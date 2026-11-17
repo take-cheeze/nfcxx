@@ -2634,6 +2634,9 @@
       "template": "(mrb_type($0) == MRB_TT_DATA && DATA_TYPE($0) == &$1)",
       "caveat": "CRuby's rb_typeddata_is_kind_of(obj, &type): obj is a typed data object whose type is type (or a subclass of it in CRuby). mruby's data objects carry one type descriptor and no parent chain, so this is an exact match; the second argument is the address of the type, as in the bigdecimal use"
     },
+    "PRIuSIZE": {"kind": "expr", "mruby": "\"zu\"", "caveat": "C99 printf length modifier for size_t (CRuby's PRIuSIZE is this string literal)"},
+    "PRIdSIZE": {"kind": "expr", "mruby": "\"zd\"", "caveat": "C99 printf length modifier for size_t (CRuby's PRIdSIZE is this string literal)"},
+    "PUREFUNC": {"kind": "template", "arity": 1, "template": "$0", "caveat": "PUREFUNC (CRuby's pure-function attribute) is a compiler hint: the declaration it wraps is kept, without the attribute"},
     "rb_cstr_to_dbl": {
       "kind": "template",
       "arity": 2,

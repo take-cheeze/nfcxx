@@ -659,7 +659,7 @@ end
 # the headers of an immediate subdirectory (yajl's api/ holds its public headers, which the sources include as "api/x.h")
 # are inputs at their relative path; the subdirectory's sources are not compiled (only the gem's own C files are)
 sub_headers = Dir.children(@cext_dir).reject { |n| n.start_with?('.') }.sort.select { |n| File.directory?(File.join(@cext_dir, n)) }
-                  .flat_map { |d| Dir.glob(File.join(@cext_dir, d, '*.h')).sort.map { |p| File.join(d, File.basename(p)) } }
+                  .flat_map { |d| Dir.glob(File.join(@cext_dir, d, '*.{h,c}')).sort.map { |p| File.join(d, File.basename(p)) } }
 sub_headers.each { |rel| texts[rel] = read_text(File.join(@cext_dir, rel)) }
 texts.each_key { |k| texts[k] = kr_normalize(texts[k]) }
 texts = static_rename(texts)
