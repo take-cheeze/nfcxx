@@ -557,12 +557,9 @@ done
 # The host-platform cflags (Path B on macOS and Linux aarch64, and the __AARCH64EL__ define on hosted Linux aarch64): the rules are
 # scripts/nfcxx-host-cflags.rb plan (stage B3), with the reasons beside them there.
 eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-host-cflags.rb" plan backend="$backend" freestanding="$freestanding" sys="$(uname -s)" mach="$(uname -m)" root="$root")"
-gnu_opts=()
-if [ "$dialect" = clang ]; then
-  cv=$("${RUBY:-ruby}" "$root/scripts/host-sys.rb" host_clang_version); [ -n "$cv" ] && gnu_opts=(--clang_version="$cv")
-elif [ -n "$gnu" ]; then
-  gnu_opts=(--gnu_version="$gnu")
-fi
+# The front end's version option: the host's clang version for the clang dialect, else the GNU version (scripts/nfcxx-gnu-opts.rb).
+gnu_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-gnu-opts.rb" plan dialect="$dialect" gnu="$gnu" root="$root") || exit $?
+eval "$gnu_sh"
 # --target: the EDG configuration of the generated C (only with --freestanding --emit-c, see the usage above). The host
 # library headers and the host C compiler would be the build host's, so a hosted or compiled build with a target is refused.
 # --target=linux_k1om: Intel Knights Corner (k1om). The front end lays out the program for the build host (LP64, the
