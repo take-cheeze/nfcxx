@@ -334,12 +334,18 @@
       "caveat": "valid only inside a data type mark callback, as rb_gc_mark; mruby does not compact, so a movable mark is the same mark (the mark hook is the fork's mrb_data_type.mark, branch claude/markable-data-type)"
     },
     "rb_gc_enable": {
-      "kind": "refuse",
-      "reason": "no mruby enable function: gc.disabled is a VM flag (include/mruby/gc.h), and CRuby's return value (the previous state) would have to be emulated"
+      "kind": "template",
+      "arity": 0,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, mrb_obj_value(mrb_module_get($m, \"GC\")), mrb_intern_cstr($m, \"enable\"), 0, NULL)",
+      "caveat": "calls the GC.enable class method (src/gc.c), which clears gc.disabled and returns the previous state as a boolean, as CRuby's rb_gc_enable returns Qtrue when GC was disabled"
     },
     "rb_gc_disable": {
-      "kind": "refuse",
-      "reason": "no mruby disable function: gc.disabled is a VM flag (include/mruby/gc.h), and CRuby's return value (the previous state) would have to be emulated"
+      "kind": "template",
+      "arity": 0,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, mrb_obj_value(mrb_module_get($m, \"GC\")), mrb_intern_cstr($m, \"disable\"), 0, NULL)",
+      "caveat": "calls the GC.disable class method (src/gc.c), which sets gc.disabled and returns the previous state as a boolean, as CRuby's rb_gc_disable returns Qtrue when GC was already disabled"
     },
     "rb_gc_start": {
       "kind": "special",
@@ -2229,6 +2235,13 @@
       "inject_mrb": true,
       "needs_mrb": true,
       "caveat": "the format is printed by mruby's formatter; CRuby's PRIsVALUE arguments are not mapped (refused where they appear)"
+    },
+    "rb_fatal": {
+      "kind": "call",
+      "mruby": "mrb_bug",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "mrb_bug (src/error.c) prints the message and exits, as CRuby's rb_fatal does: it is not an exception, so no rescue sees it. The prefix differs (CRuby prints [FATAL], mruby prints bug:); CRuby's PRIsVALUE arguments are not mapped"
     },
     "rb_sprintf": {
       "kind": "call",

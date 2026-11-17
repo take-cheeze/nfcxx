@@ -172,8 +172,9 @@ check grep -qF 'do { if (!mrb_immediate_p(self)) mrb_field_write_barrier_value(m
 rc=0; "$rb" "$conv" --scanner "$scanner" --name gc_map_refused tools/cext2mrbgem/fixtures/gc_map_refused/ext/gc_map_refused "$work/gc_map_refused" > "$work/gc_map_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check test -e "$work/gc_map_refused/NOT_BUILDABLE"
-check grep -q '  rb_gc_disable  no mruby disable function' "$work/gc_map_refused/REFUSALS.txt"
-check grep -q '  rb_gc_enable  no mruby enable function' "$work/gc_map_refused/REFUSALS.txt"
+# rb_gc_enable / rb_gc_disable map to the GC class methods (see 2zzz109), so they are not refused here
+check test "$(grep -c '  rb_gc_disable  ' "$work/gc_map_refused/REFUSALS.txt")" -eq 0
+check test "$(grep -c '  rb_gc_enable  ' "$work/gc_map_refused/REFUSALS.txt")" -eq 0
 check grep -q '  rb_gc_start  the return value of rb_gc_start (nil) is used' "$work/gc_map_refused/REFUSALS.txt"
 check grep -q '  rb_gc_mark  stuck point (GC mark callback): rb_gc_mark is valid only in a data type mark callback' "$work/gc_map_refused/REFUSALS.txt"
 check grep -q '  rb_gc_writebarrier  argument .rb_str_new_cstr("x"). is not a plain local variable' "$work/gc_map_refused/REFUSALS.txt"
@@ -1357,13 +1358,17 @@ check test ! -e "$work/api_store_field/NOT_BUILDABLE"
 check grep -qF 'mrb_value (*fn)(mrb_state *mrb, const char *str, size_t len);' "$work/api_store_field/src/api_store_field.c"
 check grep -qF 'return sf_cur.fn(mrb, str, len);' "$work/api_store_field/src/api_store_field.c"
 check grep -qF '(struct RClass *[]){ E_TYPE_ERROR, mrb_exc_get(mrb, "EOFError") }' "$work/api_rescue2/src/api_rescue2.c"
-# 2zzz109. rb_cstr_to_dbl, rb_check_convert_type (with the T_ tag as MRB_TT_), and rb_need_block (LocalJumpError without a block).
+# 2zzz109. rb_cstr_to_dbl, rb_check_convert_type (with the T_ tag as MRB_TT_), rb_need_block (LocalJumpError without a block),
+# rb_gc_enable / rb_gc_disable (the GC class methods), and rb_fatal (mrb_bug, which exits).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_conv_misc tools/cext2mrbgem/fixtures/api_conv_misc/ext/api_conv_misc "$work/api_conv_misc" > "$work/api_conv_misc.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check test ! -e "$work/api_conv_misc/NOT_BUILDABLE"
 check grep -qF 'mrb_float_value(mrb, mrb_cstr_to_dbl(mrb, RSTRING_PTR(str), 1))' "$work/api_conv_misc/src/api_conv_misc.c"
 check grep -qF 'mrb_check_convert_type(mrb, val, MRB_TT_STRING, "String", "to_str")' "$work/api_conv_misc/src/api_conv_misc.c"
 check grep -qF 'mrb_raise(mrb, E_LOCALJUMP_ERROR, "no block given")' "$work/api_conv_misc/src/api_conv_misc.c"
+check grep -qF 'mrb_funcall_argv(mrb, mrb_obj_value(mrb_module_get(mrb, "GC")), mrb_intern_cstr(mrb, "disable"), 0, NULL)' "$work/api_conv_misc/src/api_conv_misc.c"
+check grep -qF 'mrb_intern_cstr(mrb, "enable")' "$work/api_conv_misc/src/api_conv_misc.c"
+check grep -qF 'mrb_bug(mrb, "boom %d", 1)' "$work/api_conv_misc/src/api_conv_misc.c"
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads
