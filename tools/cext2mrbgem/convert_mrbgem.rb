@@ -3746,6 +3746,14 @@ end
       # the name in the prototype that decl_drop removes is not a use (the calls are converted)
       next if entry && entry['decl_drop'] && @decls.any? { |d| d['name'] == name && d['proto'] && d['file'] == rel &&
                                                               d['hstart'] <= s && s < d['hend'] }
+      # a VALUE local of the enclosing macro body or function named like an API entry (yajl's rb_encoder) is that local, not
+      # the API: it is not a use of the entry (a call of it is still the API)
+      if entry && !psl(masked, e, e + 1).match?(/\A\(/)
+        dl = define_at(rel, s)
+        fl = enclosing_func(rel, s)
+        local_v = dl ? macro_value_names(rel, dl).include?(name) : (fl && value_names_of(fl).include?(name))
+        next if local_v
+      end
       if !entry.nil?
         excluded = (@excluded_spans || {})[rel]&.any? { |a, z| a < s && s < z }
         next if excluded && entry['needs_mrb']
@@ -3770,7 +3778,7 @@ end
         end
         ed.add(s, e, @types[name])
         rewrite(rel, s, name, @types[name])
-      elsif UNKNOWN_RE.match?(name) && !local_syms.include?(name) &&
+      elsif UNKNOWN_RE.match?(name) && !local_syms.include?(name) && !local_value_at?(rel, s, name) &&
             !(@local_tags.include?(name) && psl(masked, [s - 40, 0].max, s).match?(/\b(?:struct|union|enum)[ \t\n]+\z/))
         # a CRuby type tag the fork cannot test has its recorded reason (type_check_refused), not a generic one
         refuse(rel, s, name, @type_check_refused[name] || @unmapped_reasons[name] || 'no entry in api_map.json')
@@ -4023,6 +4031,14 @@ end
       return true if d.key?('body_end') && d['brace'] < pos && pos < d['body_end'] && param_names(d).include?(name)
     end
     false
+  end
+
+  # a VALUE local of the enclosing macro body or function (VALUE a, b; in it), not a CRuby name
+  def local_value_at?(rel, s, name)
+    dl = define_at(rel, s)
+    return macro_value_names(rel, dl).include?(name) if dl
+    fl = enclosing_func(rel, s)
+    !!(fl && value_names_of(fl).include?(name))
   end
 
   def map_entry(rel, s, e, name, entry)
