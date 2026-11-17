@@ -1853,10 +1853,32 @@ end
         # a static callback defined in this file, with no other use in the file (its definition and this call)
         d = (@defs[cb] || []).select { |x| x['file'] == rel }
         next unless d.size == 1 && d[0]['storage'].split.include?('static')
-        next unless (@occ[cb] || []).count { |r, _, _| r == rel } == 2
+        # a VALUE data argument (a VALUE name, not a pointer cast): the data is passed by address, and the callback may also be
+        # called directly (each such call passes its VALUE data by address too)
+        fn_h = enclosing_func(rel, s)
+        value_data = !arg.start_with?('(VALUE)') && !arg.start_with?('&') && fn_h &&
+                     (value_names_of(fn_h).include?(arg) || file_scope_value_names(rel).include?(arg))
+        cb_occ = (@occ[cb] || []).select { |r, _, _| r == rel }
+        if value_data
+          direct = cb_occ.reject { |_r, p, _e| p == cb_ident_pos || p == d[0]['hstart'] || p == d[0]['hstart'] + (text[d[0]['hstart']..].index(cb) || 0) }
+          direct = direct.reject do |_r, p, _e|
+            nx = next_nonspace(masked, p + cb.length)
+            nx >= 0 && masked[nx] == '(' && (dc = match_close(masked, nx)) > 0 && next_nonspace(masked, dc + 1) >= 0 && masked[next_nonspace(masked, dc + 1)] == '{'
+          end
+          # every other use is a plain call of the callback (not an address taken or stored), or the callback of another
+          # rb_hash_foreach / rb_ivar_foreach call (that call is a record of its own)
+          direct = direct.reject { |_r, p, _e| masked[[p - 80, 0].max...p].to_s.match?(/(?:rb_hash_foreach|rb_ivar_foreach)#{SS}\([^,()]*,#{SS}\z/) }
+          next unless direct.all? do |_r, p, _e|
+            nx = next_nonspace(masked, p + cb.length)
+            nx >= 0 && masked[nx] == '(' && (dc = match_close(masked, nx)) > 0 && split_args(masked, nx, dc).size == 3
+          end
+        else
+          next unless cb_occ.count == 2
+        end
         pars = split_args(masked, d[0]['po'], d[0]['pc']).map { |a2, b2| [a2, b2, psl(text, a2, b2)] }
         out << { rel: rel, s: s, e: close + 1, h: h, cb: cb, fe: fe_name, arg: arg.sub(/\A\(VALUE\)\s*/, ''),
-                 cb_pos: cb_ident_pos, cb_file: d[0]['file'], param_edit: [pars[2][0], pars[2][0] + 5] }
+                 cb_pos: cb_ident_pos, cb_file: d[0]['file'], param_edit: [pars[2][0], pars[2][0] + 5],
+                 value_data: value_data }
       end
     end
     out
@@ -2431,6 +2453,9 @@ end
     @hash_calls.each { |c| forced << c[:cb] }
     @hash_cb_pos = Set.new(@hash_calls.map { |c| [c[:rel], c[:cb_pos]] })
     @hash_cb_names = Set.new(@hash_calls.map { |c| c[:cb] })
+    # a VALUE-data callback: its third parameter is a void * named nfcx_data_<name>, and its body starts with the VALUE copy
+    @hash_value_cbs = {}
+    @hash_calls.each { |c| @hash_value_cbs[c[:cb]] = c[:arg] if c[:value_data] }
     # a local macro whose body uses a name that needs the state needs it too: a use of the macro expands that use
     macro_needs = Set.new
     macro_idents = {}   # macro name -> the identifiers of its body (a macro that calls a needed helper needs the state too)
@@ -3641,7 +3666,8 @@ tail = ['', 'void'].include?(ptxt) ? '' : ', ' + map_types(ptxt, @types)
 if (@hash_cb_names || Set.new).include?(name)
   # a rb_hash_foreach callback: its third (VALUE) parameter is the pointer it was given (void *)
   ps = ptxt.split(',').map(&:strip)
-  tail = ', ' + [map_types(ps[0], @types), map_types(ps[1], @types), 'void *' + ps[2].split.last].join(', ')
+  vcb = (@hash_value_cbs || {})[name]
+  tail = ', ' + [map_types(ps[0], @types), map_types(ps[1], @types), vcb ? "void *nfcx_data_#{vcb}" : 'void *' + ps[2].split.last].join(', ')
 end
         hdr = "#{d['storage']}#{map_types(d['ret'], @types)} #{name}(mrb_state *mrb#{tail})"
       end
@@ -3709,6 +3735,21 @@ end
         # an alias call inside another rewritten span is that span's business (it is not threaded here)
         next if !@helper_names.include?(name) && @edits[rel].touches?(po + 1)
         ed.add(po + 1, po + 1, masked[pa] == ')' ? t : "#{t}, ")
+        # a direct call of a VALUE-data callback passes its VALUE data by address (the callback reads it back)
+        if (@hash_value_cbs || {}).key?(name)
+          cargs = split_args(masked, po, close_of = match_close(masked, po))
+          if cargs.size == 3
+            a3, b3 = cargs[2]
+            id3 = psl(@files[rel]['text'], a3, b3).strip
+            qv = { 'Qnil' => 'mrb_nil_value()', 'Qtrue' => 'mrb_true_value()', 'Qfalse' => 'mrb_false_value()' }[id3]
+            if qv
+              # a Q constant has no address: a compound literal holds its value for the call
+              ed.add(a3, b3, "(void *)&(mrb_value[]){#{qv}}")
+            elsif id3.match?(/\A[A-Za-z_][#{WC}]*\z/)
+              ed.add(a3, b3, "(void *)&#{id3}")
+            end
+          end
+        end
       end
     end
     # 4b. a direct call of a split registered method calls its impl (the mrb argument, if any, is added above). A
@@ -4533,8 +4574,18 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       end
       # rb_ivar_foreach(obj, callback, data) is the fork's mrb_iv_foreach over the object's instance variables (ID -> mrb_sym)
       fe = c[:fe] == 'rb_ivar_foreach' ? ['mrb_iv_foreach', c[:h]] : ['mrb_hash_foreach', "RHASH(#{c[:h]})"]
-      ed.add(c[:s], c[:e], "#{fe[0]}(#{mrb_tok(rel, s)}, #{fe[1]}, #{c[:cb]}, (void *)#{c[:arg]})")
-      rewrite(rel, s, name, "#{fe[0]}(mrb, #{fe[1]}, #{c[:cb]}, (void *)#{c[:arg]})",
+      dtxt = c[:value_data] ? "&#{c[:arg]}" : c[:arg]
+      if c[:value_data]
+        # the callback's body starts with the VALUE copy of its data (once per callback)
+        cbd = (@defs[c[:cb]] || []).find { |x| x['file'] == c[:cb_file] && x['brace'] }
+        @value_copy_done ||= Set.new
+        if cbd && !@value_copy_done.include?(c[:cb])
+          @value_copy_done << c[:cb]
+          @edits[c[:cb_file]].add(cbd['brace'] + 1, cbd['brace'] + 1, "\n  mrb_value #{c[:arg]} = *(mrb_value *)nfcx_data_#{c[:arg]};")
+        end
+      end
+      ed.add(c[:s], c[:e], "#{fe[0]}(#{mrb_tok(rel, s)}, #{fe[1]}, #{c[:cb]}, (void *)#{dtxt})")
+      rewrite(rel, s, name, "#{fe[0]}(mrb, #{fe[1]}, #{c[:cb]}, (void *)#{dtxt})",
               'the callback gets (mrb, key, value, void *): its third VALUE parameter is a pointer; the callback result is passed through (0 continues, as CRuby ST_CONTINUE)')
     when 'call'
       unless called

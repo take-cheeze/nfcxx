@@ -1575,6 +1575,14 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_union_field/NOT_BUILDABLE"
 check grep -qF 'c.value = 0;' "$work/api_union_field/src/api_union_field.c"
 check grep -qF 'h.value = mrb_nil_value();' "$work/api_union_field/src/api_union_field.c"
+# 2zzz143. a rb_hash_foreach callback whose data is a VALUE name (not a pointer cast) takes the data by address: the call passes (void *)&proc,
+# the callback reads its VALUE copy at its start, and its direct calls (including one with a Q constant) pass the data by address too.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_value_data tools/cext2mrbgem/fixtures/api_hash_value_data/ext/api_hash_value_data "$work/api_hash_value_data" > "$work/api_hash_value_data.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_hash_value_data/NOT_BUILDABLE"
+check grep -qF 'mrb_hash_foreach(mrb, RHASH(value), walk, (void *)&proc);' "$work/api_hash_value_data/src/api_hash_value_data.c"
+check grep -qF 'mrb_value proc = *(mrb_value *)nfcx_data_proc;' "$work/api_hash_value_data/src/api_hash_value_data.c"
+check grep -qF 'walk(mrb, mrb_nil_value(), h, (void *)&(mrb_value[]){mrb_nil_value()});' "$work/api_hash_value_data/src/api_hash_value_data.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?
