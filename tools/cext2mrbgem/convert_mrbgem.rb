@@ -3285,6 +3285,15 @@ use_problem = lambda do |name, use|
     if fn.key?('brace') && fn.key?('body_end')
       body = psl(@files[fn['file']]['masked'], fn['brace'], fn['body_end'] + 1)
       body.scan(/\bVALUE\s+([A-Za-z_]\w*)\s*[;=,)]/) { |m| names << m[0] }
+      # every declarator of a VALUE declaration list in the body (VALUE a, b, c;): the statements are parsed once per file
+      @vdecl_cache ||= {}
+      stmts = (@vdecl_cache[fn['file']] ||= value_decl_statements(@files[fn['file']]['masked']))
+      stmts.each do |_st, _kw, decls|
+        decls.each do |d|
+          next unless d[:name] && !d[:ptr] && !d[:fn] && d[:start] > fn['brace'] && d[:start] < fn['body_end']
+          names << d[:name]
+        end
+      end
     end
     names
   end
