@@ -2444,6 +2444,8 @@ end
     @macro_needs = macro_needs
     # a helper that reads rb_scan_args on its argc and argv needs the mruby state for its argc check (mrb_argnum_error)
     forced.merge(argv_scan_helpers.keys)
+    # a --method-scope-fn helper needs the state (its stored pointer runs inside a method call that sets it)
+    forced.merge($method_scope_fns || [])
     needs = Set.new(forced)
     ids.each do |name, s|
       # a class-test type tag (RB_TYPE_P(x, T_RATIONAL) and the like) is a class lookup, which needs the mruby state
@@ -2780,6 +2782,8 @@ use_problem = lambda do |name, use|
     # threaded helper or another helper of this set. The set is the greatest fixpoint: a helper leaves it when one of
     # its uses fails, and its callers are then checked again.
     @global_name = "#{@funcname}_bc2_mrb"
+    # a --method-scope-fn helper keeps its signature and takes the state from the global (a stored pointer's type is unchanged)
+    ($method_scope_fns || []).each { |n| cands.delete(n) }
     gcands = Set.new
     @needs.to_a.sort.each do |name|
       next if @reg_names.include?(name) || name == init_first || !@defs.key?(name) || cands.include?(name)
@@ -2788,6 +2792,9 @@ use_problem = lambda do |name, use|
     with_state = cands | @valid_reg_names | (init_first ? Set[init_first] : Set.new)
     global_use = lambda do |name, use, members|
       rel, s, direct, fn = use
+      # --method-scope-fn NAME: the helper's address is stored only inside a parser or table that lives for one registered method
+      # call (the caller asserts it), so the helper runs in that method's dynamic extent, where the global state is set
+      next nil if ($method_scope_fns || Set.new).include?(name)
       # a callback passed to rb_hash_foreach / rb_ivar_foreach is converted by that call (the callback takes mrb)
       next nil if !direct && (@hash_cb_pos || Set.new).include?([rel, s])
       macro = fn.nil? && direct ? define_at(rel, s) : nil
@@ -5831,6 +5838,8 @@ def main(argv)
       defines << args.shift
     elsif opt == '--undefine' && !args.empty?
       undefines << args.shift
+    elsif opt == '--method-scope-fn' && !args.empty?
+      ($method_scope_fns ||= Set.new) << args.shift
     elsif opt == '--stored-tag' && !args.empty? && args.first.include?('=')
       tag_name, tag_value = args.shift.split('=', 2)
       ($stored_tags ||= {})[tag_name] = tag_value

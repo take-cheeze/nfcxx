@@ -1541,6 +1541,13 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_stored_tag/NOT_BUILDABLE"
 check grep -qF 'case 0xf0: return mrb_nil_value();' "$work/api_stored_tag/src/api_stored_tag.c"
 check grep -qF 'it.tag = 0xf0;' "$work/api_stored_tag/src/api_stored_tag.c"
+# 2zzz138. --method-scope-fn NAME: a helper whose address is stored (a struct function pointer) takes the state from the gem's global, which
+# the registered method sets and restores, so its signature is unchanged (the stored pointer's type still matches).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_method_scope --method-scope-fn note tools/cext2mrbgem/fixtures/api_method_scope/ext/api_method_scope "$work/api_method_scope" > "$work/api_method_scope.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_method_scope/NOT_BUILDABLE"
+check grep -qF 'last = mrb_str_dup(api_method_scope_bc2_mrb, v);' "$work/api_method_scope/src/api_method_scope.c"
+check grep -qF 'api_method_scope_bc2_mrb = mrb;' "$work/api_method_scope/src/api_method_scope.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?
