@@ -610,22 +610,9 @@ pre_opts=(); for f in ${preinc[@]+${preinc[@]+"${preinc[@]}"}}; do
   if [ $moves = 1 ] && [ -e "$f" ]; then f=$(abs_path "$f"); fi
   pre_opts+=(--preinclude "$f")
 done
-# Path B hosted on macOS (the SDK's libc++): its __config evaluates __has_feature and friends in #if, which EDG's g++
-# mode does not define (lib/pathb/clang_macros.h). Gated on Darwin, not on the dialect: a Linux clang host keeps libstdc++
-# and its own feature checks.
-[ $backend = pathb ] && [ $freestanding = 0 ] && [ "$(uname -s)" = Darwin ] && cflags+=(-include "$root/lib/pathb/clang_macros.h" -I "$root/lib/pathb/darwin-include")
-# Path B's front end is an x86-64 EDG target (no __aarch64__, no __clang__), so libc++ takes the x86-64 std::string layout on
-# an arm64 Mac, where the SDK's libc++ (clang's Apple arm64 config) uses the alternate layout: the size in byte 23, the
-# short-string flag in its top bit. Path B would read a string made by the library wrongly. Defining the layout macro is
-# the only ABI knob of that config that changes the object. Darwin arm64 only: x86-64 Macs keep the old layout.
-[ $backend = pathb ] && [ $freestanding = 0 ] && [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ] && cflags+=(-D_LIBCPP_ABI_ALTERNATE_STRING_LAYOUT)
-# Hosted Path B on Linux aarch64: the host's <bits/math-vector.h> uses GCC's AdvSIMD/SVE vector types, which EDG (x86-64
-# target) does not have; lib/pathb/linux-aarch64-include/bits/math-vector.h stands in for it (scripts/pathb-dump.rb does the same).
-[ $backend = pathb ] && [ $freestanding = 0 ] && [ "$(uname -s)" = Linux ] && { [ "$(uname -m)" = aarch64 ] || [ "$(uname -m)" = arm64 ]; } && cflags+=(-I "$root/lib/pathb/linux-aarch64-include")
-# Hosted Linux aarch64 (either backend): the front end's predefined macros have __aarch64__ but not __AARCH64EL__, which gcc
-# defines there. glibc's and CPython's multiarch headers (python3.12's pyconfig.h) choose their directory by both, so without
-# it Python.h stops with "unknown multiarch location for pyconfig.h". The value is the one gcc defines.
-[ $freestanding = 0 ] && [ "$(uname -s)" = Linux ] && { [ "$(uname -m)" = aarch64 ] || [ "$(uname -m)" = arm64 ]; } && { cflags+=(-D__AARCH64EL__=1); files+=(-D__AARCH64EL__=1); }
+# The host-platform cflags (Path B on macOS and Linux aarch64, and the __AARCH64EL__ define on hosted Linux aarch64): the rules are
+# scripts/nfcxx-host-cflags.rb plan (stage B3), with the reasons beside them there.
+eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-host-cflags.rb" plan backend="$backend" freestanding="$freestanding" sys="$(uname -s)" mach="$(uname -m)" root="$root")"
 gnu_opts=()
 if [ "$dialect" = clang ]; then
   cv=$("${RUBY:-ruby}" "$root/scripts/host-sys.rb" host_clang_version); [ -n "$cv" ] && gnu_opts=(--clang_version="$cv")
