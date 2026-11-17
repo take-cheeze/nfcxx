@@ -50,6 +50,19 @@ m_global(VALUE self)
     return INT2FIX(7);
 }
 
+/* a helper that yields to the block of the method that calls it */
+static VALUE
+yield_helper(VALUE v)
+{
+    return rb_yield(v);
+}
+
+static VALUE
+m_yield_via_helper(VALUE self)
+{
+    return yield_helper(INT2FIX(5));
+}
+
 void
 Init_api_conv_misc(void)
 {
@@ -60,5 +73,6 @@ Init_api_conv_misc(void)
     rb_define_method(c, "gc_off", m_gc_off, 0);
     rb_define_method(c, "gc_on", m_gc_on, 0);
     rb_define_method(c, "fatal", m_fatal, 0);
+    rb_define_method(c, "yield_via_helper", m_yield_via_helper, 0);
     rb_define_global_function("conv_global", m_global, 0);
 }

@@ -1,6 +1,6 @@
 #include <ruby.h>
 
-/* rb_yield in a helper (not a registered method): the helper has no block to yield to, so it is refused */
+/* rb_yield in a helper: the block is read from the calling method's frame (nfcx_block_arg), so it converts */
 static VALUE yr_helper(VALUE v) {
     return rb_yield(v);
 }

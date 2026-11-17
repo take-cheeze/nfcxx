@@ -520,6 +520,7 @@ class Converter
     @reg_by_call = {}
     @reg_names = Set.new
     @valid_reg_names = Set.new  # registered functions whose registration survived check_refs
+    @block_arg_files = Set.new  # files that have the nfcx_block_arg definition (rb_yield in a helper)
     @decls = []   # dicts for function prototypes and definitions
     @defs = {}    # name -> [def dicts]
     @init_defs = []
@@ -3892,10 +3893,21 @@ end
           (t.match?(/(?:->|\.)[A-Za-z_]\w*\z/) && vf.include?(t[/([A-Za-z_]\w*)\z/]))
       end
       # rb_yield needs the block of the method, which only a registered method's wrapper fetches (registered_header)
+      # in a helper (a function with the mruby state), the block is read from the current call frame, as the wrapper does:
+      # nfcx_block_arg (one per file, placed before the helper) runs mrb_get_args with "&" (the frame's block slot)
       if entry['requires_block']
         fnb = enclosing_func(rel, s)
-        unless fnb && @valid_reg_names.include?(fnb['name'])
-          refuse(rel, s, name, 'rb_yield is supported only in the body of a registered method (the wrapper fetches the block)')
+        if fnb && @valid_reg_names.include?(fnb['name'])
+          nil
+        elsif fnb && fnb['hstart']
+          unless @block_arg_files.include?(rel)
+            @block_arg_files << rel
+            ed.add(fnb['hstart'], fnb['hstart'],
+                   "static mrb_value nfcx_block_arg(mrb_state *mrb)\n{\n  mrb_value nfcx_b;\n  mrb_get_args(mrb, \"&\", &nfcx_b);\n  return nfcx_b;\n}\n\n")
+          end
+          entry = entry.merge('template' => entry['template'].sub('nfcx_block', 'nfcx_block_arg($m)'))
+        else
+          refuse(rel, s, name, 'rb_yield is supported only in a function body (no block is in scope at file scope)')
           return
         end
       end
