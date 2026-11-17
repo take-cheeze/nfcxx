@@ -6023,10 +6023,14 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     # a converted source that uses mruby names includes the mruby headers itself (gem_init.c has its own include)
     prelude_headers = %w[mruby.h mruby/array.h mruby/class.h mruby/data.h mruby/error.h mruby/hash.h
                          mruby/numeric.h mruby/range.h mruby/string.h mruby/variable.h]
+    # a header that names the state or the mruby API (a converted prototype or callback type) needs the mruby headers before it
+    mrb_header_names = @files.keys.select { |r| @files[r]['kind'] != 'src' && outputs[r].to_s.match?(/\bmrb_|\bmrb_state\b/) }
+                             .map { |r| File.basename(r) }
     @files.each do |rel, f|
       next unless f['kind'] == 'src'
       t = outputs[rel]
-      next unless t.match?(/\bmrb_|\bmrb_state\b/)
+      quoted = t.scan(/#\s*include\s*"([^"]+)"/).flatten.map { |h| File.basename(h) }
+      next unless t.match?(/\bmrb_|\bmrb_state\b/) || quoted.any? { |h| mrb_header_names.include?(h) }
       # each header the file does not include yet (the API map adds some of them itself)
       missing = prelude_headers.reject { |h| t.match?(/#\s*include\s*[<"]#{Regexp.escape(h)}[>"]/) }
       # mruby.h first: the other mruby headers need its types (and the include guards make a repeat harmless)
