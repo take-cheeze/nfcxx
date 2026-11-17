@@ -887,10 +887,8 @@ if [ ${#cu_inputs[@]} = 1 ] && [ -z "${NFCXX_CUDA_HOST_SYMBOLS:-}" ] && [ $prepr
    && [ -s "$cudatmp/$(basename "${cu_inputs[0]}" .cu).dev.kernels.unresolved" ]; then
   hsyms=$cudatmp/host.syms
   nm -C "$out" 2>/dev/null | sed 's/_INTERNAL_[A-Za-z0-9_]*:://g' > "$hsyms" || true
-  found=0
-  while IFS= read -r k; do
-    [ -n "$k" ] && grep -qE "(^|[ :])$k<" "$hsyms" && found=1
-  done < "$cudatmp/$(basename "${cu_inputs[0]}" .cu).dev.kernels.unresolved"
+  # the unresolved kernels that the host symbols define: scripts/nfcxx-second-pass.rb found (B7)
+  found=$("${RUBY:-ruby}" "$root/scripts/nfcxx-second-pass.rb" found "$hsyms" "$cudatmp/$(basename "${cu_inputs[0]}" .cu).dev.kernels.unresolved")
   if [ $found = 1 ]; then
     t=$(trace_start)
     # (the second pass is not cached: the --cache option is left out, and NFCXX_CACHE emptied)
