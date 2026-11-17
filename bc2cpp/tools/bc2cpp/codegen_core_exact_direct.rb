@@ -44,8 +44,21 @@ module CoreExactDirect
 
     impl = "#{cpp_name(target.owner, target.name)}_impl"
     args, = direct_call_args(target, argv, impl)
+    args = with_block_slot(target, argv, args)
     "#{CORE_EXACT_DIRECT_NOTE}#{name} -- proven #{site[:klass]} receiver: calls the compiled #{target.owner}##{target.name} " \
       "body, no dispatch\n  r#{d} = #{impl}(M, #{([recv] + args).join(', ')});\n"
+  end
+
+  # A compiled callee with `&block` (`_impl(M, self, ..., bc2cpp_blk)`) needs its block slot even on a
+  # block-less site. direct_call_args supplies it when it sees the callee's block parameter; where it returns
+  # only the positional arguments, nil fills the slot, which is what the block-less call means. Only the
+  # plain shape is touched (no rest, no optionals to pad): when the slot is already there, args is unchanged.
+  def with_block_slot(target, argv, args)
+    t_irep = @ireps.fetch(target.irep)
+    return args unless block_param_arity?(t_irep) && !rest_only_callee?(t_irep)
+    return args unless optional_arity(t_irep).zero? && args.size == argv.size && args.size == mandatory_arity(t_irep)
+
+    args + ['mrb_nil_value()']
   end
 
   TO_ENUM_DIRECT_NOTE = '// TO_ENUM_DIRECT :'
