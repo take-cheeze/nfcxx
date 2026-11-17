@@ -3371,7 +3371,7 @@ use_problem = lambda do |name, use|
     return true if defs.any? && defs.all? { |x| x['ret'].to_s.strip == 'VALUE' }
     ent = @entries[name]
     return false unless ent.is_a?(Hash)
-    return true if ent['handler'] == 'const_get'
+    return true if %w[const_get funcall].include?(ent['handler'])
     ent['template'].to_s.match?(/\Amrb_(?:obj_value\(|const_get)/) || ent['mruby'].to_s.match?(/\Amrb_const_get|_value\z/)
   end
 
@@ -3562,9 +3562,77 @@ use_problem = lambda do |name, use|
     end
   end
 
+  # CRuby returns an ID where a VALUE is returned, and a VALUE where an ID is: the fork's symbol is an mrb_sym carried in a value by
+  # mrb_symbol_value, read back by mrb_symbol. In a function returning VALUE, return NAME of an ID NAME is mrb_symbol_value(NAME);
+  # in a function returning ID, return f(...) of a VALUE-returning call f is mrb_symbol(f(...)).
+  def id_return_pass
+    @defs.values.flatten.each do |d|
+      next if d['proto'] || !d['brace'] || !d['body_end']
+      rel = d['file']
+      masked = @files[rel]['masked']
+      ret = d['ret'].to_s.strip
+      next unless ret == 'VALUE' || ret == 'ID'
+      bstart = d['brace'] + 1
+      body = masked[bstart...d['body_end']].to_s
+      header_ids = (d['params'].to_s + ' ' + body).scan(/\bID\s+([A-Za-z_]\w*)/).flatten.to_set
+      if ret == 'VALUE'
+        body.to_enum(:scan, /\breturn\s+([A-Za-z_]\w*)\s*;/).each do
+          m = Regexp.last_match
+          nm = m[1]
+          next unless header_ids.include?(nm)
+          s = bstart + m.begin(1)
+          e = bstart + m.end(1)
+          next if @edits[rel].overlaps(s, e)
+          @edits[rel].add(s, e, "mrb_symbol_value(#{nm})")
+        end
+      else
+        body.to_enum(:scan, /\breturn\s+([A-Za-z_]\w*)\s*\(/).each do
+          m = Regexp.last_match
+          cn = m[1]
+          next unless value_call_name?(cn)
+          cs = bstart + m.begin(1)
+          open = bstart + m.end(0) - 1
+          close = match_close(masked, open)
+          next if close < 0
+          next if @edits[rel].touches_strictly?(cs) || @edits[rel].touches_strictly?(close + 1)
+          @edits[rel].add(cs, cs, 'mrb_symbol(')
+          @edits[rel].add(close + 1, close + 1, ')')
+        end
+      end
+    end
+  end
+
+  # rb_id2name(v) of a VALUE symbol v (CRuby takes the ID; a symbol VALUE is passed where it is wanted): the fork's symbol is read
+  # from the value with mrb_symbol, so the argument becomes mrb_symbol(v)
+  def id_arg_of_value_pass
+    @files.each_key do |rel|
+      masked = @files[rel]['masked']
+      masked.to_enum(:scan, /\brb_id2name\s*\(\s*([A-Za-z_]\w*)\s*\)/).each do
+        m = Regexp.last_match
+        fn = enclosing_func(rel, m.begin(0))
+        next unless fn && value_names_of(fn).include?(m[1])
+        s = m.begin(1)
+        e = m.end(1)
+        next if @edits[rel].overlaps(s, e) || @edits[rel].touches_strictly?(s) || @edits[rel].touches_strictly?(e)
+        @edits[rel].add(s, s, 'mrb_symbol(')
+        @edits[rel].add(e, e, ')')
+      end
+    end
+  end
+
   # The Onigmo regexp engine of CRuby (its types, its match region and regex, its functions and constants): the fork has no
   # regexp engine, so each use of its names is a stuck point, marked where it is used (the functions that hold them are not
   # buildable without it)
+  ONIG_STUCK_TYPES_PRELUDE = <<~C
+    /* BC2CPP-MRBGEM: placeholder types for CRuby's Onigmo declarations (the fork has no regexp engine). Only stubs use them. */
+    typedef unsigned char UChar;
+    typedef unsigned char OnigUChar;
+    typedef long OnigPosition;
+    typedef void *OnigRegex;
+    typedef void *regex_t;
+    typedef struct nfcx_onig_regs { int allocated; int num_regs; OnigPosition *beg; OnigPosition *end; } OnigRegion;
+    struct re_registers { int allocated; int num_regs; OnigPosition *beg; OnigPosition *end; };
+  C
   ONIG_NAME_RE = /(?<![#{WC}.>])(OnigUChar|OnigRegion|OnigRegex|OnigPosition|OnigEncoding|OnigOptionType|OnigCaptureTreeNode|regex_t|re_registers|UChar|ONIG_[A-Z0-9_]+|onig_[a-z0-9_]+)(?![#{WC}])/
   def onig_engine_stuck_pass
     @files.each_key do |rel|
@@ -5454,6 +5522,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       fs_init = if %w[Qnil Qtrue Qfalse].include?(name) && enclosing_func(rel, s).nil?
                   eq = prev_nonspace(masked, s - 1)
                   var = eq >= 0 && masked[eq] == '=' ? masked[0...eq].match(/([A-Za-z_]\w*)\s*\z/) : nil
+                  # a member assigned in a macro ((s)->regex = Qnil) is not a declaration's initializer
+                  var = nil if var && masked[0...eq].match?(/(?:->|\.)\s*#{Regexp.escape(var[1])}\s*\z/)
                   init_d = @init_defs.find { |d| d['file'] == rel && d['brace'] }
                   [eq, var && var[1], init_d] if var && init_d && (@init_rel == rel)
                 end
@@ -6456,7 +6526,10 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     @refusals.group_by { |r| r['file'] }.each do |rel, refs|
       next unless @files[rel]
       text = @files[rel]['text']
-      defs = @defs.values.flatten.select { |d| d['file'] == rel && !d['proto'] && d['brace'] && d['body_end'] }
+      # the Init function is not stubbed: a stub there would make the gem raise at load and register no method
+      defs = @defs.values.flatten.select do |d|
+        d['file'] == rel && !d['proto'] && d['brace'] && d['body_end'] && !d['name'].to_s.start_with?('Init_')
+      end
       defs.each do |d|
         l1 = line_of(text, d['brace'])
         l2 = line_of(text, d['body_end'])
@@ -6474,7 +6547,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         ret_stmt = if ret == 'void' then ''
                    elsif ret.match?(/\bVALUE\b|\bmrb_value\b/) then ' return mrb_nil_value();'
                    elsif ret.include?('*') then ' return NULL;'
-                   else ' return 0;'
+                   else " return (#{ret}){0};"
                    end
         msg = "stuck point (see REFUSALS.txt): #{d['name']} uses a CRuby feature the fork has no form of"
         stub = " /* BC2CPP-MRBGEM stub: refused code */ mrb_raise(#{target}, mrb_exc_get(#{target}, \"NotImplementedError\"), \"#{msg}\");#{ret_stmt} "
@@ -6495,6 +6568,16 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     outputs = {}
     @files.each { |rel, f| outputs[rel] = @edits[rel].apply(f['text']) }
     @files.each { |rel, f| outputs[rel] = id_value_casts(outputs[rel]) if f['kind'] == 'src' }
+    # Onigmo's types in declarations (a struct field of OnigRegion, a UChar pointer): the fork has no regexp engine, so these are
+    # placeholder types for the declarations only. Every use of an Onigmo function or constant is refused, so the code that
+    # reads these types is a stub: the placeholders are never used to compute a result.
+    @files.each do |rel, f|
+      next unless f['kind'] == 'src' && f['masked'].match?(ONIG_NAME_RE)
+      prelude = ONIG_STUCK_TYPES_PRELUDE
+      # a file that includes POSIX <regex.h> has its own regex_t (struct re_pattern_buffer): no placeholder for that name
+      prelude = prelude.sub(/^typedef void \*regex_t;\n/, '') if f['text'].match?(/#\s*include\s*<regex\.h>/)
+      outputs[rel] = prelude + outputs[rel]
+    end
     # a function without the state parameter reads the gem's state global: a literal mrb-> (from a template's class argument)
     # in its body names that global (the global-state functions are the ones that have no mrb parameter)
     if @global_wrap
@@ -6633,6 +6716,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     value_as_integer_arg_pass
     value_struct_pointer_cast_pass
     onig_engine_stuck_pass
+    id_return_pass
+    id_arg_of_value_pass
     value_if_truth_stuck_pass
     value_pointer_array_stuck_pass
     encoding_pointer_assign_pass

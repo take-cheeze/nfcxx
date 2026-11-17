@@ -1619,6 +1619,11 @@ check grep -qF 'BC2CPP-MRBGEM stub: refused code' "$work/api_value_if/src/api_va
 check grep -qF 'NotImplementedError' "$work/api_value_if/src/api_value_if.c"
 check test "$(grep -c '#error' "$work/api_value_if/src/gem_init.c")" -eq 0
 check grep -qF 'STATUS: STUBBED' "$work/api_value_if/REFUSALS.txt"
+# 2zzz150. an ID returned from a VALUE function is the symbol value (mrb_symbol_value), and a VALUE call returned from an ID
+# function is read as its symbol (mrb_symbol), the fork's symbol carried in a value.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_id_return tools/cext2mrbgem/fixtures/api_id_return/ext/api_id_return "$work/api_id_return" > "$work/api_id_return.log" 2>&1 || rc=$?
+check grep -qF 'return mrb_symbol_value(id);' "$work/api_id_return/src/api_id_return.c"
+check grep -qF 'mrb_symbol(' "$work/api_id_return/src/api_id_return.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?
