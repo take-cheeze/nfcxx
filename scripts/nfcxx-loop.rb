@@ -25,6 +25,8 @@
 #                                       a stand-in for the hashed path), or it did not build, with the text it printed
 #   The facts are the files the bash tests: tests/nfcxx/loop-state.sh gives the port the real ones for the toolkits it uses.
 
+require "shellwords"
+
 class NfcxxUnported < StandardError
 end
 
@@ -604,9 +606,43 @@ rescue NfcxxMissing => e
   0
 end
 
+# shell mode (the driver's, `--shell --ld-available=... -- ARG...`): the records of the loop as the shell statements that apply them to
+# the driver's variables: each scalar the loop assigned, then each array element in order (appended). A refusal goes to standard
+# error with status 2 (the driver ends with it, as before); a value option given last prints the statement that makes the driver
+# end as the bash did (loop_no_value). The statements are the ones the bash read loop and apply loop made.
+# the -fuse-ld=NAME values whose ld.NAME program is on PATH (command -v ld.NAME in the bash: an executable file, not a directory)
+def ld_on_path(argv)
+  names = argv.map { |a| a[/\A-fuse-ld=(.+)\z/, 1] }.compact.reject(&:empty?).uniq
+  dirs = ENV.fetch("PATH", "").split(":")
+  names.select do |n|
+    dirs.any? do |d|
+      f = File.join(d.empty? ? "." : d, "ld.#{n}")
+      File.file?(f) && File.executable?(f)
+    end
+  end
+end
+
+def run_shell(argv, ld_available)
+  state = LoopState.new
+  run_loop(argv, state, ld_available)
+  state.assigned.each { |name| $stdout.write("#{name}=#{Shellwords.escape(state.public_send(name).to_s)}\n") }
+  LOOP_ARRAYS.each { |name| state.public_send(name).each { |x| $stdout.write("#{name}+=(#{Shellwords.escape(x)})\n") } }
+  0
+rescue NfcxxExit => e
+  $stderr.write("#{e.message}\n")
+  e.status
+rescue NfcxxMissing => e
+  $stdout.write("loop_no_value #{Shellwords.escape(e.message)}\n")
+  0
+end
+
 def main(argv)
   records = argv.first == "--records"
   argv.shift if records
+  shell = argv.first == "--shell"
+  argv.shift if shell
+  probe_ld = argv.first == "--probe-ld"
+  argv.shift if probe_ld
   ld_available = []
   env = {}
   uid = "0"
@@ -632,6 +668,12 @@ def main(argv)
   if records
     argv.shift if argv.first == "--"
     return run_records(argv, ld_available)
+  end
+  if shell
+    argv.shift if argv.first == "--"
+    # --probe-ld: the ld.NAME programs for -fuse-ld=NAME are looked up on PATH here (the driver used command -v)
+    ld_available = ld_on_path(argv) if probe_ld
+    return run_shell(argv, ld_available)
   end
   plan = syntax_only_plan(argv)
   plan = [plan] if plan
