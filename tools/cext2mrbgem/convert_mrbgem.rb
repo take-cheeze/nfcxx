@@ -1937,6 +1937,11 @@ end
         j = en && fn_param_names(en).index(am[1])
         rec[:assigns] << (j ? [:fwd, en['name'], j] : [am[1], frel, am.begin(1)])
       end
+      # a conditional assignment (obj->NAME = cond ? helper_a : helper_b;): both helpers are assigned
+      masked.to_enum(:scan, /(?:\.|->)\s*#{rec[:name]}\s*=\s*[^;{}]*?\?\s*([A-Za-z_]\w*)\s*:\s*([A-Za-z_]\w*)\s*;/).each do
+        cm = Regexp.last_match
+        [1, 2].each { |g| rec[:assigns] << [cm[g], frel, cm.begin(g)] }
+      end
       # a designated initializer of the field (.NAME = helper inside a braced initializer) is an assignment too
       masked.to_enum(:scan, /\.\s*#{rec[:name]}\s*=\s*([A-Za-z_]\w*)\s*(?=[,}])/).each do
         am = Regexp.last_match
@@ -2350,6 +2355,8 @@ end
     helper_uses = lambda do |name|
       out = []
       (@occ[name] || []).each do |rel, s, e|
+        # a file-scope array of this name in this file is a variable, not a use of a helper of the same name elsewhere
+        next if @files[rel]['masked'].match?(/^[ \t]*(?:static[ \t]+|const[ \t]+)*[A-Za-z_][\w \t\*]*?\b#{Regexp.escape(name)}[ \t]*\[[^\]\n]*\][ \t]*(?:=|;)/)
         next if @decls.any? { |d| d['name'] == name && rel == d['file'] && d['hstart'] <= s && s < d['hend'] }
         # the body of an object-like alias (#define alias real_name): its invocations are the uses, resolved by object_macro_name
         lstart = @files[rel]['masked'].rindex("\n", s - 1) || -1
