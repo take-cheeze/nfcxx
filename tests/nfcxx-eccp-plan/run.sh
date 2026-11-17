@@ -40,7 +40,7 @@ chmod +x "$stub"
 prelude="set -euo pipefail; root=$repo; RUBY=$ruby_bin; trace_start() { :; }; trace_end() { :; }; trace_finish() { :; }
 eccp_bin=$stub; std=--c++23; dialect=gnu; eccp_out=/nfcxx-test/a.out; moves=0; keep_intermediates=0; shared=0; eccp_dir=
 extra=(); inst_opts=(); modopts=(); diag_opts=(); userinc=(); sys_inc=(); hosted_libs=(); keep_static=(); eh_unwind=()
-picopts=(); cobjs=(); pre_opts=(); cuda_opts=(); eflist=(); shim=(); vlart=(); rtlib=(); files=(); compile_only=0"
+picopts=(); cobjs=(); pre_opts=(); preinc=(); cuda_opts=(); eflist=(); shim=(); vlart=(); rtlib=(); files=(); compile_only=0"
 
 # normalize TMPD TEXT: the side's temporary directory (and the directories mktemp made in it) as <tmp>
 normalize() {
@@ -91,15 +91,15 @@ $t"
   [ -z "${ECCP_SHOW:-}" ] || printf '%s\n' "$t"
 }
 
-case_ "plain compile: one source, a temporary directory" 'moves=1; pre_opts=(a.cc)'
+case_ "plain compile: one source, a temporary directory" 'moves=1; pre_opts=(--preinclude a.cc); preinc=(a.cc)'
 case_ "link with objects" 'moves=1; cobjs=(a.o b.o); hosted_libs=(-lm); rtlib=(-lrt)'
 case_ "-shared: the variable and -fPIC" 'moves=1; shared=1; picopts=(--c_to_obj_option -fPIC --c_to_obj_option -Wl,-soname,libx.so.1); cobjs=(a.o)'
 case_ "-pthread: the C compile option" 'moves=1; picopts=(--c_to_obj_option -pthread); cobjs=(a.o)'
 case_ "-rdynamic: the C compile option" 'moves=1; picopts=(--c_to_obj_option -rdynamic); cobjs=(a.o)'
-case_ "-c with -o: the user's directory, no note" 'moves=0; pre_opts=(a.cc); eccp_out=/nfcxx-test/a.o'
+case_ "-c with -o: the user's directory, no note" 'moves=0; pre_opts=(--preinclude a.cc); preinc=(a.cc); eccp_out=/nfcxx-test/a.o'
 case_ "keep-intermediates: the note and the directory kept" 'moves=1; keep_intermediates=1; cobjs=(a.o)'
 case_ "temporary directory in use: removed, no note" 'moves=1; cobjs=(a.o)'
-case_ "-c with keep-intermediates: no directory, no note" 'moves=0; keep_intermediates=1; pre_opts=(a.cc); eccp_out=/nfcxx-test/a.o'
+case_ "-c with keep-intermediates: no directory, no note" 'moves=0; keep_intermediates=1; pre_opts=(--preinclude a.cc); preinc=(a.cc); eccp_out=/nfcxx-test/a.o'
 case_ "extra options: a word with a space and an empty word" 'moves=1; extra=(-DNAME=a\ b "" -O0 -I/x)'
 case_ "modopts and diag_opts" 'moves=1; modopts=(-fmodules-ts); diag_opts=(--diag_suppress 1234); cobjs=(a.o)'
 case_ "cuda_opts and rtlib" 'moves=1; cuda_opts=(--cuda_arch sm_80); rtlib=(-lcudart); cobjs=(a.o)'
