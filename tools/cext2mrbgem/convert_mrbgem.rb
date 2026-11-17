@@ -98,6 +98,8 @@ DEF_RE = /^[ \t]*((?:(?:static|inline|extern)[ \t\n]+)*)((?:[A-Za-z_][#{WC}]*(?:
 INC_RE = /#[ \t]*include[ \t]*[<"](ruby(?:\/[#{WC}.\/-]*)?\.h)[>"]/
 REG_RE = /(?<![#{WC}$.>])(rb_define_method|rb_define_private_method|rb_define_singleton_method|rb_define_module_function|rb_define_global_function)#{SS}\(/
 # a right side that yields a class (a definition or a lookup of a class): not a non-class assignment to a class variable
+# a class expression of the fork (an RClass *): mrb->x_class, mrb_class_get / mrb_exc_get / mrb_module_get, or an E_*_ERROR class macro
+CLASS_EXPR_RE = /\A(?:mrb->\w+_class|mrb_class_get\(|mrb_exc_get\(|mrb_module_get\(|E_[A-Z][A-Z0-9_]*\z)/
 CLASS_RHS_RE = '(?:rb_define_(?:class|module)(?:_under)?|rb_const_get(?:_at)?|rb_path2class|rb_class_new|mrb_const_get|mrb_define_(?:class|module)(?:_under)?|mrb_class_get|rb_class_get)'
 CLASS_ASSIGN_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}=#{SS}rb_define_(?:class|module)(?:_under)?#{SS}\(/
 # an ID variable's only write in the gem: NAME = rb_intern("lit"); (matched on the masked text, the literal read from the source)
@@ -3469,7 +3471,7 @@ use_problem = lambda do |name, use|
     return true if t.match?(/\A[A-Za-z_]\w*\z/) && value_names.include?(t)
     return true if t.match?(/\A[A-Za-z_]\w*\z/) && @class_vars.include?(t)
     # a class constant (rb_cObject, mrb->object_class) outside a class argument is its VALUE (mrb_obj_value)
-    if t.match?(/\A[A-Za-z_]\w*\z/) && (e = @entries[t]).is_a?(Hash) && e['kind'] == 'expr' && e['mruby'].to_s.match?(/\A(?:mrb->\w+_class|mrb_class_get\(mrb, "[^"]+"\)|mrb_exc_get\(mrb, "[^"]+"\))\z/)
+    if t.match?(/\A[A-Za-z_]\w*\z/) && (e = @entries[t]).is_a?(Hash) && e['kind'] == 'expr' && e['mruby'].to_s.match?(CLASS_EXPR_RE)
       return true
     end
     return true if t.match?(/(?:->|\.)[A-Za-z_]\w*\z/) && vfields.include?(t[/([A-Za-z_]\w*)\z/])
@@ -5024,7 +5026,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       callee_c, idx_c = call_context(masked, s)
       class_pos = callee_c && ((@special_pos[callee_c] || []).include?(idx_c) ||
                                ((@entries[callee_c] || {})['class_args'] || []).include?(idx_c))
-      text = "mrb_obj_value(#{text})" if !class_pos && entry['mruby'].match?(/\A(?:mrb->(?:object_class|\w+_class)|mrb_class_get\()/)
+      text = "mrb_obj_value(#{text})" if !class_pos && entry['mruby'].match?(CLASS_EXPR_RE)
       # a file-scope initializer (static VALUE X = Qnil;) is not a constant expression in C (mrb_nil_value is a function): the
       # initializer is removed, and the variable is set at the start of Init (the file's Init function)
       fs_init = if %w[Qnil Qtrue Qfalse].include?(name) && enclosing_func(rel, s).nil?

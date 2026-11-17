@@ -2756,6 +2756,9 @@
     }
   },
   "special_arg_positions_class_only": {
+    "rb_raise": [
+      0
+    ],
     "rb_define_method": [
       0
     ],
