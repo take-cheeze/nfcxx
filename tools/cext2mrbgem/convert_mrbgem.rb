@@ -3840,7 +3840,7 @@ use_problem = lambda do |name, use|
     @files.each_key do |rel|
       masked = @files[rel]['masked']
       # an operand after && or ||, or the first operand of an if or while condition
-      masked.to_enum(:scan, /(?<![#{WC}])((?:&&|\|\|)[ \t\n]*|\b(?:if|while)[ \t\n]*\([ \t\n]*)(?=[A-Za-z_])/).each do
+      masked.to_enum(:scan, /(?<![#{WC}])((?:&&|\|\|)[ \t\n]*|\b(?:if|while)[ \t\n]*\([ \t\n]*|![ \t\n]*\([ \t\n]*)(?=[A-Za-z_])/).each do
         m = Regexp.last_match
         rs = m.end(0)
         cm = masked[rs..].to_s.match(/\A([A-Za-z_]\w*)[ \t\n]*\(/)
@@ -4025,6 +4025,8 @@ use_problem = lambda do |name, use|
     return true if t.match?(/\A[A-Za-z_]\w*\s*\(/) && t.match?(/_value\s*\(/) && t.start_with?('mrb_')
     # a funcall of the fork returns a VALUE (mrb_funcall_argv(...) == mrb_fixnum_value(1))
     return true if t.match?(/\Amrb_funcall\w*\s*\(/)
+    # a CRuby funcall (rb_funcall(...)) of the original is the same VALUE-returning call
+    return true if t.match?(/\Arb_funcall\w*\s*\(/)
     if (cm = t.match(/\A([A-Za-z_]\w*)\s*\(/))
       defs = (@defs[cm[1]] || []).reject { |x| x['proto'] }
       return true if defs.any? && defs.all? { |x| x['ret'].to_s.strip == 'VALUE' }
