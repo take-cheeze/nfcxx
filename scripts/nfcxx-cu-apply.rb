@@ -16,6 +16,7 @@ module NfcxxCuApply
   def split(s) = s.to_s.split("\x1f", -1).reject(&:empty?)
 
   def plan(opts, reply)
+    kind = opts.fetch("kind", "cu")
     inputs = split(opts["inputs"])
     srcs = split(opts["srcs"])
     files = split(opts["files"])
@@ -37,7 +38,11 @@ module NfcxxCuApply
       end
     end
     unless done
-      warn "nfcxx: scripts/nfcxx-cuda-device.rb stopped before its end (the .cu inputs are incomplete)"
+      if kind == "cpp2"
+        warn "nfcxx: scripts/nfcxx-cpp2.rb stopped before its end (the translations are incomplete)"
+      else
+        warn "nfcxx: scripts/nfcxx-cuda-device.rb stopped before its end (the .cu inputs are incomplete)"
+      end
       raise SystemExit.new(1)
     end
     inputs.each_with_index do |src, idx|
@@ -48,13 +53,22 @@ module NfcxxCuApply
       srcs.map! { |x| x == src ? copy : x }
       files.map! { |x| x == src ? copy : x }
     end
-    [
+    if kind == "cpp2"
+      # the cppfront include directory goes last, in cflags and files (the bash .cpp2 step)
+      inc = "-I#{opts.fetch("cppfront", "")}/include"
+      cflags << inc
+      files << inc
+    end
+    out = [
       "srcs=(#{srcs.map { |w| Shellwords.escape(w) }.join(" ")})",
       "files=(#{files.map { |w| Shellwords.escape(w) }.join(" ")})",
       "cflags=(#{cflags.map { |w| Shellwords.escape(w) }.join(" ")})",
-      "cuda_opts=(#{groups["cuda"].map { |w| Shellwords.escape(w) }.join(" ")})",
-      "preinc=(#{groups["preinc"].map { |w| Shellwords.escape(w) }.join(" ")})",
-    ].join("\n")
+    ]
+    if kind == "cu"
+      out << "cuda_opts=(#{groups["cuda"].map { |w| Shellwords.escape(w) }.join(" ")})"
+      out << "preinc=(#{groups["preinc"].map { |w| Shellwords.escape(w) }.join(" ")})"
+    end
+    out.join("\n")
   end
 end
 
