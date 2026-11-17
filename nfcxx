@@ -406,16 +406,9 @@ args0=("$@")   # the arguments as given: the SYCL two-pass build below re-runs t
 # A planner that stops before "z" ends the driver with status 1, so a crash is never silent.
 loop_no_value() { : "$2"; }   # a value option given last: $2 is unset here (set -u ends the driver)
 # the ld.NAME programs that exist, for -fuse-ld=NAME (the planner does not ask the shell)
-loop_ld=""
-for loop_a in "$@"; do
-  case $loop_a in
-    -fuse-ld=*) loop_n=${loop_a#-fuse-ld=}
-                if [ -n "$loop_n" ] && command -v "ld.$loop_n" >/dev/null 2>&1; then loop_ld+="$loop_n,"; fi ;;
-  esac
-done
 # The loop's state as the shell statements that apply it (scripts/nfcxx-loop.rb --shell): a refusal ends the driver with 2, a
 # value option given last ends it as the bash did (loop_no_value), and the state is set and appended as the loop made it.
-loop_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-loop.rb" --shell --ld-available="$loop_ld" -- "$@") || exit $?
+loop_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-loop.rb" --shell --probe-ld -- "$@") || exit $?
 eval "$loop_sh"
 shift $#
 # END the argument loop
