@@ -2637,6 +2637,7 @@
     "PRIuSIZE": {"kind": "expr", "mruby": "\"zu\"", "caveat": "C99 printf length modifier for size_t (CRuby's PRIuSIZE is this string literal)"},
     "PRIdSIZE": {"kind": "expr", "mruby": "\"zd\"", "caveat": "C99 printf length modifier for size_t (CRuby's PRIdSIZE is this string literal)"},
     "PUREFUNC": {"kind": "template", "arity": 1, "template": "$0", "caveat": "PUREFUNC (CRuby's pure-function attribute) is a compiler hint: the declaration it wraps is kept, without the attribute"},
+    "RARRAY_PTR": {"kind": "macro", "mruby": "RARRAY_PTR", "caveat": "mruby's RARRAY_PTR (include/mruby/array.h) is the array's element pointer, as CRuby's; the use reads elements. A write through it would need mruby's array modify step (not done here)"},
     "rb_cstr_to_dbl": {
       "kind": "template",
       "arity": 2,
