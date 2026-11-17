@@ -627,9 +627,8 @@ picopts=(); ldopts=()
 # eccp passes it to both the front end and the C compile. Macros with arguments are not passed.
 if [ ${#isa[@]} -gt 0 ]; then
   for o in ${isa[@]+"${isa[@]}"}; do picopts+=(--c_to_obj_option "$o"); done
-  while IFS= read -r d; do files+=("$d"); done < <(
-    comm -13 <(gcc -dM -E -x c /dev/null | sort) <(gcc ${isa[@]+"${isa[@]}"} -dM -E -x c /dev/null | sort) \
-      | sed -n 's/^#define \([^ (]*\) */-D\1=/p')
+  # the -D options of the macros the -m options add: scripts/nfcxx-isa-macros.rb (the gcc -dM difference, as the bash had it)
+  while IFS= read -r d; do files+=("$d"); done < <("${RUBY:-ruby}" "$root/scripts/nfcxx-isa-macros.rb" ${isa[@]+"${isa[@]}"})
 fi
 [ $pic = 0 ] || { picopts=(--c_to_obj_option -fPIC); cflags_pic=(-fPIC); }
 [ $rdynamic = 0 ] || picopts+=(--c_to_obj_option -rdynamic)
