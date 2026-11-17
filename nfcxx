@@ -586,21 +586,14 @@ if [ $cosmo = 1 ]; then
   cosmo_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cosmo-setup.rb" setup root="$root" backend="$backend" backend_explicit="$backend_explicit" path_b="$path_b" gnu="${gnu:-}") || exit $?
   eval "$cosmo_sh"
 fi
+# The freestanding or hosted setup: the headers and the GNU version (scripts/nfcxx-freestanding-setup.rb plan, stage B3). The host
+# include directories are read inside the trace span of the host C++ headers, as they were.
 if [ $freestanding = 1 ]; then
-  extra=(--no_standard_includes "-I$root/lib")
-  [ -n "$gnu" ] || gnu=130000
+  eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-freestanding-setup.rb" plan freestanding=1 gnu="$gnu" sys="$(uname -s)" root="$root")"
 else
   t=$(trace_start)
-  while IFS= read -r d; do [ -n "$d" ] && sys_inc+=("--sys_include=$d"); done < <("${RUBY:-ruby}" "$root/scripts/host-sys.rb" host_sys_includes)
+  eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-freestanding-setup.rb" plan freestanding=0 gnu="$gnu" sys="$(uname -s)" root="$root")"
   trace_end "$t" "host C++ headers" driver
-  # g++ links libm implicitly through libstdc++; the hosted headers (<cmath>, used by doctest for
-  # log10) need it too. The EDG link appends --c_to_obj_lib libraries after the objects.
-  hosted_libs=(--c_to_obj_lib=m)
-  # macOS has libc++, not libstdc++: the link needs it explicitly (eccp's Linux default is libstdc++).
-  [ "$(uname -s)" = Darwin ] && hosted_libs+=(--c_to_obj_lib=c++)
-  if [ -z "$gnu" ]; then
-    gnu=$("${RUBY:-ruby}" "$root/scripts/host-sys.rb" host_gnu_version)
-  fi
 fi
 # -isystem DIR from the command line: searched after the host's own directories, as the host compiler does.
 ecp_args ${sysdirs[@]+"${sysdirs[@]}"}
