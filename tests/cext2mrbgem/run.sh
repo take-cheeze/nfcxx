@@ -1509,6 +1509,24 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_struct_type/NOT_BUILDABLE"
 check grep -qF 'mrb_obj_is_kind_of(mrb, obj, mrb_class_get(mrb, "Struct"))' "$work/api_struct_type/src/api_struct_type.c"
 check grep -qF "spec.add_dependency 'mruby-struct'" "$work/api_struct_type/mrbgem.rake"
+# 2zzz133. rb_scan_args with a NULL output (the argument is discarded) takes a dummy VALUE declared at the start of the function; the
+# call converts and the output is the one given.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_scan_null tools/cext2mrbgem/fixtures/api_scan_null/ext/api_scan_null "$work/api_scan_null" > "$work/api_scan_null.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_scan_null/NOT_BUILDABLE"
+check grep -qF 'mrb_value nfcx_skip' "$work/api_scan_null/src/api_scan_null.c"
+# 2zzz134. a helper prototype wrapped in MAYBE_UNUSED(...) (CRuby's identity wrapper around a declaration) is a prototype like the
+# others: it takes the mruby state with the definition, and the call converts.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_maybe_unused_proto tools/cext2mrbgem/fixtures/api_maybe_unused_proto/ext/api_maybe_unused_proto "$work/api_maybe_unused_proto" > "$work/api_maybe_unused_proto.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_maybe_unused_proto/NOT_BUILDABLE"
+check grep -qF 'static mrb_value make_pair(mrb_state *mrb, int n);' "$work/api_maybe_unused_proto/src/api_maybe_unused_proto.c"
+# 2zzz135. an object-like alias of a threaded helper (#define MakeOne wrap_one) is called as the helper: its call gets the state, and
+# the call converts (an alias that names an API entry is not threaded: its mapping decides).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_alias_thread tools/cext2mrbgem/fixtures/api_alias_thread/ext/api_alias_thread "$work/api_alias_thread" > "$work/api_alias_thread.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_alias_thread/NOT_BUILDABLE"
+check grep -qF 'return MakeOne(mrb, v);' "$work/api_alias_thread/src/api_alias_thread.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?

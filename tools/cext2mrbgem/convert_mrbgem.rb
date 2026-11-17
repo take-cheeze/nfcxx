@@ -423,6 +423,11 @@ class Edits
     @items.any? { |a, b, _| a < e && s < b }
   end
 
+  # an edit that starts, ends or spans the position p (a zero-width insertion there would conflict with it)
+  def touches?(p)
+    @items.any? { |a, b, _| a <= p && p <= b }
+  end
+
   # the edits that overlap [s, e), as [start, end, text]
   def overlapping(s, e)
     @items.select { |a, b, _| a < e && s < b }
@@ -1594,12 +1599,13 @@ end
 def noreturn_mask(rel)
   f = @files[rel]
   f['noreturn'] = []
-  f['text'].to_enum(:scan, /^[ \t]*NORETURN\(/).each do
+  # MAYBE_UNUSED(decl) is the same kind of wrapper: CRuby's identity macro (an unused-variable attribute) around a declaration
+  f['text'].to_enum(:scan, /^[ \t]*(?:NORETURN|MAYBE_UNUSED)\(/).each do
     m = Regexp.last_match
     open = m.end(0) - 1
     close = match_close(f['masked'], open)
     next if close < 0
-    start = m.begin(0) + m[0].index('N')
+    start = m.begin(0) + m[0][/\A[ \t]*/].length
     f['noreturn'] << [start, open, close]
     (start...open + 1).each { |k| f['masked'][k] = ' ' }
     f['masked'][close] = ' '
@@ -2440,7 +2446,8 @@ end
     forced.merge(argv_scan_helpers.keys)
     needs = Set.new(forced)
     ids.each do |name, s|
-      needs << name if s.any? { |i| (@entries[i] || {})['needs_mrb'] || macro_needs.include?(i) }
+      # a class-test type tag (RB_TYPE_P(x, T_RATIONAL) and the like) is a class lookup, which needs the mruby state
+      needs << name if s.any? { |i| (@entries[i] || {})['needs_mrb'] || macro_needs.include?(i) || %w[T_RATIONAL T_COMPLEX T_STRUCT].include?(i) }
     end
     changed = true
     while changed
@@ -3669,7 +3676,10 @@ end
     end
     # 4. helper call sites get the mrb argument
     header_spans = @decls.select { |d| d['file'] == rel }.map { |d| [d['hstart'], d['hend']] }
-    @helper_names.to_a.sort.each do |name|
+    # an object-like alias of a threaded helper (#define NewX helper) is called as the helper: its calls get the argument too
+    alias_names = @files.values.flat_map { |f| f['text'].scan(/^[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)[ \t]+([A-Za-z_]\w*)[ \t]*$/) }
+                        .select { |a, t| @helper_names.include?(t) && !@entries.key?(a) }.map(&:first)
+    (@helper_names.to_a + alias_names).uniq.sort.each do |name|
       (@occ[name] || []).each do |orel, s, e|
         next if orel != rel || header_spans.any? { |a, b| a <= s && s < b }
         # a use in the text of an inactive definition (its #if is false in this build) stays as it is
@@ -3679,6 +3689,8 @@ end
         next if po < 0 || masked[po] != '('
         pa = next_nonspace(masked, po + 1)
         t = mrb_tok(rel, s)
+        # an alias call inside another rewritten span is that span's business (it is not threaded here)
+        next if !@helper_names.include?(name) && @edits[rel].touches?(po + 1)
         ed.add(po + 1, po + 1, masked[pa] == ')' ? t : "#{t}, ")
       end
     end
@@ -5197,6 +5209,13 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     end
     names = []
     outs.each do |a, b|
+      # a NULL output is an argument the caller discards: a dummy VALUE takes it (declared at the start of the function)
+      if psl(text, a, b).strip == 'NULL'
+        dummy = "nfcx_skip#{a}"
+        ed.add(fn['brace'] + 1, fn['brace'] + 1, " mrb_value #{dummy}; ")
+        names << dummy
+        next
+      end
       om = /\A&#{SS}([A-Za-z_][#{WC}]*)\z/.match(psl(text, a, b))
       if !om || @class_vars.include?(om[1]) || [argc_n, argv_n, self_n].include?(om[1])
         refuse(rel, s, 'rb_scan_args', "output #{py_repr(psl(text, a, b))} is not a plain local variable")
