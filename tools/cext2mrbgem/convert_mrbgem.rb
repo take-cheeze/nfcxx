@@ -428,6 +428,11 @@ class Edits
     @items.any? { |a, b, _| a <= p && p <= b }
   end
 
+  # an edit that strictly contains the position p (a->p->b with a < p < b): an insertion there would conflict with it
+  def touches_strictly?(p)
+    @items.any? { |a, b, _| a < p && p < b }
+  end
+
   # the edits that overlap [s, e), as [start, end, text]
   def overlapping(s, e)
     @items.select { |a, b, _| a < e && s < b }
@@ -3290,6 +3295,144 @@ use_problem = lambda do |name, use|
     end
   end
 
+  # A == or != between two VALUE expressions that the other passes do not rewrite whole (a call, a dereference, an assignment in
+  # parentheses, a function result): CRuby compares VALUEs by identity, which is mrb_value_identical (stateless, in the fork). The
+  # operands keep their own rewrites; only the operator and the two ends of the comparison are edited (insertions).
+  def value_compare_wrap_pass
+    cmp_re = /(?<![=!<>])(==|!=)(?!=)/
+    @files.each_key do |rel|
+      masked = @files[rel]['masked']
+      text = @files[rel]['text']
+      vfields = value_field_names
+      masked.to_enum(:scan, cmp_re).each do
+        m = Regexp.last_match
+        op = m[1]
+        op_s, op_e = m.begin(1), m.end(1)
+        next if in_dead_init(rel, op_s)
+        # the operator must not be inside an edit already (the equality pass rewrote this comparison, or another pass did)
+        next if @edits[rel].overlaps(op_s, op_e)
+        fn = enclosing_func(rel, op_s)
+        next unless fn
+        value_names = value_names_of(fn)
+        l_start, l_text = left_operand(masked, op_s)
+        r_end, r_text = right_operand(masked, op_e)
+        next if l_text.nil? || r_text.nil? || l_text.empty? || r_text.empty?
+        next unless value_operand?(l_text, value_names, vfields, rel, op_s) && value_operand?(r_text, value_names, vfields, rel, op_s)
+        # the insertions must not fall strictly inside another edit
+        next if [l_start, r_end].any? { |q| @edits[rel].touches_strictly?(q) }
+        @edits[rel].add(l_start, l_start, (op == '!=' ? '!' : '') + 'mrb_value_identical(')
+        @edits[rel].add(op_s, op_e, ', ')
+        @edits[rel].add(r_end, r_end, ')')
+      end
+    end
+  end
+
+  # the left operand of an operator at pos: [start, text] of the maximal expression ending before pos (balanced groups,
+  # identifiers, member and address/deref prefixes; stops at a lower-precedence token or an unmatched open)
+  def left_operand(masked, pos)
+    i = prev_nonspace(masked, pos - 1)
+    return [pos, nil] if i < 0
+    start = nil
+    loop do
+      break if i < 0
+      c = masked[i]
+      if c == ')' || c == ']'
+        open = c == ')' ? '(' : '['
+        depth = 0
+        k = i
+        while k >= 0
+          if masked[k] == c then depth += 1
+          elsif masked[k] == open
+            depth -= 1
+            break if depth.zero?
+          end
+          k -= 1
+        end
+        return [pos, nil] if k < 0
+        start = k
+        i = prev_nonspace(masked, k - 1)
+        # a call's name (or a cast's type) before the group is part of the operand
+        if i >= 0 && masked[i] =~ /[#{WC}]/
+          j = i
+          j -= 1 while j >= 0 && masked[j] =~ /[#{WC}]/
+          start = j + 1
+          i = prev_nonspace(masked, j)
+        end
+      elsif masked[i] =~ /[#{WC}]/
+        j = i
+        j -= 1 while j >= 0 && masked[j] =~ /[#{WC}]/
+        start = j + 1
+        i = j
+      else
+        break
+      end
+      # a member or pointer access before the operand continues it
+      k = i
+      k -= 1 while k >= 0 && masked[k] =~ /\s/
+      if k >= 1 && (masked[k - 1, 2] == '->' || masked[k] == '.')
+        i = k - (masked[k] == '.' ? 1 : 2)
+        i = prev_nonspace(masked, i)
+        next
+      end
+      break
+    end
+    return [pos, nil] if start.nil?
+    # a unary prefix (*x, &x, !x) before a plain operand is part of it when the operand is a deref
+    st = start
+    j = prev_nonspace(masked, st - 1)
+    st = j if j >= 0 && masked[j] == '*' && (j == 0 || masked[j - 1] !~ /[#{WC})\]]/)
+    [st, masked[st...pos].to_s.strip.sub(/\s*\z/, '')]
+  end
+
+  # the right operand of an operator ending at pos: [end, text] of the expression starting after pos (stops at a lower-precedence token)
+  def right_operand(masked, pos)
+    i = next_nonspace(masked, pos)
+    return [pos, nil] if i < 0
+    st = i
+    depth = 0
+    k = i
+    while k < masked.length
+      c = masked[k]
+      if c == '(' || c == '[' then depth += 1
+      elsif c == ')' || c == ']'
+        break if depth.zero?
+        depth -= 1
+      elsif depth.zero?
+        break if c =~ /[;,?:{}]/ || masked[k, 2] == '&&' || masked[k, 2] == '||' || masked[k, 2] == '==' || masked[k, 2] == '!=' || (c == '=' && masked[k + 1] != '=' && masked[k - 1] !~ /[=!<>]/)
+      end
+      k += 1
+    end
+    e = k
+    e -= 1 while e > st && masked[e - 1] =~ /\s/
+    [e, masked[st...e]]
+  end
+
+  # a VALUE operand: a VALUE name, a VALUE member, an *_value(...) call, a Q constant, a converted function that returns VALUE, or a
+  # parenthesized assignment to a VALUE name. A literal 0 is left to the equality pass (CRuby's Qfalse).
+  def value_operand?(t, value_names, vfields, rel, pos)
+    t = t.strip
+    return true if t.match?(/\AQ(?:nil|true|false|undef)\z/)
+    return true if t.match?(/\A[A-Za-z_]\w*\z/) && value_names.include?(t)
+    return true if t.match?(/\A[A-Za-z_]\w*\z/) && @class_vars.include?(t)
+    # a class constant (rb_cObject, mrb->object_class) outside a class argument is its VALUE (mrb_obj_value)
+    if t.match?(/\A[A-Za-z_]\w*\z/) && (e = @entries[t]).is_a?(Hash) && e['kind'] == 'expr' && e['mruby'].to_s.match?(/\Amrb->\w+_class\z/)
+      return true
+    end
+    return true if t.match?(/(?:->|\.)[A-Za-z_]\w*\z/) && vfields.include?(t[/([A-Za-z_]\w*)\z/])
+    return true if t.match?(/\A[A-Za-z_]\w*\s*\(/) && t.match?(/_value\s*\(/) && t.start_with?('mrb_')
+    if (cm = t.match(/\A([A-Za-z_]\w*)\s*\(/))
+      defs = (@defs[cm[1]] || []).reject { |x| x['proto'] }
+      return true if defs.any? && defs.all? { |x| x['ret'].to_s.strip == 'VALUE' }
+      # a mapped CRuby API call whose result is a VALUE (its template wraps a data or class object in mrb_obj_value)
+      ent = @entries[cm[1]]
+      return true if ent.is_a?(Hash) && (ent['template'].to_s.start_with?('mrb_obj_value(') || ent['mruby'].to_s.end_with?('_value'))
+    end
+    if (am = t.match(/\A\(\s*([A-Za-z_]\w*)\s*=/))
+      return true if value_names.include?(am[1])
+    end
+    false
+  end
+
   def value_equality_pass
     qconst = /\AQ(?:nil|true|false|undef)\z/
     with_state = (@threaded_cands || Set.new) | (@valid_reg_names || Set.new)
@@ -3973,6 +4116,10 @@ end
         refuse(rel, s, name, @type_check_refused[name] || @unmapped_reasons[name] || 'no entry in api_map.json')
       elsif @class_vars.include?(name)
         next if @decl_name_pos.include?([rel, s]) || is_param(rel, s, name)
+        # a struct or union field declaration named like a class variable is a field (not a use of the class variable)
+        ob_f = enclosing_open_brace(masked, s)
+        next if ob_f && masked[[ob_f - 60, 0].max...ob_f].to_s.match?(/\b(?:struct|union)[ \t\n]*[A-Za-z_]?\w*[ \t\n]*\z/) &&
+                enclosing_func(rel, s).nil?
         # a local or parameter of this name in the enclosing function shadows the class variable: not a use of it
         fn_here = enclosing_func(rel, s)
         next if fn_here && local_shadows_class_var?(name, fn_here)
@@ -5886,6 +6033,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     check_refs
     @files.keys.sort.each { |rel| process(rel) }
     value_equality_pass
+    value_compare_wrap_pass
     value_zero_assign_pass
     integer_return_pass
     @dead_inits.each do |d|

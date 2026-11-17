@@ -1583,6 +1583,13 @@ check test ! -e "$work/api_hash_value_data/NOT_BUILDABLE"
 check grep -qF 'mrb_hash_foreach(mrb, RHASH(value), walk, (void *)&proc);' "$work/api_hash_value_data/src/api_hash_value_data.c"
 check grep -qF 'mrb_value proc = *(mrb_value *)nfcx_data_proc;' "$work/api_hash_value_data/src/api_hash_value_data.c"
 check grep -qF 'walk(mrb, mrb_nil_value(), h, (void *)&(mrb_value[]){mrb_nil_value()});' "$work/api_hash_value_data/src/api_hash_value_data.c"
+# 2zzz144. a comparison of two VALUE expressions that are calls (rb_obj_class(a) == rb_obj_class(b)) is mrb_value_identical of the operands
+# (the != is its negation), a class constant (rb_cObject) is its VALUE, and a struct field named like a class variable stays a field.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_value_cmp tools/cext2mrbgem/fixtures/api_value_cmp/ext/api_value_cmp "$work/api_value_cmp" > "$work/api_value_cmp.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_value_cmp/NOT_BUILDABLE"
+check grep -qF 'if (mrb_value_identical(mrb_obj_value(mrb_obj_class(mrb, a)) ,  mrb_obj_value(mrb_obj_class(mrb, b)))) {' "$work/api_value_cmp/src/api_value_cmp.c"
+check grep -qF 'c.json_cls = "x";' "$work/api_value_cmp/src/api_value_cmp.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?
