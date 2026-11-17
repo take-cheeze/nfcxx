@@ -3188,6 +3188,22 @@ use_problem = lambda do |name, use|
     end
   end
 
+  # X = 0; where X is a VALUE struct member: CRuby's Qfalse is the zero word, so the 0 is mrb_false_value()
+  def value_zero_assign_pass
+    vfields = value_field_names
+    @files.each_key do |rel|
+      masked = @files[rel]['masked']
+      masked.to_enum(:scan, /((?:->|\.)[A-Za-z_]\w*)[ \t\n]*(?<![=!<>+\-*\/%&|^])=(?!=)[ \t\n]*0(?![\w.])[ \t\n]*;/).each do
+        m = Regexp.last_match
+        field = m[1][/[A-Za-z_]\w*\z/]
+        next unless vfields.include?(field) && enclosing_func(rel, m.begin(0))
+        zpos = m.begin(0) + m[0].rindex('0')
+        @edits[rel].add(zpos, zpos + 1, 'mrb_false_value()')
+        rewrite(rel, zpos, field, "#{field} = mrb_false_value()", 'a literal 0 stored in a VALUE member is Qfalse (the zero word)')
+      end
+    end
+  end
+
   def value_assert_pass
     vfields = value_field_names
     @files.each_key do |rel|
@@ -3221,7 +3237,8 @@ use_problem = lambda do |name, use|
     @files.each_key do |rel|
       masked = @files[rel]['masked']
       operand = '[A-Za-z_]\w*(?:(?:->|\.)[A-Za-z_]\w*)*'
-      masked.to_enum(:scan, /(?<![#{WC}.>])(#{operand})[ \t\n]*(==|!=)[ \t\n]*(#{operand})(?![#{WC}(])/).each do
+      # the right operand may be the literal 0 (CRuby's Qfalse is the zero word, so 0 compared with a VALUE is Qfalse)
+      masked.to_enum(:scan, /(?<![#{WC}.>])(#{operand})[ \t\n]*(==|!=)[ \t\n]*(#{operand}|0(?![\w.]))(?![#{WC}(])/).each do
         m = Regexp.last_match
         a, op, b = m[1], m[2], m[3]
         s0, e0 = m.begin(0), m.end(0)
@@ -3235,7 +3252,7 @@ use_problem = lambda do |name, use|
         end
         value_names = fn ? value_names_of(fn) : macro_value_names(rel, mac)
         is_value = lambda do |x|
-          next true if qconst.match?(x)
+          next true if qconst.match?(x) || x == '0'
           # a tracked class variable is a VALUE (its mrb_obj_value wrap, made by the identifier pass)
           next true if x.match?(/\A[A-Za-z_]\w*\z/) && @class_vars.include?(x) && !value_names.include?(x)
           next value_names.include?(x) if x.match?(/\A[A-Za-z_]\w*\z/)
@@ -3247,13 +3264,13 @@ use_problem = lambda do |name, use|
         next unless ok_a && ok_b
         # a function without the mruby state compares identity with mrb_value_identical (the fork's stateless test)
         stateless = fn ? !with_state.include?(fn['name']) : false
-        conv = ->(x) { qconst.match?(x) ? @entries[x]['mruby'] : (@class_vars.include?(x) && !value_names.include?(x) ? "mrb_obj_value(#{x})" : x) }
+        conv = ->(x) { x == '0' ? 'mrb_false_value()' : (qconst.match?(x) ? @entries[x]['mruby'] : (@class_vars.include?(x) && !value_names.include?(x) ? "mrb_obj_value(#{x})" : x)) }
         # the only edits allowed inside the comparison are the rewrites of its own Q-constant operands (Qundef becomes
         # mrb_undef_value()); the comparison replaces them with the same text, so they are dropped
         if @edits[rel].overlaps(s0, e0)
           operand_spans = []
           operand_spans << [m.begin(1), m.end(1), a] if qconst.match?(a) || (@class_vars.include?(a) && !value_names.include?(a))
-          operand_spans << [m.begin(3), m.end(3), b] if qconst.match?(b) || (@class_vars.include?(b) && !value_names.include?(b))
+          operand_spans << [m.begin(3), m.end(3), b] if qconst.match?(b) || b == '0' || (@class_vars.include?(b) && !value_names.include?(b))
           inner = @edits[rel].overlapping(s0, e0)
           own = inner.select do |x, y, t|
             operand_spans.any? { |os, oe, name| x >= os && y <= oe && t == conv.call(name) }
@@ -5486,6 +5503,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     @files.keys.sort.each { |rel| process(rel) }
     value_equality_pass
     value_assert_pass
+    value_zero_assign_pass
     integer_return_pass
     @dead_inits.each do |d|
       @edits[d['file']].add(d['hstart'], d['hstart'],

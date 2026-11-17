@@ -23,6 +23,16 @@ m_missing(VALUE self, VALUE h, VALUE k)
     return Qnil;
 }
 
+/* a VALUE member: CRuby's Qfalse is the zero word, so 0 stored in it, or compared with it, is Qfalse */
+struct qcc_holder { VALUE t; };
+
+static VALUE
+qcc_reset(struct qcc_holder *q)
+{
+    q->t = 0;
+    return q->t != 0 ? Qtrue : Qfalse;
+}
+
 void
 Init_api_q_call_cmp(void)
 {
