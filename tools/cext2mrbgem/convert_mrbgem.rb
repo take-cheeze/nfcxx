@@ -2642,6 +2642,9 @@ end
       elsif callee == 'rb_define_alloc_func'
         # the allocator is called by the VM with no state argument: the fork has no per-class allocator hook (accepted stuck point)
         'stuck point (per-class allocator): the pointer is an allocator, which the VM calls with no state argument in the fork'
+      elsif @entries[callee].nil? && (ur = @unmapped_reasons[callee]).is_a?(String) && ur.start_with?('stuck point')
+        # a callee that is a stuck point (its reason is recorded): the pointer's refusal carries that reason
+        "#{ur}; the pointer is passed to #{callee}"
       elsif STORE_CALL_RE.match?(callee) || @defs.key?(callee) || !@entries.key?(callee)
         "the pointer is passed to #{callee}, which may keep it"
       end
@@ -2818,16 +2821,20 @@ use_problem = lambda do |name, use|
     @needs.to_a.sort.each do |name|
       next if @reg_names.include?(name) || name == init_first || !@defs.key?(name) || cands.include?(name) || gset.include?(name)
       ctx_why = nil
+      stuck_why = nil
       if gcands.include?(name)
         # a use in a function with no state (a callback path) is reported once, on the helper's definition
         helper_uses.call(name).each do |u|
           why = global_use.call(name, u, gset)
           ctx_why ||= why if why == CTX_REASON
+          stuck_why ||= why if why && why.include?('stuck point')
           refuse(u[0], u[1], name, why) if why && why != CTX_REASON
         end
       else
         helper_uses.call(name).each do |u|
           why = use_problem.call(name, u)
+          # a use that is a stuck point (its reason is recorded) makes the helper's refusal that stuck point
+          stuck_why ||= why if why && why.start_with?('stuck point')
           refuse(u[0], u[1], name, why) if why
         end
       end
@@ -2836,8 +2843,12 @@ use_problem = lambda do |name, use|
           refuse(d0['file'], d0['hstart'], name, 'stuck point (per-class allocator): the helper needs the mruby state and is reached from a ' \
                                                   'per-class allocator (rb_define_alloc_func), which has no state argument in the fork (accepted stuck point)')
         else
-          refuse(d0['file'], d0['hstart'], name, ctx_why ? "helper needs mruby state; threading refused: #{ctx_why}" :
-                                                 'helper needs mruby state; threading refused')
+          if stuck_why
+            refuse(d0['file'], d0['hstart'], name, "#{stuck_why}; the helper is refused with it")
+          else
+            refuse(d0['file'], d0['hstart'], name, ctx_why ? "helper needs mruby state; threading refused: #{ctx_why}" :
+                                                   'helper needs mruby state; threading refused')
+          end
         end
       end
       refused_defs << name

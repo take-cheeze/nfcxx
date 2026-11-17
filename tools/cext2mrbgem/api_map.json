@@ -20,6 +20,7 @@
     "T_REGEXP": "stuck point: the fork has no Regexp tag (include/mruby/value.h:106-131) and no mrbgem defines a Regexp class (mrbgems/ lists no mruby-regexp), so there is nothing to compare with"
   },
   "unmapped_reasons": {
+    "onig_foreach_name": "stuck point (regexp engine): onig_foreach_name is the Onigmo regexp engine of CRuby; the fork has no regexp engine (mrbgems has no regexp gem), so the named-capture iteration has no mruby form",
     "T_RATIONAL": "stuck point (gem dependency): a Rational test is the mruby-rational class test, which needs the state and the gem (the decision is made: the gem is a dependency when the test is emitted); a bare use has no test to make here",
     "T_COMPLEX": "stuck point (gem dependency): a Complex test is the mruby-complex class test, which needs the state and the gem (the decision is made: the gem is a dependency when the test is emitted); a bare use has no test to make here",
     "_comment": "A name with no api_map entry is refused with the reason given here (the converter's no-entry path). PRIsVALUE is converted where rb_raise and rb_sprintf take it; elsewhere it is an argument of rb_enc_sprintf, which takes an rb_encoding *.",
