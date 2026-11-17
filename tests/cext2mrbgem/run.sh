@@ -1596,6 +1596,13 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_lookup_arg tools/cext2m
 check test "$rc" -eq 0
 check test ! -e "$work/api_hash_lookup_arg/NOT_BUILDABLE"
 check grep -qF 'mrb_hash_fetch(mrb, hash, mrb_symbol_value(mrb_intern_cstr(mrb, "lax")), mrb_nil_value())' "$work/api_hash_lookup_arg/src/api_hash_lookup_arg.c"
+# 2zzz146. a VALUE call result used as a truth value beside && is mrb_test(...), and a literal 0 compared with a VALUE is mrb_false_value()
+# (CRuby's Qfalse); the converted function compiles.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_truth_zero tools/cext2mrbgem/fixtures/api_truth_zero/ext/api_truth_zero "$work/api_truth_zero" > "$work/api_truth_zero.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_truth_zero/NOT_BUILDABLE"
+check grep -qF 'mrb_test(' "$work/api_truth_zero/src/api_truth_zero.c"
+check grep -qF 'mrb_false_value()' "$work/api_truth_zero/src/api_truth_zero.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?

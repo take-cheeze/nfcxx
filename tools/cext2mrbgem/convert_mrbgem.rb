@@ -3450,6 +3450,29 @@ use_problem = lambda do |name, use|
     end
   end
 
+  # A call returning a VALUE (rb_funcall and its family, mrb_funcall_argv) used as a truth value beside && or || is
+  # tested as CRuby tests it: mrb_test(...) (nil and false are false, everything else true)
+  def value_truth_call_pass
+    @files.each_key do |rel|
+      masked = @files[rel]['masked']
+      masked.to_enum(:scan, /(?<![#{WC}])(&&|\|\|)[ \t\n]*(?=[A-Za-z_])/).each do
+        m = Regexp.last_match
+        rs = m.end(0)
+        cm = masked[rs..].to_s.match(/\A([A-Za-z_]\w*)[ \t\n]*\(/)
+        next unless cm
+        ent = @entries[cm[1]]
+        next unless ent.is_a?(Hash) && (ent['mruby'].to_s.start_with?('mrb_funcall') || ent['template'].to_s.start_with?('mrb_funcall') || ent['handler'] == 'funcall')
+        open = rs + cm[0].length - 1
+        close = match_close(masked, open)
+        next if close < 0
+        next if in_dead_init(rel, rs)
+        next if @edits[rel].touches_strictly?(rs) || @edits[rel].touches_strictly?(close + 1)
+        @edits[rel].add(rs, rs, 'mrb_test(')
+        @edits[rel].add(close + 1, close + 1, ')')
+      end
+    end
+  end
+
   def value_compare_wrap_pass
     cmp_re = /(?<![=!<>])(==|!=)(?!=)/
     @files.each_key do |rel|
@@ -3477,8 +3500,18 @@ use_problem = lambda do |name, use|
         # a dereference of a VALUE pointer (VALUE *argv, mrb_value *p) is a VALUE
         value_ptr = fn ? value_pointer_names(fn) : Set.new
         value_names = value_names | value_ptr.map { |n| "*#{n}" }
+        # a literal 0 beside a VALUE is CRuby's Qfalse (the equality pass's rule): it becomes mrb_false_value()
+        zero_l = l_text.strip == '0'
+        zero_r = r_text.strip == '0'
+        if zero_l || zero_r
+          other = zero_l ? r_text : l_text
+          next unless value_operand?(other, value_names, vfields, rel, op_s) || strong.call(other)
+          zero_s, zero_e = zero_l ? [l_start, l_start + 1] : [r_end - 1, r_end]
+          @edits[rel].add(zero_s, zero_e, 'mrb_false_value()') unless @edits[rel].touches_strictly?(zero_s)
+        else
         next unless (value_operand?(l_text, value_names, vfields, rel, op_s) || strong.call(r_text)) &&
                     (value_operand?(r_text, value_names, vfields, rel, op_s) || strong.call(l_text))
+        end
         # the insertions must not fall strictly inside another edit
         next if [l_start, r_end].any? { |q| @edits[rel].touches_strictly?(q) }
         @edits[rel].add(l_start, l_start, (op == '!=' ? '!' : '') + 'mrb_value_identical(')
@@ -6270,6 +6303,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     value_equality_pass
     value_compare_wrap_pass
     owned_class_assign_pass
+    value_truth_call_pass
     value_order_stuck_pass
     header_prototype_types_pass
     value_zero_assign_pass
