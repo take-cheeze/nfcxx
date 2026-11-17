@@ -5,28 +5,29 @@
 
 class NfcxxState
   def initialize
-    @names = []
-    @values = {}
+    @groups = []
   end
 
-  # set NAME, VALUE...: replaces the group (a name with no values is a group with none)
-  def set(name, *values)
-    @names << name unless @values.key?(name)
-    @values[name] = values
+  # add NAME, VALUE...: appends a group (a name with no values is a group with none). A repeated name is a second group, as the
+  # driver's state_put calls write it.
+  def add(name, *values)
+    @groups << [name, values]
     self
   end
 
+  def names = @groups.map(&:first)
+
+  # the first group of NAME's values (the driver reads its state by name)
   def get(name)
-    @values.fetch(name, [])
+    group = @groups.find { |n, _| n == name }
+    group ? group[1] : []
   end
 
-  def names = @names
-
-  # the records: "k NAME" then "v VALUE" for each value, each NUL-terminated
+  # the records: "k NAME" then "v VALUE" for each value, each NUL-terminated, in the order the groups were added
   def records
-    @names.map do |n|
-      out = "k#{n}\0"
-      @values[n].each { |v| out << "v#{v}\0" }
+    @groups.map do |name, values|
+      out = "k#{name}\0"
+      values.each { |v| out << "v#{v}\0" }
       out
     end.join
   end

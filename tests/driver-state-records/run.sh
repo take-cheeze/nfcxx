@@ -20,6 +20,9 @@ run_case() {   # run_case LABEL: the groups as the bash writes them, and as the 
   if cmp -s "$t/bash.bin" "$t/ruby.bin"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL $label"; od -c "$t/bash.bin" | head -4; od -c "$t/ruby.bin" | head -4; fi
 }
 run_case mixed
+# a repeated group name is written twice, as state_put writes it
+{ state_put tmp a; state_put tmp; } > "$t/b4"; ruby "$repo/scripts/nfcxx-state-records.rb" tmp a $'\x1e' tmp $'\x1e' > "$t/r4"
+if cmp -s "$t/b4" "$t/r4"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL repeated name"; fi
 # a group with no values, and an empty group list
 { state_put only; } > "$t/b2"; ruby "$repo/scripts/nfcxx-state-records.rb" only $'\x1e' > "$t/r2"
 if cmp -s "$t/b2" "$t/r2"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL name-only"; fi
