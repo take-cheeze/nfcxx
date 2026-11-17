@@ -2901,9 +2901,15 @@ use_problem = lambda do |name, use|
               # `if (C) return E` with one return: the macro restores the state itself, before its return (the plan below)
               plan = nil
               mm = /(if[ \t]*\(.*\)[ \t]*)return([ \t]+[^;]*)\z/m.match(body)
-              if mm && body.scan(/(?<![#{WC}])return(?![#{WC}])/).size == 1 && !uses_out.empty? &&
+              # the final statement form: `... return E;` (the macro's last statement; its ';' ends the return)
+              mf = /(?<![#{WC}])return([ \t]+[^;]*);[ \t\\\n]*\z/m.match(body) unless mm
+              if (mm || mf) && body.scan(/(?<![#{WC}])return(?![#{WC}])/).size == 1 && !uses_out.empty? &&
                  uses_out.all? { |orel, os, _oe| wrapped_use.call(orel, os) }
-                plan = { ret: m.end(0) + mm.begin(0) + mm[1].length, end: e }
+                if mm
+                  plan = { ret: m.end(0) + mm.begin(0) + mm[1].length, end: e }
+                else
+                  plan = { ret: m.end(0) + mf.begin(0), end: m.end(0) + mf.begin(0) + mf[0].rindex(';') }
+                end
               end
               next unless plan
               (@macro_return_plan ||= {})[[rel, s]] = plan if record

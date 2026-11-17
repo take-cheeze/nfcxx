@@ -1396,6 +1396,11 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_amp tools/cext2mrbgem/f
 check test "$rc" -eq 0
 check test ! -e "$work/api_hash_amp/NOT_BUILDABLE"
 check grep -qF 'mrb_hash_foreach(mrb, RHASH(h->hash), cb_count, (void *)&count);' "$work/api_hash_amp/src/api_hash_amp.c"
+# 2zzz116. a macro whose last statement is `return E;`, expanded by a registered method, converts and compiles in both legs.
+# (This fixture does not reach the global-state path, so the restore block is checked by the yajl corpus run, not here.)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_macro_final_return tools/cext2mrbgem/fixtures/api_macro_final_return/ext/api_macro_final_return "$work/api_macro_final_return" > "$work/api_macro_final_return.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_macro_final_return/NOT_BUILDABLE"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?
