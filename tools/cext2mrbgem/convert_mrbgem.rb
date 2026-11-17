@@ -3370,7 +3370,15 @@ use_problem = lambda do |name, use|
     return true if defs.any? && defs.all? { |x| x['ret'].to_s.strip == 'VALUE' }
     ent = @entries[name]
     return false unless ent.is_a?(Hash)
+    return true if ent['handler'] == 'const_get'
     ent['template'].to_s.match?(/\Amrb_(?:obj_value\(|const_get)/) || ent['mruby'].to_s.match?(/\Amrb_const_get|_value\z/)
+  end
+
+  # a call whose result is a class pointer (struct RClass *): the mruby definitions and lookups of a class or module
+  def class_result_call?(name)
+    ent = @entries[name]
+    return false unless ent.is_a?(Hash)
+    ent['mruby'].to_s.match?(/\Amrb_(?:define_(?:class|module)(?:_under)?|class_get|module_get|exc_get)\z/)
   end
 
   # An owned class variable (struct RClass *) assigned the result of a VALUE-returning call: the class pointer of that result
@@ -3382,8 +3390,34 @@ use_problem = lambda do |name, use|
         m = Regexp.last_match
         name = m[1]
         next unless @class_vars.include?(name)
-        next unless owns_class_var?(rel, m.begin(1), name)
         rs = m.end(0)
+        unless owns_class_var?(rel, m.begin(1), name)
+          # an unowned class variable (a VALUE) assigned a class pointer result: the VALUE is the class's object. A local VALUE
+          # is wrapped where it is converted, so this is for a file-scope variable
+          fl = enclosing_func(rel, m.begin(1))
+          next if fl && value_names_of(fl).include?(name)
+          cm = masked[rs..].to_s.match(/\A([A-Za-z_]\w*)[ \t\n]*\(/)
+          next unless cm && class_result_call?(cm[1])
+          open = rs + cm[0].length - 1
+          close = match_close(masked, open)
+          next if close < 0
+          after = next_nonspace(masked, close + 1)
+          next unless after >= 0 && masked[after] == ';'
+          # a class expression in a value position is already wrapped where it is converted
+          next if @edits[rel].overlapping(rs, close + 1).any? { |_, _, t| t.to_s.include?('mrb_obj_value(') }
+          next if @edits[rel].touches_strictly?(rs) || @edits[rel].touches_strictly?(close + 1)
+          @edits[rel].add(rs, rs, 'mrb_obj_value(')
+          @edits[rel].add(close + 1, close + 1, ')')
+          next
+        end
+        # an owned class variable assigned a nil, undef or false constant is the null class pointer (as its declaration's Q
+        # initializer is): the constant becomes 0
+        qm = masked[rs..].to_s.match(/\A(Qnil|Qundef|Qfalse)[ \t\n]*;/)
+        if qm
+          next if @edits[rel].overlaps(rs, rs + qm[1].length)
+          @edits[rel].add(rs, rs + qm[1].length, '0')
+          next
+        end
         cm = masked[rs..].to_s.match(/\A([A-Za-z_]\w*)[ \t\n]*\(/)
         next unless cm && value_call_name?(cm[1])
         open = rs + cm[0].length - 1
@@ -3427,12 +3461,63 @@ use_problem = lambda do |name, use|
     out
   end
 
+  # CRuby stores an ID in a VALUE (the cast (VALUE)rb_intern(...)) and reads it back with (ID)v. The fork's symbol is an
+  # mrb_sym, carried in a value by mrb_symbol_value and read back by mrb_symbol: the two casts become those calls.
+  def id_value_casts(text)
+    out = text.dup
+    loop do
+      m = /\(mrb_value\)\s*mrb_intern\(/.match(out)
+      break unless m
+      start = m.begin(0)
+      name_at = start + m[0].index('mrb_intern')
+      close = match_close(out, m.end(0) - 1)
+      break if close < 0
+      out = out[0...start] + 'mrb_symbol_value(' + out[name_at..close] + ')' + out[(close + 1)..]
+    end
+    loop do
+      m = /\(mrb_sym\)\s*([A-Za-z_]\w*)\(/.match(out)
+      break unless m && value_call_name?(m[1])
+      start = m.begin(0)
+      name_at = start + m[0].index(m[1])
+      close = match_close(out, m.end(0) - 1)
+      break if close < 0
+      out = out[0...start] + 'mrb_symbol(' + out[name_at..close] + ')' + out[(close + 1)..]
+    end
+    out
+  end
+
   # a #define that generates a static function without the state parameter (DEFINE_DELEGATED_FUNCTION) names the global in
   # its expansion: the generated function is a stored callback, run inside a method call
   def global_macro_arrows(text, gname)
     text.gsub(/^#define(?:[^\n]*\\\n)*[^\n]*/) do |blk|
       next blk if blk.include?('mrb_state') || !blk.match?(/\bstatic\s+\w+\s+[\w#]+\s*\(/) || !blk.include?('{')
       blk.gsub(/(?<![\w$.>])mrb->/, "#{gname}->").gsub(/(?<=[(,\s])mrb(?=\s*[,)])/, gname)
+    end
+  end
+
+  # A VALUE cast to a struct pointer (CRuby carries a struct pointer in a VALUE: (OO)ov, (ParseInfo)pip): the fork's VALUE is a
+  # struct, so the cast does not compile. The target is a struct pointer, or a typedef of one.
+  def value_struct_pointer_cast_pass
+    ptr_typedefs = Set.new
+    @files.each_value do |f|
+      # typedef struct X *T;  and  typedef struct { ... } *T;
+      f['masked'].to_enum(:scan, /typedef\s+[^;{}]*\*\s*([A-Za-z_]\w*)\s*;|\}\s*\*\s*([A-Za-z_]\w*)\s*;/).each do
+        ptr_typedefs << (Regexp.last_match(1) || Regexp.last_match(2))
+      end
+    end
+    @files.each_key do |rel|
+      mv = @files[rel]['masked']
+      fs_values = file_scope_value_names(rel)
+      mv.to_enum(:scan, /\(\s*(?:struct\s+[A-Za-z_]\w*\s*\*+|([A-Za-z_]\w*))\s*\)\s*([A-Za-z_]\w*)(?=\s*(?:[;,)\-.\[]|\z))/).each do
+        m = Regexp.last_match
+        target = m[1]
+        next if target && !ptr_typedefs.include?(target)
+        nm = m[2]
+        next unless (local_value_at?(rel, m.begin(2), nm) || fs_values.include?(nm)) && !@class_vars.include?(nm)
+        next if in_dead_init(rel, m.begin(2))
+        next if @edits[rel].overlaps(m.begin(2), m.begin(2) + 1)
+        refuse(rel, m.begin(2), nm, "stuck point (VALUE as pointer): #{nm} is a VALUE, a struct in the fork (include/mruby/boxing_no.h), and a cast of it to a struct pointer has no mruby form")
+      end
     end
   end
 
@@ -3522,6 +3607,15 @@ use_problem = lambda do |name, use|
     tmpl.to_s.include?("mrb_class_ptr($#{k})")
   end
 
+  # the parameters of a function declared with a type other than VALUE or mrb_value (char *json, int n)
+  def non_value_param_names(fn)
+    (fn['params'] || '').to_s.split(',').each_with_object(Set.new) do |p, acc|
+      q = py_strip(p)
+      next if q.empty? || q.match?(/\b(?:VALUE|mrb_value)\b/) || q == 'void'
+      acc << $1 if q =~ /([A-Za-z_]\w*)\s*\z/
+    end
+  end
+
   def value_compare_wrap_pass
     cmp_re = /(?<![=!<>])(==|!=)(?!=)/
     @files.each_key do |rel|
@@ -3541,6 +3635,8 @@ use_problem = lambda do |name, use|
         l_start, l_text = left_operand(masked, op_s)
         r_end, r_text = right_operand(masked, op_e)
         next if l_text.nil? || r_text.nil? || l_text.empty? || r_text.empty?
+        # a parameter of this function that is not a VALUE (char *json) shadows a file-scope VALUE of the same name
+        value_names -= non_value_param_names(fn)
         # a comparison with a definite VALUE (a Q constant or an mrb_*_value call) compares VALUEs: the other operand is one too
         # (CRuby compares VALUEs with ==; a member whose name is declared differently in other structs is not judged by name)
         strong = ->(t) { t.strip.match?(/\AQ(?:nil|true|false|undef)\z/) || t.strip.match?(/\Amrb_\w*_value\s*\(/) ||
@@ -3554,6 +3650,7 @@ use_problem = lambda do |name, use|
         zero_r = r_text.strip == '0'
         if zero_l || zero_r
           other = zero_l ? r_text : l_text
+          next if non_value_param_names(fn).include?(other.strip)
           next unless value_operand?(other, value_names, vfields, rel, op_s) || strong.call(other)
           zero_s, zero_e = zero_l ? [l_start, l_start + 1] : [r_end - 1, r_end]
           @edits[rel].add(zero_s, zero_e, 'mrb_false_value()') unless @edits[rel].touches_strictly?(zero_s)
@@ -3698,8 +3795,11 @@ use_problem = lambda do |name, use|
           next unless mac && ((@global_macro_spans || {})[rel] || []).any? { |x, _z| x == mac[1] }
         end
         value_names = fn ? value_names_of(fn) : macro_value_names(rel, mac)
+        # a parameter of this function declared as a non-VALUE (char *json) is not a VALUE, whatever a class variable has the name
+        nvp = fn ? non_value_param_names(fn) : Set.new
         is_value = lambda do |x|
           next true if qconst.match?(x) || x == '0'
+          next false if x.match?(/\A[A-Za-z_]\w*\z/) && nvp.include?(x)
           # a tracked class variable is a VALUE (its mrb_obj_value wrap, made by the identifier pass)
           next true if x.match?(/\A[A-Za-z_]\w*\z/) && @class_vars.include?(x) && !value_names.include?(x)
           next value_names.include?(x) if x.match?(/\A[A-Za-z_]\w*\z/)
@@ -5266,7 +5366,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       # fork's value (nil: value 0; true and false: value 1, the tag tells them apart): mrb_nil_value() is not a constant
       if %w[Qnil Qtrue Qfalse Qundef].include?(name) && !fs_init && enclosing_func(rel, s).nil? && define_at(rel, s).nil? &&
          (masked[[s - 60, 0].max...s].to_s.match?(/struct\s+RClass\s*\*\s*([A-Za-z_]\w*)\s*=\s*\z/) ||
-          (masked[[s - 60, 0].max...s].to_s.match?(/\bVALUE\s+([A-Za-z_]\w*)\s*=\s*\z/) && @class_vars.include?($1) && owns_class_var?(rel, s, $1)))
+          (decl_v = masked[[s - 60, 0].max...s].to_s.match(/\bVALUE\s+([A-Za-z_]\w*)\s*=\s*\z/)) && @class_vars.include?(decl_v[1]) && owns_class_var?(rel, s, decl_v[1]))
         # an owned class variable (struct RClass *) starts as a null class pointer (the Q value is not a class)
         ed.add(s, e, '0')
         rewrite(rel, s, name, '0', 'an owned class variable (struct RClass *) initialized with a Q value: the null class pointer')
@@ -5284,8 +5384,10 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       if fs_init
         eq, var_name, init_d = fs_init
         ed.add(eq, e, '')
-        ed.add(init_d['brace'] + 1, init_d['brace'] + 1, "\n  #{var_name} = #{entry['mruby']};")
-        rewrite(rel, s, name, "#{var_name} = #{entry['mruby']} (in Init)", 'a file-scope initializer is set at the start of Init (not a constant in C)')
+        # an owned class variable (struct RClass *) is set to the null class pointer, as its declaration's Q value is
+        rhs_fs = @class_vars.include?(var_name) && owns_class_var?(rel, s, var_name) ? '0' : entry['mruby']
+        ed.add(init_d['brace'] + 1, init_d['brace'] + 1, "\n  #{var_name} = #{rhs_fs};")
+        rewrite(rel, s, name, "#{var_name} = #{rhs_fs} (in Init)", 'a file-scope initializer is set at the start of Init (not a constant in C)')
         return
       end
       # nil, true and false compare by identity in CRuby (x == Qnil); mruby values are structs, so the comparison is a test
@@ -6248,6 +6350,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     FileUtils.mkdir_p(inc_dir)
     outputs = {}
     @files.each { |rel, f| outputs[rel] = @edits[rel].apply(f['text']) }
+    @files.each { |rel, f| outputs[rel] = id_value_casts(outputs[rel]) if f['kind'] == 'src' }
     # a function without the state parameter reads the gem's state global: a literal mrb-> (from a template's class argument)
     # in its body names that global (the global-state functions are the ones that have no mrb parameter)
     if @global_wrap
@@ -6380,6 +6483,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     value_truth_call_pass
     value_order_stuck_pass
     value_as_integer_arg_pass
+    value_struct_pointer_cast_pass
     header_prototype_types_pass
     value_zero_assign_pass
     integer_return_pass

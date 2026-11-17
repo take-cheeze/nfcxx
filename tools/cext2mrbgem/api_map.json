@@ -2671,6 +2671,12 @@
       "template": "memcpy($0, $1, sizeof($2)*($3))",
       "caveat": "CRuby's MEMCPY(p, src, type, n) is memcpy(p, src, sizeof(type)*n) (the type is a plain name here)"
     },
+    "ALLOCA_N": {
+      "kind": "template",
+      "arity": 2,
+      "template": "(($0 *)alloca(sizeof($0) * ($1)))",
+      "caveat": "CRuby's ALLOCA_N(type, n) is the C alloca of n elements of type; the fork's build uses the C library's alloca, so the call is the same"
+    },
     "PRIdSIZE": {"kind": "expr", "mruby": "\"zd\"", "caveat": "C99 printf length modifier for size_t (CRuby's PRIdSIZE is this string literal)"},
     "PUREFUNC": {"kind": "template", "arity": 1, "template": "$0", "caveat": "PUREFUNC (CRuby's pure-function attribute) is a compiler hint: the declaration it wraps is kept, without the attribute"},
     "RARRAY_PTR": {"kind": "macro", "mruby": "RARRAY_PTR", "caveat": "mruby's RARRAY_PTR (include/mruby/array.h) is the array's element pointer, as CRuby's; the use reads elements. A write through it would need mruby's array modify step (not done here)"},
