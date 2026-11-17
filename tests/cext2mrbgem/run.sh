@@ -1502,6 +1502,13 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_field_named_fn tools/cext2mr
 check test "$rc" -eq 0
 check test ! -e "$work/api_field_named_fn/NOT_BUILDABLE"
 check grep -qF 'char to_json;' "$work/api_field_named_fn/src/api_field_named_fn.c"
+# 2zzz132. RB_TYPE_P(x, T_STRUCT) is the Struct class test (mrb_obj_is_kind_of, which covers the Struct subclasses CRuby's T_STRUCT
+# includes), and the generated mrbgem depends on mruby-struct (only because the test is emitted).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_struct_type tools/cext2mrbgem/fixtures/api_struct_type/ext/api_struct_type "$work/api_struct_type" > "$work/api_struct_type.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_struct_type/NOT_BUILDABLE"
+check grep -qF 'mrb_obj_is_kind_of(mrb, obj, mrb_class_get(mrb, "Struct"))' "$work/api_struct_type/src/api_struct_type.c"
+check grep -qF "spec.add_dependency 'mruby-struct'" "$work/api_struct_type/mrbgem.rake"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?

@@ -5345,7 +5345,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     # subclasses, so the class test is the match. It needs the mruby state, which only a function that has it can pass.
     # T_RATIONAL and T_COMPLEX: the classes of the mruby-rational and mruby-complex gems (data objects, no subclasses in CRuby),
     # so the test is the class test; the gem is a dependency of the generated mrbgem (only when such a test is emitted)
-    class_gem = { 'T_RATIONAL' => ['Rational', 'mruby-rational'], 'T_COMPLEX' => ['Complex', 'mruby-complex'] }[tname.sub(/\ARUBY_/, '')]
+    class_gem = { 'T_RATIONAL' => ['Rational', 'mruby-rational'], 'T_COMPLEX' => ['Complex', 'mruby-complex'], 'T_STRUCT' => ['Struct', 'mruby-struct'] }[tname.sub(/\ARUBY_/, '')]
     if class_gem
       cls_name, gem_name = class_gem
       fnr = enclosing_func(rel, s)
@@ -5420,7 +5420,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       return
     end
     # Check_Type(x, T_RATIONAL / T_COMPLEX): the class test of the gem's class, raising TypeError as CRuby does (the gem is a dependency)
-    class_gem_c = { 'T_RATIONAL' => ['Rational', 'mruby-rational'], 'T_COMPLEX' => ['Complex', 'mruby-complex'] }[tname.sub(/\ARUBY_/, '')]
+    class_gem_c = { 'T_RATIONAL' => ['Rational', 'mruby-rational'], 'T_COMPLEX' => ['Complex', 'mruby-complex'], 'T_STRUCT' => ['Struct', 'mruby-struct'] }[tname.sub(/\ARUBY_/, '')]
     if class_gem_c
       cls_name, gem_name = class_gem_c
       fnc = enclosing_func(rel, s)
