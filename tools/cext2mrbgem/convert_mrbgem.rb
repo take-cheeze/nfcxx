@@ -4834,7 +4834,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       vnames_t = (f_t = enclosing_func(rel, s)) ? value_names_of(f_t) : Set.new
       vfields_t = value_field_names
       value_class = lambda do |t|
-        ((vnames_t.include?(t) || @files.keys.any? { |fr| file_scope_value_names(fr).include?(t) }) && !@class_vars.include?(t)) ||
+        ((vnames_t.include?(t) || @files.keys.any? { |fr| file_scope_value_names(fr).include?(t) }) &&
+         (!@class_vars.include?(t) || shadowed_local?(rel, t, s))) ||
           (t.match?(/(?:->|\.)[A-Za-z_]\w*\z/) && vfields_t.include?(t[/([A-Za-z_]\w*)\z/]))
       end
       out = (cond ? entry['template_cond'] : entry['template']).gsub(/\$(\d+)|\$m/) do
