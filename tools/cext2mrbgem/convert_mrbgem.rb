@@ -3571,7 +3571,11 @@ use_problem = lambda do |name, use|
         elsif inc == 'ruby/version.h'
           refuse(rel, m.begin(0), "#include <#{inc}>", 'stuck point (CRuby version): ruby/version.h gives the CRuby version (RUBY_API_VERSION_CODE, RUBY_VERSION), which the code uses to choose its paths; mruby has no such number, so the version to emulate is a decision (accepted stuck point)')
         else
-          refuse(rel, m.begin(0), "#include <#{inc}>", 'CRuby header not in the supported subset')
+          if inc.start_with?('ruby/internal/') || inc == 'ruby/atomic.h'
+            refuse(rel, m.begin(0), "#include <#{inc}>", "stuck point (CRuby internal header): #{inc} is CRuby's internal API (its feature tests, static assertions and atomics), which has no form in the converted subset")
+          else
+            refuse(rel, m.begin(0), "#include <#{inc}>", 'CRuby header not in the supported subset')
+          end
         end
       end
     end
@@ -3831,7 +3835,9 @@ end
         map_entry(rel, s, e, name, entry)
       elsif @types.key?(name)
         # an ID declaration: `ID x` or `ID *x` (the spaces around the * are optional; the match is on the text after the type)
-        next if name == 'ID' && !(psl(masked, e, e + 40) =~ /\A[#{WSP}]*(?:[A-Za-z_]|\*[#{WSP}]*[A-Za-z_])/)
+        # a cast to ID, (ID)x, is an mrb_sym cast as well
+        id_cast = name == 'ID' && (pc = prev_nonspace(masked, s - 1)) >= 0 && masked[pc] == '(' && psl(masked, e, e + 40) =~ /\A[#{WSP}]*\)/
+        next if name == 'ID' && !id_cast && !(psl(masked, e, e + 40) =~ /\A[#{WSP}]*(?:[A-Za-z_]|\*[#{WSP}]*[A-Za-z_])/)
         # a declaration of ID variables that are all assigned ID2SYM(...) holds a symbol VALUE (CRuby keeps it in an ID-typed
         # variable): it is an mrb_value, as ID2SYM is mrb_symbol_value
         if name == 'ID' && symbol_value_decl?(rel, e)
@@ -5337,7 +5343,11 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     end
     ent = @entries[tname]
     if ent.nil? || ent.empty? || ent['kind'] != 'expr' || !(ent['mruby'] || '').start_with?('MRB_TT_') || ent.key?('caveat')
-      refuse(rel, s, 'RB_TYPE_P', "#{tname} has no exact mruby type to compare with")
+      if tname == 'T_BIGNUM'
+        refuse(rel, s, 'RB_TYPE_P', 'stuck point (Bignum): the fork has no Bignum. No MRB_TT_BIGINT tag exists (include/mruby/value.h:106-131) and no mrbgem defines a big-integer class, so no tag or class test can select CRuby\'s T_BIGNUM values')
+      else
+        refuse(rel, s, 'RB_TYPE_P', "#{tname} has no exact mruby type to compare with")
+      end
       return
     end
     new = "(mrb_type(#{obj}) == #{ent['mruby']})"

@@ -1139,7 +1139,7 @@
                 0
           ],
           "needs_mrb": true,
-          "template": "mrb_data_object_alloc($m, $0, mrb_calloc($m, 1, $1), $2)",
+          "template": "mrb_obj_value(mrb_data_object_alloc($m, $0, mrb_calloc($m, 1, $1), $2))",
           "caveat": "a zeroed struct of the given size with the data type, as the Data_Make_Struct path builds it"
     },
     "ruby_xrealloc2": {

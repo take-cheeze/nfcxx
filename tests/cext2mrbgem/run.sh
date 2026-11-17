@@ -616,7 +616,7 @@ check test -e "$work/api_type_refused/NOT_BUILDABLE"
 check grep -q '  RB_TYPE_P  T_DATA has no exact mruby type' "$work/api_type_refused/REFUSALS.txt"
 check grep -q "  RB_TYPE_P  object 'rb_ary_entry(a, 0)' is not a plain local variable" "$work/api_type_refused/REFUSALS.txt"
 check grep -q '  RB_TYPE_P  T_FIXNUM has no exact mruby type' "$work/api_type_refused/REFUSALS.txt"
-check grep -q '  RB_TYPE_P  T_BIGNUM has no exact mruby type' "$work/api_type_refused/REFUSALS.txt"
+check grep -q '  RB_TYPE_P  stuck point (Bignum): the fork has no Bignum' "$work/api_type_refused/REFUSALS.txt"
 
 # 2m. class-name and method-undef calls (api_map.json batch C1): the class variable is passed as a struct RClass * (not
 # wrapped in mrb_obj_value, which the mruby functions do not take)
@@ -1465,6 +1465,13 @@ check grep -qF 'stuck point (VALUE as pointer): obj is a VALUE' "$work/api_value
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_value_assert tools/cext2mrbgem/fixtures/api_value_assert/ext/api_value_assert "$work/api_value_assert" > "$work/api_value_assert.log" 2>&1 || rc=$?
 check test -e "$work/api_value_assert/NOT_BUILDABLE"
 check grep -qF 'stuck point (VALUE truth test): assert(obj)' "$work/api_value_assert/REFUSALS.txt"
+# 2zzz126. rb_data_typed_object_zalloc is a VALUE (the data object is wrapped with mrb_obj_value), and a cast to ID, (ID)x, is an
+# mrb_sym cast.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_zalloc_idcast tools/cext2mrbgem/fixtures/api_zalloc_idcast/ext/api_zalloc_idcast "$work/api_zalloc_idcast" > "$work/api_zalloc_idcast.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_zalloc_idcast/NOT_BUILDABLE"
+check grep -qF 'mrb_value obj = mrb_obj_value(mrb_data_object_alloc(mrb, mrb->object_class, mrb_calloc(mrb, 1, sz), &zb_type));' "$work/api_zalloc_idcast/src/api_zalloc_idcast.c"
+check grep -qF 'f = (mrb_sym)mrb_intern_cstr(mrb, "a");' "$work/api_zalloc_idcast/src/api_zalloc_idcast.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?
