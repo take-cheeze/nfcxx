@@ -1329,6 +1329,21 @@ texts = static_rename(texts)
     end
   end
 
+  # for a Q constant at s followed by == or != and a call NAME(...): [operator position, call end, negated?]; nil otherwise
+  def q_left_call(masked, e)
+    op_p = next_nonspace(masked, e)
+    return nil if op_p < 0
+    op = masked[op_p..op_p + 1]
+    return nil unless op == '==' || op == '!='
+    rs = next_nonspace(masked, op_p + 2)
+    m = masked[rs..].match(/\A[A-Za-z_]\w*[ \t\n]*\(/)
+    return nil unless m
+    open_p = rs + m[0].length - 1
+    cl = match_close(masked, open_p)
+    return nil if cl < 0
+    [op_p, cl + 1, op == '!=']
+  end
+
   def local_shadows_class_var?(name, fn)
     return true if param_names(fn).include?(name)
     masked = @files[fn['file']]['masked']
@@ -4175,7 +4190,7 @@ end
         fnc = enclosing_func(rel, at)
         vn = fnc ? value_names_of(fnc) : Set.new
         vf = value_field_names
-        (t.match?(/\A[A-Za-z_]\w*\z/) && vn.include?(t) && !@class_vars.include?(t)) ||
+        (t.match?(/\A[A-Za-z_]\w*\z/) && (vn.include?(t) || @files.keys.any? { |fr| file_scope_value_names(fr).include?(t) }) && !@class_vars.include?(t)) ||
           (t.match?(/(?:->|\.)[A-Za-z_]\w*\z/) && vf.include?(t[/([A-Za-z_]\w*)\z/]))
       end
       # rb_yield needs the block of the method, which only a registered method's wrapper fetches (registered_header)
@@ -4261,7 +4276,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       vnames_t = (f_t = enclosing_func(rel, s)) ? value_names_of(f_t) : Set.new
       vfields_t = value_field_names
       value_class = lambda do |t|
-        (vnames_t.include?(t) && !@class_vars.include?(t)) ||
+        ((vnames_t.include?(t) || @files.keys.any? { |fr| file_scope_value_names(fr).include?(t) }) && !@class_vars.include?(t)) ||
           (t.match?(/(?:->|\.)[A-Za-z_]\w*\z/) && vfields_t.include?(t[/([A-Za-z_]\w*)\z/]))
       end
       out = (cond ? entry['template_cond'] : entry['template']).gsub(/\$(\d+)|\$m/) do
@@ -4592,6 +4607,25 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       end
       # nil, true and false compare by identity in CRuby (x == Qnil); mruby values are structs, so the comparison is a test
       # through a one-argument helper (the value is evaluated once) defined before the enclosing function
+      # Q on the left of == or != with a call on the right (Qtrue == rb_obj_is_kind_of(...)): the helper test of the call
+      if %w[Qnil Qtrue Qfalse].include?(name) && (rhs = q_left_call(masked, e))
+        ops_l, call_end, neg_l = rhs
+        fnl = enclosing_func(rel, s)
+        if fnl && fnl['hstart']
+          hname_l = { 'Qnil' => 'nfcx_is_nil', 'Qtrue' => 'nfcx_is_true', 'Qfalse' => 'nfcx_is_false' }[name]
+          ptest_l = { 'Qnil' => 'mrb_nil_p', 'Qtrue' => 'mrb_true_p', 'Qfalse' => 'mrb_false_p' }[name]
+          @q_helpers[rel] ||= Set.new
+          unless @q_helpers[rel].include?(hname_l)
+            @q_helpers[rel] << hname_l
+            ed.add(fnl['hstart'], fnl['hstart'], "static mrb_bool #{hname_l}(mrb_value v) { return #{ptest_l}(v); }\n")
+          end
+          call_start = next_nonspace(masked, ops_l + 2)
+          ed.add(s, call_start, "#{neg_l ? '!' : ''}#{hname_l}(")
+          ed.add(call_end, call_end, ')')
+          rewrite(rel, s, name, "#{hname_l}(...)", 'a comparison of nil, true or false with a call: the helper test of the call result')
+          return
+        end
+      end
       if %w[Qnil Qtrue Qfalse].include?(name) && (cmp = q_comparison(rel, s, masked))
         ops, lhs_start, neg = cmp
         fnq = enclosing_func(rel, s)
