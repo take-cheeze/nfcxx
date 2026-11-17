@@ -71,6 +71,16 @@ m_kw(VALUE self, VALUE opts)
     return anchor == Qundef ? Qfalse : anchor;
 }
 
+/* a class variable whose name a local of a function shadows: the local is the argument (a class's members) */
+static VALUE shadow_cls;
+
+static VALUE
+m_shadow(VALUE self)
+{
+    VALUE shadow_cls = rb_cObject;
+    return rb_struct_s_members(shadow_cls);
+}
+
 void
 Init_api_q_call_cmp(void)
 {
@@ -78,9 +88,11 @@ Init_api_q_call_cmp(void)
     rb_define_method(c, "missing", m_missing, 2);
     sym_key = ID2SYM(rb_intern("key"));
     saved_nil = Qnil;
+    shadow_cls = rb_define_class("ShadowCls", rb_cObject);
     rb_define_method(c, "key", m_key, 1);
     rb_define_method(c, "call_id", m_call_id, 1);
     rb_define_method(c, "checked", m_checked, 1);
     rb_define_method(c, "switch_q", m_switch_q, 1);
     rb_define_method(c, "kw", m_kw, 1);
+    rb_define_method(c, "shadow", m_shadow, 0);
 }
