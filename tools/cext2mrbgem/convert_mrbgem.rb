@@ -3374,7 +3374,8 @@ use_problem = lambda do |name, use|
     other = Set.new
     @files.each_value do |f|
       masked = f['masked']
-      masked.to_enum(:scan, /struct[ \t\n]*[A-Za-z_]?\w*[ \t\n]*\{([^{}]*)\}/).each do
+      # struct and union bodies: a union member is a field too (a name declared as a non-VALUE member anywhere is not a VALUE field)
+      masked.to_enum(:scan, /(?:struct|union)[ \t\n]*[A-Za-z_]?\w*[ \t\n]*\{([^{}]*)\}/).each do
         body = Regexp.last_match[1]
         body.split(';').each do |decl|
           m = /\A\s*((?:(?:const|volatile|unsigned|signed|static)\s+)*[A-Za-z_]\w*(?:\s*\*)?)\s*\*?\s*([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*\z/.match(decl)

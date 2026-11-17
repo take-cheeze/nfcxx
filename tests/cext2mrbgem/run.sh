@@ -1568,6 +1568,13 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_st_include tools/cext2mrbgem
 check test "$rc" -eq 0
 check test ! -e "$work/api_st_include/NOT_BUILDABLE"
 check grep -qF 'return 0;' "$work/api_st_include/src/api_st_include.c"
+# 2zzz142. a union member is a field when deciding whether a name is a VALUE field: a name that is a VALUE member of one struct and an integer
+# member of a union is not a VALUE field, so the integer assignment (c.value = 0) keeps its integer 0.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_union_field tools/cext2mrbgem/fixtures/api_union_field/ext/api_union_field "$work/api_union_field" > "$work/api_union_field.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_union_field/NOT_BUILDABLE"
+check grep -qF 'c.value = 0;' "$work/api_union_field/src/api_union_field.c"
+check grep -qF 'h.value = mrb_nil_value();' "$work/api_union_field/src/api_union_field.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?
