@@ -1554,6 +1554,14 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_class_new_expr tools/cext2mr
 check test "$rc" -eq 0
 check test ! -e "$work/api_class_new_expr/NOT_BUILDABLE"
 check grep -qF 'nfcx_class_new_instance(mrb, (int)(RARRAY_LEN(arr) - 1), RARRAY_PTR(arr) + 1, mrb->range_class)' "$work/api_class_new_expr/src/api_class_new_expr.c"
+# 2zzz140. T_STRUCT compared with rb_type of an object (!= and ==) is the Struct class test, as one rewrite: the != is the negation, and
+# the mruby-struct gem is a dependency.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_struct_cmp tools/cext2mrbgem/fixtures/api_struct_cmp/ext/api_struct_cmp "$work/api_struct_cmp" > "$work/api_struct_cmp.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_struct_cmp/NOT_BUILDABLE"
+check grep -qF 'if (!mrb_obj_is_kind_of(mrb, obj, mrb_class_get(mrb, "Struct"))) {' "$work/api_struct_cmp/src/api_struct_cmp.c"
+check grep -qF 'if (mrb_obj_is_kind_of(mrb, obj, mrb_class_get(mrb, "Struct"))) {' "$work/api_struct_cmp/src/api_struct_cmp.c"
+check grep -qF "spec.add_dependency 'mruby-struct'" "$work/api_struct_cmp/mrbgem.rake"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?

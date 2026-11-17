@@ -3880,6 +3880,8 @@ end
           end
           next
         end
+        # a name inside a comparison this pass has already rewritten as a whole (T_STRUCT != rb_type(x)) is not converted again
+        next if ((@claimed_spans || {})[rel] || []).any? { |a, z| a <= s && s < z }
         map_entry(rel, s, e, name, entry)
       elsif @types.key?(name)
         # an ID declaration: `ID x` or `ID *x` (the spaces around the * are optional; the match is on the text after the type)
@@ -3901,6 +3903,22 @@ end
       elsif UNKNOWN_RE.match?(name) && !local_syms.include?(name) && !local_value_at?(rel, s, name) &&
             !(@local_tags.include?(name) && psl(masked, [s - 40, 0].max, s).match?(/\b(?:struct|union|enum)[ \t\n]+\z/))
         # a CRuby type tag the fork cannot test has its recorded reason (type_check_refused), not a generic one
+        if name == 'T_STRUCT' && (cmp = psl(masked, e, [e + 200, masked.length].min).match(/\A[ \t\n]*(!=|==)[ \t\n]*rb_type\(([^()]+)\)/))
+          # T_STRUCT compared with the type of an object: the Struct class test (the mruby-struct gem; CRuby's T_STRUCT is Struct
+          # and its subclasses, which kind_of covers). The whole comparison is one rewrite, so rb_type's own name is not converted.
+          st_end = e + cmp[0].length
+          obj_expr = cmp[2].strip
+          if obj_expr.match?(/\A[A-Za-z_][#{WC}]*(?:\s*(?:->|\.)\s*[A-Za-z_][#{WC}]*)*\z/)
+            neg = cmp[1] == '!=' ? '!' : ''
+            new = "#{neg}mrb_obj_is_kind_of(#{mrb_tok(rel, s)}, #{obj_expr}, mrb_class_get(#{mrb_tok(rel, s)}, \"Struct\"))"
+            (@gem_deps ||= Set.new) << 'mruby-struct'
+            ed.add(s, st_end, new)
+            (@claimed_spans ||= {})[rel] ||= []
+            (@claimed_spans[rel]) << [s, st_end]
+            rewrite(rel, s, name, new, 'a Struct test by class (the mruby-struct gem): T_STRUCT compared with rb_type of an object')
+            next
+          end
+        end
         stored_key = name.sub(/\ARUBY_/, '')
         if ($stored_tags || {}).key?(stored_key) && !psl(masked, [s - 40, 0].max, s).match?(/\b(?:struct|union|enum)[ \t\n]+\z/)
           # a tag the build configuration names as stored (--stored-tag NAME=VALUE; CRuby's RUBY_ alias too): the file keeps it
@@ -4465,6 +4483,11 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     when 'ensure_call'
       c = (@ensure_calls || []).find { |x| x[:rel] == rel && x[:s] == s }
       unless c
+        # a data argument that is a pointer cast to VALUE (the callbacks cast it back): a VALUE holds no address in the fork
+        if psl(@files[rel]['masked'], s, [s + 300, @files[rel]['masked'].length].min).match?(/\A[^;]*?,[^;]*?,[^;]*?,\s*\(\s*VALUE\s*\)\s*&?[A-Za-z_]/)
+          refuse(rel, s, name, 'stuck point (VALUE as pointer): rb_ensure gets a pointer cast to VALUE as its data, and the fork\'s VALUE is a struct (include/mruby/boxing_no.h), so the pointer cannot pass through it')
+          return
+        end
         refuse(rel, s, name, 'rb_ensure needs static VALUE callbacks defined here and used only here, and data arguments that are VALUE names or Q constants (a pointer cast such as (VALUE)&x is not mapped)')
         return
       end
