@@ -1094,7 +1094,7 @@ if [ -n "${NFCX_MRUBY_INCLUDE:-}" ]; then
 # while ow-crypt.h declares it with void * (a C error in the gem, not in the conversion); the refusal says so
 check test "$rc" -eq 2
 check test -e "$work/bcrypt/NOT_BUILDABLE"
-check grep -q 'conflicting types for .crypt_r' "$work/bcrypt/REFUSALS.txt"
+check grep -q 'stuck point (target): the gem defines crypt_r' "$work/bcrypt/REFUSALS.txt"
 else
 check test "$rc" -eq 0
 check test ! -e "$work/bcrypt/NOT_BUILDABLE"
