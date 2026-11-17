@@ -13,8 +13,8 @@ bash -n "$oracle"; check "the frozen driver parses" $?
 # the driver differs from the frozen copy only where the ports moved code out: the Ruby flag (B2) and the default backend block (B3,
 # scripts/nfcxx-backend.rb default). Both are removed from both sides; the rest must be the same.
 check "the frozen driver matches the driver apart from the ports (B2, B3)" "$(
-  diff -q <(sed -e '/^default_backend=0$/,/^fi$/d' -e '/^if \[ -n "\$sanitize" \]; then$/,/^fi$/d' "$oracle") \
-          <(sed -e '/^# NFCXX_RUBY_DRIVER=1/,/NFCXX_RUBY_DRIVER:-0/d' -e '/^if \[ -n "\$sanitize" \]; then$/,/^fi$/d' "$repo/nfcxx" \
+  diff -q <(sed -e '/^default_backend=0$/,/^fi$/d' -e '/^if \[ -n "\$sanitize" \]; then$/,/^fi$/d' -e '/^if \[ \$cosmo = 1 \]; then$/,/^fi$/d' "$oracle") \
+          <(sed -e '/^# NFCXX_RUBY_DRIVER=1/,/NFCXX_RUBY_DRIVER:-0/d' -e '/^if \[ -n "\$sanitize" \]; then$/,/^fi$/d' -e '/^if \[ \$cosmo = 1 \]; then$/,/^fi$/d' "$repo/nfcxx" \
             | awk '/^# The default backend \(docs\/notes\/pathb-default.md; the rule is/ { skip = 1 }
                    skip && /uname -m\)"\)"$/ { skip = 0; next }
                    !skip') >/dev/null && echo 0 || echo 1)"

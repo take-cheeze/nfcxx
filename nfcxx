@@ -582,24 +582,9 @@ esac
 # --cosmo (docs/notes/cosmo.md): cosmocc is the C compiler (NFCXX_GCC: gcc-cc runs it, pathb-cc assembles with it), and
 # its libc++ headers and predefined macros are the C++ target. The backend is gcc, or Path B with --backend=pathb (NFCXX_PATH=b).
 if [ $cosmo = 1 ]; then
-  [ $path_b = 0 ] || backend=pathb
-  if [ $backend != pathb ]; then
-    [ $backend_explicit = 0 ] || [ $backend = gcc ] || { echo "nfcxx: --cosmo needs --backend=gcc or --backend=pathb" >&2; exit 2; }
-    backend=gcc
-  fi
-  cosmo_bin=${NFCXX_COSMOCC:-$root/build/cosmocc/bin/cosmocc}
-  [ -x "$cosmo_bin" ] || { echo "nfcxx: $cosmo_bin is not installed; run scripts/setup-cosmo.sh (or set NFCXX_COSMOCC)" >&2; exit 2; }
-  cosmo_root=$(cd "$(dirname "$cosmo_bin")/.." && pwd)
-  export NFCXX_GCC=$cosmo_bin
-  # cosmoc++ is a wrapper that prints no include list, so the directories are named here: libc++ first, then the C library.
-  export NFCXX_SYS_INCLUDES=$cosmo_root/include/third_party/libcxx:$cosmo_root/include
-  gver=$cosmo_root/bin/x86_64-linux-cosmo-g++; [ -x "$gver" ] || gver=$cosmo_bin
-  [ -n "${gnu:-}" ] || gnu=$({ "$gver" -dumpfullversion 2>/dev/null || true; } | awk -F. '{ printf "%d%02d%02d\n", $1, $2, $3 }')
-  # cosmo's own build force-includes libc/integral/normalize.inc (libcesque, bool32, __static_yoink, the c.inc macros); the
-  # front end needs it too. __has_feature is clang's: libc++'s __config uses it, and cosmo's gcc does not define it.
-  cflags+=(-D__COSMOPOLITAN__ -D__COSMOCC__ -D__FATCOSMOCC__)
-  # Path B only: its front end reads libc++, whose __config uses __has_feature (clang's; cosmo's gcc does not define it)
-  [ $backend = pathb ] && cflags+=('-D__has_feature(x)=0' -include "$cosmo_root/include/libc/integral/normalize.inc" -include "$root/lib/cosmo/libcxx_traits.h")
+  # the setup is scripts/nfcxx-cosmo-setup.rb (stage B3): its refusals are the bash's messages, status 2
+  cosmo_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cosmo-setup.rb" setup root="$root" backend="$backend" backend_explicit="$backend_explicit" path_b="$path_b" gnu="${gnu:-}") || exit $?
+  eval "$cosmo_sh"
 fi
 if [ $freestanding = 1 ]; then
   extra=(--no_standard_includes "-I$root/lib")
