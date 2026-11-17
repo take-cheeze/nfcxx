@@ -47,6 +47,9 @@ check "the frozen driver matches the driver apart from the ports (B2, B3)" "$(
                    !skip') >/dev/null && echo 0 || echo 1)"
 # B2: the flag runs the Ruby skeleton, which runs the oracle: a compile gives the same stdout, stderr and status
 src=$(mktemp -d); printf 'int main() { return 0; }\n' > "$src/m.cpp"
+# the tool the driver builds on first use (cuda-rewrite) is built here, before the comparison: a first build prints ninja's output to
+# standard error, which only the first run would have, so the comparison would fail on a fresh tree
+ruby "$repo/scripts/nfcxx-ensure-tool.rb" "$repo/tools/cuda-rewrite" "$repo/build/cuda-rewrite" >/dev/null 2>&1 || true
 (cd "$src" && "$repo/nfcxx" -c m.cpp -o plain.o >p.out 2>p.err; echo $? > p.rc; NFCXX_RUBY_DRIVER=1 "$repo/nfcxx" -c m.cpp -o flag.o >f.out 2>f.err; echo $? > f.rc)
 check "the Ruby skeleton gives the bash driver's stdout, stderr and status" "$(cd "$src" && cmp -s p.out f.out && cmp -s p.err f.err && cmp -s p.rc f.rc && echo 0 || echo 1)"
 rm -rf "$src"
