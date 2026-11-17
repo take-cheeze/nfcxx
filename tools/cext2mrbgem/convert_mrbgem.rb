@@ -1058,7 +1058,7 @@ texts = static_rename(texts)
       next if C_STATEMENT_KEYWORDS.include?(name)
       ret = m[2].sub(/[#{WSP}]+\z/, '') # the pointer star of a return type (Real *) stays
       po = pyfind(masked, '(', m.begin(3))
-      pc = pyfind(masked, ')', po)
+      pc = match_close(masked, po)
       d = { 'file' => rel, 'name' => name, 'storage' => storage, 'ret' => ret,
             'hstart' => m.begin(0), 'po' => po, 'pc' => pc,
             'params' => psl(text, po + 1, pc), 'proto' => term == ';', 'hdr' => f['kind'] != 'src' }
