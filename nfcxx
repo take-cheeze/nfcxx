@@ -426,9 +426,8 @@ if [ $modules = 1 ]; then
   if [ $compile_only = 0 ]; then mod_build_program; fi
   [ ${#srcs[@]} = 1 ] || { echo "nfcxx: -c with C++ modules takes one source" >&2; exit 2; }
   mdir=${moddir:-$(dirname "$out")}; mkdir -p "$mdir"; mdir=$(cd "$mdir" && pwd -P)
-  modopts=(--modules --modules_directory "$mdir")
-  n=$("${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" decl-name "${srcs[0]}")
-  [ -z "$n" ] || modopts+=(--create_module_interface "$mdir/$n.eifc")
+  modopts_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-modopts.rb" plan mdir="$mdir" src="${srcs[0]}") || exit $?   # --modules, the interface directory (scripts/nfcxx-modopts.rb)
+  eval "$modopts_sh"
 fi
 
 # The default backend: Path B on x86-64 Linux (and on aarch64 Linux and arm64 macOS for freestanding programs), unless the request needs
