@@ -6014,7 +6014,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       # Declared as struct mrb_state so the prefix needs no include (the typedef is the same type).
       @files.each do |rel, _f|
         pre = "extern struct mrb_state *#{@global_name};\n"
-        pre += "struct mrb_state *#{@global_name} = NULL;\n" if rel == @init_rel
+        # 0, not NULL: the definition is placed before the file's includes (NULL may not be declared yet)
+        pre += "struct mrb_state *#{@global_name} = 0;\n" if rel == @init_rel
         outputs[rel] = pre + outputs[rel]
       end
     end
