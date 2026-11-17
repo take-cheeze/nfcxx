@@ -40,6 +40,15 @@ m_call_id(VALUE self, VALUE target)
     return rb_funcall(target, mid, 0);
 }
 
+/* checked long to int, and a symbol looked up without creating it */
+static VALUE
+m_checked(VALUE self, VALUE v)
+{
+    int n = rb_long2int(FIX2LONG(v));
+    VALUE sym = rb_check_symbol_cstr("abc", 3, NULL);
+    return Qnil == sym ? INT2FIX(n) : sym;
+}
+
 void
 Init_api_q_call_cmp(void)
 {
@@ -49,4 +58,5 @@ Init_api_q_call_cmp(void)
     saved_nil = Qnil;
     rb_define_method(c, "key", m_key, 1);
     rb_define_method(c, "call_id", m_call_id, 1);
+    rb_define_method(c, "checked", m_checked, 1);
 }

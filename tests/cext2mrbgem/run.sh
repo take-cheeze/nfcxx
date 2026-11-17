@@ -1375,6 +1375,8 @@ check grep -qF 'if (nfcx_is_nil(mrb_hash_get(mrb, h, k)' "$work/api_q_call_cmp/s
 check grep -qF 'if (!nfcx_is_false(mrb_hash_get(mrb, h, k)' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
 check grep -qF 'static mrb_value sym_key;' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
 check grep -qF 'mrb_funcall_argv(mrb, target, mid, 0, NULL)' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
+check grep -qF 'nfcx_long2int(mrb, ' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
+check grep -qF 'nfcx_check_symbol(mrb, "abc", 3)' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
 check grep -qF 'mrb_hash_get(mrb, h, sym_key)' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
 check grep -qF 'static mrb_value saved_nil ;' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
 check grep -qF 'saved_nil = mrb_nil_value();' "$work/api_q_call_cmp/src/api_q_call_cmp.c"

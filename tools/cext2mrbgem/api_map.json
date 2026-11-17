@@ -2638,6 +2638,27 @@
     "PRIdSIZE": {"kind": "expr", "mruby": "\"zd\"", "caveat": "C99 printf length modifier for size_t (CRuby's PRIdSIZE is this string literal)"},
     "PUREFUNC": {"kind": "template", "arity": 1, "template": "$0", "caveat": "PUREFUNC (CRuby's pure-function attribute) is a compiler hint: the declaration it wraps is kept, without the attribute"},
     "RARRAY_PTR": {"kind": "macro", "mruby": "RARRAY_PTR", "caveat": "mruby's RARRAY_PTR (include/mruby/array.h) is the array's element pointer, as CRuby's; the use reads elements. A write through it would need mruby's array modify step (not done here)"},
+    "rb_long2int": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "prelude": "#include <limits.h>\nstatic int nfcx_long2int(mrb_state *mrb, long v) {\n  if (v < (long)INT_MIN || v > (long)INT_MAX) mrb_raise(mrb, E_RANGE_ERROR, \"integer too big to convert to int\");\n  return (int)v;\n}",
+      "prelude_name": "nfcx_long2int",
+      "template": "nfcx_long2int($m, $0)",
+      "caveat": "CRuby's rb_long2int: the long as an int, raising RangeError when it does not fit (a checked conversion, as CRuby's)"
+    },
+    "rb_check_symbol_cstr": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "ignored_args": [
+        2
+      ],
+      "prelude": "static mrb_value nfcx_check_symbol(mrb_state *mrb, const char *p, long n) {\n  return mrb_check_intern(mrb, p, (size_t)n);\n}",
+      "prelude_name": "nfcx_check_symbol",
+      "template": "nfcx_check_symbol($m, $0, $1)",
+      "caveat": "CRuby's rb_check_symbol_cstr: the symbol of the name when one exists, nil otherwise (callers test for nil, as oj does); the encoding argument is dropped (mruby symbols carry no encoding)"
+    },
     "rb_cstr_to_dbl": {
       "kind": "template",
       "arity": 2,
