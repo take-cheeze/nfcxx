@@ -4922,7 +4922,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       if entry['append_args']
         # extra trailing arguments (a literal default): the call's own arguments are not moved, only the closing
         # parenthesis gets the text (rb_hash_lookup -> mrb_hash_fetch(mrb, hash, key, mrb_nil_value()))
-        cp = pyfind(masked, ')', nxt)
+        cp = match_close(masked, nxt)
         args = cp > 0 ? split_args(masked, nxt, cp) : []
         if args.size != entry['append_arity']
           refuse(rel, s, name, "expected #{entry['append_arity']} arguments, found #{args.size}")

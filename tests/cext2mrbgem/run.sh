@@ -1590,6 +1590,12 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_value_cmp/NOT_BUILDABLE"
 check grep -qF 'if (mrb_value_identical(mrb_obj_value(mrb_obj_class(mrb, a)) ,  mrb_obj_value(mrb_obj_class(mrb, b)))) {' "$work/api_value_cmp/src/api_value_cmp.c"
 check grep -qF 'c.json_cls = "x";' "$work/api_value_cmp/src/api_value_cmp.c"
+# 2zzz145. rb_hash_lookup(h, key) gets its default (mrb_nil_value()) after the call's own arguments: a key that is itself a call (its
+# closing parenthesis is not the call's) keeps its text, and the call compiles.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_lookup_arg tools/cext2mrbgem/fixtures/api_hash_lookup_arg/ext/api_hash_lookup_arg "$work/api_hash_lookup_arg" > "$work/api_hash_lookup_arg.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_hash_lookup_arg/NOT_BUILDABLE"
+check grep -qF 'mrb_hash_fetch(mrb, hash, mrb_symbol_value(mrb_intern_cstr(mrb, "lax")), mrb_nil_value())' "$work/api_hash_lookup_arg/src/api_hash_lookup_arg.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?
