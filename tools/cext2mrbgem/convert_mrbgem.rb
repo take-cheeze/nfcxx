@@ -1058,7 +1058,7 @@ texts = static_rename(texts)
       next if C_STATEMENT_KEYWORDS.include?(name)
       ret = m[2].sub(/[#{WSP}]+\z/, '') # the pointer star of a return type (Real *) stays
       po = pyfind(masked, '(', m.begin(3))
-      pc = pyfind(masked, ')', po)
+      pc = match_close(masked, po)
       d = { 'file' => rel, 'name' => name, 'storage' => storage, 'ret' => ret,
             'hstart' => m.begin(0), 'po' => po, 'pc' => pc,
             'params' => psl(text, po + 1, pc), 'proto' => term == ';', 'hdr' => f['kind'] != 'src' }
@@ -1883,6 +1883,7 @@ end
       end
       # the callback is threaded (it takes mrb): only a parameter that calls the callback, and does not keep it, can take it
       rec[:bad] = true unless non_retaining?(hname, pidx)
+      rec[:stores] = ((@store_fields || {})[[hname, pidx]] || []).uniq
       next if rec[:bad] || rec[:assigns].empty?
       recs << rec
       end
@@ -1931,7 +1932,15 @@ end
       # the field may also be stored as an address (x.NAME = &helper;)
       masked.to_enum(:scan, /(?:\.|->)\s*#{rec[:name]}\s*=\s*&?\s*([A-Za-z_]\w*)\s*;/).each do
         am = Regexp.last_match
-        rec[:assigns] << [am[1], frel, am.begin(1)]
+        # a parameter of the enclosing function: the callback it receives (its parameter record gives the helpers)
+        en = enclosing_func(frel, am.begin(1))
+        j = en && fn_param_names(en).index(am[1])
+        rec[:assigns] << (j ? [:fwd, en['name'], j] : [am[1], frel, am.begin(1)])
+      end
+      # a conditional assignment (obj->NAME = cond ? helper_a : helper_b;): both helpers are assigned
+      masked.to_enum(:scan, /(?:\.|->)\s*#{rec[:name]}\s*=\s*[^;{}]*?\?\s*([A-Za-z_]\w*)\s*:\s*([A-Za-z_]\w*)\s*;/).each do
+        cm = Regexp.last_match
+        [1, 2].each { |g| rec[:assigns] << [cm[g], frel, cm.begin(g)] }
       end
       # a designated initializer of the field (.NAME = helper inside a braced initializer) is an assignment too
       masked.to_enum(:scan, /\.\s*#{rec[:name]}\s*=\s*([A-Za-z_]\w*)\s*(?=[,}])/).each do
@@ -2135,6 +2144,43 @@ forced = (@reg_names - @split_names) | Set.new(@init_defs.map { |d| d['name'] })
     @files.keys.each { |frel| fnptr_decls(frel).each { |d| @fnptr_recs << fnptr_global(d) } }
     @files.keys.each { |frel| fnptr_typedefs(frel).each { |d| @fnptr_recs << fnptr_typed_global(d) } }
     @fnptr_recs.concat(fnptr_param_recs)
+    # a field assigned a parameter takes the helpers of that parameter's record (forwarding), and a parameter record that
+    # stores into a field is refused when the field cannot take mrb: iterated until both sides agree
+    @fnptr_recs.each { |r| r[:assigns_raw] ||= r[:assigns].dup }
+    10.times do
+      byk = {}
+      @fnptr_recs.each { |r| byk[[r[:owner], r[:pidx]]] = r if r[:owner] && !r[:bad] }
+      @fnptr_recs.each do |r|
+        next if r[:owner] || r[:bad]
+        next unless r[:assigns_raw].any? { |x| x[0] == :fwd }
+        out = []
+        okf = true
+        r[:assigns_raw].each do |x|
+          if x[0] == :fwd
+            src = byk[[x[1], x[2]]]
+            if src.nil?
+              okf = false
+              break
+            end
+            out.concat(src[:assigns])
+          else
+            out << x
+          end
+        end
+        r[:assigns] = okf ? out : []
+      end
+      changed = false
+      @fnptr_recs.each do |p|
+        next if p[:bad] || p[:owner].nil? || (p[:stores] || []).empty?
+        unusable = p[:stores].any? do |f|
+          @fnptr_recs.any? { |q| q[:owner].nil? && q[:name] == f && !q[:bad] && (q[:assigns_raw].any? { |x| x[0] == :fwd } && q[:assigns].empty?) }
+        end
+        next unless unusable
+        p[:bad] = true
+        changed = true
+      end
+      break unless changed
+    end
     @fnptr_recs.each do |r|
       next if r[:assigns].empty?
       r[:ok] = r[:assigns].all? { |h, _, _| @defs.key?(h) } && r[:calls].all? { |_, fn, _| fn }
@@ -2309,6 +2355,8 @@ end
     helper_uses = lambda do |name|
       out = []
       (@occ[name] || []).each do |rel, s, e|
+        # a file-scope array of this name in this file is a variable, not a use of a helper of the same name elsewhere
+        next if @files[rel]['masked'].match?(/^[ \t]*(?:static[ \t]+|const[ \t]+)*[A-Za-z_][\w \t\*]*?\b#{Regexp.escape(name)}[ \t]*\[[^\]\n]*\][ \t]*(?:=|;)/)
         next if @decls.any? { |d| d['name'] == name && rel == d['file'] && d['hstart'] <= s && s < d['hend'] }
         # the body of an object-like alias (#define alias real_name): its invocations are the uses, resolved by object_macro_name
         lstart = @files[rel]['masked'].rindex("\n", s - 1) || -1
@@ -2777,6 +2825,10 @@ use_problem = lambda do |name, use|
   # true when the parameter at index k of the defined function fname never keeps the function pointer it receives: every
   # use in its body is a call of it (NAME(...) or (*NAME)(...)) or an argument of a call of another such function. The
   # depth bounds the forwarding chain.
+  def fnptr_field_names
+    @fnptr_field_names ||= Set.new(@files.keys.flat_map { |f| fnptr_decls(f).map { |d| d[:name] } })
+  end
+
   def non_retaining?(fname, k, depth = 0)
     return false if depth > 6
     defs = (@defs[fname] || []).reject { |x| x['proto'] }
@@ -2793,6 +2845,12 @@ use_problem = lambda do |name, use|
       nx = next_nonspace(masked, q + pname.length)
       next if nx >= 0 && masked[nx] == '('
       pv = prev_nonspace(masked, q - 1)
+      # stored into a callback field of the gem (obj->field = param): the field takes mrb too (see the field forwarding)
+      if pv >= 0 && masked[pv] == '=' && (fm = masked[[q - 80, 0].max...q].to_s[/(?:\.|->)[ \t\n]*([A-Za-z_]\w*)[ \t\n]*=[ \t\n]*\z/, 1]) &&
+         fnptr_field_names.include?(fm)
+        (@store_fields ||= Hash.new { |h, kk| h[kk] = [] })[[fname, k]] << fm
+        next
+      end
       if pv >= 0 && masked[pv] == '*'
         pv2 = prev_nonspace(masked, pv - 1)
         if pv2 >= 0 && masked[pv2] == '('

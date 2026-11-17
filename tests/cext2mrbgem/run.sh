@@ -571,13 +571,8 @@ check grep -qF '(mrb_value (*)(void *))ct_secs,' "$work/api_cast_table/src/api_c
 # 2zzz47. a callback passed as an argument of a file-scope macro: the macro escapes the pointer only if its body does, and here
 # the body passes it to a helper that calls it and keeps nothing; the callback is threaded and the macro call converted.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_macro_cb tools/cext2mrbgem/fixtures/api_macro_cb/ext/api_macro_cb "$work/api_macro_cb" > "$work/api_macro_cb.log" 2>&1 || rc=$?
-if [ "$scanner" = libclang ]; then
-  check test "$rc" -eq 0
-  check grep -qF '#define MC_RUN(m, h, c) mc_call(mrb, m, c, h)' "$work/api_macro_cb/src/api_macro_cb.c"
-else
-  # the regex scan does not thread the callback through the macro: refused (not buildable), never converted silently
-  check test -e "$work/api_macro_cb/NOT_BUILDABLE"
-fi
+check test "$rc" -eq 0
+check grep -qF '#define MC_RUN(m, h, c) mc_call(mrb, m, c, h)' "$work/api_macro_cb/src/api_macro_cb.c"
 # 2zzz48. a value use of a CRuby setter whose mruby function returns void (rb_hash_aset) is refused; a statement use converts.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_value_lost tools/cext2mrbgem/fixtures/api_value_lost/ext/api_value_lost "$work/api_value_lost" > "$work/api_value_lost.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
@@ -964,17 +959,11 @@ check grep -qF 'rb_yield is supported only in the body of a registered method' "
 # The regex scanner cannot read a parameter with nested parentheses (DEF_RE), so there the callback stays refused: the
 # output is NOT_BUILDABLE with the refusal of fp_cb (the libclang scanner reads the definition).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fnptr_param tools/cext2mrbgem/fixtures/api_fnptr_param/ext/api_fnptr_param "$work/api_fnptr_param" > "$work/api_fnptr_param.log" 2>&1 || rc=$?
-if [ "$scanner" = libclang ]; then
 check test "$rc" -eq 0
 check test ! -e "$work/api_fnptr_param/NOT_BUILDABLE"
 check grep -qF 'static mrb_value fp_each(mrb_state *mrb, mrb_value (*cb)(mrb_state *mrb, mrb_value, mrb_value), mrb_value v, mrb_value hash) {' "$work/api_fnptr_param/src/api_fnptr_param.c"
 check grep -qF 'return cb(mrb, v, hash);' "$work/api_fnptr_param/src/api_fnptr_param.c"
 check grep -qF 'return fp_each(mrb, fp_cb, v, mrb_nil_value());' "$work/api_fnptr_param/src/api_fnptr_param.c"
-else
-check test "$rc" -eq 2
-check test -e "$work/api_fnptr_param/NOT_BUILDABLE"
-check grep -q '  fp_cb  ' "$work/api_fnptr_param/REFUSALS.txt"
-fi
 
 # 2zzj. a struct function-pointer field filled by a positional initializer (struct TAG var = { h1, h2, ... }): the member index
 # gives the field; the helper there is threaded like an assigned field, and calls through the field pass mrb
@@ -1186,14 +1175,9 @@ check grep -qF 'mrb_str_cat_cstr(mrb, s, "!");' "$work/api_str_barrier/src/api_s
 
 # 2zzv. a stateful callback passed down a forwarding chain (fnptr_param_recs with retention): converts, compiles with -Wall -Werror
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fwd_callback tools/cext2mrbgem/fixtures/api_fwd_callback/ext/api_fwd_callback "$work/api_fwd_callback" > "$work/api_fwd_callback.log" 2>&1 || rc=$?
-if [ "$scanner" = libclang ]; then
 check test "$rc" -eq 0
 check test ! -e "$work/api_fwd_callback/NOT_BUILDABLE"
 check grep -qF 'return fwd_outer(mrb, v, fwd_c);' "$work/api_fwd_callback/src/api_fwd_callback.c"
-else
-check test "$rc" -eq 2
-check test -e "$work/api_fwd_callback/NOT_BUILDABLE"
-fi
 
 # 2zzw. a stateful callback stored into a global (the callee keeps the pointer): refused, the output is not buildable
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_store_callback_refused tools/cext2mrbgem/fixtures/api_store_callback_refused/ext/api_store_callback_refused "$work/api_store_callback_refused" > "$work/api_store_callback_refused.log" 2>&1 || rc=$?
@@ -1351,6 +1335,12 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rescue2 tools/cext2mrbgem/fi
 check test "$rc" -eq 0
 check test ! -e "$work/api_rescue2/NOT_BUILDABLE"
 check grep -qF 'mrb_rescue_exceptions(mrb, rs2_body, proc, nfcx_rescue_rs2_recover_' "$work/api_rescue2/src/api_rescue2.c"
+# 2zzz106. a callback stored into a struct field: the parameter, the field and the field's calls all take mrb (field forwarding).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_store_field tools/cext2mrbgem/fixtures/api_store_field/ext/api_store_field "$work/api_store_field" > "$work/api_store_field.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_store_field/NOT_BUILDABLE"
+check grep -qF 'mrb_value (*fn)(mrb_state *mrb, const char *str, size_t len);' "$work/api_store_field/src/api_store_field.c"
+check grep -qF 'return sf_cur.fn(mrb, str, len);' "$work/api_store_field/src/api_store_field.c"
 check grep -qF '(struct RClass *[]){ E_TYPE_ERROR, mrb_exc_get(mrb, "EOFError") }' "$work/api_rescue2/src/api_rescue2.c"
 }
 
