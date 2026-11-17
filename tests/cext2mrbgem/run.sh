@@ -1478,6 +1478,12 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_memcpy_pri tools/cext2mrbgem
 check test "$rc" -eq 0
 check test ! -e "$work/api_memcpy_pri/NOT_BUILDABLE"
 check grep -qF 'memcpy(buf, RSTRING_PTR(str), sizeof(char)*(n));' "$work/api_memcpy_pri/src/api_memcpy_pri.c"
+# 2zzz128. the dropped encoding argument of rb_enc_str_new may be a pure member read (opt->active_enc has no side effect), as a plain
+# name is; the call converts with the bytes kept (mruby strings carry no encoding).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_enc_member tools/cext2mrbgem/fixtures/api_enc_member/ext/api_enc_member "$work/api_enc_member" > "$work/api_enc_member.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_enc_member/NOT_BUILDABLE"
+check grep -qF 'mrb_str_new(mrb, H.data, H.size)' "$work/api_enc_member/src/api_enc_member.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?

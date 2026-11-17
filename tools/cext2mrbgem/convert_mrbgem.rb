@@ -4281,7 +4281,7 @@ end
       # argument is a plain name or a pure encoding getter, so no rewrite is lost
       dropped = entry['ignored_args'] || []
       if !dropped.empty? && entry['template_cond'].nil? && class_args.empty? && str_args.empty? &&
-         texts.none? { |t| t.match?(/\Arb_intern\(/) } && texts.each_with_index.all? { |t, i| !dropped.include?(i) || t.match?(/\A(?:[A-Za-z_][#{WC}]*|rb_utf8_encoding\(\)|rb_ascii8bit_encoding\(\)|rb_usascii_encoding\(\))\z/) } &&
+         texts.none? { |t| t.match?(/\Arb_intern\(/) } && texts.each_with_index.all? { |t, i| !dropped.include?(i) || t.match?(/\A(?:(?:[A-Za-z_][#{WC}]*(?:\s*(?:->|\.)\s*[A-Za-z_][#{WC}]*)*)|rb_utf8_encoding\(\)|rb_ascii8bit_encoding\(\)|rb_usascii_encoding\(\))\z/) } &&
          order == (0...args.size).reject { |i| dropped.include?(i) }
         used_args = order.map { |i| args[i] }
         pieces = tmpl.split(/(\$\d+(?!\d))/, -1)
@@ -4326,7 +4326,7 @@ end
       end
 ignored = entry['ignored_args'] || []
 # an argument the template drops (an encoding) may be a call of a pure encoding getter: its value is not used
-unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:rb_utf8_encoding|rb_ascii8bit_encoding|rb_usascii_encoding)\(\)\z/) || t.match?(/\Arb_enc_get\(\s*[A-Za-z_][#{WC}]*\s*\)\z/) || t.match?(/\A[A-Za-z_][#{WC}]*\z/) : (class_args.include?(i) ? (@class_vars.include?(t.delete('&')) || class_expr_ok.call(t.delete('&')) || value_class_arg.call(t.delete('&'), s)) : (t.match?(/\A&?(?:[A-Za-z_][#{WC}]*(?:(?:->|\.)[A-Za-z_][#{WC}]*)*|\d+|(?:struct|union)[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && (!@class_vars.include?(t.delete('&')) || entry['class_var_value'] || shadowed_local?(rel, t.delete('&'), s)) || plain_expr?(t, rel) || t.match?(/\Arb_intern\(\s*"[^"\\]*"\s*\)\z/) || (str_args.include?(i) && t.match?(/\A"[^"\\]*"\z/)))) }
+unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:rb_utf8_encoding|rb_ascii8bit_encoding|rb_usascii_encoding)\(\)\z/) || t.match?(/\Arb_enc_get\(\s*[A-Za-z_][#{WC}]*\s*\)\z/) || t.match?(/\A(?:[A-Za-z_][#{WC}]*(?:\s*(?:->|\.)\s*[A-Za-z_][#{WC}]*)*)\z/) : (class_args.include?(i) ? (@class_vars.include?(t.delete('&')) || class_expr_ok.call(t.delete('&')) || value_class_arg.call(t.delete('&'), s)) : (t.match?(/\A&?(?:[A-Za-z_][#{WC}]*(?:(?:->|\.)[A-Za-z_][#{WC}]*)*|\d+|(?:struct|union)[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && (!@class_vars.include?(t.delete('&')) || entry['class_var_value'] || shadowed_local?(rel, t.delete('&'), s)) || plain_expr?(t, rel) || t.match?(/\Arb_intern\(\s*"[^"\\]*"\s*\)\z/) || (str_args.include?(i) && t.match?(/\A"[^"\\]*"\z/)))) }
         refuse(rel, s, name, 'the arguments are not all plain identifiers or integer literals (only those are substituted)')
         return
       end
@@ -5345,6 +5345,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     if ent.nil? || ent.empty? || ent['kind'] != 'expr' || !(ent['mruby'] || '').start_with?('MRB_TT_') || ent.key?('caveat')
       if tname == 'T_BIGNUM'
         refuse(rel, s, 'RB_TYPE_P', 'stuck point (Bignum): the fork has no Bignum. No MRB_TT_BIGINT tag exists (include/mruby/value.h:106-131) and no mrbgem defines a big-integer class, so no tag or class test can select CRuby\'s T_BIGNUM values')
+      elsif tname == 'T_REGEXP'
+        refuse(rel, s, 'RB_TYPE_P', 'stuck point (Regexp): the fork has no Regexp class (no regexp mrbgem, and no Onigmo engine under mrbgems), so no class test can select CRuby\'s T_REGEXP values')
       else
         refuse(rel, s, 'RB_TYPE_P', "#{tname} has no exact mruby type to compare with")
       end
