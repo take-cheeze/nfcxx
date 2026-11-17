@@ -3427,6 +3427,29 @@ use_problem = lambda do |name, use|
     out
   end
 
+  # A relational comparison (<, >, <=, >=) of two VALUE expressions orders them by address (CRuby's class tables are searched
+  # by VALUE). The fork's VALUE is a struct with no order: a stuck point, recorded with its reason.
+  def value_order_stuck_pass
+    @files.each_key do |rel|
+      masked = @files[rel]['masked']
+      masked.to_enum(:scan, /(?<![<>=!])(<=|>=|<|>)(?![<>=])/).each do
+        m = Regexp.last_match
+        op_s, op_e = m.begin(1), m.end(1)
+        next if in_dead_init(rel, op_s)
+        next if masked[op_s - 1] == '#' || masked[[op_s - 8, 0].max...op_s].to_s.include?('#')
+        fn = enclosing_func(rel, op_s)
+        next unless fn
+        value_names = value_names_of(fn) | all_file_scope_value_names
+        l_start, l_text = left_operand(masked, op_s)
+        r_end, r_text = right_operand(masked, op_e)
+        next if l_text.nil? || r_text.nil? || l_text.empty? || r_text.empty?
+        next unless value_operand?(l_text, value_names, value_field_names, rel, op_s) && value_operand?(r_text, value_names, value_field_names, rel, op_s)
+        next if @edits[rel].touches_strictly?(op_s)
+        refuse(rel, op_s, m[1], 'stuck point (VALUE order): a VALUE is ordered by address in CRuby (the class-table search); the fork\'s VALUE is a struct with no order')
+      end
+    end
+  end
+
   def value_compare_wrap_pass
     cmp_re = /(?<![=!<>])(==|!=)(?!=)/
     @files.each_key do |rel|
@@ -6247,6 +6270,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     value_equality_pass
     value_compare_wrap_pass
     owned_class_assign_pass
+    value_order_stuck_pass
     header_prototype_types_pass
     value_zero_assign_pass
     integer_return_pass
