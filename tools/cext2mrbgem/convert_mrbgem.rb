@@ -5048,6 +5048,16 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
                   init_d = @init_defs.find { |d| d['file'] == rel && d['brace'] }
                   [eq, var && var[1], init_d] if var && init_d && (@init_rel == rel)
                 end
+      # Qfalse (0) and Qtrue returned from a function whose result is an integer (int, bool): the integer, as CRuby's (0 / truthy)
+      if %w[Qfalse Qtrue].include?(name) && (fr_i = enclosing_func(rel, s)) && fr_i['ret'].to_s.split.any? { |t| %w[int bool long unsigned].include?(t) }
+        ret_pre = masked[[s - 12, 0].max...s].to_s
+        if ret_pre.match?(/\breturn[ \t\n]*\z/)
+          lit = name == 'Qfalse' ? '0' : '1'
+          ed.add(s, e, lit)
+          rewrite(rel, s, name, lit, 'a Q constant returned from an integer function: CRuby\'s Qfalse is 0 (Qtrue a nonzero truth value)')
+          return
+        end
+      end
       # a Q constant in a file-scope initializer (a table entry) is a constant compound literal with the same bits as the
       # fork's value (nil: value 0; true and false: value 1, the tag tells them apart): mrb_nil_value() is not a constant
       if %w[Qnil Qtrue Qfalse Qundef].include?(name) && !fs_init && enclosing_func(rel, s).nil? && define_at(rel, s).nil?
