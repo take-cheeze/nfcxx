@@ -943,6 +943,13 @@ texts = static_rename(texts)
         finditer(/(?<![#{WC}])VALUE(?![#{WC}])#{SS1}#{Regexp.escape(c)}(?![#{WC}])(?=#{SS}[=;,\[])/, f['masked'])
           .each { |m| @decl_name_pos << [rel, m.end(0) - c.length] }
       end
+      # every declarator of a VALUE declaration list (static VALUE a, cParseError, cEncoder;): a list has no call or braces
+      finditer(/(?<![#{WC}])VALUE(?![#{WC}])([^;{}()]*);/, f['masked']).each do |m|
+        m[1].scan(/(?<![#{WC}])([A-Za-z_]\w*)(?![#{WC}])/) do
+          next unless @class_vars.include?($1)
+          @decl_name_pos << [rel, m.begin(1) + $~.begin(0)]
+        end
+      end
     end
   end
 
@@ -3635,7 +3642,8 @@ end
       st = Regexp.last_match.begin(0)
       kw_end = Regexp.last_match.end(0)
       # the words before the type, with preprocessor lines blanked (they are not statements)
-      ctx = masked[[st - 60, 0].max...st].gsub(/^[ \t]*#[^\n]*/) { |x| ' ' * x.length }
+      # (the whole text before the type, so a statement that follows a long run of preprocessor lines is still found)
+      ctx = masked[0...st].gsub(/^[ \t]*#[^\n]*/) { |x| ' ' * x.length }
       next unless ctx.match?(/(?:\A|[;{}])\s*(?:(?:static|const|extern|register|volatile)\s+)*\z/)
       depth = 0
       i = kw_end

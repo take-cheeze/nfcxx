@@ -1596,6 +1596,12 @@
       "needs_mrb": true,
       "caveat": "struct RClass *, as E_ARGUMENT_ERROR: a VALUE use needs mrb_obj_value(); in rb_raise it is the class argument"
     },
+    "Data_Get_Struct": {
+      "kind": "template",
+      "arity": 3,
+      "template": "($2 = ($1 *)DATA_PTR($0))",
+      "caveat": "reads the data pointer of an mruby data object (DATA_PTR), with no type check, as CRuby's Data_Get_Struct does not check the type of an untyped object; use TypedData_Get_Struct where the type is checked"
+    },
     "RTYPEDDATA_DATA": {
       "kind": "call",
       "mruby": "DATA_PTR",

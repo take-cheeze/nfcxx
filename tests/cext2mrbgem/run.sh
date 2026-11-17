@@ -1360,6 +1360,12 @@ check test ! -e "$work/api_store_field/NOT_BUILDABLE"
 check grep -qF 'mrb_value (*fn)(mrb_state *mrb, const char *str, size_t len);' "$work/api_store_field/src/api_store_field.c"
 check grep -qF 'return sf_cur.fn(mrb, str, len);' "$work/api_store_field/src/api_store_field.c"
 check grep -qF '(struct RClass *[]){ E_TYPE_ERROR, mrb_exc_get(mrb, "EOFError") }' "$work/api_rescue2/src/api_rescue2.c"
+# 2zzz111. a VALUE declaration list in a header (static VALUE a, b, c;) gives each class variable struct RClass *, and
+# the first declarator that is not a class (assigned from rb_const_get) stays mrb_value; the uses keep their form.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_class_decl_list tools/cext2mrbgem/fixtures/api_class_decl_list/ext/api_class_decl_list "$work/api_class_decl_list" > "$work/api_class_decl_list.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_class_decl_list/NOT_BUILDABLE"
+check grep -qF 'static mrb_value cStandardError; struct RClass *cA, *cB, *mM;' "$work/api_class_decl_list/include/api_class_decl_list.h"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?
