@@ -1430,6 +1430,12 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_rational_gem/NOT_BUILDABLE"
 check grep -qF 'mrb_class_get(mrb, "Rational")' "$work/api_rational_gem/src/api_rational_gem.c"
 check grep -qF "spec.add_dependency 'mruby-rational'" "$work/api_rational_gem/mrbgem.rake"
+# 2zzz120. the address of an owned class variable (struct RClass *) given to rb_gc_register_address is refused with its
+# reason; the converter does not emit &mrb_obj_value(...), which does not compile.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_gc_addr_cls tools/cext2mrbgem/fixtures/api_gc_addr_cls/ext/api_gc_addr_cls "$work/api_gc_addr_cls" > "$work/api_gc_addr_cls.log" 2>&1 || rc=$?
+check test -e "$work/api_gc_addr_cls/NOT_BUILDABLE"
+check grep -qF 'stuck point (GC root): the address of an owned class variable' "$work/api_gc_addr_cls/REFUSALS.txt"
+check bash -c "! grep -rqF '&mrb_obj_value(' '$work/api_gc_addr_cls'"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?

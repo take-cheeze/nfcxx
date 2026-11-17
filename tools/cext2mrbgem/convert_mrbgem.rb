@@ -3854,6 +3854,12 @@ end
         next if nx >= 0 && masked[nx] == '=' && psl(masked, nx + 1, nx + 2) != '='
         callee, idx = call_context(masked, s)
         next if callee && (@special_pos[callee] || []).include?(idx)
+        # the address of an owned class variable (struct RClass *) is an RClass **, which no mruby call takes as a GC root
+        pv = prev_nonspace(masked, s - 1)
+        if pv >= 0 && masked[pv] == '&' && !(pv > 0 && masked[pv - 1] == '&') && owns_class_var?(rel, s, name)
+          refuse(rel, s, name, 'stuck point (GC root): the address of an owned class variable (struct RClass *) is taken as a GC root, which needs an mrb_value holder (the variable would change type)')
+          next
+        end
         # rb_raise's class is an RClass * for mrb_raisef: an owned class variable is one already; a class variable whose
         # value is not a class definition (rb_const_get) is an mrb_value, and its class pointer is taken
         if callee == 'rb_raise' && idx == 0
