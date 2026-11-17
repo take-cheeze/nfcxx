@@ -837,7 +837,10 @@ fi
 # The one-step build: eccp runs in a temporary directory, so its paths are made absolute before the cd (in the plan).
 eccp_bin="$edg/eccp"; eccp_out=$out
 if [ $moves = 1 ]; then
-  eccp_dir=$(mktemp -d); trap eccp_cleanup EXIT
+  eccp_dir=$(mktemp -d)
+  # the eccp directory and its temporary directories are removed by eccp_cleanup, unless the Ruby driver owns the temporary root
+  # (NFCXX_TMP_OWNED=1: it removes them when the run ends, unless intermediates are kept)
+  if [ "${NFCXX_TMP_OWNED:-}" = 1 ]; then trap trace_finish EXIT; else trap eccp_cleanup EXIT; fi
 fi
 # The command line (its arguments, the variable a shared link exports, and the directory it runs in) is planned by
 # scripts/nfcxx-eccp-plan.rb, which also prints the note for a kept temporary directory (--keep-intermediates).

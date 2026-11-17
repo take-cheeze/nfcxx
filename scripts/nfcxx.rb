@@ -33,7 +33,9 @@ tmproot = Dir.mktmpdir("nfcxx-tmp.")
 status_code = 1
 begin
   # the stages not yet ported run in bash: the same arguments and environment, the standard streams inherited. Its status is ours.
-  status = system({ "RUBY" => ENV["RUBY"] || RbConfig.ruby, "TMPDIR" => tmproot }, "bash", program.path, *ARGV)
+  # NFCXX_TMP_OWNED: the temporary directories are this process's, removed when it ends (unless intermediates are kept), so the
+  # driver's eccp trap keeps only its trace finish (nfcxx: eccp_cleanup is for the plain driver)
+  status = system({ "RUBY" => ENV["RUBY"] || RbConfig.ruby, "TMPDIR" => tmproot, "NFCXX_TMP_OWNED" => "1" }, "bash", program.path, *ARGV)
   status_code = status ? 0 : ($?.exitstatus || 1)
 ensure
   program.unlink
