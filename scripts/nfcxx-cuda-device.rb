@@ -104,18 +104,8 @@ def bash_quote(s)
   s.gsub(/[ !"$&'()*,;<>?\[\\\]^`{|}]|\A[#~]|(?<=[=:])~/) { "\\#{$&}" }
 end
 
-# realpath -m: the absolute path with the symbolic links of the existing part resolved (the rest is kept as written)
-def realpath_m(path)
-  parts = File.expand_path(path).split("/").reject(&:empty?)
-  resolved = "/"
-  parts.each_with_index do |part, i|
-    cand = File.join(resolved, part)
-    return File.join(resolved, *parts[i..]) unless File.exist?(cand)
-
-    resolved = File.realpath(cand)
-  end
-  resolved
-end
+# realpath -m (DriverState.realpath_m)
+def realpath_m(path) = DriverState.realpath_m(path)
 
 # cu_prepare's directory of the copy of a -c compile of OBJ (the per-user cache, keyed by the absolute object path)
 def cu_dir(obj, env = ENV)

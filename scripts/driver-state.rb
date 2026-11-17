@@ -64,6 +64,20 @@ module DriverState
 
   # realpath as the bash runs it (GNU realpath without -m): every component but the last must exist; a missing last
   # component is resolved in its existing directory. The error names the path as given (ENOENT).
+  # realpath -m: the absolute path with the symbolic links of the existing part resolved; the rest is kept as written. The
+  # object keys of the per-user caches (cu_dir, cpp2_dir) are the SHA-1 of this path.
+  def realpath_m(path)
+    parts = File.expand_path(path).split("/").reject(&:empty?)
+    resolved = "/"
+    parts.each_with_index do |part, i|
+      cand = File.join(resolved, part)
+      return File.join(resolved, *parts[i..]) unless File.exist?(cand)
+
+      resolved = File.realpath(cand)
+    end
+    resolved
+  end
+
   def gnu_realpath(path)
     File.realpath(path)
   rescue Errno::ENOENT

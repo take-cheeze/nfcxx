@@ -4,11 +4,13 @@
 # cppfront in the scratch directory (cd SCRATCH; cppfront -q -o COPY ABS). The bash keeps the array edits and the checks
 # that cppfront is built. tests/nfcxx-cpp2-prepare/run.sh checks the port against the bash with a stub cppfront.
 #
+#   ruby scripts/nfcxx-cpp2.rb --cpp2-dir=OBJ     prints the directory of the translations of a -c compile of OBJ (cpp2_prepare)
 #   ruby scripts/nfcxx-cpp2.rb --prepare < RECORDS
 #       RECORDS are driver-state groups: root, dir, scratch, cppfront (the program) and inputs (one value per .cpp2 input).
 #       The reply is the groups sdirs and copies (one value per input), then z. A failing step ends with its status and
 #       message: realpath's for a missing source directory (status 1), cppfront's status otherwise.
 
+require "digest"
 require_relative "driver-state"
 
 module NfcxxCpp2
@@ -23,6 +25,17 @@ module NfcxxCpp2
       @status = status
     end
   end
+
+  # cpp2_prepare's directory of the translations of a -c compile of OBJ: the per-user cache, keyed by the SHA-1 of realpath -m OBJ
+  # (as the bash had it with realpath -m and sha1sum; Ruby does both on every platform, macOS included)
+  def cpp2_dir(obj, env = ENV)
+    key = Digest::SHA1.hexdigest("#{DriverState.realpath_m(obj)}\n")[0, 16]
+    cache = nonempty(env["NFCXX_CU_CACHE"]) ||
+            "#{nonempty(env["XDG_CACHE_HOME"]) || "#{nonempty(env["HOME"]) || "/tmp"}/.cache"}/nfcxx"
+    "#{cache}/cpp2/#{key}"
+  end
+
+  def nonempty(v) = (v.nil? || v.empty?) ? nil : v
 
   # [sdirs, copies] for INPUTS; each translation is made in SCRATCH (cppfront's -o is relative to it, as the bash has it)
   def prepare(dir:, scratch:, cppfront:, inputs:)
@@ -49,7 +62,11 @@ module NfcxxCpp2
 end
 
 if $PROGRAM_NAME == __FILE__
-  abort "nfcxx-cpp2: --prepare (records on standard input)" unless ARGV == ["--prepare"]
+  if ARGV.size == 1 && ARGV[0].start_with?("--cpp2-dir=")
+    puts NfcxxCpp2.cpp2_dir(ARGV[0].delete_prefix("--cpp2-dir="))
+    exit 0
+  end
+  abort "nfcxx-cpp2: --prepare (records on standard input) or --cpp2-dir=OBJ" unless ARGV == ["--prepare"]
   begin
     groups = DriverState.read_groups($stdin.binmode.read)
     sdirs, copies = NfcxxCpp2.prepare(dir: DriverState.scalar(groups, "dir"), scratch: DriverState.scalar(groups, "scratch"),

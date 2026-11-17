@@ -238,8 +238,8 @@ cpp2_prepare() {  # cpp2_prepare: translates every .cpp2 input and puts its tran
   if [ $compile_only = 1 ]; then
     # As for .cu inputs (cu_prepare): the translation outlives the compile, because the prelinker re-reads it at link time.
     local obj=$out; [ $outset = 1 ] || obj=$(basename "${cpp2_inputs[0]}" .cpp2).o
-    local key; key=$(realpath -m "$obj" | sha1sum | cut -c1-16)
-    dir=${NFCXX_CU_CACHE:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/nfcxx}/cpp2/$key
+    # the directory is scripts/nfcxx-cpp2.rb's (--cpp2-dir: the SHA-1 of realpath -m OBJ, as the bash had it)
+    dir=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cpp2.rb" --cpp2-dir="$obj") || exit $?
     mkdir -p "$dir"
   fi
   local scratch; scratch=$(mktemp -d -p "$cudatmp")
