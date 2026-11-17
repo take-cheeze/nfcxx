@@ -3624,7 +3624,9 @@ use_problem = lambda do |name, use|
   # regexp engine, so each use of its names is a stuck point, marked where it is used (the functions that hold them are not
   # buildable without it)
   ONIG_STUCK_TYPES_PRELUDE = <<~C
-    /* BC2CPP-MRBGEM: placeholder types for CRuby's Onigmo declarations (the fork has no regexp engine). Only stubs use them. */
+    #ifndef NFCX_STUCK_TYPES_H
+    #define NFCX_STUCK_TYPES_H
+    /* BC2CPP-MRBGEM: placeholder types for CRuby's Onigmo and Encoding declarations (the fork has neither). Only stubs use them. */
     typedef unsigned char UChar;
     typedef unsigned char OnigUChar;
     typedef long OnigPosition;
@@ -3632,7 +3634,18 @@ use_problem = lambda do |name, use|
     typedef void *regex_t;
     typedef struct nfcx_onig_regs { int allocated; int num_regs; OnigPosition *beg; OnigPosition *end; } OnigRegion;
     struct re_registers { int allocated; int num_regs; OnigPosition *beg; OnigPosition *end; };
+    struct nfcx_rb_encoding;
+    typedef struct nfcx_rb_encoding rb_encoding;
+    #endif
   C
+  PLACEHOLDER_APIS = %w[UChar OnigUChar OnigPosition OnigRegex regex_t OnigRegion re_registers rb_encoding
+                        #include\ <ruby/encoding.h>].freeze
+
+  # a file whose declarations name a stuck type gets the placeholder prelude (see ONIG_STUCK_TYPES_PRELUDE)
+  def needs_placeholder_prelude?(f)
+    (f['masked'].match?(ONIG_NAME_RE) || f['masked'].match?(/\brb_encoding\b/) ||
+                           f['text'].match?(/#\s*include\s*<ruby\/encoding\.h>/))
+  end
   ONIG_NAME_RE = /(?<![#{WC}.>])(OnigUChar|OnigRegion|OnigRegex|OnigPosition|OnigEncoding|OnigOptionType|OnigCaptureTreeNode|regex_t|re_registers|UChar|ONIG_[A-Z0-9_]+|onig_[a-z0-9_]+)(?![#{WC}])/
   def onig_engine_stuck_pass
     @files.each_key do |rel|
@@ -4290,6 +4303,8 @@ use_problem = lambda do |name, use|
       else
         if inc == 'ruby/encoding.h'
           refuse(rel, m.begin(0), "#include <#{inc}>", 'stuck point (Encoding): ruby/encoding.h declares rb_encoding and the encoding API; the fork has no Encoding (accepted stuck point)')
+          # the header is not in the fork: the include is dropped, and rb_encoding is a placeholder type (the prelude)
+          ed.add(m.begin(0), m.end(0), "/* BC2CPP-MRBGEM dropped: #include <ruby/encoding.h> (rb_encoding is a placeholder, see the prelude) */")
         elsif inc == 'ruby/io.h'
           refuse(rel, m.begin(0), "#include <#{inc}>", 'stuck point (IO): ruby/io.h declares the CRuby IO struct (rb_io_t) and its API; the fork has no binding for that struct (mruby-io has its own, different one) (accepted stuck point)')
         elsif inc == 'ruby/version.h'
@@ -6565,6 +6580,12 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     FileUtils.mkdir_p(src_dir)
     FileUtils.mkdir_p(inc_dir)
     stub_refused_functions
+    # a refusal of a stuck type or include that the placeholder prelude covers is stubbed too: the declaration compiles
+    @refusals.each do |r|
+      next unless r['api'] && PLACEHOLDER_APIS.include?(r['api'])
+      next unless @files[r['file']] && needs_placeholder_prelude?(@files[r['file']])
+      (@stubbed ||= Set.new) << [r['file'], r['line']]
+    end
     outputs = {}
     @files.each { |rel, f| outputs[rel] = @edits[rel].apply(f['text']) }
     @files.each { |rel, f| outputs[rel] = id_value_casts(outputs[rel]) if f['kind'] == 'src' }
@@ -6572,7 +6593,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     # placeholder types for the declarations only. Every use of an Onigmo function or constant is refused, so the code that
     # reads these types is a stub: the placeholders are never used to compute a result.
     @files.each do |rel, f|
-      next unless f['kind'] == 'src' && f['masked'].match?(ONIG_NAME_RE)
+      next unless needs_placeholder_prelude?(f)
       prelude = ONIG_STUCK_TYPES_PRELUDE
       # a file that includes POSIX <regex.h> has its own regex_t (struct re_pattern_buffer): no placeholder for that name
       prelude = prelude.sub(/^typedef void \*regex_t;\n/, '') if f['text'].match?(/#\s*include\s*<regex\.h>/)
@@ -6665,7 +6686,10 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     write_bytes(File.join(@out_dir, 'mrbgem.rake'), rake.join("\n"))
     lines = ["BC2CPP-MRBGEM refusals for ext/#{@name}",
              "STATUS: #{status} (#{@refusals.size} refusal(s))", '']
-    @refusals.each { |r| lines << "#{r['file']}:#{r['line']}  #{r['api']}  #{r['reason']}" }
+    @refusals.each do |r|
+      tag = (@stubbed || Set.new).include?([r['file'], r['line']]) ? ' [stubbed]' : ' [NOT stubbed]'
+      lines << "#{r['file']}:#{r['line']}  #{r['api']}  #{r['reason']}#{tag}"
+    end
     write_bytes(File.join(@out_dir, 'REFUSALS.txt'), lines.join("\n") + "\n")
     unless @warnings.empty?
       body = @warnings.map { |w| "#{w['file']}:#{w['line']}  #{w['api']}  dropped: #{w['reason']}\n" }.join
