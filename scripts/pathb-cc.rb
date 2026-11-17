@@ -64,7 +64,7 @@ src = ""
 out = ""
 safe_on = ENV["NFCXX_SAFE_POINTERS"] == "1" ? 1 : 0
 asan_on = ENV["NFCXX_PATHB_ASAN"] == "1" ? 1 : 0
-passes = ENV.key?("NFCXX_IR_OPT") ? ENV["NFCXX_IR_OPT"] : "inline"
+passes = ENV.key?("NFCXX_IR_OPT") ? ENV["NFCXX_IR_OPT"] : "inline,sroa"
 ir_opt_max = ENV["NFCXX_IR_OPT_MAX"].to_s.empty? ? "268435456" : ENV["NFCXX_IR_OPT_MAX"]
 passes_given = ENV.key?("NFCXX_IR_OPT") ? 1 : 0
 pic = []
