@@ -1383,6 +1383,11 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_dtype_mark/NOT_BUILDABLE"
 check grep -qF 'static void holder_mark(mrb_state *mrb, void *ptr) {' "$work/api_dtype_mark/src/api_dtype_mark.c"
 check grep -qF 'mrb_free' "$work/api_dtype_mark/src/api_dtype_mark.c"
+# 2zzz114. a #if of defined() atoms joined by && (defined(_LIBC) is false in a normal build) makes its block inactive: the call in
+# it is not refused.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_defined_cond tools/cext2mrbgem/fixtures/api_defined_cond/ext/api_defined_cond "$work/api_defined_cond" > "$work/api_defined_cond.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_defined_cond/NOT_BUILDABLE"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?

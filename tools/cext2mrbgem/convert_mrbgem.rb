@@ -1026,13 +1026,44 @@ texts = static_rename(texts)
     nil
   end
 
+  # the value of a #if condition made of defined(NAME) / !defined(NAME) atoms joined by && or || (no grouping):
+  # true, false, or nil when an atom is not decided (a name no build or target setting defines or undefines)
+  def pred_value(arg, build, undefined)
+    atom = lambda do |t|
+      t = t.strip
+      neg = t.start_with?('!')
+      t = t.sub(/\A!\s*/, '') if neg
+      t = t.sub(/\A\(\s*/, '').sub(/\s*\)\z/, '') while t.start_with?('(') && t.end_with?(')')
+      m = t.match(/\Adefined\s*\(?\s*([A-Za-z_]\w*)\s*\)?\z/)
+      return nil unless m
+      v = if build.include?(m[1]) then true
+          elsif undefined.include?(m[1]) then false
+          end
+      return nil if v.nil?
+      neg ? !v : v
+    end
+    return nil if arg.include?('(') && !arg.match?(/\A\s*!?\s*\(?\s*defined/)
+    ors = arg.split('||').map(&:strip)
+    ors.map do |o|
+      ands = o.split('&&').map { |a| atom.call(a) }
+      if ands.include?(false) then false
+      elsif ands.all? { |x| x == true } then true
+      end
+    end.then do |vals|
+      if vals.include?(true) then true
+      elsif vals.all? { |x| x == false } then false
+      end
+    end
+  end
+
   def text_inactive_spans(rel)
     f = @files[rel]
     masked = f['masked']
     build = Set.new((@defines || []).map { |d| d.split('=', 2)[0] })
     # The target is a non-Windows mruby build: these names are undefined in it, so their #ifdef branches are inactive
     # (oj's rb_w32_* calls sit under #ifdef _WIN32). A Windows target would need this set changed.
-    target_undefined = Set.new(%w[_WIN32 _MSC_VER __MINGW32__]) | Set.new(@undefines || [])
+    # _LIBC is defined only while glibc itself is compiled (bcrypt's crypt_r is under defined(__GLIBC__) && defined(_LIBC))
+    target_undefined = Set.new(%w[_WIN32 _MSC_VER __MINGW32__ _LIBC]) | Set.new(@undefines || [])
     gem_defined = Set.new
     @files.each_value { |g| g['masked'].scan(/^[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)/) { gem_defined << $1 } }
     out = []
@@ -1056,6 +1087,9 @@ texts = static_rename(texts)
                     kw == 'ifdef'
                   elsif kw != 'if' && arg =~ /\A([A-Za-z_]\w*)\z/ && target_undefined.include?($1)
                     kw == 'ifndef'
+                  elsif kw == 'if' && arg.match?(/defined|&&|\|\|/)
+                    # a condition of defined(NAME) atoms joined by && and || (no grouping): decided when the atoms decide it
+                    pred_value(arg, build, target_undefined)
                   end
           frame = { value: value, inactive_from: nil }
           frame[:inactive_from] = pos if value == false
@@ -2437,7 +2471,12 @@ end
     if !@init_defs.empty?
       @init_rel = @init_defs[0]['file']
     else
-      refuse(nil, 0, "Init_#{@name}", 'no Init_<name> function found')
+      cxx = Dir.glob(File.join(@cext_dir, '*.{cc,cpp,cxx}'))
+      if cxx.any?
+        refuse(nil, 0, "Init_#{@name}", "stuck point (C++): the extension is C++ (#{cxx.map { |f| File.basename(f) }.sort.join(', ')}), and the converter reads C sources only; C++ classes, templates and exceptions are not translated (accepted stuck point)")
+      else
+        refuse(nil, 0, "Init_#{@name}", 'no Init_<name> function found')
+      end
     end
     init_first = @init_defs.empty? ? nil : @init_defs[0]['name']
     # registered functions: must be defined; must not be called directly
