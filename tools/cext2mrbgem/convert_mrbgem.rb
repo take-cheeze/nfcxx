@@ -3158,6 +3158,16 @@ use_problem = lambda do |name, use|
   # CRuby compares VALUEs with ==, which is identity. mruby's mrb_value is a struct here, so a == b is mrb_obj_equal(mrb, a, b)
   # (identity too). Both operands must be VALUE names of a function with the mruby state, or a Qnil/Qtrue/Qfalse/Qundef
   # constant; any other comparison is left as it is (the compile check refuses it when it does not compile).
+  # the VALUE names declared in a macro body (VALUE a, b;) of a define span [name, start, end]
+  def macro_value_names(rel, mac)
+    body = psl(@files[rel]['masked'], mac[1], mac[2])
+    names = Set.new
+    body.scan(/(?<![#{WC}])VALUE(?![#{WC}])([^;{}()]*);/) do
+      $1.split(',').each { |d| n = d.strip[/\A[A-Za-z_]\w*/]; names << n if n }
+    end
+    names
+  end
+
   def value_equality_pass
     qconst = /\AQ(?:nil|true|false|undef)\z/
     with_state = (@threaded_cands || Set.new) | (@valid_reg_names || Set.new)
@@ -3171,8 +3181,13 @@ use_problem = lambda do |name, use|
         s0, e0 = m.begin(0), m.end(0)
         next if qconst.match?(b) && (@q_done || Set.new).include?(m.begin(3))
         fn = enclosing_func(rel, s0)
-        next if fn.nil?
-        value_names = value_names_of(fn)
+        # a comparison in the body of a global macro (its expansions have the state, through the global name) is a value
+        # comparison too: its VALUE names are the macro body's own declarations
+        mac = fn.nil? ? define_at(rel, s0) : nil
+        if fn.nil?
+          next unless mac && ((@global_macro_spans || {})[rel] || []).any? { |x, _z| x == mac[1] }
+        end
+        value_names = fn ? value_names_of(fn) : macro_value_names(rel, mac)
         is_value = lambda do |x|
           next true if qconst.match?(x)
           next value_names.include?(x) if x.match?(/\A[A-Za-z_]\w*\z/)
@@ -3183,7 +3198,7 @@ use_problem = lambda do |name, use|
         ok_b = is_value.call(b)
         next unless ok_a && ok_b
         # a function without the mruby state compares identity with mrb_value_identical (the fork's stateless test)
-        stateless = !with_state.include?(fn['name'])
+        stateless = fn ? !with_state.include?(fn['name']) : false
         conv = ->(x) { qconst.match?(x) ? @entries[x]['mruby'] : x }
         # the only edits allowed inside the comparison are the rewrites of its own Q-constant operands (Qundef becomes
         # mrb_undef_value()); the comparison replaces them with the same text, so they are dropped
