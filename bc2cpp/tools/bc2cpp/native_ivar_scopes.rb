@@ -3,11 +3,13 @@
 require_relative 'world_root'
 require 'digest'
 require_relative 'native_names'
+require_relative 'world_audit_pins'
 
 # Audited native writes preserve their registered receiver family.
 # Only unrelated Ruby families may pool the same names.
 module NativeIvarScopes
-  FILES = {}.freeze
+  # The mruby-rgss digests are the world's (sig/bc2cpp/audit_pins.yml).
+  FILES = WorldAuditPins.ivar_files.freeze
   SCOPES = {
     'contents' => ['RGSS::Window'],
     'bitmap' => %w[RGSS::Sprite RGSS::Plane],
