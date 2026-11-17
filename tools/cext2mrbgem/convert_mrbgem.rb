@@ -4446,7 +4446,12 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     when 'hash_foreach'
       c = (@hash_calls || []).find { |x| x[:rel] == rel && x[:s] == s }
       unless c
-        refuse(rel, s, name, 'not a call of the form rb_hash_foreach(hash, callback, (VALUE)pointer) with a callback defined here and used only here')
+        # the data argument is a pointer cast to VALUE (the callback casts it back): a VALUE holds no address in the fork
+        if psl(@files[rel]['masked'], s, [s + 300, @files[rel]['masked'].length].min).match?(/\A[^;]*?,[^;]*?,\s*\(\s*VALUE\s*\)\s*[A-Za-z_]/)
+          refuse(rel, s, name, 'stuck point (VALUE as pointer): rb_hash_foreach gets a pointer cast to VALUE as its data, and the fork\'s VALUE is a struct (include/mruby/boxing_no.h), so the pointer cannot pass through it')
+        else
+          refuse(rel, s, name, 'not a call of the form rb_hash_foreach(hash, callback, (VALUE)pointer) with a callback defined here and used only here')
+        end
         return
       end
       # a refusal of the callback (or of the call's arguments) inside the call's span: the call is refused with it

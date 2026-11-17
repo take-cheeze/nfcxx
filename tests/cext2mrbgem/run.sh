@@ -1491,6 +1491,11 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_memsearch/NOT_BUILDABLE"
 check grep -qF 'static long nfcx_memsearch(const char *x, long m, const char *y, long n) {' "$work/api_memsearch/src/api_memsearch.c"
 check grep -qF 'nfcx_memsearch(RSTRING_PTR(needle), RSTRING_LEN(needle),' "$work/api_memsearch/src/api_memsearch.c"
+# 2zzz130. rb_hash_foreach with a pointer cast to VALUE as its data is a stuck point (VALUE as pointer): the VALUE struct cannot hold
+# the pointer, so the file is marked not buildable with that reason (not the generic form refusal).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_ptr_stuck tools/cext2mrbgem/fixtures/api_hash_ptr_stuck/ext/api_hash_ptr_stuck "$work/api_hash_ptr_stuck" > "$work/api_hash_ptr_stuck.log" 2>&1 || rc=$?
+check test -e "$work/api_hash_ptr_stuck/NOT_BUILDABLE"
+check grep -qF 'stuck point (VALUE as pointer): rb_hash_foreach gets a pointer cast to VALUE' "$work/api_hash_ptr_stuck/REFUSALS.txt"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?
