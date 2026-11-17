@@ -3373,6 +3373,31 @@ use_problem = lambda do |name, use|
     ent['template'].to_s.match?(/\Amrb_(?:obj_value\(|const_get)/) || ent['mruby'].to_s.match?(/\Amrb_const_get|_value\z/)
   end
 
+  # An owned class variable (struct RClass *) assigned the result of a VALUE-returning call: the class pointer of that result
+  # (mrb_class_ptr around the call; the call's own rewrites stay).
+  def owned_class_assign_pass
+    @files.each_key do |rel|
+      masked = @files[rel]['masked']
+      masked.to_enum(:scan, /(?<![#{WC}$.>])([A-Za-z_]\w*)[ \t\n]*=(?![=])[ \t\n]*(?=[A-Za-z_])/).each do
+        m = Regexp.last_match
+        name = m[1]
+        next unless @class_vars.include?(name)
+        next unless owns_class_var?(rel, m.begin(1), name)
+        rs = m.end(0)
+        cm = masked[rs..].to_s.match(/\A([A-Za-z_]\w*)[ \t\n]*\(/)
+        next unless cm && value_call_name?(cm[1])
+        open = rs + cm[0].length - 1
+        close = match_close(masked, open)
+        next if close < 0
+        after = next_nonspace(masked, close + 1)
+        next unless after >= 0 && masked[after] == ';'
+        next if @edits[rel].touches_strictly?(rs) || @edits[rel].touches_strictly?(close + 1)
+        @edits[rel].add(rs, rs, 'mrb_class_ptr(')
+        @edits[rel].add(close + 1, close + 1, ')')
+      end
+    end
+  end
+
   def value_compare_wrap_pass
     cmp_re = /(?<![=!<>])(==|!=)(?!=)/
     @files.each_key do |rel|
@@ -5084,6 +5109,13 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       end
       # a Q constant in a file-scope initializer (a table entry) is a constant compound literal with the same bits as the
       # fork's value (nil: value 0; true and false: value 1, the tag tells them apart): mrb_nil_value() is not a constant
+      if %w[Qnil Qtrue Qfalse Qundef].include?(name) && !fs_init && enclosing_func(rel, s).nil? && define_at(rel, s).nil? &&
+         masked[[s - 60, 0].max...s].to_s.match?(/struct\s+RClass\s*\*\s*[A-Za-z_]\w*\s*=\s*\z/)
+        # an owned class variable (struct RClass *) starts as a null class pointer (the Q value is not a class)
+        ed.add(s, e, '0')
+        rewrite(rel, s, name, '0', 'an owned class variable (struct RClass *) initialized with a Q value: the null class pointer')
+        return
+      end
       if %w[Qnil Qtrue Qfalse Qundef].include?(name) && !fs_init && enclosing_func(rel, s).nil? && define_at(rel, s).nil?
         const_lit = { 'Qnil' => '((mrb_value){.value.i = 0, .tt = MRB_TT_FALSE})',
                       'Qtrue' => '((mrb_value){.value.i = 1, .tt = MRB_TT_TRUE})',
@@ -6177,6 +6209,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     @files.keys.sort.each { |rel| process(rel) }
     value_equality_pass
     value_compare_wrap_pass
+    owned_class_assign_pass
     header_prototype_types_pass
     value_zero_assign_pass
     integer_return_pass
