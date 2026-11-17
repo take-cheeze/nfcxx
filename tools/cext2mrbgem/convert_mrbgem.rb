@@ -1497,7 +1497,12 @@ end
     return { 'error' => 'no .function field' } unless fn
     return { 'error' => '.function is not a braced group' } unless fn[2].start_with?('{') && fn[2].end_with?('}')
     brace = fn[0] + tx[fn[0]...fn[1]].index('{')
-    sub = split_args(mk, brace, fn[1] - 1).map { |a, b| [a, b, psl(tx, a, b)] }.reject { |_a, _b, t| t.empty? }
+    # the elements of .function: a preprocessor line before an element (#ifdef HAVE_RB_GC_LOCATION) is not part of it, and an
+    # element in inactive text (its branch is not in this build) is not an element (mruby's data type has no compaction hook)
+    inactive = (@excluded_spans || {})[rel] || []
+    sub = split_args(mk, brace, fn[1] - 1).map { |a, b| [a, b, psl(tx, a, b)] }
+    sub = sub.reject { |a, _b, _t| inactive.any? { |x, z| x < a && a < z } }
+    sub = sub.map { |a, b, t| [a, b, t.gsub(/^[ \t]*#[^\n]*\n?/, '').strip] }.reject { |_a, _b, t| t.empty? }
     sf = {}
     sub.each do |a, b, t|
       mm = t.match(/\A\.\s*([A-Za-z_]\w*)\s*=\s*(.*)\z/m)

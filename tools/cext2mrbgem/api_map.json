@@ -1612,6 +1612,14 @@
       "mruby": "mrb_free",
       "caveat": "as RUBY_TYPED_DEFAULT_FREE: mrb_free, the default release of mrb_malloc'd data"
     },
+    "rb_reg_region_copy": {
+      "kind": "refuse",
+      "reason": "stuck point (regexp internals): rb_reg_region_copy copies CRuby's Onigmo match region (struct re_registers); mruby's regexp is the mruby-onig-regexp gem with a different match API, so there is no region to copy (accepted stuck point)"
+    },
+    "rb_reg_prepare_re": {
+      "kind": "refuse",
+      "reason": "stuck point (regexp internals): rb_reg_prepare_re returns CRuby's compiled Onigmo regex for a Regexp; mruby's regexp is the mruby-onig-regexp gem with its own compiled form (accepted stuck point)"
+    },
     "RUBY_API_VERSION_CODE": {
       "kind": "refuse",
       "reason": "stuck point (CRuby version): RUBY_API_VERSION_CODE is the CRuby version the code tests (#if RUBY_API_VERSION_CODE >= ...), and mruby has no version number to test against; the version to emulate is a decision (accepted stuck point)"
