@@ -4850,6 +4850,9 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
           else
             @entries[t]['mruby']
           end
+        elsif class_args.include?(k) && @class_vars.include?(t) && !owns_class_var?(rel, s, t)
+          # an unowned class variable is a VALUE: a class argument takes its class pointer
+          "mrb_class_ptr(#{t})"
         elsif class_args.include?(k) && value_class.call(t)
           "mrb_class_ptr(#{t})"
         elsif entry['class_var_value'] && @class_vars.include?(t)
@@ -5019,7 +5022,10 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
           ca, cb = cargs[pi]
           at = psl(@files[rel]['text'], ca, cb).strip
           # a VALUE parameter that shadows a class variable of the same name is a value (is_param)
-          next unless at.match?(/\A[A-Za-z_][#{WC}]*\z/) && vnc.include?(at) && (!@class_vars.include?(at) || is_param(rel, ca, at))
+          next unless at.match?(/\A[A-Za-z_][#{WC}]*\z/)
+          # an unowned class variable (a VALUE at file scope) in a class position takes its class pointer too
+          unowned_cv = @class_vars.include?(at) && !is_param(rel, ca, at) && !owns_class_var?(rel, ca, at)
+          next unless unowned_cv || (vnc.include?(at) && (!@class_vars.include?(at) || is_param(rel, ca, at)))
           ed.add(ca, cb, "mrb_class_ptr(#{at})")
         end
       end
