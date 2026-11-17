@@ -1442,6 +1442,12 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_id_ptr tools/cext2mrbgem/fix
 check test "$rc" -eq 0
 check test ! -e "$work/api_id_ptr/NOT_BUILDABLE"
 check grep -qF 'mrb_sym *idp;' "$work/api_id_ptr/src/api_id_ptr.c"
+# 2zzz122. a module (rb_mEnumerable) is a class argument of rb_class_inherited_p: it is the module's RClass * (mrb_module_get),
+# and the call converts (the class test accepts module lookups as well as class lookups).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_module_arg tools/cext2mrbgem/fixtures/api_module_arg/ext/api_module_arg "$work/api_module_arg" > "$work/api_module_arg.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_module_arg/NOT_BUILDABLE"
+check grep -qF 'mrb_class_inherited_p(mrb, mrb_class_ptr(clas), mrb_module_get(mrb, "Enumerable"))' "$work/api_module_arg/src/api_module_arg.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?

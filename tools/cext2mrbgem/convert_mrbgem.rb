@@ -3112,7 +3112,7 @@ use_problem = lambda do |name, use|
       e = @entries[t]
       next false unless e.is_a?(Hash) && e['kind'] == 'expr' && e['mruby'].is_a?(String)
       e['mruby'].match?(/\Amrb->\w+_class\z/) || e['mruby'].match?(/\Amrb_class_get\(mrb, "[^"]+"\)\z/) ||
-        e['mruby'].match?(/\Amrb_exc_get\(mrb, "[^"]+"\)\z/)
+        e['mruby'].match?(/\Amrb_exc_get\(mrb, "[^"]+"\)\z/) || e['mruby'].match?(/\Amrb_module_get\(mrb, "[^"]+"\)\z/)
     end
   end
 
