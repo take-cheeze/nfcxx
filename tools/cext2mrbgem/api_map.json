@@ -2547,6 +2547,27 @@
       "template": "mrb_str_to_inum($m, $0, $1, $2)",
       "caveat": "parses the string in the base; badcheck as given (CRuby's rb_str_to_inum)"
     },
+    "rb_cstr_to_dbl": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_cstr_to_dbl($m, $0, $1)",
+      "caveat": "parses the NUL-terminated string as a Float; badcheck as given (CRuby's rb_cstr_to_dbl), raising ArgumentError on a bad string"
+    },
+    "rb_check_convert_type": {
+      "kind": "template",
+      "arity": 4,
+      "needs_mrb": true,
+      "template": "mrb_check_convert_type($m, $0, $1, $2, $3)",
+      "caveat": "returns nil when the value has no conversion method, as CRuby; the type is the mruby MRB_TT_ tag (T_STRING and the other T_ tags map to it)"
+    },
+    "rb_need_block": {
+      "kind": "template",
+      "arity": 0,
+      "needs_mrb": true,
+      "template": "(mrb_block_given_p($m) ? (void)0 : mrb_raise($m, E_LOCALJUMP_ERROR, \"no block given\"))",
+      "caveat": "raises LocalJumpError when the method has no block, as CRuby's rb_need_block; it reads the block of the enclosing method, so it is supported only where the mruby state is in scope"
+    },
     "RB_FLOAT_TYPE_P": {
       "kind": "template",
       "arity": 1,
