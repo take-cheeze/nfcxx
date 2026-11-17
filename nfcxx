@@ -886,7 +886,7 @@ link_records_rm
 if [ ${#cu_inputs[@]} = 1 ] && [ -z "${NFCXX_CUDA_HOST_SYMBOLS:-}" ] && [ $preprocess = 0 ] && [ -f "$out" ] \
    && [ -s "$cudatmp/$(basename "${cu_inputs[0]}" .cu).dev.kernels.unresolved" ]; then
   hsyms=$cudatmp/host.syms
-  nm -C "$out" 2>/dev/null | sed 's/_INTERNAL_[A-Za-z0-9_]*:://g' > "$hsyms" || true
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-second-pass.rb" host-symbols "$out" "$hsyms" || true   # nm -C, the _INTERNAL_ scopes removed
   # the unresolved kernels that the host symbols define: scripts/nfcxx-second-pass.rb found (B7)
   found=$("${RUBY:-ruby}" "$root/scripts/nfcxx-second-pass.rb" found "$hsyms" "$cudatmp/$(basename "${cu_inputs[0]}" .cu).dev.kernels.unresolved")
   if [ $found = 1 ]; then

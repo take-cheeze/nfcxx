@@ -31,5 +31,12 @@ run_case multi 'bar<1>\n' 'foo\nbar\n'
 run_case empty-syms '' 'foo\n'
 run_case empty-unres 'foo<1>\n' ''
 run_case internal-scope 'k<1>\n' 'k\n'
+# the host symbols of a real object (nm -C | sed), as the driver writes them
+printf 'namespace _INTERNAL_1234 { int kern(int x) { return x; } }\nint plain(int y) { return y; }\ntemplate<class T> T tmpl(T v) { return v; }\nint use() { return plain(1) + tmpl<int>(2) + _INTERNAL_1234::kern(3); }\n' > "$t/h.cpp"
+if ! (cd "$t" && g++ -c h.cpp -o h.o); then fail=$((fail + 1)); echo "FAIL host symbols: the test object did not build"; elif true; then
+  bash_syms=$(nm -C "$t/h.o" 2>/dev/null | sed 's/_INTERNAL_[A-Za-z0-9_]*:://g')
+  ruby "$repo/scripts/nfcxx-second-pass.rb" host-symbols "$t/h.o" "$t/ruby.syms"
+  if [ "$bash_syms" = "$(cat "$t/ruby.syms")" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL host symbols"; fi
+fi
 echo "driver-second-pass: $pass passed, $fail failed"
 [ $fail = 0 ]
