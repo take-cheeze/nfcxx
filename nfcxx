@@ -436,7 +436,8 @@ trace_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-trace-unit.rb" plan srcs0_set="$
 eval "$trace_sh"; export NFCXX_TRACE_UNIT=$trace_unit   # the back-end scripts it runs log under it too (scripts/nfcxx-trace-unit.rb)
 # The time log is read by every script that sources scripts/trace.sh (the gcc-cc that eccp runs, ...): the one setting that is
 # handed to the processes below as an environment variable, as NFCXX_TRACE is (trace_begin).
-[ -z "$time_log" ] || export NFCXX_TIME_LOG=$(abs_path "$time_log")
+tl_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-time-log.rb" plan time_log="$time_log") || exit $?   # NFCXX_TIME_LOG (scripts/nfcxx-time-log.rb)
+[ -z "$tl_sh" ] || eval "$tl_sh"
 [ -z "$trace" ] || trace_begin "$trace"
 cu_prepare
 cpp2_prepare
