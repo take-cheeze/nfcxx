@@ -1415,6 +1415,7 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ary_new3_va tools/cext2mrbge
 check test "$rc" -eq 0
 check test ! -e "$work/api_ary_new3_va/NOT_BUILDABLE"
 check grep -qF '#define pair_of(...) nfcx_ary_new3(api_ary_new3_va_bc2_mrb, __VA_ARGS__)' "$work/api_ary_new3_va/src/api_ary_new3_va.c"
+check grep -qF 'nfcx_funcall_va(' "$work/api_ary_new3_va/src/api_ary_new3_va.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?

@@ -4705,6 +4705,23 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     end
     id_text = psl(text, args[1][0], args[1][1]).strip
     n_text = psl(text, args[2][0], args[2][1]).strip
+    # rb_funcall(recv, id, __VA_ARGS__) in a variadic macro: the count and the arguments come from each expansion, so the call is
+    # the variadic helper nfcx_funcall_va(mrb, recv, id, n, args...), defined once before the macro (up to 16 arguments)
+    if n_text == '__VA_ARGS__' && args.size == 3 && (dpre = define_at(rel, s))
+      unless (@prelude_done ||= Set.new).include?([rel, 'nfcx_funcall_va'])
+        @prelude_done << [rel, 'nfcx_funcall_va']
+        ed.add(dpre[1], dpre[1], "#include <stdarg.h>\n" \
+          "static mrb_value nfcx_funcall_va(mrb_state *mrb, mrb_value recv, mrb_sym mid, int n, ...) {\n" \
+          "  mrb_value argv[16]; va_list ap; int i;\n" \
+          "  if (n < 0 || n > 16) mrb_raise(mrb, E_ARGUMENT_ERROR, \"too many arguments\");\n" \
+          "  va_start(ap, n);\n  for (i = 0; i < n; i++) argv[i] = va_arg(ap, mrb_value);\n" \
+          "  va_end(ap);\n  return mrb_funcall_argv(mrb, recv, mid, n, argv);\n}\n")
+      end
+      ed.add(s, s + 'rb_funcall'.length, 'nfcx_funcall_va')
+      ed.add(nxt + 1, nxt + 1, "#{mrb_tok(rel, s)}, ")
+      rewrite(rel, s, 'rb_funcall', 'nfcx_funcall_va(mrb, recv, mid, n, args...)', 'the count and the arguments come from the expansion (a variadic helper)')
+      return
+    end
     unless n_text.match?(/\A\d+\z/) && args.size == 3 + n_text.to_i
       refuse(rel, s, 'rb_funcall', 'the argument count must be an integer literal that matches the arguments')
       return
