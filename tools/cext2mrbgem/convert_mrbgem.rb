@@ -5241,6 +5241,25 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       rewrite(rel, s, name, new, 'a class or module check by tag (singleton classes are CRuby T_CLASS and mruby MRB_TT_SCLASS); the message is generic')
       return
     end
+    # Check_Type(x, T_RATIONAL / T_COMPLEX): the class test of the gem's class, raising TypeError as CRuby does (the gem is a dependency)
+    class_gem_c = { 'T_RATIONAL' => ['Rational', 'mruby-rational'], 'T_COMPLEX' => ['Complex', 'mruby-complex'] }[tname.sub(/\ARUBY_/, '')]
+    if class_gem_c
+      cls_name, gem_name = class_gem_c
+      fnc = enclosing_func(rel, s)
+      obj_c = psl(text, args[0][0], args[0][1]).strip
+      unless fnc && ((@valid_reg_names || Set.new).include?(fnc['name']) || (@needs || Set.new).include?(fnc['name'])) &&
+             obj_c.match?(/\A[A-Za-z_][#{WC}]*\z/)
+        refuse(rel, s, name, "#{tname} needs the mruby state and a plain object (the #{cls_name} class test)")
+        return
+      end
+      tok_c = mrb_tok(rel, s)
+      new_c = "(mrb_obj_is_kind_of(#{tok_c}, #{obj_c}, mrb_class_get(#{tok_c}, \"#{cls_name}\")) ? (void)0 : " \
+              "mrb_raise(#{tok_c}, E_TYPE_ERROR, \"wrong argument type (expected #{cls_name})\"))"
+      ed.add(s, close + 1, new_c)
+      (@gem_deps ||= Set.new) << gem_name
+      rewrite(rel, s, name, new_c, "a #{cls_name} check by class (the #{gem_name} gem); the message is generic")
+      return
+    end
     ent = @entries[tname]
     if !@type_check_refused[tname].nil? || ent.nil? || !%w[exact caveat].include?(ent['type_check']) ||
        !(ent['mruby'] || '').start_with?('MRB_TT_')
