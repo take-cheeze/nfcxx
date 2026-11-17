@@ -4595,6 +4595,23 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     cp = match_close(masked, nxt)
     args = cp > 0 ? split_args(masked, nxt, cp) : []
     n_text = args.empty? ? '' : psl(text, args[0][0], args[0][1]).strip
+    # rb_ary_new3(__VA_ARGS__) in a variadic macro: the count and the values come from each expansion, so the call is the
+    # variadic helper nfcx_ary_new3(mrb, n, values...), defined once before the macro (its count is the first argument)
+    if n_text == '__VA_ARGS__' && (dpre = define_at(rel, s))
+      unless (@prelude_done ||= Set.new).include?([rel, 'nfcx_ary_new3'])
+        @prelude_done << [rel, 'nfcx_ary_new3']
+        ed.add(dpre[1], dpre[1], "#include <stdarg.h>\n" \
+          "static mrb_value nfcx_ary_new3(mrb_state *mrb, int n, ...) {\n" \
+          "  mrb_value ary = mrb_ary_new_capa(mrb, n);\n" \
+          "  va_list ap; int i;\n  va_start(ap, n);\n" \
+          "  for (i = 0; i < n; i++) mrb_ary_push(mrb, ary, va_arg(ap, mrb_value));\n" \
+          "  va_end(ap);\n  return ary;\n}\n")
+      end
+      ed.add(s, s + 'rb_ary_new3'.length, 'nfcx_ary_new3')
+      ed.add(nxt + 1, nxt + 1, "#{mrb_tok(rel, s)}, ")
+      rewrite(rel, s, 'rb_ary_new3', 'nfcx_ary_new3(mrb, __VA_ARGS__)', 'the count and values come from the expansion (a variadic helper)')
+      return
+    end
     unless n_text.match?(/\A\d+\z/) && args.size == 1 + n_text.to_i
       refuse(rel, s, 'rb_ary_new3', 'the count must be an integer literal that matches the values (not supported)')
       return
