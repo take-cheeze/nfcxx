@@ -4568,6 +4568,14 @@ end
           entry = entry.merge('template' => 'mrb_class($m, $0)')
         end
       end
+      # a template that wraps its class result in mrb_obj_value (rb_obj_class) in a class-only argument position is the class
+      # pointer itself (rb_class2name's argument is an RClass *): the wrap is dropped
+      if entry['template'].to_s.start_with?('mrb_obj_value(') && entry['template'].to_s.end_with?(')')
+        cc_w, ci_w = call_context(masked, s)
+        if cc_w && (@special_pos[cc_w] || []).include?(ci_w)
+          entry = entry.merge('template' => entry['template'][14...-1])
+        end
+      end
       # a template that needs a file-scope helper (api_map "prelude": its definition text, "prelude_name": its name) gets it once
       # per file, before the enclosing function (as nfcx_block_arg is)
       if entry['prelude']
