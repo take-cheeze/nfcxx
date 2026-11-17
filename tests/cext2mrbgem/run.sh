@@ -1534,6 +1534,13 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_allocv_pair/NOT_BUILDABLE"
 check grep -qF 'char *buffer = (char *)mrb_malloc(mrb, sizeof(char) * (len + 1));' "$work/api_allocv_pair/src/api_allocv_pair.c"
 check grep -qF 'mrb_free(mrb, buffer);' "$work/api_allocv_pair/src/api_allocv_pair.c"
+# 2zzz137. --stored-tag T_NIL=VALUE (the build configuration names T_NIL a stored integer tag) maps the tag's uses to the value; without it the
+# tag stays a refusal (the fork cannot tell nil from false by type).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_stored_tag --stored-tag T_NIL=0xf0 tools/cext2mrbgem/fixtures/api_stored_tag/ext/api_stored_tag "$work/api_stored_tag" > "$work/api_stored_tag.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_stored_tag/NOT_BUILDABLE"
+check grep -qF 'case 0xf0: return mrb_nil_value();' "$work/api_stored_tag/src/api_stored_tag.c"
+check grep -qF 'it.tag = 0xf0;' "$work/api_stored_tag/src/api_stored_tag.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?

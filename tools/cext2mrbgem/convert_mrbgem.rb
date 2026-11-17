@@ -3894,6 +3894,15 @@ end
       elsif UNKNOWN_RE.match?(name) && !local_syms.include?(name) && !local_value_at?(rel, s, name) &&
             !(@local_tags.include?(name) && psl(masked, [s - 40, 0].max, s).match?(/\b(?:struct|union|enum)[ \t\n]+\z/))
         # a CRuby type tag the fork cannot test has its recorded reason (type_check_refused), not a generic one
+        stored_key = name.sub(/\ARUBY_/, '')
+        if ($stored_tags || {}).key?(stored_key) && !psl(masked, [s - 40, 0].max, s).match?(/\b(?:struct|union|enum)[ \t\n]+\z/)
+          # a tag the build configuration names as stored (--stored-tag NAME=VALUE; CRuby's RUBY_ alias too): the file keeps it
+          # as an integer tag
+          val = $stored_tags[stored_key]
+          ed.add(s, e, val)
+          rewrite(rel, s, name, val, "a stored tag (--stored-tag): the file keeps #{stored_key} as the integer tag #{val}, not a VALUE type test")
+          next
+        end
         refuse(rel, s, name, @type_check_refused[name] || @unmapped_reasons[name] || 'no entry in api_map.json')
       elsif @class_vars.include?(name)
         next if @decl_name_pos.include?([rel, s]) || is_param(rel, s, name)
@@ -5822,6 +5831,9 @@ def main(argv)
       defines << args.shift
     elsif opt == '--undefine' && !args.empty?
       undefines << args.shift
+    elsif opt == '--stored-tag' && !args.empty? && args.first.include?('=')
+      tag_name, tag_value = args.shift.split('=', 2)
+      ($stored_tags ||= {})[tag_name] = tag_value
     else
       args = nil
       break
@@ -5829,7 +5841,7 @@ def main(argv)
   end
   if args.nil? || args.size != 2
     warn 'usage: convert_mrbgem.rb [--name GEM] [--scanner auto|libclang|regex] [--define NAME[=VALUE]]... [--undefine NAME]... ' \
-         '<cext_dir> <out_dir>'
+         '[--stored-tag NAME=VALUE]... <cext_dir> <out_dir>'
     return 1
   end
   Converter.new(args[0], args[1], name, scanner, defines, undefines).run
