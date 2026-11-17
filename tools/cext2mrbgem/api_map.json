@@ -17,11 +17,11 @@
     "T_TRUE": "not in the type-check subset of this change (refused as listed); mruby's MRB_TT_TRUE (include/mruby/value.h:107) is true only, so it can be added as its own change",
     "T_UNDEF": "CRuby's Qundef is an internal marker, not a Ruby object type; mruby's MRB_TT_UNDEF (value.h:111) is a separate value kind",
     "T_STRUCT": "the fork has no MRB_TT_STRUCT tag (include/mruby/value.h:106-131); Struct instances are an mrbgem class (mrbgems/mruby-struct), so a type test would be a class test, which is not made here",
-    "T_REGEXP": "stuck point: the fork has no Regexp tag (include/mruby/value.h:106-131) and no mrbgem defines a Regexp class (mrbgems/ lists no mruby-regexp), so there is nothing to compare with",
-    "T_RATIONAL": "stuck point (gem dependency): converting it needs the mruby-rational gem in the build (a decision); the fork has no MRB_TT_RATIONAL tag: Rational is the mruby-rational mrbgem class (mrbgems/mruby-rational), so a test is mrb_obj_is_kind_of against it. Where the state is in scope RB_TYPE_P converts to that test; a case label of a switch cannot test a class, so a switch on T_RATIONAL needs an if-chain (not made here); Check_Type in a function without the state is refused",
-    "T_COMPLEX": "stuck point (gem dependency): converting it needs the mruby-complex gem in the build (a decision); the fork has no MRB_TT_COMPLEX tag; Complex is the mruby-complex mrbgem class (mrbgems/mruby-complex), so a type test is a class test against that gem, which is not made here"
+    "T_REGEXP": "stuck point: the fork has no Regexp tag (include/mruby/value.h:106-131) and no mrbgem defines a Regexp class (mrbgems/ lists no mruby-regexp), so there is nothing to compare with"
   },
   "unmapped_reasons": {
+    "T_RATIONAL": "stuck point (gem dependency): a Rational test is the mruby-rational class test, which needs the state and the gem (the decision is made: the gem is a dependency when the test is emitted); a bare use has no test to make here",
+    "T_COMPLEX": "stuck point (gem dependency): a Complex test is the mruby-complex class test, which needs the state and the gem (the decision is made: the gem is a dependency when the test is emitted); a bare use has no test to make here",
     "_comment": "A name with no api_map entry is refused with the reason given here (the converter's no-entry path). PRIsVALUE is converted where rb_raise and rb_sprintf take it; elsewhere it is an argument of rb_enc_sprintf, which takes an rb_encoding *.",
     "PRIsVALUE": "stuck point (Encoding): PRIsVALUE outside rb_raise and rb_sprintf is an argument of rb_enc_sprintf, which takes an rb_encoding *; the fork has no Encoding (accepted stuck point)",
     "rb_enc_from_index": "stuck point (Encoding): an encoding index; the fork has no Encoding (accepted stuck point)",

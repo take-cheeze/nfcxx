@@ -3817,6 +3817,9 @@ end
         end
         ed.add(s, e, @types[name])
         rewrite(rel, s, name, @types[name])
+      elsif (name == 'T_RATIONAL' || name == 'T_COMPLEX') && (cc_t = call_context(masked, s)) && cc_t[0] == 'RB_TYPE_P'
+        # the type argument of an RB_TYPE_P that is rewritten to a class test (or refused with its own reason): not a use here
+        next
       elsif UNKNOWN_RE.match?(name) && !local_syms.include?(name) && !local_value_at?(rel, s, name) &&
             !(@local_tags.include?(name) && psl(masked, [s - 40, 0].max, s).match?(/\b(?:struct|union|enum)[ \t\n]+\z/))
         # a CRuby type tag the fork cannot test has its recorded reason (type_check_refused), not a generic one
@@ -5168,15 +5171,20 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     # is true only for nil, and RB_TYPE_P(v, T_FALSE) only for false (Qfalse)
     # T_RATIONAL: the fork's rational gem makes Rational objects as data (no exact tag), but CRuby's Rational class has no
     # subclasses, so the class test is the match. It needs the mruby state, which only a function that has it can pass.
-    if tname.sub(/\ARUBY_/, '') == 'T_RATIONAL'
+    # T_RATIONAL and T_COMPLEX: the classes of the mruby-rational and mruby-complex gems (data objects, no subclasses in CRuby),
+    # so the test is the class test; the gem is a dependency of the generated mrbgem (only when such a test is emitted)
+    class_gem = { 'T_RATIONAL' => ['Rational', 'mruby-rational'], 'T_COMPLEX' => ['Complex', 'mruby-complex'] }[tname.sub(/\ARUBY_/, '')]
+    if class_gem
+      cls_name, gem_name = class_gem
       fnr = enclosing_func(rel, s)
       unless fnr && ((@valid_reg_names || Set.new).include?(fnr['name']) || (@needs || Set.new).include?(fnr['name']))
-        refuse(rel, s, 'RB_TYPE_P', 'T_RATIONAL needs the mruby state (the Rational class test), which this function does not have')
+        refuse(rel, s, 'RB_TYPE_P', "#{tname} needs the mruby state (the #{cls_name} class test), which this function does not have")
         return
       end
-      new = "mrb_obj_is_kind_of(#{mrb_tok(rel, s)}, #{obj}, mrb_class_get(#{mrb_tok(rel, s)}, \"Rational\"))"
+      new = "mrb_obj_is_kind_of(#{mrb_tok(rel, s)}, #{obj}, mrb_class_get(#{mrb_tok(rel, s)}, \"#{cls_name}\"))"
       ed.add(s, close + 1, new)
-      rewrite(rel, s, 'RB_TYPE_P', new, 'a Rational test by class (mruby-rational gem: Rational is a data object; CRuby Rational has no subclasses)')
+      (@gem_deps ||= Set.new) << gem_name
+      rewrite(rel, s, 'RB_TYPE_P', new, "a #{cls_name} test by class (the #{gem_name} gem; CRuby #{cls_name} has no subclasses)")
       return
     end
     pred = { 'T_NIL' => 'mrb_nil_p', 'T_FALSE' => 'mrb_false_p' }[tname.sub(/\ARUBY_/, '')]
@@ -5446,6 +5454,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       "  spec.summary = 'converted from CRuby ext/#{@name}'",
     ]
     rake << "  spec.add_dependency 'mruby-uv'  # thread model: nfcx_uv_thread.h" if uses_uv_thread?
+    (@gem_deps || Set.new).to_a.sort.each { |g| rake << "  spec.add_dependency '#{g}'  # a class test in the converted code" }
     rake += ['end', '']
     write_bytes(File.join(@out_dir, 'mrbgem.rake'), rake.join("\n"))
     lines = ["BC2CPP-MRBGEM refusals for ext/#{@name}",

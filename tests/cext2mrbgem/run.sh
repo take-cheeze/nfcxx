@@ -1419,6 +1419,13 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_ary_new3_va/NOT_BUILDABLE"
 check grep -qF '#define pair_of(...) nfcx_ary_new3(api_ary_new3_va_bc2_mrb, __VA_ARGS__)' "$work/api_ary_new3_va/src/api_ary_new3_va.c"
 check grep -qF 'nfcx_funcall_va(' "$work/api_ary_new3_va/src/api_ary_new3_va.c"
+# 2zzz119. a Rational test (RB_TYPE_P T_RATIONAL) is a class test against the mruby-rational gem's class, and the generated
+# mrbgem depends on that gem (only because such a test is emitted).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rational_gem tools/cext2mrbgem/fixtures/api_rational_gem/ext/api_rational_gem "$work/api_rational_gem" > "$work/api_rational_gem.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_rational_gem/NOT_BUILDABLE"
+check grep -qF 'mrb_class_get(mrb, "Rational")' "$work/api_rational_gem/src/api_rational_gem.c"
+check grep -qF "spec.add_dependency 'mruby-rational'" "$work/api_rational_gem/mrbgem.rake"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?
