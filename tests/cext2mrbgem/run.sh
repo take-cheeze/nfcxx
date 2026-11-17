@@ -1388,6 +1388,12 @@ check grep -qF 'mrb_free' "$work/api_dtype_mark/src/api_dtype_mark.c"
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_defined_cond tools/cext2mrbgem/fixtures/api_defined_cond/ext/api_defined_cond "$work/api_defined_cond" > "$work/api_defined_cond.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check test ! -e "$work/api_defined_cond/NOT_BUILDABLE"
+# 2zzz115. rb_hash_foreach with a callback given by address (&cb) and a hash held in a struct field: the callback is the
+# hash callback (its occurrence is the identifier after the &), so it is threaded and the call converts.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_amp tools/cext2mrbgem/fixtures/api_hash_amp/ext/api_hash_amp "$work/api_hash_amp" > "$work/api_hash_amp.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_hash_amp/NOT_BUILDABLE"
+check grep -qF 'mrb_hash_foreach(mrb, RHASH(h->hash), cb_count, (void *)&count);' "$work/api_hash_amp/src/api_hash_amp.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?

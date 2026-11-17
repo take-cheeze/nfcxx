@@ -1804,8 +1804,11 @@ end
         h = args[0][2]
         cb = args[1][2]
         arg = args[2][2]
-        next unless h.match?(/\A[A-Za-z_][#{WC}]*\z/) && cb.match?(/\A&?[A-Za-z_][#{WC}]*\z/)
+        next unless h.match?(/\A[A-Za-z_][#{WC}]*(?:(?:->|\.)[A-Za-z_][#{WC}]*)*\z/) && cb.match?(/\A&?[A-Za-z_][#{WC}]*\z/)
+        raw_cb = cb
         cb = cb.delete('&')
+        # the callback's position is its identifier's (after a & address-of), where its occurrence is recorded
+        cb_ident_pos = args[1][0] + raw_cb.index(cb)
         next unless arg.match?(/\A(?:\(VALUE\)\s*)?&?[A-Za-z_][#{WC}]*\z/)
         # a static callback defined in this file, with no other use in the file (its definition and this call)
         d = (@defs[cb] || []).select { |x| x['file'] == rel }
@@ -1813,7 +1816,7 @@ end
         next unless (@occ[cb] || []).count { |r, _, _| r == rel } == 2
         pars = split_args(masked, d[0]['po'], d[0]['pc']).map { |a2, b2| [a2, b2, psl(text, a2, b2)] }
         out << { rel: rel, s: s, e: close + 1, h: h, cb: cb, fe: fe_name, arg: arg.sub(/\A\(VALUE\)\s*/, ''),
-                 cb_pos: args[1][0], cb_file: d[0]['file'], param_edit: [pars[2][0], pars[2][0] + 5] }
+                 cb_pos: cb_ident_pos, cb_file: d[0]['file'], param_edit: [pars[2][0], pars[2][0] + 5] }
       end
     end
     out
