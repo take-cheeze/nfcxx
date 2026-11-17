@@ -4165,6 +4165,14 @@ end
         refuse(rel, s, name, "expected #{entry['arity']} arguments, found #{texts.size}")
         return
       end
+      # CLASS_OF(x) in a class-only argument position (rb_undef_method's class) is the RClass * itself: CRuby's class pointer, not
+      # the VALUE the template wraps for an expression use
+      if name == 'CLASS_OF'
+        cc_c, ci_c = call_context(masked, s)
+        if cc_c && (@special_pos[cc_c] || []).include?(ci_c)
+          entry = entry.merge('template' => 'mrb_class($m, $0)')
+        end
+      end
       # a template that needs a file-scope helper (api_map "prelude": its definition text, "prelude_name": its name) gets it once
       # per file, before the enclosing function (as nfcx_block_arg is)
       if entry['prelude']
