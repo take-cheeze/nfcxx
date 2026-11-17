@@ -2447,7 +2447,7 @@ end
     needs = Set.new(forced)
     ids.each do |name, s|
       # a class-test type tag (RB_TYPE_P(x, T_RATIONAL) and the like) is a class lookup, which needs the mruby state
-      needs << name if s.any? { |i| (@entries[i] || {})['needs_mrb'] || macro_needs.include?(i) || %w[T_RATIONAL T_COMPLEX T_STRUCT].include?(i) }
+      needs << name if s.any? { |i| (@entries[i] || {})['needs_mrb'] || macro_needs.include?(i) || %w[T_RATIONAL T_COMPLEX T_STRUCT RB_ALLOCV_N RB_ALLOCV_END].include?(i) }
     end
     changed = true
     while changed
@@ -2752,7 +2752,16 @@ use_problem = lambda do |name, use|
       bad.each do |name, caller|
         @split_names.delete(name)
         cands.delete(name)
-        @split_reason[name] = "its direct caller #{caller} has no mruby state in scope (not a method, Init or threaded helper)"
+        stuck_callee = (@occ[caller] || []).map { |crel, cs, _ce| [crel, cs] }.filter_map do |crel, cs|
+          cm = @files[crel]['masked']
+          op, callee_n = innermost_open(cm, cs)
+          callee_n if op == '(' && callee_n && (ur = @unmapped_reasons[callee_n]).is_a?(String) && ur.start_with?('stuck point')
+        end.first
+        @split_reason[name] = if stuck_callee
+                                "stuck point (#{stuck_callee}): the caller #{caller} is passed to #{stuck_callee}, which has no mruby form (its reason is recorded)"
+                              else
+                                "its direct caller #{caller} has no mruby state in scope (not a method, Init or threaded helper)"
+                              end
         refuse_direct_uses(name)
       end
     end
@@ -4946,6 +4955,62 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
                   : 'the receiver and arguments are unchanged; the method name is an interned C string (mrb_funcall_argv)')
   end
 
+  # RB_ALLOCV_N(type, v, n) in a declaration `T *p = RB_ALLOCV_N(type, v, n);` is mrb_malloc of n elements; RB_ALLOCV_END(v) is
+  # the mrb_free of p. The pair must be in one function with no return or goto between (else the buffer would leak: stuck).
+  def allocv_n_special(rel, s, nxt, called)
+    masked = @files[rel]['masked']
+    ed = @edits[rel]
+    unless called
+      refuse(rel, s, 'RB_ALLOCV_N', 'used without a call')
+      return
+    end
+    close = match_close(masked, nxt)
+    args = close > 0 ? split_args(masked, nxt, close) : []
+    text = @files[rel]['text']
+    fn = enclosing_func(rel, s)
+    before = masked[[s - 160, 0].max...s].to_s
+    decl = before.match(/([A-Za-z_]\w*)[ \t\n]*\*[ \t\n]*([A-Za-z_]\w*)[ \t\n]*=[ \t\n]*\z/)
+    if args.size != 3 || fn.nil? || decl.nil?
+      refuse(rel, s, 'RB_ALLOCV_N', 'stuck point (temporary buffer): RB_ALLOCV_N is used other than as a pointer declaration (T *p = RB_ALLOCV_N(...)) in a function, so its free has no mruby form here')
+      return
+    end
+    type = decl[1]
+    ptr = decl[2]
+    v = psl(text, args[1][0], args[1][1]).strip
+    n = psl(text, args[2][0], args[2][1]).strip
+    unless v.match?(/\A[A-Za-z_]\w*\z/)
+      refuse(rel, s, 'RB_ALLOCV_N', 'stuck point (temporary buffer): the VALUE holder of RB_ALLOCV_N is not a plain name')
+      return
+    end
+    (@allocv ||= {})[[rel, v]] = { pos: s, ptr: ptr, fn: fn['name'], type: type }
+    ed.add(s, close + 1, "(#{type} *)mrb_malloc(#{mrb_tok(rel, s)}, sizeof(#{type}) * (#{n}))")
+    rewrite(rel, s, 'RB_ALLOCV_N', "(#{type} *)mrb_malloc(...)", 'a temporary buffer: mrb_malloc, freed by RB_ALLOCV_END of the same VALUE')
+  end
+
+  def allocv_end_special(rel, s, nxt, called)
+    masked = @files[rel]['masked']
+    ed = @edits[rel]
+    close = called ? match_close(masked, nxt) : -1
+    args = close > 0 ? split_args(masked, nxt, close) : []
+    rec = nil
+    if args.size == 1
+      v = psl(@files[rel]['text'], args[0][0], args[0][1]).strip
+      rec = (@allocv || {})[[rel, v]]
+    end
+    fn = enclosing_func(rel, s)
+    if rec.nil? || fn.nil? || rec[:fn] != fn['name'] || rec[:pos] >= s
+      refuse(rel, s, 'RB_ALLOCV_END', 'stuck point (temporary buffer): RB_ALLOCV_END has no RB_ALLOCV_N of its VALUE before it in the same function')
+      return
+    end
+    between = masked[rec[:pos]...s].to_s
+    if between.match?(/\b(?:return|goto)\b/)
+      refuse(rel, s, 'RB_ALLOCV_END', 'stuck point (temporary buffer): a return or goto between RB_ALLOCV_N and RB_ALLOCV_END would leak the buffer')
+      return
+    end
+    ed.add(s, close + 1, "mrb_free(#{mrb_tok(rel, s)}, #{rec[:ptr]})")
+    rewrite(rel, s, 'RB_ALLOCV_END', "mrb_free(..., #{rec[:ptr]})", 'the temporary buffer is freed (mrb_free)')
+  end
+
   def special(rel, s, e, name, entry, nxt, called)
     masked = @files[rel]['masked']
     text = @files[rel]['text']
@@ -4956,6 +5021,14 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     end
     if name == 'rb_funcall'
       funcall_special(rel, s, nxt, called)
+      return
+    end
+    if name == 'RB_ALLOCV_N'
+      allocv_n_special(rel, s, nxt, called)
+      return
+    end
+    if name == 'RB_ALLOCV_END'
+      allocv_end_special(rel, s, nxt, called)
       return
     end
     if name == 'rb_ary_new3'

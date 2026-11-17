@@ -2647,6 +2647,16 @@
       "template": "nfcx_memsearch($0, $1, $2, $3)",
       "caveat": "CRuby's rb_memsearch(x, m, y, n, enc) is the byte offset of the m-byte x in the n-byte y, or -1; the encoding is dropped (mruby strings carry none), so the search is bytewise"
     },
+    "RB_ALLOCV_N": {
+      "kind": "special",
+      "needs_mrb": true,
+      "caveat": "CRuby's RB_ALLOCV_N(type, v, n) allocates a temporary buffer freed by RB_ALLOCV_END(v); converted to mrb_malloc, with the free at RB_ALLOCV_END of the same pointer (the declaration and the end must be in one function, with no return or goto between)"
+    },
+    "RB_ALLOCV_END": {
+      "kind": "special",
+      "needs_mrb": true,
+      "caveat": "the free of the buffer RB_ALLOCV_N allocated for this VALUE: mrb_free of that pointer"
+    },
     "PRIdVALUE": {
       "kind": "expr",
       "mruby": "\"ld\"",

@@ -1527,6 +1527,13 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_alias_thread tools/cext2mrbg
 check test "$rc" -eq 0
 check test ! -e "$work/api_alias_thread/NOT_BUILDABLE"
 check grep -qF 'return MakeOne(mrb, v);' "$work/api_alias_thread/src/api_alias_thread.c"
+# 2zzz136. RB_ALLOCV_N (a temporary buffer) in a pointer declaration is mrb_malloc, and RB_ALLOCV_END of its VALUE is the mrb_free of that
+# pointer; the pair converts. A return between them would leak the buffer, so that pair is a stuck point.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_allocv_pair tools/cext2mrbgem/fixtures/api_allocv_pair/ext/api_allocv_pair "$work/api_allocv_pair" > "$work/api_allocv_pair.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_allocv_pair/NOT_BUILDABLE"
+check grep -qF 'char *buffer = (char *)mrb_malloc(mrb, sizeof(char) * (len + 1));' "$work/api_allocv_pair/src/api_allocv_pair.c"
+check grep -qF 'mrb_free(mrb, buffer);' "$work/api_allocv_pair/src/api_allocv_pair.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?
