@@ -1484,6 +1484,13 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_enc_member tools/cext2mrbgem
 check test "$rc" -eq 0
 check test ! -e "$work/api_enc_member/NOT_BUILDABLE"
 check grep -qF 'mrb_str_new(mrb, H.data, H.size)' "$work/api_enc_member/src/api_enc_member.c"
+# 2zzz129. rb_memsearch (the byte offset of a needle in a haystack, or -1) is a prelude helper nfcx_memsearch; its encoding argument
+# is dropped (mruby strings carry no encoding), and the call converts.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_memsearch tools/cext2mrbgem/fixtures/api_memsearch/ext/api_memsearch "$work/api_memsearch" > "$work/api_memsearch.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_memsearch/NOT_BUILDABLE"
+check grep -qF 'static long nfcx_memsearch(const char *x, long m, const char *y, long n) {' "$work/api_memsearch/src/api_memsearch.c"
+check grep -qF 'nfcx_memsearch(RSTRING_PTR(needle), RSTRING_LEN(needle),' "$work/api_memsearch/src/api_memsearch.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?

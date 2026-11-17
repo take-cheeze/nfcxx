@@ -2635,6 +2635,16 @@
       "caveat": "CRuby's rb_typeddata_is_kind_of(obj, &type): obj is a typed data object whose type is type (or a subclass of it in CRuby). mruby's data objects carry one type descriptor and no parent chain, so this is an exact match; the second argument is the address of the type, as in the bigdecimal use"
     },
     "PRIuSIZE": {"kind": "expr", "mruby": "\"zu\"", "caveat": "C99 printf length modifier for size_t (CRuby's PRIuSIZE is this string literal)"},
+    "rb_memsearch": {
+      "kind": "template",
+      "arity": 5,
+      "needs_mrb": false,
+      "ignored_args": [4],
+      "prelude": "#include <string.h>\nstatic long nfcx_memsearch(const char *x, long m, const char *y, long n) {\n  long i;\n  if (m > n) return -1;\n  if (m == 0) return 0;\n  for (i = 0; i + m <= n; i++) if (memcmp(y + i, x, (size_t)m) == 0) return i;\n  return -1;\n}",
+      "prelude_name": "nfcx_memsearch",
+      "template": "nfcx_memsearch($0, $1, $2, $3)",
+      "caveat": "CRuby's rb_memsearch(x, m, y, n, enc) is the byte offset of the m-byte x in the n-byte y, or -1; the encoding is dropped (mruby strings carry none), so the search is bytewise"
+    },
     "PRIdVALUE": {
       "kind": "expr",
       "mruby": "\"ld\"",
