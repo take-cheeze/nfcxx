@@ -3348,7 +3348,11 @@ use_problem = lambda do |name, use|
         l_start, l_text = left_operand(masked, op_s)
         r_end, r_text = right_operand(masked, op_e)
         next if l_text.nil? || r_text.nil? || l_text.empty? || r_text.empty?
-        next unless value_operand?(l_text, value_names, vfields, rel, op_s) && value_operand?(r_text, value_names, vfields, rel, op_s)
+        # a comparison with a definite VALUE (a Q constant or an mrb_*_value call) compares VALUEs: the other operand is one too
+        # (CRuby compares VALUEs with ==; a member whose name is declared differently in other structs is not judged by name)
+        strong = ->(t) { t.strip.match?(/\AQ(?:nil|true|false|undef)\z/) || t.strip.match?(/\Amrb_\w*_value\s*\(/) }
+        next unless (value_operand?(l_text, value_names, vfields, rel, op_s) || strong.call(r_text)) &&
+                    (value_operand?(r_text, value_names, vfields, rel, op_s) || strong.call(l_text))
         # the insertions must not fall strictly inside another edit
         next if [l_start, r_end].any? { |q| @edits[rel].touches_strictly?(q) }
         @edits[rel].add(l_start, l_start, (op == '!=' ? '!' : '') + 'mrb_value_identical(')
@@ -3446,7 +3450,7 @@ use_problem = lambda do |name, use|
     return true if t.match?(/\A[A-Za-z_]\w*\z/) && value_names.include?(t)
     return true if t.match?(/\A[A-Za-z_]\w*\z/) && @class_vars.include?(t)
     # a class constant (rb_cObject, mrb->object_class) outside a class argument is its VALUE (mrb_obj_value)
-    if t.match?(/\A[A-Za-z_]\w*\z/) && (e = @entries[t]).is_a?(Hash) && e['kind'] == 'expr' && e['mruby'].to_s.match?(/\Amrb->\w+_class\z/)
+    if t.match?(/\A[A-Za-z_]\w*\z/) && (e = @entries[t]).is_a?(Hash) && e['kind'] == 'expr' && e['mruby'].to_s.match?(/\A(?:mrb->\w+_class|mrb_class_get\(mrb, "[^"]+"\)|mrb_exc_get\(mrb, "[^"]+"\))\z/)
       return true
     end
     return true if t.match?(/(?:->|\.)[A-Za-z_]\w*\z/) && vfields.include?(t[/([A-Za-z_]\w*)\z/])
@@ -4147,6 +4151,19 @@ end
         refuse(rel, s, name, @type_check_refused[name] || @unmapped_reasons[name] || 'no entry in api_map.json')
       elsif @class_vars.include?(name)
         next if @decl_name_pos.include?([rel, s]) || is_param(rel, s, name)
+        # a macro's parameter list (#define NAME(a, b)) names parameters, not class variables
+        ls_m = masked.rindex("\n", s - 1)
+        ls_m = ls_m ? ls_m + 1 : 0
+        mp = masked[ls_m...s].to_s.match(/\A[ \t]*#[ \t]*define[ \t]+[A-Za-z_]\w*\(([^)]*)\z/)
+        next if mp
+        # inside a function-like macro whose parameter has this name, the name is the parameter (in the body too)
+        dm_p = define_at(rel, s)
+        if dm_p
+          dl_s = masked.rindex("\n", dm_p[1]) ; dl_s = dl_s ? dl_s + 1 : 0
+          dl = masked[dl_s...(masked.index("\n", dm_p[1]) || masked.length)].to_s
+          dl_m = dl.match(/\A[ \t]*#[ \t]*define[ \t]+[A-Za-z_]\w*\(([^)]*)\)/)
+          next if dl_m && dl_m[1].split(',').map(&:strip).include?(name)
+        end
         # a struct or union field declaration named like a class variable is a field (not a use of the class variable)
         ob_f = enclosing_open_brace(masked, s)
         next if ob_f && masked[[ob_f - 60, 0].max...ob_f].to_s.match?(/\b(?:struct|union)[ \t\n]*[A-Za-z_]?\w*[ \t\n]*\z/) &&
