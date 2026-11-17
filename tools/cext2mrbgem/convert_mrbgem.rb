@@ -3190,6 +3190,8 @@ use_problem = lambda do |name, use|
         value_names = fn ? value_names_of(fn) : macro_value_names(rel, mac)
         is_value = lambda do |x|
           next true if qconst.match?(x)
+          # a tracked class variable is a VALUE (its mrb_obj_value wrap, made by the identifier pass)
+          next true if x.match?(/\A[A-Za-z_]\w*\z/) && @class_vars.include?(x) && !value_names.include?(x)
           next value_names.include?(x) if x.match?(/\A[A-Za-z_]\w*\z/)
           # a member path is VALUE when its last member is declared VALUE in every struct that declares that name
           x.match?(/(?:->|\.)([A-Za-z_]\w*)\z/) && vfields.include?(x[/([A-Za-z_]\w*)\z/])
@@ -3199,13 +3201,13 @@ use_problem = lambda do |name, use|
         next unless ok_a && ok_b
         # a function without the mruby state compares identity with mrb_value_identical (the fork's stateless test)
         stateless = fn ? !with_state.include?(fn['name']) : false
-        conv = ->(x) { qconst.match?(x) ? @entries[x]['mruby'] : x }
+        conv = ->(x) { qconst.match?(x) ? @entries[x]['mruby'] : (@class_vars.include?(x) && !value_names.include?(x) ? "mrb_obj_value(#{x})" : x) }
         # the only edits allowed inside the comparison are the rewrites of its own Q-constant operands (Qundef becomes
         # mrb_undef_value()); the comparison replaces them with the same text, so they are dropped
         if @edits[rel].overlaps(s0, e0)
           operand_spans = []
-          operand_spans << [m.begin(1), m.end(1), a] if qconst.match?(a)
-          operand_spans << [m.begin(3), m.end(3), b] if qconst.match?(b)
+          operand_spans << [m.begin(1), m.end(1), a] if qconst.match?(a) || (@class_vars.include?(a) && !value_names.include?(a))
+          operand_spans << [m.begin(3), m.end(3), b] if qconst.match?(b) || (@class_vars.include?(b) && !value_names.include?(b))
           inner = @edits[rel].overlapping(s0, e0)
           own = inner.select do |x, y, t|
             operand_spans.any? { |os, oe, name| x >= os && y <= oe && t == conv.call(name) }
