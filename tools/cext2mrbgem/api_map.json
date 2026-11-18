@@ -2689,6 +2689,8 @@
     },
     "PRIdSIZE": {"kind": "expr", "mruby": "\"zd\"", "caveat": "C99 printf length modifier for size_t (CRuby's PRIdSIZE is this string literal)"},
     "DECIMAL_SIZE_OF_BITS": {"kind": "template", "arity": 1, "template": "((($0) * 146 / 485) + 1)", "caveat": "CRuby's DECIMAL_SIZE_OF_BITS(n) is the number of decimal digits that n bits can need: (n * 146 / 485) + 1 (CRuby's util headers; pure arithmetic)"},
+    "rb_enc_interned_str_cstr": {"kind": "template", "arity": 2, "needs_mrb": true, "ignored_args": [1], "template": "mrb_str_new_cstr($m, $0)", "caveat": "CRuby's rb_enc_interned_str_cstr(cstr, enc) is an interned string in the encoding enc; mruby strings carry no encoding (the default is UTF-8 here), so the encoding argument is ignored and the string is a plain mruby string"},
+    "rb_utf8_encoding": {"kind": "expr", "mruby": "NULL", "caveat": "CRuby's rb_utf8_encoding() is the UTF-8 encoding object; mruby strings carry no encoding, so the value is not used (its uses are the encoding argument of calls whose entry ignores it)"},
     "PRI_SIZE_PREFIX": {"kind": "expr", "mruby": "\"z\"", "caveat": "CRuby's PRI_SIZE_PREFIX is the printf length modifier for size_t, the string the PRI*SIZE macros append to (C99 z)"},
     "PUREFUNC": {"kind": "template", "arity": 1, "template": "$0", "caveat": "PUREFUNC (CRuby's pure-function attribute) is a compiler hint: the declaration it wraps is kept, without the attribute"},
     "RARRAY_PTR": {"kind": "macro", "mruby": "RARRAY_PTR", "caveat": "mruby's RARRAY_PTR (include/mruby/array.h) is the array's element pointer, as CRuby's; the use reads elements. A write through it would need mruby's array modify step (not done here)"},
