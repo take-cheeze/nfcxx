@@ -393,13 +393,7 @@ if [ $preprocess = 1 ]; then
   exec "$hostcxx" -E "-std=${std#--}" ${pp_x[@]+${pp_x[@]+"${pp_x[@]}"}} ${ppflags[@]+${ppflags[@]+"${ppflags[@]}"}} ${cflags[@]+${cflags[@]+"${cflags[@]}"}} \
     ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"} ${pp_pre[@]+${pp_pre[@]+"${pp_pre[@]}"}} ${srcs[@]+${srcs[@]+"${srcs[@]}"}} ${pp_in[@]+${pp_in[@]+"${pp_in[@]}"}} ${pp_out[@]+"${pp_out[@]}"}
 fi
-if [ $stdin_src = 1 ]; then
-  echo "nfcxx: a source on stdin is supported only with -E" >&2; exit 2
-fi
-case $xlang in ""|c++|none) ;; *) echo "nfcxx: -x $xlang: only C++ sources (use nfcc for C)" >&2; exit 2 ;; esac
-if [ -n "$depmode" ] && [ $compile_only = 0 ]; then
-  echo "nfcxx: $depmode needs -c (dependency files are written for a compile only)" >&2; exit 2
-fi
+"${RUBY:-ruby}" "$root/scripts/nfcxx-argchecks.rb" check stdin_src="$stdin_src" xlang="$xlang" depmode="$depmode" compile_only="$compile_only" || exit $?   # the refusals (scripts/nfcxx-argchecks.rb)
 if [ $ncpp -gt 0 ] || [ $emit_c = 1 ] || { [ $nobj -gt 0 ] && [ ${#cfiles[@]} = 0 ]; }; then
   [ -x "$edg/eccp" ] || { echo "nfcxx: EDG not built; run scripts/setup-edg.sh" >&2; exit 2; }
 fi
