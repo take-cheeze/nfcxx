@@ -157,6 +157,8 @@ class ClosedWorld
     @constant_write_counts = Hash.new(0)
     # Struct.new(*MEMBERS, keyword_init: true) sites: their member names are checked after the scan (resolve_struct_splats).
     @deferred_struct_splats = []
+    # Modules named by a mixin whose target the analysis cannot place (resolve_deferred_mixin_modules).
+    @deferred_mixin_modules = []
     @class_constant_names = Set.new
     # CLASS ops that declare a name (not the root-level reopen of native_class_unshadowed?).
     @class_declared_names = Set.new
@@ -1720,6 +1722,7 @@ class ClosedWorld
       end
     end
     resolve_struct_splats
+    resolve_deferred_mixin_modules
     # A read name (scan_factory) can run a definition the scan only finishes seeing here.
     global!(:class_factory_escape) unless @factory_read_names.all? { |name| ownerless_native_dispatch_safe?(name) }
   end
@@ -1818,6 +1821,43 @@ class ClosedWorld
     @loop_installer_sites ||= LoopInstallers.sites(@registry)
   end
 
+  # The module argument of an include/prepend/extend send (one plain argument), as a constant reference, or nil.
+  def mixin_module_ref(irep, idx, insn)
+    return nil unless %w[include prepend extend].include?(insn.sym) && insn.reg && insn.plain_fixed_argc? && insn.argc == 1
+
+    resolve_mixin_ref(irep, idx, insn.reg + 1)
+  end
+
+  # A mixin the analysis cannot place (a singleton class, `extend` in a class body, a mixin made in a method) adds the
+  # module's methods to some receiver. Those names become dynamic: every call site of one keeps dispatching by name, and
+  # mruby's own lookup decides at run time (resolve_deferred_mixin_modules). Returns false (the caller refuses the closed
+  # world) when the module argument is not a constant.
+  def defer_mixin_module?(irep, idx, insn)
+    ref = mixin_module_ref(irep, idx, insn)
+    return false unless ref && ref[:name]
+
+    @deferred_mixin_modules << ref[:name]
+    true
+  end
+
+  # Every declared name ending in the referenced name is a candidate (a superset, so sound: the scope it was spelled in is
+  # not tracked here). A candidate-free reference names a module the program does not declare (a gem's), so the closed
+  # world is refused. The names are the methods of those modules as registered.
+  def resolve_deferred_mixin_modules
+    declared = @module_names | @class_decls.keys.to_set
+    @deferred_mixin_modules.each do |name|
+      bare = name.delete_prefix('::')
+      modules = declared.select { |decl| decl == bare || decl.end_with?("::#{bare}") }.to_set
+      if modules.empty?
+        global!(:dynamic_mixin)
+        next
+      end
+      @registry.each do |method_name, defs|
+        note_unknown_def(method_name, nil) if defs.any? { |d| modules.include?(d.owner) }
+      end
+    end
+  end
+
   # A file-scope `Const.include(Mod)` / `Const.prepend(Mod)` in the root body (explicit_mixin_refs): the registry records it
   # as a mixin of the owner when both constants resolve to declared names, so no ancestor is unknown. Any other explicit
   # receiver, or a constant that does not resolve, stays dynamic.
@@ -1848,7 +1888,9 @@ class ClosedWorld
       # (or marked unknown_mixins); runtime mixin changes are not.
       class_body_mixin = %w[include prepend].include?(name) && @walked.include?(irep.label) &&
                          BytecodeIR::Ops::SELF_SEND.include?(insn.op)
-      global!(:dynamic_mixin) unless class_body_mixin || explicit_mixin_accepted?(irep, idx, insn)
+      unless class_body_mixin || explicit_mixin_accepted?(irep, idx, insn) || defer_mixin_module?(irep, idx, insn)
+        global!(:dynamic_mixin)
+      end
 
       return
     end
