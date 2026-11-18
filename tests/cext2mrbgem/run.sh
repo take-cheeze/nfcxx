@@ -1663,6 +1663,15 @@ check test "$rc" -eq 0
 check grep -qF 'void (*emit)(struct fd_sink *s, mrb_value v);' "$work/api_fnptr_dispatch/src/api_fnptr_dispatch.c"
 check grep -qF 's->emit(s, mrb_fixnum_value((int)n));' "$work/api_fnptr_dispatch/src/api_fnptr_dispatch.c"
 check grep -qF 'static void fd_store(struct fd_sink *s, mrb_value v) {' "$work/api_fnptr_dispatch/src/api_fnptr_dispatch.c"
+# 2zzz158. the encoding index API: RB_ENCODING_GET and ENCODING_SET read and write a string's index, rb_enc_strlen counts UTF-8
+# characters, rb_enc_find_index looks an encoding up by name, and rb_eEncodingError is the fork's EncodingError class.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_enc_index tools/cext2mrbgem/fixtures/api_enc_index/ext/api_enc_index "$work/api_enc_index" > "$work/api_enc_index.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_enc_index/NOT_BUILDABLE"
+check grep -qF 'int i = rb_enc_get_index(str);' "$work/api_enc_index/src/api_enc_index.c"
+check grep -qF 'rb_enc_strlen(p, p + RSTRING_LEN(str), rb_utf8_encoding())' "$work/api_enc_index/src/api_enc_index.c"
+check grep -qF 'rb_enc_set_index(str, rb_usascii_encindex());' "$work/api_enc_index/src/api_enc_index.c"
+check grep -qF 'mrb_raisef(mrb, mrb_class_get(mrb, "EncodingError"), "bad encoding");' "$work/api_enc_index/src/api_enc_index.c"
 # 2zzz155. a struct field of CRuby's rb_encoding * type: the Encoding placeholder type is in the prelude (the declaration compiles),
 # and the include of ruby/encoding.h is not a blocking refusal (the placeholder covers it).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rb_encoding_field tools/cext2mrbgem/fixtures/api_rb_encoding_field/ext/api_rb_encoding_field "$work/api_rb_encoding_field" > "$work/api_rb_encoding_field.log" 2>&1 || rc=$?
