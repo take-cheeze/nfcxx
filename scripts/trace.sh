@@ -46,7 +46,7 @@ trace_flush() {
 # Driver only: start a trace file at $1 and record the whole run when the driver exits. Only the outermost driver
 # (NFCXX_TRACE_OWNER) writes the opening "[" and the closing "]", and owns the pending file (removed at its end).
 trace_begin() {
-  NFCXX_TRACE=$(abs_path "$1"); export NFCXX_TRACE
+  NFCXX_TRACE=$("${RUBY:-ruby}" "$(dirname "${BASH_SOURCE[0]}")/host-sys.rb" abs_path "$1"); export NFCXX_TRACE
   if [ -z "${NFCXX_TRACE_OWNER:-}" ]; then
     export NFCXX_TRACE_OWNER=$$
     "${RUBY:-ruby}" "$_trace_rb" open "$NFCXX_TRACE"
