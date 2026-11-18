@@ -5714,7 +5714,9 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         rewrite(rel, s, name, '0', 'an owned class variable (struct RClass *) initialized with a Q value: the null class pointer')
         return
       end
-      if %w[Qnil Qtrue Qfalse Qundef].include?(name) && !fs_init && enclosing_func(rel, s).nil? && define_at(rel, s).nil?
+      # (inside a macro, a Q constant of a brace initializer is the same constant: a table entry from a macro, f(N) { ..., Qnil })
+      in_init_brace = !define_at(rel, s).nil? && masked[[s - 160, 0].max...s].to_s.match?(/=\s*\{[^;]*\z/)
+      if %w[Qnil Qtrue Qfalse Qundef].include?(name) && !fs_init && enclosing_func(rel, s).nil? && (define_at(rel, s).nil? || in_init_brace)
         const_lit = { 'Qnil' => '((mrb_value){.value.i = 0, .tt = MRB_TT_FALSE})',
                       'Qtrue' => '((mrb_value){.value.i = 1, .tt = MRB_TT_TRUE})',
                       'Qfalse' => '((mrb_value){.value.i = 1, .tt = MRB_TT_FALSE})',
