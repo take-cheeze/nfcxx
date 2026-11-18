@@ -1,0 +1,11 @@
+MessagePack.class.to_s	Module
+MessagePack::Packer.class.to_s	Class
+MessagePack::Unpacker.class.to_s	Class
+MessagePack::Buffer.class.to_s	Class
+MessagePack::Packer.new.class.to_s	MessagePack::Packer
+MessagePack::Packer.new.class.to_s	MessagePack::Packer
+MessagePack::Buffer.class.to_s	Class
+MessagePack::Packer.new.class.to_s	MessagePack::Packer
+MessagePack::Unpacker.new.class.to_s	MessagePack::Unpacker
+MessagePack::Factory.new.class.to_s	MessagePack::Factory
+MessagePack::Buffer.new.class.to_s	MessagePack::Buffer

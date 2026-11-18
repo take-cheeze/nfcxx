@@ -349,8 +349,10 @@ check test "$rc" -eq 0
 check grep -qF 'mrb_obj_freeze(mrb, ary);' "$work/api_ary_freeze/src/api_ary_freeze.c"
 # 2zzz49. an object-like alias of a callback (#define alias real_cb) is not a use in its own define line: its invocations are.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_macro_ret_cb tools/cext2mrbgem/fixtures/api_macro_ret_cb/ext/api_macro_ret_cb "$work/api_macro_ret_cb" > "$work/api_macro_ret_cb.log" 2>&1 || rc=$?
-check test "$rc" -eq 2
-check grep -q 'mr_run2' "$work/api_macro_ret_cb/REFUSALS.txt"
+# a truth test of an int call (return mr_run2(...) ? Qtrue : Qfalse) is not an int returned as a VALUE: it converts (no refusal)
+check test "$rc" -eq 0
+check test ! -e "$work/api_macro_ret_cb/NOT_BUILDABLE"
+check grep -qF '? mrb_true_value() : mrb_false_value();' "$work/api_macro_ret_cb/src/api_macro_ret_cb.c"
 # 2zzz50. two files each define the same macro (f_negate): a file's macro has only its own file's uses.
 mkdir -p tools/cext2mrbgem/fixtures/api_macro_twofile/ext/api_macro_twofile
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_macro_twofile tools/cext2mrbgem/fixtures/api_macro_twofile/ext/api_macro_twofile "$work/api_macro_twofile" > "$work/api_macro_twofile.log" 2>&1 || rc=$?
@@ -613,9 +615,12 @@ check grep -qF 'if (!!(mrb_nil_p(obj)))' "$work/api_num_sym_ctl/src/api_num_sym_
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_type_refused tools/cext2mrbgem/fixtures/api_type_refused/ext/api_type_refused "$work/api_type_refused" > "$work/api_type_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check test -e "$work/api_type_refused/NOT_BUILDABLE"
-check grep -q '  RB_TYPE_P  T_DATA has no exact mruby type' "$work/api_type_refused/REFUSALS.txt"
+# T_DATA and T_FIXNUM are the api_map's caveat forms (type_check "caveat"): converted to their MRB_TT_ tags, not refused
+check test "$(grep -c '  RB_TYPE_P  T_DATA has no exact' "$work/api_type_refused/REFUSALS.txt")" -eq 0
+check grep -qF 'MRB_TT_DATA' "$work/api_type_refused/src/api_type_refused.c"
+check test "$(grep -c '  RB_TYPE_P  T_FIXNUM has no exact' "$work/api_type_refused/REFUSALS.txt")" -eq 0
+check grep -qF 'MRB_TT_FIXNUM' "$work/api_type_refused/src/api_type_refused.c"
 check grep -q "  RB_TYPE_P  object 'rb_ary_entry(a, 0)' is not a plain local variable" "$work/api_type_refused/REFUSALS.txt"
-check grep -q '  RB_TYPE_P  T_FIXNUM has no exact mruby type' "$work/api_type_refused/REFUSALS.txt"
 check grep -q '  RB_TYPE_P  stuck point (Bignum): the fork has no Bignum' "$work/api_type_refused/REFUSALS.txt"
 
 # 2m. class-name and method-undef calls (api_map.json batch C1): the class variable is passed as a struct RClass * (not

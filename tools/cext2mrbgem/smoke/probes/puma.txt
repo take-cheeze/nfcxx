@@ -1,1 +1,3 @@
 Puma::HttpParser.new.class.to_s	Puma::HttpParser
+Puma::HttpParser.new.finished?	false
+Puma::HttpParser.new.error?	false

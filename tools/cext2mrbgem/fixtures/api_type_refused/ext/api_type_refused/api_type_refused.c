@@ -1,6 +1,7 @@
 #include <ruby.h>
 
-/* RB_TYPE_P forms with no exact mruby comparison, or not a plain local: each stays refused with its reason. */
+/* RB_TYPE_P forms: T_DATA and T_FIXNUM are the caveat forms the api_map accepts (type_check "caveat"); a nested object and
+ * T_BIGNUM have no mruby form and stay refused with their reasons. */
 static VALUE mTypeRefused;
 
 static VALUE tr_data(VALUE self, VALUE obj) {

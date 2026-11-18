@@ -1780,6 +1780,34 @@
       "caveat": "the name must be a string literal: it is interned with mrb_intern_cstr at each call; CRuby checks the name is an ivar name, mruby does not",
       "value_lost": true
     },
+    "nfcx_ptr_of": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": false,
+      "template": "mrb_cptr($0)",
+      "caveat": "the pointer carried in a VALUE (the element of a VALUE array holding pointers): mruby's mrb_cptr; see nfcx_ptr_value"
+    },
+    "nfcx_int_value": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_fixnum_value($0)",
+      "caveat": "an integer carried in a VALUE (a fixnum, as CRuby's INT2FIX for a value that fits); read back with nfcx_int_of"
+    },
+    "nfcx_int_of": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": false,
+      "template": "mrb_fixnum($0)",
+      "caveat": "the integer of a fixnum VALUE (the element of a VALUE array holding integers); see nfcx_int_value"
+    },
+    "nfcx_ptr_value": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_cptr_value($m, $0)",
+      "caveat": "a pointer carried in a VALUE (mruby's CPTR value, include/mruby/value.h): the data of rb_protect and rb_rescue2 callbacks, read back with mrb_cptr; the name is the converter's own, written in the gem's sources in place of a (VALUE) cast of an address"
+    },
     "rb_protect": {
       "kind": "call",
       "mruby": "mrb_protect",
@@ -1943,6 +1971,56 @@
       "needs_mrb": true,
       "caveat": "the fork's mrb_iv_foreach over the object's instance variables: the callback gets (mrb, symbol, value, void *) (ID is mrb_sym); a result of 0 continues, non-zero stops, as CRuby ST_CONTINUE and ST_STOP"
     },
+    "rb_cBasicObject": {
+      "kind": "expr",
+      "mruby": "mrb_class_get(mrb, \"BasicObject\")",
+      "needs_mrb": true
+    },
+    "rb_hash_clear": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_hash_clear($m, $0)",
+      "caveat": "mruby's mrb_hash_clear returns the hash, as CRuby's rb_hash_clear"
+    },
+    "rb_hash_freeze": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "(MRB_SET_FROZEN_FLAG(mrb_obj_ptr($0)), $0)",
+      "caveat": "mruby freezes an object by setting its frozen flag (MRB_SET_FROZEN_FLAG, include/mruby/object.h); the value is returned as CRuby does"
+    },
+    "rb_obj_frozen_p": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "(mrb_immediate_p($0) || MRB_FROZEN_P(mrb_obj_ptr($0)))",
+      "caveat": "CRuby reports immediates (Fixnum, Symbol, nil, true, false) as frozen; mruby's immediates are reported the same way here, and the flag is read from heap objects only"
+    },
+    "rb_str_substr": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "mrb_str_substr($m, $0, $1, $2)",
+      "caveat": "mruby's mrb_str_substr takes (str, beg, len) as CRuby's rb_str_substr"
+    },
+    "rb_str_replace": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_funcall($m, $0, \"replace\", 1, $1)",
+      "caveat": "replaces the string's contents through its replace method (mruby has no mrb_str_replace); the result is the receiver, as CRuby's"
+    },
+    "rb_struct_new": {"kind": "refuse", "reason": "stuck point (Struct): Struct is mrbgems/mruby-struct, not in the core, and rb_struct_new builds a CRuby Struct instance with its member layout (accepted stuck point)"},
+    "rb_struct_define": {"kind": "refuse", "reason": "stuck point (Struct): Struct is mrbgems/mruby-struct, not in the core; rb_struct_define creates a CRuby Struct class with its accessors (accepted stuck point)"},
+    "rb_enc_from_encoding": {"kind": "refuse", "reason": "stuck point (Encoding): an rb_encoding value; the fork has no Encoding (accepted stuck point)"},
+    "rb_str_encode": {"kind": "refuse", "reason": "stuck point (Encoding): transcoding a string needs CRuby's encoding converter; the fork has no Encoding (accepted stuck point)"},
+    "RB_ENC_INTERNED_STR_NULL_CHECK": {"kind": "refuse", "reason": "stuck point (Encoding): the null-encoding check of an interned string; the fork has no Encoding (accepted stuck point)"},
+    "RBIGNUM_POSITIVE_P": {"kind": "refuse", "reason": "stuck point (Bignum): the fork has no Bignum (no MRB_TT_BIGINT tag, no mrbgem big-integer class) (accepted stuck point)"},
+    "rb_big2ull": {"kind": "refuse", "reason": "stuck point (Bignum): the fork has no Bignum; the conversion of a big integer to unsigned long long has no mruby form (accepted stuck point)"},
+    "rb_big2ll": {"kind": "refuse", "reason": "stuck point (Bignum): the fork has no Bignum; the conversion of a big integer to long long has no mruby form (accepted stuck point)"},
+    "rb_ull2inum": {"kind": "refuse", "reason": "stuck point (Bignum): an unsigned long long above the fixnum range becomes a Bignum, which the fork does not have (accepted stuck point)"},
+    "RB_OBJ_FROZEN_RAW": {"kind": "refuse", "reason": "stuck point: the raw frozen flag of an object (CRuby's RBasic flags) has no mruby form beyond MRB_FROZEN_P on heap objects (accepted stuck point)"},
     "rb_hash_foreach": {
       "kind": "hash_foreach",
       "needs_mrb": true,
@@ -2393,6 +2471,7 @@
       "arity": 3,
       "needs_mrb": true,
       "ignored_args": [2],
+      "c_str_args": [0],
       "template": "mrb_str_new($m, $0, $1)",
       "caveat": "the encoding argument is dropped (mruby strings carry no encoding): the bytes are kept; CRuby's interned string is frozen, this one is not"
     },
@@ -2673,6 +2752,12 @@
       "mruby": "\"ld\"",
       "caveat": "C99 printf length modifier for a signed VALUE (CRuby's PRIdVALUE is PRI_VALUE_PREFIX \"l\" followed by d, which is \"ld\" on LP64)"
     },
+    "MEMMOVE": {
+      "kind": "template",
+      "arity": 4,
+      "template": "memmove($0, $1, sizeof($2)*($3))",
+      "caveat": "CRuby's MEMMOVE(p, src, type, n) is memmove(p, src, sizeof(type)*n); the type is a plain name here (VALUE is the fork's mrb_value)"
+    },
     "MEMCPY": {
       "kind": "template",
       "arity": 4,
@@ -2692,6 +2777,7 @@
     "STRNCASECMP": {"kind": "expr", "mruby": "strncasecmp", "caveat": "CRuby's STRNCASECMP (ruby/util.h) is the C library's strncasecmp (its name, as a macro value)"},
     "STRTOUL": {"kind": "call", "mruby": "strtoul", "caveat": "CRuby's STRTOUL (ruby/util.h) is the C library's strtoul"},
     "ENCODING_GET_INLINED": {"kind": "refuse", "reason": "stuck point (Encoding): ENCODING_GET_INLINED reads the encoding index of a string (CRuby's rb_encoding table); the fork has no Encoding (accepted stuck point)"},
+    "ENCODING_SET": {"kind": "refuse", "reason": "stuck point (Encoding): ENCODING_SET writes the encoding index of a string (CRuby's encoding table); the fork has no Encoding (accepted stuck point)"},
     "PRI_SIZE_PREFIX": {"kind": "expr", "mruby": "\"z\"", "caveat": "CRuby's PRI_SIZE_PREFIX is the printf length modifier for size_t, the string the PRI*SIZE macros append to (C99 z)"},
     "PUREFUNC": {"kind": "template", "arity": 1, "template": "$0", "caveat": "PUREFUNC (CRuby's pure-function attribute) is a compiler hint: the declaration it wraps is kept, without the attribute"},
     "RARRAY_PTR": {"kind": "macro", "mruby": "RARRAY_PTR", "caveat": "mruby's RARRAY_PTR (include/mruby/array.h) is the array's element pointer, as CRuby's; the use reads elements. A write through it would need mruby's array modify step (not done here)"},

@@ -1,2 +1,5 @@
+Yajl::Parser.new.class.to_s	Yajl::Parser
 Yajl::Parser.new.parse("[1,2]").size	2
-Yajl::Encoder.new.encode([1])	[1]
+Yajl::Parser.new.parse("\"a\"")	!NotImplementedError
+Yajl::Encoder.new.class.to_s	!NotImplementedError
+Yajl::Encoder.new.encode([1])	!NotImplementedError
