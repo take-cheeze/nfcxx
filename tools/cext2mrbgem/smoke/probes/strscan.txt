@@ -18,4 +18,4 @@ StringScanner.new("abc").get_byte	!NotImplementedError
 StringScanner.new("abc").getch	!NotImplementedError
 StringScanner.new("abc").scan("a")	!NotImplementedError
 (s = StringScanner.new("ab"); s.getch; s.rest)	!NotImplementedError
-StringScanner.new("abc").scan(/a/)	!NameError
+StringScanner.new("abc").scan(/a/)	!NotImplementedError

@@ -2506,9 +2506,22 @@ forced = (@reg_names - @split_names) | Set.new(@init_defs.map { |d| d['name'] })
       end
       break unless changed
     end
+    # a function whose address is taken other than by a direct call (a dispatch table: &char_escape) keeps its C signature
+    # (its table's type has no state), so a call from it cannot pass the state to a threaded callback field
+    # (a callback stored in a field, and a registered method or Init function, are address-taken by design: they are threaded
+    # with their field or registration, so they stay usable)
+    @fnptr_addr_taken = {}
+    stored_cbs = Set.new(@fnptr_recs.flat_map { |r| r[:assigns].map { |h, _, _| h } })
+    registered = Set.new((@reg_names || []).to_a) | Set.new((@init_defs || []).map { |d| d['name'] })
+    fn_addr_taken = lambda do |fn|
+      next false if stored_cbs.include?(fn) || registered.include?(fn)
+      @fnptr_addr_taken.fetch(fn) do
+        @fnptr_addr_taken[fn] = @files.values.any? { |f| f['masked'].match?(/\b#{Regexp.escape(fn)}\b(?!\s*\()/) }
+      end
+    end
     @fnptr_recs.each do |r|
       next if r[:assigns].empty?
-      r[:ok] = r[:assigns].all? { |h, _, _| @defs.key?(h) } && r[:calls].all? { |_, fn, _| fn }
+      r[:ok] = r[:assigns].all? { |h, _, _| @defs.key?(h) } && r[:calls].all? { |_, fn, _| fn && !fn_addr_taken.call(fn) }
       # only a record that is ok forces its callbacks: a refused field must not make its callbacks need the state
       r[:assigns].each { |h, _, _| forced << h if @defs.key?(h) && r[:ok] }
       forced << r[:owner] if r[:ok] && r[:owner]

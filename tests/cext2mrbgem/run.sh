@@ -1655,6 +1655,14 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_paste_macro tools/cext2mrbge
 check test "$rc" -eq 0
 check test ! -e "$work/api_paste_macro/NOT_BUILDABLE"
 check grep -qF '##_helper(mrb, v)' "$work/api_paste_macro/src/api_paste_macro.c"
+# 2zzz157. a callback field called from a function whose address is taken in a dispatch table (fd_table): that function keeps its C
+# signature, so the field and the callback stored in it take no mruby state (a threaded callback with an unthreaded caller was a
+# silent mismatch, which the redcarpet render path crashed on)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fnptr_dispatch tools/cext2mrbgem/fixtures/api_fnptr_dispatch/ext/api_fnptr_dispatch "$work/api_fnptr_dispatch" > "$work/api_fnptr_dispatch.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'void (*emit)(struct fd_sink *s, mrb_value v);' "$work/api_fnptr_dispatch/src/api_fnptr_dispatch.c"
+check grep -qF 's->emit(s, mrb_fixnum_value((int)n));' "$work/api_fnptr_dispatch/src/api_fnptr_dispatch.c"
+check grep -qF 'static void fd_store(struct fd_sink *s, mrb_value v) {' "$work/api_fnptr_dispatch/src/api_fnptr_dispatch.c"
 # 2zzz155. a struct field of CRuby's rb_encoding * type: the Encoding placeholder type is in the prelude (the declaration compiles),
 # and the include of ruby/encoding.h is not a blocking refusal (the placeholder covers it).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rb_encoding_field tools/cext2mrbgem/fixtures/api_rb_encoding_field/ext/api_rb_encoding_field "$work/api_rb_encoding_field" > "$work/api_rb_encoding_field.log" 2>&1 || rc=$?
