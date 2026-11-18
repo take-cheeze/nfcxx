@@ -667,11 +667,11 @@ check grep -q '  rb_ln_fallback  no entry in api_map.json' "$work/local_names_re
 check grep -q '  rb_lnr_proto  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
 check test "$(grep -c '  LNR_CALL  ' "$work/local_names_refused/REFUSALS.txt")" -eq 0
 
-# 2q. includes come from api_map.json ("includes"): ruby/ruby.h and ruby/re.h map to their mruby headers, and ruby/encoding.h
-# maps to the fork's mruby/encoding.h (mrbgems/mruby-encoding/include)
+# 2q. includes come from api_map.json ("includes"): ruby/ruby.h maps to its mruby headers, ruby/re.h to the fork's mruby/onigmo.h
+# (the Onigmo API on the system oniguruma library), and ruby/encoding.h to the fork's mruby/encoding.h
 rc=0; "$rb" "$conv" --scanner "$scanner" --name includes_map tools/cext2mrbgem/fixtures/includes_map/ext/includes_map "$work/includes_map" > "$work/includes_map.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
-check grep -qF '#include <mruby/re.h>' "$work/includes_map/src/includes_map.c"
+check grep -qF '#include <mruby/onigmo.h>' "$work/includes_map/src/includes_map.c"
 check grep -qF '#include <mruby/numeric.h>' "$work/includes_map/src/includes_map.c"
 check grep -qF '#include <mruby/encoding.h>' "$work/includes_map/src/includes_map.c"
 
@@ -1672,6 +1672,15 @@ check grep -qF 'int i = rb_enc_get_index(str);' "$work/api_enc_index/src/api_enc
 check grep -qF 'rb_enc_strlen(p, p + RSTRING_LEN(str), rb_utf8_encoding())' "$work/api_enc_index/src/api_enc_index.c"
 check grep -qF 'rb_enc_set_index(str, rb_usascii_encindex());' "$work/api_enc_index/src/api_enc_index.c"
 check grep -qF 'mrb_raisef(mrb, mrb_class_get(mrb, "EncodingError"), "bad encoding");' "$work/api_enc_index/src/api_enc_index.c"
+# 2zzz159. CRuby's Onigmo API maps to the fork's mruby/onigmo.h (the system oniguruma library): RB_TYPE_P(v, T_REGEXP) is the
+# Regexp test of the mruby-onig-regexp gem, RREGEXP_PTR is its compiled regex, and the region calls are the library's.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_onig_map tools/cext2mrbgem/fixtures/api_onig_map/ext/api_onig_map "$work/api_onig_map" > "$work/api_onig_map.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_onig_map/NOT_BUILDABLE"
+check grep -qF 'return mruby_onig_regexp_is(v) ? mrb_true_value() : mrb_false_value();' "$work/api_onig_map/src/api_onig_map.c"
+check grep -qF 'onig_region_init(&regs);' "$work/api_onig_map/src/api_onig_map.c"
+check grep -qF 'pos = onig_search(RREGEXP_PTR(re),' "$work/api_onig_map/src/api_onig_map.c"
+check grep -qF '#include <mruby/onigmo.h>' "$work/api_onig_map/src/api_onig_map.c"
 # 2zzz155. a struct field of CRuby's rb_encoding * type: the Encoding placeholder type is in the prelude (the declaration compiles),
 # and the include of ruby/encoding.h is not a blocking refusal (the placeholder covers it).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rb_encoding_field tools/cext2mrbgem/fixtures/api_rb_encoding_field/ext/api_rb_encoding_field "$work/api_rb_encoding_field" > "$work/api_rb_encoding_field.log" 2>&1 || rc=$?

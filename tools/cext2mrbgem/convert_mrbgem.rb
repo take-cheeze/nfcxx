@@ -3802,8 +3802,9 @@ use_problem = lambda do |name, use|
 
   # a file whose declarations name a stuck type gets the placeholder prelude (see ONIG_STUCK_TYPES_PRELUDE)
   def needs_placeholder_prelude?(f)
-    (f['masked'].match?(ONIG_NAME_RE) || f['masked'].match?(/\brb_encoding\b/) ||
-                           f['text'].match?(/#\s*include\s*[<"]ruby\/encoding\.h[>"]/))
+    # the Onigmo names are declared by the fork's mruby/onigmo.h (ruby/re.h maps there), and rb_encoding and ruby/encoding.h by
+    # the fork's mruby/encoding.h: no placeholder is needed for them. The prelude stays for a name the fork declares nowhere.
+    false
   end
   ONIG_NAME_RE = /(?<![#{WC}.>])(OnigUChar|OnigRegion|OnigRegex|OnigPosition|OnigEncoding|OnigOptionType|OnigCaptureTreeNode|regex_t|re_registers|UChar|ONIG_[A-Z0-9_]+|onig_[a-z0-9_]+)(?![#{WC}])/
   def onig_engine_stuck_pass
@@ -3812,7 +3813,7 @@ use_problem = lambda do |name, use|
       masked.to_enum(:scan, ONIG_NAME_RE).each do
         m = Regexp.last_match
         name = m[1]
-        next if @defs[name] || @entries[name]
+        next if @defs[name] || @entries[name] || @types.key?(name)
         s, e = m.begin(1), m.end(1)
         next if @edits[rel].overlaps(s, e)
         refuse(rel, s, name, "stuck point (regexp engine): #{name} is CRuby's Onigmo regexp engine (its match region, regex and functions); the fork has no regexp engine (no regexp mrbgem in mrbgems/), so it has no mruby form")
@@ -6671,6 +6672,13 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       new = "#{pred}(#{obj})"
       ed.add(s, close + 1, new)
       rewrite(rel, s, 'RB_TYPE_P', new, 'nil and false are told apart by value (mrb_nil_p, mrb_false_p), not by tag')
+      return
+    end
+    if tname.sub(/\ARUBY_/, '') == 'T_REGEXP'
+      # a Regexp is a data object of the mruby-onig-regexp gem: its data type is the gem's (mruby/onigmo.h, mruby_onig_regexp_is)
+      new = "mruby_onig_regexp_is(#{obj})"
+      ed.add(s, close + 1, new)
+      rewrite(rel, s, 'RB_TYPE_P', new, 'a Regexp is the mruby-onig-regexp gem\'s data object (its data type), not a tag')
       return
     end
     ent = @entries[tname]

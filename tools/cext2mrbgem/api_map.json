@@ -6,7 +6,14 @@
     "ID": "mrb_sym",
     "SIGNED_VALUE": "intptr_t",
     "st_index_t": "uintptr_t",
-    "rb_encoding": "rb_encoding"
+    "rb_encoding": "rb_encoding",
+    "UChar": "UChar",
+    "OnigUChar": "OnigUChar",
+    "OnigPosition": "OnigPosition",
+    "OnigRegex": "OnigRegex",
+    "regex_t": "regex_t",
+    "OnigRegion": "OnigRegion",
+    "re_registers": "re_registers"
   },
   "type_check_refused": {
     "_comment": "Check_Type and rb_check_type (handler check_type in convert_mrbgem.rb) map a T_ name only when its entry has type_check exact or caveat. These names are refused with the reason given here.",
@@ -22,10 +29,10 @@
     "T_REGEXP": "stuck point: the fork has no Regexp tag (include/mruby/value.h:106-131) and no mrbgem defines a Regexp class (mrbgems/ lists no mruby-regexp), so there is nothing to compare with"
   },
   "unmapped_reasons": {
-    "onig_foreach_name": "stuck point (regexp engine): onig_foreach_name is the Onigmo regexp engine of CRuby; the fork has no regexp engine (mrbgems has no regexp gem), so the named-capture iteration has no mruby form",
     "T_RATIONAL": "stuck point (gem dependency): a Rational test is the mruby-rational class test, which needs the state and the gem (the decision is made: the gem is a dependency when the test is emitted); a bare use has no test to make here",
     "T_COMPLEX": "stuck point (gem dependency): a Complex test is the mruby-complex class test, which needs the state and the gem (the decision is made: the gem is a dependency when the test is emitted); a bare use has no test to make here",
     "_comment": "A name with no api_map entry is refused with the reason given here (the converter's no-entry path). PRIsVALUE is converted where rb_raise and rb_sprintf take it; elsewhere it is an argument of rb_enc_sprintf, which takes an rb_encoding *.",
+    "onig_foreach_name": "stuck point (onig_foreach_name): onig_foreach_name calls its callback with only the user data, and the callback (strscan's named_captures_iter) needs the mruby state; the rb_hash_foreach-style callback wrapper that carries it is not implemented for this call (the next Onigmo item)",
     "PRIsVALUE": "stuck point (Encoding): PRIsVALUE outside rb_raise and rb_sprintf is an argument of rb_enc_sprintf, which takes an rb_encoding *; the fork has no Encoding (accepted stuck point)",
     "rb_str_conv_enc": "stuck point (Encoding): the conversion between encodings; the fork has no Encoding (accepted stuck point)",
     "rb_thread_current": "stuck point (Thread): the fork has no Thread (accepted stuck point)",
@@ -47,7 +54,6 @@
     "rb_enc_raise": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
     "rb_marshal_load": "stuck point: the fork has no Marshal (no marshal mrbgem in mrbgems/), so there is no loader to call",
     "rb_enc_sprintf": "stuck point (Encoding): rb_enc_sprintf takes an rb_encoding *; the fork has no Encoding (accepted stuck point)",
-    "rb_enc_check": "stuck point (Encoding): checks two strings are compatible encodings; the fork has no Encoding (accepted stuck point)",
     "rb_define_alloc_func": "stuck point (per-class allocator): the fork has only the global allocf, no per-class allocator (accepted stuck point)"
   },
   "includes": {
@@ -79,7 +85,7 @@
     },
     "ruby/re.h": {
       "headers": [
-        "mruby/re.h"
+        "mruby/onigmo.h"
       ]
     },
     "ruby/thread.h": {
@@ -512,6 +518,97 @@
       "arity": 2,
       "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): rb_encoding is a static descriptor for UTF-8 or ASCII-8BIT; no transcoding"
     },
+    "onig_region_init": {
+      "kind": "call",
+      "mruby": "onig_region_init",
+      "arity": 1,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type; the regex is the mruby-onig-regexp gem's"
+    },
+    "onig_region_clear": {
+      "kind": "call",
+      "mruby": "onig_region_clear",
+      "arity": 1,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type; the regex is the mruby-onig-regexp gem's"
+    },
+    "onig_region_memsize": {
+      "kind": "call",
+      "mruby": "onig_region_memsize",
+      "arity": 1,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type; the regex is the mruby-onig-regexp gem's"
+    },
+    "onig_region_free": {
+      "kind": "call",
+      "mruby": "onig_region_free",
+      "arity": 2,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type; the regex is the mruby-onig-regexp gem's"
+    },
+    "onig_region_set": {
+      "kind": "call",
+      "mruby": "onig_region_set",
+      "arity": 4,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type; the regex is the mruby-onig-regexp gem's"
+    },
+    "onig_free": {
+      "kind": "call",
+      "mruby": "onig_free",
+      "arity": 1,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type; the regex is the mruby-onig-regexp gem's"
+    },
+    "onig_match": {
+      "kind": "call",
+      "mruby": "onig_match",
+      "arity": 6,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type; the regex is the mruby-onig-regexp gem's"
+    },
+    "onig_search": {
+      "kind": "call",
+      "mruby": "onig_search",
+      "arity": 7,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type; the regex is the mruby-onig-regexp gem's"
+    },
+    "onig_name_to_backref_number": {
+      "kind": "call",
+      "mruby": "onig_name_to_backref_number",
+      "arity": 4,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type; the regex is the mruby-onig-regexp gem's"
+    },
+    "rb_reg_region_copy": {
+      "kind": "call",
+      "mruby": "rb_reg_region_copy",
+      "arity": 2,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type; the regex is the mruby-onig-regexp gem's"
+    },
+    "rb_reg_prepare_re": {
+      "kind": "call",
+      "mruby": "rb_reg_prepare_re",
+      "arity": 2,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type; the regex is the mruby-onig-regexp gem's"
+    },
+    "ONIG_OPTION_IGNORECASE": {
+      "kind": "macro",
+      "mruby": "ONIG_OPTION_IGNORECASE",
+      "caveat": "the oniguruma constant of the same name (mruby/onigmo.h)"
+    },
+    "ONIG_OPTION_NONE": {
+      "kind": "macro",
+      "mruby": "ONIG_OPTION_NONE",
+      "caveat": "the oniguruma constant of the same name (mruby/onigmo.h)"
+    },
+    "ONIG_MISMATCH": {
+      "kind": "macro",
+      "mruby": "ONIG_MISMATCH",
+      "caveat": "the oniguruma constant of the same name (mruby/onigmo.h)"
+    },
+    "RREGEXP": {
+      "kind": "macro",
+      "mruby": "RREGEXP",
+      "caveat": "CRuby's struct RRegexp (its usecnt); the fork keeps no such count, so this is a scratch record (mruby/onigmo.h)"
+    },
+    "RREGEXP_PTR": {
+      "kind": "macro",
+      "mruby": "RREGEXP_PTR",
+      "caveat": "the compiled regex of a Regexp object (the mruby-onig-regexp gem's data pointer), mruby/onigmo.h"
+    },
     "rb_usascii_encoding": {
       "kind": "call",
       "mruby": "rb_usascii_encoding",
@@ -589,6 +686,14 @@
       "mruby": "rb_enc_associate_index",
       "arity": 2,
       "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): three encodings (ASCII-8BIT, UTF-8, US-ASCII), no transcoding"
+    },
+    "rb_enc_check": {
+      "kind": "call",
+      "mruby": "rb_enc_check",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "arity": 2,
+      "caveat": "the fork's rb_enc_check (mrbgems/mruby-encoding): the encoding two strings combine in; two non-ASCII strings in different encodings raise Encoding::CompatibilityError"
     },
     "rb_enc_strlen": {
       "kind": "call",
@@ -1171,10 +1276,6 @@
       "kind": "refuse",
       "reason": "stuck point: the fork has no Regexp class (no mruby-regexp mrbgem in mrbgems/) and no Regexp tag (include/mruby/value.h:106-131), so there is no regexp object to build or read"
     },
-    "RREGEXP_PTR": {
-      "kind": "refuse",
-      "reason": "stuck point: the fork has no Regexp class (no mruby-regexp mrbgem in mrbgems/) and no Regexp tag (include/mruby/value.h:106-131), so there is no regexp object to build or read"
-    },
     "rb_copy_generic_ivar": {
       "kind": "template",
       "arity": 2,
@@ -1712,14 +1813,6 @@
       "kind": "expr",
       "mruby": "mrb_free",
       "caveat": "as RUBY_TYPED_DEFAULT_FREE: mrb_free, the default release of mrb_malloc'd data"
-    },
-    "rb_reg_region_copy": {
-      "kind": "refuse",
-      "reason": "stuck point (regexp internals): rb_reg_region_copy copies CRuby's Onigmo match region (struct re_registers); mruby's regexp is the mruby-onig-regexp gem with a different match API, so there is no region to copy (accepted stuck point)"
-    },
-    "rb_reg_prepare_re": {
-      "kind": "refuse",
-      "reason": "stuck point (regexp internals): rb_reg_prepare_re returns CRuby's compiled Onigmo regex for a Regexp; mruby's regexp is the mruby-onig-regexp gem with its own compiled form (accepted stuck point)"
     },
     "RUBY_API_VERSION_CODE": {
       "kind": "refuse",
