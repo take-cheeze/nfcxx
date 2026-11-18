@@ -3921,6 +3921,11 @@ use_problem = lambda do |name, use|
         next unless (local_value_at?(rel, m.begin(2), nm) || fs_values.include?(nm)) && !@class_vars.include?(nm)
         next if in_dead_init(rel, m.begin(2))
         next if @edits[rel].overlaps(m.begin(2), m.begin(2) + 1)
+        # the third parameter of a rb_hash_foreach callback is the pointer it was given (the threading makes it void *): a cast of it is
+        # a cast of a pointer, as yajl's yajl_encode_part_hash_i casts its iterator
+        fnh = enclosing_func(rel, m.begin(2))
+        next if fnh && (@hash_cb_names || Set.new).include?(fnh['name']) &&
+                (fnh['params'] || '').split(',')[2].to_s.split.last.to_s.delete('*') == nm
         refuse(rel, m.begin(2), nm, "stuck point (VALUE as pointer): #{nm} is a VALUE, a struct in the fork (include/mruby/boxing_no.h), and a cast of it to a struct pointer has no mruby form")
       end
     end

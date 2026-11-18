@@ -165,6 +165,8 @@
     "--replace",
     "(const char *)buffer, len)=(const char *)nfcx_gbuf, len)",
     "--replace",
-    "rb_scan_args(argc, argv, \"11&\", &obj, &io, &blk);=rb_scan_args(argc, argv, \"11\", &obj, &io); blk = Qnil;"
+    "rb_scan_args(argc, argv, \"11&\", &obj, &io, &blk);=rb_scan_args(argc, argv, \"11\", &obj, &io); blk = Qnil;",
+    "--replace",
+    "case T_BIGNUM:=case -1:"
   ]
 }
