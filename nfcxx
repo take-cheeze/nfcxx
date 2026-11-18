@@ -176,7 +176,8 @@ cu_inputs=()
 cu_keep=""   # with -c: the directory the device images are kept in (the link re-reads the copy, and the copy names them)
 cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs and files in place of the source
   [ ${#cu_inputs[@]} -gt 0 ] || return 0
-  cudatmp=$(mktemp -d); trap trace_finish EXIT
+  # the directory of the device records: removed on every exit (eccp_cleanup removes it too when eccp runs)
+  cudatmp=$(mktemp -d); trap 'trace_finish; [ -z "${cudatmp:-}" ] || rm -rf "$cudatmp"' EXIT
   local dir=$cudatmp
   if [ $compile_only = 1 ]; then
     # The copy must outlive the compile: the prelinker re-reads it when it needs a template instance at link time,
@@ -223,7 +224,7 @@ cpp2_prepare() {  # cpp2_prepare: translates every .cpp2 input and puts its tran
   local cppfront_src=${CPPFRONT_SRC:-$root/build/cppfront-src}
   [ -x "$root/build/cppfront" ] || { echo "nfcxx: cppfront is not built; run scripts/setup-cppfront.sh (docs/notes/cpp2.md)" >&2; exit 2; }
   [ -f "$cppfront_src/include/cpp2util.h" ] || { echo "nfcxx: no cpp2util.h under $cppfront_src; run scripts/setup-cppfront.sh" >&2; exit 2; }
-  if [ -z "${cudatmp:-}" ]; then cudatmp=$(mktemp -d); trap trace_finish EXIT; fi
+  if [ -z "${cudatmp:-}" ]; then cudatmp=$(mktemp -d); trap 'trace_finish; [ -z "${cudatmp:-}" ] || rm -rf "$cudatmp"' EXIT; fi
   local dir=$cudatmp
   if [ $compile_only = 1 ]; then
     # As for .cu inputs (cu_prepare): the translation outlives the compile, because the prelinker re-reads it at link time.

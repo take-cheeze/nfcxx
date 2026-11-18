@@ -39,7 +39,7 @@ run_env() {  # run_env [NAME=VALUE]...: the environment words of one run
 }
 # the temporary directories of the bash's own messages have random names: both sides' are made the same. The oracle's root is
 # its sandbox: its messages name this tree's files (lib/cuda/nfcxx_cuda.h), so the sandbox is the tree's root.
-norm() { sed -e "s#$oracle#$root#g" -e 's#/tmp/tmp\.[A-Za-z0-9]*#TMP#g' -e 's#/tmp/nfcxx-cu[A-Za-z0-9_.-]*#TMP#g' "$1"; }
+norm() { sed -e "s#$oracle#$root#g" -e 's#/tmp/nfcxx-tmp\.[A-Za-z0-9._-]*/tmp\.[A-Za-z0-9]*#TMP#g' -e 's#/tmp/tmp\.[A-Za-z0-9]*#TMP#g' -e 's#/tmp/nfcxx-cu[A-Za-z0-9_.-]*#TMP#g' "$1"; }   # the planned driver's root: /tmp/nfcxx-tmp.*/tmp.*, the same scratch as the bash's
 # An object's internal namespace (_INTERNAL_8_NAME_cpp_HASH, EDG's) has a hash that differs from one compile to the next, so
 # the objects are compared with the hash of each such name replaced (the same length, so the bytes are the rest).
 normobj() {  # normobj FILE OUT
