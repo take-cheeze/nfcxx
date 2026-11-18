@@ -359,7 +359,9 @@ shift $#
 # -I, -D and -U options go to the rewriter as they go to the host copy.
 if [ "${emit_hip:-0}" = 1 ]; then
   [ ${#cu_inputs[@]} = 1 ] || { echo "nfcxx: --emit-hip takes one .cu file" >&2; exit 2; }
-  hip_opts=(); for f in ${cflags[@]+"${cflags[@]}"}; do case $f in -I*|-D*|-U*) hip_opts+=("$f");; esac; done
+  hip_opts=()
+  while IFS= read -r -d '' x; do hip_opts+=("$x"); done < <("${RUBY:-ruby}" "$root/scripts/nfcxx-emit-hip.rb" plan ${cflags[@]+"${cflags[@]}"})   # the -I, -D and -U options (scripts/nfcxx-emit-hip.rb)
+  wait $! || exit $?
   exec "$root/build/cuda-rewrite" --hip ${hip_opts[@]+"${hip_opts[@]}"} "${cu_inputs[0]}"
 fi
 # SYCL kernel integration (docs/notes/sycl-kernel-builtins.md). A -c compile of one C++ source that includes the oneAPI SYCL
