@@ -6906,6 +6906,14 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     [st, e]
   end
 
+  # The init-like functions: the gem's Init_<name> entry point, and a *_module_init helper that Init calls (msgpack's
+  # MessagePack_Packer_module_init defines the class and its methods). A refused plain statement in one is dropped, as in Init,
+  # so the rest of the function (its definitions) stays; a whole-function stub would leave the class undefined.
+  def init_like_name?(name)
+    n = name.to_s
+    n.start_with?('Init_') || n.match?(/_module_init\z/)
+  end
+
   def stub_refused_functions
     @stubbed = Set.new
     @refusals.group_by { |r| r['file'] }.each do |rel, refs|
@@ -6914,7 +6922,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       # Init: a refused statement is dropped (the decision of the user: a deliberate no-op, noted in REFUSALS.txt); a stub
       # there would make the gem raise at load. A refusal whose statement is not a plain call statement stays unstubbed.
       masked = @files[rel]['masked']
-      init_defs = @defs.values.flatten.select { |d| d['file'] == rel && !d['proto'] && d['brace'] && d['body_end'] && d['name'].to_s.start_with?('Init_') }
+      init_defs = @defs.values.flatten.select { |d| d['file'] == rel && !d['proto'] && d['brace'] && d['body_end'] && init_like_name?(d['name']) }
       # a refusal in a #define body (a macro whose expansion refuses) is handled at each use of the macro: a use inside Init
       # is a statement dropped there, a use inside a function stubs that function (the uses are the refused uses)
       refs = refs.dup
@@ -6960,7 +6968,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       end
       # the Init function is not stubbed: a stub there would make the gem raise at load and register no method
       defs = @defs.values.flatten.select do |d|
-        d['file'] == rel && !d['proto'] && d['brace'] && d['body_end'] && !d['name'].to_s.start_with?('Init_')
+        d['file'] == rel && !d['proto'] && d['brace'] && d['body_end'] && !init_like_name?(d['name'])
       end
       defs.each do |d|
         l1 = line_of(text, d['hstart'] || d['brace'])
@@ -7022,7 +7030,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     loop do
       grew = false
       @defs.values.flatten.each do |d|
-        next if d['proto'] || !d['brace'] || !d['body_end'] || names.include?(d['name'])
+        # an init-like function is not stubbed (its refused statements are dropped), so calling it does not raise
+        next if d['proto'] || !d['brace'] || !d['body_end'] || names.include?(d['name']) || init_like_name?(d['name'])
         next unless @files[d['file']]
         body = @files[d['file']]['masked'][d['brace']..d['body_end']]
         next unless names.any? { |n| body.match?(/\b#{Regexp.escape(n)}\s*\(/) }
@@ -7046,7 +7055,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       next unless @edits[rel]
       masked = f['masked']
       text = f['text']
-      inits = @defs.values.flatten.select { |d| d['file'] == rel && !d['proto'] && d['brace'] && d['body_end'] && d['name'].to_s.start_with?('Init_') }
+      inits = @defs.values.flatten.select { |d| d['file'] == rel && !d['proto'] && d['brace'] && d['body_end'] && init_like_name?(d['name']) }
       inits.each do |d|
         names.each do |n|
           positions = []

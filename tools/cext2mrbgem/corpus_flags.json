@@ -112,5 +112,11 @@
     "VALUE unf_initialize(VALUE self) {\\n    return self;\\n  }=VALUE unf_initialize(VALUE self) {\\n    UNF::Normalizer* ptr = new UNF::Normalizer;\\n    rb_ivar_set(self, rb_intern(\"@__unf_normalizer\"), TypedData_Wrap_Struct(rb_cObject, &unf_normalizer_data_type, ptr));\\n    return self;\\n  }",
     "--replace",
     "TypedData_Get_Struct(self, UNF::Normalizer, &unf_normalizer_data_type, ptr);=VALUE holder = rb_ivar_get(self, rb_intern(\"@__unf_normalizer\"));\\n    TypedData_Get_Struct(holder, UNF::Normalizer, &unf_normalizer_data_type, ptr);"
+  ],
+  "msgpack": [
+    "--define",
+    "MSGPACK_RMEM_PAGE_SIZE=8192",
+    "--replace",
+    "TypedData_Get_Struct(object, msgpack_packer_t, &packer_data_type, packer);=packer = ({ VALUE nfcx_h = rb_ivar_get(object, rb_intern(\"@__packer\")); msgpack_packer_t *nfcx_p; if (NIL_P(nfcx_h)) { nfcx_p = ALLOC(msgpack_packer_t); msgpack_packer_init(nfcx_p); nfcx_h = TypedData_Wrap_Struct(rb_cObject, &packer_data_type, nfcx_p); msgpack_packer_set_to_msgpack_method(nfcx_p, rb_intern(\"to_msgpack\"), object); rb_ivar_set(object, rb_intern(\"@__packer\"), nfcx_h); } TypedData_Get_Struct(nfcx_h, msgpack_packer_t, &packer_data_type, nfcx_p); nfcx_p; });"
   ]
 }

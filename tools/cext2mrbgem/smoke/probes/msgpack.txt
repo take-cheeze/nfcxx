@@ -1,2 +1,7 @@
 MessagePack.class.to_s	Module
-MessagePack::Packer.new	!NameError
+MessagePack::Packer.class.to_s	Class
+MessagePack::Unpacker.class.to_s	Class
+MessagePack::Buffer.class.to_s	Class
+MessagePack::Packer.new.class.to_s	MessagePack::Packer
+MessagePack::Packer.new.class.to_s	MessagePack::Packer
+MessagePack::Buffer.class.to_s	Class
