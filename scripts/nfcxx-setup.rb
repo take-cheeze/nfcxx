@@ -94,6 +94,68 @@ module NfcxxSetup
   end
 end
 
+module NfcxxSetup
+  module_function
+
+  # The steps in the order ./nfcxx runs them (line numbers on main): default 427, asan 435, instantiate 460, cosmo 465 (only
+  # with cosmo=1), freestanding 472, host cflags 484, gnu opts 485, k1om 494, target 498, the Path B override 539, backend env
+  # 553. The override runs after the planners above it, so they see the backend the default chose (docs/notes/driver-setup-stage.md).
+  # Not sequenced yet: the system include list (ecp_args, sys_inc) and the gnu_opts array that the target step reads; the
+  # target step is run with the options as given. Returns { steps: [[name, text, backend_seen]], state: {...} }.
+  def sequence(opts, env = ENV)
+    state = opts.dup
+    flag = ->(k) { state.fetch(k, "0") == "1" }
+    steps = []
+    record = lambda do |name, text|
+      steps << [name, text, state["backend"].to_s]
+    end
+
+    # 1. the default backend: sets backend, default_backend and pb_fs_host
+    text = run("default", state, env)
+    record.("default", text)
+    state["backend"], state["default_backend"], state["pb_fs_host"] = text.scan(/(\S+)=(\S+)/).map(&:last)
+
+    # 2. the sanitizer, which reads the backend the default chose
+    record.("asan", run("asan", state, env))
+
+    # 3. instantiation
+    record.("instantiate", run("instantiate", state, env))
+
+    # 4. cosmo, only with cosmo=1; it reads the command line's gnu, which the freestanding step sets after it
+    record.("cosmo", run("cosmo", state, env)) if flag.("cosmo")
+
+    # 5. the freestanding or hosted headers; sets gnu
+    text = run("freestanding", state, env)
+    record.("freestanding", text)
+    if (m = text.match(/^gnu=(\S+)/))
+      state["gnu"] = m[1]
+    end
+
+    # 6. host cflags, which read the backend the default chose
+    record.("host_cflags", run("host_cflags", state, env))
+
+    # 7. the GNU version option, which reads the gnu the freestanding step set
+    record.("gnu_opts", run("gnu_opts", state, env))
+
+    # 8. k1om, which reads the backend the default chose
+    record.("k1om", run("k1om", state, env))
+
+    # 9. target, run with the options as given (its gnu_opts input is not sequenced yet)
+    record.("target", run("target", state, env))
+
+    # 10. the Path B override (bash line 539): after the planners above, before the backend environment
+    if flag.("path_b")
+      state["backend"] = "pathb"
+      state["default_backend"] = "0"
+    end
+
+    # 11. the backend environment, which reads the overridden backend
+    record.("backend_env", run("backend_env", state, env))
+
+    { steps: steps, state: state }
+  end
+end
+
 if $PROGRAM_NAME == __FILE__
   step, *rest = ARGV
   abort "nfcxx-setup: STEP KEY=VALUE... (steps: #{NfcxxSetup::STEPS.join(" ")})" unless step
