@@ -297,8 +297,16 @@ def closed_world_mrblib_srcs(gems_root, core_gems: :canonical, tts: false)
     rpg2k << "#{gems_root}/#{RgssTtsConfig::RPG2K_TTS_OFF_RB}"
   end
   (core_compiled_mrblib_srcs(gems_root, core_gems) +
-    (rpg2k + Dir["#{gems_root}/mruby-lcf/mrblib/*.rb"] +
+    (rpg2k + lcf_mrblib_srcs(gems_root) +
       Dir["#{gems_root}/mruby-rgss/mrblib/*.rb"]).sort).map { |path| File.expand_path(path) }
+end
+
+# mruby-lcf's mrblib for the compiled gem. BC2CPP_SKIP_LCF_SCHEMA_RB=1 leaves out schema.rb, whose LCF::Schema the wio
+# build takes from its blob instead (mruby-lcf/mrbgem.rake); the copy compiled here costs about 147 KB of wio flash.
+def lcf_mrblib_srcs(gems_root)
+  Dir["#{gems_root}/mruby-lcf/mrblib/*.rb"].reject do |path|
+    ENV['BC2CPP_SKIP_LCF_SCHEMA_RB'] == '1' && path.end_with?('/schema.rb')
+  end
 end
 
 # `gem_names`: names of the gems in the build (:canonical: BC2CPP_CANONICAL_CORE_GEMS,
