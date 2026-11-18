@@ -84,6 +84,12 @@
     "--replace",
     "void oj_dump_obj_val(VALUE obj, int depth, Out out) {=void oj_dump_obj_val(VALUE obj, int depth, Out out) { if (T_BIGNUM == 0) { }"
   ],
+  "strscan": [
+    "--replace",
+    "    return rb_check_typeddata(obj, &strscanner_type);=    VALUE nfcx_holder = rb_ivar_get(obj, rb_intern(\"@__strscan\")); struct strscanner *nfcx_p; if (NIL_P(nfcx_holder)) { nfcx_holder = TypedData_Make_Struct(rb_cObject, struct strscanner, &strscanner_type, nfcx_p); nfcx_p->str = Qnil; rb_ivar_set(obj, rb_intern(\"@__strscan\"), nfcx_holder); } return rb_check_typeddata(nfcx_holder, &strscanner_type);",
+    "--replace",
+    "#define rb_gc_mark_movable rb_gc_mark=#define rb_gc_mark_movable(x) rb_gc_mark(x)"
+  ],
   "fast_blank": [
     "--define",
     "RUBY_API_VERSION_CODE=20200"

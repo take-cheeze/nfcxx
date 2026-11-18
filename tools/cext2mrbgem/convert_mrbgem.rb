@@ -5149,6 +5149,13 @@ end
         ok = false
       end
     end
+    # mruby's formatter reads %l as a C string and a size_t, not an integer: CRuby's %ld and %lu are %d and %u here
+    # (strscan's inspect formats the position with %ld; the arguments after it were read from the wrong places)
+    fmt.to_enum(:scan, /%l([du])/).each do
+      lm = Regexp.last_match
+      ltok = a + lm.begin(0) + 1
+      ed.add(ltok, ltok + 1, '')
+    end
     ok
   end
 
@@ -5654,7 +5661,16 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       if entry['gc_mark_context']
         # rb_gc_mark marks a value for the GC: it is valid only in a data type's mark callback, which the runtime calls
         fn = enclosing_func(rel, s)
-        unless fn && mark_context_names.include?(fn['name'])
+        # in a macro body (strscan's #define rb_gc_mark_movable(x) rb_gc_mark(x)) the call is valid when every use of the macro
+        # is in a mark callback
+        dl = fn ? nil : define_at(rel, s)
+        in_mark = if dl
+                    uses = (@occ[dl[0]] || []).reject { |orel, os, _oe| orel == rel && dl[1] <= os && os < dl[2] }
+                    !uses.empty? && uses.all? { |orel, os, _oe| (uf = enclosing_func(orel, os)) && mark_context_names.include?(uf['name']) }
+                  else
+                    fn && mark_context_names.include?(fn['name'])
+                  end
+        unless in_mark
           refuse(rel, s, name, 'stuck point (GC mark callback): rb_gc_mark is valid only in a data type mark callback, and this function is not one; ' \
                                'callback here (the fork calls mrb_data_type.mark, include/mruby/data.h, only from the runtime)')
           return
@@ -6975,7 +6991,13 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
                    else " return (#{ret}){0};"
                    end
         msg = "stuck point (see REFUSALS.txt): #{d['name']} uses a CRuby feature the fork has no form of"
-        stub = " /* BC2CPP-MRBGEM stub: refused code */ mrb_raise(#{target}, mrb_exc_get(#{target}, \"NotImplementedError\"), \"#{msg}\");#{ret_stmt} "
+        # a void GC callback (a dfree or a mark function: strscan_free, strscan_mark) runs inside the collector, where a raise
+        # aborts the process (mrb_close): its stub does nothing, and the refused part of the body is noted in REFUSALS.txt
+        if d['name'].to_s.match?(/_(?:free|mark)\z/) && ret.split.last == 'void'
+          stub = " /* BC2CPP-MRBGEM stub: refused code (a GC callback: no effect, the refused part is noted in REFUSALS.txt) */ "
+        else
+          stub = " /* BC2CPP-MRBGEM stub: refused code */ mrb_raise(#{target}, mrb_exc_get(#{target}, \"NotImplementedError\"), \"#{msg}\");#{ret_stmt} "
+        end
         inside = @edits[rel].overlapping(d['brace'] + 1, d['body_end'])
         @edits[rel].drop(inside)
         @edits[rel].add(d['brace'] + 1, d['body_end'], stub)
