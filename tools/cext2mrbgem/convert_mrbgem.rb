@@ -687,6 +687,10 @@ texts = static_rename(texts)
   re = /(?<![\w$])#{Regexp.escape(old)}(?![\w])/
   texts.each_key { |k| texts[k] = texts[k].gsub(re, new) }
 end
+# --replace OLD=NEW: the literal text OLD is NEW in every source and header (a signature the gem's own header and definition disagree on)
+($replaces || []).each do |old, new|
+  texts.each_key { |k| texts[k] = texts[k].gsub(old, new) }
+end
     Dir.children(@cext_dir).reject { |n| n.start_with?('.') }.sort.each do |base|
       path = File.join(@cext_dir, base)
       if File.directory?(path)
@@ -7043,6 +7047,8 @@ def main(argv)
       undefines << args.shift
     elsif opt == '--exclude' && !args.empty?
       ($excluded_files ||= Set.new) << args.shift
+    elsif opt == '--replace' && !args.empty? && args.first.include?('=')
+      ($replaces ||= []) << args.shift.split('=', 2)
     elsif opt == '--rename' && !args.empty? && args.first.include?('=')
       ($renames ||= []) << args.shift.split('=', 2)
     elsif opt == '--method-scope-fn' && !args.empty?
@@ -7056,7 +7062,7 @@ def main(argv)
     end
   end
   if args.nil? || args.size != 2
-    warn 'usage: convert_mrbgem.rb [--name GEM] [--scanner auto|libclang|regex] [--define NAME[=VALUE]]... [--undefine NAME]... [--exclude FILE]... [--rename OLD=NEW]... ' \
+    warn 'usage: convert_mrbgem.rb [--name GEM] [--scanner auto|libclang|regex] [--define NAME[=VALUE]]... [--undefine NAME]... [--exclude FILE]... [--rename OLD=NEW]... [--replace OLD=NEW]... ' \
          '[--stored-tag NAME=VALUE]... <cext_dir> <out_dir>'
     return 1
   end
