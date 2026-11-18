@@ -7115,7 +7115,7 @@ def main(argv)
     elsif opt == '--exclude' && !args.empty?
       ($excluded_files ||= Set.new) << args.shift
     elsif opt == '--replace' && !args.empty? && args.first.include?('=')
-      ($replaces ||= []) << args.shift.split('=', 2)
+      ($replaces ||= []) << args.shift.split('=', 2).map { |t| t.gsub('\\n', "\n") }
     elsif opt == '--thread-sync'
       $thread_sync = true
     elsif opt == '--rename' && !args.empty? && args.first.include?('=')
