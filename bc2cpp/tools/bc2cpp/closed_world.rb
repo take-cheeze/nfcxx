@@ -2062,6 +2062,7 @@ class ClosedWorld
       case const
       when 'Struct'
         @struct_factory_used = true
+        argc = call.argc if struct_keyword_init?(call)
         return global!(:class_factory_escape) unless argc
 
         argc.times do |argument|
@@ -2083,6 +2084,13 @@ class ClosedWorld
         @dynamic_subclassed.merge(bases)
       end
     end
+  end
+
+  # `Struct.new(:a, :b, keyword_init: true)`: the constructor's keyword only changes how instances are built, so the
+  # positional arguments are the members and the keyword defines nothing. Ruby rejects any other keyword for a Struct,
+  # so a single keyword with no splat is accepted; a splat (which could carry any keyword) is not.
+  def struct_keyword_init?(call)
+    call.keyword_arguments? && call.keyword_argc == 1 && !call.keyword_splat? && !call.positional_splat?
   end
 
   def factory_argument_names(irep, index, register, ops)
