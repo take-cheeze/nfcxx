@@ -14,7 +14,7 @@ require "stringio"
 
 root = File.expand_path("..", __dir__)
 %w[nfcxx-backend nfcxx-asan-c nfcxx-instantiate nfcxx-cosmo-setup nfcxx-freestanding-setup
-   nfcxx-host-cflags nfcxx-gnu-opts nfcxx-k1om-env nfcxx-target nfcxx-backend-env].each do |f|
+   nfcxx-host-cflags nfcxx-gnu-opts nfcxx-k1om-env nfcxx-target nfcxx-backend-env trace ecp-arg].each do |f|
   require File.join(root, "scripts", f)
 end
 
@@ -169,7 +169,56 @@ module NfcxxSetup
   end
 end
 
+module NfcxxSetup
+  module_function
+
+  # the span a bash trace_end writes (trace.sh): into the pending file when the driver batches its spans, else directly
+  def trace_span(start, name, category, env, pid)
+    return unless NfccxxTrace.enabled?(env)
+
+    pending = env["NFCXX_TRACE_PENDING"].to_s
+    if pending.empty?
+      NfccxxTrace.span(start, name, category, pid: pid, env: env)
+    else
+      # trace.sh's record: start, stop, name, category, pid, unit, each followed by NUL
+      fields = [start, NfccxxTrace.now_us, name, category, pid, env["NFCXX_TRACE_UNIT"].to_s]
+      File.open(pending, "ab") { |f| f.write(fields.map { |v| "#{v}\0" }.join) }
+    end
+  end
+
+  # the host C++ headers step, with the span the bash wraps around it when the build is hosted (bash: trace_start, the
+  # freestanding eval, trace_end "host C++ headers" driver). freestanding=1 has no span.
+  def host_headers(opts, env, bash_pid)
+    if opts.fetch("freestanding", "0") == "1"
+      return text_of(NfcxxFreestanding.plan(opts))
+    end
+
+    start = NfccxxTrace.enabled?(env) ? NfccxxTrace.now_us : 0
+    text = text_of(NfcxxFreestanding.plan(opts))
+    trace_span(start, "host C++ headers", "driver", env, bash_pid) if NfccxxTrace.enabled?(env)
+    text
+  end
+
+  # the -isystem directories as the bash's ecp_args builds sys_inc: each answer (the eccp form when moves is 1) as
+  # --sys_include=DIR, in order; no directories, no words
+  def sys_include(moves, dirs)
+    answers = dirs.map { |arg| EcpArg.substitution(moves == "1" ? EcpArg.ecp_arg(arg) : arg) }
+    answers.map { |d| "--sys_include=#{d}" }
+  end
+end
+
 if $PROGRAM_NAME == __FILE__
+  if ARGV.first == "host-headers"
+    opts = NfcxxSetup.options(ARGV.drop(1))
+    $stdout.write(NfcxxSetup.host_headers(opts, ENV, opts.fetch("bash_pid", "0")))
+    exit 0
+  end
+  if ARGV.first == "sys-include"
+    _, moves, *dirs = ARGV
+    dirs = dirs.drop(1) if dirs.first == "--"
+    $stdout.binmode.write(*NfcxxSetup.sys_include(moves, dirs).map { |w| w + "\0" })
+    exit 0
+  end
   step, *rest = ARGV
   abort "nfcxx-setup: STEP KEY=VALUE... (steps: #{NfcxxSetup::STEPS.join(" ")})" unless step
   begin

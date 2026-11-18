@@ -469,16 +469,11 @@ if [ $cosmo = 1 ]; then
 fi
 # The freestanding or hosted setup: the headers and the GNU version (scripts/nfcxx-freestanding-setup.rb plan, stage B3). The host
 # include directories are read inside the trace span of the host C++ headers, as they were.
-if [ $freestanding = 1 ]; then
-  eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-freestanding-setup.rb" plan freestanding=1 gnu="$gnu" sys="$(uname -s)" root="$root")"
-else
-  t=$(trace_start)
-  eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-freestanding-setup.rb" plan freestanding=0 gnu="$gnu" sys="$(uname -s)" root="$root")"
-  trace_end "$t" "host C++ headers" driver
-fi
+# (scripts/nfcxx-setup.rb host-headers: the freestanding plan, with the host C++ headers span for a hosted build)
+eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-setup.rb" host-headers freestanding="$freestanding" gnu="$gnu" sys="$(uname -s)" root="$root" bash_pid="${BASHPID:-$$}")"
 # -isystem DIR from the command line: searched after the host's own directories, as the host compiler does.
-ecp_args ${sysdirs[@]+"${sysdirs[@]}"}
-for d in ${ecp_list[@]+"${ecp_list[@]}"}; do sys_inc+=("--sys_include=$d"); done
+# (scripts/nfcxx-setup.rb sys-include: each answer as --sys_include=DIR, the eccp form when moves is 1)
+while IFS= read -r -d '' x; do sys_inc+=("$x"); done < <("${RUBY:-ruby}" "$root/scripts/nfcxx-setup.rb" sys-include "$moves" -- ${sysdirs[@]+"${sysdirs[@]}"})
 # The host-platform cflags (Path B on macOS and Linux aarch64, and the __AARCH64EL__ define on hosted Linux aarch64): the rules are
 # scripts/nfcxx-host-cflags.rb plan (stage B3), with the reasons beside them there.
 eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-host-cflags.rb" plan backend="$backend" freestanding="$freestanding" sys="$(uname -s)" mach="$(uname -m)" root="$root")"
