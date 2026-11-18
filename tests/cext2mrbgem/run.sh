@@ -1644,6 +1644,18 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_exclude --exclude extra_only
 check test "$rc" -eq 0
 check test ! -e "$work/api_exclude/src/extra_only.c"
 check test ! -s "$work/api_exclude/REFUSALS.txt" -o "$(grep -c 'rb_thread_current' "$work/api_exclude/REFUSALS.txt")" = 0
+# 2zzz154. a helper called by a pasted name in a macro (CALL_HELPER(xy, v) is xy##_helper(v)) passes the state, as the helper takes
+# it: the macro's call is xy##_helper(mrb, v) (the same rule that keeps date's jd_trunc in use).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_paste_macro tools/cext2mrbgem/fixtures/api_paste_macro/ext/api_paste_macro "$work/api_paste_macro" > "$work/api_paste_macro.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_paste_macro/NOT_BUILDABLE"
+check grep -qF '##_helper(mrb, v)' "$work/api_paste_macro/src/api_paste_macro.c"
+# 2zzz155. a struct field of CRuby's rb_encoding * type: the Encoding placeholder type is in the prelude (the declaration compiles),
+# and the include of ruby/encoding.h is not a blocking refusal (the placeholder covers it).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rb_encoding_field tools/cext2mrbgem/fixtures/api_rb_encoding_field/ext/api_rb_encoding_field "$work/api_rb_encoding_field" > "$work/api_rb_encoding_field.log" 2>&1 || rc=$?
+check grep -qF 'STATUS: STUBBED' "$work/api_rb_encoding_field/REFUSALS.txt"
+check test "$(grep -c '#error' "$work/api_rb_encoding_field/src/gem_init.c")" -eq 0
+check grep -qF 'typedef struct nfcx_rb_encoding rb_encoding;' "$work/api_rb_encoding_field/src/api_rb_encoding_field.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?
