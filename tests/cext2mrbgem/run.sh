@@ -613,9 +613,12 @@ check grep -qF 'if (!!(mrb_nil_p(obj)))' "$work/api_num_sym_ctl/src/api_num_sym_
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_type_refused tools/cext2mrbgem/fixtures/api_type_refused/ext/api_type_refused "$work/api_type_refused" > "$work/api_type_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check test -e "$work/api_type_refused/NOT_BUILDABLE"
-check grep -q '  RB_TYPE_P  T_DATA has no exact mruby type' "$work/api_type_refused/REFUSALS.txt"
+# T_DATA and T_FIXNUM are the api_map's caveat forms (type_check "caveat"): converted to their MRB_TT_ tags, not refused
+check test "$(grep -c '  RB_TYPE_P  T_DATA has no exact' "$work/api_type_refused/REFUSALS.txt")" -eq 0
+check grep -qF 'MRB_TT_DATA' "$work/api_type_refused/src/api_type_refused.c"
+check test "$(grep -c '  RB_TYPE_P  T_FIXNUM has no exact' "$work/api_type_refused/REFUSALS.txt")" -eq 0
+check grep -qF 'MRB_TT_FIXNUM' "$work/api_type_refused/src/api_type_refused.c"
 check grep -q "  RB_TYPE_P  object 'rb_ary_entry(a, 0)' is not a plain local variable" "$work/api_type_refused/REFUSALS.txt"
-check grep -q '  RB_TYPE_P  T_FIXNUM has no exact mruby type' "$work/api_type_refused/REFUSALS.txt"
 check grep -q '  RB_TYPE_P  stuck point (Bignum): the fork has no Bignum' "$work/api_type_refused/REFUSALS.txt"
 
 # 2m. class-name and method-undef calls (api_map.json batch C1): the class variable is passed as a struct RClass * (not

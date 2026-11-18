@@ -3813,6 +3813,10 @@ use_problem = lambda do |name, use|
         nm = m[1]
         next unless local_value_at?(rel, m.begin(1), nm) || fs_values.include?(nm)
         next if in_dead_init(rel, m.begin(1)) || @edits[rel].overlaps(m.begin(1), m.end(1))
+        # the third parameter of a rb_hash_foreach callback is already the void * it was given (the threading above): no mrb_cptr
+        fnv = enclosing_func(rel, m.begin(1))
+        next if fnv && (@hash_cb_names || Set.new).include?(fnv['name']) &&
+                (fnv['params'] || '').split(',')[2].to_s.split.last.to_s.delete('*') == nm
         @edits[rel].add(m.begin(1), m.begin(1), 'mrb_cptr(')
         @edits[rel].add(m.end(1), m.end(1), ')')
       end
@@ -5328,7 +5332,10 @@ end
         vn = fnc ? value_names_of(fnc) : Set.new
         vf = value_field_names
         (t.match?(/\A[A-Za-z_]\w*\z/) && (vn.include?(t) || @files.keys.any? { |fr| file_scope_value_names(fr).include?(t) }) && !@class_vars.include?(t)) ||
-          (t.match?(/(?:->|\.)[A-Za-z_]\w*\z/) && vf.include?(t[/([A-Za-z_]\w*)\z/]))
+          (t.match?(/(?:->|\.)[A-Za-z_]\w*\z/) && vf.include?(t[/([A-Za-z_]\w*)\z/])) ||
+          # an element of a VALUE array (rb_class_inherited_p(args[0], key): a class read from the array)
+          (t.match?(/\A[A-Za-z_]\w*\s*\[[^\[\]]*\]\z/) && (vn.include?(t[/\A([A-Za-z_]\w*)/, 1]) || vn.include?("*#{t[/\A([A-Za-z_]\w*)/, 1]}") ||
+            (fnc && value_pointer_names(fnc).include?(t[/\A([A-Za-z_]\w*)/, 1]))))
       end
       # rb_yield needs the block of the method, which only a registered method's wrapper fetches (registered_header)
       # in a helper (a function with the mruby state), the block is read from the current call frame, as the wrapper does:
@@ -5405,7 +5412,9 @@ end
       end
 ignored = entry['ignored_args'] || []
 # an argument the template drops (an encoding) may be a call of a pure encoding getter: its value is not used
-unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:rb_utf8_encoding|rb_ascii8bit_encoding|rb_usascii_encoding)\(\)\z/) || t.match?(/\Arb_enc_get\(\s*[A-Za-z_][#{WC}]*\s*\)\z/) || t.match?(/\A(?:[A-Za-z_][#{WC}]*(?:\s*(?:->|\.)\s*[A-Za-z_][#{WC}]*)*)\z/) : (class_args.include?(i) ? (@class_vars.include?(t.delete('&')) || class_expr_ok.call(t.delete('&')) || value_class_arg.call(t.delete('&'), s)) : (t.match?(/\A&?(?:[A-Za-z_][#{WC}]*(?:(?:->|\.)[A-Za-z_][#{WC}]*)*|\d+|(?:struct|union)[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && (!@class_vars.include?(t.delete('&')) || entry['class_var_value'] || shadowed_local?(rel, t.delete('&'), s)) || plain_expr?(t, rel) || t.match?(/\Arb_intern\(\s*"[^"\\]*"\s*\)\z/) || (str_args.include?(i) && t.match?(/\A"[^"\\]*"\z/)))) }
+unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:rb_utf8_encoding|rb_ascii8bit_encoding|rb_usascii_encoding)\(\)\z/) || t.match?(/\Arb_enc_get\(\s*[A-Za-z_][#{WC}]*\s*\)\z/) || t.match?(/\A(?:[A-Za-z_][#{WC}]*(?:\s*(?:->|\.)\s*[A-Za-z_][#{WC}]*)*)\z/) ||
+  # a choice of encoding getters (utf8 ? rb_utf8_encoding() : rb_ascii8bit_encoding()): the value is dropped with the argument
+  t.match?(/\A[A-Za-z_][#{WC}]*\s*\?\s*(?:rb_(?:utf8|ascii8bit|usascii)_encoding\(\)|rb_enc_get\(\s*[A-Za-z_][#{WC}]*\s*\))\s*:\s*(?:rb_(?:utf8|ascii8bit|usascii)_encoding\(\)|rb_enc_get\(\s*[A-Za-z_][#{WC}]*\s*\))\z/) :(class_args.include?(i) ? (@class_vars.include?(t.delete('&')) || class_expr_ok.call(t.delete('&')) || value_class_arg.call(t.delete('&'), s)) : (t.match?(/\A&?(?:[A-Za-z_][#{WC}]*(?:(?:->|\.)[A-Za-z_][#{WC}]*)*|\d+|(?:struct|union)[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && (!@class_vars.include?(t.delete('&')) || entry['class_var_value'] || shadowed_local?(rel, t.delete('&'), s)) || plain_expr?(t, rel) || t.match?(/\Arb_intern\(\s*"[^"\\]*"\s*\)\z/) || ((str_args.include?(i) || (entry['c_str_args'] || []).include?(i)) && t.match?(/\A"[^"\\]*"\z/)))) }
         refuse(rel, s, name, 'the arguments are not all plain identifiers or integer literals (only those are substituted)')
         return
       end
@@ -5417,7 +5426,9 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       value_class = lambda do |t|
         ((vnames_t.include?(t) || @files.keys.any? { |fr| file_scope_value_names(fr).include?(t) }) &&
          (!@class_vars.include?(t) || shadowed_local?(rel, t, s))) ||
-          (t.match?(/(?:->|\.)[A-Za-z_]\w*\z/) && vfields_t.include?(t[/([A-Za-z_]\w*)\z/]))
+          (t.match?(/(?:->|\.)[A-Za-z_]\w*\z/) && vfields_t.include?(t[/([A-Za-z_]\w*)\z/])) ||
+          (t.match?(/\A[A-Za-z_]\w*\s*\[[^\[\]]*\]\z/) && (vnames_t.include?(t[/\A([A-Za-z_]\w*)/, 1]) || vnames_t.include?("*#{t[/\A([A-Za-z_]\w*)/, 1]}") ||
+            ((pfn = enclosing_func(rel, s)) && value_pointer_names(pfn).include?(t[/\A([A-Za-z_]\w*)/, 1]))))
       end
       out = (cond ? entry['template_cond'] : entry['template']).gsub(/\$(\d+)|\$m/) do
         next mrb_tok(rel, s) unless $1
@@ -6320,12 +6331,19 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       return
     end
     tgt = psl(text, args[0][0], args[0][1])
-    unless tgt == 'rb_cObject' || (@class_vars.include?(tgt) && !is_param(rel, args[0][0], tgt)) || class_expr_ok.call(tgt)
+    # a VALUE parameter is a module or class the caller holds (msgpack's *_module_init(VALUE mMessagePack)): its class pointer is read
+    value_param = is_param(rel, args[0][0], tgt) && (fe = enclosing_func(rel, s)) && value_names_of(fe).include?(tgt)
+    unless tgt == 'rb_cObject' || (@class_vars.include?(tgt) && !is_param(rel, args[0][0], tgt)) || class_expr_ok.call(tgt) || value_param
       refuse(rel, s, 'rb_define_const', "target #{py_repr(tgt)} is not a tracked class or module variable")
       return
     end
     ed.add(s, e, 'mrb_define_const')
     ed.add(nxt + 1, nxt + 1, "#{mrb_tok(rel, s)}, ")
+    # a VALUE parameter as the receiver: its class pointer (the mrb_class_ptr of a VALUE class, as the class arguments are)
+    if value_param
+      ed.add(args[0][0], args[0][0], 'mrb_class_ptr(')
+      ed.add(args[0][1], args[0][1], ')')
+    end
     rewrite(rel, s, 'rb_define_const', "mrb_define_const(mrb, #{tgt}, ...)",
             'an existing constant is replaced without CRuby\'s "already initialized" warning')
   end
@@ -6588,7 +6606,9 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       return
     end
     ent = @entries[tname]
-    if ent.nil? || ent.empty? || ent['kind'] != 'expr' || !(ent['mruby'] || '').start_with?('MRB_TT_') || ent.key?('caveat')
+    # an entry with a caveat is accepted when its type_check says the caveat is the accepted form (T_FIXNUM: the weaker Integer check)
+    if ent.nil? || ent.empty? || ent['kind'] != 'expr' || !(ent['mruby'] || '').start_with?('MRB_TT_') ||
+       (ent.key?('caveat') && ent['type_check'] != 'caveat')
       if tname == 'T_BIGNUM'
         refuse(rel, s, 'RB_TYPE_P', 'stuck point (Bignum): the fork has no Bignum. No MRB_TT_BIGINT tag exists (include/mruby/value.h:106-131) and no mrbgem defines a big-integer class, so no tag or class test can select CRuby\'s T_BIGNUM values')
       elsif tname == 'T_REGEXP'
