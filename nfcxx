@@ -503,7 +503,7 @@ fi
 if [ $emit_c = 1 ]; then
   # Run the front end alone and print the generated C.
   base=${EDG_BASE:-$root/build/edg-base}
-  tmp=$(mktemp -d); trap trace_finish EXIT
+  tmp=$(mktemp -d); trap 'trace_finish; [ -z "${tmp:-}" ] || rm -rf "$tmp"' EXIT   # removed on every exit (the front end's output is printed first)
   f=$(realpath "${srcs[0]}")   # the first source, not files[0] (which may be an -I option)
   # host dirs first, then EDG's own, as eccp orders user and default include dirs
   # the include list: scripts/nfcxx-emit-c.rb inc (the host or freestanding directories, EDG's own, and the user's -I directories
@@ -604,7 +604,8 @@ fi
 # C inputs: compile each .c to an object. Link options (-l, -L, ...) stay in files for the final link.
 cobjs=()
 if [ ${#cfiles[@]} -gt 0 ]; then
-  ctmp=$(mktemp -d); trap trace_finish EXIT
+  # the C objects' directory is removed on every exit (a failed compile or link too); eccp's trap removes it when eccp runs
+  ctmp=$(mktemp -d); trap 'trace_finish; [ -z "${ctmp:-}" ] || rm -rf "$ctmp"' EXIT
   n=0
   for c in ${cfiles[@]+"${cfiles[@]}"}; do
     o=$ctmp/$n.o; n=$((n + 1))
@@ -719,7 +720,7 @@ if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
   exit 0
 fi
 if [ $backend = pathb ]; then
-  ptmp=$(mktemp -d); trap trace_finish EXIT
+  ptmp=$(mktemp -d); trap 'trace_finish; [ -z "${ptmp:-}" ] || rm -rf "$ptmp"' EXIT   # the Path B objects' directory: removed on every exit
   pobjs=(); plink=(); n=0
   for f in ${files[@]+"${files[@]}"}; do
     case $f in
