@@ -1,2 +1,3 @@
-Redcarpet::Markdown.new(Redcarpet::Render::HTML).render("*a*")	<p><em>a</em></p>
-
+Redcarpet::Render::HTML.new.class.to_s	Redcarpet::Render::HTML
+Redcarpet::Markdown.new(Redcarpet::Render::HTML.new).render("*a*")	!NotImplementedError
+Redcarpet::Markdown.new(Redcarpet::Render::HTML.new).render("# T")	!NotImplementedError

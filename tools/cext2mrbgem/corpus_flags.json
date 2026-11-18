@@ -16,13 +16,19 @@
     "--undefine",
     "HAVE_OPENSSL_BIO_H",
     "--exclude",
-    "mini_ssl.c"
+    "mini_ssl.c",
+    "--replace",
+    "TypedData_Get_Struct(self, puma_parser, &HttpParser_data_type, http);=http = ({ VALUE nfcx_h = rb_ivar_get(self, rb_intern(\"@__parser\")); puma_parser *nfcx_p; if (NIL_P(nfcx_h)) { nfcx_p = ALLOC_N(puma_parser, 1); nfcx_p->http_field = http_field; nfcx_p->request_method = request_method; nfcx_p->request_uri = request_uri; nfcx_p->fragment = fragment; nfcx_p->request_path = request_path; nfcx_p->query_string = query_string; nfcx_p->server_protocol = server_protocol; nfcx_p->header_done = header_done; nfcx_p->request = Qnil; puma_parser_init(nfcx_p); nfcx_h = TypedData_Wrap_Struct(rb_cObject, &HttpParser_data_type, nfcx_p); rb_ivar_set(self, rb_intern(\"@__parser\"), nfcx_h); } TypedData_Get_Struct(nfcx_h, puma_parser, &HttpParser_data_type, nfcx_p); nfcx_p; });"
   ],
   "redcarpet": [
     "--method-scope-fn",
     "rndr_autolink__html",
     "--method-scope-fn",
-    "rndr_link__html"
+    "rndr_link__html",
+    "--replace",
+    "TypedData_Get_Struct(self, struct rb_redcarpet_rndr, &rb_redcarpet_rndr_type, rndr);=rndr = ({ VALUE nfcx_h = rb_ivar_get(self, rb_intern(\"@__rndr\")); struct rb_redcarpet_rndr *nfcx_r; if (NIL_P(nfcx_h)) { nfcx_r = ALLOC(struct rb_redcarpet_rndr); memset(nfcx_r, 0x0, sizeof(struct rb_redcarpet_rndr)); nfcx_h = TypedData_Wrap_Struct(rb_cObject, &rb_redcarpet_rndr_type, nfcx_r); rb_ivar_set(self, rb_intern(\"@__rndr\"), nfcx_h); } TypedData_Get_Struct(nfcx_h, struct rb_redcarpet_rndr, &rb_redcarpet_rndr_type, nfcx_r); nfcx_r; });",
+    "--replace",
+    "TypedData_Get_Struct(opt->self, struct rb_redcarpet_rndr, &rb_redcarpet_rndr_type, rndr);=rndr = ({ VALUE nfcx_h = rb_ivar_get(opt->self, rb_intern(\"@__rndr\")); struct rb_redcarpet_rndr *nfcx_r; if (NIL_P(nfcx_h)) { nfcx_r = ALLOC(struct rb_redcarpet_rndr); memset(nfcx_r, 0x0, sizeof(struct rb_redcarpet_rndr)); nfcx_h = TypedData_Wrap_Struct(rb_cObject, &rb_redcarpet_rndr_type, nfcx_r); rb_ivar_set(opt->self, rb_intern(\"@__rndr\"), nfcx_h); } TypedData_Get_Struct(nfcx_h, struct rb_redcarpet_rndr, &rb_redcarpet_rndr_type, nfcx_r); nfcx_r; });"
   ],
   "date": [
     "--define",

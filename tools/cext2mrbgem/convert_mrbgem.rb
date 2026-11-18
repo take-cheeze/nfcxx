@@ -3324,6 +3324,9 @@ use_problem = lambda do |name, use|
       masked.to_enum(:scan, /(?<![#{WC}.>])return[ \t\n]+([A-Za-z_]\w*)[ \t\n]*\(/).each do
         m = Regexp.last_match
         callee = m[1]
+        # return f(x) ? Qtrue : Qfalse is a truth test of the int, not the int returned (puma's HttpParser_is_finished)
+        close_p = match_close(masked, m.end(0) - 1)
+        next if close_p >= 0 && (nxc = next_nonspace(masked, close_p + 1)) >= 0 && masked[nxc] == '?'
         defs = (@defs[callee] || []).reject { |x| x['proto'] }
         next unless defs.size == 1 && defs[0]['ret']
         ret = defs[0]['ret'].to_s
