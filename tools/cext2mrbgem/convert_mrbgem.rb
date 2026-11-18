@@ -2280,6 +2280,11 @@ end
       next unless r[:calls].all? { |_, fn, _| fn && (cands.include?(fn) || regs.include?(fn)) }
       ptxt = ptxt.sub(/\(\s*\*\s*#{Regexp.escape(r[:name])}\s*\)\s*\(/) { |m| m + 'mrb_state *mrb, ' }
     end
+    # a prototype declares the callback without its name ((*)(VALUE, ...)): the threaded callback type takes mrb the same way
+    if (@fnptr_recs || []).any? { |r| r[:owner] == name && r[:ok] && r[:assigns].all? { |h, _, _| cands.include?(h) } &&
+                                      r[:calls].all? { |_, fn, _| fn && (cands.include?(fn) || regs.include?(fn)) } }
+      ptxt = ptxt.gsub(/\(\s*\*\s*\)\s*\(/) { |m| m + 'mrb_state *mrb, ' }
+    end
     ptxt
   end
 
@@ -3754,12 +3759,22 @@ use_problem = lambda do |name, use|
     @files.each_key do |rel|
       mv = @files[rel]['masked']
       fs_values = file_scope_value_names(rel)
-      mv.to_enum(:scan, /\(\s*(?:uintptr_t|intptr_t|unsigned\s+long|long|unsigned\s+int|int|size_t|ID)\s*\)\s*([A-Za-z_]\w*)(?![\w(\[])/).each do
+      mv.to_enum(:scan, /\(\s*(?:uintptr_t|intptr_t|unsigned\s+long|long|unsigned\s+int|int|size_t|ID|st_index_t|st_data_t)\s*\)\s*([A-Za-z_]\w*)(?![\w(\[])/).each do
         m = Regexp.last_match
         nm = m[1]
         next unless (local_value_at?(rel, m.begin(1), nm) || fs_values.include?(nm)) && !@class_vars.include?(nm)
         next if in_dead_init(rel, m.begin(1)) || @edits[rel].overlaps(m.begin(0), m.begin(0) + 1)
         refuse(rel, m.begin(0), nm, "stuck point (VALUE as integer): #{nm} is a VALUE, a struct in the fork (include/mruby/boxing_no.h), and its word is read as an integer in CRuby; the fork has no integer form of it")
+      end
+      # an element of an integer hash array (st_index_t h[5]) assigned a VALUE-returning call: the word is stored as an integer
+      int_arrays = mv.to_enum(:scan, /\bst_index_t\s+([A-Za-z_]\w*)\s*\[/).map { Regexp.last_match(1) }.to_set
+      int_arrays.each do |arr|
+        mv.to_enum(:scan, /(?<![#{WC}])#{Regexp.escape(arr)}\s*\[[^\]\n]*\]\s*=\s*([A-Za-z_]\w*)\s*\(/).each do
+          m = Regexp.last_match
+          next unless value_call_name?(m[1]) || ((@defs[m[1]] || []).reject { |x| x['proto'] }.any? && (@defs[m[1]] || []).reject { |x| x['proto'] }.all? { |x| x['ret'].to_s.strip == 'VALUE' })
+          next if in_dead_init(rel, m.begin(0)) || @edits[rel].overlaps(m.begin(0), m.begin(0) + 1)
+          refuse(rel, m.begin(0), arr, "stuck point (VALUE as integer): #{arr} is an integer array (st_index_t), and #{m[1]} returns a VALUE, a struct in the fork (include/mruby/boxing_no.h); the word has no integer form here")
+        end
       end
     end
   end
@@ -4616,8 +4631,13 @@ end
     end
     # A macro with no use anywhere in the gem (no occurrence outside its own #define) is dead text: its CRuby body is not
     # converted, so the #define is kept under #if 0 and its names are not refused. A macro used in any file is not dead.
+    # a name built by pasting (s##_trunc with s = jd makes jd_trunc) is a use of the macro it names
+    paste_suffixes = (@paste_suffixes ||= @files.values.inject(Set.new) do |acc, f|
+      acc | f['masked'].scan(/##\s*([A-Za-z_]\w*)/).flatten.to_set
+    end)
     unused_spans = define_spans(rel).select do |mname, a, b|
-      (@occ[mname] || []).none? { |r, os, _oe| !(r == rel && a <= os && os < b) }
+      (@occ[mname] || []).none? { |r, os, _oe| !(r == rel && a <= os && os < b) } &&
+        paste_suffixes.none? { |sfx| mname.end_with?(sfx) }
     end.map { |_n, a, b| [a, b] }
     unused_spans.each do |a, b|
       ed.add(a, a, "#if 0  /* BC2CPP-MRBGEM: unused macro (no use in the gem): its CRuby body is not converted */\n")
