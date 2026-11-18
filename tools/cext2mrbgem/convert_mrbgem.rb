@@ -1460,7 +1460,7 @@ end
 
   def split_problem(name, uses)
     return 'it has more than one definition' if @defs[name].size != 1
-    return "the name #{name}_impl is already used in the input" if @occ.key?("#{name}_impl")
+    return "the names #{name}_impl and #{name}_nfcx_impl are already used in the input" if @occ.key?("#{name}_impl") && @occ.key?("#{name}_nfcx_impl")
     d0 = @defs[name][0]
     _hdr, _pro, err = registered_header(d0)
     return "its arguments are not known to the converter: #{err}" if err
@@ -1503,11 +1503,17 @@ end
     d0['params'].split(',', -1).map { |p| py_strip(p)[/\AVALUE#{SS1}([A-Za-z_][#{WC}]*)\z/, 1] }
   end
 
+  # the name of a split method's impl: <name>_impl, or <name>_nfcx_impl when the input already has <name>_impl (msgpack's
+  # Unpacker_each has its own Unpacker_each_impl helper)
+  def split_impl_name(name)
+    @occ.key?("#{name}_impl") ? "#{name}_nfcx_impl" : "#{name}_impl"
+  end
+
   # the impl: the original C parameters (mapped), with mrb first when check_refs threaded it
   def split_impl_hdr(d0)
     mrb_arg = @helper_names.include?(d0['name']) ? 'mrb_state *mrb, ' : ''
     params = map_types(py_strip(d0['params']), @types)
-    "#{d0['storage']}#{map_types(d0['ret'], @types)} #{d0['name']}_impl(#{mrb_arg}#{params})"
+    "#{d0['storage']}#{map_types(d0['ret'], @types)} #{split_impl_name(d0['name'])}(#{mrb_arg}#{params})"
   end
 
   def split_self(d0)
@@ -1537,7 +1543,7 @@ end
       args = [names[0]] + locals
     end
     args.unshift('mrb') if @helper_names.include?(name)
-    call = "#{name}_impl(#{args.join(', ')})"
+    call = "#{split_impl_name(name)}(#{args.join(', ')})"
     if @global_wrap
       # as a registered method: the global state is set on entry and restored on return (wrap_returns)
       g = @global_name
@@ -3795,6 +3801,42 @@ use_problem = lambda do |name, use|
     end
   end
 
+  # (T *)v where v is a VALUE that carries a pointer (CRuby's rb_protect and rb_ensure data: msgpack's
+  # msgpack_packer_try_calling_proc casts its VALUE to a struct pointer): the pointer is read with mrb_cptr, as the ensure
+  # data of the callbacks is (api_ensure_ptr). Runs last, so a cast the passes above convert is left alone.
+  def value_to_pointer_cast_pass
+    @files.each_key do |rel|
+      mv = @files[rel]['masked']
+      fs_values = file_scope_value_names(rel)
+      mv.to_enum(:scan, /\(\s*(?:struct\s+[A-Za-z_]\w*|[A-Za-z_]\w*)\s*\*+\s*\)\s*([A-Za-z_]\w*)(?![\w(\[])/).each do
+        m = Regexp.last_match
+        nm = m[1]
+        next unless local_value_at?(rel, m.begin(1), nm) || fs_values.include?(nm)
+        next if in_dead_init(rel, m.begin(1)) || @edits[rel].overlaps(m.begin(1), m.end(1))
+        @edits[rel].add(m.begin(1), m.begin(1), 'mrb_cptr(')
+        @edits[rel].add(m.end(1), m.end(1), ')')
+      end
+    end
+  end
+
+  # (VALUE)0 is CRuby's Qfalse as a cast (a macro body such as msgpack's NO_MAPPED_STRING): the fork's VALUE is a struct, so the
+  # cast of 0 is not valid; it becomes mrb_false_value(), in function bodies and in macro bodies alike
+  def value_cast_zero_pass
+    @files.each_key do |rel|
+      masked = @files[rel]['masked']
+      masked.to_enum(:scan, /\(\s*VALUE\s*\)\s*0\b/).each do
+        m = Regexp.last_match
+        s0, e0 = m.begin(0), m.end(0)
+        # only in a macro body: a (VALUE)0 in a call is a sentinel of the call (rb_rescue2's argument list ends with one)
+        next unless define_at(rel, s0)
+        next if in_dead_init(rel, s0)
+        # the cast's VALUE token may carry the type rename: the whole cast is replaced, so those edits go
+        @edits[rel].drop(@edits[rel].overlapping(s0, e0))
+        @edits[rel].add(s0, e0, 'mrb_false_value()')
+      end
+    end
+  end
+
   # VALUE x = 0 (CRuby's Qfalse is the zero word): the local is initialized with mrb_false_value(), the fork's false
   def value_zero_init_pass
     @files.each_key do |rel|
@@ -3986,14 +4028,15 @@ use_problem = lambda do |name, use|
         next if in_dead_init(rel, op_s)
         # the operator must not be inside an edit already (the equality pass rewrote this comparison, or another pass did)
         next if @edits[rel].overlaps(op_s, op_e)
+        # a comparison in a macro body has no enclosing function: its operands are the macro's parameters and the file's VALUE names
         fn = enclosing_func(rel, op_s)
-        next unless fn
-        value_names = value_names_of(fn) | all_file_scope_value_names
+        next unless fn || define_at(rel, op_s)
+        value_names = (fn ? value_names_of(fn) : Set.new) | all_file_scope_value_names
         l_start, l_text = left_operand(masked, op_s)
         r_end, r_text = right_operand(masked, op_e)
         next if l_text.nil? || r_text.nil? || l_text.empty? || r_text.empty?
         # a parameter of this function that is not a VALUE (char *json) shadows a file-scope VALUE of the same name
-        value_names -= non_value_param_names(fn)
+        value_names -= non_value_param_names(fn) if fn
         # a comparison with a definite VALUE (a Q constant or an mrb_*_value call) compares VALUEs: the other operand is one too
         # (CRuby compares VALUEs with ==; a member whose name is declared differently in other structs is not judged by name)
         strong = ->(t) { t.strip.match?(/\AQ(?:nil|true|false|undef)\z/) || t.strip.match?(/\Amrb_\w*_value\s*\(/) ||
@@ -4007,7 +4050,7 @@ use_problem = lambda do |name, use|
         zero_r = r_text.strip == '0'
         if zero_l || zero_r
           other = zero_l ? r_text : l_text
-          next if non_value_param_names(fn).include?(other.strip)
+          next if fn && non_value_param_names(fn).include?(other.strip)
           next unless value_operand?(other, value_names, vfields, rel, op_s) || strong.call(other)
           zero_s, zero_e = zero_l ? [l_start, l_start + 1] : [r_end - 1, r_end]
           @edits[rel].add(zero_s, zero_e, 'mrb_false_value()') unless @edits[rel].touches_strictly?(zero_s)
@@ -4641,8 +4684,8 @@ end
         next if is_member(mk, s)
         ob = enclosing_open_brace(mk, s)
         next if ob && mk[[ob - 60, 0].max...ob].to_s.match?(/\b(?:struct|union)[ \t\n]*[A-Za-z_]?\w*[ \t\n]*\z/)
-        ed.add(s, s + name.length, "#{name}_impl")
-        rewrite(rel, s, name, "#{name}_impl")
+        ed.add(s, s + name.length, split_impl_name(name))
+        rewrite(rel, s, name, split_impl_name(name))
       end
     end
 # NORETURN( ) wrappers (noreturn_mask): the two tokens are removed; the declaration inside stays
@@ -5408,6 +5451,9 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         elsif (qe = { 'Qnil' => 'mrb_nil_value()', 'Qtrue' => 'mrb_true_value()', 'Qfalse' => 'mrb_false_value()', 'Qundef' => 'mrb_undef_value()' }[texts[k].strip])
           # a Q constant argument of a template is its value (the template copies the argument text)
           qe
+        elsif texts[k].strip == 'VALUE'
+          # a bare VALUE argument is a type (MEMCPY(p, s, VALUE, n) expands to sizeof(VALUE)): the fork's VALUE type
+          'mrb_value'
         else
           texts[k]
         end
@@ -7150,6 +7196,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     value_as_integer_arg_pass
     value_struct_pointer_cast_pass
     value_cast_integer_stuck_pass
+    value_cast_zero_pass
     value_zero_init_pass
     onig_engine_stuck_pass
     id_return_pass
@@ -7161,6 +7208,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     header_prototype_types_pass
     value_zero_assign_pass
     integer_return_pass
+    # last: a (T *)v cast that the passes above did not cover (the ensure and protect data are theirs)
+    value_to_pointer_cast_pass
     @dead_inits.each do |d|
       @edits[d['file']].add(d['hstart'], d['hstart'],
                             "#if 0  /* BC2CPP-MRBGEM: not the extension entry; CRuby never calls it */\n")
