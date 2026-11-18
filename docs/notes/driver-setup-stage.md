@@ -29,8 +29,10 @@ Each step is an `eval` of a planner's statements (or a call that sets variables)
 
 ## What the dependencies force
 
-- **backend** is read by steps 2, 4, 7, 9 and 12, and written by steps 1 and 11. Step 11 runs after 1, so the Path B override
-  always wins over the default; a Ruby version must keep that order, not compute the backend once.
+- **backend** is written by step 1 (the default) and step 11 (the Path B override, bash line 539). The override runs after
+  steps 2, 4, 7, 9 and 10 in ./nfcxx, so those planners see the default's backend, not pathb, when --backend is not given but
+  NFCXX_PATH=b is set. Only steps 11 and 12 see the overridden value. A Ruby version must keep this order exactly; computing
+  the backend once, before the planners, changes the output of cosmo, host cflags, k1om and the target when path_b=1.
 - **gnu** is written by step 5 and read by steps 4, 8 and 10. Step 4 (cosmo) runs before step 5, so cosmo sees the gnu the
   command line gave, not the one step 5 picks.
 - **gnu_opts** is built by steps 8 and 10 and read by step 10. The order of the words matters: the target's words follow
