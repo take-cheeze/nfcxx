@@ -1668,6 +1668,12 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_thread_sync --thread-sync to
 check grep -qF 'return fn(data);' "$work/api_thread_sync/include/nfcx_uv_thread.h"
 check test "$(grep -c 'uv\.h\|uv_queue_work\|uv_run' "$work/api_thread_sync/include/nfcx_uv_thread.h")" -eq 0
 check test "$(grep -c 'mruby-uv' "$work/api_thread_sync/mrbgem.rake")" -eq 0
+# 2zzz158. a C++ extension (.cc) is read as C++: its Init function is found (no gem-level "C++" refusal), the variadic method cast
+# (VALUE (*)(...)) is a method function, and the converted source keeps the .cc name (the mruby build compiles it as C++).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_cxx_source tools/cext2mrbgem/fixtures/api_cxx_source/ext/api_cxx_source "$work/api_cxx_source" > "$work/api_cxx_source.log" 2>&1 || rc=$?
+check test -e "$work/api_cxx_source/src/api_cxx_source.cc"
+check test "$(grep -c 'C++' "$work/api_cxx_source/REFUSALS.txt")" -eq 0
+check grep -qF 'cxx_twice' "$work/api_cxx_source/src/api_cxx_source.cc"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?

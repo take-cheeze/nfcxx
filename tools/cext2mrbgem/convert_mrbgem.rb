@@ -684,6 +684,16 @@ class Converter
     out
   end
 
+  # C++ inputs (the extension's .cc/.cpp/.cxx sources and their .hh/.hpp/.hxx headers) are read as the C ones are: the mruby build
+  # compiles a gem's .cc sources as C++, and the C API they use is the fork's (extern "C" headers)
+  def c_input?(name)
+    name.match?(/\.(?:c|h|cc|cpp|cxx|hh|hpp|hxx)\z/)
+  end
+
+  def cxx_or_c_source?(name)
+    name.match?(/\.(?:c|cc|cpp|cxx)\z/)
+  end
+
   def load
     abort "error: not a directory: #{@cext_dir}" unless File.directory?(@cext_dir)
     abort "error: cannot derive a gem name from #{@cext_dir}" unless GEM_NAME_RE.match?(@name)
@@ -691,12 +701,12 @@ texts = {}
 Dir.children(@cext_dir).reject { |n| n.start_with?('.') }.sort.each do |tb|
   tp = File.join(@cext_dir, tb)
   next if File.directory?(tp)
-  texts[tb] = read_text(tp) if tb.end_with?('.c') || tb.end_with?('.h')
+  texts[tb] = read_text(tp) if c_input?(tb)
 end
 # the headers of an immediate subdirectory (yajl's api/ holds its public headers, which the sources include as "api/x.h")
 # are inputs at their relative path; the subdirectory's sources are not compiled (only the gem's own C files are)
 sub_headers = Dir.children(@cext_dir).reject { |n| n.start_with?('.') }.sort.select { |n| File.directory?(File.join(@cext_dir, n)) }
-                  .flat_map { |d| Dir.glob(File.join(@cext_dir, d, '*.{h,c}')).sort.map { |p| File.join(d, File.basename(p)) } }
+                  .flat_map { |d| (Dir.glob(File.join(@cext_dir, d, '*.{h,c}')) + Dir.glob(File.join(@cext_dir, d, '**', '*.{hh,hpp,hxx}'))).sort.map { |p| p.sub(File.join(@cext_dir, '') , '') } }
 sub_headers.each { |rel| texts[rel] = read_text(File.join(@cext_dir, rel)) }
 texts.each_key { |k| texts[k] = kr_normalize(texts[k]) }
 texts = static_rename(texts)
@@ -719,12 +729,12 @@ end
         @ignored << [base, 'excluded (--exclude): not built in this configuration']
         next
       end
-      unless base.end_with?('.c') || base.end_with?('.h')
+      unless c_input?(base)
         @ignored << [base, 'not a C source or header (read by nothing; extconf.rb is never run)']
         next
       end
       text = texts.fetch(base)
-      kind = base.end_with?('.c') ? 'src' : 'hdr'
+      kind = cxx_or_c_source?(base) ? 'src' : 'hdr'
       @files[base] = { 'text' => text, 'masked' => mask_c(text), 'kind' => kind }
       noreturn_mask(base)
       @edits[base] = Edits.new
@@ -940,7 +950,7 @@ end
             end
             rec['name_span'] = [ns, ne]
             nm = /\A"([^"\\\n]*)"\z/.match(py_strip(psl(text, ns, ne)))
-            fm = /\A(?:\(#{SS}VALUE#{SS}\(#{SS}\*#{SS}\)#{SS}\(#{SS}ANYARGS#{SS}\)#{SS}\)#{SS})?([A-Za-z_][#{WC}]*)\z/
+            fm = /\A(?:\(#{SS}VALUE#{SS}\(#{SS}\*#{SS}\)#{SS}\(#{SS}(?:ANYARGS|\.\.\.)#{SS}\)#{SS}\)#{SS})?([A-Za-z_][#{WC}]*)\z/
                  .match(py_strip(psl(text, fs, fe)))
             am = /\A-?[0-9]+\z/.match(py_strip(psl(text, as_, ae)))
             rec['func_span'] = [fs, fe]
@@ -952,7 +962,7 @@ end
               rec['error'] = "argc #{am[0]} (array form) is not in the supported subset"
             elsif fm.nil?
               rec['error'] = 'method function argument is not a plain function name ' \
-                             '(only the VALUE (*)(ANYARGS) cast is handled)'
+                             '(only the VALUE (*)(ANYARGS) and VALUE (*)(...) casts are handled)'
             elsif nm.nil?
               rec['error'] = 'method name is not a plain string literal'
             else
@@ -6674,7 +6684,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     @files.each do |rel, f|
       next unless f['kind'] == 'src'
       path = File.join(src_dir, rel)
-      args = ['gcc', '-fsyntax-only', '-w', '-include', 'stddef.h', '-I', src_dir, '-I', inc_dir]
+      # a C++ source (.cc) is checked as C++ (g++): the mruby headers are extern "C" and the converted classes are C++
+      args = [(rel.end_with?('.cc') ? 'g++' : 'gcc'), '-fsyntax-only', '-w', '-include', 'stddef.h', '-I', src_dir, '-I', inc_dir]
       # the build's defines (the --define options: the names the build defines, as extconf would set them)
       (@defines || []).each { |d| args << "-D#{d}" }
       incs.each { |d| args += ['-I', d] }
