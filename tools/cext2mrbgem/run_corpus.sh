@@ -1,0 +1,38 @@
+#!/bin/bash
+# Converts every gem of the CRuby C-extension corpus and reports, per gem, the refusals that are not classified as stuck
+# (OPEN) and those that are (STUCK). usage: run_corpus.sh CORPUS_SRC OUT_DIR
+#   CORPUS_SRC: a directory holding one extension per gem, as src/<gem>-<version>/ext/<gem>/extconf.rb
+#   OUT_DIR:    where each gem's converted output goes (OUT_DIR/<gem>)
+# The per-gem options are in corpus_flags.json next to this script.
+set -u
+HERE=$(cd "$(dirname "$0")" && pwd)
+REPO=$(cd "$HERE/../.." && pwd)
+SRC=${1:?usage: run_corpus.sh CORPUS_SRC OUT_DIR}
+OUT=${2:?usage: run_corpus.sh CORPUS_SRC OUT_DIR}
+export NFCX_MRUBY_INCLUDE=${NFCX_MRUBY_INCLUDE:-/home/user/mruby/include:/home/user/mruby/build/host/include}
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+to=0; ts=0
+for extconf in $(find "$SRC" -type f -name extconf.rb -not -path '*/test/*' | sort); do
+  ext=$(dirname "$extconf")
+  n=$(basename "$(dirname "$(dirname "$ext")")")
+  n=$(echo "$n" | sed 's/-[0-9][0-9.]*$//')
+  # per-gem options, read from corpus_flags.json (none for a gem not listed)
+  flags=()
+  while IFS= read -r f; do [ -n "$f" ] && flags+=("$f"); done < <(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("\n".join(d.get(sys.argv[2], [])))' "$HERE/corpus_flags.json" "$n")
+  if [ "$n" = oj ]; then
+    # oj: trace.c's static fill_indent is renamed in a copy (a name clash with dump.h's inline fill_indent)
+    root=$(dirname "$(dirname "$ext")")
+    mkdir -p "$WORK/oj-src" && cp -r "$root/." "$WORK/oj-src/"
+    sed -i 's/\bfill_indent\b/trace_fill_indent/g' "$WORK/oj-src/ext/oj/trace.c"
+    ext="$WORK/oj-src/ext/oj"
+  fi
+  o="$OUT/$n"; rm -rf "$o"
+  ruby "$REPO/tools/cext2mrbgem/convert_mrbgem.rb" --name "$n" --scanner auto "${flags[@]}" "$ext" "$o" >/dev/null 2>&1
+  all=$(grep -E '^[^ ]+:[0-9]+ ' "$o/REFUSALS.txt" 2>/dev/null)
+  open=$(printf '%s\n' "$all" | grep -v '^$' | grep -cv 'stuck')
+  stk=$(printf '%s\n' "$all" | grep -v '^$' | grep -c 'stuck')
+  printf '%-14s open %-5s stuck %s\n' "$n" "$open" "$stk"
+  to=$((to+open)); ts=$((ts+stk))
+done
+echo "OPEN $to STUCK $ts"

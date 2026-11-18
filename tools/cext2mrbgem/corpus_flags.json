@@ -1,0 +1,18 @@
+{
+  "_comment": "Per-gem converter options for run_corpus.sh (the corpus of CRuby C extensions). Each value is the list of options passed to convert_mrbgem.rb after --name and --scanner auto. The oj source is copied and its trace.c fill_indent is renamed to trace_fill_indent first (a name clash with dump.h's inline fill_indent); see run_corpus.sh.",
+  "bigdecimal": ["--undefine", "BIGDECIMAL_USE_VP_TEST_METHODS", "--undefine", "HAVE_RB_OPTS_EXCEPTION_P", "--undefine", "RBIMPL_STATIC_ASSERT", "--undefine", "RUBY_ATOMIC_PTR_CAS"],
+  "puma": ["--undefine", "HAVE_OPENSSL_BIO_H"],
+  "redcarpet": ["--method-scope-fn", "rndr_autolink__html", "--method-scope-fn", "rndr_link__html"],
+  "date": ["--define", "HAVE_GMTIME_R", "--define", "HAVE_LOCALTIME_R", "--define", "HAVE_SYS_TIME_H"],
+  "oj": ["--undefine", "HAVE_RB_GC_MARK_MOVABLE", "--stored-tag", "T_NIL=0xf0", "--define", "RSTRUCT_LEN",
+         "--method-scope-fn", "safe_open_array", "--method-scope-fn", "safe_open_array_key",
+         "--method-scope-fn", "safe_open_object", "--method-scope-fn", "safe_open_object_key",
+         "--method-scope-fn", "encode", "--method-scope-fn", "fill_indent", "--method-scope-fn", "get_datetime_secs",
+         "--method-scope-fn", "safe_add_null", "--method-scope-fn", "safe_add_null_key",
+         "--method-scope-fn", "safe_add_true", "--method-scope-fn", "safe_add_true_key",
+         "--method-scope-fn", "safe_add_false", "--method-scope-fn", "safe_add_false_key",
+         "--method-scope-fn", "safe_add_int", "--method-scope-fn", "safe_add_int_key",
+         "--method-scope-fn", "safe_add_float", "--method-scope-fn", "safe_add_float_key",
+         "--method-scope-fn", "safe_add_big", "--method-scope-fn", "safe_add_big_key",
+         "--method-scope-fn", "safe_add_str", "--method-scope-fn", "safe_add_str_key"]
+}
