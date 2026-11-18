@@ -159,6 +159,8 @@ class ClosedWorld
     @deferred_struct_splats = []
     # Modules named by a mixin whose target the analysis cannot place (resolve_deferred_mixin_modules).
     @deferred_mixin_modules = []
+    # LOADSYM of an installer or rebinder name: [irep, index, register, name] (resolve_installer_symbol_loads).
+    @installer_symbol_loads = []
     @class_constant_names = Set.new
     # CLASS ops that declare a name (not the root-level reopen of native_class_unshadowed?).
     @class_declared_names = Set.new
@@ -1697,11 +1699,16 @@ class ClosedWorld
           scan_send(irep, idx, insn)
         when :UNDEF
           @removed_names << insn.sym
-        when :LOADSYM
-          sym = insn.sym_token
+        when :LOADSYM, :SYMBOL
+          # A %i[] element is a SYMBOL (its name is in the pool) and a method name can be sent from it just the same.
+          sym = loaded_symbol_name(irep, insn)
+          next unless sym
+
           @clone_sent = true if sym == 'clone'
           @dynamic_visibility = true if VISIBILITY_SENDS.include?(sym)
-          global!(:dynamic_install) if INSTALLER_SENDS.include?(sym) || CONST_REBINDERS.include?(sym)
+          # An installer or rebinder name loaded as a symbol may be sent by name: its value must stay on safe paths
+          # (resolve_installer_symbol_loads), not refuse the program outright.
+          @installer_symbol_loads << [irep, idx, insn.reg, sym] if INSTALLER_SENDS.include?(sym) || CONST_REBINDERS.include?(sym)
         when :GETCONST, :GETMCNST
           const = insn.const_name
           @basic_object_referenced = true if const == 'BasicObject'
@@ -1723,6 +1730,7 @@ class ClosedWorld
     end
     resolve_struct_splats
     resolve_deferred_mixin_modules
+    resolve_installer_symbol_loads
     # A read name (scan_factory) can run a definition the scan only finishes seeing here.
     global!(:class_factory_escape) unless @factory_read_names.all? { |name| ownerless_native_dispatch_safe?(name) }
   end
@@ -1763,8 +1771,9 @@ class ClosedWorld
     case insn.op
     when :SDEF, :SCLASS
       @singleton_opens << [irep, idx, insn]
-    when :LOADSYM
-      @singleton_makers << [irep.label, insn.sym_token] if SINGLETON_MAKERS.include?(insn.sym_token)
+    when :LOADSYM, :SYMBOL
+      name = loaded_symbol_name(irep, insn)
+      @singleton_makers << [irep.label, name] if name && SINGLETON_MAKERS.include?(name)
     when SEND_OPS
       @singleton_makers << [irep.label, insn.sym] if SINGLETON_MAKERS.include?(insn.sym)
     end
@@ -1819,6 +1828,79 @@ class ClosedWorld
 
   def loop_installer_sites
     @loop_installer_sites ||= LoopInstallers.sites(@registry)
+  end
+
+  # The name a symbol load produces: LOADSYM names it in the operand, SYMBOL in the irep's pool. Nil if it is not a string.
+  def loaded_symbol_name(irep, insn)
+    return insn.sym_token if insn.op == :LOADSYM
+
+    entry = irep.pool && insn.pool_index && irep.pool[insn.pool_index.to_i]
+    entry.is_a?(String) ? entry : nil
+  end
+
+  # Names whose only use, as a value, is a read that never sends its argument: a set or key test, equality, a hash or a
+  # string form. Each must be native (a Ruby method of that name could send its argument).
+  INSTALLER_SAFE_READS = %w[include? key? member? == != eql? equal? === hash to_s inspect].freeze
+  INSTALLER_SYMBOL_DEPTH = 4
+
+  # Every LOADSYM of an installer or rebinder name must be on a safe path: its value (and any array or hash holding it, or
+  # constant bound to it, read anywhere in the program) reaches only native reads. A value that reaches a send, a return,
+  # an unknown container or an unknown read keeps the refusal, since mruby would send the name at run time.
+  def resolve_installer_symbol_loads
+    @installer_symbol_loads.each do |irep, idx, reg, _sym|
+      global!(:dynamic_install) unless installer_symbol_value_safe?(irep, idx, reg, 0)
+    end
+  end
+
+  def installer_symbol_value_safe?(irep, idx, reg, depth)
+    return false if depth > INSTALLER_SYMBOL_DEPTH || reg.nil?
+
+    uses = FactoryFlow.uses(irep, idx, reg)
+    return false unless uses
+
+    uses.all? { |use_idx, use_reg| installer_symbol_use_safe?(irep, use_idx, use_reg, depth) }
+  end
+
+  def installer_symbol_use_safe?(irep, use_idx, use_reg, depth)
+    insn = BytecodeIR.for(irep).source_at(use_idx)
+    case insn.op
+    when :ARRAY, :HASH
+      installer_symbol_value_safe?(irep, use_idx, insn.reg, depth + 1)
+    when :CLASS, :MODULE, :SCLASS, :TCLASS
+      # A class or module operand is type-checked, never sent a method: a stale temporary read here is not a send.
+      true
+    when :SETCONST
+      return false unless insn.regs&.first == use_reg
+
+      installer_constant_reads_safe?(insn.const_name.to_s, depth + 1)
+    when *BytecodeIR::Ops::SEND.to_a
+      # `freeze` returns its receiver (the same register, now frozen): the value continues on that register.
+      if insn.sym == 'freeze' && use_reg == insn.reg && native_only?('freeze')
+        return installer_symbol_value_safe?(irep, use_idx, insn.reg, depth + 1)
+      end
+
+      INSTALLER_SAFE_READS.include?(insn.sym) && native_only?(insn.sym)
+    else
+      false
+    end
+  end
+
+  # Every definer of +name+ is native (a Ruby method of that name could send what it is given).
+  def native_only?(name)
+    @registry.fetch(name, []).all? { |d| d.owner == '<native>' }
+  end
+
+  # Every read of constant +name+ in the program (GETCONST and scoped GETMCNST) carries a safe value.
+  def installer_constant_reads_safe?(name, depth)
+    @ireps.each_value do |irep|
+      source = BytecodeIR.for(irep)
+      (0...source.size).each do |i|
+        read = source.source_at(i)
+        next unless (read.op == :GETCONST && read.const_name.to_s == name) || (read.op == :GETMCNST && read.mcnst_name.to_s == name)
+        return false unless installer_symbol_value_safe?(irep, i, read.reg, depth)
+      end
+    end
+    true
   end
 
   # The module argument of an include/prepend/extend send (one plain argument), as a constant reference, or nil.
