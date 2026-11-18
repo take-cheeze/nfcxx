@@ -1875,7 +1875,7 @@ class ClosedWorld
       installer_constant_reads_safe?(insn.const_name.to_s, depth + 1)
     when *BytecodeIR::Ops::SEND.to_a
       # `freeze` returns its receiver (the same register, now frozen): the value continues on that register.
-      if insn.sym == 'freeze' && use_reg == insn.reg && native_only?('freeze')
+      if insn.sym == 'freeze' && use_reg == insn.reg && literal_freeze_native?
         return installer_symbol_value_safe?(irep, use_idx, insn.reg, depth + 1)
       end
 
@@ -1883,6 +1883,14 @@ class ClosedWorld
     else
       false
     end
+  end
+
+  # The freeze of a literal Array or Hash (the receiver's class is known) runs the core method unless a Ruby definer
+  # sits on that class or one of its ancestors; freezes of other classes (Irep, StrictKeySet) do not matter here.
+  LITERAL_FREEZE_OWNERS = %w[Array Hash Object Kernel BasicObject Enumerable].freeze
+
+  def literal_freeze_native?
+    @registry.fetch('freeze', []).all? { |d| d.owner == '<native>' || !LITERAL_FREEZE_OWNERS.include?(d.owner) }
   end
 
   # Every definer of +name+ is native (a Ruby method of that name could send what it is given).
