@@ -604,7 +604,8 @@ fi
 # C inputs: compile each .c to an object. Link options (-l, -L, ...) stay in files for the final link.
 cobjs=()
 if [ ${#cfiles[@]} -gt 0 ]; then
-  ctmp=$(mktemp -d); trap trace_finish EXIT
+  # the C objects' directory is removed on every exit (a failed compile or link too); eccp's trap removes it when eccp runs
+  ctmp=$(mktemp -d); trap 'trace_finish; [ -z "${ctmp:-}" ] || rm -rf "$ctmp"' EXIT
   n=0
   for c in ${cfiles[@]+"${cfiles[@]}"}; do
     o=$ctmp/$n.o; n=$((n + 1))
