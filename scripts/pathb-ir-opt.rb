@@ -211,6 +211,8 @@ end
 # the callees grow with each round). 0 turns a cap off.
 $inline_max_callee = 150
 $inline_max_growth = 2.0
+# --max-caller=N: a caller grows by inlining up to N nodes (its own size plus what it takes in); 0: no limit
+$inline_max_caller = 0
 $inline_cost = :weighted
 $inline_tiers = [16, 40]   # --tiers=A,B: callee cost caps of the first rounds; the last round takes --max-callee (empty: one round set)
 $inline_tiny = 16   # --max-tiny: a callee this cheap is inlined even past --max-growth (0: none)
@@ -466,6 +468,13 @@ def expand_call(s, fns, st)
     st[:refused]["section"] = (st[:refused]["section"] || 0) + 1
     return nil
   end
+  # A caller that has taken in its limit inlines nothing more: one setup function (ggml_vk_load_shaders, 14 MB of IL) must not
+  # absorb a module's worth of copies, since QBE's memory grows with the size of a function.
+  if $inline_max_caller > 0 && st[:caller_size] + node_cost(fn) > $inline_max_caller
+    st[:refused]["caller over --max-caller"] = (st[:refused]["caller over --max-caller"] || 0) + 1
+    return nil
+  end
+  st[:caller_size] += node_cost(fn)
   # Past the module's growth budget only a tiny callee is inlined (an accessor or wrapper: its call costs about what its body does).
   if st[:over] && $inline_tiny > 0 && st[:tc].fetch(fn) { st[:tc][fn] = node_cost(fn) } > $inline_tiny && !always_inline?(fn) && !$inline_once[cname] && !asm_needs_constant?(fn)
     st[:refused]["module over --max-growth"] = (st[:refused]["module over --max-growth"] || 0) + 1
@@ -654,7 +663,7 @@ def inline_pass(forms, max_depth, report)
         next
       end
       name = unq(f[1])
-      st = { next: ids.fetch(f) { ids[f] = max_id(f) } + 1, k: counter[:k], hoist: [], inlined: 0, refused: refused, rc: reasons,
+      st = { next: ids.fetch(f) { ids[f] = max_id(f) } + 1, k: counter[:k], hoist: [], inlined: 0, caller_size: node_cost(f), refused: refused, rc: reasons,
              ic: infos, attrs: attrs, attr_from: [], over: over, tc: tiny_costs, cap: cap, section: section_of(f) }
       children = rewrite(f.drop(2), fns, st)
       counter[:k] = st[:k]
@@ -2249,6 +2258,8 @@ def main(argv)
       $inline_tiny = a[11..-1].to_i
     elsif a.start_with?("--cost=")
       $inline_cost = a[7..-1] == "nodes" ? :nodes : :weighted
+    elsif a.start_with?("--max-caller=")
+      $inline_max_caller = a[13..].to_i
     elsif a.start_with?("--max-growth=")
       $inline_max_growth = a[13..-1].to_f
     elsif a == "--scope-facts"

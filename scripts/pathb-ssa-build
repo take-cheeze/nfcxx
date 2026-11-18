@@ -24,6 +24,8 @@ require "tmpdir"
 require_relative "pathb-egraph"
 require_relative "pathb-ssa-qbe"
 require_relative "pathb-x87-thunks"
+require_relative "pathb-ssa-split"
+require "digest"
 
 # The reader of the IR and SSA text, for CRuby. scripts/pathb-ssa.rb tokenizes with a character loop, so that it runs in the
 # script worlds (tests/bc2cpp/run_pathb_ssa.sh: no Regexp); under CRuby that loop takes about 15 times as long as one
@@ -649,7 +651,22 @@ unless x86_asm.empty? || x87_target_x86_64?
   exit EXIT_PARTIAL
 end
 File.write($il_path, il) if $il_path
-asm, qbe_err = assemble(il)
+# NFCXX_SSA_CHUNK_MB=N: QBE runs on chunks of about N MB of functions (pathb-ssa-split.rb), not on the whole module at once.
+def assemble_split(il, file)
+  mb = ENV["NFCXX_SSA_CHUNK_MB"].to_s
+  return [*assemble(il), il] if mb.empty? || mb.to_f <= 0
+  tag = Digest::MD5.hexdigest(File.basename(file.to_s))[0, 8]
+  chunks, full = PathbSsaSplit.split_module(il, (mb.to_f * 1_000_000).to_i, tag)
+  return [*assemble(il), il] if chunks.length == 1
+  asms = []
+  chunks.each_with_index do |c, ci|
+    a, err = assemble(c)
+    return [nil, "chunk #{ci}/#{chunks.length}: #{err}", full] if a.nil?
+    asms << a
+  end
+  [PathbSsaSplit.join_asm(asms), nil, full]
+end
+asm, qbe_err, il = assemble_split(il, file)
 error_exit("QBE failed: #{qbe_err.lines.first&.strip}") if asm.nil?
 # -mno-sse: QBE has no switch to avoid SSE and x87 (-n only keeps integer moves out of %xmm15), so the code it wrote is checked, as
 # scripts/qbe-cc does. The inline asm thunks and the long double helpers appended below are the program's own, as with gcc.
