@@ -379,11 +379,11 @@
       "caveat": "the argument is converted in place with to_str; the argument must be a plain identifier"
     },
     "StringValueCStr": {
-      "kind": "call",
-      "mruby": "RSTRING_PTR",
-      "inject_mrb": false,
-      "needs_mrb": false,
-      "caveat": "argument must already be a String: no to_str conversion and no NUL-byte check"
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_string_value_cstr($m, &$0)",
+      "caveat": "CRuby's StringValueCStr converts the argument in place (to_str) and checks for NUL bytes: the fork's mrb_string_value_cstr does both; the argument must be a plain identifier"
     },
     "NUM2ULONG": {
       "kind": "template",
