@@ -2,7 +2,7 @@
 #include <ruby/re.h>
 #include <ruby/encoding.h>
 
-/* ruby/ruby.h and ruby/re.h are mapped by api_map.json ("includes"); ruby/encoding.h has no mruby counterpart. */
+/* ruby/ruby.h, ruby/re.h and ruby/encoding.h are mapped by api_map.json ("includes") to their mruby headers. */
 static VALUE im_hello(VALUE self) {
     return rb_str_new_cstr("hi");
 }

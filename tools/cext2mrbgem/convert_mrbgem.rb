@@ -3601,6 +3601,8 @@ use_problem = lambda do |name, use|
   # rb_enc_get gives a VALUE (the encoding name, mruby-encoding), but a field or variable declared rb_encoding * takes the
   # encoding pointer: an assignment of it to such a field is the Encoding stuck point (the fork has no rb_encoding)
   def encoding_pointer_assign_pass
+    # the fork has rb_encoding (mrbgems/mruby-encoding), so an rb_encoding * is a real pointer: nothing to refuse
+    return
     names = Set.new
     @files.each_value do |f|
       f['masked'].to_enum(:scan, /\brb_encoding\s*\*\s*([A-Za-z_]\w*)\s*[;,\[=)]/).each { names << Regexp.last_match(1) }
@@ -3781,12 +3783,9 @@ use_problem = lambda do |name, use|
     typedef void *regex_t;
     typedef struct nfcx_onig_regs { int allocated; int num_regs; OnigPosition *beg; OnigPosition *end; } OnigRegion;
     struct re_registers { int allocated; int num_regs; OnigPosition *beg; OnigPosition *end; };
-    struct nfcx_rb_encoding;
-    typedef struct nfcx_rb_encoding rb_encoding;
     #endif
   C
-  PLACEHOLDER_APIS = %w[UChar OnigUChar OnigPosition OnigRegex regex_t OnigRegion re_registers rb_encoding
-                        #include\ <ruby/encoding.h>].freeze
+  PLACEHOLDER_APIS = %w[UChar OnigUChar OnigPosition OnigRegex regex_t OnigRegion re_registers].freeze
 
   # a file whose declarations name a stuck type gets the placeholder prelude (see ONIG_STUCK_TYPES_PRELUDE)
   def needs_placeholder_prelude?(f)
@@ -4582,9 +4581,8 @@ use_problem = lambda do |name, use|
         warn "warning: #{rel}:#{line_of(text, m.begin(0))} dropped #include <#{inc}> (#{reason})"
       else
         if inc == 'ruby/encoding.h'
-          refuse(rel, m.begin(0), "#include <#{inc}>", 'stuck point (Encoding): ruby/encoding.h declares rb_encoding and the encoding API; the fork has no Encoding (accepted stuck point)')
-          # the header is not in the fork: the include is dropped, and rb_encoding is a placeholder type (the prelude)
-          ed.add(m.begin(0), m.end(0), "/* BC2CPP-MRBGEM dropped: #include <ruby/encoding.h> (rb_encoding is a placeholder, see the prelude) */")
+          # the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h) declares rb_encoding and the functions
+          ed.add(m.begin(0), m.end(0), "#include <mruby/encoding.h>")
         elsif inc == 'ruby/io.h'
           refuse(rel, m.begin(0), "#include <#{inc}>", 'stuck point (IO): ruby/io.h declares the CRuby IO struct (rb_io_t) and its API; the fork has no binding for that struct (mruby-io has its own, different one) (accepted stuck point)')
         elsif inc == 'ruby/version.h'

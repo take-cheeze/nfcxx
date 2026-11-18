@@ -667,13 +667,13 @@ check grep -q '  rb_ln_fallback  no entry in api_map.json' "$work/local_names_re
 check grep -q '  rb_lnr_proto  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
 check test "$(grep -c '  LNR_CALL  ' "$work/local_names_refused/REFUSALS.txt")" -eq 0
 
-# 2q. includes come from api_map.json ("includes"): ruby/ruby.h and ruby/re.h map to their mruby headers; a header with
-# no mruby counterpart (ruby/encoding.h) is refused
+# 2q. includes come from api_map.json ("includes"): ruby/ruby.h and ruby/re.h map to their mruby headers, and ruby/encoding.h
+# maps to the fork's mruby/encoding.h (mrbgems/mruby-encoding/include)
 rc=0; "$rb" "$conv" --scanner "$scanner" --name includes_map tools/cext2mrbgem/fixtures/includes_map/ext/includes_map "$work/includes_map" > "$work/includes_map.log" 2>&1 || rc=$?
-check test "$rc" -eq 2
+check test "$rc" -eq 0
 check grep -qF '#include <mruby/re.h>' "$work/includes_map/src/includes_map.c"
 check grep -qF '#include <mruby/numeric.h>' "$work/includes_map/src/includes_map.c"
-check grep -q '  #include <ruby/encoding.h>  stuck point (Encoding)' "$work/includes_map/REFUSALS.txt"
+check grep -qF '#include <mruby/encoding.h>' "$work/includes_map/src/includes_map.c"
 
 # 2r. exception classes rb_eIndexError and rb_eRangeError (api_map.json batch D1): the class argument of rb_raise
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_exc_index tools/cext2mrbgem/fixtures/api_exc_index/ext/api_exc_index "$work/api_exc_index" > "$work/api_exc_index.log" 2>&1 || rc=$?
@@ -1021,7 +1021,7 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_enc_drop tools/cext2mrbgem/f
 check test "$rc" -eq 0
 check test ! -e "$work/api_enc_drop/NOT_BUILDABLE"
 check grep -qF 'return mrb_str_new(mrb, p, n);' "$work/api_enc_drop/src/api_enc_drop.c"
-check grep -qF 'mrb_intern_cstr(mrb, "force_encoding"), 1, (mrb_value[]){' "$work/api_enc_drop/src/api_enc_drop.c"
+check grep -qF 'return rb_enc_associate(s, rb_utf8_encoding());' "$work/api_enc_drop/src/api_enc_drop.c"
 
 # 2zzo. a positional callback table with a NULL entry, and a callback stored by address (x.NAME = &helper;): both are read by the field rule
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fnptr_null tools/cext2mrbgem/fixtures/api_fnptr_null/ext/api_fnptr_null "$work/api_fnptr_null" > "$work/api_fnptr_null.log" 2>&1 || rc=$?
@@ -1344,8 +1344,8 @@ check grep -qF 'static mrb_value ti_str(mrb_state *mrb, mrb_value self) {' "$wor
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_encoding tools/cext2mrbgem/fixtures/api_encoding/ext/api_encoding "$work/api_encoding" > "$work/api_encoding.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check test ! -e "$work/api_encoding/NOT_BUILDABLE"
-check grep -qF 'mrb_funcall_argv(mrb, str, mrb_intern_cstr(mrb, "encoding"), 0, NULL)' "$work/api_encoding/src/api_encoding.c"
-check grep -qF 'mrb_module_get(mrb, "Encoding")' "$work/api_encoding/src/api_encoding.c"
+check grep -qF 'return rb_enc_get(str);' "$work/api_encoding/src/api_encoding.c"
+check grep -qF 'return rb_enc_associate(str, rb_ascii8bit_encoding());' "$work/api_encoding/src/api_encoding.c"
 # 2zzz104. rb_rescue maps to mrb_rescue; the rescue callback gets the exception from mrb->exc through a file-scope wrapper.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rescue tools/cext2mrbgem/fixtures/api_rescue/ext/api_rescue "$work/api_rescue" > "$work/api_rescue.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
@@ -1658,9 +1658,9 @@ check grep -qF '##_helper(mrb, v)' "$work/api_paste_macro/src/api_paste_macro.c"
 # 2zzz155. a struct field of CRuby's rb_encoding * type: the Encoding placeholder type is in the prelude (the declaration compiles),
 # and the include of ruby/encoding.h is not a blocking refusal (the placeholder covers it).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rb_encoding_field tools/cext2mrbgem/fixtures/api_rb_encoding_field/ext/api_rb_encoding_field "$work/api_rb_encoding_field" > "$work/api_rb_encoding_field.log" 2>&1 || rc=$?
-check grep -qF 'STATUS: STUBBED' "$work/api_rb_encoding_field/REFUSALS.txt"
+check grep -qF 'no refusals' "$work/api_rb_encoding_field/REFUSALS.txt"
 check test "$(grep -c '#error' "$work/api_rb_encoding_field/src/gem_init.c")" -eq 0
-check grep -qF 'typedef struct nfcx_rb_encoding rb_encoding;' "$work/api_rb_encoding_field/src/api_rb_encoding_field.c"
+check grep -qF '    rb_encoding *enc;' "$work/api_rb_encoding_field/src/api_rb_encoding_field.c"
 # 2zzz156. !v on a VALUE is a stuck point (VALUE truth test); DECIMAL_SIZE_OF_BITS(n) is its arithmetic ((n * 146 / 485) + 1); a
 # symbol VALUE passed to rb_id2name is read with mrb_symbol.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_value_not_decimal tools/cext2mrbgem/fixtures/api_value_not_decimal/ext/api_value_not_decimal "$work/api_value_not_decimal" > "$work/api_value_not_decimal.log" 2>&1 || rc=$?

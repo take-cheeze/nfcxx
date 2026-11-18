@@ -140,6 +140,7 @@
     "((VALUE*) args)[2]=nfcx_int_of(((VALUE*) args)[2])"
   ],
   "yajl-ruby": [
+    "--define", "HAVE_RUBY_ENCODING_H",
     "--replace",
     "GetParser((VALUE)ctx, wrapper);=wrapper = (yajl_parser_wrapper *)ctx;",
     "--replace",

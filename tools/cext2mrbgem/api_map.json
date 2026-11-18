@@ -5,7 +5,8 @@
     "VALUE": "mrb_value",
     "ID": "mrb_sym",
     "SIGNED_VALUE": "intptr_t",
-    "st_index_t": "uintptr_t"
+    "st_index_t": "uintptr_t",
+    "rb_encoding": "rb_encoding"
   },
   "type_check_refused": {
     "_comment": "Check_Type and rb_check_type (handler check_type in convert_mrbgem.rb) map a T_ name only when its entry has type_check exact or caveat. These names are refused with the reason given here.",
@@ -44,9 +45,7 @@
     "T_NONE": "stuck point: the fork has no T_NONE tag (the MRB_TT enum, include/mruby/value.h:106-131); the empty-object marker has no mruby value kind",
     "RUBY_T_NONE": "stuck point: the fork has no T_NONE tag (the MRB_TT enum, include/mruby/value.h:106-131); the empty-object marker has no mruby value kind",
     "rb_time_timespec_new": "stuck point (Time offset): mruby-time's Time has only UTC and LOCAL timezones (mrbgems/mruby-time/include/mruby/time.h:15-20; getlocal takes no offset), so a fixed UTC offset from the caller cannot be represented",
-    "rb_str_export_to_enc": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
     "rb_encoder": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
-    "rb_default_internal_encoding": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
     "rb_enc_codepoint_len": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
     "rb_utf8_encindex": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
     "rb_usascii_encindex": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
@@ -58,7 +57,6 @@
     "rb_marshal_load": "stuck point: the fork has no Marshal (no marshal mrbgem in mrbgems/), so there is no loader to call",
     "rb_enc_sprintf": "stuck point (Encoding): rb_enc_sprintf takes an rb_encoding *; the fork has no Encoding (accepted stuck point)",
     "rb_usascii_encoding": "stuck point (Encoding): the US-ASCII rb_encoding object; the fork has no Encoding (accepted stuck point)",
-    "rb_encoding": "stuck point (Encoding): the rb_encoding type; the fork has no Encoding (accepted stuck point)",
     "rb_enc_check": "stuck point (Encoding): checks two strings are compatible encodings; the fork has no Encoding (accepted stuck point)",
     "rb_define_alloc_func": "stuck point (per-class allocator): the fork has only the global allocf, no per-class allocator (accepted stuck point)"
   },
@@ -519,11 +517,28 @@
       "caveat": "the encoding argument is dropped: mruby strings carry no encoding, so the bytes are kept and the result is not tagged"
     },
     "rb_enc_associate": {
-      "kind": "template",
+      "kind": "call",
+      "mruby": "rb_enc_associate",
       "arity": 2,
-      "needs_mrb": true,
-      "template": "mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"force_encoding\"), 1, (mrb_value[]){$1})",
-      "caveat": "String#force_encoding of the mruby-encoding gem (ASCII-8BIT, BINARY or UTF-8); returns the string, as CRuby"
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): rb_encoding is a static descriptor for UTF-8 or ASCII-8BIT; no transcoding"
+    },
+    "rb_default_internal_encoding": {
+      "kind": "call",
+      "mruby": "rb_default_internal_encoding",
+      "arity": 0,
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): rb_encoding is a static descriptor for UTF-8 or ASCII-8BIT; no transcoding"
+    },
+    "rb_default_external_encoding": {
+      "kind": "call",
+      "mruby": "rb_default_external_encoding",
+      "arity": 0,
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): rb_encoding is a static descriptor for UTF-8 or ASCII-8BIT; no transcoding"
+    },
+    "rb_str_export_to_enc": {
+      "kind": "call",
+      "mruby": "rb_str_export_to_enc",
+      "arity": 2,
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): rb_encoding is a static descriptor for UTF-8 or ASCII-8BIT; no transcoding"
     },
     "rb_intern": {
       "kind": "call",
@@ -1031,25 +1046,22 @@
       "caveat": "the fork's mrb_memhash (src/numeric.c): an FNV-1a hash of the bytes; the value differs from CRuby's, which only matters where the hash is printed or stored across runs"
     },
     "rb_utf8_encoding": {
-      "kind": "template",
+      "kind": "call",
+      "mruby": "rb_utf8_encoding",
       "arity": 0,
-      "needs_mrb": true,
-      "template": "mrb_const_get($m, mrb_obj_value(mrb_module_get($m, \"Encoding\")), mrb_intern_cstr($m, \"UTF_8\"))",
-      "caveat": "the mruby-encoding gem's Encoding::UTF_8 (a frozen name string), not an rb_encoding *; requires the gem"
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): rb_encoding is a static descriptor for UTF-8 or ASCII-8BIT; no transcoding"
     },
     "rb_ascii8bit_encoding": {
-      "kind": "template",
+      "kind": "call",
+      "mruby": "rb_ascii8bit_encoding",
       "arity": 0,
-      "needs_mrb": true,
-      "template": "mrb_const_get($m, mrb_obj_value(mrb_module_get($m, \"Encoding\")), mrb_intern_cstr($m, \"BINARY\"))",
-      "caveat": "the mruby-encoding gem's Encoding::BINARY (ASCII-8BIT), not an rb_encoding *; requires the gem"
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): rb_encoding is a static descriptor for UTF-8 or ASCII-8BIT; no transcoding"
     },
     "rb_enc_get": {
-      "kind": "template",
+      "kind": "call",
+      "mruby": "rb_enc_get",
       "arity": 1,
-      "needs_mrb": true,
-      "template": "mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"encoding\"), 0, NULL)",
-      "caveat": "String#encoding of the mruby-encoding gem: the Encoding name string, not an rb_encoding *"
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): rb_encoding is a static descriptor for UTF-8 or ASCII-8BIT; no transcoding"
     },
     "rb_hash_bulk_insert": {
       "kind": "template",

@@ -10,7 +10,7 @@ G=${1:?converted gem dir}; N=${2:?gem name}; INIT=${3:?init symbol}
 CORE=${MRUBY_CORE:?MRUBY_CORE: core archive}; GEMS=${MRUBY_GEMS:?MRUBY_GEMS: gems archive}; MRBLIB=${MRUBY_MRBLIB:?MRUBY_MRBLIB: mrblib object}
 DEFS=$(python3 -I "$HERE/../corpus_defs.py" "$HERE/../corpus_flags.json" "$N")
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
-INC="-I $G/include -I $MR/include -I $MR/build/host-debug/include"
+INC="-I $G/include -I $MR/include -I $MR/build/host-debug/include -I $MR/mrbgems/mruby-encoding/include"
 objs=(); linker=gcc
 for c in "$G"/src/*.c "$G"/src/*.cc; do
   [ -f "$c" ] || continue
@@ -22,6 +22,6 @@ for c in "$G"/src/*.c "$G"/src/*.cc; do
   objs+=("$o")
 done
 gcc -c -w -DGEM_INIT="$INIT" -I "$MR/include" -I "$MR/build/host-debug/include" "$HERE/gem_probe_main.c" -o "$W/main.o"
-$linker -o "$W/probe" "$W/main.o" "${objs[@]}" "$MRBLIB" -Wl,--start-group "$CORE" "$GEMS" -Wl,--end-group -lm
+$linker -o "$W/probe" "$W/main.o" "${objs[@]}" "$MRBLIB" -Wl,--start-group "$CORE" "$GEMS" -Wl,--end-group -lm -lonig
 [ -n "$PROBE_BIN" ] && cp "$W/probe" "$PROBE_BIN"
 "$W/probe" "$HERE/probes/$N.txt"
