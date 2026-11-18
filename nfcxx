@@ -424,16 +424,17 @@ fi
 # The default backend (docs/notes/pathb-default.md; the rule is scripts/nfcxx-backend.rb, stage B3 of docs/notes/driver-body-port.md):
 # gcc, or Path B for a request only Path B takes. pb_fs_host: the hosts Path B compiles freestanding programs on, x86-64 and aarch64
 # Linux and arm64 macOS (docs/notes/freestanding.md). Both are set here; the refusals and the NFCXX_PATH=b override stay below.
-eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-backend.rb" default backend="$backend" backend_explicit="$backend_explicit" \
-  freestanding="$freestanding" cosmo="$cosmo" emit_c="$emit_c" target="$target" preprocess="$preprocess" depmode="$depmode" \
-  shared="$shared" host="$(uname -s) $(uname -m)")"
+asan_c=()   # options for every C compile and link of the program
+# The planners before the sanitizer, in ./nfcxx's order (scripts/nfcxx-setup.rb setup): the default backend (which sets backend,
+# default_backend and pb_fs_host), the ASan options, instantiation, cosmo (with cosmo=1), the headers (with the host C++ headers span),
+# the host cflags, the GNU options, k1om and the target. Their statements are eval'd here. The sanitizer, -fsafe-pointers, the Path B
+# override and the backend environment come after, as they set backend (docs/notes/driver-setup-stage.md).
+setup_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-setup.rb" setup backend="$backend" backend_explicit="$backend_explicit" freestanding="$freestanding" cosmo="$cosmo" emit_c="$emit_c" target="$target" preprocess="$preprocess" depmode="$depmode" shared="$shared" host="$(uname -s) $(uname -m)" asan="$asan" asanopts="$(IFS=$'\x1f'; echo "${asanopts[*]-}")" instantiate="$instantiate" sys="$(uname -s)" gnu="$gnu" root="$root" dialect="$dialect" mach="$(uname -m)" gnu_opts="" path_b="$path_b" bash_pid="${BASHPID:-$$}") || exit $?
+eval "$setup_sh"
 
 # -fsanitize=address: gcc's instrumentation on the gcc backend. Both link libasan. Path B calls
 # libasan's checks before each access (scripts/pathb-cc.rb --asan, passed below once the backend is final); the default backend gets it too (docs/notes/asan-plan.md; a program Path B does not build falls back to gcc).
-asan_c=()   # options for every C compile and link of the program
 # the ASan options and the backend check (scripts/nfcxx-asan-c.rb plan): a refused backend ends the driver with 2
-asan_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-asan-c.rb" plan asan="$asan" backend="$backend" ${asanopts[@]+"${asanopts[@]/#/asanopts=}"}) || exit $?
-eval "$asan_sh"
 
 # C inputs: a .c file does not go through EDG. It is compiled to an object file by the backend's C compiler
 # (gcc: gcc -O2 -fwrapv
@@ -458,40 +459,25 @@ hosted_libs=()
 # assigns each instance a unit and recompiles that unit at link time, one unit per pass (libggml-sycl: 3087 instances in
 # 98 passes, a 33-minute link; 59 MB of code).
 # --instantiate: scripts/nfcxx-instantiate.rb plan (its refusal is the bash's message, status 2).
-inst_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-instantiate.rb" plan instantiate="$instantiate" sys="$(uname -s)") || exit $?
-eval "$inst_sh"
 # --cosmo (docs/notes/cosmo.md): cosmocc is the C compiler (NFCXX_GCC: gcc-cc runs it, pathb-cc assembles with it), and
 # its libc++ headers and predefined macros are the C++ target. The backend is gcc, or Path B with --backend=pathb (NFCXX_PATH=b).
-if [ $cosmo = 1 ]; then
-  # the setup is scripts/nfcxx-cosmo-setup.rb (stage B3): its refusals are the bash's messages, status 2
-  cosmo_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cosmo-setup.rb" setup root="$root" backend="$backend" backend_explicit="$backend_explicit" path_b="$path_b" gnu="${gnu:-}") || exit $?
-  eval "$cosmo_sh"
-fi
 # The freestanding or hosted setup: the headers and the GNU version (scripts/nfcxx-freestanding-setup.rb plan, stage B3). The host
 # include directories are read inside the trace span of the host C++ headers, as they were.
 # (scripts/nfcxx-setup.rb host-headers: the freestanding plan, with the host C++ headers span for a hosted build)
-eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-setup.rb" host-headers freestanding="$freestanding" gnu="$gnu" sys="$(uname -s)" root="$root" bash_pid="${BASHPID:-$$}")"
 # -isystem DIR from the command line: searched after the host's own directories, as the host compiler does.
 # (scripts/nfcxx-setup.rb sys-include: each answer as --sys_include=DIR, the eccp form when moves is 1)
 while IFS= read -r -d '' x; do sys_inc+=("$x"); done < <("${RUBY:-ruby}" "$root/scripts/nfcxx-setup.rb" sys-include "$moves" -- ${sysdirs[@]+"${sysdirs[@]}"})
 # The host-platform cflags (Path B on macOS and Linux aarch64, and the __AARCH64EL__ define on hosted Linux aarch64): the rules are
 # scripts/nfcxx-host-cflags.rb plan (stage B3), with the reasons beside them there.
-eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-host-cflags.rb" plan backend="$backend" freestanding="$freestanding" sys="$(uname -s)" mach="$(uname -m)" root="$root")"
 # The front end's version option: the host's clang version for the clang dialect, else the GNU version (scripts/nfcxx-gnu-opts.rb).
-gnu_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-gnu-opts.rb" plan dialect="$dialect" gnu="$gnu" root="$root") || exit $?
-eval "$gnu_sh"
 # --target: the EDG configuration of the generated C (only with --freestanding --emit-c, see the usage above). The host
 # library headers and the host C compiler would be the build host's, so a hosted or compiled build with a target is refused.
 # --target=linux_k1om: Intel Knights Corner (k1om). The front end lays out the program for the build host (LP64, the
 # same sizes as k1om); the C is compiled and linked by the k1om GCC 5.1.1 (scripts/k1om-cc.rb) with the k1om assembler and
 # runtime (scripts/setup-k1om.sh). Freestanding and the gcc backend only: the k1om toolchain is GCC's.
 # --target=linux_k1om: the k1om toolchain and runtime, the gcc backend (scripts/nfcxx-k1om-env.rb plan, restructure step 3).
-k1om_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-k1om-env.rb" plan target="$target" freestanding="$freestanding" backend_explicit="$backend_explicit" backend="$backend" root="$root") || exit $?
-[ -z "$k1om_sh" ] || eval "$k1om_sh"
 # --target=NAME: the EDG table, the target's options and EDG_CPFE_DEFAULT_OPTIONS (scripts/nfcxx-target.rb plan, restructure step 3).
 # The gnu_opts array is passed joined by ASCII 31; the plan's words are appended to it by the eval.
-tgt_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-target.rb" plan target="$target" freestanding="$freestanding" emit_c="$emit_c" root="$root" gnu_opts="$(IFS=$'\x1f'; echo "${gnu_opts[*]-}")") || exit $?
-[ -z "$tgt_sh" ] || eval "$tgt_sh"
 
 if [ $emit_c = 1 ] && [ ${#cfiles[@]} -gt 0 ]; then
   echo "nfcxx: --emit-c does not apply to .c inputs (they skip the front end)" >&2; exit 2
