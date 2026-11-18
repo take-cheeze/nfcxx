@@ -1796,7 +1796,7 @@ end
         d.size == 1 && d[0]['storage'].split.include?('static') && d[0]['ret'].to_s.strip == 'VALUE' &&
           psl(text, d[0]['po'], d[0]['pc']).match?(pat) &&
           ((@occ[cb] || []).count { |r0, _, _| r0 == rel } -
-           @decls.count { |x| x['name'] == cb && x['file'] == rel && x['proto'] }) == 1 + raw_refs[[rel, cb]]
+           @decls.count { |x| x['name'] == cb && x['file'] == rel && x['proto'] }) >= 1 + raw_refs[[rel, cb]]
       end
       next unless ok
       rdef = (@defs[c[:r]] || []).find { |x| x['file'] == rel }
@@ -1909,6 +1909,8 @@ end
       # a cast to a pointer type: (T *), or (P) where P is a typedef of a pointer type in this gem
       ptr_cast = pre.match?(/\(\s*(?:const\s+|volatile\s+)*(?:void|struct\s+[A-Za-z_]\w*|[A-Za-z_]\w*)\s*\*+\s*\)\s*\z/) ||
                  ((tn = pre[/\(\s*([A-Za-z_]\w*)\s*\)\s*\z/, 1]) && pointer_typedef?(tn))
+      # UNUSED(name) discards the parameter (msgpack's sysdep.h: ((void)var)): not a use of the pointer
+      next if pre.match?(/\bUNUSED\(\s*\z/)
       return nil unless ptr_cast
       uses << (d['brace'] + m.begin(0))
     end
@@ -1963,7 +1965,7 @@ end
           next unless cb_occ.count == 2
         end
         pars = split_args(masked, d[0]['po'], d[0]['pc']).map { |a2, b2| [a2, b2, psl(text, a2, b2)] }
-        out << { rel: rel, s: s, e: close + 1, h: h, cb: cb, fe: fe_name, arg: arg.sub(/\A\(VALUE\)\s*/, ''),
+        out << { rel: rel, s: s, e: close + 1, h: h, cb: cb, fe: fe_name, arg: arg.sub(/\A\(VALUE\)\s*(?:\(void\s*\*\)\s*)?/, ''),
                  cb_pos: cb_ident_pos, cb_file: d[0]['file'], param_edit: [pars[2][0], pars[2][0] + 5],
                  value_data: value_data }
       end
@@ -5474,6 +5476,14 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     when 'rescue_call'
       c = (@rescue_calls || []).find { |x| x[:rel] == rel && x[:s] == s }
       unless c
+        # a data argument that is a pointer cast through void * (msgpack's read_until_eof: a VALUE array of pointers) is a VALUE
+        # carrying a pointer: the fork's VALUE is a struct, so the call is a stuck point
+        call_text = @files[rel]['masked'][s, 200].to_s
+        if call_text.match?(/\A[^;]*\(VALUE\)\s*\(void\s*\*\)/)
+          refuse(rel, s, name, 'stuck point (VALUE as pointer): the rescue data is a pointer cast through void * into a VALUE ' \
+                               '(the callbacks read a VALUE array of pointers); the fork\'s VALUE is a struct and cannot carry a pointer')
+          return
+        end
         refuse(rel, s, name, 'rb_rescue needs static callbacks defined here and used only here (the body takes one VALUE, the rescue ' \
                              'callback takes the data and the exception), and VALUE-name or Q data arguments')
         return
