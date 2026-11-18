@@ -123,7 +123,21 @@
     "--replace",
     "TypedData_Get_Struct(object, msgpack_factory_t, &factory_data_type, factory);=factory = ({ VALUE nfcx_h = rb_ivar_get(object, rb_intern(\"@__factory\")); msgpack_factory_t *nfcx_o; if (NIL_P(nfcx_h)) { nfcx_o = ALLOC(msgpack_factory_t); nfcx_h = TypedData_Wrap_Struct(rb_cObject, &factory_data_type, nfcx_o); rb_ivar_set(object, rb_intern(\"@__factory\"), nfcx_h); } TypedData_Get_Struct(nfcx_h, msgpack_factory_t, &factory_data_type, nfcx_o); nfcx_o; });",
     "--replace",
-    "TypedData_Get_Struct(object, msgpack_buffer_t, view ? &buffer_view_data_type : &buffer_data_type, buffer);=buffer = ({ VALUE nfcx_h = rb_ivar_get(object, rb_intern(\"@__buffer\")); msgpack_buffer_t *nfcx_o; if (NIL_P(nfcx_h)) { nfcx_o = ALLOC(msgpack_buffer_t); msgpack_buffer_init(nfcx_o); nfcx_h = TypedData_Wrap_Struct(rb_cObject, &buffer_data_type, nfcx_o); rb_ivar_set(object, rb_intern(\"@__buffer\"), nfcx_h); } TypedData_Get_Struct(nfcx_h, msgpack_buffer_t, &buffer_data_type, nfcx_o); nfcx_o; });"
+    "TypedData_Get_Struct(object, msgpack_buffer_t, view ? &buffer_view_data_type : &buffer_data_type, buffer);=buffer = ({ VALUE nfcx_h = rb_ivar_get(object, rb_intern(\"@__buffer\")); msgpack_buffer_t *nfcx_o; if (NIL_P(nfcx_h)) { nfcx_o = ALLOC(msgpack_buffer_t); msgpack_buffer_init(nfcx_o); nfcx_h = TypedData_Wrap_Struct(rb_cObject, &buffer_data_type, nfcx_o); rb_ivar_set(object, rb_intern(\"@__buffer\"), nfcx_h); } TypedData_Get_Struct(nfcx_h, msgpack_buffer_t, &buffer_data_type, nfcx_o); nfcx_o; });",
+    "--replace",
+    "(VALUE)&args, raised)=nfcx_ptr_value(&args), raised)",
+    "--replace",
+    "(VALUE)&args, &exception_occured)=nfcx_ptr_value(&args), &exception_occured)",
+    "--replace",
+    "(VALUE)(void*) b, out, (VALUE) max, (VALUE)(void*) &sz=nfcx_ptr_value(b), out, nfcx_int_value(max), nfcx_ptr_value(&sz)",
+    "--replace",
+    "(VALUE)(void*) args,=nfcx_ptr_value(args),",
+    "--replace",
+    "(void*) ((VALUE*) args)[0]=nfcx_ptr_of(((VALUE*) args)[0])",
+    "--replace",
+    "(void*) ((VALUE*) args)[3]=nfcx_ptr_of(((VALUE*) args)[3])",
+    "--replace",
+    "((VALUE*) args)[2]=nfcx_int_of(((VALUE*) args)[2])"
   ],
   "yajl-ruby": [
     "--replace",

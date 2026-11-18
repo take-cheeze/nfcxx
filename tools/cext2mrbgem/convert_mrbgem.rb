@@ -1778,7 +1778,8 @@ end
         next unless b_cb.match?(ident) && r_cb.match?(ident)
         data_ok = ->(d) { d.match?(ident) && (!@entries.key?(d) || d.match?(/\AQ(?:nil|undef|true|false)\z/)) }
         # a pointer passed as data: (VALUE)name, whose callback uses the parameter only in pointer casts
-        ptr_data = ->(d) { d.match?(/\A\(VALUE\)\s*[A-Za-z_][#{WC}]*\z/) }
+        # (VALUE)name, or the converter's nfcx_ptr_value(name): a pointer carried in a VALUE
+        ptr_data = ->(d) { d.match?(/\A\(VALUE\)\s*[A-Za-z_][#{WC}]*\z/) || d.match?(/\Anfcx_ptr_value\(\s*&?[A-Za-z_][#{WC}]*\s*\)\z/) }
         next unless [d1, d2].all? { |d| data_ok.call(d) || ptr_data.call(d) }
         raw_refs[[rel, b_cb]] += 1
         raw_refs[[rel, r_cb]] += 1
@@ -1965,7 +1966,8 @@ end
           next unless cb_occ.count == 2
         end
         pars = split_args(masked, d[0]['po'], d[0]['pc']).map { |a2, b2| [a2, b2, psl(text, a2, b2)] }
-        out << { rel: rel, s: s, e: close + 1, h: h, cb: cb, fe: fe_name, arg: arg.sub(/\A\(VALUE\)\s*(?:\(void\s*\*\)\s*)?/, ''),
+        out << { rel: rel, s: s, e: close + 1, h: h, cb: cb, fe: fe_name,
+                 arg: arg.sub(/\Anfcx_ptr_value\(\s*(&?[A-Za-z_][#{WC}]*)\s*\)\z/) { "mrb_cptr_value(mrb, #{$1})" }.sub(/\A\(VALUE\)\s*(?:\(void\s*\*\)\s*)?/, ''),
                  cb_pos: cb_ident_pos, cb_file: d[0]['file'], param_edit: [pars[2][0], pars[2][0] + 5],
                  value_data: value_data }
       end
@@ -3887,6 +3889,20 @@ use_problem = lambda do |name, use|
 
   # A VALUE cast to a struct pointer (CRuby carries a struct pointer in a VALUE: (OO)ov, (ParseInfo)pip): the fork's VALUE is a
   # struct, so the cast does not compile. The target is a struct pointer, or a typedef of one.
+  # The functions passed as the first argument of rb_protect(...) anywhere in the input: a rb_protect callback takes its data as
+  # one VALUE (a pointer carried in it, when the caller passes the address of a struct)
+  def protect_callback_name?(name)
+    @protect_cb_names ||= begin
+      names = Set.new
+      @files.each_value do |f|
+        # rb_protect's callback and rb_rescue2's body callback both take their data as one VALUE
+        f['masked'].to_enum(:scan, /rb_(?:protect|rescue2?)\s*\(\s*([A-Za-z_]\w*)/).each { names << Regexp.last_match(1) }
+      end
+      names
+    end
+    @protect_cb_names.include?(name)
+  end
+
   def value_struct_pointer_cast_pass
     ptr_typedefs = Set.new
     @files.each_value do |f|
@@ -3926,6 +3942,10 @@ use_problem = lambda do |name, use|
         fnh = enclosing_func(rel, m.begin(2))
         next if fnh && (@hash_cb_names || Set.new).include?(fnh['name']) &&
                 (fnh['params'] || '').split(',')[2].to_s.split.last.to_s.delete('*') == nm
+        # the data of a rb_protect callback is the pointer it was given: the sole parameter, read back from the CPTR value
+        # (nfcx_ptr_value at the call; the last pass inserts mrb_cptr at the cast)
+        next if fnh && m[0].include?('*') && protect_callback_name?(fnh['name']) && fnh['params'].to_s.split(',').size == 1 &&
+                fnh['params'].to_s.split.last.to_s.delete('*') == nm
         refuse(rel, m.begin(2), nm, "stuck point (VALUE as pointer): #{nm} is a VALUE, a struct in the fork (include/mruby/boxing_no.h), and a cast of it to a struct pointer has no mruby form")
       end
     end
@@ -4976,6 +4996,9 @@ end
       fnv = enclosing_func(rel, m.begin(1))
       next if fnv && (@hash_cb_names || Set.new).include?(fnv['name']) &&
               (fnv['params'] || '').split(',')[2].to_s.split.last.to_s.delete('*') == nm
+      # the sole parameter of a rb_protect or rb_rescue2 callback is the pointer it was given (the last pass reads it with mrb_cptr)
+      next if fnv && m[0].include?('*') && protect_callback_name?(fnv['name']) && fnv['params'].to_s.split(',').size == 1 &&
+              fnv['params'].to_s.split.last.to_s.delete('*') == nm
       next if @edits[rel].overlaps(m.begin(1), m.begin(1) + 1)
       refuse(rel, m.begin(1), nm, "stuck point (VALUE as pointer): #{nm} is a VALUE, a struct in the fork (include/mruby/boxing_no.h), and a cast of it to a pointer has no mruby form")
     end
@@ -7100,6 +7123,14 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     end
     outputs = {}
     @files.each { |rel, f| outputs[rel] = @edits[rel].apply(f['text']) }
+    # the helpers of the gem's sources (api_map nfcx_ptr_value, nfcx_ptr_of, nfcx_int_value, nfcx_int_of) are written where a call's
+    # text is copied (a rescue's data arguments), not expanded by a template: their mruby forms are written here
+    @files.each_key do |rel|
+      outputs[rel] = outputs[rel].gsub(/\bnfcx_ptr_value\(/, 'mrb_cptr_value(mrb, ')
+                                 .gsub(/\bnfcx_ptr_of\(/, 'mrb_cptr(')
+                                 .gsub(/\bnfcx_int_value\(/, 'mrb_fixnum_value(')
+                                 .gsub(/\bnfcx_int_of\(/, 'mrb_fixnum(')
+    end
     @files.each { |rel, f| outputs[rel] = id_value_casts(outputs[rel]) if f['kind'] == 'src' }
     @files.each { |rel, _f| outputs[rel] = macro_paste_mrb(outputs[rel]) }
     # Onigmo's types in declarations (a struct field of OnigRegion, a UChar pointer): the fork has no regexp engine, so these are

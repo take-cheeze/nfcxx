@@ -1780,6 +1780,34 @@
       "caveat": "the name must be a string literal: it is interned with mrb_intern_cstr at each call; CRuby checks the name is an ivar name, mruby does not",
       "value_lost": true
     },
+    "nfcx_ptr_of": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": false,
+      "template": "mrb_cptr($0)",
+      "caveat": "the pointer carried in a VALUE (the element of a VALUE array holding pointers): mruby's mrb_cptr; see nfcx_ptr_value"
+    },
+    "nfcx_int_value": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_fixnum_value($0)",
+      "caveat": "an integer carried in a VALUE (a fixnum, as CRuby's INT2FIX for a value that fits); read back with nfcx_int_of"
+    },
+    "nfcx_int_of": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": false,
+      "template": "mrb_fixnum($0)",
+      "caveat": "the integer of a fixnum VALUE (the element of a VALUE array holding integers); see nfcx_int_value"
+    },
+    "nfcx_ptr_value": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_cptr_value($m, $0)",
+      "caveat": "a pointer carried in a VALUE (mruby's CPTR value, include/mruby/value.h): the data of rb_protect and rb_rescue2 callbacks, read back with mrb_cptr; the name is the converter's own, written in the gem's sources in place of a (VALUE) cast of an address"
+    },
     "rb_protect": {
       "kind": "call",
       "mruby": "mrb_protect",
