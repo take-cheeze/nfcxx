@@ -1,0 +1,2 @@
+MessagePack.class.to_s	Module
+MessagePack::Packer.new	!NameError
