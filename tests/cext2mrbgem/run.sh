@@ -1624,6 +1624,26 @@ check grep -qF 'STATUS: STUBBED' "$work/api_value_if/REFUSALS.txt"
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_id_return tools/cext2mrbgem/fixtures/api_id_return/ext/api_id_return "$work/api_id_return" > "$work/api_id_return.log" 2>&1 || rc=$?
 check grep -qF 'return mrb_symbol_value(id);' "$work/api_id_return/src/api_id_return.c"
 check grep -qF 'mrb_symbol(' "$work/api_id_return/src/api_id_return.c"
+# 2zzz151. a refused statement in Init is dropped as a no-op (the user's decision): the gem loads, so gem_init.c has no #error
+# and the statement is recorded as dropped in REFUSALS.txt.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_init_drop tools/cext2mrbgem/fixtures/api_init_drop/ext/api_init_drop "$work/api_init_drop" > "$work/api_init_drop.log" 2>&1 || rc=$?
+check grep -qF 'BC2CPP-MRBGEM dropped in Init (rb_thread_current)' "$work/api_init_drop/src/api_init_drop.c"
+check test "$(grep -c '#error' "$work/api_init_drop/src/gem_init.c")" -eq 0
+check grep -qF '[dropped in Init' "$work/api_init_drop/REFUSALS.txt"
+check grep -qF 'STATUS: STUBBED' "$work/api_init_drop/REFUSALS.txt"
+# 2zzz152. --rename OLD=NEW renames the gem's identifier in its sources, and --replace OLD=NEW replaces literal text (the signature
+# the header and the definition agree on): the renamed definition takes void *data, and nothing names the old identifier.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rename_replace --rename crypt_r=nfcx_crypt_r --replace 'nfcx_crypt_r(const char *key, const char *setting, struct crypt_data *data)=nfcx_crypt_r(const char *key, const char *setting, void *data)' tools/cext2mrbgem/fixtures/api_rename_replace/ext/api_rename_replace "$work/api_rename_replace" > "$work/api_rename_replace.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_rename_replace/NOT_BUILDABLE"
+check grep -qF 'nfcx_crypt_r(const char *key, const char *setting, void *data)' "$work/api_rename_replace/src/api_rename_replace.c"
+check test "$(grep -c 'crypt_r' "$work/api_rename_replace/src/api_rename_replace.c" | head -1)" -ge 1
+check test "$(grep -cw 'crypt_r' "$work/api_rename_replace/src/api_rename_replace.c")" -eq 0
+# 2zzz153. --exclude FILE leaves a source out of the conversion: extra_only.c's refused thread call never reaches the output.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_exclude --exclude extra_only.c tools/cext2mrbgem/fixtures/api_exclude/ext/api_exclude "$work/api_exclude" > "$work/api_exclude.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_exclude/src/extra_only.c"
+check test ! -s "$work/api_exclude/REFUSALS.txt" -o "$(grep -c 'rb_thread_current' "$work/api_exclude/REFUSALS.txt")" = 0
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?
