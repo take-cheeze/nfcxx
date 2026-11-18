@@ -154,6 +154,8 @@ class ClosedWorld
     @dynamic_visibility = false
     @rebound = Set.new
     @constant_write_counts = Hash.new(0)
+    # Struct.new(*MEMBERS, keyword_init: true) sites: their member names are checked after the scan (resolve_struct_splats).
+    @deferred_struct_splats = []
     @class_constant_names = Set.new
     # CLASS ops that declare a name (not the root-level reopen of native_class_unshadowed?).
     @class_declared_names = Set.new
@@ -1716,6 +1718,7 @@ class ClosedWorld
         end
       end
     end
+    resolve_struct_splats
     # A read name (scan_factory) can run a definition the scan only finishes seeing here.
     global!(:class_factory_escape) unless @factory_read_names.all? { |name| ownerless_native_dispatch_safe?(name) }
   end
@@ -2062,6 +2065,10 @@ class ClosedWorld
       case const
       when 'Struct'
         @struct_factory_used = true
+        if struct_keyword_init?(call) && call.positional_splat?
+          @deferred_struct_splats << [irep, use, call]
+          next
+        end
         argc = call.argc if struct_keyword_init?(call)
         return global!(:class_factory_escape) unless argc
 
@@ -2088,9 +2095,68 @@ class ClosedWorld
 
   # `Struct.new(:a, :b, keyword_init: true)`: the constructor's keyword only changes how instances are built, so the
   # positional arguments are the members and the keyword defines nothing. Ruby rejects any other keyword for a Struct,
-  # so a single keyword with no splat is accepted; a splat (which could carry any keyword) is not.
+  # so a single keyword with no keyword splat is accepted. The members may be a splat (see resolve_struct_splats).
   def struct_keyword_init?(call)
-    call.keyword_arguments? && call.keyword_argc == 1 && !call.keyword_splat? && !call.positional_splat?
+    call.keyword_arguments? && call.keyword_argc == 1 && !call.keyword_splat?
+  end
+
+  # `Struct.new(*MEMBERS, keyword_init: true)`: mruby takes a call with more than 14 positional arguments and a keyword
+  # for a block, so the members are packed in a constant array. They are the symbols of MEMBERS when the program
+  # writes MEMBERS exactly once, in this body, as a literal `%i[...].freeze`. Anything else refuses the closed world.
+  def resolve_struct_splats
+    @deferred_struct_splats.each do |irep, use, call|
+      names = struct_splat_member_names(irep, use, call)
+      unless names
+        global!(:class_factory_escape)
+        next
+      end
+      names.each do |name|
+        note_unknown_def(name, nil)
+        note_unknown_def("#{name}=", nil)
+      end
+    end
+  end
+
+  def struct_splat_member_names(irep, use, call)
+    program = BytecodeIR.for(irep)
+    source_idx, source = sole_definition(irep, use, (call.reg + 1))
+    return nil unless source&.op == :ARYCAT
+
+    base = sole_definition(irep, source_idx, source.reg)&.last
+    return nil unless base&.op == :LOADNIL
+
+    _read_idx, read = sole_definition(irep, source_idx, source.regs[1])
+    return nil unless read&.op == :GETCONST
+
+    const = read.const_name.to_s
+    return nil unless @constant_write_counts[const] == 1 && !@deferred_constant_writes.include?(const)
+
+    setters = (0...program.size).select do |i|
+      writer = program.source_at(i)
+      writer.op == :SETCONST && writer.const_name.to_s == const
+    end
+    return nil unless setters.size == 1
+
+    value_idx, value = sole_definition(irep, setters.first, program.source_at(setters.first).regs.first)
+    return nil unless value&.op == :SEND0 && value.sym == 'freeze'
+
+    arr_idx, arr = sole_definition(irep, value_idx, value.reg)
+    return nil unless arr&.op == :ARRAY
+
+    literal = program.container_literal(arr_idx)
+    return nil unless literal&.kind == :array && literal.count.positive?
+
+    (0...literal.count).map do |offset|
+      _element_idx, writer = sole_definition(irep, arr_idx, (literal.base + offset))
+      # A %i[] element is a SYMBOL (its name is in the pool); a LOADSYM names it directly.
+      name = case writer&.op
+             when :LOADSYM then writer.sym_token
+             when :SYMBOL then irep.pool&.[](writer.pool_index.to_i)
+             end
+      return nil unless name.is_a?(String)
+
+      name
+    end
   end
 
   def factory_argument_names(irep, index, register, ops)
