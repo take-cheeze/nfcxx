@@ -1943,6 +1943,56 @@
       "needs_mrb": true,
       "caveat": "the fork's mrb_iv_foreach over the object's instance variables: the callback gets (mrb, symbol, value, void *) (ID is mrb_sym); a result of 0 continues, non-zero stops, as CRuby ST_CONTINUE and ST_STOP"
     },
+    "rb_cBasicObject": {
+      "kind": "expr",
+      "mruby": "mrb_class_get(mrb, \"BasicObject\")",
+      "needs_mrb": true
+    },
+    "rb_hash_clear": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_hash_clear($m, $0)",
+      "caveat": "mruby's mrb_hash_clear returns the hash, as CRuby's rb_hash_clear"
+    },
+    "rb_hash_freeze": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "(MRB_SET_FROZEN_FLAG(mrb_obj_ptr($0)), $0)",
+      "caveat": "mruby freezes an object by setting its frozen flag (MRB_SET_FROZEN_FLAG, include/mruby/object.h); the value is returned as CRuby does"
+    },
+    "rb_obj_frozen_p": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "(mrb_immediate_p($0) || MRB_FROZEN_P(mrb_obj_ptr($0)))",
+      "caveat": "CRuby reports immediates (Fixnum, Symbol, nil, true, false) as frozen; mruby's immediates are reported the same way here, and the flag is read from heap objects only"
+    },
+    "rb_str_substr": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "mrb_str_substr($m, $0, $1, $2)",
+      "caveat": "mruby's mrb_str_substr takes (str, beg, len) as CRuby's rb_str_substr"
+    },
+    "rb_str_replace": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_funcall($m, $0, \"replace\", 1, $1)",
+      "caveat": "replaces the string's contents through its replace method (mruby has no mrb_str_replace); the result is the receiver, as CRuby's"
+    },
+    "rb_struct_new": {"kind": "refuse", "reason": "stuck point (Struct): Struct is mrbgems/mruby-struct, not in the core, and rb_struct_new builds a CRuby Struct instance with its member layout (accepted stuck point)"},
+    "rb_struct_define": {"kind": "refuse", "reason": "stuck point (Struct): Struct is mrbgems/mruby-struct, not in the core; rb_struct_define creates a CRuby Struct class with its accessors (accepted stuck point)"},
+    "rb_enc_from_encoding": {"kind": "refuse", "reason": "stuck point (Encoding): an rb_encoding value; the fork has no Encoding (accepted stuck point)"},
+    "rb_str_encode": {"kind": "refuse", "reason": "stuck point (Encoding): transcoding a string needs CRuby's encoding converter; the fork has no Encoding (accepted stuck point)"},
+    "RB_ENC_INTERNED_STR_NULL_CHECK": {"kind": "refuse", "reason": "stuck point (Encoding): the null-encoding check of an interned string; the fork has no Encoding (accepted stuck point)"},
+    "RBIGNUM_POSITIVE_P": {"kind": "refuse", "reason": "stuck point (Bignum): the fork has no Bignum (no MRB_TT_BIGINT tag, no mrbgem big-integer class) (accepted stuck point)"},
+    "rb_big2ull": {"kind": "refuse", "reason": "stuck point (Bignum): the fork has no Bignum; the conversion of a big integer to unsigned long long has no mruby form (accepted stuck point)"},
+    "rb_big2ll": {"kind": "refuse", "reason": "stuck point (Bignum): the fork has no Bignum; the conversion of a big integer to long long has no mruby form (accepted stuck point)"},
+    "rb_ull2inum": {"kind": "refuse", "reason": "stuck point (Bignum): an unsigned long long above the fixnum range becomes a Bignum, which the fork does not have (accepted stuck point)"},
+    "RB_OBJ_FROZEN_RAW": {"kind": "refuse", "reason": "stuck point: the raw frozen flag of an object (CRuby's RBasic flags) has no mruby form beyond MRB_FROZEN_P on heap objects (accepted stuck point)"},
     "rb_hash_foreach": {
       "kind": "hash_foreach",
       "needs_mrb": true,

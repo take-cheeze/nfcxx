@@ -4111,12 +4111,24 @@ use_problem = lambda do |name, use|
     @files[rel]['text'].match?(/^[ \t]*#[ \t]*define[ \t]+#{Regexp.escape(name)}\s*\([^)]*\)\s*(?:mrb_funcall|rb_funcall)/)
   end
 
+  # a function-like or object-like macro of any file of the gem whose body casts to VALUE (or is an mrb_value): its uses are VALUEs
+  def value_macro?(name)
+    @value_macro_cache ||= {}
+    return @value_macro_cache[name] if @value_macro_cache.key?(name)
+    @value_macro_cache[name] = @files.any? do |frel, f|
+      next false unless f['masked']
+      define_spans(frel).any? { |n, a, b| n == name && f['masked'][a..b].to_s.match?(/\(\s*VALUE\s*\)|\bmrb_value\b/) }
+    end
+  end
+
   def value_operand?(t, value_names, vfields, rel, pos)
     t = t.strip
     return true if t.match?(/\AQ(?:nil|true|false|undef)\z/)
     return true if t.match?(/\A[A-Za-z_]\w*\z/) && value_names.include?(t)
     return true if t.match?(/\A\*\s*[A-Za-z_]\w*\z/) && value_names.include?(t.delete(' \t'))
     return true if t.match?(/\A[A-Za-z_]\w*\z/) && @class_vars.include?(t)
+    # a macro whose body is a VALUE cast (msgpack's NO_MAPPED_STRING is ((VALUE)0)) is a VALUE operand
+    return true if t.match?(/\A[A-Za-z_]\w*\z/) && value_macro?(t)
     # a class constant (rb_cObject, mrb->object_class) outside a class argument is its VALUE (mrb_obj_value)
     if t.match?(/\A[A-Za-z_]\w*\z/) && (e = @entries[t]).is_a?(Hash) && e['kind'] == 'expr' && e['mruby'].to_s.match?(CLASS_EXPR_RE)
       return true
@@ -4635,8 +4647,10 @@ end
     end
 # NORETURN( ) wrappers (noreturn_mask): the two tokens are removed; the declaration inside stays
 (@files[rel]['noreturn'] || []).each do |start, open, close|
+  # a prototype rewritten as a whole already lacks the opening token; when its rewrite also covers the closing parenthesis, the
+  # closing token is not removed again (an overlap); otherwise the rewrite keeps the original ')' and it is removed here
   ed.add(start, open + 1, '') unless noreturn_in_rewritten_decl?(rel, start)
-  ed.add(close, close + 1, '')
+  ed.add(close, close + 1, '') unless ed.overlapping(close, close + 1).any?
 end
     edit_fnptr_fields(rel)
     # 4c. a rb_data_type_t initializer is CRuby's {name, {dmark, dfree, dsize}, parent, data, flags}; mruby's
