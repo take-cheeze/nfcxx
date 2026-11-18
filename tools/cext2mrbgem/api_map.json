@@ -15,6 +15,7 @@
     "OnigRegion": "OnigRegion",
     "re_registers": "re_registers"
   },
+  "require_features": ["time", "encoding", "bigdecimal", "date", "strscan"],
   "type_check_refused": {
     "_comment": "Check_Type and rb_check_type (handler check_type in convert_mrbgem.rb) map a T_ name only when its entry has type_check exact or caveat. These names are refused with the reason given here.",
     "T_OBJECT": "mruby's MRB_TT_OBJECT does not match CRuby's T_OBJECT: CRuby allocates exceptions as T_OBJECT (ruby4src error.c:3583 via object.c:118), mruby allocates them as MRB_TT_EXCEPTION (src/error.c:42), so the check would reject exceptions",
@@ -41,7 +42,6 @@
     "rb_mutex_new": "stuck point (Thread): a Mutex; the fork has no Thread or Mutex (accepted stuck point)",
     "rb_mutex_lock": "stuck point (Thread): a Mutex; the fork has no Thread or Mutex (accepted stuck point)",
     "rb_mutex_unlock": "stuck point (Thread): a Mutex; the fork has no Thread or Mutex (accepted stuck point)",
-    "rb_require": "stuck point (require): the fork has no require (accepted stuck point)",
     "rb_big_cmp": "stuck point (Bignum): the fork has no Bignum (no MRB_TT_BIGINT tag, no bignum mrbgem)",
     "rb_absint_size": "stuck point (Bignum): the fork has no Bignum (no MRB_TT_BIGINT tag, no bignum mrbgem)",
     "RBIGNUM_NEGATIVE_P": "stuck point (Bignum): the fork has no Bignum (no MRB_TT_BIGINT tag, no bignum mrbgem)",
@@ -163,6 +163,11 @@
     "rb_define_const": {
       "kind": "special",
       "handler": "define_const",
+      "needs_mrb": true
+    },
+    "rb_require": {
+      "kind": "special",
+      "handler": "require_call",
       "needs_mrb": true
     },
     "rb_const_get": {

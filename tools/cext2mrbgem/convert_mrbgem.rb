@@ -544,6 +544,7 @@ class Converter
     @includes = amap['includes']
     @special_pos = amap['special_arg_positions_class_only']
     @type_check_refused = amap['type_check_refused'] || {}
+    @require_features = amap['require_features'] || []
     @unmapped_reasons = amap['unmapped_reasons'] || {}
     @files = {}   # rel -> {'text','masked','kind'}
     @edits = {}   # rel -> Edits
@@ -6325,6 +6326,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       define_const(rel, s, e, nxt, called)
     when 'rb_const_get'
       const_get(rel, s, e, nxt, called)
+    when 'rb_require'
+      require_call(rel, s, e, nxt, called)
     when 'rb_raise'
       unless called
         refuse(rel, s, name, 'used without a call')
@@ -6365,6 +6368,38 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
   # rb_const_get(klass, id) -> mrb_const_get(mrb, klass, id). Both take the receiver as a VALUE and the name as
   # an ID (mrb_sym); rb_cObject is passed as its VALUE. Differences, recorded as a caveat: a module receiver
   # does not fall back to Object in mruby (CRuby does), and there is no autoload.
+  # rb_require("feature") -> rb_require(mrb, "feature") (the fork's require, mrbgems/mruby-require). The feature must be one this
+  # build provides (api_map.json "require_features"): a name the build lacks would raise LoadError when the code runs (an Init
+  # would fail to load the gem), so it stays a stuck point. A feature that is the gem's own Ruby file is not provided (its
+  # Ruby code is not compiled into the gem), and a name that is not a literal cannot be checked.
+  def require_call(rel, s, e, nxt, called)
+    masked, text, ed = @files[rel]['masked'], @files[rel]['text'], @edits[rel]
+    unless called
+      refuse(rel, s, 'rb_require', 'used without a call')
+      return
+    end
+    close = match_close(masked, nxt)
+    args = close > 0 ? split_args(masked, nxt, close) : []
+    if args.size != 1
+      refuse(rel, s, 'rb_require', 'rb_require takes a feature name')
+      return
+    end
+    a0, a1 = args[0]
+    lit = psl(text, a0, a1)
+    m = /\A"([^"\\]*)"\z/.match(lit)
+    unless m
+      refuse(rel, s, 'rb_require', 'stuck point (require): the feature name is not a literal, so the build cannot check that it is provided')
+      return
+    end
+    feature = m[1]
+    unless (@require_features || []).include?(feature)
+      refuse(rel, s, 'rb_require', "stuck point (require): the feature '#{feature}' is not provided by this build (no built gem of that name, or it is the gem's own Ruby file, which is not compiled into the gem)")
+      return
+    end
+    ed.add(nxt + 1, nxt + 1, 'mrb, ')
+    rewrite(rel, s, 'rb_require', 'rb_require', "the fork's require (mrbgems/mruby-require): feature '#{feature}' is a built gem's name, and it is provided")
+  end
+
   def const_get(rel, s, e, nxt, called)
     masked, text, ed = @files[rel]['masked'], @files[rel]['text'], @edits[rel]
     unless called

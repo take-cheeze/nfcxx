@@ -1681,6 +1681,13 @@ check grep -qF 'return mruby_onig_regexp_is(v) ? mrb_true_value() : mrb_false_va
 check grep -qF 'onig_region_init(&regs);' "$work/api_onig_map/src/api_onig_map.c"
 check grep -qF 'pos = onig_search(RREGEXP_PTR(re),' "$work/api_onig_map/src/api_onig_map.c"
 check grep -qF '#include <mruby/onigmo.h>' "$work/api_onig_map/src/api_onig_map.c"
+# 2zzz160. rb_require maps to the fork's require for a feature the build provides (time, mruby-time); a feature it does not provide
+# (stringio) and a name that is not a literal stay stuck points.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_require tools/cext2mrbgem/fixtures/api_require/ext/api_require "$work/api_require" > "$work/api_require.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check grep -qF 'rb_require(mrb, "time");' "$work/api_require/src/api_require.c"
+check grep -q "feature 'stringio' is not provided by this build" "$work/api_require/REFUSALS.txt"
+check grep -q 'feature name is not a literal' "$work/api_require/REFUSALS.txt"
 # 2zzz155. a struct field of CRuby's rb_encoding * type: the Encoding placeholder type is in the prelude (the declaration compiles),
 # and the include of ruby/encoding.h is not a blocking refusal (the placeholder covers it).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rb_encoding_field tools/cext2mrbgem/fixtures/api_rb_encoding_field/ext/api_rb_encoding_field "$work/api_rb_encoding_field" > "$work/api_rb_encoding_field.log" 2>&1 || rc=$?
