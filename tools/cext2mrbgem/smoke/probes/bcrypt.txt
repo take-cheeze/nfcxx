@@ -1,0 +1,2 @@
+BCrypt::Engine.__bc_salt("$2a$", 4, "0123456789abcdef").size	29
+BCrypt::Engine.__bc_salt("$2a$", 4, "0123456789abcdef")[0, 7]	$2a$04$

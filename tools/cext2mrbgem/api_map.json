@@ -12,6 +12,7 @@
     "T_OBJECT": "mruby's MRB_TT_OBJECT does not match CRuby's T_OBJECT: CRuby allocates exceptions as T_OBJECT (ruby4src error.c:3583 via object.c:118), mruby allocates them as MRB_TT_EXCEPTION (src/error.c:42), so the check would reject exceptions",
     "T_CLASS": "mruby's MRB_TT_CLASS does not match CRuby's T_CLASS: a CRuby singleton class is a class with RUBY_FL_SINGLETON (ruby4src class.c:42), mruby allocates singleton classes as MRB_TT_SCLASS (src/class.c:371), so the check would reject them",
     "T_BIGNUM": "stuck point: the fork has no Bignum. No MRB_TT_BIGINT tag exists (include/mruby/value.h:106-131) and no mrbgem defines a big-integer class, so no tag or class test can select CRuby's T_BIGNUM values",
+    "RUBY_T_NIL": "nil and false share mruby's tag MRB_TT_FALSE (include/mruby/value.h:106, MRB_TT_FALSE; mrb_nil_p tells them apart by value, value.h:184), so a type check cannot tell nil from false",
     "T_NIL": "nil and false share mruby's tag MRB_TT_FALSE (include/mruby/value.h:106, MRB_TT_FALSE; mrb_nil_p tells them apart by value, value.h:184), so a type check cannot tell nil from false",
     "T_FALSE": "mruby's MRB_TT_FALSE (include/mruby/value.h:106) also matches nil, which CRuby reports as T_NIL",
     "T_TRUE": "not in the type-check subset of this change (refused as listed); mruby's MRB_TT_TRUE (include/mruby/value.h:107) is true only, so it can be added as its own change",
@@ -20,6 +21,7 @@
     "T_REGEXP": "stuck point: the fork has no Regexp tag (include/mruby/value.h:106-131) and no mrbgem defines a Regexp class (mrbgems/ lists no mruby-regexp), so there is nothing to compare with"
   },
   "unmapped_reasons": {
+    "onig_foreach_name": "stuck point (regexp engine): onig_foreach_name is the Onigmo regexp engine of CRuby; the fork has no regexp engine (mrbgems has no regexp gem), so the named-capture iteration has no mruby form",
     "T_RATIONAL": "stuck point (gem dependency): a Rational test is the mruby-rational class test, which needs the state and the gem (the decision is made: the gem is a dependency when the test is emitted); a bare use has no test to make here",
     "T_COMPLEX": "stuck point (gem dependency): a Complex test is the mruby-complex class test, which needs the state and the gem (the decision is made: the gem is a dependency when the test is emitted); a bare use has no test to make here",
     "_comment": "A name with no api_map entry is refused with the reason given here (the converter's no-entry path). PRIsVALUE is converted where rb_raise and rb_sprintf take it; elsewhere it is an argument of rb_enc_sprintf, which takes an rb_encoding *.",
@@ -82,6 +84,10 @@
         "mruby/data.h",
         "mruby/array.h"
       ]
+    },
+    "ruby/st.h": {
+      "headers": [],
+      "caveat": "CRuby's st.h declares the st table API and the st_retval enum; mruby has no st table (its hash is mrb_hash). The include is dropped: st_retval's ST_* return codes are mapped (ST_CONTINUE, ST_STOP as expressions), and any st_table or st_* call has no entry and is refused where it is used"
     },
     "ruby/re.h": {
       "headers": [
@@ -373,11 +379,11 @@
       "caveat": "the argument is converted in place with to_str; the argument must be a plain identifier"
     },
     "StringValueCStr": {
-      "kind": "call",
-      "mruby": "RSTRING_PTR",
-      "inject_mrb": false,
-      "needs_mrb": false,
-      "caveat": "argument must already be a String: no to_str conversion and no NUL-byte check"
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_string_value_cstr($m, &$0)",
+      "caveat": "CRuby's StringValueCStr converts the argument in place (to_str) and checks for NUL bytes: the fork's mrb_string_value_cstr does both; the argument must be a plain identifier"
     },
     "NUM2ULONG": {
       "kind": "template",
@@ -1139,7 +1145,7 @@
                 0
           ],
           "needs_mrb": true,
-          "template": "mrb_data_object_alloc($m, $0, mrb_calloc($m, 1, $1), $2)",
+          "template": "mrb_obj_value(mrb_data_object_alloc($m, $0, mrb_calloc($m, 1, $1), $2))",
           "caveat": "a zeroed struct of the given size with the data type, as the Data_Make_Struct path builds it"
     },
     "ruby_xrealloc2": {
@@ -1662,8 +1668,9 @@
     },
     "rb_cInteger": {
       "kind": "expr",
-      "mruby": "mrb->integer_class",
-      "needs_mrb": true
+      "mruby": "mrb->fixnum_class",
+      "needs_mrb": true,
+      "caveat": "the fork has no Integer class field: mruby's Integer is fixnum_class (the fork has no separate Bignum class)"
     },
     "rb_cSymbol": {
       "kind": "expr",
@@ -1754,7 +1761,7 @@
       "kind": "special",
       "handler": "define_method",
       "needs_mrb": true,
-      "caveat": "registers a private method: the same wrapper and argument spec as rb_define_method (mrb_define_private_method has the same shape); the method is callable only without a receiver, as in CRuby"
+      "caveat": "registers a method as rb_define_method does: the fork has no private visibility (no mrb_define_private_method), so the method is also callable with an explicit receiver; a visibility difference from CRuby, noted here"
     },
     "rb_iv_get": {
       "kind": "call",
@@ -1781,16 +1788,14 @@
       "caveat": "the function is called with the mruby state (mrb_func_t: mrb, then the data), so a callback passed here is threaded with an mrb argument (helper threading); the state argument is int * in CRuby but mrb_bool * in mruby, so a caller variable must be declared mrb_bool; only mruby exceptions are caught, and CRuby errinfo is not set"
     },
     "rb_class_new_instance": {
-      "kind": "call",
-      "mruby": "mrb_obj_new",
-      "inject_mrb": false,
+      "kind": "template",
+      "arity": 3,
+      "class_args": [2],
       "needs_mrb": true,
-      "arg_order": [
-        2,
-        0,
-        1
-      ],
-      "caveat": "the arguments are reordered: CRuby rb_class_new_instance(argc, argv, klass) is mruby mrb_obj_new(mrb, klass, argc, argv); the class is a tracked class variable, a mapped class constant (rb_cRange is mrb->range_class), or a VALUE name or member unwrapped with mrb_class_ptr (CRuby requires a class there); argc may be an integer literal and argv NULL; both calls run initialize"
+      "prelude": "static mrb_value nfcx_class_new_instance(mrb_state *mrb, int argc, mrb_value *argv, struct RClass *c) {\n  return mrb_obj_new(mrb, c, argc, argv);\n}",
+      "prelude_name": "nfcx_class_new_instance",
+      "template": "nfcx_class_new_instance($m, $0, $1, $2)",
+      "caveat": "CRuby rb_class_new_instance(argc, argv, klass) is mrb_obj_new(mrb, klass, argc, argv) through a helper that keeps CRuby's argument order (so the arguments need no reordering): the class is a tracked class variable, a mapped class constant, or a VALUE name or member unwrapped with mrb_class_ptr; both calls run initialize"
     },
     "rb_hash_lookup": {
       "kind": "call",
@@ -1972,10 +1977,8 @@
       "caveat": "EOFError is defined by the mruby-io gem"
     },
     "rb_eEncodingError": {
-      "kind": "expr",
-      "mruby": "mrb_exc_get(mrb, \"EncodingError\")",
-      "needs_mrb": true,
-      "caveat": "mruby has no encodings; the exception is only the class"
+      "kind": "refuse",
+      "reason": "stuck point (Encoding): rb_eEncodingError is the EncodingError class of CRuby's Encoding API; the fork has no Encoding and defines no EncodingError class (accepted stuck point)"
     },
     "rb_eSysStackError": {
       "kind": "expr",
@@ -2631,11 +2634,65 @@
       "kind": "template",
       "arity": 2,
       "needs_mrb": false,
-      "template": "(mrb_type($0) == MRB_TT_DATA && DATA_TYPE($0) == &$1)",
+      "template": "(mrb_type($0) == MRB_TT_DATA && DATA_TYPE($0) == $1)",
       "caveat": "CRuby's rb_typeddata_is_kind_of(obj, &type): obj is a typed data object whose type is type (or a subclass of it in CRuby). mruby's data objects carry one type descriptor and no parent chain, so this is an exact match; the second argument is the address of the type, as in the bigdecimal use"
     },
     "PRIuSIZE": {"kind": "expr", "mruby": "\"zu\"", "caveat": "C99 printf length modifier for size_t (CRuby's PRIuSIZE is this string literal)"},
+    "rb_memsearch": {
+      "kind": "template",
+      "arity": 5,
+      "needs_mrb": false,
+      "ignored_args": [4],
+      "prelude": "#include <string.h>\nstatic long nfcx_memsearch(const char *x, long m, const char *y, long n) {\n  long i;\n  if (m > n) return -1;\n  if (m == 0) return 0;\n  for (i = 0; i + m <= n; i++) if (memcmp(y + i, x, (size_t)m) == 0) return i;\n  return -1;\n}",
+      "prelude_name": "nfcx_memsearch",
+      "template": "nfcx_memsearch($0, $1, $2, $3)",
+      "caveat": "CRuby's rb_memsearch(x, m, y, n, enc) is the byte offset of the m-byte x in the n-byte y, or -1; the encoding is dropped (mruby strings carry none), so the search is bytewise"
+    },
+    "RB_ALLOCV_N": {
+      "kind": "special",
+      "needs_mrb": true,
+      "caveat": "CRuby's RB_ALLOCV_N(type, v, n) allocates a temporary buffer freed by RB_ALLOCV_END(v); converted to mrb_malloc, with the free at RB_ALLOCV_END of the same pointer (the declaration and the end must be in one function, with no return or goto between)"
+    },
+    "RB_ALLOCV_END": {
+      "kind": "special",
+      "needs_mrb": true,
+      "caveat": "the free of the buffer RB_ALLOCV_N allocated for this VALUE: mrb_free of that pointer"
+    },
+    "ALLOCV_N": {
+      "kind": "special",
+      "needs_mrb": true,
+      "caveat": "the unprefixed form of RB_ALLOCV_N (CRuby's ruby/util.h alias): the same temporary buffer, converted the same way"
+    },
+    "ALLOCV_END": {
+      "kind": "special",
+      "needs_mrb": true,
+      "caveat": "the unprefixed form of RB_ALLOCV_END: the same free"
+    },
+    "PRIdVALUE": {
+      "kind": "expr",
+      "mruby": "\"ld\"",
+      "caveat": "C99 printf length modifier for a signed VALUE (CRuby's PRIdVALUE is PRI_VALUE_PREFIX \"l\" followed by d, which is \"ld\" on LP64)"
+    },
+    "MEMCPY": {
+      "kind": "template",
+      "arity": 4,
+      "template": "memcpy($0, $1, sizeof($2)*($3))",
+      "caveat": "CRuby's MEMCPY(p, src, type, n) is memcpy(p, src, sizeof(type)*n) (the type is a plain name here)"
+    },
+    "ALLOCA_N": {
+      "kind": "template",
+      "arity": 2,
+      "template": "(($0 *)alloca(sizeof($0) * ($1)))",
+      "caveat": "CRuby's ALLOCA_N(type, n) is the C alloca of n elements of type; the fork's build uses the C library's alloca, so the call is the same"
+    },
     "PRIdSIZE": {"kind": "expr", "mruby": "\"zd\"", "caveat": "C99 printf length modifier for size_t (CRuby's PRIdSIZE is this string literal)"},
+    "DECIMAL_SIZE_OF_BITS": {"kind": "template", "arity": 1, "template": "((($0) * 146 / 485) + 1)", "caveat": "CRuby's DECIMAL_SIZE_OF_BITS(n) is the number of decimal digits that n bits can need: (n * 146 / 485) + 1 (CRuby's util headers; pure arithmetic)"},
+    "rb_enc_interned_str_cstr": {"kind": "template", "arity": 2, "needs_mrb": true, "ignored_args": [1], "template": "mrb_str_new_cstr($m, $0)", "caveat": "CRuby's rb_enc_interned_str_cstr(cstr, enc) is an interned string in the encoding enc; mruby strings carry no encoding (the default is UTF-8 here), so the encoding argument is ignored and the string is a plain mruby string"},
+    "RUBY_API_VERSION_CODE": {"kind": "expr", "mruby": "20200", "caveat": "the CRuby API version the gem emulates: 2.2 (20200), by the user's decision (fast_blank: CRuby 2.2 or later, so U+180E is not whitespace). The build also defines it (--define RUBY_API_VERSION_CODE=20200), which selects the #ifndef branches"},
+    "STRNCASECMP": {"kind": "expr", "mruby": "strncasecmp", "caveat": "CRuby's STRNCASECMP (ruby/util.h) is the C library's strncasecmp (its name, as a macro value)"},
+    "STRTOUL": {"kind": "call", "mruby": "strtoul", "caveat": "CRuby's STRTOUL (ruby/util.h) is the C library's strtoul"},
+    "ENCODING_GET_INLINED": {"kind": "refuse", "reason": "stuck point (Encoding): ENCODING_GET_INLINED reads the encoding index of a string (CRuby's rb_encoding table); the fork has no Encoding (accepted stuck point)"},
+    "PRI_SIZE_PREFIX": {"kind": "expr", "mruby": "\"z\"", "caveat": "CRuby's PRI_SIZE_PREFIX is the printf length modifier for size_t, the string the PRI*SIZE macros append to (C99 z)"},
     "PUREFUNC": {"kind": "template", "arity": 1, "template": "$0", "caveat": "PUREFUNC (CRuby's pure-function attribute) is a compiler hint: the declaration it wraps is kept, without the attribute"},
     "RARRAY_PTR": {"kind": "macro", "mruby": "RARRAY_PTR", "caveat": "mruby's RARRAY_PTR (include/mruby/array.h) is the array's element pointer, as CRuby's; the use reads elements. A write through it would need mruby's array modify step (not done here)"},
     "rb_long2int": {
@@ -2658,6 +2715,22 @@
       "prelude_name": "nfcx_check_symbol",
       "template": "nfcx_check_symbol($m, $0, $1)",
       "caveat": "CRuby's rb_check_symbol_cstr: the symbol of the name when one exists, nil otherwise (callers test for nil, as oj does); the encoding argument is dropped (mruby symbols carry no encoding)"
+    },
+    "rb_get_kwargs": {
+      "kind": "template",
+      "arity": 5,
+      "needs_mrb": true,
+      "prelude": "static int nfcx_get_kwargs(mrb_state *mrb, mrb_value hash, const mrb_sym *ids, int required, int optional, mrb_value *values) {\n  int i, n = required + optional, found = 0;\n  for (i = 0; i < n; i++) {\n    mrb_value key = mrb_symbol_value(ids[i]);\n    if (mrb_hash_p(hash) && mrb_hash_key_p(mrb, hash, key)) {\n      values[i] = mrb_hash_get(mrb, hash, key); found++;\n    } else if (i < required) {\n      mrb_raise(mrb, E_ARGUMENT_ERROR, \"missing keyword\");\n    } else {\n      values[i] = mrb_undef_value();\n    }\n  }\n  return found;\n}",
+      "prelude_name": "nfcx_get_kwargs",
+      "template": "nfcx_get_kwargs($m, $0, $1, $2, $3, $4)",
+      "caveat": "CRuby's rb_get_kwargs: the values of the listed keywords (Qundef when an optional one is absent); a missing required keyword raises ArgumentError. Unknown keywords are not rejected (a caveat: CRuby rejects them unless the method takes **rest)"
+    },
+    "rb_str_dump": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"dump\"), 0, NULL)",
+      "caveat": "CRuby's rb_str_dump: the String#dump of the string (mruby-string-ext's String#dump, a fork gem). Its escapes follow mruby's, which may differ from CRuby's for non-ASCII bytes"
     },
     "rb_cstr_to_dbl": {
       "kind": "template",
@@ -2705,6 +2778,9 @@
     }
   },
   "special_arg_positions_class_only": {
+    "rb_raise": [
+      0
+    ],
     "rb_define_method": [
       0
     ],

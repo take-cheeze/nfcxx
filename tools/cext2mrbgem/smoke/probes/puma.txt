@@ -1,0 +1,1 @@
+Puma::HttpParser.new.class.to_s	Puma::HttpParser

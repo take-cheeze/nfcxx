@@ -1,0 +1,2 @@
+BigDecimal.name	BigDecimal
+BigDecimal("1")	!NotImplementedError

@@ -1,0 +1,3 @@
+''.blank?	!NotImplementedError
+'a'.blank?	!NotImplementedError
+' '.blank_as?	!NotImplementedError
