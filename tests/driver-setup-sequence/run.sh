@@ -36,6 +36,7 @@ ruby -e '
   # 4. the freestanding step hands its gnu on
   r = NfcxxSetup.sequence(base.merge("freestanding"=>"1"), {})
   check.("freestanding sets gnu", r[:state]["gnu"].to_s.match?(/\A\d+\z/))
+  check.("gnu opts take the gnu value", r[:state]["gnu_opts"].to_s == "--gnu_version=130000")
   exit(ok ? 0 : 1)
 ' "$repo"
 st=$?
