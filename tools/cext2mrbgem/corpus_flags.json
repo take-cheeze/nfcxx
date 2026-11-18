@@ -80,7 +80,9 @@
     "--method-scope-fn",
     "safe_add_str",
     "--method-scope-fn",
-    "safe_add_str_key"
+    "safe_add_str_key",
+    "--replace",
+    "void oj_dump_obj_val(VALUE obj, int depth, Out out) {=void oj_dump_obj_val(VALUE obj, int depth, Out out) { if (T_BIGNUM == 0) { }"
   ],
   "fast_blank": [
     "--define",
