@@ -76,6 +76,9 @@ EOS
 # CRuby headers whose only use is a compatibility redefinition that the target libc does not need.
 DROP_INCLUDES = {
   'ruby/util.h' => 'only redefines strdup as ruby_strdup for libcs without it; mruby targets provide strdup',
+  'ruby/internal/has/builtin.h' => 'CRuby internal feature tests (__has_builtin); the code that uses them is in branches the build undefines (corpus flags: RBIMPL_STATIC_ASSERT, RUBY_ATOMIC_PTR_CAS)',
+  'ruby/internal/static_assert.h' => 'CRuby internal static assertions (RBIMPL_STATIC_ASSERT); the build undefines it (corpus flags), so its uses are not compiled',
+  'ruby/atomic.h' => 'CRuby internal atomics (RUBY_ATOMIC_PTR_CAS); the build undefines it (corpus flags), so its uses are not compiled',
   'ruby/version.h' => 'the CRuby version the gem emulates is a build define (RUBY_API_VERSION_CODE, set by --define in the corpus flags); the header only declares it',
 }
 
@@ -6802,7 +6805,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         # so its body returns a zero value (no state to raise with), noted as the dropped allocator
         if !has_mrb && !@global_wrap && hit.all? { |r| r['reason'].to_s.include?('per-class allocator') }
           ret = d['ret'].to_s.strip
-          zero = if ret == 'void' then '' elsif ret.match?(/\bVALUE\b|\bmrb_value\b/) then ' return mrb_nil_value();'
+          zero = if ret.split.last == 'void' && !ret.include?('*') then '' elsif ret.match?(/\bVALUE\b|\bmrb_value\b/) then ' return mrb_nil_value();'
                  elsif ret.include?('*') then ' return NULL;' else " return (#{ret}){0};" end
           inside = @edits[rel].overlapping(d['brace'] + 1, d['body_end'])
           @edits[rel].drop(inside)
@@ -6813,7 +6816,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         next unless has_mrb || @global_wrap
         target = has_mrb ? 'mrb' : @global_name
         ret = d['ret'].to_s.strip
-        ret_stmt = if ret == 'void' then ''
+        ret_stmt = if ret.split.last == 'void' && !ret.include?('*') then ''
                    elsif ret.match?(/\bVALUE\b|\bmrb_value\b/) then ' return mrb_nil_value();'
                    elsif ret.include?('*') then ' return NULL;'
                    else " return (#{ret}){0};"
