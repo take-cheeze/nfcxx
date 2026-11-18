@@ -124,12 +124,9 @@ path_b=0; [ "${NFCXX_PATH:-}" != b ] || path_b=1                        # --back
 ir_opt_set=0; ir_opt=""; if [ -n "${NFCXX_IR_OPT+x}" ]; then ir_opt_set=1; ir_opt=$NFCXX_IR_OPT; fi   # --ir-opt=LIST
 eh_unwind_on=0; [ "${NFCXX_EH_UNWIND:-}" != 1 ] || eh_unwind_on=1       # --eh-unwind
 eh_shim_on=1; [ "${NFCXX_EHSHIM:-1}" != 0 ] || eh_shim_on=0             # --no-eh-shim
-cache_dir=${NFCXX_CACHE:-}; cache_log_file=${NFCXX_CACHE_LOG:-}         # --cache=DIR, --cache-log=FILE
-# NFCXX_CACHE_REMOTE=gha: each stored object is also kept in the GitHub Actions cache, and a local miss is looked up there
-# (scripts/nfcxx-cache-gha.rb; docs/notes/cxx-driver.md). Without NFCXX_CACHE the local side is a temporary directory.
-cache_remote=${NFCXX_CACHE_REMOTE:-}
-case $cache_remote in ""|gha) ;; *) echo "nfcxx: NFCXX_CACHE_REMOTE takes gha (got '$cache_remote')" >&2; exit 2 ;; esac
-[ -n "$cache_dir" ] || [ -z "$cache_remote" ] || cache_dir=${TMPDIR:-/tmp}/nfcxx-cache-$(id -u)
+# --cache=DIR, --cache-log=FILE, NFCXX_CACHE_REMOTE=gha: cache_dir, cache_log_file, cache_remote (scripts/nfcxx-cache-config.rb plan)
+cfg_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cache-config.rb" plan) || exit $?
+eval "$cfg_sh"
 keep_intermediates=0; [ "${NFCXX_KEEP_INTERMEDIATES:-}" != 1 ] || keep_intermediates=1   # --keep-intermediates
 time_log=${NFCXX_TIME_LOG:-}                                            # --time-log=FILE
 instantiate=${NFCXX_INSTANTIATE:-used}                                  # --instantiate=used|auto
