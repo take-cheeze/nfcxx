@@ -587,7 +587,7 @@ class Converter
     end
     return if in_dead_init(rel, pos)
     text = @files[rel]['text']
-    @refusals << { 'file' => rel, 'line' => line_of(text, pos), 'api' => api, 'reason' => reason }
+    @refusals << { 'file' => rel, 'line' => line_of(text, pos), 'api' => api, 'reason' => reason, 'pos' => pos }
     # a marker strictly inside a declaration's header would overlap the header rewrite (process step 2); the
     # refusal is still recorded and the output is still marked not buildable
     return if @decls.any? { |d| d['file'] == rel && d['hstart'] < pos && pos < d['hend'] }
@@ -6699,17 +6699,88 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
   # Stub policy (option A): a function whose body holds a refused (stuck) use has its body replaced by a stub that raises
   # NotImplementedError when it runs, so the gem compiles and loads; the function is then not a source of NOT BUILDABLE.
   # Each refusal line in a stubbed body is recorded in @stubbed; the refusals elsewhere (file scope, headers, the gem) remain.
+  # the statement holding position pos, as [start, end) of masked text, when it is a plain statement (a call, not a control
+  # statement, a block or an assignment); nil otherwise
+  def stmt_span(masked, pos)
+    depth = 0
+    k = pos - 1
+    st = nil
+    while k >= 0
+      c = masked[k]
+      if c == ')' || c == ']' then depth += 1
+      elsif c == '(' || c == '[' then depth -= 1; (return nil if depth < 0)
+      elsif depth.zero? && (c == ';' || c == '{' || c == '}')
+        st = k + 1
+        break
+      end
+      k -= 1
+    end
+    return nil if st.nil?
+    depth = 0
+    e = nil
+    k = pos
+    while k < masked.length
+      c = masked[k]
+      if c == '(' || c == '[' then depth += 1
+      elsif c == ')' || c == ']' then depth -= 1; (return nil if depth < 0)
+      elsif depth.zero? && (c == '{' || c == '}') then return nil
+      elsif depth.zero? && c == ';'
+        e = k + 1
+        break
+      end
+      k += 1
+    end
+    return nil if e.nil?
+    text = masked[st...e].to_s.strip
+    return nil if text.match?(/\A(?:if|else|for|while|do|return|switch|case|goto)\b/)
+    return nil if text.match?(/(?<![=!<>])=(?!=)/)
+    [st, e]
+  end
+
   def stub_refused_functions
     @stubbed = Set.new
     @refusals.group_by { |r| r['file'] }.each do |rel, refs|
       next unless @files[rel]
       text = @files[rel]['text']
+      # Init: a refused statement is dropped (the decision of the user: a deliberate no-op, noted in REFUSALS.txt); a stub
+      # there would make the gem raise at load. A refusal whose statement is not a plain call statement stays unstubbed.
+      masked = @files[rel]['masked']
+      init_defs = @defs.values.flatten.select { |d| d['file'] == rel && !d['proto'] && d['brace'] && d['body_end'] && d['name'].to_s.start_with?('Init_') }
+      # a refusal in a #define body (a macro whose expansion refuses) is handled at each use of the macro: a use inside Init
+      # is a statement dropped there, a use inside a function stubs that function (the uses are the refused uses)
+      refs = refs.dup
+      refs.select { |r| r['pos'] && define_at(rel, r['pos']) }.each do |r|
+        name = define_at(rel, r['pos'])[0]
+        da, db = define_at(rel, r['pos'])[1], define_at(rel, r['pos'])[2]
+        uses = (@occ[name] || []).reject { |rr, os, _oe| rr == rel && da <= os && os < db }
+        next if uses.empty?
+        uses.each do |rr, os, _oe|
+          next unless rr == rel
+          refs << r.merge('line' => line_of(text, os), 'pos' => os, 'api' => name)
+        end
+        @stubbed << [rel, r['line']]
+        (@dropped_inits ||= Set.new) << [rel, r['line']] if uses.all? { |rr, os, _oe| rr == rel && init_defs.any? { |d| os >= d['brace'] && os <= d['body_end'] } }
+      end
+      init_defs.each do |d|
+        l1 = line_of(text, d['hstart'] || d['brace'])
+        l2 = line_of(text, d['body_end'])
+        refs.select { |r| r['line'] >= l1 && r['line'] <= l2 && r['pos'] }.each do |r|
+          span = stmt_span(masked, r['pos'])
+          next unless span
+          s0, e0 = span
+          next if @edits[rel].overlapping(s0, e0).any? { |a, b, _| a < d['brace'] || b > d['body_end'] + 1 }
+          @edits[rel].drop(@edits[rel].overlapping(s0, e0))
+          @edits[rel].add(s0, e0, "/* BC2CPP-MRBGEM dropped in Init (#{r['api']}): #{r['reason'].to_s.sub(/\A[^:]*: /, '')[0, 160]} */")
+          @stubbed << [rel, r['line']]
+          @dropped_inits = (@dropped_inits || Set.new) << [rel, r['line']]
+        end
+      end
       # the Init function is not stubbed: a stub there would make the gem raise at load and register no method
       defs = @defs.values.flatten.select do |d|
         d['file'] == rel && !d['proto'] && d['brace'] && d['body_end'] && !d['name'].to_s.start_with?('Init_')
       end
       defs.each do |d|
-        l1 = line_of(text, d['brace'])
+        l1 = line_of(text, d['hstart'] || d['brace'])
         l2 = line_of(text, d['body_end'])
         hit = refs.select { |r| r['line'] >= l1 && r['line'] <= l2 }
         next if hit.empty?
@@ -6719,6 +6790,18 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         # the output has the state parameter when the source has it, or an edit inserts it into the parameter list
         added_mrb = @edits[rel].overlapping(d['po'], d['po'] + 2).any? { |_a, _b, t| t.to_s.include?('mrb_state') }
         has_mrb = !global_fn && (d['params'].to_s.match?(/\bmrb_state\b/) || added_mrb)
+        # a per-class allocator without a state (its registration, rb_define_alloc_func, is dropped in Init): nothing calls it,
+        # so its body returns a zero value (no state to raise with), noted as the dropped allocator
+        if !has_mrb && !@global_wrap && hit.all? { |r| r['reason'].to_s.include?('per-class allocator') }
+          ret = d['ret'].to_s.strip
+          zero = if ret == 'void' then '' elsif ret.match?(/\bVALUE\b|\bmrb_value\b/) then ' return mrb_nil_value();'
+                 elsif ret.include?('*') then ' return NULL;' else " return (#{ret}){0};" end
+          inside = @edits[rel].overlapping(d['brace'] + 1, d['body_end'])
+          @edits[rel].drop(inside)
+          @edits[rel].add(d['brace'] + 1, d['body_end'], " /* BC2CPP-MRBGEM dropped: the per-class allocator is unreachable (rb_define_alloc_func was dropped in Init) */#{zero} ")
+          hit.each { |r| @stubbed << [rel, r['line']]; (@dropped_inits ||= Set.new) << [rel, r['line']] }
+          next
+        end
         next unless has_mrb || @global_wrap
         target = has_mrb ? 'mrb' : @global_name
         ret = d['ret'].to_s.strip
@@ -6830,7 +6913,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     ]
     write_bytes(File.join(src_dir, 'gem_init.c'), gem_init.join("\n"))
     status = if @refusals.empty? then 'no refusals (NOT compiled or tested)'
-             elsif unstubbed.empty? then 'STUBBED (every refused use is in a stub that raises NotImplementedError)'
+             elsif unstubbed.empty? then 'STUBBED (every refused use is in a stub that raises NotImplementedError, or was dropped as a no-op in Init: see [dropped in Init])'
              else 'NOT BUILDABLE'
              end
     rake = ["# Generated by convert_mrbgem.rb from CRuby ext/#{@name}. Fill in the TODO fields."]
@@ -6852,7 +6935,10 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     lines = ["BC2CPP-MRBGEM refusals for ext/#{@name}",
              "STATUS: #{status} (#{@refusals.size} refusal(s))", '']
     @refusals.each do |r|
-      tag = (@stubbed || Set.new).include?([r['file'], r['line']]) ? ' [stubbed]' : ' [NOT stubbed]'
+      tag = if (@dropped_inits || Set.new).include?([r['file'], r['line']]) then ' [dropped in Init: a no-op, noted]'
+            elsif (@stubbed || Set.new).include?([r['file'], r['line']]) then ' [stubbed]'
+            else ' [NOT stubbed]'
+            end
       lines << "#{r['file']}:#{r['line']}  #{r['api']}  #{r['reason']}#{tag}"
     end
     write_bytes(File.join(@out_dir, 'REFUSALS.txt'), lines.join("\n") + "\n")
