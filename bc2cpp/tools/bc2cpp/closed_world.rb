@@ -117,9 +117,10 @@ class ClosedWorld
   end
   private :profile_mark
 
-  def initialize(ireps:, registry:, class_decls:, walked:, native_paths:, ruby_paths:, module_names: Set.new)
+  def initialize(ireps:, registry:, class_decls:, walked:, native_paths:, ruby_paths:, module_names: Set.new, root_label: nil)
     @ireps = ireps
     @module_names = module_names.to_set
+    @root_label = root_label
     @clone_sent = false
     @registry = registry
     @class_decls = class_decls
@@ -1817,6 +1818,21 @@ class ClosedWorld
     @loop_installer_sites ||= LoopInstallers.sites(@registry)
   end
 
+  # A file-scope `Const.include(Mod)` / `Const.prepend(Mod)` in the root body (explicit_mixin_refs): the registry records it
+  # as a mixin of the owner when both constants resolve to declared names, so no ancestor is unknown. Any other explicit
+  # receiver, or a constant that does not resolve, stays dynamic.
+  def explicit_mixin_accepted?(irep, idx, insn)
+    return false unless @root_label && irep.label == @root_label
+
+    refs = explicit_mixin_refs(irep, idx, insn)
+    return false unless refs
+
+    declared = @module_names | @class_decls.keys.to_set
+    owner = mixin_declared_name(refs[0], nil, declared)
+    mod = mixin_declared_name(refs[1], nil, declared)
+    !owner.nil? && !mod.nil? && @module_names.include?(mod)
+  end
+
   def scan_send(irep, idx, insn)
     name = insn.sym
     @clone_sent = true if name == 'clone'
@@ -1832,7 +1848,7 @@ class ClosedWorld
       # (or marked unknown_mixins); runtime mixin changes are not.
       class_body_mixin = %w[include prepend].include?(name) && @walked.include?(irep.label) &&
                          BytecodeIR::Ops::SELF_SEND.include?(insn.op)
-      global!(:dynamic_mixin) unless class_body_mixin
+      global!(:dynamic_mixin) unless class_body_mixin || explicit_mixin_accepted?(irep, idx, insn)
 
       return
     end

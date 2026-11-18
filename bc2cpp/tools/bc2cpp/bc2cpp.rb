@@ -380,7 +380,7 @@ BC2CPP_MAIN = lambda do
     closed_world = ClosedWorld.new(ireps: engine_ireps, registry: engine_registry, class_decls: class_decls,
                                    walked: walked_ireps & engine_ireps.keys,
                                    native_paths: outside_native, ruby_paths: outside_ruby,
-                                   module_names: declared_modules)
+                                   module_names: declared_modules, root_label: root_label)
     profile_phase.call('closed world: ClosedWorld.new')
     warn "== closed world (#{build_name}: #{build_gems.size} gems, #{outside_native.size} native + " \
          "#{outside_ruby.size} Ruby outside sources) =="
