@@ -424,6 +424,9 @@ fi
 # The default backend (docs/notes/pathb-default.md; the rule is scripts/nfcxx-backend.rb, stage B3 of docs/notes/driver-body-port.md):
 # gcc, or Path B for a request only Path B takes. pb_fs_host: the hosts Path B compiles freestanding programs on, x86-64 and aarch64
 # Linux and arm64 macOS (docs/notes/freestanding.md). Both are set here; the refusals and the NFCXX_PATH=b override stay below.
+extra=()
+sys_inc=()
+hosted_libs=()
 asan_c=()   # options for every C compile and link of the program
 # The planners before the sanitizer, in ./nfcxx's order (scripts/nfcxx-setup.rb setup): the default backend (which sets backend,
 # default_backend and pb_fs_host), the ASan options, instantiation, cosmo (with cosmo=1), the headers (with the host C++ headers span),
@@ -448,9 +451,6 @@ eval "$setup_sh"
 # Hosted mode (default) uses the host C++ library headers, so real code can include <cstdio>,
 # <cctype>, <string> and friends. Their include directories and the GNU version come from the host
 # g++ (override with NFCXX_CXX, or NFCXX_SYS_INCLUDES as a colon-separated list).
-extra=()
-sys_inc=()
-hosted_libs=()
 # Template instantiation. Default (--instantiate=used, or NFCXX_INSTANTIATE): each unit instantiates the templates it uses, as g++ does,
 # so the link recompiles nothing (libggml-sycl: 8 minutes in all, a 3 s link). The C output has the instances as weak
 # symbols in one .text, not as COMDAT groups, so the link would keep every unit's copy (libggml-sycl: 77 MB of code): each
