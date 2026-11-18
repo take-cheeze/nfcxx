@@ -52,8 +52,18 @@ and the trace span are shared with the other stages.
 - The existing suites: tests/nfcxx-link (45), tests/driver-eccp-env, tests/nfcxx-linkargs, tests/nfcxx-ecp-arg,
   tests/nfcxx-cache (21), tests/trace.
 
-## Open questions for the owner
+## Decisions
 
-1. Option A now or with B8? (Recommendation: with B8.)
-2. Does a failing eccp always need the trace record written, even when the trace is off? (Current behaviour: yes,
-   trace_end runs only on success because `set -e` exits first; confirm before changing it.)
+1. **Option B now, A with B8.** The call stays in bash until the switch. The plan, the environment and the record
+   removals are already Ruby (scripts/nfcxx-eccp-plan.rb, nfcxx-eccp-env.rb, nfcxx-link.rb), so B adds the tests below
+   and no new planner.
+2. **No trace record on a failing eccp.** This is the current behaviour: the driver runs under `set -euo pipefail`, so
+   a failing eccp exits before `trace_end`. The port must write no span on failure either.
+   tests/driver-eccp-call/run.sh pins this, along with the status pass-through, stderr, the cwd and the environment,
+   against the block copied verbatim from ./nfcxx.
+
+## Tests
+
+- tests/driver-eccp-call/run.sh: the call block verbatim, against a stub eccp (success, failure, tracing off, no cd).
+  Cleanup on exit (eccp_cleanup, `--keep-intermediates`, the cache hit) is not covered here; it stays in
+  tests/nfcxx-link (45) and tests/nfcxx-cache (21), which need an EDG build.
