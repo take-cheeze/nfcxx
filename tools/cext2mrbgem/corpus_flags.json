@@ -79,5 +79,13 @@
     "safe_add_str",
     "--method-scope-fn",
     "safe_add_str_key"
+  ],
+  "fast_blank": [
+    "--define",
+    "RUBY_API_VERSION_CODE=20200"
+  ],
+  "bcrypt": [
+    "--rename",
+    "crypt_r=nfcx_crypt_r"
   ]
 }

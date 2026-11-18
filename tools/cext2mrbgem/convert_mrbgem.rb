@@ -76,6 +76,7 @@ EOS
 # CRuby headers whose only use is a compatibility redefinition that the target libc does not need.
 DROP_INCLUDES = {
   'ruby/util.h' => 'only redefines strdup as ruby_strdup for libcs without it; mruby targets provide strdup',
+  'ruby/version.h' => 'the CRuby version the gem emulates is a build define (RUBY_API_VERSION_CODE, set by --define in the corpus flags); the header only declares it',
 }
 
 HERE = File.dirname(File.absolute_path(__FILE__))
@@ -678,6 +679,11 @@ sub_headers = Dir.children(@cext_dir).reject { |n| n.start_with?('.') }.sort.sel
 sub_headers.each { |rel| texts[rel] = read_text(File.join(@cext_dir, rel)) }
 texts.each_key { |k| texts[k] = kr_normalize(texts[k]) }
 texts = static_rename(texts)
+# --rename OLD=NEW: the gem's own identifier OLD is NEW in every source and header (a name the system headers declare, e.g. crypt_r)
+($renames || []).each do |old, new|
+  re = /(?<![\w$])#{Regexp.escape(old)}(?![\w])/
+  texts.each_key { |k| texts[k] = texts[k].gsub(re, new) }
+end
     Dir.children(@cext_dir).reject { |n| n.start_with?('.') }.sort.each do |base|
       path = File.join(@cext_dir, base)
       if File.directory?(path)
@@ -7034,6 +7040,8 @@ def main(argv)
       undefines << args.shift
     elsif opt == '--exclude' && !args.empty?
       ($excluded_files ||= Set.new) << args.shift
+    elsif opt == '--rename' && !args.empty? && args.first.include?('=')
+      ($renames ||= []) << args.shift.split('=', 2)
     elsif opt == '--method-scope-fn' && !args.empty?
       ($method_scope_fns ||= Set.new) << args.shift
     elsif opt == '--stored-tag' && !args.empty? && args.first.include?('=')
@@ -7045,7 +7053,7 @@ def main(argv)
     end
   end
   if args.nil? || args.size != 2
-    warn 'usage: convert_mrbgem.rb [--name GEM] [--scanner auto|libclang|regex] [--define NAME[=VALUE]]... [--undefine NAME]... [--exclude FILE]... ' \
+    warn 'usage: convert_mrbgem.rb [--name GEM] [--scanner auto|libclang|regex] [--define NAME[=VALUE]]... [--undefine NAME]... [--exclude FILE]... [--rename OLD=NEW]... ' \
          '[--stored-tag NAME=VALUE]... <cext_dir> <out_dir>'
     return 1
   end
