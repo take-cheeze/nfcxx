@@ -1656,6 +1656,12 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rb_encoding_field tools/cext
 check grep -qF 'STATUS: STUBBED' "$work/api_rb_encoding_field/REFUSALS.txt"
 check test "$(grep -c '#error' "$work/api_rb_encoding_field/src/gem_init.c")" -eq 0
 check grep -qF 'typedef struct nfcx_rb_encoding rb_encoding;' "$work/api_rb_encoding_field/src/api_rb_encoding_field.c"
+# 2zzz156. !v on a VALUE is a stuck point (VALUE truth test); DECIMAL_SIZE_OF_BITS(n) is its arithmetic ((n * 146 / 485) + 1); a
+# symbol VALUE passed to rb_id2name is read with mrb_symbol.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_value_not_decimal tools/cext2mrbgem/fixtures/api_value_not_decimal/ext/api_value_not_decimal "$work/api_value_not_decimal" > "$work/api_value_not_decimal.log" 2>&1 || rc=$?
+check grep -qF 'stuck point (VALUE truth test): !v tests a VALUE' "$work/api_value_not_decimal/REFUSALS.txt"
+check grep -qF '((64) * 146 / 485) + 1' "$work/api_value_not_decimal/src/api_value_not_decimal.c"
+check grep -qF 'mrb_symbol(sym)' "$work/api_value_not_decimal/src/api_value_not_decimal.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?
