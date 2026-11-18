@@ -684,6 +684,10 @@ texts = static_rename(texts)
         @ignored << [base, 'subdirectory not converted']
         next
       end
+      if ($excluded_files || Set.new).include?(base)
+        @ignored << [base, 'excluded (--exclude): not built in this configuration']
+        next
+      end
       unless base.end_with?('.c') || base.end_with?('.h')
         @ignored << [base, 'not a C source or header (read by nothing; extconf.rb is never run)']
         next
@@ -3723,7 +3727,7 @@ use_problem = lambda do |name, use|
   # a file whose declarations name a stuck type gets the placeholder prelude (see ONIG_STUCK_TYPES_PRELUDE)
   def needs_placeholder_prelude?(f)
     (f['masked'].match?(ONIG_NAME_RE) || f['masked'].match?(/\brb_encoding\b/) ||
-                           f['text'].match?(/#\s*include\s*<ruby\/encoding\.h>/))
+                           f['text'].match?(/#\s*include\s*[<"]ruby\/encoding\.h[>"]/))
   end
   ONIG_NAME_RE = /(?<![#{WC}.>])(OnigUChar|OnigRegion|OnigRegex|OnigPosition|OnigEncoding|OnigOptionType|OnigCaptureTreeNode|regex_t|re_registers|UChar|ONIG_[A-Z0-9_]+|onig_[a-z0-9_]+)(?![#{WC}])/
   def onig_engine_stuck_pass
@@ -6657,6 +6661,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
           @refusals << { 'file' => rel, 'line' => m[1].to_i, 'api' => 'compile check',
                          'reason' => "stuck point (cascade of a refused use on the same line): the converted line does not compile " \
                                      "because of its refused use (#{m[2].strip})" }
+          # the refused use is the stuck point (recorded, and stubbed or kept NOT BUILDABLE on its own): this line is its cascade
+          (@stubbed ||= Set.new) << [rel, m[1].to_i]
           next
         end
         # the include of ruby/encoding.h is kept in the output (its api is the accepted Encoding stuck point); the fork has no
@@ -6703,30 +6709,24 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
   # Each refusal line in a stubbed body is recorded in @stubbed; the refusals elsewhere (file scope, headers, the gem) remain.
   # the statement holding position pos, as [start, end) of masked text, when it is a plain statement (a call, not a control
   # statement, a block or an assignment); nil otherwise
-  def stmt_span(masked, pos)
-    depth = 0
-    k = pos - 1
+  def stmt_span(masked, pos, allow_assign: false)
+    # the position is inside the statement's own parentheses (an argument), so the statement boundaries are the ; { } characters
     st = nil
+    k = pos - 1
     while k >= 0
-      c = masked[k]
-      if c == ')' || c == ']' then depth += 1
-      elsif c == '(' || c == '[' then depth -= 1; (return nil if depth < 0)
-      elsif depth.zero? && (c == ';' || c == '{' || c == '}')
+      if masked[k] == ';' || masked[k] == '{' || masked[k] == '}'
         st = k + 1
         break
       end
       k -= 1
     end
     return nil if st.nil?
-    depth = 0
     e = nil
     k = pos
     while k < masked.length
       c = masked[k]
-      if c == '(' || c == '[' then depth += 1
-      elsif c == ')' || c == ']' then depth -= 1; (return nil if depth < 0)
-      elsif depth.zero? && (c == '{' || c == '}') then return nil
-      elsif depth.zero? && c == ';'
+      return nil if c == '{' || c == '}'
+      if c == ';'
         e = k + 1
         break
       end
@@ -6735,7 +6735,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     return nil if e.nil?
     text = masked[st...e].to_s.strip
     return nil if text.match?(/\A(?:if|else|for|while|do|return|switch|case|goto)\b/)
-    return nil if text.match?(/(?<![=!<>])=(?!=)/)
+    return nil if !allow_assign && text.match?(/(?<![=!<>])=(?!=)/)
     [st, e]
   end
 
@@ -6767,7 +6767,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         l1 = line_of(text, d['hstart'] || d['brace'])
         l2 = line_of(text, d['body_end'])
         refs.select { |r| r['line'] >= l1 && r['line'] <= l2 && r['pos'] }.each do |r|
-          span = stmt_span(masked, r['pos'])
+          span = stmt_span(masked, r["pos"], allow_assign: true)
           next unless span
           s0, e0 = span
           next if @edits[rel].overlapping(s0, e0).any? { |a, b, _| a < d['brace'] || b > d['body_end'] + 1 }
@@ -7032,6 +7032,8 @@ def main(argv)
       defines << args.shift
     elsif opt == '--undefine' && !args.empty?
       undefines << args.shift
+    elsif opt == '--exclude' && !args.empty?
+      ($excluded_files ||= Set.new) << args.shift
     elsif opt == '--method-scope-fn' && !args.empty?
       ($method_scope_fns ||= Set.new) << args.shift
     elsif opt == '--stored-tag' && !args.empty? && args.first.include?('=')
@@ -7043,7 +7045,7 @@ def main(argv)
     end
   end
   if args.nil? || args.size != 2
-    warn 'usage: convert_mrbgem.rb [--name GEM] [--scanner auto|libclang|regex] [--define NAME[=VALUE]]... [--undefine NAME]... ' \
+    warn 'usage: convert_mrbgem.rb [--name GEM] [--scanner auto|libclang|regex] [--define NAME[=VALUE]]... [--undefine NAME]... [--exclude FILE]... ' \
          '[--stored-tag NAME=VALUE]... <cext_dir> <out_dir>'
     return 1
   end
