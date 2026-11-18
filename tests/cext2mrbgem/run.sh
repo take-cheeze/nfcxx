@@ -1662,6 +1662,12 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_value_not_decimal tools/cext
 check grep -qF 'stuck point (VALUE truth test): !v tests a VALUE' "$work/api_value_not_decimal/REFUSALS.txt"
 check grep -qF '((64) * 146 / 485) + 1' "$work/api_value_not_decimal/src/api_value_not_decimal.c"
 check grep -qF 'mrb_symbol(sym)' "$work/api_value_not_decimal/src/api_value_not_decimal.c"
+# 2zzz157. --thread-sync: the work run without the GVL is a direct call on the calling thread (mruby has no GVL to release); the
+# header is the synchronous model, and the gem has no mruby-uv dependency (the rake file has no add_dependency line for it).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_thread_sync --thread-sync tools/cext2mrbgem/fixtures/api_thread_sync/ext/api_thread_sync "$work/api_thread_sync" > "$work/api_thread_sync.log" 2>&1 || rc=$?
+check grep -qF 'return fn(data);' "$work/api_thread_sync/include/nfcx_uv_thread.h"
+check test "$(grep -c 'uv\.h\|uv_queue_work\|uv_run' "$work/api_thread_sync/include/nfcx_uv_thread.h")" -eq 0
+check test "$(grep -c 'mruby-uv' "$work/api_thread_sync/mrbgem.rake")" -eq 0
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?

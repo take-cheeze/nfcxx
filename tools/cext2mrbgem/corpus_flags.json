@@ -88,6 +88,7 @@
     "--rename",
     "crypt_r=nfcx_crypt_r",
     "--replace",
-    "nfcx_crypt_r(const char *key, const char *setting, struct crypt_data *data)=nfcx_crypt_r(const char *key, const char *setting, void *data)"
+    "nfcx_crypt_r(const char *key, const char *setting, struct crypt_data *data)=nfcx_crypt_r(const char *key, const char *setting, void *data)",
+    "--thread-sync"
   ]
 }
