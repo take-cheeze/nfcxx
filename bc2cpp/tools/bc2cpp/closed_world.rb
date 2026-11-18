@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'regexp_matches'
 require 'set'
 require_relative 'compiled_gems'
 require_relative 'bytecode_ir'
@@ -1064,7 +1065,7 @@ class ClosedWorld
     text = File.binread(path).gsub(%r{/\*.*?\*/|//[^\n]*}m, ' ')
     blanked = text.gsub(/"((?:[^"\\\n]|\\.)*)"/) { |lit| '"' + ' ' * (lit.size - 2) + '"' }
     symbols = nil
-    blanked.to_enum(:scan, /\b#{Regexp.escape(fn)}\b/).map { Regexp.last_match }.all? do |m|
+    RegexpMatches.of(blanked, /\b#{Regexp.escape(fn)}\b/).all? do |m|
       # A member access (`x.fn(`, `x->fn(`) is not a call to a free helper.
       next true if m.begin(0).positive? && text[0...m.begin(0)].match?(/(?:\.|->)\s*\z/)
       # A symbol spelled by a macro (MRB_SYM(fn)) names the method, not the function.
@@ -1284,12 +1285,12 @@ class ClosedWorld
     blanked = text.gsub(/"((?:[^"\\\n]|\\.)*)"/) { |lit| '"' + ' ' * (lit.size - 2) + '"' }
                   .gsub(/MRB_(?:OP)?SYM\w*\(\s*\w+\s*\)/, ' ')
     dispatched = Hash.new(0)
-    text.to_enum(:scan, NATIVE_DISPATCH_CALL).map { Regexp.last_match }.each do |md|
+    RegexpMatches.of(text, NATIVE_DISPATCH_CALL).each do |md|
       arg = bc2cpp_c_call_args(md[1])[2].to_s.strip
       dispatched[arg] += 1 if arg.match?(/\A\w+\z/)
     end
     symbols = {}
-    text.to_enum(:scan, NATIVE_LOCAL_SYMBOL).map { Regexp.last_match }.each do |md|
+    RegexpMatches.of(text, NATIVE_LOCAL_SYMBOL).each do |md|
       name = md[1]
       branches = ternary_values(md[2])
       next unless branches.all? { |b| b.match?(NATIVE_NO_NAME) || b.match?(NATIVE_SPELLED_NAME) }
@@ -1307,7 +1308,7 @@ class ClosedWorld
   # dispatch whose enclosing function does not declare +param+ (a lambda, a macro) answers nil and stays open.
   NATIVE_DEFINITION = /(?<!\w)(?!(?:if|for|while|switch|catch|return|sizeof)\b)(\w+)\s*\(([^()]*)\)\s*(?:const\s*)?\{/
   def self.native_helper_param(text, at, param)
-    defn = text[0...at].to_enum(:scan, NATIVE_DEFINITION).map { Regexp.last_match }.last
+    defn = RegexpMatches.of(text[0...at], NATIVE_DEFINITION).last
     return nil unless defn
 
     params = defn[2].split(',').map(&:strip)
@@ -1334,7 +1335,7 @@ class ClosedWorld
     end
     symbols = native_local_symbols(text)
     helpers = Set.new
-    text.to_enum(:scan, NATIVE_DISPATCH_CALL).map { Regexp.last_match }.each do |md|
+    RegexpMatches.of(text, NATIVE_DISPATCH_CALL).each do |md|
       # The method name is enumerable when it is spelled out (a literal, a MRB_SYM / MRB_OPSYM, an interned literal,
       # a local bound to one of those, or a ternary between them); anything else is computed and could be `include`.
       name_arg = bc2cpp_c_call_args(md[1])[2].to_s.strip
@@ -1524,7 +1525,7 @@ class ClosedWorld
     values = head[:words] ? head[:words].split : loop_literal_names(text, head[:const])
     return nil unless values && !values.empty? && values.all? { |v| v.match?(/\A\w+\z/) }
 
-    args = body.to_enum(:scan, RUBY_DEFINER_ARG).map { Regexp.last_match }
+    args = RegexpMatches.of(body, RUBY_DEFINER_ARG)
     return nil unless args.size == dyn
 
     names = args.flat_map do |arg|
@@ -1566,7 +1567,7 @@ class ClosedWorld
     core = CoreDefs.core_source?(path)
 
     # DYNAMIC_NAME_LOOPS: every dynamic definer is either inside a loop this file enumerates exactly, or unresolved.
-    loops = text.to_enum(:scan, RUBY_LOOP_HEAD).map { Regexp.last_match }.map { |head| definer_loop(text, head) }
+    loops = RegexpMatches.of(text, RUBY_LOOP_HEAD).map { |head| definer_loop(text, head) }
     covered = loops.compact.sum { |loop| loop[:dyn] }
     dynamic_total = text.scan(RUBY_DYNAMIC).size + text.scan(RUBY_DYNAMIC_SYMBOL).size
     dynamic_unresolved = covered != dynamic_total

@@ -29,6 +29,7 @@
 #
 # An exclusion macro names (MRB_MT_CLASS, name), shared by every table of that class (its singleton's too), so a
 # key is listed only when each entry it names is a candidate: in a table whose install target is MRB_MT_CLASS itself.
+require_relative 'regexp_matches'
 require 'set'
 require 'tmpdir'
 require_relative 'native_rom_owners'
@@ -154,10 +155,10 @@ module CoreNativeCandidates
     return text if text.match?(/\\[\r\n]|%:|\?\?/)
     clean = StaticDispatchRegistrations.strip_c_comments(text)
     return text if clean.match?(/^\s*#\s*(?:define|undef)\s+(?:domain_error|mrb_raisef|mrb_module_get_id|mrb_class_get_under_id)\b/)
-    definitions = clean.to_enum(:scan, DOMAIN_ERROR).map { Regexp.last_match }
+    definitions = RegexpMatches.of(clean, DOMAIN_ERROR)
     return text unless definitions.size == 1 && definitions[0][1].gsub(/\s+/, '') == DOMAIN_ERROR_BODY
 
-    calls = clean.to_enum(:scan, DOMAIN_ERROR_CALL).map { Regexp.last_match }
+    calls = RegexpMatches.of(clean, DOMAIN_ERROR_CALL)
     return text unless clean.scan(/\bdomain_error\b/).size == calls.size + 1
     return text if calls.any? { |call| clean[0...call.begin(0)].rstrip.end_with?('.', ':', '>') }
 
@@ -207,8 +208,8 @@ module CoreNativeCandidates
 
   # [path, the definition's text without blanks] of each `void name(mrb_state ...) { ... }` in `text`.
   def label_definitions(path, text, name)
-    text.to_enum(:scan, /\bvoid\s+#{name}\s*\(\s*mrb_state[^()]*\)\s*\{/).map do
-      start = Regexp.last_match.begin(0)
+    RegexpMatches.of(text, /\bvoid\s+#{name}\s*\(\s*mrb_state[^()]*\)\s*\{/).map do |m|
+      start = m.begin(0)
       depth = 0
       close = (start...text.size).find do |i|
         depth += 1 if text[i] == '{'
@@ -709,8 +710,7 @@ module CoreNativeCandidates
       text = File.binread(path).force_encoding(Encoding::UTF_8).scrub
       next [] unless text.include?('MRB_MT_ENTRY') && text.include?('MRB_MT_CLASS')
 
-      marks = text.to_enum(:scan, /^[ \t]*#[ \t]*(define|undef)[ \t]+MRB_MT_CLASS\b[ \t]*(\w*)/).map do
-        m = Regexp.last_match
+      marks = RegexpMatches.of(text, /^[ \t]*#[ \t]*(define|undef)[ \t]+MRB_MT_CLASS\b[ \t]*(\w*)/).map do |m|
         [m.begin(0), m[1] == 'define' ? m[2] : nil]
       end
       marks.each_with_index.flat_map do |(from, token), i|

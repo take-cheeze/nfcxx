@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'regexp_matches'
 require 'set'
 
 # C_CALL_ROWS (closed only, the core rows run): a native names a method to a C call that finds a row where its entry
@@ -136,8 +137,8 @@ module CCallRows
   def sink_variable?(body, var, sinks, param: false, offsets: nil, proven: false)
     ok = (offsets || operand_offsets(body, sinks)).select { |from, to| body[from...to].strip == var }.to_set { |from, to| from + body[from...to].index(var) }
     # A NAME_LITERAL spelling the variable's own name (`mrb_sym included = MRB_SYM(included)`) is no use of it.
-    literals = body.to_enum(:scan, NAME_LITERAL).map { Regexp.last_match.begin(0)...Regexp.last_match.end(0) }
-    uses = body.to_enum(:scan, /(?<![\w.>"])#{Regexp.escape(var)}\b/).map { Regexp.last_match.begin(0) }
+    literals = RegexpMatches.of(body, NAME_LITERAL).map { |m| m.begin(0)...m.end(0) }
+    uses = RegexpMatches.of(body, /(?<![\w.>"])#{Regexp.escape(var)}\b/).map { |m| m.begin(0) }
     uses.reject! { |at| literals.any? { |span| span.cover?(at) } }
     return false if uses.empty?
 
