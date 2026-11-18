@@ -26,5 +26,9 @@ if [ $st != 0 ] && [ "$(left)" = 0 ]; then pass=$((pass + 1)); else fail=$((fail
 NFCXX_BACKEND=gcc "$repo/nfcxx" -o m m.c a.o >/dev/null 2>&1; st=$?
 if [ $st = 0 ] && ./m && [ "$(left)" = 0 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL link leaves the C directory (status $st, left $(left))"; fi
 
+# the gcc-cc wrapper (scripts/gcc-cc.rb) runs under the link: its directory is removed too, and the link's status is kept
+NFCXX_BACKEND=gcc "$repo/nfcxx" -o m m.c a.o >/dev/null 2>&1; st=$?
+if [ $st = 0 ] && ./m && [ -z "$(ls -A "$tdir" 2>/dev/null)" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL gcc-cc leaves a directory after the link (status $st)"; fi
+
 echo "driver-ctmp-cleanup: $pass passed, $fail failed"
 [ $fail = 0 ]

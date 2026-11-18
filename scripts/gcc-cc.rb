@@ -59,6 +59,18 @@ ccbin = on_path?("ccache") && ENV["NFCXX_CCACHE"] != "0" ? ["ccache", CC] : [CC]
 tmp = Dir.mktmpdir("gcc-cc")
 at_exit { FileUtils.rm_rf(tmp) }
 
+# Runs the command and exits with its status. exec would replace this process, and the at_exit above (which removes the
+# temporary directory) would never run; the child's status is passed on, and a signal is reported as 128 + its number.
+def run_and_exit(*cmd)
+  ok = system(*cmd)
+  if ok.nil?
+    warn "gcc-cc: cannot run #{cmd.first}: #{$!&.message || "not found"}"
+    exit 127
+  end
+  st = $?
+  exit(st.exitstatus || (128 + st.termsig))
+end
+
 argv = ARGV.dup
 args = []
 n = 0
@@ -149,6 +161,6 @@ if compile && !csrc.empty? && File.file?(csrc) && !obj.empty?
   end
   run!(*ccbin, *build)
   run!(File.join(ROOT, "scripts", "weak-symbols.rb"), csrc, asmf)
-  exec(ENV["NFCXX_AS"] || "as", "-o", obj, asmf)
+  run_and_exit(ENV["NFCXX_AS"] || "as", "-o", obj, asmf)
 end
-exec(*ccbin, *args)
+run_and_exit(*ccbin, *args)
