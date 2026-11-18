@@ -3567,6 +3567,16 @@ use_problem = lambda do |name, use|
     return if names.empty?
     @files.each_key do |rel|
       mv = @files[rel]['masked']
+      # every use of an rb_encoding * variable as a value (passed to an encoding call, or stored in a VALUE array such as
+      # (mrb_value[]){enc}) is the Encoding stuck point; its declaration (rb_encoding *enc;) is not a use
+      names.each do |nm|
+        mv.to_enum(:scan, /(?<![#{WC}.>$])#{Regexp.escape(nm)}(?![#{WC}])/).each do
+          m = Regexp.last_match
+          pre = mv[0...m.begin(0)]
+          next if pre.match?(/\brb_encoding\s*\*\s*\z/) && mv[m.end(0)..].to_s.match?(/\A\s*[;,\[=)]/)
+          refuse(rel, m.begin(0), nm, "stuck point (Encoding): #{nm} is an rb_encoding * (the encoding pointer of CRuby), used as a value; the fork has no Encoding (accepted stuck point)")
+        end
+      end
       mv.to_enum(:scan, /(?<![#{WC}])([A-Za-z_]\w*(?:\s*(?:->|\.)\s*[A-Za-z_]\w*)*)\s*=(?!=)\s*(rb_enc_get)\s*\(/).each do
         m = Regexp.last_match
         field = m[1].split(/\s*(?:->|\.)\s*/).last
@@ -3812,9 +3822,10 @@ use_problem = lambda do |name, use|
       # a struct pointer carried in a VALUE: (VALUE)pi, where pi is declared as a struct pointer (CRuby passes such a pointer as
       # the data of rb_protect, rb_ensure, rb_hash_foreach)
       ptr_names = Set.new
-      ptr_re = ptr_typedefs.empty? ? /struct\s+[A-Za-z_]\w*\s*\*+\s*([A-Za-z_]\w*)/ :
-               /(?:struct\s+[A-Za-z_]\w*\s*\*+|\b(?:#{ptr_typedefs.to_a.map { |t| Regexp.escape(t) }.join('|')})\b\s*\**)\s*([A-Za-z_]\w*)/
-      mv.to_enum(:scan, ptr_re).each { ptr_names << Regexp.last_match(1) }
+      # a void * is a pointer too (a callback's context, carried in a VALUE by CRuby: GetParser((VALUE)ctx, ...))
+      ptr_re = ptr_typedefs.empty? ? /(?:struct\s+[A-Za-z_]\w*|void)\s*\*+\s*([A-Za-z_]\w*)/ :
+               /(?:struct\s+[A-Za-z_]\w*|void)\s*\*+\s*([A-Za-z_]\w*)|\b(?:#{ptr_typedefs.to_a.map { |t| Regexp.escape(t) }.join('|')})\b\s*\**\s*([A-Za-z_]\w*)/
+      mv.to_enum(:scan, ptr_re).each { ptr_names << (Regexp.last_match(1) || Regexp.last_match(2)) }
       mv.to_enum(:scan, /\(\s*(?:VALUE|mrb_value)\s*\)\s*([A-Za-z_]\w*)(?=\s*(?:[;,)\-.\[]|\z))/).each do
         m = Regexp.last_match
         nm = m[1]
@@ -6746,6 +6757,11 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       k += 1
     end
     return nil if e.nil?
+    # a preprocessor line (#if, #endif) between the boundary and the statement is not part of the statement: the span starts after it
+    dir = masked[st...pos].to_s.scan(/^[ \t]*#[^\n]*\n/).last
+    if dir
+      st = st + masked[st...pos].to_s.rindex(dir) + dir.length
+    end
     text = masked[st...e].to_s.strip
     return nil if text.match?(/\A(?:if|else|for|while|do|return|switch|case|goto)\b/)
     return nil if !allow_assign && text.match?(/(?<![=!<>])=(?!=)/)
@@ -6764,14 +6780,28 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       # a refusal in a #define body (a macro whose expansion refuses) is handled at each use of the macro: a use inside Init
       # is a statement dropped there, a use inside a function stubs that function (the uses are the refused uses)
       refs = refs.dup
-      refs.select { |r| r['pos'] && define_at(rel, r['pos']) }.each do |r|
-        name = define_at(rel, r['pos'])[0]
-        da, db = define_at(rel, r['pos'])[1], define_at(rel, r['pos'])[2]
+      # a use of a refused macro inside another macro's body is a use of that macro too: the chain is followed to the functions
+      # (or Init statements) that expand it
+      work = refs.select { |r| r['pos'] && define_at(rel, r['pos']) }
+      seen_macros = Set.new
+      until work.empty?
+        r = work.shift
+        dl = define_at(rel, r['pos'])
+        name, da, db = dl[0], dl[1], dl[2]
+        # every refusal in a macro body is handled by its uses (the first refusal of a macro expands them; the others are the same)
+        @stubbed << [rel, r['line']]
+        next if seen_macros.include?(name)
+        seen_macros << name
         uses = (@occ[name] || []).reject { |rr, os, _oe| rr == rel && da <= os && os < db }
         next if uses.empty?
         uses.each do |rr, os, _oe|
           next unless rr == rel
-          refs << r.merge('line' => line_of(text, os), 'pos' => os, 'api' => name)
+          rec = r.merge('line' => line_of(text, os), 'pos' => os, 'api' => name)
+          if define_at(rel, os)
+            work << rec
+          else
+            refs << rec
+          end
         end
         @stubbed << [rel, r['line']]
         (@dropped_inits ||= Set.new) << [rel, r['line']] if uses.all? { |rr, os, _oe| rr == rel && init_defs.any? { |d| os >= d['brace'] && os <= d['body_end'] } }
