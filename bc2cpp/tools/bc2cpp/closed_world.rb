@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'regexp_matches'
 require 'set'
 require_relative 'compiled_gems'
 require_relative 'bytecode_ir'
@@ -153,6 +154,8 @@ class ClosedWorld
     @dynamic_visibility = false
     @rebound = Set.new
     @constant_write_counts = Hash.new(0)
+    # Struct.new(*MEMBERS, keyword_init: true) sites: their member names are checked after the scan (resolve_struct_splats).
+    @deferred_struct_splats = []
     @class_constant_names = Set.new
     # CLASS ops that declare a name (not the root-level reopen of native_class_unshadowed?).
     @class_declared_names = Set.new
@@ -1064,7 +1067,7 @@ class ClosedWorld
     text = File.binread(path).gsub(%r{/\*.*?\*/|//[^\n]*}m, ' ')
     blanked = text.gsub(/"((?:[^"\\\n]|\\.)*)"/) { |lit| '"' + ' ' * (lit.size - 2) + '"' }
     symbols = nil
-    blanked.to_enum(:scan, /\b#{Regexp.escape(fn)}\b/).map { Regexp.last_match }.all? do |m|
+    RegexpMatches.of(blanked, /\b#{Regexp.escape(fn)}\b/).all? do |m|
       # A member access (`x.fn(`, `x->fn(`) is not a call to a free helper.
       next true if m.begin(0).positive? && text[0...m.begin(0)].match?(/(?:\.|->)\s*\z/)
       # A symbol spelled by a macro (MRB_SYM(fn)) names the method, not the function.
@@ -1284,12 +1287,12 @@ class ClosedWorld
     blanked = text.gsub(/"((?:[^"\\\n]|\\.)*)"/) { |lit| '"' + ' ' * (lit.size - 2) + '"' }
                   .gsub(/MRB_(?:OP)?SYM\w*\(\s*\w+\s*\)/, ' ')
     dispatched = Hash.new(0)
-    text.to_enum(:scan, NATIVE_DISPATCH_CALL).map { Regexp.last_match }.each do |md|
+    RegexpMatches.of(text, NATIVE_DISPATCH_CALL).each do |md|
       arg = bc2cpp_c_call_args(md[1])[2].to_s.strip
       dispatched[arg] += 1 if arg.match?(/\A\w+\z/)
     end
     symbols = {}
-    text.to_enum(:scan, NATIVE_LOCAL_SYMBOL).map { Regexp.last_match }.each do |md|
+    RegexpMatches.of(text, NATIVE_LOCAL_SYMBOL).each do |md|
       name = md[1]
       branches = ternary_values(md[2])
       next unless branches.all? { |b| b.match?(NATIVE_NO_NAME) || b.match?(NATIVE_SPELLED_NAME) }
@@ -1307,7 +1310,7 @@ class ClosedWorld
   # dispatch whose enclosing function does not declare +param+ (a lambda, a macro) answers nil and stays open.
   NATIVE_DEFINITION = /(?<!\w)(?!(?:if|for|while|switch|catch|return|sizeof)\b)(\w+)\s*\(([^()]*)\)\s*(?:const\s*)?\{/
   def self.native_helper_param(text, at, param)
-    defn = text[0...at].to_enum(:scan, NATIVE_DEFINITION).map { Regexp.last_match }.last
+    defn = RegexpMatches.of(text[0...at], NATIVE_DEFINITION).last
     return nil unless defn
 
     params = defn[2].split(',').map(&:strip)
@@ -1334,7 +1337,7 @@ class ClosedWorld
     end
     symbols = native_local_symbols(text)
     helpers = Set.new
-    text.to_enum(:scan, NATIVE_DISPATCH_CALL).map { Regexp.last_match }.each do |md|
+    RegexpMatches.of(text, NATIVE_DISPATCH_CALL).each do |md|
       # The method name is enumerable when it is spelled out (a literal, a MRB_SYM / MRB_OPSYM, an interned literal,
       # a local bound to one of those, or a ternary between them); anything else is computed and could be `include`.
       name_arg = bc2cpp_c_call_args(md[1])[2].to_s.strip
@@ -1524,7 +1527,7 @@ class ClosedWorld
     values = head[:words] ? head[:words].split : loop_literal_names(text, head[:const])
     return nil unless values && !values.empty? && values.all? { |v| v.match?(/\A\w+\z/) }
 
-    args = body.to_enum(:scan, RUBY_DEFINER_ARG).map { Regexp.last_match }
+    args = RegexpMatches.of(body, RUBY_DEFINER_ARG)
     return nil unless args.size == dyn
 
     names = args.flat_map do |arg|
@@ -1566,7 +1569,7 @@ class ClosedWorld
     core = CoreDefs.core_source?(path)
 
     # DYNAMIC_NAME_LOOPS: every dynamic definer is either inside a loop this file enumerates exactly, or unresolved.
-    loops = text.to_enum(:scan, RUBY_LOOP_HEAD).map { Regexp.last_match }.map { |head| definer_loop(text, head) }
+    loops = RegexpMatches.of(text, RUBY_LOOP_HEAD).map { |head| definer_loop(text, head) }
     covered = loops.compact.sum { |loop| loop[:dyn] }
     dynamic_total = text.scan(RUBY_DYNAMIC).size + text.scan(RUBY_DYNAMIC_SYMBOL).size
     dynamic_unresolved = covered != dynamic_total
@@ -1715,6 +1718,7 @@ class ClosedWorld
         end
       end
     end
+    resolve_struct_splats
     # A read name (scan_factory) can run a definition the scan only finishes seeing here.
     global!(:class_factory_escape) unless @factory_read_names.all? { |name| ownerless_native_dispatch_safe?(name) }
   end
@@ -2061,6 +2065,11 @@ class ClosedWorld
       case const
       when 'Struct'
         @struct_factory_used = true
+        if struct_keyword_init?(call) && call.positional_splat?
+          @deferred_struct_splats << [irep, use, call]
+          next
+        end
+        argc = call.argc if struct_keyword_init?(call)
         return global!(:class_factory_escape) unless argc
 
         argc.times do |argument|
@@ -2081,6 +2090,72 @@ class ClosedWorld
 
         @dynamic_subclassed.merge(bases)
       end
+    end
+  end
+
+  # `Struct.new(:a, :b, keyword_init: true)`: the constructor's keyword only changes how instances are built, so the
+  # positional arguments are the members and the keyword defines nothing. Ruby rejects any other keyword for a Struct,
+  # so a single keyword with no keyword splat is accepted. The members may be a splat (see resolve_struct_splats).
+  def struct_keyword_init?(call)
+    call.keyword_arguments? && call.keyword_argc == 1 && !call.keyword_splat?
+  end
+
+  # `Struct.new(*MEMBERS, keyword_init: true)`: mruby takes a call with more than 14 positional arguments and a keyword
+  # for a block, so the members are packed in a constant array. They are the symbols of MEMBERS when the program
+  # writes MEMBERS exactly once, in this body, as a literal `%i[...].freeze`. Anything else refuses the closed world.
+  def resolve_struct_splats
+    @deferred_struct_splats.each do |irep, use, call|
+      names = struct_splat_member_names(irep, use, call)
+      unless names
+        global!(:class_factory_escape)
+        next
+      end
+      names.each do |name|
+        note_unknown_def(name, nil)
+        note_unknown_def("#{name}=", nil)
+      end
+    end
+  end
+
+  def struct_splat_member_names(irep, use, call)
+    program = BytecodeIR.for(irep)
+    source_idx, source = sole_definition(irep, use, (call.reg + 1))
+    return nil unless source&.op == :ARYCAT
+
+    base = sole_definition(irep, source_idx, source.reg)&.last
+    return nil unless base&.op == :LOADNIL
+
+    _read_idx, read = sole_definition(irep, source_idx, source.regs[1])
+    return nil unless read&.op == :GETCONST
+
+    const = read.const_name.to_s
+    return nil unless @constant_write_counts[const] == 1 && !@deferred_constant_writes.include?(const)
+
+    setters = (0...program.size).select do |i|
+      writer = program.source_at(i)
+      writer.op == :SETCONST && writer.const_name.to_s == const
+    end
+    return nil unless setters.size == 1
+
+    value_idx, value = sole_definition(irep, setters.first, program.source_at(setters.first).regs.first)
+    return nil unless value&.op == :SEND0 && value.sym == 'freeze'
+
+    arr_idx, arr = sole_definition(irep, value_idx, value.reg)
+    return nil unless arr&.op == :ARRAY
+
+    literal = program.container_literal(arr_idx)
+    return nil unless literal&.kind == :array && literal.count.positive?
+
+    (0...literal.count).map do |offset|
+      _element_idx, writer = sole_definition(irep, arr_idx, (literal.base + offset))
+      # A %i[] element is a SYMBOL (its name is in the pool); a LOADSYM names it directly.
+      name = case writer&.op
+             when :LOADSYM then writer.sym_token
+             when :SYMBOL then irep.pool&.[](writer.pool_index.to_i)
+             end
+      return nil unless name.is_a?(String)
+
+      name
     end
   end
 

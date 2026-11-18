@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'regexp_matches'
 require_relative 'native_names'
 
 # NativeCallbacks: which Ruby method names a native method's C body can call back into, computed per registered
@@ -222,7 +223,7 @@ module NativeCallbacks
       body.code.scan(MRB_SYM_TOKEN_RE) { |m, n| callbacks << resolve_mrb_sym_token(m, n) }
       # A dispatch call names its method at run time unless the argument list spells the name. Such a call can reach
       # any method, which the literal tokens cannot bound, so the closure is incomplete.
-      body.code.to_enum(:scan, /\b(\w+)\s*\(/).map { Regexp.last_match }.each do |m|
+      RegexpMatches.of(body.code, /\b(\w+)\s*\(/).each do |m|
         next unless DISPATCH.match?(m[1])
 
         args = balanced_args(body.code, m.end(0) - 1)

@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'regexp_matches'
 require 'set'
 require_relative 'compiled_gems'
 require_relative 'send_names'
@@ -164,7 +165,7 @@ module TouchScan
     text = ClosedWorld.without_class_object_tables(text)
     events = []
     text.scan(NATIVE_SUPER_ASSIGN) { events << ['super', nil, 'direct ->super assignment'] }
-    text.to_enum(:scan, NATIVE_EVENT).map { Regexp.last_match }.each do |m|
+    RegexpMatches.of(text, NATIVE_EVENT).each do |m|
       next if native_declarator?(text, m.begin(0), m.end(0))
 
       args = bc2cpp_c_call_args(text[m.end(0)..])
@@ -243,7 +244,7 @@ module TouchScan
 
     blanked = text.gsub(/"((?:[^"\\\n]|\\.)*)"/) { |lit| '"' + ' ' * (lit.size - 2) + '"' }
     names = []
-    blanked.to_enum(:scan, /\b#{Regexp.escape(fn)}\b/).map { Regexp.last_match }.each do |use|
+    RegexpMatches.of(blanked, /\b#{Regexp.escape(fn)}\b/).each do |use|
       open = blanked[use.end(0)..][/\A\s*\(/] or return nil # a pointer to the function could pass any name
       start = use.end(0) + open.size
       next if native_declarator?(text, use.begin(0), start)
