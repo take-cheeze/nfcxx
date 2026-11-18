@@ -124,12 +124,9 @@ path_b=0; [ "${NFCXX_PATH:-}" != b ] || path_b=1                        # --back
 ir_opt_set=0; ir_opt=""; if [ -n "${NFCXX_IR_OPT+x}" ]; then ir_opt_set=1; ir_opt=$NFCXX_IR_OPT; fi   # --ir-opt=LIST
 eh_unwind_on=0; [ "${NFCXX_EH_UNWIND:-}" != 1 ] || eh_unwind_on=1       # --eh-unwind
 eh_shim_on=1; [ "${NFCXX_EHSHIM:-1}" != 0 ] || eh_shim_on=0             # --no-eh-shim
-cache_dir=${NFCXX_CACHE:-}; cache_log_file=${NFCXX_CACHE_LOG:-}         # --cache=DIR, --cache-log=FILE
-# NFCXX_CACHE_REMOTE=gha: each stored object is also kept in the GitHub Actions cache, and a local miss is looked up there
-# (scripts/nfcxx-cache-gha.rb; docs/notes/cxx-driver.md). Without NFCXX_CACHE the local side is a temporary directory.
-cache_remote=${NFCXX_CACHE_REMOTE:-}
-case $cache_remote in ""|gha) ;; *) echo "nfcxx: NFCXX_CACHE_REMOTE takes gha (got '$cache_remote')" >&2; exit 2 ;; esac
-[ -n "$cache_dir" ] || [ -z "$cache_remote" ] || cache_dir=${TMPDIR:-/tmp}/nfcxx-cache-$(id -u)
+# --cache=DIR, --cache-log=FILE, NFCXX_CACHE_REMOTE=gha: cache_dir, cache_log_file, cache_remote (scripts/nfcxx-cache-config.rb plan)
+cfg_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cache-config.rb" plan) || exit $?
+eval "$cfg_sh"
 keep_intermediates=0; [ "${NFCXX_KEEP_INTERMEDIATES:-}" != 1 ] || keep_intermediates=1   # --keep-intermediates
 time_log=${NFCXX_TIME_LOG:-}                                            # --time-log=FILE
 instantiate=${NFCXX_INSTANTIATE:-used}                                  # --instantiate=used|auto
@@ -395,13 +392,7 @@ if [ $preprocess = 1 ]; then
   exec "$hostcxx" -E "-std=${std#--}" ${pp_x[@]+${pp_x[@]+"${pp_x[@]}"}} ${ppflags[@]+${ppflags[@]+"${ppflags[@]}"}} ${cflags[@]+${cflags[@]+"${cflags[@]}"}} \
     ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"} ${pp_pre[@]+${pp_pre[@]+"${pp_pre[@]}"}} ${srcs[@]+${srcs[@]+"${srcs[@]}"}} ${pp_in[@]+${pp_in[@]+"${pp_in[@]}"}} ${pp_out[@]+"${pp_out[@]}"}
 fi
-if [ $stdin_src = 1 ]; then
-  echo "nfcxx: a source on stdin is supported only with -E" >&2; exit 2
-fi
-case $xlang in ""|c++|none) ;; *) echo "nfcxx: -x $xlang: only C++ sources (use nfcc for C)" >&2; exit 2 ;; esac
-if [ -n "$depmode" ] && [ $compile_only = 0 ]; then
-  echo "nfcxx: $depmode needs -c (dependency files are written for a compile only)" >&2; exit 2
-fi
+"${RUBY:-ruby}" "$root/scripts/nfcxx-argchecks.rb" check stdin_src="$stdin_src" xlang="$xlang" depmode="$depmode" compile_only="$compile_only" || exit $?   # the refusals (scripts/nfcxx-argchecks.rb)
 if [ $ncpp -gt 0 ] || [ $emit_c = 1 ] || { [ $nobj -gt 0 ] && [ ${#cfiles[@]} = 0 ]; }; then
   [ -x "$edg/eccp" ] || { echo "nfcxx: EDG not built; run scripts/setup-edg.sh" >&2; exit 2; }
 fi
@@ -439,16 +430,9 @@ eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-backend.rb" default backend="$backe
 # -fsanitize=address: gcc's instrumentation on the gcc backend. Both link libasan. Path B calls
 # libasan's checks before each access (scripts/pathb-cc.rb --asan, passed below once the backend is final); the default backend gets it too (docs/notes/asan-plan.md; a program Path B does not build falls back to gcc).
 asan_c=()   # options for every C compile and link of the program
-if [ $asan = 1 ]; then
-  case $backend in
-    gcc) ;;
-    pathb) ;;
-    *) echo "nfcxx: -fsanitize=address: unknown backend $backend" >&2; exit 2 ;;
-  esac
-  asan_c=(-fsanitize=address -fno-omit-frame-pointer ${asanopts[@]+${asanopts[@]+"${asanopts[@]}"}})
-else
-  asanopts=()
-fi
+# the ASan options and the backend check (scripts/nfcxx-asan-c.rb plan): a refused backend ends the driver with 2
+asan_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-asan-c.rb" plan asan="$asan" backend="$backend" ${asanopts[@]+"${asanopts[@]/#/asanopts=}"}) || exit $?
+eval "$asan_sh"
 
 # C inputs: a .c file does not go through EDG. It is compiled to an object file by the backend's C compiler
 # (gcc: gcc -O2 -fwrapv
@@ -857,25 +841,16 @@ link_records_rm
 # output has an instance of one of them (nm -C), the build runs again with those symbols (NFCXX_CUDA_HOST_SYMBOLS), and
 # the device rewrite makes each instance's entry. A unit whose templates are instantiated by other units (fattn.cu)
 # has none, and builds once. One .cu input only: the symbols of two units' static kernels could not be told apart.
-if [ ${#cu_inputs[@]} = 1 ] && [ -z "${NFCXX_CUDA_HOST_SYMBOLS:-}" ] && [ $preprocess = 0 ] && [ -f "$out" ] \
-   && [ -s "$cudatmp/$(basename "${cu_inputs[0]}" .cu).dev.kernels.unresolved" ]; then
-  hsyms=$cudatmp/host.syms
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-second-pass.rb" host-symbols "$out" "$hsyms" || true   # nm -C, the _INTERNAL_ scopes removed
-  # the unresolved kernels that the host symbols define: scripts/nfcxx-second-pass.rb found (B7)
-  found=$("${RUBY:-ruby}" "$root/scripts/nfcxx-second-pass.rb" found "$hsyms" "$cudatmp/$(basename "${cu_inputs[0]}" .cu).dev.kernels.unresolved")
-  if [ $found = 1 ]; then
-    t=$(trace_start)
-    # (the second pass is not cached: the --cache option is left out, and NFCXX_CACHE emptied)
-    args2=(); for a in "${args0[@]}"; do case $a in --cache=*) ;; *) args2+=("$a") ;; esac; done
-    "${RUBY:-ruby}" "$root/scripts/nfcxx-second-pass.rb" rerun "$root" "$hsyms" ${args2[@]+"${args2[@]}"} || exit $?   # the re-run (scripts/nfcxx-second-pass.rb)
-    trace_end "$t" "second pass (kernel instances from the host compile)" eccp
-  fi
+eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-second-pass.rb" plan "$out" "$cudatmp" "${#cu_inputs[@]}" "${cu_inputs[0]-}" "$preprocess" "${NFCXX_CUDA_HOST_SYMBOLS-}" ${args0[@]+"${args0[@]}"})"   # the gate, host symbols, found and args2 (plan); not cached
+if [ $sp_run = 1 ]; then
+  t=$(trace_start)
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-second-pass.rb" rerun "$root" "$hsyms" ${args2[@]+"${args2[@]}"} || exit $?   # the re-run (scripts/nfcxx-second-pass.rb)
+  trace_end "$t" "second pass (kernel instances from the host compile)" eccp
 fi
 cache_store "$out"
 if [ -n "$depmode" ]; then
   # -MD/-MMD (with -MF/-MT/-MQ/-MP): the host preprocessor writes the dependency file, as nfcc does for C.
-  df=${dfile:-${out%.*}.d}; tgt=${dtarget:-$out}
-  mflag=-M; [ "$depmode" = -MMD ] && mflag=-MM
-  "${NFCXX_CXX:-g++}" $mflag $depphony -MT "$tgt" -MF "$df" "-std=${std#--}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} \
-    ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"} ${srcs[@]+${srcs[@]+"${srcs[@]}"}}
+  dep_cmd=(); while IFS= read -r -d '' dep_w; do dep_cmd+=("$dep_w"); done < <("${RUBY:-ruby}" "$root/scripts/nfcxx-depmode.rb" plan depmode="$depmode" out="$out" std="$std" cxx="${NFCXX_CXX:-}" dfile="$dfile" dtarget="$dtarget" depphony="$depphony" ${cflags[@]+"${cflags[@]/#/cflags=}"} ${sysdirs[@]+"${sysdirs[@]/#/sysdirs=}"} ${srcs[@]+"${srcs[@]/#/srcs=}"})   # the command: scripts/nfcxx-depmode.rb
+  [ ${#dep_cmd[@]} -gt 0 ] || exit 1
+  "${dep_cmd[@]}"
 fi
