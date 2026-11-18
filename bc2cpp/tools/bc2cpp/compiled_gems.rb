@@ -840,11 +840,17 @@ module Bc2cppCompiledGemGeneration
 
   module_function
 
+  # Rake's sh (the environment first, nil unsets a variable): echo the command, run it, raise on failure. Written here
+  # rather than mixed in from Rake::FileUtilsExt, which would make the compiler's closed world refuse on a gem module.
+  def run_sh(env, command)
+    warn command
+    raise "Command failed with status (#{$?.exitstatus}): [#{command}]" unless system(env, command)
+  end
+
   def generate(spec, gems_root)
     require 'rake'
     require 'json'
     require_relative 'shared_generation'
-    extend Rake::FileUtilsExt unless singleton_class.include?(Rake::FileUtilsExt)
     _, _, generated = bc2cpp_compiled_gem_job(spec, gems_root)
     @mutex.synchronize do
       next if @done[generated]
@@ -892,7 +898,7 @@ module Bc2cppCompiledGemGeneration
 
     if group.size == 1
       group.each do |env, _, generated|
-        sh env.merge(gc_env), "#{launcher} #{srcs.map(&:shellescape).join(' ')} > #{generated.shellescape}"
+        run_sh env.merge(gc_env), "#{launcher} #{srcs.map(&:shellescape).join(' ')} > #{generated.shellescape}"
       end
     else
       plan = "#{group.first[2]}.units.json"
@@ -900,7 +906,7 @@ module Bc2cppCompiledGemGeneration
         { 'env' => env.slice(*SharedGeneration::UNIT_KEYS), 'out' => generated, 'err' => "#{generated}.stderr" }
       end
       File.write(plan, JSON.generate(units))
-      sh common.merge(SharedGeneration::UNIT_KEYS.to_h { |k| [k, nil] }, gc_env),
+      run_sh common.merge(SharedGeneration::UNIT_KEYS.to_h { |k| [k, nil] }, gc_env),
          "#{launcher} #{SharedGeneration::FLAG} #{plan.shellescape} " \
          "#{srcs.map(&:shellescape).join(' ')}"
       FileUtils.rm_f([plan, *units.map { |unit| unit['err'] }])
