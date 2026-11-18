@@ -841,19 +841,11 @@ link_records_rm
 # output has an instance of one of them (nm -C), the build runs again with those symbols (NFCXX_CUDA_HOST_SYMBOLS), and
 # the device rewrite makes each instance's entry. A unit whose templates are instantiated by other units (fattn.cu)
 # has none, and builds once. One .cu input only: the symbols of two units' static kernels could not be told apart.
-if [ ${#cu_inputs[@]} = 1 ] && [ -z "${NFCXX_CUDA_HOST_SYMBOLS:-}" ] && [ $preprocess = 0 ] && [ -f "$out" ] \
-   && [ -s "$cudatmp/$(basename "${cu_inputs[0]}" .cu).dev.kernels.unresolved" ]; then
-  hsyms=$cudatmp/host.syms
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-second-pass.rb" host-symbols "$out" "$hsyms" || true   # nm -C, the _INTERNAL_ scopes removed
-  # the unresolved kernels that the host symbols define: scripts/nfcxx-second-pass.rb found (B7)
-  found=$("${RUBY:-ruby}" "$root/scripts/nfcxx-second-pass.rb" found "$hsyms" "$cudatmp/$(basename "${cu_inputs[0]}" .cu).dev.kernels.unresolved")
-  if [ $found = 1 ]; then
-    t=$(trace_start)
-    # (the second pass is not cached: the --cache option is left out, and NFCXX_CACHE emptied)
-    args2=(); for a in "${args0[@]}"; do case $a in --cache=*) ;; *) args2+=("$a") ;; esac; done
-    "${RUBY:-ruby}" "$root/scripts/nfcxx-second-pass.rb" rerun "$root" "$hsyms" ${args2[@]+"${args2[@]}"} || exit $?   # the re-run (scripts/nfcxx-second-pass.rb)
-    trace_end "$t" "second pass (kernel instances from the host compile)" eccp
-  fi
+eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-second-pass.rb" plan "$out" "$cudatmp" "${#cu_inputs[@]}" "${cu_inputs[0]-}" "$preprocess" "${NFCXX_CUDA_HOST_SYMBOLS-}" ${args0[@]+"${args0[@]}"})"   # the gate, host symbols, found and args2 (plan); not cached
+if [ $sp_run = 1 ]; then
+  t=$(trace_start)
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-second-pass.rb" rerun "$root" "$hsyms" ${args2[@]+"${args2[@]}"} || exit $?   # the re-run (scripts/nfcxx-second-pass.rb)
+  trace_end "$t" "second pass (kernel instances from the host compile)" eccp
 fi
 cache_store "$out"
 if [ -n "$depmode" ]; then
