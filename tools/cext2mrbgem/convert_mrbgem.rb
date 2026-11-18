@@ -6120,7 +6120,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         refuse(rel, s, name, "target #{py_repr(tgt)} is not a tracked class or module variable")
         return
       end
-      new = { 'rb_define_method' => 'mrb_define_method', 'rb_define_private_method' => 'mrb_define_private_method',
+      new = { 'rb_define_method' => 'mrb_define_method', 'rb_define_private_method' => 'mrb_define_method',
               'rb_define_singleton_method' => 'mrb_define_class_method',
               'rb_define_module_function' => 'mrb_define_module_function',
               'rb_define_global_function' => 'mrb_define_module_function' }[name]
@@ -6908,6 +6908,14 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     # a header that names the state or the mruby API (a converted prototype or callback type) needs the mruby headers before it
     mrb_header_names = @files.keys.select { |r| @files[r]['kind'] != 'src' && outputs[r].to_s.match?(/\bmrb_|\bmrb_state\b/) }
                              .map { |r| File.basename(r) }
+    # <math.h> came with CRuby's ruby.h (signbit, isnan, INFINITY, ...): a source that uses its names includes it
+    math_names = /(?<![\w$])(?:signbit|isnan|isinf|isfinite|fabs|floor|ceil|pow|sqrt|NAN|INFINITY|HUGE_VAL)(?![\w$])/
+    @files.each do |rel, f|
+      next unless f['kind'] == 'src'
+      next if outputs[rel].to_s.match?(/#\s*include\s*[<"]math\.h[>"]/)
+      next unless outputs[rel].to_s.match?(math_names)
+      outputs[rel] = "#include <math.h>\n" + outputs[rel]
+    end
     @files.each do |rel, f|
       next unless f['kind'] == 'src'
       t = outputs[rel]

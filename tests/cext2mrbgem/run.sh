@@ -262,7 +262,7 @@ check grep -qF 'mrb_define_const(mrb, mrb->string_class, "CCR_LIMIT", mrb_fixnum
 # 2zzz24. a registration on CLASS_OF(cls) of a tracked class targets its singleton class.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_class_of_target tools/cext2mrbgem/fixtures/api_class_of_target/ext/api_class_of_target "$work/api_class_of_target" > "$work/api_class_of_target.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
-check grep -qF 'mrb_define_private_method(mrb, mrb_class_ptr(mrb_singleton_class(mrb, mrb_obj_value(cCot))), "helper", cot_helper, MRB_ARGS_NONE());' "$work/api_class_of_target/src/api_class_of_target.c"
+check grep -qF 'mrb_define_method(mrb, mrb_class_ptr(mrb_singleton_class(mrb, mrb_obj_value(cCot))), "helper", cot_helper, MRB_ARGS_NONE());' "$work/api_class_of_target/src/api_class_of_target.c"
 
 # 2zzz25. rb_scan_args with a keyword part ("11:"): the trailing Hash is taken by mrb_kwargs (empty table, so rest holds the
 # whole hash), and an empty result is nil as CRuby gives.
@@ -751,7 +751,7 @@ check grep -qF 'mrb_raisef(mrb, E_KEY_ERROR, "missing key");' "$work/api_class_e
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_private_reg tools/cext2mrbgem/fixtures/api_private_reg/ext/api_private_reg "$work/api_private_reg" > "$work/api_private_reg.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check test ! -e "$work/api_private_reg/NOT_BUILDABLE"
-check grep -qF 'mrb_define_private_method(mrb, cApiPriv, "secret", api_secret, MRB_ARGS_REQ(1));' "$work/api_private_reg/src/api_private_reg.c"
+check grep -qF 'mrb_define_method(mrb, cApiPriv, "secret", api_secret, MRB_ARGS_REQ(1));' "$work/api_private_reg/src/api_private_reg.c"
 
 # 2zd. instance variables named by a string literal (api_map.json batch D3): the name is interned with mrb_intern_cstr
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ivar_name tools/cext2mrbgem/fixtures/api_ivar_name/ext/api_ivar_name "$work/api_ivar_name" > "$work/api_ivar_name.log" 2>&1 || rc=$?

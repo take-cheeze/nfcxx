@@ -1761,7 +1761,7 @@
       "kind": "special",
       "handler": "define_method",
       "needs_mrb": true,
-      "caveat": "registers a private method: the same wrapper and argument spec as rb_define_method (mrb_define_private_method has the same shape); the method is callable only without a receiver, as in CRuby"
+      "caveat": "registers a method as rb_define_method does: the fork has no private visibility (no mrb_define_private_method), so the method is also callable with an explicit receiver; a visibility difference from CRuby, noted here"
     },
     "rb_iv_get": {
       "kind": "call",
@@ -2691,6 +2691,9 @@
     "DECIMAL_SIZE_OF_BITS": {"kind": "template", "arity": 1, "template": "((($0) * 146 / 485) + 1)", "caveat": "CRuby's DECIMAL_SIZE_OF_BITS(n) is the number of decimal digits that n bits can need: (n * 146 / 485) + 1 (CRuby's util headers; pure arithmetic)"},
     "rb_enc_interned_str_cstr": {"kind": "template", "arity": 2, "needs_mrb": true, "ignored_args": [1], "template": "mrb_str_new_cstr($m, $0)", "caveat": "CRuby's rb_enc_interned_str_cstr(cstr, enc) is an interned string in the encoding enc; mruby strings carry no encoding (the default is UTF-8 here), so the encoding argument is ignored and the string is a plain mruby string"},
     "RUBY_API_VERSION_CODE": {"kind": "expr", "mruby": "20200", "caveat": "the CRuby API version the gem emulates: 2.2 (20200), by the user's decision (fast_blank: CRuby 2.2 or later, so U+180E is not whitespace). The build also defines it (--define RUBY_API_VERSION_CODE=20200), which selects the #ifndef branches"},
+    "STRNCASECMP": {"kind": "expr", "mruby": "strncasecmp", "caveat": "CRuby's STRNCASECMP (ruby/util.h) is the C library's strncasecmp (its name, as a macro value)"},
+    "STRTOUL": {"kind": "call", "mruby": "strtoul", "caveat": "CRuby's STRTOUL (ruby/util.h) is the C library's strtoul"},
+    "ENCODING_GET_INLINED": {"kind": "refuse", "reason": "stuck point (Encoding): ENCODING_GET_INLINED reads the encoding index of a string (CRuby's rb_encoding table); the fork has no Encoding (accepted stuck point)"},
     "PRI_SIZE_PREFIX": {"kind": "expr", "mruby": "\"z\"", "caveat": "CRuby's PRI_SIZE_PREFIX is the printf length modifier for size_t, the string the PRI*SIZE macros append to (C99 z)"},
     "PUREFUNC": {"kind": "template", "arity": 1, "template": "$0", "caveat": "PUREFUNC (CRuby's pure-function attribute) is a compiler hint: the declaration it wraps is kept, without the attribute"},
     "RARRAY_PTR": {"kind": "macro", "mruby": "RARRAY_PTR", "caveat": "mruby's RARRAY_PTR (include/mruby/array.h) is the array's element pointer, as CRuby's; the use reads elements. A write through it would need mruby's array modify step (not done here)"},
