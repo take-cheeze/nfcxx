@@ -549,7 +549,7 @@ module SymbolCache
       return true;
     }
     #endif
-    #define BC2CPP_OWNERS(...) ([]() -> bc2cpp_owner_set& { static const char* const names[] = { __VA_ARGS__, nullptr }; static bc2cpp_owner_set s = { names, nullptr, 0, nullptr, 0, nullptr }; return s; }())
+    #define BC2CPP_OWNERS(...) ([]() -> bc2cpp_owner_set& { static const char* const names[] = { __VA_ARGS__, nullptr }; static bc2cpp_owner_set s; if (!s.names) s.names = names; return s; }())
     // OWNER_CALL_DIRECT: DIRECTS is a run of BC2CPP_OWNER_DIRECT(owner, entry, aspec, visibility), no commas between.
     #define BC2CPP_OWNER_DIRECT(owner, fn, aspec, vis) { owner, fn, (uint32_t)(aspec) | (uint32_t)(vis) },
     #define BC2CPP_OWNERS_D(DIRECTS, ...) ([]() -> bc2cpp_owner_set& { static const char* const names[] = { __VA_ARGS__, nullptr }; static const bc2cpp_owner_direct rows[] = { DIRECTS }; static struct RClass* cls[sizeof rows / sizeof rows[0]]; static bc2cpp_owner_directs d = { rows, (int)(sizeof rows / sizeof rows[0]), 0, nullptr, cls }; static bc2cpp_owner_set s = { names, &d, 0, nullptr, 0, nullptr }; return s; }())
