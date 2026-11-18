@@ -27,5 +27,12 @@ run "default link" "$repo/nfcxx" -o pm2 m.cpp
 run "failing link (Path B)" env NFCXX_BACKEND=pathb "$repo/nfcxx" -o pm3 bad.cpp
 run "Path B -c" env NFCXX_BACKEND=pathb "$repo/nfcxx" -c m.cpp -o m.o
 
+# -fsyntax-only: its own directory is removed, and the status is the compile's, not a trap's (it was 127 before: the trap ran
+# trace_finish before trace.sh was sourced)
+run "-fsyntax-only -o" "$repo/nfcxx" -fsyntax-only -o x.o m.cpp
+if [ "$LAST_STATUS" = 0 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL -fsyntax-only -o exits $LAST_STATUS, not 0"; fi
+run "-fsyntax-only error" "$repo/nfcxx" -fsyntax-only -o x.o bad.cpp
+if [ "$LAST_STATUS" = 2 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL -fsyntax-only error exits $LAST_STATUS, not 2"; fi
+
 echo "driver-tmp-cleanup: $pass passed, $fail failed"
 [ $fail = 0 ]

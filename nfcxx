@@ -88,7 +88,7 @@ for a in "$@"; do
     [ $fso_has_E = 1 ] && exec "$0" "${fso_args[@]}"
     if [ $fso_has_o = 1 ]; then
       # An explicit -o is honoured by the real compile; the type check discards it.
-      fso_dir=$(mktemp -d); trap trace_finish EXIT
+      fso_dir=$(mktemp -d); trap '[ -z "${fso_dir:-}" ] || rm -rf "$fso_dir"' EXIT   # before trace.sh is sourced: no trace to finish here
       fso_new=(); fso_skip=0
       for b in "${fso_args[@]}"; do
         if [ $fso_skip = 1 ]; then fso_skip=0; fso_new+=("$fso_dir/x.o"); continue; fi
@@ -96,7 +96,7 @@ for a in "$@"; do
       done
       "$0" -c "${fso_new[@]}"; exit $?
     fi
-    fso_dir=$(mktemp -d); trap trace_finish EXIT
+    fso_dir=$(mktemp -d); trap '[ -z "${fso_dir:-}" ] || rm -rf "$fso_dir"' EXIT   # before trace.sh is sourced: no trace to finish here
     "$0" -c "${fso_args[@]}" -o "$fso_dir/x.o"; exit $?
   fi
 done
