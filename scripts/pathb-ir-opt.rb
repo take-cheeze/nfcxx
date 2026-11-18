@@ -213,6 +213,11 @@ $inline_max_callee = 150
 $inline_max_growth = 2.0
 # --max-caller=N: a caller grows by inlining up to N nodes (its own size plus what it takes in); 0: no limit
 $inline_max_caller = 0
+# --smart-ptr-inline=N: a std::shared_ptr / __shared_ptr / __shared_count / _Sp_counted_base member of at most N nodes is inlined
+# past the module's growth budget and the tier caps (its copy and destruction are a few nodes, and each one left as a call is
+# a call and an extra refcount in the caller). 0: off.
+$smart_ptr_inline = 120
+SMART_PTR_CALLEE = /\A_ZN(?:K)?St(?:10shared_ptr|12__shared_ptr|14__shared_count|16_Sp_counted_base|19__shared_ptr_access)/
 $inline_cost = :weighted
 $inline_tiers = [16, 40]   # --tiers=A,B: callee cost caps of the first rounds; the last round takes --max-callee (empty: one round set)
 $inline_tiny = 16   # --max-tiny: a callee this cheap is inlined even past --max-growth (0: none)
@@ -475,13 +480,15 @@ def expand_call(s, fns, st)
     return nil
   end
   st[:caller_size] += node_cost(fn)
+  # A smart-pointer member (small) is inlined past the budget and the tier caps (see --smart-ptr-inline).
+  smart = $smart_ptr_inline > 0 && cname.match?(SMART_PTR_CALLEE) && node_cost(fn) <= $smart_ptr_inline
   # Past the module's growth budget only a tiny callee is inlined (an accessor or wrapper: its call costs about what its body does).
-  if st[:over] && $inline_tiny > 0 && st[:tc].fetch(fn) { st[:tc][fn] = node_cost(fn) } > $inline_tiny && !always_inline?(fn) && !$inline_once[cname] && !asm_needs_constant?(fn)
+  if st[:over] && !smart && $inline_tiny > 0 && st[:tc].fetch(fn) { st[:tc][fn] = node_cost(fn) } > $inline_tiny && !always_inline?(fn) && !$inline_once[cname] && !asm_needs_constant?(fn)
     st[:refused]["module over --max-growth"] = (st[:refused]["module over --max-growth"] || 0) + 1
     return nil
   end
   # A tier of the pass takes only callees up to its cap: the small ones are inlined everywhere before the budget goes to big ones.
-  return nil if st[:cap] && st[:tc].fetch(fn) { st[:tc][fn] = node_cost(fn) } > st[:cap]
+  return nil if st[:cap] && !smart && st[:tc].fetch(fn) { st[:tc][fn] = node_cost(fn) } > st[:cap]
   info = st[:ic].fetch(cname) { st[:ic][cname] = callee_info(fn) }
   rtype = info[:ret][1]
   return nil unless show(call[1]) == info[:rtext]
@@ -2260,6 +2267,8 @@ def main(argv)
       $inline_cost = a[7..-1] == "nodes" ? :nodes : :weighted
     elsif a.start_with?("--max-caller=")
       $inline_max_caller = a[13..].to_i
+    elsif a.start_with?("--smart-ptr-inline=")
+      $smart_ptr_inline = a[19..].to_i
     elsif a.start_with?("--max-growth=")
       $inline_max_growth = a[13..-1].to_f
     elsif a == "--scope-facts"
