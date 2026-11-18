@@ -1915,7 +1915,20 @@ class ClosedWorld
   def mixin_module_ref(irep, idx, insn)
     return nil unless %w[include prepend extend].include?(insn.sym) && insn.reg && insn.plain_fixed_argc? && insn.argc == 1
 
-    resolve_mixin_ref(irep, idx, insn.reg + 1)
+    resolve_mixin_ref(irep, idx, insn.reg + 1) || straight_line_constant_ref(irep, idx, insn.reg + 1)
+  end
+
+  # The argument of a send that directly follows its own `GETCONST` (no other path reaches the send, handlers included):
+  # the register holds that constant, whatever the reaching-definition analysis of the method could not prove (an
+  # `ensure` clause makes it give up). Nil otherwise.
+  def straight_line_constant_ref(irep, idx, reg)
+    program = BytecodeIR.for(irep)
+    return nil unless idx >= 1 && program.linear_corridor?(idx - 1, idx, include_handlers: true)
+
+    writer = program.source_at(idx - 1)
+    return nil unless writer.op == :GETCONST && writer.reg == reg && writer.const_name
+
+    { name: writer.const_name.to_s, qualified: false, absolute: false }
   end
 
   # A mixin the analysis cannot place (a singleton class, `extend` in a class body, a mixin made in a method) adds the
