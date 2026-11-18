@@ -8,7 +8,9 @@
     "--undefine",
     "RBIMPL_STATIC_ASSERT",
     "--undefine",
-    "RUBY_ATOMIC_PTR_CAS"
+    "RUBY_ATOMIC_PTR_CAS",
+    "--replace",
+    "VpInit(0UL);=rb_cBigDecimal = rb_define_class(\"BigDecimal\", rb_cNumeric); VpInit(0UL);"
   ],
   "puma": [
     "--undefine",

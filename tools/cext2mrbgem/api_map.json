@@ -1977,10 +1977,8 @@
       "caveat": "EOFError is defined by the mruby-io gem"
     },
     "rb_eEncodingError": {
-      "kind": "expr",
-      "mruby": "mrb_exc_get(mrb, \"EncodingError\")",
-      "needs_mrb": true,
-      "caveat": "mruby has no encodings; the exception is only the class"
+      "kind": "refuse",
+      "reason": "stuck point (Encoding): rb_eEncodingError is the EncodingError class of CRuby's Encoding API; the fork has no Encoding and defines no EncodingError class (accepted stuck point)"
     },
     "rb_eSysStackError": {
       "kind": "expr",

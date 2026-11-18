@@ -1674,6 +1674,18 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_cxx_source tools/cext2mrbgem
 check test -e "$work/api_cxx_source/src/api_cxx_source.cc"
 check test "$(grep -c 'C++' "$work/api_cxx_source/REFUSALS.txt")" -eq 0
 check grep -qF 'cxx_twice' "$work/api_cxx_source/src/api_cxx_source.cc"
+# 2zzz159. a call from Init to a stubbed function is dropped in Init (the stub would raise at load, aborting the gem; oj's Init
+# called oj_string_writer_init): the call is gone and recorded as dropped in REFUSALS.txt, the stub stays, gem_init.c has no #error.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_init_stub_call tools/cext2mrbgem/fixtures/api_init_stub_call/ext/api_init_stub_call "$work/api_init_stub_call" > "$work/api_init_stub_call.log" 2>&1 || rc=$?
+check test "$(grep -c 'helper(c)' "$work/api_init_stub_call/src/api_init_stub_call.c")" -eq 0
+check grep -qF 'BC2CPP-MRBGEM dropped in Init (helper)' "$work/api_init_stub_call/src/api_init_stub_call.c"
+# the transitive case: outer is not refused, but its body calls the stub, so Init's call to outer is dropped too (outer's body stays)
+check test "$(grep -c 'outer(c)' "$work/api_init_stub_call/src/api_init_stub_call.c")" -eq 0
+check grep -qF 'BC2CPP-MRBGEM dropped in Init (outer): calls a function that reaches a stub' "$work/api_init_stub_call/src/api_init_stub_call.c"
+check grep -qF 'return helper(mrb, self);' "$work/api_init_stub_call/src/api_init_stub_call.c"
+check grep -qF 'helper(mrb_state *mrb, mrb_value self) { /* BC2CPP-MRBGEM stub: refused code */' "$work/api_init_stub_call/src/api_init_stub_call.c"
+check grep -qF '[dropped in Init' "$work/api_init_stub_call/REFUSALS.txt"
+check test "$(grep -c '#error' "$work/api_init_stub_call/src/gem_init.c")" -eq 0
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?

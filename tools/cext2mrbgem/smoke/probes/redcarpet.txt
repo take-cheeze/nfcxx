@@ -1,0 +1,2 @@
+Redcarpet::Markdown.new(Redcarpet::Render::HTML).render("*a*")	<p><em>a</em></p>
+

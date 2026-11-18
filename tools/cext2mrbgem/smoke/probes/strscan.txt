@@ -1,0 +1,21 @@
+StringScanner.new("abc").string	abc
+StringScanner.new("abc").pos	0
+StringScanner.new("abc").eos?	false
+StringScanner.new("").eos?	true
+StringScanner.new("abc").rest	abc
+StringScanner.new("abc").rest_size	3
+(s = StringScanner.new("abc"); s.pos = 2; s.pos)	2
+StringScanner.new("abc").matched?	false
+StringScanner.new("abc").beginning_of_line?	true
+StringScanner.must_C_version	StringScanner
+StringScanner::Error.superclass	StandardError
+StringScanner.new("abc").inspect	#<StringScanner 0/3 @ "abc">
+(s = StringScanner.new("ab"); s.concat("c"); s.string)	abc
+(s = StringScanner.new("ab"); s.terminate; s.eos?)	true
+(s = StringScanner.new("ab"); s.reset; s.pos)	0
+StringScanner.new("abc").peek(2)	ab
+StringScanner.new("abc").get_byte	a
+StringScanner.new("abc").getch	a
+StringScanner.new("abc").scan("a")	a
+(s = StringScanner.new("ab"); s.getch; s.rest)	b
+StringScanner.new("abc").scan(/a/)	!NotImplementedError

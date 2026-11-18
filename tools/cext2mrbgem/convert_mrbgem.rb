@@ -3429,7 +3429,7 @@ use_problem = lambda do |name, use|
   def class_result_call?(name)
     ent = @entries[name]
     return false unless ent.is_a?(Hash)
-    ent['mruby'].to_s.match?(/\Amrb_(?:define_(?:class|module)(?:_under)?|class_get|module_get|exc_get)\z/)
+    ent['mruby'].to_s.match?(/\Amrb_(?:define_(?:class|module)(?:_under)?|class_get|module_get|exc_get)(?:\z|\()/)
   end
 
   # An owned class variable (struct RClass *) assigned the result of a VALUE-returning call: the class pointer of that result
@@ -6890,6 +6890,69 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         @edits[rel].drop(inside)
         @edits[rel].add(d['brace'] + 1, d['body_end'], stub)
         hit.each { |r| @stubbed << [rel, r['line']] }
+        (@stub_fns ||= Set.new) << d['name']
+      end
+    end
+    drop_init_calls_to_stubs
+  end
+
+  # A call from an Init function to a stubbed function is a statement Init must not run: the stub raises, and at load time the
+  # raise aborts the gem (oj's Init called oj_string_writer_init, a stub). The statement is dropped, as a refused statement in Init
+  # is, and recorded in REFUSALS.txt as dropped in Init.
+  def drop_init_calls_to_stubs
+    names = (@stub_fns || Set.new).dup
+    return if names.empty?
+    # a function that calls a stub reaches it too (bigdecimal's BigDecimal_literal calls the stubbed f_BigDecimal_impl): its call
+    # from Init would raise at load, so the closure of the callers of stubs is dropped from Init as well (its own body is not changed)
+    loop do
+      grew = false
+      @defs.values.flatten.each do |d|
+        next if d['proto'] || !d['brace'] || !d['body_end'] || names.include?(d['name'])
+        next unless @files[d['file']]
+        body = @files[d['file']]['masked'][d['brace']..d['body_end']]
+        next unless names.any? { |n| body.match?(/\b#{Regexp.escape(n)}\s*\(/) }
+        names << d['name']
+        grew = true
+      end
+      # a function-like macro whose body reaches a stub is a name too: its uses in Init are dropped (bigdecimal's
+      # BIGDECIMAL_LITERAL expands to BigDecimal_literal, which reaches the stub f_BigDecimal_impl)
+      @files.each_key do |frel|
+        define_spans(frel).each do |mname, ma, mb|
+          next if names.include?(mname)
+          mbody = @files[frel]['masked'][ma..mb]
+          next unless names.any? { |n| mbody.match?(/\b#{Regexp.escape(n)}\s*\(/) }
+          names << mname
+          grew = true
+        end
+      end
+      break unless grew
+    end
+    @files.each do |rel, f|
+      next unless @edits[rel]
+      masked = f['masked']
+      text = f['text']
+      inits = @defs.values.flatten.select { |d| d['file'] == rel && !d['proto'] && d['brace'] && d['body_end'] && d['name'].to_s.start_with?('Init_') }
+      inits.each do |d|
+        names.each do |n|
+          positions = []
+          masked.scan(/\b#{Regexp.escape(n)}\s*\(/) { positions << $~.begin(0) }
+          positions.each do |pos|
+            next unless pos > d['brace'] && pos < d['body_end']
+            span = stmt_span(masked, pos)
+            next unless span
+            s0, e0 = span
+            next if @edits[rel].overlapping(s0, e0).any? { |a, b, _| a < d['brace'] || b > d['body_end'] + 1 }
+            @edits[rel].drop(@edits[rel].overlapping(s0, e0))
+            direct = (@stub_fns || Set.new).include?(n)
+            how = direct ? 'calls the stubbed function' : 'calls a function that reaches a stub'
+            @edits[rel].add(s0, e0, "/* BC2CPP-MRBGEM dropped in Init (#{n}): #{how} #{n} (a stuck point, see REFUSALS.txt) */")
+            line = line_of(text, pos)
+            why = direct ? "#{n} is stubbed (its refusal is above)" : "#{n} calls a stubbed function (its body reaches the stub)"
+            @refusals << { 'file' => rel, 'line' => line, 'api' => n, 'reason' => "stuck point: #{why}; called from Init, the stub would raise at load", 'pos' => pos }
+            @stubbed << [rel, line]
+            (@dropped_inits ||= Set.new) << [rel, line]
+          end
+        end
       end
     end
   end
