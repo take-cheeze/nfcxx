@@ -14,11 +14,11 @@ require 'set'
 #
 # An entry is direct only when its registration is the plain define of OWNER_METHOD_REGISTRATION (codegen_emit.rb):
 # public or private, no CORE_BLOCK_GUARD (registered only when the bytecode could be saved), under its own name. A
-# wrapper is static in its gem, so only this gem's owners can be direct. A call gets direct entries only when they
-# complete it: every listed owner the build leaves out for the name (unregistered_keys) is direct, or tested by the
-# exact-class guard chain the call is the else of and subclassed by no class of the program (a subclass instance
-# takes the else and inherits the owner's method). Any other call would still look its owners up, and its table of
-# entries would only cost read-only data. BC2CPP_OWNER_CALL_DIRECT=0 turns it off.
+# wrapper is static in its gem, so only this gem's owners can be direct (CROSS_UNIT_ROW reaches another gem's). A call
+# gets direct entries only when they complete it: every listed owner the build leaves out for the name
+# (unregistered_keys) is direct, or tested by the exact-class guard chain the call is the else of and subclassed by no
+# class of the program (a subclass instance takes the else and inherits the owner's method). Any other call would still
+# look its owners up. BC2CPP_OWNER_CALL_DIRECT=0 turns it off.
 module OwnerCallDirect
   # A call carries at most this many (each is a row of read-only data and a class slot).
   MAX = 32
@@ -115,7 +115,8 @@ module OwnerCallDirect
   # owner-class getter call (`bc2cpp_owner_class_3(M)`) to its owner; `subclassed` holds every program superclass.
   # `unregistered`: the "Owner#name" keys the build leaves out (CodeGen#unregistered_keys).
   # `other`: (owner, name) -> a row for a method another gem compiles (CodeGen#other_unit_direct_entry), or nil.
-  def rewrite(code, entries, slots, subclassed, unregistered, other: nil)
+  # `trim`: rows only for the owners left out (OWNER_ROWS_TRIM, CodeGen#owner_rows_trim?).
+  def rewrite(code, entries, slots, subclassed, unregistered, other: nil, trim: false)
     return code if entries.empty? || ENV['BC2CPP_OWNER_CALL_DIRECT'] == '0' || !code.include?('BC2CPP_OWNERS(')
 
     lines = Lines.new(code)
@@ -138,6 +139,9 @@ module OwnerCallDirect
       row = ->(o) { entries[[o, name]] || other&.call(o, name) }
       next if candidates.any? { |o| unregistered.include?("#{o}##{name}") && row.(o).nil? }
 
+      # OWNER_ROWS_TRIM: the build's own generation drops the optional rows, which cost the site RAM
+      # (bc2cpp_owner_directs and a class slot each); the proof's keeps them, as its coverage reads them (OWNER_CALL_GUARDED).
+      candidates = candidates.select { |o| unregistered.include?("#{o}##{name}") } if trim
       direct = candidates.map { |o| row.(o) }.compact
       next if direct.empty? || direct.size > MAX
 
