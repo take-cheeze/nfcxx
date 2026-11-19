@@ -270,6 +270,34 @@ end
 module NfcxxSetup
   module_function
 
+  # The arrays the bash passes, joined by ASCII 31 (an empty array is the empty string).
+  def split_list(text)
+    text.to_s.empty? ? [] : text.split("\x1f", -1)
+  end
+
+  # The compile cache's options (bash: cache_check's key arguments): the cache and its log, the output, the source, the
+  # working directory, the variables the key depends on, the command line without the cache's own options (--arg=), and the
+  # host preprocessor's command line (--cpp=): -std, the cflags, the forced includes and the system directories. Printed
+  # NUL-terminated, one option a word, so the driver reads them back with read -d ''.
+  def cache_opts(h)
+    argv = split_list(h["argv"]).reject { |a| a.start_with?("--cache=", "--cache-log=", "--time-log=", "--trace=") }
+    pre = split_list(h["preinc"]).flat_map { |f| ["-include", f] }
+    cpp = ["-std=#{h.fetch("std", "").delete_prefix("--")}", *split_list(h["cflags"]), *pre,
+           *split_list(h["sysdirs"]).map { |d| "-isystem#{d}" }]
+    opts = [
+      "--cache-dir=#{h.fetch("cache_dir", "")}", "--cache-log=#{h.fetch("cache_log", "")}",
+      "--out=#{h.fetch("out", "")}", "--src=#{h.fetch("src", "")}", "--cwd=#{h.fetch("cwd", "")}",
+      "--var=backend=#{h.fetch("backend", "")}", "--var=compile_only=#{h.fetch("compile_only", "")}",
+      "--var=ncpp=#{h.fetch("ncpp", "")}", "--var=outset=#{h.fetch("outset", "")}",
+      "--var=nobj=#{h.fetch("nobj", "")}", "--var=modules=#{h.fetch("modules", "")}",
+      "--var=preprocess=#{h.fetch("preprocess", "")}", "--var=stdin_src=#{h.fetch("stdin_src", "")}",
+      "--var=depmode=#{h.fetch("depmode", "")}", "--var=cfiles_n=#{h.fetch("cfiles_n", "")}",
+      "--var=cu_n=#{h.fetch("cu_n", "")}", "--var=cpp2_n=#{h.fetch("cpp2_n", "")}",
+      *argv.map { |a| "--arg=#{a}" }, *cpp.map { |c| "--cpp=#{c}" }
+    ]
+    opts.map { |w| w + "\0" }.join
+  end
+
   # The Path B option statements after the override (bash: the pb_flags lines and the backend environment, in this order). Every
   # condition is the bash's; the backend environment comes last, as it reads the final backend. No statement here refuses.
   def flags_text(opts, env = ENV)
@@ -318,6 +346,10 @@ if $PROGRAM_NAME == __FILE__
       warn e.message
       exit e.status
     end
+    exit 0
+  end
+  if ARGV.first == "cache-opts"
+    $stdout.binmode.write(NfcxxSetup.cache_opts(NfcxxSetup.options(ARGV.drop(1))))
     exit 0
   end
   if ARGV.first == "flags"
