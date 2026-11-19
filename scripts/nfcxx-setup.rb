@@ -14,7 +14,7 @@ require "stringio"
 
 root = File.expand_path("..", __dir__)
 %w[nfcxx-backend nfcxx-asan-c nfcxx-instantiate nfcxx-cosmo-setup nfcxx-freestanding-setup
-   nfcxx-host-cflags nfcxx-gnu-opts nfcxx-k1om-env nfcxx-target nfcxx-backend-env trace ecp-arg].each do |f|
+   nfcxx-host-cflags nfcxx-gnu-opts nfcxx-k1om-env nfcxx-target nfcxx-backend-env nfcxx-sanitize trace ecp-arg].each do |f|
   require File.join(root, "scripts", f)
 end
 
@@ -240,6 +240,33 @@ module NfcxxSetup
   end
 end
 
+module NfcxxSetup
+  module_function
+
+  # The backend stage after the planners and the emit-C path (bash: the sanitizer, -fsafe-pointers and the Path B override):
+  # the refusals first, in the bash's order, then the statements that set pb_flags and backend. The sanitizer's check is the
+  # one scripts/nfcxx-sanitize.rb makes (its message and status 2). The text is eval'd by the driver, where the bash ran them.
+  def stage_text(opts)
+    out = +""
+    sanitize = opts.fetch("sanitize", "")
+    freestanding = opts.fetch("freestanding", "0")
+    unless sanitize.empty?
+      msg = send(:check, sanitize, freestanding)
+      raise Refusal.new(msg, 2) if msg
+      out << "pb_flags+=(#{Shellwords.escape("--sanitize=#{sanitize}")})\n"
+      out << "backend=pathb\n"
+    end
+    if opts.fetch("safeptr", "0") == "1"
+      raise Refusal.new("nfcxx: -fsafe-pointers needs Path B, which compiles hosted programs only", 2) if freestanding != "0"
+      raise Refusal.new("nfcxx: -fsafe-pointers and -fsanitize=address both replace malloc; use one", 2) if opts.fetch("asan", "0") != "0"
+      out << "pb_flags+=(--safe-pointers)\n"
+      out << "backend=pathb\n"
+    end
+    out << "backend=pathb default_backend=0\n" if opts.fetch("path_b", "0") == "1"
+    out
+  end
+end
+
 if $PROGRAM_NAME == __FILE__
   if ARGV.first == "host-headers"
     opts = NfcxxSetup.options(ARGV.drop(1))
@@ -250,6 +277,16 @@ if $PROGRAM_NAME == __FILE__
     opts = NfcxxSetup.options(ARGV.drop(1))
     begin
       $stdout.write(NfcxxSetup.planners_text(opts, ENV, opts.fetch("bash_pid", "0")))
+    rescue NfcxxSetup::Refusal => e
+      warn e.message
+      exit e.status
+    end
+    exit 0
+  end
+  if ARGV.first == "stage"
+    opts = NfcxxSetup.options(ARGV.drop(1))
+    begin
+      $stdout.write(NfcxxSetup.stage_text(opts))
     rescue NfcxxSetup::Refusal => e
       warn e.message
       exit e.status
