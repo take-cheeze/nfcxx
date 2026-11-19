@@ -464,6 +464,17 @@ class CodeGen
     keys | ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').split(',').to_set
   end
 
+  # OWNER_ROWS_TRIM (owner_call_direct.rb): a real gem build's owner calls carry rows only for the owners it leaves out.
+  # The proof's generation (OUT_SYMBOL never_called_probe) and a fixture keep every row; BC2CPP_OWNER_ROWS=left_out or
+  # =all forces either.
+  def owner_rows_trim?
+    case ENV['BC2CPP_OWNER_ROWS']
+    when 'left_out' then true
+    when 'all' then false
+    else BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == ENV['OUT_SYMBOL'] }
+    end
+  end
+
   # The proof's output for this run (static_dispatch_lists.rb). A real gem build has to be given it: running without
   # would register every name, or none, and ship a method table the proof was never run for. A fixture or a probe
   # (any other OUT_SYMBOL) has no engine names to leave out.
