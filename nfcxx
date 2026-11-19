@@ -121,25 +121,13 @@ asan=0; backend_explicit=0; asanopts=(); safeptr=0; cosmo=0
 dialect=${NFCXX_DIALECT:-$("${RUBY:-ruby}" "$root/scripts/host-sys.rb" host_dialect)}; dialect_asked=${NFCXX_DIALECT:+1}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}; target=""
 # Options with a flag and an environment variable: the variable is the default, the flag overrides it (see the usage above).
 path_b=0; [ "${NFCXX_PATH:-}" != b ] || path_b=1                        # --backend=pathb: Path B asked for by name
-ir_opt_set=0; ir_opt=""; if [ -n "${NFCXX_IR_OPT+x}" ]; then ir_opt_set=1; ir_opt=$NFCXX_IR_OPT; fi   # --ir-opt=LIST
-eh_unwind_on=0; [ "${NFCXX_EH_UNWIND:-}" != 1 ] || eh_unwind_on=1       # --eh-unwind
-eh_shim_on=1; [ "${NFCXX_EHSHIM:-1}" != 0 ] || eh_shim_on=0             # --no-eh-shim
 # --cache=DIR, --cache-log=FILE, NFCXX_CACHE_REMOTE=gha: cache_dir, cache_log_file, cache_remote (scripts/nfcxx-cache-config.rb plan)
 cfg_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cache-config.rb" plan) || exit $?
 eval "$cfg_sh"
-keep_intermediates=0; [ "${NFCXX_KEEP_INTERMEDIATES:-}" != 1 ] || keep_intermediates=1   # --keep-intermediates
-time_log=${NFCXX_TIME_LOG:-}                                            # --time-log=FILE
-instantiate=${NFCXX_INSTANTIATE:-used}                                  # --instantiate=used|auto
-promote_slots=${NFCXX_PROMOTE_SLOTS:-1}; unroll=${NFCXX_UNROLL:-1}; struct_slots=${NFCXX_STRUCT_SLOTS:-1}   # --promote-slots= ...
-ld_name=${NFCXX_LD:-}                                  # -fuse-ld=NAME
-pathb_c=${NFCXX_PATHB_C:-}                                              # --pathb-c=gcc
 pb_flags=()   # the options scripts/pathb-cc.rb gets (--asan, --safe-pointers, --sanitize=, --ir-opt=): flags, not exported variables
 onoff() {  # onoff FLAG VALUE: on|1 -> 1, off|0 -> 0; anything else is an error
   case $2 in on|1) echo 1 ;; off|0) echo 0 ;; *) echo "nfcxx: $1 takes on or off (got '$2')" >&2; exit 2 ;; esac
 }
-# CUDA kernel names are obfuscated (docs/notes/gpu.md, "Kernel name obfuscation"): --obfuscate-kernels, or NFCXX_OBFUSCATE_KERNELS=1
-# in the environment (which reaches a CMake build through nfcxx-cuda without any change to its command line).
-obfuscate=0; case ${NFCXX_OBFUSCATE_KERNELS:-0} in 0|"") ;; *) obfuscate=1 ;; esac
 # Compiler-driver options a build system passes (CMake, ninja, make; mruby's rake build). See docs/notes/cxx-driver.md.
 pthread=0; preprocess=0; outset=0; depmode=""; dfile=""; dtarget=""; depphony=""
 moddir=""   # --module-dir=DIR: where C++ module interface files are written and read (docs/notes/modules.md)
