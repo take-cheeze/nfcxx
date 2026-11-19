@@ -161,6 +161,9 @@ class ClosedWorld
     @deferred_mixin_modules = []
     # LOADSYM of an installer or rebinder name: [irep, index, register, name] (resolve_installer_symbol_loads).
     @installer_symbol_loads = []
+    # LOADSYM of a name CodeGen's installed-name scan treats as an installer (symbol_load_proven?), same shape.
+    @name_installer_loads = []
+    @proven_symbol_loads = Set.new
     @class_constant_names = Set.new
     # CLASS ops that declare a name (not the root-level reopen of native_class_unshadowed?).
     @class_declared_names = Set.new
@@ -1709,6 +1712,7 @@ class ClosedWorld
           # An installer or rebinder name loaded as a symbol may be sent by name: its value must stay on safe paths
           # (resolve_installer_symbol_loads), not refuse the program outright.
           @installer_symbol_loads << [irep, idx, insn.reg, sym] if INSTALLER_SENDS.include?(sym) || CONST_REBINDERS.include?(sym)
+          @name_installer_loads << [irep, idx, insn.reg, sym] if NAME_INSTALLER_NAMES.include?(sym)
         when :GETCONST, :GETMCNST
           const = insn.const_name
           @basic_object_referenced = true if const == 'BasicObject'
@@ -1850,9 +1854,27 @@ class ClosedWorld
   # an unknown container or an unknown read keeps the refusal, since mruby would send the name at run time.
   def resolve_installer_symbol_loads
     @installer_symbol_loads.each do |irep, idx, reg, _sym|
-      global!(:dynamic_install) unless installer_symbol_value_safe?(irep, idx, reg, 0, false)
+      if installer_symbol_value_safe?(irep, idx, reg, 0, false)
+        @proven_symbol_loads << [irep.label, idx]
+      else
+        global!(:dynamic_install)
+      end
+    end
+    # These names refuse nothing here; CodeGen's installed-name scan asks for the proof instead (symbol_load_proven?).
+    @name_installer_loads.each do |irep, idx, reg, _sym|
+      @proven_symbol_loads << [irep.label, idx] if installer_symbol_value_safe?(irep, idx, reg, 0, false)
     end
   end
+
+  # The names CodeGen#collect_installed_names treats as installers when loaded as a symbol (NAME_INSTALLER_SENDS).
+  NAME_INSTALLER_NAMES = %w[alias_method define_method undef_method remove_method].freeze
+
+  # Whether the symbol load at +idx+ of irep +label+ was proven to stay off every send path
+  # (resolve_installer_symbol_loads): its name is then only compared, never installed by name.
+  def symbol_load_proven?(label, idx)
+    @proven_symbol_loads.include?([label, idx])
+  end
+  public :symbol_load_proven?
 
   # +container+: the value followed is a literal Array or Hash holding the symbol (false: the symbol itself). It decides
   # which class answers a send whose receiver is that value (receiver_read_native?).

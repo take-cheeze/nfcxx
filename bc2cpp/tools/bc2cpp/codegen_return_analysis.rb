@@ -323,8 +323,12 @@ class CodeGen
           next if insn.op == :ALIAS && AliasSites.settled?(@registry, label, idx)
 
           names << insn.sym unless scoped
-        when :LOADSYM
-          return nil if NAME_INSTALLER_SENDS.include?(insn.sym)
+        when :LOADSYM, :SYMBOL
+          # A %i[] element is a SYMBOL (its name is in the pool), sendable all the same. A load the closed world proved
+          # stays off every send path (only compared, as in a lookup table) installs nothing.
+          sym = insn.op == :LOADSYM ? insn.sym : (insn.pool_index && irep.pool&.[](insn.pool_index.to_i))
+          next unless sym.is_a?(String) && NAME_INSTALLER_SENDS.include?(sym)
+          return nil unless @closed_world&.symbol_load_proven?(label, idx)
         when :SEND, :SEND0, :SENDB, :SSEND, :SSEND0, :SSENDB
           next unless NAME_INSTALLER_SENDS.include?(insn.sym)
           # DEFINE_METHOD_SITES: the registry defines this one, so it names nothing unknown.
