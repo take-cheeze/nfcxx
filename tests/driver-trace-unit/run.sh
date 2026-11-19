@@ -13,7 +13,7 @@ for case in unset empty named; do for out in a.out prog; do
   trace_unit=${srcs[0]-$out}                                   # the bash line, verbatim
   want=$trace_unit
   eval "$(ruby "$repo/scripts/nfcxx-trace-unit.rb" plan srcs0_set="$s0set" srcs0="$s0" out="$out")"
-  if [ "$want" = "$trace_unit" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL $case out=$out: bash [$want] ruby [$trace_unit]"; fi
+  if [ "$want" = "$trace_unit" ] && [ "$NFCXX_TRACE_UNIT" = "$want" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL $case out=$out: bash [$want] ruby [$trace_unit] exported [${NFCXX_TRACE_UNIT-unset}]"; fi
 done; done
 echo "driver-trace-unit: $pass passed, $fail failed"
 [ $fail = 0 ]
