@@ -97,8 +97,18 @@ Dir.mktmpdir('bc2cpp-owner-call-direct') do |dir|
   suite.check('the else of exact-class arms carries both engine owners\' entries',
               push.include?('BC2CPP_OWNERS_D(BC2CPP_OWNER_DIRECT("Game::OcdA", Game__OcdA_push, ') &&
               push.include?('BC2CPP_OWNER_DIRECT("Game::OcdC", Game__OcdC_push, ') && push.include?('"Array"'))
-  suite.check('an engine owner with no entry here keeps the plain owner set',
-              go_site(code, 'pick').include?('BC2CPP_OWNERS("Game::OcdA", "Game::OcdD")'))
+  # An engine owner with no entry is a blocker only when the build leaves the name out (unregistered_keys).
+  suite.check('an engine owner with no entry the build keeps does not block the direct row',
+              go_site(code, 'pick').include?('BC2CPP_OWNERS_D(BC2CPP_OWNER_DIRECT("Game::OcdA", '))
+  saved_extra = ENV['BC2CPP_UNREGISTERED_EXTRA']
+  begin
+    ENV['BC2CPP_UNREGISTERED_EXTRA'] = 'Game::OcdD#pick'
+    left_out, = Bc2cppFixtureRuntime.generate(SOURCE, dir, core: true, only_owners: OWNERS)
+  ensure
+    saved_extra ? ENV['BC2CPP_UNREGISTERED_EXTRA'] = saved_extra : ENV.delete('BC2CPP_UNREGISTERED_EXTRA')
+  end
+  suite.check('an engine owner with no entry the build leaves out keeps the plain owner set',
+              go_site(left_out, 'pick').include?('BC2CPP_OWNERS("Game::OcdA", "Game::OcdD")'))
   # As the text scan finds `< OcdA`.
   subclassed = %w[Game::OcdA OcdA]
   suite.check('the proof counts the completed call as no lookup',

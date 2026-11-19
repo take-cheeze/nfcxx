@@ -3017,23 +3017,24 @@ BC2CPP_MAIN = lambda do
   owner_call_direct = owner_call_direct.merge(OwnerCallDirect.native_entries) if ENV['BC2CPP_OWNER_CALL_DIRECT'] != '0'
   owner_class_slots = gen.owner_class_slots
   program_superclasses = gen.program_superclasses
+  unregistered = gen.unregistered_keys
   # GUARD_VIOLATION: name the method a violation site sits in.
   # Fuse the three per-method rewrite passes (@@SITE@@ substitution, DIRECT_RAISE, SymbolCache.rewrite) into one.
   compiled.each do |m|
     code = m[:code].gsub('@@SITE@@') { "#{m[:owner]}##{m[:name]}".gsub(/["\\]/) { |c| "\\#{c}" } }
-    code = OwnerCallDirect.rewrite(code, owner_call_direct, owner_class_slots, program_superclasses)
+    code = OwnerCallDirect.rewrite(code, owner_call_direct, owner_class_slots, program_superclasses, unregistered)
     m[:code] = SymbolCache.rewrite(code, symbol_table)
   end
   # The class units' text takes the same passes as the compiled methods (a unit's helper calls are named the same way).
   class_units = class_units.map do |unit|
     code = unit[:code].gsub('@@SITE@@') { unit[:path].to_s.gsub(/["\\]/) { |c| "\\#{c}" } }
-    code = OwnerCallDirect.rewrite(code, owner_call_direct, owner_class_slots, program_superclasses)
+    code = OwnerCallDirect.rewrite(code, owner_call_direct, owner_class_slots, program_superclasses, unregistered)
     unit.merge(code: SymbolCache.rewrite(code, symbol_table))
   end
   # TOP_LEVEL_STATEMENTS takes the same passes: its sends are named calls too (a `Class.new(Base)` constant write is an owner call).
   unless top_level_code.empty?
     code = top_level_code.gsub('@@SITE@@', 'top-level')
-    code = OwnerCallDirect.rewrite(code, owner_call_direct, owner_class_slots, program_superclasses)
+    code = OwnerCallDirect.rewrite(code, owner_call_direct, owner_class_slots, program_superclasses, unregistered)
     top_level_code = SymbolCache.rewrite(code, symbol_table)
   end
   # Fused single pass over the compiled methods: all of these closed-world diagnostic counts used to

@@ -15,15 +15,11 @@ require 'set'
 # An entry is direct only when its registration is the plain define of OWNER_METHOD_REGISTRATION (codegen_emit.rb):
 # public or private, no CORE_BLOCK_GUARD (registered only when the bytecode could be saved), under its own name. A
 # wrapper is static in its gem, so only this gem's owners can be direct. A call gets direct entries only when they
-# complete it: every listed owner the closed list may leave out (CLOSED_OWNER_RE) is direct, or tested by the
+# complete it: every listed owner the build leaves out for the name (unregistered_keys) is direct, or tested by the
 # exact-class guard chain the call is the else of and subclassed by no class of the program (a subclass instance
 # takes the else and inherits the owner's method). Any other call would still look its owners up, and its table of
 # entries would only cost read-only data. BC2CPP_OWNER_CALL_DIRECT=0 turns it off.
 module OwnerCallDirect
-  # CLOSED_OWNER_RE: the owners the closed list may unregister -- the engine's own (Game, RPG2k, RPG2k3, LCF), RGSS,
-  # and the singletons of those modules themselves (`Game.singleton`). Reopened core classes (Array, StringIO, ...)
-  # stay out: the core's own code calls their methods on values of every kind.
-  CLOSED_OWNER_RE = /\A(?:Game|RPG2k3?|LCF|RGSS)(?:::|\.singleton\z|\z)/
   # A call carries at most this many (each is a row of read-only data and a class slot).
   MAX = 32
   VISIBILITY = { public: 'MRB_METHOD_PUBLIC_FL', private: 'MRB_METHOD_PRIVATE_FL' }.freeze
@@ -117,7 +113,8 @@ module OwnerCallDirect
 
   # `code` with the owner set of each call the direct entries complete replaced by BC2CPP_OWNERS_D. `slots` maps an
   # owner-class getter call (`bc2cpp_owner_class_3(M)`) to its owner; `subclassed` holds every program superclass.
-  def rewrite(code, entries, slots, subclassed)
+  # `unregistered`: the "Owner#name" keys the build leaves out (CodeGen#unregistered_keys).
+  def rewrite(code, entries, slots, subclassed, unregistered)
     return code if entries.empty? || ENV['BC2CPP_OWNER_CALL_DIRECT'] == '0' || !code.include?('BC2CPP_OWNERS(')
 
     lines = Lines.new(code)
@@ -132,10 +129,15 @@ module OwnerCallDirect
       next unless site
 
       head, recv, name, list = site.captures
-      owners = list.scan(STRING).flatten.grep(CLOSED_OWNER_RE)
+      owners = list.scan(STRING).flatten
       guarded = (at.positive? && lines[at - 1].strip == '} else {' && guard_chain_classes(lines, at - 1, recv, slots)) || NO_GUARD
-      direct = owners.reject { |o| guarded.include?(o) && !subclassed.include?(o) }.map { |o| entries[[o, name]] }
-      next if direct.empty? || direct.include?(nil) || direct.size > MAX
+      # An owner the build leaves out for this name has lost its registration, so it needs a row. Any other owner keeps
+      # its table entry, so a row for it is optional: the first direct owner the lookup meets answers the same either way.
+      candidates = owners.reject { |o| guarded.include?(o) && !subclassed.include?(o) }
+      next if candidates.any? { |o| unregistered.include?("#{o}##{name}") && entries[[o, name]].nil? }
+
+      direct = candidates.map { |o| entries[[o, name]] }.compact
+      next if direct.empty? || direct.size > MAX
 
       rows = direct.map do |m|
         "BC2CPP_OWNER_DIRECT(\"#{m[:owner]}\", #{m[:entry]}, #{m[:aspec]}, #{VISIBILITY.fetch(m[:visibility])})"

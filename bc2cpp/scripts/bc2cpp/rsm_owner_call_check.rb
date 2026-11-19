@@ -83,7 +83,7 @@ SELF_SENDS.each do |fn, (name, sub)|
   text = step(code, fn)
   suite.check("#{fn}: the variant is compiled", !text.empty?)
   suite.check("#{fn}: `#{name}` is an owner call listing #{sub}",
-              text.match?(/bc2cpp_owner_call\w*\(M, self, [^\n]*BC2CPP_OWNERS\([^)]*"#{sub}"[^\n]*owner-call: #{Regexp.escape(name)} \*\//))
+              text.match?(/bc2cpp_owner_call\w*\(M, self, [^\n]*BC2CPP_OWNERS(?:_D)?\([^)]*"#{sub}"[^\n]*owner-call: #{Regexp.escape(name)} \*\//))
   suite.check("#{fn}: BC2CPP_RSM_OWNER_CALL=0 sends `#{name}` by name", step(off, fn).include?('bc2cpp_send(M, self, '))
 end
 
