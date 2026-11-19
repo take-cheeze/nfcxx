@@ -17,6 +17,9 @@ oracle = File.join(root, "tests", "driver-body", "nfcxx-bash")
 # the oracle computes its root from its own location; here it is this repository's root (the same substitution the
 # differential tests make), so its paths are the repository's
 text = File.read(oracle).sub(/^root=\$\(cd "\$\(dirname "\$0"\)" && pwd\)$/) { "root=#{root}" }
+# the oracle re-runs the driver as "$0" (the -fsyntax-only route): run from a temporary program, $0 is that file, so the
+# driver's own path is put there (the program is an executable file of its own, not a driver)
+text = text.gsub('"$0"', "\"#{File.join(root, "nfcxx")}\"")
 abort "nfcxx: the oracle's root line is not as expected" unless text.include?("root=#{root}")
 program = Tempfile.new(["nfcxx-oracle", ".sh"])
 program.write(text)
