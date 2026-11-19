@@ -3,9 +3,12 @@
 # cache, its cache-log line, the remote tier's fetch on a local miss, and the hit (the object copied back). The driver passes the
 # lookup's arguments unchanged (the same --cache-dir, --out, --var and --arg options scripts/nfcxx-cache.rb lookup takes).
 #
-#   ruby scripts/nfcxx-cache-check.rb check --statements=FILE LOOKUP-ARGS...
+#   ruby scripts/nfcxx-cache-check.rb check --statements=FILE [--remote=KIND] LOOKUP-ARGS...
 #       writes cache_entry, cc_state (hit, miss or none) and cc_key to FILE for the driver to source, and logs the decision
-#       (--cache-log). The driver makes the remote fetch and the hit itself. Checked by tests/nfcxx-cache/run.sh.
+#       (--cache-log). On a local miss with --remote, the remote tier is fetched (scripts/nfcxx-cache-io.rb remote-get); an object
+#       then present is a hit, copied back to the output (scripts/nfcxx-cache.rb hit). Exit status 10: the hit was copied, and the
+#       driver exits 0; 0: go on. NFCXX_CACHE_IO replaces the remote helper's script (tests/nfcxx-cache/run.sh's stub).
+#       Checked by tests/nfcxx-cache/run.sh.
 
 require "shellwords"
 require "stringio"
@@ -18,6 +21,11 @@ module NfcxxCacheCheck
 
   def helper(*args)
     system(ruby, File.join(__dir__, "nfcxx-cache-io.rb"), *args)
+  end
+
+  # the hit: the object and its records copied back to the output (nfcxx-cache.rb hit); true when it was copied
+  def hit(opt, entry)
+    system(ruby, File.join(__dir__, "nfcxx-cache.rb"), "hit", "--out=#{opt[:out]}", "--entry=#{entry}")
   end
 
   def capture_lookup(opt)
@@ -33,18 +41,21 @@ module NfcxxCacheCheck
   end
 
   # the lookup and its log line: the decision (state hit or miss, and the key) for the driver, which makes the remote fetch and
-  # the hit itself (the driver's cache_remote_get and nfcxx-cache.rb hit, so the functions the tests set around them still run)
+  # the remote tier's fetch and the hit: the GHA helper's stand-in in tests (NFCXX_CACHE_IO), and nfcxx-cache.rb hit
   def check(args)
     statements = nil
     lookup_args = []
+    remote = ""
     args.each do |a|
       if a.start_with?("--statements=") then statements = a.delete_prefix("--statements=")
+      elsif a.start_with?("--remote=") then remote = a.delete_prefix("--remote=")
       else lookup_args << a
       end
     end
     state = "none"
     key = ""
     cache_entry = ""
+    opt = nil
     begin
       opt = parse(["lookup", *lookup_args])[1]
       look = capture_lookup(opt)
@@ -62,6 +73,12 @@ module NfcxxCacheCheck
       warn e.message
       state = "none"
     end
+    hit_now = state == "hit"
+    if state == "miss" && !cache_entry.empty?
+      # a local miss is looked up in the remote tier (a failure is a miss); an object there is a hit
+      system(ruby, ENV["NFCXX_CACHE_IO"] || File.join(__dir__, "nfcxx-cache-io.rb"), "remote-get", key, cache_entry) if !remote.empty?
+      hit_now = File.file?(File.join(cache_entry, "obj"))
+    end
     if statements
       File.write(statements, [
         "cache_entry=#{Shellwords.escape(cache_entry)}",
@@ -69,12 +86,13 @@ module NfcxxCacheCheck
         "cc_key=#{Shellwords.escape(key)}",
       ].join("\n") + "\n")
     end
-    0
+    return 0 unless hit_now && opt
+    hit(opt, cache_entry) ? 10 : 0
   end
 end
 
 if $PROGRAM_NAME == __FILE__
   cmd, *rest = ARGV
-  abort "nfcxx-cache-check: check --statements=FILE [--remote] LOOKUP-ARGS... (got #{cmd.inspect})" unless cmd == "check"
+  abort "nfcxx-cache-check: check --statements=FILE [--remote=KIND] LOOKUP-ARGS... (got #{cmd.inspect})" unless cmd == "check"
   exit NfcxxCacheCheck.check(rest)
 end

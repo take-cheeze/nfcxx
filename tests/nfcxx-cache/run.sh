@@ -21,7 +21,7 @@ trap 'cp "$backup" "$port" 2>/dev/null; rm -rf "$work" "$scratch"' EXIT
 
 # A stand-in EDG build: nfcxx's setup needs bin/eccp (the build itself is stubbed). The key lists its files on both sides.
 mkdir -p "$scratch/edg/bin" && printf '#!/bin/sh\nexit 1\n' > "$scratch/edg/bin/eccp" && chmod +x "$scratch/edg/bin/eccp"
-base_env=("EDG_BUILD=$scratch/edg")
+base_env=("EDG_BUILD=$scratch/edg" "NFCXX_CACHE_IO=$here/remote-stub.rb")   # the remote helper: the stand-in of the remote tier
 # The backend of a case is CASE_BACKEND (set_case: gcc, or pathb with the stubbed Path B compile).
 
 norm() { sed -e "s#$work#SANDBOX#g" -e "s#$root#ROOT#g" -e 's/\.\(tmp\|remote\)\.[0-9][0-9]*/.\1.PID/g'; }
