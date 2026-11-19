@@ -575,12 +575,9 @@ if [ ${#cfiles[@]} -gt 0 ]; then
     cobjs+=("$o")
   done
   if [ $compile_only = 1 ] && [ $ncpp = 0 ]; then
-    # -c with only C sources: the objects are the output (-o names the one object; otherwise each is <source>.o)
-    [ $outset = 0 ] || [ ${#cobjs[@]} = 1 ] || { echo "nfcxx: -c with -o needs exactly one source" >&2; exit 2; }
-    for i in "${!cobjs[@]}"; do
-      dst=$out; [ $outset = 1 ] || dst=$(printf '%s' "${cfiles[$i]}" | "${RUBY:-ruby}" "$root/scripts/nfcxx-objname.rb" --suffix=.c) || exit $?
-      cp "${cobjs[$i]}" "$dst"
-    done
+    # -c with only C sources: the objects are the output (-o names the one object; otherwise each is <source>.o). The refusal and
+    # the copies are scripts/nfcxx-c-only.rb copy (a failed cp ends the driver with its status)
+    "${RUBY:-ruby}" "$root/scripts/nfcxx-c-only.rb" copy outset="$outset" out="$out" cobjs="$(IFS=$'\x1f'; echo "${cobjs[*]-}")" cfiles="$(IFS=$'\x1f'; echo "${cfiles[*]-}")" || exit $?
     exit 0
   fi
   if [ $ncpp = 0 ] && { [ $nobj = 0 ] || [ ! -x "$edg/eccp" ]; }; then
