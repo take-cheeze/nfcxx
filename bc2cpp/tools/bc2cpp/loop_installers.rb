@@ -56,6 +56,9 @@ module LoopInstallers
   ATTR_NAME = /\A[A-Za-z_][A-Za-z0-9_]*\z/
   # A name define_method installs, or a Symbol an expansion loads: an identifier, optionally ending in ?, ! or =.
   METHOD_NAME = /\A[A-Za-z_][A-Za-z0-9_]*[?!=]?\z/
+  # Operator method names. A loop that installs one registers nothing (a body is registered under an identifier name),
+  # but names_only (unregistered_define_names) still counts the name as installed.
+  OPERATOR_METHOD_NAMES = %w[[] []= + - * / % ** == != < > <= >= <=> === =~ !~ ! ~ +@ -@ << >> & | ^ `].to_set.freeze
   STEP_LIMIT = 200_000
 
   Sym = Struct.new(:name)
@@ -129,7 +132,9 @@ module LoopInstallers
       Walker.new(irep, ireps, registry, by_index).run.each do |site|
         if site.is_a?(String)
           refused[site] += 1
-          unspellable ||= site.include?('a define_method body a method cannot spell')
+          # Either refusal leaves the names knowable: names_only waives the body shape and takes operator names.
+          unspellable ||= site.include?('a define_method body a method cannot spell') ||
+                          site.start_with?('the method name ')
         else
           recognized += 1
           register(registry, site, ireps)
@@ -348,6 +353,7 @@ module LoopInstallers
       when :STRING then @regs[insn.reg.to_i] = LoopInstallers.string_piece(@irep, insn)
       when LOAD_TRUTHY then @regs[insn.reg.to_i] = TRUTHY
       when :ARRAY, :ARRAY2 then @regs[insn.reg.to_i] = build_array(insn)
+      when :ARYPUSH then push_array(insn)
       when :HASH then @regs[insn.reg.to_i] = build_hash(insn)
       when :BLOCK then @regs[insn.reg.to_i] = BlockVal.new(@irep.reps[insn.block_index])
       when :LAMBDA, :METHOD, :TDEF, :SDEF, :TCLASS, :SCLASS, :GETIV, :GETUPVAR, :GETGV, :GETCV, :GETSV
@@ -402,6 +408,21 @@ module LoopInstallers
       items = Array.new(count) { |i| get(from + i) }
       consume(from + (kinds.size == 2 ? 1 : 0), kinds.size == 2 ? count - 1 : count)
       Cont.new(:array, items, false)
+    end
+
+    # `ARYPUSH Ra n` appends Ra+1..Ra+n to the Array in Ra: mrbc builds a literal longer than its
+    # register window (`%i[...]` of more than 63 elements) as an ARRAY and then ARYPUSH chunks. The
+    # Array is the same object afterwards, so every register holding it sees the new items.
+    def push_array(insn)
+      to = insn.reg.to_i
+      count = insn.typed[1].value
+      target = @regs[to]
+      if target.is_a?(Cont) && target.kind == :array
+        target.items.concat(Array.new(count) { |i| get(to + 1 + i) })
+      else
+        @regs[to] = OPAQUE
+      end
+      consume(to + 1, count)
     end
 
     def build_hash(insn)
@@ -644,7 +665,8 @@ module LoopInstallers
              elsif name.is_a?(Built) then name.text
              else refuse('a method name that is not a Symbol literal')
              end
-      refuse("the method name #{text.inspect}") unless text.match?(METHOD_NAME)
+      refuse("the method name #{text.inspect}") unless text.match?(METHOD_NAME) ||
+                                                      (@names_only && OPERATOR_METHOD_NAMES.include?(text))
       refuse('a define_method body that is not a literal block') unless block.is_a?(BlockVal)
       body = @ireps[block.label] or refuse('a missing define_method body')
       registers = DefineMethodSites.loop_body_captures(body, @ireps)
