@@ -633,19 +633,13 @@ while IFS= read -r -d '' w; do opts+=("$w"); done < <("${RUBY:-ruby}" "$root/scr
   std="$std" argv="$(IFS=$'\x1f'; printf '%s' "${nfcxx_argv[*]-}")" cflags="$(IFS=$'\x1f'; printf '%s' "${cflags[*]-}")" preinc="$(IFS=$'\x1f'; printf '%s' "${preinc[*]-}")" sysdirs="$(IFS=$'\x1f'; printf '%s' "${sysdirs[*]-}")")
 # the lookup and the cache log (scripts/nfcxx-cache-check.rb check, restructure step 2): the decision comes back as cc_state and
 # cc_key; the remote fetch and the hit are below, as they were
-cc_file=$(mktemp)
-"${RUBY:-ruby}" "$root/scripts/nfcxx-cache-check.rb" check --statements="$cc_file" "${opts[@]}" || { rm -f "$cc_file"; return 0; }
+cc_file=$(mktemp); cc_rc=0
+# the lookup, its cache log line, the remote tier's fetch on a local miss, and the hit (scripts/nfcxx-cache-check.rb check): the
+# decision comes back as cc_state and cc_key; status 10: the hit was copied back, and the program is done
+"${RUBY:-ruby}" "$root/scripts/nfcxx-cache-check.rb" check --statements="$cc_file" ${cache_remote:+--remote="$cache_remote"} "${opts[@]}" || cc_rc=$?
+[ $cc_rc = 0 ] || [ $cc_rc = 10 ] || { rm -f "$cc_file"; return 0; }
 . "$cc_file"; rm -f "$cc_file"
-case $cc_state in
-  hit) ;;
-  miss)
-    # a local miss is looked up in the remote tier (nfcxx-cache-io.rb remote-get; a failure is a miss)
-    [ -z "$cache_remote" ] || cache_remote_get "$cc_key" "$cache_entry" || true
-    [ -f "$cache_entry/obj" ] || return 0 ;;
-  *) return 0 ;;
-esac
-# hit: the object and its records are copied back, and the program is done
-"${RUBY:-ruby}" "$root/scripts/nfcxx-cache.rb" hit --out="$out" --entry="$cache_entry" && exit 0
+[ $cc_rc = 10 ] && exit 0
 return 0
 }
 cache_store() {  # cache_store OBJ: a whole entry appears at once (a partial copy is never a hit)
