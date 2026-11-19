@@ -161,6 +161,9 @@ class ClosedWorld
     @deferred_mixin_modules = []
     # LOADSYM of an installer or rebinder name: [irep, index, register, name] (resolve_installer_symbol_loads).
     @installer_symbol_loads = []
+    # LOADSYM of a name CodeGen's installed-name scan treats as an installer (symbol_load_proven?), same shape.
+    @name_installer_loads = []
+    @proven_symbol_loads = Set.new
     @class_constant_names = Set.new
     # CLASS ops that declare a name (not the root-level reopen of native_class_unshadowed?).
     @class_declared_names = Set.new
@@ -1709,6 +1712,7 @@ class ClosedWorld
           # An installer or rebinder name loaded as a symbol may be sent by name: its value must stay on safe paths
           # (resolve_installer_symbol_loads), not refuse the program outright.
           @installer_symbol_loads << [irep, idx, insn.reg, sym] if INSTALLER_SENDS.include?(sym) || CONST_REBINDERS.include?(sym)
+          @name_installer_loads << [irep, idx, insn.reg, sym] if NAME_INSTALLER_NAMES.include?(sym)
         when :GETCONST, :GETMCNST
           const = insn.const_name
           @basic_object_referenced = true if const == 'BasicObject'
@@ -1841,56 +1845,127 @@ class ClosedWorld
   # Names whose only use, as a value, is a read that never sends its argument: a set or key test, equality, a hash or a
   # string form. Each must be native (a Ruby method of that name could send its argument).
   INSTALLER_SAFE_READS = %w[include? key? member? == != eql? equal? === hash to_s inspect].freeze
-  INSTALLER_SYMBOL_DEPTH = 4
+  # Each step (a container, a freeze, a constant binding and its reads, an Array#+, a map(&:to_s)) is one level; the
+  # compiler's own tables chain several (`INSTALLERS = (%i[...] + ACCESSORS).freeze`), so the bound leaves room for them.
+  INSTALLER_SYMBOL_DEPTH = 10
 
   # Every LOADSYM of an installer or rebinder name must be on a safe path: its value (and any array or hash holding it, or
   # constant bound to it, read anywhere in the program) reaches only native reads. A value that reaches a send, a return,
   # an unknown container or an unknown read keeps the refusal, since mruby would send the name at run time.
   def resolve_installer_symbol_loads
     @installer_symbol_loads.each do |irep, idx, reg, _sym|
-      global!(:dynamic_install) unless installer_symbol_value_safe?(irep, idx, reg, 0)
+      if installer_symbol_value_safe?(irep, idx, reg, 0, false)
+        @proven_symbol_loads << [irep.label, idx]
+      else
+        global!(:dynamic_install)
+      end
+    end
+    # These names refuse nothing here; CodeGen's installed-name scan asks for the proof instead (symbol_load_proven?).
+    @name_installer_loads.each do |irep, idx, reg, _sym|
+      @proven_symbol_loads << [irep.label, idx] if installer_symbol_value_safe?(irep, idx, reg, 0, false)
     end
   end
 
-  def installer_symbol_value_safe?(irep, idx, reg, depth)
+  # The names CodeGen#collect_installed_names treats as installers when loaded as a symbol (NAME_INSTALLER_SENDS).
+  NAME_INSTALLER_NAMES = %w[alias_method define_method undef_method remove_method].freeze
+
+  # Whether the symbol load at +idx+ of irep +label+ was proven to stay off every send path
+  # (resolve_installer_symbol_loads): its name is then only compared, never installed by name.
+  def symbol_load_proven?(label, idx)
+    @proven_symbol_loads.include?([label, idx])
+  end
+  public :symbol_load_proven?
+
+  # +container+: the value followed is a literal Array or Hash holding the symbol (false: the symbol itself). It decides
+  # which class answers a send whose receiver is that value (receiver_read_native?).
+  def installer_symbol_value_safe?(irep, idx, reg, depth, container)
     return false if depth > INSTALLER_SYMBOL_DEPTH || reg.nil?
 
     uses = FactoryFlow.uses(irep, idx, reg)
     return false unless uses
 
-    uses.all? { |use_idx, use_reg| installer_symbol_use_safe?(irep, use_idx, use_reg, depth) }
+    uses.all? { |use_idx, use_reg| installer_symbol_use_safe?(irep, use_idx, use_reg, depth, container) }
   end
 
-  def installer_symbol_use_safe?(irep, use_idx, use_reg, depth)
+  def installer_symbol_use_safe?(irep, use_idx, use_reg, depth, container)
     insn = BytecodeIR.for(irep).source_at(use_idx)
     case insn.op
     when :ARRAY, :HASH
-      installer_symbol_value_safe?(irep, use_idx, insn.reg, depth + 1)
+      installer_symbol_value_safe?(irep, use_idx, insn.reg, depth + 1, true)
     when :CLASS, :MODULE, :SCLASS, :TCLASS
       # A class or module operand is type-checked, never sent a method: a stale temporary read here is not a send.
       true
+    when :GETMCNST
+      # OP_GETMCNST reads only regs[a], the scope of `Scope::NAME`, and type-checks it (a non-module raises TypeError):
+      # it is never sent a method. Any other register the read set reports here is not read by the VM.
+      true
+    when :EQ
+      # OP_EQ compares regs[a] with regs[a+1]: identity and numeric fast paths, else regs[a]'s `==` with regs[a+1]
+      # as its argument (vm.c). As the receiver the value's own class answers; as the argument, the receiver is
+      # unknown, so every `==` must be core.
+      use_reg == insn.reg ? receiver_read_native?('==', container) : native_only?('==')
+    when :ADD
+      # `a + b` of a literal Array: Array#+ builds a new Array holding the same elements, which is followed in turn.
+      return false unless container && literal_array_add?(irep, use_idx, insn, use_reg)
+
+      installer_symbol_value_safe?(irep, use_idx, insn.reg, depth + 1, true)
     when :SETCONST
       return false unless insn.regs&.first == use_reg
 
-      installer_constant_reads_safe?(insn.const_name.to_s, depth + 1)
+      installer_constant_reads_safe?(insn.const_name.to_s, depth + 1, container)
     when *BytecodeIR::Ops::SEND.to_a
-      # `freeze` returns its receiver (the same register, now frozen): the value continues on that register.
-      if insn.sym == 'freeze' && use_reg == insn.reg && literal_freeze_native?
-        return installer_symbol_value_safe?(irep, use_idx, insn.reg, depth + 1)
-      end
+      # OP_SSEND / OP_SSEND0 / OP_SSENDB start with regs[a] = regs[0]: the stale value in regs[a] is overwritten by self,
+      # never read (vm.c). Only an argument register of a self send is a real read.
+      return true if BytecodeIR::Ops::SELF_SEND.include?(insn.op) && use_reg == insn.reg
 
-      INSTALLER_SAFE_READS.include?(insn.sym) && native_only?(insn.sym)
+      receiver = use_reg == insn.reg
+      # `freeze` returns its receiver (the same register, now frozen): the value continues on that register.
+      if insn.sym == 'freeze' && receiver && receiver_read_native?('freeze', container)
+        return installer_symbol_value_safe?(irep, use_idx, insn.reg, depth + 1, container)
+      end
+      # `container.map(&:to_s)`: Array#map runs Symbol#to_s on each element; the result is followed as a container.
+      if insn.sym == 'map' && receiver && container && symbol_to_s_block?(irep, use_idx, insn)
+        return installer_symbol_value_safe?(irep, use_idx, insn.reg, depth + 1, true)
+      end
+      return false unless INSTALLER_SAFE_READS.include?(insn.sym)
+
+      # As the receiver, the value's own class answers (a literal Array/Hash, or a Symbol). As an argument, the receiver
+      # is unknown, so every definer of the name must be native.
+      receiver ? receiver_read_native?(insn.sym, container) : native_only?(insn.sym)
     else
       false
     end
   end
 
-  # The freeze of a literal Array or Hash (the receiver's class is known) runs the core method unless a Ruby definer
-  # sits on that class or one of its ancestors; freezes of other classes (Irep, StrictKeySet) do not matter here.
-  LITERAL_FREEZE_OWNERS = %w[Array Hash Object Kernel BasicObject Enumerable].freeze
+  # `a + b` where the followed container is one operand and the other is a literal Array (or the followed value itself):
+  # the receiver is an Array, so Array#+ answers unless a Ruby `+` sits on Array's chain.
+  def literal_array_add?(irep, use_idx, insn, use_reg)
+    return false unless receiver_read_native?('+', true)
+    return true if use_reg == insn.reg
 
-  def literal_freeze_native?
-    @registry.fetch('freeze', []).all? { |d| d.owner == '<native>' || !LITERAL_FREEZE_OWNERS.include?(d.owner) }
+    _idx, receiver = sole_definition(irep, use_idx, insn.reg)
+    use_reg == insn.reg + 1 && receiver&.op == :ARRAY
+  end
+
+  # A `map` whose block is `&:to_s` (the block register holds the Symbol :to_s) and every method it runs is core.
+  def symbol_to_s_block?(irep, use_idx, insn)
+    return false unless insn.op == :SENDB && insn.argc.to_i.zero? && insn.reg
+    return false unless receiver_read_native?('map', true) && receiver_read_native?('to_s', false) &&
+                        receiver_read_native?('to_proc', false)
+
+    _idx, block = sole_definition(irep, use_idx, insn.reg + 1)
+    loaded_symbol_name(irep, block) == 'to_s' if block && %i[LOADSYM SYMBOL].include?(block.op)
+  end
+
+  # The classes that answer a send to a literal container, or to a Symbol, before any other class could.
+  CONTAINER_READ_OWNERS = %w[Array Hash Object Kernel BasicObject Enumerable].freeze
+  SYMBOL_READ_OWNERS = %w[Symbol Object Kernel BasicObject Comparable].freeze
+
+  # +name+ sent to the value runs a core method unless a Ruby definer sits on the value's class or one of its ancestors;
+  # definers on other classes (Irep#freeze, StrictKeySet#include?) cannot answer it.
+  def receiver_read_native?(name, container)
+    owners = container ? CONTAINER_READ_OWNERS : SYMBOL_READ_OWNERS
+    @registry.fetch(name, []).all? { |d| d.owner == '<native>' || !owners.include?(d.owner) }
   end
 
   # Every definer of +name+ is native (a Ruby method of that name could send what it is given).
@@ -1899,13 +1974,13 @@ class ClosedWorld
   end
 
   # Every read of constant +name+ in the program (GETCONST and scoped GETMCNST) carries a safe value.
-  def installer_constant_reads_safe?(name, depth)
+  def installer_constant_reads_safe?(name, depth, container)
     @ireps.each_value do |irep|
       source = BytecodeIR.for(irep)
       (0...source.size).each do |i|
         read = source.source_at(i)
         next unless (read.op == :GETCONST && read.const_name.to_s == name) || (read.op == :GETMCNST && read.mcnst_name.to_s == name)
-        return false unless installer_symbol_value_safe?(irep, i, read.reg, depth)
+        return false unless installer_symbol_value_safe?(irep, i, read.reg, depth, container)
       end
     end
     true

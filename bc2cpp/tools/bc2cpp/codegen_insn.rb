@@ -178,6 +178,15 @@ class CodeGen
     when :LOADSYM
       d = insn.reg
       name = insn.sym_token
+      # QUOTED_SYMBOL: mrbc's dump quotes a symbol that is not a plain name (`:"LCF::Array1D"` prints as
+      # "LCF::Array1D"), so the token is not the name itself. Without escapes its inside is the name; with one the
+      # dump's escaping would have to be decoded, which is not done here.
+      if name&.start_with?('"')
+        inner = name[/\A"([^"\\]*)"\z/, 1]
+        return "  #error LOADSYM of a quoted symbol with escapes (#{name}) -- not in this prototype's supported subset\n" unless inner
+
+        return "  #{RegName[d]} = mrb_symbol_value(mrb_intern_cstr(M, #{c_string_literal(inner)}));\n"
+      end
       "  #{RegName[d]} = mrb_symbol_value(mrb_intern_cstr(M, \"#{name}\"));\n"
     when LOADI_PREFIX
       d = insn.reg

@@ -2914,6 +2914,31 @@ BC2CPP_MAIN = lambda do
       return bc2cpp_keep_call(M, [&] { return mrb_funcall_with_block(M, self, mid, argc, argv, blk); });
     }
   CPP
+  # KEYWORD_DYNAMIC_SEND (codegen_keyword_send.rb, keyword_dynamic_send): a blockless OP_SEND / OP_SSEND with literal
+  # keyword pairs whose callee no static proof names. `kdict` is the Hash OP_SEND packs (hash_new_from_regs), never
+  # empty. mrb_funcall_send lays out the frame as OP_SEND does (n positionals, kdict, nil block, nk = 15), checks the
+  # callee's argument count (check_argc), and reaches method_missing with the keywords, as prepare_missing does for
+  # OP_SEND. What it skips is OP_SEND's visibility check for an explicit receiver, done here first as vm.c does it:
+  # only when the method is found; private raises, protected raises unless the caller's self is a kind_of the class
+  # the method was found on. The error's argument list is the positionals only, as vis_error's (ci->n).
+  puts <<~CPP
+    [[maybe_unused]] static mrb_value bc2cpp_send_kw(mrb_state* M, mrb_value self, mrb_sym mid, mrb_int argc,
+                                                     const mrb_value* argv, mrb_value kdict, bool explicit_receiver,
+                                                     mrb_value caller_self) {
+      if (explicit_receiver) {
+        struct RClass* c = mrb_class(M, self);
+        mrb_method_t m = bc2cpp_find_method(M, &c, mid);
+        if (!MRB_METHOD_UNDEF_P(m)) {
+          bool priv = (m.flags & MRB_METHOD_PRIVATE_FL) != 0;
+          if (priv || ((m.flags & MRB_METHOD_PROTECTED_FL) && !mrb_obj_is_kind_of(M, caller_self, c))) {
+            mrb_no_method_error(M, mid, mrb_ary_new_from_values(M, argc, argv), "%s method '%n' called for %T",
+                                priv ? "private" : "protected", mid, self);
+          }
+        }
+      }
+      return bc2cpp_keep_call(M, [&] { return mrb_funcall_send(M, self, mid, argc, argv, kdict, mrb_nil_value()); });
+    }
+  CPP
   print RuntimeHeader::END_MARK
   # PROFILER_SECTION_SUPPORT: emit_profiler_section_inline calls the native
   # profiling primitives directly (profiler_section_begin/_end, frame_begin/

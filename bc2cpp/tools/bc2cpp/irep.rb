@@ -259,7 +259,9 @@ CatchHandler = Struct.new(:type, :begin_addr, :end_addr, :target, keyword_init: 
 # not ivars; module_function copies; NATIVE_SRCS names) must stay untagged:
 # tagging them would be a silent wrong-value bug, not a missed optimization.
 # `core`: the body comes from mruby's own Ruby (CoreDefs, set by the driver).
-# `installer`: :define_method for a `define_method(:x) { }` body (DefineMethodSites), else nil.
+# `installer`: :define_method_def for a `define_method(:x) { }` body (DefineMethodSites), :alias for an alias, else
+# nil. The tag is not spelled :define_method: a Symbol that names an installer is a value the installed-name scans
+# must prove is never sent (closed_world.rb symbol_load_proven?), and a tag stored in every MethodDef could not be.
 # `site`: for an accessor a loop installs (LoopInstallers), the [irep label, index] of each attr_* send
 # of that loop, else nil.
 MethodDef = Struct.new(:name, :owner, :irep, :visibility, :kind, :copy_irep, :copy_owner, :core, :installer, :site,

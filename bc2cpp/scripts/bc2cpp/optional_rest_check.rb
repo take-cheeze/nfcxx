@@ -70,8 +70,9 @@ suite.compile(KWREST) do |ireps, root|
   code = gen.compile_method(label)
   text = code.to_h[:code].to_s
   suite.check('the optional-rest-keyword-block method compiles (no #error)', code && !text.include?('#error'))
-  suite.check('the keyword rest is read from the callinfo keyword slot, not the positionals',
-              text.include?('bc2cpp_kw_ci->nk == 15 ? bc2cpp_kw_ci->stack[bc2cpp_kw_ci->n == 15 ? 2 : bc2cpp_kw_ci->n + 1]'))
+  suite.check('the keyword rest binds through mrb_get_args `:`, apart from the positionals',
+              text.match?(/mrb_kwargs bc2cpp_kwargs = \{ 0, 0, NULL, NULL, &\w+ \};/) &&
+              text.match?(/mrb_get_args\(M, "[^"]*\*:&?"/))
   suite.check('its aspec keeps the keyword hash apart and takes the block',
               code[:aspec].to_s.include?('MRB_ARGS_KEY(0, 1)') && code[:aspec].to_s.include?('MRB_ARGS_BLOCK()'))
   headers = %w[mruby.h mruby/array.h mruby/class.h mruby/hash.h mruby/numeric.h mruby/proc.h mruby/range.h mruby/string.h mruby/variable.h]

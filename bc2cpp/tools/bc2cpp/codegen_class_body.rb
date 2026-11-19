@@ -207,6 +207,10 @@ class CodeGen
         lines << compile_insn(insn, irep, owner_def, idx)
       end
     end
+    # An admitted opcode can still compile to `#error` (a send shape compile_send refuses): the body is refused, as
+    # bc2cpp_top_level_statements leaves such a statement to the VM, instead of failing the whole translation unit.
+    return [nil, [:ERROR]] if lines.include?('#error')
+
     fn = "bc2cpp_class_body_#{sanitize(owner)}#{@unit_tag}"
     code = +"#{CLASS_UNIT_DECLS}static mrb_value #{fn}(mrb_state* M) {\n"
     code << "  mrb_value self = #{body_self_expr(owner)};\n"

@@ -4,6 +4,7 @@
 
 require_relative 'define_method_sites'
 require_relative 'alias_sites'
+require_relative 'factory_flow'
 require_relative 'codegen_declared_returns'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_returns'
@@ -306,6 +307,37 @@ class CodeGen
     @symbol_instance_installed_names = symbol_installed_names && collect_installed_names(skip_class_object: true)
   end
 
+  # REFLECTIVE_INSTALLER_SENDS: `recv.send(:remove_method, :x)` (or __send__ / public_send) runs the installer it names
+  # on the literal names after it, exactly as the direct call would.
+  REFLECTIVE_SENDS = %w[send __send__ public_send].freeze
+
+  # The names a reflective send installs when every argument is a literal Symbol and the first names an installer:
+  # `send(:alias_method, :new, :old)` installs new (and, as the direct call, reads old), `send(:remove_method, :x)` x.
+  # nil when it is no such send (a computed name keeps the scan's answer to the load that fed it).
+  def reflective_installer_names(irep, idx, insn)
+    return nil unless insn.plain_fixed_argc? && insn.argc.to_i >= 2
+
+    syms = literal_symbol_args(irep, idx, insn.reg.to_i, insn.argc)
+    return nil unless syms && NAME_INSTALLER_SENDS.include?(syms.first)
+
+    [syms.first, syms.drop(1)]
+  end
+
+  # The installer-name load at +idx+ is the first literal argument of such a send and that send is its only use.
+  def reflective_installer_load?(irep, idx, load)
+    program = BytecodeIR.for(irep)
+    (2..14).each do |argc|
+      send = program.source_at(idx + argc)
+      next unless send && BytecodeIR::Ops::SEND.include?(send.op) && REFLECTIVE_SENDS.include?(send.sym)
+      next unless send.plain_fixed_argc? && send.argc.to_i == argc && send.reg.to_i + 1 == load.reg.to_i
+      next unless reflective_installer_names(irep, idx + argc, send)
+
+      uses = FactoryFlow.uses(irep, idx, load.reg)
+      return uses == Set[[idx + argc, load.reg]]
+    end
+    false
+  end
+
   def collect_installed_names(skip_class_object:, destinations_only: false)
     names = Set.new
     children = @ireps.values.flat_map(&:reps).compact.to_set
@@ -323,12 +355,33 @@ class CodeGen
           next if insn.op == :ALIAS && AliasSites.settled?(@registry, label, idx)
 
           names << insn.sym unless scoped
-        when :LOADSYM
-          return nil if NAME_INSTALLER_SENDS.include?(insn.sym)
+        when :LOADSYM, :SYMBOL
+          # A %i[] element is a SYMBOL (its name is in the pool), sendable all the same. A load the closed world proved
+          # stays off every send path (only compared, as in a lookup table) installs nothing.
+          sym = insn.op == :LOADSYM ? insn.sym : (insn.pool_index && irep.pool&.[](insn.pool_index.to_i))
+          next unless sym.is_a?(String) && NAME_INSTALLER_SENDS.include?(sym)
+          # REFLECTIVE_INSTALLER_SENDS: the load is the first literal argument of `send(:remove_method, :x)`; that send
+          # (the case below) counts the names it installs.
+          next if reflective_installer_load?(irep, idx, insn)
+          return nil unless @closed_world&.symbol_load_proven?(label, idx)
         when :SEND, :SEND0, :SENDB, :SSEND, :SSEND0, :SSENDB
+          if REFLECTIVE_SENDS.include?(insn.sym)
+            installer, reflected = reflective_installer_names(irep, idx, insn)
+            next unless reflected
+
+            # destinations_only: `send(:alias_method, :new, :old)` installs new and leaves old as it was.
+            reflected = reflected.first(1) if destinations_only && installer == 'alias_method'
+            names.merge(reflected) unless scoped && BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op)
+            next
+          end
           next unless NAME_INSTALLER_SENDS.include?(insn.sym)
           # DEFINE_METHOD_SITES: the registry defines this one, so it names nothing unknown.
           next if insn.sym == 'define_method' && DefineMethodSites.settled?(@registry, irep, idx, @ireps)
+          # UNREGISTERED_DEFINE_NAMES: a literal loop whose names are known though its body is not registered.
+          if insn.sym == 'define_method' && (looped = LoopInstallers.unregistered_define_names[[label, idx]])
+            names.merge(looped) unless scoped && BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op)
+            next
+          end
           # ALIAS_SITES: so is a settled class-body alias_method, and it leaves `old` as it was.
           next if insn.sym == 'alias_method' && AliasSites.settled?(@registry, label, idx)
 

@@ -774,20 +774,17 @@ class CodeGen
       call_args += kw_table.flat_map { |kw| keyword_param_names(kw) }
       out << entry_return_line(label, d, impl_name, "#{call_args.join(', ')}")
     elsif kwrest_only
-      # KEYWORD_REST_ONLY: the positionals bind exactly; the keyword hash is the callinfo's keyword slot (read as the
-      # has_rest branch below does), or a fresh empty Hash when the call passed none.
+      # KEYWORD_REST_ONLY: the positionals bind exactly and the keywords go to the rest Hash, both through one
+      # mrb_get_args `:` (a format without `:` counts the keyword hash as one more positional). `:` hands over the
+      # call's keyword hash as OP_ENTER does, or a fresh empty Hash when the call passed none.
       mand_names = arg_names.first(mand)
       kwrest_name = arg_names.last
       mand_names.each_with_index { |a, i| out << "  #{native_c_type(arg_native_types[i])} #{a};\n" }
-      if mand.zero?
-        out << "  bc2cpp_check_argc(M, 0, 0);\n"
-      else
-        fmt = arg_native_types.first(mand).map { |t| t == :fixnum ? 'i' : (t == :symbol ? 'n' : 'o') }.join
-        out << "  mrb_get_args(M, \"#{fmt}\", #{mand_names.map { |a| "&#{a}" }.join(', ')});\n"
-      end
-      out << "  mrb_callinfo* bc2cpp_kw_ci = M->c->ci;\n"
-      out << "  mrb_value #{kwrest_name} = bc2cpp_kw_ci->nk == 15 ? bc2cpp_kw_ci->stack[bc2cpp_kw_ci->n == 15 ? 2 : bc2cpp_kw_ci->n + 1] : mrb_nil_value();\n"
-      out << "  if (!mrb_hash_p(#{kwrest_name})) #{kwrest_name} = mrb_hash_new(M);\n"
+      fmt = arg_native_types.first(mand).map { |t| t == :fixnum ? 'i' : (t == :symbol ? 'n' : 'o') }.join + ':'
+      out << "  mrb_value #{kwrest_name} = mrb_nil_value();\n"
+      out << "  mrb_kwargs bc2cpp_kwargs = { 0, 0, NULL, NULL, &#{kwrest_name} };\n"
+      ptrs = mand_names.map { |a| "&#{a}" } + ['&bc2cpp_kwargs']
+      out << "  mrb_get_args(M, \"#{fmt}\", #{ptrs.join(', ')});\n"
       out << entry_return_line(label, d, impl_name, "#{(mand_names + [kwrest_name]).join(', ')}")
     elsif has_rest
       # REST_ARG_SUPPORT: mrb_get_args `*` returns a pointer into the live VM stack,
@@ -807,6 +804,15 @@ class CodeGen
       fmt += '|' + 'o' * opt if opt_names.any?
       fmt += '*'
       ptrs = (mand_names.map { |a| "&#{a}" } + opt_names.map { |a| "&#{a}" } + ['&bc2cpp_rest_ptr', '&bc2cpp_rest_len']).join(', ')
+      if kwrest_name
+        # The keyword rest binds through `:`: without it mrb_get_args counts the call's keyword hash as one more
+        # positional, so the hash would land in an optional or the rest Array. `:` hands over the call's keyword hash
+        # as OP_ENTER does, or a fresh empty Hash when the call passed none.
+        out << "  mrb_value #{kwrest_name} = mrb_nil_value();\n"
+        out << "  mrb_kwargs bc2cpp_kwargs = { 0, 0, NULL, NULL, &#{kwrest_name} };\n"
+        fmt += ':'
+        ptrs += ', &bc2cpp_kwargs'
+      end
       # REST_BLOCK_COMBINED_SUPPORT: `*` and `&` combine in one mrb_get_args call.
       # OPTIONAL_REST_YIELD: a bare `yield` (needs_blk_param) extracts the block the same way.
       if has_blk || needs_blk_param
@@ -817,13 +823,6 @@ class CodeGen
       out << "  bc2cpp_check_argc(M, #{mand}, -1);\n"
       out << "  mrb_get_args(M, \"#{fmt}\", #{ptrs});\n"
       out << "  mrb_value #{rest_name} = mrb_ary_new_from_values(M, bc2cpp_rest_len, bc2cpp_rest_ptr);\n"
-      if kwrest_name
-        # The keyword hash sits in the callinfo's keyword slot (vm.c mrb_ci_kidx: n+1, or 2 when n is packed); an absent
-        # one is nil, and the parameter is a fresh empty Hash, as OP_ENTER makes it.
-        out << "  mrb_callinfo* bc2cpp_kw_ci = M->c->ci;\n"
-        out << "  mrb_value #{kwrest_name} = bc2cpp_kw_ci->nk == 15 ? bc2cpp_kw_ci->stack[bc2cpp_kw_ci->n == 15 ? 2 : bc2cpp_kw_ci->n + 1] : mrb_nil_value();\n"
-        out << "  if (!mrb_hash_p(#{kwrest_name})) #{kwrest_name} = mrb_hash_new(M);\n"
-      end
       call_args = mand_names + opt_names + [rest_name]
       call_args << kwrest_name if kwrest_name
       call_args << 'bc2cpp_blk' if has_blk || needs_blk_param
@@ -843,7 +842,8 @@ class CodeGen
       # OPTIONAL_ARG_SUPPORT: optional positions start as mrb_nil_value(): `|` leaves
       # an omitted out-param untouched, and reading uninitialized memory would be UB
       # even though the default-value code overwrites it.
-      # OPTIONAL_KWREST: the keyword rest is the last parameter but not a positional: it is read from the callinfo below.
+      # OPTIONAL_KWREST: the keyword rest is the last parameter but not a positional: mrb_get_args `:` binds it (a format
+      # without `:` would count the call's keyword hash as one more positional, so as the optional).
       pos_names = has_kwrest ? arg_names[0...-1] : arg_names
       pos_names.each_with_index do |a, i|
         default = i >= mand ? ' = mrb_nil_value()' : ''
@@ -858,6 +858,11 @@ class CodeGen
         i == mand && opt.positive? ? "|#{ch}" : ch
       end.join
       ptrs = pos_names.map { |a| "&#{a}" }.join(', ')
+      if has_kwrest
+        out << "  mrb_kwargs bc2cpp_kwargs = { 0, 0, NULL, NULL, &#{arg_names.last} };\n"
+        fmt += ':'
+        ptrs += ', &bc2cpp_kwargs'
+      end
       # BLKPUSH_YIELD_SUPPORT: mrb_get_args `&` is this call's block (src/class.c
       # `case '&':`), nil when none (plain `&`, not `&!`), appended to the same call.
       # Neither needs_blk_param nor has_blk methods have optionals.
@@ -870,12 +875,6 @@ class CodeGen
       # where mrb_get_args says `1..2`.
       out << "  bc2cpp_check_argc(M, #{mand}, #{mand + opt});\n" if opt.positive?
       out << "  mrb_get_args(M, \"#{fmt}\", #{ptrs});\n"
-      if has_kwrest
-        kwrest_name = arg_names.last
-        out << "  mrb_callinfo* bc2cpp_kw_ci = M->c->ci;\n"
-        out << "  #{kwrest_name} = bc2cpp_kw_ci->nk == 15 ? bc2cpp_kw_ci->stack[bc2cpp_kw_ci->n == 15 ? 2 : bc2cpp_kw_ci->n + 1] : mrb_nil_value();\n"
-        out << "  if (!mrb_hash_p(#{kwrest_name})) #{kwrest_name} = mrb_hash_new(M);\n"
-      end
       if opt.positive?
         # OPTIONAL_ARG_SUPPORT: mrb_get_argc(M) - mand is the quantity OP_ENTER uses to
         # pick the jump-table entry. The clamp to [0, opt] is a formality

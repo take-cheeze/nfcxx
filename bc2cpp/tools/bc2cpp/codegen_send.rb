@@ -101,6 +101,11 @@ class CodeGen
                                     splat: RegName[insn.reg + 1 + n])
         return code if code
       end
+      # KEYWORD_DYNAMIC_SEND: literal keyword pairs no static path resolved keep OP_SEND's by-name send.
+      dynamic = keyword_dynamic_send(insn, self_implicit: self_implicit, irep: irep, idx: idx,
+                                           call_receiver: call_receiver, call_arguments: call_arguments)
+      return dynamic if dynamic
+
       return "  #error SEND/SSEND :#{name} has a splat and/or keyword argument list (#{insn.argc_text}) -- not in this prototype's supported subset\n"
     end
 

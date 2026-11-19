@@ -329,20 +329,34 @@ class CodeGen
   end
 
   # RUNTIME_DEF_DEVIRT_GUARD: may `name` be bound statically in the method being
-  # compiled? Always true unless the method patches at runtime
-  # (@runtime_installed_names non-nil).
+  # compiled? Blocked when the method patches it at runtime (@runtime_installed_names)
+  # and, in a closed world, when the program installs or removes it where the registry
+  # does not see (INSTALLED_NAME_DEVIRT_GUARD).
   def devirt_blocked_name?(name)
+    return true if installed_name_blocks_devirt?(name)
     return false unless @runtime_installed_names
     return true if @runtime_installed_names == :unknown
 
     @runtime_installed_names.include?(name.to_s)
   end
 
+  # INSTALLED_NAME_DEVIRT_GUARD: symbol_installed_names lists the names some method of the program
+  # aliases, defines, undefines or removes outside the registry, and is nil when a name is computed. A
+  # static bind of such a name (MONO, lexical self, ...) could run a body the program removed, or miss
+  # one it added, so it keeps dispatching by name; with no list, no name binds statically. Only in a
+  # closed world: without one, every loaded installer Symbol leaves the list nil.
+  def installed_name_blocks_devirt?(name)
+    return false unless @closed_world
+
+    installed = symbol_installed_names
+    installed.nil? || installed.include?(name.to_s)
+  end
+
   # RUNTIME_DEF_DEVIRT_GUARD: marker kinds that are real dynamic dispatch (runtime
   # lookup honours a singleton patch). Every other `// KIND :name` marker is
   # audited as a static bind, so a new marker kind defaults to the safe side.
   RUNTIME_DEF_DYNAMIC_MARKERS = %w[
-    POLY SPLAT KEYWORD_HASH_POSITIONAL EXPLICIT_BLOCK_ARG
+    POLY SPLAT KEYWORD_HASH_POSITIONAL KEYWORD_DYNAMIC_SEND EXPLICIT_BLOCK_ARG
     BLOCK_FALLBACK LAMBDA_FALLBACK SDEF_FALLBACK TDEF_FALLBACK
     SCLASS_FALLBACK
   ].freeze

@@ -114,6 +114,21 @@ check.call('a computed name built from a Symbol and a String registers both buil
            kept == 2 && dropped.zero? && defined_by.call(registry, 'x_dn_a').size == 1 && defined_by.call(registry, 'y_dn_b').size == 1)
 _r, _i, untrusted_kept, = registry_of.call(WRAP.call("  %i[dn_a].each { |n| define_method(\"x_\#{n}\") { 1 } }\n"), trusted: false)
 check.call('an untrusted world drops the built name with every other define_method site', untrusted_kept.zero?)
+# mrbc builds a literal of more than 63 elements as ARRAY then ARYPUSH chunks; the Walker appends the chunks.
+long_names = (1..70).map { |i| "dl_#{i}" }
+registry, _ireps, kept, dropped, = registry_of.call(WRAP.call("  %i[#{long_names.join(' ')}].each { |n| define_method(n) { 1 } }\n"))
+check.call('a 70-name literal (ARRAY + ARYPUSH) registers every name',
+           kept == 70 && dropped.zero? && long_names.all? { |n| defined_by.call(registry, n).size == 1 })
+# UNREGISTERED_DEFINE_NAMES: a loop that registers nothing for its body shape or an operator name still installs
+# exactly its names, so the installed names stay known instead of nil.
+registry, _ireps, kept, _dropped, installed = registry_of.call(
+  WRAP.call("  %i[du_a du_b].each { |n| define_method(n) { |*a, **o, &b| super(*a, **o, &b) } }\n")
+)
+check.call('a loop with a body no method can spell installs its names unregistered',
+           kept.zero? && defined_by.call(registry, 'du_a').empty? && installed && installed.superset?(Set['du_a', 'du_b']))
+registry, _ireps, kept, _dropped, installed = registry_of.call(WRAP.call("  %i[[] du_c].each { |n| define_method(n) { 1 } }\n"))
+check.call('a loop installing an operator name installs its names unregistered',
+           kept.zero? && defined_by.call(registry, 'du_c').empty? && installed && installed.superset?(Set['[]', 'du_c']))
 registry, _ireps, kept, = registry_of.call("%i[dn_a].each { |n| define_method(n) { 1 } }\n")
 check.call('a loop at top level registers nothing', kept.zero? && defined_by.call(registry, 'dn_a').empty?)
 
