@@ -29,6 +29,10 @@ for extconf in $(find "$SRC" -type f -name extconf.rb -not -path '*/test/*' | so
   fi
   o="$OUT/$n"; rm -rf "$o"
   ruby "$REPO/tools/cext2mrbgem/convert_mrbgem.rb" --name "$n" --scanner auto "${flags[@]}" "$ext" "$o" >/dev/null 2>&1
+  if [ ! -f "$o/REFUSALS.txt" ]; then
+    # the converter did not finish (no REFUSALS.txt): a crash is an open problem, not a clean gem
+    printf '%-14s CRASHED (no REFUSALS.txt)\n' "$n"; to=$((to+1)); continue
+  fi
   all=$(grep -E '^[^ ]+:[0-9]+ ' "$o/REFUSALS.txt" 2>/dev/null)
   open=$(printf '%s\n' "$all" | grep -v '^$' | grep -cv 'stuck')
   stk=$(printf '%s\n' "$all" | grep -v '^$' | grep -c 'stuck')

@@ -1,7 +1,7 @@
 #include <ruby.h>
 
-/* require of a feature the build provides (time: mruby-time) maps to the fork's require; one it does not (stringio) stays a
-   stuck point, as does a feature name that is not a literal */
+/* rb_require of a literal feature maps to the fork's require: time (mruby-time) and stringio (mruby-stringio) are provided by
+   a build gem, so they become dependencies; a non-literal name cannot be checked and stays a stuck point */
 void
 Init_api_require(void)
 {

@@ -13,9 +13,22 @@
     "OnigRegex": "OnigRegex",
     "regex_t": "regex_t",
     "OnigRegion": "OnigRegion",
-    "re_registers": "re_registers"
+    "re_registers": "re_registers",
+    "OnigEncoding": "OnigEncoding",
+    "OnigErrorInfo": "OnigErrorInfo",
+    "OnigOptionType": "OnigOptionType",
+    "OnigSyntaxType": "OnigSyntaxType",
+    "OnigCaptureTreeNode": "OnigCaptureTreeNode"
   },
-  "require_features": ["time", "encoding", "bigdecimal", "date", "strscan"],
+  "require_gems": {
+    "time": "mruby-time",
+    "encoding": "mruby-encoding",
+    "stringio": "mruby-stringio",
+    "bigdecimal": "bigdecimal",
+    "date": "date",
+    "strscan": "strscan",
+    "onig_regexp": "mruby-onig-regexp"
+  },
   "type_check_refused": {
     "_comment": "Check_Type and rb_check_type (handler check_type in convert_mrbgem.rb) map a T_ name only when its entry has type_check exact or caveat. These names are refused with the reason given here.",
     "T_OBJECT": "mruby's MRB_TT_OBJECT does not match CRuby's T_OBJECT: CRuby allocates exceptions as T_OBJECT (ruby4src error.c:3583 via object.c:118), mruby allocates them as MRB_TT_EXCEPTION (src/error.c:42), so the check would reject exceptions",
@@ -34,8 +47,7 @@
     "T_COMPLEX": "stuck point (gem dependency): a Complex test is the mruby-complex class test, which needs the state and the gem (the decision is made: the gem is a dependency when the test is emitted); a bare use has no test to make here",
     "_comment": "A name with no api_map entry is refused with the reason given here (the converter's no-entry path). PRIsVALUE is converted where rb_raise and rb_sprintf take it; elsewhere it is an argument of rb_enc_sprintf, which takes an rb_encoding *.",
     "onig_foreach_name": "stuck point (onig_foreach_name): onig_foreach_name calls its callback with only the user data, and the callback (strscan's named_captures_iter) needs the mruby state; the rb_hash_foreach-style callback wrapper that carries it is not implemented for this call (the next Onigmo item)",
-    "PRIsVALUE": "stuck point (Encoding): PRIsVALUE outside rb_raise and rb_sprintf is an argument of rb_enc_sprintf, which takes an rb_encoding *; the fork has no Encoding (accepted stuck point)",
-    "rb_str_conv_enc": "stuck point (Encoding): the conversion between encodings; the fork has no Encoding (accepted stuck point)",
+    "PRIsVALUE": "stuck point (PRIsVALUE): PRIsVALUE outside the format of rb_raise, rb_sprintf and rb_enc_sprintf (a VALUE argument of another call) is not converted; it has no mruby form in this position",
     "rb_thread_current": "stuck point (Thread): the fork has no Thread (accepted stuck point)",
     "rb_thread_local_aref": "stuck point (Thread): thread-local storage; the fork has no Thread (accepted stuck point)",
     "rb_thread_local_aset": "stuck point (Thread): thread-local storage; the fork has no Thread (accepted stuck point)",
@@ -49,11 +61,8 @@
     "RUBY_T_NONE": "stuck point: the fork has no T_NONE tag (the MRB_TT enum, include/mruby/value.h:106-131); the empty-object marker has no mruby value kind",
     "rb_time_timespec_new": "stuck point (Time offset): mruby-time's Time has only UTC and LOCAL timezones (mrbgems/mruby-time/include/mruby/time.h:15-20; getlocal takes no offset), so a fixed UTC offset from the caller cannot be represented",
     "rb_encoder": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
-    "rb_enc_codepoint_len": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
     "rb_enc_interned_str_cstr": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
-    "rb_enc_raise": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
     "rb_marshal_load": "stuck point: the fork has no Marshal (no marshal mrbgem in mrbgems/), so there is no loader to call",
-    "rb_enc_sprintf": "stuck point (Encoding): rb_enc_sprintf takes an rb_encoding *; the fork has no Encoding (accepted stuck point)",
     "rb_define_alloc_func": "stuck point (per-class allocator): the fork has only the global allocf, no per-class allocator (accepted stuck point)"
   },
   "includes": {
@@ -223,6 +232,13 @@
       "needs_mrb": true,
       "template": "((long)mrb_int($m, $0))",
       "caveat": "NUM2LONG converts through mruby's integer conversion (mrb_to_int, the mrb_int macro): a Float is truncated, a non-numeric value raises TypeError"
+    },
+    "UINT2NUM": {
+      "kind": "call",
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "mruby's Integer (mrb_fixnum_value); the value is converted to mrb_int, as INT2NUM (an unsigned value above the mrb_int range is not represented)"
     },
     "INT2NUM": {
       "kind": "call",
@@ -523,6 +539,111 @@
       "arity": 2,
       "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): rb_encoding is a static descriptor for UTF-8 or ASCII-8BIT; no transcoding"
     },
+    "onig_new": {
+      "kind": "call",
+      "mruby": "onig_new",
+      "arity": 7,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type"
+    },
+    "onig_region_new": {
+      "kind": "call",
+      "mruby": "onig_region_new",
+      "arity": 2,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type"
+    },
+    "onig_region_copy": {
+      "kind": "call",
+      "mruby": "onig_region_copy",
+      "arity": 2,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type"
+    },
+    "onig_region_resize": {
+      "kind": "call",
+      "mruby": "onig_region_resize",
+      "arity": 2,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type"
+    },
+    "onig_name_to_group_numbers": {
+      "kind": "call",
+      "mruby": "onig_name_to_group_numbers",
+      "arity": 4,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type"
+    },
+    "onig_number_of_names": {
+      "kind": "call",
+      "mruby": "onig_number_of_names",
+      "arity": 1,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type"
+    },
+    "onig_number_of_captures": {
+      "kind": "call",
+      "mruby": "onig_number_of_captures",
+      "arity": 1,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type"
+    },
+    "onig_error_code_to_str": {
+      "kind": "call",
+      "mruby": "onig_error_code_to_str",
+      "arity": 3,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type"
+    },
+    "onig_get_encoding": {
+      "kind": "call",
+      "mruby": "onig_get_encoding",
+      "arity": 1,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type"
+    },
+    "onig_get_options": {
+      "kind": "call",
+      "mruby": "onig_get_options",
+      "arity": 1,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type"
+    },
+    "ONIG_NORMAL": {
+      "kind": "macro",
+      "mruby": "ONIG_NORMAL",
+      "caveat": "the oniguruma constant of the same name (mruby/onigmo.h)"
+    },
+    "ONIG_MAX_ERROR_MESSAGE_LEN": {
+      "kind": "macro",
+      "mruby": "ONIG_MAX_ERROR_MESSAGE_LEN",
+      "caveat": "the oniguruma constant of the same name (mruby/onigmo.h)"
+    },
+    "ONIG_OPTION_EXTEND": {
+      "kind": "macro",
+      "mruby": "ONIG_OPTION_EXTEND",
+      "caveat": "the oniguruma constant of the same name (mruby/onigmo.h)"
+    },
+    "ONIG_OPTION_MULTILINE": {
+      "kind": "macro",
+      "mruby": "ONIG_OPTION_MULTILINE",
+      "caveat": "the oniguruma constant of the same name (mruby/onigmo.h)"
+    },
+    "ONIG_OPTION_SINGLELINE": {
+      "kind": "macro",
+      "mruby": "ONIG_OPTION_SINGLELINE",
+      "caveat": "the oniguruma constant of the same name (mruby/onigmo.h)"
+    },
+    "ONIG_OPTION_CAPTURE_GROUP": {
+      "kind": "macro",
+      "mruby": "ONIG_OPTION_CAPTURE_GROUP",
+      "caveat": "the oniguruma constant of the same name (mruby/onigmo.h)"
+    },
+    "ONIG_ENCODING_UTF8": {
+      "kind": "macro",
+      "mruby": "ONIG_ENCODING_UTF8",
+      "caveat": "the oniguruma constant of the same name (mruby/onigmo.h)"
+    },
+    "ONIG_SYNTAX_RUBY": {
+      "kind": "macro",
+      "mruby": "ONIG_SYNTAX_RUBY",
+      "caveat": "the oniguruma constant of the same name (mruby/onigmo.h)"
+    },
+    "ONIG_MAX_CAPTURE_NUM": {
+      "kind": "macro",
+      "mruby": "ONIG_MAX_CAPTURE_NUM",
+      "caveat": "the oniguruma constant of the same name (mruby/onigmo.h)"
+    },
     "onig_region_init": {
       "kind": "call",
       "mruby": "onig_region_init",
@@ -691,6 +812,44 @@
       "mruby": "rb_enc_associate_index",
       "arity": 2,
       "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): three encodings (ASCII-8BIT, UTF-8, US-ASCII), no transcoding"
+    },
+"rb_enc_codepoint_len": {
+      "kind": "call",
+      "mruby": "rb_enc_codepoint_len",
+      "arity": 4,
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "the fork's rb_enc_codepoint_len (mrbgems/mruby-encoding): UTF-8 decoded; an invalid sequence raises ArgumentError"
+    },
+    "rb_enc_from_encoding": {
+      "kind": "call",
+      "mruby": "rb_enc_from_encoding",
+      "arity": 1,
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "the fork's rb_enc_from_encoding: the Encoding name string (CRuby's Encoding object); nil for NULL"
+    },
+    "rb_str_conv_enc": {
+      "kind": "call",
+      "mruby": "rb_str_conv_enc",
+      "arity": 3,
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "the fork's rb_str_conv_enc: an ASCII-only string takes the target encoding; anything else is returned unchanged (no transcoding)"
+    },
+    "rb_enc_raise": {
+      "kind": "special",
+      "handler": "rb_enc_raise",
+      "needs_mrb": true
+    },
+    "rb_enc_sprintf": {
+      "kind": "call",
+      "mruby": "rb_enc_sprintf",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "arity": 3,
+      "format_arg": 1,
+      "caveat": "the fork's rb_enc_sprintf (mrbgems/mruby-encoding): mrb_vformat, tagged with the encoding; PRIsVALUE in the format becomes %S, as rb_sprintf"
     },
     "rb_enc_check": {
       "kind": "call",
@@ -2209,7 +2368,6 @@
     },
     "rb_struct_new": {"kind": "refuse", "reason": "stuck point (Struct): Struct is mrbgems/mruby-struct, not in the core, and rb_struct_new builds a CRuby Struct instance with its member layout (accepted stuck point)"},
     "rb_struct_define": {"kind": "refuse", "reason": "stuck point (Struct): Struct is mrbgems/mruby-struct, not in the core; rb_struct_define creates a CRuby Struct class with its accessors (accepted stuck point)"},
-    "rb_enc_from_encoding": {"kind": "refuse", "reason": "stuck point (Encoding): an rb_encoding value; the fork has no Encoding (accepted stuck point)"},
     "rb_str_encode": {"kind": "refuse", "reason": "stuck point (Encoding): transcoding a string needs CRuby's encoding converter; the fork has no Encoding (accepted stuck point)"},
     "RB_ENC_INTERNED_STR_NULL_CHECK": {"kind": "refuse", "reason": "stuck point (Encoding): the null-encoding check of an interned string; the fork has no Encoding (accepted stuck point)"},
     "RBIGNUM_POSITIVE_P": {"kind": "refuse", "reason": "stuck point (Bignum): the fork has no Bignum (no MRB_TT_BIGINT tag, no mrbgem big-integer class) (accepted stuck point)"},
@@ -3062,6 +3220,9 @@
   "special_arg_positions_class_only": {
     "rb_raise": [
       0
+    ],
+    "rb_enc_raise": [
+      1
     ],
     "rb_define_method": [
       0
