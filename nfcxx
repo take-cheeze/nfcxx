@@ -501,23 +501,12 @@ if [ $emit_c = 1 ]; then
   exit 0
 fi
 
-if [ -n "$sanitize" ]; then
-  # The checks live in the Path B IR (docs/notes/ubsan.md); the names are gcc's, and not every one is implemented.
-  # The validation is scripts/nfcxx-sanitize.rb (stage B3): its refusals are the bash's messages, status 2.
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-sanitize.rb" check "$sanitize" "$freestanding" || exit $?
-  pb_flags+=(--sanitize="$sanitize")   # scripts/pathb-cc.rb: the front end's checks (NFCXX_IR_SANITIZE)
-  backend=pathb
-fi
-if [ $safeptr = 1 ]; then
-  # The checks are emitted from the Path B IR (docs/notes/safe-pointers.md), and the runtime replaces malloc and free.
-  [ $freestanding = 0 ] || { echo "nfcxx: -fsafe-pointers needs Path B, which compiles hosted programs only" >&2; exit 2; }
-  [ $asan = 0 ] || { echo "nfcxx: -fsafe-pointers and -fsanitize=address both replace malloc; use one" >&2; exit 2; }
-  pb_flags+=(--safe-pointers)
-  backend=pathb
-fi
-# --backend=pathb, or NFCXX_PATH=b: the Path B compiler (docs/notes/pathb-hosted.md). Asked for by name, so a file Path B cannot
-# build is an error, not a fallback to gcc (the fallback re-run would also take NFCXX_PATH=b back to Path B).
-[ $path_b = 0 ] || { backend=pathb; default_backend=0; }
+# The sanitizer checks (docs/notes/ubsan.md: the checks live in the Path B IR), -fsafe-pointers (docs/notes/safe-pointers.md) and
+# the Path B override (--backend=pathb or NFCXX_PATH=b: asked for by name, so a file Path B cannot build is an error, not a
+# fallback to gcc). scripts/nfcxx-setup.rb stage gives their refusals (the bash's messages, status 2) and their statements, in
+# this order (docs/notes/driver-setup-stage.md).
+stage_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-setup.rb" stage sanitize="$sanitize" freestanding="$freestanding" safeptr="$safeptr" asan="$asan" path_b="$path_b") || exit $?
+eval "$stage_sh"
 [ $ir_opt_set = 0 ] || pb_flags+=(--ir-opt="$ir_opt")
 [ $asan = 0 ] || [ $backend != pathb ] || pb_flags+=(--asan)   # the SSA emitter's __asan_load/store checks (scripts/pathb-cc.rb)
 [ $pic = 0 ] || pb_flags+=(--pic)   # -shared / -fPIC: scripts/pathb-cc.rb --pic reads a preemptible symbol's address through the GOT
