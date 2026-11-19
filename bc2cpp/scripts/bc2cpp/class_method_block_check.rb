@@ -80,7 +80,7 @@ end
 DYNAMIC = 'mrb_funcall_with_block('
 # The by-name block send as an else: the send itself, or its owner call carrying the block (BLOCK_OWNER_CALL) when
 # the closed world names every owner.
-ELSE_SEND = /mrb_funcall_with_block\(|bc2cpp_owner_call\(M, [^;]*BC2CPP_OWNERS\([^)]*\), (?!mrb_nil_value\(\))/
+ELSE_SEND = /mrb_funcall_with_block\(|bc2cpp_owner_call\(M, [^;]*BC2CPP_OWNERS(?:_D)?\(.*?\), (?!mrb_nil_value\(\))/
 
 baseline_dir = Dir.mktmpdir('bc2cpp-class-method-block')
 at_exit { FileUtils.remove_entry(baseline_dir) }
