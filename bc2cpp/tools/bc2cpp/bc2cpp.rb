@@ -3043,23 +3043,25 @@ BC2CPP_MAIN = lambda do
   owner_class_slots = gen.owner_class_slots
   program_superclasses = gen.program_superclasses
   unregistered = gen.unregistered_keys
+  # CROSS_UNIT_ROW (CodeGen#other_unit_direct_entry): a row for a method another gem of this link compiles.
+  other_unit_entry = ENV['BC2CPP_CROSS_UNIT_ROW'] == '0' ? nil : gen.method(:other_unit_direct_entry)
   # GUARD_VIOLATION: name the method a violation site sits in.
   # Fuse the three per-method rewrite passes (@@SITE@@ substitution, DIRECT_RAISE, SymbolCache.rewrite) into one.
   compiled.each do |m|
     code = m[:code].gsub('@@SITE@@') { "#{m[:owner]}##{m[:name]}".gsub(/["\\]/) { |c| "\\#{c}" } }
-    code = OwnerCallDirect.rewrite(code, owner_call_direct, owner_class_slots, program_superclasses, unregistered)
+    code = OwnerCallDirect.rewrite(code, owner_call_direct, owner_class_slots, program_superclasses, unregistered, other: other_unit_entry)
     m[:code] = SymbolCache.rewrite(code, symbol_table)
   end
   # The class units' text takes the same passes as the compiled methods (a unit's helper calls are named the same way).
   class_units = class_units.map do |unit|
     code = unit[:code].gsub('@@SITE@@') { unit[:path].to_s.gsub(/["\\]/) { |c| "\\#{c}" } }
-    code = OwnerCallDirect.rewrite(code, owner_call_direct, owner_class_slots, program_superclasses, unregistered)
+    code = OwnerCallDirect.rewrite(code, owner_call_direct, owner_class_slots, program_superclasses, unregistered, other: other_unit_entry)
     unit.merge(code: SymbolCache.rewrite(code, symbol_table))
   end
   # TOP_LEVEL_STATEMENTS takes the same passes: its sends are named calls too (a `Class.new(Base)` constant write is an owner call).
   unless top_level_code.empty?
     code = top_level_code.gsub('@@SITE@@', 'top-level')
-    code = OwnerCallDirect.rewrite(code, owner_call_direct, owner_class_slots, program_superclasses, unregistered)
+    code = OwnerCallDirect.rewrite(code, owner_call_direct, owner_class_slots, program_superclasses, unregistered, other: other_unit_entry)
     top_level_code = SymbolCache.rewrite(code, symbol_table)
   end
   # Fused single pass over the compiled methods: all of these closed-world diagnostic counts used to
@@ -3192,6 +3194,7 @@ BC2CPP_MAIN = lambda do
   compiled.each do |m|
     print ShardOutput.unit_mark(m[:owner]) if shards > 1
     print m[:code]
+    print gen.cross_unit_thunk(m)
   end
   print ShardOutput::HOOKS_MARK if shards > 1
   print top_level_code
