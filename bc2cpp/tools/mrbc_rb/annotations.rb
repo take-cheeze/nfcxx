@@ -66,9 +66,12 @@ module MrbcRb
     SEND_OPS = %i[SEND SEND0 SSEND SSEND0 SENDB SSENDB].to_h { |o| [o, true] }.freeze
     TRACKED = (%i[CLASS MODULE SCLASS EXEC TDEF SDEF DEF ALIAS UNDEF SETCONST SETMCNST GETCONST GETMCNST] + SEND_OPS.keys).to_h { |o| [o, true] }.freeze
     # The sends that get a `call` record (see above): mixins, name-taking sends and visibility/definition sends.
-    CALL_NAMES = %i[include prepend extend send __send__ public_send method instance_method define_method define_singleton_method
-                    alias_method attr attr_reader attr_writer attr_accessor respond_to? private public protected module_function
-                    private_class_method public_class_method private_constant].to_h { |n| [n, true] }.freeze
+    # A literal Hash (no block runs over the names) so the closed world can prove they are only looked up.
+    CALL_NAMES = { include: true, prepend: true, extend: true, send: true, __send__: true, public_send: true,
+                  method: true, instance_method: true, define_method: true, define_singleton_method: true,
+                  alias_method: true, attr: true, attr_reader: true, attr_writer: true, attr_accessor: true,
+                  'respond_to?': true, private: true, public: true, protected: true, module_function: true,
+                  private_class_method: true, public_class_method: true, private_constant: true }.freeze
     VIS_CALLS = %i[private public protected module_function private_class_method public_class_method private_constant].freeze
 
     # Emitter-side state of one irep being compiled.

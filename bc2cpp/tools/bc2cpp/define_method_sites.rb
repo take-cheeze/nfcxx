@@ -161,7 +161,7 @@ module DefineMethodSites
     trusted_for = trusted.respond_to?(:call) ? trusted : ->(_name) { trusted }
     doomed = registry.each_value.flat_map do |defs|
       defs.select do |d|
-        d.installer == :define_method &&
+        d.installer == :define_method_def &&
           (!trusted_for.call(d.name) || defs.any? { |other| !other.equal?(d) && other.owner == d.owner })
       end
     end
@@ -169,9 +169,9 @@ module DefineMethodSites
     kept = dropped = 0
     registry.each_value do |defs|
       gone = defs.select do |d|
-        d.installer == :define_method && (doomed.any? { |x| x.equal?(d) } || (d.site || []).any? { |s| doomed_sites.include?(s) })
+        d.installer == :define_method_def && (doomed.any? { |x| x.equal?(d) } || (d.site || []).any? { |s| doomed_sites.include?(s) })
       end
-      kept += defs.count { |d| d.installer == :define_method } - gone.size
+      kept += defs.count { |d| d.installer == :define_method_def } - gone.size
       dropped += gone.size
       defs.reject! { |d| gone.any? { |x| x.equal?(d) } }
     end
@@ -183,7 +183,7 @@ module DefineMethodSites
   # body is registered, or a loop send whose expansions are (DEFINE_METHOD_LOOPS).
   def settled?(registry, irep, idx, ireps)
     found = site(irep, idx, ireps)
-    return true if found && registry.fetch(found.name, []).any? { |d| d.installer == :define_method && d.irep == found.child }
+    return true if found && registry.fetch(found.name, []).any? { |d| d.installer == :define_method_def && d.irep == found.child }
 
     loop_sites(registry).key?([irep.label, idx])
   end
@@ -192,7 +192,7 @@ module DefineMethodSites
   def loop_sites(registry)
     registry.each_value.with_object({}) do |defs, sites|
       defs.each do |d|
-        next unless d.installer == :define_method
+        next unless d.installer == :define_method_def
 
         d.site&.each { |s| (sites[s] ||= []) << d.name }
       end

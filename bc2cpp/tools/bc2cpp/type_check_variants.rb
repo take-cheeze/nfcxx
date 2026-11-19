@@ -15,18 +15,44 @@ module TypeCheckVariants
     class << self
       attr_accessor :armed
     end
-    keyed = %i[[] fetch key? has_key? include? member? assoc values_at slice []= store delete]
-    # Bulk APIs, including counts and exclusion, can observe whether a control exists.
-    all = ENV.singleton_methods - keyed - %i[clone dup freeze to_s]
-    (keyed + all).each do |method|
-      next unless ENV.respond_to?(method)
+    # The reads that take a key: only one naming a control is refused.
+    KEYED = %i[[] fetch key? has_key? include? member? assoc values_at slice []= store delete].freeze
+    # Bulk APIs, including counts and exclusion, can observe whether a control exists: CRuby's ENV singleton methods
+    # (its own and Enumerable's, as CRuby 4 lists them) other than KEYED, clone, dup, freeze and to_s. Spelled out, not
+    # read from ENV.singleton_methods, so a self-compiled bc2cpp's closed world knows the names this module installs
+    # (LoopInstallers.unregistered_define_names); arm_guard refuses a Ruby whose ENV has a singleton method neither
+    # list names, so a newer Ruby cannot slip past the guard. mruby's ENV (mruby-env) has no singleton methods.
+    BULK = %i[
+      all? any? chain chunk chunk_while clear collect collect_concat compact count cycle delete_if detect drop
+      drop_while each each_cons each_entry each_key each_pair each_slice each_value each_with_index each_with_object
+      empty? entries except filter filter! filter_map find find_all find_index first flat_map grep grep_v group_by
+      has_value? inject inspect invert keep_if key keys lazy length map max max_by merge! min min_by minmax minmax_by
+      none? one? partition rassoc reduce rehash reject reject! replace reverse_each select select! shift size
+      slice_after slice_before slice_when sort sort_by sum take take_while tally to_a to_h to_hash to_set uniq update
+      value? values zip
+    ].freeze
+    UNGUARDED = %i[clone dup freeze to_s].freeze
 
+    # A method this Ruby's ENV lacks gets a wrapper too: it only calls super, which raises NoMethodError as before.
+    %i[
+      [] fetch key? has_key? include? member? assoc values_at slice []= store delete all? any? chain chunk chunk_while
+      clear collect collect_concat compact count cycle delete_if detect drop drop_while each each_cons each_entry
+      each_key each_pair each_slice each_value each_with_index each_with_object empty? entries except filter filter!
+      filter_map find find_all find_index first flat_map grep grep_v group_by has_value? inject inspect invert keep_if
+      key keys lazy length map max max_by merge! min min_by minmax minmax_by none? one? partition rassoc reduce rehash
+      reject reject! replace reverse_each select select! shift size slice_after slice_before slice_when sort sort_by
+      sum take take_while tally to_a to_h to_hash to_set uniq update value? values zip
+    ].each do |method|
       define_method(method) do |*args, **opts, &block|
-        if EnvGuard.armed && (all.include?(method) || args.grep(String).any? { |key| CONTROL_KEYS.include?(key) })
+        if EnvGuard.armed && (BULK.include?(method) || args.grep(String).any? { |key| CONTROL_KEYS.include?(key) })
           raise Error, "bc2cpp: shared type-check setup cannot access variant controls through ENV.#{method} before the fork"
         end
         super(*args, **opts, &block)
       end
+    end
+
+    def self.uncovered
+      ENV.singleton_methods - KEYED - BULK - UNGUARDED
     end
   end
 
@@ -70,6 +96,11 @@ module TypeCheckVariants
   end
 
   def arm_guard
+    uncovered = EnvGuard.uncovered
+    unless uncovered.empty?
+      raise Error, "bc2cpp: the type-check ENV guard does not cover ENV.#{uncovered.sort.join(', ENV.')}; add them to " \
+                   'TypeCheckVariants::EnvGuard'
+    end
     ENV.singleton_class.prepend(EnvGuard) unless ENV.singleton_class.include?(EnvGuard)
     EnvGuard.armed = true
   end

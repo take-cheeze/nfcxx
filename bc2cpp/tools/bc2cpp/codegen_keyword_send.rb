@@ -612,6 +612,63 @@ class CodeGen
     dynamic_dispatch_line(d, recv, name, ext_argv)
   end
 
+  # KEYWORD_DYNAMIC_SEND: the last resort for a blockless `recv.m(a, b, k1: v1, k2: v2)` (`n=N|nk=K`, no splat) that
+  # no static proof above resolved: the by-name send OP_SEND itself would make, with its keywords.
+  #   * OP_SEND packs the K pairs, in order, into one fresh Hash (hash_new_from_regs: mrb_hash_new_capa(K) then
+  #     mrb_hash_set per pair, keys and values read from the registers as they are) and sets nk = 15. The same Hash
+  #     is built here from the same registers, so neither literal keys nor a known callee is needed.
+  #   * bc2cpp_send_kw (bc2cpp.rb) passes it to mrb_funcall_send, which builds OP_SEND's frame (N positionals, the
+  #     Hash, a nil block, nk = 15), so the callee's OP_ENTER, a cfunc's mrb_get_args, Class#new's forwarding and
+  #     method_missing (prepare_missing) all see the keywords as keywords; it checks the callee's argument count as
+  #     OP_SEND does for a cfunc. For OP_SEND (explicit receiver) bc2cpp_send_kw first makes OP_SEND's visibility check.
+  # Refused, keeping `#error`:
+  #   * a block of any kind (SENDB, or an ARG_SHAPES block expression): the block slot is not modelled here;
+  #   * N >= 15 or K >= 15: OP_SEND then packs an Array / takes a Hash register, not this shape;
+  #   * `send`/`__send__`/`public_send`: called from C (ci->cci != CINFO_NONE) mruby's send_method takes its
+  #     funcall branch, whose mrb_get_args("n*&") does not forward the keyword Hash as keywords, unlike OP_SEND;
+  #   * a substituted receiver or argument list (an inlined body), or no source instruction to read registers from.
+  # A class-body unit (codegen_class_body.rb) takes it too: bc2cpp_send_kw is in the runtime prelude, not a checked-send
+  # slot, and the unit's `self` is the class OP_SEND's protected check compares against.
+  KEYWORD_DYNAMIC_SEND_REFUSED = %w[send __send__ public_send].freeze
+
+  def keyword_dynamic_send(insn, self_implicit:, irep:, idx:, call_receiver:, call_arguments:)
+    return nil unless keyword_dynamic_send_enabled?
+    return nil unless %i[SEND SSEND].include?(insn.op) && (insn.op == :SSEND) == self_implicit
+    return nil if insn.positional_splat? || insn.keyword_splat?
+    return nil unless irep && idx && call_receiver.nil? && call_arguments.nil? && !@call_block_expr
+
+    n = insn.argc
+    nk = insn.keyword_argc
+    return nil unless n.is_a?(Integer) && nk.is_a?(Integer) && n < 15 && nk.between?(1, 14)
+
+    name = insn.sym
+    return nil if name.nil? || KEYWORD_DYNAMIC_SEND_REFUSED.include?(name)
+
+    d = insn.reg.to_i
+    recv = self_implicit ? 'self' : RegName[d]
+    argv = (1..n).map { |k| RegName[d + k] }
+    base = d + 1 + n
+    out = String.new
+    out << "  // KEYWORD_DYNAMIC_SEND :#{name} (#{insn.argc_text}) -- no static callee; the by-name send OP_SEND makes: " \
+           "the #{nk} pair(s) packed into one Hash (hash_new_from_regs), passed as keywords (mrb_funcall_send)" \
+           "#{insn.op == :SEND ? ', after OP_SEND\'s explicit-receiver visibility check' : ''}\n"
+    out << "  {\n"
+    out << "    mrb_value bc2cpp_kwd_argv[] = { #{argv.join(', ')} };\n" unless argv.empty?
+    out << "    mrb_value bc2cpp_kwd = mrb_hash_new_capa(M, #{nk});\n"
+    nk.times do |k|
+      out << "    mrb_hash_set(M, bc2cpp_kwd, #{RegName[base + (2 * k)]}, #{RegName[base + (2 * k) + 1]});\n"
+    end
+    out << "    #{RegName[d]} = bc2cpp_send_kw(M, #{recv}, mrb_intern_cstr(M, #{c_string_literal(name)}), #{n}, " \
+           "#{argv.empty? ? 'NULL' : 'bc2cpp_kwd_argv'}, bc2cpp_kwd, #{insn.op == :SEND ? 'true' : 'false'}, self);\n"
+    out << "  }\n"
+    out
+  end
+
+  # BC2CPP_KEYWORD_DYNAMIC_SEND=0 keeps such sites `#error` (the method stays interpreted).
+  def keyword_dynamic_send_enabled?
+    ENV['BC2CPP_KEYWORD_DYNAMIC_SEND'] != '0'
+  end
+
   # KEYWORD_NEVER_DEFINED_CONST_RECEIVER_SUPPORT: memoized
   # IntegerConstants.defined_name_universe; without NATIVE_SRCS/FOREIGN_RUBY_SRCS
   # the picture is incomplete and no proof runs.

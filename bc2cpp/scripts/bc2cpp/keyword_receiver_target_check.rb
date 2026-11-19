@@ -4,8 +4,9 @@
 # CONSTANT_OBJECT_KEYWORD (constant_object_keyword_target): a keyword send to a stable class/module constant resolves to
 # the singleton definition that constant's class object reaches, even when the name also has an instance definer. The
 # positive case, `RtMod.reach(a, x: 2)`, is a direct C++ call. The negative case, a keyword send on a receiver nothing
-# proves is a constant (`h.reach(a, x: 2)`), stays refused: a name with two definers has no single target. The
-# behaviour part needs BC2CPP_MRUBY_FULL, or rake and a C++ compiler.
+# proves is a constant (`h.reach(a, x: 2)`), is not bound: a name with two definers has no single target, so it keeps
+# the by-name keyword send OP_SEND makes (KEYWORD_DYNAMIC_SEND, bc2cpp_send_kw), never a direct call to either
+# definer. The behaviour part needs BC2CPP_MRUBY_FULL, or rake and a C++ compiler.
 ENV['BC2CPP_SIG_DIRS'] = ''
 
 require 'tmpdir'
@@ -63,8 +64,11 @@ Dir.mktmpdir('bc2cpp-keyword-receiver') do |dir|
     refusals = refusals_by_function(refusal_dir)
     suite.check('the constant-receiver keyword send is a direct call to the singleton definition',
                 refusals.fetch('RtUse_run_impl', 0).zero? && refusal_code.include?('RtMod_singleton_reach_impl(M, r'))
-    suite.check('a keyword send on an unproven receiver with two definers stays refused',
-                refusals.fetch('RtUse_unproven_impl', 0).positive?)
+    unproven = refusal_code[/^mrb_value RtUse_unproven_impl\(mrb_state\* M.*?^\}/m].to_s
+    suite.check('a keyword send on an unproven receiver with two definers is bound to neither definer',
+                refusals.fetch('RtUse_unproven_impl', 0).zero? &&
+                unproven.include?('KEYWORD_DYNAMIC_SEND :reach (n=1|nk=1)') &&
+                unproven.include?('bc2cpp_send_kw(M, ') && !unproven.include?('_reach_impl('))
   end
   _code, err = Bc2cppFixtureRuntime.generate(SOURCE, dir, core: true, only_owners: OWNERS)
 
@@ -80,6 +84,8 @@ Dir.mktmpdir('bc2cpp-keyword-receiver') do |dir|
         mrb_value five_v[] = {mrb_fixnum_value(5)};
         mrb_value use = rt_new(M, "RtUse");
         call(M, "run", use, "run", 1, five_v);
+        mrb_value ctx_v[] = {rt_new(M, "RtCtx"), mrb_fixnum_value(5)};
+        call(M, "unproven_ctx", use, "unproven", 2, ctx_v);
         return 0;
       }
     CPP
@@ -90,6 +96,8 @@ Dir.mktmpdir('bc2cpp-keyword-receiver') do |dir|
     interpreted = plain.call(sections['interpreted'])
     compiled = plain.call(sections['compiled'])
     suite.check('the call ran and returned the keyword-aware value', interpreted.include?('run => 17'))
+    suite.check('the unproven receiver reaches the instance definer as the interpreter does',
+                interpreted.include?('unproven_ctx => raised ArgumentError'))
     suite.check('compiled matches interpreted', compiled == interpreted)
   end
 end

@@ -106,7 +106,7 @@ check.call('a bare private applies to the defs after it, a bare public ends it',
 check.call('attr_* names are accessors of Cr',
            %w[ra rb wa= aa aa= ab ab=].all? { |n| reg[n].any? { |d| d.owner == 'Cr' && d.kind == :ivar_accessor } })
 check.call('alias_method :new, :old is a definition of new', reg['al_new'].any? { |d| d.owner == 'Cr' && d.installer == :alias })
-check.call('define_method(:dm) { } is a definition of dm', reg['dm'].any? { |d| d.owner == 'Cr' && d.installer == :define_method })
+check.call('define_method(:dm) { } is a definition of dm', reg['dm'].any? { |d| d.owner == 'Cr' && d.installer == :define_method_def })
 check.call('a bare module_function copies the later defs', reg['mf'].any? { |d| d.owner == 'CrMod.singleton' && d.kind == :module_function })
 check.call('module_function :named copies named', reg['named'].any? { |d| d.owner == 'CrNamed.singleton' && d.kind == :module_function })
 check.call('an alias handed to private, or in a loop, registers nothing; a plain one after them still does',
