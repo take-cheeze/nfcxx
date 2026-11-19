@@ -507,21 +507,15 @@ fi
 # this order (docs/notes/driver-setup-stage.md).
 stage_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-setup.rb" stage sanitize="$sanitize" freestanding="$freestanding" safeptr="$safeptr" asan="$asan" path_b="$path_b") || exit $?
 eval "$stage_sh"
-[ $ir_opt_set = 0 ] || pb_flags+=(--ir-opt="$ir_opt")
-[ $asan = 0 ] || [ $backend != pathb ] || pb_flags+=(--asan)   # the SSA emitter's __asan_load/store checks (scripts/pathb-cc.rb)
-[ $pic = 0 ] || pb_flags+=(--pic)   # -shared / -fPIC: scripts/pathb-cc.rb --pic reads a preemptible symbol's address through the GOT
+# the Path B options and the backend environment (scripts/nfcxx-setup.rb flags): the same conditions, in this order
+flags_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-setup.rb" flags ir_opt_set="$ir_opt_set" ir_opt="${ir_opt:-}" asan="$asan" backend="$backend" pic="$pic" diag_opts="$(IFS=$'\x1f'; echo "${diag_opts[*]-}")" dialect="$dialect" dialect_asked="${dialect_asked:-}" gnu_user="${gnu_user:-}" freestanding="$freestanding" gnu="$gnu" root="$root" pb_fs_host="$pb_fs_host") || exit $?
+eval "$flags_sh"
 # Freestanding: the front end reads only lib/ (the old harness, which has no host headers), emulates GNU $gnu, and the program links
 # EDG's runtime, so its exception handling state is declared as that runtime has it (scripts/pathb-dump.rb --eh-runtime).
 # Hosted Path B: scripts/pathb-dump.rb takes the host's GNU version unless the command line gave one.
-pb_flags+=(${diag_opts[@]+"${diag_opts[@]}"})   # EDG diagnostic options (-Wno-narrowing), for scripts/pathb-dump.rb
 # EDG's clang mode on Path B only when asked for (--dialect=clang, NFCXX_DIALECT), not for a clang host's default: Path B on macOS stays in g++ mode
 # with lib/pathb/clang_macros.h, since libc++ needs __BYTE_ORDER__, which the clang mode does not define.
-[ $backend != pathb ] || [ "$dialect" != clang ] || [ -z "${dialect_asked:-}" ] || pb_flags+=(--dialect=clang)   # scripts/pathb-dump.rb
-[ $backend != pathb ] || [ $freestanding != 0 ] || [ -z "${gnu_user:-}" ] || pb_flags+=("--gnu-version=$gnu_user")
-[ $backend != pathb ] || [ $freestanding = 0 ] || pb_flags+=(--freestanding --eh-runtime "--gnu-version=$gnu" "-I$root/lib")
 # The backend's compiler (NFCXX_CC) and its refusals: scripts/nfcxx-backend-env.rb plan (restructure step 3).
-backend_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-backend-env.rb" plan backend="$backend" freestanding="$freestanding" pb_fs_host="$pb_fs_host" root="$root") || exit $?
-eval "$backend_sh"
 
 # Hosted link (not -c, -shared or --freestanding): two additions to what eccp links.
 #  - the EH shim (lib/ehshim, docs/notes/eh-shim.md): exceptions thrown by libstdc++.so and std::exception_ptr on EDG's
