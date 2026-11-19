@@ -1911,7 +1911,7 @@ module StaticDispatchRegistrations
   # ever reach.
   # CLOSED_OWNER_RE (owner_call_direct.rb, whose emitter completes owner calls over the same owners): the owners the
   # closed list may unregister.
-  CLOSED_OWNER_RE = OwnerCallDirect::CLOSED_OWNER_RE
+  CLOSED_OWNER_RE = /\A(?:Game|RPG2k3?|LCF|RGSS)(?:::|\.singleton\z|\z)/
 
   def owner_re(closed_only)
     closed_only ? CLOSED_OWNER_RE : NeverCalledRegistrations::SAFE_UNREGISTER_OWNER_RE

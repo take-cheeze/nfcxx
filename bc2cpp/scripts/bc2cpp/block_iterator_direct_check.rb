@@ -151,7 +151,7 @@ end
 KERNEL_LOOP = 'Kernel_loop_impl(M, self, '
 # The dynamic else an unproven receiver keeps: mrb_funcall_with_block, or the owner call carrying the block
 # (BLOCK_OWNER_CALL). BY_NAME is the unchecked by-name send alone, which a fully proven site must not keep.
-DYNAMIC = /mrb_funcall_with_block\(|bc2cpp_owner_call\(M, [^;]*BC2CPP_OWNERS\([^)]*\), (?!mrb_nil_value\(\))/
+DYNAMIC = /mrb_funcall_with_block\(|bc2cpp_owner_call\(M, [^;]*BC2CPP_OWNERS(?:_D)?\(.*?\), (?!mrb_nil_value\(\))/
 BY_NAME = 'mrb_funcall_with_block('
 
 # Keep the baseline bytecode and C++ for runtime; BC2CPP_CXXFLAGS only affects its C++ compilation.
@@ -181,7 +181,7 @@ check.call('str_lines: each_line gets the String arm', code_of(code, 'str_lines'
 check.call('rej_bang: reject! calls the compiled Array body, no by-name send left',
            code_of(code, 'rej_bang').include?('Array_reject$21_impl(M, ') && !code_of(code, 'rej_bang').include?(BY_NAME))
 # IO#each_line is an alias in mruby-io's Ruby, never a registry definition: the owner call must still name IO.
-lines_owner = code_of(code, 'str_lines')[/BC2CPP_OWNERS\(([^)]*)\)[^;]*; \/\* CLOSED_WORLD owner-call: each_line/, 1]
+lines_owner = code_of(code, 'str_lines')[/BC2CPP_OWNERS(?:_D)?\((.*)\)[^;]*; \/\* CLOSED_WORLD owner-call: each_line/, 1]
 check.call('str_lines: an owner-call else lists IO, whose each_line is a core alias',
            lines_owner.nil? || lines_owner.include?('"IO"'))
 nested = code_with_blocks(code, 'tm_nested')
@@ -237,11 +237,11 @@ puts '-- world proofs withdraw the arms'
 c, = generate_world(SRC + "class Object\n  def loop; :mine; end\nend\n")
 check.call('a program Object#loop withdraws the direct Kernel#loop call: the owner call lists both',
            !code_of(c, 'lp').include?('MONO :loop') && !code_of(c, 'lp').include?(KERNEL_LOOP) &&
-             code_of(c, 'lp').match?(/BC2CPP_OWNERS\("Kernel", "Object"\)/))
+             code_of(c, 'lp').match?(/BC2CPP_OWNERS(?:_D)?\(.*"Kernel", "Object"\)/))
 c, = generate_world(SRC + "class BiOther\n  def loop; :mine; end\nend\n")
 check.call('a program loop of another class withdraws it too: two definitions, no MONO',
            !code_of(c, 'lp').include?('MONO :loop') && !code_of(c, 'lp').include?(KERNEL_LOOP) &&
-             code_of(c, 'lp').match?(/BC2CPP_OWNERS\("BiOther", "Kernel"\)/))
+             code_of(c, 'lp').match?(/BC2CPP_OWNERS(?:_D)?\(.*"BiOther", "Kernel"\)/))
 # A BasicObject subclass has no Kernel#loop: its own `loop { }` must not run Kernel's body (the interpreter raises
 # NoMethodError). Another class of the program still has Kernel.
 bare = "class BiBare < BasicObject\n  def run; loop { break 1 }; end\nend\n"
