@@ -32,6 +32,7 @@ ruby scripts/bc2cpp/keyword_send_check.rb
 ruby scripts/bc2cpp/proc_call_helper_check.rb
 ruby scripts/bc2cpp/optional_yield_check.rb
 ruby scripts/bc2cpp/keyword_receiver_target_check.rb
+ruby scripts/bc2cpp/keyword_dynamic_send_check.rb
 ruby scripts/bc2cpp/block_rest_mixed_check.rb
 ruby scripts/bc2cpp/hash_build_ops_check.rb
 ruby scripts/bc2cpp/kernel_loop_check.rb
