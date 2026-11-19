@@ -114,7 +114,8 @@ module OwnerCallDirect
   # `code` with the owner set of each call the direct entries complete replaced by BC2CPP_OWNERS_D. `slots` maps an
   # owner-class getter call (`bc2cpp_owner_class_3(M)`) to its owner; `subclassed` holds every program superclass.
   # `unregistered`: the "Owner#name" keys the build leaves out (CodeGen#unregistered_keys).
-  def rewrite(code, entries, slots, subclassed, unregistered)
+  # `other`: (owner, name) -> a row for a method another gem compiles (CodeGen#other_unit_direct_entry), or nil.
+  def rewrite(code, entries, slots, subclassed, unregistered, other: nil)
     return code if entries.empty? || ENV['BC2CPP_OWNER_CALL_DIRECT'] == '0' || !code.include?('BC2CPP_OWNERS(')
 
     lines = Lines.new(code)
@@ -134,9 +135,10 @@ module OwnerCallDirect
       # An owner the build leaves out for this name has lost its registration, so it needs a row. Any other owner keeps
       # its table entry, so a row for it is optional: the first direct owner the lookup meets answers the same either way.
       candidates = owners.reject { |o| guarded.include?(o) && !subclassed.include?(o) }
-      next if candidates.any? { |o| unregistered.include?("#{o}##{name}") && entries[[o, name]].nil? }
+      row = ->(o) { entries[[o, name]] || other&.call(o, name) }
+      next if candidates.any? { |o| unregistered.include?("#{o}##{name}") && row.(o).nil? }
 
-      direct = candidates.map { |o| entries[[o, name]] }.compact
+      direct = candidates.map { |o| row.(o) }.compact
       next if direct.empty? || direct.size > MAX
 
       rows = direct.map do |m|
