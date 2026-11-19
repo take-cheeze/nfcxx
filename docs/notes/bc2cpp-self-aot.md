@@ -30,6 +30,9 @@ The executable path is printed on stdout; progress goes to stderr and detailed l
 `BC2CPP_SELF_BUILD_DIR` defaults to `build/bc2cpp-self`; `BC2CPP_SELF_SHARDS` defaults to 16;
 `BC2CPP_BUILD_JOBS` defaults to 8; `BC2CPP_SELF_CXX` defaults to this repository's `nfcxx`.
 Use separate build directories when changing the C++ compiler, backend or ABI flags.
+The native builds use Rake's multitask mode so independent prerequisites actually run concurrently;
+the job count bounds those workers. Changing `BC2CPP_BUILD_JOBS` reuses the generated C++ instead of
+rerunning the Ruby self-compiler.
 
 Generation is cached by the host Ruby version, the Prism and RBS versions, source and header contents (and every bc2cpp
 tool source), configured runtime defines, the explicit self-build settings, and the interpreter and front-end variables

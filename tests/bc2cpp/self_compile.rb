@@ -22,6 +22,19 @@ isolated, controls = Bc2cppSelfCompile.generation_environment(base,
 raise 'guest metadata leaked into the compiler build' unless controls.empty? &&
   isolated['BC2CPP_EXACT_ARITH'].nil? && isolated['BC2CPP_NATIVE_INVENTORY'].nil?
 
+# Changing C++ scheduling must reuse the expensive Ruby generation, while a
+# changed shard count still changes its cache key.
+fingerprint = lambda do |caller|
+  env, settings = Bc2cppSelfCompile.generation_environment(base, caller)
+  Bc2cppSelfCompile.generation_fingerprint(toolchain: {}, env: env, controls: settings,
+                                         defines: [], dependencies: [])
+end
+raise 'worker count invalidates Ruby generation' unless fingerprint.call({}) ==
+  fingerprint.call('BC2CPP_BUILD_JOBS' => '1') && fingerprint.call({}) ==
+  fingerprint.call('BC2CPP_BUILD_JOBS' => '8')
+raise 'shard count must invalidate Ruby generation' if fingerprint.call({}) ==
+  fingerprint.call('BC2CPP_SELF_SHARDS' => '8')
+
 keys = BC2CPPRunner::SELF_DYNAMIC_OPTIONS + ['BC2CPP_STRICT_KEYS']
 saved = keys.to_h { |key| [key, ENV[key]] }
 begin
