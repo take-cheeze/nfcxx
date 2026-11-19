@@ -5,8 +5,17 @@
     "VALUE": "mrb_value",
     "ID": "mrb_sym",
     "SIGNED_VALUE": "intptr_t",
-    "st_index_t": "uintptr_t"
+    "st_index_t": "uintptr_t",
+    "rb_encoding": "rb_encoding",
+    "UChar": "UChar",
+    "OnigUChar": "OnigUChar",
+    "OnigPosition": "OnigPosition",
+    "OnigRegex": "OnigRegex",
+    "regex_t": "regex_t",
+    "OnigRegion": "OnigRegion",
+    "re_registers": "re_registers"
   },
+  "require_features": ["time", "encoding", "bigdecimal", "date", "strscan"],
   "type_check_refused": {
     "_comment": "Check_Type and rb_check_type (handler check_type in convert_mrbgem.rb) map a T_ name only when its entry has type_check exact or caveat. These names are refused with the reason given here.",
     "T_OBJECT": "mruby's MRB_TT_OBJECT does not match CRuby's T_OBJECT: CRuby allocates exceptions as T_OBJECT (ruby4src error.c:3583 via object.c:118), mruby allocates them as MRB_TT_EXCEPTION (src/error.c:42), so the check would reject exceptions",
@@ -21,15 +30,11 @@
     "T_REGEXP": "stuck point: the fork has no Regexp tag (include/mruby/value.h:106-131) and no mrbgem defines a Regexp class (mrbgems/ lists no mruby-regexp), so there is nothing to compare with"
   },
   "unmapped_reasons": {
-    "onig_foreach_name": "stuck point (regexp engine): onig_foreach_name is the Onigmo regexp engine of CRuby; the fork has no regexp engine (mrbgems has no regexp gem), so the named-capture iteration has no mruby form",
     "T_RATIONAL": "stuck point (gem dependency): a Rational test is the mruby-rational class test, which needs the state and the gem (the decision is made: the gem is a dependency when the test is emitted); a bare use has no test to make here",
     "T_COMPLEX": "stuck point (gem dependency): a Complex test is the mruby-complex class test, which needs the state and the gem (the decision is made: the gem is a dependency when the test is emitted); a bare use has no test to make here",
     "_comment": "A name with no api_map entry is refused with the reason given here (the converter's no-entry path). PRIsVALUE is converted where rb_raise and rb_sprintf take it; elsewhere it is an argument of rb_enc_sprintf, which takes an rb_encoding *.",
+    "onig_foreach_name": "stuck point (onig_foreach_name): onig_foreach_name calls its callback with only the user data, and the callback (strscan's named_captures_iter) needs the mruby state; the rb_hash_foreach-style callback wrapper that carries it is not implemented for this call (the next Onigmo item)",
     "PRIsVALUE": "stuck point (Encoding): PRIsVALUE outside rb_raise and rb_sprintf is an argument of rb_enc_sprintf, which takes an rb_encoding *; the fork has no Encoding (accepted stuck point)",
-    "rb_enc_from_index": "stuck point (Encoding): an encoding index; the fork has no Encoding (accepted stuck point)",
-    "rb_enc_find_index": "stuck point (Encoding): an encoding lookup by name; the fork has no Encoding (accepted stuck point)",
-    "RB_ENCODING_GET": "stuck point (Encoding): the encoding index of a string; the fork has no Encoding (accepted stuck point)",
-    "rb_enc_str_asciionly_p": "stuck point (Encoding): an encoding query; the fork has no Encoding (accepted stuck point)",
     "rb_str_conv_enc": "stuck point (Encoding): the conversion between encodings; the fork has no Encoding (accepted stuck point)",
     "rb_thread_current": "stuck point (Thread): the fork has no Thread (accepted stuck point)",
     "rb_thread_local_aref": "stuck point (Thread): thread-local storage; the fork has no Thread (accepted stuck point)",
@@ -37,29 +42,18 @@
     "rb_mutex_new": "stuck point (Thread): a Mutex; the fork has no Thread or Mutex (accepted stuck point)",
     "rb_mutex_lock": "stuck point (Thread): a Mutex; the fork has no Thread or Mutex (accepted stuck point)",
     "rb_mutex_unlock": "stuck point (Thread): a Mutex; the fork has no Thread or Mutex (accepted stuck point)",
-    "rb_require": "stuck point (require): the fork has no require (accepted stuck point)",
     "rb_big_cmp": "stuck point (Bignum): the fork has no Bignum (no MRB_TT_BIGINT tag, no bignum mrbgem)",
     "rb_absint_size": "stuck point (Bignum): the fork has no Bignum (no MRB_TT_BIGINT tag, no bignum mrbgem)",
     "RBIGNUM_NEGATIVE_P": "stuck point (Bignum): the fork has no Bignum (no MRB_TT_BIGINT tag, no bignum mrbgem)",
     "T_NONE": "stuck point: the fork has no T_NONE tag (the MRB_TT enum, include/mruby/value.h:106-131); the empty-object marker has no mruby value kind",
     "RUBY_T_NONE": "stuck point: the fork has no T_NONE tag (the MRB_TT enum, include/mruby/value.h:106-131); the empty-object marker has no mruby value kind",
     "rb_time_timespec_new": "stuck point (Time offset): mruby-time's Time has only UTC and LOCAL timezones (mrbgems/mruby-time/include/mruby/time.h:15-20; getlocal takes no offset), so a fixed UTC offset from the caller cannot be represented",
-    "rb_str_export_to_enc": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
     "rb_encoder": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
-    "rb_default_internal_encoding": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
     "rb_enc_codepoint_len": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
-    "rb_utf8_encindex": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
-    "rb_usascii_encindex": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
-    "rb_ascii8bit_encindex": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
-    "rb_enc_strlen": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
-    "rb_enc_mbclen": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
     "rb_enc_interned_str_cstr": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
     "rb_enc_raise": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
     "rb_marshal_load": "stuck point: the fork has no Marshal (no marshal mrbgem in mrbgems/), so there is no loader to call",
     "rb_enc_sprintf": "stuck point (Encoding): rb_enc_sprintf takes an rb_encoding *; the fork has no Encoding (accepted stuck point)",
-    "rb_usascii_encoding": "stuck point (Encoding): the US-ASCII rb_encoding object; the fork has no Encoding (accepted stuck point)",
-    "rb_encoding": "stuck point (Encoding): the rb_encoding type; the fork has no Encoding (accepted stuck point)",
-    "rb_enc_check": "stuck point (Encoding): checks two strings are compatible encodings; the fork has no Encoding (accepted stuck point)",
     "rb_define_alloc_func": "stuck point (per-class allocator): the fork has only the global allocf, no per-class allocator (accepted stuck point)"
   },
   "includes": {
@@ -91,7 +85,7 @@
     },
     "ruby/re.h": {
       "headers": [
-        "mruby/re.h"
+        "mruby/onigmo.h"
       ]
     },
     "ruby/thread.h": {
@@ -169,6 +163,11 @@
     "rb_define_const": {
       "kind": "special",
       "handler": "define_const",
+      "needs_mrb": true
+    },
+    "rb_require": {
+      "kind": "special",
+      "handler": "require_call",
       "needs_mrb": true
     },
     "rb_const_get": {
@@ -519,11 +518,223 @@
       "caveat": "the encoding argument is dropped: mruby strings carry no encoding, so the bytes are kept and the result is not tagged"
     },
     "rb_enc_associate": {
-      "kind": "template",
+      "kind": "call",
+      "mruby": "rb_enc_associate",
       "arity": 2,
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): rb_encoding is a static descriptor for UTF-8 or ASCII-8BIT; no transcoding"
+    },
+    "onig_region_init": {
+      "kind": "call",
+      "mruby": "onig_region_init",
+      "arity": 1,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type; the regex is the mruby-onig-regexp gem's"
+    },
+    "onig_region_clear": {
+      "kind": "call",
+      "mruby": "onig_region_clear",
+      "arity": 1,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type; the regex is the mruby-onig-regexp gem's"
+    },
+    "onig_region_memsize": {
+      "kind": "call",
+      "mruby": "onig_region_memsize",
+      "arity": 1,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type; the regex is the mruby-onig-regexp gem's"
+    },
+    "onig_region_free": {
+      "kind": "call",
+      "mruby": "onig_region_free",
+      "arity": 2,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type; the regex is the mruby-onig-regexp gem's"
+    },
+    "onig_region_set": {
+      "kind": "call",
+      "mruby": "onig_region_set",
+      "arity": 4,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type; the regex is the mruby-onig-regexp gem's"
+    },
+    "onig_free": {
+      "kind": "call",
+      "mruby": "onig_free",
+      "arity": 1,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type; the regex is the mruby-onig-regexp gem's"
+    },
+    "onig_match": {
+      "kind": "call",
+      "mruby": "onig_match",
+      "arity": 6,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type; the regex is the mruby-onig-regexp gem's"
+    },
+    "onig_search": {
+      "kind": "call",
+      "mruby": "onig_search",
+      "arity": 7,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type; the regex is the mruby-onig-regexp gem's"
+    },
+    "onig_name_to_backref_number": {
+      "kind": "call",
+      "mruby": "onig_name_to_backref_number",
+      "arity": 4,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type; the regex is the mruby-onig-regexp gem's"
+    },
+    "rb_reg_region_copy": {
+      "kind": "call",
+      "mruby": "rb_reg_region_copy",
+      "arity": 2,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type; the regex is the mruby-onig-regexp gem's"
+    },
+    "rb_reg_prepare_re": {
+      "kind": "call",
+      "mruby": "rb_reg_prepare_re",
+      "arity": 2,
+      "caveat": "CRuby's Onigmo API on the system oniguruma library (mruby/onigmo.h): the same name and type; the regex is the mruby-onig-regexp gem's"
+    },
+    "ONIG_OPTION_IGNORECASE": {
+      "kind": "macro",
+      "mruby": "ONIG_OPTION_IGNORECASE",
+      "caveat": "the oniguruma constant of the same name (mruby/onigmo.h)"
+    },
+    "ONIG_OPTION_NONE": {
+      "kind": "macro",
+      "mruby": "ONIG_OPTION_NONE",
+      "caveat": "the oniguruma constant of the same name (mruby/onigmo.h)"
+    },
+    "ONIG_MISMATCH": {
+      "kind": "macro",
+      "mruby": "ONIG_MISMATCH",
+      "caveat": "the oniguruma constant of the same name (mruby/onigmo.h)"
+    },
+    "RREGEXP": {
+      "kind": "macro",
+      "mruby": "RREGEXP",
+      "caveat": "CRuby's struct RRegexp (its usecnt); the fork keeps no such count, so this is a scratch record (mruby/onigmo.h)"
+    },
+    "RREGEXP_PTR": {
+      "kind": "macro",
+      "mruby": "RREGEXP_PTR",
+      "caveat": "the compiled regex of a Regexp object (the mruby-onig-regexp gem's data pointer), mruby/onigmo.h"
+    },
+    "rb_usascii_encoding": {
+      "kind": "call",
+      "mruby": "rb_usascii_encoding",
+      "arity": 0,
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): three encodings (ASCII-8BIT, UTF-8, US-ASCII), no transcoding"
+    },
+    "rb_enc_from_index": {
+      "kind": "call",
+      "mruby": "rb_enc_from_index",
+      "arity": 1,
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): three encodings (ASCII-8BIT, UTF-8, US-ASCII), no transcoding"
+    },
+    "rb_enc_find_index": {
+      "kind": "call",
+      "mruby": "rb_enc_find_index",
+      "arity": 1,
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): three encodings (ASCII-8BIT, UTF-8, US-ASCII), no transcoding"
+    },
+    "rb_enc_to_index": {
+      "kind": "call",
+      "mruby": "rb_enc_to_index",
+      "arity": 1,
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): three encodings (ASCII-8BIT, UTF-8, US-ASCII), no transcoding"
+    },
+    "rb_utf8_encindex": {
+      "kind": "call",
+      "mruby": "rb_utf8_encindex",
+      "arity": 0,
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): three encodings (ASCII-8BIT, UTF-8, US-ASCII), no transcoding"
+    },
+    "rb_ascii8bit_encindex": {
+      "kind": "call",
+      "mruby": "rb_ascii8bit_encindex",
+      "arity": 0,
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): three encodings (ASCII-8BIT, UTF-8, US-ASCII), no transcoding"
+    },
+    "rb_usascii_encindex": {
+      "kind": "call",
+      "mruby": "rb_usascii_encindex",
+      "arity": 0,
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): three encodings (ASCII-8BIT, UTF-8, US-ASCII), no transcoding"
+    },
+    "rb_enc_get_index": {
+      "kind": "call",
+      "mruby": "rb_enc_get_index",
+      "arity": 1,
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): three encodings (ASCII-8BIT, UTF-8, US-ASCII), no transcoding"
+    },
+    "RB_ENCODING_GET": {
+      "kind": "call",
+      "mruby": "rb_enc_get_index",
+      "arity": 1,
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): three encodings (ASCII-8BIT, UTF-8, US-ASCII), no transcoding"
+    },
+    "ENCODING_GET_INLINED": {
+      "kind": "call",
+      "mruby": "rb_enc_get_index",
+      "arity": 1,
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): three encodings (ASCII-8BIT, UTF-8, US-ASCII), no transcoding"
+    },
+    "rb_enc_set_index": {
+      "kind": "call",
+      "mruby": "rb_enc_set_index",
+      "arity": 2,
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): three encodings (ASCII-8BIT, UTF-8, US-ASCII), no transcoding"
+    },
+    "ENCODING_SET": {
+      "kind": "call",
+      "mruby": "rb_enc_set_index",
+      "arity": 2,
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): three encodings (ASCII-8BIT, UTF-8, US-ASCII), no transcoding"
+    },
+    "rb_enc_associate_index": {
+      "kind": "call",
+      "mruby": "rb_enc_associate_index",
+      "arity": 2,
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): three encodings (ASCII-8BIT, UTF-8, US-ASCII), no transcoding"
+    },
+    "rb_enc_check": {
+      "kind": "call",
+      "mruby": "rb_enc_check",
+      "inject_mrb": true,
       "needs_mrb": true,
-      "template": "mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"force_encoding\"), 1, (mrb_value[]){$1})",
-      "caveat": "String#force_encoding of the mruby-encoding gem (ASCII-8BIT, BINARY or UTF-8); returns the string, as CRuby"
+      "arity": 2,
+      "caveat": "the fork's rb_enc_check (mrbgems/mruby-encoding): the encoding two strings combine in; two non-ASCII strings in different encodings raise Encoding::CompatibilityError"
+    },
+    "rb_enc_strlen": {
+      "kind": "call",
+      "mruby": "rb_enc_strlen",
+      "arity": 3,
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): three encodings (ASCII-8BIT, UTF-8, US-ASCII), no transcoding"
+    },
+    "rb_enc_mbclen": {
+      "kind": "call",
+      "mruby": "rb_enc_mbclen",
+      "arity": 3,
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): three encodings (ASCII-8BIT, UTF-8, US-ASCII), no transcoding"
+    },
+    "rb_enc_str_asciionly_p": {
+      "kind": "call",
+      "mruby": "rb_enc_str_asciionly_p",
+      "arity": 1,
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): three encodings (ASCII-8BIT, UTF-8, US-ASCII), no transcoding"
+    },
+    "rb_default_internal_encoding": {
+      "kind": "call",
+      "mruby": "rb_default_internal_encoding",
+      "arity": 0,
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): rb_encoding is a static descriptor for UTF-8 or ASCII-8BIT; no transcoding"
+    },
+    "rb_default_external_encoding": {
+      "kind": "call",
+      "mruby": "rb_default_external_encoding",
+      "arity": 0,
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): rb_encoding is a static descriptor for UTF-8 or ASCII-8BIT; no transcoding"
+    },
+    "rb_str_export_to_enc": {
+      "kind": "call",
+      "mruby": "rb_str_export_to_enc",
+      "arity": 2,
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): rb_encoding is a static descriptor for UTF-8 or ASCII-8BIT; no transcoding"
     },
     "rb_intern": {
       "kind": "call",
@@ -1031,25 +1242,22 @@
       "caveat": "the fork's mrb_memhash (src/numeric.c): an FNV-1a hash of the bytes; the value differs from CRuby's, which only matters where the hash is printed or stored across runs"
     },
     "rb_utf8_encoding": {
-      "kind": "template",
+      "kind": "call",
+      "mruby": "rb_utf8_encoding",
       "arity": 0,
-      "needs_mrb": true,
-      "template": "mrb_const_get($m, mrb_obj_value(mrb_module_get($m, \"Encoding\")), mrb_intern_cstr($m, \"UTF_8\"))",
-      "caveat": "the mruby-encoding gem's Encoding::UTF_8 (a frozen name string), not an rb_encoding *; requires the gem"
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): rb_encoding is a static descriptor for UTF-8 or ASCII-8BIT; no transcoding"
     },
     "rb_ascii8bit_encoding": {
-      "kind": "template",
+      "kind": "call",
+      "mruby": "rb_ascii8bit_encoding",
       "arity": 0,
-      "needs_mrb": true,
-      "template": "mrb_const_get($m, mrb_obj_value(mrb_module_get($m, \"Encoding\")), mrb_intern_cstr($m, \"BINARY\"))",
-      "caveat": "the mruby-encoding gem's Encoding::BINARY (ASCII-8BIT), not an rb_encoding *; requires the gem"
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): rb_encoding is a static descriptor for UTF-8 or ASCII-8BIT; no transcoding"
     },
     "rb_enc_get": {
-      "kind": "template",
+      "kind": "call",
+      "mruby": "rb_enc_get",
       "arity": 1,
-      "needs_mrb": true,
-      "template": "mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"encoding\"), 0, NULL)",
-      "caveat": "String#encoding of the mruby-encoding gem: the Encoding name string, not an rb_encoding *"
+      "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): rb_encoding is a static descriptor for UTF-8 or ASCII-8BIT; no transcoding"
     },
     "rb_hash_bulk_insert": {
       "kind": "template",
@@ -1070,10 +1278,6 @@
       "reason": "stuck point: the fork has no Regexp class (no mruby-regexp mrbgem in mrbgems/) and no Regexp tag (include/mruby/value.h:106-131), so there is no regexp object to build or read"
     },
     "rb_reg_regcomp": {
-      "kind": "refuse",
-      "reason": "stuck point: the fork has no Regexp class (no mruby-regexp mrbgem in mrbgems/) and no Regexp tag (include/mruby/value.h:106-131), so there is no regexp object to build or read"
-    },
-    "RREGEXP_PTR": {
       "kind": "refuse",
       "reason": "stuck point: the fork has no Regexp class (no mruby-regexp mrbgem in mrbgems/) and no Regexp tag (include/mruby/value.h:106-131), so there is no regexp object to build or read"
     },
@@ -1615,14 +1819,6 @@
       "mruby": "mrb_free",
       "caveat": "as RUBY_TYPED_DEFAULT_FREE: mrb_free, the default release of mrb_malloc'd data"
     },
-    "rb_reg_region_copy": {
-      "kind": "refuse",
-      "reason": "stuck point (regexp internals): rb_reg_region_copy copies CRuby's Onigmo match region (struct re_registers); mruby's regexp is the mruby-onig-regexp gem with a different match API, so there is no region to copy (accepted stuck point)"
-    },
-    "rb_reg_prepare_re": {
-      "kind": "refuse",
-      "reason": "stuck point (regexp internals): rb_reg_prepare_re returns CRuby's compiled Onigmo regex for a Regexp; mruby's regexp is the mruby-onig-regexp gem with its own compiled form (accepted stuck point)"
-    },
     "RUBY_API_VERSION_CODE": {
       "kind": "refuse",
       "reason": "stuck point (CRuby version): RUBY_API_VERSION_CODE is the CRuby version the code tests (#if RUBY_API_VERSION_CODE >= ...), and mruby has no version number to test against; the version to emulate is a decision (accepted stuck point)"
@@ -2055,8 +2251,10 @@
       "caveat": "EOFError is defined by the mruby-io gem"
     },
     "rb_eEncodingError": {
-      "kind": "refuse",
-      "reason": "stuck point (Encoding): rb_eEncodingError is the EncodingError class of CRuby's Encoding API; the fork has no Encoding and defines no EncodingError class (accepted stuck point)"
+      "kind": "expr",
+      "mruby": "mrb_class_get(mrb, \"EncodingError\")",
+      "needs_mrb": true,
+      "caveat": "struct RClass *, as E_INDEX_ERROR: the EncodingError class the fork defines (mrbgems/mruby-encoding); a VALUE use needs mrb_obj_value(); in rb_raise it is the class argument"
     },
     "rb_eSysStackError": {
       "kind": "expr",
@@ -2776,8 +2974,6 @@
     "RUBY_API_VERSION_CODE": {"kind": "expr", "mruby": "20200", "caveat": "the CRuby API version the gem emulates: 2.2 (20200), by the user's decision (fast_blank: CRuby 2.2 or later, so U+180E is not whitespace). The build also defines it (--define RUBY_API_VERSION_CODE=20200), which selects the #ifndef branches"},
     "STRNCASECMP": {"kind": "expr", "mruby": "strncasecmp", "caveat": "CRuby's STRNCASECMP (ruby/util.h) is the C library's strncasecmp (its name, as a macro value)"},
     "STRTOUL": {"kind": "call", "mruby": "strtoul", "caveat": "CRuby's STRTOUL (ruby/util.h) is the C library's strtoul"},
-    "ENCODING_GET_INLINED": {"kind": "refuse", "reason": "stuck point (Encoding): ENCODING_GET_INLINED reads the encoding index of a string (CRuby's rb_encoding table); the fork has no Encoding (accepted stuck point)"},
-    "ENCODING_SET": {"kind": "refuse", "reason": "stuck point (Encoding): ENCODING_SET writes the encoding index of a string (CRuby's encoding table); the fork has no Encoding (accepted stuck point)"},
     "PRI_SIZE_PREFIX": {"kind": "expr", "mruby": "\"z\"", "caveat": "CRuby's PRI_SIZE_PREFIX is the printf length modifier for size_t, the string the PRI*SIZE macros append to (C99 z)"},
     "PUREFUNC": {"kind": "template", "arity": 1, "template": "$0", "caveat": "PUREFUNC (CRuby's pure-function attribute) is a compiler hint: the declaration it wraps is kept, without the attribute"},
     "RARRAY_PTR": {"kind": "macro", "mruby": "RARRAY_PTR", "caveat": "mruby's RARRAY_PTR (include/mruby/array.h) is the array's element pointer, as CRuby's; the use reads elements. A write through it would need mruby's array modify step (not done here)"},

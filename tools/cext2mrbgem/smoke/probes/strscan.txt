@@ -14,8 +14,10 @@ StringScanner.new("abc").inspect	#<StringScanner 0/3 @ "abc">
 (s = StringScanner.new("ab"); s.terminate; s.eos?)	true
 (s = StringScanner.new("ab"); s.reset; s.pos)	0
 StringScanner.new("abc").peek(2)	ab
-StringScanner.new("abc").get_byte	!NotImplementedError
-StringScanner.new("abc").getch	!NotImplementedError
-StringScanner.new("abc").scan("a")	!NotImplementedError
-(s = StringScanner.new("ab"); s.getch; s.rest)	!NotImplementedError
-StringScanner.new("abc").scan(/a/)	!NameError
+StringScanner.new("abc").get_byte	a
+StringScanner.new("abc").getch	a
+StringScanner.new("abc").scan("a")	a
+(s = StringScanner.new("ab"); s.getch; s.rest)	b
+StringScanner.new("abc").scan(/a/)	a
+(s = StringScanner.new("abc"); s.scan(/a/); s.matched)	a
+StringScanner.new("abc").scan(/z/).nil?	true

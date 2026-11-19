@@ -544,6 +544,7 @@ class Converter
     @includes = amap['includes']
     @special_pos = amap['special_arg_positions_class_only']
     @type_check_refused = amap['type_check_refused'] || {}
+    @require_features = amap['require_features'] || []
     @unmapped_reasons = amap['unmapped_reasons'] || {}
     @files = {}   # rel -> {'text','masked','kind'}
     @edits = {}   # rel -> Edits
@@ -2506,9 +2507,22 @@ forced = (@reg_names - @split_names) | Set.new(@init_defs.map { |d| d['name'] })
       end
       break unless changed
     end
+    # a function whose address is taken other than by a direct call (a dispatch table: &char_escape) keeps its C signature
+    # (its table's type has no state), so a call from it cannot pass the state to a threaded callback field
+    # (a callback stored in a field, and a registered method or Init function, are address-taken by design: they are threaded
+    # with their field or registration, so they stay usable)
+    @fnptr_addr_taken = {}
+    stored_cbs = Set.new(@fnptr_recs.flat_map { |r| r[:assigns].map { |h, _, _| h } })
+    registered = Set.new((@reg_names || []).to_a) | Set.new((@init_defs || []).map { |d| d['name'] })
+    fn_addr_taken = lambda do |fn|
+      next false if stored_cbs.include?(fn) || registered.include?(fn)
+      @fnptr_addr_taken.fetch(fn) do
+        @fnptr_addr_taken[fn] = @files.values.any? { |f| f['masked'].match?(/\b#{Regexp.escape(fn)}\b(?!\s*\()/) }
+      end
+    end
     @fnptr_recs.each do |r|
       next if r[:assigns].empty?
-      r[:ok] = r[:assigns].all? { |h, _, _| @defs.key?(h) } && r[:calls].all? { |_, fn, _| fn }
+      r[:ok] = r[:assigns].all? { |h, _, _| @defs.key?(h) } && r[:calls].all? { |_, fn, _| fn && !fn_addr_taken.call(fn) }
       # only a record that is ok forces its callbacks: a refused field must not make its callbacks need the state
       r[:assigns].each { |h, _, _| forced << h if @defs.key?(h) && r[:ok] }
       forced << r[:owner] if r[:ok] && r[:owner]
@@ -3601,6 +3615,8 @@ use_problem = lambda do |name, use|
   # rb_enc_get gives a VALUE (the encoding name, mruby-encoding), but a field or variable declared rb_encoding * takes the
   # encoding pointer: an assignment of it to such a field is the Encoding stuck point (the fork has no rb_encoding)
   def encoding_pointer_assign_pass
+    # the fork has rb_encoding (mrbgems/mruby-encoding), so an rb_encoding * is a real pointer: nothing to refuse
+    return
     names = Set.new
     @files.each_value do |f|
       f['masked'].to_enum(:scan, /\brb_encoding\s*\*\s*([A-Za-z_]\w*)\s*[;,\[=)]/).each { names << Regexp.last_match(1) }
@@ -3781,17 +3797,15 @@ use_problem = lambda do |name, use|
     typedef void *regex_t;
     typedef struct nfcx_onig_regs { int allocated; int num_regs; OnigPosition *beg; OnigPosition *end; } OnigRegion;
     struct re_registers { int allocated; int num_regs; OnigPosition *beg; OnigPosition *end; };
-    struct nfcx_rb_encoding;
-    typedef struct nfcx_rb_encoding rb_encoding;
     #endif
   C
-  PLACEHOLDER_APIS = %w[UChar OnigUChar OnigPosition OnigRegex regex_t OnigRegion re_registers rb_encoding
-                        #include\ <ruby/encoding.h>].freeze
+  PLACEHOLDER_APIS = %w[UChar OnigUChar OnigPosition OnigRegex regex_t OnigRegion re_registers].freeze
 
   # a file whose declarations name a stuck type gets the placeholder prelude (see ONIG_STUCK_TYPES_PRELUDE)
   def needs_placeholder_prelude?(f)
-    (f['masked'].match?(ONIG_NAME_RE) || f['masked'].match?(/\brb_encoding\b/) ||
-                           f['text'].match?(/#\s*include\s*[<"]ruby\/encoding\.h[>"]/))
+    # the Onigmo names are declared by the fork's mruby/onigmo.h (ruby/re.h maps there), and rb_encoding and ruby/encoding.h by
+    # the fork's mruby/encoding.h: no placeholder is needed for them. The prelude stays for a name the fork declares nowhere.
+    false
   end
   ONIG_NAME_RE = /(?<![#{WC}.>])(OnigUChar|OnigRegion|OnigRegex|OnigPosition|OnigEncoding|OnigOptionType|OnigCaptureTreeNode|regex_t|re_registers|UChar|ONIG_[A-Z0-9_]+|onig_[a-z0-9_]+)(?![#{WC}])/
   def onig_engine_stuck_pass
@@ -3800,7 +3814,7 @@ use_problem = lambda do |name, use|
       masked.to_enum(:scan, ONIG_NAME_RE).each do
         m = Regexp.last_match
         name = m[1]
-        next if @defs[name] || @entries[name]
+        next if @defs[name] || @entries[name] || @types.key?(name)
         s, e = m.begin(1), m.end(1)
         next if @edits[rel].overlaps(s, e)
         refuse(rel, s, name, "stuck point (regexp engine): #{name} is CRuby's Onigmo regexp engine (its match region, regex and functions); the fork has no regexp engine (no regexp mrbgem in mrbgems/), so it has no mruby form")
@@ -4582,9 +4596,8 @@ use_problem = lambda do |name, use|
         warn "warning: #{rel}:#{line_of(text, m.begin(0))} dropped #include <#{inc}> (#{reason})"
       else
         if inc == 'ruby/encoding.h'
-          refuse(rel, m.begin(0), "#include <#{inc}>", 'stuck point (Encoding): ruby/encoding.h declares rb_encoding and the encoding API; the fork has no Encoding (accepted stuck point)')
-          # the header is not in the fork: the include is dropped, and rb_encoding is a placeholder type (the prelude)
-          ed.add(m.begin(0), m.end(0), "/* BC2CPP-MRBGEM dropped: #include <ruby/encoding.h> (rb_encoding is a placeholder, see the prelude) */")
+          # the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h) declares rb_encoding and the functions
+          ed.add(m.begin(0), m.end(0), "#include <mruby/encoding.h>")
         elsif inc == 'ruby/io.h'
           refuse(rel, m.begin(0), "#include <#{inc}>", 'stuck point (IO): ruby/io.h declares the CRuby IO struct (rb_io_t) and its API; the fork has no binding for that struct (mruby-io has its own, different one) (accepted stuck point)')
         elsif inc == 'ruby/version.h'
@@ -6313,6 +6326,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       define_const(rel, s, e, nxt, called)
     when 'rb_const_get'
       const_get(rel, s, e, nxt, called)
+    when 'rb_require'
+      require_call(rel, s, e, nxt, called)
     when 'rb_raise'
       unless called
         refuse(rel, s, name, 'used without a call')
@@ -6353,6 +6368,38 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
   # rb_const_get(klass, id) -> mrb_const_get(mrb, klass, id). Both take the receiver as a VALUE and the name as
   # an ID (mrb_sym); rb_cObject is passed as its VALUE. Differences, recorded as a caveat: a module receiver
   # does not fall back to Object in mruby (CRuby does), and there is no autoload.
+  # rb_require("feature") -> rb_require(mrb, "feature") (the fork's require, mrbgems/mruby-require). The feature must be one this
+  # build provides (api_map.json "require_features"): a name the build lacks would raise LoadError when the code runs (an Init
+  # would fail to load the gem), so it stays a stuck point. A feature that is the gem's own Ruby file is not provided (its
+  # Ruby code is not compiled into the gem), and a name that is not a literal cannot be checked.
+  def require_call(rel, s, e, nxt, called)
+    masked, text, ed = @files[rel]['masked'], @files[rel]['text'], @edits[rel]
+    unless called
+      refuse(rel, s, 'rb_require', 'used without a call')
+      return
+    end
+    close = match_close(masked, nxt)
+    args = close > 0 ? split_args(masked, nxt, close) : []
+    if args.size != 1
+      refuse(rel, s, 'rb_require', 'rb_require takes a feature name')
+      return
+    end
+    a0, a1 = args[0]
+    lit = psl(text, a0, a1)
+    m = /\A"([^"\\]*)"\z/.match(lit)
+    unless m
+      refuse(rel, s, 'rb_require', 'stuck point (require): the feature name is not a literal, so the build cannot check that it is provided')
+      return
+    end
+    feature = m[1]
+    unless (@require_features || []).include?(feature)
+      refuse(rel, s, 'rb_require', "stuck point (require): the feature '#{feature}' is not provided by this build (no built gem of that name, or it is the gem's own Ruby file, which is not compiled into the gem)")
+      return
+    end
+    ed.add(nxt + 1, nxt + 1, 'mrb, ')
+    rewrite(rel, s, 'rb_require', 'rb_require', "the fork's require (mrbgems/mruby-require): feature '#{feature}' is a built gem's name, and it is provided")
+  end
+
   def const_get(rel, s, e, nxt, called)
     masked, text, ed = @files[rel]['masked'], @files[rel]['text'], @edits[rel]
     unless called
@@ -6660,6 +6707,13 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       new = "#{pred}(#{obj})"
       ed.add(s, close + 1, new)
       rewrite(rel, s, 'RB_TYPE_P', new, 'nil and false are told apart by value (mrb_nil_p, mrb_false_p), not by tag')
+      return
+    end
+    if tname.sub(/\ARUBY_/, '') == 'T_REGEXP'
+      # a Regexp is a data object of the mruby-onig-regexp gem: its data type is the gem's (mruby/onigmo.h, mruby_onig_regexp_is)
+      new = "mruby_onig_regexp_is(#{obj})"
+      ed.add(s, close + 1, new)
+      rewrite(rel, s, 'RB_TYPE_P', new, 'a Regexp is the mruby-onig-regexp gem\'s data object (its data type), not a tag')
       return
     end
     ent = @entries[tname]
