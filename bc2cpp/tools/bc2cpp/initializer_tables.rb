@@ -223,10 +223,14 @@ class CodeGen
     @enclosing_method_label[label] = up
   end
 
+  # Sends that reflect on or define methods by name; a foreign source that makes one refuses initializer tables. A frozen
+  # constant (not a local the block below captures) so the closed world can prove these names are only compared.
+  FOREIGN_REFLECTION_SENDS = %i[send __send__ public_send eval instance_eval class_eval module_eval instance_exec class_exec
+                                module_exec method instance_method to_proc define_method define_singleton_method
+                                alias_method].freeze
+
   def initializer_foreign_reflection?
     require 'prism'
-    sensitive = %i[send __send__ public_send eval instance_eval class_eval module_eval instance_exec class_exec module_exec
-                   method instance_method to_proc define_method define_singleton_method alias_method]
     visible = @ireps.values.map(&:file).to_set
     paths = @closed_world.foreign_ruby_token_files.keys | Shellwords.split(ENV.fetch('FOREIGN_RUBY_SRCS', ''))
     paths.any? do |path|
@@ -251,7 +255,7 @@ class CodeGen
               next
             end
           end
-          if sensitive.include?(node.name)
+          if FOREIGN_REFLECTION_SENDS.include?(node.name)
             unsafe = true
             break
           end
