@@ -2270,6 +2270,25 @@ class ClosedWorld
     call.keyword_arguments? && call.keyword_argc == 1 && !call.keyword_splat?
   end
 
+  def struct_packed_member_names(irep, use, call, arr_idx, arr)
+    uses = FactoryFlow.uses(irep, arr_idx, arr.reg)
+    return nil unless uses && uses.size == 1 && uses.first == [use, call.reg + 1]
+
+    literal = BytecodeIR.for(irep).container_literal(arr_idx)
+    return nil unless literal&.kind == :array && literal.count.positive?
+
+    (0...literal.count).map do |offset|
+      _element_idx, writer = sole_definition(irep, arr_idx, (literal.base + offset))
+      name = case writer&.op
+             when :LOADSYM then writer.sym_token
+             when :SYMBOL then irep.pool&.[](writer.pool_index.to_i)
+             end
+      return nil unless name.is_a?(String)
+
+      name
+    end
+  end
+
   # `Struct.new(*MEMBERS, keyword_init: true)`: mruby takes a call with more than 14 positional arguments and a keyword
   # for a block, so the members are packed in a constant array. They are the symbols of MEMBERS when the program
   # writes MEMBERS exactly once, in this body, as a literal `%i[...].freeze`. Anything else refuses the closed world.
@@ -2290,6 +2309,8 @@ class ClosedWorld
   def struct_splat_member_names(irep, use, call)
     program = BytecodeIR.for(irep)
     source_idx, source = sole_definition(irep, use, (call.reg + 1))
+    # 15+ literal members and a keyword arrive packed: `ARRAY Ra k` read only by this send (as packed_syms reads them).
+    return struct_packed_member_names(irep, use, call, source_idx, source) if source&.op == :ARRAY
     return nil unless source&.op == :ARYCAT
 
     base = sole_definition(irep, source_idx, source.reg)&.last
