@@ -207,10 +207,53 @@ module NfcxxSetup
   end
 end
 
+module NfcxxSetup
+  module_function
+
+  # The planners that the bash ran before the sanitizer, in the order it ran them: the default backend (which sets backend,
+  # default_backend and pb_fs_host), the sanitizer's options, instantiation, cosmo (only with cosmo=1), the freestanding or
+  # hosted headers (with the host C++ headers span), the host cflags, the GNU options, k1om and the target. Their statements
+  # are returned as one text for the driver to eval. The sanitizer, -fsafe-pointers, the Path B override and the backend
+  # environment stay in the driver, after this text, because they set backend (docs/notes/driver-setup-stage.md).
+  def planners_text(opts, env, bash_pid)
+    state = opts.dup
+    flag = ->(k) { state.fetch(k, "0") == "1" }
+    out = +""
+    out << run("default", state, env)
+    state["backend"], state["default_backend"], state["pb_fs_host"] = out.scan(/(\S+)=(\S+)/).map(&:last)
+    out << run("asan", state, env)
+    out << run("instantiate", state, env)
+    out << run("cosmo", state, env) if flag.("cosmo")
+    text = host_headers(state, env, bash_pid)
+    out << text
+    if (m = text.match(/^gnu=(\S+)/))
+      state["gnu"] = m[1]
+    end
+    out << run("host_cflags", state, env)
+    gnu_text = run("gnu_opts", state, env)
+    out << gnu_text
+    state["gnu_opts"] = array_words(gnu_text, "gnu_opts")[1].join("\x1f")
+    out << run("k1om", state, env)
+    target_text = run("target", state, env)
+    out << target_text
+    out
+  end
+end
+
 if $PROGRAM_NAME == __FILE__
   if ARGV.first == "host-headers"
     opts = NfcxxSetup.options(ARGV.drop(1))
     $stdout.write(NfcxxSetup.host_headers(opts, ENV, opts.fetch("bash_pid", "0")))
+    exit 0
+  end
+  if ARGV.first == "setup"
+    opts = NfcxxSetup.options(ARGV.drop(1))
+    begin
+      $stdout.write(NfcxxSetup.planners_text(opts, ENV, opts.fetch("bash_pid", "0")))
+    rescue NfcxxSetup::Refusal => e
+      warn e.message
+      exit e.status
+    end
     exit 0
   end
   if ARGV.first == "sys-include"
