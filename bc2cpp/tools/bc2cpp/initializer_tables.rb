@@ -248,7 +248,8 @@ class CodeGen
       until queue.empty?
         node = queue.pop
         if node.is_a?(Prism::CallNode)
-          if node.name == :alias_method
+          # The Symbol is the receiver (Symbol#==, a core read), so the closed world can prove the name is only compared.
+          if :alias_method == node.name
             args = node.arguments&.arguments
             if args && args.size == 2 && args.all? { |arg| arg.is_a?(Prism::SymbolNode) && !%w[initialize new].include?(arg.unescaped) }
               queue.concat(node.compact_child_nodes)

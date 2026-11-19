@@ -597,7 +597,7 @@ module EscapeAnalysis
         return @dynamic_sites << [irep.label, idx, sym] unless literal
 
         @defs[names[0]] << MethodDef.new(name: names[0], owner: '<define_method>', irep: nil, visibility: :public,
-                                         installer: :define_method)
+                                         installer: :define_method_def)
       end
     end
 

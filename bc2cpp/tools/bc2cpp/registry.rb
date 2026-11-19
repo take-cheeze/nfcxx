@@ -614,7 +614,7 @@ def build_registry(ireps, root_label)
         if site && namespace && !namespace.include?('.singleton') && !namespace.start_with?('<') &&
            default_visibility == :public && !CoreDefs.core_source?(irep.file)
           registry[site.name] << MethodDef.new(name: site.name, owner: namespace, irep: site.child,
-                                                visibility: :public, installer: :define_method)
+                                                visibility: :public, installer: :define_method_def)
         end
       when :SENDB
         loop_sites << [label, idx, namespace, default_visibility] if LoopInstallers.candidate?(irep, idx, ireps)

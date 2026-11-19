@@ -151,7 +151,7 @@ module LoopInstallers
       next if site.is_a?(String)
 
       site.installs.each do |kind, name, _body, _captures, send_site|
-        next unless kind == :define_method && !registered.key?(send_site)
+        next unless kind == :define_method_def && !registered.key?(send_site)
 
         (@unregistered_define_names[send_site] ||= Set.new) << name
       end
@@ -168,11 +168,11 @@ module LoopInstallers
     seen = Set.new
     expansions = Hash.new(0)
     result.installs.each do |kind, name, body, captures, send_site|
-      if kind == :define_method
+      if kind == :define_method_def
         label = DefineMethodSites.expand(ireps, body, captures, expansions[body])
         expansions[body] += 1
         registry[name] << MethodDef.new(name: name, owner: owner, irep: label, visibility: :public,
-                                        installer: :define_method, site: [send_site])
+                                        installer: :define_method_def, site: [send_site])
         next
       end
 
@@ -514,7 +514,7 @@ module LoopInstallers
 
           [r, value.name]
         end
-        @installs << [:define_method, name, body, captures, send_site]
+        @installs << [:define_method_def, name, body, captures, send_site]
       end
       nil
     end
