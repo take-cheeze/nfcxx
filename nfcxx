@@ -642,10 +642,8 @@ return 0
 }
 cache_store() {  # cache_store OBJ: a whole entry appears at once (a partial copy is never a hit)
   [ -n "$cache_entry" ] || return 0
-  # store: exit 0 when this call made the entry; a new entry goes to the remote tier (cache_remote_put, a note on failure)
-  if "${RUBY:-ruby}" "$root/scripts/nfcxx-cache.rb" store --out="$1" --entry="$cache_entry" && [ -n "$cache_remote" ]; then
-    cache_remote_put "${cache_entry##*/}" "$cache_entry"
-  fi
+  # the store (scripts/nfcxx-cache-check.rb store): a new entry goes to the remote tier too, a note on failure (the build goes on)
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-check.rb" store --out="$1" --entry="$cache_entry" ${cache_remote:+--remote="$cache_remote"} || true
 }
 # Path B: no C is generated. Each C++ file goes EDG -> typed IR -> QBE -> object (scripts/pathb-cc.rb), and the objects are
 # linked with EDG's runtime (libC.a: exceptions, operator new) before libstdc++, as tests/pathb-qbe/run.sh links them.
