@@ -134,9 +134,6 @@ promote_slots=${NFCXX_PROMOTE_SLOTS:-1}; unroll=${NFCXX_UNROLL:-1}; struct_slots
 ld_name=${NFCXX_LD:-}                                  # -fuse-ld=NAME
 pathb_c=${NFCXX_PATHB_C:-}                                              # --pathb-c=gcc
 pb_flags=()   # the options scripts/pathb-cc.rb gets (--asan, --safe-pointers, --sanitize=, --ir-opt=): flags, not exported variables
-onoff() {  # onoff FLAG VALUE: on|1 -> 1, off|0 -> 0; anything else is an error
-  case $2 in on|1) echo 1 ;; off|0) echo 0 ;; *) echo "nfcxx: $1 takes on or off (got '$2')" >&2; exit 2 ;; esac
-}
 # CUDA kernel names are obfuscated (docs/notes/gpu.md, "Kernel name obfuscation"): --obfuscate-kernels, or NFCXX_OBFUSCATE_KERNELS=1
 # in the environment (which reaches a CMake build through nfcxx-cuda without any change to its command line).
 obfuscate=0; case ${NFCXX_OBFUSCATE_KERNELS:-0} in 0|"") ;; *) obfuscate=1 ;; esac
