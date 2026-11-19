@@ -189,30 +189,21 @@ cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs
     mkdir -p "$dir"
     cu_keep=$dir
   fi
-  # The loop over the inputs is scripts/nfcxx-cuda-device.rb --cu-prepare: the copies, the -I of each source directory, the
-  # rewrite of each input (in that process) and the state it changes, which come back as the groups sdirs, copies, cuda and
-  # preinc. The state goes in as records (state_put). The bash keeps the array edits (srcs, files, cflags) and sets cuda_opts
-  # and preinc from the reply. A failing rewrite ends the driver with its status (the reply's file is read after the call).
-  local rec group done=0 idx src copy i bpid=$BASHPID inf=$cudatmp/cu-in.rec
+  # The loop over the inputs is scripts/nfcxx-cuda-device.rb --cu-run (the copies, the -I of each source directory, the rewrite of
+  # each input in that process, and the state it changes: the groups sdirs, copies, cuda and preinc). The bash keeps the array
+  # edits (srcs, files, cflags) and sets cuda_opts and preinc from the reply. A failing rewrite ends the driver with its status.
+  local rec group done=0 idx src copy i bpid=$BASHPID
   local cu_sdirs=() cu_copies=() cu_cuda=() cu_pre=()
-  # the planner's state records (scripts/nfcxx-state-records.rb, restructure step 2): each group is its name, its values, and a
-  # separator; the writer prints the records state_put printed
-  local st=()
-  st+=(root "$root" $'\x1e' tmp "$cudatmp" $'\x1e' keep "$cu_keep" $'\x1e' bash_pid "$bpid" $'\x1e')
-  st+=(trace_unit "${trace_unit:-${NFCXX_TRACE_UNIT:-}}" $'\x1e' dir "$dir" $'\x1e')
-  st+=(inputs ${cu_inputs[@]+"${cu_inputs[@]}"} $'\x1e' cflags ${cflags[@]+"${cflags[@]}"} $'\x1e')
-  if [ "$obfuscate" = 1 ]; then st+=(obfuscate 1 $'\x1e'); else st+=(obfuscate 0 $'\x1e'); fi
-  if [ "$ir_opt_set" = 1 ]; then st+=(ir_opt "$ir_opt" $'\x1e'); else st+=(ir_opt $'\x1e'); fi
-  st+=(promote_slots "$promote_slots" $'\x1e' unroll "$unroll" $'\x1e' struct_slots "$struct_slots" $'\x1e')
-  st+=(cache_dir "$cache_dir" $'\x1e' cache_log "${cache_log_file:-}" $'\x1e')
-  st+=(preinc ${preinc[@]+"${preinc[@]}"} $'\x1e' cuda ${cuda_opts[@]+"${cuda_opts[@]}"} $'\x1e')
-  st+=(edg_launch "${NFCXX_CUDA_EDG_LAUNCH:-1}" $'\x1e')
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-state-records.rb" "${st[@]}" > "$inf"
-  # the reply (scripts/nfcxx-cu-apply.rb plan, restructure step 2): the -I directories and the copies replace the inputs in srcs and
-  # files, and the cuda and preinc groups become cuda_opts and preinc. A refusal ends the driver with 2; a reply without its end with 1.
-  # the reply (scripts/nfcxx-cuda-device.rb --cu-run, restructure step 2): the loop and its apply in one process (nfcxx-cu-apply.rb
-  # plan kind=cu); its statements are evaluated here
-  cu_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cuda-device.rb" --cu-run inputs="$(IFS=$'\x1f'; echo "${cu_inputs[*]-}")" srcs="$(IFS=$'\x1f'; echo "${srcs[*]-}")" files="$(IFS=$'\x1f'; echo "${files[*]-}")" cflags="$(IFS=$'\x1f'; echo "${cflags[*]-}")" < "$inf") || exit $?
+  # the state and the reply (scripts/nfcxx-cuda-device.rb --cu-run, restructure step 2): the driver's values go in as key=value
+  # arguments (a list is joined by ASCII 31) and the planner builds the state, runs the loop and applies the reply (nfcxx-cu-apply.rb
+  # plan kind=cu) in one process. Its statements are evaluated here: the -I directories and the copies replace the inputs in srcs
+  # and files, and the cuda and preinc groups become cuda_opts and preinc. A refusal ends the driver with 2; a reply without its end with 1.
+  cu_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cuda-device.rb" --cu-run root="$root" tmp="$cudatmp" keep="$cu_keep" bash_pid="$bpid" \
+    trace_unit="${trace_unit:-${NFCXX_TRACE_UNIT:-}}" dir="$dir" obfuscate="$obfuscate" ir_opt_set="$ir_opt_set" ir_opt="$ir_opt" \
+    promote_slots="$promote_slots" unroll="$unroll" struct_slots="$struct_slots" cache_dir="$cache_dir" cache_log="${cache_log_file:-}" \
+    edg_launch="${NFCXX_CUDA_EDG_LAUNCH:-1}" inputs="$(IFS=$'\x1f'; echo "${cu_inputs[*]-}")" cflags="$(IFS=$'\x1f'; echo "${cflags[*]-}")" \
+    preinc="$(IFS=$'\x1f'; echo "${preinc[*]-}")" cuda="$(IFS=$'\x1f'; echo "${cuda_opts[*]-}")" \
+    srcs="$(IFS=$'\x1f'; echo "${srcs[*]-}")" files="$(IFS=$'\x1f'; echo "${files[*]-}")") || exit $?
   eval "$cu_sh"
 }
 # A .cpp2 input (experimental, docs/notes/cpp2.md) is translated to C++1 by cppfront (scripts/setup-cppfront.sh) before the

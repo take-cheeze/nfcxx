@@ -67,6 +67,7 @@ require_relative "amdgpu-env"
 require_relative "driver-state"
 require "stringio"
 require_relative "nfcxx-cu-apply"
+require_relative "nfcxx-state"
 
 RUNNER_PATH = File.expand_path("nfcxx-run.rb", __dir__)
 
@@ -157,6 +158,25 @@ def cu_prepare_run(g)
     preinc << hdr unless preinc.include?(hdr)
   end
   [[["sdirs", sdirs], ["copies", copies], ["cuda", cuda], ["preinc", preinc]], 0]
+end
+
+# cu_prepare's state (the driver's values, as key=value arguments; a list is its values joined by ASCII 31, an empty list is
+# empty): the state records the driver's state_put wrote, read back as the groups cu_prepare_run takes. ir_opt is a group
+# with its value only when ir_opt_set is 1 (the driver's --ir-opt, even when empty).
+def cu_state_groups(a)
+  s = ->(k) { a[k].to_s }
+  list = ->(k) { s[k].empty? ? [] : s[k].split("\x1f", -1) }
+  st = NfcxxState.new
+  st.add("root", s["root"]).add("tmp", s["tmp"]).add("keep", s["keep"]).add("bash_pid", s["bash_pid"])
+  st.add("trace_unit", s["trace_unit"]).add("dir", s["dir"])
+  st.add("inputs", *list["inputs"]).add("cflags", *list["cflags"])
+  st.add("obfuscate", s["obfuscate"])
+  st.add("ir_opt", *(s["ir_opt_set"] == "1" ? [s["ir_opt"]] : []))
+  st.add("promote_slots", s["promote_slots"]).add("unroll", s["unroll"]).add("struct_slots", s["struct_slots"])
+  st.add("cache_dir", s["cache_dir"]).add("cache_log", s["cache_log"])
+  st.add("preinc", *list["preinc"]).add("cuda", *list["cuda"])
+  st.add("edg_launch", s["edg_launch"])
+  DriverState.read_groups(st.records)
 end
 
 # cu_rewrite's --execute options (the bash built them from the driver's state; the bash now writes that state as records,
@@ -747,12 +767,12 @@ end
 
 if $PROGRAM_NAME == __FILE__
   begin
-    # --cu-run inputs=... srcs=... files=... cflags=... < RECORDS: cu_prepare's loop (--cu-prepare) and its apply (nfcxx-cu-apply.rb
-    # plan kind=cu) in one process; the statements the driver evals are printed
+    # --cu-run KEY=VALUE...: cu_prepare's state (cu_state_groups), its loop (--cu-prepare) and its apply (nfcxx-cu-apply.rb plan
+    # kind=cu) in one process; the statements the driver evals are printed
     if ARGV[0] == "--cu-run"
       opts = ARGV.drop(1).to_h { |kv| kv.split("=", 2) }
       begin
-        groups = DriverState.read_groups($stdin.binmode.read)
+        groups = cu_state_groups(opts)
         result, status = cu_prepare_run(groups)
       rescue ArgumentError, CuCopiesFailed => e
         $stderr.puts(e.message.start_with?("realpath") ? e.message : "nfcxx-cuda-device: #{e.message}")
