@@ -1702,6 +1702,7 @@ check grep -qF 'rb_enc_codepoint_len(mrb, p, p + RSTRING_LEN(str), &len, rb_utf8
 check grep -qF 'rb_str_conv_enc(mrb, str, rb_utf8_encoding(), rb_usascii_encoding())' "$work/api_enc_helpers/src/api_enc_helpers.c"
 check grep -qF 'rb_enc_from_encoding(mrb, rb_utf8_encoding())' "$work/api_enc_helpers/src/api_enc_helpers.c"
 check grep -qF 'mrb_raisef(mrb, mrb_class_get(mrb, "EncodingError"), "bad: %s", mrb_string_value_cstr(mrb, &msg));' "$work/api_enc_helpers/src/api_enc_helpers.c"
+check grep -qF 'return rb_enc_sprintf(mrb, rb_utf8_encoding(), "[%""S""]", v);' "$work/api_enc_helpers/src/api_enc_helpers.c"
 # 2zzz155. a struct field of CRuby's rb_encoding * type: the Encoding placeholder type is in the prelude (the declaration compiles),
 # and the include of ruby/encoding.h is not a blocking refusal (the placeholder covers it).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rb_encoding_field tools/cext2mrbgem/fixtures/api_rb_encoding_field/ext/api_rb_encoding_field "$work/api_rb_encoding_field" > "$work/api_rb_encoding_field.log" 2>&1 || rc=$?

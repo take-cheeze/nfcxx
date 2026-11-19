@@ -30,6 +30,12 @@ eh_fail(VALUE self, VALUE msg)
     return Qnil;
 }
 
+static VALUE
+eh_fmt(VALUE self, VALUE v)
+{
+    return rb_enc_sprintf(rb_utf8_encoding(), "[%"PRIsVALUE"]", v);
+}
+
 void
 Init_api_enc_helpers(void)
 {
@@ -38,4 +44,5 @@ Init_api_enc_helpers(void)
     rb_define_module_function(m, "conv", eh_conv, 1);
     rb_define_module_function(m, "name", eh_name, 0);
     rb_define_module_function(m, "fail", eh_fail, 1);
+    rb_define_module_function(m, "fmt", eh_fmt, 1);
 }

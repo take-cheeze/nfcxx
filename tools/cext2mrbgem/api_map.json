@@ -47,7 +47,7 @@
     "T_COMPLEX": "stuck point (gem dependency): a Complex test is the mruby-complex class test, which needs the state and the gem (the decision is made: the gem is a dependency when the test is emitted); a bare use has no test to make here",
     "_comment": "A name with no api_map entry is refused with the reason given here (the converter's no-entry path). PRIsVALUE is converted where rb_raise and rb_sprintf take it; elsewhere it is an argument of rb_enc_sprintf, which takes an rb_encoding *.",
     "onig_foreach_name": "stuck point (onig_foreach_name): onig_foreach_name calls its callback with only the user data, and the callback (strscan's named_captures_iter) needs the mruby state; the rb_hash_foreach-style callback wrapper that carries it is not implemented for this call (the next Onigmo item)",
-    "PRIsVALUE": "stuck point (Encoding): PRIsVALUE outside rb_raise and rb_sprintf is an argument of rb_enc_sprintf, which takes an rb_encoding *; the fork has no Encoding (accepted stuck point)",
+    "PRIsVALUE": "stuck point (PRIsVALUE): PRIsVALUE outside the format of rb_raise, rb_sprintf and rb_enc_sprintf (a VALUE argument of another call) is not converted; it has no mruby form in this position",
     "rb_thread_current": "stuck point (Thread): the fork has no Thread (accepted stuck point)",
     "rb_thread_local_aref": "stuck point (Thread): thread-local storage; the fork has no Thread (accepted stuck point)",
     "rb_thread_local_aset": "stuck point (Thread): thread-local storage; the fork has no Thread (accepted stuck point)",
@@ -63,7 +63,6 @@
     "rb_encoder": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
     "rb_enc_interned_str_cstr": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
     "rb_marshal_load": "stuck point: the fork has no Marshal (no marshal mrbgem in mrbgems/), so there is no loader to call",
-    "rb_enc_sprintf": "stuck point (Encoding): rb_enc_sprintf takes an rb_encoding *; the fork has no Encoding (accepted stuck point)",
     "rb_define_alloc_func": "stuck point (per-class allocator): the fork has only the global allocf, no per-class allocator (accepted stuck point)"
   },
   "includes": {
@@ -842,6 +841,15 @@
       "kind": "special",
       "handler": "rb_enc_raise",
       "needs_mrb": true
+    },
+    "rb_enc_sprintf": {
+      "kind": "call",
+      "mruby": "rb_enc_sprintf",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "arity": 3,
+      "format_arg": 1,
+      "caveat": "the fork's rb_enc_sprintf (mrbgems/mruby-encoding): mrb_vformat, tagged with the encoding; PRIsVALUE in the format becomes %S, as rb_sprintf"
     },
     "rb_enc_check": {
       "kind": "call",
