@@ -193,7 +193,7 @@ cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs
   # rewrite of each input (in that process) and the state it changes, which come back as the groups sdirs, copies, cuda and
   # preinc. The state goes in as records (state_put). The bash keeps the array edits (srcs, files, cflags) and sets cuda_opts
   # and preinc from the reply. A failing rewrite ends the driver with its status (the reply's file is read after the call).
-  local rec group done=0 idx src copy i bpid=$BASHPID inf=$cudatmp/cu-in.rec outf=$cudatmp/cu-out.rec
+  local rec group done=0 idx src copy i bpid=$BASHPID inf=$cudatmp/cu-in.rec
   local cu_sdirs=() cu_copies=() cu_cuda=() cu_pre=()
   # the planner's state records (scripts/nfcxx-state-records.rb, restructure step 2): each group is its name, its values, and a
   # separator; the writer prints the records state_put printed
@@ -208,10 +208,11 @@ cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs
   st+=(preinc ${preinc[@]+"${preinc[@]}"} $'\x1e' cuda ${cuda_opts[@]+"${cuda_opts[@]}"} $'\x1e')
   st+=(edg_launch "${NFCXX_CUDA_EDG_LAUNCH:-1}" $'\x1e')
   "${RUBY:-ruby}" "$root/scripts/nfcxx-state-records.rb" "${st[@]}" > "$inf"
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-cuda-device.rb" --cu-prepare < "$inf" > "$outf" || exit $?
   # the reply (scripts/nfcxx-cu-apply.rb plan, restructure step 2): the -I directories and the copies replace the inputs in srcs and
   # files, and the cuda and preinc groups become cuda_opts and preinc. A refusal ends the driver with 2; a reply without its end with 1.
-  cu_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cu-apply.rb" plan inputs="$(IFS=$'\x1f'; echo "${cu_inputs[*]-}")" srcs="$(IFS=$'\x1f'; echo "${srcs[*]-}")" files="$(IFS=$'\x1f'; echo "${files[*]-}")" cflags="$(IFS=$'\x1f'; echo "${cflags[*]-}")" < "$outf") || exit $?
+  # the reply (scripts/nfcxx-cuda-device.rb --cu-run, restructure step 2): the loop and its apply in one process (nfcxx-cu-apply.rb
+  # plan kind=cu); its statements are evaluated here
+  cu_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cuda-device.rb" --cu-run inputs="$(IFS=$'\x1f'; echo "${cu_inputs[*]-}")" srcs="$(IFS=$'\x1f'; echo "${srcs[*]-}")" files="$(IFS=$'\x1f'; echo "${files[*]-}")" cflags="$(IFS=$'\x1f'; echo "${cflags[*]-}")" < "$inf") || exit $?
   eval "$cu_sh"
 }
 # A .cpp2 input (experimental, docs/notes/cpp2.md) is translated to C++1 by cppfront (scripts/setup-cppfront.sh) before the
@@ -222,30 +223,12 @@ cpp2_inputs=()
 cpp2_prepare() {  # cpp2_prepare: translates every .cpp2 input and puts its translation in srcs and files in place of the source
   [ ${#cpp2_inputs[@]} -gt 0 ] || return 0
   local cppfront_src=${CPPFRONT_SRC:-$root/build/cppfront-src}
-  [ -x "$root/build/cppfront" ] || { echo "nfcxx: cppfront is not built; run scripts/setup-cppfront.sh (docs/notes/cpp2.md)" >&2; exit 2; }
-  [ -f "$cppfront_src/include/cpp2util.h" ] || { echo "nfcxx: no cpp2util.h under $cppfront_src; run scripts/setup-cppfront.sh" >&2; exit 2; }
   if [ -z "${cudatmp:-}" ]; then cudatmp=$(mktemp -d); trap 'trace_finish; [ -z "${cudatmp:-}" ] || rm -rf "$cudatmp"' EXIT; fi
-  local dir=$cudatmp
-  if [ $compile_only = 1 ]; then
-    # As for .cu inputs (cu_prepare): the translation outlives the compile, because the prelinker re-reads it at link time.
-    local obj=$out; [ $outset = 1 ] || obj=$(basename "${cpp2_inputs[0]}" .cpp2).o
-    # the directory is scripts/nfcxx-cpp2.rb's (--cpp2-dir: the SHA-1 of realpath -m OBJ, as the bash had it)
-    dir=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cpp2.rb" --cpp2-dir="$obj") || exit $?
-    mkdir -p "$dir"
-  fi
-  local scratch; scratch=$(mktemp -d -p "$cudatmp")
-  # The translations are scripts/nfcxx-cpp2.rb --prepare (the source directories, and cppfront in the scratch directory, from
-  # the records of the driver's state); the bash keeps the array edits. A failing step ends the driver with its status (the
-  # reply's file is read after the call).
-  local rec group done=0 idx src copy i inf=$cudatmp/cpp2-in.rec outf=$cudatmp/cpp2-out.rec
-  local cpp2_sdirs=() cpp2_copies=()
-  {
-    state_put root "$root"; state_put dir "$dir"; state_put scratch "$scratch"; state_put cppfront "$root/build/cppfront"
-    state_put inputs ${cpp2_inputs[@]+"${cpp2_inputs[@]}"}
-  } > "$inf"
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-cpp2.rb" --prepare < "$inf" > "$outf" || exit $?
-  # the reply (scripts/nfcxx-cu-apply.rb plan kind=cpp2, restructure step 2): the -I directories and the copies, then the cppfront include.
-  cpp2_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cu-apply.rb" plan kind=cpp2 cppfront="$cppfront_src" inputs="$(IFS=$'\x1f'; echo "${cpp2_inputs[*]-}")" srcs="$(IFS=$'\x1f'; echo "${srcs[*]-}")" files="$(IFS=$'\x1f'; echo "${files[*]-}")" cflags="$(IFS=$'\x1f'; echo "${cflags[*]-}")" < "$outf") || exit $?
+  # the whole step is scripts/nfcxx-cpp2.rb run (the checks that cppfront and cpp2util.h are there, the directory of the translations,
+  # their scratch directory, cppfront, and the array edits: nfcxx-cu-apply.rb's plan of the reply); its statements are evaluated here
+  cpp2_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cpp2.rb" run root="$root" cppfront_src="$cppfront_src" cudatmp="$cudatmp" \
+    compile_only="$compile_only" out="$out" outset="$outset" inputs="$(IFS=$'\x1f'; echo "${cpp2_inputs[*]-}")" \
+    srcs="$(IFS=$'\x1f'; echo "${srcs[*]-}")" files="$(IFS=$'\x1f'; echo "${files[*]-}")" cflags="$(IFS=$'\x1f'; echo "${cflags[*]-}")") || exit $?
   eval "$cpp2_sh"
 }
 # A CUDA_HOME outside /usr is still a system directory for the rewriter (its headers are not inlined into the device unit),
@@ -375,7 +358,7 @@ fi
 # The unit of the time log's lines (scripts/trace.sh): the first source, else the output. Tracing starts before the .cu
 # and .cpp2 inputs are prepared, whose stages it records.
 trace_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-trace-unit.rb" plan srcs0_set="$([ -n "${srcs[0]+x}" ] && echo 1 || echo 0)" srcs0="${srcs[0]-}" out="$out") || exit $?
-eval "$trace_sh"; export NFCXX_TRACE_UNIT=$trace_unit   # the back-end scripts it runs log under it too (scripts/nfcxx-trace-unit.rb)
+eval "$trace_sh"   # trace_unit, and its export NFCXX_TRACE_UNIT: the back-end scripts it runs log under it too (scripts/nfcxx-trace-unit.rb)
 # The time log is read by every script that sources scripts/trace.sh (the gcc-cc that eccp runs, ...): the one setting that is
 # handed to the processes below as an environment variable, as NFCXX_TRACE is (trace_begin).
 tl_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-time-log.rb" plan time_log="$time_log") || exit $?   # NFCXX_TIME_LOG (scripts/nfcxx-time-log.rb)
@@ -487,16 +470,14 @@ if [ $emit_c = 1 ]; then
   base=${EDG_BASE:-$root/build/edg-base}
   tmp=$(mktemp -d); trap 'trace_finish; [ -z "${tmp:-}" ] || rm -rf "$tmp"' EXIT   # removed on every exit (the front end's output is printed first)
   f=$(realpath "${srcs[0]}")   # the first source, not files[0] (which may be an -I option)
-  # host dirs first, then EDG's own, as eccp orders user and default include dirs
-  # the include list: scripts/nfcxx-emit-c.rb inc (the host or freestanding directories, EDG's own, and the user's -I directories
-  # in front of them, made absolute: cpfe runs from the EDG base directory)
-  inc=()
-  while IFS= read -r -d '' x; do inc+=("$x"); done < <("${RUBY:-ruby}" "$root/scripts/nfcxx-emit-c.rb" inc "$base" "$root" "$freestanding" -- ${sys_inc[@]+"${sys_inc[@]}"} -- ${files[@]+"${files[@]}"})
-  t=$(trace_start)
+  # host dirs first, then EDG's own, as eccp orders user and default include dirs (the include list is nfcxx-emit-c.rb's run)
   eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-host-libs.rb" plan sys="$(uname -s)" freestanding="$freestanding")"   # posix_def: as the macOS base (scripts/nfcxx-host-libs.rb)
-  (cd "$base" && "$edg/cpfe" ${posix_def[@]+"${posix_def[@]}"} -D__CHAR_BIT__=8 "$std" --"$dialect" ${eh_tls[@]+"${eh_tls[@]}"} ${gnu_opts[@]+"${gnu_opts[@]}"} ${diag_opts[@]+"${diag_opts[@]}"} \
-      ${inc[@]+"${inc[@]}"} --gen_c_file_name="$tmp/out.c" "$f")
-  trace_end "$t" "cpfe --emit-c (front end)" frontend
+  # the front end run (scripts/nfcxx-emit-c.rb run): the include list, cpfe in the EDG base directory, and its span
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-emit-c.rb" run base="$base" root="$root" edg="$edg" freestanding="$freestanding" std="$std" \
+    dialect="$dialect" posix_def="$(IFS=$'\x1f'; printf '%s' "${posix_def[*]-}")" eh_tls="$(IFS=$'\x1f'; printf '%s' "${eh_tls[*]-}")" \
+    gnu_opts="$(IFS=$'\x1f'; printf '%s' "${gnu_opts[*]-}")" diag_opts="$(IFS=$'\x1f'; printf '%s' "${diag_opts[*]-}")" \
+    sys_inc="$(IFS=$'\x1f'; printf '%s' "${sys_inc[*]-}")" files="$(IFS=$'\x1f'; printf '%s' "${files[*]-}")" file="$f" tmp="$tmp" \
+    unit="${trace_unit:-${NFCXX_TRACE_UNIT:-}}" bash_pid="${BASHPID:-$$}" || exit $?
   cat "$tmp/out.c"
   exit 0
 fi
