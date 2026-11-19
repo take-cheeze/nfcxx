@@ -6,8 +6,15 @@ require "fileutils"
 
 io = File.expand_path("../../scripts/nfcxx-cache-io.rb", __dir__)
 cmd, key, entry = ARGV
-exit 2 unless cmd == "remote-get"
-puts "RUN ruby #{io} remote-get #{key} #{entry}"
+case cmd
+when "remote-put"
+  puts "RUN ruby #{io} remote-put #{key} #{entry}"
+  exit 0
+when "remote-get"
+  puts "RUN ruby #{io} remote-get #{key} #{entry}"
+else
+  exit 2
+end
 exit 1 unless ENV.fetch("CACHE_TEST_REMOTE", "miss") == "hit"
 unless File.exist?(entry)
   FileUtils.mkdir_p(entry)
