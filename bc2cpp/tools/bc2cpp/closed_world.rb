@@ -117,9 +117,10 @@ class ClosedWorld
   end
   private :profile_mark
 
-  def initialize(ireps:, registry:, class_decls:, walked:, native_paths:, ruby_paths:, module_names: Set.new)
+  def initialize(ireps:, registry:, class_decls:, walked:, native_paths:, ruby_paths:, module_names: Set.new, root_label: nil)
     @ireps = ireps
     @module_names = module_names.to_set
+    @root_label = root_label
     @clone_sent = false
     @registry = registry
     @class_decls = class_decls
@@ -156,6 +157,10 @@ class ClosedWorld
     @constant_write_counts = Hash.new(0)
     # Struct.new(*MEMBERS, keyword_init: true) sites: their member names are checked after the scan (resolve_struct_splats).
     @deferred_struct_splats = []
+    # Modules named by a mixin whose target the analysis cannot place (resolve_deferred_mixin_modules).
+    @deferred_mixin_modules = []
+    # LOADSYM of an installer or rebinder name: [irep, index, register, name] (resolve_installer_symbol_loads).
+    @installer_symbol_loads = []
     @class_constant_names = Set.new
     # CLASS ops that declare a name (not the root-level reopen of native_class_unshadowed?).
     @class_declared_names = Set.new
@@ -1694,15 +1699,20 @@ class ClosedWorld
           scan_send(irep, idx, insn)
         when :UNDEF
           @removed_names << insn.sym
-        when :LOADSYM
-          sym = insn.sym_token
+        when :LOADSYM, :SYMBOL
+          # A %i[] element is a SYMBOL (its name is in the pool) and a method name can be sent from it just the same.
+          sym = loaded_symbol_name(irep, insn)
+          next unless sym
+
           @clone_sent = true if sym == 'clone'
           @dynamic_visibility = true if VISIBILITY_SENDS.include?(sym)
-          global!(:dynamic_install) if INSTALLER_SENDS.include?(sym) || CONST_REBINDERS.include?(sym)
+          # An installer or rebinder name loaded as a symbol may be sent by name: its value must stay on safe paths
+          # (resolve_installer_symbol_loads), not refuse the program outright.
+          @installer_symbol_loads << [irep, idx, insn.reg, sym] if INSTALLER_SENDS.include?(sym) || CONST_REBINDERS.include?(sym)
         when :GETCONST, :GETMCNST
           const = insn.const_name
           @basic_object_referenced = true if const == 'BasicObject'
-          scan_factory(irep, idx, insn, const) if CLASS_FACTORIES.include?(const)
+          scan_factory(irep, idx, insn, const) if CLASS_FACTORIES.include?(const) && !scoped_constant_of_other_scope?(irep, idx, insn)
         when :CLASS, :MODULE
           name = insn.sym_token
           if name
@@ -1719,6 +1729,8 @@ class ClosedWorld
       end
     end
     resolve_struct_splats
+    resolve_deferred_mixin_modules
+    resolve_installer_symbol_loads
     # A read name (scan_factory) can run a definition the scan only finishes seeing here.
     global!(:class_factory_escape) unless @factory_read_names.all? { |name| ownerless_native_dispatch_safe?(name) }
   end
@@ -1759,8 +1771,9 @@ class ClosedWorld
     case insn.op
     when :SDEF, :SCLASS
       @singleton_opens << [irep, idx, insn]
-    when :LOADSYM
-      @singleton_makers << [irep.label, insn.sym_token] if SINGLETON_MAKERS.include?(insn.sym_token)
+    when :LOADSYM, :SYMBOL
+      name = loaded_symbol_name(irep, insn)
+      @singleton_makers << [irep.label, name] if name && SINGLETON_MAKERS.include?(name)
     when SEND_OPS
       @singleton_makers << [irep.label, insn.sym] if SINGLETON_MAKERS.include?(insn.sym)
     end
@@ -1817,6 +1830,161 @@ class ClosedWorld
     @loop_installer_sites ||= LoopInstallers.sites(@registry)
   end
 
+  # The name a symbol load produces: LOADSYM names it in the operand, SYMBOL in the irep's pool. Nil if it is not a string.
+  def loaded_symbol_name(irep, insn)
+    return insn.sym_token if insn.op == :LOADSYM
+
+    entry = irep.pool && insn.pool_index && irep.pool[insn.pool_index.to_i]
+    entry.is_a?(String) ? entry : nil
+  end
+
+  # Names whose only use, as a value, is a read that never sends its argument: a set or key test, equality, a hash or a
+  # string form. Each must be native (a Ruby method of that name could send its argument).
+  INSTALLER_SAFE_READS = %w[include? key? member? == != eql? equal? === hash to_s inspect].freeze
+  INSTALLER_SYMBOL_DEPTH = 4
+
+  # Every LOADSYM of an installer or rebinder name must be on a safe path: its value (and any array or hash holding it, or
+  # constant bound to it, read anywhere in the program) reaches only native reads. A value that reaches a send, a return,
+  # an unknown container or an unknown read keeps the refusal, since mruby would send the name at run time.
+  def resolve_installer_symbol_loads
+    @installer_symbol_loads.each do |irep, idx, reg, _sym|
+      global!(:dynamic_install) unless installer_symbol_value_safe?(irep, idx, reg, 0)
+    end
+  end
+
+  def installer_symbol_value_safe?(irep, idx, reg, depth)
+    return false if depth > INSTALLER_SYMBOL_DEPTH || reg.nil?
+
+    uses = FactoryFlow.uses(irep, idx, reg)
+    return false unless uses
+
+    uses.all? { |use_idx, use_reg| installer_symbol_use_safe?(irep, use_idx, use_reg, depth) }
+  end
+
+  def installer_symbol_use_safe?(irep, use_idx, use_reg, depth)
+    insn = BytecodeIR.for(irep).source_at(use_idx)
+    case insn.op
+    when :ARRAY, :HASH
+      installer_symbol_value_safe?(irep, use_idx, insn.reg, depth + 1)
+    when :CLASS, :MODULE, :SCLASS, :TCLASS
+      # A class or module operand is type-checked, never sent a method: a stale temporary read here is not a send.
+      true
+    when :SETCONST
+      return false unless insn.regs&.first == use_reg
+
+      installer_constant_reads_safe?(insn.const_name.to_s, depth + 1)
+    when *BytecodeIR::Ops::SEND.to_a
+      # `freeze` returns its receiver (the same register, now frozen): the value continues on that register.
+      if insn.sym == 'freeze' && use_reg == insn.reg && literal_freeze_native?
+        return installer_symbol_value_safe?(irep, use_idx, insn.reg, depth + 1)
+      end
+
+      INSTALLER_SAFE_READS.include?(insn.sym) && native_only?(insn.sym)
+    else
+      false
+    end
+  end
+
+  # The freeze of a literal Array or Hash (the receiver's class is known) runs the core method unless a Ruby definer
+  # sits on that class or one of its ancestors; freezes of other classes (Irep, StrictKeySet) do not matter here.
+  LITERAL_FREEZE_OWNERS = %w[Array Hash Object Kernel BasicObject Enumerable].freeze
+
+  def literal_freeze_native?
+    @registry.fetch('freeze', []).all? { |d| d.owner == '<native>' || !LITERAL_FREEZE_OWNERS.include?(d.owner) }
+  end
+
+  # Every definer of +name+ is native (a Ruby method of that name could send what it is given).
+  def native_only?(name)
+    @registry.fetch(name, []).all? { |d| d.owner == '<native>' }
+  end
+
+  # Every read of constant +name+ in the program (GETCONST and scoped GETMCNST) carries a safe value.
+  def installer_constant_reads_safe?(name, depth)
+    @ireps.each_value do |irep|
+      source = BytecodeIR.for(irep)
+      (0...source.size).each do |i|
+        read = source.source_at(i)
+        next unless (read.op == :GETCONST && read.const_name.to_s == name) || (read.op == :GETMCNST && read.mcnst_name.to_s == name)
+        return false unless installer_symbol_value_safe?(irep, i, read.reg, depth)
+      end
+    end
+    true
+  end
+
+  # A scoped read whose scope is a named module (`RBS::AST::Declarations::Class`) names that module's constant, never the
+  # core class of the same spelling, so it is not a class factory. An unknown scope or Object's own keeps the check.
+  def scoped_constant_of_other_scope?(irep, idx, insn)
+    return false unless insn.op == :GETMCNST
+
+    scope = irep.constant_path(idx - 1, insn.reg)
+    !scope.nil? && scope.root == :const && !scope.name.nil? && scope.name.delete_prefix('::') != 'Object'
+  end
+
+  # The module argument of an include/prepend/extend send (one plain argument), as a constant reference, or nil.
+  def mixin_module_ref(irep, idx, insn)
+    return nil unless %w[include prepend extend].include?(insn.sym) && insn.reg && insn.plain_fixed_argc? && insn.argc == 1
+
+    resolve_mixin_ref(irep, idx, insn.reg + 1) || straight_line_constant_ref(irep, idx, insn.reg + 1)
+  end
+
+  # The argument of a send that directly follows its own `GETCONST` (no other path reaches the send, handlers included):
+  # the register holds that constant, whatever the reaching-definition analysis of the method could not prove (an
+  # `ensure` clause makes it give up). Nil otherwise.
+  def straight_line_constant_ref(irep, idx, reg)
+    program = BytecodeIR.for(irep)
+    return nil unless idx >= 1 && program.linear_corridor?(idx - 1, idx, include_handlers: true)
+
+    writer = program.source_at(idx - 1)
+    return nil unless writer.op == :GETCONST && writer.reg == reg && writer.const_name
+
+    { name: writer.const_name.to_s, qualified: false, absolute: false }
+  end
+
+  # A mixin the analysis cannot place (a singleton class, `extend` in a class body, a mixin made in a method) adds the
+  # module's methods to some receiver. Those names become dynamic: every call site of one keeps dispatching by name, and
+  # mruby's own lookup decides at run time (resolve_deferred_mixin_modules). Returns false (the caller refuses the closed
+  # world) when the module argument is not a constant.
+  def defer_mixin_module?(irep, idx, insn)
+    ref = mixin_module_ref(irep, idx, insn)
+    return false unless ref && ref[:name]
+
+    @deferred_mixin_modules << ref[:name]
+    true
+  end
+
+  # Every declared name ending in the referenced name is a candidate (a superset, so sound: the scope it was spelled in is
+  # not tracked here). A candidate-free reference names a module the program does not declare (a gem's), so the closed
+  # world is refused. The names are the methods of those modules as registered.
+  def resolve_deferred_mixin_modules
+    declared = @module_names | @class_decls.keys.to_set
+    @deferred_mixin_modules.each do |name|
+      bare = name.delete_prefix('::')
+      modules = declared.select { |decl| decl == bare || decl.end_with?("::#{bare}") }.to_set
+      if modules.empty?
+        global!(:dynamic_mixin)
+        next
+      end
+      @registry.each do |method_name, defs|
+        note_unknown_def(method_name, nil) if defs.any? { |d| modules.include?(d.owner) }
+      end
+    end
+  end
+
+  # A file-scope `Const.include(Mod)` / `Const.prepend(Mod)` in the root body (explicit_mixin_refs): the registry records it
+  # as a mixin of the owner when both constants resolve to declared names, so no ancestor is unknown. Any other explicit
+  # receiver, or a constant that does not resolve, stays dynamic.
+  def explicit_mixin_accepted?(irep, idx, insn)
+    return false unless @root_label && irep.label == @root_label
+
+    refs = explicit_mixin_refs(irep, idx, insn)
+    return false unless refs
+
+    declared = @module_names | @class_decls.keys.to_set
+    owner = mixin_declared_name(refs[0], nil, declared)
+    mod = mixin_declared_name(refs[1], nil, declared)
+    !owner.nil? && !mod.nil? && @module_names.include?(mod)
+  end
+
   def scan_send(irep, idx, insn)
     name = insn.sym
     @clone_sent = true if name == 'clone'
@@ -1832,7 +2000,9 @@ class ClosedWorld
       # (or marked unknown_mixins); runtime mixin changes are not.
       class_body_mixin = %w[include prepend].include?(name) && @walked.include?(irep.label) &&
                          BytecodeIR::Ops::SELF_SEND.include?(insn.op)
-      global!(:dynamic_mixin) unless class_body_mixin
+      unless class_body_mixin || explicit_mixin_accepted?(irep, idx, insn) || defer_mixin_module?(irep, idx, insn)
+        global!(:dynamic_mixin)
+      end
 
       return
     end
@@ -2100,6 +2270,25 @@ class ClosedWorld
     call.keyword_arguments? && call.keyword_argc == 1 && !call.keyword_splat?
   end
 
+  def struct_packed_member_names(irep, use, call, arr_idx, arr)
+    uses = FactoryFlow.uses(irep, arr_idx, arr.reg)
+    return nil unless uses && uses.size == 1 && uses.first == [use, call.reg + 1]
+
+    literal = BytecodeIR.for(irep).container_literal(arr_idx)
+    return nil unless literal&.kind == :array && literal.count.positive?
+
+    (0...literal.count).map do |offset|
+      _element_idx, writer = sole_definition(irep, arr_idx, (literal.base + offset))
+      name = case writer&.op
+             when :LOADSYM then writer.sym_token
+             when :SYMBOL then irep.pool&.[](writer.pool_index.to_i)
+             end
+      return nil unless name.is_a?(String)
+
+      name
+    end
+  end
+
   # `Struct.new(*MEMBERS, keyword_init: true)`: mruby takes a call with more than 14 positional arguments and a keyword
   # for a block, so the members are packed in a constant array. They are the symbols of MEMBERS when the program
   # writes MEMBERS exactly once, in this body, as a literal `%i[...].freeze`. Anything else refuses the closed world.
@@ -2120,6 +2309,8 @@ class ClosedWorld
   def struct_splat_member_names(irep, use, call)
     program = BytecodeIR.for(irep)
     source_idx, source = sole_definition(irep, use, (call.reg + 1))
+    # 15+ literal members and a keyword arrive packed: `ARRAY Ra k` read only by this send (as packed_syms reads them).
+    return struct_packed_member_names(irep, use, call, source_idx, source) if source&.op == :ARRAY
     return nil unless source&.op == :ARYCAT
 
     base = sole_definition(irep, source_idx, source.reg)&.last

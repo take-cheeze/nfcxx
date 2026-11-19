@@ -920,6 +920,9 @@ class CodeGen
     # singleton class at runtime cannot be bound statically (see
     # devirt_blocked_name?/class_body_installed_names).
     return nil if devirt_blocked_name?(name)
+    # A name the closed world could not place (a mixin's method, a struct member, ...) has definers it does not see: no
+    # single registered definer is the target, so the send keeps dispatching by name.
+    return nil if @closed_world&.unknown_def?(name)
 
     defs = core_targets(@registry[name])
     return nil unless defs && defs.size == 1

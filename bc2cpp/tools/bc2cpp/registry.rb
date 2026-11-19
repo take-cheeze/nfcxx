@@ -494,8 +494,13 @@ def build_registry(ireps, root_label)
           mixin_n = insn.argc
           recognized = SSEND_NO_BLOCK_OPS.include?(insn.op) && mixin_n == 1 && self_reg
           ref = recognized ? resolve_mixin_ref(irep, idx, self_reg + 1) : nil
+          explicit = ref ? nil : explicit_mixin_refs(irep, idx, insn)
           if ref
             mixin_sites << { owner: mixin_owner, kind: name, namespace: namespace, ref: ref }
+          elsif explicit && namespace.nil?
+            # EXPLICIT_MIXIN_SITES: file-scope `Const.include(Mod)` / `Const.prepend(Mod)`. The owner is resolved with the
+            # modules below; closed_world accepts the same sites only when both resolve (explicit_mixin_refs).
+            mixin_sites << { owner: nil, owner_ref: explicit[0], kind: name, namespace: nil, ref: explicit[1] }
           else
             unknown_mixins << mixin_owner
           end
@@ -679,30 +684,18 @@ def build_registry(ireps, root_label)
   declared_types = declared_modules | class_decls.keys.to_set
   mixin_sites.each do |site|
     ref = site[:ref]
-    candidates = if ref[:absolute]
-                   [ref[:name]]
-                 else
-                   scopes = []
-                   scope = site[:namespace]
-                   while scope
-                     scopes << scope
-                     scope = scope.include?('::') ? scope.rpartition('::').first : nil
-                   end
-                   segments = ref[:name].split('::')
-                   tail = segments.drop(1).join('::')
-                   suffix = tail.empty? ? '' : "::#{tail}"
-                   scopes.map { |prefix| "#{prefix}::#{segments.first}#{suffix}" } + [ref[:name]]
-                 end
-    resolved = candidates.find { |candidate| declared_types.include?(candidate) }
-    if resolved && declared_modules.include?(resolved)
+    resolved = mixin_declared_name(ref, site[:namespace], declared_types)
+    owner = site[:owner] || mixin_declared_name(site[:owner_ref], nil, declared_types)
+    if resolved && declared_modules.include?(resolved) && owner
       table = site[:kind] == 'include' ? included_modules : prepended_modules
-      (table[site[:owner]] ||= []) << resolved
-    elsif resolved.nil? && site[:kind] == 'include' && CoreMixins.core_mixin?(ref[:name])
+      (table[owner] ||= []) << resolved
+    elsif owner && resolved.nil? && site[:kind] == 'include' && CoreMixins.core_mixin?(ref[:name])
       # CORE_MIXINS: no closed-world module of that name is in scope,
       # so the constant is mruby's own.
-      (included_modules[site[:owner]] ||= []) << ref[:name]
+      (included_modules[owner] ||= []) << ref[:name]
     else
-      unknown_mixins << site[:owner]
+      # An explicit owner that does not resolve is named by its spelling; closed_world refuses the program for it.
+      unknown_mixins << (owner || site[:owner_ref]&.fetch(:name, nil) || '<unresolved>')
     end
   end
   # ALIAS_SITES: a prepended (or unresolved) module answers `old` before the owner's own definition, so the
@@ -781,6 +774,41 @@ end
 # whether the source used namespace qualification: an unqualified constant uses
 # Ruby's lexical nesting lookup, which is disambiguated after all module names
 # have been collected by build_registry.
+# The declared name a constant reference denotes at a site in +namespace+ (nil: file scope), or nil. Lexical scopes are
+# tried innermost first, then the spelling itself, as Ruby resolves a constant.
+def mixin_declared_name(ref, namespace, declared_types)
+  return nil unless ref
+
+  candidates = if ref[:absolute]
+                 [ref[:name]]
+               else
+                 scopes = []
+                 scope = namespace
+                 while scope
+                   scopes << scope
+                   scope = scope.include?('::') ? scope.rpartition('::').first : nil
+                 end
+                 segments = ref[:name].split('::')
+                 tail = segments.drop(1).join('::')
+                 suffix = tail.empty? ? '' : "::#{tail}"
+                 scopes.map { |prefix| "#{prefix}::#{segments.first}#{suffix}" } + [ref[:name]]
+               end
+  candidates.find { |candidate| declared_types.include?(candidate) }
+end
+
+# `Const.include(Mod)` / `Const.prepend(Mod)` (an explicit receiver, one plain argument): [owner ref, module ref], both
+# constant paths, or nil. The receiver is loaded into +insn.reg+ and the argument into the next register.
+def explicit_mixin_refs(irep, idx, insn)
+  return nil unless insn.op == :SEND && %w[include prepend].include?(insn.sym) && insn.reg && insn.plain_fixed_argc?
+  return nil unless insn.argc == 1
+
+  owner = resolve_mixin_ref(irep, idx, insn.reg)
+  mod = resolve_mixin_ref(irep, idx, insn.reg + 1)
+  return nil unless owner && mod && owner[:name] && mod[:name]
+
+  [owner, mod]
+end
+
 def resolve_mixin_ref(irep, before_idx, reg)
   ref = irep.constant_path(before_idx - 1, reg)
   case ref&.root
