@@ -39,7 +39,9 @@ common = {
 jobs = ENV.fetch('BC2CPP_BUILD_JOBS', '8')
 build = lambda do |env, log, *tasks|
   File.open(log, 'w') do |io|
-    ok = system(common.merge(env), RbConfig.ruby, '-S', 'rake', "-j#{jobs}", *tasks,
+    # -j limits workers; -m lets ordinary file-task prerequisites use them.
+    # Keep top-level tasks ordered (the manifest reads completed gem outputs).
+    ok = system(common.merge(env), RbConfig.ruby, '-S', 'rake', '-m', "-j#{jobs}", *tasks,
                 chdir: File.join(world, '3rd/mruby'), out: io, err: io)
     abort "bc2cpp self build failed; see #{log}" unless ok
   end

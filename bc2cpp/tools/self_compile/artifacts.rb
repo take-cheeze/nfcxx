@@ -22,7 +22,8 @@ module Bc2cppSelfCompile
     # compiler invocation. Only the explicit self-generation settings cross this boundary.
     keys = PROGRAM_CONTEXT_KEYS + %w[FIXNUM_NIL_IVARS HARNESSES] + caller_env.keys.grep(/\ABC2CPP_/)
     env = base.merge(keys.uniq.reject { |key| base.key?(key) }.to_h { |key| [key, nil] })
-    selectors = %w[BC2CPP_HOST_RUBY BC2CPP_SELF_BUILD_DIR BC2CPP_SELF_CXX BC2CPP_SELF_SHARDS BC2CPP_BUILD_JOBS]
+    # Worker count only schedules the C++ build; it cannot change generated C++.
+    selectors = %w[BC2CPP_HOST_RUBY BC2CPP_SELF_BUILD_DIR BC2CPP_SELF_CXX BC2CPP_SELF_SHARDS]
     controls = caller_env.select { |key, _| selectors.include?(key) }.sort.to_h
     # Only the inherited variables that are set: an unset one is absent from the controls, not a nil control.
     inherited = {}
