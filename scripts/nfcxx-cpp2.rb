@@ -11,7 +11,11 @@
 #       message: realpath's for a missing source directory (status 1), cppfront's status otherwise.
 
 require "digest"
+require "fileutils"
+require "stringio"
+require "tmpdir"
 require_relative "driver-state"
+require_relative "nfcxx-cu-apply"
 
 module NfcxxCpp2
   module_function
@@ -36,6 +40,38 @@ module NfcxxCpp2
   end
 
   def nonempty(v) = (v.nil? || v.empty?) ? nil : v
+
+  # cpp2_prepare, the whole step (the bash's checks, directory, scratch directory, translations and array edits): the statements
+  # the driver evals (nfcxx-cu-apply.rb's plan of the reply). OPTS: root, cppfront_src, cudatmp (the driver's temporary
+  # directory, which the driver removes on exit), compile_only, out, outset, inputs, srcs, files, cflags (the arrays joined by
+  # ASCII 31). A failed check or step ends with its message and status.
+  def run(opts, env = ENV)
+    root = opts.fetch("root", "")
+    cppfront = "#{root}/build/cppfront"
+    cppfront_src = opts.fetch("cppfront_src", "")
+    inputs = opts.fetch("inputs", "").split("\x1f", -1).reject(&:empty?)
+    raise Failed.new("nfcxx: cppfront is not built; run scripts/setup-cppfront.sh (docs/notes/cpp2.md)", 2) unless File.executable?(cppfront)
+    unless File.file?(File.join(cppfront_src, "include", "cpp2util.h"))
+      raise Failed.new("nfcxx: no cpp2util.h under #{cppfront_src}; run scripts/setup-cppfront.sh", 2)
+    end
+    cudatmp = opts.fetch("cudatmp", "")
+    dir = cudatmp
+    if opts.fetch("compile_only", "0") == "1"
+      obj = opts.fetch("out", "")
+      obj = "#{File.basename(inputs[0].to_s, ".cpp2")}.o" if opts.fetch("outset", "0") != "1"
+      dir = cpp2_dir(obj, env)
+      FileUtils.mkdir_p(dir)
+    end
+    scratch = Dir.mktmpdir("tmp.", cudatmp)
+    sdirs, copies = prepare(dir: dir, scratch: scratch, cppfront: cppfront, inputs: inputs)
+    reply = StringIO.new
+    DriverState.write_groups(reply, [["sdirs", sdirs], ["copies", copies]])
+    DriverState.write_end(reply)
+    NfcxxCuApply.plan({
+      "kind" => "cpp2", "cppfront" => cppfront_src, "inputs" => opts.fetch("inputs", ""),
+      "srcs" => opts.fetch("srcs", ""), "files" => opts.fetch("files", ""), "cflags" => opts.fetch("cflags", ""),
+    }, reply.string)
+  end
 
   # [sdirs, copies] for INPUTS; each translation is made in SCRATCH (cppfront's -o is relative to it, as the bash has it)
   def prepare(dir:, scratch:, cppfront:, inputs:)
@@ -66,7 +102,16 @@ if $PROGRAM_NAME == __FILE__
     puts NfcxxCpp2.cpp2_dir(ARGV[0].delete_prefix("--cpp2-dir="))
     exit 0
   end
-  abort "nfcxx-cpp2: --prepare (records on standard input) or --cpp2-dir=OBJ" unless ARGV == ["--prepare"]
+  if ARGV.first == "run"
+    begin
+      puts NfcxxCpp2.run(ARGV.drop(1).to_h { |kv| kv.split("=", 2) })
+    rescue NfcxxCpp2::Failed => e
+      $stderr.puts e.message unless e.message.empty?
+      exit e.status
+    end
+    exit 0
+  end
+  abort "nfcxx-cpp2: --prepare (records on standard input) or --cpp2-dir=OBJ or run KEY=VALUE..." unless ARGV == ["--prepare"]
   begin
     groups = DriverState.read_groups($stdin.binmode.read)
     sdirs, copies = NfcxxCpp2.prepare(dir: DriverState.scalar(groups, "dir"), scratch: DriverState.scalar(groups, "scratch"),
