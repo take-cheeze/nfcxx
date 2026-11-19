@@ -630,19 +630,13 @@ fi
 cache_check() {  # cache_check: sets cache_entry (empty when the cache does not apply) and exits 0 on a hit
 cache_entry=""
 [ -n "$cache_dir" ] || return 0   # the cache is off: no Ruby is started
-local f a look decision state key pre=() cpp=() opts=() key_argv=()
-for a in ${nfcxx_argv[@]+"${nfcxx_argv[@]}"}; do
-  case $a in --cache=*|--cache-log=*|--time-log=*|--trace=*) ;; *) key_argv+=("$a") ;; esac
-done
-for f in ${preinc[@]+"${preinc[@]}"}; do pre+=(-include "$f"); done
-# the host preprocessor's arguments (its -M command line, after -M and before the source)
-cpp=("-std=${std#--}" ${cflags[@]+"${cflags[@]}"} ${pre[@]+"${pre[@]}"} ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"})
-opts=(--cache-dir="$cache_dir" --cache-log="$cache_log_file" --out="$out" --src="${srcs[0]-}" --cwd="$PWD"
-      --var=backend="$backend" --var=compile_only="$compile_only" --var=ncpp="$ncpp" --var=outset="$outset"
-      --var=nobj="$nobj" --var=modules="$modules" --var=preprocess="$preprocess" --var=stdin_src="$stdin_src"
-      --var=depmode="$depmode" --var=cfiles_n="${#cfiles[@]}" --var=cu_n="${#cu_inputs[@]}" --var=cpp2_n="${#cpp2_inputs[@]}")
-for a in "${key_argv[@]+"${key_argv[@]}"}"; do opts+=(--arg="$a"); done
-for a in "${cpp[@]+"${cpp[@]}"}"; do opts+=(--cpp="$a"); done
+local w opts=()
+# the key arguments and the host preprocessor's command line (scripts/nfcxx-setup.rb cache-opts), read back NUL-terminated
+while IFS= read -r -d '' w; do opts+=("$w"); done < <("${RUBY:-ruby}" "$root/scripts/nfcxx-setup.rb" cache-opts \
+  cache_dir="$cache_dir" cache_log="$cache_log_file" out="$out" src="${srcs[0]-}" cwd="$PWD" backend="$backend" \
+  compile_only="$compile_only" ncpp="$ncpp" outset="$outset" nobj="$nobj" modules="$modules" preprocess="$preprocess" \
+  stdin_src="$stdin_src" depmode="$depmode" cfiles_n="${#cfiles[@]}" cu_n="${#cu_inputs[@]}" cpp2_n="${#cpp2_inputs[@]}" \
+  std="$std" argv="$(IFS=$'\x1f'; printf '%s' "${nfcxx_argv[*]-}")" cflags="$(IFS=$'\x1f'; printf '%s' "${cflags[*]-}")" preinc="$(IFS=$'\x1f'; printf '%s' "${preinc[*]-}")" sysdirs="$(IFS=$'\x1f'; printf '%s' "${sysdirs[*]-}")")
 # the lookup and the cache log (scripts/nfcxx-cache-check.rb check, restructure step 2): the decision comes back as cc_state and
 # cc_key; the remote fetch and the hit are below, as they were
 cc_file=$(mktemp)
