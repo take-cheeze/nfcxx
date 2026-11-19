@@ -1899,6 +1899,11 @@ class ClosedWorld
       # OP_GETMCNST reads only regs[a], the scope of `Scope::NAME`, and type-checks it (a non-module raises TypeError):
       # it is never sent a method. Any other register the read set reports here is not read by the VM.
       true
+    when :EQ
+      # OP_EQ compares regs[a] with regs[a+1]: identity and numeric fast paths, else regs[a]'s `==` with regs[a+1]
+      # as its argument (vm.c). As the receiver the value's own class answers; as the argument, the receiver is
+      # unknown, so every `==` must be core.
+      use_reg == insn.reg ? receiver_read_native?('==', container) : native_only?('==')
     when :ADD
       # `a + b` of a literal Array: Array#+ builds a new Array holding the same elements, which is followed in turn.
       return false unless container && literal_array_add?(irep, use_idx, insn, use_reg)
