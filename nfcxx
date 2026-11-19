@@ -358,7 +358,7 @@ fi
 # The unit of the time log's lines (scripts/trace.sh): the first source, else the output. Tracing starts before the .cu
 # and .cpp2 inputs are prepared, whose stages it records.
 trace_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-trace-unit.rb" plan srcs0_set="$([ -n "${srcs[0]+x}" ] && echo 1 || echo 0)" srcs0="${srcs[0]-}" out="$out") || exit $?
-eval "$trace_sh"; export NFCXX_TRACE_UNIT=$trace_unit   # the back-end scripts it runs log under it too (scripts/nfcxx-trace-unit.rb)
+eval "$trace_sh"   # trace_unit, and its export NFCXX_TRACE_UNIT: the back-end scripts it runs log under it too (scripts/nfcxx-trace-unit.rb)
 # The time log is read by every script that sources scripts/trace.sh (the gcc-cc that eccp runs, ...): the one setting that is
 # handed to the processes below as an environment variable, as NFCXX_TRACE is (trace_begin).
 tl_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-time-log.rb" plan time_log="$time_log") || exit $?   # NFCXX_TIME_LOG (scripts/nfcxx-time-log.rb)
