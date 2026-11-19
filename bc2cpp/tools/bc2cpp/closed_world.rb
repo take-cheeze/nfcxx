@@ -1841,7 +1841,9 @@ class ClosedWorld
   # Names whose only use, as a value, is a read that never sends its argument: a set or key test, equality, a hash or a
   # string form. Each must be native (a Ruby method of that name could send its argument).
   INSTALLER_SAFE_READS = %w[include? key? member? == != eql? equal? === hash to_s inspect].freeze
-  INSTALLER_SYMBOL_DEPTH = 4
+  # Each step (a container, a freeze, a constant binding and its reads, an Array#+, a map(&:to_s)) is one level; the
+  # compiler's own tables chain several (`INSTALLERS = (%i[...] + ACCESSORS).freeze`), so the bound leaves room for them.
+  INSTALLER_SYMBOL_DEPTH = 10
 
   # Every LOADSYM of an installer or rebinder name must be on a safe path: its value (and any array or hash holding it, or
   # constant bound to it, read anywhere in the program) reaches only native reads. A value that reaches a send, a return,
@@ -1871,6 +1873,14 @@ class ClosedWorld
     when :CLASS, :MODULE, :SCLASS, :TCLASS
       # A class or module operand is type-checked, never sent a method: a stale temporary read here is not a send.
       true
+    when :GETMCNST
+      # The scope operand of `Scope::NAME` is type-checked (a non-module raises TypeError), never sent a method.
+      use_reg == insn.reg
+    when :ADD
+      # `a + b` of a literal Array: Array#+ builds a new Array holding the same elements, which is followed in turn.
+      return false unless container && literal_array_add?(irep, use_idx, insn, use_reg)
+
+      installer_symbol_value_safe?(irep, use_idx, insn.reg, depth + 1, true)
     when :SETCONST
       return false unless insn.regs&.first == use_reg
 
@@ -1881,6 +1891,10 @@ class ClosedWorld
       if insn.sym == 'freeze' && receiver && receiver_read_native?('freeze', container)
         return installer_symbol_value_safe?(irep, use_idx, insn.reg, depth + 1, container)
       end
+      # `container.map(&:to_s)`: Array#map runs Symbol#to_s on each element; the result is followed as a container.
+      if insn.sym == 'map' && receiver && container && symbol_to_s_block?(irep, use_idx, insn)
+        return installer_symbol_value_safe?(irep, use_idx, insn.reg, depth + 1, true)
+      end
       return false unless INSTALLER_SAFE_READS.include?(insn.sym)
 
       # As the receiver, the value's own class answers (a literal Array/Hash, or a Symbol). As an argument, the receiver
@@ -1889,6 +1903,26 @@ class ClosedWorld
     else
       false
     end
+  end
+
+  # `a + b` where the followed container is one operand and the other is a literal Array (or the followed value itself):
+  # the receiver is an Array, so Array#+ answers unless a Ruby `+` sits on Array's chain.
+  def literal_array_add?(irep, use_idx, insn, use_reg)
+    return false unless receiver_read_native?('+', true)
+    return true if use_reg == insn.reg
+
+    _idx, receiver = sole_definition(irep, use_idx, insn.reg)
+    use_reg == insn.reg + 1 && receiver&.op == :ARRAY
+  end
+
+  # A `map` whose block is `&:to_s` (the block register holds the Symbol :to_s) and every method it runs is core.
+  def symbol_to_s_block?(irep, use_idx, insn)
+    return false unless insn.op == :SENDB && insn.argc.to_i.zero? && insn.reg
+    return false unless receiver_read_native?('map', true) && receiver_read_native?('to_s', false) &&
+                        receiver_read_native?('to_proc', false)
+
+    _idx, block = sole_definition(irep, use_idx, insn.reg + 1)
+    loaded_symbol_name(irep, block) == 'to_s' if block && %i[LOADSYM SYMBOL].include?(block.op)
   end
 
   # The classes that answer a send to a literal container, or to a Symbol, before any other class could.
