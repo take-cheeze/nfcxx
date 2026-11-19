@@ -297,6 +297,29 @@ module NfcxxSetup
     ]
     opts.map { |w| w + "\0" }.join
   end
+
+  # The Path B option statements after the override (bash: the pb_flags lines and the backend environment, in this order). Every
+  # condition is the bash's; the backend environment comes last, as it reads the final backend. No statement here refuses.
+  def flags_text(opts, env = ENV)
+    out = +""
+    flag = ->(k) { opts.fetch(k, "0") == "1" }
+    backend = opts.fetch("backend", "")
+    freestanding = opts.fetch("freestanding", "0")
+    pb = ->(*words) { out << "pb_flags+=(#{words.map { |w| Shellwords.escape(w) }.join(" ")})\n" }
+    pb.("--ir-opt=#{opts["ir_opt"]}") if flag.("ir_opt_set")
+    pb.("--asan") if flag.("asan") && backend == "pathb"
+    pb.("--pic") if flag.("pic")
+    diag = opts.fetch("diag_opts", "").split("\x1f", -1).reject(&:empty?)
+    pb.(*diag) unless diag.empty?
+    pb.("--dialect=clang") if backend == "pathb" && opts.fetch("dialect", "") == "clang" && !opts.fetch("dialect_asked", "").empty?
+    gnu_user = opts.fetch("gnu_user", "")
+    pb.("--gnu-version=#{gnu_user}") if backend == "pathb" && freestanding == "0" && !gnu_user.empty?
+    if backend == "pathb" && freestanding != "0"
+      pb.("--freestanding", "--eh-runtime", "--gnu-version=#{opts["gnu"]}", "-I#{opts["root"]}/lib")
+    end
+    out << text_of(NfcxxBackendEnv.plan(opts))
+    out
+  end
 end
 
 if $PROGRAM_NAME == __FILE__
@@ -327,6 +350,16 @@ if $PROGRAM_NAME == __FILE__
   end
   if ARGV.first == "cache-opts"
     $stdout.binmode.write(NfcxxSetup.cache_opts(NfcxxSetup.options(ARGV.drop(1))))
+    exit 0
+  end
+  if ARGV.first == "flags"
+    opts = NfcxxSetup.options(ARGV.drop(1))
+    begin
+      $stdout.write(NfcxxSetup.flags_text(opts, ENV))
+    rescue NfcxxSetup::Refusal, NfcxxBackendEnv::Refusal => e
+      warn e.message
+      exit(e.respond_to?(:status) ? e.status : 2)
+    end
     exit 0
   end
   if ARGV.first == "sys-include"
