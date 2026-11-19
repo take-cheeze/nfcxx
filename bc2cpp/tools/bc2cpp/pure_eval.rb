@@ -115,20 +115,14 @@ module PureEval
     into
   end
 
-  # Runs `source` in a fresh Module and returns [value of constant `name`], or nil when it raises.
+  # Runs `source` in a fresh Module and returns [value of constant `name`], or nil when it raises or when this is not
+  # CRuby. The evaluation lives in pure_eval_host.rb, loaded here only under CRuby: mruby has no string eval (its
+  # module_eval raises, so the fold never applied there), and a self-compiled bc2cpp must not carry the fresh Module.
   def evaluate(source, name, magic)
-    text = +''
-    text << "# frozen_string_literal: true\n" if magic
-    text << source
-    verbose = $VERBOSE
-    $VERBOSE = nil
-    mod = Module.new
-    mod.module_eval(text, '(pure_eval)', 1)
-    [mod.const_get(name, false)]
-  rescue StandardError, ScriptError
-    nil
-  ensure
-    $VERBOSE = verbose
+    return nil unless RUBY_ENGINE == 'ruby'
+
+    load File.join(__dir__, 'pure_eval_host.rb') unless defined?(PureEvalHost)
+    PureEvalHost.evaluate(source, name, magic)
   end
 
   # ---- the guard: which expressions may be evaluated at build time ----------------------------------------------

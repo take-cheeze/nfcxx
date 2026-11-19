@@ -8,7 +8,9 @@
 #       (--cache-log). On a local miss with --remote, the remote tier is fetched (scripts/nfcxx-cache-io.rb remote-get); an object
 #       then present is a hit, copied back to the output (scripts/nfcxx-cache.rb hit). Exit status 10: the hit was copied, and the
 #       driver exits 0; 0: go on. NFCXX_CACHE_IO replaces the remote helper's script (tests/nfcxx-cache/run.sh's stub).
-#       Checked by tests/nfcxx-cache/run.sh.
+#   ruby scripts/nfcxx-cache-check.rb store --out=OUT --entry=DIR [--remote=KIND]
+#       stores the object just built (scripts/nfcxx-cache.rb store); a new entry goes to the remote tier (remote-put, through
+#       NFCXX_CACHE_IO as the check's remote-get). Checked by tests/nfcxx-cache/run.sh.
 
 require "shellwords"
 require "stringio"
@@ -21,6 +23,25 @@ module NfcxxCacheCheck
 
   def helper(*args)
     system(ruby, File.join(__dir__, "nfcxx-cache-io.rb"), *args)
+  end
+
+  # the store of the object just built (nfcxx-cache.rb store). A new entry goes to the remote tier (remote-put; a failure is a
+  # note on stderr, and the build goes on). Status 0 always, as the driver's cache_store.
+  def store(args)
+    out = entry = nil
+    remote = ""
+    args.each do |a|
+      if a.start_with?("--out=") then out = a.delete_prefix("--out=")
+      elsif a.start_with?("--entry=") then entry = a.delete_prefix("--entry=")
+      elsif a.start_with?("--remote=") then remote = a.delete_prefix("--remote=")
+      end
+    end
+    return 0 if entry.nil? || entry.empty?
+    made = system(ruby, File.join(__dir__, "nfcxx-cache.rb"), "store", "--out=#{out}", "--entry=#{entry}")
+    if made && !remote.empty?
+      system(ruby, ENV["NFCXX_CACHE_IO"] || File.join(__dir__, "nfcxx-cache-io.rb"), "remote-put", File.basename(entry), entry)
+    end
+    0
   end
 
   # the hit: the object and its records copied back to the output (nfcxx-cache.rb hit); true when it was copied
@@ -93,6 +114,9 @@ end
 
 if $PROGRAM_NAME == __FILE__
   cmd, *rest = ARGV
-  abort "nfcxx-cache-check: check --statements=FILE [--remote=KIND] LOOKUP-ARGS... (got #{cmd.inspect})" unless cmd == "check"
-  exit NfcxxCacheCheck.check(rest)
+  case cmd
+  when "check" then exit NfcxxCacheCheck.check(rest)
+  when "store" then exit NfcxxCacheCheck.store(rest)
+  else abort "nfcxx-cache-check: check --statements=FILE [--remote=KIND] LOOKUP-ARGS... | store --out=OUT --entry=DIR [--remote=KIND] (got #{cmd.inspect})"
+  end
 end
