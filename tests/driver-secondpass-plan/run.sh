@@ -18,18 +18,20 @@ if [ ${#cu_inputs[@]} = 1 ] && [ -z "${NFCXX_CUDA_HOST_SYMBOLS:-}" ] && [ $prepr
     t=$(trace_start)
     # (the second pass is not cached: the --cache option is left out, and NFCXX_CACHE emptied)
     args2=(); for a in "${args0[@]}"; do case $a in --cache=*) ;; *) args2+=("$a") ;; esac; done
-    "${RUBY:-ruby}" "$root/scripts/nfcxx-second-pass.rb" rerun "$root" "$hsyms" ${args2[@]+"${args2[@]}"} || exit $?   # the re-run (scripts/nfcxx-second-pass.rb)
+    "${RUBY:-ruby}" "$root/scripts/nfcxx-second-pass.rb" rerun "$root" "$hsyms" "$$" ${args2[@]+"${args2[@]}"} || exit $?   # the re-run (scripts/nfcxx-second-pass.rb)
     trace_end "$t" "second pass (kernel instances from the host compile)" eccp
   fi
 fi
 BLOCK
 
+# The span moved into the re-run (scripts/nfcxx-second-pass.rb rerun), so the new side has none of the bash trace lines; the
+# bash side's are dropped here, and the span is checked by the last cases.
+sed -i '/^ *t=\$(trace_start)$/d; /^ *trace_end "\$t" "second pass/d' "$t/old.sh"
+
 cat > "$t/new.sh" <<'BLOCK'
 eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-second-pass.rb" plan "$out" "$cudatmp" "${#cu_inputs[@]}" "${cu_inputs[0]-}" "$preprocess" "${NFCXX_CUDA_HOST_SYMBOLS-}" ${args0[@]+"${args0[@]}"})"   # the gate, host symbols, found and args2 (plan); not cached
 if [ $sp_run = 1 ]; then
-  t=$(trace_start)
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-second-pass.rb" rerun "$root" "$hsyms" ${args2[@]+"${args2[@]}"} || exit $?   # the re-run (scripts/nfcxx-second-pass.rb)
-  trace_end "$t" "second pass (kernel instances from the host compile)" eccp
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-second-pass.rb" rerun "$root" "$hsyms" "${BASHPID:-$$}" ${args2[@]+"${args2[@]}"} || exit $?   # the re-run and its trace span (scripts/nfcxx-second-pass.rb)
 fi
 BLOCK
 
@@ -107,6 +109,20 @@ case_run preprocess-1        0 'm.cu' 1 1 'tmpl\n' 0 '' "$ARGS"
 case_run no-object           0 'm.cu' 0 0 'tmpl\n' 0 '' "$ARGS"
 case_run quoted-args         1 'm.cu' 0 1 'tmpl\n' 0 '' "-c 'my file.cpp' --cache=/x --cache=y -o 'a'\\''b.o' -DX='a b'"
 case_run no-args-cache       1 'm.cu' 0 1 'tmpl\n' 0 '' "-c m.cpp -o m.o"
+
+# the span of the re-run (the bash's trace_end, now in the re-run): a time log line when it succeeds and none when it fails,
+# written directly, and a pending record (NUL-separated, six fields) when the driver batches its spans
+for rc in 0 7; do
+  mk "span-$rc" 'm.cu' 0 1 'tmpl\n' "$rc" '' "$ARGS"
+  ( export NFCXX_TIME_LOG="$t/tl-$rc" NFCXX_TRACE_UNIT=m.o; unset NFCXX_TRACE_PENDING; run_side "$t/case-span-$rc" "$t/new.sh" )
+  n=$(awk -F'\t' '$2 == "eccp" && $3 == "second pass (kernel instances from the host compile)" && $4 == "m.o"' "$t/tl-$rc" 2>/dev/null | wc -l | tr -d ' ')
+  want=$([ "$rc" = 0 ] && echo 1 || echo 0)
+  if [ "$n" = "$want" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL span status $rc: $n time log lines, want $want"; fi
+  rm -f "$t/pend-$rc"; : > "$t/pend-$rc"
+  ( export NFCXX_TRACE=/dev/null NFCXX_TRACE_PENDING="$t/pend-$rc" NFCXX_TRACE_UNIT=m.o; run_side "$t/case-span-$rc" "$t/new.sh" )
+  n=$(tr '\0' '\n' < "$t/pend-$rc" | grep -c '^eccp$' || true)
+  if [ "$n" = "$want" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL pending span status $rc: $n records, want $want"; fi
+done
 
 echo "driver-secondpass-plan: $pass passed, $fail failed"
 [ $fail = 0 ]
