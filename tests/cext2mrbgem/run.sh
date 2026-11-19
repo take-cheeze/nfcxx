@@ -1151,7 +1151,7 @@ check test -e "$work/api_skipped_refused/NOT_BUILDABLE"
 check test "$(grep -c "no entry in api_map.json" "$work/api_skipped_refused/REFUSALS.txt")" -eq 2
 check grep -q '  rb_memcicmp  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
 check grep -q "  rb_iv_get  argument 2 is not a string literal" "$work/api_skipped_refused/REFUSALS.txt"
-check grep -q '  rb_require  stuck point (require)' "$work/api_skipped_refused/REFUSALS.txt"
+check grep -q "feature 'x' has no providing gem" "$work/api_skipped_refused/WARNINGS.txt"
 
 # 6. api_map.json batch C1 (RTYPEDDATA_DATA -> DATA_PTR, an lvalue in both): mapped with no refusal, mruby/data.h included
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_typed_ptr tools/cext2mrbgem/fixtures/api_typed_ptr/ext/api_typed_ptr "$work/api_typed_ptr" > "$work/api_typed_ptr.log" 2>&1 || rc=$?
@@ -1681,13 +1681,27 @@ check grep -qF 'return mruby_onig_regexp_is(v) ? mrb_true_value() : mrb_false_va
 check grep -qF 'onig_region_init(&regs);' "$work/api_onig_map/src/api_onig_map.c"
 check grep -qF 'pos = onig_search(RREGEXP_PTR(re),' "$work/api_onig_map/src/api_onig_map.c"
 check grep -qF '#include <mruby/onigmo.h>' "$work/api_onig_map/src/api_onig_map.c"
-# 2zzz160. rb_require maps to the fork's require for a feature the build provides (time, mruby-time); a feature it does not provide
-# (stringio) and a name that is not a literal stay stuck points.
+# 2zzz160. rb_require of a literal feature maps to the fork's require, and a gem that provides it (time, stringio) becomes a
+# dependency of the converted gem; a non-literal name stays a stuck point. The gem's own gemspec (its runtime dependencies) adds
+# the dependency of a built gem (bigdecimal), and a development dependency (rake) is not one.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_require tools/cext2mrbgem/fixtures/api_require/ext/api_require "$work/api_require" > "$work/api_require.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check grep -qF 'rb_require(mrb, "time");' "$work/api_require/src/api_require.c"
-check grep -q "feature 'stringio' is not provided by this build" "$work/api_require/REFUSALS.txt"
+check grep -qF 'rb_require(mrb, "stringio");' "$work/api_require/src/api_require.c"
+check grep -q "spec.add_dependency 'mruby-stringio'" "$work/api_require/mrbgem.rake"
+check grep -q "spec.add_dependency 'mruby-time'" "$work/api_require/mrbgem.rake"
+check grep -q "spec.add_dependency 'bigdecimal'  # runtime dependency bigdecimal (gemspec metadata)" "$work/api_require/mrbgem.rake"
+check test "$(grep -c 'rake' "$work/api_require/mrbgem.rake")" -eq 0
 check grep -q 'feature name is not a literal' "$work/api_require/REFUSALS.txt"
+# 2zzz161. the encoding helpers: rb_enc_codepoint_len and rb_str_conv_enc and rb_enc_from_encoding take the state (the fork's
+# functions raise and name the encoding); rb_enc_raise is a rb_raise with the encoding argument dropped.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_enc_helpers tools/cext2mrbgem/fixtures/api_enc_helpers/ext/api_enc_helpers "$work/api_enc_helpers" > "$work/api_enc_helpers.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_enc_helpers/NOT_BUILDABLE"
+check grep -qF 'rb_enc_codepoint_len(mrb, p, p + RSTRING_LEN(str), &len, rb_utf8_encoding())' "$work/api_enc_helpers/src/api_enc_helpers.c"
+check grep -qF 'rb_str_conv_enc(mrb, str, rb_utf8_encoding(), rb_usascii_encoding())' "$work/api_enc_helpers/src/api_enc_helpers.c"
+check grep -qF 'rb_enc_from_encoding(mrb, rb_utf8_encoding())' "$work/api_enc_helpers/src/api_enc_helpers.c"
+check grep -qF 'mrb_raisef(mrb, mrb_class_get(mrb, "EncodingError"), "bad: %s", mrb_string_value_cstr(mrb, &msg));' "$work/api_enc_helpers/src/api_enc_helpers.c"
 # 2zzz155. a struct field of CRuby's rb_encoding * type: the Encoding placeholder type is in the prelude (the declaration compiles),
 # and the include of ruby/encoding.h is not a blocking refusal (the placeholder covers it).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rb_encoding_field tools/cext2mrbgem/fixtures/api_rb_encoding_field/ext/api_rb_encoding_field "$work/api_rb_encoding_field" > "$work/api_rb_encoding_field.log" 2>&1 || rc=$?

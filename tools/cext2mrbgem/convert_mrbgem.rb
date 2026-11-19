@@ -544,7 +544,7 @@ class Converter
     @includes = amap['includes']
     @special_pos = amap['special_arg_positions_class_only']
     @type_check_refused = amap['type_check_refused'] || {}
-    @require_features = amap['require_features'] || []
+    @require_gems = amap['require_gems'] || {}
     @unmapped_reasons = amap['unmapped_reasons'] || {}
     @files = {}   # rel -> {'text','masked','kind'}
     @edits = {}   # rel -> Edits
@@ -6328,13 +6328,23 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       const_get(rel, s, e, nxt, called)
     when 'rb_require'
       require_call(rel, s, e, nxt, called)
-    when 'rb_raise'
+    when 'rb_raise', 'rb_enc_raise'
       unless called
         refuse(rel, s, name, 'used without a call')
         return
       end
       cp = match_close(masked, nxt)
       args = cp > 0 ? split_args(masked, nxt, cp) : []
+      # rb_enc_raise(enc, exc, fmt, ...): the encoding of the message is not kept (the fork's messages are not tagged), so the
+      # encoding argument is dropped and the rest is a rb_raise
+      if name == 'rb_enc_raise'
+        if args.size < 3
+          refuse(rel, s, name, 'rb_enc_raise needs an encoding, an exception class and a format string')
+          return
+        end
+        ed.add(args[0][0], args[1][0], '')
+        args = args[1..-1]
+      end
       if args.size < 2
         refuse(rel, s, name, 'rb_raise needs an exception class and a format string')
         return
@@ -6368,10 +6378,10 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
   # rb_const_get(klass, id) -> mrb_const_get(mrb, klass, id). Both take the receiver as a VALUE and the name as
   # an ID (mrb_sym); rb_cObject is passed as its VALUE. Differences, recorded as a caveat: a module receiver
   # does not fall back to Object in mruby (CRuby does), and there is no autoload.
-  # rb_require("feature") -> rb_require(mrb, "feature") (the fork's require, mrbgems/mruby-require). The feature must be one this
-  # build provides (api_map.json "require_features"): a name the build lacks would raise LoadError when the code runs (an Init
-  # would fail to load the gem), so it stays a stuck point. A feature that is the gem's own Ruby file is not provided (its
-  # Ruby code is not compiled into the gem), and a name that is not a literal cannot be checked.
+  # rb_require("feature") -> rb_require(mrb, "feature") (the fork's require, mrbgems/mruby-require). A literal feature is
+  # required at run time, and when api_map.json "require_gems" says which built gem provides it, that gem is a dependency of
+  # the converted gem (mrbgem.rake), so the build includes it. A feature with no entry is required as written: the build must
+  # provide it, or the require raises LoadError (WARNINGS.txt says so). A name that is not a literal cannot be checked.
   def require_call(rel, s, e, nxt, called)
     masked, text, ed = @files[rel]['masked'], @files[rel]['text'], @edits[rel]
     unless called
@@ -6388,16 +6398,35 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     lit = psl(text, a0, a1)
     m = /\A"([^"\\]*)"\z/.match(lit)
     unless m
-      refuse(rel, s, 'rb_require', 'stuck point (require): the feature name is not a literal, so the build cannot check that it is provided')
+      refuse(rel, s, 'rb_require', 'stuck point (require): the feature name is not a literal, so the build cannot tell which gem provides it')
       return
     end
     feature = m[1]
-    unless (@require_features || []).include?(feature)
-      refuse(rel, s, 'rb_require', "stuck point (require): the feature '#{feature}' is not provided by this build (no built gem of that name, or it is the gem's own Ruby file, which is not compiled into the gem)")
-      return
+    gem = @require_gems[feature]
+    if gem
+      (@gem_deps ||= Set.new) << gem
+    else
+      (@warnings ||= []) << { 'file' => rel, 'line' => line_of(text, s), 'api' => 'rb_require',
+                              'reason' => "feature '#{feature}' has no providing gem in api_map.json require_gems: it must be provided by a built gem" }
     end
     ed.add(nxt + 1, nxt + 1, 'mrb, ')
-    rewrite(rel, s, 'rb_require', 'rb_require', "the fork's require (mrbgems/mruby-require): feature '#{feature}' is a built gem's name, and it is provided")
+    rewrite(rel, s, 'rb_require', 'rb_require', "the fork's require (mrbgems/mruby-require): feature '#{feature}'#{gem ? " is provided by #{gem}" : ''}")
+  end
+
+  # The runtime dependencies named by the gem's own gemspec (<gem root>/*.gemspec, the root above ext/<name>): the names of
+  # add_runtime_dependency and add_dependency calls (development dependencies are not runtime).
+  def gemspec_runtime_deps
+    root = File.dirname(File.dirname(@cext_dir))
+    deps = []
+    Dir.glob(File.join(root, '*.gemspec')).sort.each do |gs|
+      File.readlines(gs, encoding: 'UTF-8').each do |line|
+        line = line.scrub
+        next if line =~ /development/
+        m = /\badd_(?:runtime_)?dependency\s*\(?\s*['"]([^'"]+)['"]/.match(line)
+        deps << m[1] if m
+      end
+    end
+    deps.uniq
   end
 
   def const_get(rel, s, e, nxt, called)
@@ -7289,6 +7318,17 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     rake << "  spec.add_dependency 'mruby-uv'  # thread model: nfcx_uv_thread.h" if uses_uv_thread? && !$thread_sync
     (@defines || []).each { |d| rake << "  spec.cc.defines << '#{d}'  # a build define (--define): the guard branches it selects are the ones built" }
     (@gem_deps || Set.new).to_a.sort.each { |g| rake << "  spec.add_dependency '#{g}'  # a class test in the converted code" }
+    # runtime dependencies from the gem's own metadata (its *.gemspec, in the gem root above ext/): a dependency that a built
+    # gem provides (api_map.json require_gems) is added; any other is recorded in WARNINGS.txt
+    gemspec_runtime_deps.each do |dep|
+      gem = @require_gems[dep]
+      if gem
+        rake << "  spec.add_dependency '#{gem}'  # runtime dependency #{dep} (gemspec metadata)" unless (@gem_deps || Set.new).include?(gem)
+      else
+        (@warnings ||= []) << { 'file' => File.basename(@cext_dir), 'line' => 0, 'api' => 'gemspec',
+                                'reason' => "runtime dependency '#{dep}' has no providing gem in api_map.json require_gems" }
+      end
+    end
     rake += ['end', '']
     write_bytes(File.join(@out_dir, 'mrbgem.rake'), rake.join("\n"))
     lines = ["BC2CPP-MRBGEM refusals for ext/#{@name}",
