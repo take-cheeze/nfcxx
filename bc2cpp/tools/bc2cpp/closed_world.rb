@@ -1874,8 +1874,9 @@ class ClosedWorld
       # A class or module operand is type-checked, never sent a method: a stale temporary read here is not a send.
       true
     when :GETMCNST
-      # The scope operand of `Scope::NAME` is type-checked (a non-module raises TypeError), never sent a method.
-      use_reg == insn.reg
+      # OP_GETMCNST reads only regs[a], the scope of `Scope::NAME`, and type-checks it (a non-module raises TypeError):
+      # it is never sent a method. Any other register the read set reports here is not read by the VM.
+      true
     when :ADD
       # `a + b` of a literal Array: Array#+ builds a new Array holding the same elements, which is followed in turn.
       return false unless container && literal_array_add?(irep, use_idx, insn, use_reg)
@@ -1886,6 +1887,10 @@ class ClosedWorld
 
       installer_constant_reads_safe?(insn.const_name.to_s, depth + 1, container)
     when *BytecodeIR::Ops::SEND.to_a
+      # OP_SSEND / OP_SSEND0 / OP_SSENDB start with regs[a] = regs[0]: the stale value in regs[a] is overwritten by self,
+      # never read (vm.c). Only an argument register of a self send is a real read.
+      return true if BytecodeIR::Ops::SELF_SEND.include?(insn.op) && use_reg == insn.reg
+
       receiver = use_reg == insn.reg
       # `freeze` returns its receiver (the same register, now frozen): the value continues on that register.
       if insn.sym == 'freeze' && receiver && receiver_read_native?('freeze', container)
