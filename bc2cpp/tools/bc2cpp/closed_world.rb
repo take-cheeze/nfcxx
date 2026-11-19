@@ -1712,7 +1712,7 @@ class ClosedWorld
         when :GETCONST, :GETMCNST
           const = insn.const_name
           @basic_object_referenced = true if const == 'BasicObject'
-          scan_factory(irep, idx, insn, const) if CLASS_FACTORIES.include?(const)
+          scan_factory(irep, idx, insn, const) if CLASS_FACTORIES.include?(const) && !scoped_constant_of_other_scope?(irep, idx, insn)
         when :CLASS, :MODULE
           name = insn.sym_token
           if name
@@ -1909,6 +1909,15 @@ class ClosedWorld
       end
     end
     true
+  end
+
+  # A scoped read whose scope is a named module (`RBS::AST::Declarations::Class`) names that module's constant, never the
+  # core class of the same spelling, so it is not a class factory. An unknown scope or Object's own keeps the check.
+  def scoped_constant_of_other_scope?(irep, idx, insn)
+    return false unless insn.op == :GETMCNST
+
+    scope = irep.constant_path(idx - 1, insn.reg)
+    !scope.nil? && scope.root == :const && !scope.name.nil? && scope.name.delete_prefix('::') != 'Object'
   end
 
   # The module argument of an include/prepend/extend send (one plain argument), as a constant reference, or nil.
