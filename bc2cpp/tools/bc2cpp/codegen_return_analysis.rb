@@ -333,6 +333,11 @@ class CodeGen
           next unless NAME_INSTALLER_SENDS.include?(insn.sym)
           # DEFINE_METHOD_SITES: the registry defines this one, so it names nothing unknown.
           next if insn.sym == 'define_method' && DefineMethodSites.settled?(@registry, irep, idx, @ireps)
+          # UNREGISTERED_DEFINE_NAMES: a literal loop whose names are known though its body is not registered.
+          if insn.sym == 'define_method' && (looped = LoopInstallers.unregistered_define_names[[label, idx]])
+            names.merge(looped) unless scoped && BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op)
+            next
+          end
           # ALIAS_SITES: so is a settled class-body alias_method, and it leaves `old` as it was.
           next if insn.sym == 'alias_method' && AliasSites.settled?(@registry, label, idx)
 

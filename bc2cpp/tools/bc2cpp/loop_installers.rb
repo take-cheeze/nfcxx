@@ -121,18 +121,46 @@ module LoopInstallers
   def install(registry, ireps, sites)
     refused = Hash.new(0)
     recognized = 0
+    @unregistered_define_names = {}
     sites.group_by(&:first).each_value do |group|
       irep = ireps.fetch(group.first.first)
-      Walker.new(irep, ireps, registry, group.to_h { |_, idx, ns, vis| [idx, [ns, vis]] }).run.each do |site|
+      by_index = group.to_h { |_, idx, ns, vis| [idx, [ns, vis]] }
+      unspellable = false
+      Walker.new(irep, ireps, registry, by_index).run.each do |site|
         if site.is_a?(String)
           refused[site] += 1
+          unspellable ||= site.include?('a define_method body a method cannot spell')
         else
           recognized += 1
           register(registry, site, ireps)
         end
       end
+      collect_unregistered_define_names(irep, ireps, registry, by_index) if unspellable
     end
     [recognized, refused]
+  end
+
+  # UNREGISTERED_DEFINE_NAMES: a loop the interpreter runs to the end but whose define_method body no method can spell
+  # (`%i[a b].each { |n| define_method(n) { |*args, **opts, &blk| super(*args, **opts, &blk) } }`) registers nothing,
+  # yet the names it installs are exactly known. They are kept per define_method send ([irep label, index] => names)
+  # so CodeGen#collect_installed_names can count them as installed (every call of one keeps its by-name send) instead
+  # of giving up on the whole program. Every other condition of the walk still holds; only the body shape is waived.
+  def collect_unregistered_define_names(irep, ireps, registry, by_index)
+    registered = DefineMethodSites.loop_sites(registry)
+    Walker.new(irep, ireps, registry, by_index, names_only: true).run.each do |site|
+      next if site.is_a?(String)
+
+      site.installs.each do |kind, name, _body, _captures, send_site|
+        next unless kind == :define_method && !registered.key?(send_site)
+
+        (@unregistered_define_names[send_site] ||= Set.new) << name
+      end
+    end
+  end
+
+  # [irep label, index] of a define_method send => the names a recognized loop installs through it unregistered.
+  def unregistered_define_names
+    @unregistered_define_names || {}
   end
 
   def register(registry, result, ireps)
@@ -218,11 +246,12 @@ module LoopInstallers
 
   # One class or module body, walked forward with the registers and constants it holds.
   class Walker
-    def initialize(irep, ireps, registry, sites)
+    def initialize(irep, ireps, registry, sites, names_only: false)
       @irep = irep
       @ireps = ireps
       @registry = registry
       @sites = sites
+      @names_only = names_only
       @regs = Array.new(irep.nregs.to_i, OPAQUE)
       @consts = {}
     end
@@ -282,7 +311,8 @@ module LoopInstallers
       return generic_refusal(insn, 'a block that is not a literal block') unless block.is_a?(BlockVal)
 
       interp = Interp.new(@ireps, @consts, reached, definer: definer?(namespace),
-                                                    symbol_text: LoopInstallers.symbol_to_s_untouched?(@registry, @ireps))
+                                                    symbol_text: LoopInstallers.symbol_to_s_untouched?(@registry, @ireps),
+                                                    names_only: @names_only)
       interp.iterate(insn.sym, recv, block)
       @regs[insn.reg.to_i] = recv
       @regs[insn.reg.to_i + 1] = OPAQUE
@@ -426,11 +456,12 @@ module LoopInstallers
   class Interp
     attr_reader :installs
 
-    def initialize(ireps, consts, protected_conts, definer: false, symbol_text: false)
+    def initialize(ireps, consts, protected_conts, definer: false, symbol_text: false, names_only: false)
       @ireps = ireps
       @consts = consts
       @protected = protected_conts
       @definer = definer
+      @names_only = names_only
       @symbol_text = symbol_text
       @installs = []
       @steps = 0
@@ -617,9 +648,10 @@ module LoopInstallers
       refuse('a define_method body that is not a literal block') unless block.is_a?(BlockVal)
       body = @ireps[block.label] or refuse('a missing define_method body')
       registers = DefineMethodSites.loop_body_captures(body, @ireps)
-      refuse('a define_method body a method cannot spell') unless registers
+      # names_only (unregistered_define_names): only the name is wanted, so a body no method can spell is no refusal.
+      refuse('a define_method body a method cannot spell') unless registers || @names_only
 
-      defines << [text, block.label, registers.to_a.sort, [irep.label, pc]]
+      defines << [text, block.label, (registers || []).to_a.sort, [irep.label, pc]]
       Sym.new(text)
     end
 
