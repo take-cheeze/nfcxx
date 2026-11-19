@@ -65,6 +65,8 @@ require "securerandom"
 require_relative "trace"
 require_relative "amdgpu-env"
 require_relative "driver-state"
+require "stringio"
+require_relative "nfcxx-cu-apply"
 
 RUNNER_PATH = File.expand_path("nfcxx-run.rb", __dir__)
 
@@ -745,6 +747,24 @@ end
 
 if $PROGRAM_NAME == __FILE__
   begin
+    # --cu-run inputs=... srcs=... files=... cflags=... < RECORDS: cu_prepare's loop (--cu-prepare) and its apply (nfcxx-cu-apply.rb
+    # plan kind=cu) in one process; the statements the driver evals are printed
+    if ARGV[0] == "--cu-run"
+      opts = ARGV.drop(1).to_h { |kv| kv.split("=", 2) }
+      begin
+        groups = DriverState.read_groups($stdin.binmode.read)
+        result, status = cu_prepare_run(groups)
+      rescue ArgumentError, CuCopiesFailed => e
+        $stderr.puts(e.message.start_with?("realpath") ? e.message : "nfcxx-cuda-device: #{e.message}")
+        exit 2
+      end
+      exit status unless status == 0
+      reply = StringIO.new
+      DriverState.write_groups(reply, result)
+      DriverState.write_end(reply)
+      puts NfcxxCuApply.plan(opts.merge("kind" => "cu"), reply.string)
+      exit 0
+    end
     if ARGV[0] == "--cu-prepare"
       begin
         groups = DriverState.read_groups($stdin.binmode.read)

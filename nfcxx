@@ -193,7 +193,7 @@ cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs
   # rewrite of each input (in that process) and the state it changes, which come back as the groups sdirs, copies, cuda and
   # preinc. The state goes in as records (state_put). The bash keeps the array edits (srcs, files, cflags) and sets cuda_opts
   # and preinc from the reply. A failing rewrite ends the driver with its status (the reply's file is read after the call).
-  local rec group done=0 idx src copy i bpid=$BASHPID inf=$cudatmp/cu-in.rec outf=$cudatmp/cu-out.rec
+  local rec group done=0 idx src copy i bpid=$BASHPID inf=$cudatmp/cu-in.rec
   local cu_sdirs=() cu_copies=() cu_cuda=() cu_pre=()
   # the planner's state records (scripts/nfcxx-state-records.rb, restructure step 2): each group is its name, its values, and a
   # separator; the writer prints the records state_put printed
@@ -208,10 +208,11 @@ cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs
   st+=(preinc ${preinc[@]+"${preinc[@]}"} $'\x1e' cuda ${cuda_opts[@]+"${cuda_opts[@]}"} $'\x1e')
   st+=(edg_launch "${NFCXX_CUDA_EDG_LAUNCH:-1}" $'\x1e')
   "${RUBY:-ruby}" "$root/scripts/nfcxx-state-records.rb" "${st[@]}" > "$inf"
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-cuda-device.rb" --cu-prepare < "$inf" > "$outf" || exit $?
   # the reply (scripts/nfcxx-cu-apply.rb plan, restructure step 2): the -I directories and the copies replace the inputs in srcs and
   # files, and the cuda and preinc groups become cuda_opts and preinc. A refusal ends the driver with 2; a reply without its end with 1.
-  cu_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cu-apply.rb" plan inputs="$(IFS=$'\x1f'; echo "${cu_inputs[*]-}")" srcs="$(IFS=$'\x1f'; echo "${srcs[*]-}")" files="$(IFS=$'\x1f'; echo "${files[*]-}")" cflags="$(IFS=$'\x1f'; echo "${cflags[*]-}")" < "$outf") || exit $?
+  # the reply (scripts/nfcxx-cuda-device.rb --cu-run, restructure step 2): the loop and its apply in one process (nfcxx-cu-apply.rb
+  # plan kind=cu); its statements are evaluated here
+  cu_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cuda-device.rb" --cu-run inputs="$(IFS=$'\x1f'; echo "${cu_inputs[*]-}")" srcs="$(IFS=$'\x1f'; echo "${srcs[*]-}")" files="$(IFS=$'\x1f'; echo "${files[*]-}")" cflags="$(IFS=$'\x1f'; echo "${cflags[*]-}")" < "$inf") || exit $?
   eval "$cu_sh"
 }
 # A .cpp2 input (experimental, docs/notes/cpp2.md) is translated to C++1 by cppfront (scripts/setup-cppfront.sh) before the
