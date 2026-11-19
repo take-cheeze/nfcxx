@@ -48,7 +48,7 @@ exit 7
 STUB
 chmod +x "$stub/nfcxx"
 want=$(NFCXX_CUDA_HOST_SYMBOLS=/h/syms NFCXX_CACHE= NFCXX_CACHE_REMOTE= "$stub/nfcxx" -c m.cpp -o m.o; echo "rc=$?")
-got=$(ruby "$repo/scripts/nfcxx-second-pass.rb" rerun "$stub" /h/syms -c m.cpp -o m.o; echo "rc=$?")
+got=$(ruby "$repo/scripts/nfcxx-second-pass.rb" rerun "$stub" /h/syms 4242 -c m.cpp -o m.o; echo "rc=$?")
 if [ "$want" = "$got" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL rerun: bash [$want] ruby [$got]"; fi
 echo "driver-second-pass: $pass passed, $fail failed"
 [ $fail = 0 ]
