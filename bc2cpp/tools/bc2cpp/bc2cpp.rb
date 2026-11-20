@@ -509,6 +509,10 @@ BC2CPP_MAIN = lambda do
   linked_mrblib = build_gems.values.flat_map { |dir| Dir["#{dir}/mrblib/**/*.rb"] }.select { |path| CoreDefs.core_source?(path) }
   unread_ruby = (Shellwords.split(ENV['FOREIGN_RUBY_SRCS']) + outside_ruby + linked_mrblib)
                 .map { |path| File.expand_path(path) }.uniq
+  # UNREAD_RUBY_OWNERS: the outside owner sets (OutsideOwnerCall) read these too. A linked core gem's mrblib that this
+  # build does not compile (bc2cpp-self runs mruby's own gems as Ruby) is in neither outside_ruby nor the program's
+  # core, and its `module Kernel; alias enum_for to_enum` was missing from the enum_for owner set.
+  CodeGen.unread_ruby_paths = unread_ruby.reject { |path| compiled_ruby.include?(path) }.sort
   unseen_flipped = CoreDefs.add_unseen_placeholders!(
     registry, ireps, core_all_defs, alias_sites,
     foreign_method_names(unread_ruby.reject { |path| compiled_ruby.include?(path) }.sort)
