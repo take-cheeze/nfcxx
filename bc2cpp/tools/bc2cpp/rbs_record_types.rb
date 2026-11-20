@@ -9,6 +9,7 @@ require_relative 'rbs_signatures'
 require_relative 'core_hierarchy_sigs'
 require_relative 'escape_analysis'
 require_relative 'rbs_parse_memo'
+require_relative 'rbs_record_values'
 
 # RBS_RECORD_TYPES: an RBS record type on an ivar (`@ui: { battle: Game::Battle, ?win: Window }`)
 # is a CHECKED declaration that feeds the facts RECORD_HASH_PROOF produces.
@@ -23,7 +24,8 @@ require_relative 'rbs_parse_memo'
 #   `h.store(:k, v)`                       a store;
 #   `h.delete(:k)`                         only of a key declared optional (`?k:`).
 # Every store must use declared keys, every literal stored into the ivar must carry every required key, and every
-# value must be traced (literal, `Klass.new`, trace_new_target) to a class that conforms to the field type. A
+# value must be traced (literal, `Klass.new`, trace_new_target, RECORD_FIELD_TRACE in rbs_record_values.rb) to
+# classes that conform to the field type. A
 # write the checker cannot verify (computed key, non-literal update, clear, replace, delete of a required key,
 # an escape of the Hash, reflection, an outside spelling of the name) is a TC1009 error at its file:line, and
 # the build aborts on it like RBS_SEED_CONTRADICTION. Nothing is trusted on the declaration's word alone.
@@ -165,7 +167,9 @@ module RbsRecordTypes
     sites = refusal ? {} : collect_sites(ireps, by_name.keys, poison.readers)
     ctx = { registry: registry, superclass_of: superclass_of, known_owners: known_owners, root: display_root,
             container_constants: container_constants, value_class: value_class, closed_world: closed_world,
-            owner_of: body_owners(ireps, registry), escape_world: escape_world }
+            owner_of: body_owners(ireps, registry), escape_world: escape_world, ireps: ireps, poison: poison,
+            outside_ivars: outside_ivars }
+    ctx[:tracer] = ValueTrace.new(ctx)
     by_name.each do |name, decls|
       errors = []
       decl = decls.first
@@ -285,11 +289,12 @@ module RbsRecordTypes
     return ["value of :#{field.key} cannot be traced (declare it untyped)"] if defs.nil? || defs.empty?
 
     defs.filter_map do |d|
-      cls = d.entry? ? nil : value_class_at(irep, d.index, d.reg, ctx)
-      if cls.nil?
+      classes = d.entry? ? nil : ctx[:tracer].classes_at(irep, d.index, d.reg)
+      bad = classes&.reject { |cls| conforms?(cls, field.classes, ctx[:superclass_of]) }
+      if classes.nil?
         "value of :#{field.key} cannot be traced to a class (declared #{field.text}; declare it untyped)"
-      elsif !conforms?(cls, field.classes, ctx[:superclass_of])
-        "value of :#{field.key} is #{cls}, declared #{field.text}"
+      elsif !bad.empty?
+        "value of :#{field.key} is #{bad.sort.join(' | ')}, declared #{field.text}"
       end
     end
   end
