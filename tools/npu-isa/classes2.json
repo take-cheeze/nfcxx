@@ -1,0 +1,140 @@
+[
+{
+"unit": "BRU",
+"text": "BRU.INC",
+"len": 1,
+"low": 7
+},
+{
+"unit": "BRU",
+"text": "BRU.JMP i1",
+"len": 3,
+"low": 71
+},
+{
+"unit": "BRU",
+"text": "BRU.RPL i1 i2",
+"len": 4,
+"low": 135
+},
+{
+"unit": "CMU",
+"text": "CMU.CLAMP0.F16 i1 i2 i3",
+"len": 5,
+"low": 193
+},
+{
+"unit": "CMU",
+"text": "CMU.CLRB i1 i2 i3",
+"len": 4,
+"low": 129
+},
+{
+"unit": "CMU",
+"text": "CMU.CMZ.F16 i1",
+"len": 3,
+"low": 65
+},
+{
+"unit": "IAU",
+"text": "IAU.ABS i1 i2",
+"len": 3,
+"low": 70
+},
+{
+"unit": "IAU",
+"text": "IAU.ADD i1 i2 i3",
+"len": 4,
+"low": 198
+},
+{
+"unit": "IAU",
+"text": "IAU.ADDCI i1 i2 i3",
+"len": 4,
+"low": 134
+},
+{
+"unit": "LSU0",
+"text": "LSU0.BYPASS_OFF",
+"len": 4,
+"low": 66
+},
+{
+"unit": "LSU0",
+"text": "LSU0.LDX.32 i1 i2 i3",
+"len": 5,
+"low": 130
+},
+{
+"unit": "LSU1",
+"text": "LSU1.BYPASS_OFF",
+"len": 4,
+"low": 73
+},
+{
+"unit": "LSU1",
+"text": "LSU1.LDX.32 i1 i2 i3",
+"len": 5,
+"low": 137
+},
+{
+"unit": "NOP",
+"text": "NOP",
+"len": 1,
+"low": 7
+},
+{
+"unit": "PEU",
+"text": "PEU.ANDACC",
+"len": 2,
+"low": 69
+},
+{
+"unit": "PEU",
+"text": "PEU.PC1C 1",
+"len": 2,
+"low": 133
+},
+{
+"unit": "PEU",
+"text": "PEU.PC2S.AND 1",
+"len": 3,
+"low": 197
+},
+{
+"unit": "SAU",
+"text": "SAU.ABS.F16 i1 i2",
+"len": 4,
+"low": 44
+},
+{
+"unit": "SAU",
+"text": "SAU.ADD.F16 i1 i2 i3",
+"len": 4,
+"low": 60
+},
+{
+"unit": "SAU",
+"text": "SAU.ATN i1 i2.0",
+"len": 3,
+"low": 28
+},
+{
+"unit": "VAU",
+"text": "VAU.ADDCI v1 v2 v3",
+"len": 4,
+"low": 35
+},
+{
+"unit": "VAU",
+"text": "VAU.ADIFF.F16 v1 v2 v3",
+"len": 4,
+"low": 51
+},
+{
+"unit": "VAU",
+"text": "VAU.EXP v1 v2",
+"len": 3,
+"low": 19
+}
+]
