@@ -1514,6 +1514,11 @@ BC2CPP_MAIN = lambda do
     abort "\n[bc2cpp] DECLARED_RETURN_GUARD: #{guard_failures.size} runtime-checked return declaration(s) " \
           "without their compiled check:\n  #{guard_failures.join("\n  ")}"
   end
+  param_failures = DeclaredReturns.optional_param_guard_failures(CodeGen.declared_params, compiled)
+  unless param_failures.empty?
+    abort "\n[bc2cpp] DECLARED_PARAM_GUARD: #{param_failures.size} seeded optional parameter declaration(s) without " \
+          "their compiled check:\n  #{param_failures.join("\n  ")}"
+  end
   # DECLARED_IVAR_PROOF: a declared slot seeded as its declared kind is trusted only because every store to it is
   # checked; abort unless each method that stores to one compiled with its guard.
   ivar_failures = gen.declared_ivar_writer_failures(compiled, only_owners, other_owners, live: main_reach&.labels)

@@ -48,11 +48,30 @@ module RbsParamCheck
     # RBS only: every declared parameter class is trusted as written, so no caller is proven against it. The compiled
     # body checks it at entry instead (DECLARED_PARAM_GUARD): guards is label => [[position, class, key, text], ...].
     found = targets(ctx)
+    diags = optional_notes(ctx, found)
     trusted = found.flat_map { |_sig, d, positions| positions.map { |pos, *| [d.irep, pos] } }.to_set
     guards = found.to_h do |sig, d, positions|
-      [d.irep, positions.map { |pos, cls, kind, nilable| [pos, cls, "#{sig.owner}##{sig.name}", sig.args[pos].text, kind, nilable] }]
+      [d.irep, positions.map do |pos, cls, kind, nilable, optional|
+        text = optional ? sig.optional_args[optional].text : sig.args[pos].text
+        [pos, cls, "#{sig.owner}##{sig.name}", text, kind, nilable, optional]
+      end]
     end
-    [[], trusted, guards]
+    [diags, trusted, guards]
+  end
+
+  # TC1005 info for each typed optional parameter optional_targets does not guard (and so gives no hint).
+  def optional_notes(ctx, found)
+    guarded = found.to_h { |_sig, d, positions| [d.irep, positions.map(&:first).to_set] }
+    ctx[:sig_of].flat_map do |label, sig|
+      mand = sig.args.size
+      Array(sig.optional_args).each_with_index.filter_map do |type, k|
+        next if type.value_classes.nil? || guarded[label]&.include?(mand + k) || ctx[:comment_class_args][label]&.[](mand + k)
+
+        RbsSignatures::Diag.new(file: sig.loc.file, line: sig.loc.line, col: sig.loc.col, severity: 'info', code: 'TC1005',
+                                message: "#{sig.owner}##{sig.name} parameter #{mand + k + 1}: optional #{type.text} gives " \
+                                         'no hint (a guardable kind with a literal default of that kind is needed)')
+      end
+    end
   end
 
   # DECLARED_IVAR_GUARD: one `@x: T` declaration the compiled stores check. kind is :float, :integer, :symbol, :class
@@ -162,9 +181,93 @@ module RbsParamCheck
 
         [i, type.cls, :class, false]
       end
+      positions.concat(optional_targets(ctx, label, sig))
       out << [sig, d, positions] unless positions.empty?
     end
     out
+  end
+
+  # DECLARED_OPTIONAL_PARAM: [[position, class, kind, nilable, k], ...] for the optional parameters (k-th optional) whose
+  # declaration the guard can test and whose default is a literal of that kind (optional_defaults). The guard checks
+  # a given argument only (bc2cpp_given_opt > k); an omitted one holds its default, so either way the register has
+  # the declared kind wherever the body reads it.
+  def optional_targets(ctx, label, sig)
+    types = Array(sig.optional_args)
+    return [] if types.empty?
+
+    irep = ctx[:ireps][label]
+    mand = sig.args.size
+    defaults = irep && optional_defaults(irep, mand, types.size)
+    return [] unless defaults
+
+    types.each_with_index.filter_map do |type, k|
+      pos = mand + k
+      next if ctx[:comment_class_args][label]&.[](pos)
+
+      inner = type.optional
+      t = inner || type
+      nilable = !inner.nil?
+      kind, cls = if VALUE_CLASSES.key?(t.value) then [t.value, VALUE_CLASSES[t.value]]
+                  elsif t.kind == :class && ctx[:classes].include?(t.cls) && !ctx[:subclassed].include?(t.cls)
+                    [:class, t.cls]
+                  end
+      next unless kind
+
+      default = defaults[k]
+      next unless default && (default == kind || (default == :nil && nilable))
+
+      [pos, cls, kind, nilable, k]
+    end
+  end
+
+  # Ops that write their register from their operands alone and read no register (OPTIONAL_DEFAULT_READS).
+  DEFAULT_LITERAL_OPS = (BytecodeIR::Ops::LOADI_OPS | %i[LOADNIL LOADTRUE LOADFALSE LOADSYM LOADL STRING LOADSELF]).freeze
+  # Past it a LOADI32 literal may not be a fixnum on a 32-bit mrb_int target (see mrb_fixnum_p).
+  DEFAULT_FIXNUM_LIMIT = 0x2000_0000
+
+  # The kind of each optional default (:integer, :symbol, :nil, or nil for anything else) when the ENTER jump table is
+  # the plain one (optional_arg_table's shape) and every default reads no register; nil otherwise.
+  # OPTIONAL_DEFAULT_READS: an omitted optional is nil, not its declared kind, until its own default runs, and only the
+  # defaults before it run first. Default code that reads no register cannot see it, so the entry state the class pool
+  # seeds (declared kind) is what every read of the register finds.
+  def optional_defaults(irep, mand, count)
+    enter = irep.enter
+    return nil unless enter
+
+    fields = enter.enter_fields.map(&:to_i)
+    return nil unless fields[0] == mand && fields[1] == count
+
+    program = BytecodeIR.for(irep)
+    first = irep.enter_index + 1
+    return nil unless first + count + 1 <= program.size
+
+    jmps = (first..first + count).map { |index| program.source_at(index) }
+    return nil unless jmps.all? { |insn| insn.op == :JMP }
+
+    targets = jmps.map(&:jmp_addr)
+    index = first + count + 1
+    count.times.map do |k|
+      segment = []
+      while index < program.size && program.source_at(index).addr < targets[k + 1]
+        segment << program.source_at(index)
+        index += 1
+      end
+      return nil unless segment.first&.addr == targets[k] && segment.all? { |insn| DEFAULT_LITERAL_OPS.include?(insn.op) }
+
+      literal = segment.size == 1 && segment.first.reg == mand + 1 + k ? segment.first : nil
+      literal && default_kind(literal)
+    end.then { |kinds| program.source_at(index)&.addr == targets[count] ? kinds : nil }
+  end
+
+  def default_kind(insn)
+    case insn.op
+    when :LOADNIL then :nil
+    when :LOADSYM then :symbol
+    when *BytecodeIR::Ops::LOADI_OPS
+      value = BytecodeIR::Ops::LOADI_SLOT_VALUE[insn.op] || (insn.op == :LOADI__1 ? -1 : insn.imm_operand)
+      value = -value.abs if value && insn.op == :LOADINEG
+      value && value.abs < DEFAULT_FIXNUM_LIMIT ? :integer : nil
+    end
   end
 
   # Every name code outside the analysed bytecode can call a Ruby method by: in a native source (comments dropped),

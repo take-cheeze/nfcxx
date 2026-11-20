@@ -408,7 +408,7 @@ class CodeGen
   # DECLARED_PARAM_GUARD: the C++ statements that check the declared class of each trusted parameter of `label`, given
   # the impl's parameter names (M, self, then the positionals), or "" when it has none.
   def declared_param_guard_statements(label, names, types = [])
-    (self.class.declared_params&.[](label) || []).filter_map do |pos, cls, key, text, kind = :class, nilable = false|
+    (self.class.declared_params&.[](label) || []).filter_map do |pos, cls, key, text, kind = :class, nilable = false, optional = nil|
       var = names[2 + pos]
       next unless var
       # An unboxed specialization (`mrb_int id`, `mrb_float f`) already carries the kind: its callers box-check it.
@@ -423,6 +423,12 @@ class CodeGen
              else exact_class_guard(owner_class_ptr_expr(cls), var)
              end
       cond = "mrb_nil_p(#{var}) || (#{cond})" if nilable
+      # DECLARED_OPTIONAL_PARAM: an omitted optional holds its default (RbsParamCheck.optional_defaults), not a value.
+      if optional
+        raise "DECLARED_PARAM_GUARD: #{key} arg #{pos + 1}: no bc2cpp_given_opt in #{names.join(', ')}" unless names.include?('bc2cpp_given_opt')
+
+        cond = "bc2cpp_given_opt <= #{optional} || (#{cond})"
+      end
       "  if (mrb_unlikely(!(#{cond}))) bc2cpp_declared_param_violation(M, #{var}, \"#{key}\", #{pos + 1}, \"#{text}\"); " \
         "/* DECLARED_PARAM_GUARD #{key} arg #{pos + 1} */\n"
     end.join
