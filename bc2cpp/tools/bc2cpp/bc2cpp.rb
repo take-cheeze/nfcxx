@@ -1628,8 +1628,8 @@ BC2CPP_MAIN = lambda do
   RuntimeHeader.capture_stdout(ENV[RuntimeHeader::DIR_KEY])
   CompactOutput.capture_stdout unless annotated
   # OWNER_SET_SHARE (owner_set_share.rb): before the split, so shards of one gem share a set too.
-  real_gem = BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol }
-  OwnerSetShare.capture_stdout(symbol) if OwnerSetShare.enabled?(real_gem)
+  # Inline, not a local: BC2CPP_MAIN is at mruby's limit of local variables (see owner_rewrite below).
+  OwnerSetShare.capture_stdout(symbol) if OwnerSetShare.enabled?(BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol })
 
   # PARAM_TRACE (tools/bc2cpp/param_trace.rb): opt-in runtime classes of compiled method and block
   # parameters; unset (or any value but 1) leaves stdout untouched. Registered BEFORE ELSE_TRACE so the
