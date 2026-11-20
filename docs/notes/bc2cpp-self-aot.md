@@ -55,6 +55,9 @@ Native builds also [split oversized owners across shards](bc2cpp-owner-shards.md
 does not leave one compiler process running after all other shard workers finish. Explicit hot-owner pins retain
 their existing placement.
 
+[Measured bottlenecks and results](bc2cpp-self-performance.md) separate Ruby generation, native build balance
+and compiled-compiler runtime checks.
+
 ## Validation
 
 With a full pinned-world checkout selected, the integration check compares generated C++ and bytecode against CRuby,
