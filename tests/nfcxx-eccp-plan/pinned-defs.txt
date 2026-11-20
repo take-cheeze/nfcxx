@@ -46,3 +46,11 @@ eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary direc
   trace_finish
   return $rc
 }
+
+temp_cleanup() {
+  [ -z "${tmp:-}" ] || rm -rf "$tmp"
+  [ -z "${ptmp:-}" ] || rm -rf "$ptmp"
+  [ -z "${ctmp:-}" ] || rm -rf "$ctmp"
+  [ -z "${cudatmp:-}" ] || rm -rf "$cudatmp"
+  [ -z "${fso_dir:-}" ] || rm -rf "$fso_dir"
+}

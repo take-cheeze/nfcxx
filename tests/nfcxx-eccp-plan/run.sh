@@ -16,7 +16,7 @@ work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 ruby_bin=$(command -v ruby) || { echo "nfcxx-eccp-plan: ruby is not on PATH" >&2; exit 2; }
 
 # the port, as nfcxx has it: the functions, and the call (the lines from the moves test to the trace span of eccp)
-sed -n '/^state_put() {/,/^}/p;/^eccp_plan_input() {/,/^}/p;/^eccp_plan() {/,/^}/p;/^eccp_cleanup() {/,/^}/p' "$here/pinned-defs.txt" > "$work/thin_defs.sh"
+sed -n '/^temp_cleanup() {/,/^}/p;/^state_put() {/,/^}/p;/^eccp_plan_input() {/,/^}/p;/^eccp_plan() {/,/^}/p;/^eccp_cleanup() {/,/^}/p' "$here/pinned-defs.txt" > "$work/thin_defs.sh"
 sed -n '/^if \[ \$moves = 1 \]; then$/,/^eccp_plan$/p' "$here/pinned-call.txt" > "$work/thin_call.sh"; sed -n '/^t=\$(trace_start)$/,/^trace_end "\$t" "eccp (front end/p' "$here/pinned-call.txt" >> "$work/thin_call.sh"
 for f in "$work/thin_defs.sh" "$work/thin_call.sh"; do
   [ -s "$f" ] || { echo "nfcxx-eccp-plan: nothing to test in nfcxx ($f is empty)" >&2; exit 2; }
