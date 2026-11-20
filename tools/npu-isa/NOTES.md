@@ -150,3 +150,19 @@ Open:
 - Remaining unknown runs are most likely bundle combinations or operand-dependent headers.
 - Mnemonics still rejected by the assembler for every tried shape: about 1,160 (`mnemonics.txt` minus the
   table). They need operand forms not yet enumerated.
+
+## Bundle shapes fitted from bundle encodings (session 3)
+
+Bundle layouts do not copy the standalone slot encodings at fixed bit positions: register fields
+inside a bundle are encoded differently. So bundle shapes are fitted directly from bundle samples.
+
+`bundle_fit.py` assembles every two-slot class pair and every placeholder shape (header length 0 in
+`tuple_hdr.json`) with random register numbers, requires every register column to vary, fits one
+template per shape with `fit_fields.fit`, and stores the result in `bundle_templates.json`.
+`decode_kernel.py` loads that file next to `all_templates.json` and tries single templates up to 16 bytes.
+
+Results: 195 of 248 shapes verify. On the 150 placeholder samples, 146 decode as one item and every
+one of those 146 reassembles to the exact bytes. The 4 misses are in `LSU0/5:82|SAU/4:2c|IAU/4:86|PEU`.
+The frame kernel's coverage is unchanged (66.4 %): its unknown bundles are not these shapes.
+
+Also needed: `table.json` and `kernel_table.json` (not tracked here) must sit next to the scripts.
