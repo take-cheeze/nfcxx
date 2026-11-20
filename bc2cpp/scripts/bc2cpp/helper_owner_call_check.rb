@@ -45,7 +45,7 @@ Dir.mktmpdir('helper-owner-call') do |dir|
   helper = code[/static mrb_value bc2cpp_slow_lshift\(mrb_state\* M.*?\n\}\n/m].to_s
   check.call('the << slow helper is emitted', !helper.empty?)
   check.call('its fallback is the owner call over the << owner set',
-             helper.match?(/bc2cpp_owner_call\(M, a, \d+, 0, BC2CPP_OWNERS\([^)]*"Acc"[^)]*\), mrb_nil_value\(\), 1, b\)/))
+             helper.match?(/bc2cpp_owner_call\(M, a, BC2CPP_OWNERS\(\d+, 0, [^)]*"Acc"[^)]*\), mrb_nil_value\(\), 1, b\)/))
   check.call('no by-name fallback left in the numeric slow helpers',
              !code.match?(/bc2cpp_funcall_keep\(M, a, "(?:<<|\+|-)"/))
 

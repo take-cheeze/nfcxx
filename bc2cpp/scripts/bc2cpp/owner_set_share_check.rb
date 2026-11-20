@@ -2,10 +2,11 @@
 # frozen_string_literal: true
 
 # OWNER_SET_SHARE (tools/bc2cpp/owner_set_share.rb): owner calls with the same method, level and owner list share
-# one bc2cpp_owner_set.
+# one descriptor and bc2cpp_owner_set.
 #
-#   1. the rewrite: two sites with one key share it; a different level, method or owner list, a single site, a site
-#      with direct rows (BC2CPP_OWNERS_D) and another gem's same site do not; the owner list stays spelled;
+#   1. the rewrite: two sites with one key share it, defined once after the BC2CPP_SHARED macro; a different level,
+#      method or owner list, a single site, a site with direct rows (BC2CPP_OWNERS_D) and another gem's same site do
+#      not; the owner list stays spelled;
 #   2. a fixture generated with BC2CPP_OWNER_SET_SHARE=1, run on a full-core mruby against interpreted: sites that
 #      share a set, called with receivers of alternating classes, a redefinition between calls, and a core method
 #      made private after both sites ran it, answer as interpreted.
@@ -24,20 +25,32 @@ check = lambda do |what, condition|
   failures << what unless condition
 end
 
-site = ->(recv, mid, level, owners) { "  r1 = bc2cpp_owner_call(M, #{recv}, #{mid}, #{level}, BC2CPP_OWNERS(#{owners}), mrb_nil_value(), 0);\n" }
+site = ->(recv, mid, level, owners) { "  r1 = bc2cpp_owner_call(M, #{recv}, BC2CPP_OWNERS(#{mid}, #{level}, #{owners}), mrb_nil_value(), 0);\n" }
 text = site.call('r2', 7, 2, '"Array", "String"') + site.call('r5', 7, 2, '"Array", "String"') +
        site.call('r2', 7, 0, '"Array", "String"') + site.call('r2', 8, 2, '"Array", "String"') +
        site.call('r2', 7, 2, '"Array"') + site.call('r2', 9, 1, '"Hash"') +
-       "  r1 = bc2cpp_owner_call(M, r2, 7, 2, BC2CPP_OWNERS_D(BC2CPP_OWNER_DIRECT(\"Array\", Array_x, MRB_ARGS_NONE(), MRB_METHOD_PUBLIC_FL) BC2CPP_OWNER_DIRECT(\"String\", String_x, MRB_ARGS_NONE(), MRB_METHOD_PUBLIC_FL), \"Array\", \"String\"), mrb_nil_value(), 0);\n" * 2
-out = OwnerSetShare.rewrite(text, 'gem_a')
-lines = out.lines
-k = OwnerSetShare.key('gem_a', '7', '2', 'BC2CPP_OWNERS("Array", "String")')
-check.call('two sites with one key share it, the owner list still spelled',
-           lines[0..1].all? { |l| l.include?("7, 2, BC2CPP_SHARED(0x#{k}, BC2CPP_OWNERS(\"Array\", \"String\")), mrb_nil_value()") })
+       "  r1 = bc2cpp_owner_call(M, r2, BC2CPP_OWNERS_D(7, 2, BC2CPP_OWNER_DIRECT(\"Array\", Array_x, MRB_ARGS_NONE(), MRB_METHOD_PUBLIC_FL) BC2CPP_OWNER_DIRECT(\"String\", String_x, MRB_ARGS_NONE(), MRB_METHOD_PUBLIC_FL), \"Array\", \"String\"), mrb_nil_value(), 0);\n" * 2
+out = OwnerSetShare.rewrite(OwnerSetShare::DEFS_AT + text, 'gem_a')
+k = OwnerSetShare.key('gem_a', '7', '2', '"Array", "String"')
+defs = out[OwnerSetShare::DEFS_AT.size...out.index('  r1 = ')].lines
+lines = out[out.index('  r1 = ')..].lines
+check.call('two sites with one key share it, the slot, level and owner list still spelled',
+           lines[0..1].all? { |l| l.include?("BC2CPP_SHARED(0x#{k}, 7, 2, \"Array\", \"String\"), mrb_nil_value()") })
+check.call('the shared key is defined once, after the macro: names, zeroed set, descriptor',
+           defs == ["inline const char* const bc2cpp_owner_sn_0x#{k}[] = { \"Array\", \"String\", nullptr };\n",
+                    "inline bc2cpp_owner_set bc2cpp_owner_ss_0x#{k}{};\n",
+                    "inline const bc2cpp_owner_desc bc2cpp_owner_sd_0x#{k} = { bc2cpp_owner_sn_0x#{k}, nullptr, &bc2cpp_owner_ss_0x#{k}, 7, 2 };\n"])
 check.call('another level, method or owner list does not', lines[2..4].none? { |l| l.include?('BC2CPP_SHARED') })
 check.call('a single site keeps its own set', !lines[5].include?('BC2CPP_SHARED'))
 check.call('sites with direct rows keep theirs', lines[6..7].none? { |l| l.include?('BC2CPP_SHARED') })
-check.call("another gem's same site has another key", OwnerSetShare.key('gem_b', '7', '2', 'BC2CPP_OWNERS("Array", "String")') != k)
+check.call("another gem's same site has another key", OwnerSetShare.key('gem_b', '7', '2', '"Array", "String"') != k)
+check.call('a shared site with no macro to define it after is an error',
+           begin
+             OwnerSetShare.rewrite(text, 'gem_a')
+             false
+           rescue RuntimeError => e
+             e.message.include?('OWNER_SET_SHARE')
+           end)
 check.call('a text with nothing to share is returned as it is', OwnerSetShare.rewrite(lines[5], 'gem_a') == lines[5])
 ENV['BC2CPP_OWNER_SET_SHARE'] = '0'
 check.call('BC2CPP_OWNER_SET_SHARE=0 turns it off in a real build', !OwnerSetShare.enabled?(true))
