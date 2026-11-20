@@ -6949,6 +6949,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       args = [(rel.end_with?('.cc') ? 'g++' : 'gcc'), '-fsyntax-only', '-w', '-include', 'stddef.h', '-I', src_dir, '-I', inc_dir]
       # the build's defines (the --define options: the names the build defines, as extconf would set them)
       (@defines || []).each { |d| args << "-D#{d}" }
+      # the fork's build defines MRB_USE_BIGINT for every object (mrbgems/mruby-bigint/mrbgem.rake): the bigint helpers are declared
+      args << '-DMRB_USE_BIGINT'
       incs.each { |d| args += ['-I', d] }
       args << path
       _o, err, _st = Open3.capture3(*args)
