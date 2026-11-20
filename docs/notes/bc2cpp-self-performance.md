@@ -67,3 +67,17 @@ retains 396 VM fallbacks. Strict fresh C++/bytecode parity and generated-program
 binary strings and exceptions. The compiled compiler also matches CRuby's main C++, shard C++ and bytecode
 with oversized-owner splitting both disabled and enabled. This verifies the default owner layout as well as
 the self-build layout.
+
+## Optimized native debug information
+
+The runner's GCC toolchain supplied `-g` even with `BC2CPP_RUNNER_OPT=1`. Optimized runner builds now omit
+that default for C and C++, retaining `-O2` and exception support. Ordinary debug builds keep `-g3 -O0`
+and `MRB_DEBUG`; explicit `CFLAGS`/`CXXFLAGS` retain the caller's debug options (including `-g3`, `-ggdb`
+and `-g0`). For example, `CXXFLAGS='-g -Wall -Wundef'` restores native debug information in an optimized build.
+
+A fixed captured compiler shard built through the nfcxx GCC backend had identical disassembly and identical
+text/data/BSS sizes with and without `-g`. The object shrank from 23,592,160 to 3,341,528 bytes; peak compiler
+RSS fell from about 847 to 609 MiB. A sequential repeat measured 42.52 to 24.82 seconds wall time and 41.20
+to 23.98 seconds user CPU. An earlier pair measured 31.83 to 23.19 seconds (those processes briefly overlapped).
+These are individual shard measurements, not a whole-build speedup claim. The principal saving is skipping
+DWARF generation for the lowered compiler bodies, without changing their executable instructions.
