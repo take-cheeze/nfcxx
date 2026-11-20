@@ -72,6 +72,16 @@ module Bc2cppFixtureRuntime
     Shellwords.split(cflags).grep(/\A-D/).uniq
   end
 
+  # A custom full runtime may link gems such as digest, whose dependencies
+  # (libcrypto) must follow libmruby.a on the fixture's link line too.
+  def library_libraries(build)
+    mak = File.join(build, 'lib', 'libmruby.flags.mak')
+    libraries = File.read(mak)[/^MRUBY_LIBS = (.*)$/, 1]
+    raise "#{mak} has no MRUBY_LIBS line" unless libraries
+
+    Shellwords.split(libraries).reject { |flag| flag == '-lmruby' }
+  end
+
   def compiler?
     system('g++', '--version', out: File::NULL, err: File::NULL)
   end
@@ -404,7 +414,7 @@ module Bc2cppFixtureRuntime
     flags.concat(Shellwords.split(ENV.fetch('BC2CPP_CXXFLAGS', '')))
     built = Bc2cppCxx.system(*flags, "-I#{dir}", "-I#{build}/include", "-I#{ROOT}/3rd/mruby/include",
                    "-I#{ROOT}/mruby-rgss/src", "-I#{ROOT}/include", File.join(dir, 'main.cpp'), *extra_srcs, lib, '-lm',
-                   '-o', binary)
+                   *(full ? library_libraries(build) : []), '-o', binary)
     return [false, ''] unless built
 
     FileUtils.cp_r(dir, ENV['BC2CPP_KEEP_DIR'], remove_destination: true) if ENV['BC2CPP_KEEP_DIR']
