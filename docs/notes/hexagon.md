@@ -279,7 +279,9 @@ Hexagon plan:
    and pin two refusals (a scalar module, a whole runnable module).
    `tests/pathb-hvx/cases/add_i16` passes (exit 67), `cases/mul_i16` passes (exit 184),
    and `cases/mul_su_i16` passes (exit 184), equal to the host models. CRuby
-   and mruby agree byte-for-byte on the output and the refusal text.
+   and mruby agree byte-for-byte on the output and the refusal text. A sweep over
+   every dumpable `tests/cases/*.cpp` module (61 files) refuses all of them with
+   exit 3 and `refused:` on stderr: no crash, no garbage emission.
 3. **Alignment and memory ops.** Aligned vector loads and stores need the IR to guarantee alignment;
    otherwise use the unaligned forms. clang 18 does not recognize `__builtin_HEXAGON_V6_vmemu_128B` or
    `__builtin_HEXAGON_V6_vmem_128B` (checked), so `tests/hexagon/hvx_vaddh.c` loads with plain vector
