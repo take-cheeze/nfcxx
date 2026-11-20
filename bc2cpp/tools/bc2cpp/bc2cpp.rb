@@ -372,6 +372,11 @@ BC2CPP_MAIN = lambda do
   profile_phase.call('closed world: build check')
 
     outside_native, outside_ruby = bc2cpp_closed_world_outside_srcs(build_name, build_gems, repo_root)
+    # GENERATED_GEM_RUBY: a gem may generate Ruby into its build directory (mruby-prism's prism_mrblib.rb, the node
+    # classes; mruby-rbs's rbs_mrblib.rb). FOREIGN_RUBY_SRCS names those files, outside any mrblib/ directory, but the
+    # gem-dir glob above does not, so a name only they define (Prism::ParametersNode#rest) looked closed.
+    outside_ruby |= Shellwords.split(ENV.fetch('FOREIGN_RUBY_SRCS', '')).reject { |path| path.include?('/mrblib/') }
+                                                                      .map { |path| File.expand_path(path) }
   profile_phase.call('closed world: outside sources')
     # Core Ruby is compiled input here but stays an OUTSIDE source for these proofs: the
     # closed world is the engine's own Ruby, and a name mruby's own Ruby defines is one
