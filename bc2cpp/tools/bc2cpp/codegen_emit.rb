@@ -112,6 +112,8 @@ class CodeGen
     :@exact_core_site => nil, :@nonnil_receiver => nil,
     # CHECKED_POOL_EXACT: the one register its arm is being compiled under a class test for.
     :@checked_pool_override => nil,
+    # DECLARED_LOOP_ELEMENT: the inlined loop bodies being compiled under an element guard.
+    :@declared_loop_elements => nil,
     # INDEX_CLOSED: set while a shared index helper builds its chain; a probe compiled meanwhile must not see it.
     :@index_closed_build => nil
   }.freeze

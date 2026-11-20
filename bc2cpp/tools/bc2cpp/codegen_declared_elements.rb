@@ -141,6 +141,43 @@ class CodeGen
       "\"#{quote.call(entry[:text])}\"); /* DECLARED_ELEMENT_GUARD #{entry[:owner]}##{entry[:name]} #{verb} */\n"
   end
 
+  # DECLARED_LOOP_ELEMENT: the declared program-class element of an inlined Array loop's receiver (its one reaching
+  # definition at the SENDB is `@x` of a declaring class), or nil. The loop tests each element it binds
+  # (declared_loop_element_guard), so inside that body the parameter is exactly the class while no write reaches it
+  # (declared_loop_element_class). Only an exact program class: the guard's class test is pointer equality.
+  def declared_loop_element(region, irep, d)
+    return nil if region[:ssendb] || d.nil? || ENV['BC2CPP_DECLARED_LOOP_ELEMENT'] == '0'
+
+    idx = irep.index_of_addr(region[:sendb_addr])
+    entry = declared_element_receiver(irep, idx, region[:dest_reg], d.owner)
+    return nil unless entry && entry[:kind] == :class && @closed_world&.exact_class?(entry[:klass])
+
+    entry
+  end
+
+  # DECLARED_ELEMENT_GUARD on a loop element: the statement testing the element bound to `var`. An element inside the
+  # bounds is never a read past the end, so nil raises too.
+  def declared_loop_element_guard(region, var)
+    entry = region[:declared_element]
+    entry ? element_guard_statement(entry, var, nil_ok: false, verb: 'iterated') : ''
+  end
+
+  # The class DECLARED_LOOP_ELEMENT gives +reg+ at +idx+ of +irep+: only while that irep's inlined body is compiled
+  # under its guard, and only when every reaching definition is the parameter's entry value (a MOVE of it counts).
+  def declared_loop_element_class(irep, idx, reg)
+    scope = @declared_loop_elements
+    return nil if scope.nil? || scope.empty?
+
+    hit = scope.find { |e| e[:irep].equal?(irep) }
+    return nil unless hit
+
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
+    return nil if defs.nil? || defs.empty?
+    return nil unless defs.all? { |df| df.entry? && df.reg.to_s == hit[:reg] }
+
+    hit[:klass]
+  end
+
   # DECLARED_ELEMENT_MASK: the class set of a GETIDX/GETIDX0 result the flow may use: the declared element's class and
   # nil (guarded by DECLARED_ELEMENT_GUARD, so the read is never another class). nil when no element is declared.
   def declared_element_index_mask(irep, index, insn)
