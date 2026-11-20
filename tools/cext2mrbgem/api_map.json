@@ -58,8 +58,7 @@
     "rb_time_timespec_new": "stuck point (Time offset): mruby-time's Time has only UTC and LOCAL timezones (mrbgems/mruby-time/include/mruby/time.h:15-20; getlocal takes no offset), so a fixed UTC offset from the caller cannot be represented",
     "rb_encoder": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
     "rb_enc_interned_str_cstr": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
-    "rb_marshal_load": "stuck point: the fork has no Marshal (no marshal mrbgem in mrbgems/), so there is no loader to call",
-    "rb_define_alloc_func": "stuck point (per-class allocator): the fork has only the global allocf, no per-class allocator (accepted stuck point)"
+    "rb_marshal_load": "stuck point: the fork has no Marshal (no marshal mrbgem in mrbgems/), so there is no loader to call"
   },
   "includes": {
     "ruby.h": {
@@ -2552,6 +2551,18 @@
       "needs_mrb": true,
       "caveat": "appends the NUL-terminated bytes; returns the string, as CRuby"
     },
+    "rb_define_alloc_func": {
+    "kind": "template",
+    "arity": 2,
+    "needs_mrb": true,
+    "class_args": [
+      0
+    ],
+    "template": "nfcx_alloc_register($m, $0, $1)",
+    "prelude_name": "nfcx_alloc",
+    "prelude": "/* BC2CPP-MRBGEM: a per-class allocator (rb_define_alloc_func). The fork has one global allocator, so the class's allocate\n   and new are singleton methods that call the allocator registered for the class (or for a superclass). new is allocate\n   followed by initialize with the same arguments and block, as Class#new. */\ntypedef mrb_value (*nfcx_alloc_fn)(mrb_state *, mrb_value);\nstatic struct { struct RClass *c; nfcx_alloc_fn f; } nfcx_alloc_tab[64];\nstatic int nfcx_alloc_n = 0;\nstatic nfcx_alloc_fn\nnfcx_alloc_for(struct RClass *c)\n{\n  for (; c; c = c->super) {\n    int i;\n    for (i = 0; i < nfcx_alloc_n; i++) {\n      if (nfcx_alloc_tab[i].c == c) return nfcx_alloc_tab[i].f;\n    }\n  }\n  return NULL;\n}\nstatic mrb_value\nnfcx_alloc_allocate(mrb_state *mrb, mrb_value self)\n{\n  nfcx_alloc_fn f = nfcx_alloc_for(mrb_class_ptr(self));\n  if (f == NULL) mrb_raise(mrb, E_RUNTIME_ERROR, \"no allocator for this class\");\n  return f(mrb, self);\n}\nstatic mrb_value\nnfcx_alloc_new(mrb_state *mrb, mrb_value self)\n{\n  mrb_value obj = nfcx_alloc_allocate(mrb, self);\n  mrb_value *argv;\n  mrb_int argc;\n  mrb_value blk;\n  mrb_get_args(mrb, \"*&\", &argv, &argc, &blk);\n  mrb_funcall_with_block(mrb, obj, mrb_intern_lit(mrb, \"initialize\"), argc, argv, blk);\n  return obj;\n}\nstatic void\nnfcx_alloc_register(mrb_state *mrb, struct RClass *c, nfcx_alloc_fn f)\n{\n  if (nfcx_alloc_n >= 64) mrb_raise(mrb, E_RUNTIME_ERROR, \"too many allocators\");\n  nfcx_alloc_tab[nfcx_alloc_n].c = c;\n  nfcx_alloc_tab[nfcx_alloc_n].f = f;\n  nfcx_alloc_n++;\n  mrb_define_class_method(mrb, c, \"allocate\", nfcx_alloc_allocate, MRB_ARGS_NONE());\n  mrb_define_class_method(mrb, c, \"new\", nfcx_alloc_new, MRB_ARGS_ANY());\n}",
+    "caveat": "the allocator becomes the class's allocate and new (singleton methods, see the prelude); a subclass uses its superclass's allocator"
+  },
     "rb_undef_alloc_func": {
       "kind": "template",
       "arity": 1,
