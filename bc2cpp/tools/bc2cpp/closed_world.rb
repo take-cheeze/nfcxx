@@ -1611,7 +1611,8 @@ class ClosedWorld
       tokens: tokens.to_a,
       supers: supers,
       touch: touch,
-      clone_sent: text.match?(/\bclone\b/),
+      # A full-line comment sends nothing; any other spelling (code or a string) counts.
+      clone_sent: text.gsub(/^[ \t]*#.*$/, '').match?(/\bclone\b/),
       freeze_possible: !core && text.match?(/\bfreeze\b/),
       singleton_maker: !core && text.match?(RUBY_SINGLETON),
       constant_writes: text.scan(/\b(?:[A-Z]\w*::)*([A-Z]\w*)\s*=(?!=|>)/).map(&:first),

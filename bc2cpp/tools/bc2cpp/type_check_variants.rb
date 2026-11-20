@@ -51,8 +51,10 @@ module TypeCheckVariants
       end
     end
 
+    # The lists are only read with include? here (not passed to Array#- on ENV's answer), so a self-compiled bc2cpp's
+    # closed world can prove the :clone in UNGUARDED is never sent (CLONE_SYMBOL_PROOF).
     def self.uncovered
-      ENV.singleton_methods - KEYED - BULK - UNGUARDED
+      ENV.singleton_methods.reject { |m| KEYED.include?(m) || BULK.include?(m) || UNGUARDED.include?(m) }
     end
   end
 
