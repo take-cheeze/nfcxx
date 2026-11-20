@@ -1709,6 +1709,18 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_value_order tools/cext2mrbge
 check test "$rc" -eq 0
 check test ! -e "$work/api_value_order/NOT_BUILDABLE"
 check grep -qF 'return mrb_value_addr(a) < mrb_value_addr(b);' "$work/api_value_order/src/api_value_order.c"
+# 2zzz163. Bignum conversions map to the fork's bigint helpers (mrb_bint_as_int64, as_uint64, new_uint64, absint_size, sign,
+# bint_cmp); none of them is a stuck point any more.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_bignum tools/cext2mrbgem/fixtures/api_bignum/ext/api_bignum "$work/api_bignum" > "$work/api_bignum.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_bint_as_int64(mrb, ' "$work/api_bignum/src/api_bignum.c"
+check grep -qF 'mrb_bint_as_uint64(mrb, ' "$work/api_bignum/src/api_bignum.c"
+check grep -qF 'mrb_bint_new_uint64(mrb, (uint64_t)' "$work/api_bignum/src/api_bignum.c"
+check grep -qF 'mrb_bint_absint_size(mrb, ' "$work/api_bignum/src/api_bignum.c"
+check grep -qF 'mrb_fixnum_value(mrb_bint_cmp(mrb, ' "$work/api_bignum/src/api_bignum.c"
+check grep -qF '(mrb_bint_sign(mrb, ' "$work/api_bignum/src/api_bignum.c"
+check test "$(grep -c 'stuck point' "$work/api_bignum/REFUSALS.txt" 2>/dev/null)" -eq 0
+
 # 2zzz155. a struct field of CRuby's rb_encoding * type: the Encoding placeholder type is in the prelude (the declaration compiles),
 # and the include of ruby/encoding.h is not a blocking refusal (the placeholder covers it).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rb_encoding_field tools/cext2mrbgem/fixtures/api_rb_encoding_field/ext/api_rb_encoding_field "$work/api_rb_encoding_field" > "$work/api_rb_encoding_field.log" 2>&1 || rc=$?
