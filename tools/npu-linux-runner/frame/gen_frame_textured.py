@@ -8,7 +8,7 @@ interpolation field to match nr_native_check for native 39.
 The texture is 128x128 opaque RGBA in an atlas window. The quad maps uv (pixel centre)/128, so each covered
 pixel should return the texel at its own position. Commands use blend mode 0 (copy).
 
-usage: gen_frame_textured.py <ptl_kernels dir> <out dir> [seed] [draws] [--full-tile] [--vector]
+usage: gen_frame_textured.py <ptl_kernels dir> <out dir> [seed] [draws] [--full-tile] [--vector] [--sampler]
 """
 import pathlib
 import re
@@ -23,6 +23,7 @@ from gen_frame_quad import signature, solve_interpolation  # noqa: E402
 from gen_frame_fill import inline  # noqa: E402
 from flat_dispatch import flatten  # noqa: E402
 from vector_lower import vector_lower  # noqa: E402
+from sampler_lower import lower_sampler  # noqa: E402
 
 NATIVE = 39
 TEX = 128
@@ -146,6 +147,8 @@ def main():
     src = (src_dir / "frame_programs.h").read_text()
     core = inline(src_dir / "frame_core.h")
     lowered = flatten(core)
+    if "--sampler" in sys.argv:
+        lowered = lower_sampler(lowered)  # block fast path for nr_sample (see sampler_lower.py)
     if "--vector" in sys.argv:
         lowered = vector_lower(lowered)   # ext-vector four-lane helpers (see vector_lower.py)
     (out / "frame_fill_entry.c").write_text(lowered + ENTRY)

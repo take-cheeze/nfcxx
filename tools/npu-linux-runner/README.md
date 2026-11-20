@@ -182,3 +182,23 @@ Vector lowering of the four-lane helpers (`frame/vector_lower.py`) changes the t
 within noise, so the helpers are not where the time goes. The sampler (`nr_sample`, bilinear with four texel
 fetches) and the blend are the candidates for lowering work. The ablation builds do not produce correct
 pixels; only their timings are meaningful.
+
+## Sampler lowering
+
+`frame/sampler_lower.py` (`--sampler` in `gen_frame_textured.py`) gives `nr_sample` a block fast path: when the
+four bilinear taps lie in the first window, one bounds check covers them and the four addresses are offsets from
+one base. It is bit-identical (the tap addresses and escape counts do not change), and the four-tap batch
+passes the exact texel check.
+
+Four full-tile textured draws (p50, sequential runs):
+
+| build | p50 (ms) |
+| --- | --- |
+| flat dispatch | 42.06 |
+| flat dispatch + sampler block path | 41.60 |
+| sampler replaced by a constant return (ablation, not correct) | 31.08 |
+
+The bounds checks are not the cost: the block path gains about 1 %. The taps cost about 10.5 ms of the
+41.6 ms (about a quarter), mostly the loads, unpacking and float conversions per texel, which the block path
+keeps. The blend is about 15 ms and the remaining row maths and rasterisation about 16 ms. The next lowering
+candidates are the per-texel conversion (convert the four texels as one block) and the blend.
