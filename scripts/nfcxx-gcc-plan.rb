@@ -216,6 +216,17 @@ class LiveFacts < Facts
     @cwd
   end
 
+  # cuda-cub PATH: scripts/cuda-cub.rb's output (built when stale), as the bash's $(cuda-cub). A failure is no value, so the
+  # link goes without the archive (the bash's behaviour). Read on demand: only a link that names -lcudart asks for it.
+  def value(key)
+    return super unless key == "cuda-cub"
+
+    out, status = Open3.capture2(File.join(@root, "scripts", "cuda-cub.rb"))
+    status.success? ? out.chomp : nil
+  rescue SystemCallError
+    nil
+  end
+
   # the file a plan path names on this machine: ROOT is the repository, a relative path is in the working directory
   def real(path)
     return @root if path == ROOT

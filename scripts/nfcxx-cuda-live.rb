@@ -247,6 +247,10 @@ def run_compile(argv, env, output)
     kernels = kernels_of(File.join(tmp, "#{File.basename(src, ".cu")}.dev.kernels"))
     stage_done("prep", env, " (#{kernels.size} kernels)")
     return 0 if env["NFCXX_CUDA_LIVE_STOP"] == "prep"
+    # the bash's second pass (scripts/nfcxx-second-pass.rb): kernel instances the device unit leaves unresolved are the host
+    # compile's, and this route does not build them; the bash does
+    unresolved = File.join(tmp, "#{File.basename(src, ".cu")}.dev.kernels.unresolved")
+    fallback!("the unit has kernel instances only the host compile makes (the bash's second pass)") if File.size?(unresolved)
     unless kernels.empty?
       _, emit = device_lines(env, args, tmp, :emit, kernels: kernels)
       status = run_plan(emit.join("\n") + "\n", tmp, exports, "emit", output)
