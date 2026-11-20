@@ -142,3 +142,16 @@ mruby interpreter. Every answer matched. The interpreter baseline copies retaine
 same scan-region compatibility issue, so this compares two correct implementations; it is not a whole-compiler
 runtime speedup claim. Scope checks also cover UTF-8 prefixes, interleaved queries into different functions,
 out-of-function positions and both definition-only and lookup policies sharing one header index.
+
+## Rescue-aware writer walks
+
+Writer queries with arbitrary barrier predicates still inspect every instruction. Three hot callers whose
+predicates only reject RESCUE can now declare that opcode: the walk merges leading-register writer positions
+with RESCUE positions, including its second-register write, and skips unrelated instructions.
+
+On 396,194 queries captured from real self-compilation bytecode, alternating warm primitive measurements fell
+from about 0.559 to 0.241 seconds CPU, with identical answers. The differential fixture covers 29,952 combinations
+of barriers, MOVE chains and budgets, skipped opcodes, missing registers, exhausted callbacks and traversal order.
+All 20 generated artifacts also match byte-for-byte on the frozen self-compilation graph. The full replays ran
+under different external load and do not establish a whole-generation speedup. The walker remains a VM fallback
+in the current self image; this change improves its algorithm rather than changing its translation status.
