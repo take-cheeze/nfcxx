@@ -325,6 +325,80 @@ fi
 # and .cpp2 inputs are prepared, whose stages it records.
 trace_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-trace-unit.rb" plan srcs0_set="$([ -n "${srcs[0]+x}" ] && echo 1 || echo 0)" srcs0="${srcs[0]-}" out="$out") || exit $?
 eval "$trace_sh"   # trace_unit, and its export NFCXX_TRACE_UNIT: the back-end scripts it runs log under it too (scripts/nfcxx-trace-unit.rb)
+# The gcc route as a plan (scripts/nfcxx-gcc-plan.rb --shell: the planner's header has the contract). The planner plans this route
+# for these arguments and this machine; its lines run here, the placeholders replaced as the contract says (ROOT, WORK, TMP,
+# ECCP, RUBY, ENTRY). UNPORTED (status 3) leaves the route to the bash below, which is the fallback for every case the plan
+# does not cover. A status other than 0, 2 or 3 is also the bash's (the planner did not finish).
+nfcxx_plan_subst() {  # nfcxx_plan_subst WORD: the placeholders of WORD replaced, in nfcxx_plan_w
+  nfcxx_plan_w=$1
+  nfcxx_plan_w=${nfcxx_plan_w//@@NFCXX_ROOT@@/$root}; nfcxx_plan_w=${nfcxx_plan_w//@@NFCXX_WORK@@/$PWD}
+  nfcxx_plan_w=${nfcxx_plan_w//@@NFCXX_TMP@@/${nfcxx_plan_tmp:-}}; nfcxx_plan_w=${nfcxx_plan_w//@@NFCXX_ECCP@@/${nfcxx_plan_eccp:-}}
+  nfcxx_plan_w=${nfcxx_plan_w//@@NFCXX_RUBY@@/${RUBY:-ruby}}; nfcxx_plan_w=${nfcxx_plan_w//@@NFCXX_ENTRY@@/${cache_entry:-}}
+}
+nfcxx_plan_exit() {  # the EXIT trap of the plan: the link's cleanup (eccp_cleanup's words), then the plan's temporary directory
+  local rc=$? w a=()
+  for w in ${nfcxx_plan_exit_raw[@]+"${nfcxx_plan_exit_raw[@]}"}; do nfcxx_plan_subst "$w"; a+=("$nfcxx_plan_w"); done
+  [ ${#a[@]} -eq 0 ] || "${a[@]}" || true
+  trace_finish
+  [ -z "${nfcxx_plan_tmp:-}" ] || rm -rf "$nfcxx_plan_tmp"
+  return $rc
+}
+nfcxx_plan_run() {  # nfcxx_plan_run: runs the plan in nfcxx_plan, then exits with its status (0, or 2 after its lines)
+  local i k n kind pos=0 u w cwd="" rc=0 words=()
+  nfcxx_plan_tmp=""; nfcxx_plan_eccp=""; cache_entry=""; nfcxx_plan_exit_raw=()
+  eval "$nfcxx_plan"
+  # the backend's compiler (NFCXX_CC, for eccp's C step and the cache key): the setup's export, as the bash makes it
+  eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-backend-env.rb" plan backend=gcc freestanding=0 pb_fs_host=0 root="$root")" || exit $?
+  for u in ${nfcxx_plan_uses[@]+"${nfcxx_plan_uses[@]}"}; do
+    case $u in
+      TMP) nfcxx_plan_tmp=$(mktemp -d) ;;
+      ECCP) nfcxx_plan_eccp=$(mktemp -d) ;;
+    esac
+  done
+  # the EXIT command is found first: a cache hit ends the driver before the link runs, and the trap still removes the directory
+  for ((i = 0, pos = 0; i < ${#nfcxx_plan_kinds[@]}; i++)); do
+    n=${nfcxx_plan_nwords[i]}
+    if [ "${nfcxx_plan_kinds[i]}" = EXIT ]; then nfcxx_plan_exit_raw=("${nfcxx_plan_words[@]:pos:n}"); fi
+    pos=$((pos + n))
+  done
+  trap nfcxx_plan_exit EXIT
+  for ((i = 0, pos = 0; i < ${#nfcxx_plan_kinds[@]}; i++)); do
+    kind=${nfcxx_plan_kinds[i]}; n=${nfcxx_plan_nwords[i]}; words=()
+    for ((k = 0; k < n; k++)); do nfcxx_plan_subst "${nfcxx_plan_words[pos + k]}"; words+=("$nfcxx_plan_w"); done
+    pos=$((pos + n))
+    case $kind in
+      CD) cwd=${words[0]} ;;
+      ENV) export "${words[0]}" ;;
+      RUN)
+        # a CD before it: the program runs in that directory, in a subshell (the bash's eccp subshell)
+        if [ -n "$cwd" ]; then (cd "$cwd" && "${words[@]}") || exit $?; cwd=""
+        else "${words[@]}" || exit $?; fi ;;
+      CP) cp "${words[0]}" "${words[1]}" || exit $? ;;
+      EXEC) exec "${words[@]}" ;;
+      NOTE) printf '%s\n' "${words[0]}" >&2 ;;
+      CHECK)
+        # the cache lookup (cache_check): a hit (status 10) is copied back and the driver is done; a lookup (status 0) sets the
+        # entry from the statements file; any other status leaves the cache off
+        rc=0; "${words[@]}" || rc=$?
+        if [ "$rc" = 10 ]; then exit 0; fi
+        if [ "$rc" = 0 ]; then . "$nfcxx_plan_tmp/cc"; else cache_entry=""; fi ;;
+      STORE) if [ -n "$cache_entry" ]; then "${words[@]}" || true; fi ;;
+      EXIT) ;;
+      *) echo "nfcxx: unknown plan command $kind" >&2; exit 1 ;;
+    esac
+  done
+  [ -z "$nfcxx_plan_msg" ] || printf '%s\n' "$nfcxx_plan_msg" >&2
+  exit "$nfcxx_plan_status"
+}
+# The planner runs here: after the loop, the SYCL pre-pass and the trace unit's export (the bash's NFCXX_TRACE_UNIT, which the
+# plan's environment has as the bash does), and before the setup exports the EDG and backend variables. The planner refuses the
+# NFCXX_* variables it does not model, and those exports come after it.
+if [ "$backend" = gcc ]; then
+  nfcxx_plan_err=$(mktemp); nfcxx_plan_rc=0
+  nfcxx_plan=$("${RUBY:-ruby}" "$root/scripts/nfcxx-gcc-plan.rb" --shell --live="$root" ${nfcxx_argv[@]+"${nfcxx_argv[@]}"} 2>"$nfcxx_plan_err") || nfcxx_plan_rc=$?
+  nfcxx_plan_msg=$(cat "$nfcxx_plan_err"); rm -f "$nfcxx_plan_err"
+  if [ "$nfcxx_plan_rc" = 0 ] || [ "$nfcxx_plan_rc" = 2 ]; then nfcxx_plan_run; fi
+fi
 # The time log is read by every script that sources scripts/trace.sh (the gcc-cc that eccp runs, ...): the one setting that is
 # handed to the processes below as an environment variable, as NFCXX_TRACE is (trace_begin).
 tl_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-time-log.rb" plan time_log="$time_log") || exit $?   # NFCXX_TIME_LOG (scripts/nfcxx-time-log.rb)

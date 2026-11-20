@@ -14,26 +14,48 @@
 # nothing runs, and the reason is on stderr as "unported: ...").
 #
 # prints the commands the bash runs for ARG..., one per line, then "STATUS n" (the exit status the bash ends with):
-#   RUN PROGRAM ARG...     a program the driver runs (gcc, g++, cp's CP below, the EDG driver as ROOT/build/edg/bin/eccp)
+#   RUN PROGRAM ARG...     a program the driver runs (gcc, g++, cp's CP below, the EDG driver as ROOT/build/edg/bin/eccp, the
+#                          helpers ruby ROOT/scripts/nfcxx-link.rb ...)
 #   EXEC PROGRAM ARG...    the program replaces nfcxx (-E: exec g++ -E)
 #   CP SRC DST             a copy (the objects of a C-only -c)
 #   ENV NAME=VALUE         a variable the bash exports, for the programs that follow (EDG_CPFE_DEFAULT_OPTIONS for the GNU or
 #                          clang version, EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS for -shared)
-# ROOT stands for the repository and WORK for the working directory; TMP for a temporary directory (mktemp -d).
+#   CD DIR                 the next RUN runs in DIR (the bash's eccp subshell, cd'ed to its temporary directory on a link)
+#   NOTE TEXT              a line for standard error, in order (the --keep-intermediates note of the kept directory)
+#   CHECK PROGRAM ARG...   the cache lookup (scripts/nfcxx-cache-check.rb check, with --statements=TMP/cc): status 10 is a hit
+#                          that was copied back, and the driver ends with 0; status 0 sets the cache entry from the statements
+#                          file; any other status leaves the cache off
+#   STORE PROGRAM ARG...   the cache store (scripts/nfcxx-cache-check.rb store, --entry=ENTRY): run only when the lookup set an
+#                          entry (the bash's cache_store)
+#   EXIT PROGRAM ARG...    the command of a link's exit trap (scripts/nfcxx-link.rb cleanup): run when the driver exits, however
+#                          it exits (the bash's eccp_cleanup); its words are the last line of the plan
+#
+# The substitution contract (--shell only; the default form prints the names in brackets): every word holds placeholders, each
+# a whole token that the driver replaces, with bash parameter expansion, as nfcxx's fso_argv does for @@NFCXX_FSO_TMP@@:
+#   @@NFCXX_ROOT@@    the repository (the driver's $root)                       ROOT
+#   @@NFCXX_WORK@@    the working directory (the driver's $PWD)                 WORK
+#   @@NFCXX_TMP@@     a temporary directory the driver makes with mktemp -d     TMP (C objects, the -fsyntax-only object, cc)
+#   @@NFCXX_ECCP@@    the directory eccp runs in (a link), made the same way    TMP (kept on exit with --keep-intermediates)
+#   @@NFCXX_RUBY@@    ${RUBY:-ruby}                                            ruby
+#   @@NFCXX_ENTRY@@   the cache entry the lookup set (cache_entry)              ENTRY
+# nfcxx_plan_uses=(TMP ECCP) names the temporary directories the plan uses (each made once, removed on exit: TMP always, ECCP
+# unless nfcxx_plan_keep=1). The real paths of abs_path are in the words already (a link's include names are resolved here).
 # An argument list outside the gcc backend (Path B by default, cosmo, the CUDA inputs, a cache lookup, modules, cppfront,
 # freestanding, ...) exits 3 with "unported: ..." on stderr and prints nothing. A refusal the bash makes (status 2) prints
 # the lines before it, then its status.
 #
 # Modelled here: -fsyntax-only (the re-run as -c -o TMP/x.o, as nfcxx-loop.rb's
 # syntax_only_plan has it; -E execs g++ -E), --cuda-driver= and a link that names libcuda (the re-run of
-# scripts/wrap.rb, or its note, or its error), and --cache=DIR when the compile is not one a cache lookup
-# keys (a link, several sources, -MD, an -o without an extension). A -c of one source with --cache is unported: its key
-# hashes the scripts and binaries.
+# scripts/wrap.rb, or its note, or its error), and --cache=DIR for every compile and link of the gcc route: the lookup (CHECK)
+# and the store (STORE) are commands of the plan, and the key is the lookup's own (scripts/nfcxx-cache-check.rb), so nothing
+# of the key is planned here. --keep-intermediates: the note (NOTE) and the kept directory (nfcxx_plan_keep).
 #
 # --shell (the driver's form): the same plan as shell statements, every value escaped with Shellwords, for the driver to eval:
 #   nfcxx_plan_state=PLAN           the plan follows (the state is UNPORTED alone when the plan is unported: exit 3)
 #   nfcxx_plan_status=N             the exit status the bash ends with (0, or 2 for a refusal, with the lines before it)
-#   nfcxx_plan_kinds=(KIND...)      one per command: RUN, EXEC, CP or ENV (the kinds as above)
+#   nfcxx_plan_keep=0|1             --keep-intermediates: the ECCP directory is kept on exit
+#   nfcxx_plan_uses=(NAME...)       the temporary directories the plan uses (TMP, ECCP: see the placeholders above)
+#   nfcxx_plan_kinds=(KIND...)      one per command: RUN, EXEC, CP, ENV, CD, NOTE, CHECK, STORE or EXIT (the kinds as above)
 #   nfcxx_plan_nwords=(N...)        the number of words of each command, the program and its arguments (ENV: one word)
 #   nfcxx_plan_words=(WORD...)      the words of all the commands, in order (the command i takes nwords[i] of them)
 # An UNPORTED plan prints only "nfcxx_plan_state=UNPORTED" on standard output (and exits 3), so an eval never reads an empty
@@ -73,6 +95,7 @@ require "open3"
 require "pathname"
 require "shellwords"
 require_relative "nfcxx-linkargs"
+require_relative "nfcxx-depmode"
 
 class NfcxxUnported < StandardError
 end
@@ -90,11 +113,21 @@ class NfcxxExit < StandardError
   end
 end
 
-ROOT = "ROOT".freeze
-CWD = "WORK".freeze
-ECCP = "ROOT/build/edg/bin/eccp".freeze
-LIBC = "ROOT/build/edg/lib/libC.a".freeze
-EH_UNWIND_HEADER = "ROOT/lib/ehshim/nfcxx_eh_unwind.h".freeze
+# The placeholders of a plan (the substitution contract, see the --shell form above). Each is a whole token, so the driver
+# replaces it with a bash parameter expansion, as nfcxx's fso_argv does with @@NFCXX_FSO_TMP@@.
+ROOT = "@@NFCXX_ROOT@@".freeze        # the repository: the driver's $root
+CWD = "@@NFCXX_WORK@@".freeze        # the working directory: the driver's $PWD
+TMP = "@@NFCXX_TMP@@".freeze         # a mktemp -d the driver makes for the plan (C objects, the -fsyntax-only object, the statements)
+ECCP_DIR = "@@NFCXX_ECCP@@".freeze   # the mktemp -d eccp runs in (a link); kept with --keep-intermediates
+RUBY_PROG = "@@NFCXX_RUBY@@".freeze  # ${RUBY:-ruby}
+ENTRY = "@@NFCXX_ENTRY@@".freeze     # the cache entry a lookup set (cache_entry), for the store
+# the words of the plan's default form show these names for the placeholders (the tests compare with them)
+DISPLAY = { ROOT => "ROOT", CWD => "WORK", TMP => "TMP", ECCP_DIR => "TMP", RUBY_PROG => "ruby", ENTRY => "ENTRY" }.freeze
+ECCP = "#{ROOT}/build/edg/bin/eccp".freeze
+LIBC = "#{ROOT}/build/edg/lib/libC.a".freeze
+EH_UNWIND_HEADER = "#{ROOT}/lib/ehshim/nfcxx_eh_unwind.h".freeze
+NLINK = "#{ROOT}/scripts/nfcxx-link.rb".freeze
+NCACHE = "#{ROOT}/scripts/nfcxx-cache-check.rb".freeze
 
 # The facts the bash reads from the machine (see the header).
 class Facts
@@ -168,9 +201,19 @@ class Facts
     value(key) == "1"
   end
 
-  # the working directory as the plan names it (WORK, the placeholder, for a file of the facts)
+  # the working directory as the plan names it (the placeholder, for the words of the plan)
   def cwd_name
     CWD
+  end
+
+  # the working directory as the cache key reads it (the bash's $PWD): "WORK" for a facts file
+  def real_cwd
+    "WORK"
+  end
+
+  # the real directory of DIR (realpath in the bash's abs_path): the work directory's placeholder for a relative name
+  def real_dir(dir)
+    normalize(dir.start_with?("/") ? dir : File.join(CWD, dir))
   end
 
   # ld.NAME is on PATH (the -fuse-ld= names)
@@ -237,7 +280,18 @@ class LiveFacts < Facts
   end
 
   def cwd_name
-    @cwd
+    CWD
+  end
+
+  # the bash's $PWD (a logical name, as the bash keeps it): the cache key takes it
+  def real_cwd
+    ENV.fetch("PWD", @cwd)
+  end
+
+  # realpath of DIR: the physical name the bash's abs_path gives (a relative name is in the working directory; a placeholder
+  # names the repository)
+  def real_dir(dir)
+    File.realpath(real(dir))
   end
 
   # cuda-cub PATH: scripts/cuda-cub.rb's output (built when stale), as the bash's $(cuda-cub). A failure is no value, so the
@@ -429,17 +483,22 @@ PLAN_ENV = %w[NFCXX_LD NFCXX_DIALECT NFCXX_BACKEND].freeze
 
 # Whether the plan is unported for the environment variable NAME with VALUE (the live environment, or an env line of the
 # facts): NFCXX_BACKEND only as gcc (Path B and any other name are unported, as before), the PLAN_ENV names otherwise, and
-# NFCXX_DRIVER_TRACE (the CRuby driver's own switch, scripts/nfcxx.rb; the bash does not read it) are not refused. Any other
-# NFCXX_* variable, and CUDA_HOME and the EDG variables, are refused.
+# NFCXX_DRIVER_TRACE (the CRuby driver's own switch, scripts/nfcxx.rb; the bash does not read it) are not refused. Nor is
+# NFCXX_TRACE_UNIT, which the bash exports itself before the gcc route (the trace unit's name): the plan traces nothing unless
+# NFCXX_TRACE is set, and that one is refused. Any other NFCXX_* variable, and CUDA_HOME and the EDG variables, are refused.
 def env_refused?(name, value)
   return value != "gcc" if name == "NFCXX_BACKEND"
-  return false if PLAN_ENV.include?(name) || name == "NFCXX_DRIVER_TRACE"
+  return false if PLAN_ENV.include?(name) || %w[NFCXX_DRIVER_TRACE NFCXX_TRACE_UNIT].include?(name)
 
   name.start_with?("NFCXX_") || %w[CUDA_HOME EDG_BUILD EDG_CPFE_DEFAULT_OPTIONS EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS].include?(name)
 end
 
 class Plan
   attr_reader :lines
+
+  def keep?
+    @keep
+  end
 
   # lines: the output (a nested run, the -fsyntax-only or --cuda-driver= re-run, appends to it); env_mode: the mode of
   # NFCXX_CUDA_DRIVER for this run ("libcuda" for the run the wrap execs, which has the mode in its environment)
@@ -448,8 +507,11 @@ class Plan
     @lines = lines
     @env_mode = env_mode
     @cache_dir = ""
+    @cache_log = ""
+    @keep = false
     @std = "--c++23"
     @out = "a.out"
+    @argv = []
     @outset = false
     @dialect = facts.flag?("cxx-clang") ? "clang" : "g++"
     @backend = ""
@@ -525,11 +587,12 @@ class Plan
         unported(a)
       elsif a == "--backend=pathb" then unported("--backend=pathb (Path B)")
       elsif a.start_with?("--backend=") then @backend = a[10..]; @backend_explicit = true
-      elsif a == "--keep-intermediates" || a == "--no-eh-unwind" then nil
+      elsif a == "--keep-intermediates" then @keep = true
+      elsif a == "--no-eh-unwind" then nil
       elsif a == "--eh-unwind" then @eh_unwind_on = true
       elsif a == "--no-eh-shim" then @eh_shim_on = false
       elsif a.start_with?("--cache=") then @cache_dir = a[8..]
-      elsif a.start_with?("--cache-log=") then nil
+      elsif a.start_with?("--cache-log=") then @cache_log = a[12..]
       elsif a.start_with?("--instantiate=") then @instantiate = a[14..]
       # the CUDA device code's options (not in a hosted plan), and the module directory (read only for a module source,
       # which run refuses)
@@ -613,6 +676,7 @@ class Plan
   end
 
   def run(args)
+    @argv = args
     return syntax_only(args) if args.include?("-fsyntax-only")
 
     kind, argv = cuda_driver_step(args)
@@ -640,11 +704,6 @@ class Plan
     sanitize_checks
 
     select_backend
-    # a -c of one source with -o and an extension is looked up in the object cache (the key is not modelled)
-    if !@cache_dir.empty? && @compile_only && @ncpp == 1 && @outset && @nobj == 0 && @cfiles.empty? && @depmode.empty? &&
-       @out.include?(".")
-      unported("--cache of a -c compile: its key hashes the scripts, the binaries and the host compilers")
-    end
     @moves = !@compile_only
     asan_c = @asan ? ["-fsanitize=address", "-fno-omit-frame-pointer", *@asanopts] : []
     @asanopts = [] unless @asan
@@ -671,6 +730,10 @@ class Plan
       eh_unwind += ["--nfcxx_eh_unwind", "--c_to_obj_option", "-fexceptions", "--c_to_obj_option", "-include",
                     "--c_to_obj_option", EH_UNWIND_HEADER]
     end
+    # the bash's order of the eccp route: the note of a kept directory (eccp_plan), the records of the sources (compile_clean),
+    # the records of the link (link_records_rm), the cache lookup, then the eccp call in its directory with its exports, the
+    # records again, the cache store and the dependency file (-MD)
+    lk = nil
     if @shared
       lk = ["-shared"]
       prev = nil
@@ -678,7 +741,6 @@ class Plan
         lk << a if prev == "--c_to_obj_option" && (a.start_with?("-Wl,", "-fuse-ld=") || a == "-pthread" || a == "-rdynamic")
         prev = a
       end
-      emit("ENV", "EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS=#{lk.join(" ")}")
     end
     # -c without -o: the object is <stem>.o, as for C and .cu inputs; eccp makes one object per call
     out = @out
@@ -686,16 +748,27 @@ class Plan
       raise NfcxxExit.new("nfcxx: -c with several sources needs -o (one object is made per call)", 2) if @srcs.length > 1
       out = "#{File.basename(@srcs[0], ".*")}.o"
     end
+    @out = out
     # the bash exports EDG_CPFE_DEFAULT_OPTIONS (the GNU or clang version) before it runs the EDG driver
     cpfe = if @dialect == "clang" then @facts.value("clang-version") && ["--clang_version=#{@facts.value("clang-version")}"]
            else @facts.value("gnu-version") && ["--gnu_version=#{@facts.value("gnu-version")}"]
            end
+    emit("NOTE", "nfcxx: intermediates kept in #{ECCP_DIR} (--keep-intermediates)") if @moves && @keep
+    emit("RUN", RUBY_PROG, NLINK, "compile-clean", out, *@srcs) if @compile_only && @ncpp > 0
+    emit("RUN", RUBY_PROG, NLINK, "records-rm", "--", *link_files)
+    emit("CHECK", RUBY_PROG, NCACHE, "check", "--statements=#{TMP}/cc", *cache_opts(out)) unless @cache_dir.empty?
+    emit("ENV", "EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS=#{lk.join(" ")}") if lk
     emit("ENV", "EDG_CPFE_DEFAULT_OPTIONS=#{cpfe.join(" ")} ") if cpfe && !cpfe.empty?
+    emit("CD", ECCP_DIR) if @moves
     emit("RUN", ECCP, @std, "--#{@dialect}", "--wdir", "/", *inst_opts, *@diag_opts, *userinc, *sys_inc, *hosted_libs,
          "--c_to_obj_option", "-O2", "--c_to_obj_option", "-fwrapv", "--c_to_obj_option", "-fno-strict-aliasing",
          *keep_static, *eh_unwind, "--c_to_obj_option", "-fgnu89-inline", *picopts, *cobjs, *pre_opts, *eflist,
          *shim, *vlart, *rtlib, "-o", ecp_arg(out))
+    emit("RUN", RUBY_PROG, NLINK, "records-rm", "--", *link_files)
+    emit("STORE", RUBY_PROG, NCACHE, "store", "--out=#{out}", "--entry=#{ENTRY}") unless @cache_dir.empty?
     depend_step unless @depmode.empty?
+    # a link's exit trap (eccp_cleanup): the eccp directory (kept with --keep-intermediates) and the C objects' directory
+    emit_exit
     nil
   end
 
@@ -743,16 +816,17 @@ class Plan
     end
   end
 
-  # abs_path: the absolute name when the directory of the path exists (the path itself need not)
+  # abs_path (scripts/host-sys.rb): the absolute name when the directory of the path exists (the path itself need not): the
+  # directory's real path, then "/" and the base name, so a root-level name is "//NAME" as the bash makes it
   def abs(path)
-    return normalize(path) if path.start_with?("/")
-    return path unless dir_exists?(File.dirname(path))
+    dir = File.dirname(path)
+    return path unless dir_exists?(dir)
 
-    normalize(File.join(@facts.cwd_name, path))
+    "#{@facts.real_dir(dir)}/#{File.basename(path)}"
   end
 
   def dir_exists?(dir)
-    dir == "." || @facts.exists?(dir)
+    dir == "." || @facts.dir?(dir)
   end
 
   def wl_arg(arg)
@@ -842,7 +916,7 @@ class Plan
     return cobjs if @cfiles.empty?
 
     @cfiles.each_with_index do |c, n|
-      o = "TMP/#{n}.o"
+      o = "#{TMP}/#{n}.o"
       emit("RUN", "gcc", "-c", "-O2", "-fwrapv", "-fno-strict-aliasing", *asan_c, *cflags_pic, *@cflags, c, "-o", o)
       cobjs << o
     end
@@ -869,7 +943,18 @@ class Plan
                               dir: ->(d) { @facts.dir?(d) }, cub: -> { @facts.value("cuda-cub").to_s },
                               ecp_arg: ->(a) { ecp_arg(a) })
   rescue NfcxxLinkArgs::Refused => e
+    # the bash sets its exit trap before it plans the link arguments, so a refusal there still runs the cleanup
+    emit_exit
     raise NfcxxExit.new(e.message, 2)
+  end
+
+  # a link's exit trap (the bash's eccp_cleanup, set once the eccp directory is made): the eccp directory (kept with
+  # --keep-intermediates) and the C objects' directory are removed when the driver exits. Emitted once.
+  def emit_exit
+    return unless @moves && !@exit_emitted
+
+    @exit_emitted = true
+    emit("EXIT", RUBY_PROG, NLINK, "cleanup", @keep ? "1" : "0", ECCP_DIR, "", @cfiles.empty? ? "" : TMP)
   end
 
   # the run of nfcxx on ARGV, in the same output (the bash runs it as a new process)
@@ -890,7 +975,7 @@ class Plan
       skip = false
       rest.each do |b|
         if skip
-          replaced << "TMP/x.o"
+          replaced << "#{TMP}/x.o"
           skip = false
           next
         end
@@ -899,7 +984,7 @@ class Plan
       end
       return nested(["-c", *replaced], @env_mode)
     end
-    nested(["-c", *rest, "-o", "TMP/x.o"], @env_mode)
+    nested(["-c", *rest, "-o", "#{TMP}/x.o"], @env_mode)
   end
 
   def libcuda?(arg)
@@ -1013,36 +1098,53 @@ class Plan
     nil
   end
 
-  # -MD/-MMD: the host preprocessor writes the dependency file (after the eccp call)
+  # -MD/-MMD: the host preprocessor writes the dependency file (after the eccp call): the words are scripts/nfcxx-depmode.rb's
+  # (the bash runs the command it plans)
   def depend_step
-    df = @dfile.empty? ? "#{strip_extension(@out)}.d" : @dfile
-    tgt = @dtarget.empty? ? @out : @dtarget
-    mflag = @depmode == "-MMD" ? "-MM" : "-M"
-    args = [mflag]
-    args << @depphony unless @depphony.empty?
-    args += ["-MT", tgt, "-MF", df, "-std=#{@std.delete_prefix("--")}"]
-    args += @cflags + @sysdirs.map { |d| "-isystem#{d}" } + @srcs
-    emit("RUN", "g++", *args)
+    scalars = { "depmode" => @depmode, "out" => @out, "std" => @std, "dfile" => @dfile, "dtarget" => @dtarget,
+                "depphony" => @depphony }
+    arrays = { "cflags" => @cflags, "sysdirs" => @sysdirs, "srcs" => @srcs }
+    emit("RUN", *NfcxxDepmode.words(scalars, arrays))
   end
 
-  # ${out%.*}: the name without its last extension
-  def strip_extension(name)
-    dot = name.rindex(".")
-    slash = name.rindex("/")
-    return name if dot.nil? || (slash && dot < slash)
+  # the cache lookup's options (scripts/nfcxx-setup.rb cache-opts, as the bash reads them back: NUL-terminated words)
+  def cache_opts(out)
+    fields = {
+      "cache_dir" => @cache_dir, "cache_log" => @cache_log, "out" => out, "src" => @srcs[0].to_s, "cwd" => @facts.real_cwd,
+      "backend" => @backend, "compile_only" => @compile_only ? "1" : "0", "ncpp" => @ncpp.to_s, "outset" => @outset ? "1" : "0",
+      "nobj" => @nobj.to_s, "modules" => "0", "preprocess" => "0", "stdin_src" => "0", "depmode" => @depmode,
+      "cfiles_n" => @cfiles.length.to_s, "cu_n" => "0", "cpp2_n" => "0", "std" => @std,
+      "argv" => @argv.join("\x1f"), "cflags" => @cflags.join("\x1f"), "preinc" => @preinc.join("\x1f"),
+      "sysdirs" => @sysdirs.join("\x1f")
+    }
+    out_text, status = Open3.capture2(ENV["RUBY"] || "ruby", File.join(__dir__, "nfcxx-setup.rb"), "cache-opts",
+                                      *fields.map { |k, v| "#{k}=#{v}" })
+    raise NfcxxUnported, "nfcxx-setup.rb cache-opts failed" unless status.success?
 
-    name[0...dot]
+    out_text.split("\0")
   end
 end
 
-# the --shell output (see the header): the plan as statements a bash driver evals; every value is escaped with Shellwords
-def emit_shell(lines, status)
+# the --shell output (see the header): the plan as statements a bash driver evals; every value is escaped with Shellwords. The
+# placeholders stay in the words (the substitution contract): nfcxx_plan_uses names the temporary directories the plan
+# needs (TMP, ECCP: the driver makes each with mktemp -d), and nfcxx_plan_keep is 1 when ECCP is kept on exit.
+def emit_shell(lines, status, keep)
   words = lines.flat_map { |fields| fields.drop(1) }
+  uses = []
+  uses << "TMP" if words.any? { |w| w.include?(TMP) }
+  uses << "ECCP" if words.any? { |w| w.include?(ECCP_DIR) }
   $stdout.write("nfcxx_plan_state=PLAN\n")
   $stdout.write("nfcxx_plan_status=#{status}\n")
+  $stdout.write("nfcxx_plan_keep=#{keep ? 1 : 0}\n")
+  $stdout.write("nfcxx_plan_uses=(#{uses.join(" ")})\n")
   $stdout.write("nfcxx_plan_kinds=(#{lines.map { |fields| Shellwords.escape(fields.first) }.join(" ")})\n")
   $stdout.write("nfcxx_plan_nwords=(#{lines.map { |fields| fields.size - 1 }.join(" ")})\n")
   $stdout.write("nfcxx_plan_words=(#{words.map { |w| Shellwords.escape(w) }.join(" ")})\n")
+end
+
+# the default form's text of a word: the placeholders as the names the tests use
+def display(word)
+  DISPLAY.reduce(word) { |w, (token, name)| w.gsub(token, name) }
 end
 
 def main(argv)
@@ -1064,9 +1166,9 @@ def main(argv)
     status = e.status
   end
   if format == "--shell"
-    emit_shell(plan.lines, status)
+    emit_shell(plan.lines, status, plan.keep?)
   else
-    plan.lines.each { |fields| $stdout.write("#{fields.join(format == "--tabs" ? "\t" : " ")}\n") }
+    plan.lines.each { |fields| $stdout.write("#{fields.map { |w| display(w) }.join(format == "--tabs" ? "\t" : " ")}\n") }
     $stdout.write("STATUS #{status}\n") unless format == "--tabs"  # a plan file (--tabs) holds commands only; the status is the exit status
   end
   status
