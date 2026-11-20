@@ -69,7 +69,9 @@ class CodeGen
       result = with_fresh_method_state { yield }
       clean = !result[:code].include?('#error')
       if cycles == @guard_cycles
-        @clean_cache = @clean_cache.merge(label => clean).freeze
+        unless @clean_cache.key?(label) && @clean_cache[label] == clean
+          @clean_cache = @clean_cache.merge(label => clean).freeze
+        end
       else
         (@cycle_clean_cache ||= {})[label] = clean
         if outermost && @root_clean_cache_facts.equal?(@clean_cache) && ENV['BC2CPP_PROBE_ROOT_CACHE'] != '0'

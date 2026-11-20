@@ -49,6 +49,15 @@ begin
   generator.compiles_clean?(:root)
   raise 'retained an explicitly forgotten answer' unless counts[:root] == 7
 
+  generator, counts = probe_fixture(root: guarded)
+  generator.instance_variable_set(:@clean_cache, { known: true }.freeze)
+  generator.compiles_clean?(:root)
+  facts = generator.instance_variable_get(:@clean_cache)
+  generator.probe_clean(:known) { { code: 'clean' } }
+  raise 'replaced facts with identical contents' unless facts.equal?(generator.instance_variable_get(:@clean_cache))
+  generator.compiles_clean?(:root)
+  raise 'invalidated a root answer without changing facts' unless counts[:root] == 1
+
   handlers = {
     root: lambda do |gen|
       guarded.call(gen)
