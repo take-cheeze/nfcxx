@@ -91,7 +91,6 @@ module RbsRecordTypes
       ensure
         @active.delete(key)
       end
-      debug_unknown(key) if result.nil? && ENV['RFT_DEBUG']
       stored = result.nil? ? UNKNOWN : result
       @changed = true if @read.include?(key) && @assume.fetch(key, EMPTY) != stored
       @assume[key] = stored
@@ -99,12 +98,6 @@ module RbsRecordTypes
     end
 
     private
-
-    def debug_unknown(key)
-      irep = key[0].is_a?(Symbol) ? nil : @ireps[key[0]]
-      insn = irep && BytecodeIR.for(irep).source_at(key[1])
-      warn(insn ? "[rft] #{irep.file}:#{insn.lineno} #{insn.op} #{insn.sym || insn.ivar}" : "[rft] #{key.first(2).inspect}")
-    end
 
     def compute(irep, index, reg, depth)
       base = RbsRecordTypes.value_class_at(irep, index, reg, @ctx)

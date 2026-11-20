@@ -4,8 +4,9 @@
 # RECORD_FIELD_TRACE (rbs_record_values.rb): a declared record field (`@ui: { ?allies: Array }`) is checked against
 # stores whose value is a core block iterator on a traced receiver, a program call whose every definition returns
 # that class, an attr_reader of an ivar every store of which is that class, or a join of those. The checked field is
-# a guarded receiver hint (RECORD_TYPE ... hints). A definition that may return another class, a literal block that
-# `break`s, a native name and a reflected ivar keep TC1009, which aborts the run.
+# a guarded receiver hint (RECORD_TYPE ... hints); recursion is solved as a fixpoint. A definition that may return
+# another class, a literal block that `break`s, a native name, an attr_writer and a store of another class keep
+# TC1009, which aborts the run.
 #
 #   MRBC=path/to/mrbc ruby scripts/bc2cpp/record_field_trace_check.rb
 require 'tmpdir'
@@ -101,13 +102,19 @@ check.call('the record of block-iterator, call-result and joined stores is verif
                                         ':items Array, :skills Array)'))
 warn failure if failure
 
+recursive = BASE + "class Other\n  def battle_items; deep(3); end\n  def deep(n); n > 0 ? deep(n - 1) : []; end\nend\n"
+err, failure = run.call(recursive, SIG)
+check.call('a recursive definition is solved as a fixpoint', failure.nil? && err.include?('hints: :allies Array'))
+
 refused = lambda do |what, source, pattern|
   _, text = run.call(source, SIG)
   check.call(what, text.to_s.include?('TC1009') && text.to_s.match?(pattern))
-  warn text.to_s.lines.grep(/TC1009/).join if ENV['RFT_DEBUG']
 end
 refused.call('a second definition that returns a String keeps TC1009',
              BASE + "class Other\n  def battle_items; ''; end\nend\n",
+             /Scene\#@ui: value of :items is String, declared Array/)
+refused.call('a recursive definition with a String exit keeps TC1009',
+             recursive.sub('deep(n - 1) : []', "deep(n - 1) : ''"),
              /Scene\#@ui: value of :items is String, declared Array/)
 refused.call('a literal block that breaks keeps TC1009',
              BASE.sub('allies = @party.actors.map { |a| a }', 'allies = @party.actors.map { |a| break 1 if a.n > 5; a }'),
