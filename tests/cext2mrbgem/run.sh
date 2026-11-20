@@ -1639,7 +1639,7 @@ check grep -qF 'mrb_symbol(' "$work/api_id_return/src/api_id_return.c"
 # 2zzz151. a refused statement in Init is dropped as a no-op (the user's decision): the gem loads, so gem_init.c has no #error
 # and the statement is recorded as dropped in REFUSALS.txt.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_init_drop tools/cext2mrbgem/fixtures/api_init_drop/ext/api_init_drop "$work/api_init_drop" > "$work/api_init_drop.log" 2>&1 || rc=$?
-check grep -qF 'BC2CPP-MRBGEM dropped in Init (rb_thread_current)' "$work/api_init_drop/src/api_init_drop.c"
+check grep -qF 'BC2CPP-MRBGEM dropped in Init (rb_thread_local_aset)' "$work/api_init_drop/src/api_init_drop.c"
 check test "$(grep -c '#error' "$work/api_init_drop/src/gem_init.c")" -eq 0
 check grep -qF '[dropped in Init' "$work/api_init_drop/REFUSALS.txt"
 check grep -qF 'STATUS: STUBBED' "$work/api_init_drop/REFUSALS.txt"
@@ -1752,6 +1752,14 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_value_identity/NOT_BUILDABLE"
 check grep -qF 'return (mrb_obj_equal(mrb, a, b)) ? mrb_true_value() : mrb_false_value();' "$work/api_value_identity/src/api_value_identity.c"
 check grep -qF 'mrb_value_identical(k ,  mrb_symbol_value(mrb_intern_cstr(mrb, "ordinal")))' "$work/api_value_identity/src/api_value_identity.c"
+# 2zzz168. a mutex (rb_mutex_new, lock, unlock) and the current thread convert to nil and no-ops (one thread in mruby, so the lock
+# never contends); no Thread refusal for them.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_mutex_thread tools/cext2mrbgem/fixtures/api_mutex_thread/ext/api_mutex_thread "$work/api_mutex_thread" > "$work/api_mutex_thread.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_mutex_thread/NOT_BUILDABLE"
+check grep -qF 'mrb_value mu = mrb_nil_value();' "$work/api_mutex_thread/src/api_mutex_thread.c"
+check grep -qF '((void)(mu), mrb_nil_value());' "$work/api_mutex_thread/src/api_mutex_thread.c"
+check test "$(grep -c 'Thread' "$work/api_mutex_thread/REFUSALS.txt")" -eq 0
 # 2zzz155. a struct field of CRuby's rb_encoding * type: the Encoding placeholder type is in the prelude (the declaration compiles),
 # and the include of ruby/encoding.h is not a blocking refusal (the placeholder covers it).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rb_encoding_field tools/cext2mrbgem/fixtures/api_rb_encoding_field/ext/api_rb_encoding_field "$work/api_rb_encoding_field" > "$work/api_rb_encoding_field.log" 2>&1 || rc=$?
