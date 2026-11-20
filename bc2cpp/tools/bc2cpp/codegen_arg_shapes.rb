@@ -164,8 +164,12 @@ module ArgShapeCalls
   end
 
   def pure_mandatory_or_optional_arity?(irep)
+    # An optional-and-block callee qualifies only without named keywords: optional_block_arg_table admits them for
+    # STEP_KEYWORDS, but direct_call_args builds no keyword slots (`each_nested_insn(irep, lookup, depth = 0,
+    # max_depth: nil, &block)` got a direct call two arguments short).
     ok = super || (@extended_callee_shapes &&
-                   (block_only_callee?(irep) || rest_only_callee?(irep) || optional_block_callee?(irep)))
+                   (block_only_callee?(irep) || rest_only_callee?(irep) ||
+                    (optional_block_callee?(irep) && irep.enter.enter_fields[4].zero?)))
     ok && (!(@call_block_expr || takes_block_param?(irep)) || block_transparent_callee?(irep))
   end
 
