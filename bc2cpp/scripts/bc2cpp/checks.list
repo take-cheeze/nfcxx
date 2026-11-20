@@ -251,4 +251,5 @@ ruby scripts/bc2cpp/native_frame_use_check.rb
 ruby scripts/bc2cpp/name_sinks_check.rb
 ruby scripts/bc2cpp/exact_declared_return_check.rb
 ruby scripts/bc2cpp/declared_def_return_check.rb
+ruby scripts/bc2cpp/declared_optional_param_check.rb
 # ci:parallel end

@@ -7,6 +7,9 @@
 # has the same design for the gcc backend).
 #
 #   ruby scripts/nfcxx-pathb.rb --facts=FILE --backend=default|pathb -- ARG...
+#   ruby scripts/nfcxx-pathb.rb --live=ROOT --tabs --checks --backend=default|pathb -- ARG...
+#                                    --checks: the status rule of each pathb-cc is a CHECK line (the bash's own CHECK, which
+#                                    scripts/nfcxx-run.rb applies), not an EXEC or an exit. Used by scripts/nfcxx.rb.
 #   ruby scripts/nfcxx-pathb.rb --records [--shell] < STATE     the Path B -c route, planned from the driver's state (below)
 #
 # --records (the -c route, CompilePlan): the driver's own values, not the argv. STATE is the record stream of
@@ -255,10 +258,11 @@ end
 class Plan
   attr_reader :lines
 
-  def initialize(facts, choice, args)
+  def initialize(facts, choice, args, checks: false)
     @facts = facts
     @choice = choice
     @args = args
+    @checks = checks  # --checks: each pathb-cc status is a CHECK line for the runner (see check_status)
     @lines = []
     @files = []    # the bash's files: link options, objects, C++ sources, and -c (in order); not C sources
     @cflags = []   # -I, -D, -U (joined), for pathb-cc and the -E preprocess
@@ -575,14 +579,31 @@ class Plan
   end
 
   # A non-zero pathb-cc status: under the default backend the driver builds the program again with gcc (the EXEC line);
-  # an explicit --backend=pathb ends with that status.
+  # an explicit --backend=pathb ends with that status. With --checks the rule is a CHECK line instead, which the runner
+  # applies to the status it gets (scripts/nfcxx-run.rb): the bash's own rule, the same words as its CHECK.
   def check_status(source, status)
+    if @checks
+      @lines << check_line(source)
+      return
+    end
     return if status.zero?
     exit_with("nfcxx: pathb-cc status #{status} on #{source}", status) unless @default_backend
     warn "nfcxx: Path B did not build #{source} (status #{status}); building the program with the gcc backend, which " \
          "compiles with C semantics (-fwrapv -fno-strict-aliasing)"
     @lines << ["EXEC", "env", "NFCXX_BACKEND=gcc", DRIVER, *@args]
     raise PlanExec
+  end
+
+  # The CHECK line of a compile (--checks): the default backend builds the program again with gcc, the explicit one exits with
+  # the compile's status. The message and the command are the bash's (its C and C++ branches print the same words).
+  def check_line(source)
+    if @default_backend
+      ["CHECK", "gcc", "nfcxx: Path B did not build #{source} (status ",
+       "); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)",
+       "env", "NFCXX_BACKEND=gcc", DRIVER, *@args]
+    else
+      ["CHECK", "exit"]
+    end
   end
 
   # The C sources, each to an object TMP/N.o (N counts the C sources), with the C options of the bash: no -fwrapv, no -include.
@@ -950,6 +971,7 @@ def main(argv)
   facts_path = nil
   choice = "default"
   tabs = false
+  checks = false
   live = nil
   i = 0
   while i < argv.size && argv[i] != "--"
@@ -960,6 +982,8 @@ def main(argv)
       live = a.delete_prefix("--live=")
     elsif a == "--tabs"
       tabs = true
+    elsif a == "--checks"
+      checks = true
     elsif a.start_with?("--backend=")
       choice = a.delete_prefix("--backend=")
     else
@@ -976,7 +1000,7 @@ def main(argv)
 
   begin
     facts = live ? LiveFacts.new(live, Dir.pwd) : Facts.load(facts_path)
-    plan = Plan.new(facts, choice, fsyntax_only_args(args))
+    plan = Plan.new(facts, choice, fsyntax_only_args(args), checks: checks)
     plan.run
     plan.lines.each { |l| puts(tabs ? l.join("\t") : l.join(" ")) }
     puts "STATUS 0" unless tabs
