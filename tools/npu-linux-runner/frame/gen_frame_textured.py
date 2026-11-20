@@ -8,7 +8,7 @@ interpolation field to match nr_native_check for native 39.
 The texture is 128x128 opaque RGBA in an atlas window. The quad maps uv (pixel centre)/128, so each covered
 pixel should return the texel at its own position. Commands use blend mode 0 (copy).
 
-usage: gen_frame_textured.py <ptl_kernels dir> <out dir> [seed] [draws] [--full-tile] [--vector] [--sampler] [--blend]
+usage: gen_frame_textured.py <ptl_kernels dir> <out dir> [seed] [draws] [--full-tile] [--vector] [--sampler] [--blend] [--mode N]
 """
 import pathlib
 import re
@@ -30,6 +30,7 @@ NATIVE = 39
 TEX = 128
 WINDOW = 32      # NR_FRAME_WINDOW_BYTES
 STRIDE = 3       # attributes per vertex: position, constant 1.0, uv
+BLEND_MODE = int(sys.argv[sys.argv.index("--mode") + 1]) if "--mode" in sys.argv else 0
 FULL_TILE = "--full-tile" in sys.argv  # every draw clips to the whole tile (per-pixel cost)
 
 
@@ -124,7 +125,7 @@ def build(src, seed, draws):
         f[2] = 0                  # vertex offset
         f[3] = 6                  # vertex count
         f[4], f[5], f[6], f[7] = x0, y0, x1, y1
-        f[8] = 0                  # blend: copy (source ONE, destination ZERO)
+        f[8] = BLEND_MODE         # 0 = copy (source ONE, destination ZERO); other modes: timing only
         f[9] = 15
         for n, v in enumerate([0.0, 0.0, float(W), float(H), 0.0, 1.0]):
             f[18 + n] = struct.unpack("<I", struct.pack("<f", v))[0]
@@ -140,7 +141,7 @@ def build(src, seed, draws):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    args = [a for a in sys.argv[1:] if not a.startswith("--") and not (a.isdigit() and sys.argv[sys.argv.index(a) - 1] == "--mode")]
     src_dir, out = pathlib.Path(args[0]), pathlib.Path(args[1])
     seed = int(args[2]) if len(args) > 2 else 1
     draws = int(args[3]) if len(args) > 3 else 16

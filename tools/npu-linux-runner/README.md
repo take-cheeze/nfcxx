@@ -221,3 +221,23 @@ About 8.5 % faster. The candidate matches the expected tile byte for byte.
 
 The per-texel conversion pass tried alongside it (moving the channel swap onto the blended result) came out
 about 3 % slower, so it is not included.
+
+## Blend modes (general path timing)
+
+`gen_frame_textured.py --mode N` sets the command's blend mode. Four full-tile textured draws, sampler on, blend
+fast path off (so every mode runs the general path), p50 in ms:
+
+| mode | p50 | mode | p50 |
+| --- | --- | --- | --- |
+| 0 | 41.90 | 8 | 41.68 |
+| 1 | 41.57 | 9 | 41.42 |
+| 2 | 41.84 | 10 | 41.23 |
+| 3 | 41.46 | 11 | 41.15 |
+| 4 | 41.34 | 12 | 41.17 |
+| 5 | 41.62 | 13 | 41.95 |
+| 6 | 41.61 | 14 | 41.47 |
+| 7 | 41.56 | 15 | 41.54 |
+
+All modes cost the same within about 2 %, so the general path's cost does not depend on the mode. Only modes 0,
+1 and 14 match the copy-style expected tile; the others are timing-only (their outputs are not checked here). The
+copy-mode fast path is therefore the only mode-specific saving so far.
