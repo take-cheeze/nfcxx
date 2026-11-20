@@ -337,6 +337,20 @@ def next_nonspace(masked, pos)
   k < masked.length ? k : -1
 end
 
+# the span of a call rb_gc_register_address(&NAME) or rb_global_variable(&NAME) whose only argument is the address of a class
+# variable (pv: the '&', e: the end of NAME): from the callee's name to the closing parenthesis, or nil
+def gc_root_call_span(masked, pv, e)
+  nx = next_nonspace(masked, e)
+  return nil unless nx >= 0 && masked[nx] == ')'
+  o = prev_nonspace(masked, pv - 1)
+  return nil unless o >= 0 && masked[o] == '('
+  m = masked[0...o].match(/\b(rb_gc_register_address|rb_global_variable)[#{WSP}]*\z/)
+  return nil unless m
+  cp = match_close(masked, o)
+  return nil unless cp == nx
+  [m.begin(1), cp + 1]
+end
+
 def prev_nonspace(masked, pos)
   k = pos
   k -= 1 while k >= 0 && SPACE_RE.match?(masked[k])
@@ -4989,6 +5003,19 @@ end
         # the address of an owned class variable (struct RClass *) is an RClass **, which no mruby call takes as a GC root
         pv = prev_nonspace(masked, s - 1)
         if pv >= 0 && masked[pv] == '&' && !(pv > 0 && masked[pv - 1] == '&') && owns_class_var?(rel, s, name)
+          # the class value is rooted by mrb_gc_register once the variable is set (a class is a constant, so it is rooted by
+          # its constant even before that); the registration call becomes a guarded statement
+          span = gc_root_call_span(masked, pv, e)
+          if span
+            # the name keeps its own edit: the call's prefix and its closing part are the two edits around it
+            # the call's own mapping (the callee rename and the mrb argument) is replaced by the statement
+            @edits[rel].drop(@edits[rel].overlapping(span[0], span[1]))
+            ed.add(span[0], s, "if (")
+            ed.add(e, span[1], ") mrb_gc_register(mrb, mrb_obj_value(#{name}))")
+            rewrite(rel, s, name, "mrb_gc_register(mrb, mrb_obj_value(#{name}))",
+                    'the class variable is a GC root by mrb_gc_register once it is set (the registration is skipped while it is NULL)')
+            next
+          end
           refuse(rel, s, name, 'stuck point (GC root): the address of an owned class variable (struct RClass *) is taken as a GC root, which needs an mrb_value holder (the variable would change type)')
           next
         end

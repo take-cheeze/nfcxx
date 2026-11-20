@@ -1443,8 +1443,10 @@ check grep -qF "spec.add_dependency 'mruby-rational'" "$work/api_rational_gem/mr
 # 2zzz120. the address of an owned class variable (struct RClass *) given to rb_gc_register_address is refused with its
 # reason; the converter does not emit &mrb_obj_value(...), which does not compile.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_gc_addr_cls tools/cext2mrbgem/fixtures/api_gc_addr_cls/ext/api_gc_addr_cls "$work/api_gc_addr_cls" > "$work/api_gc_addr_cls.log" 2>&1 || rc=$?
-check test -e "$work/api_gc_addr_cls/NOT_BUILDABLE"
-check grep -qF 'stuck point (GC root): the address of an owned class variable' "$work/api_gc_addr_cls/REFUSALS.txt"
+check test ! -e "$work/api_gc_addr_cls/NOT_BUILDABLE"
+# the registration of an owned class variable is a guarded mrb_gc_register of the class (no GC-root refusal)
+check grep -qF 'if (err_class) mrb_gc_register(mrb, mrb_obj_value(err_class));' "$work/api_gc_addr_cls/src/api_gc_addr_cls.c"
+check test "$(grep -c 'GC root' "$work/api_gc_addr_cls/REFUSALS.txt")" -eq 0
 check bash -c "! grep -rqF '&mrb_obj_value(' '$work/api_gc_addr_cls'"
 # 2zzz121. an ID pointer declared in a function body (ID *idp) is an mrb_sym pointer, as an ID variable is (the declaration
 # test takes the * with or without spaces).
@@ -1726,6 +1728,14 @@ check grep -qF 'mrb_fixnum_value(mrb_bint_cmp(mrb, ' "$work/api_bignum/src/api_b
 check grep -qF '(mrb_bint_sign(mrb, ' "$work/api_bignum/src/api_bignum.c"
 check test "$(grep -c 'stuck point' "$work/api_bignum/REFUSALS.txt" 2>/dev/null)" -eq 0
 
+# 2zzz166. a class variable registered as a GC root (rb_gc_register_address, rb_global_variable): the registration is a guarded
+# mrb_gc_register of the class once it is set, not a stuck point (the class is also a constant).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_gc_class_root tools/cext2mrbgem/fixtures/api_gc_class_root/ext/api_gc_class_root "$work/api_gc_class_root" > "$work/api_gc_class_root.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_gc_class_root/NOT_BUILDABLE"
+check grep -qF 'if (cWidget) mrb_gc_register(mrb, mrb_obj_value(cWidget));' "$work/api_gc_class_root/src/api_gc_class_root.c"
+check grep -qF 'if (cGizmo) mrb_gc_register(mrb, mrb_obj_value(cGizmo));' "$work/api_gc_class_root/src/api_gc_class_root.c"
+check test "$(grep -c 'GC root' "$work/api_gc_class_root/REFUSALS.txt")" -eq 0
 # 2zzz155. a struct field of CRuby's rb_encoding * type: the Encoding placeholder type is in the prelude (the declaration compiles),
 # and the include of ruby/encoding.h is not a blocking refusal (the placeholder covers it).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rb_encoding_field tools/cext2mrbgem/fixtures/api_rb_encoding_field/ext/api_rb_encoding_field "$work/api_rb_encoding_field" > "$work/api_rb_encoding_field.log" 2>&1 || rc=$?
