@@ -5,7 +5,8 @@
 #   cp, ninja, eccp        logged (RUN), not run (not on the Path B path)
 #   env                    the gcc fallback's exec: EXEC env ARGS, logged; exit 0 (the bash does not return from exec)
 #   g++ -E                 the -E exec (exec g++ -E ...): EXEC g++ ARGS, logged; exit 0 (probes such as g++ -v stay silent)
-#   mktemp                 -d: a fresh directory under $NFCXX_STUB_TMP, printed
+#   mktemp                 -d: a fresh directory under $NFCXX_STUB_TMP, printed; without -d, a fresh empty file there, printed (the
+#                          cache check's statements file, cc_file=$(mktemp), is a file)
 #   pathb-cc               RUN $0 ARGS, logged; exits with the pathb-status fact of the first argument that has one
 #   pathb-ldrt.rb, ehshim.rb, asan-vla, safeptr-rt
 #                          print their facts (ROOT stands for the sandbox's repository); nothing when absent
@@ -32,7 +33,8 @@ case $name in
   env) log "EXEC env $*"; exit 0 ;;
   mktemp)
     d=$NFCXX_STUB_TMP/d$$.$RANDOM.$RANDOM
-    mkdir -p "$d" && echo "$d"; exit 0 ;;
+    if [ "${1:-}" = -d ]; then mkdir -p "$d" && echo "$d"; else : > "$d" && echo "$d"; fi
+    exit 0 ;;
   pathb-cc.rb)
     log "RUN $0 $*"
     for a in "$@"; do
