@@ -81,23 +81,13 @@ root=$(cd "$(dirname "$0")" && pwd)
 # -c would; build systems and scripts use it as a type check). Run as `-c -o TMP.o`, the object removed.
 for a in "$@"; do
   if [ "$a" = -fsyntax-only ]; then
-    fso_args=(); fso_has_o=0; fso_has_E=0
-    for b in "$@"; do
-      case $b in -fsyntax-only) ;; -o) fso_has_o=1; fso_args+=("$b") ;; -E) fso_has_E=1; fso_args+=("$b") ;; *) fso_args+=("$b") ;; esac
-    done
-    [ $fso_has_E = 1 ] && exec "$0" "${fso_args[@]}"
-    if [ $fso_has_o = 1 ]; then
-      # An explicit -o is honoured by the real compile; the type check discards it.
-      fso_dir=$(mktemp -d); trap '[ -z "${fso_dir:-}" ] || rm -rf "$fso_dir"' EXIT   # before trace.sh is sourced: no trace to finish here
-      fso_new=(); fso_skip=0
-      for b in "${fso_args[@]}"; do
-        if [ $fso_skip = 1 ]; then fso_skip=0; fso_new+=("$fso_dir/x.o"); continue; fi
-        [ "$b" = -o ] && fso_skip=1; fso_new+=("$b")
-      done
-      "$0" -c "${fso_new[@]}"; exit $?
-    fi
+    # the pre-loop plan (scripts/nfcxx-loop.rb --fso): an explicit -E execs nfcxx, otherwise the object goes to a temporary
+    # directory, which the EXIT trap removes (not set when the driver execs itself)
+    eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-loop.rb" --fso "$@")" || exit $?
+    [ "$fso_kind" = EXEC ] && exec "$0" "${fso_argv[@]:1}"
     fso_dir=$(mktemp -d); trap '[ -z "${fso_dir:-}" ] || rm -rf "$fso_dir"' EXIT   # before trace.sh is sourced: no trace to finish here
-    "$0" -c "${fso_args[@]}" -o "$fso_dir/x.o"; exit $?
+    fso_argv=("${fso_argv[@]//@@NFCXX_FSO_TMP@@/$fso_dir}")
+    "$0" "${fso_argv[@]:1}"; exit $?
   fi
 done
 source "$root/scripts/wrap.sh"   # --bundle-libs and --cuda-driver= (docs/notes/bundle.md, docs/notes/cuda-driver.md)
