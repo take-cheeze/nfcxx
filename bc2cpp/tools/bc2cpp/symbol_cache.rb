@@ -90,23 +90,31 @@ module SymbolCache
   def rewrite_interns(code, table)
     code.gsub(INTERN) do
       literal = Regexp.last_match(1)
-      presym = presym_constant(literal)
-      presym ? "MRB_SYM(#{presym})" : "bc2cpp_sym(M, #{table.index_for(literal)})"
+      presym_macro(literal) || "bc2cpp_sym(M, #{table.index_for(literal)})"
     end
   end
 
   # PRESYM_SYMBOL: a plain identifier that mruby's presym table already names is the compile-time symbol MRB_SYM(name),
   # so it needs no table slot or cache. The table is the build's include/mruby/presym/id.h (BC2CPP_PRESYM_HEADER,
   # set by closed_build.bash); without it every name keeps the table.
+  # PRESYM_ALL: in a real gem build mruby's presym scan reads the generated sources themselves (each gem's
+  # src/register.cxx includes its unit), so a name spelled with a presym macro (PresymSpelling.symbol) becomes a presym:
+  # a compile-time id, with no RAM slot and no intern at run time. A fixture has no such scan and keeps the table.
   class << self
-    attr_writer :presym_names
+    attr_writer :presym_names, :presym_all
 
     def presym_names = @presym_names || Set.new
+    def presym_all = @presym_all || false
   end
 
-  def presym_constant(literal)
-    name = literal[1...-1]
-    name if name.match?(/\A[A-Za-z_]\w*\z/) && SymbolCache.presym_names.include?(name)
+  # The presym macro for a C string literal, or nil: every spellable name under PRESYM_ALL, otherwise a plain identifier
+  # the build's presym table already has.
+  def presym_macro(literal)
+    name = literal[/\A"([^"\\]*)"\z/, 1]
+    return nil unless name
+    return PresymSpelling.symbol(name) if SymbolCache.presym_all
+
+    "MRB_SYM(#{name})" if name.match?(/\A[A-Za-z_]\w*\z/) && SymbolCache.presym_names.include?(name)
   end
 
   # `mrb_funcall(M, RECV, "name", N, ...)` -> `bc2cpp_send(M, RECV, i, N, ...)`. RECV is an arbitrary C++ expression, so the
@@ -263,6 +271,13 @@ module SymbolCache
   # cached id stays valid for the whole life of its VM.
   def emit(table)
     names = table.literals.map { |literal| "  #{literal}," }.join("\n")
+    # PRESYM_ALL: a slot's entry is its presym id, or the high bit and the index of its RAM slot; only the names presym
+    # cannot spell keep a RAM slot (bc2cpp_syms) and an intern.
+    dynamic = 0
+    entries = table.literals.map do |literal|
+      macro = presym_macro(literal)
+      macro ? "(uint32_t)#{macro}" : "0x80000000u | #{(dynamic += 1) - 1}u"
+    end
     checked = table.checks.any? { |check| check.to_i.positive? }
     checks = (0...[table.size, 1].max).map { |slot| table.checks[slot].to_i }.join(', ')
     <<~CPP
@@ -282,7 +297,8 @@ module SymbolCache
       }
       // SYMBOL_CACHE -- see tools/bc2cpp/symbol_cache.rb.
       static mrb_state* bc2cpp_sym_state = nullptr;
-      static mrb_sym bc2cpp_syms[#{[table.size, 1].max}] = {};
+      static mrb_sym bc2cpp_syms[#{[dynamic, 1].max}] = {};
+      static const uint32_t bc2cpp_sym_entry[#{[table.size, 1].max}] = { #{entries.empty? ? '0x80000000u' : entries.join(', ')} };
       static const char* const bc2cpp_sym_names[#{[table.size, 1].max}] = {
       #{names.empty? ? '  "",' : names}
       };
@@ -297,8 +313,11 @@ module SymbolCache
           bc2cpp_reset_symbol_cache();
           bc2cpp_sym_state = M;
         }
-        mrb_sym s = bc2cpp_syms[i];
-        if (!s) s = bc2cpp_syms[i] = mrb_intern_cstr(M, bc2cpp_sym_names[i]);
+        // The VM check comes first: it also bumps the epochs of the caches keyed on this table.
+        uint32_t e = bc2cpp_sym_entry[i];
+        if (!(e & 0x80000000u)) return (mrb_sym)e;
+        mrb_sym& s = bc2cpp_syms[e & 0x7fffffffu];
+        if (!s) s = mrb_intern_cstr(M, bc2cpp_sym_names[i]);
         return s;
       }
       #{checked ? "static const unsigned char bc2cpp_sym_check[#{[table.size, 1].max}] = { #{checks} };\n#{CHECKED_SEND}" : ''}

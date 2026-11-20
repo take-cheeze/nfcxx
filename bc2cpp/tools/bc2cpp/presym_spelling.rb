@@ -19,4 +19,11 @@ module PresymSpelling
     match = /\A([A-Za-z_][A-Za-z0-9_]*)([?!=]?)\z/.match(name)
     match && "#{SUFFIX_MACROS.fetch(match[2])}(#{match[1]})"
   end
+
+  VARIABLE_MACROS = { '@' => 'MRB_IVSYM', '@@' => 'MRB_CVSYM', '$' => 'MRB_GVSYM' }.freeze
+
+  # Any symbol's presym macro: a method's (key) or a variable's (`@x`, `@@x`, `$x`); nil for one presym.rb cannot spell.
+  def symbol(name)
+    key(name) || (match = /\A(@@|@|\$)([A-Za-z_][A-Za-z0-9_]*)\z/.match(name)) && "#{VARIABLE_MACROS.fetch(match[1])}(#{match[2]})"
+  end
 end
