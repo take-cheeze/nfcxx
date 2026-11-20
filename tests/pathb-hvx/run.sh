@@ -44,8 +44,8 @@ for d in "$here"/cases/*/; do
         -S "$tmp/$n.c" -o "$tmp/$n.s" 2>"$tmp/$n.asm"; then
     echo "FAIL (asm) $n"; head -3 "$tmp/$n.asm"; fail=1; continue
   fi
-  # The vector instruction the probe must lower to (vadd for add_i16, vmpy for mul_i16).
-  want_insn=vadd; [ "$n" = mul_i16 ] && want_insn=vmpy
+  # The vector instruction the probe must lower to (vadd for add_i16, vmpy for mul_i16/mul_su_i16).
+  want_insn=vadd; case $n in mul_*) want_insn=vmpy;; esac
   if ! grep -q "$want_insn" "$tmp/$n.s"; then
     echo "FAIL (vectorize) $n: no $want_insn in Hexagon assembly"; fail=1; continue
   fi

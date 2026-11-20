@@ -186,11 +186,23 @@ def match_loop_fn(fn)
   end
   refuse("function takes #{params.size} params, want 4") unless params.size == 4
   kinds = params.map { |p| p[3] }
-  refuse("params are not (ptr short) (ptr (const short)) x2 int") unless
+  # The two source pointers are int16, each signed or (const) unsigned.
+  lane_ty = lambda do |k|
+    if k == ["ptr", ["const", "short"]] || k == ["ptr", "short"]
+      "short"
+    elsif k == ["ptr", ["const", "unsigned_short"]] || k == ["ptr", "unsigned_short"]
+      "unsigned_short"
+    else
+      nil
+    end
+  end
+  refuse("params are not (ptr short) (ptr const-lane) x2 int") unless
     kinds[0] == ["ptr", "short"] &&
-    kinds[1] == ["ptr", ["const", "short"]] &&
-    kinds[2] == ["ptr", ["const", "short"]] &&
+    !lane_ty.call(kinds[1]).nil? &&
+    !lane_ty.call(kinds[2]).nil? &&
     kinds[3] == "int"
+  b_unsigned = lane_ty.call(kinds[2]) == "unsigned_short"
+  a_unsigned = lane_ty.call(kinds[1]) == "unsigned_short"
   # Map each param register to its slot via the prologue stores.
   reg_slot = {}
   pre.each do |s|
@@ -308,6 +320,18 @@ def match_loop_fn(fn)
     l = resolve.call(w[2])
     r = resolve.call(w[3])
     next unless l.is_a?(Array) && l[0] == "iconv" && r.is_a?(Array) && r[0] == "iconv"
+    # The widening conversions fix lane signedness: (iconv int (load short))
+    # sign-extends, (iconv int (load unsigned_short)) zero-extends. The loads
+    # must agree with the pointer lanes.
+    lane_load_ty = lambda do |v|
+      x = v[2]
+      while x.is_a?(String) && lets.key?(x)
+        x = lets[x]
+      end
+      (x.is_a?(Array) && x[0] == "load") ? x[1] : nil
+    end
+    next unless lane_load_ty.call(l) == (a_unsigned ? "unsigned_short" : "short")
+    next unless lane_load_ty.call(r) == (b_unsigned ? "unsigned_short" : "short")
     d = resolve.call(s[2])
     next unless d.is_a?(Array) && d[0] == "index"
     la = resolve.call(l[2])
@@ -327,11 +351,19 @@ def match_loop_fn(fn)
       found = [:add]
     else
       refuse("shift #{shift} is not a constant int") unless int_const?(shift)
-      found = [:mul, shift.to_i]
+      if !a_unsigned && !b_unsigned
+        found = [:mul, shift.to_i, :ss]
+      elsif !a_unsigned && b_unsigned
+        found = [:mul, shift.to_i, :su]
+      elsif a_unsigned && !b_unsigned
+        found = [:mul, shift.to_i, :us]
+      else
+        refuse("unsigned x unsigned widening has no verified builtin")
+      end
     end
   end
   refuse("loop body is not a[i]+b[i] narrowed into dst[i]") unless found
-  [dst, a, b, n, found]
+  [dst, a, b, n, found, a_unsigned, b_unsigned]
 end
 
 src = if ARGV[0].nil? || ARGV[0] == "-"
@@ -350,14 +382,17 @@ begin
   out << "typedef int P256 __attribute__((__vector_size__(256), __aligned__(256)));"
   fns.each do |fn|
     kind = nil
+    au = bu = false
     begin
-      _dst, _a, _b, _n, kind = match_loop_fn(fn)
+      _dst, _a, _b, _n, kind, au, bu = match_loop_fn(fn)
     rescue Refused => e
       fname = fn[1].is_a?(Array) ? fn[1][1] : fn[1]
       refuse("function #{fname}: #{e.message}")
     end
+    aty = au ? "unsigned short" : "short"
+    bty = bu ? "unsigned short" : "short"
     if kind[0] == :add
-      out << "__attribute__((noinline)) void hvx_vec_add_i16(short *dst, const short *a, const short *b, int n) {"
+      out << "__attribute__((noinline)) void hvx_vec_add_i16(short *dst, const #{aty} *a, const #{bty} *b, int n) {"
       out << "  int i = 0;"
       out << "  for (; i + 64 <= n; i += 64) {"
       out << "    V128 va = *(const V128 *)(a + i);"
@@ -368,13 +403,19 @@ begin
       out << "}"
     else
       k = kind[1]
-      out << "__attribute__((noinline)) void hvx_vec_mul_i16(short *dst, const short *a, const short *b, int n) {"
+      builtin = kind[2] == :ss ? "vmpyhv" : "vmpyhus"
+      if kind[2] == :us
+        swap = "vb, va"
+      else
+        swap = "va, vb"
+      end
+      out << "__attribute__((noinline)) void hvx_vec_mul_i16(short *dst, const #{aty} *a, const #{bty} *b, int n) {"
       out << "  int wtmp[64] __attribute__((aligned(256)));"
       out << "  int i = 0;"
       out << "  for (; i + 64 <= n; i += 64) {"
       out << "    V128 va = *(const V128 *)(a + i);"
       out << "    V128 vb = *(const V128 *)(b + i);"
-      out << "    *(P256 *)wtmp = __builtin_HEXAGON_V6_vmpyhv_128B(va, vb);"
+      out << "    *(P256 *)wtmp = __builtin_HEXAGON_V6_#{builtin}_128B(#{swap});"
       out << "    V128 v0 = *(const V128 *)wtmp, v1 = *(const V128 *)((const char *)wtmp + 128);"
       out << "    *(V128 *)(dst + i) = (V128)__builtin_HEXAGON_V6_vasrwh_128B(v1, v0, #{k});"
       out << "  }"
