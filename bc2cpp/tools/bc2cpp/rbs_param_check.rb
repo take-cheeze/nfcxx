@@ -170,6 +170,11 @@ module RbsParamCheck
           # annotation; `T?` also admits nil.
           next [i, VALUE_CLASSES[kind], kind, nilable]
         end
+        # CORE_IVAR_KINDS: Array, Hash and String by their kind test (CodeGen#declared_param_guards keeps them only
+        # in a build with no subclass of the class).
+        if (core = core_kind(t))
+          next [i, CORE_IVAR_KINDS.fetch(core), core, nilable]
+        end
         if nilable
           # A nilable program class gives no hint, so no annotation names it: take the class itself when it is a class
           # the program defines and nothing subclasses (the guard is the exact-class test).
@@ -207,7 +212,9 @@ module RbsParamCheck
       inner = type.optional
       t = inner || type
       nilable = !inner.nil?
+      core = core_kind(t)
       kind, cls = if VALUE_CLASSES.key?(t.value) then [t.value, VALUE_CLASSES[t.value]]
+                  elsif core then [core, CORE_IVAR_KINDS.fetch(core)]
                   elsif t.kind == :class && ctx[:classes].include?(t.cls) && !ctx[:subclassed].include?(t.cls)
                     [:class, t.cls]
                   end
@@ -218,6 +225,13 @@ module RbsParamCheck
 
       [pos, cls, kind, nilable, k]
     end
+  end
+
+  # :array, :hash or :string for an `Array` / `Array[T]` / `Hash` / `Hash[K, V]` / `String` type (elements unchecked).
+  def core_kind(t)
+    return t.kind if %i[array hash].include?(t.kind)
+
+    :string if t.kind == :class && t.cls == 'String'
   end
 
   # Ops that write their register from their operands alone and read no register (OPTIONAL_DEFAULT_READS).
@@ -252,17 +266,25 @@ module RbsParamCheck
         segment << program.source_at(index)
         index += 1
       end
-      return nil unless segment.first&.addr == targets[k] && segment.all? { |insn| DEFAULT_LITERAL_OPS.include?(insn.op) }
+      return nil unless segment.first&.addr == targets[k] && segment.all? { |insn| default_reads_nothing?(insn) }
 
       literal = segment.size == 1 && segment.first.reg == mand + 1 + k ? segment.first : nil
       literal && default_kind(literal)
     end.then { |kinds| program.source_at(index)&.addr == targets[count] ? kinds : nil }
   end
 
+  # `ARRAY R3 0` / `HASH R3 0` (`[]`, `{}`) read the zero registers after R3.
+  def default_reads_nothing?(insn)
+    DEFAULT_LITERAL_OPS.include?(insn.op) || (%i[ARRAY HASH].include?(insn.op) && insn.uint_operand&.zero?)
+  end
+
   def default_kind(insn)
     case insn.op
     when :LOADNIL then :nil
     when :LOADSYM then :symbol
+    when :STRING then :string
+    when :ARRAY then insn.uint_operand&.zero? ? :array : nil
+    when :HASH then insn.uint_operand&.zero? ? :hash : nil
     when *BytecodeIR::Ops::LOADI_OPS
       value = BytecodeIR::Ops::LOADI_SLOT_VALUE[insn.op] || (insn.op == :LOADI__1 ? -1 : insn.imm_operand)
       value = -value.abs if value && insn.op == :LOADINEG

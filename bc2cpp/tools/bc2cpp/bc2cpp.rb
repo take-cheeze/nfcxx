@@ -1514,7 +1514,7 @@ BC2CPP_MAIN = lambda do
     abort "\n[bc2cpp] DECLARED_RETURN_GUARD: #{guard_failures.size} runtime-checked return declaration(s) " \
           "without their compiled check:\n  #{guard_failures.join("\n  ")}"
   end
-  param_failures = DeclaredReturns.optional_param_guard_failures(CodeGen.declared_params, compiled)
+  param_failures = DeclaredReturns.optional_param_guard_failures(gen.declared_params_kept, compiled)
   unless param_failures.empty?
     abort "\n[bc2cpp] DECLARED_PARAM_GUARD: #{param_failures.size} seeded optional parameter declaration(s) without " \
           "their compiled check:\n  #{param_failures.join("\n  ")}"

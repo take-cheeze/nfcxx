@@ -5,7 +5,7 @@
 # a literal of T (or `?T?` with a nil default) is checked on entry like a required one, and only when the call gives
 # it (`bc2cpp_given_opt > k`); an omitted one holds its default. The class pool seeds it, so the body reads it as T.
 #
-#   1. generated: `b.size2` on a declared `?Foo?` (default nil) is a direct call once the nil test passed, with the
+#   1. generated (Array, Hash and String by their kind test, required ones too): `b.size2` on a declared `?Foo?` (default nil) is a direct call once the nil test passed, with the
 #      guard on the given argument; `?Integer` with an Integer default is guarded; a default that is not a literal of
 #      the declared kind, a default reading a later optional, and a `?untyped` optional give no guard (TC1005 info for
 #      the typed ones); the guarded body is not inlined;
@@ -67,9 +67,26 @@ SOURCE = <<~RUBY
       b.size2
     end
 
+    def sorted(a, xs = [])
+      (xs || []).size + a.size2
+    end
+
+    def keys_of(h)
+      h.keys.size
+    end
+
+    def shout(s)
+      s.upcase
+    end
+
     def run
       f = Foo.new
-      pick(f) + pick(f, f) + add(f) + add(f, 5) + computed(f) + later(f) + later(f, 1, f) + loose(f, f)
+      pick(f) + pick(f, f) + add(f) + add(f, 5) + computed(f) + later(f) + later(f, 1, f) + loose(f, f) +
+        sorted(f) + sorted(f, [3, 1]) + sorted(f, nil) + keys_of({ a: 1 }) + shout('a').size
+    end
+
+    def wrong_sorted
+      sorted(Foo.new, 'z')
     end
 
     def wrong
@@ -92,6 +109,9 @@ SIGNATURES = <<~RBS
     def computed: (Foo a, ?Foo? b) -> Integer
     def later: (Foo a, ?untyped b, ?Foo? c) -> Integer
     def loose: (Foo a, ?untyped b) -> Integer
+    def sorted: (Foo a, ?Array[Integer]? xs) -> Integer
+    def keys_of: (Hash[Symbol, Integer] h) -> Integer
+    def shout: (String s) -> String
   end
 RBS
 OWNERS = %w[Foo Menu].freeze
@@ -102,6 +122,7 @@ HARNESS = <<~'CPP'
     call(M, "run", menu, "run");
     call(M, "wrong pick", menu, "wrong");
     call(M, "wrong add", menu, "wrong_add");
+    call(M, "wrong sorted", menu, "wrong_sorted");
     return 0;
   }
 CPP
@@ -134,6 +155,12 @@ Dir.mktmpdir('declared-optional-param') do |dir|
              !guard.call(by['Menu#later'], 'later', 3) && err.include?('Menu#later parameter 3: optional Foo? gives no hint'))
   check.call('`?untyped` is neither guarded nor noted per parameter',
              !guard.call(by['Menu#loose'], 'loose', 2) && !err.include?('Menu#loose parameter 2'))
+  check.call('`?Array?` with a `[]` default is guarded by its kind and `(xs || []).size` is the Array body',
+             by['Menu#sorted'].to_s.include?('bc2cpp_given_opt <= 0 || (mrb_nil_p(xs) || (mrb_array_p(xs)))') &&
+               !by['Menu#sorted'].to_s.include?('owner-call: size'))
+  check.call('required Hash and String parameters are guarded by their kind',
+             by['Menu#keys_of'].to_s.include?('mrb_hash_p(h)))) bc2cpp_declared_param_violation') &&
+               by['Menu#shout'].to_s.include?('mrb_string_p(s)))) bc2cpp_declared_param_violation'))
   check.call('the guarded body is not inlined', !by['Menu#run'].to_s.include?('CALL_INLINE Menu#pick'))
 
   params = { 'x' => [[1, 'Foo', 'Menu#pick', 'Foo?', :class, true, 0]] }
@@ -157,7 +184,8 @@ Dir.mktmpdir('declared-optional-param') do |dir|
                !compiled.empty? && compiled - wrong.call(compiled) == interpreted - wrong.call(interpreted))
     check.call('a wrong given argument raises the violation in the compiled run',
                wrong.call(compiled) == ['wrong pick => raised BC2cppDeclarationViolation',
-                                        'wrong add => raised BC2cppDeclarationViolation'])
+                                        'wrong add => raised BC2cppDeclarationViolation',
+                                        'wrong sorted => raised BC2cppDeclarationViolation'])
     warn output unless built && compiled.size == interpreted.size
   else
     puts '  SKIP run: no full-core mruby build'

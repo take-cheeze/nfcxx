@@ -20,7 +20,7 @@ class CodeGen
   # label/position/key/text identify the declaration, got the class names the site passes.
   def declared_callsite_contradictions
     rows = []
-    (self.class.declared_params || {}).each do |label, guards|
+    declared_params_kept.each do |label, guards|
       guards.each do |pos, cls, key, text, kind = :class, nilable = false|
         declared = declared_callsite_bits(cls, kind, nilable)
         next if declared.nil? || declared.zero?
