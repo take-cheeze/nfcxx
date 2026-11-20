@@ -107,36 +107,89 @@ suite.check('a helper only its own shard calls keeps static', all.include?('stat
 suite.check('shard 0 and the hooks sit inside BC2CPP_SHARD_PRELUDE_ONLY',
             main.match?(/#ifndef BC2CPP_SHARD_PRELUDE_ONLY\n(?:.*\n)*int run_all\(\)(?:.*\n)*#endif/))
 
+puts '-- oversized owners'
+single_b = "static int method_counter = 0;\nstatic const int method_table[] = { 1, 2, 3 };\n" +
+           UNIT_B.sub('return twice(x);', 'return twice(x) + method_counter;')
+                 .sub('return TABLE + ext_value() - 7;', 'return method_table + ext_value() - 7;')
+single_a = UNIT_A.sub('return bump()', '++method_counter; return bump()')
+                .sub('return TABLE;', 'return method_table;')
+single_owner = PRELUDE + ShardOutput.unit_mark('One') + single_b +
+               ShardOutput.unit_mark('One') + single_a + ShardOutput::HOOKS_MARK + HOOKS
+saved_split_owners = ENV.delete('BC2CPP_SHARD_SPLIT_OWNERS')
+grouped_main, grouped_shards = ShardOutput.split(single_owner, 'chk', 3)
+suite.check('without the opt-in an oversized owner stays in one unchanged translation unit',
+            grouped_main == PRELUDE + single_b + single_a + HOOKS &&
+            grouped_shards.all? { |text| text.lines.all? { |line| line.start_with?('//') } })
+ENV['BC2CPP_SHARD_SPLIT_OWNERS'] = '1'
+single_main, single_shards = ShardOutput.split(single_owner, 'chk', 3)
+suite.check('one large owner can fill multiple shards',
+            single_shards[0].include?('#define BC2CPP_SHARD_PRELUDE_ONLY') &&
+            single_shards[1].lines.all? { |line| line.start_with?('//') })
+suite.check('same-owner static references receive cross-shard declarations',
+            single_main.include?("int B_helper(int x);\n") &&
+            (single_main + single_shards.join).include?("\nint B_helper(int x) {"))
+suite.check('same-owner mutable method state receives one external declaration',
+            single_main.include?("extern int method_counter;\n"))
+suite.check('same-owner constant method state receives external linkage',
+            single_main.include?("extern const int method_table[];\n") &&
+            (single_main + single_shards.join).include?('extern const int method_table[] ='))
+units = 12.times.map { |i| { owner: 'Large', code: 'x' * 100, index: i } } +
+        [{ owner: 'Small', code: 'y' * 100, index: 12 }]
+groups = ShardOutput.assign(units, 4)
+suite.check('oversized owner units balance across the requested shards',
+            groups.all? { |g| g.any? { |u| u[:owner] == 'Large' } } &&
+            groups.map { |g| g.sum { |u| u[:code].bytesize } }.max == 400)
+suite.check('placement retains every method exactly once and in source order within each shard',
+            groups.flatten.map { |u| u[:index] }.sort == (0..12).to_a &&
+            groups.all? { |g| g.map { |u| u[:index] } == g.map { |u| u[:index] }.sort })
+suite.check('placement is deterministic', groups == ShardOutput.assign(units, 4))
+balanced = %w[A A B B].each_with_index.map { |owner, i| { owner: owner, code: 'x' * 50, index: i } }
+suite.check('owners fitting the byte budget remain together',
+            ShardOutput.assign(balanced, 2).map { |g| g.map { |u| u[:owner] } } == [%w[A A], %w[B B]])
+hot_groups = ShardOutput.assign(units, 4, Set.new(['Large']))
+suite.check('an explicitly hot oversized owner stays entirely in the main file',
+            hot_groups[0].count { |u| u[:owner] == 'Large' } == 12 &&
+            hot_groups.drop(1).flatten.none? { |u| u[:owner] == 'Large' })
+tier_main, _tier_files, unit_tiers = ShardOutput.split_with_tiers(single_owner, 'chk', 3, 'O1')
+suite.check('each split unit reports the tier of the shard containing its body',
+            unit_tiers == ['B', 'A'].map { |owner| tier_main.include?("int #{owner}_one_impl(int x) {") ? 'default' : 'O1' } &&
+            unit_tiers.sort == %w[O1 default])
+saved_split_owners.nil? ? ENV.delete('BC2CPP_SHARD_SPLIT_OWNERS') : ENV['BC2CPP_SHARD_SPLIT_OWNERS'] = saved_split_owners
+
 puts '-- linkage'
 if Bc2cppCxx.executable?(Bc2cppCxx.compiler.first)
-  Dir.mktmpdir('bc2cpp-shard-output') do |dir|
-    File.write(File.join(dir, 'chk_gen.cpp'), main)
-    shards.each_with_index { |text, i| File.write(ShardOutput.shard_path(dir, 'chk', i + 1), text) }
-    File.write(File.join(dir, 'main.cpp'), <<~'CPP')
-      #include <cstdio>
-      int run_all();
-      const int* A_table();
-      const int* B_table();
-      int ext_value(void);
-      int main() {
-        int first = run_all();
-        int second = run_all();
-        std::printf("%d %d %d %d\n", first, second, A_table() == B_table(), ext_value());
-        return 0;
-      }
-    CPP
-    binary = File.join(dir, 'chk')
-    sources = [File.join(dir, 'chk_gen.cpp'), *shards.each_index.map { |i| ShardOutput.shard_path(dir, 'chk', i + 1) },
-               File.join(dir, 'main.cpp')]
-    out, err, status = Bc2cppCxx.capture3('-std=c++17', '-O2', '-Wall', '-Werror', "-I#{dir}", *sources, '-o', binary)
-    suite.check('the split program compiles warning-free and links', status.success?)
-    puts err.lines.first(20).join unless status.success?
-    if status.success?
-      out, = Open3.capture2(binary)
-      # A_one: bump() is the first call (101) + B_helper(2) = 105; B_one: bump() second (202) + 2 = 204. Shared
-      # counter and call count carry on into the second round: 305 + 404.
-      suite.check("prelude state and statics are one instance across shards (#{out.strip})",
-                  out == "309 713 1 7\n")
+  { 'two owners' => [main, shards, "309 713 1 7\n"],
+    'one oversized owner' => [single_main, single_shards, "310 715 1 7\n"] }.each do |description, split|
+    main_text, shard_texts, expected = split
+    Dir.mktmpdir('bc2cpp-shard-output') do |dir|
+      File.write(File.join(dir, 'chk_gen.cpp'), main_text)
+      shard_texts.each_with_index { |text, i| File.write(ShardOutput.shard_path(dir, 'chk', i + 1), text) }
+      File.write(File.join(dir, 'main.cpp'), <<~'CPP')
+        #include <cstdio>
+        int run_all();
+        const int* A_table();
+        const int* B_table();
+        int ext_value(void);
+        int main() {
+          int first = run_all();
+          int second = run_all();
+          std::printf("%d %d %d %d\n", first, second, A_table() == B_table(), ext_value());
+          return 0;
+        }
+      CPP
+      binary = File.join(dir, 'chk')
+      sources = [File.join(dir, 'chk_gen.cpp'), *shard_texts.each_index.map { |i| ShardOutput.shard_path(dir, 'chk', i + 1) },
+                 File.join(dir, 'main.cpp')]
+      out, err, status = Bc2cppCxx.capture3('-std=c++17', '-O2', '-Wall', '-Werror', "-I#{dir}", *sources, '-o', binary)
+      suite.check("#{description}: the split program compiles warning-free and links", status.success?)
+      puts err.lines.first(20).join unless status.success?
+      if status.success?
+        out, = Open3.capture2(binary)
+        # A_one: bump() is the first call (101) + B_helper(2) = 105; B_one: bump() second (202) + 2 = 204. Shared
+        # counter and call count carry on into the second round: 305 + 404.
+        suite.check("#{description}: prelude state and statics are one instance across shards (#{out.strip})",
+                    out == expected)
+      end
     end
   end
 else

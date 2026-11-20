@@ -159,14 +159,21 @@ module ShardOutput
     [text[0...first], units, text[(hooks_at + HOOKS_MARK.size)..]]
   end
 
-  # An owner's methods stay together (they call each other most); owners go largest first onto the lightest shard.
+  # By default an owner's methods stay together for cross-method inlining. BC2CPP_SHARD_SPLIT_OWNERS=1 lets
+  # oversized owners split into method units: a large compiler class otherwise leaves one translation unit on
+  # the critical path after every other worker has finished. Owners fitting a fair share of method bytes stay
+  # together, and explicitly hot owners remain together in the main file even with the opt-in.
+  # The existing cross-shard declaration rewrite also covers calls between units of the same owner.
   # `shards` lists of units, each in print order.
   def assign(units, shards, hot = Set.new)
     by_owner = units.each_with_index.group_by { |u, _| u[:owner] }
     size = ->(list) { list.sum { |u, _| u[:code].bytesize } }
     total = units.sum { |u| u[:code].bytesize }
     min_bytes = Integer(ENV.fetch('BC2CPP_SHARD_MIN_BYTES', MIN_SHARD_BYTES.to_s))
-    wanted = [[shards, by_owner.size, (total / min_bytes.to_f).ceil].min, 1].max
+    split_owners = ENV['BC2CPP_SHARD_SPLIT_OWNERS'] == '1'
+    count = split_owners ? units.size : by_owner.size
+    wanted = [[shards, count, (total / min_bytes.to_f).ceil].min, 1].max
+    target = (total + wanted - 1) / wanted
     loads = Array.new(wanted, 0)
     placed = Array.new(wanted) { [] }
     # Hot owners all go to the main file (shard 0), before the cold ones are spread over the lightest shards.
@@ -175,7 +182,10 @@ module ShardOutput
       loads[0] += size.call(list)
       placed[0].concat(list)
     end
-    cold_part.sort_by { |owner, list| [-size.call(list), owner] }.each do |_, list|
+    chunks = cold_part.flat_map do |owner, list|
+      split_owners && size.call(list) > target ? list.map { |unit| [owner, [unit]] } : [[owner, list]]
+    end
+    chunks.sort_by { |owner, list| [-size.call(list), owner, list.first.last] }.each do |_, list|
       i = loads.index(loads.min)
       loads[i] += size.call(list)
       placed[i].concat(list)
@@ -207,7 +217,11 @@ module ShardOutput
       list.each do |item|
         next unless item[:body] && shared.include?(item[:name])
 
-        lines[item[:first]] = item[:var] ? lines[item[:first]].sub(/\bstatic\b/, 'extern') : drop_static(lines[item[:first]])
+        line = lines[item[:first]]
+        # A const variable needs explicit external linkage; a mutable definition already has it without static.
+        # `extern int state = 0` is valid C++ but GCC warns about it, unlike `extern const int table[] = ...`.
+        constant = item[:var] && constant_static?(line.sub(/\A\s*\[\[[^\]]*\]\]\s*/, '').strip)
+        lines[item[:first]] = constant ? line.sub(/\bstatic\b/, 'extern') : drop_static(line)
         decls << "#{item[:var] ? 'extern ' : ''}#{drop_static(item[:head])};\n" unless declared.include?(item[:name])
       end
       lines.join

@@ -46,6 +46,18 @@ and `compile_seconds` (set when the generation ran with `BC2CPP_PROFILE_TIMINGS=
 are the `== compiled method report ==` section of `generation.log`, written by bc2cpp at exit. Self-generation passes
 no shard tier, so its tiers are `"default"`. `compile_seconds` includes the probes each method's compilation runs.
 
+Generation reuses a guarded cleanliness answer only at an empty probe stack with unchanged unconditional
+cleanliness facts. Reuse preserves the guard signal, and forgetting layout-dependent probe code also forgets
+these answers. Nested probes continue to use their existing context-sensitive rules. For diagnostic comparisons,
+`BC2CPP_PROBE_ROOT_CACHE=0` disables this reuse in a direct compiler invocation.
+
+Native builds also [split oversized owners across shards](bc2cpp-owner-shards.md), so the large `CodeGen` class
+does not leave one compiler process running after all other shard workers finish. Explicit hot-owner pins retain
+their existing placement.
+
+[Measured bottlenecks and results](bc2cpp-self-performance.md) separate Ruby generation, native build balance
+and compiled-compiler runtime checks.
+
 ## Validation
 
 With a full pinned-world checkout selected, the integration check compares generated C++ and bytecode against CRuby,

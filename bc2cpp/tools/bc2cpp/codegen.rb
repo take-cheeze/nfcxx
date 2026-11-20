@@ -231,7 +231,9 @@ class CodeGen
     # Any direct allocation needs the shared helper; only allowlisted classes
     # need the gem-init class accessor declared by emit_direct_construct_decls.
     @direct_alloc_used = false
-    @clean_cache = {} # irep label -> does compile_method(label) end up #error-free? (memoized -- see compiles_clean?'s own comment)
+    # Immutable facts: adding an unconditional answer creates a new version,
+    # so guarded root probes can recognize unchanged facts by identity.
+    @clean_cache = {}.freeze # irep label -> does compile_method(label) end up #error-free?
     @probing = Set.new # recursion guard for compiles_clean? (mutually-MONO-recursive methods)
     # Bumped when module_super_block_clean? meets a label already being probed. A probe that saw a bump
     # answered from an in-progress probe, so its answer is not memoized (see compiles_clean?).
@@ -326,6 +328,7 @@ class CodeGen
   # compiled once and kept: its text would read a slot as the type the final layout no longer gives it, or a struct it dropped.
   def forget_layout_probe_code
     @block_steps = @block_step_emitted = @block_step_names = @rsm_variants = @step_super_targets = nil
+    forget_root_probe_answers
   end
 
   def const_lookup_helper_used?
@@ -663,7 +666,8 @@ class CodeGen
   def without_probe_side_effects
     saved = instance_variables.to_h do |ivar|
       value = instance_variable_get(ivar)
-      [ivar, value.is_a?(Hash) || value.is_a?(Array) || value.is_a?(Set) ? value.dup : value]
+      immutable_facts = ivar == :@clean_cache || ivar == :@root_clean_cache_facts
+      [ivar, !immutable_facts && (value.is_a?(Hash) || value.is_a?(Array) || value.is_a?(Set)) ? value.dup : value]
     end
     yield
   ensure

@@ -55,6 +55,9 @@ class CodeGen
     repeated_owners = defs.group_by(&:owner).select { |_, group| group.size > 1 }.keys
     candidates = defs.select do |t|
       next false if repeated_owners.include?(t.owner)
+      # An exact class test does not skip a module prepended before that class.
+      # Its method may stay on the VM even when the class's own body compiles.
+      next false if poly_prepend_may_shadow?(name, t.owner)
       # EXPLICIT_RECEIVER_VISIBILITY: an arm for a non-public or re-scoped def would run what OP_SEND raises for.
       next false if @explicit_visibility_site && !explicit_call_visible?(name, t)
 
@@ -95,6 +98,15 @@ class CodeGen
       true
     end
     candidates unless candidates.empty?
+  end
+
+  def poly_prepend_may_shadow?(name, owner)
+    return true if @unknown_mixins.include?(owner)
+    modules = @prepended_modules[owner]
+    return false if no_mixins?(modules)
+    return true unless @closed_world
+
+    Array(modules).any? { |mod| cha_module_may_define?(name, mod, Set.new) }
   end
 
   def poly_arity_fits?(irep, n, optional)
