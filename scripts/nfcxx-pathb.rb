@@ -682,7 +682,7 @@ class Plan
       next if x.start_with?("-I", "-D", "-U")
 
       if x.start_with?("-") || x.end_with?(".o", ".a", ".so")
-        plink << x
+        plink.concat(link_option(x))
       else
         o = "TMP/p#{n}.o"
         n += 1
@@ -696,13 +696,23 @@ class Plan
     traced("link", "pathb") { @lines << ["RUN", *argv] }
   end
 
+  # A link argument as it goes to cc: the CUB archive (scripts/cuda-cub.rb's path, when it has one) goes before the -lcudart it
+  # needs, as the other link routes place it. A shared link has no CUB archive.
+  def link_option(x)
+    return [x] unless x == "-lcudart" && !@shared
+
+    cub = @facts.value("cuda-cub").to_s
+    cub.empty? ? [x] : [cub, x]
+  end
+
   # The link of C sources alone (or with object files when eccp is not built): cc with the C objects, every link option of the
   # command line (the -I, -D and -U options too), the VLA runtime of an ASan link, EDG's runtime and the host C++ library.
   def c_only_link
     unported("#{LIBC} does not exist") unless @facts.flag?("libc-a")
     ldrt = fact_path("pathb-ldrt")
     cvla = @asan ? [fact_path("asan-vla")] : []
-    argv = ["cc", *asan_c, *ldopts, *@c_objs, *@files, *cvla, "-o", @out, ldrt, LIBC, "-lstdc++", "-lm", "-latomic"]
+    files = @files.flat_map { |x| link_option(x) }
+    argv = ["cc", *asan_c, *ldopts, *@c_objs, *files, *cvla, "-o", @out, ldrt, LIBC, "-lstdc++", "-lm", "-latomic"]
     @lines << ["RUN", *argv]
   end
 end
@@ -783,6 +793,7 @@ class LiveFacts < Facts
     when "ehshim" then script_output("scripts/ehshim.rb", require_success: true)
     when "asan-vla" then script_output("scripts/asan-vla.rb", require_success: true)
     when "safeptr-rt" then script_output("scripts/safeptr-rt.rb", require_success: false)
+    when "cuda-cub" then script_output("scripts/cuda-cub.rb", require_success: true)   # the CUB archive, or no path (no line)
     else unported("#{key} is not in the live facts")
     end
   end

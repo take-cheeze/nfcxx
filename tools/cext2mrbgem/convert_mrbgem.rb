@@ -4014,7 +4014,21 @@ use_problem = lambda do |name, use|
         next if l_text.nil? || r_text.nil? || l_text.empty? || r_text.empty?
         next unless value_operand?(l_text, value_names, value_field_names, rel, op_s) && value_operand?(r_text, value_names, value_field_names, rel, op_s)
         next if @edits[rel].touches_strictly?(op_s)
-        refuse(rel, op_s, m[1], 'stuck point (VALUE order): a VALUE is ordered by address in CRuby (the class-table search); the fork\'s VALUE is a struct with no order')
+        # ordered by address: each operand is its object address (mrb_value_addr, include/mruby/value.h). CRuby's tables that are
+        # searched by VALUE are built and searched with this same order, so the search is consistent (the order is not CRuby's
+        # value of an address, which nothing observes). The operands are the spans of the comparison.
+        l_end = op_s
+        l_end -= 1 while l_end > 0 && masked[l_end - 1] =~ /\s/
+        r_start = op_e
+        r_start += 1 while r_start < masked.length && masked[r_start] =~ /\s/
+        next if r_start > r_end || l_start >= l_end
+        next if @edits[rel].overlaps(l_start, l_end) || @edits[rel].overlaps(r_start, r_end)
+        ed = @edits[rel]
+        ed.add(l_start, l_start, 'mrb_value_addr(')
+        ed.add(l_end, l_end, ')')
+        ed.add(r_start, r_start, 'mrb_value_addr(')
+        ed.add(r_end, r_end, ')')
+        rewrite(rel, op_s, m[1], m[1], 'a VALUE is ordered by its object address (mrb_value_addr): the converted table is sorted and searched in the same order')
       end
     end
   end

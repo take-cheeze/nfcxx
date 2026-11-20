@@ -744,7 +744,9 @@ module CoreEnumeratorFree
   NOT_CALLS = [
     /sym_idx\(\s*s\s*,\s*MRB_SYM\(each\)\s*\)/,
     # The creating natives' own call (native_creators reads them): Array#index and #rindex answer `to_enum(:index)`.
-    /mrb_funcall_id\(\s*mrb\s*,\s*self\s*,\s*MRB_SYM\(to_enum\)\s*,\s*1\s*,\s*mrb_symbol_value\(\s*MRB_SYM\(\w+\)\s*\)\s*\)/
+    /mrb_funcall_id\(\s*mrb\s*,\s*self\s*,\s*MRB_SYM\(to_enum\)\s*,\s*1\s*,\s*mrb_symbol_value\(\s*MRB_SYM\(\w+\)\s*\)\s*\)/,
+    # value.h's type-name table names each type for messages; CORE_FIBER_FREE reads class names from the same scan.
+    /f\(MRB_TT_FIBER,\s*struct RFiber,\s*"Fiber"\)/
   ].freeze
 
   # The natives' include/prepend calls: [[class, module]] and the ones whose target the owner map could not name. The three

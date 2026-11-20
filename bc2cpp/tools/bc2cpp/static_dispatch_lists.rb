@@ -24,6 +24,8 @@
 #                  reads as empty
 #   core_undef_left_out  core undef entries (mrb_undef_*) the closed build removes after init (Owner#name;
 #                  UNDEF_LEFT_OUT, CoreNativeCandidates.undef_candidates). A file without it reads as empty
+#   unmade_classes the classes no instance of which the closed build ever makes (CORE_FIBER_FREE, core_fiber_free.rb:
+#                  Fiber, whose absence drops the resumable variants). A file without it reads as empty
 #
 # The file named by BC2CPP_STATIC_DISPATCH_LISTS is JSON. Its `digest` is the digest of the proof's inputs, which
 # verify_current! compares with the tree. 'none' stands for empty lists: the proof's own first pass, and fixtures
@@ -33,13 +35,14 @@ require 'set'
 
 module StaticDispatchLists
   PATH_ENV = 'BC2CPP_STATIC_DISPATCH_LISTS'
-  KEYS = %w[open closed core_excluded core_left_out engine_rom ctor_rows core_rows frame_free core_undef_left_out engine_rows].freeze
-  REQUIRED_KEYS = (KEYS - %w[frame_free core_rows core_undef_left_out engine_rows]).freeze
+  KEYS = %w[open closed core_excluded core_left_out engine_rom ctor_rows core_rows frame_free core_undef_left_out engine_rows
+            unmade_classes].freeze
+  REQUIRED_KEYS = (KEYS - %w[frame_free core_rows core_undef_left_out engine_rows unmade_classes]).freeze
 
   class Missing < StandardError; end
 
   Lists = Struct.new(:open, :closed, :core_excluded, :core_left_out, :engine_rom, :ctor_rows, :core_rows, :frame_free,
-                     :core_undef_left_out, :engine_rows, :digest,
+                     :core_undef_left_out, :engine_rows, :unmade_classes, :digest,
                      keyword_init: true) do
     # mruby's Struct.new forwards keyword-init values as a positional Hash.
     def initialize(kwargs = {})
@@ -48,6 +51,7 @@ module StaticDispatchLists
       self.core_rows ||= Set.new.freeze
       self.core_undef_left_out ||= Set.new.freeze
       self.engine_rows ||= Set.new.freeze
+      self.unmade_classes ||= Set.new.freeze
     end
 
     # Only the closed build drops the closed-only names.
@@ -59,7 +63,7 @@ module StaticDispatchLists
   EMPTY = Lists.new(open: Set.new.freeze, closed: Set.new.freeze, core_excluded: Set.new.freeze,
                     core_left_out: Set.new.freeze, engine_rom: Set.new.freeze, ctor_rows: Set.new.freeze,
                     core_rows: Set.new.freeze, frame_free: Set.new.freeze, core_undef_left_out: Set.new.freeze,
-                    engine_rows: Set.new.freeze, digest: 'none').freeze
+                    engine_rows: Set.new.freeze, unmade_classes: Set.new.freeze, digest: 'none').freeze
 
   module_function
 

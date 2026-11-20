@@ -81,23 +81,13 @@ root=$(cd "$(dirname "$0")" && pwd)
 # -c would; build systems and scripts use it as a type check). Run as `-c -o TMP.o`, the object removed.
 for a in "$@"; do
   if [ "$a" = -fsyntax-only ]; then
-    fso_args=(); fso_has_o=0; fso_has_E=0
-    for b in "$@"; do
-      case $b in -fsyntax-only) ;; -o) fso_has_o=1; fso_args+=("$b") ;; -E) fso_has_E=1; fso_args+=("$b") ;; *) fso_args+=("$b") ;; esac
-    done
-    [ $fso_has_E = 1 ] && exec "$0" "${fso_args[@]}"
-    if [ $fso_has_o = 1 ]; then
-      # An explicit -o is honoured by the real compile; the type check discards it.
-      fso_dir=$(mktemp -d); trap '[ -z "${fso_dir:-}" ] || rm -rf "$fso_dir"' EXIT   # before trace.sh is sourced: no trace to finish here
-      fso_new=(); fso_skip=0
-      for b in "${fso_args[@]}"; do
-        if [ $fso_skip = 1 ]; then fso_skip=0; fso_new+=("$fso_dir/x.o"); continue; fi
-        [ "$b" = -o ] && fso_skip=1; fso_new+=("$b")
-      done
-      "$0" -c "${fso_new[@]}"; exit $?
-    fi
+    # the pre-loop plan (scripts/nfcxx-loop.rb --fso): an explicit -E execs nfcxx, otherwise the object goes to a temporary
+    # directory, which the EXIT trap removes (not set when the driver execs itself)
+    eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-loop.rb" --fso "$@")" || exit $?
+    [ "$fso_kind" = EXEC ] && exec "$0" "${fso_argv[@]:1}"
     fso_dir=$(mktemp -d); trap '[ -z "${fso_dir:-}" ] || rm -rf "$fso_dir"' EXIT   # before trace.sh is sourced: no trace to finish here
-    "$0" -c "${fso_args[@]}" -o "$fso_dir/x.o"; exit $?
+    fso_argv=("${fso_argv[@]//@@NFCXX_FSO_TMP@@/$fso_dir}")
+    "$0" "${fso_argv[@]:1}"; exit $?
   fi
 done
 source "$root/scripts/wrap.sh"   # --bundle-libs and --cuda-driver= (docs/notes/bundle.md, docs/notes/cuda-driver.md)
@@ -121,22 +111,10 @@ asan=0; backend_explicit=0; asanopts=(); safeptr=0; cosmo=0
 dialect=${NFCXX_DIALECT:-$("${RUBY:-ruby}" "$root/scripts/host-sys.rb" host_dialect)}; dialect_asked=${NFCXX_DIALECT:+1}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}; target=""
 # Options with a flag and an environment variable: the variable is the default, the flag overrides it (see the usage above).
 path_b=0; [ "${NFCXX_PATH:-}" != b ] || path_b=1                        # --backend=pathb: Path B asked for by name
-ir_opt_set=0; ir_opt=""; if [ -n "${NFCXX_IR_OPT+x}" ]; then ir_opt_set=1; ir_opt=$NFCXX_IR_OPT; fi   # --ir-opt=LIST
-eh_unwind_on=0; [ "${NFCXX_EH_UNWIND:-}" != 1 ] || eh_unwind_on=1       # --eh-unwind
-eh_shim_on=1; [ "${NFCXX_EHSHIM:-1}" != 0 ] || eh_shim_on=0             # --no-eh-shim
 # --cache=DIR, --cache-log=FILE, NFCXX_CACHE_REMOTE=gha: cache_dir, cache_log_file, cache_remote (scripts/nfcxx-cache-config.rb plan)
 cfg_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cache-config.rb" plan) || exit $?
 eval "$cfg_sh"
-keep_intermediates=0; [ "${NFCXX_KEEP_INTERMEDIATES:-}" != 1 ] || keep_intermediates=1   # --keep-intermediates
-time_log=${NFCXX_TIME_LOG:-}                                            # --time-log=FILE
-instantiate=${NFCXX_INSTANTIATE:-used}                                  # --instantiate=used|auto
-promote_slots=${NFCXX_PROMOTE_SLOTS:-1}; unroll=${NFCXX_UNROLL:-1}; struct_slots=${NFCXX_STRUCT_SLOTS:-1}   # --promote-slots= ...
-ld_name=${NFCXX_LD:-}                                  # -fuse-ld=NAME
-pathb_c=${NFCXX_PATHB_C:-}                                              # --pathb-c=gcc
 pb_flags=()   # the options scripts/pathb-cc.rb gets (--asan, --safe-pointers, --sanitize=, --ir-opt=): flags, not exported variables
-# CUDA kernel names are obfuscated (docs/notes/gpu.md, "Kernel name obfuscation"): --obfuscate-kernels, or NFCXX_OBFUSCATE_KERNELS=1
-# in the environment (which reaches a CMake build through nfcxx-cuda without any change to its command line).
-obfuscate=0; case ${NFCXX_OBFUSCATE_KERNELS:-0} in 0|"") ;; *) obfuscate=1 ;; esac
 # Compiler-driver options a build system passes (CMake, ninja, make; mruby's rake build). See docs/notes/cxx-driver.md.
 pthread=0; preprocess=0; outset=0; depmode=""; dfile=""; dtarget=""; depphony=""
 moddir=""   # --module-dir=DIR: where C++ module interface files are written and read (docs/notes/modules.md)
@@ -575,7 +553,13 @@ if [ ${#cfiles[@]} -gt 0 ]; then
       # Path B objects: EDG's runtime (libC.a: the VLA and EH entry points), the long double helpers and, with -fsanitize=address, libasan
       # (the C++ VLA runtime too: EDG lowers a C VLA to the same __vla_alloc calls, so each VLA is a malloc block libasan checks)
       cvla=(); [ $asan = 0 ] || cvla=("$("$root/scripts/asan-vla.rb")")
-      cc ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} ${cvla[@]+"${cvla[@]}"} -o "$out" "$("$root/scripts/pathb-ldrt.rb")" "${EDG_BUILD:-$root/build/edg}/lib/libC.a" $([ "$(uname -s)" = Darwin ] && echo -lc++ || echo -lstdc++) -lm $([ "$(uname -s)" = Darwin ] || echo -latomic)
+      # a link that names -lcudart also gets the CUB archive (scripts/cuda-cub.rb), before the -lcudart it needs; no archive, no argument
+      linkf=()
+      for f in ${files[@]+"${files[@]}"}; do
+        if [ "$f" = -lcudart ]; then cub=$("$root/scripts/cuda-cub.rb") && [ -n "$cub" ] && linkf+=("$cub"); fi
+        linkf+=("$f")
+      done
+      cc ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${linkf[@]+${linkf[@]+"${linkf[@]}"}} ${cvla[@]+"${cvla[@]}"} -o "$out" "$("$root/scripts/pathb-ldrt.rb")" "${EDG_BUILD:-$root/build/edg}/lib/libC.a" $([ "$(uname -s)" = Darwin ] && echo -lc++ || echo -lstdc++) -lm $([ "$(uname -s)" = Darwin ] || echo -latomic)
     else "${NFCXX_GCC:-gcc}" ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} -o "$out"; fi
     trace_end "$t" "link (C only)" cinput
     exit 0
@@ -618,6 +602,12 @@ cache_store() {  # cache_store OBJ: a whole entry appears at once (a partial cop
 # The forced includes (a .cu input's nfcxx_cuda.h, and -include) reach pathb-cc as -include, as they reach EDG's preinclude.
 pb_pre=(); for f in ${preinc[@]+"${preinc[@]}"}; do pb_pre+=(-include "$f"); done
 if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
+  # A .cu unit with kernel instances only the host compile makes (its .dev.kernels.unresolved is not empty) needs the second pass
+  # (below, on the EDG route); Path B does not build them, so this unit takes the gcc route, which runs it.
+  if [ ${#cu_inputs[@]} -gt 0 ] && [ -n "${cudatmp:-}" ] && [ -s "$cudatmp/$(basename "${cu_inputs[0]}" .cu).dev.kernels.unresolved" ]; then
+    echo "nfcxx: ${cu_inputs[0]} has kernel instances only the host compile makes; building it with the gcc backend, which runs the second pass" >&2
+    exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
+  fi
   cache_check   # a hit: the object is copied back and the program is done
   # -c: one object per C++ file, named as the gcc and Path B backends name it (-o FILE for one file, else basename.o)
   for f in ${files[@]+"${files[@]}"}; do
@@ -642,6 +632,9 @@ if [ $backend = pathb ]; then
   for f in ${files[@]+"${files[@]}"}; do
     case $f in
       -I*|-D*|-U*) ;;                       # reach pathb-cc through cflags
+      -lcudart)                             # the CUB archive (scripts/cuda-cub.rb) before the -lcudart it needs; none when it fails
+        if [ $shared = 0 ]; then cub=$("$root/scripts/cuda-cub.rb") && [ -n "$cub" ] && plink+=("$cub"); fi
+        plink+=("$f") ;;
       -*|*.o|*.a|*.so) plink+=("$f") ;;
       *) o=$ptmp/p$n.o; n=$((n + 1))
          t=$(trace_start)

@@ -4,7 +4,7 @@
 #                 nfcxx's exec of g++ -E (EXEC); any other call is a compile or a link (RUN), logged and not run
 #   cp            logged (CP), not copied
 #   ninja         logged (RUN), not run (the repository tools are built before the gcc path)
-#   mktemp        -d: a fresh directory under $NFCXX_STUB_TMP, printed
+#   mktemp        -d: a fresh directory under $NFCXX_STUB_TMP, printed; else a fresh empty file there, printed
 #   eccp          logged (RUN), after ENV when EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS is set (the bash exports it for -shared)
 #   ehshim.rb, asan-vla  print their facts (asan-vla fails when the fact is absent)
 #   ld.NAME       exists only, for command -v (-fuse-ld=NAME)
@@ -41,8 +41,15 @@ case $name in
   cp) log "CP $*"; exit 0 ;;
   ninja) log "RUN ninja $*"; exit 0 ;;
   mktemp)
-    d=$NFCXX_STUB_TMP/d$$.$RANDOM.$RANDOM
-    mkdir -p "$d" && echo "$d"; exit 0 ;;
+    # mktemp -d: a directory; plain mktemp (the cache lookup's statements file): an empty regular file
+    if [ "${1:-}" = -d ]; then
+      d=$NFCXX_STUB_TMP/d$$.$RANDOM.$RANDOM
+      mkdir -p "$d" && echo "$d"
+    else
+      f=$NFCXX_STUB_TMP/f$$.$RANDOM.$RANDOM
+      : > "$f" && echo "$f"
+    fi
+    exit 0 ;;
   eccp)
     [ -z "${EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS+x}" ] || log "ENV EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS=$EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS"
     log "RUN $0 $*"; exit 0 ;;

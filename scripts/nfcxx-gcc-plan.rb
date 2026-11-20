@@ -7,6 +7,11 @@
 #
 #   ruby scripts/nfcxx-gcc-plan.rb --facts=FILE ARG...   the facts of a file (the tests)
 #   ruby scripts/nfcxx-gcc-plan.rb --live=ROOT ARG...    the facts of this machine (tabs: --tabs first, for a plan file)
+#   ruby scripts/nfcxx-gcc-plan.rb --shell --live=ROOT ARG...   the plan as shell statements a bash driver evals (below)
+#
+# The exit status is the bash's: 0 or the status the bash ends with (2 for a refusal), or 3 for UNPORTED: the plan does not
+# cover these arguments or this environment, so the bash goes on by itself (the contract of this port: nothing is planned,
+# nothing runs, and the reason is on stderr as "unported: ...").
 #
 # prints the commands the bash runs for ARG..., one per line, then "STATUS n" (the exit status the bash ends with):
 #   RUN PROGRAM ARG...     a program the driver runs (gcc, g++, cp's CP below, the EDG driver as ROOT/build/edg/bin/eccp)
@@ -17,11 +22,22 @@
 # ROOT stands for the repository and WORK for the working directory; TMP for a temporary directory (mktemp -d).
 # An argument list outside the gcc backend (Path B by default, cosmo, the CUDA inputs, a cache lookup, modules, cppfront,
 # freestanding, ...) exits 3 with "unported: ..." on stderr and prints nothing. A refusal the bash makes (status 2) prints
-# the lines before it, then its status. Modelled here: -fsyntax-only (the re-run as -c -o TMP/x.o, as nfcxx-loop.rb's
+# the lines before it, then its status.
+#
+# Modelled here: -fsyntax-only (the re-run as -c -o TMP/x.o, as nfcxx-loop.rb's
 # syntax_only_plan has it; -E execs g++ -E), --cuda-driver= and a link that names libcuda (the re-run of
 # scripts/wrap.rb, or its note, or its error), and --cache=DIR when the compile is not one a cache lookup
 # keys (a link, several sources, -MD, an -o without an extension). A -c of one source with --cache is unported: its key
 # hashes the scripts and binaries.
+#
+# --shell (the driver's form): the same plan as shell statements, every value escaped with Shellwords, for the driver to eval:
+#   nfcxx_plan_state=PLAN           the plan follows (the state is UNPORTED alone when the plan is unported: exit 3)
+#   nfcxx_plan_status=N             the exit status the bash ends with (0, or 2 for a refusal, with the lines before it)
+#   nfcxx_plan_kinds=(KIND...)      one per command: RUN, EXEC, CP or ENV (the kinds as above)
+#   nfcxx_plan_nwords=(N...)        the number of words of each command, the program and its arguments (ENV: one word)
+#   nfcxx_plan_words=(WORD...)      the words of all the commands, in order (the command i takes nwords[i] of them)
+# An UNPORTED plan prints only "nfcxx_plan_state=UNPORTED" on standard output (and exits 3), so an eval never reads an empty
+# plan as "nothing to run". Joining a command's kind and words with spaces gives its line in the default form.
 #
 # FILE holds the facts the bash reads from the machine and from its helper scripts (tests/nfcxx-gcc/run.sh writes it):
 #   host-sys DIR            a directory of the host C++ library, in host_sys_includes' order
@@ -36,6 +52,7 @@
 #   eh-tls 1                ${EDG}/../eh-tls exists
 #   dir PATH                PATH (relative to WORK) is an existing directory (the exists lines cover files and directories)
 #   machine M               uname -m
+#   env NAME VALUE          the environment variable NAME is VALUE (only NFCXX_LD, NFCXX_DIALECT, NFCXX_BACKEND=gcc, as above)
 #   cuda-home PATH          CUDA_HOME is PATH (no line: CUDA_HOME is unset)
 #   cuda-cub PATH           scripts/cuda-cub.rb prints PATH (no line: it prints nothing and fails)
 #   cuda-shim PATH          scripts/cuda-driver-shim.rb prints PATH (the shim's archive)
@@ -43,7 +60,9 @@
 #   cuda-rtv PATH N         the header PATH has "#define CUDART_VERSION N"
 #   cuda-file, cuda-dir     run.sh makes these in the work directory; the port reads the exists and dir lines instead
 #
-# Read from the environment: NFCXX_LD and NFCXX_DIALECT (PLAN_ENV: the defaults the bash sets before its arguments).
+# Read from the environment: NFCXX_LD, NFCXX_DIALECT (PLAN_ENV: the defaults the bash sets before its arguments) and
+# NFCXX_BACKEND=gcc (the backend the bash takes as given, not as an explicit --backend=). An env line of the facts file
+# gives the same variables to the port, and the harness gives them to the bash. Any other NFCXX_* variable is unported.
 # Assumed, not read: the environment (other NFCXX_* variables: the harness runs the bash with none, and CUDA_HOME only as
 # the cuda-home fact), the SYCL pre-pass (it needs a sycl include in the source), the existence of eccp and of the
 # built repository tools (ensure_tool finds them fresh, so no ninja run), and the host GNU version (not used by this path).
@@ -52,6 +71,7 @@
 
 require "open3"
 require "pathname"
+require "shellwords"
 require_relative "nfcxx-linkargs"
 
 class NfcxxUnported < StandardError
@@ -89,6 +109,7 @@ class Facts
     @dirs = []
     @rtv = {}
     @values = {}
+    @env = {}
   end
 
   def self.load(path)
@@ -112,10 +133,18 @@ class Facts
         path, version = rest.split(" ", 2)
         facts.cuda_rtv_set(path, version)
       when "cuda-file", "cuda-dir" then nil
+      when "env"
+        name, value = rest.split(" ", 2)
+        unported("environment #{name} (the facts' env line)") if env_refused?(name, value.to_s)
+        facts.env_set(name, value.to_s)
       else facts.set(key, rest)
       end
     end
     facts
+  end
+
+  def env_set(name, value)
+    @env[name] = value
   end
 
   def set(key, value)
@@ -126,9 +155,9 @@ class Facts
     @values[key]
   end
 
-  # an environment variable the plan reads (NFCXX_LD, NFCXX_DIALECT): nil when unset, or when the facts have none
-  def env_value(_name)
-    nil
+  # an environment variable the plan reads (PLAN_ENV, NFCXX_BACKEND): nil when unset, or when the facts have no env line for it
+  def env_value(name)
+    @env[name]
   end
 
   def host_sys
@@ -190,8 +219,8 @@ end
 # The facts read from this machine, for the repository (--live=ROOT): each fact is probed when the port asks for it, with
 # the commands the bash runs. A fact the live facts do not model is unported, never guessed: the CUDA toolkit and shim,
 # more than one -m option, a macro with arguments, a module source (the bash's grammar is read, but a module is not
-# planned), and NFCXX_* (but NFCXX_LD and NFCXX_DIALECT) or CUDA_HOME in the environment (the port does not read them;
-# the bash does).
+# planned), and NFCXX_* (but NFCXX_LD, NFCXX_DIALECT and NFCXX_BACKEND=gcc) or CUDA_HOME in the environment (the port does
+# not read them; the bash does).
 class LiveFacts < Facts
   def initialize(root, cwd)
     super()
@@ -199,13 +228,8 @@ class LiveFacts < Facts
     @cwd = cwd
     @probes = {}
     @host_sys = nil  # computed on first use (Facts sets an empty list)
-    ENV.each_key do |name|
-      # NFCXX_DRIVER_TRACE is the CRuby driver's own switch (scripts/nfcxx.rb); the bash does not read it
-      next if PLAN_ENV.include?(name)
-      next unless (name.start_with?("NFCXX_") && name != "NFCXX_DRIVER_TRACE") ||
-                  %w[CUDA_HOME EDG_BUILD EDG_CPFE_DEFAULT_OPTIONS EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS].include?(name)
-
-      unported("environment #{name} (the live facts do not read it)")
+    ENV.each do |name, value|
+      unported("environment #{name} (the live facts do not read it)") if env_refused?(name, value)
     end
     # the bash builds these on first use (ensure_tool); the live facts do not build anything
     unported("the EDG front end is not built (build/edg/bin/eccp)") unless File.executable?(File.join(root, "build/edg/bin/eccp"))
@@ -214,6 +238,17 @@ class LiveFacts < Facts
 
   def cwd_name
     @cwd
+  end
+
+  # cuda-cub PATH: scripts/cuda-cub.rb's output (built when stale), as the bash's $(cuda-cub). A failure is no value, so the
+  # link goes without the archive (the bash's behaviour). Read on demand: only a link that names -lcudart asks for it.
+  def value(key)
+    return super unless key == "cuda-cub"
+
+    out, status = Open3.capture2(File.join(@root, "scripts", "cuda-cub.rb"))
+    status.success? ? out.chomp : nil
+  rescue SystemCallError
+    nil
   end
 
   # the file a plan path names on this machine: ROOT is the repository, a relative path is in the working directory
@@ -388,8 +423,20 @@ UNPORTED_OPTIONS = ["--cosmo", "--freestanding", "--obfuscate-kernels", "-fsafe-
 # the -fsanitize= checks the bash implements (its sanitize block; docs/notes/ubsan.md)
 SANITIZE_CHECKS = %w[undefined signed-integer-overflow integer-divide-by-zero shift bounds null unreachable return
                      float-cast-overflow].freeze
-# the environment variables the plan reads (the bash's defaults for the linker and the dialect): their values are the facts'
-PLAN_ENV = %w[NFCXX_LD NFCXX_DIALECT].freeze
+# the environment variables the plan reads (the bash's defaults for the linker, the dialect and the backend): their values are
+# the facts'. NFCXX_BACKEND is read only as gcc (env_refused?).
+PLAN_ENV = %w[NFCXX_LD NFCXX_DIALECT NFCXX_BACKEND].freeze
+
+# Whether the plan is unported for the environment variable NAME with VALUE (the live environment, or an env line of the
+# facts): NFCXX_BACKEND only as gcc (Path B and any other name are unported, as before), the PLAN_ENV names otherwise, and
+# NFCXX_DRIVER_TRACE (the CRuby driver's own switch, scripts/nfcxx.rb; the bash does not read it) are not refused. Any other
+# NFCXX_* variable, and CUDA_HOME and the EDG variables, are refused.
+def env_refused?(name, value)
+  return value != "gcc" if name == "NFCXX_BACKEND"
+  return false if PLAN_ENV.include?(name) || name == "NFCXX_DRIVER_TRACE"
+
+  name.start_with?("NFCXX_") || %w[CUDA_HOME EDG_BUILD EDG_CPFE_DEFAULT_OPTIONS EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS].include?(name)
+end
 
 class Plan
   attr_reader :lines
@@ -450,6 +497,9 @@ class Plan
       @dialect_asked = true
     end
     @ld_name = facts.env_value("NFCXX_LD") || ""
+    # NFCXX_BACKEND=gcc is the backend as the bash takes it (backend=${NFCXX_BACKEND:-}, backend_explicit stays 0), so the
+    # default-backend rule of select_backend does not apply to it
+    @backend = facts.env_value("NFCXX_BACKEND") || ""
   end
 
   # the -fsanitize= checks, after the argument loop, as the bash's sanitize block: an unknown name is the bash's refusal (exit 2);
@@ -985,9 +1035,18 @@ class Plan
   end
 end
 
+# the --shell output (see the header): the plan as statements a bash driver evals; every value is escaped with Shellwords
+def emit_shell(lines, status)
+  words = lines.flat_map { |fields| fields.drop(1) }
+  $stdout.write("nfcxx_plan_state=PLAN\n")
+  $stdout.write("nfcxx_plan_status=#{status}\n")
+  $stdout.write("nfcxx_plan_kinds=(#{lines.map { |fields| Shellwords.escape(fields.first) }.join(" ")})\n")
+  $stdout.write("nfcxx_plan_nwords=(#{lines.map { |fields| fields.size - 1 }.join(" ")})\n")
+  $stdout.write("nfcxx_plan_words=(#{words.map { |w| Shellwords.escape(w) }.join(" ")})\n")
+end
+
 def main(argv)
-  tabs = argv.first == "--tabs"
-  argv.shift if tabs
+  format = %w[--tabs --shell].include?(argv.first) ? argv.shift : nil
   source = argv.shift.to_s
   facts =
     if source.start_with?("--facts=") then Facts.load(source.delete_prefix("--facts="))
@@ -1004,11 +1063,16 @@ def main(argv)
     $stderr.write("#{e.message}\n")
     status = e.status
   end
-  plan.lines.each { |fields| $stdout.write("#{fields.join(tabs ? "\t" : " ")}\n") }
-  $stdout.write("STATUS #{status}\n") unless tabs  # a plan file (--tabs) holds commands only; the status is the exit status
+  if format == "--shell"
+    emit_shell(plan.lines, status)
+  else
+    plan.lines.each { |fields| $stdout.write("#{fields.join(format == "--tabs" ? "\t" : " ")}\n") }
+    $stdout.write("STATUS #{status}\n") unless format == "--tabs"  # a plan file (--tabs) holds commands only; the status is the exit status
+  end
   status
 rescue NfcxxUnported => e
   $stderr.write("unported: #{e.message}\n")
+  $stdout.write("nfcxx_plan_state=UNPORTED\n") if format == "--shell"
   3
 end
 

@@ -3043,26 +3043,29 @@ BC2CPP_MAIN = lambda do
   # OWNER_CALL_DIRECT (owner_call_direct.rb): an owner call its listed owners' entries complete carries them.
   owner_call_direct = OwnerCallDirect.entries(compiled + gen.module_function_copies(compiled), registration_owners)
   owner_call_direct = owner_call_direct.merge(OwnerCallDirect.native_entries) if ENV['BC2CPP_OWNER_CALL_DIRECT'] != '0'
-  # One local for OwnerCallDirect.rewrite's tables: BC2CPP_MAIN is at mruby's limit of local variables per scope (a
+  # Two locals for OwnerCallDirect.rewrite's tables and options: BC2CPP_MAIN is at mruby's limit of local variables per scope (a
   # self-compiled bc2cpp is built from this file by mrbc, which refuses "too many local variables").
   owner_rewrite = [owner_call_direct, gen.owner_class_slots, gen.program_superclasses, gen.unregistered_keys]
+  # CROSS_UNIT_ROW (CodeGen#other_unit_direct_entry): a row for a method another gem of this link compiles.
+  owner_rewrite_opts = { other: ENV['BC2CPP_CROSS_UNIT_ROW'] == '0' ? nil : gen.method(:other_unit_direct_entry),
+                         trim: gen.owner_rows_trim? }
   # GUARD_VIOLATION: name the method a violation site sits in.
   # Fuse the three per-method rewrite passes (@@SITE@@ substitution, DIRECT_RAISE, SymbolCache.rewrite) into one.
   compiled.each do |m|
     code = m[:code].gsub('@@SITE@@') { "#{m[:owner]}##{m[:name]}".gsub(/["\\]/) { |c| "\\#{c}" } }
-    code = OwnerCallDirect.rewrite(code, *owner_rewrite)
+    code = OwnerCallDirect.rewrite(code, *owner_rewrite, **owner_rewrite_opts)
     m[:code] = SymbolCache.rewrite(code, symbol_table)
   end
   # The class units' text takes the same passes as the compiled methods (a unit's helper calls are named the same way).
   class_units = class_units.map do |unit|
     code = unit[:code].gsub('@@SITE@@') { unit[:path].to_s.gsub(/["\\]/) { |c| "\\#{c}" } }
-    code = OwnerCallDirect.rewrite(code, *owner_rewrite)
+    code = OwnerCallDirect.rewrite(code, *owner_rewrite, **owner_rewrite_opts)
     unit.merge(code: SymbolCache.rewrite(code, symbol_table))
   end
   # TOP_LEVEL_STATEMENTS takes the same passes: its sends are named calls too (a `Class.new(Base)` constant write is an owner call).
   unless top_level_code.empty?
     code = top_level_code.gsub('@@SITE@@', 'top-level')
-    code = OwnerCallDirect.rewrite(code, *owner_rewrite)
+    code = OwnerCallDirect.rewrite(code, *owner_rewrite, **owner_rewrite_opts)
     top_level_code = SymbolCache.rewrite(code, symbol_table)
   end
   # Fused single pass over the compiled methods: all of these closed-world diagnostic counts used to
@@ -3195,6 +3198,7 @@ BC2CPP_MAIN = lambda do
   compiled.each do |m|
     print ShardOutput.unit_mark(m[:owner]) if shards > 1
     print m[:code]
+    print gen.cross_unit_thunk(m)
   end
   print ShardOutput::HOOKS_MARK if shards > 1
   print top_level_code
