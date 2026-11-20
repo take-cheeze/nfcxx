@@ -140,3 +140,4 @@ else
 end
 
 require_relative 'poly_candidate_probe_cases'
+require_relative 'poly_prepend_probe_cases'

@@ -2,6 +2,8 @@
 # frozen_string_literal: true
 
 # A class guard must honor a prepended override, including a VM-only body.
+# Run by skipped_direct_call_check.rb with the other polymorphic candidate cases;
+# its registry entry declares mrbc, native sources, a full library and C++.
 require_relative 'fixture_runtime'
 ENV['BC2CPP_SIG_DIRS'] = ''
 runtime = Bc2cppFixtureRuntime
