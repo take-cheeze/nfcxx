@@ -1,4 +1,5 @@
 #!/bin/bash
+# The pinned copy (pinned-port-modules.txt) was taken from the driver at commit 1aa750d8b52163609481ea3cb4ad631389529a7b, before the B8 switch.
 # Differential test of nfcxx's C++ module options (docs/notes/modules.md): the module block verbatim from the frozen driver
 # (tests/driver-body/nfcxx-bash, the bash that computed modopts itself) against the block verbatim from ./nfcxx (which calls
 # scripts/nfcxx-modopts.rb plan). Each case runs both in a fresh directory with the real module scanner: the module directory,
@@ -13,7 +14,7 @@ pass=0; fail=0
 
 # the blocks, copied from the two drivers: from the mdir line to the last line of the module options
 sed -n '/^  mdir=\${moddir:-\$(dirname "\$out")}; mkdir -p/,/^  \[ -z "\$n" \] || modopts+=/p' "$repo/tests/driver-body/nfcxx-bash" > "$work/oracle.sh"
-sed -n '/^  mdir=\${moddir:-\$(dirname "\$out")}; mkdir -p/,/^  eval "\$modopts_sh"$/p' "$repo/nfcxx" > "$work/port.sh"
+sed -n '/^  mdir=\${moddir:-\$(dirname "\$out")}; mkdir -p/,/^  eval "\$modopts_sh"$/p' "$here/pinned-port-modules.txt" > "$work/port.sh"
 [ "$(wc -l < "$work/oracle.sh")" = 4 ] || { echo "driver-modopts: the frozen driver's module block is not as expected" >&2; exit 2; }
 [ "$(wc -l < "$work/port.sh")" = 3 ] || { echo "driver-modopts: nfcxx's module block is not as expected" >&2; exit 2; }
 

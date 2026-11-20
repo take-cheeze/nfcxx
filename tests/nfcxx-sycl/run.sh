@@ -1,4 +1,5 @@
 #!/bin/bash
+# The pinned copies (pinned-prefix.txt, pinned-block.txt) were taken from the driver at commit 1aa750d8b52163609481ea3cb4ad631389529a7b, before the B8 switch.
 # Differential test of the SYCL pre-pass: scripts/nfcxx-sycl.rb (the decision and the two passes, which nfcxx's bash calls)
 # against the bash block of nfcxx on main (tests/nfcxx-sycl/oracle.sh, verbatim). Each case runs two copies of the driver in
 # sandboxes with the stub commands of tests/nfcxx-prepass/stub.sh: both cut right after the lines before the SYCL block, and
@@ -19,10 +20,10 @@ pass=0; fail=0; failed_list=""
 
 # the driver copies: the lines of nfcxx before the SYCL block (the same in both), then the block (the port's two calls, or
 # oracle.sh), then the lines after it up to the -c move, which the copies end on
-cut_new() { awk '/^# SYCL kernel integration/ { exit } { print }' "$repo/nfcxx"
-  awk '/^# SYCL kernel integration/ { go = 1 } go { print } /^\[ \$compile_only = 1 \] \|\| moves=1/ { exit }' "$repo/nfcxx" | sed '$d'
+cut_new() { cat "$here/pinned-prefix.txt"
+  cat "$here/pinned-block.txt"
   echo 'exit 77'; }
-cut_oracle() { awk '/^# SYCL kernel integration/ { exit } { print }' "$repo/nfcxx"
+cut_oracle() { cat "$here/pinned-prefix.txt"
   cat "$here/oracle.sh"; echo 'exit 77'; }
 
 while IFS= read -r line; do

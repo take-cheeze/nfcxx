@@ -1,0 +1,3 @@
+  mdir=${moddir:-$(dirname "$out")}; mkdir -p "$mdir"; mdir=$(cd "$mdir" && pwd -P)
+  modopts_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-modopts.rb" plan mdir="$mdir" src="${srcs[0]}") || exit $?   # --modules, the interface directory (scripts/nfcxx-modopts.rb)
+  eval "$modopts_sh"

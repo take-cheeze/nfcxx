@@ -1,0 +1,48 @@
+state_put() {  # state_put NAME VALUE...: one group of the records scripts/driver-state.rb reads (k NAME, then v VALUE for each)
+  local n=$1 v
+  shift
+  printf 'k%s\0' "$n"
+  for v in ${1+"$@"}; do printf 'v%s\0' "$v"; done
+}
+eccp_plan_input() {  # the records of the eccp command line: the call's arrays and scalars, in the order of nfcxx-eccp-plan.rb
+  state_put eccp "$eccp_bin"; state_put std "$std"; state_put dialect "$dialect"; state_put out "$eccp_out"
+  state_put extra ${extra[@]+"${extra[@]}"}; state_put inst_opts ${inst_opts[@]+"${inst_opts[@]}"}
+  state_put modopts ${modopts[@]+"${modopts[@]}"}; state_put diag_opts ${diag_opts[@]+"${diag_opts[@]}"}
+  state_put root "$root"; state_put files ${files[@]+"${files[@]}"}; state_put compile_only "$compile_only"
+  state_put sys_inc ${sys_inc[@]+"${sys_inc[@]}"}
+  state_put hosted_libs ${hosted_libs[@]+"${hosted_libs[@]}"}; state_put keep_static ${keep_static[@]+"${keep_static[@]}"}
+  state_put eh_unwind ${eh_unwind[@]+"${eh_unwind[@]}"}; state_put picopts ${picopts[@]+"${picopts[@]}"}
+  state_put cobjs ${cobjs[@]+"${cobjs[@]}"}; state_put preinc ${preinc[@]+"${preinc[@]}"}
+  state_put cuda_opts ${cuda_opts[@]+"${cuda_opts[@]}"}
+  state_put shim ${shim[@]+"${shim[@]}"}; state_put vlart ${vlart[@]+"${vlart[@]}"}; state_put rtlib ${rtlib[@]+"${rtlib[@]}"}
+  state_put moves "$moves"
+}
+eccp_plan() {  # eccp_plan: the eccp command line (eccp_argv), its exports (eccp_envs) and its directory (eccp_cd), from
+  # scripts/nfcxx-eccp-plan.rb (tests/nfcxx-eccp-plan/run.sh checks it against the bash's own construction). The plan also
+  # plans the link arguments (eflist and userinc, from the files), and refuses an option it cannot keep: the status is the
+  # plan's, read from the reply file after the call (a refused option ends the driver with 2, as the bash did). The keep note
+  # is printed by the port.
+  local rec done=0 reply rc
+  eccp_argv=(); eccp_envs=(); eccp_cd=""
+  local rdir; rdir=$(mktemp -d) || exit $?
+  reply=$rdir/reply.rec
+  eccp_plan_input | "${RUBY:-ruby}" "$root/scripts/nfcxx-eccp-plan.rb" "$eccp_dir" "$keep_intermediates" "$shared" > "$reply" \
+    || { rc=$?; rm -rf "$rdir"; exit $rc; }
+  while IFS= read -r -d "" rec; do
+    case $rec in
+      a*) eccp_argv+=("${rec:1}") ;;
+      e*) eccp_envs+=("${rec:1}") ;;
+      d*) eccp_cd=${rec:1} ;;
+      z) done=1 ;;
+    esac
+  done < "$reply"
+  rm -rf "$rdir"
+  [ $done = 1 ] || { echo "nfcxx: scripts/nfcxx-eccp-plan.rb stopped before its end (the eccp command line is incomplete)" >&2; exit 1; }
+}
+eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary directory (and of the C-input and .cu steps)
+  local rc=$?
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" cleanup "$keep_intermediates" "$eccp_dir" "${cudatmp:-}" "${ctmp:-}"   # the removals (tests/nfcxx-link/run.sh)
+  temp_cleanup
+  trace_finish
+  return $rc
+}
