@@ -508,6 +508,9 @@ class CodeGen
         # the sound and small answer: such a class keeps its dynamic dispatch
         # until a path that unboxes properly exists.
         arity_ok &&= native_arg_types(init_def, t_mand).all? { |ty| ty.nil? } if arity_ok
+        # An #initialize whose `_impl` takes the call's block (a yield, block_given? or SUPER_FRAME_BLOCK) is reached
+        # through Class#new, which hands it the block; this positional call has no block argument to give.
+        arity_ok &&= !takes_block_param?(init_irep) if arity_ok
         if no_custom_new && no_custom_allocate && arity_ok
           # 4: the ONLY_OWNERS/OTHER_OWNERS emission guard.
           owner_emitted = !@only_owners || @only_owners.include?(known) || @other_owners&.include?(known)
@@ -1189,6 +1192,8 @@ class CodeGen
       singleton_candidate = lex_owner.nil? && lexical_self_singleton_def(name, owner_def)
       if target.nil? && (lex_owner || singleton_candidate)
         lex_candidate = singleton_candidate || @registry[name]&.find { |md| md.owner == lex_owner }
+        # PREPENDED_OVERRIDE: a module prepended to the owner answers before its own definition.
+        lex_candidate = nil if lex_candidate && prepended_override?(lex_candidate.owner, name)
         if direct_callable?(lex_candidate, n)
           target = lex_candidate
           lexical_self = true
@@ -1842,6 +1847,12 @@ class CodeGen
     return [nil, false] unless active.add?(owner)
     return [nil, false] if @unknown_mixins.include?(owner)
 
+    # MIXIN_ORDER_UNKNOWN: @prepended_modules / @included_modules list a class's mixins in the order the generator read
+    # their sites, which is the run-time order only within one file; across files it follows the require graph. With two
+    # or more of them defining the name, which one answers first is not known here, so the lookup is unknown.
+    return [nil, false] if mixins_defining(name, @prepended_modules[owner]) > 1 ||
+                           mixins_defining(name, @included_modules[owner]) > 1
+
     Array(@prepended_modules[owner]).reverse.each do |mod|
       return [nil, false] unless @closed_world.stable_constant_identity?(mod)
 
@@ -1880,6 +1891,23 @@ class CodeGen
     return [nil, true] if superclass.nil?
 
     closed_world_lookup_target(name, superclass, active, self_call: self_call, any_visibility: any_visibility)
+  end
+
+  # MIXIN_ORDER_UNKNOWN: how many of +mods+ define +name+, themselves or through the modules they include or prepend.
+  def mixins_defining(name, mods)
+    Array(mods).count do |mod|
+      seen = Set.new
+      work = [mod]
+      found = false
+      until work.empty? || found
+        m = work.pop
+        next unless seen.add?(m)
+
+        found = @registry.fetch(name, []).any? { |definition| definition.owner == m }
+        work.concat(Array(@included_modules[m])).concat(Array(@prepended_modules[m]))
+      end
+      found
+    end
   end
 
   # DIRECT_CALLABLE: can a call with `n` positional arguments reach `definition`'s compiled `_impl` as a
@@ -2003,6 +2031,7 @@ class CodeGen
   def closed_world_exact_target(name, receiver_class, accessor: false)
     return nil unless @closed_world&.stable_class_constant?(receiver_class)
     return nil unless call_facts_enabled? && call_facts_answers.resolves_in_ruby?(receiver_class, name)
+    return nil if singleton_tainted_for?(receiver_class, [name])
     return nil if devirt_blocked_name?(name)
     # A different class body can install this instance name after its `def` is scanned.
     installed = symbol_installed_names

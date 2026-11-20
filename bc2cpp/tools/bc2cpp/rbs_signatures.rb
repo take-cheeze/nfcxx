@@ -23,7 +23,7 @@ require_relative 'rbs_ir_contracts'
 #            positional parameters and one overload; `@ivar: T`; `attr_reader/attr_accessor name: T` (an ivar type).
 #            Types: Integer (fixnum) and Symbol (embedding hints), Array / Hash (container hints), Array[C] / Hash[K, C]
 #            (element class C), and any class name the program defines (class hint).
-#   noted    (TC1005 info: accepted, gives no hint) optional / rest / keyword / block parameters and block types, `T?`,
+#   noted    (TC1005 info: accepted, gives no hint) untyped optional, rest / keyword / block parameters and block types, `T?`,
 #            unions, `untyped`, `void`, `bool`, `nil`, `self`, literal types, generics other than Array[]/Hash[], a class
 #            the program does not define, constants, aliases, interfaces, mixins, visibility, a method
 #            whose parameter count is not the definition's.
@@ -214,7 +214,8 @@ module RbsSignatures
     fn = mt.type
     args = fn.required_positionals.map { |p| type_of(p.type) }
     extras = []
-    extras << 'optional parameters' unless fn.optional_positionals.empty?
+    # A typed optional is checked by RbsParamCheck.optional_targets, which notes the ones it cannot use.
+    extras << 'optional parameters' if fn.optional_positionals.any? { |p| !value_classes_of(p.type) }
     # A `*T` with a class set types the elements in the body (ir_rest_elements), so it is a hint, not a bare rest.
     extras << 'a rest parameter' if fn.rest_positionals && !value_classes_of(fn.rest_positionals.type)
     extras << 'trailing parameters' unless fn.trailing_positionals.empty?
@@ -244,6 +245,11 @@ module RbsSignatures
     untyped = ->(t) { t.nil? || (t.kind == :other && t.text == 'untyped') }
     merged = fresh.dup
     merged.args = fresh.args.each_with_index.map { |t, i| untyped.(t) && prev.args[i] && !untyped.(prev.args[i]) ? prev.args[i] : t }
+    if Array(prev.optional_args).size == Array(fresh.optional_args).size
+      merged.optional_args = fresh.optional_args.each_with_index.map do |t, i|
+        untyped.(t) && !untyped.(prev.optional_args[i]) ? prev.optional_args[i] : t
+      end
+    end
     if untyped.(fresh.ret) && prev.ret && !untyped.(prev.ret)
       merged.ret = prev.ret
       merged.return_type = prev.return_type

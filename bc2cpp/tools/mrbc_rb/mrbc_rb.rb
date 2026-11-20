@@ -396,7 +396,19 @@ module MrbcRb
   # the file, the number of lines the next file's numbering is ahead].
   def self.file_tail(source)
     # (heredoc bodies are lexed before the rest of their line: the last token is the one that ends last)
-    last = Prism.lex(source).value.map(&:first).reject { |t| NON_TOKENS.include?(t.type) }.each_with_index.max_by { |t, i| [t.location.end_offset, i] }&.first
+    # The token that ends last, the later one on a tie. Not max_by with [offset, index] keys: mruby's max_by compares
+    # its keys with `>`, which an Array does not answer, so a self-hosted compile of several files raised there.
+    last = nil
+    last_end = nil
+    Prism.lex(source).value.each do |(t, _)|
+      next if NON_TOKENS.include?(t.type)
+
+      end_offset = t.location.end_offset
+      next if last_end && end_offset < last_end
+
+      last = t
+      last_end = end_offset
+    end
     return [false, 0] unless last
     raise Unsupported, 'file ending in a heredoc' if last.type == :HEREDOC_START
     heredoc = last.type == :HEREDOC_END
@@ -3253,8 +3265,10 @@ module MrbcRb
         return a
       end
 
-      # milestone 13: gen_values flushes into ARRAY/ARYPUSH once an argument reaches register 99 (GEN_VAL_STACK_MAX).
-      return call_with_args(node, need: need) if args.size >= 2 && a + 1 < 99 && a + args.size >= 99 && node.name.to_s.match?(PLAIN_NAME)
+      # milestone 13: gen_values flushes into ARRAY/ARYPUSH once an argument reaches register 99 (GEN_VAL_STACK_MAX). An
+      # index call with two or more arguments (`out[re, 1]`) is a plain gen_call as well, so it flushes the same way.
+      return call_with_args(node, need: need) if args.size >= 2 && a + 1 < 99 && a + args.size >= 99 &&
+                                                (node.name.to_s.match?(PLAIN_NAME) || node.name == :[])
 
       operand_into(recv, a) if recv
       skip = safe_jump(a, need) if node.safe_navigation?

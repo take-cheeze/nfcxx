@@ -408,7 +408,7 @@ class CodeGen
   # DECLARED_PARAM_GUARD: the C++ statements that check the declared class of each trusted parameter of `label`, given
   # the impl's parameter names (M, self, then the positionals), or "" when it has none.
   def declared_param_guard_statements(label, names, types = [])
-    (self.class.declared_params&.[](label) || []).filter_map do |pos, cls, key, text, kind = :class, nilable = false|
+    declared_param_guards(label).filter_map do |pos, cls, key, text, kind = :class, nilable = false, optional = nil|
       var = names[2 + pos]
       next unless var
       # An unboxed specialization (`mrb_int id`, `mrb_float f`) already carries the kind: its callers box-check it.
@@ -420,12 +420,33 @@ class CodeGen
              when :float then declared_return_condition(:float, cls, false, var)
              when :integer then declared_return_condition(:fixnum, cls, false, var)
              when :symbol then declared_return_condition(:symbol, cls, false, var)
+             when :array, :hash, :string then declared_return_condition(kind, cls, false, var)
              else exact_class_guard(owner_class_ptr_expr(cls), var)
              end
       cond = "mrb_nil_p(#{var}) || (#{cond})" if nilable
+      # DECLARED_OPTIONAL_PARAM: an omitted optional holds its default (RbsParamCheck.optional_defaults), not a value.
+      if optional
+        raise "DECLARED_PARAM_GUARD: #{key} arg #{pos + 1}: no bc2cpp_given_opt in #{names.join(', ')}" unless names.include?('bc2cpp_given_opt')
+
+        cond = "bc2cpp_given_opt <= #{optional} || (#{cond})"
+      end
       "  if (mrb_unlikely(!(#{cond}))) bc2cpp_declared_param_violation(M, #{var}, \"#{key}\", #{pos + 1}, \"#{text}\"); " \
         "/* DECLARED_PARAM_GUARD #{key} arg #{pos + 1} */\n"
     end.join
+  end
+
+  # The declared parameter guards of `label` this build keeps: a core container or String kind only where its kind test
+  # is its exact class (declared_core_kind_kept?, as for an ivar declaration).
+  def declared_param_guards(label)
+    (self.class.declared_params&.[](label) || []).select do |_pos, cls, _key, _text, kind = :class, *|
+      !RbsParamCheck::CORE_IVAR_KINDS.key?(kind) || declared_core_kind_kept?(cls)
+    end
+  end
+
+  # label => guards for every label (declared_param_guards), what the class pools, the call-site report and the
+  # optional guard contract read.
+  def declared_params_kept
+    @declared_params_kept ||= (self.class.declared_params || {}).each_key.to_h { |label| [label, declared_param_guards(label)] }
   end
 
   # DECLARED_RETURN_GUARD: `code` (one compile_method result) with every exit of `impl_name` checked against the

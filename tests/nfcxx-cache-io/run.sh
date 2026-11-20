@@ -17,7 +17,7 @@ cp "$repo/scripts/nfcxx-cache-io.rb" "$sb/scripts/"
 cp "$here/fake-gha.rb" "$sb/scripts/nfcxx-cache-gha.rb"
 
 # The current functions, as nfcxx defines them.
-sed -n '/^cache_log() {/,/^}/p; /^cache_remote_get() {/,/^}/p; /^cache_remote_put() {/,/^}/p' "$repo/nfcxx" > "$work/new-funcs.sh"
+sed -n '/^cache_log() {/,/^}/p; /^cache_remote_get() {/,/^}/p; /^cache_remote_put() {/,/^}/p' "$repo/tests/driver-body/nfcxx-bash" > "$work/new-funcs.sh"
 grep -q 'nfcxx-cache-io.rb" log' "$work/new-funcs.sh" && grep -q 'nfcxx-cache-io.rb" remote-get' "$work/new-funcs.sh" \
   && grep -q 'nfcxx-cache-io.rb" remote-put' "$work/new-funcs.sh" \
   || { echo "FAIL the functions of nfcxx do not call scripts/nfcxx-cache-io.rb"; exit 1; }
@@ -76,7 +76,7 @@ case_run "log: text that looks like an option" miss 0 '' 'cache_log_file=$PWD/ca
 case_run "log: no file set writes nothing" miss 0 '' 'cache_log_file=; cache_log nothing'
 
 # sha: nfcxx's cache_sha (bash, unchanged) and the Ruby helper's sha agree on the same input
-sed -n '/^cache_sha()/p' "$repo/nfcxx" > "$work/sha.sh"
+sed -n '/^cache_sha()/p' "$repo/tests/driver-body/nfcxx-bash" > "$work/sha.sh"
 printf 'some input\n' | (. "$work/sha.sh"; cache_sha) > "$work/b.sha"
 printf 'some input\n' | ruby "$repo/scripts/nfcxx-cache-io.rb" sha > "$work/r.sha"
 cmp -s "$work/b.sha" "$work/r.sha" && ok "sha (bash and ruby agree)" || bad "sha"

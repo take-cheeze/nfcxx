@@ -19,6 +19,9 @@ def gather(word, bits):
 # --- single-op templates -------------------------------------------------------------------
 SINGLES = []
 ALL = json.load(open("all_templates.json")) if os.path.exists("all_templates.json") else {}
+if os.path.exists("bundle_templates.json"):
+    # header-less and multi-slot bundle shapes, fitted from bundle encodings (bundle_fit.py)
+    ALL.update(json.load(open("bundle_templates.json")))
 for tpl, e in list(T.items()) + list(K.items()) + list(ALL.items()):
     if "error" in e or "fixed_mask" not in e:
         continue
@@ -202,14 +205,17 @@ def decode_pccx(word, n):
     return None
 
 
+MAX_SINGLE = 16  # bundle templates can be longer than 5 bytes
+
+
 def decode_single(data, pos):
-    for n in (1, 2, 3, 4, 5):
+    for n in range(1, MAX_SINGLE + 1):
         if pos + n <= len(data):
             w = int.from_bytes(data[pos:pos + n], "little")
             t = decode_special_word(w, n)
             if t is not None:
                 return t, n
-    for n in (1, 2, 3, 4, 5):
+    for n in range(1, MAX_SINGLE + 1):
         if pos + n > len(data):
             continue
         w = int.from_bytes(data[pos:pos + n], "little")

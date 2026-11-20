@@ -355,6 +355,9 @@ BC2CPP_MAIN = lambda do
          "#{outside_ruby.size} Ruby outside sources) =="
     warn "  global refusal: #{closed_world.global_refusal || 'none'}"
     warn "  method_missing classes: #{closed_world.method_missing_classes.to_a.sort.join(', ')}"
+    # INSTANCE_SINGLETON_TAINT: the classes whose instances may get a singleton class, and what it may answer. One line
+    # and no local here: BC2CPP_MAIN is at mruby's limit of local variables.
+    warn "  instance singletons: #{closed_world.instance_singleton_report}"
     warn ''
     LintCrosscheck.enforce!(repo_root, closed_world)
     profile_phase.call('closed world: lint cross-check')
@@ -469,6 +472,10 @@ BC2CPP_MAIN = lambda do
   linked_mrblib = build_gems.values.flat_map { |dir| Dir["#{dir}/mrblib/**/*.rb"] }.select { |path| CoreDefs.core_source?(path) }
   unread_ruby = (Shellwords.split(ENV['FOREIGN_RUBY_SRCS']) + outside_ruby + linked_mrblib)
                 .map { |path| File.expand_path(path) }.uniq
+  # UNREAD_RUBY_OWNERS: the outside owner sets (OutsideOwnerCall) read these too. A linked core gem's mrblib that this
+  # build does not compile (bc2cpp-self runs mruby's own gems as Ruby) is in neither outside_ruby nor the program's
+  # core, and its `module Kernel; alias enum_for to_enum` was missing from the enum_for owner set.
+  CodeGen.unread_ruby_paths = unread_ruby.reject { |path| compiled_ruby.include?(path) }.sort
   unseen_flipped = CoreDefs.add_unseen_placeholders!(
     registry, ireps, core_all_defs, alias_sites,
     foreign_method_names(unread_ruby.reject { |path| compiled_ruby.include?(path) }.sort)
@@ -1518,6 +1525,11 @@ BC2CPP_MAIN = lambda do
     abort "\n[bc2cpp] DECLARED_RETURN_GUARD: #{guard_failures.size} runtime-checked return declaration(s) " \
           "without their compiled check:\n  #{guard_failures.join("\n  ")}"
   end
+  param_failures = DeclaredReturns.optional_param_guard_failures(gen.declared_params_kept, compiled)
+  unless param_failures.empty?
+    abort "\n[bc2cpp] DECLARED_PARAM_GUARD: #{param_failures.size} seeded optional parameter declaration(s) without " \
+          "their compiled check:\n  #{param_failures.join("\n  ")}"
+  end
   # DECLARED_IVAR_PROOF: a declared slot seeded as its declared kind is trusted only because every store to it is
   # checked; abort unless each method that stores to one compiled with its guard.
   ivar_failures = gen.declared_ivar_writer_failures(compiled, only_owners, other_owners, live: main_reach&.labels)
@@ -1592,11 +1604,11 @@ BC2CPP_MAIN = lambda do
   # RUNTIME_HEADER (runtime_header.rb): between the two, so it moves the compacted runtime text ShardOutput then splits.
   RuntimeHeader.capture_stdout(ENV[RuntimeHeader::DIR_KEY])
   CompactOutput.capture_stdout unless annotated
-  real_gem = BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol }
   # OWNER_CALL_ARITY (owner_call_arity.rb): registered before OWNER_SET_SHARE, so it rewrites that pass's text.
-  OwnerCallArity.capture_stdout if OwnerCallArity.enabled?(real_gem)
   # OWNER_SET_SHARE (owner_set_share.rb): before the split, so shards of one gem share a set too.
-  OwnerSetShare.capture_stdout(symbol) if OwnerSetShare.enabled?(real_gem)
+  # Both inline, not through a local: BC2CPP_MAIN is at mruby's limit of local variables (see owner_rewrite below).
+  OwnerCallArity.capture_stdout if OwnerCallArity.enabled?(BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol })
+  OwnerSetShare.capture_stdout(symbol) if OwnerSetShare.enabled?(BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol })
 
   # PARAM_TRACE (tools/bc2cpp/param_trace.rb): opt-in runtime classes of compiled method and block
   # parameters; unset (or any value but 1) leaves stdout untouched. Registered BEFORE ELSE_TRACE so the

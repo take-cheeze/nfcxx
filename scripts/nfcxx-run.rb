@@ -30,8 +30,8 @@
 # sets the time log; START VAR takes a clock reading into VAR (0 when no trace is on); SPAN VAR NAME CAT UNIT records the span
 # from VAR to now; SPANF is SPAN, and is recorded also when the command just before it failed (the bash's trace_end after a
 # pathb-cc status it passes on). The files are written when the run ends. The run's end is the plan's end, with any status.
-# --fallback: the bash runs the arguments again when the plan fails (the default backend's Path B build), so a failed run
-# writes no files: the bash writes them, from the start.
+# --fallback: for a caller that runs the arguments again with the bash when the plan fails, so a failed run writes no files (the
+# bash writes them, from the start). The Path B dispatch does not use it: its default-backend failure is a CHECK line (above).
 # Exit status: the status of the command that failed (127 or 126 when it cannot be started), 0 when the plan ran to its end,
 # 2 for a usage or plan error, and the port's status when the port refuses the arguments (3 for an unported option).
 
@@ -43,10 +43,15 @@ require_relative "trace"
 
 PORT = File.expand_path("nfcxx-loop.rb", __dir__)
 ROOT_DEFAULT = File.expand_path("..", __dir__)
-KINDS = %w[ENV RUN EXEC CP CAT LN TRACE TIMELOG START SPAN SPANF ENV1 OUT APP JOBS].freeze
+KINDS = %w[ENV RUN EXEC CP CAT LN TRACE TIMELOG START SPAN SPANF ENV1 OUT APP JOBS CHECK STORE].freeze
 TRACE_KINDS = %w[TRACE TIMELOG START SPAN SPANF].freeze
 # ENV1, OUT and APP are the prefixes of the next RUN or EXEC (the bash's NAME=VALUE cmd, cmd > FILE and cmd >> FILE): they
 # apply to that command only. JOBS N is the bash's ptxas parallelism, which the runner does not need: it does nothing.
+# The Path B plan (scripts/nfcxx-pathb.rb --tabs --checks): a RUN that fails does not stop the plan at once; the CHECK after it
+# (or a span, then the CHECK) is the bash's rule for its status. CHECK exit ends the plan with the status; CHECK gcc BEFORE AFTER
+# ARGV... prints BEFORE, the status and AFTER on standard error and replaces the process with ARGV... (the bash's exec of the
+# driver with NFCXX_BACKEND=gcc), with a zero status it goes on. STORE OBJ ENTRY REMOTE is the bash's cache_store: the store
+# of scripts/nfcxx-cache-check.rb (REMOTE "" for none), nothing when ENTRY is empty, and a failed store does not stop the plan.
 
 # The print step of the port's main, and the copy of it this runner plans with: the same plan, one tab-separated line per
 # command (kind, then the argv), instead of the words joined by spaces. The copy is made in memory; the port file is not changed.
@@ -113,6 +118,11 @@ def parse_plan(text)
       raise PlanError, "line #{number}: START needs VAR" unless fields.size == 1 && fields[0].match?(/\A\w+\z/)
     when "SPAN", "SPANF"
       raise PlanError, "line #{number}: #{kind} needs VAR NAME CAT UNIT" unless fields.size == 4 && fields[0].match?(/\A\w+\z/)
+    when "CHECK"
+      raise PlanError, "line #{number}: CHECK needs exit, or gcc BEFORE AFTER ARGV..." unless
+        (fields == ["exit"]) || (fields.size >= 4 && fields[0] == "gcc")
+    when "STORE"
+      raise PlanError, "line #{number}: STORE needs OBJ ENTRY REMOTE" unless fields.size == 3
     end
     pending = %w[ENV1 OUT APP].include?(kind) ? number : nil
     pending = nil if %w[RUN EXEC].include?(kind)
@@ -221,16 +231,59 @@ def trace_step(kind, fields, rec, vars)
   end
 end
 
-def run_plan(plan, env, root, tmp, rec)
+# CHECK exit | CHECK gcc BEFORE AFTER ARGV...: the rule for the status prc of the RUN before it (the bash's CHECK, after its
+# pathb-cc). A zero status goes on (nil). exit ends the plan with the status. gcc prints BEFORE, the status and AFTER on
+# standard error, then replaces this process with ARGV... (the bash's exec of the driver with NFCXX_BACKEND=gcc). The bash's
+# exec keeps the process ID, so the driver it runs is the trace's owner (NFCXX_TRACE_OWNER is this process's ID); the trace and
+# the time log written so far are kept first (state[:before_exec]), as the bash has written them.
+def check_step(args, prc, env, state)
+  return nil if prc.zero?
+  return prc if args == ["exit"]
+
+  $stderr.write("#{args[1]}#{prc}#{args[2]}\n")
+  state[:before_exec].call
+  env = env.merge("NFCXX_TRACE_OWNER" => Process.pid.to_s) if state[:traced]
+  $stdout.flush
+  $stderr.flush
+  Kernel.exec(env, *args[3..])
+end
+
+# STORE OBJ ENTRY REMOTE: the bash's cache_store (scripts/nfcxx-cache-check.rb store, with the entry its cache_check set and the
+# remote tier of NFCXX_CACHE_REMOTE, "" for none). Nothing when ENTRY is empty; a failed store does not stop the plan (|| true).
+def store_step(args, root, env)
+  obj, entry, remote = args
+  return 0 if entry.nil? || entry.empty?
+
+  argv = [RbConfig.ruby, File.join(root, "scripts", "nfcxx-cache-check.rb"), "store", "--out=#{obj}", "--entry=#{entry}"]
+  argv << "--remote=#{remote}" unless remote.nil? || remote.empty?
+  run_command(env, argv)
+  0
+end
+
+# Runs the plan; returns its status. A RUN that fails does not stop the plan at once: the bash's CHECK after it (or a span,
+# which is recorded first) decides, and a plan with no CHECK stops there, as set -e does. A CHECK's exec (see check_step)
+# ends the process: state[:before_exec] runs first, and state[:traced] tells whether the run traces.
+def run_plan(plan, env, root, tmp, rec, state)
   exported = {}  # ENV lines: exported as the bash exports them, for the programs that follow
   vars = {}      # START variables: clock readings for SPAN
   prefix = { env: {}, out: nil }   # ENV1, OUT and APP: for the next RUN or EXEC only
+  failed = 0     # the status of the last RUN when it failed (the bash's prc)
   plan.each_with_index do |(kind, fields), index|
+    # a failed command stops the plan (set -e), unless a CHECK comes next; a span before the CHECK is still recorded
+    return failed if failed != 0 && kind != "CHECK" && !TRACE_KINDS.include?(kind)
+    state[:traced] = true if kind == "TRACE"
     if TRACE_KINDS.include?(kind)
       trace_step(kind, fields, rec, vars)
       next
     end
     args = fields.map { |field| expand(field, root, tmp) }
+    if kind == "CHECK"
+      prc = failed
+      failed = 0
+      status = check_step(args, prc, env.merge(exported), state)
+      return status unless status.nil?
+      next
+    end
     status = case kind
              when "ENV"
                name, value = fields[0].split("=", 2)
@@ -267,17 +320,19 @@ def run_plan(plan, env, root, tmp, rec)
                file_step(kind) { File.open(args[0], "rb") { |io| IO.copy_stream(io, $stdout) } }
              when "LN"
                file_step(kind) { File.symlink(args[1], args[2]) }
+             when "STORE"
+               store_step(args, root, env.merge(exported))
              end
-    if status != 0
-      # a failed command stops the plan (set -e); a SPANF after it is still the bash's span (its status is passed on)
-      nxt = plan[index + 1]
-      trace_step(nxt[0], nxt[1], rec, vars) if nxt && nxt[0] == "SPANF"
-      return status
+    # a RUN's status is the CHECK's to decide (see the top of the loop)
+    if kind == "RUN"
+      failed = status
+      next
     end
+    return status unless status.zero?
     # EXEC ends the plan with its status, as the bash's exec does
     return 0 if kind == "EXEC"
   end
-  0
+  failed
 end
 
 def main(argv)
@@ -323,21 +378,23 @@ def main(argv)
     return 0
   end
 
-  run = lambda do |tmp|
+  run = lambda do |tmp, owned|
     rec = NfccxxTrace::Recorder.new
+    # before a CHECK's exec: the files so far, and the temporary directory (the exec leaves no ensure to remove it)
+    state = { traced: false, before_exec: lambda { rec.commit; FileUtils.rm_rf(tmp) if owned } }
     status = if opts[:chdir]
-               Dir.chdir(opts[:chdir]) { run_plan(plan, opts[:env], opts[:root], tmp, rec) }
+               Dir.chdir(opts[:chdir]) { run_plan(plan, opts[:env], opts[:root], tmp, rec, state) }
              else
-               run_plan(plan, opts[:env], opts[:root], tmp, rec)
+               run_plan(plan, opts[:env], opts[:root], tmp, rec, state)
              end
     # the run's end: the driver's span and the closing lines, then the files. With --fallback a failed run writes nothing
     rec.finish_trace
     rec.commit if status.zero? || !opts[:fallback]
     status
   end
-  return run.call(File.expand_path(opts[:tmp])) if opts[:tmp]
+  return run.call(File.expand_path(opts[:tmp]), false) if opts[:tmp]
 
-  Dir.mktmpdir("nfcxx-run") { |dir| run.call(dir) }
+  Dir.mktmpdir("nfcxx-run") { |dir| run.call(dir, true) }
 end
 
 begin

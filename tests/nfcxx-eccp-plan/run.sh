@@ -1,4 +1,5 @@
 #!/bin/bash
+# The pinned copies (pinned-defs.txt, pinned-call.txt) were taken from the driver at commit 1aa750d8b52163609481ea3cb4ad631389529a7b, before the B8 switch.
 # Differential test of nfcxx's eccp command line. The port is nfcxx's eccp call: state_put, eccp_plan_input, eccp_plan and
 # the lines of the call that stay in bash (the temporary directory, the trap, the trace span), taken from ./nfcxx as they are.
 # It runs scripts/nfcxx-eccp-plan.rb. The oracle is tests/nfcxx-eccp-plan/oracle.sh: the bash the port replaced, verbatim.
@@ -15,8 +16,8 @@ work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 ruby_bin=$(command -v ruby) || { echo "nfcxx-eccp-plan: ruby is not on PATH" >&2; exit 2; }
 
 # the port, as nfcxx has it: the functions, and the call (the lines from the moves test to the trace span of eccp)
-sed -n '/^state_put() {/,/^}/p;/^eccp_plan_input() {/,/^}/p;/^eccp_plan() {/,/^}/p;/^eccp_cleanup() {/,/^}/p' "$repo/nfcxx" > "$work/thin_defs.sh"
-sed -n '/^if \[ \$moves = 1 \]; then$/,/^eccp_plan$/p' "$repo/nfcxx" > "$work/thin_call.sh"; sed -n '/^t=\$(trace_start)$/,/^trace_end "\$t" "eccp (front end/p' "$repo/nfcxx" >> "$work/thin_call.sh"
+sed -n '/^temp_cleanup() {/,/^}/p;/^state_put() {/,/^}/p;/^eccp_plan_input() {/,/^}/p;/^eccp_plan() {/,/^}/p;/^eccp_cleanup() {/,/^}/p' "$here/pinned-defs.txt" > "$work/thin_defs.sh"
+sed -n '/^if \[ \$moves = 1 \]; then$/,/^eccp_plan$/p' "$here/pinned-call.txt" > "$work/thin_call.sh"; sed -n '/^t=\$(trace_start)$/,/^trace_end "\$t" "eccp (front end/p' "$here/pinned-call.txt" >> "$work/thin_call.sh"
 for f in "$work/thin_defs.sh" "$work/thin_call.sh"; do
   [ -s "$f" ] || { echo "nfcxx-eccp-plan: nothing to test in nfcxx ($f is empty)" >&2; exit 2; }
 done

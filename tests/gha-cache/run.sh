@@ -75,7 +75,7 @@ else fail=$((fail + 1)); echo "FAIL an entry with a path outside its directory: 
 
 # The driver's remote tier: its two functions, taken from nfcxx itself (they use $root and the helper).
 funcs=$work/remote-funcs.sh
-sed -n '/^cache_remote_get() {/,/^}/p; /^cache_remote_put() {/,/^}/p' "$root/nfcxx" > "$funcs"
+sed -n '/^cache_remote_get() {/,/^}/p; /^cache_remote_put() {/,/^}/p' "$root/tests/driver-body/nfcxx-bash" > "$funcs"
 (
   set -eu
   root=$root; . "$funcs"

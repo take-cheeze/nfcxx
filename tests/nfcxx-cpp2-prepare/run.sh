@@ -1,4 +1,5 @@
 #!/bin/bash
+# The pinned copy (pinned-nfcxx.txt) was taken from the driver at commit 1aa750d8b52163609481ea3cb4ad631389529a7b, before the B8 switch.
 # Differential test of nfcxx's cpp2_prepare: the port (the thin bash function of nfcxx, which runs scripts/nfcxx-cpp2.rb)
 # against tests/nfcxx-cpp2-prepare/oracle.sh (the bash before the port, verbatim). cppfront is a stub that logs its arguments
 # and writes its -o file, or fails for an input whose name has "fail". Each case runs in its own sandbox, once per side. The
@@ -9,8 +10,8 @@ here=$(cd "$(dirname "$0")" && pwd -P)
 repo=$(cd "$here/../.." && pwd -P)
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 ruby_bin=$(command -v ruby)
-sed -n '/^state_put() {/,/^}/p' "$repo/nfcxx" > "$work/thin.sh"
-sed -n '/^cpp2_prepare() {/,/^}/p' "$repo/nfcxx" >> "$work/thin.sh"
+sed -n '/^state_put() {/,/^}/p' "$here/pinned-nfcxx.txt" > "$work/thin.sh"
+sed -n '/^cpp2_prepare() {/,/^}/p' "$here/pinned-nfcxx.txt" >> "$work/thin.sh"
 [ -s "$work/thin.sh" ] || { echo "nfcxx-cpp2-prepare: no cpp2_prepare in nfcxx" >&2; exit 2; }
 
 # the sandbox: a root with a stub cppfront and the header, the repository's scripts, and the source files

@@ -11,24 +11,34 @@ on:
     branches: [main]
     paths:
       - "3rd/edg"
+      - "be/**"
       - "scripts/setup-edg.sh"
+      - "scripts/setup-pathb.sh"
       - "scripts/gen-c-target.rb"
       - "scripts/mrb.rb"
       - "scripts/setup-mruby.sh"
       - "scripts/mruby-tool-config.rb"
+      - "scripts/pathb-dump.rb"
+      - "scripts/pathb-hvx-emit.rb"
       - "tests/hexagon/**"
       - "tests/cases/**"
+      - "tests/pathb-hvx/**"
       - ".github/workflows/hexagon.yml"
   pull_request:
     paths:
       - "3rd/edg"
+      - "be/**"
       - "scripts/setup-edg.sh"
+      - "scripts/setup-pathb.sh"
       - "scripts/gen-c-target.rb"
       - "scripts/mrb.rb"
       - "scripts/setup-mruby.sh"
       - "scripts/mruby-tool-config.rb"
+      - "scripts/pathb-dump.rb"
+      - "scripts/pathb-hvx-emit.rb"
       - "tests/hexagon/**"
       - "tests/cases/**"
+      - "tests/pathb-hvx/**"
       - ".github/workflows/hexagon.yml"
   workflow_dispatch:
 
@@ -66,6 +76,50 @@ jobs:
 
       - name: Hexagon checks (open toolchain, clang-19 + qemu-hexagon)
         run: CLANG=clang-19 QEMU_HEXAGON=qemu-hexagon-static tests/hexagon/run.sh
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
+
+  pathb-hvx:
+    runs-on: ubuntu-24.04
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - uses: ./.github/actions/toolchain
+        with:
+          packages: ruby rake
+          qbe: "false"
+
+      - name: Path B harness cache key
+        id: pathb-key
+        run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Path B harness
+        id: harness
+        uses: actions/cache@v6
+        with:
+          path: build/pathb
+          key: pathb-${{ runner.os }}-${{ steps.pathb-key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh') }}
+
+      - name: Build the Path B harness
+        if: steps.harness.outputs.cache-hit != 'true'
+        run: scripts/setup-pathb.sh
+
+      - name: Build the mruby interpreter (runs scripts/mrb.rb)
+        run: scripts/setup-mruby.sh
+
+      - name: Install clang-19 and qemu-user (Hexagon)
+        run: sudo apt-get install -y --no-install-recommends clang-19 qemu-user-static
+
+      - name: Path B IR to C+HVX checks (open toolchain, clang-19 + qemu-hexagon)
+        run: CLANG=clang-19 QEMU_HEXAGON=qemu-hexagon-static tests/pathb-hvx/run.sh
 
       - name: sccache stats
         if: always()
