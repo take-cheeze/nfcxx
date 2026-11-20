@@ -55,9 +55,11 @@ module RbsParamCheck
     [[], trusted, guards]
   end
 
-  # DECLARED_IVAR_GUARD: one `@x: T` declaration the compiled stores check. kind is :float, :integer, :symbol or :class
-  # (the exact program class cls); nilable admits nil too (`T?`).
+  # DECLARED_IVAR_GUARD: one `@x: T` declaration the compiled stores check. kind is :float, :integer, :symbol, :class
+  # (the exact program class cls) or :array, :hash, :string (CORE_IVAR_KINDS: the core class cls, kept only in a build
+  # with no subclass of it, see CodeGen#declared_ivar_entry); nilable admits nil too (`T?`).
   IvarGuard = Struct.new(:owner, :name, :cls, :kind, :nilable, :key, :text)
+  CORE_IVAR_KINDS = { array: 'Array', hash: 'Hash', string: 'String' }.freeze
 
   # { [owner, name without @] => IvarGuard } of the instance-variable declarations (`@x: T`, `attr_reader x: T`) of a
   # program class whose type is Integer, Float, Symbol or an exact program class, or the same with `?`. A program class
@@ -74,6 +76,9 @@ module RbsParamCheck
       nilable = !inner.nil?
       kind = VALUE_CLASSES.key?(t.value) ? t.value : nil
       cls = kind ? VALUE_CLASSES[kind] : t.cls
+      # An element type is not checked: `Array[T]` is the Array kind.
+      core = t.kind == :class && t.cls == 'String' ? :string : CORE_IVAR_KINDS.key?(t.kind) && t.kind
+      kind, cls = core, CORE_IVAR_KINDS.fetch(core) if !kind && core
       unless kind
         next unless t.kind == :class && classes.include?(t.cls) && !subclassed.include?(t.cls)
 
