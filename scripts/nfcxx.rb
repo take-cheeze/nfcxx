@@ -24,13 +24,25 @@ oracle = File.join(root, "tests", "driver-body", "nfcxx-bash")
 # oracle below, which runs the gcc and Path B plans itself (its routes call nfcxx_plan_run and the --records planner).
 LOOP = File.join(ROOT, "scripts", "nfcxx-loop.rb")
 GCC_PLAN = File.join(ROOT, "scripts", "nfcxx-gcc-plan.rb")
+PATHB_PLAN = File.join(ROOT, "scripts", "nfcxx-pathb.rb")
 RUNNER = File.join(ROOT, "scripts", "nfcxx-run.rb")
 PLAN_KINDS = %w[RUN EXEC CP CAT LN ENV].freeze
+# the kinds of a Path B plan (scripts/nfcxx-pathb.rb --tabs --checks --live): its compiles and links, the CHECK after each
+# pathb-cc, and the trace and time log lines
+PATHB_KINDS = %w[RUN EXEC CP TRACE TIMELOG START SPAN SPANF CHECK].freeze
 
 def plan_text?(out)
   first = out.lines.first
   !first.nil? && PLAN_KINDS.include?(first.split(/[ \t]/, 2).first)
 end
+
+def pathb_text?(out)
+  first = out.lines.first
+  !first.nil? && PATHB_KINDS.include?(first.split(/[ \t]/, 2).first)
+end
+
+# a refusal the bash makes before it runs anything (the Path B port's sanitizer refusals): the message, printed by the driver
+Refusal = Struct.new(:message)
 
 def planned_loop?(args)
   out, _err, status = Open3.capture3(RbConfig.ruby, LOOP, *args)
@@ -55,8 +67,39 @@ def gcc_plan(args)
   nil
 end
 
+# The Path B plan of these arguments (scripts/nfcxx-pathb.rb --live --checks): the default backend, or --backend=pathb (the
+# bash's two choices for a hosted compile or link; a gcc choice is the gcc plan's). Returns the plan text, a Refusal (the
+# port's refusal, which the bash makes before it runs anything), or nil when the port does not plan these arguments. The
+# compile cache (--cache, --cache-log) is the bash's own lookup and store, which the port does not plan: those go to the bash.
+def pathb_plan(args)
+  return nil if ENV.key?("NFCXX_BACKEND") || args.any? { |a| a.start_with?("--cache") }
+
+  backends = args.select { |a| a.start_with?("--backend=") }
+  choice, rest =
+    if backends.empty? then ["default", args]
+    elsif backends == ["--backend=pathb"] then ["pathb", args - backends]
+    else return nil
+    end
+  out, err, status = Open3.capture3(RbConfig.ruby, PATHB_PLAN, "--tabs", "--checks", "--live=#{ROOT}", "--backend=#{choice}", "--", *rest)
+  return Refusal.new(err) if status.exitstatus == 2 && out.strip.empty? && !err.strip.empty?
+  return nil unless status.success? && pathb_text?(out)
+
+  out
+end
+
 def trace_route(kind)
   $stderr.write("nfcxx: driver: #{kind}\n") if ENV["NFCXX_DRIVER_TRACE"] == "1"
+end
+
+# runs a plan text with the runner (scripts/nfcxx-run.rb --plan); returns its status
+def run_plan_text(text)
+  Dir.mktmpdir("nfcxx-plan") do |dir|
+    file = File.join(dir, "plan.txt")
+    File.write(file, text)
+    pid = Process.spawn(RbConfig.ruby, RUNNER, "--root=#{ROOT}", "--plan=#{file}")
+    Process.wait(pid)
+    $?.exitstatus || 128 + $?.termsig
+  end
 end
 
 # B5: the cache configuration's refusal (NFCXX_CACHE_REMOTE, scripts/nfcxx-cache-config.rb plan). The bash checks it first (its
@@ -77,9 +120,25 @@ if planned_loop?(ARGV)
   exit($?.exitstatus || 128 + $?.termsig)
 end
 
-# the gcc and Path B plans are run by the bash driver (its route runs them with nfcxx_plan_run): the runner here does not
-# take their kinds (CD, ENV, CHECK, STORE, the placeholders), so a plan of those routes goes to the oracle below
+# the gcc plan's kinds (CD, NOTE, CHECK, STORE, the placeholders) are the bash's nfcxx_plan_run's: a gcc plan is left to the oracle
+# below (only its refusal is printed here). The Path B plan is run below, with the runner, which takes its kinds.
 gcc_plan(ARGV) # a refusal exits here; a plan is left to the oracle
+
+# the Path B plan (the default backend, or --backend=pathb), run by the runner: the CHECK lines of the plan are the bash's rule for
+# a pathb-cc status (the gcc form re-executes the driver with NFCXX_BACKEND=gcc, as the bash does), so a failed compile is not
+# run a second time here. The setup's and the input's refusals come first, as the bash prints them (the oracle prints them).
+unless driver_refusals.any?
+  pb = pathb_plan(ARGV)
+  if pb.is_a?(Refusal)
+    trace_route("pathb-plan")
+    $stderr.write(pb.message)
+    exit(2)
+  end
+  if pb
+    trace_route("pathb-plan")
+    exit(run_plan_text(pb))
+  end
+end
 trace_route("bash")
 
 # the oracle computes its root from its own location; here it is this repository's root (the same substitution the
