@@ -25,8 +25,7 @@ class CodeGen
   # The `super` call for an Exception#initialize target, or nil when the target is another method or the chain is open.
   def native_exception_initialize(owner_def, irep, d_reg, n)
     return nil unless owner_def && owner_def.name == 'initialize' && n && n.to_i.between?(0, 1)
-    return nil unless call_facts_enabled? && super_direct_call_allowed?(owner_def)
-    return nil unless exception_initialize_chain?(owner_def.owner)
+    return nil unless exception_initialize_chain_reached?(owner_def)
 
     note_super_site(:native_exception_init, owner_def, irep, nil)
     if n.to_i.zero?
@@ -34,6 +33,13 @@ class CodeGen
     else
       "  r#{d_reg} = bc2cpp_exc_init(M, self, r#{d_reg.to_i + 1});\n"
     end
+  end
+
+  # The `super` of owner_def (an initialize) reaches exc_initialize. That reads no block (mrb_get_args "|o"), so a
+  # caller's block is not observable through it and SUPER_NO_CALLER_BLOCK is not needed; SUPER_FRAME_BLOCK does not
+  # extract the block for such a method either.
+  def exception_initialize_chain_reached?(owner_def)
+    owner_def.name == 'initialize' && call_facts_enabled? && exception_initialize_chain?(owner_def.owner)
   end
 
   # Every class from owner's superclass up to Exception: none defines initialize (no registry body), and Exception's own

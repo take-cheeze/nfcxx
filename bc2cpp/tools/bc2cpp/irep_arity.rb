@@ -239,15 +239,19 @@ end
 # block (lambda_body with blk=1), so only the constructing opcode tells them
 # apart; this recognizer fires only for LAMBDA, so RETURN_BLK/BREAK are allowed
 # here and compile to a plain return.
-# Nested LAMBDA/BLOCK/SENDB/SSENDB and RESCUE/RAISEIF/EXCEPT are still
-# rejected.
+# Nested LAMBDA and RESCUE/RAISEIF/EXCEPT are still rejected.
+# LAMBDA_NESTED_BLOCKS: a BLOCK/SENDB/SSENDB in the body is a nested region of
+# emit_proc_fallback_fn, as in a block body. Only a `return` inside such a nested
+# block is refused (recognize_lambda_fallback_regions): it must leave the lambda,
+# and a lambda body's env carries no return token for it.
 # CONFINED_LAMBDA_UPVAR_SUPPORT: upvars are captured as raw pointers into the
 # enclosing C++ frame, so the proc must not outlive it. A lambda has no call
 # site to vet, so recognize_lambda_fallback_regions requires
 # lambda_proc_frame_confined? over the enclosing irep instead. A lambda with no
-# upvars needs no such proof.
+# upvars needs no such proof. LAMBDA_CELLS: one that may escape captures through
+# heap cells instead.
 LAMBDA_FALLBACK_UNSAFE_OPS = %i[
-  LAMBDA BLOCK SENDB SSENDB
+  LAMBDA
   RESCUE RAISEIF EXCEPT
 ].freeze
 

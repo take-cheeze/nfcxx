@@ -11,9 +11,55 @@ class CodeGen
   CALL_FACTS_MAX_CLASSES = 32
 
   # Not memoized: a core method's body compiles with @closed_world swapped out.
+  # INSTANCE_SINGLETON_TAINT: instances that may get a singleton class do not turn the facts off when every such
+  # class is placed (ClosedWorld#instance_singleton_taint): a fact set then also holds each tainted class whose
+  # singleton may answer one of its names (call_facts_classes), and a use that dispatches a name refuses a set holding
+  # a class whose singleton may answer that name (singleton_tainted_for?). BC2CPP_SINGLETON_TAINT=0 restores the
+  # whole-world condition.
   def call_facts_enabled?
     ENV['BC2CPP_CALL_FACTS'] != '0' && !@closed_world.nil? && !@native_name_sources.nil? &&
-      @closed_world.global_refusal.nil? && @closed_world.exact_instances_singleton_free?
+      @closed_world.global_refusal.nil? && (@closed_world.exact_instances_singleton_free? || singleton_taint_placed?)
+  end
+
+  # Every instance singleton maker is placed on a class (ClosedWorld#instance_singleton_taint).
+  def singleton_taint_placed?
+    ENV['BC2CPP_SINGLETON_TAINT'] != '0' && !@closed_world.instance_singleton_taint.nil?
+  end
+
+  # What a singleton class of an instance of +klass+ may answer: nil (none can have one), :any, or a Set of names. A
+  # tainted class taints every class below it, and a class whose ancestry is not fully known is tainted by any taint.
+  def instance_singleton_gain(klass)
+    taint = @closed_world&.instance_singleton_taint
+    return :any if taint.nil?
+    return nil if taint.empty? || klass == CallFacts::CLASS_OBJECT
+
+    @instance_singleton_gain ||= {}
+    key = [@closed_world.object_id, klass]
+    return @instance_singleton_gain[key] if @instance_singleton_gain.key?(key)
+
+    answers = call_facts_answers
+    by_simple = Hash.new { |h, k| h[k] = [] }
+    taint.each { |owner, gain| by_simple[answers.simple(owner)] << gain }
+    anc, unknown = answers.ancestors(klass)
+    gains = unknown ? taint.values : anc.flat_map { |a| by_simple.fetch(a, []) }
+    @instance_singleton_gain[key] = merge_singleton_gains(gains)
+  end
+
+  def merge_singleton_gains(gains)
+    return nil if gains.empty?
+    return :any if gains.include?(:any)
+
+    names = gains.reduce(Set.new) { |all, g| all.merge(g) }
+    return names unless names.delete?(ClosedWorld::SINGLETON_INSTALLED)
+
+    installed = symbol_installed_names
+    installed.nil? ? :any : names.merge(installed)
+  end
+
+  # An instance of +klass+ may answer one of +names+ through its singleton class.
+  def singleton_tainted_for?(klass, names)
+    gain = instance_singleton_gain(klass)
+    !gain.nil? && (gain == :any || names.any? { |name| gain.include?(name) })
   end
 
   def call_facts_answers
@@ -56,7 +102,11 @@ class CodeGen
 
     states = call_facts_states(irep)
     names = states && CallFacts::Flow.facts(states[idx], reg)
-    names && call_facts_classes(names)
+    set = names && call_facts_classes(names)
+    # An instance whose singleton class may answer +name+ does not run its class's definition.
+    return nil if set&.any? { |k| singleton_tainted_for?(k, [name]) }
+
+    set
   end
 
   def call_facts_classes(names)
@@ -66,6 +116,10 @@ class CodeGen
     answers = call_facts_answers
     sets = names.filter_map { |m| answers.members(m) }
     set = sets.reduce(:&) unless sets.empty?
+    # INSTANCE_SINGLETON_TAINT: an instance may have answered a name through its singleton class.
+    if set && @closed_world.instance_singleton_taint&.any?
+      set |= answers.classes.select { |k| singleton_tainted_for?(k, names) }
+    end
     ok = set && !set.empty? && set.size <= CALL_FACTS_MAX_CLASSES && set.all? { |k| answers.user_instance?(k) }
     @call_facts_classes[names] = ok ? set.to_a.sort : nil
   end

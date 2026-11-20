@@ -17,6 +17,7 @@ require_relative 'scan_cache'
 require_relative 'send_names'
 require_relative 'factory_flow'
 require_relative 'bytecode_ir_ops'
+require_relative 'outside_singletons'
 
 # CLOSED_WORLD: bc2cpp compiles closed-world builds only, where the only Ruby that
 # can ever run is the closed world bc2cpp compiles, plus the scanned core and
@@ -81,7 +82,7 @@ class ClosedWorld
   FRESH_BUILTIN_SENDS = %w[map collect select filter reject flat_map collect_concat sort sort_by to_a entries zip
                            uniq compact reverse].freeze
   # Kernel methods that give an arbitrary receiver a singleton class (`extend` is a global
-  # refusal already, see scan_send).
+  # refusal already, see scan_send). OutsideSingletons::MAKERS repeats them.
   SINGLETON_MAKERS = %w[singleton_class define_singleton_method instance_eval instance_exec].freeze
   # A project native that makes a singleton class by hand.
   NATIVE_SINGLETON = /\bmrb_singleton_class(?:_ptr|_clone)?\b|\bmrb_define_singleton_method(?:_id)?\b|\bmrb_obj_extend\b/
@@ -201,6 +202,14 @@ class ClosedWorld
     @basic_object_referenced = false
     @singleton_makers = []
     @singleton_opens = []
+    # INSTANCE_SINGLETON_TAINT: the singleton-making sends ([irep, idx, insn]) and maker Symbol loads ([irep, idx, reg])
+    # of the closed world's own Ruby, and each outside Ruby source's placement (OutsideSingletons), nil when one
+    # is not placed.
+    @singleton_sends = []
+    @singleton_symbol_loads = []
+    @outside_singleton_taint = []
+    @outside_singleton_modules = Hash.new { |h, k| h[k] = [] }
+    @outside_open_modules = Set.new
     @outside_constant_writes = Set.new
     @outside_constant_write_counts = Hash.new(0)
     @dynamic_subclassed = Set.new
@@ -1011,9 +1020,46 @@ class ClosedWorld
   # No Array/Hash/Range/String instance can gain a singleton class or a mixin: nothing in the
   # world (mruby's own Ruby aside, which never does it to those) names a singleton-making
   # method, opens a singleton class on a non-class object, or creates one from native code.
+  # INSTANCE_SINGLETON_TAINT, for the generation log: "none", "not placed (reason)", or each tainted class with the
+  # names its instances' singletons may answer.
+  def instance_singleton_report
+    taint = instance_singleton_taint
+    return "not placed (#{singleton_taint_unplaced})" if taint.nil?
+    return 'none' if taint.empty?
+
+    taint.sort.map do |klass, gain|
+      names = gain == :any ? ['any name'] : gain.map { |n| n == SINGLETON_INSTALLED ? '<installed names>' : n }.sort
+      "#{klass} (#{names.join(' ')})"
+    end.join(', ')
+  end
+
   def exact_instances_singleton_free?
     !@global_refusal && singleton_makers.empty?
   end
+
+  # INSTANCE_SINGLETON_TAINT: the per-class form of exact_instances_singleton_free?. Which classes' instances may get a
+  # singleton class, and what it may answer: { class path => :any | Set of method names }, read as that class and
+  # every class below it. A gain holding SINGLETON_INSTALLED also answers every name installed by Symbol. {} when
+  # exact_instances_singleton_free? holds.
+  #
+  # A maker in the closed world's own Ruby is placed on the class whose instance its receiver is (`self` in an instance
+  # method of a declared class, instance_singleton_place); one whose receiver may be any object but whose gain is
+  # bounded (define_singleton_method(:x), `def obj.x`, a singleton_class only asked include? or given a listed module)
+  # is placed on Object, so on every class. nil when some maker cannot be placed (then any instance may have one with
+  # any method): a global refusal, a native maker, an outside Ruby maker OutsideSingletons does not place, a maker
+  # whose receiver and gain are both open, or a maker-named Symbol whose value may reach a send.
+  #
+  # The singleton class an `extend Mod` makes answers Mod's methods; Mod must be a module the outside sources or the
+  # registry fully list (no mixin, hook or other definer in its body), else :any. A class or module object's
+  # singleton (`class << self`, `def self.x`, `Const.singleton_class`) taints nothing: an instance never sees it.
+  def instance_singleton_taint
+    return @instance_singleton_taint if defined?(@instance_singleton_taint)
+
+    @instance_singleton_taint = compute_instance_singleton_taint
+  end
+
+  # Why instance_singleton_taint is nil (a label for the generation log), or nil when it is placed.
+  attr_reader :singleton_taint_unplaced
 
   # NUMERIC_SLOW_CLOSED `%`: the constant +name+ of a core class names that class in every scope
   # core Ruby looks it up from: no bytecode binds it, no outside source rebinds it (the core's own definition is
@@ -1592,6 +1638,7 @@ class ClosedWorld
       @clone_sent = true if file.fetch(:clone_sent)
       @freeze_possible = true if file.fetch(:freeze_possible)
       @singleton_makers << [path, :ruby] if file.fetch(:singleton_maker)
+      note_outside_singletons(file)
 
       file.fetch(:constant_writes).each { |name| note_outside_constant_write(name) }
 
@@ -1768,6 +1815,8 @@ class ClosedWorld
     dynamic_unresolved = covered != dynamic_total
     definer_loops = dynamic_unresolved ? [] : loops.compact.select { |loop| loop[:dyn].positive? }
     class_factory, struct_factory = ruby_factory_facts(text)
+    # INSTANCE_SINGLETON_TAINT: read from the syntax tree; a source that does not parse keeps the text scan, unplaced.
+    singletons = core ? nil : OutsideSingletons.scan(path)
 
     {
       path: path,
@@ -1777,7 +1826,10 @@ class ClosedWorld
       # A full-line comment sends nothing; any other spelling (code or a string) counts.
       clone_sent: text.gsub(/^[ \t]*#.*$/, '').match?(/\bclone\b/),
       freeze_possible: !core && text.match?(/\bfreeze\b/),
-      singleton_maker: !core && text.match?(RUBY_SINGLETON),
+      singleton_maker: !core && (singletons ? singletons.fetch(:maker) : text.match?(RUBY_SINGLETON)),
+      singleton_taint: core ? [] : singletons&.fetch(:taint),
+      singleton_modules: singletons ? singletons.fetch(:modules) : {},
+      open_modules: singletons ? singletons.fetch(:open_modules) : [],
       constant_writes: text.scan(/\b(?:[A-Z]\w*::)*([A-Z]\w*)\s*=(?!=|>)/).map(&:first),
       dynamic: dynamic_unresolved,
       definer_loops: definer_loops,
@@ -1988,6 +2040,225 @@ class ClosedWorld
 
   # -- singleton classes --------------------------------------------
 
+  def compute_instance_singleton_taint
+    return {} if exact_instances_singleton_free?
+    return unplaced_singleton(:global_refusal) if @global_refusal
+
+    native = @singleton_makers.find { |_, kind| kind == :native }
+    return unplaced_singleton("native #{native[0]}") if native
+
+    taint = Hash.new { |h, k| h[k] = Set.new }
+    @outside_singleton_taint.each do |path, entries|
+      return unplaced_singleton("outside #{path}") if entries.nil?
+
+      entries.each { |klass, gain, modules| add_singleton_gain(taint, klass, gain || module_gain(modules)) }
+    end
+    makers = @singleton_opens.map { |irep, idx, insn| [irep, idx, insn, insn.op == :SDEF ? [insn.sym.to_s] : :any] } +
+             @singleton_sends.map { |irep, idx, insn| [irep, idx, insn, nil] }
+    makers.each do |irep, idx, insn, gain|
+      next if !SELF_SEND_OPS.include?(insn.op) && class_object_value?(irep, idx, insn.reg)
+
+      gain ||= singleton_send_gain(irep, idx, insn)
+      # A receiver that cannot be placed may be any object: a bounded gain still holds for every class.
+      klass = instance_singleton_place(irep, idx, insn) || (gain == :any ? nil : 'Object')
+      return unplaced_singleton("#{irep.label}:#{idx} #{insn.sym || insn.op} in #{File.basename(irep.file.to_s)}") unless klass
+
+      add_singleton_gain(taint, klass, gain)
+    end
+    @singleton_symbol_loads.each do |irep, idx, reg|
+      # The value only compared or listed (resolve_installer_symbol_loads' proof) is never sent.
+      next if installer_symbol_value_safe?(irep, idx, reg, 0, false)
+
+      return unplaced_singleton("#{irep.label}:#{idx} a maker Symbol")
+    end
+    taint.to_h { |klass, gain| [klass, gain == :any ? :any : gain.freeze] }
+  end
+
+  SELF_SEND_OPS = %i[SSEND SSEND0 SSENDB].freeze
+  # A module's hooks that run on what it is mixed into.
+  MIXIN_HOOKS = %w[extended extend_object included append_features prepended prepend_features].freeze
+
+  # `reg` holds a class or module object on every path: `self` in a class body, or a constant that names a class or
+  # module the closed world or the core declares and that nothing (bytecode or outside source) binds another value
+  # to. Stricter than class_object_register?, which also takes a constant only outside code writes (`ENV`) and a
+  # fresh `Object.new`, both instances.
+  def class_object_value?(irep, idx, reg)
+    return false if reg.nil?
+
+    every_definition?(irep, idx, reg) do |writer, _|
+      case writer.op
+      # The root body's self is the main object, an instance of Object.
+      when :LOADSELF then @walked.include?(irep.label) && irep.label != @root_label
+      when :GETCONST, :GETMCNST
+        name = simple((writer.op == :GETCONST ? writer.const_name : writer.mcnst_name).to_s)
+        class_constant?(name) && !@outside_constant_writes.include?(name) && named_class_or_module?(name)
+      else false
+      end
+    end
+  end
+
+  def named_class_or_module?(name)
+    return true if !classes_named(name).empty? || @module_names.any? { |mod| simple(mod) == name }
+
+    super_of, mixins = CoreHierarchySigs.hierarchy
+    super_of.key?(name) || mixins.each_value.any? { |mods| Array(mods).include?(name) }
+  end
+
+  def unplaced_singleton(why)
+    @singleton_taint_unplaced = why.to_s
+    nil
+  end
+
+  def add_singleton_gain(taint, klass, gain)
+    if gain == :any || taint[klass] == :any
+      taint[klass] = :any
+    else
+      taint[klass].merge(gain)
+    end
+  end
+
+  # What the singleton class `extend` gives with these module references can answer: the instance methods of every
+  # module whose path ends in one of them (a superset, as resolve_deferred_mixin_modules), or :any when one is not
+  # found or not fully listed.
+  def module_gain(refs)
+    outside = @outside_singleton_modules
+    owners = Set.new
+    @registry.each_value { |defs| defs.each { |d| owners << d.owner } }
+    known = (outside.keys + @module_names.to_a + owners.to_a).uniq
+    names = Set.new
+    refs.each do |ref|
+      bare = ref.delete_prefix('::')
+      matches = known.select { |mod| mod == bare || mod.end_with?("::#{bare}") }
+      return :any if matches.empty?
+
+      matches.each do |mod|
+        return :any unless module_listed?(mod, owners)
+
+        names.merge(outside.fetch(mod, []))
+        @registry.each { |name, defs| names << name if defs.any? { |d| d.owner == mod } }
+        # A module of the closed world's own Ruby may also define a name by Symbol (a define_method loop the registry
+        # does not hold): CodeGen reads this mark as every name the build installs that way (symbol_installed_names).
+        names << SINGLETON_INSTALLED if @module_names.include?(mod) || owners.include?(mod)
+      end
+    end
+    names
+  end
+
+  # In a gain: also every name the closed world's own Ruby installs by Symbol.
+  SINGLETON_INSTALLED = :installed
+
+  # No mixin into +mod+, no class of that name, no computed definer and no extend hook: its instance methods are the
+  # ones listed.
+  def module_listed?(mod, owners)
+    return false if @outside_open_modules.include?(mod) || @declared_classes.include?(mod)
+    return false if @mixins.nil? || !@mixins.fetch(mod, []).empty? || @unknown_mixins&.include?(mod)
+
+    hooks = owners.include?("#{mod}.singleton") &&
+            MIXIN_HOOKS.any? { |hook| @registry.fetch(hook, []).any? { |d| d.owner == "#{mod}.singleton" } }
+    !hooks
+  end
+
+  # The declared class whose instance `self` is at a maker in the closed world's own Ruby, or nil: the maker's receiver
+  # (SDEF and SCLASS's register, a send's receiver, implicit in SSEND) is `self` on every path, in the body of a method
+  # the registry defines on a class (not a module, not a class object). A block's `self` may be rebound, so a block is
+  # not placed.
+  def instance_singleton_place(irep, idx, insn)
+    self_receiver = %i[SSEND SSEND0 SSENDB].include?(insn.op) ||
+                    (insn.reg && every_definition?(irep, idx, insn.reg) { |writer, _| writer.op == :LOADSELF })
+    return nil unless self_receiver
+
+    owners = method_body_owners.fetch(irep.label, [])
+    return nil unless owners.size == 1
+
+    owner = owners.first
+    return nil if owner.end_with?('.singleton') || module_declared?(owner) || !class_declared?(owner)
+
+    owner
+  end
+
+  # { irep label => the owners the registry defines that irep's body on }.
+  def method_body_owners
+    @method_body_owners ||= begin
+      map = Hash.new { |h, k| h[k] = [] }
+      @registry.each_value { |defs| defs.each { |d| map[d.irep] << d.owner if d.irep && !d.core } }
+      map.transform_values(&:uniq)
+    end
+  end
+
+  # The names whose lookup a maker send may change on its receiver: define_singleton_method(:x) answers x, a
+  # `singleton_class` whose value is only read as below changes what those reads say, and any other maker send may
+  # define anything (:any).
+  def singleton_send_gain(irep, idx, insn)
+    return :any unless insn.reg
+
+    case insn.sym
+    when 'define_singleton_method'
+      names = literal_symbol_args(irep, idx, insn, 1)
+      names && names.size == 1 ? names : :any
+    when 'singleton_class' then singleton_class_use_gain(irep, idx, insn.reg)
+    else :any
+    end
+  end
+
+  # The value `x.singleton_class` wrote to +reg+ at +idx+ is only the receiver of `include?`, of an `include` or
+  # `prepend` of a listed module (its methods), or of a `remove_method`/`undef_method` of literal names, directly or
+  # through `send` (those names). Any other use may define anything: :any.
+  def singleton_class_use_gain(irep, idx, reg)
+    uses = FactoryFlow.uses(irep, idx, reg)
+    return :any if uses.nil? || uses.empty?
+
+    program = BytecodeIR.for(irep)
+    gain = Set.new
+    uses.each do |use_idx, use_reg|
+      use = program.source_at(use_idx)
+      return :any unless SEND_OPS.include?(use.op) && !SELF_SEND_OPS.include?(use.op) && use.reg == use_reg
+
+      names =
+        case use.sym
+        when 'include?' then []
+        when 'include', 'prepend'
+          ref = mixin_module_ref(irep, use_idx, use)
+          ref && ref[:name] ? module_gain([ref[:name]]) : :any
+        when 'remove_method', 'undef_method' then literal_symbol_args(irep, use_idx, use, :all)
+        when 'send', '__send__', 'public_send'
+          all = literal_symbol_args(irep, use_idx, use, :all)
+          all && %w[remove_method undef_method].include?(all.first) && all.size > 1 ? all.drop(1) : nil
+        end
+      return :any if names.nil? || names == :any
+
+      gain.merge(names)
+    end
+    gain.to_a
+  end
+
+  # The Symbol literals a send passes at argument position +range+ (1-based), or at every one for :all, or nil when the
+  # argument list is not plain or one of them is not a literal.
+  def literal_symbol_args(irep, idx, insn, range)
+    return nil unless insn.reg && insn.plain_fixed_argc?
+
+    argc = insn.argc.to_i
+    positions = range == :all ? (1..argc).to_a : [range]
+    return nil if positions.empty? || positions.max > argc
+
+    positions.map do |i|
+      names = []
+      literal = every_definition?(irep, idx, insn.reg + i) do |writer, _|
+        name = %i[LOADSYM SYMBOL].include?(writer.op) ? loaded_symbol_name(irep, writer) : nil
+        names << name if name
+        !name.nil?
+      end
+      return nil unless literal && names.uniq.size == 1
+
+      names.first
+    end
+  end
+
+  def note_outside_singletons(file)
+    @outside_singleton_taint << [file.fetch(:path), file.fetch(:singleton_taint)]
+    file.fetch(:singleton_modules).each { |mod, names| @outside_singleton_modules[mod].concat(names) }
+    @outside_open_modules.merge(file.fetch(:open_modules))
+  end
+
   # Judged after the scan: class_constant? needs every SETCONST counted.
   def singleton_makers
     @singleton_makers_all ||= @singleton_makers + @singleton_opens.filter_map do |irep, idx, insn|
@@ -2003,9 +2274,15 @@ class ClosedWorld
       @singleton_opens << [irep, idx, insn]
     when :LOADSYM, :SYMBOL
       name = loaded_symbol_name(irep, insn)
-      @singleton_makers << [irep.label, name] if name && SINGLETON_MAKERS.include?(name)
+      return unless name && SINGLETON_MAKERS.include?(name)
+
+      @singleton_makers << [irep.label, name]
+      @singleton_symbol_loads << [irep, idx, insn.reg]
     when SEND_OPS
-      @singleton_makers << [irep.label, insn.sym] if SINGLETON_MAKERS.include?(insn.sym)
+      return unless SINGLETON_MAKERS.include?(insn.sym)
+
+      @singleton_makers << [irep.label, insn.sym]
+      @singleton_sends << [irep, idx, insn]
     end
   end
 
@@ -2894,7 +3171,7 @@ class ClosedWorld
   # source or a dynamic mixin may name it, some mixin did not resolve, or a root class (Object, Kernel, BasicObject)
   # takes it, which reaches every object. A module nothing includes answers no instance: its instance methods (the
   # private copies `module_function` makes) bind no receiver, and its `.singleton` definitions are judged on their own.
-  def module_definer_includers(mod)
+  public def module_definer_includers(mod)
     return nil unless @mixins && @unknown_mixins && @unknown_mixins.empty? && @module_names.include?(mod)
 
     @module_includer_memo ||= {}

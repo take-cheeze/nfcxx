@@ -3265,8 +3265,10 @@ module MrbcRb
         return a
       end
 
-      # milestone 13: gen_values flushes into ARRAY/ARYPUSH once an argument reaches register 99 (GEN_VAL_STACK_MAX).
-      return call_with_args(node, need: need) if args.size >= 2 && a + 1 < 99 && a + args.size >= 99 && node.name.to_s.match?(PLAIN_NAME)
+      # milestone 13: gen_values flushes into ARRAY/ARYPUSH once an argument reaches register 99 (GEN_VAL_STACK_MAX). An
+      # index call with two or more arguments (`out[re, 1]`) is a plain gen_call as well, so it flushes the same way.
+      return call_with_args(node, need: need) if args.size >= 2 && a + 1 < 99 && a + args.size >= 99 &&
+                                                (node.name.to_s.match?(PLAIN_NAME) || node.name == :[])
 
       operand_into(recv, a) if recv
       skip = safe_jump(a, need) if node.safe_navigation?
