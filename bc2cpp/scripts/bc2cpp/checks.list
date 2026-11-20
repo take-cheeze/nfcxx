@@ -2,6 +2,7 @@
 # scripts/ci/timed_checks.rb --shard N/3 in nfcxx's .github/workflows/ci.yml (the checks job). The world's
 # scripts/ci/check_registry.rb reads this file as the bc2cpp-checks runner of scripts/ci/bc2cpp_check_policy.yml.
 # ci:parallel begin 4
+ruby scripts/bc2cpp/probe_root_cache_probe.rb
 ruby scripts/bc2cpp/type_check.rb --no-sends
 ruby scripts/bc2cpp/sealed_host_check.rb
 ruby scripts/bc2cpp/ir_context_results_check.rb

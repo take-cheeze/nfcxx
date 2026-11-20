@@ -45,7 +45,22 @@ class CodeGen
       @guard_cycles += 1
       return false
     end
-    @cycle_clean_cache = {} if @probing.empty?
+    outermost = @probing.empty?
+    if outermost
+      @cycle_clean_cache = {}
+      # A guarded answer cannot be reused at an arbitrary nested depth. The
+      # empty-stack context is repeatable, however, while the unconditional
+      # answers it reads have not changed. Only retain answers from probes
+      # that did not discover any new unconditional answer themselves.
+      if @root_clean_cache_facts != @clean_cache
+        @root_clean_cache = {}
+        @root_clean_cache_facts = @clean_cache.dup.freeze
+      end
+      if ENV['BC2CPP_PROBE_ROOT_CACHE'] != '0' && @root_clean_cache.key?(label)
+        @guard_cycles += 1
+        return @root_clean_cache[label]
+      end
+    end
     return @cycle_clean_cache[label] if @cycle_clean_cache&.key?(label) && ENV['BC2CPP_PROBE_CYCLE_CACHE'] != '0'
 
     @probing << label
@@ -57,11 +72,18 @@ class CodeGen
         @clean_cache[label] = clean
       else
         (@cycle_clean_cache ||= {})[label] = clean
+        if outermost && @root_clean_cache_facts == @clean_cache && ENV['BC2CPP_PROBE_ROOT_CACHE'] != '0'
+          @root_clean_cache[label] = clean
+        end
       end
       clean
     ensure
       @probing.delete(label)
     end
+  end
+
+  def forget_root_probe_answers
+    @root_clean_cache = @root_clean_cache_facts = nil
   end
 
   # Every ivar one compile_method call sets and clears for itself, with its
