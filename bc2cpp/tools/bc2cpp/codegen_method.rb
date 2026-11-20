@@ -180,6 +180,9 @@ class CodeGen
     # bc2cpp_method_return out to this same top-level catch (the per-call-site
     # catches only match bc2cpp_block_break), so search regions recursively.
     needs_return_catch = block_fallback_regions.any? { |region| block_fallback_region_has_return_blk?(region) }
+    # LAMBDA_CELLS: recognized here, before the registers are declared, since a boxed lambda's captured registers are
+    # cells. A resumable frame keeps its registers in its own frame object, so there a boxed lambda keeps its `#error`.
+    lambda_fallback_regions = recognize_lambda_fallback_regions(irep)
     # BLOCK_STEP: the steps of the blocks that suspend, compiled ahead so the blocks' procs can name their makers.
     block_step_code = compile_block_steps(block_fallback_regions, d)
 
@@ -369,7 +372,7 @@ class CodeGen
         type ? "#{TYPE_OPS.fetch(type)[:box]}(#{arg})" : arg
       end
       initial[blk_slot] = 'bc2cpp_blk' if has_blk
-      out << emit_register_initializers(irep.nregs, initial, boxed: boxed_registers(block_fallback_regions))
+      out << emit_register_initializers(irep.nregs, initial, boxed: boxed_registers(block_fallback_regions + lambda_fallback_regions))
       out << sealed_int16_declarations(irep)
       out << stack_tuple_declarations(irep)
       out << array_hash_fixnum_prologue(d)
@@ -476,8 +479,9 @@ class CodeGen
     # (emit_lambda_fallback_glue). LAMBDA is disjoint from BLOCK/SENDB, so the
     # order and the `suppressed` check are defensive only. See
     # lambda_fallback_safe? for why RETURN_BLK/BREAK are allowed.
-    recognize_lambda_fallback_regions(irep).each do |region|
+    lambda_fallback_regions.each do |region|
       next if suppressed.include?(region[:block_addr])
+      next if region[:boxed] && @resumable
 
       fn_result = emit_proc_fallback_fn(region, d)
       next unless fn_result
