@@ -508,6 +508,9 @@ class CodeGen
         # the sound and small answer: such a class keeps its dynamic dispatch
         # until a path that unboxes properly exists.
         arity_ok &&= native_arg_types(init_def, t_mand).all? { |ty| ty.nil? } if arity_ok
+        # An #initialize whose `_impl` takes the call's block (a yield, block_given? or SUPER_FRAME_BLOCK) is reached
+        # through Class#new, which hands it the block; this positional call has no block argument to give.
+        arity_ok &&= !takes_block_param?(init_irep) if arity_ok
         if no_custom_new && no_custom_allocate && arity_ok
           # 4: the ONLY_OWNERS/OTHER_OWNERS emission guard.
           owner_emitted = !@only_owners || @only_owners.include?(known) || @other_owners&.include?(known)
