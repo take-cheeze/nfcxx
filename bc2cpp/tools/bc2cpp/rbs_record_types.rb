@@ -170,6 +170,7 @@ module RbsRecordTypes
             owner_of: body_owners(ireps, registry), escape_world: escape_world, ireps: ireps, poison: poison,
             outside_ivars: outside_ivars }
     ctx[:tracer] = ValueTrace.new(ctx)
+    ctx[:exact_tracer] = ValueTrace.new(ctx, exact: true)
     by_name.each do |name, decls|
       errors = []
       decl = decls.first
@@ -281,7 +282,41 @@ module RbsRecordTypes
       errors << [site_loc(irep, idx, ctx[:root]),
                  "#{decl.owner}#@#{name}: nil is stored but the type is not `{ ... }?`"]
     end
+    install_traced(keys, scanner.writes, decl, ctx) if errors.empty?
     [errors, keys]
+  end
+
+  # RECORD_FIELD_TRACE: a declared key whose every store traces exactly (ValueTrace exact: no class hint, only
+  # literals, core fresh-Array results and the call, ivar and iterator rules) holds those classes, nil added when the key
+  # can be absent, so the RECORD_HASH_PROOF consumers (RECORD_NILABLE_READ) read it as they read a literal store. Only a
+  # key RecordHash's own scan left unknown changes. BC2CPP_RECORD_FIELD_TRACE=0 leaves the slot as scanned.
+  def install_traced(keys, writes, decl, ctx)
+    return if ENV['BC2CPP_RECORD_FIELD_TRACE'] == '0'
+
+    traced = {}
+    writes.each do |keys_written, irep, idx, reg|
+      classes = exact_store_classes(irep, idx, reg, ctx)
+      keys_written.each { |key| traced[key] = classes && traced.fetch(key, Set.new)&.|(classes) }
+    end
+    traced.each do |key, classes|
+      info = keys[key]
+      next unless classes && info && decl.fields[key]&.classes
+
+      exact = info[:nilable] ? classes | [RecordHash::NIL_CLASS] : classes
+      %i[strict trusted].each { |tier| info[tier] = exact if info[tier].include?(:unknown) }
+    end
+  end
+
+  def exact_store_classes(irep, idx, reg, ctx)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, shared: true)
+    return nil if defs.nil? || defs.empty?
+
+    defs.each_with_object(Set.new) do |d, out|
+      classes = d.entry? ? nil : ctx[:exact_tracer].classes_at(irep, d.index, d.reg)
+      return nil unless classes
+
+      out.merge(classes)
+    end
   end
 
   def value_errors(irep, idx, reg, field, ctx)

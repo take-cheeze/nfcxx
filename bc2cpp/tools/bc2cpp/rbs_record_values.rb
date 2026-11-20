@@ -29,8 +29,11 @@ module RbsRecordTypes
     EMPTY = Set.new.freeze
     UNKNOWN = :unknown
 
-    def initialize(ctx)
+    # +exact+: no class hint enters (trace_new_target, the block arm of the ClassLayout Array rule), so the result is a
+    # proof, not a guarded hint.
+    def initialize(ctx, exact: false)
       @ctx = ctx
+      @exact = exact
       @ireps = ctx[:ireps] || {}
       @assume = {}
       @setiv = nil
@@ -100,16 +103,25 @@ module RbsRecordTypes
     private
 
     def compute(irep, index, reg, depth)
-      base = RbsRecordTypes.value_class_at(irep, index, reg, @ctx)
+      insn = BytecodeIR.for(irep).source_at(index)
+      base = @exact ? exact_base(irep, index, reg, insn) : RbsRecordTypes.value_class_at(irep, index, reg, @ctx)
       return Set[base] if base
 
-      insn = BytecodeIR.for(irep).source_at(index)
       case insn.op
       when :MOVE then reg_classes(irep, index, insn.regs[1], depth + 1)
       when :GETIV then insn.ivar && ivar_classes(insn.ivar, self_owner(irep), depth + 1)
       else
         send_classes(irep, index, insn, depth + 1) if BytecodeIR::Ops::SEND.include?(insn.op) && insn.sym
       end
+    end
+
+    # A literal, or a non-block send the ClassLayout Array rule proves without a hint (a core fresh-Array result).
+    def exact_base(irep, index, reg, insn)
+      literal = RbsRecordTypes::LITERAL_CLASS.call(irep, index)
+      return literal if literal
+      return nil unless BytecodeIR::Ops::SEND.include?(insn.op) && !BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op)
+
+      @ctx[:value_class]&.call(irep, index + 1, reg)
     end
 
     def send_classes(irep, index, insn, depth)

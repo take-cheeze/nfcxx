@@ -80,27 +80,34 @@ SIG = <<~RBS
   end
 RBS
 
-# [stderr, nil] of a run, or [nil, failure text] when bc2cpp.rb aborts.
-run = lambda do |source, sig|
+# [stderr, nil, generated code] of a run, or [nil, failure text] when bc2cpp.rb aborts.
+run = lambda do |source, sig, env = {}|
+  env.each { |k, v| ENV[k] = v }
   Dir.mktmpdir('record-field-trace') do |dir|
     sigs = File.join(dir, 'sig')
     FileUtils.mkdir_p(sigs)
     File.write(File.join(sigs, 'record.rbs'), sig)
     ENV['BC2CPP_SIG_DIRS'] = sigs
-    _code, err = runtime.generate(source, dir, only_owners: %w[Member Troop Party Scene Other])
-    [err, nil]
+    code, err = runtime.generate(source, dir, only_owners: %w[Member Troop Party Scene Other])
+    [err, nil, code]
   rescue RuntimeError => e
     [nil, e.message]
   ensure
     ENV.delete('BC2CPP_SIG_DIRS')
+    env.each_key { |k| ENV.delete(k) }
   end
 end
+body = ->(code, name) { code.to_s.split(%r{^(?=// \w+#)}).find { |part| part.start_with?("// #{name}") }.to_s }
+exact_size = ->(code) { body.call(code, 'Scene#count').scan('NILABLE_RECEIVER :size -- receiver is nil or exactly Array').size }
 
-err, failure = run.call(BASE, SIG)
+err, failure, code = run.call(BASE, SIG)
 check.call('the record of block-iterator, call-result and joined stores is verified',
            failure.nil? && err.include?('RECORD_TYPE  Scene#@ui  (4 keys; hints: :allies Array, :foes Array, ' \
                                         ':items Array, :skills Array)'))
 warn failure if failure
+check.call('each traced field read is nil or exactly an Array (RECORD_NILABLE_READ)', exact_size.call(code) == 4)
+_, _, off = run.call(BASE, SIG, 'BC2CPP_RECORD_FIELD_TRACE' => '0')
+check.call('BC2CPP_RECORD_FIELD_TRACE=0 leaves the reads unknown', exact_size.call(off).zero?)
 
 recursive = BASE + "class Other\n  def battle_items; deep(3); end\n  def deep(n); n > 0 ? deep(n - 1) : []; end\nend\n"
 err, failure = run.call(recursive, SIG)
