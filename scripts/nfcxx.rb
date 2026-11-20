@@ -12,6 +12,7 @@ require "fileutils"
 require "open3"
 require "rbconfig"
 require_relative "nfcxx-setup-args"
+require_relative "nfcxx-second-pass"
 require_relative "nfcxx-cache-config"
 
 root = File.expand_path("..", __dir__)
@@ -88,6 +89,9 @@ text = File.read(oracle).sub(/^root=\$\(cd "\$\(dirname "\$0"\)" && pwd\)$/) { "
 # driver's own path is put there (the program is an executable file of its own, not a driver)
 text = text.gsub('"$0"', "\"#{File.join(root, "nfcxx")}\"")
 abort "nfcxx: the oracle's root line is not as expected" unless text.include?("root=#{root}")
+# B7 (scripts/nfcxx-second-pass.rb): the oracle's second run is the Ruby driver itself, with the same environment and arguments
+# (run), inside the oracle's own trace span around it. Its line is the one the oracle has (the oracle is frozen).
+text = NfcxxSecondPass.oracle_text(text) or abort "nfcxx: the oracle's second-pass run is not as expected"
 program = Tempfile.new(["nfcxx-oracle", ".sh"])
 program.write(text)
 program.close
