@@ -115,6 +115,14 @@ def compiled?(code, name)
   code.match?(/^(?:static )?mrb_value #{name}\(mrb_state\* M/)
 end
 
+# SUPER_FRAME_BLOCK: when the no-caller-block proof fails, the wrapper may still compile by taking its caller's block
+# as an `_impl` parameter and forwarding it to `super`. What must not happen is a compiled wrapper whose bare super
+# passes nil: that is a compiled `_impl` without the block parameter.
+def drops_caller_block?(code, name)
+  signature = code[/^(?:static )?mrb_value #{name}\(mrb_state\* M[^\n]*/].to_s
+  !signature.empty? && !signature.include?('bc2cpp_blk')
+end
+
 def singleton_line(err)
   err[/^  instance singletons: .*$/].to_s.strip
 end
@@ -173,23 +181,23 @@ variant(BASE + UNRELATED) do |code, err, dir|
 end
 
 variant(BASE + UNRELATED, env: { 'BC2CPP_SINGLETON_TAINT' => '0' }) do |code, _err, _dir|
-  suite.check('with BC2CPP_SINGLETON_TAINT=0 (the whole-world rule) the wrapper stays interpreted',
-              !compiled?(code, 'StWrap_run_impl'))
+  suite.check('with BC2CPP_SINGLETON_TAINT=0 (the whole-world rule) the wrapper does not drop its caller block',
+              !drops_caller_block?(code, 'StWrap_run_impl'))
 end
 
 variant(BASE + UNRELATED + OWNER_RUN) do |code, err, _dir|
-  suite.check("a singleton of the wrapper's own class that may answer run keeps it interpreted (#{singleton_line(err)})",
-              singleton_line(err).include?('StBase (run)') && !compiled?(code, 'StWrap_run_impl'))
+  suite.check("a singleton of the wrapper's own class that may answer run does not let it drop its caller block (#{singleton_line(err)})",
+              singleton_line(err).include?('StBase (run)') && !drops_caller_block?(code, 'StWrap_run_impl'))
 end
 
 variant(BASE + OWNER_ANY) do |code, err, _dir|
-  suite.check("a singleton of the wrapper's own class that may answer anything keeps it interpreted (#{singleton_line(err)})",
-              singleton_line(err).include?('StBase (any name)') && !compiled?(code, 'StWrap_run_impl'))
+  suite.check("a singleton of the wrapper's own class that may answer anything does not let it drop its caller block (#{singleton_line(err)})",
+              singleton_line(err).include?('StBase (any name)') && !drops_caller_block?(code, 'StWrap_run_impl'))
 end
 
 variant(BASE + UNRELATED + PROVEN_BLOCK_CALLER) do |code, _err, _dir|
-  suite.check('a block caller proven to hold an instance of a class the module is prepended to keeps it interpreted',
-              !compiled?(code, 'StWrap_run_impl'))
+  suite.check('a block caller proven to hold an instance of a class the module is prepended to does not let it drop that block',
+              !drops_caller_block?(code, 'StWrap_run_impl'))
 end
 
 variant(BASE + UNRELATED + UNRELATED_BLOCK_CALLER) do |code, _err, _dir|
@@ -208,7 +216,7 @@ end
 variant(BASE, foreign: [['st_unplaced.rb', OUTSIDE_UNPLACED]]) do |code, err, _dir|
   line = singleton_line(err)
   suite.check("an outside extend of an unknown receiver is not placed (#{line})", line.include?('not placed'))
-  suite.check('the wrapper stays interpreted when a maker is not placed', !compiled?(code, 'StWrap_run_impl'))
+  suite.check('the wrapper does not drop its caller block when a maker is not placed', !drops_caller_block?(code, 'StWrap_run_impl'))
 end
 
 suite.finish!
