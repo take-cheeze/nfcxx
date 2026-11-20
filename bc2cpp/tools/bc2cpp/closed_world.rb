@@ -531,8 +531,19 @@ class ClosedWorld
     name = simple(mod)
     return nil if @outside_include_open || @outside_include_names.include?(name) || @outside_alias_names.include?(name)
     return nil if @ruby_tokens.each_value.any? { |tokens| tokens.include?(name) }
+    # A mixin the analysis could not place (defer_mixin_module?: `obj.extend(Mod)`, a mixin made in a method) puts the
+    # module on a receiver no declared class lists.
+    return nil if deferred_mixin_module?(mod)
 
     declared_class_names
+  end
+
+  # Is +mod+ (a declared name) one a deferred mixin may name? The same superset resolve_deferred_mixin_modules takes.
+  def deferred_mixin_module?(mod)
+    @deferred_mixin_modules.any? do |ref|
+      bare = ref.delete_prefix('::')
+      mod == bare || mod.end_with?("::#{bare}")
+    end
   end
 
   # NATIVE_CORE_DIRECT: nothing outside the registry (an outside Ruby
