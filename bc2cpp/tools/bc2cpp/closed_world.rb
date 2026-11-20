@@ -1020,6 +1020,19 @@ class ClosedWorld
   # No Array/Hash/Range/String instance can gain a singleton class or a mixin: nothing in the
   # world (mruby's own Ruby aside, which never does it to those) names a singleton-making
   # method, opens a singleton class on a non-class object, or creates one from native code.
+  # INSTANCE_SINGLETON_TAINT, for the generation log: "none", "not placed (reason)", or each tainted class with the
+  # names its instances' singletons may answer.
+  def instance_singleton_report
+    taint = instance_singleton_taint
+    return "not placed (#{singleton_taint_unplaced})" if taint.nil?
+    return 'none' if taint.empty?
+
+    taint.sort.map do |klass, gain|
+      names = gain == :any ? ['any name'] : gain.map { |n| n == SINGLETON_INSTALLED ? '<installed names>' : n }.sort
+      "#{klass} (#{names.join(' ')})"
+    end.join(', ')
+  end
+
   def exact_instances_singleton_free?
     !@global_refusal && singleton_makers.empty?
   end
