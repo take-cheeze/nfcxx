@@ -74,6 +74,16 @@
 #                  read from NFCXX_COSMOCC, else build/cosmocc/bin/cosmocc (scripts/setup-cosmo.sh). docs/notes/cosmo.md.
 set -euo pipefail
 root=$(cd "$(dirname "$0")" && pwd)
+# temp_cleanup: removes the driver's temporary directories the EXIT traps name. Each trap calls it, so a later trap (which
+# replaces an earlier one) does not leave the earlier stage's directory behind. The eccp directory is not here: eccp_cleanup
+# removes it, and only when the intermediates are not kept.
+temp_cleanup() {
+  [ -z "${tmp:-}" ] || rm -rf "$tmp"
+  [ -z "${ptmp:-}" ] || rm -rf "$ptmp"
+  [ -z "${ctmp:-}" ] || rm -rf "$ctmp"
+  [ -z "${cudatmp:-}" ] || rm -rf "$cudatmp"
+  [ -z "${fso_dir:-}" ] || rm -rf "$fso_dir"
+}
 # -fsyntax-only: the compile without keeping its object (a full front-end and back-end pass, so it reports every error a
 # -c would; build systems and scripts use it as a type check). Run as `-c -o TMP.o`, the object removed.
 for a in "$@"; do
@@ -82,10 +92,10 @@ for a in "$@"; do
     for b in "$@"; do
       case $b in -fsyntax-only) ;; -o) fso_has_o=1; fso_args+=("$b") ;; -E) fso_has_E=1; fso_args+=("$b") ;; *) fso_args+=("$b") ;; esac
     done
-    [ $fso_has_E = 1 ] && exec "$0" "${fso_args[@]}"
+    [ $fso_has_E = 1 ] && { temp_cleanup; exec "$0" "${fso_args[@]}"; }
     if [ $fso_has_o = 1 ]; then
       # An explicit -o is honoured by the real compile; the type check discards it.
-      fso_dir=$(mktemp -d); trap 'rm -rf "$fso_dir"' EXIT
+      fso_dir=$(mktemp -d); trap temp_cleanup EXIT
       fso_new=(); fso_skip=0
       for b in "${fso_args[@]}"; do
         if [ $fso_skip = 1 ]; then fso_skip=0; fso_new+=("$fso_dir/x.o"); continue; fi
@@ -93,7 +103,7 @@ for a in "$@"; do
       done
       "$0" -c "${fso_new[@]}"; exit $?
     fi
-    fso_dir=$(mktemp -d); trap 'rm -rf "$fso_dir"' EXIT
+    fso_dir=$(mktemp -d); trap temp_cleanup EXIT
     "$0" -c "${fso_args[@]}" -o "$fso_dir/x.o"; exit $?
   fi
 done
@@ -183,7 +193,7 @@ cu_inputs=()
 cu_keep=""   # with -c: the directory the device images are kept in (the link re-reads the copy, and the copy names them)
 cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs and files in place of the source
   [ ${#cu_inputs[@]} -gt 0 ] || return 0
-  cudatmp=$(mktemp -d); trap 'rm -rf "$cudatmp"; trace_finish' EXIT
+  cudatmp=$(mktemp -d); trap 'temp_cleanup; trace_finish' EXIT
   local dir=$cudatmp
   if [ $compile_only = 1 ]; then
     # The copy must outlive the compile: the prelinker re-reads it when it needs a template instance at link time,
@@ -247,7 +257,7 @@ cpp2_prepare() {  # cpp2_prepare: translates every .cpp2 input and puts its tran
   local cppfront_src=${CPPFRONT_SRC:-$root/build/cppfront-src}
   [ -x "$root/build/cppfront" ] || { echo "nfcxx: cppfront is not built; run scripts/setup-cppfront.sh (docs/notes/cpp2.md)" >&2; exit 2; }
   [ -f "$cppfront_src/include/cpp2util.h" ] || { echo "nfcxx: no cpp2util.h under $cppfront_src; run scripts/setup-cppfront.sh" >&2; exit 2; }
-  if [ -z "${cudatmp:-}" ]; then cudatmp=$(mktemp -d); trap 'rm -rf "$cudatmp"' EXIT; fi
+  if [ -z "${cudatmp:-}" ]; then cudatmp=$(mktemp -d); trap 'temp_cleanup' EXIT; fi
   local dir=$cudatmp
   if [ $compile_only = 1 ]; then
     # As for .cu inputs (cu_prepare): the translation outlives the compile, because the prelinker re-reads it at link time.
@@ -381,6 +391,7 @@ eccp_plan() {  # eccp_plan: the eccp command line (eccp_argv), its exports (eccp
 eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary directory (and of the C-input and .cu steps)
   local rc=$?
   "${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" cleanup "$keep_intermediates" "$eccp_dir" "${cudatmp:-}" "${ctmp:-}"   # the removals (tests/nfcxx-link/run.sh)
+  temp_cleanup
   trace_finish
   return $rc
 }
@@ -689,7 +700,7 @@ fi
 if [ $emit_c = 1 ]; then
   # Run the front end alone and print the generated C.
   base=${EDG_BASE:-$root/build/edg-base}
-  tmp=$(mktemp -d); trap 'rm -rf "$tmp" "$cudatmp"; trace_finish' EXIT
+  tmp=$(mktemp -d); trap 'temp_cleanup; trace_finish' EXIT
   f=$(realpath "${srcs[0]}")   # the first source, not files[0] (which may be an -I option)
   # host dirs first, then EDG's own, as eccp orders user and default include dirs
   inc=(${sys_inc[@]+${sys_inc[@]+"${sys_inc[@]}"}} --sys_include="$base/include"); [ $freestanding = 1 ] && inc=("-I$root/lib")
@@ -801,7 +812,7 @@ fi
 # C inputs: compile each .c to an object. Link options (-l, -L, ...) stay in files for the final link.
 cobjs=()
 if [ ${#cfiles[@]} -gt 0 ]; then
-  ctmp=$(mktemp -d); trap 'rm -rf "$ctmp" "$cudatmp"; trace_finish' EXIT
+  ctmp=$(mktemp -d); trap 'temp_cleanup; trace_finish' EXIT
   n=0
   for c in ${cfiles[@]+"${cfiles[@]}"}; do
     o=$ctmp/$n.o; n=$((n + 1))
@@ -816,7 +827,7 @@ if [ ${#cfiles[@]} -gt 0 ]; then
         [ $default_backend = 1 ] || exit $prc
         echo "nfcxx: Path B did not build $c (status $prc); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)" >&2
         rm -rf "$ctmp"
-        exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
+        temp_cleanup; exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
       fi
     else
       "${NFCXX_GCC:-gcc}" -c -O2 -fwrapv -fno-strict-aliasing ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${cflags_pic[@]+${cflags_pic[@]+"${cflags_pic[@]}"}} ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o"
@@ -906,7 +917,7 @@ if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
   # (below, on the EDG route); Path B does not build them, so this unit takes the gcc route, which runs it.
   if [ ${#cu_inputs[@]} -gt 0 ] && [ -n "${cudatmp:-}" ] && [ -s "$cudatmp/$(basename "${cu_inputs[0]}" .cu).dev.kernels.unresolved" ]; then
     echo "nfcxx: ${cu_inputs[0]} has kernel instances only the host compile makes; building it with the gcc backend, which runs the second pass" >&2
-    exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
+    temp_cleanup; exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
   fi
   cache_check   # a hit: the object is copied back and the program is done
   # -c: one object per C++ file, named as the gcc and Path B backends name it (-o FILE for one file, else basename.o)
@@ -919,7 +930,7 @@ if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
            # the default backend failed on this file: the object is built again with gcc, which reports its own errors
            [ $default_backend = 1 ] || exit $prc
            echo "nfcxx: Path B did not build $f (status $prc); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)" >&2
-           exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
+           temp_cleanup; exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
          fi ;;
     esac
   done
@@ -927,7 +938,7 @@ if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
   exit 0
 fi
 if [ $backend = pathb ]; then
-  ptmp=$(mktemp -d); trap 'rm -rf "$ptmp" "$cudatmp"; trace_finish' EXIT
+  ptmp=$(mktemp -d); trap 'temp_cleanup; trace_finish' EXIT
   pobjs=(); plink=(); n=0
   for f in ${files[@]+"${files[@]}"}; do
     case $f in
@@ -946,7 +957,7 @@ if [ $backend = pathb ]; then
            # the whole program is built again with gcc, which reports its own errors if it fails too
            echo "nfcxx: Path B did not build $f (status $prc); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)" >&2
            rm -rf "$ptmp"
-           exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
+           temp_cleanup; exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
          fi
          [ $prc = 0 ] || exit $prc
          pobjs+=("$o") ;;
