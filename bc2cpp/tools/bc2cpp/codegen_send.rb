@@ -1847,6 +1847,12 @@ class CodeGen
     return [nil, false] unless active.add?(owner)
     return [nil, false] if @unknown_mixins.include?(owner)
 
+    # MIXIN_ORDER_UNKNOWN: @prepended_modules / @included_modules list a class's mixins in the order the generator read
+    # their sites, which is the run-time order only within one file; across files it follows the require graph. With two
+    # or more of them defining the name, which one answers first is not known here, so the lookup is unknown.
+    return [nil, false] if mixins_defining(name, @prepended_modules[owner]) > 1 ||
+                           mixins_defining(name, @included_modules[owner]) > 1
+
     Array(@prepended_modules[owner]).reverse.each do |mod|
       return [nil, false] unless @closed_world.stable_constant_identity?(mod)
 
@@ -1885,6 +1891,23 @@ class CodeGen
     return [nil, true] if superclass.nil?
 
     closed_world_lookup_target(name, superclass, active, self_call: self_call, any_visibility: any_visibility)
+  end
+
+  # MIXIN_ORDER_UNKNOWN: how many of +mods+ define +name+, themselves or through the modules they include or prepend.
+  def mixins_defining(name, mods)
+    Array(mods).count do |mod|
+      seen = Set.new
+      work = [mod]
+      found = false
+      until work.empty? || found
+        m = work.pop
+        next unless seen.add?(m)
+
+        found = @registry.fetch(name, []).any? { |definition| definition.owner == m }
+        work.concat(Array(@included_modules[m])).concat(Array(@prepended_modules[m]))
+      end
+      found
+    end
   end
 
   # DIRECT_CALLABLE: can a call with `n` positional arguments reach `definition`'s compiled `_impl` as a
