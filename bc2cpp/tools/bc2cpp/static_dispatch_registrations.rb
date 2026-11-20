@@ -417,7 +417,7 @@ module StaticDispatchRegistrations
   # world's (CLOSED_OWNER_RE, a superset of the open list's) looks up nothing either list may drop: the symbol index
   # of each.
   # The result may be discarded (a `&:sym` loop's `each` call), which is the same owner call.
-  OWNER_CALL_SITE = /^[ \t]*(?:BC2CPP_COLD_ARM[ \t]+)?(?:\w+ = )?bc2cpp_owner_call(?:_argv)?\(M, (\w+), (\d+), \d+, BC2CPP_OWNERS(?:_D)?\((.*)$/
+  OWNER_CALL_SITE = /^[ \t]*(?:BC2CPP_COLD_ARM[ \t]+)?(?:\w+ = )?bc2cpp_owner_call(?:_argv|[0-2]|_b0)?\(M, (\w+), (\d+), \d+, BC2CPP_OWNERS(?:_D)?\((.*)$/
   OWNER_DIRECT = /BC2CPP_OWNER_DIRECT\("((?:[^"\\]|\\.)*)"/
 
   # SYM_SITE (codegen_loop_inline.rb emit_sym_inline): the marker of an inlined `&:sym` loop, `// SYM_SITE <irep label>
@@ -447,7 +447,7 @@ module StaticDispatchRegistrations
 
         text = body.join
         next if text.match?(SYM_SITE_BY_NAME)
-        next unless text.scan(/bc2cpp_owner_call(?:_argv)?\(M, \w+, (\d+),/).flatten.map(&:to_i).all? { |i| found.include?(i) }
+        next unless text.scan(/bc2cpp_owner_call(?:_argv|[0-2]|_b0)?\(M, \w+, (\d+),/).flatten.map(&:to_i).all? { |i| found.include?(i) }
 
         covered[[marker[1], marker[2].to_i]] += 1
       end

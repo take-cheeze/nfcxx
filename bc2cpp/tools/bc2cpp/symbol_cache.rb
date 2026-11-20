@@ -689,7 +689,11 @@ module SymbolCache
     // The argv form: a splat site passes the Array's own items, as mrb_funcall_with_block would (both reach vm.c's
     // funcall_with_block_m, whose funcall_args_capture copies them and packs a long list as OP_SEND does).
     // CALLER_SELF: a level 2 call passes the caller's self (the generated code's `self`) for the protected check.
-    static mrb_value bc2cpp_owner_call_argv(mrb_state* M, mrb_value recv, int i, int level, bc2cpp_owner_set& s, mrb_value blk, mrb_int argc, const mrb_value* argv,
+    // BC2CPP_SHARD_ONE_BODY (shard_output.rb): one body per sharded gem, which every shard's entries call.
+    #ifndef BC2CPP_SHARD_ONE_BODY
+    #define BC2CPP_SHARD_ONE_BODY
+    #endif
+    BC2CPP_SHARD_ONE_BODY static mrb_value bc2cpp_owner_call_argv(mrb_state* M, mrb_value recv, int i, int level, bc2cpp_owner_set& s, mrb_value blk, mrb_int argc, const mrb_value* argv,
                                             mrb_value caller_self = mrb_nil_value()) {
       mrb_sym mid = bc2cpp_sym(M, i);
       // As bc2cpp_funcall_argv: Proc#call and its aliases on a compiled block are a yield, not an OP_CALL in a C frame.
@@ -762,7 +766,7 @@ module SymbolCache
     #endif
       return bc2cpp_keep_call(M, [&] { return bc2cpp_call_found(M, recv, mid, &m, c, argc, argv, blk); });
     }
-    static mrb_value bc2cpp_owner_call(mrb_state* M, mrb_value recv, int i, int level, bc2cpp_owner_set& s, mrb_value blk, mrb_int argc, ...) {
+    [[maybe_unused]] static mrb_value bc2cpp_owner_call(mrb_state* M, mrb_value recv, int i, int level, bc2cpp_owner_set& s, mrb_value blk, mrb_int argc, ...) {
       mrb_value argv[16];
       va_list ap;
       va_start(ap, argc);
@@ -771,6 +775,35 @@ module SymbolCache
       mrb_value caller_self = level >= 2 ? va_arg(ap, mrb_value) : mrb_nil_value();
       va_end(ap);
       return bc2cpp_owner_call_argv(M, recv, i, level, s, blk, argc, argv, caller_self);
+    }
+    // OWNER_CALL_ARITY (owner_call_arity.rb): the fixed-arity entries. Out of line, so each site passes only its own
+    // arguments; the trailing caller_self overload is a level 2 site's. One body per sharded gem, as the argv form.
+    BC2CPP_SHARD_ONE_BODY [[gnu::noinline, maybe_unused]] static mrb_value bc2cpp_owner_call0(mrb_state* M, mrb_value recv, int i, int level, bc2cpp_owner_set& s) {
+      return bc2cpp_owner_call_argv(M, recv, i, level, s, mrb_nil_value(), 0, nullptr);
+    }
+    BC2CPP_SHARD_ONE_BODY [[gnu::noinline, maybe_unused]] static mrb_value bc2cpp_owner_call0(mrb_state* M, mrb_value recv, int i, int level, bc2cpp_owner_set& s, mrb_value caller_self) {
+      return bc2cpp_owner_call_argv(M, recv, i, level, s, mrb_nil_value(), 0, nullptr, caller_self);
+    }
+    BC2CPP_SHARD_ONE_BODY [[gnu::noinline, maybe_unused]] static mrb_value bc2cpp_owner_call1(mrb_state* M, mrb_value recv, int i, int level, bc2cpp_owner_set& s, mrb_value a) {
+      return bc2cpp_owner_call_argv(M, recv, i, level, s, mrb_nil_value(), 1, &a);
+    }
+    BC2CPP_SHARD_ONE_BODY [[gnu::noinline, maybe_unused]] static mrb_value bc2cpp_owner_call1(mrb_state* M, mrb_value recv, int i, int level, bc2cpp_owner_set& s, mrb_value a, mrb_value caller_self) {
+      return bc2cpp_owner_call_argv(M, recv, i, level, s, mrb_nil_value(), 1, &a, caller_self);
+    }
+    BC2CPP_SHARD_ONE_BODY [[gnu::noinline, maybe_unused]] static mrb_value bc2cpp_owner_call2(mrb_state* M, mrb_value recv, int i, int level, bc2cpp_owner_set& s, mrb_value a, mrb_value b) {
+      const mrb_value argv[2] = {a, b};
+      return bc2cpp_owner_call_argv(M, recv, i, level, s, mrb_nil_value(), 2, argv);
+    }
+    BC2CPP_SHARD_ONE_BODY [[gnu::noinline, maybe_unused]] static mrb_value bc2cpp_owner_call2(mrb_state* M, mrb_value recv, int i, int level, bc2cpp_owner_set& s, mrb_value a, mrb_value b,
+                                                                        mrb_value caller_self) {
+      const mrb_value argv[2] = {a, b};
+      return bc2cpp_owner_call_argv(M, recv, i, level, s, mrb_nil_value(), 2, argv, caller_self);
+    }
+    BC2CPP_SHARD_ONE_BODY [[gnu::noinline, maybe_unused]] static mrb_value bc2cpp_owner_call_b0(mrb_state* M, mrb_value recv, int i, int level, bc2cpp_owner_set& s, mrb_value blk) {
+      return bc2cpp_owner_call_argv(M, recv, i, level, s, blk, 0, nullptr);
+    }
+    BC2CPP_SHARD_ONE_BODY [[gnu::noinline, maybe_unused]] static mrb_value bc2cpp_owner_call_b0(mrb_state* M, mrb_value recv, int i, int level, bc2cpp_owner_set& s, mrb_value blk, mrb_value caller_self) {
+      return bc2cpp_owner_call_argv(M, recv, i, level, s, blk, 0, nullptr, caller_self);
     }
   CPP
   private_constant :OWNER_CALL
