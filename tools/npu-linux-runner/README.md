@@ -66,3 +66,21 @@ Measured on takecheeze-h8, three runs with the kernel order swapped, 64 passes e
 Both kernels pass the word-for-word check. The vector form is about 4–5% faster per pass for this
 integer kernel. That is one simple kernel, not npu-render's blend or composition code, so it does not
 show what a rewrite would gain there.
+
+## Larger kernels: growing the code window
+
+`grow_carrier.py` enlarges the `shave.text` window of an exported blob, the same rewrite npu-render's
+`grow_frame_carrier.py` does for its pinned carrier. `run_kernel.py` and `bench_kernels.py` take
+`--window BYTES` (a 1 KiB multiple).
+
+Checked on takecheeze-h8: a 131,168-byte kernel text (`examples/gen_lut.py`: a 32,768-entry lookup table,
+which the linker places in the text section, plus a loop that reads it) patched into a 262,016-byte window
+runs on the NPU, and all 4,096 output words match numpy.
+
+Compiling large code is the limit, not the window: an unrolled integer chain of 1,500 steps peaked at
+1.4 GB of compiler memory and 3,000 steps at 5.3 GB, and 6,000 steps ran out of memory on an 8 GB host.
+A table keeps compile memory small, so use data for size tests.
+
+The qualified frame kernel (about 107 KB) also needs the frame carrier's ABI and frame inputs. Neither is
+covered here, so this shows the code window and loader accept a kernel of that size, not that the frame
+kernel runs.

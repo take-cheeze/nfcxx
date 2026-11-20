@@ -68,6 +68,7 @@ def main():
     p.add_argument("--bench", type=int, default=200)
     p.add_argument("--repeat", type=int, default=1, help="passes over the data inside one inference")
     p.add_argument("--work", type=pathlib.Path, default=pathlib.Path("npu-bench"))
+    p.add_argument("--window", type=int, default=0, help="grow the code window (bytes); 0 keeps the exported size")
     args = p.parse_args()
     if args.elements % 8:
         raise SystemExit("--elements must be a multiple of 8")
@@ -76,6 +77,8 @@ def main():
     work.mkdir(parents=True, exist_ok=True)
     wine = rk.Wine(args.movi_root, args.wine_host)
     base = rk.base_blob(args.elements, work).read_bytes()
+    if args.window:
+        base, _ = rk.grow_carrier.grow(base, args.window)
 
     rng = np.random.default_rng(1)
     x = rng.uniform(-2, 2, args.elements).astype(np.float16)

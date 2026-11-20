@@ -36,6 +36,7 @@ import numpy as np
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import hazards  # noqa: E402  (fix_hazards and read_kernel_text, copied from npu-render)
+import grow_carrier  # noqa: E402  (grows shave.text of an exported blob, as npu-render's grow tool does)
 
 
 def wine_path(path):
@@ -139,6 +140,8 @@ def main():
     p.add_argument("--elements", type=int, default=8, help="FP16 elements of the base add model")
     p.add_argument("--expect", type=float, help="every output element must equal this value")
     p.add_argument("--bench", type=int, default=0, help="inferences to time after the check")
+    p.add_argument("--window", type=int, default=0,
+                   help="grow the code window to this many bytes (1 KiB multiple); 0 keeps the exported size")
     p.add_argument("--work", type=pathlib.Path, default=pathlib.Path("npu-linux-run"))
     args = p.parse_args()
 
@@ -147,6 +150,8 @@ def main():
     wine = Wine(args.movi_root, args.wine_host)
 
     base = base_blob(args.elements, work).read_bytes()
+    if args.window:
+        base, _ = grow_carrier.grow(base, args.window)
     text_off, text_size = section(base, "shave.text")
     text, hazards = build_text(args.kernel, args.entry, work, wine, args.movi_root)
     if len(text) > text_size:
