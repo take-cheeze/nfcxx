@@ -925,6 +925,10 @@ class CodeGen
     cuts = @rc_scoped_cuts
     mask = contextual && return_class_context_def_mask(definition, state[insn.reg.to_i], arguments)
     mask ||= return_class_scoped_def_mask(definition)
+    # DECLARED_DEF_RETURN: a body the flow cannot type answers its own checked declaration.
+    unless mask.is_a?(Integer) && mask.positive? && (mask & NumericFlow::OTHER).zero?
+      mask = respond_to?(:declared_def_return_mask, true) && declared_def_return_mask(definition) || mask
+    end
     unless mask.is_a?(Integer) && mask.positive? && (mask & NumericFlow::OTHER).zero?
       # SCOPED_NEGATIVE_MEMO: no cycle was cut while this was computed, so asking again gives the same nil.
       @rc_scoped_return_cache[key] = nil if @rc_scoped_cuts == cuts

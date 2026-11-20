@@ -168,9 +168,14 @@ check.call('with no world at all the POLY name stays refused (info)',
 
 outside = GuardHarness.new(defs, ireps)
 outside.instance_variable_get(:@foreign_method_names) << 'count'
-check.call('a hint whose name an outside definition also defines needs no guard (no fact relies on it)',
+check.call('a hint whose name an outside definition also defines keeps its guard: DECLARED_DEF_RETURN reads it per definition',
            outside.declared_return_refusal('count')&.first == 'info' &&
-           !outside.declared_return_hints.map(&:name).include?('count'))
+           outside.declared_return_hints.map(&:name).include?('count'))
+ENV['BC2CPP_DECLARED_DEF_RETURNS'] = '0'
+check.call('with BC2CPP_DECLARED_DEF_RETURNS=0 nothing relies on it, so it needs no guard',
+           !GuardHarness.new(defs, ireps).tap { |h| h.instance_variable_get(:@foreign_method_names) << 'count' }
+                                       .declared_return_hints.map(&:name).include?('count'))
+ENV.delete('BC2CPP_DECLARED_DEF_RETURNS')
 check.call('a hint with a fact still needs its guard',
            GuardHarness.new(defs, ireps).declared_return_hints.map(&:name).include?('count'))
 

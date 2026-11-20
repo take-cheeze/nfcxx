@@ -122,7 +122,7 @@ ensure
   env.each_key { |k| ENV.delete(k) }
 end
 on = bodies.call({})
-off = bodies.call('BC2CPP_EXACT_DECLARED_RETURNS' => '0')
+off = bodies.call('BC2CPP_EXACT_DECLARED_RETURNS' => '0', 'BC2CPP_DECLARED_DEF_RETURNS' => '0')
 unguarded = bodies.call('BC2CPP_DECLARATION_GUARD' => '0')
 class_tests = ->(body) { body.to_s.scan(/bc2cpp_(?:obj_class|class_is)\(M,/).size }
 
@@ -154,6 +154,9 @@ class MaskHarness < CodeGen
   def instance_class?(klass) = klass != 'Mod'
   def native_table_name_visible?(_name, _klass) = true
   def immediate_class_bits_enabled? = ENV['BC2CPP_IMMEDIATE_CLASS_BITS'] != '0'
+  # A core container kind is exact only in a build with no subclass of it (none here unless `core_free` names it).
+  def block_core_world = true
+  def core_class_subclass_free?(klass) = @core_free.to_a.include?(klass)
 end
 decl = lambda do |name, kind, cls, nilable: false|
   DeclaredReturns::Entry.new(owner: 'Foo', name: name, label: "L_#{name}", kind: kind, cls: cls, nilable: nilable, text: cls.to_s,
@@ -162,7 +165,8 @@ end
 entries = [decl.call('int', :fixnum, 'Integer'), decl.call('flt', :float, 'Float'), decl.call('sym', :symbol, 'Symbol'),
            decl.call('bool', :bool, nil), decl.call('nilv', :nil, nil), decl.call('foo', :class, 'Foo'),
            decl.call('foo_or_nil', :class, 'Foo', nilable: true), decl.call('sub', :class, 'Base'),
-           decl.call('str', :string, 'String'), decl.call('mod', :class, 'Mod')]
+           decl.call('str', :string, 'String'), decl.call('mod', :class, 'Mod'), decl.call('ary', :array, 'Array'),
+           decl.call('ary_or_nil', :array, 'Array', nilable: true)]
 masks = MaskHarness.new(entries, subclassed: ['Base'])
 masks.instance_variable_set(:@ireps, entries.to_h { |e| [e.label, true] })
 masks.instance_variable_set(:@owner_of, entries.to_h { |e| [e.label, true] })
@@ -177,6 +181,17 @@ check.call('-> Foo is Foo\'s class bit and -> Foo? adds NIL', masks.declared_exa
 check.call('a subclassed class, a string (subclasses pass mrb_string_p) and a non-instance class stay ceilings',
            masks.declared_exact_return_mask('sub').nil? && masks.declared_exact_return_mask('str').nil? &&
              masks.declared_exact_return_mask('mod').nil?)
+check.call('-> Array is no exact mask while Array may be subclassed', masks.declared_exact_return_mask('ary').nil?)
+core_free = MaskHarness.new(entries, subclassed: ['Base'])
+core_free.instance_variable_set(:@ireps, entries.to_h { |e| [e.label, true] })
+core_free.instance_variable_set(:@owner_of, entries.to_h { |e| [e.label, true] })
+core_free.instance_variable_set(:@native_name_sources, {})
+core_free.instance_variable_set(:@core_free, %w[Array])
+core_free.define_singleton_method(:declared_return_proven?) { |_e| false }
+check.call('with no subclass of Array, -> Array is the Array bit and -> Array? adds NIL; String stays a ceiling',
+           core_free.declared_exact_return_mask('ary') == CodeGen::RETURN_CORE_CLASS.key('Array') &&
+             core_free.declared_exact_return_mask('ary_or_nil') == (CodeGen::RETURN_CORE_CLASS.key('Array') | NumericFlow::NIL) &&
+             core_free.declared_exact_return_mask('str').nil?)
 ENV['BC2CPP_IMMEDIATE_CLASS_BITS'] = '0'
 off_bits = MaskHarness.new(entries, subclassed: ['Base'])
 off_bits.instance_variable_set(:@ireps, entries.to_h { |e| [e.label, true] })
