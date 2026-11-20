@@ -20,7 +20,7 @@ class CodeGen
     # RESCUE reads its first register and writes its second; the caught
     # exception remains live in the input register for the handler.
     rescue_write = ->(insn, cur) { insn.op == :RESCUE && insn.regs[1] == cur }
-    irep.walk_writers(idx - 1, dest_reg, skip_ops: %i[RESCUE], barrier: rescue_write, barrier_result: false,
+    irep.walk_writers(idx - 1, dest_reg, skip_ops: %i[RESCUE], barrier: rescue_write, barrier_result: false, barrier_op: :RESCUE,
                                               follow_moves: true) do |insn, _index, exc_reg|
       next false unless insn.op == :EXCEPT
 
