@@ -7,8 +7,8 @@ require_relative 'bytecode_ir_tree'
 require_relative 'core_hierarchy_sigs'
 
 # RECORD_FIELD_TRACE: the classes a value stored into a declared record field can have, for RbsRecordTypes'
-# conformance check. Beyond RbsRecordTypes.value_class_at (literals, `Klass.new`, the ClassLayout Array rule) a value
-# is traced through
+# conformance check. Beyond RbsRecordTypes.value_class_at (literals, `Klass.new`, the ClassLayout Array rule; the exact
+# trace takes `Klass.new` only by EXACT_NEW) a value is traced through
 #   joins and moves     every reaching definition, each traced;
 #   `@ivar` reads       every SETIV of the name whose self can be an instance of the reader's class or a subclass
 #                       (every SETIV of the name when that class cannot be placed), plus nil (an unset ivar), when no
@@ -122,7 +122,18 @@ module RbsRecordTypes
       return literal if literal
       return nil unless BytecodeIR::Ops::SEND.include?(insn.op) && !BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op)
 
-      @ctx[:value_class]&.call(irep, index + 1, reg)
+      exact_new_class(irep, index, insn) || @ctx[:value_class]&.call(irep, index + 1, reg)
+    end
+
+    # EXACT_NEW: a blockless `K.new` whose receiver is a constant path naming program class K (no hint enters the
+    # trace) and whose constructor lookup is closed (ClosedWorld#exact_constructor_class?).
+    def exact_new_class(irep, index, insn)
+      cw = @ctx[:closed_world]
+      return nil unless insn.sym == 'new' && BytecodeIR::Ops::COUNTED_SEND.include?(insn.op) && cw && @ctx[:superclass_of]
+
+      klass = trace_new_target(irep, index + 1, insn.reg, nil, 0, nil, owner: @ctx[:owner_of]&.[](irep.label),
+                                                                     known_owners: @ctx[:known_owners])
+      klass if klass && @ctx[:known_owners]&.include?(klass) && cw.exact_constructor_class?(klass, @ctx[:superclass_of])
     end
 
     def send_classes(irep, index, insn, depth)

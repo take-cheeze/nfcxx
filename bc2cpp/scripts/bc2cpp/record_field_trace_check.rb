@@ -6,7 +6,7 @@
 # that class, an attr_reader of an ivar every store of which is that class, or a join of those. The checked field is
 # a guarded receiver hint (RECORD_TYPE ... hints); recursion is solved as a fixpoint. A definition that may return
 # another class, a literal block that `break`s, a native name, an attr_writer and a store of another class keep
-# TC1009, which aborts the run.
+# TC1009, which aborts the run. A `Klass.new` receiver is exact (EXACT_NEW) unless a Ruby `new` can answer it.
 #
 #   MRBC=path/to/mrbc ruby scripts/bc2cpp/record_field_trace_check.rb
 require 'tmpdir'
@@ -129,10 +129,18 @@ refused.call('a literal block that breaks keeps TC1009',
 refused.call('an attr_writer on the read ivar keeps TC1009',
              BASE + "class Other\n  attr_writer :roster\nend\n",
              /Scene\#@ui: value of :foes cannot be traced/)
-refused.call('a name with a native definition of unknown owner keeps TC1009 (Struct#members)',
-             BASE.sub('attr_reader :roster', 'attr_reader :roster, :members').sub('troop.roster.map', 'troop.members.map')
-                 .sub('@roster = []', '@roster = []; @members = []'),
+# EXACT_NEW: `troop` is exactly a Troop, so `troop.members` resolves to the attr_reader although Struct#members is native.
+members = BASE.sub('attr_reader :roster', 'attr_reader :roster, :members').sub('troop.roster.map', 'troop.members.map')
+              .sub('@roster = []', '@roster = []; @members = []')
+_, failure, code = run.call(members, SIG)
+check.call('an exact Klass.new receiver resolves a name a native also defines (Struct#members)',
+           failure.nil? && exact_size.call(code) == 4)
+warn failure if failure
+refused.call('a native name on a receiver that is not traced keeps TC1009 (Struct#members)',
+             members.sub('troop = Troop.new', 'troop = Troop.new.itself'),
              /Scene\#@ui: value of :foes cannot be traced/)
+_, failure, code = run.call(members + "class Troop\n  def self.new; super; end\nend\n", SIG)
+check.call('a Ruby `new` on the class leaves :foes inexact (no EXACT_NEW)', failure.nil? && exact_size.call(code) == 3)
 refused.call('a store of another class keeps TC1009',
              BASE.sub('@actors = [Member.new(2)]', '@actors = [Member.new(2)]; @actors = {} if @actors.empty?'),
              /Scene\#@ui: value of :allies cannot be traced/)
