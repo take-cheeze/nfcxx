@@ -9,7 +9,8 @@
 #   1. generated: `t = targets; t.empty?` on a self-call of a `-> Array` definition whose name another class answers
 #      with an accessor is the Array body with no class-test chain, and the declaring body is guarded; so is a call
 #      on a fresh exact receiver; a self-call that a subclass override may answer, a `-> Array` declared on a
-#      body nothing resolves to, and BC2CPP_DECLARED_DEF_RETURNS=0 keep the chain;
+#      body nothing resolves to, and BC2CPP_DECLARED_DEF_RETURNS=0 keep the chain; a native table's later copy of
+#      the declaration (`# bc2cpp-native:`) leaves the program declaration in force;
 #   2. a guarded leaf body is not inlined (CALL_INLINE would skip the guard); an `@x: Array[T]` declaration is
 #      guarded at its stores and, seeded into the slot's pool, makes a read of the slot exactly an Array;
 #   3. run on a full-core mruby against interpreted: the resolved sends answer as interpreted, and a wrong
@@ -120,6 +121,12 @@ SIGNATURES = <<~RBS
   end
   class Roster
     @members: Array[Integer]
+  end
+
+  # A native table's later copy of a program declaration does not erase it.
+  # bc2cpp-native: typed_returns
+  class Menu
+    def targets: () -> Array
   end
 RBS
 OWNERS = %w[State Menu Outside Base Sub Roster].freeze

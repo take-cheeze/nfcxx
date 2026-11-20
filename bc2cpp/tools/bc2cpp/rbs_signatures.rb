@@ -42,7 +42,7 @@ module RbsSignatures
   # native: the declaration is in a native signature file (NativeSigs), not a program declaration.
   Loc = Struct.new(:file, :line, :col, :native)
   # args: one Type per required positional parameter; ret: Type or nil; rest_type: the Type of `*T` or nil
-  MethodSig = Struct.new(:owner, :name, :args, :optional_args, :keywords, :required_keywords, :ret, :loc, :type_params, :argument_types, :return_type, :block_type, :type_param_bounds, :callback_supported, :rest_type, keyword_init: true)
+  MethodSig = Struct.new(:owner, :name, :args, :optional_args, :keywords, :required_keywords, :ret, :loc, :type_params, :argument_types, :return_type, :block_type, :type_param_bounds, :callback_supported, :rest_type, :program, keyword_init: true)
   IvarSig = Struct.new(:owner, :name, :type, :loc, keyword_init: true)
   # kind: :int :sym :array :hash :class :other ; cls: class name (:class), element: class name for Array[C]/Hash[K, C]
   # optional: for `T?`, T's own Type; the `T?` Type itself stays kind :other.
@@ -251,6 +251,10 @@ module RbsSignatures
     # A declaration without a block says nothing about it: `def each: () -> Integer` must not erase another file's
     # `def each: () { (Integer) -> void } -> untyped`, which RBS_BLOCK_PARAM_HINT and BLOCK_RETURNS read.
     merged.block_type ||= prev.block_type
+    # The newest program declaration among the copies: a native table may repeat one, and a merged signature located
+    # in a native table is no program hint, so DeclaredReturns.from_signatures reads this one instead.
+    program = ->(sig) { sig.loc&.native ? sig.program : sig }
+    merged.program = program.call(fresh) || program.call(prev)
     merged
   end
 
