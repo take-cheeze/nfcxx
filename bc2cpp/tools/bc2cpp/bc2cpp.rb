@@ -334,7 +334,8 @@ BC2CPP_MAIN = lambda do
   profile_phase.call('closed world: build check')
 
     outside_native, outside_ruby = bc2cpp_closed_world_outside_srcs(build_name, build_gems, repo_root,
-      native_paths: Shellwords.split(ENV['NATIVE_SRCS']), ruby_paths: Shellwords.split(ENV['FOREIGN_RUBY_SRCS']),
+      native_paths: Shellwords.split(ENV.fetch('BC2CPP_LINKED_NATIVE_SRCS', '')),
+      ruby_paths: Shellwords.split(ENV.fetch('BC2CPP_LINKED_RUBY_SRCS', '')),
       compiled_srcs: srcs)
   profile_phase.call('closed world: outside sources')
     # Core Ruby is compiled input here but stays an OUTSIDE source for these proofs: the

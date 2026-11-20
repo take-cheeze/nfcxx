@@ -111,11 +111,8 @@ Dir.mktmpdir('bc2cpp-owner-call-direct') do |dir|
   ensure
     saved_extra ? ENV['BC2CPP_UNREGISTERED_EXTRA'] = saved_extra : ENV.delete('BC2CPP_UNREGISTERED_EXTRA')
   end
-  plain_pick = ->(text) do
-    site = go_site(text, 'pick')
-    site.include?('BC2CPP_OWNERS(') && site.include?('"Game::OcdA"') && site.include?('"Game::OcdD"')
-  end
-  suite.check('an engine owner with no entry the build leaves out keeps the plain owner set', plain_pick.call(left_out))
+  suite.check('an engine owner with no entry the build leaves out keeps the plain owner set',
+              go_site(left_out, 'pick').include?('BC2CPP_OWNERS("Game::OcdA", "Game::OcdD")'))
   # OWNER_ROWS_TRIM: a real build's call carries rows only for the owners it leaves out.
   saved = %w[BC2CPP_UNREGISTERED_EXTRA BC2CPP_OWNER_ROWS].to_h { |k| [k, ENV[k]] }
   begin
@@ -131,7 +128,8 @@ Dir.mktmpdir('bc2cpp-owner-call-direct') do |dir|
   suite.check('trimmed: the call carries a row for the left-out owner only',
               trimmed_push.include?('BC2CPP_OWNERS_D(BC2CPP_OWNER_DIRECT("Game::OcdC", Game__OcdC_push, ') &&
               !trimmed_push.include?('BC2CPP_OWNER_DIRECT("Game::OcdA"'))
-  suite.check('trimmed: a call with no left-out owner keeps the plain owner set', plain_pick.call(trimmed))
+  suite.check('trimmed: a call with no left-out owner keeps the plain owner set',
+              go_site(trimmed, 'pick').include?('BC2CPP_OWNERS("Game::OcdA", "Game::OcdD")'))
   # As the text scan finds `< OcdA`.
   subclassed = %w[Game::OcdA OcdA]
   suite.check('the proof counts the completed call as no lookup',

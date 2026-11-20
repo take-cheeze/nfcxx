@@ -14,6 +14,7 @@ base = { 'BC2CPP_BUILD_NAME' => 'bc2cpp-self', 'BC2CPP_BUILD_GEMS' => 'compiler=
 plain = Bc2cppSelfCompile.generation_environment(base, {})
 guest = Bc2cppSelfCompile.generation_environment(base, {
   'ONLY_OWNERS' => 'Guest', 'BC2CPP_BUILD_NAME' => 'closed', 'BC2CPP_BUILD_GEMS' => 'guest=world',
+  'BC2CPP_LINKED_NATIVE_SRCS' => '/guest/generated.c', 'BC2CPP_LINKED_RUBY_SRCS' => '/guest/generated.rb',
   'BC2CPP_TREE_ROOT' => '/compiler', 'BC2CPP_TYPE_CHECK_ONLY' => '1', 'BC2CPP_SELF_STATS' => '1',
   'BC2CPP_MRUBY_RUNNER' => '/launcher', 'BC2CPP_SCCACHE' => '0'
 })

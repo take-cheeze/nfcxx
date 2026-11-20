@@ -70,6 +70,10 @@ env = {
   'BC2CPP_BUILD_GEMS' => Shellwords.join(manifest.fetch('gems').map { |name, dir| "#{name}=#{dir}" }),
   'NATIVE_SRCS' => Shellwords.join(manifest.fetch('native')),
   'FOREIGN_RUBY_SRCS' => Shellwords.join(manifest.fetch('ruby')),
+  # The general analysis lists may include alternative core implementations.
+  # This manifest describes exactly what this runtime links, generated files too.
+  'BC2CPP_LINKED_NATIVE_SRCS' => Shellwords.join(manifest.fetch('native')),
+  'BC2CPP_LINKED_RUBY_SRCS' => Shellwords.join(manifest.fetch('ruby')),
   'OUT_DIR' => generation, 'OUT_SYMBOL' => 'bc2cpp_self', 'SKIP_UNSUPPORTED' => '1',
   'BC2CPP_SIG_DIRS' => '', 'BC2CPP_SELF_REGISTERING' => '1',
   'BC2CPP_SHARDS' => ENV.fetch('BC2CPP_SELF_SHARDS', '16'),

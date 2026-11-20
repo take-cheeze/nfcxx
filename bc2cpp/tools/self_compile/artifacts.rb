@@ -10,6 +10,7 @@ module Bc2cppSelfCompile
     BC2CPP_TYPE_FACTS_ROOT BC2CPP_MAIN_AST BC2CPP_STATIC_DISPATCH_LISTS BC2CPP_CONSTANT_PROOF_CANDIDATES
     BC2CPP_CONSTANT_PROOF_OUT BC2CPP_SELF_STATS BC2CPP_MRUBY_RUNNER BC2CPP_RUBY BC2CPP_MRUBY
     BC2CPP_RUNNER_LIBRARY BC2CPP_REQUIRE_SELF_AOT BC2CPP_RUNNER_MRBC_MODE BC2CPP_KEEP_DIR
+    BC2CPP_LINKED_NATIVE_SRCS BC2CPP_LINKED_RUBY_SRCS
     BC2CPP_MRUBY_CORE BC2CPP_MRUBY_FULL BC2CPP_SCCACHE BC2CPP_CXXFLAGS].freeze
   # Caller variables that are not BC2CPP_* but reach the generator unchanged (it is started with the caller's
   # environment): the interpreter options it loads under, and the nfcxx front end that native analyses may parse with.

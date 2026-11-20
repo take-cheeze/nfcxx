@@ -731,8 +731,10 @@ def bc2cpp_closed_world_outside_srcs(build_name, gems, repo_root, native_paths: 
                                                (!probe && BC2CPP_PROGRAM_CORE_MRBLIB_GEMS.include?(name)) ||
                                                (probe && name == BC2CPP_PROBE_BUILDS.fetch(build_name).first)
   end
-  # Build manifests also name generated sources outside a gem's src/mrblib
-  # directories (Prism's rendered Ruby AST classes, for example).
+  # Definite linked-source manifests also name generated files outside a gem's
+  # src/mrblib directories (Prism's rendered Ruby AST classes, for example).
+  # The broader NATIVE_SRCS/FOREIGN_RUBY_SRCS analysis lists can contain
+  # alternative core implementations and must not be substituted here.
   compiled = compiled_srcs.map { |path| File.expand_path(path) }.to_set
   native.concat(native_paths)
   ruby.concat(ruby_paths.reject { |path| compiled.include?(File.expand_path(path)) })
