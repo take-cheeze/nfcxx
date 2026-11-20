@@ -646,6 +646,12 @@ BC2CPP_MAIN = lambda do
                                                               superclass_of: superclass_of, display_root: sig_root, applied: sig_applied,
                                                               declared_returns: CodeGen.declared_returns)
     CodeGen.declared_params = DeclaredReturns.guard? ? param_guards : {}
+    # DECLARED_KEYWORD_PARAM: a typed keyword is checked where its KARG writes it.
+    CodeGen.declared_keywords = if DeclaredReturns.guard?
+                                  RbsParamCheck.keyword_guards(sig_loaded, ireps, registry, superclass_of,
+                                                               comment_class_args: sig_comment_class_args)
+                                else {}
+                                end
     # DECLARED_IVAR_GUARD: an `@x: T` declaration of Integer, Float, Symbol or a program class is checked on every store.
     CodeGen.declared_ivars = DeclaredReturns.guard? ? RbsParamCheck.ivar_guards(sig_loaded, superclass_of) : {}
     CodeGen.declared_ivar_elements = DeclaredReturns.guard? ? CodeGen.declared_element_table(sig_applied) : {}
@@ -1530,6 +1536,12 @@ BC2CPP_MAIN = lambda do
     abort "\n[bc2cpp] DECLARED_PARAM_GUARD: #{param_failures.size} seeded optional parameter declaration(s) without " \
           "their compiled check:\n  #{param_failures.join("\n  ")}"
   end
+  keyword_guards = (CodeGen.declared_keywords || {}).each_key.to_h { |label| [label, gen.declared_keyword_guards(label)] }
+  keyword_failures = DeclaredReturns.keyword_guard_failures(keyword_guards, compiled)
+  unless keyword_failures.empty?
+    abort "\n[bc2cpp] DECLARED_KEYWORD_GUARD: #{keyword_failures.size} typed keyword declaration(s) without their " \
+          "compiled check:\n  #{keyword_failures.join("\n  ")}"
+  end
   # DECLARED_IVAR_PROOF: a declared slot seeded as its declared kind is trusted only because every store to it is
   # checked; abort unless each method that stores to one compiled with its guard.
   ivar_failures = gen.declared_ivar_writer_failures(compiled, only_owners, other_owners, live: main_reach&.labels)
@@ -2122,6 +2134,14 @@ BC2CPP_MAIN = lambda do
       abort();
     #endif
       bc2cpp_declaration_violation(M, mrb_format(M, "declaration violation: %s argument %d is %T, declared %s", method, position, value, declared));
+    }
+    [[maybe_unused, noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_declared_keyword_violation(mrb_state* M, mrb_value value, const char* method, const char* declared) {
+    #ifdef BC2CPP_NOMETHOD_VERIFY
+      fprintf(stderr, "bc2cpp: NOMETHOD_VERIFY: declared keyword violated: %s keyword is %s, declared %s\n", method, mrb_obj_classname(M, value), declared);
+      fflush(stderr);
+      abort();
+    #endif
+      bc2cpp_declaration_violation(M, mrb_format(M, "declaration violation: %s keyword is %T, declared %s", method, value, declared));
     }
     [[maybe_unused, noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_declared_ivar_violation(mrb_state* M, mrb_value value, const char* ivar, const char* declared) {
     #ifdef BC2CPP_NOMETHOD_VERIFY

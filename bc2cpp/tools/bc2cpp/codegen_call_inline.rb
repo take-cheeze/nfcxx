@@ -70,7 +70,8 @@ class CodeGen
     irep = @ireps[d.irep]
     return nil unless irep && d.kind.nil? && d.installer.nil?
     # DECLARED_RETURN_GUARD / DECLARED_PARAM_GUARD sit in the callee's `_impl`; its inlined instructions would skip them.
-    return nil if declared_return_guard(d.irep) || !self.class.declared_params&.[](d.irep).to_a.empty?
+    return nil if declared_return_guard(d.irep) || !self.class.declared_params&.[](d.irep).to_a.empty? ||
+                  !declared_keyword_guards(d.irep).empty?
     return nil unless irep.reps.empty? && irep.catch_handlers.to_a.empty? && pure_mandatory_arity?(irep)
 
     insns = []

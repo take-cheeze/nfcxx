@@ -262,6 +262,25 @@ module DeclaredReturns
     end
   end
 
+  def keyword_guard_marker(key, name)
+    "/* DECLARED_KEYWORD_GUARD #{key} #{name}: */"
+  end
+
+  # DECLARED_KEYWORD_PARAM: why this run breaks the keyword guard contract (empty when it does not). The flow types a
+  # declared keyword's KARG result (CodeGen#declared_keyword_mask) for the body that checks it there, so each body this
+  # run compiles cleanly must carry every one of its keyword guards. `guards`: label => CodeGen#declared_keyword_guards.
+  def keyword_guard_failures(guards, compiled)
+    by_label = compiled.group_by { |m| m[:label] }
+    guards.flat_map do |label, by_name|
+      bodies = Array(by_label[label]).reject { |m| m[:unsupported] || m[:code].to_s.include?('#error') }
+      by_name.filter_map do |name, (_name, _cls, key, text)|
+        next if bodies.all? { |m| m[:code].include?(keyword_guard_marker(key, name)) }
+
+        "#{key} keyword #{text} is typed from its declaration, but a compiled body carries no guard [#{CODE}]"
+      end
+    end
+  end
+
   # Prints the outcome of CodeGen#check_declared_returns, adds its diagnostics to the signature diagnostics (the type
   # check reads them from there) and aborts a build on an error.
   def report(gen, sig_applied, abort_on_error:)

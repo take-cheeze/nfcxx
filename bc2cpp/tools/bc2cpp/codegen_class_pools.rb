@@ -170,6 +170,11 @@ class CodeGen
     base.zero? || !nilable ? base : base | NumericFlow::NIL
   end
 
+  # DECLARED_KEYWORD_PARAM: KARG's result, the declared kind when the body checks it there (declared_keyword_bits).
+  def declared_keyword_mask(irep, insn)
+    (@class_pools_on && declared_keyword_bits(irep, insn)) || NumericFlow::OTHER
+  end
+
   def class_pool_entry_mask(irep, reg)
     return NumericFlow::OTHER unless @class_pools_on
 

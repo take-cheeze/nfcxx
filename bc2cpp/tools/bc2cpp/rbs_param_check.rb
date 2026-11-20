@@ -5,6 +5,7 @@ require 'set'
 require_relative 'bytecode_ir_ops'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
+require_relative 'irep_arity'
 require_relative 'call_site_index'
 require_relative 'dynamic_names'
 require_relative 'native_names'
@@ -57,6 +58,34 @@ module RbsParamCheck
       end]
     end
     [diags, trusted, guards]
+  end
+
+  # DECLARED_KEYWORD_PARAM: label => [[name, class, key, text, kind, nilable], ...] for the keyword parameters a
+  # signature types with a guardable kind (as for a positional `T?`: a value kind, Array/Hash/String, or a program class
+  # nothing subclasses). Only bodies whose KEY_P/KARG table is exactly the declared keywords (no `**rest`) qualify. The
+  # compiled KARG checks the given value (CodeGen#declared_keyword_guard), and only KARG's result is typed: an
+  # omitted keyword's default is ordinary code the flow reads.
+  def keyword_guards(loaded, ireps, registry, superclass_of, comment_class_args: {})
+    ctx = context(loaded, ireps, registry, superclass_of)
+    ctx[:sig_of].each_with_object({}) do |(label, sig), out|
+      next if (sig.keywords || {}).empty? || comment_class_args[label]
+
+      table = ireps[label] && keyword_arg_table(ireps[label], rest_block: true)
+      next unless table && table.to_h { |kw| [kw[:name], kw[:required]] } ==
+                           sig.keywords.keys.to_h { |name| [name, sig.required_keywords.include?(name)] }
+
+      guards = sig.keywords.filter_map do |name, type|
+        inner = type.optional
+        t = inner || type
+        kind, cls = if VALUE_CLASSES.key?(t.value) then [t.value, VALUE_CLASSES[t.value]]
+                    elsif (core = core_kind(t)) then [core, CORE_IVAR_KINDS.fetch(core)]
+                    elsif t.kind == :class && ctx[:classes].include?(t.cls) && !ctx[:subclassed].include?(t.cls)
+                      [:class, t.cls]
+                    end
+        [name, cls, "#{sig.owner}##{sig.name}", "#{name}: #{type.text}", kind, !inner.nil?] if kind
+      end
+      out[label] = guards unless guards.empty?
+    end
   end
 
   # TC1005 info for each typed optional parameter optional_targets does not guard (and so gives no hint).
