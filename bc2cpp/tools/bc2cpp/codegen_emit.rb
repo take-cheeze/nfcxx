@@ -52,9 +52,9 @@ class CodeGen
       # empty-stack context is repeatable, however, while the unconditional
       # answers it reads have not changed. Only retain answers from probes
       # that did not discover any new unconditional answer themselves.
-      if @root_clean_cache_facts != @clean_cache
+      unless @root_clean_cache_facts.equal?(@clean_cache)
         @root_clean_cache = {}
-        @root_clean_cache_facts = @clean_cache.dup.freeze
+        @root_clean_cache_facts = @clean_cache
       end
       if ENV['BC2CPP_PROBE_ROOT_CACHE'] != '0' && @root_clean_cache.key?(label)
         @guard_cycles += 1
@@ -69,10 +69,10 @@ class CodeGen
       result = with_fresh_method_state { yield }
       clean = !result[:code].include?('#error')
       if cycles == @guard_cycles
-        @clean_cache[label] = clean
+        @clean_cache = @clean_cache.merge(label => clean).freeze
       else
         (@cycle_clean_cache ||= {})[label] = clean
-        if outermost && @root_clean_cache_facts == @clean_cache && ENV['BC2CPP_PROBE_ROOT_CACHE'] != '0'
+        if outermost && @root_clean_cache_facts.equal?(@clean_cache) && ENV['BC2CPP_PROBE_ROOT_CACHE'] != '0'
           @root_clean_cache[label] = clean
         end
       end

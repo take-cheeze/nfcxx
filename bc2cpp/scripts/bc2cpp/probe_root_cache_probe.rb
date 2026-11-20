@@ -10,7 +10,7 @@ require_relative '../../tools/bc2cpp/codegen_emit'
 def probe_fixture(handlers)
   counts = Hash.new(0)
   generator = CodeGen.allocate
-  generator.instance_variable_set(:@clean_cache, {})
+  generator.instance_variable_set(:@clean_cache, {}.freeze)
   generator.instance_variable_set(:@probing, Set.new)
   generator.instance_variable_set(:@guard_cycles, 0)
   generator.define_singleton_method(:resumable_method?) { |_| false }
@@ -36,10 +36,12 @@ begin
   raise 'a guarded answer leaked into the unconditional cache' unless generator.instance_variable_get(:@clean_cache).empty?
 
   # Equal-size changes, deletion and clearing must all invalidate root answers.
-  facts = generator.instance_variable_get(:@clean_cache)
-  [-> { facts[:known] = false }, -> { facts[:known] = true }, -> { facts.delete(:known) },
-   -> { facts[:another] = true }, -> { facts.clear }].each_with_index do |change, index|
-    change.call
+  changes = [->(facts) { facts.merge(known: false) }, ->(facts) { facts.merge(known: true) },
+             ->(facts) { facts.reject { |key, _| key == :known } },
+             ->(facts) { facts.merge(another: true) }, ->(_) { {} }]
+  changes.each_with_index do |change, index|
+    facts = generator.instance_variable_get(:@clean_cache)
+    generator.instance_variable_set(:@clean_cache, change.call(facts).freeze)
     2.times { generator.compiles_clean?(:root) }
     raise 'reused an answer after facts changed' unless counts[:root] == index + 2
   end
@@ -61,7 +63,8 @@ begin
 
   generator, counts = probe_fixture(root: lambda do |gen|
     guarded.call(gen)
-    gen.instance_variable_get(:@clean_cache)[:discovered] = true
+    facts = gen.instance_variable_get(:@clean_cache)
+    gen.instance_variable_set(:@clean_cache, facts.merge(discovered: true).freeze) unless facts.key?(:discovered)
     { code: 'clean' }
   end)
   3.times { generator.compiles_clean?(:root) }
@@ -70,6 +73,13 @@ begin
   generator, counts = probe_fixture(root: ->(_) { { code: 'clean' } })
   3.times { generator.compiles_clean?(:root) }
   raise 'lost unconditional memoization' unless counts[:root] == 1
+  facts = generator.instance_variable_get(:@clean_cache)
+  begin
+    facts[:untracked_change] = false
+    raise 'allowed mutation without changing the facts version'
+  rescue FrozenError
+    # Every facts change must replace the object, invalidating root answers.
+  end
 
   generator, counts = probe_fixture(root: guarded)
   generator.compiles_clean?(:root)
