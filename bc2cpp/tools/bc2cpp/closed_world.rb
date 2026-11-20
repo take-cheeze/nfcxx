@@ -2652,8 +2652,8 @@ class ClosedWorld
     end
   end
 
-  # SINGLETON_ARMS: the modules whose `.singleton` definition of `name` a guard chain can
-  # answer with an identity arm, or nil when some singleton definer cannot be armed. A module object is
+  # SINGLETON_ARMS: the modules (and, CLASS_OBJECT_ARMS, the class objects) whose `.singleton` definition of `name` a
+  # guard chain can answer with an identity arm, or nil when some singleton definer cannot be armed. A module object is
   # reached only by its own constant: no subclasses (module_object_self? also bars a class and any
   # `clone`, the one way to copy singleton methods). The caller proves the singleton chain has no mixin.
   public def singleton_arm_modules(name)
@@ -2662,10 +2662,31 @@ class ClosedWorld
     owners = @registry.fetch(name, []).map(&:owner).select { |o| o.end_with?('.singleton') }.uniq
     return nil if owners.empty?
 
-    modules = owners.map { |o| o.delete_suffix('.singleton') }
-    return nil unless modules.all? { |m| module_object_self?(m) }
+    arms = Set.new
+    owners.each do |owner|
+      base = owner.delete_suffix('.singleton')
+      if module_object_self?(base)
+        arms << base
+      elsif (objects = class_object_arms(base))
+        arms.merge(objects)
+      else
+        return nil
+      end
+    end
+    arms.to_a
+  end
 
-    modules
+  # CLASS_OBJECT_ARMS: a class's `def self.x` answers for that class object and for every subclass's class object
+  # (singleton methods are inherited by subclasses), so the arm set is the class and its known subclasses, each a
+  # declared, non-opaque class whose constant names one object. nil when the hierarchy below it is not closed.
+  def class_object_arms(klass)
+    return nil if @global_refusal || @clone_sent || !@declared_classes.include?(klass) || @module_names.include?(klass)
+
+    subclasses = known_subclasses(klass)
+    return nil unless subclasses
+    return nil unless subclasses.all? { |c| @declared_classes.include?(c) && !opaque?(c) && stable_constant_identity?(c) }
+
+    subclasses
   end
 
   def merge_mixins(included, prepended)

@@ -2448,7 +2448,9 @@ class CodeGen
         code = dynamic_dispatch_line(d, recv, name, argv).sub(/\n\z/, " /* SINGLETON_ARM_DISPATCH #{mod} */\n")
       end
 
-      "if (mrb_type(#{recv}) == MRB_TT_MODULE && mrb_class_ptr(#{recv}) == #{owner_class_ptr_expr(mod)}) {\n" \
+      # CLASS_OBJECT_ARMS: a class object's arm tests for a class, a module's for a module.
+      tt = @closed_world.module_declared?(mod) ? 'MRB_TT_MODULE' : 'MRB_TT_CLASS'
+      "if (mrb_type(#{recv}) == #{tt} && mrb_class_ptr(#{recv}) == #{owner_class_ptr_expr(mod)}) {\n" \
         "#{code.gsub(/^/, '    ').chomp}\n    } else "
     end
     [modules, branches.join]

@@ -34,6 +34,13 @@ def source(object_include)
       def self.tag(*a) = [:rest, a]
     end
 
+    class McKlass
+      def self.tag = :klass
+    end
+
+    class McKid < McKlass
+    end
+
     class McTag
       def tag = :tag
     end
@@ -64,12 +71,13 @@ def source(object_include)
       def l(o) = o.label
       def u = McUtil.scan(1)
       def t(o) = o.tag
+      def all(xs) = xs.map { |x| t(x) }
     end
     #{object_include ? 'Object.include(McMix)' : ''}
   RUBY
 end
 
-OWNERS = %w[McA McB McC McUser McMix McOuter McUtil McSolo McRest McTag].freeze
+OWNERS = %w[McA McB McC McUser McMix McOuter McUtil McSolo McRest McTag McKlass McKid].freeze
 
 def user_method(code, name)
   code[/^mrb_value McUser_#{name}_impl\(mrb_state\* M.*?(?=^(?:static )?(?:\[\[maybe_unused\]\] )?mrb_value \w+\(mrb_state\* M|\z)/m].to_s
@@ -90,6 +98,13 @@ Dir.mktmpdir('bc2cpp-module-definer-includers') do |dir|
   suite.check("an included module's method binds through its includers, also through another module",
               owner_call_names?(user_method(code, 'l'), 'label', %w[McB McMix]))
   suite.check('no site keeps dispatching for an opaque definer', err.lines.none? { |l| l.match?(/^\s+KEPT opaque_definer:/) })
+
+  # SINGLETON_ARMS / CLASS_OBJECT_ARMS: `o.tag` has module (McSolo, McRest) and class-object (McKlass and its subclass
+  # McKid) singleton definers; each gets an identity arm, so the else arm needs no by-name send.
+  t_body = user_method(code, 't')
+  suite.check('module and class-object singleton definers each take an identity arm',
+              t_body.include?('MRB_TT_MODULE') && t_body.scan('MRB_TT_CLASS').size >= 2 &&
+              !t_body.include?('CLOSED_WORLD kept: singleton_definer'))
 
   root_dir = File.join(dir, 'root')
   Dir.mkdir(root_dir)
@@ -123,6 +138,10 @@ Dir.mktmpdir('bc2cpp-module-definer-includers') do |dir|
         call(M, "t_a", u, "t", 1, &a);
         mrb_value rest = mrb_obj_value(mrb_module_get(M, "McRest"));
         call(M, "t_rest", u, "t", 1, &rest);
+        mrb_value klass = mrb_obj_value(mrb_class_get(M, "McKlass"));
+        mrb_value kid = mrb_obj_value(mrb_class_get(M, "McKid"));
+        call(M, "t_klass", u, "t", 1, &klass);
+        call(M, "t_kid", u, "t", 1, &kid);
         return 0;
       }
     CPP
@@ -134,7 +153,7 @@ Dir.mktmpdir('bc2cpp-module-definer-includers') do |dir|
     compiled = plain.call(sections['compiled'])
     expected = ['s_a => 6', 's_b => raised NoMethodError', 'l_a => :mix', 'l_b => :b', 'l_c => :mix', 'u => 2', 't_solo => :solo',
                 't_tag => :tag', 't_a => raised NoMethodError',
-                't_rest => [:rest, []]']
+                't_rest => [:rest, []]', 't_klass => :klass', 't_kid => :klass']
     suite.check('the interpreter gives the expected answers', interpreted == expected)
     puts "  interpreted: #{interpreted.inspect}" unless interpreted == expected
     suite.check('compiled matches interpreted', compiled == interpreted)
