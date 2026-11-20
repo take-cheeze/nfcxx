@@ -101,9 +101,12 @@ if ! echo 'int f(void){return 0;}' | $clang --target=$triple -ffreestanding -c -
   report skip "flatlink: $clang has no hexagon target"
 else
   objs=()
-  # The hand-written HVX kernel needs no front end.
+  # The hand-written HVX kernels need no front end.
   if $clang --target=$triple -ffreestanding -fno-pic -O2 -mhvx -mhvx-length=128b -w -c "$here/hvx_vaddh.c" -o "$tmp/hvx_vaddh.o" 2>/dev/null; then
     objs+=(hvx_vaddh)
+  fi
+  if $clang --target=$triple -ffreestanding -fno-pic -O2 -mhvx -mhvx-length=128b -w -c "$here/hvx_vmpy.c" -o "$tmp/hvx_vmpy.o" 2>/dev/null; then
+    objs+=(hvx_vmpy)
   fi
   # An object flatlink must refuse (undefined symbol): the SKIP-undef message has to match too.
   printf 'extern int ext(void);\nint _start(void) { return ext(); }\n' >"$tmp/undef.c"

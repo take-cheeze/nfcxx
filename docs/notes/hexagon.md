@@ -146,6 +146,7 @@ Results (`tests/hexagon/run.sh`, `QEMU_HEXAGON` set):
 | `hvx_add_i16` | ok (exit 67) | |
 | `hvx_mul_i16` | ok (exit 184) | |
 | `hvx_vaddh` (hand-written, `-mhvx -mhvx-length=128b`) | ok (exit 192) | real HVX `vadd` in the object |
+| `hvx_vmpy` (hand-written, `-mhvx -mhvx-length=128b`) | ok (exit 96) | widening-multiply lane semantics: `vmpyhv`/`vmpyhus` even-odd deinterleave, `vmpyh` scalar even half (section 5) |
 | `float_neg_switch` | ok (exit 42) | `.rodata` (FP constants, switch table) via `R_HEX_32_6_X`/`R_HEX_6_X` |
 | `struct_libc` | ok (exit 9) | `.rodata.str1.1`; `strlen` is defined in `stub.c` |
 | `raii_templates_class` | ok (exit 7) | `.data`/`.bss`; EH bookkeeping globals in `stub.c`, `-G0` |
@@ -153,8 +154,8 @@ Results (`tests/hexagon/run.sh`, `QEMU_HEXAGON` set):
 | `exceptions` | ok (exit 15) | `tests/hexagon/eh_rt.c` supplies EDG's EH ABI (section 3a) |
 | `templates_lambdas` | ok (exit 12) | `scripts/gen-c-target.rb` passes `-tused` (instantiate used templates), as the host driver does; no `edg_prelink` needed |
 
-All 11 Hexagon checks in this table run (the generated cases and HVX).
-Compile-only mode (no qemu) compiles all 11.
+All 12 Hexagon checks in this table run (the generated cases and HVX).
+Compile-only mode (no qemu) compiles all 12.
 
 Layout: `tests/hexagon/layout.sh` passes (26 facts); with `EDG_TARGET=linux_i686` it fails
 (verified), so it isn't vacuous.
@@ -238,6 +239,15 @@ Hexagon plan:
 2. **Vector shapes.** One vector is 128 bytes (64 `int16`, 32 `int32`). Path B must emit loops
    with a scalar tail (or masked stores via `vmaskedstore`) instead of assuming multiples of 64
    elements. The int16 kernels in `tests/cases/hvx_*.cpp` are the test shape.
+   Widening multiply lane order (verified on qemu-hexagon 8.2.2, `tests/hexagon/hvx_vmpy.c`,
+   exit 96): `V6_vmpyhv_128B` (signed x signed) and `V6_vmpyhus_128B` (signed x unsigned)
+   widen all 64 lanes, lane-aligned, deinterleaved as V0 = even-lane products, V1 = odd-lane
+   products. `V6_vmpyh_128B` (vector x scalar `Rt`) puts the even-lane products in V0; V1 reads
+   zero on this qemu, so the odd half is unconfirmed there (real hardware may fill it) and the
+   emitter must not rely on scalar-form V1 until it is checked on hardware or `hexagon-sim`.
+   Builtin names need the `_128B` suffix with raw vector types
+   (`typedef int V128 __attribute__((__vector_size__(128)))`); the unsuffixed
+   `__builtin_HEXAGON_V6_vmpyh` takes 64-byte vectors.
 3. **Alignment and memory ops.** Aligned vector loads and stores need the IR to guarantee alignment;
    otherwise use the unaligned forms. clang 18 does not recognize `__builtin_HEXAGON_V6_vmemu_128B` or
    `__builtin_HEXAGON_V6_vmem_128B` (checked), so `tests/hexagon/hvx_vaddh.c` loads with plain vector
@@ -247,8 +257,6 @@ Hexagon plan:
    the int16 kernels is an explicit wrap.
 5. **Testing.** `qemu-hexagon` runs HVX (verified). Path B tests can follow `tests/hexagon/run.sh`
    with the same flatlink path, as long as the kernel has no data relocations.
-6. **Open:** HVX `vmpy`-style multiply widening (`V6_vmpyh`) needs a check against qemu for
-   the exact lane semantics before relying on it; not done here.
 
 ## 6. Findings outside the Hexagon work
 
@@ -296,9 +304,9 @@ Run it the way CI does:
 
     CLANG=clang-19 QEMU_HEXAGON=qemu-hexagon-static tests/hexagon/run.sh
 
-Result: 13 passed (`constexpr_static`, `exceptions`, `float_neg_switch`, `qbe_builtins_libc`, `qbe_global_ctor`,
+Result: 14 passed (`constexpr_static`, `exceptions`, `float_neg_switch`, `qbe_builtins_libc`, `qbe_global_ctor`,
 `raii_templates_class`, `signed_overflow_wraps`, `struct_libc`, `templates_lambdas`, `virtual_dispatch`, and the HVX
-kernels `hvx_add_i16`, `hvx_mul_i16`, `hvx_vaddh`), 3 skipped (`qbe_atomics`, `qbe_gnu_forms`, `qbe_int3_break`:
+kernels `hvx_add_i16`, `hvx_mul_i16`, `hvx_vaddh`, `hvx_vmpy`), 3 skipped (`qbe_atomics`, `qbe_gnu_forms`, `qbe_int3_break`:
 they include hosted C++ headers that the `linux_riscv32` EDG configuration lacks).
 
 `flatlink.rb` lays every `SHF_ALLOC` section out in one `PT_LOAD` (`.text` first, `.bss` last, memsz > filesz)
