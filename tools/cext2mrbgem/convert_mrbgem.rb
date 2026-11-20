@@ -4074,6 +4074,42 @@ use_problem = lambda do |name, use|
 
   # A relational comparison (<, >, <=, >=) of two VALUE expressions orders them by address (CRuby's class tables are searched
   # by VALUE). The fork's VALUE is a struct with no order: a stuck point, recorded with its reason.
+  # == and != between two VALUEs compare the words in CRuby (identity: the same object, or the same immediate). The fork's VALUE is a
+  # struct, so the comparison is mrb_value_identical(a, b) (src/object.c: the identity mrb_obj_eq uses), and != is its negation. A
+  # plain struct == does not compile; both operands must be VALUE operands (value_operand?), as for the ordering comparisons.
+  def value_identity_pass
+    @files.each_key do |rel|
+      masked = @files[rel]['masked']
+      masked.to_enum(:scan, /(?<![<>=!])(==|!=)(?!=)/).each do
+        m = Regexp.last_match
+        op_s, op_e = m.begin(1), m.end(1)
+        next if in_dead_init(rel, op_s)
+        next if masked[op_s - 1] == '#' || masked[[op_s - 8, 0].max...op_s].to_s.include?('#')
+        fn = enclosing_func(rel, op_s)
+        next unless fn
+        value_names = value_names_of(fn) | all_file_scope_value_names
+        l_start, l_text = left_operand(masked, op_s)
+        r_end, r_text = right_operand(masked, op_e)
+        next if l_text.nil? || r_text.nil? || l_text.empty? || r_text.empty?
+        next unless value_operand?(l_text, value_names, value_field_names, rel, op_s) && value_operand?(r_text, value_names, value_field_names, rel, op_s)
+        next if @edits[rel].touches_strictly?(op_s)
+        l_end = op_s
+        l_end -= 1 while l_end > 0 && masked[l_end - 1] =~ /\s/
+        r_start = op_e
+        r_start += 1 while r_start < masked.length && masked[r_start] =~ /\s/
+        next if r_start > r_end || l_start >= l_end
+        next if @edits[rel].overlaps(l_start, l_end) || @edits[rel].overlaps(r_start, r_end) || @edits[rel].overlaps(op_s, op_e)
+        ed = @edits[rel]
+        neg = m[1] == '!='
+        ed.add(l_start, l_start, neg ? '!mrb_value_identical(' : 'mrb_value_identical(')
+        ed.add(l_end, r_start, ', ')
+        ed.add(r_end, r_end, ')')
+        rewrite(rel, op_s, m[1], neg ? '!mrb_value_identical' : 'mrb_value_identical',
+                'a VALUE comparison is identity (mrb_value_identical, the identity mrb_obj_eq uses): the same object or the same immediate')
+      end
+    end
+  end
+
   def value_order_stuck_pass
     @files.each_key do |rel|
       masked = @files[rel]['masked']
@@ -4289,7 +4325,8 @@ use_problem = lambda do |name, use|
   # parenthesized assignment to a VALUE name. A literal 0 is left to the equality pass (CRuby's Qfalse).
   # a #define whose body is a funcall (rb_funcall or mrb_funcall...) in this file
   def funcall_macro?(rel, name)
-    @files[rel]['text'].match?(/^[ \t]*#[ \t]*define[ \t]+#{Regexp.escape(name)}\s*\([^)]*\)\s*(?:mrb_funcall|rb_funcall)/)
+    # (a macro whose body is a symbol of an ID, ID2SYM(...), is a VALUE too: the symbol is a VALUE in CRuby)
+    @files[rel]['text'].match?(/^[ \t]*#[ \t]*define[ \t]+#{Regexp.escape(name)}\s*\([^)]*\)\s*(?:mrb_funcall|rb_funcall|ID2SYM)/)
   end
 
   # a function-like or object-like macro of any file of the gem whose body casts to VALUE (or is an mrb_value): its uses are VALUEs
@@ -7508,6 +7545,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     owned_class_assign_pass
     value_truth_call_pass
     value_order_stuck_pass
+    value_identity_pass
     value_as_integer_arg_pass
     value_struct_pointer_cast_pass
     value_cast_integer_stuck_pass
