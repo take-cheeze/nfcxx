@@ -794,6 +794,8 @@ class CodeGen
                 "if (!#{ops[:check]}(arg)) mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), " \
                   "\"@#{ivar}: expected #{ops[:err]}\");"
               end
+      # DECLARED_IVAR_GUARD: the declared kind is checked before the store, as at a SETIV (declared_ivar_writers_guarded?).
+      store = declared_ivar_store_guard(owner, ivar, 'arg') + store
       code = <<~CPP
         // #{owner}##{ivar}= -- synthesized attr_writer override (@#{ivar} is
         // embedded; this replaces the plain native accessor -- see
