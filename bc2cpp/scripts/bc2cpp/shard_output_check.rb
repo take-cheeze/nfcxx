@@ -115,6 +115,12 @@ single_a = UNIT_A.sub('return bump()', '++method_counter; return bump()')
                 .sub('return TABLE;', 'return method_table;')
 single_owner = PRELUDE + ShardOutput.unit_mark('One') + single_b +
                ShardOutput.unit_mark('One') + single_a + ShardOutput::HOOKS_MARK + HOOKS
+saved_split_owners = ENV.delete('BC2CPP_SHARD_SPLIT_OWNERS')
+grouped_main, grouped_shards = ShardOutput.split(single_owner, 'chk', 3)
+suite.check('without the opt-in an oversized owner stays in one unchanged translation unit',
+            grouped_main == PRELUDE + single_b + single_a + HOOKS &&
+            grouped_shards.all? { |text| text.lines.all? { |line| line.start_with?('//') } })
+ENV['BC2CPP_SHARD_SPLIT_OWNERS'] = '1'
 single_main, single_shards = ShardOutput.split(single_owner, 'chk', 3)
 suite.check('one large owner can fill multiple shards',
             single_shards[0].include?('#define BC2CPP_SHARD_PRELUDE_ONLY') &&
@@ -148,6 +154,7 @@ tier_main, _tier_files, unit_tiers = ShardOutput.split_with_tiers(single_owner, 
 suite.check('each split unit reports the tier of the shard containing its body',
             unit_tiers == ['B', 'A'].map { |owner| tier_main.include?("int #{owner}_one_impl(int x) {") ? 'default' : 'O1' } &&
             unit_tiers.sort == %w[O1 default])
+saved_split_owners.nil? ? ENV.delete('BC2CPP_SHARD_SPLIT_OWNERS') : ENV['BC2CPP_SHARD_SPLIT_OWNERS'] = saved_split_owners
 
 puts '-- linkage'
 if Bc2cppCxx.executable?(Bc2cppCxx.compiler.first)

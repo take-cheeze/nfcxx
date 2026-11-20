@@ -159,9 +159,10 @@ module ShardOutput
     [text[0...first], units, text[(hooks_at + HOOKS_MARK.size)..]]
   end
 
-  # Keep an owner's methods together when it fits a fair share of the method bytes. An oversized owner is split
-  # into method units: keeping a large compiler class together otherwise leaves one translation unit on the
-  # critical path after every other worker has finished. Explicitly hot owners remain together in the main file.
+  # By default an owner's methods stay together for cross-method inlining. BC2CPP_SHARD_SPLIT_OWNERS=1 lets
+  # oversized owners split into method units: a large compiler class otherwise leaves one translation unit on
+  # the critical path after every other worker has finished. Owners fitting a fair share of method bytes stay
+  # together, and explicitly hot owners remain together in the main file even with the opt-in.
   # The existing cross-shard declaration rewrite also covers calls between units of the same owner.
   # `shards` lists of units, each in print order.
   def assign(units, shards, hot = Set.new)
@@ -169,7 +170,9 @@ module ShardOutput
     size = ->(list) { list.sum { |u, _| u[:code].bytesize } }
     total = units.sum { |u| u[:code].bytesize }
     min_bytes = Integer(ENV.fetch('BC2CPP_SHARD_MIN_BYTES', MIN_SHARD_BYTES.to_s))
-    wanted = [[shards, units.size, (total / min_bytes.to_f).ceil].min, 1].max
+    split_owners = ENV['BC2CPP_SHARD_SPLIT_OWNERS'] == '1'
+    count = split_owners ? units.size : by_owner.size
+    wanted = [[shards, count, (total / min_bytes.to_f).ceil].min, 1].max
     target = (total + wanted - 1) / wanted
     loads = Array.new(wanted, 0)
     placed = Array.new(wanted) { [] }
@@ -180,7 +183,7 @@ module ShardOutput
       placed[0].concat(list)
     end
     chunks = cold_part.flat_map do |owner, list|
-      size.call(list) > target ? list.map { |unit| [owner, [unit]] } : [[owner, list]]
+      split_owners && size.call(list) > target ? list.map { |unit| [owner, [unit]] } : [[owner, list]]
     end
     chunks.sort_by { |owner, list| [-size.call(list), owner, list.first.last] }.each do |_, list|
       i = loads.index(loads.min)
