@@ -553,6 +553,16 @@ module SymbolCache
     // OWNER_CALL_DIRECT: DIRECTS is a run of BC2CPP_OWNER_DIRECT(owner, entry, aspec, visibility), no commas between.
     #define BC2CPP_OWNER_DIRECT(owner, fn, aspec, vis) { owner, fn, (uint32_t)(aspec) | (uint32_t)(vis) },
     #define BC2CPP_OWNERS_D(DIRECTS, ...) ([]() -> bc2cpp_owner_set& { static const char* const names[] = { __VA_ARGS__, nullptr }; static const bc2cpp_owner_direct rows[] = { DIRECTS }; static struct RClass* cls[sizeof rows / sizeof rows[0]]; static bc2cpp_owner_directs d = { rows, (int)(sizeof rows / sizeof rows[0]), 0, nullptr, cls }; static bc2cpp_owner_set s = { names, &d, 0, nullptr, 0, nullptr }; return s; }())
+    // OWNER_SET_SHARE (owner_set_share.rb): the set of every site with the same key, zero until its first call names it.
+    // SET is the site's BC2CPP_OWNERS(...), whose owner list becomes the names; its own set is never declared.
+    template <unsigned long long K> inline bc2cpp_owner_set bc2cpp_owner_shared_v{};
+    template <unsigned long long K, class F> static inline bc2cpp_owner_set& bc2cpp_owner_shared(F names) {
+      bc2cpp_owner_set& s = bc2cpp_owner_shared_v<K>;
+      if (!s.names) s.names = names();
+      return s;
+    }
+    #define BC2CPP_OWNER_NAMES_BC2CPP_OWNERS(...) { __VA_ARGS__, nullptr }
+    #define BC2CPP_SHARED(K, SET) bc2cpp_owner_shared<K##ULL>([]() -> const char* const* { static const char* const n[] = BC2CPP_OWNER_NAMES_##SET; return n; })
     [[noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_owner_violation(mrb_state* M, mrb_value recv, mrb_sym mid, const char* what) {
     #ifdef BC2CPP_NOMETHOD_VERIFY
       fprintf(stderr, "bc2cpp: NOMETHOD_VERIFY: owner-call violation: %s", mrb_class_name(M, mrb_obj_class(M, recv)));

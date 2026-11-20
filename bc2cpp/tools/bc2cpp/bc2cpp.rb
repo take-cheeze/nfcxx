@@ -25,6 +25,7 @@ require_relative 'type_check_variants'
 type_check_variants = TypeCheckVariants.parse_argv(ARGV) if $PROGRAM_NAME == __FILE__
 TypeCheckVariants.arm_guard if type_check_variants
 require_relative 'compact_output'
+require_relative 'owner_set_share'
 require_relative 'shard_output'
 require_relative 'runtime_header'
 require_relative 'shared_generation'
@@ -1626,6 +1627,9 @@ BC2CPP_MAIN = lambda do
   # RUNTIME_HEADER (runtime_header.rb): between the two, so it moves the compacted runtime text ShardOutput then splits.
   RuntimeHeader.capture_stdout(ENV[RuntimeHeader::DIR_KEY])
   CompactOutput.capture_stdout unless annotated
+  # OWNER_SET_SHARE (owner_set_share.rb): before the split, so shards of one gem share a set too.
+  real_gem = BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol }
+  OwnerSetShare.capture_stdout(symbol) if OwnerSetShare.enabled?(real_gem)
 
   # PARAM_TRACE (tools/bc2cpp/param_trace.rb): opt-in runtime classes of compiled method and block
   # parameters; unset (or any value but 1) leaves stdout untouched. Registered BEFORE ELSE_TRACE so the
