@@ -60,7 +60,7 @@ def failures(texts)
 end
 
 bad_pair = {
-  'a' => "  r1 = bc2cpp_owner_call(M, r1, 3, 0, BC2CPP_OWNERS_D(BC2CPP_OWNER_DIRECT(\"G::X\", bc2cpp_xrow_G__X_f, " \
+  'a' => "  r1 = bc2cpp_owner_call(M, r1, BC2CPP_OWNERS_D(3, 0, BC2CPP_OWNER_DIRECT(\"G::X\", bc2cpp_xrow_G__X_f, " \
          'MRB_ARGS_REQ(1), MRB_METHOD_PUBLIC_FL), "G::X"), nullptr, 1, r2);',
   'b' => "mrb_value bc2cpp_xrow_G__X_f(mrb_state* M, mrb_value self) { return G__X_f(M, self); }\n" \
          "  mrb_define_method(M, c, \"f\", G__X_f, MRB_ARGS_REQ(2));\n"

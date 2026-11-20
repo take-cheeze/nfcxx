@@ -1745,6 +1745,13 @@ check grep -qF 'static mrb_value ac_alloc(mrb_state *mrb, mrb_value klass) {' "$
 check grep -qF 'nfcx_alloc_register(mrb, k, ac_alloc);' "$work/api_alloc_class/src/api_alloc_class.c"
 check grep -qF 'mrb_define_class_method(mrb, c, "new", nfcx_alloc_new, MRB_ARGS_ANY());' "$work/api_alloc_class/src/api_alloc_class.c"
 check test "$(grep -c 'per-class allocator' "$work/api_alloc_class/REFUSALS.txt")" -eq 0
+# 2zzz167. == and != between VALUEs are identity: a VALUE parameter against another VALUE (mrb_obj_equal, the existing pass) and
+# a VALUE against a symbol call (mrb_value_identical: the operand is a call the existing pass does not take).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_value_identity tools/cext2mrbgem/fixtures/api_value_identity/ext/api_value_identity "$work/api_value_identity" > "$work/api_value_identity.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_value_identity/NOT_BUILDABLE"
+check grep -qF 'return (mrb_obj_equal(mrb, a, b)) ? mrb_true_value() : mrb_false_value();' "$work/api_value_identity/src/api_value_identity.c"
+check grep -qF 'mrb_value_identical(k ,  mrb_symbol_value(mrb_intern_cstr(mrb, "ordinal")))' "$work/api_value_identity/src/api_value_identity.c"
 # 2zzz155. a struct field of CRuby's rb_encoding * type: the Encoding placeholder type is in the prelude (the declaration compiles),
 # and the include of ruby/encoding.h is not a blocking refusal (the placeholder covers it).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rb_encoding_field tools/cext2mrbgem/fixtures/api_rb_encoding_field/ext/api_rb_encoding_field "$work/api_rb_encoding_field" > "$work/api_rb_encoding_field.log" 2>&1 || rc=$?

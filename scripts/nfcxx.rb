@@ -13,6 +13,7 @@ require "open3"
 require "rbconfig"
 require_relative "nfcxx-setup-args"
 require_relative "nfcxx-second-pass"
+require_relative "nfcxx-cache-config"
 
 root = File.expand_path("..", __dir__)
 ROOT = root
@@ -56,6 +57,17 @@ end
 
 def trace_route(kind)
   $stderr.write("nfcxx: driver: #{kind}\n") if ENV["NFCXX_DRIVER_TRACE"] == "1"
+end
+
+# B5: the cache configuration's refusal (NFCXX_CACHE_REMOTE, scripts/nfcxx-cache-config.rb plan). The bash checks it first (its
+# line 115, before the argument loop, the routes and the setup, and before its trace begins), so it is checked before anything
+# else here. The bash's -fsyntax-only pre-loop plan runs before it, so that command is the oracle's.
+unless ARGV.include?("-fsyntax-only")
+  _cache_config, cache_refusal = NfcxxCacheConfig.plan(ENV, Process.euid)
+  if cache_refusal
+    $stderr.puts(cache_refusal)
+    exit(2)
+  end
 end
 
 if planned_loop?(ARGV)

@@ -43,7 +43,7 @@ gen = <<~CPP
     "zip",
   };
   mrb_value f(mrb_state* M, mrb_value self, mrb_value r1) {
-    r1 = bc2cpp_owner_call(M, r1, 0, 2, BC2CPP_OWNERS("Array"), mrb_nil_value(), 0, self); /* CLOSED_WORLD owner-call: first */
+    r1 = bc2cpp_owner_call(M, r1, BC2CPP_OWNERS(0, 2, "Array"), mrb_nil_value(), 0, self); /* CLOSED_WORLD owner-call: first */
     r1 = mrb_iv_get(M, self, bc2cpp_sym(M, 1));
     mrb_sym name = bc2cpp_sym(M, 2);
     mrb_value r0 = mrb_const_get(M, recv, name);
