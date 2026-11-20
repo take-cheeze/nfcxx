@@ -1,4 +1,5 @@
 #!/bin/bash
+# The pinned copy (pinned-eccp-block.txt) was taken from the driver at commit 1aa750d8b52163609481ea3cb4ad631389529a7b, before the B8 switch.
 # The eccp call block of ./nfcxx (the one-step build: trace_start, the subshell that runs eccp, trace_end) is pinned before any
 # port (docs/notes/driver-eccp-call.md, option B). The block is copied verbatim out of ./nfcxx, so a change to its shape fails
 # here. It runs under set -euo pipefail, as the driver does, against a stub eccp, and checks:
@@ -13,7 +14,7 @@ here=$(cd "$(dirname "$0")" && pwd -P); repo=$(cd "$here/../.." && pwd -P)
 pass=0; fail=0
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 
-block=$(sed -n '/^t=\$(trace_start)$/,/^trace_end "\$t" "eccp (front end, C compile, link)" eccp$/p' "$repo/nfcxx")
+block=$(sed -n '/^t=\$(trace_start)$/,/^trace_end "\$t" "eccp (front end, C compile, link)" eccp$/p' "$here/pinned-eccp-block.txt")
 if [ -z "$block" ] || [ "$(printf '%s\n' "$block" | wc -l)" -lt 5 ]; then
   echo "driver-eccp-call: the eccp call block was not found in ./nfcxx"; exit 1
 fi

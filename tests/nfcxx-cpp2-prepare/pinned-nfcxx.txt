@@ -1,0 +1,17 @@
+state_put() {  # state_put NAME VALUE...: one group of the records scripts/driver-state.rb reads (k NAME, then v VALUE for each)
+  local n=$1 v
+  shift
+  printf 'k%s\0' "$n"
+  for v in ${1+"$@"}; do printf 'v%s\0' "$v"; done
+}
+cpp2_prepare() {  # cpp2_prepare: translates every .cpp2 input and puts its translation in srcs and files in place of the source
+  [ ${#cpp2_inputs[@]} -gt 0 ] || return 0
+  local cppfront_src=${CPPFRONT_SRC:-$root/build/cppfront-src}
+  if [ -z "${cudatmp:-}" ]; then cudatmp=$(mktemp -d); trap 'trace_finish; temp_cleanup' EXIT; fi
+  # the whole step is scripts/nfcxx-cpp2.rb run (the checks that cppfront and cpp2util.h are there, the directory of the translations,
+  # their scratch directory, cppfront, and the array edits: nfcxx-cu-apply.rb's plan of the reply); its statements are evaluated here
+  cpp2_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cpp2.rb" run root="$root" cppfront_src="$cppfront_src" cudatmp="$cudatmp" \
+    compile_only="$compile_only" out="$out" outset="$outset" inputs="$(IFS=$'\x1f'; echo "${cpp2_inputs[*]-}")" \
+    srcs="$(IFS=$'\x1f'; echo "${srcs[*]-}")" files="$(IFS=$'\x1f'; echo "${files[*]-}")" cflags="$(IFS=$'\x1f'; echo "${cflags[*]-}")") || exit $?
+  eval "$cpp2_sh"
+}

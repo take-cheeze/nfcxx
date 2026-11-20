@@ -1,0 +1,8 @@
+t=$(trace_start)
+(
+  [ -z "$eccp_cd" ] || cd "$eccp_cd"
+  # the eccp environment (scripts/nfcxx-eccp-env.rb plan, restructure step 3): the elements of eccp_envs, exported
+  eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-eccp-env.rb" plan envs="$(IFS=$'\x1f'; echo "${eccp_envs[*]-}")")"
+  "${eccp_argv[@]}"
+)
+trace_end "$t" "eccp (front end, C compile, link)" eccp
