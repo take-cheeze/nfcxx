@@ -1189,6 +1189,8 @@ class CodeGen
       singleton_candidate = lex_owner.nil? && lexical_self_singleton_def(name, owner_def)
       if target.nil? && (lex_owner || singleton_candidate)
         lex_candidate = singleton_candidate || @registry[name]&.find { |md| md.owner == lex_owner }
+        # PREPENDED_OVERRIDE: a module prepended to the owner answers before its own definition.
+        lex_candidate = nil if lex_candidate && prepended_override?(lex_candidate.owner, name)
         if direct_callable?(lex_candidate, n)
           target = lex_candidate
           lexical_self = true
