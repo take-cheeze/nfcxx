@@ -76,7 +76,8 @@ module StaticOwnerArms
 
       arms = static_owner_arm_targets(m[:name], argv.size, m[:blk] != NO_BLOCK)
       seen = code[[m.begin(0) - 4000, 0].max...m.begin(0)]
-      arms = arms.reject { |klass, _| static_owner_already_guarded?(seen, klass, m[:recv]) }
+      # The cap counts the arms this site adds, after the ones a guard in front already took.
+      arms = arms.reject { |klass, _| static_owner_already_guarded?(seen, klass, m[:recv]) }.first(STATIC_OWNER_ARMS_MAX)
       core = m[:blk] == NO_BLOCK ? static_owner_core_arms(m[:name], argv.size) : []
       next if arms.empty? && core.empty?
 
@@ -137,8 +138,8 @@ module StaticOwnerArms
     seen.match?(/#{expr} == (?:#{cls})|(?:#{cls}) == #{expr}|#{is}\)/)
   end
 
-  # [[class, definition]] for the arms of `name` called with `argc` arguments (and a block when `block`), at most
-  # STATIC_OWNER_ARMS_MAX.
+  # [[class, definition]] for the arms of `name` called with `argc` arguments (and a block when `block`); a site takes
+  # at most STATIC_OWNER_ARMS_MAX of those no guard in front of it took.
   def static_owner_arm_targets(name, argc, block)
     @static_owner_arm_targets ||= {}
     key = [name, argc, block, @only_owners]
@@ -166,7 +167,7 @@ module StaticOwnerArms
 
       ([t.owner] + inheriting_subclasses(name, t.owner)).each { |klass| arms << [klass, t] }
     end
-    arms.uniq(&:first).first(STATIC_OWNER_ARMS_MAX)
+    arms.uniq(&:first)
   end
 end
 
