@@ -400,9 +400,13 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_errinfo tools/cext2mrbgem/fi
 check test "$rc" -eq 0
 check grep -qF '(mrb->exc ? mrb_obj_value(mrb->exc) : mrb_nil_value())' "$work/api_errinfo/src/api_errinfo.c"
 # 2zzz63. T_BIGNUM is a recorded stuck point (the fork has no Bignum): the refusal carries that reason.
-rc=0; "$rb" "$conv" --scanner "$scanner" --name api_bignum_stuck tools/cext2mrbgem/fixtures/api_bignum_stuck/ext/api_bignum_stuck "$work/api_bignum_stuck" > "$work/api_bignum_stuck.log" 2>&1 || rc=$?
-check test "$rc" -ne 0
-check grep -qF 'stuck point: the fork has no Bignum' "$work/api_bignum_stuck/REFUSALS.txt"
+# 2zzz165. T_BIGNUM is the MRB_TT_BIGINT tag (a bigint is the value outside the fixnum range): a type test and a Check_Type on it.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_bignum_tag tools/cext2mrbgem/fixtures/api_bignum_tag/ext/api_bignum_tag "$work/api_bignum_tag" > "$work/api_bignum_tag.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_bignum_tag/NOT_BUILDABLE"
+check grep -qF 'return mrb_type(v) == MRB_TT_BIGINT ? mrb_true_value() : mrb_false_value();' "$work/api_bignum_tag/src/api_bignum_tag.c"
+check grep -qF 'mrb_check_type(mrb, v, MRB_TT_BIGINT);' "$work/api_bignum_tag/src/api_bignum_tag.c"
+check test "$(grep -c 'stuck point' "$work/api_bignum_tag/REFUSALS.txt")" -eq 0
 # 2zzz64. rb_hash_bulk_insert and rb_class_inherited_p map to the fork's mrb_hash_bulk_insert and mrb_class_inherited_p.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_class tools/cext2mrbgem/fixtures/api_hash_class/ext/api_hash_class "$work/api_hash_class" > "$work/api_hash_class.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
@@ -621,7 +625,8 @@ check grep -qF 'MRB_TT_DATA' "$work/api_type_refused/src/api_type_refused.c"
 check test "$(grep -c '  RB_TYPE_P  T_FIXNUM has no exact' "$work/api_type_refused/REFUSALS.txt")" -eq 0
 check grep -qF 'MRB_TT_FIXNUM' "$work/api_type_refused/src/api_type_refused.c"
 check grep -q "  RB_TYPE_P  object 'rb_ary_entry(a, 0)' is not a plain local variable" "$work/api_type_refused/REFUSALS.txt"
-check grep -q '  RB_TYPE_P  stuck point (Bignum): the fork has no Bignum' "$work/api_type_refused/REFUSALS.txt"
+# T_BIGNUM is the MRB_TT_BIGINT tag now (api_map: the bigint of the fork), not refused
+check grep -qF 'MRB_TT_BIGINT' "$work/api_type_refused/src/api_type_refused.c"
 
 # 2m. class-name and method-undef calls (api_map.json batch C1): the class variable is passed as a struct RClass * (not
 # wrapped in mrb_obj_value, which the mruby functions do not take)
