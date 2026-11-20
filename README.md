@@ -14,7 +14,8 @@ tests/cpp2/run.sh         # Cpp2 inputs: build, -c and link, mixed with .cpp, in
 ./nfcxx hello.cpp -o hello   # default on x86-64 Linux: C++ -> EDG IL -> Path B IR -> QBE -> asm (docs/notes/pathb-default.md)
 ./nfcxx --backend=gcc ...    # C++ -> C -> gcc -O2 -fwrapv -fno-strict-aliasing (the default where Path B is not built)
 ./nfcxx --emit-c hello.cpp   # print the generated C
-./nfcxx -ftree-vectorize x.cpp -o x # loop vectorizer of the QBE back end (SSE2 on amd64; 3rd/qbe/doc/vectorize.md)
+./nfcxx x.cpp -o x           # loop vectorizer of the QBE back end, on by default on amd64 Linux (SSE2; 3rd/qbe/doc/vectorize.md)
+./nfcxx -fno-tree-vectorize x.cpp -o x # the same without the vectorizer
 ./nfcxx -fsanitize=address x.cpp -o x # AddressSanitizer via the gcc backend (docs/notes/asan.md); tests/asan/run.sh
 ./nfcxx -fsafe-pointers x.cpp -o x # Fil-C-style pointer checks on Path B, prototype (docs/notes/safe-pointers.md); tests/safeptr/run.sh
 ./nfcxx --trace=t.json x.cpp # Chrome/Perfetto trace of the driver steps (docs/notes/tracing.md)
