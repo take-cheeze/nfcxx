@@ -133,7 +133,8 @@ class CodeGen
         end
         return [nil, [insn.op]] unless registration
 
-        registered << insn.sym.to_s if insn.op == :TDEF
+        # Only a def this body defines makes its name an alias source; a skipped one (a comment line) defines nothing yet.
+        registered << insn.sym.to_s if insn.op == :TDEF && !registration.lstrip.start_with?('//')
         lines << registration
         lines << "  r#{insn.reg} = mrb_symbol_value(mrb_intern_cstr(M, \"#{insn.sym}\"));\n"
       elsif %i[CLASS MODULE].include?(insn.op) && !bodies.key?(idx)
@@ -496,7 +497,8 @@ class CodeGen
   # singleton class. The entry is the gem's compiled method for the same irep, so the body makes the call the gem's own
   # registration also makes (emit_owner_registration_lines), and the gem registers it again after the units run. Nil
   # when the build has no compiled entry for the method, or the method is left out of the tables, or the call is one
-  # this emitter does not make (a private singleton method, or an SDEF inside a `class << self` body).
+  # this emitter does not make (a private singleton method, or an SDEF inside a `class << self` body). A comment line
+  # when the def registers nothing and the body still runs (CORE_SHADOWED, or a native method it keeps).
   # A def whose method the build leaves out of its tables (unregistered_keys), by the owner and name the compiled entry
   # carries. Its registration is skipped, and nothing the unit does depends on it.
   def left_out_method?(insn, irep)
@@ -536,13 +538,16 @@ class CodeGen
 
   def class_body_registration(insn, irep, owner)
     child = irep.reps[insn.def_child_index]
-    # A core definition a later definition replaces is not registered: the later one is (CORE_SHADOWED).
-    return nil if child && CodeGen.shadowed_labels&.include?(child)
+    # A core definition a later definition replaces is not registered: the later one is (CORE_SHADOWED). It registers
+    # nothing but keeps the unit, whose other statements (Enumerable::NONE, Array's `include Enumerable`) run only from it.
+    if child && CodeGen.shadowed_labels&.include?(child)
+      return "  // #{owner}##{insn.sym} replaced by a later definition (CORE_SHADOWED): registered there\n"
+    end
     compiled = child && @compiled_methods&.[](child)
     # A bytecode def with no compiled body (a block-taking wrapper such as Array#sort) keeps the native method already
     # registered under that owner and name, instead of refusing the whole class body.
     if compiled.nil? && (@registry[insn.sym.to_s] || []).any? { |d| d.owner == owner && d.irep.nil? }
-      return nil
+      return "  // #{owner}##{insn.sym} keeps its native method (no compiled body)\n"
     end
     # A guarded entry registers too; its Fiber fallback reads bytecode that engine methods lack, so a block call under a
     # non-root Fiber fails there.
