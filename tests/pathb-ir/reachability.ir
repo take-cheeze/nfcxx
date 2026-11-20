@@ -13,6 +13,7 @@
     (scalar 0 long (const long 0))
     (addr 8 long @"_ZTI4Used" 0)
     (addr 16 long &"_ZN4Used1gEv" 0)))
+(global "__curr_eh_stack_entry" (ptr (struct "anon1")) 8 8 (thread) (extern))
 (data "const" (const (array 6 (const char))) (string "4Used\000"))
 
 (function "__nfcxx_ldr__ZN34_INTERNAL_16_reachability_cpp_main13unused_staticEe"
@@ -121,12 +122,21 @@
   (params (param %0 "tmp" (const (ptr (struct "Used")))))
   (weak)
   (slot "tmp" (const (ptr (struct "Used"))) 8 8)
+  (slot "tmp.1" (struct "anon1") 240 8)
   (store (ptr (struct "Used")) $"tmp" %0)
-  (let %1 (ptr (const long)) (offset @"_ZTV4Used" 16))
-  (let %2 (ptr (struct "Used")) (load (ptr (struct "Used")) $"tmp"))
-  (nonnull %2)
-  (store (ptr (const long)) %2 %1)
-  (return))
+  (let %1 (ptr (struct "anon1")) (load (ptr (struct "anon1")) @"__curr_eh_stack_entry"))
+  (store (ptr (struct "anon1")) $"tmp.1" %1)
+  (store (ptr (struct "anon1")) @"__curr_eh_stack_entry" $"tmp.1")
+  (let %2 (ptr unsigned_char) (offset $"tmp.1" 8))
+  (store unsigned_char %2 (const unsigned_char 6))
+  (let %3 (ptr (const long)) (offset @"_ZTV4Used" 16))
+  (let %4 (ptr (struct "Used")) (load (ptr (struct "Used")) $"tmp"))
+  (nonnull %4)
+  (store (ptr (const long)) %4 %3)
+  (block
+    (let %5 (ptr (struct "anon1")) (load (ptr (struct "anon1")) $"tmp.1"))
+    (store (ptr (struct "anon1")) @"__curr_eh_stack_entry" %5)
+    (return)))
 
 (function "_ZN4UsedC2Ev"
   (ret void)
