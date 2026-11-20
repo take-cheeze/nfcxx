@@ -13,7 +13,7 @@ Checked against origin/main af2aa11f3 (after #1348 and #1349 merged).
   dispatches no route. Commit `c11d31fb4` (B2) removed the earlier dispatcher and its message does not say so.
 - Test state on main: `tests/driver-body` 3 passed; `tests/nfcxx-driver` 11 passed, 7 failed (the failures are the
   dispatch lines the removed dispatcher printed); `tests/nfcxx-trace` 251 passed, 35 failed (the `pathb-plan` route
-  checks); `tests/nfcxx-prepass` 28 failing (cause not analysed); `tests/nfcxx-sanitize` exits 1 with no summary.
+  checks); `tests/nfcxx-prepass` 28 failing (cause not analysed); `tests/nfcxx-sanitize` was retired in B8 (its check is `tests/driver-sanitize`).
 - Open decisions: (1) was dropping the B2 route dispatch intended? If not, restore it before B3. (2) should the bare
   `cc` at the Path B and C-only link sites become `NFCXX_CC`?
 - Not planned in the Ruby driver yet: the Path B link, the cosmo link, the eccp call sites, the `-E`, `--emit-hip`,

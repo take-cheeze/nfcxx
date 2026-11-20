@@ -9,6 +9,7 @@ require_relative 'rbs_signatures'
 require_relative 'core_hierarchy_sigs'
 require_relative 'escape_analysis'
 require_relative 'rbs_parse_memo'
+require_relative 'rbs_record_values'
 
 # RBS_RECORD_TYPES: an RBS record type on an ivar (`@ui: { battle: Game::Battle, ?win: Window }`)
 # is a CHECKED declaration that feeds the facts RECORD_HASH_PROOF produces.
@@ -23,13 +24,14 @@ require_relative 'rbs_parse_memo'
 #   `h.store(:k, v)`                       a store;
 #   `h.delete(:k)`                         only of a key declared optional (`?k:`).
 # Every store must use declared keys, every literal stored into the ivar must carry every required key, and every
-# value must be traced (literal, `Klass.new`, trace_new_target) to a class that conforms to the field type. A
+# value must be traced (literal, `Klass.new`, trace_new_target, RECORD_FIELD_TRACE in rbs_record_values.rb) to
+# classes that conform to the field type. A
 # write the checker cannot verify (computed key, non-literal update, clear, replace, delete of a required key,
 # an escape of the Hash, reflection, an outside spelling of the name) is a TC1009 error at its file:line, and
 # the build aborts on it like RBS_SEED_CONTRADICTION. Nothing is trusted on the declaration's word alone.
 #
 # Consumers: a verified name joins RecordHash.table (the unguarded RECORD_HASH_PROOF consumers keep their own
-# exact-class rules), and a literal-key read `@x[:k]` whose field names one class C (nil aside) is a receiver
+# exact-class rules, plus the classes an exact trace proves for a declared key: install_traced), and a literal-key read `@x[:k]` whose field names one class C (nil aside) is a receiver
 # HINT for C in guarded traces (trace_new_target's GETIDX arm), so the send keeps its class guard.
 module RbsRecordTypes
   CODE = 'TC1009'
@@ -165,7 +167,10 @@ module RbsRecordTypes
     sites = refusal ? {} : collect_sites(ireps, by_name.keys, poison.readers)
     ctx = { registry: registry, superclass_of: superclass_of, known_owners: known_owners, root: display_root,
             container_constants: container_constants, value_class: value_class, closed_world: closed_world,
-            owner_of: body_owners(ireps, registry), escape_world: escape_world }
+            owner_of: body_owners(ireps, registry), escape_world: escape_world, ireps: ireps, poison: poison,
+            outside_ivars: outside_ivars }
+    ctx[:tracer] = ValueTrace.new(ctx)
+    ctx[:exact_tracer] = ValueTrace.new(ctx, exact: true)
     by_name.each do |name, decls|
       errors = []
       decl = decls.first
@@ -277,7 +282,41 @@ module RbsRecordTypes
       errors << [site_loc(irep, idx, ctx[:root]),
                  "#{decl.owner}#@#{name}: nil is stored but the type is not `{ ... }?`"]
     end
+    install_traced(keys, scanner.writes, decl, ctx) if errors.empty?
     [errors, keys]
+  end
+
+  # RECORD_FIELD_TRACE: a declared key whose every store traces exactly (ValueTrace exact: no class hint, only
+  # literals, core fresh-Array results and the call, ivar and iterator rules) holds those classes, nil added when the key
+  # can be absent, so the RECORD_HASH_PROOF consumers (RECORD_NILABLE_READ) read it as they read a literal store. Only a
+  # key RecordHash's own scan left unknown changes. BC2CPP_RECORD_FIELD_TRACE=0 leaves the slot as scanned.
+  def install_traced(keys, writes, decl, ctx)
+    return if ENV['BC2CPP_RECORD_FIELD_TRACE'] == '0'
+
+    traced = {}
+    writes.each do |keys_written, irep, idx, reg|
+      classes = exact_store_classes(irep, idx, reg, ctx)
+      keys_written.each { |key| traced[key] = classes && traced.fetch(key, Set.new)&.|(classes) }
+    end
+    traced.each do |key, classes|
+      info = keys[key]
+      next unless classes && info && decl.fields[key]&.classes
+
+      exact = info[:nilable] ? classes | [RecordHash::NIL_CLASS] : classes
+      %i[strict trusted].each { |tier| info[tier] = exact if info[tier].include?(:unknown) }
+    end
+  end
+
+  def exact_store_classes(irep, idx, reg, ctx)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, shared: true)
+    return nil if defs.nil? || defs.empty?
+
+    defs.each_with_object(Set.new) do |d, out|
+      classes = d.entry? ? nil : ctx[:exact_tracer].classes_at(irep, d.index, d.reg)
+      return nil unless classes
+
+      out.merge(classes)
+    end
   end
 
   def value_errors(irep, idx, reg, field, ctx)
@@ -285,11 +324,12 @@ module RbsRecordTypes
     return ["value of :#{field.key} cannot be traced (declare it untyped)"] if defs.nil? || defs.empty?
 
     defs.filter_map do |d|
-      cls = d.entry? ? nil : value_class_at(irep, d.index, d.reg, ctx)
-      if cls.nil?
+      classes = d.entry? ? nil : ctx[:tracer].classes_at(irep, d.index, d.reg)
+      bad = classes&.reject { |cls| conforms?(cls, field.classes, ctx[:superclass_of]) }
+      if classes.nil?
         "value of :#{field.key} cannot be traced to a class (declared #{field.text}; declare it untyped)"
-      elsif !conforms?(cls, field.classes, ctx[:superclass_of])
-        "value of :#{field.key} is #{cls}, declared #{field.text}"
+      elsif !bad.empty?
+        "value of :#{field.key} is #{bad.sort.join(' | ')}, declared #{field.text}"
       end
     end
   end
