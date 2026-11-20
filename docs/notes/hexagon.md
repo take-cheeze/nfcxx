@@ -264,6 +264,16 @@ Hexagon plan:
    Builtin names need the `_128B` suffix with raw vector types
    (`typedef int V128 __attribute__((__vector_size__(128)))`); the unsuffixed
    `__builtin_HEXAGON_V6_vmpyh` takes 64-byte vectors.
+   Prototype emitter: `scripts/pathb-hvx-emit.rb` reads Path B IR text and emits C with
+   HVX builtins for the one pattern it handles (a counted int16 wrapping-add loop over
+   three short pointers and an int bound, matched structurally): a `vaddh` vector main
+   loop plus a scalar tail. Anything else is refused (exit 3), never silently dropped.
+   `tests/pathb-hvx/run.sh` is its translation validation: dump the probe loop with
+   `pathb-dump --ir`, emit, compile with clang for Hexagon, check `vadd` in the
+   assembly, flatlink, run under qemu-hexagon against `// EXPECT:`, and pin two
+   refusals (a scalar module, a whole runnable module). `tests/pathb-hvx/cases/add_i16`
+   passes (exit 67, equal to `tests/cases/hvx_add_i16.cpp`). CRuby and mruby agree
+   byte-for-byte on the output and the refusal text.
 3. **Alignment and memory ops.** Aligned vector loads and stores need the IR to guarantee alignment;
    otherwise use the unaligned forms. clang 18 does not recognize `__builtin_HEXAGON_V6_vmemu_128B` or
    `__builtin_HEXAGON_V6_vmem_128B` (checked), so `tests/hexagon/hvx_vaddh.c` loads with plain vector
