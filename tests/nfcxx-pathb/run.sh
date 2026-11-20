@@ -30,8 +30,9 @@ trap 'rm -rf "$sb"' EXIT
 root=$sb/root; work=$sb/work; bin=$sb/bin; tmp=$sb/tmp
 mkdir -p "$root/build/edg/bin" "$root/build/edg/lib" "$root/build/qbe" "$bin" "$work" "$tmp"
 cp -r "$repo/scripts" "$root/scripts"
-# the copy of nfcxx, unchanged
-cp "$repo/nfcxx" "$root/nfcxx"
+# the bash oracle: the pre-switch driver text (pinned-nfcxx.txt, ./nfcxx at 25005e00d). ./nfcxx is a shim for the Ruby driver
+# since B8, so it cannot be the oracle.
+cp "$here/pinned-nfcxx.txt" "$root/nfcxx"
 chmod +x "$root/nfcxx"
 for s in ehshim.rb asan-vla.rb safeptr-rt.rb pathb-cc.rb pathb-ldrt.rb; do ln -sf "$here/stub.sh" "$root/scripts/$s"; done
 for c in cc g++ gcc cp mktemp ninja env; do ln -s "$here/stub.sh" "$bin/$c"; done

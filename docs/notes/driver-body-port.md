@@ -1,6 +1,7 @@
 # Porting the driver body (`./nfcxx`) to Ruby
 
-Status: in progress (B0 and B1 done; B2 landed but regressed; B3 to B8 not started). Follows
+Status: B8 done (the switch): `./nfcxx` is a shim that runs `scripts/nfcxx.rb`; the bash body is frozen at
+`tests/driver-body/nfcxx-bash`. Stages B3 to B7 are the remaining ports, run by the Ruby driver through that body. Follows
 docs/notes/driver-state-design.md (the helpers are done; slices 1 to 8 are merged).
 
 ## Latest status
@@ -19,7 +20,6 @@ Checked against origin/main af2aa11f3 (after #1348 and #1349 merged).
 - Not planned in the Ruby driver yet: the Path B link, the cosmo link, the eccp call sites, the `-E`, `--emit-hip`,
   sanitizer and trace setup, `cu_prepare` and `cpp2_prepare` (they rewrite the source list and the trap), and
   `mod_build_program`.
-- B8 is blocked. The B8 audit (against 73c5fc40c) concluded that `./nfcxx` cannot become a shim yet.
 
 ## Where the body stands
 
@@ -70,8 +70,13 @@ tests/nfcxx-live, tests/nfcxx-cache, tests/nfcxx-modules, tests/nfcxx-cuda-devic
   tests/nfcxx-link and tests/nfcxx-modules/trap.sh. Not started.
 - **B7: the second pass and the exports.** Ruby spawns the second run with the environment; the exports go into the Ruby
   process environment. Not started.
-- **B8: the switch.** `./nfcxx` becomes a shim that runs `scripts/nfcxx.rb`, the flag becomes the default, and the bash
-  body moves to tests/driver-body/nfcxx-bash (kept as the oracle). Blocked: see "Latest status" and the B8 audit.
+- **B8: the switch. Done.** `./nfcxx` is a shim (`"${RUBY:-ruby}" "$(dirname "$0")/scripts/nfcxx.rb" "$@"`). The Ruby driver
+  is the entry point, and the `NFCXX_RUBY_DRIVER` gate is gone. The operational bash body is `tests/driver-body/nfcxx-bash`
+  (frozen; `scripts/nfcxx.rb` runs it as its oracle, with its root and its `"$0"` re-runs pointed at `./nfcxx`). The cache key
+  hashes `tests/driver-body/nfcxx-bash` (scripts/nfcxx-cache.rb), not `./nfcxx`; the harness copies that hash the body
+  (tests/nfcxx/nfcxx-bash, tests/nfcxx-cache/nfcxx-bash, tests/nfcxx-cuda-device/nfcxx-bash) use the same file.
+  `tests/driver-body/run.sh` no longer diffs the body against `./nfcxx` (that text is now a shim).
+  Suites that read `./nfcxx` text use a pinned copy of the pre-switch file (`pinned-*.txt`, taken at 25005e00d).
 
 ## Risks
 

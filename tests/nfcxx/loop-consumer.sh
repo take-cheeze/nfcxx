@@ -3,6 +3,7 @@
 # markers of nfcxx). For every argument list of tests/nfcxx/loop-cases.txt it must leave the state, and end the way, the frozen
 # bash loop does (tests/nfcxx/nfcxx-bash, the oracle of tests/nfcxx/option-state.sh). The harness's temporary directory and
 # the bash's line numbers in an unbound-variable error are normalized: both run in another file.
+# The driver text is the pre-switch ./nfcxx, pinned (pinned-nfcxx.txt): ./nfcxx is the Ruby driver since B8 and has no loop.
 #   tests/nfcxx/loop-consumer.sh     prints the counts; exits nonzero on a failure
 cd "$(dirname "$0")/../.."
 root=$PWD
@@ -16,7 +17,7 @@ while IFS= read -r line; do
     if [ ${#args[@]} -eq 0 ] && [[ $w =~ ^(NFCXX_[A-Z_]+|TMPDIR|CUDA_HOME|ROCM|CUDA_TEST_[A-Z_]+)= ]]; then envs+=("$w"); else args+=("$w"); fi
   done
   want=$(env "${envs[@]+"${envs[@]}"}" tests/nfcxx/option-state.sh "${args[@]}" 2>&1 | norm); ws=${PIPESTATUS[0]}
-  got=$(env "${envs[@]+"${envs[@]}"}" OPTION_STATE_SRC="$root/nfcxx" tests/nfcxx/option-state.sh "${args[@]}" 2>&1 | norm); gs=${PIPESTATUS[0]}
+  got=$(env "${envs[@]+"${envs[@]}"}" OPTION_STATE_SRC="$root/tests/nfcxx/pinned-nfcxx.txt" tests/nfcxx/option-state.sh "${args[@]}" 2>&1 | norm); gs=${PIPESTATUS[0]}
   if [ "$want" = "$got" ] && [ "$ws" = "$gs" ]; then
     pass=$((pass + 1))
   else

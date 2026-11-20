@@ -1,10 +1,10 @@
 #!/usr/bin/env ruby
-# The Ruby driver (stage B2 of docs/notes/driver-body-port.md): the skeleton that will run the driver's top-level flow in Ruby.
-# Until the stages are ported, it runs the bash driver (the oracle, tests/driver-body/nfcxx-bash) with the same arguments,
-# environment, standard streams and status, so NFCXX_RUBY_DRIVER=1 changes nothing yet. Each stage moves a part of the flow
-# here; the bash driver is the reference the differential tests compare against.
+# The Ruby driver (docs/notes/driver-body-port.md). ./nfcxx is a shim that runs this script (stage B8, the switch).
+# The stages not yet ported run in the bash body, tests/driver-body/nfcxx-bash (the frozen oracle), with the same arguments,
+# environment, standard streams and status. Each stage moves a part of the flow here; the bash body is the reference the
+# differential tests compare against.
 #
-#   NFCXX_RUBY_DRIVER=1 ./nfcxx ARGS...      (./nfcxx runs this script when the flag is set)
+#   ./nfcxx ARGS...      (runs: ruby scripts/nfcxx.rb ARGS...)
 
 require "tempfile"
 require "tmpdir"
