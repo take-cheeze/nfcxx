@@ -9,11 +9,58 @@
 require "tempfile"
 require "tmpdir"
 require "fileutils"
+require "open3"
 require "rbconfig"
 require_relative "nfcxx-setup-args"
 
 root = File.expand_path("..", __dir__)
+ROOT = root
 oracle = File.join(root, "tests", "driver-body", "nfcxx-bash")
+
+# The route dispatch: the pre-loop plan (scripts/nfcxx-loop.rb) runs in scripts/nfcxx-run.rb, and a gcc-route refusal
+# (scripts/nfcxx-gcc-plan.rb --live, status 2) is printed here, as the bash prints it. Every other argument list goes to the
+# oracle below, which runs the gcc and Path B plans itself (its routes call nfcxx_plan_run and the --records planner).
+LOOP = File.join(ROOT, "scripts", "nfcxx-loop.rb")
+GCC_PLAN = File.join(ROOT, "scripts", "nfcxx-gcc-plan.rb")
+RUNNER = File.join(ROOT, "scripts", "nfcxx-run.rb")
+PLAN_KINDS = %w[RUN EXEC CP CAT LN ENV].freeze
+
+def plan_text?(out)
+  first = out.lines.first
+  !first.nil? && PLAN_KINDS.include?(first.split(/[ \t]/, 2).first)
+end
+
+def planned_loop?(args)
+  out, _err, status = Open3.capture3(RbConfig.ruby, LOOP, *args)
+  status.success? && plan_text?(out)
+end
+
+def gcc_plan(args)
+  out, err, status = Open3.capture3(RbConfig.ruby, GCC_PLAN, "--tabs", "--live=#{ROOT}", *args)
+  # a refusal (status 2): the port's message is the bash's, so the driver prints it and stops here, as the bash would
+  if status.exitstatus == 2 && !plan_text?(out)
+    trace_route("gcc-plan")
+    $stderr.write(err)
+    exit(2)
+  end
+  nil
+end
+
+def trace_route(kind)
+  $stderr.write("nfcxx: driver: #{kind}\n") if ENV["NFCXX_DRIVER_TRACE"] == "1"
+end
+
+if planned_loop?(ARGV)
+  trace_route("plan")
+  pid = Process.spawn(RbConfig.ruby, RUNNER, "--root=#{ROOT}", "--", *ARGV)
+  Process.wait(pid)
+  exit($?.exitstatus || 128 + $?.termsig)
+end
+
+# the gcc and Path B plans are run by the bash driver (its route runs them with nfcxx_plan_run): the runner here does not
+# take their kinds (CD, ENV, CHECK, STORE, the placeholders), so a plan of those routes goes to the oracle below
+gcc_plan(ARGV) # a refusal exits here; a plan is left to the oracle
+trace_route("bash")
 
 # the oracle computes its root from its own location; here it is this repository's root (the same substitution the
 # differential tests make), so its paths are the repository's
