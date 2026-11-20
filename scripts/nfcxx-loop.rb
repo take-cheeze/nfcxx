@@ -381,7 +381,7 @@ end
 # nfcxx's -fsyntax-only block, which runs before its setup: the compile again, without its object (a type check). Returns the
 # command the bash runs as [kind, argv], kind RUN (the driver) or EXEC (nfcxx replaces itself), or nil when there is no
 # -fsyntax-only. TMP stands for the temporary directory the bash makes for the object.
-def syntax_only_plan(argv)
+def syntax_only_plan(argv, tmp = "TMP")
   return nil unless argv.include?("-fsyntax-only")
   args = argv.reject { |b| b == "-fsyntax-only" }
   return ["EXEC", ["nfcxx", *args]] if args.include?("-E")
@@ -392,7 +392,7 @@ def syntax_only_plan(argv)
     args.each do |b|
       if skip
         skip = false
-        rewritten << "TMP/x.o"
+        rewritten << "#{tmp}/x.o"
         next
       end
       skip = true if b == "-o"
@@ -400,7 +400,7 @@ def syntax_only_plan(argv)
     end
     return ["RUN", ["nfcxx", "-c", *rewritten]]
   end
-  ["RUN", ["nfcxx", "-c", *args, "-o", "TMP/x.o"]]
+  ["RUN", ["nfcxx", "-c", *args, "-o", "#{tmp}/x.o"]]
 end
 
 # nfcxx's --bundle-* options (scripts/wrap.rb, before its setup): the driver runs again on the arguments without them,
@@ -643,6 +643,15 @@ rescue NfcxxMissing => e
 end
 
 def main(argv)
+  if argv.first == "--fso"
+    # the -fsyntax-only pre-loop (the bash runs it before its setup): fso_kind and fso_argv as shell statements, with the
+    # scratch directory of the object as the token @@NFCXX_FSO_TMP@@ for the bash to replace
+    argv.shift
+    kind, cmd = syntax_only_plan(argv, "@@NFCXX_FSO_TMP@@") || ["NONE", []]
+    $stdout.write("fso_kind=#{kind}\n")
+    $stdout.write("fso_argv=(#{cmd.map { |w| Shellwords.escape(w) }.join(" ")})\n")
+    return 0
+  end
   records = argv.first == "--records"
   argv.shift if records
   shell = argv.first == "--shell"
