@@ -127,3 +127,18 @@ not an unprofiled throughput guarantee. All 20 generated C++, header and bytecod
 
 Existing IR block checks cover writes across classes, unrelated ivars, chained reads, nested Proc writes,
 cycles, unwritten ivars and unlisted dynamic writes.
+
+## Native namespace scopes
+
+A 96-method compiled-compiler profile attributed 13.0% of sampled CPU to `onig_byte_to_char`, largely beneath
+`UniqueClassNames.native_module_binding`. Each namespace query scanned function headers again from the start
+of its C/C++ source. The namespace and constant-binding analyses now share a per-analysis header index, use
+binary search for the enclosing function and retain its body boundary. Match positions and captures are saved
+as values, avoiding mruby-onig's reused scan region; UTF-8 character offsets keep their existing meaning.
+
+On 20 real namespace queries over the fixture's 79 native sources, alternating baseline/indexed runs measured
+0.376/0.353 versus 0.038/0.043 seconds on CRuby 4/YJIT, and 0.631/0.619 versus 0.127/0.126 seconds in the
+mruby interpreter. Every answer matched. The interpreter baseline copies retained MatchData to repair the
+same scan-region compatibility issue, so this compares two correct implementations; it is not a whole-compiler
+runtime speedup claim. Scope checks also cover UTF-8 prefixes, interleaved queries into different functions,
+out-of-function positions and both definition-only and lookup policies sharing one header index.

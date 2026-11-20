@@ -304,6 +304,7 @@ module ConstBindings
   def native_class_owners(native_paths)
     files = Array(native_paths).select { |path| File.file?(path) }
     sources = files.map { |path| File.read(path, encoding: 'UTF-8') }
+    headers = {}.compare_by_identity
     classes = Hash.new { |hash, name| hash[name] = Set.new }
     refused = Set.new
     files.zip(sources).each do |path, source|
@@ -328,7 +329,8 @@ module ConstBindings
           under = segment.match(UniqueClassNames::UNDER_DEFINITION)
           if segment.match?(/\Amrb_define_(?:class|module)_under/)
             outer = under && (under[2] || under[3]) == name &&
-                    UniqueClassNames.native_module_binding(sources, source, match.begin(0), under[1], lookup: true)
+                    UniqueClassNames.native_module_binding(sources, source, match.begin(0), under[1],
+                                                           lookup: true, headers: headers)
             next refused << name unless outer
 
             classes[name] << outer
