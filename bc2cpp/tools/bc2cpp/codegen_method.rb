@@ -562,10 +562,18 @@ class CodeGen
     # destructor). glue_at REPLACES an address's code, so `prefix_at` is emitted
     # ahead of the suppression check and the label.
     prefix_at = {}
-    ensure_region = recognize_ensure_region(irep)
+    # ENSURE_BODY_BLOCKS: the block passes above have run, so a block call in the ensure body is emitted from its glue,
+    # inside the guard's lambda; the main loop below must then not emit that glue a second time.
+    ensure_region = recognize_ensure_region(irep, blocks: !@resumable)
+    # A guarded inline loop's text is emitted around the main loop's instructions, never inside the lambda.
+    if ensure_region && (guarded_inline[:at].keys + guarded_inline[:after].keys)
+                        .any? { |addr| (ensure_region[:except_addr]..ensure_region[:raiseif_addr]).cover?(addr) }
+      ensure_region = recognize_ensure_region(irep)
+    end
     if ensure_region
-      open_glue, ok = emit_ensure_guard(ensure_region, irep, d)
+      open_glue, ok = emit_ensure_guard(ensure_region, irep, d, glue_at: glue_at, suppressed: suppressed)
       if ok
+        (ensure_region[:except_addr]..ensure_region[:raiseif_addr]).each { |addr| glue_at.delete(addr) }
         # ENSURE_ENTRY_LABEL: a jump onto the first protected instruction lands before the guard's scope opens.
         entry = ensure_region[:entry_label] ? "  L#{ensure_region[:begin_addr]}:;\n" : ''
         prefix_at[ensure_region[:begin_addr]] = entry + open_glue
