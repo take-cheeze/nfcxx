@@ -108,6 +108,9 @@ else
   if $clang --target=$triple -ffreestanding -fno-pic -O2 -mhvx -mhvx-length=128b -w -c "$here/hvx_vmpy.c" -o "$tmp/hvx_vmpy.o" 2>/dev/null; then
     objs+=(hvx_vmpy)
   fi
+  if $clang --target=$triple -ffreestanding -fno-pic -O2 -mhvx -mhvx-length=128b -w -c "$here/hvx_tail.c" -o "$tmp/hvx_tail.o" 2>/dev/null; then
+    objs+=(hvx_tail)
+  fi
   # An object flatlink must refuse (undefined symbol): the SKIP-undef message has to match too.
   printf 'extern int ext(void);\nint _start(void) { return ext(); }\n' >"$tmp/undef.c"
   $clang --target=$triple -ffreestanding -fno-pic -G0 -O2 -w -c "$tmp/undef.c" -o "$tmp/undef.o" 2>/dev/null && objs+=(undef)

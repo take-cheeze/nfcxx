@@ -70,7 +70,8 @@ done
 # Hand-written HVX kernels (no EDG): clang builtins with -mhvx, 128-byte vectors.
 # hvx_vaddh: one vaddh, exit 192. hvx_vmpy: widening-multiply lane semantics
 # (vmpyhv/vmpyhus even-odd deinterleave, vmpyh scalar even half), exit 96.
-for k in "hvx_vaddh 192" "hvx_vmpy 96"; do
+# hvx_tail: vector main loop plus scalar tail (n = 100, 5, 0), exit 68.
+for k in "hvx_vaddh 192" "hvx_vmpy 96" "hvx_tail 68"; do
   set -- $k; name=$1; want=$2
 if $clang --target=$triple -ffreestanding -fno-pic -O2 -mhvx -mhvx-length=128b -w \
       -c "$here/$name.c" -o "$tmp/hvx.o" 2>"$tmp/hvx.cc"; then

@@ -147,6 +147,7 @@ Results (`tests/hexagon/run.sh`, `QEMU_HEXAGON` set):
 | `hvx_mul_i16` | ok (exit 184) | |
 | `hvx_vaddh` (hand-written, `-mhvx -mhvx-length=128b`) | ok (exit 192) | real HVX `vadd` in the object |
 | `hvx_vmpy` (hand-written, `-mhvx -mhvx-length=128b`) | ok (exit 96) | widening-multiply lane semantics: `vmpyhv`/`vmpyhus` even-odd deinterleave, `vmpyh` scalar even half (section 5) |
+| `hvx_tail` (hand-written, `-mhvx -mhvx-length=128b`) | ok (exit 68) | `vaddh` vector main loop plus scalar tail (`n` = 100, 5, 0): the loop shape Path B must emit (section 5) |
 | `float_neg_switch` | ok (exit 42) | `.rodata` (FP constants, switch table) via `R_HEX_32_6_X`/`R_HEX_6_X` |
 | `struct_libc` | ok (exit 9) | `.rodata.str1.1`; `strlen` is defined in `stub.c` |
 | `raii_templates_class` | ok (exit 7) | `.data`/`.bss`; EH bookkeeping globals in `stub.c`, `-G0` |
@@ -154,8 +155,8 @@ Results (`tests/hexagon/run.sh`, `QEMU_HEXAGON` set):
 | `exceptions` | ok (exit 15) | `tests/hexagon/eh_rt.c` supplies EDG's EH ABI (section 3a) |
 | `templates_lambdas` | ok (exit 12) | `scripts/gen-c-target.rb` passes `-tused` (instantiate used templates), as the host driver does; no `edg_prelink` needed |
 
-All 12 Hexagon checks in this table run (the generated cases and HVX).
-Compile-only mode (no qemu) compiles all 12.
+All 13 Hexagon checks in this table run (the generated cases and HVX).
+Compile-only mode (no qemu) compiles all 13.
 
 Layout: `tests/hexagon/layout.sh` passes (26 facts); with `EDG_TARGET=linux_i686` it fails
 (verified), so it isn't vacuous.
@@ -238,7 +239,8 @@ Hexagon plan:
    are `__HVX__`, `__HVX_ARCH__`, `__HVX_LENGTH__`. The SDK's `hvx_hexagon_protos.h` is not needed.
 2. **Vector shapes.** One vector is 128 bytes (64 `int16`, 32 `int32`). Path B must emit loops
    with a scalar tail (or masked stores via `vmaskedstore`) instead of assuming multiples of 64
-   elements. The int16 kernels in `tests/cases/hvx_*.cpp` are the test shape.
+   elements. The int16 kernels in `tests/cases/hvx_*.cpp` are the test shape; `tests/hexagon/hvx_tail.c`
+   is the vector-main-loop plus scalar-tail shape over non-multiple counts (`n` = 100, 5, 0, exit 68).
    Widening multiply lane order (verified on qemu-hexagon 8.2.2, `tests/hexagon/hvx_vmpy.c`,
    exit 96): `V6_vmpyhv_128B` (signed x signed) and `V6_vmpyhus_128B` (signed x unsigned)
    widen all 64 lanes, lane-aligned, deinterleaved as V0 = even-lane products, V1 = odd-lane
@@ -304,9 +306,9 @@ Run it the way CI does:
 
     CLANG=clang-19 QEMU_HEXAGON=qemu-hexagon-static tests/hexagon/run.sh
 
-Result: 14 passed (`constexpr_static`, `exceptions`, `float_neg_switch`, `qbe_builtins_libc`, `qbe_global_ctor`,
+Result: 15 passed (`constexpr_static`, `exceptions`, `float_neg_switch`, `qbe_builtins_libc`, `qbe_global_ctor`,
 `raii_templates_class`, `signed_overflow_wraps`, `struct_libc`, `templates_lambdas`, `virtual_dispatch`, and the HVX
-kernels `hvx_add_i16`, `hvx_mul_i16`, `hvx_vaddh`, `hvx_vmpy`), 3 skipped (`qbe_atomics`, `qbe_gnu_forms`, `qbe_int3_break`:
+kernels `hvx_add_i16`, `hvx_mul_i16`, `hvx_vaddh`, `hvx_vmpy`, `hvx_tail`), 3 skipped (`qbe_atomics`, `qbe_gnu_forms`, `qbe_int3_break`:
 they include hosted C++ headers that the `linux_riscv32` EDG configuration lacks).
 
 `flatlink.rb` lays every `SHF_ALLOC` section out in one `PT_LOAD` (`.text` first, `.bss` last, memsz > filesz)
