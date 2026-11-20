@@ -42,6 +42,8 @@ SRC = <<~'RUBY'
     def self.each_x(n); i = 0; while i < n; yield i; i += 1; end; :done; end
     def self.keep(&b); @kept = b; :kept; end
     def self.kept; @kept; end
+    def self.with_keywords(a, b = 3, limit: 9, extra: 2, &block); block.call(a + b + limit + extra); end
+    def self.with_required(a, b = 3, limit:, &block); block.call(a + b + limit); end
   end
 
   class CmSub < CmBase
@@ -54,6 +56,9 @@ SRC = <<~'RUBY'
     def nxt(n); r = []; CmBase.each_x(n) { |x| next if x.odd?; r << x }; r; end
     def boom(n); CmBase.each_x(n) { |x| raise ArgumentError, "at #{x}" if x == 1 }; rescue ArgumentError => e; e.message; end
     def keep(n); CmBase.keep { |x| x + 1 }; [n, CmBase.kept.call(5)]; end
+    def kw_default; CmBase.with_keywords(1) { |x| x * 2 }; end
+    def kw_positional; CmBase.with_keywords(1, 4) { |x| x * 2 }; end
+    def kw_missing; CmBase.with_required(1) { |x| x }; end
     def sio(s); r = nil; StringIO.open(s) { |io| r = io.read }; r; end
     def sio_boom(s); keep = nil; StringIO.open(s) { |io| keep = io; raise ArgumentError, 'in' }; rescue ArgumentError; keep.closed?; end
     def fopen(p); File.open(p, 'w') { |f| f.write('x') }; end
@@ -94,6 +99,14 @@ check.call('inh: an inherited class method (CmSub.each_x is CmBase.each_x) is th
 check.call('keep: a class method that stores its block gets the heap block',
            code_of(code, 'keep').include?('CmBase_singleton_keep_impl(M, ') &&
              !code_of(code, 'keep').include?('Bc2cppBlock'))
+check.call('optional block and omitted keywords: defaults include keyword value/presence slots after the positional count',
+           code_of(code, 'kw_default').include?('CmBase_singleton_with_keywords_impl(M, ') &&
+             code_of(code, 'kw_default').match?(/, 0, mrb_nil_value\(\), 0, mrb_nil_value\(\), 0\);/))
+check.call('supplied optional positional: keyword slots still follow the positional count',
+           code_of(code, 'kw_positional').include?('CmBase_singleton_with_keywords_impl(M, ') &&
+             code_of(code, 'kw_positional').match?(/, 1, mrb_nil_value\(\), 0, mrb_nil_value\(\), 0\);/))
+check.call('a missing required keyword keeps dispatch to the raising entry wrapper',
+           !code_of(code, 'kw_missing').include?('CmBase_singleton_with_required_impl(M, '))
 sio = code_of(code, 'sio')
 check.call('sio: StringIO.open calls the compiled core class method at the root context, the send as the else',
            sio.match?(/if \(M->c == M->root_c\) \{\n\s+r\d+ = StringIO_singleton_open_impl\(M, /) && sio.match?(ELSE_SEND))
@@ -126,6 +139,9 @@ DRIVER = <<~'RUBY'
     %i[own inh brk nxt boom keep].each { |m| show.call("#{m}/#{n}") { fx.send(m, n) } }
   end
   show.call('sio') { fx.sio('abc') }
+  show.call('keyword defaults') { fx.kw_default }
+  show.call('keyword positional') { fx.kw_positional }
+  show.call('keyword missing') { fx.kw_missing }
   show.call('sio_boom') { fx.sio_boom('abc') }
   show.call('fopen') { fx.fopen('bc2cpp_cm_fopen.txt'); fx.ftop('bc2cpp_cm_fopen.txt'); fx.fread('bc2cpp_cm_fopen.txt') }
   show.call('fread missing') { fx.fread('bc2cpp_cm_missing/none.txt') }
@@ -175,6 +191,9 @@ else
       interpreted.zip(compiled).reject { |a, b| a == b }.first(10).each { |a, b| puts "    interpreted: #{a}\n    compiled:    #{b}" }
       check.call('a captured variable written by the block is seen after the call', interpreted.include?('own/4: [:done, 6]'))
       check.call('StringIO.open closes its io when the block raises', interpreted.include?('sio_boom: true'))
+      check.call('omitted optional positional and keyword defaults are preserved', interpreted.include?('keyword defaults: 30'))
+      check.call('a supplied optional positional retains omitted keyword defaults', interpreted.include?('keyword positional: 32'))
+      check.call('a missing required keyword raises ArgumentError', interpreted.any? { |line| line.start_with?('keyword missing: ArgumentError:') })
     end
     puts output.lines.last(30).join unless built && interpreted && compiled
   end
