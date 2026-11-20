@@ -110,3 +110,33 @@ between runs (one run showed 17 ms), so compare p50 and min.
 
 These are fill commands only. The shader path (native programs such as the blur and textured
 composition) is not measured: it needs program records, vertex streams and textures in the batch.
+
+## The shader path: solid-colour quads
+
+`frame/gen_frame_quad.py` draws a full-tile quad per command, clipped to a random rectangle, with program
+native 60 (38 + row 22: passthrough vertex stage, row 22 writes an immediate colour and does not sample).
+The program record's signature is solved from the interpolation field to match `nr_native_check`.
+
+Finding: in the NPU build, `nr_native_row` reaches `nr_row_22` through its nested dispatch tree with the
+row argument wrong. `row->immediates` reads zero inside `nr_row_22`, but the value is correct at the entry
+of `nr_native_row` and at the rasteriser's handoff. The same row called directly from the top of
+`nr_native_row` gives the correct colour for every covered pixel. `--direct-row22` inserts that shortcut
+into the generated entry. The result below uses it, so it measures the workaround, not the unpatched
+dispatch. Whether the Windows build has the same behaviour was not tested here.
+
+Measured on takecheeze-h8 (sequential runs, 300 inferences each, all tiles match):
+
+| draws | status | p50 (ms) | min (ms) |
+| --- | --- | --- | --- |
+| 1 | 0 | 0.469 | 0.433 |
+| 16 | 0 | 0.956 | 0.808 |
+
+About 32 µs per draw (two triangles each, row by row over the clip rectangle), against about 4.4 µs per
+fill command. These numbers include the fixed inference overhead of about 0.44 ms.
+
+```sh
+python3 frame/gen_frame_quad.py <npu-render>/native/windows/ptl_kernels work/quad 1 16 --direct-row22
+python3 frame/frame_check.py work/quad --movi-root ~/movitools/MVC_DEPEND --wine-host host --bench 300
+```
+
+Not yet measured: blur and textured composition, which need texture windows in the batch.
