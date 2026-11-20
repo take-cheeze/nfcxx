@@ -111,6 +111,12 @@ SOURCE = <<~RUBY
     class CbC < CbA
       def w = W
     end
+    class CbA
+      K = 7
+    end
+    class CbD
+      K = 8
+    end
   end
   module CbOuter
     class CbA
@@ -129,6 +135,8 @@ SOURCE = <<~RUBY
     end
     def top = ::W
     def late = LATE
+    def kind_a = CbOuter::CbA::K
+    def kind_d = CbOuter::CbD::K
   end
 RUBY
 
@@ -138,6 +146,10 @@ Dir.mktmpdir('bc2cpp-const-bindings') do |dir|
   code, err = Bc2cppFixtureRuntime.generate(SOURCE, dir, core: true, only_owners: OWNERS)
   suite.check('a multi-binding read uses the guarded site cache', code.include?('bc2cpp_const_path_has(M, "CbOuter::CbA"'))
   suite.check('a scoped read of an immutable name uses the receiver cache', code.match?(/bc2cpp_mcnst_\d+\(M, r\d+\)/))
+  # One receiver cache per name: the two `::K` reads (different receivers) share a slot.
+  last_mcnst = ->(meth) { code[/^mrb_value CbTop_#{meth}_impl\(mrb_state\* M.*?^}/m].to_s.scan(/bc2cpp_mcnst_(\d+)\(M, r\d+\)/).flatten.last }
+  suite.check('the GETMCNST reads of one name share one receiver cache',
+              !last_mcnst.call('kind_a').nil? && last_mcnst.call('kind_a') == last_mcnst.call('kind_d'))
   rescued = code[/^static mrb_value CbTop_rescued_impl_rescue_try\(mrb_state\* M.*?^}/m].to_s
   suite.check('a scoped read inside a rescue range uses the receiver cache',
               rescued.match?(/bc2cpp_mcnst_\d+\(M, r\d+\)/))
@@ -175,6 +187,11 @@ Dir.mktmpdir('bc2cpp-const-bindings') do |dir|
         call(M, "rescued", top, "rescued");
         call(M, "rescued again", top, "rescued");
         call(M, "top", top, "top");
+        // The shared slot holds one receiver at a time: alternate them.
+        for (int i = 0; i < 2; ++i) {
+          call(M, "kind_a", top, "kind_a");
+          call(M, "kind_d", top, "kind_d");
+        }
       }
       static int scenario(mrb_state* M) {
         round(M, "before");
