@@ -337,6 +337,23 @@ def next_nonspace(masked, pos)
   k < masked.length ? k : -1
 end
 
+GC_ROOT_ADDR_PRELUDE = <<~'C'.chomp
+  /* BC2CPP-MRBGEM: a GC root given by address (rb_gc_register_address, rb_global_variable) on a class variable (struct RClass *)
+     or on a value (mrb_value). A class is rooted by its class value once it is set; a value while it is not nil. */
+  static void
+  nfcx_gc_root_addr(mrb_state *mrb, void *p, size_t n)
+  {
+    if (n == sizeof(struct RClass *)) {
+      struct RClass *c = *(struct RClass **)p;
+      if (c) mrb_gc_register(mrb, mrb_obj_value(c));
+    }
+    else {
+      mrb_value v = *(mrb_value *)p;
+      if (!mrb_nil_p(v)) mrb_gc_register(mrb, v);
+    }
+  }
+C
+
 # the span of a call rb_gc_register_address(&NAME) or rb_global_variable(&NAME) whose only argument is the address of a class
 # variable (pv: the '&', e: the end of NAME): from the callee's name to the closing parenthesis, or nil
 def gc_root_call_span(masked, pv, e)
@@ -5006,14 +5023,23 @@ end
           # the class value is rooted by mrb_gc_register once the variable is set (a class is a constant, so it is rooted by
           # its constant even before that); the registration call becomes a guarded statement
           span = gc_root_call_span(masked, pv, e)
-          if span
-            # the name keeps its own edit: the call's prefix and its closing part are the two edits around it
-            # the call's own mapping (the callee rename and the mrb argument) is replaced by the statement
+          fnq = enclosing_func(rel, s)
+          dpre = define_at(rel, s)
+          at = dpre ? dpre[1] : (fnq && fnq['hstart'])
+          if span && at
+            # the address is passed as a void *, with the size of the variable: the helper roots a struct RClass * by its class
+            # value (when it is set) and an mrb_value while it is not nil, so the statement compiles whichever type the
+            # variable has (the converter's declaration and its assignment sites do not always agree)
+            @prelude_done ||= Set.new
+            unless @prelude_done.include?([rel, 'nfcx_gc_root_addr'])
+              @prelude_done << [rel, 'nfcx_gc_root_addr']
+              ed.add(at, at, GC_ROOT_ADDR_PRELUDE + "\n")
+            end
             @edits[rel].drop(@edits[rel].overlapping(span[0], span[1]))
-            ed.add(span[0], s, "if (")
-            ed.add(e, span[1], ") mrb_gc_register(mrb, mrb_obj_value(#{name}))")
-            rewrite(rel, s, name, "mrb_gc_register(mrb, mrb_obj_value(#{name}))",
-                    'the class variable is a GC root by mrb_gc_register once it is set (the registration is skipped while it is NULL)')
+            ed.add(span[0], s, 'nfcx_gc_root_addr(mrb, (void *)&')
+            ed.add(e, span[1], ", sizeof(#{name}))")
+            rewrite(rel, s, name, "nfcx_gc_root_addr(mrb, (void *)&#{name}, sizeof(#{name}))",
+                    'the address of a class variable is rooted by the prelude helper: a class by its class value (when set), a value while it is not nil')
             next
           end
           refuse(rel, s, name, 'stuck point (GC root): the address of an owned class variable (struct RClass *) is taken as a GC root, which needs an mrb_value holder (the variable would change type)')
