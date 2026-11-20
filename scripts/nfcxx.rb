@@ -38,7 +38,8 @@ end
 def gcc_plan(args)
   out, err, status = Open3.capture3(RbConfig.ruby, GCC_PLAN, "--tabs", "--live=#{ROOT}", *args)
   # a refusal (status 2): the port's message is the bash's, so the driver prints it and stops here, as the bash would
-  if status.exitstatus == 2 && !plan_text?(out)
+  # the setup's refusals come first, as the bash checks them before the backend's name (the setup check below prints them)
+  if status.exitstatus == 2 && !plan_text?(out) && !NfcxxSetupArgs.refusal(ARGV, ENV)
     trace_route("gcc-plan")
     $stderr.write(err)
     exit(2)
