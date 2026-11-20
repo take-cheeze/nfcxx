@@ -257,11 +257,18 @@ module OutsideOwnerCall
     core = OutsideRubyOwners.scan(program_core_ruby_paths)
     return nil if core.unknown.include?(name) || core.unknown.include?(:all)
 
+    # UNREAD_RUBY_OWNERS: linked Ruby the program neither compiles nor lists as outside (see bc2cpp.rb). Its named
+    # definitions join the owners (mruby-enumerator's `module Kernel; alias enum_for to_enum`); its wild reopeners
+    # (complex.rb's `Numeric.class_eval do`, proc-ext's `__send__(type) do`) are left out, as they were before this
+    # scan, rather than making Numeric, Proc and String an owner of every name.
+    unread = OutsideRubyOwners.scan(self.class.unread_ruby_paths || [])
+    return nil if unread.unknown.include?(name) || unread.unknown.include?(:all)
+
     # Core Ruby definitions whose name a native also registers (mruby-io's IO.open, beside StringIO's native open) are
     # moved out of the registry into core_hidden_defs, so the registry alone cannot name them.
     hidden = (self.class.core_hidden_defs || []).select { |definition| definition.name == name }.map(&:owner)
     owners = native | (map.computed - [NativeOwnerMap::UNKNOWN]) | ruby.names.fetch(name, Set.new) | ruby.wild | hidden |
-             core.names.fetch(name, Set.new) | core.wild
+             core.names.fetch(name, Set.new) | core.wild | unread.names.fetch(name, Set.new)
     return nil if owners.empty? || owners.any? { |owner| !owner.match?(OWNER_PATH) }
 
     freeze_owner_call_owners(owners.to_a.sort)

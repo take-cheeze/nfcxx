@@ -966,16 +966,26 @@ class CodeGen
     singleton = owner_def.owner.end_with?('.singleton')
     class_owner = singleton ? owner_def.owner.delete_suffix('.singleton') : owner_def.owner
     superclass = @superclass_of[class_owner]
-    return nil unless superclass.is_a?(String) || (singleton && superclass == :none)
+    # MODULE_ZSUPER: a module's method (a prepended wrapper above all) has no superclass. bc2cpp_super_call continues
+    # after the module's include-class in self's own chain, which is OP_SUPER's lookup for a module owner.
+    module_owner = !singleton && @closed_world&.module_declared?(class_owner)
+    return nil unless superclass.is_a?(String) || (singleton && superclass == :none) || module_owner
     return nil if singleton && zsuper_extended?(owner_def.name)
 
     program = BytecodeIR.for(irep)
     argary_idx = program.source_at(idx)&.op == :ARGARY ? idx : idx - 1
+    # Entered from the SUPER of a keyword zsuper without a block parameter: mruby puts `LOADNIL R(a+3)` (the block
+    # register) between the two, as zsuper_forward_plan reads it.
+    argary_idx -= 1 if argary_idx.positive? && program.source_at(argary_idx)&.op == :LOADNIL &&
+                       program.source_at(argary_idx + 1)&.op == :SUPER
     return nil if argary_idx.negative?
 
     argary = program.source_at(argary_idx)
-    super_insn = program.source_at(argary_idx + 1)
+    blank = program.source_at(argary_idx + 1)
+    nil_block = blank&.op == :LOADNIL
+    super_insn = program.source_at(argary_idx + (nil_block ? 2 : 1))
     return nil unless argary&.op == :ARGARY && super_insn&.op == :SUPER
+    return nil if nil_block && blank.reg.to_i != super_insn.reg.to_i + 3
     # SUPER is `n=*`, with keywords (`nk=*`, the keyword hash the caller's ENTER keyword slot holds) or without.
     argc = super_insn.argc_operand
     return nil unless argc && argc[0].nil? && (argc[2] || argc[1].nil?)
@@ -993,7 +1003,9 @@ class CodeGen
     return nil unless kd == (kw_count.positive? ? 1 : 0)
     kdict = kw_count.positive? ? "r#{mand + opt + rest_count + post + 1}" : nil
 
-    block = super_block_arg(owner_def, irep) || (super_direct_call_allowed?(owner_def) ? 'mrb_nil_value()' : nil)
+    # With the LOADNIL the interpreter's SUPER passes nil too, whatever block the caller gave.
+    block = nil_block ? 'mrb_nil_value()' : super_block_arg(owner_def, irep)
+    block ||= super_direct_call_allowed?(owner_def) ? 'mrb_nil_value()' : nil
     return nil unless block
 
     { m1: m1, rest: rest.positive?, m2: m2, block: block, owner: owner_def.owner, name: owner_def.name, kdict: kdict }

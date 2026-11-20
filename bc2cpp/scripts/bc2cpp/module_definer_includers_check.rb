@@ -5,7 +5,8 @@
 # instances of the classes that include or prepend it in a class body (directly or through another module), so such a
 # definer adds those classes to a send's receiver set instead of making the name opaque. A module nothing includes
 # (a `module_function` helper) adds none. A module's own singleton method still answers only for the module object,
-# and a `:clone` that is only listed (CLONE_SYMBOL_PROOF) changes nothing. A module some unresolved or root mixin could take stays opaque. The check
+# and a `:clone` that is only listed (CLONE_SYMBOL_PROOF) changes nothing. A module singleton method with an optional,
+# a keyword and a block (`McIter.walk`) is called with a literal block and compiles (the direct call takes no keywords). A module some unresolved or root mixin could take stays opaque. The check
 # reads the sites and, with a full-core libmruby, runs them interpreted and compiled.
 # Needs MRBC; the behaviour part needs BC2CPP_MRUBY_FULL, or rake and a C++ compiler.
 ENV['BC2CPP_SIG_DIRS'] = ''
@@ -28,6 +29,10 @@ def source(object_include)
     module McSolo
       def self.tag = :solo
       def self.copy?(m) = %i[clone dup].include?(m)
+    end
+
+    module McIter
+      def self.walk(a, depth = 0, max: nil, &blk) = blk.call(a + depth + (max || 0))
     end
 
     module McRest
@@ -72,12 +77,14 @@ def source(object_include)
       def u = McUtil.scan(1)
       def t(o) = o.tag
       def all(xs) = xs.map { |x| t(x) }
+      def w = McIter.walk(1) { |x| x * 2 }
+      def wk = McIter.walk(1, 2, max: 3) { |x| x * 2 }
     end
     #{object_include ? 'Object.include(McMix)' : ''}
   RUBY
 end
 
-OWNERS = %w[McA McB McC McUser McMix McOuter McUtil McSolo McRest McTag McKlass McKid].freeze
+OWNERS = %w[McA McB McC McUser McMix McOuter McUtil McSolo McRest McTag McKlass McKid McIter].freeze
 
 def user_method(code, name)
   code[/^mrb_value McUser_#{name}_impl\(mrb_state\* M.*?(?=^(?:static )?(?:\[\[maybe_unused\]\] )?mrb_value \w+\(mrb_state\* M|\z)/m].to_s
@@ -142,6 +149,8 @@ Dir.mktmpdir('bc2cpp-module-definer-includers') do |dir|
         mrb_value kid = mrb_obj_value(mrb_class_get(M, "McKid"));
         call(M, "t_klass", u, "t", 1, &klass);
         call(M, "t_kid", u, "t", 1, &kid);
+        call(M, "w", u, "w", 0, nullptr);
+        call(M, "wk", u, "wk", 0, nullptr);
         return 0;
       }
     CPP
@@ -153,7 +162,8 @@ Dir.mktmpdir('bc2cpp-module-definer-includers') do |dir|
     compiled = plain.call(sections['compiled'])
     expected = ['s_a => 6', 's_b => raised NoMethodError', 'l_a => :mix', 'l_b => :b', 'l_c => :mix', 'u => 2', 't_solo => :solo',
                 't_tag => :tag', 't_a => raised NoMethodError',
-                't_rest => [:rest, []]', 't_klass => :klass', 't_kid => :klass']
+                't_rest => [:rest, []]', 't_klass => :klass', 't_kid => :klass',
+                'w => 2', 'wk => 12']
     suite.check('the interpreter gives the expected answers', interpreted == expected)
     puts "  interpreted: #{interpreted.inspect}" unless interpreted == expected
     suite.check('compiled matches interpreted', compiled == interpreted)

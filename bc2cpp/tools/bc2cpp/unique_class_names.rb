@@ -428,7 +428,9 @@ module UniqueClassNames
       match = Regexp.last_match
       break if match.begin(0) > pos
 
-      header = match
+      # A copy: mruby-onig-regexp's scan matches every time into one MatchData, so a kept reference reads as the match
+      # the scan reached last (the one past `pos`), not as this one. CRuby makes a new MatchData per match.
+      header = match.dup
     end
     return nil unless header
 

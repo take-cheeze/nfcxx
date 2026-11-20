@@ -6,6 +6,7 @@ require_relative 'bytecode_ir_ops'
 require_relative 'ir_block_operands'
 require_relative 'core_enumerator_types'
 require_relative 'native_owner_map'
+require_relative 'regexp_matches'
 
 # CORE_ENUMERATOR_FREE (closed only): a proof that no Enumerator is ever created in the closed build, so the methods
 # of mruby-enumerator's Fiber machinery (Enumerator#each, #with_index, #initialize, Generator, Yielder, Kernel#to_enum,
@@ -452,8 +453,9 @@ module CoreEnumeratorFree
       fn_end = starts.find { |s| s > at } || text.size
       body = text[fn_start...fn_end].gsub(/"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'/) { |m| m.gsub(/[^\n]/, ' ') }
       rel = at - fn_start
-      assigns = []
-      body.scan(/(?<![\w.>&])#{Regexp.escape(var)}\s*=(?!=)/) { assigns << Regexp.last_match }
+      # RegexpMatches.of copies each MatchData: mruby-onig-regexp's scan reuses one, which a kept reference would read as
+      # reset once the scan ends.
+      assigns = RegexpMatches.of(body, /(?<![\w.>&])#{Regexp.escape(var)}\s*=(?!=)/)
       return nil unless assigns.size == 1 && !body.match?(/&\s*#{Regexp.escape(var)}\b/)
 
       assign = assigns.first

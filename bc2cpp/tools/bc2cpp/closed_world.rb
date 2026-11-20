@@ -58,7 +58,8 @@ class ClosedWorld
   # mruby core's own computed definitions only ever run for a Ruby-level
   # attr_*/define_method/alias/Struct.new, which scan_closed_world tracks.
   NATIVE_CORE = %r{/3rd/mruby/(?:src|mrbgems)/}
-  RUBY_DYNAMIC = /\b(?:define_method|define_singleton_method|alias_method|attr_reader|attr_writer|attr_accessor)
+  # A definer word right after `:` is a Symbol literal (`member: :attr_reader`), never a call.
+  RUBY_DYNAMIC = /(?<!:)\b(?:define_method|define_singleton_method|alias_method|attr_reader|attr_writer|attr_accessor)
                   \b[ \t]*\(?[ \t]*(?![:"'\s])/x
   RUBY_CONST_DYNAMIC = /\b(?:const_set|remove_const)\b/
   # DYNAMIC_NAME_LOOPS: a definer whose name is an interpolated Symbol (`alias_method :"x_#{v}", v`) is dynamic too.
@@ -1597,6 +1598,7 @@ class ClosedWorld
       global!(:outside_dynamic_definition) if file.fetch(:dynamic)
       @dynamic_constant_mutation = true if file.fetch(:dynamic_constant_mutation)
       global!(:outside_class_factory) if file.fetch(:class_factory)
+      @struct_factory_used = true if file.fetch(:struct_factory)
     end
     # Every constant write is noted by now, native ones included, so the loops can be judged.
     facts.fetch(:files).each { |file| resolve_definer_loops(file) }
@@ -1700,6 +1702,43 @@ class ClosedWorld
     { const: head[:const], names: names.uniq, dyn: dyn }
   end
 
+  # FOREIGN_DEFINER_CALLS: `define_method(a, b, c)` with three or more arguments is not Module#define_method, which
+  # takes one or two (it would raise ArgumentError and define nothing): RBS's DefinitionBuilder has its own
+  # `define_method(methods, definition, method, ...)`. Keyword arguments count as the one Hash they would pass. Only a
+  # parenthesised list whose top level the scan below reads exactly is counted: names, calls, `::`, ternaries and
+  # comparisons, Symbols, nested brackets; a string, comment, block pass or splat (`&`, `*`, which can change the
+  # count) stops the scan, and that call stays a dynamic definer.
+  def self.foreign_definer_calls(text)
+    RegexpMatches.of(text, /\bdefine_method\(/).count do |match|
+      args = definer_call_args(text, match.end(0))
+      next false unless args
+
+      keywords, positional = args.partition { |arg| arg.match?(/\A\s*[a-z_]\w*:(?!:)/) }
+      positional.size + (keywords.empty? ? 0 : 1) >= 3
+    end
+  end
+
+  # The top-level arguments of the call whose `(` ends just before +from+, or nil when the scan cannot read them exactly.
+  def self.definer_call_args(text, from)
+    depth = 0
+    args = [+'']
+    text[from..].each_char do |char|
+      case char
+      when '(', '[', '{' then depth += 1
+      when ')', ']', '}'
+        return args.all? { |arg| arg.match?(/\S/) } ? args : nil if depth.zero? && char == ')'
+        return nil if depth.zero?
+
+        depth -= 1
+      when ',' then (args << +'') && next if depth.zero?
+      when /[\w\s.:?!=<>+\-|]/ then nil
+      else return nil
+      end
+      args.last << char
+    end
+    nil
+  end
+
   def self.ruby_file_facts(path)
     text = File.read(path, encoding: 'BINARY').gsub(/^\s*#.*$/, '')
 
@@ -1725,9 +1764,10 @@ class ClosedWorld
     # DYNAMIC_NAME_LOOPS: every dynamic definer is either inside a loop this file enumerates exactly, or unresolved.
     loops = RegexpMatches.of(text, RUBY_LOOP_HEAD).map { |head| definer_loop(text, head) }
     covered = loops.compact.sum { |loop| loop[:dyn] }
-    dynamic_total = text.scan(RUBY_DYNAMIC).size + text.scan(RUBY_DYNAMIC_SYMBOL).size
+    dynamic_total = text.scan(RUBY_DYNAMIC).size + text.scan(RUBY_DYNAMIC_SYMBOL).size - foreign_definer_calls(text)
     dynamic_unresolved = covered != dynamic_total
     definer_loops = dynamic_unresolved ? [] : loops.compact.select { |loop| loop[:dyn].positive? }
+    class_factory, struct_factory = ruby_factory_facts(text)
 
     {
       path: path,
@@ -1742,8 +1782,38 @@ class ClosedWorld
       dynamic: dynamic_unresolved,
       definer_loops: definer_loops,
       dynamic_constant_mutation: text.match?(RUBY_CONST_DYNAMIC),
-      class_factory: text.match?(/\b(?:Class|Struct)\.new\b/)
+      class_factory: class_factory,
+      struct_factory: struct_factory
     }
+  end
+
+  # OUTSIDE_STRUCT_FACTORY: `Struct.new(:a, :b)` or `Struct.new(:a, keyword_init: true)`, on one line, with no block
+  # after it. Its class has Symbol members only (accessors mruby-struct defines natively under computed names) and no
+  # Ruby body, so it is the program's own Struct.new case (@struct_factory_used: factory_class_free? fails and those
+  # names keep their unknown native owner) rather than a global refusal. A block (whose `def`s OutsideRubyOwners
+  # would place on the enclosing body), any other argument, or a spelling this does not read stays a class factory.
+  RUBY_SAFE_STRUCT_NEW = /\GStruct\.new\([ \t]*:\w+(?:[ \t]*,[ \t]*:\w+)*(?:[ \t]*,[ \t]*keyword_init:[ \t]*true)?[ \t]*\)
+                          (?![ \t]*(?:do\b|\{))/x
+  # A factory receiver: `Class` or `Struct`, bare, `::`-rooted or namespaced (`Foo::Class`, which mruby's scoped lookup
+  # may resolve to the top-level class). A namespaced one is the file's own class only when the file defines a class of
+  # that name (RBS's `AST::Declarations::Class`).
+  RUBY_FACTORY_NEW = /(?<![\w:])(?:::)?(?<recv>Class|Struct)\.new\b|(?<ns>\w::)(?<recv>Class|Struct)\.new\b/
+
+  # [class_factory, struct_factory] of a file's text (see RUBY_SAFE_STRUCT_NEW).
+  def self.ruby_factory_facts(text)
+    class_factory = false
+    struct_factory = false
+    RegexpMatches.of(text, RUBY_FACTORY_NEW).each do |match|
+      at = match.begin(:recv)
+      next if match[:ns] && text.match?(/^[ \t]*class[ \t]+#{match[:recv]}\b/)
+
+      if match[:recv] == 'Struct' && text.match?(RUBY_SAFE_STRUCT_NEW, at) && text.match(RUBY_SAFE_STRUCT_NEW, at)&.begin(0) == at
+        struct_factory = true
+      else
+        class_factory = true
+      end
+    end
+    [class_factory, struct_factory]
   end
 
   # YIELD_REACH: the method names outside code can call back into Ruby by. Native code
