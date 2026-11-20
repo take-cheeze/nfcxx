@@ -714,7 +714,7 @@ end
 # The native and Ruby sources outside the closed world that share its VM on a
 # closed-world build: mruby core, every other gem's src and mrblib, the
 # closed-world gems' own native src, and the target's host sources.
-def bc2cpp_closed_world_outside_srcs(build_name, gems, repo_root)
+def bc2cpp_closed_world_outside_srcs(build_name, gems, repo_root, native_paths: [], ruby_paths: [], compiled_srcs: [])
   native = Dir["#{repo_root}/3rd/mruby/src/**/#{BC2CPP_NATIVE_GLOB}"] +
            Dir["#{repo_root}/include/**/#{BC2CPP_NATIVE_GLOB}"] +
            bc2cpp_host_native_srcs(build_name, repo_root)
@@ -731,6 +731,13 @@ def bc2cpp_closed_world_outside_srcs(build_name, gems, repo_root)
                                                (!probe && BC2CPP_PROGRAM_CORE_MRBLIB_GEMS.include?(name)) ||
                                                (probe && name == BC2CPP_PROBE_BUILDS.fetch(build_name).first)
   end
+  # Definite linked-source manifests also name generated files outside a gem's
+  # src/mrblib directories (Prism's rendered Ruby AST classes, for example).
+  # The broader NATIVE_SRCS/FOREIGN_RUBY_SRCS analysis lists can contain
+  # alternative core implementations and must not be substituted here.
+  compiled = compiled_srcs.map { |path| File.expand_path(path) }.to_set
+  native.concat(native_paths)
+  ruby.concat(ruby_paths.reject { |path| compiled.include?(File.expand_path(path)) })
   [native.map { |p| File.expand_path(p) }.uniq.sort, ruby.map { |p| File.expand_path(p) }.uniq.sort]
 end
 

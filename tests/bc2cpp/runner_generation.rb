@@ -26,6 +26,9 @@ source = <<~RUBY
     def binary
       "\\0a\\0\\xff".b.bytes
     end
+    def binary_pair
+      ['a'.b.bytes, 'z'.b.bytes]
+    end
   end
 RUBY
 runtime = Bc2cppFixtureRuntime
@@ -54,7 +57,7 @@ Dir.mktmpdir('bc2cpp-runner') do |dir|
     abort 'runner generated different C++'
   end
   abort 'runner generated different bytecode' unless bytecode == File.binread(File.join(dir, 'fixture.mrb'))
-  abort 'fixture methods were not all compiled' unless runtime.registrations(diagnostics, ['RunnerSmoke']).size == 4
+  abort 'fixture methods were not all compiled' unless runtime.registrations(diagnostics, ['RunnerSmoke']).size == 5
   body = <<~CPP
     static int scenario(mrb_state* M) {
       mrb_value obj = mrb_obj_new(M, mrb_class_get(M, "RunnerSmoke"), 0, nullptr);
@@ -62,6 +65,7 @@ Dir.mktmpdir('bc2cpp-runner') do |dir|
       call(M, "answer", obj, "answer", 1, &n);
       call(M, "label", obj, "label");
       call(M, "binary", obj, "binary");
+      call(M, "binary pair", obj, "binary_pair");
       n = mrb_int_value(M, 0);
       call(M, "division", obj, "quotient", 1, &n);
       mrb_value file = mrb_obj_value(mrb_class_get(M, "File"));
@@ -80,6 +84,7 @@ Dir.mktmpdir('bc2cpp-runner') do |dir|
   abort output unless sections.fetch('compiled') == sections.fetch('interpreted') &&
                       output.include?('answer => 22') && output.include?('division => raised ZeroDivisionError') &&
                       output.include?('binary => [0, 97, 0, 255]') &&
+                      output.include?('binary pair => [[97], [122]]') &&
                       output.include?('executable => true') && output.include?('missing => false') &&
                       output.include?('non-executable => false')
 end

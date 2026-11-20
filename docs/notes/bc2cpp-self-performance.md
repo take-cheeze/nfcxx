@@ -67,3 +67,45 @@ retains 396 VM fallbacks. Strict fresh C++/bytecode parity and generated-program
 binary strings and exceptions. The compiled compiler also matches CRuby's main C++, shard C++ and bytecode
 with oversized-owner splitting both disabled and enabled. This verifies the default owner layout as well as
 the self-build layout.
+
+## Optimized native debug information
+
+The runner's GCC toolchain supplied `-g` even with `BC2CPP_RUNNER_OPT=1`. Optimized runner builds now omit
+that default for C and C++, retaining `-O2` and exception support. Ordinary debug builds keep `-g3 -O0`
+and `MRB_DEBUG`; explicit `CFLAGS`/`CXXFLAGS` retain the caller's debug options (including `-g3`, `-ggdb`
+and `-g0`). For example, `CXXFLAGS='-g -Wall -Wundef'` restores native debug information in an optimized build.
+
+A fixed captured compiler shard built through the nfcxx GCC backend had identical disassembly and identical
+text/data/BSS sizes with and without `-g`. The object shrank from 23,592,160 to 3,341,528 bytes; peak compiler
+RSS fell from about 847 to 609 MiB. A sequential repeat measured 42.52 to 24.82 seconds wall time and 41.20
+to 23.98 seconds user CPU. An earlier pair measured 31.83 to 23.19 seconds (those processes briefly overlapped).
+These are individual shard measurements, not a whole-build speedup claim. The principal saving is skipping
+DWARF generation for the lowered compiler bodies, without changing their executable instructions.
+
+## Binary symbol-cache scans
+
+SymbolCache already scans a binary view of generated C++, but its regular expressions still requested UTF-8
+offsets from mruby-onig. Byte-oriented patterns avoid converting each match position by rescanning its prefix.
+Two alternating pairs of 100 rewrites of a 200-send function measured 0.856/0.861 seconds before and
+0.749/0.744 seconds after in the mruby runtime. UTF-8 comments, receivers and method literals retain their
+bytes and the original result encoding in the regression checks.
+
+This is a local helper improvement: a warm 96-method native compiler smoke measured 6.04 seconds before and
+6.06/6.07 seconds after, so it does not establish a whole-compiler runtime gain. The smoke's generated C++ and
+bytecode hashes matched in every run. The initial cold scan-cache run is excluded from that warm comparison.
+
+## Indexed instance-variable writes
+
+A subsequent StackProf wall profile attributed 22.0 seconds (7.8% of samples) to
+`YieldReach#compute_proc_free_ivar`. It rescanned every instruction in every irep for each queried ivar name.
+A lazy index now records SETIV sites once per analysis, preserving their original order; proofs still visit
+every matching write and retain the same cycle and dynamic-write refusals.
+
+On the same captured self-compilation input, with StackProf enabled in both runs, logged generation phases
+fell from 248.269 to 213.518 seconds (14%). Global facts and annotations fell from 34.204 to 10.768 seconds;
+method compilation fell from 180.798 to 169.651 seconds. Whole process wall time, including exit handlers
+and profile serialization, fell from 291.74 to 252.21 seconds. These are one paired profiled measurement,
+not an unprofiled throughput guarantee. All 20 generated C++, header and bytecode artifacts were byte-identical.
+
+Existing IR block checks cover writes across classes, unrelated ivars, chained reads, nested Proc writes,
+cycles, unwritten ivars and unlisted dynamic writes.
