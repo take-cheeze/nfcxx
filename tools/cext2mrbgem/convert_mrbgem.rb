@@ -338,6 +338,37 @@ def next_nonspace(masked, pos)
   k < masked.length ? k : -1
 end
 
+GC_ROOT_ADDR_PRELUDE = <<~'C'.chomp
+  /* BC2CPP-MRBGEM: a GC root given by address (rb_gc_register_address, rb_global_variable) on a class variable (struct RClass *)
+     or on a value (mrb_value). A class is rooted by its class value once it is set; a value while it is not nil. */
+  static void
+  nfcx_gc_root_addr(mrb_state *mrb, void *p, size_t n)
+  {
+    if (n == sizeof(struct RClass *)) {
+      struct RClass *c = *(struct RClass **)p;
+      if (c) mrb_gc_register(mrb, mrb_obj_value(c));
+    }
+    else {
+      mrb_value v = *(mrb_value *)p;
+      if (!mrb_nil_p(v)) mrb_gc_register(mrb, v);
+    }
+  }
+C
+
+# the span of a call rb_gc_register_address(&NAME) or rb_global_variable(&NAME) whose only argument is the address of a class
+# variable (pv: the '&', e: the end of NAME): from the callee's name to the closing parenthesis, or nil
+def gc_root_call_span(masked, pv, e)
+  nx = next_nonspace(masked, e)
+  return nil unless nx >= 0 && masked[nx] == ')'
+  o = prev_nonspace(masked, pv - 1)
+  return nil unless o >= 0 && masked[o] == '('
+  m = masked[0...o].match(/\b(rb_gc_register_address|rb_global_variable)[#{WSP}]*\z/)
+  return nil unless m
+  cp = match_close(masked, o)
+  return nil unless cp == nx
+  [m.begin(1), cp + 1]
+end
+
 def prev_nonspace(masked, pos)
   k = pos
   k -= 1 while k >= 0 && SPACE_RE.match?(masked[k])
@@ -1354,7 +1385,8 @@ end
     return @gcv_owned[name] if @gcv_owned.key?(name)
     en = Regexp.escape(name)
     define_re = /(?<![#{WC}$.>])#{en}#{SS}=#{SS}rb_define_(?:class|module)(?:_under)?#{SS}\(/
-    nondef_re = /(?<![#{WC}$.>])#{en}#{SS}=(?!=)(?>#{SS})(?!#{CLASS_RHS_RE}#{SS}\()/
+    # a class constant (rb_eEncodingError, rb_cObject: an RClass * expression in the api_map) is a class value too
+    nondef_re = /(?<![#{WC}$.>])#{en}#{SS}=(?!=)(?>#{SS})(?!#{CLASS_RHS_RE}#{SS}\(|rb_[cem][A-Z]\w*#{SS};)/
     defined = @files.values.any? { |f| f['masked'].match?(define_re) }
     mixed = @files.values.any? { |f| nondef_assignment?(f['masked'], nondef_re) }
     @gcv_owned[name] = defined && !mixed
@@ -5016,6 +5048,28 @@ end
         # the address of an owned class variable (struct RClass *) is an RClass **, which no mruby call takes as a GC root
         pv = prev_nonspace(masked, s - 1)
         if pv >= 0 && masked[pv] == '&' && !(pv > 0 && masked[pv - 1] == '&') && owns_class_var?(rel, s, name)
+          # the class value is rooted by mrb_gc_register once the variable is set (a class is a constant, so it is rooted by
+          # its constant even before that); the registration call becomes a guarded statement
+          span = gc_root_call_span(masked, pv, e)
+          fnq = enclosing_func(rel, s)
+          dpre = define_at(rel, s)
+          at = dpre ? dpre[1] : (fnq && fnq['hstart'])
+          if span && at
+            # the address is passed as a void *, with the size of the variable: the helper roots a struct RClass * by its class
+            # value (when it is set) and an mrb_value while it is not nil, so the statement compiles whichever type the
+            # variable has (the converter's declaration and its assignment sites do not always agree)
+            @prelude_done ||= Set.new
+            unless @prelude_done.include?([rel, 'nfcx_gc_root_addr'])
+              @prelude_done << [rel, 'nfcx_gc_root_addr']
+              ed.add(at, at, GC_ROOT_ADDR_PRELUDE + "\n")
+            end
+            @edits[rel].drop(@edits[rel].overlapping(span[0], span[1]))
+            ed.add(span[0], s, 'nfcx_gc_root_addr(mrb, (void *)&')
+            ed.add(e, span[1], ", sizeof(#{name}))")
+            rewrite(rel, s, name, "nfcx_gc_root_addr(mrb, (void *)&#{name}, sizeof(#{name}))",
+                    'the address of a class variable is rooted by the prelude helper: a class by its class value (when set), a value while it is not nil')
+            next
+          end
           refuse(rel, s, name, 'stuck point (GC root): the address of an owned class variable (struct RClass *) is taken as a GC root, which needs an mrb_value holder (the variable would change type)')
           next
         end
@@ -5909,7 +5963,14 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       callee_c, idx_c = call_context(masked, s)
       class_pos = callee_c && ((@special_pos[callee_c] || []).include?(idx_c) ||
                                ((@entries[callee_c] || {})['class_args'] || []).include?(idx_c))
-      text = "mrb_obj_value(#{text})" if !class_pos && entry['mruby'].match?(CLASS_EXPR_RE)
+      # the right side of an assignment to an owned class variable (struct RClass *) is the class itself, not its VALUE
+      eq = prev_nonspace(masked, s - 1)
+      owned_target = false
+      if eq >= 0 && masked[eq] == '=' && !(eq > 0 && '=!<>+-*/%&|^'.include?(masked[eq - 1]))
+        lhs = masked[0...eq].match(/([A-Za-z_]\w*)#{SS}\z/)
+        owned_target = lhs && @class_vars.include?(lhs[1]) && owns_class_var?(rel, s, lhs[1])
+      end
+      text = "mrb_obj_value(#{text})" if !class_pos && !owned_target && entry['mruby'].match?(CLASS_EXPR_RE)
       # a file-scope initializer (static VALUE X = Qnil;) is not a constant expression in C (mrb_nil_value is a function): the
       # initializer is removed, and the variable is set at the start of Init (the file's Init function)
       fs_init = if %w[Qnil Qtrue Qfalse].include?(name) && enclosing_func(rel, s).nil?
