@@ -790,13 +790,24 @@ class Plan
     unported("--backend=pathb") if @backend == "pathb"
   end
 
+  # uname -s is Darwin (the driver's sys, as scripts/nfcxx-instantiate.rb takes it); probed on first use
+  def host_darwin?
+    return @host_darwin if defined?(@host_darwin)
+
+    @host_darwin = Open3.capture2("uname", "-s", err: File::NULL).first.to_s.chomp == "Darwin"
+  rescue SystemCallError
+    @host_darwin = false
+  end
+
   def instantiate_options
     case @instantiate
     when "auto" then []
     when "used"
       opts = ["--no_auto_instantiation", "-tused"]
+      # as scripts/nfcxx-instantiate.rb: the section flags are not for Mach-O (its linker coalesces weak definitions and
+      # rejects --gc-sections), so the Darwin host gets only the instantiation options
       opts += ["--c_to_obj_option", "-ffunction-sections", "--c_to_obj_option", "-fdata-sections",
-               "--c_to_obj_option", "-Wl,--gc-sections"]
+               "--c_to_obj_option", "-Wl,--gc-sections"] unless host_darwin?
       opts
     else
       raise NfcxxExit.new("nfcxx: --instantiate (NFCXX_INSTANTIATE) is auto or used (got #{@instantiate})", 2)

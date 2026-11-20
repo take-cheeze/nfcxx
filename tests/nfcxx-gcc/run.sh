@@ -240,6 +240,16 @@ $(cat "$sb_contract")
   check_contract "-c: compile-clean, records, eccp, records" "RUN RUN RUN RUN" "" 0 --backend=gcc -c a.cc -o a.o
   # gap 6: -MD on a -c without -o: the object is a.o and the file a.d (the dependency command is the last line)
   check_contract "-c -MD without -o: dependency command last" "RUN RUN RUN RUN RUN" "" 0 --backend=gcc -c -MD a.cc
+  # the section flags of --instantiate=used (default) are not for a Darwin host (scripts/nfcxx-instantiate.rb): a fake
+  # uname -s Darwin drops --gc-sections from the link's words; the Linux host keeps it
+  dw=$(mktemp -d); printf '#!/bin/sh\ncase "$1" in -s) echo Darwin;; *) exec /usr/bin/uname "$@";; esac\n' > "$dw/uname"; chmod +x "$dw/uname"
+  if PATH="$dw:$PATH" shell_plan --backend=gcc a.cc -o prog | grep -q -- --gc-sections; then
+    fail=$((fail + 1)); failed_list+="== contract unit: Darwin host names --gc-sections
+"; else pass=$((pass + 1)); fi
+  if shell_plan --backend=gcc a.cc -o prog | grep -q -- --gc-sections; then pass=$((pass + 1))
+  else fail=$((fail + 1)); failed_list+="== contract unit: Linux host names --gc-sections
+"; fi
+  rm -rf "$dw"
   rm -f "$sb_contract"
   # gap 6: the dependency file of a dotted directory is the text before the object's last dot, as the bash names it
   out=$(shell_plan --backend=gcc -c -MD a.cc -o x.y/out.o)
