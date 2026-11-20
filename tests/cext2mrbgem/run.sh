@@ -400,9 +400,13 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_errinfo tools/cext2mrbgem/fi
 check test "$rc" -eq 0
 check grep -qF '(mrb->exc ? mrb_obj_value(mrb->exc) : mrb_nil_value())' "$work/api_errinfo/src/api_errinfo.c"
 # 2zzz63. T_BIGNUM is a recorded stuck point (the fork has no Bignum): the refusal carries that reason.
-rc=0; "$rb" "$conv" --scanner "$scanner" --name api_bignum_stuck tools/cext2mrbgem/fixtures/api_bignum_stuck/ext/api_bignum_stuck "$work/api_bignum_stuck" > "$work/api_bignum_stuck.log" 2>&1 || rc=$?
-check test "$rc" -ne 0
-check grep -qF 'stuck point: the fork has no Bignum' "$work/api_bignum_stuck/REFUSALS.txt"
+# 2zzz165. T_BIGNUM is the MRB_TT_BIGINT tag (a bigint is the value outside the fixnum range): a type test and a Check_Type on it.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_bignum_tag tools/cext2mrbgem/fixtures/api_bignum_tag/ext/api_bignum_tag "$work/api_bignum_tag" > "$work/api_bignum_tag.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_bignum_tag/NOT_BUILDABLE"
+check grep -qF 'return mrb_type(v) == MRB_TT_BIGINT ? mrb_true_value() : mrb_false_value();' "$work/api_bignum_tag/src/api_bignum_tag.c"
+check grep -qF 'mrb_check_type(mrb, v, MRB_TT_BIGINT);' "$work/api_bignum_tag/src/api_bignum_tag.c"
+check test "$(grep -c 'stuck point' "$work/api_bignum_tag/REFUSALS.txt")" -eq 0
 # 2zzz64. rb_hash_bulk_insert and rb_class_inherited_p map to the fork's mrb_hash_bulk_insert and mrb_class_inherited_p.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_class tools/cext2mrbgem/fixtures/api_hash_class/ext/api_hash_class "$work/api_hash_class" > "$work/api_hash_class.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
@@ -621,7 +625,8 @@ check grep -qF 'MRB_TT_DATA' "$work/api_type_refused/src/api_type_refused.c"
 check test "$(grep -c '  RB_TYPE_P  T_FIXNUM has no exact' "$work/api_type_refused/REFUSALS.txt")" -eq 0
 check grep -qF 'MRB_TT_FIXNUM' "$work/api_type_refused/src/api_type_refused.c"
 check grep -q "  RB_TYPE_P  object 'rb_ary_entry(a, 0)' is not a plain local variable" "$work/api_type_refused/REFUSALS.txt"
-check grep -q '  RB_TYPE_P  stuck point (Bignum): the fork has no Bignum' "$work/api_type_refused/REFUSALS.txt"
+# T_BIGNUM is the MRB_TT_BIGINT tag now (api_map: the bigint of the fork), not refused
+check grep -qF 'MRB_TT_BIGINT' "$work/api_type_refused/src/api_type_refused.c"
 
 # 2m. class-name and method-undef calls (api_map.json batch C1): the class variable is passed as a struct RClass * (not
 # wrapped in mrb_obj_value, which the mruby functions do not take)
@@ -1438,8 +1443,10 @@ check grep -qF "spec.add_dependency 'mruby-rational'" "$work/api_rational_gem/mr
 # 2zzz120. the address of an owned class variable (struct RClass *) given to rb_gc_register_address is refused with its
 # reason; the converter does not emit &mrb_obj_value(...), which does not compile.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_gc_addr_cls tools/cext2mrbgem/fixtures/api_gc_addr_cls/ext/api_gc_addr_cls "$work/api_gc_addr_cls" > "$work/api_gc_addr_cls.log" 2>&1 || rc=$?
-check test -e "$work/api_gc_addr_cls/NOT_BUILDABLE"
-check grep -qF 'stuck point (GC root): the address of an owned class variable' "$work/api_gc_addr_cls/REFUSALS.txt"
+check test ! -e "$work/api_gc_addr_cls/NOT_BUILDABLE"
+# the registration of an owned class variable goes through the address helper (no GC-root refusal)
+check grep -qF 'nfcx_gc_root_addr(mrb, (void *)&err_class, sizeof(err_class));' "$work/api_gc_addr_cls/src/api_gc_addr_cls.c"
+check test "$(grep -c 'GC root' "$work/api_gc_addr_cls/REFUSALS.txt")" -eq 0
 check bash -c "! grep -rqF '&mrb_obj_value(' '$work/api_gc_addr_cls'"
 # 2zzz121. an ID pointer declared in a function body (ID *idp) is an mrb_sym pointer, as an ID variable is (the declaration
 # test takes the * with or without spaces).
@@ -1703,6 +1710,41 @@ check grep -qF 'rb_str_conv_enc(mrb, str, rb_utf8_encoding(), rb_usascii_encodin
 check grep -qF 'rb_enc_from_encoding(mrb, rb_utf8_encoding())' "$work/api_enc_helpers/src/api_enc_helpers.c"
 check grep -qF 'mrb_raisef(mrb, mrb_class_get(mrb, "EncodingError"), "bad: %s", mrb_string_value_cstr(mrb, &msg));' "$work/api_enc_helpers/src/api_enc_helpers.c"
 check grep -qF 'return rb_enc_sprintf(mrb, rb_utf8_encoding(), "[%""S""]", v);' "$work/api_enc_helpers/src/api_enc_helpers.c"
+# 2zzz162. a relational comparison of two VALUEs orders them by object address (mrb_value_addr), so a table sorted and searched in
+# VALUE order converts; the comparison is not a stuck point.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_value_order tools/cext2mrbgem/fixtures/api_value_order/ext/api_value_order "$work/api_value_order" > "$work/api_value_order.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_value_order/NOT_BUILDABLE"
+check grep -qF 'return mrb_value_addr(a) < mrb_value_addr(b);' "$work/api_value_order/src/api_value_order.c"
+# 2zzz163. Bignum conversions map to the fork's bigint helpers (mrb_bint_as_int64, as_uint64, new_uint64, absint_size, sign,
+# bint_cmp); none of them is a stuck point any more.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_bignum tools/cext2mrbgem/fixtures/api_bignum/ext/api_bignum "$work/api_bignum" > "$work/api_bignum.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_bint_as_int64(mrb, ' "$work/api_bignum/src/api_bignum.c"
+check grep -qF 'mrb_bint_as_uint64(mrb, ' "$work/api_bignum/src/api_bignum.c"
+check grep -qF 'mrb_bint_new_uint64(mrb, (uint64_t)' "$work/api_bignum/src/api_bignum.c"
+check grep -qF 'mrb_bint_absint_size(mrb, ' "$work/api_bignum/src/api_bignum.c"
+check grep -qF 'mrb_fixnum_value(mrb_bint_cmp(mrb, ' "$work/api_bignum/src/api_bignum.c"
+check grep -qF '(mrb_bint_sign(mrb, ' "$work/api_bignum/src/api_bignum.c"
+check test "$(grep -c 'stuck point' "$work/api_bignum/REFUSALS.txt" 2>/dev/null)" -eq 0
+
+# 2zzz166. a class variable registered as a GC root (rb_gc_register_address, rb_global_variable): the registration is the
+# nfcx_gc_root_addr helper on the variable's address (a class is rooted by its class value once set), not a stuck point.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_gc_class_root tools/cext2mrbgem/fixtures/api_gc_class_root/ext/api_gc_class_root "$work/api_gc_class_root" > "$work/api_gc_class_root.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_gc_class_root/NOT_BUILDABLE"
+check grep -qF 'nfcx_gc_root_addr(mrb, (void *)&cWidget, sizeof(cWidget));' "$work/api_gc_class_root/src/api_gc_class_root.c"
+check grep -qF 'nfcx_gc_root_addr(mrb, (void *)&cGizmo, sizeof(cGizmo));' "$work/api_gc_class_root/src/api_gc_class_root.c"
+check test "$(grep -c 'GC root' "$work/api_gc_class_root/REFUSALS.txt")" -eq 0
+# 2zzz164. rb_define_alloc_func: the allocator is a registered function of the state, and the class gets allocate and new
+# singleton methods that call it (nfcx_alloc_register, with the prelude in the same file); no per-class-allocator refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_alloc_class tools/cext2mrbgem/fixtures/api_alloc_class/ext/api_alloc_class "$work/api_alloc_class" > "$work/api_alloc_class.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_alloc_class/NOT_BUILDABLE"
+check grep -qF 'static mrb_value ac_alloc(mrb_state *mrb, mrb_value klass) {' "$work/api_alloc_class/src/api_alloc_class.c"
+check grep -qF 'nfcx_alloc_register(mrb, k, ac_alloc);' "$work/api_alloc_class/src/api_alloc_class.c"
+check grep -qF 'mrb_define_class_method(mrb, c, "new", nfcx_alloc_new, MRB_ARGS_ANY());' "$work/api_alloc_class/src/api_alloc_class.c"
+check test "$(grep -c 'per-class allocator' "$work/api_alloc_class/REFUSALS.txt")" -eq 0
 # 2zzz155. a struct field of CRuby's rb_encoding * type: the Encoding placeholder type is in the prelude (the declaration compiles),
 # and the include of ruby/encoding.h is not a blocking refusal (the placeholder covers it).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rb_encoding_field tools/cext2mrbgem/fixtures/api_rb_encoding_field/ext/api_rb_encoding_field "$work/api_rb_encoding_field" > "$work/api_rb_encoding_field.log" 2>&1 || rc=$?

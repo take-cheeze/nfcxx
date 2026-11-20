@@ -117,13 +117,35 @@ class ClosedWorld
   end
   private :profile_mark
 
-  def initialize(ireps:, registry:, class_decls:, walked:, native_paths:, ruby_paths:, module_names: Set.new, root_label: nil)
+  def initialize(ireps:, registry:, class_decls:, walked:, native_paths:, ruby_paths:, module_names: Set.new, root_label: nil,
+                 struct_classes: [], included: nil, prepended: nil, unknown_mixins: nil, constant_writes: nil)
     @ireps = ireps
     @module_names = module_names.to_set
     @root_label = root_label
     @clone_sent = false
+    @clone_symbol_loads = []
     @registry = registry
-    @class_decls = class_decls
+    # STRUCT_CLASS_DECLS: a class body-level `X = Struct.new(:a, ...)` whose members the registry lists (struct_member_lists)
+    # runs once, before main, and makes X a class below Struct. It is declared here as such, so its members (registered
+    # definers of X) and the methods its block defines bind like any declared class's (see struct_class?).
+    @struct_classes = struct_classes.to_set
+    # QUALIFIED_REBINDS: the registry's class-body and top-level constant writes, [irep label, index] => the qualified
+    # constant written (constant_assignment_sites). Such a write rebinds that path only; any other write rebinds every
+    # constant of its bare name (rebound?).
+    @constant_write_sites = (constant_writes || []).to_h { |site| [[site[:irep], site[:idx]], site[:name]] }
+    @rebound_qualified = Hash.new(0)
+    @rebound_bare = Set.new
+    # MODULE_DEFINER_INCLUDERS: the registry's class-body mixins (owner => modules), or nil when the caller has none.
+    @mixins = included && prepended ? merge_mixins(included, prepended) : nil
+    @unknown_mixins = unknown_mixins
+    @class_decls = class_decls.dup
+    @struct_classes.each do |owner|
+      @class_decls[owner] = [{ super: 'Struct', outer_nil: true, outer_qualified: false, struct: true }] unless @class_decls.key?(owner)
+    end
+    # DECLARED_CLASS_SET: the registry's class_decls is a default Hash, so a read of any name adds it with no
+    # declaration; whether a module looked declared then depended on which scan read it first. opaque? asks this
+    # fixed set: the classes with a declaration (and the struct classes above).
+    @declared_classes = @class_decls.select { |_, decls| !decls.empty? }.keys.to_set
     @walked = walked
     @global_refusal = nil
     @outside_names = Set.new
@@ -143,6 +165,8 @@ class ClosedWorld
     @outside_ruby_names = Set.new
     @outside_name_paths = {}
     @native_code_tokens = {}
+    @native_class_events = []
+    @native_class_assigns = {}
     @outside_ruby_supers = Set.new
     @native_arms_name = nil
     @outside_owner_name = nil
@@ -171,6 +195,7 @@ class ClosedWorld
     # bound to a class with that superclass returns it, so two of them bind one class (see native_class_unshadowed?).
     @outside_plain_class_defines = Hash.new(0)
     @deferred_constant_writes = Set.new
+    @struct_factory_members = []
     @dynamic_constant_mutation = false
     @basic_object_referenced = false
     @singleton_makers = []
@@ -216,8 +241,11 @@ class ClosedWorld
   # CALL_FACTS: `scoped` says `instances` is the whole receiver set, so only its classes need an
   # arm, and `native_free` that no native or outside definer of `name` reaches any of them.
   def refusal(name, listed, self_owner, installed, instances: nil, scoped: false, native_free: false,
-              instance_scope: false, singleton_arms: nil)
+              instance_scope: false, singleton_arms: nil, method_missing_arms: nil)
     return @global_refusal if @global_refusal
+    # PUBLIC_SEND_DISPATCH: Kernel#public_send checks its target's visibility against how it was itself called; run
+    # through an owner call it reaches private and protected methods the VM's send refuses, so it keeps that send.
+    return :visibility_send if name == 'public_send'
     return :dynamic_install if installed.nil? || installed.include?(name)
     return :unknown_definer if instance_scope ? instance_unknown_def?(name) : @unknown_defs.include?(name)
     # A native singleton function is one more outside owner, which the owner call names (`Graphics.singleton`).
@@ -230,7 +258,9 @@ class ClosedWorld
 
     required &= instances.to_set if scoped && instances
     return :unlisted_class unless required.subset?(listed.to_set)
-    return :method_missing_receiver unless method_missing_free?(self_owner, instances)
+    # METHOD_MISSING_ARMS: an exact-class arm per method_missing class sends by name before this else is reached.
+    return :method_missing_receiver unless method_missing_free?(self_owner, instances) ||
+                                           method_missing_arms&.to_set&.superset?(@mm_classes)
 
     nil
   end
@@ -448,7 +478,7 @@ class ClosedWorld
   end
 
   def bounded_subclasses(klass, set)
-    return nil if @global_refusal || !@wild.empty? || @rebound.include?(simple(klass))
+    return nil if @global_refusal || !@wild.empty? || rebound?(klass)
     return nil unless set.all? { |k| @class_decls.key?(k) || k == klass }
 
     names = set.map { |k| simple(k) }.to_set
@@ -498,13 +528,24 @@ class ClosedWorld
   # include it: native_file_facts names every include a non-core native can make (see native_include_facts). A foreign
   # Ruby source that spells the name stays refused, since its include sites are not classified.
   def includer_candidates_uncached(mod)
-    return nil if @global_refusal || !@wild.empty? || !module_declared?(mod) || @rebound.include?(simple(mod))
+    return nil if @global_refusal || !@wild.empty? || !module_declared?(mod) || rebound?(mod)
 
     name = simple(mod)
     return nil if @outside_include_open || @outside_include_names.include?(name) || @outside_alias_names.include?(name)
     return nil if @ruby_tokens.each_value.any? { |tokens| tokens.include?(name) }
+    # A mixin the analysis could not place (defer_mixin_module?: `obj.extend(Mod)`, a mixin made in a method) puts the
+    # module on a receiver no declared class lists.
+    return nil if deferred_mixin_module?(mod)
 
     declared_class_names
+  end
+
+  # Is +mod+ (a declared name) one a deferred mixin may name? The same superset resolve_deferred_mixin_modules takes.
+  def deferred_mixin_module?(mod)
+    @deferred_mixin_modules.any? do |ref|
+      bare = ref.delete_prefix('::')
+      mod == bare || mod.end_with?("::#{bare}")
+    end
   end
 
   # NATIVE_CORE_DIRECT: nothing outside the registry (an outside Ruby
@@ -762,7 +803,7 @@ class ClosedWorld
     # their constant identity needs the same closed-world stability proof.
     return false if owner.include?('.') || owner.include?('<')
     return false unless ConstructClassNames.table&.key?(owner)
-    return false if @rebound.include?(simple(owner))
+    return false if rebound?(owner)
 
     touches_for([owner.split('::').first, simple(owner)].uniq, source: true).empty?
   end
@@ -777,7 +818,7 @@ class ClosedWorld
     # already rejected bytecode, native, and foreign constant reassignment.
     return true if UniqueClassNames.table&.value?(owner)
 
-    !@rebound.include?(simple(owner))
+    !rebound?(owner)
   end
 
   # `self` in a `def self.x` of a declared module is that module's
@@ -785,7 +826,7 @@ class ClosedWorld
   # nothing else can run them with another self; a `clone` spelled anywhere in
   # the closed world or its outside sources refuses.
   def module_object_self?(owner)
-    !@global_refusal && !@clone_sent && @module_names.include?(owner) && !@class_decls.key?(owner) &&
+    !@global_refusal && !@clone_sent && @module_names.include?(owner) && !@declared_classes.include?(owner) &&
       stable_constant_identity?(owner)
   end
 
@@ -1132,7 +1173,112 @@ class ClosedWorld
     @freeze_possible = true if file.fetch(:freeze_possible)
     @singleton_makers << [path, :native] if file.fetch(:singleton_maker)
     record_native_touches(path, file.fetch(:touch), file.fetch(:defines_class), file.fetch(:legacy_names))
+    touch = file.fetch(:touch)
+    @native_class_assigns[path] = touch.fetch(:class_assigns)
+    touch.fetch(:events).each { |event| @native_class_events << [path, *event] if NATIVE_CLASS_MAKERS.match?(event[0]) }
   end
+
+  # The native events that can make a class (TouchScan.native_facts kinds).
+  NATIVE_CLASS_MAKERS = /\A(?:define_class|class_new\z|super\z|obj_alloc\z|obj_new\z|instance_new\z|funcall)/
+  # mruby's own implementation of the class-making API (and of the funcall family it forwards through): each event
+  # there forwards a caller's class, which is that caller's own event, or serves Class.new / Class#initialize /
+  # Module#dup, which the closed world's dynamic-subclass facts bound.
+  NATIVE_CLASS_API = %r{/3rd/mruby/src/(?:class|gc|vm)\.c\z}
+
+  # NATIVE_LEAF_CORE: no native source can make an instance of a subclass of +klass+. Outside NATIVE_CLASS_API:
+  #   - every class definition and class_new names a superclass that resolves (a built-in handle, a class_get, a
+  #     local assigned only such values) to another class, and nothing assigns ->super;
+  #   - every instantiation (obj_new, instance_new, a funcall of `new`/`allocate`) is of a class that resolves to no
+  #     class factory (Class, Module, Struct, Data), or passes no argument a superclass could be (none, or only
+  #     integer/nil/string values), or is NATIVE_INSTANCE_REVIEWED.
+  # An obj_alloc of a class object makes a class with no superclass until ->super is set. A funcall of a computed
+  # name forwards a Ruby send, which the Ruby facts bound. False when any of those cannot be read.
+  def native_unsubclassed?(klass)
+    names = native_superclass_names
+    !names.nil? && !names.include?(simple(klass))
+  end
+
+  # [path suffix, call prefix] of instantiations reviewed against the pinned mruby: error.c's mrb_make_exception
+  # sends `new` to the class `raise` was given and raises TypeError unless the result is an exception, so a class it
+  # makes there has no instance.
+  NATIVE_INSTANCE_REVIEWED = [['/3rd/mruby/src/error.c', 'mrb_funcall_argv(mrb, exc, MRB_SYM(new), n, &mesg)']].freeze
+
+  # The simple names native class definitions take as superclass, or nil when one cannot be resolved.
+  def native_superclass_names
+    return @native_superclass_names if defined?(@native_superclass_names)
+
+    norm = (@class_decls.keys.map { |k| simple(k) } + CoreHierarchySigs.hierarchy[0].keys).uniq
+                                                                                   .group_by { |n| n.downcase.delete('_') }
+    @native_superclass_names = @native_class_events.each_with_object(Set.new) do |(path, kind, args, why, helper), out|
+      next if path.match?(NATIVE_CLASS_API) || kind == 'obj_alloc'
+      next if NATIVE_INSTANCE_REVIEWED.any? { |suffix, call| path.end_with?(suffix) && why.to_s.start_with?(call) }
+
+      args = Array(args)
+      # A function's own definition or declaration (`mrb_define_class(mrb_state *mrb, ...)`), not a call.
+      next if args.first.to_s.match?(/\bmrb_state\s*\*/)
+
+      names = native_class_event_supers(kind, args, helper, @native_class_assigns.fetch(path, {}), norm)
+      break nil unless names
+
+      out.merge(names)
+    end
+  end
+
+  # A value no superclass can be.
+  NATIVE_NON_CLASS_ARG = /\A(?:mrb_(?:fixnum|int|nil|bool|true|false|symbol)_value\s*\(.*\)|mrb_str_new\w*\s*\(.*\)|
+                            NULL|nullptr|0)\z/mx
+
+  # The superclass names one NATIVE_CLASS_MAKERS event may give a new class (empty when it makes none), or nil.
+  def native_class_event_supers(kind, args, helper, assigns, norm)
+    instance = lambda do |cls, rest|
+      names = native_class_resolve(cls, assigns, norm)
+      next Set.new if names && (names & TouchScan::CLASS_FACTORIES).empty?
+
+      rest.all? { |arg| arg.to_s.strip.match?(NATIVE_NON_CLASS_ARG) } ? Set.new : nil
+    end
+    case kind
+    when 'super' then nil
+    when 'obj_new', 'instance_new' then instance.(args[1], args[3..].to_a)
+    when /\Afuncall/
+      mids = helper || [TouchScan.native_literal(args[2])].compact
+      next_args = args[3].to_s.strip == '0' ? [] : args[4..].to_a
+      mids.empty? || (mids & %w[new allocate]).empty? ? Set.new : instance.(args[1], next_args)
+    when 'class_new' then native_class_resolve(args[1], assigns, norm)
+    else native_class_resolve(args[kind.include?('_under') ? 3 : 2], assigns, norm)
+    end
+  end
+
+  # The simple names a native class expression can denote: TouchScan.native_resolve, a class definition's own name,
+  # an exception class get, or each value a local is assigned. nil when one cannot be named.
+  def native_class_resolve(expr, assigns, norm, depth = 0)
+    e = expr.to_s.strip.sub(/\A\(\s*(?:struct\s+)?RClass\s*\*\s*\)\s*/, '')
+    e = Regexp.last_match(1).strip while e.match(/\Amrb_(?:obj_value|class_ptr)\s*\(\s*(\w+)\s*\)\z/)
+    return nil if depth > 4
+
+    if (m = e.match(/\Amrb_define_class(_under)?(?:_id)?\s*\((.*)\)\z/m))
+      name = TouchScan.native_literal(bc2cpp_c_call_args(m[2])[m[1] ? 2 : 1])
+      return name ? Set[TouchScan.path_names(name).last] : nil
+    end
+    if (m = e.match(/\Amrb_exc_get(?:_id)?\s*\((.*)\)\z/m))
+      name = TouchScan.native_literal(bc2cpp_c_call_args(m[1])[1])
+      return name ? Set[name] : nil
+    end
+    resolved = TouchScan.native_resolve(e, norm)
+    return resolved - [TouchScan::WILD] if resolved
+    return nil unless e.match?(TouchScan::IDENTIFIER) && !(values = assigns[e]).to_a.empty?
+
+    values.each_with_object(Set.new) do |value, out|
+      # `a = mrb->x_class = expr;` assigns expr; a null pointer is no class.
+      value = value.sub(/\A(?:[\w.]+(?:\s*->\s*\w+)*\s*=(?!=)\s*)+/, '')
+      next if value.match?(/\A(?:NULL|nullptr|0)\z/)
+
+      names = native_class_resolve(value, assigns, norm, depth + 1)
+      return nil unless names
+
+      out.merge(names)
+    end
+  end
+  public :native_unsubclassed?
 
   # The facts of each path in `paths`, in order: plain data (Hash, Array, Set, String, Symbol, true/false) with
   # no state and no ENV, so the result can be stored and loaded as it is.
@@ -1588,7 +1734,8 @@ class ClosedWorld
       tokens: tokens.to_a,
       supers: supers,
       touch: touch,
-      clone_sent: text.match?(/\bclone\b/),
+      # A full-line comment sends nothing; any other spelling (code or a string) counts.
+      clone_sent: text.gsub(/^[ \t]*#.*$/, '').match?(/\bclone\b/),
       freeze_possible: !core && text.match?(/\bfreeze\b/),
       singleton_maker: !core && text.match?(RUBY_SINGLETON),
       constant_writes: text.scan(/\b(?:[A-Z]\w*::)*([A-Z]\w*)\s*=(?!=|>)/).map(&:first),
@@ -1707,7 +1854,9 @@ class ClosedWorld
           sym = loaded_symbol_name(irep, insn)
           next unless sym
 
-          @clone_sent = true if sym == 'clone'
+          # CLONE_SYMBOL_PROOF: a `:clone` that is only compared or listed (`%i[clone dup].include?(m)`) copies nothing;
+          # resolve_installer_symbol_loads counts it as a clone only when its value may reach a send.
+          @clone_symbol_loads << [irep, idx, insn.reg] if sym == 'clone'
           @dynamic_visibility = true if VISIBILITY_SENDS.include?(sym)
           # An installer or rebinder name loaded as a symbol may be sent by name: its value must stay on safe paths
           # (resolve_installer_symbol_loads), not refuse the program outright.
@@ -1727,12 +1876,19 @@ class ClosedWorld
         when :SETCONST, :SETMCNST
           name = insn.const_name.to_s
           @rebound << name
+          qualified = insn.op == :SETCONST && @constant_write_sites[[irep.label, idx]]
+          if qualified
+            @rebound_qualified[qualified] += 1
+          else
+            @rebound_bare << name
+          end
           @constant_write_counts[name] += 1
           @deferred_constant_writes << name unless @walked.include?(irep.label)
         end
       end
     end
     resolve_struct_splats
+    resolve_struct_class_members
     resolve_deferred_mixin_modules
     resolve_installer_symbol_loads
     # A read name (scan_factory) can run a definition the scan only finishes seeing here.
@@ -1859,6 +2015,9 @@ class ClosedWorld
       else
         global!(:dynamic_install)
       end
+    end
+    @clone_symbol_loads.each do |irep, idx, reg|
+      @clone_sent = true unless installer_symbol_value_safe?(irep, idx, reg, 0, false)
     end
     # These names refuse nothing here; CodeGen's installed-name scan asks for the proof instead (symbol_load_proven?).
     @name_installer_loads.each do |irep, idx, reg, _sym|
@@ -2316,16 +2475,16 @@ class ClosedWorld
         end
         argc = call.argc if struct_keyword_init?(call)
         return global!(:class_factory_escape) unless argc
-
+        member_names = []
         argc.times do |argument|
           names = factory_argument_names(irep, use, call.reg.to_i + argument + 1, %i[LOADSYM])
           return global!(:class_factory_escape) unless names
 
-          names.each do |name|
-            note_unknown_def(name, nil)
-            note_unknown_def("#{name}=", nil)
-          end
+          member_names.concat(names.to_a)
         end
+        # STRUCT_CLASS_DECLS: whether this is a declared struct class's factory is known once every constant write is
+        # counted (resolve_struct_class_members).
+        @struct_factory_members << [irep, use, call, member_names]
       when 'Class'
         return global!(:class_factory_escape) unless argc && argc <= 1
 
@@ -2361,6 +2520,19 @@ class ClosedWorld
       return nil unless name.is_a?(String)
 
       name
+    end
+  end
+
+  # STRUCT_CLASS_DECLS: a Struct.new's members are unknown definers unless the call is a declared struct class's one
+  # `X = Struct.new(...)`, whose members the registry lists as definers of X.
+  def resolve_struct_class_members
+    @struct_factory_members.each do |irep, use, call, names|
+      next if struct_class_factory?(irep, use, call)
+
+      names.each do |name|
+        note_unknown_def(name, nil)
+        note_unknown_def("#{name}=", nil)
+      end
     end
   end
 
@@ -2447,13 +2619,41 @@ class ClosedWorld
   # dynamically, and named by a plain constant path.
   def opaque?(owner)
     return true if owner.include?('.') || owner.include?('<') || BOOT_CLASSES.include?(owner)
-    return true unless @class_decls.key?(owner)
-    return true if @rebound.include?(simple(owner)) || @dynamic_subclassed.include?(simple(owner))
+    return true unless @declared_classes.include?(owner)
+    return true if (rebound?(owner) && !struct_class?(owner)) || @dynamic_subclassed.include?(simple(owner))
 
     # Touch scans are complete after construction; declaration and rebinding guards stay live.
     return @opaque_touches.fetch(owner) { @opaque_touches[owner] = outside_class_touch?(owner) } if @opaque_touches
 
     outside_class_touch?(owner)
+  end
+
+  # QUALIFIED_REBINDS: may the constant naming +owner+ be bound to another value? A write the registry qualified
+  # rebinds only its own path; a write it did not (in a method body, `Outer::X =`, or one it does not record) rebinds
+  # every constant of that bare name.
+  def rebound?(owner)
+    @rebound_bare.include?(simple(owner)) || @rebound_qualified[owner].positive?
+  end
+
+  # STRUCT_CLASS_DECLS: X is a struct class whose one constant write is the `X = Struct.new(...)` the registry saw. That
+  # write is a declaration, not a rebinding: a second write of X, or a write of its bare name the registry did not
+  # qualify, leaves X rebound.
+  def struct_class?(owner)
+    return false unless @struct_classes.include?(owner)
+
+    @rebound_qualified[owner] == 1 && !@rebound_bare.include?(simple(owner))
+  end
+
+  # STRUCT_CLASS_DECLS: the Struct.new call at +use+ is the one `X = Struct.new(...)` of a declared struct class, so the
+  # registry holds its members as definers of X.
+  def struct_class_factory?(irep, use, call)
+    return false unless @walked.include?(irep.label)
+
+    store = BytecodeIR.for(irep).source_at(use + 1)
+    return false unless store&.op == :SETCONST && store.reg_operand == call.reg
+
+    owner = @constant_write_sites[[irep.label, use + 1]]
+    !owner.nil? && struct_class?(owner)
   end
 
   def outside_class_touch?(owner)
@@ -2513,7 +2713,7 @@ class ClosedWorld
     @class_decls.each do |klass, decls|
       decls.each do |d|
         case d[:super]
-        when nil then @wild << klass
+        when nil then @wild << klass unless d[:fresh_struct_super]
         when String
           parents = superclass_candidates(d[:super], by_simple)
           if parents.empty?
@@ -2575,8 +2775,8 @@ class ClosedWorld
     end
   end
 
-  # SINGLETON_ARMS: the modules whose `.singleton` definition of `name` a guard chain can
-  # answer with an identity arm, or nil when some singleton definer cannot be armed. A module object is
+  # SINGLETON_ARMS: the modules (and, CLASS_OBJECT_ARMS, the class objects) whose `.singleton` definition of `name` a
+  # guard chain can answer with an identity arm, or nil when some singleton definer cannot be armed. A module object is
   # reached only by its own constant: no subclasses (module_object_self? also bars a class and any
   # `clone`, the one way to copy singleton methods). The caller proves the singleton chain has no mixin.
   public def singleton_arm_modules(name)
@@ -2585,10 +2785,76 @@ class ClosedWorld
     owners = @registry.fetch(name, []).map(&:owner).select { |o| o.end_with?('.singleton') }.uniq
     return nil if owners.empty?
 
-    modules = owners.map { |o| o.delete_suffix('.singleton') }
-    return nil unless modules.all? { |m| module_object_self?(m) }
+    arms = Set.new
+    owners.each do |owner|
+      base = owner.delete_suffix('.singleton')
+      if module_object_self?(base)
+        arms << base
+      elsif (objects = class_object_arms(base))
+        arms.merge(objects)
+      else
+        return nil
+      end
+    end
+    arms.to_a
+  end
 
-    modules
+  # CLASS_OBJECT_ARMS: a class's `def self.x` answers for that class object and for every subclass's class object
+  # (singleton methods are inherited by subclasses), so the arm set is the class and its known subclasses, each a
+  # declared, non-opaque class whose constant names one object. nil when the hierarchy below it is not closed.
+  def class_object_arms(klass)
+    return nil if @global_refusal || @clone_sent || !@declared_classes.include?(klass) || @module_names.include?(klass)
+
+    subclasses = known_subclasses(klass)
+    return nil unless subclasses
+    return nil unless subclasses.all? { |c| @declared_classes.include?(c) && !opaque?(c) && stable_constant_identity?(c) }
+
+    subclasses
+  end
+
+  def merge_mixins(included, prepended)
+    merged = Hash.new { |h, k| h[k] = Set.new }
+    [included, prepended].each { |table| table.each { |owner, mods| merged[owner].merge(Array(mods)) } }
+    merged
+  end
+
+  # MODULE_DEFINER_INCLUDERS: the classes whose instances reach +mod+'s instance methods, through a class-body
+  # include or prepend of +mod+ or of a module that includes it, or nil when that is not known: +mod+ is not a
+  # declared module, an includer may be one the registry does not see (known_includer_candidates), an outside
+  # source or a dynamic mixin may name it, some mixin did not resolve, or a root class (Object, Kernel, BasicObject)
+  # takes it, which reaches every object. A module nothing includes answers no instance: its instance methods (the
+  # private copies `module_function` makes) bind no receiver, and its `.singleton` definitions are judged on their own.
+  def module_definer_includers(mod)
+    return nil unless @mixins && @unknown_mixins && @unknown_mixins.empty? && @module_names.include?(mod)
+
+    @module_includer_memo ||= {}
+    return @module_includer_memo[mod] if @module_includer_memo.key?(mod)
+
+    @module_includer_memo[mod] = module_includers_uncached(mod)
+  end
+
+  def module_includers_uncached(mod)
+    return nil if known_includer_candidates(mod).nil? || outside_class_touch?(mod)
+
+    classes = Set.new
+    seen = Set[mod]
+    work = [mod]
+    until work.empty?
+      target = work.pop
+      @mixins.each do |owner, mods|
+        next unless mods.include?(target)
+        return nil if BOOT_CLASSES.include?(owner) || owner.include?('.') || owner.include?('<')
+
+        if @module_names.include?(owner)
+          return nil if outside_class_touch?(owner)
+
+          work << owner if seen.add?(owner)
+        else
+          classes << owner
+        end
+      end
+    end
+    classes
   end
 
   def required_classes(name, instance_self = false, singleton_arms = nil)
@@ -2601,6 +2867,14 @@ class ClosedWorld
           next if instance_self || singleton_arms&.include?(d.owner.delete_suffix('.singleton'))
 
           break reason = :singleton_definer
+        end
+        if (includers = module_definer_includers(d.owner))
+          # MODULE_DEFINER_INCLUDERS: a module's method is reached through the classes that include or prepend it.
+          blocked = includers.find { |c| opaque?(c) || descendants(c).any? { |sub| opaque?(sub) } }
+          break reason = :opaque_definer if blocked
+
+          includers.each { |c| required << c; required.merge(descendants(c)) }
+          next
         end
         break reason = :opaque_definer if opaque?(d.owner)
 
@@ -2639,6 +2913,18 @@ class ClosedWorld
   # Can the fallback's receiver be an instance of a method_missing class? Only
   # `self` is known: every entry into a compiled method passes a kind_of? its
   # owner (dispatch, a guarded or lexical-self direct call, super).
+  # METHOD_MISSING_ARMS: the classes whose instances reach a Ruby method_missing (with the subclasses that inherit it),
+  # when each is a declared, non-opaque class of stable constant identity and none is open below, so an exact-class arm
+  # per class (bc2cpp_class_is, which looks through an object's singleton class) catches every such receiver. nil
+  # when there are none or that is not so.
+  public def method_missing_arm_classes
+    return nil if @global_refusal || @mm_classes.empty? || !@wild.empty?
+    return nil unless @mm_classes.all? { |c| @declared_classes.include?(c) && !opaque?(c) && stable_constant_identity?(c) }
+    return nil unless @mm_classes.all? { |c| (subs = known_subclasses(c)) && subs.to_set.subset?(@mm_classes) }
+
+    @mm_classes.to_a.sort
+  end
+
   def method_missing_free?(self_owner, instances = nil)
     return true if @mm_classes.empty?
     # A proven class set: a class inherits method_missing exactly when @mm_classes holds it.

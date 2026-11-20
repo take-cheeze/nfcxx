@@ -22,6 +22,7 @@ module TypeCheckVariants
     # read from ENV.singleton_methods, so a self-compiled bc2cpp's closed world knows the names this module installs
     # (LoopInstallers.unregistered_define_names); arm_guard refuses a Ruby whose ENV has a singleton method neither
     # list names, so a newer Ruby cannot slip past the guard. mruby's ENV (mruby-env) has no singleton methods.
+    # pretty_print is the pp library's (rbs loads it), and prints every variable.
     BULK = %i[
       all? any? chain chunk chunk_while clear collect collect_concat compact count cycle delete_if detect drop
       drop_while each each_cons each_entry each_key each_pair each_slice each_value each_with_index each_with_object
@@ -29,7 +30,7 @@ module TypeCheckVariants
       has_value? inject inspect invert keep_if key keys lazy length map max max_by merge! min min_by minmax minmax_by
       none? one? partition rassoc reduce rehash reject reject! replace reverse_each select select! shift size
       slice_after slice_before slice_when sort sort_by sum take take_while tally to_a to_h to_hash to_set uniq update
-      value? values zip
+      value? values zip pretty_print
     ].freeze
     UNGUARDED = %i[clone dup freeze to_s].freeze
 
@@ -41,7 +42,7 @@ module TypeCheckVariants
       filter_map find find_all find_index first flat_map grep grep_v group_by has_value? inject inspect invert keep_if
       key keys lazy length map max max_by merge! min min_by minmax minmax_by none? one? partition rassoc reduce rehash
       reject reject! replace reverse_each select select! shift size slice_after slice_before slice_when sort sort_by
-      sum take take_while tally to_a to_h to_hash to_set uniq update value? values zip
+      sum take take_while tally to_a to_h to_hash to_set uniq update value? values zip pretty_print
     ].each do |method|
       define_method(method) do |*args, **opts, &block|
         if EnvGuard.armed && (BULK.include?(method) || args.grep(String).any? { |key| CONTROL_KEYS.include?(key) })
@@ -51,8 +52,10 @@ module TypeCheckVariants
       end
     end
 
+    # The lists are only read with include? here (not passed to Array#- on ENV's answer), so a self-compiled bc2cpp's
+    # closed world can prove the :clone in UNGUARDED is never sent (CLONE_SYMBOL_PROOF).
     def self.uncovered
-      ENV.singleton_methods - KEYED - BULK - UNGUARDED
+      ENV.singleton_methods.reject { |m| KEYED.include?(m) || BULK.include?(m) || UNGUARDED.include?(m) }
     end
   end
 

@@ -25,6 +25,7 @@ require_relative 'type_check_variants'
 type_check_variants = TypeCheckVariants.parse_argv(ARGV) if $PROGRAM_NAME == __FILE__
 TypeCheckVariants.arm_guard if type_check_variants
 require_relative 'compact_output'
+require_relative 'owner_set_share'
 require_relative 'shard_output'
 require_relative 'runtime_header'
 require_relative 'shared_generation'
@@ -92,6 +93,7 @@ require_relative 'codegen_outside_owner_call'
 require_relative 'codegen_static_owner_arms'
 require_relative 'codegen_leaf_owner_else'
 require_relative 'codegen_owner_set_direct'
+require_relative 'codegen_arms_complete_else'
 require_relative 'codegen_native_direct'
 require_relative 'codegen_native_exact_direct'
 require_relative 'codegen_native_singleton'
@@ -340,7 +342,10 @@ BC2CPP_MAIN = lambda do
     closed_world = ClosedWorld.new(ireps: engine_ireps, registry: engine_registry, class_decls: class_decls,
                                    walked: walked_ireps & engine_ireps.keys,
                                    native_paths: outside_native, ruby_paths: outside_ruby,
-                                   module_names: declared_modules, root_label: root_label)
+                                   module_names: declared_modules, root_label: root_label,
+                                   struct_classes: struct_member_lists.keys, included: included_modules,
+                                   prepended: prepended_modules, unknown_mixins: unknown_mixins,
+                                   constant_writes: constant_assignment_sites)
     profile_phase.call('closed world: ClosedWorld.new')
     warn "== closed world (#{build_name}: #{build_gems.size} gems, #{outside_native.size} native + " \
          "#{outside_ruby.size} Ruby outside sources) =="
@@ -1583,6 +1588,9 @@ BC2CPP_MAIN = lambda do
   # RUNTIME_HEADER (runtime_header.rb): between the two, so it moves the compacted runtime text ShardOutput then splits.
   RuntimeHeader.capture_stdout(ENV[RuntimeHeader::DIR_KEY])
   CompactOutput.capture_stdout unless annotated
+  # OWNER_SET_SHARE (owner_set_share.rb): before the split, so shards of one gem share a set too.
+  real_gem = BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol }
+  OwnerSetShare.capture_stdout(symbol) if OwnerSetShare.enabled?(real_gem)
 
   # PARAM_TRACE (tools/bc2cpp/param_trace.rb): opt-in runtime classes of compiled method and block
   # parameters; unset (or any value but 1) leaves stdout untouched. Registered BEFORE ELSE_TRACE so the
@@ -2944,6 +2952,8 @@ BC2CPP_MAIN = lambda do
   if (presym_header = ENV['BC2CPP_PRESYM_HEADER']) && File.file?(presym_header)
     SymbolCache.presym_names = File.read(presym_header).scan(/^\s*MRB_SYM__([A-Za-z_]\w*) = \d+,?$/).flatten.to_set
   end
+  # PRESYM_ALL (symbol_cache.rb): a real gem build's presym scan reads this output. BC2CPP_PRESYM_ALL=0 keeps the table.
+  SymbolCache.presym_all = ENV['BC2CPP_PRESYM_ALL'] != '0' && BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol }
   symbol_table = SymbolCache::Table.new
   print gen.emit_structs
   warn InitializerTables::PREFIX + JSON.generate(gen.initializer_table_evidence(compiled, InitializerTables.direct_candidate_keys(compiled, ireps, registry)))
@@ -3000,26 +3010,29 @@ BC2CPP_MAIN = lambda do
   # OWNER_CALL_DIRECT (owner_call_direct.rb): an owner call its listed owners' entries complete carries them.
   owner_call_direct = OwnerCallDirect.entries(compiled + gen.module_function_copies(compiled), registration_owners)
   owner_call_direct = owner_call_direct.merge(OwnerCallDirect.native_entries) if ENV['BC2CPP_OWNER_CALL_DIRECT'] != '0'
-  owner_class_slots = gen.owner_class_slots
-  program_superclasses = gen.program_superclasses
-  unregistered = gen.unregistered_keys
+  # Two locals for OwnerCallDirect.rewrite's tables and options: BC2CPP_MAIN is at mruby's limit of local variables per scope (a
+  # self-compiled bc2cpp is built from this file by mrbc, which refuses "too many local variables").
+  owner_rewrite = [owner_call_direct, gen.owner_class_slots, gen.program_superclasses, gen.unregistered_keys]
+  # CROSS_UNIT_ROW (CodeGen#other_unit_direct_entry): a row for a method another gem of this link compiles.
+  owner_rewrite_opts = { other: ENV['BC2CPP_CROSS_UNIT_ROW'] == '0' ? nil : gen.method(:other_unit_direct_entry),
+                         trim: gen.owner_rows_trim? }
   # GUARD_VIOLATION: name the method a violation site sits in.
   # Fuse the three per-method rewrite passes (@@SITE@@ substitution, DIRECT_RAISE, SymbolCache.rewrite) into one.
   compiled.each do |m|
     code = m[:code].gsub('@@SITE@@') { "#{m[:owner]}##{m[:name]}".gsub(/["\\]/) { |c| "\\#{c}" } }
-    code = OwnerCallDirect.rewrite(code, owner_call_direct, owner_class_slots, program_superclasses, unregistered)
+    code = OwnerCallDirect.rewrite(code, *owner_rewrite, **owner_rewrite_opts)
     m[:code] = SymbolCache.rewrite(code, symbol_table)
   end
   # The class units' text takes the same passes as the compiled methods (a unit's helper calls are named the same way).
   class_units = class_units.map do |unit|
     code = unit[:code].gsub('@@SITE@@') { unit[:path].to_s.gsub(/["\\]/) { |c| "\\#{c}" } }
-    code = OwnerCallDirect.rewrite(code, owner_call_direct, owner_class_slots, program_superclasses, unregistered)
+    code = OwnerCallDirect.rewrite(code, *owner_rewrite, **owner_rewrite_opts)
     unit.merge(code: SymbolCache.rewrite(code, symbol_table))
   end
   # TOP_LEVEL_STATEMENTS takes the same passes: its sends are named calls too (a `Class.new(Base)` constant write is an owner call).
   unless top_level_code.empty?
     code = top_level_code.gsub('@@SITE@@', 'top-level')
-    code = OwnerCallDirect.rewrite(code, owner_call_direct, owner_class_slots, program_superclasses, unregistered)
+    code = OwnerCallDirect.rewrite(code, *owner_rewrite, **owner_rewrite_opts)
     top_level_code = SymbolCache.rewrite(code, symbol_table)
   end
   # Fused single pass over the compiled methods: all of these closed-world diagnostic counts used to
@@ -3152,6 +3165,7 @@ BC2CPP_MAIN = lambda do
   compiled.each do |m|
     print ShardOutput.unit_mark(m[:owner]) if shards > 1
     print m[:code]
+    print gen.cross_unit_thunk(m)
   end
   print ShardOutput::HOOKS_MARK if shards > 1
   print top_level_code

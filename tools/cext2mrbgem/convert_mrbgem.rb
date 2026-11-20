@@ -119,6 +119,7 @@ C_STATEMENT_KEYWORDS = %w[if while for switch return sizeof else do].freeze
 DEF_RE = /^[ \t]*((?:(?:static|inline|extern)[ \t\n]+)*)((?:[A-Za-z_][#{WC}]*(?:[ \t\n]+|[ \t\n]*\*[ \t\n\*]*))+?)([A-Za-z_][#{WC}]*)[ \t\n]*\(((?:[^()]|\([^()]*\))*)\)#{SS}(\{|;)/
 INC_RE = /#[ \t]*include[ \t]*[<"](ruby(?:\/[#{WC}.\/-]*)?\.h)[>"]/
 REG_RE = /(?<![#{WC}$.>])(rb_define_method|rb_define_private_method|rb_define_singleton_method|rb_define_module_function|rb_define_global_function)#{SS}\(/
+ALLOC_REG_RE = /(?<![#{WC}$.>])(rb_define_alloc_func)#{SS}\(/
 # a right side that yields a class (a definition or a lookup of a class): not a non-class assignment to a class variable
 # a class expression of the fork (an RClass *): mrb->x_class, mrb_class_get / mrb_exc_get / mrb_module_get, or an E_*_ERROR class macro
 CLASS_EXPR_RE = /\A(?:mrb->\w+_class|mrb_class_get\(|mrb_exc_get\(|mrb_module_get\(|E_[A-Z][A-Z0-9_]*\z)/
@@ -335,6 +336,37 @@ def next_nonspace(masked, pos)
   k = pos
   k += 1 while k < masked.length && SPACE_RE.match?(masked[k])
   k < masked.length ? k : -1
+end
+
+GC_ROOT_ADDR_PRELUDE = <<~'C'.chomp
+  /* BC2CPP-MRBGEM: a GC root given by address (rb_gc_register_address, rb_global_variable) on a class variable (struct RClass *)
+     or on a value (mrb_value). A class is rooted by its class value once it is set; a value while it is not nil. */
+  static void
+  nfcx_gc_root_addr(mrb_state *mrb, void *p, size_t n)
+  {
+    if (n == sizeof(struct RClass *)) {
+      struct RClass *c = *(struct RClass **)p;
+      if (c) mrb_gc_register(mrb, mrb_obj_value(c));
+    }
+    else {
+      mrb_value v = *(mrb_value *)p;
+      if (!mrb_nil_p(v)) mrb_gc_register(mrb, v);
+    }
+  }
+C
+
+# the span of a call rb_gc_register_address(&NAME) or rb_global_variable(&NAME) whose only argument is the address of a class
+# variable (pv: the '&', e: the end of NAME): from the callee's name to the closing parenthesis, or nil
+def gc_root_call_span(masked, pv, e)
+  nx = next_nonspace(masked, e)
+  return nil unless nx >= 0 && masked[nx] == ')'
+  o = prev_nonspace(masked, pv - 1)
+  return nil unless o >= 0 && masked[o] == '('
+  m = masked[0...o].match(/\b(rb_gc_register_address|rb_global_variable)[#{WSP}]*\z/)
+  return nil unless m
+  cp = match_close(masked, o)
+  return nil unless cp == nx
+  [m.begin(1), cp + 1]
 end
 
 def prev_nonspace(masked, pos)
@@ -976,6 +1008,34 @@ end
         @regs << rec
         @reg_by_call[[rel, cs]] = rec
       end
+      # rb_define_alloc_func(klass, func): the allocator is a registered function of arity 0 (its VALUE parameter is the class)
+      finditer(ALLOC_REG_RE, masked).each do |m|
+        cs = m.begin(1)
+        op = m.end(0) - 1
+        cp = match_close(masked, op)
+        rec = { 'file' => rel, 'call' => cs, 'open' => op, 'close' => cp, 'api' => m[1],
+                'error' => nil, 'func' => nil, 'argc' => 0, 'target' => nil,
+                'func_span' => nil, 'argc_span' => nil }
+        args = cp < 0 ? [] : split_args(masked, op, cp)
+        if cp < 0
+          rec['error'] = 'unbalanced parentheses in registration call'
+        elsif args.size != 2
+          rec['error'] = "registration call has #{args.size} arguments, expected 2"
+        else
+          (ts, te), (fs, fe) = args
+          rec['target'] = py_strip(psl(text, ts, te))
+          rec['target_span'] = [ts, te]
+          fm = /\A([A-Za-z_][#{WC}]*)\z/.match(py_strip(psl(text, fs, fe)))
+          if fm.nil?
+            rec['error'] = 'allocator argument is not a plain function name'
+          else
+            rec['func'] = fm[1]
+            rec['func_span'] = [fs, fe]
+          end
+        end
+        @regs << rec
+        @reg_by_call[[rel, cs]] = rec
+      end
     end
     # one arity per registered function
     arities = {}
@@ -1325,7 +1385,8 @@ end
     return @gcv_owned[name] if @gcv_owned.key?(name)
     en = Regexp.escape(name)
     define_re = /(?<![#{WC}$.>])#{en}#{SS}=#{SS}rb_define_(?:class|module)(?:_under)?#{SS}\(/
-    nondef_re = /(?<![#{WC}$.>])#{en}#{SS}=(?!=)(?>#{SS})(?!#{CLASS_RHS_RE}#{SS}\()/
+    # a class constant (rb_eEncodingError, rb_cObject: an RClass * expression in the api_map) is a class value too
+    nondef_re = /(?<![#{WC}$.>])#{en}#{SS}=(?!=)(?>#{SS})(?!#{CLASS_RHS_RE}#{SS}\(|rb_[cem][A-Z]\w*#{SS};)/
     defined = @files.values.any? { |f| f['masked'].match?(define_re) }
     mixed = @files.values.any? { |f| nondef_assignment?(f['masked'], nondef_re) }
     @gcv_owned[name] = defined && !mixed
@@ -1715,9 +1776,7 @@ end
   def alloc_reach
     @alloc_reach ||= begin
       seeds = Set.new
-      @files.each_value do |f|
-        f['text'].scan(/rb_define_alloc_func[ \t\n]*\([ \t\n]*[A-Za-z_]\w*[ \t\n]*,[ \t\n]*([A-Za-z_]\w*)[ \t\n]*\)/) { seeds << $1 }
-      end
+      # no seeds: an allocator is a registered function of the state (rb_define_alloc_func is a template with a prelude)
       # every #define body in the gem, by macro name (a macro may be defined in several conditional branches)
       macro_bodies = Hash.new { |h, k| h[k] = [] }
       @files.each do |rel, f|
@@ -2788,8 +2847,8 @@ end
       elsif macro_arg_nonretaining?(rel, s, callee)
         nil
       elsif callee == 'rb_define_alloc_func'
-        # the allocator is called by the VM with no state argument: the fork has no per-class allocator hook (accepted stuck point)
-        'stuck point (per-class allocator): the pointer is an allocator, which the VM calls with no state argument in the fork'
+        # the registration template takes the allocator as a registered function (see the scan of registrations)
+        nil
       elsif @entries[callee].nil? && (ur = @unmapped_reasons[callee]).is_a?(String) && ur.start_with?('stuck point')
         # a callee that is a stuck point (its reason is recorded): the pointer's refusal carries that reason
         "#{ur}; the pointer is passed to #{callee}"
@@ -4014,7 +4073,21 @@ use_problem = lambda do |name, use|
         next if l_text.nil? || r_text.nil? || l_text.empty? || r_text.empty?
         next unless value_operand?(l_text, value_names, value_field_names, rel, op_s) && value_operand?(r_text, value_names, value_field_names, rel, op_s)
         next if @edits[rel].touches_strictly?(op_s)
-        refuse(rel, op_s, m[1], 'stuck point (VALUE order): a VALUE is ordered by address in CRuby (the class-table search); the fork\'s VALUE is a struct with no order')
+        # ordered by address: each operand is its object address (mrb_value_addr, include/mruby/value.h). CRuby's tables that are
+        # searched by VALUE are built and searched with this same order, so the search is consistent (the order is not CRuby's
+        # value of an address, which nothing observes). The operands are the spans of the comparison.
+        l_end = op_s
+        l_end -= 1 while l_end > 0 && masked[l_end - 1] =~ /\s/
+        r_start = op_e
+        r_start += 1 while r_start < masked.length && masked[r_start] =~ /\s/
+        next if r_start > r_end || l_start >= l_end
+        next if @edits[rel].overlaps(l_start, l_end) || @edits[rel].overlaps(r_start, r_end)
+        ed = @edits[rel]
+        ed.add(l_start, l_start, 'mrb_value_addr(')
+        ed.add(l_end, l_end, ')')
+        ed.add(r_start, r_start, 'mrb_value_addr(')
+        ed.add(r_end, r_end, ')')
+        rewrite(rel, op_s, m[1], m[1], 'a VALUE is ordered by its object address (mrb_value_addr): the converted table is sorted and searched in the same order')
       end
     end
   end
@@ -4975,6 +5048,28 @@ end
         # the address of an owned class variable (struct RClass *) is an RClass **, which no mruby call takes as a GC root
         pv = prev_nonspace(masked, s - 1)
         if pv >= 0 && masked[pv] == '&' && !(pv > 0 && masked[pv - 1] == '&') && owns_class_var?(rel, s, name)
+          # the class value is rooted by mrb_gc_register once the variable is set (a class is a constant, so it is rooted by
+          # its constant even before that); the registration call becomes a guarded statement
+          span = gc_root_call_span(masked, pv, e)
+          fnq = enclosing_func(rel, s)
+          dpre = define_at(rel, s)
+          at = dpre ? dpre[1] : (fnq && fnq['hstart'])
+          if span && at
+            # the address is passed as a void *, with the size of the variable: the helper roots a struct RClass * by its class
+            # value (when it is set) and an mrb_value while it is not nil, so the statement compiles whichever type the
+            # variable has (the converter's declaration and its assignment sites do not always agree)
+            @prelude_done ||= Set.new
+            unless @prelude_done.include?([rel, 'nfcx_gc_root_addr'])
+              @prelude_done << [rel, 'nfcx_gc_root_addr']
+              ed.add(at, at, GC_ROOT_ADDR_PRELUDE + "\n")
+            end
+            @edits[rel].drop(@edits[rel].overlapping(span[0], span[1]))
+            ed.add(span[0], s, 'nfcx_gc_root_addr(mrb, (void *)&')
+            ed.add(e, span[1], ", sizeof(#{name}))")
+            rewrite(rel, s, name, "nfcx_gc_root_addr(mrb, (void *)&#{name}, sizeof(#{name}))",
+                    'the address of a class variable is rooted by the prelude helper: a class by its class value (when set), a value while it is not nil')
+            next
+          end
           refuse(rel, s, name, 'stuck point (GC root): the address of an owned class variable (struct RClass *) is taken as a GC root, which needs an mrb_value holder (the variable would change type)')
           next
         end
@@ -5868,7 +5963,14 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       callee_c, idx_c = call_context(masked, s)
       class_pos = callee_c && ((@special_pos[callee_c] || []).include?(idx_c) ||
                                ((@entries[callee_c] || {})['class_args'] || []).include?(idx_c))
-      text = "mrb_obj_value(#{text})" if !class_pos && entry['mruby'].match?(CLASS_EXPR_RE)
+      # the right side of an assignment to an owned class variable (struct RClass *) is the class itself, not its VALUE
+      eq = prev_nonspace(masked, s - 1)
+      owned_target = false
+      if eq >= 0 && masked[eq] == '=' && !(eq > 0 && '=!<>+-*/%&|^'.include?(masked[eq - 1]))
+        lhs = masked[0...eq].match(/([A-Za-z_]\w*)#{SS}\z/)
+        owned_target = lhs && @class_vars.include?(lhs[1]) && owns_class_var?(rel, s, lhs[1])
+      end
+      text = "mrb_obj_value(#{text})" if !class_pos && !owned_target && entry['mruby'].match?(CLASS_EXPR_RE)
       # a file-scope initializer (static VALUE X = Qnil;) is not a constant expression in C (mrb_nil_value is a function): the
       # initializer is removed, and the variable is set at the start of Init (the file's Init function)
       fs_init = if %w[Qnil Qtrue Qfalse].include?(name) && enclosing_func(rel, s).nil?
@@ -6908,6 +7010,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       args = [(rel.end_with?('.cc') ? 'g++' : 'gcc'), '-fsyntax-only', '-w', '-include', 'stddef.h', '-I', src_dir, '-I', inc_dir]
       # the build's defines (the --define options: the names the build defines, as extconf would set them)
       (@defines || []).each { |d| args << "-D#{d}" }
+      # the fork's build defines MRB_USE_BIGINT for every object (mrbgems/mruby-bigint/mrbgem.rake): the bigint helpers are declared
+      args << '-DMRB_USE_BIGINT'
       incs.each { |d| args += ['-I', d] }
       args << path
       _o, err, _st = Open3.capture3(*args)

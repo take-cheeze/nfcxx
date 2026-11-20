@@ -180,7 +180,7 @@ NFCXX_CACHE=$c4/cache NFCXX_CACHE_LOG=$c4/cache.log "$root/nfcxx" -c -I"$cuda/in
   || { cat "$c4/build.log"; echo "cache build 3: FAIL"; fail=1; }
 states=$(grep -E '^(hit|miss)$' "$c4/cache.log" | tr '\n' ' ')
 if [ "$states" = "miss hit miss " ] && [ "$(dev_stages "$c4/time1.log")" = 3 ] && [ "$(dev_stages "$c4/time2.log")" = 0 ] \
-   && cut -f2 "$c4/time2.log" | grep -qx eccp && "$root/nfcxx" "$c4/m2.o" -L"$cuda/lib64" -lcudart -o "$c4/m2" >> "$c4/build.log" 2>&1 \
+   && cut -f3 "$c4/time2.log" | grep -qx "host C++ headers" && "$root/nfcxx" "$c4/m2.o" -L"$cuda/lib64" -lcudart -o "$c4/m2" >> "$c4/build.log" 2>&1 \
    && [ "$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$c4/m2")" = "$(printf 'launch: no error\nmul2: 1000 elements, 0 mismatches')" ]; then
   echo "device image cache (miss, hit, changed kernel misses) and time log: ok"
 else

@@ -41,7 +41,7 @@ if stale
   at_exit { FileUtils.rm_rf(tmp) }
   log = File.join(tmp, "log")
   built = system({ "NFCXX_CUDA_CUB" => nil, "TMPDIR" => tmp},
-                 File.join(ROOT, "nfcxx"), "--backend=#{backend}", "-c", "--instantiate=local", "-I#{cuda}/include",
+                 File.join(ROOT, "nfcxx"), "--backend=#{backend}", "-c", "--instantiate=used", "-I#{cuda}/include",
                  src, "-o", File.join(tmp, "device.o"), out: log, err: [:child, :out])
   unless built
     warn "cuda-cub: cannot build #{src}; linking without it:"

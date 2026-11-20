@@ -318,7 +318,14 @@ Dir.mktmpdir('native_frame_use_check') do |dir|
   owner, name, wrapper, = OwnerCallDirect::NATIVE_ROWS.first
   handed = NativeFrameUse.wrappers_source(Set["#{owner}##{name}"])
   suite.check('a frame-free row\'s owner-call wrapper is handed to the set', handed.include?("{ #{wrapper} }") &&
-              NativeFrameUse.cpp_source(Set["#{owner}##{name}"]).include?('bc2cpp_ff_add(bc2cpp_ff_wrapper_fns[i])'))
+              NativeFrameUse.cpp_source(Set["#{owner}##{name}"]).include?('bc2cpp_ff_add(bc2cpp_ff_wrapper_fns[u][i])'))
+  # FRAME_FREE_SHARED: the set and its registry are inline (one per program through RUNTIME_HEADER); the hook's
+  # predecessor stays per gem, so two gems' hooks chain instead of one calling itself.
+  shared = NativeFrameUse.cpp_source(Set["#{owner}##{name}"])
+  suite.check('the set, its count and the wrapper registry are inline, the hook\'s predecessor static',
+              shared.match?(/^inline mrb_func_t bc2cpp_ff_set\[\d+\] = \{\};$/) && shared.include?('inline unsigned bc2cpp_ff_wrapper_units = 0;') &&
+              shared.include?('static decltype(mrb_state::frame_free_p) bc2cpp_ff_prev = nullptr;'))
+  suite.check('the table stops filling at three quarters, so the probe always ends', shared.include?('if (4 * (bc2cpp_ff_count + 1) > 3 *'))
   suite.check('a framed row\'s wrapper is not', NativeFrameUse.wrappers_source(Set['IO#getbyte']).empty?)
   compiled = [{ label: 'synth:Font#bold', entry: 'Font_bold', arity: 0 }, { label: 'synth:Font#bold=', entry: 'Font_bold_eq', arity: 1 },
               { label: 'Font#size', entry: 'Font_size', arity: 0 }]

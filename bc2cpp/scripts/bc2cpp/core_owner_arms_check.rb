@@ -7,9 +7,10 @@
 #
 #   1. generated code: `o.abs` (Numeric#abs in mruby's mrblib, Float#abs native) gets an Integer arm calling
 #      Numeric_abs_impl and no Float arm; `o.first(n)` (Array#first native)
-#      keeps its owner call; a name only natives answer (`o.size`) gets no core arm; the owner call is the else of every arm;
+#      keeps its owner call; a name only natives answer (`o.size`) gets no core arm; the owner call is the else of every
+#      arm; `o.empty?` gets a Symbol arm calling mruby-symbol-ext's Symbol_empty$3f_impl;
 #   2. run on a full-core mruby, compiled against interpreted: Integers (bignum included), Floats, a Numeric subclass
-#      with its own `abs`, an Array, a Range and nil give the same value or error.
+#      with its own `abs`, an Array, a Range, Symbols and nil give the same value or error.
 #
 # The fixture compiles mruby's own mrblib in front of it (core: true), as the closed build does, so Numeric#abs is a
 # compiled core body.
@@ -38,6 +39,7 @@ SOURCE = <<~RUBY
     def ab(o); o.abs; end
     def fs(o, n); o.first(n); end
     def sz(o); o.size; end
+    def em(o); o.empty?; end
   end
 RUBY
 OWNERS = %w[Meter Probe].freeze
@@ -56,6 +58,9 @@ Dir.mktmpdir('core-owner-arms') do |dir|
   fs = body.call(code, 'fs')
   check.call('first(n): the owner call stays as the else', fs.include?('bc2cpp_owner_call(M, '))
   check.call('size: no core arm (only natives answer it)', !body.call(code, 'sz').include?('STATIC_OWNER_ARMS :size'))
+  em = body.call(code, 'em')
+  check.call('empty?: the Symbol arm calls Symbol_empty$3f_impl',
+             em.match?(/if \(mrb_symbol_p\(r\d+\)\) \{\n\s*r\d+ = Symbol_empty\$3f_impl\(M, r\d+\);/))
 
   harness = <<~CPP
     #include <cstdio>
@@ -90,6 +95,8 @@ Dir.mktmpdir('core-owner-arms') do |dir|
         row(M, (std::string("first(2) ") + e).c_str(), "fs", eval(M, e), 1, mrb_fixnum_value(2));
         row(M, (std::string("first(-1) ") + e).c_str(), "fs", eval(M, e), 1, mrb_fixnum_value(-1));
       }
+      const char* em[] = {":a", ":''", "''", "[]", "{}", "nil", "3"};
+      for (const char* e : em) row(M, (std::string("empty? ") + e).c_str(), "em", eval(M, e), 0, mrb_nil_value());
       return 0;
     }
   CPP
@@ -102,6 +109,7 @@ Dir.mktmpdir('core-owner-arms') do |dir|
     check.call('built and ran', built)
     check.call('runtime parity (every row)', !compiled.empty? && compiled == interpreted)
     check.call('abs -3 is 3', compiled.include?('abs -3 => 3'))
+    check.call('the empty Symbol is empty', compiled.include?("empty? :'' => true") && compiled.include?('empty? :a => false'))
     check.call('Meter keeps its own abs', compiled.any? { |l| l.start_with?('abs Meter') && l.include?(':meter_abs') })
     warn output unless failures.empty?
   else

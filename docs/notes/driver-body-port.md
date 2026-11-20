@@ -1,12 +1,30 @@
 # Porting the driver body (`./nfcxx`) to Ruby
 
-Status: plan. Nothing in `./nfcxx` has changed yet. Follows docs/notes/driver-state-design.md (the helpers are done;
-slices 1 to 8 are merged).
+Status: in progress (B0 and B1 done; B2 landed but regressed; B3 to B8 not started). Follows
+docs/notes/driver-state-design.md (the helpers are done; slices 1 to 8 are merged).
+
+## Latest status
+
+Checked against origin/main af2aa11f3 (after #1348 and #1349 merged).
+
+- `./nfcxx` is 856 lines and 21 top-level functions. The Path B `-c` route and the gcc route now take their commands
+  from planner output (`--records --shell` and `--shell`); the bash still evaluates and runs them.
+- `scripts/nfcxx.rb` is a pass-through: it copies the frozen oracle `tests/driver-body/nfcxx-bash` and runs it. It
+  dispatches no route. Commit `c11d31fb4` (B2) removed the earlier dispatcher and its message does not say so.
+- Test state on main: `tests/driver-body` 3 passed; `tests/nfcxx-driver` 11 passed, 7 failed (the failures are the
+  dispatch lines the removed dispatcher printed); `tests/nfcxx-trace` 251 passed, 35 failed (the `pathb-plan` route
+  checks); `tests/nfcxx-prepass` 28 failing (cause not analysed); `tests/nfcxx-sanitize` exits 1 with no summary.
+- Open decisions: (1) was dropping the B2 route dispatch intended? If not, restore it before B3. (2) should the bare
+  `cc` at the Path B and C-only link sites become `NFCXX_CC`?
+- Not planned in the Ruby driver yet: the Path B link, the cosmo link, the eccp call sites, the `-E`, `--emit-hip`,
+  sanitizer and trace setup, `cu_prepare` and `cpp2_prepare` (they rewrite the source list and the trap), and
+  `mod_build_program`.
+- B8 is blocked. The B8 audit (against 73c5fc40c) concluded that `./nfcxx` cannot become a shim yet.
 
 ## Where the body stands
 
-`./nfcxx` on main is about 1060 lines, 29 functions. Its work is already done by Ruby helpers that it calls. What is left
-in bash is the top-level flow:
+`./nfcxx` was about 1060 lines and 29 functions when this plan was written. The Ruby helpers already do most of the
+work it calls. What is left in bash is the top-level flow:
 
 1. Argument records: the planner's `--records` mode (scripts/nfcxx-loop.rb), read into bash variables.
 2. Early exits: `--emit-hip`, the SYCL check and run (scripts/nfcxx-sycl.rb), the `-x` and `-MD` checks, the module block.
@@ -37,22 +55,23 @@ Each stage is one PR. Every stage keeps `./nfcxx` working and is checked against
 tests/nfcxx/loop-state.sh, tests/nfcxx/loop-consumer.sh, tests/nfcxx-driver, tests/nfcxx-gcc, tests/nfcxx-pathb,
 tests/nfcxx-live, tests/nfcxx-cache, tests/nfcxx-modules, tests/nfcxx-cuda-device, tests/nfcxx-sycl, tests/nfcxx-trace.
 
-- **B0 (this PR): the plan.** Done when reviewed.
-- **B1: the oracle.** Copy `./nfcxx` to tests/driver-body/nfcxx-bash (frozen) and point the body tests at it.
+- **B0: the plan.** Done.
+- **B1: the oracle.** Done: tests/driver-body/nfcxx-bash is the frozen copy, and the body tests point at it.
 - **B2: the Ruby skeleton.** `scripts/nfcxx.rb` runs the stages of section "Where the body stands" in order, with each
   step calling the existing helper (no new logic). It is used only when `NFCXX_RUBY_DRIVER=1`. Test: the same suites with the
-  flag.
-- **B3: the setup stage.** The backend, sanitizer, cosmo, freestanding and host-probe decisions move into Ruby (most are
+  flag. Status: landed in B2's form only, which is the pass-through described under "Latest status". The dispatch that
+  the earlier CRuby driver ran (before c11d31fb4) is gone; restoring it or not is an open decision.
+- **B3: the setup stage.** Not started. Blocked on the B2 decision above. The backend, sanitizer, cosmo, freestanding and host-probe decisions move into Ruby (most are
   already in scripts/nfcxx-loop.rb and the planners).
 - **B4: the CUDA, `.cpp2` and module stages.** These are already one call each; the Ruby driver calls them with the state
-  it has.
-- **B5: the cache and the eccp call.** Already one call each (slice 7 and 8). Move the call sites.
+  it has. Not started. Note: `cu_prepare` and `cpp2_prepare` still rewrite the source list in bash.
+- **B5: the cache and the eccp call.** Already one call each (slice 7 and 8). Move the call sites. Not started.
 - **B6: traps and temporary directories.** Ruby owns them (`Dir.mktmpdir`, `ensure`). Test: the cleanup cases in
-  tests/nfcxx-link and tests/nfcxx-modules/trap.sh.
+  tests/nfcxx-link and tests/nfcxx-modules/trap.sh. Not started.
 - **B7: the second pass and the exports.** Ruby spawns the second run with the environment; the exports go into the Ruby
-  process environment.
+  process environment. Not started.
 - **B8: the switch.** `./nfcxx` becomes a shim that runs `scripts/nfcxx.rb`, the flag becomes the default, and the bash
-  body moves to tests/driver-body/nfcxx-bash (kept as the oracle).
+  body moves to tests/driver-body/nfcxx-bash (kept as the oracle). Blocked: see "Latest status" and the B8 audit.
 
 ## Risks
 

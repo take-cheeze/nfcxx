@@ -66,6 +66,7 @@ require_relative 'static_dispatch_name_sinks'
 require_relative 'owner_call_direct'
 require_relative 'core_private_ruby'
 require_relative 'core_enumerator_free'
+require_relative 'core_fiber_free'
 require_relative 'core_methods'
 require_relative 'core_native_candidates'
 require_relative 'core_rows'
@@ -1549,11 +1550,13 @@ module StaticDispatchRegistrations
       rows = CoreNativeCandidates.candidates(entries, row_names, row_fragments, proven, operators: !proven.empty?) - rom
       row_reach = [row_names, row_fragments]
     end
-    # The fifth element is the rows run's [names, fragments] (ENGINE_ROWS), nil when it did not run.
-    [rom, (CoreNativeCandidates.ram_candidates(map, names, fragments, entries, proven) + private_ruby + ruby).uniq.sort, rows,
-     CoreNativeCandidates.undef_candidates(map, names, fragments, undef_only), row_reach]
+    # The fifth element is the rows run's [names, fragments] (ENGINE_ROWS), nil when it did not run; the sixth
+    # CORE_FIBER_FREE's result.
+    left_out = (CoreNativeCandidates.ram_candidates(map, names, fragments, entries, proven) + private_ruby + ruby).uniq.sort
+    [rom, left_out, rows, CoreNativeCandidates.undef_candidates(map, names, fragments, undef_only), row_reach,
+     fiber_free_proof(proof, left_out.to_set)]
   ensure
-    @enumerator_free_proof = nil
+    @enumerator_free_proof = @enumerator_free_inputs = nil
   end
 
   # The generated text the core rows run reads literals from. C_CALL_ROWS: funcall names and inert literals as in a
@@ -1695,7 +1698,15 @@ module StaticDispatchRegistrations
       tokens: ->(text, found) { native_name_tokens(text, found, macros) }, entry_name: CoreNativeCandidates::ENTRY_NAME,
       implicit_names: IMPLICIT_DISPATCH_NAMES.values, block_returns: declared_block_returns(repo_root)
     )
+    @enumerator_free_inputs = inputs
     CoreEnumeratorFree.prove(inputs)
+  end
+
+  # CORE_FIBER_FREE over the inputs of +proof+'s world (enumerator_free_proof, which it builds on); +left_out+ as
+  # CoreFiberFree.prove's.
+  def fiber_free_proof(proof, left_out = Set.new)
+    result = proof.call
+    CoreFiberFree.prove(@enumerator_free_inputs, enumerator_free: -> { result.holds }, left_out: left_out)
   end
 
   # BLOCK_RETURNS: the `[T] ... { ... -> T } -> T` and `-> self` declarations of the signature files, by method name. Each is
@@ -1711,7 +1722,7 @@ module StaticDispatchRegistrations
     enumerator_free_proof(core_files(repo_root, mrbc), ireps, native, NativeOwnerMap.build(native), engine_tuple, symbol_lookups, repo_root)
   end
 
-  # The proof alone, for scripts/bc2cpp/core_enumerator_free_report.rb.
+  # The proof alone, for scripts/bc2cpp/core_enumerator_free_report.rb (fiber_free_proof reads its inputs after it).
   def enumerator_free_result(repo_root, mrbc)
     @core_files_memo = nil
     ireps, _registry, _superclass_of, _owners, tuple = closed_world(repo_root, mrbc)
@@ -2119,7 +2130,9 @@ module StaticDispatchRegistrations
                                    core_rows: closed[:core_excluded][2].to_set.freeze,
                                    core_undef_left_out: Array(closed[:core_excluded][3]).to_set.freeze,
                                    engine_rows: (closed[:engine_rows] - closed_names).freeze,
-                                   frame_free: closed[:frame_free].freeze, digest: digest)
+                                   frame_free: closed[:frame_free].freeze,
+                                   unmade_classes: closed[:core_excluded][5]&.holds ? CoreFiberFree::UNMADE.to_set.freeze : Set.new.freeze,
+                                   digest: digest)
   end
 
   def read_lists(path)

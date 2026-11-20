@@ -28,7 +28,7 @@ done
 if [ $stale = 1 ]; then
   mkdir -p "$dir"
   tmp=$(mktemp -d "$dir/.build.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
-  if ! env -u NFCXX_CUDA_CUB TMPDIR="$tmp" "$root/nfcxx" --backend="$backend" -c --instantiate=local -I"$cuda/include" \
+  if ! env -u NFCXX_CUDA_CUB TMPDIR="$tmp" "$root/nfcxx" --backend="$backend" -c --instantiate=used -I"$cuda/include" \
        "$src" -o "$tmp/device.o" > "$tmp/log" 2>&1; then
     echo "cuda-cub: cannot build $src; linking without it:" >&2
     grep -m5 -E 'error|refused' "$tmp/log" >&2 || head -5 "$tmp/log" >&2

@@ -37,6 +37,9 @@ ruby scripts/bc2cpp/keyword_receiver_target_check.rb
 ruby scripts/bc2cpp/keyword_dynamic_send_check.rb
 ruby scripts/bc2cpp/keyword_rest_only_entry_check.rb
 ruby scripts/bc2cpp/installed_name_devirt_check.rb
+ruby scripts/bc2cpp/struct_class_decls_check.rb
+ruby scripts/bc2cpp/module_definer_includers_check.rb
+ruby scripts/bc2cpp/method_missing_arms_check.rb
 ruby scripts/bc2cpp/block_rest_mixed_check.rb
 ruby scripts/bc2cpp/hash_build_ops_check.rb
 ruby scripts/bc2cpp/kernel_loop_check.rb
@@ -122,10 +125,12 @@ ruby scripts/bc2cpp/static_owner_dispatch_check.rb
 ruby scripts/bc2cpp/core_owner_arms_check.rb
 ruby scripts/bc2cpp/sym_call_chain_check.rb
 ruby scripts/bc2cpp/leaf_owner_else_check.rb
+ruby scripts/bc2cpp/arms_complete_else_check.rb
 ruby scripts/bc2cpp/native_leaf_check.rb
 ruby scripts/bc2cpp/respond_to_fold_check.rb
 ruby scripts/bc2cpp/owner_set_direct_check.rb
 ruby scripts/bc2cpp/owner_call_icache_check.rb
+ruby scripts/bc2cpp/owner_set_share_check.rb
 ruby scripts/bc2cpp/helper_owner_call_check.rb
 ruby scripts/bc2cpp/owner_lookup_shapes_check.rb
 ruby scripts/bc2cpp/frozen_literal_persist_check.rb

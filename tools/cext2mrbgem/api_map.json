@@ -33,7 +33,6 @@
     "_comment": "Check_Type and rb_check_type (handler check_type in convert_mrbgem.rb) map a T_ name only when its entry has type_check exact or caveat. These names are refused with the reason given here.",
     "T_OBJECT": "mruby's MRB_TT_OBJECT does not match CRuby's T_OBJECT: CRuby allocates exceptions as T_OBJECT (ruby4src error.c:3583 via object.c:118), mruby allocates them as MRB_TT_EXCEPTION (src/error.c:42), so the check would reject exceptions",
     "T_CLASS": "mruby's MRB_TT_CLASS does not match CRuby's T_CLASS: a CRuby singleton class is a class with RUBY_FL_SINGLETON (ruby4src class.c:42), mruby allocates singleton classes as MRB_TT_SCLASS (src/class.c:371), so the check would reject them",
-    "T_BIGNUM": "stuck point: the fork has no Bignum. No MRB_TT_BIGINT tag exists (include/mruby/value.h:106-131) and no mrbgem defines a big-integer class, so no tag or class test can select CRuby's T_BIGNUM values",
     "RUBY_T_NIL": "nil and false share mruby's tag MRB_TT_FALSE (include/mruby/value.h:106, MRB_TT_FALSE; mrb_nil_p tells them apart by value, value.h:184), so a type check cannot tell nil from false",
     "T_NIL": "nil and false share mruby's tag MRB_TT_FALSE (include/mruby/value.h:106, MRB_TT_FALSE; mrb_nil_p tells them apart by value, value.h:184), so a type check cannot tell nil from false",
     "T_FALSE": "mruby's MRB_TT_FALSE (include/mruby/value.h:106) also matches nil, which CRuby reports as T_NIL",
@@ -54,16 +53,12 @@
     "rb_mutex_new": "stuck point (Thread): a Mutex; the fork has no Thread or Mutex (accepted stuck point)",
     "rb_mutex_lock": "stuck point (Thread): a Mutex; the fork has no Thread or Mutex (accepted stuck point)",
     "rb_mutex_unlock": "stuck point (Thread): a Mutex; the fork has no Thread or Mutex (accepted stuck point)",
-    "rb_big_cmp": "stuck point (Bignum): the fork has no Bignum (no MRB_TT_BIGINT tag, no bignum mrbgem)",
-    "rb_absint_size": "stuck point (Bignum): the fork has no Bignum (no MRB_TT_BIGINT tag, no bignum mrbgem)",
-    "RBIGNUM_NEGATIVE_P": "stuck point (Bignum): the fork has no Bignum (no MRB_TT_BIGINT tag, no bignum mrbgem)",
     "T_NONE": "stuck point: the fork has no T_NONE tag (the MRB_TT enum, include/mruby/value.h:106-131); the empty-object marker has no mruby value kind",
     "RUBY_T_NONE": "stuck point: the fork has no T_NONE tag (the MRB_TT enum, include/mruby/value.h:106-131); the empty-object marker has no mruby value kind",
     "rb_time_timespec_new": "stuck point (Time offset): mruby-time's Time has only UTC and LOCAL timezones (mrbgems/mruby-time/include/mruby/time.h:15-20; getlocal takes no offset), so a fixed UTC offset from the caller cannot be represented",
     "rb_encoder": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
     "rb_enc_interned_str_cstr": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
-    "rb_marshal_load": "stuck point: the fork has no Marshal (no marshal mrbgem in mrbgems/), so there is no loader to call",
-    "rb_define_alloc_func": "stuck point (per-class allocator): the fork has only the global allocf, no per-class allocator (accepted stuck point)"
+    "rb_marshal_load": "stuck point: the fork has no Marshal (no marshal mrbgem in mrbgems/), so there is no loader to call"
   },
   "includes": {
     "ruby.h": {
@@ -1067,6 +1062,11 @@
       "kind": "expr",
       "mruby": "mrb_undef_value()",
       "caveat": "mrb_value is a struct: test with mrb_undef_p(), not with =="
+    },
+    "T_BIGNUM": {
+      "kind": "expr",
+      "mruby": "MRB_TT_BIGINT",
+      "type_check": "exact"
     },
     "T_STRING": {
       "kind": "expr",
@@ -2370,10 +2370,13 @@
     "rb_struct_define": {"kind": "refuse", "reason": "stuck point (Struct): Struct is mrbgems/mruby-struct, not in the core; rb_struct_define creates a CRuby Struct class with its accessors (accepted stuck point)"},
     "rb_str_encode": {"kind": "refuse", "reason": "stuck point (Encoding): transcoding a string needs CRuby's encoding converter; the fork has no Encoding (accepted stuck point)"},
     "RB_ENC_INTERNED_STR_NULL_CHECK": {"kind": "refuse", "reason": "stuck point (Encoding): the null-encoding check of an interned string; the fork has no Encoding (accepted stuck point)"},
-    "RBIGNUM_POSITIVE_P": {"kind": "refuse", "reason": "stuck point (Bignum): the fork has no Bignum (no MRB_TT_BIGINT tag, no mrbgem big-integer class) (accepted stuck point)"},
-    "rb_big2ull": {"kind": "refuse", "reason": "stuck point (Bignum): the fork has no Bignum; the conversion of a big integer to unsigned long long has no mruby form (accepted stuck point)"},
-    "rb_big2ll": {"kind": "refuse", "reason": "stuck point (Bignum): the fork has no Bignum; the conversion of a big integer to long long has no mruby form (accepted stuck point)"},
-    "rb_ull2inum": {"kind": "refuse", "reason": "stuck point (Bignum): an unsigned long long above the fixnum range becomes a Bignum, which the fork does not have (accepted stuck point)"},
+    "RBIGNUM_POSITIVE_P": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "(mrb_bint_sign($m, $0) > 0)", "caveat": "a Bignum is never zero, and a fixnum is a plain sign test; mirrors CRuby RBIGNUM_POSITIVE_P"},
+    "RBIGNUM_NEGATIVE_P": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "(mrb_bint_sign($m, $0) < 0)", "caveat": "mirrors CRuby RBIGNUM_NEGATIVE_P"},
+    "rb_big_cmp": {"kind": "template", "arity": 2, "needs_mrb": true, "template": "mrb_fixnum_value(mrb_bint_cmp($m, $0, $1))", "caveat": "Integer -1, 0 or 1 as CRuby rb_big_cmp; both operands are Integers"},
+    "rb_absint_size": {"kind": "template", "arity": 2, "needs_mrb": true, "template": "mrb_bint_absint_size($m, $0, $1)", "caveat": "bytes of |x| as size_t and the leading zero bits in *nlz_bits, as CRuby rb_absint_size"},
+    "rb_big2ull": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "mrb_bint_as_uint64($m, $0)", "caveat": "raises RangeError when x is negative or does not fit uint64_t, as CRuby"},
+    "rb_big2ll": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "mrb_bint_as_int64($m, $0)", "caveat": "raises RangeError when x does not fit int64_t, as CRuby"},
+    "rb_ull2inum": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "mrb_bint_new_uint64($m, (uint64_t)($0))", "caveat": "a fixnum when the value fits one, a bigint otherwise, as CRuby"},
     "RB_OBJ_FROZEN_RAW": {"kind": "refuse", "reason": "stuck point: the raw frozen flag of an object (CRuby's RBasic flags) has no mruby form beyond MRB_FROZEN_P on heap objects (accepted stuck point)"},
     "rb_hash_foreach": {
       "kind": "hash_foreach",
@@ -2548,6 +2551,18 @@
       "needs_mrb": true,
       "caveat": "appends the NUL-terminated bytes; returns the string, as CRuby"
     },
+    "rb_define_alloc_func": {
+    "kind": "template",
+    "arity": 2,
+    "needs_mrb": true,
+    "class_args": [
+      0
+    ],
+    "template": "nfcx_alloc_register($m, $0, $1)",
+    "prelude_name": "nfcx_alloc",
+    "prelude": "/* BC2CPP-MRBGEM: a per-class allocator (rb_define_alloc_func). The fork has one global allocator, so the class's allocate\n   and new are singleton methods that call the allocator registered for the class (or for a superclass). new is allocate\n   followed by initialize with the same arguments and block, as Class#new. */\ntypedef mrb_value (*nfcx_alloc_fn)(mrb_state *, mrb_value);\nstatic struct { struct RClass *c; nfcx_alloc_fn f; } nfcx_alloc_tab[64];\nstatic int nfcx_alloc_n = 0;\nstatic nfcx_alloc_fn\nnfcx_alloc_for(struct RClass *c)\n{\n  for (; c; c = c->super) {\n    int i;\n    for (i = 0; i < nfcx_alloc_n; i++) {\n      if (nfcx_alloc_tab[i].c == c) return nfcx_alloc_tab[i].f;\n    }\n  }\n  return NULL;\n}\nstatic mrb_value\nnfcx_alloc_allocate(mrb_state *mrb, mrb_value self)\n{\n  nfcx_alloc_fn f = nfcx_alloc_for(mrb_class_ptr(self));\n  if (f == NULL) mrb_raise(mrb, E_RUNTIME_ERROR, \"no allocator for this class\");\n  return f(mrb, self);\n}\nstatic mrb_value\nnfcx_alloc_new(mrb_state *mrb, mrb_value self)\n{\n  mrb_value obj = nfcx_alloc_allocate(mrb, self);\n  mrb_value *argv;\n  mrb_int argc;\n  mrb_value blk;\n  mrb_get_args(mrb, \"*&\", &argv, &argc, &blk);\n  mrb_funcall_with_block(mrb, obj, mrb_intern_lit(mrb, \"initialize\"), argc, argv, blk);\n  return obj;\n}\nstatic void\nnfcx_alloc_register(mrb_state *mrb, struct RClass *c, nfcx_alloc_fn f)\n{\n  if (nfcx_alloc_n >= 64) mrb_raise(mrb, E_RUNTIME_ERROR, \"too many allocators\");\n  nfcx_alloc_tab[nfcx_alloc_n].c = c;\n  nfcx_alloc_tab[nfcx_alloc_n].f = f;\n  nfcx_alloc_n++;\n  mrb_define_class_method(mrb, c, \"allocate\", nfcx_alloc_allocate, MRB_ARGS_NONE());\n  mrb_define_class_method(mrb, c, \"new\", nfcx_alloc_new, MRB_ARGS_ANY());\n}",
+    "caveat": "the allocator becomes the class's allocate and new (singleton methods, see the prelude); a subclass uses its superclass's allocator"
+  },
     "rb_undef_alloc_func": {
       "kind": "template",
       "arity": 1,
