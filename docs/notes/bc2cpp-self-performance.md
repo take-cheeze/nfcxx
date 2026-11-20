@@ -41,6 +41,24 @@ Splitting is enabled automatically for self builds through `BC2CPP_SHARD_SPLIT_O
 their owner grouping by default, including Optcarrot's default four-shard layout. Explicit hot owners remain
 pinned. See [owner sharding](bc2cpp-owner-shards.md) for linkage and state-sharing checks.
 
+## Shard rewriting
+
+The C++ scanner now counts braces directly on lines without comments or quoted literals, provided it is not
+inside a multiline comment or raw string. Other lines retain the full lexical scanner. This avoids allocating
+one-character Strings for most generated statements; the scanner's callers only read the retained line text.
+
+On the same frozen 46 MiB raw compiler C++ capture, complete 16-shard rewriting under CRuby 4 + YJIT changed
+as follows. These exit-handler times are separate from the logged generation phases below.
+
+| Layout | Before | Updated | Allocated objects before / updated |
+| --- | ---: | ---: | ---: |
+| Default owner grouping | 16.66 s | 6.32 s | 242.19 M / 53.83 M |
+| Oversized-owner splitting | 16.50 s | 6.60 s | 242.19 M / 53.83 M |
+
+Every output file was byte-identical in both layouts. All per-line scanner records also matched on the current
+self image's main C++ and 15 shards. The shard checks cover multiline raw strings/comments crossing ordinary
+lines, quoted braces, division, shared mutable/constant state, linked generated code and runtime parity.
+
 ## Current-source self generation
 
 The current 324-file compiler graph includes the new cache and lookup checks:
