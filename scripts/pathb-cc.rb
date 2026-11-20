@@ -10,7 +10,7 @@
 # variable as a fallback, and the flag wins when both are given.
 #   --keep=DIR, --timeout=SEC (NFCXX_PATHB_TIMEOUT, default 300; 0: no limit; a stage over it is stopped with status 124),
 #   --safe-pointers, --asan, --sanitize=LIST, --ir-opt=LIST, --ir-opt-max=BYTES, --emitter=ssa|mruby, --i386, --regparm=3,
-#   --m16, --pic, --no-pie, --long-double=trap, --trap-checks, --no-fp, --as-opt=OPT, --no-unwind, --vectorize, --avx2.
+#   --m16, --pic, --no-pie, --long-double=trap, --trap-checks, --no-fp, --as-opt=OPT, --no-unwind, --vectorize (default on amd64 Linux with the SSA emitter), --no-vectorize, --avx2.
 # Exit status: 0 done; 3 the IR has a node, type or marker the emitter refuses (reason on stderr); anything else failed.
 # Needs the Path B harness (scripts/setup-pathb.sh; PATHB_CPFE, PATHB_BASE) and build/qbe/qbe (QBE).
 require "fileutils"
@@ -76,7 +76,7 @@ m16 = 0
 emitter = ENV["NFCXX_PATHB_EMITTER"].to_s.empty? ? "ssa" : ENV["NFCXX_PATHB_EMITTER"]
 nofp = 0
 nounwind = 0
-vectorize = 0
+vectorize = nil
 avx2 = 0
 trapchk = 0
 trapimp = 0
@@ -112,6 +112,7 @@ while !args.empty?
   when /\A--as-opt=/ then asopt << x.delete_prefix("--as-opt=")
   when "--no-unwind" then nounwind = 1
   when "--vectorize" then vectorize = 1
+  when "--no-vectorize" then vectorize = 0
   when "--avx2" then avx2 = 1
   when "-funsigned-char", "-fno-signed-char" then uchar = 1; opts << x
   when "-fsigned-char", "-fno-unsigned-char" then uchar = 0; opts << x
@@ -225,6 +226,12 @@ end
 ldopt = ld_trap == 0 ? [] : ["--long-double=trap"]
 ldopt << "--no-fp" if nofp != 0
 ldopt << "--no-unwind" if nounwind != 0
+# The loop vectorizer is on by default where its QBE pass exists: the SSA emitter on amd64 Linux (amd64_sysv only).
+# --no-vectorize (driver: -fno-tree-vectorize) turns it off.
+if vectorize.nil?
+  vectorize = emitter == "ssa" && IO.popen(["uname", "-s"], &:read).chomp == "Linux" &&
+              IO.popen(["uname", "-m"], &:read).chomp == "x86_64" ? 1 : 0
+end
 ldopt << "--vectorize" if vectorize != 0
 die("pathb-cc: --avx2 needs --vectorize") if avx2 != 0 && vectorize == 0
 ldopt << "--avx2" if avx2 != 0
