@@ -1953,7 +1953,7 @@ BC2CPP_MAIN = lambda do
   # TAGGED_FIXNUM (tagged_fixnum.rb): the Fixnum pair test and the word-level arithmetic and compares.
   print TaggedFixnum::PRELUDE
   # RESPOND_TO_PHANTOM (closed build): see CodeGen#respond_to_phantom_runtime.
-  if ENV['BC2CPP_BUILD_NAME'] == 'closed' || !ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').empty?
+  if StaticDispatchLists.closed_build? || !ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').empty?
     puts CodeGen.respond_to_phantom_runtime
   end
   # EXCEPTION_BREAK_SUPPORT: the exception a BLOCK_FALLBACK BREAK throws and the

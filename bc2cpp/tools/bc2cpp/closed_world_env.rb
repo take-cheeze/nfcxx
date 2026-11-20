@@ -17,7 +17,7 @@ def bc2cpp_closed_world_probe_env(env = {}, root = BC2CPP_WORLD_ROOT)
   base = {
     'NATIVE_SRCS' => Shellwords.join(natives),
     'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_mrblib_srcs(root)),
-    'BC2CPP_BUILD_NAME' => 'closed',
+    'BC2CPP_BUILD_NAME' => ListsWorld.name,
     'BC2CPP_BUILD_GEMS' => Shellwords.join(NomethodReviewedProbe.closed_gems(root).map { |n, d| "#{n}=#{d}" }),
   }
   required = %w[NATIVE_SRCS FOREIGN_RUBY_SRCS BC2CPP_BUILD_NAME BC2CPP_BUILD_GEMS]

@@ -25,6 +25,9 @@ module NomethodReviewedProbe
     gems.merge!('mruby-stringio' => "#{root}/3rd/mruby-stringio", 'mruby-marshal' => "#{root}/3rd/mruby-marshal")
     %w[mruby-lcf mruby-rgss mruby-rpg2k].each { |g| gems[g] = "#{root}/#{g}" }
     BC2CPP_COMPILED_GEMS.each_key { |g| gems[g] = "#{root}/#{g}" }
+    # LISTS_WORLD: the world's own non-core gems (wio's HAL and Math stand-in).
+    (ListsWorld::EXTRA_GEMS.fetch(ListsWorld.name) + ListsWorld.linked_app_dirs(root).map { |d| d.delete_prefix("#{File.expand_path(root)}/").chomp('/') })
+      .uniq.each { |d| gems[File.basename(d)] = "#{root}/#{d}" }
     gems.transform_values { |d| File.expand_path(d) }
   end
 

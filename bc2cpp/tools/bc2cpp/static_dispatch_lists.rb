@@ -27,6 +27,9 @@
 #   unmade_classes the classes no instance of which the closed build ever makes (CORE_FIBER_FREE, core_fiber_free.rb:
 #                  Fiber, whose absence drops the resumable variants). A file without it reads as empty
 #
+# `world` (LISTS_WORLD, lists_world.rb) names the one build the closed-only parts were proven for; a file without it
+# is the closed build's.
+#
 # The file named by BC2CPP_STATIC_DISPATCH_LISTS is JSON. Its `digest` is the digest of the proof's inputs, which
 # verify_current! compares with the tree. 'none' stands for empty lists: the proof's own first pass, and fixtures
 # that are not the engine.
@@ -42,7 +45,7 @@ module StaticDispatchLists
   class Missing < StandardError; end
 
   Lists = Struct.new(:open, :closed, :core_excluded, :core_left_out, :engine_rom, :ctor_rows, :core_rows, :frame_free,
-                     :core_undef_left_out, :engine_rows, :unmade_classes, :digest,
+                     :core_undef_left_out, :engine_rows, :unmade_classes, :digest, :world,
                      keyword_init: true) do
     # mruby's Struct.new forwards keyword-init values as a positional Hash.
     def initialize(kwargs = {})
@@ -52,11 +55,17 @@ module StaticDispatchLists
       self.core_undef_left_out ||= Set.new.freeze
       self.engine_rows ||= Set.new.freeze
       self.unmade_classes ||= Set.new.freeze
+      self.world ||= 'closed'
     end
 
-    # Only the closed build drops the closed-only names.
+    # Whether `build_name` is the build these lists' closed-only parts were proven for (LISTS_WORLD).
+    def closed_for?(build_name)
+      build_name.to_s == world
+    end
+
+    # Only the world's build drops the closed-only names.
     def for_build(build_name)
-      build_name == 'closed' ? closed : open
+      closed_for?(build_name) ? closed : open
     end
   end
 
@@ -72,11 +81,18 @@ module StaticDispatchLists
     missing = REQUIRED_KEYS - data.keys
     raise Missing, "static dispatch lists lack #{missing.join(', ')}" unless missing.empty?
 
-    Lists.new(**KEYS.to_h { |key| [key.to_sym, data.fetch(key, []).to_set.freeze] }, digest: data['digest'].to_s).freeze
+    Lists.new(**KEYS.to_h { |key| [key.to_sym, data.fetch(key, []).to_set.freeze] }, digest: data['digest'].to_s,
+              world: data.fetch('world', 'closed').to_s).freeze
+  end
+
+  # Whether this run's build takes the closed-only parts of its lists (LISTS_WORLD: the build they were proven for).
+  def closed_build?(build_name = ENV['BC2CPP_BUILD_NAME'], env: ENV)
+    current(env: env).closed_for?(build_name)
   end
 
   def dump(lists)
-    JSON.pretty_generate('digest' => lists.digest, **KEYS.to_h { |key| [key, lists.public_send(key).to_a.sort] }) + "\n"
+    world = lists.world == 'closed' ? {} : { 'world' => lists.world }
+    JSON.pretty_generate('digest' => lists.digest, **world, **KEYS.to_h { |key| [key, lists.public_send(key).to_a.sort] }) + "\n"
   end
 
   # The lists a run uses. `required` is true for a real gem build, which must never run without the proof's output:

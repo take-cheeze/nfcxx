@@ -49,6 +49,7 @@ require_relative 'world_root'
 require 'digest'
 require 'fileutils'
 require 'json'
+require 'rbconfig'
 require 'set'
 require 'strscan'
 require_relative 'bytecode_ir_ops'
@@ -183,14 +184,14 @@ module StaticDispatchRegistrations
   def index_planner(repo_root, mrbc, ireps, registry, superclass_of, engine_tuple)
     root = File.expand_path(repo_root)
     gems = NomethodReviewedProbe.closed_gems(root)
-    native_paths, _ruby_paths = bc2cpp_closed_world_outside_srcs('closed', gems, root)
+    native_paths, _ruby_paths = bc2cpp_closed_world_outside_srcs(ListsWorld.name, gems, root)
     native_sources = extract_native_method_sources(native_paths)
     engine_ireps = ireps.reject { |label, irep| label != engine_tuple[1] && CoreDefs.core_source?(irep.file) }
     engine_registry = registry.transform_values { |defs| defs.reject(&:core) }.reject { |_, defs| defs.empty? }
     world = ClosedWorld.new(ireps: engine_ireps, registry: engine_registry,
                             class_decls: engine_tuple[7], walked: engine_tuple[8] & engine_ireps.keys,
                             native_paths: native_paths,
-                            ruby_paths: bc2cpp_closed_world_outside_srcs('closed', gems, root).last,
+                            ruby_paths: bc2cpp_closed_world_outside_srcs(ListsWorld.name, gems, root).last,
                             module_names: engine_tuple[11])
     return nil unless world.global_refusal.nil? && world.exact_instances_singleton_free? &&
                       world.method_missing_classes.empty?
@@ -614,8 +615,11 @@ module StaticDispatchRegistrations
       # mrbgem.rake swaps out there (mruby-rpg2k's scene/map_tts.rb, for mrblib_limited/map_tts_off.rb).
       world_gems = %w[mruby-rpg2k mruby-lcf mruby-rgss].map { |g| "#{File.expand_path(repo_root)}/#{g}/mrblib/" }
       ruby = ruby.map { |p| File.expand_path(p) }.reject { |p| p.start_with?(*unlinked, *world_gems) }
-      native = native.map { |p| File.expand_path(p) }.reject { |p| p.start_with?(*unlinked) }
-      native << File.expand_path('scripts/bc2cpp/trace_host.cxx', BC2CPP_TREE_ROOT)
+      linked = ListsWorld.linked_app_dirs(repo_root)
+      native = native.map { |p| File.expand_path(p) }.reject { |p| p.start_with?(*unlinked) && !p.start_with?(*linked) }
+      native.concat(ListsWorld.host_natives(repo_root))
+      # LISTS_WORLD: Ruby the world's build loads that is no checked-in file (wio's LCF::Schema blob).
+      ruby.concat(world_generated_ruby(repo_root))
     end
     [(ruby.map { |p| File.expand_path(p) }.to_set - closed).to_a.sort, native.map { |p| File.expand_path(p) }.uniq.sort]
   end
@@ -631,7 +635,7 @@ module StaticDispatchRegistrations
   def closed_unlinked_dirs(repo_root)
     root = File.expand_path(repo_root)
     core = bc2cpp_closed_core_gems(root).to_set
-    lines = bc2cpp_rpg_maker_gem_lines(bc2cpp_build_config_text, 'closed', root)
+    lines = bc2cpp_rpg_maker_gem_lines(bc2cpp_build_config_text, ListsWorld.name, root)
     # Only mruby-* gems: the closure follows add_dependency lines, and a HAL gem is added by a rake's own Ruby
     # (mruby-io's `spec.build.gem core: 'hal-posix-io'`), so hal-* stays scanned whatever the closure says.
     dirs = Dir["#{root}/3rd/mruby/mrbgems/mruby-*/"].map { |d| File.basename(d) }.reject { |g| core.include?(g) }
@@ -639,6 +643,25 @@ module StaticDispatchRegistrations
     dirs += %w[mruby-marshal mruby-onig-regexp mruby-stringio].reject { |g| lines.key?(g) }
                                                               .map { |g| "#{root}/3rd/#{g}/" }
     dirs << "#{root}/app/" << "#{root}/src/"
+  end
+
+  # LISTS_WORLD (wio): mruby-lcf/mrbgem.rake swaps schema.rb for a generated schema_blob.rb in the wio build, and
+  # BC2CPP_SKIP_LCF_SCHEMA_RB leaves schema.rb out of its compiled world, so the blob is outside Ruby there. Generated
+  # once per run, from the same generator and inputs the rake uses.
+  def world_generated_ruby(repo_root)
+    return [] unless ListsWorld.name == 'wio'
+
+    root = File.expand_path(repo_root)
+    @world_generated_ruby ||= begin
+      inputs = %w[gen_schema_blob.rb mrblib/schema.rb mrblib/lcf.rb].map { |f| Digest::SHA256.file("#{root}/mruby-lcf/#{f}").hexdigest }
+      dir = File.join(Dir.tmpdir, "bc2cpp_lists_world_wio_#{Digest::SHA256.hexdigest(inputs.join)[0, 16]}")
+      FileUtils.mkdir_p(dir)
+      out = File.join(dir, 'schema_blob.rb')
+      ok = system(RbConfig.ruby, "#{root}/mruby-lcf/gen_schema_blob.rb", "#{root}/mruby-lcf/mrblib/schema.rb", out)
+      raise "LISTS_WORLD wio: gen_schema_blob.rb failed (#{out})" unless ok && File.file?(out)
+
+      [out]
+    end
   end
 
   # NATIVE_TEXT_STRIPS (closed only): native text read with the strips CoreNativeCandidates.reachable applies, each under
@@ -1706,7 +1729,18 @@ module StaticDispatchRegistrations
   # CoreFiberFree.prove's.
   def fiber_free_proof(proof, left_out = Set.new)
     result = proof.call
-    CoreFiberFree.prove(@enumerator_free_inputs, enumerator_free: -> { result.holds }, left_out: left_out)
+    _ruby, native = outside_world_files(@fiber_repo_root || BC2CPP_WORLD_ROOT, closed_only: true)
+    no_c_maker = lambda do
+      # A call, not mruby.h's MRB_API declaration.
+      native.none? do |f|
+        !f.end_with?(CoreFiberFree::FIBER_SRC) &&
+          File.read(f, encoding: 'BINARY').gsub(/^\s*MRB_API\s+mrb_value\s+mrb_fiber_new\(/, '').include?('mrb_fiber_new')
+      end
+    end
+    fiber = CoreFiberFree.prove(@enumerator_free_inputs, enumerator_free: -> { result.holds }, left_out: left_out,
+                                defining: no_c_maker)
+    warn "CORE_FIBER_FREE unproven: #{fiber.unproven.first(10).join('; ')}" unless fiber.holds
+    fiber
   end
 
   # BLOCK_RETURNS: the `[T] ... { ... -> T } -> T` and `-> self` declarations of the signature files, by method name. Each is
@@ -2100,6 +2134,8 @@ module StaticDispatchRegistrations
     files.concat(Dir["#{root}/sig/**/*.rbs"])
     sha = Digest::SHA256.new
     sha << "lists-format 1\n"
+    # LISTS_WORLD: a closed lists file is never current for another world (the closed digest is unchanged).
+    sha << "world #{ListsWorld.name}\n" unless ListsWorld.closed?
     files.map { |p| File.expand_path(p) }.uniq.sort.each do |path|
       next unless File.file?(path)
 
@@ -2132,7 +2168,7 @@ module StaticDispatchRegistrations
                                    engine_rows: (closed[:engine_rows] - closed_names).freeze,
                                    frame_free: closed[:frame_free].freeze,
                                    unmade_classes: closed[:core_excluded][5]&.holds ? CoreFiberFree::UNMADE.to_set.freeze : Set.new.freeze,
-                                   digest: digest)
+                                   digest: digest, world: ListsWorld.name)
   end
 
   def read_lists(path)
