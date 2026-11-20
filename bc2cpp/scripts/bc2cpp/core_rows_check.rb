@@ -30,6 +30,18 @@ require 'tmpdir'
 
 suite = FixtureCheck.new('core_rows_check')
 
+# SymbolCache scans a binary view even when a generated literal or comment is
+# UTF-8. Match offsets must slice that same byte view and preserve its literals.
+unicode_call = '/* café */ mrb_funcall(M, receiver("日本語"), "méthode", 0);'
+unicode_table = SymbolCache::Table.new
+unicode_rewrite = SymbolCache.rewrite_funcalls(unicode_call, unicode_table)
+suite.check('binary funcall scans preserve UTF-8 text and literal encoding',
+            unicode_rewrite == '/* café */ bc2cpp_send(M, receiver("日本語"), 0, 0);' &&
+            unicode_rewrite.encoding == unicode_call.encoding && unicode_table.literals == ['"méthode"'])
+unicode_sites = SymbolCache.send_sites('/* café */ bc2cpp_send(M, receiver("日本語"), 7, 0);')
+suite.check('binary send scans use byte offsets after UTF-8 text',
+            unicode_sites == [['send', 'receiver("日本語")'.b, 7]])
+
 gen = <<~CPP
   static const char* const bc2cpp_sym_names[9] = {
     "first",
