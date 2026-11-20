@@ -132,7 +132,11 @@ ruby scripts/bc2cpp/owner_set_direct_check.rb
 ruby scripts/bc2cpp/owner_call_icache_check.rb
 ruby scripts/bc2cpp/owner_set_share_check.rb
 ruby scripts/bc2cpp/prepended_override_check.rb
+ruby scripts/bc2cpp/mixin_order_check.rb
 ruby scripts/bc2cpp/module_zsuper_check.rb
+ruby scripts/bc2cpp/singleton_taint_check.rb
+ruby scripts/bc2cpp/scoped_constant_writes_check.rb
+ruby scripts/bc2cpp/block_self_method_boundary_check.rb
 ruby scripts/bc2cpp/helper_owner_call_check.rb
 ruby scripts/bc2cpp/owner_lookup_shapes_check.rb
 ruby scripts/bc2cpp/frozen_literal_persist_check.rb
@@ -252,4 +256,8 @@ ruby scripts/bc2cpp/name_sinks_check.rb
 ruby scripts/bc2cpp/exact_declared_return_check.rb
 ruby scripts/bc2cpp/declared_def_return_check.rb
 ruby scripts/bc2cpp/declared_optional_param_check.rb
+ruby scripts/bc2cpp/super_frame_block_check.rb
+ruby scripts/bc2cpp/lambda_cells_check.rb
+ruby scripts/bc2cpp/rescue_multi_class_check.rb
+ruby scripts/bc2cpp/ensure_body_block_check.rb
 # ci:parallel end

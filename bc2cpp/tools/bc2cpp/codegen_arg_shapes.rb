@@ -106,11 +106,43 @@ module ArgShapeCalls
     return optional_rest_yield?(irep) unless pure_mandatory_arity?(irep)
     return true if BytecodeIR.for(irep).instructions_with_op(:BLKPUSH).any? { |insn| insn.paren_value == '0' }
     return true if block_given_modelled? && block_given_reads?(irep)
+    return true if super_forwards_frame_block?(irep)
 
     (regions || recognize_block_fallback_regions(irep, available_upvars: block_upvar_needs(irep) || [], blk_available: true)).any? { |region| region[:needs_blk] }
   end
 
-  # OPTIONAL_REST_YIELD shape: optionals and/or a rest, no post, keyword or `&blk` parameter, and a bare `yield`.
+  # SUPER_FRAME_BLOCK: OP_SUPER sends this frame's block on, as a yield would read it: a bare `super` (`ARGARY` then
+  # `SUPER n=*`, vm.c OP_ARGARY copies the frame's block next to the arguments) or `super(args)`, whose block register is
+  # a MOVE of the frame's block slot R(mand+1) just before the SUPER (codegen.c gen_call for NODE_SUPER). A compiled
+  # `_impl` sees that block only when its wrapper extracts it, so without SUPER_NO_CALLER_BLOCK's proof that no caller
+  # passes one (super_direct_call_allowed?), the method extracts it like a yield-only method and the SUPER rules
+  # forward it (super_block_arg). Only a def body of the program's own with a pure-mandatory signature or the
+  # OPTIONAL_REST_YIELD one (its callers check the shape); mruby's core bodies compile without the closed world that
+  # proof reads.
+  # BC2CPP_SUPER_FRAME_BLOCK=0 turns it off.
+  def super_forwards_frame_block?(irep)
+    return false if ENV['BC2CPP_SUPER_FRAME_BLOCK'] == '0'
+
+    d = @owner_of && @owner_of[irep.label]
+    return false unless d && !d.core && d.irep == irep.label
+    return false if exception_initialize_chain_reached?(d)
+
+    program = BytecodeIR.for(irep)
+    # The frame's block slot follows the positionals (OPTIONAL_REST_YIELD's shapes have no post or keyword ones).
+    slot = irep.enter ? irep.enter.enter_fields.first(4).sum(&:to_i) + 1 : 1
+    forwards = program.instructions_with_op(:SUPER).any? do |insn|
+      idx = irep.index_of_addr(insn.addr)
+      prev = idx&.positive? && program.source_at(idx - 1)
+      next false unless prev
+
+      prev.op == :ARGARY ||
+        (prev.op == :MOVE && insn.plain_fixed_argc? && prev.regs.first(2) == [insn.reg.to_i + insn.argc.to_i + 1, slot])
+    end
+    forwards && !super_direct_call_allowed?(d)
+  end
+
+  # OPTIONAL_REST_YIELD shape: optionals and/or a rest, no post, keyword or `&blk` parameter, and a bare `yield` (or a
+  # SUPER_FRAME_BLOCK super).
   # Only this shape gets the block extracted; any other non-mandatory signature keeps its `#error`.
   def optional_rest_yield?(irep)
     return false if ENV['BC2CPP_OPTIONAL_REST_YIELD'] == '0'
@@ -123,7 +155,8 @@ module ArgShapeCalls
     return false unless post.zero? && kw.zero? && kwrest.zero? && blk.zero?
     return false unless opt.positive? || rest.positive?
 
-    BytecodeIR.for(irep).instructions_with_op(:BLKPUSH).any? { |insn| insn.paren_value == '0' } && mand >= 0
+    BytecodeIR.for(irep).instructions_with_op(:BLKPUSH).any? { |insn| insn.paren_value == '0' } && mand >= 0 ||
+      super_forwards_frame_block?(irep)
   end
 
   # Whether the callee's `_impl` has a trailing `bc2cpp_blk` parameter.

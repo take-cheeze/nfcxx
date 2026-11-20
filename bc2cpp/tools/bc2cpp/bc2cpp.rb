@@ -355,6 +355,9 @@ BC2CPP_MAIN = lambda do
          "#{outside_ruby.size} Ruby outside sources) =="
     warn "  global refusal: #{closed_world.global_refusal || 'none'}"
     warn "  method_missing classes: #{closed_world.method_missing_classes.to_a.sort.join(', ')}"
+    # INSTANCE_SINGLETON_TAINT: the classes whose instances may get a singleton class, and what it may answer. One line
+    # and no local here: BC2CPP_MAIN is at mruby's limit of local variables.
+    warn "  instance singletons: #{closed_world.instance_singleton_report}"
     warn ''
     LintCrosscheck.enforce!(repo_root, closed_world)
     profile_phase.call('closed world: lint cross-check')

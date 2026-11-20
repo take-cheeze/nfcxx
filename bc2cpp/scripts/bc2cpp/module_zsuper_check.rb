@@ -6,8 +6,9 @@
 # module owner. The fixture prepends ZsOver to two classes and includes ZsInc under a subclass, with optional, rest
 # block and keyword parameters, and checks that those module methods compile and behave as the interpreter does. A module
 # keyword zsuper without a block parameter (`LOADNIL R(a+3)` before SUPER) passes nil, as the interpreter does even
-# when its caller gave a block. A module method without a block parameter whose callers pass a block (ZsOver#qux) still stays on the interpreter: a
-# compiled body cannot see the caller's block. The behaviour part needs BC2CPP_MRUBY_FULL, or rake and a C++ compiler.
+# when its caller gave a block. A module method without a block parameter whose callers pass a block (ZsOver#qux) extracts
+# that block in its wrapper and forwards it (SUPER_FRAME_BLOCK). The behaviour part needs BC2CPP_MRUBY_FULL, or rake and a
+# C++ compiler.
 ENV['BC2CPP_SIG_DIRS'] = ''
 
 require 'tmpdir'
@@ -78,7 +79,8 @@ Dir.mktmpdir('bc2cpp-module-zsuper') do |dir|
   code, err = Bc2cppFixtureRuntime.generate(SOURCE, dir, core: true, only_owners: OWNERS)
   suite.check('module methods with a bare super compile',
               %w[ZsOver_foo_impl ZsOver_bar_impl ZsOver_baz_impl ZsInc_foo_impl ZsOver_kw_impl].all? { |f| compiled?(code, f) })
-  suite.check('a module method that would drop its caller block stays interpreted', !compiled?(code, 'ZsOver_qux_impl'))
+  suite.check('a module method whose callers pass a block takes it and forwards it',
+              code.match?(/^mrb_value ZsOver_qux_impl\(mrb_state\* M, mrb_value self, mrb_value x, mrb_value bc2cpp_blk\)/))
 
   build = ENV['CC_GENERATED_ONLY'] == '1' ? nil : Bc2cppFixtureRuntime.full_or_build
   if build.nil?
@@ -116,7 +118,8 @@ Dir.mktmpdir('bc2cpp-module-zsuper') do |dir|
                 interpreted.include?('ZsKid_call => [:kid, [:inc, [:over, [:base, 1, 9]]]]') &&
                 interpreted.include?('ZsTwo_call => [:over, [:two, 1, 5]]') &&
                 interpreted.include?('ZsBase_callbaz => [:obaz, [:baz, 1, 10]]') &&
-                interpreted.include?('ZsBase_callkwblk => [:okw, [:kw, 1, 2, false]]'))
+                interpreted.include?('ZsBase_callkwblk => [:okw, [:kw, 1, 2, false]]') &&
+                interpreted.include?('ZsBase_callqux => [:oqux, [:qux, 1, true]]'))
     suite.check('compiled matches interpreted', compiled == interpreted)
   end
 end
