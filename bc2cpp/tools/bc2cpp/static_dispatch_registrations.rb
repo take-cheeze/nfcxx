@@ -183,14 +183,16 @@ module StaticDispatchRegistrations
   def index_planner(repo_root, mrbc, ireps, registry, superclass_of, engine_tuple)
     root = File.expand_path(repo_root)
     gems = NomethodReviewedProbe.closed_gems(root)
-    native_paths, _ruby_paths = bc2cpp_closed_world_outside_srcs('closed', gems, root)
+    native_paths, _ruby_paths = bc2cpp_closed_world_outside_srcs(ListsWorld.name, gems, root)
+    # LISTS_WORLD: the host sources a world's binary links beside its gems (the closed one's are src/, above).
+    native_paths |= ListsWorld.host_natives(root) unless ListsWorld.closed?
     native_sources = extract_native_method_sources(native_paths)
     engine_ireps = ireps.reject { |label, irep| label != engine_tuple[1] && CoreDefs.core_source?(irep.file) }
     engine_registry = registry.transform_values { |defs| defs.reject(&:core) }.reject { |_, defs| defs.empty? }
     world = ClosedWorld.new(ireps: engine_ireps, registry: engine_registry,
                             class_decls: engine_tuple[7], walked: engine_tuple[8] & engine_ireps.keys,
                             native_paths: native_paths,
-                            ruby_paths: bc2cpp_closed_world_outside_srcs('closed', gems, root).last,
+                            ruby_paths: bc2cpp_closed_world_outside_srcs(ListsWorld.name, gems, root).last,
                             module_names: engine_tuple[11])
     return nil unless world.global_refusal.nil? && world.exact_instances_singleton_free? &&
                       world.method_missing_classes.empty?
@@ -616,8 +618,9 @@ module StaticDispatchRegistrations
       # mrbgem.rake swaps out there (mruby-rpg2k's scene/map_tts.rb, for mrblib_limited/map_tts_off.rb).
       world_gems = %w[mruby-rpg2k mruby-lcf mruby-rgss].map { |g| "#{File.expand_path(repo_root)}/#{g}/mrblib/" }
       ruby = ruby.map { |p| File.expand_path(p) }.reject { |p| p.start_with?(*unlinked, *world_gems) }
-      native = native.map { |p| File.expand_path(p) }.reject { |p| p.start_with?(*unlinked) }
-      native << File.expand_path('scripts/bc2cpp/trace_host.cxx', BC2CPP_TREE_ROOT)
+      linked = ListsWorld.linked_app_dirs(repo_root)
+      native = native.map { |p| File.expand_path(p) }.reject { |p| p.start_with?(*unlinked) && !p.start_with?(*linked) }
+      native.concat(ListsWorld.host_natives(repo_root))
     end
     [(ruby.map { |p| File.expand_path(p) }.to_set - closed).to_a.sort, native.map { |p| File.expand_path(p) }.uniq.sort]
   end
@@ -633,7 +636,7 @@ module StaticDispatchRegistrations
   def closed_unlinked_dirs(repo_root)
     root = File.expand_path(repo_root)
     core = bc2cpp_closed_core_gems(root).to_set
-    lines = bc2cpp_rpg_maker_gem_lines(bc2cpp_build_config_text, 'closed', root)
+    lines = bc2cpp_rpg_maker_gem_lines(bc2cpp_build_config_text, ListsWorld.name, root)
     # Only mruby-* gems: the closure follows add_dependency lines, and a HAL gem is added by a rake's own Ruby
     # (mruby-io's `spec.build.gem core: 'hal-posix-io'`), so hal-* stays scanned whatever the closure says.
     dirs = Dir["#{root}/3rd/mruby/mrbgems/mruby-*/"].map { |d| File.basename(d) }.reject { |g| core.include?(g) }
@@ -1556,7 +1559,7 @@ module StaticDispatchRegistrations
     # CORE_FIBER_FREE's result.
     left_out = (CoreNativeCandidates.ram_candidates(map, names, fragments, entries, proven) + private_ruby + ruby).uniq.sort
     [rom, left_out, rows, CoreNativeCandidates.undef_candidates(map, names, fragments, undef_only), row_reach,
-     fiber_free_proof(proof, left_out.to_set)]
+     fiber_free_proof(proof, native, left_out.to_set)]
   ensure
     @enumerator_free_proof = @enumerator_free_inputs = nil
   end
@@ -1704,11 +1707,23 @@ module StaticDispatchRegistrations
     CoreEnumeratorFree.prove(inputs)
   end
 
-  # CORE_FIBER_FREE over the inputs of +proof+'s world (enumerator_free_proof, which it builds on); +left_out+ as
-  # CoreFiberFree.prove's.
-  def fiber_free_proof(proof, left_out = Set.new)
+  # CORE_FIBER_FREE over the inputs of +proof+'s world (enumerator_free_proof, which it builds on); +native+ is that
+  # world's native sources, +left_out+ as CoreFiberFree.prove's.
+  def fiber_free_proof(proof, native, left_out = Set.new)
     result = proof.call
-    CoreFiberFree.prove(@enumerator_free_inputs, enumerator_free: -> { result.holds }, left_out: left_out)
+    fiber = CoreFiberFree.prove(@enumerator_free_inputs, enumerator_free: -> { result.holds }, left_out: left_out,
+                                defining: -> { fiber_c_makers(native).empty? })
+    warn "CORE_FIBER_FREE unproven: #{fiber.unproven.first(10).join('; ')}" unless fiber.holds
+    fiber
+  end
+
+  # The natives of +native+ other than mruby-fiber's fiber.c that call mrb_fiber_new (CoreFiberFree.prove's +defining+).
+  # mruby.h's MRB_API declaration is no call.
+  def fiber_c_makers(native)
+    native.reject do |f|
+      f.end_with?(CoreFiberFree::FIBER_SRC) ||
+        !File.read(f, encoding: 'BINARY').gsub(/^\s*MRB_API\s+mrb_value\s+mrb_fiber_new\(/, '').include?('mrb_fiber_new')
+    end
   end
 
   # BLOCK_RETURNS: the `[T] ... { ... -> T } -> T` and `-> self` declarations of the signature files, by method name. Each is
@@ -2102,6 +2117,11 @@ module StaticDispatchRegistrations
     files.concat(Dir["#{root}/sig/**/*.rbs"])
     sha = Digest::SHA256.new
     sha << "lists-format 1\n"
+    # LISTS_WORLD: a closed lists file is never current for another world (the closed digest is unchanged).
+    unless ListsWorld.closed?
+      sha << "world #{ListsWorld.name}\n"
+      files.concat(ListsWorld.digest_inputs(root))
+    end
     files.map { |p| File.expand_path(p) }.uniq.sort.each do |path|
       next unless File.file?(path)
 
@@ -2134,7 +2154,7 @@ module StaticDispatchRegistrations
                                    engine_rows: (closed[:engine_rows] - closed_names).freeze,
                                    frame_free: closed[:frame_free].freeze,
                                    unmade_classes: closed[:core_excluded][5]&.holds ? CoreFiberFree::UNMADE.to_set.freeze : Set.new.freeze,
-                                   digest: digest)
+                                   digest: digest, world: ListsWorld.name)
   end
 
   def read_lists(path)
