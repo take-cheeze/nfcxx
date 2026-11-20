@@ -3785,7 +3785,7 @@ use_problem = lambda do |name, use|
         m = Regexp.last_match
         nm = m[1]
         defs = (@defs[nm] || []).reject { |x| x['proto'] }
-        next unless (defs.any? && defs.all? { |x| x['ret'].to_s.strip == 'VALUE' }) || value_call_name?(nm)
+        next unless (defs.any? && defs.all? { |x| x['ret'].to_s.strip == 'VALUE' }) || value_call_name?(nm) || funcall_macro?(rel, nm)
         open = m.end(0) - 1
         close = match_close(mv, open)
         next if close < 0
@@ -3793,7 +3793,7 @@ use_problem = lambda do |name, use|
         next if outer < 0 || next_nonspace(mv, close + 1) != outer
         next if @edits[rel].overlaps(m.begin(1), m.begin(1) + 1)
         # if (f(...)) of a VALUE-returning call: the condition is mrb_test of the result (nil and false are false)
-        next if @edits[rel].overlaps(m.begin(1), close + 2)
+        next if @edits[rel].overlaps(close + 1, close + 2)
         @edits[rel].add(m.begin(1), m.begin(1), 'mrb_test(')
         @edits[rel].add(close + 1, close + 1, ')')
         rewrite(rel, m.begin(1), nm, "mrb_test(#{nm}(...))", TRUTH_TEST_CAVEAT)
