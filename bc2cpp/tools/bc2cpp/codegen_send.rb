@@ -2005,6 +2005,7 @@ class CodeGen
   def closed_world_exact_target(name, receiver_class, accessor: false)
     return nil unless @closed_world&.stable_class_constant?(receiver_class)
     return nil unless call_facts_enabled? && call_facts_answers.resolves_in_ruby?(receiver_class, name)
+    return nil if singleton_tainted_for?(receiver_class, [name])
     return nil if devirt_blocked_name?(name)
     # A different class body can install this instance name after its `def` is scanned.
     installed = symbol_installed_names

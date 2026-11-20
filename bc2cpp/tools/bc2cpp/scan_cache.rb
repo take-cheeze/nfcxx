@@ -85,11 +85,19 @@ module ScanCache
     def computing = @computing || 0
 
     def compute
-      ENV.singleton_class.prepend(EnvGuard) unless ENV.singleton_class.include?(EnvGuard)
+      guard_env
       @computing = computing + 1
       yield
     ensure
       @computing -= 1
+    end
+
+    # Outside the `ensure` above, and returning nil: a self-compiled bc2cpp's closed world then sees that the singleton
+    # class is only asked include? and given EnvGuard (INSTANCE_SINGLETON_TAINT), which an exception edge into the
+    # ensure clause would hide.
+    def guard_env
+      ENV.singleton_class.prepend(EnvGuard) unless ENV.singleton_class.include?(EnvGuard)
+      nil
     end
   end
 
