@@ -90,8 +90,9 @@ HARNESS = <<~'CPP'
   }
 CPP
 
+# The site's line with the slot and level its set macro starts with (OWNER_CALL_DESC) left out: the owner set as written.
 def go_site(code, name)
-  code.lines.find { |l| l.include?("CLOSED_WORLD owner-call: #{name} */") }.to_s
+  code.lines.find { |l| l.include?("CLOSED_WORLD owner-call: #{name} */") }.to_s.sub(/(BC2CPP_OWNERS(?:_D)?\()\d+, \d, /, '\\1')
 end
 
 Dir.mktmpdir('bc2cpp-owner-call-direct') do |dir|

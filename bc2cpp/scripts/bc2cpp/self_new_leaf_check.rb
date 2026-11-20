@@ -81,7 +81,7 @@ Dir.mktmpdir('self-new-leaf') do |dir|
   check.call('Class.new(C) makes C non-leaf: exactly C constructs directly, any other class takes the owner call ' \
              'over Class#new (no by-name new, no guard violation)',
              open_make.include?('SELF_NEW_LEAF') && open_make.include?('SnOpen_initialize_impl(M, ') &&
-               open_make.include?('bc2cpp_owner_call(') && open_make.match?(/BC2CPP_OWNERS\("Class"\)/) &&
+               open_make.include?('bc2cpp_owner_call(') && open_make.match?(/BC2CPP_OWNERS\(\d+, \d, "Class"\)/) &&
                !open_make.include?('bc2cpp_send(') && !open_make.include?('bc2cpp_guard_violation('))
 
   unless ENV['CC_GENERATED_ONLY'] == '1'
