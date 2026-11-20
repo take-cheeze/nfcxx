@@ -840,7 +840,13 @@ if [ ${#cfiles[@]} -gt 0 ]; then
       # Path B objects: EDG's runtime (libC.a: the VLA and EH entry points), the long double helpers and, with -fsanitize=address, libasan
       # (the C++ VLA runtime too: EDG lowers a C VLA to the same __vla_alloc calls, so each VLA is a malloc block libasan checks)
       cvla=(); [ $asan = 0 ] || cvla=("$("$root/scripts/asan-vla.rb")")
-      cc ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} ${cvla[@]+"${cvla[@]}"} -o "$out" "$("$root/scripts/pathb-ldrt.rb")" "${EDG_BUILD:-$root/build/edg}/lib/libC.a" $([ "$(uname -s)" = Darwin ] && echo -lc++ || echo -lstdc++) -lm $([ "$(uname -s)" = Darwin ] || echo -latomic)
+      # a link that names -lcudart also gets the CUB archive (scripts/cuda-cub.rb), before the -lcudart it needs; no archive, no argument
+      linkf=()
+      for f in ${files[@]+"${files[@]}"}; do
+        if [ "$f" = -lcudart ]; then cub=$("$root/scripts/cuda-cub.rb") && [ -n "$cub" ] && linkf+=("$cub"); fi
+        linkf+=("$f")
+      done
+      cc ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${linkf[@]+${linkf[@]+"${linkf[@]}"}} ${cvla[@]+"${cvla[@]}"} -o "$out" "$("$root/scripts/pathb-ldrt.rb")" "${EDG_BUILD:-$root/build/edg}/lib/libC.a" $([ "$(uname -s)" = Darwin ] && echo -lc++ || echo -lstdc++) -lm $([ "$(uname -s)" = Darwin ] || echo -latomic)
     else "${NFCXX_GCC:-gcc}" ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} -o "$out"; fi
     trace_end "$t" "link (C only)" cinput
     exit 0
@@ -896,6 +902,12 @@ cache_store() {  # cache_store OBJ: a whole entry appears at once (a partial cop
 # The forced includes (a .cu input's nfcxx_cuda.h, and -include) reach pathb-cc as -include, as they reach EDG's preinclude.
 pb_pre=(); for f in ${preinc[@]+"${preinc[@]}"}; do pb_pre+=(-include "$f"); done
 if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
+  # A .cu unit with kernel instances only the host compile makes (its .dev.kernels.unresolved is not empty) needs the second pass
+  # (below, on the EDG route); Path B does not build them, so this unit takes the gcc route, which runs it.
+  if [ ${#cu_inputs[@]} -gt 0 ] && [ -n "${cudatmp:-}" ] && [ -s "$cudatmp/$(basename "${cu_inputs[0]}" .cu).dev.kernels.unresolved" ]; then
+    echo "nfcxx: ${cu_inputs[0]} has kernel instances only the host compile makes; building it with the gcc backend, which runs the second pass" >&2
+    exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
+  fi
   cache_check   # a hit: the object is copied back and the program is done
   # -c: one object per C++ file, named as the gcc and Path B backends name it (-o FILE for one file, else basename.o)
   for f in ${files[@]+"${files[@]}"}; do
@@ -920,6 +932,9 @@ if [ $backend = pathb ]; then
   for f in ${files[@]+"${files[@]}"}; do
     case $f in
       -I*|-D*|-U*) ;;                       # reach pathb-cc through cflags
+      -lcudart)                             # the CUB archive (scripts/cuda-cub.rb) before the -lcudart it needs; none when it fails
+        if [ $shared = 0 ]; then cub=$("$root/scripts/cuda-cub.rb") && [ -n "$cub" ] && plink+=("$cub"); fi
+        plink+=("$f") ;;
       -*|*.o|*.a|*.so) plink+=("$f") ;;
       *) o=$ptmp/p$n.o; n=$((n + 1))
          t=$(trace_start)
