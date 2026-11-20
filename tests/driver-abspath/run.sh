@@ -16,7 +16,7 @@ sed -n '/^abs_path() {/,/^}/p' "$oracle" > "$work/fn.sh"
 [ -s "$work/fn.sh" ] || { echo "driver-abspath: no abs_path in the frozen driver" >&2; exit 2; }
 sed -n '/^pre_opts=(); for f in/,/^done$/p' "$oracle" > "$work/loop.sh"
 [ -s "$work/loop.sh" ] || { echo "driver-abspath: no forced-include loop in the frozen driver" >&2; exit 2; }
-sed -n '/^state_put() {/,/^}/p' "$repo/nfcxx" > "$work/state.sh"
+sed -n '/^state_put() {/,/^}/p' "$repo/tests/driver-body/nfcxx-bash" > "$work/state.sh"
 [ -s "$work/state.sh" ] || { echo "driver-abspath: no state_put in nfcxx" >&2; exit 2; }
 ruby_bin=$(command -v ruby)
 

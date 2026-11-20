@@ -168,7 +168,7 @@ else bad "a symlink member: $linked"; fi
 
 # 12. The driver's remote tier: the two functions from nfcxx, which call scripts/nfcxx-cache-io.rb (that calls the GHA client).
 funcs=$work/remote-funcs.sh
-sed -n '/^cache_remote_get() {/,/^}/p; /^cache_remote_put() {/,/^}/p' "$root/nfcxx" \
+sed -n '/^cache_remote_get() {/,/^}/p; /^cache_remote_put() {/,/^}/p' "$root/tests/driver-body/nfcxx-bash" \
   > "$funcs"
 if ! grep -q '"\${RUBY:-ruby}" "\$root/scripts/nfcxx-cache-io.rb" remote-get' "$funcs" \
    || ! grep -q '"\${RUBY:-ruby}" "\$root/scripts/nfcxx-cache-io.rb" remote-put' "$funcs"; then
