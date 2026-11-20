@@ -3728,6 +3728,9 @@ use_problem = lambda do |name, use|
     end
   end
 
+  # the caveat of a VALUE-returning call used as a truth value: mrb_test is false for nil, where CRuby's word test is true
+  TRUTH_TEST_CAVEAT = 'mrb_test of a VALUE-returning call: nil and false are false (CRuby\'s word test takes nil as true); the helpers this converts return true or false'
+
   # !v on a VALUE, or !f(...) of a VALUE-returning function (date's f_nonzero_p is (!f_zero_p(x))): CRuby's ! tests the word (Qfalse is
   # zero); the fork's VALUE is a struct, and no exact test of it is expressed (the VALUE truth test)
   def value_not_stuck_pass
@@ -3744,6 +3747,16 @@ use_problem = lambda do |name, use|
           next unless (local_value_at?(rel, m.begin(1), nm) || fs_values.include?(nm)) && !@class_vars.include?(nm)
         end
         next if @edits[rel].overlaps(m.begin(0), m.begin(0) + 1)
+        if m[2]
+          # !f(...) of a VALUE-returning call: mrb_test of the result (nil and false are false)
+          close = match_close(mv, m.end(0) - 1)
+          if close >= 0 && !@edits[rel].overlaps(m.begin(1), close + 2)
+            @edits[rel].add(m.begin(1), m.begin(1), 'mrb_test(')
+            @edits[rel].add(close + 1, close + 1, ')')
+            rewrite(rel, m.begin(0), nm, "!mrb_test(#{nm}(...))", TRUTH_TEST_CAVEAT)
+            next
+          end
+        end
         refuse(rel, m.begin(0), nm, "stuck point (VALUE truth test): !#{nm}#{m[2] ? '(...)' : ''} tests a VALUE, a struct in the fork (include/mruby/boxing_no.h); CRuby's ! tests the word (Qfalse is zero), which has no exact struct test")
       end
     end
@@ -3779,7 +3792,11 @@ use_problem = lambda do |name, use|
         outer = match_close(mv, mv.index('(', m.begin(0)))
         next if outer < 0 || next_nonspace(mv, close + 1) != outer
         next if @edits[rel].overlaps(m.begin(1), m.begin(1) + 1)
-        refuse(rel, m.begin(1), nm, "stuck point (VALUE truth test): if tests #{nm}(...), a VALUE (a struct in the fork, include/mruby/boxing_no.h); CRuby's nonzero word is true for nil too, which has no exact struct test")
+        # if (f(...)) of a VALUE-returning call: the condition is mrb_test of the result (nil and false are false)
+        next if @edits[rel].overlaps(m.begin(1), close + 2)
+        @edits[rel].add(m.begin(1), m.begin(1), 'mrb_test(')
+        @edits[rel].add(close + 1, close + 1, ')')
+        rewrite(rel, m.begin(1), nm, "mrb_test(#{nm}(...))", TRUTH_TEST_CAVEAT)
       end
     end
   end
