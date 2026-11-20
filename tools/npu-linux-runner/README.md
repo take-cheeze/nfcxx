@@ -202,3 +202,22 @@ The bounds checks are not the cost: the block path gains about 1 %. The taps cos
 41.6 ms (about a quarter), mostly the loads, unpacking and float conversions per texel, which the block path
 keeps. The blend is about 15 ms and the remaining row maths and rasterisation about 16 ms. The next lowering
 candidates are the per-texel conversion (convert the four texels as one block) and the blend.
+
+## Blend lowering (copy mode)
+
+`frame/blend_lower.py` (`--blend` in `gen_frame_textured.py`) adds a fast path to `nr_blend_pixel_alpha` for blend
+mode 0 with all four write-mask lanes set. In that mode the source factor is exactly 255 and the destination
+factor exactly 0, so the destination load and its select and shift terms add exactly zero. The fast path computes
+the same value and rounding without them. The general path is unchanged after it, and other modes are unaffected.
+
+Four full-tile textured draws, sampler block path on (p50, ms; baseline and candidate interleaved, NPU idle):
+
+| build | run 1 | run 2 |
+| --- | --- | --- |
+| baseline (`--sampler`) | 41.29 | 41.78 |
+| `--sampler --blend` | 38.00 | 37.96 |
+
+About 8.5 % faster. The candidate matches the expected tile byte for byte.
+
+The per-texel conversion pass tried alongside it (moving the channel swap onto the blended result) came out
+about 3 % slower, so it is not included.
