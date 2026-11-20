@@ -158,7 +158,11 @@ end
 #            (step ... (store int $Si (wadd int $Si (const int 1))) ...))))
 # Returns [dst, a, b, n] slot names on match.
 
-def match_loop_fn(fn)
+# Shared skeleton: function form, slots, spilled params, counted loop with
+# zero-based counter, unit step, lt.s bound check, compute block, and the
+# lets-chasing resolvers. Expects nparams params (dst, src..., n). Returns a
+# hash; compute matchers raise Refused on mismatch.
+def match_skeleton(fn, nparams)
   refuse("not a function form") unless fn.is_a?(Array) && fn[0] == "function"
   params = []
   slots = {}
@@ -184,7 +188,113 @@ def match_loop_fn(fn)
       end
     end
   end
-  refuse("function takes #{params.size} params, want 4") unless params.size == 4
+  refuse("function takes #{params.size} params, want #{nparams}") unless params.size == nparams
+  reg_slot = {}
+  pre.each do |s|
+    next unless s[0] == "store" && slot_ref?(s[2]) && s[3].is_a?(String)
+    reg_slot[s[3]] = slot_name(s[2])
+  end
+  names = params.map { |p| reg_slot[p[1]] }
+  refuse("params are not all spilled to slots") if names.any?(&:nil?)
+  refuse("no loop") if loopform.nil?
+  body = nil
+  step = nil
+  loopform[1..-1].each do |s|
+    next unless s.is_a?(Array)
+    body = s if s[0] == "body"
+    step = s if s[0] == "step"
+  end
+  refuse("loop has no body") if body.nil?
+  refuse("loop has no step") if step.nil?
+  islot = nil
+  pre.each do |s|
+    if s[3].is_a?(Array) && s[3][0] == "const" && s[3][2] == "0" && slots[slot_name(s[2])] == "int"
+      islot = slot_name(s[2])
+    end
+  end
+  refuse("no zero-initialized int counter") if islot.nil?
+  step_lets = {}
+  step[1..-1].each do |s|
+    step_lets[s[1]] = s[3] if s.is_a?(Array) && s[0] == "let"
+  end
+  step_resolve = lambda do |x|
+    while x.is_a?(String) && step_lets.key?(x)
+      x = step_lets[x]
+    end
+    if x.is_a?(Array) && x[0] == "load" && slot_ref?(x[2])
+      x = x[2]
+    end
+    x
+  end
+  ok_step = step[1..-1].any? do |s|
+    next false unless s.is_a?(Array) && s[0] == "store" && s[2] == "$#{islot}"
+    v = step_resolve.call(s[3])
+    v.is_a?(Array) && v[0] == "wadd" &&
+      step_resolve.call(v[2]) == "$#{islot}" &&
+      v[3].is_a?(Array) && v[3][0] == "const" && v[3][2] == "1"
+  end
+  refuse("loop step is not i = i + 1") unless ok_step
+  body_lets = {}
+  body[1..-1].each do |s|
+    body_lets[s[1]] = s[3] if s.is_a?(Array) && s[0] == "let"
+  end
+  body_resolve = lambda do |x|
+    while x.is_a?(String) && body_lets.key?(x)
+      x = body_lets[x]
+    end
+    if x.is_a?(Array) && x[0] == "load" && slot_ref?(x[2])
+      x = x[2]
+    end
+    x
+  end
+  n = names[-1]
+  cond = body[1..-1].find do |s|
+    next false unless s.is_a?(Array) && s[0] == "if"
+    els = s[3]
+    els.is_a?(Array) && els[0] == "else" && els[1].is_a?(Array) && els[1][0] == "break"
+  end
+  refuse("no bound check") if cond.nil?
+  cmp = body_resolve.call(cond[1])
+  refuse("bound check is not lt.s") unless cmp.is_a?(Array) && cmp[0] == "lt.s"
+  ops = [cmp[2], cmp[3]].map { |o| body_resolve.call(o) }
+  refuse("bound check does not compare the counter against a slot") unless
+    ops.include?("$#{islot}") && ops.include?("$#{n}")
+  comp = body[1..-1].find { |s| s.is_a?(Array) && s[0] == "block" }
+  refuse("loop body has no compute block") if comp.nil?
+  comp = comp[1..-1]
+  lets = {}
+  body_lets.each { |k, v| lets[k] = v }
+  comp.each do |s|
+    lets[s[1]] = s[3] if s.is_a?(Array) && s[0] == "let"
+  end
+  resolve = lambda do |x|
+    while x.is_a?(String) && lets.key?(x)
+      x = lets[x]
+    end
+    if x.is_a?(Array) && x[0] == "load"
+      op = resolve.call(x[2])
+      if slot_ref?(op)
+        x = op
+      elsif op.is_a?(Array) && op[0] == "index"
+        x = op
+      end
+    end
+    x
+  end
+  chase = lambda do |x|
+    while x.is_a?(String) && lets.key?(x)
+      x = lets[x]
+    end
+    x
+  end
+  { :params => params, :slots => slots, :names => names, :islot => islot,
+    :n => n, :comp => comp, :lets => lets, :resolve => resolve,
+    :chase => chase, :body_resolve => body_resolve, :body => body }
+end
+
+def match_loop_fn(fn)
+  ctx = match_skeleton(fn, 4)
+  params = ctx[:params]
   kinds = params.map { |p| p[3] }
   # The two source pointers are int16 or int32, each signed or (const) unsigned.
   lane_ty = lambda do |k|
@@ -212,103 +322,12 @@ def match_loop_fn(fn)
     .map { |t| t == "short" || t == "unsigned_short" ? 2 : 4 }.uniq.size == 1
   stride = dst_ty == "short" ? "2" : "4"
   narrow = stride == "2"
-  # Map each param register to its slot via the prologue stores.
-  reg_slot = {}
-  pre.each do |s|
-    next unless s[0] == "store" && slot_ref?(s[2]) && s[3].is_a?(String)
-    reg_slot[s[3]] = slot_name(s[2])
-  end
-  dst = reg_slot[params[0][1]]
-  a = reg_slot[params[1][1]]
-  b = reg_slot[params[2][1]]
-  n = reg_slot[params[3][1]]
-  refuse("params are not all spilled to slots") if dst.nil? || a.nil? || b.nil? || n.nil?
-  refuse("no loop") if loopform.nil?
-  body = nil
-  step = nil
-  loopform[1..-1].each do |s|
-    next unless s.is_a?(Array)
-    body = s if s[0] == "body"
-    step = s if s[0] == "step"
-  end
-  refuse("loop has no body") if body.nil?
-  refuse("loop has no step") if step.nil?
-  # Counter: zero store then step of (wadd i 1).
-  islot = nil
-  pre.each do |s|
-    if s[3].is_a?(Array) && s[3][0] == "const" && s[3][2] == "0" && slots[slot_name(s[2])] == "int"
-      islot = slot_name(s[2])
-    end
-  end
-  refuse("no zero-initialized int counter") if islot.nil?
-  # Step must be i = i + 1 (wadd by const 1), possibly through let registers.
-  step_lets = {}
-  step[1..-1].each do |s|
-    step_lets[s[1]] = s[3] if s.is_a?(Array) && s[0] == "let"
-  end
-  step_resolve = lambda do |x|
-    while x.is_a?(String) && step_lets.key?(x)
-      x = step_lets[x]
-    end
-    if x.is_a?(Array) && x[0] == "load" && slot_ref?(x[2])
-      x = x[2]
-    end
-    x
-  end
-  ok_step = step[1..-1].any? do |s|
-    next false unless s.is_a?(Array) && s[0] == "store" && s[2] == "$#{islot}"
-    v = step_resolve.call(s[3])
-    v.is_a?(Array) && v[0] == "wadd" &&
-      step_resolve.call(v[2]) == "$#{islot}" &&
-      v[3].is_a?(Array) && v[3][0] == "const" && v[3][2] == "1"
-  end
-  refuse("loop step is not i = i + 1") unless ok_step
-  # Body lets are visible to the bound check and the compute block.
-  body_lets = {}
-  body[1..-1].each do |s|
-    body_lets[s[1]] = s[3] if s.is_a?(Array) && s[0] == "let"
-  end
-  body_resolve = lambda do |x|
-    while x.is_a?(String) && body_lets.key?(x)
-      x = body_lets[x]
-    end
-    if x.is_a?(Array) && x[0] == "load" && slot_ref?(x[2])
-      x = x[2]
-    end
-    x
-  end
-  # The bound check: (if COND (then) (else (break))) with COND resolving to
-  # (lt.s int COUNTER BOUND) over the counter slot and the n slot.
-  cond = body[1..-1].find { |s| s.is_a?(Array) && s[0] == "if" }
-  refuse("no bound check") if cond.nil?
-  cmp = body_resolve.call(cond[1])
-  refuse("bound check is not lt.s") unless cmp.is_a?(Array) && cmp[0] == "lt.s"
-  ops = [cmp[2], cmp[3]].map { |o| body_resolve.call(o) }
-  refuse("bound check does not compare the counter against a slot") unless
-    ops.include?("$#{islot}") && ops.include?("$#{n}")
-  comp = body[1..-1].find { |s| s.is_a?(Array) && s[0] == "block" }
-  refuse("loop body has no compute block") if comp.nil?
-  comp = comp[1..-1]
-  # Collect lets: reg -> value form. Resolve loads through to slots.
-  lets = {}
-  body_lets.each { |k, v| lets[k] = v }
-  comp.each do |s|
-    lets[s[1]] = s[3] if s.is_a?(Array) && s[0] == "let"
-  end
-  resolve = lambda do |x|
-    while x.is_a?(String) && lets.key?(x)
-      x = lets[x]
-    end
-    if x.is_a?(Array) && x[0] == "load"
-      op = resolve.call(x[2])
-      if slot_ref?(op)
-        x = op
-      elsif op.is_a?(Array) && op[0] == "index"
-        x = op
-      end
-    end
-    x
-  end
+  dst, a, b, n = ctx[:names]
+  islot = ctx[:islot]
+  comp = ctx[:comp]
+  lets = ctx[:lets]
+  resolve = ctx[:resolve]
+  chase = ctx[:chase]
   # The single store: (store short DST (iconv short (wadd A B))) with
   # DST = (index $dst i), A/B = widened (load (index $a/$b i)); or the
   # multiply-shift shape (iconv short (cshr int (wmul A B) (const K))).
@@ -336,13 +355,9 @@ def match_loop_fn(fn)
     next if shift.nil? != (w[0] == "wadd")
     l = resolve.call(w[2])
     r = resolve.call(w[3])
-    # A plain lets-chase, not the unwrapping resolve: the address stays put.
-    chase = lambda do |x|
-      while x.is_a?(String) && lets.key?(x)
-        x = lets[x]
-      end
-      x
-    end
+    # A plain lets-chase (ctx[:chase]), not the unwrapping resolve: the address
+    # stays put.
+    chase = ctx[:chase]
     if narrow
       next unless l.is_a?(Array) && l[0] == "iconv" && r.is_a?(Array) && r[0] == "iconv"
       # Lane loads sit under the iconv; their types fix the lane signedness.
@@ -399,6 +414,95 @@ def match_loop_fn(fn)
   [dst, a, b, n, found, a_unsigned, b_unsigned]
 end
 
+# Unary max-against-zero: (function (ret void)
+#   (params (param %0 dst (ptr lane)) (param %1 a (ptr (const lane))) (param %2 n int))
+#   ... same counted-loop skeleton ...
+#   (loop (body ...bound check...
+#     (block ... (if COND (then ... (set R LANE)) (else (set R (const int 0))))
+#       ... (store lane DST R)))
+# where COND is (lt.s lane (const lane 0) LANE). Only int32 lanes for now.
+# Returns [dst, a, n, lane].
+def match_max_fn(fn)
+  ctx = match_skeleton(fn, 3)
+  params = ctx[:params]
+  kinds = params.map { |p| p[3] }
+  lane = kinds[0] == ["ptr", "int"] && kinds[1] == ["ptr", ["const", "int"]] ? "int" : nil
+  refuse("max is only int32 for now") if lane.nil?
+  refuse("max dst must be (ptr int)") unless kinds[0] == ["ptr", "int"]
+  refuse("max src must be (ptr (const int))") unless kinds[1] == ["ptr", ["const", "int"]]
+  refuse("max bound must be int") unless kinds[2] == "int"
+  dst, a, n = ctx[:names]
+  islot = ctx[:islot]
+  comp = ctx[:comp]
+  lets = ctx[:lets]
+  resolve = ctx[:resolve]
+  # Branch-local lets (inside the max if's then/else) extend the shared table;
+  # register numbers are fresh per scope in the IR.
+  comp.each do |s|
+    next unless s.is_a?(Array) && s[0] == "if"
+    [s[2], s[3]].each do |br|
+      next unless br.is_a?(Array)
+      br[1..-1].each do |t|
+        lets[t[1]] = t[3] if t.is_a?(Array) && t[0] == "let"
+      end
+    end
+  end
+  chase = lambda do |x|
+    while x.is_a?(String) && lets.key?(x)
+      x = lets[x]
+    end
+    x
+  end
+  found = nil
+  comp.each do |s|
+    next unless s.is_a?(Array) && s[0] == "if"
+    els = s[3]
+    next unless els.is_a?(Array) && els[0] == "else"
+    thn = s[2]
+    next unless thn.is_a?(Array) && thn[0] == "then"
+    # Condition: 0 < lane.
+    cmp = chase.call(s[1])
+    next unless cmp.is_a?(Array) && cmp[0] == "lt.s"
+    next unless cmp[1] == "int"
+    lo = chase.call(cmp[2])
+    next unless lo.is_a?(Array) && lo[0] == "const" && lo[1] == "int" && lo[2] == "0"
+    lane_val = chase.call(cmp[3])
+    next unless lane_val.is_a?(Array) && lane_val[0] == "load" && lane_val[1] == "int"
+    # Then-branch sets R to the same lane; else-branch sets R to const 0.
+    then_sets = thn[1..-1].select { |t| t.is_a?(Array) && t[0] == "set" }
+    else_sets = els[1..-1].select { |t| t.is_a?(Array) && t[0] == "set" }
+    next unless then_sets.size == 1 && else_sets.size == 1
+    next unless then_sets[0][1] == else_sets[0][1]
+    r = then_sets[0][1]
+    next unless else_sets[0][2].is_a?(Array) && else_sets[0][2][0] == "const" &&
+                else_sets[0][2][2] == "0"
+    then_val = chase.call(then_sets[0][2])
+    next unless then_val.is_a?(Array) && then_val[0] == "load" && then_val[1] == "int"
+    # Same address: both loads index $a by $i with stride 4.
+    la = resolve.call(lane_val[2])
+    ta = resolve.call(then_val[2])
+    next unless la.is_a?(Array) && la[0] == "index" && ta.is_a?(Array) && ta[0] == "index"
+    next unless resolve.call(la[1]) == "$#{a}" && resolve.call(ta[1]) == "$#{a}"
+    next unless resolve.call(la[2]) == "$#{islot}" && resolve.call(ta[2]) == "$#{islot}"
+    next unless la[3] == "4" && ta[3] == "4"
+    found = [r, dst]
+  end
+  refuse("loop body is not a max-against-zero select") unless found
+  # The single store writes the select result to dst[i].
+  r, = found
+  ok_store = comp.any? do |s|
+    next false unless s.is_a?(Array) && s[0] == "store" && s[1] == "int"
+    # The stored value is the select result register itself (set in the
+    # branches, declared by an initializing let: do not resolve through it).
+    next false unless s[3] == r
+    d = resolve.call(s[2])
+    next false unless d.is_a?(Array) && d[0] == "index"
+    resolve.call(d[1]) == "$#{dst}" && resolve.call(d[2]) == "$#{islot}" && d[3] == "4"
+  end
+  refuse("max result is not stored to dst[i]") unless ok_store
+  [dst, a, n, lane]
+end
+
 src = if ARGV[0].nil? || ARGV[0] == "-"
         $stdin.read
       else
@@ -416,11 +520,30 @@ begin
   fns.each do |fn|
     kind = nil
     au = bu = false
+    max_args = nil
     begin
       _dst, _a, _b, _n, kind, au, bu = match_loop_fn(fn)
-    rescue Refused => e
-      fname = fn[1].is_a?(Array) ? fn[1][1] : fn[1]
-      refuse("function #{fname}: #{e.message}")
+    rescue Refused
+      begin
+        max_args = match_max_fn(fn)
+        kind = [:max]
+      rescue Refused => e2
+        fname = fn[1].is_a?(Array) ? fn[1][1] : fn[1]
+        refuse("function #{fname}: #{e2.message}")
+      end
+    end
+    if kind[0] == :max
+      dst, a, = max_args
+      out << "__attribute__((noinline)) void hvx_vec_max_i32(int *dst, const int *a, int n) {"
+      out << "  int i = 0;"
+      out << "  V128 vz = {0};"
+      out << "  for (; i + 32 <= n; i += 32) {"
+      out << "    V128 va = *(const V128 *)(a + i);"
+      out << "    *(V128 *)(dst + i) = __builtin_HEXAGON_V6_vmaxw_128B(va, vz);"
+      out << "  }"
+      out << "  for (; i < n; ++i) dst[i] = a[i] > 0 ? a[i] : 0;"
+      out << "}"
+      next
     end
     lane = kind[0] == :add32 ? "int" : "short"
     vw = lane == "short" ? 64 : 32

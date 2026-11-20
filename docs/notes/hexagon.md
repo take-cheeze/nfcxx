@@ -266,20 +266,21 @@ Hexagon plan:
    `__builtin_HEXAGON_V6_vmpyh` takes 64-byte vectors.
    Prototype emitter: `scripts/pathb-hvx-emit.rb` reads Path B IR text and emits C with
    HVX builtins for the patterns it handles (counted int16/int32 wrapping-add loops,
-   and int16 widening multiplies with a constant arithmetic shift, each over a short
-   or int dst, two short/int or unsigned sources and an int bound, matched
-   structurally): a `vaddh`/`vaddw` vector main loop, or `vmpyhv`/`vmpyhus` (signed-first
-   order), split through a stack temporary and narrowed with `vasrwh` with the odd
-   half first so lanes come back sequential (verified on qemu), each plus a scalar
-   tail. Unsigned x unsigned widening is refused (no verified builtin). Anything else
-   is refused (exit 3), never silently dropped.
+   int32 max-against-zero selects, and int16 widening multiplies with a constant
+   arithmetic shift, each over the matching lanes and an int bound, matched
+   structurally): `vaddh`/`vaddw`/`vmaxw` vector main loops, or `vmpyhv`/`vmpyhus`
+   (signed-first order), split through a stack temporary and narrowed with `vasrwh`
+   with the odd half first so lanes come back sequential (verified on qemu), each
+   plus a scalar tail. Unsigned x unsigned widening is refused (no verified builtin).
+   Anything else is refused (exit 3), never silently dropped.
    `tests/pathb-hvx/run.sh` is its translation validation: dump the probe loop with
    `pathb-dump --ir`, emit, compile with clang for Hexagon, check the vector
    instruction in the assembly, flatlink, run under qemu-hexagon against `// EXPECT:`,
    and pin two refusals (a scalar module, a whole runnable module).
    `tests/pathb-hvx/cases/add_i16` passes (exit 67), `cases/add_i32` passes (exit 0),
-   `cases/mul_i16` passes (exit 184), `cases/mul_su_i16` passes (exit 184) and
-   `cases/mul_us_i16` passes (exit 184), equal to the host models. CRuby
+   `cases/max_i32` passes (exit 194), `cases/mul_i16` passes (exit 184),
+   `cases/mul_su_i16` passes (exit 184) and `cases/mul_us_i16` passes (exit 184),
+   equal to the host models. CRuby
    and mruby agree byte-for-byte on the output and the refusal text. A sweep over
    every dumpable `tests/cases/*.cpp` module (61 files) refuses all of them with
    exit 3 and `refused:` on stderr: no crash, no garbage emission.
