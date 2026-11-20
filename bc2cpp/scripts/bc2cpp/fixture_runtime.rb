@@ -72,6 +72,15 @@ module Bc2cppFixtureRuntime
     Shellwords.split(cflags).grep(/\A-D/).uniq
   end
 
+  # The system libraries a full-core libmruby's gems link (MRUBY_LIBS of its lib/libmruby.flags.mak, without -lmruby,
+  # which the fixture names by path): mruby-digest's -lcrypto above all, which a bare `libmruby.a -lm` leaves unresolved.
+  def library_libs(build)
+    mak = File.join(build, 'lib', 'libmruby.flags.mak')
+    return [] unless File.exist?(mak)
+
+    Shellwords.split(File.read(mak)[/^MRUBY_LIBS = (.*)$/, 1].to_s).grep(/\A-l/).reject { |flag| flag == '-lmruby' }.uniq
+  end
+
   def compiler?
     system('g++', '--version', out: File::NULL, err: File::NULL)
   end
@@ -403,8 +412,8 @@ module Bc2cppFixtureRuntime
     flags.concat(library_defines(build) - flags) if full
     flags.concat(Shellwords.split(ENV.fetch('BC2CPP_CXXFLAGS', '')))
     built = Bc2cppCxx.system(*flags, "-I#{dir}", "-I#{build}/include", "-I#{ROOT}/3rd/mruby/include",
-                   "-I#{ROOT}/mruby-rgss/src", "-I#{ROOT}/include", File.join(dir, 'main.cpp'), *extra_srcs, lib, '-lm',
-                   '-o', binary)
+                   "-I#{ROOT}/mruby-rgss/src", "-I#{ROOT}/include", File.join(dir, 'main.cpp'), *extra_srcs, lib,
+                   *(['-lm'] | (full ? library_libs(build) : [])), '-o', binary)
     return [false, ''] unless built
 
     FileUtils.cp_r(dir, ENV['BC2CPP_KEEP_DIR'], remove_destination: true) if ENV['BC2CPP_KEEP_DIR']
