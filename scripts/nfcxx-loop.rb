@@ -140,18 +140,32 @@ ENV_STATE_VARIABLES = %w[NFCXX_BACKEND NFCXX_PATH NFCXX_IR_OPT NFCXX_EH_UNWIND N
                          NFCXX_UNROLL NFCXX_STRUCT_SLOTS NFCXX_LD NFCXX_PATHB_C NFCXX_OBFUSCATE_KERNELS NFCXX_DIALECT
                          NFCXX_TRACE].freeze
 
+# The NFCXX_* variables of the options that the bash driver read before its loop (nfcxx's defaults, which a flag overrides). Each
+# one is assigned whether or not it is set, so the statements of --shell give the driver every one of them.
+def apply_option_environment(state, env)
+  state.ir_opt_set = env.key?("NFCXX_IR_OPT") ? 1 : 0
+  state.ir_opt = env.fetch("NFCXX_IR_OPT", "")
+  state.eh_unwind_on = env["NFCXX_EH_UNWIND"] == "1" ? 1 : 0
+  state.eh_shim_on = env["NFCXX_EHSHIM"] == "0" ? 0 : 1
+  state.keep_intermediates = env["NFCXX_KEEP_INTERMEDIATES"] == "1" ? 1 : 0
+  state.time_log = env.fetch("NFCXX_TIME_LOG", "")
+  state.instantiate = env.fetch("NFCXX_INSTANTIATE", "") == "" ? "used" : env["NFCXX_INSTANTIATE"]
+  state.promote_slots = env.fetch("NFCXX_PROMOTE_SLOTS", "") == "" ? "1" : env["NFCXX_PROMOTE_SLOTS"]
+  state.unroll = env.fetch("NFCXX_UNROLL", "") == "" ? "1" : env["NFCXX_UNROLL"]
+  state.struct_slots = env.fetch("NFCXX_STRUCT_SLOTS", "") == "" ? "1" : env["NFCXX_STRUCT_SLOTS"]
+  state.ld_name = env.fetch("NFCXX_LD", "")
+  state.pathb_c = env.fetch("NFCXX_PATHB_C", "")
+  obf = env.fetch("NFCXX_OBFUSCATE_KERNELS", "0")
+  state.obfuscate = obf == "0" || obf == "" ? 0 : 1
+end
+
 # nfcxx's setup, for the variables above: each sets the loop's state the way the bash does (${VAR:-default}, and the
 # tests of the value). env maps a variable name to its value (only the variables that are set); uid is id -u, and it is
-# used only for the default remote-cache directory.
+# used only for the default remote-cache directory. The options of apply_option_environment come first.
 def apply_environment(state, env, uid, tmpdir)
+  apply_option_environment(state, env)
   state.backend = env["NFCXX_BACKEND"] if env.key?("NFCXX_BACKEND")
   state.path_b = 1 if env["NFCXX_PATH"] == "b"
-  if env.key?("NFCXX_IR_OPT")
-    state.ir_opt = env["NFCXX_IR_OPT"]
-    state.ir_opt_set = 1
-  end
-  state.eh_unwind_on = 1 if env["NFCXX_EH_UNWIND"] == "1"
-  state.eh_shim_on = 0 if env["NFCXX_EHSHIM"] == "0"
   state.cache_dir = env["NFCXX_CACHE"] if env.key?("NFCXX_CACHE")
   state.cache_log_file = env["NFCXX_CACHE_LOG"] if env.key?("NFCXX_CACHE_LOG")
   remote = env.fetch("NFCXX_CACHE_REMOTE", "")
@@ -162,16 +176,6 @@ def apply_environment(state, env, uid, tmpdir)
     base = tmpdir.empty? ? "/tmp" : tmpdir
     state.cache_dir = "#{base}/nfcxx-cache-#{uid}"
   end
-  state.keep_intermediates = 1 if env["NFCXX_KEEP_INTERMEDIATES"] == "1"
-  state.time_log = env["NFCXX_TIME_LOG"] if env.key?("NFCXX_TIME_LOG")
-  state.instantiate = env.fetch("NFCXX_INSTANTIATE", "") == "" ? "used" : env["NFCXX_INSTANTIATE"]
-  state.promote_slots = env.fetch("NFCXX_PROMOTE_SLOTS", "") == "" ? "1" : env["NFCXX_PROMOTE_SLOTS"]
-  state.unroll = env.fetch("NFCXX_UNROLL", "") == "" ? "1" : env["NFCXX_UNROLL"]
-  state.struct_slots = env.fetch("NFCXX_STRUCT_SLOTS", "") == "" ? "1" : env["NFCXX_STRUCT_SLOTS"]
-  state.ld_name = env["NFCXX_LD"] if env.key?("NFCXX_LD")
-  state.pathb_c = env["NFCXX_PATHB_C"] if env.key?("NFCXX_PATHB_C")
-  obf = env.fetch("NFCXX_OBFUSCATE_KERNELS", "0")
-  state.obfuscate = obf == "0" || obf == "" ? 0 : 1
   if env.key?("NFCXX_DIALECT")
     unless env["NFCXX_DIALECT"].empty?
       state.dialect = env["NFCXX_DIALECT"]
@@ -607,7 +611,8 @@ rescue NfcxxMissing => e
 end
 
 # shell mode (the driver's, `--shell --ld-available=... -- ARG...`): the records of the loop as the shell statements that apply them to
-# the driver's variables: each scalar the loop assigned, then each array element in order (appended). A refusal goes to standard
+# the driver's variables: the NFCXX_* option defaults (apply_option_environment, from the process environment), then each scalar the
+# loop assigned, then each array element in order (appended). A refusal goes to standard
 # error with status 2 (the driver ends with it, as before); a value option given last prints the statement that makes the driver
 # end as the bash did (loop_no_value). The statements are the ones the bash read loop and apply loop made.
 # the -fuse-ld=NAME values whose ld.NAME program is on PATH (command -v ld.NAME in the bash: an executable file, not a directory)
@@ -622,8 +627,9 @@ def ld_on_path(argv)
   end
 end
 
-def run_shell(argv, ld_available)
+def run_shell(argv, ld_available, env)
   state = LoopState.new
+  apply_option_environment(state, env)
   run_loop(argv, state, ld_available)
   state.assigned.each { |name| $stdout.write("#{name}=#{Shellwords.escape(state.public_send(name).to_s)}\n") }
   LOOP_ARRAYS.each { |name| state.public_send(name).each { |x| $stdout.write("#{name}+=(#{Shellwords.escape(x)})\n") } }
@@ -682,7 +688,7 @@ def main(argv)
     argv.shift if argv.first == "--"
     # --probe-ld: the ld.NAME programs for -fuse-ld=NAME are looked up on PATH here (the driver used command -v)
     ld_available = ld_on_path(argv) if probe_ld
-    return run_shell(argv, ld_available)
+    return run_shell(argv, ld_available, ENV.to_h.merge(env))
   end
   plan = syntax_only_plan(argv)
   plan = [plan] if plan
