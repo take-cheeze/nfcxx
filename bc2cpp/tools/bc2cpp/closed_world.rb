@@ -241,6 +241,9 @@ class ClosedWorld
   def refusal(name, listed, self_owner, installed, instances: nil, scoped: false, native_free: false,
               instance_scope: false, singleton_arms: nil, method_missing_arms: nil)
     return @global_refusal if @global_refusal
+    # PUBLIC_SEND_DISPATCH: Kernel#public_send checks its target's visibility against how it was itself called; run
+    # through an owner call it reaches private and protected methods the VM's send refuses, so it keeps that send.
+    return :visibility_send if name == 'public_send'
     return :dynamic_install if installed.nil? || installed.include?(name)
     return :unknown_definer if instance_scope ? instance_unknown_def?(name) : @unknown_defs.include?(name)
     # A native singleton function is one more outside owner, which the owner call names (`Graphics.singleton`).
