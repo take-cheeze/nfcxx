@@ -333,7 +333,9 @@ BC2CPP_MAIN = lambda do
   abort "bc2cpp: build '#{build_name}' is not a closed world:\n  #{errors.join("\n  ")}" unless errors.empty?
   profile_phase.call('closed world: build check')
 
-    outside_native, outside_ruby = bc2cpp_closed_world_outside_srcs(build_name, build_gems, repo_root)
+    outside_native, outside_ruby = bc2cpp_closed_world_outside_srcs(build_name, build_gems, repo_root,
+      native_paths: Shellwords.split(ENV['NATIVE_SRCS']), ruby_paths: Shellwords.split(ENV['FOREIGN_RUBY_SRCS']),
+      compiled_srcs: srcs)
   profile_phase.call('closed world: outside sources')
     # Core Ruby is compiled input here but stays an OUTSIDE source for these proofs: the
     # closed world is the engine's own Ruby, and a name mruby's own Ruby defines is one
