@@ -66,7 +66,7 @@ class CodeGen
     # sites pass (an unmodelled read would otherwise delete the pool), so the declared bits are fixed, not grown.
     # A Float declaration seeds the Float bit.
     @declared_arg_pools = {}
-    (self.class.declared_params || {}).each do |label, guards|
+    declared_params_kept.each do |label, guards|
       guards.each do |pos, cls, _key, _text, kind = :class, nilable = false|
         key = [label, pos + 1]
         bit = declared_arg_bits(cls, kind, nilable)

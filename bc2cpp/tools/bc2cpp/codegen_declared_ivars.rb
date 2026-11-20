@@ -53,9 +53,12 @@ class CodeGen
   def declared_ivar_kept?(entry)
     return true unless RbsParamCheck::CORE_IVAR_KINDS.key?(entry.kind)
 
-    (@declared_ivar_core_kept ||= {}).fetch(entry.cls) do
-      @declared_ivar_core_kept[entry.cls] = !block_core_world.nil? && !@native_name_sources.nil? &&
-                                            core_class_subclass_free?(entry.cls)
+    declared_core_kind_kept?(entry.cls)
+  end
+
+  def declared_core_kind_kept?(cls)
+    (@declared_ivar_core_kept ||= {}).fetch(cls) do
+      @declared_ivar_core_kept[cls] = !block_core_world.nil? && !@native_name_sources.nil? && core_class_subclass_free?(cls)
     end
   end
 

@@ -1,0 +1,13 @@
+class Foo
+  def size2: () -> Integer
+end
+class Menu
+  def pick: (Foo a, ?Foo? b) -> Integer
+  def add: (Foo a, ?Integer b) -> Integer
+  def computed: (Foo a, ?Foo? b) -> Integer
+  def later: (Foo a, ?untyped b, ?Foo? c) -> Integer
+  def loose: (Foo a, ?untyped b) -> Integer
+  def sorted: (Foo a, ?Array[Integer]? xs) -> Integer
+  def keys_of: (Hash[Symbol, Integer] h) -> Integer
+  def shout: (String s) -> String
+end

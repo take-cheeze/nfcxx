@@ -243,6 +243,25 @@ module DeclaredReturns
     end
   end
 
+  # DECLARED_OPTIONAL_PARAM: why this run breaks the optional parameter guard contract (empty when it does not). The
+  # class pool seeds an optional declaration (CodeGen#setup_class_pools) for the body that checks it on entry, so each
+  # body this run compiles cleanly must carry every one of its optional guards. A body that does not compile runs
+  # interpreted and trusts nothing. `params`: CodeGen.declared_params.
+  def optional_param_guard_failures(params, compiled)
+    by_label = compiled.group_by { |m| m[:label] }
+    (params || {}).flat_map do |label, guards|
+      bodies = Array(by_label[label]).reject { |m| m[:unsupported] || m[:code].to_s.include?('#error') }
+      guards.filter_map do |pos, _cls, key, text, _kind, _nilable, optional|
+        next unless optional
+
+        marker = "/* DECLARED_PARAM_GUARD #{key} arg #{pos + 1} */"
+        next if bodies.all? { |m| m[:code].include?(marker) }
+
+        "#{key} parameter #{pos + 1} (#{text}) is seeded from its declaration, but a compiled body carries no guard [#{CODE}]"
+      end
+    end
+  end
+
   # Prints the outcome of CodeGen#check_declared_returns, adds its diagnostics to the signature diagnostics (the type
   # check reads them from there) and aborts a build on an error.
   def report(gen, sig_applied, abort_on_error:)
