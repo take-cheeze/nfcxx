@@ -35,11 +35,17 @@ def planned_loop?(args)
   status.success? && plan_text?(out)
 end
 
+# the refusals before the oracle, [input, setup] (scripts/nfcxx-setup-args.rb refusals), computed when one is needed: the
+# input's (CUDA, .cpp2 and module) come after the gcc planner in the bash, the setup's after them
+def driver_refusals
+  @driver_refusals ||= NfcxxSetupArgs.refusals(ARGV, ENV)
+end
+
 def gcc_plan(args)
   out, err, status = Open3.capture3(RbConfig.ruby, GCC_PLAN, "--tabs", "--live=#{ROOT}", *args)
   # a refusal (status 2): the port's message is the bash's, so the driver prints it and stops here, as the bash would
   # the setup's refusals come first, as the bash checks them before the backend's name (the setup check below prints them)
-  if status.exitstatus == 2 && !plan_text?(out) && !NfcxxSetupArgs.refusal(ARGV, ENV)
+  if status.exitstatus == 2 && !plan_text?(out) && driver_refusals[1].nil?
     trace_route("gcc-plan")
     $stderr.write(err)
     exit(2)
@@ -100,9 +106,11 @@ begin
     File.write(env["NFCXX_TRACE_PENDING"], "")
     system(env["RUBY"], trace_rb, "open", trace_abs)
   end
-  # B3: the setup stage's refusals (scripts/nfcxx-setup-args.rb): the bash prints the message and exits with the status, after the
-  # trace is opened and before anything else of the setup runs. Any other command goes on to the oracle unchanged.
-  refusal = NfcxxSetupArgs.refusal(ARGV, ENV)
+  # B3 and B4: the refusals before the oracle (scripts/nfcxx-setup-args.rb refusals): the CUDA, .cpp2 and module refusals, which the
+  # bash prints before its setup, then the setup's. The bash prints the message and exits with the status, after the trace is
+  # opened. Any other command goes on to the oracle unchanged.
+  input, setup = driver_refusals
+  refusal = input || setup
   if refusal
     $stderr.puts(refusal.message)
   else
