@@ -72,7 +72,8 @@ done
 # (vmpyhv/vmpyhus even-odd deinterleave, vmpyh scalar even half), exit 96.
 # hvx_tail: vector main loop plus scalar tail (n = 100, 5, 0), exit 68.
 # hvx_vrmpy: vrmpyubv byte dot-product, exit 64.
-for k in "hvx_vaddh 192" "hvx_vmpy 96" "hvx_tail 68" "hvx_vrmpy 64"; do
+# hvx_vdmpy: vdmpybus mixed-sign widening dot (even/odd Rt split), exit 64.
+for k in "hvx_vaddh 192" "hvx_vmpy 96" "hvx_tail 68" "hvx_vrmpy 64" "hvx_vdmpy 64"; do
   set -- $k; name=$1; want=$2
 if $clang --target=$triple -ffreestanding -fno-pic -O2 -mhvx -mhvx-length=128b -w \
       -c "$here/$name.c" -o "$tmp/hvx.o" 2>"$tmp/hvx.cc"; then

@@ -163,6 +163,7 @@ Results (`tests/hexagon/run.sh`, `QEMU_HEXAGON` set):
 | `hvx_vmpy` (hand-written, `-mhvx -mhvx-length=128b`) | ok (exit 96) | widening-multiply lane semantics: `vmpyhv`/`vmpyhus` even-odd deinterleave, `vmpyh` scalar even half (section 5) |
 | `hvx_tail` (hand-written, `-mhvx -mhvx-length=128b`) | ok (exit 68) | `vaddh` vector main loop plus scalar tail (`n` = 100, 5, 0): the loop shape Path B must emit (section 5) |
 | `hvx_vrmpy` (hand-written, `-mhvx -mhvx-length=128b`) | ok (exit 64) | real HVX `vrmpyubv` byte dot-product in the object |
+| `hvx_vdmpy` (hand-written, `-mhvx -mhvx-length=128b`) | ok (exit 64) | real HVX `vdmpybus` mixed-sign widening dot: out[2i] uses Rt[0:2], out[2i+1] uses Rt[2:4] |
 | `float_neg_switch` | ok (exit 42) | `.rodata` (FP constants, switch table) via `R_HEX_32_6_X`/`R_HEX_6_X` |
 | `struct_libc` | ok (exit 9) | `.rodata.str1.1`; `strlen` is defined in `stub.c` |
 | `raii_templates_class` | ok (exit 7) | `.data`/`.bss`; EH bookkeeping globals in `stub.c`, `-G0` |
@@ -170,8 +171,8 @@ Results (`tests/hexagon/run.sh`, `QEMU_HEXAGON` set):
 | `exceptions` | ok (exit 15) | `tests/hexagon/eh_rt.c` supplies EDG's EH ABI (section 3a) |
 | `templates_lambdas` | ok (exit 12) | `scripts/gen-c-target.rb` passes `-tused` (instantiate used templates), as the host driver does; no `edg_prelink` needed |
 
-All 14 Hexagon checks in this table run (the generated cases and HVX).
-Compile-only mode (no qemu) compiles all 14.
+All 15 Hexagon checks in this table run (the generated cases and HVX).
+Compile-only mode (no qemu) compiles all 15.
 
 Layout: `tests/hexagon/layout.sh` passes (26 facts); with `EDG_TARGET=linux_i686` it fails
 (verified), so it isn't vacuous.
@@ -267,10 +268,17 @@ Hexagon plan:
    `__builtin_HEXAGON_V6_vmpyh` takes 64-byte vectors. `V6_vrmpyubv_128B` (uint8
    dot product, 32 lanes of 4-byte dots) compiles and runs on qemu
    (`tests/hexagon/hvx_vrmpy.c`, exit 64, checked against a scalar reference);
-   `V6_vrmpyubv_acc_128B` accumulates per lane for reductions. HMX matrix-unit
-   builtins are out of reach here: `V6_vdmpy_128B` does not exist and a
-   `V6_vmpyewuh_128B` probe crashes clang-19's Hexagon backend
-   ("Cannot select"); qemu user-mode cannot run HMX anyway.
+   `V6_vrmpyubv_acc_128B` accumulates per lane for reductions. `V6_vdmpybus_128B`
+   (u8 vector x i8 scalar broadcast, mixed-sign widening dot to int16 lanes)
+   compiles and runs on qemu (`tests/hexagon/hvx_vdmpy.c`, exit 64): output pair
+   `out[2i]` uses Rt bytes [0:2], `out[2i+1]` uses Rt bytes [2:4]. Reinterleaving a
+   deinterleaved pair (e.g. `vmpybusv` halves) back to sequential lanes has no
+   verified single op here: `vshufeh`/`vshufoh` interleave same-parity lanes and
+   no `vdealvdd`/`vshuffvdd` control word tried so far produces sequential order
+   (all fail at lane 0 on qemu). True HMX matrix-unit builtins are out of reach:
+   `V6_vdmpy_128B` does not exist as such (only the bus/bus_acc/dv forms) and a
+   `V6_vmpyewuh_128B` probe crashes clang-19's Hexagon backend ("Cannot select");
+   qemu user-mode cannot run HMX anyway.
    Prototype emitter: `scripts/pathb-hvx-emit.rb` reads Path B IR text and emits C with
    HVX builtins for the patterns it handles (counted int16/int32 wrapping-add loops,
    int32 max-against-zero selects, int16 widening multiplies with a constant
@@ -348,9 +356,9 @@ Run it the way CI does:
 
     CLANG=clang-19 QEMU_HEXAGON=qemu-hexagon-static tests/hexagon/run.sh
 
-Result: 16 passed (`constexpr_static`, `exceptions`, `float_neg_switch`, `qbe_builtins_libc`, `qbe_global_ctor`,
+Result: 17 passed (`constexpr_static`, `exceptions`, `float_neg_switch`, `qbe_builtins_libc`, `qbe_global_ctor`,
 `raii_templates_class`, `signed_overflow_wraps`, `struct_libc`, `templates_lambdas`, `virtual_dispatch`, and the HVX
-kernels `hvx_add_i16`, `hvx_mul_i16`, `hvx_vaddh`, `hvx_vmpy`, `hvx_tail`, `hvx_vrmpy`), 3 skipped (`qbe_atomics`, `qbe_gnu_forms`, `qbe_int3_break`:
+kernels `hvx_add_i16`, `hvx_mul_i16`, `hvx_vaddh`, `hvx_vmpy`, `hvx_tail`, `hvx_vrmpy`, `hvx_vdmpy`), 3 skipped (`qbe_atomics`, `qbe_gnu_forms`, `qbe_int3_break`:
 they include hosted C++ headers that the `linux_riscv32` EDG configuration lacks).
 
 `flatlink.rb` lays every `SHF_ALLOC` section out in one `PT_LOAD` (`.text` first, `.bss` last, memsz > filesz)
