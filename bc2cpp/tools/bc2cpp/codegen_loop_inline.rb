@@ -153,8 +153,10 @@ class CodeGen
   # scopes inline_hash_capture_hints over the instructions only, not the nested
   # pass.
   def compile_inline_block_body(region, irep, d, iter_label, break_label: nil, result_var: nil, broke_flag: nil,
-                                elem_reg: nil, hash_capture: false, forwarded_blk: false)
+                                elem_reg: nil, hash_capture: false, forwarded_blk: false, declared_element: false)
     block_irep = region[:block_irep]
+    # DECLARED_LOOP_ELEMENT: the emitter that asks for it binds the element under declared_loop_element_guard.
+    region[:declared_element] = declared_element && elem_reg ? declared_loop_element(region, irep, d) : nil
     offset = irep.nregs
     break_dest = break_label ? region[:dest_reg] : nil
     label_prefix = "LBLK#{region[:block_addr]}#{region[:label_tag]}_"
@@ -194,10 +196,18 @@ class CodeGen
         body << '  ' << code
       end
     end
-    if hash_capture
-      with_block_hash_capture_hints(inline_hash_capture_hints(irep, region), &compile_all)
-    else
-      compile_all.call
+    saved_loop_elements = @declared_loop_elements
+    if (entry = region[:declared_element])
+      @declared_loop_elements = (saved_loop_elements || []) + [{ irep: block_irep, reg: elem_reg, klass: entry[:klass] }]
+    end
+    begin
+      if hash_capture
+        with_block_hash_capture_hints(inline_hash_capture_hints(irep, region), &compile_all)
+      else
+        compile_all.call
+      end
+    ensure
+      @declared_loop_elements = saved_loop_elements
     end
     nested_pre = @inline_nested.pre
     @inline_nested = saved_nested
@@ -306,7 +316,7 @@ class CodeGen
     # element below, so R1 is the loop element.
     body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label,
                                                                   elem_reg: region[:spread] ? nil : '1',
-                                                                  hash_capture: true)
+                                                                  hash_capture: true, declared_element: true)
     return nil unless body
 
     out = String.new
@@ -321,6 +331,7 @@ class CodeGen
       out << each_spread_binding(entry, addr, param_reg, region[:spread])
     else
       out << "      r#{param_reg} = #{entry};\n"
+      out << declared_loop_element_guard(region, "r#{param_reg}")
     end
     bound = region[:spread] ? (0...region[:spread]).map { |k| param_reg + k } : [param_reg]
     out << ElementReadRoots.loop_keep(body, bound)
@@ -614,7 +625,8 @@ class CodeGen
     # ELEMENT_CLASS_SUPPORT: R1 is the element for every admitted method;
     # each_with_index's R2 (the index) is not hinted.
     body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label, result_var: result_var,
-                                                                  broke_flag: "bc2cpp_collect_broke_#{addr}", elem_reg: '1')
+                                                                  broke_flag: "bc2cpp_collect_broke_#{addr}", elem_reg: '1',
+                                                                  declared_element: true)
     return nil unless body
 
     out = String.new
@@ -630,6 +642,7 @@ class CodeGen
     out << inline_block_frame(block_irep, offset)
     out << "      mrb_value #{result_var} = mrb_nil_value();\n"
     out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_collect_i_#{addr});\n"
+    out << declared_loop_element_guard(region, "r#{param_reg}")
     out << "      r#{param2_reg} = mrb_fixnum_value(bc2cpp_collect_i_#{addr});\n" if meth == 'each_with_index'
     out << ElementReadRoots.loop_keep(body, [param_reg])
     out << body
@@ -699,7 +712,7 @@ class CodeGen
     # as the binding below.
     body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label, result_var: result_var,
                                                                   broke_flag: "bc2cpp_accum_broke_#{addr}",
-                                                                  elem_reg: is_fold ? '2' : '1')
+                                                                  elem_reg: is_fold ? '2' : '1', declared_element: true)
     return nil unless body
 
     out = String.new
@@ -729,6 +742,7 @@ class CodeGen
     else
       out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_accum_i_#{addr});\n"
     end
+    out << declared_loop_element_guard(region, "r#{is_fold ? param2_reg : param_reg}")
     out << ElementReadRoots.loop_keep(body, [is_fold ? param2_reg : param_reg])
     out << body
     out << "      #{iter_label}:;\n"
@@ -1154,7 +1168,8 @@ class CodeGen
     result_var = "bc2cpp_sort_v_#{addr}"
     # ELEMENT_CLASS_SUPPORT: a sort_by key block takes the element as R1.
     body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label, result_var: result_var,
-                                                                  broke_flag: "bc2cpp_sort_broke_#{addr}", elem_reg: '1')
+                                                                  broke_flag: "bc2cpp_sort_broke_#{addr}", elem_reg: '1',
+                                                                  declared_element: true)
     return nil unless body
 
     out = String.new
@@ -1167,6 +1182,7 @@ class CodeGen
     out << inline_block_frame(block_irep, offset)
     out << "      mrb_value #{result_var} = mrb_nil_value();\n"
     out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_sort_i_#{addr});\n"
+    out << declared_loop_element_guard(region, "r#{param_reg}")
     out << ElementReadRoots.loop_keep(body, [param_reg])
     out << body
     out << "      #{iter_label}:;\n"

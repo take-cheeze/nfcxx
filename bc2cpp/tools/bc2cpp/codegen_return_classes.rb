@@ -1163,6 +1163,9 @@ class CodeGen
 
     # The one register CHECKED_POOL_EXACT is compiling under its class test.
     return @checked_pool_override[:klass] if @checked_pool_override && @checked_pool_override[:key] == [irep.label, idx, r]
+    # DECLARED_LOOP_ELEMENT: an inlined loop's parameter under its element guard.
+    loop_class = declared_loop_element_class(irep, idx, reg)
+    return loop_class if loop_class
 
     states = return_class_scoped_states(irep)
     state = states && states[idx]

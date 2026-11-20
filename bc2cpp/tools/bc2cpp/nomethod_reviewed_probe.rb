@@ -16,15 +16,25 @@ module NomethodReviewedProbe
   # conf.name == 'closed' (single-format, with mruby-compiler), the compiled
   # gems, and every add_dependency they pull in. Derived by
   # bc2cpp_closed_core_gems (compiled_gems.rb); order is not significant.
-  CLOSED_CORE_GEMS = bc2cpp_closed_core_gems.freeze
+  CLOSED_CORE_GEMS = bc2cpp_closed_core_gems(world: 'closed').freeze
 
   module_function
 
+  # LISTS_WORLD: the core gems of that world's build (CLOSED_CORE_GEMS for the closed one).
+  def core_gems
+    world = ListsWorld.name
+    return CLOSED_CORE_GEMS if world == 'closed'
+
+    (@core_gems ||= {})[world] ||= bc2cpp_closed_core_gems(world: world).freeze
+  end
+
   def closed_gems(root)
-    gems = CLOSED_CORE_GEMS.to_h { |g| [g, "#{root}/3rd/mruby/mrbgems/#{g}"] }
+    gems = core_gems.to_h { |g| [g, "#{root}/3rd/mruby/mrbgems/#{g}"] }
     gems.merge!('mruby-stringio' => "#{root}/3rd/mruby-stringio", 'mruby-marshal' => "#{root}/3rd/mruby-marshal")
     %w[mruby-lcf mruby-rgss mruby-rpg2k].each { |g| gems[g] = "#{root}/#{g}" }
     BC2CPP_COMPILED_GEMS.each_key { |g| gems[g] = "#{root}/#{g}" }
+    # LISTS_WORLD: the world's own gems outside 3rd/mruby (wio's HAL and Math stand-in).
+    ListsWorld::EXTRA_GEMS.fetch(ListsWorld.name).each { |d| gems[File.basename(d)] = "#{root}/#{d}" }
     gems.transform_values { |d| File.expand_path(d) }
   end
 

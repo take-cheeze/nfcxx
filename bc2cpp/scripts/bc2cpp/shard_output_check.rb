@@ -7,8 +7,9 @@
 #   text (no tools)
 #     - a run whose code is under the shard threshold prints its main file unchanged and comment-only shards;
 #     - a split one moves the prelude into the gem's namespace, makes its stateful `static` items `inline` and leaves
-#       a stateless helper `static`, keeps #include and the declarations of method-section functions global, and
-#       drops `static` only from the method-section functions another shard names;
+#       a stateless helper `static` (one marked BC2CPP_SHARD_ONE_BODY `inline`), keeps #include and the
+#       declarations of method-section functions global, and drops `static` only from the method-section functions
+#       another shard names;
 #   linkage (needs g++)
 #     - the split synthetic program links, and its prelude state, function-local statics and constant tables have
 #       one instance that both shards share;
@@ -41,6 +42,9 @@ PRELUDE = <<~'CPP'
   #endif
   struct Pair { int a; int b; };
   static int twice(int x) { return 2 * x; }
+  #define BC2CPP_SHARD_ONE_BODY
+  static int thrice(int x) { return 3 * x; }
+  BC2CPP_SHARD_ONE_BODY static int one_body(int x) { return thrice(x); }
   static const int TABLE[] = { 1, 2, 3 };
   int ext_value(void) { return TABLE[2] * 2 + 1; }
   int A_one_impl(int);
@@ -92,6 +96,8 @@ suite.check('prelude state and helpers are inline in the gem namespace',
 suite.check('function-local statics are left alone', main.include?('  static int calls = 0;'))
 suite.check('a stateless prelude helper stays static (each shard its own copy)',
             main.include?("\n[[maybe_unused]] static int twice(int x)"))
+suite.check('a BC2CPP_SHARD_ONE_BODY helper and what it calls are inline (one body for every shard)',
+            main.include?("\nBC2CPP_SHARD_ONE_BODY inline int one_body(int x)") && main.include?("\ninline int thrice(int x)"))
 suite.check('#include stays at global scope',
             main.match?(%r{^\} // namespace bc2cpp_shard_chk\n#include <stdio.h>|\A[^\n]*\n[^\n]*\n#include <stdio.h>}) &&
             main.include?("#ifdef SHARD_CHECK_NEVER\n#include <never_included.h>\n#endif\n"))

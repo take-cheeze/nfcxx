@@ -12,6 +12,8 @@ require "fileutils"
 require "open3"
 require "rbconfig"
 require_relative "nfcxx-setup-args"
+require_relative "nfcxx-second-pass"
+require_relative "nfcxx-cache-config"
 
 root = File.expand_path("..", __dir__)
 ROOT = root
@@ -57,6 +59,17 @@ def trace_route(kind)
   $stderr.write("nfcxx: driver: #{kind}\n") if ENV["NFCXX_DRIVER_TRACE"] == "1"
 end
 
+# B5: the cache configuration's refusal (NFCXX_CACHE_REMOTE, scripts/nfcxx-cache-config.rb plan). The bash checks it first (its
+# line 115, before the argument loop, the routes and the setup, and before its trace begins), so it is checked before anything
+# else here. The bash's -fsyntax-only pre-loop plan runs before it, so that command is the oracle's.
+unless ARGV.include?("-fsyntax-only")
+  _cache_config, cache_refusal = NfcxxCacheConfig.plan(ENV, Process.euid)
+  if cache_refusal
+    $stderr.puts(cache_refusal)
+    exit(2)
+  end
+end
+
 if planned_loop?(ARGV)
   trace_route("plan")
   pid = Process.spawn(RbConfig.ruby, RUNNER, "--root=#{ROOT}", "--", *ARGV)
@@ -76,6 +89,9 @@ text = File.read(oracle).sub(/^root=\$\(cd "\$\(dirname "\$0"\)" && pwd\)$/) { "
 # driver's own path is put there (the program is an executable file of its own, not a driver)
 text = text.gsub('"$0"', "\"#{File.join(root, "nfcxx")}\"")
 abort "nfcxx: the oracle's root line is not as expected" unless text.include?("root=#{root}")
+# B7 (scripts/nfcxx-second-pass.rb): the oracle's second run is the Ruby driver itself, with the same environment and arguments
+# (run), inside the oracle's own trace span around it. Its line is the one the oracle has (the oracle is frozen).
+text = NfcxxSecondPass.oracle_text(text) or abort "nfcxx: the oracle's second-pass run is not as expected"
 program = Tempfile.new(["nfcxx-oracle", ".sh"])
 program.write(text)
 program.close
@@ -111,18 +127,20 @@ begin
   # opened. Any other command goes on to the oracle unchanged.
   input, setup = driver_refusals
   refusal = input || setup
+  # the oracle's status is read here, before the trace calls below: each system call sets $?, so reading it after them
+  # gave the trace's status (0) for a failing build
+  oracle_code = 0
   if refusal
     $stderr.puts(refusal.message)
   else
-    status = system(env, "bash", program.path, *ARGV)
+    ok = system(env, "bash", program.path, *ARGV)
+    oracle_code = ok ? 0 : ($?.exitstatus || 1)
   end
   unless trace_file.empty?
     system(env, env["RUBY"], trace_rb, "flush", env["NFCXX_TRACE_PENDING"]) if File.size?(env["NFCXX_TRACE_PENDING"])
     system(env["RUBY"], trace_rb, "close", trace_abs, Process.pid.to_s)
   end
-  status_code = if refusal then refusal.status
-                else status ? 0 : ($?.exitstatus || 1)
-                end
+  status_code = refusal ? refusal.status : oracle_code
 ensure
   program.unlink
   FileUtils.rm_rf(tmproot) unless keep

@@ -65,7 +65,7 @@ def decode_single_word(word, n):
             suf = ""
             if toks[j].startswith("i") and "." in toks[j]:
                 suf = "." + toks[j].split(".", 1)[1]
-            toks[j] = ("i%d%s" % (v, suf)) if toks[j].startswith("i") else str(v)
+            toks[j] = ("i%d%s" % (v, suf)) if toks[j].startswith("i") else (("v%d" % v) if toks[j].startswith("v") else str(v))
         return " ".join(toks)
     return None
 

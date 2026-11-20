@@ -23,17 +23,22 @@ module CoreFiberFree
   CONST_LOOKUPS = %w[const_get].to_set.freeze
   # The class whose instances CORE_FIBER_FREE proves are never made (StaticDispatchLists' unmade_classes).
   UNMADE = [CONSTANT].freeze
+  FIBER_SRC = '/mrbgems/mruby-fiber/src/fiber.c'
   Result = Struct.new(:holds, :unproven, keyword_init: true)
 
   module_function
 
   # +inputs+ is CoreEnumeratorFree.inputs of the same world, +enumerator_free+ a callable for whether its proof holds,
   # +left_out+ the "Owner#name" keys of the core methods the build leaves out.
-  def prove(inputs, enumerator_free:, left_out: Set.new)
+  # +defining+: the native file that defines the class (mruby-fiber's fiber.c, when the world links it) and the natives
+  # that could call its C constructor. Its own spellings are the definition and mrb_fiber_new, which makes a Fiber only
+  # for a C caller, so they make none when no other native of the world calls mrb_fiber_new.
+  def prove(inputs, enumerator_free:, left_out: Set.new, defining: nil)
     unproven = []
     [inputs.engine, *inputs.core].each { |g| group_conditions(g, enumerator_free, left_out, unproven) }
     inputs.native_spelled.each do |name, files|
       next unless name == CONSTANT || CONST_LOOKUPS.include?(name)
+      next if name == CONSTANT && defining && files.all? { |f| f.end_with?(FIBER_SRC) } && defining.call
 
       unproven << "native text spells #{name} (#{files.first(3).join(', ')})"
     end

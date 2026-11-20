@@ -324,7 +324,8 @@ module ShardOutput
   # entity too). Every other `static` function stays `static` and each shard compiles its own copy: an `inline` one
   # keeps an out-of-line body GCC cannot drop, which shifts its inlining (docs/bc2cpp-shards.md, "Measurements"). A
   # per-call-site cache that a macro such as BC2CPP_OWNERS declares belongs to that site, so a second copy of the
-  # function is a second site, not a second state.
+  # function is a second site, not a second state. A function whose head carries BC2CPP_SHARD_ONE_BODY is shared too:
+  # an out-of-line entry every shard calls, whose own copy per shard would only cost code size.
   def shared_prelude_items(segs, code)
     items = segs.flat_map do |seg|
       next [] unless seg[:kind] == :code
@@ -337,6 +338,7 @@ module ShardOutput
     by_name = items.group_by { |item| item[:name] }
     functions = by_name.select { |_, list| list.all? { |item| item[:function] } }.keys.to_set
     shared = by_name.keys.to_set - functions
+    shared |= items.select { |item| item[:head].include?('BC2CPP_SHARD_ONE_BODY') }.to_set { |item| item[:name] } & functions
     shared |= code.scan(/\b([A-Za-z_][\w$]*)\b(?!\s*\()/).flatten.to_set & functions
     items.each do |item|
       locals = item[:text].sub(/\A[^{]*\{/, '').scan(/\bstatic\b[^=;{(]*/)
