@@ -22,6 +22,9 @@ require 'tmpdir'
 require_relative 'fixture_runtime'
 
 ENV['BC2CPP_SIG_DIRS'] ||= ''
+# The runtime rows make String and Hash subclasses the closed world does not see, which ARMS_COMPLETE_ELSE rules
+# out; off, the owner call stays the else they test.
+ENV['BC2CPP_ARMS_COMPLETE_ELSE'] = '0'
 runtime = Bc2cppFixtureRuntime
 failures = []
 check = lambda do |what, condition|

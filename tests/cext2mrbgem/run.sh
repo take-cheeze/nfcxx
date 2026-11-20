@@ -1736,6 +1736,15 @@ check test ! -e "$work/api_gc_class_root/NOT_BUILDABLE"
 check grep -qF 'nfcx_gc_root_addr(mrb, (void *)&cWidget, sizeof(cWidget));' "$work/api_gc_class_root/src/api_gc_class_root.c"
 check grep -qF 'nfcx_gc_root_addr(mrb, (void *)&cGizmo, sizeof(cGizmo));' "$work/api_gc_class_root/src/api_gc_class_root.c"
 check test "$(grep -c 'GC root' "$work/api_gc_class_root/REFUSALS.txt")" -eq 0
+# 2zzz164. rb_define_alloc_func: the allocator is a registered function of the state, and the class gets allocate and new
+# singleton methods that call it (nfcx_alloc_register, with the prelude in the same file); no per-class-allocator refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_alloc_class tools/cext2mrbgem/fixtures/api_alloc_class/ext/api_alloc_class "$work/api_alloc_class" > "$work/api_alloc_class.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_alloc_class/NOT_BUILDABLE"
+check grep -qF 'static mrb_value ac_alloc(mrb_state *mrb, mrb_value klass) {' "$work/api_alloc_class/src/api_alloc_class.c"
+check grep -qF 'nfcx_alloc_register(mrb, k, ac_alloc);' "$work/api_alloc_class/src/api_alloc_class.c"
+check grep -qF 'mrb_define_class_method(mrb, c, "new", nfcx_alloc_new, MRB_ARGS_ANY());' "$work/api_alloc_class/src/api_alloc_class.c"
+check test "$(grep -c 'per-class allocator' "$work/api_alloc_class/REFUSALS.txt")" -eq 0
 # 2zzz155. a struct field of CRuby's rb_encoding * type: the Encoding placeholder type is in the prelude (the declaration compiles),
 # and the include of ruby/encoding.h is not a blocking refusal (the placeholder covers it).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rb_encoding_field tools/cext2mrbgem/fixtures/api_rb_encoding_field/ext/api_rb_encoding_field "$work/api_rb_encoding_field" > "$work/api_rb_encoding_field.log" 2>&1 || rc=$?

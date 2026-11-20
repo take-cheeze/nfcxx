@@ -162,8 +162,9 @@ code, baseline_err = Bc2cppFixtureRuntime.generate(SRC, baseline_dir, core: true
 %w[lp lp_value lp_return lp_next lp_stop lp_drain lp_raise].each do |name|
   check.call("#{name}: loop { } calls the compiled Kernel#loop", code_of(code, name).include?(KERNEL_LOOP))
 end
-# The else is the site's send: by name, or the owner call when the closed world names every owner.
-ELSE_SEND = '(?:mrb_funcall_with_block|bc2cpp_owner_call)\\('
+# The else is the site's send: by name, or the owner call when the closed world names every owner, or its proven
+# nomethod when the arms take every owner's instances (ARMS_COMPLETE_ELSE).
+ELSE_SEND = '(?:mrb_funcall_with_block|bc2cpp_owner_call|bc2cpp_nomethod)\\('
 # Kernel#loop has one definition in the program (core's), so the send is a MONO direct call of its compiled body: no
 # root-context test (the body suspends a Fiber's frames itself) and no dynamic else. A `break` is caught at the site.
 lp = code_of(code, 'lp')
@@ -175,7 +176,7 @@ check.call('lp_drain: a yield-free block leaves no dynamic send',
              !code_of(code, 'lp_drain').match?(DYNAMIC) && !code_of(code, 'lp_drain').include?(BY_NAME))
 chars = code_of(code, 'chars')
 check.call('chars: an unproven each_char receiver gets an exact-String arm with the send as its else',
-           chars.match?(/if \(mrb_string_p\(r\d+\) && mrb_obj_ptr\(r\d+\)->c == M->string_class\) \{\n\s+r\d+ = String_each_char_impl\(M, .*\} else \{\n\s+r\d+ = #{ELSE_SEND}/m))
+           chars.match?(/if \(mrb_string_p\(r\d+\) && mrb_obj_ptr\(r\d+\)->c == M->string_class\) \{\n\s+r\d+ = String_each_char_impl\(M, .*\} else \{\n(?:\s*\/\/[^\n]*\n)?\s+r\d+ = #{ELSE_SEND}/m))
 check.call('str_lines: each_line gets the String arm', code_of(code, 'str_lines').include?('String_each_line_impl(M, '))
 # A `!`/`?` name is spelled with `$` in C++ (`Array_reject$21_impl`); the arm check must still count those calls.
 check.call('rej_bang: reject! calls the compiled Array body, no by-name send left',
@@ -211,7 +212,7 @@ check.call('tm_literal: an Integer literal receiver is the plain loop of ADR 014
 red = code_of(code, 'red')
 check.call('red: an unproven receiver runs the inlined fold behind an Array test, the send as the else',
            red.match?(/GUARDED_BLOCK_INLINE :reduce .*\n\s+if \(M->c == M->root_c && mrb_array_p\(r\d+\)/) &&
-             red.match?(DYNAMIC))
+             (red.match?(DYNAMIC) || red.include?('ARMS_COMPLETE_ELSE :reduce')))
 check.call('red_sym, red_var: a Symbol or unproven initial value (Enumerable#inject takes a Symbol as the operator) ' \
            'keeps the send', %w[red_sym red_var red_lit_sym].none? { |m| code_of(code, m).include?('bc2cpp_accum_') })
 ix = code_of(code, 'idx')

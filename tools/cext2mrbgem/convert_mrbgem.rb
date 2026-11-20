@@ -119,6 +119,7 @@ C_STATEMENT_KEYWORDS = %w[if while for switch return sizeof else do].freeze
 DEF_RE = /^[ \t]*((?:(?:static|inline|extern)[ \t\n]+)*)((?:[A-Za-z_][#{WC}]*(?:[ \t\n]+|[ \t\n]*\*[ \t\n\*]*))+?)([A-Za-z_][#{WC}]*)[ \t\n]*\(((?:[^()]|\([^()]*\))*)\)#{SS}(\{|;)/
 INC_RE = /#[ \t]*include[ \t]*[<"](ruby(?:\/[#{WC}.\/-]*)?\.h)[>"]/
 REG_RE = /(?<![#{WC}$.>])(rb_define_method|rb_define_private_method|rb_define_singleton_method|rb_define_module_function|rb_define_global_function)#{SS}\(/
+ALLOC_REG_RE = /(?<![#{WC}$.>])(rb_define_alloc_func)#{SS}\(/
 # a right side that yields a class (a definition or a lookup of a class): not a non-class assignment to a class variable
 # a class expression of the fork (an RClass *): mrb->x_class, mrb_class_get / mrb_exc_get / mrb_module_get, or an E_*_ERROR class macro
 CLASS_EXPR_RE = /\A(?:mrb->\w+_class|mrb_class_get\(|mrb_exc_get\(|mrb_module_get\(|E_[A-Z][A-Z0-9_]*\z)/
@@ -1007,6 +1008,34 @@ end
         @regs << rec
         @reg_by_call[[rel, cs]] = rec
       end
+      # rb_define_alloc_func(klass, func): the allocator is a registered function of arity 0 (its VALUE parameter is the class)
+      finditer(ALLOC_REG_RE, masked).each do |m|
+        cs = m.begin(1)
+        op = m.end(0) - 1
+        cp = match_close(masked, op)
+        rec = { 'file' => rel, 'call' => cs, 'open' => op, 'close' => cp, 'api' => m[1],
+                'error' => nil, 'func' => nil, 'argc' => 0, 'target' => nil,
+                'func_span' => nil, 'argc_span' => nil }
+        args = cp < 0 ? [] : split_args(masked, op, cp)
+        if cp < 0
+          rec['error'] = 'unbalanced parentheses in registration call'
+        elsif args.size != 2
+          rec['error'] = "registration call has #{args.size} arguments, expected 2"
+        else
+          (ts, te), (fs, fe) = args
+          rec['target'] = py_strip(psl(text, ts, te))
+          rec['target_span'] = [ts, te]
+          fm = /\A([A-Za-z_][#{WC}]*)\z/.match(py_strip(psl(text, fs, fe)))
+          if fm.nil?
+            rec['error'] = 'allocator argument is not a plain function name'
+          else
+            rec['func'] = fm[1]
+            rec['func_span'] = [fs, fe]
+          end
+        end
+        @regs << rec
+        @reg_by_call[[rel, cs]] = rec
+      end
     end
     # one arity per registered function
     arities = {}
@@ -1747,9 +1776,7 @@ end
   def alloc_reach
     @alloc_reach ||= begin
       seeds = Set.new
-      @files.each_value do |f|
-        f['text'].scan(/rb_define_alloc_func[ \t\n]*\([ \t\n]*[A-Za-z_]\w*[ \t\n]*,[ \t\n]*([A-Za-z_]\w*)[ \t\n]*\)/) { seeds << $1 }
-      end
+      # no seeds: an allocator is a registered function of the state (rb_define_alloc_func is a template with a prelude)
       # every #define body in the gem, by macro name (a macro may be defined in several conditional branches)
       macro_bodies = Hash.new { |h, k| h[k] = [] }
       @files.each do |rel, f|
@@ -2820,8 +2847,8 @@ end
       elsif macro_arg_nonretaining?(rel, s, callee)
         nil
       elsif callee == 'rb_define_alloc_func'
-        # the allocator is called by the VM with no state argument: the fork has no per-class allocator hook (accepted stuck point)
-        'stuck point (per-class allocator): the pointer is an allocator, which the VM calls with no state argument in the fork'
+        # the registration template takes the allocator as a registered function (see the scan of registrations)
+        nil
       elsif @entries[callee].nil? && (ur = @unmapped_reasons[callee]).is_a?(String) && ur.start_with?('stuck point')
         # a callee that is a stuck point (its reason is recorded): the pointer's refusal carries that reason
         "#{ur}; the pointer is passed to #{callee}"
