@@ -245,6 +245,11 @@ module RbsSignatures
     untyped = ->(t) { t.nil? || (t.kind == :other && t.text == 'untyped') }
     merged = fresh.dup
     merged.args = fresh.args.each_with_index.map { |t, i| untyped.(t) && prev.args[i] && !untyped.(prev.args[i]) ? prev.args[i] : t }
+    if Array(prev.optional_args).size == Array(fresh.optional_args).size
+      merged.optional_args = fresh.optional_args.each_with_index.map do |t, i|
+        untyped.(t) && !untyped.(prev.optional_args[i]) ? prev.optional_args[i] : t
+      end
+    end
     if untyped.(fresh.ret) && prev.ret && !untyped.(prev.ret)
       merged.ret = prev.ret
       merged.return_type = prev.return_type
