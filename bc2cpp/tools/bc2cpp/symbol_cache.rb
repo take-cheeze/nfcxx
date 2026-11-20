@@ -25,14 +25,15 @@ module SymbolCache
   CHECKED_FUNCALLS = { 'bc2cpp_funcall_noarg' => 1, 'bc2cpp_funcall_explicit' => 2,
                        'bc2cpp_native_singleton_named' => 2, 'bc2cpp_native_owner_named' => 1 }.freeze
   FUNCALLS = (%w[mrb_funcall] + CHECKED_FUNCALLS.keys).freeze
-  FUNCALL_START = /\b(#{FUNCALLS.join('|')}|bc2cpp_owner_call_argv_named|bc2cpp_owner_call_named|bc2cpp_nomethod_named|bc2cpp_nomethod_raise_named|bc2cpp_guard_violation_named|bc2cpp_hint_violation_named|bc2cpp_nil_receiver_named)\(M,\s*/
-  FUNCALL_NAME = /\G,\s*(#{STRING})\s*,/
-  NAMED_NAME = /\G,\s*(#{STRING})(?=\s*[,)])/
-  SEND_INDEX = /\G,\s*(\d+)\s*[,)]/
+  # These scans consume binary C++ text. Byte offsets avoid mruby-onig rescanning UTF-8 prefixes.
+  FUNCALL_START = /\b(#{FUNCALLS.join('|')}|bc2cpp_owner_call_argv_named|bc2cpp_owner_call_named|bc2cpp_nomethod_named|bc2cpp_nomethod_raise_named|bc2cpp_guard_violation_named|bc2cpp_hint_violation_named|bc2cpp_nil_receiver_named)\(M,\s*/n
+  FUNCALL_NAME = /\G,\s*(#{STRING})\s*,/n
+  NAMED_NAME = /\G,\s*(#{STRING})(?=\s*[,)])/n
+  SEND_INDEX = /\G,\s*(\d+)\s*[,)]/n
   # OWNER_CALL_DESC: the level and owner set after an owner call's name; the slot and level move into the set's macro.
-  OWNER_CALL_SET = /\G,\s*([0-2])\s*,\s*(BC2CPP_OWNERS(?:_D)?)\(/
+  OWNER_CALL_SET = /\G,\s*([0-2])\s*,\s*(BC2CPP_OWNERS(?:_D)?)\(/n
   # The slot of a rewritten owner call: the first argument of its set macro (BC2CPP_SHARED's after the key).
-  OWNER_CALL_INDEX = /\G,\s*BC2CPP_(?:OWNERS(?:_D)?|SHARED)\((?:0x\h+,\s*)?(\d+)\s*,/
+  OWNER_CALL_INDEX = /\G,\s*BC2CPP_(?:OWNERS(?:_D)?|SHARED)\((?:0x\h+,\s*)?(\d+)\s*,/n
   private_constant :STRING, :INTERN, :CHECKED_FUNCALLS, :FUNCALLS,
                    :FUNCALL_START, :FUNCALL_NAME, :NAMED_NAME, :SEND_INDEX, :OWNER_CALL_SET, :OWNER_CALL_INDEX
 
@@ -193,7 +194,7 @@ module SymbolCache
     out.force_encoding(encoding)
   end
 
-  OWNER_CALL_EXPLICIT = /\G,\s*2\s*,/
+  OWNER_CALL_EXPLICIT = /\G,\s*2\s*,/n
   private_constant :OWNER_CALL_EXPLICIT
 
   def caller_self_call?(kind, code, after_name)
@@ -230,7 +231,7 @@ module SymbolCache
     code = code.b
     found = []
     pos = 0
-    while (start = code.index(/\bbc2cpp_(send|nomethod|nomethod_raise|guard_violation|hint_violation|nil_receiver|native_singleton|native_owner|owner_call_argv|owner_call)\(M,\s*/, pos))
+    while (start = code.index(/\bbc2cpp_(send|nomethod|nomethod_raise|guard_violation|hint_violation|nil_receiver|native_singleton|native_owner|owner_call_argv|owner_call)\(M,\s*/n, pos))
       kind = Regexp.last_match(1)
       head_end = Regexp.last_match.end(0)
       recv_end = expression_end(code, head_end)

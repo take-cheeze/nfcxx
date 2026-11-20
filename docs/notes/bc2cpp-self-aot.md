@@ -39,6 +39,10 @@ tool source), configured runtime defines, the explicit self-build settings, and 
 the generator inherits (`RUBYOPT`, `NFCXX_AST_DUMP`, `LIBCLANG_EDG_CPFE`); `docs/notes/bc2cpp-cache-keys.md` has the
 audit. The input program's owner filters and optimization controls are isolated from self-generation.
 Identical generated files retain their timestamps so warm setup does not rebuild every translation unit.
+Self-generation supplies the runtime manifest through `BC2CPP_LINKED_NATIVE_SRCS` and `BC2CPP_LINKED_RUBY_SRCS`:
+these definite linked sources supplement the closed world's gem-directory inventory, including generated Prism
+accessors. They are separate from the broader analysis lists `NATIVE_SRCS` and `FOREIGN_RUBY_SRCS`, which may
+include alternative core implementations. The input program's linked-source settings are isolated from this manifest.
 `generation/host.json` records the actual Ruby version, YJIT state and inputs. `generation/coverage.json` records
 translated methods and the exact fallback reasons. Its `methods` array has one object per translated method, with
 `entry`, `owner`, `name`, `tier` (the `--shard-cold-opt` level when the method is in a cold shard, else `"default"`)

@@ -167,4 +167,15 @@ Dir.mktmpdir('bc2cpp-owner-call-direct') do |dir|
   end
 end
 
+# Generated gem sources need not live below the gem's mrblib/src directories.
+# Their methods still belong to the closed world's outside-owner inventory.
+Dir.mktmpdir('owner-call-generated-source') do |dir|
+  generated = "class GeneratedAccessor\n  attr_reader :generated_reader\nend\n"
+  source = "class GeneratedCaller\n  def read(object); object.generated_reader; end\nend\n"
+  code, = Bc2cppFixtureRuntime.generate(source, dir, only_owners: ['GeneratedCaller'],
+    foreign: [['generated_ast.rb', generated]])
+  suite.check('generated foreign readers remain in the closed owner set',
+              code.include?('"GeneratedAccessor"') && code.include?('CLOSED_WORLD owner-call: generated_reader'))
+end
+
 suite.finish!

@@ -19,6 +19,11 @@ MRuby::Build.new(self_aot ? 'bc2cpp-self' : 'bc2cpp-runner') do |conf|
   end
   # BC2CPP_RUNNER_OPT=1: an optimised runner (-O2, no MRB_DEBUG), the build to time. Without it: -g3 -O0 with MRB_DEBUG.
   if ENV['BC2CPP_RUNNER_OPT'] == '1'
+    # The gcc toolchain defaults to -g even without enable_debug. DWARF for
+    # translated compiler bodies is expensive and is not useful to a normal
+    # optimized build. Preserve explicit CFLAGS/CXXFLAGS, including requested -g.
+    conf.cc.flags = conf.cc.flags.flatten - ['-g'] unless ENV['CFLAGS']
+    conf.cxx.flags = conf.cxx.flags.flatten - ['-g'] unless ENV['CXXFLAGS'] || ENV['CFLAGS']
     conf.cc.flags << '-O2'
     conf.cxx.flags << '-O2'
   else
