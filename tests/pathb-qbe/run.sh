@@ -228,6 +228,8 @@ run_one() {
   fi
   if [ "$gcc_rc" != "$((want & 255))" ] && [ "$gcc_rc" != "$want" ]; then
     failed=$((failed + 1)); lines+=("MISMATCH $name: path B matches EXPECT $want but gcc gives $gcc_rc")
+    # the gcc backend's own stderr, so a host-only compile failure shows its message in the log
+    [ "$gcc_rc" = compile-error ] && { lines+=("  gcc stderr:"); while IFS= read -r l; do lines+=("    $l"); done < "$tmp/$n.gccerr"; }
     return
   fi
   # A probe with a `// STDOUT: same` line prints (constructor and destructor order, ...): the output of the Path B
