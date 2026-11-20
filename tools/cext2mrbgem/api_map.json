@@ -47,12 +47,8 @@
     "_comment": "A name with no api_map entry is refused with the reason given here (the converter's no-entry path). PRIsVALUE is converted where rb_raise and rb_sprintf take it; elsewhere it is an argument of rb_enc_sprintf, which takes an rb_encoding *.",
     "onig_foreach_name": "stuck point (onig_foreach_name): onig_foreach_name calls its callback with only the user data, and the callback (strscan's named_captures_iter) needs the mruby state; the rb_hash_foreach-style callback wrapper that carries it is not implemented for this call (the next Onigmo item)",
     "PRIsVALUE": "stuck point (PRIsVALUE): PRIsVALUE outside the format of rb_raise, rb_sprintf and rb_enc_sprintf (a VALUE argument of another call) is not converted; it has no mruby form in this position",
-    "rb_thread_current": "stuck point (Thread): the fork has no Thread (accepted stuck point)",
     "rb_thread_local_aref": "stuck point (Thread): thread-local storage; the fork has no Thread (accepted stuck point)",
     "rb_thread_local_aset": "stuck point (Thread): thread-local storage; the fork has no Thread (accepted stuck point)",
-    "rb_mutex_new": "stuck point (Thread): a Mutex; the fork has no Thread or Mutex (accepted stuck point)",
-    "rb_mutex_lock": "stuck point (Thread): a Mutex; the fork has no Thread or Mutex (accepted stuck point)",
-    "rb_mutex_unlock": "stuck point (Thread): a Mutex; the fork has no Thread or Mutex (accepted stuck point)",
     "T_NONE": "stuck point: the fork has no T_NONE tag (the MRB_TT enum, include/mruby/value.h:106-131); the empty-object marker has no mruby value kind",
     "RUBY_T_NONE": "stuck point: the fork has no T_NONE tag (the MRB_TT enum, include/mruby/value.h:106-131); the empty-object marker has no mruby value kind",
     "rb_time_timespec_new": "stuck point (Time offset): mruby-time's Time has only UTC and LOCAL timezones (mrbgems/mruby-time/include/mruby/time.h:15-20; getlocal takes no offset), so a fixed UTC offset from the caller cannot be represented",
@@ -2562,6 +2558,34 @@
     "prelude_name": "nfcx_alloc",
     "prelude": "/* BC2CPP-MRBGEM: a per-class allocator (rb_define_alloc_func). The fork has one global allocator, so the class's allocate\n   and new are singleton methods that call the allocator registered for the class (or for a superclass). new is allocate\n   followed by initialize with the same arguments and block, as Class#new. */\ntypedef mrb_value (*nfcx_alloc_fn)(mrb_state *, mrb_value);\nstatic struct { struct RClass *c; nfcx_alloc_fn f; } nfcx_alloc_tab[64];\nstatic int nfcx_alloc_n = 0;\nstatic nfcx_alloc_fn\nnfcx_alloc_for(struct RClass *c)\n{\n  for (; c; c = c->super) {\n    int i;\n    for (i = 0; i < nfcx_alloc_n; i++) {\n      if (nfcx_alloc_tab[i].c == c) return nfcx_alloc_tab[i].f;\n    }\n  }\n  return NULL;\n}\nstatic mrb_value\nnfcx_alloc_allocate(mrb_state *mrb, mrb_value self)\n{\n  nfcx_alloc_fn f = nfcx_alloc_for(mrb_class_ptr(self));\n  if (f == NULL) mrb_raise(mrb, E_RUNTIME_ERROR, \"no allocator for this class\");\n  return f(mrb, self);\n}\nstatic mrb_value\nnfcx_alloc_new(mrb_state *mrb, mrb_value self)\n{\n  mrb_value obj = nfcx_alloc_allocate(mrb, self);\n  mrb_value *argv;\n  mrb_int argc;\n  mrb_value blk;\n  mrb_get_args(mrb, \"*&\", &argv, &argc, &blk);\n  mrb_funcall_with_block(mrb, obj, mrb_intern_lit(mrb, \"initialize\"), argc, argv, blk);\n  return obj;\n}\nstatic void\nnfcx_alloc_register(mrb_state *mrb, struct RClass *c, nfcx_alloc_fn f)\n{\n  if (nfcx_alloc_n >= 64) mrb_raise(mrb, E_RUNTIME_ERROR, \"too many allocators\");\n  nfcx_alloc_tab[nfcx_alloc_n].c = c;\n  nfcx_alloc_tab[nfcx_alloc_n].f = f;\n  nfcx_alloc_n++;\n  mrb_define_class_method(mrb, c, \"allocate\", nfcx_alloc_allocate, MRB_ARGS_NONE());\n  mrb_define_class_method(mrb, c, \"new\", nfcx_alloc_new, MRB_ARGS_ANY());\n}",
     "caveat": "the allocator becomes the class's allocate and new (singleton methods, see the prelude); a subclass uses its superclass's allocator"
+  },
+    "rb_thread_current": {
+    "kind": "template",
+    "arity": 0,
+    "needs_mrb": false,
+    "template": "mrb_nil_value()",
+    "caveat": "the fork has no Thread: the current thread is nil (a single-threaded runtime; thread-local storage stays a stuck point)"
+  },
+    "rb_mutex_new": {
+    "kind": "template",
+    "arity": 0,
+    "needs_mrb": false,
+    "template": "mrb_nil_value()",
+    "caveat": "the fork has no Mutex: a mutex is nil; lock and unlock do nothing (a single-threaded runtime never contends for a lock)"
+  },
+    "rb_mutex_lock": {
+    "kind": "template",
+    "arity": 1,
+    "needs_mrb": false,
+    "template": "((void)($0), mrb_nil_value())",
+    "caveat": "no-op: a single-threaded runtime never contends for a lock"
+  },
+    "rb_mutex_unlock": {
+    "kind": "template",
+    "arity": 1,
+    "needs_mrb": false,
+    "template": "((void)($0), mrb_nil_value())",
+    "caveat": "no-op: a single-threaded runtime never contends for a lock"
   },
     "rb_undef_alloc_func": {
       "kind": "template",
