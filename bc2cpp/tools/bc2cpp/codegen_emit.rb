@@ -53,6 +53,8 @@ class CodeGen
       cycles = @guard_cycles
       result = with_fresh_method_state { yield }
       clean = !result[:code].include?('#error')
+      # CROSS_UNIT_ROW: the registration aspec, from the same variables the wrapper is built from.
+      (@probe_aspec ||= {})[label] = result[:aspec] if clean && result[:aspec]
       if cycles == @guard_cycles
         @clean_cache[label] = clean
       else
@@ -460,6 +462,17 @@ class CodeGen
     keys = lists.for_build(ENV['BC2CPP_BUILD_NAME'])
     keys |= lists.core_left_out | lists.core_excluded if ENV['BC2CPP_BUILD_NAME'] == 'closed'
     keys | ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').split(',').to_set
+  end
+
+  # OWNER_ROWS_TRIM (owner_call_direct.rb): a real gem build's owner calls carry rows only for the owners it leaves out.
+  # The proof's generation (OUT_SYMBOL never_called_probe) and a fixture keep every row; BC2CPP_OWNER_ROWS=left_out or
+  # =all forces either.
+  def owner_rows_trim?
+    case ENV['BC2CPP_OWNER_ROWS']
+    when 'left_out' then true
+    when 'all' then false
+    else BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == ENV['OUT_SYMBOL'] }
+    end
   end
 
   # The proof's output for this run (static_dispatch_lists.rb). A real gem build has to be given it: running without
@@ -1242,6 +1255,7 @@ class CodeGen
   def compile_all(only_owners: nil, other_owners: nil, live_labels: nil)
     @only_owners = only_owners
     @other_owners = other_owners
+    @live_labels = live_labels
     # SYM_DEVIRT: sym_call_target probes callees with compiles_clean?, whose
     # compile_method reads @only_owners/@other_owners, so both are set before any
     # compile_method runs. compile_method never assigns them.
@@ -1393,8 +1407,56 @@ class CodeGen
     out << "#pragma once\n"
     out << "#include <mruby.h>\n\n"
     compiled.each { |m| out << "#{decl_line(m)};\n" }
+    compiled.each { |m| out << "mrb_value #{cross_unit_thunk_name(m[:entry])}(mrb_state*, mrb_value);\n" if cross_unit_thunk?(m) }
     out << "\n"
     out
+  end
+
+  # CROSS_UNIT_ROW: an owner call in one compiled gem may carry a direct row for a method another gem compiles. The
+  # entry wrapper is static to its gem, so the gem exports it through a thunk, emitted right after the wrapper (the
+  # same translation unit when the output is sharded); --gc-sections drops the thunks no row names.
+  def cross_unit_thunk_name(entry)
+    "bc2cpp_xrow_#{entry}"
+  end
+
+  # The gem exports `m`'s entry: a clean compiled entry of an engine owner (other_unit_direct_entry's prediction is a
+  # subset of these, so a row it names always links).
+  def cross_unit_thunk?(m)
+    m[:entry] && m[:aspec] && !m[:unsupported] && !m[:code].include?('#error') &&
+      !BC2CPP_CORE_OWNERS.include?(m[:owner]) && %i[public private].include?(m[:visibility])
+  end
+
+  def cross_unit_thunk(m)
+    return '' unless cross_unit_thunk?(m)
+
+    "mrb_value #{cross_unit_thunk_name(m[:entry])}(mrb_state* M, mrb_value self) { return #{m[:entry]}(M, self); }\n\n"
+  end
+
+  # The direct row (OwnerCallDirect.entries' shape) for `owner`'s `name` when another gem of this link compiles it, or
+  # nil. Every unit forks from the same analysis, so whether that gem compiles the body (compiles_clean?) and the aspec
+  # it registers are the same here; only one plain Ruby `def` on an engine owner, live and not resumable, is predicted.
+  def other_unit_direct_entry(owner, name)
+    cache = (@other_unit_entries ||= {})
+    return cache[[owner, name]] if cache.key?([owner, name])
+
+    cache[[owner, name]] = predict_other_unit_entry(owner, name)
+  end
+
+  def predict_other_unit_entry(owner, name)
+    return nil unless @other_owners&.include?(owner) && !BC2CPP_CORE_OWNERS.include?(owner)
+    return nil if @only_owners&.include?(owner)
+
+    defs = (@registry[name] || []).select { |d| d.owner == owner }
+    return nil unless defs.size == 1
+
+    d = defs.first
+    return nil unless d.irep && d.kind.nil? && d.installer.nil? && !d.core && %i[public private].include?(d.visibility)
+    return nil if @live_labels && !@live_labels.include?(d.irep)
+    return nil if CoreDefs.core_source?(@ireps.fetch(d.irep).file)
+    return nil unless compiles_clean?(d.irep) && (aspec = @probe_aspec&.[](d.irep))
+
+    { owner: owner, name: name, entry: cross_unit_thunk_name(cpp_name(owner, name)), aspec: aspec,
+      visibility: d.visibility }
   end
 
   # `m[:arg_c_types]`: each mandatory position's C++ type (mrb_value, or
