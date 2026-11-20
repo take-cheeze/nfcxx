@@ -2992,6 +2992,8 @@ BC2CPP_MAIN = lambda do
   if (presym_header = ENV['BC2CPP_PRESYM_HEADER']) && File.file?(presym_header)
     SymbolCache.presym_names = File.read(presym_header).scan(/^\s*MRB_SYM__([A-Za-z_]\w*) = \d+,?$/).flatten.to_set
   end
+  # PRESYM_ALL (symbol_cache.rb): a real gem build's presym scan reads this output. BC2CPP_PRESYM_ALL=0 keeps the table.
+  SymbolCache.presym_all = ENV['BC2CPP_PRESYM_ALL'] != '0' && BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol }
   symbol_table = SymbolCache::Table.new
   print gen.emit_structs
   warn InitializerTables::PREFIX + JSON.generate(gen.initializer_table_evidence(compiled, InitializerTables.direct_candidate_keys(compiled, ireps, registry)))
