@@ -10,6 +10,7 @@ require "tempfile"
 require "tmpdir"
 require "fileutils"
 require "rbconfig"
+require_relative "nfcxx-setup-args"
 
 root = File.expand_path("..", __dir__)
 oracle = File.join(root, "tests", "driver-body", "nfcxx-bash")
@@ -51,12 +52,21 @@ begin
     File.write(env["NFCXX_TRACE_PENDING"], "")
     system(env["RUBY"], trace_rb, "open", trace_abs)
   end
-  status = system(env, "bash", program.path, *ARGV)
+  # B3: the setup stage's refusals (scripts/nfcxx-setup-args.rb): the bash prints the message and exits with the status, after the
+  # trace is opened and before anything else of the setup runs. Any other command goes on to the oracle unchanged.
+  refusal = NfcxxSetupArgs.refusal(ARGV, ENV)
+  if refusal
+    $stderr.puts(refusal.message)
+  else
+    status = system(env, "bash", program.path, *ARGV)
+  end
   unless trace_file.empty?
     system(env, env["RUBY"], trace_rb, "flush", env["NFCXX_TRACE_PENDING"]) if File.size?(env["NFCXX_TRACE_PENDING"])
     system(env["RUBY"], trace_rb, "close", trace_abs, Process.pid.to_s)
   end
-  status_code = status ? 0 : ($?.exitstatus || 1)
+  status_code = if refusal then refusal.status
+                else status ? 0 : ($?.exitstatus || 1)
+                end
 ensure
   program.unlink
   FileUtils.rm_rf(tmproot) unless keep
