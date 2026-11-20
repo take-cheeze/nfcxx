@@ -64,9 +64,12 @@ module NativeFrameUse
         name = Regexp.last_match(1)
         next if NOT_CALLS.include?(name)
 
+        # Read before brace_body: under mruby-onig the last match is one global, and brace_body's ASCII view (a gsub
+        # for a non-ASCII source) replaces it, where CRuby keeps it per frame.
+        signature = Regexp.last_match(0)
         open = Regexp.last_match.end(0) - 1
         body = NativeExpressionDevirt.brace_body(source, open)&.first
-        defs[name] << Def.new(name: name, path: path, body: body, signature: Regexp.last_match(0)) if body
+        defs[name] << Def.new(name: name, path: path, body: body, signature: signature) if body
       end
     end
     defs
