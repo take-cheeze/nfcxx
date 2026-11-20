@@ -2416,6 +2416,15 @@ class CodeGen
                                                                                 instance_scope: instance_scope,
                                                                                 singleton_arms: singleton_arms)
     end
+    mm_branches = ''
+    if reason == :method_missing_receiver && (mm_arms = method_missing_arm_branches(d, recv, name, argv))
+      mm_classes, mm_branches = mm_arms
+      reason = @closed_world.refusal(name, listed, site[:self_owner], installed, instances: instances, scoped: scoped,
+                                                                                native_free: native_free,
+                                                                                instance_scope: instance_scope,
+                                                                                singleton_arms: singleton_arms,
+                                                                                method_missing_arms: mm_classes)
+    end
     return dispatch.sub(/\n\z/, " /* CLOSED_WORLD kept: #{reason} */\n") if reason
 
     args = argv.empty? ? '' : ", #{argv.size}, #{argv.join(', ')}"
@@ -2423,10 +2432,25 @@ class CodeGen
     # to hold every such site to its source-line annotation.
     marker = NomethodReviewed.marker(name, self_receiver: !site[:self_owner].nil?, site: insn_source_site)
     error = "r#{d} = bc2cpp_nomethod_named(M, #{recv}, \"#{name}\"#{args}); #{marker}\n"
-    extra_branches = singleton_branches
+    extra_branches = singleton_branches + mm_branches
     return error if extra_branches.empty?
 
     "#{extra_branches}{\n      #{error.chomp}\n    }\n"
+  end
+
+  # METHOD_MISSING_ARMS: one exact-class arm per class whose instances reach a Ruby method_missing, each sending by
+  # name as the fallback would, so the else arm can close for every other receiver. [classes, branches], or nil.
+  def method_missing_arm_branches(d, recv, name, argv)
+    return nil if ENV['BC2CPP_METHOD_MISSING_ARMS'] == '0'
+
+    classes = @closed_world.method_missing_arm_classes
+    return nil if classes.nil? || classes.size > UNLISTED_CLASS_GUARDS_MAX
+
+    branches = classes.map do |klass|
+      code = dynamic_dispatch_line(d, recv, name, argv).sub(/\n\z/, " /* METHOD_MISSING_ARM #{klass} */\n")
+      "if (bc2cpp_class_is(M, #{recv}, #{owner_class_ptr_expr(klass)})) {\n#{code.gsub(/^/, '    ').chomp}\n    } else "
+    end
+    [classes, branches.join]
   end
 
   # SINGLETON_ARMS: one identity arm per module whose `.singleton` definition answers `name`,
@@ -2441,9 +2465,16 @@ class CodeGen
 
     branches = modules.sort.map do |mod|
       code = constant_object_send_code(name, argv.size, d, recv, argv, mod)
-      return nil unless code && code.include?('CLOSED_WORLD_CONSTANT_OBJECT')
+      # SINGLETON_ARM_DISPATCH: a module whose singleton method has no direct call here still gets its arm, which sends by
+      # name exactly as the fallback would for that one receiver; the arm is what lets every other receiver take the
+      # owner call.
+      unless code&.include?('CLOSED_WORLD_CONSTANT_OBJECT')
+        code = dynamic_dispatch_line(d, recv, name, argv).sub(/\n\z/, " /* SINGLETON_ARM_DISPATCH #{mod} */\n")
+      end
 
-      "if (mrb_type(#{recv}) == MRB_TT_MODULE && mrb_class_ptr(#{recv}) == #{owner_class_ptr_expr(mod)}) {\n" \
+      # CLASS_OBJECT_ARMS: a class object's arm tests for a class, a module's for a module.
+      tt = @closed_world.module_declared?(mod) ? 'MRB_TT_MODULE' : 'MRB_TT_CLASS'
+      "if (mrb_type(#{recv}) == #{tt} && mrb_class_ptr(#{recv}) == #{owner_class_ptr_expr(mod)}) {\n" \
         "#{code.gsub(/^/, '    ').chomp}\n    } else "
     end
     [modules, branches.join]

@@ -341,6 +341,10 @@ def build_registry(ireps, root_label)
           resolved = resolve_superclass_ref(irep, idx, superclass_reg, namespace)
           outer_nil = resolve_superclass_ref(irep, idx, reg, nil) == :none
           decl = { super: resolved, outer_nil: outer_nil, outer_qualified: !outer_qualified.nil? }
+          # FRESH_STRUCT_SUPER: `class X < Struct.new(...)` leaves the superclass unresolved (its members live on the
+          # anonymous parent), but that parent is a class Struct.new made right here, below Struct: X derives from no
+          # declared class. ClosedWorld#build_hierarchy reads this instead of counting X as a possible subclass of any.
+          decl[:fresh_struct_super] = true if resolved.nil? && fresh_struct_superclass?(irep, idx, superclass_reg)
           class_decls[opener_name] << decl
           # A bare constant in a namespace names the innermost enclosing one that defines it, or the top level (Ruby's
           # lexical lookup). Which one is known only once the walk has seen every definition, so it is settled after it.
@@ -735,6 +739,15 @@ end
 # lexical `namespace`, one level, like resolve_singleton_receiver), GETMCNST,
 # or a MOVE of one is recognized; anything else returns nil (absent from
 # superclass_of, never a wrong guess).
+# FRESH_STRUCT_SUPER: the superclass operand of the CLASS at +class_idx+ is the result of a `Struct.new(...)` sent
+# right before it (with or without a block).
+def fresh_struct_superclass?(irep, class_idx, reg)
+  send = BytecodeIR.for(irep).source_at(class_idx - 1)
+  return false unless send && %i[SEND SENDB].include?(send.op) && send.reg == reg
+
+  struct_new_receiver?(irep, class_idx - 1, send)
+end
+
 def resolve_superclass_ref(irep, before_idx, reg, namespace)
   ref = irep.constant_path(before_idx - 1, reg)
   case ref&.root
