@@ -601,6 +601,17 @@ cache_store() {  # cache_store OBJ: a whole entry appears at once (a partial cop
 # linked with EDG's runtime (libC.a: exceptions, operator new) before libstdc++, as tests/pathb-qbe/run.sh links them.
 # The forced includes (a .cu input's nfcxx_cuda.h, and -include) reach pathb-cc as -include, as they reach EDG's preinclude.
 pb_pre=(); for f in ${preinc[@]+"${preinc[@]}"}; do pb_pre+=(-include "$f"); done
+# cpc_plan_input: the state of the -c route as records (state_put groups), for scripts/nfcxx-pathb.rb --records (the plan of the
+# block below); the planner's header lists the groups. The values are the driver's own, as they are at that point.
+cpc_plan_input() {
+  state_put root "$root"; state_put backend "$backend"; state_put default_backend "$default_backend"
+  state_put compile_only "$compile_only"; state_put ncpp "$ncpp"; state_put outset "$outset"; state_put out "$out"
+  state_put std "$std"; state_put srcs ${srcs[@]+"${srcs[@]}"}; state_put files ${files[@]+"${files[@]}"}
+  state_put cflags ${cflags[@]+"${cflags[@]}"}; state_put pb_flags ${pb_flags[@]+"${pb_flags[@]}"}
+  state_put pb_pre ${pb_pre[@]+"${pb_pre[@]}"}; state_put cuda_opts ${cuda_opts[@]+"${cuda_opts[@]}"}
+  state_put modules "$modules"; state_put modopts ${modopts[@]+"${modopts[@]}"}
+  state_put nfcxx_argv ${nfcxx_argv[@]+"${nfcxx_argv[@]}"}; state_put cache_entry "$cache_entry"
+}
 if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
   # A .cu unit with kernel instances only the host compile makes (its .dev.kernels.unresolved is not empty) needs the second pass
   # (below, on the EDG route); Path B does not build them, so this unit takes the gcc route, which runs it.
@@ -609,21 +620,27 @@ if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
     exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
   fi
   cache_check   # a hit: the object is copied back and the program is done
-  # -c: one object per C++ file, named as the gcc and Path B backends name it (-o FILE for one file, else basename.o)
-  for f in ${files[@]+"${files[@]}"}; do
-    case $f in
-      -I*|-D*|-U*|-*|*.o|*.a|*.so) ;;
-      *) dst=$out; [ $outset = 1 ] || dst=$(printf '%s' "$f" | "${RUBY:-ruby}" "$root/scripts/nfcxx-objname.rb") || exit $?   # the object's name: scripts/nfcxx-objname.rb
-         prc=0; "$root/scripts/pathb-cc.rb" ${pb_flags[@]+"${pb_flags[@]}"} "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} ${pb_pre[@]+"${pb_pre[@]}"} ${cuda_opts[@]+"${cuda_opts[@]}"} ${modopts[@]+"${modopts[@]}"} "$f" -o "$dst" || prc=$?
-         if [ $prc != 0 ]; then
-           # the default backend failed on this file: the object is built again with gcc, which reports its own errors
-           [ $default_backend = 1 ] || exit $prc
-           echo "nfcxx: Path B did not build $f (status $prc); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)" >&2
-           exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
-         fi ;;
+  # the plan (scripts/nfcxx-pathb.rb --records, cpc_plan_input): one pathb-cc call per C++ input in files (objects named as
+  # nfcxx-objname.rb names them), each followed by its CHECK, the rule for its status, then the cache's STORE. The driver runs the
+  # lines in order: a RUN is a command, a CHECK ends the driver with the status or builds the program again with gcc (the planner
+  # decides which), a STORE stores the object. A planner that refuses ends the driver with its status.
+  cpc_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-pathb.rb" --records --shell < <(cpc_plan_input)) || exit $?
+  eval "$cpc_sh"
+  cpc_w=0; prc=0
+  for ((cpc_i = 0; cpc_i < ${#nfcxx_plan_kinds[@]}; cpc_i++)); do
+    cpc_n=${nfcxx_plan_nwords[cpc_i]}
+    cpc=("${nfcxx_plan_words[@]:cpc_w:cpc_n}"); cpc_w=$((cpc_w + cpc_n))
+    case ${nfcxx_plan_kinds[cpc_i]} in
+      RUN) prc=0; "${cpc[@]}" || prc=$? ;;
+      CHECK)
+        if [ $prc != 0 ]; then
+          if [ "${cpc[0]}" = exit ]; then exit $prc; fi
+          printf '%s%s%s\n' "${cpc[1]}" "$prc" "${cpc[2]}" >&2
+          exec "${cpc[@]:3}"
+        fi ;;
+      STORE) cache_store "${cpc[0]}" ;;
     esac
   done
-  if [ -n "$cache_entry" ] && [ ${#srcs[@]} = 1 ]; then cache_store "$out"; fi
   exit 0
 fi
 if [ $backend = pathb ]; then
