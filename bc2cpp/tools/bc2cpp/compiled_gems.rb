@@ -379,7 +379,7 @@ BC2CPP_SELF_GEMS = %w[
   mruby-array-ext mruby-hash-ext mruby-enum-ext mruby-io mruby-dir mruby-numeric-ext mruby-range-ext
   mruby-symbol-ext mruby-compar-ext mruby-fiber mruby-exit mruby-sprintf mruby-kernel-ext mruby-random
   mruby-math mruby-time mruby-bigint mruby-string-ext mruby-metaprog mruby-pack mruby-enumerator mruby-enum-lazy
-  mruby-struct mruby-set mruby-method mruby-proc-ext mruby-errno mruby-error mruby-encoding
+  mruby-struct mruby-set mruby-method mruby-proc-ext mruby-errno mruby-error mruby-encoding mruby-object-ext
   mruby-require mruby-onig-regexp mruby-marshal
   mruby-shellwords mruby-json mruby-digest mruby-fileutils mruby-tmpdir mruby-tempfile mruby-dir-glob
   mruby-strscan mruby-compare-by-identity mruby-yaml mruby-zlib
