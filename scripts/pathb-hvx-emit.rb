@@ -186,23 +186,32 @@ def match_loop_fn(fn)
   end
   refuse("function takes #{params.size} params, want 4") unless params.size == 4
   kinds = params.map { |p| p[3] }
-  # The two source pointers are int16, each signed or (const) unsigned.
+  # The two source pointers are int16 or int32, each signed or (const) unsigned.
   lane_ty = lambda do |k|
     if k == ["ptr", ["const", "short"]] || k == ["ptr", "short"]
       "short"
     elsif k == ["ptr", ["const", "unsigned_short"]] || k == ["ptr", "unsigned_short"]
       "unsigned_short"
+    elsif k == ["ptr", ["const", "int"]] || k == ["ptr", "int"]
+      "int"
+    elsif k == ["ptr", ["const", "unsigned_int"]] || k == ["ptr", "unsigned_int"]
+      "unsigned_int"
     else
       nil
     end
   end
-  refuse("params are not (ptr short) (ptr const-lane) x2 int") unless
-    kinds[0] == ["ptr", "short"] &&
+  refuse("params are not (ptr lane) (ptr const-lane) x2 int") unless
+    (lane_ty.call(kinds[0]) == "short" || lane_ty.call(kinds[0]) == "int") &&
     !lane_ty.call(kinds[1]).nil? &&
     !lane_ty.call(kinds[2]).nil? &&
     kinds[3] == "int"
-  b_unsigned = lane_ty.call(kinds[2]) == "unsigned_short"
-  a_unsigned = lane_ty.call(kinds[1]) == "unsigned_short"
+  dst_ty = lane_ty.call(kinds[0])
+  a_unsigned = lane_ty.call(kinds[1]) == "unsigned_short" || lane_ty.call(kinds[1]) == "unsigned_int"
+  b_unsigned = lane_ty.call(kinds[2]) == "unsigned_short" || lane_ty.call(kinds[2]) == "unsigned_int"
+  refuse("mixed lane widths") unless [lane_ty.call(kinds[0]), lane_ty.call(kinds[1]), lane_ty.call(kinds[2])]
+    .map { |t| t == "short" || t == "unsigned_short" ? 2 : 4 }.uniq.size == 1
+  stride = dst_ty == "short" ? "2" : "4"
+  narrow = stride == "2"
   # Map each param register to its slot via the prologue stores.
   reg_slot = {}
   pre.each do |s|
@@ -308,10 +317,18 @@ def match_loop_fn(fn)
   comp.each do |s|
     next unless s.is_a?(Array) && s[0] == "store"
     v = resolve.call(s[3])
-    next unless v.is_a?(Array) && v[0] == "iconv" && v[1] == "short"
-    w = resolve.call(v[2])
+    if narrow
+      # Narrowing shape: (store short DST (iconv short (wadd|cshr A B))).
+      next unless v.is_a?(Array) && v[0] == "iconv" && v[1] == "short"
+      v = resolve.call(v[2])
+    else
+      # Native-width shape: (store int DST (wadd A B)); no narrowing.
+      next unless s[1] == "int" && v.is_a?(Array) && v[0] == "wadd"
+    end
+    w = v
     shift = nil
     if w.is_a?(Array) && w[0] == "cshr" && w[3].is_a?(Array) && w[3][0] == "const"
+      refuse("widening multiply needs the narrowing shape") unless narrow
       shift = w[3][2]
       w = resolve.call(w[2])
     end
@@ -319,25 +336,41 @@ def match_loop_fn(fn)
     next if shift.nil? != (w[0] == "wadd")
     l = resolve.call(w[2])
     r = resolve.call(w[3])
-    next unless l.is_a?(Array) && l[0] == "iconv" && r.is_a?(Array) && r[0] == "iconv"
-    # The widening conversions fix lane signedness: (iconv int (load short))
-    # sign-extends, (iconv int (load unsigned_short)) zero-extends. The loads
-    # must agree with the pointer lanes.
-    lane_load_ty = lambda do |v|
-      x = v[2]
+    # A plain lets-chase, not the unwrapping resolve: the address stays put.
+    chase = lambda do |x|
       while x.is_a?(String) && lets.key?(x)
         x = lets[x]
       end
-      (x.is_a?(Array) && x[0] == "load") ? x[1] : nil
+      x
     end
-    next unless lane_load_ty.call(l) == (a_unsigned ? "unsigned_short" : "short")
-    next unless lane_load_ty.call(r) == (b_unsigned ? "unsigned_short" : "short")
+    if narrow
+      next unless l.is_a?(Array) && l[0] == "iconv" && r.is_a?(Array) && r[0] == "iconv"
+      # Lane loads sit under the iconv; their types fix the lane signedness.
+      l = chase.call(l[2])
+      r = chase.call(r[2])
+      exp_a = a_unsigned ? "unsigned_short" : "short"
+      exp_b = b_unsigned ? "unsigned_short" : "short"
+      next unless l.is_a?(Array) && l[0] == "load" && l[1] == exp_a
+      next unless r.is_a?(Array) && r[0] == "load" && r[1] == exp_b
+      la = resolve.call(l[2])
+      lb = resolve.call(r[2])
+    else
+      exp_a = a_unsigned ? "unsigned_int" : "int"
+      exp_b = b_unsigned ? "unsigned_int" : "int"
+      # Native width: the unwrapping resolve already returned the lane address
+      # indexes. Verify the load types behind them match the pointer lanes.
+      la = l
+      lb = r
+      next unless la.is_a?(Array) && la[0] == "index" && lb.is_a?(Array) && lb[0] == "index"
+      load_a = chase.call(w[2])
+      load_b = chase.call(w[3])
+      next unless load_a.is_a?(Array) && load_a[0] == "load" && load_a[1] == exp_a
+      next unless load_b.is_a?(Array) && load_b[0] == "load" && load_b[1] == exp_b
+    end
+    next unless la.is_a?(Array) && la[0] == "index" && lb.is_a?(Array) && lb[0] == "index"
     d = resolve.call(s[2])
     next unless d.is_a?(Array) && d[0] == "index"
-    la = resolve.call(l[2])
-    lb = resolve.call(r[2])
-    next unless la.is_a?(Array) && la[0] == "index" && lb.is_a?(Array) && lb[0] == "index"
-    # index forms: (index BASE IDX 2); base resolves to the right slot, idx to the counter.
+    # index forms: (index BASE IDX stride); base resolves to the right slot, idx to the counter.
     db = resolve.call(d[1])
     ab = resolve.call(la[1])
     bb = resolve.call(lb[1])
@@ -346,9 +379,9 @@ def match_loop_fn(fn)
     bi = resolve.call(lb[2])
     next unless db == "$#{dst}" && ab == "$#{a}" && bb == "$#{b}"
     next unless di == "$#{islot}" && ai == "$#{islot}" && bi == "$#{islot}"
-    next unless d[3] == "2" && la[3] == "2" && lb[3] == "2"
+    next unless d[3] == stride && la[3] == stride && lb[3] == stride
     if shift.nil?
-      found = [:add]
+      found = narrow ? [:add] : [:add32]
     else
       refuse("shift #{shift} is not a constant int") unless int_const?(shift)
       if !a_unsigned && !b_unsigned
@@ -362,7 +395,7 @@ def match_loop_fn(fn)
       end
     end
   end
-  refuse("loop body is not a[i]+b[i] narrowed into dst[i]") unless found
+  refuse("loop body is not a vectorizable lane loop") unless found
   [dst, a, b, n, found, a_unsigned, b_unsigned]
 end
 
@@ -389,17 +422,25 @@ begin
       fname = fn[1].is_a?(Array) ? fn[1][1] : fn[1]
       refuse("function #{fname}: #{e.message}")
     end
-    aty = au ? "unsigned short" : "short"
-    bty = bu ? "unsigned short" : "short"
-    if kind[0] == :add
-      out << "__attribute__((noinline)) void hvx_vec_add_i16(short *dst, const #{aty} *a, const #{bty} *b, int n) {"
+    lane = kind[0] == :add32 ? "int" : "short"
+    vw = lane == "short" ? 64 : 32
+    vadd = lane == "short" ? "vaddh" : "vaddw"
+    narrow_emit = lane == "short"
+    aty = au ? "unsigned #{lane}" : lane
+    bty = bu ? "unsigned #{lane}" : lane
+    if kind[0] == :add || kind[0] == :add32
+      out << "__attribute__((noinline)) void hvx_vec_add_#{narrow_emit ? "i16" : "i32"}(#{lane} *dst, const #{aty} *a, const #{bty} *b, int n) {"
       out << "  int i = 0;"
-      out << "  for (; i + 64 <= n; i += 64) {"
+      out << "  for (; i + #{vw} <= n; i += #{vw}) {"
       out << "    V128 va = *(const V128 *)(a + i);"
       out << "    V128 vb = *(const V128 *)(b + i);"
-      out << "    *(V128 *)(dst + i) = __builtin_HEXAGON_V6_vaddh_128B(va, vb);"
+      out << "    *(V128 *)(dst + i) = __builtin_HEXAGON_V6_#{vadd}_128B(va, vb);"
       out << "  }"
-      out << "  for (; i < n; ++i) dst[i] = (short)(a[i] + b[i]);"
+      if narrow_emit
+        out << "  for (; i < n; ++i) dst[i] = (short)(a[i] + b[i]);"
+      else
+        out << "  for (; i < n; ++i) dst[i] = a[i] + b[i];"
+      end
       out << "}"
     else
       k = kind[1]
