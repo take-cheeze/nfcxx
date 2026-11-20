@@ -84,3 +84,29 @@ A table keeps compile memory small, so use data for size tests.
 The qualified frame kernel (about 107 KB) also needs the frame carrier's ABI and frame inputs. Neither is
 covered here, so this shows the code window and loader accept a kernel of that size, not that the frame
 kernel runs.
+
+## npu-render's frame renderer on the NPU
+
+`frame/gen_frame_fill.py` builds a synthetic frame batch with fill commands only, and the expected tile in
+numpy. It inlines `frame_core.h` from an npu-render checkout (read at build time, not copied here), with an
+entry that calls the real `nr_render_span`. `frame/frame_check.py` runs the batch on the NPU, checks the
+output header and all 65,536 tile bytes, and times the inference.
+
+```sh
+python3 frame/gen_frame_fill.py <npu-render>/native/windows/ptl_kernels work/fill 1 64
+python3 frame/frame_check.py work/fill --movi-root ~/movitools/MVC_DEPEND --wine-host host --bench 300
+```
+
+Measured on takecheeze-h8 (sequential runs, 300 inferences each):
+
+| commands | status | tile | p50 (ms) | min (ms) |
+| --- | --- | --- | --- | --- |
+| 1 | 0 | 0 mismatches | 0.446 | 0.339 |
+| 64 | 0 | 0 mismatches | 0.724 | 0.546 |
+
+The renderer's text is 105,920 bytes with one hazard NOP. Per fill command the cost is about 4.4 µs
+over a fixed overhead of about 0.44 ms (which includes the 264 KB transfer each way). The p90 varies
+between runs (one run showed 17 ms), so compare p50 and min.
+
+These are fill commands only. The shader path (native programs such as the blur and textured
+composition) is not measured: it needs program records, vertex streams and textures in the batch.
