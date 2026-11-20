@@ -1,6 +1,6 @@
 (ir-module "vecadd_device.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
 
-(function "__nfcxx_sycl_k0"
+(function "__nfcxx_sycl_entry_k0"
   (ret void)
   (params (param %0 "ra" (ptr (const float))) (param %1 "rb" (ptr (const float))) (param %2 "rc" (ptr float)) (param %3 "n" int))
   (slot "ra" (ptr (const float)) 8 8)
