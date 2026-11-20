@@ -65,6 +65,35 @@ check.call('`pr[i]` on a parameter may run a Proc', node&.proc_call == true)
 _, _, node = analyze.call("class A; def m; a = [1, 2]; i = 0; a[i]; end; end\n")
 check.call('`a[i]` on an Array literal runs none', node&.proc_call == false)
 
+_, reach, = analyze.call(<<~RUBY)
+  class A
+    def m; @safe[0]; end
+    def initialize
+      @safe = []
+      @other = -> { 1 }
+      @chain = @safe
+      @left = @right
+      @right = @left
+    end
+    def later
+      @mixed = 1
+      [1].each { @mixed = -> { 2 } }
+    end
+  end
+  class B
+    def initialize; @safe = 2; end
+  end
+RUBY
+check.call('the ivar write index combines safe writes across classes', reach.send(:proc_free_ivar?, 'safe'))
+check.call('writes of another name do not contaminate a safe ivar', !reach.send(:proc_free_ivar?, 'other'))
+check.call('the ivar proof follows another safe ivar', reach.send(:proc_free_ivar?, 'chain'))
+check.call('a Proc write inside a nested block refutes the ivar proof', !reach.send(:proc_free_ivar?, 'mixed'))
+check.call('mutually recursive ivar writes remain unproven', !reach.send(:proc_free_ivar?, 'left') && !reach.send(:proc_free_ivar?, 'right'))
+check.call('an ivar with no writes retains the vacuous non-Proc proof', reach.send(:proc_free_ivar?, 'unwritten'))
+
+_, reach, = analyze.call('class A; def m; @safe = 1; instance_variable_set(:@safe, -> { 1 }); end; end')
+check.call('an unlisted dynamic write still disables the ivar proof', !reach.send(:proc_free_ivar?, 'safe'))
+
 _, reach, node = analyze.call("class A; def m; e = Enumerator; e.new { |y| y << 1 }; end; end\n")
 check.call('a generator literal block through a constant local builds an enumerator',
            node && reach.builds_enumerator?(node.label) && reach.nodes.values.count(&:generator) == 1)
