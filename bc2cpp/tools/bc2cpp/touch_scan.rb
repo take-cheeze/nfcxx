@@ -186,7 +186,21 @@ module TouchScan
       values = string_variable_values(name, text) if name.match?(IDENTIFIER)
       symbols[string_key(name)] = values if values
     end
-    { events: events, symbols: symbols }
+    { events: events, symbols: symbols, class_assigns: class_assigns(events, text) }
+  end
+
+  # NATIVE_LEAF_CORE (ClosedWorld#native_superclass_names): every right-hand side the file assigns to an identifier a
+  # class-making event (define_class*, class_new, obj_new, a funcall) passes as its class, so a superclass held in a
+  # local (`io = mrb_define_class(...)`, then `mrb_define_class(mrb, "File", io)`) can be resolved.
+  def self.class_assigns(events, text)
+    names = events.flat_map do |kind, args, *|
+      next [] unless kind.match?(/\A(?:define_class|class_new\z|obj_new\z|instance_new\z|funcall)/)
+
+      Array(args).map { |arg| arg.to_s.strip.sub(/\A(?:mrb_obj_value|mrb_class_ptr)\s*\(\s*(\w+)\s*\)\z/, '\\1') }
+    end
+    names.grep(IDENTIFIER).uniq.to_h do |name|
+      [name, text.scan(/(?<![\w.>])#{Regexp.escape(name)}[ \t\n]*=(?!=)[ \t\n]*([^;]*);/).flatten.map(&:strip)]
+    end
   end
 
   def self.native_classify(facts, decl_simples)

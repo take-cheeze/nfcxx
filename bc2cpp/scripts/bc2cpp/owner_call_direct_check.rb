@@ -21,6 +21,9 @@
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/owner_call_direct_check.rb
 ENV['BC2CPP_SIG_DIRS'] = ''
+# The runtime rows make a class the closed world does not see (Class.new at run time), which ARMS_COMPLETE_ELSE
+# rules out; off, the owner call stays the else they test.
+ENV['BC2CPP_ARMS_COMPLETE_ELSE'] = '0'
 
 require 'tmpdir'
 require 'fileutils'
