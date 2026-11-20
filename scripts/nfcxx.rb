@@ -186,18 +186,20 @@ begin
   # opened. Any other command goes on to the oracle unchanged.
   input, setup = driver_refusals
   refusal = input || setup
+  # the oracle's status is read here, before the trace calls below: each system call sets $?, so reading it after them
+  # gave the trace's status (0) for a failing build
+  oracle_code = 0
   if refusal
     $stderr.puts(refusal.message)
   else
-    status = system(env, "bash", program.path, *ARGV)
+    ok = system(env, "bash", program.path, *ARGV)
+    oracle_code = ok ? 0 : ($?.exitstatus || 1)
   end
   unless trace_file.empty?
     system(env, env["RUBY"], trace_rb, "flush", env["NFCXX_TRACE_PENDING"]) if File.size?(env["NFCXX_TRACE_PENDING"])
     system(env["RUBY"], trace_rb, "close", trace_abs, Process.pid.to_s)
   end
-  status_code = if refusal then refusal.status
-                else status ? 0 : ($?.exitstatus || 1)
-                end
+  status_code = refusal ? refusal.status : oracle_code
 ensure
   program.unlink
   FileUtils.rm_rf(tmproot) unless keep

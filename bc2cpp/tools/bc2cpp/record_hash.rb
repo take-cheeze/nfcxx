@@ -306,6 +306,7 @@ module RecordHash
 
     def initialize(ireps, registry, closed_world, native_paths, foreign_paths)
       @by_name = {}
+      @all_reasons = {}
       @global = nil
       @closed_world = closed_world
       @native = native_paths.map { |p| File.file?(p) ? File.read(p, mode: 'rb') : '' }
@@ -326,6 +327,18 @@ module RecordHash
 
     def reason(name)
       return @by_name[name] if @by_name.key?(name)
+
+      outside_reason(name)
+    end
+
+    # RECORD_FIELD_TRACE: why something other than a visible SETIV may write +name+, or nil. A reader named as a
+    # Symbol only reads it.
+    def write_reason(name)
+      why = (@all_reasons[name] || []).find { |r| r != READER_SYMBOL }
+      why || outside_reason(name)
+    end
+
+    def outside_reason(name)
       return 'accessor installed outside the registry' if [name, "#{name}="].any? { |n| @closed_world.invisibly_definable?(n) }
 
       pattern = /["']@#{Regexp.escape(name)}["']|MRB_IVSYM\(\s*#{Regexp.escape(name)}\s*\)/
@@ -337,7 +350,10 @@ module RecordHash
 
     private
 
+    READER_SYMBOL = 'reader named as a Symbol'
+
     def poison(name, why)
+      (@all_reasons[name] ||= []) << why
       @by_name[name] ||= why
     end
 
@@ -351,7 +367,7 @@ module RecordHash
           if insn.op == :LOADSYM
             @global ||= "#{insn.sym} escapes as a Symbol" if REFLECTION_SENDS.include?(insn.sym)
             # `send(:ui)` / `&:ui` / `method(:ui)` would call a reader without a visible call site.
-            poison(insn.sym, 'reader named as a Symbol') if @readers.include?(insn.sym) && !installer_args.include?(i)
+            poison(insn.sym, READER_SYMBOL) if @readers.include?(insn.sym) && !installer_args.include?(i)
           elsif BytecodeIR::Ops::CALL.include?(insn.op) && REFLECTION_SENDS.include?(insn.sym)
             literal = BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op) ? nil : literal_ivar_arg(irep, i, insn)
             literal ? poison(literal, "reflection #{insn.sym}") : (@global ||= "computed #{insn.sym}")

@@ -11,6 +11,8 @@
 #   MRBC            a host mrbc of this tree's mruby pin; without it one is built into BUILD_DIR/host.
 #   BC2CPP_LISTS_DIR  where the lists go (default BUILD_DIR/bc2cpp). CI points two builds of one job at the same
 #                   directory, so the second finds the first's file current.
+#   BC2CPP_LISTS_WORLD  the build the lists are proven for (tools/bc2cpp/lists_world.rb; default closed). Another
+#                   world's lists go to BUILD_DIR/bc2cpp-WORLD by default, and only that build takes their closed parts.
 #
 # BC2CPP_LISTS_REUSE=1 skips the proof and reuses the lists in lists_dir (local iteration only; CI computes its own).
 # Needs what closed_build.bash needs (ruby with prism, rake, a C compiler, bison, gperf); everything but the path
@@ -22,7 +24,10 @@ root="${BC2CPP_WORLD_ROOT:-$tree}"
 build_dir="${1:-$root/build-closed-bc2cpp}"
 mkdir -p "$build_dir"
 build_dir="$(cd "$build_dir" && pwd)"
-lists_dir="${BC2CPP_LISTS_DIR:-$build_dir/bc2cpp}"
+world="${BC2CPP_LISTS_WORLD:-closed}"
+default_dir="$build_dir/bc2cpp"
+[ "$world" = closed ] || default_dir="$build_dir/bc2cpp-$world"
+lists_dir="${BC2CPP_LISTS_DIR:-$default_dir}"
 lists="$lists_dir/static_dispatch_lists.json"
 
 # BC2CPP_LISTS_REUSE=1 (local iteration only): the lists already in lists_dir are used whatever tree they came from,
