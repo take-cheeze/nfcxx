@@ -30,6 +30,10 @@ def source(object_include)
       def self.copy?(m) = %i[clone dup].include?(m)
     end
 
+    module McRest
+      def self.tag(*a) = [:rest, a]
+    end
+
     class McTag
       def tag = :tag
     end
@@ -65,7 +69,7 @@ def source(object_include)
   RUBY
 end
 
-OWNERS = %w[McA McB McC McUser McMix McOuter McUtil McSolo McTag].freeze
+OWNERS = %w[McA McB McC McUser McMix McOuter McUtil McSolo McRest McTag].freeze
 
 def user_method(code, name)
   code[/^mrb_value McUser_#{name}_impl\(mrb_state\* M.*?(?=^(?:static )?(?:\[\[maybe_unused\]\] )?mrb_value \w+\(mrb_state\* M|\z)/m].to_s
@@ -117,6 +121,8 @@ Dir.mktmpdir('bc2cpp-module-definer-includers') do |dir|
         call(M, "t_solo", u, "t", 1, &solo);
         call(M, "t_tag", u, "t", 1, &tag);
         call(M, "t_a", u, "t", 1, &a);
+        mrb_value rest = mrb_obj_value(mrb_module_get(M, "McRest"));
+        call(M, "t_rest", u, "t", 1, &rest);
         return 0;
       }
     CPP
@@ -127,7 +133,8 @@ Dir.mktmpdir('bc2cpp-module-definer-includers') do |dir|
     interpreted = plain.call(sections['interpreted'])
     compiled = plain.call(sections['compiled'])
     expected = ['s_a => 6', 's_b => raised NoMethodError', 'l_a => :mix', 'l_b => :b', 'l_c => :mix', 'u => 2', 't_solo => :solo',
-                't_tag => :tag', 't_a => raised NoMethodError']
+                't_tag => :tag', 't_a => raised NoMethodError',
+                't_rest => [:rest, []]']
     suite.check('the interpreter gives the expected answers', interpreted == expected)
     puts "  interpreted: #{interpreted.inspect}" unless interpreted == expected
     suite.check('compiled matches interpreted', compiled == interpreted)

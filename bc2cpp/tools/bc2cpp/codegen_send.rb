@@ -2441,7 +2441,12 @@ class CodeGen
 
     branches = modules.sort.map do |mod|
       code = constant_object_send_code(name, argv.size, d, recv, argv, mod)
-      return nil unless code && code.include?('CLOSED_WORLD_CONSTANT_OBJECT')
+      # SINGLETON_ARM_DISPATCH: a module whose singleton method has no direct call here still gets its arm, which sends by
+      # name exactly as the fallback would for that one receiver; the arm is what lets every other receiver take the
+      # owner call.
+      unless code&.include?('CLOSED_WORLD_CONSTANT_OBJECT')
+        code = dynamic_dispatch_line(d, recv, name, argv).sub(/\n\z/, " /* SINGLETON_ARM_DISPATCH #{mod} */\n")
+      end
 
       "if (mrb_type(#{recv}) == MRB_TT_MODULE && mrb_class_ptr(#{recv}) == #{owner_class_ptr_expr(mod)}) {\n" \
         "#{code.gsub(/^/, '    ').chomp}\n    } else "
