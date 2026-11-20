@@ -31,7 +31,7 @@ require_relative 'rbs_record_values'
 # the build aborts on it like RBS_SEED_CONTRADICTION. Nothing is trusted on the declaration's word alone.
 #
 # Consumers: a verified name joins RecordHash.table (the unguarded RECORD_HASH_PROOF consumers keep their own
-# exact-class rules), and a literal-key read `@x[:k]` whose field names one class C (nil aside) is a receiver
+# exact-class rules, plus the classes an exact trace proves for a declared key: install_traced), and a literal-key read `@x[:k]` whose field names one class C (nil aside) is a receiver
 # HINT for C in guarded traces (trace_new_target's GETIDX arm), so the send keeps its class guard.
 module RbsRecordTypes
   CODE = 'TC1009'

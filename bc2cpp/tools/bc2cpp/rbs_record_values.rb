@@ -10,8 +10,9 @@ require_relative 'core_hierarchy_sigs'
 # conformance check. Beyond RbsRecordTypes.value_class_at (literals, `Klass.new`, the ClassLayout Array rule) a value
 # is traced through
 #   joins and moves     every reaching definition, each traced;
-#   `@ivar` reads       every SETIV of the name anywhere in the program, plus nil (an unset ivar), when no reflection,
-#                       attr_writer or outside source can write it (RecordHash::Poison, outside_ivar_names);
+#   `@ivar` reads       every SETIV of the name whose self can be an instance of the reader's class or a subclass
+#                       (every SETIV of the name when that class cannot be placed), plus nil (an unset ivar), when no
+#                       reflection, attr_writer or outside source can write it (RecordHash::Poison#write_reason);
 #   program calls       the union of the returns of EVERY definition of the name, so the receiver need not be known:
 #                       refused when a definition is native, core, outside the program, installed by a computed name,
 #                       or reachable through method_missing (closed world);
