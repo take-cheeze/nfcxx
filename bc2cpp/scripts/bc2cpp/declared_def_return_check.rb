@@ -10,9 +10,10 @@
 #      with an accessor is the Array body with no class-test chain, and the declaring body is guarded; so is a call
 #      on a fresh exact receiver; a self-call that a subclass override may answer, a `-> Array` declared on a
 #      body nothing resolves to, and BC2CPP_DECLARED_DEF_RETURNS=0 keep the chain;
-#   2. a guarded leaf body is not inlined (CALL_INLINE would skip the guard);
+#   2. a guarded leaf body is not inlined (CALL_INLINE would skip the guard); an `@x: Array[T]` declaration is
+#      guarded at its stores and, seeded into the slot's pool, makes a read of the slot exactly an Array;
 #   3. run on a full-core mruby against interpreted: the resolved sends answer as interpreted, and a wrong
-#      declaration raises the violation instead of reaching the unchecked body.
+#      declaration (or ivar store) raises the violation instead of reaching the unchecked body.
 #
 # Usage: MRBC=path/to/host/mrbc [BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/declared_def_return_check.rb
 
@@ -94,6 +95,17 @@ SOURCE = <<~RUBY
       ''
     end
   end
+
+  class Roster
+    def initialize(list)
+      @members = list
+      nil
+    end
+
+    def none?
+      @members.empty?
+    end
+  end
 RUBY
 
 SIGNATURES = <<~RBS
@@ -106,8 +118,11 @@ SIGNATURES = <<~RBS
   class Base
     def rows: () -> Array
   end
+  class Roster
+    @members: Array[Integer]
+  end
 RBS
-OWNERS = %w[State Menu Outside Base Sub].freeze
+OWNERS = %w[State Menu Outside Base Sub Roster].freeze
 
 HARNESS = <<~'CPP'
   static mrb_value eval(mrb_state* M, const char* src) { return mrb_load_string(M, src); }
@@ -127,6 +142,11 @@ HARNESS = <<~'CPP'
     call(M, "count of none", menu2, "count");
     call(M, "wrong declaration", menu, "bad_count");
     call(M, "wrong hinted leaf", menu, "use_ratio");
+    mrb_value list = eval(M, "[1]");
+    mrb_value roster = mrb_obj_new(M, mrb_class_get(M, "Roster"), 1, &list);
+    call(M, "roster none?", roster, "none?");
+    mrb_value text = eval(M, "'x'");
+    call(M, "wrong ivar", mrb_obj_value(mrb_class_get(M, "Roster")), "new", 1, &text);
     return 0;
   }
 CPP
@@ -165,6 +185,9 @@ Dir.mktmpdir('declared-def-return') do |dir|
   check.call('a call on a fresh exact receiver reads the declaration too', exact_empty.call(on['Outside#probe']))
   check.call('a self-call a subclass override may answer keeps its chain',
              !exact_empty.call(on['Base#first_empty?']) && chain.call(on['Base#first_empty?']))
+  check.call('a declared `@x: Array[T]` store is guarded and its read is the Array body (CORE_IVAR_KINDS)',
+             on['Roster#initialize'].to_s.include?('DECLARED_IVAR_GUARD Roster#@members') &&
+               exact_empty.call(on['Roster#none?']) && !chain.call(on['Roster#none?']))
   check.call('the guarded leaf is not inlined', !on['Menu#use_ratio'].to_s.include?('CALL_INLINE Menu#ratio') &&
                                                 on['Menu#use_ratio'].to_s.include?('Menu_ratio_impl('))
 
@@ -181,7 +204,8 @@ Dir.mktmpdir('declared-def-return') do |dir|
                !compiled.empty? && compiled - wrong.call(compiled) == interpreted - wrong.call(interpreted))
     check.call('a wrong declaration raises the violation in the compiled run',
                wrong.call(compiled) == ['wrong declaration => raised BC2cppDeclarationViolation',
-                                        'wrong hinted leaf => raised BC2cppDeclarationViolation'])
+                                        'wrong hinted leaf => raised BC2cppDeclarationViolation',
+                                        'wrong ivar => raised BC2cppDeclarationViolation'])
     warn output unless built && compiled.size == interpreted.size
   else
     puts '  SKIP run: no full-core mruby build'
