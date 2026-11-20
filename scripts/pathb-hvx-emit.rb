@@ -1,10 +1,12 @@
 #!/usr/bin/env ruby
 # Path B: prototype IR -> C+HVX emitter (docs/notes/hexagon.md, section 5).
 #
-# Handles exactly one pattern: a counted loop over three int16 pointers and an
-# int bound whose body is a wrapping add narrowed back to short (the hvx_add_i16
-# shape), matched structurally (no function names are consulted). The loop is
-# emitted as a vaddh vector main loop plus a scalar tail (tests/hexagon/hvx_tail.c).
+# Handles exactly two patterns, matched structurally (no function names consulted):
+# a counted loop over three int16 pointers and an int bound whose body is a wrapping
+# add narrowed back to short (emitted as a vaddh vector main loop plus a scalar tail),
+# or a widening multiply with a constant arithmetic shift narrowed back to short
+# (emitted as vmpyhv, split through a stack temporary, narrowed with vasrwh with the
+# odd half first so lanes come back sequential, plus a scalar tail).
 # Anything else in the module is refused, never silently dropped.
 #
 # Usage: scripts/mrb.rb scripts/pathb-hvx-emit.rb [FILE.ir | -]   C with HVX builtins on stdout
@@ -114,6 +116,20 @@ def merge_slotrefs(x)
   else
     x
   end
+end
+
+# No Regexp in mruby: true when s is an optional minus followed by digits.
+def int_const?(s)
+  return false unless s.is_a?(String) && s.bytesize > 0
+  i = 0
+  i = 1 if s.getbyte(0) == 45
+  return false if i >= s.bytesize
+  while i < s.bytesize
+    c = s.getbyte(i)
+    return false if c < 48 || c > 57
+    i += 1
+  end
+  true
 end
 
 def refuse(reason)
@@ -273,14 +289,22 @@ def match_loop_fn(fn)
     x
   end
   # The single store: (store short DST (iconv short (wadd A B))) with
-  # DST = (index $dst i), A/B = widened (load (index $a/$b i)).
+  # DST = (index $dst i), A/B = widened (load (index $a/$b i)); or the
+  # multiply-shift shape (iconv short (cshr int (wmul A B) (const K))).
+  # Returns [:add] or [:mul, shift].
   found = nil
   comp.each do |s|
     next unless s.is_a?(Array) && s[0] == "store"
     v = resolve.call(s[3])
     next unless v.is_a?(Array) && v[0] == "iconv" && v[1] == "short"
     w = resolve.call(v[2])
-    next unless w.is_a?(Array) && w[0] == "wadd"
+    shift = nil
+    if w.is_a?(Array) && w[0] == "cshr" && w[3].is_a?(Array) && w[3][0] == "const"
+      shift = w[3][2]
+      w = resolve.call(w[2])
+    end
+    next unless w.is_a?(Array) && (w[0] == "wadd" || w[0] == "wmul")
+    next if shift.nil? != (w[0] == "wadd")
     l = resolve.call(w[2])
     r = resolve.call(w[3])
     next unless l.is_a?(Array) && l[0] == "iconv" && r.is_a?(Array) && r[0] == "iconv"
@@ -299,10 +323,15 @@ def match_loop_fn(fn)
     next unless db == "$#{dst}" && ab == "$#{a}" && bb == "$#{b}"
     next unless di == "$#{islot}" && ai == "$#{islot}" && bi == "$#{islot}"
     next unless d[3] == "2" && la[3] == "2" && lb[3] == "2"
-    found = true
+    if shift.nil?
+      found = [:add]
+    else
+      refuse("shift #{shift} is not a constant int") unless int_const?(shift)
+      found = [:mul, shift.to_i]
+    end
   end
   refuse("loop body is not a[i]+b[i] narrowed into dst[i]") unless found
-  [dst, a, b, n]
+  [dst, a, b, n, found]
 end
 
 src = if ARGV[0].nil? || ARGV[0] == "-"
@@ -318,22 +347,40 @@ begin
   refuse("module has no functions") if fns.empty?
   out = []
   out << "typedef int V128 __attribute__((__vector_size__(128), __aligned__(128)));"
+  out << "typedef int P256 __attribute__((__vector_size__(256), __aligned__(256)));"
   fns.each do |fn|
+    kind = nil
     begin
-      match_loop_fn(fn)
+      _dst, _a, _b, _n, kind = match_loop_fn(fn)
     rescue Refused => e
       fname = fn[1].is_a?(Array) ? fn[1][1] : fn[1]
       refuse("function #{fname}: #{e.message}")
     end
-    out << "__attribute__((noinline)) void hvx_vec_add_i16(short *dst, const short *a, const short *b, int n) {"
-    out << "  int i = 0;"
-    out << "  for (; i + 64 <= n; i += 64) {"
-    out << "    V128 va = *(const V128 *)(a + i);"
-    out << "    V128 vb = *(const V128 *)(b + i);"
-    out << "    *(V128 *)(dst + i) = __builtin_HEXAGON_V6_vaddh_128B(va, vb);"
-    out << "  }"
-    out << "  for (; i < n; ++i) dst[i] = (short)(a[i] + b[i]);"
-    out << "}"
+    if kind[0] == :add
+      out << "__attribute__((noinline)) void hvx_vec_add_i16(short *dst, const short *a, const short *b, int n) {"
+      out << "  int i = 0;"
+      out << "  for (; i + 64 <= n; i += 64) {"
+      out << "    V128 va = *(const V128 *)(a + i);"
+      out << "    V128 vb = *(const V128 *)(b + i);"
+      out << "    *(V128 *)(dst + i) = __builtin_HEXAGON_V6_vaddh_128B(va, vb);"
+      out << "  }"
+      out << "  for (; i < n; ++i) dst[i] = (short)(a[i] + b[i]);"
+      out << "}"
+    else
+      k = kind[1]
+      out << "__attribute__((noinline)) void hvx_vec_mul_i16(short *dst, const short *a, const short *b, int n) {"
+      out << "  int wtmp[64] __attribute__((aligned(256)));"
+      out << "  int i = 0;"
+      out << "  for (; i + 64 <= n; i += 64) {"
+      out << "    V128 va = *(const V128 *)(a + i);"
+      out << "    V128 vb = *(const V128 *)(b + i);"
+      out << "    *(P256 *)wtmp = __builtin_HEXAGON_V6_vmpyhv_128B(va, vb);"
+      out << "    V128 v0 = *(const V128 *)wtmp, v1 = *(const V128 *)((const char *)wtmp + 128);"
+      out << "    *(V128 *)(dst + i) = (V128)__builtin_HEXAGON_V6_vasrwh_128B(v1, v0, #{k});"
+      out << "  }"
+      out << "  for (; i < n; ++i) dst[i] = (short)((a[i] * b[i]) >> #{k});"
+      out << "}"
+    end
   end
   puts out.join("\n")
 rescue Refused => e
