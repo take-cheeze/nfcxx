@@ -117,13 +117,30 @@ class ClosedWorld
   end
   private :profile_mark
 
-  def initialize(ireps:, registry:, class_decls:, walked:, native_paths:, ruby_paths:, module_names: Set.new, root_label: nil)
+  def initialize(ireps:, registry:, class_decls:, walked:, native_paths:, ruby_paths:, module_names: Set.new, root_label: nil,
+                 struct_classes: [], included: nil, prepended: nil, unknown_mixins: nil, constant_writes: nil)
     @ireps = ireps
     @module_names = module_names.to_set
     @root_label = root_label
     @clone_sent = false
     @registry = registry
-    @class_decls = class_decls
+    # STRUCT_CLASS_DECLS: a class body-level `X = Struct.new(:a, ...)` whose members the registry lists (struct_member_lists)
+    # runs once, before main, and makes X a class below Struct. It is declared here as such, so its members (registered
+    # definers of X) and the methods its block defines bind like any declared class's (see struct_class?).
+    @struct_classes = struct_classes.to_set
+    # QUALIFIED_REBINDS: the registry's class-body and top-level constant writes, [irep label, index] => the qualified
+    # constant written (constant_assignment_sites). Such a write rebinds that path only; any other write rebinds every
+    # constant of its bare name (rebound?).
+    @constant_write_sites = (constant_writes || []).to_h { |site| [[site[:irep], site[:idx]], site[:name]] }
+    @rebound_qualified = Hash.new(0)
+    @rebound_bare = Set.new
+    # MODULE_DEFINER_INCLUDERS: the registry's class-body mixins (owner => modules), or nil when the caller has none.
+    @mixins = included && prepended ? merge_mixins(included, prepended) : nil
+    @unknown_mixins = unknown_mixins
+    @class_decls = class_decls.dup
+    @struct_classes.each do |owner|
+      @class_decls[owner] = [{ super: 'Struct', outer_nil: true, outer_qualified: false, struct: true }] unless @class_decls.key?(owner)
+    end
     @walked = walked
     @global_refusal = nil
     @outside_names = Set.new
@@ -171,6 +188,7 @@ class ClosedWorld
     # bound to a class with that superclass returns it, so two of them bind one class (see native_class_unshadowed?).
     @outside_plain_class_defines = Hash.new(0)
     @deferred_constant_writes = Set.new
+    @struct_factory_members = []
     @dynamic_constant_mutation = false
     @basic_object_referenced = false
     @singleton_makers = []
@@ -448,7 +466,7 @@ class ClosedWorld
   end
 
   def bounded_subclasses(klass, set)
-    return nil if @global_refusal || !@wild.empty? || @rebound.include?(simple(klass))
+    return nil if @global_refusal || !@wild.empty? || rebound?(klass)
     return nil unless set.all? { |k| @class_decls.key?(k) || k == klass }
 
     names = set.map { |k| simple(k) }.to_set
@@ -498,7 +516,7 @@ class ClosedWorld
   # include it: native_file_facts names every include a non-core native can make (see native_include_facts). A foreign
   # Ruby source that spells the name stays refused, since its include sites are not classified.
   def includer_candidates_uncached(mod)
-    return nil if @global_refusal || !@wild.empty? || !module_declared?(mod) || @rebound.include?(simple(mod))
+    return nil if @global_refusal || !@wild.empty? || !module_declared?(mod) || rebound?(mod)
 
     name = simple(mod)
     return nil if @outside_include_open || @outside_include_names.include?(name) || @outside_alias_names.include?(name)
@@ -762,7 +780,7 @@ class ClosedWorld
     # their constant identity needs the same closed-world stability proof.
     return false if owner.include?('.') || owner.include?('<')
     return false unless ConstructClassNames.table&.key?(owner)
-    return false if @rebound.include?(simple(owner))
+    return false if rebound?(owner)
 
     touches_for([owner.split('::').first, simple(owner)].uniq, source: true).empty?
   end
@@ -777,7 +795,7 @@ class ClosedWorld
     # already rejected bytecode, native, and foreign constant reassignment.
     return true if UniqueClassNames.table&.value?(owner)
 
-    !@rebound.include?(simple(owner))
+    !rebound?(owner)
   end
 
   # `self` in a `def self.x` of a declared module is that module's
@@ -1727,12 +1745,19 @@ class ClosedWorld
         when :SETCONST, :SETMCNST
           name = insn.const_name.to_s
           @rebound << name
+          qualified = insn.op == :SETCONST && @constant_write_sites[[irep.label, idx]]
+          if qualified
+            @rebound_qualified[qualified] += 1
+          else
+            @rebound_bare << name
+          end
           @constant_write_counts[name] += 1
           @deferred_constant_writes << name unless @walked.include?(irep.label)
         end
       end
     end
     resolve_struct_splats
+    resolve_struct_class_members
     resolve_deferred_mixin_modules
     resolve_installer_symbol_loads
     # A read name (scan_factory) can run a definition the scan only finishes seeing here.
@@ -2316,16 +2341,16 @@ class ClosedWorld
         end
         argc = call.argc if struct_keyword_init?(call)
         return global!(:class_factory_escape) unless argc
-
+        member_names = []
         argc.times do |argument|
           names = factory_argument_names(irep, use, call.reg.to_i + argument + 1, %i[LOADSYM])
           return global!(:class_factory_escape) unless names
 
-          names.each do |name|
-            note_unknown_def(name, nil)
-            note_unknown_def("#{name}=", nil)
-          end
+          member_names.concat(names.to_a)
         end
+        # STRUCT_CLASS_DECLS: whether this is a declared struct class's factory is known once every constant write is
+        # counted (resolve_struct_class_members).
+        @struct_factory_members << [irep, use, call, member_names]
       when 'Class'
         return global!(:class_factory_escape) unless argc && argc <= 1
 
@@ -2361,6 +2386,19 @@ class ClosedWorld
       return nil unless name.is_a?(String)
 
       name
+    end
+  end
+
+  # STRUCT_CLASS_DECLS: a Struct.new's members are unknown definers unless the call is a declared struct class's one
+  # `X = Struct.new(...)`, whose members the registry lists as definers of X.
+  def resolve_struct_class_members
+    @struct_factory_members.each do |irep, use, call, names|
+      next if struct_class_factory?(irep, use, call)
+
+      names.each do |name|
+        note_unknown_def(name, nil)
+        note_unknown_def("#{name}=", nil)
+      end
     end
   end
 
@@ -2448,12 +2486,40 @@ class ClosedWorld
   def opaque?(owner)
     return true if owner.include?('.') || owner.include?('<') || BOOT_CLASSES.include?(owner)
     return true unless @class_decls.key?(owner)
-    return true if @rebound.include?(simple(owner)) || @dynamic_subclassed.include?(simple(owner))
+    return true if (rebound?(owner) && !struct_class?(owner)) || @dynamic_subclassed.include?(simple(owner))
 
     # Touch scans are complete after construction; declaration and rebinding guards stay live.
     return @opaque_touches.fetch(owner) { @opaque_touches[owner] = outside_class_touch?(owner) } if @opaque_touches
 
     outside_class_touch?(owner)
+  end
+
+  # QUALIFIED_REBINDS: may the constant naming +owner+ be bound to another value? A write the registry qualified
+  # rebinds only its own path; a write it did not (in a method body, `Outer::X =`, or one it does not record) rebinds
+  # every constant of that bare name.
+  def rebound?(owner)
+    @rebound_bare.include?(simple(owner)) || @rebound_qualified[owner].positive?
+  end
+
+  # STRUCT_CLASS_DECLS: X is a struct class whose one constant write is the `X = Struct.new(...)` the registry saw. That
+  # write is a declaration, not a rebinding: a second write of X, or a write of its bare name the registry did not
+  # qualify, leaves X rebound.
+  def struct_class?(owner)
+    return false unless @struct_classes.include?(owner)
+
+    @rebound_qualified[owner] == 1 && !@rebound_bare.include?(simple(owner))
+  end
+
+  # STRUCT_CLASS_DECLS: the Struct.new call at +use+ is the one `X = Struct.new(...)` of a declared struct class, so the
+  # registry holds its members as definers of X.
+  def struct_class_factory?(irep, use, call)
+    return false unless @walked.include?(irep.label)
+
+    store = BytecodeIR.for(irep).source_at(use + 1)
+    return false unless store&.op == :SETCONST && store.reg_operand == call.reg
+
+    owner = @constant_write_sites[[irep.label, use + 1]]
+    !owner.nil? && struct_class?(owner)
   end
 
   def outside_class_touch?(owner)
@@ -2591,6 +2657,51 @@ class ClosedWorld
     modules
   end
 
+  def merge_mixins(included, prepended)
+    merged = Hash.new { |h, k| h[k] = Set.new }
+    [included, prepended].each { |table| table.each { |owner, mods| merged[owner].merge(Array(mods)) } }
+    merged
+  end
+
+  # MODULE_DEFINER_INCLUDERS: the classes whose instances reach +mod+'s instance methods, through a class-body
+  # include or prepend of +mod+ or of a module that includes it, or nil when that is not known: +mod+ is not a
+  # declared module, an includer may be one the registry does not see (known_includer_candidates), an outside
+  # source or a dynamic mixin may name it, some mixin did not resolve, or a root class (Object, Kernel, BasicObject)
+  # takes it, which reaches every object. A module nothing includes answers no instance: its instance methods (the
+  # private copies `module_function` makes) bind no receiver, and its `.singleton` definitions are judged on their own.
+  def module_definer_includers(mod)
+    return nil unless @mixins && @unknown_mixins && @unknown_mixins.empty? && @module_names.include?(mod)
+
+    @module_includer_memo ||= {}
+    return @module_includer_memo[mod] if @module_includer_memo.key?(mod)
+
+    @module_includer_memo[mod] = module_includers_uncached(mod)
+  end
+
+  def module_includers_uncached(mod)
+    return nil if known_includer_candidates(mod).nil? || outside_class_touch?(mod)
+
+    classes = Set.new
+    seen = Set[mod]
+    work = [mod]
+    until work.empty?
+      target = work.pop
+      @mixins.each do |owner, mods|
+        next unless mods.include?(target)
+        return nil if BOOT_CLASSES.include?(owner) || owner.include?('.') || owner.include?('<')
+
+        if @module_names.include?(owner)
+          return nil if outside_class_touch?(owner)
+
+          work << owner if seen.add?(owner)
+        else
+          classes << owner
+        end
+      end
+    end
+    classes
+  end
+
   def required_classes(name, instance_self = false, singleton_arms = nil)
     @memo[[name, instance_self, singleton_arms]] ||= begin
       defs = @registry.fetch(name, []).reject { |d| d.owner == '<native>' }
@@ -2601,6 +2712,14 @@ class ClosedWorld
           next if instance_self || singleton_arms&.include?(d.owner.delete_suffix('.singleton'))
 
           break reason = :singleton_definer
+        end
+        if (includers = module_definer_includers(d.owner))
+          # MODULE_DEFINER_INCLUDERS: a module's method is reached through the classes that include or prepend it.
+          blocked = includers.find { |c| opaque?(c) || descendants(c).any? { |sub| opaque?(sub) } }
+          break reason = :opaque_definer if blocked
+
+          includers.each { |c| required << c; required.merge(descendants(c)) }
+          next
         end
         break reason = :opaque_definer if opaque?(d.owner)
 
