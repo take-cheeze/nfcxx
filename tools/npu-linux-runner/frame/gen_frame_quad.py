@@ -8,7 +8,7 @@ signature that nr_native_check expects for native 60.
 Each draw covers a random clip rectangle with a full-tile quad (two triangles). The expected tile is the
 colour quantised to bytes, written into each clip rectangle in command order.
 
-usage: gen_frame_quad.py <ptl_kernels dir> <out dir> [seed] [draws] [--direct-row22]
+usage: gen_frame_quad.py <ptl_kernels dir> <out dir> [seed] [draws] [--nested-dispatch]
 """
 import pathlib
 import re
@@ -18,6 +18,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from flat_dispatch import flatten  # noqa: E402
 from gen_frame_fill import ENTRY, HEADER, COMMAND, SPAN, W, H, MAGIC, inline  # noqa: E402
 
 NATIVE = 60                       # 38 + 22: passthrough vertex stage, row 22 (immediate colour, no sample)
@@ -141,26 +142,19 @@ def build(src, seed, draws):
     return elements, tile.reshape(-1), draws, color
 
 
-# On the NPU build, nr_native_row loses its row argument when it reaches nr_row_22 through the nested
-# dispatch tree: row->immediates reads zero inside nr_row_22 but is correct at nr_native_row's entry.
-# Calling nr_row_22 directly gives the correct colour for every covered pixel (see README).
-DISPATCH_SHORTCUT = "    if (native == 22u) { nr_row_22(row); return; }\n"
-DISPATCH_HEAD = "NR_NOINLINE void nr_native_row(nr_u32 native, const nr_row *row) {\n    if (native >= 38u) native -= 38u;\n"
 
 
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    direct_row22 = "--direct-row22" in sys.argv
+    nested = "--nested-dispatch" in sys.argv
     src_dir, out = pathlib.Path(args[0]), pathlib.Path(args[1])
     seed = int(args[2]) if len(args) > 2 else 1
     draws = int(args[3]) if len(args) > 3 else 16
     out.mkdir(parents=True, exist_ok=True)
     src = (src_dir / "frame_programs.h").read_text()
     core = inline(src_dir / "frame_core.h")
-    if direct_row22:
-        if core.count(DISPATCH_HEAD) != 1:
-            raise SystemExit("nr_native_row head not found; the workaround does not apply to this source")
-        core = core.replace(DISPATCH_HEAD, DISPATCH_HEAD + DISPATCH_SHORTCUT)
+    if not nested:
+        core = flatten(core)      # the nested tree gives wrong rows on the NPU build (see flat_dispatch.py)
     (out / "frame_fill_entry.c").write_text(core + ENTRY)
     elements, tile, n, color = build(src, seed, draws)
     np.save(out / "frame_input.npy", elements)

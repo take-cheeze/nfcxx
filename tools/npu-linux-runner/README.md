@@ -120,23 +120,43 @@ The program record's signature is solved from the interpolation field to match `
 Finding: in the NPU build, `nr_native_row` reaches `nr_row_22` through its nested dispatch tree with the
 row argument wrong. `row->immediates` reads zero inside `nr_row_22`, but the value is correct at the entry
 of `nr_native_row` and at the rasteriser's handoff. The same row called directly from the top of
-`nr_native_row` gives the correct colour for every covered pixel. `--direct-row22` inserts that shortcut
-into the generated entry. The result below uses it, so it measures the workaround, not the unpatched
-dispatch. Whether the Windows build has the same behaviour was not tested here.
+`nr_native_row` gives the correct colour for every covered pixel. The generator now lowers the nested tree to a flat chain by default (`frame/flat_dispatch.py`), which
+gives correct output without the shortcut. `--nested-dispatch` reproduces the original tree.
 
-Measured on takecheeze-h8 (sequential runs, 300 inferences each, all tiles match):
+Measured on takecheeze-h8 (sequential runs, 300 inferences each, all tiles match, flat dispatch):
 
 | draws | status | p50 (ms) | min (ms) |
 | --- | --- | --- | --- |
 | 1 | 0 | 0.469 | 0.433 |
-| 16 | 0 | 0.956 | 0.808 |
+| 16 | 0 | 0.982 | 0.830 |
 
 About 32 µs per draw (two triangles each, row by row over the clip rectangle), against about 4.4 µs per
 fill command. These numbers include the fixed inference overhead of about 0.44 ms.
 
 ```sh
-python3 frame/gen_frame_quad.py <npu-render>/native/windows/ptl_kernels work/quad 1 16 --direct-row22
+python3 frame/gen_frame_quad.py <npu-render>/native/windows/ptl_kernels work/quad 1 16
 python3 frame/frame_check.py work/quad --movi-root ~/movitools/MVC_DEPEND --wine-host host --bench 300
 ```
 
-Not yet measured: blur and textured composition, which need texture windows in the batch.
+## Textured quads
+
+`frame/gen_frame_textured.py` samples a 128x128 opaque texture in an atlas window through native 39
+(38 + row 1: passthrough vertex stage; row 1 returns sample x varying 0, and varying 0 is 1.0 here). The
+UVs are pixel centres over 128, so each covered pixel must return its own texel. All covered pixels match.
+
+| draws | status | p50 (ms) | min (ms) |
+| --- | --- | --- | --- |
+| 1 | 0 | 0.685 | 0.526 |
+| 16 | 0 | 1.193 | 1.153 |
+
+About 34 µs per textured draw at p50 (solid colour: about 32 µs), against a fill command at about 4.4 µs.
+The single-draw cost is higher than the solid quad's (0.685 ms against 0.469 ms), which points to a fixed
+cost of the textured path per inference.
+
+Not yet measured: blur (multi-pass) and bilinear minification; the sample here maps one texel per pixel.
+
+## Lowering
+
+`frame/flat_dispatch.py` flattens `nr_native_row`'s nested tree into `if (native == k) { nr_row_k(row); return; }`
+for every row function present. It is applied to the generated entry for both the quad and textured batches.
+
