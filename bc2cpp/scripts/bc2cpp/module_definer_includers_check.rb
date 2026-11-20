@@ -54,7 +54,7 @@ def source(object_include)
   RUBY
 end
 
-OWNERS = %w[McA McB McC McUser].freeze
+OWNERS = %w[McA McB McC McUser McMix McOuter McUtil].freeze
 
 def user_method(code, name)
   code[/^mrb_value McUser_#{name}_impl\(mrb_state\* M.*?(?=^(?:static )?(?:\[\[maybe_unused\]\] )?mrb_value \w+\(mrb_state\* M|\z)/m].to_s

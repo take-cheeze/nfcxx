@@ -141,6 +141,10 @@ class ClosedWorld
     @struct_classes.each do |owner|
       @class_decls[owner] = [{ super: 'Struct', outer_nil: true, outer_qualified: false, struct: true }] unless @class_decls.key?(owner)
     end
+    # DECLARED_CLASS_SET: the registry's class_decls is a default Hash, so a read of any name adds it with no
+    # declaration; whether a module looked declared then depended on which scan read it first. opaque? asks this
+    # fixed set: the classes with a declaration (and the struct classes above).
+    @declared_classes = @class_decls.select { |_, decls| !decls.empty? }.keys.to_set
     @walked = walked
     @global_refusal = nil
     @outside_names = Set.new
@@ -2485,7 +2489,7 @@ class ClosedWorld
   # dynamically, and named by a plain constant path.
   def opaque?(owner)
     return true if owner.include?('.') || owner.include?('<') || BOOT_CLASSES.include?(owner)
-    return true unless @class_decls.key?(owner)
+    return true unless @declared_classes.include?(owner)
     return true if (rebound?(owner) && !struct_class?(owner)) || @dynamic_subclassed.include?(simple(owner))
 
     # Touch scans are complete after construction; declaration and rebinding guards stay live.
@@ -2579,7 +2583,7 @@ class ClosedWorld
     @class_decls.each do |klass, decls|
       decls.each do |d|
         case d[:super]
-        when nil then @wild << klass
+        when nil then @wild << klass unless d[:fresh_struct_super]
         when String
           parents = superclass_candidates(d[:super], by_simple)
           if parents.empty?
