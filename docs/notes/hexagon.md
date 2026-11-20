@@ -81,8 +81,8 @@ char, long long, double, pointer, short, float, function pointer, plus `size_t`,
 | pointer / `long` / `size_t` / `wchar_t` | 4 / 4 / 4 / 4 | 4 / 4 / 4 / 4 | yes |
 | `long long`, `double` alignment | 8 / 8 | 8 / 8 | yes |
 | `struct {char; long long}` size, `offsetof` | 16, 8 | 16, 8 | yes |
-| `long double` size / alignment | **16 / 16** | **8 / 8** | **no** |
-| `struct {long double; char}` size | **32** | **16** | **no** |
+| `long double` size / alignment | **16 / 16** | **8 / 8** | **no** (`linux_hexagon` gives 8 / 8: yes) |
+| `struct {long double; char}` size | **32** | **16** | **no** (`linux_hexagon` gives 16: yes) |
 | jmp_buf (EH runtime) | 36 × `long long` (288 B) | unknown: needs hexagon libC `jmp_buf` | unverified |
 
 Only the `long double` rows disagree. The `tests/hexagon/layout.sh` probe leaves `long double`
@@ -94,16 +94,30 @@ Other generated-C differences from the default x86_64 config (diffed for `tests/
 EH jmp_buf is `long long[36]`. EDG also emits explicit padding (`char __dummy[N]`) computed from
 its own layout, so the C compiler must agree with EDG's layout, which the probe checks.
 
-### What a real `linux_hexagon` target needs (not built)
+### The real `linux_hexagon` target (built in scratch)
 
-To make `long double` and `TARG_JMP_BUF_*` exact, EDG needs a real target. Copy `linux_riscv32`'s
-`base.cmakedef` to `support/target/linux_hexagon/` in a scratch copy of `3rd/edg`, change
-`TARG_SIZEOF_LONG_DOUBLE`/`TARG_ALIGNOF_LONG_DOUBLE` to 8 and the `LDBL` constants to IEEE double,
-set `TARG_JMP_BUF_NUM_ELEMENTS` from the Hexagon libc, add `TARGET_CONFIGURATION_8=linux_hexagon`
-in `linux-x86_64/base.cmakedef`, add `lib_linux_hexagon/predefined_macros.txt` (from `clang -dM`
-for hexagon; `__hexagon__`, `__HEXAGON_ARCH__`, `__CHAR_UNSIGNED__`, sizes), and rebuild `cpfe`
-(~3 min). This is the next step if `long double` or real jmp_buf layout matters. Nothing here
-modifies `3rd/edg`.
+`scripts/setup-edg-hexagon.sh` builds it: a scratch copy of `3rd/edg` (the submodule stays
+clean) with `linux_riscv32`'s `base.cmakedef` copied to `support/target/linux_hexagon/`,
+`long double` as IEEE double (size/align 8, `LDBL` = `DBL` constants), all `SUPPORTS_*` 0,
+registered as `TARGET_CONFIGURATION_8`, plus `lib_linux_hexagon/predefined_macros.txt`
+generated from `clang --target=hexagon -dM` (`scripts/hexagon-predef.rb`). Use it with
+`EDG_BUILD`/`EDG_BASE` pointed at the hexagon build and `-t linux_hexagon`:
+
+```
+scripts/setup-edg-hexagon.sh                              # build/edg-hex (cpfe, edg_prelink, libC.a)
+EDG_BUILD=$PWD/build/edg-hex EDG_BASE=$PWD/build/edg-hex-base \
+  scripts/gen-c-target.rb -t linux_hexagon tests/cases/hvx_add_i16.cpp
+EDG_BUILD=$PWD/build/edg-hex EDG_BASE=$PWD/build/edg-hex-base \
+  CLANG=clang-19 EDG_TARGET=linux_hexagon tests/hexagon/layout.sh
+```
+
+Verified: `layout.sh` passes (26 facts), a `long double` case generates 8-byte layout
+(`sizeof(struct {long double; char})` = 16, `sizeof(long double)` = 8, matching clang Hexagon;
+the riscv32 stand-in gives 32 and 16), and the full `tests/hexagon/run.sh` suite gives the
+same results as the stand-in (33 passed including the HVX kernels, 26 skipped, same 5
+pre-existing clang-19 `void (*dtor)(...)` failures). `TARG_JMP_BUF_*` is still riscv32's
+36 `long long` (the real hexagon libc `jmp_buf` is unknown without the SDK). Upstreaming the
+target into the `take-cheeze/edg-compiler` fork is still open. Nothing here modifies `3rd/edg`.
 
 Notes from the generated C:
 
