@@ -2220,11 +2220,13 @@ class CodeGen
     [[idx - 1, previous]]
   end
 
-  # One GETMCNST cache per site of +name+; each keeps the receiver its value was read from.
+  # One GETMCNST cache per name: a slot keeps the receiver its value was read from and answers only that receiver, so
+  # every site reading +name+ from it reads the same binding (mrb_const_defined_at, the receiver's own table) and the
+  # sites of one name can share it; another receiver refills it.
   def const_member_slot(name)
     @const_member_sites ||= []
-    @const_member_sites << name
-    @const_member_sites.size - 1
+    @const_member_index ||= {}
+    @const_member_index[name] ||= (@const_member_sites << name).size - 1
   end
 
   # File-scope state and helpers for CONST_SITE_CACHE. Each helper returns the

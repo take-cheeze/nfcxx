@@ -17,6 +17,9 @@ require 'tmpdir'
 require_relative 'fixture_runtime'
 
 ENV['BC2CPP_SIG_DIRS'] ||= ''
+# ARMS_COMPLETE_ELSE would also close pong's else (Base and Kid both get arms); off, the owner call shows what
+# LEAF_OWNER_ELSE leaves.
+ENV['BC2CPP_ARMS_COMPLETE_ELSE'] = '0'
 runtime = Bc2cppFixtureRuntime
 failures = []
 check = lambda do |what, condition|

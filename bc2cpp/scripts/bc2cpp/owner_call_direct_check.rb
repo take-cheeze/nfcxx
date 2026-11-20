@@ -21,6 +21,9 @@
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/owner_call_direct_check.rb
 ENV['BC2CPP_SIG_DIRS'] = ''
+# The runtime rows make a class the closed world does not see (Class.new at run time), which ARMS_COMPLETE_ELSE
+# rules out; off, the owner call stays the else they test.
+ENV['BC2CPP_ARMS_COMPLETE_ELSE'] = '0'
 
 require 'tmpdir'
 require 'fileutils'
@@ -87,8 +90,9 @@ HARNESS = <<~'CPP'
   }
 CPP
 
+# The site's line with the slot and level its set macro starts with (OWNER_CALL_DESC) left out: the owner set as written.
 def go_site(code, name)
-  code.lines.find { |l| l.include?("CLOSED_WORLD owner-call: #{name} */") }.to_s
+  code.lines.find { |l| l.include?("CLOSED_WORLD owner-call: #{name} */") }.to_s.sub(/(BC2CPP_OWNERS(?:_D)?\()\d+, \d, /, '\\1')
 end
 
 Dir.mktmpdir('bc2cpp-owner-call-direct') do |dir|

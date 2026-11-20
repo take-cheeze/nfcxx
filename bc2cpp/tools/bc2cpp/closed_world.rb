@@ -166,6 +166,8 @@ class ClosedWorld
     @outside_ruby_names = Set.new
     @outside_name_paths = {}
     @native_code_tokens = {}
+    @native_class_events = []
+    @native_class_assigns = {}
     @outside_ruby_supers = Set.new
     @native_arms_name = nil
     @outside_owner_name = nil
@@ -1172,7 +1174,112 @@ class ClosedWorld
     @freeze_possible = true if file.fetch(:freeze_possible)
     @singleton_makers << [path, :native] if file.fetch(:singleton_maker)
     record_native_touches(path, file.fetch(:touch), file.fetch(:defines_class), file.fetch(:legacy_names))
+    touch = file.fetch(:touch)
+    @native_class_assigns[path] = touch.fetch(:class_assigns)
+    touch.fetch(:events).each { |event| @native_class_events << [path, *event] if NATIVE_CLASS_MAKERS.match?(event[0]) }
   end
+
+  # The native events that can make a class (TouchScan.native_facts kinds).
+  NATIVE_CLASS_MAKERS = /\A(?:define_class|class_new\z|super\z|obj_alloc\z|obj_new\z|instance_new\z|funcall)/
+  # mruby's own implementation of the class-making API (and of the funcall family it forwards through): each event
+  # there forwards a caller's class, which is that caller's own event, or serves Class.new / Class#initialize /
+  # Module#dup, which the closed world's dynamic-subclass facts bound.
+  NATIVE_CLASS_API = %r{/3rd/mruby/src/(?:class|gc|vm)\.c\z}
+
+  # NATIVE_LEAF_CORE: no native source can make an instance of a subclass of +klass+. Outside NATIVE_CLASS_API:
+  #   - every class definition and class_new names a superclass that resolves (a built-in handle, a class_get, a
+  #     local assigned only such values) to another class, and nothing assigns ->super;
+  #   - every instantiation (obj_new, instance_new, a funcall of `new`/`allocate`) is of a class that resolves to no
+  #     class factory (Class, Module, Struct, Data), or passes no argument a superclass could be (none, or only
+  #     integer/nil/string values), or is NATIVE_INSTANCE_REVIEWED.
+  # An obj_alloc of a class object makes a class with no superclass until ->super is set. A funcall of a computed
+  # name forwards a Ruby send, which the Ruby facts bound. False when any of those cannot be read.
+  def native_unsubclassed?(klass)
+    names = native_superclass_names
+    !names.nil? && !names.include?(simple(klass))
+  end
+
+  # [path suffix, call prefix] of instantiations reviewed against the pinned mruby: error.c's mrb_make_exception
+  # sends `new` to the class `raise` was given and raises TypeError unless the result is an exception, so a class it
+  # makes there has no instance.
+  NATIVE_INSTANCE_REVIEWED = [['/3rd/mruby/src/error.c', 'mrb_funcall_argv(mrb, exc, MRB_SYM(new), n, &mesg)']].freeze
+
+  # The simple names native class definitions take as superclass, or nil when one cannot be resolved.
+  def native_superclass_names
+    return @native_superclass_names if defined?(@native_superclass_names)
+
+    norm = (@class_decls.keys.map { |k| simple(k) } + CoreHierarchySigs.hierarchy[0].keys).uniq
+                                                                                   .group_by { |n| n.downcase.delete('_') }
+    @native_superclass_names = @native_class_events.each_with_object(Set.new) do |(path, kind, args, why, helper), out|
+      next if path.match?(NATIVE_CLASS_API) || kind == 'obj_alloc'
+      next if NATIVE_INSTANCE_REVIEWED.any? { |suffix, call| path.end_with?(suffix) && why.to_s.start_with?(call) }
+
+      args = Array(args)
+      # A function's own definition or declaration (`mrb_define_class(mrb_state *mrb, ...)`), not a call.
+      next if args.first.to_s.match?(/\bmrb_state\s*\*/)
+
+      names = native_class_event_supers(kind, args, helper, @native_class_assigns.fetch(path, {}), norm)
+      break nil unless names
+
+      out.merge(names)
+    end
+  end
+
+  # A value no superclass can be.
+  NATIVE_NON_CLASS_ARG = /\A(?:mrb_(?:fixnum|int|nil|bool|true|false|symbol)_value\s*\(.*\)|mrb_str_new\w*\s*\(.*\)|
+                            NULL|nullptr|0)\z/mx
+
+  # The superclass names one NATIVE_CLASS_MAKERS event may give a new class (empty when it makes none), or nil.
+  def native_class_event_supers(kind, args, helper, assigns, norm)
+    instance = lambda do |cls, rest|
+      names = native_class_resolve(cls, assigns, norm)
+      next Set.new if names && (names & TouchScan::CLASS_FACTORIES).empty?
+
+      rest.all? { |arg| arg.to_s.strip.match?(NATIVE_NON_CLASS_ARG) } ? Set.new : nil
+    end
+    case kind
+    when 'super' then nil
+    when 'obj_new', 'instance_new' then instance.(args[1], args[3..].to_a)
+    when /\Afuncall/
+      mids = helper || [TouchScan.native_literal(args[2])].compact
+      next_args = args[3].to_s.strip == '0' ? [] : args[4..].to_a
+      mids.empty? || (mids & %w[new allocate]).empty? ? Set.new : instance.(args[1], next_args)
+    when 'class_new' then native_class_resolve(args[1], assigns, norm)
+    else native_class_resolve(args[kind.include?('_under') ? 3 : 2], assigns, norm)
+    end
+  end
+
+  # The simple names a native class expression can denote: TouchScan.native_resolve, a class definition's own name,
+  # an exception class get, or each value a local is assigned. nil when one cannot be named.
+  def native_class_resolve(expr, assigns, norm, depth = 0)
+    e = expr.to_s.strip.sub(/\A\(\s*(?:struct\s+)?RClass\s*\*\s*\)\s*/, '')
+    e = Regexp.last_match(1).strip while e.match(/\Amrb_(?:obj_value|class_ptr)\s*\(\s*(\w+)\s*\)\z/)
+    return nil if depth > 4
+
+    if (m = e.match(/\Amrb_define_class(_under)?(?:_id)?\s*\((.*)\)\z/m))
+      name = TouchScan.native_literal(bc2cpp_c_call_args(m[2])[m[1] ? 2 : 1])
+      return name ? Set[TouchScan.path_names(name).last] : nil
+    end
+    if (m = e.match(/\Amrb_exc_get(?:_id)?\s*\((.*)\)\z/m))
+      name = TouchScan.native_literal(bc2cpp_c_call_args(m[1])[1])
+      return name ? Set[name] : nil
+    end
+    resolved = TouchScan.native_resolve(e, norm)
+    return resolved - [TouchScan::WILD] if resolved
+    return nil unless e.match?(TouchScan::IDENTIFIER) && !(values = assigns[e]).to_a.empty?
+
+    values.each_with_object(Set.new) do |value, out|
+      # `a = mrb->x_class = expr;` assigns expr; a null pointer is no class.
+      value = value.sub(/\A(?:[\w.]+(?:\s*->\s*\w+)*\s*=(?!=)\s*)+/, '')
+      next if value.match?(/\A(?:NULL|nullptr|0)\z/)
+
+      names = native_class_resolve(value, assigns, norm, depth + 1)
+      return nil unless names
+
+      out.merge(names)
+    end
+  end
+  public :native_unsubclassed?
 
   # The facts of each path in `paths`, in order: plain data (Hash, Array, Set, String, Symbol, true/false) with
   # no state and no ENV, so the result can be stored and loaded as it is.

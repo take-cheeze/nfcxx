@@ -119,6 +119,7 @@ C_STATEMENT_KEYWORDS = %w[if while for switch return sizeof else do].freeze
 DEF_RE = /^[ \t]*((?:(?:static|inline|extern)[ \t\n]+)*)((?:[A-Za-z_][#{WC}]*(?:[ \t\n]+|[ \t\n]*\*[ \t\n\*]*))+?)([A-Za-z_][#{WC}]*)[ \t\n]*\(((?:[^()]|\([^()]*\))*)\)#{SS}(\{|;)/
 INC_RE = /#[ \t]*include[ \t]*[<"](ruby(?:\/[#{WC}.\/-]*)?\.h)[>"]/
 REG_RE = /(?<![#{WC}$.>])(rb_define_method|rb_define_private_method|rb_define_singleton_method|rb_define_module_function|rb_define_global_function)#{SS}\(/
+ALLOC_REG_RE = /(?<![#{WC}$.>])(rb_define_alloc_func)#{SS}\(/
 # a right side that yields a class (a definition or a lookup of a class): not a non-class assignment to a class variable
 # a class expression of the fork (an RClass *): mrb->x_class, mrb_class_get / mrb_exc_get / mrb_module_get, or an E_*_ERROR class macro
 CLASS_EXPR_RE = /\A(?:mrb->\w+_class|mrb_class_get\(|mrb_exc_get\(|mrb_module_get\(|E_[A-Z][A-Z0-9_]*\z)/
@@ -335,6 +336,37 @@ def next_nonspace(masked, pos)
   k = pos
   k += 1 while k < masked.length && SPACE_RE.match?(masked[k])
   k < masked.length ? k : -1
+end
+
+GC_ROOT_ADDR_PRELUDE = <<~'C'.chomp
+  /* BC2CPP-MRBGEM: a GC root given by address (rb_gc_register_address, rb_global_variable) on a class variable (struct RClass *)
+     or on a value (mrb_value). A class is rooted by its class value once it is set; a value while it is not nil. */
+  static void
+  nfcx_gc_root_addr(mrb_state *mrb, void *p, size_t n)
+  {
+    if (n == sizeof(struct RClass *)) {
+      struct RClass *c = *(struct RClass **)p;
+      if (c) mrb_gc_register(mrb, mrb_obj_value(c));
+    }
+    else {
+      mrb_value v = *(mrb_value *)p;
+      if (!mrb_nil_p(v)) mrb_gc_register(mrb, v);
+    }
+  }
+C
+
+# the span of a call rb_gc_register_address(&NAME) or rb_global_variable(&NAME) whose only argument is the address of a class
+# variable (pv: the '&', e: the end of NAME): from the callee's name to the closing parenthesis, or nil
+def gc_root_call_span(masked, pv, e)
+  nx = next_nonspace(masked, e)
+  return nil unless nx >= 0 && masked[nx] == ')'
+  o = prev_nonspace(masked, pv - 1)
+  return nil unless o >= 0 && masked[o] == '('
+  m = masked[0...o].match(/\b(rb_gc_register_address|rb_global_variable)[#{WSP}]*\z/)
+  return nil unless m
+  cp = match_close(masked, o)
+  return nil unless cp == nx
+  [m.begin(1), cp + 1]
 end
 
 def prev_nonspace(masked, pos)
@@ -976,6 +1008,34 @@ end
         @regs << rec
         @reg_by_call[[rel, cs]] = rec
       end
+      # rb_define_alloc_func(klass, func): the allocator is a registered function of arity 0 (its VALUE parameter is the class)
+      finditer(ALLOC_REG_RE, masked).each do |m|
+        cs = m.begin(1)
+        op = m.end(0) - 1
+        cp = match_close(masked, op)
+        rec = { 'file' => rel, 'call' => cs, 'open' => op, 'close' => cp, 'api' => m[1],
+                'error' => nil, 'func' => nil, 'argc' => 0, 'target' => nil,
+                'func_span' => nil, 'argc_span' => nil }
+        args = cp < 0 ? [] : split_args(masked, op, cp)
+        if cp < 0
+          rec['error'] = 'unbalanced parentheses in registration call'
+        elsif args.size != 2
+          rec['error'] = "registration call has #{args.size} arguments, expected 2"
+        else
+          (ts, te), (fs, fe) = args
+          rec['target'] = py_strip(psl(text, ts, te))
+          rec['target_span'] = [ts, te]
+          fm = /\A([A-Za-z_][#{WC}]*)\z/.match(py_strip(psl(text, fs, fe)))
+          if fm.nil?
+            rec['error'] = 'allocator argument is not a plain function name'
+          else
+            rec['func'] = fm[1]
+            rec['func_span'] = [fs, fe]
+          end
+        end
+        @regs << rec
+        @reg_by_call[[rel, cs]] = rec
+      end
     end
     # one arity per registered function
     arities = {}
@@ -1325,7 +1385,8 @@ end
     return @gcv_owned[name] if @gcv_owned.key?(name)
     en = Regexp.escape(name)
     define_re = /(?<![#{WC}$.>])#{en}#{SS}=#{SS}rb_define_(?:class|module)(?:_under)?#{SS}\(/
-    nondef_re = /(?<![#{WC}$.>])#{en}#{SS}=(?!=)(?>#{SS})(?!#{CLASS_RHS_RE}#{SS}\()/
+    # a class constant (rb_eEncodingError, rb_cObject: an RClass * expression in the api_map) is a class value too
+    nondef_re = /(?<![#{WC}$.>])#{en}#{SS}=(?!=)(?>#{SS})(?!#{CLASS_RHS_RE}#{SS}\(|rb_[cem][A-Z]\w*#{SS};)/
     defined = @files.values.any? { |f| f['masked'].match?(define_re) }
     mixed = @files.values.any? { |f| nondef_assignment?(f['masked'], nondef_re) }
     @gcv_owned[name] = defined && !mixed
@@ -1715,9 +1776,7 @@ end
   def alloc_reach
     @alloc_reach ||= begin
       seeds = Set.new
-      @files.each_value do |f|
-        f['text'].scan(/rb_define_alloc_func[ \t\n]*\([ \t\n]*[A-Za-z_]\w*[ \t\n]*,[ \t\n]*([A-Za-z_]\w*)[ \t\n]*\)/) { seeds << $1 }
-      end
+      # no seeds: an allocator is a registered function of the state (rb_define_alloc_func is a template with a prelude)
       # every #define body in the gem, by macro name (a macro may be defined in several conditional branches)
       macro_bodies = Hash.new { |h, k| h[k] = [] }
       @files.each do |rel, f|
@@ -2788,8 +2847,8 @@ end
       elsif macro_arg_nonretaining?(rel, s, callee)
         nil
       elsif callee == 'rb_define_alloc_func'
-        # the allocator is called by the VM with no state argument: the fork has no per-class allocator hook (accepted stuck point)
-        'stuck point (per-class allocator): the pointer is an allocator, which the VM calls with no state argument in the fork'
+        # the registration template takes the allocator as a registered function (see the scan of registrations)
+        nil
       elsif @entries[callee].nil? && (ur = @unmapped_reasons[callee]).is_a?(String) && ur.start_with?('stuck point')
         # a callee that is a stuck point (its reason is recorded): the pointer's refusal carries that reason
         "#{ur}; the pointer is passed to #{callee}"
@@ -3669,6 +3728,9 @@ use_problem = lambda do |name, use|
     end
   end
 
+  # the caveat of a VALUE-returning call used as a truth value: mrb_test is false for nil, where CRuby's word test is true
+  TRUTH_TEST_CAVEAT = 'mrb_test of a VALUE-returning call: nil and false are false (CRuby\'s word test takes nil as true); the helpers this converts return true or false'
+
   # !v on a VALUE, or !f(...) of a VALUE-returning function (date's f_nonzero_p is (!f_zero_p(x))): CRuby's ! tests the word (Qfalse is
   # zero); the fork's VALUE is a struct, and no exact test of it is expressed (the VALUE truth test)
   def value_not_stuck_pass
@@ -3685,6 +3747,16 @@ use_problem = lambda do |name, use|
           next unless (local_value_at?(rel, m.begin(1), nm) || fs_values.include?(nm)) && !@class_vars.include?(nm)
         end
         next if @edits[rel].overlaps(m.begin(0), m.begin(0) + 1)
+        if m[2]
+          # !f(...) of a VALUE-returning call: mrb_test of the result (nil and false are false)
+          close = match_close(mv, m.end(0) - 1)
+          if close >= 0 && !@edits[rel].overlaps(m.begin(1), close + 2)
+            @edits[rel].add(m.begin(1), m.begin(1), 'mrb_test(')
+            @edits[rel].add(close + 1, close + 1, ')')
+            rewrite(rel, m.begin(0), nm, "!mrb_test(#{nm}(...))", TRUTH_TEST_CAVEAT)
+            next
+          end
+        end
         refuse(rel, m.begin(0), nm, "stuck point (VALUE truth test): !#{nm}#{m[2] ? '(...)' : ''} tests a VALUE, a struct in the fork (include/mruby/boxing_no.h); CRuby's ! tests the word (Qfalse is zero), which has no exact struct test")
       end
     end
@@ -3713,14 +3785,18 @@ use_problem = lambda do |name, use|
         m = Regexp.last_match
         nm = m[1]
         defs = (@defs[nm] || []).reject { |x| x['proto'] }
-        next unless (defs.any? && defs.all? { |x| x['ret'].to_s.strip == 'VALUE' }) || value_call_name?(nm)
+        next unless (defs.any? && defs.all? { |x| x['ret'].to_s.strip == 'VALUE' }) || value_call_name?(nm) || funcall_macro?(rel, nm)
         open = m.end(0) - 1
         close = match_close(mv, open)
         next if close < 0
         outer = match_close(mv, mv.index('(', m.begin(0)))
         next if outer < 0 || next_nonspace(mv, close + 1) != outer
         next if @edits[rel].overlaps(m.begin(1), m.begin(1) + 1)
-        refuse(rel, m.begin(1), nm, "stuck point (VALUE truth test): if tests #{nm}(...), a VALUE (a struct in the fork, include/mruby/boxing_no.h); CRuby's nonzero word is true for nil too, which has no exact struct test")
+        # if (f(...)) of a VALUE-returning call: the condition is mrb_test of the result (nil and false are false)
+        next if @edits[rel].overlaps(close + 1, close + 2)
+        @edits[rel].add(m.begin(1), m.begin(1), 'mrb_test(')
+        @edits[rel].add(close + 1, close + 1, ')')
+        rewrite(rel, m.begin(1), nm, "mrb_test(#{nm}(...))", TRUTH_TEST_CAVEAT)
       end
     end
   end
@@ -3998,6 +4074,42 @@ use_problem = lambda do |name, use|
 
   # A relational comparison (<, >, <=, >=) of two VALUE expressions orders them by address (CRuby's class tables are searched
   # by VALUE). The fork's VALUE is a struct with no order: a stuck point, recorded with its reason.
+  # == and != between two VALUEs compare the words in CRuby (identity: the same object, or the same immediate). The fork's VALUE is a
+  # struct, so the comparison is mrb_value_identical(a, b) (src/object.c: the identity mrb_obj_eq uses), and != is its negation. A
+  # plain struct == does not compile; both operands must be VALUE operands (value_operand?), as for the ordering comparisons.
+  def value_identity_pass
+    @files.each_key do |rel|
+      masked = @files[rel]['masked']
+      masked.to_enum(:scan, /(?<![<>=!])(==|!=)(?!=)/).each do
+        m = Regexp.last_match
+        op_s, op_e = m.begin(1), m.end(1)
+        next if in_dead_init(rel, op_s)
+        next if masked[op_s - 1] == '#' || masked[[op_s - 8, 0].max...op_s].to_s.include?('#')
+        fn = enclosing_func(rel, op_s)
+        next unless fn
+        value_names = value_names_of(fn) | all_file_scope_value_names
+        l_start, l_text = left_operand(masked, op_s)
+        r_end, r_text = right_operand(masked, op_e)
+        next if l_text.nil? || r_text.nil? || l_text.empty? || r_text.empty?
+        next unless value_operand?(l_text, value_names, value_field_names, rel, op_s) && value_operand?(r_text, value_names, value_field_names, rel, op_s)
+        next if @edits[rel].touches_strictly?(op_s)
+        l_end = op_s
+        l_end -= 1 while l_end > 0 && masked[l_end - 1] =~ /\s/
+        r_start = op_e
+        r_start += 1 while r_start < masked.length && masked[r_start] =~ /\s/
+        next if r_start > r_end || l_start >= l_end
+        next if @edits[rel].overlaps(l_start, l_end) || @edits[rel].overlaps(r_start, r_end) || @edits[rel].overlaps(op_s, op_e)
+        ed = @edits[rel]
+        neg = m[1] == '!='
+        ed.add(l_start, l_start, neg ? '!mrb_value_identical(' : 'mrb_value_identical(')
+        ed.add(l_end, r_start, ', ')
+        ed.add(r_end, r_end, ')')
+        rewrite(rel, op_s, m[1], neg ? '!mrb_value_identical' : 'mrb_value_identical',
+                'a VALUE comparison is identity (mrb_value_identical, the identity mrb_obj_eq uses): the same object or the same immediate')
+      end
+    end
+  end
+
   def value_order_stuck_pass
     @files.each_key do |rel|
       masked = @files[rel]['masked']
@@ -4213,7 +4325,8 @@ use_problem = lambda do |name, use|
   # parenthesized assignment to a VALUE name. A literal 0 is left to the equality pass (CRuby's Qfalse).
   # a #define whose body is a funcall (rb_funcall or mrb_funcall...) in this file
   def funcall_macro?(rel, name)
-    @files[rel]['text'].match?(/^[ \t]*#[ \t]*define[ \t]+#{Regexp.escape(name)}\s*\([^)]*\)\s*(?:mrb_funcall|rb_funcall)/)
+    # (a macro whose body is a symbol of an ID, ID2SYM(...), is a VALUE too: the symbol is a VALUE in CRuby)
+    @files[rel]['text'].match?(/^[ \t]*#[ \t]*define[ \t]+#{Regexp.escape(name)}\s*\([^)]*\)\s*(?:mrb_funcall|rb_funcall|ID2SYM)/)
   end
 
   # a function-like or object-like macro of any file of the gem whose body casts to VALUE (or is an mrb_value): its uses are VALUEs
@@ -4989,6 +5102,28 @@ end
         # the address of an owned class variable (struct RClass *) is an RClass **, which no mruby call takes as a GC root
         pv = prev_nonspace(masked, s - 1)
         if pv >= 0 && masked[pv] == '&' && !(pv > 0 && masked[pv - 1] == '&') && owns_class_var?(rel, s, name)
+          # the class value is rooted by mrb_gc_register once the variable is set (a class is a constant, so it is rooted by
+          # its constant even before that); the registration call becomes a guarded statement
+          span = gc_root_call_span(masked, pv, e)
+          fnq = enclosing_func(rel, s)
+          dpre = define_at(rel, s)
+          at = dpre ? dpre[1] : (fnq && fnq['hstart'])
+          if span && at
+            # the address is passed as a void *, with the size of the variable: the helper roots a struct RClass * by its class
+            # value (when it is set) and an mrb_value while it is not nil, so the statement compiles whichever type the
+            # variable has (the converter's declaration and its assignment sites do not always agree)
+            @prelude_done ||= Set.new
+            unless @prelude_done.include?([rel, 'nfcx_gc_root_addr'])
+              @prelude_done << [rel, 'nfcx_gc_root_addr']
+              ed.add(at, at, GC_ROOT_ADDR_PRELUDE + "\n")
+            end
+            @edits[rel].drop(@edits[rel].overlapping(span[0], span[1]))
+            ed.add(span[0], s, 'nfcx_gc_root_addr(mrb, (void *)&')
+            ed.add(e, span[1], ", sizeof(#{name}))")
+            rewrite(rel, s, name, "nfcx_gc_root_addr(mrb, (void *)&#{name}, sizeof(#{name}))",
+                    'the address of a class variable is rooted by the prelude helper: a class by its class value (when set), a value while it is not nil')
+            next
+          end
           refuse(rel, s, name, 'stuck point (GC root): the address of an owned class variable (struct RClass *) is taken as a GC root, which needs an mrb_value holder (the variable would change type)')
           next
         end
@@ -5882,7 +6017,14 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       callee_c, idx_c = call_context(masked, s)
       class_pos = callee_c && ((@special_pos[callee_c] || []).include?(idx_c) ||
                                ((@entries[callee_c] || {})['class_args'] || []).include?(idx_c))
-      text = "mrb_obj_value(#{text})" if !class_pos && entry['mruby'].match?(CLASS_EXPR_RE)
+      # the right side of an assignment to an owned class variable (struct RClass *) is the class itself, not its VALUE
+      eq = prev_nonspace(masked, s - 1)
+      owned_target = false
+      if eq >= 0 && masked[eq] == '=' && !(eq > 0 && '=!<>+-*/%&|^'.include?(masked[eq - 1]))
+        lhs = masked[0...eq].match(/([A-Za-z_]\w*)#{SS}\z/)
+        owned_target = lhs && @class_vars.include?(lhs[1]) && owns_class_var?(rel, s, lhs[1])
+      end
+      text = "mrb_obj_value(#{text})" if !class_pos && !owned_target && entry['mruby'].match?(CLASS_EXPR_RE)
       # a file-scope initializer (static VALUE X = Qnil;) is not a constant expression in C (mrb_nil_value is a function): the
       # initializer is removed, and the variable is set at the start of Init (the file's Init function)
       fs_init = if %w[Qnil Qtrue Qfalse].include?(name) && enclosing_func(rel, s).nil?
@@ -6922,6 +7064,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       args = [(rel.end_with?('.cc') ? 'g++' : 'gcc'), '-fsyntax-only', '-w', '-include', 'stddef.h', '-I', src_dir, '-I', inc_dir]
       # the build's defines (the --define options: the names the build defines, as extconf would set them)
       (@defines || []).each { |d| args << "-D#{d}" }
+      # the fork's build defines MRB_USE_BIGINT for every object (mrbgems/mruby-bigint/mrbgem.rake): the bigint helpers are declared
+      args << '-DMRB_USE_BIGINT'
       incs.each { |d| args += ['-I', d] }
       args << path
       _o, err, _st = Open3.capture3(*args)
@@ -7401,6 +7545,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     owned_class_assign_pass
     value_truth_call_pass
     value_order_stuck_pass
+    value_identity_pass
     value_as_integer_arg_pass
     value_struct_pointer_cast_pass
     value_cast_integer_stuck_pass

@@ -1,7 +1,7 @@
 #include <ruby.h>
 
-/* RB_TYPE_P forms: T_DATA and T_FIXNUM are the caveat forms the api_map accepts (type_check "caveat"); a nested object and
- * T_BIGNUM have no mruby form and stay refused with their reasons. */
+/* RB_TYPE_P forms: T_DATA and T_FIXNUM are the caveat forms the api_map accepts (type_check "caveat"); T_BIGNUM is the
+ * MRB_TT_BIGINT tag; a nested object has no plain local to test and stays refused with its reason. */
 static VALUE mTypeRefused;
 
 static VALUE tr_data(VALUE self, VALUE obj) {

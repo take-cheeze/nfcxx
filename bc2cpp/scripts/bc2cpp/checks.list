@@ -2,6 +2,7 @@
 # scripts/ci/timed_checks.rb --shard N/3 in nfcxx's .github/workflows/ci.yml (the checks job). The world's
 # scripts/ci/check_registry.rb reads this file as the bc2cpp-checks runner of scripts/ci/bc2cpp_check_policy.yml.
 # ci:parallel begin 4
+ruby scripts/bc2cpp/probe_root_cache_probe.rb
 ruby scripts/bc2cpp/type_check.rb --no-sends
 ruby scripts/bc2cpp/sealed_host_check.rb
 ruby scripts/bc2cpp/foreign_definer_calls_check.rb
@@ -124,6 +125,7 @@ ruby scripts/bc2cpp/static_owner_dispatch_check.rb
 ruby scripts/bc2cpp/core_owner_arms_check.rb
 ruby scripts/bc2cpp/sym_call_chain_check.rb
 ruby scripts/bc2cpp/leaf_owner_else_check.rb
+ruby scripts/bc2cpp/arms_complete_else_check.rb
 ruby scripts/bc2cpp/native_leaf_check.rb
 ruby scripts/bc2cpp/respond_to_fold_check.rb
 ruby scripts/bc2cpp/owner_set_direct_check.rb
@@ -145,9 +147,11 @@ ruby scripts/bc2cpp/module_includer_bound_check.rb
 ruby scripts/bc2cpp/alias_method_check.rb
 ruby scripts/bc2cpp/singleton_const_owner_check.rb
 ruby scripts/bc2cpp/enumerator_class_unit_check.rb
+ruby scripts/bc2cpp/core_shadowed_unit_check.rb
 ruby scripts/bc2cpp/frozen_hash_lookup_check.rb
 ruby scripts/bc2cpp/record_hash_update_check.rb
 ruby scripts/bc2cpp/record_nilable_read_check.rb
+ruby scripts/bc2cpp/record_field_trace_check.rb
 ruby scripts/bc2cpp/constructor_optionals_check.rb
 ruby scripts/bc2cpp/initializer_sites_check.rb
 ruby scripts/bc2cpp/super_direct_check.rb
@@ -246,4 +250,5 @@ ruby scripts/bc2cpp/const_site_cache_check.rb
 ruby scripts/bc2cpp/native_frame_use_check.rb
 ruby scripts/bc2cpp/name_sinks_check.rb
 ruby scripts/bc2cpp/exact_declared_return_check.rb
+ruby scripts/bc2cpp/declared_def_return_check.rb
 # ci:parallel end

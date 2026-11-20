@@ -29,8 +29,12 @@ module SymbolCache
   FUNCALL_NAME = /\G,\s*(#{STRING})\s*,/
   NAMED_NAME = /\G,\s*(#{STRING})(?=\s*[,)])/
   SEND_INDEX = /\G,\s*(\d+)\s*[,)]/
+  # OWNER_CALL_DESC: the level and owner set after an owner call's name; the slot and level move into the set's macro.
+  OWNER_CALL_SET = /\G,\s*([0-2])\s*,\s*(BC2CPP_OWNERS(?:_D)?)\(/
+  # The slot of a rewritten owner call: the first argument of its set macro (BC2CPP_SHARED's after the key).
+  OWNER_CALL_INDEX = /\G,\s*BC2CPP_(?:OWNERS(?:_D)?|SHARED)\((?:0x\h+,\s*)?(\d+)\s*,/
   private_constant :STRING, :INTERN, :CHECKED_FUNCALLS, :FUNCALLS,
-                   :FUNCALL_START, :FUNCALL_NAME, :NAMED_NAME, :SEND_INDEX
+                   :FUNCALL_START, :FUNCALL_NAME, :NAMED_NAME, :SEND_INDEX, :OWNER_CALL_SET, :OWNER_CALL_INDEX
 
   # Symbols found so far, in first-seen order: C string literal => index.
   class Table
@@ -90,23 +94,31 @@ module SymbolCache
   def rewrite_interns(code, table)
     code.gsub(INTERN) do
       literal = Regexp.last_match(1)
-      presym = presym_constant(literal)
-      presym ? "MRB_SYM(#{presym})" : "bc2cpp_sym(M, #{table.index_for(literal)})"
+      presym_macro(literal) || "bc2cpp_sym(M, #{table.index_for(literal)})"
     end
   end
 
   # PRESYM_SYMBOL: a plain identifier that mruby's presym table already names is the compile-time symbol MRB_SYM(name),
   # so it needs no table slot or cache. The table is the build's include/mruby/presym/id.h (BC2CPP_PRESYM_HEADER,
   # set by closed_build.bash); without it every name keeps the table.
+  # PRESYM_ALL: in a real gem build mruby's presym scan reads the generated sources themselves (each gem's
+  # src/register.cxx includes its unit), so a name spelled with a presym macro (PresymSpelling.symbol) becomes a presym:
+  # a compile-time id, with no RAM slot and no intern at run time. A fixture has no such scan and keeps the table.
   class << self
-    attr_writer :presym_names
+    attr_writer :presym_names, :presym_all
 
     def presym_names = @presym_names || Set.new
+    def presym_all = @presym_all || false
   end
 
-  def presym_constant(literal)
-    name = literal[1...-1]
-    name if name.match?(/\A[A-Za-z_]\w*\z/) && SymbolCache.presym_names.include?(name)
+  # The presym macro for a C string literal, or nil: every spellable name under PRESYM_ALL, otherwise a plain identifier
+  # the build's presym table already has.
+  def presym_macro(literal)
+    name = literal[/\A"([^"\\]*)"\z/, 1]
+    return nil unless name
+    return PresymSpelling.symbol(name) if SymbolCache.presym_all
+
+    "MRB_SYM(#{name})" if name.match?(/\A[A-Za-z_]\w*\z/) && SymbolCache.presym_names.include?(name)
   end
 
   # `mrb_funcall(M, RECV, "name", N, ...)` -> `bc2cpp_send(M, RECV, i, N, ...)`. RECV is an arbitrary C++ expression, so the
@@ -166,8 +178,12 @@ module SymbolCache
                       else "bc2cpp_send(M, #{receiver}, #{index},"
                       end
         copy.call(pos, start)
-        out << replacement.b
         pos = recv_end + name[0].length
+        if (set = replacement.start_with?('bc2cpp_owner_call') && OWNER_CALL_SET.match(code, pos))
+          replacement = "#{replacement.delete_suffix(", #{index}")}, #{set[2]}(#{index}, #{set[1]}, "
+          pos = set.end(0)
+        end
+        out << replacement.b
       else
         copy.call(pos, head_end)
         pos = head_end
@@ -218,7 +234,7 @@ module SymbolCache
       kind = Regexp.last_match(1)
       head_end = Regexp.last_match.end(0)
       recv_end = expression_end(code, head_end)
-      match = recv_end && SEND_INDEX.match(code, recv_end)
+      match = recv_end && (kind.start_with?('owner_call') ? OWNER_CALL_INDEX : SEND_INDEX).match(code, recv_end)
       idx = match && match[1]
       found << [kind, code[head_end...recv_end].strip, idx.to_i] if idx
       pos = head_end
@@ -263,6 +279,13 @@ module SymbolCache
   # cached id stays valid for the whole life of its VM.
   def emit(table)
     names = table.literals.map { |literal| "  #{literal}," }.join("\n")
+    # PRESYM_ALL: a slot's entry is its presym id, or the high bit and the index of its RAM slot; only the names presym
+    # cannot spell keep a RAM slot (bc2cpp_syms) and an intern.
+    dynamic = 0
+    entries = table.literals.map do |literal|
+      macro = presym_macro(literal)
+      macro ? "(uint32_t)#{macro}" : "0x80000000u | #{(dynamic += 1) - 1}u"
+    end
     checked = table.checks.any? { |check| check.to_i.positive? }
     checks = (0...[table.size, 1].max).map { |slot| table.checks[slot].to_i }.join(', ')
     <<~CPP
@@ -282,7 +305,8 @@ module SymbolCache
       }
       // SYMBOL_CACHE -- see tools/bc2cpp/symbol_cache.rb.
       static mrb_state* bc2cpp_sym_state = nullptr;
-      static mrb_sym bc2cpp_syms[#{[table.size, 1].max}] = {};
+      static mrb_sym bc2cpp_syms[#{[dynamic, 1].max}] = {};
+      static const uint32_t bc2cpp_sym_entry[#{[table.size, 1].max}] = { #{entries.empty? ? '0x80000000u' : entries.join(', ')} };
       static const char* const bc2cpp_sym_names[#{[table.size, 1].max}] = {
       #{names.empty? ? '  "",' : names}
       };
@@ -297,8 +321,11 @@ module SymbolCache
           bc2cpp_reset_symbol_cache();
           bc2cpp_sym_state = M;
         }
-        mrb_sym s = bc2cpp_syms[i];
-        if (!s) s = bc2cpp_syms[i] = mrb_intern_cstr(M, bc2cpp_sym_names[i]);
+        // The VM check comes first: it also bumps the epochs of the caches keyed on this table.
+        uint32_t e = bc2cpp_sym_entry[i];
+        if (!(e & 0x80000000u)) return (mrb_sym)e;
+        mrb_sym& s = bc2cpp_syms[e & 0x7fffffffu];
+        if (!s) s = mrb_intern_cstr(M, bc2cpp_sym_names[i]);
         return s;
       }
       #{checked ? "static const unsigned char bc2cpp_sym_check[#{[table.size, 1].max}] = { #{checks} };\n#{CHECKED_SEND}" : ''}
@@ -491,29 +518,42 @@ module SymbolCache
       mrb_func_t func;
       uint32_t flags;
     };
+    // OWNER_CALL_DESC: what never changes is const (rodata); `cls` and `epoch` point at the zeroed run-time state.
+    // The epoch alone dates `cls`: bc2cpp_sym bumps it for another VM, and gem_final for a reused one.
     struct bc2cpp_owner_directs {
       const bc2cpp_owner_direct* rows;
-      int count;
-      unsigned epoch;
-      mrb_state* state;
       struct RClass** cls;
+      unsigned* epoch;
+      int count;
     };
+    // The run-time state of an owner set, zero-initialised (.bss: an initialised one would be a .data image in flash).
+    // OWNER_SET_EPOCH: the set is valid while `epoch` is bc2cpp_owner_epoch. It keeps no mrb_state: every use follows
+    // a bc2cpp_sym(M, ...) of the same call, which bumps the epoch whenever the gem's VM changes (or the gem is
+    // finalised), so a current epoch names the calling VM. Narrow fields sit last, for padding.
     struct bc2cpp_owner_set {
-      const char* const* names;
-      bc2cpp_owner_directs* direct;
-      unsigned epoch;
-      mrb_state* state;
-      int seen_count;
       // Owners already matched: up to 32, allocated on the first miss (an inline 32-slot array was most of a site's bytes).
       struct RClass** seen;
       // OWNER_CALL_ICACHE: the last call that passed every check (hit_klass null: none).
       struct RClass* hit_klass;
       struct RClass* hit_c;
       mrb_method_t hit_m;
-      mrb_int hit_argc;
+      unsigned epoch;
     #ifdef MRB_MT_ROWS
       uint32_t hit_mt_epoch;
     #endif
+      uint8_t seen_count;
+      // A call of more arguments is not kept (see bc2cpp_owner_call_argv).
+      uint8_t hit_argc;
+    };
+    // OWNER_CALL_DESC: a site's constant descriptor: its owner list, direct rows, state and the call's symbol slot and
+    // level, so the call passes one pointer. The narrowing of a brace initialiser keeps a slot past 16 bits from
+    // compiling.
+    struct bc2cpp_owner_desc {
+      const char* const* names;
+      const bc2cpp_owner_directs* direct;
+      bc2cpp_owner_set* set;
+      uint16_t mid;
+      uint8_t level;
     };
     #ifdef BC2CPP_OWNER_ICACHE_STATS
     // Hits and full lookups, for scripts/bc2cpp/owner_call_icache_check.rb; printed at exit.
@@ -534,7 +574,7 @@ module SymbolCache
     // The site's kept call, while mruby's method cache still holds the same entry for (klass, mid). A fork with rows
     // (MRB_MT_ROWS) bumps mt_epoch wherever it clears that cache, and a row is never cached: the epoch decides there.
     static inline bool bc2cpp_owner_icache_hit(mrb_state* M, const bc2cpp_owner_set& s, struct RClass* klass, mrb_sym mid, mrb_int argc) {
-      if (s.hit_klass != klass || s.hit_argc != argc || s.epoch != bc2cpp_owner_epoch || s.state != M) return false;
+      if (s.hit_klass != klass || (mrb_int)s.hit_argc != argc || s.epoch != bc2cpp_owner_epoch) return false;
     #ifdef MRB_MT_ROWS
       (void)mid;
       if (s.hit_mt_epoch != M->mt_epoch) return false;
@@ -549,20 +589,14 @@ module SymbolCache
       return true;
     }
     #endif
-    #define BC2CPP_OWNERS(...) ([]() -> bc2cpp_owner_set& { static const char* const names[] = { __VA_ARGS__, nullptr }; static bc2cpp_owner_set s; if (!s.names) s.names = names; return s; }())
+    // I is the call's symbol slot, L its level, then the owner list.
+    #define BC2CPP_OWNERS(I, L, ...) ([]() -> const bc2cpp_owner_desc* { static const char* const names[] = { __VA_ARGS__, nullptr }; static bc2cpp_owner_set s; static const bc2cpp_owner_desc d = { names, nullptr, &s, I, L }; return &d; }())
     // OWNER_CALL_DIRECT: DIRECTS is a run of BC2CPP_OWNER_DIRECT(owner, entry, aspec, visibility), no commas between.
     #define BC2CPP_OWNER_DIRECT(owner, fn, aspec, vis) { owner, fn, (uint32_t)(aspec) | (uint32_t)(vis) },
-    #define BC2CPP_OWNERS_D(DIRECTS, ...) ([]() -> bc2cpp_owner_set& { static const char* const names[] = { __VA_ARGS__, nullptr }; static const bc2cpp_owner_direct rows[] = { DIRECTS }; static struct RClass* cls[sizeof rows / sizeof rows[0]]; static bc2cpp_owner_directs d = { rows, (int)(sizeof rows / sizeof rows[0]), 0, nullptr, cls }; static bc2cpp_owner_set s = { names, &d, 0, nullptr, 0, nullptr }; return s; }())
-    // OWNER_SET_SHARE (owner_set_share.rb): the set of every site with the same key, zero until its first call names it.
-    // SET is the site's BC2CPP_OWNERS(...), whose owner list becomes the names; its own set is never declared.
-    template <unsigned long long K> inline bc2cpp_owner_set bc2cpp_owner_shared_v{};
-    template <unsigned long long K, class F> static inline bc2cpp_owner_set& bc2cpp_owner_shared(F names) {
-      bc2cpp_owner_set& s = bc2cpp_owner_shared_v<K>;
-      if (!s.names) s.names = names();
-      return s;
-    }
-    #define BC2CPP_OWNER_NAMES_BC2CPP_OWNERS(...) { __VA_ARGS__, nullptr }
-    #define BC2CPP_SHARED(K, SET) bc2cpp_owner_shared<K##ULL>([]() -> const char* const* { static const char* const n[] = BC2CPP_OWNER_NAMES_##SET; return n; })
+    #define BC2CPP_OWNERS_D(I, L, DIRECTS, ...) ([]() -> const bc2cpp_owner_desc* { static const char* const names[] = { __VA_ARGS__, nullptr }; static const bc2cpp_owner_direct rows[] = { DIRECTS }; static struct RClass* cls[sizeof rows / sizeof rows[0]]; static unsigned ep; static const bc2cpp_owner_directs dr = { rows, cls, &ep, (int)(sizeof rows / sizeof rows[0]) }; static bc2cpp_owner_set s; static const bc2cpp_owner_desc d = { names, &dr, &s, I, L }; return &d; }())
+    // OWNER_SET_SHARE (owner_set_share.rb): the descriptor every site with key K shares, defined once below; the
+    // site's slot, level and owner list stay spelled for the reader.
+    #define BC2CPP_SHARED(K, ...) (&bc2cpp_owner_sd_##K)
     [[noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_owner_violation(mrb_state* M, mrb_value recv, mrb_sym mid, const char* what) {
     #ifdef BC2CPP_NOMETHOD_VERIFY
       fprintf(stderr, "bc2cpp: NOMETHOD_VERIFY: owner-call violation: %s", mrb_class_name(M, mrb_obj_class(M, recv)));
@@ -644,11 +678,10 @@ module SymbolCache
     // ancestors are walked in lookup order up to where the table lookup found the name (`*c`; the whole chain when it
     // found none): the first direct owner met there answers with its entry, as its registration would have. A
     // prepended class keeps the table lookup (its origin reorders the chain; the closed world prepends into none).
-    static void bc2cpp_owner_direct_pick(mrb_state* M, bc2cpp_owner_directs& t, struct RClass* klass, mrb_method_t* m, struct RClass** c) {
-      if (t.epoch != bc2cpp_owner_epoch || t.state != M) {
+    static void bc2cpp_owner_direct_pick(mrb_state* M, const bc2cpp_owner_directs& t, struct RClass* klass, mrb_method_t* m, struct RClass** c) {
+      if (*t.epoch != bc2cpp_owner_epoch) {
         for (int d = 0; d < t.count; ++d) t.cls[d] = bc2cpp_owner_direct_class(M, t.rows[d].owner);
-        t.epoch = bc2cpp_owner_epoch;
-        t.state = M;
+        *t.epoch = bc2cpp_owner_epoch;
       }
       struct RClass* found = MRB_METHOD_UNDEF_P(*m) ? nullptr : *c;
       for (struct RClass* k = klass; k; k = k->super) {
@@ -667,9 +700,15 @@ module SymbolCache
     // The argv form: a splat site passes the Array's own items, as mrb_funcall_with_block would (both reach vm.c's
     // funcall_with_block_m, whose funcall_args_capture copies them and packs a long list as OP_SEND does).
     // CALLER_SELF: a level 2 call passes the caller's self (the generated code's `self`) for the protected check.
-    static mrb_value bc2cpp_owner_call_argv(mrb_state* M, mrb_value recv, int i, int level, bc2cpp_owner_set& s, mrb_value blk, mrb_int argc, const mrb_value* argv,
+    // BC2CPP_SHARD_ONE_BODY (shard_output.rb): one body per sharded gem, which every shard's entries call.
+    #ifndef BC2CPP_SHARD_ONE_BODY
+    #define BC2CPP_SHARD_ONE_BODY
+    #endif
+    BC2CPP_SHARD_ONE_BODY static mrb_value bc2cpp_owner_call_argv(mrb_state* M, mrb_value recv, const bc2cpp_owner_desc* d, mrb_value blk, mrb_int argc, const mrb_value* argv,
                                             mrb_value caller_self = mrb_nil_value()) {
-      mrb_sym mid = bc2cpp_sym(M, i);
+      bc2cpp_owner_set& s = *d->set;
+      int level = d->level;
+      mrb_sym mid = bc2cpp_sym(M, d->mid);
       // As bc2cpp_funcall_argv: Proc#call and its aliases on a compiled block are a yield, not an OP_CALL in a C frame.
       if (mrb_nil_p(blk) && mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return bc2cpp_yield_argv(M, recv, argc, argv);
       struct RClass* klass = mrb_class(M, recv);
@@ -681,23 +720,22 @@ module SymbolCache
     #endif
       struct RClass* c = klass;
       mrb_method_t m = bc2cpp_find_proven(M, &c, mid);
-      if (s.direct) bc2cpp_owner_direct_pick(M, *s.direct, klass, &m, &c);
+      if (d->direct) bc2cpp_owner_direct_pick(M, *d->direct, klass, &m, &c);
       if (MRB_METHOD_UNDEF_P(m)) {
         if (mrb_nil_p(blk)) bc2cpp_funcall_argv(M, recv, mid, argc, argv);
         else mrb_funcall_with_block(M, recv, mid, argc, argv, blk);
         bc2cpp_owner_violation(M, recv, mid, "was proven to raise NoMethodError but dispatched");
       }
       struct RClass* owner = c->tt == MRB_TT_ICLASS ? c->c : c;
-      if (s.epoch != bc2cpp_owner_epoch || s.state != M) {
+      if (s.epoch != bc2cpp_owner_epoch) {
         s.epoch = bc2cpp_owner_epoch;
-        s.state = M;
         s.seen_count = 0;
         s.hit_klass = nullptr;
       }
       bool seen = false;
       for (int k = 0; k < s.seen_count; ++k) seen = seen || s.seen[k] == owner;
       if (!seen) {
-        if (!bc2cpp_owner_listed(M, owner, s.names)
+        if (!bc2cpp_owner_listed(M, owner, d->names)
     #ifdef BC2CPP_FIBER_RUNTIME
             && !bc2cpp_fiber_definer_p(m)
     #endif
@@ -729,11 +767,11 @@ module SymbolCache
         }
       }
     #ifdef BC2CPP_OWNER_ICACHE
-      if (!(m.flags & MRB_METHOD_PROTECTED_FL)) {
+      if (!(m.flags & MRB_METHOD_PROTECTED_FL) && argc <= UINT8_MAX) {
         s.hit_klass = klass;
         s.hit_c = c;
         s.hit_m = m;
-        s.hit_argc = argc;
+        s.hit_argc = (uint8_t)argc;
     #ifdef MRB_MT_ROWS
         s.hit_mt_epoch = M->mt_epoch;
     #endif
@@ -741,15 +779,44 @@ module SymbolCache
     #endif
       return bc2cpp_keep_call(M, [&] { return bc2cpp_call_found(M, recv, mid, &m, c, argc, argv, blk); });
     }
-    static mrb_value bc2cpp_owner_call(mrb_state* M, mrb_value recv, int i, int level, bc2cpp_owner_set& s, mrb_value blk, mrb_int argc, ...) {
+    [[maybe_unused]] static mrb_value bc2cpp_owner_call(mrb_state* M, mrb_value recv, const bc2cpp_owner_desc* d, mrb_value blk, mrb_int argc, ...) {
       mrb_value argv[16];
       va_list ap;
       va_start(ap, argc);
       for (mrb_int k = 0; k < argc && k < 16; k++) argv[k] = va_arg(ap, mrb_value);
       for (mrb_int k = 16; k < argc; k++) (void)va_arg(ap, mrb_value);
-      mrb_value caller_self = level >= 2 ? va_arg(ap, mrb_value) : mrb_nil_value();
+      mrb_value caller_self = d->level >= 2 ? va_arg(ap, mrb_value) : mrb_nil_value();
       va_end(ap);
-      return bc2cpp_owner_call_argv(M, recv, i, level, s, blk, argc, argv, caller_self);
+      return bc2cpp_owner_call_argv(M, recv, d, blk, argc, argv, caller_self);
+    }
+    // OWNER_CALL_ARITY (owner_call_arity.rb): the fixed-arity entries. Out of line, so each site passes only its own
+    // arguments; the trailing caller_self overload is a level 2 site's. One body per sharded gem, as the argv form.
+    BC2CPP_SHARD_ONE_BODY [[gnu::noinline, maybe_unused]] static mrb_value bc2cpp_owner_call0(mrb_state* M, mrb_value recv, const bc2cpp_owner_desc* d) {
+      return bc2cpp_owner_call_argv(M, recv, d, mrb_nil_value(), 0, nullptr);
+    }
+    BC2CPP_SHARD_ONE_BODY [[gnu::noinline, maybe_unused]] static mrb_value bc2cpp_owner_call0(mrb_state* M, mrb_value recv, const bc2cpp_owner_desc* d, mrb_value caller_self) {
+      return bc2cpp_owner_call_argv(M, recv, d, mrb_nil_value(), 0, nullptr, caller_self);
+    }
+    BC2CPP_SHARD_ONE_BODY [[gnu::noinline, maybe_unused]] static mrb_value bc2cpp_owner_call1(mrb_state* M, mrb_value recv, const bc2cpp_owner_desc* d, mrb_value a) {
+      return bc2cpp_owner_call_argv(M, recv, d, mrb_nil_value(), 1, &a);
+    }
+    BC2CPP_SHARD_ONE_BODY [[gnu::noinline, maybe_unused]] static mrb_value bc2cpp_owner_call1(mrb_state* M, mrb_value recv, const bc2cpp_owner_desc* d, mrb_value a, mrb_value caller_self) {
+      return bc2cpp_owner_call_argv(M, recv, d, mrb_nil_value(), 1, &a, caller_self);
+    }
+    BC2CPP_SHARD_ONE_BODY [[gnu::noinline, maybe_unused]] static mrb_value bc2cpp_owner_call2(mrb_state* M, mrb_value recv, const bc2cpp_owner_desc* d, mrb_value a, mrb_value b) {
+      const mrb_value argv[2] = {a, b};
+      return bc2cpp_owner_call_argv(M, recv, d, mrb_nil_value(), 2, argv);
+    }
+    BC2CPP_SHARD_ONE_BODY [[gnu::noinline, maybe_unused]] static mrb_value bc2cpp_owner_call2(mrb_state* M, mrb_value recv, const bc2cpp_owner_desc* d, mrb_value a, mrb_value b,
+                                                                        mrb_value caller_self) {
+      const mrb_value argv[2] = {a, b};
+      return bc2cpp_owner_call_argv(M, recv, d, mrb_nil_value(), 2, argv, caller_self);
+    }
+    BC2CPP_SHARD_ONE_BODY [[gnu::noinline, maybe_unused]] static mrb_value bc2cpp_owner_call_b0(mrb_state* M, mrb_value recv, const bc2cpp_owner_desc* d, mrb_value blk) {
+      return bc2cpp_owner_call_argv(M, recv, d, blk, 0, nullptr);
+    }
+    BC2CPP_SHARD_ONE_BODY [[gnu::noinline, maybe_unused]] static mrb_value bc2cpp_owner_call_b0(mrb_state* M, mrb_value recv, const bc2cpp_owner_desc* d, mrb_value blk, mrb_value caller_self) {
+      return bc2cpp_owner_call_argv(M, recv, d, blk, 0, nullptr, caller_self);
     }
   CPP
   private_constant :OWNER_CALL

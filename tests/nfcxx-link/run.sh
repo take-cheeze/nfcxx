@@ -11,7 +11,7 @@ repo=$(cd "$here/../.." && pwd -P)
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 ruby_bin=$(command -v ruby)
 # the functions as nfcxx has them now (the port is what they call)
-sed -n '/^eccp_cleanup() {/,/^}/p;/^link_records_rm() {/,/^}/p;/^compile_clean() {/,/^}/p' "$repo/nfcxx" > "$work/thin.sh"
+sed -n '/^temp_cleanup() {/,/^}/p;/^eccp_cleanup() {/,/^}/p;/^link_records_rm() {/,/^}/p;/^compile_clean() {/,/^}/p' "$repo/tests/driver-body/nfcxx-bash" > "$work/thin.sh"
 [ -s "$work/thin.sh" ] || { echo "nfcxx-link: no link steps in nfcxx" >&2; exit 2; }
 
 # run WHICH SB SETUP BODY: builds SB, runs BODY in bash with the functions of WHICH (thin or oracle); prints the outcome

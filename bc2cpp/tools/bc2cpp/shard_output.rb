@@ -159,14 +159,21 @@ module ShardOutput
     [text[0...first], units, text[(hooks_at + HOOKS_MARK.size)..]]
   end
 
-  # An owner's methods stay together (they call each other most); owners go largest first onto the lightest shard.
+  # By default an owner's methods stay together for cross-method inlining. BC2CPP_SHARD_SPLIT_OWNERS=1 lets
+  # oversized owners split into method units: a large compiler class otherwise leaves one translation unit on
+  # the critical path after every other worker has finished. Owners fitting a fair share of method bytes stay
+  # together, and explicitly hot owners remain together in the main file even with the opt-in.
+  # The existing cross-shard declaration rewrite also covers calls between units of the same owner.
   # `shards` lists of units, each in print order.
   def assign(units, shards, hot = Set.new)
     by_owner = units.each_with_index.group_by { |u, _| u[:owner] }
     size = ->(list) { list.sum { |u, _| u[:code].bytesize } }
     total = units.sum { |u| u[:code].bytesize }
     min_bytes = Integer(ENV.fetch('BC2CPP_SHARD_MIN_BYTES', MIN_SHARD_BYTES.to_s))
-    wanted = [[shards, by_owner.size, (total / min_bytes.to_f).ceil].min, 1].max
+    split_owners = ENV['BC2CPP_SHARD_SPLIT_OWNERS'] == '1'
+    count = split_owners ? units.size : by_owner.size
+    wanted = [[shards, count, (total / min_bytes.to_f).ceil].min, 1].max
+    target = (total + wanted - 1) / wanted
     loads = Array.new(wanted, 0)
     placed = Array.new(wanted) { [] }
     # Hot owners all go to the main file (shard 0), before the cold ones are spread over the lightest shards.
@@ -175,7 +182,10 @@ module ShardOutput
       loads[0] += size.call(list)
       placed[0].concat(list)
     end
-    cold_part.sort_by { |owner, list| [-size.call(list), owner] }.each do |_, list|
+    chunks = cold_part.flat_map do |owner, list|
+      split_owners && size.call(list) > target ? list.map { |unit| [owner, [unit]] } : [[owner, list]]
+    end
+    chunks.sort_by { |owner, list| [-size.call(list), owner, list.first.last] }.each do |_, list|
       i = loads.index(loads.min)
       loads[i] += size.call(list)
       placed[i].concat(list)
@@ -207,7 +217,11 @@ module ShardOutput
       list.each do |item|
         next unless item[:body] && shared.include?(item[:name])
 
-        lines[item[:first]] = item[:var] ? lines[item[:first]].sub(/\bstatic\b/, 'extern') : drop_static(lines[item[:first]])
+        line = lines[item[:first]]
+        # A const variable needs explicit external linkage; a mutable definition already has it without static.
+        # `extern int state = 0` is valid C++ but GCC warns about it, unlike `extern const int table[] = ...`.
+        constant = item[:var] && constant_static?(line.sub(/\A\s*\[\[[^\]]*\]\]\s*/, '').strip)
+        lines[item[:first]] = constant ? line.sub(/\bstatic\b/, 'extern') : drop_static(line)
         decls << "#{item[:var] ? 'extern ' : ''}#{drop_static(item[:head])};\n" unless declared.include?(item[:name])
       end
       lines.join
@@ -310,7 +324,8 @@ module ShardOutput
   # entity too). Every other `static` function stays `static` and each shard compiles its own copy: an `inline` one
   # keeps an out-of-line body GCC cannot drop, which shifts its inlining (docs/bc2cpp-shards.md, "Measurements"). A
   # per-call-site cache that a macro such as BC2CPP_OWNERS declares belongs to that site, so a second copy of the
-  # function is a second site, not a second state.
+  # function is a second site, not a second state. A function whose head carries BC2CPP_SHARD_ONE_BODY is shared too:
+  # an out-of-line entry every shard calls, whose own copy per shard would only cost code size.
   def shared_prelude_items(segs, code)
     items = segs.flat_map do |seg|
       next [] unless seg[:kind] == :code
@@ -323,6 +338,7 @@ module ShardOutput
     by_name = items.group_by { |item| item[:name] }
     functions = by_name.select { |_, list| list.all? { |item| item[:function] } }.keys.to_set
     shared = by_name.keys.to_set - functions
+    shared |= items.select { |item| item[:head].include?('BC2CPP_SHARD_ONE_BODY') }.to_set { |item| item[:name] } & functions
     shared |= code.scan(/\b([A-Za-z_][\w$]*)\b(?!\s*\()/).flatten.to_set & functions
     items.each do |item|
       locals = item[:text].sub(/\A[^{]*\{/, '').scan(/\bstatic\b[^=;{(]*/)

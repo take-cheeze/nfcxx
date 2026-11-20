@@ -1,5 +1,5 @@
 // Host runtime for the SYCL subset of the nfcxx SYCL front end (scripts/sycl-rewrite.rb). A program includes
-// <sycl/sycl.hpp>; the device half of each parallel_for is the kernel __nfcxx_sycl_kN of the rewrite, which is
+// <sycl/sycl.hpp>; the device half of each parallel_for is the kernel __nfcxx_sycl_entry_kN of the rewrite, which is
 // assembled to SPIR-V and loaded from the file named by NFCXX_SYCL_SPV at run time. Launches go through OpenCL
 // (clCreateProgramWithIL), on the first Intel GPU (else the first GPU).
 //
@@ -154,11 +154,11 @@ struct buffer_state {
   bool written = false;   // an accessor can write it: copy back on destruction
 };
 
-// Launches kernel __nfcxx_sycl_k<next> over n work items with the buffers as its pointer arguments, then n.
+// Launches kernel __nfcxx_sycl_entry_k<next> over n work items with the buffers as its pointer arguments, then n.
 inline void launch(const std::vector<buffer_state *> &bufs, size_t n) {
   runtime &r = rt();
   char name[64];
-  std::snprintf(name, sizeof name, "__nfcxx_sycl_k%d", r.next_kernel++);
+  std::snprintf(name, sizeof name, "__nfcxx_sycl_entry_k%d", r.next_kernel++);
   cl_int err;
   cl_kernel k = clCreateKernel(r.prog, name, &err);
   if (err != CL_SUCCESS) fatal(name, err);

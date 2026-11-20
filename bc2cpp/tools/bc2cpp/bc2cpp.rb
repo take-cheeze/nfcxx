@@ -25,6 +25,7 @@ require_relative 'type_check_variants'
 type_check_variants = TypeCheckVariants.parse_argv(ARGV) if $PROGRAM_NAME == __FILE__
 TypeCheckVariants.arm_guard if type_check_variants
 require_relative 'compact_output'
+require_relative 'owner_call_arity'
 require_relative 'owner_set_share'
 require_relative 'shard_output'
 require_relative 'runtime_header'
@@ -93,6 +94,7 @@ require_relative 'codegen_outside_owner_call'
 require_relative 'codegen_static_owner_arms'
 require_relative 'codegen_leaf_owner_else'
 require_relative 'codegen_owner_set_direct'
+require_relative 'codegen_arms_complete_else'
 require_relative 'codegen_native_direct'
 require_relative 'codegen_native_exact_direct'
 require_relative 'codegen_native_singleton'
@@ -238,6 +240,8 @@ def bc2cpp_method_report(compiled, tiers)
   end
 end
 
+require_relative 'profile_timings'
+
 BC2CPP_MAIN = lambda do
   next unless $PROGRAM_NAME == __FILE__
 
@@ -272,49 +276,7 @@ BC2CPP_MAIN = lambda do
   symbol = ENV['OUT_SYMBOL'] || File.basename(srcs.first, '.rb').gsub(/[^a-zA-Z0-9_]/, '_')
   out_dir = ENV['OUT_DIR'] || File.dirname(srcs.first)
   SharedGeneration.arm_guard(SharedGeneration::UNIT_KEYS | shared_units.flat_map { |unit| unit.env.keys }) if shared_units
-  profile_started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-  profile_last = profile_started
-  # NFCXX_TIME_LOG (set by the nfcxx driver, docs/notes/tracing.md): each phase is also appended to that file as a
-  # time-log line, "SECONDS<Tab>bc2cpp<Tab>PHASE<Tab>UNIT", the format scripts/trace.sh writes. UNIT is the source the
-  # driver compiles (NFCXX_TRACE_UNIT), else the build name.
-  time_log = ENV['NFCXX_TIME_LOG'].to_s
-  time_log_unit = ENV['NFCXX_TRACE_UNIT'] || ENV['BC2CPP_BUILD_NAME'] || ''
-  profile_phase = lambda do |name|
-    profiling = ENV['BC2CPP_PROFILE_TIMINGS'] == '1'
-    next unless profiling || !time_log.empty?
-
-    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    if profiling
-      # Resident memory (Linux), so a run shows where its memory grows; -1 where /proc is not there.
-      rss_kb = begin
-        File.read('/proc/self/status').lines.grep(/\AVmRSS:/).first.to_s.split[1].to_i
-      rescue StandardError
-        -1
-      end
-      warn format('BC2CPP_TIME %-32s %8.3fs (total %8.3fs) rss %d MB', name, now - profile_last, now - profile_started,
-                  rss_kb / 1024)
-    end
-    unless time_log.empty?
-      micros = ((now - profile_last) * 1_000_000).round
-      line = format("%d.%06d\tbc2cpp\t%s\t%s\n", micros / 1_000_000, micros % 1_000_000, name, time_log_unit)
-      # A time log that cannot be written must not fail the build it times.
-      begin
-        File.open(time_log, 'a') { |file| file.write(line) }
-      rescue StandardError
-        nil
-      end
-    end
-    profile_last = now
-  end
-  profile_call = lambda do |name, &block|
-    next block.call unless ENV['BC2CPP_PROFILE_TIMINGS'] == '1'
-
-    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    value = block.call
-    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
-    warn format('BC2CPP_DETAIL %-40s %8.3fs', name, elapsed)
-    value
-  end
+  profile_phase, profile_call, profile_reset = Bc2cppTimings.callbacks
 
   # CONVERSION_RETURNS: to_s, to_str, to_int, to_ary and to_hash take only optional positional parameters; their returns
   # are runtime-checked hints, declared in a generated signature file that joins the program's signatures.
@@ -892,13 +854,13 @@ BC2CPP_MAIN = lambda do
     shared_units = nil
     symbol = ENV['OUT_SYMBOL'] || File.basename(srcs.first, '.rb').gsub(/[^a-zA-Z0-9_]/, '_')
     out_dir = ENV['OUT_DIR'] || File.dirname(srcs.first)
-    profile_started = profile_last = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    profile_reset.call
   end
 
   if type_check_variants
     TypeCheckVariants.fork_variants(type_check_variants)
     # A child's phase timings exclude time spent waiting for earlier variants.
-    profile_started = profile_last = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    profile_reset.call
   end
 
   known_owners = registry.values.flatten.map(&:owner).uniq
@@ -1636,8 +1598,10 @@ BC2CPP_MAIN = lambda do
   # RUNTIME_HEADER (runtime_header.rb): between the two, so it moves the compacted runtime text ShardOutput then splits.
   RuntimeHeader.capture_stdout(ENV[RuntimeHeader::DIR_KEY])
   CompactOutput.capture_stdout unless annotated
+  # OWNER_CALL_ARITY (owner_call_arity.rb): registered before OWNER_SET_SHARE, so it rewrites that pass's text.
   # OWNER_SET_SHARE (owner_set_share.rb): before the split, so shards of one gem share a set too.
-  # Inline, not a local: BC2CPP_MAIN is at mruby's limit of local variables (see owner_rewrite below).
+  # Both inline, not through a local: BC2CPP_MAIN is at mruby's limit of local variables (see owner_rewrite below).
+  OwnerCallArity.capture_stdout if OwnerCallArity.enabled?(BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol })
   OwnerSetShare.capture_stdout(symbol) if OwnerSetShare.enabled?(BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol })
 
   # PARAM_TRACE (tools/bc2cpp/param_trace.rb): opt-in runtime classes of compiled method and block
@@ -1966,7 +1930,7 @@ BC2CPP_MAIN = lambda do
   # TAGGED_FIXNUM (tagged_fixnum.rb): the Fixnum pair test and the word-level arithmetic and compares.
   print TaggedFixnum::PRELUDE
   # RESPOND_TO_PHANTOM (closed build): see CodeGen#respond_to_phantom_runtime.
-  if ENV['BC2CPP_BUILD_NAME'] == 'closed' || !ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').empty?
+  if StaticDispatchLists.closed_build? || !ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').empty?
     puts CodeGen.respond_to_phantom_runtime
   end
   # EXCEPTION_BREAK_SUPPORT: the exception a BLOCK_FALLBACK BREAK throws and the
@@ -3000,6 +2964,8 @@ BC2CPP_MAIN = lambda do
   if (presym_header = ENV['BC2CPP_PRESYM_HEADER']) && File.file?(presym_header)
     SymbolCache.presym_names = File.read(presym_header).scan(/^\s*MRB_SYM__([A-Za-z_]\w*) = \d+,?$/).flatten.to_set
   end
+  # PRESYM_ALL (symbol_cache.rb): a real gem build's presym scan reads this output. BC2CPP_PRESYM_ALL=0 keeps the table.
+  SymbolCache.presym_all = ENV['BC2CPP_PRESYM_ALL'] != '0' && BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol }
   symbol_table = SymbolCache::Table.new
   print gen.emit_structs
   warn InitializerTables::PREFIX + JSON.generate(gen.initializer_table_evidence(compiled, InitializerTables.direct_candidate_keys(compiled, ireps, registry)))

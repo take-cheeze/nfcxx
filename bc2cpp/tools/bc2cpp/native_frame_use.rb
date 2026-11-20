@@ -529,22 +529,40 @@ module NativeFrameUse
       #{table}
       #{ROWS_END}
       };
-      static mrb_state* bc2cpp_ff_state = nullptr;
-      // FRAME_FREE_WRAPPERS: an owner call's direct-row wrappers (frame_free_wrappers_source), handed over by the unit.
-      static const mrb_func_t* bc2cpp_ff_wrapper_fns = nullptr;
-      static size_t bc2cpp_ff_wrapper_count = 0;
+      // FRAME_FREE_SHARED: the set and what it is built from are one per program, not one per gem: `inline`, not `static`,
+      // so RUNTIME_HEADER places them in the header every gem includes (its namespace is the runtime text's digest, and the
+      // rows are the lists' frame_free, the same in every gem). Being frame-free is a property of the function, so one set
+      // answers for every gem's hook; each gem only adds its own wrappers to the registry.
+      inline mrb_state* bc2cpp_ff_state = nullptr;
+      // FRAME_FREE_WRAPPERS: each unit's owner-call direct-row wrappers and readers (wrappers_source), handed over at load.
+      inline const mrb_func_t* bc2cpp_ff_wrapper_fns[16] = {};
+      inline size_t bc2cpp_ff_wrapper_counts[16] = {};
+      inline unsigned bc2cpp_ff_wrapper_units = 0;
       static inline bool bc2cpp_frame_free_wrappers(const mrb_func_t* fns, size_t n) {
-        bc2cpp_ff_wrapper_fns = fns;
-        bc2cpp_ff_wrapper_count = n;
+        for (unsigned u = 0; u < bc2cpp_ff_wrapper_units; ++u) {
+          if (bc2cpp_ff_wrapper_fns[u] == fns) return true;
+        }
+        // A unit past the registry keeps its wrappers framed (the safe answer).
+        if (bc2cpp_ff_wrapper_units == sizeof bc2cpp_ff_wrapper_fns / sizeof bc2cpp_ff_wrapper_fns[0]) return false;
+        bc2cpp_ff_wrapper_fns[bc2cpp_ff_wrapper_units] = fns;
+        bc2cpp_ff_wrapper_counts[bc2cpp_ff_wrapper_units++] = n;
         bc2cpp_ff_state = nullptr;
         return true;
       }
-      static mrb_func_t bc2cpp_ff_set[#{capacity}];
+      inline mrb_func_t bc2cpp_ff_set[#{capacity}] = {};
+      inline unsigned bc2cpp_ff_count = 0;
       static inline unsigned bc2cpp_ff_slot(mrb_func_t f) { return (unsigned)(((uintptr_t)f >> 4) * 2654435761u) & #{capacity - 1}; }
+      // Every unit's wrappers share the table: past three quarters full a function stays out, so it keeps its frame (the
+      // safe answer) and the probe loop always finds an empty slot.
       static void bc2cpp_ff_add(mrb_func_t f) {
         for (unsigned i = bc2cpp_ff_slot(f); ; i = (i + 1) & #{capacity - 1}) {
           if (bc2cpp_ff_set[i] == f) return;
-          if (!bc2cpp_ff_set[i]) { bc2cpp_ff_set[i] = f; return; }
+          if (!bc2cpp_ff_set[i]) {
+            if (4 * (bc2cpp_ff_count + 1) > 3 * #{capacity}u) return;
+            bc2cpp_ff_set[i] = f;
+            ++bc2cpp_ff_count;
+            return;
+          }
         }
       }
       // "A::B" or "A::B.singleton" to the class whose own table holds the name; null where there is none (no constant, or a
@@ -574,6 +592,7 @@ module NativeFrameUse
       static inline struct RClass* bc2cpp_ff_origin(struct RClass* k) { MRB_CLASS_ORIGIN(k); return k; }
       static void bc2cpp_ff_build(mrb_state* M) {
         memset(bc2cpp_ff_set, 0, sizeof bc2cpp_ff_set);
+        bc2cpp_ff_count = 0;
         bc2cpp_ff_state = M;
         for (const bc2cpp_ff_row& r : bc2cpp_ff_rows) {
           struct RClass* start = bc2cpp_ff_class(M, r.owner);
@@ -584,7 +603,9 @@ module NativeFrameUse
           if (c != start && !(c->tt == MRB_TT_ICLASS && c->c == start) && c != bc2cpp_ff_origin(start)) continue;
           bc2cpp_ff_add(MRB_METHOD_FUNC(m));
         }
-        for (size_t i = 0; i < bc2cpp_ff_wrapper_count; ++i) bc2cpp_ff_add(bc2cpp_ff_wrapper_fns[i]);
+        for (unsigned u = 0; u < bc2cpp_ff_wrapper_units; ++u) {
+          for (size_t i = 0; i < bc2cpp_ff_wrapper_counts[u]; ++i) bc2cpp_ff_add(bc2cpp_ff_wrapper_fns[u][i]);
+        }
       }
       static inline bool bc2cpp_frame_free_p(mrb_state* M, mrb_func_t f) {
         if (bc2cpp_ff_state != M) bc2cpp_ff_build(M);

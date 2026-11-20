@@ -164,6 +164,7 @@ class CodeGen
            when :integer then NumericFlow::INT
            when :float then NumericFlow::FLT
            when :symbol then immediate_class_bits_enabled? ? numeric_class_bit('Symbol') : 0
+           when :array, :hash, :string then RETURN_CORE_CLASS.key(cls) || 0
            else numeric_class_bit(cls)
            end
     base.zero? || !nilable ? base : base | NumericFlow::NIL

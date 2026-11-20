@@ -9,10 +9,78 @@
 require "tempfile"
 require "tmpdir"
 require "fileutils"
+require "open3"
 require "rbconfig"
+require_relative "nfcxx-setup-args"
+require_relative "nfcxx-second-pass"
+require_relative "nfcxx-cache-config"
 
 root = File.expand_path("..", __dir__)
+ROOT = root
 oracle = File.join(root, "tests", "driver-body", "nfcxx-bash")
+
+# The route dispatch: the pre-loop plan (scripts/nfcxx-loop.rb) runs in scripts/nfcxx-run.rb, and a gcc-route refusal
+# (scripts/nfcxx-gcc-plan.rb --live, status 2) is printed here, as the bash prints it. Every other argument list goes to the
+# oracle below, which runs the gcc and Path B plans itself (its routes call nfcxx_plan_run and the --records planner).
+LOOP = File.join(ROOT, "scripts", "nfcxx-loop.rb")
+GCC_PLAN = File.join(ROOT, "scripts", "nfcxx-gcc-plan.rb")
+RUNNER = File.join(ROOT, "scripts", "nfcxx-run.rb")
+PLAN_KINDS = %w[RUN EXEC CP CAT LN ENV].freeze
+
+def plan_text?(out)
+  first = out.lines.first
+  !first.nil? && PLAN_KINDS.include?(first.split(/[ \t]/, 2).first)
+end
+
+def planned_loop?(args)
+  out, _err, status = Open3.capture3(RbConfig.ruby, LOOP, *args)
+  status.success? && plan_text?(out)
+end
+
+# the refusals before the oracle, [input, setup] (scripts/nfcxx-setup-args.rb refusals), computed when one is needed: the
+# input's (CUDA, .cpp2 and module) come after the gcc planner in the bash, the setup's after them
+def driver_refusals
+  @driver_refusals ||= NfcxxSetupArgs.refusals(ARGV, ENV)
+end
+
+def gcc_plan(args)
+  out, err, status = Open3.capture3(RbConfig.ruby, GCC_PLAN, "--tabs", "--live=#{ROOT}", *args)
+  # a refusal (status 2): the port's message is the bash's, so the driver prints it and stops here, as the bash would
+  # the setup's refusals come first, as the bash checks them before the backend's name (the setup check below prints them)
+  if status.exitstatus == 2 && !plan_text?(out) && driver_refusals[1].nil?
+    trace_route("gcc-plan")
+    $stderr.write(err)
+    exit(2)
+  end
+  nil
+end
+
+def trace_route(kind)
+  $stderr.write("nfcxx: driver: #{kind}\n") if ENV["NFCXX_DRIVER_TRACE"] == "1"
+end
+
+# B5: the cache configuration's refusal (NFCXX_CACHE_REMOTE, scripts/nfcxx-cache-config.rb plan). The bash checks it first (its
+# line 115, before the argument loop, the routes and the setup, and before its trace begins), so it is checked before anything
+# else here. The bash's -fsyntax-only pre-loop plan runs before it, so that command is the oracle's.
+unless ARGV.include?("-fsyntax-only")
+  _cache_config, cache_refusal = NfcxxCacheConfig.plan(ENV, Process.euid)
+  if cache_refusal
+    $stderr.puts(cache_refusal)
+    exit(2)
+  end
+end
+
+if planned_loop?(ARGV)
+  trace_route("plan")
+  pid = Process.spawn(RbConfig.ruby, RUNNER, "--root=#{ROOT}", "--", *ARGV)
+  Process.wait(pid)
+  exit($?.exitstatus || 128 + $?.termsig)
+end
+
+# the gcc and Path B plans are run by the bash driver (its route runs them with nfcxx_plan_run): the runner here does not
+# take their kinds (CD, ENV, CHECK, STORE, the placeholders), so a plan of those routes goes to the oracle below
+gcc_plan(ARGV) # a refusal exits here; a plan is left to the oracle
+trace_route("bash")
 
 # the oracle computes its root from its own location; here it is this repository's root (the same substitution the
 # differential tests make), so its paths are the repository's
@@ -21,6 +89,9 @@ text = File.read(oracle).sub(/^root=\$\(cd "\$\(dirname "\$0"\)" && pwd\)$/) { "
 # driver's own path is put there (the program is an executable file of its own, not a driver)
 text = text.gsub('"$0"', "\"#{File.join(root, "nfcxx")}\"")
 abort "nfcxx: the oracle's root line is not as expected" unless text.include?("root=#{root}")
+# B7 (scripts/nfcxx-second-pass.rb): the oracle's second run is the Ruby driver itself, with the same environment and arguments
+# (run), inside the oracle's own trace span around it. Its line is the one the oracle has (the oracle is frozen).
+text = NfcxxSecondPass.oracle_text(text) or abort "nfcxx: the oracle's second-pass run is not as expected"
 program = Tempfile.new(["nfcxx-oracle", ".sh"])
 program.write(text)
 program.close
@@ -51,12 +122,25 @@ begin
     File.write(env["NFCXX_TRACE_PENDING"], "")
     system(env["RUBY"], trace_rb, "open", trace_abs)
   end
-  status = system(env, "bash", program.path, *ARGV)
+  # B3 and B4: the refusals before the oracle (scripts/nfcxx-setup-args.rb refusals): the CUDA, .cpp2 and module refusals, which the
+  # bash prints before its setup, then the setup's. The bash prints the message and exits with the status, after the trace is
+  # opened. Any other command goes on to the oracle unchanged.
+  input, setup = driver_refusals
+  refusal = input || setup
+  # the oracle's status is read here, before the trace calls below: each system call sets $?, so reading it after them
+  # gave the trace's status (0) for a failing build
+  oracle_code = 0
+  if refusal
+    $stderr.puts(refusal.message)
+  else
+    ok = system(env, "bash", program.path, *ARGV)
+    oracle_code = ok ? 0 : ($?.exitstatus || 1)
+  end
   unless trace_file.empty?
     system(env, env["RUBY"], trace_rb, "flush", env["NFCXX_TRACE_PENDING"]) if File.size?(env["NFCXX_TRACE_PENDING"])
     system(env["RUBY"], trace_rb, "close", trace_abs, Process.pid.to_s)
   end
-  status_code = status ? 0 : ($?.exitstatus || 1)
+  status_code = refusal ? refusal.status : oracle_code
 ensure
   program.unlink
   FileUtils.rm_rf(tmproot) unless keep

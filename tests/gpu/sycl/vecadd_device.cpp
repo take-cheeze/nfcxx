@@ -4,7 +4,7 @@ extern "C" unsigned __nfcxx_ctaid_x(void);
 extern "C" unsigned __nfcxx_ntid_x(void);
 
 // parallel_for 0: n work items
-extern "C" void __nfcxx_sycl_k0(const float *ra, const float *rb, float *rc, int n) {
+extern "C" void __nfcxx_sycl_entry_k0(const float *ra, const float *rb, float *rc, int n) {
   int i = (int)__nfcxx_tid_x() + (int)__nfcxx_ctaid_x() * (int)__nfcxx_ntid_x();
   if (i >= n) return;
   rc[i] = ra[i] + rb[i];

@@ -124,6 +124,7 @@ module DeclaredReturns
     defs_by = {}
     registry.each_value { |defs| defs.each { |d| defs_by[[d.owner, d.name.to_s]] = d if d.irep } }
     loaded.methods.each_value.filter_map do |sig|
+      sig = sig.program if sig.loc.native && sig.program
       next if sig.loc.native
 
       d = defs_by[[sig.owner, sig.name]]

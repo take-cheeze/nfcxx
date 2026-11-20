@@ -45,7 +45,22 @@ class CodeGen
       @guard_cycles += 1
       return false
     end
-    @cycle_clean_cache = {} if @probing.empty?
+    outermost = @probing.empty?
+    if outermost
+      @cycle_clean_cache = {}
+      # A guarded answer cannot be reused at an arbitrary nested depth. The
+      # empty-stack context is repeatable, however, while the unconditional
+      # answers it reads have not changed. Only retain answers from probes
+      # that did not discover any new unconditional answer themselves.
+      unless @root_clean_cache_facts.equal?(@clean_cache)
+        @root_clean_cache = {}
+        @root_clean_cache_facts = @clean_cache
+      end
+      if ENV['BC2CPP_PROBE_ROOT_CACHE'] != '0' && @root_clean_cache.key?(label)
+        @guard_cycles += 1
+        return @root_clean_cache[label]
+      end
+    end
     return @cycle_clean_cache[label] if @cycle_clean_cache&.key?(label) && ENV['BC2CPP_PROBE_CYCLE_CACHE'] != '0'
 
     @probing << label
@@ -56,14 +71,23 @@ class CodeGen
       # CROSS_UNIT_ROW: the registration aspec, from the same variables the wrapper is built from.
       (@probe_aspec ||= {})[label] = result[:aspec] if clean && result[:aspec]
       if cycles == @guard_cycles
-        @clean_cache[label] = clean
+        unless @clean_cache.key?(label) && @clean_cache[label] == clean
+          @clean_cache = @clean_cache.merge(label => clean).freeze
+        end
       else
         (@cycle_clean_cache ||= {})[label] = clean
+        if outermost && @root_clean_cache_facts.equal?(@clean_cache) && ENV['BC2CPP_PROBE_ROOT_CACHE'] != '0'
+          @root_clean_cache[label] = clean
+        end
       end
       clean
     ensure
       @probing.delete(label)
     end
+  end
+
+  def forget_root_probe_answers
+    @root_clean_cache = @root_clean_cache_facts = nil
   end
 
   # Every ivar one compile_method call sets and clears for itself, with its
@@ -88,6 +112,8 @@ class CodeGen
     :@exact_core_site => nil, :@nonnil_receiver => nil,
     # CHECKED_POOL_EXACT: the one register its arm is being compiled under a class test for.
     :@checked_pool_override => nil,
+    # DECLARED_LOOP_ELEMENT: the inlined loop bodies being compiled under an element guard.
+    :@declared_loop_elements => nil,
     # INDEX_CLOSED: set while a shared index helper builds its chain; a probe compiled meanwhile must not see it.
     :@index_closed_build => nil
   }.freeze
@@ -386,7 +412,7 @@ class CodeGen
 
   # CTOR_ROWS, ENGINE_ROWS: the compiled entries this closed build keeps as rows of their table.
   def ctor_row_keys
-    @ctor_row_keys ||= if ENV['BC2CPP_BUILD_NAME'] == 'closed'
+    @ctor_row_keys ||= if StaticDispatchLists.closed_build?
                          (static_dispatch_lists.ctor_rows || Set.new) | (static_dispatch_lists.engine_rows || Set.new)
                        else
                          Set.new
@@ -460,7 +486,7 @@ class CodeGen
   def unregistered_keys(lists: nil)
     lists ||= static_dispatch_lists
     keys = lists.for_build(ENV['BC2CPP_BUILD_NAME'])
-    keys |= lists.core_left_out | lists.core_excluded if ENV['BC2CPP_BUILD_NAME'] == 'closed'
+    keys |= lists.core_left_out | lists.core_excluded if StaticDispatchLists.closed_build?
     keys | ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').split(',').to_set
   end
 
@@ -487,7 +513,7 @@ class CodeGen
   # (StaticDispatchLists#core_excluded). The core gem registers them; only a verify build has anything to register.
   def left_out_core_rom
     return [] unless ENV['OUT_SYMBOL'] == BC2CPP_COMPILED_GEMS.fetch('mruby-core-compiled')[:out_symbol] &&
-                     ENV['BC2CPP_BUILD_NAME'] == 'closed'
+                     StaticDispatchLists.closed_build?
 
     static_dispatch_lists.core_excluded.map { |key| key.split('#', 2) }.sort
   end
@@ -497,7 +523,7 @@ class CodeGen
   # define is skipped (bc2cpp_native_owner).
   def left_out_core_ram
     return [] unless ENV['OUT_SYMBOL'] == BC2CPP_COMPILED_GEMS.fetch('mruby-core-compiled')[:out_symbol] &&
-                     ENV['BC2CPP_BUILD_NAME'] == 'closed'
+                     StaticDispatchLists.closed_build?
 
     static_dispatch_lists.core_left_out.map { |key| key.split('#', 2) }.sort
   end
@@ -506,7 +532,7 @@ class CodeGen
   # (StaticDispatchLists#core_undef_left_out), from the core gem's core half.
   def left_out_core_undef
     return [] unless ENV['OUT_SYMBOL'] == BC2CPP_COMPILED_GEMS.fetch('mruby-core-compiled')[:out_symbol] &&
-                     ENV['BC2CPP_BUILD_NAME'] == 'closed'
+                     StaticDispatchLists.closed_build?
 
     static_dispatch_lists.core_undef_left_out.map { |key| key.split('#', 2) }.sort
   end
@@ -515,7 +541,7 @@ class CodeGen
   # (StaticDispatchLists#engine_rom). Only a verify build has anything to register.
   def left_out_engine_rom
     symbol = ENV['OUT_SYMBOL']
-    return [] unless symbol && ENV['BC2CPP_BUILD_NAME'] == 'closed'
+    return [] unless symbol && StaticDispatchLists.closed_build?
 
     gem = BC2CPP_COMPILED_GEMS.find { |_name, g| g[:out_symbol] == symbol }&.first
     return [] unless gem

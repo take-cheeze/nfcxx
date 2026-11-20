@@ -40,11 +40,23 @@ class CodeGen
       return nil unless k.is_a?(String)
 
       entry = table[[k, name]]
-      return entry if entry
+      return declared_ivar_kept?(entry) ? entry : nil if entry
 
       k = @superclass_of[k]
     end
     nil
+  end
+
+  # CORE_IVAR_KINDS: a core container or String declaration is checked by its kind test (mrb_array_p, ...), which is
+  # its exact class only in a build with no subclass of it (core_class_subclass_free?); the exact-class flow already
+  # requires singleton-free instances. Elsewhere the declaration is left out (no guard, no seed).
+  def declared_ivar_kept?(entry)
+    return true unless RbsParamCheck::CORE_IVAR_KINDS.key?(entry.kind)
+
+    (@declared_ivar_core_kept ||= {}).fetch(entry.cls) do
+      @declared_ivar_core_kept[entry.cls] = !block_core_world.nil? && !@native_name_sources.nil? &&
+                                            core_class_subclass_free?(entry.cls)
+    end
   end
 
   # The C++ test that `var` (an mrb_value) has the declared kind. Integer is any Integer (mrb_integer_p, or a bignum:
@@ -55,6 +67,9 @@ class CodeGen
            when :float then "mrb_float_p(#{var})"
            when :integer then "(mrb_integer_p(#{var}) || mrb_bigint_p(#{var}))"
            when :symbol then "mrb_symbol_p(#{var})"
+           when :array then "mrb_array_p(#{var})"
+           when :hash then "mrb_hash_p(#{var})"
+           when :string then "mrb_string_p(#{var})"
            else exact_class_guard(owner_class_ptr_expr(entry.cls), var)
            end
     entry.nilable ? "mrb_nil_p(#{var}) || (#{cond})" : cond
@@ -102,7 +117,7 @@ class CodeGen
     return @declared_ivar_seeds if table.nil? || table.empty? || ENV['BC2CPP_DECLARED_IVAR_PROOF'] == '0' ||
                                    @numeric_ivar_disabled || @numeric_ivar_groups.nil?
 
-    by_slot = table.values.group_by { |e| [numeric_family(e.owner), e.name] }
+    by_slot = table.values.select { |e| declared_ivar_kept?(e) }.group_by { |e| [numeric_family(e.owner), e.name] }
     by_slot.each do |key, entries|
       next unless entries.size == 1
 
@@ -163,7 +178,7 @@ class CodeGen
     return [] if table.nil? || table.empty?
 
     seeded = declared_ivar_seeds.values.map { |entry, _| entry.key }.to_set
-    table.values.sort_by(&:key).map do |e|
+    table.values.select { |e| declared_ivar_kept?(e) }.sort_by(&:key).map do |e|
       "  DECLARED_IVAR #{e.key}: #{e.text}, #{seeded.include?(e.key) ? 'guarded stores, pool seeded' : 'guarded stores'}"
     end
   end

@@ -1184,7 +1184,7 @@ class CodeGen
     return @fiber_free if defined?(@fiber_free)
 
     # The lists themselves, not static_dispatch_lists: that reads OUT_SYMBOL, which the shared analysis may not.
-    @fiber_free = ENV['BC2CPP_BUILD_NAME'] == 'closed' && StaticDispatchLists.current.unmade_classes.include?('Fiber')
+    @fiber_free = StaticDispatchLists.closed_build? && StaticDispatchLists.current.unmade_classes.include?('Fiber')
   end
 
   def rsm_impl_name(d) = "#{cpp_name(d.owner, d.name)}#{RSM_SUFFIX}_impl"

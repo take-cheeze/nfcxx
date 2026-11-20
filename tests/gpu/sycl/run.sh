@@ -10,7 +10,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 root=$(cd ../../.. && pwd)
 tools=${SPIRV_TOOLS_BIN:-}
-clinc=${OPENCL_INCLUDE:-/opt/intel/oneapi/compiler/2026.1/include}
+clinc=${OPENCL_INCLUDE:-/usr/include}
 if [ -n "$tools" ]; then export PATH="$tools:$PATH"; fi
 if [ ! -x "$root/build/pathb/cmake/bin/cpfe" ] || ! command -v spirv-as >/dev/null || ! command -v spirv-val >/dev/null \
    || [ ! -f "$clinc/CL/cl.h" ] || [ ! -e /usr/lib/x86_64-linux-gnu/libOpenCL.so.1 ]; then
@@ -29,7 +29,7 @@ if diff -u vecadd_device.cpp "$out/vecadd_device.cpp"; then echo "rewrite vecadd
 if diff -u vecadd_device.ir "$out/vecadd_device.ir"; then echo "IR vecadd: ok"; else echo "IR vecadd: FAIL"; fail=1; fi
 
 # 2. The SPIR-V emitter lowers it to the golden assembly; it assembles and validates.
-mrb "$root/scripts/pathb-spirv-emit.rb" "$out/vecadd_device.ir" > "$out/vecadd.spvasm"
+mrb "$root/scripts/pathb-spirv-kernel-emit.rb" "$out/vecadd_device.ir" > "$out/vecadd.spvasm"
 if diff -u vecadd.spvasm "$out/vecadd.spvasm"; then echo "asm vecadd: ok"; else echo "asm vecadd: FAIL"; fail=1; fi
 spirv-as --target-env spv1.1 "$out/vecadd.spvasm" -o "$out/vecadd.spv"
 if spirv-val --target-env spv1.1 "$out/vecadd.spv"; then echo "validate vecadd: ok"; else echo "validate vecadd: FAIL"; fail=1; fi
@@ -37,7 +37,7 @@ if spirv-val --target-env spv1.1 "$out/vecadd.spv"; then echo "validate vecadd: 
 # 3. The launcher runs the kernel on the GPU (the same signature as the vecAdd of tests/gpu/spirv).
 gcc -O2 -Wall -I"$clinc" ../spirv/launch.c -o "$out/launch" -l:libOpenCL.so.1
 set +e
-run=$("$out/launch" "$out/vecadd.spv" __nfcxx_sycl_k0 2>&1); rc=$?
+run=$("$out/launch" "$out/vecadd.spv" __nfcxx_sycl_entry_k0 2>&1); rc=$?
 set -e
 if [ $rc = 2 ] && grep -q "no OpenCL GPU" <<< "$run"; then
   echo "SKIP: gpu sycl: no OpenCL GPU device"; exit 0
@@ -49,16 +49,16 @@ if [ $rc = 0 ]; then echo "run vecadd: ok"; else echo "run vecadd: FAIL"; fail=1
 sed 's/ra\[i\] + rb\[i\]/ra[i] - rb[i]/' vecadd.cpp > "$out/mut.cpp"
 mrb "$root/scripts/sycl-rewrite.rb" "$out/mut.cpp" > "$out/mut_device.cpp"
 (cd "$out" && "$root/scripts/pathb-dump.rb" --ir --freestanding mut_device.cpp > mut_device.ir)
-mrb "$root/scripts/pathb-spirv-emit.rb" "$out/mut_device.ir" > "$out/mut.spvasm"
+mrb "$root/scripts/pathb-spirv-kernel-emit.rb" "$out/mut_device.ir" > "$out/mut.spvasm"
 spirv-as --target-env spv1.1 "$out/mut.spvasm" -o "$out/mut.spv"
-if "$out/launch" "$out/mut.spv" __nfcxx_sycl_k0 >/dev/null 2>&1; then
+if "$out/launch" "$out/mut.spv" __nfcxx_sycl_entry_k0 >/dev/null 2>&1; then
   echo "mutant vecadd: FAIL (not caught)"; fail=1
 else
   echo "mutant vecadd: caught"
 fi
 
 # 5. The SYCL source itself (vecadd.cpp, unchanged) builds against the host runtime (lib/sycl) and runs: the runtime loads the
-# SPIR-V named by NFCXX_SYCL_SPV and launches __nfcxx_sycl_k0 with the three accessors. The mutant SPIR-V must fail the host run.
+# SPIR-V named by NFCXX_SYCL_SPV and launches __nfcxx_sycl_entry_k0 with the three accessors. The mutant SPIR-V must fail the host run.
 g++ -std=c++17 -O2 -Wall -I"$root/lib/sycl" -I"$clinc" vecadd.cpp -o "$out/host" -l:libOpenCL.so.1
 if NFCXX_SYCL_SPV="$out/vecadd.spv" "$out/host"; then echo "run sycl host: ok"; else echo "run sycl host: FAIL"; fail=1; fi
 if NFCXX_SYCL_SPV="$out/mut.spv" "$out/host" >/dev/null 2>&1; then

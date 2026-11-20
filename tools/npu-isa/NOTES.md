@@ -118,3 +118,51 @@ Open root cause: for some 3-slot bundles the header bits include operand bits of
 The class-level header table cannot express that; header must be measured per operand pattern or the
 slot whose bits leak into the header must be identified.
 Residue: branch byte 0x0b/0x06 varies with the target (linker relocation); not reproducible by numeric operands.
+
+## Register-operand field fitting (session 3)
+
+Problem: many templates were fitted from one example, so their register bits were treated as
+constant. `VAU.MUL.F32 v1 v2 v3` decoded, but `v4 v5 v6` did not, and every VAU template was
+`linear: false` or had no `fields`. The decoder also skipped non-linear templates and printed
+vector operands as bare numbers.
+
+Fix (`fit_fields.py`): for each template with register operands, assemble random register numbers
+(0..31) with the MoviTools oracle, find the encoding bit that tracks each value bit, keep the
+constant bits as `fixed_mask`/`fixed_val`, and accept a template only if it reconstructs every sample.
+An operand that no encoding bit tracks is kept as a literal token: for `VAU.DP4A` the fourth operand
+is accepted but ignored by the encoder (`v0`, `v4`, `v31` all give `33 5f 84 21`).
+
+Results: 1519 of 1519 register-operand templates refit and verify.
+Decoder patches: vector operands print as `vN`; `linear` is no longer required to be true for
+fitted entries.
+
+Coverage, frame kernel `ptl frame.c` (106,816 bytes, built with the pinned flags, one hazard NOP):
+
+| Table | Decoded |
+| --- | --- |
+| origin/main | 60.2 % |
+| after register-field refit | 66.4 % (70,931 of 106,816 bytes) |
+
+Open:
+- The bundle at offset 0x1b2 (`42 fd 1c 0e 60 …`) is unexplained. Byte 0x42 is `LSU0.BYPASS_OFF` or an
+  LSU0 CP/CFLUSH/CINVAL/CPFL form, but no register or immediate variant (registers 0..31, immediates
+  0..63) encodes to `42 fd 1c 0e`, and no pair or triple of opcode-class representatives starts with 0x42.
+- Remaining unknown runs are most likely bundle combinations or operand-dependent headers.
+- Mnemonics still rejected by the assembler for every tried shape: about 1,160 (`mnemonics.txt` minus the
+  table). They need operand forms not yet enumerated.
+
+## Bundle shapes fitted from bundle encodings (session 3)
+
+Bundle layouts do not copy the standalone slot encodings at fixed bit positions: register fields
+inside a bundle are encoded differently. So bundle shapes are fitted directly from bundle samples.
+
+`bundle_fit.py` assembles every two-slot class pair and every placeholder shape (header length 0 in
+`tuple_hdr.json`) with random register numbers, requires every register column to vary, fits one
+template per shape with `fit_fields.fit`, and stores the result in `bundle_templates.json`.
+`decode_kernel.py` loads that file next to `all_templates.json` and tries single templates up to 16 bytes.
+
+Results: 195 of 248 shapes verify. On the 150 placeholder samples, 146 decode as one item and every
+one of those 146 reassembles to the exact bytes. The 4 misses are in `LSU0/5:82|SAU/4:2c|IAU/4:86|PEU`.
+The frame kernel's coverage is unchanged (66.4 %): its unknown bundles are not these shapes.
+
+Also needed: `table.json` and `kernel_table.json` (not tracked here) must sit next to the scripts.
