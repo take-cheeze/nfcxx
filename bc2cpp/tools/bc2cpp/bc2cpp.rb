@@ -25,6 +25,7 @@ require_relative 'type_check_variants'
 type_check_variants = TypeCheckVariants.parse_argv(ARGV) if $PROGRAM_NAME == __FILE__
 TypeCheckVariants.arm_guard if type_check_variants
 require_relative 'compact_output'
+require_relative 'owner_call_arity'
 require_relative 'owner_set_share'
 require_relative 'shard_output'
 require_relative 'runtime_header'
@@ -1593,8 +1594,10 @@ BC2CPP_MAIN = lambda do
   # RUNTIME_HEADER (runtime_header.rb): between the two, so it moves the compacted runtime text ShardOutput then splits.
   RuntimeHeader.capture_stdout(ENV[RuntimeHeader::DIR_KEY])
   CompactOutput.capture_stdout unless annotated
-  # OWNER_SET_SHARE (owner_set_share.rb): before the split, so shards of one gem share a set too.
   real_gem = BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol }
+  # OWNER_CALL_ARITY (owner_call_arity.rb): registered before OWNER_SET_SHARE, so it rewrites that pass's text.
+  OwnerCallArity.capture_stdout if OwnerCallArity.enabled?(real_gem)
+  # OWNER_SET_SHARE (owner_set_share.rb): before the split, so shards of one gem share a set too.
   OwnerSetShare.capture_stdout(symbol) if OwnerSetShare.enabled?(real_gem)
 
   # PARAM_TRACE (tools/bc2cpp/param_trace.rb): opt-in runtime classes of compiled method and block
@@ -1923,7 +1926,7 @@ BC2CPP_MAIN = lambda do
   # TAGGED_FIXNUM (tagged_fixnum.rb): the Fixnum pair test and the word-level arithmetic and compares.
   print TaggedFixnum::PRELUDE
   # RESPOND_TO_PHANTOM (closed build): see CodeGen#respond_to_phantom_runtime.
-  if ENV['BC2CPP_BUILD_NAME'] == 'closed' || !ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').empty?
+  if StaticDispatchLists.closed_build? || !ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').empty?
     puts CodeGen.respond_to_phantom_runtime
   end
   # EXCEPTION_BREAK_SUPPORT: the exception a BLOCK_FALLBACK BREAK throws and the

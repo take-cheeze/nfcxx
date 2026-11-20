@@ -171,7 +171,7 @@ C
 
 # Compiles a world: +core+ maps a path below the world's root to its source (added to the two fixed core files), +engine+ is
 # one source. The block gets the compiled pieces while the files exist.
-def with_world(suite, engine:, core: {}, native: nil)
+def with_world(suite, engine:, core: {}, native: nil, native_name: 'native.c')
   Dir.mktmpdir('core_enumerator_free_fixture') do |root|
     compile = lambda do |rel, source, label|
       path = File.join(root, rel)
@@ -185,7 +185,8 @@ def with_world(suite, engine:, core: {}, native: nil)
     native_paths = []
     entries = []
     if native
-      path = File.join(root, 'native.c')
+      path = File.join(root, native_name)
+      FileUtils.mkdir_p(File.dirname(path))
       File.write(path, native)
       native_paths << path
       entries.concat(CoreNativeCandidates.entries([path]))
@@ -460,11 +461,11 @@ suite.check('and the block\'s own value counts (a block that ends in an Array)',
                                                     block_returns: declared).holds)
 
 # --- CORE_FIBER_FREE (core_fiber_free.rb), which builds on this proof -------------------------------------------------
-fiber_free = lambda do |engine:, core: {}, native: INDEX_C, left_out: Set.new|
-  with_world(suite, engine: engine, core: core, native: native) do |w|
+fiber_free = lambda do |engine:, core: {}, native: INDEX_C, left_out: Set.new, native_name: 'native.c', defining: nil|
+  with_world(suite, engine: engine, core: core, native: native, native_name: native_name) do |w|
     inputs = inputs_of(w)
     enumerators = EF.prove(inputs)
-    CoreFiberFree.prove(inputs, enumerator_free: -> { enumerators.holds }, left_out: left_out)
+    CoreFiberFree.prove(inputs, enumerator_free: -> { enumerators.holds }, left_out: left_out, defining: defining)
   end
 end
 # Enumerator#next's shape: the one Fiber.new of mruby's Ruby.
@@ -490,6 +491,25 @@ suite.check('a native that names the class refutes it',
             !fiber_free.call(engine: engine_ok, native: fiber_c.call('return mrb_obj_value(mrb_class_get(mrb, "Fiber"));')).holds)
 suite.check('so does one that calls const_get',
             !fiber_free.call(engine: engine_ok, native: fiber_c.call('return mrb_funcall(mrb, self, "const_get", 1, self);')).holds)
+# LISTS_WORLD (a world that links mruby-fiber, wio): fiber.c's own spelling is the class's definition, which makes no Fiber
+# while no other native calls its C constructor (StaticDispatchRegistrations.fiber_c_makers).
+fiber_src = 'mrbgems/mruby-fiber/src/fiber.c'
+defines = fiber_c.call('return mrb_obj_value(mrb_define_class(mrb, "Fiber", mrb->object_class));')
+suite.check('fiber.c defining the class does not refute it while no native calls mrb_fiber_new',
+            fiber_free.call(engine: engine_ok, native: defines, native_name: fiber_src, defining: -> { true }).holds)
+suite.check('it does when one may',
+            !fiber_free.call(engine: engine_ok, native: defines, native_name: fiber_src, defining: -> { false }).holds)
+suite.check('and any other native naming the class still does',
+            !fiber_free.call(engine: engine_ok, native: defines, defining: -> { true }).holds)
+Dir.mktmpdir('fiber_c_makers') do |dir|
+  write = ->(rel, text) { File.join(dir, rel).tap { |p| FileUtils.mkdir_p(File.dirname(p)) && File.write(p, text) } }
+  own = write.call(fiber_src, "MRB_API mrb_value\nmrb_fiber_new(mrb_state *mrb, const struct RProc *p) { return fiber_new(p); }\n")
+  decl = write.call('include/mruby.h', "MRB_API mrb_value mrb_fiber_new(mrb_state *mrb, const struct RProc *proc);\n")
+  call = write.call('src/host.c', "void h(mrb_state *mrb) { mrb_fiber_new(mrb, p); }\n")
+  sdr = StaticDispatchRegistrations
+  suite.check("fiber.c's definition and mruby.h's declaration call no mrb_fiber_new", sdr.fiber_c_makers([own, decl]).empty?)
+  suite.check('another native that calls it does', sdr.fiber_c_makers([own, decl, call]) == [call])
+end
 suite.check("value.h's type-name table does not",
             fiber_free.call(engine: engine_ok, native: fiber_c.call("return self;\n}\n#define T(f) f(MRB_TT_FIBER,       struct RFiber,      \"Fiber\")\nstatic void fx_x(void) {")).holds)
 

@@ -55,6 +55,7 @@ BC2CPP_CANONICAL_CORE_GEMS = (BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_G
 # would claim them. A class also owned by an engine gem (Array, StringIO) is split per definition by
 # source file: see emit_unit in bc2cpp.rb.
 require_relative 'world_root'
+require_relative 'lists_world'
 require_relative 'ruby_parse_cache'
 require_relative 'scan_cache'
 BC2CPP_OWNER_SOURCE_ROOT = File.join(BC2CPP_WORLD_ROOT, "3rd").freeze
@@ -533,7 +534,7 @@ end
 # The non-test add_dependency names of a mrbgem.rake. add_test_dependency is not built, so it is not followed.
 # A `Dir.exist?` modifier (mruby-marshal's metaprog) is evaluated, and an `unless %w[...].include?(build.name)`
 # modifier drops the gem for the closed build; any other modifier raises.
-def bc2cpp_rake_dependencies(dir, root)
+def bc2cpp_rake_dependencies(dir, root, world = 'closed')
   text = bc2cpp_gem_rake_text(dir, root)
   raise "bc2cpp: #{dir}/mrbgem.rake is missing; the closed-world gem closure is derived from it" unless text
 
@@ -543,8 +544,8 @@ def bc2cpp_rake_dependencies(dir, root)
     if (cond = line[/\bif\s+Dir\.exist\?\s+"\#\{MRUBY_ROOT\}\/mrbgems\/([\w-]+)"/, 1])
       next unless File.directory?(File.join(root, '3rd/mruby/mrbgems', cond))
     elsif (excluded = line[/\bunless\s+%w\[([^\]]*)\]\.include\?\(build\.name\)/, 1])
-      # The closure is always the closed build's, so a gem its list names is left out.
-      next if excluded.split.include?('closed')
+      # The closure is the world's (LISTS_WORLD, closed unless named), so a gem its list names is left out.
+      next if excluded.split.include?(world)
     elsif line.match?(/\b(?:if|unless)\b/)
       raise "bc2cpp: unsupported add_dependency condition in #{rake}: #{line.strip}"
     end
@@ -555,8 +556,8 @@ end
 # Gems the closed build lists under another directory (mruby-fiber is a source-less placeholder there).
 BC2CPP_GEM_STAND_INS = { 'mruby-fiber' => 'mruby-fiber-placeholder' }.freeze
 
-def bc2cpp_gem_dir(name, root)
-  stand_in = BC2CPP_GEM_STAND_INS[name]
+def bc2cpp_gem_dir(name, root, world = 'closed')
+  stand_in = world == 'closed' && BC2CPP_GEM_STAND_INS[name]
   return File.join(root, stand_in) if stand_in && bc2cpp_gem_rake_text(File.join(root, stand_in), root)
 
   dirs = [File.join(root, '3rd/mruby/mrbgems', name), File.join(root, name), File.join(root, '3rd', name)]
@@ -565,7 +566,7 @@ def bc2cpp_gem_dir(name, root)
 end
 
 # { name => dir } of `roots` and everything they reach. `extra` adds the edges a rake builds in Ruby.
-def bc2cpp_gem_closure(roots, root, extra = {})
+def bc2cpp_gem_closure(roots, root, extra = {}, world = 'closed')
   table = {}
   queue = roots.to_a
   until queue.empty?
@@ -573,8 +574,8 @@ def bc2cpp_gem_closure(roots, root, extra = {})
     next if table.key?(name)
 
     table[name] = dir
-    (bc2cpp_rake_dependencies(dir, root) + extra.fetch(name, [])).each do |dep|
-      queue << [dep, bc2cpp_gem_dir(dep, root)]
+    (bc2cpp_rake_dependencies(dir, root, world) + extra.fetch(name, [])).each do |dep|
+      queue << [dep, bc2cpp_gem_dir(dep, root, world)]
     end
   end
   table
@@ -597,12 +598,14 @@ def bc2cpp_core_compiled_edges(root, build_names)
   end
 end
 
-# The core gems (3rd/mruby/mrbgems) the closed build loads. Its build_config conf.gem lines and compiled gems are roots.
-def bc2cpp_closed_core_gems(root = BC2CPP_GEMS_ROOT)
-  lines = bc2cpp_rpg_maker_gem_lines(bc2cpp_build_config_text, 'closed', root)
+# The core gems (3rd/mruby/mrbgems) the closed build loads (`world`: the LISTS_WORLD build's instead). Its build_config
+# conf.gem lines and compiled gems are roots.
+def bc2cpp_closed_core_gems(root = BC2CPP_GEMS_ROOT, world: ListsWorld.name)
+  lines = bc2cpp_rpg_maker_gem_lines(bc2cpp_build_config_text, world, root)
   roots = lines.merge(BC2CPP_COMPILED_GEMS.keys.to_h { |g| [g, File.join(root, g)] })
+  roots.merge!(ListsWorld::EXTRA_GEMS.fetch(world).to_h { |d| [File.basename(d), File.join(root, d)] })
   edges = { 'mruby-core-compiled' => bc2cpp_core_compiled_edges(root, lines.keys) }
-  core = bc2cpp_gem_closure(roots, root, edges).select { |_, dir| dir.start_with?("#{root}/3rd/mruby/mrbgems/") }.keys
+  core = bc2cpp_gem_closure(roots, root, edges, world).select { |_, dir| dir.start_with?("#{root}/3rd/mruby/mrbgems/") }.keys
   raise 'bc2cpp: the closed build derives no core gems' if core.empty?
 
   core.freeze

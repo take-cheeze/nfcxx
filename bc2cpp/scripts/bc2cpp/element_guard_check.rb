@@ -4,6 +4,7 @@
 # DECLARED_ELEMENT_GUARD: `@items: Array[Integer]` (RBS) is checked where an element is read. A GETIDX of the declared
 # ivar tests its result after the read, so a non-Integer element raises BC2cppDeclarationViolation in the compiled run
 # (the interpreted run has no declaration, so it returns the element). A good element behaves the same in both runs.
+# Loops over the ivar (each, map, select, inject, sort_by) test each element they bind (DECLARED_LOOP_ELEMENT).
 # Read from the generated code's DECLARED_ELEMENT_GUARD lines and the behaviour comparison.
 #
 #   MRBC=path/to/mrbc ruby scripts/bc2cpp/element_guard_check.rb
@@ -206,6 +207,139 @@ Dir.mktmpdir('element_guard_thing_sig') do |sig_dir|
   end
 ensure
   ENV.delete('BC2CPP_SIG_DIRS')
+end
+
+# DECLARED_LOOP_ELEMENT: an inlined each/map/select/inject/sort_by over `@things: Array[Thing]` tests each element it
+# binds, so the block parameter is exactly Thing in the body (an exact-class call, not a by-name or owner-class chain).
+# A parameter the body reassigns is not the element there and keeps its ordinary dispatch.
+LOOP_SOURCE = <<~RUBY
+  class Thing
+    def ok?
+      true
+    end
+
+    def hp
+      3
+    end
+  end
+
+  class Other
+    def ok?
+      false
+    end
+
+    def hp
+      1
+    end
+  end
+
+  class Pack
+    def initialize
+      @things = [Thing.new, Thing.new]
+      nil
+    end
+
+    def total
+      s = 0
+      @things.each { |t| s += t.hp }
+      s
+    end
+
+    def oks
+      @things.map { |t| t.ok? }
+    end
+
+    def good
+      @things.select { |t| t.ok? }.size
+    end
+
+    def folded
+      @things.inject(0) { |acc, t| acc + t.hp }
+    end
+
+    def ordered
+      @things.sort_by { |t| t.hp }.size
+    end
+
+    def swapped(flag)
+      @things.map do |t|
+        t = Other.new if flag
+        t.ok?
+      end
+    end
+
+    def poison
+      @things.replace([Thing.new, Other.new])
+      nil
+    end
+  end
+RUBY
+
+LOOP_SIG = <<~RBS
+  class Pack
+    @things: Array[Thing]
+  end
+RBS
+
+LOOP_DRIVER = <<~'RUBY'
+  def show(label)
+    puts "#{label}: #{yield.inspect}"
+  rescue => e
+    puts "#{label}: raised #{e.class}"
+  end
+  p = Pack.new
+  show('total') { p.total }
+  show('oks') { p.oks }
+  show('good') { p.good }
+  show('folded') { p.folded }
+  show('ordered') { p.ordered }
+  show('swapped') { p.swapped(true) }
+  p.poison
+  show('bad total') { p.total }
+  show('bad oks') { p.oks }
+  show('bad good') { p.good }
+  show('bad folded') { p.folded }
+  show('bad ordered') { p.ordered }
+  puts 'end'
+RUBY
+
+LOOP_METHODS = %w[total oks good folded ordered].freeze
+
+Dir.mktmpdir('element_guard_loop_sig') do |sig_dir|
+  File.write(File.join(sig_dir, 'pack.rbs'), LOOP_SIG)
+  ENV['BC2CPP_SIG_DIRS'] = sig_dir
+  Dir.mktmpdir('element_guard_loop') do |dir|
+    code, = Bc2cppFixtureRuntime.generate(LOOP_SOURCE, dir, only_owners: %w[Pack Thing Other])
+    bodies = code.split(%r{^// (?=Pack#)}).to_h { |chunk| [chunk[/\APack#(\w+)/, 1], chunk] }
+    LOOP_METHODS.each do |name|
+      body = bodies[name].to_s
+      check.call("the #{name} loop tests each element it binds", body.include?('DECLARED_ELEMENT_GUARD Pack#things iterated'))
+      check.call("the #{name} loop body calls the element's method exactly",
+                 body.include?('CLOSED_WORLD_EXACT_CLASS :hp -> Thing#hp') || body.include?('CLOSED_WORLD_EXACT_CLASS :ok? -> Thing#ok?') ||
+                   body.include?('MONO :hp -> Thing#hp'))
+    end
+    check.call('a multi-class name on the element is an exact-class call',
+               bodies['oks'].to_s.include?('CLOSED_WORLD_EXACT_CLASS :ok? -> Thing#ok?') && !bodies['oks'].to_s.include?('POLY_SMALL_N :ok?'))
+    check.call('a reassigned parameter keeps its ordinary dispatch', !bodies['swapped'].to_s.include?('CLOSED_WORLD_EXACT_CLASS :ok? -> Thing#ok?'))
+  end
+  ENV['BC2CPP_DECLARED_LOOP_ELEMENT'] = '0'
+  Dir.mktmpdir('element_guard_loop_off') do |dir|
+    code, = Bc2cppFixtureRuntime.generate(LOOP_SOURCE, dir, only_owners: %w[Pack Thing Other])
+    check.call('BC2CPP_DECLARED_LOOP_ELEMENT=0 emits no loop guard', !code.include?('iterated */'))
+  end
+  ENV.delete('BC2CPP_DECLARED_LOOP_ELEMENT')
+  suite.generate(LOOP_SOURCE, %w[Pack Thing Other])
+  suite.behaviour(LOOP_DRIVER, banner: 'declared element loops, interpreted and compiled', same: false) do |interpreted, compiled|
+    good = ->(lines) { lines&.reject { |l| l.start_with?('bad ', '[RPG2k]') } }
+    check.call('good elements loop the same in both runs', interpreted && compiled && good.call(interpreted) == good.call(compiled))
+    check.call('the interpreted run loops over the wrong-class element', interpreted&.select { |l| l.start_with?('bad ') }&.none? { |l| l.include?('raised') })
+    check.call('every compiled loop raises the declaration violation on it',
+               compiled&.select { |l| l.start_with?('bad ') }&.size == LOOP_METHODS.size &&
+                 compiled.select { |l| l.start_with?('bad ') }.all? { |l| l.end_with?('raised BC2cppDeclarationViolation') })
+  end
+ensure
+  ENV.delete('BC2CPP_SIG_DIRS')
+  ENV.delete('BC2CPP_DECLARED_LOOP_ELEMENT')
 end
 
 suite.finish
