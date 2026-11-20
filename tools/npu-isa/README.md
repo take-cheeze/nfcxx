@@ -30,3 +30,32 @@ Status: partial. Coverage of the OpenVINO blobs tested so far is about 51%, and 
 
 - Python 3, plus wine with a prefix at `~/.wine-movi` that has MoviTools installed under `C:\movi`.
 - Target string `5000xx`. `3720xx` produces incorrect code on this device.
+
+## Building `asmbatch.exe`
+
+`asmbatch.exe` is a Windows program, cross-compiled with MinGW-w64 and run under wine.
+
+1. Install the tools. On Debian/Ubuntu: `sudo apt install gcc-mingw-w64-x86-64 wine64`.
+   On macOS: `brew install mingw-w64` and a wine build (for example `brew install --cask wine-stable`).
+2. Compile:
+
+   ```sh
+   x86_64-w64-mingw32-gcc -O2 -Wall -o asmbatch.exe asmbatch.c
+   ```
+
+   The result is a 64-bit PE console executable, about 274 KB.
+3. Install the MoviTools host directory into the wine prefix. Copy `asmbatch.exe` to
+   `~/.wine-movi/drive_c/movi/host/`, and put the MoviTools `MVC_DEPEND` tree at
+   `~/.wine-movi/drive_c/movi/MVC_DEPEND/` (it must contain `bin\moviAsm64.dll`).
+4. Run it. Paths are wine paths, and `in.txt` holds one instruction per line:
+
+   ```sh
+   WINEPREFIX=$HOME/.wine-movi WINEDEBUG=-all wine 'C:\movi\host\asmbatch.exe' \
+     'C:\movi\MVC_DEPEND' 'C:\movi\host\in.txt' 'C:\movi\host\out.txt' 5000xx
+   ```
+
+   The output file has one line per input line: `<index>\t<OK|ERR>\t<object file hex>`.
+   `learn_list.py` runs the same command.
+
+Verified on Linux with `x86_64-w64-mingw32-gcc` and wine: `NOP 1` and `IAU.ADD i1 i1 2` both assembled
+with status OK.
