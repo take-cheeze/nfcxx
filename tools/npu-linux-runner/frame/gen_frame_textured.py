@@ -8,7 +8,7 @@ interpolation field to match nr_native_check for native 39.
 The texture is 128x128 opaque RGBA in an atlas window. The quad maps uv (pixel centre)/128, so each covered
 pixel should return the texel at its own position. Commands use blend mode 0 (copy).
 
-usage: gen_frame_textured.py <ptl_kernels dir> <out dir> [seed] [draws]
+usage: gen_frame_textured.py <ptl_kernels dir> <out dir> [seed] [draws] [--full-tile] [--vector]
 """
 import pathlib
 import re
@@ -22,11 +22,13 @@ from gen_frame_fill import ENTRY, HEADER, COMMAND, SPAN, W, H, MAGIC  # noqa: E4
 from gen_frame_quad import signature, solve_interpolation  # noqa: E402
 from gen_frame_fill import inline  # noqa: E402
 from flat_dispatch import flatten  # noqa: E402
+from vector_lower import vector_lower  # noqa: E402
 
 NATIVE = 39
 TEX = 128
 WINDOW = 32      # NR_FRAME_WINDOW_BYTES
-STRIDE = 3       # attributes per vertex: position, uv, uv
+STRIDE = 3       # attributes per vertex: position, constant 1.0, uv
+FULL_TILE = "--full-tile" in sys.argv  # every draw clips to the whole tile (per-pixel cost)
 
 
 def expected_signature(src):
@@ -112,6 +114,8 @@ def build(src, seed, draws):
     for k in range(draws):
         x0, y0 = (int(v) for v in rng.integers(0, 120, 2))
         x1, y1 = x0 + int(rng.integers(1, 9)), y0 + int(rng.integers(1, 9))
+        if FULL_TILE:
+            x0, y0, x1, y1 = 0, 0, W, H
         f = [0] * (COMMAND // 4)
         f[0] = 0                  # draw
         f[1] = 0                  # program index
@@ -134,13 +138,17 @@ def build(src, seed, draws):
 
 
 def main():
-    src_dir, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
-    seed = int(sys.argv[3]) if len(sys.argv) > 3 else 1
-    draws = int(sys.argv[4]) if len(sys.argv) > 4 else 16
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    src_dir, out = pathlib.Path(args[0]), pathlib.Path(args[1])
+    seed = int(args[2]) if len(args) > 2 else 1
+    draws = int(args[3]) if len(args) > 3 else 16
     out.mkdir(parents=True, exist_ok=True)
     src = (src_dir / "frame_programs.h").read_text()
     core = inline(src_dir / "frame_core.h")
-    (out / "frame_fill_entry.c").write_text(flatten(core) + ENTRY)
+    lowered = flatten(core)
+    if "--vector" in sys.argv:
+        lowered = vector_lower(lowered)   # ext-vector four-lane helpers (see vector_lower.py)
+    (out / "frame_fill_entry.c").write_text(lowered + ENTRY)
     elements, tile, n = build(src, seed, draws)
     np.save(out / "frame_input.npy", elements)
     np.save(out / "frame_expected.npy", tile)

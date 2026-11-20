@@ -160,3 +160,25 @@ Not yet measured: blur (multi-pass) and bilinear minification; the sample here m
 `frame/flat_dispatch.py` flattens `nr_native_row`'s nested tree into `if (native == k) { nr_row_k(row); return; }`
 for every row function present. It is applied to the generated entry for both the quad and textured batches.
 
+
+## Where the per-pixel time goes (full-tile textured draws)
+
+`--full-tile` makes every draw cover the whole 128x128 tile, so the per-pixel path dominates. Four
+textured draws, 100 to 200 inferences each, sequential runs (p50):
+
+| build | p50 (ms) |
+| --- | --- |
+| flat dispatch (default) | 42.06 |
+| flat dispatch + vector lowering (`--vector`) | 41.73 |
+| no blend (`NR_EXP_NO_BLEND` defined in the entry) | 27.08 |
+| no pixel shader (`NR_EXP_NO_PS` defined in the entry) | 18.69 |
+| neither | 2.24 |
+
+Per pixel-draw (4 x 16,384 = 65,536 of them, out of 262,144 with fill-free overhead removed):
+the blend is about 57 ns, the shader with texture sampling about 89 ns, and rasterisation with fixed
+overhead the rest (about 2.2 ms in total, of which about 0.4 ms is the fixed inference cost).
+
+Vector lowering of the four-lane helpers (`frame/vector_lower.py`) changes the time by about 1 %, which is
+within noise, so the helpers are not where the time goes. The sampler (`nr_sample`, bilinear with four texel
+fetches) and the blend are the candidates for lowering work. The ablation builds do not produce correct
+pixels; only their timings are meaningful.
