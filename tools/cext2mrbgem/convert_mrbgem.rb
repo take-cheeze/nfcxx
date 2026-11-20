@@ -1356,7 +1356,8 @@ end
     return @gcv_owned[name] if @gcv_owned.key?(name)
     en = Regexp.escape(name)
     define_re = /(?<![#{WC}$.>])#{en}#{SS}=#{SS}rb_define_(?:class|module)(?:_under)?#{SS}\(/
-    nondef_re = /(?<![#{WC}$.>])#{en}#{SS}=(?!=)(?>#{SS})(?!#{CLASS_RHS_RE}#{SS}\()/
+    # a class constant (rb_eEncodingError, rb_cObject: an RClass * expression in the api_map) is a class value too
+    nondef_re = /(?<![#{WC}$.>])#{en}#{SS}=(?!=)(?>#{SS})(?!#{CLASS_RHS_RE}#{SS}\(|rb_[cem][A-Z]\w*#{SS};)/
     defined = @files.values.any? { |f| f['masked'].match?(define_re) }
     mixed = @files.values.any? { |f| nondef_assignment?(f['masked'], nondef_re) }
     @gcv_owned[name] = defined && !mixed
@@ -5935,7 +5936,14 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       callee_c, idx_c = call_context(masked, s)
       class_pos = callee_c && ((@special_pos[callee_c] || []).include?(idx_c) ||
                                ((@entries[callee_c] || {})['class_args'] || []).include?(idx_c))
-      text = "mrb_obj_value(#{text})" if !class_pos && entry['mruby'].match?(CLASS_EXPR_RE)
+      # the right side of an assignment to an owned class variable (struct RClass *) is the class itself, not its VALUE
+      eq = prev_nonspace(masked, s - 1)
+      owned_target = false
+      if eq >= 0 && masked[eq] == '=' && !(eq > 0 && '=!<>+-*/%&|^'.include?(masked[eq - 1]))
+        lhs = masked[0...eq].match(/([A-Za-z_]\w*)#{SS}\z/)
+        owned_target = lhs && @class_vars.include?(lhs[1]) && owns_class_var?(rel, s, lhs[1])
+      end
+      text = "mrb_obj_value(#{text})" if !class_pos && !owned_target && entry['mruby'].match?(CLASS_EXPR_RE)
       # a file-scope initializer (static VALUE X = Qnil;) is not a constant expression in C (mrb_nil_value is a function): the
       # initializer is removed, and the variable is set at the start of Init (the file's Init function)
       fs_init = if %w[Qnil Qtrue Qfalse].include?(name) && enclosing_func(rel, s).nil?
