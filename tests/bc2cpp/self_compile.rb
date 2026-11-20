@@ -4,8 +4,10 @@
 require 'tmpdir'
 require 'open3'
 require 'rbconfig'
+require 'stringio'
 require_relative '../../bc2cpp/tools/self_compile/artifacts'
 require_relative '../../bc2cpp/host-libs/mruby-bc2cpp-runner/mrblib/runner'
+require_relative '../../bc2cpp/tools/bc2cpp/profile_timings'
 
 base = { 'BC2CPP_BUILD_NAME' => 'bc2cpp-self', 'BC2CPP_BUILD_GEMS' => 'compiler=runtime',
          'BC2CPP_TREE_ROOT' => '/compiler', 'BC2CPP_MRBC_RB' => '' }
@@ -107,5 +109,38 @@ Dir.mktmpdir('self-compile-check') do |dir|
   rescue RuntimeError => error
     raise unless error.message == 'late self installation cannot change existing object layouts'
   end
+end
+
+# Timing callbacks retain their shared clock when a forked variant resets it.
+timing_keys = %w[BC2CPP_PROFILE_TIMINGS NFCXX_TIME_LOG NFCXX_TRACE_UNIT]
+timing_env = timing_keys.to_h { |key| [key, ENV[key]] }
+timing_clock = Process.method(:clock_gettime)
+timing_stderr = $stderr
+Dir.mktmpdir('self-compile-timing') do |dir|
+  ticks = [10.0, 10.25, 10.5, 10.75, 20.0, 20.125, 30.0, 30.5, 40.0]
+  Process.define_singleton_method(:clock_gettime) { |_| ticks.shift || raise('unexpected clock read') }
+  $stderr = StringIO.new
+  ENV['BC2CPP_PROFILE_TIMINGS'] = '1'
+  ENV['NFCXX_TIME_LOG'] = File.join(dir, 'times')
+  ENV['NFCXX_TRACE_UNIT'] = 'fixture.rb'
+  phase, call, reset = Bc2cppTimings.callbacks
+  phase.call('first')
+  raise 'timed callback lost its result' unless call.call('detail') { 7 } == 7
+  reset.call
+  phase.call('after reset')
+  expected = "0.250000\tbc2cpp\tfirst\tfixture.rb\n0.125000\tbc2cpp\tafter reset\tfixture.rb\n"
+  raise 'phase clock did not reset' unless File.read(ENV['NFCXX_TIME_LOG']) == expected
+  raise 'elapsed diagnostic changed' unless $stderr.string.match?(/after reset\s+0\.125s \(total\s+0\.125s\)/)
+  ENV.delete('BC2CPP_PROFILE_TIMINGS')
+  raise 'disabled timing lost callback result' unless call.call('disabled') { 9 } == 9
+  ENV['NFCXX_TIME_LOG'] = dir # A logging error must not fail compilation.
+  Bc2cppTimings.callbacks.first.call('unwritable')
+  ENV.delete('NFCXX_TIME_LOG')
+  Bc2cppTimings.callbacks.first.call('disabled')
+  raise 'unexpected timing clock behavior' unless ticks.empty?
+ensure
+  Process.define_singleton_method(:clock_gettime, timing_clock)
+  $stderr = timing_stderr
+  timing_env.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
 end
 puts 'self compilation registration, counters, fallbacks and incremental artifacts: PASS'
