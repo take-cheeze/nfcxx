@@ -239,7 +239,7 @@ class ClosedWorld
   # CALL_FACTS: `scoped` says `instances` is the whole receiver set, so only its classes need an
   # arm, and `native_free` that no native or outside definer of `name` reaches any of them.
   def refusal(name, listed, self_owner, installed, instances: nil, scoped: false, native_free: false,
-              instance_scope: false, singleton_arms: nil)
+              instance_scope: false, singleton_arms: nil, method_missing_arms: nil)
     return @global_refusal if @global_refusal
     return :dynamic_install if installed.nil? || installed.include?(name)
     return :unknown_definer if instance_scope ? instance_unknown_def?(name) : @unknown_defs.include?(name)
@@ -253,7 +253,9 @@ class ClosedWorld
 
     required &= instances.to_set if scoped && instances
     return :unlisted_class unless required.subset?(listed.to_set)
-    return :method_missing_receiver unless method_missing_free?(self_owner, instances)
+    # METHOD_MISSING_ARMS: an exact-class arm per method_missing class sends by name before this else is reached.
+    return :method_missing_receiver unless method_missing_free?(self_owner, instances) ||
+                                           method_missing_arms&.to_set&.superset?(@mm_classes)
 
     nil
   end
@@ -2790,6 +2792,18 @@ class ClosedWorld
   # Can the fallback's receiver be an instance of a method_missing class? Only
   # `self` is known: every entry into a compiled method passes a kind_of? its
   # owner (dispatch, a guarded or lexical-self direct call, super).
+  # METHOD_MISSING_ARMS: the classes whose instances reach a Ruby method_missing (with the subclasses that inherit it),
+  # when each is a declared, non-opaque class of stable constant identity and none is open below, so an exact-class arm
+  # per class (bc2cpp_class_is, which looks through an object's singleton class) catches every such receiver. nil
+  # when there are none or that is not so.
+  public def method_missing_arm_classes
+    return nil if @global_refusal || @mm_classes.empty? || !@wild.empty?
+    return nil unless @mm_classes.all? { |c| @declared_classes.include?(c) && !opaque?(c) && stable_constant_identity?(c) }
+    return nil unless @mm_classes.all? { |c| (subs = known_subclasses(c)) && subs.to_set.subset?(@mm_classes) }
+
+    @mm_classes.to_a.sort
+  end
+
   def method_missing_free?(self_owner, instances = nil)
     return true if @mm_classes.empty?
     # A proven class set: a class inherits method_missing exactly when @mm_classes holds it.
