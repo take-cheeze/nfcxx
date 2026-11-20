@@ -5,7 +5,7 @@
 #
 # Usage: scripts/mrb.rb scripts/sycl-rewrite.rb FILE.cpp > device.cpp
 #
-# The output is C++ for the device only: the kernels, named __nfcxx_sycl_k0, __nfcxx_sycl_k1, ... in source order, each
+# The output is C++ for the device only: the kernels, named __nfcxx_sycl_entry_k0, __nfcxx_sycl_entry_k1, ... in source order, each
 # with the parameters (one pointer per captured accessor, in declaration order, then `int n`). The guard `if (i >= n)`
 # is added because the launch rounds the range up to whole work groups. The host side (queue, buffer, handler) is not
 # rewritten yet: the runtime is the next slice.
@@ -175,7 +175,7 @@ def rewrite(src)
     end
     params << "int n"
     out << "\n// parallel_for #{k}: #{n_expr} work items\n"
-    out << "extern \"C\" void __nfcxx_sycl_k#{k}(#{params.join(", ")}) {\n"
+    out << "extern \"C\" void __nfcxx_sycl_entry_k#{k}(#{params.join(", ")}) {\n"
     out << "  int #{id_name} = (int)__nfcxx_tid_x() + (int)__nfcxx_ctaid_x() * (int)__nfcxx_ntid_x();\n"
     out << "  if (#{id_name} >= n) return;\n"
     out << body.strip.split("\n").map { |l| "  #{l.strip}" }.join("\n") << "\n"
