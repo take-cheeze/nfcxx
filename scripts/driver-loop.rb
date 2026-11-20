@@ -311,8 +311,12 @@ def pathb_option(state, arg)
   elsif arg == "-mregparm=3"
     state.pb_regparm = 1
   elsif arg == "-ftree-vectorize"
-    # the loop vectorizer of the QBE back end (3rd/qbe vec.c, qbe -V); gcc's own flag, so the gcc backend takes it too
+    # the loop vectorizer of the QBE back end (3rd/qbe vec.c, qbe -V); gcc's own flag, so the gcc backend takes it too.
+    # Path B vectorizes by default (pathb-cc.rb); this flag is then the same as the default.
     state.pbf << "--vectorize"
+  elsif arg == "-fno-tree-vectorize"
+    # turns the default loop vectorizer off (pathb-cc.rb --no-vectorize)
+    state.pbf << "--no-vectorize"
   elsif PATHB_PBF_FLAGS.include?(arg) || PATHB_TRIVIAL.include?(arg)
     state.pbf << arg
   elsif arg == "-fshort-wchar"

@@ -50,18 +50,24 @@ pathbcc_stub() {  # the Path B compile of one file (scripts/pathb-cc.rb): the ob
   printf 'OBJECT %s\n' "$o" > "$o"
   return 0
 }
+pathb_run() {  # a planned command of the Path B -c route (scripts/nfcxx-pathb.rb --records): a pathb-cc call is the stub
+  case $1 in */scripts/pathb-cc.rb) shift; pathbcc_stub "$@"; return ;; esac
+  "$@"
+}
 EOT
   # the setup and argument loop, up to the cache block (the build step stubbed, the root and the exec of the driver replaced)
   head -n "$((first - 1))" "$file" |
     sed -e "s|^root=\$(cd \"\$(dirname \"\$0\")\" && pwd)|root=$root|" -e 's/^ensure_tool() {/ensure_tool_real() {/' \
         -e 's|exec "\$0" |exec_stub nfcxx |g' -e 's|"\$0" |run_stub nfcxx |g' \
         -e 's|"\$root/scripts/pathb-cc.rb" |pathbcc_stub |g' \
+        -e 's|"\${cpc\[@\]}" |pathb_run "\${cpc[@]}" |' \
         -e 's|cp "\$pb_entry/obj" "\$out"; exit 0|cp "$pb_entry/obj" "$out"; _out EXIT 0; exit 0|' \
         -e '/^cache_check() {/,/^}/ s/^\( *\)exit 0$/\1_out EXIT 0; exit 0/' \
         -e '/^cache_check() {/,/^}/ s/&& exit 0$/\&\& { _out EXIT 0; exit 0; }/'
   # the cache block: from the pre-compile removal to the line before the -MD block
   sed -n "${first},$((end - 1))p" "$file" |
     sed -e 's/"\$eccp_bin" /eccp_stub /' -e 's/^  "\${eccp_argv\[@\]}"$/  eccp_stub/' -e 's|"\$root/scripts/pathb-cc.rb" |pathbcc_stub |g' \
+        -e 's|"\${cpc\[@\]}" |pathb_run "\${cpc[@]}" |' \
         -e 's/^\( *\)exit 0$/\1_out EXIT 0; exit 0/' -e 's/&& exit 0$/\&\& { _out EXIT 0; exit 0; }/'
 }
 harness > "$tmp/harness.sh"
