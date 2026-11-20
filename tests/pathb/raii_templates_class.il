@@ -78,53 +78,41 @@
   (returns void)
   (params (param "tmp8" (const (ptr (struct "_Z3BoxIiE")))))
   (block
-    (local "tmp9" (struct "__C7"))
-    (expr (assign (ptr (struct "__C7")) (dot_field (ptr (struct "__C7")) (var (struct "__C7") "tmp9") (field "next")) (var (ptr (struct "__C7")) "__curr_eh_stack_entry")))
-    (expr (assign (ptr (struct "__C7")) (var (ptr (struct "__C7")) "__curr_eh_stack_entry") (address_of (ptr (struct "__C7")) (var (struct "__C7") "tmp9"))))
-    (expr (assign unsigned_char (dot_field unsigned_char (var (struct "__C7") "tmp9") (field "kind")) (const unsigned_char 6)))
     (expr (pre_decr int (var int "live")))
-    (block
-      (expr (assign (ptr (struct "__C7")) (var (ptr (struct "__C7")) "__curr_eh_stack_entry") (dot_field (ptr (struct "__C7")) (var (struct "__C7") "tmp9") (field "next"))))
-      (return))))
+    (return)))
 
 (function "_ZN3BoxIiED2Ev"
   (returns void)
-  (params (param "tmp10" (const (ptr (struct "_Z3BoxIiE")))))
+  (params (param "tmp9" (const (ptr (struct "_Z3BoxIiE")))))
   (block
-    (expr (call void (routine (ptr (fn void ((ptr (struct "_Z3BoxIiE"))))) "_ZN3BoxIiED1Ev") (var (ptr (struct "_Z3BoxIiE")) "tmp10")))
+    (expr (call void (routine (ptr (fn void ((ptr (struct "_Z3BoxIiE"))))) "_ZN3BoxIiED1Ev") (var (ptr (struct "_Z3BoxIiE")) "tmp9")))
     (return)))
 
 (function "_ZN3BoxIlEC1El"
   (returns void)
-  (params (param "tmp11" (const (ptr (struct "_Z3BoxIlE")))) (param "x" long))
+  (params (param "tmp10" (const (ptr (struct "_Z3BoxIlE")))) (param "x" long))
   (block
-    (expr (assign long (points_to_field long (var (ptr (struct "_Z3BoxIlE")) "tmp11") (field "v")) (var long "x")))
+    (expr (assign long (points_to_field long (var (ptr (struct "_Z3BoxIlE")) "tmp10") (field "v")) (var long "x")))
     (expr (pre_incr int (var int "live")))
     (return)))
 
 (function "_ZN3BoxIlEC2El"
   (returns void)
-  (params (param "tmp12" (const (ptr (struct "_Z3BoxIlE")))) (param "tmp13" long))
+  (params (param "tmp11" (const (ptr (struct "_Z3BoxIlE")))) (param "tmp12" long))
   (block
-    (expr (call void (routine (ptr (fn void ((ptr (struct "_Z3BoxIlE")) long))) "_ZN3BoxIlEC1El") (var (ptr (struct "_Z3BoxIlE")) "tmp12") (var long "tmp13")))
+    (expr (call void (routine (ptr (fn void ((ptr (struct "_Z3BoxIlE")) long))) "_ZN3BoxIlEC1El") (var (ptr (struct "_Z3BoxIlE")) "tmp11") (var long "tmp12")))
     (return)))
 
 (function "_ZN3BoxIlED1Ev"
   (returns void)
-  (params (param "tmp14" (const (ptr (struct "_Z3BoxIlE")))))
+  (params (param "tmp13" (const (ptr (struct "_Z3BoxIlE")))))
   (block
-    (local "tmp15" (struct "__C7"))
-    (expr (assign (ptr (struct "__C7")) (dot_field (ptr (struct "__C7")) (var (struct "__C7") "tmp15") (field "next")) (var (ptr (struct "__C7")) "__curr_eh_stack_entry")))
-    (expr (assign (ptr (struct "__C7")) (var (ptr (struct "__C7")) "__curr_eh_stack_entry") (address_of (ptr (struct "__C7")) (var (struct "__C7") "tmp15"))))
-    (expr (assign unsigned_char (dot_field unsigned_char (var (struct "__C7") "tmp15") (field "kind")) (const unsigned_char 6)))
     (expr (pre_decr int (var int "live")))
-    (block
-      (expr (assign (ptr (struct "__C7")) (var (ptr (struct "__C7")) "__curr_eh_stack_entry") (dot_field (ptr (struct "__C7")) (var (struct "__C7") "tmp15") (field "next"))))
-      (return))))
+    (return)))
 
 (function "_ZN3BoxIlED2Ev"
   (returns void)
-  (params (param "tmp16" (const (ptr (struct "_Z3BoxIlE")))))
+  (params (param "tmp14" (const (ptr (struct "_Z3BoxIlE")))))
   (block
-    (expr (call void (routine (ptr (fn void ((ptr (struct "_Z3BoxIlE"))))) "_ZN3BoxIlED1Ev") (var (ptr (struct "_Z3BoxIlE")) "tmp16")))
+    (expr (call void (routine (ptr (fn void ((ptr (struct "_Z3BoxIlE"))))) "_ZN3BoxIlED1Ev") (var (ptr (struct "_Z3BoxIlE")) "tmp14")))
     (return)))
