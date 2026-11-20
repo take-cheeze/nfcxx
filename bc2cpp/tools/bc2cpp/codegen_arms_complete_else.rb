@@ -225,7 +225,9 @@ module ArmsCompleteElseScan
 
     bin = code.b
     sites = []
-    bin.to_enum(:scan, SITE).each { sites << Regexp.last_match }
+    # mruby-onig reuses its MatchData region as scan advances, including the
+    # final failed search. Retain each site's offsets before that mutation.
+    bin.to_enum(:scan, SITE).each { sites << Regexp.last_match.dup }
     sites.select! { |m| m[:args].split(', ').drop(1).size >= m[:argc].to_i }
     return code if sites.empty?
 
