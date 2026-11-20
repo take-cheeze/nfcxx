@@ -123,6 +123,7 @@ class ClosedWorld
     @module_names = module_names.to_set
     @root_label = root_label
     @clone_sent = false
+    @clone_symbol_loads = []
     @registry = registry
     # STRUCT_CLASS_DECLS: a class body-level `X = Struct.new(:a, ...)` whose members the registry lists (struct_member_lists)
     # runs once, before main, and makes X a class below Struct. It is declared here as such, so its members (registered
@@ -807,7 +808,7 @@ class ClosedWorld
   # nothing else can run them with another self; a `clone` spelled anywhere in
   # the closed world or its outside sources refuses.
   def module_object_self?(owner)
-    !@global_refusal && !@clone_sent && @module_names.include?(owner) && !@class_decls.key?(owner) &&
+    !@global_refusal && !@clone_sent && @module_names.include?(owner) && !@declared_classes.include?(owner) &&
       stable_constant_identity?(owner)
   end
 
@@ -1729,7 +1730,9 @@ class ClosedWorld
           sym = loaded_symbol_name(irep, insn)
           next unless sym
 
-          @clone_sent = true if sym == 'clone'
+          # CLONE_SYMBOL_PROOF: a `:clone` that is only compared or listed (`%i[clone dup].include?(m)`) copies nothing;
+          # resolve_installer_symbol_loads counts it as a clone only when its value may reach a send.
+          @clone_symbol_loads << [irep, idx, insn.reg] if sym == 'clone'
           @dynamic_visibility = true if VISIBILITY_SENDS.include?(sym)
           # An installer or rebinder name loaded as a symbol may be sent by name: its value must stay on safe paths
           # (resolve_installer_symbol_loads), not refuse the program outright.
@@ -1888,6 +1891,9 @@ class ClosedWorld
       else
         global!(:dynamic_install)
       end
+    end
+    @clone_symbol_loads.each do |irep, idx, reg|
+      @clone_sent = true unless installer_symbol_value_safe?(irep, idx, reg, 0, false)
     end
     # These names refuse nothing here; CodeGen's installed-name scan asks for the proof instead (symbol_load_proven?).
     @name_installer_loads.each do |irep, idx, reg, _sym|
