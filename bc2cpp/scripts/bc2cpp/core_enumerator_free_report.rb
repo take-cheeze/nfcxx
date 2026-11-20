@@ -5,9 +5,9 @@
 # it found: whether it holds, every site of an iterator that can make an Enumerator and how it was settled (a block, a
 # no-argument native, a receiver proven by the class facts), and, when it does not hold, each site or condition it could
 # not account for with file, line and why. The build leaves the mruby-enumerator methods in the method tables until it
-# holds (docs/bc2cpp-unregistered-methods.md, "The Enumerator machinery").
+# holds (docs/bc2cpp-unregistered-methods.md, "The Enumerator machinery"). Then the same for CORE_FIBER_FREE.
 #
-# Usage: MRBC=path/to/mrbc ruby scripts/bc2cpp/core_enumerator_free_report.rb [--sites]
+# Usage: MRBC=path/to/mrbc [BC2CPP_STATIC_DISPATCH_LISTS=lists.json] ruby scripts/bc2cpp/core_enumerator_free_report.rb [--sites]
 #   --sites  also lists every checked engine site, not only the unproven ones
 
 require_relative '../../tools/bc2cpp/world_root'
@@ -31,4 +31,9 @@ result.unproven.each do |u|
   where = u.file ? "#{u.file.sub(%r{.*/(mruby-[^/]+/|3rd/)}, '\1')}:#{u.line}" : '-'
   puts "UNPROVEN #{where} #{u.where} #{u.name}: #{u.why}"
 end
-exit(result.holds ? 0 : 1)
+# CORE_FIBER_FREE (tools/bc2cpp/core_fiber_free.rb), which builds on it: no Fiber is made, so the resumable variants go.
+# The left-out core methods are those of the lists BC2CPP_STATIC_DISPATCH_LISTS names, none without it.
+fiber = StaticDispatchRegistrations.fiber_free_proof(-> { result }, StaticDispatchLists.current.core_left_out)
+puts "fiber-free proof #{fiber.holds ? 'holds' : 'does not hold'}"
+fiber.unproven.each { |why| puts "UNPROVEN fiber: #{why}" }
+exit(result.holds && fiber.holds ? 0 : 1)

@@ -1175,7 +1175,16 @@ class CodeGen
   RESUMABLE_DUAL_NAMES = RESUMABLE_DUAL.to_set { |key| key.split('#').last }.freeze
 
   def rsm_dual?(label, d)
-    EnumStep.enabled? && d.core && RESUMABLE_DUAL.include?("#{d.owner}##{d.name}")
+    EnumStep.enabled? && d.core && RESUMABLE_DUAL.include?("#{d.owner}##{d.name}") && !fiber_free?
+  end
+
+  # CORE_FIBER_FREE (core_fiber_free.rb): the closed build never makes a Fiber, so an entry is never under one and the
+  # variants are dead code.
+  def fiber_free?
+    return @fiber_free if defined?(@fiber_free)
+
+    # The lists themselves, not static_dispatch_lists: that reads OUT_SYMBOL, which the shared analysis may not.
+    @fiber_free = ENV['BC2CPP_BUILD_NAME'] == 'closed' && StaticDispatchLists.current.unmade_classes.include?('Fiber')
   end
 
   def rsm_impl_name(d) = "#{cpp_name(d.owner, d.name)}#{RSM_SUFFIX}_impl"

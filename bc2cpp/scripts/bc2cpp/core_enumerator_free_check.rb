@@ -20,6 +20,8 @@
 #       result, an element, a parameter some caller gives an Array;
 #   other ways in: an engine `to_enum` or Enumerator constant, a Symbol that names a creator and reaches a lookup, a native
 #     that spells a creator name, a `method_missing`.
+#   CORE_FIBER_FREE: a Fiber constant only where no code runs it (Enumerator#next while no Enumerator is made, or left out),
+#     refuted by an engine Fiber, a const_get, a native that spells Fiber or const_get.
 #
 # Usage: MRBC=path/to/mrbc ruby scripts/bc2cpp/core_enumerator_free_check.rb
 
@@ -456,6 +458,40 @@ suite.check('without the declaration the call may return anything',
 suite.check('and the block\'s own value counts (a block that ends in an Array)',
             !prove(suite, engine: timed.sub('{ Route.new }.each', '{ [1] }.each') + DRIVER, native: INDEX_C,
                                                     block_returns: declared).holds)
+
+# --- CORE_FIBER_FREE (core_fiber_free.rb), which builds on this proof -------------------------------------------------
+fiber_free = lambda do |engine:, core: {}, native: INDEX_C, left_out: Set.new|
+  with_world(suite, engine: engine, core: core, native: native) do |w|
+    inputs = inputs_of(w)
+    enumerators = EF.prove(inputs)
+    CoreFiberFree.prove(inputs, enumerator_free: -> { enumerators.holds }, left_out: left_out)
+  end
+end
+# Enumerator#next's shape: the one Fiber.new of mruby's Ruby.
+fiber_next = { 'mruby-enumerator/mrblib/enumerator.rb' => ENUMERATOR_RB.sub("class Enumerator\n", <<~'RUBY') }
+  class Enumerator
+    def next
+      @fib ||= Fiber.new { Fiber.yield 1 }
+      @fib.resume
+    end
+RUBY
+failing = cases.fetch('a literal Array receiver').first + DRIVER
+suite.check('no Fiber constant, no native that spells one: no Fiber is made', fiber_free.call(engine: engine_ok).holds)
+suite.check('a Fiber.new in the engine refutes it', !fiber_free.call(engine: "class A\n  def run\n    Fiber.new { 1 }.resume\n  end\nend\n").holds)
+suite.check('Enumerator#next names Fiber: fine while no Enumerator is made',
+            fiber_free.call(engine: engine_ok, core: fiber_next).holds)
+suite.check('not when one may be', !fiber_free.call(engine: failing, core: fiber_next).holds)
+suite.check('unless the build leaves Enumerator#next out (nothing calls it)',
+            fiber_free.call(engine: failing, core: fiber_next, left_out: Set['Enumerator#next']).holds)
+suite.check('a const_get refutes it (the name may be computed)',
+            !fiber_free.call(engine: "class A\n  def run(n)\n    Object.const_get(n)\n  end\nend\n").holds)
+fiber_c = ->(body) { "#{INDEX_C}\nstatic mrb_value fx_make(mrb_state *mrb, mrb_value self)\n{\n  #{body}\n}\n" }
+suite.check('a native that names the class refutes it',
+            !fiber_free.call(engine: engine_ok, native: fiber_c.call('return mrb_obj_value(mrb_class_get(mrb, "Fiber"));')).holds)
+suite.check('so does one that calls const_get',
+            !fiber_free.call(engine: engine_ok, native: fiber_c.call('return mrb_funcall(mrb, self, "const_get", 1, self);')).holds)
+suite.check("value.h's type-name table does not",
+            fiber_free.call(engine: engine_ok, native: fiber_c.call("return self;\n}\n#define T(f) f(MRB_TT_FIBER,       struct RFiber,      \"Fiber\")\nstatic void fx_x(void) {")).holds)
 
 # --- the hook into the closed-list proof ---------------------------------------------------------------------------------
 reasons = {
