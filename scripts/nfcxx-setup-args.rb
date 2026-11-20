@@ -8,10 +8,11 @@
 # NFCXX_DIALECT when it is set, else host-sys.rb's host_dialect, as the bash sets it.
 #
 # The bash ends some commands before its setup (the -fsyntax-only and --bundle- re-runs, --emit-hip, the SYCL check, -E, the
-# input checks, the .cu and .cpp2 preparation, modules, the EDG check, the dialect check, --emit-c, the sanitizer and
-# safe-pointer checks, which come after a step this check does not model). A command that meets one of them is not checked
-# here: refusal returns nil and the oracle runs it, so its messages and their order stay the bash's. Any other failure in
-# this check also returns nil (the oracle runs the command as before).
+# input checks, the EDG check, the dialect check, --emit-c, the sanitizer and safe-pointer checks, which come after a step
+# this check does not model). A command that meets one of them is not checked here: refusals returns nil and the oracle runs
+# it, so its messages and their order stay the bash's. Any other failure in this check also returns nil (the oracle runs the
+# command as before). The .cu and .cpp2 preparation and the module block come before the setup in the bash: their refusals
+# are scripts/nfcxx-cu-cpp2-args.rb's, checked here first (see refusals).
 #
 #   ruby scripts/nfcxx-setup-args.rb ARG...   prints the setup options (KEY=VALUE, the array as KEY=VALUE joined by ASCII 31)
 #                                             or the deferral, for the tests
@@ -19,6 +20,7 @@
 require "open3"
 require "rbconfig"
 require_relative "nfcxx-setup"
+require_relative "nfcxx-cu-cpp2-args"
 
 module NfcxxSetupArgs
   module_function
@@ -88,8 +90,9 @@ module NfcxxSetupArgs
     ncpp = s["ncpp"].to_i
     nobj = s["nobj"].to_i
     cfiles = arrays.fetch("cfiles", [])
-    return true if ncpp + nobj + cfiles.size + (s["stdin_src"] == "1" ? 1 : 0) == 0
-    return true unless arrays.fetch("cu_inputs", []).empty? && arrays.fetch("cpp2_inputs", []).empty?
+    cu = arrays.fetch("cu_inputs", [])
+    cpp2 = arrays.fetch("cpp2_inputs", [])
+    return true if ncpp + nobj + cfiles.size + cu.size + cpp2.size + (s["stdin_src"] == "1" ? 1 : 0) == 0
     return true if s["target"] == "linux_k1om"
     return true unless %w[g++ clang].include?(opts["dialect"])
 
@@ -103,28 +106,30 @@ module NfcxxSetupArgs
     sycl_out, sycl_err, sycl_st = Open3.capture3(ruby, File.join(ROOT, "scripts", "nfcxx-sycl.rb"), "check", *argv)
     return true if sycl_st.success? || !sycl_err.empty?
 
-    # modules: a source that declares or imports one (scripts/nfcxx-modscan.rb is-module, exit 0)
-    arrays.fetch("srcs", []).any? do |src|
-      _, err, st = Open3.capture3(ruby, File.join(ROOT, "scripts", "nfcxx-modscan.rb"), "is-module", src)
-      st.success? || !err.empty?
-    end
+    false
   end
 
-  # the setup's refusal for the command line, a Refusal (message and status), or nil when the setup refuses nothing or the
-  # command is deferred to the oracle
-  def refusal(argv, env = ENV)
+  # the refusals before the oracle, as [input, setup]: input is the CUDA, .cpp2 and module refusals (scripts/nfcxx-cu-cpp2-args.rb,
+  # which the bash prints before its setup), setup is the setup's. At most one is set; both nil when nothing is refused or the
+  # command is deferred to the oracle. The setup check does not run for a command the input check decides (the bash rewrites,
+  # translates or compiles before its setup), nor for a module link (the module build runs first).
+  def refusals(argv, env = ENV)
     scalars, arrays = loop_state(argv, env)
-    return nil unless scalars
+    return [nil, nil] unless scalars
 
     opts = setup_opts(scalars, arrays, env)
-    return nil if deferred?(scalars, arrays, argv, env, opts)
+    return [nil, nil] if deferred?(scalars, arrays, argv, env, opts)
+
+    input = NfcxxCuCpp2Args.check(scalars, arrays, env)
+    return [input, nil] if input.is_a?(NfcxxSetup::Refusal)
+    return [nil, nil] unless input == :setup
 
     NfcxxSetup.sequence(opts, env)
-    nil
+    [nil, nil]
   rescue NfcxxSetup::Refusal => e
-    e
+    [nil, e]
   rescue StandardError
-    nil
+    [nil, nil]
   end
 end
 
