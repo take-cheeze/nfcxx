@@ -517,22 +517,25 @@ module SymbolCache
       mrb_state* state;
       struct RClass** cls;
     };
+    // OWNER_SET_EPOCH: the set is valid while `epoch` is bc2cpp_owner_epoch. It keeps no mrb_state: every use follows
+    // a bc2cpp_sym(M, ...) of the same call, which bumps the epoch whenever the gem's VM changes (or the gem is
+    // finalised), so a current epoch names the calling VM. Narrow fields sit last, for padding.
     struct bc2cpp_owner_set {
       const char* const* names;
       bc2cpp_owner_directs* direct;
-      unsigned epoch;
-      mrb_state* state;
-      int seen_count;
       // Owners already matched: up to 32, allocated on the first miss (an inline 32-slot array was most of a site's bytes).
       struct RClass** seen;
       // OWNER_CALL_ICACHE: the last call that passed every check (hit_klass null: none).
       struct RClass* hit_klass;
       struct RClass* hit_c;
       mrb_method_t hit_m;
-      mrb_int hit_argc;
+      unsigned epoch;
     #ifdef MRB_MT_ROWS
       uint32_t hit_mt_epoch;
     #endif
+      uint8_t seen_count;
+      // A call of more arguments is not kept (see bc2cpp_owner_call_argv).
+      uint8_t hit_argc;
     };
     #ifdef BC2CPP_OWNER_ICACHE_STATS
     // Hits and full lookups, for scripts/bc2cpp/owner_call_icache_check.rb; printed at exit.
@@ -553,7 +556,7 @@ module SymbolCache
     // The site's kept call, while mruby's method cache still holds the same entry for (klass, mid). A fork with rows
     // (MRB_MT_ROWS) bumps mt_epoch wherever it clears that cache, and a row is never cached: the epoch decides there.
     static inline bool bc2cpp_owner_icache_hit(mrb_state* M, const bc2cpp_owner_set& s, struct RClass* klass, mrb_sym mid, mrb_int argc) {
-      if (s.hit_klass != klass || s.hit_argc != argc || s.epoch != bc2cpp_owner_epoch || s.state != M) return false;
+      if (s.hit_klass != klass || (mrb_int)s.hit_argc != argc || s.epoch != bc2cpp_owner_epoch) return false;
     #ifdef MRB_MT_ROWS
       (void)mid;
       if (s.hit_mt_epoch != M->mt_epoch) return false;
@@ -571,7 +574,7 @@ module SymbolCache
     #define BC2CPP_OWNERS(...) ([]() -> bc2cpp_owner_set& { static const char* const names[] = { __VA_ARGS__, nullptr }; static bc2cpp_owner_set s; if (!s.names) s.names = names; return s; }())
     // OWNER_CALL_DIRECT: DIRECTS is a run of BC2CPP_OWNER_DIRECT(owner, entry, aspec, visibility), no commas between.
     #define BC2CPP_OWNER_DIRECT(owner, fn, aspec, vis) { owner, fn, (uint32_t)(aspec) | (uint32_t)(vis) },
-    #define BC2CPP_OWNERS_D(DIRECTS, ...) ([]() -> bc2cpp_owner_set& { static const char* const names[] = { __VA_ARGS__, nullptr }; static const bc2cpp_owner_direct rows[] = { DIRECTS }; static struct RClass* cls[sizeof rows / sizeof rows[0]]; static bc2cpp_owner_directs d = { rows, (int)(sizeof rows / sizeof rows[0]), 0, nullptr, cls }; static bc2cpp_owner_set s = { names, &d, 0, nullptr, 0, nullptr }; return s; }())
+    #define BC2CPP_OWNERS_D(DIRECTS, ...) ([]() -> bc2cpp_owner_set& { static const char* const names[] = { __VA_ARGS__, nullptr }; static const bc2cpp_owner_direct rows[] = { DIRECTS }; static struct RClass* cls[sizeof rows / sizeof rows[0]]; static bc2cpp_owner_directs d = { rows, (int)(sizeof rows / sizeof rows[0]), 0, nullptr, cls }; static bc2cpp_owner_set s = { names, &d }; return s; }())
     // OWNER_SET_SHARE (owner_set_share.rb): the set of every site with the same key, zero until its first call names it.
     // SET is the site's BC2CPP_OWNERS(...), whose owner list becomes the names; its own set is never declared.
     template <unsigned long long K> inline bc2cpp_owner_set bc2cpp_owner_shared_v{};
@@ -707,9 +710,8 @@ module SymbolCache
         bc2cpp_owner_violation(M, recv, mid, "was proven to raise NoMethodError but dispatched");
       }
       struct RClass* owner = c->tt == MRB_TT_ICLASS ? c->c : c;
-      if (s.epoch != bc2cpp_owner_epoch || s.state != M) {
+      if (s.epoch != bc2cpp_owner_epoch) {
         s.epoch = bc2cpp_owner_epoch;
-        s.state = M;
         s.seen_count = 0;
         s.hit_klass = nullptr;
       }
@@ -748,11 +750,11 @@ module SymbolCache
         }
       }
     #ifdef BC2CPP_OWNER_ICACHE
-      if (!(m.flags & MRB_METHOD_PROTECTED_FL)) {
+      if (!(m.flags & MRB_METHOD_PROTECTED_FL) && argc <= UINT8_MAX) {
         s.hit_klass = klass;
         s.hit_c = c;
         s.hit_m = m;
-        s.hit_argc = argc;
+        s.hit_argc = (uint8_t)argc;
     #ifdef MRB_MT_ROWS
         s.hit_mt_epoch = M->mt_epoch;
     #endif
