@@ -3315,13 +3315,16 @@ end
       name = name_of(f[1])
       size = int_lit(f[2])
       align = int_lit(f[3])
-      raise QbeUnsupported, "abi-type #{name}: alignment #{align}" unless [1, 2, 4, 8, 16].include?(align)
-
-      spec = f[4]
       tn = ":ty#{abi.size}"
+      spec = f[4]
+      # QBE has no type alignment past 16. A memory-class value (CUDA's long4_32a: 32 bytes, align 32) is passed as a pointer to
+      # the caller's copy, and this route only loads and stores through it (no aligned vector access), so 16 is enough for it.
+      # Any other alignment past 16 is refused for the module, as before.
+      memory_big = align == 32 && head(spec) == "memory"
+      raise QbeUnsupported, "abi-type #{name}: alignment #{align}" unless [1, 2, 4, 8, 16].include?(align) || memory_big
       case head(spec)
       when "memory"
-        decls << "type #{tn} = align #{align} { #{size} }"
+        decls << "type #{tn} = align #{[align, 16].min} { #{size} }"
         abi[name] = AbiInfo.new(tn, size, align, "memory", nil, 1)   # passed as a pointer to a copy: one integer register
       when "empty"
         abi[name] = AbiInfo.new(tn, size, align, "empty", nil, 0)
