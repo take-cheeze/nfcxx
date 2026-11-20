@@ -167,8 +167,13 @@ class HiddenRubyOwnerScan < Prism::Visitor
   EVAL_CALLS = %i[class_eval module_eval instance_eval class_exec module_exec instance_exec eval].freeze
   MIXIN_CALLS = %i[include prepend extend].freeze
   SEND_CALLS = %i[send __send__ public_send].freeze
-  # Reflective send arguments are literal text, so compare without interning source names.
-  DEFINING_CALLS = (DEFINER_CALLS + EVAL_CALLS + MIXIN_CALLS + %i[alias undef]).map(&:to_s).freeze
+  # Reflective send arguments are literal text, so compare without interning source names. The names of
+  # DEFINER_CALLS, EVAL_CALLS and MIXIN_CALLS, spelled as Strings: a self-compiled bc2cpp's closed world then proves
+  # the :instance_eval and :instance_exec Symbols above are only read with include? (INSTANCE_SINGLETON_TAINT), which it
+  # cannot follow through an Array#+ argument.
+  DEFINING_CALLS = %w[define_method define_singleton_method alias_method attr attr_reader attr_writer attr_accessor
+                      class_eval module_eval instance_eval class_exec module_exec instance_exec eval
+                      include prepend extend alias undef].freeze
 
   attr_reader :owners, :unowned, :wild, :mixins, :global
 

@@ -1245,17 +1245,32 @@ class CodeGen
 
   # True only when the build shows no block-carrying call of `owner_def.name`
   # that can reach this owner. See super_direct_call_allowed?.
+  #
+  # The classes whose instances run the owner's method are the owner and its subclasses, or for a module the
+  # classes that include or prepend it and theirs (ClosedWorld#module_definer_includers). When a module's includers
+  # are not known, only a name no send carries a block to is proven.
+  #
+  # INSTANCE_SINGLETON_TAINT: a singleton class of such an instance that may answer the name sits in front of the
+  # owner's method and may call it with a block through `super`, so that refuses too.
   def no_caller_passes_block?(owner_def)
     name = owner_def.name
-    owner = owner_def.owner
-    subclasses = superclass_closure.call(owner)
+    reach = block_reach_classes(owner_def.owner)
     callers = block_carrying_callers_of(name)
     # A send whose receiver class is not proven cannot be excluded, and neither
     # can one naming any class that could be this owner or a subclass of it.
     return false if callers.nil?
-    return false if callers.any? { |recv| recv.nil? || (recv & subclasses).empty? }
+    return false if callers.any? { |recv| recv.nil? || reach.nil? || recv.any? { |k| reach.include?(k) } }
 
-    true
+    tainted = (reach || call_facts_answers.classes).any? { |k| singleton_tainted_for?(k, [name]) }
+    !tainted
+  end
+
+  # The classes whose instances can run a method of +owner+ (see no_caller_passes_block?), or nil when not known.
+  def block_reach_classes(owner)
+    return superclass_closure.call(owner) unless @closed_world&.module_declared?(owner)
+
+    includers = @closed_world.module_definer_includers(owner)
+    includers&.each_with_object(Set.new) { |klass, out| out.merge(superclass_closure.call(klass)) }
   end
 
   # Every block-carrying send of `name` in the build, as the set of receiver

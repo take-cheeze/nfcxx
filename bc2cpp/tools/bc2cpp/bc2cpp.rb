@@ -355,6 +355,19 @@ BC2CPP_MAIN = lambda do
          "#{outside_ruby.size} Ruby outside sources) =="
     warn "  global refusal: #{closed_world.global_refusal || 'none'}"
     warn "  method_missing classes: #{closed_world.method_missing_classes.to_a.sort.join(', ')}"
+    # INSTANCE_SINGLETON_TAINT: the classes whose instances may get a singleton class, and what it may answer.
+    singleton_taint = closed_world.instance_singleton_taint
+    warn '  instance singletons: ' +
+         if singleton_taint.nil? then "not placed (#{closed_world.singleton_taint_unplaced})"
+         elsif singleton_taint.empty? then 'none'
+         else
+           singleton_taint.sort.map do |klass, gain|
+             names = if gain == :any then ['any name']
+                     else gain.map { |n| n == ClosedWorld::SINGLETON_INSTALLED ? '<installed names>' : n }.sort
+                     end
+             "#{klass} (#{names.join(' ')})"
+           end.join(', ')
+         end
     warn ''
     LintCrosscheck.enforce!(repo_root, closed_world)
     profile_phase.call('closed world: lint cross-check')
