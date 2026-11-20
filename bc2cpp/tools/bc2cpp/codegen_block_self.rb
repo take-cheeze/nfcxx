@@ -47,6 +47,27 @@ class CodeGen
     block_self_world.rebound.include?(label)
   end
 
+  # BLOCK_SELF_METHOD_BOUNDARY: may a rebinder run block +label+ under a self other than the one of the frame that
+  # creates it? BlockSelfWorld marks every irep nested in a rebinder's literal block, the bodies of the methods it defines
+  # (`Struct.new(:a) do def x = list.map { a } end`) and their blocks included, and that set stays the answer about those
+  # bodies' own self. A block's self is its creator's (OP_BLOCK/OP_LAMBDA capture the creating frame), so only the blocks
+  # on the chain from +label+ up to the first body that is not a block decide: a rebinder site among them rebinds it.
+  # Past a method body (or a class body) the creating frame's self is whatever mruby passed that body, which a compiled
+  # block reads from its env as the interpreter does.
+  def block_self_rebound_from_creator?(label)
+    return false unless block_self_rebound?(label)
+
+    @block_self_site_labels ||= block_self_world.sites.to_set(&:last)
+    cur = label
+    while (parent, = numeric_block_parents[cur])
+      return true if @block_self_site_labels.include?(cur)
+
+      cur = parent.label
+    end
+    # +label+ is not a block at all (no creating BLOCK/LAMBDA), so keep the whole set's answer.
+    cur == label
+  end
+
   # Does a compiled block body check, at entry, that it runs under the self it captured? Only where the world
   # fact does not already prove it.
   def block_self_check?

@@ -508,7 +508,8 @@ class CodeGen
       next unless block_irep && block_fallback_safe?(block_irep)
       # BLOCK_SELF_WORLD: a rebinder runs this block under another self; the compiled body would read
       # its creator's. It stays interpreted (with the method holding it).
-      next if block_self_rebound?(block_label)
+      # BLOCK_SELF_METHOD_BOUNDARY: a block in a method a rebinder's block defines is not one of them.
+      next if block_self_rebound_from_creator?(block_label)
 
       upvars = block_upvar_needs(block_irep)
       next if upvars.nil?
@@ -898,7 +899,7 @@ class CodeGen
     block_irep = region[:block_irep]
     # BLOCK_SELF_WORLD: every block or lambda body compiled here reads its creator's self; a rebound one
     # never runs under it. The recognizers already skip these; this keeps any other caller from compiling one.
-    return nil if !runtime_def_fallback_kind?(region[:kind]) && block_self_rebound?(block_irep.label)
+    return nil if !runtime_def_fallback_kind?(region[:kind]) && block_self_rebound_from_creator?(block_irep.label)
     mand = mandatory_arity(block_irep)
     rest_block = (region[:kind] || 'block_fallback') == 'block_fallback' && rest_only_block?(block_irep)
     # MIXED_REST_BLOCK: m values, then the rest Array as the last parameter (mixed_rest_unpack fills them).
