@@ -71,7 +71,8 @@ module LexicalConsts
   end
 
   class Model
-    def initialize(ireps)
+    # +scopes_only+: stop after assign_scopes (BLOCK_SELF_WORLD reads only the scope of each body, scope_of).
+    def initialize(ireps, scopes_only: false)
       @ireps = ireps
       @scope = {}
       @defs = Hash.new { |h, k| h[k] = Set.new }
@@ -87,8 +88,15 @@ module LexicalConsts
       @super_sites = []
       @supers = {}
       assign_scopes
+      return if scopes_only
+
       collect_definitions
       resolve_mixins
+    end
+
+    # The lexical scope of the body +label+ (a qualified name, TOP for the top level), or :unknown.
+    def scope_of(label)
+      @scope.fetch(label, :unknown)
     end
 
     def results
