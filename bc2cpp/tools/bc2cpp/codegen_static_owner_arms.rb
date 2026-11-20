@@ -105,7 +105,7 @@ module StaticOwnerArms
     branches += core.map do |klass, t|
       impl = "#{cpp_name(t.owner, t.name)}_impl"
       call_argv, = direct_call_args(t, argv, impl)
-      guard = format(BlockCoreDirectFallback::RECEIVERS.fetch(klass)[:guard], r: m[:recv])
+      guard = format(core_owner_arm_receivers.fetch(klass)[:guard], r: m[:recv])
       "if (#{guard}) {\n#{ind}    #{m[:dest]} = #{impl}(M, #{([m[:recv]] + call_argv).join(', ')});\n#{ind}  } else "
     end
     "#{ind}// STATIC_OWNER_ARMS :#{m[:name]} -> #{note}: exact class, direct call; the owner call for any other " \
@@ -113,14 +113,24 @@ module StaticOwnerArms
       "#{ind}  #{branches.join}{\n#{ind}    #{m[:dest]} = #{m[:call]}\n#{ind}  } }"
   end
 
+  # CORE_OWNER_ARMS' receivers: BlockCoreDirectFallback::RECEIVERS, and Symbol, whose mrblib (mruby-symbol-ext)
+  # defines Symbol#empty? and the case methods; a Symbol is an immediate, with no subclass instance and no singleton
+  # class. BC2CPP_CORE_OWNER_SYMBOL_ARM=0 leaves Symbol out.
+  CORE_OWNER_SYMBOL = { 'Symbol' => { guard: 'mrb_symbol_p(%<r>s)', chain: %w[Symbol Comparable] }.freeze }.freeze
+
+  def core_owner_arm_receivers
+    receivers = BlockCoreDirectFallback::RECEIVERS
+    ENV['BC2CPP_CORE_OWNER_SYMBOL_ARM'] == '0' ? receivers : receivers.merge(CORE_OWNER_SYMBOL)
+  end
+
   # CORE_OWNER_ARMS: the compiled mruby core bodies an owner call with no block reaches on an exact builtin receiver
-  # (BlockCoreDirectFallback::RECEIVERS: Array, Hash, Range, Integer), as [[class, definition]]. The core definitions
+  # (core_owner_arm_receivers: Array, Hash, Range, Integer, Symbol), as [[class, definition]]. The core definitions
   # are not in the engine registry, so the arms above never name them (`x.abs` on an Integer lands in Numeric#abs);
   # core_exact_target is CORE_EXACT_DIRECT's proof that the exact class answers the name with that body and nothing else.
   def static_owner_core_arms(name, argc)
     return [] unless block_core_world && @native_name_sources && core_extend_enabled?
 
-    BlockCoreDirectFallback::RECEIVERS.filter_map do |klass, spec|
+    core_owner_arm_receivers.filter_map do |klass, spec|
       target = core_exact_target(klass, spec[:chain], name, argc)
       [klass, target] if target
     end
