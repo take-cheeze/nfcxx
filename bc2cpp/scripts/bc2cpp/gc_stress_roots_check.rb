@@ -51,6 +51,8 @@ RUBY
 OWNERS = %w[StressRoots IbCell Array Enumerable Enumerator Integer Kernel Range].freeze
 BARRIER = 'mrb_field_write_barrier_value('
 MARK = '/* IMMEDIATE_BARRIER */'
+# EMBED_STORE_OUTLINED: bc2cpp_embed_store runs the barrier itself (bc2cpp.rb).
+def barrier?(body) = body.include?(BARRIER) || body.match?(/bc2cpp_embed_store(?:_unfrozen)?\(M, /)
 
 def body_of(code, name)
   code.scan(/^(?:static )?mrb_value #{name}_impl\w*\(mrb_state\* M.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m).join
@@ -60,7 +62,7 @@ ENV['BC2CPP_IMMEDIATE_BARRIER'] = '0'
 off = suite.generate(SRC, OWNERS)
 ENV.delete('BC2CPP_IMMEDIATE_BARRIER')
 suite.check('BC2CPP_IMMEDIATE_BARRIER=0 keeps every write barrier',
-            !off.include?(MARK) && body_of(off, 'IbCell_set_nil').include?(BARRIER))
+            !off.include?(MARK) && barrier?(body_of(off, 'IbCell_set_nil')))
 
 code = suite.generate(SRC, OWNERS)
 suite.check('the arena result root is emitted in a method entry',
@@ -68,11 +70,11 @@ suite.check('the arena result root is emitted in a method entry',
 suite.check('the stores compile to the embedded field', body_of(code, 'IbCell_set_nil').include?('(IbCell_ivars*)DATA_PTR(self))->ivar_v'))
 %w[set_nil set_sym set_int].each do |name|
   body = body_of(code, "IbCell_#{name}")
-  suite.check("#{name}: an immediate store has no write barrier", body.include?(MARK) && !body.include?(BARRIER))
+  suite.check("#{name}: an immediate store has no write barrier", body.include?(MARK) && !barrier?(body))
 end
 %w[set_obj set_str initialize].each do |name|
   body = body_of(code, "IbCell_#{name}")
-  suite.check("#{name}: a heap or unknown value keeps the write barrier", body.include?(BARRIER) && !body.include?(MARK))
+  suite.check("#{name}: a heap or unknown value keeps the write barrier", barrier?(body) && !body.include?(MARK))
 end
 
 DRIVER = <<~'RUBY'

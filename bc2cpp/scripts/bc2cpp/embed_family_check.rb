@@ -8,7 +8,9 @@
 #   generated code (needs a host mrbc)
 #     - the family has one struct, the base's, and every member is an MRB_TT_DATA class; a subclass method reads its
 #       own and the base's ivars as struct fields, with no mrb_iv_get;
-#     - a family whose subclass works before `super` is not folded, and BC2CPP_EMBED_FAMILIES=0 keeps the refusal.
+#     - a family whose subclass works before `super` is not folded, and BC2CPP_EMBED_FAMILIES=0 keeps the refusal;
+#     - a keyword/optional-parameter prologue or a call on another object before `super` folds; a call on self does not
+#       (SUPER_ARGUMENT_PROLOGUE).
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
 #     - interpreted and compiled runs print the same for the methods, reflection (instance_variables,
 #       instance_variable_get/set), dup, GC.stress and a Fiber.
@@ -61,6 +63,32 @@ SRC = <<~'RUBY'
   class EfPlain < EfBase
     def doubled; @a * 2; end
   end
+  class EfKw < EfBase
+    def initialize(a, k: 4, opt: nil)
+      super(a)
+      @k = opt ? k + 1 : k
+    end
+    def kw_sum; @a + @k; end
+  end
+  class EfArg < EfBase
+    def initialize(other, n = 2)
+      super other.a
+      @n = n
+    end
+    def arg_sum; @a + @n; end
+  end
+  class EfKwCallBase
+    def initialize(a); @a = [a][0]; end
+    def a; @a; end
+  end
+  class EfKwCall < EfKwCallBase
+    def initialize(a, k: default_k)
+      super(a)
+      @k = k
+    end
+    def default_k; 9; end
+    def kw_sum; @a + @k; end
+  end
   class EfLateBase
     def initialize; @x = 1; end
     def x; @x; end
@@ -71,7 +99,7 @@ SRC = <<~'RUBY'
   end
 RUBY
 
-OWNERS = %w[EfBase EfLeft EfRight EfPlain EfLateBase EfLate].freeze
+OWNERS = %w[EfBase EfLeft EfRight EfPlain EfKw EfArg EfKwCallBase EfKwCall EfLateBase EfLate].freeze
 
 def code_of(code, name)
   code.scan(/^(?:static )?mrb_value #{name}_impl\w*\(mrb_state\* M.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m).join
@@ -105,12 +133,22 @@ check.call('a subclass method reads its own and the base\'s ivars as struct fiel
              !code_of(code, 'EfLeft_left_sum').include?('mrb_iv_get('))
 check.call('a subclass that works before super keeps its family out of the struct storage',
            !code.include?('struct EfLateBase_ivars') && !code.include?('struct EfLate_ivars'))
+check.call('a subclass whose keyword prologue precedes super joins the family',
+           !code.include?('struct EfKw_ivars') && code[/struct EfBase_ivars \{.*?\};/m].to_s.include?('ivar_k') &&
+             !code_of(code, 'EfKw_kw_sum').include?('mrb_iv_get('))
+check.call('a subclass whose super argument calls another object joins the family',
+           !code.include?('struct EfArg_ivars') && code[/struct EfBase_ivars \{.*?\};/m].to_s.include?('ivar_n'))
+check.call('a keyword default that calls a method keeps its family out of the struct storage',
+           !code.include?('struct EfKwCallBase_ivars') && !code.include?('struct EfKwCall_ivars'))
 check.call('no #error in the generated code', !code.include?('#error'))
 full_probe, full_probe_err = generate_world({ 'BC2CPP_PROBE_TEXT_CLEANUP' => '0' }, directory: baseline_dir)
 check.call('full probe root analysis and text cleanup preserve emitted C++ and embedding decisions',
            full_probe == code && full_probe_err == baseline_err)
 off, = generate_world({ 'BC2CPP_EMBED_FAMILIES' => '0' })
 check.call('BC2CPP_EMBED_FAMILIES=0: the family is refused', !off.include?('struct EfBase_ivars'))
+kw_off, = generate_world({ 'BC2CPP_SUPER_ARGUMENT_PROLOGUE' => '0' })
+check.call('BC2CPP_SUPER_ARGUMENT_PROLOGUE=0: an argument prologue before super refuses the family',
+           !kw_off.include?('struct EfBase_ivars'))
 
 DRIVER = <<~'RUBY'
   show = lambda do |name, &blk|
@@ -128,6 +166,9 @@ DRIVER = <<~'RUBY'
   show.call('left') { [l.a, l.left_sum, l.describe, l.bump.a, l.left_sum] }
   show.call('right') { [r.right_pair, r.describe, r.bump.right_pair] }
   show.call('plain') { [p0.doubled, p0.describe] }
+  show.call('kw') { [EfKw.new(1).kw_sum, EfKw.new(1, k: 10).kw_sum, EfKw.new(1, k: 10, opt: true).describe] }
+  show.call('arg') { [EfKwCall.new(2).kw_sum, EfArg.new(EfPlain.new(5)).arg_sum, EfArg.new(EfLeft.new(1), 7).describe] }
+  show.call('kw error') { EfKw.new(1, bad: 2) }
   show.call('late') { [late.x, late.y] }
   show.call('ivars') { [l, r, p0, late].map { |o| o.instance_variables.sort } }
   show.call('ivar_get') { [l.instance_variable_get(:@left), r.instance_variable_get(:@right), l.instance_variable_get(:@right)] }
