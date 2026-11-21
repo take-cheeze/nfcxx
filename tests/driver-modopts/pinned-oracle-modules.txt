@@ -1,0 +1,4 @@
+  mdir=${moddir:-$(dirname "$out")}; mkdir -p "$mdir"; mdir=$(cd "$mdir" && pwd -P)
+  modopts=(--modules --modules_directory "$mdir")
+  n=$("${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" decl-name "${srcs[0]}")
+  [ -z "$n" ] || modopts+=(--create_module_interface "$mdir/$n.eifc")

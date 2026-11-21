@@ -395,15 +395,10 @@ eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary direc
   trace_finish
   return $rc
 }
-# C++ modules (docs/notes/modules.md): the source scans are scripts/nfcxx-modscan.rb (is-module, decl-name, check; they read
-# the declarations at the start of a line only; tests/nfcxx-modscan/oracle-wrappers.sh is the bash they replaced).
-# mod_build_program: a program with modules is built by scripts/nfcxx-modules.rb build (docs/notes/modules.md): each source is
-# compiled on its own (EDG takes one translation unit per call with modules on), the interface units first in dependency order,
-# then the objects are linked; each compile is this driver again. The build's temporary directory is the Ruby's. The EXIT trap
-# is left as it is, so cu_prepare's cleanup and trace_finish still run. A failing step ends the build with its status (set -e).
-mod_build_program() {
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-modules.rb" build "$root" "$out" "${moddir:-}" "${#srcs[@]}" "${srcs[@]}" "${nfcxx_argv[@]}"
-  exit $?
+modules_plan_input() {  # the records of the modules block: the state scripts/nfcxx-modules-plan.rb reads (its header lists the groups)
+  state_put root "$root"; state_put out "$out"; state_put moddir "${moddir:-}"; state_put std "$std"
+  state_put emit_c "$emit_c"; state_put compile_only "$compile_only"
+  state_put cfiles ${cfiles[@]+"${cfiles[@]}"}; state_put srcs ${srcs[@]+"${srcs[@]}"}; state_put argv ${nfcxx_argv[@]+"${nfcxx_argv[@]}"}
 }
 nfcxx_argv=("$@")   # the command as given: the compile cache keys on it (see cache_key)
 args0=("$@")   # the arguments as given: the SYCL two-pass build below re-runs the driver with them
@@ -524,25 +519,32 @@ fi
 # The refusals after the -E route (stdin without -E, -x, dependency files without -c, the EDG build, the dialect): the same planner.
 early_status=0; "${RUBY:-ruby}" "$root/scripts/nfcxx-early-exit.rb" post < <(early_records) || early_status=$?
 [ $early_status = 0 ] || exit $early_status
-# C++ modules (docs/notes/modules.md). A program whose sources declare or import a module is built by mod_build_program, which
-# runs this driver once per source. A compile gets the module options: --modules, the directory of the interface files (BMIs,
-# --module-dir, else the directory of -o) and, for an interface unit, the BMI it writes.
+# C++ modules (docs/notes/modules.md): scripts/nfcxx-modules-plan.rb plans the block. It scans the sources, refuses a module program
+# (the standard, --emit-c, C sources, a partition, a header unit, an import of std, -c with more than one source), builds a link
+# with scripts/nfcxx-modules.rb build (the driver ends with the build's status, as the bash's mod_build_program did), and gives a
+# compile its module options: --modules, the directory of the interface files (BMIs, --module-dir, else the directory of -o)
+# and, for an interface unit, the BMI it writes. The EXIT trap is left as it is, so cu_prepare's cleanup and trace_finish still
+# run when the build ends the driver. Its state and reply are records in a temporary directory, removed before the driver ends.
 modules=0; modopts=()
-for s in ${srcs[@]+"${srcs[@]}"}; do
-  if "${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" is-module "$s"; then modules=1; fi
-done
-if [ $modules = 1 ]; then
-  case $std in --c++98|--c++03|--c++11|--c++14|--c++17) echo "nfcxx: C++ modules need -std=c++20 or later" >&2; exit 2 ;; esac
-  [ $emit_c = 0 ] || { echo "nfcxx: --emit-c does not support C++ modules yet (docs/notes/modules.md)" >&2; exit 2; }
-  [ ${#cfiles[@]} = 0 ] || { echo "nfcxx: C sources cannot be built with C++ modules yet (docs/notes/modules.md)" >&2; exit 2; }
-  for s in ${srcs[@]+"${srcs[@]}"}; do "${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" check "$s" || exit $?; done
-  if [ $compile_only = 0 ]; then mod_build_program; fi
-  [ ${#srcs[@]} = 1 ] || { echo "nfcxx: -c with C++ modules takes one source" >&2; exit 2; }
-  mdir=${moddir:-$(dirname "$out")}; mkdir -p "$mdir"; mdir=$(cd "$mdir" && pwd -P)
-  modopts=(--modules --modules_directory "$mdir")
-  n=$("${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" decl-name "${srcs[0]}")
-  [ -z "$n" ] || modopts+=(--create_module_interface "$mdir/$n.eifc")
-fi
+modplan=$(mktemp -d) || exit $?
+modules_plan_input > "$modplan/state"
+modrc=0; "${RUBY:-ruby}" "$root/scripts/nfcxx-modules-plan.rb" "$modplan/state" "$modplan/reply" || modrc=$?
+if [ $modrc != 0 ]; then rm -rf "$modplan"; exit $modrc; fi
+modgroup=""; modbuilt=""; modz=0
+while IFS= read -r -d "" modrec; do
+  case $modrec in
+    k*) modgroup=${modrec:1} ;;
+    v*) case $modgroup in
+          modules) modules=${modrec:1} ;;
+          modopts) modopts+=("${modrec:1}") ;;
+          built) modbuilt=${modrec:1} ;;
+        esac ;;
+    z) modz=1 ;;
+  esac
+done < "$modplan/reply"
+rm -rf "$modplan"
+[ $modz = 1 ] || { echo "nfcxx: scripts/nfcxx-modules-plan.rb stopped before its end (the module block is incomplete)" >&2; exit 1; }
+[ -z "$modbuilt" ] || exit "$modbuilt"
 
 # The default backend: Path B on x86-64 Linux (and on aarch64 Linux and arm64 macOS for freestanding programs), unless the request needs
 # something only qbe or gcc does (cosmo, --emit-c, --target, -E, -M, -shared; a freestanding program takes Path B on
