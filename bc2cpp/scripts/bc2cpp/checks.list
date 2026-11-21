@@ -141,6 +141,9 @@ ruby scripts/bc2cpp/nested_lambda_check.rb
 ruby scripts/bc2cpp/implicit_superclass_zsuper_check.rb
 ruby scripts/bc2cpp/strict_mixed_rest_check.rb
 ruby scripts/bc2cpp/lambda_rest_check.rb
+ruby scripts/bc2cpp/keyword_yield_check.rb
+ruby scripts/bc2cpp/optional_region_yield_check.rb
+ruby scripts/bc2cpp/keyword_splat_dynamic_send_check.rb
 ruby scripts/bc2cpp/singleton_taint_check.rb
 ruby scripts/bc2cpp/scoped_constant_writes_check.rb
 ruby scripts/bc2cpp/block_self_method_boundary_check.rb

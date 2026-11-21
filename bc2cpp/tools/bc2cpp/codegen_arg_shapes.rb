@@ -103,7 +103,7 @@ module ArgShapeCalls
   def yields_block_param?(irep, regions = nil)
     # OPTIONAL_REST_YIELD: an optional or rest signature with no `&blk` and a bare `yield` (BLKPUSH lv 0) also takes
     # the block as its extra parameter; the wrapper extracts it with `&` after the rest, as the `&blk` form does.
-    return optional_rest_yield?(irep) unless pure_mandatory_arity?(irep)
+    return optional_rest_yield?(irep) || keyword_yield?(irep, regions) unless pure_mandatory_arity?(irep)
     return true if BytecodeIR.for(irep).instructions_with_op(:BLKPUSH).any? { |insn| insn.paren_value == '0' }
     return true if block_given_modelled? && block_given_reads?(irep)
     return true if super_forwards_frame_block?(irep)
@@ -141,6 +141,24 @@ module ArgShapeCalls
     forwards && !super_direct_call_allowed?(d)
   end
 
+  # KEYWORD_YIELD: named keyword parameters (ENTER m:o:0:0:k:0:0:0, the shape keyword_arg_table reads, optionals with
+  # their jump table) and no `&blk`, with a bare `yield`, a `block_given?` read, or a block region that forwards the
+  # frame's block. The wrapper extracts the block after the keywords (keyword_rest_block_entry, as for `&blk` beside
+  # keywords) and the `_impl` takes it after the positionals, ahead of the optionals' count and the keywords; a keyword
+  # call site passes it there (compile_keyword_call). BC2CPP_KEYWORD_YIELD=0 keeps such a method interpreted.
+  def keyword_yield?(irep, regions = nil)
+    return false if ENV['BC2CPP_KEYWORD_YIELD'] == '0'
+
+    fields = irep.enter&.enter_fields
+    return false unless fields && fields.length >= 8 && fields[4].positive?
+    return false unless [2, 3, 5, 6, 7].all? { |i| fields[i].zero? } && keyword_arg_table(irep)
+    return false if fields[1].positive? && !optional_arg_table(irep)[1]
+    return true if BytecodeIR.for(irep).instructions_with_op(:BLKPUSH).any? { |insn| insn.paren_value == '0' }
+    return true if block_given_modelled? && block_given_reads?(irep)
+
+    (regions || recognize_block_fallback_regions(irep, available_upvars: block_upvar_needs(irep) || [], blk_available: true)).any? { |region| region[:needs_blk] }
+  end
+
   # OPTIONAL_REST_YIELD shape: optionals and/or a rest, no post, keyword or `&blk` parameter, and a bare `yield` (or a
   # SUPER_FRAME_BLOCK super).
   # Only this shape gets the block extracted; any other non-mandatory signature keeps its `#error`.
@@ -156,7 +174,15 @@ module ArgShapeCalls
     return false unless opt.positive? || rest.positive?
 
     BytecodeIR.for(irep).instructions_with_op(:BLKPUSH).any? { |insn| insn.paren_value == '0' } && mand >= 0 ||
-      super_forwards_frame_block?(irep)
+      super_forwards_frame_block?(irep) || optional_rest_region_yield?(irep)
+  end
+
+  # OPTIONAL_REST_YIELD: a block region of the method forwards its block (a `yield` inside `list.reduce(init) { }`), as
+  # yields_block_param? asks of a pure-mandatory method. BC2CPP_OPTIONAL_REST_REGION_YIELD=0 keeps such a method interpreted.
+  def optional_rest_region_yield?(irep)
+    return false if ENV['BC2CPP_OPTIONAL_REST_REGION_YIELD'] == '0'
+
+    recognize_block_fallback_regions(irep, available_upvars: block_upvar_needs(irep) || [], blk_available: true).any? { |region| region[:needs_blk] }
   end
 
   # Whether the callee's `_impl` has a trailing `bc2cpp_blk` parameter.
