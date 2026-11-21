@@ -423,6 +423,7 @@ class CodeGen
              when :integer then declared_return_condition(:fixnum, cls, false, var)
              when :symbol then declared_return_condition(:symbol, cls, false, var)
              when :array, :hash, :string then declared_return_condition(kind, cls, false, var)
+             when :union then declared_union_condition(cls, var)
              else exact_class_guard(owner_class_ptr_expr(cls), var)
              end
       cond = "mrb_nil_p(#{var}) || (#{cond})" if nilable

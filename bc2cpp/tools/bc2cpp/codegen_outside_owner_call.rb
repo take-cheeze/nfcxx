@@ -103,6 +103,7 @@ module OutsideOwnerCall
   end
 
   OWNER_PATH = /\A[A-Z]\w*(?:::[A-Z]\w*)*(?:\.singleton)?\z/
+  NOMETHOD_TAIL = /\G[^\n]*?\); \/\* CLOSED_WORLD nomethod: (?:self|recv)\.\S+ @ \S+ \*\//
 
   def guarded_fallback_line(d, recv, name, argv, listed, site)
     base = super
@@ -117,11 +118,20 @@ module OutsideOwnerCall
     return base unless owners
 
     lifted = @closed_world.with_outside_owner_call(name) { super }
-    error = %r{r#{d} = bc2cpp_nomethod_named\(M, #{Regexp.escape(recv)}, "#{Regexp.escape(name)}"[^\n]*?\); /\* CLOSED_WORLD nomethod: (?:self|recv)\.\S+ @ \S+ \*/}
-    # Another gate still keeps the else: the site dispatches by name, under that gate's reason.
-    return lifted unless lifted.match?(error)
+    # Only the literal call prefix varies by site; reuse the marker matcher instead of compiling a regexp.
+    prefix = "r#{d} = bc2cpp_nomethod_named(M, #{recv}, \"#{name}\""
+    offset = 0
+    while (start = lifted.index(prefix, offset))
+      if (tail = NOMETHOD_TAIL.match(lifted, start + prefix.length))
+        # mruby-onig reuses match regions, including across calls made while emitting the replacement.
+        finish = tail.end(0)
+        return lifted[0...start] + outside_owner_call_line(d, recv, name, argv, owners) + lifted[finish..]
+      end
+      offset = start + 1
+    end
 
-    lifted.sub(error) { outside_owner_call_line(d, recv, name, argv, owners) }
+    # Another gate still keeps the else: the site dispatches by name, under that gate's reason.
+    lifted
   end
 
   # A send with no guard chain (POLY's bare dispatch): the same closed-world question with no Ruby arm listed. The

@@ -215,3 +215,83 @@ Integer shifts fell from 1.966 seconds to 0.001 seconds. Whole profiled generati
 301.704 to 291.237 seconds, with GC 55.000 to 51.875 seconds. This is one before/after pair with other
 phase variation, not a stable throughput guarantee. All 20 C++, header and bytecode artifacts matched
 byte-for-byte. Local results are in `build/bench/self-profile-current/mask-optimized`.
+
+## Reuse the outside-owner fallback marker matcher
+
+`OutsideOwnerCall#guarded_fallback_line` used to compile a regexp containing the destination,
+receiver and method name at each site, then match it twice when replacing the proven nomethod branch.
+It now locates that literal call prefix with `String#index` and matches the trailing marker once
+with a shared regexp anchored at the suffix position. A failed candidate continues searching, and
+only the first valid branch is replaced. The end offset is saved before emitting the owner call:
+mruby-onig may reuse its MatchData region during calls made by that emission.
+
+The current-main baseline (0f9c7bfea, including the mask optimization) invoked this path 384,547 times
+on the frozen self input. Replaying its first 20,000 calls in alternating warm CRuby 4/YJIT runs
+measured 0.242/0.226 seconds CPU with the original matcher versus 0.063/0.047 seconds with the shared
+matcher. Allocations fell from about 625K to 316K. The fixture isolates replacement by using a fixed
+owner-call result; these are matcher timings, not whole-generation or compiled-compiler throughput.
+All results matched on CRuby and mruby-onig. Another 576 comparisons cover multiple candidates,
+failed matches, argument lists, regexp metacharacters, UTF-8 offsets and match-region reuse.
+These comparisons run inside the already-registered `helper_owner_call_check.rb`; adding a separate
+check requires a matching entry in the pinned world's check policy.
+
+Full CPU-profiled generation with the same bounded capture hook in both runs measured 336.644 versus
+322.041 seconds. This method's self CPU fell from 7.021 to 0.413 seconds; its inclusive tree fell
+from 53.173 to 44.310 seconds. Allocations fell from 528.25M to 523.31M and GC from 58.461 to
+54.634 seconds. All 20 C++, header and bytecode artifacts matched byte-for-byte. The whole-generation
+times are one before/after pair with profiling/capture overhead and other phase variation, not a
+throughput guarantee. These runs use a newer generator than the earlier mask measurements and must
+not be used to infer a cumulative speedup. Local artifacts are under
+`build/bench/self-profile-current/fallback-{baseline,optimized}`. Helper owner calls, direct owner calls,
+static owner dispatch and method-missing arms also pass their generated-program runtime checks.
+
+## Skip empty prepend traversals
+
+`prepended_override?` now returns before allocating a Set or duplicating a work list when the owner
+has no recorded prepended modules. Unknown owners still refuse first. Nonempty inputs retain the
+same normalization, cycle handling, nested included/prepended walks and registry lookup; no decision
+cache or context-dependent result is introduced.
+
+A capture at 89a710184 recorded 9,883,208 queries across 5,182 distinct analysis/owner/name combinations;
+9,863,575 queries (99.8%) had an empty prepend list. Replaying those combinations with their recorded
+frequencies on CRuby 4/YJIT preserved every answer. Alternating warm baseline CPU was 2.606/2.568 seconds
+versus 0.627/0.627 seconds; allocations fell from 30.58M to 0.99M. The replay reconstructs the captured
+analysis tables and measures this helper, not whole-compiler throughput.
+
+The existing registered prepend check now covers absent and empty lists, unknown owners, nested modules,
+cycles, unrelated included modules and frozen inputs, as well as compiled-program dispatch parity.
+The optimized helper itself also compiles and matches eight interpreted answers in an isolated native
+fixture. That fixture must include the full-core Set native-source metadata: the canonical world used
+by ordinary fixtures does not include mruby-set, while the full-core library used for this experiment does.
+
+Full self generation with identical CPU profiling/query-capture hooks allocated 521.03M versus 491.65M
+objects (5.6% fewer). The helper's inclusive sampled CPU fell from 4.457 to 0.954 seconds; GC measured
+48.900 versus 46.681 seconds. Whole wall time was 274.484 versus 279.600 seconds, so this pair does not
+establish a whole-generation speedup. All 20 C++, header and bytecode artifacts matched byte-for-byte.
+Local captures and metrics are under `build/bench/self-profile-current/prepend-{baseline,optimized}`;
+the weighted query results are `prepend-query-results.json` in that parent directory.
+
+## Check the constant path before scanning branch prefixes
+
+`straight_line_constant_name` now finds the receiver's textual constant path before collecting preceding
+branch edges. Ordinary receivers return nil immediately. A constant candidate still needs the same
+resolved-target, bypass-edge and reaching-definition proofs, including JMPUW and handler edges.
+
+At 494253a9a the frozen self input made 946,815 queries across 44,721 distinct label/index/register/policy
+combinations. Only 106,873 queries (11.3%) had a constant path requiring the branch scan. Both full runs
+captured identical query lists and frequencies. Weighted warm CRuby 4/YJIT replays preserved every answer:
+baseline CPU was 7.205/6.983 seconds versus 1.874/2.026 seconds, with allocations 22.69M versus 5.99M.
+Alias ireps share their source instructions; the replay uses those original bodies for the six alias labels.
+
+Full CPU-profiled generation with the same capture hook allocated 495.21M versus 478.61M objects.
+The branch collector's inclusive CPU fell from 11.320 to 1.660 seconds, and the constant-name helper
+from 13.669 to 4.170 seconds. Whole generation measured 327.430 versus 317.774 seconds. The two runs
+overlapped on separate processes, and these are single profiled observations rather than a stable
+throughput guarantee. All 20 C++, header and bytecode artifacts matched byte-for-byte.
+
+The registered constant-proofs check passes 49 cases, including parameter receivers, forward bypasses,
+loop back-edges, rescue ranges, unresolved jumps and JMPUW bypasses. Class-object argument/constructor
+and singleton-owner checks pass; Array.new block behavior matches interpreted execution (73 output lines).
+The pinned-world registry audit has zero unclassified checks. Local artifacts are under
+`build/bench/self-profile-current/constant-path-{baseline,optimized}`, with the weighted replay in
+`constant-path-query-results.json` in that parent directory.

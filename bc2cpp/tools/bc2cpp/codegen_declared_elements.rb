@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'factory_flow'
 
 # CodeGen: DECLARED_ELEMENT_GUARD and DECLARED_ELEMENT_MASK.
 #
@@ -15,6 +16,9 @@ class CodeGen
   class << self
     # { [owner, name without @] => { kind:, text: } } for this build (nil or empty: none).
     attr_accessor :declared_ivar_elements
+    # DECLARED_ARG_ELEMENT: { irep label => { register => { kind:, text:, klass: } } } of the positional parameters a
+    # signature declares `Array[T]` (or `Array[T]?`) for (nil or empty: none).
+    attr_accessor :declared_arg_elements
   end
 
   DECLARED_ELEMENT_CLASSES = {
@@ -50,6 +54,25 @@ class CodeGen
     out
   end
 
+  # DECLARED_ARG_ELEMENT: the same element kinds for declared parameters (applied.ir_arg_elements).
+  def self.declared_arg_element_table(applied)
+    return {} unless applied
+
+    optional = applied.ir_arg_optional_elements || {}
+    (applied.ir_arg_elements.keys | optional.keys).each_with_object({}) do |label, acc|
+      regs = applied.ir_arg_elements.fetch(label, {}).merge(optional.fetch(label, {}))
+      entries = regs.filter_map do |reg, classes|
+        next unless classes.is_a?(Set) && classes.size == 1
+
+        klass = classes.first.to_s
+        kind, = DECLARED_ELEMENT_CLASSES[klass]
+        kind ||= :class if klass.match?(/\A[A-Z][\w:]*\z/) && !%w[Array Hash Object NilClass].include?(klass)
+        [reg, { kind: kind, text: "Array[#{klass}]", klass: klass }] if kind
+      end
+      acc[label] = entries.to_h unless entries.empty?
+    end
+  end
+
   # The declared element of ivar +name+ for +klass+ or its nearest declaring ancestor, or nil.
   def declared_element_entry(klass, name)
     table = self.class.declared_ivar_elements
@@ -69,16 +92,75 @@ class CodeGen
   end
 
   # The receiver's declared element entry when its one reaching definition is an ivar read, else nil.
-  def declared_element_receiver(irep, idx, reg, owner)
-    return nil unless irep && idx && reg && owner && self.class.declared_ivar_elements && !self.class.declared_ivar_elements.empty?
+  def declared_element_receiver(irep, idx, reg, owner, derived: false, depth: 0)
+    return nil unless irep && idx && reg && owner
 
     producers = BytecodeIR.producers(irep, idx, reg)
-    return nil unless producers&.size == 1
+    return nil if producers.nil? || producers.empty?
+    return declared_arg_element_receiver(irep, producers) if producers.any?(&:entry?)
+
+    # `(@x || [])` for a read or loop: an empty Array literal adds no element (a store could go into the literal).
+    producers = producers.reject { |p| empty_array_literal?(p.insn) } if derived && producers.size > 1
+    return nil unless producers.size == 1
 
     producer = producers.first
-    return nil if producer.entry? || producer.insn&.op != :GETIV
+    unless producer.insn&.op == :GETIV
+      return derived ? element_preserving_receiver(irep, idx, producer, owner, depth) : nil
+    end
+    return nil unless self.class.declared_ivar_elements && !self.class.declared_ivar_elements.empty?
 
     declared_element_entry(owner, producer.insn.ivar)
+  end
+
+  # DECLARED_ELEMENT_DERIVED (reads and loops only): a no-argument filter or reordering of a receiver with a declared
+  # element (`xs.reject(&:x)`, `@a.sort`, `@a + @b` of one element), used once and only by the consumer at +idx+, holds
+  # only elements of that receiver. The consumer still tests every element it binds or reads, so this only picks the
+  # class it tests. A copy something else can reach (and so store into) is refused. BC2CPP_DECLARED_ELEMENT_DERIVED=0.
+  ELEMENT_PRESERVING = %w[reject select filter sort sort_by uniq compact dup reverse].to_set.freeze
+
+  def element_preserving_receiver(irep, idx, producer, owner, depth)
+    insn = producer.insn
+    return nil if insn.nil? || depth >= 4 || ENV['BC2CPP_DECLARED_ELEMENT_DERIVED'] == '0'
+    return nil unless %i[SEND SEND0 SENDB ADD].include?(insn.op)
+
+    uses = FactoryFlow.uses(irep, producer.index, producer.reg)
+    return nil unless uses && uses.map(&:first).uniq == [idx]
+
+    inner = ->(r) { declared_element_receiver(irep, producer.index, r, owner, derived: true, depth: depth + 1) }
+    if insn.op == :ADD
+      left = inner.call(insn.reg)
+      right = left && inner.call(insn.reg + 1)
+      return left if right && right[:kind] == left[:kind] && right[:klass] == left[:klass]
+
+      return nil
+    end
+    return nil unless ELEMENT_PRESERVING.include?(insn.sym.to_s) && insn.argc.to_i.zero? && insn.plain_fixed_argc?
+
+    inner.call(insn.reg)
+  end
+
+  # DECLARED_ARG_ELEMENT: a receiver whose reaching definitions are a declared `Array[T]` parameter's entry value, plus
+  # any number of empty Array literals (`xs || []`), which add no element. BC2CPP_DECLARED_ARG_ELEMENT=0 turns it off.
+  def declared_arg_element_receiver(irep, producers)
+    return nil if ENV['BC2CPP_DECLARED_ARG_ELEMENT'] == '0'
+
+    table = self.class.declared_arg_elements&.[](irep.label)
+    return nil unless table
+
+    entries = producers.reject { |p| !p.entry? && empty_array_literal?(p.insn) }
+    return nil unless entries.all?(&:entry?) && entries.map(&:reg).uniq.size == 1
+
+    reg = entries.first.reg.to_i
+    entry = table[reg]
+    return nil unless entry
+
+    owner = @owner_of[irep.label]
+    where = owner ? "#{owner.owner}##{owner.name}" : irep.label.to_s
+    entry.merge(owner: where, name: "arg#{reg}", subject: "#{where} argument #{reg}[]", marker: "#{where} arg#{reg}")
+  end
+
+  def empty_array_literal?(insn)
+    insn && insn.op == :ARRAY && insn.typed.size == 2 && insn.typed[1].value.to_i.zero?
   end
 
   # DECLARED_ELEMENT_GUARD: the statement checking the element a GETIDX/GETIDX0 at +idx+ stored into `dest` (a register
@@ -88,7 +170,7 @@ class CodeGen
 
     # The raw register, as the flow's mask reads it (declared_element_index_mask) and as the emitted read names it.
     receiver = insn.op == :GETIDX0 ? insn.regs[1] : insn.regs.first
-    entry = declared_element_receiver(irep, idx, receiver, owner_def&.owner)
+    entry = declared_element_receiver(irep, idx, receiver, owner_def&.owner, derived: true)
     return '' unless entry
 
     # The read result is nil past the end, so nil is allowed here.
@@ -137,8 +219,8 @@ class CodeGen
            end
     ok = nil_ok ? "mrb_nil_p(#{var}) || (#{cond})" : cond
     "  if (mrb_unlikely(!(#{ok}))) " \
-      "bc2cpp_declared_ivar_violation(M, #{var}, \"#{quote.call("#{entry[:owner]}#@#{entry[:name]}[]")}\", " \
-      "\"#{quote.call(entry[:text])}\"); /* DECLARED_ELEMENT_GUARD #{entry[:owner]}##{entry[:name]} #{verb} */\n"
+      "bc2cpp_declared_ivar_violation(M, #{var}, \"#{quote.call(entry[:subject] || "#{entry[:owner]}#@#{entry[:name]}[]")}\", " \
+      "\"#{quote.call(entry[:text])}\"); /* DECLARED_ELEMENT_GUARD #{entry[:marker] || "#{entry[:owner]}##{entry[:name]}"} #{verb} */\n"
   end
 
   # DECLARED_LOOP_ELEMENT: the declared program-class element of an inlined Array loop's receiver (its one reaching
@@ -149,7 +231,7 @@ class CodeGen
     return nil if region[:ssendb] || d.nil? || ENV['BC2CPP_DECLARED_LOOP_ELEMENT'] == '0'
 
     idx = irep.index_of_addr(region[:sendb_addr])
-    entry = declared_element_receiver(irep, idx, region[:dest_reg], d.owner)
+    entry = declared_element_receiver(irep, idx, region[:dest_reg], d.owner, derived: true)
     return nil unless entry && entry[:kind] == :class && @closed_world&.exact_class?(entry[:klass])
 
     entry
@@ -185,7 +267,7 @@ class CodeGen
 
     receiver = insn.op == :GETIDX0 ? insn.regs[1] : insn.regs.first
     owner = @owner_of[irep.label]&.owner
-    entry = declared_element_receiver(irep, index, receiver, owner)
+    entry = declared_element_receiver(irep, index, receiver, owner, derived: true)
     return nil unless entry
 
     bits = if entry[:kind] == :class

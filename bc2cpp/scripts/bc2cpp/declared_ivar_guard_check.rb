@@ -9,7 +9,10 @@
 #   2. once no store can bypass the checks, the declared kind is the slot's class pool: a `@peer.name` send is a proven
 #      one (BC2CPP_DECLARED_IVAR_PROOF=0 keeps the checks and drops the proof); a slot an attr_accessor writes is trusted
 #      when its synthesized writer carries the check too; one a store in an uncompiled owner could reach is not;
-#   3. interpreted and compiled runs agree on a right declaration; a wrong store raises the violation, naming the ivar.
+#   3. interpreted and compiled runs agree on a right declaration; a wrong store raises the violation, naming the ivar;
+#   4. DECLARED_UNION: a union of program classes (`A | B`, `nil | A | B`) and a class with subclasses (its closed
+#      subtree) are checked as the exact classes they stand for, seed the pool with them, and a send on such a slot is
+#      one exact-class arm per class with no by-name fallback (USER_RECEIVER_CASES, NILABLE_RECEIVER for nil).
 #
 #   MRBC=path/to/mrbc ruby scripts/bc2cpp/declared_ivar_guard_check.rb
 require 'tmpdir'
@@ -70,6 +73,25 @@ SOURCE = <<~RUBY
     def put(x); @w = x; nil; end
     def read; @w; end
   end
+  class Left
+    def name; 'left'; end
+  end
+  class Right
+    def name; 'right'; end
+  end
+  class Pair
+    def initialize; @side = Left.new; @maybe = nil; nil; end
+    def set_side(x); @side = x; nil; end
+    def set_maybe(x); @maybe = x; nil; end
+    def side_name; @side.name; end
+    def maybe_name; @maybe.name; end
+  end
+  class Open; end
+  OpenKid = Class.new(Open)
+  class Loose
+    def initialize; @l = Open.new; nil; end
+    def put(x); @l = x; nil; end
+  end
 RUBY
 
 SIGS = <<~RBS
@@ -90,9 +112,16 @@ SIGS = <<~RBS
   class Wide
     @w: Integer
   end
+  class Pair
+    @side: Left | Right
+    @maybe: (nil | Left | Right)
+  end
+  class Loose
+    @l: Open | Peer
+  end
 RBS
 
-OWNERS = %w[Peer Other Gauge Base Kid Holder Acc Wide].freeze
+OWNERS = %w[Peer Other Gauge Base Kid Holder Acc Wide Left Right Pair Open Loose].freeze
 
 # [code, stderr] of one generation with the given switches (nil code: generation refused, stderr is the message).
 generate = lambda do |source, env = {}, owners: OWNERS|
@@ -137,8 +166,13 @@ check.call('a program class: tested as exactly the class',
 check.call('T?: nil or the kind', body_of.call(code, 'Gauge#set_opt').include?('!(mrb_nil_p(r1) || ((mrb_integer_p(r1) || mrb_bigint_p(r1))))'))
 check.call('bool stays unchecked by design', guard.call('Gauge#@flag').zero? && proven.call('Gauge#@flag').zero? &&
                                               !body_of.call(code, 'Gauge#set_flag').include?('declared_ivar_violation'))
-check.call('a class with a subclass is not checked (a subclass instance is a legal value)',
-           guard.call('Holder#@b').zero? && !body_of.call(code, 'Holder#set_b').include?('declared_ivar_violation'))
+class_test = /bc2cpp_class_is\(M, r1, bc2cpp_owner_class_\d+\(M\)\)/
+check.call('a class with a subclass is checked as its closed subtree (one exact test per class)',
+           guard.call('Holder#@b') == 1 && body_of.call(code, 'Holder#set_b').scan(class_test).size == 2)
+check.call('a union is checked as its classes, `nil | A | B` admitting nil first',
+           body_of.call(code, 'Pair#set_side').scan(class_test).size == 2 &&
+             body_of.call(code, 'Pair#set_side').include?('"Pair#@side", "Left | Right"') &&
+             body_of.call(code, 'Pair#set_maybe').include?('!(mrb_nil_p(r1) || (bc2cpp_class_is('))
 check.call('the report lists the slots and counts the stores',
            err.include?('DECLARED_IVAR Gauge#@level: Integer, guarded stores, pool seeded') &&
              err.match?(/declared instance variables \(DECLARED_IVAR_GUARD\): \d+, [1-9]\d* checked stores, [1-9]\d* proven stores/))
@@ -151,7 +185,24 @@ check.call('pools: Integer, Float, Symbol, the class, and Integer? with nil',
            pool.call(err, 'Gauge#@level') == 'INT' && pool.call(err, 'Gauge#@ratio') == 'FLT' &&
              pool.call(err, 'Gauge#@mark') == 'Symbol' && pool.call(err, 'Gauge#@peer') == 'Peer' &&
              pool.call(err, 'Gauge#@opt') == 'INT|NIL')
-check.call('bool and a class with subclasses are not seeded', pool.call(err, 'Gauge#@flag').nil? && pool.call(err, 'Holder#@b').nil?)
+check.call('bool is not seeded', pool.call(err, 'Gauge#@flag').nil?)
+check.call('a union seeds its classes (and nil for `nil | A | B`)',
+           pool.call(err, 'Pair#@side')&.split('|')&.sort == %w[Left Right] &&
+             pool.call(err, 'Pair#@maybe')&.split('|')&.sort == %w[Left NIL Right])
+side = body_of.call(code, 'Pair#side_name')
+check.call('a send on a union slot: one exact arm per class, no by-name fallback',
+           side.include?('USER_RECEIVER_CASES :name') && side.include?('Left_name_impl') && side.include?('Right_name_impl') &&
+             !side.match?(/bc2cpp_owner_call|mrb_funcall|bc2cpp_send\(/))
+maybe = body_of.call(code, 'Pair#maybe_name')
+check.call('on a nil-or-union slot: the nil test, then the same arms',
+           maybe.include?('NILABLE_RECEIVER :name') && maybe.include?('USER_RECEIVER_CASES :name') &&
+             !maybe.match?(/bc2cpp_owner_call|mrb_funcall|bc2cpp_send\(/))
+check.call('a union naming a class the closed world cannot bound (Class.new(Open)) is not checked',
+           guard.call('Loose#@l').zero? && pool.call(err, 'Loose#@l').nil?)
+nounion, nounion_err = generate.call(SOURCE, { 'BC2CPP_DECLARED_UNION' => '0' })
+check.call('BC2CPP_DECLARED_UNION=0 leaves unions and subclassed classes unchecked',
+           nounion && !nounion.include?('DECLARED_IVAR_GUARD Pair#@side') && !nounion.include?('DECLARED_IVAR_GUARD Holder#@b') &&
+             pool.call(nounion_err, 'Pair#@side').nil?)
 unproven_code, unproven_err = generate.call(SOURCE, { 'BC2CPP_DECLARED_IVAR_PROOF' => '0' })
 check.call('BC2CPP_DECLARED_IVAR_PROOF=0 drops the seed and keeps the checks',
            unproven_code && pool.call(unproven_err, 'Gauge#@peer') != 'Peer' &&
@@ -195,6 +246,18 @@ DRIVER = <<~'RUBY'
       puts "violation: #{e.message}"
     end
   end
+  pr = Pair.new
+  pr.set_side(Right.new)
+  pr.set_maybe(Left.new)
+  puts pr.side_name, pr.maybe_name
+  begin
+    pr.set_side(Other.new)
+    puts 'set_side: kept'
+  rescue BC2cppDeclarationViolation => e
+    puts "union violation: #{e.message}"
+  end
+  h = Holder.new
+  h.set_b(Kid.new)
   a = Acc.new
   a.v = 4
   a.reset(5)
@@ -242,6 +305,9 @@ if build
                    violations[6].include?('Gauge#@peer was assigned Other, declared Peer'))
       check.call('the interpreter stores every one of them', interpreted.count { |l| l.end_with?(': stored') } == 7)
       check.call('the tail (the attr_accessor slot) agrees', interpreted.last(2) == compiled.last(2))
+      check.call('a union slot reads the same; a store outside the union raises, a subclass store does not',
+                 compiled.include?('right') && compiled.include?('left') && interpreted.include?('set_side: kept') &&
+                   compiled.any? { |l| l.include?('union violation: ') && l.include?('Pair#@side was assigned Other, declared Left | Right') })
       unless interpreted.first(5) == compiled.first(5)
         puts '    interpreted | compiled'
         [interpreted.size, compiled.size].max.times { |i| puts "    #{interpreted[i].to_s.ljust(24)}| #{compiled[i]}" }

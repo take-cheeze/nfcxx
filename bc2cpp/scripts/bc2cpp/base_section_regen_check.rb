@@ -132,6 +132,53 @@ Dir.mktmpdir('base-section-regen') do |gen|
              BaseSection.ruby_decls(BaseSection.regenerate_ruby(section, gen)).include?("class Kept\n  def y: () -> untyped\nend\n"))
 end
 
+puts 'the --write split: core blocks move to the core file without leaving headers behind, and a second write is a no-op'
+WORLD = <<~RBS
+  # world preamble
+  # Base RBS (scripts/bc2cpp/base_rbs.rb): shapes from the AST, no types.
+  # Base RBS (scripts/bc2cpp/base_rbs.rb): shapes from the AST, no types.
+  # ---- base stubs (fixture)
+  # Base RBS (scripts/bc2cpp/base_rbs.rb): shapes from the AST, no types.
+  # bc2cpp-native: base_rpg2k
+  class Kept
+    def y: () -> untyped
+  end
+
+  # ---- block_types.rbs
+  class Program
+    def run: () -> Integer
+  end
+RBS
+CORE = <<~RBS
+  # Base RBS (scripts/bc2cpp/base_rbs.rb): shapes from the AST, no types.
+  # bc2cpp-native: base_array
+  class Array
+    def bsearch: () -> untyped
+  end
+
+  # Base RBS (scripts/bc2cpp/base_rbs.rb): shapes from the AST, no types.
+  # bc2cpp-native: base_enum
+  module Enumerable
+    def each_slice: (untyped) -> untyped
+  end
+
+RBS
+write_by_tag = { 'base_rpg2k' => ["class Kept\n  def y: () -> untyped\nend\n"],
+                 'base_array' => ["class Array\n  def bsearch: () -> untyped\nend\n"],
+                 'base_enum' => ["module Enumerable\n  def each_slice: (untyped) -> untyped\nend\n"] }
+core1, world1 = BaseSection.write_texts(WORLD, {}, write_by_tag, core: CORE)
+core2, world2 = BaseSection.write_texts(world1, {}, write_by_tag, core: core1)
+header = "# Base RBS (scripts/bc2cpp/base_rbs.rb): shapes from the AST, no types.\n"
+check.call('no header without declarations is left in the world file (and old orphans go)',
+           BaseSection.section_of(world1).lines.each_cons(2).none? { |a, b| a == header && !b.start_with?('# bc2cpp-native:') })
+check.call('the core declarations stay in the core file, in their order',
+           core1.index('class Array') && core1.index('module Enumerable') && core1.index('class Array') < core1.index('module Enumerable') &&
+             !world1.include?('class Array'))
+check.call('the world keeps its preamble, its own declaration and the rest of the file',
+           world1.start_with?("# world preamble\n") && world1.include?("class Kept\n") &&
+           world1.end_with?(WORLD[BaseSection.section_of(WORLD).length..]))
+check.call('a second write changes neither file', core2 == core1 && world2 == world1)
+
 puts 'committed file: regenerating from its own content is a no-op'
 committed = File.read(DECLARATIONS)
 bodies = native_bodies_of(BaseSection.section_of(committed)).group_by(&:first).transform_values { |rows| rows.map(&:last).join }

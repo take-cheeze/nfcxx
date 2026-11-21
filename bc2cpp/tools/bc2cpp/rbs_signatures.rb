@@ -352,7 +352,8 @@ module RbsSignatures
 
   # --------------------------------------------------------------------------------------------- applying
 
-  Applied = Struct.new(:ivar_classes, :ivar_elements, :ivar_hash_elements, :origins, :locs, :diagnostics, :ivar_sigs, :ir_arg_types, :ir_return_types, :ir_named_returns, :ir_ivar_types, :ir_owners, :ir_methods, :ir_arg_elements, :ir_ivar_elements, :ir_const_elements, :ir_optional_types, :ir_keyword_types, :ir_rest_elements, :ir_block_signatures, :subtree_ivars, :subtree_args, :subtree_returns, :based, keyword_init: true)
+  Applied = Struct.new(:ivar_classes, :ivar_elements, :ivar_hash_elements, :origins, :locs, :diagnostics, :ivar_sigs, :ir_arg_types, :ir_return_types, :ir_named_returns, :ir_ivar_types, :ir_owners, :ir_methods, :ir_arg_elements, :ir_ivar_elements, :ir_const_elements, :ir_optional_types, :ir_keyword_types, :ir_rest_elements, :ir_block_signatures, :subtree_ivars, :subtree_args, :subtree_returns, :based,
+                       :ir_arg_optional_elements, keyword_init: true)
 
   # Merges the signatures into the three comment-annotation tables (irep label -> struct), in place, and returns what
   # the ivar seeds and the diagnostics are. `annotations`, `class_annotations` and `element_annotations` are what
@@ -408,6 +409,12 @@ module RbsSignatures
           register = index + 1
           [register, type.element_classes] if type.element_classes && ap.ir_arg_types[d.irep]&.key?(register)
         end.to_h.freeze
+        # DECLARED_ARG_ELEMENT only: the element of an `Array[T]?` parameter, which the IR's element facts leave out.
+        (ap.ir_arg_optional_elements ||= {})[d.irep] = sig.args.each_with_index.filter_map do |type, index|
+          register = index + 1
+          inner = type.optional&.element_classes
+          [register, inner] if inner && ap.ir_arg_types[d.irep]&.key?(register)
+        end.to_h.freeze
       end
       if ap.ir_owners[d.irep] == sig.owner
         runtime = ireps[d.irep]
@@ -421,6 +428,15 @@ module RbsSignatures
 
             [register, type.value_classes] if type.value_classes
           end.to_h.freeze
+          # DECLARED_ARG_ELEMENT: an optional `Array[T]` / `Array[T]?` parameter's element (its default is one more
+          # reaching definition, accepted only when it is an empty Array literal).
+          optional_elements = Array(sig.optional_args).each_with_index.filter_map do |type, index|
+            inner = type.element_classes || type.optional&.element_classes
+            [mand + index + 1, inner] if inner && ap.ir_optional_types[d.irep]&.key?(mand + index + 1)
+          end.to_h
+          unless optional_elements.empty?
+            (ap.ir_arg_optional_elements ||= {})[d.irep] = (ap.ir_arg_optional_elements[d.irep] || {}).merge(optional_elements).freeze
+          end
         end
         # `*T` types the rest register (after the optional ones) of a positional-only rest, the layout the call-site
         # join accepts (irep_arity.rb rest_positional_shape?). The optional count must match, as for optional types.

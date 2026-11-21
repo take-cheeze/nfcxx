@@ -649,11 +649,16 @@ class CodeGen
     insn = idx && BytecodeIR.for(irep).source_at(idx)
     return {} unless insn&.op == :SENDB
 
-    shapes = CoreBlockParamSigs.shapes.select do |(klass, name), shape|
-      name == region[:name] && shape.argc.cover?(region[:n]) && shape.arity == fields.first && !shape.elements.empty? &&
-        block_element_chain_core?(klass, name)
+    fitting = CoreBlockParamSigs.shapes.select do |(_klass, name), shape|
+      name == region[:name] && shape.argc.cover?(region[:n]) && shape.arity == fields.first && !shape.elements.empty?
     end
-    return {} if shapes.empty?
+    shapes = fitting.select { |(klass, name), _| block_element_chain_core?(klass, name) }
+    # DECLARED_BLOCK_ELEMENT needs no core chain: its entry guard holds whoever yields (a program `Array#sort` too).
+    if shapes.empty?
+      shape = fitting.find { |(klass, _), _| klass == 'Array' }&.last
+      declared = shape && declared_block_element(irep, idx, region, owner_name)
+      return declared ? declared_block_element_hints(region, declared, shape) : {}
+    end
 
     recv_class = block_fallback_receiver_class(irep, idx, region[:dest_reg], owner_name)
     mand = mandatory_arity(irep)
@@ -670,13 +675,45 @@ class CodeGen
                 end
       # Only a class of this program: the scans also return primitive tags and VACUOUS, which
       # PRIMITIVE_ELEMENT_SUPPORT keeps away from the element-hint consumers.
-      next unless element.is_a?(String) && known_owner_set.include?(element) &&
-                  !PRIMITIVE_ELEMENT_CLASSES.include?(element)
+      unless element.is_a?(String) && known_owner_set.include?(element) && !PRIMITIVE_ELEMENT_CLASSES.include?(element)
+        declared = klass == 'Array' && declared_block_element(irep, idx, region, owner_name)
+        next unless declared
+
+        return declared_block_element_hints(region, declared, shape)
+      end
 
       strict = STRICT_BLOCK_ELEMENT_SHAPES.include?([klass, name]) && shape.elements == [0]
       return shape.elements.to_h { |pos| [pos + 1, strict ? element : SoftElementHint.new(element)] }
     end
     {}
+  end
+
+  # DECLARED_BLOCK_ELEMENT: the declared program-class element of a block-taking Array iterator's receiver (a declared
+  # `@x`, a declared parameter, or a used-once filter of one; see declared_element_receiver), or nil.
+  # BC2CPP_DECLARED_BLOCK_ELEMENT=0 turns it off.
+  def declared_block_element(irep, idx, region, owner_name)
+    return nil if ENV['BC2CPP_DECLARED_BLOCK_ELEMENT'] == '0' || region[:self_implicit]
+
+    entry = declared_element_receiver(irep, idx, region[:dest_reg], owner_name, derived: true)
+    entry if entry && entry[:kind] == :class && @closed_world&.exact_class?(entry[:klass])
+  end
+
+  # The body tests each element parameter on entry (declared_block_element_guards), so inside it the hint is exact.
+  def declared_block_element_hints(region, declared, shape)
+    region[:declared_block_element] = [declared, shape.elements.map { |pos| pos + 1 }]
+    shape.elements.to_h { |pos| [pos + 1, declared[:klass]] }
+  end
+
+  # The entry tests of the parameters DECLARED_BLOCK_ELEMENT hints: whoever calls the body, a parameter the hint names
+  # is exactly the class past this point, or the call raised BC2cppDeclarationViolation.
+  def declared_block_element_guards(region, arg_names)
+    entry, positions = region[:declared_block_element]
+    return '' unless entry
+
+    positions.filter_map do |pos|
+      name = arg_names[pos - 1]
+      element_guard_statement(entry, name, nil_ok: false, verb: 'yielded') if name
+    end.join
   end
 
   # Does an exact `klass` instance answer `name` with the core method? A program
@@ -1138,6 +1175,7 @@ class CodeGen
            "#{arg_names.map { |a| ", mrb_value #{a}" }.join}) {\n"
     out << errinfo_scope_line(block_irep)
     out << emit_register_initializers(block_irep.nregs, arg_names, boxed: boxed_registers(nested_regions))
+    out << declared_block_element_guards(region, arg_names)
     out << body
     out << fell_off_end(impl_name)
     out << "}\n\n"

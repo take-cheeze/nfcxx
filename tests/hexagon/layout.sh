@@ -12,12 +12,17 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 "$root/scripts/gen-c-target.rb" -t "$target" -o "$tmp/probe.c" "$here/layout_probe.cpp" || exit 1
 # nfcxx_<name> = <value>  ->  _Static_assert((<C expression for name>) == <value>)
 grep -o 'const unsigned long nfcxx_[A-Za-z0-9_]* = [0-9]*' "$tmp/probe.c" | sed 's/const unsigned long nfcxx_//; s/ = /=/' |
+# long-double facts only hold for the linux_hexagon target (the riscv32 stand-in
+# disagrees with clang's Hexagon ABI there by design); drop them otherwise.
+if [ "$target" = linux_hexagon ]; then cat; else grep -v '^\(sz_ld=\|al_ld=\|sz_LD=\|off_LD_\)'; fi |
 while IFS== read name val; do
   val=${val%UL}
   case $name in
     sz_ptr) e='sizeof(void *)';;  sz_long) e='sizeof(long)';;  sz_ll) e='sizeof(long long)';;
     sz_wchar) e='sizeof(int)';;  sz_size_t) e='sizeof(unsigned long)';;
     al_ll) e='_Alignof(long long)';;  al_dbl) e='_Alignof(double)';;
+    sz_ld) e='sizeof(long double)';;  al_ld) e='_Alignof(long double)';;
+    sz_LD) e='sizeof(struct LD)';;
     sz_*) e="sizeof(struct ${name#sz_})";;  al_*) e="_Alignof(struct ${name#al_})";;
     off_*) s=${name#off_}; e="__builtin_offsetof(struct ${s%_*}, ${s##*_})";;
   esac
