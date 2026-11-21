@@ -165,7 +165,7 @@ class CodeGen
       return "  // IO_PUTS_MODEL: shared bc2cpp_io_puts; exact core IO#puts body, else dispatch by name.\n" \
              "  {\n" \
              "#{args_decl}" \
-             "    #{RegName[d]} = bc2cpp_io_puts(M, #{recv}, mrb_intern_lit(M, \"puts\"), #{n}, #{direct_argv});\n" \
+             "    #{RegName[d]} = bc2cpp_io_puts(M, #{recv}, mrb_intern_lit(M, \"puts\"), #{n}, #{direct_argv}, self);\n" \
              "  }\n"
     end
 
