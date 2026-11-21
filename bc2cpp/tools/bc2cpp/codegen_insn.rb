@@ -277,7 +277,8 @@ class CodeGen
       # Not `$`-anchored: a trailing "; R1:name" comment (see IvarLayout.analyze).
       s = insn.regs.first
       klass = self_class(owner_def)
-      code = ivar_set_code(klass, 'self', ivar, "#{RegName[s]}", self_of_klass: true)
+      immediate = proven_immediate_operand?(irep, idx, unshift_proof_reg(s, reg_offset), owner_def)
+      code = ivar_set_code(klass, 'self', ivar, "#{RegName[s]}", self_of_klass: true, immediate: immediate)
       type = embed_type(klass, ivar) if klass
       # DECLARED_IVAR_GUARD: the declared kind of the slot is checked before the value is stored.
       guard = code ? declared_ivar_setiv_guard(insn, irep, owner_def, idx, reg_offset) : ''
