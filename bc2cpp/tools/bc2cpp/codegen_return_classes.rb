@@ -577,6 +577,9 @@ class CodeGen
     core_result = state && native_core_class_result(insn, state)
     return core_result if core_result
 
+    vetted = state && vetted_fresh_array_mask(insn, state)
+    return vetted if vetted
+
     if name == 'dup' && insn.op == :SEND0 && state && native_dup_result_safe?
       mask = state[insn.reg.to_i]
       allowed = RETURN_CORE_CLASS.keys.reduce(NumericFlow::NIL, :|) | (@numeric_class_bits || {}).values.reduce(0, :|)
@@ -936,12 +939,60 @@ class CodeGen
       return nil
     end
 
-    klass = return_class_of_mask(mask)
+    klass = return_class_of_mask(mask) || scoped_nilable_result_class(mask)
     valid = klass && (contextual || !RETURN_CORE_CLASS.value?(klass))
     result = valid ? mask : nil
     @rc_scoped_return_cache[key] = result
   ensure
     @rc_scoped_return_active.delete(key) if acquired
+  end
+
+  # VETTED_FRESH_ARRAY: on an exact Array, a name whose every definition is native, mruby's own Ruby or a vetted
+  # fresh-Array override (core_array_return?, `# bc2cpp-vetted: fresh-array`) answers a copy, an exact Array too.
+  # BC2CPP_VETTED_FRESH_ARRAY=0 leaves it unknown.
+  def vetted_fresh_array_mask(insn, state)
+    return nil unless ENV['BC2CPP_VETTED_FRESH_ARRAY'] != '0' && %i[SEND SEND0].include?(insn.op) && state[insn.reg.to_i] == NumericFlow::ARR
+
+    name = insn.sym
+    @vetted_fresh_array ||= {}
+    return @vetted_fresh_array[name] if @vetted_fresh_array.key?(name)
+
+    @vetted_fresh_array[name] = vetted_fresh_array_name?(name) ? NumericFlow::ARR : nil
+  end
+
+  def vetted_fresh_array_name?(name)
+    return false unless defined?(VETTED_ARRAY_RETURN_OVERRIDES) && VETTED_ARRAY_RETURN_OVERRIDES.include?("Array##{name}")
+    return false unless @closed_world&.exact_instances_singleton_free? && @closed_world.method_missing_classes.empty?
+    return false if @closed_world.unknown_def?(name) || Array(@prepended_modules['Array']).any? || @unknown_mixins.include?('Array')
+
+    installed = symbol_installed_names
+    return false unless installed && !installed.include?(name) && !numeric_aliased_names.include?(name)
+    return false if bytecode_ir_name_removed?(name) || singleton_tainted_for?('Array', [name])
+    return false unless @closed_world.outside_ruby_paths_defining(name).all? { |path| CoreDefs.core_source?(path) }
+    return false unless @native_name_sources && !block_core_native_registered?('Array', name)
+
+    # mruby's own Ruby bodies (MethodDef#core) are among those core_array_return? vouches for, as RbsRecordValues reads it.
+    core_array_return?(name, { name => (@registry[name] || []).reject(&:core) })
+  end
+
+  SCOPED_SCALAR_CLASSES = { NumericFlow::INT => 'Integer', NumericFlow::FLT => 'Float' }.freeze
+
+  # SCOPED_NILABLE_RESULT: the one class of a resolved body's result that may also be nil (`C?`, `Array?`), or an
+  # Integer or Float result, which have no class bit. The mask is the body's whole result set either way, so it is
+  # passed on as is. BC2CPP_SCOPED_NILABLE_RESULTS=0 keeps one class bit only.
+  def scoped_nilable_result_class(mask)
+    return nil unless scoped_nilable_results? && mask.is_a?(Integer) && mask.positive?
+
+    base = mask & ~NumericFlow::NIL
+    return nil if base.zero?
+
+    SCOPED_SCALAR_CLASSES[base] || return_class_of_mask(base)
+  end
+
+  def scoped_nilable_results?
+    return @scoped_nilable_results if defined?(@scoped_nilable_results)
+
+    @scoped_nilable_results = ENV['BC2CPP_SCOPED_NILABLE_RESULTS'] != '0'
   end
 
   # BOTTOM_BLOCK_RECEIVER: the receiver of a literal-block send is a name the table has not given a class yet (its
