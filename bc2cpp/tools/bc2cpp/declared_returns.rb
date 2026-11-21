@@ -262,6 +262,55 @@ module DeclaredReturns
     end
   end
 
+  # TRACED_PARAM: why this run breaks the traced parameter contract (empty when it does not). An installed record
+  # trace read a declared parameter as its declared classes (ValueTrace#entry_classes, #keyword_classes), which holds
+  # only while that method runs compiled with the guard, so it must compile, cleanly, with the guard in every body. A
+  # positional the impl takes unboxed (`mrb_int id`) is checked by its callers instead. `trusted`: [label, :arg,
+  # position] / [label, :keyword, name]; `keys`: label => "Owner#name". A method another gem's run compiles
+  # (other_owners) is that run's to check.
+  def traced_param_failures(trusted, compiled, keys, only_owners, other_owners)
+    by_label = compiled.group_by { |m| m[:label] }
+    (trusted || []).filter_map do |label, form, which|
+      key = keys[label] || label
+      what = form == :arg ? "parameter #{which + 1}" : "keyword #{which}:"
+      owner = key.to_s.split('#').first.delete_suffix('.singleton')
+      if only_owners && !only_owners.include?(owner)
+        next if other_owners&.include?(owner)
+
+        next "#{key} #{what} is traced from its declaration, but no compiled gem of this build compiles #{owner} [#{CODE}]"
+      end
+      bodies = Array(by_label[label])
+      if bodies.empty? || bodies.any? { |m| m[:unsupported] || m[:code].to_s.include?('#error') }
+        next "#{key} #{what} is traced from its declaration, but the method does not compile [#{CODE}]"
+      end
+
+      marker = form == :arg ? "/* DECLARED_PARAM_GUARD #{key} arg #{which + 1} */" : keyword_guard_marker(key, which)
+      next if bodies.all? { |m| m[:code].include?(marker) || (form == :arg && unboxed_param?(m[:code], which)) }
+
+      "#{key} #{what} is traced from its declaration, but a compiled body carries no guard [#{CODE}]"
+    end
+  end
+
+  # Aborts the run on a traced_param_failures failure of the record trace's trusted guards (a method of its own, so
+  # bc2cpp.rb's top level, which mrbc compiles, keeps its local count).
+  def check_traced_params!(compiled, only_owners, other_owners)
+    return unless defined?(RbsRecordTypes) && defined?(CodeGen)
+
+    keys = (CodeGen.declared_params || {}).merge(CodeGen.declared_keywords || {}).transform_values { |guards| guards.first&.[](2) }
+    failures = traced_param_failures(RbsRecordTypes.trusted_params, compiled, keys, only_owners, other_owners)
+    return if failures.empty?
+
+    abort "\n[bc2cpp] TRACED_PARAM: #{failures.size} parameter declaration(s) a record trace trusted without their " \
+          "compiled check:\n  #{failures.join("\n  ")}"
+  end
+
+  # The body's first `_impl(` definition takes positional `position` as a C scalar, not an mrb_value.
+  def unboxed_param?(code, position)
+    params = code[/^(?:static inline )?mrb_value \w+_impl(?:_unguarded)?\(([^)]*)\) \{$/, 1]
+    type = params&.split(',')&.[](2 + position)&.strip&.sub(/\s*\w+\z/, '')
+    !type.nil? && type != 'mrb_value'
+  end
+
   def keyword_guard_marker(key, name)
     "/* DECLARED_KEYWORD_GUARD #{key} #{name}: */"
   end

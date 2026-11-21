@@ -5,6 +5,7 @@ require_relative 'bytecode_ir_ops'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_tree'
 require_relative 'core_hierarchy_sigs'
+require_relative 'outside_ruby_owners'
 
 # RECORD_FIELD_TRACE: the classes a value stored into a declared record field can have, for RbsRecordTypes'
 # conformance check. Beyond RbsRecordTypes.value_class_at (literals, `Klass.new`, the ClassLayout Array rule; the exact
@@ -38,6 +39,26 @@ module RbsRecordTypes
       @ireps = ctx[:ireps] || {}
       @assume = {}
       @setiv = nil
+      @trusted = []
+    end
+
+    # TRACED_PARAM: every declared parameter guard a trace leaned on, as [label, :arg, position] or
+    # [label, :keyword, name], in the order read; trusted_since(mark) is what the traces after `mark` read.
+    def trusted_mark = @trusted.size
+    def trusted_since(mark) = @trusted[mark..].to_set
+
+    # TRACED_PARAM: the classes an entry register holds when its method declares a guarded parameter there
+    # (CodeGen.declared_params, DECLARED_PARAM_GUARD; an optional one reaches here only when given), or nil. Sound only
+    # while the body runs compiled with the guard: DeclaredReturns.traced_param_failures aborts the run otherwise.
+    def entry_classes(irep, reg)
+      return nil unless defined?(CodeGen) && CodeGen.respond_to?(:declared_params)
+
+      guard = (CodeGen.declared_params&.[](irep.label) || []).find { |pos, *| pos + 1 == reg.to_i }
+      return nil unless guard
+
+      pos, cls, _key, _text, kind = guard
+      @trusted << [irep.label, :arg, pos]
+      declared_classes(cls, kind || :class, guard[5])
     end
 
     # Set of class names the instruction at +index+ leaves in +reg+, or nil. Recursion (a method whose result flows
@@ -64,9 +85,7 @@ module RbsRecordTypes
 
       out = Set.new
       defs.each do |d|
-        return nil if d.entry?
-
-        classes = def_classes(irep, d.index, d.reg, depth)
+        classes = d.entry? ? entry_classes(irep, d.reg) : def_classes(irep, d.index, d.reg, depth)
         return nil unless classes
 
         out.merge(classes)
@@ -110,10 +129,28 @@ module RbsRecordTypes
 
       case insn.op
       when :MOVE then reg_classes(irep, index, insn.regs[1], depth + 1)
+      when :KARG then keyword_classes(irep, insn)
       when :GETIV then insn.ivar && ivar_classes(insn.ivar, self_owner(irep), depth + 1)
       else
         send_classes(irep, index, insn, depth + 1) if BytecodeIR::Ops::SEND.include?(insn.op) && insn.sym
       end
+    end
+
+    # TRACED_PARAM: a KARG of a declared keyword guard (DECLARED_KEYWORD_PARAM) holds the declared classes.
+    def keyword_classes(irep, insn)
+      return nil unless defined?(CodeGen) && CodeGen.respond_to?(:declared_keywords)
+
+      guard = (CodeGen.declared_keywords&.[](irep.label) || []).find { |name, *| name == insn.sym.to_s }
+      return nil unless guard
+
+      name, cls, _key, _text, kind, nilable = guard
+      @trusted << [irep.label, :keyword, name]
+      declared_classes(cls, kind, nilable)
+    end
+
+    def declared_classes(cls, kind, nilable)
+      out = Set[cls]
+      nilable ? out | ['NilClass'] : out
     end
 
     # A literal, or a non-block send the ClassLayout Array rule proves without a hint (a core fresh-Array result).
@@ -144,16 +181,70 @@ module RbsRecordTypes
       unless BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op)
         recv = reg_classes(irep, index, insn.reg.to_i, depth)
         recv -= ['NilClass'] if recv && nil_raises?(name)
+        # No receiver value yet (a fixpoint round, or only a nil that raises): the call answers none either.
+        return EMPTY if recv&.empty?
+        # DUP_PRESERVES_CLASS: the native Kernel#dup answers an object of its receiver's class (nil and immediates
+        # themselves).
+        return recv if recv && !block && name == 'dup' && native_dup?(insn)
         if recv && !recv.empty?
           if block && defined?(BLOCK_RESULT_NAMES) && BLOCK_RESULT_NAMES.include?(name) && recv.size == 1 &&
-             block_result_array?(name, recv.first, @ctx[:registry])
+             (block_result_array?(name, recv.first, @ctx[:registry]) || core_block_result_array?(name, recv.first))
             return Set['Array']
           end
+          return Set['Array'] if !block && recv == ARRAY && fresh_array_call?(name, insn)
+
           scoped = receiver_returns(name, recv, depth)
           return scoped if scoped
         end
       end
       program_returns(name, depth)
+    end
+
+    ARRAY = Set['Array'].freeze
+
+    # block_result_array? with mruby's own Ruby bodies (MethodDef#core) admitted: CoreBlockIteratorSigs declares those
+    # bodies (core_facts_rbs_check), so only a program definition on the receiver or Enumerable withdraws the claim.
+    def core_block_result_array?(name, klass)
+      block_result_array?(name, klass, core_stripped(name))
+    end
+
+    # The registry without mruby's own Ruby definitions of +name+ (only +name+ is read by the callers).
+    def core_stripped(name)
+      registry = @ctx[:registry] || {}
+      { name => (registry[name] || []).reject(&:core) }
+    end
+
+    # CORE_ARRAY_CHAIN on an exact Array: a core fresh-Array method (core_array_return?, vetted overrides and mruby's own
+    # Ruby bodies included) answers an Array.
+    def fresh_array_call?(name, _insn)
+      cw = @ctx[:closed_world]
+      world = @ctx[:escape_world]
+      return false unless cw && world && cw.method_missing_classes.empty? && !cw.unknown_def?(name)
+
+      chain = world.ancestry('Array')
+      chain && outside_free_on?(name, chain) && defined?(core_array_return?) && core_array_return?(name, core_stripped(name))
+    end
+
+    # Ruby outside the closed world defines +name+ on no class of +chain+ (OutsideRubyOwners; a wild or computed definer
+    # refuses), or only in mruby's own sources (CoreDefs.core_source?), the bodies core_array_return? already vouches for.
+    def outside_free_on?(name, chain)
+      cw = @ctx[:closed_world]
+      return true unless cw.outside_ruby_name?(name)
+      return true if defined?(CoreDefs) && cw.outside_ruby_paths_defining(name).all? { |path| CoreDefs.core_source?(path) } &&
+                     !outside_scan.unknown.include?(name) && !outside_scan.unknown.include?(:all)
+      return false if outside_scan.unknown.include?(name) || outside_scan.unknown.include?(:all) || !outside_scan.wild.empty?
+
+      (outside_scan.names.fetch(name, Set.new) & chain.to_set).empty?
+    end
+
+    def outside_scan
+      @outside_scan ||= OutsideRubyOwners.scan(Array(@ctx[:closed_world].outside_ruby_paths))
+    end
+
+    def native_dup?(insn)
+      cw = @ctx[:closed_world]
+      cw && cw.method_missing_classes.empty? && !cw.unknown_def?('dup') && !cw.outside_ruby_name?('dup') &&
+        (insn.argc_operand.nil? || insn.argc.zero?) && (@ctx[:registry]['dup'] || []).all? { |md| md.owner == '<native>' }
     end
 
     # The union of what the definitions a call of +name+ reaches on receivers of exactly +classes+ return

@@ -1546,6 +1546,7 @@ BC2CPP_MAIN = lambda do
     abort "\n[bc2cpp] DECLARED_PARAM_GUARD: #{param_failures.size} seeded optional parameter declaration(s) without " \
           "their compiled check:\n  #{param_failures.join("\n  ")}"
   end
+  DeclaredReturns.check_traced_params!(compiled, only_owners, other_owners)
   keyword_guards = (CodeGen.declared_keywords || {}).each_key.to_h { |label| [label, gen.declared_keyword_guards(label)] }
   keyword_failures = DeclaredReturns.keyword_guard_failures(keyword_guards, compiled)
   unless keyword_failures.empty?
