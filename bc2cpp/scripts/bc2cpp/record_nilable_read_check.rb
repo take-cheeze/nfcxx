@@ -3,7 +3,8 @@
 
 # RECORD_NILABLE_READ: a record read `@slot[:key]` enters the exact-class flow as its stored classes plus nil, so the
 # flow's truthiness narrowing makes `@slot[:key] || []` and `return unless x` exact receivers. Generated end to end
-# by bc2cpp.rb (no mruby build needed); BC2CPP_RECORD_NILABLE_READS=0 is the output before it.
+# by bc2cpp.rb (no mruby build needed); BC2CPP_RECORD_NILABLE_READS=0 is the output before it. The nil arm of such a
+# read folds a NilClass native (NIL_NATIVE_FOLD).
 #
 #   MRBC=path/to/mrbc ruby scripts/bc2cpp/record_nilable_read_check.rb
 require 'tmpdir'
@@ -21,6 +22,19 @@ SOURCE = <<~RUBY
   class Item
     def initialize; @n = 1; end
     def value; @n; end
+  end
+  class NameRecord
+    def initialize
+      @name_record = {}
+      nil
+    end
+    def set
+      @name_record[:name] = 'x'
+      @name_record[:list] = []
+      nil
+    end
+    def label; @name_record[:name].to_s; end
+    def shown; @name_record[:list].inspect; end
   end
   class ObjectScene
     def initialize; @record_items = {}; @record_active = nil; end
@@ -107,7 +121,7 @@ RUBY
 bodies = lambda do |flag|
   ENV['BC2CPP_RECORD_NILABLE_READS'] = flag
   Dir.mktmpdir('record_nilable_read') do |dir|
-    code, = Bc2cppFixtureRuntime.generate(SOURCE, dir, only_owners: %w[Scene Leaky Item ObjectScene ObjectLeak ObjectUnknown])
+    code, = Bc2cppFixtureRuntime.generate(SOURCE, dir, only_owners: %w[Scene Leaky Item ObjectScene ObjectLeak ObjectUnknown NameRecord])
     code.split(%r{^(?=// \w+#)}).to_h { |part| [part[%r{\A// (\S+)}, 1], part] }
   end
 ensure
@@ -115,6 +129,14 @@ ensure
 end
 on = bodies.call('1')
 off = bodies.call('0')
+ENV['BC2CPP_NIL_NATIVE_FOLD'] = '0'
+unfolded = bodies.call('1')
+ENV.delete('BC2CPP_NIL_NATIVE_FOLD')
+# NIL_NATIVE_FOLD: the nil arm of a nil-or-String record read answers NilClass's own native, with no dispatch.
+check.call('the nil arm of `rec[:k].to_s` is the empty frozen String (NIL_NATIVE_FOLD)',
+           on['NameRecord#label'].include?('NIL_NATIVE_FOLD nil.to_s') && !on['NameRecord#label'].include?('owner-call: to_s'))
+check.call('the nil arm of `rec[:k].inspect` is "nil"', on['NameRecord#shown'].include?('mrb_str_new_lit_frozen(M, "nil")'))
+check.call('BC2CPP_NIL_NATIVE_FOLD=0 keeps the nil arm dispatching', !unfolded['NameRecord#label'].include?('NIL_NATIVE_FOLD'))
 exact_size = ->(body) { body.to_s.include?('CLOSED_WORLD_NATIVE_EXACT :size') }
 
 check.call('`@ui[:k] || []` is an exact Array for size', exact_size.call(on['Scene#total']))
@@ -160,7 +182,7 @@ unless ENV['CC_GENERATED_ONLY'] == '1'
   build = Bc2cppFixtureRuntime.full_or_build
   if build
     Dir.mktmpdir('record-object-runtime') do |dir|
-      owners = %w[Scene Leaky Item ObjectScene ObjectLeak ObjectUnknown]
+      owners = %w[Scene Leaky Item ObjectScene ObjectLeak ObjectUnknown NameRecord]
       _code, err = Bc2cppFixtureRuntime.generate(SOURCE, dir, only_owners: owners)
       driver = <<~'RUBY'
         show = lambda do |name, &block|
@@ -190,6 +212,12 @@ unless ENV['CC_GENERATED_ONLY'] == '1'
         show.call('escaped before mutation') { l.value }
         l.hand_out[:item] = 'wrong class'
         show.call('escaped after mutation') { l.value }
+        n = NameRecord.new
+        show.call('nil to_s') { [n.label, n.label.frozen?] }
+        show.call('nil inspect') { [n.shown, n.shown.frozen?] }
+        n.set
+        show.call('set to_s') { n.label }
+        show.call('set inspect') { n.shown }
         puts 'end'
       RUBY
       harness = <<~CPP
