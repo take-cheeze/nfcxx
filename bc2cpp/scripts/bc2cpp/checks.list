@@ -144,6 +144,7 @@ ruby scripts/bc2cpp/lambda_rest_check.rb
 ruby scripts/bc2cpp/keyword_yield_check.rb
 ruby scripts/bc2cpp/optional_region_yield_check.rb
 ruby scripts/bc2cpp/keyword_splat_dynamic_send_check.rb
+ruby scripts/bc2cpp/sync_yield_names_check.rb
 ruby scripts/bc2cpp/singleton_taint_check.rb
 ruby scripts/bc2cpp/scoped_constant_writes_check.rb
 ruby scripts/bc2cpp/block_self_method_boundary_check.rb

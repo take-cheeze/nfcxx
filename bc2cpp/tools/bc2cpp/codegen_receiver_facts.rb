@@ -1363,6 +1363,8 @@ class CodeGen
     reach = block_reach_classes(owner_def.owner)
     # Class#new hands its own block to #initialize, so a block-carrying `new` is a caller of #initialize too.
     return false if name == 'initialize' && (reach.nil? || block_new_may_reach?(reach))
+    # mruby calls method_missing with the block of whatever call missed (prepare_missing), a send of any name.
+    return false if name == 'method_missing'
 
     callers = block_carrying_callers_of(name)
     # A send whose receiver class is not proven cannot be excluded, and neither
