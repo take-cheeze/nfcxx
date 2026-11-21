@@ -78,6 +78,28 @@ def marked
 end
 
 puts '-- text'
+lexical = <<~'CPP'
+  static int lexical() {
+    const char* raw = R"TAG(
+  } // a raw-string line that would close the function
+  )TAG";
+    /* a multiline comment
+  }
+    */
+    const char* quoted = "} /*";
+    if (true) { }
+    return 2 / 1;
+  }
+CPP
+lexical_lines = lexical.lines.map(&:freeze)
+scan = ShardOutput.scan_lines(lexical_lines)
+suite.check('plain-line scanning retains braces inside carried raw strings and comments',
+            scan.map { |line| line[:depth] } == [0] + [1] * 10 &&
+            scan.each_index.select { |i| scan[i][:item_start] } == [0] &&
+            scan.each_index.select { |i| scan[i][:item_end] } == [10])
+suite.check('literal and division lines do not change the enclosing item boundaries',
+            ShardOutput.top_level_items(lexical_lines).map { |item| item.values_at(:name, :first, :last) } ==
+              [['lexical', 0, 10]])
 small, small_shards = ShardOutput.split(marked, 'chk', 3)
 suite.check('under the threshold the main file is the unmarked text',
             small == PRELUDE + UNIT_B + UNIT_A + HOOKS)

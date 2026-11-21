@@ -41,6 +41,24 @@ Splitting is enabled automatically for self builds through `BC2CPP_SHARD_SPLIT_O
 their owner grouping by default, including Optcarrot's default four-shard layout. Explicit hot owners remain
 pinned. See [owner sharding](bc2cpp-owner-shards.md) for linkage and state-sharing checks.
 
+## Shard rewriting
+
+The C++ scanner now counts braces directly on lines without comments or quoted literals, provided it is not
+inside a multiline comment or raw string. Other lines retain the full lexical scanner. This avoids allocating
+one-character Strings for most generated statements; the scanner's callers only read the retained line text.
+
+On the same frozen 46 MiB raw compiler C++ capture, complete 16-shard rewriting under CRuby 4 + YJIT changed
+as follows. These exit-handler times are separate from the logged generation phases below.
+
+| Layout | Before | Updated | Allocated objects before / updated |
+| --- | ---: | ---: | ---: |
+| Default owner grouping | 16.66 s | 6.32 s | 242.19 M / 53.83 M |
+| Oversized-owner splitting | 16.50 s | 6.60 s | 242.19 M / 53.83 M |
+
+Every output file was byte-identical in both layouts. All per-line scanner records also matched on the current
+self image's main C++ and 15 shards. The shard checks cover multiline raw strings/comments crossing ordinary
+lines, quoted braces, division, shared mutable/constant state, linked generated code and runtime parity.
+
 ## Current-source self generation
 
 The current 324-file compiler graph includes the new cache and lookup checks:
@@ -109,3 +127,31 @@ not an unprofiled throughput guarantee. All 20 generated C++, header and bytecod
 
 Existing IR block checks cover writes across classes, unrelated ivars, chained reads, nested Proc writes,
 cycles, unwritten ivars and unlisted dynamic writes.
+
+## Native namespace scopes
+
+A 96-method compiled-compiler profile attributed 13.0% of sampled CPU to `onig_byte_to_char`, largely beneath
+`UniqueClassNames.native_module_binding`. Each namespace query scanned function headers again from the start
+of its C/C++ source. The namespace and constant-binding analyses now share a per-analysis header index, use
+binary search for the enclosing function and retain its body boundary. Match positions and captures are saved
+as values, avoiding mruby-onig's reused scan region; UTF-8 character offsets keep their existing meaning.
+
+On 20 real namespace queries over the fixture's 79 native sources, alternating baseline/indexed runs measured
+0.376/0.353 versus 0.038/0.043 seconds on CRuby 4/YJIT, and 0.631/0.619 versus 0.127/0.126 seconds in the
+mruby interpreter. Every answer matched. The interpreter baseline copies retained MatchData to repair the
+same scan-region compatibility issue, so this compares two correct implementations; it is not a whole-compiler
+runtime speedup claim. Scope checks also cover UTF-8 prefixes, interleaved queries into different functions,
+out-of-function positions and both definition-only and lookup policies sharing one header index.
+
+## Rescue-aware writer walks
+
+Writer queries with arbitrary barrier predicates still inspect every instruction. Three hot callers whose
+predicates only reject RESCUE can now declare that opcode: the walk merges leading-register writer positions
+with RESCUE positions, including its second-register write, and skips unrelated instructions.
+
+On 396,194 queries captured from real self-compilation bytecode, alternating warm primitive measurements fell
+from about 0.559 to 0.241 seconds CPU, with identical answers. The differential fixture covers 29,952 combinations
+of barriers, MOVE chains and budgets, skipped opcodes, missing registers, exhausted callbacks and traversal order.
+All 20 generated artifacts also match byte-for-byte on the frozen self-compilation graph. The full replays ran
+under different external load and do not establish a whole-generation speedup. The walker remains a VM fallback
+in the current self image; this change improves its algorithm rather than changing its translation status.
