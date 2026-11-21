@@ -68,10 +68,14 @@ SOURCE = <<~RUBY
       c.size2
     end
 
+    def blk(xs, f: Foo.new)
+      xs.map { |x| f.size2 + x }.size
+    end
+
     def run
       f = Foo.new
       pick(f) + pick(f, b: f) + need(foo: f) + counted + counted(n: 5) + items + items(xs: [1, 2]) +
-        loose(f, k: f) + renamed(f, c: f)
+        loose(f, k: f) + renamed(f, c: f) + blk([1]) + blk([2], f: f)
     end
 
     def wrong
@@ -99,6 +103,7 @@ SIGNATURES = <<~RBS
     def items: (?xs: Array[Integer]) -> Integer
     def loose: (Foo a, ?k: untyped) -> Integer
     def renamed: (Foo a, ?b: Foo?) -> Integer
+    def blk: (Array[Integer] xs, ?f: Foo) -> Integer
   end
 RBS
 OWNERS = %w[Foo Menu].freeze
@@ -114,7 +119,8 @@ HARNESS = <<~'CPP'
   }
 CPP
 
-generate = lambda do |dir|
+generate = lambda do |dir, env = {}|
+  env.each { |k, v| ENV[k] = v }
   sigs = File.join(dir, 'sig')
   FileUtils.mkdir_p(sigs)
   File.write(File.join(sigs, 'menu.rbs'), SIGNATURES)
@@ -123,6 +129,7 @@ generate = lambda do |dir|
   [code, err, code.split(%r{^(?=// \w+#)}).to_h { |part| [part[%r{\A// (\S+)}, 1], part] }]
 ensure
   ENV.delete('BC2CPP_SIG_DIRS')
+  env.each_key { |k| ENV.delete(k) }
 end
 guard = ->(body, name, kw) { body.to_s.include?("/* DECLARED_KEYWORD_GUARD Menu##{name} #{kw}: */") }
 direct = ->(body) { body.to_s.include?('MONO_EXACT_FLOW :size2 -> Foo#size2') && !body.to_s.include?('CLOSED_WORLD nomethod: recv.size2') }
@@ -140,6 +147,13 @@ Dir.mktmpdir('declared-keyword-param') do |dir|
   check.call('an untyped keyword gives no guard', !by['Menu#loose'].to_s.include?('DECLARED_KEYWORD_GUARD'))
   check.call("a signature whose keywords are not the body's gives no guard",
              !by['Menu#renamed'].to_s.include?('DECLARED_KEYWORD_GUARD'))
+  # CAPTURED_LATER_WRITES: the KEY_P flag the keyword's register held before the block existed is no value the block
+  # can read, so `f` in the block is the declared Foo.
+  check.call('a block reads a declared keyword as its class (CAPTURED_LATER_WRITES)', direct.call(by['Menu#blk']))
+  Dir.mktmpdir('declared-keyword-param-off') do |off_dir|
+    _, _, off = generate.call(off_dir, 'BC2CPP_CAPTURED_LATER_WRITES' => '0')
+    check.call('BC2CPP_CAPTURED_LATER_WRITES=0 keeps the KEY_P flag in the block\'s class set', !direct.call(off['Menu#blk']))
+  end
   check.call('the guarded body is not inlined', !by['Menu#run'].to_s.include?('CALL_INLINE Menu#need'))
 
   guards = { 'x' => { 'b' => ['b', 'Foo', 'Menu#pick', 'b: Foo?', :class, true] } }
