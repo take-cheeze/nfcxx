@@ -3785,7 +3785,7 @@ use_problem = lambda do |name, use|
         if m[2]
           # !f(...) of a VALUE-returning call: mrb_test of the result (nil and false are false)
           close = match_close(mv, m.end(0) - 1)
-          if close >= 0 && !@edits[rel].overlaps(m.begin(1), close + 2)
+          if close >= 0 && !@edits[rel].overlaps(m.begin(1), m.begin(1) + 1) && !@edits[rel].overlaps(close + 1, close + 2)
             @edits[rel].add(m.begin(1), m.begin(1), 'mrb_test(')
             @edits[rel].add(close + 1, close + 1, ')')
             rewrite(rel, m.begin(0), nm, "!mrb_test(#{nm}(...))", TRUTH_TEST_CAVEAT)
