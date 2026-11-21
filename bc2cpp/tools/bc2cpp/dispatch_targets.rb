@@ -464,7 +464,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
   # JMPIF/JMPNOT stay visible for CONTAINER_PHI_MERGE below; the rest of
   # LEAD_READ_ONLY only reads its register (see BytecodeIR::Receivers::SKIP_OPS).
   skip_ops = BytecodeIR::Receivers::SKIP_OPS
-  found = BytecodeIR.for(irep).walk_writers(idx - 1, reg, skip_ops: skip_ops, barrier: TRACE_RESCUE_WRITE,
+  found = BytecodeIR.for(irep).walk_writers(idx - 1, reg, skip_ops: skip_ops, barrier: TRACE_RESCUE_WRITE, barrier_op: :RESCUE,
                                                           exhausted: IrepScans::REACH_ENTRY) do |insn, i, cur|
     if dominated && !BytecodeIR::Ops::LEAD_READ_ONLY.include?(insn.op)
       return nil unless dominated.call(i, use, cur)

@@ -53,10 +53,11 @@ class CodeGen
     end
     # DECLARED_IVAR_PROOF: a declared slot whose every store is checked holds exactly the declared kind (and nil unless a
     # constructor assigns it first, class_pool_ivar_entry_mask), whatever the stores' flows show: a fixed seed, never
-    # grown. A slot the pools already refused (a writer outside the SETIV sites) is not seeded.
+    # grown. A slot the pools already refused (a writer outside the SETIV sites) is not seeded, unless that writer is a
+    # guarded synthesized attr_writer (declared_ivar_writers_guarded?).
     @declared_ivar_pools = {}
     declared_ivar_seeds.each do |key, (_entry, bits)|
-      next unless @class_ivar_pools.key?(key)
+      next unless @class_ivar_pools.key?(key) || @numeric_ivar_groups[key]&.accessor_only
 
       @class_ivar_pools[key] = bits
       @declared_ivar_pools[key] = bits

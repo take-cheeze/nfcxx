@@ -489,46 +489,53 @@ module ShardOutput
         info[:code] = ''
         next info
       end
-      code = String.new
-      i = 0
-      in_str = nil
-      while i < line.size
-        c = line[i]
-        if in_comment
-          if line[i, 2] == '*/'
-            in_comment = false
+      # Most emitted lines contain neither comments nor literals. They need only
+      # brace accounting; avoid allocating a one-character String at every step.
+      if !in_comment && !raw_end && !line.match?(/[\/"']/)
+        code = line
+        depth += line.count('{') - line.count('}')
+      else
+        code = String.new
+        i = 0
+        in_str = nil
+        while i < line.size
+          c = line[i]
+          if in_comment
+            if line[i, 2] == '*/'
+              in_comment = false
+              i += 1
+            end
+            code << ' '
+          elsif raw_end
+            if line[i, raw_end.size] == raw_end
+              i += raw_end.size - 1
+              raw_end = nil
+            end
+            code << ' '
+          elsif in_str
+            i += 1 if c == '\\'
+            in_str = nil if c == in_str
+            code << ' '
+          elsif line[i, 2] == '//'
+            break
+          elsif line[i, 2] == '/*'
+            in_comment = true
             i += 1
+            code << ' '
+          elsif c == 'R' && line[i + 1] == '"' && (m = line[i..].match(/\AR"([^ ()\\\t\r\n]{0,16})\(/))
+            raw_end = ")#{m[1]}\""
+            i += m[0].size - 1
+            code << ' '
+          elsif c == '"' || (c == "'" && !line[i - 1].to_s.match?(/[0-9A-Fa-f]/))
+            in_str = c
+            code << ' '
+          else
+            depth += 1 if c == '{'
+            depth -= 1 if c == '}'
+            code << c
           end
-          code << ' '
-        elsif raw_end
-          if line[i, raw_end.size] == raw_end
-            i += raw_end.size - 1
-            raw_end = nil
-          end
-          code << ' '
-        elsif in_str
-          i += 1 if c == '\\'
-          in_str = nil if c == in_str
-          code << ' '
-        elsif line[i, 2] == '//'
-          break
-        elsif line[i, 2] == '/*'
-          in_comment = true
           i += 1
-          code << ' '
-        elsif c == 'R' && line[i + 1] == '"' && (m = line[i..].match(/\AR"([^ ()\\\t\r\n]{0,16})\(/))
-          raw_end = ")#{m[1]}\""
-          i += m[0].size - 1
-          code << ' '
-        elsif c == '"' || (c == "'" && !line[i - 1].to_s.match?(/[0-9A-Fa-f]/))
-          in_str = c
-          code << ' '
-        else
-          depth += 1 if c == '{'
-          depth -= 1 if c == '}'
-          code << c
         end
-        i += 1
       end
       info[:code] = code
       stripped = code.strip

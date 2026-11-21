@@ -27,6 +27,7 @@ TypeCheckVariants.arm_guard if type_check_variants
 require_relative 'compact_output'
 require_relative 'owner_call_arity'
 require_relative 'owner_set_share'
+require_relative 'foreign_core_units'
 require_relative 'shard_output'
 require_relative 'runtime_header'
 require_relative 'shared_generation'
@@ -241,6 +242,15 @@ def bc2cpp_method_report(compiled, tiers)
 end
 
 require_relative 'profile_timings'
+
+# The files a gem run's class units stand for (compile_top_class_units' `own_file`): the core run's are mruby's own Ruby,
+# an engine gem's its own mrblib. Nil for any other run (a probe or fixture world), where every file counts.
+def bc2cpp_own_unit_file(symbol, own_mrblib)
+  return ->(file) { CoreDefs.core_source?(file) } if symbol == 'core_compiled'
+  return nil unless BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol }
+
+  ->(file) { file.include?(own_mrblib) }
+end
 
 BC2CPP_MAIN = lambda do
   next unless $PROGRAM_NAME == __FILE__
@@ -2973,10 +2983,16 @@ BC2CPP_MAIN = lambda do
   # A class this gem's own mrblib reopens is the gem's too, even when it compiles no method of it (mruby-rpg2k's
   # `class Object; include RGSS; end`): the statements run only from this gem's units. The root holds every linked
   # engine mrblib, so only this gem's own directory counts.
-  all_class_units = gen.compile_top_class_units(ireps.fetch(root_label))
   own_mrblib = "/mruby-#{symbol.to_s.delete_suffix('_compiled')}/mrblib/"
+  all_class_units = gen.compile_top_class_units(ireps.fetch(root_label), own_file: bc2cpp_own_unit_file(symbol, own_mrblib))
   own_reopened = all_class_units.select { |unit| unit[:file].to_s.include?(own_mrblib) }.map { |unit| unit[:path] }
   class_units = gen.owned_class_units(all_class_units, only_owners && (only_owners + own_reopened))
+  # FOREIGN_CORE_UNITS: the excluded core file's classes (10error.rb) run first, as mrb_init_mrblib would load them.
+  if symbol == 'core_compiled'
+    class_units = ForeignCoreUnits.units(ForeignCoreUnits.files(BC2CPP_WORLD_ROOT), lambda { |owner, name|
+      registry.fetch(name, []).any? { |d| d.owner == owner && d.irep }
+    }) + class_units
+  end
   File.write(File.join(out_dir, "#{symbol}_units.txt"), class_units.map { |u| "#{u[:path]}\n" }.uniq.join)
   # BC2CPP_DUMP_UNITS: the units this gem emits (the dump of every attempt, in CodeGen#dump_class_unit, also has the
   # units of other gems' owners that owned_class_units drops).
