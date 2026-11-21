@@ -845,6 +845,7 @@ module TypeFacts
       eann = ctx.element_annotations[d.irep]
       if eann&.ret_class
         set = complete_set([[inferred_return(ctx, gen, d, ctx.ireps[d.irep], (ctx.registry[d.name] || []).size == 1), nil]])
+        set = set&.map { |n| lcf_kind_class(n) }&.uniq
         add.call(d, 'return', eann.ret_class, set.join(' | '), nil) if set && !set.empty? && !set.include?(eann.ret_class) &&
                                                                          !inherits_any?(ctx, set, eann.ret_class)
       end
@@ -869,6 +870,17 @@ module TypeFacts
   end
 
   # Class names of an inferred list when it is a closed set of registry classes or Integer/Symbol, else nil.
+  # An LCF_ROW_FLOW kind is an exact instance of its class: ROW:path is an LCF::Array1D, TABLE:path an LCF::Array2D,
+  # FILE:K a K (LcfRowFlow::Model#name).
+  def lcf_kind_class(name)
+    case name
+    when /\AROW:/ then 'LCF::Array1D'
+    when /\ATABLE:/ then 'LCF::Array2D'
+    when /\AFILE:(.+)\z/ then Regexp.last_match(1)
+    else name
+    end
+  end
+
   def complete_set(inferred)
     names = inferred.flat_map { |t, _| t.to_s.split('|').map { |x| x.strip.delete_suffix('?') } }.reject { |x| x.empty? || x == 'nil' }
     names.empty? ? nil : names.uniq

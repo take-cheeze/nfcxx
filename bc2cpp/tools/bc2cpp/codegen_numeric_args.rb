@@ -23,7 +23,21 @@ class CodeGen
     return NumericFlow::INT if fixnum_proof_entry_arg?(irep, reg, owner)
 
     pooled = @entry_arg_numeric && @entry_arg_numeric[[irep.label, reg.to_i]]
-    pooled.nil? ? NumericFlow::OTHER : pooled
+    pooled.nil? ? (lcf_entry_class_pool(irep, reg) || NumericFlow::OTHER) : pooled
+  end
+
+  # EXACT_LCF_ENTRY: a parameter with no numeric pool (a call site the numeric flow cannot name) still holds what its
+  # exact-class pool proves when that is LCF kinds only (rows, tables, files; nil): the class pools are final before
+  # the first numeric pass (compute_numeric_facts), and a CHECKED pool is only checked at run time, so it is not used.
+  # BC2CPP_EXACT_LCF_ENTRY=0 leaves such a parameter OTHER.
+  def lcf_entry_class_pool(irep, reg)
+    return nil unless @lcf_rows && ENV['BC2CPP_EXACT_LCF_ENTRY'] != '0'
+
+    mask = class_pool_entry_mask(irep, reg)
+    return nil if mask.nil? || mask.zero? || mask.anybits?(NumericFlow::CHECKED)
+
+    kinds = exact_lcf_file_kinds(mask)
+    kinds if @lcf_rows.lcf_bits(kinds).nonzero? && (kinds & ~(@lcf_rows.mask | NumericFlow::NIL)).zero?
   end
 
   # Sends whose method name is computed at run time can reach a candidate the
