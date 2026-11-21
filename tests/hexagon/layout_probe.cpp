@@ -1,7 +1,9 @@
 // Layout oracle for the Hexagon target: EDG's sizes/alignments/offsets become constants in the
 // generated C, and tests/hexagon/layout.sh turns each into a _Static_assert checked by clang.
-// long double is left out on purpose: EDG's linux_riscv32 has 16-byte long double, Hexagon has 8
-// (see docs/notes/hexagon.md).
+// long double: only correct for the linux_hexagon target (8 bytes, like clang's
+// Hexagon ABI). The riscv32 stand-in has 16-byte long double, so layout.sh only
+// asserts these facts when EDG_TARGET=linux_hexagon (see docs/notes/hexagon.md).
+struct LD { char c; long double x; };
 typedef __SIZE_TYPE__ size_t;
 struct A { char c; long long x; };
 struct B { char c; double d; };
@@ -22,4 +24,7 @@ OBS(sz_H, sizeof(H)) OBS(off_H_n, __builtin_offsetof(H, n))
 OBS(sz_J, sizeof(J)) OBS(off_J_i, __builtin_offsetof(J, i))
 OBS(sz_ptr, sizeof(void *)) OBS(sz_long, sizeof(long)) OBS(sz_ll, sizeof(long long))
 OBS(sz_wchar, sizeof(__WCHAR_TYPE__)) OBS(sz_size_t, sizeof(size_t)) OBS(al_ll, alignof(long long)) OBS(al_dbl, alignof(double))
+OBS(sz_ld, sizeof(long double)) OBS(al_ld, alignof(long double))
+OBS(sz_LD, sizeof(struct LD)) OBS(off_LD_x, __builtin_offsetof(struct LD, x))
 A nfcxx_objA; B nfcxx_objB; C nfcxx_objC; E nfcxx_objE; F nfcxx_objF; G nfcxx_objG; H nfcxx_objH; J nfcxx_objJ;
+struct LD nfcxx_objLD;
