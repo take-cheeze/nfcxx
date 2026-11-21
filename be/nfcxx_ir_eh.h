@@ -385,85 +385,148 @@ static int ir_eh_cleanup(int i)
   return 1;
 }
 
-/* the code of pad n (its catch clauses go into types, in order); 0 when some cleanup cannot be written */
-static int ir_eh_pad_code(int n, int *types, int *ntypes, int *cleanup)
+/* The pads share their code, as gcc's do: each pad is a stub that keeps the exception and the selector, then jumps into
+   a chain of nodes, each written once. A region node runs its region's cleanup and goes on to the next region's node; a
+   frame node (a try's catch clauses, an internal try's action) goes on to the node of the region the frame began in;
+   the end node resumes the unwind (or calls std::terminate, or std::unexpected first). Code then grows with the regions,
+   not with regions times their depth. */
+typedef struct ir_eh_node {
+  unsigned long r;                /* a region node: (r, f); a frame node: (f->entry_region, f); the end: (null, NULL) */
+  ir_eh_frame *f;
+} ir_eh_node;
+
+static ir_eh_node *ir_eh_nodes;
+static int ir_eh_nnode, ir_eh_capnode;
+
+static char *ir_eh_node_label(unsigned long r, ir_eh_frame *f)
+{
+  if (f == NULL && r == null_eh_region_number) return "eh.x";
+  if (f != NULL && r == f->entry_region) return ir_fmt("eh.f.%d", f->id);
+  return ir_fmt("eh.c.%lu.%d", r, f != NULL ? f->id : 0);
+}
+
+/* the node (r, f), added to the list of nodes to write when it is new */
+static void ir_eh_node_want(unsigned long r, ir_eh_frame *f)
+{
+  int i;
+  for (i = 0; i < ir_eh_nnode; i++)
+    if (ir_eh_nodes[i].r == r && ir_eh_nodes[i].f == f) return;
+  if (ir_eh_nnode == ir_eh_capnode) {
+    ir_eh_capnode = ir_eh_capnode ? 2 * ir_eh_capnode : 32;
+    ir_eh_nodes = (ir_eh_node *)realloc(ir_eh_nodes, ir_eh_capnode * sizeof ir_eh_nodes[0]);
+    if (ir_eh_nodes == NULL) abort();
+  }
+  ir_eh_nodes[ir_eh_nnode].r = r;
+  ir_eh_nodes[ir_eh_nnode].f = f;
+  ir_eh_nnode++;
+}
+
+/* Pad n's action chain (its catch clauses' type ids, in order) and whether it cleans up; the nodes it reaches are
+   wanted. 0 when the chain is malformed. */
+static int ir_eh_pad_walk(int n, int *types, int *ntypes, int *cleanup)
 {
   unsigned long r = ir_eh_pads[n].region;
   ir_eh_frame *f = ir_eh_pads[n].frame;
   int guard = 0, k;
   *ntypes = 0;
-  *cleanup = 0;
+  *cleanup = ir_eh_noexcept;
   for (;;) {
     unsigned long bound = f != NULL ? f->entry_region : null_eh_region_number;
     while (r != bound && r != null_eh_region_number) {
-      if (guard++ > 100000 || r >= (unsigned long)ir_eh_nrt || !ir_eh_cleanup((int)r)) return 0;
+      if (guard++ > 100000 || r >= (unsigned long)ir_eh_nrt) return 0;
+      ir_eh_node_want(r, f);
       *cleanup = 1;
       r = ir_eh_rt[r].next;
     }
     if (f == NULL) break;
-    if (f->action != NULL) {
-      (void)ir_rval(f->action);
-      *cleanup = 1;
-    }
-    for (k = 0; k < f->nh; k++) {
-      char *sel = ir_let("long", ir_fmt("(load long %s)", ir_eh_sel_slot()));
-      char *c = ir_let("bool", ir_fmt("(eq long %s (const long %d))", sel, f->tid[k]));
-      ir_line(ir_depth, ir_fmt("(if %s", c));
-      ir_line(ir_depth + 1, ir_fmt("(then (goto \"%s\")))", f->label[k]));
+    ir_eh_node_want(f->entry_region, f);
+    if (f->action != NULL) *cleanup = 1;
+    for (k = 0; k < f->nh; k++)
       if (*ntypes < IR_EH_MAXH) types[(*ntypes)++] = f->tid[k];
-    }
     r = f->entry_region;
     f = f->parent;
   }
-  if (ir_eh_nspec > 0) {
-    /* the specification's filter: a negative selector, when the exception is not one the specification allows */
-    char *sel = ir_let("long", ir_fmt("(load long %s)", ir_eh_sel_slot()));
-    ir_line(ir_depth, ir_fmt("(if %s", ir_let("bool", ir_fmt("(lt.s long %s (const long 0))", sel))));
-    ir_line(ir_depth + 1, "(then");
-    ir_depth += 2;
-    ir_emit(ir_fmt("(eval (call void &\"__cxa_call_unexpected\" %s))",
-                   ir_let("(ptr void)", ir_fmt("(load (ptr void) %s)", ir_eh_exc_slot()))));
-    ir_emit("(unreachable)");
-    ir_close(2);
-    ir_depth -= 2;
+  ir_eh_node_want(null_eh_region_number, NULL);
+  return 1;
+}
+
+/* the code of a node (at ir_depth); 0 when a cleanup cannot be written */
+static int ir_eh_node_code(ir_eh_node *nd)
+{
+  ir_eh_frame *f = nd->f;
+  int k;
+  ir_line(ir_depth, ir_fmt("(label \"%s\")", ir_eh_node_label(nd->r, f)));
+  if (f == NULL && nd->r == null_eh_region_number) {
+    if (ir_eh_nspec > 0) {
+      /* the specification's filter: a negative selector, when the exception is not one the specification allows */
+      char *sel = ir_let("long", ir_fmt("(load long %s)", ir_eh_sel_slot()));
+      ir_line(ir_depth, ir_fmt("(if %s", ir_let("bool", ir_fmt("(lt.s long %s (const long 0))", sel))));
+      ir_line(ir_depth + 1, "(then");
+      ir_depth += 2;
+      ir_emit(ir_fmt("(eval (call void &\"__cxa_call_unexpected\" %s))",
+                     ir_let("(ptr void)", ir_fmt("(load (ptr void) %s)", ir_eh_exc_slot()))));
+      ir_emit("(unreachable)");
+      ir_close(2);
+      ir_depth -= 2;
+    }
+    if (ir_eh_noexcept) {
+      ir_emit("(eval (call void &\"_ZSt9terminatev\"))");
+      ir_emit("(unreachable)");
+    } else {
+      ir_emit(ir_fmt("(eh-resume %s)", ir_let("(ptr void)", ir_fmt("(load (ptr void) %s)", ir_eh_exc_slot()))));
+    }
+    return 1;
   }
-  if (ir_eh_noexcept) {
-    ir_emit("(eval (call void &\"_ZSt9terminatev\"))");
-    ir_emit("(unreachable)");
-    *cleanup = 1;
-  } else {
-    ir_emit(ir_fmt("(eh-resume %s)", ir_let("(ptr void)", ir_fmt("(load (ptr void) %s)", ir_eh_exc_slot()))));
+  if (f != NULL && nd->r == f->entry_region) {
+    if (f->action != NULL) (void)ir_rval(f->action);
+    for (k = 0; k < f->nh; k++) {
+      char *sel = ir_let("long", ir_fmt("(load long %s)", ir_eh_sel_slot()));
+      /* (eh-tid N): the type id as a constant (scripts/pathb-ssa.rb), which the inliner renumbers in a caller's table */
+      char *c = ir_let("bool", ir_fmt("(eq long %s (eh-tid %d))", sel, f->tid[k]));
+      ir_line(ir_depth, ir_fmt("(if %s", c));
+      ir_line(ir_depth + 1, ir_fmt("(then (goto \"%s\")))", f->label[k]));
+    }
+    ir_line(ir_depth, ir_fmt("(goto \"%s\")", ir_eh_node_label(f->entry_region, f->parent)));
+    return 1;
+  }
+  if (!ir_eh_cleanup((int)nd->r)) return 0;
+  {
+    unsigned long next = ir_eh_rt[nd->r].next;
+    unsigned long bound = f != NULL ? f->entry_region : null_eh_region_number;
+    if (next == null_eh_region_number) next = bound; /* the chain ends: the frame's node, or the end */
+    ir_line(ir_depth, ir_fmt("(goto \"%s\")", ir_eh_node_label(next, f)));
   }
   return 1;
 }
 
-/* the pads, after the body (at depth 1, in the body's buffer) */
+/* the pads, after the body (at depth 1, in the body's buffer): each pad's stub, and the nodes after the last stub */
 static void ir_eh_end_body(void)
 {
-  int n, i, types[IR_EH_MAXH], nt, cl;
-  if (!ir_eh_on) return;
-  for (n = 0; n < ir_eh_npad; n++) {
-    ir_buf code;
-    int ok;
-    ir_buf_open(&code);
-    ir_buf_begin(&code);
-    ir_depth = 2;
-    ir_emit(ir_fmt("(store (ptr void) %s %s)", ir_eh_exc_slot(), ir_let("(ptr void)", "(call (ptr void) &\"__nfcxx_eh_ptr\")")));
-    ir_emit(ir_fmt("(store long %s %s)", ir_eh_sel_slot(), ir_let("long", "(call long &\"__nfcxx_eh_sel\")")));
-    ok = ir_eh_pad_code(n, types, &nt, &cl);
-    ir_buf_end(&code);
-    if (!ok) {
-      ir_buf_close(&code);
-      ir_line(1, ir_fmt("(unsupported exception cleanup: %s)", ir_eh_why != NULL ? ir_eh_why : "?"));
-      continue;
-    }
+  int n, i, types[IR_EH_MAXH], nt, cl, ok = 1;
+  ir_buf code;
+  if (!ir_eh_on || ir_eh_npad == 0) return;
+  ir_eh_nnode = 0;
+  ir_buf_open(&code);
+  ir_buf_begin(&code);
+  for (n = 0; n < ir_eh_npad && ok; n++) {
+    ok = ir_eh_pad_walk(n, types, &nt, &cl);
+    if (!ok) break;
     ir_line(1, ir_fmt("(eh-pad %d %d (", n + 1, cl));
     for (i = 0; i < nt; i++) fprintf(nf_out, "%s%d", i ? " " : "", types[i]);
     fputs(")", nf_out);
-    ir_buf_write(&code, nf_out);
-    fputs(")", nf_out);
-    ir_buf_close(&code);
+    ir_depth = 2;
+    ir_emit(ir_fmt("(store (ptr void) %s %s)", ir_eh_exc_slot(), ir_let("(ptr void)", "(call (ptr void) &\"__nfcxx_eh_ptr\")")));
+    ir_emit(ir_fmt("(store long %s %s)", ir_eh_sel_slot(), ir_let("long", "(call long &\"__nfcxx_eh_sel\")")));
+    ir_line(2, ir_fmt("(goto \"%s\")", ir_eh_node_label(ir_eh_pads[n].region, ir_eh_pads[n].frame)));
+    if (n + 1 < ir_eh_npad) fputs(")", nf_out);
   }
+  /* the nodes (a list that grows only in the walks above), in the last pad's form */
+  for (i = 0; i < ir_eh_nnode && ok; i++) ok = ir_eh_node_code(&ir_eh_nodes[i]);
+  if (ok) fputs(")", nf_out);
+  ir_buf_end(&code);
+  if (ok) ir_buf_write(&code, nf_out);
+  else ir_line(1, ir_fmt("(unsupported exception cleanup: %s)", ir_eh_why != NULL ? ir_eh_why : "?"));
+  ir_buf_close(&code);
   ir_depth = 1;
 }
 

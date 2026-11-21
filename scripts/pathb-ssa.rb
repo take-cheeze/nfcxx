@@ -230,18 +230,43 @@ class Cfg
     end
     cur = lower_list(body, entry)
     set_term(cur, void ? ["ret"] : ["unreachable"]) if @blocks[cur].term.nil?
-    # (eh-pad N CLEANUP (TID...) STMT...): pad N's code. Its first block is the landing pad (no jump reaches it); its code
-    # runs in the :term state; it ends in a handler's label, std::terminate or (eh-resume EXC).
+    # (eh-pad N CLEANUP (TID...) [(eh-outer K)] STMT...): pad N's code. Its first block is the landing pad (no jump reaches
+    # it); its code runs in the :term state; it ends in a handler's label, std::terminate, (eh-resume EXC) or, for a pad of
+    # an inlined callee (eh-outer K: the copy K, scripts/pathb-ir-opt.rb), (eh-resume-outer K EXC).
+    @pad_forms = pads.to_h { |p| [p[1], p] }
+    @in_pads = true
     pads.each do |p|
       b = new_block
       @blocks[b].eh = :term
       @blocks[b].reached = true
-      @blocks[b].instrs << ["eh-pad", p[2], *p[3]]
+      @blocks[b].instrs << ["eh-pad"]   # its action chain: below, once every copy's entry state is known
       @eh_text = :term
       @pad_block ||= {}
       @pad_block[p[1]] = b
-      c = lower_list(p[4..], b)
+      c = lower_list(p[(head(p[4]) == "eh-outer" ? 5 : 4)..], b)
       set_term(c, ["unreachable"]) if @blocks[c].term.nil?
+    end
+    @in_pads = false
+    # An inlined callee's resume, and the pads' action chains: a copy inlined into a pad's code is entered after the pads
+    # lowered before that pad.
+    (@deferred || []).each do |cur, k, exc|
+      o = outer_of(k)
+      if o == :term
+        @blocks[cur].instrs << ["eval", ["call", "void", Ref.new("&", '"_ZSt9terminatev"')]]
+        set_term(cur, ["unreachable"])
+      elsif o.is_a?(Integer) && o > 0
+        set_term(cur, ["br", label_block(pad_chain_label(o.to_s))])
+      else
+        nb = new_block
+        @blocks[nb].eh = 0
+        set_term(cur, ["br", nb])
+        @blocks[nb].instrs << ["eval", ["call", "void", Ref.new("&", '"_Unwind_Resume"'), exc]]
+        set_term(nb, ["unreachable"])
+      end
+    end
+    (@pad_block || {}).each do |id, b|
+      cl, types = pad_actions(id, {})
+      @blocks[b].instrs[0] = ["eh-pad", cl, *types]
     end
     @blocks[0].term = ["eh-entry", 1, *@pad_block.values] unless pads.empty?
     @blocks.each { |b| b.term ||= ["unreachable"] }
@@ -292,6 +317,45 @@ class Cfg
 
   def label_block(name) = (@labels[name] ||= new_block)
 
+  # The state an inlined copy K was entered in (eh-inline-begin K): its callee's state 0 and its pads' resume go there.
+  def outer_of(k) = (@inline_outer || {})[k] || 0
+
+  # Pad id's cleanup flag and action chain: its own, and for an inlined callee's pad what the pad of the state the copy
+  # was entered in adds after it (the exception goes on there).
+  def pad_actions(id, seen)
+    p = @pad_forms.fetch(id) { raise Fail, "no landing pad #{id}" }
+    cl = p[2]
+    types = p[3].dup
+    if head(p[4]) == "eh-outer" && !seen[id]
+      seen[id] = true
+      o = outer_of(p[4][1])
+      if o == :term
+        cl = "1"
+      elsif o.is_a?(Integer) && o > 0
+        ocl, otypes = pad_actions(o.to_s, seen)
+        types += otypes
+        cl = "1" if ocl == "1"
+      end
+    end
+    [cl, types]
+  end
+
+  # (eh-tid N) in a pad's code: the type id N as a long constant
+  def eh_tids(x)
+    return x unless x.is_a?(Array)
+    return ["const", "long", x[1]] if head(x) == "eh-tid"
+
+    x.map { |y| eh_tids(y) }
+  end
+
+  # The first jump of pad id's code: the node of its chain, past the stub that keeps the exception and the selector.
+  def pad_chain_label(id)
+    g = @pad_forms.fetch(id) { raise Fail, "no landing pad #{id}" }.find { |x| head(x) == "goto" }
+    raise Fail, "landing pad #{id} has no chain" unless g
+
+    g[1].raw
+  end
+
   # Every case returns the block where control continues; that block is always open. After a jump the
   # continuation is a fresh block with no predecessor, which the converter drops.
   def lower_stmt(s, cur)
@@ -300,7 +364,15 @@ class Cfg
     case head(s)
     when "block" then lower_list(s[1..], cur)
     when "eh-state" then eh_state(s[1].to_i, cur)
-    when "eh-resume"
+    # an inlined callee with exception tables (scripts/pathb-ir-opt.rb): its copy K begins in the caller's state, which its
+    # state 0 means, and which holds again after it
+    when "eh-inline-begin"
+      (@inline_outer ||= {})[s[1]] = @blocks[cur].eh
+      cur
+    when "eh-state-outer", "eh-inline-end" then eh_state(outer_of(s[1]), cur)
+    when "eh-resume-outer"
+      (@deferred ||= []) << [cur, s[1], s[2]]   # resolved after the pads (build)
+      new_block    when "eh-resume"
       # _Unwind_Resume in a block of the default state: its call site passes the exception on, out of this function.
       nb = new_block
       @blocks[nb].eh = 0
@@ -357,6 +429,7 @@ class Cfg
       @loc_now = s
       cur
     else
+      s = eh_tids(s) if @in_pads
       blk = @blocks[cur]
       if @loc_now && (blk.loc.nil? || blk.loc.object_id != @loc_now.object_id)
         blk.instrs << @loc_now
