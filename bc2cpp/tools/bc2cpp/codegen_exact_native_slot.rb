@@ -31,7 +31,11 @@ module ExactNativeSlot
     return line if line
 
     site = @exact_native_slot_site
-    site && CORE_CLASS_OF.value?(site[2]) ? exact_native_slot_line(d, recv, name, argv) : nil
+    return nil unless site && CORE_CLASS_OF.value?(site[2])
+    # An audited native of the class still gets its guarded inline arm (NATIVE_CORE_DIRECT); the slot is its else.
+    return nil if native_core_entries(name, argv.size).any? { |entry| entry.owner == site[2] }
+
+    exact_native_slot_line(d, recv, name, argv)
   end
 
   # Every owner call over a name owner set is built here: a bare send's, a chain's else, a lifted nomethod's.

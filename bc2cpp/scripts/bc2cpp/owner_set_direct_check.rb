@@ -101,6 +101,8 @@ OWNERS = %w[Bag Probe].freeze
 OWNER_PREDICATES = { 'Float' => 'mrb_float_p', 'Integer' => 'mrb_integer_p', 'String' => 'mrb_string_p',
                      'Hash' => 'mrb_hash_p' }.freeze
 
+# The else of a guarded native arm: the owner call, or EXACT_NATIVE_SLOT's slot call on a proven receiver.
+FALLBACK = /bc2cpp_owner_call\(|bc2cpp_native_slot\(/
 body = ->(code, name) { code[/^mrb_value Probe_#{name}_impl\(mrb_state\* M[^\n]*\{\n.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m].to_s }
 
 Dir.mktmpdir('owner-set-direct') do |dir|
@@ -116,7 +118,7 @@ Dir.mktmpdir('owner-set-direct') do |dir|
                text.include?('NATIVE_CORE_EXACT') && !text.include?('mrb_integer_p(') && !text.include?('bc2cpp_owner_call('))
   end
   check.call('an unknown getbyte index retains its type guard and fallback',
-             body.call(code, 'gb_unknown').include?('mrb_integer_p(') && body.call(code, 'gb_unknown').include?('bc2cpp_owner_call('))
+             body.call(code, 'gb_unknown').include?('mrb_integer_p(') && body.call(code, 'gb_unknown').match?(FALLBACK))
   check.call('byteslice with one proven argument tests only its unknown argument',
              body.call(code, 'slice_partial').scan('mrb_integer_p(').size == 1)
   %w[isa kind].each do |name|
@@ -173,7 +175,7 @@ Dir.mktmpdir('owner-set-direct') do |dir|
              body.call(off, 'nl').include?('bc2cpp_owner_call(M, '))
 
   check.call('core Integer argument switch restores the type guard and fallback',
-             body.call(int_off, 'gb').include?('mrb_integer_p(') && body.call(int_off, 'gb').include?('bc2cpp_owner_call('))
+             body.call(int_off, 'gb').include?('mrb_integer_p(') && body.call(int_off, 'gb').match?(FALLBACK))
   check.call('class-argument switch restores the type guard and fallback',
              body.call(class_off, 'isa').include?('mrb_class_p(') && body.call(class_off, 'isa').include?('bc2cpp_owner_call('))
   rebound, = runtime.generate(SOURCE + "Bag = 7", File.join(dir, 'rebound-class'), only_owners: OWNERS)
