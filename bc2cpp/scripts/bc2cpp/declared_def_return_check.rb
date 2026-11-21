@@ -28,6 +28,7 @@ require 'tmpdir'
 require 'fileutils'
 require_relative 'check_support'
 require_relative 'fixture_runtime'
+require_relative '../../tools/bc2cpp/native_core_result_sigs'
 
 suite = FixtureCheck.new('declared_def_return_check')
 check = suite.method(:check)
@@ -361,8 +362,13 @@ Dir.mktmpdir('declared-def-return-core') do |dir|
   CORE_SWITCHES.each_key do |key|
     check.call("#{key}: the Array result answers `empty?` with the Array body", exact_empty.call(on[key]))
   end
-  check.call('Pile#count_text: an exact Array#size is an Integer (core_results)',
-             on['Pile#count_text'].to_s.include?('NUMERIC_NATIVE_EXACT :to_s -> Integer'))
+  # The world's core.rbs names the result kind; a world without the declaration keeps Array#size untyped.
+  if NativeCoreResultSigs.kinds.dig('Array', 'size')
+    check.call('Pile#count_text: an exact Array#size is an Integer (core_results)',
+               on['Pile#count_text'].to_s.include?('NUMERIC_NATIVE_EXACT :to_s -> Integer'))
+  else
+    puts '  SKIP Array#size result: the world declares no core_results kind for it'
+  end
   CORE_SWITCHES.each do |key, switch|
     Dir.mktmpdir('declared-def-return-core-off') do |off_dir|
       _, _, off = core_generate.call(off_dir, switch => '0')
