@@ -15,9 +15,11 @@ require_relative 'bytecode_ir_containers'
 # (escape_immediate_ivars.rb).
 #
 # `kind` is `lambda`, `block:<callee name>`, `array`, `hash`, `string` or `object`. `today` says what the
-# compiler does with the site without the analysis: `rproc` (a BLOCK_FALLBACK RProc is built),
-# `confined` (CONFINED_LAMBDA_CALL proof held), `lambda` (LAMBDA_FALLBACK without a proof), `-` (not
-# an RProc site, or no code is emitted for it).
+# compiler does with the site: `rproc` (a BLOCK_FALLBACK heap RProc is built each time), `lazy` (a frame-local
+# block, with a heap copy built only on a branch that still needs one: Bc2cppBlock::proc), `stack` (frame-local
+# only), `confined` (CONFINED_LAMBDA_CALL proof held), `lambda` (LAMBDA_FALLBACK without a proof), `-` (not
+# an RProc site, or no code is emitted for it). A block glue is judged by its last emission, which may be a probe of a
+# method whose final code inlines the loop instead.
 module EscapeReport
   TODAY = {}
   LAMBDA_REGIONS = {}
@@ -32,8 +34,16 @@ module EscapeReport
   end
 
   def emit_block_fallback_glue(region, fn_name, **options)
-    TODAY[[region[:parent_irep].label, region[:block_addr]]] = 'rproc' if region[:parent_irep]
-    super
+    out = super
+    TODAY[[region[:parent_irep].label, region[:block_addr]]] = EscapeReport.block_today(out) if region[:parent_irep]
+    out
+  end
+
+  def self.block_today(code)
+    return 'rproc' if code.include?('bc2cpp_heap_proc(')
+    return 'lazy' if code.include?('.proc()')
+
+    code.include?('Bc2cppBlock ') ? 'stack' : 'rproc'
   end
 
   def recognize_lambda_fallback_regions(irep, **options)
