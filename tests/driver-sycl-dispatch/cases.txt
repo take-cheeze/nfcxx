@@ -1,0 +1,27 @@
+# One driver argument list per line (run as ./nfcxx ARGS in a sandbox holding the fake SYCL header tree of run.sh).
+# The first lines are the SYCL two-pass build (the check applies); the rest are the bash's "not the two passes" cases.
+case-c-plain -c -Iinc sy.cc
+case-c-o -c -Iinc sy.cc -o out/sy.o
+case-c-o-bare -c -Iinc sy.cc -o sy.o
+case-c-sep-I -c -I inc sy.cc
+case-c-two-I -c -Iother -Iinc sy.cc
+case-cxx -c -Iinc sy.cxx
+case-cpp2 -c -Iinc sy.cpp2
+case-sanitize-ub -c -Iinc sy.cc -fsanitize=undefined
+case-sanitize-bogus -c -Iinc sy.cc -fsanitize=bogus
+case-md -c -Iinc sy.cc -MD -MF d.d -MT t
+case-x -c -x c++ -Iinc sy.cc
+case-defs -c -Iinc sy.cc -DX=1 -UY -include pre.h
+case-link-flags -c -Iinc sy.cc -Wl,-rpath,/x -lm
+case-syntax-only -fsyntax-only -Iinc sy.cc
+case-plain-cc -c -Iinc plain.cc
+case-plain-after -c plain.cc -Iinc
+case-mixed -c -Iinc sy.cc plain.cc
+case-c-source -c -Iinc sy.c
+case-E -c -Iinc -E sy.cc
+case-emit-c -c -Iinc --emit-c sy.cc
+case-no-I -c sy.cc
+case-stdin -c -Iinc -
+case-emit-hip --emit-hip sy.cu
+case-no-input -Iinc
+case-sanitize-address -c -Iinc sy.cc -fsanitize=address

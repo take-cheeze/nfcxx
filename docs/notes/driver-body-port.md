@@ -21,6 +21,8 @@ Checked against origin/main after #1432 (the compile cache's lookup planner).
   `freestanding`, the trace unit, `cu_prepare`, `cpp2_prepare`, the cache hit and store (`cache_check`, `cache_store`), the
   eccp call (`eccp_plan`, its trap and its trace span), the depmode step, the CUDA host-symbol second pass, and the second run
   with an environment prefix.
+- The SYCL two-pass build (`scripts/nfcxx-sycl.rb`) now runs in `scripts/nfcxx.rb`, before the body starts:
+  the body's early exits never refuse its arguments. `tests/driver-sycl-dispatch` holds the goldens.
 - Helpers still defined in the body: `temp_cleanup`, `abs_path`, `onoff`, `ensure_tool`, `ecp_args`, `state_put`,
   `loop_set`/`loop_append`, `eccp_cleanup`, `compile_clean`, `link_records_rm`, `cache_log`, `cache_sha`, `cache_remote_get`,
   `cache_remote_put`.
@@ -33,7 +35,7 @@ The body can be deleted only when the Ruby driver runs every stage without it. I
    state as bash statements and the refusals itself (status 2, or status 1 for a missing value or an unfinished loop). The
    loop still runs in the body, after its pre-loop steps (`-fsyntax-only`, `--bundle-*`, `--cuda-driver=`, `set --`), so
    its arguments are the body's. Moving the call up to `scripts/nfcxx.rb` needs those steps ported first.
-2. **Early exits.** `--emit-hip`, the SYCL check and run, the `-x` and `-MD` checks, and the module block.
+2. **Early exits.** `--emit-hip`, the `-x` and `-MD` checks, and the module block.
 3. **Setup.** The backend choice, sanitizers, `instantiate`, `cosmo`, `freestanding`, host probes and the trace unit.
    Most of the decisions are already in the planners; the bash only calls them.
 4. **CUDA and `.cpp2` preparation.** `cu_prepare` and `cpp2_prepare` rewrite the source list and the trap; Ruby must do the

@@ -10,7 +10,9 @@
 #     - a world whose only freeze is of a core iterator's result on a Range literal stores embedded ivars with no
 #       frozen check;
 #     - a freeze of a user object, or of `map` once user Ruby defines its own `map`, keeps the check, and so
-#       does BC2CPP_FRESH_FREEZE=0.
+#       does BC2CPP_FRESH_FREEZE=0;
+#     - FRESH_BUILTIN_OPS: an Array literal grown by `+`, a splat or a push frees the stores and the synthesized
+#       writer of the check; `+` on a constant, a user Array#+ and BC2CPP_FRESH_FREEZE_OPS=0 keep it.
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
 #     - interpreted and compiled runs print the same, the frozen Array included.
 #
@@ -57,6 +59,38 @@ OWN_MAP = SRC + <<~'RUBY'
   end
 RUBY
 
+# FRESH_BUILTIN_OPS: an Array literal grown by `+`, a splat or a push is still a builtin value.
+ARRAY_OPS = SRC + <<~'RUBY'
+  class FfTable
+    LETTERS = (%w[a b] + %w[c] + [:d, nil]).freeze
+    CELLS = [*LETTERS, 'BS', 'OK'].freeze
+    NONE = [nil, *LETTERS].freeze
+    attr_writer :count
+    def letters; CELLS + NONE; end
+  end
+RUBY
+
+# A non-literal receiver of `+` (a constant) could be anything `+` returns.
+CONST_PLUS = SRC + <<~'RUBY'
+  class FfTable
+    LETTERS = %w[a b].freeze
+    CELLS = (LETTERS + %w[c]).freeze
+  end
+RUBY
+
+# A Hash has no `+`: method_missing would answer it.
+HASH_PLUS = SRC + <<~'RUBY'
+  class FfTable
+    def self.sealed; ({ a: 1 } + [1]).freeze; end
+  end
+RUBY
+
+OWN_PLUS = ARRAY_OPS + <<~'RUBY'
+  class Array
+    def +(other); FfTable.new(1); end
+  end
+RUBY
+
 OWNERS = %w[FfTable].freeze
 FROZEN_TEST = 'mrb_frozen_p(mrb_obj_ptr(self))'
 
@@ -80,6 +114,21 @@ sealed, = generate(FROZEN_USER)
 check.call('a freeze of a user object keeps the frozen check', code_of(sealed, 'FfTable_bump').include?(FROZEN_TEST))
 own, = generate(OWN_MAP)
 check.call('a user-defined map keeps the frozen check', code_of(own, 'FfTable_bump').include?(FROZEN_TEST))
+ops, = generate(ARRAY_OPS)
+check.call('a freeze of an Array literal grown by +, a splat or a push leaves no frozen check',
+           !ops.include?(FROZEN_TEST) && !ops.include?('mrb_check_frozen'))
+check.call('the synthesized writer carries no frozen check', ops.include?('/* FROZEN_FREE */'))
+check.call('a freeze of a constant + a literal keeps the frozen check',
+           code_of(generate(CONST_PLUS).first, 'FfTable_bump').include?(FROZEN_TEST))
+check.call('a + on a Hash literal keeps the frozen check',
+           code_of(generate(HASH_PLUS).first, 'FfTable_bump').include?(FROZEN_TEST))
+check.call('a user-defined Array#+ keeps the frozen check',
+           code_of(generate(OWN_PLUS).first, 'FfTable_bump').include?(FROZEN_TEST))
+ENV['BC2CPP_FRESH_FREEZE_OPS'] = '0'
+ops_off, = generate(ARRAY_OPS)
+ENV.delete('BC2CPP_FRESH_FREEZE_OPS')
+check.call('BC2CPP_FRESH_FREEZE_OPS=0 keeps the frozen check', code_of(ops_off, 'FfTable_bump').include?(FROZEN_TEST))
+check.call('... and the synthesized writer tests the frozen flag', code_of(ops_off, 'FfTable_count_eq').include?(FROZEN_TEST))
 ENV['BC2CPP_FRESH_FREEZE'] = '0'
 off, = generate(SRC)
 ENV.delete('BC2CPP_FRESH_FREEZE')
