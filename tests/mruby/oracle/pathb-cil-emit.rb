@@ -873,6 +873,10 @@ class Function
       emit("ldc.i8 #{py_int(pyidx(e, 1))}")
       return 'int64'
     end
+    if head == 'eh-exc' || head == 'eh-sel'   # a pad's exception and selector: cil-link.rb's fields (eh_try)
+      emit("ldsfld int64 Prog::'#{head == 'eh-exc' ? 'cxx_ptr' : 'cxx_sel'}'")
+      return 'int64'
+    end
     if head == 'const'
       il, _size, _signed = @em.type_of(pyidx(e, 1))
       v = pyidx(e, 2)
@@ -1321,9 +1325,7 @@ class Function
     if args.any? { |a| a.is_a?(Array) && truthy(a) && pyidx(a, 0) == 'variadic' }
       return variadic_call(name, indirect, ret, args)
     end
-    if !indirect && name.start_with?('__nfcxx_') && !['__nfcxx_eh_ptr', '__nfcxx_eh_sel'].include?(name)
-      refuse("#{pys(@name)}: #{pys(name)} is a helper of nfcxx's runtime (long double, __int128 or __float128), which the CIL backend does not link")
-    end
+    refuse("#{pys(@name)}: #{pys(name)} is a helper of nfcxx's runtime (long double, __int128 or __float128), which the CIL backend does not link") if !indirect && name.start_with?('__nfcxx_')
     if name == '_setjmp'
       unless eh_setjmp_arg(args[0])
         refuse("#{pys(@name)}: setjmp is not supported by the CIL backend (only the setjmp of a lowered C++ try is)")

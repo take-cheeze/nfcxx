@@ -515,8 +515,14 @@ static void ir_eh_end_body(void)
     for (i = 0; i < nt; i++) fprintf(nf_out, "%s%d", i ? " " : "", types[i]);
     fputs(")", nf_out);
     ir_depth = 2;
-    ir_emit(ir_fmt("(store (ptr void) %s %s)", ir_eh_exc_slot(), ir_let("(ptr void)", "(call (ptr void) &\"__nfcxx_eh_ptr\")")));
-    ir_emit(ir_fmt("(store long %s %s)", ir_eh_sel_slot(), ir_let("long", "(call long &\"__nfcxx_eh_sel\")")));
+    {
+      /* (eh-exc) and (eh-sel): the exception and the selector the personality installed in the landing pad's registers
+         (QBE's ehptr, ehsel), read first, before anything else can use those registers */
+      char *exc = ir_let("(ptr void)", "(eh-exc)");
+      char *sel = ir_let("long", "(eh-sel)");
+      ir_emit(ir_fmt("(store (ptr void) %s %s)", ir_eh_exc_slot(), exc));
+      ir_emit(ir_fmt("(store long %s %s)", ir_eh_sel_slot(), sel));
+    }
     {
       /* the first node of the walk: with no region (a state in a try outside every cleanup of it), the frame's */
       unsigned long r = ir_eh_pads[n].region;

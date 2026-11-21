@@ -2244,6 +2244,7 @@ RVAL = {
     r_call(fn, ['call', x[1], x[4]] + x.drop(5))
   },
   "call" => ->(fn, x) { r_call(fn, x) }, "rdtsc" => ->(fn, x) { r_rdtsc(fn, x) },
+  "eh-exc" => ->(fn, x) { r_eh_reg(fn, x) }, "eh-sel" => ->(fn, x) { r_eh_reg(fn, x) },
 }
 
 # -------- statement handlers
@@ -2577,6 +2578,15 @@ def s_rref_arg(fn, x)
 end
 
 # (rdtsc): the 64-bit time stamp counter, edx:eax of the instruction, from the helper __pathb_rdtsc.
+# (eh-exc), (eh-sel): in a landing pad, the exception and the selector the personality installed (QBE's ehptr and
+# ehsel, the unwinder's registers; docs/notes/pathb-zero-cost-eh.md)
+def r_eh_reg(fn, x)
+  raise BadIR, "#{x[0]} form" if x.length != 1
+  t = fn.tmp
+  fn.emit("#{t} =l #{x[0] == "eh-exc" ? "ehptr" : "ehsel"}")
+  Val.new(t, "l", parse_type(x[0] == "eh-exc" ? ["ptr", "void"] : "long"))
+end
+
 def r_rdtsc(fn, x)
   raise BadIR, "rdtsc form" if x.length != 1
   fn.mod.asmhelpers["rdtsc"] = true

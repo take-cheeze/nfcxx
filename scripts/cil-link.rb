@@ -45,8 +45,6 @@ CXX_RUNTIME = [
   ["__cxa_rethrow", "void", [], ["newobj instance void class CxxThrow::.ctor()", "throw"]],
   ["__cxa_begin_catch", "int64", ["int64"], ["ldarg.0", "ret"]],
   ["__cxa_end_catch", "void", [], ["ret"]],
-  ["__nfcxx_eh_ptr", "int64", [], ["ldsfld int64 Prog::'cxx_ptr'", "ret"]],
-  ["__nfcxx_eh_sel", "int64", [], ["ldsfld int64 Prog::'cxx_sel'", "ret"]],
   ["_ZSt9terminatev", "void", [], ["ldstr \"terminate called\"", "call void [System.Runtime]System.Environment::FailFast(string)", "ret"]],
 ]
 

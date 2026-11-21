@@ -2206,6 +2206,10 @@ end
         end
       # `(p2i T P)`: a pointer's address as an integer of type T, truncated or kept as the type's canonical form.
       when "p2i" then canon_lines(dst, t, op(rv[2]))
+      # `(eh-exc)`, `(eh-sel)`: in a landing pad, the exception and the selector the personality installed (QBE's ehptr and
+      # ehsel: the unwinder's registers, docs/notes/pathb-zero-cost-eh.md).
+      when "eh-exc" then @lines << "  #{dst} =l ehptr"
+      when "eh-sel" then @lines << "  #{dst} =l ehsel"
       # `(rdtsc)`: the time-stamp counter, from the helper the driver appends.
       when "rdtsc"
         asm_helpers << "rdtsc"

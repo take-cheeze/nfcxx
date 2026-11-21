@@ -9,8 +9,8 @@
 #                                       the EH probes of the frames mode (the default Path B harness), run here too.
 #
 # Each: scripts/pathb-dump.rb --ir (a PATHB_EH=tables harness) -> scripts/pathb-ir-opt.rb (pathb-cc's passes) ->
-# scripts/pathb-ssa-build -> cc, linked with libnfcxxld.a (scripts/pathb-ldrt.rb: the long double helpers and
-# be/nfcxx_ehrt.c, the personality wrapper) and libstdc++, and EDG's libC.a only after it (for the lowering's helpers:
+# scripts/pathb-ssa-build -> cc, linked with libnfcxxld.a (scripts/pathb-ldrt.rb: the long double helpers)
+# and libstdc++ (its personality, __gxx_personality_v0, is the tables'), and EDG's libC.a only after it (for the lowering's helpers:
 # VLAs, complex arithmetic; libstdc++ has the C++ ABI, its EH runtime and RTTI). The exit code must equal the // EXPECT:
 # value; `// STDOUT: same` also needs the standard output of the g++ build of the same sources. A trap's stderr message is libstdc++'s, not EDG's runtime's, so a
 # `// TRAP-STDERR:` line is not checked. `// TABLES-SKIP: reason` skips a program in this mode (counted, reported).

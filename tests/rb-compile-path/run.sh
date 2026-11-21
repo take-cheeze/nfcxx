@@ -34,7 +34,7 @@ sandbox() {
   for c in cc gcc g++ ar llvm-ar llvm-mc mktemp uname nm realpath xcrun; do ln -s "$here/stub.sh" "$sb/bin/$c"; done
   for c in scripts/mrb.rb scripts/pathb-cil.rb nfcxx; do ln -s "$here/stub.sh" "$sb/$c"; done
   # the sources the scripts read: their mtimes are old, so an object or archive made by a case is newer
-  : > "$sb/be/nfcxx_ldrt.c"; : > "$sb/be/nfcxx_ehrt.c"; : > "$sb/lib/ehshim/nfcxx_eh_shim.cpp"; touch -d 2000-01-01 "$sb/be/nfcxx_ldrt.c" "$sb/be/nfcxx_ehrt.c" "$sb/lib/ehshim/nfcxx_eh_shim.cpp"
+  : > "$sb/be/nfcxx_ldrt.c"; : > "$sb/lib/ehshim/nfcxx_eh_shim.cpp"; touch -d 2000-01-01 "$sb/be/nfcxx_ldrt.c" "$sb/lib/ehshim/nfcxx_eh_shim.cpp"
   local f
   for f in a.c b.cc x.cpp s.cxx; do : > "$sb/work/$f"; done
   printf 'notes\n' > "$sb/work/notes.txt"

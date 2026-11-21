@@ -67,7 +67,8 @@ conditional flag) before the back end runs, so a temporary's cleanup cannot be w
   (type ids from 1, 0 for `catch (...)`), and a C++14 `throw(T...)`'s allowed types.
 - `(eh-state N)`: statement; the calls after it unwind to pad N (0: none).
 - `(eh-pad N CLEANUP (TID ...) STMT ...)`: function level, after the body; the pad's catch clauses' type ids (the action
-  chain) and whether it also cleans up. Its code ends in a jump to a handler's label, `std::terminate`, or
+  chain) and whether it also cleans up. Its code begins with `(eh-exc)` and `(eh-sel)`, the exception and the selector
+  the personality installed (QBE's `ehptr`, `ehsel`), and ends in a jump to a handler's label, `std::terminate`, or
   `(eh-resume EXC)`.
 
 `throw()` and `noexcept` are both `(eh-noexcept)`: a call with no pad has no call-site entry, so an exception that
@@ -104,9 +105,15 @@ assigns without the call's location). In a function with pads GVN merges only in
 - The LSDA has one call site per call: its block's pad and the pad's action chain, no pad (the exception passes
   through), or no entry (std::terminate). It has an action table, a type table with `DW.ref` indirections and the
   specification list, as gcc's. A leaf function has no table (nothing unwinds through it).
-- Pads are dominated by the entry and reached by no jump; liveness flows from each call into its pad; `simplcfg` keeps
-  blocks with different unwind targets apart; a function with pads keeps its frame and its stack slots. Tested on
-  x86-64 ELF; the arm64 emitter marks call sites and pads too, untested; rv64 has no tables.
+- `%e =l ehptr`, `%s =l ehsel`: in a pad, the exception and the selector the personality installed (gcc's
+  `__builtin_eh_pointer` and `__builtin_eh_filter`). The abi passes move them to the top of the pad and make them copies
+  of `%rax` and `%rdx` (`x0`, `x1` on arm64). The personality is libstdc++'s `__gxx_personality_v0` itself.
+- Pads are dominated by the entry and reached by no jump; liveness flows from each call into its pad (its temporaries,
+  not the two registers); the spiller loads a pad's live-in temporaries from their slots at its entry (after the two
+  copies: no register but those survives the unwind), and a block without successors whose calls unwind to a pad keeps
+  no register for them; `simplcfg` keeps blocks with different unwind targets apart; a function with pads keeps its
+  frame and its stack slots; a call that unwinds to a pad or to std::terminate is never a tail call. Tested on x86-64
+  ELF; the arm64 emitter marks call sites and pads too (CI's arm64 Linux job runs it); rv64 has no tables.
 
 ### The EDG fork (`NFCXX_ITANIUM_EH_TYPEINFO`, set with `PATHB_EH=tables`)
 
@@ -115,13 +122,11 @@ personality matches a pointer's own `__pointer_type_info`. With the switch, a ca
 pointer type's typeinfo, a throw makes the thrown type's own typeinfo (`std::nullptr_t` has none otherwise), and the
 destructor a throw passes is the complete-object one (the subobject destructor of a class with virtual bases takes a VTT).
 
-### Runtime (`be/nfcxx_ehrt.c`)
+### Runtime
 
-`__nfcxx_personality_v0` calls libstdc++'s `__gxx_personality_v0`. QBE cannot read the registers a personality sets for
-a landing pad (gcc's `__builtin_eh_pointer`), so the wrapper keeps the exception and the selector in thread-local
-storage when it installs a pad, and the pad reads them first (`__nfcxx_eh_ptr`, `__nfcxx_eh_sel`). It is a member of
-`libnfcxxld.a`, which every Path B link names; only a program with tables references it. The program links libstdc++
-first and `libC.a` after it: `libC.a` defines its own IA-64 RTTI vtables, `__cxa_*` and `__cxa_vec_*`, which libstdc++'s
+None of Path B's own: a pad reads the exception and the selector with `(eh-exc)` and `(eh-sel)` (QBE's `ehptr`, `ehsel`),
+the personality is libstdc++'s `__gxx_personality_v0`, so an object with tables needs only libstdc++ (`g++ x.o` links
+it). The program links libstdc++ first and `libC.a` after it (`scripts/pathb-ldrt.rb`'s link script): `libC.a` defines its own IA-64 RTTI vtables, `__cxa_*` and `__cxa_vec_*`, which libstdc++'s
 personality cannot use, so libstdc++ must provide those; `libC.a` then gives only what is still undefined, the lowering's
 helpers (the VLA pool, C99 complex arithmetic: self-contained members). No EH shim either: an exception thrown by
 libstdc++ is already one of ours.
