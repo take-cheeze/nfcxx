@@ -236,7 +236,8 @@ program.close
 status = nil
 # --keep-intermediates (NFCXX_KEEP_INTERMEDIATES=1): the bash keeps its eccp directory, which is made under this root; the root is then
 # kept too, so the directory the user asked for survives the run (the bash's eccp_cleanup removes it only when the flag is off)
-keep = ENV["NFCXX_KEEP_INTERMEDIATES"] == "1"
+# --keep-intermediates (on the command line) keeps the intermediates too: the oracle reads it from its environment
+keep = ENV["NFCXX_KEEP_INTERMEDIATES"] == "1" || ARGV.include?("--keep-intermediates")
 tmproot = Dir.mktmpdir("nfcxx-tmp.")
 status_code = 1
 begin
@@ -247,6 +248,7 @@ begin
   # trace_finish did; the bash only flushes its spans (its trace_finish keeps its span flush, and does not close the trace)
   trace_file = ARGV.reverse.find { |a| a.start_with?("--trace=") }&.delete_prefix("--trace=") || ENV["NFCXX_TRACE"].to_s
   env = { "RUBY" => ENV["RUBY"] || RbConfig.ruby, "TMPDIR" => tmproot, "NFCXX_TMP_OWNED" => "1" }
+  env["NFCXX_KEEP_INTERMEDIATES"] = "1" if keep
   trace_rb = File.join(__dir__, "trace.rb")
   unless trace_file.empty?
     trace_abs = File.join(File.realpath(File.dirname(trace_file)), File.basename(trace_file))
