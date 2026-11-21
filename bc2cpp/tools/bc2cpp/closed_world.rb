@@ -915,12 +915,13 @@ class ClosedWorld
     end
   end
 
-  # EXACT_NEW: `klass.new` answers an instance of exactly +klass+. Its constant is stable, and `new` / `allocate` are
-  # Class's natives: no Ruby definition on Class, on +klass+ or a superclass or their singletons, or on a module (which
-  # `extend` could put on a singleton), and no mixin into Class or those singletons.
+  # EXACT_NEW: `klass.new` answers an instance of exactly +klass+. Its constant is stable and no outside source touches
+  # the class (stable_class_constant?), and `new` / `allocate` are Class's natives: no Ruby definition on Class, on
+  # +klass+ or a superclass or their singletons, or on a module (which `extend` could put on a singleton), and no mixin
+  # into Class or those singletons.
   def exact_constructor_class?(klass, superclass_of)
     return false unless standard_constructor_lookup? && class_declared?(klass) && @mixins && @unknown_mixins
-    return false unless stable_class_constant?(klass) || stable_constant_identity?(klass)
+    return false unless stable_class_constant?(klass)
     return false if @unknown_mixins.include?('Class') || !@mixins.fetch('Class', []).empty?
 
     defs = %w[new allocate].flat_map { |name| @registry.fetch(name, []) }.reject { |d| d.owner == '<native>' }
