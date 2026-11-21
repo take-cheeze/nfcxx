@@ -16,7 +16,7 @@ Checked against origin/main after #1432 (the compile cache's lookup planner).
   Path B dispatch with CHECK and STORE lines (#1387), the switch (#1402), and the compile cache's lookup planner
   (`scripts/nfcxx-cache-plan.rb`, #1432).
 - The frozen body still does these in bash, and the Ruby driver calls them through the body: argument records (now evaluated from
-  `scripts/nfcxx-loop.rb --bash-state`), `--emit-hip`, the SYCL check and run, the `-x` and `-MD` checks, the module block (`mod_build_program`), the
+  `scripts/nfcxx-loop.rb --bash-state`), `--emit-hip`, the `-x` and `-MD` checks, the module block (`mod_build_program`), the
   backend choice and host probes (`default_backend`, `pb_fs_host`, the uname checks), sanitizers, `instantiate`, `cosmo`,
   `freestanding`, the trace unit, `cu_prepare`, `cpp2_prepare`, the cache hit and store (`cache_check`, `cache_store`), the
   eccp call (`eccp_plan`, its trap and its trace span), the depmode step, the CUDA host-symbol second pass, and the second run
