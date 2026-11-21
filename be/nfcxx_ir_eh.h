@@ -517,7 +517,13 @@ static void ir_eh_end_body(void)
     ir_depth = 2;
     ir_emit(ir_fmt("(store (ptr void) %s %s)", ir_eh_exc_slot(), ir_let("(ptr void)", "(call (ptr void) &\"__nfcxx_eh_ptr\")")));
     ir_emit(ir_fmt("(store long %s %s)", ir_eh_sel_slot(), ir_let("long", "(call long &\"__nfcxx_eh_sel\")")));
-    ir_line(2, ir_fmt("(goto \"%s\")", ir_eh_node_label(ir_eh_pads[n].region, ir_eh_pads[n].frame)));
+    {
+      /* the first node of the walk: with no region (a state in a try outside every cleanup of it), the frame's */
+      unsigned long r = ir_eh_pads[n].region;
+      ir_eh_frame *f = ir_eh_pads[n].frame;
+      if (r == null_eh_region_number && f != NULL) r = f->entry_region;
+      ir_line(2, ir_fmt("(goto \"%s\")", ir_eh_node_label(r, f)));
+    }
     if (n + 1 < ir_eh_npad) fputs(")", nf_out);
   }
   /* the nodes (a list that grows only in the walks above), in the last pad's form */

@@ -214,6 +214,7 @@ class Cfg
   def initialize
     @blocks = []
     @labels = {}
+    @defined_labels = {}
     @targets = []   # [break target, continue target or nil] for each enclosing loop and switch, innermost last
     @switches = []  # { cases: [[value, block]], default: block or nil } for each enclosing switch
   end
@@ -269,6 +270,9 @@ class Cfg
       @blocks[b].instrs[0] = ["eh-pad", cl, *types]
     end
     @blocks[0].term = ["eh-entry", 1, *@pad_block.values] unless pads.empty?
+    # a jump to a label no (label) statement defines would become an empty block that ends in unreachable
+    undefined = @labels.keys.reject { |l| (@defined_labels || {})[l] }
+    raise Fail, "goto to the undefined label #{undefined.first}" unless undefined.empty?
     @blocks.each { |b| b.term ||= ["unreachable"] }
     self
   end
@@ -421,6 +425,7 @@ class Cfg
     when "goto" then set_term(cur, ["br", label_block(s[1].raw)]) && new_block
     when "label"
       l = label_block(s[1].raw)
+      (@defined_labels ||= {})[s[1].raw] = true
       set_term(cur, ["br", l])
       l
     when "loc"

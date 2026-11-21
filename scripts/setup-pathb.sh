@@ -81,12 +81,16 @@ LOWER_VARIABLE_LENGTH_ARRAYS=1
 import <support/platform/linux/cpfe>
 import <support/build-type/release/cpfe>
 CFG
-# PATHB_EH=tables: zero-cost exception handling (docs/notes/pathb-zero-cost-eh.md). EDG's "partial lowering" EH scheme:
-# try, catch and throw stay in the IL; the cleanups are described by the region table EDG's portable scheme builds (with
-# stack-offset handles), and leck_cleanup_state nodes say which region is current. There is no EH stack and no
-# __eh_curr_region: the back end (be/nfcxx_ir_eh.h) turns the region chains into landing pads, and throw/catch into the
-# Itanium C++ ABI runtime's calls (libstdc++).
-if [ "${PATHB_EH:-frames}" = tables ]; then
+# Exception handling (docs/notes/pathb-zero-cost-eh.md). PATHB_EH=tables (the default): zero-cost exception handling,
+# EDG's "partial lowering" EH scheme: try, catch and throw stay in the IL; the cleanups are described by the region table
+# EDG's portable scheme builds (with stack-offset handles), and leck_cleanup_state nodes say which region is current. There
+# is no EH stack and no __eh_curr_region: the back end (be/nfcxx_ir_eh.h) turns the region chains into landing pads, and
+# throw/catch into the Itanium C++ ABI runtime's calls (libstdc++). PATHB_EH=frames: EDG's portable lowering (an EH stack
+# of runtime frames, setjmp/longjmp, EDG's runtime in libC.a). The scheme is recorded next to cpfe: cmake/bin/eh-tables
+# exists in a tables harness (scripts/pathb-ldrt.rb, the driver and the emitters read it).
+pathb_eh=${PATHB_EH:-tables}
+case $pathb_eh in tables|frames) ;; *) echo "setup-pathb: PATHB_EH must be tables or frames, not '$pathb_eh'" >&2; exit 2 ;; esac
+if [ "$pathb_eh" = tables ]; then
 cat >> "$tree/cmake/macro-conf/nfcxx-pathb/cpfe.cmakedef" <<'CFG'
 DO_FULL_PORTABLE_EH_LOWERING=0
 GENERATE_EH_TABLES=1
@@ -226,6 +230,7 @@ if [ "$emscripten" != 1 ] && [ "$(uname -s)" = Linux ]; then
 fi
 cd "$out/cmake"
 ninja ${PATHB_JOBS:+-j$PATHB_JOBS} $target >"$out/build.log" 2>&1 || { grep -m20 -B2 -A8 'error' "$out/build.log" >&2; exit 1; }
+if [ "$pathb_eh" = tables ]; then : > "$out/cmake/bin/eh-tables"; else rm -f "$out/cmake/bin/eh-tables"; fi
 if [ "$emscripten" = 1 ]; then
   echo "Path B cpfe built for the browser: $out/cmake/bin/cpfe.js, cpfe.wasm (base dir: $base)"
 else
