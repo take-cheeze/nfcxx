@@ -4,7 +4,8 @@
 # DECLARED_ELEMENT_GUARD: `@items: Array[Integer]` (RBS) is checked where an element is read. A GETIDX of the declared
 # ivar tests its result after the read, so a non-Integer element raises BC2cppDeclarationViolation in the compiled run
 # (the interpreted run has no declaration, so it returns the element). A good element behaves the same in both runs.
-# Loops over the ivar (each, map, select, inject, sort_by) test each element they bind (DECLARED_LOOP_ELEMENT).
+# Loops over the ivar (each, map, select, inject, sort_by) test each element they bind (DECLARED_LOOP_ELEMENT), and a
+# block-fallback iterator body tests its element parameters on entry (DECLARED_BLOCK_ELEMENT).
 # Read from the generated code's DECLARED_ELEMENT_GUARD lines and the behaviour comparison.
 #
 #   MRBC=path/to/mrbc ruby scripts/bc2cpp/element_guard_check.rb
@@ -396,6 +397,14 @@ ARG_SOURCE = <<~RUBY
       l << Other.new
       l.map { |t| t.ok? }
     end
+
+    def ordered(things)
+      things.sort { |a, b| a.hp <=> b.hp }.size
+    end
+
+    def ranked(n, things = [])
+      things.sort { |a, b| a.hp <=> b.hp }.size + n
+    end
   end
 RUBY
 
@@ -406,6 +415,8 @@ ARG_SIG = <<~RBS
     def swapped: (Array[Thing], untyped) -> untyped
     def joined: (Array[Thing]) -> untyped
     def copied: (Array[Thing]) -> untyped
+    def ordered: (Array[Thing]) -> untyped
+    def ranked: (Integer, ?Array[Thing]) -> untyped
   end
 RBS
 
@@ -425,8 +436,13 @@ ARG_DRIVER = <<~'RUBY'
   show('other') { r.other(bad) }
   show('joined') { r.joined(good) }
   show('copied') { r.copied(good) }
+  show('ordered') { r.ordered(good) }
+  show('ranked') { r.ranked(1, good) }
+  show('ranked default') { r.ranked(1) }
   show('bad total') { r.total(bad) }
   show('bad oks') { r.oks(bad) }
+  show('bad ordered') { r.ordered(bad) }
+  show('bad ranked') { r.ranked(1, bad) }
   puts 'end'
 RUBY
 
@@ -449,24 +465,40 @@ Dir.mktmpdir('element_guard_arg_sig') do |sig_dir|
                bodies['joined'].to_s.include?('DECLARED_ELEMENT_GUARD Roster#joined arg1 iterated'))
     check.call('a copy something else also reads (and may store into) gets no element',
                !bodies['copied'].to_s.include?('iterated */'))
+    ordered_block = code[/^static mrb_value Roster_ordered_block_fallback\w*_impl\(.*?^}\n/m].to_s
+    check.call('a block-fallback iterator body tests its element parameters on entry (DECLARED_BLOCK_ELEMENT)',
+               ordered_block.scan('DECLARED_ELEMENT_GUARD Roster#ordered arg1 yielded').size == 2)
+    ranked_block = code[/^static mrb_value Roster_ranked_block_fallback\w*_impl\(.*?^}\n/m].to_s
+    check.call('an optional `?Array[T]` parameter with an empty-literal default is guarded the same way',
+               ranked_block.include?('DECLARED_ELEMENT_GUARD Roster#ranked arg2 yielded'))
+    check.call('so its sends on them are exact, with no owner call',
+               !ordered_block.empty? && !ordered_block.include?('owner-call: hp') && !ordered_block.include?('POLY_SMALL_N :hp'))
   end
   ENV['BC2CPP_DECLARED_ARG_ELEMENT'] = '0'
   Dir.mktmpdir('element_guard_arg_off') do |dir|
     code, = Bc2cppFixtureRuntime.generate(ARG_SOURCE, dir, only_owners: %w[Roster Thing Other])
     check.call('BC2CPP_DECLARED_ARG_ELEMENT=0 emits no parameter loop guard', !code.include?('arg1 iterated */'))
   end
+  ENV['BC2CPP_DECLARED_ARG_ELEMENT'] = nil
+  ENV['BC2CPP_DECLARED_BLOCK_ELEMENT'] = '0'
+  Dir.mktmpdir('element_guard_block_off') do |dir|
+    code, = Bc2cppFixtureRuntime.generate(ARG_SOURCE, dir, only_owners: %w[Roster Thing Other])
+    check.call('BC2CPP_DECLARED_BLOCK_ELEMENT=0 emits no block entry guard', !code.include?('yielded */'))
+  end
   ENV.delete('BC2CPP_DECLARED_ARG_ELEMENT')
+  ENV.delete('BC2CPP_DECLARED_BLOCK_ELEMENT')
   suite.generate(ARG_SOURCE, %w[Roster Thing Other])
   suite.behaviour(ARG_DRIVER, banner: 'declared parameter element loops, interpreted and compiled', same: false) do |interpreted, compiled|
     good = ->(lines) { lines&.reject { |l| l.start_with?('bad ', '[RPG2k]') } }
     check.call('good elements (and nil) loop the same in both runs', interpreted && compiled && good.call(interpreted) == good.call(compiled))
     check.call('every compiled parameter loop raises the declaration violation on a wrong-class element',
-               compiled&.select { |l| l.start_with?('bad ') }&.size == 2 &&
+               compiled&.select { |l| l.start_with?('bad ') }&.size == 4 &&
                  compiled.select { |l| l.start_with?('bad ') }.all? { |l| l.end_with?('raised BC2cppDeclarationViolation') })
   end
 ensure
   ENV.delete('BC2CPP_SIG_DIRS')
   ENV.delete('BC2CPP_DECLARED_ARG_ELEMENT')
+  ENV.delete('BC2CPP_DECLARED_BLOCK_ELEMENT')
 end
 
 suite.finish

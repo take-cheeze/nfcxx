@@ -16,7 +16,7 @@ class CodeGen
   class << self
     # { [owner, name without @] => { kind:, text: } } for this build (nil or empty: none).
     attr_accessor :declared_ivar_elements
-    # DECLARED_ARG_ELEMENT: { irep label => { register => { kind:, text:, klass: } } } of the required parameters a
+    # DECLARED_ARG_ELEMENT: { irep label => { register => { kind:, text:, klass: } } } of the positional parameters a
     # signature declares `Array[T]` (or `Array[T]?`) for (nil or empty: none).
     attr_accessor :declared_arg_elements
   end
@@ -98,6 +98,9 @@ class CodeGen
     producers = BytecodeIR.producers(irep, idx, reg)
     return nil if producers.nil? || producers.empty?
     return declared_arg_element_receiver(irep, producers) if producers.any?(&:entry?)
+
+    # `(@x || [])` for a read or loop: an empty Array literal adds no element (a store could go into the literal).
+    producers = producers.reject { |p| empty_array_literal?(p.insn) } if derived && producers.size > 1
     return nil unless producers.size == 1
 
     producer = producers.first

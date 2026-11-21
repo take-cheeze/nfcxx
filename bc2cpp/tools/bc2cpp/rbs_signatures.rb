@@ -428,6 +428,15 @@ module RbsSignatures
 
             [register, type.value_classes] if type.value_classes
           end.to_h.freeze
+          # DECLARED_ARG_ELEMENT: an optional `Array[T]` / `Array[T]?` parameter's element (its default is one more
+          # reaching definition, accepted only when it is an empty Array literal).
+          optional_elements = Array(sig.optional_args).each_with_index.filter_map do |type, index|
+            inner = type.element_classes || type.optional&.element_classes
+            [mand + index + 1, inner] if inner && ap.ir_optional_types[d.irep]&.key?(mand + index + 1)
+          end.to_h
+          unless optional_elements.empty?
+            (ap.ir_arg_optional_elements ||= {})[d.irep] = (ap.ir_arg_optional_elements[d.irep] || {}).merge(optional_elements).freeze
+          end
         end
         # `*T` types the rest register (after the optional ones) of a positional-only rest, the layout the call-site
         # join accepts (irep_arity.rb rest_positional_shape?). The optional count must match, as for optional types.
