@@ -405,28 +405,23 @@ class CodeGen
     names
   end
 
-  # CORE_ALIAS_DESTINATIONS: the names the aliases of a core-source irep install over a core method (collect_installed_names).
-  # mruby's own mrblib aliases only names it defines that way (`alias map collect`), so its literal aliases stay out; a
-  # gem outside 3rd/mruby (mruby-onig-regexp) aliases over mrblib's bodies, so its literal destinations count. A computed
-  # alias_method (`alias_method v, :"onig_regexp_#{v}"` in a loop) names what the file's literal loops enumerate
-  # (ClosedWorld.ruby_file_facts' definer_loops) wherever it is; nil, as for any computed name, when the file has none.
+  # CORE_ALIAS_DESTINATIONS: the names the computed aliases of a core-source irep install over a core method
+  # (collect_installed_names): `alias_method v, :"onig_regexp_#{v}"` in a loop names what the file's literal loops
+  # enumerate (ClosedWorld.ruby_file_facts' definer_loops); nil, as for any computed name, when the file has none. A
+  # literal alias is the registry walk's: it shadows the owner's earlier definitions (CORE_ALIAS_REPLACES, registry.rb)
+  # and leaves every other owner's name bound.
   def core_alias_destinations(label, irep)
     names = Set.new
-    literal_counts = !irep.file.to_s.include?('/3rd/mruby/')
     BytecodeIR.for(irep).each_source do |insn, idx|
-      if insn.op == :ALIAS
-        names << insn.sym if literal_counts && !AliasSites.settled?(@registry, label, idx)
-      elsif %i[SEND SSEND].include?(insn.op) && insn.sym == 'alias_method' && !AliasSites.settled?(@registry, label, idx)
-        syms = insn.plain_fixed_argc? && literal_symbol_args(irep, idx, insn.reg.to_i, insn.argc)
-        if syms && !syms.empty?
-          names << syms.first if literal_counts
-          next
-        end
-        installed = core_loop_defined_names(irep.file)
-        return nil if installed.empty?
+      next unless %i[SEND SSEND].include?(insn.op) && insn.sym == 'alias_method' && !AliasSites.settled?(@registry, label, idx)
 
-        names.merge(installed)
-      end
+      syms = insn.plain_fixed_argc? && literal_symbol_args(irep, idx, insn.reg.to_i, insn.argc)
+      next if syms && !syms.empty?
+
+      installed = core_loop_defined_names(irep.file)
+      return nil if installed.empty?
+
+      names.merge(installed)
     end
     names
   end
