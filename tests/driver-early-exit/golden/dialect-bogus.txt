@@ -1,0 +1,4 @@
+stdout:
+status=2
+stderr:
+nfcxx: unknown dialect 'bogus'

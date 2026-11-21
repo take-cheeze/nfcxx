@@ -1,0 +1,4 @@
+stdout:
+status=1
+stderr:
+cc1plus: fatal error: missing.cpp: No such file or directory
