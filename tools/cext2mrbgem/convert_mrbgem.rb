@@ -4149,11 +4149,12 @@ use_problem = lambda do |name, use|
         tc = match_close(masked, top)
         next if tc < 0 || tc >= sw[1]
         fn = enclosing_func(rel, lab)
-        next unless fn && ((@valid_reg_names || Set.new).include?(fn['name']) || (@needs || Set.new).include?(fn['name']))
+        # the state token of this position (the parameter, or the file-scope state of a global-state helper: mrb_tok)
+        next unless fn
         ed = @edits[rel]
         # the switch subject: TYPE(x) becomes nfcx_type_key(mrb, (x))
         ed.drop(ed.overlapping(tp, tp + 4))
-        ed.add(tp, tp + 4, 'nfcx_type_key(mrb, ')
+        ed.add(tp, tp + 4, "nfcx_type_key(#{mrb_tok(rel, tp)}, ")
         ed.add(tc + 1, tc + 1, ')')
         # the label: the key of a Rational; the refusal and its marker go
         ed.drop(ed.at_point(lab).select { |_a, _b, t| t.to_s.include?('REFUSED: T_RATIONAL') })
