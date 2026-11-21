@@ -27,6 +27,7 @@ class CodeGen
   CLASS_UNIT_DECLS = <<~CPP
     extern "C" struct RClass* mrb_vm_define_class(mrb_state*, mrb_value, mrb_value, mrb_sym);
     extern "C" struct RClass* mrb_vm_define_module(mrb_state*, mrb_value, mrb_sym);
+    extern "C" void mrb_method_added(mrb_state*, struct RClass*, mrb_sym);
   CPP
 
   # [C++ text, nil] for a compiled body (its children's functions first), or [nil, refusing opcodes]. `owner` is the
@@ -174,6 +175,10 @@ class CodeGen
         args = (1..n).map { |k| "r#{insn.reg + k}" }
         # A Ruby def of the same name anywhere in the program may override Module's own, so that name stays a send.
         overridden = @registry.fetch(insn.sym.to_s, []).any?(&:irep)
+        if !overridden && (alias_line = class_body_alias_method(irep, idx, insn, registered))
+          lines << alias_line
+          next
+        end
         call = case overridden ? '' : insn.sym.to_s
                when 'include' then "bc2cpp_mod_include(M, self, {#{args.join(', ')}})"
                when 'attr_reader', 'attr' then "bc2cpp_mod_attr(M, self, true, false, {#{args.join(', ')}})"
@@ -612,6 +617,20 @@ class CodeGen
   # True when no definition of +name+ anywhere in the registry has a body: the name is a native method.
   def native_before_units?(name)
     @registry.fetch(name, []).none? { |definition| definition.irep }
+  end
+
+  # CLASS_BODY_ALIAS_METHOD: `alias_method :new, :old` with literal names is Module#alias_method's own body (class.c
+  # mrb_mod_alias: the alias, the method_added hook, the module as the result), under the condition class_body_alias
+  # puts on `alias`: `old` is a native method or one this body registered before. Nil sends it by name.
+  def class_body_alias_method(irep, idx, insn, registered)
+    site = AliasSites.site(irep, idx)
+    return nil unless site && insn.op == :SSEND && insn.argc.to_i == 2
+    return nil unless registered.include?(site.old_name.to_s) || native_before_units?(site.old_name.to_s)
+
+    new_sym = "mrb_intern_cstr(M, #{c_string_literal(site.new_name.to_s)})"
+    "  mrb_alias_method(M, mrb_class_ptr(self), #{new_sym}, mrb_intern_cstr(M, #{c_string_literal(site.old_name.to_s)}));\n" \
+      "  mrb_method_added(M, mrb_class_ptr(self), #{new_sym});\n" \
+      "  r#{insn.reg} = self;\n"
   end
 
   def class_body_alias(insn, registered)

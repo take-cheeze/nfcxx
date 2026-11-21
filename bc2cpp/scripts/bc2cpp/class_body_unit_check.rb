@@ -97,6 +97,36 @@ suite.compile(SEND0) do |ireps, root|
   suite.check('the no-argument send sets the constant it built', code.include?('mrb_const_set('))
 end
 
+# CLASS_BODY_ALIAS_METHOD: `alias_method :new, :old` of a native method (mruby-io's `alias_method :eof, :eof?`) is
+# Module#alias_method's own body in the unit, not a by-name send.
+ALIASES = <<~'RUBY'
+  class Aliaser
+    alias_method :name_text, :to_s
+  end
+RUBY
+
+suite.compile(ALIASES) do |ireps, root|
+  gen = CodeGen.new(ireps, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  units = gen.compile_top_class_units(ireps.fetch(root))
+  code = units.find { |unit| unit[:path] == 'Aliaser' }.to_h[:code].to_s
+  suite.check('an alias_method of a native method is mrb_alias_method and the method_added hook, no by-name send',
+              code.include?('mrb_alias_method(M, mrb_class_ptr(self), ') &&
+              code.include?('mrb_method_added(M, mrb_class_ptr(self), ') &&
+              code.include?(CodeGen.new({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new).c_string_literal('name_text')) &&
+              !code.include?('bc2cpp_ssend'))
+  headers = %w[mruby.h mruby/array.h mruby/class.h mruby/hash.h mruby/proc.h mruby/range.h mruby/string.h mruby/variable.h]
+  unit = +"#{headers.map { |h| "#include <#{h}>\n" }.join}#{CodeGen::CLASS_UNIT_DECLS}#{gen.emit_owner_class_cache}"
+  unit << units.map { |u| u[:code] }.join
+  path = File.join(ENV.fetch('TMPDIR', '/tmp'), "class_body_alias_#{$$}.cc")
+  File.write(path, unit)
+  out, status = Open3.capture2e('g++', '-std=c++17', '-fsyntax-only', '-w',
+                                "-I#{ROOT}/3rd/mruby/include",
+                                "-I#{ENV.fetch('BC2CPP_BUILD_INCLUDE', "#{ROOT}/build-closed-bc2cpp/closed/include")}", path)
+  suite.check('the alias unit compiles with the mruby headers', status.success?)
+  puts "    g++: #{out.lines.first(3).join.strip}" unless status.success?
+  File.delete(path)
+end
+
 DEFS = <<~'RUBY'
   class Router
     def route(x)
