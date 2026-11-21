@@ -44,29 +44,57 @@ conditional flag) before the back end runs, so a temporary's cleanup cannot be w
 
 ### IR forms
 
-- `(eh-types SYM-or-0 ...)`, `(eh-noexcept)`: function header; the catch clauses' typeinfo symbols (type ids from 1).
-- `(eh-state N)`: statement.
+- `(eh-types SYM-or-0 ...)`, `(eh-noexcept)`, `(eh-spec TID ...)`: function header; the catch clauses' typeinfo symbols
+  (type ids from 1, 0 for `catch (...)`), and a C++14 `throw(T...)`'s allowed types.
+- `(eh-state N)`: statement; the calls after it unwind to pad N (0: none).
 - `(eh-pad N CLEANUP (TID ...) STMT ...)`: function level, after the body; the pad's catch clauses' type ids (the action
-  chain) and whether it also cleans up.
-- `(eh-resume)`: statement in pad code.
+  chain) and whether it also cleans up. Its code ends in a jump to a handler's label, `std::terminate`, or
+  `(eh-resume EXC)`.
 
-The SSA builder (`scripts/pathb-ssa.rb`) splits blocks at `(eh-state N)`: each block knows its pad. The state of a
-branch starts as the state at the `if`; after the join it is the state at the end of the branch that falls through. A
-conditional temporary's region tests its flag, so the state after a `?:` that constructed one on a single path is safe.
+`throw()` and `noexcept` are both `(eh-noexcept)`: a call with no pad has no call-site entry, so an exception that
+reaches it calls `std::terminate`, and a pad of such a function cleans up and then calls it. With `(eh-spec ...)`
+every state has a pad, so the specification's filter (the last record of each action chain) is seen; the pad calls
+`__cxa_call_unexpected` on a negative selector.
+
+### The SSA builder (`scripts/pathb-ssa.rb`)
+
+A block has one state. `(eh-state N)` after an instruction begins a block; a block begins in the state of the first
+reached block that jumps to it, so the code after an `if` whose branch returned from inside a cleanup region is in the
+state the other path brought. (EDG also writes the enclosing state again at the end of each block, after a `return`.)
+
+The pads' code runs in a terminate state (`(eh-unwind 0)`: a destructor that throws during the unwind calls
+`std::terminate`), and the `_Unwind_Resume` call is in a block of its own with the default state (its call site passes the
+exception on). Each SSA block says its state with `(eh-unwind B)`.
 
 ### Values across the unwind edge
 
 There is no CFG edge from a call to its landing pad (the unwinder makes the transfer, mid-call), so no SSA value and no
-phi can travel along it. Pads and the code they reach read only stack slots and values they compute themselves; the
-builder keeps those slots in memory, and QBE does not promote or share the slots of a function with pads.
+phi can travel along it. The function's entry is an empty block whose terminator, `(eh-entry BODY PAD...)`, has the pads
+as successors too: for every analysis (the SSA builder's, the e-graph pass's) a pad is dominated only by that empty
+block, so no value of the body reaches it and no memory fact flows into it. QBE gets `jmp @BODY`. A promoted slot that is
+live into a pad (read on some path from the pad before it is written) stays in memory, as across a `setjmp`.
+
+QBE's own passes must keep the invariant too: its GVN merges equal instructions anywhere and lets GCM place the one
+copy, which put a value shared by the body and a pad where both see it (live into the pad, in a register the allocator
+assigns without the call's location). In a function with pads GVN merges only into a dominating instruction.
 
 ### QBE (`take-cheeze/qbe`, branch `nfcxx/eh-tables`)
 
-- `ehtype ID $sym | ehtype ID 0`, `ehnoexcept`, `ehpad CLEANUP ID...`, `ehunwind @pad | ehunwind 0` (std::terminate).
+- `ehtype ID $sym | ehtype ID 0`, `ehnoexcept`, `ehspec ID...`, `ehpad CLEANUP ID...`, `ehunwind @pad | ehunwind 0`
+  (std::terminate).
 - The LSDA has one call site per call: its block's pad and the pad's action chain, no pad (the exception passes
-  through), or no entry (std::terminate). It has an action table and a type table with `DW.ref` indirections, as gcc's.
+  through), or no entry (std::terminate). It has an action table, a type table with `DW.ref` indirections and the
+  specification list, as gcc's. A leaf function has no table (nothing unwinds through it).
 - Pads are dominated by the entry and reached by no jump; liveness flows from each call into its pad; `simplcfg` keeps
-  blocks with different unwind targets apart; a function with pads keeps its frame and its stack slots.
+  blocks with different unwind targets apart; a function with pads keeps its frame and its stack slots. Tested on
+  x86-64 ELF; the arm64 emitter marks call sites and pads too, untested; rv64 has no tables.
+
+### The EDG fork (`NFCXX_ITANIUM_EH_TYPEINFO`, set with `PATHB_EH=tables`)
+
+EDG's tables describe a pointer by a flag and the pointed-to type's typeinfo (its own runtime's format); libstdc++'s
+personality matches a pointer's own `__pointer_type_info`. With the switch, a catch clause of pointer type names the
+pointer type's typeinfo, a throw makes the thrown type's own typeinfo (`std::nullptr_t` has none otherwise), and the
+destructor a throw passes is the complete-object one (the subobject destructor of a class with virtual bases takes a VTT).
 
 ### Runtime (`be/nfcxx_ehrt.c`)
 
@@ -74,7 +102,30 @@ builder keeps those slots in memory, and QBE does not promote or share the slots
 a landing pad (gcc's `__builtin_eh_pointer`), so the wrapper keeps the exception and the selector in thread-local
 storage when it installs a pad, and the pad reads them first (`__nfcxx_eh_ptr`, `__nfcxx_eh_sel`). The program links
 libstdc++ and not `libC.a`: `libC.a` defines its own IA-64 RTTI vtables and `__cxa_vec_*`, which libstdc++'s personality
-cannot use.
+cannot use. No EH shim either: an exception thrown by libstdc++ is already one of ours.
+
+### The IR passes (`scripts/pathb-ir-opt.rb`)
+
+A function with exception tables is not inlined (its pads and states are its own, and a `noexcept` callee's calls would
+lose their `std::terminate`). A function without them inlines as before: its calls get the state of the call site.
+
+## Tests
+
+`tests/pathb-eh-tables/run.sh` (needs a `PATHB_EH=tables` harness and the QBE branch): this mode's probes (region-table
+cleanups compared with g++'s output: conditional temporaries, `new` with a throwing constructor, partially built arrays
+and objects, a local static whose initializer throws, temporaries of a full expression; exceptions across g++-compiled
+code in both directions; `noexcept`), and the EH probes of the frames mode (`tests/pathb-qbe/{cases,traps}/eh_*.cpp`,
+`tests/cases/eh_*.cpp`). 19 programs, all pass, through the IR passes, the e-graph pass and QBE's optimizations.
+
+## Known gaps
+
+- A dynamic exception specification of a pointer type is refused (unsupported): EDG makes no typeinfo of the pointer
+  type itself for it.
+- When an exception leaves a full expression that built argument temporaries, EDG destroys them in construction order,
+  not in reverse. The frames mode does the same (it is EDG's region table), so this is no change.
+- The driver (`nfcxx`, `scripts/pathb-cc.rb`) does not select the mode or link its runtime yet; `tests/pathb-eh-tables`
+  links by hand.
+- Targets: tested on x86-64 Linux only (arm64 untested, rv64 and Apple without tables).
 
 ## Measured so far
 
