@@ -462,14 +462,26 @@ for loop_rec in ${loop_recs[@]+"${loop_recs[@]}"}; do
 done
 shift $#
 # END the argument loop
-[ $((ncpp + nobj + ${#cfiles[@]} + stdin_src)) -gt 0 ] || { echo "nfcxx: no input files" >&2; exit 2; }
-# --emit-hip: the .cu input as HIP source on stdout, for hipcc (tools/cuda-rewrite --hip). Nothing is compiled, and the
-# -I, -D and -U options go to the rewriter as they go to the host copy.
-if [ "${emit_hip:-0}" = 1 ]; then
-  [ ${#cu_inputs[@]} = 1 ] || { echo "nfcxx: --emit-hip takes one .cu file" >&2; exit 2; }
-  hip_opts=(); for f in ${cflags[@]+"${cflags[@]}"}; do case $f in -I*|-D*|-U*) hip_opts+=("$f");; esac; done
-  exec "$root/build/cuda-rewrite" --hip ${hip_opts[@]+"${hip_opts[@]}"} "${cu_inputs[0]}"
-fi
+# The early exits: the refusals of the state above and the --emit-hip route are scripts/nfcxx-early-exit.rb's (pre: status 2 is a
+# refusal, its message on stderr; status 3 is the route). early_records gives the state as records.
+early_rec() { printf 's%s\0' "$1"; }
+early_records() {
+  local kv
+  for kv in "ncpp=$ncpp" "nobj=$nobj" "cfiles_n=${#cfiles[@]}" "cu_n=${#cu_inputs[@]}" "stdin_src=$stdin_src" \
+    "emit_hip=${emit_hip:-0}" "compile_only=$compile_only" "emit_c=$emit_c" "xlang=$xlang" "depmode=$depmode" \
+    "dialect=$dialect" "edg=$edg"; do
+    early_rec "$kv"
+  done
+}
+early_status=0; "${RUBY:-ruby}" "$root/scripts/nfcxx-early-exit.rb" pre < <(early_records) || early_status=$?
+case $early_status in
+  0) ;;
+  3)  # --emit-hip: the .cu input as HIP source on stdout, for hipcc (tools/cuda-rewrite --hip). Nothing is compiled, and the
+      # -I, -D and -U options go to the rewriter as they go to the host copy.
+    hip_opts=(); for f in ${cflags[@]+"${cflags[@]}"}; do case $f in -I*|-D*|-U*) hip_opts+=("$f");; esac; done
+    exec "$root/build/cuda-rewrite" --hip ${hip_opts[@]+"${hip_opts[@]}"} "${cu_inputs[0]}" ;;
+  *) exit $early_status ;;
+esac
 # SYCL kernel integration (docs/notes/sycl-kernel-builtins.md). A -c compile of one C++ source that includes the oneAPI SYCL
 # headers (a -I directory holding sycl/detail/kernel_desc.hpp) runs in two passes, as the real toolchain's integration headers
 # do. Pass 1 (NFCXX_SYCL_DUMP) records each kernel's stable name, closure size and parameters; scripts/sycl-integration-header.rb
@@ -489,27 +501,29 @@ trace_unit=${srcs[0]-$out}; export NFCXX_TRACE_UNIT=$trace_unit   # the back-end
 [ -z "$trace" ] || trace_begin "$trace"
 cu_prepare
 cpp2_prepare
+# preprocess_records: the state of the -E command line, as NUL-terminated records for scripts/nfcxx-preprocess.rb (s NAME=VALUE for
+# the scalars; e, c, d, i and r for the ppflags, cflags, sysdirs, forced includes and sources).
+preprocess_records() {
+  local a
+  pp_rec() { printf '%s\0' "$1$2"; }
+  pp_rec s "host=${NFCXX_CXX:-g++}"; pp_rec s "std=$std"; pp_rec s "xlang=$xlang"; pp_rec s "outset=$outset"
+  pp_rec s "out=$out"; pp_rec s "stdin_src=$stdin_src"
+  for a in ${ppflags[@]+"${ppflags[@]}"}; do pp_rec e "$a"; done
+  for a in ${cflags[@]+"${cflags[@]}"}; do pp_rec c "$a"; done
+  for a in ${sysdirs[@]+"${sysdirs[@]}"}; do pp_rec d "$a"; done
+  for a in ${preinc[@]+"${preinc[@]}"}; do pp_rec i "$a"; done
+  for a in ${srcs[@]+"${srcs[@]}"}; do pp_rec r "$a"; done
+}
 if [ $preprocess = 1 ]; then
-  # -E: the host C++ compiler preprocesses, as nfcc does for C (build systems run the compiler this way).
-  hostcxx=${NFCXX_CXX:-g++}
-  pp_out=(); [ $outset = 0 ] || pp_out=(-o "$out")
-  pp_x=(); [ -z "$xlang" ] || pp_x=(-x "$xlang")
-  pp_in=(); [ $stdin_src = 0 ] || pp_in=(-)
-  pp_pre=(); for f in ${preinc[@]+${preinc[@]+"${preinc[@]}"}}; do pp_pre+=(-include "$f"); done
-  exec "$hostcxx" -E "-std=${std#--}" ${pp_x[@]+${pp_x[@]+"${pp_x[@]}"}} ${ppflags[@]+${ppflags[@]+"${ppflags[@]}"}} ${cflags[@]+${cflags[@]+"${cflags[@]}"}} \
-    ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"} ${pp_pre[@]+${pp_pre[@]+"${pp_pre[@]}"}} ${srcs[@]+${srcs[@]+"${srcs[@]}"}} ${pp_in[@]+${pp_in[@]+"${pp_in[@]}"}} ${pp_out[@]+"${pp_out[@]}"}
+  # -E: the host C++ compiler preprocesses, as nfcc does for C (build systems run the compiler this way). The command line is
+  # scripts/nfcxx-preprocess.rb's, from the records of preprocess_records.
+  preprocess_argv=(); while IFS= read -r -d "" pp_arg; do preprocess_argv+=("$pp_arg"); done < <(preprocess_records | "${RUBY:-ruby}" "$root/scripts/nfcxx-preprocess.rb")
+  [ ${#preprocess_argv[@]} -gt 0 ] || { echo "nfcxx: scripts/nfcxx-preprocess.rb planned no command" >&2; exit 2; }
+  exec "${preprocess_argv[@]}"
 fi
-if [ $stdin_src = 1 ]; then
-  echo "nfcxx: a source on stdin is supported only with -E" >&2; exit 2
-fi
-case $xlang in ""|c++|none) ;; *) echo "nfcxx: -x $xlang: only C++ sources (use nfcc for C)" >&2; exit 2 ;; esac
-if [ -n "$depmode" ] && [ $compile_only = 0 ]; then
-  echo "nfcxx: $depmode needs -c (dependency files are written for a compile only)" >&2; exit 2
-fi
-if [ $ncpp -gt 0 ] || [ $emit_c = 1 ] || { [ $nobj -gt 0 ] && [ ${#cfiles[@]} = 0 ]; }; then
-  [ -x "$edg/eccp" ] || { echo "nfcxx: EDG not built; run scripts/setup-edg.sh" >&2; exit 2; }
-fi
-case $dialect in g++|clang) ;; *) echo "nfcxx: unknown dialect '$dialect'" >&2; exit 2 ;; esac
+# The refusals after the -E route (stdin without -E, -x, dependency files without -c, the EDG build, the dialect): the same planner.
+early_status=0; "${RUBY:-ruby}" "$root/scripts/nfcxx-early-exit.rb" post < <(early_records) || early_status=$?
+[ $early_status = 0 ] || exit $early_status
 # C++ modules (docs/notes/modules.md). A program whose sources declare or import a module is built by mod_build_program, which
 # runs this driver once per source. A compile gets the module options: --modules, the directory of the interface files (BMIs,
 # --module-dir, else the directory of -o) and, for an interface unit, the BMI it writes.
@@ -869,22 +883,26 @@ fi
 # a hit back beside the output, and the store of the object just built. The bash runs Ruby only when the cache is on.
 # cache_check is the lookup and the hit (exit 0 on a hit); cache_store stores the object just built when the cache is in use
 # and has no entry for it yet. The remote tier (NFCXX_CACHE_REMOTE=gha) is scripts/nfcxx-cache-io.rb, called from here.
+# cache_plan: prints the lookup's options, NUL-separated: the records of this compile (scripts/nfcxx-cache-plan.rb turns them into
+# the options; the command arguments without the cache options, the host preprocessor's -std, cflags, forced includes and sysdirs)
+cache_plan() {
+  local a
+  cache_rec() { printf '%s\0' "$1$2"; }   # cache_rec KIND PAYLOAD: one record
+  cache_rec o "cache-dir=$cache_dir"; cache_rec o "cache-log=$cache_log_file"; cache_rec o "out=$out"; cache_rec o "src=${srcs[0]-}"; cache_rec o "cwd=$PWD"
+  cache_rec v "backend=$backend"; cache_rec v "compile_only=$compile_only"; cache_rec v "ncpp=$ncpp"; cache_rec v "outset=$outset"; cache_rec v "nobj=$nobj"
+  cache_rec v "modules=$modules"; cache_rec v "preprocess=$preprocess"; cache_rec v "stdin_src=$stdin_src"; cache_rec v "depmode=$depmode"
+  cache_rec v "cfiles_n=${#cfiles[@]}"; cache_rec v "cu_n=${#cu_inputs[@]}"; cache_rec v "cpp2_n=${#cpp2_inputs[@]}"
+  for a in ${nfcxx_argv[@]+"${nfcxx_argv[@]}"}; do cache_rec a "$a"; done
+  cache_rec s "$std"
+  for a in ${cflags[@]+"${cflags[@]}"}; do cache_rec f "$a"; done
+  for a in ${preinc[@]+"${preinc[@]}"}; do cache_rec p "$a"; done
+  for a in ${sysdirs[@]+"${sysdirs[@]}"}; do cache_rec d "$a"; done
+}
 cache_check() {  # cache_check: sets cache_entry (empty when the cache does not apply) and exits 0 on a hit
 cache_entry=""
 [ -n "$cache_dir" ] || return 0   # the cache is off: no Ruby is started
-local f a look decision state key pre=() cpp=() opts=() key_argv=()
-for a in ${nfcxx_argv[@]+"${nfcxx_argv[@]}"}; do
-  case $a in --cache=*|--cache-log=*|--time-log=*|--trace=*) ;; *) key_argv+=("$a") ;; esac
-done
-for f in ${preinc[@]+"${preinc[@]}"}; do pre+=(-include "$f"); done
-# the host preprocessor's arguments (its -M command line, after -M and before the source)
-cpp=("-std=${std#--}" ${cflags[@]+"${cflags[@]}"} ${pre[@]+"${pre[@]}"} ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"})
-opts=(--cache-dir="$cache_dir" --cache-log="$cache_log_file" --out="$out" --src="${srcs[0]-}" --cwd="$PWD"
-      --var=backend="$backend" --var=compile_only="$compile_only" --var=ncpp="$ncpp" --var=outset="$outset"
-      --var=nobj="$nobj" --var=modules="$modules" --var=preprocess="$preprocess" --var=stdin_src="$stdin_src"
-      --var=depmode="$depmode" --var=cfiles_n="${#cfiles[@]}" --var=cu_n="${#cu_inputs[@]}" --var=cpp2_n="${#cpp2_inputs[@]}")
-for a in "${key_argv[@]+"${key_argv[@]}"}"; do opts+=(--arg="$a"); done
-for a in "${cpp[@]+"${cpp[@]}"}"; do opts+=(--cpp="$a"); done
+local f a look decision state key rec opts=()
+while IFS= read -r -d "" rec; do opts+=("$rec"); done < <(cache_plan | "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-plan.rb")
 # lookup: the --cache-log block (when there is a log) and the last line, "hit KEY" or "miss KEY"; nothing when not cached
 look=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cache.rb" lookup "${opts[@]}") || return 0
 [ -n "$look" ] || return 0

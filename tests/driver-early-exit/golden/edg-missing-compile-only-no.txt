@@ -1,0 +1,4 @@
+stdout:
+status=2
+stderr:
+nfcxx: EDG not built; run scripts/setup-edg.sh

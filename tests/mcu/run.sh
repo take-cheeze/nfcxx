@@ -30,6 +30,8 @@ while IFS== read name val; do
     sz_ptr) e='sizeof(void *)';;  sz_long) e='sizeof(long)';;  sz_ll) e='sizeof(long long)';;
     sz_wchar) e='sizeof(int)';;  sz_size_t) e='sizeof(unsigned long)';;
     al_ll) e='_Alignof(long long)';;  al_dbl) e='_Alignof(double)';;
+    sz_ld) e='sizeof(long double)';;  al_ld) e='_Alignof(long double)';;
+    sz_LD) e='sizeof(struct LD)';;
     sz_*) e="sizeof(struct ${name#sz_})";;  al_*) e="_Alignof(struct ${name#al_})";;
     off_*) s=${name#off_}; e="__builtin_offsetof(struct ${s%_*}, ${s##*_})";;
   esac

@@ -1983,6 +1983,31 @@ end
     uses.map { |u| [rel, u, u + pname.size] }
   end
 
+  # onig_foreach_name(reg, cb, arg): the callback cb (a static function of this file, with no other use but the call) is threaded
+  # with the mruby state as its first argument; the call passes it through a trampoline (see onig_foreach_special)
+  def onig_foreach_calls
+    out = []
+    @files.each do |rel, f|
+      masked = f['masked']
+      text = f['text']
+      finditer(/(?<![#{WC}$.>])onig_foreach_name#{SS}\(/, masked).each do |m|
+        s0 = m.begin(0)
+        open = m.end(0) - 1
+        close = match_close(masked, open)
+        next if close < 0
+        args = split_args(masked, open, close)
+        next unless args.size == 3
+        cb_a, cb_b = args[1]
+        cb = psl(text, cb_a, cb_b).strip
+        next unless cb.match?(/\A[A-Za-z_][#{WC}]*\z/)
+        d = (@defs[cb] || []).select { |x| x['file'] == rel }
+        next unless d.size == 1 && d[0]['storage'].to_s.split.include?('static') && d[0]['po']
+        out << { rel: rel, cb: cb, cb_pos: cb_a + text[cb_a...cb_b].to_s.index(cb).to_i, call: s0, open: open, close: close, def: d[0] }
+      end
+    end
+    out
+  end
+
   def hash_foreach_calls
     out = []
     @files.each do |rel, f|
@@ -2618,6 +2643,9 @@ data_make_calls_all.each do |rel, pos, mk_name, fr_name, mk_pos, fr_pos|
 end
     # rb_hash_foreach callbacks are threaded (see hash_foreach_calls): forced into the needs set, with their call positions
     @hash_calls = hash_foreach_calls
+    @onig_calls = onig_foreach_calls
+    @onig_calls.each { |c| forced << c[:cb] }
+    @onig_cb_pos = Set.new(@onig_calls.map { |c| [c[:rel], c[:cb_pos]] })
     @ensure_calls = ensure_calls
     @ensure_calls.each { |c| forced << c[:b] << c[:ecb] }
     @ensure_cb_pos = Set.new(@ensure_calls.flat_map { |c| [[c[:rel], c[:bpos]], [c[:rel], c[:epos]]] })
@@ -2869,6 +2897,7 @@ use_problem = lambda do |name, use|
   next nil if !direct && (@fnptr_assign_pos || Set.new).include?([rel, s])
   next nil if !direct && @dtype_cb_pos.include?([rel, s])
   next nil if !direct && (@hash_cb_pos || Set.new).include?([rel, s])
+  next nil if !direct && (@onig_cb_pos || Set.new).include?([rel, s])
   next nil if !direct && ((@ensure_cb_pos || Set.new).include?([rel, s]) || (@rescue_cb_pos || Set.new).include?([rel, s]))
   # the first argument of rb_protect is called synchronously with the mrb_func_t shape (mrb, data), which a
   # threaded helper has; it is a value use that may take mrb (api_map.json rb_protect)
@@ -2996,6 +3025,7 @@ use_problem = lambda do |name, use|
       next nil if ($method_scope_fns || Set.new).include?(name)
       # a callback passed to rb_hash_foreach / rb_ivar_foreach is converted by that call (the callback takes mrb)
       next nil if !direct && (@hash_cb_pos || Set.new).include?([rel, s])
+      next nil if !direct && (@onig_cb_pos || Set.new).include?([rel, s])
       macro = fn.nil? && direct ? define_at(rel, s) : nil
       if fn.nil?
         # a function address in a file-scope table (an initializer of a variable of this file) runs only when the table is
@@ -6243,6 +6273,47 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     }
   C
 
+  # onig_foreach_name(reg, cb, arg) -> (nfcx_onig_mrb = mrb, onig_foreach_name(reg, nfcx_tramp_cb, arg)): the trampoline calls cb with
+  # the state first, and cb takes mrb (it is threaded like a helper: see onig_foreach_calls)
+  def onig_foreach_special(rel, s, nxt, called)
+    unless called
+      refuse(rel, s, 'onig_foreach_name', 'used without a call')
+      return
+    end
+    rec = (@onig_calls || []).find { |c| c[:rel] == rel && c[:call] == s }
+    if rec.nil?
+      refuse(rel, s, 'onig_foreach_name', 'the callback is not a static function of this file with no other use (not supported)')
+      return
+    end
+    fn = enclosing_func(rel, s)
+    dpre = define_at(rel, s)
+    at = dpre ? dpre[1] : (fn && fn['hstart'])
+    unless at
+      refuse(rel, s, 'onig_foreach_name', 'the trampoline this call needs has no place before it (not in a function or a macro)')
+      return
+    end
+    cb = rec[:cb]
+    tramp = "nfcx_tramp_#{cb}"
+    ed = @edits[rel]
+    @prelude_done ||= Set.new
+    unless @prelude_done.include?([rel, 'nfcx_onig'])
+      @prelude_done << [rel, 'nfcx_onig']
+      ed.add(at, at, "static mrb_state *nfcx_onig_mrb;\n")
+    end
+    unless @prelude_done.include?([rel, tramp])
+      @prelude_done << [rel, tramp]
+      ed.add(at, at, "static int #{tramp}(const OnigUChar *name, const OnigUChar *name_end, int back_num, int *back_refs, " \
+                     "OnigRegex regex, void *arg) {\n  return #{cb}(nfcx_onig_mrb, name, name_end, back_num, back_refs, regex, arg);\n}\n")
+    end
+    ed.drop(ed.overlapping(rec[:cb_pos], rec[:cb_pos] + cb.length))
+    ed.add(rec[:cb_pos], rec[:cb_pos] + cb.length, tramp)
+    ed.drop(ed.overlapping(s, s + 'onig_foreach_name'.length))
+    ed.add(s, s + 'onig_foreach_name'.length, "(nfcx_onig_mrb = #{mrb_tok(rel, s)}, onig_foreach_name")
+    ed.add(rec[:close] + 1, rec[:close] + 1, ')')
+    rewrite(rel, s, 'onig_foreach_name', "(nfcx_onig_mrb = mrb, onig_foreach_name(..., #{tramp}, ...))",
+            'the callback takes the mruby state (threaded like a helper); the trampoline passes it, and the state is stored for the call')
+  end
+
   def struct_variadic_special(rel, s, nxt, called, name)
     unless called
       refuse(rel, s, name, 'used without a call')
@@ -6533,6 +6604,10 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     end
     if name == 'rb_ary_new3'
       ary_new3_special(rel, s, nxt, called)
+      return
+    end
+    if name == 'onig_foreach_name'
+      onig_foreach_special(rel, s, nxt, called)
       return
     end
     if %w[rb_struct_define rb_struct_new].include?(name)
