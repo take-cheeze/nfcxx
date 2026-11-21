@@ -102,9 +102,18 @@ class CodeGen
     # The instance methods this body has registered so far: an alias may name only one of them (its old name must exist
     # when the unit runs, and the gem's own registrations come after the units).
     registered = Set.new
+    # LITERAL_TABLES (codegen_literal_tables.rb): only the plain instruction texts the loop below emits are modelled.
+    literal = literal_table_plan(irep, freeze_send: true, claimed: lambda do |_addr, i|
+      folded_away.include?(i) || folds.key?(i) || bodies.key?(i) || literal_length_send?(program, irep, i) ||
+        literal_native_send?(program, irep, i)
+    end)
     program.each_source do |insn, idx|
-      next if paired_exec.include?(idx) && insn.op == :EXEC || folded_away.include?(idx)
+      next if paired_exec.include?(idx) && insn.op == :EXEC || folded_away.include?(idx) || literal.skip.include?(idx)
 
+      if (glue = literal.glue[idx])
+        lines << glue
+        next
+      end
       lines << folds[idx][:code] if folds.key?(idx)
       if bodies.key?(idx)
         child_path = child_body_path(program, irep, idx, owner)
@@ -716,3 +725,4 @@ class CodeGen
 end
 
 require_relative 'codegen_class_fold'
+require_relative 'codegen_literal_tables'

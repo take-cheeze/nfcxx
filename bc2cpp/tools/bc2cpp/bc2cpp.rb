@@ -1540,6 +1540,13 @@ BC2CPP_MAIN = lambda do
   # OTHER_OWNERS: classes another gem's run compiles and exposes (with
   # OTHER_DECLS_HEADER); see compile_send.
   other_owners = ENV['OTHER_OWNERS']&.split(',')
+  # Set before codegen: LITERAL_TABLES (codegen_literal_tables.rb) spells its Symbols with the same macros.
+  # PRESYM_SYMBOL (symbol_cache.rb): the names mruby's presym table has, as the build's id.h enum spells them.
+  if (presym_header = ENV['BC2CPP_PRESYM_HEADER']) && File.file?(presym_header)
+    SymbolCache.presym_names = File.read(presym_header).scan(/^\s*MRB_SYM__([A-Za-z_]\w*) = \d+,?$/).flatten.to_set
+  end
+  # PRESYM_ALL (symbol_cache.rb): a real gem build's presym scan reads this output. BC2CPP_PRESYM_ALL=0 keeps the table.
+  SymbolCache.presym_all = ENV['BC2CPP_PRESYM_ALL'] != '0' && BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol }
   compiled = profile_call.call('CodeGen.compile_all') do
     gen.compile_all(only_owners: only_owners, other_owners: other_owners, live_labels: main_reach&.labels)
   end
@@ -3027,12 +3034,6 @@ BC2CPP_MAIN = lambda do
   end
   # SYMBOL_CACHE: rewrite every function first, so the table is complete before
   # it is printed ahead of the code that uses it.
-  # PRESYM_SYMBOL (symbol_cache.rb): the names mruby's presym table has, as the build's id.h enum spells them.
-  if (presym_header = ENV['BC2CPP_PRESYM_HEADER']) && File.file?(presym_header)
-    SymbolCache.presym_names = File.read(presym_header).scan(/^\s*MRB_SYM__([A-Za-z_]\w*) = \d+,?$/).flatten.to_set
-  end
-  # PRESYM_ALL (symbol_cache.rb): a real gem build's presym scan reads this output. BC2CPP_PRESYM_ALL=0 keeps the table.
-  SymbolCache.presym_all = ENV['BC2CPP_PRESYM_ALL'] != '0' && BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol }
   symbol_table = SymbolCache::Table.new
   print gen.emit_structs
   warn InitializerTables::PREFIX + JSON.generate(gen.initializer_table_evidence(compiled, InitializerTables.direct_candidate_keys(compiled, ireps, registry)))
