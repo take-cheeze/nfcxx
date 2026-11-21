@@ -1,0 +1,4 @@
+== -c m.cpp --cache=CACHE --cache-log=LOG -o m.o --backend=gcc
+-- stdout
+-- stderr
+status=0

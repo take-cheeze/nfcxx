@@ -15,8 +15,8 @@ Checked against origin/main after #1432 (the compile cache's lookup planner).
   second-pass helper (`scripts/nfcxx-second-pass.rb`, #1372), temporary-directory leak fix (#1364), trace exit status (#1378),
   Path B dispatch with CHECK and STORE lines (#1387), the switch (#1402), and the compile cache's lookup planner
   (`scripts/nfcxx-cache-plan.rb`, #1432).
-- The frozen body still does these in bash, and the Ruby driver calls them through the body: argument records (read into bash
-  variables), `--emit-hip`, the SYCL check and run, the `-x` and `-MD` checks, the module block (`mod_build_program`), the
+- The frozen body still does these in bash, and the Ruby driver calls them through the body: argument records (now evaluated from
+  `scripts/nfcxx-loop.rb --bash-state`), `--emit-hip`, the SYCL check and run, the `-x` and `-MD` checks, the module block (`mod_build_program`), the
   backend choice and host probes (`default_backend`, `pb_fs_host`, the uname checks), sanitizers, `instantiate`, `cosmo`,
   `freestanding`, the trace unit, `cu_prepare`, `cpp2_prepare`, the cache hit and store (`cache_check`, `cache_store`), the
   eccp call (`eccp_plan`, its trap and its trace span), the depmode step, the CUDA host-symbol second pass, and the second run
@@ -29,7 +29,10 @@ Checked against origin/main after #1432 (the compile cache's lookup planner).
 
 The body can be deleted only when the Ruby driver runs every stage without it. In order:
 
-1. **Argument records.** Read the planner's records (`scripts/nfcxx-loop.rb`) in Ruby, not into bash variables.
+1. **Argument records.** Done for the body's variables: the body evals `scripts/nfcxx-loop.rb --bash-state`, which prints the
+   state as bash statements and the refusals itself (status 2, or status 1 for a missing value or an unfinished loop). The
+   loop still runs in the body, after its pre-loop steps (`-fsyntax-only`, `--bundle-*`, `--cuda-driver=`, `set --`), so
+   its arguments are the body's. Moving the call up to `scripts/nfcxx.rb` needs those steps ported first.
 2. **Early exits.** `--emit-hip`, the SYCL check and run, the `-x` and `-MD` checks, and the module block.
 3. **Setup.** The backend choice, sanitizers, `instantiate`, `cosmo`, `freestanding`, host probes and the trace unit.
    Most of the decisions are already in the planners; the bash only calls them.

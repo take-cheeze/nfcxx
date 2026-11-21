@@ -1,0 +1,25 @@
+# argument lists for the argument loop's state handoff (run.sh): one list per line, words split on spaces (no quoting).
+# Each runs nfcxx in a fresh directory holding m.cpp, k.cu and p.cpp2, with TMPDIR of its own. The golden is the stdout,
+# stderr and status of each (golden/NN.txt), normalized (run.sh).
+-c m.cpp -o m.o
+m.cpp -o m --backend=gcc
+-c m.cpp -o
+-c m.cpp -I
+-x
+-o m m.cpp -fuse-ld=nosuch
+-c m.cpp -fuse-ld=nosuch -o m.o
+-c m.cpp -fuse-ld=gold -o m.o
+-c m.cpp --bogus-flag -o m.o
+-E m.cpp
+-c m.cpp --emit-c -o m.o
+--emit-hip -c k.cu
+-c k.cu -o k.o
+-c p.cpp2 -o p.o
+-x c++ -c m.cpp -o m.o
+-fsyntax-only m.cpp
+-c m.cpp --cache=CACHE -o m.o
+-c m.cpp --cache=CACHE --cache-log=LOG -o m.o --backend=gcc
+-c m.cpp --instantiate=bogus -o m.o
+-c m.cpp --promote-slots=maybe -o m.o
+-c m.cpp -fsanitize=bogus -o m.o
+-c m.cpp --keep-intermediates -o m.o
