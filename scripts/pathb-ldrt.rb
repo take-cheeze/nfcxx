@@ -35,7 +35,10 @@ out = env("PATHB_LDRT_OUT") || "#{root}/build/pathb-ldrt-cosmo" if cc_bin.includ
 src = "#{root}/be/nfcxx_ldrt.c"
 ehsrc = "#{root}/be/nfcxx_ehrt.c"
 lib = "#{out}/libnfcxxld.a"
-if !File.file?(lib) || [src, ehsrc].any? { |f| File.exist?(f) && File.mtime(f) > File.mtime(lib) }
+# rebuilt when a source is newer, and when an archive of before the wrapper lacks its member
+stale = !File.file?(lib) || [src, ehsrc].any? { |f| File.exist?(f) && File.mtime(f) > File.mtime(lib) } ||
+        !IO.popen(["ar", "t", lib], &:read).split("\n").include?("nfcxx_ehrt.o")
+if stale
   FileUtils.mkdir_p(out)
   tmp = IO.popen(["mktemp", "-d", "#{out}/.tmp.XXXXXX"], &:read).sub(/\n+\z/, "")
   exit($?.exitstatus || 1) unless $?.success?
