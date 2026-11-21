@@ -600,12 +600,14 @@ class CodeGen
     lines.compact.reject(&:empty?).join("\n") + "\n"
   end
 
-  # A `send`-family call without a literal block (a forwarded `&blk` included), in any argument shape.
+  # A call without a literal block (a forwarded `&blk` included), in any argument shape: a `send`-family call, whose first
+  # argument is the method name, or a blockless call of a yielding name (blockless_yielding_send?), whose name is fixed.
   def resumable_dyn_send_insn(insn)
     shape = dyn_call_shape(insn)
     recv = %i[SSEND SSENDB].include?(insn.op) ? 'self' : "r#{shape[:dest]}"
     block_value = %i[SENDB SSENDB].include?(insn.op) ? "bc2cpp_env_block(M, r#{shape[:blk_reg]})" : 'mrb_nil_value()'
-    resumable_dyn_site(recv, shape[:dest], shape[:n], block_value, splat_reg: shape[:argv_reg], kw: shape[:kw])
+    name = DYN_SEND_NAMES.include?(insn.sym) ? nil : insn.sym
+    resumable_dyn_site(recv, shape[:dest], shape[:n], block_value, name: name, splat_reg: shape[:argv_reg], kw: shape[:kw])
   end
 
   # DYN_SUPER: `super(args)` in a method step; the block is the register after the arguments (OP_SUPER's R(a+n+1)).
