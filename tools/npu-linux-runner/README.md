@@ -241,3 +241,24 @@ fast path off (so every mode runs the general path), p50 in ms:
 All modes cost the same within about 2 %, so the general path's cost does not depend on the mode. Only modes 0,
 1 and 14 match the copy-style expected tile; the others are timing-only (their outputs are not checked here). The
 copy-mode fast path is therefore the only mode-specific saving so far.
+
+## Correction: native dispatch and the fixture check
+
+The earlier "nested dispatch fault" finding was wrong. The device runs the tree correctly. The problem was my
+flattening: it mapped native n to `nr_row_n`, but the emitted tree is not the identity above native 12
+(native 13 runs `nr_row_10`, native 14 runs `nr_row_13`, native 22 runs `nr_row_21`, and so on). Native 60 is
+row 22 after `native -= 38`, which the tree sends to `nr_row_21`. The solid-colour results in the earlier table
+came from `nr_row_22` (the wrong row for native 60), and the textured result (native 39, row 1) is valid.
+
+`frame/flat_dispatch.py` now evaluates the tree (`frame/flat_vertex.py` provides the walker) and emits the
+mapping it encodes. `frame/flat_vertex.py` also flattens `nr_native_vs` the same way (it was not needed for the
+fixtures, but the tree is checked for exclusivity).
+
+`frame/fixtures_check.py` runs npu-render's own fixtures on the NPU and compares each output with the host
+reference: `frame_kernel_test --fixtures` writes 222 spans (captured DWM programs as quads, split windows,
+transparent textures, loads, fills and a rejected header) with their reference outputs. With the corrected
+mapping all 222 match bit for bit. The blob's second shave invocation writes only a rejected header to the upper
+half of the buffer, so the check compares the rendered half exactly and requires the rest to be that header.
+
+Per-span time on the NPU (p50, 10 inferences): the slowest real-shader fixtures are about 3.25 s
+(`e3ebf67c`), 0.25 s (`ec1e65f6`) and 0.2 s (`2a28d3fe`); fills and most light shaders are a few milliseconds.
