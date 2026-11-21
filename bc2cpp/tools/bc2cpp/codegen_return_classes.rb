@@ -58,6 +58,7 @@ class CodeGen
 
       @cg.numeric_class_bit(klass)
     end
+    def keyword_mask(irep, insn) = @cg.declared_keyword_mask(irep, insn)
     def keyword_presence(_insn)
       return NumericFlow::OTHER unless @cg.immediate_class_bits_enabled?
 

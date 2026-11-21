@@ -78,6 +78,8 @@ class CodeGen
   # compiles it (the resumable paths call this too).
   def compile_insn_op(insn, irep, owner_def, idx = nil, reg_offset = 0)
     code = compile_insn_op_plain(insn, irep, owner_def, idx, reg_offset)
+    # DECLARED_KEYWORD_PARAM: the value KARG just wrote, checked before anything reads it.
+    return code + declared_keyword_guard_statement(irep, insn, RegName[insn.reg]) if insn.op == :KARG && irep && code.is_a?(String)
     return code unless code.is_a?(String) && idx && irep
 
     if insn.op == :SEND && %w[<< push unshift].include?(insn.sym.to_s)

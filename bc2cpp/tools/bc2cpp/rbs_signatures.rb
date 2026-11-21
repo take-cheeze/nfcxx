@@ -23,10 +23,10 @@ require_relative 'rbs_ir_contracts'
 #            positional parameters and one overload; `@ivar: T`; `attr_reader/attr_accessor name: T` (an ivar type).
 #            Types: Integer (fixnum) and Symbol (embedding hints), Array / Hash (container hints), Array[C] / Hash[K, C]
 #            (element class C), and any class name the program defines (class hint).
-#   noted    (TC1005 info: accepted, gives no hint) untyped optional, rest / keyword / block parameters and block types, `T?`,
-#            unions, `untyped`, `void`, `bool`, `nil`, `self`, literal types, generics other than Array[]/Hash[], a class
-#            the program does not define, constants, aliases, interfaces, mixins, visibility, a method
-#            whose parameter count is not the definition's.
+#   noted    (TC1005 info: accepted, gives no hint) untyped optional, rest / untyped keyword / block parameters and
+#            block types, `T?`, unions, `untyped`, `void`, `bool`, `nil`, `self`, literal types, generics other than
+#            Array[]/Hash[], a class the program does not define, constants, aliases, interfaces, mixins, visibility, a
+#            method whose parameter count is not the definition's.
 #   `def self.x` returns type constant-receiver calls (RBS_SINGLETON_RETURN); an ivar `T?` and a return
 #            `C?` feed the nil-tolerant facts (rbs_optional_hint.rb); a class parameter is checked at every caller
 #            (rbs_param_check.rb).
@@ -219,7 +219,9 @@ module RbsSignatures
     # A `*T` with a class set types the elements in the body (ir_rest_elements), so it is a hint, not a bare rest.
     extras << 'a rest parameter' if fn.rest_positionals && !value_classes_of(fn.rest_positionals.type)
     extras << 'trailing parameters' unless fn.trailing_positionals.empty?
-    extras << 'keyword parameters' unless fn.required_keywords.empty? && fn.optional_keywords.empty? && !fn.rest_keywords
+    # A typed keyword is checked where its KARG writes it (RbsParamCheck.keyword_guards).
+    keywords = fn.required_keywords.merge(fn.optional_keywords)
+    extras << 'keyword parameters' if fn.rest_keywords || keywords.any? { |_, p| !value_classes_of(p.type) }
     extras << 'a block type' if mt.block
     diag(out, loc, 'info', 'TC1005', "#{owner}##{m.name}: #{extras.join(', ')} accepted but give no hint") unless extras.empty?
     # `def self.x` is keyed by the owner the IR names singleton methods with (`Klass.singleton`).
@@ -249,6 +251,9 @@ module RbsSignatures
       merged.optional_args = fresh.optional_args.each_with_index.map do |t, i|
         untyped.(t) && !untyped.(prev.optional_args[i]) ? prev.optional_args[i] : t
       end
+    end
+    if prev.keywords && fresh.keywords && prev.keywords.keys.sort == fresh.keywords.keys.sort
+      merged.keywords = fresh.keywords.to_h { |name, t| [name, untyped.(t) && !untyped.(prev.keywords[name]) ? prev.keywords[name] : t] }
     end
     if untyped.(fresh.ret) && prev.ret && !untyped.(prev.ret)
       merged.ret = prev.ret
