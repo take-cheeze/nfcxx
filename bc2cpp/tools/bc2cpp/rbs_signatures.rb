@@ -352,7 +352,8 @@ module RbsSignatures
 
   # --------------------------------------------------------------------------------------------- applying
 
-  Applied = Struct.new(:ivar_classes, :ivar_elements, :ivar_hash_elements, :origins, :locs, :diagnostics, :ivar_sigs, :ir_arg_types, :ir_return_types, :ir_named_returns, :ir_ivar_types, :ir_owners, :ir_methods, :ir_arg_elements, :ir_ivar_elements, :ir_const_elements, :ir_optional_types, :ir_keyword_types, :ir_rest_elements, :ir_block_signatures, :subtree_ivars, :subtree_args, :subtree_returns, :based, keyword_init: true)
+  Applied = Struct.new(:ivar_classes, :ivar_elements, :ivar_hash_elements, :origins, :locs, :diagnostics, :ivar_sigs, :ir_arg_types, :ir_return_types, :ir_named_returns, :ir_ivar_types, :ir_owners, :ir_methods, :ir_arg_elements, :ir_ivar_elements, :ir_const_elements, :ir_optional_types, :ir_keyword_types, :ir_rest_elements, :ir_block_signatures, :subtree_ivars, :subtree_args, :subtree_returns, :based,
+                       :ir_arg_optional_elements, keyword_init: true)
 
   # Merges the signatures into the three comment-annotation tables (irep label -> struct), in place, and returns what
   # the ivar seeds and the diagnostics are. `annotations`, `class_annotations` and `element_annotations` are what
@@ -407,6 +408,12 @@ module RbsSignatures
         ap.ir_arg_elements[d.irep] = sig.args.each_with_index.filter_map do |type, index|
           register = index + 1
           [register, type.element_classes] if type.element_classes && ap.ir_arg_types[d.irep]&.key?(register)
+        end.to_h.freeze
+        # DECLARED_ARG_ELEMENT only: the element of an `Array[T]?` parameter, which the IR's element facts leave out.
+        (ap.ir_arg_optional_elements ||= {})[d.irep] = sig.args.each_with_index.filter_map do |type, index|
+          register = index + 1
+          inner = type.optional&.element_classes
+          [register, inner] if inner && ap.ir_arg_types[d.irep]&.key?(register)
         end.to_h.freeze
       end
       if ap.ir_owners[d.irep] == sig.owner
