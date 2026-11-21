@@ -78,6 +78,8 @@ module BytecodeIR
   DATAFLOW_MAX_STATES = 400
   # Exhaustive test/report queries must not retain a quadratic number of answers per body.
   DATAFLOW_CACHE_SIZE = 1024
+  # Keep stamps within the 32-bit target Fixnum range; a wrap clears their validity table.
+  DATAFLOW_SEEN_GENERATIONS = 1_000_000
 
   class Program
     # Definitions of +reg+ (digits) that reach the read at the entry of
@@ -224,12 +226,24 @@ module BytecodeIR
       guarded = through_handlers ? nil : dataflow_guarded_at
       live_at = live && live_flags
       scalar_seen = ENV['BC2CPP_IR_SCALAR_SEEN'] != '0'
-      # The seen table, work stack and definition set are scratch, emptied before each walk (the answer is a sorted
-      # copy of the set); a walk that starts while another holds them (none does today) gets its own.
+      # Work/definitions are scratch, emptied before each walk. Ordinary instruction indices use dense seen slots
+      # validated by a query stamp; encoded handler states and reentrant walks retain a Hash.
       scratch = !@reaching_scratch_busy
+      dense_seen = scratch && !handler_ops && index.is_a?(Integer) && ENV['BC2CPP_IR_DENSE_SEEN'] != '0'
       if scratch
         @reaching_scratch_busy = true
-        seen = (@reaching_scratch_seen ||= {}).clear
+        if dense_seen
+          seen = (@reaching_scratch_seen_array ||= [])
+          seen_stamps = (@reaching_scratch_seen_stamps ||= [])
+          generation = (@reaching_scratch_seen_generation || 0) + 1
+          if generation >= DATAFLOW_SEEN_GENERATIONS
+            seen_stamps.clear
+            generation = 1
+          end
+          @reaching_scratch_seen_generation = generation
+        else
+          seen = (@reaching_scratch_seen ||= {}).clear
+        end
         work = (@reaching_scratch_work ||= []).clear.push(index, reg)
         defs = (@reaching_scratch_defs ||= Set.new).clear
       else
@@ -250,7 +264,16 @@ module BytecodeIR
           nil_regs = i / count
           i %= count
         end
-        seen_here = seen[key]
+        if dense_seen
+          if seen_stamps[key] == generation
+            seen_here = seen[key]
+          else
+            seen_stamps[key] = generation
+            seen_here = nil
+          end
+        else
+          seen_here = seen[key]
+        end
         if scalar_seen && !seen_here.is_a?(Hash)
           next if seen_here.eql?(r)
 
