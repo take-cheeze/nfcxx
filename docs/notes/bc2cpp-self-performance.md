@@ -270,3 +270,28 @@ objects (5.6% fewer). The helper's inclusive sampled CPU fell from 4.457 to 0.95
 establish a whole-generation speedup. All 20 C++, header and bytecode artifacts matched byte-for-byte.
 Local captures and metrics are under `build/bench/self-profile-current/prepend-{baseline,optimized}`;
 the weighted query results are `prepend-query-results.json` in that parent directory.
+
+## Check the constant path before scanning branch prefixes
+
+`straight_line_constant_name` now finds the receiver's textual constant path before collecting preceding
+branch edges. Ordinary receivers return nil immediately. A constant candidate still needs the same
+resolved-target, bypass-edge and reaching-definition proofs, including JMPUW and handler edges.
+
+At 494253a9a the frozen self input made 946,815 queries across 44,721 distinct label/index/register/policy
+combinations. Only 106,873 queries (11.3%) had a constant path requiring the branch scan. Both full runs
+captured identical query lists and frequencies. Weighted warm CRuby 4/YJIT replays preserved every answer:
+baseline CPU was 7.205/6.983 seconds versus 1.874/2.026 seconds, with allocations 22.69M versus 5.99M.
+Alias ireps share their source instructions; the replay uses those original bodies for the six alias labels.
+
+Full CPU-profiled generation with the same capture hook allocated 495.21M versus 478.61M objects.
+The branch collector's inclusive CPU fell from 11.320 to 1.660 seconds, and the constant-name helper
+from 13.669 to 4.170 seconds. Whole generation measured 327.430 versus 317.774 seconds. The two runs
+overlapped on separate processes, and these are single profiled observations rather than a stable
+throughput guarantee. All 20 C++, header and bytecode artifacts matched byte-for-byte.
+
+The registered constant-proofs check passes 49 cases, including parameter receivers, forward bypasses,
+loop back-edges, rescue ranges, unresolved jumps and JMPUW bypasses. Class-object argument/constructor
+and singleton-owner checks pass; Array.new block behavior matches interpreted execution (73 output lines).
+The pinned-world registry audit has zero unclassified checks. Local artifacts are under
+`build/bench/self-profile-current/constant-path-{baseline,optimized}`, with the weighted replay in
+`constant-path-query-results.json` in that parent directory.
