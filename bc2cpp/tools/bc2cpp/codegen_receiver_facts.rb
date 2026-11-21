@@ -320,12 +320,13 @@ class CodeGen
   # The constant the straight-line walk finds when no branch can bypass its
   # load; nil otherwise (agreed_constant_name then asks every reaching definition).
   def straight_line_constant_name(irep, idx, dest_reg, skip_blocks: false)
-    branch_edges = BytecodeIR.for(irep).jump_edges_before(idx, %i[JMP JMPIF JMPNOT JMPNIL JMPUW])
-    return nil unless branch_edges
-
     barriers = skip_blocks ? %i[JMPUW ONERR RESCUE EXCEPT] : %i[JMPUW ONERR RESCUE EXCEPT BLOCK]
     ref = irep.constant_path(idx - 1, dest_reg, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY, barrier: barriers)
     return nil unless ref&.root == :const
+
+    # Ordinary receivers have no constant load to protect; only scan branches after finding one.
+    branch_edges = BytecodeIR.for(irep).jump_edges_before(idx, %i[JMP JMPIF JMPNOT JMPNIL JMPUW])
+    return nil unless branch_edges
 
     # A forward edge from before this write into the send's block could
     # bypass the receiver value; edges from later code already execute it.
