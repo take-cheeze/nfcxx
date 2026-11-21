@@ -499,6 +499,13 @@ module SymbolCache
         if (MRB_PROC_ALIAS_P(p)) p = p->upper;
         if (MRB_PROC_CFUNC_P(p) && MRB_PROC_NOARG_P(p)) mrb_argnum_error(M, argc, 0, 0);
       }
+      // vm.c check_argument_count: OP_SEND checks a raw C function's registered aspec; mrb_funcall does not.
+      if (MRB_METHOD_FUNC_P(m)) {
+        mrb_aspec aspec = MRB_MT_ASPEC(m.flags);
+        int min = MRB_ASPEC_REQ(aspec) + MRB_ASPEC_POST(aspec);
+        int max = MRB_ASPEC_REST(aspec) ? -1 : min + MRB_ASPEC_OPT(aspec);
+        if (argc < min || (max >= 0 && argc > max)) mrb_argnum_error(M, argc, min, max);
+      }
     }
   CPP
   private_constant :CHECKED_SEND

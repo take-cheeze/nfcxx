@@ -676,6 +676,7 @@ BC2CPP_MAIN = lambda do
                              end
     CodeGen.declared_ivar_elements = DeclaredReturns.guard? ? CodeGen.declared_element_table(sig_applied) : {}
     CodeGen.declared_arg_elements = DeclaredReturns.guard? ? CodeGen.declared_arg_element_table(sig_applied) : {}
+    CodeGen.declared_arg_records = DeclaredReturns.guard? ? CodeGen.declared_arg_record_table(sig_applied) : {}
     sig_applied.diagnostics.concat(param_diags)
     param_diags.each { |d| warn "  #{d.file}:#{d.line}:#{d.col}: #{d.severity}: #{d.message} [#{d.code}]" }
     # An unproven parameter type is not trusted, so its argument stays `any` (an mrb_value): it is reported, not fatal.
@@ -2656,11 +2657,23 @@ BC2CPP_MAIN = lambda do
   # IO_PUTS_MODEL: one shared body for every explicit-receiver `puts`, so the
   # by-name fallback exists once instead of once per site.
   puts <<~'IO_PUTS'
-    static inline mrb_value bc2cpp_io_puts(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_int argc, const mrb_value* argv) {
+    // The site is an explicit-receiver OP_SEND, so the by-name fallback makes its visibility check: Kernel#puts is
+    // private, and `"s".puts` raises NoMethodError (caller_self decides a protected one).
+    static inline mrb_value bc2cpp_io_puts(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_int argc, const mrb_value* argv,
+                                           mrb_value caller_self) {
     #ifdef HAVE_MRUBY_IO_GEM
       mrb_value result;
       if (mrb_io_puts_direct(M, recv, argc, argv, &result)) return result;
     #endif
+      struct RClass* c = mrb_class(M, recv);
+      mrb_method_t m = bc2cpp_find_method(M, &c, mid);
+      if (!MRB_METHOD_UNDEF_P(m) && (m.flags & (MRB_METHOD_PRIVATE_FL | MRB_METHOD_PROTECTED_FL))) {
+        bool priv = (m.flags & MRB_METHOD_PRIVATE_FL) != 0;
+        if (priv || !mrb_obj_is_kind_of(M, caller_self, c)) {
+          mrb_no_method_error(M, mid, mrb_ary_new_from_values(M, argc, argv), "%s method '%n' called for %T",
+                              priv ? "private" : "protected", mid, recv);
+        }
+      }
       return bc2cpp_funcall_argv(M, recv, mid, argc, argv);
     }
   IO_PUTS
