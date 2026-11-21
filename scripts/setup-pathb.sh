@@ -148,7 +148,8 @@ if [ "$emscripten" = 1 ]; then
       -e 's/^#define MIN_HOST_LARGE_INTEGER PTRDIFF_MIN$/#define MIN_HOST_LARGE_INTEGER LLONG_MIN/' \
       -e 's/^#define MAX_HOST_LARGE_UNSIGNED SIZE_MAX$/#define MAX_HOST_LARGE_UNSIGNED ULLONG_MAX/' \
       "$src/src/targ_def.h" > "$tree/src/targ_def.h"
-  [ "$(grep -c 'nfcxx' "$tree/src/targ_def.h")" = 2 ] && grep -q 'ULLONG_MAX$' "$tree/src/targ_def.h" \
+  grep -q 'a_host_large_integer;  /\* nfcxx: 64-bit' "$tree/src/targ_def.h" &&
+    grep -q 'a_host_large_unsigned;  /\* nfcxx \*/' "$tree/src/targ_def.h" && grep -q 'ULLONG_MAX$' "$tree/src/targ_def.h" \
     || { echo "setup-pathb: targ_def.h patch failed" >&2; exit 1; }
   cat >> "$tree/cmake/macro-conf/nfcxx-pathb/base.cmakedef" <<'CFG'
 USE_SOFTFLOAT=1
