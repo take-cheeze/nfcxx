@@ -744,13 +744,14 @@ class CodeGen
     out << "static mrb_value #{entry_name}(mrb_state* M, mrb_value self) {\n"
     if arg_names.empty? && !kw_table && !needs_blk_param && !has_blk
       out << entry_return_line(label, d, impl_name, [])
-    elsif arg_names.empty? && (needs_blk_param || has_blk) && !kw_rest_block
+    elsif arg_names.empty? && (needs_blk_param || has_blk) && !kw_rest_block && !kw_table
       # BLKPUSH_YIELD_SUPPORT/EXPLICIT_BLOCK_PARAM_SUPPORT with zero mandatory
       # arguments: a standalone mrb_get_args("&") call.
       out << "  mrb_value bc2cpp_blk = mrb_nil_value();\n"
       out << "  mrb_get_args(M, \"&\", &bc2cpp_blk);\n"
       out << entry_return_line(label, d, impl_name, 'bc2cpp_blk')
-    elsif kw_rest_block
+    elsif kw_rest_block || (kw_table && needs_blk_param)
+      # KEYWORD_YIELD: a keyword method that yields takes its block as the `&blk` form does.
       out << keyword_rest_block_entry(label, d, impl_name, arg_names, arg_native_types, mand: mand, opt: opt, has_rest: has_rest,
                                                            has_blk: has_blk || needs_blk_param, kw_table: kw_table)
     elsif kw_table

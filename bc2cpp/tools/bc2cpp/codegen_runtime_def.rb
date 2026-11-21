@@ -110,6 +110,8 @@ class CodeGen
   # emitter needs them (see emit_lambda_confined_call_glue).
   def lambda_confined_call_sites(irep, lambda_insn, d, lambda_irep)
     nlocals = irep.nlocals.to_i
+    # LAMBDA_REST: a direct call passes the positionals as they are; a rest lambda's `_impl` takes them packed.
+    return nil unless pure_mandatory_arity?(lambda_irep)
     # (1) a named local, so no implicit register window can alias it.
     return nil unless d >= 1 && d < nlocals
     # (2) the two opcodes that read a named local without printing it.

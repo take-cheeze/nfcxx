@@ -1070,6 +1070,8 @@ class CodeGen
        site_marker = irep ? initializer_site_marker(irep, idx) : ''
        zsuper_plan = reg_offset.zero? ? zsuper_forward_plan(owner_def, irep, idx) : nil
        zsuper_lookup = reg_offset.zero? && zsuper_plan.nil? ? zsuper_lookup_plan(owner_def, irep, idx) : nil
+       # BLOCK_ZSUPER: a bare `super` in a block body, with the method's parameters read through the upvars.
+       zsuper_lookup ||= reg_offset.zero? && zsuper_plan.nil? ? block_zsuper_plan(owner_def, irep, idx) : nil
        super_code = if target_def && d_reg && n && super_arity_ok?(target_def, n)
          note_super_site(:direct, owner_def, irep, idx)
          args = (1..n.to_i).map { |i| "#{RegName[d_reg.to_i + i]}" }
@@ -1111,8 +1113,8 @@ class CodeGen
       if reg_offset.zero? && zsuper_forward_plan(owner_def, irep, idx)
         # ZSUPER_GENERAL_SUPPORT: the SUPER arm calls the superclass `_impl` with the original registers.
         "  // #{insn.raw.strip} (zsuper argument array not built -- forwarded to the superclass _impl below)\n"
-      elsif reg_offset.zero? && zsuper_lookup_plan(owner_def, irep, idx)
-        # ZSUPER_LOOKUP: the SUPER arm builds the same list for the looked-up method.
+      elsif reg_offset.zero? && (zsuper_lookup_plan(owner_def, irep, idx) || block_zsuper_plan(owner_def, irep, idx))
+        # ZSUPER_LOOKUP: the SUPER arm builds the same list for the looked-up method (BLOCK_ZSUPER: from the upvars).
         "  // #{insn.raw.strip} (zsuper argument array built by the SUPER below)\n"
       else
         "  #error unhandled opcode ARGARY -- not in this prototype's supported subset\n"

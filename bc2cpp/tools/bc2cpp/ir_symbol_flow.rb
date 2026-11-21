@@ -355,6 +355,11 @@ module IrSymbolFlow
         index, level = insn.upvar_ref
         out << index if index && level == depth - 1
       end
+      # BLOCK_ZSUPER: a bare `super` in a nested block reads the method's parameters (OP_ARGARY with lv == depth).
+      BytecodeIR.for(child).each_with_op(:ARGARY) do |insn, _|
+        reads = insn.argary_frame_reads
+        out.merge(reads ? reads[1] : (1...irep.nlocals.to_i).to_a) if reads.nil? || reads[0] == depth
+      end
       collect_captures(tree, child, depth + 1, out)
     end
   end
