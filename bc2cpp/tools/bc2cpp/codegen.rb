@@ -682,9 +682,11 @@ class CodeGen
   # literal defaults (the ENTER jump table, KEY_P/KARG/KEYEND, a `**` Hash) and for the arguments of the `super`
   # itself (`super map.parent`). No op here reads R0 (prologue_insn_self_free?) or makes a closure, so code run
   # before the storage exists never has `self`: a call made there runs on another object. Family roots only.
+  # The LOADI forms are spelled out (BytecodeIR::Ops::LOADI_OPS): checks load this file without bytecode_ir.
   SUPER_PROLOGUE_OPS = (SUPER_LEADING_OPS + %i[KEY_P KARG KEYEND LOADTRUE LOADFALSE LOADNIL LOADSYM LOADL HASH
-                                              SEND SEND0 JMP JMPIF JMPNOT JMPNIL] +
-                        BytecodeIR::Ops::LOADI_OPS.to_a).freeze
+                                              SEND SEND0 JMP JMPIF JMPNOT JMPNIL
+                                              LOADI8 LOADINEG LOADI__1 LOADI_0 LOADI_1 LOADI_2 LOADI_3 LOADI_4
+                                              LOADI_5 LOADI_6 LOADI_7 LOADI16 LOADI32]).freeze
 
   # A prologue op of SUPER_PROLOGUE_OPS whose register operands leave out R0 (`self`), so neither a MOVE copies
   # self for a later SEND nor a SEND targets it.
