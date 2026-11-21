@@ -317,6 +317,9 @@ end
 def refusal(fn, name)
   return "callee over --max-callee" if $inline_max_callee > 0 && node_cost(fn) > $inline_max_callee && !always_inline?(fn) && !$inline_once[name] && !asm_needs_constant?(fn)
   return "ctor/dtor" if fn.any? { |f| head(f) == "constructor" || head(f) == "destructor" }
+  # Zero-cost exception tables (docs/notes/pathb-zero-cost-eh.md): a callee with landing pads is inlined with them
+  # (eh_inline); one with a dynamic exception specification is not (its filter would cover the caller's pads).
+  return "dynamic exception specification" if fn.any? { |f| head(f) == "eh-spec" }
   return "noinline" if fn.any? { |f| head(f) == "noinline" } && !empty_body?(fn)
   return "weak attr" if fn.any? { |f| head(f) == "weak" && f.length == 2 }   # __attribute__((weak)): another object may define the callee
   params = fn.find { |f| head(f) == "params" }
@@ -437,7 +440,12 @@ def callee_info(fn)
   params = fn.find { |f| head(f) == "params" }.drop(1)
   body = fn.drop(2)
   slots = body.select { |f| head(f) == "slot" }
-  stmts = splice_tail_blocks(body.reject { |f| HEADER_HEADS.include?(head(f)) })
+  eh_heads = %w[eh-pad eh-types eh-noexcept]
+  ehty = body.find { |f| head(f) == "eh-types" }
+  eh = { pads: body.select { |f| head(f) == "eh-pad" }, types: ehty ? ehty.drop(1) : [],
+         noexcept: body.any? { |f| head(f) == "eh-noexcept" } }
+  eh = nil if eh[:pads].empty? && !eh[:noexcept] && eh[:types].empty?
+  stmts = splice_tail_blocks(body.reject { |f| HEADER_HEADS.include?(head(f)) || eh_heads.include?(head(f)) })
   ret_op = nil
   early = count_heads(stmts, "return") > (stmts.length > 0 && head(stmts.last) == "return" ? 1 : 0)
   if !early && stmts.length > 0 && head(stmts.last) == "return"
@@ -445,7 +453,7 @@ def callee_info(fn)
     stmts = stmts[0...-1]
   end
   { ret: ret, rtext: show(ret[1]), params: params, slots: slots, stmts: stmts, ret_op: ret_op, early: early,
-    deep: early && return_in_loop?(stmts, false) }
+    deep: early && return_in_loop?(stmts, false), eh: eh }
 end
 
 # Replaces one call statement by the callee's statements. Returns [hoisted slots, statements] or nil.
@@ -550,6 +558,7 @@ def expand_call(s, fns, st)
     out = pre + [["loop", ["body"] + body + [["break"]], ["step"]]]
     out << ["let", dest, dtype, ["load", rt, rslot]] if dest
     hoisted += hoisted_ret if dest
+    out = eh_inline(info[:eh], out, map, st, k, hoisted) if info[:eh]
     st[:inlined] += 1
     st[:attr_from] << cname if st[:attrs].key?(cname)
     return [hoisted, scope_slots(hoisted, out)]
@@ -557,9 +566,93 @@ def expand_call(s, fns, st)
   return nil if dest && ret_op.nil?
   out = byval_pre + stmts.map { |x| subst(x, map, st) }
   out << ["let", dest, dtype, subst(ret_op, map, st)] if dest
+  out = eh_inline(info[:eh], out, map, st, k, hoisted) if info[:eh]
   st[:inlined] += 1
   st[:attr_from] << cname if st[:attrs].key?(cname)
   [hoisted, scope_slots(hoisted, out)]
+end
+
+# A callee with exception tables (docs/notes/pathb-zero-cost-eh.md), inlined as copy K: its landing pads become the
+# caller's (renumbered after the caller's), its catch types join the caller's table (eh-tid operands renumbered), and
+# the copy is bracketed by (eh-inline-begin K) and (eh-inline-end K). The callee's state 0 is the state the copy was
+# entered in (eh-state-outer K), or for a noexcept callee a pad that calls std::terminate. A callee pad's resume goes on
+# into the pad of that state (eh-resume-outer K EXC, after it hands the caller's slots the exception and the selector);
+# scripts/pathb-ssa.rb resolves the states along the control flow. Returns the copy's statements; the pads and the type
+# table are the caller's (st[:eh]), written by inline_pass.
+def eh_inline(eh, out, map, st, k, hoisted)
+  ce = st[:eh]
+  tidmap = {}
+  eh[:types].each_with_index do |t, i|
+    j = ce[:types].index { |u| show(u) == show(t) }
+    unless j
+      ce[:types] << t
+      j = ce[:types].size - 1
+    end
+    tidmap[(i + 1).to_s] = (j + 1).to_s
+  end
+  pmap = {}
+  eh[:pads].each { |p| pmap[p[1]] = (ce[:next_pad] += 1).to_s }
+  kk = k.to_s
+  zero = ["eh-state-outer", kk]
+  if eh[:noexcept]
+    t = (ce[:next_pad] += 1).to_s
+    lbl = "\"eh.t.#{kk}\""
+    ce[:pads] << ["eh-pad", t, "1", [], ["goto", lbl], ["label", lbl], ["eval", ["call", "void", "&\"_ZSt9terminatev\""]],
+                  ["unreachable"]]
+    zero = ["eh-state", t]
+  end
+  sel = map["$\"eh.sel\""]
+  eh[:pads].each do |p|
+    q = subst(p, map, st)   # labels, registers and slots of the copy
+    own = head(q[4]) == "eh-outer"
+    stmts = eh_renumber(q[(own ? 5 : 4)..], pmap, tidmap, zero)
+    unless own
+      ce[:need_slots] = true
+      stmts = eh_resumes(stmts, kk, sel, st)
+    end
+    outer = own ? eh_renumber(q[4], pmap, tidmap, zero) : ["eh-outer", kk]
+    ce[:pads] << ["eh-pad", pmap[p[1]], q[2], q[3].map { |x| tidmap.fetch(x, x) }, outer, *stmts]
+  end
+  ce[:changed] = true
+  body = eh_renumber(out, pmap, tidmap, zero)
+  [["eh-inline-begin", kk]] + (eh[:noexcept] ? [zero] : []) + body + [["eh-inline-end", kk]]
+end
+
+# The callee's states, pad numbers and type ids in the caller's numbering
+def eh_renumber(x, pmap, tidmap, zero)
+  return x unless x.is_a?(Array)
+  if head(x) == "eh-state"
+    return copy_form(zero) if x[1] == "0"
+    return ["eh-state", pmap.fetch(x[1]) { raise "eh-state #{x[1]}: no such pad" }]
+  end
+  return ["eh-tid", tidmap.fetch(x[1], x[1])] if head(x) == "eh-tid"
+  # a copy inlined into the callee before: its number gets this copy's (two copies of the callee keep theirs apart)
+  if %w[eh-inline-begin eh-inline-end eh-state-outer eh-resume-outer eh-outer].include?(head(x))
+    return [x[0], "#{x[1]}_#{zero[-1]}"] + x.drop(2).map { |y| eh_renumber(y, pmap, tidmap, zero) }
+  end
+  x.map { |y| eh_renumber(y, pmap, tidmap, zero) }
+end
+
+# A callee pad's (eh-resume EXC): the caller's pad slots get the exception and the selector, then (eh-resume-outer K EXC)
+def eh_resumes(list, kk, sel, st)
+  out = []
+  list.each do |y|
+    if head(y) == "eh-resume"
+      out << ["store", ["ptr", "void"], "$\"eh.exc\"", y[1]]
+      if sel
+        r = "%#{st[:next]}"   # a let, not a load inside the store: the SSA builder promotes a slot's lets
+        st[:next] += 1
+        out << ["let", r, "long", ["load", "long", sel]]
+        out << ["store", "long", "$\"eh.sel\"", r]
+      end
+      out << ["eh-resume-outer", kk, y[1]]
+    elsif y.is_a?(Array)
+      out << eh_resumes(y, kk, sel, st)
+    else
+      out << y
+    end
+  end
+  out
 end
 
 # --scope-facts: the slots of an inlined body live exactly as long as its statements (the callee's frame), so the copy is bracketed by
@@ -606,6 +699,21 @@ def rewrite(list, fns, st)
     end
   end
   out
+end
+
+# The caller's exception tables after its inlining: its type table, the inlined pads after its own, and its pad slots
+# (the inlined pads hand it the exception there).
+def eh_write_back(children, st)
+  ce = st[:eh]
+  children = children.reject { |x| head(x) == "eh-types" }
+  if ce[:need_slots]
+    names = children.select { |x| head(x) == "slot" }.map { |x| x[1] } + st[:hoist].map { |x| x[1] }
+    st[:hoist] << ["slot", "\"eh.exc\"", ["ptr", "void"], "8", "8"] unless names.include?("\"eh.exc\"")
+    st[:hoist] << ["slot", "\"eh.sel\"", "long", "8", "8"] unless names.include?("\"eh.sel\"")
+  end
+  idx = children.index { |x| !(HEADER_HEADS.include?(head(x)) || head(x) == "ret" || head(x) == "params") } || children.size
+  children = children[0...idx] + (ce[:types].empty? ? [] : [["eh-types", *ce[:types]]]) + children[idx..]
+  children + ce[:pads]
 end
 
 # Hoisted slots go after the header (ret, params and the caller's own slots).
@@ -663,9 +771,13 @@ def inline_pass(forms, max_depth, report)
         next
       end
       name = unq(f[1])
+      ehty = f.find { |x| head(x) == "eh-types" }
       st = { next: ids.fetch(f) { ids[f] = max_id(f) } + 1, k: counter[:k], hoist: [], inlined: 0, caller_size: node_cost(f), refused: refused, rc: reasons,
-             ic: infos, attrs: attrs, attr_from: [], over: over, tc: tiny_costs, cap: cap, section: section_of(f) }
+             ic: infos, attrs: attrs, attr_from: [], over: over, tc: tiny_costs, cap: cap, section: section_of(f),
+             eh: { types: ehty ? ehty.drop(1) : [], pads: [], changed: false, need_slots: false,
+                   next_pad: f.select { |x| head(x) == "eh-pad" }.map { |x| x[1].to_i }.max || 0 } }
       children = rewrite(f.drop(2), fns, st)
+      children = eh_write_back(children, st) if st[:eh][:changed]
       counter[:k] = st[:k]
       next if st[:inlined] == 0
       round += st[:inlined]

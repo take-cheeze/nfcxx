@@ -1,5 +1,7 @@
 #!/usr/bin/env ruby
-# Path B long double support library (be/nfcxx_ldrt.c, docs/notes/pathb-longdouble.md). Prints the path of libnfcxxld.a,
+# Path B long double support library (be/nfcxx_ldrt.c, docs/notes/pathb-longdouble.md), with the personality wrapper of the
+# zero-cost exception tables (be/nfcxx_ehrt.c, docs/notes/pathb-zero-cost-eh.md: a member only such a program pulls in,
+# through its DW.ref.__nfcxx_personality_v0). Prints the path of libnfcxxld.a,
 # building it with the host C compiler first when it is missing or older than its source. Every Path B link step adds
 # the archive after its objects: $(scripts/pathb-ldrt.rb) (the archive only pulls in the helpers a program calls).
 # PATHB_LDRT_OUT: build somewhere else (default build/pathb-ldrt).
@@ -31,15 +33,20 @@ end
 cc_bin = env("NFCXX_GCC") || "cc"
 out = env("PATHB_LDRT_OUT") || "#{root}/build/pathb-ldrt-cosmo" if cc_bin.include?("cosmocc")
 src = "#{root}/be/nfcxx_ldrt.c"
+ehsrc = "#{root}/be/nfcxx_ehrt.c"
 lib = "#{out}/libnfcxxld.a"
-if !File.file?(lib) || (File.exist?(src) && File.mtime(src) > File.mtime(lib))
+# rebuilt when a source is newer, and when an archive of before the wrapper lacks its member
+stale = !File.file?(lib) || [src, ehsrc].any? { |f| File.exist?(f) && File.mtime(f) > File.mtime(lib) } ||
+        !IO.popen(["ar", "t", lib], &:read).split("\n").include?("nfcxx_ehrt.o")
+if stale
   FileUtils.mkdir_p(out)
   tmp = IO.popen(["mktemp", "-d", "#{out}/.tmp.XXXXXX"], &:read).sub(/\n+\z/, "")
   exit($?.exitstatus || 1) unless $?.success?
   at_exit { FileUtils.rm_rf(tmp) }
   # -ffunction-sections: one helper per archive member would be better, but one object keeps the link line trivial
   run!(cc_bin, "-O2", "-fno-strict-aliasing", "-fPIC", *defines, "-c", "-o", "#{tmp}/nfcxx_ldrt.o", src)
-  run!("ar", "rcs", "#{tmp}/libnfcxxld.a", "#{tmp}/nfcxx_ldrt.o")
+  run!(cc_bin, "-O2", "-fPIC", "-c", "-o", "#{tmp}/nfcxx_ehrt.o", ehsrc)
+  run!("ar", "rcs", "#{tmp}/libnfcxxld.a", "#{tmp}/nfcxx_ldrt.o", "#{tmp}/nfcxx_ehrt.o")
   File.rename("#{tmp}/libnfcxxld.a", lib)
 end
 puts lib

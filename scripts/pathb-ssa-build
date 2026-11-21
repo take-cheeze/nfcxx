@@ -447,6 +447,7 @@ def assemble(il)
   Dir.mktmpdir("pathb-ssa-build") do |dir|
     path = File.join(dir, "module.qbe")
     File.write(path, il)
+    File.write(ENV["PATHB_SSA_KEEP_QBE"], il) unless ENV["PATHB_SSA_KEEP_QBE"].to_s.empty?   # debugging: the QBE input
     qbe_args = ENV.key?("PATHB_QBE_TARGET") && !$target32 ? ["-t", qbe_target] : []
     qbe_args += $qbe_flags
     asm, err, st = Open3.capture3(qbe_binary, *qbe_args, path)
