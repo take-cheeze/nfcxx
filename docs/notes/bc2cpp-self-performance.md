@@ -155,3 +155,63 @@ of barriers, MOVE chains and budgets, skipped opcodes, missing registers, exhaus
 All 20 generated artifacts also match byte-for-byte on the frozen self-compilation graph. The full replays ran
 under different external load and do not establish a whole-generation speedup. The walker remains a VM fallback
 in the current self image; this change improves its algorithm rather than changing its translation status.
+
+## Next optimization profile (062f75bc, November 21)
+
+Profiled the frozen 331-file self input on CRuby 4.0.5 with YJIT, using StackProf CPU sampling at 1 ms
+and a separate allocation run sampling every 2,000 allocations. These are profiled generation runs,
+not measurements of the compiled compiler's execution speed. Local artifacts and reproduction scripts
+are under `build/bench/self-profile-current` and `build/bench/profile-self-*.rb` (ignored build outputs).
+
+Generation took 301.7 seconds, including exit handlers: method compilation accounted for 243.9 seconds.
+There were 580.2 million allocations and 55.0 seconds of GC. Inclusive call-tree costs below overlap
+and must not be added together. The next candidates, in suggested order, are:
+
+1. **Avoid unconditional reaching-definition bit masks.** In `compute_reaching_definitions`, line 274
+   computes `1 << here.reg.to_i` before testing `here.op == :EXCEPT`. Allocation samples attribute
+   34,979 of 290,014 samples to this expression, approximately 70 million allocations (12.1%).
+   Test the opcode first, then the mask; consider skipping the mask when `nil_regs` is zero.
+   Validate exception-edge answers and byte-identical generated output. The entire reaching-definitions
+   API costs 21.2 seconds CPU inclusive; its compute loop costs 15.2 seconds.
+2. **Stop compiling a dynamic regexp per fallback site.** The regexp construction in
+   `OutsideOwnerCall#guarded_fallback_line`, line 120, costs 6.1 seconds self CPU.
+   Use structured fallback results or exact token matching, preserving the replacement's semantics.
+3. **Reuse fallback target decisions.** The outside-owner fallback tree costs 46.0 seconds inclusive,
+   with singleton-arm planning around 30.7 seconds. The context-lifted second fallback call repeats
+   substantial analysis. Reuse immutable target plans while retaining layout, probe and cycle context;
+   emitted C++ strings cannot safely be cached without accounting for those inputs.
+4. **Split the giant send emitter and measure native shard costs.** A fresh native build of 16 units
+   with eight workers took 114.4 seconds; all units compiled successfully. The main registration unit
+   took 49.0 seconds, while shard 3 took 70.2 seconds. Equal source bytes do not imply equal compile cost.
+   `CodeGen_compile_send_site_body_impl` occupies 19,235 lines / 910,325 bytes in shard 3.
+   In sequential isolated compilations with otherwise identical flags, the original unit took 55.21 seconds;
+   replacing only that method body with a nil return took 26.33 seconds, reducing peak RSS from
+   1,164,836 to 693,876 KiB. This deliberately incorrect ablation was never linked and establishes
+   an upper bound on removable cost, not the speedup from extracting helpers. Smaller helpers and
+   finer compile-cost-aware shards need separate validation. Merely ordering units longest-first
+   simulates at 112.7 seconds with the observed costs, so scheduling alone has little headroom.
+
+`ShardOutput.scan_lines` still accounts for about 11.3% of allocation samples, but only 3.7 seconds
+inclusive CPU after its earlier optimization. Prioritize the reaching-definition mask before further
+scanner work. Allocation reductions may reduce GC, but the profile does not establish how much of
+the 55 seconds of GC any individual change will recover. No compiler implementation changed in this
+profiling pass.
+
+## Avoid irrelevant reaching-definition masks
+
+The EXCEPT nil-path check now tests the opcode and a nonzero nil-register state before constructing
+the register mask. This preserves the exception-edge decision while avoiding large Integer allocations
+for unrelated instructions and states. Low and high exception-register fixtures check both incoming
+paths before RAISEIF and the normal-only path after it.
+
+On 593,352 sampled queries from the frozen self bytecode, including handler policies and refusal
+diagnostics, all answers matched the previous guard. Alternating warm runs measured baseline CPU
+1.274/1.233 seconds versus 1.171/1.178 seconds; allocations fell from 5.36M to 4.12M. These sampled
+instruction queries are a differential workload, not a recording of the compiler's actual query mix.
+
+Replaying the full 331-file generation with the same CPU profiler reduced allocations from 580.18M
+to 525.78M (9.4%). The reaching-definition compute loop fell from 15.184 to 9.537 seconds sampled CPU;
+Integer shifts fell from 1.966 seconds to 0.001 seconds. Whole profiled generation measured
+301.704 to 291.237 seconds, with GC 55.000 to 51.875 seconds. This is one before/after pair with other
+phase variation, not a stable throughput guarantee. All 20 C++, header and bytecode artifacts matched
+byte-for-byte. Local results are in `build/bench/self-profile-current/mask-optimized`.

@@ -45,3 +45,21 @@ begin
 ensure
   saved ? ENV[flag] = saved : ENV.delete(flag)
 end
+
+# A high exception register needs a heap-allocated bit mask. Before RAISEIF both
+# normal and exceptional predecessors reach EXCEPT; after it, only the nil path does.
+[4, 100].each do |exception_reg|
+  ops = [[:LOADI_1, 'R1 (1)'], [:SEND0, 'R120 :work'], [:LOADI_2, 'R1 (2)'],
+         [:EXCEPT, "R#{exception_reg}"], [:RAISEIF, "R#{exception_reg}"], [:RETURN, 'R1']]
+  list = ops.each_with_index.map do |(op, args), i|
+    Insn.new(lineno: 1, addr: i, op: op, args: args, raw: "#{op} #{args}")
+  end
+  body = Irep.new(label: 'except-nil-path', instructions: list, nregs: 122, nlocals: 2,
+                  catch_handlers: [CatchHandler.new(type: :rescue, begin_addr: 1, end_addr: 2, target: 3)])
+  program = BytecodeIR::Program.new(body)
+  [[4, [[0, 1], [2, 1]]], [5, [[2, 1]]]].each do |index, expected|
+    found = program.reaching_definitions(index, 1, through_handlers: true, handler_ops: true)
+    raise "EXCEPT nil path changed for R#{exception_reg} at #{index}" unless found&.map { |d| [d.index, d.reg] } == expected
+  end
+end
+puts 'EXCEPT nil paths: low and high exception registers passed'
