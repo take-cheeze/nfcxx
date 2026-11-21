@@ -22,8 +22,10 @@ module SymbolCache
   # method the compiler proved to be one native singleton function; it keeps level 2 as its fallback is a
   # checked send, and gets a per-site method cache slot (BC2CPP_NSC_SLOT).
   # CORE_SELF_NATIVE: `bc2cpp_native_owner_named` is the same for a self call (level 1: no visibility check).
+  # EXACT_NATIVE_SLOT: `bc2cpp_native_slot_named` is an explicit-receiver call (level 2) with a slot per method id.
   CHECKED_FUNCALLS = { 'bc2cpp_funcall_noarg' => 1, 'bc2cpp_funcall_explicit' => 2,
-                       'bc2cpp_native_singleton_named' => 2, 'bc2cpp_native_owner_named' => 1 }.freeze
+                       'bc2cpp_native_singleton_named' => 2, 'bc2cpp_native_owner_named' => 1,
+                       'bc2cpp_native_slot_named' => 2 }.freeze
   FUNCALLS = (%w[mrb_funcall] + CHECKED_FUNCALLS.keys).freeze
   # These scans consume binary C++ text. Byte offsets avoid mruby-onig rescanning UTF-8 prefixes.
   FUNCALL_START = /\b(#{FUNCALLS.join('|')}|bc2cpp_owner_call_argv_named|bc2cpp_owner_call_named|bc2cpp_nomethod_named|bc2cpp_nomethod_raise_named|bc2cpp_guard_violation_named|bc2cpp_hint_violation_named|bc2cpp_nil_receiver_named)\(M,\s*/n
@@ -51,6 +53,11 @@ module SymbolCache
     attr_accessor :native_singleton_used
     # OUTSIDE_OWNER_CALL: the same for bc2cpp_owner_call.
     attr_accessor :owner_call_used
+
+    # EXACT_NATIVE_SLOT: the symbol indices bc2cpp_native_slot calls use, one slot each.
+    def native_slots
+      @native_slots ||= Set.new
+    end
 
     # CHECKED_SEND: per slot, 0 plain, 1 argument count of an attr_reader, 2 that and
     # the explicit-receiver visibility check.
@@ -166,6 +173,10 @@ module SymbolCache
         table.nil_receiver_used = true if kind == 'bc2cpp_nil_receiver_named'
         table.native_singleton_used = true if %w[bc2cpp_native_singleton_named bc2cpp_native_owner_named].include?(kind)
         table.owner_call_used = true if %w[bc2cpp_owner_call_named bc2cpp_owner_call_argv_named].include?(kind)
+        if kind == 'bc2cpp_native_slot_named'
+          table.native_singleton_used = true
+          table.native_slots << index
+        end
         replacement = case kind
                       when 'bc2cpp_nomethod_named' then "bc2cpp_nomethod(M, #{receiver}, #{index}"
                       when 'bc2cpp_nomethod_raise_named' then "bc2cpp_nomethod_raise(M, #{receiver}, #{index}"
@@ -176,6 +187,7 @@ module SymbolCache
                       when 'bc2cpp_owner_call_argv_named' then "bc2cpp_owner_call_argv(M, #{receiver}, #{index}"
                       when 'bc2cpp_native_singleton_named' then "bc2cpp_native_singleton(M, #{receiver}, #{index}, BC2CPP_NSC_SLOT,"
                       when 'bc2cpp_native_owner_named' then "bc2cpp_native_owner(M, #{receiver}, #{index}, BC2CPP_NSC_SLOT,"
+                      when 'bc2cpp_native_slot_named' then "bc2cpp_native_slot(M, #{receiver}, #{index}, bc2cpp_xslot_#{index},"
                       else "bc2cpp_send(M, #{receiver}, #{index},"
                       end
         copy.call(pos, start)
@@ -231,7 +243,7 @@ module SymbolCache
     code = code.b
     found = []
     pos = 0
-    while (start = code.index(/\bbc2cpp_(send|nomethod|nomethod_raise|guard_violation|hint_violation|nil_receiver|native_singleton|native_owner|owner_call_argv|owner_call)\(M,\s*/n, pos))
+    while (start = code.index(/\bbc2cpp_(send|nomethod|nomethod_raise|guard_violation|hint_violation|nil_receiver|native_singleton|native_owner|native_slot|owner_call_argv|owner_call)\(M,\s*/n, pos))
       kind = Regexp.last_match(1)
       head_end = Regexp.last_match.end(0)
       recv_end = expression_end(code, head_end)
@@ -268,6 +280,103 @@ module SymbolCache
     end
     nil
   end
+
+  # EXACT_NATIVE_SLOT (codegen_exact_native_slot.rb): the shared body and one slot per method id the table's calls use.
+  def native_slot_source(table)
+    slots = table.native_slots.sort.map { |i| "static bc2cpp_xslot bc2cpp_xslot_#{i};\n" }.join
+    "#{NATIVE_SLOT}#{slots}"
+  end
+
+  # EXACT_NATIVE_SLOT: a call whose receiver the compiler proved one class, whose method the closed world proved a C
+  # function (codegen_exact_native_slot.rb). The slot of the method id keeps the method found for one receiver class,
+  # valid while mruby's method cache still answers the same (the epoch where MRB_MT_ROWS clears it), so a definition
+  # or removal anywhere forces the lookup again. The call runs in the frame mruby's dispatch pushes (bc2cpp_call_found)
+  # after OP_SEND's argument-count check. A method that is no C function, or is not public, is not kept: the call is
+  # then the checked by-name send, so a wrong proof costs speed, never the answer or the error.
+  NATIVE_SLOT = <<~CPP
+    #include <string.h>
+    #ifndef BC2CPP_SHARD_ONE_BODY
+    #define BC2CPP_SHARD_ONE_BODY
+    #endif
+    struct bc2cpp_xslot {
+      unsigned epoch;
+      mrb_state* state;
+      struct RClass* klass;
+      struct RClass* c;
+      mrb_method_t m;
+    #ifdef MRB_MT_ROWS
+      uint32_t mt_epoch;
+    #endif
+    };
+    static inline bool bc2cpp_xslot_hit(mrb_state* M, const bc2cpp_xslot& s, struct RClass* klass, mrb_sym mid) {
+      if (s.klass != klass || s.epoch != bc2cpp_nsc_epoch || s.state != M) return false;
+    #if defined(MRB_MT_ROWS)
+      (void)mid;
+      return s.mt_epoch == M->mt_epoch;
+    #elif !defined(MRB_NO_METHOD_CACHE)
+      int h = mrb_int_hash_func(M, ((intptr_t)klass) ^ mid) & (MRB_METHOD_CACHE_SIZE - 1);
+      const struct mrb_cache_entry* mc = &M->cache[h];
+      uintptr_t x, y;
+      memcpy(&x, &mc->m.as, sizeof x);
+      memcpy(&y, &s.m.as, sizeof y);
+      return mc->c == klass && mc->mid == mid && mc->c0 == s.c && mc->m.flags == s.m.flags && x == y;
+    #else
+      (void)mid;
+      return false;
+    #endif
+    }
+    BC2CPP_SHARD_ONE_BODY [[gnu::noinline, maybe_unused]] static mrb_value bc2cpp_native_slot_argv(mrb_state* M, mrb_value recv, int i, bc2cpp_xslot& s, mrb_int argc, const mrb_value* argv) {
+      mrb_sym mid = bc2cpp_sym(M, i);
+      struct RClass* klass = mrb_class(M, recv);
+      if (!bc2cpp_xslot_hit(M, s, klass, mid)) {
+        struct RClass* c = klass;
+        mrb_method_t m = bc2cpp_find_proven(M, &c, mid);
+        if (MRB_METHOD_UNDEF_P(m) || MRB_METHOD_PROC_P(m) || (m.flags & (MRB_METHOD_PRIVATE_FL | MRB_METHOD_PROTECTED_FL))) {
+          bc2cpp_check_send(M, recv, mid, argc, argv, true, mrb_nil_value());
+          return bc2cpp_funcall_argv(M, recv, mid, argc, argv);
+        }
+        s.epoch = bc2cpp_nsc_epoch;
+        s.state = M;
+        s.klass = klass;
+        s.c = c;
+        s.m = m;
+    #ifdef MRB_MT_ROWS
+        s.mt_epoch = M->mt_epoch;
+    #endif
+      }
+      // vm.c check_argument_count: the registered aspec, before the call.
+      mrb_aspec aspec = MRB_MT_ASPEC(s.m.flags);
+      int min = MRB_ASPEC_REQ(aspec) + MRB_ASPEC_POST(aspec);
+      int max = MRB_ASPEC_REST(aspec) ? -1 : min + MRB_ASPEC_OPT(aspec);
+      if (argc < min || (max >= 0 && argc > max)) mrb_argnum_error(M, argc, min, max);
+      return bc2cpp_keep_call(M, [&] { return bc2cpp_call_found(M, recv, mid, &s.m, s.c, argc, argv, mrb_nil_value()); });
+    }
+    BC2CPP_SHARD_ONE_BODY [[gnu::noinline, maybe_unused]] static mrb_value bc2cpp_native_slot0(mrb_state* M, mrb_value recv, int i, bc2cpp_xslot& s) {
+      return bc2cpp_native_slot_argv(M, recv, i, s, 0, nullptr);
+    }
+    BC2CPP_SHARD_ONE_BODY [[gnu::noinline, maybe_unused]] static mrb_value bc2cpp_native_slot1(mrb_state* M, mrb_value recv, int i, bc2cpp_xslot& s, mrb_value a) {
+      return bc2cpp_native_slot_argv(M, recv, i, s, 1, &a);
+    }
+    BC2CPP_SHARD_ONE_BODY [[gnu::noinline, maybe_unused]] static mrb_value bc2cpp_native_slot2(mrb_state* M, mrb_value recv, int i, bc2cpp_xslot& s, mrb_value a, mrb_value b) {
+      const mrb_value argv[2] = {a, b};
+      return bc2cpp_native_slot_argv(M, recv, i, s, 2, argv);
+    }
+    // The site spells the count after the slot; these fold it away.
+    [[maybe_unused]] static inline mrb_value bc2cpp_native_slot(mrb_state* M, mrb_value recv, int i, bc2cpp_xslot& s, mrb_int) {
+      return bc2cpp_native_slot0(M, recv, i, s);
+    }
+    [[maybe_unused]] static inline mrb_value bc2cpp_native_slot(mrb_state* M, mrb_value recv, int i, bc2cpp_xslot& s, mrb_int, mrb_value a) {
+      return bc2cpp_native_slot1(M, recv, i, s, a);
+    }
+    [[maybe_unused]] static inline mrb_value bc2cpp_native_slot(mrb_state* M, mrb_value recv, int i, bc2cpp_xslot& s, mrb_int, mrb_value a, mrb_value b) {
+      return bc2cpp_native_slot2(M, recv, i, s, a, b);
+    }
+    template <class... A> [[maybe_unused]] static inline mrb_value bc2cpp_native_slot(mrb_state* M, mrb_value recv, int i, bc2cpp_xslot& s, mrb_int argc, mrb_value a, mrb_value b, mrb_value c, A... rest) {
+      const mrb_value argv[] = {a, b, c, rest...};
+      return bc2cpp_native_slot_argv(M, recv, i, s, argc, argv);
+    }
+  CPP
+  private_constant :NATIVE_SLOT
 
   # OWNER_CALL, with OWNER_CALL_ICACHE compiled out when BC2CPP_OWNER_ICACHE=0.
   def owner_call_source
@@ -347,7 +456,7 @@ module SymbolCache
         #endif
         return bc2cpp_funcall_argv(M, recv, bc2cpp_sym(M, i), argc, argv);
       }
-      #{table.native_singleton_used ? NATIVE_SINGLETON : ''}#{table.owner_call_used ? owner_call_source : ''}
+      #{table.native_singleton_used ? NATIVE_SINGLETON : ''}#{table.native_slots.empty? ? '' : native_slot_source(table)}#{table.owner_call_used ? owner_call_source : ''}
       #{table.nomethod_used ? NOMETHOD : ''}
       #{GUARD_VIOLATION}#{table.hint_violation_used ? HINT_VIOLATION : ''}
       #{table.nil_receiver_used ? NIL_RECEIVER : ''}
