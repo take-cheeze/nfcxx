@@ -68,10 +68,9 @@ end
 # SELF_CORE: mruby's own Ruby (mrblib/*.rb and the linked core gems' mrblib, in the interpreter's load order) is compiled
 # with the compiler's sources, as a game build compiles it, so Array#each, Hash#each, Integer#times, Enumerable and the
 # rest run as C++ instead of on the VM under every compiled caller. They come first, as the interpreter defines them.
-# Opt-in (BC2CPP_SELF_CORE=1): the image it gives reaches CRuby's output, but runs slower than the compiler's sources
-# alone (107 s against 39 s on the small benchmark): the compiled iterators yield through a heap block and an argument
-# Array per element, and mruby-enumerator's Fiber makes most block-calling methods resumable.
-if ENV.fetch('BC2CPP_SELF_CORE', '0') == '1'
+# BC2CPP_SELF_CORE=0 compiles the compiler's sources alone (the small benchmark, scan caches warm: 22.9 s, against 17.9 s
+# with core compiled; a cold first run is several times slower either way).
+if ENV.fetch('BC2CPP_SELF_CORE', '1') != '0'
   files = core_compiled_mrblib_srcs(world, manifest.fetch('gems').map(&:first)) + files
 end
 env = {
