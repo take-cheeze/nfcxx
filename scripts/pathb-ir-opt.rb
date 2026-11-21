@@ -317,6 +317,10 @@ end
 def refusal(fn, name)
   return "callee over --max-callee" if $inline_max_callee > 0 && node_cost(fn) > $inline_max_callee && !always_inline?(fn) && !$inline_once[name] && !asm_needs_constant?(fn)
   return "ctor/dtor" if fn.any? { |f| head(f) == "constructor" || head(f) == "destructor" }
+  # Zero-cost exception tables (docs/notes/pathb-zero-cost-eh.md): the callee's landing pads and states are its own, and
+  # a noexcept callee's calls would lose their std::terminate in the caller. A callee with neither inlines as any other:
+  # its calls unwind to the caller's pad at the call's state.
+  return "exception tables" if fn.any? { |f| %w[eh-pad eh-noexcept eh-types eh-spec].include?(head(f)) }
   return "noinline" if fn.any? { |f| head(f) == "noinline" } && !empty_body?(fn)
   return "weak attr" if fn.any? { |f| head(f) == "weak" && f.length == 2 }   # __attribute__((weak)): another object may define the callee
   params = fn.find { |f| head(f) == "params" }

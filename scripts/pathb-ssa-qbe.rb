@@ -592,6 +592,9 @@ module Qbe
         @label = block_label(@cur)
         @lines << "@#{@label}"
         items = b[2..]
+        @eh_block_line ||= {}
+        ehu = items.find { |it| head(it) == "eh-unwind" }
+        @eh_block_line[@label] = ehu && "  ehunwind #{ehu[1] == "0" ? "0" : "@#{block_label(ehu[1])}"}"
         # A trap or unreachable ends the block in QBE (hlt): what follows it in the SSA block is dead, and QBE rejects an
         # instruction after hlt, so the block is cut there.
         halt = items.index { |it| %w[trap unreachable].include?(head(it)) }
@@ -602,6 +605,7 @@ module Qbe
       end
       @lines << "}"
       resolve_phi_predecessors
+      eh_relabel if @eh_block_line&.values&.any?
       self
     end
 
@@ -696,6 +700,7 @@ module Qbe
         @lines << "#{static ? "" : "export "}#{secl}function #{ret}$#{@name}(#{sig.join(", ")}) {"
       end
       @lines << "@start"
+      eh_header
       @f16_params.each { |n| f16_from_sse("%h#{n}", "%p#{n}") }
     end
 
@@ -919,6 +924,7 @@ module Qbe
     def block_successors(term)
       case head(term)
       when "br" then [term[1].to_s]
+      when "eh-entry" then term[1..].map(&:to_s)
       when "condbr" then [term[2].to_s, term[3].to_s]
       when "switch" then term[2..].select { |c| head(c) == "case" || head(c) == "default" }.map { |c| c.last.to_s }
       else []
@@ -1334,6 +1340,41 @@ end
     end
 
     def block_label(num) = "b#{num}"
+
+    # Zero-cost exception tables (docs/notes/pathb-zero-cost-eh.md): the function's catch clause types and noexcept.
+    def eh_header
+      @form.drop(2).each do |p|
+        next unless p.is_a?(Array)
+
+        case head(p)
+        when "eh-noexcept" then @lines << "  ehnoexcept"
+        when "eh-spec" then @lines << "  ehspec #{p[1..].join(' ')}"
+        when "eh-types"
+          p[1..].each_with_index do |t, i|
+            @lines << "  ehtype #{i + 1} #{t.is_a?(Ref) ? "$#{Qbe.symbol(t.raw)}" : "0"}"
+          end
+        end
+      end
+    end
+
+    # A label the emitter writes inside an SSA block (a loop of an expansion) begins a QBE block, whose calls unwind to
+    # the SSA block's pad too: its ehunwind line is written again after every such label.
+    def eh_relabel
+      cur = nil
+      out = []
+      @lines.each do |l|
+        out << l
+        if l.start_with?("@")
+          name = l[1..]
+          if @eh_block_line.key?(name)
+            cur = @eh_block_line[name]
+          elsif cur && name != "start"
+            out << cur
+          end
+        end
+      end
+      @lines = out
+    end
 
     # QBE reads at most 63 predecessors in a phi ("too many arguments"). A block that has more (the join of the dispatch
     # switches of a computed-goto interpreter: Lua's lvm.c has 83 `goto *` and a label every one of them reaches) gets
@@ -1855,6 +1896,8 @@ end
         end.join(", ")
         @lines << "  #{reg(item[1])} =#{Qbe.cls(item[2])} phi #{pairs}"
       when "let" then let_lines(item[1], item[2], item[3])
+      when "eh-unwind" then @lines << "  ehunwind #{item[1] == "0" ? "0" : "@#{block_label(item[1])}"}"
+      when "eh-pad" then @lines << "  ehpad #{item[1]}#{item[2..].map { |t| " #{t}" }.join}"
       # A volatile store is a call of its helper (QBE merges, forwards and drops plain volatile stores; a call is kept).
       when "store"
         v = op(item[3])
@@ -1896,7 +1939,7 @@ end
         safe_check(item[2], dst, n)
         asan_check(item[2], dst, n, "store")
         @lines << "  call $memset(#{Qbe.kp} #{dst}, w 0, #{Qbe.kp} #{n})" unless n.to_i.zero?
-      when "br"
+      when "br", "eh-entry"   # eh-entry: the landing pads after the body block are no jump's targets
         jump_to(item[1])
         @lines << "  jmp @#{block_label(item[1])}"
       when "switch" then switch_lines(item)
