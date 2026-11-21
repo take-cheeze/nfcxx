@@ -76,3 +76,4 @@ int main() {
   printf("%d failures\n", bad);
   return bad;
 }
+// MACOS-XFAIL-gcc: the gcc backend on macOS miscompiles libc++'s std::to_string(int) (it returns garbage), so the first probe segfaults in std::string
