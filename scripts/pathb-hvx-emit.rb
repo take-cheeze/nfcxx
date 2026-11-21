@@ -417,23 +417,28 @@ def match_loop_fn(fn)
   [dst, a, b, n, found, a_unsigned, b_unsigned]
 end
 
-# Unary max-against-zero: (function (ret void)
+# Unary min/max-against-zero: (function (ret void)
 #   (params (param %0 dst (ptr lane)) (param %1 a (ptr (const lane))) (param %2 n int))
 #   ... same counted-loop skeleton ...
 #   (loop (body ...bound check...
 #     (block ... (if COND (then ... (set R LANE)) (else (set R (const int 0))))
-#       ... (store lane DST R)))
-# where COND is (lt.s lane (const lane 0) LANE). Only int32 lanes for now.
-# Returns [dst, a, n, lane].
+#       ... (store lane DST [R | (iconv lane R)])))
+# where COND is (lt.s int (const int 0) LANE) for max or (lt.s int LANE (const int 0))
+# for min, lanes int32 or int16 (compared and stored in their own width, with an
+# iconv narrow step for int16). Returns [dst, a, n, lane, is_min].
 def match_max_fn(fn)
   ctx = match_skeleton(fn, 3)
   params = ctx[:params]
   kinds = params.map { |p| p[3] }
-  lane = kinds[0] == ["ptr", "int"] && kinds[1] == ["ptr", ["const", "int"]] ? "int" : nil
-  refuse("max is only int32 for now") if lane.nil?
-  refuse("max dst must be (ptr int)") unless kinds[0] == ["ptr", "int"]
-  refuse("max src must be (ptr (const int))") unless kinds[1] == ["ptr", ["const", "int"]]
-  refuse("max bound must be int") unless kinds[2] == "int"
+  lane = nil
+  if kinds[0] == ["ptr", "int"] && kinds[1] == ["ptr", ["const", "int"]]
+    lane = "int"
+  elsif kinds[0] == ["ptr", "short"] && kinds[1] == ["ptr", ["const", "short"]]
+    lane = "short"
+  end
+  refuse("min/max lanes must be int32 or int16") if lane.nil?
+  refuse("min/max bound must be int") unless kinds[2] == "int"
+  stride = lane == "int" ? "4" : "2"
   dst, a, n = ctx[:names]
   islot = ctx[:islot]
   comp = ctx[:comp]
@@ -457,20 +462,51 @@ def match_max_fn(fn)
     x
   end
   found = nil
+  found_kind = nil
   comp.each do |s|
     next unless s.is_a?(Array) && s[0] == "if"
     els = s[3]
     next unless els.is_a?(Array) && els[0] == "else"
     thn = s[2]
     next unless thn.is_a?(Array) && thn[0] == "then"
-    # Condition: 0 < lane.
+    # Condition: 0 < lane (max) or lane < 0 (min), compared as int.
+    # int16 lanes are widened by an iconv first; chase through it.
     cmp = chase.call(s[1])
     next unless cmp.is_a?(Array) && cmp[0] == "lt.s"
     next unless cmp[1] == "int"
-    lo = chase.call(cmp[2])
-    next unless lo.is_a?(Array) && lo[0] == "const" && lo[1] == "int" && lo[2] == "0"
-    lane_val = chase.call(cmp[3])
-    next unless lane_val.is_a?(Array) && lane_val[0] == "load" && lane_val[1] == "int"
+    lhs = chase.call(cmp[2])
+    rhs = chase.call(cmp[3])
+    is_min = false
+    lane_op = nil
+    if lane == "int"
+      if lhs.is_a?(Array) && lhs[0] == "const" && lhs[1] == "int" && lhs[2] == "0" &&
+         rhs.is_a?(Array) && rhs[0] == "load"
+        lane_op = rhs
+      elsif rhs.is_a?(Array) && rhs[0] == "const" && rhs[1] == "int" && rhs[2] == "0" &&
+            lhs.is_a?(Array) && lhs[0] == "load"
+        lane_op = lhs
+        is_min = true
+      else
+        next
+      end
+      next unless lane_op[1] == "int"
+    else
+      conv = lambda do |o|
+        o = chase.call(o)
+        next nil unless o.is_a?(Array) && o[0] == "iconv" && o[1] == "int"
+        chase.call(o[2])
+      end
+      if lhs.is_a?(Array) && lhs[0] == "const" && lhs[1] == "int" && lhs[2] == "0"
+        lane_op = conv.call(cmp[3])
+      elsif rhs.is_a?(Array) && rhs[0] == "const" && rhs[1] == "int" && rhs[2] == "0"
+        lane_op = conv.call(cmp[2])
+        is_min = true
+      else
+        next
+      end
+      next if lane_op.nil?
+      next unless lane_op.is_a?(Array) && lane_op[0] == "load" && lane_op[1] == "short"
+    end
     # Then-branch sets R to the same lane; else-branch sets R to const 0.
     then_sets = thn[1..-1].select { |t| t.is_a?(Array) && t[0] == "set" }
     else_sets = els[1..-1].select { |t| t.is_a?(Array) && t[0] == "set" }
@@ -478,32 +514,43 @@ def match_max_fn(fn)
     next unless then_sets[0][1] == else_sets[0][1]
     r = then_sets[0][1]
     next unless else_sets[0][2].is_a?(Array) && else_sets[0][2][0] == "const" &&
-                else_sets[0][2][2] == "0"
+                else_sets[0][2][1] == "int" && else_sets[0][2][2] == "0"
     then_val = chase.call(then_sets[0][2])
-    next unless then_val.is_a?(Array) && then_val[0] == "load" && then_val[1] == "int"
-    # Same address: both loads index $a by $i with stride 4.
-    la = resolve.call(lane_val[2])
+    if lane == "int"
+      next unless then_val.is_a?(Array) && then_val[0] == "load" && then_val[1] == "int"
+    else
+      then_val = chase.call(then_val[2]) if then_val.is_a?(Array) && then_val[0] == "iconv"
+      next unless then_val.is_a?(Array) && then_val[0] == "load" && then_val[1] == "short"
+    end
+    # Same address: both loads index $a by $i with the lane stride.
+    la = resolve.call(lane_op[2])
     ta = resolve.call(then_val[2])
     next unless la.is_a?(Array) && la[0] == "index" && ta.is_a?(Array) && ta[0] == "index"
     next unless resolve.call(la[1]) == "$#{a}" && resolve.call(ta[1]) == "$#{a}"
     next unless resolve.call(la[2]) == "$#{islot}" && resolve.call(ta[2]) == "$#{islot}"
-    next unless la[3] == "4" && ta[3] == "4"
+    next unless la[3] == stride && ta[3] == stride
     found = [r, dst]
+    found_kind = is_min ? :min : :max
   end
-  refuse("loop body is not a max-against-zero select") unless found
-  # The single store writes the select result to dst[i].
+  refuse("loop body is not a min/max-against-zero select") unless found
+  # The single store writes the select result to dst[i]: the raw result register
+  # for int lanes, or an iconv of it for int16 lanes (do not chase through the
+  # initializing let in either case).
   r, = found
   ok_store = comp.any? do |s|
-    next false unless s.is_a?(Array) && s[0] == "store" && s[1] == "int"
-    # The stored value is the select result register itself (set in the
-    # branches, declared by an initializing let: do not resolve through it).
-    next false unless s[3] == r
+    next false unless s.is_a?(Array) && s[0] == "store" && s[1] == lane
+    if lane == "int"
+      next false unless s[3] == r
+    else
+      v = chase.call(s[3])
+      next false unless v.is_a?(Array) && v[0] == "iconv" && v[1] == "short" && v[2] == r
+    end
     d = resolve.call(s[2])
     next false unless d.is_a?(Array) && d[0] == "index"
-    resolve.call(d[1]) == "$#{dst}" && resolve.call(d[2]) == "$#{islot}" && d[3] == "4"
+    resolve.call(d[1]) == "$#{dst}" && resolve.call(d[2]) == "$#{islot}" && d[3] == stride
   end
-  refuse("max result is not stored to dst[i]") unless ok_store
-  [dst, a, n, lane]
+  refuse("min/max result is not stored to dst[i]") unless ok_store
+  [dst, a, n, lane, found_kind]
 end
 
 # Uint8 dot-product reduction: (function (ret int)
@@ -595,7 +642,7 @@ begin
     rescue Refused
       begin
         max_args = match_max_fn(fn)
-        kind = [:max]
+        kind = [max_args[4]]
       rescue Refused
         begin
           dot_args = match_dot_fn(fn)
@@ -624,16 +671,21 @@ begin
       out << "}"
       next
     end
-    if kind[0] == :max
-      dst, a, = max_args
-      out << "__attribute__((noinline)) void hvx_vec_max_i32(int *dst, const int *a, int n) {"
+    if kind[0] == :max || kind[0] == :min
+      dst, a, _n2, lane, _k = max_args
+      vw = lane == "int" ? 32 : 64
+      vop = (kind[0] == :max ? "vmax" : "vmin") + (lane == "int" ? "w" : "h")
+      fnm = "hvx_vec_#{kind[0] == :max ? "max" : "min"}_#{lane == "int" ? "i32" : "i16"}"
+      cmp = kind[0] == :max ? ">" : "<"
+      cast = lane == "int" ? "" : "(short)"
+      out << "__attribute__((noinline)) void #{fnm}(#{lane} *dst, const #{lane} *a, int n) {"
       out << "  int i = 0;"
       out << "  V128 vz = {0};"
-      out << "  for (; i + 32 <= n; i += 32) {"
+      out << "  for (; i + #{vw} <= n; i += #{vw}) {"
       out << "    V128 va = *(const V128 *)(a + i);"
-      out << "    *(V128 *)(dst + i) = __builtin_HEXAGON_V6_vmaxw_128B(va, vz);"
+      out << "    *(V128 *)(dst + i) = __builtin_HEXAGON_V6_#{vop}_128B(va, vz);"
       out << "  }"
-      out << "  for (; i < n; ++i) dst[i] = a[i] > 0 ? a[i] : 0;"
+      out << "  for (; i < n; ++i) dst[i] = #{cast}(a[i] #{cmp} 0 ? a[i] : 0);"
       out << "}"
       next
     end

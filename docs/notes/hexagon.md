@@ -303,10 +303,11 @@ Hexagon plan:
    instruction in the assembly, flatlink, run under qemu-hexagon against `// EXPECT:`,
    and pin two refusals (a scalar module, a whole runnable module).
    `tests/pathb-hvx/cases/add_i16` passes (exit 67), `cases/add_i32` passes (exit 0),
-   `cases/max_i32` passes (exit 194), `cases/dot_u8` passes (exit 212),
-   `cases/dot_su8` passes (exit 80), `cases/mul_i16` passes (exit 184),
-   `cases/mul_su_i16` passes (exit 184) and `cases/mul_us_i16` passes (exit 184),
-   equal to the host models. CRuby
+   `cases/max_i32` passes (exit 194), `cases/max_i16` passes (exit 194),
+   `cases/min_i32` passes (exit 120), `cases/min_i16` passes (exit 120),
+   `cases/dot_u8` passes (exit 212), `cases/dot_su8` passes (exit 80),
+   `cases/mul_i16` passes (exit 184), `cases/mul_su_i16` passes (exit 184) and
+   `cases/mul_us_i16` passes (exit 184), equal to the host models. CRuby
    and mruby agree byte-for-byte on the output and the refusal text. A sweep over
    every dumpable `tests/cases/*.cpp` module (61 files) refuses all of them with
    exit 3 and `refused:` on stderr: no crash, no garbage emission.
