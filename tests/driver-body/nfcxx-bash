@@ -402,59 +402,13 @@ modules_plan_input() {  # the records of the modules block: the state scripts/nf
 }
 nfcxx_argv=("$@")   # the command as given: the compile cache keys on it (see cache_key)
 args0=("$@")   # the arguments as given: the SYCL two-pass build below re-runs the driver with them
-# BEGIN the argument loop: scripts/nfcxx-loop.rb --records reads the arguments and answers the state they leave; this block
-# sets that state. The records are NUL-terminated: "s NAME=VALUE" a scalar the loop assigns; "a NAME=VALUE" an element the
-# loop appends to an array; "x MESSAGE" an argument the loop refuses (printed; status 2); "u OPTION" a value option given
-# last (set -u ends the driver, as the bash loop did: "$2: unbound variable"); "z" the end marker, written only on success.
-# A planner that stops before "z" ends the driver with status 1, so a crash is never silent.
-loop_set() {  # loop_set NAME=VALUE: the loop's scalar NAME
-  printf -v "${1%%=*}" '%s' "${1#*=}"
-}
-loop_append() {  # loop_append NAME=VALUE: appends VALUE to the loop's array NAME
-  case ${1%%=*} in
-    files) files+=("${1#*=}") ;;
-    cflags) cflags+=("${1#*=}") ;;
-    cfiles) cfiles+=("${1#*=}") ;;
-    cu_inputs) cu_inputs+=("${1#*=}") ;;
-    cpp2_inputs) cpp2_inputs+=("${1#*=}") ;;
-    srcs) srcs+=("${1#*=}") ;;
-    ppflags) ppflags+=("${1#*=}") ;;
-    pie_opts) pie_opts+=("${1#*=}") ;;
-    preinc) preinc+=("${1#*=}") ;;
-    sysdirs) sysdirs+=("${1#*=}") ;;
-    isa) isa+=("${1#*=}") ;;
-    diag_opts) diag_opts+=("${1#*=}") ;;
-    asanopts) asanopts+=("${1#*=}") ;;
-    *) echo "nfcxx: scripts/nfcxx-loop.rb sent an unknown array (${1%%=*})" >&2; exit 1 ;;
-  esac
-}
+# BEGIN the argument loop: scripts/nfcxx-loop.rb --bash-state reads the arguments and prints the statements that set the state
+# they leave (the loop's scalars and arrays, from the planner's records; the setup above has set the NFCXX_* defaults). A refusal
+# is its message on standard error, with status 2 (the driver ends with it). A value option given last is a loop_no_value
+# statement: set -u ends the driver there ("$2: unbound variable"). A planner that stops before its end ends the driver with 1.
 loop_no_value() { : "$2"; }   # a value option given last: $2 is unset here (set -u ends the driver)
-# the ld.NAME programs that exist, for -fuse-ld=NAME (the planner does not ask the shell)
-loop_ld=""
-for loop_a in "$@"; do
-  case $loop_a in
-    -fuse-ld=*) loop_n=${loop_a#-fuse-ld=}
-                if [ -n "$loop_n" ] && command -v "ld.$loop_n" >/dev/null 2>&1; then loop_ld+="$loop_n,"; fi ;;
-  esac
-done
-loop_recs=(); loop_done=0; loop_refused=""; loop_missing=""
-while IFS= read -r -d '' loop_rec; do
-  case $loop_rec in
-    z) loop_done=1 ;;
-    x*) loop_refused=${loop_rec:1} ;;
-    u*) loop_missing=${loop_rec:1} ;;
-    *) loop_recs+=("$loop_rec") ;;
-  esac
-done < <("${RUBY:-ruby}" "$root/scripts/nfcxx-loop.rb" --records --ld-available="$loop_ld" -- "$@")
-if [ -n "$loop_refused" ]; then printf '%s\n' "$loop_refused" >&2; exit 2; fi
-if [ -n "$loop_missing" ]; then loop_no_value "$loop_missing"; fi
-[ $loop_done = 1 ] || { echo "nfcxx: scripts/nfcxx-loop.rb stopped before its end (the argument state is incomplete)" >&2; exit 1; }
-for loop_rec in ${loop_recs[@]+"${loop_recs[@]}"}; do
-  case $loop_rec in
-    s*) loop_set "${loop_rec:1}" ;;
-    a*) loop_append "${loop_rec:1}" ;;
-  esac
-done
+loop_state=$("${RUBY:-ruby}" "$root/scripts/nfcxx-loop.rb" --bash-state -- "$@") || exit $?
+eval "$loop_state"
 shift $#
 # END the argument loop
 # The early exits: the refusals of the state above and the --emit-hip route are scripts/nfcxx-early-exit.rb's (pre: status 2 is a

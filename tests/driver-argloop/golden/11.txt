@@ -1,0 +1,12 @@
+== -c m.cpp --emit-c -o m.o
+-- stdout
+/* Translated by the Edison Design Group C++/C front end (version 7.0) */
+/* DATE */
+extern int __EDGCPFE__7_0;
+void *memcpy(void *,const void *,unsigned long);
+void *memset(void *,int,unsigned long);
+
+# 1 "TMP/m.cpp"
+extern int main(void); int main(void) { return 0; }
+-- stderr
+status=0

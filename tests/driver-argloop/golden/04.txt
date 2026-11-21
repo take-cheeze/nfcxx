@@ -1,0 +1,5 @@
+== -c m.cpp -I
+-- stdout
+-- stderr
+nfcxx: -I needs an argument
+status=2
