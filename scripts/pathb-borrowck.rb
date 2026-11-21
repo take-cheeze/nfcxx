@@ -566,6 +566,9 @@ class LocalLifetime
         @byval[p[1]] = name
       end
     end
+    # exception tables: the pads' slots for the exception and the selector live for the whole call (the pads write
+    # them; a handler reads the exception, which its edge from the throw point makes initialized: eh_tables_edges)
+    EH_SLOTS.each { |s| @declared[s] = true if @slots[s] }
     @slots.each_key do |name|
       unless @declared[name] || @params.any? { |p| p[1] == name }
         raise BorrowRefused, "missing declaration facts for slot #{name}"
@@ -618,10 +621,13 @@ class LocalLifetime
       raise BadIR, "drop obligation #{r[:name]} collides with a contract argument" if @drops.key?(r[:name])
       @drops[r[:name]] = {root: r[:name], off: 0, width: r[:width], type: r[:type], required: r[:required]}
     end
-    body = f.drop(4).reject { |x| ['slot', 'static', 'weak', 'drop-obligation'].include?(bh(x)) }
+    body = f.drop(4).reject { |x| ['slot', 'static', 'weak', 'drop-obligation'].include?(bh(x)) || EH_TABLE_HEADER.include?(bh(x)) }
     @try_stack = []
     @exc = {}
+    eh_tables_setup(f.drop(4).select { |x| bh(x) == 'eh-pad' }, body, f.drop(4).find { |x| bh(x) == 'eh-types' })
+    body = body.reject { |x| bh(x) == 'eh-pad' }
     @entry = sequence(body, node(['function-exit'], []), nil, nil)
+    eh_tables_edges
     @nodes.each do |n|
       n[1].map! do |edge|
         if edge.is_a?(String)
@@ -1199,6 +1205,11 @@ class LocalLifetime
       else
         # __throw and __rethrow do not return; any other throwing call also continues normally.
         follow = node(x, eh_noreturn?(x) ? [] : [follow])
+        # exception tables: a throw point in state N reaches the catch handlers pad N dispatches to (eh_tables_edges)
+        if @eh_pad_handlers && throw_point?(x)
+          st = @eh_state_of[x.object_id]
+          @eh_pending << [follow, st, x.object_id] if st && st > 0
+        end
         # A throw point reaches the handler of every enclosing try block of this function: which one catches
         # depends on the exception's type, which no summary states.
         if !@try_stack.empty? && throw_point?(x)
@@ -1214,7 +1225,128 @@ class LocalLifetime
     follow
   end
 
-  EH_THROWS = %w[__throw __rethrow].freeze
+  EH_THROWS = %w[__throw __rethrow __cxa_throw __cxa_rethrow].freeze
+  EH_NORETURN = %w[_ZSt9terminatev __cxa_call_unexpected].freeze
+  EH_TABLE_HEADER = %w[eh-types eh-noexcept eh-spec].freeze
+  EH_SLOTS = %w[eh.exc eh.sel].freeze
+
+  # Zero-cost exception tables (docs/notes/pathb-zero-cost-eh.md): (eh-state N) says the calls after it unwind to landing
+  # pad N; the pads (eh-pad N ...) after the body run the cleanups and dispatch to the body's catch handlers by goto. The
+  # checker does not run the pads' generated code: a throw point in state N gets an exceptional edge to each handler
+  # label the pad can reach (through the shared nodes of the pads), as the frames model's edge into a try's handler.
+  # On that edge the objects the pad's cleanups destroy on the way to the handler end (their storage too), as the frames
+  # model ends a try body's locals.
+  def eh_tables_setup(pads, body, types)
+    @eh_pad_handlers = nil
+    return if pads.empty?
+    # the catch-all clauses' type ids (an (eh-types ...) entry 0): a test of one always matches, the chain stops there
+    catch_all = {}
+    (types || []).drop(1).each_with_index { |t, i| catch_all[i + 1] = true unless t.is_a?(IRSym) }
+    defs = {}   # the pads' registers -> their expressions (for the selector tests)
+    pads.each { |p| p.each { |x| defs[x[1]] = x[3] if bh(x) == 'let' && x[1].is_a?(String) } }
+    matches_all = lambda do |cond|
+      e = cond.is_a?(String) ? defs[cond] : nil
+      bh(e) == 'eq' && bh(e[3]) == 'eh-tid' && catch_all[e[3][1].to_s.to_i]
+    end
+    pad_labels = {}
+    code = {}   # a pad-internal label -> the statements after it
+    pads.each do |p|
+      stmts = p.drop(bh(p[4]) == 'eh-outer' ? 5 : 4)
+      cur = nil
+      stmts.each do |s|
+        if bh(s) == 'label'
+          cur = bname(s[1])
+          pad_labels[cur] = true
+          code[cur] = []
+        elsif cur
+          code[cur] << s
+        end
+      end
+    end
+    # the local slots a statement's calls are given (a cleanup's destructor call names its object)
+    slot_args = lambda do |x, acc|
+      if x.is_a?(IRSym)
+        acc << x.name if x.sig == '$' && !EH_SLOTS.include?(x.name) && !acc.include?(x.name)
+      elsif x.is_a?(Array)
+        x.each { |y| slot_args.call(y, acc) }
+      end
+      acc
+    end
+    # the walk of a pad's chain, in the order of its code: [handler label, the slots its cleanups end on the way]
+    walk_chain = nil
+    walk_chain = lambda do |xs, acc, out, depth|
+      raise BorrowRefused, 'landing pad chain too deep' if depth > 1000
+      xs.each do |s|
+        next unless s.is_a?(Array)
+        case bh(s)
+        when 'goto'
+          l = bname(s[1])
+          if pad_labels[l]
+            walk_chain.call(code[l], acc.dup, out, depth + 1)
+          else
+            out << [l, acc.dup]
+          end
+          return out   # nothing after a jump runs
+        when 'if'
+          s.drop(2).each { |arm| walk_chain.call(arm.drop(1), acc.dup, out, depth + 1) if arm.is_a?(Array) }
+          return out if matches_all.call(s[1])   # a catch (...): nothing after its test is reached
+        when 'block'
+          walk_chain.call(s.drop(1), acc, out, depth + 1)
+        when 'eval', 'let'
+          slot_args.call(s, acc) if s.flatten.any? { |y| y == 'call' }
+        end
+      end
+      out
+    end
+    @eh_pad_handlers = {}
+    pads.each do |p|
+      stub = p.drop(bh(p[4]) == 'eh-outer' ? 5 : 4).take_while { |s| bh(s) != 'label' }
+      @eh_pad_handlers[p[1].to_s.to_i] = walk_chain.call(stub, [], [], 0)
+    end
+    # each statement's state, in the order of the text (EDG states the enclosing state again at the end of a block), and
+    # the locals in scope (decl ... scope-end) at each throw point and each label: the edge into a handler ends the ones
+    # in scope at the throw and not at the handler (the try body's), as the frames model does
+    @eh_state_of = {}
+    @eh_scope_of = {}
+    @eh_label_scope = {}
+    cur = 0
+    scope = []
+    walk = lambda do |xs|
+      xs.each do |s|
+        next unless s.is_a?(Array)
+        case bh(s)
+        when 'eh-state'
+          cur = s[1].to_s.to_i
+        when 'decl'
+          scope << s[1].name if s[1].is_a?(IRSym) && s[1].sig == '$' && !scope.include?(s[1].name)
+        when 'scope-end'
+          scope.delete(s[1].name) if s[1].is_a?(IRSym)
+        when 'label'
+          @eh_label_scope[bname(s[1])] = scope.dup
+        else
+          @eh_state_of[s.object_id] = cur
+          @eh_scope_of[s.object_id] = scope.dup if throw_point?(s)
+          # a nested statement's locals end with it, and the ends on its exit paths (before a return) are not this path's
+          saved = scope.dup
+          walk.call(s.drop(1))
+          scope = saved
+        end
+      end
+    end
+    walk.call(body)
+    @eh_pending = []
+  end
+
+  def eh_tables_edges
+    return unless @eh_pad_handlers
+    @eh_pending.each do |id, st, x|
+      (@eh_pad_handlers[st] || []).each do |l, slots|
+        raise BadIR, "unknown label #{l}" unless @labels.key?(l)
+        ended = slots + ((@eh_scope_of[x] || []) - (@eh_label_scope[l] || [])).reject { |n| slots.include?(n) }
+        (@exc[id] ||= []) << [@labels[l], nil, ended]
+      end
+    end
+  end
 
   def direct_callee(x)
     return nil unless x.is_a?(Array)
@@ -1235,7 +1367,7 @@ class LocalLifetime
   end
 
   def eh_noreturn?(x)
-    bh(x) == 'eval' && EH_THROWS.include?(direct_callee(x[1]))
+    bh(x) == 'eval' && (EH_THROWS.include?(direct_callee(x[1])) || EH_NORETURN.include?(direct_callee(x[1])))
   end
 
   # The frame slot of a try block, when cond is (eq int R (const int 0)) with R the result of _setjmp on a pointer
@@ -1713,6 +1845,34 @@ class LocalLifetime
         raise BorrowRefused, 'exception setup with a local address' if v.any? { |p| p != 'external' }
       end
       ['eh']
+    # the Itanium C++ ABI's calls (exception tables, docs/notes/pathb-zero-cost-eh.md): the same protocol
+    when '__cxa_allocate_exception'
+      raise BadIR, "#{name} form" unless args.length == 1
+      ['eh']
+    when '__cxa_throw'
+      raise BadIR, "#{name} form" unless args.length == 3
+      obj = value(args[0], state)
+      raise BorrowRefused, 'throw of an object that is not the exception object' unless obj == ['eh']
+      args.drop(1).each do |a|
+        raise BorrowRefused, 'exception setup with a local address' if value(a, state).any? { |p| p != 'external' }
+      end
+      refuse_live_drops(state)
+      @throws = true
+      []
+    when '__cxa_rethrow'
+      raise BadIR, "#{name} form" unless args.empty?
+      refuse_live_drops(state)
+      @throws = true
+      []
+    when '__cxa_begin_catch'
+      raise BadIR, "#{name} form" unless args.length == 1
+      ['eh']
+    when '__cxa_end_catch'
+      raise BadIR, "#{name} form" unless args.empty?
+      invalidate_pointers(state, ['eh'], 'ended:exception object')
+      []
+    when '_ZSt9terminatev', '__cxa_call_unexpected'
+      []
     end
   end
 
@@ -2032,8 +2192,9 @@ class LocalLifetime
       check_pending_drops(state)
     when 'drop-live', 'drop-state', 'drop-state-if-live'
       return drop_event(x, state)
-    when 'join', 'unreachable', 'loc'
-      # Locations are preserved in input; diagnostics currently identify functions and slots.
+    when 'join', 'unreachable', 'loc', 'eh-state', 'eh-inline-begin', 'eh-inline-end', 'eh-state-outer'
+      # Locations are preserved in input; diagnostics currently identify functions and slots. The exception states of
+      # the tables mode are read when the CFG is built (eh_tables_setup).
     when 'readonly'
       # (readonly %N): the parameter is a pointer the function never writes through (a Rust `&T`). Summary
       # inference gives it read-only modes; a summary verified against the body enforces that.
@@ -2192,6 +2353,7 @@ class LocalLifetime
         reset_drop_flags(name, initial, 'vacant')
       end
     end
+    EH_SLOTS.each { |s| reset_storage(s, initial, 'uninitialized') if @slots[s] }
     @loans.each_key { |id| initial['loan:' + id] = ['inactive'] }
     @loans.each { |id, loan| initial['phase:' + id] = ['reserved'] if loan[1] == 'two-phase' }
     initial['value:@eh'] = ['external']
@@ -2262,7 +2424,12 @@ class LocalLifetime
       end
       invalidate_pointers(state, origins, 'ended:' + name)
     end
-    state['value:@eh'] = ['local:' + frame]
+    if frame
+      state['value:@eh'] = ['local:' + frame]
+    else
+      # a pad's edge into a handler (exception tables): the pad stored the exception and the selector
+      EH_SLOTS.each { |s| reset_storage(s, state, 'initialized') if @slots[s] }
+    end
     state
   end
 
