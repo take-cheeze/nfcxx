@@ -40,11 +40,11 @@ mkroot() {
 awk -v f="$here/bash-build.sh" '
   /^mod_build_program\(\) \{/ { while ((getline l < f) > 0) print l; skip = 1; next }
   skip && /^\}/ { skip = 0; next }
-  !skip { print }' "$repo/nfcxx" > "$sb/nfcxx-oracle"
+  !skip { print }' "$here/pinned-nfcxx.txt" > "$sb/nfcxx-oracle"
 # the module wrappers are no longer in nfcxx (its call sites are direct); the oracle gets their verbatim copy first
 { cat "$repo/tests/nfcxx-modscan/oracle-wrappers.sh"; cat "$sb/nfcxx-oracle"; } > "$sb/nfcxx-oracle.tmp" && mv "$sb/nfcxx-oracle.tmp" "$sb/nfcxx-oracle"
 mkroot "$oracle" "$sb/nfcxx-oracle"
-mkroot "$port" "$repo/nfcxx"
+mkroot "$port" "$here/pinned-nfcxx.txt"   # the pre-switch driver text (./nfcxx is the Ruby driver since B8)
 root=$oracle   # the module functions of nfcxx (mod_decl_name and the rest) run the scripts of this root
 for c in gcc cc g++ cp mktemp ninja; do ln -s "$here/stub.sh" "$bin/$c"; done
 # the sources: the repository's module tests and the port's own (src/)
