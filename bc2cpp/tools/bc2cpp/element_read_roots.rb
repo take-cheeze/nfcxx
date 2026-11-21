@@ -33,6 +33,24 @@ class ElementReadRoots < RegisterFlow
     'mrb_ary_push'
   ].freeze
 
+  # PURE_CALLS: names that run no Ruby code and store into no existing slot, beyond SAFE_CALLS: macros, symbol
+  # interning, ivar and class reads, identity tests, write barriers, and allocators of plain Array/String/Hash
+  # objects. An allocator may run the GC, which frees only unreachable objects, and an element no code has unlinked
+  # is still reachable from its container. Anything that may raise, send by name or hash a key stays a call.
+  # BC2CPP_ELEMENT_READ_PURE=0 treats these as calls again.
+  PURE_CALLS = Set[
+    'mrb_likely', 'mrb_unlikely', 'DATA_PTR', 'BC2CPP_FIXNUM_PAIR_P', 'BC2CPP_FIXNUM_WORD', 'mrb_undef_p',
+    'mrb_frozen_p', 'mrb_intern_cstr', 'mrb_intern_lit', 'mrb_intern_static', 'mrb_intern', 'mrb_iv_get',
+    'mrb_obj_eq', 'mrb_obj_equal', 'mrb_str_equal', 'mrb_obj_class', 'bc2cpp_obj_class', 'bc2cpp_class_is',
+    'mrb_field_write_barrier', 'mrb_field_write_barrier_value', 'mrb_write_barrier',
+    'mrb_ary_new', 'mrb_ary_new_capa', 'mrb_ary_new_from_values', 'mrb_str_new', 'mrb_str_new_cstr',
+    'mrb_str_new_static', 'mrb_str_new_lit', 'bc2cpp_pool_str', 'mrb_hash_new', 'mrb_hash_new_capa', 'mrb_int_value'
+  ].freeze
+
+  def self.pure_calls?
+    ENV['BC2CPP_ELEMENT_READ_PURE'] != '0'
+  end
+
   # C keywords that take a parenthesised condition and are not calls.
   KEYWORDS = Set['if', 'while', 'for', 'switch', 'return', 'sizeof', 'else', 'do'].freeze
   CALL_NAME = /\b([A-Za-z_]\w*)\s*\(/
@@ -146,8 +164,9 @@ class ElementReadRoots < RegisterFlow
 
   # Whether generated text (comments aside) names a function the rule does not know to be safe.
   def self.calls?(text)
+    pure = pure_calls?
     text.gsub(COMMENT_LINE, '').gsub(COMMENT_BLOCK, '').scan(CALL_NAME) do |(name)|
-      next if KEYWORDS.include?(name) || SAFE_CALLS.include?(name)
+      next if KEYWORDS.include?(name) || SAFE_CALLS.include?(name) || (pure && PURE_CALLS.include?(name))
 
       return true
     end
