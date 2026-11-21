@@ -255,8 +255,11 @@ LAMBDA_FALLBACK_UNSAFE_OPS = %i[
   RESCUE RAISEIF EXCEPT
 ].freeze
 
+# LAMBDA_REST: `->(a, *r) { }` and `->(*r) { }` (CORE_BLOCK_REST / MIXED_REST_BLOCK's shapes) bind as a strict proc does
+# (emit_proc_fallback_fn_body); BC2CPP_LAMBDA_REST=0 keeps them refused.
 def lambda_fallback_safe?(lambda_irep)
-  return false unless pure_mandatory_arity?(lambda_irep)
+  rest = ENV['BC2CPP_LAMBDA_REST'] != '0' && (rest_only_block?(lambda_irep) || mixed_rest_block?(lambda_irep))
+  return false unless pure_mandatory_arity?(lambda_irep) || rest
 
   !BytecodeIR.for(lambda_irep).op?(*LAMBDA_FALLBACK_UNSAFE_OPS)
 end
