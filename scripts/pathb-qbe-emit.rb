@@ -1152,9 +1152,9 @@ class Fn
   end
 
   # (eh-resume-outer K EXC): resolved after the pads, when every copy's entry state is known
-  def eh_resume_outer(k, v)
+  def eh_resume_outer(k, v, sel = nil)
     ensure_live
-    @eh_deferred << [@body.length, k, v]
+    @eh_deferred << [@body.length, k, v, sel]
     @body << nil
     @dead = true
   end
@@ -1180,12 +1180,13 @@ class Fn
       stmts(code.map { |s| eh_tids(s) })
       jmp(abort_label(:unreachable)) unless @dead
     end
-    @eh_deferred.each do |idx, k, v|
+    @eh_deferred.each do |idx, k, v, sel|
       o = eh_outer(k)
       @body[idx] = if o == :term
                      ["\tcall $_ZSt9terminatev()", "\thlt"]
                    elsif o.is_a?(Integer) && o > 0
-                     "\tjmp #{lab_for(eh_chain_label(forms, o.to_s))}"
+                     # into that pad's chain as its stub goes there: the exception and the selector in its stub's slots
+                     eh_stub_stores(forms, o.to_s, v, sel) + ["\tjmp #{lab_for(eh_chain_label(forms, o.to_s))}"]
                    else
                      lab = newlab
                      ["\tjmp #{lab}", lab, "\tcall $_Unwind_Resume(l #{v})", "\thlt"]
@@ -1217,6 +1218,22 @@ class Fn
       end
     end
     [cl, types]
+  end
+
+  # the stores of pad id's stub (the exception's, then the selector's), with the values v and sel, as QBE lines
+  def eh_stub_stores(forms, id, v, sel)
+    p = forms[id]
+    raise BadIR, "no landing pad #{id}" if p.nil?
+    stub = p.drop(head_of(p[4]) == "eh-outer" ? 5 : 4).take_while { |x| head_of(x) != "goto" }
+    lines = []
+    stub.select { |x| head_of(x) == "store" }.first(2).each_with_index do |st, i|
+      val = i == 0 ? v : sel
+      next if val.nil?
+      slot = @slots[st[2].name]
+      raise BadIR, "landing pad #{id}: a stub store to #{form_text(st[2])}" if !st[2].is_a?(IRSym) || slot.nil?
+      lines << "\tstorel #{val}, #{slot[0]}"
+    end
+    lines
   end
 
   # the first jump of pad id's code: its chain's node, past the stub that keeps the exception and the selector
@@ -2790,9 +2807,11 @@ end
 
 # (eh-resume-outer K EXC): a copy's pad goes on to the pad of the state the copy was entered in
 def s_eh_resume_outer(fn, x)
-  raise BadIR, "eh-resume-outer form" if x.length != 3 || !fn.eh_on?
+  raise BadIR, "eh-resume-outer form" if (x.length != 3 && x.length != 4) || !fn.eh_on?
   fn.ensure_live
-  fn.eh_resume_outer(pstr(x[1]), fn.opnd(x[2], "l").t)
+  exc = fn.opnd(x[2], "l").t
+  sel = x.length == 4 ? fn.opnd(x[3], "l").t : nil
+  fn.eh_resume_outer(pstr(x[1]), exc, sel)
 end
 
 def s_return(fn, x)

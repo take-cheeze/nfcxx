@@ -633,19 +633,22 @@ def eh_renumber(x, pmap, tidmap, zero)
   x.map { |y| eh_renumber(y, pmap, tidmap, zero) }
 end
 
-# A callee pad's (eh-resume EXC): the caller's pad slots get the exception and the selector, then (eh-resume-outer K EXC)
+# A callee pad's (eh-resume EXC): (eh-resume-outer K EXC SEL), the exception and the copy's selector. Where they go is
+# the SSA builder's: the slots the stub of the pad of the state copy K was entered in stores to (that pad may be another
+# copy's, whose slots are that copy's: a callee inlined into an inlined body).
 def eh_resumes(list, kk, sel, st)
   out = []
   list.each do |y|
     if head(y) == "eh-resume"
-      out << ["store", ["ptr", "void"], "$\"eh.exc\"", y[1]]
       if sel
-        r = "%#{st[:next]}"   # a let, not a load inside the store: the SSA builder promotes a slot's lets
+        r = "%#{st[:next]}"   # a let, not a load inside the form: the SSA builder promotes a slot's lets
         st[:next] += 1
         out << ["let", r, "long", ["load", "long", sel]]
-        out << ["store", "long", "$\"eh.sel\"", r]
+        out << ["eh-resume-outer", kk, y[1], r]
+      else
+        out << ["eh-resume-outer", kk, y[1]]
       end
-      out << ["eh-resume-outer", kk, y[1]]
+      next
     elsif y.is_a?(Array)
       out << eh_resumes(y, kk, sel, st)
     else

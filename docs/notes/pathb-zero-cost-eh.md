@@ -136,9 +136,10 @@ libstdc++ is already one of ours.
 A callee with landing pads is inlined with them (`eh_inline`): its pads are renumbered after the caller's, its catch
 types join the caller's table (the pads compare the selector with `(eh-tid N)`, which the renumbering reaches), and the
 copy is bracketed by `(eh-inline-begin K)` and `(eh-inline-end K)`. The callee's state 0 becomes `(eh-state-outer K)`, the
-state the copy was entered in; its pads say `(eh-outer K)`, and their resume hands the caller's pad slots the exception
-and the selector and becomes `(eh-resume-outer K EXC)`, a jump into the chain of that state's pad (a resume when it is
-0, `std::terminate` in a pad's code). The SSA builder resolves these along the control flow, after all the code (a copy
+state the copy was entered in; its pads say `(eh-outer K)`, and their resume becomes `(eh-resume-outer K EXC SEL)`: the
+exception and the selector go to the slots the stub of that state's pad stores to, then a jump into its chain (a resume
+when it is 0, `std::terminate` in a pad's code). That pad may be another copy's (a callee inlined into an inlined
+body), whose slots are that copy's, not the function's (`tests/pathb-eh-tables/cases/inline_nested_resume.cpp`). The SSA builder resolves these along the control flow, after all the code (a copy
 inlined into a pad's code is entered after the pads before it), and appends the outer pad's action chain to the copy's
 pads. A `noexcept` callee's copy gets a pad that calls `std::terminate` for its state 0. A callee with a dynamic exception
 specification is not inlined. A function without tables inlines as before: its calls get the state of the call site.
