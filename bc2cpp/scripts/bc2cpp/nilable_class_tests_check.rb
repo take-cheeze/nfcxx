@@ -188,7 +188,7 @@ check.call('native Integer conversion is retained for the setter argument',
 unbox_off = bodies.call('BC2CPP_NATIVE_PARAM_UNBOX' => '0')
 check.call('disabling native unboxing retains Integer argument checks and fallback',
            unbox_off['NativeProbe#sprite_z'].to_s.include?('mrb_integer_p(') &&
-             unbox_off['NativeProbe#sprite_z'].include?('bc2cpp_owner_call(') &&
+             unbox_off['NativeProbe#sprite_z'].match?(/bc2cpp_owner_call\(|bc2cpp_native_slot\(/) &&
              !unbox_off['NativeProbe#sprite_z'].include?('POLY_SMALL_N'))
 Dir.mktmpdir('native-before-poly-override') do |dir|
   replaced, = Bc2cppFixtureRuntime.generate(SOURCE + "module RGSS; class Sprite; def z=(v); v; end; end; end", dir,
