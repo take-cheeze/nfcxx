@@ -140,7 +140,10 @@ class ClosedWorld
     # MODULE_DEFINER_INCLUDERS: the registry's class-body mixins (owner => modules), or nil when the caller has none.
     @mixins = included && prepended ? merge_mixins(included, prepended) : nil
     @unknown_mixins = unknown_mixins
-    @class_decls = class_decls.dup
+    # Without the registry's default block: a read of an undeclared name (derives_from_module_or_class?, the superclass walk)
+    # must not add a key, or class_declared? answers true for it from then on (a module_function module's self was taken
+    # for an instance, so its singleton copy got no arm and the module object fell to the nomethod else).
+    @class_decls = {}.merge(class_decls)
     @struct_classes.each do |owner|
       @class_decls[owner] = [{ super: 'Struct', outer_nil: true, outer_qualified: false, struct: true }] unless @class_decls.key?(owner)
     end
