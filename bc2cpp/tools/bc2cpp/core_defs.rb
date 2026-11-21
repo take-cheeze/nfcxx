@@ -41,6 +41,85 @@ module CoreDefs
     out
   end
 
+  # CORE_OUTSIDE_REDEFINED: the labels of the core-source definitions in +registry+ that a linked Ruby source this build does
+  # not compile defines again on the same owner (mruby-require's Hash#to_h, which takes a block where mruby-hash-ext's
+  # returns self). Those sources load after mruby's own Ruby, so the interpreter ends up with their method: the core body
+  # may be neither bound nor registered over it (a self build registers after every gem has run). +paths+: the linked
+  # Ruby sources (BC2CPP_LINKED_RUBY_SRCS); the ones +ireps+ compiles are left out. Read as bytecode, owner by owner: a
+  # text or parse scan is no substitute, since keeping a core body interpreted is not free (an interpreted frame between
+  # the steps of a compiled Fiber, Enumerator#next over Enumerator#each, is a C boundary its yield cannot cross), and the
+  # parse scan drops a name some file defines outside a class body. The compile is kept (outside_compile) for
+  # BlockSelfWorld's read of the same sources.
+  def outside_redefined_labels(registry, ireps, paths, symbol, out_dir)
+    compiled = ireps.each_value.to_set { |irep| File.expand_path(irep.file.to_s) }
+    unread = paths.map { |path| File.expand_path(path) }.uniq.sort.reject { |path| compiled.include?(path) }
+    return Set.new if unread.empty?
+
+    begin
+      outside_ireps, outside_root = outside_compile(unread, symbol, out_dir)
+    rescue StandardError => e
+      # As BlockSelfWorld's read of the same sources: one that does not compile is reported, and nothing is learned.
+      warn "bc2cpp: CORE_OUTSIDE_REDEFINED: an outside Ruby source does not compile (#{e.message.lines.first&.strip})"
+      return Set.new
+    end
+    pairs = build_registry(outside_ireps.dup, outside_root)[0].values.flatten.to_set { |d| [d.owner, d.name] }
+    registry.values.flatten.select do |d|
+      d.irep && pairs.include?([d.owner, d.name]) && core_source?(ireps.fetch(d.irep).file)
+    end.to_set(&:irep)
+  end
+
+  # The outside Ruby sources +paths+ (sorted, expanded) as [ireps, root], compiled once per list for every reader.
+  def outside_compile(paths, symbol, out_dir)
+    @outside_compiles ||= {}
+    @outside_compiles[paths] ||= compile_ireps(paths, "#{symbol}_block_self_world", out_dir, emitter: false)
+  end
+
+  # CORE_LOOP_ALIASES: the names `%i[sub gsub].each { |v| alias_method v, :"onig_regexp_#{v}" }` installs, when the SENDB at
+  # +idx+ of +irep+ is such a loop: `each` over an Array literal of Symbols, whose block aliases to a name its parameter
+  # holds (the alias_method's first argument is a MOVE from R1). nil for any other send. The aliases replace whatever
+  # method of those names the owner has, which a walk-order registry entry would otherwise stand for.
+  def loop_alias_names(irep, idx, ireps)
+    program = BytecodeIR.for(irep)
+    send = program.source_at(idx)
+    return nil unless send&.op == :SENDB && send.sym == 'each' && send.argc.to_i.zero? && idx >= 2
+
+    block = program.source_at(idx - 1)
+    literal = program.container_literal(idx - 2)
+    return nil unless block&.op == :BLOCK && literal && literal.kind == :array && literal.base == send.reg.to_i
+
+    names = (0...literal.count).map do |k|
+      load = program.source_at(idx - 2 - literal.count + k)
+      return nil unless load && load.reg.to_i == literal.base + k
+
+      sym = case load.op
+            when :LOADSYM then load.sym
+            when :SYMBOL then load.pool_index && irep.pool&.[](load.pool_index.to_i)
+            end
+      return nil unless sym.is_a?(String)
+
+      sym
+    end
+    child = block.block_index && irep.reps&.[](block.block_index.to_i)
+    body = child && ireps[child]
+    return nil unless body && loop_param_alias?(body)
+
+    names
+  end
+
+  # Does the block +body+ send alias_method with its first parameter (R1) as the new name?
+  def loop_param_alias?(body)
+    program = BytecodeIR.for(body)
+    found = false
+    program.each_source do |insn, i|
+      next unless insn.op == :SSEND && insn.sym == 'alias_method' && insn.plain_fixed_argc? && insn.argc.to_i == 2
+
+      arg = insn.reg.to_i + 1
+      writer = (0...i).reverse_each.lazy.map { |j| program.source_at(j) }.find { |w| w && w.reg.to_i == arg }
+      found = true if writer && writer.op == :MOVE && writer.regs.map(&:to_i) == [arg, 1]
+    end
+    found
+  end
+
   # Irep labels of every def instruction that a conditional forward jump can skip
   # (`def x ... end unless method_defined?(:x)`, a def in an `if` arm). The
   # registry sees the def, but at run time it may not happen, and a registration

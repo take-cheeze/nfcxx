@@ -133,10 +133,15 @@ class CodeGen
     # mrb_nil_value(), never read because the callee's switch jumps to the default
     # code, which overwrites the register.
     opt_args = []
-    if t_opt.positive?
-      opt_args = Array.new(t_mand + t_opt - argv.size, 'mrb_nil_value()')
-      opt_args << (argv.size - t_mand).to_s
+    opt_args = Array.new(t_mand + t_opt - argv.size, 'mrb_nil_value()') if t_opt.positive?
+    # KEYWORD_YIELD: a callee that yields takes the block after the positionals. This send carries none (a keyword send
+    # with a literal block never reaches here), so it is nil, as the interpreter's frame would hold.
+    if takes_block_param?(callee_irep)
+      return nil if @call_block_expr
+
+      opt_args << 'mrb_nil_value()'
     end
+    opt_args << (argv.size - t_mand).to_s if t_opt.positive?
     call = "r#{d} = #{impl}(M, #{([recv] + argv + opt_args + kw_args).join(', ')});"
     # LEXICAL_SELF_KEYWORD_SUPPORT: a marker distinct from MONO (one definition
     # program-wide vs. a provably exact self class), spelled like compile_send's
@@ -373,6 +378,8 @@ class CodeGen
     # (a): exact keyword-name match, and every required keyword supplied.
     kw_table = keyword_arg_table(init_irep)
     return nil unless kw_table
+    # KEYWORD_YIELD: an initialize that takes the block is not built here (its `_impl` has the block parameter).
+    return nil if takes_block_param?(init_irep)
     return nil unless (kw_names - kw_table.map { |k| k[:name] }).empty?
 
     required = kw_table.select { |k| k[:required] }.map { |k| k[:name] }
@@ -629,23 +636,31 @@ class CodeGen
   #   * a substituted receiver or argument list (an inlined body), or no source instruction to read registers from.
   # A class-body unit (codegen_class_body.rb) takes it too: bc2cpp_send_kw is in the runtime prelude, not a checked-send
   # slot, and the unit's `self` is the class OP_SEND's protected check compares against.
+  # KEYWORD_SPLAT_DYNAMIC_SEND: the packed shapes too. With `nk=*` (`m(a, **h)`) the keyword Hash is the register after
+  # the positionals, which OP_SEND only checks (mrb_ensure_hash_type, a TypeError otherwise) and passes as it is; with
+  # `n=*` (`m(*list, k: v)`) the positionals are the items of the Array in R(a+1), passed as values, as the other splat
+  # sends do. BC2CPP_KEYWORD_SPLAT_DYNAMIC_SEND=0 keeps those `#error`.
   KEYWORD_DYNAMIC_SEND_REFUSED = %w[send __send__ public_send].freeze
 
   def keyword_dynamic_send(insn, self_implicit:, irep:, idx:, call_receiver:, call_arguments:)
     return nil unless keyword_dynamic_send_enabled?
     return nil unless %i[SEND SSEND].include?(insn.op) && (insn.op == :SSEND) == self_implicit
-    return nil if insn.positional_splat? || insn.keyword_splat?
+    splat = insn.positional_splat?
+    kwsplat = insn.keyword_splat?
+    return nil if (splat || kwsplat) && ENV['BC2CPP_KEYWORD_SPLAT_DYNAMIC_SEND'] == '0'
     return nil unless irep && idx && call_receiver.nil? && call_arguments.nil? && !@call_block_expr
 
-    n = insn.argc
-    nk = insn.keyword_argc
-    return nil unless n.is_a?(Integer) && nk.is_a?(Integer) && n < 15 && nk.between?(1, 14)
+    n = splat ? 0 : insn.argc
+    nk = kwsplat ? 0 : insn.keyword_argc
+    return nil unless n.is_a?(Integer) && nk.is_a?(Integer) && n < 15 && (kwsplat || nk.between?(1, 14))
 
     name = insn.sym
     return nil if name.nil? || KEYWORD_DYNAMIC_SEND_REFUSED.include?(name)
 
     d = insn.reg.to_i
     recv = self_implicit ? 'self' : RegName[d]
+    return keyword_splat_dynamic_send(insn, d, recv, name, splat, kwsplat, n, nk) if splat || kwsplat
+
     argv = (1..n).map { |k| RegName[d + k] }
     base = d + 1 + n
     out = String.new
@@ -660,6 +675,34 @@ class CodeGen
     end
     out << "    #{RegName[d]} = bc2cpp_send_kw(M, #{recv}, mrb_intern_cstr(M, #{c_string_literal(name)}), #{n}, " \
            "#{argv.empty? ? 'NULL' : 'bc2cpp_kwd_argv'}, bc2cpp_kwd, #{insn.op == :SEND ? 'true' : 'false'}, self);\n"
+    out << "  }\n"
+    out
+  end
+
+  # KEYWORD_SPLAT_DYNAMIC_SEND: the by-name send of a packed shape (see KEYWORD_DYNAMIC_SEND_REFUSED's note).
+  def keyword_splat_dynamic_send(insn, d, recv, name, splat, kwsplat, n, nk)
+    base = d + 1 + (splat ? 1 : n)
+    argc = splat ? "ary_size(#{RegName[d + 1]})" : n.to_s
+    items = if splat
+              "ary_items(#{RegName[d + 1]})"
+            else
+              n.zero? ? 'NULL' : 'bc2cpp_kwd_argv'
+            end
+    out = String.new
+    out << "  // KEYWORD_DYNAMIC_SEND :#{name} (#{insn.argc_text}) -- no static callee; the by-name send OP_SEND makes, " \
+           "the keywords passed as keywords (mrb_funcall_send)#{insn.op == :SEND ? ', after OP_SEND\'s explicit-receiver visibility check' : ''}\n"
+    out << "  {\n"
+    out << "    mrb_value bc2cpp_kwd_argv[] = { #{(1..n).map { |k| RegName[d + k] }.join(', ')} };\n" if !splat && n.positive?
+    if kwsplat
+      out << "    mrb_value bc2cpp_kwd = mrb_ensure_hash_type(M, #{RegName[base]});\n"
+    else
+      out << "    mrb_value bc2cpp_kwd = mrb_hash_new_capa(M, #{nk});\n"
+      nk.times do |k|
+        out << "    mrb_hash_set(M, bc2cpp_kwd, #{RegName[base + (2 * k)]}, #{RegName[base + (2 * k) + 1]});\n"
+      end
+    end
+    out << "    #{RegName[d]} = bc2cpp_send_kw(M, #{recv}, mrb_intern_cstr(M, #{c_string_literal(name)}), #{argc}, " \
+           "#{items}, bc2cpp_kwd, #{insn.op == :SEND ? 'true' : 'false'}, self);\n"
     out << "  }\n"
     out
   end

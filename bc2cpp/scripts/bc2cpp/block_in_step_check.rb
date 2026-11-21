@@ -197,8 +197,32 @@ SRC7 = <<~RUBY
   end
 RUBY
 
-OWNERS = %w[BiClock NbClock CcClock DyClock IbClock RtClock BkClock].freeze
-code = suite.generate(SRC + SRC2 + SRC3 + SRC4 + SRC5 + SRC6 + SRC7, OWNERS)
+# FxClock: a blockless call with arguments of a yielding name on another object is a dynamic call with that fixed name;
+# only a `send`-family call takes its name from the first argument. `run` is a yielding name (FxClock#run suspends), and
+# FxBox#run returns at once, as Hash#fetch does in a program whose own `fetch` suspends.
+SRC8 = <<~RUBY
+  class FxBox
+    def run(a, b) = [a, b]
+  end
+
+  class FxClock
+    def start
+      @fiber = Fiber.new { run }
+    end
+
+    def run
+      got = Fiber.yield :k
+      [got, fx_box.run(:j, 8)]
+    end
+
+    def fx_box = FxBox.new
+
+    #{CLOCK}
+  end
+RUBY
+
+OWNERS = %w[BiClock NbClock CcClock DyClock IbClock RtClock BkClock FxBox FxClock].freeze
+code = suite.generate(SRC + SRC2 + SRC3 + SRC4 + SRC5 + SRC6 + SRC7 + SRC8, OWNERS)
 suite.check('run compiles as a resumable step function', code.include?('static mrb_value BiClock_run_step(mrb_state* M'))
 suite.check('each_mark compiles as a resumable step function', code.include?('static mrb_value BiClock_each_mark_step(mrb_state* M'))
 suite.check('the block compiles as a resumable step', code.match?(/static mrb_value BiClock_run__blk\d+_step\(mrb_state\* M/))
@@ -210,6 +234,9 @@ suite.check('dy_mark registers a dispatcher', code.include?('DyClock_dy_mark_imp
 suite.check('the inner block of ib_each compiles as a resumable step', code.match?(/static mrb_value IbClock_ib_each__blk\d+_step\(mrb_state\* M/))
 suite.check('the return of an inner block unwinds (RESUMABLE_UNWIND RETURN_BLK)', code.include?('RESUMABLE_UNWIND RETURN_BLK'))
 suite.check('the break of a block unwinds (RESUMABLE_UNWIND BREAK)', code.include?('RESUMABLE_UNWIND BREAK'))
+fx_run = code[/^static mrb_value FxClock_run_step\(mrb_state\* M.*?^\}/m].to_s
+suite.check('a blockless yielding call with arguments keeps its name (no argument taken as the name)',
+            fx_run.include?('RESUMABLE_DYN_CALL') && !fx_run.match?(/bc2cpp_dyn_call\(M, r\d+, r\d+,/))
 
 DRIVER = <<~'RUBY'
   a = BiClock.new
@@ -285,6 +312,14 @@ DRIVER = <<~'RUBY'
   o7 << g.go_with(6)
   o7 << g.fiber_alive
   p o7
+  h = FxClock.new
+  h.start
+  o8 = []
+  o8 << h.go
+  GC.start
+  o8 << h.go_with(1)
+  o8 << h.fiber_alive
+  p o8
   puts 'end'
 RUBY
 
@@ -297,5 +332,6 @@ suite.behaviour(DRIVER) do |interpreted, _|
   suite.check('a return from an inner block ends the method', at.(5) == '[0, 1, 0, 1, [1, nil], false]')
   suite.check('a break out of a block ends the call that took it', at.(6) == '[0, 1, 0, 1, [:stopped, [0, 1]], false]')
   suite.check('a block nested in a Fiber body step yields through the callee', at.(1) == '[:begin, 0, 1, [5, [11, 21]], false]')
+  suite.check('a blockless call of a yielding name on another object returns its value', at.(7) == '[:k, [1, [:j, 8]], false]')
 end
 suite.finish

@@ -639,7 +639,7 @@ module EscapeAnalysis
   end
 
   BLKPUSH = %i[BLKPUSH].freeze
-  REF_OPS = %i[GETUPVAR BLKPUSH].freeze
+  REF_OPS = %i[GETUPVAR BLKPUSH ARGARY].freeze
 
   class Analyzer
     MAX_DEPTH = 24
@@ -1375,6 +1375,16 @@ module EscapeAnalysis
           if insn.op == :GETUPVAR
             idx, level = insn.upvar_ref
             refs << { kind: :up, idx: idx, irep: node, index: j, dest: insn.reg, chain: c } if level == d
+          elsif insn.op == :ARGARY
+            # BLOCK_ZSUPER: a bare `super` in a closure packs the frame's parameters and its block (vm.c OP_ARGARY with
+            # lv = d + 1) into the register the SUPER after it sends; an unparsed one reads every parameter.
+            reads = insn.argary_frame_reads
+            next unless reads.nil? || reads[0] == d + 1
+
+            (reads ? reads[1] : (1..parameter_count(c.first.first)).to_a).each do |idx|
+              refs << { kind: :up, idx: idx, irep: node, index: j, dest: insn.reg, chain: c }
+            end
+            refs << { kind: :blk, irep: node, index: j, dest: insn.reg, chain: c }
           elsif insn.paren_int == d + 1
             refs << { kind: :blk, irep: node, index: j, dest: insn.reg, chain: c }
           end
