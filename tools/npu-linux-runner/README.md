@@ -273,3 +273,15 @@ Ablation: replacing the raw four-lane divide with a multiply (output not checked
 unchanged, so the division is not the cost. The identical time for three different fixtures, and the difference
 from the bgra variants of the same program, point to a device-side stall or an escape path rather than to the
 arithmetic. That is not yet diagnosed.
+
+## Diagnosis: the slow rgba span is a shader loop running to its budget
+
+The emitted loops are `for (;;)` with an iteration budget of 16 (`nr_loop_guard`), and a budget overflow is counted in
+the output header (`loop_overflows`). In the rgba variant of native 5, both loops run to the budget on every covered
+pixel: the reference header records 27,132 overflows for 13,566 covered pixels. The bgra variant records none and
+takes about 10 ms. So the 3.25 s is 2 loops x 16 iterations x the loop body per pixel, which the arithmetic
+ablation could not show. The reference and the NPU agree on the overflow count and the output.
+
+Consequence for lowering: skipping the loop would change the overflow counters, and those are part of the output
+header. A faster version must prove the loop result without running it, or compute the same counters. Neither is a
+bit-exact local rewrite.
