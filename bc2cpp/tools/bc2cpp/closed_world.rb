@@ -81,6 +81,14 @@ class ClosedWorld
   # Core iterators whose result on a builtin receiver is a new Array or Hash (fresh_builtin_result?).
   FRESH_BUILTIN_SENDS = %w[map collect select filter reject flat_map collect_concat sort sort_by to_a entries zip
                            uniq compact reverse].freeze
+  # FRESH_BUILTIN_OPS: ops that leave a builtin value in their register when it held one. ARYCAT/ARYPUSH append to
+  # the Array in place (vm.c; ARYCAT on nil stores a dup'd splat, anything else but an Array raises), and ADD on an
+  # Array or a String sends `+` unless both are Strings, which must then be core's (fresh_builtin_names_core?).
+  # BC2CPP_FRESH_FREEZE_OPS=0 refuses them.
+  FRESH_BUILTIN_OPS = { ADD: '+', ARYCAT: nil, ARYPUSH: nil }.freeze
+  # The receivers ADD may have: an Array or String literal, or an Array op's result. A Hash or Range has no `+`, so
+  # method_missing would answer it.
+  FRESH_ADD_RECEIVERS = %i[ARRAY ARRAY2 STRING STRCAT ADD ARYCAT ARYPUSH].freeze
   # Kernel methods that give an arbitrary receiver a singleton class (`extend` is a global
   # refusal already, see scan_send). OutsideSingletons::MAKERS repeats them.
   SINGLETON_MAKERS = %w[singleton_class define_singleton_method instance_eval instance_exec].freeze
@@ -2657,7 +2665,7 @@ class ClosedWorld
                  when *FREEZE_LITERAL_WRITERS then true
                  when :GETCONST then (constant = writer.const_name) && true
                  when :GETMCNST then (constant = writer.mcnst_name) && true
-                 when BytecodeIR::Ops::SEND_PREFIX_OPS then fresh_builtin_result?(irep, index, writer)
+                 else fresh_builtin_result?(irep, index, writer)
                  end
                end
     return @freeze_possible = true unless harmless == true
@@ -2665,22 +2673,38 @@ class ClosedWorld
     @frozen_constants << constant if constant
   end
 
-  # FRESH_BUILTIN_FREEZE: `(0..n).map { }.freeze`. A core iterator of FRESH_BUILTIN_SENDS called on a builtin
-  # literal (or on such a result) returns a new builtin value, never a user object, as long as only mruby's own
-  # code defines the name. That is judged after the scan (fresh_builtin_names_core?), when every definer is known.
+  # FRESH_BUILTIN_FREEZE: `(0..n).map { }.freeze`, `(%w[a] + [b]).freeze`. A core iterator of FRESH_BUILTIN_SENDS or
+  # an op of FRESH_BUILTIN_OPS on a builtin literal (or on such a result) leaves a builtin value, never a user object,
+  # as long as only mruby's own code defines the name. That is judged after the scan (fresh_builtin_names_core?), when every definer is known.
   # BC2CPP_FRESH_FREEZE=0 refuses it, for comparison.
   def fresh_builtin_result?(irep, index, writer, depth = 0)
-    return false if ENV['BC2CPP_FRESH_FREEZE'] == '0'
-    return false unless FRESH_BUILTIN_SENDS.include?(writer.sym.to_s) && depth < 4
+    return false if ENV['BC2CPP_FRESH_FREEZE'] == '0' || depth >= 4
+
+    name = fresh_builtin_name(writer)
+    return false if name == false
 
     literal = irep.walk_dominating_writers(index - 1, writer.reg, use: index, follow_moves: true) do |receiver, at|
-      FREEZE_LITERAL_WRITERS.include?(receiver.op) ||
-        (BytecodeIR::Ops::SEND_PREFIX_OPS.include?(receiver.op) && fresh_builtin_result?(irep, at, receiver, depth + 1))
+      next false if writer.op == :ADD && !FRESH_ADD_RECEIVERS.include?(receiver.op)
+
+      FREEZE_LITERAL_WRITERS.include?(receiver.op) || (writer.op == :ARYCAT && receiver.op == :LOADNIL) ||
+        fresh_builtin_result?(irep, at, receiver, depth + 1)
     end
     return false unless literal == true
 
-    @fresh_freeze_names << writer.sym.to_s
+    @fresh_freeze_names << name if name
     true
+  end
+
+  # The method name a FRESH_BUILTIN_FREEZE writer dispatches (nil: none, it is an Array op), or false when the writer
+  # is not one.
+  def fresh_builtin_name(writer)
+    if BytecodeIR::Ops::SEND_PREFIX_OPS.include?(writer.op)
+      FRESH_BUILTIN_SENDS.include?(writer.sym.to_s) && writer.sym.to_s
+    elsif FRESH_BUILTIN_OPS.key?(writer.op) && ENV['BC2CPP_FRESH_FREEZE_OPS'] != '0'
+      FRESH_BUILTIN_OPS[writer.op]
+    else
+      false
+    end
   end
 
   # Every definer of a FRESH_BUILTIN_FREEZE name is mruby's own: core Ruby or a core native.
