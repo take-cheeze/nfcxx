@@ -1345,6 +1345,10 @@ end
     def eh_header
       @form.drop(2).each do |p|
         next unless p.is_a?(Array)
+        # QBE's i386 target writes no exception tables (no CFI either): an exception would reach std::terminate
+        if Qbe.ptr32 && %w[eh-types eh-noexcept eh-spec].include?(head(p))
+          raise QbeUnsupported, "exception tables on the 32-bit x86 target (QBE's i386 writes none)"
+        end
 
         case head(p)
         when "eh-noexcept" then @lines << "  ehnoexcept"
@@ -1897,7 +1901,9 @@ end
         @lines << "  #{reg(item[1])} =#{Qbe.cls(item[2])} phi #{pairs}"
       when "let" then let_lines(item[1], item[2], item[3])
       when "eh-unwind" then @lines << "  ehunwind #{item[1] == "0" ? "0" : "@#{block_label(item[1])}"}"
-      when "eh-pad" then @lines << "  ehpad #{item[1]}#{item[2..].map { |t| " #{t}" }.join}"
+      when "eh-pad"
+        raise QbeUnsupported, "exception tables on the 32-bit x86 target (QBE's i386 writes none)" if Qbe.ptr32
+        @lines << "  ehpad #{item[1]}#{item[2..].map { |t| " #{t}" }.join}"
       # A volatile store is a call of its helper (QBE merges, forwards and drops plain volatile stores; a call is kept).
       when "store"
         v = op(item[3])

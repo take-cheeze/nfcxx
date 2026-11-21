@@ -1,7 +1,24 @@
 # Path B: zero-cost exception handling
 
-Status: in progress (opt-in, `PATHB_EH=tables`). The default Path B harness keeps EDG's portable EH lowering (an EH stack
-of runtime frames in thread-local storage, `setjmp`/`longjmp` for `try`, EDG's runtime in `libC.a`).
+Status: the default (`scripts/setup-pathb.sh`, `PATHB_EH=tables`). `PATHB_EH=frames` builds a harness with EDG's portable
+EH lowering instead (an EH stack of runtime frames in thread-local storage, `setjmp`/`longjmp` for `try`, EDG's runtime in
+`libC.a`). A harness says which it is: `cmake/bin/eh-tables` exists beside its cpfe in the tables mode.
+
+## Where it goes
+
+| consumer | exception tables |
+|---|---|
+| the SSA route (`scripts/pathb-ssa-build`, QBE) | landing pads and the LSDA (below) |
+| the mruby emitter (`scripts/pathb-qbe-emit.rb`, `--emitter=mruby`) | the same QBE directives, with the SSA route's state rules |
+| CIL (`scripts/pathb-cil-emit.rb`) | the body in one protected block, the pads after it (its `eh_try`); see `docs/notes/pathb-cil.md` |
+| wasm, SPIR-V, WGSL, HVX | the pads and states are dropped (nothing unwinds there); a throw is refused where it is |
+| PTX, AMDGPU | CUDA device code is compiled with `--no_exceptions`: no tables |
+| QBE's i386 target | refused (it writes no tables and no CFI) |
+
+The link: `scripts/pathb-ldrt.rb` prints a GNU ld input script in place of `libnfcxxld.a` when the harness has tables,
+`INPUT(libnfcxxld.a -lstdc++ -lgcc_s)`, so every Path B link line (which names `libC.a` after it) gets libstdc++'s C++ ABI,
+EH runtime, RTTI and `operator new` first and `libC.a` gives only the lowering's helpers. The driver and
+`tests/pathb-qbe/run.sh` link no EH shim then (the shim hands libstdc++'s throws to EDG's runtime).
 
 ## Why
 
@@ -138,9 +155,10 @@ IR passes, the e-graph pass and QBE's optimizations.
   type itself for it.
 - When an exception leaves a full expression that built argument temporaries, EDG destroys them in construction order,
   not in reverse. The frames mode does the same (it is EDG's region table), so this is no change.
-- The driver (`nfcxx`, `scripts/pathb-cc.rb`) does not select the mode or link its runtime yet; `tests/pathb-eh-tables`
-  links by hand.
-- Targets: tested on x86-64 Linux only (arm64 untested, rv64 and Apple without tables).
+- Targets: tested on x86-64 Linux. QBE's arm64 emitter marks call sites and pads (Linux and Apple), run only by CI's
+  arm64 jobs; on macOS `scripts/pathb-ldrt.rb` writes no link script (ld64 reads none), so libC.a's C++ ABI members
+  come before libc++'s there. QBE's rv64 writes no tables, its i386 neither (refused).
+- CIL: exact catch types only, see `docs/notes/pathb-cil.md`.
 
 ## Measured
 
