@@ -262,3 +262,14 @@ half of the buffer, so the check compares the rendered half exactly and requires
 
 Per-span time on the NPU (p50, 10 inferences): the slowest real-shader fixtures are about 3.25 s
 (`e3ebf67c`), 0.25 s (`ec1e65f6`) and 0.2 s (`2a28d3fe`); fills and most light shaders are a few milliseconds.
+
+## Where the real shader time goes (fixtures, NPU)
+
+`frame/fixtures_check.py --only e3ebf67c --time 5` (p50 per span). The slowest real shader is native 5 (row 5: about
+1,700 lines per pixel, 18 texture samples, 21 division sites). Its three rgba fixtures take about 3.25 s each, the
+bgra variants about 10 ms.
+
+Ablation: replacing the raw four-lane divide with a multiply (output not checked) leaves the 3.25 s rgba time
+unchanged, so the division is not the cost. The identical time for three different fixtures, and the difference
+from the bgra variants of the same program, point to a device-side stall or an escape path rather than to the
+arithmetic. That is not yet diagnosed.
