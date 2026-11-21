@@ -869,22 +869,26 @@ fi
 # a hit back beside the output, and the store of the object just built. The bash runs Ruby only when the cache is on.
 # cache_check is the lookup and the hit (exit 0 on a hit); cache_store stores the object just built when the cache is in use
 # and has no entry for it yet. The remote tier (NFCXX_CACHE_REMOTE=gha) is scripts/nfcxx-cache-io.rb, called from here.
+# cache_plan: prints the lookup's options, NUL-separated: the records of this compile (scripts/nfcxx-cache-plan.rb turns them into
+# the options; the command arguments without the cache options, the host preprocessor's -std, cflags, forced includes and sysdirs)
+cache_plan() {
+  local a
+  cache_rec() { printf '%s\0' "$1$2"; }   # cache_rec KIND PAYLOAD: one record
+  cache_rec o "cache-dir=$cache_dir"; cache_rec o "cache-log=$cache_log_file"; cache_rec o "out=$out"; cache_rec o "src=${srcs[0]-}"; cache_rec o "cwd=$PWD"
+  cache_rec v "backend=$backend"; cache_rec v "compile_only=$compile_only"; cache_rec v "ncpp=$ncpp"; cache_rec v "outset=$outset"; cache_rec v "nobj=$nobj"
+  cache_rec v "modules=$modules"; cache_rec v "preprocess=$preprocess"; cache_rec v "stdin_src=$stdin_src"; cache_rec v "depmode=$depmode"
+  cache_rec v "cfiles_n=${#cfiles[@]}"; cache_rec v "cu_n=${#cu_inputs[@]}"; cache_rec v "cpp2_n=${#cpp2_inputs[@]}"
+  for a in ${nfcxx_argv[@]+"${nfcxx_argv[@]}"}; do cache_rec a "$a"; done
+  cache_rec s "$std"
+  for a in ${cflags[@]+"${cflags[@]}"}; do cache_rec f "$a"; done
+  for a in ${preinc[@]+"${preinc[@]}"}; do cache_rec p "$a"; done
+  for a in ${sysdirs[@]+"${sysdirs[@]}"}; do cache_rec d "$a"; done
+}
 cache_check() {  # cache_check: sets cache_entry (empty when the cache does not apply) and exits 0 on a hit
 cache_entry=""
 [ -n "$cache_dir" ] || return 0   # the cache is off: no Ruby is started
-local f a look decision state key pre=() cpp=() opts=() key_argv=()
-for a in ${nfcxx_argv[@]+"${nfcxx_argv[@]}"}; do
-  case $a in --cache=*|--cache-log=*|--time-log=*|--trace=*) ;; *) key_argv+=("$a") ;; esac
-done
-for f in ${preinc[@]+"${preinc[@]}"}; do pre+=(-include "$f"); done
-# the host preprocessor's arguments (its -M command line, after -M and before the source)
-cpp=("-std=${std#--}" ${cflags[@]+"${cflags[@]}"} ${pre[@]+"${pre[@]}"} ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"})
-opts=(--cache-dir="$cache_dir" --cache-log="$cache_log_file" --out="$out" --src="${srcs[0]-}" --cwd="$PWD"
-      --var=backend="$backend" --var=compile_only="$compile_only" --var=ncpp="$ncpp" --var=outset="$outset"
-      --var=nobj="$nobj" --var=modules="$modules" --var=preprocess="$preprocess" --var=stdin_src="$stdin_src"
-      --var=depmode="$depmode" --var=cfiles_n="${#cfiles[@]}" --var=cu_n="${#cu_inputs[@]}" --var=cpp2_n="${#cpp2_inputs[@]}")
-for a in "${key_argv[@]+"${key_argv[@]}"}"; do opts+=(--arg="$a"); done
-for a in "${cpp[@]+"${cpp[@]}"}"; do opts+=(--cpp="$a"); done
+local f a look decision state key rec opts=()
+while IFS= read -r -d "" rec; do opts+=("$rec"); done < <(cache_plan | "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-plan.rb")
 # lookup: the --cache-log block (when there is a log) and the last line, "hit KEY" or "miss KEY"; nothing when not cached
 look=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cache.rb" lookup "${opts[@]}") || return 0
 [ -n "$look" ] || return 0
