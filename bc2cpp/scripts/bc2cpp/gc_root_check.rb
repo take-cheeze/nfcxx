@@ -184,6 +184,14 @@ SOURCE = <<~RUBY
       r.inspect
     end
 
+    # Only PURE_CALLS run between the read and its use (an ivar read, allocations): nothing can unlink the element.
+    def pure_between
+      a = @cells
+      r = a[2]
+      pair = [@cur, :k]
+      [r, pair]
+    end
+
     def attr_overwrite
       r = cur
       self.cur = nil
@@ -197,6 +205,8 @@ OWNERS = %w[GcRoot].freeze
 CASES = %w[ivar_return ivar_local gvar_overwrite ary_overwrite hash_overwrite ary_clear ary_replace
            attr_overwrite ary_clear_by_name ary_store_by_name hash_clear_by_name hash_store_by_name
            each_clear_by_name map_clear_by_name map_proc_clear arg_clear_by_name].freeze
+# Cases that need no root, so they match with the roots switched off too.
+UNROOTED_CASES = %w[pure_between].freeze
 
 SCENARIO = <<~CPP
   static int scenario(mrb_state* M) {
@@ -211,10 +221,10 @@ CPP
 def run_cases(dir, build)
   code, err = Bc2cppFixtureRuntime.generate(SOURCE, dir, core: true, only_owners: OWNERS)
   built, results = Bc2cppFixtureRuntime.run(dir, err, OWNERS, "#include <cstdlib>\n#{SCENARIO}", build: build, full: true,
-                                            envs: CASES.map { |c| { 'GCR_CASE' => c } })
+                                            envs: (CASES + UNROOTED_CASES).map { |c| { 'GCR_CASE' => c } })
   return [code, nil, false] unless built
 
-  per_case = CASES.zip(results).to_h do |name, (output, ok)|
+  per_case = (CASES + UNROOTED_CASES).zip(results).to_h do |name, (output, ok)|
     sections = Bc2cppFixtureRuntime.sections(output)
     plain = ->(lines) { lines.to_a.reject { |l| l.start_with?('  dispatches=') } }
     [name, { interpreted: plain.call(sections['interpreted']), compiled: plain.call(sections['compiled']), ok: ok }]
@@ -233,6 +243,18 @@ Dir.mktmpdir('bc2cpp-gc-root') do |dir|
   suite.check('a Hash store looks the old value up first', code.include?('bc2cpp_hash_aset(M,'))
   suite.check('an element read is rooted where a by-name call may unlink it',
               code.match?(/bc2cpp_ary_entry\(M, r\d+, 0\);.*?bc2cpp_keep\(M, r\d+\);/m))
+  pure_body = ->(text) { text[/GcRoot_pure_between_impl\(mrb_state\* M, mrb_value self\) \{.*?\n\}\n/m].to_s }
+  suite.check('an element read followed only by PURE_CALLS is not rooted',
+              pure_body.call(code).include?('bc2cpp_ary_entry(M,') && !pure_body.call(code).include?('bc2cpp_keep('))
+  Dir.mktmpdir('bc2cpp-gc-root-impure') do |impure_dir|
+    ENV['BC2CPP_ELEMENT_READ_PURE'] = '0'
+    begin
+      impure, = Bc2cppFixtureRuntime.generate(SOURCE, impure_dir, core: true, only_owners: OWNERS)
+    ensure
+      ENV.delete('BC2CPP_ELEMENT_READ_PURE')
+    end
+    suite.check('BC2CPP_ELEMENT_READ_PURE=0 roots that read again', pure_body.call(impure).include?('bc2cpp_keep('))
+  end
 
   if build.nil?
     puts '  SKIP gc root behaviour: needs a full-core libmruby (BC2CPP_MRUBY_FULL, or rake and g++)'
@@ -293,7 +315,7 @@ Dir.mktmpdir('bc2cpp-gc-root') do |dir|
     _, rooted, built = run_cases(dir, build)
     suite.check('fixture builds and runs', built)
     if built
-      CASES.each do |name|
+      (CASES + UNROOTED_CASES).each do |name|
         r = rooted.fetch(name)
         suite.check("#{name}: the process survives and compiled matches interpreted",
                     r[:ok] && r[:interpreted].size == 1 && r[:compiled] == r[:interpreted])
@@ -309,6 +331,11 @@ Dir.mktmpdir('bc2cpp-gc-root') do |dir|
       end
       suite.check('the switched-off build compiles', off_built)
       if off_built
+        UNROOTED_CASES.each do |name|
+          r = unrooted.fetch(name)
+          suite.check("#{name}: needs no root, so it matches switched off too",
+                      r[:ok] && r[:interpreted].size == 1 && r[:compiled] == r[:interpreted])
+        end
         diverged = CASES.reject do |name|
           r = unrooted.fetch(name)
           r[:ok] && r[:compiled] == r[:interpreted]
