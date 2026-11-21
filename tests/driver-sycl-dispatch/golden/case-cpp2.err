@@ -1,0 +1,2 @@
+nfcxx: cppfront is not built; run scripts/setup-cppfront.sh (docs/notes/cpp2.md)
+nfcxx: the SYCL pre-pass recorded no kernels
