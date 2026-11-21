@@ -1,6 +1,9 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+# LITERAL_TABLES (tools/bc2cpp/codegen_literal_tables.rb): a constant Hash/Array literal in a class body or a free
+# lambda's body is a word table that bc2cpp_lit_build builds, and BC2CPP_LITERAL_TABLES=0 keeps the pair-by-pair code.
+#
 # CLASS_BODY_EMIT, FREE_LAMBDA (tools/bc2cpp/codegen_class_body.rb): a lambda in a class body whose body reads nothing
 # from the creating frame (no self, upvar, block or nested closure) is built as a free RProc over a
 # direct entry (bc2cpp_block_thunk over an env of nil, the entry and a flag word) flagged strict as a lambda is, so a
@@ -28,6 +31,20 @@ RUBY
 SELF_USE = <<~'RUBY'
   class Router
     ME = ->(x) { self }
+  end
+RUBY
+
+# LITERAL_TABLES (tools/bc2cpp/codegen_literal_tables.rb): constant literals in the body and in a free lambda's body.
+# Its Symbols are core method names, so mruby's own presym table has them.
+LITERALS = <<~'RUBY'
+  class Router
+    LIMIT = 3
+    TABLE = {
+      1 => { name: :inspect, size: :to_s, default: '' },
+      2 => { name: :to_s, size: :size, default: -70_000, last: [nil, true, false, 4096] },
+      3 => { name: :default, first: LIMIT },
+    }
+    LAZY = -> { { 1 => { name: :name, size: :first }, 2 => { name: :last, size: :inspect, default: 'x' } } }
   end
 RUBY
 
@@ -71,6 +88,51 @@ suite.compile(FREE) do |ireps, root|
   suite.check('the emitted unit with the free lambda compiles with the mruby headers', status.success?)
   puts "    g++: #{out.lines.first(12).join.strip}" unless status.success?
   File.delete(path)
+end
+
+# The units of LITERALS with presym-spelled Symbols, as a real gem build spells them (PRESYM_ALL).
+literal_units = lambda do |ireps, root|
+  saved = SymbolCache.presym_all
+  SymbolCache.presym_all = true
+  gen = CodeGen.new(ireps, build_registry(ireps, root)[0], {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  [gen, gen.compile_top_class_units(ireps.fetch(root))]
+ensure
+  SymbolCache.presym_all = saved
+end
+
+suite.compile(LITERALS) do |ireps, root|
+  gen, units = literal_units.call(ireps, root)
+  code = units.map { |u| u[:code] }.join
+  suite.check('both constant literals are word tables built by bc2cpp_lit_build, with no mrb_hash_set left',
+              code.scan('bc2cpp_lit_build(M, bc2cpp_lit,').size == 2 && !code.include?('mrb_hash_set'))
+  suite.check('Symbols are presym ids, Strings are fresh-String slots, the constant read is handed over',
+              code.include?('(uint16_t)MRB_SYM(name)') && code.include?('BC2CPP_LIT_STR("")') &&
+              code.match?(/const mrb_value bc2cpp_lit_d\[\] = \{ r\d+ \};/) && code.include?('0x9000, 0xee90, 0xfffe'))
+  headers = %w[mruby.h mruby/array.h mruby/class.h mruby/hash.h mruby/numeric.h mruby/proc.h mruby/range.h mruby/string.h mruby/variable.h]
+  stubs = "typedef mrb_value (*Bc2cppBlockEntry)(mrb_state*, struct REnv*, bool, mrb_int, const mrb_value*);\n" \
+          "struct Bc2cppBlock { Bc2cppBlock(mrb_state*, mrb_int, mrb_value*); mrb_value proc(); };\n" \
+          "mrb_value bc2cpp_const_scope_0(mrb_state*, mrb_sym);\n"
+  unit = +"#{headers.map { |h| "#include <#{h}>\n" }.join}#{TaggedFixnum::PRELUDE}#{SymbolCache::LITERAL_TABLES_PRELUDE}#{stubs}"
+  unit << gen.emit_owner_class_cache << code
+  path = File.join(ENV.fetch('TMPDIR', '/tmp'), "class_body_literals_#{$$}.cc")
+  File.write(path, unit)
+  out, status = Open3.capture2e('g++', '-std=c++17', '-fsyntax-only', '-w',
+                                "-I#{ROOT}/3rd/mruby/include",
+                                "-I#{ENV.fetch('BC2CPP_BUILD_INCLUDE', "#{ROOT}/build-closed-bc2cpp/closed/include")}", path)
+  suite.check('the units with the word tables compile with the mruby headers', status.success?)
+  puts "    g++: #{out.lines.first(12).join.strip}" unless status.success?
+  File.delete(path)
+end
+
+begin
+  ENV['BC2CPP_LITERAL_TABLES'] = '0'
+  suite.compile(LITERALS) do |ireps, root|
+    code = literal_units.call(ireps, root)[1].map { |u| u[:code] }.join
+    suite.check('BC2CPP_LITERAL_TABLES=0 keeps one mrb_hash_set per pair',
+                !code.include?('bc2cpp_lit_build(M') && code.include?('mrb_hash_set(M, h, '))
+  end
+ensure
+  ENV.delete('BC2CPP_LITERAL_TABLES')
 end
 
 suite.compile(SELF_USE) do |ireps, root|
