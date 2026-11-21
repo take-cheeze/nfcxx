@@ -94,6 +94,9 @@ env = {
 env, controls = Bc2cppSelfCompile.generation_environment(env)
 # The generation runs without BC2CPP_AST_PRODUCER, so it parses with the producer that auto selection picks here.
 controls = controls.merge('ast_producer' => NativeAstSource.available?('nfcxx') ? 'nfcxx' : 'clang')
+# The input list itself, in order: the dependency digests below cover the files' contents, and a core file that the
+# runtime links is a dependency whether or not it is compiled, so SELF_CORE alone would leave the fingerprint unchanged.
+controls = controls.merge('sources' => files)
 # Every tool source (ScanCache.tools_sources) is a dependency, not only the ones baked into the generator's input: the
 # .yml data and the mrbc_rb sources the generator loads are read too.
 dependencies = (files + manifest.fetch('native') + manifest.fetch('ruby') + manifest.fetch('headers') +
