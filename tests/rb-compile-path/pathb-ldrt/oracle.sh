@@ -18,13 +18,35 @@ fi
 cc_bin=${NFCXX_GCC:-cc}
 case $cc_bin in *cosmocc*) out=${PATHB_LDRT_OUT:-$root/build/pathb-ldrt-cosmo} ;; esac
 src=$root/be/nfcxx_ldrt.c
+ehsrc=$root/be/nfcxx_ehrt.c
 lib=$out/libnfcxxld.a
-if [ ! -f "$lib" ] || [ "$src" -nt "$lib" ]; then
+# rebuilt when a source is newer, and when an archive of before the EH wrapper lacks its member
+stale=0
+if [ ! -f "$lib" ]; then stale=1
+elif [ -e "$src" ] && [ "$src" -nt "$lib" ]; then stale=1
+elif [ -e "$ehsrc" ] && [ "$ehsrc" -nt "$lib" ]; then stale=1
+elif ! ar t "$lib" | grep -qx nfcxx_ehrt.o; then stale=1
+fi
+if [ $stale = 1 ]; then
   mkdir -p "$out"
   tmp=$(mktemp -d "$out/.tmp.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
   # -ffunction-sections: one helper per archive member would be better, but one object keeps the link line trivial
   "$cc_bin" -O2 -fno-strict-aliasing -fPIC $defines -c -o "$tmp/nfcxx_ldrt.o" "$src"
-  ar rcs "$tmp/libnfcxxld.a" "$tmp/nfcxx_ldrt.o"
+  "$cc_bin" -O2 -fPIC -c -o "$tmp/nfcxx_ehrt.o" "$ehsrc"
+  ar rcs "$tmp/libnfcxxld.a" "$tmp/nfcxx_ldrt.o" "$tmp/nfcxx_ehrt.o"
   mv "$tmp/libnfcxxld.a" "$lib"
+fi
+# A harness with exception tables (eh-tables beside its cpfe): a GNU ld input script in place of the archive, which puts
+# libstdc++ and libgcc_s ahead of the libC.a every Path B link names after it (docs/notes/pathb-zero-cost-eh.md).
+cpfe=${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}
+if [ -f "$(dirname "$cpfe")/eh-tables" ] && case $cc_bin in *cosmocc*) false ;; *) true ;; esac && [ "$(uname -s)" != Darwin ]; then
+  script=$out/libnfcxxld-eh.ld
+  text="/* nfcxx: scripts/pathb-ldrt.rb, a Path B link with exception tables (docs/notes/pathb-zero-cost-eh.md) */
+INPUT ( $lib -lstdc++ -lgcc_s )"
+  if [ ! -f "$script" ] || [ "$(cat "$script")" != "$text" ]; then
+    printf '%s\n' "$text" > "$script.$$"
+    mv "$script.$$" "$script"
+  fi
+  lib=$script
 fi
 echo "$lib"

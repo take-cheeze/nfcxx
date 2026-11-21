@@ -9,8 +9,6 @@
 # the abort), built into build/pathb-ldrt-x86 unless PATHB_LDRT_OUT is set. Only the stage-2 front end links it
 # (scripts/selfhost-cpfe.sh); user programs keep the trap.
 require "fileutils"
-require "rbconfig"
-require "rbconfig"
 
 # A variable that is unset or empty is nil (bash's ${VAR:-default}).
 def env(name)
@@ -61,7 +59,7 @@ end
 # arithmetic). Not for cosmo (its own C++ runtime) or macOS (ld64 reads no linker scripts).
 cpfe = env("PATHB_CPFE") || "#{root}/build/pathb/cmake/bin/cpfe"
 if File.file?(File.join(File.dirname(cpfe), "eh-tables")) && !cc_bin.include?("cosmocc") &&
-   RbConfig::CONFIG["host_os"] !~ /darwin/
+   IO.popen(["uname", "-s"], &:read).chomp != "Darwin"
   script = "#{out}/libnfcxxld-eh.ld"
   text = "/* nfcxx: scripts/pathb-ldrt.rb, a Path B link with exception tables (docs/notes/pathb-zero-cost-eh.md) */\n" \
          "INPUT ( #{lib} -lstdc++ -lgcc_s )\n"

@@ -13,3 +13,5 @@
  :: NFCXX_GCC=clang NFCXX_LDRT_X86=1 "$S"
  :: NFCXX_GCC= "$S"
  :: NFCXX_STUB_CC_RC=3 "$S"
+# a harness with exception tables (eh-tables beside its cpfe): the link script in place of the archive, then unchanged
+ :: mkdir -p "$SB/build/pathb/cmake/bin" && : > "$SB/build/pathb/cmake/bin/eh-tables"; "$S"; "$S"

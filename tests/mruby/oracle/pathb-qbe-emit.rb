@@ -1026,15 +1026,21 @@ class Fn
   end
 
   def start_block(lab)
-    put("jmp #{lab}") unless @dead
+    unless @dead
+      eh_edge(lab)
+      put("jmp #{lab}")
+    end
     @body << lab
     @dead = false
+    eh_begin(lab)
   end
 
   def ensure_live
     if @dead
-      @body << newlab
+      lab = newlab
+      @body << lab
       @dead = false
+      eh_begin(lab)
     end
   end
 
@@ -1045,14 +1051,197 @@ class Fn
 
   def jmp(lab)
     ensure_live
+    eh_edge(lab)
     put("jmp #{lab}")
     @dead = true
   end
 
   def jnz(c, yes, no)
     ensure_live
+    eh_edge(yes)
+    eh_edge(no)
     put("jnz #{c}, #{yes}, #{no}")
     @dead = true
+  end
+
+  # ---- zero-cost exception tables (docs/notes/pathb-zero-cost-eh.md), as the SSA route's builder (scripts/pathb-ssa.rb)
+  # A QBE block has one unwind target, its ehunwind line: the landing pad of the state N of (eh-state N) (@ehpN), none for
+  # state 0 (the exception passes through; std::terminate in an ehnoexcept function) and std::terminate (ehunwind 0) for
+  # the pads' own code (:term). A block begins in the state of the first reached block that jumps to it, or, reached by no
+  # jump yet, in the state the text is in. A state change after an instruction begins a block.
+  def eh_init
+    @eh_on = true
+    @eh_cur = 0
+    @eh_text = 0
+    @eh_reached = true
+    @eh_lab = {}        # QBE label -> the state of the first reached block that jumps to it
+    @eh_reach = {}      # QBE label -> a reached block jumps to it
+    @eh_inline = {}     # inlined copy K (eh-inline-begin K) -> the state it was entered in
+    @eh_deferred = []   # [body index, K, exception operand] of each (eh-resume-outer K EXC)
+    @eh_line = @body.length
+    @body << nil
+  end
+
+  def eh_on?
+    @eh_on == true
+  end
+
+  def eh_pad_label(n)
+    "@ehp#{n}"
+  end
+
+  def eh_unwind_line(st)
+    return "\tehunwind 0" if st == :term
+    return nil if st == 0
+
+    "\tehunwind #{eh_pad_label(st)}"
+  end
+
+  def eh_edge(lab)
+    return unless eh_on? && @eh_reached
+
+    @eh_lab[lab] = @eh_cur unless @eh_lab.key?(lab)
+    @eh_reach[lab] = true
+  end
+
+  def eh_begin(lab)
+    return unless eh_on?
+
+    @eh_cur = @eh_lab.key?(lab) ? @eh_lab[lab] : @eh_text
+    @eh_text = @eh_cur
+    @eh_reached = @eh_reach[lab] == true
+    @eh_line = @body.length
+    @body << eh_unwind_line(@eh_cur)
+  end
+
+  # (eh-state N), and the states an inlined copy's markers name
+  def eh_set(st)
+    @eh_text = st
+    return if @dead || @eh_cur == st
+
+    if @body.length == @eh_line + 1   # nothing in the block yet: it begins in the new state
+      @eh_cur = st
+      @body[@eh_line] = eh_unwind_line(st)
+      return
+    end
+    lab = newlab
+    put("jmp #{lab}")
+    @body << lab
+    @eh_cur = st
+    @eh_line = @body.length
+    @body << eh_unwind_line(st)
+  end
+
+  def eh_state_of_text
+    @dead ? @eh_text : @eh_cur
+  end
+
+  def eh_inline_begin(k)
+    @eh_inline[k] = eh_state_of_text
+  end
+
+  def eh_outer(k)
+    @eh_inline.key?(k) ? @eh_inline[k] : 0
+  end
+
+  # (eh-resume EXC): _Unwind_Resume in a block of the default state (its call site passes the exception on).
+  def eh_resume(v)
+    lab = newlab
+    jmp(lab)
+    @body << lab
+    @dead = false
+    @eh_cur = 0
+    @eh_text = 0
+    @eh_line = @body.length
+    @body << nil
+    put("call $_Unwind_Resume(l #{v})")
+    put("hlt")
+    @dead = true
+  end
+
+  # (eh-resume-outer K EXC): resolved after the pads, when every copy's entry state is known
+  def eh_resume_outer(k, v)
+    ensure_live
+    @eh_deferred << [@body.length, k, v]
+    @body << nil
+    @dead = true
+  end
+
+  # The function's landing pads, after the body: (eh-pad N CLEANUP (TID...) [(eh-outer K)] STMT...). Each pad's code runs in
+  # the std::terminate state; its first block is the pad (no jump reaches it, QBE's ehpad).
+  def eh_pads(pads)
+    forms = {}
+    pads.each { |p| forms[pstr(p[1])] = p }
+    pad_lines = {}
+    pads.each do |p|
+      id = pstr(p[1])
+      @body << eh_pad_label(id)
+      @dead = false
+      pad_lines[id] = @body.length
+      @body << nil   # the ehpad line, written below (an inlined copy's pad adds its outer pad's action chain)
+      @eh_cur = :term
+      @eh_text = :term
+      @eh_reached = true
+      @eh_line = @body.length
+      @body << eh_unwind_line(:term)
+      code = head_of(p[4]) == "eh-outer" ? p.drop(5) : p.drop(4)
+      stmts(code.map { |s| eh_tids(s) })
+      jmp(abort_label(:unreachable)) unless @dead
+    end
+    @eh_deferred.each do |idx, k, v|
+      o = eh_outer(k)
+      @body[idx] = if o == :term
+                     ["\tcall $_ZSt9terminatev()", "\thlt"]
+                   elsif o.is_a?(Integer) && o > 0
+                     "\tjmp #{lab_for(eh_chain_label(forms, o.to_s))}"
+                   else
+                     lab = newlab
+                     ["\tjmp #{lab}", lab, "\tcall $_Unwind_Resume(l #{v})", "\thlt"]
+                   end
+    end
+    pad_lines.each do |id, idx|
+      cl, types = eh_actions(forms, id, {})
+      @body[idx] = "\tehpad #{cl}#{types.map { |t| " #{pstr(t)}" }.join}"
+    end
+    @body = @body.flatten.compact
+  end
+
+  # pad id's cleanup flag and action chain; an inlined callee's pad continues with the pad of the state its copy was
+  # entered in (or std::terminate, which makes it a cleanup)
+  def eh_actions(forms, id, seen)
+    p = forms[id]
+    raise BadIR, "no landing pad #{id}" if p.nil?
+    cl = pstr(p[2])
+    types = p[3].dup
+    if head_of(p[4]) == "eh-outer" && !seen[id]
+      seen[id] = true
+      o = eh_outer(pstr(p[4][1]))
+      if o == :term
+        cl = "1"
+      elsif o.is_a?(Integer) && o > 0
+        ocl, otypes = eh_actions(forms, o.to_s, seen)
+        types += otypes
+        cl = "1" if ocl == "1"
+      end
+    end
+    [cl, types]
+  end
+
+  # the first jump of pad id's code: its chain's node, past the stub that keeps the exception and the selector
+  def eh_chain_label(forms, id)
+    p = forms[id]
+    raise BadIR, "no landing pad #{id}" if p.nil?
+    g = p.find { |x| head_of(x) == "goto" }
+    raise BadIR, "landing pad #{id} has no chain" if g.nil?
+    pstr(g[1])
+  end
+
+  # (eh-tid N) in a pad's code: the type id N as a long constant
+  def eh_tids(x)
+    return x unless x.is_a?(Array)
+    return ["const", "long", x[1]] if head_of(x) == "eh-tid"
+
+    x.map { |y| eh_tids(y) }
   end
 
   def ret(v = nil)
@@ -2433,6 +2622,42 @@ def s_label(fn, x)
   fn.label(fn.lab_for(pstr(x[1])))
 end
 
+# Zero-cost exception tables (docs/notes/pathb-zero-cost-eh.md, Fn#eh_init). (eh-state N): the calls after it unwind to
+# landing pad N (0: none).
+def s_eh_state(fn, x)
+  raise BadIR, "eh-state form" if x.length != 2 || as_int(x[1]).nil?
+  n = as_int(x[1])
+  return if n == 0 && !fn.eh_on?   # a function without pads: every state is 0
+  raise BadIR, "(eh-state #{n}) in a function without landing pads" unless fn.eh_on?
+  fn.eh_set(n)
+end
+
+# (eh-resume EXC): the end of a pad's chain, the unwind goes on (_Unwind_Resume)
+def s_eh_resume(fn, x)
+  raise BadIR, "eh-resume form" if x.length != 2 || !fn.eh_on?
+  fn.ensure_live
+  fn.eh_resume(fn.opnd(x[1], "l").t)
+end
+
+# An inlined callee with exception tables (scripts/pathb-ir-opt.rb): (eh-inline-begin K) records the state its copy K is
+# entered in; its state 0 (eh-state-outer K) and its end (eh-inline-end K) are that state again.
+def s_eh_inline(fn, x)
+  raise BadIR, "#{x[0]} form" if x.length != 2 || !fn.eh_on?
+  k = pstr(x[1])
+  if x[0] == "eh-inline-begin"
+    fn.eh_inline_begin(k)
+  else
+    fn.eh_set(fn.eh_outer(k))
+  end
+end
+
+# (eh-resume-outer K EXC): a copy's pad goes on to the pad of the state the copy was entered in
+def s_eh_resume_outer(fn, x)
+  raise BadIR, "eh-resume-outer form" if x.length != 3 || !fn.eh_on?
+  fn.ensure_live
+  fn.eh_resume_outer(pstr(x[1]), fn.opnd(x[2], "l").t)
+end
+
 def s_return(fn, x)
   if fn.ret_ty == VOID
     raise BadIR, "return with a value in a void function" if x.length != 1
@@ -2486,6 +2711,9 @@ STMT = {
   "case" => ->(fn, x) { s_case(fn, x) }, "default" => ->(fn, x) { s_default(fn, x) },
   "break" => ->(fn, x) { s_break(fn, x) }, "continue" => ->(fn, x) { s_continue(fn, x) },
   "goto" => ->(fn, x) { s_goto(fn, x) }, "label" => ->(fn, x) { s_label(fn, x) },
+  "eh-state" => ->(fn, x) { s_eh_state(fn, x) }, "eh-resume" => ->(fn, x) { s_eh_resume(fn, x) },
+  "eh-inline-begin" => ->(fn, x) { s_eh_inline(fn, x) }, "eh-inline-end" => ->(fn, x) { s_eh_inline(fn, x) },
+  "eh-state-outer" => ->(fn, x) { s_eh_inline(fn, x) }, "eh-resume-outer" => ->(fn, x) { s_eh_resume_outer(fn, x) },
   "return" => ->(fn, x) { s_return(fn, x) }, "unreachable" => ->(fn, x) { s_unreachable(fn, x) },
   "loc" => ->(fn, x) { s_loc(fn, x) }, "likely" => ->(fn, x) { s_hint(fn, x) }, "unlikely" => ->(fn, x) { s_hint(fn, x) },
   "barrier" => ->(fn, x) { s_barrier(fn, x) }, "trap" => ->(fn, x) { s_trap(fn, x) }, "fence" => ->(fn, x) { s_fence(fn, x) },
@@ -2871,9 +3099,22 @@ def emit_function(mod, f)
   qparams = []
   param_stores = []
   body_forms = []
+  eh_header = []   # zero-cost exception tables: the function's ehtype, ehnoexcept and ehspec lines
+  eh_pads = []
   f.drop(4).each do |part|
     h = head_of(part)
-    if h == "static"
+    if h == "eh-types"
+      # (eh-types SYM|0 ...): the catch clauses' typeinfo symbols, type ids from 1 (0: catch (...))
+      part.drop(1).each_with_index do |t, i|
+        eh_header << "\tehtype #{i + 1} #{t.is_a?(IRSym) ? "$#{qsym(t.name)}" : "0"}"
+      end
+    elsif h == "eh-noexcept"
+      eh_header << "\tehnoexcept"
+    elsif h == "eh-spec"
+      eh_header << "\tehspec #{part.drop(1).map { |t| pstr(t) }.join(" ")}"
+    elsif h == "eh-pad"
+      eh_pads << part
+    elsif h == "static"
       static = true
     elsif h == "weak"
       weak = true
@@ -2970,6 +3211,7 @@ def emit_function(mod, f)
   param_stores.each do |cls, idx, n|
     fn.put("#{MEM_STORE[cls]} %p#{idx}, %r#{n}")
   end
+  fn.eh_init unless eh_header.empty? && eh_pads.empty?
   fn.stmts(body_forms)
   unless fn.dead
     if ret == VOID
@@ -2978,6 +3220,7 @@ def emit_function(mod, f)
       fn.jmp(fn.abort_label(:missing_return))
     end
   end
+  fn.eh_pads(eh_pads) if fn.eh_on?
   fn.ub_blocks
   if fn.abort_used
     fn.body << "@abort"
@@ -2990,6 +3233,7 @@ def emit_function(mod, f)
   mod.out << (WEAK_MARK + qsym(name)) if weak
   mod.out << "#{linkage}function #{rc}$#{qsym(name)}(#{qparams.join(", ")}) {"
   mod.out << "@start"
+  mod.out.concat(eh_header)
   mod.out.concat(fn.allocs)
   mod.out.concat(fn.inits)
   if fn.returns_twice
