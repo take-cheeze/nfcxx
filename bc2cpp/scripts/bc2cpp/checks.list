@@ -138,7 +138,6 @@ ruby scripts/bc2cpp/singleton_taint_check.rb
 ruby scripts/bc2cpp/scoped_constant_writes_check.rb
 ruby scripts/bc2cpp/block_self_method_boundary_check.rb
 ruby scripts/bc2cpp/helper_owner_call_check.rb
-ruby scripts/bc2cpp/outside_owner_fallback_check.rb
 ruby scripts/bc2cpp/owner_lookup_shapes_check.rb
 ruby scripts/bc2cpp/frozen_literal_persist_check.rb
 ruby scripts/bc2cpp/ir_argument_types_check.rb

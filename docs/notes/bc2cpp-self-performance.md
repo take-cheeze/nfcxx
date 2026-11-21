@@ -232,7 +232,8 @@ matcher. Allocations fell from about 625K to 316K. The fixture isolates replacem
 owner-call result; these are matcher timings, not whole-generation or compiled-compiler throughput.
 All results matched on CRuby and mruby-onig. Another 576 comparisons cover multiple candidates,
 failed matches, argument lists, regexp metacharacters, UTF-8 offsets and match-region reuse.
-The new host check is included in `scripts/bc2cpp/checks.list`.
+These comparisons run inside the already-registered `helper_owner_call_check.rb`; adding a separate
+check requires a matching entry in the pinned world's check policy.
 
 Full CPU-profiled generation with the same bounded capture hook in both runs measured 336.644 versus
 322.041 seconds. This method's self CPU fell from 7.021 to 0.413 seconds; its inclusive tree fell
