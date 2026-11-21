@@ -86,14 +86,15 @@
     (store long $"eh.sel" %36)
     (goto "eh.c.0.0")
     (label "eh.c.0.0")
-    (let %37 bool (ne (ptr void) $"a" (null (ptr void))))
-    (if %37
+    (let %37 (ptr void) (load (ptr void) $"a"))
+    (let %38 bool (ne (ptr void) %37 (null (ptr void))))
+    (if %38
       (then
-        (eval (call void &"__vla_dealloc_eh" $"a"))))
+        (eval (call void &"__vla_dealloc_eh" %37))))
     (goto "eh.x")
     (label "eh.x")
-    (let %38 (ptr void) (load (ptr void) $"eh.exc"))
-    (eh-resume %38)))
+    (let %39 (ptr void) (load (ptr void) $"eh.exc"))
+    (eh-resume %39)))
 
 (function "_ZN31_INTERNAL_13_vla_scope_cpp_main8sequenceEi"
   (ret int)
@@ -229,25 +230,28 @@
     (store long $"eh.sel" %68)
     (goto "eh.c.2.0")
     (label "eh.c.0.0")
-    (let %69 bool (ne (ptr void) $"a" (null (ptr void))))
-    (if %69
+    (let %69 (ptr void) (load (ptr void) $"a"))
+    (let %70 bool (ne (ptr void) %69 (null (ptr void))))
+    (if %70
       (then
-        (eval (call void &"__vla_dealloc_eh" $"a"))))
+        (eval (call void &"__vla_dealloc_eh" %69))))
     (goto "eh.x")
     (label "eh.x")
-    (let %70 (ptr void) (load (ptr void) $"eh.exc"))
-    (eh-resume %70)
+    (let %71 (ptr void) (load (ptr void) $"eh.exc"))
+    (eh-resume %71)
     (label "eh.c.1.0")
-    (let %71 bool (ne (ptr void) $"b" (null (ptr void))))
-    (if %71
+    (let %72 (ptr void) (load (ptr void) $"b"))
+    (let %73 bool (ne (ptr void) %72 (null (ptr void))))
+    (if %73
       (then
-        (eval (call void &"__vla_dealloc_eh" $"b"))))
+        (eval (call void &"__vla_dealloc_eh" %72))))
     (goto "eh.x")
     (label "eh.c.2.0")
-    (let %72 bool (ne (ptr void) $"c" (null (ptr void))))
-    (if %72
+    (let %74 (ptr void) (load (ptr void) $"c"))
+    (let %75 bool (ne (ptr void) %74 (null (ptr void))))
+    (if %75
       (then
-        (eval (call void &"__vla_dealloc_eh" $"c"))))
+        (eval (call void &"__vla_dealloc_eh" %74))))
     (goto "eh.x")))
 
 (function "_ZN31_INTERNAL_13_vla_scope_cpp_main6nestedEi"
@@ -401,25 +405,28 @@
     (store long $"eh.sel" %80)
     (goto "eh.c.2.0")
     (label "eh.c.0.0")
-    (let %81 bool (ne (ptr void) $"a" (null (ptr void))))
-    (if %81
+    (let %81 (ptr void) (load (ptr void) $"a"))
+    (let %82 bool (ne (ptr void) %81 (null (ptr void))))
+    (if %82
       (then
-        (eval (call void &"__vla_dealloc_eh" $"a"))))
+        (eval (call void &"__vla_dealloc_eh" %81))))
     (goto "eh.x")
     (label "eh.x")
-    (let %82 (ptr void) (load (ptr void) $"eh.exc"))
-    (eh-resume %82)
+    (let %83 (ptr void) (load (ptr void) $"eh.exc"))
+    (eh-resume %83)
     (label "eh.c.1.0")
-    (let %83 bool (ne (ptr void) $"b" (null (ptr void))))
-    (if %83
+    (let %84 (ptr void) (load (ptr void) $"b"))
+    (let %85 bool (ne (ptr void) %84 (null (ptr void))))
+    (if %85
       (then
-        (eval (call void &"__vla_dealloc_eh" $"b"))))
+        (eval (call void &"__vla_dealloc_eh" %84))))
     (goto "eh.c.0.0")
     (label "eh.c.2.0")
-    (let %84 bool (ne (ptr void) $"c" (null (ptr void))))
-    (if %84
+    (let %86 (ptr void) (load (ptr void) $"c"))
+    (let %87 bool (ne (ptr void) %86 (null (ptr void))))
+    (if %87
       (then
-        (eval (call void &"__vla_dealloc_eh" $"c"))))
+        (eval (call void &"__vla_dealloc_eh" %86))))
     (goto "eh.c.1.0")))
 
 (function "_ZN31_INTERNAL_13_vla_scope_cpp_main5loopsEi"
@@ -570,19 +577,21 @@
     (store long $"eh.sel" %64)
     (goto "eh.c.1.0")
     (label "eh.c.0.0")
-    (let %65 bool (ne (ptr void) $"a" (null (ptr void))))
-    (if %65
+    (let %65 (ptr void) (load (ptr void) $"a"))
+    (let %66 bool (ne (ptr void) %65 (null (ptr void))))
+    (if %66
       (then
-        (eval (call void &"__vla_dealloc_eh" $"a"))))
+        (eval (call void &"__vla_dealloc_eh" %65))))
     (goto "eh.x")
     (label "eh.x")
-    (let %66 (ptr void) (load (ptr void) $"eh.exc"))
-    (eh-resume %66)
+    (let %67 (ptr void) (load (ptr void) $"eh.exc"))
+    (eh-resume %67)
     (label "eh.c.1.0")
-    (let %67 bool (ne (ptr void) $"buf" (null (ptr void))))
-    (if %67
+    (let %68 (ptr void) (load (ptr void) $"buf"))
+    (let %69 bool (ne (ptr void) %68 (null (ptr void))))
+    (if %69
       (then
-        (eval (call void &"__vla_dealloc_eh" $"buf"))))
+        (eval (call void &"__vla_dealloc_eh" %68))))
     (goto "eh.x")))
 
 (function "_ZN31_INTERNAL_13_vla_scope_cpp_main5jumpsEi"
@@ -674,14 +683,15 @@
     (store long $"eh.sel" %33)
     (goto "eh.c.0.0")
     (label "eh.c.0.0")
-    (let %34 bool (ne (ptr void) $"a" (null (ptr void))))
-    (if %34
+    (let %34 (ptr void) (load (ptr void) $"a"))
+    (let %35 bool (ne (ptr void) %34 (null (ptr void))))
+    (if %35
       (then
-        (eval (call void &"__vla_dealloc_eh" $"a"))))
+        (eval (call void &"__vla_dealloc_eh" %34))))
     (goto "eh.x")
     (label "eh.x")
-    (let %35 (ptr void) (load (ptr void) $"eh.exc"))
-    (eh-resume %35)))
+    (let %36 (ptr void) (load (ptr void) $"eh.exc"))
+    (eh-resume %36)))
 
 (function "_ZN31_INTERNAL_13_vla_scope_cpp_main5earlyEi"
   (ret int)
@@ -788,19 +798,21 @@
     (store long $"eh.sel" %50)
     (goto "eh.c.1.0")
     (label "eh.c.0.0")
-    (let %51 bool (ne (ptr void) $"a" (null (ptr void))))
-    (if %51
+    (let %51 (ptr void) (load (ptr void) $"a"))
+    (let %52 bool (ne (ptr void) %51 (null (ptr void))))
+    (if %52
       (then
-        (eval (call void &"__vla_dealloc_eh" $"a"))))
+        (eval (call void &"__vla_dealloc_eh" %51))))
     (goto "eh.x")
     (label "eh.x")
-    (let %52 (ptr void) (load (ptr void) $"eh.exc"))
-    (eh-resume %52)
+    (let %53 (ptr void) (load (ptr void) $"eh.exc"))
+    (eh-resume %53)
     (label "eh.c.1.0")
-    (let %53 bool (ne (ptr void) $"b" (null (ptr void))))
-    (if %53
+    (let %54 (ptr void) (load (ptr void) $"b"))
+    (let %55 bool (ne (ptr void) %54 (null (ptr void))))
+    (if %55
       (then
-        (eval (call void &"__vla_dealloc_eh" $"b"))))
+        (eval (call void &"__vla_dealloc_eh" %54))))
     (goto "eh.c.0.0")))
 
 (function "_ZN31_INTERNAL_13_vla_scope_cpp_main2swEii"
@@ -899,19 +911,21 @@
     (store long $"eh.sel" %35)
     (goto "eh.c.1.0")
     (label "eh.c.0.0")
-    (let %36 bool (ne (ptr void) $"a" (null (ptr void))))
-    (if %36
+    (let %36 (ptr void) (load (ptr void) $"a"))
+    (let %37 bool (ne (ptr void) %36 (null (ptr void))))
+    (if %37
       (then
-        (eval (call void &"__vla_dealloc_eh" $"a"))))
+        (eval (call void &"__vla_dealloc_eh" %36))))
     (goto "eh.x")
     (label "eh.x")
-    (let %37 (ptr void) (load (ptr void) $"eh.exc"))
-    (eh-resume %37)
+    (let %38 (ptr void) (load (ptr void) $"eh.exc"))
+    (eh-resume %38)
     (label "eh.c.1.0")
-    (let %38 bool (ne (ptr void) $"a.1" (null (ptr void))))
-    (if %38
+    (let %39 (ptr void) (load (ptr void) $"a.1"))
+    (let %40 bool (ne (ptr void) %39 (null (ptr void))))
+    (if %40
       (then
-        (eval (call void &"__vla_dealloc_eh" $"a.1"))))
+        (eval (call void &"__vla_dealloc_eh" %39))))
     (goto "eh.x")))
 
 (function "_ZN31_INTERNAL_13_vla_scope_cpp_main5recurEi"
@@ -980,14 +994,15 @@
     (store long $"eh.sel" %29)
     (goto "eh.c.0.0")
     (label "eh.c.0.0")
-    (let %30 bool (ne (ptr void) $"a" (null (ptr void))))
-    (if %30
+    (let %30 (ptr void) (load (ptr void) $"a"))
+    (let %31 bool (ne (ptr void) %30 (null (ptr void))))
+    (if %31
       (then
-        (eval (call void &"__vla_dealloc_eh" $"a"))))
+        (eval (call void &"__vla_dealloc_eh" %30))))
     (goto "eh.x")
     (label "eh.x")
-    (let %31 (ptr void) (load (ptr void) $"eh.exc"))
-    (eh-resume %31)))
+    (let %32 (ptr void) (load (ptr void) $"eh.exc"))
+    (eh-resume %32)))
 
 (function "_ZN31_INTERNAL_13_vla_scope_cpp_main3bigEi"
   (ret long)
@@ -1091,14 +1106,15 @@
     (store long $"eh.sel" %53)
     (goto "eh.c.0.0")
     (label "eh.c.0.0")
-    (let %54 bool (ne (ptr void) $"v" (null (ptr void))))
-    (if %54
+    (let %54 (ptr void) (load (ptr void) $"v"))
+    (let %55 bool (ne (ptr void) %54 (null (ptr void))))
+    (if %55
       (then
-        (eval (call void &"__vla_dealloc_eh" $"v"))))
+        (eval (call void &"__vla_dealloc_eh" %54))))
     (goto "eh.x")
     (label "eh.x")
-    (let %55 (ptr void) (load (ptr void) $"eh.exc"))
-    (eh-resume %55)))
+    (let %56 (ptr void) (load (ptr void) $"eh.exc"))
+    (eh-resume %56)))
 
 (function "_ZN31_INTERNAL_13_vla_scope_cpp_main9with_dtorEiPi"
   (ret int)
@@ -1168,10 +1184,11 @@
     (let %25 (ptr void) (load (ptr void) $"eh.exc"))
     (eh-resume %25)
     (label "eh.c.1.0")
-    (let %26 bool (ne (ptr void) $"a" (null (ptr void))))
-    (if %26
+    (let %26 (ptr void) (load (ptr void) $"a"))
+    (let %27 bool (ne (ptr void) %26 (null (ptr void))))
+    (if %27
       (then
-        (eval (call void &"__vla_dealloc_eh" $"a"))))
+        (eval (call void &"__vla_dealloc_eh" %26))))
     (goto "eh.c.0.0")))
 
 (function "main"

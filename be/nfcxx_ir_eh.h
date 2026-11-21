@@ -348,6 +348,11 @@ static int ir_eh_cleanup(int i)
   }
   obj = a != NULL ? ir_eh_addr_f(a->handle, fl & IR_RDF_THIS_PARAM_OFFSET, 1) : ir_eh_addr_f(r->handle, fl, 1);
   if (fl & IR_RDF_INDIRECT) obj = ir_let("(ptr void)", ir_fmt("(load (ptr void) %s)", obj));
+  /* a lowered VLA's region: a new allocation whose handle is the VLA's pointer variable, without the indirect flag (EDG's
+     runtime frees it only when VLA operations are lowered); __vla_dealloc_eh takes the array's address, the variable's
+     value */
+  else if ((fl & IR_RDF_NEW_ALLOCATION) && dtor != NULL && strcmp(dtor, "__vla_dealloc_eh") == 0)
+    obj = ir_let("(ptr void)", ir_fmt("(load (ptr void) %s)", obj));
   if (fl & IR_RDF_GUARD_VAR_FOR_LOCAL_STATIC) {
     ir_emit(ir_fmt("(eval (call void &\"__cxa_guard_abort\" %s))", obj));
   } else if (!(fl & IR_RDF_NEW_ALLOCATION)) {

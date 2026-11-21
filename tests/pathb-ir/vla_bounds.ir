@@ -134,14 +134,15 @@
     (store long $"eh.sel" %63)
     (goto "eh.c.0.0")
     (label "eh.c.0.0")
-    (let %64 bool (ne (ptr void) $"v" (null (ptr void))))
-    (if %64
+    (let %64 (ptr void) (load (ptr void) $"v"))
+    (let %65 bool (ne (ptr void) %64 (null (ptr void))))
+    (if %65
       (then
-        (eval (call void &"__vla_dealloc_eh" $"v"))))
+        (eval (call void &"__vla_dealloc_eh" %64))))
     (goto "eh.x")
     (label "eh.x")
-    (let %65 (ptr void) (load (ptr void) $"eh.exc"))
-    (eh-resume %65)))
+    (let %66 (ptr void) (load (ptr void) $"eh.exc"))
+    (eh-resume %66)))
 
 (function "_Z4sum2i"
   (ret int)
@@ -271,14 +272,15 @@
     (store long $"eh.sel" %59)
     (goto "eh.c.0.0")
     (label "eh.c.0.0")
-    (let %60 bool (ne (ptr void) $"m" (null (ptr void))))
-    (if %60
+    (let %60 (ptr void) (load (ptr void) $"m"))
+    (let %61 bool (ne (ptr void) %60 (null (ptr void))))
+    (if %61
       (then
-        (eval (call void &"__vla_dealloc_eh" $"m"))))
+        (eval (call void &"__vla_dealloc_eh" %60))))
     (goto "eh.x")
     (label "eh.x")
-    (let %61 (ptr void) (load (ptr void) $"eh.exc"))
-    (eh-resume %61)))
+    (let %62 (ptr void) (load (ptr void) $"eh.exc"))
+    (eh-resume %62)))
 
 (function "_Z4sum3ii"
   (ret int)
@@ -409,14 +411,15 @@
     (store long $"eh.sel" %60)
     (goto "eh.c.0.0")
     (label "eh.c.0.0")
-    (let %61 bool (ne (ptr void) $"m" (null (ptr void))))
-    (if %61
+    (let %61 (ptr void) (load (ptr void) $"m"))
+    (let %62 bool (ne (ptr void) %61 (null (ptr void))))
+    (if %62
       (then
-        (eval (call void &"__vla_dealloc_eh" $"m"))))
+        (eval (call void &"__vla_dealloc_eh" %61))))
     (goto "eh.x")
     (label "eh.x")
-    (let %62 (ptr void) (load (ptr void) $"eh.exc"))
-    (eh-resume %62)))
+    (let %63 (ptr void) (load (ptr void) $"eh.exc"))
+    (eh-resume %63)))
 
 (function "_Z4sumwm"
   (ret long)
@@ -502,14 +505,15 @@
     (store long $"eh.sel" %36)
     (goto "eh.c.0.0")
     (label "eh.c.0.0")
-    (let %37 bool (ne (ptr void) $"w" (null (ptr void))))
-    (if %37
+    (let %37 (ptr void) (load (ptr void) $"w"))
+    (let %38 bool (ne (ptr void) %37 (null (ptr void))))
+    (if %38
       (then
-        (eval (call void &"__vla_dealloc_eh" $"w"))))
+        (eval (call void &"__vla_dealloc_eh" %37))))
     (goto "eh.x")
     (label "eh.x")
-    (let %38 (ptr void) (load (ptr void) $"eh.exc"))
-    (eh-resume %38)))
+    (let %39 (ptr void) (load (ptr void) $"eh.exc"))
+    (eh-resume %39)))
 
 (function "_Z8sum_charh"
   (ret int)
@@ -599,14 +603,15 @@
     (store long $"eh.sel" %40)
     (goto "eh.c.0.0")
     (label "eh.c.0.0")
-    (let %41 bool (ne (ptr void) $"c" (null (ptr void))))
-    (if %41
+    (let %41 (ptr void) (load (ptr void) $"c"))
+    (let %42 bool (ne (ptr void) %41 (null (ptr void))))
+    (if %42
       (then
-        (eval (call void &"__vla_dealloc_eh" $"c"))))
+        (eval (call void &"__vla_dealloc_eh" %41))))
     (goto "eh.x")
     (label "eh.x")
-    (let %42 (ptr void) (load (ptr void) $"eh.exc"))
-    (eh-resume %42)))
+    (let %43 (ptr void) (load (ptr void) $"eh.exc"))
+    (eh-resume %43)))
 
 (function "main"
   (ret int)

@@ -48,14 +48,15 @@
     (store long $"eh.sel" %21)
     (goto "eh.c.0.0")
     (label "eh.c.0.0")
-    (let %22 bool (ne (ptr void) $"buf" (null (ptr void))))
-    (if %22
+    (let %22 (ptr void) (load (ptr void) $"buf"))
+    (let %23 bool (ne (ptr void) %22 (null (ptr void))))
+    (if %23
       (then
-        (eval (call void &"__vla_dealloc_eh" $"buf"))))
+        (eval (call void &"__vla_dealloc_eh" %22))))
     (goto "eh.x")
     (label "eh.x")
-    (let %23 (ptr void) (load (ptr void) $"eh.exc"))
-    (eh-resume %23)))
+    (let %24 (ptr void) (load (ptr void) $"eh.exc"))
+    (eh-resume %24)))
 
 (function "_Z8stmtexpri"
   (ret int)
