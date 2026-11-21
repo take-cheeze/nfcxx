@@ -102,9 +102,12 @@ destructor a throw passes is the complete-object one (the subobject destructor o
 
 `__nfcxx_personality_v0` calls libstdc++'s `__gxx_personality_v0`. QBE cannot read the registers a personality sets for
 a landing pad (gcc's `__builtin_eh_pointer`), so the wrapper keeps the exception and the selector in thread-local
-storage when it installs a pad, and the pad reads them first (`__nfcxx_eh_ptr`, `__nfcxx_eh_sel`). The program links
-libstdc++ and not `libC.a`: `libC.a` defines its own IA-64 RTTI vtables and `__cxa_vec_*`, which libstdc++'s personality
-cannot use. No EH shim either: an exception thrown by libstdc++ is already one of ours.
+storage when it installs a pad, and the pad reads them first (`__nfcxx_eh_ptr`, `__nfcxx_eh_sel`). It is a member of
+`libnfcxxld.a`, which every Path B link names; only a program with tables references it. The program links libstdc++
+first and `libC.a` after it: `libC.a` defines its own IA-64 RTTI vtables, `__cxa_*` and `__cxa_vec_*`, which libstdc++'s
+personality cannot use, so libstdc++ must provide those; `libC.a` then gives only what is still undefined, the lowering's
+helpers (the VLA pool, C99 complex arithmetic: self-contained members). No EH shim either: an exception thrown by
+libstdc++ is already one of ours.
 
 ### The IR passes (`scripts/pathb-ir-opt.rb`)
 
@@ -124,7 +127,8 @@ specification is not inlined. A function without tables inlines as before: its c
 cleanups compared with g++'s output: conditional temporaries, `new` with a throwing constructor, partially built arrays
 and objects, a local static whose initializer throws, temporaries of a full expression; exceptions across g++-compiled
 code in both directions; `noexcept`), and the EH probes of the frames mode (`tests/pathb-qbe/{cases,traps}/eh_*.cpp`,
-`tests/cases/eh_*.cpp`), and inlined callees with pads (two copies in a caller, a copy inside a copy, a catch that
+`tests/cases/eh_*.cpp`; with `--all`, every program of `tests/pathb-qbe/cases` and `tests/cases`: 193, all pass), and
+inlined callees with pads (two copies in a caller, a copy inside a copy, a catch that
 rethrows from a copy, destructors with pads inlined into a pad, a `noexcept` copy). 21 programs, all pass, through the
 IR passes, the e-graph pass and QBE's optimizations.
 

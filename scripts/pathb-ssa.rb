@@ -483,7 +483,8 @@ end
 def promotable_slots(fn)
   types = fn.slots.to_h { |s| ["$#{s[1].raw}", s[2]] }
   bad = {}
-  twice = fn.body.map { |s| scan_slot_uses(s, types, bad) }.any?
+  # the landing pads' code too (fn.pads): a slot whose address a pad takes stays in memory
+  twice = (fn.body + (fn.pads || [])).map { |s| scan_slot_uses(s, types, bad) }.any?
   [types.select { |k, t| !bad[k] && scalar_type?(t) }, twice]
 end
 
