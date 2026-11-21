@@ -64,6 +64,7 @@ def main():
     p.add_argument("--work", type=pathlib.Path, default=pathlib.Path("npu-fixtures"))
     p.add_argument("--only", default="", help="run fixtures whose name contains this")
     p.add_argument("--time", type=int, default=0, help="time each matching fixture with this many inferences")
+    p.add_argument("--loop-fixpoint", action="store_true", help="apply the loop fixed-point transform")
     args = p.parse_args()
 
     work = args.work.resolve()
@@ -71,6 +72,9 @@ def main():
     wine = rk.Wine(args.movi_root, args.wine_host)
     base, _ = grow_carrier.grow(rk.base_blob(ELEMENTS, work).read_bytes(), 262144)
     core = flatten_vertex(flatten(inline(args.kernels / "frame_core.h")))   # both native trees flattened
+    if args.loop_fixpoint:
+        from loop_fixpoint import loop_fixpoint
+        core = loop_fixpoint(core)
     (work / "frame_fill_entry.c").write_text(core + ENTRY)
     text, hazards = rk.build_text(work / "frame_fill_entry.c", "nr_probe_kernel", work, wine, args.movi_root)
     off, size = rk.section(base, "shave.text")
