@@ -1,0 +1,2 @@
+nfcxx: EDG not built; run scripts/setup-edg.sh
+nfcxx: the SYCL pre-pass recorded no kernels
