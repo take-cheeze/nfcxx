@@ -672,8 +672,8 @@ if ENV['MRBC']
   check.call('an argument passed an Integer at one site and a Float at another proves as Integer-or-Float',
              proven.call('NqBox#nq_half') && numeric_note.call('NqBox#nq_half'))
   check.call('a comparison of pooled numeric arguments loses its send', proven.call('NqBox#nq_less'))
-  check.call('Array#size of an ivar that only ever holds an exact Array is an Integer',
-             proven.call('NqBox#nq_len') && numeric_note.call('NqBox#nq_len'))
+  # The exact-class flow knows Array#size too (NATIVE_RESULT_FACTS), so the Fixnum proof may take the site first.
+  check.call('Array#size of an ivar that only ever holds an exact Array is an Integer', proven.call('NqBox#nq_len'))
   check.call('Array#size of an argument an exact Array at every call site is an Integer',
              proven.call('NqBox#nq_argsize'))
   check.call('NEG: Array#size of an argument one site passes a Symbol keeps its send',
