@@ -3785,7 +3785,7 @@ use_problem = lambda do |name, use|
         if m[2]
           # !f(...) of a VALUE-returning call: mrb_test of the result (nil and false are false)
           close = match_close(mv, m.end(0) - 1)
-          if close >= 0 && !@edits[rel].overlaps(m.begin(1), close + 2)
+          if close >= 0 && !@edits[rel].overlaps(m.begin(1), m.begin(1) + 1) && !@edits[rel].overlaps(close + 1, close + 2)
             @edits[rel].add(m.begin(1), m.begin(1), 'mrb_test(')
             @edits[rel].add(close + 1, close + 1, ')')
             rewrite(rel, m.begin(0), nm, "!mrb_test(#{nm}(...))", TRUTH_TEST_CAVEAT)
@@ -4207,6 +4207,36 @@ use_problem = lambda do |name, use|
                  "      mrb_obj_is_kind_of(mrb, v, mrb_class_get(mrb, \"Rational\"))) return NFCX_TT_RATIONAL;\n" \
                  "  return (int)mrb_type(v);\n}\n")
         end
+      end
+    end
+  end
+
+  # a VALUE-returning call that is an operand of && or || (or !) in an if or while condition: mrb_test of the call, as the call
+  # that is the whole condition is (value_truth_call_pass). The call's own insertion points must be free (an earlier pass may
+  # have wrapped it already).
+  def value_condition_operand_pass
+    @files.each_key do |rel|
+      masked = @files[rel]['masked']
+      masked.to_enum(:scan, /(?<![#{WC}])([A-Za-z_]\w*)[ \t\n]*\(/).each do
+        m = Regexp.last_match
+        nm = m[1]
+        next if %w[if while for switch return sizeof].include?(nm)
+        defs = (@defs[nm] || []).reject { |x| x['proto'] }
+        next unless (defs.any? && defs.all? { |x| x['ret'].to_s.strip == 'VALUE' }) || funcall_macro?(rel, nm)
+        st = m.begin(1)
+        cl = match_close(masked, m.end(0) - 1)
+        next if cl < 0
+        pre = prev_nonspace(masked, st - 1)
+        post = next_nonspace(masked, cl + 1)
+        next unless pre >= 0 && post >= 0
+        next unless '(&|!'.include?(masked[pre]) && ')&|'.include?(masked[post])
+        ch, owner = innermost_open(masked, st)
+        next unless ch == '(' && %w[if while].include?(owner)
+        ed = @edits[rel]
+        next if ed.at_point(st).any? || ed.at_point(cl + 1).any? || ed.overlaps(st, st + 1) || ed.overlaps(cl + 1, cl + 2)
+        ed.add(st, st, 'mrb_test(')
+        ed.add(cl + 1, cl + 1, ')')
+        rewrite(rel, st, nm, "mrb_test(#{nm}(...))", TRUTH_TEST_CAVEAT)
       end
     end
   end
@@ -7764,6 +7794,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     value_compare_wrap_pass
     owned_class_assign_pass
     value_truth_call_pass
+    value_condition_operand_pass
     value_order_stuck_pass
     value_identity_pass
     value_as_integer_arg_pass
