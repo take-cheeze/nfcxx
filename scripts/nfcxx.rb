@@ -89,10 +89,12 @@ require "rbconfig"
 require_relative "nfcxx-setup-args"
 require_relative "nfcxx-second-pass"
 require_relative "nfcxx-cache-config"
+require_relative "nfcxx-sycl"
 
 root = File.expand_path("..", __dir__)
 ROOT = root
 oracle = File.join(root, "tests", "driver-body", "nfcxx-bash")
+SYCL_SCRIPT = File.join(root, "scripts", "nfcxx-sycl.rb")
 
 # The route dispatch: the pre-loop plan (scripts/nfcxx-loop.rb) runs in scripts/nfcxx-run.rb, and a gcc-route refusal
 # (scripts/nfcxx-gcc-plan.rb --live, status 2) is printed here, as the bash prints it. Every other argument list goes to the
@@ -175,6 +177,18 @@ def run_plan_text(text)
     Process.wait(pid)
     $?.exitstatus || 128 + $?.termsig
   end
+end
+
+# The SYCL kernel integration (docs/notes/sycl-kernel-builtins.md): a -c compile of one C++ source that includes the oneAPI SYCL
+# headers (a -I directory holding sycl/detail/kernel_desc.hpp) runs in two passes, as the real toolchain's integration headers
+# do. The decision and the two passes are scripts/nfcxx-sycl.rb's (tests/nfcxx-sycl/run.sh checks them against the bash block).
+# The bash body ran this check after its early exits and before its setup, and the early exits never refuse these arguments
+# (they have one source, a compile, and no -E, -x or EDG-less path), so the check runs here, before the body, with the body's
+# environment (the temporary root and the trace are set up below, and the passes inherit them as before).
+def sycl_applies?
+  NfcxxSycl.applies?(ARGV)
+rescue StandardError
+  false
 end
 
 # B5: the cache configuration's refusal (NFCXX_CACHE_REMOTE, scripts/nfcxx-cache-config.rb plan). The bash checks it first (its
@@ -262,11 +276,16 @@ begin
   # bash prints before its setup, then the setup's. The bash prints the message and exits with the status, after the trace is
   # opened. Any other command goes on to the oracle unchanged.
   input, setup = driver_refusals
-  refusal = input || setup
+  # the SYCL two-pass build comes before the refusals, as it came before the setup in the body
+  sycl = sycl_applies?
+  refusal = sycl ? nil : (input || setup)
   # the oracle's status is read here, before the trace calls below: each system call sets $?, so reading it after them
   # gave the trace's status (0) for a failing build
   oracle_code = 0
-  if refusal
+  if sycl
+    system(env, env["RUBY"], SYCL_SCRIPT, "run", "--root=#{ROOT}", *ARGV)
+    oracle_code = $?.exitstatus || 128 + $?.termsig
+  elsif refusal
     $stderr.puts(refusal.message)
   else
     ok = system(env, "bash", program.path, *ARGV)
