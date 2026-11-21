@@ -285,3 +285,17 @@ ablation could not show. The reference and the NPU agree on the overflow count a
 Consequence for lowering: skipping the loop would change the overflow counters, and those are part of the output
 header. A faster version must prove the loop result without running it, or compute the same counters. Neither is a
 bit-exact local rewrite.
+
+## Loop fixed-point attempt (negative result)
+
+Idea: if a shader loop's iteration leaves its state bit-for-bit unchanged and does not break, every later
+iteration repeats the same work, so the loop can stop and add the remaining escapes and the overflow in closed form.
+That keeps the output and both counters exact.
+
+Result on native 5 (rgba, `e3ebf67c`): the transform is bit-exact on all six fixtures for that shader, but the fixed
+point never fires. The loop state includes an integer counter (`nr_v4_iadd` updates a register every iteration), so
+the body never repeats. Timing is unchanged (3.25 s baseline, 3.16 s transformed; within run-to-run noise).
+
+So the loop cost is inherent to this shader's semantics: 16 iterations of a large body per pixel, with no state
+that settles. A real speedup needs the counter's trajectory computed in closed form, which is a shader-specific
+analysis, not a bit-exact local rewrite.
