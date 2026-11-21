@@ -291,7 +291,7 @@ def mrbc_command(mrbc)
      .find { |path| File.file?(path) && File.executable?(path) }
 end
 
-def run_mrbc(src_paths, symbol, out_dir, mrbc: MRBC)
+def run_mrbc(src_paths, symbol, out_dir, mrbc: MRBC, emitter: true)
   mrb_path = File.join(out_dir, "#{symbol}.mrb")
   paths = Array(src_paths)
   mrbc = mrbc_command(mrbc)
@@ -305,7 +305,9 @@ def run_mrbc(src_paths, symbol, out_dir, mrbc: MRBC)
   #                          (bc2cpp/tools/mrbc_rb/snapshot.txt); an input not in it aborts, see mrbc_rb/snapshot.rb
   mode = ENV.fetch('BC2CPP_MRBC_RB', '')
   reason = 'disabled'
-  unless mode == '0'
+  analysis_only = !emitter && mrbc && mode != 'verify'
+  reason = 'analysis-only input' if analysis_only
+  unless mode == '0' || analysis_only
     result, reason = mrbc_rb_image(paths)
     if result
       image = result.image
@@ -404,8 +406,12 @@ def rites_from_tree(root)
 end
 
 # [ireps (label => Irep), root_label] for +src_paths+ compiled by mrbc.
-def compile_ireps(src_paths, symbol, out_dir, mrbc: MRBC)
-  load_ireps(run_mrbc(src_paths, symbol, out_dir, mrbc: mrbc), cache: IrepCache.directory_for_sources(src_paths))
+# +emitter+ false: a compile whose ireps only feed an analysis (the linked sources this build does not compile, which
+# CORE_OUTSIDE_REDEFINED and BlockSelfWorld read) takes mrbc when there is one, except under BC2CPP_MRBC_RB=verify. The
+# emitter's bytes are mrbc's (golden_test), and such a read does without its annotations; in a self-compiled bc2cpp the
+# emitter spent most of a small run compiling those sources again.
+def compile_ireps(src_paths, symbol, out_dir, mrbc: MRBC, emitter: true)
+  load_ireps(run_mrbc(src_paths, symbol, out_dir, mrbc: mrbc, emitter: emitter), cache: IrepCache.directory_for_sources(src_paths))
 end
 
 CATCH_TYPES = { 0 => :rescue, 1 => :ensure }.freeze
