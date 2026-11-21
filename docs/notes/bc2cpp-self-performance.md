@@ -244,3 +244,29 @@ throughput guarantee. These runs use a newer generator than the earlier mask mea
 not be used to infer a cumulative speedup. Local artifacts are under
 `build/bench/self-profile-current/fallback-{baseline,optimized}`. Helper owner calls, direct owner calls,
 static owner dispatch and method-missing arms also pass their generated-program runtime checks.
+
+## Skip empty prepend traversals
+
+`prepended_override?` now returns before allocating a Set or duplicating a work list when the owner
+has no recorded prepended modules. Unknown owners still refuse first. Nonempty inputs retain the
+same normalization, cycle handling, nested included/prepended walks and registry lookup; no decision
+cache or context-dependent result is introduced.
+
+A capture at 89a710184 recorded 9,883,208 queries across 5,182 distinct analysis/owner/name combinations;
+9,863,575 queries (99.8%) had an empty prepend list. Replaying those combinations with their recorded
+frequencies on CRuby 4/YJIT preserved every answer. Alternating warm baseline CPU was 2.606/2.568 seconds
+versus 0.627/0.627 seconds; allocations fell from 30.58M to 0.99M. The replay reconstructs the captured
+analysis tables and measures this helper, not whole-compiler throughput.
+
+The existing registered prepend check now covers absent and empty lists, unknown owners, nested modules,
+cycles, unrelated included modules and frozen inputs, as well as compiled-program dispatch parity.
+The optimized helper itself also compiles and matches eight interpreted answers in an isolated native
+fixture. That fixture must include the full-core Set native-source metadata: the canonical world used
+by ordinary fixtures does not include mruby-set, while the full-core library used for this experiment does.
+
+Full self generation with identical CPU profiling/query-capture hooks allocated 521.03M versus 491.65M
+objects (5.6% fewer). The helper's inclusive sampled CPU fell from 4.457 to 0.954 seconds; GC measured
+48.900 versus 46.681 seconds. Whole wall time was 274.484 versus 279.600 seconds, so this pair does not
+establish a whole-generation speedup. All 20 C++, header and bytecode artifacts matched byte-for-byte.
+Local captures and metrics are under `build/bench/self-profile-current/prepend-{baseline,optimized}`;
+the weighted query results are `prepend-query-results.json` in that parent directory.
