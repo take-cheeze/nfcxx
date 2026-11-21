@@ -103,6 +103,9 @@ class CodeGen
     # two are saved and restored together), so it resets per method too.
     :@block_fallback_depth => 0,
     :@block_ret_slot => nil, :@block_brk_slot => nil,
+    # STEP_CLOSURES: the cell levels of the BLOCK_FALLBACK body being emitted. A probe run from inside one must not
+    # see them: a block step it compiles reads SETUPVAR through its own frame's cells (@block_step_cell_levels) only.
+    :@block_cell_levels => nil,
     :@inline_nested => nil, :@inline_nested_pre => nil, :@suppress_native_expression_send => nil,
     # LOOP_FLOW_POSITION: the enclosing inlined loop's SENDB. Saved and restored around each inlined
     # body, so a nested compile of a callee must start without the caller's loop parent.

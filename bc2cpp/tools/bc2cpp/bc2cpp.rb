@@ -310,6 +310,11 @@ BC2CPP_MAIN = lambda do
   # emitted. Dropped before anything reads the registry.
   CodeGen.module_names = declared_modules
   core_shadowed = CoreDefs.shadowed_labels(registry, ireps)
+  # CORE_LOOP_ALIASES: a core alias loop (mruby-onig-regexp's String#gsub) replaces the definitions before it.
+  alias_sites.each { |site| core_shadowed.merge(site[:replaces]) if site[:replaces] }
+  # CORE_OUTSIDE_REDEFINED: so does a linked Ruby source this build does not compile (mruby-require's Hash#to_h).
+  core_shadowed.merge(CoreDefs.outside_redefined_labels(registry, ireps, Shellwords.split(ENV.fetch('BC2CPP_LINKED_RUBY_SRCS', '')),
+                                                        symbol, out_dir))
   CodeGen.shadowed_labels = core_shadowed
   core_shadowed_pairs = registry.values.flatten.select { |d| d.irep && core_shadowed.include?(d.irep) }
                                 .to_set { |d| [d.owner, d.name] }
@@ -596,7 +601,7 @@ BC2CPP_MAIN = lambda do
   refusal = nil
   unless unread.empty?
     begin
-      outside_ireps, outside_root = compile_ireps(unread, "#{symbol}_block_self_world", out_dir)
+      outside_ireps, outside_root = CoreDefs.outside_compile(unread, symbol, out_dir)
     rescue StandardError => e
       refusal = "an outside Ruby source does not compile (#{e.message.lines.first&.strip})"
     end

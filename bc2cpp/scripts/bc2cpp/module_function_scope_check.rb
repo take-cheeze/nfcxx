@@ -5,12 +5,16 @@
 # src/class.c): a private instance method plus a public singleton copy. The registry (tools/bc2cpp/registry.rb) must
 # list that copy, or the closed world's owner set for `Mod.name` misses `Mod.singleton` and the compiled call raises a
 # closed-world owner violation. The named form `module_function :a` changes nothing after it.
+# The closed world reads the registry's class declarations, a Hash whose default block adds a key on any read: a lookup
+# of the module (a superclass walk, derives_from_module_or_class?) must not make it a declared class, or a self-call in
+# a module function is taken for an instance call and the module object, the singleton copy's receiver, gets no arm.
 #
 # Usage: MRBC=path/to/mrbc ruby scripts/bc2cpp/module_function_scope_check.rb
 
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/irep'
 require_relative '../../tools/bc2cpp/registry'
+require_relative '../../tools/bc2cpp/closed_world'
 
 FIXTURE = <<~RUBY
   module Drv
@@ -33,13 +37,17 @@ unless mrbc && File.executable?(mrbc)
   exit 0
 end
 
+world = nil
 registry = Dir.mktmpdir('module_function_scope') do |dir|
   src = File.join(dir, 'fixture.rb')
   out = File.join(dir, 'fixture.mrb')
   File.write(src, FIXTURE)
   system(mrbc, '-g', '-o', out, src, exception: true)
   ireps, root = load_ireps(Struct.new(:bytes).new(File.binread(out)), cache: nil)
-  build_registry(ireps, root)[0]
+  built = build_registry(ireps, root)
+  world = ClosedWorld.new(ireps: ireps, registry: built[0], class_decls: built[7], walked: built[8], native_paths: [],
+                          ruby_paths: [], module_names: built[11], root_label: root)
+  built[0]
 end
 
 defs = ->(name) { registry[name].to_h { |d| [d.owner, d] } }
@@ -60,6 +68,9 @@ end
 check.call('named module_function: Named.a is a singleton copy', defs.call('a')['Named.singleton']&.kind == :module_function)
 check.call('named module_function: a later def gets no copy', defs.call('b').keys == ['Named'])
 check.call('named module_function: a later def stays public', defs.call('b')['Named']&.visibility == :public)
+world.send(:derives_from_module_or_class?, 'Drv', Set.new)
+check.call('a lookup of the module does not make it a declared class',
+           !world.class_declared?('Drv') && !world.send(:instance_self?, 'Drv'))
 
 if failures.empty?
   puts 'bc2cpp module_function scope check: PASS'

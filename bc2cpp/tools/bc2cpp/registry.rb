@@ -239,6 +239,13 @@ def build_registry(ireps, root_label)
     registry.fetch(name, []).any? { |d| d.owner == owner } ||
       alias_sites.any? { |site| site[:owner] == owner && site[:new] == name }
   end
+  # CORE_ALIAS_REPLACES: a core-source alias replaces the owner's definitions of its new name the walk has seen (mruby-onig-
+  # regexp's `alias_method :slice, :[]` over an earlier String#slice): they are not what the interpreter ends up with.
+  core_alias_replaced = lambda do |irep, namespace, new_name|
+    next [] unless namespace && !namespace.start_with?('<') && CoreDefs.core_source?(irep.file)
+
+    registry.fetch(new_name, []).select { |d| d.owner == namespace && d.irep }.map(&:irep)
+  end
   register_alias = lambda do |label, irep, idx, namespace|
     next if namespace.nil? || namespace.start_with?('<') || CoreDefs.core_source?(irep.file)
 
@@ -386,7 +393,8 @@ def build_registry(ireps, root_label)
       when :ALIAS
         old_name = insn.first_of(:name)&.value
         alias_sites << { owner: namespace || 'Object', new: insn.sym, old: old_name, irep: label,
-                         defined: defined_before.call(namespace || 'Object', old_name) } if insn.sym && old_name
+                         defined: defined_before.call(namespace || 'Object', old_name),
+                         replaces: core_alias_replaced.call(irep, namespace, insn.sym) } if insn.sym && old_name
         register_alias.call(label, irep, idx, namespace)
       when :TDEF
         # "TDEF R1 :speak I[1]"
@@ -485,7 +493,8 @@ def build_registry(ireps, root_label)
         register_alias.call(label, irep, idx, namespace) if name == 'alias_method' && insn.op == :SSEND
         if name == 'alias_method' && insn.op == :SSEND && CoreDefs.core_source?(irep.file) && (found = AliasSites.site(irep, idx))
           alias_sites << { owner: namespace || 'Object', new: found.new_name, old: found.old_name, irep: label,
-                           defined: defined_before.call(namespace || 'Object', found.old_name) }
+                           defined: defined_before.call(namespace || 'Object', found.old_name),
+                           replaces: core_alias_replaced.call(irep, namespace, found.new_name) }
         end
         if %w[include prepend].include?(name)
           # ANCESTOR_MIXINS_SUPPORT: a self-implicit `include M`/`prepend M` in this
@@ -622,6 +631,15 @@ def build_registry(ireps, root_label)
         end
       when :SENDB
         loop_sites << [label, idx, namespace, default_visibility] if LoopInstallers.candidate?(irep, idx, ireps)
+        # CORE_LOOP_ALIASES: the loop replaces the owner's methods of those names; the definitions it replaces (the walk
+        # has seen every earlier one) are not what the interpreter ends up with.
+        if namespace && !namespace.start_with?('<') && CoreDefs.core_source?(irep.file) &&
+           (looped = CoreDefs.loop_alias_names(irep, idx, ireps))
+          looped.each do |name|
+            replaced = registry.fetch(name, []).select { |d| d.owner == namespace && d.irep }.map(&:irep)
+            alias_sites << { owner: namespace, new: name, old: nil, irep: label, defined: false, replaces: replaced }
+          end
+        end
         # STRUCT_MEMBERS_ANALYSIS for the block-taking form; additive only.
         found = detect_struct_new_members(irep, idx, insn, namespace)
         struct_member_lists[found[0]] = found[1] if found

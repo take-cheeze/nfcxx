@@ -565,6 +565,11 @@ module RecordHash
             index, level = insn.upvar_ref
             found << [child, i] if index == reg && level == depth
           end
+          # BLOCK_ZSUPER: a bare `super` in the block packs the frame's parameters (OP_ARGARY, lv == depth + 1).
+          BytecodeIR.for(child).each_with_op(:ARGARY) do |insn, i|
+            reads = insn.argary_frame_reads
+            found << [child, i] if reads.nil? || (reads[0] == depth + 1 && reads[1].include?(reg.to_i))
+          end
           walk.call(child, depth + 1)
         end
       end
