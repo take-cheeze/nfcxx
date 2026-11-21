@@ -501,4 +501,88 @@ ensure
   ENV.delete('BC2CPP_DECLARED_BLOCK_ELEMENT')
 end
 
+# DECLARED_CORE_ELEMENT: an `Array[String]` / `Array[Integer]` element is trusted the same way (String, Array and Hash
+# only in a build with no subclass of them), so its loop and block parameters are tested on entry too.
+CORE_SOURCE = <<~RUBY
+  class Doc
+    def initialize(lines, ids)
+      @lines = lines
+      @ids = ids
+      nil
+    end
+
+    def total
+      t = 0
+      @lines.each { |l| t += l.length }
+      t
+    end
+
+    def longest
+      @lines.sort { |a, b| a.length <=> b.length }.size
+    end
+
+    def zeros
+      @ids.count { |i| i.nil? }
+    end
+  end
+RUBY
+
+CORE_SIG = <<~RBS
+  class Doc
+    @lines: Array[String]
+    @ids: Array[Integer]
+  end
+RBS
+
+CORE_DRIVER = <<~'RUBY'
+  def show(label)
+    puts "#{label}: #{yield.inspect}"
+  rescue => e
+    puts "#{label}: raised #{e.class}"
+  end
+  d = Doc.new(%w[a bb], [1, 2])
+  show('total') { d.total }
+  show('longest') { d.longest }
+  show('zeros') { d.zeros }
+  b = Doc.new(['a', :b], [1, 'x'])
+  show('bad total') { b.total }
+  show('bad longest') { b.longest }
+  show('bad zeros') { b.zeros }
+  puts 'end'
+RUBY
+
+Dir.mktmpdir('element_guard_core_sig') do |sig_dir|
+  File.write(File.join(sig_dir, 'doc.rbs'), CORE_SIG)
+  ENV['BC2CPP_SIG_DIRS'] = sig_dir
+  Dir.mktmpdir('element_guard_core') do |dir|
+    code, = Bc2cppFixtureRuntime.generate(CORE_SOURCE, dir, only_owners: %w[Doc])
+    bodies = code.split(%r{^// (?=Doc#)}).to_h { |chunk| [chunk[/\ADoc#(\w+)/, 1], chunk] }
+    check.call('an Array[String] loop tests each element with mrb_string_p',
+               bodies['total'].to_s.match?(/mrb_string_p\(\w+\)\)\)\) bc2cpp_declared_ivar_violation.*DECLARED_ELEMENT_GUARD Doc#lines iterated/))
+    check.call('an Array[String] block-fallback body tests its element parameters on entry',
+               code.scan('DECLARED_ELEMENT_GUARD Doc#lines yielded').size == 2)
+    check.call('an Array[Integer] loop is guarded and `i.nil?` on the element folds to false',
+               bodies['zeros'].to_s.include?('DECLARED_ELEMENT_GUARD Doc#ids iterated') &&
+                 !bodies['zeros'].to_s.include?('owner-call: nil?'))
+  end
+  ENV['BC2CPP_DECLARED_CORE_ELEMENT'] = '0'
+  Dir.mktmpdir('element_guard_core_off') do |dir|
+    code, = Bc2cppFixtureRuntime.generate(CORE_SOURCE, dir, only_owners: %w[Doc])
+    check.call('BC2CPP_DECLARED_CORE_ELEMENT=0 leaves core elements unguarded',
+               !code.include?('Doc#lines iterated') && !code.include?('Doc#ids iterated') && !code.include?('yielded */'))
+  end
+  ENV.delete('BC2CPP_DECLARED_CORE_ELEMENT')
+  suite.generate(CORE_SOURCE, %w[Doc])
+  suite.behaviour(CORE_DRIVER, banner: 'declared core element loops, interpreted and compiled', same: false) do |interpreted, compiled|
+    good = ->(lines) { lines&.reject { |l| l.start_with?('bad ', '[RPG2k]') } }
+    check.call('good core elements loop the same in both runs', interpreted && compiled && good.call(interpreted) == good.call(compiled))
+    check.call('every compiled core element loop raises the declaration violation on a wrong-class element',
+               compiled&.select { |l| l.start_with?('bad ') }&.size == 3 &&
+                 compiled.select { |l| l.start_with?('bad ') }.all? { |l| l.end_with?('raised BC2cppDeclarationViolation') })
+  end
+ensure
+  ENV.delete('BC2CPP_SIG_DIRS')
+  ENV.delete('BC2CPP_DECLARED_CORE_ELEMENT')
+end
+
 suite.finish

@@ -695,13 +695,25 @@ class CodeGen
     return nil if ENV['BC2CPP_DECLARED_BLOCK_ELEMENT'] == '0' || region[:self_implicit]
 
     entry = declared_element_receiver(irep, idx, region[:dest_reg], owner_name, derived: true)
-    entry if entry && entry[:kind] == :class && @closed_world&.exact_class?(entry[:klass])
+    entry if entry && declared_element_exact?(entry)
   end
 
-  # The body tests each element parameter on entry (declared_block_element_guards), so inside it the hint is exact.
+  # The body tests each element parameter on entry (declared_block_element_guards), so inside it the hint is exact. A
+  # core class gives no send hint (PRIMITIVE_ELEMENT_CLASSES); the body's exact flow reads it instead
+  # (declared_block_element_scope).
   def declared_block_element_hints(region, declared, shape)
     region[:declared_block_element] = [declared, shape.elements.map { |pos| pos + 1 }]
+    return {} unless declared[:kind] == :class
+
     shape.elements.to_h { |pos| [pos + 1, declared[:klass]] }
+  end
+
+  # DECLARED_LOOP_ELEMENT's scope for a block body: each guarded parameter is its class while its entry value holds.
+  def declared_block_element_scope(region, block_irep)
+    entry, positions = region[:declared_block_element]
+    return [] unless entry
+
+    positions.map { |pos| { irep: block_irep, reg: pos.to_s, klass: entry[:klass] } }
   end
 
   # The entry tests of the parameters DECLARED_BLOCK_ELEMENT hints: whoever calls the body, a parameter the hint names
@@ -1139,6 +1151,9 @@ class CodeGen
     # BLOCK_ENSURE: a `begin ... ensure` in the body is the guard scope compile_method opens (ENSURE_RAII_SUPPORT), so a
     # `break` or `return` thrown out of it runs the ensure body on the way.
     prefix_at = block_ensure_prefixes(block_irep, d, targets, nested_suppressed)
+    saved_loop_elements = @declared_loop_elements
+    scope = declared_block_element_scope(region, block_irep)
+    @declared_loop_elements = (saved_loop_elements || []) + scope unless scope.empty?
     BytecodeIR.for(block_irep).each_source do |insn, idx|
       next if insn.op == :ENTER
 
@@ -1154,6 +1169,7 @@ class CodeGen
         end
       end
     end
+    @declared_loop_elements = saved_loop_elements
     @tail_yield_block = saved_tail_yield_block
     @ensure_except_remaps = nil
     @block_fallback_upvars = nil
