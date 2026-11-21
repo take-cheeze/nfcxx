@@ -482,15 +482,6 @@ case $early_status in
     exec "$root/build/cuda-rewrite" --hip ${hip_opts[@]+"${hip_opts[@]}"} "${cu_inputs[0]}" ;;
   *) exit $early_status ;;
 esac
-# SYCL kernel integration (docs/notes/sycl-kernel-builtins.md). A -c compile of one C++ source that includes the oneAPI SYCL
-# headers (a -I directory holding sycl/detail/kernel_desc.hpp) runs in two passes, as the real toolchain's integration headers
-# do. Pass 1 (NFCXX_SYCL_DUMP) records each kernel's stable name, closure size and parameters; scripts/sycl-integration-header.rb
-# turns them into KernelInfoData specializations; pass 2 compiles a wrapper that includes sycl.hpp, that header and the source,
-# with __SYCL_UNNAMED_LAMBDA__ defined as the real toolchain defines it. Other sources are unchanged.
-# The pass decision and the two passes are scripts/nfcxx-sycl.rb's (tests/nfcxx-sycl/run.sh checks them against the bash block).
-if "${RUBY:-ruby}" "$root/scripts/nfcxx-sycl.rb" check ${args0[@]+"${args0[@]}"}; then
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-sycl.rb" run --root="$root" ${args0[@]+"${args0[@]}"}; exit $?
-fi
 [ $compile_only = 1 ] || moves=1   # a -c compile stays in the user's directory (see ecp_args)
 # The unit of the time log's lines (scripts/trace.sh): the first source, else the output. Tracing starts before the .cu
 # and .cpp2 inputs are prepared, whose stages it records.
