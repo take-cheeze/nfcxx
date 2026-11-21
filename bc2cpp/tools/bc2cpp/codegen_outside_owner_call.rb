@@ -246,8 +246,9 @@ module OutsideOwnerCall
     return nil if mode == :strict && (map.core_dynamic_unknown.positive? || map.refusals[:core_prepend].positive?)
 
     native = map.by_name.fetch(name, Set.new)
-    native = factory_unknown_dropped(name, paths, native) if native.include?(NativeOwnerMap::UNKNOWN)
-    return nil if native.nil? || native.include?(NativeOwnerMap::UNKNOWN)
+    unknown = [NativeOwnerMap::UNKNOWN, NativeOwnerMap::UNKNOWN_CLASS_TABLE]
+    native = factory_unknown_dropped(name, paths, native) if native.intersect?(unknown)
+    return nil if native.nil? || native.intersect?(unknown)
 
     ruby = OutsideRubyOwners.scan(Array(owner_call_world.ruby_paths))
     return nil if ruby.unknown.include?(name) || ruby.unknown.include?(:all)
@@ -291,14 +292,14 @@ module OutsideOwnerCall
       key = FACTORY_UNKNOWN_NAMES.keys.find { |suffix| File.expand_path(path).end_with?(suffix) }
       key && native_unknown_names(path).sort == FACTORY_UNKNOWN_NAMES.fetch(key).sort
     end
-    factory && !sources.empty? ? native - [NativeOwnerMap::UNKNOWN] : nil
+    factory && !sources.empty? ? native - [NativeOwnerMap::UNKNOWN, NativeOwnerMap::UNKNOWN_CLASS_TABLE] : nil
   end
 
   # The names `path` registers on a class the owner map cannot name.
   def native_unknown_names(path)
     @native_unknown_names ||= {}
     @native_unknown_names[path] ||= NativeOwnerMap.build([path]).by_name
-                                                  .select { |_, owners| owners.include?(NativeOwnerMap::UNKNOWN) }.keys
+                                                  .select { |_, owners| owners.include?(NativeOwnerMap::UNKNOWN) || owners.include?(NativeOwnerMap::UNKNOWN_CLASS_TABLE) }.keys
   end
 
   def program_core_ruby_paths
