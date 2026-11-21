@@ -125,9 +125,9 @@ class CodeGen
       next unless entries.size == 1
 
       group = @numeric_ivar_groups[key]
-      next unless group && !group.structural && !group.checked
-
       entry = entries.first
+      next unless group && (!(group.structural || group.checked) || declared_ivar_writers_guarded?(group, entry))
+
       bits = declared_arg_bits(entry.cls, entry.kind, entry.nilable)
       next if bits.zero?
 
@@ -137,6 +137,24 @@ class CodeGen
       @declared_ivar_seeds[key] = [entry, bits]
     end
     @declared_ivar_seeds
+  end
+
+  # ACCESSOR_GUARDED_WRITER: a slot an attr_writer stores to is still seeded when every native writer of the name in
+  # the family is replaced by its synthesized struct-field writer (ATTR_STRUCT_DEVIRT), which carries the guard.
+  def declared_ivar_accessor_writers(family, name)
+    (@registry["#{name}="] || []).select do |d|
+      d.kind == :ivar_accessor && d.irep.nil? && numeric_family(d.owner) == family
+    end
+  end
+
+  def declared_ivar_writers_guarded?(group, entry)
+    return false unless group.accessor_only && ENV['BC2CPP_DECLARED_IVAR_ACCESSOR'] != '0'
+
+    writers = declared_ivar_accessor_writers(group.family, group.name)
+    !writers.empty? && writers.all? do |d|
+      declared_ivar_inherits?(d.owner, entry.owner) && @synthesize_accessor_for.include?([d.owner, group.name, :writer]) &&
+        !embed_type(d.owner, group.name).nil?
+    end
   end
 
   # Is +owner+ a class equal to or descending from +ancestor+ (through superclass links only)?
@@ -156,10 +174,17 @@ class CodeGen
   def declared_ivar_writer_failures(compiled, only_owners, other_owners, live: nil)
     by_label = compiled.each_with_object({}) { |m, h| h[m[:label]] ||= m if m[:label] }
     declared_ivar_seeds.flat_map do |(_family, _name), (entry, _bits)|
-      writers = @numeric_ivar_groups.fetch([numeric_family(entry.owner), entry.name]).sites.filter_map do |irep, _idx, _reg|
+      family = numeric_family(entry.owner)
+      writers = @numeric_ivar_groups.fetch([family, entry.name]).sites.filter_map do |irep, _idx, _reg|
         numeric_irep_owner[irep.label]
       end.uniq
-      writers.filter_map do |d|
+      accessors = declared_ivar_accessor_writers(family, entry.name).filter_map do |d|
+        next if only_owners.nil? || only_owners.include?(d.owner) || other_owners&.include?(d.owner)
+
+        "#{entry.key} is trusted as declared (DECLARED_IVAR_PROOF) because every store is checked, but no compiled " \
+          "gem of this build compiles #{d.owner}, whose attr_writer #{d.name} stores to it"
+      end
+      accessors + writers.filter_map do |d|
         next if live && !live.include?(d.irep)
 
         where = "#{entry.key} is trusted as declared (DECLARED_IVAR_PROOF) because every store is checked, but"

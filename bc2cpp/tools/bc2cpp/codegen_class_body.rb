@@ -305,7 +305,8 @@ class CodeGen
     end
   end
 
-  def compile_top_class_units(root_irep)
+  # `own_file` (a predicate on a unit's source file) names the files this run's units stand for; nil means every file.
+  def compile_top_class_units(root_irep, own_file: nil)
     program = BytecodeIR.for(root_irep)
     candidates = BytecodeIR.class_bodies(root_irep, :CLASS, :MODULE).filter_map do |idx, child|
       insn = program.source_at(idx)
@@ -328,8 +329,10 @@ class CodeGen
       raise "unresolved constants in class bodies (CONST_RESOLVE):\n#{listing}"
     end
     # A path is emitted only when every occurrence of it compiled: UNIT_BLANK removes all of that path's statements, so a
-    # refused occurrence would otherwise lose its body.
-    refused_paths = compiled.reject { |unit| unit[:code] }.map { |unit| unit[:path] }.to_set
+    # refused occurrence would otherwise lose its body. Only this run's own occurrences count: another gem's reopening
+    # (rgss's `class Array`) compiles in that gem's run, and refusing it here would drop the core's own Array body.
+    refused_paths = compiled.reject { |unit| unit[:code] || (own_file && !own_file.call(unit[:file].to_s)) }
+                            .map { |unit| unit[:path] }.to_set
     compiled.select { |unit| unit[:code] && !refused_paths.include?(unit[:path]) }.map do |unit|
       { path: unit[:path], name: "#{sanitize(unit[:path])}#{unit[:tag]}", file: unit[:file],
         code: top_class_unit_code(unit[:insn], unit[:path], unit[:code], unit[:tag], unit[:superclass]) }

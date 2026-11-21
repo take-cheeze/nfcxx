@@ -12,9 +12,9 @@ pass=0; fail=0
 
 block() { sed -n '/^if \[ -n "\$depmode" \]; then$/,/^fi$/p' "$1"; }
 block "$repo/tests/driver-body/nfcxx-bash" > "$work/bash.sh"
-block "$repo/nfcxx" > "$work/driver.sh"
+block "$here/pinned-depmode-block.txt" > "$work/driver.sh"   # the pre-switch block of ./nfcxx, pinned (see pinned-depmode-block.txt)
 [ "$(wc -l < "$work/bash.sh")" = 7 ] || { echo "driver-depmode: the bash block is not the seven lines of the frozen driver" >&2; exit 2; }
-[ -s "$work/driver.sh" ] || { echo "driver-depmode: no depmode block in ./nfcxx" >&2; exit 2; }
+[ -s "$work/driver.sh" ] || { echo "driver-depmode: no depmode block in the pinned copy" >&2; exit 2; }
 
 # the stub: logs its arguments, NUL-separated, to $NFCXX_STUB_LOG, then exits with $STUB_RC
 bin=$work/bin; mkdir -p "$bin"

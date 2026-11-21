@@ -2028,7 +2028,7 @@ class CodeGen
     return nil unless map && !map.computed_unknown && map.refusals[:native_prepend].to_i.zero?
 
     owners = Array(map.by_name['initialize'])
-    return nil if owners.include?(NativeOwnerMap::UNKNOWN)
+    return nil if owners.include?(NativeOwnerMap::UNKNOWN) || owners.include?(NativeOwnerMap::UNKNOWN_CLASS_TABLE)
 
     owners.to_set
   end

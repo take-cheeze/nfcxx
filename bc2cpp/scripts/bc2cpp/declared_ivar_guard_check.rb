@@ -7,8 +7,8 @@
 #      bc2cpp_declared_ivar_violation); a store the flow already proves carries no test; `bool` and a class with
 #      subclasses stay unchecked;
 #   2. once no store can bypass the checks, the declared kind is the slot's class pool: a `@peer.name` send is a proven
-#      one (BC2CPP_DECLARED_IVAR_PROOF=0 keeps the checks and drops the proof); a slot an attr_accessor can write, or one
-#      a store in an uncompiled owner could reach, is not trusted;
+#      one (BC2CPP_DECLARED_IVAR_PROOF=0 keeps the checks and drops the proof); a slot an attr_accessor writes is trusted
+#      when its synthesized writer carries the check too; one a store in an uncompiled owner could reach is not;
 #   3. interpreted and compiled runs agree on a right declaration; a wrong store raises the violation, naming the ivar.
 #
 #   MRBC=path/to/mrbc ruby scripts/bc2cpp/declared_ivar_guard_check.rb
@@ -162,8 +162,8 @@ check.call('@peer.name is a proven send: one direct call, no class test, no fall
 check.call('without the seed it is a class-tested call with a by-name fallback (the declared class hint)',
            body_of.call(unproven_code, 'Gauge#peek').include?('TYPED :name') &&
              body_of.call(unproven_code, 'Gauge#peek').include?('bc2cpp_hint_violation'))
-check.call('a slot an attr_accessor writes keeps its checks but is not trusted',
-           code.include?('DECLARED_IVAR_GUARD Acc#@v') && pool.call(err, 'Acc#@v').nil?)
+check.call('a slot an attr_accessor writes is trusted once its synthesized writer is checked too',
+           code.include?('DECLARED_IVAR_GUARD Acc#@v') && pool.call(err, 'Acc#@v') == 'INT')
 
 puts '-- a store in a method that is not compiled voids the proof'
 # Wide#put is a store the run would leave interpreted and unchecked: the owner is not compiled by this run.

@@ -12,9 +12,29 @@ ENV['BC2CPP_SIG_DIRS'] = ''
 require 'tmpdir'
 require_relative 'check_support'
 require_relative 'fixture_runtime'
+require_relative '../../tools/bc2cpp/codegen'
+require_relative '../../tools/bc2cpp/codegen_ivar_poly'
 
 suite = FixtureCheck.new('prepended_override_check')
 suite.require_mrbc!
+
+# Unknown owners must still refuse when no prepend list is recorded. Nonempty lists
+# still walk included/prepended modules, tolerate cycles, and leave frozen facts intact.
+probe = CodeGen.allocate
+probe.instance_variable_set(:@registry, { 'foo' => [Struct.new(:owner).new('Over')] })
+probe.instance_variable_set(:@unknown_mixins, Set['Unknown', 'Mystery'])
+probe.instance_variable_set(:@prepended_modules, {
+  'Empty' => [].freeze, 'Wrapped' => ['Wrapper'].freeze,
+  'Cycle' => ['CycleMod'].freeze, 'IndirectUnknown' => ['Mystery'].freeze
+})
+probe.instance_variable_set(:@included_modules, {
+  'Wrapper' => ['Over'].freeze, 'CycleMod' => ['CycleMod'].freeze, 'IncludedOnly' => ['Over'].freeze
+})
+[['Absent', 'foo', false], ['Empty', 'foo', false], ['Unknown', 'foo', true],
+ ['Wrapped', 'foo', true], ['Wrapped', 'other', false], ['Cycle', 'foo', false],
+ ['IndirectUnknown', 'foo', true], ['IncludedOnly', 'foo', false]].each do |owner, name, expected|
+  suite.check("#{owner}##{name}: prepend lookup preserves #{expected}", probe.prepended_override?(owner, name) == expected)
+end
 
 SOURCE = <<~RUBY
   class PpBase

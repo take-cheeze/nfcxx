@@ -1,21 +1,25 @@
 # Porting the driver body (`./nfcxx`) to Ruby
 
-Status: in progress. B0 to B7 are done; B8 (the switch) is the next step and is not done. Follows
+Status: B8 done (the switch): `./nfcxx` is a shim that runs `scripts/nfcxx.rb`; the bash body is frozen at
+`tests/driver-body/nfcxx-bash`. Stages B3 to B7 are the remaining ports, run by the Ruby driver through that body. Follows
 docs/notes/driver-state-design.md (the helpers are done; slices 1 to 8 are merged).
 
 ## Latest status
 
-Checked against origin/main 1aa750d8b (after #1387 merged).
+Checked against origin/main af2aa11f3 (after #1348 and #1349 merged).
 
-- `./nfcxx` is still the bash driver. With `NFCXX_RUBY_DRIVER=1` it runs `scripts/nfcxx.rb`, which does the refusals,
-  the cache configuration, the temporary directories and traps, and the second pass in Ruby, and runs the frozen
-  oracle `tests/driver-body/nfcxx-bash` for the rest.
-- Done: B0 to B7 (see "Stages"). The route dispatch is restored (pre-loop plan and gcc refusals), and the Path B plan
-  dispatch landed in #1387.
-- The text-reading suites point at the frozen body (#1385). `tests/nfcxx-sanitize` is retired; its check is
-  `tests/driver-sanitize`.
-- Decided: the cache key hashes `tests/driver-body/nfcxx-bash` after B8. The six suites are pinned (pinned copies).
-- Not done: B8. It is the next step; see "Stages".
+- `./nfcxx` is 856 lines and 21 top-level functions. The Path B `-c` route and the gcc route now take their commands
+  from planner output (`--records --shell` and `--shell`); the bash still evaluates and runs them.
+- `scripts/nfcxx.rb` is a pass-through: it copies the frozen oracle `tests/driver-body/nfcxx-bash` and runs it. It
+  dispatches no route. Commit `c11d31fb4` (B2) removed the earlier dispatcher and its message does not say so.
+- Test state on main: `tests/driver-body` 3 passed; `tests/nfcxx-driver` 11 passed, 7 failed (the failures are the
+  dispatch lines the removed dispatcher printed); `tests/nfcxx-trace` 251 passed, 35 failed (the `pathb-plan` route
+  checks); `tests/nfcxx-prepass` 28 failing (cause not analysed); `tests/nfcxx-sanitize` was retired in B8 (its check is `tests/driver-sanitize`).
+- Open decisions: (1) was dropping the B2 route dispatch intended? If not, restore it before B3. (2) should the bare
+  `cc` at the Path B and C-only link sites become `NFCXX_CC`?
+- Not planned in the Ruby driver yet: the Path B link, the cosmo link, the eccp call sites, the `-E`, `--emit-hip`,
+  sanitizer and trace setup, `cu_prepare` and `cpp2_prepare` (they rewrite the source list and the trap), and
+  `mod_build_program`.
 
 ## Where the body stands
 
@@ -53,18 +57,26 @@ tests/nfcxx-live, tests/nfcxx-cache, tests/nfcxx-modules, tests/nfcxx-cuda-devic
 
 - **B0: the plan.** Done.
 - **B1: the oracle.** Done: tests/driver-body/nfcxx-bash is the frozen copy, and the body tests point at it.
-- **B2: the Ruby skeleton.** Done. `scripts/nfcxx.rb` runs under `NFCXX_RUBY_DRIVER=1`. The route dispatch (pre-loop plan
-  and gcc refusals) is restored, and the Path B plan dispatch is in (#1387).
-- **B3: the setup stage.** Done (#1356): the setup refusals are in Ruby.
-- **B4: the CUDA, `.cpp2` and module stages.** Done (#1363): their refusals are in Ruby.
-- **B5: the cache and the eccp call.** Done (#1369): the cache configuration refusal is in Ruby. The eccp refusals were
-  already on the gcc route.
-- **B6: traps and temporary directories.** Done (#1364): Ruby owns them (`Dir.mktmpdir`, removed when the run ends). This
-  is the temporary-directory leak fix.
-- **B7: the second pass and the exports.** Done (#1372): the second run goes through a Ruby helper.
-- **B8: the switch.** Not done; the next step. `./nfcxx` becomes a shim that runs `scripts/nfcxx.rb`, the flag becomes
-  the default, and the frozen body in tests/driver-body/nfcxx-bash stays the oracle. The cache key hashes that file
-  after B8.
+- **B2: the Ruby skeleton.** `scripts/nfcxx.rb` runs the stages of section "Where the body stands" in order, with each
+  step calling the existing helper (no new logic). It is used only when `NFCXX_RUBY_DRIVER=1`. Test: the same suites with the
+  flag. Status: landed in B2's form only, which is the pass-through described under "Latest status". The dispatch that
+  the earlier CRuby driver ran (before c11d31fb4) is gone; restoring it or not is an open decision.
+- **B3: the setup stage.** Not started. Blocked on the B2 decision above. The backend, sanitizer, cosmo, freestanding and host-probe decisions move into Ruby (most are
+  already in scripts/nfcxx-loop.rb and the planners).
+- **B4: the CUDA, `.cpp2` and module stages.** These are already one call each; the Ruby driver calls them with the state
+  it has. Not started. Note: `cu_prepare` and `cpp2_prepare` still rewrite the source list in bash.
+- **B5: the cache and the eccp call.** Already one call each (slice 7 and 8). Move the call sites. Not started.
+- **B6: traps and temporary directories.** Ruby owns them (`Dir.mktmpdir`, `ensure`). Test: the cleanup cases in
+  tests/nfcxx-link and tests/nfcxx-modules/trap.sh. Not started.
+- **B7: the second pass and the exports.** Ruby spawns the second run with the environment; the exports go into the Ruby
+  process environment. Not started.
+- **B8: the switch. Done.** `./nfcxx` is a shim (`"${RUBY:-ruby}" "$(dirname "$0")/scripts/nfcxx.rb" "$@"`). The Ruby driver
+  is the entry point, and the `NFCXX_RUBY_DRIVER` gate is gone. The operational bash body is `tests/driver-body/nfcxx-bash`
+  (frozen; `scripts/nfcxx.rb` runs it as its oracle, with its root and its `"$0"` re-runs pointed at `./nfcxx`). The cache key
+  hashes `tests/driver-body/nfcxx-bash` (scripts/nfcxx-cache.rb), not `./nfcxx`; the harness copies that hash the body
+  (tests/nfcxx/nfcxx-bash, tests/nfcxx-cache/nfcxx-bash, tests/nfcxx-cuda-device/nfcxx-bash) use the same file.
+  `tests/driver-body/run.sh` no longer diffs the body against `./nfcxx` (that text is now a shim).
+  Suites that read `./nfcxx` text use a pinned copy of the pre-switch file (`pinned-*.txt`, taken at 25005e00d).
 
 ## Risks
 

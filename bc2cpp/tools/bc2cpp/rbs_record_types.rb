@@ -52,6 +52,8 @@ module RbsRecordTypes
   class << self
     # name => { key => class name } for guarded receiver hints; name => Decl. Set by the driver.
     attr_accessor :hints, :decls
+    # TRACED_PARAM: the declared parameter guards an installed exact trace leaned on (ValueTrace#trusted_since).
+    attr_accessor :trusted_params
   end
 
   module_function
@@ -294,16 +296,24 @@ module RbsRecordTypes
     return if ENV['BC2CPP_RECORD_FIELD_TRACE'] == '0'
 
     traced = {}
+    leaned = Hash.new { |h, k| h[k] = Set.new }
     writes.each do |keys_written, irep, idx, reg|
+      mark = ctx[:exact_tracer].trusted_mark
       classes = exact_store_classes(irep, idx, reg, ctx)
-      keys_written.each { |key| traced[key] = classes && traced.fetch(key, Set.new)&.|(classes) }
+      used = ctx[:exact_tracer].trusted_since(mark)
+      keys_written.each do |key|
+        traced[key] = classes && traced.fetch(key, Set.new)&.|(classes)
+        leaned[key].merge(used)
+      end
     end
     traced.each do |key, classes|
       info = keys[key]
       next unless classes && info && decl.fields[key]&.classes
+      next unless %i[strict trusted].any? { |tier| info[tier].include?(:unknown) }
 
       exact = info[:nilable] ? classes | [RecordHash::NIL_CLASS] : classes
       %i[strict trusted].each { |tier| info[tier] = exact if info[tier].include?(:unknown) }
+      self.trusted_params = (trusted_params || Set.new) | leaned[key]
     end
   end
 
@@ -312,7 +322,7 @@ module RbsRecordTypes
     return nil if defs.nil? || defs.empty?
 
     defs.each_with_object(Set.new) do |d, out|
-      classes = d.entry? ? nil : ctx[:exact_tracer].classes_at(irep, d.index, d.reg)
+      classes = d.entry? ? ctx[:exact_tracer].entry_classes(irep, d.reg) : ctx[:exact_tracer].classes_at(irep, d.index, d.reg)
       return nil unless classes
 
       out.merge(classes)
@@ -412,6 +422,7 @@ module RbsRecordTypes
   def drive(files, diagnostics, ireps, registry, display_root:, closed_world:, native_paths:, foreign_paths:,
             superclass_of:, container_constants:)
     loaded = load(files, display_root: display_root)
+    self.trusted_params = Set.new
     outside = outside_ivar_names(native_paths + foreign_paths)
     result = check(loaded, ireps, registry, closed_world: closed_world, native_paths: native_paths,
                                             foreign_paths: foreign_paths, outside_ivars: outside,

@@ -2362,8 +2362,8 @@
       "template": "mrb_funcall($m, $0, \"replace\", 1, $1)",
       "caveat": "replaces the string's contents through its replace method (mruby has no mrb_str_replace); the result is the receiver, as CRuby's"
     },
-    "rb_struct_new": {"kind": "refuse", "reason": "stuck point (Struct): Struct is mrbgems/mruby-struct, not in the core, and rb_struct_new builds a CRuby Struct instance with its member layout (accepted stuck point)"},
-    "rb_struct_define": {"kind": "refuse", "reason": "stuck point (Struct): Struct is mrbgems/mruby-struct, not in the core; rb_struct_define creates a CRuby Struct class with its accessors (accepted stuck point)"},
+    "rb_struct_new": {"kind": "special", "handler": "struct_variadic", "needs_mrb": true, "caveat": "Struct is the mruby-struct gem: Struct.new with the member symbols (rb_struct_define), or klass.new with the members' count of values (rb_struct_new)"},
+    "rb_struct_define": {"kind": "special", "handler": "struct_variadic", "needs_mrb": true, "caveat": "Struct is the mruby-struct gem: Struct.new with the member symbols (rb_struct_define), or klass.new with the members' count of values (rb_struct_new)"},
     "rb_str_encode": {"kind": "refuse", "reason": "stuck point (Encoding): transcoding a string needs CRuby's encoding converter; the fork has no Encoding (accepted stuck point)"},
     "RB_ENC_INTERNED_STR_NULL_CHECK": {"kind": "refuse", "reason": "stuck point (Encoding): the null-encoding check of an interned string; the fork has no Encoding (accepted stuck point)"},
     "RBIGNUM_POSITIVE_P": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "(mrb_bint_sign($m, $0) > 0)", "caveat": "a Bignum is never zero, and a fixnum is a plain sign test; mirrors CRuby RBIGNUM_POSITIVE_P"},

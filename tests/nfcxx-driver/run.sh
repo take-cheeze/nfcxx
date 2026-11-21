@@ -28,7 +28,7 @@ done
 dispatch() { NFCXX_DRIVER_TRACE=1 ruby scripts/nfcxx.rb "$@" 2>&1 >/dev/null | grep '^nfcxx: driver:' ; }
 check_dispatch() {  # check_dispatch EXPECTED ARG...
   local want=$1; shift
-  local got; got=$(dispatch "$@")
+  local got; got=$(dispatch "$@" | head -1)   # the first route is the top-level one; a re-run through ./nfcxx (the shim) adds its own
   if [ "$got" = "nfcxx: driver: $want" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL dispatch $* want $want got [$got]"; fi
 }
 check_dispatch plan -fsyntax-only x.cc

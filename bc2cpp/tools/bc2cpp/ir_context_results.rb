@@ -56,7 +56,7 @@ class IrContextResults
     def false_class_bit = @engine.gen.numeric_class_bit('FalseClass')
     def class_narrowing_active? = false
     def op_native?(name) = @engine.gen.numeric_op_native?(name)
-    def keyword_mask(insn) = @node.keywords.fetch(insn.sym.to_s, NumericFlow::OTHER)
+    def keyword_mask(_irep, insn) = @node.keywords.fetch(insn.sym.to_s, NumericFlow::OTHER)
     def keyword_presence(insn)
       names = @node.root ? %w[TrueClass FalseClass] : [@node.keywords.key?(insn.sym.to_s) ? 'TrueClass' : 'FalseClass']
       names.reduce(0) { |mask, name| mask | @engine.gen.numeric_class_bit(name) }

@@ -56,7 +56,7 @@ bad() { echo "      $*"; bad_case=1; }
 run_case() {  # run_case: runs the case set up by set_case, and prints ok or FAIL
   bad_case=0
   prepare
-  run_driver "$root/nfcxx" > "$scratch/new.raw" 2> "$scratch/new.err"; new_rc=$?
+  run_driver "$here/pinned-nfcxx.txt" > "$scratch/new.raw" 2> "$scratch/new.err"; new_rc=$?
   [ -z "$CHECK" ] || $CHECK
   snapshot > "$scratch/new.tree"
   prepare

@@ -66,11 +66,15 @@ Dir.mktmpdir('base-section-check') do |temporary|
   if write
     bodies = BaseSection.native_bodies(gen)
     by_tag = BaseSection.generated_ruby_by_tag(gen, hand)
-    merged = BaseSection.regenerate_ruby_by_tag(BaseSection.regenerate_native_bodies(committed, bodies), by_tag)
-    core_text, rest_text = BaseSection.core_split(merged)
-    File.write(BaseSection::CORE_FILE, core_text)
-    File.write(declarations, rest_text + text[declared_section.length..])
-    puts "base section check: rewrote #{BaseSection::CORE_FILE} and the base section of #{declarations}"
+    core_text, world_text = BaseSection.write_texts(text, bodies, by_tag)
+    # Only a file whose text changes is written, so a write over a current section touches nothing.
+    written = [[BaseSection::CORE_FILE, core_text], [declarations, world_text]].filter_map do |path, body|
+      next if File.file?(path) && File.read(path) == body
+
+      File.write(path, body)
+      path
+    end
+    puts "base section check: #{written.empty? ? 'nothing to rewrite' : "rewrote #{written.join(' and ')}"}"
     exit 0
   end
 

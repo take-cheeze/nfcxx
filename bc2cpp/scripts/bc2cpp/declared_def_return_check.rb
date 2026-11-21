@@ -12,9 +12,11 @@
 #      body nothing resolves to, and BC2CPP_DECLARED_DEF_RETURNS=0 keep the chain; a native table's later copy of
 #      the declaration (`# bc2cpp-native:`) leaves the program declaration in force;
 #   2. a guarded leaf body is not inlined (CALL_INLINE would skip the guard); an `@x: Array[T]` declaration is
-#      guarded at its stores and, seeded into the slot's pool, makes a read of the slot exactly an Array;
+#      guarded at its stores and, seeded into the slot's pool, makes a read of the slot exactly an Array; so is an
+#      `@x: Array?` slot an attr_accessor writes (the synthesized writer is guarded too), and `(x || []).empty?` is
+#      then the Array body; a slot whose name reflection writes, and BC2CPP_DECLARED_IVAR_ACCESSOR=0, stay unseeded;
 #   3. run on a full-core mruby against interpreted: the resolved sends answer as interpreted, and a wrong
-#      declaration (or ivar store) raises the violation instead of reaching the unchecked body.
+#      declaration (or ivar store, or attr_writer store) raises the violation instead of reaching the unchecked body.
 #
 # Usage: MRBC=path/to/host/mrbc [BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/declared_def_return_check.rb
 
@@ -107,6 +109,40 @@ SOURCE = <<~RUBY
       @members.empty?
     end
   end
+
+  class Fighter
+    attr_accessor :states
+
+    def initialize(states = nil)
+      @states = states
+      nil
+    end
+
+    def calm?
+      (states || []).empty?
+    end
+
+    def bare?
+      (@states || []).empty?
+    end
+  end
+
+  class Poked
+    attr_accessor :items
+
+    def initialize
+      @items = nil
+      nil
+    end
+
+    def none?
+      (@items || []).empty?
+    end
+
+    def poke
+      instance_variable_set(:@items, [1])
+    end
+  end
 RUBY
 
 SIGNATURES = <<~RBS
@@ -122,6 +158,12 @@ SIGNATURES = <<~RBS
   class Roster
     @members: Array[Integer]
   end
+  class Fighter
+    @states: Array?
+  end
+  class Poked
+    @items: Array?
+  end
 
   # A native table's later copy of a program declaration does not erase it.
   # bc2cpp-native: typed_returns
@@ -129,7 +171,7 @@ SIGNATURES = <<~RBS
     def targets: () -> Array
   end
 RBS
-OWNERS = %w[State Menu Outside Base Sub Roster].freeze
+OWNERS = %w[State Menu Outside Base Sub Roster Fighter Poked].freeze
 
 HARNESS = <<~'CPP'
   static mrb_value eval(mrb_state* M, const char* src) { return mrb_load_string(M, src); }
@@ -154,6 +196,12 @@ HARNESS = <<~'CPP'
     call(M, "roster none?", roster, "none?");
     mrb_value text = eval(M, "'x'");
     call(M, "wrong ivar", mrb_obj_value(mrb_class_get(M, "Roster")), "new", 1, &text);
+    mrb_value fighter = mrb_obj_new(M, mrb_class_get(M, "Fighter"), 0, nullptr);
+    call(M, "fighter calm?", fighter, "calm?");
+    mrb_value one = eval(M, "[1]");
+    call(M, "fighter states=", fighter, "states=", 1, &one);
+    call(M, "fighter bare?", fighter, "bare?");
+    call(M, "wrong accessor", fighter, "states=", 1, &text);
     return 0;
   }
 CPP
@@ -175,11 +223,13 @@ chain = ->(body) { body.to_s.include?('bc2cpp_owner_call(') || body.to_s.match?(
 exact_empty = ->(body) { body.to_s.include?('CLOSED_WORLD_NATIVE_EXACT :empty? -> Array') }
 
 Dir.mktmpdir('declared-def-return-off') do |dir|
-  _, _, off = generate.call(dir, 'BC2CPP_DECLARED_DEF_RETURNS' => '0')
+  _, _, off = generate.call(dir, 'BC2CPP_DECLARED_DEF_RETURNS' => '0', 'BC2CPP_DECLARED_IVAR_ACCESSOR' => '0')
   check.call('before: `t.empty?` on the declared self-call result keeps the class-test chain',
              chain.call(off['Menu#count']) && !exact_empty.call(off['Menu#count']))
   check.call('before: the info-refused declaration has no guard',
              !off['Menu#targets'].to_s.include?('DECLARED_RETURN_GUARD Menu#targets'))
+  check.call('before: an accessor-written declared slot is not seeded, so `(states || []).empty?` keeps its chain',
+             chain.call(off['Fighter#calm?']) && !exact_empty.call(off['Fighter#calm?']))
 end
 
 Dir.mktmpdir('declared-def-return') do |dir|
@@ -195,6 +245,15 @@ Dir.mktmpdir('declared-def-return') do |dir|
   check.call('a declared `@x: Array[T]` store is guarded and its read is the Array body (CORE_IVAR_KINDS)',
              on['Roster#initialize'].to_s.include?('DECLARED_IVAR_GUARD Roster#@members') &&
                exact_empty.call(on['Roster#none?']) && !chain.call(on['Roster#none?']))
+  check.call('the synthesized attr_writer of a declared slot is guarded',
+             on['Fighter#states='].to_s.include?('DECLARED_IVAR_GUARD Fighter#@states'))
+  check.call('an accessor-written `@x: Array?` slot is seeded (ACCESSOR_GUARDED_WRITER)',
+             err.include?('DECLARED_IVAR Fighter#@states: Array?, guarded stores, pool seeded'))
+  check.call('`(x || [])` of the seeded slot, through the reader or the ivar, is the Array body',
+             %w[Fighter#calm? Fighter#bare?].all? { |k| exact_empty.call(on[k]) && !chain.call(on[k]) })
+  check.call('a slot whose name reflection writes is not seeded and keeps its chain',
+             !err.include?('DECLARED_IVAR Poked#@items: Array?, guarded stores, pool seeded') &&
+               chain.call(on['Poked#none?']))
   check.call('the guarded leaf is not inlined', !on['Menu#use_ratio'].to_s.include?('CALL_INLINE Menu#ratio') &&
                                                 on['Menu#use_ratio'].to_s.include?('Menu_ratio_impl('))
 
@@ -212,7 +271,8 @@ Dir.mktmpdir('declared-def-return') do |dir|
     check.call('a wrong declaration raises the violation in the compiled run',
                wrong.call(compiled) == ['wrong declaration => raised BC2cppDeclarationViolation',
                                         'wrong hinted leaf => raised BC2cppDeclarationViolation',
-                                        'wrong ivar => raised BC2cppDeclarationViolation'])
+                                        'wrong ivar => raised BC2cppDeclarationViolation',
+                                        'wrong accessor => raised BC2cppDeclarationViolation'])
     warn output unless built && compiled.size == interpreted.size
   else
     puts '  SKIP run: no full-core mruby build'

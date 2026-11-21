@@ -163,6 +163,7 @@ ruby scripts/bc2cpp/alias_method_check.rb
 ruby scripts/bc2cpp/singleton_const_owner_check.rb
 ruby scripts/bc2cpp/enumerator_class_unit_check.rb
 ruby scripts/bc2cpp/core_shadowed_unit_check.rb
+ruby scripts/bc2cpp/core_own_unit_check.rb
 ruby scripts/bc2cpp/frozen_hash_lookup_check.rb
 ruby scripts/bc2cpp/record_hash_update_check.rb
 ruby scripts/bc2cpp/record_nilable_read_check.rb
@@ -267,6 +268,7 @@ ruby scripts/bc2cpp/name_sinks_check.rb
 ruby scripts/bc2cpp/exact_declared_return_check.rb
 ruby scripts/bc2cpp/declared_def_return_check.rb
 ruby scripts/bc2cpp/declared_optional_param_check.rb
+ruby scripts/bc2cpp/declared_keyword_param_check.rb
 ruby scripts/bc2cpp/super_frame_block_check.rb
 ruby scripts/bc2cpp/lambda_cells_check.rb
 ruby scripts/bc2cpp/rescue_multi_class_check.rb

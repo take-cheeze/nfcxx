@@ -41,6 +41,24 @@ Splitting is enabled automatically for self builds through `BC2CPP_SHARD_SPLIT_O
 their owner grouping by default, including Optcarrot's default four-shard layout. Explicit hot owners remain
 pinned. See [owner sharding](bc2cpp-owner-shards.md) for linkage and state-sharing checks.
 
+## Shard rewriting
+
+The C++ scanner now counts braces directly on lines without comments or quoted literals, provided it is not
+inside a multiline comment or raw string. Other lines retain the full lexical scanner. This avoids allocating
+one-character Strings for most generated statements; the scanner's callers only read the retained line text.
+
+On the same frozen 46 MiB raw compiler C++ capture, complete 16-shard rewriting under CRuby 4 + YJIT changed
+as follows. These exit-handler times are separate from the logged generation phases below.
+
+| Layout | Before | Updated | Allocated objects before / updated |
+| --- | ---: | ---: | ---: |
+| Default owner grouping | 16.66 s | 6.32 s | 242.19 M / 53.83 M |
+| Oversized-owner splitting | 16.50 s | 6.60 s | 242.19 M / 53.83 M |
+
+Every output file was byte-identical in both layouts. All per-line scanner records also matched on the current
+self image's main C++ and 15 shards. The shard checks cover multiline raw strings/comments crossing ordinary
+lines, quoted braces, division, shared mutable/constant state, linked generated code and runtime parity.
+
 ## Current-source self generation
 
 The current 324-file compiler graph includes the new cache and lookup checks:
@@ -109,3 +127,146 @@ not an unprofiled throughput guarantee. All 20 generated C++, header and bytecod
 
 Existing IR block checks cover writes across classes, unrelated ivars, chained reads, nested Proc writes,
 cycles, unwritten ivars and unlisted dynamic writes.
+
+## Native namespace scopes
+
+A 96-method compiled-compiler profile attributed 13.0% of sampled CPU to `onig_byte_to_char`, largely beneath
+`UniqueClassNames.native_module_binding`. Each namespace query scanned function headers again from the start
+of its C/C++ source. The namespace and constant-binding analyses now share a per-analysis header index, use
+binary search for the enclosing function and retain its body boundary. Match positions and captures are saved
+as values, avoiding mruby-onig's reused scan region; UTF-8 character offsets keep their existing meaning.
+
+On 20 real namespace queries over the fixture's 79 native sources, alternating baseline/indexed runs measured
+0.376/0.353 versus 0.038/0.043 seconds on CRuby 4/YJIT, and 0.631/0.619 versus 0.127/0.126 seconds in the
+mruby interpreter. Every answer matched. The interpreter baseline copies retained MatchData to repair the
+same scan-region compatibility issue, so this compares two correct implementations; it is not a whole-compiler
+runtime speedup claim. Scope checks also cover UTF-8 prefixes, interleaved queries into different functions,
+out-of-function positions and both definition-only and lookup policies sharing one header index.
+
+## Rescue-aware writer walks
+
+Writer queries with arbitrary barrier predicates still inspect every instruction. Three hot callers whose
+predicates only reject RESCUE can now declare that opcode: the walk merges leading-register writer positions
+with RESCUE positions, including its second-register write, and skips unrelated instructions.
+
+On 396,194 queries captured from real self-compilation bytecode, alternating warm primitive measurements fell
+from about 0.559 to 0.241 seconds CPU, with identical answers. The differential fixture covers 29,952 combinations
+of barriers, MOVE chains and budgets, skipped opcodes, missing registers, exhausted callbacks and traversal order.
+All 20 generated artifacts also match byte-for-byte on the frozen self-compilation graph. The full replays ran
+under different external load and do not establish a whole-generation speedup. The walker remains a VM fallback
+in the current self image; this change improves its algorithm rather than changing its translation status.
+
+## Next optimization profile (062f75bc, November 21)
+
+Profiled the frozen 331-file self input on CRuby 4.0.5 with YJIT, using StackProf CPU sampling at 1 ms
+and a separate allocation run sampling every 2,000 allocations. These are profiled generation runs,
+not measurements of the compiled compiler's execution speed. Local artifacts and reproduction scripts
+are under `build/bench/self-profile-current` and `build/bench/profile-self-*.rb` (ignored build outputs).
+
+Generation took 301.7 seconds, including exit handlers: method compilation accounted for 243.9 seconds.
+There were 580.2 million allocations and 55.0 seconds of GC. Inclusive call-tree costs below overlap
+and must not be added together. The next candidates, in suggested order, are:
+
+1. **Avoid unconditional reaching-definition bit masks.** In `compute_reaching_definitions`, line 274
+   computes `1 << here.reg.to_i` before testing `here.op == :EXCEPT`. Allocation samples attribute
+   34,979 of 290,014 samples to this expression, approximately 70 million allocations (12.1%).
+   Test the opcode first, then the mask; consider skipping the mask when `nil_regs` is zero.
+   Validate exception-edge answers and byte-identical generated output. The entire reaching-definitions
+   API costs 21.2 seconds CPU inclusive; its compute loop costs 15.2 seconds.
+2. **Stop compiling a dynamic regexp per fallback site.** The regexp construction in
+   `OutsideOwnerCall#guarded_fallback_line`, line 120, costs 6.1 seconds self CPU.
+   Use structured fallback results or exact token matching, preserving the replacement's semantics.
+3. **Reuse fallback target decisions.** The outside-owner fallback tree costs 46.0 seconds inclusive,
+   with singleton-arm planning around 30.7 seconds. The context-lifted second fallback call repeats
+   substantial analysis. Reuse immutable target plans while retaining layout, probe and cycle context;
+   emitted C++ strings cannot safely be cached without accounting for those inputs.
+4. **Split the giant send emitter and measure native shard costs.** A fresh native build of 16 units
+   with eight workers took 114.4 seconds; all units compiled successfully. The main registration unit
+   took 49.0 seconds, while shard 3 took 70.2 seconds. Equal source bytes do not imply equal compile cost.
+   `CodeGen_compile_send_site_body_impl` occupies 19,235 lines / 910,325 bytes in shard 3.
+   In sequential isolated compilations with otherwise identical flags, the original unit took 55.21 seconds;
+   replacing only that method body with a nil return took 26.33 seconds, reducing peak RSS from
+   1,164,836 to 693,876 KiB. This deliberately incorrect ablation was never linked and establishes
+   an upper bound on removable cost, not the speedup from extracting helpers. Smaller helpers and
+   finer compile-cost-aware shards need separate validation. Merely ordering units longest-first
+   simulates at 112.7 seconds with the observed costs, so scheduling alone has little headroom.
+
+`ShardOutput.scan_lines` still accounts for about 11.3% of allocation samples, but only 3.7 seconds
+inclusive CPU after its earlier optimization. Prioritize the reaching-definition mask before further
+scanner work. Allocation reductions may reduce GC, but the profile does not establish how much of
+the 55 seconds of GC any individual change will recover. No compiler implementation changed in this
+profiling pass.
+
+## Avoid irrelevant reaching-definition masks
+
+The EXCEPT nil-path check now tests the opcode and a nonzero nil-register state before constructing
+the register mask. This preserves the exception-edge decision while avoiding large Integer allocations
+for unrelated instructions and states. Low and high exception-register fixtures check both incoming
+paths before RAISEIF and the normal-only path after it.
+
+On 593,352 sampled queries from the frozen self bytecode, including handler policies and refusal
+diagnostics, all answers matched the previous guard. Alternating warm runs measured baseline CPU
+1.274/1.233 seconds versus 1.171/1.178 seconds; allocations fell from 5.36M to 4.12M. These sampled
+instruction queries are a differential workload, not a recording of the compiler's actual query mix.
+
+Replaying the full 331-file generation with the same CPU profiler reduced allocations from 580.18M
+to 525.78M (9.4%). The reaching-definition compute loop fell from 15.184 to 9.537 seconds sampled CPU;
+Integer shifts fell from 1.966 seconds to 0.001 seconds. Whole profiled generation measured
+301.704 to 291.237 seconds, with GC 55.000 to 51.875 seconds. This is one before/after pair with other
+phase variation, not a stable throughput guarantee. All 20 C++, header and bytecode artifacts matched
+byte-for-byte. Local results are in `build/bench/self-profile-current/mask-optimized`.
+
+## Reuse the outside-owner fallback marker matcher
+
+`OutsideOwnerCall#guarded_fallback_line` used to compile a regexp containing the destination,
+receiver and method name at each site, then match it twice when replacing the proven nomethod branch.
+It now locates that literal call prefix with `String#index` and matches the trailing marker once
+with a shared regexp anchored at the suffix position. A failed candidate continues searching, and
+only the first valid branch is replaced. The end offset is saved before emitting the owner call:
+mruby-onig may reuse its MatchData region during calls made by that emission.
+
+The current-main baseline (0f9c7bfea, including the mask optimization) invoked this path 384,547 times
+on the frozen self input. Replaying its first 20,000 calls in alternating warm CRuby 4/YJIT runs
+measured 0.242/0.226 seconds CPU with the original matcher versus 0.063/0.047 seconds with the shared
+matcher. Allocations fell from about 625K to 316K. The fixture isolates replacement by using a fixed
+owner-call result; these are matcher timings, not whole-generation or compiled-compiler throughput.
+All results matched on CRuby and mruby-onig. Another 576 comparisons cover multiple candidates,
+failed matches, argument lists, regexp metacharacters, UTF-8 offsets and match-region reuse.
+These comparisons run inside the already-registered `helper_owner_call_check.rb`; adding a separate
+check requires a matching entry in the pinned world's check policy.
+
+Full CPU-profiled generation with the same bounded capture hook in both runs measured 336.644 versus
+322.041 seconds. This method's self CPU fell from 7.021 to 0.413 seconds; its inclusive tree fell
+from 53.173 to 44.310 seconds. Allocations fell from 528.25M to 523.31M and GC from 58.461 to
+54.634 seconds. All 20 C++, header and bytecode artifacts matched byte-for-byte. The whole-generation
+times are one before/after pair with profiling/capture overhead and other phase variation, not a
+throughput guarantee. These runs use a newer generator than the earlier mask measurements and must
+not be used to infer a cumulative speedup. Local artifacts are under
+`build/bench/self-profile-current/fallback-{baseline,optimized}`. Helper owner calls, direct owner calls,
+static owner dispatch and method-missing arms also pass their generated-program runtime checks.
+
+## Skip empty prepend traversals
+
+`prepended_override?` now returns before allocating a Set or duplicating a work list when the owner
+has no recorded prepended modules. Unknown owners still refuse first. Nonempty inputs retain the
+same normalization, cycle handling, nested included/prepended walks and registry lookup; no decision
+cache or context-dependent result is introduced.
+
+A capture at 89a710184 recorded 9,883,208 queries across 5,182 distinct analysis/owner/name combinations;
+9,863,575 queries (99.8%) had an empty prepend list. Replaying those combinations with their recorded
+frequencies on CRuby 4/YJIT preserved every answer. Alternating warm baseline CPU was 2.606/2.568 seconds
+versus 0.627/0.627 seconds; allocations fell from 30.58M to 0.99M. The replay reconstructs the captured
+analysis tables and measures this helper, not whole-compiler throughput.
+
+The existing registered prepend check now covers absent and empty lists, unknown owners, nested modules,
+cycles, unrelated included modules and frozen inputs, as well as compiled-program dispatch parity.
+The optimized helper itself also compiles and matches eight interpreted answers in an isolated native
+fixture. That fixture must include the full-core Set native-source metadata: the canonical world used
+by ordinary fixtures does not include mruby-set, while the full-core library used for this experiment does.
+
+Full self generation with identical CPU profiling/query-capture hooks allocated 521.03M versus 491.65M
+objects (5.6% fewer). The helper's inclusive sampled CPU fell from 4.457 to 0.954 seconds; GC measured
+48.900 versus 46.681 seconds. Whole wall time was 274.484 versus 279.600 seconds, so this pair does not
+establish a whole-generation speedup. All 20 C++, header and bytecode artifacts matched byte-for-byte.
+Local captures and metrics are under `build/bench/self-profile-current/prepend-{baseline,optimized}`;
+the weighted query results are `prepend-query-results.json` in that parent directory.

@@ -918,6 +918,29 @@ class ClosedWorld
     end
   end
 
+  # EXACT_NEW: `klass.new` answers an instance of exactly +klass+. Its constant is stable and no outside source touches
+  # the class (stable_class_constant?), and `new` / `allocate` are Class's natives: no Ruby definition on Class, on
+  # +klass+ or a superclass or their singletons, or on a module (which `extend` could put on a singleton), and no mixin
+  # into Class or those singletons.
+  def exact_constructor_class?(klass, superclass_of)
+    return false unless standard_constructor_lookup? && class_declared?(klass) && @mixins && @unknown_mixins
+    return false unless stable_class_constant?(klass)
+    return false if @unknown_mixins.include?('Class') || !@mixins.fetch('Class', []).empty?
+
+    defs = %w[new allocate].flat_map { |name| @registry.fetch(name, []) }.reject { |d| d.owner == '<native>' }
+    return false if defs.any? { |d| d.owner == 'Class' || @module_names.include?(d.owner.to_s) }
+
+    seen = Set.new
+    while klass.is_a?(String) && seen.add?(klass)
+      singleton = "#{klass}.singleton"
+      return false if @unknown_mixins.include?(singleton) || !@mixins.fetch(singleton, []).empty?
+      return false if defs.any? { |d| d.owner == klass || d.owner == singleton }
+
+      klass = superclass_of[klass]
+    end
+    true
+  end
+
   # NUMERIC_RETURN_PROOF: can a call to `name` reach only the definitions the
   # registry lists? False for a name some native or foreign source defines or
   # calls a runtime installer with, or whenever a method_missing hook exists.

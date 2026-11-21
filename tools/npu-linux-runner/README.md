@@ -202,3 +202,100 @@ The bounds checks are not the cost: the block path gains about 1 %. The taps cos
 41.6 ms (about a quarter), mostly the loads, unpacking and float conversions per texel, which the block path
 keeps. The blend is about 15 ms and the remaining row maths and rasterisation about 16 ms. The next lowering
 candidates are the per-texel conversion (convert the four texels as one block) and the blend.
+
+## Blend lowering (copy mode)
+
+`frame/blend_lower.py` (`--blend` in `gen_frame_textured.py`) adds a fast path to `nr_blend_pixel_alpha` for blend
+mode 0 with all four write-mask lanes set. In that mode the source factor is exactly 255 and the destination
+factor exactly 0, so the destination load and its select and shift terms add exactly zero. The fast path computes
+the same value and rounding without them. The general path is unchanged after it, and other modes are unaffected.
+
+Four full-tile textured draws, sampler block path on (p50, ms; baseline and candidate interleaved, NPU idle):
+
+| build | run 1 | run 2 |
+| --- | --- | --- |
+| baseline (`--sampler`) | 41.29 | 41.78 |
+| `--sampler --blend` | 38.00 | 37.96 |
+
+About 8.5 % faster. The candidate matches the expected tile byte for byte.
+
+The per-texel conversion pass tried alongside it (moving the channel swap onto the blended result) came out
+about 3 % slower, so it is not included.
+
+## Blend modes (general path timing)
+
+`gen_frame_textured.py --mode N` sets the command's blend mode. Four full-tile textured draws, sampler on, blend
+fast path off (so every mode runs the general path), p50 in ms:
+
+| mode | p50 | mode | p50 |
+| --- | --- | --- | --- |
+| 0 | 41.90 | 8 | 41.68 |
+| 1 | 41.57 | 9 | 41.42 |
+| 2 | 41.84 | 10 | 41.23 |
+| 3 | 41.46 | 11 | 41.15 |
+| 4 | 41.34 | 12 | 41.17 |
+| 5 | 41.62 | 13 | 41.95 |
+| 6 | 41.61 | 14 | 41.47 |
+| 7 | 41.56 | 15 | 41.54 |
+
+All modes cost the same within about 2 %, so the general path's cost does not depend on the mode. Only modes 0,
+1 and 14 match the copy-style expected tile; the others are timing-only (their outputs are not checked here). The
+copy-mode fast path is therefore the only mode-specific saving so far.
+
+## Correction: native dispatch and the fixture check
+
+The earlier "nested dispatch fault" finding was wrong. The device runs the tree correctly. The problem was my
+flattening: it mapped native n to `nr_row_n`, but the emitted tree is not the identity above native 12
+(native 13 runs `nr_row_10`, native 14 runs `nr_row_13`, native 22 runs `nr_row_21`, and so on). Native 60 is
+row 22 after `native -= 38`, which the tree sends to `nr_row_21`. The solid-colour results in the earlier table
+came from `nr_row_22` (the wrong row for native 60), and the textured result (native 39, row 1) is valid.
+
+`frame/flat_dispatch.py` now evaluates the tree (`frame/flat_vertex.py` provides the walker) and emits the
+mapping it encodes. `frame/flat_vertex.py` also flattens `nr_native_vs` the same way (it was not needed for the
+fixtures, but the tree is checked for exclusivity).
+
+`frame/fixtures_check.py` runs npu-render's own fixtures on the NPU and compares each output with the host
+reference: `frame_kernel_test --fixtures` writes 222 spans (captured DWM programs as quads, split windows,
+transparent textures, loads, fills and a rejected header) with their reference outputs. With the corrected
+mapping all 222 match bit for bit. The blob's second shave invocation writes only a rejected header to the upper
+half of the buffer, so the check compares the rendered half exactly and requires the rest to be that header.
+
+Per-span time on the NPU (p50, 10 inferences): the slowest real-shader fixtures are about 3.25 s
+(`e3ebf67c`), 0.25 s (`ec1e65f6`) and 0.2 s (`2a28d3fe`); fills and most light shaders are a few milliseconds.
+
+## Where the real shader time goes (fixtures, NPU)
+
+`frame/fixtures_check.py --only e3ebf67c --time 5` (p50 per span). The slowest real shader is native 5 (row 5: about
+1,700 lines per pixel, 18 texture samples, 21 division sites). Its three rgba fixtures take about 3.25 s each, the
+bgra variants about 10 ms.
+
+Ablation: replacing the raw four-lane divide with a multiply (output not checked) leaves the 3.25 s rgba time
+unchanged, so the division is not the cost. The identical time for three different fixtures, and the difference
+from the bgra variants of the same program, point to a device-side stall or an escape path rather than to the
+arithmetic. That is not yet diagnosed.
+
+## Diagnosis: the slow rgba span is a shader loop running to its budget
+
+The emitted loops are `for (;;)` with an iteration budget of 16 (`nr_loop_guard`), and a budget overflow is counted in
+the output header (`loop_overflows`). In the rgba variant of native 5, both loops run to the budget on every covered
+pixel: the reference header records 27,132 overflows for 13,566 covered pixels. The bgra variant records none and
+takes about 10 ms. So the 3.25 s is 2 loops x 16 iterations x the loop body per pixel, which the arithmetic
+ablation could not show. The reference and the NPU agree on the overflow count and the output.
+
+Consequence for lowering: skipping the loop would change the overflow counters, and those are part of the output
+header. A faster version must prove the loop result without running it, or compute the same counters. Neither is a
+bit-exact local rewrite.
+
+## Loop fixed-point attempt (negative result)
+
+Idea: if a shader loop's iteration leaves its state bit-for-bit unchanged and does not break, every later
+iteration repeats the same work, so the loop can stop and add the remaining escapes and the overflow in closed form.
+That keeps the output and both counters exact.
+
+Result on native 5 (rgba, `e3ebf67c`): the transform is bit-exact on all six fixtures for that shader, but the fixed
+point never fires. The loop state includes an integer counter (`nr_v4_iadd` updates a register every iteration), so
+the body never repeats. Timing is unchanged (3.25 s baseline, 3.16 s transformed; within run-to-run noise).
+
+So the loop cost is inherent to this shader's semantics: 16 iterations of a large body per pixel, with no state
+that settles. A real speedup needs the counter's trajectory computed in closed form, which is a shader-specific
+analysis, not a bit-exact local rewrite.

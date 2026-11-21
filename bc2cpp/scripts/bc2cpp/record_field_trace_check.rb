@@ -6,13 +6,14 @@
 # that class, an attr_reader of an ivar every store of which is that class, or a join of those. The checked field is
 # a guarded receiver hint (RECORD_TYPE ... hints); recursion is solved as a fixpoint. A definition that may return
 # another class, a literal block that `break`s, a native name, an attr_writer and a store of another class keep
-# TC1009, which aborts the run.
+# TC1009, which aborts the run. A `Klass.new` receiver is exact (EXACT_NEW) unless a Ruby `new` can answer it.
 #
 #   MRBC=path/to/mrbc ruby scripts/bc2cpp/record_field_trace_check.rb
 require 'tmpdir'
 require 'fileutils'
 require_relative 'check_support'
 require_relative 'fixture_runtime'
+require_relative '../../tools/bc2cpp/declared_returns'
 
 suite = FixtureCheck.new('record_field_trace_check')
 check = suite.method(:check)
@@ -129,12 +130,61 @@ refused.call('a literal block that breaks keeps TC1009',
 refused.call('an attr_writer on the read ivar keeps TC1009',
              BASE + "class Other\n  attr_writer :roster\nend\n",
              /Scene\#@ui: value of :foes cannot be traced/)
-refused.call('a name with a native definition of unknown owner keeps TC1009 (Struct#members)',
-             BASE.sub('attr_reader :roster', 'attr_reader :roster, :members').sub('troop.roster.map', 'troop.members.map')
-                 .sub('@roster = []', '@roster = []; @members = []'),
+# EXACT_NEW: `troop` is exactly a Troop, so `troop.members` resolves to the attr_reader although Struct#members is native.
+members = BASE.sub('attr_reader :roster', 'attr_reader :roster, :members').sub('troop.roster.map', 'troop.members.map')
+              .sub('@roster = []', '@roster = []; @members = []')
+_, failure, code = run.call(members, SIG)
+check.call('an exact Klass.new receiver resolves a name a native also defines (Struct#members)',
+           failure.nil? && exact_size.call(code) == 4)
+warn failure if failure
+refused.call('a native name on a receiver that is not traced keeps TC1009 (Struct#members)',
+             members.sub('troop = Troop.new', 'troop = Troop.new.itself'),
              /Scene\#@ui: value of :foes cannot be traced/)
+_, failure, code = run.call(members + "class Troop\n  def self.new; super; end\nend\n", SIG)
+check.call('a Ruby `new` on the class leaves :foes inexact (no EXACT_NEW)', failure.nil? && exact_size.call(code) == 3)
 refused.call('a store of another class keeps TC1009',
              BASE.sub('@actors = [Member.new(2)]', '@actors = [Member.new(2)]; @actors = {} if @actors.empty?'),
              /Scene\#@ui: value of :allies cannot be traced/)
+
+# TRACED_PARAM: a declared, guarded parameter is its declared class in the trace (`actor.skills` on `Member?`, the
+# `ids` of `skills=` as `Array?`), mruby's own Ruby bodies count for core iterators and fresh-Array methods, `dup`
+# keeps its receiver's class, and the run aborts unless each trusted method compiles with its guard.
+member_skills = <<~RUBY
+  class Member
+    attr_reader :skills
+    def skills=(ids)
+      @skills = (ids || []).reject { |s| s.nil? || s == 0 }
+    end
+    def reset_skills
+      old = @skills.dup
+      @skills = old
+    end
+  end
+RUBY
+old_skills = "    @actors.map { |a| [a.n, 0] }\n"
+params = BASE.sub(old_skills, "    actor.skills.select { |s| s > 0 }.map { |s| [s, 0] }\n") + member_skills
+raise 'record_field_trace_check: BASE changed' unless BASE.include?(old_skills)
+
+params += "class Other\n  def load(m); m.skills = [3, 1]; m.reset_skills; nil; end\nend\n"
+param_sig = SIG + "class Party\n  def battle_skills: (Member? actor) -> Array\nend\nclass Member\n  def skills=: (Array[Integer]? ids) -> untyped\nend\n"
+_, failure, code = run.call(params, param_sig)
+check.call('declared parameters type the trace through attr_reader, reject and dup (TRACED_PARAM)',
+           failure.nil? && exact_size.call(code) == 4)
+warn failure if failure
+check.call('the traced parameters keep their entry guards',
+           body.call(code, 'Party#battle_skills').include?('DECLARED_PARAM_GUARD Party#battle_skills arg 1') &&
+             body.call(code, 'Member#skills=').include?('DECLARED_PARAM_GUARD Member#skills= arg 1'))
+trusted = [['L1', :arg, 0], ['L2', :keyword, 'k']]
+keys = { 'L1' => 'Party#battle_skills', 'L2' => 'Menu#pick' }
+guarded = '/* DECLARED_PARAM_GUARD Party#battle_skills arg 1 */ /* DECLARED_KEYWORD_GUARD Menu#pick k: */'
+check.call('the traced parameter contract refuses an uncompiled or unguarded body, and another gem\'s method is its own',
+           DeclaredReturns.traced_param_failures(trusted, [{ label: 'L1', code: '#error' }, { label: 'L2', code: guarded }],
+                                                 keys, nil, nil).size == 1 &&
+             DeclaredReturns.traced_param_failures(trusted, [{ label: 'L1', code: 'x' }, { label: 'L2', code: 'y' }],
+                                                   keys, nil, nil).size == 2 &&
+             DeclaredReturns.traced_param_failures(trusted, [{ label: 'L1', code: guarded }, { label: 'L2', code: guarded }],
+                                                   keys, nil, nil).empty? &&
+             DeclaredReturns.traced_param_failures(trusted, [], keys, %w[Scene], %w[Party Menu]).empty? &&
+             DeclaredReturns.traced_param_failures(trusted, [], keys, %w[Scene], []).size == 2)
 
 suite.finish!

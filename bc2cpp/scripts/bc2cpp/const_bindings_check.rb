@@ -18,6 +18,35 @@ require_relative '../../tools/bc2cpp/const_site_cache'
 suite = FixtureCheck.new('const_bindings_check')
 suite.require_mrbc!
 
+scope_source = <<~C
+  /* 日本語 before the function headers exercises character offsets. */
+  void first(mrb_state* mrb) {
+    RClass* scope = mrb_define_module(mrb, "First");
+    first_site();
+  }
+  void second(mrb_state* mrb) {
+    RClass* scope = mrb_define_module(mrb, "Second");
+    second_site();
+  }
+C
+scope_headers = {}.compare_by_identity
+%w[second first second first].each do |name|
+  pos = scope_source.index("#{name}_site")
+  found = UniqueClassNames.native_module_binding([scope_source], scope_source, pos, 'scope', headers: scope_headers)
+  suite.check("indexed native scope retains #{name}'s own function and offsets", found == name.capitalize)
+end
+suite.check('a position before every function has no native scope',
+            UniqueClassNames.native_module_binding([scope_source], scope_source, 0, 'scope', headers: scope_headers).nil?)
+suite.check('a position past the final closing brace has no native scope',
+            UniqueClassNames.native_module_binding([scope_source], scope_source, scope_source.size, 'scope', headers: scope_headers).nil?)
+lookup_source = scope_source.sub('mrb_define_module(mrb, "First")', 'mrb_module_get(mrb, "First")')
+lookup_pos = lookup_source.index('first_site')
+[false, true, false].each do |lookup|
+  found = UniqueClassNames.native_module_binding([lookup_source], lookup_source, lookup_pos, 'scope',
+                                                 lookup: lookup, headers: scope_headers)
+  suite.check("a shared header index preserves lookup=#{lookup}'s binding policy", found == (lookup ? 'First' : nil))
+end
+
 Dir.mktmpdir('const-bindings') do |dir|
   native = File.join(dir, 'native.c')
   File.write(native, <<~C)

@@ -29,6 +29,8 @@ class CodeGen
     attr_accessor :declared_returns, :declared_return_root, :declared_return_hint_refusals
     # label => [[position, class, key, text], ...]: the declared parameter classes the bodies trust (DECLARED_PARAM_GUARD).
     attr_accessor :declared_params
+    # label => [[name, class, key, text, kind, nilable], ...]: RbsParamCheck.keyword_guards (DECLARED_KEYWORD_PARAM).
+    attr_accessor :declared_keywords
   end
 
   # The checked declarations: statically checked ones and the runtime-checked %a{bc2cpp:hint} ones.
@@ -441,6 +443,39 @@ class CodeGen
     (self.class.declared_params&.[](label) || []).select do |_pos, cls, _key, _text, kind = :class, *|
       !RbsParamCheck::CORE_IVAR_KINDS.key?(kind) || declared_core_kind_kept?(cls)
     end
+  end
+
+  # DECLARED_KEYWORD_PARAM: the keyword guards of `label` this build keeps (as declared_param_guards), by name.
+  def declared_keyword_guards(label)
+    @declared_keyword_guards ||= {}
+    @declared_keyword_guards[label] ||= (self.class.declared_keywords&.[](label) || []).select do |_name, cls, _key, _text, kind, _nilable|
+      !RbsParamCheck::CORE_IVAR_KINDS.key?(kind) || declared_core_kind_kept?(cls)
+    end.to_h { |guard| [guard.first, guard] }
+  end
+
+  # The class bits KARG `insn` of `irep` leaves in its register, or nil: the declared kind, which the check right after
+  # the KARG (declared_keyword_guard_statement) holds the given value to.
+  def declared_keyword_bits(irep, insn)
+    _name, cls, _key, _text, kind, nilable = declared_keyword_guards(irep.label)[insn.sym.to_s]
+    return nil unless kind
+
+    bit = declared_arg_bits(cls, kind, nilable)
+    bit.zero? ? nil : bit
+  end
+
+  # The C++ statement that checks KARG `insn`'s register `var` against its declared keyword type, or ''.
+  def declared_keyword_guard_statement(irep, insn, var)
+    name, cls, key, text, kind, nilable = declared_keyword_guards(irep.label)[insn.sym.to_s]
+    return '' unless name
+
+    cond = case kind
+           when :float, :symbol, :array, :hash, :string then declared_return_condition(kind, cls, false, var)
+           when :integer then declared_return_condition(:fixnum, cls, false, var)
+           else exact_class_guard(owner_class_ptr_expr(cls), var)
+           end
+    cond = "mrb_nil_p(#{var}) || (#{cond})" if nilable
+    "  if (mrb_unlikely(!(#{cond}))) bc2cpp_declared_keyword_violation(M, #{var}, \"#{key}\", \"#{text}\"); " \
+      "#{DeclaredReturns.keyword_guard_marker(key, name)}\n"
   end
 
   # label => guards for every label (declared_param_guards), what the class pools, the call-site report and the

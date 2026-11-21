@@ -501,6 +501,11 @@ class Edits
     @items -= items
   end
 
+  # the edits at exactly the point p (a zero-width insertion, such as a refusal marker, or any edit that starts there)
+  def at_point(p)
+    @items.select { |a, _b, _| a == p }
+  end
+
   def apply(text)
     # stable sort: edits at the same position keep their insertion order, as Python's sorted() does
     items = @items.each_with_index.sort_by { |(s, e, _), i| [s, e, i] }.map(&:first)
@@ -4110,6 +4115,72 @@ use_problem = lambda do |name, use|
     end
   end
 
+  # switch (TYPE(x)) with case T_RATIONAL labels: a Rational is a data object of the mruby-rational gem, so the switch is on a type
+  # key that tells it apart (nfcx_type_key: NFCX_TT_RATIONAL for a Rational, else the tag), and each label is that key. The labels
+  # were refused in process and their refusal markers are removed here; the subject's TYPE is the key, not its tag.
+  def value_rational_switch_pass
+    @files.each_key do |rel|
+      masked = @files[rel]['masked']
+      masked.to_enum(:scan, /(?<![#{WC}])T_RATIONAL(?![#{WC}])/).each do
+        m = Regexp.last_match
+        lab = m.begin(0)
+        lab_e = m.end(0)
+        before = masked[0...lab].to_s
+        next unless before.match?(/(?<![#{WC}])case[ \t\n]+\z/)
+        nx = next_nonspace(masked, lab_e)
+        next unless nx >= 0 && masked[nx] == ':'
+        # the innermost switch whose body holds the label
+        sw = nil
+        masked.to_enum(:scan, /(?<![#{WC}])switch[ \t]*\(/).each do
+          sm = Regexp.last_match
+          op = sm.end(0) - 1
+          cl = match_close(masked, op)
+          next if cl < 0 || cl > lab
+          br = next_nonspace(masked, cl + 1)
+          next unless br >= 0 && masked[br] == '{' && match_close(masked, br) > lab
+          sw = [op, cl] if sw.nil? || op > sw[0]
+        end
+        next if sw.nil?
+        subj = masked[(sw[0] + 1)...sw[1]].to_s.strip
+        next unless subj.match?(/\ATYPE[ \t]*\(/)
+        tp = masked.index('TYPE', sw[0] + 1)
+        next if tp.nil? || tp >= sw[1]
+        top = masked.index('(', tp)
+        tc = match_close(masked, top)
+        next if tc < 0 || tc >= sw[1]
+        fn = enclosing_func(rel, lab)
+        # the state token of this position (the parameter, or the file-scope state of a global-state helper: mrb_tok)
+        next unless fn
+        ed = @edits[rel]
+        # the switch subject: TYPE(x) becomes nfcx_type_key(mrb, (x))
+        ed.drop(ed.overlapping(tp, tp + 4))
+        ed.add(tp, tp + 4, "nfcx_type_key(#{mrb_tok(rel, tp)}, ")
+        ed.add(tc + 1, tc + 1, ')')
+        # the label: the key of a Rational; the refusal and its marker go
+        ed.drop(ed.at_point(lab).select { |_a, _b, t| t.to_s.include?('REFUSED: T_RATIONAL') })
+        @refusals.reject! { |r| r['file'] == rel && r['api'] == 'T_RATIONAL' && r['pos'] == lab }
+        ed.drop(ed.overlapping(lab, lab_e))
+        ed.add(lab, lab_e, 'NFCX_TT_RATIONAL')
+        (@gem_deps ||= Set.new) << 'mruby-rational'
+        rewrite(rel, lab, 'T_RATIONAL', 'NFCX_TT_RATIONAL',
+                'a Rational label: the switch is on nfcx_type_key, which tells a Rational (the mruby-rational data object) from other data')
+        # the helper, once per file, before the enclosing function
+        at = define_at(rel, lab) ? define_at(rel, lab)[1] : (fn['hstart'] || nil)
+        next unless at
+        @prelude_done ||= Set.new
+        unless @prelude_done.include?([rel, 'nfcx_type_key'])
+          @prelude_done << [rel, 'nfcx_type_key']
+          ed.add(at, at,
+                 "#define NFCX_TT_RATIONAL (MRB_TT_MAXDEFINE + 1)\n" \
+                 "static int nfcx_type_key(mrb_state *mrb, mrb_value v) {\n" \
+                 "  if (mrb_type(v) == MRB_TT_DATA && mrb_class_defined(mrb, \"Rational\") &&\n" \
+                 "      mrb_obj_is_kind_of(mrb, v, mrb_class_get(mrb, \"Rational\"))) return NFCX_TT_RATIONAL;\n" \
+                 "  return (int)mrb_type(v);\n}\n")
+        end
+      end
+    end
+  end
+
   def value_order_stuck_pass
     @files.each_key do |rel|
       masked = @files[rel]['masked']
@@ -6134,6 +6205,75 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     end
   end
 
+  # rb_struct_define(name, m1, ..., NULL) and rb_struct_new(klass, v1, ..., vn) of the mruby-struct gem: the variadic helper
+  # nfcx_struct_va (once per file, before the enclosing function) defines the class with Struct.new (the member symbols; a name
+  # is the Struct constant) and rb_struct_new calls klass.new with as many values as klass.members has
+  STRUCT_VA_PRELUDE = <<~'C'.chomp
+    /* BC2CPP-MRBGEM: the mruby-struct gem's Struct: rb_struct_define and rb_struct_new (variadic) */
+    #include <stdarg.h>
+    static mrb_value
+    nfcx_struct_define(mrb_state *mrb, const char *name, ...)
+    {
+      va_list ap;
+      mrb_value argv[64];
+      int n = 0;
+      const char *m;
+      mrb_value st = mrb_obj_value(mrb_class_get(mrb, "Struct"));
+      mrb_value cls;
+      va_start(ap, name);
+      while (n < 64 && (m = va_arg(ap, const char *)) != NULL) {
+        argv[n++] = mrb_symbol_value(mrb_intern_cstr(mrb, m));
+      }
+      va_end(ap);
+      cls = mrb_funcall_argv(mrb, st, mrb_intern_cstr(mrb, "new"), n, argv);
+      if (name) mrb_const_set(mrb, st, mrb_intern_cstr(mrb, name), cls);
+      return cls;
+    }
+    static mrb_value
+    nfcx_struct_new(mrb_state *mrb, mrb_value klass, ...)
+    {
+      va_list ap;
+      mrb_value members = mrb_funcall_argv(mrb, klass, mrb_intern_cstr(mrb, "members"), 0, NULL);
+      mrb_int n = RARRAY_LEN(members), i;
+      mrb_value argv[64];
+      va_start(ap, klass);
+      for (i = 0; i < n && i < 64; i++) argv[i] = va_arg(ap, mrb_value);
+      va_end(ap);
+      return mrb_funcall_argv(mrb, klass, mrb_intern_cstr(mrb, "new"), (mrb_int)i, argv);
+    }
+  C
+
+  def struct_variadic_special(rel, s, nxt, called, name)
+    unless called
+      refuse(rel, s, name, 'used without a call')
+      return
+    end
+    masked = @files[rel]['masked']
+    cp = match_close(masked, nxt)
+    if cp < 0
+      refuse(rel, s, name, 'the call is not closed')
+      return
+    end
+    fn = enclosing_func(rel, s)
+    dpre = define_at(rel, s)
+    at = dpre ? dpre[1] : (fn && fn['hstart'])
+    unless at
+      refuse(rel, s, name, 'the helper this call needs has no place before it (not in a function or a macro)')
+      return
+    end
+    ed = @edits[rel]
+    @prelude_done ||= Set.new
+    unless @prelude_done.include?([rel, 'nfcx_struct_va'])
+      @prelude_done << [rel, 'nfcx_struct_va']
+      ed.add(at, at, STRUCT_VA_PRELUDE + "\n")
+    end
+    helper = name == 'rb_struct_define' ? 'nfcx_struct_define' : 'nfcx_struct_new'
+    ed.add(s, s + name.length, helper)
+    ed.add(nxt + 1, nxt + 1, "#{mrb_tok(rel, s)}, ")
+    (@gem_deps ||= Set.new) << 'mruby-struct'
+    rewrite(rel, s, name, "#{helper}(mrb, ...)", 'a Struct of the mruby-struct gem (Struct.new of the member symbols, or klass.new with the members count of values)')
+  end
+
   # rb_ary_new3(n, a1..an) -> mrb_ary_new_from_values(mrb, n, (mrb_value[]){a1..an}): the count is a literal and the values
   # stay in place (the identifier pass converts them); the head and the closing paren are rewritten
   def ary_new3_special(rel, s, nxt, called)
@@ -6393,6 +6533,10 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     end
     if name == 'rb_ary_new3'
       ary_new3_special(rel, s, nxt, called)
+      return
+    end
+    if %w[rb_struct_define rb_struct_new].include?(name)
+      struct_variadic_special(rel, s, nxt, called, name)
       return
     end
     if name == 'RB_GC_GUARD'
@@ -7540,6 +7684,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     compute_needs
     check_refs
     @files.keys.sort.each { |rel| process(rel) }
+    value_rational_switch_pass
     value_equality_pass
     value_compare_wrap_pass
     owned_class_assign_pass

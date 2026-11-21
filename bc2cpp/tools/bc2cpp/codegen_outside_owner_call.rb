@@ -103,6 +103,7 @@ module OutsideOwnerCall
   end
 
   OWNER_PATH = /\A[A-Z]\w*(?:::[A-Z]\w*)*(?:\.singleton)?\z/
+  NOMETHOD_TAIL = /\G[^\n]*?\); \/\* CLOSED_WORLD nomethod: (?:self|recv)\.\S+ @ \S+ \*\//
 
   def guarded_fallback_line(d, recv, name, argv, listed, site)
     base = super
@@ -117,11 +118,20 @@ module OutsideOwnerCall
     return base unless owners
 
     lifted = @closed_world.with_outside_owner_call(name) { super }
-    error = %r{r#{d} = bc2cpp_nomethod_named\(M, #{Regexp.escape(recv)}, "#{Regexp.escape(name)}"[^\n]*?\); /\* CLOSED_WORLD nomethod: (?:self|recv)\.\S+ @ \S+ \*/}
-    # Another gate still keeps the else: the site dispatches by name, under that gate's reason.
-    return lifted unless lifted.match?(error)
+    # Only the literal call prefix varies by site; reuse the marker matcher instead of compiling a regexp.
+    prefix = "r#{d} = bc2cpp_nomethod_named(M, #{recv}, \"#{name}\""
+    offset = 0
+    while (start = lifted.index(prefix, offset))
+      if (tail = NOMETHOD_TAIL.match(lifted, start + prefix.length))
+        # mruby-onig reuses match regions, including across calls made while emitting the replacement.
+        finish = tail.end(0)
+        return lifted[0...start] + outside_owner_call_line(d, recv, name, argv, owners) + lifted[finish..]
+      end
+      offset = start + 1
+    end
 
-    lifted.sub(error) { outside_owner_call_line(d, recv, name, argv, owners) }
+    # Another gate still keeps the else: the site dispatches by name, under that gate's reason.
+    lifted
   end
 
   # A send with no guard chain (POLY's bare dispatch): the same closed-world question with no Ruby arm listed. The
@@ -246,8 +256,9 @@ module OutsideOwnerCall
     return nil if mode == :strict && (map.core_dynamic_unknown.positive? || map.refusals[:core_prepend].positive?)
 
     native = map.by_name.fetch(name, Set.new)
-    native = factory_unknown_dropped(name, paths, native) if native.include?(NativeOwnerMap::UNKNOWN)
-    return nil if native.nil? || native.include?(NativeOwnerMap::UNKNOWN)
+    unknown = [NativeOwnerMap::UNKNOWN, NativeOwnerMap::UNKNOWN_CLASS_TABLE]
+    native = factory_unknown_dropped(name, paths, native) if native.intersect?(unknown)
+    return nil if native.nil? || native.intersect?(unknown)
 
     ruby = OutsideRubyOwners.scan(Array(owner_call_world.ruby_paths))
     return nil if ruby.unknown.include?(name) || ruby.unknown.include?(:all)
@@ -291,14 +302,14 @@ module OutsideOwnerCall
       key = FACTORY_UNKNOWN_NAMES.keys.find { |suffix| File.expand_path(path).end_with?(suffix) }
       key && native_unknown_names(path).sort == FACTORY_UNKNOWN_NAMES.fetch(key).sort
     end
-    factory && !sources.empty? ? native - [NativeOwnerMap::UNKNOWN] : nil
+    factory && !sources.empty? ? native - [NativeOwnerMap::UNKNOWN, NativeOwnerMap::UNKNOWN_CLASS_TABLE] : nil
   end
 
   # The names `path` registers on a class the owner map cannot name.
   def native_unknown_names(path)
     @native_unknown_names ||= {}
     @native_unknown_names[path] ||= NativeOwnerMap.build([path]).by_name
-                                                  .select { |_, owners| owners.include?(NativeOwnerMap::UNKNOWN) }.keys
+                                                  .select { |_, owners| owners.include?(NativeOwnerMap::UNKNOWN) || owners.include?(NativeOwnerMap::UNKNOWN_CLASS_TABLE) }.keys
   end
 
   def program_core_ruby_paths

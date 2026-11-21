@@ -27,6 +27,7 @@ TypeCheckVariants.arm_guard if type_check_variants
 require_relative 'compact_output'
 require_relative 'owner_call_arity'
 require_relative 'owner_set_share'
+require_relative 'foreign_core_units'
 require_relative 'shard_output'
 require_relative 'runtime_header'
 require_relative 'shared_generation'
@@ -241,6 +242,15 @@ def bc2cpp_method_report(compiled, tiers)
 end
 
 require_relative 'profile_timings'
+
+# The files a gem run's class units stand for (compile_top_class_units' `own_file`): the core run's are mruby's own Ruby,
+# an engine gem's its own mrblib. Nil for any other run (a probe or fixture world), where every file counts.
+def bc2cpp_own_unit_file(symbol, own_mrblib)
+  return ->(file) { CoreDefs.core_source?(file) } if symbol == 'core_compiled'
+  return nil unless BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol }
+
+  ->(file) { file.include?(own_mrblib) }
+end
 
 BC2CPP_MAIN = lambda do
   next unless $PROGRAM_NAME == __FILE__
@@ -651,9 +661,16 @@ BC2CPP_MAIN = lambda do
                                                               superclass_of: superclass_of, display_root: sig_root, applied: sig_applied,
                                                               declared_returns: CodeGen.declared_returns)
     CodeGen.declared_params = DeclaredReturns.guard? ? param_guards : {}
+    # DECLARED_KEYWORD_PARAM: a typed keyword is checked where its KARG writes it.
+    CodeGen.declared_keywords = if DeclaredReturns.guard?
+                                  RbsParamCheck.keyword_guards(sig_loaded, ireps, registry, superclass_of,
+                                                               comment_class_args: sig_comment_class_args)
+                                else {}
+                                end
     # DECLARED_IVAR_GUARD: an `@x: T` declaration of Integer, Float, Symbol or a program class is checked on every store.
     CodeGen.declared_ivars = DeclaredReturns.guard? ? RbsParamCheck.ivar_guards(sig_loaded, superclass_of) : {}
     CodeGen.declared_ivar_elements = DeclaredReturns.guard? ? CodeGen.declared_element_table(sig_applied) : {}
+    CodeGen.declared_arg_elements = DeclaredReturns.guard? ? CodeGen.declared_arg_element_table(sig_applied) : {}
     sig_applied.diagnostics.concat(param_diags)
     param_diags.each { |d| warn "  #{d.file}:#{d.line}:#{d.col}: #{d.severity}: #{d.message} [#{d.code}]" }
     # An unproven parameter type is not trusted, so its argument stays `any` (an mrb_value): it is reported, not fatal.
@@ -1535,6 +1552,13 @@ BC2CPP_MAIN = lambda do
     abort "\n[bc2cpp] DECLARED_PARAM_GUARD: #{param_failures.size} seeded optional parameter declaration(s) without " \
           "their compiled check:\n  #{param_failures.join("\n  ")}"
   end
+  DeclaredReturns.check_traced_params!(compiled, only_owners, other_owners)
+  keyword_guards = (CodeGen.declared_keywords || {}).each_key.to_h { |label| [label, gen.declared_keyword_guards(label)] }
+  keyword_failures = DeclaredReturns.keyword_guard_failures(keyword_guards, compiled)
+  unless keyword_failures.empty?
+    abort "\n[bc2cpp] DECLARED_KEYWORD_GUARD: #{keyword_failures.size} typed keyword declaration(s) without their " \
+          "compiled check:\n  #{keyword_failures.join("\n  ")}"
+  end
   # DECLARED_IVAR_PROOF: a declared slot seeded as its declared kind is trusted only because every store to it is
   # checked; abort unless each method that stores to one compiled with its guard.
   ivar_failures = gen.declared_ivar_writer_failures(compiled, only_owners, other_owners, live: main_reach&.labels)
@@ -2127,6 +2151,14 @@ BC2CPP_MAIN = lambda do
       abort();
     #endif
       bc2cpp_declaration_violation(M, mrb_format(M, "declaration violation: %s argument %d is %T, declared %s", method, position, value, declared));
+    }
+    [[maybe_unused, noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_declared_keyword_violation(mrb_state* M, mrb_value value, const char* method, const char* declared) {
+    #ifdef BC2CPP_NOMETHOD_VERIFY
+      fprintf(stderr, "bc2cpp: NOMETHOD_VERIFY: declared keyword violated: %s keyword is %s, declared %s\n", method, mrb_obj_classname(M, value), declared);
+      fflush(stderr);
+      abort();
+    #endif
+      bc2cpp_declaration_violation(M, mrb_format(M, "declaration violation: %s keyword is %T, declared %s", method, value, declared));
     }
     [[maybe_unused, noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_declared_ivar_violation(mrb_state* M, mrb_value value, const char* ivar, const char* declared) {
     #ifdef BC2CPP_NOMETHOD_VERIFY
@@ -2958,10 +2990,16 @@ BC2CPP_MAIN = lambda do
   # A class this gem's own mrblib reopens is the gem's too, even when it compiles no method of it (mruby-rpg2k's
   # `class Object; include RGSS; end`): the statements run only from this gem's units. The root holds every linked
   # engine mrblib, so only this gem's own directory counts.
-  all_class_units = gen.compile_top_class_units(ireps.fetch(root_label))
   own_mrblib = "/mruby-#{symbol.to_s.delete_suffix('_compiled')}/mrblib/"
+  all_class_units = gen.compile_top_class_units(ireps.fetch(root_label), own_file: bc2cpp_own_unit_file(symbol, own_mrblib))
   own_reopened = all_class_units.select { |unit| unit[:file].to_s.include?(own_mrblib) }.map { |unit| unit[:path] }
   class_units = gen.owned_class_units(all_class_units, only_owners && (only_owners + own_reopened))
+  # FOREIGN_CORE_UNITS: the excluded core file's classes (10error.rb) run first, as mrb_init_mrblib would load them.
+  if symbol == 'core_compiled'
+    class_units = ForeignCoreUnits.units(ForeignCoreUnits.files(BC2CPP_WORLD_ROOT), lambda { |owner, name|
+      registry.fetch(name, []).any? { |d| d.owner == owner && d.irep }
+    }) + class_units
+  end
   File.write(File.join(out_dir, "#{symbol}_units.txt"), class_units.map { |u| "#{u[:path]}\n" }.uniq.join)
   # BC2CPP_DUMP_UNITS: the units this gem emits (the dump of every attempt, in CodeGen#dump_class_unit, also has the
   # units of other gems' owners that owned_class_units drops).

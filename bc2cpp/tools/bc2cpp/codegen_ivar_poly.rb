@@ -40,8 +40,14 @@ class CodeGen
   def prepended_override?(owner, name)
     return true if @unknown_mixins&.include?(owner)
 
+    prepended = @prepended_modules[owner]
+    return false if prepended.nil?
+
+    work = Array(prepended)
+    return false if work.empty?
+
     seen = Set.new
-    work = Array(@prepended_modules[owner]).dup
+    work = work.dup
     until work.empty?
       mod = work.pop
       next unless seen.add?(mod)
