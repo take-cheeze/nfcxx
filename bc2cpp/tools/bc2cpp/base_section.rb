@@ -82,13 +82,29 @@ module BaseSection
           core_decls.each { |tag, decl| core << "# bc2cpp-native: #{tag}\n#{decl}" }
           core << "\n"
         end
-        rest << block.first << rest_decls.map { |tag, decl| tag ? "# bc2cpp-native: #{tag}\n#{decl}" : decl }.join
-        rest << "\n" unless rest_decls.empty?
+        # A block whose declarations all moved to core (or that held none) leaves no header behind: an orphan header
+        # would come back on every write.
+        unless rest_decls.empty?
+          rest << block.first << rest_decls.map { |tag, decl| tag ? "# bc2cpp-native: #{tag}\n#{decl}" : decl }.join
+          rest << "\n"
+        end
       else
         rest << block.join
       end
     end
     [core, rest]
+  end
+
+  # `base_section_check.rb --write`: the core file text and the world file text after regenerating the combined section
+  # (the core stubs plus the world's base section). The world's preamble (above its first header) is kept apart, since
+  # in the combined text it would sit after the core blocks and be read as part of the last one.
+  def self.write_texts(text, bodies, by_tag, core: core_file_text)
+    declared_section = section_of(text)
+    preamble = declared_section.lines.take_while { |l| !l.match?(HEADER) }.join
+    combined = core + core_split(declared_section)[1].delete_prefix(preamble)
+    merged = regenerate_ruby_by_tag(regenerate_native_bodies(combined, bodies), by_tag)
+    core_text, rest_text = core_split(merged)
+    [core_text, preamble + rest_text + text[declared_section.length..]]
   end
 
   def self.tag_of(gem)
