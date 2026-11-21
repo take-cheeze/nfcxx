@@ -670,6 +670,7 @@ BC2CPP_MAIN = lambda do
                              end
     CodeGen.declared_ivar_elements = DeclaredReturns.guard? ? CodeGen.declared_element_table(sig_applied) : {}
     CodeGen.declared_arg_elements = DeclaredReturns.guard? ? CodeGen.declared_arg_element_table(sig_applied) : {}
+    CodeGen.declared_arg_records = DeclaredReturns.guard? ? CodeGen.declared_arg_record_table(sig_applied) : {}
     sig_applied.diagnostics.concat(param_diags)
     param_diags.each { |d| warn "  #{d.file}:#{d.line}:#{d.col}: #{d.severity}: #{d.message} [#{d.code}]" }
     # An unproven parameter type is not trusted, so its argument stays `any` (an mrb_value): it is reported, not fatal.

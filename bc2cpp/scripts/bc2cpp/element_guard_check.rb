@@ -5,7 +5,8 @@
 # ivar tests its result after the read, so a non-Integer element raises BC2cppDeclarationViolation in the compiled run
 # (the interpreted run has no declaration, so it returns the element). A good element behaves the same in both runs.
 # Loops over the ivar (each, map, select, inject, sort_by) test each element they bind (DECLARED_LOOP_ELEMENT), and a
-# block-fallback iterator body tests its element parameters on entry (DECLARED_BLOCK_ELEMENT).
+# block-fallback iterator body tests its element parameters on entry (DECLARED_BLOCK_ELEMENT). A record parameter's
+# literal-key field read is tested the same way (DECLARED_RECORD_READ).
 # Read from the generated code's DECLARED_ELEMENT_GUARD lines and the behaviour comparison.
 #
 #   MRBC=path/to/mrbc ruby scripts/bc2cpp/element_guard_check.rb
@@ -90,6 +91,93 @@ ensure
   ENV.delete('BC2CPP_SIG_DIRS')
 end
 
+
+# DECLARED_RECORD_READ: a record parameter `{ target: String?, ... }` is checked where a literal-key field is read, so
+# the read is typed whatever wrote the Hash, and a wrong field raises in the compiled run.
+RECORD_SOURCE = <<~RUBY
+  class Logline
+    def line(e)
+      e[:target].to_s + e[:hits].to_s
+    end
+
+    def blank?(e)
+      e[:target].empty?
+    end
+
+    def mutated(e)
+      touch(e)
+      e[:target].to_s
+    end
+
+    def touch(e)
+      e[:target] = 7
+      nil
+    end
+  end
+RUBY
+
+RECORD_SIG = <<~RBS
+  class Logline
+    def line: ({ target: String?, ?hits: Integer }) -> untyped
+    def blank?: ({ target: String }) -> untyped
+    def mutated: ({ target: String? }) -> untyped
+  end
+RBS
+
+RECORD_DRIVER = <<~'RUBY'
+  l = Logline.new
+  puts l.line({ target: 'a', hits: 2 })
+  puts l.line({})
+  puts l.blank?({ target: '' }).inspect
+  begin
+    puts l.mutated({ target: 'b' })
+  rescue => e
+    puts "raised #{e.class}"
+  end
+  begin
+    puts l.line({ target: :sym })
+  rescue => e
+    puts "raised #{e.class}"
+  end
+  puts 'end'
+RUBY
+
+Dir.mktmpdir('record_read_sig') do |sig_dir|
+  File.write(File.join(sig_dir, 'logline.rbs'), RECORD_SIG)
+  ENV['BC2CPP_SIG_DIRS'] = sig_dir
+  Dir.mktmpdir('record_read') do |dir|
+    code, = Bc2cppFixtureRuntime.generate(RECORD_SOURCE, dir, only_owners: %w[Logline])
+    body = ->(name) { code.split(%r{^(?=// \w+#)}).find { |part| part.start_with?("// Logline##{name} ") }.to_s }
+    line = body.call('line')
+    check.call('each literal-key field read of a record parameter is guarded',
+               line.scan('DECLARED_ELEMENT_GUARD Logline#line arg1[:').size == 2)
+    check.call('the guarded String? field is read as nil or exactly a String',
+               line.include?('NILABLE_RECEIVER :to_s -- receiver is nil or exactly String'))
+    blank = body.call('blank?')
+    check.call('a non-nil String field reads exactly a String (no nil allowed by the guard)',
+               blank.include?('Logline#blank? arg1[:target]') && !blank.include?('owner-call: empty?') &&
+                 !blank[/if \(mrb_unlikely\(!\(mrb_nil_p/])
+  end
+  Dir.mktmpdir('record_read_off') do |dir|
+    ENV['BC2CPP_DECLARED_RECORD_READ'] = '0'
+    code, = Bc2cppFixtureRuntime.generate(RECORD_SOURCE, dir, only_owners: %w[Logline])
+    check.call('BC2CPP_DECLARED_RECORD_READ=0 leaves the reads unguarded', !code.include?('Logline#line arg1[:'))
+  ensure
+    ENV.delete('BC2CPP_DECLARED_RECORD_READ')
+  end
+  suite.generate(RECORD_SOURCE, %w[Logline])
+  suite.behaviour(RECORD_DRIVER, banner: 'declared record read, interpreted and compiled', same: false) do |interpreted, compiled|
+    check.call('good records read the same in both runs', interpreted && compiled && interpreted.first(3) == compiled.first(3))
+    raised = compiled&.count('raised BC2cppDeclarationViolation')
+    check.call('a field mutated through an alias before the read raises in the compiled run',
+               raised && raised >= 1 && compiled.any? { |l| l.include?('Logline#mutated argument 1[:target]') } &&
+                 interpreted[3] == '7')
+    check.call('a field of another class raises in the compiled run',
+               raised == 2 && compiled.any? { |l| l.include?('Logline#line argument 1[:target]') } && interpreted[4] == 'sym')
+  end
+ensure
+  ENV.delete('BC2CPP_SIG_DIRS')
+end
 
 # A program class: `@things: Array[Thing]` (an exact-class element), with a Thing and an Other.
 THING_SOURCE = <<~RUBY

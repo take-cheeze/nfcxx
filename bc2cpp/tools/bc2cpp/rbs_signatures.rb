@@ -247,6 +247,12 @@ module RbsSignatures
     untyped = ->(t) { t.nil? || (t.kind == :other && t.text == 'untyped') }
     merged = fresh.dup
     merged.args = fresh.args.each_with_index.map { |t, i| untyped.(t) && prev.args[i] && !untyped.(prev.args[i]) ? prev.args[i] : t }
+    # The raw types follow the same rule (DECLARED_RECORD_READ reads a record parameter from them).
+    if Array(prev.argument_types).size == Array(fresh.argument_types).size
+      merged.argument_types = fresh.argument_types.each_with_index.map do |t, i|
+        t.is_a?(RBS::Types::Bases::Any) ? prev.argument_types[i] : t
+      end.freeze
+    end
     if Array(prev.optional_args).size == Array(fresh.optional_args).size
       merged.optional_args = fresh.optional_args.each_with_index.map do |t, i|
         untyped.(t) && !untyped.(prev.optional_args[i]) ? prev.optional_args[i] : t
@@ -353,7 +359,7 @@ module RbsSignatures
   # --------------------------------------------------------------------------------------------- applying
 
   Applied = Struct.new(:ivar_classes, :ivar_elements, :ivar_hash_elements, :origins, :locs, :diagnostics, :ivar_sigs, :ir_arg_types, :ir_return_types, :ir_named_returns, :ir_ivar_types, :ir_owners, :ir_methods, :ir_arg_elements, :ir_ivar_elements, :ir_const_elements, :ir_optional_types, :ir_keyword_types, :ir_rest_elements, :ir_block_signatures, :subtree_ivars, :subtree_args, :subtree_returns, :based,
-                       :ir_arg_optional_elements, keyword_init: true)
+                       :ir_arg_optional_elements, :ir_arg_records, keyword_init: true)
 
   # Merges the signatures into the three comment-annotation tables (irep label -> struct), in place, and returns what
   # the ivar seeds and the diagnostics are. `annotations`, `class_annotations` and `element_annotations` are what
@@ -409,6 +415,11 @@ module RbsSignatures
           register = index + 1
           [register, type.element_classes] if type.element_classes && ap.ir_arg_types[d.irep]&.key?(register)
         end.to_h.freeze
+        # DECLARED_RECORD_READ only: the record fields of a `{ k: T, ... }` parameter (CodeGen.declared_arg_record_table).
+        records = Array(sig.argument_types).each_with_index.filter_map do |type, index|
+          [index + 1, type] if type.is_a?(RBS::Types::Record)
+        end
+        (ap.ir_arg_records ||= {})[d.irep] = records.to_h.freeze unless records.empty?
         # DECLARED_ARG_ELEMENT only: the element of an `Array[T]?` parameter, which the IR's element facts leave out.
         (ap.ir_arg_optional_elements ||= {})[d.irep] = sig.args.each_with_index.filter_map do |type, index|
           register = index + 1
