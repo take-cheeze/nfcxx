@@ -101,9 +101,10 @@ assigns without the call's location). In a function with pads GVN merges only in
 ### QBE (`take-cheeze/qbe`, branch `nfcxx/eh-tables`)
 
 - `ehtype ID $sym | ehtype ID 0`, `ehnoexcept`, `ehspec ID...`, `ehpad CLEANUP ID...`, `ehunwind @pad | ehunwind 0`
-  (std::terminate).
-- The LSDA has one call site per call: its block's pad and the pad's action chain, no pad (the exception passes
-  through), or no entry (std::terminate). It has an action table, a type table with `DW.ref` indirections and the
+  (std::terminate), `ehnothrow $sym...` (callees that let no exception out).
+- A call site of the LSDA has its block's pad and the pad's action chain, no pad (the exception passes through), or no
+  entry (std::terminate). As gcc's, one site covers consecutive calls with the same pad when no call without an entry
+  comes between them, and a call of an `ehnothrow` callee has no entry and sits inside any range. It has an action table, a type table with `DW.ref` indirections and the
   specification list, as gcc's. A leaf function has no table (nothing unwinds through it).
 - `%e =l ehptr`, `%s =l ehsel`: in a pad, the exception and the selector the personality installed (gcc's
   `__builtin_eh_pointer` and `__builtin_eh_filter`). The abi passes move them to the top of the pad and make them copies
@@ -114,6 +115,17 @@ assigns without the call's location). In a function with pads GVN merges only in
   no register for them; `simplcfg` keeps blocks with different unwind targets apart; a function with pads keeps its
   frame and its stack slots; a call that unwinds to a pad or to std::terminate is never a tail call. Tested on x86-64
   ELF; the arm64 emitter marks call sites and pads too (CI's arm64 Linux job runs it); rv64 has no tables.
+
+### Nothrow callees (`scripts/pathb-ssa-qbe.rb` `nothrow_callees`)
+
+The emitter lists with `ehnothrow` the direct callees of a function with tables that let no exception out: a `noexcept`
+function of the module (an exception that would leave it calls std::terminate); a function of the module whose
+definition every call reaches (static, an inline or template instance, or exported outside a shared object: not
+`__attribute__((weak))`, not preemptible with `-fPIC`), with no dynamic exception specification, whose calls are all
+direct calls of such functions; and libc's nothrow routines (`scripts/pathb-nothrow.rb`; not stdio's output routines,
+which are cancellation points). A declaration's `noexcept` is not in the IR, so a callee the module does not define is
+nothrow only when it is in that list. On `lib/ast/nfcast_parse.cpp` (-O2) the merged ranges and the nothrow callees take
+`.gcc_except_table` from 12,164 bytes to 4,728 (g++ -O2: 3,143).
 
 ### The EDG fork (`NFCXX_ITANIUM_EH_TYPEINFO`, set with `PATHB_EH=tables`)
 

@@ -1963,6 +1963,8 @@ NOTHROW_EXTERN = %w[memcpy memmove memset memcmp memchr strlen strcmp strncmp st
                     abort _exit __assert_fail __assert_perror_fail __stack_chk_fail _ZSt21__glibcxx_assert_failPKciS0_S0_ _ZSt9terminatev
                     _ZdlPv _ZdlPvm _ZdaPv _ZdaPvm _ZdlPvSt11align_val_t _ZdlPvmSt11align_val_t _ZdaPvSt11align_val_t
                     _ZdaPvmSt11align_val_t].freeze
+# (scripts/pathb-nothrow.rb has the exception tables' copy of the list, without stdio's cancellation points: this file
+# stays one file for the bc2cpp world)
 # --nothrow-extern=NAME,NAME: more functions the module does not define that let no exception out (a project's own abort).
 $nothrow_extra = []
 

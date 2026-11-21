@@ -9,6 +9,7 @@
 #   scripts/pathb-ssa-qbe.rb FILE.ssa > FILE.qbe      then:  build/qbe/qbe FILE.qbe > FILE.s
 #
 require_relative "pathb-ssa"
+require_relative "pathb-nothrow"
 
 QbeUnsupported = Class.new(StandardError)
 
@@ -176,7 +177,7 @@ module Qbe
     # interpose (not static) is read through the GOT or a pointer cell, never as a PC-relative reference, which ld rejects for
     # a symbol of a shared object (R_X86_64_PC32 "can not be used when making a shared object").
     # darwin: the module is for a Darwin target (the builder sets it from the host; a closed script world has no RbConfig).
-    attr_accessor :ptr32, :regparm3, :xadd, :cmpxchg, :jtab, :safe, :asan, :darwin, :got_extern, :pic, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_thunks, :trap_checks, :no_pie
+    attr_accessor :ptr32, :regparm3, :xadd, :cmpxchg, :jtab, :safe, :asan, :darwin, :got_extern, :pic, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_thunks, :trap_checks, :no_pie, :nothrow
   end
   # --asan, milestone 2: the redzone on each side of a slot that stays in memory (poisoned at the function's entry, unpoisoned
   # before its return). 32 bytes, as the qbe backend's (docs/notes/asan.md).
@@ -196,6 +197,7 @@ module Qbe
   self.module_has_data = false
   self.sp_objects = []
   self.sp_funcs = []
+  self.nothrow = {}   # the callees that let no exception out (module_context, nothrow_callees): symbol => true
   self.asan_objects = []   # --asan, milestone 3: [symbol, size rounded up to 8] of each global with a redzone after it
 
   module_function
@@ -1343,6 +1345,7 @@ end
 
     # Zero-cost exception tables (docs/notes/pathb-zero-cost-eh.md): the function's catch clause types and noexcept.
     def eh_header
+      eh_nothrow_line
       @form.drop(2).each do |p|
         next unless p.is_a?(Array)
         # QBE's i386 target writes no exception tables (no CFI either): an exception would reach std::terminate
@@ -1359,6 +1362,24 @@ end
           end
         end
       end
+    end
+
+    # The direct callees of a function with exception tables that let no exception out (Qbe.nothrow): their calls have
+    # no call site entry.
+    def eh_nothrow_line
+      tables = false
+      names = {}
+      walk = lambda do |x|
+        next unless x.is_a?(Array)
+        tables = true if %w[eh-unwind eh-noexcept eh-spec eh-types].include?(head(x))
+        if head(x) == "call" && x[2].is_a?(Ref) && x[2].sigil == "&"
+          n = Qbe.symbol(x[2].raw)
+          names[n] = true if Qbe.nothrow.key?(n) || n.start_with?("__atomic_")
+        end
+        x.each { |y| walk.call(y) }
+      end
+      walk.call(@form)
+      @lines << "  ehnothrow #{names.keys.sort.map { |n| "$#{n}" }.join(" ")}" if tables && !names.empty?
     end
 
     # A label the emitter writes inside an SSA block (a loop of an expansion) begins a QBE block, whose calls unwind to
@@ -3971,7 +3992,68 @@ end
     [rcls, classes]
   end
 
+  # The exception tables' nothrow analysis (as gcc's): the callees whose calls need no call site entry (QBE's
+  # ehnothrow). A function the module defines lets no exception out when it is noexcept (an exception that would leave it
+  # calls std::terminate), or when the definition is the one every call reaches (static, an inline or template instance,
+  # or an exported function outside a shared object: not __attribute__((weak)), not preemptible with -fPIC), has no
+  # dynamic exception specification, and makes only direct calls of such functions or of PathbNothrow::EXTERN (libc's
+  # nothrow routines). Computed as the least set of the functions that can throw, through their callers.
+  def nothrow_callees(forms)
+    defs = {}
+    forms.each { |f| defs[f[1].raw.delete('"')] = f if head(f) == "ssa-function" }
+    callers = Hash.new { |h, k| h[k] = [] }
+    bad = {}
+    work = []
+    defs.each do |name, f|
+      attrs = f.drop(2).select { |p| p.is_a?(Array) }
+      next if attrs.any? { |p| head(p) == "eh-noexcept" }
+
+      fixed = attrs.any? { |p| head(p) == "static" } || attrs.any? { |p| head(p) == "weak" && p.length == 1 } ||
+              !(pic || attrs.any? { |p| head(p) == "weak" })
+      risky = !fixed || attrs.any? { |p| head(p) == "eh-spec" }
+      callees = {}
+      unless risky
+        walk = lambda do |x|
+          next unless x.is_a?(Array)
+          if head(x) == "call"
+            if x[2].is_a?(Ref) && x[2].sigil == "&"
+              callees[x[2].raw.delete('"')] = true
+            else
+              risky = true
+            end
+          end
+          x.each { |y| walk.call(y) }
+        end
+        walk.call(f)
+      end
+      callees.each_key do |c|
+        if defs.key?(c)
+          callers[c] << name
+        elsif !PathbNothrow.extern?(c)
+          risky = true
+        end
+      end
+      next unless risky
+
+      bad[name] = true
+      work << name
+    end
+    until work.empty?
+      callers[work.pop].each do |name|
+        next if bad[name]
+
+        bad[name] = true
+        work << name
+      end
+    end
+    out = {}
+    defs.each_key { |n| out[symbol(n)] = true unless bad[n] }
+    PathbNothrow::EXTERN.each { |n| out[n] = true }
+    out
+  end
+
   def module_context(forms)
+    self.nothrow = nothrow_callees(forms)
     gs = forms.select { |g| head(g) == "global" }
     self.module_has_data = forms.any? { |f| %w[global data].include?(head(f)) }
     self.sp_objects = []
