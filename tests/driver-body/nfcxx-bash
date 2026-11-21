@@ -462,14 +462,26 @@ for loop_rec in ${loop_recs[@]+"${loop_recs[@]}"}; do
 done
 shift $#
 # END the argument loop
-[ $((ncpp + nobj + ${#cfiles[@]} + stdin_src)) -gt 0 ] || { echo "nfcxx: no input files" >&2; exit 2; }
-# --emit-hip: the .cu input as HIP source on stdout, for hipcc (tools/cuda-rewrite --hip). Nothing is compiled, and the
-# -I, -D and -U options go to the rewriter as they go to the host copy.
-if [ "${emit_hip:-0}" = 1 ]; then
-  [ ${#cu_inputs[@]} = 1 ] || { echo "nfcxx: --emit-hip takes one .cu file" >&2; exit 2; }
-  hip_opts=(); for f in ${cflags[@]+"${cflags[@]}"}; do case $f in -I*|-D*|-U*) hip_opts+=("$f");; esac; done
-  exec "$root/build/cuda-rewrite" --hip ${hip_opts[@]+"${hip_opts[@]}"} "${cu_inputs[0]}"
-fi
+# The early exits: the refusals of the state above and the --emit-hip route are scripts/nfcxx-early-exit.rb's (pre: status 2 is a
+# refusal, its message on stderr; status 3 is the route). early_records gives the state as records.
+early_rec() { printf 's%s\0' "$1"; }
+early_records() {
+  local kv
+  for kv in "ncpp=$ncpp" "nobj=$nobj" "cfiles_n=${#cfiles[@]}" "cu_n=${#cu_inputs[@]}" "stdin_src=$stdin_src" \
+    "emit_hip=${emit_hip:-0}" "compile_only=$compile_only" "emit_c=$emit_c" "xlang=$xlang" "depmode=$depmode" \
+    "dialect=$dialect" "edg=$edg"; do
+    early_rec "$kv"
+  done
+}
+early_status=0; "${RUBY:-ruby}" "$root/scripts/nfcxx-early-exit.rb" pre < <(early_records) || early_status=$?
+case $early_status in
+  0) ;;
+  3)  # --emit-hip: the .cu input as HIP source on stdout, for hipcc (tools/cuda-rewrite --hip). Nothing is compiled, and the
+      # -I, -D and -U options go to the rewriter as they go to the host copy.
+    hip_opts=(); for f in ${cflags[@]+"${cflags[@]}"}; do case $f in -I*|-D*|-U*) hip_opts+=("$f");; esac; done
+    exec "$root/build/cuda-rewrite" --hip ${hip_opts[@]+"${hip_opts[@]}"} "${cu_inputs[0]}" ;;
+  *) exit $early_status ;;
+esac
 # SYCL kernel integration (docs/notes/sycl-kernel-builtins.md). A -c compile of one C++ source that includes the oneAPI SYCL
 # headers (a -I directory holding sycl/detail/kernel_desc.hpp) runs in two passes, as the real toolchain's integration headers
 # do. Pass 1 (NFCXX_SYCL_DUMP) records each kernel's stable name, closure size and parameters; scripts/sycl-integration-header.rb
@@ -499,17 +511,9 @@ if [ $preprocess = 1 ]; then
   exec "$hostcxx" -E "-std=${std#--}" ${pp_x[@]+${pp_x[@]+"${pp_x[@]}"}} ${ppflags[@]+${ppflags[@]+"${ppflags[@]}"}} ${cflags[@]+${cflags[@]+"${cflags[@]}"}} \
     ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"} ${pp_pre[@]+${pp_pre[@]+"${pp_pre[@]}"}} ${srcs[@]+${srcs[@]+"${srcs[@]}"}} ${pp_in[@]+${pp_in[@]+"${pp_in[@]}"}} ${pp_out[@]+"${pp_out[@]}"}
 fi
-if [ $stdin_src = 1 ]; then
-  echo "nfcxx: a source on stdin is supported only with -E" >&2; exit 2
-fi
-case $xlang in ""|c++|none) ;; *) echo "nfcxx: -x $xlang: only C++ sources (use nfcc for C)" >&2; exit 2 ;; esac
-if [ -n "$depmode" ] && [ $compile_only = 0 ]; then
-  echo "nfcxx: $depmode needs -c (dependency files are written for a compile only)" >&2; exit 2
-fi
-if [ $ncpp -gt 0 ] || [ $emit_c = 1 ] || { [ $nobj -gt 0 ] && [ ${#cfiles[@]} = 0 ]; }; then
-  [ -x "$edg/eccp" ] || { echo "nfcxx: EDG not built; run scripts/setup-edg.sh" >&2; exit 2; }
-fi
-case $dialect in g++|clang) ;; *) echo "nfcxx: unknown dialect '$dialect'" >&2; exit 2 ;; esac
+# The refusals after the -E route (stdin without -E, -x, dependency files without -c, the EDG build, the dialect): the same planner.
+early_status=0; "${RUBY:-ruby}" "$root/scripts/nfcxx-early-exit.rb" post < <(early_records) || early_status=$?
+[ $early_status = 0 ] || exit $early_status
 # C++ modules (docs/notes/modules.md). A program whose sources declare or import a module is built by mod_build_program, which
 # runs this driver once per source. A compile gets the module options: --modules, the directory of the interface files (BMIs,
 # --module-dir, else the directory of -o) and, for an interface unit, the BMI it writes.

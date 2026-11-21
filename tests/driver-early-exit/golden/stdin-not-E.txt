@@ -1,0 +1,4 @@
+stdout:
+status=2
+stderr:
+nfcxx: a source on stdin is supported only with -E
