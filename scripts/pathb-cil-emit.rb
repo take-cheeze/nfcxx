@@ -768,6 +768,13 @@ class Function
     @frame = 0
     @ret_local = nil
     @ret_label = nil
+    # zero-cost exception tables (docs/notes/pathb-zero-cost-eh.md, eh_try): the pads, the catch types, the state local
+    @eh_pads = []
+    @eh_types = []
+    @eh_noexcept = false
+    @eh_st = nil
+    @eh_in_pads = false
+    @eh_body_labels = {}
     parse_header(form)
   end
 
@@ -862,6 +869,10 @@ class Function
     end
     refuse("#{pys(@name)}: bad expression #{py_repr(e)}") unless e.is_a?(Array) && truthy(e)
     head = pyidx(e, 0)
+    if head == 'eh-tid'   # a catch type id in a pad's selector test (eh_try): a long constant
+      emit("ldc.i8 #{py_int(pyidx(e, 1))}")
+      return 'int64'
+    end
     if head == 'const'
       il, _size, _signed = @em.type_of(pyidx(e, 1))
       v = pyidx(e, 2)
@@ -1310,7 +1321,9 @@ class Function
     if args.any? { |a| a.is_a?(Array) && truthy(a) && pyidx(a, 0) == 'variadic' }
       return variadic_call(name, indirect, ret, args)
     end
-    refuse("#{pys(@name)}: #{pys(name)} is a helper of nfcxx's runtime (long double, __int128 or __float128), which the CIL backend does not link") if !indirect && name.start_with?('__nfcxx_')
+    if !indirect && name.start_with?('__nfcxx_') && !['__nfcxx_eh_ptr', '__nfcxx_eh_sel'].include?(name)
+      refuse("#{pys(@name)}: #{pys(name)} is a helper of nfcxx's runtime (long double, __int128 or __float128), which the CIL backend does not link")
+    end
     if name == '_setjmp'
       unless eh_setjmp_arg(args[0])
         refuse("#{pys(@name)}: setjmp is not supported by the CIL backend (only the setjmp of a lowered C++ try is)")
@@ -1524,9 +1537,33 @@ class Function
       return
     end
     if head == 'goto'
+      if @eh_in_pads && @eh_body_labels.key?(pyidx(s, 1))
+        # a pad's jump to a catch handler of the body: back into the protected block at its start (eh_try)
+        emit("ldc.i4 #{@eh_body_labels[pyidx(s, 1)]}", "stloc #{@eh_res}", "br #{@eh_top}")
+        return
+      end
       target = "L_#{ir_label(pyidx(s, 1))}"
       emit(@try_depth > 0 ? "leave #{target}" : "br #{target}")
       return
+    end
+    # zero-cost exception tables (eh_try)
+    if head == 'eh-state'
+      n = py_int(pyidx(s, 1))
+      if @eh_st.nil?
+        refuse("#{pys(@name)}: (eh-state #{n}) in a function without landing pads") if n != 0
+      else
+        emit("ldc.i4 #{n}", "stloc #{@eh_st}")
+      end
+      return
+    end
+    if head == 'eh-resume'
+      expr(pyidx(s, 1))
+      emit('pop')
+      eh_rethrow
+      return
+    end
+    if ['eh-inline-begin', 'eh-inline-end', 'eh-state-outer', 'eh-resume-outer'].include?(head)
+      refuse("#{pys(@name)}: an inlined callee with exception tables is not supported by the CIL backend")
     end
     if head == 'break' || head == 'continue'
       # a switch is on the stack with no continue label: `continue` is the innermost loop's, `break` the innermost entry's
@@ -1712,6 +1749,102 @@ class Function
     emit("br #{top}", "#{brk}:")
   end
 
+  # zero-cost exception tables (docs/notes/pathb-zero-cost-eh.md) -----------
+  #
+  # A function with landing pads: (eh-state N) says the calls after it unwind to pad N (0: none); the pads (eh-pad N
+  # CLEANUP (TID...) STMT...) come after the body and jump to the body's catch handlers. On CIL the body is one
+  # protected block entered at IL_ehtop:
+  #   IL_ehtop: .try { switch on the resume index (0: the body; k: the k-th label of the body) ... body ... }
+  #             catch CxxThrow { keep the state; leave IL_ehpads }
+  #   IL_ehpads: the pad of the state; its selector: the first of its catch types whose typeinfo is the thrown one's
+  #             (cil-link.rb's cxx_ti: the address of the typeinfo object __cxa_throw was given; exact types, no base
+  #             class or pointer conversions), 0 when none is and the pad cleans up; otherwise the throw goes on.
+  #             The pad's code runs outside the try; a jump to a label of the body sets the resume index and goes to
+  #             IL_ehtop (a branch into a protected block is only allowed to its start).
+  # (eh-resume EXC) throws CxxThrow again (the exception object and its type stay in cil-link.rb's fields). In a noexcept
+  # function an exception at state 0 calls abort, as std::terminate does. noexcept is not enforced in a function without
+  # pads, and an exception thrown by a pad's own code is not std::terminate.
+  def eh_collect_labels(x)
+    return unless x.is_a?(Array)
+    if truthy(x) && pyidx(x, 0) == 'label' && pylen(x) == 2 && pyidx(x, 1).is_a?(String)
+      @eh_body_labels[pyidx(x, 1)] = @eh_body_labels.size + 1 unless @eh_body_labels.key?(pyidx(x, 1))
+      return
+    end
+    x.each { |y| eh_collect_labels(y) }
+  end
+
+  def eh_rethrow
+    emit('newobj instance void class CxxThrow::.ctor()', 'throw')
+  end
+
+  def eh_try(body)
+    @eh_st = new_local('int32')
+    @eh_res = new_local('int32')
+    @eh_hit = new_local('int32')
+    eh_collect_labels(body)
+    @eh_top = new_label('IL_ehtop')
+    start = new_label('IL_ehbody')
+    pads_l = new_label('IL_ehpads')
+    emit('ldc.i4.0', "stloc #{@eh_st}", 'ldc.i4.0', "stloc #{@eh_res}")
+    emit("#{@eh_top}:")
+    @try_depth += 1
+    emit('.try {')
+    targets = [start] + @eh_body_labels.keys.map { |n| "L_#{ir_label(n)}" }
+    emit("ldloc #{@eh_res}", "switch (#{targets.join(', ')})")
+    emit("#{start}:")
+    body.each { |stmt_form| stmt(stmt_form) }
+    if @ret == 'void'
+      emit("leave #{@ret_label}")
+    else
+      emit('ldnull', 'throw')  # falling off a non-void function: undefined behaviour in C++
+    end
+    emit('}')
+    @try_depth -= 1
+    emit('catch class CxxThrow {', 'pop', "ldloc #{@eh_st}", "stloc #{@eh_hit}", "leave #{pads_l}", '}')
+    emit("#{pads_l}:")
+    sel_l = {}
+    @eh_pads.each do |p|
+      n = py_int(pyidx(p, 1))
+      sel_l[n] = new_label('IL_ehsel')
+      emit("ldloc #{@eh_hit}", "ldc.i4 #{n}", "beq #{sel_l[n]}")
+    end
+    if @eh_noexcept
+      abort
+    else
+      eh_rethrow
+    end
+    @eh_pads.each do |p|
+      n = py_int(pyidx(p, 1))
+      if pylen(p) > 4 && pyidx(p, 4).is_a?(Array) && truthy(pyidx(p, 4)) && pyidx(pyidx(p, 4), 0) == 'eh-outer'
+        refuse("#{pys(@name)}: an inlined callee with exception tables is not supported by the CIL backend")
+      end
+      code_l = new_label('IL_ehpad')
+      emit("#{sel_l[n]}:")
+      pyidx(p, 3).each do |t|
+        tid = py_int(t)
+        sym = @eh_types[tid - 1]
+        if sym.is_a?(Ref)
+          nx = new_label('IL_ehnext')
+          emit("ldsfld int64 Prog::'cxx_ti'")
+          expr(sym)
+          emit("bne.un #{nx}", "ldc.i8 #{tid}", "stsfld int64 Prog::'cxx_sel'", "br #{code_l}", "#{nx}:")
+        else
+          emit("ldc.i8 #{tid}", "stsfld int64 Prog::'cxx_sel'", "br #{code_l}")   # catch (...)
+        end
+      end
+      if py_int(pyidx(p, 2)) == 1
+        emit('ldc.i8 0', "stsfld int64 Prog::'cxx_sel'", "br #{code_l}")
+      else
+        eh_rethrow
+      end
+      emit("#{code_l}:")
+      @eh_in_pads = true
+      pytail(p, 4).each { |stmt_form| stmt(stmt_form) }
+      @eh_in_pads = false
+      eh_rethrow   # a pad's code ends in a jump; this is never reached
+    end
+  end
+
   # the function -----------------------------------------------------------
 
   def translate(form)
@@ -1719,7 +1852,15 @@ class Function
     slots = []
     body = []
     pytail(form, 2).each do |part|
-      if part.is_a?(Array) && truthy(part) && pyidx(part, 0) == 'slot'
+      if part.is_a?(Array) && truthy(part) && pyidx(part, 0) == 'eh-pad'
+        @eh_pads << part
+      elsif part.is_a?(Array) && truthy(part) && pyidx(part, 0) == 'eh-types'
+        @eh_types = pytail(part, 1)
+      elsif part.is_a?(Array) && truthy(part) && pyidx(part, 0) == 'eh-noexcept'
+        @eh_noexcept = true
+      elsif part.is_a?(Array) && truthy(part) && pyidx(part, 0) == 'eh-spec'
+        refuse("#{pys(@name)}: a dynamic exception specification is not supported by the CIL backend")
+      elsif part.is_a?(Array) && truthy(part) && pyidx(part, 0) == 'slot'
         slots << part
       elsif part.is_a?(Array) && truthy(part) && pyidx(part, 0) == 'body'
         body.concat(pytail(part, 1))
@@ -1745,12 +1886,17 @@ class Function
     @ret_local = @ret == 'void' ? nil : new_local(@ret)
     @ret_label = new_label('IL_ret')
     emit("ldc.i4 #{@frame}", 'localloc', 'conv.u8', "stloc #{@frame_local}") if @frame != 0
-    body.each { |stmt_form| stmt(stmt_form) }
-    if @ret == 'void'
-      emit("#{@ret_label}:", 'ret')
+    if @eh_pads.empty?
+      body.each { |stmt_form| stmt(stmt_form) }
+      if @ret == 'void'
+        emit("#{@ret_label}:", 'ret')
+      else
+        emit('ldnull', 'throw')  # falling off a non-void function: undefined behaviour in C++
+        emit("#{@ret_label}:", "ldloc #{@ret_local}", 'ret')
+      end
     else
-      emit('ldnull', 'throw')  # falling off a non-void function: undefined behaviour in C++
-      emit("#{@ret_label}:", "ldloc #{@ret_local}", 'ret')
+      eh_try(body)
+      emit("#{@ret_label}:", *(@ret == 'void' ? ['ret'] : ["ldloc #{@ret_local}", 'ret']))
     end
     lines = [".method static #{pys(@ret)} '#{pys(@em.fn_name(@name))}'(#{@params.map { |p| p[2] }.join(', ')}) cil managed {",
              '  .maxstack 1024']

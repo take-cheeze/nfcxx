@@ -32,6 +32,15 @@ longjmps in EDG's runtime.
 
 ## The translation
 
+With exception tables (the default harness, `docs/notes/pathb-zero-cost-eh.md`) a function with landing pads is one
+protected block: the body runs in `.try`, entered at its start through a `switch` on a resume index; `(eh-state N)`
+stores N in a local; the `catch class CxxThrow` handler keeps the state and leaves to the pads, after the block. The
+pad of the state computes its selector (the first catch type whose typeinfo address is the thrown one's, kept by
+`__cxa_throw` in cil-link.rb's `cxx_ti`; 0 for a cleanup), and its code runs; a jump to a handler of the body sets the
+resume index and goes back to the block's start; `(eh-resume ...)` throws `CxxThrow` again. `__cxa_allocate_exception`,
+`__cxa_throw`, `__cxa_begin_catch` and `__cxa_end_catch` are cil-link.rb's runtime. The rest of this section is the
+frames mode's translation.
+
 - The emitter recognises the `if` whose condition is `_setjmp(...) == 0` and emits `.try { B } catch class CxxThrow { H }`.
 - `_setjmp` is 0 (it is only ever the entry test). `__throw_setup` allocates the storage and records its pointer in
   `cxx_ptr`. `__throw` raises `CxxThrow`. The catch copies `cxx_ptr` into `__caught_object_address` and sets
@@ -51,7 +60,8 @@ longjmps in EDG's runtime.
 | `throw_across_frames` | the throw is in a callee, caught in the caller | 41 |
 | `no_throw` | a `try` that returns normally | 5 |
 | `loop_break_in_catch` | `break` out of a handler inside a loop | 150 |
-| `two_catches` | several catch clauses: refused, with a message | refused |
+| `two_catches` | several catch clauses, selected by the thrown typeinfo | 5 |
+| `unwind_dtor` | a destructor runs while the exception unwinds its frame (a landing pad) | 42 |
 | `rem_shift` | `crem` (with a negative dividend), `cshl` and `cshr` with variable counts | 5 |
 | `float_ptr` | `fneg`, a volatile load (`load.v`), `pdiff`, a compiler barrier | 12 |
 | `small_wrap` | `++` and `--` on `unsigned char`, `signed char` and `short` wrap to the type, in the value of the expression | 42 |
@@ -154,12 +164,10 @@ A file Path B refuses falls back to cproc.
 
 ## Limits of this spike (each a refusal or a known wrong result)
 
-- **One catch clause only.** The catch assumes clause 1. Selecting among clauses (and checking the thrown type) needs
-  typeinfo objects: EDG's `_ZTI*` are extern here (libc++/libstdc++ define them on hosted builds), so the emitter cannot
-  compare them. A try with several clauses is refused. A single catch of a different type than the one thrown is not
-  detected: it is a wrong result, so it must be fixed before this route is used on real programs.
-- **No destructors during unwinding.** EDG's cleanup tables are not translated. Objects with destructors in the `try`
-  block are not destroyed when a throw leaves it.
+- **Exact catch types only** (exception tables). A clause matches when the thrown object's typeinfo is the clause's, by
+  address: no base class, pointer or qualification conversions. With a frames harness (`PATHB_EH=frames`) the old limits
+  hold: one catch clause (a try with several is refused), and no destructors during unwinding.
+- **No std::terminate from a pad's own code**, and `noexcept` is enforced only in a function that has landing pads.
 - **Native exceptions.** Exceptions thrown by native code (the host's libstdc++) are not CLR exceptions and are not caught.
 - **The IR is a subset.** Classes with virtual dispatch, variadic calls and `sret` need more emitter work (above).
   `cf2i` (a checked float-to-int conversion) and volatile stores (`store.v`) are refused too. Floating-point arithmetic
@@ -173,6 +181,6 @@ A file Path B refuses falls back to cproc.
 ## Next steps, in order
 
 1. `byval` and aggregate values, and the variadic calls (they carry most of the refusals).
-2. Typeinfo objects for the thrown and caught types, so catch clauses can be selected and checked by type.
-3. Cleanups: translate the destructor calls of the `try` block's objects to `finally` (or `fault`) regions.
-4. `sret` and aggregate values (C++ classes passed or returned by value).
+2. Base-class and pointer conversions in a catch clause's match (the typeinfo's own `__do_catch`, which needs the
+   typeinfo objects' vtables).
+3. `sret` and aggregate values (C++ classes passed or returned by value).
