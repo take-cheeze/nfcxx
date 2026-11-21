@@ -996,12 +996,12 @@ class CodeGen
     <<~CPP.gsub(/^(?=.)/, '  ')
       // However the loop ends (a return, or an unwind such as the return token of Enumerable#all?), the caller's frame-local
       // block goes out of scope: the frame must not keep it. (A frame that parks in a Fiber returns above this point.)
-      Bc2cppResumeRelease bc2cpp_release = { M, &frame };
+      Bc2cppResumeRelease bc2cpp_release = { M, &bc2cpp_rframe };
       for (;;) {
-        mrb_value result = #{step_name}(M, self, frame, resume);
-        if (!bc2cpp_resume_frame_p(M, result)) return result;
-        frame = result;
-        resume = bc2cpp_resumable_resume_from_c(M, frame);
+        mrb_value bc2cpp_rresult = #{step_name}(M, self, bc2cpp_rframe, bc2cpp_rresume);
+        if (!bc2cpp_resume_frame_p(M, bc2cpp_rresult)) return bc2cpp_rresult;
+        bc2cpp_rframe = bc2cpp_rresult;
+        bc2cpp_rresume = bc2cpp_resumable_resume_from_c(M, bc2cpp_rframe);
       }
     CPP
   end
@@ -1043,11 +1043,11 @@ class CodeGen
           // An armed entry is reached from the runtime (a dispatcher, a CALL site, a Fiber body's start), which counted already.
           if (!bc2cpp_prologue.expect) bc2cpp_check_argc(M, 0, 0);
           bc2cpp_resumable_init(M);
-          mrb_value frame = mrb_nil_value(), resume = mrb_nil_value();
+          mrb_value bc2cpp_rframe = mrb_nil_value(), bc2cpp_rresume = mrb_nil_value();
           if (bc2cpp_prologue_armed(M, #{owner_literal}, self)) {
             // The frame exists before it is parked: the maker of a block step stores the pointers it captured in it.
-            bc2cpp_resume_frame(M, &frame, #{ctx.nregs}, #{ctx.slot_count});
-            return bc2cpp_prologue_park(M, bc2cpp_method_frame_new(M, #{step_name}, self, frame));
+            bc2cpp_resume_frame(M, &bc2cpp_rframe, #{ctx.nregs}, #{ctx.slot_count});
+            return bc2cpp_prologue_park(M, bc2cpp_method_frame_new(M, #{step_name}, self, bc2cpp_rframe));
           }
       CPP
         }
@@ -1069,16 +1069,18 @@ class CodeGen
     head = <<~CPP
       mrb_value #{impl_name}(mrb_state* M, mrb_value self, #{params}) {
       bc2cpp_resumable_init(M);#{arm_block}
-        mrb_value frame = mrb_nil_value();
-        Bc2cppResumeFrame* F = bc2cpp_resume_frame(M, &frame, #{ctx.nregs}, #{ctx.slot_count});
+        // RESUME_LOCALS: the entry's own locals carry the bc2cpp_ prefix, so a Ruby parameter named frame, resume or
+        // result (OutsideRubyOwners::Collector#scoped(frame)) cannot clash with them.
+        mrb_value bc2cpp_rframe = mrb_nil_value();
+        Bc2cppResumeFrame* F = bc2cpp_resume_frame(M, &bc2cpp_rframe, #{ctx.nregs}, #{ctx.slot_count});
     CPP
     fill = resumable_entry_fill(arg_names, ctx, blk, kw).map { |line| "  #{line}\n" }.join
     tail = <<~CPP.gsub(/^(?=.)/, '  ')
       mrb_write_barrier(M, (struct RBasic*)mrb_ary_ptr(F->regs_ary));
       if (bc2cpp_prologue_armed(M, #{owner_literal}, self)) {
-        return bc2cpp_prologue_park(M, bc2cpp_method_frame_new(M, #{step_name}, self, frame));
+        return bc2cpp_prologue_park(M, bc2cpp_method_frame_new(M, #{step_name}, self, bc2cpp_rframe));
       }
-      mrb_value resume = mrb_nil_value();
+      mrb_value bc2cpp_rresume = mrb_nil_value();
     CPP
     footer = <<~CPP
       }
