@@ -1,0 +1,1 @@
+nfcxx: --emit-c does not support C++ modules yet (docs/notes/modules.md)
