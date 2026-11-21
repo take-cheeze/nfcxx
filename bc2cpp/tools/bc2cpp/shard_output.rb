@@ -501,13 +501,13 @@ module ShardOutput
         while i < line.size
           c = line[i]
           if in_comment
-            if line[i, 2] == '*/'
+            if c == '*' && line[i, 2] == '*/'
               in_comment = false
               i += 1
             end
             code << ' '
           elsif raw_end
-            if line[i, raw_end.size] == raw_end
+            if c == ')' && line[i, raw_end.size] == raw_end
               i += raw_end.size - 1
               raw_end = nil
             end
@@ -516,9 +516,9 @@ module ShardOutput
             i += 1 if c == '\\'
             in_str = nil if c == in_str
             code << ' '
-          elsif line[i, 2] == '//'
+          elsif c == '/' && line[i, 2] == '//'
             break
-          elsif line[i, 2] == '/*'
+          elsif c == '/' && line[i, 2] == '/*'
             in_comment = true
             i += 1
             code << ' '
