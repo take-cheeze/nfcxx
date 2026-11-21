@@ -16,12 +16,14 @@ Checked against origin/main after #1432 (the compile cache's lookup planner).
   Path B dispatch with CHECK and STORE lines (#1387), the switch (#1402), and the compile cache's lookup planner
   (`scripts/nfcxx-cache-plan.rb`, #1432).
 - The frozen body still does these in bash, and the Ruby driver calls them through the body: argument records (read into bash
-  variables), `--emit-hip`, the SYCL check and run, the `-x` and `-MD` checks, the module block (planned by
+  variables), `--emit-hip`, the `-x` and `-MD` checks, the module block (planned by
   `scripts/nfcxx-modules-plan.rb`, called from the body), the
   backend choice and host probes (`default_backend`, `pb_fs_host`, the uname checks), sanitizers, `instantiate`, `cosmo`,
   `freestanding`, the trace unit, `cu_prepare`, `cpp2_prepare`, the cache hit and store (`cache_check`, `cache_store`), the
   eccp call (`eccp_plan`, its trap and its trace span), the depmode step, the CUDA host-symbol second pass, and the second run
   with an environment prefix.
+- The SYCL two-pass build (`scripts/nfcxx-sycl.rb`) now runs in `scripts/nfcxx.rb`, before the body starts:
+  the body's early exits never refuse its arguments. `tests/driver-sycl-dispatch` holds the goldens.
 - Helpers still defined in the body: `temp_cleanup`, `abs_path`, `onoff`, `ensure_tool`, `ecp_args`, `state_put`,
   `loop_set`/`loop_append`, `eccp_cleanup`, `compile_clean`, `link_records_rm`, `cache_log`, `cache_sha`, `cache_remote_get`,
   `cache_remote_put`.
@@ -31,7 +33,7 @@ Checked against origin/main after #1432 (the compile cache's lookup planner).
 The body can be deleted only when the Ruby driver runs every stage without it. In order:
 
 1. **Argument records.** Read the planner's records (`scripts/nfcxx-loop.rb`) in Ruby, not into bash variables.
-2. **Early exits.** `--emit-hip`, the SYCL check and run, the `-x` and `-MD` checks. The module block is planned in Ruby
+2. **Early exits.** `--emit-hip`, the `-x` and `-MD` checks. The module block is planned in Ruby
    (`scripts/nfcxx-modules-plan.rb`: scans, refusals, the module build of a link, the compile's module options); the body
    only calls it at the block's place and ends with the build's status.
 3. **Setup.** The backend choice, sanitizers, `instantiate`, `cosmo`, `freestanding`, host probes and the trace unit.
