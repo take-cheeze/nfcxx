@@ -1234,15 +1234,21 @@ class CodeGen
     saved_loop_elements = @declared_loop_elements
     scope = declared_block_element_scope(region, block_irep)
     @declared_loop_elements = (saved_loop_elements || []) + scope unless scope.empty?
+    # LITERAL_TABLES (codegen_literal_tables.rb): an instruction another pass emits stays out of every table.
+    claimed_addrs = (nested_suppressed + nested_glue_at.keys + prefix_at.keys).to_set
+    literal = literal_table_plan(block_irep, claimed: ->(addr, _idx) { claimed_addrs.include?(addr) })
     BytecodeIR.for(block_irep).each_source do |insn, idx|
       next if insn.op == :ENTER
 
       body << prefix_at[insn.addr] if prefix_at.key?(insn.addr)
       next if nested_suppressed.include?(insn.addr) && !nested_glue_at.key?(insn.addr)
+      next if literal.skip.include?(idx)
 
       body << "  L#{insn.addr}:;\n" if targets.include?(insn.addr)
       if nested_glue_at.key?(insn.addr)
         body << nested_glue_at[insn.addr]
+      elsif (glue = literal.glue[idx])
+        body << glue
       else
         with_element_hints(block_irep, insn, idx, elem_hints) do
           body << compile_insn(insn, block_irep, d, idx)

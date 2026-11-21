@@ -378,6 +378,57 @@ module SymbolCache
   CPP
   private_constant :NATIVE_SLOT
 
+  # LITERAL_TABLES (codegen_literal_tables.rb): the builder every table calls, in each unit's prelude.
+  LITERAL_TABLES_PRELUDE = <<~CPP
+    // LITERAL_TABLES (codegen_literal_tables.rb): a constant literal's word table, built as its instructions would build
+    // it. A word with bit 15 clear is a presym id. A finished pair or element drops its arena slots: its container holds
+    // it, and the container sits in the arena below them.
+    struct Bc2cppLitStr { const char* p; mrb_int n; };
+    #define BC2CPP_LIT_STR(s) { s, (mrb_int)sizeof(s) - 1 }
+    #ifdef MRB_PRESYM_MAX
+    static_assert(MRB_PRESYM_MAX < 0x8000, "LITERAL_TABLES: a presym id needs bit 15 clear");
+    #endif
+    [[maybe_unused]] static mrb_value bc2cpp_lit_node(mrb_state* M, const uint16_t*& pc, const Bc2cppLitStr* s, const mrb_value* d) {
+      const unsigned w = *pc++;
+      if (!(w & 0x8000u)) return mrb_symbol_value((mrb_sym)w);
+      const unsigned p = w & 0x0fffu;
+      switch (w >> 12) {
+      case 0x8: return mrb_fixnum_value((mrb_int)p);
+      case 0x9: {
+        const uint32_t v = (uint32_t)pc[0] | ((uint32_t)pc[1] << 16);
+        pc += 2;
+        return mrb_fixnum_value((mrb_int)(int32_t)v);
+      }
+      case 0xa: {
+        mrb_value h = mrb_hash_new_capa(M, (mrb_int)p);
+        const int ai = mrb_gc_arena_save(M);
+        for (unsigned i = 0; i < p; ++i) {
+          mrb_value k = bc2cpp_lit_node(M, pc, s, d);
+          mrb_value v = bc2cpp_lit_node(M, pc, s, d);
+          mrb_hash_set(M, h, k, v);
+          mrb_gc_arena_restore(M, ai);
+        }
+        return h;
+      }
+      case 0xb: {
+        mrb_value a = mrb_ary_new_capa(M, (mrb_int)p);
+        const int ai = mrb_gc_arena_save(M);
+        for (unsigned i = 0; i < p; ++i) {
+          mrb_ary_push(M, a, bc2cpp_lit_node(M, pc, s, d));
+          mrb_gc_arena_restore(M, ai);
+        }
+        return a;
+      }
+      case 0xc: return mrb_str_new(M, s[p].p, s[p].n);
+      case 0xd: return d[p];
+      default: return p == 1 ? mrb_true_value() : p == 2 ? mrb_false_value() : mrb_nil_value();
+      }
+    }
+    [[maybe_unused]] static mrb_value bc2cpp_lit_build(mrb_state* M, const uint16_t* code, const Bc2cppLitStr* s, const mrb_value* d) {
+      return bc2cpp_lit_node(M, code, s, d);
+    }
+  CPP
+
   # OWNER_CALL, with OWNER_CALL_ICACHE compiled out when BC2CPP_OWNER_ICACHE=0.
   def owner_call_source
     ENV['BC2CPP_OWNER_ICACHE'] == '0' ? "#define BC2CPP_NO_OWNER_ICACHE 1\n#{OWNER_CALL}" : OWNER_CALL
@@ -417,6 +468,7 @@ module SymbolCache
       template<size_t N> static inline void bc2cpp_str_cat_lit(mrb_state* M, mrb_value str, const char (&s)[N]) {
         mrb_str_cat(M, str, s, N - 1);
       }
+      #{LITERAL_TABLES_PRELUDE.chomp}
       // SYMBOL_CACHE -- see tools/bc2cpp/symbol_cache.rb.
       static mrb_state* bc2cpp_sym_state = nullptr;
       static mrb_sym bc2cpp_syms[#{[dynamic, 1].max}] = {};
