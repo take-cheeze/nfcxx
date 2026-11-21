@@ -38,6 +38,8 @@ conditional flag) before the back end runs, so a temporary's cleanup cannot be w
   innermost frame; then that frame (a `try`: a selector test for each catch clause, jumping to the handler; a `catch`:
   `__cxa_end_catch`); then on outwards. At the end it resumes the unwind (`_Unwind_Resume`), or calls `std::terminate`
   in a `noexcept` function.
+- The pads share that code, as gcc's share their tails: a pad is a stub that keeps the exception and the selector and
+  jumps to its node; a node (a region's cleanup, a frame's clauses, the end) is written once and jumps to the next one.
 - `throw` is `__cxa_allocate_exception`, the lowered copy into it, `__cxa_throw` (typeinfo, destructor); `throw;` is
   `__cxa_rethrow`. A handler is `__cxa_begin_catch` on entry and `__cxa_end_catch` at the catch epilogue.
 - The pad keeps the exception and the selector in two stack slots (`eh.exc`, `eh.sel`), which the handlers read.
@@ -106,8 +108,15 @@ cannot use. No EH shim either: an exception thrown by libstdc++ is already one o
 
 ### The IR passes (`scripts/pathb-ir-opt.rb`)
 
-A function with exception tables is not inlined (its pads and states are its own, and a `noexcept` callee's calls would
-lose their `std::terminate`). A function without them inlines as before: its calls get the state of the call site.
+A callee with landing pads is inlined with them (`eh_inline`): its pads are renumbered after the caller's, its catch
+types join the caller's table (the pads compare the selector with `(eh-tid N)`, which the renumbering reaches), and the
+copy is bracketed by `(eh-inline-begin K)` and `(eh-inline-end K)`. The callee's state 0 becomes `(eh-state-outer K)`, the
+state the copy was entered in; its pads say `(eh-outer K)`, and their resume hands the caller's pad slots the exception
+and the selector and becomes `(eh-resume-outer K EXC)`, a jump into the chain of that state's pad (a resume when it is
+0, `std::terminate` in a pad's code). The SSA builder resolves these along the control flow, after all the code (a copy
+inlined into a pad's code is entered after the pads before it), and appends the outer pad's action chain to the copy's
+pads. A `noexcept` callee's copy gets a pad that calls `std::terminate` for its state 0. A callee with a dynamic exception
+specification is not inlined. A function without tables inlines as before: its calls get the state of the call site.
 
 ## Tests
 
@@ -115,7 +124,9 @@ lose their `std::terminate`). A function without them inlines as before: its cal
 cleanups compared with g++'s output: conditional temporaries, `new` with a throwing constructor, partially built arrays
 and objects, a local static whose initializer throws, temporaries of a full expression; exceptions across g++-compiled
 code in both directions; `noexcept`), and the EH probes of the frames mode (`tests/pathb-qbe/{cases,traps}/eh_*.cpp`,
-`tests/cases/eh_*.cpp`). 19 programs, all pass, through the IR passes, the e-graph pass and QBE's optimizations.
+`tests/cases/eh_*.cpp`), and inlined callees with pads (two copies in a caller, a copy inside a copy, a catch that
+rethrows from a copy, destructors with pads inlined into a pad, a `noexcept` copy). 21 programs, all pass, through the
+IR passes, the e-graph pass and QBE's optimizations.
 
 ## Known gaps
 
@@ -127,7 +138,21 @@ code in both directions; `noexcept`), and the EH probes of the frames mode (`tes
   links by hand.
 - Targets: tested on x86-64 Linux only (arm64 untested, rv64 and Apple without tables).
 
-## Measured so far
+## Measured
+
+llama.cpp's `ggml-vulkan.cpp` (`-std=c++17`, the IR passes of `pathb-cc`, the SSA route and QBE), the frames mode against
+this one, same scripts and QBE:
+
+| | frames | tables |
+|---|---|---|
+| instructions (`.text`) | 511,329 | 472,675 |
+| `%fs` accesses (EH stack) | 1,281 | 0 |
+| `setjmp` calls | 137 | 0 |
+| LSDA lines (`.gcc_except_table`) | 0 | 152,543 |
+
+Without the IR passes: 588,395 and 506,324 instructions, 6,045 and 0 `%fs` accesses. Before the pads shared their code
+the tables mode had 1,025,661 instructions (each pad repeated its whole chain), and 654,714 before callees with pads
+were inlined.
 
 - Mechanism (hand-written QBE, gcc-compiled thrower): a typed catch, a catch-all, a cleanup pad that resumes into a gcc
   `catch`, and `std::terminate` from a `noexcept` function all behave as in gcc.
