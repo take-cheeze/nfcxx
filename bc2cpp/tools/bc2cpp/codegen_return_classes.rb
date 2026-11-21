@@ -1003,6 +1003,8 @@ class CodeGen
     receiver = exact_flow_mask(irep, index, reg)
     return nil unless receiver.is_a?(Integer) && receiver.positive?
 
+    # NILABLE_UNION: inside the non-nil arm of a nil-or-union receiver the tested register is not nil.
+    receiver = exact_flow_strip_nil(irep, index, reg.to_i, receiver)
     bits = numeric_receiver_class_bits(receiver)
     return nil unless bits && bits.size >= 2
 

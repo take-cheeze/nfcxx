@@ -73,9 +73,15 @@ class CodeGen
            when :array then "mrb_array_p(#{var})"
            when :hash then "mrb_hash_p(#{var})"
            when :string then "mrb_string_p(#{var})"
+           when :union then declared_union_condition(entry.cls, var)
            else exact_class_guard(owner_class_ptr_expr(entry.cls), var)
            end
     entry.nilable ? "mrb_nil_p(#{var}) || (#{cond})" : cond
+  end
+
+  # DECLARED_UNION: one exact-class test per listed class (RbsParamCheck.union_classes).
+  def declared_union_condition(classes, var)
+    classes.map { |klass| exact_class_guard(owner_class_ptr_expr(klass), var) }.join(' || ')
   end
 
   # Does a flow mask (NumericFlow bits) put the stored value inside the declared kind?
