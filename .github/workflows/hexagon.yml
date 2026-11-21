@@ -113,9 +113,10 @@ jobs:
         with:
           path: build/edg-hex
           key: hexagon-edg-${{ runner.os }}-${{ steps.hexagon-key.outputs.edg }}-${{ hashFiles('scripts/setup-edg.sh', 'scripts/setup-edg-hexagon.sh', 'scripts/hexagon-predef.rb', '3rd/edg/cmake/macro-conf/support/target/linux_riscv32/base.cmakedef') }}
+          restore-keys: |
+            hexagon-edg-${{ runner.os }}-
 
       - name: Build the Hexagon EDG (linux_hexagon target)
-        if: steps.hexagon-edg.outputs.cache-hit != 'true'
         run: scripts/setup-edg-hexagon.sh
 
       - name: Build the mruby interpreter (runs tests/hexagon/flatlink.rb)
