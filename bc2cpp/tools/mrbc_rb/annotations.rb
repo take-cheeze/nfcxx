@@ -39,7 +39,7 @@ module MrbcRb
   #     SCLASS:          kind: :sclass, target: :self | :const | :other, target_text:, singleton_of: String | nil,
   #                      path: nil, empty_body:, body_irep:
   #     EXEC:            owner_pc: pc of the opener this EXEC runs the body of, body_irep: Integer
-  #     TDEF / SDEF / DEF: name:, owner_kind: :top|:class|:module|:singleton_class|:block|:dynamic, owner_path: String | nil (the
+  #     TDEF / SDEF / DEF: name:, owner_kind: :top|:class|:module|:sclass|:block|:dynamic, owner_path: String | nil (the
   #                      class the method lands on when statically evident; "Object" at top level), singleton: true|false,
   #                      receiver: nil | :self | source text of `def Recv.m`, visibility: :public|:private|:protected|
   #                      :module_function | nil (nil when not evident: inside a block, a method or a singleton def),
@@ -264,17 +264,17 @@ module MrbcRb
         entry = ann_namespace_entry
         kind = if sc.in_block then :block
                elsif entry.nil? then :top
-               elsif entry[:kind] == :sclass then :singleton_class
+               elsif entry[:kind] == :sclass then :sclass
                else entry[:kind]
                end
-        { owner_kind: kind, owner_path: kind == :block || kind == :singleton_class ? nil : ann_scope_path, in_block: sc.in_block }
+        { owner_kind: kind, owner_path: kind == :block || kind == :sclass ? nil : ann_scope_path, in_block: sc.in_block }
       end
 
       def ann_def_record(extra)
         sc = ann_scope
         fields = ann_owner_fields
         recv = extra[:receiver]
-        singleton = !recv.nil? || fields[:owner_kind] == :singleton_class
+        singleton = !recv.nil? || fields[:owner_kind] == :sclass
         if recv
           fields[:owner_kind] = :dynamic if recv != :self
           fields[:owner_kind] = :dynamic if sc.in_method

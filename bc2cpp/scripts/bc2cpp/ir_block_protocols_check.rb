@@ -63,7 +63,7 @@ Dir.mktmpdir('ir-block-protocols') do |dir|
       def generic_literal: (Array[String] values) -> untyped
       def stable: (Array[String] values) -> untyped
       def iterator_capture: (Array[String] values) -> untyped
-      def declared_capture: (Array[String] values, String label) -> untyped
+      def declared_capture: (Array[String] values, String | Integer label) -> untyped
       def guarded_capture: (Array[String] values, Symbol label) -> untyped
       def written: (Array[String] values) -> untyped
       def opaque_capture: (Array[String] values) -> untyped
@@ -89,8 +89,9 @@ Dir.mktmpdir('ir-block-protocols') do |dir|
   check.call('generic callback output substitutes into its container contract', row.call('generic_literal', 'callback_result')['type'] == 'Array[Integer]')
   check.call('pure custom yield captures retain independently proven Integer facts', row.call('stable', 'block_return')['type'] == 'Integer' && row.call('stable', 'block_return')['status'] == 'inferred')
   check.call('nominal iterator contracts alone cannot prove capture lifetime', row.call('iterator_capture', 'block_return')['status'] == 'unknown')
+  # A union is no guarded kind (DECLARED_PARAM_GUARD), so the capture keeps the bare declared contract.
   check.call('declared captures retain their argument contract provenance',
-             row.call('declared_capture', 'block_return')['type'] == 'String' && row.call('declared_capture', 'block_return')['status'] == 'declared' && row.call('declared_capture', 'block_return')['contracts'].include?('argument:R2'))
+             row.call('declared_capture', 'block_return')['type'].split(' | ').sort == %w[Integer String] && row.call('declared_capture', 'block_return')['status'] == 'declared' && row.call('declared_capture', 'block_return')['contracts'].include?('argument:R2'))
   # A declared Symbol (or Integer, Float, `T?`, program class) parameter is checked on entry (DECLARED_PARAM_GUARD) and
   # seeds the flow, so its capture is a proven fact, not a bare contract: it carries no argument contract.
   check.call('a guarded declared parameter is proven on entry, so its capture is inferred without a contract',

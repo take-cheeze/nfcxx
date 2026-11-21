@@ -21,6 +21,18 @@ mruby=$bc2cpp_root/3rd/mruby
 
 echo "mrbc_rb: oracle $mruby/bin/mrbc (world rpg-maker-clone $(git -C "$bc2cpp_root" rev-parse --short HEAD), fork $(git -C "$mruby" rev-parse --short HEAD))"
 export MRBC="$mruby/bin/mrbc"
+# The self build bakes every bc2cpp tool source through mrbc (host-libs/mruby-bc2cpp-sources), which refuses a source
+# mruby cannot compile, such as a scope over its local-variable limit ("too many local variables" in bc2cpp.rb's
+# BC2CPP_MAIN). cli_test.rb skips a source the emitter refuses, so this compiles each one with the fork's mrbc.
+mrbc_failed=0
+while IFS= read -r src; do
+  if ! err=$("$MRBC" -o /dev/null "$src" 2>&1); then
+    echo "FAIL mrbc_rb: the fork's mrbc refuses $src: ${err%%$'\n'*}"
+    mrbc_failed=1
+  fi
+done < <(find bc2cpp/tools -name '*.rb' | sort)
+[ "$mrbc_failed" = 0 ] || exit 1
+echo "mrbc_rb: the fork's mrbc compiles every bc2cpp tool source"
 bundle exec ruby bc2cpp/tools/mrbc_rb/golden_test.rb
 bundle exec ruby bc2cpp/tools/mrbc_rb/cli_test.rb
 bundle exec ruby bc2cpp/tools/mrbc_rb/codedump_test.rb

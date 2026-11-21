@@ -98,7 +98,11 @@ class CodeGen
   # bc2cpp_ensure_guard); this file's own C++ break/return exceptions run the
   # destructor and continue to their catch sites.
   # Everything below rejects unproven shapes.
-  def recognize_ensure_region(irep)
+  # ENSURE_BODY_BLOCKS: `blocks: true` (compile_method, whose block passes run first) also admits a block call in the
+  # ensure body (`saved.each { |k, v| ... }`), compiled through the glue those passes made for it (emit_ensure_guard).
+  # The block, at any depth, must hold no `return` or `break`: either unwinds by a C++ exception that would leave the
+  # destructor's lambda.
+  def recognize_ensure_region(irep, blocks: false)
     return nil if irep.catch_handlers.nil?
     # STEP_HANDLERS: a step handles its own handler table (resumable_step_function); the RAII form cannot be jumped into.
     return nil if step_with_handlers?(irep)
@@ -133,7 +137,9 @@ class CodeGen
     # could throw a C++ exception out of a destructor that may already be running
     # during unwinding (std::terminate). The nested rescue's own EXCEPT and RAISEIF are its handler.
     handler_addrs = nested ? [nested[:except_addr], nested[:raise_addr]] : []
-    return nil if body.any? { |i| ENSURE_BODY_REFUSED_OPS.include?(i.op) && !handler_addrs.include?(i.addr) }
+    refused = blocks ? ENSURE_BODY_REFUSED_OPS - ENSURE_BODY_BLOCK_OPS : ENSURE_BODY_REFUSED_OPS
+    return nil if body.any? { |i| refused.include?(i.op) && !handler_addrs.include?(i.addr) }
+    return nil if blocks && body.any? { |i| i.op == :BLOCK && !ensure_body_block_exits_free?(irep, i) }
     # Branches inside the ensure body must stay inside it; its RAISEIF address is
     # allowed (mrbc's "skip the rest" target for a conditional ensure body) and
     # becomes a label at the end of the lambda.
@@ -181,6 +187,25 @@ class CodeGen
   end
 
   ENSURE_BODY_REFUSED_OPS = %i[RETURN RETURN_BLK BREAK BLOCK SENDB SSENDB LAMBDA EXCEPT RAISEIF].freeze
+  ENSURE_BODY_BLOCK_OPS = %i[BLOCK SENDB SSENDB].freeze
+
+  # ENSURE_BODY_BLOCKS: the block built by +insn+ (a BLOCK) and every irep nested in it hold no RETURN_BLK or BREAK.
+  def ensure_body_block_exits_free?(irep, insn)
+    label = insn.block_index && irep.reps && irep.reps[insn.block_index.to_i]
+    block = label && @ireps[label]
+    return false unless block
+
+    clean = true
+    walked = BytecodeIR.each_nested_insn(block, ->(child) { @ireps[child] }, max_depth: MAX_UPVAR_NEST_DEPTH) do |nested, _depth|
+      clean = false if %i[RETURN_BLK BREAK].include?(nested.op)
+    end
+    walked && clean && irep_tree(block).size == 1 + nested_rep_count(block)
+  end
+
+  # How many ireps are nested in +irep+, counting every rep label (a label irep_tree cannot look up is not counted there).
+  def nested_rep_count(irep)
+    (irep.reps || []).sum { |label| 1 + ((child = label && @ireps[label]) ? nested_rep_count(child) : 0) }
+  end
 
   # ENSURE_NESTED_RESCUE: `begin X rescue C ... end` inside an ensure body (mruby-io's IO.open closes its io that way).
   # The rescue has the shape recognize_rescue_regions reads: [begin, end) protected, `JMP S` at end, `EXCEPT Rexc` at
@@ -244,7 +269,11 @@ class CodeGen
   # The lambda captures `[&]`, so it uses the function's own `rN` locals. Those
   # are declared at the top, before the guard, so reverse destruction order
   # keeps them alive when the guard runs.
-  def emit_ensure_guard(region, irep, d)
+  # ENSURE_BODY_BLOCKS: +glue_at+ and +suppressed+ are compile_method's, from the passes that already claimed the block
+  # calls in the body. A claimed instruction is emitted as its glue inside the lambda; one claimed with no glue of its own
+  # (the SENDB a BLOCK's glue calls) is skipped. Only a block op may be claimed, and a glue that jumps (`goto`) to a
+  # label it does not define itself, or returns, keeps the `#error`: inside the lambda neither leaves the method.
+  def emit_ensure_guard(region, irep, d, glue_at: nil, suppressed: nil)
     body = String.new
     ok = true
     # The ensure body's branches target the body or the RAISEIF; both become
@@ -268,7 +297,14 @@ class CodeGen
         next
       end
       body << "    L#{insn.addr}:;\n" if body_targets.include?(insn.addr)
-      code = compile_insn(insn, irep, d, idx)
+      if glue_at&.key?(insn.addr) || suppressed&.include?(insn.addr)
+        code = glue_at&.[](insn.addr) || ''
+        own_labels = code.scan(/^\s*(\w+):;/).flatten
+        jumps_out = code.scan(/\bgoto\s+(\w+)\s*;/).flatten.any? { |label| !own_labels.include?(label) }
+        ok = false unless ENSURE_BODY_BLOCK_OPS.include?(insn.op) && !jumps_out && !code.match?(/\breturn\b/)
+      else
+        code = compile_insn(insn, irep, d, idx)
+      end
       ok = false if code.include?('#error')
       body << code
     end
@@ -290,8 +326,8 @@ class CodeGen
   # whole-method `rescue` and the `EXPR rescue FALLBACK` modifier: same
   # EXCEPT/RESCUE/RAISEIF shape). Chained single-class clauses and namespaced
   # classes are supported (recognize_rescue_class_handler), and proper nesting
-  # (NESTED_RESCUE_SUPPORT). Not supported: `retry`, `ensure`, a multi-class
-  # clause `rescue A, B`, partial overlap. Unrecognized shapes keep
+  # (NESTED_RESCUE_SUPPORT), and a multi-class clause `rescue A, B`
+  # (RESCUE_MULTI_CLASS). Not supported: `retry`, `ensure`, partial overlap. Unrecognized shapes keep
   # `#error unhandled opcode EXCEPT`: RESCUE/RAISEIF translate anywhere, but
   # EXCEPT only means something inside this bc2cpp_protect wrapping.
   #
@@ -572,6 +608,15 @@ class CodeGen
 
       match_addr = jmpif_i.uint_operand.to_i
       return nil unless match_addr && match_addr > jmpif_i.addr
+
+      # RESCUE_MULTI_CLASS: `rescue A, B => e` tests each class in turn (GETCONST, RESCUE, JMPIF to the one handler),
+      # with the clause's `JMP next` only after its last class. The next class's test head follows the JMPIF directly.
+      if jmp_i.op == :GETCONST
+        cls_names << cls_name
+        first_match_addr ||= match_addr
+        clause_idx = seg_idx + 2
+        next
+      end
       return nil unless jmp_i.op == :JMP
       next_addr = jmp_i.jmp_addr
       # Strictly forward: bounds the walk and excludes a backward `retry`.

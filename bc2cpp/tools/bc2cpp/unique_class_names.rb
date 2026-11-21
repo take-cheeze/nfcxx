@@ -152,6 +152,7 @@ module UniqueClassNames
     sources = Array(native_paths).select { |path| File.file?(path) }
                                  .map { |path| File.read(path, encoding: 'UTF-8') }
     bindings = native_bindings(sources)
+    headers = {}.compare_by_identity
     # A native class or module (kind 2 of BINDING_CALLS) is a candidate at its full path; a native value constant, or a
     # class whose outer namespace is not known, refuses the name.
     native_classes = Set.new
@@ -162,7 +163,7 @@ module UniqueClassNames
           native_refused << name
         elsif var.nil?
           native_classes << name
-        elsif (outer = native_module_binding(sources, source, pos, var))
+        elsif (outer = native_module_binding(sources, source, pos, var, headers: headers))
           native_classes << "#{outer}::#{name}"
         else
           native_refused << name
@@ -203,7 +204,7 @@ module UniqueClassNames
 
       scope = defs.first.delete_suffix("::#{name}")
       agree = bindings[name].all? do |source, pos, var|
-        var && native_module_binding(sources, source, pos, var) == scope
+        var && native_module_binding(sources, source, pos, var, headers: headers) == scope
       end
       out[name] = defs.first if agree
     end
@@ -422,35 +423,31 @@ module UniqueClassNames
   # parameter every caller in `sources` passes such a variable to.
   # With +lookup+, `var = mrb_module_get(M, "X")` / `mrb_class_get(M, "X")` also names X (the caller must then
   # check that X has one binding, at the top level), and a prototype of the function is not taken for a call.
-  def native_module_binding(sources, source, pos, var, depth = 2, lookup: false)
-    header = nil
-    source.to_enum(:scan, FUNCTION_HEADER).each do
-      match = Regexp.last_match
-      break if match.begin(0) > pos
-
-      header = match
-    end
+  def native_module_binding(sources, source, pos, var, depth = 2, lookup: false, headers: nil)
+    headers ||= {}.compare_by_identity
+    header = native_function_header(source, pos, headers)
     return nil unless header
 
-    body_end = source.index(/^\}/, header.end(0))
+    header << source.index(/^\}/, header[1]) if header.size == 5
+    body_end = header[5]
     return nil unless body_end && pos < body_end
 
-    body = source[header.end(0)...body_end]
+    body = source[header[1]...body_end]
     rhs = body.scan(/(?<![\w>.])#{Regexp.escape(var)}\s*=(?!=)\s*([^;]+);/).flatten
     unless rhs.empty?
       form = lookup ? NATIVE_MODULE_LOOKUP : NATIVE_MODULE_DEFINITION
       modules = rhs.map { |expr| expr.strip[form, 1] }
       return modules.uniq.size == 1 ? modules.first : nil
     end
-    params = header[2].split(',').map(&:strip)
+    params = header[4].split(',').map(&:strip)
     index = params.index { |param| param.match?(/\A(?:struct\s+)?RClass\s*\*\s*#{Regexp.escape(var)}\z/) }
     return nil unless index && depth.positive?
 
     callers = []
     sources.each do |caller_source|
-      caller_source.to_enum(:scan, /\b#{Regexp.escape(header[1])}\s*\(/).each do
+      caller_source.to_enum(:scan, /\b#{Regexp.escape(header[3])}\s*\(/).each do
         call = Regexp.last_match
-        next if caller_source.equal?(source) && call.begin(0) == header.begin(1)
+        next if caller_source.equal?(source) && call.begin(0) == header[2]
 
         args, = NativeExpressionDevirt.split_call_arguments(caller_source, call.end(0) - 1)
         # A prototype (`void f(mrb_state* M, RClass* rgss);`) lists parameters, not arguments.
@@ -459,9 +456,35 @@ module UniqueClassNames
         arg = args&.[](index)
         return nil unless arg&.match?(/\A\w+\z/)
 
-        callers << native_module_binding(sources, caller_source, call.begin(0), arg, depth - 1, lookup: lookup)
+        callers << native_module_binding(sources, caller_source, call.begin(0), arg, depth - 1,
+                                         lookup: lookup, headers: headers)
       end
     end
     callers.uniq.size == 1 ? callers.first : nil
+  end
+
+  # One index per immutable source in an analysis. Record values immediately:
+  # mruby-onig reuses a scan's MatchData region on its next match.
+  # Records are [start, body start, name start, name, parameters, optional body end].
+  def native_function_header(source, pos, headers)
+    list = headers.fetch(source) do
+      found = []
+      source.to_enum(:scan, FUNCTION_HEADER).each do
+        match = Regexp.last_match
+        found << [match.begin(0), match.end(0), match.begin(1), match[1], match[2]]
+      end
+      headers[source] = found
+    end
+    left = 0
+    right = list.size
+    while left < right
+      middle = (left + right) / 2
+      if list[middle][0] <= pos
+        left = middle + 1
+      else
+        right = middle
+      end
+    end
+    list[left - 1] unless left.zero?
   end
 end

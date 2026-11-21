@@ -19,6 +19,11 @@ MRuby::Build.new(self_aot ? 'bc2cpp-self' : 'bc2cpp-runner') do |conf|
   end
   # BC2CPP_RUNNER_OPT=1: an optimised runner (-O2, no MRB_DEBUG), the build to time. Without it: -g3 -O0 with MRB_DEBUG.
   if ENV['BC2CPP_RUNNER_OPT'] == '1'
+    # The gcc toolchain defaults to -g even without enable_debug. DWARF for
+    # translated compiler bodies is expensive and is not useful to a normal
+    # optimized build. Preserve explicit CFLAGS/CXXFLAGS, including requested -g.
+    conf.cc.flags = conf.cc.flags.flatten - ['-g'] unless ENV['CFLAGS']
+    conf.cxx.flags = conf.cxx.flags.flatten - ['-g'] unless ENV['CXXFLAGS'] || ENV['CFLAGS']
     conf.cc.flags << '-O2'
     conf.cxx.flags << '-O2'
   else
@@ -43,7 +48,7 @@ MRuby::Build.new(self_aot ? 'bc2cpp-self' : 'bc2cpp-runner') do |conf|
   %w[mruby-array-ext mruby-hash-ext mruby-enum-ext mruby-io mruby-dir mruby-numeric-ext mruby-range-ext
      mruby-symbol-ext mruby-compar-ext mruby-fiber mruby-exit mruby-sprintf mruby-kernel-ext mruby-random
      mruby-math mruby-time mruby-bigint mruby-string-ext mruby-metaprog mruby-pack mruby-enumerator mruby-enum-lazy mruby-struct
-     mruby-set mruby-method mruby-proc-ext mruby-errno mruby-error mruby-encoding].each { |g| conf.gem core: g }
+     mruby-set mruby-method mruby-proc-ext mruby-errno mruby-error mruby-encoding mruby-object-ext].each { |g| conf.gem core: g }
   conf.gem File.expand_path('../mruby-require', __dir__)
   conf.gem File.expand_path('../mruby-env', __dir__)
   # Marshal (the scan cache) depends on mruby-onig-regexp, which bundles Onigmo, as build_config.rb has it.

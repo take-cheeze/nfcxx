@@ -226,10 +226,14 @@ module Bc2cppFixtureRuntime
       world = closed_world_native_srcs
       world = world.reject { |path| path.include?('/mruby-rgss/src/') } if core
       world = world.reject { |path| drop_native.any? { |fragment| path.include?(fragment) } }
-      natives = world + write_outside.call(native)
+      linked_native = write_outside.call(native)
+      linked_ruby = write_outside.call(foreign)
+      natives = world + linked_native
     env = bc2cpp_closed_world_probe_env(env.merge(
       'NATIVE_SRCS' => Shellwords.join(natives),
-                 'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_mrblib_srcs(ROOT) + write_outside.call(foreign)),
+      'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_mrblib_srcs(ROOT) + linked_ruby),
+      'BC2CPP_LINKED_NATIVE_SRCS' => Shellwords.join(linked_native),
+      'BC2CPP_LINKED_RUBY_SRCS' => Shellwords.join(linked_ruby),
       'BC2CPP_BUILD_GEMS' => Shellwords.join(NomethodReviewedProbe.closed_gems(ROOT).merge(build_gems.to_h).except(*drop_gems).map { |n, d| "#{n}=#{d}" })
     ), ROOT)
       env['BC2CPP_COLLECTION_EXPORTS'] = '1' if Bc2cppFixtureRuntime.collection_exports_linked

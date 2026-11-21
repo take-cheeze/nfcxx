@@ -20,7 +20,7 @@ class CodeGen
     # RESCUE reads its first register and writes its second; the caught
     # exception remains live in the input register for the handler.
     rescue_write = ->(insn, cur) { insn.op == :RESCUE && insn.regs[1] == cur }
-    irep.walk_writers(idx - 1, dest_reg, skip_ops: %i[RESCUE], barrier: rescue_write, barrier_result: false,
+    irep.walk_writers(idx - 1, dest_reg, skip_ops: %i[RESCUE], barrier: rescue_write, barrier_result: false, barrier_op: :RESCUE,
                                               follow_moves: true) do |insn, _index, exc_reg|
       next false unless insn.op == :EXCEPT
 
@@ -853,6 +853,9 @@ class CodeGen
     return nil if shape && shape[1].positive?
 
     t_irep = @ireps.fetch(target.irep)
+    # The call below passes exactly the N positionals (and the block): the target's `_impl` must take that many
+    # mandatory arguments and nothing else besides a block (a rest or keyword target has another `_impl` shape).
+    return nil unless (shape || block_only_callee?(t_irep)) && mandatory_arity(t_irep) == n.to_i
     block = super_block_arg(owner_def, irep)
     return nil if takes_block_param?(t_irep) && block.nil?
     return nil if block.nil? && yields_block_param?(t_irep)
@@ -966,16 +969,26 @@ class CodeGen
     singleton = owner_def.owner.end_with?('.singleton')
     class_owner = singleton ? owner_def.owner.delete_suffix('.singleton') : owner_def.owner
     superclass = @superclass_of[class_owner]
-    return nil unless superclass.is_a?(String) || (singleton && superclass == :none)
+    # MODULE_ZSUPER: a module's method (a prepended wrapper above all) has no superclass. bc2cpp_super_call continues
+    # after the module's include-class in self's own chain, which is OP_SUPER's lookup for a module owner.
+    module_owner = !singleton && @closed_world&.module_declared?(class_owner)
+    return nil unless superclass.is_a?(String) || (singleton && superclass == :none) || module_owner
     return nil if singleton && zsuper_extended?(owner_def.name)
 
     program = BytecodeIR.for(irep)
     argary_idx = program.source_at(idx)&.op == :ARGARY ? idx : idx - 1
+    # Entered from the SUPER of a keyword zsuper without a block parameter: mruby puts `LOADNIL R(a+3)` (the block
+    # register) between the two, as zsuper_forward_plan reads it.
+    argary_idx -= 1 if argary_idx.positive? && program.source_at(argary_idx)&.op == :LOADNIL &&
+                       program.source_at(argary_idx + 1)&.op == :SUPER
     return nil if argary_idx.negative?
 
     argary = program.source_at(argary_idx)
-    super_insn = program.source_at(argary_idx + 1)
+    blank = program.source_at(argary_idx + 1)
+    nil_block = blank&.op == :LOADNIL
+    super_insn = program.source_at(argary_idx + (nil_block ? 2 : 1))
     return nil unless argary&.op == :ARGARY && super_insn&.op == :SUPER
+    return nil if nil_block && blank.reg.to_i != super_insn.reg.to_i + 3
     # SUPER is `n=*`, with keywords (`nk=*`, the keyword hash the caller's ENTER keyword slot holds) or without.
     argc = super_insn.argc_operand
     return nil unless argc && argc[0].nil? && (argc[2] || argc[1].nil?)
@@ -993,7 +1006,9 @@ class CodeGen
     return nil unless kd == (kw_count.positive? ? 1 : 0)
     kdict = kw_count.positive? ? "r#{mand + opt + rest_count + post + 1}" : nil
 
-    block = super_block_arg(owner_def, irep) || (super_direct_call_allowed?(owner_def) ? 'mrb_nil_value()' : nil)
+    # With the LOADNIL the interpreter's SUPER passes nil too, whatever block the caller gave.
+    block = nil_block ? 'mrb_nil_value()' : super_block_arg(owner_def, irep)
+    block ||= super_direct_call_allowed?(owner_def) ? 'mrb_nil_value()' : nil
     return nil unless block
 
     { m1: m1, rest: rest.positive?, m2: m2, block: block, owner: owner_def.owner, name: owner_def.name, kdict: kdict }
@@ -1096,8 +1111,7 @@ class CodeGen
     return nil unless kw_regs.size == caller[:kw]
 
     # (6) The same-named method on the registered superclass exists, is bytecode
-    # and compiles clean. A clean `_impl` never yields, so a caller's block is
-    # unobservable (no caller scan needed, unlike SUPER_NO_CALLER_BLOCK).
+    # and compiles clean. A target that reads the block takes it as a parameter, which (8) fills.
     # super_reaches_superclass? rules out an included module in between.
     # A class method (`def self.new`, owner `K.singleton`) reaches the superclass's singleton. A module the class `extend`s
     # answers before that, and the superclass map does not record extends, so such a program is refused (zsuper_extended?).
@@ -1124,9 +1138,19 @@ class CodeGen
     return nil unless target_kw.map { |k| k[:name].to_s }.sort == kw_regs.keys.map(&:to_s).sort
     return nil unless target[:block] == caller[:block]
 
+    # A target with no `&blk` may still take the block as its `_impl` parameter (a yield or block_given?, or
+    # SUPER_FRAME_BLOCK): it is then handed the caller's block, the frame's own when the caller takes it too, else nil
+    # where SUPER_NO_CALLER_BLOCK proves no caller passes one.
+    target_block = takes_block_param?(target_irep)
+    block = if caller[:block] == 1
+              "r#{caller[:block_reg]}"
+            elsif target_block
+              super_block_arg(owner_def, irep) || (super_direct_call_allowed?(owner_def) ? 'mrb_nil_value()' : nil)
+            end
+    return nil if target_block && block.nil?
+
     { target_def: target_def, m: m, target_mand: target[:mand], target_opt: target[:opt],
-      target_kw: target_kw, kw_regs: kw_regs, target_block: target[:block] == 1,
-      block: caller[:block] == 1 ? "r#{caller[:block_reg]}" : nil }
+      target_kw: target_kw, kw_regs: kw_regs, target_block: target_block, block: block }
   end
 
   # The caller's ENTER as zsuper forwarding reads it: mandatory and optional positionals, the keyword count, and whether a
@@ -1233,17 +1257,35 @@ class CodeGen
 
   # True only when the build shows no block-carrying call of `owner_def.name`
   # that can reach this owner. See super_direct_call_allowed?.
+  #
+  # The classes whose instances run the owner's method are the owner and its subclasses, or for a module the
+  # classes that include or prepend it and theirs (ClosedWorld#module_definer_includers). When a module's includers
+  # are not known, only a name no send carries a block to is proven.
+  #
+  # INSTANCE_SINGLETON_TAINT: a singleton class of such an instance that may answer the name sits in front of the
+  # owner's method and may call it with a block through `super`, so that refuses too.
   def no_caller_passes_block?(owner_def)
     name = owner_def.name
-    owner = owner_def.owner
-    subclasses = superclass_closure.call(owner)
+    reach = block_reach_classes(owner_def.owner)
+    # Class#new hands its own block to #initialize, so a block-carrying `new` is a caller of #initialize too.
+    return false if name == 'initialize' && (reach.nil? || block_new_may_reach?(reach))
+
     callers = block_carrying_callers_of(name)
     # A send whose receiver class is not proven cannot be excluded, and neither
     # can one naming any class that could be this owner or a subclass of it.
     return false if callers.nil?
-    return false if callers.any? { |recv| recv.nil? || (recv & subclasses).empty? }
+    return false if callers.any? { |recv| recv.nil? || reach.nil? || recv.any? { |k| reach.include?(k) } }
 
-    true
+    tainted = (reach || call_facts_answers.classes).any? { |k| singleton_tainted_for?(k, [name]) }
+    !tainted
+  end
+
+  # The classes whose instances can run a method of +owner+ (see no_caller_passes_block?), or nil when not known.
+  def block_reach_classes(owner)
+    return superclass_closure.call(owner) unless @closed_world&.module_declared?(owner)
+
+    includers = @closed_world.module_definer_includers(owner)
+    includers&.each_with_object(Set.new) { |klass, out| out.merge(superclass_closure.call(klass)) }
   end
 
   # Every block-carrying send of `name` in the build, as the set of receiver
@@ -1273,6 +1315,30 @@ class CodeGen
       end
     end
     @block_carrying_callers[name] = unknown ? nil : found
+  end
+
+  # May a block-carrying `new` construct an instance of one of +classes+ (an owner and its subclasses)? Its receiver is a
+  # class object, which the instance facts above do not describe, so only a receiver read from a constant is excluded:
+  # one naming (by its last segment, as the constant was written) none of +classes+ but a class of the program or a
+  # builtin that no SETCONST/SETMCNST anywhere rebinds, or a native class no program class or constant write shadows
+  # (ClosedWorld#native_class_unshadowed?). Any other receiver (self, a variable, an unknown constant) may be one.
+  def block_new_may_reach?(classes)
+    tails = classes.map { |klass| klass.to_s.split('::').last }.to_set
+    known = @block_new_known_classes ||= (@superclass_of.keys + ClassWorld::NATIVE.keys + CoreHierarchySigs.hierarchy[0].keys)
+                                         .map { |klass| klass.to_s.split('::').last }.to_set
+    @rebound_constant_names ||= @ireps.each_value.with_object(Set.new) do |irep, names|
+      BytecodeIR.for(irep).each_with_op(:SETCONST, :SETMCNST) do |insn, _idx|
+        names << (insn.op == :SETCONST ? insn.const_name : insn.mcnst_name).to_s.split('::').last
+      end
+    end
+    block_send_sites.fetch('new', []).any? do |irep, idx, reg|
+      name = IrBlockOperands.constant_name(irep, idx, reg)&.split('::')&.last
+      next true if name.nil? || tails.include?(name)
+
+      next false if @closed_world&.native_class_unshadowed?(name)
+
+      !known.include?(name) || @rebound_constant_names.include?(name)
+    end
   end
 
   # { name => [[irep, index, receiver register]] } for every block-carrying send in the build.

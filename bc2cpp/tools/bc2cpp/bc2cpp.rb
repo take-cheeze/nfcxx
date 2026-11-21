@@ -27,6 +27,7 @@ TypeCheckVariants.arm_guard if type_check_variants
 require_relative 'compact_output'
 require_relative 'owner_call_arity'
 require_relative 'owner_set_share'
+require_relative 'foreign_core_units'
 require_relative 'shard_output'
 require_relative 'runtime_header'
 require_relative 'shared_generation'
@@ -242,6 +243,15 @@ end
 
 require_relative 'profile_timings'
 
+# The files a gem run's class units stand for (compile_top_class_units' `own_file`): the core run's are mruby's own Ruby,
+# an engine gem's its own mrblib. Nil for any other run (a probe or fixture world), where every file counts.
+def bc2cpp_own_unit_file(symbol, own_mrblib)
+  return ->(file) { CoreDefs.core_source?(file) } if symbol == 'core_compiled'
+  return nil unless BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol }
+
+  ->(file) { file.include?(own_mrblib) }
+end
+
 BC2CPP_MAIN = lambda do
   next unless $PROGRAM_NAME == __FILE__
 
@@ -333,7 +343,10 @@ BC2CPP_MAIN = lambda do
   abort "bc2cpp: build '#{build_name}' is not a closed world:\n  #{errors.join("\n  ")}" unless errors.empty?
   profile_phase.call('closed world: build check')
 
-    outside_native, outside_ruby = bc2cpp_closed_world_outside_srcs(build_name, build_gems, repo_root)
+    outside_native, outside_ruby = bc2cpp_closed_world_outside_srcs(build_name, build_gems, repo_root,
+      native_paths: Shellwords.split(ENV.fetch('BC2CPP_LINKED_NATIVE_SRCS', '')),
+      ruby_paths: Shellwords.split(ENV.fetch('BC2CPP_LINKED_RUBY_SRCS', '')),
+      compiled_srcs: srcs)
   profile_phase.call('closed world: outside sources')
     # Core Ruby is compiled input here but stays an OUTSIDE source for these proofs: the
     # closed world is the engine's own Ruby, and a name mruby's own Ruby defines is one
@@ -352,6 +365,9 @@ BC2CPP_MAIN = lambda do
          "#{outside_ruby.size} Ruby outside sources) =="
     warn "  global refusal: #{closed_world.global_refusal || 'none'}"
     warn "  method_missing classes: #{closed_world.method_missing_classes.to_a.sort.join(', ')}"
+    # INSTANCE_SINGLETON_TAINT: the classes whose instances may get a singleton class, and what it may answer. One line
+    # and no local here: BC2CPP_MAIN is at mruby's limit of local variables.
+    warn "  instance singletons: #{closed_world.instance_singleton_report}"
     warn ''
     LintCrosscheck.enforce!(repo_root, closed_world)
     profile_phase.call('closed world: lint cross-check')
@@ -466,6 +482,10 @@ BC2CPP_MAIN = lambda do
   linked_mrblib = build_gems.values.flat_map { |dir| Dir["#{dir}/mrblib/**/*.rb"] }.select { |path| CoreDefs.core_source?(path) }
   unread_ruby = (Shellwords.split(ENV['FOREIGN_RUBY_SRCS']) + outside_ruby + linked_mrblib)
                 .map { |path| File.expand_path(path) }.uniq
+  # UNREAD_RUBY_OWNERS: the outside owner sets (OutsideOwnerCall) read these too. A linked core gem's mrblib that this
+  # build does not compile (bc2cpp-self runs mruby's own gems as Ruby) is in neither outside_ruby nor the program's
+  # core, and its `module Kernel; alias enum_for to_enum` was missing from the enum_for owner set.
+  CodeGen.unread_ruby_paths = unread_ruby.reject { |path| compiled_ruby.include?(path) }.sort
   unseen_flipped = CoreDefs.add_unseen_placeholders!(
     registry, ireps, core_all_defs, alias_sites,
     foreign_method_names(unread_ruby.reject { |path| compiled_ruby.include?(path) }.sort)
@@ -1515,6 +1535,11 @@ BC2CPP_MAIN = lambda do
     abort "\n[bc2cpp] DECLARED_RETURN_GUARD: #{guard_failures.size} runtime-checked return declaration(s) " \
           "without their compiled check:\n  #{guard_failures.join("\n  ")}"
   end
+  param_failures = DeclaredReturns.optional_param_guard_failures(gen.declared_params_kept, compiled)
+  unless param_failures.empty?
+    abort "\n[bc2cpp] DECLARED_PARAM_GUARD: #{param_failures.size} seeded optional parameter declaration(s) without " \
+          "their compiled check:\n  #{param_failures.join("\n  ")}"
+  end
   # DECLARED_IVAR_PROOF: a declared slot seeded as its declared kind is trusted only because every store to it is
   # checked; abort unless each method that stores to one compiled with its guard.
   ivar_failures = gen.declared_ivar_writer_failures(compiled, only_owners, other_owners, live: main_reach&.labels)
@@ -1589,11 +1614,11 @@ BC2CPP_MAIN = lambda do
   # RUNTIME_HEADER (runtime_header.rb): between the two, so it moves the compacted runtime text ShardOutput then splits.
   RuntimeHeader.capture_stdout(ENV[RuntimeHeader::DIR_KEY])
   CompactOutput.capture_stdout unless annotated
-  real_gem = BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol }
   # OWNER_CALL_ARITY (owner_call_arity.rb): registered before OWNER_SET_SHARE, so it rewrites that pass's text.
-  OwnerCallArity.capture_stdout if OwnerCallArity.enabled?(real_gem)
   # OWNER_SET_SHARE (owner_set_share.rb): before the split, so shards of one gem share a set too.
-  OwnerSetShare.capture_stdout(symbol) if OwnerSetShare.enabled?(real_gem)
+  # Both inline, not through a local: BC2CPP_MAIN is at mruby's limit of local variables (see owner_rewrite below).
+  OwnerCallArity.capture_stdout if OwnerCallArity.enabled?(BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol })
+  OwnerSetShare.capture_stdout(symbol) if OwnerSetShare.enabled?(BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol })
 
   # PARAM_TRACE (tools/bc2cpp/param_trace.rb): opt-in runtime classes of compiled method and block
   # parameters; unset (or any value but 1) leaves stdout untouched. Registered BEFORE ELSE_TRACE so the
@@ -2938,10 +2963,16 @@ BC2CPP_MAIN = lambda do
   # A class this gem's own mrblib reopens is the gem's too, even when it compiles no method of it (mruby-rpg2k's
   # `class Object; include RGSS; end`): the statements run only from this gem's units. The root holds every linked
   # engine mrblib, so only this gem's own directory counts.
-  all_class_units = gen.compile_top_class_units(ireps.fetch(root_label))
   own_mrblib = "/mruby-#{symbol.to_s.delete_suffix('_compiled')}/mrblib/"
+  all_class_units = gen.compile_top_class_units(ireps.fetch(root_label), own_file: bc2cpp_own_unit_file(symbol, own_mrblib))
   own_reopened = all_class_units.select { |unit| unit[:file].to_s.include?(own_mrblib) }.map { |unit| unit[:path] }
   class_units = gen.owned_class_units(all_class_units, only_owners && (only_owners + own_reopened))
+  # FOREIGN_CORE_UNITS: the excluded core file's classes (10error.rb) run first, as mrb_init_mrblib would load them.
+  if symbol == 'core_compiled'
+    class_units = ForeignCoreUnits.units(ForeignCoreUnits.files(BC2CPP_WORLD_ROOT), lambda { |owner, name|
+      registry.fetch(name, []).any? { |d| d.owner == owner && d.irep }
+    }) + class_units
+  end
   File.write(File.join(out_dir, "#{symbol}_units.txt"), class_units.map { |u| "#{u[:path]}\n" }.uniq.join)
   # BC2CPP_DUMP_UNITS: the units this gem emits (the dump of every attempt, in CodeGen#dump_class_unit, also has the
   # units of other gems' owners that owned_class_units drops).

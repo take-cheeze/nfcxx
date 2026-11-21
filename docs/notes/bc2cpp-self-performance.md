@@ -41,6 +41,24 @@ Splitting is enabled automatically for self builds through `BC2CPP_SHARD_SPLIT_O
 their owner grouping by default, including Optcarrot's default four-shard layout. Explicit hot owners remain
 pinned. See [owner sharding](bc2cpp-owner-shards.md) for linkage and state-sharing checks.
 
+## Shard rewriting
+
+The C++ scanner now counts braces directly on lines without comments or quoted literals, provided it is not
+inside a multiline comment or raw string. Other lines retain the full lexical scanner. This avoids allocating
+one-character Strings for most generated statements; the scanner's callers only read the retained line text.
+
+On the same frozen 46 MiB raw compiler C++ capture, complete 16-shard rewriting under CRuby 4 + YJIT changed
+as follows. These exit-handler times are separate from the logged generation phases below.
+
+| Layout | Before | Updated | Allocated objects before / updated |
+| --- | ---: | ---: | ---: |
+| Default owner grouping | 16.66 s | 6.32 s | 242.19 M / 53.83 M |
+| Oversized-owner splitting | 16.50 s | 6.60 s | 242.19 M / 53.83 M |
+
+Every output file was byte-identical in both layouts. All per-line scanner records also matched on the current
+self image's main C++ and 15 shards. The shard checks cover multiline raw strings/comments crossing ordinary
+lines, quoted braces, division, shared mutable/constant state, linked generated code and runtime parity.
+
 ## Current-source self generation
 
 The current 324-file compiler graph includes the new cache and lookup checks:
@@ -67,3 +85,133 @@ retains 396 VM fallbacks. Strict fresh C++/bytecode parity and generated-program
 binary strings and exceptions. The compiled compiler also matches CRuby's main C++, shard C++ and bytecode
 with oversized-owner splitting both disabled and enabled. This verifies the default owner layout as well as
 the self-build layout.
+
+## Optimized native debug information
+
+The runner's GCC toolchain supplied `-g` even with `BC2CPP_RUNNER_OPT=1`. Optimized runner builds now omit
+that default for C and C++, retaining `-O2` and exception support. Ordinary debug builds keep `-g3 -O0`
+and `MRB_DEBUG`; explicit `CFLAGS`/`CXXFLAGS` retain the caller's debug options (including `-g3`, `-ggdb`
+and `-g0`). For example, `CXXFLAGS='-g -Wall -Wundef'` restores native debug information in an optimized build.
+
+A fixed captured compiler shard built through the nfcxx GCC backend had identical disassembly and identical
+text/data/BSS sizes with and without `-g`. The object shrank from 23,592,160 to 3,341,528 bytes; peak compiler
+RSS fell from about 847 to 609 MiB. A sequential repeat measured 42.52 to 24.82 seconds wall time and 41.20
+to 23.98 seconds user CPU. An earlier pair measured 31.83 to 23.19 seconds (those processes briefly overlapped).
+These are individual shard measurements, not a whole-build speedup claim. The principal saving is skipping
+DWARF generation for the lowered compiler bodies, without changing their executable instructions.
+
+## Binary symbol-cache scans
+
+SymbolCache already scans a binary view of generated C++, but its regular expressions still requested UTF-8
+offsets from mruby-onig. Byte-oriented patterns avoid converting each match position by rescanning its prefix.
+Two alternating pairs of 100 rewrites of a 200-send function measured 0.856/0.861 seconds before and
+0.749/0.744 seconds after in the mruby runtime. UTF-8 comments, receivers and method literals retain their
+bytes and the original result encoding in the regression checks.
+
+This is a local helper improvement: a warm 96-method native compiler smoke measured 6.04 seconds before and
+6.06/6.07 seconds after, so it does not establish a whole-compiler runtime gain. The smoke's generated C++ and
+bytecode hashes matched in every run. The initial cold scan-cache run is excluded from that warm comparison.
+
+## Indexed instance-variable writes
+
+A subsequent StackProf wall profile attributed 22.0 seconds (7.8% of samples) to
+`YieldReach#compute_proc_free_ivar`. It rescanned every instruction in every irep for each queried ivar name.
+A lazy index now records SETIV sites once per analysis, preserving their original order; proofs still visit
+every matching write and retain the same cycle and dynamic-write refusals.
+
+On the same captured self-compilation input, with StackProf enabled in both runs, logged generation phases
+fell from 248.269 to 213.518 seconds (14%). Global facts and annotations fell from 34.204 to 10.768 seconds;
+method compilation fell from 180.798 to 169.651 seconds. Whole process wall time, including exit handlers
+and profile serialization, fell from 291.74 to 252.21 seconds. These are one paired profiled measurement,
+not an unprofiled throughput guarantee. All 20 generated C++, header and bytecode artifacts were byte-identical.
+
+Existing IR block checks cover writes across classes, unrelated ivars, chained reads, nested Proc writes,
+cycles, unwritten ivars and unlisted dynamic writes.
+
+## Native namespace scopes
+
+A 96-method compiled-compiler profile attributed 13.0% of sampled CPU to `onig_byte_to_char`, largely beneath
+`UniqueClassNames.native_module_binding`. Each namespace query scanned function headers again from the start
+of its C/C++ source. The namespace and constant-binding analyses now share a per-analysis header index, use
+binary search for the enclosing function and retain its body boundary. Match positions and captures are saved
+as values, avoiding mruby-onig's reused scan region; UTF-8 character offsets keep their existing meaning.
+
+On 20 real namespace queries over the fixture's 79 native sources, alternating baseline/indexed runs measured
+0.376/0.353 versus 0.038/0.043 seconds on CRuby 4/YJIT, and 0.631/0.619 versus 0.127/0.126 seconds in the
+mruby interpreter. Every answer matched. The interpreter baseline copies retained MatchData to repair the
+same scan-region compatibility issue, so this compares two correct implementations; it is not a whole-compiler
+runtime speedup claim. Scope checks also cover UTF-8 prefixes, interleaved queries into different functions,
+out-of-function positions and both definition-only and lookup policies sharing one header index.
+
+## Rescue-aware writer walks
+
+Writer queries with arbitrary barrier predicates still inspect every instruction. Three hot callers whose
+predicates only reject RESCUE can now declare that opcode: the walk merges leading-register writer positions
+with RESCUE positions, including its second-register write, and skips unrelated instructions.
+
+On 396,194 queries captured from real self-compilation bytecode, alternating warm primitive measurements fell
+from about 0.559 to 0.241 seconds CPU, with identical answers. The differential fixture covers 29,952 combinations
+of barriers, MOVE chains and budgets, skipped opcodes, missing registers, exhausted callbacks and traversal order.
+All 20 generated artifacts also match byte-for-byte on the frozen self-compilation graph. The full replays ran
+under different external load and do not establish a whole-generation speedup. The walker remains a VM fallback
+in the current self image; this change improves its algorithm rather than changing its translation status.
+
+## Next optimization profile (062f75bc, November 21)
+
+Profiled the frozen 331-file self input on CRuby 4.0.5 with YJIT, using StackProf CPU sampling at 1 ms
+and a separate allocation run sampling every 2,000 allocations. These are profiled generation runs,
+not measurements of the compiled compiler's execution speed. Local artifacts and reproduction scripts
+are under `build/bench/self-profile-current` and `build/bench/profile-self-*.rb` (ignored build outputs).
+
+Generation took 301.7 seconds, including exit handlers: method compilation accounted for 243.9 seconds.
+There were 580.2 million allocations and 55.0 seconds of GC. Inclusive call-tree costs below overlap
+and must not be added together. The next candidates, in suggested order, are:
+
+1. **Avoid unconditional reaching-definition bit masks.** In `compute_reaching_definitions`, line 274
+   computes `1 << here.reg.to_i` before testing `here.op == :EXCEPT`. Allocation samples attribute
+   34,979 of 290,014 samples to this expression, approximately 70 million allocations (12.1%).
+   Test the opcode first, then the mask; consider skipping the mask when `nil_regs` is zero.
+   Validate exception-edge answers and byte-identical generated output. The entire reaching-definitions
+   API costs 21.2 seconds CPU inclusive; its compute loop costs 15.2 seconds.
+2. **Stop compiling a dynamic regexp per fallback site.** The regexp construction in
+   `OutsideOwnerCall#guarded_fallback_line`, line 120, costs 6.1 seconds self CPU.
+   Use structured fallback results or exact token matching, preserving the replacement's semantics.
+3. **Reuse fallback target decisions.** The outside-owner fallback tree costs 46.0 seconds inclusive,
+   with singleton-arm planning around 30.7 seconds. The context-lifted second fallback call repeats
+   substantial analysis. Reuse immutable target plans while retaining layout, probe and cycle context;
+   emitted C++ strings cannot safely be cached without accounting for those inputs.
+4. **Split the giant send emitter and measure native shard costs.** A fresh native build of 16 units
+   with eight workers took 114.4 seconds; all units compiled successfully. The main registration unit
+   took 49.0 seconds, while shard 3 took 70.2 seconds. Equal source bytes do not imply equal compile cost.
+   `CodeGen_compile_send_site_body_impl` occupies 19,235 lines / 910,325 bytes in shard 3.
+   In sequential isolated compilations with otherwise identical flags, the original unit took 55.21 seconds;
+   replacing only that method body with a nil return took 26.33 seconds, reducing peak RSS from
+   1,164,836 to 693,876 KiB. This deliberately incorrect ablation was never linked and establishes
+   an upper bound on removable cost, not the speedup from extracting helpers. Smaller helpers and
+   finer compile-cost-aware shards need separate validation. Merely ordering units longest-first
+   simulates at 112.7 seconds with the observed costs, so scheduling alone has little headroom.
+
+`ShardOutput.scan_lines` still accounts for about 11.3% of allocation samples, but only 3.7 seconds
+inclusive CPU after its earlier optimization. Prioritize the reaching-definition mask before further
+scanner work. Allocation reductions may reduce GC, but the profile does not establish how much of
+the 55 seconds of GC any individual change will recover. No compiler implementation changed in this
+profiling pass.
+
+## Avoid irrelevant reaching-definition masks
+
+The EXCEPT nil-path check now tests the opcode and a nonzero nil-register state before constructing
+the register mask. This preserves the exception-edge decision while avoiding large Integer allocations
+for unrelated instructions and states. Low and high exception-register fixtures check both incoming
+paths before RAISEIF and the normal-only path after it.
+
+On 593,352 sampled queries from the frozen self bytecode, including handler policies and refusal
+diagnostics, all answers matched the previous guard. Alternating warm runs measured baseline CPU
+1.274/1.233 seconds versus 1.171/1.178 seconds; allocations fell from 5.36M to 4.12M. These sampled
+instruction queries are a differential workload, not a recording of the compiler's actual query mix.
+
+Replaying the full 331-file generation with the same CPU profiler reduced allocations from 580.18M
+to 525.78M (9.4%). The reaching-definition compute loop fell from 15.184 to 9.537 seconds sampled CPU;
+Integer shifts fell from 1.966 seconds to 0.001 seconds. Whole profiled generation measured
+301.704 to 291.237 seconds, with GC 55.000 to 51.875 seconds. This is one before/after pair with other
+phase variation, not a stable throughput guarantee. All 20 C++, header and bytecode artifacts matched
+byte-for-byte. Local results are in `build/bench/self-profile-current/mask-optimized`.

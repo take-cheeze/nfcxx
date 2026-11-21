@@ -335,7 +335,7 @@ class IvarLayout
                             trusted: false)
     use = idx
     found = BytecodeIR.for(irep).walk_writers(idx - 1, reg, skip_ops: TRACE_TYPE_SKIP_OPS,
-                                              barrier: TRACE_TYPE_RESCUE_WRITE, barrier_result: UNKNOWN,
+                                              barrier: TRACE_TYPE_RESCUE_WRITE, barrier_result: UNKNOWN, barrier_op: :RESCUE,
                                               exhausted: IrepScans::REACH_ENTRY) do |insn, i, cur|
       return JOIN_BREAK unless (trusted && i == idx - 1) || BytecodeIR.write_dominates?(irep, i, use, cur)
 

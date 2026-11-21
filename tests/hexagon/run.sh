@@ -67,20 +67,28 @@ for f in "$root"/tests/cases/*.cpp; do
   if [ $((got & 255)) -eq $((want & 255)) ]; then echo "ok   run $n"; pass=$((pass+1));
   else echo "FAIL (run) $n: want $want got $got"; fail=1; fi
 done
-# Hand-written HVX kernel (no EDG): clang builtins with -mhvx, one 128-byte vaddh, exit 192.
+# Hand-written HVX kernels (no EDG): clang builtins with -mhvx, 128-byte vectors.
+# hvx_vaddh: one vaddh, exit 192. hvx_vmpy: widening-multiply lane semantics
+# (vmpyhv/vmpyhus even-odd deinterleave, vmpyh scalar even half), exit 96.
+# hvx_tail: vector main loop plus scalar tail (n = 100, 5, 0), exit 68.
+# hvx_vrmpy: vrmpyubv byte dot-product, exit 64.
+# hvx_vdmpy: vdmpybus mixed-sign widening dot (even/odd Rt split), exit 64.
+for k in "hvx_vaddh 192" "hvx_vmpy 96" "hvx_tail 68" "hvx_vrmpy 64" "hvx_vdmpy 64"; do
+  set -- $k; name=$1; want=$2
 if $clang --target=$triple -ffreestanding -fno-pic -O2 -mhvx -mhvx-length=128b -w \
-      -c "$here/hvx_vaddh.c" -o "$tmp/hvx.o" 2>"$tmp/hvx.cc"; then
-  if [ $run = 0 ]; then echo "ok   compile hvx_vaddh"; pass=$((pass+1));
+      -c "$here/$name.c" -o "$tmp/hvx.o" 2>"$tmp/hvx.cc"; then
+  if [ $run = 0 ]; then echo "ok   compile $name"; pass=$((pass+1));
   elif ! "$root/scripts/mrb.rb" "$here/flatlink.rb" "$tmp/hvx.o" "$tmp/hvx.elf" _start 2>"$tmp/hvx.link"; then
-    echo "FAIL (link) hvx_vaddh"; cat "$tmp/hvx.link"; fail=1
+    echo "FAIL (link) $name"; cat "$tmp/hvx.link"; fail=1
   else
     chmod +x "$tmp/hvx.elf"
     timeout 30 "$qemu" "$tmp/hvx.elf" >/dev/null 2>&1; got=$?
-    if [ "$got" -eq 192 ]; then echo "ok   run hvx_vaddh"; pass=$((pass+1));
-    else echo "FAIL (run) hvx_vaddh: want 192 got $got"; fail=1; fi
+    if [ "$got" -eq "$want" ]; then echo "ok   run $name"; pass=$((pass+1));
+    else echo "FAIL (run) $name: want $want got $got"; fail=1; fi
   fi
 else
-  echo "FAIL (clang) hvx_vaddh"; head -3 "$tmp/hvx.cc"; fail=1
+  echo "FAIL (clang) $name"; head -3 "$tmp/hvx.cc"; fail=1
 fi
+done
 echo "hexagon: $pass passed, $skip skipped"
 exit $fail

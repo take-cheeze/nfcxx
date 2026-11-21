@@ -8,7 +8,7 @@
 #   cc                  the link: logged (RUN), not run
 #   pathb-cc            logged (RUN ROOT/scripts/pathb-cc.rb ARGS); its status is the facts' pathb-status
 #   env                 the gcc fallback's exec: logged (EXEC); the bash is replaced, so no STATUS line follows it
-#   mktemp -d           a directory under the sandbox's tmp, printed as TMP
+#   mktemp -d           a directory under the sandbox's tmp, printed as TMP; mktemp alone is a file there (the cache check's statements)
 #   g++, gcc            probes answer; no others run here
 # Everything else (rm, sed, awk, grep, ...) runs for real. The bash runs under env -i (no NFCXX_* variables) in the sandbox's
 # work directory, whose files and directories are the "exists" facts. In the output the sandbox's repository is ROOT, its work

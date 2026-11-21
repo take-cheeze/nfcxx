@@ -33,6 +33,25 @@ class CodeGen
     nil
   end
 
+  # PREPENDED_OVERRIDE: a module prepended to +owner+ (directly, or included or prepended into one that is) comes
+  # before +owner+ in its lookup, so when it defines +name+ an exact-class arm for +owner+ must not call +owner+'s own
+  # body: lookup on an instance of exactly +owner+ finds the module's first. An owner with a mixin the registry could
+  # not resolve may have one too.
+  def prepended_override?(owner, name)
+    return true if @unknown_mixins&.include?(owner)
+
+    seen = Set.new
+    work = Array(@prepended_modules[owner]).dup
+    until work.empty?
+      mod = work.pop
+      next unless seen.add?(mod)
+      return true if @unknown_mixins&.include?(mod) || (@registry[name] || []).any? { |d| d.owner == mod }
+
+      work.concat(Array(@included_modules[mod])).concat(Array(@prepended_modules[mod]))
+    end
+    false
+  end
+
   # Every definition of `name` a runtime-class-checked direct call can reach
   # for an `n`-argument send, uncapped; nil when there is none.
   def poly_candidates(name, n, optional: false)
@@ -57,7 +76,7 @@ class CodeGen
       next false if repeated_owners.include?(t.owner)
       # An exact class test does not skip a module prepended before that class.
       # Its method may stay on the VM even when the class's own body compiles.
-      next false if poly_prepend_may_shadow?(name, t.owner)
+      next false if prepended_override?(t.owner, name) || poly_prepend_may_shadow?(name, t.owner)
       # EXPLICIT_RECEIVER_VISIBILITY: an arm for a non-public or re-scoped def would run what OP_SEND raises for.
       next false if @explicit_visibility_site && !explicit_call_visible?(name, t)
 

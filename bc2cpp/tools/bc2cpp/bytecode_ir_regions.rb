@@ -125,22 +125,43 @@ module BytecodeIR
     # Options, checked per instruction in this order:
     # * barrier: ops (Array) or `->(insn, reg)`; a hit ends the walk with
     #   +barrier_result+ whether or not the instruction touches the register.
+    # * barrier_op: a callable barrier can only hit this opcode. This lets the
+    #   walk skip unrelated instructions while retaining non-leading writes
+    #   such as RESCUE's second register. Omit for an arbitrary predicate.
     # * skip_ops: ops ignored even when they name the register (read-only
     #   opcodes, BLOCK's proc register).
     # * follow_moves: MOVE is followed to its source without yielding; a MOVE
     #   without a source, or more than +max_moves+ of them, ends the walk with nil.
     # +exhausted+ (`->(reg)`) supplies the result when the top of the body is
     # reached with +reg+ never written, i.e. an incoming register.
-    def walk_writers(from_index, reg, skip_ops: nil, barrier: nil, barrier_result: nil,
+    def walk_writers(from_index, reg, skip_ops: nil, barrier: nil, barrier_result: nil, barrier_op: nil,
                      follow_moves: false, max_moves: nil, exhausted: nil)
       moves = 0
       callable_barrier = barrier.respond_to?(:call)
       index = [from_index, @instructions.length - 1].min
+      if callable_barrier && barrier_op
+        barrier_indices = indices_by_op.fetch(barrier_op, EMPTY_INDICES)
+        if barrier_indices.empty? && reg.is_a?(Integer)
+          # Most bodies have no RESCUE at all; the predicate cannot stop them.
+          barrier = barrier_indices = nil
+        else
+          barrier_position = barrier_indices.bsearch_index { |i| i > index }
+          barrier_position = barrier_position ? barrier_position - 1 : barrier_indices.length - 1
+        end
+      end
       while index >= 0
-        # Without a barrier only an instruction leading with +reg+ can matter, so
-        # jump straight to the previous one (skip_ops only ever skips those too).
-        unless barrier
-          index = last_writer_index(index, reg)
+        # Jump between leading-register instructions and any indexed barriers;
+        # an arbitrary barrier predicate still examines every instruction.
+        if !barrier || (barrier_indices && reg.is_a?(Integer))
+          writer = last_writer_index(index, reg)
+          if barrier_indices
+            barrier_position -= 1 while barrier_position >= 0 && barrier_indices[barrier_position] > index
+            if barrier_position >= 0
+              candidate = barrier_indices[barrier_position]
+              writer = candidate if !writer || candidate > writer
+            end
+          end
+          index = writer
           break unless index
         end
         insn = @instructions[index].source
