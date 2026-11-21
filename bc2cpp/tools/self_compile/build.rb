@@ -16,6 +16,7 @@ require_relative '../bc2cpp/bake_sources'
 require_relative '../bc2cpp/scan_cache'
 require_relative '../bc2cpp/toolchain'
 require_relative '../bc2cpp/native_ast_source'
+require_relative '../bc2cpp/compiled_gems'
 require_relative '../../host-libs/mruby-bc2cpp-runner/mrblib/runner'
 require_relative 'artifacts'
 
@@ -63,6 +64,13 @@ files = bake('tools/bc2cpp/bc2cpp.rb').filter_map do |name, source|
   FileUtils.mkdir_p(File.dirname(path))
   File.write(path, source) unless File.file?(path) && File.binread(path) == source.b
   path
+end
+# SELF_CORE: mruby's own Ruby (mrblib/*.rb and the linked core gems' mrblib, in the interpreter's load order) is compiled
+# with the compiler's sources, as a game build compiles it, so Array#each, Hash#each, Integer#times, Enumerable and the
+# rest run as C++ instead of on the VM under every compiled caller. They come first, as the interpreter defines them.
+# BC2CPP_SELF_CORE=0 compiles the compiler's sources alone.
+if ENV.fetch('BC2CPP_SELF_CORE', '1') != '0'
+  files = core_compiled_mrblib_srcs(world, manifest.fetch('gems').map(&:first)) + files
 end
 env = {
   'BC2CPP_WORLD_ROOT' => world, 'BC2CPP_TREE_ROOT' => tree,
