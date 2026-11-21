@@ -100,6 +100,30 @@ suite.check('plain-line scanning retains braces inside carried raw strings and c
 suite.check('literal and division lines do not change the enclosing item boundaries',
             ShardOutput.top_level_items(lexical_lines).map { |item| item.values_at(:name, :first, :last) } ==
               [['lexical', 0, 10]])
+
+delimiters = <<~'CPP'
+  static int delimiter_guards() {
+    /* 雪 *x /y
+       not a close * / }
+    */
+    const char* raw = R"TAG(雪 )NO" /* //
+      )TAGx"
+    )TAG";
+    const char* empty_tag = R"(雪 /* } )";
+    const char* quoted = "雪 \" // /*";
+    int n = 1'000;
+    return n / 2; // }
+  }
+CPP
+delimiter_lines = delimiters.lines.map(&:freeze)
+delimiter_scan = ShardOutput.scan_lines(delimiter_lines)
+suite.check('partial delimiters, UTF-8 and empty raw tags preserve the enclosing depth',
+            delimiter_scan.map { |line| line[:depth] } == [0] + [1] * (delimiter_lines.size - 1))
+suite.check('comment and raw-string false endings do not split the function',
+            ShardOutput.top_level_items(delimiter_lines).map { |item| item.values_at(:name, :first, :last) } ==
+              [['delimiter_guards', 0, delimiter_lines.size - 1]])
+suite.check('division stays code while a trailing line comment hides its brace',
+            delimiter_scan[-2][:code].strip == 'return n / 2;')
 small, small_shards = ShardOutput.split(marked, 'chk', 3)
 suite.check('under the threshold the main file is the unmarked text',
             small == PRELUDE + UNIT_B + UNIT_A + HOOKS)
