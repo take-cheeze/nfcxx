@@ -215,3 +215,32 @@ Integer shifts fell from 1.966 seconds to 0.001 seconds. Whole profiled generati
 301.704 to 291.237 seconds, with GC 55.000 to 51.875 seconds. This is one before/after pair with other
 phase variation, not a stable throughput guarantee. All 20 C++, header and bytecode artifacts matched
 byte-for-byte. Local results are in `build/bench/self-profile-current/mask-optimized`.
+
+## Reuse the outside-owner fallback marker matcher
+
+`OutsideOwnerCall#guarded_fallback_line` used to compile a regexp containing the destination,
+receiver and method name at each site, then match it twice when replacing the proven nomethod branch.
+It now locates that literal call prefix with `String#index` and matches the trailing marker once
+with a shared regexp anchored at the suffix position. A failed candidate continues searching, and
+only the first valid branch is replaced. The end offset is saved before emitting the owner call:
+mruby-onig may reuse its MatchData region during calls made by that emission.
+
+The current-main baseline (0f9c7bfea, including the mask optimization) invoked this path 384,547 times
+on the frozen self input. Replaying its first 20,000 calls in alternating warm CRuby 4/YJIT runs
+measured 0.242/0.226 seconds CPU with the original matcher versus 0.063/0.047 seconds with the shared
+matcher. Allocations fell from about 625K to 316K. The fixture isolates replacement by using a fixed
+owner-call result; these are matcher timings, not whole-generation or compiled-compiler throughput.
+All results matched on CRuby and mruby-onig. Another 576 comparisons cover multiple candidates,
+failed matches, argument lists, regexp metacharacters, UTF-8 offsets and match-region reuse.
+These comparisons run inside the already-registered `helper_owner_call_check.rb`; adding a separate
+check requires a matching entry in the pinned world's check policy.
+
+Full CPU-profiled generation with the same bounded capture hook in both runs measured 336.644 versus
+322.041 seconds. This method's self CPU fell from 7.021 to 0.413 seconds; its inclusive tree fell
+from 53.173 to 44.310 seconds. Allocations fell from 528.25M to 523.31M and GC from 58.461 to
+54.634 seconds. All 20 C++, header and bytecode artifacts matched byte-for-byte. The whole-generation
+times are one before/after pair with profiling/capture overhead and other phase variation, not a
+throughput guarantee. These runs use a newer generator than the earlier mask measurements and must
+not be used to infer a cumulative speedup. Local artifacts are under
+`build/bench/self-profile-current/fallback-{baseline,optimized}`. Helper owner calls, direct owner calls,
+static owner dispatch and method-missing arms also pass their generated-program runtime checks.
