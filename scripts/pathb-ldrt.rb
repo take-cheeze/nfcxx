@@ -53,7 +53,8 @@ end
 cpfe = env("PATHB_CPFE") || "#{root}/build/pathb/cmake/bin/cpfe"
 if File.file?(File.join(File.dirname(cpfe), "eh-tables")) && !cc_bin.include?("cosmocc") &&
    IO.popen(["uname", "-s"], &:read).chomp != "Darwin"
-  script = "#{out}/libnfcxxld-eh.ld"
+  # named .a: the drivers pass a .a to the link as it is (GNU ld reads a link script whatever its name)
+  script = "#{out}/libnfcxxld-eh.a"
   text = "/* nfcxx: scripts/pathb-ldrt.rb, a Path B link with exception tables (docs/notes/pathb-zero-cost-eh.md) */\n" \
          "INPUT ( #{lib} -lstdc++ -lgcc_s )\n"
   unless File.file?(script) && File.read(script) == text
