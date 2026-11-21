@@ -1760,6 +1760,15 @@ check test ! -e "$work/api_mutex_thread/NOT_BUILDABLE"
 check grep -qF 'mrb_value mu = mrb_nil_value();' "$work/api_mutex_thread/src/api_mutex_thread.c"
 check grep -qF '((void)(mu), mrb_nil_value());' "$work/api_mutex_thread/src/api_mutex_thread.c"
 check test "$(grep -c 'Thread' "$work/api_mutex_thread/REFUSALS.txt")" -eq 0
+# 2zzz169. rb_struct_define and rb_struct_new of the mruby-struct gem: the variadic helpers (Struct.new of the member symbols, and
+# klass.new with the members' count of values); the gem is a dependency.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_struct_va tools/cext2mrbgem/fixtures/api_struct_va/ext/api_struct_va "$work/api_struct_va" > "$work/api_struct_va.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_struct_va/NOT_BUILDABLE"
+check grep -qF 'return nfcx_struct_new(mrb, sv_point, x, y);' "$work/api_struct_va/src/api_struct_va.c"
+check grep -qF 'sv_point = nfcx_struct_define(mrb, "SvPoint", "x", "y", NULL);' "$work/api_struct_va/src/api_struct_va.c"
+check grep -qF "spec.add_dependency 'mruby-struct'" "$work/api_struct_va/mrbgem.rake"
+check test "$(grep -c 'stuck point (Struct)' "$work/api_struct_va/REFUSALS.txt")" -eq 0
 # 2zzz155. a struct field of CRuby's rb_encoding * type: the Encoding placeholder type is in the prelude (the declaration compiles),
 # and the include of ruby/encoding.h is not a blocking refusal (the placeholder covers it).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rb_encoding_field tools/cext2mrbgem/fixtures/api_rb_encoding_field/ext/api_rb_encoding_field "$work/api_rb_encoding_field" > "$work/api_rb_encoding_field.log" 2>&1 || rc=$?

@@ -6205,6 +6205,75 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     end
   end
 
+  # rb_struct_define(name, m1, ..., NULL) and rb_struct_new(klass, v1, ..., vn) of the mruby-struct gem: the variadic helper
+  # nfcx_struct_va (once per file, before the enclosing function) defines the class with Struct.new (the member symbols; a name
+  # is the Struct constant) and rb_struct_new calls klass.new with as many values as klass.members has
+  STRUCT_VA_PRELUDE = <<~'C'.chomp
+    /* BC2CPP-MRBGEM: the mruby-struct gem's Struct: rb_struct_define and rb_struct_new (variadic) */
+    #include <stdarg.h>
+    static mrb_value
+    nfcx_struct_define(mrb_state *mrb, const char *name, ...)
+    {
+      va_list ap;
+      mrb_value argv[64];
+      int n = 0;
+      const char *m;
+      mrb_value st = mrb_obj_value(mrb_class_get(mrb, "Struct"));
+      mrb_value cls;
+      va_start(ap, name);
+      while (n < 64 && (m = va_arg(ap, const char *)) != NULL) {
+        argv[n++] = mrb_symbol_value(mrb_intern_cstr(mrb, m));
+      }
+      va_end(ap);
+      cls = mrb_funcall_argv(mrb, st, mrb_intern_cstr(mrb, "new"), n, argv);
+      if (name) mrb_const_set(mrb, st, mrb_intern_cstr(mrb, name), cls);
+      return cls;
+    }
+    static mrb_value
+    nfcx_struct_new(mrb_state *mrb, mrb_value klass, ...)
+    {
+      va_list ap;
+      mrb_value members = mrb_funcall_argv(mrb, klass, mrb_intern_cstr(mrb, "members"), 0, NULL);
+      mrb_int n = RARRAY_LEN(members), i;
+      mrb_value argv[64];
+      va_start(ap, klass);
+      for (i = 0; i < n && i < 64; i++) argv[i] = va_arg(ap, mrb_value);
+      va_end(ap);
+      return mrb_funcall_argv(mrb, klass, mrb_intern_cstr(mrb, "new"), (mrb_int)i, argv);
+    }
+  C
+
+  def struct_variadic_special(rel, s, nxt, called, name)
+    unless called
+      refuse(rel, s, name, 'used without a call')
+      return
+    end
+    masked = @files[rel]['masked']
+    cp = match_close(masked, nxt)
+    if cp < 0
+      refuse(rel, s, name, 'the call is not closed')
+      return
+    end
+    fn = enclosing_func(rel, s)
+    dpre = define_at(rel, s)
+    at = dpre ? dpre[1] : (fn && fn['hstart'])
+    unless at
+      refuse(rel, s, name, 'the helper this call needs has no place before it (not in a function or a macro)')
+      return
+    end
+    ed = @edits[rel]
+    @prelude_done ||= Set.new
+    unless @prelude_done.include?([rel, 'nfcx_struct_va'])
+      @prelude_done << [rel, 'nfcx_struct_va']
+      ed.add(at, at, STRUCT_VA_PRELUDE + "\n")
+    end
+    helper = name == 'rb_struct_define' ? 'nfcx_struct_define' : 'nfcx_struct_new'
+    ed.add(s, s + name.length, helper)
+    ed.add(nxt + 1, nxt + 1, "#{mrb_tok(rel, s)}, ")
+    (@gem_deps ||= Set.new) << 'mruby-struct'
+    rewrite(rel, s, name, "#{helper}(mrb, ...)", 'a Struct of the mruby-struct gem (Struct.new of the member symbols, or klass.new with the members count of values)')
+  end
+
   # rb_ary_new3(n, a1..an) -> mrb_ary_new_from_values(mrb, n, (mrb_value[]){a1..an}): the count is a literal and the values
   # stay in place (the identifier pass converts them); the head and the closing paren are rewritten
   def ary_new3_special(rel, s, nxt, called)
@@ -6464,6 +6533,10 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     end
     if name == 'rb_ary_new3'
       ary_new3_special(rel, s, nxt, called)
+      return
+    end
+    if %w[rb_struct_define rb_struct_new].include?(name)
+      struct_variadic_special(rel, s, nxt, called, name)
       return
     end
     if name == 'RB_GC_GUARD'
