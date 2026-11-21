@@ -3,6 +3,7 @@
 require 'set'
 require_relative 'native_names'
 require_relative 'ruby_parse_cache'
+require_relative 'scan_cache'
 
 # OUTSIDE_RUBY_IVAR_SCOPES: which classes an outside Ruby source (core mrblib, a gem's mrblib) can write `@name` on.
 #
@@ -25,13 +26,26 @@ module OutsideRubyIvarScopes
     global = Set.new
     scoped = Hash.new { |h, k| h[k] = Set.new }
     Array(paths).each do |path|
-      src = SourceText.read(path, 'outside_ruby_ivar_scopes')
-      next unless src
-      file_global, file_scoped = scan_source(src, path)
+      facts = file_facts(path)
+      next unless facts
+      file_global, file_scoped = facts
       global.merge(file_global)
       file_scoped.each { |name, classes| scoped[name].merge(classes) }
     end
     [global, scoped.reject { |name, _| global.include?(name) }.transform_values(&:freeze)]
+  end
+
+  # One file's [global names, [[name, classes]...]] as Arrays (nil when it cannot be read), kept in ScanCache: the walk
+  # over the linked Prism and RBS sources was a fifth of a small self-compiled run. Arrays, not Sets, as a
+  # self-compiled bc2cpp's Marshal read a Set's links wrongly before 3rd/mruby-marshal's fix.
+  def file_facts(path)
+    ScanCache.fetch('outside_ruby_ivar_scopes', [path]) do
+      src = SourceText.read(path, 'outside_ruby_ivar_scopes')
+      if src
+        file_global, file_scoped = scan_source(src, path)
+        [file_global.to_a, file_scoped.map { |name, classes| [name, classes.to_a] }]
+      end
+    end
   end
 
   # The parse is RubyParseCache's, shared with the other foreign-Ruby scans.

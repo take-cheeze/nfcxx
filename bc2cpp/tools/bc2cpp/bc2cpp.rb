@@ -965,15 +965,18 @@ BC2CPP_MAIN = lambda do
   # BC2CPP_SELF_REGISTERING: a caller that compiles another program and installs its own registrations
   # (tools/optcarrot_probe/compiled_run.rb) sets it; an engine build registers each owner on its own.
   CodeGen.engine_registrations = true unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
-  CodeGen.core_compare = CoreCompare.verified(foreign_ruby_srcs | core_mrbgem_mrblib_srcs(BC2CPP_WORLD_ROOT),
-                                              native_name_sources)
+  CodeGen.core_compare = profile_call.call('CoreCompare.verified') do
+    CoreCompare.verified(foreign_ruby_srcs | core_mrbgem_mrblib_srcs(BC2CPP_WORLD_ROOT), native_name_sources)
+  end
   warn "== Comparable comparison operators verified against the build's sources (CORE_COMPARE): #{CodeGen.core_compare.to_a.sort.join(', ')} =="
-  return_names_probe = CodeGen.new(ireps, registry, ivar_layout, class_layout_probe, class_annotations,
-                                    annotations, superclass_of, {}, {}, container_constants, {},
-                                    Set.new, foreign_methods, nil, nil,
-                                    analysis_only: true,
-                                    native_expression_devirt: native_expression_devirt,
-                                    native_registered_expressions: native_registered_expressions)
+  return_names_probe = profile_call.call('CodeGen.new probe') do
+    CodeGen.new(ireps, registry, ivar_layout, class_layout_probe, class_annotations,
+                annotations, superclass_of, {}, {}, container_constants, {},
+                Set.new, foreign_methods, nil, nil,
+                analysis_only: true,
+                native_expression_devirt: native_expression_devirt,
+                native_registered_expressions: native_registered_expressions)
+  end
   array_return_probe = profile_call.call('CodeGen.array_return_names probe') { return_names_probe.array_return_names }
   # RETCLASS_SELF_CALL_SUPPORT: from the same Level-0 probe as
   # array_return_probe (see ClassLayout.analyze's `ret_class_proof`).
