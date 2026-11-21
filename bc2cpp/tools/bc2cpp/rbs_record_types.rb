@@ -319,7 +319,9 @@ module RbsRecordTypes
 
   def exact_store_classes(irep, idx, reg, ctx)
     defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, shared: true)
-    return nil if defs.nil? || defs.empty?
+    # A local a block assigns refuses here; the trace reads it (CAPTURED_LOCAL_TRACE).
+    return ctx[:exact_tracer].classes_at_use(irep, idx, reg) if defs.nil?
+    return nil if defs.empty?
 
     defs.each_with_object(Set.new) do |d, out|
       classes = d.entry? ? ctx[:exact_tracer].entry_classes(irep, d.reg) : ctx[:exact_tracer].classes_at(irep, d.index, d.reg)
@@ -331,10 +333,14 @@ module RbsRecordTypes
 
   def value_errors(irep, idx, reg, field, ctx)
     defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, shared: true)
+    defs = [nil] if defs.nil? && ctx[:tracer].classes_at_use(irep, idx, reg) # CAPTURED_LOCAL_TRACE
     return ["value of :#{field.key} cannot be traced (declare it untyped)"] if defs.nil? || defs.empty?
 
     defs.filter_map do |d|
-      classes = d.entry? ? nil : ctx[:tracer].classes_at(irep, d.index, d.reg)
+      classes = if d.nil? then ctx[:tracer].classes_at_use(irep, idx, reg)
+                elsif d.entry? then nil
+                else ctx[:tracer].classes_at(irep, d.index, d.reg)
+                end
       bad = classes&.reject { |cls| conforms?(cls, field.classes, ctx[:superclass_of]) }
       if classes.nil?
         "value of :#{field.key} cannot be traced to a class (declared #{field.text}; declare it untyped)"

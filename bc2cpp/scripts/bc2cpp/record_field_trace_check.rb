@@ -6,7 +6,8 @@
 # that class, an attr_reader of an ivar every store of which is that class, or a join of those. The checked field is
 # a guarded receiver hint (RECORD_TYPE ... hints); recursion is solved as a fixpoint. A definition that may return
 # another class, a literal block that `break`s, a native name, an attr_writer and a store of another class keep
-# TC1009, which aborts the run. A `Klass.new` receiver is exact (EXACT_NEW) unless a Ruby `new` can answer it.
+# TC1009, which aborts the run. A `Klass.new` receiver is exact (EXACT_NEW) unless a Ruby `new` can answer it. A
+# captured local is traced through its frame's writes and the blocks' SETUPVARs (CAPTURED_LOCAL_TRACE).
 #
 #   MRBC=path/to/mrbc ruby scripts/bc2cpp/record_field_trace_check.rb
 require 'tmpdir'
@@ -145,6 +146,36 @@ check.call('a Ruby `new` on the class leaves :foes inexact (no EXACT_NEW)', fail
 refused.call('a store of another class keeps TC1009',
              BASE.sub('@actors = [Member.new(2)]', '@actors = [Member.new(2)]; @actors = {} if @actors.empty?'),
              /Scene\#@ui: value of :allies cannot be traced/)
+
+# CAPTURED_LOCAL_TRACE: a store inside a block reads the local it captures (GETUPVAR), at any depth, and a local a
+# block assigns (SETUPVAR) holds the frame's own last write or a block's value.
+old_items = "    @ui[:items] = @party.battle_items\n"
+raise 'record_field_trace_check: BASE changed' unless BASE.include?(old_items)
+
+captured = lambda do |items|
+  BASE.sub(old_items, items)
+end
+upvar = captured.call("    list = @party.battle_items\n    [1].each { |_| [2].each { |_| @ui[:items] = list } }\n")
+_, failure, code = run.call(upvar, SIG)
+check.call('a store inside nested blocks traces the captured local (GETUPVAR)', failure.nil? && exact_size.call(code) == 4)
+warn failure if failure
+_, text = run.call(upvar, SIG, 'BC2CPP_CAPTURED_LOCAL_TRACE' => '0')
+check.call('BC2CPP_CAPTURED_LOCAL_TRACE=0 leaves the captured local untraced',
+           text.to_s.match?(/Scene\#@ui: value of :items cannot be traced/))
+setupvar = captured.call("    list = []\n    [1].each { |_| list = @party.battle_items }\n    @ui[:items] = list\n")
+_, failure, code = run.call(setupvar, SIG)
+check.call('a local assigned in a block holds the frame\'s write or the block\'s value (SETUPVAR)',
+           failure.nil? && exact_size.call(code) == 4)
+warn failure if failure
+refused.call('a block that assigns another class keeps TC1009',
+             captured.call("    list = []\n    [1].each { |_| list = '' }\n    [2].each { |_| @ui[:items] = list }\n"),
+             /Scene\#@ui: value of :items is String, declared Array/)
+refused.call('a local that may still be unassigned keeps TC1009',
+             captured.call("    list = [] if @party\n    [1].each { |_| list = @party.battle_items }\n    @ui[:items] = list\n"),
+             /Scene\#@ui: value of :items is NilClass, declared Array/)
+refused.call('a write by name (binding) in the world keeps TC1009',
+             upvar + "class Other\n  def peek; binding; end\nend\n",
+             /Scene\#@ui: value of :items cannot be traced/)
 
 # TRACED_PARAM: a declared, guarded parameter is its declared class in the trace (`actor.skills` on `Member?`, the
 # `ids` of `skills=` as `Array?`), mruby's own Ruby bodies count for core iterators and fresh-Array methods, `dup`

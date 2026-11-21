@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'native_ivar_scopes'
+require_relative 'captured_local_writers'
 require_relative 'numeric_flow'
 require_relative 'core_hierarchy_sigs'
 require_relative 'bytecode_ir'
@@ -235,14 +236,7 @@ class CodeGen
 
   # SENDB whose block register is written by BLOCK/LAMBDA in the same irep.
   def literal_block_argument?(irep, idx, insn)
-    return false unless BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op) && insn.reg
-
-    n = insn.argc
-    return false unless n
-
-    writers = BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg + n + 1))
-    program = BytecodeIR.for(irep)
-    writers&.all? { |i| BytecodeIR::Ops::LITERAL_PROC.include?(program.source_at(i).op) } || false
+    CapturedLocalWriters.literal_block_argument?(irep, idx, insn)
   end
 
   # `instance_variable_set(:@x, v)`: every write that reaches the name is a LOADSYM of an ivar name (already
