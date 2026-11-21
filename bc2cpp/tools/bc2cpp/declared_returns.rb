@@ -291,6 +291,19 @@ module DeclaredReturns
     end
   end
 
+  # Aborts the run on a traced_param_failures failure of the record trace's trusted guards (a method of its own, so
+  # bc2cpp.rb's top level, which mrbc compiles, keeps its local count).
+  def check_traced_params!(compiled, only_owners, other_owners)
+    return unless defined?(RbsRecordTypes) && defined?(CodeGen)
+
+    keys = (CodeGen.declared_params || {}).merge(CodeGen.declared_keywords || {}).transform_values { |guards| guards.first&.[](2) }
+    failures = traced_param_failures(RbsRecordTypes.trusted_params, compiled, keys, only_owners, other_owners)
+    return if failures.empty?
+
+    abort "\n[bc2cpp] TRACED_PARAM: #{failures.size} parameter declaration(s) a record trace trusted without their " \
+          "compiled check:\n  #{failures.join("\n  ")}"
+  end
+
   # The body's first `_impl(` definition takes positional `position` as a C scalar, not an mrb_value.
   def unboxed_param?(code, position)
     params = code[/^(?:static inline )?mrb_value \w+_impl(?:_unguarded)?\(([^)]*)\) \{$/, 1]
