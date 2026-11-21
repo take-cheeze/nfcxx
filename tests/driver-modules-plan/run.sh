@@ -19,6 +19,8 @@ mode=${1:-check}
 golden=$here/golden
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/tmp" "$golden/plan"
+# EDG: a stub eccp, so the driver's EDG check passes whether or not the repository has an EDG build (the goldens assume it passes)
+mkdir -p "$work/edg/bin" && printf '#!/bin/sh\nexit 1\n' > "$work/edg/bin/eccp" && chmod +x "$work/edg/bin/eccp"
 pass=0; fail=0
 
 # fixtures DIR: the sources the cases name
@@ -64,7 +66,7 @@ while IFS=$'\t' read -r name args; do
   case $name in ""|\#*) continue ;; esac
   d=$work/run/$name; mkdir -p "$d"; fixtures "$d"
   # the environment is the driver's own: PATH and HOME, with a temporary directory of the test's own
-  (cd "$d" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$work/tmp" "$repo/nfcxx" $args >"$work/table-$name.out" 2>"$work/table-$name.err"; echo $? > "$work/table-$name.status")
+  (cd "$d" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$work/tmp" EDG_BUILD="$work/edg" "$repo/nfcxx" $args >"$work/table-$name.out" 2>"$work/table-$name.err"; echo $? > "$work/table-$name.status")
   compare_or_record table "$name"
 done < "$here/cases.txt"
 
