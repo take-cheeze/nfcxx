@@ -26,6 +26,8 @@ class CodeGen
     'Float' => [:float, 'Float'],
     'Symbol' => [:symbol, 'Symbol'],
     'String' => [:string, 'String'],
+    'Array' => [:array, 'Array'],
+    'Hash' => [:hash, 'Hash'],
   }.freeze
 
   # The declarations of one build's applied signatures: { [owner, name] => { kind:, text: } } for each Array ivar whose
@@ -215,6 +217,8 @@ class CodeGen
            when :integer then "(mrb_integer_p(#{var}) || mrb_bigint_p(#{var}))"
            when :symbol then "mrb_symbol_p(#{var})"
            when :string then "mrb_string_p(#{var})"
+           when :array then "mrb_array_p(#{var})"
+           when :hash then "mrb_hash_p(#{var})"
            when :class then exact_class_guard(owner_class_ptr_expr(entry[:klass]), var)
            end
     ok = nil_ok ? "mrb_nil_p(#{var}) || (#{cond})" : cond
@@ -232,9 +236,20 @@ class CodeGen
 
     idx = irep.index_of_addr(region[:sendb_addr])
     entry = declared_element_receiver(irep, idx, region[:dest_reg], d.owner, derived: true)
-    return nil unless entry && entry[:kind] == :class && @closed_world&.exact_class?(entry[:klass])
+    entry if entry && declared_element_exact?(entry)
+  end
 
-    entry
+  # Is the element guard's test the element's exact class? A program class is tested by pointer equality; Integer,
+  # Float and Symbol have no subclass; String, Array and Hash are tested by kind, which is their class only in a build
+  # with no subclass of them (core_class_subclass_free?, as for the parameter and keyword guards).
+  def declared_element_exact?(entry)
+    case entry[:kind]
+    when :class then @closed_world&.exact_class?(entry[:klass]) || false
+    when :integer, :float, :symbol then ENV['BC2CPP_DECLARED_CORE_ELEMENT'] != '0'
+    when :string, :array, :hash
+      ENV['BC2CPP_DECLARED_CORE_ELEMENT'] != '0' && !block_core_world.nil? && core_class_subclass_free?(entry[:klass])
+    else false
+    end
   end
 
   # DECLARED_ELEMENT_GUARD on a loop element: the statement testing the element bound to `var`. An element inside the
@@ -250,14 +265,25 @@ class CodeGen
     scope = @declared_loop_elements
     return nil if scope.nil? || scope.empty?
 
-    hit = scope.find { |e| e[:irep].equal?(irep) }
-    return nil unless hit
+    hits = scope.select { |e| e[:irep].equal?(irep) }
+    return nil if hits.empty?
 
     defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
     return nil if defs.nil? || defs.empty?
-    return nil unless defs.all? { |df| df.entry? && df.reg.to_s == hit[:reg] }
 
-    hit[:klass]
+    # A block may bind several element parameters (`sort { |a, b| }`), each under its own entry test.
+    classes = defs.map { |df| df.entry? && hits.find { |e| e[:reg] == df.reg.to_s }&.dig(:klass) }
+    classes.uniq.size == 1 && classes.first ? classes.first : nil
+  end
+
+  # declared_loop_element_class as flow bits (declared_arg_bits), or nil.
+  def declared_loop_element_bits(irep, idx, reg)
+    klass = declared_loop_element_class(irep, idx, reg)
+    return nil unless klass
+
+    kind = DECLARED_ELEMENT_CLASSES[klass]&.first || :class
+    bits = declared_arg_bits(klass, kind, false)
+    bits.zero? ? nil : bits
   end
 
   # DECLARED_ELEMENT_MASK: the class set of a GETIDX/GETIDX0 result the flow may use: the declared element's class and

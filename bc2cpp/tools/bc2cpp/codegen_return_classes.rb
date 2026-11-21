@@ -1233,6 +1233,10 @@ class CodeGen
     r = reg.to_i
     return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg)
 
+    # DECLARED_LOOP_ELEMENT: the same override as exact_flow_class, as the class's flow bits.
+    loop_bits = declared_loop_element_bits(irep, idx, reg)
+    return loop_bits if loop_bits
+
     states = return_class_scoped_states(irep)
     state = states && states[idx]
     state && state[r]
