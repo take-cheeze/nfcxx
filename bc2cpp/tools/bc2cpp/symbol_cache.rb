@@ -413,6 +413,10 @@ module SymbolCache
       template<size_t N> static inline mrb_value bc2cpp_pool_str(mrb_state* M, const char (&s)[N]) {
         return mrb_str_new(M, s, N - 1);
       }
+      // STRCAT_LITERAL (codegen_strcat_literal.rb): a pool string's bytes appended in place, as mrb_str_concat of it.
+      template<size_t N> static inline void bc2cpp_str_cat_lit(mrb_state* M, mrb_value str, const char (&s)[N]) {
+        mrb_str_cat(M, str, s, N - 1);
+      }
       // SYMBOL_CACHE -- see tools/bc2cpp/symbol_cache.rb.
       static mrb_state* bc2cpp_sym_state = nullptr;
       static mrb_sym bc2cpp_syms[#{[dynamic, 1].max}] = {};

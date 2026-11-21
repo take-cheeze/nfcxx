@@ -256,9 +256,11 @@ class CodeGen
     when :STRCAT
       # Matches OP_STRCAT's own real semantics exactly (src/vm.c):
       # mrb_ensure_string_type then mrb_str_concat (mutates r<d> in place).
+      # The check is dropped only for a proven String (STRCAT_STRING_ACC, codegen_strcat_literal.rb).
       d = insn.reg
       s = insn.paren_reg
-      "  #{RegName[d]} = mrb_ensure_string_type(M, #{RegName[d]});\n  mrb_str_concat(M, #{RegName[d]}, #{RegName[s]});\n"
+      check = strcat_accumulator_string?(irep, idx) ? '' : "  #{RegName[d]} = mrb_ensure_string_type(M, #{RegName[d]});\n"
+      "#{check}  mrb_str_concat(M, #{RegName[d]}, #{RegName[s]});\n"
     when :GETIV
       d = insn.reg
       ivar = insn.ivar
