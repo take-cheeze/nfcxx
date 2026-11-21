@@ -350,7 +350,7 @@ class CodeGen
 
     # EXACT_CORE_RECEIVER: a proven exact class takes its own arm without the tag
     # test, or none when no registration is its own (the arms' classes are all other ones).
-    site = exact_core_site_for(recv, name)
+    site = native_exact_site_for(recv, name)
     if site
       exact = entries.find { |entry| entry[:owner][:class_name] == site[:klass] }
       # CORE_EXACT_DIRECT: a class with no registration of its own reaches a compiled core body (Array#include? is

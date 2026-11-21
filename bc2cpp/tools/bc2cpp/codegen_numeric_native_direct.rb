@@ -13,7 +13,7 @@ class CodeGen
     return nil if ENV['BC2CPP_NUMERIC_NATIVE_DIRECT'] == '0'
     return nil unless %w[to_s to_i].include?(name) && @closed_world&.exact_instances_singleton_free?
     return nil unless @closed_world.visibility_stable?(name) && !devirt_blocked_name?(name)
-    return nil unless numeric_operand_mask(irep, index, reg, owner_def) == NumericFlow::INT
+    return nil unless integer_flow_exact?(irep, index, reg, owner_def)
 
     entry = numeric_conversion_entries(name).first
     return nil unless entry
