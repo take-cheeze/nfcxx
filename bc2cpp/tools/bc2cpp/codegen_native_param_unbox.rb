@@ -27,14 +27,15 @@ module NativeParamUnbox
   # [statements, argument expressions] for `kinds` over the argument registers `argv`. A converting kind is a
   # statement of its own, in argument order: operands of one call expression are unsequenced, and the order decides which
   # TypeError/RangeError wins and when each to_int runs. +unboxed+ lists the positions already known to be a Fixnum
-  # (proven, or tested by the caller), which `mrb_integer` reads without a conversion.
-  def native_param_unbox_args(d, argv, kinds, unboxed: [])
+  # (proven, or tested by the caller), which `mrb_integer` reads without a conversion; +fixnum+ the subset the Fixnum
+  # proof covers, an immediate that `mrb_fixnum` reads inline (FIXNUM_ARG_UNBOX).
+  def native_param_unbox_args(d, argv, kinds, unboxed: [], fixnum: [])
     stmts = []
     args = kinds.each_index.map do |i|
       local = "bc2cpp_pu#{d}_#{i}"
       case kinds[i]
       when :int
-        next "mrb_integer(#{argv[i]})" if unboxed.include?(i)
+        next "#{native_int_read(fixnum.include?(i))}(#{argv[i]})" if unboxed.include?(i)
 
         stmts << "mrb_int #{local} = mrb_as_int(M, #{argv[i]});"
         local
@@ -56,8 +57,14 @@ module NativeParamUnbox
     safe = native_param_unbox_name?(name)
     ints = kinds.each_index.select { |i| kinds[i] == :int }
     guards = safe ? [] : (ints - proven).map { |i| "mrb_integer_p(#{argv[i]})" }
-    stmts, args = native_param_unbox_args(d, argv, kinds, unboxed: safe ? proven : ints)
+    stmts, args = native_param_unbox_args(d, argv, kinds, unboxed: safe ? proven : ints, fixnum: proven)
     [guards, native_param_unbox_block(stmts, "r#{d} = rgss::#{function}(#{(['M', recv] + args).join(', ')});")]
+  end
+
+  # FIXNUM_ARG_UNBOX: a value the Fixnum proof covers is an immediate on every target (LOADI_FIXNUM_RANGE), where
+  # mrb_fixnum equals mrb_integer; on word boxing mrb_integer is an out-of-line call that also handles a heap Integer.
+  def native_int_read(proven_fixnum)
+    proven_fixnum && fixnum_arg_unbox_on? ? 'mrb_fixnum' : 'mrb_integer'
   end
 
   # `call` run after `stmts`, in a block of its own so the locals stay out of the case labels around it.
