@@ -265,6 +265,11 @@ class CodeGen
       frozen = embedded_store_frozen_check(recv)
       if type == :value
         field = "((#{struct_name(klass)}*)DATA_PTR(#{recv}))->#{ivar_field_name(ivar)}"
+        # EMBED_STORE_OUTLINED: an IMMEDIATE_BARRIER store has no barrier to share, so it stays inline.
+        if !immediate && ENV['BC2CPP_EMBED_STORE_OUTLINED'] != '0'
+          helper = frozen ? 'bc2cpp_embed_store' : 'bc2cpp_embed_store_unfrozen'
+          return "#{indent}#{helper}(M, #{recv}, &#{field}, #{src});#{tail}"
+        end
         # BC2CPP_IMMEDIATE_BARRIER=verify aborts where the proof would be wrong instead, for a sweep.
         barrier = if immediate && ENV['BC2CPP_IMMEDIATE_BARRIER'] == 'verify'
                     "if (!mrb_immediate_p(#{src})) { fputs(\"IMMEDIATE_BARRIER violated: @#{ivar}\\n\", stderr); abort(); }"

@@ -1922,6 +1922,17 @@ BC2CPP_MAIN = lambda do
     #endif
       mrb_iv_set(M, obj, id, v);
     }
+    // EMBED_STORE_OUTLINED (codegen_ivar_poly.rb ivar_set_code): an embedded mrb_value slot's store, the same frozen
+    // test, keep of the old value, store and write barrier as the inline form, in one out-of-line copy.
+    [[maybe_unused, gnu::noinline]] static void bc2cpp_embed_store_unfrozen(mrb_state* M, mrb_value obj, mrb_value* slot, mrb_value v) {
+      bc2cpp_keep_old(M, *slot);
+      *slot = v;
+      mrb_field_write_barrier_value(M, (struct RBasic*)mrb_obj_ptr(obj), v);
+    }
+    [[maybe_unused, gnu::noinline]] static void bc2cpp_embed_store(mrb_state* M, mrb_value obj, mrb_value* slot, mrb_value v) {
+      if (mrb_unlikely(mrb_frozen_p(mrb_obj_ptr(obj)))) mrb_check_frozen(M, mrb_obj_ptr(obj));
+      bc2cpp_embed_store_unfrozen(M, obj, slot, v);
+    }
     static inline void bc2cpp_gv_set(mrb_state* M, mrb_sym id, mrb_value v) {
     #ifndef BC2CPP_NO_GC_KEEP_OVERWRITTEN
       bc2cpp_keep_old(M, mrb_gv_get(M, id));
