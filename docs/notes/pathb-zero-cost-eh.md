@@ -155,9 +155,10 @@ IR passes, the e-graph pass and QBE's optimizations.
   type itself for it.
 - When an exception leaves a full expression that built argument temporaries, EDG destroys them in construction order,
   not in reverse. The frames mode does the same (it is EDG's region table), so this is no change.
-- Targets: tested on x86-64 Linux. QBE's arm64 emitter marks call sites and pads (Linux and Apple), run only by CI's
-  arm64 jobs; on macOS `scripts/pathb-ldrt.rb` writes no link script (ld64 reads none), so libC.a's C++ ABI members
-  come before libc++'s there. QBE's rv64 writes no tables, its i386 neither (refused).
+- Targets: tested on x86-64 Linux; QBE's arm64 emitter marks call sites and pads too (CI's arm64 Linux job runs it).
+  A macOS host builds a frames harness by default: ld64 reads no linker script, so `scripts/pathb-ldrt.rb` cannot put
+  libc++abi ahead of the `libC.a` the links name (its C++ ABI members would win), and QBE's Mach-O tables are untested.
+  QBE's rv64 writes no tables, its i386 neither (refused).
 - CIL: exact catch types only, see `docs/notes/pathb-cil.md`.
 
 ## Measured

@@ -88,7 +88,10 @@ CFG
 # throw/catch into the Itanium C++ ABI runtime's calls (libstdc++). PATHB_EH=frames: EDG's portable lowering (an EH stack
 # of runtime frames, setjmp/longjmp, EDG's runtime in libC.a). The scheme is recorded next to cpfe: cmake/bin/eh-tables
 # exists in a tables harness (scripts/pathb-ldrt.rb, the driver and the emitters read it).
-pathb_eh=${PATHB_EH:-tables}
+# A macOS host defaults to frames: ld64 reads no linker script, so pathb-ldrt.rb cannot put libc++abi ahead of the libC.a
+# the links name (its C++ ABI members would win), and QBE's Mach-O tables are untested.
+pathb_eh_default=tables; [ "$(uname -s)" = Darwin ] && [ "$emscripten" != 1 ] && pathb_eh_default=frames
+pathb_eh=${PATHB_EH:-$pathb_eh_default}
 case $pathb_eh in tables|frames) ;; *) echo "setup-pathb: PATHB_EH must be tables or frames, not '$pathb_eh'" >&2; exit 2 ;; esac
 if [ "$pathb_eh" = tables ]; then
 cat >> "$tree/cmake/macro-conf/nfcxx-pathb/cpfe.cmakedef" <<'CFG'
