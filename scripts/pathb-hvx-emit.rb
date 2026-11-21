@@ -503,6 +503,67 @@ def match_max_fn(fn)
   [dst, a, n, lane]
 end
 
+# Uint8 dot-product reduction: (function (ret int)
+#   (params (param %0 a (ptr (const unsigned_char))) (param %1 b (ptr (const unsigned_char)))
+#           (param %2 n int))
+#   ... same counted-loop skeleton, plus a zero-initialized int accumulator slot ...
+#   (loop (body ...bound check...
+#     (block ... (store int $sum (wadd int (load int $sum)
+#                                  (wmul int (iconv int (load u8 (index $a i 1)))
+#                                           (iconv int (load u8 (index $b i 1))))))))
+#   ... (return sum-reg). Emitted as a vrmpyubv_acc main loop over 128-byte
+# chunks with a 32-lane accumulator, a horizontal sum, and a scalar tail.
+# Returns [a, b, n].
+def match_dot_fn(fn)
+  ctx = match_skeleton(fn, 3)
+  params = ctx[:params]
+  kinds = params.map { |p| p[3] }
+  u8 = ["ptr", ["const", "unsigned_char"]]
+  refuse("dot lanes must be (ptr (const unsigned_char)) x2") unless
+    kinds[0] == u8 && kinds[1] == u8
+  refuse("dot bound must be int") unless kinds[2] == "int"
+  a, b, n = ctx[:names]
+  islot = ctx[:islot]
+  comp = ctx[:comp]
+  lets = ctx[:lets]
+  resolve = ctx[:resolve]
+  chase = lambda do |x|
+    while x.is_a?(String) && lets.key?(x)
+      x = lets[x]
+    end
+    x
+  end
+  # The accumulator slot: an int slot zero-initialized outside the loop that
+  # is loaded and stored once per iteration (no other stores to it in comp).
+  acc = nil
+  comp.each do |s|
+    next unless s.is_a?(Array) && s[0] == "store" && slot_ref?(s[2])
+    next unless s[1] == "int"
+    v = chase.call(s[3])
+    next unless v.is_a?(Array) && v[0] == "wadd" && v[1] == "int"
+    add_l = chase.call(v[2])
+    next unless add_l.is_a?(Array) && add_l[0] == "load" && add_l[1] == "int"
+    next unless resolve.call(add_l[2]) == s[2]
+    prod = chase.call(v[3])
+    next unless prod.is_a?(Array) && prod[0] == "wmul" && prod[1] == "int"
+    # Both factors widen an unsigned_char lane load.
+    lanes = [prod[2], prod[3]].map { |o| chase.call(o) }
+    next unless lanes.all? { |l| l.is_a?(Array) && l[0] == "iconv" && l[1] == "int" }
+    loads = lanes.map { |l| chase.call(l[2]) }
+    next unless loads.all? { |l| l.is_a?(Array) && l[0] == "load" && l[1] == "unsigned_char" }
+    idx = loads.map { |l| resolve.call(l[2]) }
+    next unless idx.all? { |x| x.is_a?(Array) && x[0] == "index" && x[3] == "1" }
+    next unless resolve.call(idx[0][1]) == "$#{a}" && resolve.call(idx[1][1]) == "$#{b}"
+    next unless resolve.call(idx[0][2]) == "$#{islot}" && resolve.call(idx[1][2]) == "$#{islot}"
+    acc = slot_name(s[2])
+  end
+  refuse("loop body is not a u8 dot-product accumulation") unless acc
+  # Exactly one store to the accumulator per iteration (plus nothing else stored).
+  stores = comp.select { |s| s.is_a?(Array) && s[0] == "store" }
+  refuse("loop body stores more than the accumulator") unless stores.size == 1
+  [a, b, n]
+end
+
 src = if ARGV[0].nil? || ARGV[0] == "-"
         $stdin.read
       else
@@ -527,10 +588,31 @@ begin
       begin
         max_args = match_max_fn(fn)
         kind = [:max]
-      rescue Refused => e2
-        fname = fn[1].is_a?(Array) ? fn[1][1] : fn[1]
-        refuse("function #{fname}: #{e2.message}")
+      rescue Refused
+        begin
+          dot_args = match_dot_fn(fn)
+          kind = [:dot]
+        rescue Refused => e2
+          fname = fn[1].is_a?(Array) ? fn[1][1] : fn[1]
+          refuse("function #{fname}: #{e2.message}")
+        end
       end
+    end
+    if kind[0] == :dot
+      out << "__attribute__((noinline)) int hvx_vec_dot_u8(const unsigned char *a, const unsigned char *b, int n) {"
+      out << "  int acc[32] __attribute__((aligned(128))) = {0};"
+      out << "  int i = 0;"
+      out << "  for (; i + 128 <= n; i += 128) {"
+      out << "    V128 va = *(const V128 *)(a + i);"
+      out << "    V128 vb = *(const V128 *)(b + i);"
+      out << "    *(V128 *)acc = __builtin_HEXAGON_V6_vrmpyubv_acc_128B(*(const V128 *)acc, va, vb);"
+      out << "  }"
+      out << "  int sum = 0;"
+      out << "  for (int k = 0; k < 32; ++k) sum += acc[k];"
+      out << "  for (; i < n; ++i) sum += (int)a[i] * (int)b[i];"
+      out << "  return sum;"
+      out << "}"
+      next
     end
     if kind[0] == :max
       dst, a, = max_args
