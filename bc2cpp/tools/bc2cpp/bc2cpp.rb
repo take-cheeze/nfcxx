@@ -302,8 +302,7 @@ BC2CPP_MAIN = lambda do
   # CORE_LOOP_ALIASES: a core alias loop (mruby-onig-regexp's String#gsub) replaces the definitions before it.
   alias_sites.each { |site| core_shadowed.merge(site[:replaces]) if site[:replaces] }
   # CORE_OUTSIDE_REDEFINED: so does a linked Ruby source this build does not compile (mruby-require's Hash#to_h).
-  core_shadowed.merge(CoreDefs.outside_redefined_labels(registry, ireps, Shellwords.split(ENV.fetch('BC2CPP_LINKED_RUBY_SRCS', '')),
-                                                        symbol, out_dir))
+  core_shadowed.merge(CoreDefs.outside_redefined_labels(registry, ireps, Shellwords.split(ENV.fetch('BC2CPP_LINKED_RUBY_SRCS', ''))))
   CodeGen.shadowed_labels = core_shadowed
   core_shadowed_pairs = registry.values.flatten.select { |d| d.irep && core_shadowed.include?(d.irep) }
                                 .to_set { |d| [d.owner, d.name] }

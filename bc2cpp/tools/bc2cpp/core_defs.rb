@@ -42,25 +42,27 @@ module CoreDefs
   end
 
   # CORE_OUTSIDE_REDEFINED: the labels of the core-source definitions in +registry+ that a linked Ruby source this build does
-  # not compile defines again on the same owner (mruby-require's Hash#to_h, which takes a block where mruby-hash-ext's
+  # not compile may define again on the same owner (mruby-require's Hash#to_h, which takes a block where mruby-hash-ext's
   # returns self). Those sources load after mruby's own Ruby, so the interpreter ends up with their method: the core body
   # may be neither bound nor registered over it (a self build registers after every gem has run). +paths+: the linked
-  # Ruby sources (BC2CPP_LINKED_RUBY_SRCS); the ones +ireps+ compiles are left out.
-  def outside_redefined_labels(registry, ireps, paths, symbol, out_dir)
+  # Ruby sources (BC2CPP_LINKED_RUBY_SRCS); the ones +ireps+ compiles are left out. Read as text, over-approximate on
+  # purpose: a file that defines the name (foreign_method_names) and spells the owner's name counts, which only keeps a
+  # body interpreted; the bytecode of every linked source took most of a self build's parse time.
+  def outside_redefined_labels(registry, ireps, paths)
     compiled = ireps.each_value.to_set { |irep| File.expand_path(irep.file.to_s) }
     unread = paths.map { |path| File.expand_path(path) }.uniq.sort.reject { |path| compiled.include?(path) }
-    return Set.new if unread.empty?
+    texts = {}
+    unread.each do |path|
+      next unless File.file?(path)
 
-    begin
-      outside_ireps, outside_root = compile_ireps(unread, "#{symbol}_outside_defs", out_dir)
-    rescue StandardError => e
-      # As BlockSelfWorld's read of the same sources: one that does not compile is reported, and nothing is learned.
-      warn "bc2cpp: CORE_OUTSIDE_REDEFINED: an outside Ruby source does not compile (#{e.message.lines.first&.strip})"
-      return Set.new
+      text = File.read(path, encoding: 'BINARY')
+      foreign_method_names([path]).each { |name| (texts[name] ||= []) << text }
     end
-    pairs = build_registry(outside_ireps, outside_root)[0].values.flatten.to_set { |d| [d.owner, d.name] }
     registry.values.flatten.select do |d|
-      d.irep && pairs.include?([d.owner, d.name]) && core_source?(ireps.fetch(d.irep).file)
+      next false unless d.irep && texts.key?(d.name) && core_source?(ireps.fetch(d.irep).file)
+
+      simple = d.owner.delete_suffix('.singleton').split('::').last
+      texts[d.name].any? { |text| text.match?(/\b#{Regexp.escape(simple)}\b/) }
     end.to_set(&:irep)
   end
 
