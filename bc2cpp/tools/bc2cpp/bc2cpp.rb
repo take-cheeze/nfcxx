@@ -1546,6 +1546,13 @@ BC2CPP_MAIN = lambda do
     abort "\n[bc2cpp] DECLARED_PARAM_GUARD: #{param_failures.size} seeded optional parameter declaration(s) without " \
           "their compiled check:\n  #{param_failures.join("\n  ")}"
   end
+  keys = (CodeGen.declared_params || {}).merge(CodeGen.declared_keywords || {}).transform_values { |guards| guards.first[2] }
+  traced_failures = DeclaredReturns.traced_param_failures(RbsRecordTypes.trusted_params, compiled, keys, only_owners,
+                                                         other_owners) if defined?(RbsRecordTypes)
+  unless traced_failures.to_a.empty?
+    abort "\n[bc2cpp] TRACED_PARAM: #{traced_failures.size} parameter declaration(s) a record trace trusted without their " \
+          "compiled check:\n  #{traced_failures.join("\n  ")}"
+  end
   keyword_guards = (CodeGen.declared_keywords || {}).each_key.to_h { |label| [label, gen.declared_keyword_guards(label)] }
   keyword_failures = DeclaredReturns.keyword_guard_failures(keyword_guards, compiled)
   unless keyword_failures.empty?
