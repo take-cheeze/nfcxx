@@ -16,7 +16,11 @@
 #      `@x: Array?` slot an attr_accessor writes (the synthesized writer is guarded too), and `(x || []).empty?` is
 #      then the Array body; a slot whose name reflection writes, and BC2CPP_DECLARED_IVAR_ACCESSOR=0, stay unseeded;
 #   3. run on a full-core mruby against interpreted: the resolved sends answer as interpreted, and a wrong
-#      declaration (or ivar store, or attr_writer store) raises the violation instead of reaching the unchecked body.
+#      declaration (or ivar store, or attr_writer store) raises the violation instead of reaching the unchecked body;
+#   4. a resolved body's `String?` result is a String once nil is tested (SCOPED_NILABLE_RESULT); and with mruby's own
+#      Ruby compiled in, an exact Array's `reject { }` (CORE_TARGET_ONE_BODY), `uniq { }` (CORE_RUBY_SELF), `sort`
+#      (VETTED_FRESH_ARRAY) and `size` (core_results) results are exact, each switch keeps the chain, and the
+#      compiled run answers as the interpreted one.
 #
 # Usage: MRBC=path/to/host/mrbc [BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/declared_def_return_check.rb
 
@@ -33,6 +37,8 @@ runtime = Bc2cppFixtureRuntime
 SOURCE = <<~RUBY
   class State
     attr_accessor :targets
+    # A second definer of `label`, so Tag#label's declaration is no name-wide fact.
+    attr_reader :label
     def initialize
       @targets = { 3 => 1, 1 => 2 }
       nil
@@ -127,6 +133,24 @@ SOURCE = <<~RUBY
     end
   end
 
+  class Tag
+    attr_accessor :text
+
+    def initialize
+      @text = 'x'
+      nil
+    end
+
+    def label
+      @text
+    end
+
+    def blank?
+      n = label
+      n.nil? || n.empty?
+    end
+  end
+
   class Poked
     attr_accessor :items
 
@@ -164,6 +188,10 @@ SIGNATURES = <<~RBS
   class Poked
     @items: Array?
   end
+  class Tag
+    %a{bc2cpp:hint}
+    def label: () -> String?
+  end
 
   # A native table's later copy of a program declaration does not erase it.
   # bc2cpp-native: typed_returns
@@ -171,7 +199,7 @@ SIGNATURES = <<~RBS
     def targets: () -> Array
   end
 RBS
-OWNERS = %w[State Menu Outside Base Sub Roster Fighter Poked].freeze
+OWNERS = %w[State Menu Outside Base Sub Roster Fighter Poked Tag].freeze
 
 HARNESS = <<~'CPP'
   static mrb_value eval(mrb_state* M, const char* src) { return mrb_load_string(M, src); }
@@ -202,6 +230,8 @@ HARNESS = <<~'CPP'
     call(M, "fighter states=", fighter, "states=", 1, &one);
     call(M, "fighter bare?", fighter, "bare?");
     call(M, "wrong accessor", fighter, "states=", 1, &text);
+    mrb_value tag = mrb_obj_new(M, mrb_class_get(M, "Tag"), 0, nullptr);
+    call(M, "tag blank?", tag, "blank?");
     return 0;
   }
 CPP
@@ -221,6 +251,7 @@ ensure
 end
 chain = ->(body) { body.to_s.include?('bc2cpp_owner_call(') || body.to_s.match?(/mrb_array_p\(r\d+\) && mrb_obj_ptr/) }
 exact_empty = ->(body) { body.to_s.include?('CLOSED_WORLD_NATIVE_EXACT :empty? -> Array') }
+exact_str_empty = ->(body) { body.to_s.include?('CLOSED_WORLD_NATIVE_EXACT :empty? -> String') }
 
 Dir.mktmpdir('declared-def-return-off') do |dir|
   _, _, off = generate.call(dir, 'BC2CPP_DECLARED_DEF_RETURNS' => '0', 'BC2CPP_DECLARED_IVAR_ACCESSOR' => '0')
@@ -230,6 +261,11 @@ Dir.mktmpdir('declared-def-return-off') do |dir|
              !off['Menu#targets'].to_s.include?('DECLARED_RETURN_GUARD Menu#targets'))
   check.call('before: an accessor-written declared slot is not seeded, so `(states || []).empty?` keeps its chain',
              chain.call(off['Fighter#calm?']) && !exact_empty.call(off['Fighter#calm?']))
+end
+
+Dir.mktmpdir('declared-def-return-nilable-off') do |dir|
+  _, _, off = generate.call(dir, 'BC2CPP_SCOPED_NILABLE_RESULTS' => '0')
+  check.call('BC2CPP_SCOPED_NILABLE_RESULTS=0: a `String?` result keeps its by-name `empty?`', !exact_str_empty.call(off['Tag#blank?']))
 end
 
 Dir.mktmpdir('declared-def-return') do |dir|
@@ -254,6 +290,8 @@ Dir.mktmpdir('declared-def-return') do |dir|
   check.call('a slot whose name reflection writes is not seeded and keeps its chain',
              !err.include?('DECLARED_IVAR Poked#@items: Array?, guarded stores, pool seeded') &&
                chain.call(on['Poked#none?']))
+  check.call('a resolved `String?` result tested for nil is the String body (SCOPED_NILABLE_RESULT)',
+             exact_str_empty.call(on['Tag#blank?']) && on['Tag#label'].to_s.include?('DECLARED_RETURN_GUARD Tag#label -> String?'))
   check.call('the guarded leaf is not inlined', !on['Menu#use_ratio'].to_s.include?('CALL_INLINE Menu#ratio') &&
                                                 on['Menu#use_ratio'].to_s.include?('Menu_ratio_impl('))
 
@@ -278,6 +316,81 @@ Dir.mktmpdir('declared-def-return') do |dir|
     puts '  SKIP run: no full-core mruby build'
   end
   File.write(File.join(dir, 'keep.cpp'), code) if ENV['BC2CPP_KEEP_DIR']
+end
+
+# Results on an exact Array, with mruby's own Ruby in the closed world (core: true).
+CORE_SOURCE = <<~RUBY
+  class Pile
+    def initialize
+      @ids = [3, 1, 2]
+      nil
+    end
+
+    def kept_none?
+      @ids.reject { |x| x > 2 }.empty?
+    end
+
+    def uniq_none?
+      @ids.uniq { |x| x % 2 }.empty?
+    end
+
+    def sorted_none?
+      @ids.sort.empty?
+    end
+
+    def count_text
+      @ids.size.to_s
+    end
+  end
+RUBY
+CORE_OWNERS = %w[Pile].freeze
+CORE_SWITCHES = { 'Pile#kept_none?' => 'BC2CPP_CORE_TARGET_ONE_BODY', 'Pile#uniq_none?' => 'BC2CPP_CORE_RUBY_SELF',
+                  'Pile#sorted_none?' => 'BC2CPP_VETTED_FRESH_ARRAY' }.freeze
+core_generate = lambda do |dir, env|
+  env.each { |k, v| ENV[k] = v }
+  ENV['BC2CPP_SIG_DIRS'] = ''
+  code, err = runtime.generate(CORE_SOURCE, dir, core: true, only_owners: CORE_OWNERS)
+  [code, err, code.split(%r{^(?=// \w+#)}).to_h { |part| [part[%r{\A// (\S+)}, 1], part] }]
+ensure
+  ENV.delete('BC2CPP_SIG_DIRS')
+  env.each_key { |k| ENV.delete(k) }
+end
+
+Dir.mktmpdir('declared-def-return-core') do |dir|
+  code, err, on = core_generate.call(dir, {})
+  CORE_SWITCHES.each_key do |key|
+    check.call("#{key}: the Array result answers `empty?` with the Array body", exact_empty.call(on[key]))
+  end
+  check.call('Pile#count_text: an exact Array#size is an Integer (core_results)',
+             on['Pile#count_text'].to_s.include?('NUMERIC_NATIVE_EXACT :to_s -> Integer'))
+  CORE_SWITCHES.each do |key, switch|
+    Dir.mktmpdir('declared-def-return-core-off') do |off_dir|
+      _, _, off = core_generate.call(off_dir, switch => '0')
+      check.call("#{switch}=0 keeps #{key}'s by-name `empty?`", !exact_empty.call(off[key]))
+    end
+  end
+
+  build = runtime.full_or_build
+  if build
+    body = <<~CPP
+      static int scenario(mrb_state* M) {
+        std::fflush(stdout);
+        mrb_load_string(M, "p = Pile.new; puts [p.kept_none?, p.uniq_none?, p.sorted_none?, p.count_text].inspect");
+        std::fflush(stdout);
+        if (M->exc) { mrb_print_error(M); M->exc = nullptr; return 1; }
+        return 0;
+      }
+    CPP
+    built, output = runtime.run(dir, err, CORE_OWNERS, body, build: build, full: true)
+    sections = runtime.sections(output)
+    check.call('the core fixture builds and runs', built)
+    check.call('compiled and interpreted Array results agree',
+               sections['interpreted'] == sections['compiled'] && sections['compiled'].to_a.include?('[false, false, false, "3"]'))
+    warn output unless built && sections['interpreted'] == sections['compiled']
+  else
+    puts '  SKIP core run: no full-core mruby build'
+  end
+  File.write(File.join(dir, 'keep_core.cpp'), code) if ENV['BC2CPP_KEEP_DIR']
 end
 
 suite.finish!
