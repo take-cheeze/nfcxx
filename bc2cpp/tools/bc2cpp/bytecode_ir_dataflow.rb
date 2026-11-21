@@ -271,7 +271,8 @@ module BytecodeIR
         # vm.c OP_EXCEPT stores nil only when entered with no pending exception, so a path that needs its register
         # nil came in by the normal edge.
         here = @instructions[i].source
-        if nil_regs.anybits?(1 << here.reg.to_i) && here.op == :EXCEPT
+        # High register masks allocate big integers; only build one for a relevant EXCEPT state.
+        if here.op == :EXCEPT && nil_regs != 0 && nil_regs.anybits?(1 << here.reg.to_i)
           # No normal edge in: no path leaves the register nil here, so none reaches the query.
           next if (ps = pred_lists[i]).empty?
         end
