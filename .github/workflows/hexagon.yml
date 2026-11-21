@@ -13,8 +13,10 @@ on:
       - "3rd/edg"
       - "be/**"
       - "scripts/setup-edg.sh"
+      - "scripts/setup-edg-hexagon.sh"
       - "scripts/setup-pathb.sh"
       - "scripts/gen-c-target.rb"
+      - "scripts/hexagon-predef.rb"
       - "scripts/mrb.rb"
       - "scripts/setup-mruby.sh"
       - "scripts/mruby-tool-config.rb"
@@ -29,8 +31,10 @@ on:
       - "3rd/edg"
       - "be/**"
       - "scripts/setup-edg.sh"
+      - "scripts/setup-edg-hexagon.sh"
       - "scripts/setup-pathb.sh"
       - "scripts/gen-c-target.rb"
+      - "scripts/hexagon-predef.rb"
       - "scripts/mrb.rb"
       - "scripts/setup-mruby.sh"
       - "scripts/mruby-tool-config.rb"
@@ -76,6 +80,52 @@ jobs:
 
       - name: Hexagon checks (open toolchain, clang-19 + qemu-hexagon)
         run: CLANG=clang-19 QEMU_HEXAGON=qemu-hexagon-static tests/hexagon/run.sh
+
+  hexagon-target:
+    runs-on: ubuntu-24.04
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      # ruby and rake bootstrap the mruby build and hexagon-predef.rb (scripts/setup-mruby.sh); python3 is not needed here.
+      - uses: ./.github/actions/toolchain
+        with:
+          packages: ruby rake
+          qbe: "false"
+
+      - name: Install clang-19 and qemu-user (Hexagon)
+        run: sudo apt-get install -y --no-install-recommends clang-19 qemu-user-static
+
+      - name: Hexagon EDG cache key
+        id: hexagon-key
+        run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
+
+      # build/edg-hex-base is rebuilt from scratch on every run (setup-edg.sh wipes
+      # it), so only the compiler outputs are cached.
+      - name: Restore the Hexagon EDG (linux_hexagon target)
+        id: hexagon-edg
+        uses: actions/cache@v6
+        with:
+          path: build/edg-hex
+          key: hexagon-edg-${{ runner.os }}-${{ steps.hexagon-key.outputs.edg }}-${{ hashFiles('scripts/setup-edg.sh', 'scripts/setup-edg-hexagon.sh', 'scripts/hexagon-predef.rb', '3rd/edg/cmake/macro-conf/support/target/linux_riscv32/base.cmakedef') }}
+
+      - name: Build the Hexagon EDG (linux_hexagon target)
+        if: steps.hexagon-edg.outputs.cache-hit != 'true'
+        run: scripts/setup-edg-hexagon.sh
+
+      - name: Build the mruby interpreter (runs tests/hexagon/flatlink.rb)
+        run: scripts/setup-mruby.sh
+
+      - name: Hexagon struct layout (linux_hexagon target vs clang's Hexagon ABI)
+        run: EDG_BUILD=$PWD/build/edg-hex EDG_BASE=$PWD/build/edg-hex-base CLANG=clang-19 EDG_TARGET=linux_hexagon tests/hexagon/layout.sh
+
+      - name: Hexagon checks on the linux_hexagon target (open toolchain, clang-19 + qemu-hexagon)
+        run: EDG_BUILD=$PWD/build/edg-hex EDG_BASE=$PWD/build/edg-hex-base CLANG=clang-19 QEMU_HEXAGON=qemu-hexagon-static EDG_TARGET=linux_hexagon tests/hexagon/run.sh
 
       - name: sccache stats
         if: always()
