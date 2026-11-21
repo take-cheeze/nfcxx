@@ -30,7 +30,7 @@ module SharedGeneration
   # These switches are consumed by method emission, including embedding probes.
   # Ordinary owner-only units retain their existing later fork boundary.
   EMISSION_KEYS = %w[BC2CPP_OWNER_SET_DIRECT BC2CPP_CORE_INT_ARG_PROOF
-                     BC2CPP_KERNEL_CLASS_ARG_PROOF BC2CPP_SYMBOL_PROBE_DIRECT].freeze
+                     BC2CPP_KERNEL_CLASS_ARG_PROOF BC2CPP_SYMBOL_PROBE_DIRECT BC2CPP_SELF_NOT_ARRAY].freeze
 
   class Error < RuntimeError; end
 

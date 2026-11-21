@@ -6,6 +6,7 @@ require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_tree'
 require_relative 'core_hierarchy_sigs'
 require_relative 'outside_ruby_owners'
+require_relative 'captured_local_writers'
 
 # RECORD_FIELD_TRACE: the classes a value stored into a declared record field can have, for RbsRecordTypes'
 # conformance check. Beyond RbsRecordTypes.value_class_at (literals, `Klass.new`, the ClassLayout Array rule; the exact
@@ -21,6 +22,9 @@ require_relative 'outside_ruby_owners'
 #                       native one sits on their lookup chains; a core block iterator (`recv.map { }`) by
 #                       block_result_array?. A nil receiver is dropped when nothing nil answers through defines the
 #                       name (the call raises instead).
+#   captured locals     CAPTURED_LOCAL_TRACE: a block's GETUPVAR reads its defining frame's register; a local a nested
+#                       block writes (SETUPVAR) holds the frame's last own write or a SETUPVAR's value. Only while
+#                       CapturedLocalWriters.absent? (no write by name).
 # A literal block of the send must not `break` (OP_BREAK makes the send evaluate to its operand), and a body whose
 # blocks `return` (RETURN_BLK) is refused. Anything else is nil (cannot be traced), which keeps the TC1009 error.
 module RbsRecordTypes
@@ -67,12 +71,21 @@ module RbsRecordTypes
     # only once a round reproduces every assumption it read. Each step is sound whenever its assumptions cover the
     # values of runs up to some depth, so by induction on that depth a fixpoint covers every run.
     def classes_at(irep, index, reg)
+      solve { def_classes(irep, index, reg, 0) }
+    end
+
+    # Set of class names +reg+ can hold when read at +use+ (every reaching definition), or nil.
+    def classes_at_use(irep, use, reg)
+      solve { reg_classes(irep, use, reg, 0) }
+    end
+
+    def solve
       MAX_ROUNDS.times do
         @memo = {}
         @active = Set.new
         @read = Set.new
         @changed = false
-        result = def_classes(irep, index, reg, 0)
+        result = yield
         return result unless @changed
       end
       nil
@@ -81,6 +94,12 @@ module RbsRecordTypes
     # Set of class names +reg+ can hold when read at +use+, or nil.
     def reg_classes(irep, use, reg, depth)
       defs = BytecodeIR.reaching_definitions(irep, use, reg, through_handlers: true, shared: true)
+      if defs.nil? && captured_locals_sealed?
+        return captured_written_classes(irep, use, reg.to_i, depth) if upvar_written?(irep, reg.to_i)
+
+        # A copy of such a local: stop at the MOVE, whose source is traced as above.
+        defs = BytecodeIR.reaching_definitions(irep, use, reg, follow_moves: false, through_handlers: true, shared: true)
+      end
       return nil if defs.nil? || defs.empty?
 
       out = Set.new
@@ -131,6 +150,7 @@ module RbsRecordTypes
       when :MOVE then reg_classes(irep, index, insn.regs[1], depth + 1)
       when :KARG then keyword_classes(irep, insn)
       when :GETIV then insn.ivar && ivar_classes(insn.ivar, self_owner(irep), depth + 1)
+      when :GETUPVAR then upvar_classes(irep, insn, depth + 1)
       else
         send_classes(irep, index, insn, depth + 1) if BytecodeIR::Ops::SEND.include?(insn.op) && insn.sym
       end
@@ -149,7 +169,7 @@ module RbsRecordTypes
     end
 
     def declared_classes(cls, kind, nilable)
-      out = Set[cls]
+      out = cls.is_a?(Array) ? cls.to_set : Set[cls]
       nilable ? out | ['NilClass'] : out
     end
 
@@ -201,6 +221,145 @@ module RbsRecordTypes
     end
 
     ARRAY = Set['Array'].freeze
+    # Ops that read their leading register without writing it (the dataflow's write table lists them).
+    LEAD_KEEP = (BytecodeIR::Ops::LEAD_READ_ONLY | %i[SETIV SETGV SETSV SETCV SETCONST SETMCNST]).freeze
+
+    # CAPTURED_LOCAL_TRACE: what a block's GETUPVAR reads, from the frame +level+ + 1 closures out. The block runs while
+    # or after that frame does, so the register holds what reached the creating BLOCK, a later write of the frame or a
+    # SETUPVAR's value.
+    def upvar_classes(irep, insn, depth)
+      index, level = insn.upvar_ref
+      return nil unless index && level && captured_locals_sealed?
+
+      frame = irep
+      creations = nil
+      (level.to_i + 1).times do
+        frame, creations = block_parents[frame.label]
+        return nil unless frame
+      end
+      reg = index.to_i
+      out = setupvar_classes(frame, reg, depth)
+      creations.each do |at|
+        before = out && frame_reg_classes(frame, at, reg, depth)
+        later = before && frame_write_classes(frame, reg, depth, BytecodeIR.for(frame).reachable_from(at, include_handlers: true))
+        return nil unless later
+
+        out.merge(before).merge(later)
+      end
+      out
+    end
+
+    # A read of a local that a nested block writes: the last write before it is one of the frame's own (the reaching
+    # definitions with no register opaque) or a SETUPVAR of a block under the frame.
+    def captured_written_classes(irep, use, reg, depth)
+      return nil unless captured_locals_sealed?
+
+      own = frame_reg_classes(irep, use, reg, depth)
+      setup = own && setupvar_classes(irep, reg, depth)
+      setup && own.merge(setup)
+    end
+
+    # The frame's own definitions of +reg+ reaching +use+, nested-block writes ignored (the callers add those). Moves are
+    # not followed, so a copied register is traced by its own reads.
+    def frame_reg_classes(irep, use, reg, depth)
+      defs = BytecodeIR.for(irep).reaching_definitions(use, reg, follow_moves: false, through_handlers: true, shared: true)
+      return nil if defs.nil? || defs.empty?
+
+      out = Set.new
+      defs.each do |d|
+        classes = if d.entry?
+                    argument_reg?(irep, reg) ? entry_classes(irep, reg) : Set['NilClass']
+                  else
+                    def_classes(irep, d.index, d.reg, depth)
+                  end
+        return nil unless classes
+
+        out.merge(classes)
+      end
+      out
+    end
+
+    # The classes of the frame's writes of +reg+ (at the instruction indices +within+, every one when nil), or nil when
+    # a write is not one the trace can follow (a callee frame below it, an unmodelled op).
+    def frame_write_classes(frame, reg, depth, within)
+      prog = BytecodeIR.for(frame)
+      out = Set.new
+      prog.instructions.each_with_index do |instruction, j|
+        next if within && !within.include?(j)
+        next unless prog.may_write_at?(j, reg)
+
+        insn = instruction.source
+        next if insn.reg&.to_i == reg && LEAD_KEEP.include?(insn.op)
+        return nil unless insn.reg&.to_i == reg
+
+        classes = def_classes(frame, j, reg, depth)
+        return nil unless classes
+
+        out.merge(classes)
+      end
+      out
+    end
+
+    # The values the SETUPVARs of the blocks nested in +frame+ store into its register +reg+.
+    def setupvar_classes(frame, reg, depth)
+      out = Set.new
+      walk = lambda do |parent, level|
+        Array(parent.reps).each do |label|
+          child = @ireps[label]
+          return nil unless child
+
+          BytecodeIR.for(child).each_with_op(:SETUPVAR) do |insn, i|
+            index, at = insn.upvar_ref
+            next unless at.to_i == level && index.to_i == reg
+
+            classes = reg_classes(child, i, insn.reg.to_i, depth + 1)
+            return nil unless classes
+
+            out.merge(classes)
+          end
+          return nil unless walk.call(child, level + 1)
+        end
+        true
+      end
+      walk.call(frame, 0) && out
+    end
+
+    def upvar_written?(irep, reg)
+      BytecodeIR.own_upvar_written_regs(irep).include?(reg)
+    end
+
+    # A parameter register (or the block slot) of +irep+: its entry value comes from the caller.
+    def argument_reg?(irep, reg)
+      fields = irep.enter&.enter_fields || []
+      m1, opt, rest, m2, key, kdict = fields[0, 6].map(&:to_i)
+      reg <= m1 + opt + rest + m2 + (key + kdict).clamp(0, 1) + 1
+    end
+
+    # child label => [defining irep, indices of the BLOCK/LAMBDA ops that create it].
+    def block_parents
+      @block_parents ||= begin
+        map = {}
+        @ireps.each_value do |parent|
+          BytecodeIR.for(parent).each_with_op(*CLOSURE_OPS) do |insn, idx|
+            child = parent.reps[insn.block_index.to_i]
+            next unless child
+
+            entry = (map[child] ||= [parent, []])
+            # A body created by two frames would need both; upvar_classes refuses it (no frame).
+            entry[0] = nil unless entry[0].equal?(parent)
+            entry[1] << idx
+          end
+        end
+        map
+      end
+    end
+
+    def captured_locals_sealed?
+      return @captured_locals_sealed if defined?(@captured_locals_sealed)
+
+      @captured_locals_sealed = ENV['BC2CPP_CAPTURED_LOCAL_TRACE'] != '0' &&
+                                CapturedLocalWriters.absent?(@ireps, @ctx[:closed_world])
+    end
 
     # block_result_array? with mruby's own Ruby bodies (MethodDef#core) admitted: CoreBlockIteratorSigs declares those
     # bodies (core_facts_rbs_check), so only a program definition on the receiver or Enumerable withdraws the claim.

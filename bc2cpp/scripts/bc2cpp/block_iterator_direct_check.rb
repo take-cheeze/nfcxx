@@ -189,7 +189,7 @@ nested = code_with_blocks(code, 'tm_nested')
 # The only dynamic send left is the outer `n.times`'s own else (its receiver is unproven); the inner `2.times` keeps
 # none, in the inlined loop and in the block function the outer else passes.
 check.call('tm_nested: the Integer literal receiver of the inner times keeps no dynamic else',
-           nested.include?('literal Integer receiver') && nested.include?('Integer_times_impl(M, ') &&
+           nested.match?(/(?:literal|proven) Integer receiver/) && nested.include?('Integer_times_impl(M, ') &&
            nested.scan(DYNAMIC).size == 1 && code_of(code, 'tm_nested').scan(DYNAMIC).size == 1)
 nested_chars = code_with_blocks(code, 'chars_nested')
 # The literal is proven exactly String (EXACT_TYPED): a direct call, no class test, and the only dynamic else left

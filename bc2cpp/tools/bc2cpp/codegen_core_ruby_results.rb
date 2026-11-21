@@ -78,6 +78,8 @@ module CoreRubyResults
     end
 
     def self_mask = @receiver
+    # CORE_RUBY_SELF: LOADSELF and a self-send in the specialized method frame read the receiver R0 holds.
+    def loadself_mask = @cg.core_ruby_self? ? @receiver : NumericFlow::OTHER
     # EXC supplies only truthiness here. It has no exportable result class.
     def entry_mask(_irep, reg)
       return @block_given ? NumericFlow::EXC : NumericFlow::NIL if reg == @block_register
@@ -95,7 +97,14 @@ module CoreRubyResults
     def false_class_bit = @cg.numeric_false_class_bit
 
     def send_mask(_irep, _index, insn, state)
-      @cg.core_ruby_static_send_mask(insn, state)
+      return @cg.core_ruby_static_send_mask(insn, state) unless %i[SSEND SSEND0].include?(insn.op) && @cg.core_ruby_self?
+
+      # `self.dup` in Array#uniq: SSEND's register holds no receiver, self does.
+      explicit = insn.dup
+      explicit.op = BytecodeIR::Ops::SELF_SEND_TO_EXPLICIT.fetch(insn.op)
+      inputs = state.dup
+      inputs[insn.reg.to_i] = @receiver
+      @cg.core_ruby_static_send_mask(explicit, inputs)
     end
 
     def block_send_mask(irep, index, insn, state)
@@ -243,9 +252,26 @@ class CodeGen
       return nil unless block_core_owner_plain?(owner, name)
 
       definitions = Array(block_core_index[[owner, name]]) + registry.select { |definition| definition.owner == owner && definition.core && definition.irep }
+      # CORE_TARGET_ONE_BODY: block_core_index already holds the registry's core bodies, so one body appears twice;
+      # two distinct bodies still refuse.
+      definitions = definitions.uniq(&:irep) if core_target_one_body?
       return definitions.one? ? definitions.first : nil unless definitions.empty?
     end
     nil
+  end
+
+  # BC2CPP_CORE_RUBY_SELF=0 leaves self unknown inside a specialized core body except as R0 (CORE_RUBY_SELF).
+  def core_ruby_self?
+    return @core_ruby_self if defined?(@core_ruby_self)
+
+    @core_ruby_self = ENV['BC2CPP_CORE_RUBY_SELF'] != '0'
+  end
+
+  # BC2CPP_CORE_TARGET_ONE_BODY=0 counts a body block_core_index and the registry both list twice again.
+  def core_target_one_body?
+    return @core_target_one_body if defined?(@core_target_one_body)
+
+    @core_target_one_body = ENV['BC2CPP_CORE_TARGET_ONE_BODY'] != '0'
   end
 
   def core_ruby_super_result_target(target, receiver)

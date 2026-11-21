@@ -10,7 +10,9 @@
 #   2. run on a full-core mruby, compiled against interpreted: nil?, respond_to? with a Symbol (public, private and
 #      missing method, with and without the include_all flag), with a String (the else) and with a non-name
 #      argument (TypeError) give the same value or error;
-#   3. the Kernel rows dup / object_id / __to_int and OWNER_SET_NATIVE_ARMS (to_i, to_f, <=>, bytesize, keys): the
+#   3. SELF_NOT_ARRAY: `push x` on a self the class flow proves no Array calls the class's own push, with no
+#      ARRAY_PUSH arm and no owner-call else; BC2CPP_SELF_NOT_ARRAY=0 keeps the arm; Stk#add runs as interpreted;
+#   4. the Kernel rows dup / object_id / __to_int and OWNER_SET_NATIVE_ARMS (to_i, to_f, <=>, bytesize, keys): the
 #      arms are emitted with the owner call as the else, and every edge case (negative, huge and non-finite Floats,
 #      heap-sized Integers, nil and String operands, subclass receivers, class receivers of dup, frozen receivers,
 #      wrong types) gives the interpreter's value or error.
@@ -96,8 +98,13 @@ SOURCE = <<~RUBY
     def oid(o); i = o.object_id; [i.class, i == o.object_id]; end
     def toint(o); o.__to_int; end
   end
+  class Stk
+    def initialize; @a = []; end
+    def push(x); @a << x; @a.size; end
+    def add(x); push x; end
+  end
 RUBY
-OWNERS = %w[Bag Probe].freeze
+OWNERS = %w[Bag Probe Stk].freeze
 OWNER_PREDICATES = { 'Float' => 'mrb_float_p', 'Integer' => 'mrb_integer_p', 'String' => 'mrb_string_p',
                      'Hash' => 'mrb_hash_p' }.freeze
 
@@ -105,9 +112,10 @@ body = ->(code, name) { code[/^mrb_value Probe_#{name}_impl\(mrb_state\* M[^\n]*
 
 Dir.mktmpdir('owner-set-direct') do |dir|
   code, err = runtime.generate(SOURCE, dir, only_owners: OWNERS)
-  variants = %w[BC2CPP_OWNER_SET_DIRECT BC2CPP_CORE_INT_ARG_PROOF BC2CPP_KERNEL_CLASS_ARG_PROOF BC2CPP_SYMBOL_PROBE_DIRECT]
+  variants = %w[BC2CPP_OWNER_SET_DIRECT BC2CPP_CORE_INT_ARG_PROOF BC2CPP_KERNEL_CLASS_ARG_PROOF BC2CPP_SYMBOL_PROBE_DIRECT
+                BC2CPP_SELF_NOT_ARRAY]
              .map { |key| { key => '0' } }
-  off, int_off, class_off, disabled = runtime.generate(SOURCE, File.join(dir, 'emission-variants'),
+  off, int_off, class_off, disabled, not_array_off = runtime.generate(SOURCE, File.join(dir, 'emission-variants'),
                                                      only_owners: OWNERS, emission_variants: variants).map(&:code)
   File.write(File.join(ENV['BC2CPP_KEEP_DIR'], 'owner_set_direct.cxx'), code) if ENV['BC2CPP_KEEP_DIR']
   %w[gb slice_one slice_two radix bad_radix].each do |name|
@@ -167,6 +175,13 @@ Dir.mktmpdir('owner-set-direct') do |dir|
              body.call(code, 'ti').match?(/mrb_float_p\(r\d+\) && isfinite\(mrb_float\(r\d+\)\) && FIXABLE_FLOAT/))
   check.call('Integer#<=> arm only for a fixnum against a fixnum or Float',
              body.call(code, 'cmp').match?(/mrb_fixnum_p\(r\d+\) && \(mrb_fixnum_p\(r\d+\) \|\| mrb_float_p\(r\d+\)\)/))
+
+  # SELF_NOT_ARRAY: self in Stk#add is no Array, so `push x` is Stk's own push, not an ARRAY_PUSH arm with a dynamic else.
+  stk = ->(text, name) { text[/^mrb_value Stk_#{name}_impl\(mrb_state\* M[^\n]*\{\n.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m].to_s }
+  check.call('push on a non-Array self: no ARRAY_PUSH arm, no owner call',
+             !stk.call(code, 'add').include?('ARRAY_PUSH') && stk.call(code, 'add').include?('Stk_push_impl(') &&
+               !stk.call(code, 'add').include?('bc2cpp_owner_call('))
+  check.call('BC2CPP_SELF_NOT_ARRAY=0 keeps the ARRAY_PUSH arm', stk.call(not_array_off, 'add').include?('ARRAY_PUSH'))
 
   check.call('BC2CPP_OWNER_SET_DIRECT=0 keeps the owner calls',
              !off.include?('OWNER_SET_DIRECT :') && !off.include?('OWNER_SET_NATIVE_ARMS :') &&
@@ -284,6 +299,13 @@ Dir.mktmpdir('owner-set-direct') do |dir|
         for (const char* e : oid) row(M, (std::string("object_id ") + e).c_str(), "oid", eval(M, e), 0, mrb_nil_value());
         const char* toint[] = {"5", "-5", "5.5", "'5'", "nil"};
         for (const char* e : toint) row(M, (std::string("__to_int ") + e).c_str(), "toint", eval(M, e), 0, mrb_nil_value());
+        {
+          mrb_value stk = mrb_obj_new(M, mrb_class_get(M, "Stk"), 0, nullptr);
+          mrb_value v = mrb_funcall(M, stk, "add", 1, mrb_int_value(M, 5));
+          v = mrb_funcall(M, stk, "add", 1, mrb_int_value(M, 6));
+          mrb_value s = mrb_inspect(M, v);
+          std::printf("Stk#add => %.*s\n", (int)RSTRING_LEN(s), RSTRING_PTR(s));
+        }
         mrb_gc_unregister(M, bag);
         return 0;
       }

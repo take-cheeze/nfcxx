@@ -15,13 +15,24 @@ class BlockCaptureIndex
   def upvars(irep)
     @upvars.fetch(irep) do
       needs = []
+      opaque = false
       walked = BytecodeIR.each_nested_insn(irep, ->(label) { @ireps[label] }, max_depth: @max_depth) do |insn, depth|
+        if insn.op == :ARGARY
+          # BLOCK_ZSUPER: a bare `super` in a block reads the method frame's parameters as GETUPVARs would.
+          reads = insn.argary_frame_reads
+          opaque ||= reads.nil?
+          next unless reads && reads[0] >= 1
+
+          level = reads[0] - 1
+          reads[1].each { |index| needs << [level - depth, index].freeze } if level >= depth
+          next
+        end
         next unless insn.op == :GETUPVAR || insn.op == :SETUPVAR
 
         index, level = insn.upvar_ref
         needs << [level - depth, index].freeze if level >= depth
       end
-      @upvars[irep] = walked ? needs.uniq.sort.freeze : nil
+      @upvars[irep] = walked && !opaque ? needs.uniq.sort.freeze : nil
     end
   end
 
@@ -39,6 +50,13 @@ class BlockCaptureIndex
       return store_levels(by_depth, depth, nil) unless level
 
       needs << level.to_i
+    end
+    # BLOCK_ZSUPER: OP_ARGARY copies the block slot of the frame `lv` names, as BLKPUSH reads it.
+    BytecodeIR.for(irep).instructions_with_op(:ARGARY).each do |insn|
+      level = insn.paren_int
+      return store_levels(by_depth, depth, nil) unless level
+
+      needs << level
     end
     if given && BytecodeIR.for(irep).instructions_with_op(:SSEND0).any? { |insn| @block_given_names.include?(insn.sym) }
       needs << depth + 1

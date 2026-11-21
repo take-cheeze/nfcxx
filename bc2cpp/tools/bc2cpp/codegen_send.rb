@@ -165,7 +165,7 @@ class CodeGen
       return "  // IO_PUTS_MODEL: shared bc2cpp_io_puts; exact core IO#puts body, else dispatch by name.\n" \
              "  {\n" \
              "#{args_decl}" \
-             "    #{RegName[d]} = bc2cpp_io_puts(M, #{recv}, mrb_intern_lit(M, \"puts\"), #{n}, #{direct_argv});\n" \
+             "    #{RegName[d]} = bc2cpp_io_puts(M, #{recv}, mrb_intern_lit(M, \"puts\"), #{n}, #{direct_argv}, self);\n" \
              "  }\n"
     end
 
@@ -930,7 +930,7 @@ class CodeGen
       CPP
     end
 
-    if name == 'push' && n == 1 && builtin_class_send_safe?(name, %w[Array])
+    if name == 'push' && n == 1 && builtin_class_send_safe?(name, %w[Array]) && !self_never_array?(self_implicit, irep, new_proof_idx)
       value = argv.first
       exact_push = exact_array_push_code(irep, new_proof_idx, new_proof_reg, self_implicit, name, d, recv, value)
       return exact_push if exact_push
@@ -1396,6 +1396,11 @@ class CodeGen
       target = nil unless @other_owners&.include?(target.owner) || module_function_emitted
     end
 
+    # INSTALLED_NAME_DEVIRT_GUARD: a name the program aliases or defines outside the registry (an alias in mruby's own Ruby
+    # included: mruby-onig-regexp replaces String#gsub) may no longer run the registry body, whatever the receiver's
+    # class; a class guard (TYPED) or an exactness proof (EXACT_TYPED) cannot see that.
+    target = nil if target && installed_name_blocks_devirt?(name)
+
     # EXPLICIT_RECEIVER_VISIBILITY: a direct `_impl` call would run a private or protected method that OP_SEND raises for;
     # only a public def whose visibility nothing in the program changes is bound, the rest keeps the checked dispatch.
     unless self_implicit || explicit_call_visible?(name, target)
@@ -1784,6 +1789,15 @@ class CodeGen
 
       "#{diag}#{note}#{miss}  #{line}"
     end
+  end
+
+  # SELF_NOT_ARRAY: the class flow proves an implicit receiver is no Array, so the ARRAY_PUSH arm is dead and the send
+  # takes the ordinary self-call path. BC2CPP_SELF_NOT_ARRAY=0 keeps the arm.
+  def self_never_array?(self_implicit, irep, idx)
+    return false unless self_implicit && irep && idx && ENV['BC2CPP_SELF_NOT_ARRAY'] != '0'
+
+    mask = exact_flow_mask(irep, idx, 0)
+    !mask.nil? && mask.positive? && (mask & (NumericFlow::ARR | NumericFlow::OTHER)).zero?
   end
 
   # The argument list of a direct `_impl` call to `target` and the note naming

@@ -55,7 +55,10 @@ module NativeCoreResultSigsCases
   def self.run(check)
     audited = { 'Array' => { 'to_a' => 'Array', 'compact' => 'Array', 'join' => 'String', '+' => 'Array', '-' => 'Array' }, 'String' => { 'bytes' => 'Array', 'size' => :fixnum, 'length' => :fixnum }, 'Integer' => { 'to_s' => 'String', 'to_i' => :fixnum, 'inspect' => 'String' } }.freeze
 
-    check.call('loaded table equals the audited entries', NativeCoreResultSigs.kinds == audited)
+    # Kinds a world adds once its NativeCoreDirect pins exist (Array#size/#length, String#to_s); an older world lacks them.
+    added = { 'Array' => { 'size' => :fixnum, 'length' => :fixnum }, 'String' => { 'to_s' => 'String' } }
+    with_added = audited.merge(added) { |_klass, base, extra| base.merge(extra) }
+    check.call('loaded table equals the audited entries', [audited, with_added].include?(NativeCoreResultSigs.kinds))
     check.call('table is frozen', NativeCoreResultSigs.kinds.frozen? && NativeCoreResultSigs.kinds['Array'].frozen?)
     check.call('rejects an Integer result', rejects("class Array\n  def size: () -> Integer\nend\n"))
     check.call('rejects a nil result', rejects("class Array\n  def pop: () -> nil\nend\n"))

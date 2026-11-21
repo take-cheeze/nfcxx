@@ -633,6 +633,15 @@ module NativeCoreDirect
                   size_t blen = capa * sizeof(mrb_value);
                   struct RArray *a = MRB_OBJ_ALLOC(mrb, MRB_TT_ARRAY, mrb->array_class);
               C
+    # The length as a Fixnum: an exact Array's size and length are Integers (NATIVE_RESULT_FACTS through core_results).
+    *%w[size length].map do |name|
+      Entry.new(name: name, owner: 'Array', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()', expression: nil, apis: [],
+                checks: [['mrb_ary_size', <<~C, :exact]])
+                  struct RArray *a = mrb_ary_ptr(self);
+
+                  return mrb_int_value(mrb, ARY_LEN(a));
+                C
+    end,
     # ARRAY_TIMES_RESULT (CodeGen#native_array_times_result): for an argument that is no String and answers no
     # to_str, mrb_ary_times returns mrb_ary_new (mrb_ary_new_capa's ary_new_capa) or its own ary_new_capa.
     Entry.new(name: '*', owner: 'Array', arity: 1, arg: :integer, aspec: 'MRB_ARGS_REQ(1)', expression: nil, apis: [],

@@ -16,9 +16,12 @@ class CodeGen
   class << self
     # { [owner, name without @] => { kind:, text: } } for this build (nil or empty: none).
     attr_accessor :declared_ivar_elements
-    # DECLARED_ARG_ELEMENT: { irep label => { register => { kind:, text:, klass: } } } of the required parameters a
+    # DECLARED_ARG_ELEMENT: { irep label => { register => { kind:, text:, klass: } } } of the positional parameters a
     # signature declares `Array[T]` (or `Array[T]?`) for (nil or empty: none).
     attr_accessor :declared_arg_elements
+    # DECLARED_RECORD_READ: { irep label => { register => { key => { kind:, klass:, nilable:, text: } } } } of the
+    # positional parameters a signature declares a record type `{ k: T, ?j: U? }` for (nil or empty: none).
+    attr_accessor :declared_arg_records
   end
 
   DECLARED_ELEMENT_CLASSES = {
@@ -26,6 +29,8 @@ class CodeGen
     'Float' => [:float, 'Float'],
     'Symbol' => [:symbol, 'Symbol'],
     'String' => [:string, 'String'],
+    'Array' => [:array, 'Array'],
+    'Hash' => [:hash, 'Hash'],
   }.freeze
 
   # The declarations of one build's applied signatures: { [owner, name] => { kind:, text: } } for each Array ivar whose
@@ -73,6 +78,78 @@ class CodeGen
     end
   end
 
+  # DECLARED_RECORD_READ: the checkable fields of each record parameter (applied.ir_arg_records). A field is checkable
+  # when its type is one class of DECLARED_ELEMENT_CLASSES or a program class, optionally `T?`; an optional key (`?k:`)
+  # reads nil when absent. Other fields (untyped, unions) are left out and their reads stay unchecked.
+  def self.declared_arg_record_table(applied)
+    return {} unless applied && applied.ir_arg_records
+
+    applied.ir_arg_records.each_with_object({}) do |(label, regs), acc|
+      table = regs.each_with_object({}) do |(reg, record), out|
+        fields = {}
+        optional = record.respond_to?(:optional_fields) ? record.optional_fields : {}
+        [[record.fields, false], [optional, true]].each do |set, opt|
+          set.each do |key, type|
+            field = record_field_spec(type, opt)
+            fields[key.to_sym] = field if field
+          end
+        end
+        out[reg] = fields unless fields.empty?
+      end
+      acc[label] = table unless table.empty?
+    end
+  end
+
+  def self.record_field_spec(type, optional_key)
+    nilable = optional_key
+    if type.is_a?(RBS::Types::Optional)
+      nilable = true
+      type = type.type
+    end
+    return nil unless type.is_a?(RBS::Types::ClassInstance) && type.args.empty?
+
+    klass = type.name.to_s.delete_prefix('::')
+    kind, = DECLARED_ELEMENT_CLASSES[klass]
+    kind ||= :class if klass.match?(/\A[A-Z][\w:]*\z/) && !%w[Array Hash Object NilClass BasicObject].include?(klass)
+    return nil unless kind
+
+    { kind: kind, klass: klass, nilable: nilable, text: "#{klass}#{'?' if nilable}" }
+  end
+
+  # DECLARED_RECORD_READ: the field entry a GETIDX at +idx+ reads, when its receiver's every reaching definition is the
+  # entry value of one declared record parameter and its key is one literal Symbol the record declares; else nil. The
+  # read is tested after it runs (declared_element_getidx_guard), so the field class holds whatever wrote the Hash,
+  # aliases and mutations before the read included. BC2CPP_DECLARED_RECORD_READ=0 turns it off.
+  def declared_record_read(irep, idx, insn)
+    return nil unless insn.op == :GETIDX && irep && idx && ENV['BC2CPP_DECLARED_RECORD_READ'] != '0'
+
+    table = self.class.declared_arg_records&.[](irep.label)
+    return nil unless table
+
+    producers = BytecodeIR.producers(irep, idx, insn.regs.first)
+    return nil if producers.nil? || producers.empty? || !producers.all?(&:entry?) || producers.map(&:reg).uniq.size != 1
+
+    reg = producers.first.reg.to_i
+    fields = table[reg]
+    key = fields && record_literal_key(irep, idx, insn.regs.first.to_i + 1)
+    field = key && fields[key]
+    return nil unless field && (field[:kind] != :class || @closed_world&.exact_class?(field[:klass]))
+
+    owner = @owner_of[irep.label]
+    where = owner ? "#{owner.owner}##{owner.name}" : irep.label.to_s
+    field.merge(owner: where, name: "arg#{reg}[:#{key}]", subject: "#{where} argument #{reg}[:#{key}]",
+                marker: "#{where} arg#{reg}[:#{key}]")
+  end
+
+  # The one literal Symbol the key register holds at +idx+ (handler edges crossed), else nil.
+  def record_literal_key(irep, idx, key_reg)
+    defs = BytecodeIR.reaching_definitions(irep, idx, key_reg, through_handlers: true, shared: true)
+    return nil unless defs && defs.size == 1 && !defs.first.entry?
+
+    writer = BytecodeIR.for(irep).source_at(defs.first.index)
+    writer.op == :LOADSYM ? writer.sym&.to_sym : nil
+  end
+
   # The declared element of ivar +name+ for +klass+ or its nearest declaring ancestor, or nil.
   def declared_element_entry(klass, name)
     table = self.class.declared_ivar_elements
@@ -98,6 +175,9 @@ class CodeGen
     producers = BytecodeIR.producers(irep, idx, reg)
     return nil if producers.nil? || producers.empty?
     return declared_arg_element_receiver(irep, producers) if producers.any?(&:entry?)
+
+    # `(@x || [])` for a read or loop: an empty Array literal adds no element (a store could go into the literal).
+    producers = producers.reject { |p| empty_array_literal?(p.insn) } if derived && producers.size > 1
     return nil unless producers.size == 1
 
     producer = producers.first
@@ -168,7 +248,10 @@ class CodeGen
     # The raw register, as the flow's mask reads it (declared_element_index_mask) and as the emitted read names it.
     receiver = insn.op == :GETIDX0 ? insn.regs[1] : insn.regs.first
     entry = declared_element_receiver(irep, idx, receiver, owner_def&.owner, derived: true)
-    return '' unless entry
+    unless entry
+      field = declared_record_read(irep, idx, insn)
+      return field ? element_guard_statement(field, RegName[insn.regs.first], nil_ok: field[:nilable], verb: 'read') : ''
+    end
 
     # The read result is nil past the end, so nil is allowed here.
     element_guard_statement(entry, RegName[insn.regs.first], nil_ok: true, verb: 'read')
@@ -212,6 +295,8 @@ class CodeGen
            when :integer then "(mrb_integer_p(#{var}) || mrb_bigint_p(#{var}))"
            when :symbol then "mrb_symbol_p(#{var})"
            when :string then "mrb_string_p(#{var})"
+           when :array then "mrb_array_p(#{var})"
+           when :hash then "mrb_hash_p(#{var})"
            when :class then exact_class_guard(owner_class_ptr_expr(entry[:klass]), var)
            end
     ok = nil_ok ? "mrb_nil_p(#{var}) || (#{cond})" : cond
@@ -229,9 +314,20 @@ class CodeGen
 
     idx = irep.index_of_addr(region[:sendb_addr])
     entry = declared_element_receiver(irep, idx, region[:dest_reg], d.owner, derived: true)
-    return nil unless entry && entry[:kind] == :class && @closed_world&.exact_class?(entry[:klass])
+    entry if entry && declared_element_exact?(entry)
+  end
 
-    entry
+  # Is the element guard's test the element's exact class? A program class is tested by pointer equality; Integer,
+  # Float and Symbol have no subclass; String, Array and Hash are tested by kind, which is their class only in a build
+  # with no subclass of them (core_class_subclass_free?, as for the parameter and keyword guards).
+  def declared_element_exact?(entry)
+    case entry[:kind]
+    when :class then @closed_world&.exact_class?(entry[:klass]) || false
+    when :integer, :float, :symbol then ENV['BC2CPP_DECLARED_CORE_ELEMENT'] != '0'
+    when :string, :array, :hash
+      ENV['BC2CPP_DECLARED_CORE_ELEMENT'] != '0' && !block_core_world.nil? && core_class_subclass_free?(entry[:klass])
+    else false
+    end
   end
 
   # DECLARED_ELEMENT_GUARD on a loop element: the statement testing the element bound to `var`. An element inside the
@@ -247,14 +343,25 @@ class CodeGen
     scope = @declared_loop_elements
     return nil if scope.nil? || scope.empty?
 
-    hit = scope.find { |e| e[:irep].equal?(irep) }
-    return nil unless hit
+    hits = scope.select { |e| e[:irep].equal?(irep) }
+    return nil if hits.empty?
 
     defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
     return nil if defs.nil? || defs.empty?
-    return nil unless defs.all? { |df| df.entry? && df.reg.to_s == hit[:reg] }
 
-    hit[:klass]
+    # A block may bind several element parameters (`sort { |a, b| }`), each under its own entry test.
+    classes = defs.map { |df| df.entry? && hits.find { |e| e[:reg] == df.reg.to_s }&.dig(:klass) }
+    classes.uniq.size == 1 && classes.first ? classes.first : nil
+  end
+
+  # declared_loop_element_class as flow bits (declared_arg_bits), or nil.
+  def declared_loop_element_bits(irep, idx, reg)
+    klass = declared_loop_element_class(irep, idx, reg)
+    return nil unless klass
+
+    kind = DECLARED_ELEMENT_CLASSES[klass]&.first || :class
+    bits = declared_arg_bits(klass, kind, false)
+    bits.zero? ? nil : bits
   end
 
   # DECLARED_ELEMENT_MASK: the class set of a GETIDX/GETIDX0 result the flow may use: the declared element's class and
@@ -265,7 +372,7 @@ class CodeGen
     receiver = insn.op == :GETIDX0 ? insn.regs[1] : insn.regs.first
     owner = @owner_of[irep.label]&.owner
     entry = declared_element_receiver(irep, index, receiver, owner, derived: true)
-    return nil unless entry
+    return declared_record_index_mask(irep, index, insn) unless entry
 
     bits = if entry[:kind] == :class
              declared_arg_bits(entry[:klass], :class, false)
@@ -274,5 +381,20 @@ class CodeGen
            end
     # A class with no bit yet gives no mask: the flow keeps the unknown answer rather than renumbering the masks.
     bits.zero? ? nil : bits | NumericFlow::NIL
+  end
+
+  # DECLARED_RECORD_READ: the field's class (nil too when it may be absent or nil), for the guarded read only.
+  def declared_record_index_mask(irep, index, insn)
+    field = declared_record_read(irep, index, insn)
+    return nil unless field
+
+    bits = if field[:kind] == :class
+             declared_arg_bits(field[:klass], :class, false)
+           else
+             NumericFlow.class_bits(field[:klass]).keys.inject(0, :|)
+           end
+    return nil if bits.zero?
+
+    field[:nilable] ? bits | NumericFlow::NIL : bits
   end
 end

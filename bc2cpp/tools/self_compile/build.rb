@@ -16,6 +16,7 @@ require_relative '../bc2cpp/bake_sources'
 require_relative '../bc2cpp/scan_cache'
 require_relative '../bc2cpp/toolchain'
 require_relative '../bc2cpp/native_ast_source'
+require_relative '../bc2cpp/compiled_gems'
 require_relative '../../host-libs/mruby-bc2cpp-runner/mrblib/runner'
 require_relative 'artifacts'
 
@@ -64,6 +65,14 @@ files = bake('tools/bc2cpp/bc2cpp.rb').filter_map do |name, source|
   File.write(path, source) unless File.file?(path) && File.binread(path) == source.b
   path
 end
+# SELF_CORE: mruby's own Ruby (mrblib/*.rb and the linked core gems' mrblib, in the interpreter's load order) is compiled
+# with the compiler's sources, as a game build compiles it, so Array#each, Hash#each, Integer#times, Enumerable and the
+# rest run as C++ instead of on the VM under every compiled caller. They come first, as the interpreter defines them.
+# BC2CPP_SELF_CORE=0 compiles the compiler's sources alone (the small benchmark, scan caches warm: 22.9 s, against 17.9 s
+# with core compiled; a cold first run is several times slower either way).
+if ENV.fetch('BC2CPP_SELF_CORE', '1') != '0'
+  files = core_compiled_mrblib_srcs(world, manifest.fetch('gems').map(&:first)) + files
+end
 env = {
   'BC2CPP_WORLD_ROOT' => world, 'BC2CPP_TREE_ROOT' => tree,
   'MRBC' => mrbc, 'BC2CPP_MRBC_RB' => '', 'BC2CPP_BUILD_NAME' => 'bc2cpp-self',
@@ -86,6 +95,9 @@ env = {
 env, controls = Bc2cppSelfCompile.generation_environment(env)
 # The generation runs without BC2CPP_AST_PRODUCER, so it parses with the producer that auto selection picks here.
 controls = controls.merge('ast_producer' => NativeAstSource.available?('nfcxx') ? 'nfcxx' : 'clang')
+# The input list itself, in order: the dependency digests below cover the files' contents, and a core file that the
+# runtime links is a dependency whether or not it is compiled, so SELF_CORE alone would leave the fingerprint unchanged.
+controls = controls.merge('sources' => files)
 # Every tool source (ScanCache.tools_sources) is a dependency, not only the ones baked into the generator's input: the
 # .yml data and the mrbc_rb sources the generator loads are read too.
 dependencies = (files + manifest.fetch('native') + manifest.fetch('ruby') + manifest.fetch('headers') +

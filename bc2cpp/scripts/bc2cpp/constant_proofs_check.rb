@@ -283,5 +283,24 @@ check.call('a straight-line receiver constant still resolves',
 # A send inside a rescue range must still resolve: the reaching-definition query runs through handler edges.
 check.call('a receiver constant inside a rescue range still resolves',
            receiver_at_send.call("def probe(c)\n  x = Alpha\n  begin\n    x.foo\n  rescue StandardError\n    nil\n  end\nend\n").first == 'Alpha')
+check.call('an ordinary parameter receiver remains unproven',
+           receiver_at_send.call("def probe(x)\n  x.foo\nend\n") == [nil, nil])
+check.call('a forward branch that bypasses the constant load remains unproven',
+           receiver_at_send.call("def probe(c)\n  x = Alpha if c\n  x.foo\nend\n") == [nil, nil])
+
+# Even after finding a textual constant load, unresolved jumps and unwind edges
+# that bypass it must still refuse the proof.
+[[:JMP, '99'], [:JMPUW, '2']].each do |op, target|
+  ops = [[op, target], [:GETCONST, 'R1 Alpha'], [:SEND0, 'R1 :foo'], [:RETURN, 'R1']]
+  instructions = ops.each_with_index.map do |(code, args), index|
+    Insn.new(lineno: 1, addr: index, op: code, args: args, raw: "#{code} #{args}")
+  end
+  body = Irep.new(label: "constant-branch-#{op}", instructions: instructions, nregs: 3, nlocals: 1,
+                  catch_handlers: [])
+  ref = body.constant_path(1, 1, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY,
+                                  barrier: %i[JMPUW ONERR RESCUE EXCEPT BLOCK])
+  check.call("#{op}: a textual constant load still needs a valid branch proof",
+             ref&.root == :const && CodeGen.allocate.send(:straight_line_constant_name, body, 2, 1).nil?)
+end
 
 suite.finish!

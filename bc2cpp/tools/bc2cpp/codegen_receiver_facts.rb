@@ -320,12 +320,13 @@ class CodeGen
   # The constant the straight-line walk finds when no branch can bypass its
   # load; nil otherwise (agreed_constant_name then asks every reaching definition).
   def straight_line_constant_name(irep, idx, dest_reg, skip_blocks: false)
-    branch_edges = BytecodeIR.for(irep).jump_edges_before(idx, %i[JMP JMPIF JMPNOT JMPNIL JMPUW])
-    return nil unless branch_edges
-
     barriers = skip_blocks ? %i[JMPUW ONERR RESCUE EXCEPT] : %i[JMPUW ONERR RESCUE EXCEPT BLOCK]
     ref = irep.constant_path(idx - 1, dest_reg, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY, barrier: barriers)
     return nil unless ref&.root == :const
+
+    # Ordinary receivers have no constant load to protect; only scan branches after finding one.
+    branch_edges = BytecodeIR.for(irep).jump_edges_before(idx, %i[JMP JMPIF JMPNOT JMPNIL JMPUW])
+    return nil unless branch_edges
 
     # A forward edge from before this write into the send's block could
     # bypass the receiver value; edges from later code already execute it.
@@ -972,7 +973,10 @@ class CodeGen
     # MODULE_ZSUPER: a module's method (a prepended wrapper above all) has no superclass. bc2cpp_super_call continues
     # after the module's include-class in self's own chain, which is OP_SUPER's lookup for a module owner.
     module_owner = !singleton && @closed_world&.module_declared?(class_owner)
-    return nil unless superclass.is_a?(String) || (singleton && superclass == :none) || module_owner
+    # IMPLICIT_SUPERCLASS: a `class X` body with no superclass written (:none) is looked up the same way: bc2cpp_super_call
+    # follows the class's own chain at run time (its origin's super, include-classes and all), as OP_SUPER does, so it
+    # needs no superclass name.
+    return nil unless superclass.is_a?(String) || superclass == :none || module_owner
     return nil if singleton && zsuper_extended?(owner_def.name)
 
     program = BytecodeIR.for(irep)
@@ -1014,8 +1018,99 @@ class CodeGen
     { m1: m1, rest: rest.positive?, m2: m2, block: block, owner: owner_def.owner, name: owner_def.name, kdict: kdict }
   end
 
+  # BLOCK_ZSUPER: a bare `super` in a block a method makes (`scoped(x) { super }`):
+  #
+  #   ARGARY R3 1:0:0:0 (1)    ; vm.c OP_ARGARY lv=1: the args are uvenv(0)'s stack[1..m1], the method frame's
+  #   SUPER  R2 n=*            ; OP_SUPER: ci->mid and the target class are the method's (the block's env)
+  #
+  # It is the method's zsuper (ZSUPER_LOOKUP) run from the block body: the arguments are the method's parameter
+  # registers, which the block reads through its upvar pointers (block_upvar_needs lists them as level-0 reads), and the
+  # block is the method's own (block_blk_needs lists the ARGARY like a BLKPUSH of the same lv), else nil where
+  # SUPER_NO_CALLER_BLOCK proves no caller passes one. Only inside a BLOCK_FALLBACK body at depth 1 whose irep is a
+  # direct child of the method, so lv == 1 names the method frame; the body runs under the method's self (a rebound
+  # block is never compiled), which is OP_SUPER's receiver and passes its kind_of check. The method takes exactly m1
+  # mandatory parameters (no optional, rest, post, keyword or block parameter: m1:0:0:0), and no instruction of the
+  # method or of a block in it writes one, so each still holds its argument wherever a nested closure or an analysis
+  # of the method reads it. `idx` may name either half. BC2CPP_BLOCK_ZSUPER=0 keeps the `#error`.
+  def block_zsuper_plan(owner_def, irep, idx)
+    return nil unless owner_def && irep && idx && ENV.fetch('BC2CPP_BLOCK_ZSUPER', '1') == '1'
+    return nil unless @block_fallback_active && @block_fallback_upvars && @block_fallback_depth == 1
+    return nil unless ENV.fetch('BC2CPP_SUPER_LOOKUP', '1') == '1'
+    return nil unless owner_def.irep && !owner_def.core
+
+    method_irep = @ireps[owner_def.irep]
+    return nil unless method_irep && method_irep.reps&.include?(irep.label)
+
+    singleton = owner_def.owner.end_with?('.singleton')
+    class_owner = singleton ? owner_def.owner.delete_suffix('.singleton') : owner_def.owner
+    superclass = @superclass_of[class_owner]
+    module_owner = !singleton && @closed_world&.module_declared?(class_owner)
+    return nil unless superclass.is_a?(String) || superclass == :none || module_owner
+    return nil if singleton && zsuper_extended?(owner_def.name)
+
+    program = BytecodeIR.for(irep)
+    argary_idx = program.source_at(idx)&.op == :ARGARY ? idx : idx - 1
+    return nil if argary_idx.negative?
+
+    argary = program.source_at(argary_idx)
+    super_insn = program.source_at(argary_idx + 1)
+    return nil unless argary&.op == :ARGARY && super_insn&.op == :SUPER
+    return nil unless argary.reg && super_insn.reg && argary.reg.to_i == super_insn.reg.to_i + 1
+
+    argc = super_insn.argc_operand
+    return nil unless argc && argc[0].nil? && argc[2]
+
+    reads = argary.argary_frame_reads
+    spec = argary.argary_spec
+    return nil unless reads && reads[0] == 1 && spec[1..3].all?(&:zero?)
+
+    m1 = spec[0]
+    enter = method_irep.enter&.enter_fields
+    return nil unless enter && enter.length >= 7 && enter[0] == m1 && enter[1..6].all?(&:zero?)
+    return nil unless (1..m1).all? { |i| @block_fallback_upvars.include?([0, i]) }
+    return nil unless zsuper_params_unwritten?(method_irep, m1)
+
+    block = if @blk_param_name && @blk_param_level == 1
+              @blk_param_name
+            elsif super_direct_call_allowed?(owner_def)
+              'mrb_nil_value()'
+            end
+    return nil unless block
+
+    { m1: m1, rest: false, m2: 0, block: block, owner: owner_def.owner, name: owner_def.name, kdict: nil,
+      args: (1..m1).map { |i| "(*#{upvar_var_name(0, i)})" } }
+  end
+
+  # BLOCK_ZSUPER: no instruction of +method_irep+ but its ENTER writes R1..R(m1), and no block in it writes one through
+  # SETUPVAR. An op whose writes are not modelled refuses.
+  def zsuper_params_unwritten?(method_irep, m1)
+    return false unless BytecodeIR.own_upvar_written_regs(method_irep).none? { |r| r.to_i.between?(1, m1) }
+
+    BytecodeIR.for(method_irep).each_source.all? do |insn, _|
+      next true if insn.op == :ENTER || BytecodeIR::Ops::LEAD_READ_ONLY.include?(insn.op)
+
+      run = BytecodeIR.written_run(insn)
+      if run
+        run.none? { |r| r.between?(1, m1) }
+      elsif BytecodeIR::WRITES_LEADING_REG_OPS.include?(insn.op) || BytecodeIR::Ops::LOADI_OPS.include?(insn.op)
+        !insn.reg || !insn.reg.to_i.between?(1, m1)
+      else
+        false
+      end
+    end
+  end
+
   # ZSUPER_LOOKUP: SUPER's half (`d_reg` is its destination), with the argument list built as OP_ARGARY builds it.
   def compile_zsuper_lookup(plan, d_reg)
+    if plan[:args]
+      # BLOCK_ZSUPER: the method's parameters, read through the block's upvar pointers.
+      vals = plan[:args].empty? ? 'nullptr' : 'bc2cpp_zsuper_argv'
+      out = +"  {\n"
+      out << "    mrb_value bc2cpp_zsuper_argv[] = {#{plan[:args].join(', ')}};\n" unless plan[:args].empty?
+      out << "    r#{d_reg} = bc2cpp_super_call(M, self, #{owner_class_ptr_expr(plan[:owner])}, " \
+             "mrb_intern_lit(M, #{plan[:name].inspect}), #{plan[:args].size}, #{vals}, #{plan[:block]});\n"
+      return out << "  }\n"
+    end
     pre = (1..plan[:m1]).map { |i| "r#{i}" }
     post = (1..plan[:m2]).map { |i| "r#{plan[:m1] + (plan[:rest] ? 1 : 0) + i}" }
     out = +"  {\n"
@@ -1269,6 +1364,8 @@ class CodeGen
     reach = block_reach_classes(owner_def.owner)
     # Class#new hands its own block to #initialize, so a block-carrying `new` is a caller of #initialize too.
     return false if name == 'initialize' && (reach.nil? || block_new_may_reach?(reach))
+    # mruby calls method_missing with the block of whatever call missed (prepare_missing), a send of any name.
+    return false if name == 'method_missing'
 
     callers = block_carrying_callers_of(name)
     # A send whose receiver class is not proven cannot be excluded, and neither

@@ -87,10 +87,22 @@ module NilableReceiverSend
     mask = exact_flow_mask(irep, idx, proof_reg)
     return nil unless mask.is_a?(Integer) && mask.anybits?(NumericFlow::NIL)
 
-    klass = return_class_of_mask(mask & ~NumericFlow::NIL)
+    klass = return_class_of_mask(mask & ~NumericFlow::NIL) || nilable_union_label(mask & ~NumericFlow::NIL)
     return nil unless klass
 
     { key: [irep.label, idx, proof_reg], klass: klass, name: insn.sym, argv: (1..n).map { |k| "r#{reg + k}" } }
+  end
+
+  # NILABLE_UNION: nil or one of a few exact program classes. The non-nil arm is compiled with the nil bit stripped,
+  # where exact_flow_user_union_plan can take the class set. BC2CPP_NILABLE_UNION=0 keeps such receivers plain.
+  def nilable_union_label(mask)
+    return nil if ENV['BC2CPP_NILABLE_UNION'] == '0' || ENV['BC2CPP_USER_RECEIVER_UNIONS'] == '0'
+
+    bits = numeric_receiver_class_bits(mask)
+    return nil unless bits && bits.size >= 2
+
+    names = bits.map { |bit| return_class_name_of_bit(bit) }
+    names.all? ? names.join(' | ') : nil
   end
 
   # GETIDX / SETIDX: an index on a receiver the flow leaves nilable, with no nil check dominating it (a
@@ -117,6 +129,8 @@ module NilableReceiverSend
   # name (a marked helper, so the site is not a dynamic send), else the dispatch itself.
   def nilable_nil_arm(insn, recv, name, argv)
     d = insn.reg
+    folded = argv.empty? && nil_native_fold(name, "r#{d}")
+    return folded if folded
     return dynamic_dispatch_line(d, recv, name, argv) unless nil_unanswerable?(name)
 
     args = argv.empty? ? '' : ", #{argv.size}, #{argv.join(', ')}"
@@ -124,7 +138,69 @@ module NilableReceiverSend
   end
 end
 
+# NIL_NATIVE_FOLD: what NilClass's own native answers for a zero-argument name, as the C expression its body
+# returns (mruby src/object.c nil_rom_entries, mruby-object-ext nil_ext_rom_entries). `to_f` needs floats.
+module NilNativeFold
+  BODIES = {
+    'nil?' => ['mrb_true_value()'],
+    'to_s' => ['mrb_str_new_frozen(M, NULL, 0)', :ascii],
+    'inspect' => ['mrb_str_new_lit_frozen(M, "nil")', :ascii],
+    'to_a' => ['mrb_ary_new(M)'],
+    'to_h' => ['mrb_hash_new(M)'],
+    'to_i' => ['mrb_fixnum_value(0)'],
+    'to_f' => ['mrb_float_value(M, 0.0)', :float]
+  }.freeze
+
+  # The statement folding `nil.name` into +dest+, or nil. Only when nil's lookup of the name ends at NilClass's own
+  # native: no Ruby definition on a nil ancestor (program, foreign or installed by name), no method_missing there, and
+  # the build's native sources register the name on NilClass (nil_native_owner?). BC2CPP_NIL_NATIVE_FOLD=0 turns it off.
+  def nil_native_fold(name, dest)
+    body, flag = BODIES[name]
+    return nil unless body && ENV['BC2CPP_NIL_NATIVE_FOLD'] != '0' && nil_native_owner?(name)
+
+    code = "#{dest} = #{body};"
+    code += " RSTR_SET_ASCII_FLAG(mrb_str_ptr(#{dest}));" if flag == :ascii
+    code = "\n#ifndef MRB_NO_FLOAT\n  #{code}\n#endif\n" if flag == :float
+    "#{code} /* NIL_NATIVE_FOLD nil.#{name} */\n"
+  end
+
+  def nil_native_owner?(name)
+    @nil_native_owner ||= {}
+    return @nil_native_owner[name] if @nil_native_owner.key?(name)
+
+    @nil_native_owner[name] = compute_nil_native_owner(name)
+  end
+
+  # nil_unanswerable_refusal's checks with one answer allowed: a native registration on NilClass itself, which nil's
+  # lookup reaches first. Any other nil-ancestor owner (or an unresolved one) refuses.
+  def compute_nil_native_owner(name)
+    world = block_core_world
+    installed = symbol_installed_names
+    return false unless world && installed && !installed.include?(name)
+    return false unless world.nil_foreign_definition_free?(name, nil_ancestor_modules.to_a)
+    return false if (world.method_missing_classes.to_a & nil_ancestor_modules.to_a).any?
+    return false if (@registry[name] || []).any? { |definition| nil_ancestor_modules.include?(definition.owner) }
+
+    on_nil = false
+    world.native_paths_spelling(name).each do |path|
+      registrations, opaque = NativeExpressionDevirt.path_registrations(path)
+      owners = registrations.fetch(name, []).map { |entry| entry[:owner]&.fetch(:class_name, nil) } + opaque.fetch(name, [])
+      return false if owners.any?(&:nil?)
+      return false if owners.any? { |owner| owner != 'NilClass' && nil_ancestor_modules.include?(owner) && owner_before_nil?(owner) }
+
+      on_nil ||= owners.include?('NilClass')
+    end
+    on_nil
+  end
+
+  # A module prepended to NilClass is looked up before it; nothing else on nil's chain is.
+  def owner_before_nil?(owner)
+    Array(@prepended_modules['NilClass']).include?(owner)
+  end
+end
+
 CodeGen.prepend(NilableReceiverSend)
+CodeGen.include(NilNativeFold)
 
 # NILABLE_RECEIVER for the index instructions (`@ui[:phase]`, `@ui[:k] = v`): GETIDX, GETIDX0 and
 # SETIDX are not sends, so the module above never sees them. An exact Array/Hash receiver takes the
