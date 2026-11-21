@@ -1,12 +1,15 @@
 #!/usr/bin/env ruby
 # Path B: prototype IR -> C+HVX emitter (docs/notes/hexagon.md, section 5).
 #
-# Handles exactly two patterns, matched structurally (no function names consulted):
-# a counted loop over three int16 pointers and an int bound whose body is a wrapping
-# add narrowed back to short (emitted as a vaddh vector main loop plus a scalar tail),
-# or a widening multiply with a constant arithmetic shift narrowed back to short
-# (emitted as vmpyhv, split through a stack temporary, narrowed with vasrwh with the
-# odd half first so lanes come back sequential, plus a scalar tail).
+# Handles these patterns, matched structurally (no function names consulted):
+# counted int16/int32 wrapping-add loops (vaddh/vaddw main loop plus scalar tail);
+# int32 max-against-zero selects (vmaxw main loop plus scalar tail);
+# int16 widening multiplies with a constant arithmetic shift, signed/signed and
+# signed/unsigned and unsigned/signed lanes (vmpyhv/vmpyhus, split through a stack
+# temporary, narrowed with vasrwh with the odd half first so lanes come back
+# sequential, plus a scalar tail);
+# uint8 dot-product reductions, u8xu8 and u8xi8 lanes (vrmpyubv_acc/vrmpybusv_acc
+# over 128-byte chunks into a 32-lane accumulator, horizontal sum, scalar tail).
 # Anything else in the module is refused, never silently dropped.
 #
 # Usage: scripts/mrb.rb scripts/pathb-hvx-emit.rb [FILE.ir | -]   C with HVX builtins on stdout
@@ -519,9 +522,11 @@ def match_dot_fn(fn)
   params = ctx[:params]
   kinds = params.map { |p| p[3] }
   u8 = ["ptr", ["const", "unsigned_char"]]
-  refuse("dot lanes must be (ptr (const unsigned_char)) x2") unless
-    kinds[0] == u8 && kinds[1] == u8
+  s8 = ["ptr", ["const", "signed_char"]]
+  refuse("dot lane A must be (ptr (const unsigned_char))") unless kinds[0] == u8
+  refuse("dot lane B must be u8 or i8") unless kinds[1] == u8 || kinds[1] == s8
   refuse("dot bound must be int") unless kinds[2] == "int"
+  mixed = kinds[1] == s8
   a, b, n = ctx[:names]
   islot = ctx[:islot]
   comp = ctx[:comp]
@@ -546,11 +551,14 @@ def match_dot_fn(fn)
     next unless resolve.call(add_l[2]) == s[2]
     prod = chase.call(v[3])
     next unless prod.is_a?(Array) && prod[0] == "wmul" && prod[1] == "int"
-    # Both factors widen an unsigned_char lane load.
+    # Both factors widen lane loads: A is always unsigned_char; B matches the
+    # declared signedness (zero- vs sign-extended by the iconv type).
     lanes = [prod[2], prod[3]].map { |o| chase.call(o) }
     next unless lanes.all? { |l| l.is_a?(Array) && l[0] == "iconv" && l[1] == "int" }
     loads = lanes.map { |l| chase.call(l[2]) }
-    next unless loads.all? { |l| l.is_a?(Array) && l[0] == "load" && l[1] == "unsigned_char" }
+    next unless loads[0].is_a?(Array) && loads[0][0] == "load" && loads[0][1] == "unsigned_char"
+    exp_b = mixed ? "signed_char" : "unsigned_char"
+    next unless loads[1].is_a?(Array) && loads[1][0] == "load" && loads[1][1] == exp_b
     idx = loads.map { |l| resolve.call(l[2]) }
     next unless idx.all? { |x| x.is_a?(Array) && x[0] == "index" && x[3] == "1" }
     next unless resolve.call(idx[0][1]) == "$#{a}" && resolve.call(idx[1][1]) == "$#{b}"
@@ -561,7 +569,7 @@ def match_dot_fn(fn)
   # Exactly one store to the accumulator per iteration (plus nothing else stored).
   stores = comp.select { |s| s.is_a?(Array) && s[0] == "store" }
   refuse("loop body stores more than the accumulator") unless stores.size == 1
-  [a, b, n]
+  [a, b, n, mixed]
 end
 
 src = if ARGV[0].nil? || ARGV[0] == "-"
@@ -591,21 +599,23 @@ begin
       rescue Refused
         begin
           dot_args = match_dot_fn(fn)
-          kind = [:dot]
+          kind = dot_args[3] ? [:dot_su] : [:dot]
         rescue Refused => e2
           fname = fn[1].is_a?(Array) ? fn[1][1] : fn[1]
           refuse("function #{fname}: #{e2.message}")
         end
       end
     end
-    if kind[0] == :dot
-      out << "__attribute__((noinline)) int hvx_vec_dot_u8(const unsigned char *a, const unsigned char *b, int n) {"
+    if kind[0] == :dot || kind[0] == :dot_su
+      acc = kind[0] == :dot ? "vrmpyubv_acc" : "vrmpybusv_acc"
+      bty = kind[0] == :dot ? "unsigned char" : "signed char"
+      out << "__attribute__((noinline)) int hvx_vec_dot_#{kind[0] == :dot ? "u8" : "su8"}(const unsigned char *a, const #{bty} *b, int n) {"
       out << "  int acc[32] __attribute__((aligned(128))) = {0};"
       out << "  int i = 0;"
       out << "  for (; i + 128 <= n; i += 128) {"
       out << "    V128 va = *(const V128 *)(a + i);"
       out << "    V128 vb = *(const V128 *)(b + i);"
-      out << "    *(V128 *)acc = __builtin_HEXAGON_V6_vrmpyubv_acc_128B(*(const V128 *)acc, va, vb);"
+      out << "    *(V128 *)acc = __builtin_HEXAGON_V6_#{acc}_128B(*(const V128 *)acc, va, vb);"
       out << "  }"
       out << "  int sum = 0;"
       out << "  for (int k = 0; k < 32; ++k) sum += acc[k];"
