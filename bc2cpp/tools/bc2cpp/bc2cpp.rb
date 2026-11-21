@@ -209,6 +209,7 @@ require_relative 'native_arms_report' if ENV['BC2CPP_NATIVE_ARMS_REPORT']
 require_relative 'provable_error_report' if ENV['BC2CPP_PROVABLE_ERROR_REPORT']
 require_relative 'element_site_report' if ENV['BC2CPP_ELEMENT_REPORT']
 require_relative 'receiver_proof_report' if ENV['BC2CPP_RECEIVER_PROOF_REPORT']
+require_relative 'owner_call_proof_note' if ENV['BC2CPP_OWNER_CALL_PROOF_NOTE']
 # Last: its compile_method and compile_insn prepends must be outermost.
 require_relative 'codegen_stack_tuples'
 require_relative 'codegen_string_eq'

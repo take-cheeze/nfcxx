@@ -258,6 +258,7 @@ ruby scripts/bc2cpp/exact_declared_return_check.rb
 ruby scripts/bc2cpp/declared_def_return_check.rb
 ruby scripts/bc2cpp/declared_optional_param_check.rb
 ruby scripts/bc2cpp/declared_keyword_param_check.rb
+ruby scripts/bc2cpp/integer_exact_check.rb
 ruby scripts/bc2cpp/super_frame_block_check.rb
 ruby scripts/bc2cpp/lambda_cells_check.rb
 ruby scripts/bc2cpp/rescue_multi_class_check.rb
