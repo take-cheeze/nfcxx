@@ -105,14 +105,16 @@ jobs:
         id: hexagon-key
         run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
 
-      # build/edg-hex-base is rebuilt from scratch on every run (setup-edg.sh wipes
-      # it), so only the compiler outputs are cached.
+      # build/edg-hex-base (with lib_linux_hexagon's predefined macros) is cached with the
+      # compiler: a cache hit skips setup-edg-hexagon.sh, the step that writes it.
       - name: Restore the Hexagon EDG (linux_hexagon target)
         id: hexagon-edg
         uses: actions/cache@v6
         with:
-          path: build/edg-hex
-          key: hexagon-edg-${{ runner.os }}-${{ steps.hexagon-key.outputs.edg }}-${{ hashFiles('scripts/setup-edg.sh', 'scripts/setup-edg-hexagon.sh', 'scripts/hexagon-predef.rb', '3rd/edg/cmake/macro-conf/support/target/linux_riscv32/base.cmakedef') }}
+          path: |
+            build/edg-hex
+            build/edg-hex-base
+          key: hexagon-edg-v2-${{ runner.os }}-${{ steps.hexagon-key.outputs.edg }}-${{ hashFiles('scripts/setup-edg.sh', 'scripts/setup-edg-hexagon.sh', 'scripts/hexagon-predef.rb', '3rd/edg/cmake/macro-conf/support/target/linux_riscv32/base.cmakedef') }}
 
       - name: Build the Hexagon EDG (linux_hexagon target)
         if: steps.hexagon-edg.outputs.cache-hit != 'true'

@@ -2685,6 +2685,8 @@ static an_expr_node_ptr ir_choose_operand(an_expr_node_ptr e)
 }
 #endif
 
+#include "nfcxx_ir_eh.h"
+
 static ir_val ir_rval(an_expr_node_ptr e)
 {
   if (e == NULL) return ir_mk_void();
@@ -2742,6 +2744,12 @@ static ir_val ir_rval(an_expr_node_ptr e)
       return ir_rval_op(e);
     case enk_result_of_overriding_function:
       return ir_roof(e);
+#if IR_EH_TABLES
+    case enk_lowered_eh_construct:
+      return ir_eh_construct(e);
+    case enk_throw:
+      return ir_eh_throw(e);
+#endif
     default:
       return ir_gap(e->type, ir_fmt("node %s", nfcxx_enk_name((an_expr_node_kind)e->kind) != NULL ? nfcxx_enk_name((an_expr_node_kind)e->kind) : "?"),
                     2, (int)e->kind);
@@ -8253,6 +8261,12 @@ static void ir_stmt(a_statement_ptr s, int d)
       ir_tmp_end(&tmps, d);
       return;
     }
+#if IR_EH_TABLES
+    case stmk_try_block:
+      ir_note(1, stmk_try_block, 1);
+      ir_eh_try(s, d);
+      return;
+#endif
     case stmk_block: {
       ir_decl_rec *mark = ir_decl_top;
       a_scope_ptr cl_scope = s->variant.block.extra_info != NULL ? ir_cl_enter(s->variant.block.extra_info->assoc_scope) : NULL;
@@ -8774,6 +8788,9 @@ static void ir_function(a_routine_ptr rout)
   /* Body. Scalar parameters are copied into slots first, so that every named variable has an address. */
   ir_buf_open(&body);
   ir_buf_begin(&body);
+#if IR_EH_TABLES
+  ir_eh_begin(rout);
+#endif
   if (IR_A64_ABI && !ir_a64_on() && ir_a64_refuse_sig(fn_type))
     ir_emit("(unsupported long double calling convention on aarch64: set NFCXX_LONG_DOUBLE_ABI=aarch64)");
   free(ir_loc_file);
@@ -8839,6 +8856,9 @@ static void ir_function(a_routine_ptr rout)
     }
   }
   ir_assigned_goto_tail(ir_is_void(ret) && !ir_ends_in_return(scope->assoc_block));
+#if IR_EH_TABLES
+  ir_eh_end_body(); /* the landing pads: (eh-pad N ...) after the body's statements */
+#endif
   ir_buf_end(&body);
 
   /* Output: header, slots, body. */
@@ -8889,6 +8909,9 @@ static void ir_function(a_routine_ptr rout)
     fputs("\n  (weak)", nf_out); /* the _ZTW wrapper / _ZTH function of a thread_local: every unit that uses the variable defines it */
   else if (rout->is_weak) fputs("\n  (weak attr)", nf_out); /* __attribute__((weak)) definition: an interface symbol, kept by pruning */
   ir_startup_markers(rout);
+#if IR_EH_TABLES
+  ir_eh_header(nf_out);
+#endif
   ir_buf_write(&ir_slot_buf, nf_out);
   if (ir_borrow) {
     int i;
