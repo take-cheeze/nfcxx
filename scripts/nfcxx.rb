@@ -6,6 +6,81 @@
 #
 #   ./nfcxx ARGS...      (runs: ruby scripts/nfcxx.rb ARGS...)
 
+# Usage (moved here from the bash driver at the B8 switch):
+# nfcxx: experimental C++ compiler driver.
+#   Path A: C++ --(EDG front end)--> C --(host C compiler)--> executable
+# Usage: nfcxx [--emit-c] [--backend=gcc|pathb] [--dialect=g++|clang] [--gnu-version=N] [--freestanding]
+# Options are flags; most also have an NFCXX_* environment variable (listed with each), the fallback for build systems and
+# scripts that cannot change a command line. When both are given the flag wins. Tool and host locations stay environment
+# variables, as CC= does: NFCXX_GCC, NFCXX_CC, NFCXX_CXX, NFCXX_COSMOCC, NFCXX_SYSTEM_PATHS, NFCXX_SYS_INCLUDES,
+# NFCXX_K1OM_ROOT, NFCXX_MACOS_SYSROOT, and the CUDA tuning variables (NFCXX_SM, NFCXX_CUDA_*, docs/notes/gpu.md).
+#   Hosted (default): host C++ headers and GNU version from g++ (see scripts/host-sys.rb host_sys_includes below).
+#              [-o out] [-std=c++NN] file.cpp...
+#   pathb (default on x86-64 Linux, unless cosmo, --emit-c, --target, -E, -M or -shared is
+#                  asked for; --backend=pathb, or NFCXX_PATH=b): EDG lowered IL -> typed IR -> QBE, no generated C. Hosted programs, and freestanding ones on x86-64 and aarch64 Linux and arm64 macOS.
+#                  A program it does not build is built with the gcc backend instead (docs/notes/pathb-default.md).
+#   gcc (default elsewhere, and for the options above): EDG's generated C through the host compiler (scripts/gcc-cc.rb)
+#   gcc:           generated C -> gcc -O2 -fwrapv -fno-strict-aliasing
+#                  Needs the Path B harness (scripts/setup-pathb.sh, PATHB_CPFE/PATHB_BASE); docs/notes/pathb-hosted.md.
+#   --dialect:     EDG front-end mode (default g++; NFCXX_DIALECT overrides the default)
+#   --ir-opt=LIST (NFCXX_IR_OPT): the Path B IR passes (docs/notes/pathb-ir-passes.md), a comma-separated list or none. Off by
+#                  default for host code; a .cu file's device code runs inline,sroa unless it is set (--ir-opt=off turns them off).
+#   --eh-unwind (NFCXX_EH_UNWIND=1): a throw runs the cleanups of the frames it unwinds in the system unwinder (gcc and Path B
+#                  backends; docs/notes/eh-shim.md). --no-eh-unwind undoes it. --no-eh-shim (NFCXX_EHSHIM=0) links without the EH shim.
+#   --instantiate=used|auto (NFCXX_INSTANTIATE): templates are instantiated in each unit that uses them (default) or by EDG's
+#                  prelinker at link time (docs/notes/cxx-driver.md).
+#   --promote-slots=on|off, --unroll=on|off, --struct-slots=on|off (NFCXX_PROMOTE_SLOTS, NFCXX_UNROLL, NFCXX_STRUCT_SLOTS = 0|1):
+#                  the optimizations of a .cu file's device code (docs/notes/gpu.md); on by default.
+#   --pathb-c=gcc (NFCXX_PATHB_C=gcc): with Path B, the .c inputs go through gcc-cc instead of Path B's C front end.
+#   --gnu-version: GCC version the g++ front end emulates, e.g. 130000 (EDG default when unset)
+#   -fsanitize=undefined|CHECK[,CHECK...]: the undefined behavior sanitizer (docs/notes/ubsan.md). Implies Path B, whose IR has the
+#                  checks; a failing check prints "file:line: runtime error: ..." and aborts. -fno-sanitize=all turns it off.
+#   file.cpp2:     Cpp2 source, experimental: cppfront (build/cppfront, scripts/setup-cppfront.sh) translates it to C++ first.
+#                  docs/notes/cpp2.md.
+#   --trace=FILE: write a Chrome trace-event JSON file (open in ui.perfetto.dev); NFCXX_TRACE=FILE too.
+#   --time-log=FILE (NFCXX_TIME_LOG=FILE): appends one line per stage, "SECONDS<Tab>CATEGORY<Tab>STAGE<Tab>SOURCE", to FILE; the compiles
+#                  of a parallel build can share it (sort -rn FILE ranks them). A .cu file's stages are the rewriter's two
+#                  passes, the device front end, the PTX emitter, ptxas, the embed step and the host compile (eccp).
+#   --module-dir=DIR: where C++ module interface files (NAME.eifc) are written and read; the default is the directory of -o.
+#                  A program with `export module` or `import` is built one source at a time (docs/notes/modules.md).
+#   NFCXX_CUDA_HOST_SYMBOLS=FILE: internal (the second pass of a .cu compile, see "Kernel instances from the host
+#                  compile" below): the demangled symbols of the first pass's output, for the device rewrite.
+#   --keep-intermediates (NFCXX_KEEP_INTERMEDIATES=1): a compile and link keeps its intermediates (the .o files, <stem>.ii, <stem>.ti) in the
+#                  temporary directory the driver names on stderr, instead of removing it on exit. A -c compile keeps
+#                  <stem>.ii and <stem>.ti beside its object in any case: the link that follows reads them there.
+#   -shared [-fPIC] [-rdynamic]: build a shared object (-shared implies -fPIC); -rdynamic exports an
+#                  executable's symbols so a dlopen'd object can bind to them. See docs/notes/eval.md.
+#   --bundle-libs [--bundle-exclude=NAME,...] [--bundle-only=NAME,...]: after the link, the shared libraries the output
+#                  needs (libstdc++, libgcc_s, the program's own; never glibc) are copied into it, so it runs without them
+#                  (tools/bundle, docs/notes/bundle.md). Executables and -shared objects.
+#   --cuda-driver=auto|cudart|libcuda: a link that names libcuda (-lcuda, CMake's CUDA::cuda_driver path) reaches the
+#                  CUDA driver API through libcudart instead (default auto; scripts/wrap.rb,
+#                  docs/notes/cuda-driver.md); NFCXX_CUDA_DRIVER= for every command.
+#   -c / *.o:      separate compilation: `nfcxx -c a.cpp -o a.o`, then `nfcxx a.o b.o -o x` links objects (docs/notes/multi-tu.md).
+#   -fuse-ld=NAME (NFCXX_LD=NAME): link with that linker (mold, lld, gold, bfd; needs ld.NAME on PATH). Default: the system linker.
+#   --cache=DIR (NFCXX_CACHE=DIR): keeps each -c compile in DIR and takes it back when nothing it depends on changed (docs/notes/cxx-driver.md).
+#                  For a .cu file it keeps the device images (DIR/cu-device): an unchanged device unit skips the device
+#                  front end, the PTX emitter and ptxas; the rewriter and the host compile still run.
+#   --cache-log=FILE (NFCXX_CACHE_LOG=FILE): with --cache, appends each lookup's key inputs, its key, and hit or miss to FILE, to diff a miss against a hit.
+#   NFCXX_CACHE_REMOTE=gha: with the cache, objects are also kept in the GitHub Actions cache (scripts/nfcxx-cache-gha.rb), like sccache's GHA backend.
+#   -fsanitize=address: AddressSanitizer (heap/stack/global overflow, use-after-free, double free, leaks). Path B (the default
+#                  backend) calls libasan's checks before each access through a computed address (docs/notes/asan-plan.md), and
+#                  a program Path B does not build falls back to gcc, which instruments the code; --backend=gcc is used.
+#                  docs/notes/asan.md. -fno-sanitize=address undoes it; other -fsanitize= values are
+#                  refused (-fsanitize=undefined and its checks are the UBSan option above).
+#   -fsafe-pointers: Fil-C-style memory safety checks (docs/notes/safe-pointers.md). Implies Path B: pointer arithmetic must
+#                  stay in its object, loads and stores must be in a live object (heap, global, escaping local), and a
+#                  freed or returned-from object cannot be used; a failure prints "file:line: safety error: ..." and
+#                  aborts. -fno-safe-pointers turns it off.
+#   --freestanding: headers come only from lib/ (no EDG std headers, no hosted libc++/libstdc++),
+#                  and --gnu-version defaults to 130000. Opt-in; see docs/notes/freestanding.md.
+#   --target=NAME: with --freestanding and --emit-c only. The front end lays out the program for an EDG target (sizes,
+#                  predefined macros) instead of the build host: linux_aarch64, linux_armv7, linux_riscv64, linux_riscv32,
+#                  linux_i686, linux_k1om (Intel Knights Corner: freestanding, the k1om GCC; docs/notes/k1om.md), win64 (MinGW's macros when MinGW is installed at setup; docs/notes/freestanding.md, "Windows"), win32. The generated C is for that target, so the
+#                  host cc must not compile it: give it to a cross compiler. docs/notes/freestanding.md, "Targets".
+#   --cosmo: build with cosmocc (Cosmopolitan libc, APE output) as the C compiler. Implies --backend=gcc. cosmocc is
+#                  read from NFCXX_COSMOCC, else build/cosmocc/bin/cosmocc (scripts/setup-cosmo.sh). docs/notes/cosmo.md.
+
 require "tempfile"
 require "tmpdir"
 require "fileutils"
