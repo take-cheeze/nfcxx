@@ -57,8 +57,11 @@ qbe_target=${PATHB_QBE_TARGET:-$(host_qbe_target)}
 [ -x "$qbe" ] || { echo "pathb-qbe: no QBE at $qbe; run scripts/setup-qbe.sh" >&2; exit 2; }
 libdir=${EDG_LIB:-$root/build/edg/lib}
 # The EH shim (lib/ehshim; exceptions thrown by libstdc++.so, std::exception_ptr) is part of every hosted program the
-# driver links, so it is part of every program linked here. Empty when it cannot be built (NFCXX_EHSHIM=0 too).
-shim=$(scripts/ehshim.rb) || shim=
+# driver links, so it is part of every program linked here. Empty when it cannot be built (NFCXX_EHSHIM=0 too), and with a
+# harness that has exception tables (eh-tables beside its cpfe): those programs use libstdc++'s EH runtime, which
+# scripts/pathb-ldrt.rb's link script puts ahead of libC.a (docs/notes/pathb-zero-cost-eh.md).
+eh_tables=0; [ -f "$(dirname "$cpfe")/eh-tables" ] && eh_tables=1
+shim=; [ $eh_tables = 1 ] || shim=$(scripts/ehshim.rb) || shim=
 export PATHB_CPFE=$cpfe
 export PATHB_BASE=${PATHB_BASE:-$root/build/pathb/edg-base}
 emit=scripts/pathb-qbe-emit.rb
@@ -182,6 +185,9 @@ run_one() {
     # A `// TRAP-STDERR: text` line names a message the abort must have printed, so that a program which aborts for
     # another reason (a broken unwinder, say) is not taken for the trap it is testing.
     want=$(sed -n 's,^// TRAP-STDERR: *\(.*\),\1,p' "$f" | head -1)
+    # With exception tables (eh_tables) std::terminate is libstdc++'s, whose message is "terminate called ..." where EDG's
+    # runtime prints "terminate() called".
+    [ $eh_tables = 1 ] && [ "$want" = "terminate() called" ] && want="terminate called"
     # `// TRAP-EXIT: 132` names another fatal signal (128 + signal): __builtin_trap and ud2 are SIGILL, not SIGABRT.
     wsig=$(sed -n 's,^// TRAP-EXIT: *\([0-9][0-9]*\).*,\1,p' "$f" | head -1); wsig=${wsig:-134}
     # `// TRAP-EXIT-AARCH64: 133` replaces TRAP-EXIT on Linux aarch64 only: there an illegal instruction (ud2, __builtin_trap)

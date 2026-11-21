@@ -35,6 +35,17 @@ CXX_RUNTIME = [
   ["__rethrow", "void", [], ["newobj instance void class CxxThrow::.ctor()", "throw"]],
   ["__exception_caught", "void", [], ["ret"]],
   ["__destroy_exception_object", "void", [], ["ret"]],
+  # Zero-cost exception tables (docs/notes/pathb-zero-cost-eh.md, pathb-cil-emit.rb's eh_try): the Itanium C++ ABI calls a
+  # throw and a catch make. The thrown object's typeinfo is kept in cxx_ti (the pads' selectors compare it), the selector
+  # the pad computed in cxx_sel; the exception pointer of a pad is the object's address.
+  ["__cxa_allocate_exception", "int64", ["int64"], ["ldc.i8 1", "ldarg.0", "call int64 Prog::'calloc'(int64, int64)", "ret"]],
+  ["__cxa_throw", "void", ["int64", "int64", "int64"],
+   ["ldarg.0", "stsfld int64 Prog::'cxx_ptr'", "ldarg.1", "stsfld int64 Prog::'cxx_ti'",
+    "newobj instance void class CxxThrow::.ctor()", "throw"]],
+  ["__cxa_rethrow", "void", [], ["newobj instance void class CxxThrow::.ctor()", "throw"]],
+  ["__cxa_begin_catch", "int64", ["int64"], ["ldarg.0", "ret"]],
+  ["__cxa_end_catch", "void", [], ["ret"]],
+  ["_ZSt9terminatev", "void", [], ["ldstr \"terminate called\"", "call void [System.Runtime]System.Environment::FailFast(string)", "ret"]],
 ]
 
 SHIM_C = <<'C'
@@ -309,6 +320,8 @@ def main(args)
   lines << ".class public abstract sealed auto ansi beforefieldinit Prog extends [System.Runtime]System.Object {"
   sorted_names.each { |n| lines << "  .field public static int64 'addr_#{qname(n)}'" }
   lines << "  .field public static int64 'cxx_ptr'"
+  lines << "  .field public static int64 'cxx_ti'"
+  lines << "  .field public static int64 'cxx_sel'"
 
   # P/Invoke stubs for the functions this program calls and no unit defines (a variadic call goes through the shim).
   variadic = calls.values.any? { |s| s["variadic"] } || frags.any? { |fr| fr["variadic"] }

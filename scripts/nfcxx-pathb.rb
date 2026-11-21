@@ -947,12 +947,18 @@ class LiveFacts < Facts
     when "qbe" then File.executable?(File.join(@root, "build/qbe/qbe")) ? "1" : "0"
     when "libc-a" then File.file?(File.join(@root, "build/edg/lib/libC.a")) ? "1" : "0"
     when "pathb-ldrt" then script_output("scripts/pathb-ldrt.rb", require_success: true)
-    when "ehshim" then script_output("scripts/ehshim.rb", require_success: true)
+    # a harness with exception tables (eh-tables beside its cpfe, scripts/setup-pathb.sh) links libstdc++'s EH runtime: no shim
+    when "ehshim" then pathb_eh_tables? ? "" : script_output("scripts/ehshim.rb", require_success: true)
     when "asan-vla" then script_output("scripts/asan-vla.rb", require_success: true)
     when "safeptr-rt" then script_output("scripts/safeptr-rt.rb", require_success: false)
     when "cuda-cub" then script_output("scripts/cuda-cub.rb", require_success: true)   # the CUB archive, or no path (no line)
     else unported("#{key} is not in the live facts")
     end
+  end
+
+  def pathb_eh_tables?
+    cpfe = ENV["PATHB_CPFE"].to_s.empty? ? File.join(@root, "build/pathb/cmake/bin/cpfe") : ENV["PATHB_CPFE"]
+    File.file?(File.join(File.dirname(cpfe), "eh-tables"))
   end
 
   def script_output(script, require_success:)

@@ -27,4 +27,17 @@ if [ ! -f "$lib" ] || [ "$src" -nt "$lib" ]; then
   ar rcs "$tmp/libnfcxxld.a" "$tmp/nfcxx_ldrt.o"
   mv "$tmp/libnfcxxld.a" "$lib"
 fi
+# A harness with exception tables (eh-tables beside its cpfe): a GNU ld input script in place of the archive, which puts
+# libstdc++ and libgcc_s ahead of the libC.a every Path B link names after it (docs/notes/pathb-zero-cost-eh.md).
+cpfe=${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}
+if [ -f "$(dirname "$cpfe")/eh-tables" ] && case $cc_bin in *cosmocc*) false ;; *) true ;; esac && [ "$(uname -s)" != Darwin ]; then
+  script=$out/libnfcxxld-eh.ld
+  text="/* nfcxx: scripts/pathb-ldrt.rb, a Path B link with exception tables (docs/notes/pathb-zero-cost-eh.md) */
+INPUT ( $lib -lstdc++ -lgcc_s )"
+  if [ ! -f "$script" ] || [ "$(cat "$script")" != "$text" ]; then
+    printf '%s\n' "$text" > "$script.$$"
+    mv "$script.$$" "$script"
+  fi
+  lib=$script
+fi
 echo "$lib"

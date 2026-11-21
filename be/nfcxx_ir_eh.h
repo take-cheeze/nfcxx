@@ -348,6 +348,11 @@ static int ir_eh_cleanup(int i)
   }
   obj = a != NULL ? ir_eh_addr_f(a->handle, fl & IR_RDF_THIS_PARAM_OFFSET, 1) : ir_eh_addr_f(r->handle, fl, 1);
   if (fl & IR_RDF_INDIRECT) obj = ir_let("(ptr void)", ir_fmt("(load (ptr void) %s)", obj));
+  /* a lowered VLA's region: a new allocation whose handle is the VLA's pointer variable, without the indirect flag (EDG's
+     runtime frees it only when VLA operations are lowered); __vla_dealloc_eh takes the array's address, the variable's
+     value */
+  else if ((fl & IR_RDF_NEW_ALLOCATION) && dtor != NULL && strcmp(dtor, "__vla_dealloc_eh") == 0)
+    obj = ir_let("(ptr void)", ir_fmt("(load (ptr void) %s)", obj));
   if (fl & IR_RDF_GUARD_VAR_FOR_LOCAL_STATIC) {
     ir_emit(ir_fmt("(eval (call void &\"__cxa_guard_abort\" %s))", obj));
   } else if (!(fl & IR_RDF_NEW_ALLOCATION)) {
@@ -515,9 +520,21 @@ static void ir_eh_end_body(void)
     for (i = 0; i < nt; i++) fprintf(nf_out, "%s%d", i ? " " : "", types[i]);
     fputs(")", nf_out);
     ir_depth = 2;
-    ir_emit(ir_fmt("(store (ptr void) %s %s)", ir_eh_exc_slot(), ir_let("(ptr void)", "(call (ptr void) &\"__nfcxx_eh_ptr\")")));
-    ir_emit(ir_fmt("(store long %s %s)", ir_eh_sel_slot(), ir_let("long", "(call long &\"__nfcxx_eh_sel\")")));
-    ir_line(2, ir_fmt("(goto \"%s\")", ir_eh_node_label(ir_eh_pads[n].region, ir_eh_pads[n].frame)));
+    {
+      /* (eh-exc) and (eh-sel): the exception and the selector the personality installed in the landing pad's registers
+         (QBE's ehptr, ehsel), read first, before anything else can use those registers */
+      char *exc = ir_let("(ptr void)", "(eh-exc)");
+      char *sel = ir_let("long", "(eh-sel)");
+      ir_emit(ir_fmt("(store (ptr void) %s %s)", ir_eh_exc_slot(), exc));
+      ir_emit(ir_fmt("(store long %s %s)", ir_eh_sel_slot(), sel));
+    }
+    {
+      /* the first node of the walk: with no region (a state in a try outside every cleanup of it), the frame's */
+      unsigned long r = ir_eh_pads[n].region;
+      ir_eh_frame *f = ir_eh_pads[n].frame;
+      if (r == null_eh_region_number && f != NULL) r = f->entry_region;
+      ir_line(2, ir_fmt("(goto \"%s\")", ir_eh_node_label(r, f)));
+    }
     if (n + 1 < ir_eh_npad) fputs(")", nf_out);
   }
   /* the nodes (a list that grows only in the walks above), in the last pad's form */

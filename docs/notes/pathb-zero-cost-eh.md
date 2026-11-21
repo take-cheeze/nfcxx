@@ -1,7 +1,24 @@
 # Path B: zero-cost exception handling
 
-Status: in progress (opt-in, `PATHB_EH=tables`). The default Path B harness keeps EDG's portable EH lowering (an EH stack
-of runtime frames in thread-local storage, `setjmp`/`longjmp` for `try`, EDG's runtime in `libC.a`).
+Status: the default (`scripts/setup-pathb.sh`, `PATHB_EH=tables`). `PATHB_EH=frames` builds a harness with EDG's portable
+EH lowering instead (an EH stack of runtime frames in thread-local storage, `setjmp`/`longjmp` for `try`, EDG's runtime in
+`libC.a`). A harness says which it is: `cmake/bin/eh-tables` exists beside its cpfe in the tables mode.
+
+## Where it goes
+
+| consumer | exception tables |
+|---|---|
+| the SSA route (`scripts/pathb-ssa-build`, QBE) | landing pads and the LSDA (below) |
+| the mruby emitter (`scripts/pathb-qbe-emit.rb`, `--emitter=mruby`) | the same QBE directives, with the SSA route's state rules |
+| CIL (`scripts/pathb-cil-emit.rb`) | the body in one protected block, the pads after it (its `eh_try`); see `docs/notes/pathb-cil.md` |
+| wasm, SPIR-V, WGSL, HVX | the pads and states are dropped (nothing unwinds there); a throw is refused where it is |
+| PTX, AMDGPU | CUDA device code is compiled with `--no_exceptions`: no tables |
+| QBE's i386 target | refused (it writes no tables and no CFI) |
+
+The link: `scripts/pathb-ldrt.rb` prints a GNU ld input script in place of `libnfcxxld.a` when the harness has tables,
+`INPUT(libnfcxxld.a -lstdc++ -lgcc_s)`, so every Path B link line (which names `libC.a` after it) gets libstdc++'s C++ ABI,
+EH runtime, RTTI and `operator new` first and `libC.a` gives only the lowering's helpers. The driver and
+`tests/pathb-qbe/run.sh` link no EH shim then (the shim hands libstdc++'s throws to EDG's runtime).
 
 ## Why
 
@@ -50,7 +67,8 @@ conditional flag) before the back end runs, so a temporary's cleanup cannot be w
   (type ids from 1, 0 for `catch (...)`), and a C++14 `throw(T...)`'s allowed types.
 - `(eh-state N)`: statement; the calls after it unwind to pad N (0: none).
 - `(eh-pad N CLEANUP (TID ...) STMT ...)`: function level, after the body; the pad's catch clauses' type ids (the action
-  chain) and whether it also cleans up. Its code ends in a jump to a handler's label, `std::terminate`, or
+  chain) and whether it also cleans up. Its code begins with `(eh-exc)` and `(eh-sel)`, the exception and the selector
+  the personality installed (QBE's `ehptr`, `ehsel`), and ends in a jump to a handler's label, `std::terminate`, or
   `(eh-resume EXC)`.
 
 `throw()` and `noexcept` are both `(eh-noexcept)`: a call with no pad has no call-site entry, so an exception that
@@ -87,9 +105,15 @@ assigns without the call's location). In a function with pads GVN merges only in
 - The LSDA has one call site per call: its block's pad and the pad's action chain, no pad (the exception passes
   through), or no entry (std::terminate). It has an action table, a type table with `DW.ref` indirections and the
   specification list, as gcc's. A leaf function has no table (nothing unwinds through it).
-- Pads are dominated by the entry and reached by no jump; liveness flows from each call into its pad; `simplcfg` keeps
-  blocks with different unwind targets apart; a function with pads keeps its frame and its stack slots. Tested on
-  x86-64 ELF; the arm64 emitter marks call sites and pads too, untested; rv64 has no tables.
+- `%e =l ehptr`, `%s =l ehsel`: in a pad, the exception and the selector the personality installed (gcc's
+  `__builtin_eh_pointer` and `__builtin_eh_filter`). The abi passes move them to the top of the pad and make them copies
+  of `%rax` and `%rdx` (`x0`, `x1` on arm64). The personality is libstdc++'s `__gxx_personality_v0` itself.
+- Pads are dominated by the entry and reached by no jump; liveness flows from each call into its pad (its temporaries,
+  not the two registers); the spiller loads a pad's live-in temporaries from their slots at its entry (after the two
+  copies: no register but those survives the unwind), and a block without successors whose calls unwind to a pad keeps
+  no register for them; `simplcfg` keeps blocks with different unwind targets apart; a function with pads keeps its
+  frame and its stack slots; a call that unwinds to a pad or to std::terminate is never a tail call. Tested on x86-64
+  ELF; the arm64 emitter marks call sites and pads too (CI's arm64 Linux job runs it); rv64 has no tables.
 
 ### The EDG fork (`NFCXX_ITANIUM_EH_TYPEINFO`, set with `PATHB_EH=tables`)
 
@@ -98,13 +122,11 @@ personality matches a pointer's own `__pointer_type_info`. With the switch, a ca
 pointer type's typeinfo, a throw makes the thrown type's own typeinfo (`std::nullptr_t` has none otherwise), and the
 destructor a throw passes is the complete-object one (the subobject destructor of a class with virtual bases takes a VTT).
 
-### Runtime (`be/nfcxx_ehrt.c`)
+### Runtime
 
-`__nfcxx_personality_v0` calls libstdc++'s `__gxx_personality_v0`. QBE cannot read the registers a personality sets for
-a landing pad (gcc's `__builtin_eh_pointer`), so the wrapper keeps the exception and the selector in thread-local
-storage when it installs a pad, and the pad reads them first (`__nfcxx_eh_ptr`, `__nfcxx_eh_sel`). It is a member of
-`libnfcxxld.a`, which every Path B link names; only a program with tables references it. The program links libstdc++
-first and `libC.a` after it: `libC.a` defines its own IA-64 RTTI vtables, `__cxa_*` and `__cxa_vec_*`, which libstdc++'s
+None of Path B's own: a pad reads the exception and the selector with `(eh-exc)` and `(eh-sel)` (QBE's `ehptr`, `ehsel`),
+the personality is libstdc++'s `__gxx_personality_v0`, so an object with tables needs only libstdc++ (`g++ x.o` links
+it). The program links libstdc++ first and `libC.a` after it (`scripts/pathb-ldrt.rb`'s link script): `libC.a` defines its own IA-64 RTTI vtables, `__cxa_*` and `__cxa_vec_*`, which libstdc++'s
 personality cannot use, so libstdc++ must provide those; `libC.a` then gives only what is still undefined, the lowering's
 helpers (the VLA pool, C99 complex arithmetic: self-contained members). No EH shim either: an exception thrown by
 libstdc++ is already one of ours.
@@ -138,9 +160,11 @@ IR passes, the e-graph pass and QBE's optimizations.
   type itself for it.
 - When an exception leaves a full expression that built argument temporaries, EDG destroys them in construction order,
   not in reverse. The frames mode does the same (it is EDG's region table), so this is no change.
-- The driver (`nfcxx`, `scripts/pathb-cc.rb`) does not select the mode or link its runtime yet; `tests/pathb-eh-tables`
-  links by hand.
-- Targets: tested on x86-64 Linux only (arm64 untested, rv64 and Apple without tables).
+- Targets: tested on x86-64 Linux; QBE's arm64 emitter marks call sites and pads too (CI's arm64 Linux job runs it).
+  A macOS host builds a frames harness by default: ld64 reads no linker script, so `scripts/pathb-ldrt.rb` cannot put
+  libc++abi ahead of the `libC.a` the links name (its C++ ABI members would win), and QBE's Mach-O tables are untested.
+  QBE's rv64 writes no tables, its i386 neither (refused).
+- CIL: exact catch types only, see `docs/notes/pathb-cil.md`.
 
 ## Measured
 

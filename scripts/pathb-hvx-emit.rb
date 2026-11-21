@@ -624,8 +624,28 @@ src = if ARGV[0].nil? || ARGV[0] == "-"
       else
         File.open(ARGV[0], "rb") { |f| f.read }
       end
+# Zero-cost exception tables (docs/notes/pathb-zero-cost-eh.md): nothing unwinds on this target, so a function's landing
+# pads (eh-pad) never run and its exception states (eh-state, an inlined copy's markers) mean nothing; they are dropped,
+# with the table header (eh-types, eh-noexcept, eh-spec). A throw is still refused where it is (its __cxa_throw call).
+EH_TABLE_ITEMS = %w[eh-types eh-noexcept eh-spec eh-pad].freeze
+EH_STATE_STMTS = %w[eh-state eh-inline-begin eh-inline-end eh-state-outer].freeze
+
+def strip_eh_stmts(x)
+  return x unless x.is_a?(Array)
+
+  x.reject { |y| y.is_a?(Array) && EH_STATE_STMTS.include?(y[0]) }.map { |y| strip_eh_stmts(y) }
+end
+
+def strip_eh_tables(forms)
+  forms.map do |f|
+    next f unless f.is_a?(Array) && f[0] == "function"
+
+    strip_eh_stmts(f.reject { |p| p.is_a?(Array) && EH_TABLE_ITEMS.include?(p[0]) })
+  end
+end
+
 begin
-  forms = parse(src)
+  forms = strip_eh_tables(parse(src))
   mod = forms.find { |f| f.is_a?(Array) && f[0] == "ir-module" }
   refuse("no ir-module form") if mod.nil?
   fns = forms.select { |f| f.is_a?(Array) && f[0] == "function" }

@@ -5,6 +5,6 @@
 struct S {
   int v;
   S(int x) : v(x) {}
-  ~S() {}
+  ~S() { v = 0; }   // not empty: with exception tables an empty inline destructor is not called at all
 };
 int conditional(bool c) { return c ? S(1).v : 0; }
