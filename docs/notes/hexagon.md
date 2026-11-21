@@ -85,8 +85,10 @@ char, long long, double, pointer, short, float, function pointer, plus `size_t`,
 | `struct {long double; char}` size | **32** | **16** | **no** (`linux_hexagon` gives 16: yes) |
 | jmp_buf (EH runtime) | 36 × `long long` (288 B) | unknown: needs hexagon libC `jmp_buf` | unverified |
 
-Only the `long double` rows disagree. The `tests/hexagon/layout.sh` probe leaves `long double`
-out. The probe does discriminate: with `EDG_TARGET=linux_i686` it fails against the Hexagon clang
+Only the `long double` rows disagree. The `tests/hexagon/layout.sh` probe checks
+26 facts under the stand-in and 30 under `EDG_TARGET=linux_hexagon` (the extra 4 pin
+`long double` size/alignment and `struct {char; long double}` size/`offsetof` at 8/16).
+The probe does discriminate: with `EDG_TARGET=linux_i686` it fails against the Hexagon clang
 (EDG's i686 gives `struct {char; long long}` 12 bytes, Hexagon 16).
 
 Other generated-C differences from the default x86_64 config (diffed for `tests/cases`): `size_t` is
@@ -111,7 +113,8 @@ EDG_BUILD=$PWD/build/edg-hex EDG_BASE=$PWD/build/edg-hex-base \
   CLANG=clang-19 EDG_TARGET=linux_hexagon tests/hexagon/layout.sh
 ```
 
-Verified: `layout.sh` passes (26 facts), a `long double` case generates 8-byte layout
+Verified: `layout.sh` passes (26 facts on the stand-in, 30 on `linux_hexagon` including
+the new long-double rows), a `long double` case generates 8-byte layout
 (`sizeof(struct {long double; char})` = 16, `sizeof(long double)` = 8, matching clang Hexagon;
 the riscv32 stand-in gives 32 and 16), and the full `tests/hexagon/run.sh` suite gives the
 same results as the stand-in (33 passed including the HVX kernels, 26 skipped, same 5
@@ -300,10 +303,11 @@ Hexagon plan:
    instruction in the assembly, flatlink, run under qemu-hexagon against `// EXPECT:`,
    and pin two refusals (a scalar module, a whole runnable module).
    `tests/pathb-hvx/cases/add_i16` passes (exit 67), `cases/add_i32` passes (exit 0),
-   `cases/max_i32` passes (exit 194), `cases/dot_u8` passes (exit 212),
-   `cases/dot_su8` passes (exit 80), `cases/mul_i16` passes (exit 184),
-   `cases/mul_su_i16` passes (exit 184) and `cases/mul_us_i16` passes (exit 184),
-   equal to the host models. CRuby
+   `cases/max_i32` passes (exit 194), `cases/max_i16` passes (exit 194),
+   `cases/min_i32` passes (exit 120), `cases/min_i16` passes (exit 120),
+   `cases/dot_u8` passes (exit 212), `cases/dot_su8` passes (exit 80),
+   `cases/mul_i16` passes (exit 184), `cases/mul_su_i16` passes (exit 184) and
+   `cases/mul_us_i16` passes (exit 184), equal to the host models. CRuby
    and mruby agree byte-for-byte on the output and the refusal text. A sweep over
    every dumpable `tests/cases/*.cpp` module (61 files) refuses all of them with
    exit 3 and `refused:` on stderr: no crash, no garbage emission.
@@ -362,6 +366,13 @@ Everything needed is open source and installs from Ubuntu's archive; the Qualcom
 Run it the way CI does:
 
     CLANG=clang-19 QEMU_HEXAGON=qemu-hexagon-static tests/hexagon/run.sh
+
+The `hexagon-target` CI job builds the scratch `linux_hexagon` EDG once per EDG revision
+(cached as `build/edg-hex`; `scripts/setup-edg-hexagon.sh` is idempotent, and the
+source-tree copy is quick next to the compile) and runs the same layout + suite against it:
+
+    EDG_BUILD=$PWD/build/edg-hex EDG_BASE=$PWD/build/edg-hex-base \
+      CLANG=clang-19 QEMU_HEXAGON=qemu-hexagon-static EDG_TARGET=linux_hexagon tests/hexagon/run.sh
 
 Result: 18 passed (`constexpr_static`, `exceptions`, `float_neg_switch`, `qbe_builtins_libc`, `qbe_global_ctor`,
 `raii_templates_class`, `signed_overflow_wraps`, `struct_libc`, `templates_lambdas`, `virtual_dispatch`, and the HVX

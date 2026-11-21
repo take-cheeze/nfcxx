@@ -128,9 +128,15 @@ module RbsParamCheck
       core = t.kind == :class && t.cls == 'String' ? :string : CORE_IVAR_KINDS.key?(t.kind) && t.kind
       kind, cls = core, CORE_IVAR_KINDS.fetch(core) if !kind && core
       unless kind
-        next unless t.kind == :class && classes.include?(t.cls) && !subclassed.include?(t.cls)
+        union = union_classes(iv.type, classes, superclass_of)
+        if union && union.first.size > 1
+          cls, nilable = union
+          kind = :union
+        else
+          next unless t.kind == :class && classes.include?(t.cls) && !subclassed.include?(t.cls)
 
-        kind = :class
+          kind = :class
+        end
       end
       name = iv.name.delete_prefix('@')
       out[[iv.owner, name]] = IvarGuard.new(iv.owner, name, cls, kind, nilable, "#{iv.owner}##{iv.name}", iv.type.text)
@@ -140,7 +146,7 @@ module RbsParamCheck
   # The tables every query reads: method owners (`self_of` only for def bodies, never blocks, whose self an
   # instance_exec may change; `owner_of` also for blocks, for lexical constant lookup) and the signature of each body.
   def context(loaded, ireps, registry, superclass_of)
-    ctx = { ireps: ireps, registry: registry, subclassed: superclass_of.values.grep(String).to_set,
+    ctx = { ireps: ireps, registry: registry, subclassed: superclass_of.values.grep(String).to_set, superclass_of: superclass_of,
             classes: superclass_of.keys.to_set,
             dynamic: DynamicNames.universe(ireps), self_of: {}, method_name: {}, owner_of: {}, sig_of: {}, def_of: {},
             aliased: alias_names(ireps), parent: {} }
@@ -204,6 +210,9 @@ module RbsParamCheck
         if (core = core_kind(t))
           next [i, CORE_IVAR_KINDS.fetch(core), core, nilable]
         end
+        if (union = union_classes(type, ctx[:classes], ctx[:superclass_of])) && union.first.size > 1
+          next [i, union.first, :union, union.last]
+        end
         if nilable
           # A nilable program class gives no hint, so no annotation names it: take the class itself when it is a class
           # the program defines and nothing subclasses (the guard is the exact-class test).
@@ -254,6 +263,56 @@ module RbsParamCheck
 
       [pos, cls, kind, nilable, k]
     end
+  end
+
+  # DECLARED_UNION: a union of program classes (`A | B`, `nil | A | B`) or a program class with subclasses (`A`, `A?`)
+  # is checked as the exact classes it stands for: [classes, nilable], a member with subclasses standing for its
+  # whole program subtree. Callers take only two or more classes: one is the :class kind's own rule. Kept only where
+  # the closed world bounds every listed class's subclasses by the list (union_closed?). BC2CPP_DECLARED_UNION=0: none.
+  DECLARED_UNION_MAX = 8
+  UNION_CORE_NAMES = %w[BasicObject Object Module Class Kernel Comparable Enumerable Integer Float Numeric Symbol String
+                        Array Hash Range Proc NilClass TrueClass FalseClass Exception].to_set.freeze
+
+  def union_classes(type, classes, superclass_of)
+    return nil if ENV['BC2CPP_DECLARED_UNION'] == '0' || superclass_of.nil?
+
+    values = type.value_classes
+    return nil unless values && !values.empty?
+
+    nilable = values.include?(:NilClass)
+    members = values.reject { |v| v == :NilClass }.map(&:to_s)
+    return nil if members.empty?
+    return nil unless members.all? { |m| classes.include?(m) && !UNION_CORE_NAMES.include?(m) }
+
+    children = Hash.new { |h, k| h[k] = [] }
+    superclass_of.each { |k, sup| children[sup] << k if sup.is_a?(String) }
+    listed = Set.new
+    work = members.dup
+    until work.empty?
+      k = work.pop
+      work.concat(children[k]) if listed.add?(k)
+    end
+    return nil if listed.size > DECLARED_UNION_MAX
+
+    [listed.to_a.sort.freeze, nilable]
+  end
+
+  # DECLARED_UNION: a union guard is kept only where the closed world sees every subclass of each listed class and
+  # lists it too, so "A or a subclass" is exactly the listed classes. Without a closed world none is kept.
+  def union_closed?(classes, closed_world)
+    return false unless closed_world
+
+    classes.all? { |k| (subs = closed_world.known_subclasses(k)) && subs.all? { |sub| classes.include?(sub) } }
+  end
+
+  def closed_union_params(guards, closed_world)
+    guards.transform_values do |list|
+      list.reject { |_pos, cls, _key, _text, kind, *| kind == :union && !union_closed?(cls, closed_world) }
+    end.reject { |_label, list| list.empty? }
+  end
+
+  def closed_union_ivars(guards, closed_world)
+    guards.reject { |_key, entry| entry.kind == :union && !union_closed?(entry.cls, closed_world) }
   end
 
   # :array, :hash or :string for an `Array` / `Array[T]` / `Hash` / `Hash[K, V]` / `String` type (elements unchecked).

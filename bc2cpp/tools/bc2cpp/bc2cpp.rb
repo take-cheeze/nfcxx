@@ -660,7 +660,7 @@ BC2CPP_MAIN = lambda do
                                                               outside_names: param_outside, constructor_entries: param_constructors,
                                                               superclass_of: superclass_of, display_root: sig_root, applied: sig_applied,
                                                               declared_returns: CodeGen.declared_returns)
-    CodeGen.declared_params = DeclaredReturns.guard? ? param_guards : {}
+    CodeGen.declared_params = DeclaredReturns.guard? ? RbsParamCheck.closed_union_params(param_guards, closed_world) : {}
     # DECLARED_KEYWORD_PARAM: a typed keyword is checked where its KARG writes it.
     CodeGen.declared_keywords = if DeclaredReturns.guard?
                                   RbsParamCheck.keyword_guards(sig_loaded, ireps, registry, superclass_of,
@@ -668,7 +668,10 @@ BC2CPP_MAIN = lambda do
                                 else {}
                                 end
     # DECLARED_IVAR_GUARD: an `@x: T` declaration of Integer, Float, Symbol or a program class is checked on every store.
-    CodeGen.declared_ivars = DeclaredReturns.guard? ? RbsParamCheck.ivar_guards(sig_loaded, superclass_of) : {}
+    CodeGen.declared_ivars = if DeclaredReturns.guard?
+                               RbsParamCheck.closed_union_ivars(RbsParamCheck.ivar_guards(sig_loaded, superclass_of), closed_world)
+                             else {}
+                             end
     CodeGen.declared_ivar_elements = DeclaredReturns.guard? ? CodeGen.declared_element_table(sig_applied) : {}
     CodeGen.declared_arg_elements = DeclaredReturns.guard? ? CodeGen.declared_arg_element_table(sig_applied) : {}
     sig_applied.diagnostics.concat(param_diags)
