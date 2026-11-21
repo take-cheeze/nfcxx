@@ -622,6 +622,15 @@ def build_registry(ireps, root_label)
         end
       when :SENDB
         loop_sites << [label, idx, namespace, default_visibility] if LoopInstallers.candidate?(irep, idx, ireps)
+        # CORE_LOOP_ALIASES: the loop replaces the owner's methods of those names; the definitions it replaces (the walk
+        # has seen every earlier one) are not what the interpreter ends up with.
+        if namespace && !namespace.start_with?('<') && CoreDefs.core_source?(irep.file) &&
+           (looped = CoreDefs.loop_alias_names(irep, idx, ireps))
+          looped.each do |name|
+            replaced = registry.fetch(name, []).select { |d| d.owner == namespace && d.irep }.map(&:irep)
+            alias_sites << { owner: namespace, new: name, old: nil, irep: label, defined: false, replaces: replaced }
+          end
+        end
         # STRUCT_MEMBERS_ANALYSIS for the block-taking form; additive only.
         found = detect_struct_new_members(irep, idx, insn, namespace)
         struct_member_lists[found[0]] = found[1] if found

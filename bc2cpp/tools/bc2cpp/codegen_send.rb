@@ -1396,6 +1396,11 @@ class CodeGen
       target = nil unless @other_owners&.include?(target.owner) || module_function_emitted
     end
 
+    # INSTALLED_NAME_DEVIRT_GUARD: a name the program aliases or defines outside the registry (an alias in mruby's own Ruby
+    # included: mruby-onig-regexp replaces String#gsub) may no longer run the registry body, whatever the receiver's
+    # class; a class guard (TYPED) or an exactness proof (EXACT_TYPED) cannot see that.
+    target = nil if target && installed_name_blocks_devirt?(name)
+
     # EXPLICIT_RECEIVER_VISIBILITY: a direct `_impl` call would run a private or protected method that OP_SEND raises for;
     # only a public def whose visibility nothing in the program changes is bound, the rest keeps the checked dispatch.
     unless self_implicit || explicit_call_visible?(name, target)

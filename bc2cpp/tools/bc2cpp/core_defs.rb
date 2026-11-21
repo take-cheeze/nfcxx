@@ -41,6 +41,52 @@ module CoreDefs
     out
   end
 
+  # CORE_LOOP_ALIASES: the names `%i[sub gsub].each { |v| alias_method v, :"onig_regexp_#{v}" }` installs, when the SENDB at
+  # +idx+ of +irep+ is such a loop: `each` over an Array literal of Symbols, whose block aliases to a name its parameter
+  # holds (the alias_method's first argument is a MOVE from R1). nil for any other send. The aliases replace whatever
+  # method of those names the owner has, which a walk-order registry entry would otherwise stand for.
+  def loop_alias_names(irep, idx, ireps)
+    program = BytecodeIR.for(irep)
+    send = program.source_at(idx)
+    return nil unless send&.op == :SENDB && send.sym == 'each' && send.argc.to_i.zero? && idx >= 2
+
+    block = program.source_at(idx - 1)
+    literal = program.container_literal(idx - 2)
+    return nil unless block&.op == :BLOCK && literal && literal.kind == :array && literal.base == send.reg.to_i
+
+    names = (0...literal.count).map do |k|
+      load = program.source_at(idx - 2 - literal.count + k)
+      return nil unless load && load.reg.to_i == literal.base + k
+
+      sym = case load.op
+            when :LOADSYM then load.sym
+            when :SYMBOL then load.pool_index && irep.pool&.[](load.pool_index.to_i)
+            end
+      return nil unless sym.is_a?(String)
+
+      sym
+    end
+    child = block.block_index && irep.reps&.[](block.block_index.to_i)
+    body = child && ireps[child]
+    return nil unless body && loop_param_alias?(body)
+
+    names
+  end
+
+  # Does the block +body+ send alias_method with its first parameter (R1) as the new name?
+  def loop_param_alias?(body)
+    program = BytecodeIR.for(body)
+    found = false
+    program.each_source do |insn, i|
+      next unless insn.op == :SSEND && insn.sym == 'alias_method' && insn.plain_fixed_argc? && insn.argc.to_i == 2
+
+      arg = insn.reg.to_i + 1
+      writer = (0...i).reverse_each.lazy.map { |j| program.source_at(j) }.find { |w| w && w.reg.to_i == arg }
+      found = true if writer && writer.op == :MOVE && writer.regs.map(&:to_i) == [arg, 1]
+    end
+    found
+  end
+
   # Irep labels of every def instruction that a conditional forward jump can skip
   # (`def x ... end unless method_defined?(:x)`, a def in an `if` arm). The
   # registry sees the def, but at run time it may not happen, and a registration

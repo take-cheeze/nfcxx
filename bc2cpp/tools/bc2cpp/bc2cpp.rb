@@ -299,6 +299,8 @@ BC2CPP_MAIN = lambda do
   # emitted. Dropped before anything reads the registry.
   CodeGen.module_names = declared_modules
   core_shadowed = CoreDefs.shadowed_labels(registry, ireps)
+  # CORE_LOOP_ALIASES: a core alias loop (mruby-onig-regexp's String#gsub) replaces the definitions before it.
+  alias_sites.each { |site| core_shadowed.merge(site[:replaces]) if site[:replaces] }
   CodeGen.shadowed_labels = core_shadowed
   core_shadowed_pairs = registry.values.flatten.select { |d| d.irep && core_shadowed.include?(d.irep) }
                                 .to_set { |d| [d.owner, d.name] }
