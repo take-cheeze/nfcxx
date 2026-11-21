@@ -59,6 +59,8 @@ RUBY
 
 OWNERS = %w[FfTable].freeze
 FROZEN_TEST = 'mrb_frozen_p(mrb_obj_ptr(self))'
+# EMBED_STORE_OUTLINED: the frozen test lives in bc2cpp_embed_store; bc2cpp_embed_store_unfrozen has none.
+def frozen_test?(code) = code.include?(FROZEN_TEST) || code.include?('bc2cpp_embed_store(M,')
 
 def generate(src)
   Dir.mktmpdir { |dir| Bc2cppFixtureRuntime.generate(src, dir, core: true, only_owners: OWNERS) }
@@ -74,16 +76,16 @@ puts '-- generated code'
 code, baseline_err = Bc2cppFixtureRuntime.generate(SRC, baseline_dir, core: true, only_owners: OWNERS)
 bump = code_of(code, 'FfTable_bump')
 check.call('the store compiles to the embedded field', bump.include?('(FfTable_ivars*)DATA_PTR(self))->ivar_count'))
-check.call('a freeze of a core iterator result on a literal leaves no frozen check', !code.include?(FROZEN_TEST))
+check.call('a freeze of a core iterator result on a literal leaves no frozen check', !frozen_test?(code))
 check.call('no #error in the generated code', !code.include?('#error'))
 sealed, = generate(FROZEN_USER)
-check.call('a freeze of a user object keeps the frozen check', code_of(sealed, 'FfTable_bump').include?(FROZEN_TEST))
+check.call('a freeze of a user object keeps the frozen check', frozen_test?(code_of(sealed, 'FfTable_bump')))
 own, = generate(OWN_MAP)
-check.call('a user-defined map keeps the frozen check', code_of(own, 'FfTable_bump').include?(FROZEN_TEST))
+check.call('a user-defined map keeps the frozen check', frozen_test?(code_of(own, 'FfTable_bump')))
 ENV['BC2CPP_FRESH_FREEZE'] = '0'
 off, = generate(SRC)
 ENV.delete('BC2CPP_FRESH_FREEZE')
-check.call('BC2CPP_FRESH_FREEZE=0 keeps the frozen check', code_of(off, 'FfTable_bump').include?(FROZEN_TEST))
+check.call('BC2CPP_FRESH_FREEZE=0 keeps the frozen check', frozen_test?(code_of(off, 'FfTable_bump')))
 
 DRIVER = <<~'RUBY'
   t = FfTable.new(6)

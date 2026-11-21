@@ -264,6 +264,10 @@ class CodeGen
       frozen = embedded_store_frozen_check(recv)
       if type == :value
         field = "((#{struct_name(klass)}*)DATA_PTR(#{recv}))->#{ivar_field_name(ivar)}"
+        if ENV['BC2CPP_EMBED_STORE_OUTLINED'] != '0'
+          helper = frozen ? 'bc2cpp_embed_store' : 'bc2cpp_embed_store_unfrozen'
+          return "#{indent}#{helper}(M, #{recv}, &#{field}, #{src});#{tail}"
+        end
         # GC_KEEP_OVERWRITTEN: the value this store replaces may be held only by a register of the caller.
         return "#{"#{indent}#{frozen}\n" if frozen}#{indent}bc2cpp_keep_old(M, #{field});\n#{indent}#{field} = #{src};\n" \
                "#{indent}mrb_field_write_barrier_value(M, (struct RBasic*)mrb_obj_ptr(#{recv}), #{src});#{tail}"
