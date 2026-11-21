@@ -1540,6 +1540,13 @@ BC2CPP_MAIN = lambda do
   # OTHER_OWNERS: classes another gem's run compiles and exposes (with
   # OTHER_DECLS_HEADER); see compile_send.
   other_owners = ENV['OTHER_OWNERS']&.split(',')
+  # Set before codegen: LITERAL_TABLES (codegen_literal_tables.rb) spells its Symbols with the same macros.
+  # PRESYM_SYMBOL (symbol_cache.rb): the names mruby's presym table has, as the build's id.h enum spells them.
+  if (presym_header = ENV['BC2CPP_PRESYM_HEADER']) && File.file?(presym_header)
+    SymbolCache.presym_names = File.read(presym_header).scan(/^\s*MRB_SYM__([A-Za-z_]\w*) = \d+,?$/).flatten.to_set
+  end
+  # PRESYM_ALL (symbol_cache.rb): a real gem build's presym scan reads this output. BC2CPP_PRESYM_ALL=0 keeps the table.
+  SymbolCache.presym_all = ENV['BC2CPP_PRESYM_ALL'] != '0' && BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol }
   compiled = profile_call.call('CodeGen.compile_all') do
     gen.compile_all(only_owners: only_owners, other_owners: other_owners, live_labels: main_reach&.labels)
   end
@@ -1920,6 +1927,17 @@ BC2CPP_MAIN = lambda do
       bc2cpp_keep_old(M, mrb_iv_get(M, obj, id));
     #endif
       mrb_iv_set(M, obj, id, v);
+    }
+    // EMBED_STORE_OUTLINED (codegen_ivar_poly.rb ivar_set_code): an embedded mrb_value slot's store, the same frozen
+    // test, keep of the old value, store and write barrier as the inline form, in one out-of-line copy.
+    [[maybe_unused, gnu::noinline]] static void bc2cpp_embed_store_unfrozen(mrb_state* M, mrb_value obj, mrb_value* slot, mrb_value v) {
+      bc2cpp_keep_old(M, *slot);
+      *slot = v;
+      mrb_field_write_barrier_value(M, (struct RBasic*)mrb_obj_ptr(obj), v);
+    }
+    [[maybe_unused, gnu::noinline]] static void bc2cpp_embed_store(mrb_state* M, mrb_value obj, mrb_value* slot, mrb_value v) {
+      if (mrb_unlikely(mrb_frozen_p(mrb_obj_ptr(obj)))) mrb_check_frozen(M, mrb_obj_ptr(obj));
+      bc2cpp_embed_store_unfrozen(M, obj, slot, v);
     }
     static inline void bc2cpp_gv_set(mrb_state* M, mrb_sym id, mrb_value v) {
     #ifndef BC2CPP_NO_GC_KEEP_OVERWRITTEN
@@ -3027,12 +3045,6 @@ BC2CPP_MAIN = lambda do
   end
   # SYMBOL_CACHE: rewrite every function first, so the table is complete before
   # it is printed ahead of the code that uses it.
-  # PRESYM_SYMBOL (symbol_cache.rb): the names mruby's presym table has, as the build's id.h enum spells them.
-  if (presym_header = ENV['BC2CPP_PRESYM_HEADER']) && File.file?(presym_header)
-    SymbolCache.presym_names = File.read(presym_header).scan(/^\s*MRB_SYM__([A-Za-z_]\w*) = \d+,?$/).flatten.to_set
-  end
-  # PRESYM_ALL (symbol_cache.rb): a real gem build's presym scan reads this output. BC2CPP_PRESYM_ALL=0 keeps the table.
-  SymbolCache.presym_all = ENV['BC2CPP_PRESYM_ALL'] != '0' && BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol }
   symbol_table = SymbolCache::Table.new
   print gen.emit_structs
   warn InitializerTables::PREFIX + JSON.generate(gen.initializer_table_evidence(compiled, InitializerTables.direct_candidate_keys(compiled, ireps, registry)))

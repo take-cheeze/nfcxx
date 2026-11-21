@@ -236,10 +236,16 @@ build = ENV['CC_GENERATED_ONLY'] == '1' ? nil : Bc2cppFixtureRuntime.full_or_bui
 
 Dir.mktmpdir('bc2cpp-gc-root') do |dir|
   code, err = Bc2cppFixtureRuntime.generate(SOURCE, dir, core: true, only_owners: OWNERS)
-  suite.check('an embedded ivar store roots the value it replaces', code.include?('bc2cpp_keep_old(M, ((GcRoot_ivars*)'))
+  # EMBED_STORE_OUTLINED: bc2cpp_embed_store keeps the old slot value itself (bc2cpp.rb).
+  embedded_store = lambda do |field|
+    code.include?("bc2cpp_keep_old(M, ((GcRoot_ivars*)DATA_PTR(self))->#{field});") ||
+      code.match?(/bc2cpp_embed_store(?:_unfrozen)?\(M, self, &\(\(GcRoot_ivars\*\)DATA_PTR\(self\)\)->#{field}, /)
+  end
+  suite.check('an embedded ivar store roots the value it replaces',
+              code.include?('bc2cpp_keep_old(M, ((GcRoot_ivars*)') || code.include?('bc2cpp_embed_store'))
   suite.check('the global, element and attr_writer stores root theirs',
               code.include?('bc2cpp_gv_set(M,') && code.include?('bc2cpp_keep_old(M, ARY_PTR(a)[n]);') &&
-              code.include?('bc2cpp_keep_old(M, ((GcRoot_ivars*)DATA_PTR(self))->ivar_cur);'))
+              embedded_store.call('ivar_cur'))
   suite.check('a Hash store looks the old value up first', code.include?('bc2cpp_hash_aset(M,'))
   suite.check('an element read is rooted where a by-name call may unlink it',
               code.match?(/bc2cpp_ary_entry\(M, r\d+, 0\);.*?bc2cpp_keep\(M, r\d+\);/m))

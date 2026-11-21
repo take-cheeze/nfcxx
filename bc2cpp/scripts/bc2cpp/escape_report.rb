@@ -43,8 +43,13 @@ def lambdas_and_blocks(sites)
 
   blocks = sites.select { |r| r[4] == 'BLOCK' }
   rproc = blocks.select { |r| r[9] == 'rproc' }
-  puts "-- blocks: #{blocks.size} sites; #{rproc.size} build an RProc (BLOCK_FALLBACK); the analysis confines " \
+  puts "-- blocks: #{blocks.size} sites; #{rproc.size} build a heap RProc each time (BLOCK_FALLBACK); the analysis confines " \
        "#{rproc.count { |r| r[6] == 'confined' }} of those and #{blocks.count { |r| r[6] == 'confined' }} of all"
+  %w[lazy stack].each do |today|
+    list = blocks.select { |r| r[9] == today }
+    puts "   #{today}: #{list.size} sites (frame-local#{today == 'lazy' ? ', a heap copy on a by-name branch' : ' only'}), " \
+         "confined: #{list.count { |r| r[6] == 'confined' }}"
+  end
   puts '   by callee (RProc sites / confined of them / all sites):'
   blocks.group_by { |r| r[5] }.sort_by { |_, v| -v.size }.first(25).each do |callee, list|
     r = list.select { |x| x[9] == 'rproc' }

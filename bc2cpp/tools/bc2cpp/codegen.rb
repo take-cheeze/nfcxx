@@ -519,8 +519,10 @@ class CodeGen
   def embed_family_foldable?(root, members)
     family = [root, *members]
     return false if family.any? { |owner| NATIVE_DATA_OWNERS.include?(owner) }
-    # Engine worlds keep one layout per chain for now: their registrations wire each owner separately.
-    return false if self.class.engine_registrations
+    # ENGINE_EMBED_FAMILIES: an engine world registers every owner, and switches each one's instance type, on its
+    # own (bc2cpp_set_instance_tts walks subclasses), so a folded family needs no wiring of its own.
+    # BC2CPP_ENGINE_EMBED_FAMILIES=0 keeps engine worlds at one layout per chain.
+    return false if self.class.engine_registrations && ENV['BC2CPP_ENGINE_EMBED_FAMILIES'] == '0'
 
     @superclass_of.each_key.all? do |klass|
       next true unless strict_subclass?(klass, root)
@@ -675,6 +677,29 @@ class CodeGen
     saved.each { |ivar, value| instance_variable_set(ivar, value) unless ivar == :@clean_cache }
   end
 
+  SUPER_LEADING_OPS = %i[ENTER LINE NOP MOVE].freeze
+  # SUPER_ARGUMENT_PROLOGUE: what mrbc emits ahead of the first statement for optional and keyword parameters with
+  # literal defaults (the ENTER jump table, KEY_P/KARG/KEYEND, a `**` Hash) and for the arguments of the `super`
+  # itself (`super map.parent`). No op here reads R0 (prologue_insn_self_free?) or makes a closure, so code run
+  # before the storage exists never has `self`: a call made there runs on another object. Family roots only.
+  # The LOADI forms are spelled out (BytecodeIR::Ops::LOADI_OPS): checks load this file without bytecode_ir.
+  SUPER_PROLOGUE_OPS = (SUPER_LEADING_OPS + %i[KEY_P KARG KEYEND LOADTRUE LOADFALSE LOADNIL LOADSYM LOADL HASH
+                                              SEND SEND0 JMP JMPIF JMPNOT JMPNIL
+                                              LOADI8 LOADINEG LOADI__1 LOADI_0 LOADI_1 LOADI_2 LOADI_3 LOADI_4
+                                              LOADI_5 LOADI_6 LOADI_7 LOADI16 LOADI32]).freeze
+
+  # A prologue op of SUPER_PROLOGUE_OPS whose register operands leave out R0 (`self`), so neither a MOVE copies
+  # self for a later SEND nor a SEND targets it.
+  def prologue_insn_self_free?(insn)
+    insn.regs.none?(&:zero?)
+  end
+
+  # A call in the prologue runs Ruby while `self` has no storage yet; only ObjectSpace.each_object could hand it out
+  # (ivar_slot_assured.rb slot_opening_call has the same test).
+  def prologue_calls_cannot_reach_self?
+    @closed_world && !(slot_name_definable?('each_object') && slot_world_names?('each_object'))
+  end
+
   def initializer_starts_with_super?(definition, bare: false)
     return false unless definition.irep
 
@@ -684,9 +709,30 @@ class CodeGen
     # A bare `super` passes the method's own arguments: ARGARY (which only gathers them) builds the array SUPER's
     # `n=*` reads from the next register (`ARGARY R4`, `SUPER R3 n=*`). Only EMBED_FAMILY roots accept it yet, so
     # the single-layout chains of engine worlds embed exactly as before.
-    leading = BytecodeIR.for(irep).each_source.lazy.map { |insn, _| insn }
-                        .reject { |insn| %i[ENTER LINE NOP MOVE].include?(insn.op) }.first(2)
+    extended = bare && ENV['BC2CPP_SUPER_ARGUMENT_PROLOGUE'] != '0'
+    jumps = []
+    leading = []
+    BytecodeIR.for(irep).each_source do |insn, _|
+      if leading.empty? && extended
+        if SUPER_PROLOGUE_OPS.include?(insn.op)
+          return false unless prologue_insn_self_free?(insn)
+          return false if %i[SEND SEND0].include?(insn.op) && !prologue_calls_cannot_reach_self?
+
+          jumps << insn if BytecodeIR::BRANCH_OPS.include?(insn.op)
+          next
+        end
+      elsif SUPER_LEADING_OPS.include?(insn.op)
+        next
+      end
+
+      leading << insn
+      break if leading.size == 2
+    end
     first = leading.first
+    # SUPER_ARGUMENT_PROLOGUE: a prologue branch only skips forward, to an address up to the first statement, so every
+    # path through the self-free prologue reaches it.
+    forward = jumps.all? { |j| first && j.branch_target && j.branch_target > j.addr && j.branch_target <= first.addr }
+    return false unless forward
     first = leading[1] if bare && first&.op == :ARGARY && leading[1]&.op == :SUPER && leading[1].reg.to_i + 1 == first.reg.to_i
     first&.op == :SUPER && super_reaches_superclass?(definition) &&
       Array(@prepended_modules[definition.owner]).empty?
