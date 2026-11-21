@@ -353,7 +353,9 @@ class CodeGen
     site = exact_core_site_for(recv, name)
     if site
       exact = entries.find { |entry| entry[:owner][:class_name] == site[:klass] }
-      return fallback unless exact
+      # CORE_EXACT_DIRECT: a class with no registration of its own reaches a compiled core body (Array#include? is
+      # Enumerable's), the direct call the bare send would have become.
+      return core_exact_direct_line(d, recv, name, argv, dynamic_dispatch_line(d, recv, name, argv)) || fallback unless exact
 
       expression = exact[:expression].gsub('recv', recv)
       expression = expression.gsub('BC2CPP_ARG0', argv.fetch(0)) if exact[:arity] == 1

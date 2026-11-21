@@ -31,7 +31,26 @@ class CodeGen
     state = states && states[creation]
     return NumericFlow::OTHER unless state
 
-    state[index] | (@rc_writes.dig(ancestor.label, index) || 0)
+    state[index] | captured_later_mask(ancestor, creation, states, index)
+  end
+
+  # CAPTURED_LATER_WRITES: what +index+ can be given while the frame runs on after the closure exists. Both the
+  # frame's writes of it (the flow's write log) and its state at every instruction reachable from the creation
+  # (handlers included) cover every such value, so their intersection does too: a write only on paths before the
+  # creation (an optional keyword's KEY_P flag in the register its value then takes) drops out.
+  # BC2CPP_CAPTURED_LATER_WRITES=0 keeps the write log alone.
+  def captured_later_mask(ancestor, creation, states, index)
+    written = @rc_writes.dig(ancestor.label, index) || 0
+    return written if ENV['BC2CPP_CAPTURED_LATER_WRITES'] == '0'
+
+    @captured_later_reach ||= {}
+    reach = @captured_later_reach[[ancestor.label, creation]] ||=
+      BytecodeIR.for(ancestor).reachable_from(creation, include_handlers: true).to_a
+    later = reach.reduce(0) do |mask, j|
+      at = states[j]
+      at ? mask | at[index].to_i : mask
+    end
+    written & later
   end
 
   # [defining irep, index of the BLOCK/LAMBDA that created the closure on the path], or nil.
