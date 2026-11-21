@@ -215,6 +215,11 @@ only_param = plain_gen.declared_return_guard_wrap('L9', body.call('Foo_x_impl', 
 check.call('a method with a parameter class and no return declaration is wrapped for the parameter only',
            only_param.include?('Foo_x_impl_unguarded') && only_param.include?('bc2cpp_declared_param_violation(M, n, "Foo#x", 1, "Bar");') &&
              !only_param.include?('bc2cpp_declared_return_violation'))
+CodeGen.declared_params = { 'L9' => [[0, %w[Bar Baz], 'Foo#x', 'Bar | Baz', :union, true]] }
+union_param = plain_gen.declared_return_guard_wrap('L9', body.call('Foo_x_impl', 'mrb_value'), 'Foo_x_impl')
+check.call('DECLARED_UNION: a union parameter is one exact test per class, nil first when the union has it',
+           union_param.match?(/if \(mrb_unlikely\(!\(mrb_nil_p\(n\) \|\| \(bc2cpp_class_is\(M, n, bc2cpp_owner_class_\d+\(M\)\) \|\| bc2cpp_class_is\(M, n, bc2cpp_owner_class_\d+\(M\)\)\)\)\)\) /) &&
+             union_param.include?('bc2cpp_declared_param_violation(M, n, "Foo#x", 1, "Bar | Baz");'))
 CodeGen.declared_params = { 'L8' => [[0, 'Integer', 'Foo#y', 'Integer', :integer, false]] }
 unboxed = plain_gen.declared_return_guard_wrap('L8', body.call('Foo_y_impl'), 'Foo_y_impl')
 check.call('an unboxed (mrb_int) specialization is not re-checked: its kind is in its C++ type',

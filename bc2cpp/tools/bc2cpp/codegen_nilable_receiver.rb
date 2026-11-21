@@ -87,10 +87,22 @@ module NilableReceiverSend
     mask = exact_flow_mask(irep, idx, proof_reg)
     return nil unless mask.is_a?(Integer) && mask.anybits?(NumericFlow::NIL)
 
-    klass = return_class_of_mask(mask & ~NumericFlow::NIL)
+    klass = return_class_of_mask(mask & ~NumericFlow::NIL) || nilable_union_label(mask & ~NumericFlow::NIL)
     return nil unless klass
 
     { key: [irep.label, idx, proof_reg], klass: klass, name: insn.sym, argv: (1..n).map { |k| "r#{reg + k}" } }
+  end
+
+  # NILABLE_UNION: nil or one of a few exact program classes. The non-nil arm is compiled with the nil bit stripped,
+  # where exact_flow_user_union_plan can take the class set. BC2CPP_NILABLE_UNION=0 keeps such receivers plain.
+  def nilable_union_label(mask)
+    return nil if ENV['BC2CPP_NILABLE_UNION'] == '0' || ENV['BC2CPP_USER_RECEIVER_UNIONS'] == '0'
+
+    bits = numeric_receiver_class_bits(mask)
+    return nil unless bits && bits.size >= 2
+
+    names = bits.map { |bit| return_class_name_of_bit(bit) }
+    names.all? ? names.join(' | ') : nil
   end
 
   # GETIDX / SETIDX: an index on a receiver the flow leaves nilable, with no nil check dominating it (a

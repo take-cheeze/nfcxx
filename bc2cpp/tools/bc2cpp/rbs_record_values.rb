@@ -149,7 +149,7 @@ module RbsRecordTypes
     end
 
     def declared_classes(cls, kind, nilable)
-      out = Set[cls]
+      out = cls.is_a?(Array) ? cls.to_set : Set[cls]
       nilable ? out | ['NilClass'] : out
     end
 
