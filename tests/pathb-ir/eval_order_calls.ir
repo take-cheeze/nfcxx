@@ -9,7 +9,6 @@
 (abi-type "_ZNSt6ranges8__detail15__max_size_typeE" 32 16 (memory))
 (abi-type "_ZNSt6ranges8__detail15__max_diff_typeE" 32 16 (memory))
 (abi-type "_ZSt10error_code" 16 8 (leaf 0 w) (leaf 8 l))
-(abi-type "_ZSt4fposI11__mbstate_tE" 16 8 (leaf 0 l) (leaf 8 w) (leaf 12 w))
 (abi-type "_ZSt20forward_iterator_tag" 1 1 (empty))
 (abi-type "_ZN9__gnu_cxx17__normal_iteratorIPcNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEEE" 8 8 (leaf 0 l))
 (abi-type "_ZN9__gnu_cxx17__normal_iteratorIPKcNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEEE" 8 8 (leaf 0 l))
@@ -1538,10 +1537,7 @@
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 64))))
-(global "tmp.36" (struct "__mbstate_t") 8 4 (static) (init
-    (zero 0 4)
-    (zero 4 4)))
-(global "tmp.37" (array 2 (struct "__C8")) 32 8 (static) (init
+(global "tmp.36" (array 2 (struct "__C8")) 32 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSaIcED1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
@@ -1550,6 +1546,11 @@
     (scalar 24 unsigned_short (const unsigned_short 1))
     (scalar 26 unsigned_short (const unsigned_short 65535))
     (scalar 28 unsigned_char (const unsigned_char 0))))
+(global "tmp.37" (array 1 (struct "__C8")) 16 8 (static) (init
+    (addr 0 (ptr (fn void ())) &"_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE12_Alloc_hiderD1Ev" 0)
+    (scalar 8 unsigned_short (const unsigned_short 0))
+    (scalar 10 unsigned_short (const unsigned_short 65535))
+    (scalar 12 unsigned_char (const unsigned_char 0))))
 (global "tmp.38" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE12_Alloc_hiderD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
@@ -1566,36 +1567,36 @@
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
 (global "tmp.41" (array 1 (struct "__C8")) 16 8 (static) (init
-    (addr 0 (ptr (fn void ())) &"_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE12_Alloc_hiderD1Ev" 0)
-    (scalar 8 unsigned_short (const unsigned_short 0))
-    (scalar 10 unsigned_short (const unsigned_short 65535))
-    (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.42" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSaIcED1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.43" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.42" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE12_Alloc_hiderD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.44" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.43" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE12_M_constructIPKcEEvT_S8_St20forward_iterator_tagEN6_GuardD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.45" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.44" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE12_Alloc_hiderD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.46" (struct "_ZSt20forward_iterator_tag") 1 1 (static) (init))
-(global "tmp.47" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.45" (struct "_ZSt20forward_iterator_tag") 1 1 (static) (init))
+(global "tmp.46" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE12_M_constructIPcEEvT_S7_St20forward_iterator_tagEN6_GuardD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
+(global "tmp.47" (array 1 (struct "__C8")) 16 8 (static) (init
+    (addr 0 (ptr (fn void ())) &"_ZNSaIcED2Ev" 0)
+    (scalar 8 unsigned_short (const unsigned_short 0))
+    (scalar 10 unsigned_short (const unsigned_short 65535))
+    (scalar 12 unsigned_char (const unsigned_char 64))))
 (global "tmp.48" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSaIcED2Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
@@ -1607,122 +1608,117 @@
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 64))))
 (global "tmp.50" (array 1 (struct "__C8")) 16 8 (static) (init
-    (addr 0 (ptr (fn void ())) &"_ZNSaIcED2Ev" 0)
+    (addr 0 (ptr (fn void ())) &"_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEE12_Alloc_hiderD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
-    (scalar 12 unsigned_char (const unsigned_char 64))))
+    (scalar 12 unsigned_char (const unsigned_char 0))))
 (global "tmp.51" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEE12_Alloc_hiderD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
 (global "tmp.52" (array 1 (struct "__C8")) 16 8 (static) (init
-    (addr 0 (ptr (fn void ())) &"_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEE12_Alloc_hiderD1Ev" 0)
-    (scalar 8 unsigned_short (const unsigned_short 0))
-    (scalar 10 unsigned_short (const unsigned_short 65535))
-    (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.53" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEE12_M_constructIPKwEEvT_S8_St20forward_iterator_tagEN6_GuardD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.54" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.53" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEE12_Alloc_hiderD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.55" (struct "_ZSt20forward_iterator_tag") 1 1 (static) (init))
-(global "tmp.56" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.54" (struct "_ZSt20forward_iterator_tag") 1 1 (static) (init))
+(global "tmp.55" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEE12_M_constructIPwEEvT_S7_St20forward_iterator_tagEN6_GuardD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
+(global "tmp.56" (array 1 (struct "__C8")) 16 8 (static) (init
+    (addr 0 (ptr (fn void ())) &"_ZNSaIwED2Ev" 0)
+    (scalar 8 unsigned_short (const unsigned_short 0))
+    (scalar 10 unsigned_short (const unsigned_short 65535))
+    (scalar 12 unsigned_char (const unsigned_char 64))))
 (global "tmp.57" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSaIwED2Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 64))))
 (global "tmp.58" (array 1 (struct "__C8")) 16 8 (static) (init
-    (addr 0 (ptr (fn void ())) &"_ZNSaIwED2Ev" 0)
+    (addr 0 (ptr (fn void ())) &"_ZNSt7__cxx1112basic_stringIDuSt11char_traitsIDuESaIDuEE12_Alloc_hiderD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
-    (scalar 12 unsigned_char (const unsigned_char 64))))
+    (scalar 12 unsigned_char (const unsigned_char 0))))
 (global "tmp.59" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSt7__cxx1112basic_stringIDuSt11char_traitsIDuESaIDuEE12_Alloc_hiderD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
 (global "tmp.60" (array 1 (struct "__C8")) 16 8 (static) (init
-    (addr 0 (ptr (fn void ())) &"_ZNSt7__cxx1112basic_stringIDuSt11char_traitsIDuESaIDuEE12_Alloc_hiderD1Ev" 0)
-    (scalar 8 unsigned_short (const unsigned_short 0))
-    (scalar 10 unsigned_short (const unsigned_short 65535))
-    (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.61" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZZNSt7__cxx1112basic_stringIDuSt11char_traitsIDuESaIDuEE12_M_constructIPKDuEEvT_S8_St20forward_iterator_tagEN6_GuardD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
+(global "tmp.61" (array 1 (struct "__C8")) 16 8 (static) (init
+    (addr 0 (ptr (fn void ())) &"_ZNSaIDuED2Ev" 0)
+    (scalar 8 unsigned_short (const unsigned_short 0))
+    (scalar 10 unsigned_short (const unsigned_short 65535))
+    (scalar 12 unsigned_char (const unsigned_char 64))))
 (global "tmp.62" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSaIDuED2Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 64))))
 (global "tmp.63" (array 1 (struct "__C8")) 16 8 (static) (init
-    (addr 0 (ptr (fn void ())) &"_ZNSaIDuED2Ev" 0)
+    (addr 0 (ptr (fn void ())) &"_ZNSt7__cxx1112basic_stringIDsSt11char_traitsIDsESaIDsEE12_Alloc_hiderD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
-    (scalar 12 unsigned_char (const unsigned_char 64))))
+    (scalar 12 unsigned_char (const unsigned_char 0))))
 (global "tmp.64" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSt7__cxx1112basic_stringIDsSt11char_traitsIDsESaIDsEE12_Alloc_hiderD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
 (global "tmp.65" (array 1 (struct "__C8")) 16 8 (static) (init
-    (addr 0 (ptr (fn void ())) &"_ZNSt7__cxx1112basic_stringIDsSt11char_traitsIDsESaIDsEE12_Alloc_hiderD1Ev" 0)
-    (scalar 8 unsigned_short (const unsigned_short 0))
-    (scalar 10 unsigned_short (const unsigned_short 65535))
-    (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.66" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZZNSt7__cxx1112basic_stringIDsSt11char_traitsIDsESaIDsEE12_M_constructIPKDsEEvT_S8_St20forward_iterator_tagEN6_GuardD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
+(global "tmp.66" (array 1 (struct "__C8")) 16 8 (static) (init
+    (addr 0 (ptr (fn void ())) &"_ZNSaIDsED2Ev" 0)
+    (scalar 8 unsigned_short (const unsigned_short 0))
+    (scalar 10 unsigned_short (const unsigned_short 65535))
+    (scalar 12 unsigned_char (const unsigned_char 64))))
 (global "tmp.67" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSaIDsED2Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 64))))
 (global "tmp.68" (array 1 (struct "__C8")) 16 8 (static) (init
-    (addr 0 (ptr (fn void ())) &"_ZNSaIDsED2Ev" 0)
+    (addr 0 (ptr (fn void ())) &"_ZNSt7__cxx1112basic_stringIDiSt11char_traitsIDiESaIDiEE12_Alloc_hiderD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
-    (scalar 12 unsigned_char (const unsigned_char 64))))
+    (scalar 12 unsigned_char (const unsigned_char 0))))
 (global "tmp.69" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSt7__cxx1112basic_stringIDiSt11char_traitsIDiESaIDiEE12_Alloc_hiderD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
 (global "tmp.70" (array 1 (struct "__C8")) 16 8 (static) (init
-    (addr 0 (ptr (fn void ())) &"_ZNSt7__cxx1112basic_stringIDiSt11char_traitsIDiESaIDiEE12_Alloc_hiderD1Ev" 0)
-    (scalar 8 unsigned_short (const unsigned_short 0))
-    (scalar 10 unsigned_short (const unsigned_short 65535))
-    (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.71" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZZNSt7__cxx1112basic_stringIDiSt11char_traitsIDiESaIDiEE12_M_constructIPKDiEEvT_S8_St20forward_iterator_tagEN6_GuardD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
+(global "tmp.71" (array 1 (struct "__C8")) 16 8 (static) (init
+    (addr 0 (ptr (fn void ())) &"_ZNSaIDiED2Ev" 0)
+    (scalar 8 unsigned_short (const unsigned_short 0))
+    (scalar 10 unsigned_short (const unsigned_short 65535))
+    (scalar 12 unsigned_char (const unsigned_char 64))))
 (global "tmp.72" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSaIDiED2Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 64))))
-(global "tmp.73" (array 1 (struct "__C8")) 16 8 (static) (init
-    (addr 0 (ptr (fn void ())) &"_ZNSaIDiED2Ev" 0)
-    (scalar 8 unsigned_short (const unsigned_short 0))
-    (scalar 10 unsigned_short (const unsigned_short 65535))
-    (scalar 12 unsigned_char (const unsigned_char 64))))
-(global "tmp.74" (array 2 (struct "__C8")) 32 8 (static) (init
+(global "tmp.73" (array 2 (struct "__C8")) 32 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSt15basic_streambufIcSt11char_traitsIcEED2Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
@@ -1731,7 +1727,7 @@
     (scalar 24 unsigned_short (const unsigned_short 1))
     (scalar 26 unsigned_short (const unsigned_short 0))
     (scalar 28 unsigned_char (const unsigned_char 0))))
-(global "tmp.75" (array 2 (struct "__C8")) 32 8 (static) (init
+(global "tmp.74" (array 2 (struct "__C8")) 32 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSaIcED1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
@@ -1740,7 +1736,7 @@
     (scalar 24 unsigned_short (const unsigned_short 1))
     (scalar 26 unsigned_short (const unsigned_short 65535))
     (scalar 28 unsigned_char (const unsigned_char 0))))
-(global "tmp.76" (array 2 (struct "__C8")) 32 8 (static) (init
+(global "tmp.75" (array 2 (struct "__C8")) 32 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSt15basic_streambufIcSt11char_traitsIcEED2Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
@@ -1749,7 +1745,7 @@
     (scalar 24 unsigned_short (const unsigned_short 1))
     (scalar 26 unsigned_short (const unsigned_short 0))
     (scalar 28 unsigned_char (const unsigned_char 0))))
-(global "tmp.77" (array 5 (struct "__C8")) 80 8 (static) (init
+(global "tmp.76" (array 5 (struct "__C8")) 80 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSt9basic_iosIcSt11char_traitsIcEED2Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 1))
     (scalar 10 unsigned_short (const unsigned_short 65535))
@@ -1770,12 +1766,12 @@
     (scalar 72 unsigned_short (const unsigned_short 4))
     (scalar 74 unsigned_short (const unsigned_short 2))
     (scalar 76 unsigned_char (const unsigned_char 0))))
-(global "tmp.78" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.77" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSt9basic_iosIcSt11char_traitsIcEED2Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 64))))
-(global "tmp.79" (array 5 (struct "__C8")) 80 8 (static) (init
+(global "tmp.78" (array 5 (struct "__C8")) 80 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSt9basic_iosIcSt11char_traitsIcEED2Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 1))
     (scalar 10 unsigned_short (const unsigned_short 65535))
@@ -1796,17 +1792,26 @@
     (scalar 72 unsigned_short (const unsigned_short 4))
     (scalar 74 unsigned_short (const unsigned_short 2))
     (scalar 76 unsigned_char (const unsigned_char 0))))
-(global "tmp.80" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.79" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSt9basic_iosIcSt11char_traitsIcEED2Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 64))))
+(global "tmp.80" (struct "_ZNSt9__cmp_cat8__unspecE") 1 1 (static) (init))
 (global "tmp.81" (struct "_ZNSt9__cmp_cat8__unspecE") 1 1 (static) (init))
-(global "tmp.82" (struct "_ZNSt9__cmp_cat8__unspecE") 1 1 (static) (init))
-(global "tmp.83" (struct "_ZNSt6ranges8__detail15__max_size_typeE") 32 16 (static) (init
+(global "tmp.82" (struct "_ZNSt6ranges8__detail15__max_size_typeE") 32 16 (static) (init
     (scalar 0 unsigned_long (const unsigned_long 18446744073709551615))
     (scalar 8 unsigned_long (const unsigned_long 18446744073709551615))
     (bitfield 16 4 0 1 unsigned_int (const unsigned_int 1))))
+(global "tmp.83" (array 2 (struct "__C8")) 32 8 (static) (init
+    (addr 0 (ptr (fn void ())) &"_ZNSaIcED1Ev" 0)
+    (scalar 8 unsigned_short (const unsigned_short 0))
+    (scalar 10 unsigned_short (const unsigned_short 65535))
+    (scalar 12 unsigned_char (const unsigned_char 0))
+    (addr 16 (ptr (fn void ())) &"_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEED1Ev" 0)
+    (scalar 24 unsigned_short (const unsigned_short 1))
+    (scalar 26 unsigned_short (const unsigned_short 65535))
+    (scalar 28 unsigned_char (const unsigned_char 0))))
 (global "tmp.84" (array 2 (struct "__C8")) 32 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSaIcED1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
@@ -1852,160 +1857,151 @@
     (scalar 24 unsigned_short (const unsigned_short 1))
     (scalar 26 unsigned_short (const unsigned_short 65535))
     (scalar 28 unsigned_char (const unsigned_char 0))))
-(global "tmp.89" (array 2 (struct "__C8")) 32 8 (static) (init
-    (addr 0 (ptr (fn void ())) &"_ZNSaIcED1Ev" 0)
-    (scalar 8 unsigned_short (const unsigned_short 0))
-    (scalar 10 unsigned_short (const unsigned_short 65535))
-    (scalar 12 unsigned_char (const unsigned_char 0))
-    (addr 16 (ptr (fn void ())) &"_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEED1Ev" 0)
-    (scalar 24 unsigned_short (const unsigned_short 1))
-    (scalar 26 unsigned_short (const unsigned_short 65535))
-    (scalar 28 unsigned_char (const unsigned_char 0))))
-(global "tmp.90" (struct "_ZSt15strong_ordering") 1 1 (static) (init
+(global "tmp.89" (struct "_ZSt15strong_ordering") 1 1 (static) (init
     (scalar 0 signed_char (const signed_char -1))))
-(global "tmp.91" (struct "_ZSt15strong_ordering") 1 1 (static) (init
+(global "tmp.90" (struct "_ZSt15strong_ordering") 1 1 (static) (init
     (scalar 0 signed_char (const signed_char 1))))
-(global "tmp.92" (struct "_ZSt15strong_ordering") 1 1 (static) (init
+(global "tmp.91" (struct "_ZSt15strong_ordering") 1 1 (static) (init
     (scalar 0 signed_char (const signed_char 0))))
-(global "tmp.93" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.92" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSaIcED1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.94" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.93" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSaIwED1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.95" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.94" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSaIDuED1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.96" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.95" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSaIDsED1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.97" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.96" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSaIDiED1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
+(global "tmp.97" (struct "_ZSt15strong_ordering") 1 1 (static) (init
+    (scalar 0 signed_char (const signed_char -1))))
 (global "tmp.98" (struct "_ZSt15strong_ordering") 1 1 (static) (init
-    (scalar 0 signed_char (const signed_char -1))))
+    (scalar 0 signed_char (const signed_char 1))))
 (global "tmp.99" (struct "_ZSt15strong_ordering") 1 1 (static) (init
-    (scalar 0 signed_char (const signed_char 1))))
+    (scalar 0 signed_char (const signed_char 0))))
 (global "tmp.100" (struct "_ZSt15strong_ordering") 1 1 (static) (init
-    (scalar 0 signed_char (const signed_char 0))))
-(global "tmp.101" (struct "_ZSt15strong_ordering") 1 1 (static) (init
     (scalar 0 signed_char (const signed_char -1))))
-(global "tmp.102" (struct "_ZSt15strong_ordering") 1 1 (static) (init
+(global "tmp.101" (struct "_ZSt15strong_ordering") 1 1 (static) (init
     (scalar 0 signed_char (const signed_char 1))))
-(global "tmp.103" (struct "_ZSt15strong_ordering") 1 1 (static) (init
+(global "tmp.102" (struct "_ZSt15strong_ordering") 1 1 (static) (init
     (scalar 0 signed_char (const signed_char 0))))
-(global "tmp.104" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.103" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZZN9__gnu_cxx6__stoaIlicJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.105" (struct "_ZSt17integral_constantIbLb1EE") 1 1 (static) (init))
-(global "tmp.106" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.104" (struct "_ZSt17integral_constantIbLb1EE") 1 1 (static) (init))
+(global "tmp.105" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZZN9__gnu_cxx6__stoaIllcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.107" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
-(global "tmp.108" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.106" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
+(global "tmp.107" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZZN9__gnu_cxx6__stoaImmcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.109" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
-(global "tmp.110" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.108" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
+(global "tmp.109" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZZN9__gnu_cxx6__stoaIxxcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.111" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
-(global "tmp.112" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.110" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
+(global "tmp.111" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZZN9__gnu_cxx6__stoaIyycJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.113" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
-(global "tmp.114" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.112" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
+(global "tmp.113" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZZN9__gnu_cxx6__stoaIffcJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.115" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
-(global "tmp.116" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.114" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
+(global "tmp.115" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZZN9__gnu_cxx6__stoaIddcJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.117" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
-(global "tmp.118" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.116" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
+(global "tmp.117" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZZN9__gnu_cxx6__stoaIeecJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.119" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
-(global "tmp.120" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.118" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
+(global "tmp.119" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSaIcED1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.121" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.120" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZZN9__gnu_cxx6__stoaIliwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.122" (struct "_ZSt17integral_constantIbLb1EE") 1 1 (static) (init))
-(global "tmp.123" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.121" (struct "_ZSt17integral_constantIbLb1EE") 1 1 (static) (init))
+(global "tmp.122" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZZN9__gnu_cxx6__stoaIllwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.124" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
-(global "tmp.125" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.123" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
+(global "tmp.124" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZZN9__gnu_cxx6__stoaImmwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.126" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
-(global "tmp.127" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.125" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
+(global "tmp.126" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZZN9__gnu_cxx6__stoaIxxwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.128" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
-(global "tmp.129" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.127" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
+(global "tmp.128" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZZN9__gnu_cxx6__stoaIyywJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.130" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
-(global "tmp.131" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.129" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
+(global "tmp.130" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZZN9__gnu_cxx6__stoaIffwJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.132" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
-(global "tmp.133" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.131" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
+(global "tmp.132" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZZN9__gnu_cxx6__stoaIddwJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.134" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
-(global "tmp.135" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.133" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
+(global "tmp.134" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZZN9__gnu_cxx6__stoaIeewJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.136" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
-(global "tmp.137" (array 1 (struct "__C8")) 16 8 (static) (init
+(global "tmp.135" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
+(global "tmp.136" (array 1 (struct "__C8")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZNSaIwED1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
@@ -14337,30 +14333,6 @@
   (eval (call void &"_ZNSt15basic_streambufIcSt11char_traitsIcEEC1Ev" %1))
   (return))
 
-(function "_ZNKSt15basic_streambufIcSt11char_traitsIcEE5ebackEv"
-  (ret (ptr char))
-  (params (param %0 "tmp" (const (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))))))
-  (weak)
-  (slot "tmp" (const (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))) 8 8)
-  (store (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) $"tmp" %0)
-  (let %1 (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) (load (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) $"tmp"))
-  (nonnull %1)
-  (let %2 (ptr (ptr char)) (offset %1 8))
-  (let %3 (ptr char) (load (ptr char) %2))
-  (return %3))
-
-(function "_ZNKSt15basic_streambufIcSt11char_traitsIcEE4gptrEv"
-  (ret (ptr char))
-  (params (param %0 "tmp" (const (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))))))
-  (weak)
-  (slot "tmp" (const (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))) 8 8)
-  (store (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) $"tmp" %0)
-  (let %1 (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) (load (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) $"tmp"))
-  (nonnull %1)
-  (let %2 (ptr (ptr char)) (offset %1 16))
-  (let %3 (ptr char) (load (ptr char) %2))
-  (return %3))
-
 (function "_ZNKSt15basic_streambufIcSt11char_traitsIcEE5egptrEv"
   (ret (ptr char))
   (params (param %0 "tmp" (const (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))))))
@@ -14372,52 +14344,6 @@
   (let %2 (ptr (ptr char)) (offset %1 24))
   (let %3 (ptr char) (load (ptr char) %2))
   (return %3))
-
-(function "_ZNSt15basic_streambufIcSt11char_traitsIcEE5gbumpEi"
-  (ret void)
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))) (param %1 "__n" int))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) 8 8)
-  (slot "__n" int 4 4)
-  (store (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp" %0)
-  (store int $"__n" %1)
-  (let %2 int (load int $"__n"))
-  (let %3 (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) (load (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp"))
-  (nonnull %3)
-  (let %4 (ptr (ptr char)) (offset %3 16))
-  (let %5 (ptr char) (load (ptr char) %4))
-  (let %6 (ptr char) (index %5 %2 1))
-  (store (ptr char) %4 %6)
-  (return))
-
-(function "_ZNSt15basic_streambufIcSt11char_traitsIcEE4setgEPcS3_S3_"
-  (ret void)
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))) (param %1 "__gbeg" (ptr char)) (param %2 "__gnext" (ptr char)) (param %3 "__gend" (ptr char)))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) 8 8)
-  (slot "__gbeg" (ptr char) 8 8)
-  (slot "__gnext" (ptr char) 8 8)
-  (slot "__gend" (ptr char) 8 8)
-  (store (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp" %0)
-  (store (ptr char) $"__gbeg" %1)
-  (store (ptr char) $"__gnext" %2)
-  (store (ptr char) $"__gend" %3)
-  (let %4 (ptr char) (load (ptr char) $"__gbeg"))
-  (let %5 (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) (load (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp"))
-  (nonnull %5)
-  (let %6 (ptr (ptr char)) (offset %5 8))
-  (store (ptr char) %6 %4)
-  (let %7 (ptr char) (load (ptr char) $"__gnext"))
-  (let %8 (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) (load (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp"))
-  (nonnull %8)
-  (let %9 (ptr (ptr char)) (offset %8 16))
-  (store (ptr char) %9 %7)
-  (let %10 (ptr char) (load (ptr char) $"__gend"))
-  (let %11 (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) (load (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp"))
-  (nonnull %11)
-  (let %12 (ptr (ptr char)) (offset %11 24))
-  (store (ptr char) %12 %10)
-  (return))
 
 (function "_ZNKSt15basic_streambufIcSt11char_traitsIcEE5pbaseEv"
   (ret (ptr char))
@@ -14442,150 +14368,6 @@
   (let %2 (ptr (ptr char)) (offset %1 40))
   (let %3 (ptr char) (load (ptr char) %2))
   (return %3))
-
-(function "_ZNSt15basic_streambufIcSt11char_traitsIcEE5imbueERKSt6locale"
-  (ret void)
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))) (param %1 "__loc" (ptr (const (struct "_ZSt6locale")))))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) 8 8)
-  (slot "__loc" (ptr (const (struct "_ZSt6locale"))) 8 8)
-  (store (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp" %0)
-  (store (ptr (const (struct "_ZSt6locale"))) $"__loc" %1)
-  (return))
-
-(function "_ZNSt15basic_streambufIcSt11char_traitsIcEE6setbufEPcl"
-  (ret (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))) (param %1 "tmp" (ptr char)) (param %2 "tmp" long))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) 8 8)
-  (slot "tmp.1" (ptr char) 8 8)
-  (slot "tmp.2" long 8 8)
-  (store (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp" %0)
-  (store (ptr char) $"tmp.1" %1)
-  (store long $"tmp.2" %2)
-  (let %3 (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) (load (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp"))
-  (return %3))
-
-(function "_ZNSt15basic_streambufIcSt11char_traitsIcEE7seekoffElSt12_Ios_SeekdirSt13_Ios_Openmode"
-  (ret void)
-  (params (sret %0 (struct "_ZSt4fposI11__mbstate_tE")) (param %1 "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))) (param %2 "tmp" long) (param %3 "tmp" int) (param %4 "tmp" int))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) 8 8)
-  (slot "tmp.1" long 8 8)
-  (slot "tmp.2" int 4 4)
-  (slot "tmp.3" int 4 4)
-  (slot "tmp.4" (struct "_ZSt4fposI11__mbstate_tE") 16 8)
-  (store (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp" %1)
-  (store long $"tmp.1" %2)
-  (store int $"tmp.2" %3)
-  (store int $"tmp.3" %4)
-  (block
-    (eval (call void &"_ZNSt4fposI11__mbstate_tEC1El" $"tmp.4" (const long -1)))
-    (copy 16 %0 $"tmp.4")
-    (return)))
-
-(function "_ZNSt15basic_streambufIcSt11char_traitsIcEE7seekposESt4fposI11__mbstate_tESt13_Ios_Openmode"
-  (ret void)
-  (params (sret %0 (struct "_ZSt4fposI11__mbstate_tE")) (param %1 "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))) (param %2 "tmp" (byval (struct "_ZSt4fposI11__mbstate_tE"))) (param %3 "tmp" int))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) 8 8)
-  (slot "tmp.1" int 4 4)
-  (slot "tmp.2" (struct "_ZSt4fposI11__mbstate_tE") 16 8)
-  (store (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp" %1)
-  (store int $"tmp.1" %3)
-  (block
-    (eval (call void &"_ZNSt4fposI11__mbstate_tEC1El" $"tmp.2" (const long -1)))
-    (copy 16 %0 $"tmp.2")
-    (return)))
-
-(function "_ZNSt15basic_streambufIcSt11char_traitsIcEE4syncEv"
-  (ret int)
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) 8 8)
-  (store (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp" %0)
-  (return (const int 0)))
-
-(function "_ZNSt15basic_streambufIcSt11char_traitsIcEE9showmanycEv"
-  (ret long)
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) 8 8)
-  (store (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp" %0)
-  (return (const long 0)))
-
-(function "_ZNSt15basic_streambufIcSt11char_traitsIcEE9underflowEv"
-  (ret int)
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) 8 8)
-  (store (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp" %0)
-  (return (const int -1)))
-
-(function "_ZNSt15basic_streambufIcSt11char_traitsIcEE5uflowEv"
-  (ret int)
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) 8 8)
-  (slot "__ret" int 4 4)
-  (slot "tmp.1" (const int) 4 4)
-  (slot "tmp.2" (ptr (const int)) 8 8)
-  (slot "tmp.3" (ptr (const int)) 8 8)
-  (slot "__testeof" (const bool) 1 1)
-  (store (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp" %0)
-  (store int $"__ret" (const int -1))
-  (let %1 (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) (load (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp"))
-  (nonnull %1)
-  (let %2 (ptr (const long)) (load (ptr (const long)) %1))
-  (let %3 (ptr (const long)) (index %2 (const int 9) 8))
-  (let %4 (ptr (ptr (fn int ((ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))))) (bitcast (ptr (ptr (fn int ((ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))))) %3))
-  (nonnull %4)
-  (let %5 (ptr (fn int ((ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))))) (load (ptr (fn int ((ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))))) %4))
-  (nonnull %5)
-  (let %6 (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) (load (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp"))
-  (let %7 int (call int %5 %6))
-  (store int $"tmp.1" %7)
-  (store (ptr (const int)) $"tmp.2" $"tmp.1")
-  (store (ptr (const int)) $"tmp.3" $"__ret")
-  (let %8 (ptr (const int)) (load (ptr (const int)) $"tmp.2"))
-  (let %9 (ptr (const int)) (load (ptr (const int)) $"tmp.3"))
-  (let %10 bool (call bool &"_ZNSt11char_traitsIcE11eq_int_typeERKiS2_" %8 %9))
-  (store bool $"__testeof" %10)
-  (let %11 bool (load bool $"__testeof"))
-  (let %12 bool (eq bool %11 (const bool 0)))
-  (if %12
-    (then
-      (block
-        (let %13 (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) (load (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp"))
-        (let %14 (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) (bitcast (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) %13))
-        (let %15 (ptr char) (call (ptr char) &"_ZNKSt15basic_streambufIcSt11char_traitsIcEE4gptrEv" %14))
-        (let %16 (ptr (const char)) (bitcast (ptr (const char)) %15))
-        (let %17 int (call int &"_ZNSt11char_traitsIcE11to_int_typeERKc" %16))
-        (store int $"__ret" %17)
-        (let %18 (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) (load (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp"))
-        (eval (call void &"_ZNSt15basic_streambufIcSt11char_traitsIcEE5gbumpEi" %18 (const int 1))))))
-  (let %19 int (load int $"__ret"))
-  (return %19))
-
-(function "_ZNSt15basic_streambufIcSt11char_traitsIcEE9pbackfailEi"
-  (ret int)
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))) (param %1 "__c" int))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) 8 8)
-  (slot "__c" int 4 4)
-  (store (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp" %0)
-  (store int $"__c" %1)
-  (return (const int -1)))
-
-(function "_ZNSt15basic_streambufIcSt11char_traitsIcEE8overflowEi"
-  (ret int)
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))) (param %1 "__c" int))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) 8 8)
-  (slot "__c" int 4 4)
-  (store (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp" %0)
-  (store int $"__c" %1)
-  (return (const int -1)))
 
 (function "_ZNKSt5ctypeIcE2isEtc"
   (ret bool)
@@ -15818,55 +15600,6 @@
     (let %13 bool (load bool $"tmp.2"))
     (return %13)))
 
-(function "_ZNSt4fposI11__mbstate_tEC1El"
-  (ret void)
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt4fposI11__mbstate_tE")))) (param %1 "__off" long))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt4fposI11__mbstate_tE"))) 8 8)
-  (slot "__off" long 8 8)
-  (store (ptr (struct "_ZSt4fposI11__mbstate_tE")) $"tmp" %0)
-  (store long $"__off" %1)
-  (let %2 long (load long $"__off"))
-  (let %3 (ptr (struct "_ZSt4fposI11__mbstate_tE")) (load (ptr (struct "_ZSt4fposI11__mbstate_tE")) $"tmp"))
-  (nonnull %3)
-  (store long %3 %2)
-  (let %4 (ptr (struct "_ZSt4fposI11__mbstate_tE")) (load (ptr (struct "_ZSt4fposI11__mbstate_tE")) $"tmp"))
-  (nonnull %4)
-  (let %5 (ptr (struct "__mbstate_t")) (offset %4 8))
-  (copy 8 %5 @"tmp.36")
-  (return))
-
-(function "_ZNSt4fposI11__mbstate_tEC2El"
-  (ret void)
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt4fposI11__mbstate_tE")))) (param %1 "tmp" long))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt4fposI11__mbstate_tE"))) 8 8)
-  (slot "tmp.1" long 8 8)
-  (store (ptr (struct "_ZSt4fposI11__mbstate_tE")) $"tmp" %0)
-  (store long $"tmp.1" %1)
-  (let %2 (ptr (struct "_ZSt4fposI11__mbstate_tE")) (load (ptr (struct "_ZSt4fposI11__mbstate_tE")) $"tmp"))
-  (let %3 long (load long $"tmp.1"))
-  (eval (call void &"_ZNSt4fposI11__mbstate_tEC1El" %2 %3))
-  (return))
-
-(function "_ZNSt4fposI11__mbstate_tED1Ev"
-  (ret void)
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt4fposI11__mbstate_tE")))))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt4fposI11__mbstate_tE"))) 8 8)
-  (store (ptr (struct "_ZSt4fposI11__mbstate_tE")) $"tmp" %0)
-  (return))
-
-(function "_ZNSt4fposI11__mbstate_tED2Ev"
-  (ret void)
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt4fposI11__mbstate_tE")))))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt4fposI11__mbstate_tE"))) 8 8)
-  (store (ptr (struct "_ZSt4fposI11__mbstate_tE")) $"tmp" %0)
-  (let %1 (ptr (struct "_ZSt4fposI11__mbstate_tE")) (load (ptr (struct "_ZSt4fposI11__mbstate_tE")) $"tmp"))
-  (eval (call void &"_ZNSt4fposI11__mbstate_tED1Ev" %1))
-  (return))
-
 (function "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE11_S_allocateERS3_m"
   (ret (ptr char))
   (params (param %0 "__a" (ptr (struct "_ZSaIcE"))) (param %1 "__n" unsigned_long))
@@ -16863,7 +16596,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.2")
   (let %4 (ptr unsigned_char) (offset $"tmp.2" 8))
   (store unsigned_char %4 (const unsigned_char 1))
-  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.37"))
+  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.36"))
   (let %6 (ptr (union "__C6")) (offset $"tmp.2" 16))
   (store (ptr (struct "__C8")) %6 %5)
   (let %7 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
@@ -16940,7 +16673,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.2")
   (let %5 (ptr unsigned_char) (offset $"tmp.2" 8))
   (store unsigned_char %5 (const unsigned_char 1))
-  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.38"))
+  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.37"))
   (let %7 (ptr (union "__C6")) (offset $"tmp.2" 16))
   (store (ptr (struct "__C8")) %7 %6)
   (let %8 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
@@ -17015,7 +16748,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %5 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %5 (const unsigned_char 1))
-  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.39"))
+  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.38"))
   (let %7 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %7 %6)
   (let %8 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -17114,7 +16847,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.2")
   (let %5 (ptr unsigned_char) (offset $"tmp.2" 8))
   (store unsigned_char %5 (const unsigned_char 1))
-  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.40"))
+  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.39"))
   (let %7 (ptr (union "__C6")) (offset $"tmp.2" 16))
   (store (ptr (struct "__C8")) %7 %6)
   (let %8 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
@@ -17235,7 +16968,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.2")
   (let %4 (ptr unsigned_char) (offset $"tmp.2" 8))
   (store unsigned_char %4 (const unsigned_char 1))
-  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.41"))
+  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.40"))
   (let %6 (ptr (union "__C6")) (offset $"tmp.2" 16))
   (store (ptr (struct "__C8")) %6 %5)
   (let %7 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
@@ -17596,7 +17329,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %3 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %3 (const unsigned_char 1))
-  (let %4 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.42"))
+  (let %4 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.41"))
   (let %5 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %5 %4)
   (let %6 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -18271,7 +18004,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %5 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %5 (const unsigned_char 1))
-  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.43"))
+  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.42"))
   (let %7 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %7 %6)
   (let %8 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -18355,7 +18088,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %5 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %5 (const unsigned_char 1))
-  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.44"))
+  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.43"))
   (let %7 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %7 %6)
   (let %8 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -18450,7 +18183,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %5 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %5 (const unsigned_char 1))
-  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.45"))
+  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.44"))
   (let %7 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %7 %6)
   (let %8 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -18485,7 +18218,7 @@
   (let %26 (ptr (struct "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE")) $"tmp"))
   (let %27 (ptr char) (load (ptr char) $"tmp.3"))
   (let %28 (ptr char) (load (ptr char) $"tmp.4"))
-  (copy 1 $"tmp.5" @"tmp.46")
+  (copy 1 $"tmp.5" @"tmp.45")
   (eval (call void &"_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE12_M_constructIPcEEvT_S7_St20forward_iterator_tag" %26 %27 %28 (byval (struct "_ZSt20forward_iterator_tag") $"tmp.5")))
   (block
     (let %29 (ptr (union "__C6")) (offset $"tmp.1" 16))
@@ -18539,7 +18272,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %5 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %5 (const unsigned_char 1))
-  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.47"))
+  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.46"))
   (let %7 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %7 %6)
   (let %8 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -18675,7 +18408,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %4 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %4 (const unsigned_char 1))
-  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.48"))
+  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.47"))
   (let %6 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %6 %5)
   (let %7 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -18745,7 +18478,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %4 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %4 (const unsigned_char 1))
-  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.49"))
+  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.48"))
   (let %6 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %6 %5)
   (let %7 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -18819,7 +18552,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.2")
   (let %4 (ptr unsigned_char) (offset $"tmp.2" 8))
   (store unsigned_char %4 (const unsigned_char 1))
-  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.50"))
+  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.49"))
   (let %6 (ptr (union "__C6")) (offset $"tmp.2" 16))
   (store (ptr (struct "__C8")) %6 %5)
   (let %7 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
@@ -19343,7 +19076,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %5 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %5 (const unsigned_char 1))
-  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.51"))
+  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.50"))
   (let %7 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %7 %6)
   (let %8 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -19437,7 +19170,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.2")
   (let %4 (ptr unsigned_char) (offset $"tmp.2" 8))
   (store unsigned_char %4 (const unsigned_char 1))
-  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.52"))
+  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.51"))
   (let %6 (ptr (union "__C6")) (offset $"tmp.2" 16))
   (store (ptr (struct "__C8")) %6 %5)
   (let %7 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
@@ -19539,7 +19272,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %5 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %5 (const unsigned_char 1))
-  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.53"))
+  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.52"))
   (let %7 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %7 %6)
   (let %8 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -19634,7 +19367,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %5 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %5 (const unsigned_char 1))
-  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.54"))
+  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.53"))
   (let %7 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %7 %6)
   (let %8 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -19669,7 +19402,7 @@
   (let %26 (ptr (struct "_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEEE")) (load (ptr (struct "_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEEE")) $"tmp"))
   (let %27 (ptr int) (load (ptr int) $"tmp.3"))
   (let %28 (ptr int) (load (ptr int) $"tmp.4"))
-  (copy 1 $"tmp.5" @"tmp.55")
+  (copy 1 $"tmp.5" @"tmp.54")
   (eval (call void &"_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEE12_M_constructIPwEEvT_S7_St20forward_iterator_tag" %26 %27 %28 (byval (struct "_ZSt20forward_iterator_tag") $"tmp.5")))
   (block
     (let %29 (ptr (union "__C6")) (offset $"tmp.1" 16))
@@ -19723,7 +19456,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %5 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %5 (const unsigned_char 1))
-  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.56"))
+  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.55"))
   (let %7 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %7 %6)
   (let %8 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -19813,7 +19546,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %4 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %4 (const unsigned_char 1))
-  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.57"))
+  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.56"))
   (let %6 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %6 %5)
   (let %7 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -19885,7 +19618,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.2")
   (let %4 (ptr unsigned_char) (offset $"tmp.2" 8))
   (store unsigned_char %4 (const unsigned_char 1))
-  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.58"))
+  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.57"))
   (let %6 (ptr (union "__C6")) (offset $"tmp.2" 16))
   (store (ptr (struct "__C8")) %6 %5)
   (let %7 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
@@ -20371,7 +20104,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %5 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %5 (const unsigned_char 1))
-  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.59"))
+  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.58"))
   (let %7 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %7 %6)
   (let %8 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -20465,7 +20198,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.2")
   (let %4 (ptr unsigned_char) (offset $"tmp.2" 8))
   (store unsigned_char %4 (const unsigned_char 1))
-  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.60"))
+  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.59"))
   (let %6 (ptr (union "__C6")) (offset $"tmp.2" 16))
   (store (ptr (struct "__C8")) %6 %5)
   (let %7 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
@@ -20543,7 +20276,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %5 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %5 (const unsigned_char 1))
-  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.61"))
+  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.60"))
   (let %7 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %7 %6)
   (let %8 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -20633,7 +20366,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %4 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %4 (const unsigned_char 1))
-  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.62"))
+  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.61"))
   (let %6 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %6 %5)
   (let %7 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -20705,7 +20438,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.2")
   (let %4 (ptr unsigned_char) (offset $"tmp.2" 8))
   (store unsigned_char %4 (const unsigned_char 1))
-  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.63"))
+  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.62"))
   (let %6 (ptr (union "__C6")) (offset $"tmp.2" 16))
   (store (ptr (struct "__C8")) %6 %5)
   (let %7 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
@@ -21191,7 +20924,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %5 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %5 (const unsigned_char 1))
-  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.64"))
+  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.63"))
   (let %7 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %7 %6)
   (let %8 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -21285,7 +21018,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.2")
   (let %4 (ptr unsigned_char) (offset $"tmp.2" 8))
   (store unsigned_char %4 (const unsigned_char 1))
-  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.65"))
+  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.64"))
   (let %6 (ptr (union "__C6")) (offset $"tmp.2" 16))
   (store (ptr (struct "__C8")) %6 %5)
   (let %7 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
@@ -21363,7 +21096,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %5 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %5 (const unsigned_char 1))
-  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.66"))
+  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.65"))
   (let %7 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %7 %6)
   (let %8 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -21453,7 +21186,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %4 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %4 (const unsigned_char 1))
-  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.67"))
+  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.66"))
   (let %6 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %6 %5)
   (let %7 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -21525,7 +21258,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.2")
   (let %4 (ptr unsigned_char) (offset $"tmp.2" 8))
   (store unsigned_char %4 (const unsigned_char 1))
-  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.68"))
+  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.67"))
   (let %6 (ptr (union "__C6")) (offset $"tmp.2" 16))
   (store (ptr (struct "__C8")) %6 %5)
   (let %7 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
@@ -22011,7 +21744,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %5 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %5 (const unsigned_char 1))
-  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.69"))
+  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.68"))
   (let %7 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %7 %6)
   (let %8 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -22105,7 +21838,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.2")
   (let %4 (ptr unsigned_char) (offset $"tmp.2" 8))
   (store unsigned_char %4 (const unsigned_char 1))
-  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.70"))
+  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.69"))
   (let %6 (ptr (union "__C6")) (offset $"tmp.2" 16))
   (store (ptr (struct "__C8")) %6 %5)
   (let %7 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
@@ -22183,7 +21916,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %5 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %5 (const unsigned_char 1))
-  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.71"))
+  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.70"))
   (let %7 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %7 %6)
   (let %8 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -22273,7 +22006,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %4 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %4 (const unsigned_char 1))
-  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.72"))
+  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.71"))
   (let %6 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %6 %5)
   (let %7 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -22345,7 +22078,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.2")
   (let %4 (ptr unsigned_char) (offset $"tmp.2" 8))
   (store unsigned_char %4 (const unsigned_char 1))
-  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.73"))
+  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.72"))
   (let %6 (ptr (union "__C6")) (offset $"tmp.2" 16))
   (store (ptr (struct "__C8")) %6 %5)
   (let %7 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
@@ -22406,7 +22139,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %3 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %3 (const unsigned_char 1))
-  (let %4 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.74"))
+  (let %4 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.73"))
   (let %5 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %5 %4)
   (let %6 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -22489,7 +22222,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.2")
   (let %3 (ptr unsigned_char) (offset $"tmp.2" 8))
   (store unsigned_char %3 (const unsigned_char 1))
-  (let %4 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.75"))
+  (let %4 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.74"))
   (let %5 (ptr (union "__C6")) (offset $"tmp.2" 16))
   (store (ptr (struct "__C8")) %5 %4)
   (let %6 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
@@ -22555,154 +22288,6 @@
       (let %38 (ptr (struct "__C7")) (load (ptr (struct "__C7")) $"tmp.2"))
       (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" %38)
       (return))))
-
-(function "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEE9showmanycEv"
-  (ret long)
-  (params (param %0 "tmp" (const (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")))))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE"))) 8 8)
-  (slot "__ret" long 8 8)
-  (store (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp" %0)
-  (store long $"__ret" (const long -1))
-  (let %1 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-  (nonnull %1)
-  (let %2 (ptr int) (offset %1 64))
-  (let %3 int (load int %2))
-  (let %4 int (call int &"_ZStanSt13_Ios_OpenmodeS_" %3 (const int 8)))
-  (let %5 bool (ne int %4 (const int 0)))
-  (if %5
-    (then
-      (block
-        (let %6 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-        (eval (call void &"_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEE15_M_update_egptrEv" %6))
-        (let %7 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-        (let %8 (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) (bitcast (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) %7))
-        (let %9 (ptr char) (call (ptr char) &"_ZNKSt15basic_streambufIcSt11char_traitsIcEE5egptrEv" %8))
-        (let %10 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-        (let %11 (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) (bitcast (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) %10))
-        (let %12 (ptr char) (call (ptr char) &"_ZNKSt15basic_streambufIcSt11char_traitsIcEE4gptrEv" %11))
-        (let %13 long (pdiff %9 %12 1))
-        (store long $"__ret" %13))))
-  (let %14 long (load long $"__ret"))
-  (return %14))
-
-(function "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEE6setbufEPcl"
-  (ret (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))
-  (params (param %0 "tmp" (const (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")))) (param %1 "__s" (ptr char)) (param %2 "__n" long))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE"))) 8 8)
-  (slot "__s" (ptr char) 8 8)
-  (slot "__n" long 8 8)
-  (slot "tmp.1" (ptr char) 8 8)
-  (slot "tmp.2" unsigned_long 8 8)
-  (store (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp" %0)
-  (store (ptr char) $"__s" %1)
-  (store long $"__n" %2)
-  (let %3 (ptr char) (load (ptr char) $"__s"))
-  (let %4 bool (ne (ptr char) %3 (null (ptr char))))
-  (let %5 bool (const bool 0))
-  (if %4
-    (then
-      (let %6 long (load long $"__n"))
-      (let %7 bool (le.s long (const long 0) %6))
-      (set %5 %7)))
-  (if %5
-    (then
-      (block
-        (let %8 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-        (let %9 (ptr (struct "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE")) (offset %8 72))
-        (eval (call void &"_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE5clearEv" %9))
-        (let %10 (ptr char) (load (ptr char) $"__s"))
-        (store (ptr char) $"tmp.1" %10)
-        (let %11 long (load long $"__n"))
-        (let %12 unsigned_long (iconv unsigned_long %11))
-        (store unsigned_long $"tmp.2" %12)
-        (let %13 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-        (let %14 (ptr char) (load (ptr char) $"tmp.1"))
-        (let %15 unsigned_long (load unsigned_long $"tmp.2"))
-        (eval (call void &"_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEE7_M_syncEPcmm" %13 %14 %15 (const unsigned_long 0))))))
-  (let %16 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-  (return %16))
-
-(function "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEE15_M_update_egptrEv"
-  (ret void)
-  (params (param %0 "tmp" (const (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")))))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE"))) 8 8)
-  (slot "__pptr" (ptr char) 8 8)
-  (slot "__egptr" (ptr char) 8 8)
-  (slot "tmp.1" (ptr char) 8 8)
-  (slot "tmp.2" (ptr char) 8 8)
-  (slot "tmp.3" (ptr char) 8 8)
-  (slot "tmp.4" (ptr char) 8 8)
-  (slot "tmp.5" (ptr char) 8 8)
-  (slot "tmp.6" (ptr char) 8 8)
-  (store (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp" %0)
-  (block
-    (let %1 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-    (let %2 (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) (bitcast (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) %1))
-    (let %3 (ptr char) (call (ptr char) &"_ZNKSt15basic_streambufIcSt11char_traitsIcEE4pptrEv" %2))
-    (store (ptr char) $"__pptr" %3)
-    (let %4 (ptr char) (load (ptr char) $"__pptr"))
-    (let %5 bool (ne (ptr char) %4 (null (ptr char))))
-    (if %5
-      (then
-        (block
-          (let %6 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-          (let %7 (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) (bitcast (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) %6))
-          (let %8 (ptr char) (call (ptr char) &"_ZNKSt15basic_streambufIcSt11char_traitsIcEE5egptrEv" %7))
-          (store (ptr char) $"__egptr" %8)
-          (let %9 (ptr char) (load (ptr char) $"__egptr"))
-          (let %10 bool (eq (ptr char) %9 (null (ptr char))))
-          (let %11 bool (const bool 1))
-          (if %10
-            (then)
-            (else
-              (let %12 (ptr char) (load (ptr char) $"__pptr"))
-              (let %13 (ptr char) (load (ptr char) $"__egptr"))
-              (let %14 bool (lt.u (ptr char) %13 %12))
-              (set %11 %14)))
-          (if %11
-            (then
-              (block
-                (let %15 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-                (nonnull %15)
-                (let %16 (ptr int) (offset %15 64))
-                (let %17 int (load int %16))
-                (let %18 int (call int &"_ZStanSt13_Ios_OpenmodeS_" %17 (const int 8)))
-                (let %19 bool (ne int %18 (const int 0)))
-                (if %19
-                  (then
-                    (block
-                      (let %20 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-                      (let %21 (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) (bitcast (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) %20))
-                      (let %22 (ptr char) (call (ptr char) &"_ZNKSt15basic_streambufIcSt11char_traitsIcEE5ebackEv" %21))
-                      (store (ptr char) $"tmp.1" %22)
-                      (let %23 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-                      (let %24 (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) (bitcast (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) %23))
-                      (let %25 (ptr char) (call (ptr char) &"_ZNKSt15basic_streambufIcSt11char_traitsIcEE4gptrEv" %24))
-                      (store (ptr char) $"tmp.2" %25)
-                      (let %26 (ptr char) (load (ptr char) $"__pptr"))
-                      (store (ptr char) $"tmp.3" %26)
-                      (let %27 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-                      (let %28 (ptr char) (load (ptr char) $"tmp.1"))
-                      (let %29 (ptr char) (load (ptr char) $"tmp.2"))
-                      (let %30 (ptr char) (load (ptr char) $"tmp.3"))
-                      (eval (call void &"_ZNSt15basic_streambufIcSt11char_traitsIcEE4setgEPcS3_S3_" %27 %28 %29 %30))))
-                  (else
-                    (block
-                      (let %31 (ptr char) (load (ptr char) $"__pptr"))
-                      (store (ptr char) $"tmp.4" %31)
-                      (let %32 (ptr char) (load (ptr char) $"__pptr"))
-                      (store (ptr char) $"tmp.5" %32)
-                      (let %33 (ptr char) (load (ptr char) $"__pptr"))
-                      (store (ptr char) $"tmp.6" %33)
-                      (let %34 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-                      (let %35 (ptr char) (load (ptr char) $"tmp.4"))
-                      (let %36 (ptr char) (load (ptr char) $"tmp.5"))
-                      (let %37 (ptr char) (load (ptr char) $"tmp.6"))
-                      (eval (call void &"_ZNSt15basic_streambufIcSt11char_traitsIcEE4setgEPcS3_S3_" %34 %35 %36 %37))))))))))))
-  (return))
 
 (function "_ZNKSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEE12_M_high_markEv"
   (ret (ptr char))
@@ -22787,7 +22372,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.2")
   (let %4 (ptr unsigned_char) (offset $"tmp.2" 8))
   (store unsigned_char %4 (const unsigned_char 1))
-  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.76"))
+  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.75"))
   (let %6 (ptr (union "__C6")) (offset $"tmp.2" 16))
   (store (ptr (struct "__C8")) %6 %5)
   (let %7 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
@@ -22877,7 +22462,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.2")
   (let %3 (ptr unsigned_char) (offset $"tmp.2" 8))
   (store unsigned_char %3 (const unsigned_char 1))
-  (let %4 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.77"))
+  (let %4 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.76"))
   (let %5 (ptr (union "__C6")) (offset $"tmp.2" 16))
   (store (ptr (struct "__C8")) %5 %4)
   (let %6 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
@@ -23013,7 +22598,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %2 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %2 (const unsigned_char 1))
-  (let %3 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.78"))
+  (let %3 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.77"))
   (let %4 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %4 %3)
   (let %5 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -23079,7 +22664,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.3")
   (let %5 (ptr unsigned_char) (offset $"tmp.3" 8))
   (store unsigned_char %5 (const unsigned_char 1))
-  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.79"))
+  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.78"))
   (let %7 (ptr (union "__C6")) (offset $"tmp.3" 16))
   (store (ptr (struct "__C8")) %7 %6)
   (let %8 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.4"))
@@ -23236,7 +22821,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %2 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %2 (const unsigned_char 1))
-  (let %3 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.80"))
+  (let %3 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.79"))
   (let %4 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %4 %3)
   (let %5 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -25142,7 +24727,7 @@
     (let %20 (ptr (const (struct "_ZNSt6ranges8__detail15__max_diff_typeE"))) (load (ptr (const (struct "_ZNSt6ranges8__detail15__max_diff_typeE"))) $"tmp.7"))
     (eval (call void &"_ZNKSt6ranges8__detail15__max_diff_typessERKS1_" (sret (struct "_ZSt15strong_ordering") $"tmp.8") %20 $"tmp.5"))
     (copy 1 $"tmp.9" $"tmp.8")
-    (copy 1 $"tmp.10" @"tmp.81")
+    (copy 1 $"tmp.10" @"tmp.80")
     (let %21 bool (call bool &"_ZStltSt15strong_orderingNSt9__cmp_cat8__unspecE" (byval (struct "_ZSt15strong_ordering") $"tmp.9") (byval (struct "_ZNSt9__cmp_cat8__unspecE") $"tmp.10")))
     (store bool $"__neg" %21))
   (block
@@ -25159,7 +24744,7 @@
     (let %26 (ptr (const (struct "_ZNSt6ranges8__detail15__max_diff_typeE"))) (load (ptr (const (struct "_ZNSt6ranges8__detail15__max_diff_typeE"))) $"tmp.13"))
     (eval (call void &"_ZNKSt6ranges8__detail15__max_diff_typessERKS1_" (sret (struct "_ZSt15strong_ordering") $"tmp.14") %26 $"tmp.11"))
     (copy 1 $"tmp.15" $"tmp.14")
-    (copy 1 $"tmp.16" @"tmp.82")
+    (copy 1 $"tmp.16" @"tmp.81")
     (let %27 bool (call bool &"_ZStltSt15strong_orderingNSt9__cmp_cat8__unspecE" (byval (struct "_ZSt15strong_ordering") $"tmp.15") (byval (struct "_ZNSt9__cmp_cat8__unspecE") $"tmp.16")))
     (store bool $"__rneg" %27))
   (let %28 bool (load bool $"__neg"))
@@ -25468,7 +25053,7 @@
       (block
         (let %12 (ptr (struct "_ZNSt6ranges8__detail15__max_diff_typeE")) (load (ptr (struct "_ZNSt6ranges8__detail15__max_diff_typeE")) $"tmp"))
         (let %13 (ptr void) (bitcast (ptr void) $"tmp.3"))
-        (copy 32 $"tmp.5" @"tmp.83")
+        (copy 32 $"tmp.5" @"tmp.82")
         (let %14 (ptr (const (struct "_ZNSt6ranges8__detail15__max_diff_typeE"))) (load (ptr (const (struct "_ZNSt6ranges8__detail15__max_diff_typeE"))) $"__r"))
         (eval (call void &"_ZNSt6ranges8__detailrsENS0_15__max_size_typeERKS1_" (sret (struct "_ZNSt6ranges8__detail15__max_size_typeE") $"tmp.4") (byval (struct "_ZNSt6ranges8__detail15__max_size_typeE") $"tmp.5") %14))
         (copy 32 $"tmp.6" $"tmp.4")
@@ -28075,7 +27660,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.2")
   (let %5 (ptr unsigned_char) (offset $"tmp.2" 8))
   (store unsigned_char %5 (const unsigned_char 1))
-  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.84"))
+  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.83"))
   (let %7 (ptr (union "__C6")) (offset $"tmp.2" 16))
   (store (ptr (struct "__C8")) %7 %6)
   (let %8 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
@@ -28183,7 +27768,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.2")
   (let %5 (ptr unsigned_char) (offset $"tmp.2" 8))
   (store unsigned_char %5 (const unsigned_char 1))
-  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.85"))
+  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.84"))
   (let %7 (ptr (union "__C6")) (offset $"tmp.2" 16))
   (store (ptr (struct "__C8")) %7 %6)
   (let %8 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
@@ -28266,7 +27851,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %3 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %3 (const unsigned_char 1))
-  (let %4 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.86"))
+  (let %4 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.85"))
   (let %5 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %5 %4)
   (let %6 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -28366,7 +27951,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %3 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %3 (const unsigned_char 1))
-  (let %4 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.87"))
+  (let %4 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.86"))
   (let %5 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %5 %4)
   (let %6 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -28447,7 +28032,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %3 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %3 (const unsigned_char 1))
-  (let %4 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.88"))
+  (let %4 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.87"))
   (let %5 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %5 %4)
   (let %6 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -28547,7 +28132,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %3 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %3 (const unsigned_char 1))
-  (let %4 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.89"))
+  (let %4 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.88"))
   (let %5 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %5 %4)
   (let %6 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -29784,7 +29369,7 @@
           (let %22 (ptr (struct "_ZSt15strong_ordering")) (null (ptr (struct "_ZSt15strong_ordering"))))
           (if %21
             (then
-              (set %22 @"tmp.90"))
+              (set %22 @"tmp.89"))
             (else
               (let %23 (ptr (const (struct "_ZNSt6ranges8__detail15__max_size_typeE"))) (load (ptr (const (struct "_ZNSt6ranges8__detail15__max_size_typeE"))) $"__r"))
               (nonnull %23)
@@ -29797,9 +29382,9 @@
               (let %27 (ptr (struct "_ZSt15strong_ordering")) (null (ptr (struct "_ZSt15strong_ordering"))))
               (if %26
                 (then
-                  (set %27 @"tmp.91"))
+                  (set %27 @"tmp.90"))
                 (else
-                  (set %27 @"tmp.92")))
+                  (set %27 @"tmp.91")))
               (set %22 %27)))
           (copy 1 $"tmp.5" %22)
           (copy 1 %0 $"tmp.5")
@@ -30149,7 +29734,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %4 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %4 (const unsigned_char 1))
-  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.93"))
+  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.92"))
   (let %6 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %6 %5)
   (let %7 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -30212,7 +29797,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %4 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %4 (const unsigned_char 1))
-  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.94"))
+  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.93"))
   (let %6 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %6 %5)
   (let %7 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -30275,7 +29860,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %4 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %4 (const unsigned_char 1))
-  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.95"))
+  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.94"))
   (let %6 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %6 %5)
   (let %7 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -30338,7 +29923,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %4 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %4 (const unsigned_char 1))
-  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.96"))
+  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.95"))
   (let %6 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %6 %5)
   (let %7 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -30401,7 +29986,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %4 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %4 (const unsigned_char 1))
-  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.97"))
+  (let %5 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.96"))
   (let %6 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %6 %5)
   (let %7 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -32613,7 +32198,7 @@
     (let %15 (ptr (struct "_ZSt15strong_ordering")) (null (ptr (struct "_ZSt15strong_ordering"))))
     (if %14
       (then
-        (set %15 @"tmp.98"))
+        (set %15 @"tmp.97"))
       (else
         (let %16 int (load int $"tmp.8"))
         (let %17 int (load int $"tmp.7"))
@@ -32621,9 +32206,9 @@
         (let %19 (ptr (struct "_ZSt15strong_ordering")) (null (ptr (struct "_ZSt15strong_ordering"))))
         (if %18
           (then
-            (set %19 @"tmp.99"))
+            (set %19 @"tmp.98"))
           (else
-            (set %19 @"tmp.100")))
+            (set %19 @"tmp.99")))
         (set %15 %19)))
     (copy 1 $"tmp.9" %15)
     (copy 1 %0 $"tmp.9")
@@ -32822,7 +32407,7 @@
     (let %15 (ptr (struct "_ZSt15strong_ordering")) (null (ptr (struct "_ZSt15strong_ordering"))))
     (if %14
       (then
-        (set %15 @"tmp.101"))
+        (set %15 @"tmp.100"))
       (else
         (let %16 int (load int $"tmp.8"))
         (let %17 int (load int $"tmp.7"))
@@ -32830,9 +32415,9 @@
         (let %19 (ptr (struct "_ZSt15strong_ordering")) (null (ptr (struct "_ZSt15strong_ordering"))))
         (if %18
           (then
-            (set %19 @"tmp.102"))
+            (set %19 @"tmp.101"))
           (else
-            (set %19 @"tmp.103")))
+            (set %19 @"tmp.102")))
         (set %15 %19)))
     (copy 1 $"tmp.9" %15)
     (copy 1 %0 $"tmp.9")
@@ -34234,7 +33819,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp")
   (let %6 (ptr unsigned_char) (offset $"tmp" 8))
   (store unsigned_char %6 (const unsigned_char 1))
-  (let %7 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.104"))
+  (let %7 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.103"))
   (let %8 (ptr (union "__C6")) (offset $"tmp" 16))
   (store (ptr (struct "__C8")) %8 %7)
   (let %9 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.1"))
@@ -34286,7 +33871,7 @@
           (then)
           (else
             (let %35 long (load long $"__tmp"))
-            (copy 1 $"tmp.5" @"tmp.105")
+            (copy 1 $"tmp.5" @"tmp.104")
             (let %36 bool (call bool &"_ZZN9__gnu_cxx6__stoaIlicJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkElSt17integral_constantIbLb1EE" %35 (byval (struct "_ZSt17integral_constantIbLb1EE") $"tmp.5")))
             (set %34 %36)))
         (if %34
@@ -34357,7 +33942,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp")
   (let %6 (ptr unsigned_char) (offset $"tmp" 8))
   (store unsigned_char %6 (const unsigned_char 1))
-  (let %7 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.106"))
+  (let %7 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.105"))
   (let %8 (ptr (union "__C6")) (offset $"tmp" 16))
   (store (ptr (struct "__C8")) %8 %7)
   (let %9 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.1"))
@@ -34409,7 +33994,7 @@
           (then)
           (else
             (let %35 long (load long $"__tmp"))
-            (copy 1 $"tmp.5" @"tmp.107")
+            (copy 1 $"tmp.5" @"tmp.106")
             (let %36 bool (call bool &"_ZZN9__gnu_cxx6__stoaIllcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkElSt17integral_constantIbLb0EE" %35 (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.5")))
             (set %34 %36)))
         (if %34
@@ -34479,7 +34064,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp")
   (let %6 (ptr unsigned_char) (offset $"tmp" 8))
   (store unsigned_char %6 (const unsigned_char 1))
-  (let %7 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.108"))
+  (let %7 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.107"))
   (let %8 (ptr (union "__C6")) (offset $"tmp" 16))
   (store (ptr (struct "__C8")) %8 %7)
   (let %9 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.1"))
@@ -34531,7 +34116,7 @@
           (then)
           (else
             (let %35 unsigned_long (load unsigned_long $"__tmp"))
-            (copy 1 $"tmp.5" @"tmp.109")
+            (copy 1 $"tmp.5" @"tmp.108")
             (let %36 bool (call bool &"_ZZN9__gnu_cxx6__stoaImmcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEmSt17integral_constantIbLb0EE" %35 (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.5")))
             (set %34 %36)))
         (if %34
@@ -34601,7 +34186,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp")
   (let %6 (ptr unsigned_char) (offset $"tmp" 8))
   (store unsigned_char %6 (const unsigned_char 1))
-  (let %7 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.110"))
+  (let %7 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.109"))
   (let %8 (ptr (union "__C6")) (offset $"tmp" 16))
   (store (ptr (struct "__C8")) %8 %7)
   (let %9 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.1"))
@@ -34653,7 +34238,7 @@
           (then)
           (else
             (let %35 long_long (load long_long $"__tmp"))
-            (copy 1 $"tmp.5" @"tmp.111")
+            (copy 1 $"tmp.5" @"tmp.110")
             (let %36 bool (call bool &"_ZZN9__gnu_cxx6__stoaIxxcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkExSt17integral_constantIbLb0EE" %35 (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.5")))
             (set %34 %36)))
         (if %34
@@ -34723,7 +34308,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp")
   (let %6 (ptr unsigned_char) (offset $"tmp" 8))
   (store unsigned_char %6 (const unsigned_char 1))
-  (let %7 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.112"))
+  (let %7 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.111"))
   (let %8 (ptr (union "__C6")) (offset $"tmp" 16))
   (store (ptr (struct "__C8")) %8 %7)
   (let %9 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.1"))
@@ -34775,7 +34360,7 @@
           (then)
           (else
             (let %35 unsigned_long_long (load unsigned_long_long $"__tmp"))
-            (copy 1 $"tmp.5" @"tmp.113")
+            (copy 1 $"tmp.5" @"tmp.112")
             (let %36 bool (call bool &"_ZZN9__gnu_cxx6__stoaIyycJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEySt17integral_constantIbLb0EE" %35 (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.5")))
             (set %34 %36)))
         (if %34
@@ -34841,7 +34426,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp")
   (let %5 (ptr unsigned_char) (offset $"tmp" 8))
   (store unsigned_char %5 (const unsigned_char 1))
-  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.114"))
+  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.113"))
   (let %7 (ptr (union "__C6")) (offset $"tmp" 16))
   (store (ptr (struct "__C8")) %7 %6)
   (let %8 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.1"))
@@ -34888,7 +34473,7 @@
           (then)
           (else
             (let %31 float (load float $"__tmp"))
-            (copy 1 $"tmp.3" @"tmp.115")
+            (copy 1 $"tmp.3" @"tmp.114")
             (let %32 bool (call bool &"_ZZN9__gnu_cxx6__stoaIffcJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEfSt17integral_constantIbLb0EE" %31 (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.3")))
             (set %30 %32)))
         (if %30
@@ -34954,7 +34539,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp")
   (let %5 (ptr unsigned_char) (offset $"tmp" 8))
   (store unsigned_char %5 (const unsigned_char 1))
-  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.116"))
+  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.115"))
   (let %7 (ptr (union "__C6")) (offset $"tmp" 16))
   (store (ptr (struct "__C8")) %7 %6)
   (let %8 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.1"))
@@ -35001,7 +34586,7 @@
           (then)
           (else
             (let %31 double (load double $"__tmp"))
-            (copy 1 $"tmp.3" @"tmp.117")
+            (copy 1 $"tmp.3" @"tmp.116")
             (let %32 bool (call bool &"_ZZN9__gnu_cxx6__stoaIddcJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEdSt17integral_constantIbLb0EE" %31 (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.3")))
             (set %30 %32)))
         (if %30
@@ -35073,7 +34658,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp")
   (let %6 (ptr unsigned_char) (offset $"tmp" 8))
   (store unsigned_char %6 (const unsigned_char 1))
-  (let %7 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.118"))
+  (let %7 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.117"))
   (let %8 (ptr (union "__C6")) (offset $"tmp" 16))
   (store (ptr (struct "__C8")) %8 %7)
   (let %9 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.1"))
@@ -35121,7 +34706,7 @@
           (else
             (copy 16 $"tmp.4" $"__tmp")
             (copy 16 $"tmp.5" $"tmp.4")
-            (copy 1 $"tmp.6" @"tmp.119")
+            (copy 1 $"tmp.6" @"tmp.118")
             (let %31 bool (call bool &"_ZZN9__gnu_cxx6__stoaIeecJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEeSt17integral_constantIbLb0EE" (byval (struct "__nfcxx_ld") $"tmp.5") (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.6")))
             (set %30 %31)))
         (if %30
@@ -35189,7 +34774,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %5 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %5 (const unsigned_char 1))
-  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.120"))
+  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.119"))
   (let %7 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %7 %6)
   (let %8 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
@@ -35282,7 +34867,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp")
   (let %6 (ptr unsigned_char) (offset $"tmp" 8))
   (store unsigned_char %6 (const unsigned_char 1))
-  (let %7 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.121"))
+  (let %7 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.120"))
   (let %8 (ptr (union "__C6")) (offset $"tmp" 16))
   (store (ptr (struct "__C8")) %8 %7)
   (let %9 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.1"))
@@ -35334,7 +34919,7 @@
           (then)
           (else
             (let %35 long (load long $"__tmp"))
-            (copy 1 $"tmp.5" @"tmp.122")
+            (copy 1 $"tmp.5" @"tmp.121")
             (let %36 bool (call bool &"_ZZN9__gnu_cxx6__stoaIliwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkElSt17integral_constantIbLb1EE" %35 (byval (struct "_ZSt17integral_constantIbLb1EE") $"tmp.5")))
             (set %34 %36)))
         (if %34
@@ -35405,7 +34990,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp")
   (let %6 (ptr unsigned_char) (offset $"tmp" 8))
   (store unsigned_char %6 (const unsigned_char 1))
-  (let %7 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.123"))
+  (let %7 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.122"))
   (let %8 (ptr (union "__C6")) (offset $"tmp" 16))
   (store (ptr (struct "__C8")) %8 %7)
   (let %9 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.1"))
@@ -35457,7 +35042,7 @@
           (then)
           (else
             (let %35 long (load long $"__tmp"))
-            (copy 1 $"tmp.5" @"tmp.124")
+            (copy 1 $"tmp.5" @"tmp.123")
             (let %36 bool (call bool &"_ZZN9__gnu_cxx6__stoaIllwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkElSt17integral_constantIbLb0EE" %35 (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.5")))
             (set %34 %36)))
         (if %34
@@ -35527,7 +35112,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp")
   (let %6 (ptr unsigned_char) (offset $"tmp" 8))
   (store unsigned_char %6 (const unsigned_char 1))
-  (let %7 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.125"))
+  (let %7 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.124"))
   (let %8 (ptr (union "__C6")) (offset $"tmp" 16))
   (store (ptr (struct "__C8")) %8 %7)
   (let %9 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.1"))
@@ -35579,7 +35164,7 @@
           (then)
           (else
             (let %35 unsigned_long (load unsigned_long $"__tmp"))
-            (copy 1 $"tmp.5" @"tmp.126")
+            (copy 1 $"tmp.5" @"tmp.125")
             (let %36 bool (call bool &"_ZZN9__gnu_cxx6__stoaImmwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEmSt17integral_constantIbLb0EE" %35 (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.5")))
             (set %34 %36)))
         (if %34
@@ -35649,7 +35234,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp")
   (let %6 (ptr unsigned_char) (offset $"tmp" 8))
   (store unsigned_char %6 (const unsigned_char 1))
-  (let %7 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.127"))
+  (let %7 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.126"))
   (let %8 (ptr (union "__C6")) (offset $"tmp" 16))
   (store (ptr (struct "__C8")) %8 %7)
   (let %9 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.1"))
@@ -35701,7 +35286,7 @@
           (then)
           (else
             (let %35 long_long (load long_long $"__tmp"))
-            (copy 1 $"tmp.5" @"tmp.128")
+            (copy 1 $"tmp.5" @"tmp.127")
             (let %36 bool (call bool &"_ZZN9__gnu_cxx6__stoaIxxwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkExSt17integral_constantIbLb0EE" %35 (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.5")))
             (set %34 %36)))
         (if %34
@@ -35771,7 +35356,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp")
   (let %6 (ptr unsigned_char) (offset $"tmp" 8))
   (store unsigned_char %6 (const unsigned_char 1))
-  (let %7 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.129"))
+  (let %7 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.128"))
   (let %8 (ptr (union "__C6")) (offset $"tmp" 16))
   (store (ptr (struct "__C8")) %8 %7)
   (let %9 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.1"))
@@ -35823,7 +35408,7 @@
           (then)
           (else
             (let %35 unsigned_long_long (load unsigned_long_long $"__tmp"))
-            (copy 1 $"tmp.5" @"tmp.130")
+            (copy 1 $"tmp.5" @"tmp.129")
             (let %36 bool (call bool &"_ZZN9__gnu_cxx6__stoaIyywJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEySt17integral_constantIbLb0EE" %35 (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.5")))
             (set %34 %36)))
         (if %34
@@ -35889,7 +35474,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp")
   (let %5 (ptr unsigned_char) (offset $"tmp" 8))
   (store unsigned_char %5 (const unsigned_char 1))
-  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.131"))
+  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.130"))
   (let %7 (ptr (union "__C6")) (offset $"tmp" 16))
   (store (ptr (struct "__C8")) %7 %6)
   (let %8 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.1"))
@@ -35936,7 +35521,7 @@
           (then)
           (else
             (let %31 float (load float $"__tmp"))
-            (copy 1 $"tmp.3" @"tmp.132")
+            (copy 1 $"tmp.3" @"tmp.131")
             (let %32 bool (call bool &"_ZZN9__gnu_cxx6__stoaIffwJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEfSt17integral_constantIbLb0EE" %31 (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.3")))
             (set %30 %32)))
         (if %30
@@ -36002,7 +35587,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp")
   (let %5 (ptr unsigned_char) (offset $"tmp" 8))
   (store unsigned_char %5 (const unsigned_char 1))
-  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.133"))
+  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.132"))
   (let %7 (ptr (union "__C6")) (offset $"tmp" 16))
   (store (ptr (struct "__C8")) %7 %6)
   (let %8 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.1"))
@@ -36049,7 +35634,7 @@
           (then)
           (else
             (let %31 double (load double $"__tmp"))
-            (copy 1 $"tmp.3" @"tmp.134")
+            (copy 1 $"tmp.3" @"tmp.133")
             (let %32 bool (call bool &"_ZZN9__gnu_cxx6__stoaIddwJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEdSt17integral_constantIbLb0EE" %31 (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.3")))
             (set %30 %32)))
         (if %30
@@ -36121,7 +35706,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp")
   (let %6 (ptr unsigned_char) (offset $"tmp" 8))
   (store unsigned_char %6 (const unsigned_char 1))
-  (let %7 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.135"))
+  (let %7 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.134"))
   (let %8 (ptr (union "__C6")) (offset $"tmp" 16))
   (store (ptr (struct "__C8")) %8 %7)
   (let %9 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.1"))
@@ -36169,7 +35754,7 @@
           (else
             (copy 16 $"tmp.4" $"__tmp")
             (copy 16 $"tmp.5" $"tmp.4")
-            (copy 1 $"tmp.6" @"tmp.136")
+            (copy 1 $"tmp.6" @"tmp.135")
             (let %31 bool (call bool &"_ZZN9__gnu_cxx6__stoaIeewJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEeSt17integral_constantIbLb0EE" (byval (struct "__nfcxx_ld") $"tmp.5") (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.6")))
             (set %30 %31)))
         (if %30
@@ -36237,7 +35822,7 @@
   (store (ptr (struct "__C7")) @"__curr_eh_stack_entry" $"tmp.1")
   (let %5 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %5 (const unsigned_char 1))
-  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.137"))
+  (let %6 (ptr (struct "__C8")) (bitcast (ptr (struct "__C8")) @"tmp.136"))
   (let %7 (ptr (union "__C6")) (offset $"tmp.1" 16))
   (store (ptr (struct "__C8")) %7 %6)
   (let %8 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
