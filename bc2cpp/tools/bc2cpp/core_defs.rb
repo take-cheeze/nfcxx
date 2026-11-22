@@ -51,8 +51,6 @@ module CoreDefs
   # the steps of a compiled Fiber, Enumerator#next over Enumerator#each, is a C boundary its yield cannot cross), and the
   # parse scan drops a name some file defines outside a class body. The compile is kept (outside_compile) for
   # BlockSelfWorld's read of the same sources.
-  class OutsideCompileError < StandardError; end
-
   # The variables compiling and registering the outside sources read (mrbc's, the irep cache's and the IR switches').
   OUTSIDE_PAIRS_ENV = %w[MRBC BC2CPP_MRBC_RB BC2CPP_MRBC_RB_LOG BC2CPP_NO_MRBC BC2CPP_IREP_CACHE_DIR BC2CPP_EXT_PREFIX
                          BC2CPP_CALL_CROSSCHECK BC2CPP_IR_SCALAR_SEEN BC2CPP_IR_QUERY_KEYS
@@ -65,21 +63,27 @@ module CoreDefs
 
     # The [owner, name] pairs depend on those sources, the compile's settings and the IR switches alone (OUTSIDE_PAIRS_ENV),
     # so ScanCache keeps them: the compile and the registry over every linked Prism and RBS source were most of this
-    # phase. A failed compile is not stored, so it is reported again each run.
-    begin
-      pairs = ScanCache.fetch('core_defs.outside_pairs', unread, cache_absent: false, env: OUTSIDE_PAIRS_ENV) do
-        outside_ireps, outside_root = begin
-          outside_compile(unread, symbol, out_dir)
-        rescue ScanCache::Error
-          raise
-        rescue StandardError => e
-          raise OutsideCompileError, e.message
-        end
+    # phase. A compile that fails (deterministic for the same sources and settings) is kept as [:refused, why] and
+    # reported each run: the block returns rather than raises, as a self-compiled bc2cpp left ScanCache's computing
+    # count raised when an exception unwound its scan.
+    pairs = ScanCache.fetch('core_defs.outside_pairs', unread, cache_absent: false, env: OUTSIDE_PAIRS_ENV) do
+      compiled_outside = begin
+        outside_compile(unread, symbol, out_dir)
+      rescue ScanCache::Error
+        raise
+      rescue StandardError => e
+        [:refused, e.message.lines.first&.strip]
+      end
+      if compiled_outside.first == :refused
+        compiled_outside
+      else
+        outside_ireps, outside_root = compiled_outside
         build_registry(outside_ireps.dup, outside_root)[0].values.flatten.to_set { |d| [d.owner, d.name] }
       end
-    rescue OutsideCompileError => e
+    end
+    if pairs.is_a?(Array)
       # As BlockSelfWorld's read of the same sources: one that does not compile is reported, and nothing is learned.
-      warn "bc2cpp: CORE_OUTSIDE_REDEFINED: an outside Ruby source does not compile (#{e.message.lines.first&.strip})"
+      warn "bc2cpp: CORE_OUTSIDE_REDEFINED: an outside Ruby source does not compile (#{pairs[1]})"
       return Set.new
     end
     registry.values.flatten.select do |d|

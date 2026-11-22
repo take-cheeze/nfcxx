@@ -88,10 +88,12 @@ module IrepCache
 
   def prune(dir, written)
     trees = Dir[File.join(dir, '*.marshal')].reject { |tree| tree == written }
-    trees.sort_by { |tree| -File.mtime(tree).to_f }.drop(KEEP).each do |stale|
+    # File.stat, as ScanCache reads a file's time: a self-compiled bc2cpp's File has no File.mtime.
+    trees.sort_by { |tree| -File.stat(tree).mtime.to_i }.drop(KEEP).each do |stale|
       FileUtils.rm_f([stale, "#{stale}.lock"])
     end
-  rescue SystemCallError
+  rescue StandardError
+    # Pruning only saves disk; a failure must not fail the decode it follows.
     nil
   end
 

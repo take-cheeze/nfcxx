@@ -11,9 +11,14 @@ module FileUtils
     path
   end
 
-  # Deletes a file if it exists; a missing file is not an error.
+  # Deletes a file, or each file of an Array, if it exists; a missing file is not an error. CRuby's takes a list too, so
+  # `rm_f([a, b])` (IrepCache.prune) deleted nothing here and raised instead.
   def self.rm_f(path)
-    File.delete(path) if File.exist?(path)
+    if path.is_a?(Array)
+      path.each { |each_path| rm_f(each_path) }
+    else
+      File.delete(path) if File.exist?(path)
+    end
     path
   end
 
@@ -34,7 +39,11 @@ module FileUtils
 
   # Like remove_entry, but a missing path is not an error.
   def self.rm_rf(path)
-    remove_entry(path) if File.exist?(path)
+    if path.is_a?(Array)
+      path.each { |each_path| rm_rf(each_path) }
+    elsif File.exist?(path)
+      remove_entry(path)
+    end
     path
   end
 end
