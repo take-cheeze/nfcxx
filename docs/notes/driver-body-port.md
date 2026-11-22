@@ -32,10 +32,12 @@ Checked against origin/main after #1432 (the compile cache's lookup planner).
 
 The body can be deleted only when the Ruby driver runs every stage without it. In order:
 
-1. **Argument records.** Done for the body's variables: the body evals `scripts/nfcxx-loop.rb --bash-state`, which prints the
-   state as bash statements and the refusals itself (status 2, or status 1 for a missing value or an unfinished loop). The
-   loop still runs in the body, after its pre-loop steps (`-fsyntax-only`, `--bundle-*`, `--cuda-driver=`, `set --`), so
-   its arguments are the body's. Moving the call up to `scripts/nfcxx.rb` needs those steps ported first.
+1. **Argument records.** Mostly done. `scripts/nfcxx.rb` runs `scripts/nfcxx-loop.rb --bash-state` before the routes (design
+   (a): the result goes to the body in the environment, `NFCXX_LOOP_STATUS` and `NFCXX_LOOP_STATE`, and the body evals it at
+   its loop's place, so a refusal is printed where it was). The body runs the loop itself only when the Ruby driver did not:
+   when the arguments name `--bundle-*`, `--cuda-driver=` or `libcuda`, because the body's wrappers rewrite them first
+   (`scripts/wrap.sh`, which still runs in the body). Porting those wrappers to `scripts/nfcxx.rb` (they are `scripts/wrap.rb`
+   calls, with the EXEC and CONTINUE results) removes the fallback and the body's loop.
 2. **Early exits.** `--emit-hip`, the `-x` and `-MD` checks. The module block is planned in Ruby
    (`scripts/nfcxx-modules-plan.rb`: scans, refusals, the module build of a link, the compile's module options); the body
    only calls it at the block's place and ends with the build's status.

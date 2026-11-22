@@ -267,4 +267,89 @@ Dir.mktmpdir('mono-exact-runtime') do |dir|
   end
 end
 
+
+# NILABLE_SCOPED_RECEIVER: `@world.party` on a nil-or-World receiver returns World#party's value, since a nil receiver
+# raises instead, so `.count` on it is exactly Party although Booth#party returns a Badge. A Ruby NilClass#party keeps
+# the by-name join. BC2CPP_NILABLE_SCOPED_RECEIVER=0 is the output before it.
+scoped_source = <<~RUBY
+  class Party
+    def initialize; @n = 1; nil; end
+    def count; @n + 1; end
+  end
+  class Badge; end
+  class World
+    attr_reader :party
+    def initialize; @party = Party.new; nil; end
+  end
+  class Booth
+    def initialize; @party = Badge.new; nil; end
+    def party; @party; end
+  end
+  class Desk
+    def initialize; @world = nil; nil; end
+    def open; @world = World.new; nil; end
+    def party_count; @world.party.count; end
+  end
+RUBY
+scoped_owners = %w[Party Badge World Booth Desk]
+nil_party = "class NilClass; def party; Badge.new; end; end\n"
+scoped_body = lambda do |source, dir, env = {}|
+  env.each { |k, v| ENV[k] = v }
+  code, err = Bc2cppFixtureRuntime.generate(source, dir, only_owners: scoped_owners)
+  [code[/^mrb_value Desk_party_count_impl\([^)]*\) \{\n.*?^\}/m].to_s.gsub(dir, ''), code, err]
+ensure
+  env.each_key { |k| ENV.delete(k) }
+end
+Dir.mktmpdir('nilable-scoped-receiver') do |dir|
+  on_body, _code, on_err = scoped_body.call(scoped_source, File.join(dir, 'on'))
+  off_body, = scoped_body.call(scoped_source, File.join(dir, 'off'), 'BC2CPP_NILABLE_SCOPED_RECEIVER' => '0')
+  nil_body, = scoped_body.call(scoped_source + nil_party, File.join(dir, 'nil'))
+  nil_off_body, = scoped_body.call(scoped_source + nil_party, File.join(dir, 'nil_off'), 'BC2CPP_NILABLE_SCOPED_RECEIVER' => '0')
+  count_arm = 'CLOSED_WORLD nomethod: recv.count'
+  check.call('before, a nil-or-World receiver joins every `party`: `.count` keeps its class guard and nomethod arm',
+             off_body.include?(count_arm) && class_tests.call(off_body).positive?)
+  check.call('a nil-or-World receiver scopes `party` to World: `.count` is a direct Party call with no class test',
+             !on_body.include?(count_arm) && on_body.include?(':count -> Party#count') && class_tests.call(on_body).zero?)
+  check.call('a nil that answers `party` keeps the joined result and the guarded `.count`',
+             nil_body.include?(count_arm) && nil_body == nil_off_body)
+  unless ENV['CC_GENERATED_ONLY'] == '1'
+    build = Bc2cppFixtureRuntime.full_or_build
+    if build
+      driver = <<~'RUBY'
+        show = lambda do |name, &block|
+          begin
+            puts "#{name}: #{block.call.inspect}"
+          rescue Exception => e
+            puts "#{name}: #{e.class}"
+          end
+        end
+        d = Desk.new
+        show.call('nil world') { d.party_count }
+        d.open
+        show.call('world') { d.party_count }
+        puts 'end'
+      RUBY
+      harness = <<~CPP
+        static int scenario(mrb_state* M) {
+          std::fflush(stdout);
+          mrb_load_string(M, R"SCOPED(#{driver})SCOPED");
+          std::fflush(stdout);
+          if (M->exc) { mrb_print_error(M); return 1; }
+          return 0;
+        }
+      CPP
+      built, output = Bc2cppFixtureRuntime.run(File.join(dir, 'on'), on_err, scoped_owners, harness, build: build, full: true)
+      sections = Bc2cppFixtureRuntime.sections(output)
+      interpreted = sections['interpreted']
+      compiled = sections['compiled']
+      check.call('nilable scoped receiver: the runtime fixture builds and runs', built)
+      check.call('nilable scoped receiver: values and errors match interpreted mruby',
+                 interpreted && interpreted.last == 'end' && interpreted == compiled)
+      puts output unless built && interpreted && interpreted == compiled
+    else
+      puts '  SKIP: no full-core mruby build for the nilable scoped receiver runtime checks'
+    end
+  end
+end
+
 suite.finish!
