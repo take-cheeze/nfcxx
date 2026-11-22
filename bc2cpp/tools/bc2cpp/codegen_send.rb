@@ -341,12 +341,14 @@ class CodeGen
           if native_param_unbox_name?('_init_size')
             # Bitmap#initialize branches on `f.kind_of? String` (a dispatched test), so only the first argument keeps
             # its tag test; _init_size then converts both as "ii".
-            arg_checks = native_int_arg_proven?(*int_site, argv, 0) ? '' : "mrb_integer_p(#{argv[0]})"
-            unbox_stmts, unboxed_argv = native_param_unbox_args(d, argv, [:int] * argv.size, unboxed: [0])
+            first_proven = native_int_arg_proven?(*int_site, argv, 0)
+            arg_checks = first_proven ? '' : "mrb_integer_p(#{argv[0]})"
+            unbox_stmts, unboxed_argv = native_param_unbox_args(d, argv, [:int] * argv.size, unboxed: [0],
+                                                                fixnum: first_proven ? [0] : [])
           else
-            arg_checks = argv.each_index.reject { |i| native_int_arg_proven?(*int_site, argv, i) }
-                             .map { |i| "mrb_integer_p(#{argv[i]})" }.join(' && ')
-            unboxed_argv = argv.map { |a| "mrb_integer(#{a})" }
+            proven_args = argv.each_index.select { |i| native_int_arg_proven?(*int_site, argv, i) }
+            arg_checks = (argv.each_index.to_a - proven_args).map { |i| "mrb_integer_p(#{argv[i]})" }.join(' && ')
+            unboxed_argv = argv.each_with_index.map { |a, i| "#{native_int_read(proven_args.include?(i))}(#{a})" }
           end
           arg_checks = nil if arg_checks.empty?
           guard = [class_guard, arg_checks].compact.join(' && ')
@@ -1817,7 +1819,7 @@ class CodeGen
     call_argv = Array.new(argv.size) do |i|
       a = argv[i]
       case call_types[i]
-      when :fixnum then "mrb_as_int(M, #{a})"
+      when :fixnum then fixnum_arg_unbox?(a) ? "mrb_fixnum(#{a})" : "mrb_as_int(M, #{a})"
       when :symbol then "mrb_obj_to_sym(M, #{a})"
       else a
       end
@@ -1835,6 +1837,17 @@ class CodeGen
                                                   "#{native_positions.join(', ')} unboxed here to match " \
                                                   "#{impl}'s own native argument type)"
     [call_argv, native_note]
+  end
+
+  # FIXNUM_ARG_UNBOX: a NATIVE_ARGS position holds a Fixnum at every SEND site of the name (ENTRY_ARG_CALLSITE_PROOF
+  # rule 9), so a site register passed there reads with mrb_fixnum. Any other expression (a C local of a helper arm)
+  # keeps mrb_as_int. BC2CPP_FIXNUM_ARG_UNBOX=0 keeps mrb_as_int everywhere.
+  def fixnum_arg_unbox?(arg)
+    fixnum_arg_unbox_on? && arg.match?(/\Ar\d+\z/)
+  end
+
+  def fixnum_arg_unbox_on?
+    ENV['BC2CPP_FIXNUM_ARG_UNBOX'] != '0'
   end
 
   # Prove the first implementation in a receiver's inherited lookup chain. An

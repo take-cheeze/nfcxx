@@ -642,7 +642,41 @@ rescue NfcxxMissing => e
   0
 end
 
+# bash-state mode (the frozen body's argument loop, `--bash-state -- ARG...`): the state the loop leaves, as the shell statements
+# that set the body's variables, from the same loop as the records (run_records). The body evals the output: a scalar the loop
+# assigned is "NAME=VALUE", an array element is "NAME+=(VALUE)" in order, and a value option given last is a "loop_no_value OPTION"
+# statement (the body's set -u ends it, as the bash did). A refusal is its message on standard error with status 2; a loop that
+# does not finish (or a refusal with no message) is the stopped message with status 1. The loop's -fuse-ld= values are the ld.NAME
+# programs on PATH. No NFCXX_* environment is read: the body's setup has set those variables already.
+def run_bash_state(argv)
+  state = LoopState.new
+  run_loop(argv, state, ld_on_path(argv))
+  state.assigned.each { |name| $stdout.write("#{name}=#{Shellwords.escape(state.public_send(name).to_s)}\n") }
+  LOOP_ARRAYS.each { |name| state.public_send(name).each { |x| $stdout.write("#{name}+=(#{Shellwords.escape(x)})\n") } }
+  0
+rescue NfcxxExit => e
+  return stopped_status if e.message.empty?  # the body treats an empty refusal as no refusal, and the loop as not finished
+
+  $stderr.write("#{e.message}\n")
+  2
+rescue NfcxxMissing => e
+  $stdout.write("loop_no_value #{Shellwords.escape(e.message)}\n")
+  0
+rescue StandardError
+  stopped_status
+end
+
+def stopped_status
+  $stderr.write("nfcxx: scripts/nfcxx-loop.rb stopped before its end (the argument state is incomplete)\n")
+  1
+end
+
 def main(argv)
+  if argv.first == "--bash-state"
+    argv.shift
+    argv.shift if argv.first == "--"
+    return run_bash_state(argv)
+  end
   if argv.first == "--fso"
     # the -fsyntax-only pre-loop (the bash runs it before its setup): fso_kind and fso_argv as shell statements, with the
     # scratch directory of the object as the token @@NFCXX_FSO_TMP@@ for the bash to replace

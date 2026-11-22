@@ -84,33 +84,8 @@ temp_cleanup() {
   [ -z "${cudatmp:-}" ] || rm -rf "$cudatmp"
   [ -z "${fso_dir:-}" ] || rm -rf "$fso_dir"
 }
-# -fsyntax-only: the compile without keeping its object (a full front-end and back-end pass, so it reports every error a
-# -c would; build systems and scripts use it as a type check). Run as `-c -o TMP.o`, the object removed.
-for a in "$@"; do
-  if [ "$a" = -fsyntax-only ]; then
-    fso_args=(); fso_has_o=0; fso_has_E=0
-    for b in "$@"; do
-      case $b in -fsyntax-only) ;; -o) fso_has_o=1; fso_args+=("$b") ;; -E) fso_has_E=1; fso_args+=("$b") ;; *) fso_args+=("$b") ;; esac
-    done
-    [ $fso_has_E = 1 ] && { temp_cleanup; exec "$0" "${fso_args[@]}"; }
-    if [ $fso_has_o = 1 ]; then
-      # An explicit -o is honoured by the real compile; the type check discards it.
-      fso_dir=$(mktemp -d); trap temp_cleanup EXIT
-      fso_new=(); fso_skip=0
-      for b in "${fso_args[@]}"; do
-        if [ $fso_skip = 1 ]; then fso_skip=0; fso_new+=("$fso_dir/x.o"); continue; fi
-        [ "$b" = -o ] && fso_skip=1; fso_new+=("$b")
-      done
-      "$0" -c "${fso_new[@]}"; exit $?
-    fi
-    fso_dir=$(mktemp -d); trap temp_cleanup EXIT
-    "$0" -c "${fso_args[@]}" -o "$fso_dir/x.o"; exit $?
-  fi
-done
-source "$root/scripts/wrap.sh"   # --bundle-libs and --cuda-driver= (docs/notes/bundle.md, docs/notes/cuda-driver.md)
-bundle_wrap "$root/nfcxx" "$@"   # --bundle-libs (docs/notes/bundle.md)
-cuda_driver_wrap "$root/nfcxx" "$@"   # --cuda-driver= (docs/notes/cuda-driver.md)
-set -- ${cuda_driver_args[@]+"${cuda_driver_args[@]}"}
+# -fsyntax-only is rewritten by the Ruby driver before this body runs (scripts/nfcxx-syntax-only.rb).
+# --bundle-libs and --cuda-driver= are wrapped by the Ruby driver before this body runs (scripts/wrap.rb, from scripts/nfcxx.rb).
 source "$root/scripts/trace.sh"
 edg=${EDG_BUILD:-$root/build/edg}/bin
 # The exception handling state is per thread when the EDG runtime was built so (lib_src's RUNTIME_EH_TLS, Linux targets;
@@ -395,71 +370,20 @@ eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary direc
   trace_finish
   return $rc
 }
-# C++ modules (docs/notes/modules.md): the source scans are scripts/nfcxx-modscan.rb (is-module, decl-name, check; they read
-# the declarations at the start of a line only; tests/nfcxx-modscan/oracle-wrappers.sh is the bash they replaced).
-# mod_build_program: a program with modules is built by scripts/nfcxx-modules.rb build (docs/notes/modules.md): each source is
-# compiled on its own (EDG takes one translation unit per call with modules on), the interface units first in dependency order,
-# then the objects are linked; each compile is this driver again. The build's temporary directory is the Ruby's. The EXIT trap
-# is left as it is, so cu_prepare's cleanup and trace_finish still run. A failing step ends the build with its status (set -e).
-mod_build_program() {
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-modules.rb" build "$root" "$out" "${moddir:-}" "${#srcs[@]}" "${srcs[@]}" "${nfcxx_argv[@]}"
-  exit $?
+modules_plan_input() {  # the records of the modules block: the state scripts/nfcxx-modules-plan.rb reads (its header lists the groups)
+  state_put root "$root"; state_put out "$out"; state_put moddir "${moddir:-}"; state_put std "$std"
+  state_put emit_c "$emit_c"; state_put compile_only "$compile_only"
+  state_put cfiles ${cfiles[@]+"${cfiles[@]}"}; state_put srcs ${srcs[@]+"${srcs[@]}"}; state_put argv ${nfcxx_argv[@]+"${nfcxx_argv[@]}"}
 }
 nfcxx_argv=("$@")   # the command as given: the compile cache keys on it (see cache_key)
 args0=("$@")   # the arguments as given: the SYCL two-pass build below re-runs the driver with them
-# BEGIN the argument loop: scripts/nfcxx-loop.rb --records reads the arguments and answers the state they leave; this block
-# sets that state. The records are NUL-terminated: "s NAME=VALUE" a scalar the loop assigns; "a NAME=VALUE" an element the
-# loop appends to an array; "x MESSAGE" an argument the loop refuses (printed; status 2); "u OPTION" a value option given
-# last (set -u ends the driver, as the bash loop did: "$2: unbound variable"); "z" the end marker, written only on success.
-# A planner that stops before "z" ends the driver with status 1, so a crash is never silent.
-loop_set() {  # loop_set NAME=VALUE: the loop's scalar NAME
-  printf -v "${1%%=*}" '%s' "${1#*=}"
-}
-loop_append() {  # loop_append NAME=VALUE: appends VALUE to the loop's array NAME
-  case ${1%%=*} in
-    files) files+=("${1#*=}") ;;
-    cflags) cflags+=("${1#*=}") ;;
-    cfiles) cfiles+=("${1#*=}") ;;
-    cu_inputs) cu_inputs+=("${1#*=}") ;;
-    cpp2_inputs) cpp2_inputs+=("${1#*=}") ;;
-    srcs) srcs+=("${1#*=}") ;;
-    ppflags) ppflags+=("${1#*=}") ;;
-    pie_opts) pie_opts+=("${1#*=}") ;;
-    preinc) preinc+=("${1#*=}") ;;
-    sysdirs) sysdirs+=("${1#*=}") ;;
-    isa) isa+=("${1#*=}") ;;
-    diag_opts) diag_opts+=("${1#*=}") ;;
-    asanopts) asanopts+=("${1#*=}") ;;
-    *) echo "nfcxx: scripts/nfcxx-loop.rb sent an unknown array (${1%%=*})" >&2; exit 1 ;;
-  esac
-}
+# BEGIN the argument loop: scripts/nfcxx-loop.rb --bash-state reads the arguments and prints the statements that set the state
+# they leave (the loop's scalars and arrays, from the planner's records; the setup above has set the NFCXX_* defaults). A refusal
+# is its message on standard error, with status 2 (the driver ends with it). A value option given last is a loop_no_value
+# statement: set -u ends the driver there ("$2: unbound variable"). A planner that stops before its end ends the driver with 1.
 loop_no_value() { : "$2"; }   # a value option given last: $2 is unset here (set -u ends the driver)
-# the ld.NAME programs that exist, for -fuse-ld=NAME (the planner does not ask the shell)
-loop_ld=""
-for loop_a in "$@"; do
-  case $loop_a in
-    -fuse-ld=*) loop_n=${loop_a#-fuse-ld=}
-                if [ -n "$loop_n" ] && command -v "ld.$loop_n" >/dev/null 2>&1; then loop_ld+="$loop_n,"; fi ;;
-  esac
-done
-loop_recs=(); loop_done=0; loop_refused=""; loop_missing=""
-while IFS= read -r -d '' loop_rec; do
-  case $loop_rec in
-    z) loop_done=1 ;;
-    x*) loop_refused=${loop_rec:1} ;;
-    u*) loop_missing=${loop_rec:1} ;;
-    *) loop_recs+=("$loop_rec") ;;
-  esac
-done < <("${RUBY:-ruby}" "$root/scripts/nfcxx-loop.rb" --records --ld-available="$loop_ld" -- "$@")
-if [ -n "$loop_refused" ]; then printf '%s\n' "$loop_refused" >&2; exit 2; fi
-if [ -n "$loop_missing" ]; then loop_no_value "$loop_missing"; fi
-[ $loop_done = 1 ] || { echo "nfcxx: scripts/nfcxx-loop.rb stopped before its end (the argument state is incomplete)" >&2; exit 1; }
-for loop_rec in ${loop_recs[@]+"${loop_recs[@]}"}; do
-  case $loop_rec in
-    s*) loop_set "${loop_rec:1}" ;;
-    a*) loop_append "${loop_rec:1}" ;;
-  esac
-done
+loop_state=$("${RUBY:-ruby}" "$root/scripts/nfcxx-loop.rb" --bash-state -- "$@") || exit $?
+eval "$loop_state"
 shift $#
 # END the argument loop
 # The early exits: the refusals of the state above and the --emit-hip route are scripts/nfcxx-early-exit.rb's (pre: status 2 is a
@@ -515,25 +439,32 @@ fi
 # The refusals after the -E route (stdin without -E, -x, dependency files without -c, the EDG build, the dialect): the same planner.
 early_status=0; "${RUBY:-ruby}" "$root/scripts/nfcxx-early-exit.rb" post < <(early_records) || early_status=$?
 [ $early_status = 0 ] || exit $early_status
-# C++ modules (docs/notes/modules.md). A program whose sources declare or import a module is built by mod_build_program, which
-# runs this driver once per source. A compile gets the module options: --modules, the directory of the interface files (BMIs,
-# --module-dir, else the directory of -o) and, for an interface unit, the BMI it writes.
+# C++ modules (docs/notes/modules.md): scripts/nfcxx-modules-plan.rb plans the block. It scans the sources, refuses a module program
+# (the standard, --emit-c, C sources, a partition, a header unit, an import of std, -c with more than one source), builds a link
+# with scripts/nfcxx-modules.rb build (the driver ends with the build's status, as the bash's mod_build_program did), and gives a
+# compile its module options: --modules, the directory of the interface files (BMIs, --module-dir, else the directory of -o)
+# and, for an interface unit, the BMI it writes. The EXIT trap is left as it is, so cu_prepare's cleanup and trace_finish still
+# run when the build ends the driver. Its state and reply are records in a temporary directory, removed before the driver ends.
 modules=0; modopts=()
-for s in ${srcs[@]+"${srcs[@]}"}; do
-  if "${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" is-module "$s"; then modules=1; fi
-done
-if [ $modules = 1 ]; then
-  case $std in --c++98|--c++03|--c++11|--c++14|--c++17) echo "nfcxx: C++ modules need -std=c++20 or later" >&2; exit 2 ;; esac
-  [ $emit_c = 0 ] || { echo "nfcxx: --emit-c does not support C++ modules yet (docs/notes/modules.md)" >&2; exit 2; }
-  [ ${#cfiles[@]} = 0 ] || { echo "nfcxx: C sources cannot be built with C++ modules yet (docs/notes/modules.md)" >&2; exit 2; }
-  for s in ${srcs[@]+"${srcs[@]}"}; do "${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" check "$s" || exit $?; done
-  if [ $compile_only = 0 ]; then mod_build_program; fi
-  [ ${#srcs[@]} = 1 ] || { echo "nfcxx: -c with C++ modules takes one source" >&2; exit 2; }
-  mdir=${moddir:-$(dirname "$out")}; mkdir -p "$mdir"; mdir=$(cd "$mdir" && pwd -P)
-  modopts=(--modules --modules_directory "$mdir")
-  n=$("${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" decl-name "${srcs[0]}")
-  [ -z "$n" ] || modopts+=(--create_module_interface "$mdir/$n.eifc")
-fi
+modplan=$(mktemp -d) || exit $?
+modules_plan_input > "$modplan/state"
+modrc=0; "${RUBY:-ruby}" "$root/scripts/nfcxx-modules-plan.rb" "$modplan/state" "$modplan/reply" || modrc=$?
+if [ $modrc != 0 ]; then rm -rf "$modplan"; exit $modrc; fi
+modgroup=""; modbuilt=""; modz=0
+while IFS= read -r -d "" modrec; do
+  case $modrec in
+    k*) modgroup=${modrec:1} ;;
+    v*) case $modgroup in
+          modules) modules=${modrec:1} ;;
+          modopts) modopts+=("${modrec:1}") ;;
+          built) modbuilt=${modrec:1} ;;
+        esac ;;
+    z) modz=1 ;;
+  esac
+done < "$modplan/reply"
+rm -rf "$modplan"
+[ $modz = 1 ] || { echo "nfcxx: scripts/nfcxx-modules-plan.rb stopped before its end (the module block is incomplete)" >&2; exit 1; }
+[ -z "$modbuilt" ] || exit "$modbuilt"
 
 # The default backend: Path B on x86-64 Linux (and on aarch64 Linux and arm64 macOS for freestanding programs), unless the request needs
 # something only qbe or gcc does (cosmo, --emit-c, --target, -E, -M, -shared; a freestanding program takes Path B on

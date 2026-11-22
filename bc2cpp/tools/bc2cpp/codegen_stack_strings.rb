@@ -25,8 +25,9 @@ require_relative 'escape_analysis'
 class CodeGen
   # Natives that read a String argument's bytes and keep, mutate and share none of it, by position. The registrations
   # must be exactly NATIVE_ARG_OK's audited files for the name (see stack_string_reader_ok?).
-  #   section  profiler.cxx (real and WIO stub): "S&", then mrb_string_value_cstr, which writes only when the bytes
-  #            lack a NUL terminator (a C literal has one) and otherwise raises on an embedded NUL
+  #   section  profiler.cxx (real and WIO stub): "S&" or "o&" (a String passes either unconverted), then
+  #            mrb_string_value_cstr, which writes only when the bytes lack a NUL terminator (a C literal has one)
+  #            and otherwise raises on an embedded NUL
   #   pack / unpack  pack.c prepare_tmpl: "S" into a stack struct, then RSTRING_PTR/LEN reads; errors format copies
   STACK_STRING_READERS = { 'section' => [0], 'pack' => [0], 'unpack' => [0] }.freeze
   STACK_STRING_TESTS = Set[:JMPIF, :JMPNOT, :JMPNIL].freeze

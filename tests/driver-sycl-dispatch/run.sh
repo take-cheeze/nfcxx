@@ -29,7 +29,7 @@ run_case() {  # run_case NAME ARGS...: the normalized outcome of one case, in it
   printf '#include <sycl/sycl.hpp>\nint k;\n' > "$w/sy.c"
   printf '#include <sycl/sycl.hpp>\nint k;\n' > "$w/sy.cu"
   printf 'int k;\n' > "$w/plain.cc"; printf 'int k;\n' > "$w/pre.h"
-  (cd "$w" && env -i PATH="/usr/local/bin:/usr/bin:/bin" HOME="$sb" TMPDIR="$sb/tmp" "$repo/nfcxx" "$@" \
+  (cd "$w" && env -i PATH="/usr/local/bin:/usr/bin:/bin" HOME="$sb" TMPDIR="$sb/tmp" EDG_BUILD="$sb/no-edg" "$repo/nfcxx" "$@" \
      >"$sb/out" 2>"$sb/err"; echo $? > "$sb/status")
   local norm=(-e "s#$sb/tmp/[^ \"/]*#<tmp>#g" -e "s#$repo#<repo>#g" -e "s#$sb#<sb>#g")
   sed "${norm[@]}" "$sb/out" > "$sb/out.n"; sed "${norm[@]}" "$sb/err" > "$sb/err.n"

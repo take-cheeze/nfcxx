@@ -1,0 +1,7 @@
+kmodules
+v1
+kmodopts
+kbuilt
+v7
+z
+["build", "WORK/stub", "prog", "", "2", "geom.cppm", "main.cpp", "geom.cppm", "main.cpp", "-o", "prog"]

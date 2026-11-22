@@ -1,0 +1,5 @@
+== -c m.cpp -fsanitize=bogus -o m.o
+-- stdout
+-- stderr
+nfcxx: -fsanitize=bogus is not supported (implemented: undefined, signed-integer-overflow, integer-divide-by-zero, shift, bounds, null, unreachable, return, float-cast-overflow)
+status=2

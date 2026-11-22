@@ -1,7 +1,8 @@
 #!/bin/bash
 # The pinned copy (pinned-port-modules.txt) was taken from the driver at commit 1aa750d8b52163609481ea3cb4ad631389529a7b, before the B8 switch.
-# Differential test of nfcxx's C++ module options (docs/notes/modules.md): the module block verbatim from the frozen driver
-# (tests/driver-body/nfcxx-bash, the bash that computed modopts itself) against the block verbatim from ./nfcxx (which calls
+# Differential test of nfcxx's C++ module options (docs/notes/modules.md): the module block verbatim from the bash that computed
+# modopts itself (pinned-oracle-modules.txt, the frozen body's lines before the planner took them) against the block verbatim from
+# the pinned pre-switch driver (pinned-port-modules.txt, which calls
 # scripts/nfcxx-modopts.rb plan). Each case runs both in a fresh directory with the real module scanner: the module directory,
 # the options, the status and messages of the block, and the directory tree it leaves. Output that names the case directory is
 # normalized to @W; @D in a value is replaced by the case directory.
@@ -13,7 +14,9 @@ work=$(cd "$(mktemp -d)" && pwd -P); trap 'rm -rf "$work"' EXIT
 pass=0; fail=0
 
 # the blocks, copied from the two drivers: from the mdir line to the last line of the module options
-sed -n '/^  mdir=\${moddir:-\$(dirname "\$out")}; mkdir -p/,/^  \[ -z "\$n" \] || modopts+=/p' "$repo/tests/driver-body/nfcxx-bash" > "$work/oracle.sh"
+# The frozen body's block moved to scripts/nfcxx-modules-plan.rb (it no longer has these lines), so the oracle is the block as the
+# body had it (pinned-oracle-modules.txt, taken from the body before the move)
+cp "$here/pinned-oracle-modules.txt" "$work/oracle.sh"
 sed -n '/^  mdir=\${moddir:-\$(dirname "\$out")}; mkdir -p/,/^  eval "\$modopts_sh"$/p' "$here/pinned-port-modules.txt" > "$work/port.sh"
 [ "$(wc -l < "$work/oracle.sh")" = 4 ] || { echo "driver-modopts: the frozen driver's module block is not as expected" >&2; exit 2; }
 [ "$(wc -l < "$work/port.sh")" = 3 ] || { echo "driver-modopts: nfcxx's module block is not as expected" >&2; exit 2; }
