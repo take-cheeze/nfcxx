@@ -161,9 +161,10 @@ suite.check('SHARED_HELPERS: a stateless prelude helper is inline under -Os (one
 suite.check('a head wrapped over lines is read as its function: stateless shared, stateful inline',
             main.include?("\n[[maybe_unused]] BC2CPP_SHARED_FN int wrapped(int a,\n") &&
               main.include?("\ninline int wrapped_state(int a,\n"))
+saved_helpers = ENV.fetch('BC2CPP_SHARED_HELPERS', nil)
 ENV['BC2CPP_SHARED_HELPERS'] = '0'
 helpers_off, = ShardOutput.split(marked, 'chk', 3)
-ENV.delete('BC2CPP_SHARED_HELPERS')
+saved_helpers.nil? ? ENV.delete('BC2CPP_SHARED_HELPERS') : ENV['BC2CPP_SHARED_HELPERS'] = saved_helpers
 suite.check('BC2CPP_SHARED_HELPERS=0: a stateless prelude helper stays static (each shard its own copy)',
             helpers_off.include?("\n[[maybe_unused]] static int twice(int x)") &&
               !helpers_off.include?('BC2CPP_SHARED_FN'))
@@ -614,9 +615,10 @@ Dir.mktmpdir('bc2cpp-shard-generated') do |dir|
         return 0;
       }
     CPP
-    # -Os: the size-optimized build is the one SHARED_HELPERS gives one body per gem.
+    # -Os: the size-optimized build is the one SHARED_HELPERS gives one body per gem. -fno-inline keeps every
+    # called helper out of line, so a per-shard copy cannot hide inside its callers.
     saved_flags = ENV.fetch('BC2CPP_CXXFLAGS', nil)
-    ENV['BC2CPP_CXXFLAGS'] = "#{saved_flags} -Os"
+    ENV['BC2CPP_CXXFLAGS'] = "#{saved_flags} -Os -fno-inline"
     built, output = Bc2cppFixtureRuntime.run(dir, err, OWNERS, body, build: build, full: true, extra_srcs: [shard])
     saved_flags.nil? ? ENV.delete('BC2CPP_CXXFLAGS') : ENV['BC2CPP_CXXFLAGS'] = saved_flags
     suite.check('the main file and the shard compile and link', built)
