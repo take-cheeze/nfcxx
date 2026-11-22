@@ -46,10 +46,6 @@
     "T_COMPLEX": "stuck point (gem dependency): a Complex test is the mruby-complex class test, which needs the state and the gem (the decision is made: the gem is a dependency when the test is emitted); a bare use has no test to make here",
     "_comment": "A name with no api_map entry is refused with the reason given here (the converter's no-entry path). PRIsVALUE is converted where rb_raise and rb_sprintf take it; elsewhere it is an argument of rb_enc_sprintf, which takes an rb_encoding *.",
     "PRIsVALUE": "stuck point (PRIsVALUE): PRIsVALUE outside the format of rb_raise, rb_sprintf and rb_enc_sprintf (a VALUE argument of another call) is not converted; it has no mruby form in this position",
-    "rb_thread_local_aref": "stuck point (Thread): thread-local storage; the fork has no Thread (accepted stuck point)",
-    "rb_thread_local_aset": "stuck point (Thread): thread-local storage; the fork has no Thread (accepted stuck point)",
-    "T_NONE": "stuck point: the fork has no T_NONE tag (the MRB_TT enum, include/mruby/value.h:106-131); the empty-object marker has no mruby value kind",
-    "RUBY_T_NONE": "stuck point: the fork has no T_NONE tag (the MRB_TT enum, include/mruby/value.h:106-131); the empty-object marker has no mruby value kind",
     "rb_time_timespec_new": "stuck point (Time offset): mruby-time's Time has only UTC and LOCAL timezones (mrbgems/mruby-time/include/mruby/time.h:15-20; getlocal takes no offset), so a fixed UTC offset from the caller cannot be represented",
     "rb_encoder": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
     "rb_enc_interned_str_cstr": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
@@ -99,6 +95,36 @@
     }
   },
   "entries": {
+    "T_NONE": {
+      "kind": "expr",
+      "mruby": "MRB_TT_UNDEF",
+      "type_check": "exact",
+      "caveat": "CRuby's T_NONE is the no-type tag (a sentinel, e.g. oj's fast.c parent_type = T_NONE for no parent); the fork has no empty-object tag, so the sentinel is MRB_TT_UNDEF (include/mruby/value.h:113), which no Ruby object carries"
+    },
+    "RUBY_T_NONE": {
+      "kind": "expr",
+      "mruby": "MRB_TT_UNDEF",
+      "type_check": "exact",
+      "caveat": "CRuby's RUBY_T_NONE is the no-type tag: the sentinel MRB_TT_UNDEF (include/mruby/value.h:113), as for T_NONE"
+    },
+    "rb_thread_local_aref": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "prelude": "static mrb_value nfcx_tls_hash(mrb_state *mrb) {\n  mrb_sym s = mrb_intern_cstr(mrb, \"$__nfcx_thread_locals\");\n  mrb_value h = mrb_gv_get(mrb, s);\n  if (mrb_nil_p(h)) { h = mrb_hash_new(mrb); mrb_gv_set(mrb, s, h); }\n  return h;\n}\nstatic mrb_value nfcx_tls_aref(mrb_state *mrb, mrb_value thread, mrb_sym key) {\n  (void)thread;\n  return mrb_hash_get(mrb, nfcx_tls_hash(mrb), mrb_symbol_value(key));\n}\nstatic mrb_value nfcx_tls_aset(mrb_state *mrb, mrb_value thread, mrb_sym key, mrb_value val) {\n  (void)thread;\n  mrb_hash_set(mrb, nfcx_tls_hash(mrb), mrb_symbol_value(key), val);\n  return val;\n}",
+      "prelude_name": "nfcx_tls",
+      "template": "nfcx_tls_aref($m, $0, $1)",
+      "caveat": "CRuby's thread-local storage (rb_thread_local_aref/aset of a symbol key): a per-state hash in a global of the mrb_state. Each mruby-uv thread has its own mrb_state, so each thread has its own values; the thread argument is ignored, and a state shared between threads shares its values"
+    },
+    "rb_thread_local_aset": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "prelude": "static mrb_value nfcx_tls_hash(mrb_state *mrb) {\n  mrb_sym s = mrb_intern_cstr(mrb, \"$__nfcx_thread_locals\");\n  mrb_value h = mrb_gv_get(mrb, s);\n  if (mrb_nil_p(h)) { h = mrb_hash_new(mrb); mrb_gv_set(mrb, s, h); }\n  return h;\n}\nstatic mrb_value nfcx_tls_aref(mrb_state *mrb, mrb_value thread, mrb_sym key) {\n  (void)thread;\n  return mrb_hash_get(mrb, nfcx_tls_hash(mrb), mrb_symbol_value(key));\n}\nstatic mrb_value nfcx_tls_aset(mrb_state *mrb, mrb_value thread, mrb_sym key, mrb_value val) {\n  (void)thread;\n  mrb_hash_set(mrb, nfcx_tls_hash(mrb), mrb_symbol_value(key), val);\n  return val;\n}",
+      "prelude_name": "nfcx_tls",
+      "template": "nfcx_tls_aset($m, $0, $1, $2)",
+      "caveat": "CRuby's thread-local storage (rb_thread_local_aref/aset of a symbol key): a per-state hash in a global of the mrb_state. Each mruby-uv thread has its own mrb_state, so each thread has its own values; the thread argument is ignored, and a state shared between threads shares its values"
+    },
     "rb_define_module": {
       "kind": "call",
       "mruby": "mrb_define_module",
@@ -2364,8 +2390,8 @@
     "onig_foreach_name": {"kind": "special", "handler": "onig_foreach", "needs_mrb": true, "caveat": "the callback takes the mruby state as its first argument (threaded like a helper); a trampoline passes it, and the state is stored for the call"},
     "rb_struct_new": {"kind": "special", "handler": "struct_variadic", "needs_mrb": true, "caveat": "Struct is the mruby-struct gem: Struct.new with the member symbols (rb_struct_define), or klass.new with the members' count of values (rb_struct_new)"},
     "rb_struct_define": {"kind": "special", "handler": "struct_variadic", "needs_mrb": true, "caveat": "Struct is the mruby-struct gem: Struct.new with the member symbols (rb_struct_define), or klass.new with the members' count of values (rb_struct_new)"},
-    "rb_str_encode": {"kind": "refuse", "reason": "stuck point (Encoding): transcoding a string needs CRuby's encoding converter; the fork has no Encoding (accepted stuck point)"},
-    "RB_ENC_INTERNED_STR_NULL_CHECK": {"kind": "refuse", "reason": "stuck point (Encoding): the null-encoding check of an interned string; the fork has no Encoding (accepted stuck point)"},
+    "rb_str_encode": {"kind": "refuse", "reason": "stuck point (Encoding): transcoding a string needs an encoding converter; mruby-encoding (mrbgems/mruby-encoding) has rb_str_conv_enc, which changes only the encoding tag of an ASCII-only string and returns any other string unchanged, so there is no transcoder to map this to"},
+    "RB_ENC_INTERNED_STR_NULL_CHECK": {"kind": "refuse", "reason": "stuck point (Encoding): the null-encoding check of an interned string; mruby-encoding tags a string with an encoding index (rb_enc_get_index) and an interned string has no separate null encoding, so the check has no mruby form here without a per-string null flag"},
     "RBIGNUM_POSITIVE_P": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "(mrb_bint_sign($m, $0) > 0)", "caveat": "a Bignum is never zero, and a fixnum is a plain sign test; mirrors CRuby RBIGNUM_POSITIVE_P"},
     "RBIGNUM_NEGATIVE_P": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "(mrb_bint_sign($m, $0) < 0)", "caveat": "mirrors CRuby RBIGNUM_NEGATIVE_P"},
     "rb_big_cmp": {"kind": "template", "arity": 2, "needs_mrb": true, "template": "mrb_fixnum_value(mrb_bint_cmp($m, $0, $1))", "caveat": "Integer -1, 0 or 1 as CRuby rb_big_cmp; both operands are Integers"},
