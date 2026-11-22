@@ -1,0 +1,11 @@
+== case 46:  -c a.c -o a.o
+-- status: 0
+-- stdout
+-- stderr
+pathb-cc: a.c: the optimized IR is refused (pathb-ssa-build: QBE failed: <REPO>/build/qbe/qbe: invalid option -- 'V'), using the unoptimized IR
+pathb-cc: a.c: SSA route: pathb-ssa-build: QBE failed: <REPO>/build/qbe/qbe: invalid option -- 'V'
+nfcxx: Path B did not build a.c (status 1); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)
+-- eccp
+(none)
+-- files
+a.o

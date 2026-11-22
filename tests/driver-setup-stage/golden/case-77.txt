@@ -1,0 +1,10 @@
+== case 77:  -fsanitize=address -fsanitize=undefined -c a.cpp -o a.o
+-- status: 1
+-- stdout
+-- stderr
+pathb-cc: a.cpp: SSA route: pathb-ssa-build: QBE failed: <REPO>/build/qbe/qbe: invalid option -- 'V'
+nfcxx: Path B did not build a.cpp (status 1); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)
+pathb-cc: a.cpp: SSA route: pathb-ssa-build: QBE failed: <REPO>/build/qbe/qbe: invalid option -- 'V'
+-- eccp
+(none)
+-- files

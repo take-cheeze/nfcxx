@@ -17,6 +17,7 @@
 #   ruby scripts/nfcxx-setup-args.rb ARG...   prints the setup options (KEY=VALUE, the array as KEY=VALUE joined by ASCII 31)
 #                                             or the deferral, for the tests
 
+require "etc"
 require "open3"
 require "rbconfig"
 require_relative "nfcxx-setup"
@@ -30,6 +31,14 @@ module NfcxxSetupArgs
   # the loop's state: [scalars, arrays] (name => value, name => [elements]), or nil when the loop refuses, is unported, or
   # prints a plan instead (the -fsyntax-only, --bundle- and --cuda-driver= re-runs)
   def loop_state(argv, env)
+    # memoized per process (the driver asks for the same arguments' state more than once)
+    @loop_states ||= {}
+    return @loop_states[argv] if @loop_states.key?(argv)
+
+    @loop_states[argv] = loop_state_uncached(argv, env)
+  end
+
+  def loop_state_uncached(argv, env)
     ruby = env["RUBY"] || RbConfig.ruby
     config = env.select { |k, _| k.start_with?("NFCXX_") || k == "CUDA_HOME" || k == "ROCM" }
                 .map { |k, v| "--nfcxx-env=#{k}=#{v}" }
@@ -47,6 +56,39 @@ module NfcxxSetupArgs
       end
     end
     [scalars, arrays]
+  end
+
+  # the options the default and stage planners read, from the loop's full state: the flags (a key the loop does not print is off),
+  # the values (a key it does not print is ""), and the host as uname -s and uname -m (Etc.uname: no process)
+  PLANNER_FLAGS = %w[backend_explicit path_b freestanding cosmo emit_c preprocess shared asan safeptr].freeze
+  PLANNER_VALUES = %w[backend target depmode sanitize].freeze
+
+  def planner_opts(s)
+    u = Etc.uname
+    opts = PLANNER_FLAGS.to_h { |k| [k, s[k].to_s.empty? ? "0" : s[k].to_s] }
+    PLANNER_VALUES.each { |k| opts[k] = s[k].to_s }
+    opts["host"] = "#{u[:sysname]} #{u[:machine]}"
+    opts
+  end
+
+  # The setup state the body evals, from the argument loop's full state: default is the default backend's statements
+  # (NfcxxSetup.run "default", which sets backend, default_backend and pb_fs_host), and stage is [status, text] for the stage
+  # after the emit-C route (NfcxxSetup.stage_text: the statements on success, the refusal's message and status 2 otherwise).
+  # nil when the loop gives no state (the body's wrappers rewrite the arguments, so the body plans them itself).
+  def planned_state(argv, env = ENV)
+    scalars, _arrays = loop_state(argv, env)
+    return nil unless scalars
+
+    opts = planner_opts(scalars)
+    default = NfcxxSetup.run("default", opts, env)
+    stage = begin
+      [0, NfcxxSetup.stage_text(opts)]
+    rescue NfcxxSetup::Refusal => e
+      [e.status, "#{e.message}\n"]
+    end
+    { default: default, stage: stage }
+  rescue StandardError
+    nil
   end
 
   # the host probes the setup reads: uname, and host-sys.rb's answers

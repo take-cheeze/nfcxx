@@ -1,0 +1,8 @@
+== case 25:  -fsanitize=address -c a.cpp -o a.o --backend=bogus
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: -fsanitize=address: unknown backend bogus
+-- eccp
+(none)
+-- files

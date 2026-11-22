@@ -1,0 +1,8 @@
+== case 35:  --freestanding --target=linux_aarch64 --emit-c a.cpp
+-- status: 127
+-- stdout
+-- stderr
+<TMPDIR>: line N: <WORK>/stub/bin/cpfe: No such file or directory
+-- eccp
+(none)
+-- files

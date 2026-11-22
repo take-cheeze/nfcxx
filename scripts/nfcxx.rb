@@ -361,7 +361,17 @@ begin
   elsif refusal
     $stderr.puts(refusal.message)
   else
-    ok = system(env, "bash", program.path, *ARGV)
+    # The setup's planners run here, before the body, on the argument loop's state (scripts/nfcxx-setup-args.rb planned_state):
+    # NFCXX_SETUP_DEFAULT is the default backend's statements, and NFCXX_SETUP_STAGE_STATUS and NFCXX_SETUP_STAGE are the stage
+    # after the emit-C route (its statements, or a refusal's status and message, which the body prints where the bash did). The
+    # body evals them at its places. A command the wrappers rewrite (LOOP_RESULT is nil) is planned by the body, so none is passed.
+    setup = LOOP_RESULT && NfcxxSetupArgs.planned_state(ARGV, ENV)
+    setup_env = {
+      "NFCXX_SETUP_DEFAULT" => setup&.fetch(:default),
+      "NFCXX_SETUP_STAGE_STATUS" => setup && setup[:stage].first.to_s,
+      "NFCXX_SETUP_STAGE" => setup && setup[:stage].last,
+    }
+    ok = system(env.merge(setup_env), "bash", program.path, *ARGV)
     oracle_code = ok ? 0 : ($?.exitstatus || 1)
   end
   unless trace_file.empty?

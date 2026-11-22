@@ -1,0 +1,8 @@
+== case 42:  --instantiate=bogus -c a.cpp -o a.o
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: --instantiate (NFCXX_INSTANTIATE) is auto or used (got bogus)
+-- eccp
+(none)
+-- files

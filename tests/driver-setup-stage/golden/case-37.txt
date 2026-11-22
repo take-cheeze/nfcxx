@@ -1,0 +1,8 @@
+== case 37:  --target=linux_k1om --freestanding --emit-c a.cpp
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: no k1om toolchain at /opt/k1om (NFCXX_K1OM_ROOT; docs/notes/k1om.md)
+-- eccp
+(none)
+-- files

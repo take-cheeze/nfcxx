@@ -1,0 +1,8 @@
+== case 68: NFCXX_BACKEND=bogus   --freestanding -c a.cpp -o a.o
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: unknown backend 'bogus'
+-- eccp
+(none)
+-- files
