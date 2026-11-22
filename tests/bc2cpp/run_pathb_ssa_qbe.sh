@@ -59,7 +59,7 @@ accepted=build/bc2cpp/pathb_ssa_qbe.accepted
 
 # The script world takes one file: the script and the scripts it loads with require_relative, bundled.
 bundle=build/bc2cpp/pathb-ssa-qbe.bundle.rb
-ruby tests/bc2cpp/bundle_script.rb "$bundle" scripts/pathb-ssa-qbe.rb scripts/pathb-ssa.rb || { echo "FAIL bc2cpp pathb-ssa-qbe: bundling failed"; exit 1; }
+ruby tests/bc2cpp/bundle_script.rb "$bundle" scripts/pathb-ssa-qbe.rb scripts/pathb-ssa.rb scripts/pathb-nothrow.rb || { echo "FAIL bc2cpp pathb-ssa-qbe: bundling failed"; exit 1; }
 
 log=build/bc2cpp/pathb_ssa_qbe.log
 bench=${PATHB_SSA_QBE_BENCH_SRC:-$(ls -S $(cat build/bc2cpp/pathb_ssa_qbe.accepted) | head -1)}

@@ -31,7 +31,7 @@ sandbox() {
   else
     cp "$repo/scripts/$base.rb" "$sb/scripts/$base.rb"; chmod +x "$sb/scripts/$base.rb"; S=$sb/scripts/$base.rb
   fi
-  for c in cc gcc g++ ar llvm-ar llvm-mc mktemp uname nm realpath xcrun; do ln -s "$here/stub.sh" "$sb/bin/$c"; done
+  for c in cc gcc g++ ar llvm-ar llvm-mc mktemp uname nm objcopy realpath xcrun; do ln -s "$here/stub.sh" "$sb/bin/$c"; done
   for c in scripts/mrb.rb scripts/pathb-cil.rb nfcxx; do ln -s "$here/stub.sh" "$sb/$c"; done
   # the sources the scripts read: their mtimes are old, so an object or archive made by a case is newer
   : > "$sb/be/nfcxx_ldrt.c"; : > "$sb/lib/ehshim/nfcxx_eh_shim.cpp"; touch -d 2000-01-01 "$sb/be/nfcxx_ldrt.c" "$sb/lib/ehshim/nfcxx_eh_shim.cpp"
@@ -58,7 +58,7 @@ run_case() {
      NFCXX_STUB_LOG="$sb/log" NFCXX_STUB_TMP="$sb/tmp" SB="$sb" S="$S" bash -c "$cmd") > "$res/out" 2> "$res/err"
   echo $? > "$res/status"
   cp "$sb/log" "$res/log"
-  (cd "$sb" && find . \( -path ./scripts -o -path ./bin -o -path ./k1om \) -prune -o -print | sort | while read -r f; do
+  (cd "$sb" && find . \( -path ./scripts -o -path ./bin -o -path ./k1om -o -path ./log \) -prune -o -print | sort | while read -r f; do
      echo "== $f"; if [ -f "$f" ]; then head -c 400 "$f"; echo; fi; done) > "$res/files"
   # the sandbox's own path is written as ROOT in every record
   for r in out err status log files; do sed -i "s|$sb|ROOT|g" "$res/$r"; done

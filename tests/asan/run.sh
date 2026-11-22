@@ -44,6 +44,9 @@ for f in tests/asan/cases/*.cpp tests/asan/cases/*.c; do
     elif ! grep -qF -- "$want" "$tmp/rep"; then bad "$n" "report lacks '$want': $(grep -m1 'ERROR' "$tmp/rep")"
     else ok "$n"; fi
   else
+    if grep -q "LeakSanitizer has encountered a fatal error\|LeakSanitizer does not work under ptrace" "$tmp/rep"; then
+      echo "SKIP $n (LeakSanitizer cannot run here)"; skip=$((skip + 1)); continue
+    fi
     if [ $rc -ne 0 ] || grep -q Sanitizer "$tmp/rep"; then bad "$n" "exit $rc: $(head -3 "$tmp/rep" | tr '\n' ' ')"; else ok "$n"; fi
   fi
 done

@@ -5,7 +5,7 @@
 struct S {
   int v;
   S(int x) : v(x) {}
-  ~S() {}
+  ~S() { int x = v; (void)x; }   // not empty: with exception tables EDG calls no destructor with an empty body
 };
 int rewrite() {
   S s(1);

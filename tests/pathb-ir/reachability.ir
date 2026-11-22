@@ -120,6 +120,7 @@
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "Used")))))
   (weak)
+  (eh-noexcept)
   (slot "tmp" (const (ptr (struct "Used"))) 8 8)
   (store (ptr (struct "Used")) $"tmp" %0)
   (let %1 (ptr (const long)) (offset @"_ZTV4Used" 16))

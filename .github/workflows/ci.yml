@@ -257,6 +257,9 @@ jobs:
               # Path B: the default driver is Path B on every host (docs/notes/pathb-default.md). The name is kept
               # so a required check of this name does not disappear.
               NFCXX_BACKEND=pathb tests/run.sh
+              # QBE's arm64 exception tables (pads reading x0 and x1, the LSDA), against g++: the EH probes (--all adds
+              # programs that need x86 inline assembly or the x86 long double, which this target refuses)
+              tests/pathb-eh-tables/run.sh
               if [ "$GCC_BACKEND" = 1 ]; then NFCXX_BACKEND=gcc tests/run.sh; fi
           # float-to-int checks the x87 helpers of be/nfcxx_ldrt.c, which exist only on x86-64, so it stays off this runner.
           - name: freestanding lib, builtins, trace, C inputs, cc mode, driver options, determinism
@@ -494,6 +497,7 @@ jobs:
           - name: Path B stage 3 (IR to QBE translation validation) and hosted Path B (NFCXX_PATH=b)
             run: |
               tests/pathb-qbe/run.sh
+              tests/pathb-eh-tables/run.sh --all
               tests/pathb-qbe/hosted.sh
               tests/pathb-qbe/static_linkage.sh
           - name: C++11 and C++14 probes (Path B) and the EH shim (gcc, qbe and Path B)
@@ -664,6 +668,7 @@ jobs:
             - "scripts/pathb-ssa.rb"
             - "scripts/pathb-egraph.rb"
             - "scripts/pathb-ssa-qbe.rb"
+            - "scripts/pathb-nothrow.rb"
             - "scripts/pathb-ir-opt.rb"
             - "scripts/pathb-structure.rb"
             - "scripts/pathb-ssa-structurize.rb"

@@ -637,7 +637,10 @@ esac
 shim=(); rtlib=(); vlart=()
 if [ $freestanding = 0 ] && [ $compile_only = 0 ] && [ $shared = 0 ] && [ $((ncpp + nobj)) -gt 0 ]; then
   t=$(trace_start)
-  s=""; [ $eh_shim_on = 0 ] || s=$("$root/scripts/ehshim.rb") || s=""
+  # a Path B harness with exception tables (its cpfe has eh-tables beside it, scripts/setup-pathb.sh) links libstdc++'s own
+  # EH runtime (docs/notes/pathb-zero-cost-eh.md): the shim, which hands libstdc++'s throws to EDG's runtime, is not linked
+  pb_tables=0; [ "$backend" = pathb ] && [ -f "$(dirname "${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}")/eh-tables" ] && pb_tables=1
+  s=""; [ $eh_shim_on = 0 ] || [ $pb_tables = 1 ] || s=$("$root/scripts/ehshim.rb") || s=""
   trace_end "$t" "EH shim" driver
   # cosmo: the shim interoperates with libstdc++.so (its type_info vtables and __cxa layout); cosmo links libc++ only
   [ $cosmo = 1 ] || { [ -z "$s" ] || shim=("$s"); }

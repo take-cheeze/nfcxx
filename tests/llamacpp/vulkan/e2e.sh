@@ -38,8 +38,8 @@ objs=(); while IFS=$'\t' read -r f _; do
   objs+=("$out/obj/$(echo "$f" | tr / _).o")
 done < "$out/sources"
 for s in "${srcs[@]}"; do objs+=("$e2e/$(echo "${s#"$llama"/}" | tr / _).o"); done
-# NFCXX_PATH=b: the Path B runtime archive (scripts/pathb-ldrt), as build.sh links it
-[ "${NFCXX_PATH:-}" != b ] || objs+=("$("$root/scripts/pathb-ldrt")")
+# NFCXX_PATH=b: the Path B runtime archive (scripts/pathb-ldrt.rb), as build.sh links it
+[ "${NFCXX_PATH:-}" != b ] || objs+=("$("$root/scripts/pathb-ldrt.rb")")
 "$root/nfcxx" "${objs[@]}" -fopenmp -lvulkan -lm -lpthread -lstdc++ -lgomp -o "$e2e/llama-bench" \
   > "$e2e/link.log" 2>&1 || { echo "FAIL link: $(grep -m3 'undefined\|error' "$e2e/link.log" | cut -c1-200)"; exit 1; }
 echo "linked $e2e/llama-bench"

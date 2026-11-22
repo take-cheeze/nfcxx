@@ -43,6 +43,7 @@ typedef struct ir_eh_frame {
   unsigned long entry_region;     /* the region current where the frame begins */
   int id;
   an_expr_node_ptr action;        /* an internal try: the expression to evaluate when unwinding */
+  int free_thr;                   /* a throw's operand: free the exception object being built (__cxa_free_exception) */
   int nh;                         /* a try: its catch clauses */
   int tid[IR_EH_MAXH];
   char *label[IR_EH_MAXH];
@@ -70,6 +71,8 @@ static int ir_eh_nframe;
 static char *ir_eh_thrown;          /* the exception object of the throw being lowered (leck_thrown_object_address) */
 static char *ir_eh_caught;          /* the caught object of the handler being lowered (leck_caught_object_address) */
 static char ir_eh_k_exc, ir_eh_k_sel; /* keys of the pad slots */
+static char ir_eh_k_thr;            /* key of the slot of the exception object a throw is building (ir_eh_thr_slot) */
+static int ir_eh_thr_rel;           /* the region table has entries relative to that object (ir_eh_prologue) */
 static const char *ir_eh_why;       /* why the last cleanup could not be written */
 static int ir_eh_spec[IR_EH_MAXH];  /* a dynamic exception specification (C++14 throw(T...)): the type ids it allows */
 static int ir_eh_nspec;             /* their number: 0 for none (and for throw(), which is noexcept here) */
@@ -79,6 +82,7 @@ static a_type_ptr ir_eh_long_type(void) { return integer_type((an_integer_kind)i
 
 static const char *ir_eh_exc_slot(void) { return ir_slot_op(&ir_eh_k_exc, "eh.exc", ir_eh_vptr_type(), 8); }
 static const char *ir_eh_sel_slot(void) { return ir_slot_op(&ir_eh_k_sel, "eh.sel", ir_eh_long_type(), 8); }
+static const char *ir_eh_thr_slot(void) { return ir_slot_op(&ir_eh_k_thr, "eh.thrown", ir_eh_vptr_type(), 8); }
 
 static int ir_eh_type_id(a_variable_ptr ti);
 static void ir_eh_sync(void);
@@ -104,6 +108,7 @@ static void ir_eh_begin(a_routine_ptr rout)
   ir_eh_ntype = 0;
   ir_eh_nframe = 0;
   ir_eh_thrown = NULL;
+  ir_eh_thr_rel = 0;
   ir_eh_caught = NULL;
   ir_eh_nspec = 0;
   if (esp != NULL && !ir_eh_noexcept && !esp->is_noexcept && !esp->throw_any && !esp->indeterminate && !esp->arg_cached &&
@@ -201,6 +206,18 @@ static int ir_eh_count(a_constant_ptr t)
   return n;
 }
 
+static int ir_eh_is_destroy_exc(a_routine_ptr r);
+
+/* Region table entry i is a subobject of the exception object a throw is building (throw E{S(...), g()}): a
+   destructor call whose handle has no variable, only the offset in that object (an integer). Not a handler's entry
+   (__destroy_exception_object), not an array's (its handle is an array table index), not one relative to this. */
+static int ir_eh_thr_entry(int i)
+{
+  ir_eh_rte *r = &ir_eh_rt[i];
+  return r->handle != NULL && r->handle->kind == ck_integer && r->rout != NULL && !ir_eh_is_destroy_exc(r->rout) &&
+         !(r->flags & (IR_RDF_THIS_PARAM_OFFSET | IR_RDF_ARRAY | IR_RDF_NEW_ALLOCATION | IR_RDF_GUARD_VAR_FOR_LOCAL_STATIC));
+}
+
 /* leck_function_prologue: read the function's region and array tables */
 static void ir_eh_prologue(an_eh_prologue_supplement_ptr psp)
 {
@@ -222,6 +239,9 @@ static void ir_eh_prologue(an_eh_prologue_supplement_ptr psp)
       r->next = (unsigned long)ir_eh_int(f);
       f = f != NULL ? f->next : NULL;
       r->flags = (unsigned)ir_eh_int(f);
+      /* a subobject of the exception object a throw is building (throw E{S(...), g()}): EDG's handle has no
+         variable, only the offset in that object (an integer) */
+      if (ir_eh_thr_entry(ir_eh_nrt - 1)) ir_eh_thr_rel = 1;
     }
   t = ir_eh_local_static_init(psp->array_table);
   ir_eh_at = (ir_eh_ate *)realloc(ir_eh_at, (ir_eh_count(t) + 1) * sizeof ir_eh_at[0]);
@@ -267,6 +287,11 @@ static char *ir_eh_addr_f(a_constant_ptr h, unsigned fl, int write)
     if (h->kind != ck_integer || t == NULL) return NULL;
     if (!write) return "";
     return ir_eh_offset(ir_let("(ptr void)", ir_fmt("(load (ptr void) %s)", ir_var_addr(t, t->type, 0).s)), ir_eh_int(h));
+  }
+  if (h->kind == ck_integer && ir_eh_thr_rel) {
+    /* an offset in the exception object being built: its address is in the slot the throw keeps it in */
+    if (!write) return "";
+    return ir_eh_offset(ir_let("(ptr void)", ir_fmt("(load (ptr void) %s)", ir_eh_thr_slot())), ir_eh_int(h));
   }
   if (h->kind == ck_stack_offset && h->variant.stack_offset.variable != NULL) {
     if (!write) return "";
@@ -348,6 +373,11 @@ static int ir_eh_cleanup(int i)
   }
   obj = a != NULL ? ir_eh_addr_f(a->handle, fl & IR_RDF_THIS_PARAM_OFFSET, 1) : ir_eh_addr_f(r->handle, fl, 1);
   if (fl & IR_RDF_INDIRECT) obj = ir_let("(ptr void)", ir_fmt("(load (ptr void) %s)", obj));
+  /* a lowered VLA's region: a new allocation whose handle is the VLA's pointer variable, without the indirect flag (EDG's
+     runtime frees it only when VLA operations are lowered); __vla_dealloc_eh takes the array's address, the variable's
+     value */
+  else if ((fl & IR_RDF_NEW_ALLOCATION) && dtor != NULL && strcmp(dtor, "__vla_dealloc_eh") == 0)
+    obj = ir_let("(ptr void)", ir_fmt("(load (ptr void) %s)", obj));
   if (fl & IR_RDF_GUARD_VAR_FOR_LOCAL_STATIC) {
     ir_emit(ir_fmt("(eval (call void &\"__cxa_guard_abort\" %s))", obj));
   } else if (!(fl & IR_RDF_NEW_ALLOCATION)) {
@@ -421,6 +451,24 @@ static void ir_eh_node_want(unsigned long r, ir_eh_frame *f)
   ir_eh_nnode++;
 }
 
+/* A run of temporaries: the regions from r on (up to bound) whose cleanups are conditional (each a temporary of a full
+   expression, with its flag). EDG sets one region before it evaluates the expression and chains its temporaries in the
+   order they are built, the flags saying which are; an exception destroys them in the reverse order ([except.ctor], as
+   gcc does), so a run is one node that runs the cleanups backwards. The regions of the run go into run (at most
+   IR_EH_MAXRUN; a longer run is cut), and the number is returned (1: r alone). */
+#define IR_EH_MAXRUN 64
+static int ir_eh_run(unsigned long r, unsigned long bound, unsigned long *run)
+{
+  int n = 0;
+  while (n < IR_EH_MAXRUN && r != bound && r != null_eh_region_number && r < (unsigned long)ir_eh_nrt &&
+         (ir_eh_rt[r].flags & IR_RDF_CONDITIONAL_FLAG) && !ir_eh_is_destroy_exc(ir_eh_rt[r].rout)) {
+    run[n++] = r;
+    r = ir_eh_rt[r].next;
+  }
+  if (n == 0) run[n++] = r;
+  return n;
+}
+
 /* Pad n's action chain (its catch clauses' type ids, in order) and whether it cleans up; the nodes it reaches are
    wanted. 0 when the chain is malformed. */
 static int ir_eh_pad_walk(int n, int *types, int *ntypes, int *cleanup)
@@ -433,14 +481,17 @@ static int ir_eh_pad_walk(int n, int *types, int *ntypes, int *cleanup)
   for (;;) {
     unsigned long bound = f != NULL ? f->entry_region : null_eh_region_number;
     while (r != bound && r != null_eh_region_number) {
+      unsigned long run[IR_EH_MAXRUN];
+      int nr;
       if (guard++ > 100000 || r >= (unsigned long)ir_eh_nrt) return 0;
       ir_eh_node_want(r, f);
       *cleanup = 1;
-      r = ir_eh_rt[r].next;
+      nr = ir_eh_run(r, bound, run);
+      r = ir_eh_rt[run[nr - 1]].next;
     }
     if (f == NULL) break;
     ir_eh_node_want(f->entry_region, f);
-    if (f->action != NULL) *cleanup = 1;
+    if (f->action != NULL || f->free_thr) *cleanup = 1;
     for (k = 0; k < f->nh; k++)
       if (*ntypes < IR_EH_MAXH) types[(*ntypes)++] = f->tid[k];
     r = f->entry_region;
@@ -463,6 +514,9 @@ static int ir_eh_node_code(ir_eh_node *nd)
       ir_line(ir_depth, ir_fmt("(if %s", ir_let("bool", ir_fmt("(lt.s long %s (const long 0))", sel))));
       ir_line(ir_depth + 1, "(then");
       ir_depth += 2;
+      /* in the default state, not the pads' std::terminate: an exception the unexpected handler throws that the
+         specification allows leaves the function from this call (__cxa_call_unexpected rethrows it), as gcc's */
+      ir_emit("(eh-state 0)");
       ir_emit(ir_fmt("(eval (call void &\"__cxa_call_unexpected\" %s))",
                      ir_let("(ptr void)", ir_fmt("(load (ptr void) %s)", ir_eh_exc_slot()))));
       ir_emit("(unreachable)");
@@ -479,6 +533,9 @@ static int ir_eh_node_code(ir_eh_node *nd)
   }
   if (f != NULL && nd->r == f->entry_region) {
     if (f->action != NULL) (void)ir_rval(f->action);
+    if (f->free_thr)
+      ir_emit(ir_fmt("(eval (call void &\"__cxa_free_exception\" %s))",
+                     ir_let("(ptr void)", ir_fmt("(load (ptr void) %s)", ir_eh_thr_slot()))));
     for (k = 0; k < f->nh; k++) {
       char *sel = ir_let("long", ir_fmt("(load long %s)", ir_eh_sel_slot()));
       /* (eh-tid N): the type id as a constant (scripts/pathb-ssa.rb), which the inliner renumbers in a caller's table */
@@ -489,10 +546,13 @@ static int ir_eh_node_code(ir_eh_node *nd)
     ir_line(ir_depth, ir_fmt("(goto \"%s\")", ir_eh_node_label(f->entry_region, f->parent)));
     return 1;
   }
-  if (!ir_eh_cleanup((int)nd->r)) return 0;
   {
-    unsigned long next = ir_eh_rt[nd->r].next;
+    unsigned long run[IR_EH_MAXRUN], next;
     unsigned long bound = f != NULL ? f->entry_region : null_eh_region_number;
+    int nr = ir_eh_run(nd->r, bound, run), j;
+    for (j = nr - 1; j >= 0; j--)
+      if (!ir_eh_cleanup((int)run[j])) return 0;
+    next = ir_eh_rt[run[nr - 1]].next;
     if (next == null_eh_region_number) next = bound; /* the chain ends: the frame's node, or the end */
     ir_line(ir_depth, ir_fmt("(goto \"%s\")", ir_eh_node_label(next, f)));
   }
@@ -515,9 +575,21 @@ static void ir_eh_end_body(void)
     for (i = 0; i < nt; i++) fprintf(nf_out, "%s%d", i ? " " : "", types[i]);
     fputs(")", nf_out);
     ir_depth = 2;
-    ir_emit(ir_fmt("(store (ptr void) %s %s)", ir_eh_exc_slot(), ir_let("(ptr void)", "(call (ptr void) &\"__nfcxx_eh_ptr\")")));
-    ir_emit(ir_fmt("(store long %s %s)", ir_eh_sel_slot(), ir_let("long", "(call long &\"__nfcxx_eh_sel\")")));
-    ir_line(2, ir_fmt("(goto \"%s\")", ir_eh_node_label(ir_eh_pads[n].region, ir_eh_pads[n].frame)));
+    {
+      /* (eh-exc) and (eh-sel): the exception and the selector the personality installed in the landing pad's registers
+         (QBE's ehptr, ehsel), read first, before anything else can use those registers */
+      char *exc = ir_let("(ptr void)", "(eh-exc)");
+      char *sel = ir_let("long", "(eh-sel)");
+      ir_emit(ir_fmt("(store (ptr void) %s %s)", ir_eh_exc_slot(), exc));
+      ir_emit(ir_fmt("(store long %s %s)", ir_eh_sel_slot(), sel));
+    }
+    {
+      /* the first node of the walk: with no region (a state in a try outside every cleanup of it), the frame's */
+      unsigned long r = ir_eh_pads[n].region;
+      ir_eh_frame *f = ir_eh_pads[n].frame;
+      if (r == null_eh_region_number && f != NULL) r = f->entry_region;
+      ir_line(2, ir_fmt("(goto \"%s\")", ir_eh_node_label(r, f)));
+    }
     if (n + 1 < ir_eh_npad) fputs(")", nf_out);
   }
   /* the nodes (a list that grows only in the walks above), in the last pad's form */
@@ -600,6 +672,7 @@ static ir_val ir_eh_throw(an_expr_node_ptr e)
   a_type_ptr t;
   unsigned long long size;
   char *saved = ir_eh_thrown, *ti;
+  int thr_calls;
   const char *dtor = NULL;
   ir_eh_on = 1;
   if (tsp == NULL) {
@@ -618,10 +691,59 @@ static ir_val ir_eh_throw(an_expr_node_ptr e)
   size = ir_size_of(t);
   ir_eh_thrown = ir_let("(ptr void)", ir_fmt("(call (ptr void) &\"__cxa_allocate_exception\" (const unsigned_long %llu))",
                                               size ? size : 1));
-  if (tsp->expr != NULL) (void)ir_rval(tsp->expr);
-  ir_emit(ir_fmt("(eval (call void &\"__cxa_throw\" %s %s %s))", ir_eh_thrown, ti,
-                 dtor != NULL ? ir_fmt("&\"%s\"", dtor) : "(null (ptr void))"));
-  ir_emit("(unreachable)");
+  thr_calls = 0;
+  if (tsp->expr != NULL) {
+    /* The operand runs in a frame of its own whose pad frees the exception object (after the cleanups of the members
+       it built), as gcc's __cxa_free_exception when a constructor of the object throws; the object's address is in
+       the eh.thrown slot. The operand is written to a buffer first: one that makes no call (throw 42) throws nothing,
+       and gets neither the frame nor the slot. */
+    ir_buf ob;
+    ir_eh_frame *f = (ir_eh_frame *)calloc(1, sizeof *f);
+    int npad0 = ir_eh_npad, last0 = ir_eh_last;
+    f->parent = ir_eh_cur;
+    f->entry_region = ir_eh_region;
+    f->id = ++ir_eh_nframe;
+    f->free_thr = 1;
+    ir_buf_open(&ob);
+    ir_buf_begin(&ob);
+    ir_eh_cur = f;
+    ir_eh_sync();
+    (void)ir_rval(tsp->expr);
+    ir_eh_cur = f->parent;
+    ir_buf_end(&ob);
+    fflush(ob.f);
+    thr_calls = ob.data != NULL && strstr(ob.data, "(call ") != NULL;
+    if (thr_calls || ir_eh_thr_rel) ir_emit(ir_fmt("(store (ptr void) %s %s)", ir_eh_thr_slot(), ir_eh_thrown));
+    if (thr_calls) {
+      ir_buf_write(&ob, nf_out);
+    } else {
+      /* no call: the frame's (eh-state N) line (the first: each line begins with its newline) goes, and so does
+         its pad when that state made it */
+      char *st = ob.data != NULL ? strstr(ob.data, "(eh-state ") : NULL;
+      char *nl = st != NULL ? strchr(st, '\n') : NULL;
+      if (st != NULL) fputs(nl != NULL ? nl : "", nf_out);
+      if (ir_eh_npad == npad0 + 1 && ir_eh_pads[npad0].frame == f) ir_eh_npad = npad0;
+      ir_eh_last = last0;
+      if (f->id == ir_eh_nframe) ir_eh_nframe--;   /* and its number: the labels of later frames are as before */
+      f->free_thr = 0;
+    }
+    ir_buf_close(&ob);
+    free(ob.data);
+  }
+  {
+    /* The exception object is complete: __cxa_throw owns it, and the unwind from that call must not destroy its
+       subobjects (EDG leaves their regions current, innermost). The call is in the region outside them; the
+       temporaries of the full expression around it are still destroyed by the unwind. */
+    unsigned long cur = ir_eh_region, r = cur;
+    while (ir_eh_thr_rel && r != null_eh_region_number && r < (unsigned long)ir_eh_nrt && ir_eh_thr_entry((int)r))
+      r = ir_eh_rt[r].next;
+    ir_eh_region = r;
+    if (r != cur || thr_calls) ir_eh_sync();   /* out of the operand's frame, and of the object's regions */
+    ir_emit(ir_fmt("(eval (call void &\"__cxa_throw\" %s %s %s))", ir_eh_thrown, ti,
+                   dtor != NULL ? ir_fmt("&\"%s\"", dtor) : "(null (ptr void))"));
+    ir_emit("(unreachable)");
+    if (r != cur) ir_eh_region = cur;   /* the text after it (unreachable) goes on in EDG's region */
+  }
   ir_eh_thrown = saved;
   return ir_mk_void();
 }

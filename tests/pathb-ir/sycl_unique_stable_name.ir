@@ -123,6 +123,7 @@
   (ret void)
   (params)
   (weak)
+  (eh-noexcept)
   (eval (call void &"_ZSt9terminatev"))
   (return))
 
@@ -130,6 +131,7 @@
   (ret bool)
   (params)
   (weak)
+  (eh-noexcept)
   (block
     (return (const bool 0x0)))
   (unreachable))

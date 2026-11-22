@@ -214,6 +214,7 @@ class Cfg
   def initialize
     @blocks = []
     @labels = {}
+    @defined_labels = {}
     @targets = []   # [break target, continue target or nil] for each enclosing loop and switch, innermost last
     @switches = []  # { cases: [[value, block]], default: block or nil } for each enclosing switch
   end
@@ -249,12 +250,17 @@ class Cfg
     @in_pads = false
     # An inlined callee's resume, and the pads' action chains: a copy inlined into a pad's code is entered after the pads
     # lowered before that pad.
-    (@deferred || []).each do |cur, k, exc|
+    (@deferred || []).each do |cur, k, exc, sel|
       o = outer_of(k)
       if o == :term
         @blocks[cur].instrs << ["eval", ["call", "void", Ref.new("&", '"_ZSt9terminatev"')]]
         set_term(cur, ["unreachable"])
       elsif o.is_a?(Integer) && o > 0
+        # into that pad's chain as its stub goes there: the exception and the selector in the slots its stub stores to
+        # (the pad of another inlined copy has that copy's slots)
+        exc_st, sel_st = pad_stub_stores(o.to_s)
+        @blocks[cur].instrs << [exc_st[0], exc_st[1], exc_st[2], exc] if exc_st
+        @blocks[cur].instrs << [sel_st[0], sel_st[1], sel_st[2], sel] if sel_st && sel
         set_term(cur, ["br", label_block(pad_chain_label(o.to_s))])
       else
         nb = new_block
@@ -269,6 +275,9 @@ class Cfg
       @blocks[b].instrs[0] = ["eh-pad", cl, *types]
     end
     @blocks[0].term = ["eh-entry", 1, *@pad_block.values] unless pads.empty?
+    # a jump to a label no (label) statement defines would become an empty block that ends in unreachable
+    undefined = @labels.keys.reject { |l| (@defined_labels || {})[l] }
+    raise Fail, "goto to the undefined label #{undefined.first}" unless undefined.empty?
     @blocks.each { |b| b.term ||= ["unreachable"] }
     self
   end
@@ -348,6 +357,14 @@ class Cfg
     x.map { |y| eh_tids(y) }
   end
 
+  # The stores of pad id's stub, before its first jump: [the exception's, the selector's] (be/nfcxx_ir_eh.h writes them in
+  # that order, of (eh-exc) and (eh-sel)).
+  def pad_stub_stores(id)
+    p = @pad_forms.fetch(id) { raise Fail, "no landing pad #{id}" }
+    stub = p.drop(head(p[4]) == "eh-outer" ? 5 : 4).take_while { |x| head(x) != "goto" }
+    stub.select { |x| head(x) == "store" }.first(2)
+  end
+
   # The first jump of pad id's code: the node of its chain, past the stub that keeps the exception and the selector.
   def pad_chain_label(id)
     g = @pad_forms.fetch(id) { raise Fail, "no landing pad #{id}" }.find { |x| head(x) == "goto" }
@@ -371,8 +388,9 @@ class Cfg
       cur
     when "eh-state-outer", "eh-inline-end" then eh_state(outer_of(s[1]), cur)
     when "eh-resume-outer"
-      (@deferred ||= []) << [cur, s[1], s[2]]   # resolved after the pads (build)
-      new_block    when "eh-resume"
+      (@deferred ||= []) << [cur, s[1], s[2], s[3]]   # (eh-resume-outer K EXC [SEL]): resolved after the pads (build)
+      new_block
+    when "eh-resume"
       # _Unwind_Resume in a block of the default state: its call site passes the exception on, out of this function.
       nb = new_block
       @blocks[nb].eh = 0
@@ -421,6 +439,7 @@ class Cfg
     when "goto" then set_term(cur, ["br", label_block(s[1].raw)]) && new_block
     when "label"
       l = label_block(s[1].raw)
+      (@defined_labels ||= {})[s[1].raw] = true
       set_term(cur, ["br", l])
       l
     when "loc"

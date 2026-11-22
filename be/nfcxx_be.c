@@ -335,6 +335,34 @@ static void nf_put_expr(an_expr_node_ptr expr)
                   expr->variant.field.ptr, "field");
       fputc(')', nf_out);
       return;
+#if DO_IL_LOWERING && !DO_FULL_PORTABLE_EH_LOWERING && GENERATE_EH_TABLES
+    /* zero-cost exception tables (docs/notes/pathb-zero-cost-eh.md): what the partial EH lowering leaves in the IL */
+    case enk_lowered_eh_construct:
+      fprintf(nf_out, "(eh-construct %d", (int)expr->variant.lowered_eh.kind);
+      if (expr->variant.lowered_eh.kind == leck_cleanup_state ||
+          expr->variant.lowered_eh.kind == leck_unreachable_cleanup_state) {
+        fprintf(nf_out, " %lu", (unsigned long)expr->variant.lowered_eh.variant.cleanup_region_number);
+      } else if (expr->variant.lowered_eh.kind == leck_internal_try &&
+                 expr->variant.lowered_eh.variant.try_and_catch_expr != NULL) {
+        fputc(' ', nf_out);
+        nf_put_expr(expr->variant.lowered_eh.variant.try_and_catch_expr);
+      }
+      fputc(')', nf_out);
+      return;
+    case enk_throw:
+      if (expr->variant.throw_info == NULL) {
+        fputs("(rethrow)", nf_out);
+        return;
+      }
+      fputs("(throw ", nf_out);
+      nf_put_type(expr->variant.throw_info->type);
+      if (expr->variant.throw_info->expr != NULL) {
+        fputc(' ', nf_out);
+        nf_put_expr(expr->variant.throw_info->expr);
+      }
+      fputc(')', nf_out);
+      return;
+#endif
     default:
       if (nfcxx_enk_name((an_expr_node_kind)expr->kind) != NULL) {
         fprintf(nf_out, "(unsupported %s)", nfcxx_enk_name((an_expr_node_kind)expr->kind));
@@ -514,6 +542,22 @@ static void nf_put_stmt(a_statement_ptr stmt, int depth)
       fputc(')', nf_out);
       break;
     }
+#if DO_IL_LOWERING && !DO_FULL_PORTABLE_EH_LOWERING && GENERATE_EH_TABLES
+    case stmk_try_block: {   /* zero-cost exception tables: the try and its handlers stay in the IL */
+      a_handler_ptr h;
+      fputs("(try", nf_out);
+      nf_put_stmt(stmt->variant.try_block->statement, depth + 1);
+      for (h = stmt->variant.try_block->handlers; h != NULL; h = h->next) {
+        nf_indent(depth + 1);
+        fputs("(handler ", nf_out);
+        if (h->parameter != NULL) nf_put_type(h->parameter->type); else fputs("...", nf_out);
+        nf_put_stmt(h->statement, depth + 2);
+        fputc(')', nf_out);
+      }
+      fputc(')', nf_out);
+      break;
+    }
+#endif
     default: {
       a_const_char *name = nfcxx_stmk_name(stmt->kind);
       if (name != NULL) {

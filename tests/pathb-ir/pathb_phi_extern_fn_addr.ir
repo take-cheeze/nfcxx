@@ -204,6 +204,7 @@
   (ret void)
   (params)
   (weak)
+  (eh-noexcept)
   (eval (call void &"_ZSt9terminatev"))
   (return))
 
@@ -211,6 +212,7 @@
   (ret bool)
   (params)
   (weak)
+  (eh-noexcept)
   (block
     (return (const bool 0x0)))
   (unreachable))
@@ -331,6 +333,7 @@
   (ret void)
   (params (sret %0 (struct "ldiv_t")) (param %1 "__i" long) (param %2 "__j" long))
   (weak)
+  (eh-noexcept)
   (slot "__i" long 8 8)
   (slot "__j" long 8 8)
   (slot "tmp" long 8 8)

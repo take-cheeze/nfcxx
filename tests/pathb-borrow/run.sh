@@ -304,14 +304,16 @@ cc "$tmp/calias.s" -o "$tmp/calias"
 "$tmp/calias" || { echo "FAIL $calias runtime: expected 0"; exit 1; }
 echo "ok   const pointer results: shared alias summary, held-result mutant, emitter validation, and native execution"
 pass=$((pass + 1))
-# A local with a destructor is bracketed by exception-stack frame pushes and pops;
+# A local with a destructor is bracketed by exception-stack frame pushes and pops (a frames harness), or has a
+# landing pad (exception tables, the default: docs/notes/pathb-zero-cost-eh.md);
 # the checker tracks the stack and infers the destructors' summaries. Using the
 # object through a pointer after its scope is still found.
 raii=tests/pathb-borrow/contracts/raii.cpp
 sed 's/^  return r - 3;$/  return get(k) - 3;/' "$raii" > "$tmp/raii_late.cpp"
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$raii" > "$tmp/raii.ir"
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$tmp/raii_late.cpp" > "$tmp/raii_late.ir" 2>/dev/null
-grep -Fq '@"__curr_eh_stack_entry" $"' "$tmp/raii.ir" || { echo "FAIL $raii: no exception-stack frame"; exit 1; }
+grep -Fq '@"__curr_eh_stack_entry" $"' "$tmp/raii.ir" || grep -Fq '(eh-pad ' "$tmp/raii.ir" ||
+  { echo "FAIL $raii: no exception-stack frame and no landing pad"; exit 1; }
 scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/raii.ir" > "$tmp/out"
 grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $raii"; cat "$tmp/out"; exit 1; }
 rc=0
@@ -324,7 +326,7 @@ scripts/mrb.rb scripts/pathb-qbe-emit.rb "$tmp/raii.ir" > "$tmp/raii.qbe"
 # EDG's EH runtime (libC.a) defines the exception-stack globals, linked as tests/pathb-qbe/run.sh does.
 edglib=${EDG_LIB:-build/edg/lib}
 if [ -f "$edglib/libC.a" ]; then
-  cc "$tmp/raii.s" -o "$tmp/raii" -L"$edglib" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic
+  cc "$tmp/raii.s" -o "$tmp/raii" "$(scripts/pathb-ldrt.rb)" -L"$edglib" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic
   "$tmp/raii" || { echo "FAIL $raii runtime: expected 0"; exit 1; }
 else
   echo "skip $raii native run: no $edglib/libC.a"
@@ -360,7 +362,7 @@ NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir tests/pathb-borrow/destructors/r
 scripts/mrb.rb scripts/pathb-qbe-emit.rb "$tmp/dtor.ir" > "$tmp/dtor.qbe"
 "${QBE:-build/qbe/qbe}" "$tmp/dtor.qbe" -o "$tmp/dtor.s"
 if [ -f "$edglib/libC.a" ]; then
-  cc "$tmp/dtor.s" -o "$tmp/dtor" -L"$edglib" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic
+  cc "$tmp/dtor.s" -o "$tmp/dtor" "$(scripts/pathb-ldrt.rb)" -L"$edglib" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic
   "$tmp/dtor" || { echo "FAIL raii_ok.cpp runtime: expected 0"; exit 1; }
 else
   echo "skip raii_ok.cpp native run: no $edglib/libC.a"
@@ -549,7 +551,7 @@ cmp "$tmp/tc.qbe" "$tmp/tc-oracle.qbe"
 edglib=${EDG_LIB:-build/edg/lib}
 if [ -f "$edglib/libC.a" ]; then
   "${QBE:-build/qbe/qbe}" "$tmp/tc.qbe" -o "$tmp/tc.s"
-  cc "$tmp/tc.s" -o "$tmp/tc" -L"$edglib" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic
+  cc "$tmp/tc.s" -o "$tmp/tc" "$(scripts/pathb-ldrt.rb)" -L"$edglib" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic
   "$tmp/tc" || { echo "FAIL $tc runtime: expected 0"; exit 1; }
 else
   echo "skip $tc native run: no $edglib/libC.a"
