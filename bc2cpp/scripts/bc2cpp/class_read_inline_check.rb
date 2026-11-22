@@ -132,7 +132,7 @@ check.call('CLASS_TEST_FUSE: each owner getter is a slot reference with its path
            !code.match?(/static inline struct RClass\* bc2cpp_owner_class_\d+\(/))
 check.call('CLASS_TEST_FUSE: a class test on a slot reference is one bc2cpp_is_owner call',
            code.match?(/static inline bool bc2cpp_class_is\(mrb_state\* M, mrb_value v, bc2cpp_owner_ref o\) \{\n\s+return bc2cpp_is_owner\(M, v, o\.i\);/) &&
-           code.match?(/static bool bc2cpp_is_owner\(mrb_state\* M, mrb_value v, int i\) \{\n\s+struct RClass\* c = bc2cpp_owner_class_slots\[i\];\n\s+if \(!c\) c = bc2cpp_owner_class_at\(M, i\);\n\s+return bc2cpp_class_is\(M, v, c\);/))
+           code.match?(/static bool bc2cpp_is_owner\(mrb_state\* M, mrb_value v, int i\) \{\n\s+struct RClass\* c = bc2cpp_owner_class_slots\[i\];\n\s+if \(!c\) c = bc2cpp_owner_class_at\(M, i\);\n\s+if \(!mrb_immediate_p\(v\) && mrb_obj_ptr\(v\)->c == c\) return true;\n\s+return c == mrb_obj_class\(M, v\);/))
 check.call('CLASS_TEST_FUSE: the slot reference has a user-provided copy (clang refuses it through `...`)',
            code.include?('bc2cpp_owner_ref(const bc2cpp_owner_ref& o) : M(o.M), i(o.i) {}'))
 require_relative '../../tools/bc2cpp/class_test_fuse'

@@ -2229,10 +2229,14 @@ class CodeGen
         [[gnu::always_inline]] bc2cpp_owner_ref(const bc2cpp_owner_ref& o) : M(o.M), i(o.i) {}
         [[gnu::always_inline]] operator struct RClass*() const { return bc2cpp_owner_class_at(M, i); }
       };
+      // bc2cpp_class_is's test, spelled with mruby's own API so the cache also compiles where no prelude is
+      // (a class-body unit): a slot holds a plain class or null (see CodeGen#exact_class_guard), and for one the
+      // pointer test first, then mrb_obj_class, gives exactly `c == mrb_obj_class(M, v)`.
       [[maybe_unused]] [[gnu::noinline]] static bool bc2cpp_is_owner(mrb_state* M, mrb_value v, int i) {
         struct RClass* c = bc2cpp_owner_class_slots[i];
         if (!c) c = bc2cpp_owner_class_at(M, i);
-        return bc2cpp_class_is(M, v, c);
+        if (!mrb_immediate_p(v) && mrb_obj_ptr(v)->c == c) return true;
+        return c == mrb_obj_class(M, v);
       }
       // Every generated guard spells both M arguments as the function's own M.
       [[maybe_unused]] [[gnu::always_inline]] static inline bool bc2cpp_class_is(mrb_state* M, mrb_value v, bc2cpp_owner_ref o) {
