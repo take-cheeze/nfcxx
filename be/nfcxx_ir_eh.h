@@ -120,8 +120,8 @@ static void ir_eh_begin(a_routine_ptr rout)
       a_type_ptr t = skip_typerefs(espt->type);
       if (is_reference_type(t)) t = skip_typerefs(type_pointed_to(t));
       t = skip_typerefs(make_unqualified_type(t));
-      /* a pointer's typeinfo here is its own (__pointer_type_info) only when something made one: EDG's tables
-         describe a pointer by its pointed-to type, so a pointer type of a specification alone has none */
+      /* the EDG fork makes the IA-64 typeinfo of each type of a specification (a pointer's own
+         __pointer_type_info); a pointer to member and std::nullptr_t have none */
       if (t->typeinfo_var == NULL || ir_eh_nspec == IR_EH_MAXH) {
         ir_line(1, "(unsupported dynamic exception specification of a type without typeinfo)");
         ir_eh_nspec = 0;
