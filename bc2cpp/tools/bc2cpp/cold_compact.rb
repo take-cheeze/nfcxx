@@ -20,7 +20,8 @@ module ColdCompact
   # Callees a helper body may name. Each takes its operands by value (or is a macro over values), so a renamed
   # register is read, never written, through it; bc2cpp_fixnum_* write their third argument, which must be the
   # destination (checked in outline_refusal). A helper printed only when a method's text names it (bc2cpp_num_cmp)
-  # is not one: the scan that prints it does not read the helpers here.
+  # is not one: the scan that prints it does not read the helpers here. bc2cpp_cmp_num_* are: CMP_NUM_OUTLINE prints
+  # them whenever it is on, and only then does a compare's text name them.
   CALLEES = %w[
     mrb_likely mrb_unlikely mrb_fixnum_p mrb_integer_p mrb_float_p mrb_undef_p mrb_symbol_p mrb_nil_p
     mrb_fixnum mrb_integer mrb_float mrb_fixnum_value mrb_bool_value mrb_true_value mrb_false_value mrb_nil_value
@@ -31,6 +32,7 @@ module ColdCompact
     bc2cpp_slow_div bc2cpp_slow_div_f bc2cpp_slow_lt bc2cpp_slow_lt_f bc2cpp_slow_le bc2cpp_slow_le_f
     bc2cpp_slow_gt bc2cpp_slow_gt_f bc2cpp_slow_ge bc2cpp_slow_ge_f
     mrb_type mrb_string_p mrb_obj_ptr mrb_float_value mrb_div_float mrb_as_float mrb_str_equal mrb_obj_equal
+    bc2cpp_cmp_num_lt bc2cpp_cmp_num_le bc2cpp_cmp_num_gt bc2cpp_cmp_num_ge bc2cpp_cmp_num_eq
   ].to_set.freeze
   OUT_PARAM = /\bbc2cpp_fixnum_(?:add|sub|mul)\(/
   KEYWORDS = %w[if else].to_set.freeze
