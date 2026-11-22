@@ -4,7 +4,8 @@
 # (tests/nfcxx-cache-io/bash-oracle.sh, frozen). Each case runs the reference and the Ruby functions (called from bash, one call
 # each) from the same starting state, each in its own directory, against a stand-in GHA client (fake-gha.rb, which answers as
 # FAKE_GHA says). Both must exit with the case's status, print the same stdout and stderr, and leave the same files.
-# cache_sha stays bash (the key is computed in bash); its check is the sha of nfcxx against scripts/nfcxx-cache-io.rb sha.
+# The sha helper: the bash cache_sha is gone from the body (the key is computed in Ruby); its output, recorded from the frozen
+# body, is pinned here, and scripts/nfcxx-cache-io.rb sha must print it.
 #   bash tests/nfcxx-cache-io/run.sh
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
@@ -91,11 +92,10 @@ case_run "log: an existing file is appended to" miss 0 'echo before > cache.log'
 case_run "log: text that looks like an option" miss 0 '' 'cache_log_file=$PWD/cache.log; cache_log -n -e x'
 case_run "log: no file set writes nothing" miss 0 '' 'cache_log_file=; cache_log nothing'
 
-# sha: nfcxx's cache_sha (bash, unchanged) and the Ruby helper's sha agree on the same input
-sed -n '/^cache_sha()/p' "$repo/tests/driver-body/nfcxx-bash" > "$work/sha.sh"
-printf 'some input\n' | (. "$work/sha.sh"; cache_sha) > "$work/b.sha"
+# sha: the Ruby helper's sha of the input is the frozen body's cache_sha output for it (sha256sum's line)
+printf '%s\n' '96d7fae8adb7286a419a88f78c13d35fb782d63df654b7db56f154765698b754  -' > "$work/b.sha"
 printf 'some input\n' | ruby "$repo/scripts/nfcxx-cache-io.rb" sha > "$work/r.sha"
-cmp -s "$work/b.sha" "$work/r.sha" && ok "sha (bash and ruby agree)" || bad "sha"
+cmp -s "$work/b.sha" "$work/r.sha" && ok "sha (ruby matches the frozen bash's cache_sha output)" || bad "sha"
 
 echo "$pass passed, $fail failed"
 [ "$fail" = 0 ]

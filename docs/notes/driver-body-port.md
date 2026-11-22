@@ -38,8 +38,8 @@ Checked against origin/main after #1432 (the compile cache's lookup planner).
 - The SYCL two-pass build (`scripts/nfcxx-sycl.rb`) now runs in `scripts/nfcxx.rb`, before the body starts:
   the body's early exits never refuse its arguments. `tests/driver-sycl-dispatch` holds the goldens.
 - Helpers still defined in the body: `temp_cleanup`, `abs_path`, `onoff`, `ensure_tool`, `ecp_args`, `state_put`,
-  `loop_set`/`loop_append`, `eccp_cleanup`, `compile_clean`, `link_records_rm`, `cache_log`, `cache_sha`, `cache_remote_get`,
-  `cache_remote_put`.
+  `loop_set`/`loop_append`, `eccp_cleanup`, `compile_clean`, `link_records_rm`. (The compile cache's `cache_log`, `cache_sha`,
+  `cache_remote_get` and `cache_remote_put` are no longer in the body: they are scripts/nfcxx-cache-check.rb's.)
 
 ## What blocks deleting the frozen body
 

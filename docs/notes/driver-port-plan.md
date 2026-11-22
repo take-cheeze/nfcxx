@@ -33,7 +33,7 @@ and the Ruby entry (scripts/nfcxx.rb) routes to it until the last stage.
    `cache_remote_get` and `cache_remote_put` are calls of scripts/nfcxx-cache-io.rb (log, remote-get, remote-put; the GHA
    client is behind it). Test of those: tests/nfcxx-cache-io (against the frozen bash, bash-oracle.sh). Still in bash:
    the remote calls, `cache_log` (the bash writes the block the lookup prints), and the removals before a compile.
-   `cache_sha` is defined but nfcxx no longer calls it (tests/nfcxx-cache-io reads it).
+   `cache_sha` is deleted from the body (nothing called it); tests/nfcxx-cache-io pins its output for the same input.
    The key covers nfcxx and scripts/, so a change to either changes every key, as it always did.
 3. Modules: `mod_is_module_src`, `mod_decl_name`, `mod_imports`, `mod_check_src`, `mod_build_program`. Test:
    tests/nfcxx-modules (its plan printer exists: scripts/nfcxx-modules.rb).
