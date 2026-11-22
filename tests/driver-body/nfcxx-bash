@@ -91,6 +91,20 @@ temp_cleanup() {
   [ -z "${cudatmp:-}" ] || [ -n "${cudatmp_owned:-}" ] || rm -rf "$cudatmp"
   [ -z "${fso_dir:-}" ] || rm -rf "$fso_dir"
 }
+# fallback_gcc MESSAGE: the program is built again with the gcc backend, which reports its own errors if it fails too. The temporary
+# directories are removed first. Under the Ruby driver (scripts/nfcxx.rb sets NFCXX_FALLBACK_MARKER) the body leaves MESSAGE in that
+# marker file and exits 0 without its EXIT trap: the driver prints MESSAGE and runs the driver again with NFCXX_BACKEND=gcc, the same
+# arguments, and exits with its status. Run alone, the body prints MESSAGE and execs the driver, as it always did.
+fallback_gcc() {
+  temp_cleanup
+  if [ -n "${NFCXX_FALLBACK_MARKER:-}" ]; then
+    printf '%s\n' "$1" > "$NFCXX_FALLBACK_MARKER"
+    trap - EXIT
+    exit 0
+  fi
+  echo "$1" >&2
+  exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
+}
 # -fsyntax-only is rewritten by the Ruby driver before this body runs (scripts/nfcxx-syntax-only.rb).
 # --bundle-libs and --cuda-driver= are wrapped by the Ruby driver before this body runs (scripts/wrap.rb, from scripts/nfcxx.rb).
 source "$root/scripts/trace.sh"
@@ -660,9 +674,8 @@ if [ ${#cfiles[@]} -gt 0 ]; then
         # as for a C++ file: the default backend failed on this one (status 3: a construct Path B refuses), so the whole
         # program is built again with gcc, which reports its own errors if it fails too. An explicit backend is an error.
         [ $default_backend = 1 ] || exit $prc
-        echo "nfcxx: Path B did not build $c (status $prc); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)" >&2
         rm -rf "$ctmp"
-        temp_cleanup; exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
+        fallback_gcc "nfcxx: Path B did not build $c (status $prc); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)"
       fi
     else
       "${NFCXX_GCC:-gcc}" -c -O2 -fwrapv -fno-strict-aliasing ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${cflags_pic[@]+${cflags_pic[@]+"${cflags_pic[@]}"}} ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o"
@@ -750,8 +763,7 @@ if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
   # A .cu unit with kernel instances only the host compile makes (its .dev.kernels.unresolved is not empty) needs the second pass
   # (below, on the EDG route); Path B does not build them, so this unit takes the gcc route, which runs it.
   if [ ${#cu_inputs[@]} -gt 0 ] && [ -n "${cudatmp:-}" ] && [ -s "$cudatmp/$(basename "${cu_inputs[0]}" .cu).dev.kernels.unresolved" ]; then
-    echo "nfcxx: ${cu_inputs[0]} has kernel instances only the host compile makes; building it with the gcc backend, which runs the second pass" >&2
-    temp_cleanup; exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
+    fallback_gcc "nfcxx: ${cu_inputs[0]} has kernel instances only the host compile makes; building it with the gcc backend, which runs the second pass"
   fi
   cache_check   # a hit: the object is copied back and the program is done
   # -c: one object per C++ file, named as the gcc and Path B backends name it (-o FILE for one file, else basename.o)
@@ -763,8 +775,7 @@ if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
          if [ $prc != 0 ]; then
            # the default backend failed on this file: the object is built again with gcc, which reports its own errors
            [ $default_backend = 1 ] || exit $prc
-           echo "nfcxx: Path B did not build $f (status $prc); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)" >&2
-           temp_cleanup; exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
+           fallback_gcc "nfcxx: Path B did not build $f (status $prc); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)"
          fi ;;
     esac
   done
@@ -790,9 +801,8 @@ if [ $backend = pathb ]; then
          if [ $prc != 0 ] && [ $default_backend = 1 ]; then
            # the default backend failed on this file (status 3: a construct Path B refuses; otherwise a Path B fault):
            # the whole program is built again with gcc, which reports its own errors if it fails too
-           echo "nfcxx: Path B did not build $f (status $prc); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)" >&2
            rm -rf "$ptmp"
-           temp_cleanup; exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
+           fallback_gcc "nfcxx: Path B did not build $f (status $prc); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)"
          fi
          [ $prc = 0 ] || exit $prc
          pobjs+=("$o") ;;
