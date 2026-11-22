@@ -3337,6 +3337,7 @@ BC2CPP_MAIN = lambda do
   entry_header = gen.emit_entry_header(compiled, symbol)
   # SHARD_COLOCATE (shard_colocate.rb): the hosts call these bodies directly, so no copy of them saves code.
   ShardColocate.keep = entry_header.scan(/(?<![\w$])[A-Za-z_][\w$]*_impl(?![\w$])/)
+  ShardColocate.proven_guards = gen.site_proven_param_guards if ShardColocate.enabled? && ShardColocate.guards_enabled?
   File.write(File.join(out_dir, "#{symbol}_entry.h"), entry_header)
   if (entry_dir = ENV['BC2CPP_ENTRY_INCLUDE_DIR'])
     FileUtils.mkdir_p(entry_dir)

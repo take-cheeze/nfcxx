@@ -650,4 +650,82 @@ Dir.mktmpdir('bc2cpp-shard-colocate-generated') do |dir|
   end
 end
 
+# SHARD_COLOCATE_GUARDS on generated code: a declared program-class parameter that its one program site proves is left
+# out of the copy, and kept in the original that outside callers reach. An Integer guard stays. The name is unique:
+# one the outside world also uses (`step`) has no site list, so nothing is proven.
+GUARD_SOURCE = <<~'RUBY'
+  class GuardLeaf
+    def initialize(k); @k = k; end
+    def scale(n); n * 3 + @k; end
+  end
+  class GuardMid
+    def guard_advance(leaf, n); leaf.scale(n) * 2; end
+  end
+  class GuardTop
+    def run(k); GuardMid.new.guard_advance(GuardLeaf.new(k), k + 1) + 1; end
+  end
+RUBY
+GUARD_SIG = <<~'RBS'
+  class GuardMid
+    def guard_advance: (GuardLeaf leaf, Integer n) -> untyped
+  end
+RBS
+GUARD_OWNERS = %w[GuardLeaf GuardMid GuardTop].freeze
+GUARD_DRIVER = <<~'RUBY'
+  puts GuardTop.new.run(4)
+  puts GuardTop.new.run(-7)
+  puts 'end'
+RUBY
+copy_body = lambda do |text, name|
+  start = text.index(/^BC2CPP_COLO_ATTR static mrb_value bc2cpp_colo_#{name}\(.*\{$/)
+  start ? text[start...text.index(/^\}$/, start)] : ''
+end
+guard_texts = { nil => nil, '0' => nil }.keys.to_h do |mode|
+  Dir.mktmpdir('bc2cpp-shard-colocate-guards') do |dir|
+    sig = File.join(dir, 'sig')
+    FileUtils.mkdir_p(sig)
+    File.write(File.join(sig, 'guard.rbs'), GUARD_SIG)
+    saved = %w[BC2CPP_SHARDS BC2CPP_SHARD_MIN_BYTES BC2CPP_SHARD_COLOCATE BC2CPP_SHARD_COLOCATE_GUARDS BC2CPP_SIG_DIRS]
+            .to_h { |k| [k, ENV.fetch(k, nil)] }
+    ENV.update('BC2CPP_SHARDS' => '3', 'BC2CPP_SHARD_MIN_BYTES' => '1', 'BC2CPP_SHARD_COLOCATE' => 'all', 'BC2CPP_SIG_DIRS' => sig)
+    mode ? ENV['BC2CPP_SHARD_COLOCATE_GUARDS'] = mode : ENV.delete('BC2CPP_SHARD_COLOCATE_GUARDS')
+    code, err = Bc2cppFixtureRuntime.generate(GUARD_SOURCE, dir, core: true, only_owners: GUARD_OWNERS)
+    saved.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
+    shards = [1, 2].map { |k| ShardOutput.shard_path(dir, 'fixture', k) }
+    text = code + shards.map { |p| File.exist?(p) ? File.read(p) : '' }.join
+    if mode.nil?
+      build = Bc2cppFixtureRuntime.full_or_build
+      if build.nil?
+        puts '  SKIP guard behavioural comparison: needs a full-core libmruby'
+      else
+        body = <<~CPP
+          static int scenario(mrb_state* M) {
+            std::fflush(stdout);
+            mrb_load_string(M, R"SHD(#{GUARD_DRIVER})SHD");
+            std::fflush(stdout);
+            if (M->exc) { mrb_print_error(M); M->exc = nullptr; return 1; }
+            return 0;
+          }
+        CPP
+        built, output = Bc2cppFixtureRuntime.run(dir, err, GUARD_OWNERS, body, build: build, full: true, extra_srcs: shards)
+        sections = Bc2cppFixtureRuntime.sections(output.to_s)
+        suite.check('the build without the site-proven guard runs the fixture as the interpreter does',
+                    built && sections['interpreted']&.last == 'end' && sections['interpreted'] == sections['compiled'])
+        puts output.to_s.lines.last(20).join unless built && sections['interpreted'] == sections['compiled']
+      end
+    end
+    [mode, text]
+  end
+end
+on = guard_texts[nil]
+guarded_copy = copy_body.call(on, 'GuardMid_guard_advance_impl')
+suite.check('the copy of a guard wrapper leaves out the program-class guard its one site proves',
+            !guarded_copy.empty? && !guarded_copy.include?('DECLARED_PARAM_GUARD GuardMid#guard_advance arg 1 '))
+suite.check('the copy keeps the Integer guard (the flow\'s Integer bit is not the fixnum test)',
+            guarded_copy.include?('DECLARED_PARAM_GUARD GuardMid#guard_advance arg 2 '))
+suite.check('the original keeps both guards for its outside callers',
+            on.match?(/^mrb_value GuardMid_guard_advance_impl\(.*\{\n.*DECLARED_PARAM_GUARD GuardMid#guard_advance arg 1 /))
+suite.check('BC2CPP_SHARD_COLOCATE_GUARDS=0 keeps the guard in the copy',
+            copy_body.call(guard_texts['0'], 'GuardMid_guard_advance_impl').include?('DECLARED_PARAM_GUARD GuardMid#guard_advance arg 1 '))
+
 suite.finish!
