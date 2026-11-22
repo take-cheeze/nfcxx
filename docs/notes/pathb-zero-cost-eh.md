@@ -180,15 +180,16 @@ cleanups compared with g++'s output: conditional temporaries, `new` with a throw
 and objects, a local static whose initializer throws, temporaries of a full expression; exceptions across g++-compiled
 code in both directions; `noexcept`; the forced unwind of `pthread_exit` and `pthread_cancel` and a foreign
 exception, through pads and `catch (...)`; the nothrow callees), and the EH probes of the frames mode (`tests/pathb-qbe/{cases,traps}/eh_*.cpp`,
-`tests/cases/eh_*.cpp`; with `--all`, every program of `tests/pathb-qbe/cases` and `tests/cases`: 200, all pass), and
+`tests/cases/eh_*.cpp`; with `--all`, every program of `tests/pathb-qbe/cases` and `tests/cases`: 201, all pass), and
 inlined callees with pads (two copies in a caller, a copy inside a copy, a catch that
 rethrows from a copy, destructors with pads inlined into a pad, a `noexcept` copy). 21 programs, all pass, through the
 IR passes, the e-graph pass and QBE's optimizations.
 
 ## Known gaps
 
-- A dynamic exception specification of a pointer type is refused (unsupported) when nothing else in the unit makes the
-  pointer type's typeinfo (a `catch` of it does): EDG makes none for the specification alone.
+- A dynamic exception specification of a pointer to member or of `std::nullptr_t` is refused (unsupported): EDG's
+  description of those types is not the IA-64 typeinfo. The EDG fork makes the typeinfo of every other type of a
+  specification (`tests/pathb-eh-tables/cases/spec_pointer_types.cpp`).
 - The frames mode destroys a full expression's temporaries in construction order when an exception leaves it (EDG's
   runtime walks the region chain as it is); the pads run such a run backwards (below).
 - Targets: tested on x86-64 Linux; QBE's arm64 emitter marks call sites and pads too (CI's arm64 Linux job runs it).
