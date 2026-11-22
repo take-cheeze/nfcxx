@@ -6,10 +6,17 @@
 #   bash tests/driver-setup-stage/run.sh            compares every case with its golden
 #   bash tests/driver-setup-stage/run.sh --record   writes the goldens (only on a tree whose behavior is the reference)
 set -u
-here=$(cd "$(dirname "$0")" && pwd -P); repo=$(cd "$here/../.." && pwd -P)
+here=$(cd "$(dirname "$0")" && pwd -P); src=$(cd "$here/../.." && pwd -P)
 mode=${1:-check}
 work=$(mktemp -d) || exit 1
 trap 'rm -rf "$work"' EXIT
+# the environment is pinned: the driver reads ROOT/build (QBE, the EH shim, EDG's libC.a, cpfe's tree, cosmocc, cppfront), which
+# EDG_BUILD does not cover, so the cases run a copy of the repository without build/ (and without .git). The copy is the
+# checkout's files as they are, so the driver under test is this tree's. The tool the driver builds on first use
+# (tools/cuda-rewrite) is built before the cases, its output discarded, so no case records the build's messages.
+repo=$work/root
+mkdir -p "$repo" && (cd "$src" && tar --exclude=./build --exclude=./.git -cf - .) | (cd "$repo" && tar -xf -) || exit 1
+ruby "$repo/scripts/nfcxx-ensure-tool.rb" "$repo/tools/cuda-rewrite" "$repo/build/cuda-rewrite" >/dev/null 2>&1 || true
 mkdir -p "$work/src" "$work/tmp" "$work/stub/bin"
 printf 'int main() { return 0; }\n' > "$work/src/a.cpp"
 printf 'int b() { return 1; }\n' > "$work/src/b.cpp"
@@ -24,7 +31,7 @@ chmod +x "$work/stub/bin/eccp"
 
 # normalize: the repository, the work directory and the temporary directories (their names are random) become fixed words
 normalize() {
-  sed -e "s#$work#<WORK>#g" -e "s#$repo#<REPO>#g" \
+  sed -e "s#$repo#<REPO>#g" -e "s#$work#<WORK>#g" \
       -e 's#nfcxx-[a-z]*\.[A-Za-z0-9_]*#nfcxx-<T>#g' -e 's#\.build\.[A-Za-z0-9]*/#.build.<T>/#g' \
       -e 's#<WORK>/tmp/[^ :/]*#<TMPDIR>#g' -e 's#line [0-9][0-9]*: #line N: #g'
 }
