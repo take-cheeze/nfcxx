@@ -93,6 +93,13 @@
     }
   },
   "entries": {
+    "RB_OBJ_FROZEN_RAW": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": false,
+      "template": "(!mrb_immediate_p($0) && MRB_FROZEN_P(mrb_basic_ptr($0)))",
+      "caveat": "CRuby's RB_OBJ_FROZEN_RAW tests the frozen bit of an object's flags; the fork keeps it in the object's basic header (MRB_FL_OBJ_IS_FROZEN, include/mruby/object.h), tested for heap objects only (an immediate has no flags, so it is not frozen here)"
+    },
     "rb_marshal_load": {
       "kind": "template",
       "arity": 1,
@@ -2422,7 +2429,6 @@
     "rb_big2ull": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "mrb_bint_as_uint64($m, $0)", "caveat": "raises RangeError when x is negative or does not fit uint64_t, as CRuby"},
     "rb_big2ll": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "mrb_bint_as_int64($m, $0)", "caveat": "raises RangeError when x does not fit int64_t, as CRuby"},
     "rb_ull2inum": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "mrb_bint_new_uint64($m, (uint64_t)($0))", "caveat": "a fixnum when the value fits one, a bigint otherwise, as CRuby"},
-    "RB_OBJ_FROZEN_RAW": {"kind": "refuse", "reason": "stuck point: the raw frozen flag of an object (CRuby's RBasic flags) has no mruby form beyond MRB_FROZEN_P on heap objects (accepted stuck point)"},
     "rb_hash_foreach": {
       "kind": "hash_foreach",
       "needs_mrb": true,
