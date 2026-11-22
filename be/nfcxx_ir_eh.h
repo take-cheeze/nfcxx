@@ -43,6 +43,7 @@ typedef struct ir_eh_frame {
   unsigned long entry_region;     /* the region current where the frame begins */
   int id;
   an_expr_node_ptr action;        /* an internal try: the expression to evaluate when unwinding */
+  int free_thr;                   /* a throw's operand: free the exception object being built (__cxa_free_exception) */
   int nh;                         /* a try: its catch clauses */
   int tid[IR_EH_MAXH];
   char *label[IR_EH_MAXH];
@@ -490,7 +491,7 @@ static int ir_eh_pad_walk(int n, int *types, int *ntypes, int *cleanup)
     }
     if (f == NULL) break;
     ir_eh_node_want(f->entry_region, f);
-    if (f->action != NULL) *cleanup = 1;
+    if (f->action != NULL || f->free_thr) *cleanup = 1;
     for (k = 0; k < f->nh; k++)
       if (*ntypes < IR_EH_MAXH) types[(*ntypes)++] = f->tid[k];
     r = f->entry_region;
@@ -532,6 +533,9 @@ static int ir_eh_node_code(ir_eh_node *nd)
   }
   if (f != NULL && nd->r == f->entry_region) {
     if (f->action != NULL) (void)ir_rval(f->action);
+    if (f->free_thr)
+      ir_emit(ir_fmt("(eval (call void &\"__cxa_free_exception\" %s))",
+                     ir_let("(ptr void)", ir_fmt("(load (ptr void) %s)", ir_eh_thr_slot()))));
     for (k = 0; k < f->nh; k++) {
       char *sel = ir_let("long", ir_fmt("(load long %s)", ir_eh_sel_slot()));
       /* (eh-tid N): the type id as a constant (scripts/pathb-ssa.rb), which the inliner renumbers in a caller's table */
@@ -668,6 +672,7 @@ static ir_val ir_eh_throw(an_expr_node_ptr e)
   a_type_ptr t;
   unsigned long long size;
   char *saved = ir_eh_thrown, *ti;
+  int thr_calls;
   const char *dtor = NULL;
   ir_eh_on = 1;
   if (tsp == NULL) {
@@ -686,8 +691,45 @@ static ir_val ir_eh_throw(an_expr_node_ptr e)
   size = ir_size_of(t);
   ir_eh_thrown = ir_let("(ptr void)", ir_fmt("(call (ptr void) &\"__cxa_allocate_exception\" (const unsigned_long %llu))",
                                               size ? size : 1));
-  if (ir_eh_thr_rel) ir_emit(ir_fmt("(store (ptr void) %s %s)", ir_eh_thr_slot(), ir_eh_thrown));
-  if (tsp->expr != NULL) (void)ir_rval(tsp->expr);
+  thr_calls = 0;
+  if (tsp->expr != NULL) {
+    /* The operand runs in a frame of its own whose pad frees the exception object (after the cleanups of the members
+       it built), as gcc's __cxa_free_exception when a constructor of the object throws; the object's address is in
+       the eh.thrown slot. The operand is written to a buffer first: one that makes no call (throw 42) throws nothing,
+       and gets neither the frame nor the slot. */
+    ir_buf ob;
+    ir_eh_frame *f = (ir_eh_frame *)calloc(1, sizeof *f);
+    int npad0 = ir_eh_npad, last0 = ir_eh_last;
+    f->parent = ir_eh_cur;
+    f->entry_region = ir_eh_region;
+    f->id = ++ir_eh_nframe;
+    f->free_thr = 1;
+    ir_buf_open(&ob);
+    ir_buf_begin(&ob);
+    ir_eh_cur = f;
+    ir_eh_sync();
+    (void)ir_rval(tsp->expr);
+    ir_eh_cur = f->parent;
+    ir_buf_end(&ob);
+    fflush(ob.f);
+    thr_calls = ob.data != NULL && strstr(ob.data, "(call ") != NULL;
+    if (thr_calls || ir_eh_thr_rel) ir_emit(ir_fmt("(store (ptr void) %s %s)", ir_eh_thr_slot(), ir_eh_thrown));
+    if (thr_calls) {
+      ir_buf_write(&ob, nf_out);
+    } else {
+      /* no call: the frame's (eh-state N) line (the first: each line begins with its newline) goes, and so does
+         its pad when that state made it */
+      char *st = ob.data != NULL ? strstr(ob.data, "(eh-state ") : NULL;
+      char *nl = st != NULL ? strchr(st, '\n') : NULL;
+      if (st != NULL) fputs(nl != NULL ? nl : "", nf_out);
+      if (ir_eh_npad == npad0 + 1 && ir_eh_pads[npad0].frame == f) ir_eh_npad = npad0;
+      ir_eh_last = last0;
+      if (f->id == ir_eh_nframe) ir_eh_nframe--;   /* and its number: the labels of later frames are as before */
+      f->free_thr = 0;
+    }
+    ir_buf_close(&ob);
+    free(ob.data);
+  }
   {
     /* The exception object is complete: __cxa_throw owns it, and the unwind from that call must not destroy its
        subobjects (EDG leaves their regions current, innermost). The call is in the region outside them; the
@@ -695,10 +737,8 @@ static ir_val ir_eh_throw(an_expr_node_ptr e)
     unsigned long cur = ir_eh_region, r = cur;
     while (ir_eh_thr_rel && r != null_eh_region_number && r < (unsigned long)ir_eh_nrt && ir_eh_thr_entry((int)r))
       r = ir_eh_rt[r].next;
-    if (r != cur) {
-      ir_eh_region = r;
-      ir_eh_sync();
-    }
+    ir_eh_region = r;
+    if (r != cur || thr_calls) ir_eh_sync();   /* out of the operand's frame, and of the object's regions */
     ir_emit(ir_fmt("(eval (call void &\"__cxa_throw\" %s %s %s))", ir_eh_thrown, ti,
                    dtor != NULL ? ir_fmt("&\"%s\"", dtor) : "(null (ptr void))"));
     ir_emit("(unreachable)");

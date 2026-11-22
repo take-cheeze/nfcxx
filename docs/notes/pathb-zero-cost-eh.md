@@ -88,8 +88,10 @@ in the reverse order of their construction, as [except.ctor] says
 An exception object built in place from subobjects (`throw E{S(...), g()}`) has regions whose handle is only the
 member's offset in that object (no variable). A throw in such a function keeps the object's address in a slot
 (`eh.thrown`), and the pad destroys the members built so far through it; `__cxa_throw` is called outside those
-regions, as the object is complete then (`tests/pathb-eh-tables/cases/throw_subobjects.cpp`). The object is not freed
-when its construction throws (gcc calls `__cxa_free_exception`): it leaks.
+regions, as the object is complete then (`tests/pathb-eh-tables/cases/throw_subobjects.cpp`). A throw whose operand makes a call runs
+it in a frame of its own, whose pad frees the object (`__cxa_free_exception`, as gcc) after the cleanups of the members
+it built; `__cxa_throw` is outside it (`tests/asan/cases/clean_throw_ctor_free.cpp`, with LeakSanitizer). An operand
+that makes no call (`throw 42`) gets neither the frame nor the slot.
 
 ### The SSA builder (`scripts/pathb-ssa.rb`)
 
