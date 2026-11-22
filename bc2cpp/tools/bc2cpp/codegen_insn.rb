@@ -300,6 +300,8 @@ class CodeGen
       # needs proving.
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('+', d, lit)}\n"
+      elsif integer_operand_pair?('+', d, nil, irep, idx, owner_def, reg_offset)
+        integer_arith_tier('+', d, "mrb_fixnum_value(#{lit})", "mrb_fixnum_p(#{RegName[d]})")
       else
         guarded = guarded_game_integer_immediate(:ADD, irep, idx, unshift_proof_reg(d, reg_offset), lit,
                                                  owner_def)
@@ -328,6 +330,8 @@ class CodeGen
       s = insn.paren_reg
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('+', d, "#{RegName[s]}")}\n"
+      elsif integer_operand_pair?('+', d, s, irep, idx, owner_def, reg_offset)
+        integer_arith_tier('+', d, RegName[s], TaggedFixnum.pair(RegName[d], RegName[s]))
       else
         guarded = guarded_game_integer_pair(:ADD, irep, idx, unshift_proof_reg(d, reg_offset),
                                             unshift_proof_reg(s, reg_offset), owner_def)
@@ -361,6 +365,8 @@ class CodeGen
       lit = BytecodeIR::OperandModel.imm_operand(insn)
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('-', d, lit)}\n"
+      elsif integer_operand_pair?('-', d, nil, irep, idx, owner_def, reg_offset)
+        integer_arith_tier('-', d, "mrb_fixnum_value(#{lit})", "mrb_fixnum_p(#{RegName[d]})")
       else
         guarded = guarded_game_integer_immediate(:SUB, irep, idx, unshift_proof_reg(d, reg_offset), lit,
                                                  owner_def)
@@ -388,6 +394,8 @@ class CodeGen
       s = insn.paren_reg
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('-', d, "#{RegName[s]}")}\n"
+      elsif integer_operand_pair?('-', d, s, irep, idx, owner_def, reg_offset)
+        integer_arith_tier('-', d, RegName[s], TaggedFixnum.pair(RegName[d], RegName[s]))
       else
         guarded = guarded_game_integer_pair(:SUB, irep, idx, unshift_proof_reg(d, reg_offset),
                                             unshift_proof_reg(s, reg_offset), owner_def)
@@ -421,6 +429,8 @@ class CodeGen
       s = insn.paren_reg
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('*', d, "#{RegName[s]}")}\n"
+      elsif integer_operand_pair?('*', d, s, irep, idx, owner_def, reg_offset)
+        integer_arith_tier('*', d, RegName[s], TaggedFixnum.pair(RegName[d], RegName[s]))
       else
         guarded = guarded_game_integer_pair(:MUL, irep, idx, unshift_proof_reg(d, reg_offset),
                                             unshift_proof_reg(s, reg_offset), owner_def)
@@ -458,6 +468,8 @@ class CodeGen
       s = insn.paren_reg
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  #{RegName[d]} = mrb_div_int_value(M, mrb_fixnum(#{RegName[d]}), mrb_fixnum(#{RegName[s]}));\n"
+      elsif integer_operand_pair?('/', d, s, irep, idx, owner_def, reg_offset)
+        integer_div_tier(d, s)
       else
         guarded = guarded_game_integer_pair(:DIV, irep, idx, unshift_proof_reg(d, reg_offset),
                                             unshift_proof_reg(s, reg_offset), owner_def)
@@ -960,6 +972,8 @@ class CodeGen
       # between the write and this use).
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('+', d, lit)}\n"
+      elsif integer_operand_pair?('+', d, nil, irep, idx, owner_def, reg_offset)
+        integer_arith_tier('+', d, "mrb_fixnum_value(#{lit})", "mrb_fixnum_p(#{RegName[d]})")
       else
         <<~CPP
           if (#{BranchHints.likely("mrb_fixnum_p(#{RegName[d]})")}) {
@@ -978,6 +992,8 @@ class CodeGen
       lit = insn.src_and_literal&.last
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('-', d, lit)}\n"
+      elsif integer_operand_pair?('-', d, nil, irep, idx, owner_def, reg_offset)
+        integer_arith_tier('-', d, "mrb_fixnum_value(#{lit})", "mrb_fixnum_p(#{RegName[d]})")
       else
         <<~CPP
           if (#{BranchHints.likely("mrb_fixnum_p(#{RegName[d]})")}) {
@@ -1148,6 +1164,8 @@ class CodeGen
     if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
       return "#{FIXNUM_PROOF_NOTE}  #{RegName[d]} = mrb_bool_value(#{TaggedFixnum.compare("#{RegName[d]}", sym, "#{RegName[s]}")});\n"
     end
+    integer_pair = integer_operand_pair?(sym, d, s, irep, idx, owner_def, reg_offset)
+    return integer_compare_tier(sym, d, s) if integer_pair && op != :EQ
 
     # OP_CMP's MRB_TT_INTEGER is the full Integer tag, and with floats all three
     # Integer/Float pairs compare natively; the tag checks come before
@@ -1174,6 +1192,7 @@ class CodeGen
     end
     # String/Symbol `==` use their registered C bodies; Integer's other numeric
     # forms and unmatched tags keep mruby's mrb_equal semantics in the fallback.
+    plain_fallback = fallback
     fallback = generated_eq_dispatch(d, s, fallback) || fallback if op == :EQ
 
     integer_accessor = "mrb_integer(#{RegName[d]}) #{sym} mrb_integer(#{RegName[s]})"
@@ -1211,7 +1230,20 @@ class CodeGen
       }
     CPP
 
-    if op == :EQ
+    if integer_pair
+      # INTEGER_OPERAND_PROOF: neither operand is a Symbol or a Float, so only the Integer pair, identity and
+      # the fallback (a bigint) remain of OP_EQ.
+      <<~CPP
+        #{format(INTEGER_PROOF_NOTE, ':==')}
+        #{fixnum_arm}if (mrb_integer_p(r#{d}) && mrb_integer_p(r#{s})) {
+          #{RegName[d]} = mrb_bool_value(mrb_integer(#{RegName[d]}) == mrb_integer(#{RegName[s]}));
+        } else if (mrb_obj_eq(M, #{RegName[d]}, #{RegName[s]})) {
+          #{RegName[d]} = mrb_true_value();
+        } else {
+          #{plain_fallback}
+        }
+      CPP
+    elsif op == :EQ
       # INTEGER_PAIR_EQ: mrb_obj_eq on two Integers is their value equality, so testing the
       # pair ahead of identity gives OP_EQ's answer without the out-of-line mrb_obj_eq call.
       <<~CPP
