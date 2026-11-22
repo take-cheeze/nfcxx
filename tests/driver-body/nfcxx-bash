@@ -85,10 +85,7 @@ temp_cleanup() {
   [ -z "${fso_dir:-}" ] || rm -rf "$fso_dir"
 }
 # -fsyntax-only is rewritten by the Ruby driver before this body runs (scripts/nfcxx-syntax-only.rb).
-source "$root/scripts/wrap.sh"   # --bundle-libs and --cuda-driver= (docs/notes/bundle.md, docs/notes/cuda-driver.md)
-bundle_wrap "$root/nfcxx" "$@"   # --bundle-libs (docs/notes/bundle.md)
-cuda_driver_wrap "$root/nfcxx" "$@"   # --cuda-driver= (docs/notes/cuda-driver.md)
-set -- ${cuda_driver_args[@]+"${cuda_driver_args[@]}"}
+# --bundle-libs and --cuda-driver= are wrapped by the Ruby driver before this body runs (scripts/wrap.rb, from scripts/nfcxx.rb).
 source "$root/scripts/trace.sh"
 edg=${EDG_BUILD:-$root/build/edg}/bin
 # The exception handling state is per thread when the EDG runtime was built so (lib_src's RUNTIME_EH_TLS, Linux targets;

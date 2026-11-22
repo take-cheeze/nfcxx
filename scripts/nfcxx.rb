@@ -100,6 +100,7 @@ SYCL_SCRIPT = File.join(root, "scripts", "nfcxx-sycl.rb")
 # -fsyntax-only (the type check) comes first, as it came first in the body: the command is rewritten (scripts/nfcxx-syntax-only.rb),
 # and this driver runs again on the rewritten command in a temporary directory, with its status.
 if (syntax = NfcxxSyntaxOnly.plan(ARGV))
+  $stderr.write("nfcxx: driver: plan\n") if ENV["NFCXX_DRIVER_TRACE"] == "1"   # the route the pre-loop plan took
   status = nil
   Dir.mktmpdir("nfcxx-fso.") do |dir|
     system(RbConfig.ruby, __FILE__, *NfcxxSyntaxOnly.args_in(syntax, dir))
@@ -107,6 +108,28 @@ if (syntax = NfcxxSyntaxOnly.plan(ARGV))
   end
   exit status
 end
+
+# --bundle-libs and --cuda-driver= (docs/notes/bundle.md, docs/notes/cuda-driver.md): the wrappers (scripts/wrap.rb) come after the
+# -fsyntax-only step and before anything else, as they came first in the body. Status 254 from the bundle wrapper means nothing
+# was done and the run goes on; any other status ends the run. A --cuda-driver= run goes on with the arguments the wrapper gives
+# (the --cuda-driver= options left out), or is run again with the shim in place of libcuda (EXEC) and ends with that status.
+WRAP_RB = File.join(root, "scripts", "wrap.rb")
+DRIVER_SHIM = File.join(root, "nfcxx")
+WRAP_GO_ON = 254
+$stderr.write("nfcxx: driver: plan\n") if ENV["NFCXX_DRIVER_TRACE"] == "1" && ARGV.any? { |a| a.start_with?("--bundle-") }
+system(RbConfig.ruby, WRAP_RB, "bundle", DRIVER_SHIM, *ARGV)
+bundle_status = $?.exitstatus || 128 + $?.termsig
+exit bundle_status unless bundle_status == WRAP_GO_ON
+cuda_out = IO.popen([RbConfig.ruby, WRAP_RB, "cuda-driver", DRIVER_SHIM, *ARGV], &:read)
+cuda_status = $?.exitstatus || 128 + $?.termsig
+exit cuda_status unless cuda_status == 0
+cuda_lines = cuda_out.lines.map(&:chomp)
+cuda_kind = cuda_lines.shift
+if cuda_kind == "EXEC"
+  system({ "NFCXX_CUDA_DRIVER" => "libcuda" }, DRIVER_SHIM, *cuda_lines)
+  exit($?.exitstatus || 128 + $?.termsig)
+end
+ARGV.replace(cuda_lines)
 
 # The route dispatch: the pre-loop plan (scripts/nfcxx-loop.rb) runs in scripts/nfcxx-run.rb, and a gcc-route refusal
 # (scripts/nfcxx-gcc-plan.rb --live, status 2) is printed here, as the bash prints it. Every other argument list goes to the

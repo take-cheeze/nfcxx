@@ -664,8 +664,8 @@ class CodeGen
 
       # The receiver must be the literal constant path RGSS::Profiler (see
       # profiler_section_receiver?), and a :section's name must be a String pool
-      # literal (see profiler_section_literal?). Everything else keeps today's
-      # BLOCK_FALLBACK.
+      # literal or a Symbol literal (see profiler_section_literal). Everything
+      # else keeps today's BLOCK_FALLBACK.
       next unless profiler_section_receiver?(irep, idx, dest_reg, meth)
 
       section_name = meth == 'section' ? profiler_section_literal(irep, idx, (dest_reg + 1)) : nil
@@ -700,7 +700,7 @@ class CodeGen
   # Is `reg` the literal constant path RGSS::Profiler at this call? `idx` is the
   # SENDB's index, so the BLOCK is at idx-1. The pair
   # `GETCONST R<r> RGSS` + `GETMCNST R<r> (R<r>)::Profiler` ends immediately
-  # before the BLOCK for :frame, and one STRING earlier for :section (whose
+  # before the BLOCK for :frame, and one name load earlier for :section (whose
   # name argument is written in between), so both positions are tried.
   # Anything else -- a local alias, a rebased constant, a different receiver
   # answering `section` -- is not matched and keeps today's BLOCK_FALLBACK.
@@ -719,20 +719,46 @@ class CodeGen
     const && const.op == :GETCONST && const.reg == reg && const.const_name == 'RGSS'
   end
 
-  # The String pool literal for :section's name argument, or nil. The VM wrote
-  # that argument (register dest+1) with a `STRING R<n> L[k]` pool load placed
-  # between the receiver pair and the BLOCK. The search is bounded to exactly
-  # those two instructions, so a STRING left over from an earlier statement in
-  # the method can never be mistaken for this call's name.
+  # The literal name of :section's argument, or nil. The VM wrote that argument
+  # (register dest+1) with a `STRING R<n> L[k]` pool load or a `LOADSYM R<n> :name`
+  # placed between the receiver pair and the BLOCK. The search is bounded to
+  # exactly those two instructions, so a load left over from an earlier
+  # statement in the method can never be mistaken for this call's name. A Symbol
+  # name is the one profiler.cxx reports (mrb_sym_name), and allocates nothing.
   def profiler_section_literal(irep, idx, reg)
     insn = BytecodeIR.for(irep).source_at(idx - 2)
-    return nil unless insn && insn.op == :STRING && insn.reg == reg
+    return nil unless insn && insn.reg == reg
+    return profiler_section_symbol(insn.sym_token) if insn.op == :LOADSYM && profiler_symbol_name_taken?
+    return nil unless insn.op == :STRING
 
     pool_idx = insn.pool_index
     return nil unless pool_idx
 
     entry = irep.pool.fetch(pool_idx.to_i)
     entry if entry.is_a?(String)
+  end
+
+  # PROFILER_SYMBOL_NAME: the inline body stands in for the native, so a Symbol name is inlined only when every
+  # mrb_get_args in profiler.cxx (prof_section and the stub) reads the name with "o" and prof_section tests
+  # mrb_symbol_p; a native that reads it with "S" raises a TypeError the inline body would not.
+  # BC2CPP_PROFILER_SYMBOL_NAME=0 keeps a Symbol-named section on the fallback.
+  def profiler_symbol_name_taken?
+    return false if ENV['BC2CPP_PROFILER_SYMBOL_NAME'] == '0'
+    return @profiler_symbol_name_taken unless @profiler_symbol_name_taken.nil?
+
+    paths = block_return_native_paths('section')
+    src = paths.one? ? File.read(paths.first) : ''
+    formats = src.scan(/mrb_get_args\(M, "([^"]*)", &name/).flatten
+    @profiler_symbol_name_taken = !formats.empty? && formats.all? { |f| f.delete('|').start_with?('o') } &&
+                                  src.include?('mrb_symbol_p(name)')
+  end
+
+  # A LOADSYM token's name: plain, or QUOTED_SYMBOL's quoted form without escapes (as compile_insn's LOADSYM).
+  def profiler_section_symbol(token)
+    return nil if token.nil?
+    return token unless token.start_with?('"')
+
+    token[/\A"([^"\\]*)"\z/, 1]
   end
 
   # SORT_BLOCK_SUPPORT: inline sort_by (1-arg key), with the proven_array_source

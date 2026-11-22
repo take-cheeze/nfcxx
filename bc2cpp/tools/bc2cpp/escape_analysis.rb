@@ -197,8 +197,9 @@ module EscapeAnalysis
     # mrb_hash_has_key hashes the probe (hash, receiver = key) and compares it (eql?, receiver = key).
     'key?' => { args: [0], recv: %w[hash eql?], files: %w[3rd/mruby/src/hash.c] },
     'has_key?' => { args: [0], recv: %w[hash eql?], files: %w[3rd/mruby/src/hash.c] },
-    # Both registrations (profiler.cxx, real and WIO stub) read the name with "S&" and copy it into a std::string
-    # key (profiler_section_end); the block is captured by name (block_captured_by_name?). A non-String name is inspected (%Y).
+    # Both registrations (profiler.cxx, real and WIO stub) read the name with "S&" (a String; another name is
+    # inspected, %Y) or "o&" (a Symbol or a String, else a TypeError naming its class) and copy it into a std::string
+    # key (profiler_section_end); the block is captured by name (block_captured_by_name?).
     'section' => { args: [0], recv: %w[inspect to_s], files: %w[mruby-rgss/src/profiler.cxx] },
     # pack.c reads the template once (prepare_tmpl: mrb_get_args "S" into a stack struct) and builds copies.
     # Only an exact String is proven: other classes reach mrb_ensure_string_type, which inspects them (%Y).
