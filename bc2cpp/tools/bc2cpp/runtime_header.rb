@@ -5,6 +5,7 @@ require 'fileutils'
 require 'set'
 require 'stringio'
 require_relative 'shard_output'
+require_relative 'implicit_state'
 
 # RUNTIME_HEADER: the fixed runtime prelude bc2cpp.rb prints between BEGIN and END (helpers whose text depends on the
 # build, never on which owners a unit emits) goes to one header in BC2CPP_RUNTIME_HEADER_DIR that every compiled gem
@@ -57,6 +58,9 @@ module RuntimeHeader
 
     header, local = split(region, head + tail)
     return head + region + tail unless header
+
+    # IMPLICIT_STATE: the shared helpers lose their state parameter in the header text the digest names.
+    header = ImplicitState.rewrite([header]).first if ImplicitState.enabled?
 
     digest = Digest::SHA256.hexdigest("#{FORMAT}\n#{header}")[0, 16]
     ns = "bc2cpp_rt_#{digest}"
