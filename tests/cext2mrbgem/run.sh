@@ -1776,6 +1776,12 @@ check test ! -e "$work/api_int_local/NOT_BUILDABLE"
 check grep -qF 'mrb_int jd = 5;' "$work/api_int_local/src/api_int_local.c"
 check grep -qF 'mrb_int t;' "$work/api_int_local/src/api_int_local.c"
 check grep -qF 'mrb_value keep = x;' "$work/api_int_local/src/api_int_local.c"
+# 2zzz171. a block-scoped long t and a VALUE t in a later block of one function: the (long)t cast of the long is an integer use,
+# no VALUE-as-integer refusal (the lookup is the declaration whose block encloses the use).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_block_shadow tools/cext2mrbgem/fixtures/api_block_shadow/ext/api_block_shadow "$work/api_block_shadow" > "$work/api_block_shadow.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_block_shadow/NOT_BUILDABLE"
+check test "$(grep -c 'VALUE as integer' "$work/api_block_shadow/REFUSALS.txt")" -eq 0
 check test "$(grep -c 'stuck point (Struct)' "$work/api_struct_va/REFUSALS.txt")" -eq 0
 # 2zzz155. a struct field of CRuby's rb_encoding * type: the Encoding placeholder type is in the prelude (the declaration compiles),
 # and the include of ruby/encoding.h is not a blocking refusal (the placeholder covers it).

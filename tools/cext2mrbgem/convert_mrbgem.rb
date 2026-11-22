@@ -4103,6 +4103,7 @@ use_problem = lambda do |name, use|
         next unless ok
         @edits[rel].add(st, kw_end, 'mrb_int')
         names.each { |n| @int_locals << [rel, body_s, n] }
+        decls.each { |d| (@int_decl_pos ||= Set.new) << [rel, d[:start]] }
         rewrite(rel, st, 'VALUE', 'mrb_int', 'a VALUE local that CRuby uses only as a C integer (its word is the integer) is an mrb_int local: every use is an integer use')
       end
     end
@@ -5695,7 +5696,84 @@ end
     dl = define_at(rel, s)
     return macro_value_names(rel, dl).include?(name) if dl
     fl = enclosing_func(rel, s)
-    !!(fl && value_names_of(fl).include?(name))
+    return false unless fl
+    # a body declaration in scope at s decides the type (a block's long t and a later block's VALUE t are two locals)
+    t = local_decl_type_at(rel, s, name)
+    return t == 'VALUE' if t
+    !!value_names_of(fl).include?(name)
+  end
+
+  LOCAL_DECL_KEYWORDS = %w[return else goto case typedef sizeof do].freeze
+
+  # The declared type of the local name in effect at pos, by block scope: the latest declaration in the function body whose
+  # block encloses pos and comes before it. nil when no body declaration of name is in scope (a parameter, or not a local).
+  def local_decl_type_at(rel, pos, name)
+    fn = enclosing_func(rel, pos)
+    return nil unless fn && fn.key?('brace') && fn.key?('body_end')
+    @local_decls ||= {}
+    cands = (@local_decls[[rel, fn['brace'], name]] ||= local_decl_candidates(rel, fn, name))
+    best = nil
+    cands.each do |dpos, type, bs, be|
+      next unless bs < pos && pos < be && dpos < pos
+      best = [dpos, type] if best.nil? || dpos > best[0]
+    end
+    best && best[1]
+  end
+
+  # the declarations of name in a function body: [name position, declared type, block start, block end]
+  def local_decl_candidates(rel, fn, name)
+    masked = @files[rel]['masked']
+    base = fn['brace']
+    out = []
+    re = /((?:(?:const|volatile|static|unsigned|signed|register)\s+)*[A-Za-z_]\w*(?:\s*\*)*)\s+#{Regexp.escape(name)}(?![#{WC}])\s*(?=[;=,)\[])/
+    masked[base...fn['body_end']].to_enum(:scan, re).each do
+      m = Regexp.last_match
+      type = m[1].strip.gsub(/\s+/, ' ')
+      first = type.split.reject { |w| %w[const volatile static unsigned signed register].include?(w) }.first.to_s
+      next if LOCAL_DECL_KEYWORDS.include?(first)
+      dpos = base + m.begin(0) + m[0].rindex(name)
+      type = 'mrb_int' if @int_decl_pos&.include?([rel, dpos])
+      before = masked[0...m.begin(0) + base].rstrip[-1]
+      next unless before.nil? || [';', '{', '}', '(', ','].include?(before)
+      bs, be = block_span(masked, dpos, fn)
+      out << [dpos, type, bs, be]
+    end
+    out
+  end
+
+  # the block that encloses position d: its '{' and matching '}' (the function body when d is at its top level)
+  def block_span(masked, d, fn)
+    depth = 0
+    i = d - 1
+    bs = fn['brace']
+    while i > fn['brace']
+      c = masked[i]
+      if c == '}' then depth += 1
+      elsif c == '{'
+        if depth.zero?
+          bs = i
+          break
+        end
+        depth -= 1
+      end
+      i -= 1
+    end
+    depth = 0
+    j = bs + 1
+    be = fn['body_end']
+    while j < fn['body_end']
+      c = masked[j]
+      if c == '{' then depth += 1
+      elsif c == '}'
+        if depth.zero?
+          be = j
+          break
+        end
+        depth -= 1
+      end
+      j += 1
+    end
+    [bs, be]
   end
 
   def map_entry(rel, s, e, name, entry)
