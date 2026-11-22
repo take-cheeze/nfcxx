@@ -203,6 +203,8 @@ IR passes, the e-graph pass and QBE's optimizations.
   libc++abi ahead of the `libC.a` the links name (its C++ ABI members would win), and QBE's Mach-O tables are untested.
   QBE's rv64 writes no tables, its i386 neither (refused).
 - CIL: exact catch types only, see `docs/notes/pathb-cil.md`.
+- Debug info: `-g` gives a line table only (`.debug_line`: gdb has the source line of each frame and steps by line, the
+  pads too); there is no variable or type information (`.debug_info` describes the compile unit only).
 
 ## Measured
 

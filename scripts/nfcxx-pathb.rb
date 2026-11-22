@@ -438,6 +438,9 @@ class Plan
         @files << x
       elsif x == "-Wno-narrowing"
         @diag << "--diag_warning=narrowing_conversion"
+      elsif x.match?(/\A-g(gdb)?[0-3]?\z/)
+        @files << x
+        @dbg_g = x # also pathb-cc.rb -g: the object's line table (pb_flags)
       elsif x.start_with?("-W") || x == "-w"
         nil # warnings do not change the object code
       elsif x.start_with?("-m")
@@ -556,7 +559,7 @@ class Plan
   end
 
   # The options scripts/pathb-cc.rb gets, in the order the bash appends them (pb_flags): --sanitize, --safe-pointers, --ir-opt,
-  # --asan (Path B only), --pic, the EDG diagnostic options, --dialect=clang (only when asked), --gnu-version.
+  # --asan (Path B only), --pic, -g, the EDG diagnostic options, --dialect=clang (only when asked), --gnu-version.
   def pb_flags
     f = []
     f << "--sanitize=#{@sanitize}" unless @sanitize.to_s.empty?
@@ -564,6 +567,7 @@ class Plan
     f << "--ir-opt=#{@ir_opt}" unless @ir_opt.nil?
     f << "--asan" if @asan
     f << "--pic" if @pic
+    f << "-g" if @dbg_g && !%w[-g0 -ggdb0].include?(@dbg_g) # -g (the last, unless -g0): the line table
     f.concat(@diag)
     f << "--dialect=clang" if @dialect == "clang" && @dialect_asked
     f << "--gnu-version=#{@gnu_user}" if @gnu_user && !@gnu_user.empty?

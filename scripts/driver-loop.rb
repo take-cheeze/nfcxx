@@ -791,6 +791,8 @@ def pathb_reason(state, env, extra, csrc = nil)
   end
   state.pb_opts.unshift("-D_DEFAULT_SOURCE") if state.pb_gnu != 0
   state.pb_opts << "--pic" if state.pathb_pic != 0
+  # -g (the last -g option, unless -g0): the object's line table (scripts/pathb-cc.rb)
+  state.pb_opts << "-g" unless state.dbg.empty? || %w[-g0 -ggdb0].include?(state.dbg.last)
   if state.wchar16 == 1
     # the probe answers true (a wide literal), false, or :failed (the host preprocessor failed: bash's reason for that)
     wide = lazy_value(env.wide_literal, state, csrc)

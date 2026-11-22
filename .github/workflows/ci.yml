@@ -498,6 +498,7 @@ jobs:
             run: |
               tests/pathb-qbe/run.sh
               tests/pathb-eh-tables/run.sh --all
+              tests/pathb-debug/run.sh
               tests/pathb-qbe/hosted.sh
               tests/pathb-qbe/static_linkage.sh
           - name: C++11 and C++14 probes (Path B) and the EH shim (gcc, qbe and Path B)

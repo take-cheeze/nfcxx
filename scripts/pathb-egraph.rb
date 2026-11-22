@@ -929,7 +929,7 @@ module PathbEgraph
 
         memory_write?(ins[3])
       when "set" then memory_write?(ins[2])
-      when "nonnull", "bounds", "life-start", "life-end" then false   # the lifetime facts neither read nor write memory
+      when "nonnull", "bounds", "life-start", "life-end", "loc" then false   # the lifetime facts and a source location (-g) neither read nor write memory
       else true
       end
     end
