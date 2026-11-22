@@ -70,6 +70,8 @@ static int ir_eh_nframe;
 static char *ir_eh_thrown;          /* the exception object of the throw being lowered (leck_thrown_object_address) */
 static char *ir_eh_caught;          /* the caught object of the handler being lowered (leck_caught_object_address) */
 static char ir_eh_k_exc, ir_eh_k_sel; /* keys of the pad slots */
+static char ir_eh_k_thr;            /* key of the slot of the exception object a throw is building (ir_eh_thr_slot) */
+static int ir_eh_thr_rel;           /* the region table has entries relative to that object (ir_eh_prologue) */
 static const char *ir_eh_why;       /* why the last cleanup could not be written */
 static int ir_eh_spec[IR_EH_MAXH];  /* a dynamic exception specification (C++14 throw(T...)): the type ids it allows */
 static int ir_eh_nspec;             /* their number: 0 for none (and for throw(), which is noexcept here) */
@@ -79,6 +81,7 @@ static a_type_ptr ir_eh_long_type(void) { return integer_type((an_integer_kind)i
 
 static const char *ir_eh_exc_slot(void) { return ir_slot_op(&ir_eh_k_exc, "eh.exc", ir_eh_vptr_type(), 8); }
 static const char *ir_eh_sel_slot(void) { return ir_slot_op(&ir_eh_k_sel, "eh.sel", ir_eh_long_type(), 8); }
+static const char *ir_eh_thr_slot(void) { return ir_slot_op(&ir_eh_k_thr, "eh.thrown", ir_eh_vptr_type(), 8); }
 
 static int ir_eh_type_id(a_variable_ptr ti);
 static void ir_eh_sync(void);
@@ -104,6 +107,7 @@ static void ir_eh_begin(a_routine_ptr rout)
   ir_eh_ntype = 0;
   ir_eh_nframe = 0;
   ir_eh_thrown = NULL;
+  ir_eh_thr_rel = 0;
   ir_eh_caught = NULL;
   ir_eh_nspec = 0;
   if (esp != NULL && !ir_eh_noexcept && !esp->is_noexcept && !esp->throw_any && !esp->indeterminate && !esp->arg_cached &&
@@ -201,6 +205,18 @@ static int ir_eh_count(a_constant_ptr t)
   return n;
 }
 
+static int ir_eh_is_destroy_exc(a_routine_ptr r);
+
+/* Region table entry i is a subobject of the exception object a throw is building (throw E{S(...), g()}): a
+   destructor call whose handle has no variable, only the offset in that object (an integer). Not a handler's entry
+   (__destroy_exception_object), not an array's (its handle is an array table index), not one relative to this. */
+static int ir_eh_thr_entry(int i)
+{
+  ir_eh_rte *r = &ir_eh_rt[i];
+  return r->handle != NULL && r->handle->kind == ck_integer && r->rout != NULL && !ir_eh_is_destroy_exc(r->rout) &&
+         !(r->flags & (IR_RDF_THIS_PARAM_OFFSET | IR_RDF_ARRAY | IR_RDF_NEW_ALLOCATION | IR_RDF_GUARD_VAR_FOR_LOCAL_STATIC));
+}
+
 /* leck_function_prologue: read the function's region and array tables */
 static void ir_eh_prologue(an_eh_prologue_supplement_ptr psp)
 {
@@ -222,6 +238,9 @@ static void ir_eh_prologue(an_eh_prologue_supplement_ptr psp)
       r->next = (unsigned long)ir_eh_int(f);
       f = f != NULL ? f->next : NULL;
       r->flags = (unsigned)ir_eh_int(f);
+      /* a subobject of the exception object a throw is building (throw E{S(...), g()}): EDG's handle has no
+         variable, only the offset in that object (an integer) */
+      if (ir_eh_thr_entry(ir_eh_nrt - 1)) ir_eh_thr_rel = 1;
     }
   t = ir_eh_local_static_init(psp->array_table);
   ir_eh_at = (ir_eh_ate *)realloc(ir_eh_at, (ir_eh_count(t) + 1) * sizeof ir_eh_at[0]);
@@ -267,6 +286,11 @@ static char *ir_eh_addr_f(a_constant_ptr h, unsigned fl, int write)
     if (h->kind != ck_integer || t == NULL) return NULL;
     if (!write) return "";
     return ir_eh_offset(ir_let("(ptr void)", ir_fmt("(load (ptr void) %s)", ir_var_addr(t, t->type, 0).s)), ir_eh_int(h));
+  }
+  if (h->kind == ck_integer && ir_eh_thr_rel) {
+    /* an offset in the exception object being built: its address is in the slot the throw keeps it in */
+    if (!write) return "";
+    return ir_eh_offset(ir_let("(ptr void)", ir_fmt("(load (ptr void) %s)", ir_eh_thr_slot())), ir_eh_int(h));
   }
   if (h->kind == ck_stack_offset && h->variant.stack_offset.variable != NULL) {
     if (!write) return "";
@@ -662,10 +686,24 @@ static ir_val ir_eh_throw(an_expr_node_ptr e)
   size = ir_size_of(t);
   ir_eh_thrown = ir_let("(ptr void)", ir_fmt("(call (ptr void) &\"__cxa_allocate_exception\" (const unsigned_long %llu))",
                                               size ? size : 1));
+  if (ir_eh_thr_rel) ir_emit(ir_fmt("(store (ptr void) %s %s)", ir_eh_thr_slot(), ir_eh_thrown));
   if (tsp->expr != NULL) (void)ir_rval(tsp->expr);
-  ir_emit(ir_fmt("(eval (call void &\"__cxa_throw\" %s %s %s))", ir_eh_thrown, ti,
-                 dtor != NULL ? ir_fmt("&\"%s\"", dtor) : "(null (ptr void))"));
-  ir_emit("(unreachable)");
+  {
+    /* The exception object is complete: __cxa_throw owns it, and the unwind from that call must not destroy its
+       subobjects (EDG leaves their regions current, innermost). The call is in the region outside them; the
+       temporaries of the full expression around it are still destroyed by the unwind. */
+    unsigned long cur = ir_eh_region, r = cur;
+    while (ir_eh_thr_rel && r != null_eh_region_number && r < (unsigned long)ir_eh_nrt && ir_eh_thr_entry((int)r))
+      r = ir_eh_rt[r].next;
+    if (r != cur) {
+      ir_eh_region = r;
+      ir_eh_sync();
+    }
+    ir_emit(ir_fmt("(eval (call void &\"__cxa_throw\" %s %s %s))", ir_eh_thrown, ti,
+                   dtor != NULL ? ir_fmt("&\"%s\"", dtor) : "(null (ptr void))"));
+    ir_emit("(unreachable)");
+    if (r != cur) ir_eh_region = cur;   /* the text after it (unreachable) goes on in EDG's region */
+  }
   ir_eh_thrown = saved;
   return ir_mk_void();
 }

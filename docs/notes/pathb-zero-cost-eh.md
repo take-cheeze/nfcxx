@@ -85,6 +85,12 @@ set before the expression; the pad destroys such a run of conditional regions ba
 in the reverse order of their construction, as [except.ctor] says
 (`tests/pathb-eh-tables/cases/arg_temporaries_order.cpp`).
 
+An exception object built in place from subobjects (`throw E{S(...), g()}`) has regions whose handle is only the
+member's offset in that object (no variable). A throw in such a function keeps the object's address in a slot
+(`eh.thrown`), and the pad destroys the members built so far through it; `__cxa_throw` is called outside those
+regions, as the object is complete then (`tests/pathb-eh-tables/cases/throw_subobjects.cpp`). The object is not freed
+when its construction throws (gcc calls `__cxa_free_exception`): it leaks.
+
 ### The SSA builder (`scripts/pathb-ssa.rb`)
 
 A block has one state. `(eh-state N)` after an instruction begins a block; a block begins in the state of the first
@@ -172,7 +178,7 @@ cleanups compared with g++'s output: conditional temporaries, `new` with a throw
 and objects, a local static whose initializer throws, temporaries of a full expression; exceptions across g++-compiled
 code in both directions; `noexcept`; the forced unwind of `pthread_exit` and `pthread_cancel` and a foreign
 exception, through pads and `catch (...)`; the nothrow callees), and the EH probes of the frames mode (`tests/pathb-qbe/{cases,traps}/eh_*.cpp`,
-`tests/cases/eh_*.cpp`; with `--all`, every program of `tests/pathb-qbe/cases` and `tests/cases`: 199, all pass), and
+`tests/cases/eh_*.cpp`; with `--all`, every program of `tests/pathb-qbe/cases` and `tests/cases`: 200, all pass), and
 inlined callees with pads (two copies in a caller, a copy inside a copy, a catch that
 rethrows from a copy, destructors with pads inlined into a pad, a `noexcept` copy). 21 programs, all pass, through the
 IR passes, the e-graph pass and QBE's optimizations.
