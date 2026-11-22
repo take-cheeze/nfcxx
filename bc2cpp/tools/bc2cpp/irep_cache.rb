@@ -78,9 +78,25 @@ module IrepCache
       ensure
         FileUtils.rm_f(temporary)
       end
+      prune(dir, path)
       result
     end
   end
+  # A tree is some 12 MB and every tool change keys a new one, so a directory keeps the KEEP newest besides the one
+  # just written. A reader that loses the race finds no file and decodes again.
+  KEEP = 4
+
+  def prune(dir, written)
+    trees = Dir[File.join(dir, '*.marshal')].reject { |tree| tree == written }
+    # File.stat, as ScanCache reads a file's time: a self-compiled bc2cpp's File has no File.mtime.
+    trees.sort_by { |tree| -File.stat(tree).mtime.to_i }.drop(KEEP).each do |stale|
+      FileUtils.rm_f([stale, "#{stale}.lock"])
+    end
+  rescue StandardError
+    # Pruning only saves disk; a failure must not fail the decode it follows.
+    nil
+  end
+
   def read_snapshot(path)
     return nil unless File.exist?(path)
 

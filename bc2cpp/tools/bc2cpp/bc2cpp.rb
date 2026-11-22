@@ -301,11 +301,11 @@ BC2CPP_MAIN = lambda do
   ConversionReturns.enforce!(srcs.select { |path| path.end_with?('.rb') })
   # Mruby's own Ruby defining a native-named method (File#inspect) is hidden from the registry, so it gets no hint.
   conversion_sigs = ConversionReturns.write_sigs(srcs.select { |path| path.end_with?('.rb') && !CoreDefs.core_source?(path) })
-  ireps, root_label = compile_ireps(srcs, symbol, out_dir)
+  ireps, root_label = profile_call.call('compile_ireps') { compile_ireps(srcs, symbol, out_dir) }
   dfs_order(ireps, root_label)
   registry, superclass_of, container_constants, included_modules, prepended_modules, unknown_mixins,
     struct_member_lists, class_decls, walked_ireps, module_body_ivar_labels, constant_assignment_sites,
-    declared_modules, alias_sites = build_registry(ireps, root_label)
+    declared_modules, alias_sites = profile_call.call('build_registry') { build_registry(ireps, root_label) }
   # ESCAPE_ANALYSIS: callees are every definition of a name, so the registry is copied before
   # the core filtering below drops the methods the build keeps interpreted.
   escape_registry = EscapeAnalysis.enabled? ? registry.transform_values(&:dup) : nil
@@ -316,12 +316,14 @@ BC2CPP_MAIN = lambda do
   # method the interpreter ends up with, so it must not make the name POLY nor be
   # emitted. Dropped before anything reads the registry.
   CodeGen.module_names = declared_modules
-  core_shadowed = CoreDefs.shadowed_labels(registry, ireps)
+  core_shadowed = profile_call.call('CoreDefs.shadowed_labels') { CoreDefs.shadowed_labels(registry, ireps) }
   # CORE_LOOP_ALIASES: a core alias loop (mruby-onig-regexp's String#gsub) replaces the definitions before it.
   alias_sites.each { |site| core_shadowed.merge(site[:replaces]) if site[:replaces] }
   # CORE_OUTSIDE_REDEFINED: so does a linked Ruby source this build does not compile (mruby-require's Hash#to_h).
-  core_shadowed.merge(CoreDefs.outside_redefined_labels(registry, ireps, Shellwords.split(ENV.fetch('BC2CPP_LINKED_RUBY_SRCS', '')),
-                                                        symbol, out_dir))
+  linked_ruby = Shellwords.split(ENV.fetch('BC2CPP_LINKED_RUBY_SRCS', ''))
+  core_shadowed.merge(profile_call.call('CoreDefs.outside_redefined_labels') do
+    CoreDefs.outside_redefined_labels(registry, ireps, linked_ruby, symbol, out_dir)
+  end)
   CodeGen.shadowed_labels = core_shadowed
   core_shadowed_pairs = registry.values.flatten.select { |d| d.irep && core_shadowed.include?(d.irep) }
                                 .to_set { |d| [d.owner, d.name] }
@@ -331,12 +333,14 @@ BC2CPP_MAIN = lambda do
   end
   CodeGen.core_aliases = CoreDefs.alias_map(alias_sites, registry, ireps, core_shadowed_pairs)
   # CORE_METHODS: what mruby's own Ruby must keep interpreted is no registry definition either.
-  core_ineligible = CoreMethods.excluded_labels(registry, ireps)
+  core_ineligible = profile_call.call('CoreMethods.excluded_labels') { CoreMethods.excluded_labels(registry, ireps) }
   # An interpreted core replacement still intercepts inherited lookup.
-  CodeGen.core_result_opaque_defs = CoreRubyResults.opaque_definitions(registry, core_ineligible, ireps, alias_sites, CodeGen.core_aliases)
+  CodeGen.core_result_opaque_defs = profile_call.call('CoreRubyResults.opaque_definitions') do
+    CoreRubyResults.opaque_definitions(registry, core_ineligible, ireps, alias_sites, CodeGen.core_aliases)
+  end
   CodeGen.core_result_installed_names = CoreRubyResults.installed_names(ireps)
   # ENUMERATOR_MODEL: read before the core filtering below drops the interpreted Kernel#to_enum.
-  CodeGen.enumerator_model = EnumeratorModel.analyze(registry, ireps, alias_sites)
+  CodeGen.enumerator_model = profile_call.call('EnumeratorModel.analyze') { EnumeratorModel.analyze(registry, ireps, alias_sites) }
   core_bytecode = registry.values.flatten.count { |d| d.irep && CoreDefs.core_source?(ireps.fetch(d.irep).file) }
   core_all_defs = registry.values.flatten.select { |d| d.irep && d.core }
   # A core attr_* accessor or module_function copy has no body to compile: it stays the interpreter's.
@@ -608,7 +612,7 @@ BC2CPP_MAIN = lambda do
   refusal = nil
   unless unread.empty?
     begin
-      outside_ireps, outside_root = CoreDefs.outside_compile(unread, symbol, out_dir)
+      outside_ireps, outside_root = profile_call.call('CoreDefs.outside_compile') { CoreDefs.outside_compile(unread, symbol, out_dir) }
     rescue StandardError => e
       refusal = "an outside Ruby source does not compile (#{e.message.lines.first&.strip})"
     end
