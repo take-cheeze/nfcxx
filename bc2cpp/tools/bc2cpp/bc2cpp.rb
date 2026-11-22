@@ -612,7 +612,7 @@ BC2CPP_MAIN = lambda do
   refusal = nil
   unless unread.empty?
     begin
-      outside_ireps, outside_root = CoreDefs.outside_compile(unread, symbol, out_dir)
+      outside_ireps, outside_root = profile_call.call('CoreDefs.outside_compile') { CoreDefs.outside_compile(unread, symbol, out_dir) }
     rescue StandardError => e
       refusal = "an outside Ruby source does not compile (#{e.message.lines.first&.strip})"
     end

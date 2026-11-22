@@ -78,9 +78,23 @@ module IrepCache
       ensure
         FileUtils.rm_f(temporary)
       end
+      prune(dir, path)
       result
     end
   end
+  # A tree is some 12 MB and every tool change keys a new one, so a directory keeps the KEEP newest besides the one
+  # just written. A reader that loses the race finds no file and decodes again.
+  KEEP = 4
+
+  def prune(dir, written)
+    trees = Dir[File.join(dir, '*.marshal')].reject { |tree| tree == written }
+    trees.sort_by { |tree| -File.mtime(tree).to_f }.drop(KEEP).each do |stale|
+      FileUtils.rm_f([stale, "#{stale}.lock"])
+    end
+  rescue SystemCallError
+    nil
+  end
+
   def read_snapshot(path)
     return nil unless File.exist?(path)
 
