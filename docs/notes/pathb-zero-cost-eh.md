@@ -164,8 +164,9 @@ specification is not inlined. A function without tables inlines as before: its c
 `tests/pathb-eh-tables/run.sh` (needs a `PATHB_EH=tables` harness and the QBE branch): this mode's probes (region-table
 cleanups compared with g++'s output: conditional temporaries, `new` with a throwing constructor, partially built arrays
 and objects, a local static whose initializer throws, temporaries of a full expression; exceptions across g++-compiled
-code in both directions; `noexcept`), and the EH probes of the frames mode (`tests/pathb-qbe/{cases,traps}/eh_*.cpp`,
-`tests/cases/eh_*.cpp`; with `--all`, every program of `tests/pathb-qbe/cases` and `tests/cases`: 193, all pass), and
+code in both directions; `noexcept`; the forced unwind of `pthread_exit` and `pthread_cancel` and a foreign
+exception, through pads and `catch (...)`; the nothrow callees), and the EH probes of the frames mode (`tests/pathb-qbe/{cases,traps}/eh_*.cpp`,
+`tests/cases/eh_*.cpp`; with `--all`, every program of `tests/pathb-qbe/cases` and `tests/cases`: 197, all pass), and
 inlined callees with pads (two copies in a caller, a copy inside a copy, a catch that
 rethrows from a copy, destructors with pads inlined into a pad, a `noexcept` copy). 21 programs, all pass, through the
 IR passes, the e-graph pass and QBE's optimizations.
