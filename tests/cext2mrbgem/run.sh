@@ -1790,6 +1790,23 @@ check test "$rc" -eq 0
 check test "$(grep -c 'temporary buffer' "$work/api_allocv_assign/REFUSALS.txt")" -eq 0
 check grep -qF 'buf = (char *)mrb_malloc(mrb, sizeof(char) * (n + 1));' "$work/api_allocv_assign/src/api_allocv_assign.c"
 check grep -qF 'mrb_free(mrb, buf);' "$work/api_allocv_assign/src/api_allocv_assign.c"
+# 2zzz180. rb_reg_new is a Regexp: the mruby-onig-regexp gem's OnigRegexp (OnigRegexp.new(source, options)); the converted gem
+# depends on mruby-onig-regexp; no Regexp refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_reg_new tools/cext2mrbgem/fixtures/api_reg_new/ext/api_reg_new "$work/api_reg_new" > "$work/api_reg_new.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'Regexp' "$work/api_reg_new/REFUSALS.txt")" -eq 0
+check grep -qF 'OnigRegexp' "$work/api_reg_new/src/api_reg_new.c"
+check grep -qF "spec.add_dependency 'mruby-onig-regexp'" "$work/api_reg_new/mrbgem.rake"
+# 2zzz181. a VALUE funcall as the condition of ?: is mrb_test (CRuby tests the word; a boolean result is exact under mrb_test).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ternary_truth tools/cext2mrbgem/fixtures/api_ternary_truth/ext/api_ternary_truth "$work/api_ternary_truth" > "$work/api_ternary_truth.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_test(tt_ge(mrb, self, n)) ? 19 : 20' "$work/api_ternary_truth/src/api_ternary_truth.c"
+# 2zzz182. rb_marshal_load(port) is mrb_marshal_load(mrb, str) of the mruby-marshal gem; the converted gem depends on it; no refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_marshal_load tools/cext2mrbgem/fixtures/api_marshal_load/ext/api_marshal_load "$work/api_marshal_load" > "$work/api_marshal_load.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'Marshal' "$work/api_marshal_load/REFUSALS.txt")" -eq 0
+check grep -qF 'return mrb_marshal_load(mrb, data);' "$work/api_marshal_load/src/api_marshal_load.c"
+check grep -qF "spec.add_dependency 'mruby-marshal'" "$work/api_marshal_load/mrbgem.rake"
 # 2zzz179. rb_time_timespec_new: a fixed UTC offset is mrb_time_at_offset (the fork's mruby-time), CRuby's INT_MAX and INT_MAX-1 are
 # local time and UTC; no Time-offset refusal.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_time_offset tools/cext2mrbgem/fixtures/api_time_offset/ext/api_time_offset "$work/api_time_offset" > "$work/api_time_offset.log" 2>&1 || rc=$?

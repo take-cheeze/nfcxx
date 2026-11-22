@@ -4487,6 +4487,31 @@ use_problem = lambda do |name, use|
     end
   end
 
+  # a VALUE funcall as the condition of ?: (date's f_ge_p(n, 69) ? 19 : 20): CRuby tests the word, and a boolean result is
+  # exact under mrb_test (nil and false are false). Same funcall criteria as value_truth_call_pass; the call ends at the ?.
+  def value_ternary_truth_pass
+    @files.each_key do |rel|
+      masked = @files[rel]['masked']
+      masked.to_enum(:scan, /(?<![#{WC}.>])([A-Za-z_]\w*)[ \t\n]*\(/).each do
+        m = Regexp.last_match
+        name = m[1]
+        ent = @entries[name]
+        macro_funcall = @files[rel]['text'].match?(/^[ \t]*#[ \t]*define[ \t]+#{Regexp.escape(name)}\s*\([^)]*\)\s*(?:mrb_funcall|rb_funcall)/)
+        # a funcall macro, a funcall entry, or a converted function returning VALUE (date's f_ge_p helper)
+        next unless macro_funcall || value_call_name?(name) || (ent.is_a?(Hash) && (ent['mruby'].to_s.start_with?('mrb_funcall') || ent['template'].to_s.start_with?('mrb_funcall') || ent['handler'] == 'funcall'))
+        open = m.end(0) - 1
+        close = match_close(masked, open)
+        next if close < 0
+        q = next_nonspace(masked, close + 1)
+        next unless q >= 0 && masked[q] == '?'
+        next if in_dead_init(rel, m.begin(0))
+        next if @edits[rel].touches_strictly?(m.begin(0)) || @edits[rel].touches_strictly?(close + 1)
+        @edits[rel].add(m.begin(0), m.begin(0), 'mrb_test(')
+        @edits[rel].add(close + 1, close + 1, ')')
+      end
+    end
+  end
+
   # the template uses mrb_class_ptr($k) on argument k (the argument is a VALUE there)
   def out_tmpl_uses_class_ptr?(tmpl, k)
     tmpl.to_s.include?("mrb_class_ptr($#{k})")
@@ -5914,6 +5939,8 @@ end
       end
       # a template that needs a file-scope helper (api_map "prelude": its definition text, "prelude_name": its name) gets it once
       # per file, before the enclosing function (as nfcx_block_arg is)
+      # a template that needs a gem at run time declares it (api_map gem_dep): the converted gem depends on it
+      (@gem_deps ||= Set.new) << entry['gem_dep'] if entry['gem_dep']
       if entry['prelude']
         # a call in a function: the helper goes before that function; a call in a macro body: before the #define (file scope)
         dpre = define_at(rel, s)
@@ -6076,6 +6103,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         end
       end
       ed.add(s, cp + 1, out)
+      # a template that needs a gem at run time declares it (api_map gem_dep): the converted gem depends on it
+      (@gem_deps ||= Set.new) << entry['gem_dep'] if entry['gem_dep']
       rewrite(rel, s, name, out, entry['caveat'])
     when 'rescue_call'
       c = (@rescue_calls || []).find { |x| x[:rel] == rel && x[:s] == s }
@@ -8078,6 +8107,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     value_compare_wrap_pass
     owned_class_assign_pass
     value_truth_call_pass
+    value_ternary_truth_pass
     value_condition_operand_pass
     value_order_stuck_pass
     value_identity_pass
