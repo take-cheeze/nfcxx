@@ -847,6 +847,13 @@ def bc2cpp_compiled_gem_shards(spec, generated, prereqs)
   main_mode = "#{ENV['BC2CPP_MAIN_AST']}\n#{ENV['BC2CPP_NATIVE_INVENTORY']}\n"
   File.write(main_stamp, main_mode) unless File.exist?(main_stamp) && File.read(main_stamp) == main_mode
   Rake::Task[generated].enhance([main_stamp, *bc2cpp_main_prerequisites])
+  # COLD_COMPACT (cold_compact.rb): the switches and the cold list choose which sites the generated file outlines.
+  require_relative 'cold_compact'
+  cold_stamp = File.join(spec.build_dir, 'bc2cpp_cold_compact')
+  cold_mode = %w[BC2CPP_COLD_COMPACT BC2CPP_COLD_PROFILE].map { |k| "#{k}=#{ENV[k]}\n" }.join + "#{ColdCompact.list_path}\n"
+  File.write(cold_stamp, cold_mode) unless File.exist?(cold_stamp) && File.read(cold_stamp) == cold_mode
+  Rake::Task[generated].enhance([cold_stamp])
+  Rake::Task[generated].enhance([ColdCompact.list_path]) if File.file?(ColdCompact.list_path)
   # A changed list regenerates too: the registrations it drops are in the generated file.
   lists = ENV['BC2CPP_STATIC_DISPATCH_LISTS']
   Rake::Task[generated].enhance([lists]) if lists && lists != 'none' && File.file?(lists)

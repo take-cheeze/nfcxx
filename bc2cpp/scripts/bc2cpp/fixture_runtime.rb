@@ -215,6 +215,8 @@ module Bc2cppFixtureRuntime
     env = { 'MRBC' => mrbc, 'OUT_SYMBOL' => 'fixture', 'OUT_DIR' => dir,
             'BC2CPP_SELF_REGISTERING' => '1' }
     env['SKIP_UNSUPPORTED'] = '1' if skip_unsupported
+    # COLD_COMPACT: a fixture is its own world, so the world's cold list (profiled on its methods) is not read.
+    env['BC2CPP_COLD_LIST'] = ENV.fetch('BC2CPP_COLD_LIST', File::NULL)
     only_owners = BC2CPP_CORE_OWNERS + only_owners if core && only_owners
     env['ONLY_OWNERS'] = only_owners.join(',') if only_owners
       # `native`/`foreign` are [name, text] pairs of outside sources the closed world must scan.
