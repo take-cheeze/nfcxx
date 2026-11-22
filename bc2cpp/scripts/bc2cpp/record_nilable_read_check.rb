@@ -150,7 +150,7 @@ check.call('without the read `each` keeps its fallback', off['Scene#each_sprite'
 check.call('`return 0 unless x` narrows the read to Array', exact_size.call(on['Scene#guarded']))
 check.call('an unnarrowed read keeps its nil test (NILABLE_RECEIVER) before the exact Array body',
            on['Scene#plain'].include?('NILABLE_RECEIVER :size -- receiver is nil or exactly Array') &&
-           on['Scene#plain'].include?('bc2cpp_nil_receiver(') && exact_size.call(on['Scene#plain']))
+           on['Scene#plain'].include?('bc2cpp_nil_receiver_id(') && exact_size.call(on['Scene#plain']))
 check.call('without the read a plain read has no nil test', !off['Scene#plain'].include?('NILABLE_RECEIVER'))
 check.call('a key stored from a call result stays unknown', !exact_size.call(on['Scene#call_stored']))
 check.call('a record that escapes gives no read class', !exact_size.call(on['Leaky#total']))

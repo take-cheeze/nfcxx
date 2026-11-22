@@ -1003,7 +1003,7 @@ class CodeGen
         mrb_value bc2cpp_rresult = #{step_name}(M, self, bc2cpp_rframe, bc2cpp_rresume);
         if (!bc2cpp_resume_frame_p(M, bc2cpp_rresult)) return bc2cpp_rresult;
         bc2cpp_rframe = bc2cpp_rresult;
-        bc2cpp_rresume = bc2cpp_resumable_resume_from_c(M, bc2cpp_rframe);
+        bc2cpp_rresume = bc2cpp_resumable_resume_handled(M, bc2cpp_rframe);
       }
     CPP
   end
@@ -1964,6 +1964,20 @@ class CodeGen
       if (!mrb_test(bc2cpp_resume_frame_block_call(M, frame))) return bc2cpp_resumable_yield_from_c(M, frame);
       mrb_value blk = bc2cpp_resume_frame_block(M, frame);
       return bc2cpp_yield_foreign(M, blk, bc2cpp_resume_frame_argc(suspended), bc2cpp_resume_frame_argv(suspended));
+    }
+    // RESUME_FROM_C_HANDLERS: what the block (or callee) a suspended step asked for raises is the step's to handle,
+    // as it is when a Fiber drives the step (bc2cpp_method_frame_unwind_into): a step with handlers is re-entered with
+    // the exception pending (raise_pending, the exception as its resume value), so its ensure and rescue run, and
+    // re-raise what they do not handle. Run from C without this, the raise left the step's ensure unrun
+    // (ScanCache.compute's counter stayed raised in a self-compiled bc2cpp).
+    static mrb_value bc2cpp_resumable_resume_handled(mrb_state* M, mrb_value frame) {
+      Bc2cppResumeFrame* suspended = (Bc2cppResumeFrame*)DATA_PTR(frame);
+      if (!suspended || !suspended->has_handlers) return bc2cpp_resumable_resume_from_c(M, frame);
+      mrb_bool bc2cpp_err = FALSE;
+      auto bc2cpp_resume = [&]() { return bc2cpp_resumable_resume_from_c(M, frame); };
+      mrb_value bc2cpp_value = bc2cpp_protect_call(M, bc2cpp_resume, &bc2cpp_err);
+      if (bc2cpp_err) suspended->raise_pending = 1;
+      return bc2cpp_value;
     }
   CPP
 end

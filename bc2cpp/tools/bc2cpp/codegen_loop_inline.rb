@@ -249,15 +249,17 @@ class CodeGen
   # and mrb_funcall cannot pass a block.
   # INLINE_NIL_RECEIVER: the gate also takes an ivar class hint, and an ivar no path assigned yet is
   # nil, so nil runs the send's own NoMethodError (bc2cpp_nil_receiver) when nil answers `name` nowhere.
-  def inline_receiver_guard(predicate, recv_expr, expected, name: nil)
-    "    if (!#{predicate}(#{recv_expr})) { #{inline_nil_arm(recv_expr, name)}" \
+  # `args` are the send's positional argument registers, which nil's NoMethodError carries (NoMethodError#args).
+  def inline_receiver_guard(predicate, recv_expr, expected, name: nil, args: [])
+    "    if (!#{predicate}(#{recv_expr})) { #{inline_nil_arm(recv_expr, name, args)}" \
       "#{inline_raise('TypeError', "expected #{expected}")} }\n"
   end
 
-  def inline_nil_arm(recv_expr, name)
+  def inline_nil_arm(recv_expr, name, args = [])
     return '' unless name && nil_unanswerable?(name)
 
-    "if (mrb_nil_p(#{recv_expr})) bc2cpp_nil_receiver_named(M, #{recv_expr}, \"#{name}\"); " \
+    argv = args.empty? ? '' : ", #{args.size}, #{args.join(', ')}"
+    "if (mrb_nil_p(#{recv_expr})) bc2cpp_nil_receiver_named(M, #{recv_expr}, \"#{name}\"#{argv}); " \
       "#{NomethodReviewed.nil_receiver_marker(name)} "
   end
 
@@ -717,7 +719,8 @@ class CodeGen
 
     out = String.new
     out << "  {\n"
-    out << inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined ##{meth}", name: meth)
+    out << inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined ##{meth}", name: meth,
+                                                                                                args: is_fold ? ["r#{region[:init_reg]}"] : [])
     out << "    mrb_bool bc2cpp_accum_broke_#{addr} = FALSE;\n"
     case meth
     when 'any?'

@@ -11,32 +11,50 @@
 #   d DIR          --cpp=-isystemDIR            (a system directory)
 #
 #   ruby scripts/nfcxx-cache-plan.rb < records
+# NfcxxCachePlan.plan(records) is the same planner for scripts/nfcxx-cache-check.rb (--records).
 #
 # A record of another kind is a usage error: nothing is printed and the status is 2.
 
 CACHE_OPTIONS = %w[--cache= --cache-log= --time-log= --trace=].freeze
 
-records = $stdin.read.split("\0", -1)
-records.pop if records.last == ""   # the last record is NUL-terminated: nothing follows it
+module NfcxxCachePlan
+  module_function
 
-out = []
-records.each do |rec|
-  kind = rec[0]
-  value = rec[1..] || ""
-  case kind
-  when "o" then out << "--#{value}"
-  when "v" then out << "--var=#{value}"
-  when "a"
-    next if CACHE_OPTIONS.any? { |opt| value.start_with?(opt) }
-    out << "--arg=#{value}"
-  when "s" then out << "--cpp=-std=#{value.delete_prefix("--")}"
-  when "f" then out << "--cpp=#{value}"
-  when "p" then out << "--cpp=-include" << "--cpp=#{value}"
-  when "d" then out << "--cpp=-isystem#{value}"
-  else
-    warn "nfcxx-cache-plan: no record kind #{kind.inspect}"
-    exit 2
+  # The options of the records (in their order), or nil, with a note on stderr, for a record of an unknown kind.
+  def plan(records)
+    out = []
+    records.each do |rec|
+      kind = rec[0]
+      value = rec[1..] || ""
+      case kind
+      when "o" then out << "--#{value}"
+      when "v" then out << "--var=#{value}"
+      when "a"
+        next if CACHE_OPTIONS.any? { |opt| value.start_with?(opt) }
+        out << "--arg=#{value}"
+      when "s" then out << "--cpp=-std=#{value.delete_prefix("--")}"
+      when "f" then out << "--cpp=#{value}"
+      when "p" then out << "--cpp=-include" << "--cpp=#{value}"
+      when "d" then out << "--cpp=-isystem#{value}"
+      else
+        warn "nfcxx-cache-plan: no record kind #{kind.inspect}"
+        return nil
+      end
+    end
+    out
+  end
+
+  # The records of NUL-separated text (the last record is NUL-terminated: nothing follows it).
+  def records_of(text)
+    records = text.split("\0", -1)
+    records.pop if records.last == ""
+    records
   end
 end
 
-out.each { |opt| $stdout.write(opt + "\0") }
+if $PROGRAM_NAME == __FILE__
+  options = NfcxxCachePlan.plan(NfcxxCachePlan.records_of($stdin.read))
+  exit 2 if options.nil?
+
+  options.each { |opt| $stdout.write(opt + "\0") }
+end
