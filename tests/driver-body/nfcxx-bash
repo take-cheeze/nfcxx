@@ -78,6 +78,7 @@ root=$(cd "$(dirname "$0")" && pwd)
 # root, removed when the run ends). They are read and unset here, so a driver this body re-runs makes its own. When they are not
 # set (the body run alone), the body makes its directories with mktemp -d and removes them in its EXIT traps.
 owned_cudatmp=${NFCXX_OWNED_CUDATMP-}; owned_tmp=${NFCXX_OWNED_TMP-}; unset NFCXX_OWNED_CUDATMP NFCXX_OWNED_TMP
+early_pre_done=${NFCXX_EARLY_PRE_DONE-}; unset NFCXX_EARLY_PRE_DONE
 # NFCXX_OWNED_CTMP and NFCXX_OWNED_PTMP: the C-input and Path B object directories, made by the Ruby driver the same way.
 owned_ctmp=${NFCXX_OWNED_CTMP-}; owned_ptmp=${NFCXX_OWNED_PTMP-}; unset NFCXX_OWNED_CTMP NFCXX_OWNED_PTMP
 # temp_cleanup: removes the driver's temporary directories the EXIT traps name. Each trap calls it, so a later trap (which
@@ -343,7 +344,9 @@ early_records() {
     early_rec "$kv"
   done
 }
-early_status=0; "${RUBY:-ruby}" "$root/scripts/nfcxx-early-exit.rb" pre < <(early_records) || early_status=$?
+early_status=0
+# NFCXX_EARLY_PRE_DONE: the Ruby driver ran this check on the loop's state before the body (scripts/nfcxx.rb early_pre); unset here
+if [ -z "${early_pre_done:-}" ]; then "${RUBY:-ruby}" "$root/scripts/nfcxx-early-exit.rb" pre < <(early_records) || early_status=$?; fi
 case $early_status in
   0) ;;
   3)  # --emit-hip: the .cu input as HIP source on stdout, for hipcc (tools/cuda-rewrite --hip). Nothing is compiled, and the

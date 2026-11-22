@@ -671,11 +671,33 @@ def stopped_status
   1
 end
 
+# --pre-records (the driver's early exits, scripts/nfcxx-early-exit.rb pre): the state the pre check reads, as NUL-terminated
+# records: "s NAME=VALUE" for ncpp, nobj, cfiles_n, cu_n, stdin_src and emit_hip (the body's names, early_records); "u PATH" for
+# the first .cu input and "h FLAG" for each -I, -D or -U option (the --emit-hip route's flags). Status 0 when the loop finishes;
+# otherwise 1, and nothing is written (the caller then leaves the checks to the body).
+def run_pre_records(argv)
+  state = LoopState.new
+  run_loop(argv, state, ld_on_path(argv))
+  emit_hip = state.emit_hip.to_s.empty? ? "0" : state.emit_hip.to_s
+  { "ncpp" => state.ncpp, "nobj" => state.nobj, "cfiles_n" => state.cfiles.size, "cu_n" => state.cu_inputs.size,
+    "stdin_src" => state.stdin_src, "emit_hip" => emit_hip }.each { |k, v| $stdout.write("s#{k}=#{v}\0") }
+  $stdout.write("u#{state.cu_inputs.first}\0") unless state.cu_inputs.empty?
+  state.cflags.each { |f| $stdout.write("h#{f}\0") if f.start_with?("-I", "-D", "-U") }
+  0
+rescue NfcxxExit, NfcxxMissing, StandardError
+  1
+end
+
 def main(argv)
   if argv.first == "--bash-state"
     argv.shift
     argv.shift if argv.first == "--"
     return run_bash_state(argv)
+  end
+  if argv.first == "--pre-records"
+    argv.shift
+    argv.shift if argv.first == "--"
+    return run_pre_records(argv)
   end
   if argv.first == "--fso"
     # the -fsyntax-only pre-loop (the bash runs it before its setup): fso_kind and fso_argv as shell statements, with the
