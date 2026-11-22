@@ -223,9 +223,8 @@ IR passes, the e-graph pass and QBE's optimizations.
   an exception object built in place (`throw E{S(...), ...}`) twice when the throw succeeds: their regions are still
   current when EDG's runtime starts the unwind. The gcc back end has the same two (it uses EDG's runtime too).
 - Targets: tested on x86-64 Linux; QBE's arm64 emitter marks call sites and pads too (CI's arm64 Linux job runs it).
-  A macOS host builds a frames harness by default: ld64 reads no linker script, so `scripts/pathb-ldrt.rb` cannot put
-  libc++abi ahead of the `libC.a` the links name (its C++ ABI members would win), and QBE's Mach-O tables are untested.
-  QBE's rv64 writes no tables, its i386 neither (refused).
+  macOS arm64: see "macOS arm64" below. QBE's rv64 writes no tables, its amd64 Apple target refuses them, and its i386
+  neither (refused).
 - CIL: catch clauses match exact types, public unambiguous non-virtual bases and pointers to them (not virtual bases,
   not libstdc++ base classes); a throw from a pad's own code does not call std::terminate; dynamic exception
   specifications are refused. See `docs/notes/pathb-cil.md`, "Catch matching".
@@ -250,3 +249,37 @@ were inlined.
 
 - Mechanism (hand-written QBE, gcc-compiled thrower): a typed catch, a catch-all, a cleanup pad that resumes into a gcc
   `catch`, and `std::terminate` from a `noexcept` function all behave as in gcc.
+
+## macOS arm64
+
+The harness on a macOS host is a tables harness too (`scripts/setup-pathb.sh` defaults to `PATHB_EH=tables` everywhere).
+`tests/pathb-eh-tables/run.sh` passes on arm64 macOS (29 of 29, with the cases of tests/pathb-qbe and tests/cases). The
+tables are Mach-O, and what that takes:
+
+- **CFI everywhere** (`arm64/emit.c`): Apple arm64 writes `.cfi_*` for each non-leaf function too, not only for those with
+  tables: a throw unwinds through callers that have none. QBE's amd64 Apple target still writes none (it refuses tables).
+- **The personality and the LSDA** (`emit.c`, `ehfnbegin`): `.cfi_personality 0x9b, ___gxx_personality_v0` names the
+  symbol (the assembler makes its GOT entry, as clang's output). The LSDA pointer is `.cfi_lsda 16` (aligned absolute, as
+  clang), not `0x1b`: with pcrel the assembler writes a `__LD,__compact_unwind` entry of 84 bytes, and ld64 rejects it.
+- **A non-local symbol at each LSDA** (`ehtabend`): `GCC_except_tableN:` before the table, as clang's. Without it the
+  assembler resolves the LSDA pointer of a function that follows another with a table into the previous table (24 bytes
+  early), and the throw is not caught. Local `L` names alone do not do it. The bug showed as "terminating due to uncaught
+  exception" in a `main` that caught the exception, whenever a function with a cleanup came first in the object.
+- **Types through the GOT**: each type id is `sym@GOT - label` (`.LEHTY`), as clang's, not an ELF `DW.ref` indirection.
+- **Labels**: the EH labels are `asloc`-prefixed (`L` on Mach-O, where only `L` names are assembler-local; `.L` on ELF).
+  The ELF output is byte-identical to the previous QBE (checked on 23 programs, both `arm64` and `amd64_sysv`).
+- **Asm labels of the C library** (`be/nfcxx_ir.c`, `ir_asm_label_sym`): Apple's `__DARWIN_ALIAS(f)` is `__asm("_" f)`, and
+  the IR names a symbol by its label. On a Darwin host the label's underscore is taken off, since the emitter adds one
+  back: the IR had `_fwrite`, which became `__fwrite`.
+- **Atomics** (`be/nfcxx_ldrt.c`, Darwin only): the lowering calls the GNU libatomic names (`__atomic_fetch_add_8`, ...).
+  Darwin's compiler-rt has only the outline helpers, so the sizes 1, 2, 4 and 8 are defined in the runtime archive, with
+  builtins that compile inline. 16 bytes is not provided.
+- **The link** (`scripts/pathb-ldrt.rb`, `tests/pathb-eh-tables/run.sh`): ld64 reads no linker script, so on a Mach-O host
+  `pathb-ldrt.rb` prints one archive (`libnfcxxld-eh.a`: the long double member and the three EDG helper members of
+  `libC.a`), and the links name `-lc++` in place of `-lstdc++ -lgcc_s -latomic`. `libC.a`'s EH runtime is not linked.
+- **Messages**: `tests/cases/eh_libstdcxx_throw.cpp` checks libstdc++'s `what()` texts only under `__GLIBCXX__`; the type
+  checks run on either library.
+
+Not done: the `nfcxx` driver's Path B port (`scripts/nfcxx-pathb.rb`) still refuses any host but x86-64 Linux, and the
+default backend on macOS is still gcc. So hosted programs built by `nfcxx` on a Mac do not use this route yet. The
+freestanding and Path B hosted link lines on macOS (`scripts/nfcxx-pathb.rb`, `c_only_link`) name `-lstdc++` too.

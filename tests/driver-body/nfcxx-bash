@@ -803,7 +803,9 @@ if [ $backend = pathb ]; then
   ldrt=$("$root/scripts/pathb-ldrt.rb")
   # The C++ and atomic libraries of the host: macOS has libc++ (in libSystem's SDK) and no libstdc++, libgcc_s or libatomic.
   if [ "$(uname -s)" = Darwin ]; then pb_cxx_libs="-lc++"; pb_atomic_lib=""; else pb_cxx_libs="-lstdc++ -lgcc_s"; pb_atomic_lib="-latomic"; fi
-  [ $freestanding = 0 ] || { pb_cxx_libs=""; pb_atomic_lib=""; }   # no hosted C++ runtime: the program links EDG's runtime and libc
+  # no hosted C++ runtime: the program links EDG's runtime and libc. On macOS the exception tables' personality is libc++abi's (a
+  # landing pad that calls std::terminate is enough for it), so libc++ is named there.
+  [ $freestanding = 0 ] || { [ "$(uname -s)" = Darwin ] || pb_cxx_libs=""; pb_atomic_lib=""; }
   sprt=(); [ $safeptr = 0 ] || [ $compile_only = 1 ] || sprt=("$("$root/scripts/safeptr-rt.rb")" -pthread)   # first: its malloc wins
   if [ $cosmo = 1 ]; then
     # cosmo: cosmocc links, its libc++ comes with the C++ driver, and the glibc-only libraries are not there

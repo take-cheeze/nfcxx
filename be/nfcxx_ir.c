@@ -579,10 +579,22 @@ static void ir_reserve_name(const char *name)
 
 /* The symbol of a routine: its GNU asm label (`int f() __asm__("g")`, which glibc's string.h gives the C++ overloads
    of strchr and friends so that they are the C functions) if it has one, else its name. */
+/* An asm label as the IR names the symbol. On a Darwin host the C library's labels are the Darwin symbols (__DARWIN_ALIAS
+   is __asm("_" name)): the IR names a C symbol by its C name, and the emitter adds the one leading underscore of Mach-O
+   itself, so the label's underscore is taken off here. Elsewhere the label is the name. */
+static const char *ir_asm_label_sym(const char *label)
+{
+#ifdef __APPLE__
+  if (label[0] == '_')
+    return label + 1;
+#endif
+  return label;
+}
+
 static const char *ir_rout_sym(a_routine_ptr r)
 {
   if (has_gnu_routine_supp(r) && gnu_routine_supp(r)->asm_name != NULL && gnu_routine_supp(r)->asm_name[0] != '\0')
-    return gnu_routine_supp(r)->asm_name;
+    return ir_asm_label_sym(gnu_routine_supp(r)->asm_name);
   return r->source_corresp.name;
 }
 
@@ -1091,7 +1103,7 @@ static int ir_var_is_thread(a_variable_ptr var)
 static const char *ir_var_sym(a_variable_ptr var)
 {
   if (var->asm_name_is_valid && var->asm_name_or_reg.name != NULL && var->asm_name_or_reg.name[0] != '\0')
-    return var->asm_name_or_reg.name;
+    return ir_asm_label_sym(var->asm_name_or_reg.name);
   return var->source_corresp.name;
 }
 
