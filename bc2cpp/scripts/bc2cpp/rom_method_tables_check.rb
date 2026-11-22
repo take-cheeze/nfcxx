@@ -4,6 +4,7 @@
 # ROM_METHOD_TABLES (tools/bc2cpp/codegen_emit.rb): the closed build registers its compiled methods through const
 # mrb_mt_entry tables chained into the classes, so a compiled entry takes no heap method-table entry.
 #   static: no owner registration in the generated sources defines a presym-spellable name through mrb_define_*method,
+#     or leaves one out through a bc2cpp_left_out call instead of a walked LEFT_OUT_TABLE stream,
 #     each file installs the fiber runtime's tables, and every bc2cpp_mt_install names a table the file defines;
 #   --host TRACE_HOST GAME_DIR: after boot no heap entry duplicates a ROM entry below it and none is a C function of the
 #     generated code (nm), so what stays on the heap is the natives' and class bodies' attr_* procs.
@@ -19,8 +20,10 @@ sources = Dir[File.join(dir, 'mrbgems/*-compiled/*_gen.cpp')].sort
 abort "rom_method_tables: no generated sources under #{dir}/mrbgems" if sources.empty?
 
 DEFINE = /\b(?:mrb_define_(?:private_|class_)?method|bc2cpp_define_private_class_method)\(M, bc2cpp_owner_reg_\w+, "((?:[^"\\]|\\.)*)"/
+LEFT_OUT = /\bbc2cpp_left_out\(M, \w+, "((?:[^"\\]|\\.)*)"/
 REGISTRATION = /^(?:\[\[maybe_unused\]\] )?(?:static|inline) void bc2cpp_register_(?:core|program)_owner_methods\(\[\[maybe_unused\]\] mrb_state\* M\) \{\n(.*?)^\}/m
 tables = 0
+walked = 0
 sources.each do |path|
   src = File.read(path)
   # RUNTIME_HEADER (tools/bc2cpp/runtime_header.rb): the fixed runtime part is in the header the file includes.
@@ -28,6 +31,8 @@ sources.each do |path|
   name = File.basename(path)
   failures << "#{name}: no `#define BC2CPP_ROM_METHOD_TABLES 1`" unless src.include?("#define BC2CPP_ROM_METHOD_TABLES 1\n")
   defined = src.scan(/^(?:static|inline) const mrb_mt_entry (bc2cpp_mt_\w+)\[\] = \{$/).flatten.to_set
+  streams = src.scan(/^(?:static|inline) constexpr uint16_t (bc2cpp_left_out_\w+)\[\] = \{$/).flatten.to_set
+  walked += streams.size
   tables += defined.size
   bodies = src.scan(REGISTRATION).flatten
   failures << "#{name}: no registration functions" if bodies.empty?
@@ -35,12 +40,21 @@ sources.each do |path|
     body.scan(DEFINE).flatten.each do |method|
       failures << "#{name}: #{method} is registered with mrb_define_*method" if PresymSpelling.key(method)
     end
+    # LEFT_OUT_TABLE: outside a verify-only block, a left-out name presym spells is a row of a walked stream.
+    body.gsub(/^#ifdef BC2CPP_UNREGISTERED_VERIFY\n.*?^#endif\n/m, '').scan(LEFT_OUT).flatten.each do |lit|
+      method = lit.gsub(/\\x(\h\h)/) { Regexp.last_match(1).hex.chr }
+      failures << "#{name}: #{method} is left out by a bc2cpp_left_out call" if PresymSpelling.key(method)
+    end
+    body.scan(/bc2cpp_left_out_walk\(M, (\w+)\);/).flatten.each do |stream|
+      failures << "#{name}: #{stream} is walked but not defined" unless streams.include?(stream)
+    end
     body.scan(/bc2cpp_mt_install\(M, \w+, (\w+),/).flatten.each do |table|
       failures << "#{name}: #{table} is installed but not defined" unless defined.include?(table)
     end
   end
 end
 failures << 'no ROM tables in any generated source' if tables.zero?
+failures << 'no LEFT_OUT_TABLE stream in any generated source' if walked.zero? && ENV['BC2CPP_LEFT_OUT_TABLE'] != '0'
 
 summary = nil
 if (i = ARGV.index('--host'))

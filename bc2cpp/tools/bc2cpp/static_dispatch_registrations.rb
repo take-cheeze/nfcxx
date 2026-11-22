@@ -103,7 +103,8 @@ module StaticDispatchRegistrations
   # GENERATED_COMMENTS: a whole-line comment of the generated code (the probe's annotations, `// POLY_DIAG ... name="x"`)
   # looks nothing up, so its quoted names are no literals.
   GENERATED_COMMENT = %r{^[ \t]*//[^\n]*$}
-  LEFT_OUT_CALL = /bc2cpp_left_out\(\s*M\s*,\s*[A-Za-z_][A-Za-z0-9_$]*\s*,\s*"(?:[^"\\]|\\.)*"\s*,\s*(?:true|false)\s*\);/m
+  # A LEFT_OUT_TABLE stream is the same calls, as presym spellings.
+  LEFT_OUT_CALL = /bc2cpp_left_out\(\s*M\s*,\s*[A-Za-z_][A-Za-z0-9_$]*\s*,\s*"(?:[^"\\]|\\.)*"\s*,\s*(?:true|false)\s*\);|(?:static|inline) constexpr uint16_t bc2cpp_left_out_\w+\[\] = \{[^;]*\};/m
   # STEP_SUPER_STATIC (codegen_resumable.rb): the name a static step `super` passes only names the frame; the entry
   # before it is called with no lookup. The name argument (a presym or a literal) is what this blanks.
   STEP_SUPER_STATIC_NAME = /(?<=\bbc2cpp_dyn_super_static\(M, self, )([A-Za-z_][\w$]*, \w+\(M\), )(?:MRB_[QS]?SYM(?:_[QBE])?\(\w+\)|bc2cpp_sym\(M, \d+\)|mrb_intern_lit\(M, "(?:[^"\\]|\\.)*"\))/
