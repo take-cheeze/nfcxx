@@ -1,0 +1,4 @@
+stdout:
+status=2
+stderr:
+nfcxx: -x c: only C++ sources (use nfcc for C)

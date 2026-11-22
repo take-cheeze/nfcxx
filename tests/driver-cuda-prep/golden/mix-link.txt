@@ -1,0 +1,8 @@
+stdout:
+status=2
+stderr:
+"WORK/tmp/nfcxx-tmp.T/tmp.T/a.dev.cpp", line 40: error: identifier "VALUE" is undefinedvoid kern(int *p) { p[0] = VALUE; }^
+
+1 error detected in the compilation of "WORK/tmp/nfcxx-tmp.T/tmp.T/a.dev.cpp".
+nfcxx: a.cu: device code: the front end refused it (see above; needs scripts/setup-pathb.sh)
+eccp:

@@ -4,14 +4,15 @@ module BC2CPPRunner
   ENTRY = 'tools/bc2cpp/bc2cpp'.freeze
   DEBUG_SOURCES = %w[escape_report cha_self_report guard_hint_report interface_table_report send_root_report site_origin_table
                      refine_report native_arms_report provable_error_report element_site_report receiver_proof_report
-                     param_trace else_trace recv_trace].map { |n| "tools/bc2cpp/#{n}" }.freeze
+                     param_trace else_trace recv_trace owner_call_proof_note].map { |n| "tools/bc2cpp/#{n}" }.freeze
   DEBUG_MODULES = %w[EscapeReport ChaSelfReport GuardHintReport InterfaceTableReport SendRootReport SiteOriginTable RefineReport
                      NativeArmsReport ProvableErrorReport ElementSiteReport ReceiverProofReport ParamTrace ElseTrace
-                     RecvTrace].freeze
+                     RecvTrace OwnerCallProofNote].freeze
   SELF_DYNAMIC_OPTIONS = %w[BC2CPP_ESCAPE_REPORT BC2CPP_CHA_REPORT BC2CPP_GUARD_HINT_REPORT BC2CPP_ITAB_REPORT
                             BC2CPP_SEND_ROOT_REPORT BC2CPP_POOL_DROP_REPORT BC2CPP_SITE_ORIGIN_TABLE BC2CPP_REFINE_REPORT
                             BC2CPP_NATIVE_ARMS_REPORT BC2CPP_PROVABLE_ERROR_REPORT BC2CPP_ELEMENT_REPORT
-                            BC2CPP_RECEIVER_PROOF_REPORT BC2CPP_PARAM_TRACE BC2CPP_ELSE_TRACE BC2CPP_RECV_TRACE].freeze
+                            BC2CPP_RECEIVER_PROOF_REPORT BC2CPP_PARAM_TRACE BC2CPP_ELSE_TRACE BC2CPP_RECV_TRACE
+                            BC2CPP_OWNER_CALL_PROOF_NOTE].freeze
 
   def self.validate_self_options!
     dynamic = SELF_DYNAMIC_OPTIONS.select { |key| ENV[key] }
@@ -35,7 +36,14 @@ module BC2CPPRunner
       # CodeGen and register at_exit writers: they stay unloaded, as under CRuby, and registration gets an inert module to
       # attach their compiled methods to.
       DEBUG_MODULES.each { |name| Object.const_set(name, placeholder) unless Object.const_defined?(name) }
-      register_compiled
+      if MRubyRequire.load_times?
+        MRubyRequire.report_load_times
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        register_compiled
+        $stderr.puts format('BC2CPP_LOAD %8.3fs register_compiled', Process.clock_gettime(Process::CLOCK_MONOTONIC) - started)
+      else
+        register_compiled
+      end
       BC2CPP_MAIN.call
     else
       require ENTRY

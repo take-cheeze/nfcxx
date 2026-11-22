@@ -25,6 +25,8 @@
 #                     save. Saving writes into GAME_DIR, so point it at a copy.
 #   BC2CPP_HOST_CONTINUE  1: pick Continue on the title instead of New Game.
 #   BC2CPP_HOST_PREVIEW_MAP  start New Game on this map id's centre tile.
+#   BC2CPP_HOST_GC_STRESS  run the GC without pause, in steps of this step_ratio
+#                     (e.g. 1000), so a missing GC root shows up; host_sweep.bash passes it on.
 #
 # Needs on PATH: c++ (g++), cc, ar, nproc, clock_gettime-capable libc (Linux).
 set -euo pipefail

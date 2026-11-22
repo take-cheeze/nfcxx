@@ -295,3 +295,25 @@ and singleton-owner checks pass; Array.new block behavior matches interpreted ex
 The pinned-world registry audit has zero unclassified checks. Local artifacts are under
 `build/bench/self-profile-current/constant-path-{baseline,optimized}`, with the weighted replay in
 `constant-path-query-results.json` in that parent directory.
+
+## Guard shard-scanner delimiter slices
+
+The full lexical path in `ShardOutput.scan_lines` now checks the current character before slicing for
+`/*`, `//`, `*/` or a raw-string terminator (which always starts with `)`). This preserves character
+indexing and avoids temporary substrings when the first character cannot match. Carried comments,
+raw strings, quoted strings and the existing plain-line fast path keep their behavior.
+
+On the same 47,670,380-byte raw compiler capture used by the earlier shard measurements, all 933,143
+scanner records matched. Alternating complete 16-shard rewrites on CRuby 4/YJIT measured:
+
+| Layout | Baseline wall | Updated wall | Baseline / updated allocations |
+| --- | --- | --- | --- |
+| Default owner grouping | 5.75 / 5.91 s | 5.41 / 5.29 s | 53.86M / 37.61M |
+| Oversized-owner splitting | 5.97 / 5.93 s | 5.29 / 5.20 s | 53.86M / 37.62M |
+
+Every main/shard file hash and tier assignment matched in every run. This is about 30% fewer allocations
+in the measured sharding phase, not a whole self-compilation speedup claim. The existing registered
+shard check passes 55 cases, including linked generated-code/runtime parity and new UTF-8, partial
+delimiter, empty raw-tag and division/comment cases. The scanner also produces identical records on
+33,294 prelude/edge-case lines in mruby-onig. The current pinned-world registry audit passes.
+Local measurements and file hashes are in `build/bench/shard-delimiters/results.json`.

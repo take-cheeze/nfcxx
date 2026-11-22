@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 # nfcxx's SYCL pre-pass, ported from the bash in nfcxx (sycl_kernel_headers and the block after it; stage 5 of
-# docs/notes/driver-port-plan.md, docs/notes/sycl-kernel-builtins.md). The bash keeps two calls, after its argument loop:
+# docs/notes/driver-port-plan.md, docs/notes/sycl-kernel-builtins.md). The Ruby driver (scripts/nfcxx.rb) makes these two calls before the body:
 #
 #   ruby scripts/nfcxx-sycl.rb check ARG...             exit 0: the two passes apply; exit 1: they do not (the bash goes on)
 #   ruby scripts/nfcxx-sycl.rb run --root=DIR ARG...    runs the two passes and exits with the status the bash gave: 2 for its

@@ -38,6 +38,18 @@ raise 'worker count invalidates Ruby generation' unless fingerprint.call({}) ==
 raise 'shard count must invalidate Ruby generation' if fingerprint.call({}) ==
   fingerprint.call('BC2CPP_SELF_SHARDS' => '8')
 
+# Every module bc2cpp.rb loads only under an environment variable stays out of the self-compiled graph: its source is a
+# DEBUG_SOURCE, its constant a DEBUG_MODULE, and its variable a SELF_DYNAMIC_OPTION the self runner refuses. A module left
+# off is compiled and registered, and runs in every self run (OwnerCallProofNote's notes changed the C++ it generates).
+entry = File.read(File.expand_path('../../bc2cpp/tools/bc2cpp/bc2cpp.rb', __dir__))
+entry.scan(/^require_relative '([a-z_]+)' if ENV\['([A-Z0-9_]+)'\]/) do |name, var|
+  abort "self_compile: #{name} is required under #{var} but is no DEBUG_SOURCE" unless
+    BC2CPPRunner::DEBUG_SOURCES.include?("tools/bc2cpp/#{name}")
+  abort "self_compile: #{var} gates #{name} but is no SELF_DYNAMIC_OPTION" unless BC2CPPRunner::SELF_DYNAMIC_OPTIONS.include?(var)
+  mod = File.read(File.expand_path("../../bc2cpp/tools/bc2cpp/#{name}.rb", __dir__))[/^(?:module|class) ([A-Z]\w*)/, 1]
+  abort "self_compile: #{name}'s #{mod} is no DEBUG_MODULE" if mod && !BC2CPPRunner::DEBUG_MODULES.include?(mod)
+end
+
 keys = BC2CPPRunner::SELF_DYNAMIC_OPTIONS + ['BC2CPP_STRICT_KEYS']
 saved = keys.to_h { |key| [key, ENV[key]] }
 begin

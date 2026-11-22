@@ -249,7 +249,8 @@ class CodeGen
   # IVAR_ACCESS's write half: the statement storing `src` into @ivar, or nil.
   # Same rules as ivar_get_code. With `dst`, it also leaves `src` (attr_writer's
   # return value) in `dst`.
-  def ivar_set_code(klass, recv, ivar, src, self_of_klass: false, dst: nil, indent: '  ')
+  # `immediate`: `src` is proven an immediate (proven_immediate_operand?), so the store needs no write barrier.
+  def ivar_set_code(klass, recv, ivar, src, self_of_klass: false, dst: nil, indent: '  ', immediate: false)
     type = ivar_embed_type(klass, ivar)
     tail = dst ? "\n#{indent}#{dst} = #{src};" : ''
     return "bc2cpp_iv_set(M, #{recv}, mrb_intern_cstr(M, \"@#{ivar}\"), #{src});#{tail}" if type.nil?
@@ -264,9 +265,20 @@ class CodeGen
       frozen = embedded_store_frozen_check(recv)
       if type == :value
         field = "((#{struct_name(klass)}*)DATA_PTR(#{recv}))->#{ivar_field_name(ivar)}"
+        # EMBED_STORE_OUTLINED: an IMMEDIATE_BARRIER store has no barrier to share, so it stays inline.
+        if !immediate && ENV['BC2CPP_EMBED_STORE_OUTLINED'] != '0'
+          helper = frozen ? 'bc2cpp_embed_store' : 'bc2cpp_embed_store_unfrozen'
+          return "#{indent}#{helper}(M, #{recv}, &#{field}, #{src});#{tail}"
+        end
+        # BC2CPP_IMMEDIATE_BARRIER=verify aborts where the proof would be wrong instead, for a sweep.
+        barrier = if immediate && ENV['BC2CPP_IMMEDIATE_BARRIER'] == 'verify'
+                    "if (!mrb_immediate_p(#{src})) { fputs(\"IMMEDIATE_BARRIER violated: @#{ivar}\\n\", stderr); abort(); }"
+                  elsif immediate then '/* IMMEDIATE_BARRIER */'
+                  else "mrb_field_write_barrier_value(M, (struct RBasic*)mrb_obj_ptr(#{recv}), #{src});"
+                  end
         # GC_KEEP_OVERWRITTEN: the value this store replaces may be held only by a register of the caller.
         return "#{"#{indent}#{frozen}\n" if frozen}#{indent}bc2cpp_keep_old(M, #{field});\n#{indent}#{field} = #{src};\n" \
-               "#{indent}mrb_field_write_barrier_value(M, (struct RBasic*)mrb_obj_ptr(#{recv}), #{src});#{tail}"
+               "#{indent}#{barrier}#{tail}"
       end
 
       ops = TYPE_OPS.fetch(type)
@@ -286,6 +298,29 @@ class CodeGen
     elsif embedded_accessor_linkable?(klass, "#{ivar}=")
       "#{dst ? "#{dst} = " : ''}#{sanitize(klass)}_#{sanitize(ivar)}_eq_impl(M, #{recv}, #{src});"
     end
+  end
+
+  # IMMEDIATE_BARRIER: every definition of `reg` reaching the read at `idx` is nil, true, false, a Symbol or a proven
+  # Fixnum (fixnum_proof_source?), all immediates in every boxing, so a store of it needs no write barrier: the GC
+  # never marks an immediate. The use guards are proven_fixnum_operand?'s. BC2CPP_IMMEDIATE_BARRIER=0 keeps them all.
+  IMMEDIATE_LOAD_OPS = %i[LOADNIL LOADTRUE LOADFALSE LOADSYM].freeze
+  def proven_immediate_operand?(irep, idx, reg, owner_def)
+    return false if ENV['BC2CPP_IMMEDIATE_BARRIER'] == '0'
+    return false unless irep && idx && reg && owner_def
+
+    ctx = fixnum_proof_ctx(irep)
+    program = BytecodeIR.for(irep)
+    use_insn = idx >= 0 && program.source_at(idx)
+    return false if !use_insn || ctx[:upvars].include?(reg) || ctx[:protected].include?(use_insn.addr)
+
+    program.every_reaching_definition(idx, reg, opaque_regs: ctx[:upvars], max_states: fixnum_proof_max_states(irep),
+                                                shared: true) do |definition|
+      next fixnum_proof_entry_arg?(irep, definition.reg, owner_def) if definition.entry?
+
+      insn = program.source_at(definition.index)
+      IMMEDIATE_LOAD_OPS.include?(insn.op) ||
+        fixnum_proof_source?(irep, definition.index, insn, definition.reg, owner_def, 0)
+    end || false
   end
 
   # The frozen test mrb_iv_set makes and a direct struct store would skip, or nil when
@@ -730,7 +765,7 @@ class CodeGen
     out = +<<~CPP
       // POLY_TABLE -- see codegen_ivar_poly.rb's compile_poly_table.
       struct bc2cpp_poly_entry {
-        struct RClass* (*owner)(mrb_state*);
+        #{owner_row_getter_field}
         bc2cpp_poly_fn fn;
         int slot;
       };
@@ -752,7 +787,7 @@ class CodeGen
         bc2cpp_poly_fn fn = nullptr;
         for (int i = 0; i < t.n; ++i) {
           struct RClass* k = bc2cpp_owner_class_slots[t.rows[i].slot];
-          if (k == c || (!k && t.rows[i].owner(M) == c)) {
+          if (k == c || (!k && #{owner_row_fill('t.rows[i]')} == c)) {
             fn = t.rows[i].fn;
             break;
           }
@@ -767,7 +802,7 @@ class CodeGen
       out << "// POLY_TABLE :#{table[:name]}\n"
       out << "static const bc2cpp_poly_entry #{rows}[] = {\n"
       table[:entries].zip(table.fetch(:getters), table.fetch(:slots)).each do |(owner, impl), getter, slot|
-        out << "  {#{getter}, reinterpret_cast<bc2cpp_poly_fn>(#{impl}), #{slot}},  // #{owner}\n"
+        out << "  {#{owner_row_getter(getter)}reinterpret_cast<bc2cpp_poly_fn>(#{impl}), #{slot}},  // #{owner}\n"
       end
       out << "};\n"
       out << "static const bc2cpp_poly_table #{table[:symbol]} = {#{rows}, #{table[:entries].size}, " \

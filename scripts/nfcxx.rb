@@ -89,10 +89,47 @@ require "rbconfig"
 require_relative "nfcxx-setup-args"
 require_relative "nfcxx-second-pass"
 require_relative "nfcxx-cache-config"
+require_relative "nfcxx-sycl"
+require_relative "nfcxx-syntax-only"
 
 root = File.expand_path("..", __dir__)
 ROOT = root
 oracle = File.join(root, "tests", "driver-body", "nfcxx-bash")
+SYCL_SCRIPT = File.join(root, "scripts", "nfcxx-sycl.rb")
+
+# -fsyntax-only (the type check) comes first, as it came first in the body: the command is rewritten (scripts/nfcxx-syntax-only.rb),
+# and this driver runs again on the rewritten command in a temporary directory, with its status.
+if (syntax = NfcxxSyntaxOnly.plan(ARGV))
+  $stderr.write("nfcxx: driver: plan\n") if ENV["NFCXX_DRIVER_TRACE"] == "1"   # the route the pre-loop plan took
+  status = nil
+  Dir.mktmpdir("nfcxx-fso.") do |dir|
+    system(RbConfig.ruby, __FILE__, *NfcxxSyntaxOnly.args_in(syntax, dir))
+    status = $?.exitstatus || 128 + $?.termsig
+  end
+  exit status
+end
+
+# --bundle-libs and --cuda-driver= (docs/notes/bundle.md, docs/notes/cuda-driver.md): the wrappers (scripts/wrap.rb) come after the
+# -fsyntax-only step and before anything else, as they came first in the body. Status 254 from the bundle wrapper means nothing
+# was done and the run goes on; any other status ends the run. A --cuda-driver= run goes on with the arguments the wrapper gives
+# (the --cuda-driver= options left out), or is run again with the shim in place of libcuda (EXEC) and ends with that status.
+WRAP_RB = File.join(root, "scripts", "wrap.rb")
+DRIVER_SHIM = File.join(root, "nfcxx")
+WRAP_GO_ON = 254
+$stderr.write("nfcxx: driver: plan\n") if ENV["NFCXX_DRIVER_TRACE"] == "1" && ARGV.any? { |a| a.start_with?("--bundle-") }
+system(RbConfig.ruby, WRAP_RB, "bundle", DRIVER_SHIM, *ARGV)
+bundle_status = $?.exitstatus || 128 + $?.termsig
+exit bundle_status unless bundle_status == WRAP_GO_ON
+cuda_out = IO.popen([RbConfig.ruby, WRAP_RB, "cuda-driver", DRIVER_SHIM, *ARGV], &:read)
+cuda_status = $?.exitstatus || 128 + $?.termsig
+exit cuda_status unless cuda_status == 0
+cuda_lines = cuda_out.lines.map(&:chomp)
+cuda_kind = cuda_lines.shift
+if cuda_kind == "EXEC"
+  system({ "NFCXX_CUDA_DRIVER" => "libcuda" }, DRIVER_SHIM, *cuda_lines)
+  exit($?.exitstatus || 128 + $?.termsig)
+end
+ARGV.replace(cuda_lines)
 
 # The route dispatch: the pre-loop plan (scripts/nfcxx-loop.rb) runs in scripts/nfcxx-run.rb, and a gcc-route refusal
 # (scripts/nfcxx-gcc-plan.rb --live, status 2) is printed here, as the bash prints it. Every other argument list goes to the
@@ -100,6 +137,7 @@ oracle = File.join(root, "tests", "driver-body", "nfcxx-bash")
 LOOP = File.join(ROOT, "scripts", "nfcxx-loop.rb")
 GCC_PLAN = File.join(ROOT, "scripts", "nfcxx-gcc-plan.rb")
 PATHB_PLAN = File.join(ROOT, "scripts", "nfcxx-pathb.rb")
+CUDA_LIVE = File.join(ROOT, "scripts", "nfcxx-cuda-live.rb")
 RUNNER = File.join(ROOT, "scripts", "nfcxx-run.rb")
 PLAN_KINDS = %w[RUN EXEC CP CAT LN ENV].freeze
 # the kinds of a Path B plan (scripts/nfcxx-pathb.rb --tabs --checks --live): its compiles and links, the CHECK after each
@@ -146,6 +184,19 @@ end
 # bash's two choices for a hosted compile or link; a gcc choice is the gcc plan's). Returns the plan text, a Refusal (the
 # port's refusal, which the bash makes before it runs anything), or nil when the port does not plan these arguments. The
 # compile cache (--cache, --cache-log) is the bash's own lookup and store, which the port does not plan: those go to the bash.
+# the CUDA compile of these arguments (a .cu input): its status, or nil when the port does not plan them (exit 3 from it).
+# It runs the compile itself, in stages, so this is not a probe. Its exit 3 means the bash runs the arguments: when that
+# comes after its stages ran, the stages' output is dropped and the bash's own output is the one printed (the bash rewrites
+# the same files).
+def cuda_run(args)
+  return nil unless args.any? { |a| a.end_with?(".cu") }
+
+  pid = Process.spawn(RbConfig.ruby, CUDA_LIVE, "--", *args)
+  Process.wait(pid)
+  status = $?.exitstatus || 128 + $?.termsig
+  status == 3 ? nil : status
+end
+
 def pathb_plan(args)
   return nil if ENV.key?("NFCXX_BACKEND") || args.any? { |a| a.start_with?("--cache") }
 
@@ -177,6 +228,18 @@ def run_plan_text(text)
   end
 end
 
+# The SYCL kernel integration (docs/notes/sycl-kernel-builtins.md): a -c compile of one C++ source that includes the oneAPI SYCL
+# headers (a -I directory holding sycl/detail/kernel_desc.hpp) runs in two passes, as the real toolchain's integration headers
+# do. The decision and the two passes are scripts/nfcxx-sycl.rb's (tests/nfcxx-sycl/run.sh checks them against the bash block).
+# The bash body ran this check after its early exits and before its setup, and the early exits never refuse these arguments
+# (they have one source, a compile, and no -E, -x or EDG-less path), so the check runs here, before the body, with the body's
+# environment (the temporary root and the trace are set up below, and the passes inherit them as before).
+def sycl_applies?
+  NfcxxSycl.applies?(ARGV)
+rescue StandardError
+  false
+end
+
 # B5: the cache configuration's refusal (NFCXX_CACHE_REMOTE, scripts/nfcxx-cache-config.rb plan). The bash checks it first (its
 # line 115, before the argument loop, the routes and the setup, and before its trace begins), so it is checked before anything
 # else here. The bash's -fsyntax-only pre-loop plan runs before it, so that command is the oracle's.
@@ -187,6 +250,22 @@ unless ARGV.include?("-fsyntax-only")
     exit(2)
   end
 end
+
+# The argument loop (scripts/nfcxx-loop.rb --bash-state) runs here, before the routes, on the arguments the body's loop sees. Its
+# result is handed to the body in the environment (NFCXX_LOOP_STATUS: 0 and NFCXX_LOOP_STATE the statements to eval, or the
+# status and message of a refusal), and the body evals it at the place of its loop: a refusal is printed there, after the
+# body's steps before its loop, as before. The body's wrappers (--bundle-*, --cuda-driver=, a link that names libcuda) rewrite
+# the arguments before its loop, so for those the loop is left to the body (NFCXX_LOOP_STATUS unset).
+LOOP_WRAPPED = /--bundle-|\A--cuda-driver=|libcuda/
+
+def loop_result(args)
+  return nil if args.any? { |a| LOOP_WRAPPED.match?(a) }
+
+  out, err, status = Open3.capture3(RbConfig.ruby, LOOP, "--bash-state", "--", *args)
+  status.success? ? [0, out] : [status.exitstatus || 1, err]
+end
+
+LOOP_RESULT = loop_result(ARGV)
 
 if planned_loop?(ARGV)
   trace_route("plan")
@@ -203,6 +282,11 @@ gcc_plan(ARGV) # a refusal exits here; a plan is left to the oracle
 # a pathb-cc status (the gcc form re-executes the driver with NFCXX_BACKEND=gcc, as the bash does), so a failed compile is not
 # run a second time here. The setup's and the input's refusals come first, as the bash prints them (the oracle prints them).
 unless driver_refusals.any?
+  cu = cuda_run(ARGV)
+  if cu
+    trace_route("cuda-plan")
+    exit(cu)
+  end
   pb = pathb_plan(ARGV)
   if pb.is_a?(Refusal)
     trace_route("pathb-plan")
@@ -248,6 +332,9 @@ begin
   # trace_finish did; the bash only flushes its spans (its trace_finish keeps its span flush, and does not close the trace)
   trace_file = ARGV.reverse.find { |a| a.start_with?("--trace=") }&.delete_prefix("--trace=") || ENV["NFCXX_TRACE"].to_s
   env = { "RUBY" => ENV["RUBY"] || RbConfig.ruby, "TMPDIR" => tmproot, "NFCXX_TMP_OWNED" => "1" }
+  # the argument loop's result (LOOP_RESULT, above); nil unsets a variable the caller may have set, so the body runs its own loop
+  env["NFCXX_LOOP_STATUS"] = LOOP_RESULT&.first&.to_s
+  env["NFCXX_LOOP_STATE"] = LOOP_RESULT&.last
   env["NFCXX_KEEP_INTERMEDIATES"] = "1" if keep
   trace_rb = File.join(__dir__, "trace.rb")
   unless trace_file.empty?
@@ -262,11 +349,16 @@ begin
   # bash prints before its setup, then the setup's. The bash prints the message and exits with the status, after the trace is
   # opened. Any other command goes on to the oracle unchanged.
   input, setup = driver_refusals
-  refusal = input || setup
+  # the SYCL two-pass build comes before the refusals, as it came before the setup in the body
+  sycl = sycl_applies?
+  refusal = sycl ? nil : (input || setup)
   # the oracle's status is read here, before the trace calls below: each system call sets $?, so reading it after them
   # gave the trace's status (0) for a failing build
   oracle_code = 0
-  if refusal
+  if sycl
+    system(env, env["RUBY"], SYCL_SCRIPT, "run", "--root=#{ROOT}", *ARGV)
+    oracle_code = $?.exitstatus || 128 + $?.termsig
+  elsif refusal
     $stderr.puts(refusal.message)
   else
     ok = system(env, "bash", program.path, *ARGV)

@@ -1,0 +1,5 @@
+stdout:
+status=1
+stderr:
+cuda-rewrite: cannot read nosuch/x.cu
+eccp:

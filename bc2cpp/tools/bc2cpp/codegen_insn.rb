@@ -256,9 +256,11 @@ class CodeGen
     when :STRCAT
       # Matches OP_STRCAT's own real semantics exactly (src/vm.c):
       # mrb_ensure_string_type then mrb_str_concat (mutates r<d> in place).
+      # The check is dropped only for a proven String (STRCAT_STRING_ACC, codegen_strcat_literal.rb).
       d = insn.reg
       s = insn.paren_reg
-      "  #{RegName[d]} = mrb_ensure_string_type(M, #{RegName[d]});\n  mrb_str_concat(M, #{RegName[d]}, #{RegName[s]});\n"
+      check = strcat_accumulator_string?(irep, idx) ? '' : "  #{RegName[d]} = mrb_ensure_string_type(M, #{RegName[d]});\n"
+      "#{check}  mrb_str_concat(M, #{RegName[d]}, #{RegName[s]});\n"
     when :GETIV
       d = insn.reg
       ivar = insn.ivar
@@ -277,7 +279,8 @@ class CodeGen
       # Not `$`-anchored: a trailing "; R1:name" comment (see IvarLayout.analyze).
       s = insn.regs.first
       klass = self_class(owner_def)
-      code = ivar_set_code(klass, 'self', ivar, "#{RegName[s]}", self_of_klass: true)
+      immediate = proven_immediate_operand?(irep, idx, unshift_proof_reg(s, reg_offset), owner_def)
+      code = ivar_set_code(klass, 'self', ivar, "#{RegName[s]}", self_of_klass: true, immediate: immediate)
       type = embed_type(klass, ivar) if klass
       # DECLARED_IVAR_GUARD: the declared kind of the slot is checked before the value is stored.
       guard = code ? declared_ivar_setiv_guard(insn, irep, owner_def, idx, reg_offset) : ''
@@ -932,6 +935,9 @@ class CodeGen
       name = insn.const_name
       if name.nil? || owner_def.nil? || owner_def.owner.nil?
         "  #error SETCONST: the target class is unknown here\n"
+      elsif self.class.const_def_elide&.elide?(name)
+        # CONST_DEF_ELIDE: nothing can observe this binding (see ConstDefElide); the value register stays written.
+        "  /* CONST_DEF_ELIDE #{name} */\n"
       else
         "  mrb_const_set(M, mrb_obj_value(#{owner_class_ptr_expr(owner_def.owner)}), mrb_intern_cstr(M, \"#{name}\"), #{RegName[insn.regs.last]});\n"
       end

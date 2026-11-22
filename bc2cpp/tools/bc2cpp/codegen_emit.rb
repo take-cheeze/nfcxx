@@ -799,6 +799,10 @@ class CodeGen
               end
       # DECLARED_IVAR_GUARD: the declared kind is checked before the store, as at a SETIV (declared_ivar_writers_guarded?).
       store = declared_ivar_store_guard(owner, ivar, 'arg') + store
+      # WRITER_FROZEN_FREE: the SETIV store's frozen test (embedded_store_frozen_check), also for an outside caller.
+      writer_frozen_check = if ENV['BC2CPP_WRITER_FROZEN_FREE'] == '0' then 'mrb_check_frozen(M, mrb_obj_ptr(self));'
+                            else embedded_store_frozen_check('self') || '/* FROZEN_FREE */'
+                            end
       code = <<~CPP
         // #{owner}##{ivar}= -- synthesized attr_writer override (@#{ivar} is
         // embedded; this replaces the plain native accessor -- see
@@ -813,7 +817,7 @@ class CodeGen
         // (3rd/mruby/src/class.c: `mrb_iv_set(...); return val;`, see
         // MethodDef's own kind: :ivar_accessor comment for the citation).
         mrb_value #{impl}(mrb_state* M, mrb_value self, mrb_value arg) {
-          mrb_check_frozen(M, mrb_obj_ptr(self));
+          #{writer_frozen_check}
           #{guard}
         #{store.chomp}
           #{guard}

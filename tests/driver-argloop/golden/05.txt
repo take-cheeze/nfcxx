@@ -1,0 +1,5 @@
+== -x
+-- stdout
+-- stderr
+ORACLE: line N: $2: unbound variable
+status=1

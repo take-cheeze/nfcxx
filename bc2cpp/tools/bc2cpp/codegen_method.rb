@@ -69,6 +69,8 @@ class CodeGen
   end
 
   NO_PASS_CONTEXT = [].freeze
+  # EMBED_UNDEF_LOOP: below this many slots the per-field stores are no larger than the loop.
+  EMBED_UNDEF_LOOP_MIN = 8
 
   def run_inline_loop_passes_in(irep, d, mand, claimed, suppressed, glue_at, guarded, try_range: nil)
     ctx_ivar = @class_layout[d.owner]
@@ -375,6 +377,7 @@ class CodeGen
       out << emit_register_initializers(irep.nregs, initial, boxed: boxed_registers(block_fallback_regions + lambda_fallback_regions))
       out << sealed_int16_declarations(irep)
       out << stack_tuple_declarations(irep)
+      out << stack_string_declarations(irep)
       out << array_hash_fixnum_prologue(d)
       if embedded_ivars && d.name == 'initialize'
         # At the start of #initialize self is a bare MRB_TT_DATA shell (data == NULL):
@@ -382,9 +385,18 @@ class CodeGen
         sname = struct_name(d.owner)
         out << "  {\n"
         out << "    #{sname}* embedded = (#{sname}*)mrb_calloc(M, 1, sizeof(#{sname}));\n"
-        embedded_ivars.each do |ivar, type|
-          initial = type == :value ? 'mrb_undef_value()' : '{}'
-          out << "    embedded->#{ivar_field_name(ivar)} = #{initial};\n"
+        if embedded_ivars.size >= EMBED_UNDEF_LOOP_MIN && embedded_ivars.each_value.all?(:value) &&
+           ENV['BC2CPP_EMBED_UNDEF_LOOP'] != '0'
+          # EMBED_UNDEF_LOOP: a struct of mrb_value slots only is an mrb_value array (the static_assert), so one loop
+          # leaves every slot unset, as the per-field stores below do.
+          n = embedded_ivars.size
+          out << "    static_assert(sizeof(#{sname}) == #{n} * sizeof(mrb_value), \"#{sname}: mrb_value slots only\");\n"
+          out << "    for (mrb_value* p = (mrb_value*)embedded; p != (mrb_value*)embedded + #{n}; ++p) *p = mrb_undef_value();\n"
+        else
+          embedded_ivars.each do |ivar, type|
+            initial = type == :value ? 'mrb_undef_value()' : '{}'
+            out << "    embedded->#{ivar_field_name(ivar)} = #{initial};\n"
+          end
         end
         out << "    mrb_data_init(self, embedded, &#{type_var(d.owner)});\n"
         out << "  }\n"
@@ -622,7 +634,9 @@ class CodeGen
     end
     pending_splat = nil
     BytecodeIR.for(irep).each_source do |insn, idx|
-      stack_tuple_visit(irep, idx, suppressed.include?(insn.addr) || glue_at.key?(insn.addr) || guarded_inline[:at].key?(insn.addr))
+      bypassed = suppressed.include?(insn.addr) || glue_at.key?(insn.addr) || guarded_inline[:at].key?(insn.addr)
+      stack_tuple_visit(irep, idx, bypassed)
+      stack_string_visit(irep, idx, bypassed)
       # With REGISTER_FLOW the bodies are written at the end, so a label written here would land before the method's
       # first instruction: the guarded loop's `goto` would then jump back to the top and run the loop again.
       out << guarded_inline[:after][insn.addr] if !flow_bodies && guarded_inline[:after].key?(insn.addr)

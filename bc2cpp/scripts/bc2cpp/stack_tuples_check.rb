@@ -383,6 +383,47 @@ CHR_APP_EXPECTED = {
 }.freeze
 OWNERS_CHR = %w[ChrSub ChrApp].freeze
 
+# STRCAT_LITERAL (codegen_strcat_literal.rb): a literal piece of an interpolation appends its bytes to the accumulator,
+# and STRCAT_STRING_ACC drops the accumulator's String check when it is proven. The cases cover operands of every kind
+# (an object with its own to_s included), NUL and multibyte pieces, the shifted registers of an inlined block, a
+# to_s that raises into a rescue, and an interpolation result that is appended to afterwards.
+STRCAT_LIT = <<~'RUBY6'
+  class ScObj
+    def to_s; "obj"; end
+  end
+
+  class ScBad
+    def to_s; raise ArgumentError, "bad to_s"; end
+  end
+
+  class ScLit
+    def plain(x); "a#{x} (#{x})b"; end
+    def nul(x); "\0#{x}\0"; end
+    def multi(x); "\u00e9#{x}\u3042"; end
+    def mapped(a); a.map { |v| "<#{v}>" }; end
+    def joined(a); s = String.new; a.each { |v| s << "#{v}, " }; s; end
+    def rescued(x); begin; "p#{x}q"; rescue ArgumentError => e; "r:#{e.message}"; end; end
+    def appended(x); s = "#{x}!"; s << "?"; s; end
+  end
+RUBY6
+STRCAT_LIT_EXPECTED = {
+  'ScLit.new.plain(1)' => '"a1 (1)b"',
+  'ScLit.new.plain("s")' => '"as (s)b"',
+  'ScLit.new.plain(nil)' => '"a ()b"',
+  'ScLit.new.plain(:sym)' => '"asym (sym)b"',
+  'ScLit.new.plain(ScObj.new)' => '"aobj (obj)b"',
+  'ScLit.new.nul(7).bytes.to_a' => '[0, 55, 0]',
+  'ScLit.new.multi("x").bytesize' => '6',
+  'ScLit.new.multi("x").size' => '3',
+  'ScLit.new.mapped([1, "b", nil])' => '["<1>", "<b>", "<>"]',
+  'ScLit.new.joined([1, 2])' => '"1, 2, "',
+  'ScLit.new.rescued(3)' => '"p3q"',
+  'ScLit.new.rescued(ScBad.new)' => '"r:bad to_s"',
+  'ScLit.new.appended(5)' => '"5!?"',
+  'ScLit.new.plain(1).frozen?' => 'false',
+}.freeze
+OWNERS_SC = %w[ScObj ScBad ScLit].freeze
+
 # CALL_INLINE (codegen_call_inline.rb): a call the compiler already binds to one definition (here by the receiver being
 # exactly a fresh IcPoint) becomes the callee's instructions when the callee is a small register-only body. The cases cover
 # the Integer, Float, String and nil operands of the inlined arithmetic and compare (the slow arms), a branching callee, a
@@ -538,6 +579,26 @@ Dir.mktmpdir('stack-tuples') do |dir|
   saved_chr.nil? ? ENV.delete('BC2CPP_CHR_APPEND') : ENV['BC2CPP_CHR_APPEND'] = saved_chr
   check.call('kill switch: BC2CPP_CHR_APPEND=0 rewrites nothing', !chr_off_code.include?('CHR_APPEND'))
 
+  sc_dir = File.join(dir, 'strcat')
+  Dir.mkdir(sc_dir)
+  sc_code, sc_err = runtime.generate(STRCAT_LIT, sc_dir, core: true, only_owners: OWNERS_SC)
+  %w[plain nul multi mapped joined rescued].each do |name|
+    chunk = method_chunk(sc_code, 'ScLit', name)
+    check.call("ScLit##{name} appends its literal pieces, with no String built for them",
+               chunk.include?('bc2cpp_str_cat_lit(M, r'))
+  end
+  check.call('ScLit#plain builds only its first piece, the accumulator',
+             method_chunk(sc_code, 'ScLit', 'plain').scan('bc2cpp_pool_str(M, ').size == 1)
+  check.call('ScLit#plain drops the String check of its proven accumulator',
+             !method_chunk(sc_code, 'ScLit', 'plain').include?('mrb_ensure_string_type'))
+  saved_sc = ENV.fetch('BC2CPP_STRCAT_LITERAL', nil)
+  ENV['BC2CPP_STRCAT_LITERAL'] = '0'
+  sc_off_code = Dir.mktmpdir('strcat-literal-off') { |off| runtime.generate(STRCAT_LIT, off, core: true, only_owners: OWNERS_SC).first }
+  saved_sc.nil? ? ENV.delete('BC2CPP_STRCAT_LITERAL') : ENV['BC2CPP_STRCAT_LITERAL'] = saved_sc
+  check.call('kill switch: BC2CPP_STRCAT_LITERAL=0 appends through a built String and keeps every String check',
+             !sc_off_code.include?('// STRCAT_LITERAL: ') && !sc_off_code.include?('bc2cpp_str_cat_lit(M, r') &&
+             method_chunk(sc_off_code, 'ScLit', 'plain').include?('mrb_ensure_string_type'))
+
   inl_dir = File.join(dir, 'inl')
   Dir.mkdir(inl_dir)
   inl_code, inl_err = runtime.generate(CALL_INL, inl_dir, core: true, only_owners: OWNERS_INL)
@@ -565,6 +626,7 @@ Dir.mktmpdir('stack-tuples') do |dir|
      [OWNERS_REDEF, redef_dir, redef_err, REDEFINED_EXPECTED, 'redefined'],
      [OWNERS_STR, str_dir, str_err, STR_EQ_EXPECTED, 'string literal compare'],
      [OWNERS_CHR, chr_dir, chr_err, CHR_APP_EXPECTED, 'chr append'],
+     [OWNERS_SC, sc_dir, sc_err, STRCAT_LIT_EXPECTED, 'interpolation literal append'],
      [OWNERS_INL, inl_dir, inl_err, CALL_INL_EXPECTED, 'call inline']].each do |owners, sub, err, expected, label|
       built, output = runtime.run(sub, err, owners, harness_rows.call(expected), build: build, full: true)
       sections = runtime.sections(output)

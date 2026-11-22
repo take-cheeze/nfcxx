@@ -326,8 +326,10 @@ module StaticDispatchRegistrations
   # class register rN of codegen_class_body.rb): its name is a method being defined, not a lookup, as REGISTRATION_CALL's.
   SELF_REGISTRATION_CALL = /mrb_define_(?:private_|class_)?method\(\s*M\s*,\s*mrb_class_ptr\((?:self|r\d+)\)\s*,\s*"(?:[^"\\\n]|\\.)*"\s*,\s*[A-Za-z_][A-Za-z0-9_$]*\s*,/
   RAW_SYMBOL_VALUE = /mrb_symbol_value\(mrb_intern_cstr\(M, "(?:[^"\\\n]|\\.)*"\)\)/
-  # codegen_insn.rb's pool string value (bc2cpp_pool_str, symbol_cache.rb's prelude), not a folded constant.
-  POOL_STRING_VALUE = /bc2cpp_pool_str\(M, "((?:[^"\\\n]|\\.)*)"\)/
+  # codegen_insn.rb's pool string value (bc2cpp_pool_str, symbol_cache.rb's prelude), not a folded constant, or the
+  # same value appended by STRCAT_LITERAL (bc2cpp_str_cat_lit); a LITERAL_TABLES String slot (BC2CPP_LIT_STR) is the
+  # same STRING instruction's value, and so is a STACK_STRINGS frame-local one (bc2cpp_stack_str).
+  POOL_STRING_VALUE = /(?:bc2cpp_pool_str\(M, |bc2cpp_stack_str\(M, bc2cpp_str\d+, |bc2cpp_str_cat_lit\(M, r\d+, |BC2CPP_LIT_STR\()"((?:[^"\\\n]|\\.)*)"\)/
   # symbol_cache.rb's interned-name table; every use is `bc2cpp_sym(M, <index>)`
   # or the index argument of `bc2cpp_send(M, recv, <index>, ...)`.
   SYM_TABLE = /bc2cpp_sym_names\[\d+\] = \{\n(.*?)^\};/m
@@ -477,6 +479,10 @@ module StaticDispatchRegistrations
   def guarded_owner_calls(src, subclassed)
     slots = {}
     src.scan(/bc2cpp_owner_class_(\d+)\(mrb_state\* M\) \{\n[^\n]*\n[^\n]*\n\s*static const char\* const path\[\] = \{([^}]*)\}/) do |n, path|
+      slots["bc2cpp_owner_class_#{n}(M)"] = path.scan(STRING_LITERAL).map { |(s)| unescape(s) }.join('::')
+    end
+    # CLASS_TEST_FUSE (codegen_send.rb) names each slot's path array instead.
+    src.scan(/static const char\* const bc2cpp_owner_class_path_(\d+)\[\] = \{([^}]*)\}/) do |n, path|
       slots["bc2cpp_owner_class_#{n}(M)"] = path.scan(STRING_LITERAL).map { |(s)| unescape(s) }.join('::')
     end
     lines = src.lines

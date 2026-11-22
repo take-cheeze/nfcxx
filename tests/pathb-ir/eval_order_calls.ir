@@ -9,7 +9,6 @@
 (abi-type "_ZNSt6ranges8__detail15__max_size_typeE" 32 16 (memory))
 (abi-type "_ZNSt6ranges8__detail15__max_diff_typeE" 32 16 (memory))
 (abi-type "_ZSt10error_code" 16 8 (leaf 0 w) (leaf 8 l))
-(abi-type "_ZSt4fposI11__mbstate_tE" 16 8 (leaf 0 l) (leaf 8 w) (leaf 12 w))
 (abi-type "_ZSt20forward_iterator_tag" 1 1 (empty))
 (abi-type "_ZN9__gnu_cxx17__normal_iteratorIPcNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEEE" 8 8 (leaf 0 l))
 (abi-type "_ZN9__gnu_cxx17__normal_iteratorIPKcNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEEE" 8 8 (leaf 0 l))
@@ -1228,51 +1227,48 @@
     (scalar 0 signed_char (const signed_char 1))))
 (global "tmp.5" (struct "_ZSt15strong_ordering") 1 1 (static) (init
     (scalar 0 signed_char (const signed_char 0))))
-(global "tmp.6" (struct "__mbstate_t") 8 4 (static) (init
-    (zero 0 4)
-    (zero 4 4)))
+(global "tmp.6" (struct "_ZSt20forward_iterator_tag") 1 1 (static) (init))
 (global "tmp.7" (struct "_ZSt20forward_iterator_tag") 1 1 (static) (init))
-(global "tmp.8" (struct "_ZSt20forward_iterator_tag") 1 1 (static) (init))
+(global "tmp.8" (struct "_ZNSt9__cmp_cat8__unspecE") 1 1 (static) (init))
 (global "tmp.9" (struct "_ZNSt9__cmp_cat8__unspecE") 1 1 (static) (init))
-(global "tmp.10" (struct "_ZNSt9__cmp_cat8__unspecE") 1 1 (static) (init))
-(global "tmp.11" (struct "_ZNSt6ranges8__detail15__max_size_typeE") 32 16 (static) (init
+(global "tmp.10" (struct "_ZNSt6ranges8__detail15__max_size_typeE") 32 16 (static) (init
     (scalar 0 unsigned_long (const unsigned_long 18446744073709551615))
     (scalar 8 unsigned_long (const unsigned_long 18446744073709551615))
     (bitfield 16 4 0 1 unsigned_int (const unsigned_int 1))))
+(global "tmp.11" (struct "_ZSt15strong_ordering") 1 1 (static) (init
+    (scalar 0 signed_char (const signed_char -1))))
 (global "tmp.12" (struct "_ZSt15strong_ordering") 1 1 (static) (init
-    (scalar 0 signed_char (const signed_char -1))))
+    (scalar 0 signed_char (const signed_char 1))))
 (global "tmp.13" (struct "_ZSt15strong_ordering") 1 1 (static) (init
-    (scalar 0 signed_char (const signed_char 1))))
+    (scalar 0 signed_char (const signed_char 0))))
 (global "tmp.14" (struct "_ZSt15strong_ordering") 1 1 (static) (init
-    (scalar 0 signed_char (const signed_char 0))))
+    (scalar 0 signed_char (const signed_char -1))))
 (global "tmp.15" (struct "_ZSt15strong_ordering") 1 1 (static) (init
-    (scalar 0 signed_char (const signed_char -1))))
+    (scalar 0 signed_char (const signed_char 1))))
 (global "tmp.16" (struct "_ZSt15strong_ordering") 1 1 (static) (init
-    (scalar 0 signed_char (const signed_char 1))))
+    (scalar 0 signed_char (const signed_char 0))))
 (global "tmp.17" (struct "_ZSt15strong_ordering") 1 1 (static) (init
-    (scalar 0 signed_char (const signed_char 0))))
-(global "tmp.18" (struct "_ZSt15strong_ordering") 1 1 (static) (init
     (scalar 0 signed_char (const signed_char -1))))
-(global "tmp.19" (struct "_ZSt15strong_ordering") 1 1 (static) (init
+(global "tmp.18" (struct "_ZSt15strong_ordering") 1 1 (static) (init
     (scalar 0 signed_char (const signed_char 1))))
-(global "tmp.20" (struct "_ZSt15strong_ordering") 1 1 (static) (init
+(global "tmp.19" (struct "_ZSt15strong_ordering") 1 1 (static) (init
     (scalar 0 signed_char (const signed_char 0))))
-(global "tmp.21" (struct "_ZSt17integral_constantIbLb1EE") 1 1 (static) (init))
+(global "tmp.20" (struct "_ZSt17integral_constantIbLb1EE") 1 1 (static) (init))
+(global "tmp.21" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
 (global "tmp.22" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
 (global "tmp.23" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
 (global "tmp.24" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
 (global "tmp.25" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
 (global "tmp.26" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
 (global "tmp.27" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
-(global "tmp.28" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
-(global "tmp.29" (struct "_ZSt17integral_constantIbLb1EE") 1 1 (static) (init))
+(global "tmp.28" (struct "_ZSt17integral_constantIbLb1EE") 1 1 (static) (init))
+(global "tmp.29" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
 (global "tmp.30" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
 (global "tmp.31" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
 (global "tmp.32" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
 (global "tmp.33" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
 (global "tmp.34" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
 (global "tmp.35" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
-(global "tmp.36" (struct "_ZSt17integral_constantIbLb0EE") 1 1 (static) (init))
 (data "const" (const (array 5 (const char))) (string "stoi\000"))
 (data "const.1" (const (array 5 (const char))) (string "stol\000"))
 (data "const.2" (const (array 6 (const char))) (string "stoul\000"))
@@ -13298,30 +13294,6 @@
   (eval (call void &"_ZNSt15basic_streambufIcSt11char_traitsIcEEC1Ev" %1))
   (return))
 
-(function "_ZNKSt15basic_streambufIcSt11char_traitsIcEE5ebackEv"
-  (ret (ptr char))
-  (params (param %0 "tmp" (const (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))))))
-  (weak)
-  (slot "tmp" (const (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))) 8 8)
-  (store (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) $"tmp" %0)
-  (let %1 (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) (load (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) $"tmp"))
-  (nonnull %1)
-  (let %2 (ptr (ptr char)) (offset %1 8))
-  (let %3 (ptr char) (load (ptr char) %2))
-  (return %3))
-
-(function "_ZNKSt15basic_streambufIcSt11char_traitsIcEE4gptrEv"
-  (ret (ptr char))
-  (params (param %0 "tmp" (const (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))))))
-  (weak)
-  (slot "tmp" (const (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))) 8 8)
-  (store (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) $"tmp" %0)
-  (let %1 (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) (load (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) $"tmp"))
-  (nonnull %1)
-  (let %2 (ptr (ptr char)) (offset %1 16))
-  (let %3 (ptr char) (load (ptr char) %2))
-  (return %3))
-
 (function "_ZNKSt15basic_streambufIcSt11char_traitsIcEE5egptrEv"
   (ret (ptr char))
   (params (param %0 "tmp" (const (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))))))
@@ -13333,52 +13305,6 @@
   (let %2 (ptr (ptr char)) (offset %1 24))
   (let %3 (ptr char) (load (ptr char) %2))
   (return %3))
-
-(function "_ZNSt15basic_streambufIcSt11char_traitsIcEE5gbumpEi"
-  (ret void)
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))) (param %1 "__n" int))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) 8 8)
-  (slot "__n" int 4 4)
-  (store (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp" %0)
-  (store int $"__n" %1)
-  (let %2 int (load int $"__n"))
-  (let %3 (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) (load (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp"))
-  (nonnull %3)
-  (let %4 (ptr (ptr char)) (offset %3 16))
-  (let %5 (ptr char) (load (ptr char) %4))
-  (let %6 (ptr char) (index %5 %2 1))
-  (store (ptr char) %4 %6)
-  (return))
-
-(function "_ZNSt15basic_streambufIcSt11char_traitsIcEE4setgEPcS3_S3_"
-  (ret void)
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))) (param %1 "__gbeg" (ptr char)) (param %2 "__gnext" (ptr char)) (param %3 "__gend" (ptr char)))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) 8 8)
-  (slot "__gbeg" (ptr char) 8 8)
-  (slot "__gnext" (ptr char) 8 8)
-  (slot "__gend" (ptr char) 8 8)
-  (store (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp" %0)
-  (store (ptr char) $"__gbeg" %1)
-  (store (ptr char) $"__gnext" %2)
-  (store (ptr char) $"__gend" %3)
-  (let %4 (ptr char) (load (ptr char) $"__gbeg"))
-  (let %5 (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) (load (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp"))
-  (nonnull %5)
-  (let %6 (ptr (ptr char)) (offset %5 8))
-  (store (ptr char) %6 %4)
-  (let %7 (ptr char) (load (ptr char) $"__gnext"))
-  (let %8 (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) (load (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp"))
-  (nonnull %8)
-  (let %9 (ptr (ptr char)) (offset %8 16))
-  (store (ptr char) %9 %7)
-  (let %10 (ptr char) (load (ptr char) $"__gend"))
-  (let %11 (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) (load (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp"))
-  (nonnull %11)
-  (let %12 (ptr (ptr char)) (offset %11 24))
-  (store (ptr char) %12 %10)
-  (return))
 
 (function "_ZNKSt15basic_streambufIcSt11char_traitsIcEE5pbaseEv"
   (ret (ptr char))
@@ -13403,150 +13329,6 @@
   (let %2 (ptr (ptr char)) (offset %1 40))
   (let %3 (ptr char) (load (ptr char) %2))
   (return %3))
-
-(function "_ZNSt15basic_streambufIcSt11char_traitsIcEE5imbueERKSt6locale"
-  (ret void)
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))) (param %1 "__loc" (ptr (const (struct "_ZSt6locale")))))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) 8 8)
-  (slot "__loc" (ptr (const (struct "_ZSt6locale"))) 8 8)
-  (store (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp" %0)
-  (store (ptr (const (struct "_ZSt6locale"))) $"__loc" %1)
-  (return))
-
-(function "_ZNSt15basic_streambufIcSt11char_traitsIcEE6setbufEPcl"
-  (ret (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))) (param %1 "tmp" (ptr char)) (param %2 "tmp" long))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) 8 8)
-  (slot "tmp.1" (ptr char) 8 8)
-  (slot "tmp.2" long 8 8)
-  (store (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp" %0)
-  (store (ptr char) $"tmp.1" %1)
-  (store long $"tmp.2" %2)
-  (let %3 (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) (load (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp"))
-  (return %3))
-
-(function "_ZNSt15basic_streambufIcSt11char_traitsIcEE7seekoffElSt12_Ios_SeekdirSt13_Ios_Openmode"
-  (ret void)
-  (params (sret %0 (struct "_ZSt4fposI11__mbstate_tE")) (param %1 "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))) (param %2 "tmp" long) (param %3 "tmp" int) (param %4 "tmp" int))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) 8 8)
-  (slot "tmp.1" long 8 8)
-  (slot "tmp.2" int 4 4)
-  (slot "tmp.3" int 4 4)
-  (slot "tmp.4" (struct "_ZSt4fposI11__mbstate_tE") 16 8)
-  (store (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp" %1)
-  (store long $"tmp.1" %2)
-  (store int $"tmp.2" %3)
-  (store int $"tmp.3" %4)
-  (block
-    (eval (call void &"_ZNSt4fposI11__mbstate_tEC1El" $"tmp.4" (const long -1)))
-    (copy 16 %0 $"tmp.4")
-    (return)))
-
-(function "_ZNSt15basic_streambufIcSt11char_traitsIcEE7seekposESt4fposI11__mbstate_tESt13_Ios_Openmode"
-  (ret void)
-  (params (sret %0 (struct "_ZSt4fposI11__mbstate_tE")) (param %1 "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))) (param %2 "tmp" (byval (struct "_ZSt4fposI11__mbstate_tE"))) (param %3 "tmp" int))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) 8 8)
-  (slot "tmp.1" int 4 4)
-  (slot "tmp.2" (struct "_ZSt4fposI11__mbstate_tE") 16 8)
-  (store (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp" %1)
-  (store int $"tmp.1" %3)
-  (block
-    (eval (call void &"_ZNSt4fposI11__mbstate_tEC1El" $"tmp.2" (const long -1)))
-    (copy 16 %0 $"tmp.2")
-    (return)))
-
-(function "_ZNSt15basic_streambufIcSt11char_traitsIcEE4syncEv"
-  (ret int)
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) 8 8)
-  (store (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp" %0)
-  (return (const int 0)))
-
-(function "_ZNSt15basic_streambufIcSt11char_traitsIcEE9showmanycEv"
-  (ret long)
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) 8 8)
-  (store (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp" %0)
-  (return (const long 0)))
-
-(function "_ZNSt15basic_streambufIcSt11char_traitsIcEE9underflowEv"
-  (ret int)
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) 8 8)
-  (store (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp" %0)
-  (return (const int -1)))
-
-(function "_ZNSt15basic_streambufIcSt11char_traitsIcEE5uflowEv"
-  (ret int)
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) 8 8)
-  (slot "__ret" int 4 4)
-  (slot "tmp.1" (const int) 4 4)
-  (slot "tmp.2" (ptr (const int)) 8 8)
-  (slot "tmp.3" (ptr (const int)) 8 8)
-  (slot "__testeof" (const bool) 1 1)
-  (store (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp" %0)
-  (store int $"__ret" (const int -1))
-  (let %1 (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) (load (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp"))
-  (nonnull %1)
-  (let %2 (ptr (const long)) (load (ptr (const long)) %1))
-  (let %3 (ptr (const long)) (index %2 (const int 9) 8))
-  (let %4 (ptr (ptr (fn int ((ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))))) (bitcast (ptr (ptr (fn int ((ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))))) %3))
-  (nonnull %4)
-  (let %5 (ptr (fn int ((ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))))) (load (ptr (fn int ((ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))))) %4))
-  (nonnull %5)
-  (let %6 (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) (load (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp"))
-  (let %7 int (call int %5 %6))
-  (store int $"tmp.1" %7)
-  (store (ptr (const int)) $"tmp.2" $"tmp.1")
-  (store (ptr (const int)) $"tmp.3" $"__ret")
-  (let %8 (ptr (const int)) (load (ptr (const int)) $"tmp.2"))
-  (let %9 (ptr (const int)) (load (ptr (const int)) $"tmp.3"))
-  (let %10 bool (call bool &"_ZNSt11char_traitsIcE11eq_int_typeERKiS2_" %8 %9))
-  (store bool $"__testeof" %10)
-  (let %11 bool (load bool $"__testeof"))
-  (let %12 bool (eq bool %11 (const bool 0)))
-  (if %12
-    (then
-      (block
-        (let %13 (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) (load (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp"))
-        (let %14 (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) (bitcast (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) %13))
-        (let %15 (ptr char) (call (ptr char) &"_ZNKSt15basic_streambufIcSt11char_traitsIcEE4gptrEv" %14))
-        (let %16 (ptr (const char)) (bitcast (ptr (const char)) %15))
-        (let %17 int (call int &"_ZNSt11char_traitsIcE11to_int_typeERKc" %16))
-        (store int $"__ret" %17)
-        (let %18 (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) (load (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp"))
-        (eval (call void &"_ZNSt15basic_streambufIcSt11char_traitsIcEE5gbumpEi" %18 (const int 1))))))
-  (let %19 int (load int $"__ret"))
-  (return %19))
-
-(function "_ZNSt15basic_streambufIcSt11char_traitsIcEE9pbackfailEi"
-  (ret int)
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))) (param %1 "__c" int))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) 8 8)
-  (slot "__c" int 4 4)
-  (store (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp" %0)
-  (store int $"__c" %1)
-  (return (const int -1)))
-
-(function "_ZNSt15basic_streambufIcSt11char_traitsIcEE8overflowEi"
-  (ret int)
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))) (param %1 "__c" int))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) 8 8)
-  (slot "__c" int 4 4)
-  (store (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")) $"tmp" %0)
-  (store int $"__c" %1)
-  (return (const int -1)))
 
 (function "_ZNKSt5ctypeIcE2isEtc"
   (ret bool)
@@ -14658,56 +14440,6 @@
     (store bool $"tmp.2" %12)
     (let %13 bool (load bool $"tmp.2"))
     (return %13)))
-
-(function "_ZNSt4fposI11__mbstate_tEC1El"
-  (ret void)
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt4fposI11__mbstate_tE")))) (param %1 "__off" long))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt4fposI11__mbstate_tE"))) 8 8)
-  (slot "__off" long 8 8)
-  (store (ptr (struct "_ZSt4fposI11__mbstate_tE")) $"tmp" %0)
-  (store long $"__off" %1)
-  (let %2 long (load long $"__off"))
-  (let %3 (ptr (struct "_ZSt4fposI11__mbstate_tE")) (load (ptr (struct "_ZSt4fposI11__mbstate_tE")) $"tmp"))
-  (nonnull %3)
-  (store long %3 %2)
-  (let %4 (ptr (struct "_ZSt4fposI11__mbstate_tE")) (load (ptr (struct "_ZSt4fposI11__mbstate_tE")) $"tmp"))
-  (nonnull %4)
-  (let %5 (ptr (struct "__mbstate_t")) (offset %4 8))
-  (copy 8 %5 @"tmp.6")
-  (return))
-
-(function "_ZNSt4fposI11__mbstate_tEC2El"
-  (ret void)
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt4fposI11__mbstate_tE")))) (param %1 "tmp" long))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt4fposI11__mbstate_tE"))) 8 8)
-  (slot "tmp.1" long 8 8)
-  (store (ptr (struct "_ZSt4fposI11__mbstate_tE")) $"tmp" %0)
-  (store long $"tmp.1" %1)
-  (let %2 (ptr (struct "_ZSt4fposI11__mbstate_tE")) (load (ptr (struct "_ZSt4fposI11__mbstate_tE")) $"tmp"))
-  (let %3 long (load long $"tmp.1"))
-  (eval (call void &"_ZNSt4fposI11__mbstate_tEC1El" %2 %3))
-  (return))
-
-(function "_ZNSt4fposI11__mbstate_tED1Ev"
-  (ret void)
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt4fposI11__mbstate_tE")))))
-  (weak)
-  (eh-noexcept)
-  (slot "tmp" (const (ptr (struct "_ZSt4fposI11__mbstate_tE"))) 8 8)
-  (store (ptr (struct "_ZSt4fposI11__mbstate_tE")) $"tmp" %0)
-  (return))
-
-(function "_ZNSt4fposI11__mbstate_tED2Ev"
-  (ret void)
-  (params (param %0 "tmp" (const (ptr (struct "_ZSt4fposI11__mbstate_tE")))))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZSt4fposI11__mbstate_tE"))) 8 8)
-  (store (ptr (struct "_ZSt4fposI11__mbstate_tE")) $"tmp" %0)
-  (let %1 (ptr (struct "_ZSt4fposI11__mbstate_tE")) (load (ptr (struct "_ZSt4fposI11__mbstate_tE")) $"tmp"))
-  (eval (call void &"_ZNSt4fposI11__mbstate_tED1Ev" %1))
-  (return))
 
 (function "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE11_S_allocateERS3_m"
   (ret (ptr char))
@@ -16949,7 +16681,7 @@
   (let %12 (ptr (struct "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE")) $"tmp"))
   (let %13 (ptr char) (load (ptr char) $"tmp.1"))
   (let %14 (ptr char) (load (ptr char) $"tmp.2"))
-  (copy 1 $"tmp.3" @"tmp.7")
+  (copy 1 $"tmp.3" @"tmp.6")
   (eval (call void &"_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE12_M_constructIPcEEvT_S7_St20forward_iterator_tag" %12 %13 %14 (byval (struct "_ZSt20forward_iterator_tag") $"tmp.3")))
   (return))
 
@@ -17909,7 +17641,7 @@
   (let %12 (ptr (struct "_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEEE")) (load (ptr (struct "_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEEE")) $"tmp"))
   (let %13 (ptr int) (load (ptr int) $"tmp.1"))
   (let %14 (ptr int) (load (ptr int) $"tmp.2"))
-  (copy 1 $"tmp.3" @"tmp.8")
+  (copy 1 $"tmp.3" @"tmp.7")
   (eval (call void &"_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEE12_M_constructIPwEEvT_S7_St20forward_iterator_tag" %12 %13 %14 (byval (struct "_ZSt20forward_iterator_tag") $"tmp.3")))
   (block
     (eh-state 0)
@@ -20257,154 +19989,6 @@
     (label "eh.c.1.0")
     (eval (call void &"_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEED1Ev" $"__ret"))
     (goto "eh.x")))
-
-(function "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEE9showmanycEv"
-  (ret long)
-  (params (param %0 "tmp" (const (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")))))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE"))) 8 8)
-  (slot "__ret" long 8 8)
-  (store (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp" %0)
-  (store long $"__ret" (const long -1))
-  (let %1 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-  (nonnull %1)
-  (let %2 (ptr int) (offset %1 64))
-  (let %3 int (load int %2))
-  (let %4 int (call int &"_ZStanSt13_Ios_OpenmodeS_" %3 (const int 8)))
-  (let %5 bool (ne int %4 (const int 0)))
-  (if %5
-    (then
-      (block
-        (let %6 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-        (eval (call void &"_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEE15_M_update_egptrEv" %6))
-        (let %7 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-        (let %8 (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) (bitcast (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) %7))
-        (let %9 (ptr char) (call (ptr char) &"_ZNKSt15basic_streambufIcSt11char_traitsIcEE5egptrEv" %8))
-        (let %10 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-        (let %11 (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) (bitcast (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) %10))
-        (let %12 (ptr char) (call (ptr char) &"_ZNKSt15basic_streambufIcSt11char_traitsIcEE4gptrEv" %11))
-        (let %13 long (pdiff %9 %12 1))
-        (store long $"__ret" %13))))
-  (let %14 long (load long $"__ret"))
-  (return %14))
-
-(function "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEE6setbufEPcl"
-  (ret (ptr (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE")))
-  (params (param %0 "tmp" (const (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")))) (param %1 "__s" (ptr char)) (param %2 "__n" long))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE"))) 8 8)
-  (slot "__s" (ptr char) 8 8)
-  (slot "__n" long 8 8)
-  (slot "tmp.1" (ptr char) 8 8)
-  (slot "tmp.2" unsigned_long 8 8)
-  (store (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp" %0)
-  (store (ptr char) $"__s" %1)
-  (store long $"__n" %2)
-  (let %3 (ptr char) (load (ptr char) $"__s"))
-  (let %4 bool (ne (ptr char) %3 (null (ptr char))))
-  (let %5 bool (const bool 0))
-  (if %4
-    (then
-      (let %6 long (load long $"__n"))
-      (let %7 bool (le.s long (const long 0) %6))
-      (set %5 %7)))
-  (if %5
-    (then
-      (block
-        (let %8 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-        (let %9 (ptr (struct "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE")) (offset %8 72))
-        (eval (call void &"_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE5clearEv" %9))
-        (let %10 (ptr char) (load (ptr char) $"__s"))
-        (store (ptr char) $"tmp.1" %10)
-        (let %11 long (load long $"__n"))
-        (let %12 unsigned_long (iconv unsigned_long %11))
-        (store unsigned_long $"tmp.2" %12)
-        (let %13 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-        (let %14 (ptr char) (load (ptr char) $"tmp.1"))
-        (let %15 unsigned_long (load unsigned_long $"tmp.2"))
-        (eval (call void &"_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEE7_M_syncEPcmm" %13 %14 %15 (const unsigned_long 0))))))
-  (let %16 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-  (return %16))
-
-(function "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEE15_M_update_egptrEv"
-  (ret void)
-  (params (param %0 "tmp" (const (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")))))
-  (weak)
-  (slot "tmp" (const (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE"))) 8 8)
-  (slot "__pptr" (ptr char) 8 8)
-  (slot "__egptr" (ptr char) 8 8)
-  (slot "tmp.1" (ptr char) 8 8)
-  (slot "tmp.2" (ptr char) 8 8)
-  (slot "tmp.3" (ptr char) 8 8)
-  (slot "tmp.4" (ptr char) 8 8)
-  (slot "tmp.5" (ptr char) 8 8)
-  (slot "tmp.6" (ptr char) 8 8)
-  (store (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp" %0)
-  (block
-    (let %1 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-    (let %2 (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) (bitcast (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) %1))
-    (let %3 (ptr char) (call (ptr char) &"_ZNKSt15basic_streambufIcSt11char_traitsIcEE4pptrEv" %2))
-    (store (ptr char) $"__pptr" %3)
-    (let %4 (ptr char) (load (ptr char) $"__pptr"))
-    (let %5 bool (ne (ptr char) %4 (null (ptr char))))
-    (if %5
-      (then
-        (block
-          (let %6 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-          (let %7 (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) (bitcast (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) %6))
-          (let %8 (ptr char) (call (ptr char) &"_ZNKSt15basic_streambufIcSt11char_traitsIcEE5egptrEv" %7))
-          (store (ptr char) $"__egptr" %8)
-          (let %9 (ptr char) (load (ptr char) $"__egptr"))
-          (let %10 bool (eq (ptr char) %9 (null (ptr char))))
-          (let %11 bool (const bool 1))
-          (if %10
-            (then)
-            (else
-              (let %12 (ptr char) (load (ptr char) $"__pptr"))
-              (let %13 (ptr char) (load (ptr char) $"__egptr"))
-              (let %14 bool (lt.u (ptr char) %13 %12))
-              (set %11 %14)))
-          (if %11
-            (then
-              (block
-                (let %15 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-                (nonnull %15)
-                (let %16 (ptr int) (offset %15 64))
-                (let %17 int (load int %16))
-                (let %18 int (call int &"_ZStanSt13_Ios_OpenmodeS_" %17 (const int 8)))
-                (let %19 bool (ne int %18 (const int 0)))
-                (if %19
-                  (then
-                    (block
-                      (let %20 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-                      (let %21 (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) (bitcast (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) %20))
-                      (let %22 (ptr char) (call (ptr char) &"_ZNKSt15basic_streambufIcSt11char_traitsIcEE5ebackEv" %21))
-                      (store (ptr char) $"tmp.1" %22)
-                      (let %23 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-                      (let %24 (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) (bitcast (ptr (const (struct "_ZSt15basic_streambufIcSt11char_traitsIcEE"))) %23))
-                      (let %25 (ptr char) (call (ptr char) &"_ZNKSt15basic_streambufIcSt11char_traitsIcEE4gptrEv" %24))
-                      (store (ptr char) $"tmp.2" %25)
-                      (let %26 (ptr char) (load (ptr char) $"__pptr"))
-                      (store (ptr char) $"tmp.3" %26)
-                      (let %27 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-                      (let %28 (ptr char) (load (ptr char) $"tmp.1"))
-                      (let %29 (ptr char) (load (ptr char) $"tmp.2"))
-                      (let %30 (ptr char) (load (ptr char) $"tmp.3"))
-                      (eval (call void &"_ZNSt15basic_streambufIcSt11char_traitsIcEE4setgEPcS3_S3_" %27 %28 %29 %30))))
-                  (else
-                    (block
-                      (let %31 (ptr char) (load (ptr char) $"__pptr"))
-                      (store (ptr char) $"tmp.4" %31)
-                      (let %32 (ptr char) (load (ptr char) $"__pptr"))
-                      (store (ptr char) $"tmp.5" %32)
-                      (let %33 (ptr char) (load (ptr char) $"__pptr"))
-                      (store (ptr char) $"tmp.6" %33)
-                      (let %34 (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-                      (let %35 (ptr char) (load (ptr char) $"tmp.4"))
-                      (let %36 (ptr char) (load (ptr char) $"tmp.5"))
-                      (let %37 (ptr char) (load (ptr char) $"tmp.6"))
-                      (eval (call void &"_ZNSt15basic_streambufIcSt11char_traitsIcEE4setgEPcS3_S3_" %34 %35 %36 %37))))))))))))
-  (return))
 
 (function "_ZNKSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEE12_M_high_markEv"
   (ret (ptr char))
@@ -22755,7 +22339,7 @@
     (let %18 (ptr (const (struct "_ZNSt6ranges8__detail15__max_diff_typeE"))) (load (ptr (const (struct "_ZNSt6ranges8__detail15__max_diff_typeE"))) $"tmp.6"))
     (eval (call void &"_ZNKSt6ranges8__detail15__max_diff_typessERKS1_" (sret (struct "_ZSt15strong_ordering") $"tmp.7") %18 $"tmp.4"))
     (copy 1 $"tmp.8" $"tmp.7")
-    (copy 1 $"tmp.9" @"tmp.9")
+    (copy 1 $"tmp.9" @"tmp.8")
     (let %19 bool (call bool &"_ZStltSt15strong_orderingNSt9__cmp_cat8__unspecE" (byval (struct "_ZSt15strong_ordering") $"tmp.8") (byval (struct "_ZNSt9__cmp_cat8__unspecE") $"tmp.9")))
     (store bool $"__neg" %19))
   (block
@@ -22772,7 +22356,7 @@
     (let %24 (ptr (const (struct "_ZNSt6ranges8__detail15__max_diff_typeE"))) (load (ptr (const (struct "_ZNSt6ranges8__detail15__max_diff_typeE"))) $"tmp.12"))
     (eval (call void &"_ZNKSt6ranges8__detail15__max_diff_typessERKS1_" (sret (struct "_ZSt15strong_ordering") $"tmp.13") %24 $"tmp.10"))
     (copy 1 $"tmp.14" $"tmp.13")
-    (copy 1 $"tmp.15" @"tmp.10")
+    (copy 1 $"tmp.15" @"tmp.9")
     (let %25 bool (call bool &"_ZStltSt15strong_orderingNSt9__cmp_cat8__unspecE" (byval (struct "_ZSt15strong_ordering") $"tmp.14") (byval (struct "_ZNSt9__cmp_cat8__unspecE") $"tmp.15")))
     (store bool $"__rneg" %25))
   (let %26 bool (load bool $"__neg"))
@@ -23066,7 +22650,7 @@
       (block
         (let %10 (ptr (struct "_ZNSt6ranges8__detail15__max_diff_typeE")) (load (ptr (struct "_ZNSt6ranges8__detail15__max_diff_typeE")) $"tmp"))
         (let %11 (ptr void) (bitcast (ptr void) $"tmp.2"))
-        (copy 32 $"tmp.4" @"tmp.11")
+        (copy 32 $"tmp.4" @"tmp.10")
         (let %12 (ptr (const (struct "_ZNSt6ranges8__detail15__max_diff_typeE"))) (load (ptr (const (struct "_ZNSt6ranges8__detail15__max_diff_typeE"))) $"__r"))
         (eval (call void &"_ZNSt6ranges8__detailrsENS0_15__max_size_typeERKS1_" (sret (struct "_ZNSt6ranges8__detail15__max_size_typeE") $"tmp.3") (byval (struct "_ZNSt6ranges8__detail15__max_size_typeE") $"tmp.4") %12))
         (copy 32 $"tmp.5" $"tmp.3")
@@ -27338,7 +26922,7 @@
           (let %22 (ptr (struct "_ZSt15strong_ordering")) (null (ptr (struct "_ZSt15strong_ordering"))))
           (if %21
             (then
-              (set %22 @"tmp.12"))
+              (set %22 @"tmp.11"))
             (else
               (let %23 (ptr (const (struct "_ZNSt6ranges8__detail15__max_size_typeE"))) (load (ptr (const (struct "_ZNSt6ranges8__detail15__max_size_typeE"))) $"__r"))
               (nonnull %23)
@@ -27351,9 +26935,9 @@
               (let %27 (ptr (struct "_ZSt15strong_ordering")) (null (ptr (struct "_ZSt15strong_ordering"))))
               (if %26
                 (then
-                  (set %27 @"tmp.13"))
+                  (set %27 @"tmp.12"))
                 (else
-                  (set %27 @"tmp.14")))
+                  (set %27 @"tmp.13")))
               (set %22 %27)))
           (copy 1 $"tmp.5" %22)
           (copy 1 %0 $"tmp.5")
@@ -30003,7 +29587,7 @@
     (let %15 (ptr (struct "_ZSt15strong_ordering")) (null (ptr (struct "_ZSt15strong_ordering"))))
     (if %14
       (then
-        (set %15 @"tmp.15"))
+        (set %15 @"tmp.14"))
       (else
         (let %16 int (load int $"tmp.8"))
         (let %17 int (load int $"tmp.7"))
@@ -30011,9 +29595,9 @@
         (let %19 (ptr (struct "_ZSt15strong_ordering")) (null (ptr (struct "_ZSt15strong_ordering"))))
         (if %18
           (then
-            (set %19 @"tmp.16"))
+            (set %19 @"tmp.15"))
           (else
-            (set %19 @"tmp.17")))
+            (set %19 @"tmp.16")))
         (set %15 %19)))
     (copy 1 $"tmp.9" %15)
     (copy 1 %0 $"tmp.9")
@@ -30217,7 +29801,7 @@
     (let %15 (ptr (struct "_ZSt15strong_ordering")) (null (ptr (struct "_ZSt15strong_ordering"))))
     (if %14
       (then
-        (set %15 @"tmp.18"))
+        (set %15 @"tmp.17"))
       (else
         (let %16 int (load int $"tmp.8"))
         (let %17 int (load int $"tmp.7"))
@@ -30225,9 +29809,9 @@
         (let %19 (ptr (struct "_ZSt15strong_ordering")) (null (ptr (struct "_ZSt15strong_ordering"))))
         (if %18
           (then
-            (set %19 @"tmp.19"))
+            (set %19 @"tmp.18"))
           (else
-            (set %19 @"tmp.20")))
+            (set %19 @"tmp.19")))
         (set %15 %19)))
     (copy 1 $"tmp.9" %15)
     (copy 1 %0 $"tmp.9")
@@ -31663,7 +31247,7 @@
           (then)
           (else
             (let %22 long (load long $"__tmp"))
-            (copy 1 $"tmp.3" @"tmp.21")
+            (copy 1 $"tmp.3" @"tmp.20")
             (let %23 bool (call bool &"_ZZN9__gnu_cxx6__stoaIlicJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkElSt17integral_constantIbLb1EE" %22 (byval (struct "_ZSt17integral_constantIbLb1EE") $"tmp.3")))
             (set %21 %23)))
         (if %21
@@ -31770,7 +31354,7 @@
           (then)
           (else
             (let %22 long (load long $"__tmp"))
-            (copy 1 $"tmp.3" @"tmp.22")
+            (copy 1 $"tmp.3" @"tmp.21")
             (let %23 bool (call bool &"_ZZN9__gnu_cxx6__stoaIllcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkElSt17integral_constantIbLb0EE" %22 (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.3")))
             (set %21 %23)))
         (if %21
@@ -31876,7 +31460,7 @@
           (then)
           (else
             (let %22 unsigned_long (load unsigned_long $"__tmp"))
-            (copy 1 $"tmp.3" @"tmp.23")
+            (copy 1 $"tmp.3" @"tmp.22")
             (let %23 bool (call bool &"_ZZN9__gnu_cxx6__stoaImmcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEmSt17integral_constantIbLb0EE" %22 (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.3")))
             (set %21 %23)))
         (if %21
@@ -31982,7 +31566,7 @@
           (then)
           (else
             (let %22 long_long (load long_long $"__tmp"))
-            (copy 1 $"tmp.3" @"tmp.24")
+            (copy 1 $"tmp.3" @"tmp.23")
             (let %23 bool (call bool &"_ZZN9__gnu_cxx6__stoaIxxcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkExSt17integral_constantIbLb0EE" %22 (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.3")))
             (set %21 %23)))
         (if %21
@@ -32088,7 +31672,7 @@
           (then)
           (else
             (let %22 unsigned_long_long (load unsigned_long_long $"__tmp"))
-            (copy 1 $"tmp.3" @"tmp.25")
+            (copy 1 $"tmp.3" @"tmp.24")
             (let %23 bool (call bool &"_ZZN9__gnu_cxx6__stoaIyycJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEySt17integral_constantIbLb0EE" %22 (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.3")))
             (set %21 %23)))
         (if %21
@@ -32185,7 +31769,7 @@
           (then)
           (else
             (let %18 float (load float $"__tmp"))
-            (copy 1 $"tmp.1" @"tmp.26")
+            (copy 1 $"tmp.1" @"tmp.25")
             (let %19 bool (call bool &"_ZZN9__gnu_cxx6__stoaIffcJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEfSt17integral_constantIbLb0EE" %18 (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.1")))
             (set %17 %19)))
         (if %17
@@ -32282,7 +31866,7 @@
           (then)
           (else
             (let %18 double (load double $"__tmp"))
-            (copy 1 $"tmp.1" @"tmp.27")
+            (copy 1 $"tmp.1" @"tmp.26")
             (let %19 bool (call bool &"_ZZN9__gnu_cxx6__stoaIddcJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEdSt17integral_constantIbLb0EE" %18 (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.1")))
             (set %17 %19)))
         (if %17
@@ -32386,7 +31970,7 @@
           (else
             (copy 16 $"tmp.2" $"__tmp")
             (copy 16 $"tmp.3" $"tmp.2")
-            (copy 1 $"tmp.4" @"tmp.28")
+            (copy 1 $"tmp.4" @"tmp.27")
             (let %18 bool (call bool &"_ZZN9__gnu_cxx6__stoaIeecJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEeSt17integral_constantIbLb0EE" (byval (struct "__nfcxx_ld") $"tmp.3") (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.4")))
             (set %17 %18)))
         (if %17
@@ -32567,7 +32151,7 @@
           (then)
           (else
             (let %22 long (load long $"__tmp"))
-            (copy 1 $"tmp.3" @"tmp.29")
+            (copy 1 $"tmp.3" @"tmp.28")
             (let %23 bool (call bool &"_ZZN9__gnu_cxx6__stoaIliwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkElSt17integral_constantIbLb1EE" %22 (byval (struct "_ZSt17integral_constantIbLb1EE") $"tmp.3")))
             (set %21 %23)))
         (if %21
@@ -32674,7 +32258,7 @@
           (then)
           (else
             (let %22 long (load long $"__tmp"))
-            (copy 1 $"tmp.3" @"tmp.30")
+            (copy 1 $"tmp.3" @"tmp.29")
             (let %23 bool (call bool &"_ZZN9__gnu_cxx6__stoaIllwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkElSt17integral_constantIbLb0EE" %22 (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.3")))
             (set %21 %23)))
         (if %21
@@ -32780,7 +32364,7 @@
           (then)
           (else
             (let %22 unsigned_long (load unsigned_long $"__tmp"))
-            (copy 1 $"tmp.3" @"tmp.31")
+            (copy 1 $"tmp.3" @"tmp.30")
             (let %23 bool (call bool &"_ZZN9__gnu_cxx6__stoaImmwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEmSt17integral_constantIbLb0EE" %22 (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.3")))
             (set %21 %23)))
         (if %21
@@ -32886,7 +32470,7 @@
           (then)
           (else
             (let %22 long_long (load long_long $"__tmp"))
-            (copy 1 $"tmp.3" @"tmp.32")
+            (copy 1 $"tmp.3" @"tmp.31")
             (let %23 bool (call bool &"_ZZN9__gnu_cxx6__stoaIxxwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkExSt17integral_constantIbLb0EE" %22 (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.3")))
             (set %21 %23)))
         (if %21
@@ -32992,7 +32576,7 @@
           (then)
           (else
             (let %22 unsigned_long_long (load unsigned_long_long $"__tmp"))
-            (copy 1 $"tmp.3" @"tmp.33")
+            (copy 1 $"tmp.3" @"tmp.32")
             (let %23 bool (call bool &"_ZZN9__gnu_cxx6__stoaIyywJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEySt17integral_constantIbLb0EE" %22 (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.3")))
             (set %21 %23)))
         (if %21
@@ -33089,7 +32673,7 @@
           (then)
           (else
             (let %18 float (load float $"__tmp"))
-            (copy 1 $"tmp.1" @"tmp.34")
+            (copy 1 $"tmp.1" @"tmp.33")
             (let %19 bool (call bool &"_ZZN9__gnu_cxx6__stoaIffwJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEfSt17integral_constantIbLb0EE" %18 (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.1")))
             (set %17 %19)))
         (if %17
@@ -33186,7 +32770,7 @@
           (then)
           (else
             (let %18 double (load double $"__tmp"))
-            (copy 1 $"tmp.1" @"tmp.35")
+            (copy 1 $"tmp.1" @"tmp.34")
             (let %19 bool (call bool &"_ZZN9__gnu_cxx6__stoaIddwJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEdSt17integral_constantIbLb0EE" %18 (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.1")))
             (set %17 %19)))
         (if %17
@@ -33290,7 +32874,7 @@
           (else
             (copy 16 $"tmp.2" $"__tmp")
             (copy 16 $"tmp.3" $"tmp.2")
-            (copy 1 $"tmp.4" @"tmp.36")
+            (copy 1 $"tmp.4" @"tmp.35")
             (let %18 bool (call bool &"_ZZN9__gnu_cxx6__stoaIeewJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEeSt17integral_constantIbLb0EE" (byval (struct "__nfcxx_ld") $"tmp.3") (byval (struct "_ZSt17integral_constantIbLb0EE") $"tmp.4")))
             (set %17 %18)))
         (if %17

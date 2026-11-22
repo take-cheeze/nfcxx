@@ -6,6 +6,11 @@
 # cfunc result is rooted over the VM epilogue, which reallocs a grown arena (bc2cpp_cfunc_result). Both lose the object only under
 # an MRB_GC_STRESS mruby, so point BC2CPP_MRUBY_FULL at one to exercise them; a normal build checks the output only.
 #
+# IMMEDIATE_BARRIER (codegen_ivar_poly.rb proven_immediate_operand?): an embedded ivar store of a value every reaching
+# definition proves nil, true, false, a Symbol or a Fixnum has no write barrier; any other value, and every store under
+# BC2CPP_IMMEDIATE_BARRIER=0, keeps it. The driver stores across incremental GC steps (tiny interval and step ratios,
+# generational mode), where a barrier missing on a heap value would lose it.
+#
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/gc_stress_roots_check.rb
 
 require_relative 'fixture_runtime'
@@ -28,12 +33,61 @@ SRC = <<~'RUBY'
     def indexed
       [1, 2, 3].each_with_index.map { |_, i| i }
     end
+
+    LIMIT = 7
+    # LITERAL_TABLES: a lambda's constant literal comes from its word table, a fresh tree of fresh Strings per call.
+    def literals
+      make = -> { { 1 => 'a', 2 => [3, nil, true, false, 'b', -70_000], 3 => { 4 => 4096, 5 => LIMIT } } }
+      a = make.call
+      b = make.call
+      a[1] << 'z'
+      a[2] << 9
+      [a, b, a[1].equal?(b[1]), a[1].frozen?]
+    end
+  end
+
+  class IbCell
+    def initialize(v)
+      @v = v
+    end
+    def set_nil; @v = nil; self; end
+    def set_sym(c); @v = c ? :on : :off; self; end
+    def set_int(c); @v = c ? 5 : -3; self; end
+    def set_obj(o); @v = o; self; end
+    def set_str(n); @v = n.to_s; self; end
+    def v; @v; end
   end
 RUBY
 
-code = suite.generate(SRC, %w[StressRoots Array Enumerable Enumerator Integer Kernel Range])
+OWNERS = %w[StressRoots IbCell Array Enumerable Enumerator Integer Kernel Range].freeze
+BARRIER = 'mrb_field_write_barrier_value('
+MARK = '/* IMMEDIATE_BARRIER */'
+# EMBED_STORE_OUTLINED: bc2cpp_embed_store runs the barrier itself (bc2cpp.rb).
+def barrier?(body) = body.include?(BARRIER) || body.match?(/bc2cpp_embed_store(?:_unfrozen)?\(M, /)
+
+def body_of(code, name)
+  code.scan(/^(?:static )?mrb_value #{name}_impl\w*\(mrb_state\* M.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m).join
+end
+
+ENV['BC2CPP_IMMEDIATE_BARRIER'] = '0'
+off = suite.generate(SRC, OWNERS)
+ENV.delete('BC2CPP_IMMEDIATE_BARRIER')
+suite.check('BC2CPP_IMMEDIATE_BARRIER=0 keeps every write barrier',
+            !off.include?(MARK) && barrier?(body_of(off, 'IbCell_set_nil')))
+
+code = suite.generate(SRC, OWNERS)
 suite.check('the arena result root is emitted in a method entry',
             code.match?(/return bc2cpp_cfunc_result\(\{M, M->gc\.arena_idx, StressRoots_grown_impl\(/))
+suite.check('the lambda literal is a word table', code.include?('bc2cpp_lit_build(M, bc2cpp_lit, bc2cpp_lit_s, bc2cpp_lit_d)'))
+suite.check('the stores compile to the embedded field', body_of(code, 'IbCell_set_nil').include?('(IbCell_ivars*)DATA_PTR(self))->ivar_v'))
+%w[set_nil set_sym set_int].each do |name|
+  body = body_of(code, "IbCell_#{name}")
+  suite.check("#{name}: an immediate store has no write barrier", body.include?(MARK) && !barrier?(body))
+end
+%w[set_obj set_str initialize].each do |name|
+  body = body_of(code, "IbCell_#{name}")
+  suite.check("#{name}: a heap or unknown value keeps the write barrier", barrier?(body) && !body.include?(MARK))
+end
 
 DRIVER = <<~'RUBY'
   # The first call: a VM block's array result, then a respond_to? on it that allocates.
@@ -43,10 +97,33 @@ DRIVER = <<~'RUBY'
   p s.flat(1..2)
   p s.flat([3, 4])
   p s.indexed
+  p s.literals
+  GC.generational_mode = true if GC.respond_to?(:generational_mode=)
+  GC.interval_ratio = 1 if GC.respond_to?(:interval_ratio=)
+  GC.step_ratio = 1 if GC.respond_to?(:step_ratio=)
+  cells = (0...200).map { |i| IbCell.new(i) }
+  4.times do |round|
+    cells.each_with_index do |c, i|
+      case (i + round) % 5
+      when 0 then c.set_nil
+      when 1 then c.set_sym(i.even?)
+      when 2 then c.set_int(i.odd?)
+      when 3 then c.set_obj([i, round])
+      else c.set_str(i * round)
+      end
+      'x' * 64
+    end
+    GC.start if round == 2
+  end
+  p cells.map(&:v).first(6)
   puts 'end'
 RUBY
 
 suite.behaviour(DRIVER) do |_, compiled|
-  suite.check('the compiled run prints what MRI prints', compiled == ['[1, 2]', '["298", "299"]', '[1, 2]', '[3, 4]', '[0, 1, 2]', 'end'])
+  literals = '[{1 => "az", 2 => [3, nil, true, false, "b", -70000, 9], 3 => {4 => 4096, 5 => 7}}, ' \
+             '{1 => "a", 2 => [3, nil, true, false, "b", -70000], 3 => {4 => 4096, 5 => 7}}, false, false]'
+  suite.check('the compiled run prints what MRI prints',
+              compiled == ['[1, 2]', '["298", "299"]', '[1, 2]', '[3, 4]', '[0, 1, 2]', literals,
+                           '[[0, 3], "3", nil, :off, -3, [5, 3]]', 'end'])
 end
 suite.finish

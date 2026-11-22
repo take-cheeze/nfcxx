@@ -1,0 +1,4 @@
+stdout:
+status=2
+stderr:
+nfcxx: -MD needs -c (dependency files are written for a compile only)

@@ -410,8 +410,8 @@ end
 # CORE_OUTSIDE_REDEFINED and BlockSelfWorld read) takes mrbc when there is one, except under BC2CPP_MRBC_RB=verify. The
 # emitter's bytes are mrbc's (golden_test), and such a read does without its annotations; in a self-compiled bc2cpp the
 # emitter spent most of a small run compiling those sources again.
-def compile_ireps(src_paths, symbol, out_dir, mrbc: MRBC, emitter: true)
-  load_ireps(run_mrbc(src_paths, symbol, out_dir, mrbc: mrbc, emitter: emitter), cache: IrepCache.directory_for_sources(src_paths))
+def compile_ireps(src_paths, symbol, out_dir, mrbc: MRBC, emitter: true, cache: IrepCache.directory_for_sources(src_paths))
+  load_ireps(run_mrbc(src_paths, symbol, out_dir, mrbc: mrbc, emitter: emitter), cache: cache)
 end
 
 CATCH_TYPES = { 0 => :rescue, 1 => :ensure }.freeze
