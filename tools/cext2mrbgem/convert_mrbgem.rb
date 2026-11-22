@@ -2053,7 +2053,8 @@ end
             nx >= 0 && masked[nx] == '(' && (dc = match_close(masked, nx)) > 0 && split_args(masked, nx, dc).size == 3
           end
         else
-          next unless cb_occ.count == 2
+          calls_here = cb_occ.count { |_r, p, _e| masked[[p - 80, 0].max...p].to_s.match?(/(?:rb_hash_foreach|rb_ivar_foreach)#{SS}\([^,()]*,#{SS}&?#{SS}\z/) }
+          next unless calls_here >= 1 && cb_occ.count == 1 + calls_here
         end
         pars = split_args(masked, d[0]['po'], d[0]['pc']).map { |a2, b2| [a2, b2, psl(text, a2, b2)] }
         out << { rel: rel, s: s, e: close + 1, h: h, cb: cb, fe: fe_name,
@@ -3831,7 +3832,10 @@ use_problem = lambda do |name, use|
         next unless is_value
         next if in_dead_init(rel, m.begin(1))
         next if @edits[rel].overlaps(m.begin(1), m.begin(1) + 1)
-        refuse(rel, m.begin(1), field ? "#{base}->#{field}" : base, "stuck point (VALUE truth test): if tests #{field ? "#{base}->#{field}" : base}, a VALUE (a struct in the fork, include/mruby/boxing_no.h); CRuby's nonzero word is true for nil too, which has no exact struct test")
+        # CRuby's if (v) is true for every word but Qfalse (0), so nil is true: mrb_false_p is the same test on the struct (false only)
+        @edits[rel].add(m.begin(1), m.begin(1), '!mrb_false_p(')
+        @edits[rel].add(m.end(1), m.end(1), ')')
+        rewrite(rel, m.begin(1), field ? "#{base}->#{field}" : base, "!mrb_false_p(...)", 'if (v) on a VALUE: CRuby is true for every word but Qfalse, so nil is true; !mrb_false_p is that test (false only)')
       end
       # if (f(...)) of a VALUE-returning function: the whole condition is that VALUE
       mv.to_enum(:scan, /(?<![#{WC}])if\s*\(\s*([A-Za-z_]\w*)\s*\(/).each do
