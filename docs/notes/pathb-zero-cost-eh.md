@@ -77,7 +77,13 @@ conditional flag) before the back end runs, so a temporary's cleanup cannot be w
 `throw()` and `noexcept` are both `(eh-noexcept)`: a call with no pad has no call-site entry, so an exception that
 reaches it calls `std::terminate`, and a pad of such a function cleans up and then calls it. With `(eh-spec ...)`
 every state has a pad, so the specification's filter (the last record of each action chain) is seen; the pad calls
-`__cxa_call_unexpected` on a negative selector.
+`__cxa_call_unexpected` on a negative selector, in the default state: an exception the unexpected handler throws that
+the specification allows leaves the function from that call (`tests/pathb-eh-tables/cases/spec_unexpected_rethrow.cpp`).
+
+A full expression's temporaries (each a region with a flag) are chained in the order EDG builds them, under one region
+set before the expression; the pad destroys such a run of conditional regions backwards, so an exception destroys them
+in the reverse order of their construction, as [except.ctor] says
+(`tests/pathb-eh-tables/cases/arg_temporaries_order.cpp`).
 
 ### The SSA builder (`scripts/pathb-ssa.rb`)
 
@@ -166,17 +172,17 @@ cleanups compared with g++'s output: conditional temporaries, `new` with a throw
 and objects, a local static whose initializer throws, temporaries of a full expression; exceptions across g++-compiled
 code in both directions; `noexcept`; the forced unwind of `pthread_exit` and `pthread_cancel` and a foreign
 exception, through pads and `catch (...)`; the nothrow callees), and the EH probes of the frames mode (`tests/pathb-qbe/{cases,traps}/eh_*.cpp`,
-`tests/cases/eh_*.cpp`; with `--all`, every program of `tests/pathb-qbe/cases` and `tests/cases`: 197, all pass), and
+`tests/cases/eh_*.cpp`; with `--all`, every program of `tests/pathb-qbe/cases` and `tests/cases`: 199, all pass), and
 inlined callees with pads (two copies in a caller, a copy inside a copy, a catch that
 rethrows from a copy, destructors with pads inlined into a pad, a `noexcept` copy). 21 programs, all pass, through the
 IR passes, the e-graph pass and QBE's optimizations.
 
 ## Known gaps
 
-- A dynamic exception specification of a pointer type is refused (unsupported): EDG makes no typeinfo of the pointer
-  type itself for it.
-- When an exception leaves a full expression that built argument temporaries, EDG destroys them in construction order,
-  not in reverse. The frames mode does the same (it is EDG's region table), so this is no change.
+- A dynamic exception specification of a pointer type is refused (unsupported) when nothing else in the unit makes the
+  pointer type's typeinfo (a `catch` of it does): EDG makes none for the specification alone.
+- The frames mode destroys a full expression's temporaries in construction order when an exception leaves it (EDG's
+  runtime walks the region chain as it is); the pads run such a run backwards (below).
 - Targets: tested on x86-64 Linux; QBE's arm64 emitter marks call sites and pads too (CI's arm64 Linux job runs it).
   A macOS host builds a frames harness by default: ld64 reads no linker script, so `scripts/pathb-ldrt.rb` cannot put
   libc++abi ahead of the `libC.a` the links name (its C++ ABI members would win), and QBE's Mach-O tables are untested.

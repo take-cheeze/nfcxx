@@ -1593,18 +1593,16 @@
     (eval (call void &"__cxa_end_catch"))
     (goto "eh.x")
     (label "eh.c.1.0")
-    (let %22 int (load int $"tmp.1"))
+    (let %22 int (load int $"tmp"))
     (let %23 bool (ne int %22 (const int 0)))
     (if %23
       (then
-        (eval (call void &"_ZNSt15__exception_ptr13exception_ptrD1Ev" $"tmp.2"))))
-    (goto "eh.c.3.0")
-    (label "eh.c.3.0")
-    (let %24 int (load int $"tmp"))
+        (eval (call void &"_ZNSt15__exception_ptr13exception_ptrD1Ev" $"tmp.4"))))
+    (let %24 int (load int $"tmp.1"))
     (let %25 bool (ne int %24 (const int 0)))
     (if %25
       (then
-        (eval (call void &"_ZNSt15__exception_ptr13exception_ptrD1Ev" $"tmp.4"))))
+        (eval (call void &"_ZNSt15__exception_ptr13exception_ptrD1Ev" $"tmp.2"))))
     (goto "eh.c.0.0")))
 
 (function "_ZN38_INTERNAL_20_eh_exception_ptr_cpp_main15capture_runtimeEPKc"
@@ -6804,18 +6802,16 @@
     (eval (call void &"__cxa_end_catch"))
     (goto "eh.c.116.0")
     (label "eh.c.126.0")
-    (let %1477 int (load int $"tmp.76"))
+    (let %1477 int (load int $"tmp.75"))
     (let %1478 bool (ne int %1477 (const int 0)))
     (if %1478
       (then
-        (eval (call void &"_ZNSt15__exception_ptr13exception_ptrD1Ev" $"tmp.77"))))
-    (goto "eh.c.128.0")
-    (label "eh.c.128.0")
-    (let %1479 int (load int $"tmp.75"))
+        (eval (call void &"_ZNSt15__exception_ptr13exception_ptrD1Ev" $"tmp.79"))))
+    (let %1479 int (load int $"tmp.76"))
     (let %1480 bool (ne int %1479 (const int 0)))
     (if %1480
       (then
-        (eval (call void &"_ZNSt15__exception_ptr13exception_ptrD1Ev" $"tmp.79"))))
+        (eval (call void &"_ZNSt15__exception_ptr13exception_ptrD1Ev" $"tmp.77"))))
     (goto "eh.c.125.0")
     (label "eh.f.48")
     (let %1481 long (load long $"eh.sel"))
@@ -6839,18 +6835,16 @@
     (eval (call void &"__cxa_end_catch"))
     (goto "eh.c.116.0")
     (label "eh.c.133.0")
-    (let %1485 int (load int $"tmp.84"))
+    (let %1485 int (load int $"tmp.83"))
     (let %1486 bool (ne int %1485 (const int 0)))
     (if %1486
       (then
-        (eval (call void &"_ZNSt15__exception_ptr13exception_ptrD1Ev" $"tmp.85"))))
-    (goto "eh.c.135.0")
-    (label "eh.c.135.0")
-    (let %1487 int (load int $"tmp.83"))
+        (eval (call void &"_ZNSt15__exception_ptr13exception_ptrD1Ev" $"tmp.87"))))
+    (let %1487 int (load int $"tmp.84"))
     (let %1488 bool (ne int %1487 (const int 0)))
     (if %1488
       (then
-        (eval (call void &"_ZNSt15__exception_ptr13exception_ptrD1Ev" $"tmp.87"))))
+        (eval (call void &"_ZNSt15__exception_ptr13exception_ptrD1Ev" $"tmp.85"))))
     (goto "eh.c.132.0")))
 
 (function "_ZZN9__gnu_cxx6__stoaIlicJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC1Ev"

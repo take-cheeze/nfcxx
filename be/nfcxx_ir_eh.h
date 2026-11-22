@@ -426,6 +426,24 @@ static void ir_eh_node_want(unsigned long r, ir_eh_frame *f)
   ir_eh_nnode++;
 }
 
+/* A run of temporaries: the regions from r on (up to bound) whose cleanups are conditional (each a temporary of a full
+   expression, with its flag). EDG sets one region before it evaluates the expression and chains its temporaries in the
+   order they are built, the flags saying which are; an exception destroys them in the reverse order ([except.ctor], as
+   gcc does), so a run is one node that runs the cleanups backwards. The regions of the run go into run (at most
+   IR_EH_MAXRUN; a longer run is cut), and the number is returned (1: r alone). */
+#define IR_EH_MAXRUN 64
+static int ir_eh_run(unsigned long r, unsigned long bound, unsigned long *run)
+{
+  int n = 0;
+  while (n < IR_EH_MAXRUN && r != bound && r != null_eh_region_number && r < (unsigned long)ir_eh_nrt &&
+         (ir_eh_rt[r].flags & IR_RDF_CONDITIONAL_FLAG) && !ir_eh_is_destroy_exc(ir_eh_rt[r].rout)) {
+    run[n++] = r;
+    r = ir_eh_rt[r].next;
+  }
+  if (n == 0) run[n++] = r;
+  return n;
+}
+
 /* Pad n's action chain (its catch clauses' type ids, in order) and whether it cleans up; the nodes it reaches are
    wanted. 0 when the chain is malformed. */
 static int ir_eh_pad_walk(int n, int *types, int *ntypes, int *cleanup)
@@ -438,10 +456,13 @@ static int ir_eh_pad_walk(int n, int *types, int *ntypes, int *cleanup)
   for (;;) {
     unsigned long bound = f != NULL ? f->entry_region : null_eh_region_number;
     while (r != bound && r != null_eh_region_number) {
+      unsigned long run[IR_EH_MAXRUN];
+      int nr;
       if (guard++ > 100000 || r >= (unsigned long)ir_eh_nrt) return 0;
       ir_eh_node_want(r, f);
       *cleanup = 1;
-      r = ir_eh_rt[r].next;
+      nr = ir_eh_run(r, bound, run);
+      r = ir_eh_rt[run[nr - 1]].next;
     }
     if (f == NULL) break;
     ir_eh_node_want(f->entry_region, f);
@@ -468,6 +489,9 @@ static int ir_eh_node_code(ir_eh_node *nd)
       ir_line(ir_depth, ir_fmt("(if %s", ir_let("bool", ir_fmt("(lt.s long %s (const long 0))", sel))));
       ir_line(ir_depth + 1, "(then");
       ir_depth += 2;
+      /* in the default state, not the pads' std::terminate: an exception the unexpected handler throws that the
+         specification allows leaves the function from this call (__cxa_call_unexpected rethrows it), as gcc's */
+      ir_emit("(eh-state 0)");
       ir_emit(ir_fmt("(eval (call void &\"__cxa_call_unexpected\" %s))",
                      ir_let("(ptr void)", ir_fmt("(load (ptr void) %s)", ir_eh_exc_slot()))));
       ir_emit("(unreachable)");
@@ -494,10 +518,13 @@ static int ir_eh_node_code(ir_eh_node *nd)
     ir_line(ir_depth, ir_fmt("(goto \"%s\")", ir_eh_node_label(f->entry_region, f->parent)));
     return 1;
   }
-  if (!ir_eh_cleanup((int)nd->r)) return 0;
   {
-    unsigned long next = ir_eh_rt[nd->r].next;
+    unsigned long run[IR_EH_MAXRUN], next;
     unsigned long bound = f != NULL ? f->entry_region : null_eh_region_number;
+    int nr = ir_eh_run(nd->r, bound, run), j;
+    for (j = nr - 1; j >= 0; j--)
+      if (!ir_eh_cleanup((int)run[j])) return 0;
+    next = ir_eh_rt[run[nr - 1]].next;
     if (next == null_eh_region_number) next = bound; /* the chain ends: the frame's node, or the end */
     ir_line(ir_depth, ir_fmt("(goto \"%s\")", ir_eh_node_label(next, f)));
   }

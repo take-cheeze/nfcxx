@@ -4891,25 +4891,21 @@
     (store long $"eh.sel" %16)
     (goto "eh.c.7.0")
     (label "eh.c.0.0")
-    (let %17 int (load int $"tmp.3"))
+    (let %17 int (load int $"tmp.1"))
     (let %18 bool (ne int %17 (const int 0)))
     (if %18
       (then
-        (eval (call void &"_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEED1Ev" $"tmp.6"))))
-    (goto "eh.c.2.0")
-    (label "eh.c.2.0")
+        (eval (call void &"_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEED1Ev" $"tmp.8"))))
     (let %19 int (load int $"tmp.2"))
     (let %20 bool (ne int %19 (const int 0)))
     (if %20
       (then
         (eval (call void &"_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEED1Ev" $"tmp.5"))))
-    (goto "eh.c.4.0")
-    (label "eh.c.4.0")
-    (let %21 int (load int $"tmp.1"))
+    (let %21 int (load int $"tmp.3"))
     (let %22 bool (ne int %21 (const int 0)))
     (if %22
       (then
-        (eval (call void &"_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEED1Ev" $"tmp.8"))))
+        (eval (call void &"_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEED1Ev" $"tmp.6"))))
     (goto "eh.x")
     (label "eh.x")
     (let %23 (ptr void) (load (ptr void) $"eh.exc"))
