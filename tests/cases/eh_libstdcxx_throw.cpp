@@ -75,44 +75,19 @@ int main()
   std::variant<int, double> var(1);
   CHECK(kind([&] { (void)std::get<double>(var); }) == 12);
 
-  // by base class. The message texts are libstdc++'s: libc++ words its messages differently, so they are checked only
-  // with libstdc++ (__GLIBCXX__); the type checks run on either library.
+  // by base class, with the message of the library
   try { (void)v.at(7); CHECK(false); }
-  catch (const std::exception &e) {
-#ifdef __GLIBCXX__
-    CHECK(std::strstr(e.what(), "vector::_M_range_check") != nullptr);
-#else
-    (void)e;
-#endif
-  }
+  catch (const std::exception &e) { CHECK(std::strstr(e.what(), "vector::_M_range_check") != nullptr); }
   try { (void)std::stoi("x"); CHECK(false); }
-  catch (const std::logic_error &e) {
-#ifdef __GLIBCXX__
-    CHECK(std::strcmp(e.what(), "stoi") == 0);
-#else
-    (void)e;
-#endif
-  }
+  catch (const std::logic_error &e) { CHECK(std::strcmp(e.what(), "stoi") == 0); }
   try { f(); CHECK(false); }
-  catch (const std::exception &e) {
-#ifdef __GLIBCXX__
-    CHECK(std::strcmp(e.what(), "bad_function_call") == 0);
-#else
-    (void)e;
-#endif
-  }
+  catch (const std::exception &e) { CHECK(std::strcmp(e.what(), "bad_function_call") == 0); }
 
   // exceptions raised inside libstdc++.so itself, with frames of the library between throw and catch
   try { std::string big; big.resize(big.max_size() + 1); CHECK(false); }
   catch (const std::length_error &) { }
   try { std::basic_string<char> t("abc"); t.replace(10, 1, "x"); CHECK(false); }
-  catch (const std::out_of_range &e) {
-#ifdef __GLIBCXX__
-    CHECK(std::strstr(e.what(), "basic_string::replace") != nullptr);
-#else
-    (void)e;
-#endif
-  }
+  catch (const std::out_of_range &e) { CHECK(std::strstr(e.what(), "basic_string::replace") != nullptr); }
 
   // destructors of the frames between the throw and the handler that EDG's runtime knows about run
   int guards = 0;

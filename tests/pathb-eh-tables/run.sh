@@ -64,6 +64,11 @@ run_one() { # SRC trap|case
   name=${f#tests/}; n=$tmp/$(echo "$name" | tr '/' '_' | sed 's/\.cpp$//')
   skip=$(sed -n 's,^// TABLES-SKIP: *,,p' "$f" | head -1)
   if [ -n "$skip" ]; then skipped=$((skipped + 1)); lines+=("SKIP     $name: $skip"); return; fi
+  # a documented macOS-only failure (its marker, as tests/run.sh reads it): skipped on Darwin, and said so
+  if [ "$(uname -s)" = Darwin ]; then
+    xf=$(sed -n 's,^// MACOS-XFAIL-pathb: *,,p' "$f" | head -1)
+    if [ -n "$xf" ]; then skipped=$((skipped + 1)); lines+=("SKIP     $name (macOS): $xf"); return; fi
+  fi
   if ! msg=$(build "$f" "$n"); then failed=$((failed + 1)); lines+=("FAIL     $name: $msg"); return; fi
   sh -c "${tmo}"'"$0" > "$1" 2> "$2"; exit $?' "$n.exe" "$n.stdout" "$n.stderr"; got=$?
   if [ "$mode" = trap ]; then want=134; else want=$(sed -n 's,^// EXPECT: *\(-*[0-9]*\).*,\1,p' "$f" | head -1); fi
