@@ -238,14 +238,13 @@ class Cfg
     # it); its code runs in the :term state; it ends in a handler's label, std::terminate, (eh-resume EXC) or, for a pad of
     # an inlined callee (eh-outer K: the copy K, scripts/pathb-ir-opt.rb), (eh-resume-outer K EXC).
     @pad_forms = pads.to_h { |p| [p[1], p] }
+    @spec_pads = spec_pads
     @in_pads = true
     pads.each do |p|
       b = new_block
       @blocks[b].eh = :term
       @blocks[b].reached = true
-      @blocks[b].instrs << ["eh-pad"]   # its action chain: below, once every copy's entry state is known
-      # (eh-spec-pad N ID...): the pad's own exception specification, its filter ends the chain (qbe ehspecpad)
-      @blocks[b].instrs << ["eh-spec-pad", *spec_pads[p[1].to_s]] if spec_pads.key?(p[1].to_s)
+      @blocks[b].instrs << ["eh-pad"]   # its action chain and specification lists: below, once every copy's entry state is known
       @eh_text = :term
       @pad_block ||= {}
       @pad_block[p[1]] = b
@@ -276,8 +275,11 @@ class Cfg
       end
     end
     (@pad_block || {}).each do |id, b|
-      cl, types = pad_actions(id, {})
+      lists = []
+      cl, types = pad_actions(id, {}, lists)
       @blocks[b].instrs[0] = ["eh-pad", cl, *types]
+      # (eh-spec-pad K ID...): the pad's list K, its filter is the chain's -K (qbe ehspecpad K)
+      lists.each_with_index { |ids, i| @blocks[b].instrs.insert(1 + i, ["eh-spec-pad", i + 1, *ids]) }
     end
     @blocks[0].term = ["eh-entry", 1, *@pad_block.values] unless pads.empty?
     # a jump to a label no (label) statement defines would become an empty block that ends in unreachable
@@ -334,19 +336,24 @@ class Cfg
   # The state an inlined copy K was entered in (eh-inline-begin K): its callee's state 0 and its pads' resume go there.
   def outer_of(k) = (@inline_outer || {})[k] || 0
 
-  # Pad id's cleanup flag and action chain: its own, and for an inlined callee's pad what the pad of the state the copy
-  # was entered in adds after it (the exception goes on there).
-  def pad_actions(id, seen)
+  # Pad id's cleanup flag and action chain: its own clauses, then its own specification's filter (-K: its list K, appended to
+  # lists), and for an inlined callee's pad what the pad of the state the copy was entered in adds after them (the exception
+  # goes on there, past that pad's filter too).
+  def pad_actions(id, seen, lists)
     p = @pad_forms.fetch(id) { raise Fail, "no landing pad #{id}" }
     cl = p[2]
     types = p[3].dup
+    if (ids = @spec_pads[id.to_s])
+      lists << ids
+      types << -lists.size
+    end
     if head(p[4]) == "eh-outer" && !seen[id]
       seen[id] = true
       o = outer_of(p[4][1])
       if o == :term
         cl = "1"
       elsif o.is_a?(Integer) && o > 0
-        ocl, otypes = pad_actions(o.to_s, seen)
+        ocl, otypes = pad_actions(o.to_s, seen, lists)
         types += otypes
         cl = "1" if ocl == "1"
       end

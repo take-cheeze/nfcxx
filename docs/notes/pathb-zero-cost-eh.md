@@ -122,9 +122,10 @@ assigns without the call's location). In a function with pads GVN merges only in
 ### QBE (`take-cheeze/qbe`, branch `nfcxx/eh-tables`)
 
 - `ehtype ID $sym | ehtype ID 0`, `ehnoexcept`, `ehspec ID...`, `ehpad CLEANUP ID...`, `ehunwind @pad | ehunwind 0`
-  (std::terminate), `ehnothrow $sym...` (callees that let no exception out), `ehspecpad @pad ID...` (a landing pad's own
-  specification: its action chain ends with that list's filter instead of the function's `ehspec`; the lists follow the
-  function's after `.LEHTT`, and the filter is `.LEHTT - list - 1`, so a pad's list is found at its offset as gcc's do).
+  (std::terminate), `ehnothrow $sym...` (callees that let no exception out), `ehspecpad @pad K ID...` (list K of a landing
+  pad's own specifications; a negative `ehpad` entry -K is that list's filter, at its place in the chain; the lists follow the
+  function's after `.LEHTT`, and a filter is `.LEHTT - list - 1`, so a list is found at its offset as gcc's do; a pad without
+  lists ends its chain with the function's `ehspec` filter).
 - A call site of the LSDA has its block's pad and the pad's action chain, no pad (the exception passes through), or no
   entry (std::terminate). As gcc's, one site covers consecutive calls with the same pad when no call without an entry
   comes between them, and a call of an `ehnothrow` callee has no entry and sits inside any range. It has an action table, a type table with `DW.ref` indirections and the
@@ -189,17 +190,21 @@ before: its calls get the state of the call site.
 
 A callee whose filter is needed in the copy (`spec_inlinable?` fails: a throw of another type, a call of a function
 that can throw, a rethrow, a destructor on the way out) is still inlined (`spec_copyable?`, scripts/pathb-ir-opt.rb) when
-the caller can take a filter of its own: no catch clause on its pads (`eh[:caught]`), no filter already (its own
-specification, or a copy's `eh-spec-pad`: `eh[:filtered]`). A call of a module function in the callee stays a call in the copy,
+the caller has no specification of its own (`eh[:filtered]`: a function-level `eh-spec`, whose filter is not in the chains
+of the copy's pads). A call of a module function in the callee stays a call in the copy,
 or is inlined into it later: either way the copy's pads filter what it lets out. The copy keeps its pads, and each carries the callee's list as
 an `(eh-spec-pad PAD ID...)` form, which the SSA builder writes as `ehspecpad` (QBE): the pad's action chain is its own
-clauses, then that filter (a mismatch calls `__cxa_call_unexpected` in the personality), then its cleanup. The pads of such
-a copy resume into the caller's state, which does not re-check a filter, hence the conditions. A non-spec copy inside
+clauses, then that filter (a mismatch calls `__cxa_call_unexpected` in the personality), then the clauses of the state the
+copy was entered in and that state's own filters, then its cleanup. An action record of a filter is `-K` in the pad's `ehpad`
+list, its list is `ehspecpad @pad K ID...` (QBE), so a pad can have one per copy it is nested in, in order. A non-spec copy inside
 such a copy takes the copy's list (`eh[:own]`). `tests/pathb-eh-tables/cases/inline_spec_filter.cpp` checks it against g++.
 `tests/pathb-eh-tables/cases/inline_spec_module_call.cpp` checks a callee that calls a variadic module function (never inlined)
 and one that calls a small one (inlined into the copy later), against g++.
-Still refused (gap 11, the rest): a copy under a caller's `try` (`eh[:caught]`) or filter, and a noexcept callee with a list. Two filters on one chain (a copy inside a copy with its own list, or a
-pad that resumes into one) are not expressible yet: QBE's chain has one filter, at its end.
+A copy under a caller's `try` or clauses is inlined too: the copy's filter comes before them in the chain, so an exception
+the callee does not allow goes to std::unexpected and not to a caller's handler (`inline_spec_caught.cpp`). A copy inside a copy
+with a list of its own has both filters on its chain, in order (`inline_spec_nested.cpp`). A noexcept callee whose copies carry
+lists is inlined: its terminate pad comes after them (`inline_noexcept_spec*.cpp`, `traps/inline_noexcept_spec_*.cpp`).
+Still refused: a copy with a list under a caller with a function-level dynamic specification (`eh[:filtered]`).
 
 ## Tests
 

@@ -364,7 +364,7 @@ end
 # A callee with a dynamic exception specification that spec_inlinable? refuses is still inlined, as a copy that keeps its landing
 # pads, each with the callee's list (eh-spec-pad; QBE's ehspecpad: the pad's action chain ends with that filter, which the
 # personality checks). Its pads resume into the caller's state, and the caller's filter is not checked there, so expand_call
-# inlines it only where the caller can take no filter of its own (eh[:caught], eh[:filtered]). A call of a module function that is
+# inlines it only where the caller has no filter of its own (eh[:filtered]); its filter precedes the caller's catch clauses. A call of a module function that is
 # still a call in the copy is covered by the copy's pads (its exception is filtered there, as one of the callee's), and a
 # function inlined into the copy later gets the same pads. The specification must name its types, and the callee must not be noexcept.
 def spec_copyable?(fn)
@@ -563,12 +563,11 @@ def expand_call(s, fns, st)
   # A tier of the pass takes only callees up to its cap: the small ones are inlined everywhere before the budget goes to big ones.
   return nil if st[:cap] && st[:tc].fetch(fn) { st[:tc][fn] = node_cost(fn) } > st[:cap]
   info = st[:ic].fetch(cname) { st[:ic][cname] = callee_info(fn) }
-  # A copy with its own filter (callee_info: eh[:own]) needs a caller whose pads have no filter and no catch clause (spec_copyable?:
-  # the pads of such a copy resume into the caller's state, which would not check the caller's filter or a catch of it).
+  # A copy with its own filter (callee_info: eh[:own]) needs a caller with no specification of its own (eh[:filtered]: its
+  # function-level filter is not in the action chains of the copy's pads, which resume into the caller's state). The caller's
+  # catch clauses and the filters of its copies are no obstacle: the chains of the copy's pads take them after its own filter.
   if info[:eh] && info[:eh][:own]
-    why = if st[:eh][:caught] then "under a catch"
-          elsif st[:eh][:filtered] then "under a filter"
-          end
+    why = if st[:eh][:filtered] then "under the caller's dynamic exception specification" end
     if why
       key = "dynamic exception specification #{why}"
       st[:refused][key] = (st[:refused][key] || 0) + 1
@@ -700,9 +699,7 @@ def eh_inline(eh, out, map, st, k, hoisted)
     ids = eh[:specs][p[1]] || eh[:own]
     if ids
       ce[:spec_pads] << ["eh-spec-pad", pmap[p[1]], *ids.map { |x| tidmap.fetch(x, x) }]
-      ce[:filtered] = true
     end
-    ce[:caught] = true unless p[3].empty?
   end
   ce[:changed] = true
   body = eh_renumber(out, pmap, tidmap, zero)
@@ -871,8 +868,7 @@ def inline_pass(forms, max_depth, report)
       st = { next: ids.fetch(f) { ids[f] = max_id(f) } + 1, k: counter[:k], hoist: [], inlined: 0, caller_size: node_cost(f), refused: refused, rc: reasons,
              ic: infos, attrs: attrs, attr_from: [], over: over, tc: tiny_costs, cap: cap, section: section_of(f),
              eh: { types: ehty ? ehty.drop(1) : [], pads: [], spec_pads: [], changed: false, need_slots: false,
-                   caught: f.any? { |x| head(x) == "eh-pad" && x[3].is_a?(Array) && !x[3].empty? },
-                   filtered: f.any? { |x| head(x) == "eh-spec" || head(x) == "eh-spec-pad" },
+                   filtered: f.any? { |x| head(x) == "eh-spec" },
                    next_pad: f.select { |x| head(x) == "eh-pad" }.map { |x| x[1].to_i }.max || 0 } }
       children = rewrite(f.drop(2), fns, st)
       children = eh_write_back(children, st) if st[:eh][:changed]
