@@ -204,7 +204,18 @@ def fn_of(form)
          form[2..].reject { |x| (%w[ret params slot eh-pad] + FN_ATTR_HEADS + [PAD_SPEC_HEAD]).include?(head(x)) },
          form[2..].select { |x| FN_ATTR_HEADS.include?(head(x)) },
          form[2..].select { |x| head(x) == "eh-pad" },
-         form[2..].select { |x| head(x) == PAD_SPEC_HEAD }.to_h { |x| [x[1].to_s, x[2..]] })
+         form[2..].select { |x| head(x) == PAD_SPEC_HEAD }.group_by { |x| x[1].to_s }.transform_values { |xs| xs.map { |x| x[2..] } })
+end
+
+# The caller's own dynamic exception specification as the tail of the action chains of an inlined copy's pads (see build):
+# [its type ids, the type id of catch (...)], or nil. A function with a specification has no pads of its own that need it:
+# QBE's ehspec filter ends their chains.
+def fn_spec_tail(fn)
+  spec = fn.attrs.find { |x| head(x) == "eh-spec" }
+  return nil unless spec
+  types = fn.attrs.find { |x| head(x) == "eh-types" }
+  all = types ? types[1..].each_with_index.select { |t, _| !t.is_a?(Ref) && t.to_s == "0" }.map { |_, i| (i + 1).to_s }.first : nil
+  [spec[1..], all]
 end
 
 # ---- structured IR to basic blocks ----------------------------------------------------------------------------------
@@ -222,7 +233,7 @@ class Cfg
     @switches = []  # { cases: [[value, block]], default: block or nil } for each enclosing switch
   end
 
-  def build(body, void, pads = [], spec_pads = {})
+  def build(body, void, pads = [], spec_pads = {}, fn_spec = nil)
     entry = new_block
     @blocks[entry].eh = 0
     @blocks[entry].reached = true
@@ -239,6 +250,7 @@ class Cfg
     # an inlined callee (eh-outer K: the copy K, scripts/pathb-ir-opt.rb), (eh-resume-outer K EXC).
     @pad_forms = pads.to_h { |p| [p[1], p] }
     @spec_pads = spec_pads
+    @fn_spec = fn_spec
     @in_pads = true
     pads.each do |p|
       b = new_block
@@ -277,6 +289,21 @@ class Cfg
     (@pad_block || {}).each do |id, b|
       lists = []
       cl, types = pad_actions(id, {}, lists)
+      # The caller's own specification (a function with one) is the last filter of a copy's chain, as QBE's ehspec is that of
+      # the function's own pads. A pad with a list of its own has no ehspec of QBE's: its chain gets the filter here, unless it
+      # ends in a terminate state (its outer state is one: an exception that leaves it calls std::terminate, so the chain's last
+      # record is catch (...)).
+      p = @pad_forms[id]
+      if @fn_spec && head(p[4]) == "eh-outer"
+        ids, catch_all = @fn_spec
+        if outer_of(p[4][1]) == :term
+          raise Fail, "a function with a dynamic exception specification has no catch (...) type" unless catch_all
+          types << catch_all
+        elsif !lists.empty?
+          lists << ids
+          types << -lists.size
+        end
+      end
       @blocks[b].instrs[0] = ["eh-pad", cl, *types]
       # (eh-spec-pad K ID...): the pad's list K, its filter is the chain's -K (qbe ehspecpad K)
       lists.each_with_index { |ids, i| @blocks[b].instrs.insert(1 + i, ["eh-spec-pad", i + 1, *ids]) }
@@ -343,7 +370,7 @@ class Cfg
     p = @pad_forms.fetch(id) { raise Fail, "no landing pad #{id}" }
     cl = p[2]
     types = p[3].dup
-    if (ids = @spec_pads[id.to_s])
+    (@spec_pads[id.to_s] || []).each do |ids|
       lists << ids
       types << -lists.size
     end
@@ -560,7 +587,7 @@ class Converter
     @fn = fn
     @void = fn.ret[1] == "void"
     @promoted, twice = promotable_slots(fn)
-    cfg = Cfg.new.build(fn.body, @void, fn.pads || [], fn.spec_pads || {})
+    cfg = Cfg.new.build(fn.body, @void, fn.pads || [], fn.spec_pads || {}, fn_spec_tail(fn))
     @cfg = cfg.blocks
     # The landing pads: the unwinder enters them from the calls of the blocks whose state names them. There is no edge from
     # a call to its pad, so for the analysis each pad is a successor of the entry (it is dominated by it, and no value of the
