@@ -807,7 +807,7 @@ class CodeGen
   end
 
   def emit_rescue_try_body(try_name, region, irep, d, arg_names, arg_native_types, extra_fields: [],
-                           available_upvars: [], inline_mand: nil)
+                           available_upvars: [], inline_mand: nil, fn_prefix: nil)
     ctx_struct = "#{try_name}_Ctx"
     ctx_fields = ['mrb_value self'] + arg_names.each_with_index.map { |a, i| "#{native_c_type(arg_native_types[i])} #{a}" } +
                  extra_fields.map { |f| "#{f[:c_type]} #{f[:name]}" }
@@ -852,7 +852,10 @@ class CodeGen
     nested_block_regions = recognize_block_fallback_regions(irep, available_upvars: available_upvars)
                            .select { |r| range.cover?(r[:block_addr]) }
     nested_arg_regions = recognize_explicit_block_arg_regions(irep).select { |r| range.cover?(r[:sendb_addr]) }
-    out << emit_block_fallback_glue_pass(nested_block_regions, nested_arg_regions, d, local_suppressed, local_glue_at)
+    # A try body of a block's own rescue names its blocks under that block's fn_name (`fn_prefix`), as the block's
+    # nested pass does: their block_addr lives in the block irep, and would collide with the method's own blocks.
+    out << emit_block_fallback_glue_pass(nested_block_regions, nested_arg_regions, d, local_suppressed, local_glue_at,
+                                         fn_prefix: fn_prefix)
 
     # NESTED_RESCUE_SUPPORT: each direct child region gets its own further-nested
     # try body. Its begin_addr is reached after arbitrary code in this body, so
@@ -877,7 +880,7 @@ class CodeGen
       nested_extra_values = nested_extra_fields.map { |f| f[:value] || f[:name].sub('bc2cpp_saved_', '') }
       out << emit_rescue_try_body(nested_try_name, nregion, irep, d, [], [], extra_fields: nested_extra_fields,
                                                                             available_upvars: available_upvars,
-                                                                            inline_mand: inline_mand)
+                                                                            inline_mand: inline_mand, fn_prefix: fn_prefix)
       local_glue_at[nregion[:begin_addr]] =
         emit_rescue_glue(nested_try_name, nregion, [], [], extra_field_values: nested_extra_values)
     end

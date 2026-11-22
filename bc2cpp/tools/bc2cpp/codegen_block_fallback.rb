@@ -1207,7 +1207,8 @@ class CodeGen
       extra_fields += cell_args.map { |name| { name: name, c_type: 'mrb_value' } }
       saved = rescue_entry_saved_fields(block_irep, rregion)
       nested_pre << emit_rescue_try_body(try_name, rregion, block_irep, d, arg_names, Array.new(arg_names.size),
-                                          extra_fields: extra_fields + saved, available_upvars: upvar_regs)
+                                          extra_fields: extra_fields + saved, available_upvars: upvar_regs,
+                                          fn_prefix: fn_name)
       nested_glue_at[rregion[:begin_addr]] =
         emit_rescue_glue(try_name, rregion, arg_names, Array.new(arg_names.size),
                          extra_field_values: extra_fields.map { |f| f[:name] } +
@@ -2018,12 +2019,12 @@ class CodeGen
   # suppress-and-glue pass, used by compile_method and emit_rescue_try_body.
   # Takes recognized region lists (the caller chooses the scope), mutates the
   # caller's suppressed/glue_at, and returns the nested-function pre-code.
-  def emit_block_fallback_glue_pass(block_regions, explicit_arg_regions, d, suppressed, glue_at, irep: nil)
+  def emit_block_fallback_glue_pass(block_regions, explicit_arg_regions, d, suppressed, glue_at, irep: nil, fn_prefix: nil)
     pre = String.new
     block_regions.each do |region|
       next if suppressed.include?(region[:block_addr]) || suppressed.include?(region[:sendb_addr])
 
-      fn_result = emit_proc_fallback_fn(region, d) || step_only_block_fn(region, d)
+      fn_result = emit_proc_fallback_fn(region, d, fn_prefix) || (fn_prefix ? nil : step_only_block_fn(region, d))
       next unless fn_result
 
       fn_name, fn_code = fn_result
