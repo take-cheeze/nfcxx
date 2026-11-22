@@ -36,8 +36,10 @@ module ShardColocate
 
   # `_impl` names called from outside the gem's text that the generator knows of (the entry header's); bc2cpp.rb
   # sets them before the split. Their originals stay referenced, so a copy would only add code.
+  # SHARD_COLOCATE_GUARDS: the parameter guard markers every program call site proves
+  # (CodeGen#site_proven_param_guards), which bc2cpp.rb sets before the split.
   class << self
-    attr_accessor :keep
+    attr_accessor :keep, :proven_guards
   end
 
   module_function
@@ -45,6 +47,15 @@ module ShardColocate
   def enabled?(env = ENV)
     env['BC2CPP_SHARD_COLOCATE'] != '0'
   end
+
+  # SHARD_COLOCATE_GUARDS (BC2CPP_SHARD_COLOCATE_GUARDS=0 turns it off): a copy, which only its one program site
+  # calls, leaves out the declared parameter guards that every program site proves. The original keeps them for the
+  # callers outside the program (a by-name send, another gem, a host).
+  def guards_enabled?(env = ENV)
+    env['BC2CPP_SHARD_COLOCATE_GUARDS'] != '0'
+  end
+
+  GUARD_LINE = /\A  if \(mrb_unlikely\(!\(.*\)\)\) bc2cpp_declared_param_violation\(M, [^;]*\); \/\* (DECLARED_PARAM_GUARD \S+ arg \d+) \*\/\n\z/.freeze
 
   # BC2CPP_SHARD_COLOCATE=all also copies a callee whose wrapper is registered. Still sound (the site runs the same
   # text), only larger; a check's fixture, whose methods are all registered, uses it to reach the copies.
@@ -55,9 +66,11 @@ module ShardColocate
   # Rewrites `units` ({owner:, code:}) in place: each root's call points at its copy, the root's unit starts with
   # the copies' declarations, and its :tail holds their definitions, which the split prints after every unit of the
   # shard (where whatever a copy names from its original's unit is defined, or declared by SHARD_DECLS). Returns one
-  # row [callee, root, same-unit|other-unit] per copy.
-  def apply!(prelude, units, hooks, keep = self.keep)
+  # row [callee, root, same-unit|other-unit, guards left out] per copy.
+  def apply!(prelude, units, hooks, keep = self.keep, proven = proven_guards)
     keep = (keep || []).to_set
+    @proven = guards_enabled? ? (proven || []).to_set : Set.new
+    @dropped = {}
     items = index(units)
     defs = items.select { |it| it[:impl] }.to_h { |it| [it[:name], it] }
     return [] if defs.empty?
@@ -90,7 +103,7 @@ module ShardColocate
       unit[:prefix] = (unit[:prefix] || +ATTR) + names.map { |n| "#{copy_head(defs[n])};\n" }.join
       unit[:tail] = (unit[:tail] || +'') + names.map { |n| copy_text(defs[n], hits[defs[n][:key]]) }.join
       names.each do |n|
-        rows << [n, root[:name], defs[n][:unit] == root[:unit] ? 'same-unit' : 'other-unit']
+        rows << [n, root[:name], defs[n][:unit] == root[:unit] ? 'same-unit' : 'other-unit', @dropped[n] || 0]
         # The split's affinity (ShardOutput.colocate_affinity): bytes of copies per original owner.
         (unit[:colo_owners] ||= Hash.new(0))[units[defs[n][:unit]][:owner]] += defs[n][:raw].sum(&:bytesize)
       end
@@ -268,6 +281,9 @@ module ShardColocate
   def copy_text(d, hits)
     lines = d[:raw].dup
     rename!(lines, hits.map { |h| h.merge(line: h[:line] - d[:first]) })
+    kept = lines.reject { |line| (m = line.match(GUARD_LINE)) && @proven.include?(m[1]) }
+    @dropped[d[:name]] = lines.size - kept.size
+    lines = kept
     lines[0] = lines[0].sub(/\A(?:\[\[maybe_unused\]\] )?(?:static )?(?:inline )?/, 'BC2CPP_COLO_ATTR static ')
                        .sub(/(?<![\w$])#{Regexp.escape(d[:name])}(?=\()/, copy_name(d[:name]))
     "\n#{lines.join}"

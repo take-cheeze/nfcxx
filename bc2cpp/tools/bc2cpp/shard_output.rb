@@ -153,7 +153,7 @@ module ShardOutput
     return if rows.empty?
 
     warn "== shard colocate (SHARD_COLOCATE): #{rows.size} single-site callees copied beside " \
-         "#{rows.map { |r| r[1] }.uniq.size} callers =="
+         "#{rows.map { |r| r[1] }.uniq.size} callers, #{rows.sum { |r| r[3] }} site-proven parameter guards left out =="
     return unless (path = ENV['BC2CPP_SHARD_COLOCATE_REPORT']) && !path.empty?
 
     File.open(path, 'a') { |f| rows.each { |r| f.puts([symbol, *r].join("\t")) } }
