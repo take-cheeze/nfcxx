@@ -202,7 +202,9 @@ IR passes, the e-graph pass and QBE's optimizations.
   A macOS host builds a frames harness by default: ld64 reads no linker script, so `scripts/pathb-ldrt.rb` cannot put
   libc++abi ahead of the `libC.a` the links name (its C++ ABI members would win), and QBE's Mach-O tables are untested.
   QBE's rv64 writes no tables, its i386 neither (refused).
-- CIL: exact catch types only, see `docs/notes/pathb-cil.md`.
+- CIL: catch clauses match exact types, public unambiguous non-virtual bases and pointers to them (not virtual bases,
+  not libstdc++ base classes); a throw from a pad's own code does not call std::terminate; dynamic exception
+  specifications are refused. See `docs/notes/pathb-cil.md`, "Catch matching".
 - Debug info: `-g` gives a line table only (`.debug_line`: gdb has the source line of each frame and steps by line, the
   pads too); there is no variable or type information (`.debug_info` describes the compile unit only).
 
