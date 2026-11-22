@@ -334,7 +334,8 @@ module NfcxxSetup
   # the NAME=VALUE statements of a planner's text, as the value the shell reads (the last one of each NAME in NAMES)
   def assigned(text, names)
     values = {}
-    text.each_line do |line|
+    text.each_line do |raw|
+      line = raw.chomp # a line keeps its newline, which the anchored match below must not see
       m = line.match(/\A(#{names.map { |n| Regexp.escape(n) }.join("|")})=(.*)\z/) or next
       values[m[1]] = Shellwords.split(m[2]).first.to_s
     end
