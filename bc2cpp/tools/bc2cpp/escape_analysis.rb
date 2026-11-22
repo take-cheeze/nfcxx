@@ -199,8 +199,9 @@ module EscapeAnalysis
     'has_key?' => { args: [0], recv: %w[hash eql?], files: %w[3rd/mruby/src/hash.c] },
     # Both registrations (profiler.cxx, real and WIO stub) read the name with "S&" (a String; another name is
     # inspected, %Y) or "o&" (a Symbol or a String, else a TypeError naming its class) and copy it into a std::string
-    # key (profiler_section_end); the block is captured by name (block_captured_by_name?).
-    'section' => { args: [0], recv: %w[inspect to_s], files: %w[mruby-rgss/src/profiler.cxx] },
+    # key (profiler_section_end); the block is captured by name (block_captured_by_name?). string_recv: an exact String
+    # passes either form as it is, so it reaches no callback.
+    'section' => { args: [0], recv: %w[inspect to_s], string_recv: [], files: %w[mruby-rgss/src/profiler.cxx] },
     # pack.c reads the template once (prepare_tmpl: mrb_get_args "S" into a stack struct) and builds copies.
     # Only an exact String is proven: other classes reach mrb_ensure_string_type, which inspects them (%Y).
     # A template reaches the element conversions (to_int, to_f) only as an element of the receiver, a store
@@ -341,12 +342,13 @@ module EscapeAnalysis
       @native_names.nil? || @native_names.include?(name)
     end
 
-    # Does every NATIVE_SRCS registration of +name+ sit in one of the +audited+ files (NATIVE_ARG_OK)?
+    # Does every NATIVE_SRCS registration of +name+ sit in one of the +audited+ files (NATIVE_ARG_OK)? A build names
+    # its sources relative to its working directory (../../mruby-rgss/src/...), so each path is expanded first.
     def native_files_audited?(name, audited)
       registered = @native_files&.fetch(name, nil)
       return false if registered.nil? || registered.empty?
 
-      registered.all? { |path| audited.include?(path.delete_prefix("#{NATIVE_ROOT}/")) }
+      registered.all? { |path| audited.include?(File.expand_path(path).delete_prefix("#{NATIVE_ROOT}/")) }
     end
 
     # The ancestry of +klass+ (nil when the tables cannot place it), for native_free_on?.
@@ -1283,7 +1285,8 @@ module EscapeAnalysis
       return false unless @native_arg_busy.add?(name)
 
       begin
-        return false unless entry[:recv].all? { |callback| callback_receiver_ok?(callback, value_class) }
+        recv = value_class == 'String' && entry.key?(:string_recv) ? entry[:string_recv] : entry[:recv]
+        return false unless recv.all? { |callback| callback_receiver_ok?(callback, value_class) }
 
         # The argument is an argument of +callback+ here; that call's receiver is some other value.
         entry.fetch(:arg, []).all? do |callback, pos|
