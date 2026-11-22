@@ -341,7 +341,8 @@ begin
   env["NFCXX_LOOP_STATUS"] = LOOP_RESULT&.first&.to_s
   env["NFCXX_LOOP_STATE"] = LOOP_RESULT&.last
   env["NFCXX_KEEP_INTERMEDIATES"] = "1" if keep
-  owned = { "NFCXX_OWNED_CUDATMP" => Dir.mktmpdir("tmp.", tmproot), "NFCXX_OWNED_TMP" => Dir.mktmpdir("tmp.", tmproot) }
+  owned = { "NFCXX_OWNED_CUDATMP" => Dir.mktmpdir("tmp.", tmproot), "NFCXX_OWNED_TMP" => Dir.mktmpdir("tmp.", tmproot),
+            "NFCXX_OWNED_CTMP" => Dir.mktmpdir("tmp.", tmproot), "NFCXX_OWNED_PTMP" => Dir.mktmpdir("tmp.", tmproot) }
   trace_rb = File.join(__dir__, "trace.rb")
   unless trace_file.empty?
     trace_abs = File.join(File.realpath(File.dirname(trace_file)), File.basename(trace_file))

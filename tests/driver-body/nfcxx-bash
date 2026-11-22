@@ -78,14 +78,16 @@ root=$(cd "$(dirname "$0")" && pwd)
 # root, removed when the run ends). They are read and unset here, so a driver this body re-runs makes its own. When they are not
 # set (the body run alone), the body makes its directories with mktemp -d and removes them in its EXIT traps.
 owned_cudatmp=${NFCXX_OWNED_CUDATMP-}; owned_tmp=${NFCXX_OWNED_TMP-}; unset NFCXX_OWNED_CUDATMP NFCXX_OWNED_TMP
+# NFCXX_OWNED_CTMP and NFCXX_OWNED_PTMP: the C-input and Path B object directories, made by the Ruby driver the same way.
+owned_ctmp=${NFCXX_OWNED_CTMP-}; owned_ptmp=${NFCXX_OWNED_PTMP-}; unset NFCXX_OWNED_CTMP NFCXX_OWNED_PTMP
 # temp_cleanup: removes the driver's temporary directories the EXIT traps name. Each trap calls it, so a later trap (which
 # replaces an earlier one) does not leave the earlier stage's directory behind. The eccp directory is not here: eccp_cleanup
 # removes it, and only when the intermediates are not kept. A directory the Ruby driver owns (cudatmp_owned, tmp_owned) is not
 # removed here: the Ruby driver removes it.
 temp_cleanup() {
   [ -z "${tmp:-}" ] || [ -n "${tmp_owned:-}" ] || rm -rf "$tmp"
-  [ -z "${ptmp:-}" ] || rm -rf "$ptmp"
-  [ -z "${ctmp:-}" ] || rm -rf "$ctmp"
+  [ -z "${ptmp:-}" ] || [ -n "${ptmp_owned:-}" ] || rm -rf "$ptmp"
+  [ -z "${ctmp:-}" ] || [ -n "${ctmp_owned:-}" ] || rm -rf "$ctmp"
   [ -z "${cudatmp:-}" ] || [ -n "${cudatmp_owned:-}" ] || rm -rf "$cudatmp"
   [ -z "${fso_dir:-}" ] || rm -rf "$fso_dir"
 }
@@ -295,7 +297,8 @@ eccp_plan() {  # eccp_plan: the eccp command line (eccp_argv), its exports (eccp
 eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary directory (and of the C-input and .cu steps)
   local rc=$?
   local cudatmp_arg=${cudatmp:-}; [ -z "${cudatmp_owned:-}" ] || cudatmp_arg=   # the Ruby driver removes its own cudatmp
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" cleanup "$keep_intermediates" "$eccp_dir" "$cudatmp_arg" "${ctmp:-}"   # the removals (tests/nfcxx-link/run.sh)
+  local ctmp_arg=${ctmp:-}; [ -z "${ctmp_owned:-}" ] || ctmp_arg=   # nor its own ctmp
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" cleanup "$keep_intermediates" "$eccp_dir" "$cudatmp_arg" "$ctmp_arg"   # the removals (tests/nfcxx-link/run.sh)
   temp_cleanup
   trace_finish
   return $rc
@@ -643,7 +646,8 @@ fi
 # C inputs: compile each .c to an object. Link options (-l, -L, ...) stay in files for the final link.
 cobjs=()
 if [ ${#cfiles[@]} -gt 0 ]; then
-  ctmp=$(mktemp -d); trap 'temp_cleanup; trace_finish' EXIT
+  if [ -n "$owned_ctmp" ]; then ctmp=$owned_ctmp; ctmp_owned=1; trap 'temp_cleanup; trace_finish' EXIT
+  else ctmp=$(mktemp -d); trap 'temp_cleanup; trace_finish' EXIT; fi
   n=0
   for c in ${cfiles[@]+"${cfiles[@]}"}; do
     o=$ctmp/$n.o; n=$((n + 1))
@@ -768,7 +772,8 @@ if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
   exit 0
 fi
 if [ $backend = pathb ]; then
-  ptmp=$(mktemp -d); trap 'temp_cleanup; trace_finish' EXIT
+  if [ -n "$owned_ptmp" ]; then ptmp=$owned_ptmp; ptmp_owned=1; trap 'temp_cleanup; trace_finish' EXIT
+  else ptmp=$(mktemp -d); trap 'temp_cleanup; trace_finish' EXIT; fi
   pobjs=(); plink=(); n=0
   for f in ${files[@]+"${files[@]}"}; do
     case $f in
