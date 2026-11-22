@@ -7,7 +7,8 @@
 #   1. generated: `n.times { }` on a declared Integer calls Integer#times' compiled body (BLOCK_CORE_DIRECT's fallback,
 #      behind the guarded inline loop) with no class test and no dynamic else; `(n + 1).to_s` and `n.to_i` are NUMERIC_NATIVE_EXACT; `n.to_f` keeps its fixnum test, since the
 #      audited Integer#to_f expression reads a fixnum only; an unproven receiver keeps its class tests;
-#   2. BC2CPP_INTEGER_EXACT=0 keeps the dynamic sends;
+#   2. BC2CPP_INTEGER_EXACT=0 keeps the dynamic sends (with DECLARED_NUMERIC_ENTRY=0 too: its declared-Integer entry
+#      fact proves the same receivers);
 #   3. run on a full-core mruby against interpreted, with products in and past the fixnum range: the calls answer as
 #      interpreted.
 #
@@ -123,7 +124,7 @@ Dir.mktmpdir('integer-exact') do |dir|
                dynamic.call(by['IntFx#loose'], 'times'))
 
   Dir.mktmpdir('integer-exact-off') do |off_dir|
-    _, _, off = generate.call(off_dir, 'BC2CPP_INTEGER_EXACT' => '0')
+    _, _, off = generate.call(off_dir, 'BC2CPP_INTEGER_EXACT' => '0', 'BC2CPP_DECLARED_NUMERIC_ENTRY' => '0')
     check.call('BC2CPP_INTEGER_EXACT=0 keeps the dynamic sends',
                dynamic.call(off['IntFx#count'], 'times') && dynamic.call(off['IntFx#label'], 'to_s'))
   end
