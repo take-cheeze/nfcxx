@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'int_box_outline'
 require_relative 'ir_rbs_block_types'
 require_relative 'core_block_param_sigs'
 require_relative 'core_fact_sigs'
@@ -1324,7 +1325,7 @@ class CodeGen
     # order emit_rproc_construction builds (both read upvar_regs).
     upvar_args = upvar_regs.each_with_index.map do |(l, b), i|
       vname = upvar_var_name(l, b)
-      out << "  mrb_value* #{vname} = reinterpret_cast<mrb_value*>(static_cast<uintptr_t>(mrb_integer(mrb_proc_cfunc_env_get(M, #{i + 1}))));\n"
+      out << "  mrb_value* #{vname} = #{IntBoxOutline.upvar_read("mrb_proc_cfunc_env_get(M, #{i + 1})")};\n"
       vname
     end
     # BLOCK_FALLBACK_YIELD_SUPPORT: the forwarded block is the last env slot, read
@@ -1485,7 +1486,7 @@ class CodeGen
     out << "  Bc2cppTailYieldScope bc2cpp_tail_scope(bc2cpp_env);\n" if region[:tail_yield]
     upvar_args = upvar_regs.each_with_index.map do |(l, b), i|
       vname = upvar_var_name(l, b)
-      out << "  mrb_value* #{vname} = reinterpret_cast<mrb_value*>(static_cast<uintptr_t>(mrb_integer(bc2cpp_env->stack[#{i + 1}])));\n"
+      out << "  mrb_value* #{vname} = #{IntBoxOutline.upvar_read("bc2cpp_env->stack[#{i + 1}]")};\n"
       vname
     end
     out << "  mrb_value bc2cpp_blk = bc2cpp_env->stack[#{upvar_regs.size + 1}];\n" if needs_blk
@@ -1552,16 +1553,17 @@ class CodeGen
     # mrb_get_args "&" at method level or forwarded again) is appended by value:
     # nothing writes back through it, and the env keeps it GC-rooted.
     ptr = ->(expr) { "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(#{expr})))" }
+    uptr = ->(expr) { IntBoxOutline.upvar_write(expr) || ptr.call(expr) }
     env_entries = ['self'] + upvar_regs.each_with_index.map do |(l, b), i|
       if upvar_cells
         # FIBER_BODY_CAPTURE: the pointers lead into a heap Array holding a snapshot of the locals, not into this frame.
-        ptr.call("&#{upvar_cells}[#{i}]")
+        uptr.call("&#{upvar_cells}[#{i}]")
       elsif inline_offset
-        ptr.call("&r#{l.zero? ? b + inline_offset : b}")
+        uptr.call("&r#{l.zero? ? b + inline_offset : b}")
       elsif l.zero?
-        ptr.call("&r#{b}")
+        uptr.call("&r#{b}")
       else
-        ptr.call(upvar_var_name(l - 1, b))
+        uptr.call(upvar_var_name(l - 1, b))
       end
     end
     # FIBER_BODY_CAPTURE: the snapshot Array rides in the env, right after the upvar pointers, so the GC keeps it.

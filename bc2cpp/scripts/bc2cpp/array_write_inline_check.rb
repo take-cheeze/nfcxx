@@ -114,12 +114,13 @@ check.call('rotate!(k) has an exact-Array arm calling the audited mirror, the ow
              rotate.match?(/\} else \{\n.*(?:bc2cpp_owner_call|mrb_funcall|bc2cpp_send)/m))
 check.call('rotate! with no argument rotates by one', code_of(code, 'AwBuf_rotate_one').include?('bc2cpp_ary_rotate_bang(M, r'))
 neq = code_of(code, 'AwBuf_neq')
-# TAGGED_FIXNUM's Fixnum pair comes first, then any Integer pair.
-neq_pair = /NEQ_OP_EQ :!=.*\n\s*if \(BC2CPP_FIXNUM_PAIR_P\((\w+), (\w+)\)\) \{\n\s*r\d+ = mrb_bool_value\(BC2CPP_FIXNUM_WORD\(\1\) != BC2CPP_FIXNUM_WORD\(\2\)\);\n\s*\} else if \(mrb_integer_p\(\1\) && mrb_integer_p\(\2\)\) \{\n\s*r\d+ = mrb_bool_value\(mrb_integer\(\1\) != mrb_integer\(\2\)\);\n.*r\d+ = mrb_bool_value\(!mrb_equal\(M, \1, \2\)\);/m
-check.call('`!=` compares two Integers in place before mrb_equal', neq.match?(neq_pair))
+# TAGGED_FIXNUM's Fixnum pair comes first, then any Integer pair (the first arm of CMP_NUM_OUTLINE's shared helper).
+neq_pair = /NEQ_OP_EQ :!=.*\n\s*if \(BC2CPP_FIXNUM_PAIR_P\((\w+), (\w+)\)\) \{\n\s*r\d+ = mrb_bool_value\(BC2CPP_FIXNUM_WORD\(\1\) != BC2CPP_FIXNUM_WORD\(\2\)\);\n\s*\} else if \(!mrb_undef_p\(bc2cpp_nt = bc2cpp_cmp_num_eq\(M, \1, \2\)\)\) \{\n\s*r\d+ = mrb_bool_value\(mrb_false_p\(bc2cpp_nt\)\);\n.*r\d+ = mrb_bool_value\(!mrb_equal\(M, \1, \2\)\);/m
+eq_helper_pair = /bc2cpp_cmp_num_eq\(mrb_state\* M, mrb_value d, mrb_value s\) \{\n\s*if \(mrb_integer_p\(d\) && mrb_integer_p\(s\)\) return mrb_bool_value\(mrb_integer\(d\) == mrb_integer\(s\)\);/
+check.call('`!=` compares two Integers in place before mrb_equal', neq.match?(neq_pair) && code.match?(eq_helper_pair))
 reopened, = generate_world(source: "class Integer\n  def ==(other); super; end\nend\n#{SRC}", owners: OWNERS | ['Integer'])
 check.call('a program that reopens Integer#== keeps the Integer-pair arm, as OP_EQ ignores Integer#==',
-           code_of(reopened, 'AwBuf_neq').match?(neq_pair))
+           code_of(reopened, 'AwBuf_neq').match?(neq_pair) && reopened.match?(eq_helper_pair))
 getidx = code[/static mrb_value bc2cpp_getidx_slow\(.*?\n\}\n/m].to_s
 check.call('the shared `[]` chain reads an Integer receiver\'s class from its tag, Integer arm first',
            getidx.include?('POLY_INTEGER_TAG :[]') &&

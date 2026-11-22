@@ -103,7 +103,7 @@ suite.check('registers are locals loaded from the frame', step.match?(/^  mrb_va
 suite.check("every yield (#{yields}) stores the registers back before returning", spills == yields)
 block_step = step_function(code, 'RlBlock')
 suite.check('a step function taking a register address keeps references into the frame',
-            block_step.match?(/reinterpret_cast<uintptr_t>\(&r\d+\)/) && block_step.match?(/^  mrb_value& r\d+ = R\[\d+\];$/) &&
+            block_step.match?(/reinterpret_cast<uintptr_t>\(&r\d+\)|bc2cpp_upvar_ptr_value\(M, &r\d+\)/) && block_step.match?(/^  mrb_value& r\d+ = R\[\d+\];$/) &&
             !block_step.include?('RESUMABLE_LOCAL_REGISTERS'))
 
 ENV['BC2CPP_RESUMABLE_LOCALS'] = '0'
