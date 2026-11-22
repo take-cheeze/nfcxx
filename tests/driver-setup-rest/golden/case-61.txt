@@ -1,0 +1,8 @@
+== case 61:  -c a.c -o a.o --freestanding
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: QBE not built; run scripts/setup-qbe.sh
+-- eccp
+(none)
+-- files

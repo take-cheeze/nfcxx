@@ -1,0 +1,8 @@
+== case 36: EDG_BASE=<WORK>/edgbase   --emit-c --freestanding --target=linux_aarch64 a.c
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: --emit-c does not apply to .c inputs (they skip the front end)
+-- eccp
+(none)
+-- files

@@ -455,64 +455,36 @@ fi
 # Hosted mode (default) uses the host C++ library headers, so real code can include <cstdio>,
 # <cctype>, <string> and friends. Their include directories and the GNU version come from the host
 # g++ (override with NFCXX_CXX, or NFCXX_SYS_INCLUDES as a colon-separated list).
+# The template instantiation, --cosmo, the freestanding or hosted headers, the host cflags, the GNU options, --target=linux_k1om
+# and --target are planned by scripts/nfcxx-setup.rb (its rest step, the bash's order: docs/notes/driver-body-port.md, item 3). The
+# driver planned them on the argument loop's state and passed them in NFCXX_SETUP_REST_STATUS, NFCXX_SETUP_REST and
+# NFCXX_SETUP_REST_ERR (the statements up to a refusal, its status and message); the body plans them itself when the driver gave
+# no state (the wrappers' arguments). The statements are eval'd here. The host C++ headers' span is recorded here, as the bash
+# recorded it (setup_span_start and setup_span_stop, the probe's times), and a refusal is printed after the statements before it.
+# The rules: instantiate=auto leaves the instantiation to the front end; used asks for the used instantiations, with the sections the
+# linker collects (not on Mach-O). --cosmo: cosmocc is the C compiler (NFCXX_GCC) and its libc++ headers are the C++ target.
+# Freestanding headers come only from lib/ (--no_standard_includes), with GCC 13 emulation by default; hosted mode uses the host's
+# C++ library headers and GNU version (NFCXX_SYS_INCLUDES overrides the directories). Path B's host cflags are its macOS and
+# aarch64 Linux headers (lib/pathb). --target=linux_k1om is freestanding with the gcc backend (the k1om GCC); --target is the EDG
+# target of the generated C. EDG_CPFE_DEFAULT_OPTIONS carries the gnu_opts array to the front end.
 extra=()
 sys_inc=()
 hosted_libs=()
-# Template instantiation. Default (--instantiate=used, or NFCXX_INSTANTIATE): each unit instantiates the templates it uses, as g++ does,
-# so the link recompiles nothing (libggml-sycl: 8 minutes in all, a 3 s link). The C output has the instances as weak
-# symbols in one .text, not as COMDAT groups, so the link would keep every unit's copy (libggml-sycl: 77 MB of code): each
-# function and object gets its own section, and the link drops the sections nothing reaches (--gc-sections), among them
-# the copies the link did not choose (24 MB). --instantiate=auto: EDG's automatic instantiation, where the prelinker
-# assigns each instance a unit and recompiles that unit at link time, one unit per pass (libggml-sycl: 3087 instances in
-# 98 passes, a 33-minute link; 59 MB of code).
+gnu_opts=()
 inst_opts=()
-case $instantiate in
-  auto) ;;
-  used)
-    inst_opts=(--no_auto_instantiation -tused)
-    # Mach-O: ld64 coalesces the weak definitions itself (and takes no --gc-sections)
-    [ "$(uname -s)" = Darwin ] || inst_opts+=(--c_to_obj_option -ffunction-sections --c_to_obj_option -fdata-sections
-                                              --c_to_obj_option -Wl,--gc-sections) ;;
-  *) echo "nfcxx: --instantiate (NFCXX_INSTANTIATE) is auto or used (got $instantiate)" >&2; exit 2 ;;
-esac
-# --cosmo (docs/notes/cosmo.md): cosmocc is the C compiler (NFCXX_GCC: gcc-cc runs it, pathb-cc assembles with it), and
-# its libc++ headers and predefined macros are the C++ target. The backend is gcc, or Path B with --backend=pathb (NFCXX_PATH=b).
-if [ $cosmo = 1 ]; then
-  [ $path_b = 0 ] || backend=pathb
-  if [ $backend != pathb ]; then
-    [ $backend_explicit = 0 ] || [ $backend = gcc ] || { echo "nfcxx: --cosmo needs --backend=gcc or --backend=pathb" >&2; exit 2; }
-    backend=gcc
-  fi
-  cosmo_bin=${NFCXX_COSMOCC:-$root/build/cosmocc/bin/cosmocc}
-  [ -x "$cosmo_bin" ] || { echo "nfcxx: $cosmo_bin is not installed; run scripts/setup-cosmo.sh (or set NFCXX_COSMOCC)" >&2; exit 2; }
-  cosmo_root=$(cd "$(dirname "$cosmo_bin")/.." && pwd)
-  export NFCXX_GCC=$cosmo_bin
-  # cosmoc++ is a wrapper that prints no include list, so the directories are named here: libc++ first, then the C library.
-  export NFCXX_SYS_INCLUDES=$cosmo_root/include/third_party/libcxx:$cosmo_root/include
-  gver=$cosmo_root/bin/x86_64-linux-cosmo-g++; [ -x "$gver" ] || gver=$cosmo_bin
-  [ -n "${gnu:-}" ] || gnu=$({ "$gver" -dumpfullversion 2>/dev/null || true; } | awk -F. '{ printf "%d%02d%02d\n", $1, $2, $3 }')
-  # cosmo's own build force-includes libc/integral/normalize.inc (libcesque, bool32, __static_yoink, the c.inc macros); the
-  # front end needs it too. __has_feature is clang's: libc++'s __config uses it, and cosmo's gcc does not define it.
-  cflags+=(-D__COSMOPOLITAN__ -D__COSMOCC__ -D__FATCOSMOCC__)
-  # Path B only: its front end reads libc++, whose __config uses __has_feature (clang's; cosmo's gcc does not define it)
-  [ $backend = pathb ] && cflags+=('-D__has_feature(x)=0' -include "$cosmo_root/include/libc/integral/normalize.inc" -include "$root/lib/cosmo/libcxx_traits.h")
-fi
-if [ $freestanding = 1 ]; then
-  extra=(--no_standard_includes "-I$root/lib")
-  [ -n "$gnu" ] || gnu=130000
+if [ "${NFCXX_SETUP_REST_STATUS+x}" = x ]; then
+  setup_rest_status=$NFCXX_SETUP_REST_STATUS; setup_rest=${NFCXX_SETUP_REST-}; setup_rest_err=${NFCXX_SETUP_REST_ERR-}
+  unset NFCXX_SETUP_REST_STATUS NFCXX_SETUP_REST NFCXX_SETUP_REST_ERR
 else
-  t=$(trace_start)
-  while IFS= read -r d; do [ -n "$d" ] && sys_inc+=("--sys_include=$d"); done < <("${RUBY:-ruby}" "$root/scripts/host-sys.rb" host_sys_includes)
-  trace_end "$t" "host C++ headers" driver
-  # g++ links libm implicitly through libstdc++; the hosted headers (<cmath>, used by doctest for
-  # log10) need it too. The EDG link appends --c_to_obj_lib libraries after the objects.
-  hosted_libs=(--c_to_obj_lib=m)
-  # macOS has libc++, not libstdc++: the link needs it explicitly (eccp's Linux default is libstdc++).
-  [ "$(uname -s)" = Darwin ] && hosted_libs+=(--c_to_obj_lib=c++)
-  if [ -z "$gnu" ]; then
-    gnu=$("${RUBY:-ruby}" "$root/scripts/host-sys.rb" host_gnu_version)
-  fi
+  setup_rest_status=0; setup_rest_err=
+  setup_rest=$("${RUBY:-ruby}" "$root/scripts/nfcxx-setup.rb" rest backend="$backend" backend_explicit=$backend_explicit \
+    path_b=$path_b freestanding=$freestanding cosmo=$cosmo emit_c=$emit_c target="$target" instantiate=$instantiate \
+    gnu="${gnu:-}" dialect="$dialect" root="$root" sys="$(uname -s)" mach="$(uname -m)" host="$(uname -s) $(uname -m)") \
+    || setup_rest_status=$?
 fi
+eval "$setup_rest"
+[ -z "${setup_span_start:-}" ] || trace_range "$setup_span_start" "$setup_span_stop" "host C++ headers" driver
+if [ "$setup_rest_status" != 0 ]; then printf '%s' "$setup_rest_err" >&2; exit "$setup_rest_status"; fi
 # -isystem DIR from the command line: searched after the host's own directories, as the host compiler does.
 ecp_args ${sysdirs[@]+"${sysdirs[@]}"}
 for d in ${ecp_list[@]+"${ecp_list[@]}"}; do sys_inc+=("--sys_include=$d"); done
@@ -521,53 +493,6 @@ pre_opts=(); for f in ${preinc[@]+${preinc[@]+"${preinc[@]}"}}; do
   if [ $moves = 1 ] && [ -e "$f" ]; then f=$(abs_path "$f"); fi
   pre_opts+=(--preinclude "$f")
 done
-# Path B hosted on macOS (the SDK's libc++): its __config evaluates __has_feature and friends in #if, which EDG's g++
-# mode does not define (lib/pathb/clang_macros.h). Gated on Darwin, not on the dialect: a Linux clang host keeps libstdc++
-# and its own feature checks.
-[ $backend = pathb ] && [ $freestanding = 0 ] && [ "$(uname -s)" = Darwin ] && cflags+=(-include "$root/lib/pathb/clang_macros.h" -I "$root/lib/pathb/darwin-include")
-# Path B's front end is an x86-64 EDG target (no __aarch64__, no __clang__), so libc++ takes the x86-64 std::string layout on
-# an arm64 Mac, where the SDK's libc++ (clang's Apple arm64 config) uses the alternate layout: the size in byte 23, the
-# short-string flag in its top bit. Path B would read a string made by the library wrongly. Defining the layout macro is
-# the only ABI knob of that config that changes the object. Darwin arm64 only: x86-64 Macs keep the old layout.
-[ $backend = pathb ] && [ $freestanding = 0 ] && [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ] && cflags+=(-D_LIBCPP_ABI_ALTERNATE_STRING_LAYOUT)
-# Hosted Path B on Linux aarch64: the host's <bits/math-vector.h> uses GCC's AdvSIMD/SVE vector types, which EDG (x86-64
-# target) does not have; lib/pathb/linux-aarch64-include/bits/math-vector.h stands in for it (scripts/pathb-dump.rb does the same).
-[ $backend = pathb ] && [ $freestanding = 0 ] && [ "$(uname -s)" = Linux ] && { [ "$(uname -m)" = aarch64 ] || [ "$(uname -m)" = arm64 ]; } && cflags+=(-I "$root/lib/pathb/linux-aarch64-include")
-# Hosted Linux aarch64 (either backend): the front end's predefined macros have __aarch64__ but not __AARCH64EL__, which gcc
-# defines there. glibc's and CPython's multiarch headers (python3.12's pyconfig.h) choose their directory by both, so without
-# it Python.h stops with "unknown multiarch location for pyconfig.h". The value is the one gcc defines.
-[ $freestanding = 0 ] && [ "$(uname -s)" = Linux ] && { [ "$(uname -m)" = aarch64 ] || [ "$(uname -m)" = arm64 ]; } && { cflags+=(-D__AARCH64EL__=1); files+=(-D__AARCH64EL__=1); }
-gnu_opts=()
-if [ "$dialect" = clang ]; then
-  cv=$("${RUBY:-ruby}" "$root/scripts/host-sys.rb" host_clang_version); [ -n "$cv" ] && gnu_opts=(--clang_version="$cv")
-elif [ -n "$gnu" ]; then
-  gnu_opts=(--gnu_version="$gnu")
-fi
-# --target: the EDG configuration of the generated C (only with --freestanding --emit-c, see the usage above). The host
-# library headers and the host C compiler would be the build host's, so a hosted or compiled build with a target is refused.
-# --target=linux_k1om: Intel Knights Corner (k1om). The front end lays out the program for the build host (LP64, the
-# same sizes as k1om); the C is compiled and linked by the k1om GCC 5.1.1 (scripts/k1om-cc.rb) with the k1om assembler and
-# runtime (scripts/setup-k1om.sh). Freestanding and the gcc backend only: the k1om toolchain is GCC's.
-if [ "$target" = linux_k1om ]; then
-  [ $freestanding = 1 ] || { echo "nfcxx: --target=linux_k1om needs --freestanding (the host's C++ headers are GCC 13's, not k1om's)" >&2; exit 2; }
-  [ "$backend_explicit" = 0 ] || [ "$backend" = gcc ] || { echo "nfcxx: --target=linux_k1om uses the gcc backend (the k1om GCC)" >&2; exit 2; }
-  backend=gcc
-  k1om_root=${NFCXX_K1OM_ROOT:-/opt/k1om}
-  [ -x "$k1om_root/bin/k1om-mpss-linux-gcc" ] || { echo "nfcxx: no k1om toolchain at $k1om_root (NFCXX_K1OM_ROOT; docs/notes/k1om.md)" >&2; exit 2; }
-  [ -f "$root/build/k1om/libC.a" ] || { echo "nfcxx: no k1om runtime at $root/build/k1om/libC.a (run scripts/setup-k1om.sh)" >&2; exit 2; }
-  export NFCXX_GCC="$root/scripts/k1om-cc.rb" NFCXX_AS="$root/scripts/k1om-bin/as.rb" NFCXX_K1OM_ROOT="$k1om_root"
-fi
-if [ -n "$target" ] && [ "$target" != linux_k1om ]; then
-  [ $freestanding = 1 ] || { echo "nfcxx: --target needs --freestanding (the host's library headers are the host target's)" >&2; exit 2; }
-  [ $emit_c = 1 ] || { echo "nfcxx: --target needs --emit-c (the generated C is for the target; compile it with a cross compiler)" >&2; exit 2; }
-  tbase=${EDG_BASE:-$root/build/edg-base}
-  [ -d "$tbase/lib_$target" ] || { echo "nfcxx: no EDG target '$target' in $tbase (lib_* tables: $(cd "$tbase" && ls -d lib_* | sed 's/^lib_//' | tr '\n' ' '))" >&2; exit 2; }
-  gnu_opts+=(--target "$target")
-  # Plain char is unsigned on these ABIs (clang -dM: __CHAR_UNSIGNED__ for each triple). EDG's table says signed for
-  # linux_aarch64 and linux_armv7 (src/defines.h, TARG_HAS_SIGNED_CHARS_*), so the driver sets it: the EDG base is not patched.
-  case $target in linux_aarch64|linux_armv7|linux_riscv32|linux_riscv64) gnu_opts+=(--unsigned_chars) ;; esac
-fi
-[ ${#gnu_opts[@]} -gt 0 ] && export EDG_CPFE_DEFAULT_OPTIONS="${gnu_opts[*]} ${EDG_CPFE_DEFAULT_OPTIONS:-}"
 
 if [ $emit_c = 1 ] && [ ${#cfiles[@]} -gt 0 ]; then
   echo "nfcxx: --emit-c does not apply to .c inputs (they skip the front end)" >&2; exit 2

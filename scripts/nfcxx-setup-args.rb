@@ -75,8 +75,18 @@ module NfcxxSetupArgs
   # (NfcxxSetup.run "default", which sets backend, default_backend and pb_fs_host), and stage is [status, text] for the stage
   # after the emit-C route (NfcxxSetup.stage_text: the statements on success, the refusal's message and status 2 otherwise).
   # nil when the loop gives no state (the body's wrappers rewrite the arguments, so the body plans them itself).
+  # The setup's rest (NfcxxSetup.rest: instantiation through the target, in the bash's order) on the same state: [status, text,
+  # message], the statements up to a refusal. nil for a command that the body ends before its setup (-E, and -fsyntax-only,
+  # which runs the driver again): the body plans it itself if it gets there.
+  def planned_rest(argv, scalars, arrays, env)
+    return nil if scalars["preprocess"] == "1" || argv.include?("-fsyntax-only")
+
+    text, status, message = NfcxxSetup.rest(setup_opts_for(argv, env), env)
+    [status, text, message]
+  end
+
   def planned_state(argv, env = ENV)
-    scalars, _arrays = loop_state(argv, env)
+    scalars, arrays = loop_state(argv, env)
     return nil unless scalars
 
     opts = planner_opts(scalars)
@@ -86,7 +96,7 @@ module NfcxxSetupArgs
     rescue NfcxxSetup::Refusal => e
       [e.status, "#{e.message}\n"]
     end
-    { default: default, stage: stage }
+    { default: default, stage: stage, rest: planned_rest(argv, scalars, arrays, env) }
   rescue StandardError
     nil
   end
@@ -98,6 +108,16 @@ module NfcxxSetupArgs
 
   def host_sys(ruby, command)
     Open3.capture2(ruby, File.join(ROOT, "scripts", "host-sys.rb"), command, err: File::NULL).first.to_s.chomp
+  end
+
+  # the setup options of the loop's state for ARGV, memoized per process (the refusals and the planned state both read them);
+  # a key the loop does not print is "", so every planner reads a string
+  def setup_opts_for(argv, env)
+    @setup_opts ||= {}
+    @setup_opts[argv] ||= begin
+      scalars, arrays = loop_state(argv, env)
+      setup_opts(scalars, arrays, env).transform_values { |v| v.nil? ? "" : v }
+    end
   end
 
   # the setup options for the loop's state (the keys scripts/nfcxx-setup.rb reads)
@@ -159,7 +179,7 @@ module NfcxxSetupArgs
     scalars, arrays = loop_state(argv, env)
     return [nil, nil] unless scalars
 
-    opts = setup_opts(scalars, arrays, env)
+    opts = setup_opts_for(argv, env)
     return [nil, nil] if deferred?(scalars, arrays, argv, env, opts)
 
     input = NfcxxCuCpp2Args.check(scalars, arrays, env)

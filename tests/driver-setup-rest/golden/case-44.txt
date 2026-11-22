@@ -1,0 +1,7 @@
+== case 44:  --emit-c --dialect=clang a.cpp
+-- status: 1
+-- stdout
+-- stderr
+-- eccp
+(none)
+-- files

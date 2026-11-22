@@ -1,0 +1,8 @@
+== case 13: NFCXX_COSMOCC=<WORK>/stub/bin/cosmocc   --cosmo --backend=bogus -c a.cpp -o a.o
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: --cosmo needs --backend=gcc or --backend=pathb
+-- eccp
+(none)
+-- files

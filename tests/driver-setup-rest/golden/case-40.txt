@@ -1,0 +1,8 @@
+== case 40:  --target=linux_k1om --freestanding --backend=pathb -c a.cpp -o a.o
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: --target=linux_k1om uses the gcc backend (the k1om GCC)
+-- eccp
+(none)
+-- files

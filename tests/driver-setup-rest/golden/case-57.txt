@@ -1,0 +1,8 @@
+== case 57:  --backend=bogus -fsanitize=address --cosmo -c a.cpp -o a.o
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: -fsanitize=address: unknown backend bogus
+-- eccp
+(none)
+-- files

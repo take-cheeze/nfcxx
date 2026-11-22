@@ -1,0 +1,8 @@
+== case 54:  --backend=bogus -c a.cpp -o a.o
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: unknown backend 'bogus'
+-- eccp
+(none)
+-- files
