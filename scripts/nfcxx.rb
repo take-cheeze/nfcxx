@@ -371,17 +371,27 @@ begin
     # NFCXX_SETUP_DEFAULT is the default backend's statements; NFCXX_SETUP_REST_STATUS, NFCXX_SETUP_REST and NFCXX_SETUP_REST_ERR
     # are the setup's rest (instantiation through the target: its statements up to a refusal, and the refusal's status and message);
     # NFCXX_SETUP_STAGE_STATUS and NFCXX_SETUP_STAGE are the stage after the emit-C route (its statements, or a refusal's status and
-    # message). The body evals them at its places, and prints a refusal where the bash did. A command the wrappers rewrite
+    # message), NFCXX_SETUP_ASAN_STATUS and NFCXX_SETUP_ASAN the sanitizer check, NFCXX_SETUP_FLAGS the pb_flags tail,
+    # NFCXX_SETUP_BACKEND_ENV_STATUS and NFCXX_SETUP_BACKEND_ENV the backend environment, NFCXX_SETUP_TRACE_UNIT the trace unit.
+    # The body evals them at its places, and prints a refusal where the bash did. A command the wrappers rewrite
     # (LOOP_RESULT is nil) is planned by the body, so none is passed.
     setup = LOOP_RESULT && NfcxxSetupArgs.planned_state(ARGV, ENV)
     rest = setup&.fetch(:rest)
+    asan = setup&.fetch(:asan)
+    backend_env = setup&.fetch(:backend_env)
     setup_env = {
       "NFCXX_SETUP_DEFAULT" => setup&.fetch(:default),
+      "NFCXX_SETUP_ASAN_STATUS" => asan && asan[0].to_s,
+      "NFCXX_SETUP_ASAN" => asan && asan[1],
       "NFCXX_SETUP_REST_STATUS" => rest && rest[0].to_s,
       "NFCXX_SETUP_REST" => rest && rest[1],
       "NFCXX_SETUP_REST_ERR" => rest && rest[2],
       "NFCXX_SETUP_STAGE_STATUS" => setup && setup[:stage].first.to_s,
       "NFCXX_SETUP_STAGE" => setup && setup[:stage].last,
+      "NFCXX_SETUP_FLAGS" => setup&.fetch(:flags),
+      "NFCXX_SETUP_BACKEND_ENV_STATUS" => backend_env && backend_env[0].to_s,
+      "NFCXX_SETUP_BACKEND_ENV" => backend_env && backend_env[1],
+      "NFCXX_SETUP_TRACE_UNIT" => setup&.fetch(:trace_unit),
     }
     ok = system(env.merge(setup_env).merge(owned), "bash", program.path, *ARGV)
     oracle_code = ok ? 0 : ($?.exitstatus || 1)
