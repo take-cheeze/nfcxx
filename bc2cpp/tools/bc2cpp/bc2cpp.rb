@@ -42,6 +42,7 @@ require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_constants'
 require_relative 'register_flow'
 require_relative 'element_read_roots'
+require_relative 'keep_old_batch'
 require_relative 'registry'
 require_relative 'native_return_classes'
 require_relative 'lint_crosscheck'
@@ -1928,12 +1929,38 @@ BC2CPP_MAIN = lambda do
       static inline void bc2cpp_keep(mrb_state*, mrb_value) {}
       static inline void bc2cpp_keep_old(mrb_state*, mrb_value) {}
       static inline void bc2cpp_keep_old_range(mrb_state*, mrb_value, mrb_int, mrb_int) {}
+      static inline void bc2cpp_keep_olds2(mrb_value, mrb_value, mrb_state*) {}
+      static inline void bc2cpp_keep_olds3(mrb_value, mrb_value, mrb_value, mrb_state*) {}
     CPP
   else
+    # ROOT_VALUE_FIRST: a keep's value is mostly the result of the call just before it, already in the first argument
+    # register, and the state is in a callee-saved one; value first saves the register move each site would make.
+    # BC2CPP_ROOT_VALUE_FIRST=0 calls bc2cpp_root directly.
+    if ENV['BC2CPP_ROOT_VALUE_FIRST'] == '0'
+      puts <<~'CPP'
+        // ELEMENT_READ_ROOTS: the caller side. An element a compiled read keeps in a local, while a call may unlink it.
+        static inline void bc2cpp_keep(mrb_state* M, mrb_value v) { bc2cpp_root(M, v); }
+        static inline void bc2cpp_keep_old(mrb_state* M, mrb_value old) { bc2cpp_root(M, old); }
+      CPP
+    else
+      puts <<~'CPP'
+        // ELEMENT_READ_ROOTS: the caller side. An element a compiled read keeps in a local, while a call may unlink it.
+        [[gnu::noinline]] inline void bc2cpp_root_value_first(mrb_value v, mrb_state* M) { bc2cpp_root(M, v); }
+        static inline void bc2cpp_keep(mrb_state* M, mrb_value v) { bc2cpp_root_value_first(v, M); }
+        static inline void bc2cpp_keep_old(mrb_state* M, mrb_value old) { bc2cpp_root_value_first(old, M); }
+      CPP
+    end
     puts <<~'CPP'
-      // ELEMENT_READ_ROOTS: the caller side. An element a compiled read keeps in a local, while a call may unlink it.
-      static inline void bc2cpp_keep(mrb_state* M, mrb_value v) { bc2cpp_root(M, v); }
-      static inline void bc2cpp_keep_old(mrb_state* M, mrb_value old) { bc2cpp_root(M, old); }
+      // KEEP_OLD_BATCH (keep_old_batch.rb): the roots of a run of slot stores, in one call.
+      [[gnu::noinline]] inline void bc2cpp_keep_olds2(mrb_value a, mrb_value b, mrb_state* M) {
+        bc2cpp_root(M, a);
+        bc2cpp_root(M, b);
+      }
+      [[gnu::noinline]] inline void bc2cpp_keep_olds3(mrb_value a, mrb_value b, mrb_value c, mrb_state* M) {
+        bc2cpp_root(M, a);
+        bc2cpp_root(M, b);
+        bc2cpp_root(M, c);
+      }
       // The elements ary[head, len) an Array store is about to drop, with mrb_ary_splice's own clamping.
       static inline void bc2cpp_keep_old_range(mrb_state* M, mrb_value ary, mrb_int head, mrb_int len) {
         if (!mrb_array_p(ary)) return;

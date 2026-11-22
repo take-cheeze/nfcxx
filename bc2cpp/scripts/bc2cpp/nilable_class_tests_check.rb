@@ -167,7 +167,7 @@ end
 
 check.call('nilable_bump: the nil test still protects the exact non-nil payload call',
            on['Holder#nilable_bump'].to_s.include?('NILABLE_RECEIVER :bump') &&
-             on['Holder#nilable_bump'].include?('bc2cpp_nil_receiver('))
+             on['Holder#nilable_bump'].include?('bc2cpp_nil_receiver_id('))
 
 native_off = bodies.call('BC2CPP_NATIVE_EXACT_BEFORE_POLY' => '0')
 %w[sprite_z sprite_x sprite_y sprite_visible window_skin].each do |name|

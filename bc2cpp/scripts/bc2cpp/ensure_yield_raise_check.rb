@@ -5,8 +5,8 @@
 # ensure when the block raises, also when the block reaches it through other blocks' yields and when the raise is a
 # rescue's re-raise. The counter it restores is read after the exception is rescued; compiled must match interpreted.
 # RESUME_FROM_C_HANDLERS: compute is a resumable method here (a Fiber suspends in its block), the form a
-# self-compiled bc2cpp gives ScanCache.compute, and called from C a raise in its block reaches its ensure. Not covered:
-# a `break` or block `return` through a resumable method's ensure (a C++ unwind its handler states do not see).
+# self-compiled bc2cpp gives ScanCache.compute, and called from C a raise in its block reaches its ensure.
+# RESUME_FROM_C_UNWIND: so do a `break` and a block `return` (C++ unwinds), past rescue clauses and through nested ensures.
 ENV['BC2CPP_SIG_DIRS'] = ''
 
 require 'tmpdir'
@@ -118,6 +118,28 @@ SOURCE = <<~RUBY
       [fiber.resume, fiber.resume(2), state]
     end
 
+    def run_fiber_break
+      fiber = Fiber.new { EyCache.compute { Fiber.yield(1); break 4 } }
+      [fiber.resume, fiber.resume, state]
+    end
+
+    def run_break
+      [EyCache.compute { break 7 }, state]
+    end
+
+    def run_break_nested
+      [EyCache.compute { EyCache.compute { break 5 } + 1 }, state]
+    end
+
+    def return_inner
+      EyCache.compute { return 9 }
+      0
+    end
+
+    def run_return
+      [return_inner, state]
+    end
+
     def run_next
       [EyCache.compute { next 8 }, state]
     end
@@ -147,7 +169,7 @@ SOURCE = <<~RUBY
 RUBY
 
 OWNERS = %w[EyCache EyCache.singleton EyProbe].freeze
-RUNS = %w[run_ok run_raise run_reraise run_shape run_fiber run_next run_rescue run_direct run_nested].freeze
+RUNS = %w[run_ok run_raise run_reraise run_shape run_fiber run_fiber_break run_break run_break_nested run_return run_next run_rescue run_direct run_nested].freeze
 
 def compiled?(code, name)
   code.match?(/^mrb_value #{name}_impl\(mrb_state\* M/)
@@ -181,6 +203,7 @@ Dir.mktmpdir('bc2cpp-ensure-yield-raise') do |dir|
     compiled = plain.call(sections['compiled'])
     suite.check('the interpreter restores the counter on every exit',
                 RUNS.all? { |m| interpreted.any? { |l| l.start_with?("#{m} =>") && l.end_with?('[0, 0]]') } } &&
+                interpreted.include?('run_break => [7, [0, 0]]') && interpreted.include?('run_return => [9, [0, 0]]') &&
                 interpreted.include?('run_rescue => ["rescued r", 2, [0, 0]]'))
     suite.check('compiled matches interpreted', compiled == interpreted)
     warn "interpreted:\n  #{interpreted.join("\n  ")}\ncompiled:\n  #{compiled.join("\n  ")}" unless compiled == interpreted

@@ -260,6 +260,53 @@ class CodeGen
         #endif
         #endif
         }
+        // LEFT_OUT_TABLE (CodeGen#left_out_table): what the bc2cpp_left_out calls of one registration half did, as one
+        // const stream. Per owner: {flags, n, n path syms, count, count name syms}; flags 1 a singleton entry, 2 an
+        // owner the build may not define (a native's, as bc2cpp_native_owner); 0xffff ends it.
+        [[maybe_unused]] static uint16_t bc2cpp_left_out_sym_too_wide(mrb_sym s) { return (uint16_t)s; }
+        [[maybe_unused]] static constexpr uint16_t bc2cpp_lo_sym(mrb_sym s) {
+          // Not a constant expression past 16 bits, so a table naming such a presym does not compile.
+          return s < 0xffff ? (uint16_t)s : bc2cpp_left_out_sym_too_wide(s);
+        }
+        [[maybe_unused]] static void bc2cpp_left_out_walk(mrb_state* M, const uint16_t* rows) {
+        #if defined(BC2CPP_RESPOND_TO_PHANTOM) && !defined(BC2CPP_UNREGISTERED_VERIFY)
+          mrb_value owners = bc2cpp_phantom_add_stream(M, rows);
+        #endif
+          int ai = mrb_gc_arena_save(M);
+          for (const uint16_t* p = rows; *p != 0xffff; mrb_gc_arena_restore(M, ai)) {
+            unsigned flags = p[0], n = p[1];
+            mrb_value v = mrb_obj_value(M->object_class);
+            bool found = true;
+            for (unsigned i = 0; i < n && found; i++) {
+              mrb_sym seg = (mrb_sym)p[2 + i];
+              found = !(flags & 2) || mrb_const_defined_at(M, v, seg);
+              if (found) v = mrb_const_get(M, v, seg);
+            }
+            p += 2 + n;
+            unsigned count = *p++;
+            const uint16_t* names = p;
+            p += count;
+            struct RClass* c = found ? mrb_class_ptr(v) : NULL;
+            bool singleton = flags & 1;
+        #if defined(BC2CPP_UNREGISTERED_VERIFY)
+            for (unsigned i = 0; c && i < count; i++) {
+              if (singleton) mrb_define_class_method_id(M, c, (mrb_sym)names[i], bc2cpp_unregistered_stub, MRB_ARGS_ANY());
+              else mrb_define_method_id(M, c, (mrb_sym)names[i], bc2cpp_unregistered_stub, MRB_ARGS_ANY());
+            }
+        #else
+            struct RClass* owner = c && singleton ? mrb_class_ptr(mrb_singleton_class(M, mrb_obj_value(c))) : c;
+            for (unsigned i = 0; owner && i < count; i++) {
+              mrb_sym id = (mrb_sym)names[i];
+              struct RClass* definer = owner;
+              mrb_method_t m = bc2cpp_find_method(M, &definer, id);
+              if (!MRB_METHOD_UNDEF_P(m) && definer == owner) mrb_remove_method(M, owner, id);
+            }
+        #if defined(BC2CPP_RESPOND_TO_PHANTOM)
+            mrb_ary_push(M, owners, owner ? mrb_obj_value(owner) : mrb_nil_value());
+        #endif
+        #endif
+          }
+        }
         // UNDEF_LEFT_OUT: removes the owner's own undef entry for `name` (CoreNativeCandidates.undef_candidates), so the
         // inherited method shows; nothing else is touched. A verify build stubs the name instead, as bc2cpp_left_out does.
         [[maybe_unused]] static int bc2cpp_own_undef_cb(mrb_state*, mrb_sym id, mrb_method_t m, void* p) {
@@ -289,14 +336,14 @@ class CodeGen
     head = out
     bodies = +''
     { 'core' => core_targets, 'program' => program_targets }.each do |part, part_targets|
-      out = bodies
-      out << "static void bc2cpp_register_#{part}_owner_methods([[maybe_unused]] mrb_state* M) {\n"
+      out = +''
+      @left_out_rows = left_out_table? ? { groups: {}, defined: Set.new } : nil
       emit_owner_registration_lines(out, part_targets, by_owner, unregistered, rom: rom && [rom, part])
       if part == 'core' && core_rom.any?
         # CORE_NATIVE_CANDIDATES: the build's tables already lack these entries; only a verify build stubs them.
         # A default hook is looked up on purpose and its absence is the no-op (hook_call, 3rd/mruby/src/class.c): no stub.
         out << "#ifdef BC2CPP_UNREGISTERED_VERIFY\n"
-        emit_left_out_native_lines(out, core_rom.reject { |owner, name| CoreNativeCandidates::HOOK_DEFAULTS.include?("#{owner}##{name}") })
+        emit_left_out_native_lines(out, core_rom.reject { |owner, name| CoreNativeCandidates::HOOK_DEFAULTS.include?("#{owner}##{name}") }, table: false)
         out << "#endif\n"
       end
       emit_left_out_native_lines(out, core_ram) if part == 'core'
@@ -307,11 +354,13 @@ class CodeGen
         if engine_rom.any?
           # ENGINE_ROM: the build's tables already lack these entries; only a verify build stubs them.
           out << "#ifdef BC2CPP_UNREGISTERED_VERIFY\n"
-          emit_left_out_native_lines(out, engine_rom)
+          emit_left_out_native_lines(out, engine_rom, table: false)
           out << "#endif\n"
         end
       end
-      out << "}\n"
+      bodies << "static void bc2cpp_register_#{part}_owner_methods([[maybe_unused]] mrb_state* M) {\n"
+      bodies << left_out_table(rom, part) << out << "}\n"
+      @left_out_rows = nil
     end
     out = head
     out << rom.to_s << bodies
@@ -344,7 +393,8 @@ class CodeGen
     targets.each do |owner|
       singleton = owner.end_with?('.singleton')
       var = "bc2cpp_owner_reg_#{sanitize(owner)}"
-      out << "  struct RClass* #{var} = mrb_class_ptr(#{const_chain_value_expr(owner)});\n"
+      whole = out
+      out = +''
       # In call order: a String is a line as it stands, a Hash a definition (a table row in ROM_METHOD_TABLES).
       ops = []
       left_out = Set.new
@@ -368,7 +418,7 @@ class CodeGen
           ops << "  // #{owner}##{m[:name]} left unregistered: statically dispatched only (docs/adr/0203).\n"
         end
         omitted, names = names.partition { |name| unregistered.include?("#{owner}##{name}") }
-        omitted.each { |name| ops << "  bc2cpp_left_out(M, #{var}, #{c_string_literal(name)}, #{singleton});\n" }
+        omitted.each { |name| ops << [:left_out, name] }
         left_out.merge(omitted)
         names.each do |name|
           ops << { name: name, key: rom && presym_key(name), fn: fn, entry: m[:entry], aspec: m[:aspec],
@@ -378,14 +428,27 @@ class CodeGen
       rows = ops.grep(Hash)
       # A name both left out and defined keeps the calls' order, which one table installed after them would not.
       table = rom && rows.none? { |row| left_out.include?(row[:name]) }
+      @left_out_rows&.[](:defined)&.merge(rows.map { |row| "#{owner}##{row[:name]}" })
+      defined = rows.to_set { |row| row[:name] }
       ops.each do |op|
         next out << op if op.is_a?(String)
+
+        if op.is_a?(Array)
+          name = op[1]
+          next if !defined.include?(name) && left_out_row(owner, name, optional: false)
+
+          next out << "  bc2cpp_left_out(M, #{var}, #{c_string_literal(name)}, #{singleton});\n"
+        end
         next if table && op[:key]
 
         out << "  #{op[:fn]}(M, #{var}, #{c_string_literal(op[:name])}, #{op[:entry]}, #{op[:aspec]});\n"
       end
       rows = rows.select { |row| row[:key] }
       out << rom_method_table(rom, owner, var, singleton, rows) if table && !rows.empty?
+      # An owner the stream took every call of needs no lookup here.
+      whole << "  struct RClass* #{var} = mrb_class_ptr(#{const_chain_value_expr(owner)});\n" if out.include?(var)
+      whole << out
+      out = whole
     end
   end
 
@@ -456,9 +519,52 @@ class CodeGen
     }
   CPP
 
+  # LEFT_OUT_TABLE (BC2CPP_LEFT_OUT_TABLE, on with ROM_METHOD_TABLES, whose presym spellings it needs): the half's
+  # bc2cpp_left_out calls become one const stream that bc2cpp_left_out_walk runs first, and RESPOND_TO_PHANTOM reads
+  # in place of a heap entry per name. Running them first is sound because each only removes the owner's own
+  # definition of its name and the half defines none of those names on that owner (left_out_row keeps such a call).
+  def left_out_table?
+    rom_method_tables? && ENV['BC2CPP_LEFT_OUT_TABLE'] != '0'
+  end
+
+  # Takes Owner#name into the half's stream, or false when it stays a call: a name the half defines on the owner
+  # (the call's order matters there), or one presym cannot spell.
+  def left_out_row(owner, name, optional:)
+    lo = @left_out_rows
+    return false unless lo && !lo[:defined].include?("#{owner}##{name}")
+
+    key = presym_key(name)
+    path = lexical_scope_path(owner).map { |seg| presym_key(seg) }
+    return false unless key && path.all?
+
+    (lo[:groups][[owner, optional]] ||= []) << key
+    true
+  end
+
+  # The half's stream (into the ROM tables) and the call that walks it; empty when no row was taken.
+  def left_out_table(tables, part)
+    groups = @left_out_rows&.[](:groups)
+    return '' if groups.nil? || groups.empty?
+
+    table = "bc2cpp_left_out_#{part}"
+    tables << "// LEFT_OUT_TABLE\nstatic constexpr uint16_t #{table}[] = {\n"
+    groups.each do |(owner, optional), keys|
+      path = lexical_scope_path(owner).map { |seg| "bc2cpp_lo_sym(#{presym_key(seg)})" }
+      flags = (owner.end_with?('.singleton') ? 1 : 0) | (optional ? 2 : 0)
+      keys = keys.uniq
+      tables << "  #{flags}, #{path.size}, #{path.join(', ')}, #{keys.size},\n"
+      keys.each_slice(4) { |slice| tables << "  #{slice.map { |k| "bc2cpp_lo_sym(#{k})" }.join(', ')},\n" }
+    end
+    tables << "  0xffff\n};\n"
+    "  bc2cpp_left_out_walk(M, #{table});\n"
+  end
+
   # The removal of each listed accessor (left_out_accessors), in the program half: its owner is a program class.
   def emit_left_out_accessor_lines(out, accessors)
     accessors.group_by(&:first).each do |owner, entries|
+      entries = entries.reject { |_, name| left_out_row(owner, name, optional: false) }
+      next if entries.empty?
+
       var = "bc2cpp_owner_acc_#{sanitize(owner)}"
       out << "  struct RClass* #{var} = mrb_class_ptr(#{const_chain_value_expr(owner)});\n"
       entries.each do |_, name|
@@ -470,8 +576,11 @@ class CodeGen
 
   # The removal of each listed native (left_out_natives), in the program half. A native's class may be missing from a
   # build that does not link its source.
-  def emit_left_out_native_lines(out, natives, call: 'bc2cpp_left_out')
+  def emit_left_out_native_lines(out, natives, call: 'bc2cpp_left_out', table: true)
     natives.group_by(&:first).each do |owner, entries|
+      entries = entries.reject { |_, name| table && call == 'bc2cpp_left_out' && left_out_row(owner, name, optional: true) }
+      next if entries.empty?
+
       path = lexical_scope_path(owner).map { |seg| c_string_literal(seg) }
       out << "  {\n    static const char* const path[] = {#{path.join(', ')}};\n"
       out << "    if (struct RClass* c = bc2cpp_native_owner(M, path, #{path.size})) {\n"
@@ -785,7 +894,9 @@ class CodeGen
         if NULLABLE_TYPES.include?(type)
           "  bc2cpp_fixnum_or_nil_set(&((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)}, arg);\n"
         elsif type == :value
-          "  bc2cpp_keep_old(M, ((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)});\n" \
+          field = "((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)}"
+          keep = immediate_old_slot?(owner, ivar) ? '/* IMMEDIATE_OLD */' : "bc2cpp_keep_old(M, #{field});"
+          "  #{keep}\n" \
             "  ((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)} = arg;\n" \
             "  mrb_field_write_barrier_value(M, (struct RBasic*)mrb_obj_ptr(self), arg);\n"
         else
@@ -1346,8 +1457,8 @@ class CodeGen
   # RESPOND_TO_PHANTOM (closed build): the closed proof lets `respond_to?(:name)` take a Symbol that names a method
   # the build leaves out of the tables (SYMBOL_USES, static_dispatch_symbol_uses.rb), so respond_to? must still answer
   # true for it. bc2cpp_left_out (LEFT_OUT) records each left-out entry's class in one table shared by every compiled
-  # gem; mrb_respond_to (renamed below, for the generated code) and the Kernel#respond_to? it installs consult it when
-  # the method table says no. mruby's respond_to? ignores visibility and the closed world has no UNDEF, so "the
+  # gem, and bc2cpp_left_out_walk each walked stream (LEFT_OUT_TABLE) with its owners; mrb_respond_to (renamed below,
+  # for the generated code) and the Kernel#respond_to? it installs consult both when the method table says no. mruby's respond_to? ignores visibility and the closed world has no UNDEF, so "the
   # receiver is a kind of an owner of the entry" is the whole answer.
   def self.respond_to_phantom_runtime
     <<~'CPP'
@@ -1356,7 +1467,32 @@ class CodeGen
         [[maybe_unused]] static mrb_value bc2cpp_phantom_table(mrb_state* M) {
           return mrb_iv_get(M, mrb_obj_value(M->kernel_module), mrb_intern_lit(M, "__bc2cpp_left_out__"));
         }
+        // LEFT_OUT_TABLE: one [stream, owner per group...] Array per walked stream (bc2cpp_left_out_walk); the stream
+        // stays in ROM and only its owners are on the heap.
+        [[maybe_unused]] static mrb_value bc2cpp_phantom_streams(mrb_state* M) {
+          return mrb_iv_get(M, mrb_obj_value(M->kernel_module), mrb_intern_lit(M, "__bc2cpp_left_out_rows__"));
+        }
+        [[maybe_unused]] static mrb_bool bc2cpp_phantom_stream_responds(mrb_state* M, mrb_value entry, mrb_value obj, mrb_sym id) {
+          const uint16_t* p = static_cast<const uint16_t*>(mrb_cptr(RARRAY_PTR(entry)[0]));
+          for (mrb_int g = 1; *p != 0xffff; g++) {
+            p += 2 + p[1];
+            unsigned count = *p++;
+            bool named = false;
+            for (unsigned i = 0; i < count && !named; i++) named = (mrb_sym)p[i] == id;
+            p += count;
+            if (!named || g >= RARRAY_LEN(entry)) continue;
+            mrb_value owner = RARRAY_PTR(entry)[g];
+            if (!mrb_nil_p(owner) && mrb_obj_is_kind_of(M, obj, mrb_class_ptr(owner))) return TRUE;
+          }
+          return FALSE;
+        }
         [[maybe_unused]] static mrb_bool bc2cpp_phantom_responds(mrb_state* M, mrb_value obj, mrb_sym id) {
+          mrb_value streams = bc2cpp_phantom_streams(M);
+          if (mrb_array_p(streams)) {
+            for (mrb_int i = 0; i < RARRAY_LEN(streams); i++) {
+              if (bc2cpp_phantom_stream_responds(M, RARRAY_PTR(streams)[i], obj, id)) return TRUE;
+            }
+          }
           mrb_value table = bc2cpp_phantom_table(M);
           if (!mrb_hash_p(table)) return FALSE;
           mrb_value owners = mrb_hash_fetch(M, table, mrb_int_value(M, (mrb_int)id), mrb_nil_value());
@@ -1380,33 +1516,51 @@ class CodeGen
           mrb_get_args(M, "n|b", &id, &priv);
           return mrb_bool_value(bc2cpp_phantom_responds(M, self, id));
         }
-        [[maybe_unused]] static void bc2cpp_phantom_add(mrb_state* M, struct RClass* owner, mrb_sym id) {
+        // The hash table, made (and Kernel#respond_to? wrapped) by whichever gem records first.
+        [[maybe_unused]] static mrb_value bc2cpp_phantom_install(mrb_state* M) {
           mrb_value kernel = mrb_obj_value(M->kernel_module);
           mrb_value table = bc2cpp_phantom_table(M);
-          if (!mrb_hash_p(table)) {
-            struct RClass* k = M->kernel_module;
-            mrb_method_t m = bc2cpp_find_method(M, &k, mrb_intern_lit(M, "respond_to?"));
-            if (MRB_METHOD_UNDEF_P(m) || !MRB_METHOD_CFUNC_P(m)) {
-              mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")), "bc2cpp: RESPOND_TO_PHANTOM: Kernel#respond_to? is not mruby's native");
-            }
-            bc2cpp_original_respond_to = MRB_METHOD_CFUNC(m);
-            table = mrb_hash_new(M);
-            mrb_iv_set(M, kernel, mrb_intern_lit(M, "__bc2cpp_left_out__"), table);
-        #ifdef BC2CPP_ROM_METHOD_TABLES
-            static const mrb_mt_entry respond_to_rom[] = {
-              MRB_MT_ENTRY(bc2cpp_kernel_respond_to, MRB_SYM_Q(respond_to), MRB_ARGS_ARG(1, 1))
-            };
-            bc2cpp_mt_install(M, M->kernel_module, respond_to_rom, 1, false);
-        #else
-            mrb_define_method(M, M->kernel_module, "respond_to?", bc2cpp_kernel_respond_to, MRB_ARGS_ARG(1, 1));
-        #endif
+          if (mrb_hash_p(table)) return table;
+          struct RClass* k = M->kernel_module;
+          mrb_method_t m = bc2cpp_find_method(M, &k, mrb_intern_lit(M, "respond_to?"));
+          if (MRB_METHOD_UNDEF_P(m) || !MRB_METHOD_CFUNC_P(m)) {
+            mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")), "bc2cpp: RESPOND_TO_PHANTOM: Kernel#respond_to? is not mruby's native");
           }
+          bc2cpp_original_respond_to = MRB_METHOD_CFUNC(m);
+          table = mrb_hash_new(M);
+          mrb_iv_set(M, kernel, mrb_intern_lit(M, "__bc2cpp_left_out__"), table);
+        #ifdef BC2CPP_ROM_METHOD_TABLES
+          static const mrb_mt_entry respond_to_rom[] = {
+            MRB_MT_ENTRY(bc2cpp_kernel_respond_to, MRB_SYM_Q(respond_to), MRB_ARGS_ARG(1, 1))
+          };
+          bc2cpp_mt_install(M, M->kernel_module, respond_to_rom, 1, false);
+        #else
+          mrb_define_method(M, M->kernel_module, "respond_to?", bc2cpp_kernel_respond_to, MRB_ARGS_ARG(1, 1));
+        #endif
+          return table;
+        }
+        [[maybe_unused]] static void bc2cpp_phantom_add(mrb_state* M, struct RClass* owner, mrb_sym id) {
+          mrb_value table = bc2cpp_phantom_install(M);
           mrb_value owners = mrb_hash_fetch(M, table, mrb_int_value(M, (mrb_int)id), mrb_nil_value());
           if (!mrb_array_p(owners)) {
             owners = mrb_ary_new(M);
             mrb_hash_set(M, table, mrb_int_value(M, (mrb_int)id), owners);
           }
           mrb_ary_push(M, owners, mrb_obj_value(owner));
+        }
+        // A walked stream's entry, rooted before its owners are pushed onto it.
+        [[maybe_unused]] static mrb_value bc2cpp_phantom_add_stream(mrb_state* M, const uint16_t* rows) {
+          bc2cpp_phantom_install(M);
+          mrb_value kernel = mrb_obj_value(M->kernel_module);
+          mrb_value streams = bc2cpp_phantom_streams(M);
+          if (!mrb_array_p(streams)) {
+            streams = mrb_ary_new(M);
+            mrb_iv_set(M, kernel, mrb_intern_lit(M, "__bc2cpp_left_out_rows__"), streams);
+          }
+          mrb_value entry = mrb_ary_new(M);
+          mrb_ary_push(M, streams, entry);
+          mrb_ary_push(M, entry, mrb_cptr_value(M, const_cast<uint16_t*>(rows)));
+          return entry;
         }
         #define mrb_respond_to bc2cpp_mrb_respond_to
     CPP
