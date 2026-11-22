@@ -1,0 +1,7 @@
+== case 51: NFCXX_BACKEND=gcc   -fsanitize=undefined -fsanitize=address -c a.cpp -o a.o
+-- status: 2
+-- stdout
+-- stderr
+-- eccp
+(none)
+-- files

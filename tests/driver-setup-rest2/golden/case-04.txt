@@ -1,0 +1,46 @@
+== case 4: NFCXX_BACKEND=gcc   -fsanitize=address -c a.cpp -o a.o
+-- status: 1
+-- stdout
+-- stderr
+-- eccp
+eccp:
+  --c++23
+  --g++
+  --wdir
+  /
+  --no_auto_instantiation
+  -tused
+  --c_to_obj_option
+  -ffunction-sections
+  --c_to_obj_option
+  -fdata-sections
+  --c_to_obj_option
+  -Wl,--gc-sections
+  --sys_include=/usr/include/c++/13
+  --sys_include=/usr/include/x86_64-linux-gnu/c++/13
+  --sys_include=/usr/include/c++/13/backward
+  --sys_include=/usr/lib/gcc/x86_64-linux-gnu/13/include
+  --sys_include=/usr/local/include
+  --sys_include=/usr/include/x86_64-linux-gnu
+  --sys_include=/usr/include
+  --c_to_obj_lib=m
+  --c_to_obj_option
+  -O2
+  --c_to_obj_option
+  -fwrapv
+  --c_to_obj_option
+  -fno-strict-aliasing
+  --c_to_obj_option
+  -fkeep-static-functions
+  --c_to_obj_option
+  -fgnu89-inline
+  --c_to_obj_option
+  -fsanitize=address
+  --c_to_obj_option
+  -fno-omit-frame-pointer
+  -c
+  a.cpp
+  -o
+  a.o
+  env NFCXX_CC=<REPO>/scripts/gcc-cc.rb NFCXX_TRACE_UNIT=a.cpp NFCXX_TRACE_OWNER=
+-- files
