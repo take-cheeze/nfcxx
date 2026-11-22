@@ -4,6 +4,7 @@ require 'set'
 require_relative 'bytecode_ir_ops'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
+require_relative 'scan_cache'
 
 # CORE_DEFS: what decides whether a definition from mruby's own Ruby
 # may be compiled and registered over the interpreter's. The registry walks a
@@ -50,19 +51,37 @@ module CoreDefs
   # the steps of a compiled Fiber, Enumerator#next over Enumerator#each, is a C boundary its yield cannot cross), and the
   # parse scan drops a name some file defines outside a class body. The compile is kept (outside_compile) for
   # BlockSelfWorld's read of the same sources.
+  class OutsideCompileError < StandardError; end
+
+  # The variables compiling and registering the outside sources read (mrbc's, the irep cache's and the IR switches').
+  OUTSIDE_PAIRS_ENV = %w[MRBC BC2CPP_MRBC_RB BC2CPP_MRBC_RB_LOG BC2CPP_NO_MRBC BC2CPP_IREP_CACHE_DIR BC2CPP_EXT_PREFIX
+                         BC2CPP_CALL_CROSSCHECK BC2CPP_IR_SCALAR_SEEN BC2CPP_IR_QUERY_KEYS
+                         BC2CPP_IR_SHARED_DEFINITIONS].freeze
+
   def outside_redefined_labels(registry, ireps, paths, symbol, out_dir)
     compiled = ireps.each_value.to_set { |irep| File.expand_path(irep.file.to_s) }
     unread = paths.map { |path| File.expand_path(path) }.uniq.sort.reject { |path| compiled.include?(path) }
     return Set.new if unread.empty?
 
+    # The [owner, name] pairs depend on those sources, the compile's settings and the IR switches alone (OUTSIDE_PAIRS_ENV),
+    # so ScanCache keeps them: the compile and the registry over every linked Prism and RBS source were most of this
+    # phase. A failed compile is not stored, so it is reported again each run.
     begin
-      outside_ireps, outside_root = outside_compile(unread, symbol, out_dir)
-    rescue StandardError => e
+      pairs = ScanCache.fetch('core_defs.outside_pairs', unread, cache_absent: false, env: OUTSIDE_PAIRS_ENV) do
+        outside_ireps, outside_root = begin
+          outside_compile(unread, symbol, out_dir)
+        rescue ScanCache::Error
+          raise
+        rescue StandardError => e
+          raise OutsideCompileError, e.message
+        end
+        build_registry(outside_ireps.dup, outside_root)[0].values.flatten.to_set { |d| [d.owner, d.name] }
+      end
+    rescue OutsideCompileError => e
       # As BlockSelfWorld's read of the same sources: one that does not compile is reported, and nothing is learned.
       warn "bc2cpp: CORE_OUTSIDE_REDEFINED: an outside Ruby source does not compile (#{e.message.lines.first&.strip})"
       return Set.new
     end
-    pairs = build_registry(outside_ireps.dup, outside_root)[0].values.flatten.to_set { |d| [d.owner, d.name] }
     registry.values.flatten.select do |d|
       d.irep && pairs.include?([d.owner, d.name]) && core_source?(ireps.fetch(d.irep).file)
     end.to_set(&:irep)

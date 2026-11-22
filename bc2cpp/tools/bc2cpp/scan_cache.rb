@@ -34,7 +34,8 @@ module ScanCache
 
   class Error < RuntimeError; end
 
-  # The key holds no environment because a cached scan may not read any: ENV read while a scan computes is an Error.
+  # The key holds no environment because a cached scan may not read any: ENV read while a scan computes is an Error,
+  # except a variable the scan names in fetch's `env:`, whose value is in its key.
   module EnvGuard
     def self.refuse(name, args)
       raise Error, "bc2cpp: a cached scan read ENV.#{name}(#{args.map(&:inspect).join(', ')}); its key holds no " \
@@ -43,17 +44,17 @@ module ScanCache
 
     # The reads codegen makes on hot paths (a switch per send) take no splat, so the guard costs one compare.
     def [](name)
-      EnvGuard.refuse(:[], [name]) if ScanCache.computing.positive?
+      EnvGuard.refuse(:[], [name]) if ScanCache.computing.positive? && !ScanCache.env_allowed?(name)
       super
     end
 
     def key?(name)
-      EnvGuard.refuse(:key?, [name]) if ScanCache.computing.positive?
+      EnvGuard.refuse(:key?, [name]) if ScanCache.computing.positive? && !ScanCache.env_allowed?(name)
       super
     end
 
     def fetch(*args, &block)
-      EnvGuard.refuse(:fetch, args) if ScanCache.computing.positive?
+      EnvGuard.refuse(:fetch, args) if ScanCache.computing.positive? && !ScanCache.env_allowed?(args.first)
       super
     end
 
@@ -84,12 +85,20 @@ module ScanCache
     # How many cached scans are computing in this process (nested scans count once each).
     def computing = @computing || 0
 
-    def compute
+    # +env+: the variable names the scan may read (fetch's `env:`). A nested scan allows only its own.
+    def compute(env = nil)
       guard_env
       @computing = computing + 1
+      (@allowed_env ||= []) << env
       yield
     ensure
+      @allowed_env.pop
       @computing -= 1
+    end
+
+    def env_allowed?(name)
+      allowed = @allowed_env&.last
+      !allowed.nil? && allowed.include?(name)
     end
 
     # Outside the `ensure` above, and returning nil: a self-compiled bc2cpp's closed world then sees that the singleton
@@ -111,17 +120,19 @@ module ScanCache
 
   # The value of the scan `name` over `inputs` (file paths, in the order it reads them): the stored one when the
   # key is known, else the block's, which is stored for the next process.
-  def fetch(name, inputs, cache_absent: true)
+  # +env+: names of ENV variables the scan reads; their values join the key, and the scan may read those alone.
+  def fetch(name, inputs, cache_absent: true, env: nil)
     dir = directory
     memo = ScanCache.bypassed? ? nil : memory
     return yield unless dir || memo
 
-    key = key_for(name, inputs, cache_absent)
+    env_text = env && env.map { |var| "#{var}=#{ENV[var].inspect}" }.join("\0")
+    key = key_for(name, inputs, cache_absent, env_text)
     return yield unless key
 
     return memo.fetch(key) if memo&.key?(key)
 
-    value = dir ? fetch_entry(dir, name, key) { ScanCache.compute { yield } } : ScanCache.compute { yield }
+    value = dir ? fetch_entry(dir, name, key) { ScanCache.compute(env) { yield } } : ScanCache.compute(env) { yield }
     memo[key] = value if memo
     value
   end
@@ -137,11 +148,12 @@ module ScanCache
   end
 
   # nil when the scan cannot be keyed (an input is a directory, or is absent and the scan reports that).
-  def key_for(name, inputs, cache_absent)
+  def key_for(name, inputs, cache_absent, env_text = nil)
     digest = Digest::SHA256.new
     digest << "#{VERSION}\0#{Toolchain.versions.map(&:to_s).join("\0")}\0#{RUBY_PLATFORM}\0"
     digest << "#{Marshal::MAJOR_VERSION}.#{Marshal::MINOR_VERSION}\0"
     digest << "#{name}\0#{tools_digest}\0"
+    digest << "env\0#{env_text}\0" if env_text
     Array(inputs).each do |input|
       digest << "#{input}\0"
       if File.file?(input)
