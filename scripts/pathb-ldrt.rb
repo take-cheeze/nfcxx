@@ -47,16 +47,44 @@ end
 # Itanium C++ ABI runtime of libstdc++ (docs/notes/pathb-zero-cost-eh.md). Every Path B link names EDG's libC.a after this
 # archive and ahead of libstdc++ (the frames mode's order: libC.a's EH runtime must win there); in this mode libstdc++ must
 # provide the C++ ABI, its EH runtime, RTTI and operator new instead. So the script prints a GNU ld input script in place of
-# the archive (as glibc's libc.so is one): INPUT puts the archive, libstdc++ and libgcc_s at this position of the link
-# line, and libC.a after it then gives only what is still undefined (the lowering's helpers: the VLA pool, C99 complex
-# arithmetic). Not for cosmo (its own C++ runtime) or macOS (ld64 reads no linker scripts).
+# the archive (as glibc's libc.so is one): INPUT puts the archive, the lowering's helpers, libstdc++ and libgcc_s at this
+# position of the link line. The helpers (the VLA pool, C99 complex arithmetic, and the abort message they print) are
+# libC.a's own members, copied into libnfcxxedg.a: libC.a after the script then gives nothing, and a link that does not
+# name it (g++ x.o $(scripts/pathb-ldrt.rb)) has everything. Not for cosmo (its own C++ runtime) or macOS (ld64 reads no
+# linker scripts).
+EDG_HELPERS = %w[vla_alloc.o c99_complex.o error.o].freeze
+
+# libnfcxxedg.a in out: the EDG_HELPERS members of the harness's libC.a, or nil when there is no libC.a
+def edg_helpers(root, out)
+  libc = File.join(env("EDG_LIB") || File.join(env("EDG_BUILD") || "#{root}/build/edg", "lib"), "libC.a")
+  return nil unless File.file?(libc)
+
+  lib = "#{out}/libnfcxxedg.a"
+  return lib if File.file?(lib) && File.mtime(lib) >= File.mtime(libc)
+
+  members = IO.popen(["ar", "t", libc], &:read).split("\n") & EDG_HELPERS
+  return nil if members.empty?
+
+  tmp = IO.popen(["mktemp", "-d", "#{out}/.edg.XXXXXX"], &:read).sub(/\n+\z/, "")
+  exit($?.exitstatus || 1) unless $?.success?
+  at_exit { FileUtils.rm_rf(tmp) }
+
+  Dir.chdir(tmp) do
+    run!("ar", "x", libc, *members)
+    run!("ar", "rcs", "libnfcxxedg.a", *members)
+  end
+  File.rename("#{tmp}/libnfcxxedg.a", lib)
+  lib
+end
+
 cpfe = env("PATHB_CPFE") || "#{root}/build/pathb/cmake/bin/cpfe"
 if File.file?(File.join(File.dirname(cpfe), "eh-tables")) && !cc_bin.include?("cosmocc") &&
    IO.popen(["uname", "-s"], &:read).chomp != "Darwin"
   # named .a: the drivers pass a .a to the link as it is (GNU ld reads a link script whatever its name)
   script = "#{out}/libnfcxxld-eh.a"
+  helpers = edg_helpers(root, out)
   text = "/* nfcxx: scripts/pathb-ldrt.rb, a Path B link with exception tables (docs/notes/pathb-zero-cost-eh.md) */\n" \
-         "INPUT ( #{lib} -lstdc++ -lgcc_s )\n"
+         "INPUT ( #{lib}#{helpers ? " #{helpers}" : ""} -lstdc++ -lgcc_s )\n"
   unless File.file?(script) && File.read(script) == text
     File.write("#{script}.#{$$}", text)
     File.rename("#{script}.#{$$}", script)

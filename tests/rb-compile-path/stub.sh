@@ -41,6 +41,8 @@ case $name in
     fi
     exit "$rc" ;;
   ar|llvm-ar)
+    # `ar t` lists the member lines of an archive the stub wrote (or a test made); `ar x` extracts nothing
+    if [ "$1" = t ] && [ -f "${2:-}" ]; then sed -n 's/^member //p' "$2" | sed 's|.*/||'; exit 0; fi
     if [ "$1" = rcs ] && [ -n "${2:-}" ]; then
       { echo "AR"; for a in "${@:3}"; do echo "member $a"; done; } > "$2"
     fi

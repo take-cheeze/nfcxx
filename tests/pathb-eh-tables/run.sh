@@ -10,8 +10,8 @@
 #
 # Each: scripts/pathb-dump.rb --ir (a PATHB_EH=tables harness) -> scripts/pathb-ir-opt.rb (pathb-cc's passes) ->
 # scripts/pathb-ssa-build -> cc, linked with libnfcxxld.a (scripts/pathb-ldrt.rb: the long double helpers)
-# and libstdc++ (its personality, __gxx_personality_v0, is the tables'), and EDG's libC.a only after it (for the lowering's helpers:
-# VLAs, complex arithmetic; libstdc++ has the C++ ABI, its EH runtime and RTTI). The exit code must equal the // EXPECT:
+# and libstdc++ (its personality, __gxx_personality_v0, is the tables'), with no EDG libC.a: the lowering's helpers (VLAs,
+# complex arithmetic) are the link script's libnfcxxedg.a, and libstdc++ has the C++ ABI, its EH runtime and RTTI. The exit code must equal the // EXPECT:
 # value; `// STDOUT: same` also needs the standard output of the g++ build of the same sources. A trap's stderr message is libstdc++'s, not EDG's runtime's, so a
 # `// TRAP-STDERR:` line is not checked. `// TABLES-SKIP: reason` skips a program in this mode (counted, reported).
 #
@@ -31,6 +31,7 @@ printf 'function $f() {\n@s\n\tehnoexcept\n\tret\n}\n' | "$qbe" - >/dev/null 2>&
 tmo="timeout 10 "; command -v timeout >/dev/null 2>&1 || tmo=""
 ldrt=$(scripts/pathb-ldrt.rb) || exit 2
 libdir=${EDG_LIB:-$root/build/edg/lib}
+# (scripts/pathb-ldrt.rb copies the helpers out of it)
 [ -f "$libdir/libC.a" ] || { echo "pathb-eh-tables: no $libdir/libC.a" >&2; exit 2; }
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 total=0; pass=0; failed=0; skipped=0
@@ -47,7 +48,7 @@ build() { # SRC STEM: SRC through the pipeline to STEM.exe (with SRC's helper); 
     h=$n.helper.o
     g++ -O1 -c -o "$h" "${f%.cpp}.helper.cpp" 2> "$n.hcc" || { echo "helper: $(head -1 "$n.hcc")"; return 1; }
   fi
-  cc -o "$n.exe" "$n.s" $h "$ldrt" -lstdc++ -lgcc_s "$libdir/libC.a" -lpthread -lm -latomic 2> "$n.ld" ||
+  cc -o "$n.exe" "$n.s" $h "$ldrt" -lstdc++ -lgcc_s -lpthread -lm -latomic 2> "$n.ld" ||
     { echo "link: $(grep -m1 -o 'undefined reference to .*' "$n.ld" || head -1 "$n.ld")"; return 1; }
 }
 

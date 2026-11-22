@@ -28,12 +28,30 @@ if [ ! -f "$lib" ] || [ "$src" -nt "$lib" ]; then
   mv "$tmp/libnfcxxld.a" "$lib"
 fi
 # A harness with exception tables (eh-tables beside its cpfe): a GNU ld input script in place of the archive, which puts
-# libstdc++ and libgcc_s ahead of the libC.a every Path B link names after it (docs/notes/pathb-zero-cost-eh.md).
+# the lowering's helpers (libC.a's VLA pool, C99 complex and abort message members, copied into libnfcxxedg.a), libstdc++
+# and libgcc_s ahead of the libC.a every Path B link names after it (docs/notes/pathb-zero-cost-eh.md).
 cpfe=${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}
 if [ -f "$(dirname "$cpfe")/eh-tables" ] && case $cc_bin in *cosmocc*) false ;; *) true ;; esac && [ "$(uname -s)" != Darwin ]; then
   script=$out/libnfcxxld-eh.a
+  helpers=
+  libc=${EDG_LIB:-${EDG_BUILD:-$root/build/edg}/lib}/libC.a
+  if [ -f "$libc" ]; then
+    helpers=$out/libnfcxxedg.a
+    if [ ! -f "$helpers" ] || [ "$libc" -nt "$helpers" ]; then
+      members=$(ar t "$libc" | grep -x -e vla_alloc.o -e c99_complex.o -e error.o || true)
+      if [ -n "$members" ]; then
+        etmp=$(mktemp -d "$out/.edg.XXXXXX")
+        (cd "$etmp" && ar x "$libc" $members)
+        (cd "$etmp" && ar rcs libnfcxxedg.a $members)
+        mv "$etmp/libnfcxxedg.a" "$helpers"
+        rm -rf "$etmp"
+      else
+        helpers=
+      fi
+    fi
+  fi
   text="/* nfcxx: scripts/pathb-ldrt.rb, a Path B link with exception tables (docs/notes/pathb-zero-cost-eh.md) */
-INPUT ( $lib -lstdc++ -lgcc_s )"
+INPUT ( $lib${helpers:+ $helpers} -lstdc++ -lgcc_s )"
   if [ ! -f "$script" ] || [ "$(cat "$script")" != "$text" ]; then
     printf '%s\n' "$text" > "$script.$$"
     mv "$script.$$" "$script"

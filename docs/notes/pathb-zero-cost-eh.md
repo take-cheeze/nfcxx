@@ -16,8 +16,11 @@ EH lowering instead (an EH stack of runtime frames in thread-local storage, `set
 | QBE's i386 target | refused (it writes no tables and no CFI) |
 
 The link: `scripts/pathb-ldrt.rb` prints a GNU ld input script in place of `libnfcxxld.a` when the harness has tables,
-`INPUT(libnfcxxld.a -lstdc++ -lgcc_s)`, so every Path B link line (which names `libC.a` after it) gets libstdc++'s C++ ABI,
-EH runtime, RTTI and `operator new` first and `libC.a` gives only the lowering's helpers. The driver and
+`INPUT(libnfcxxld.a libnfcxxedg.a -lstdc++ -lgcc_s)`, so every Path B link line (which names `libC.a` after it) gets the
+lowering's helpers and libstdc++'s C++ ABI, EH runtime, RTTI and `operator new` first, and takes nothing from `libC.a`.
+`libnfcxxedg.a` is `libC.a`'s three self-contained members the lowering calls (`vla_alloc.o`, `c99_complex.o` and the
+abort message of `error.o`), copied out by the script, so a link that does not name `libC.a` at all
+(`g++ x.o $(scripts/pathb-ldrt.rb)`) has everything. The driver and
 `tests/pathb-qbe/run.sh` link no EH shim then (the shim hands libstdc++'s throws to EDG's runtime).
 
 ## Why
@@ -139,8 +142,8 @@ destructor a throw passes is the complete-object one (the subobject destructor o
 None of Path B's own: a pad reads the exception and the selector with `(eh-exc)` and `(eh-sel)` (QBE's `ehptr`, `ehsel`),
 the personality is libstdc++'s `__gxx_personality_v0`, so an object with tables needs only libstdc++ (`g++ x.o` links
 it). The program links libstdc++ first and `libC.a` after it (`scripts/pathb-ldrt.rb`'s link script): `libC.a` defines its own IA-64 RTTI vtables, `__cxa_*` and `__cxa_vec_*`, which libstdc++'s
-personality cannot use, so libstdc++ must provide those; `libC.a` then gives only what is still undefined, the lowering's
-helpers (the VLA pool, C99 complex arithmetic: self-contained members). No EH shim either: an exception thrown by
+personality cannot use, so libstdc++ must provide those; the lowering's helpers (the VLA pool, C99 complex arithmetic:
+self-contained members) come from `libnfcxxedg.a`, ahead of `libC.a`. No EH shim either: an exception thrown by
 libstdc++ is already one of ours.
 
 ### The IR passes (`scripts/pathb-ir-opt.rb`)
