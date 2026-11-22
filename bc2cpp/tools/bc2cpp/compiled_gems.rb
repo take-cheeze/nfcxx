@@ -854,6 +854,11 @@ def bc2cpp_compiled_gem_shards(spec, generated, prereqs)
   File.write(cold_stamp, cold_mode) unless File.exist?(cold_stamp) && File.read(cold_stamp) == cold_mode
   Rake::Task[generated].enhance([cold_stamp])
   Rake::Task[generated].enhance([ColdCompact.list_path]) if File.file?(ColdCompact.list_path)
+  # A kill switch (BC2CPP_<NAME>=0) changes the generated code, so a changed set of them regenerates.
+  switch_stamp = File.join(spec.build_dir, 'bc2cpp_kill_switches')
+  switch_mode = ENV.keys.grep(/\ABC2CPP_[A-Z0-9_]+\z/).select { |k| ENV[k] == '0' }.sort.map { |k| "#{k}=0\n" }.join
+  File.write(switch_stamp, switch_mode) unless File.exist?(switch_stamp) && File.read(switch_stamp) == switch_mode
+  Rake::Task[generated].enhance([switch_stamp])
   # A changed list regenerates too: the registrations it drops are in the generated file.
   lists = ENV['BC2CPP_STATIC_DISPATCH_LISTS']
   Rake::Task[generated].enhance([lists]) if lists && lists != 'none' && File.file?(lists)

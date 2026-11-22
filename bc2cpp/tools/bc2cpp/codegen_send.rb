@@ -1573,9 +1573,33 @@ class CodeGen
           "    #{fallback}" \
           "  }\n"
       else
-        # target.owner embeds no ivar, so its GETIV/SETIV never cast DATA_PTR(self); a
-        # wrong receiver is only semantically wrong, as unguarded MONO always was. No
-        # guard.
+        # target.owner embeds no ivar, so a wrong receiver is no memory hazard, but it still
+        # must raise: see MONO_RECEIVER_PROOF.
+        call = "#{RegName[d]} = #{impl}(M, #{([recv] + call_argv).join(', ')});"
+        proof = mono_receiver_proof(name, target, recv: recv, self_implicit: self_implicit, owner_def: owner_def,
+                                    irep: irep, idx: guard_proof_site, reg: drawing_proof_reg)
+        nil_arm = proof == :nilable && mono_nil_arm(d, recv, name, argv)
+        if nil_arm
+          return "  // MONO_NILABLE :#{name} -> #{target.owner}##{target.name} (receiver nil or proven to reach " \
+                 "#{target.owner}), nil test then direct C++ call#{native_note}\n" \
+                 "  if (mrb_nil_p(#{recv})) {\n    #{nil_arm}  } else {\n    #{call}\n  }\n"
+        end
+        unless proof == :proven
+          cw_site = closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx,
+                                      trace_insn: insn, trace_reg_offset: trace_reg_offset)
+          unless mono_guardable_owner?(target.owner)
+            # guarded_fallback_line's proofs read `listed` as the classes a guard took out; with no guard the
+            # receiver may still reach target, so only the plain send is right.
+            return "  // MONO_UNPROVEN :#{name} -> #{target.owner}##{target.name} (no class to guard), by-name send\n" \
+                   "  #{dynamic_dispatch_line(d, recv, name, argv)}"
+          end
+          check, listed = mono_receiver_check(target.owner, recv)
+          fallback = guarded_fallback_line(d, recv, name, argv, listed, cw_site)
+          return "  // MONO_GUARD :#{name} -> #{target.owner}##{target.name} (receiver unproven), " \
+                 "runtime-class-checked direct C++ call, by-name send fallback#{native_note}\n" \
+                 "  if (#{BranchHints.likely(check)}) {\n    #{call}\n" \
+                 "  } else {\n    #{fallback}  }\n"
+        end
         note = "  // MONO :#{name} -> #{target.owner}##{target.name}, direct C++ call (no by-name send)" \
                "#{native_note}\n"
         # PROVEN_MISS: MONO trusts the name alone, so a receiver proven to be another class
