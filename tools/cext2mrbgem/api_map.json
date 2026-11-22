@@ -46,8 +46,6 @@
     "T_COMPLEX": "stuck point (gem dependency): a Complex test is the mruby-complex class test, which needs the state and the gem (the decision is made: the gem is a dependency when the test is emitted); a bare use has no test to make here",
     "_comment": "A name with no api_map entry is refused with the reason given here (the converter's no-entry path). PRIsVALUE is converted where rb_raise and rb_sprintf take it; elsewhere it is an argument of rb_enc_sprintf, which takes an rb_encoding *.",
     "PRIsVALUE": "stuck point (PRIsVALUE): PRIsVALUE outside the format of rb_raise, rb_sprintf and rb_enc_sprintf (a VALUE argument of another call) is not converted; it has no mruby form in this position",
-    "rb_thread_local_aref": "stuck point (Thread): thread-local storage; the fork has no Thread (accepted stuck point)",
-    "rb_thread_local_aset": "stuck point (Thread): thread-local storage; the fork has no Thread (accepted stuck point)",
     "T_NONE": "stuck point: the fork has no T_NONE tag (the MRB_TT enum, include/mruby/value.h:106-131); the empty-object marker has no mruby value kind",
     "RUBY_T_NONE": "stuck point: the fork has no T_NONE tag (the MRB_TT enum, include/mruby/value.h:106-131); the empty-object marker has no mruby value kind",
     "rb_time_timespec_new": "stuck point (Time offset): mruby-time's Time has only UTC and LOCAL timezones (mrbgems/mruby-time/include/mruby/time.h:15-20; getlocal takes no offset), so a fixed UTC offset from the caller cannot be represented",
@@ -99,6 +97,24 @@
     }
   },
   "entries": {
+    "rb_thread_local_aref": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "prelude": "static mrb_value nfcx_tls_hash(mrb_state *mrb) {\n  mrb_sym s = mrb_intern_cstr(mrb, \"$__nfcx_thread_locals\");\n  mrb_value h = mrb_gv_get(mrb, s);\n  if (mrb_nil_p(h)) { h = mrb_hash_new(mrb); mrb_gv_set(mrb, s, h); }\n  return h;\n}\nstatic mrb_value nfcx_tls_aref(mrb_state *mrb, mrb_value thread, mrb_sym key) {\n  (void)thread;\n  return mrb_hash_get(mrb, nfcx_tls_hash(mrb), mrb_symbol_value(key));\n}\nstatic mrb_value nfcx_tls_aset(mrb_state *mrb, mrb_value thread, mrb_sym key, mrb_value val) {\n  (void)thread;\n  mrb_hash_set(mrb, nfcx_tls_hash(mrb), mrb_symbol_value(key), val);\n  return val;\n}",
+      "prelude_name": "nfcx_tls",
+      "template": "nfcx_tls_aref($m, $0, $1)",
+      "caveat": "CRuby's thread-local storage (rb_thread_local_aref/aset of a symbol key): a per-state hash in a global of the mrb_state. Each mruby-uv thread has its own mrb_state, so each thread has its own values; the thread argument is ignored, and a state shared between threads shares its values"
+    },
+    "rb_thread_local_aset": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "prelude": "static mrb_value nfcx_tls_hash(mrb_state *mrb) {\n  mrb_sym s = mrb_intern_cstr(mrb, \"$__nfcx_thread_locals\");\n  mrb_value h = mrb_gv_get(mrb, s);\n  if (mrb_nil_p(h)) { h = mrb_hash_new(mrb); mrb_gv_set(mrb, s, h); }\n  return h;\n}\nstatic mrb_value nfcx_tls_aref(mrb_state *mrb, mrb_value thread, mrb_sym key) {\n  (void)thread;\n  return mrb_hash_get(mrb, nfcx_tls_hash(mrb), mrb_symbol_value(key));\n}\nstatic mrb_value nfcx_tls_aset(mrb_state *mrb, mrb_value thread, mrb_sym key, mrb_value val) {\n  (void)thread;\n  mrb_hash_set(mrb, nfcx_tls_hash(mrb), mrb_symbol_value(key), val);\n  return val;\n}",
+      "prelude_name": "nfcx_tls",
+      "template": "nfcx_tls_aset($m, $0, $1, $2)",
+      "caveat": "CRuby's thread-local storage (rb_thread_local_aref/aset of a symbol key): a per-state hash in a global of the mrb_state. Each mruby-uv thread has its own mrb_state, so each thread has its own values; the thread argument is ignored, and a state shared between threads shares its values"
+    },
     "rb_define_module": {
       "kind": "call",
       "mruby": "mrb_define_module",
