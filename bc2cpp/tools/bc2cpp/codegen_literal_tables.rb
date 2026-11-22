@@ -17,7 +17,7 @@ require_relative 'symbol_cache'
 # write: the walk runs in instruction order from the writes, stopping at a jump target, a branch or any instruction
 # whose reads are not listed in literal_table_effect; a register below nlocals (a local a block may capture) is never
 # skipped; a body with catch handlers is refused. A kept constant read must reach the root with no emitted write of
-# its register in between. A Hash key is a scalar literal, so no Ruby `hash`/`eql?` runs while the table builds.
+# its register in between. A Hash key is a scalar literal or a flat Array of them (literal_table_key?).
 # Kill switch: BC2CPP_LITERAL_TABLES=0.
 class CodeGen
   LiteralNode = Struct.new(:kind, :idx, :value, :children, :reg, :parent)
@@ -38,10 +38,17 @@ class CodeGen
     ENV['BC2CPP_LITERAL_TABLES'] != '0'
   end
 
+  # LITERAL_WALK: the refusal walk steps over the class body's own instructions (class_body_literal_effect) instead of
+  # stopping at them. Kill switch: BC2CPP_LITERAL_WALK=0.
+  def literal_walk_enabled?
+    ENV['BC2CPP_LITERAL_WALK'] != '0'
+  end
+
   # The plan for one body: `skip` (instruction indices emitted as nothing) and `glue` (root index => C++ text).
   # `claimed` (addr, index) marks instructions another emitter owns; `freeze_send` admits the class body's
-  # `literal.freeze`.
-  def literal_table_plan(irep, claimed: nil, freeze_send: false)
+  # `literal.freeze`. `effect` (insn, index) gives [reads, writes] of an instruction the caller emits itself (or nil),
+  # for the refusal walk only: the trees still stop at it.
+  def literal_table_plan(irep, claimed: nil, freeze_send: false, effect: nil)
     return LITERAL_TABLE_EMPTY unless literal_tables_enabled?
 
     program = BytecodeIR.for(irep)
@@ -52,7 +59,7 @@ class CodeGen
       roots = literal_table_trees(irep, program, claimed, forbidden)
       return LITERAL_TABLE_EMPTY if roots.empty?
 
-      bad = literal_table_refusals(irep, program, roots, claimed, freeze_send)
+      bad = literal_table_refusals(irep, program, roots, claimed, freeze_send, effect)
       return literal_table_finish(roots) if bad.empty?
 
       forbidden.merge(bad)
@@ -83,7 +90,11 @@ class CodeGen
       when :GETCONST, :LAMBDA
         state[a] = LiteralNode.new(:dyn, idx, nil, nil, a)
       when :GETMCNST
-        state[a] = state[a]&.kind == :dyn ? LiteralNode.new(:dyn, idx, nil, nil, a) : nil
+        # A proved Integer member (literal_table_const_int) is a leaf; the scope read before it stays an instruction.
+        state[a] = if state[a]&.kind != :dyn then nil
+                   elsif (value = literal_table_const_int(insn.mcnst_name)) then LiteralNode.new(:int, idx, value)
+                   else LiteralNode.new(:dyn, idx, nil, nil, a)
+                   end
       when :HASH, :ARRAY
         regs = literal_table_operands(insn)
         unless regs
@@ -94,7 +105,7 @@ class CodeGen
         regs.each { |r| state.delete(r) }
         node = nil
         if nodes.all? && !forbidden.include?(idx) && nodes.size < 2 * LITERAL_TABLE_LIMIT &&
-           (insn.op == :ARRAY || nodes.each_slice(2).all? { |k, _| LITERAL_TABLE_SCALARS.include?(k.kind) })
+           (insn.op == :ARRAY || nodes.each_slice(2).all? { |k, _| literal_table_key?(k) })
           node = LiteralNode.new(insn.op == :HASH ? :hash : :array, idx, nil, nodes, a)
           nodes.each { |child| child.parent = node }
           containers << node
@@ -106,6 +117,17 @@ class CodeGen
     end
     # A table pays a call and its pointers: below LITERAL_TABLE_MIN_NODES the instructions are as small.
     containers.select { |node| node.parent.nil? && literal_table_members(node).size >= LITERAL_TABLE_MIN_NODES }
+  end
+
+  # A Hash key the table may hold: a scalar literal, or (LITERAL_ARRAY_KEYS) an Array literal of non-String scalars.
+  # An Array key's `hash`/`eql?` may be Ruby, but the builder makes the same mrb_hash_set calls in the same order on
+  # equal, fully built keys and values; only when the later pairs' fresh objects are allocated differs, which no Ruby
+  # code can reach. Kill switch: BC2CPP_LITERAL_ARRAY_KEYS=0.
+  def literal_table_key?(node)
+    return true if LITERAL_TABLE_SCALARS.include?(node.kind)
+
+    ENV['BC2CPP_LITERAL_ARRAY_KEYS'] != '0' && node.kind == :array &&
+      node.children.all? { |child| LITERAL_TABLE_SCALARS.include?(child.kind) && child.kind != :str }
   end
 
   # The registers a HASH or ARRAY reads, in order; nil for a shape not modelled.
@@ -135,6 +157,9 @@ class CodeGen
 
       macro = SymbolCache.presym_macro("\"#{name}\"")
       macro && LiteralNode.new(:sym, idx, macro)
+    when :GETCONST
+      value = literal_table_const_int(insn.const_name)
+      value && LiteralNode.new(:int, idx, value)
     when :STRING
       entry = irep.pool.fetch(insn.pool_index.to_i)
       # A frozen literal (FROZEN_LITERALS) is one persistent object, which compile_insn reads; it stays an instruction.
@@ -148,6 +173,16 @@ class CodeGen
       value = Integer(lit.to_s, exception: false)
       value && value.between?(-0x8000_0000, 0x7fff_ffff) ? LiteralNode.new(:int, idx, value) : nil
     end
+  end
+
+  # LITERAL_CONST_INTS: the value compile_insn loads for a constant INTEGER_CONSTANT_VALUE_PROOF proved (its GETCONST
+  # or GETMCNST is that fixnum and nothing else), when it fits a table word; nil otherwise. Kill switch:
+  # BC2CPP_LITERAL_CONST_INTS=0.
+  def literal_table_const_int(name)
+    return nil if ENV['BC2CPP_LITERAL_CONST_INTS'] == '0'
+
+    value = self.class.integer_constant_values&.[](name)
+    value.is_a?(Integer) && value.between?(-0x8000_0000, 0x7fff_ffff) ? value : nil
   end
 
   # [reads, writes] of an instruction the refusal walk may step over, or nil (its reads are not known). An emitted
@@ -174,7 +209,7 @@ class CodeGen
   end
 
   # Root indices whose plan is unsound (see the file comment); empty when every plan stands.
-  def literal_table_refusals(irep, program, roots, claimed, freeze_send)
+  def literal_table_refusals(irep, program, roots, claimed, freeze_send, outer_effect = nil)
     nlocals = irep.nlocals.to_i
     member_root = {}
     root_at = {}
@@ -218,7 +253,8 @@ class CodeGen
         live.clear
         next
       end
-      effect = claimed&.call(insn.addr, idx) ? nil : literal_table_effect(insn, freeze_send)
+      effect = outer_effect && literal_walk_enabled? && outer_effect.call(insn, idx)
+      effect ||= claimed&.call(insn.addr, idx) ? nil : literal_table_effect(insn, freeze_send)
       unless effect
         fail_all.call
         next

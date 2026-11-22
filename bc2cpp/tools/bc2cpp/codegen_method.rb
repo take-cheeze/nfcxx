@@ -635,6 +635,9 @@ class CodeGen
         prefix_at.key?(addr) || guarded_inline[:at].key?(addr) || guarded_inline[:after].key?(addr)
     end
     pending_splat = nil
+    # GUARD_HOIST (codegen_guard_hoist.rb): no site inside a glued or guarded-inline range (guard_hoist_bypassed).
+    guard_hoist_session(irep, prefix_at.empty?,
+                        bypassed: guard_hoist_bypassed(irep, suppressed, glue_at, guarded_inline)) do
     BytecodeIR.for(irep).each_source do |insn, idx|
       bypassed = suppressed.include?(insn.addr) || glue_at.key?(insn.addr) || guarded_inline[:at].key?(insn.addr)
       stack_tuple_visit(irep, idx, bypassed)
@@ -658,7 +661,7 @@ class CodeGen
                shared_send
              else
                inline_prefix = guarded_inline[:at][insn.addr]
-               own = glue_at[insn.addr] || cold_compact(insn, compile_insn(insn, irep, d, idx), d)
+               own = glue_at[insn.addr] || cold_compact(insn, guard_hoist_site(irep, idx, insn, compile_insn(insn, irep, d, idx)), d)
                inline_prefix ? inline_prefix + own : own
              end
       # STEP_EXIT_JUMPS: an exit from an ensure region goes through the ensure body first.
@@ -679,6 +682,7 @@ class CodeGen
       else
         out << jump_label << text
       end
+    end
     end
     if arm_prune_drop && !arm_texts.empty?
       held = arm_texts.transform_values { |label, text| label + text }
