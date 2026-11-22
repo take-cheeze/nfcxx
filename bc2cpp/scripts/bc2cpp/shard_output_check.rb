@@ -42,6 +42,16 @@ PRELUDE = <<~'CPP'
   #endif
   struct Pair { int a; int b; };
   static int twice(int x) { return 2 * x; }
+  template <int N> static inline int times(int x) { return N * x; }
+  template <class F>
+  static int apply(F f) { return f(); }
+  static int wrapped(int a,
+                     int b) { return a + b; }
+  static int wrapped_state(int a,
+                           int b) {
+    static int seen = 0;
+    return seen += a + b;
+  }
   #define BC2CPP_SHARD_ONE_BODY
   static int thrice(int x) { return 3 * x; }
   BC2CPP_SHARD_ONE_BODY static int one_body(int x) { return thrice(x); }
@@ -122,6 +132,9 @@ suite.check('partial delimiters, UTF-8 and empty raw tags preserve the enclosing
 suite.check('comment and raw-string false endings do not split the function',
             ShardOutput.top_level_items(delimiter_lines).map { |item| item.values_at(:name, :first, :last) } ==
               [['delimiter_guards', 0, delimiter_lines.size - 1]])
+suite.check('the blanked code text keeps one line per input line (item indices address it)',
+            ShardOutput.code_text(PRELUDE.lines).lines.size == PRELUDE.lines.size &&
+              ShardOutput.code_text(delimiter_lines).lines.size == delimiter_lines.size)
 suite.check('division stays code while a trailing line comment hides its brace',
             delimiter_scan[-2][:code].strip == 'return n / 2;')
 small, small_shards = ShardOutput.split(marked, 'chk', 3)
@@ -142,7 +155,12 @@ suite.check('prelude state and helpers are inline in the gem namespace',
 suite.check('function-local statics are left alone', main.include?('  static int calls = 0;'))
 suite.check('SHARED_HELPERS: a stateless prelude helper is inline under -Os (one body per gem)',
             main.include?("\n[[maybe_unused]] BC2CPP_SHARED_FN int twice(int x)") &&
+              main.include?("\ntemplate <int N> BC2CPP_SHARED_STATIC inline int times(int x)") &&
+              main.include?("\ntemplate <class F>\nBC2CPP_SHARED_FN int apply(F f)") &&
               main.include?("#ifdef __OPTIMIZE_SIZE__\n#define BC2CPP_SHARED_FN inline\n"))
+suite.check('a head wrapped over lines is read as its function: stateless shared, stateful inline',
+            main.include?("\n[[maybe_unused]] BC2CPP_SHARED_FN int wrapped(int a,\n") &&
+              main.include?("\ninline int wrapped_state(int a,\n"))
 ENV['BC2CPP_SHARED_HELPERS'] = '0'
 helpers_off, = ShardOutput.split(marked, 'chk', 3)
 ENV.delete('BC2CPP_SHARED_HELPERS')

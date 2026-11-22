@@ -342,7 +342,11 @@ module ShardOutput
                 # A shard need not call every helper the whole program does.
                 line = lines[item[:first]] = "[[maybe_unused]] #{line}"
               end
-              lines[item[:first]] = to_shared_helper(line) if helpers.include?(item[:name])
+              if helpers.include?(helper_name(item))
+                # A template head may stand on its own line, before the one with `static`.
+                at = (item[:first]..item[:last]).find { |k| lines[k][/\A[^(]*/].match?(/\bstatic\b/) }
+                lines[at] = to_shared_helper(lines[at]) if at
+              end
             end
           end
         else
@@ -413,14 +417,23 @@ module ShardOutput
       lines = seg[:lines]
       items = top_level_items(lines)
       if items.any? { |item| (!item[:body] && method_names.include?(item[:name])) || external?(lines[item[:first]], item) }
-        kept.merge(items.filter_map { |item| item[:name] })
+        kept.merge(items.filter_map { |item| helper_name(item) || item[:name] })
         next
       end
       items.each do |item|
-        names << item[:name] if item[:function] && item[:body] && item[:name] && lines[item[:first]][/\A[^(]*/].match?(/\bstatic\b/)
+        name = helper_name(item)
+        names << name if name && item[:body] && item[:head][/\A[^(]*/].match?(/\bstatic\b/)
       end
     end
     names - kept
+  end
+
+  # A function's name, a function template's too (top_level_items names no template).
+  def helper_name(item)
+    return nil unless item[:function]
+    return item[:name] unless item[:head].start_with?('template')
+
+    item[:head][/\Atemplate\s*<[^<>]*>\s*(?:\[\[[^\]]*\]\]\s*)*static\b[^(]*?([A-Za-z_]\w*)\s*\(/, 1]
   end
 
   # SHARD_SINGLE_DEFINITION's prelude names: every file-scope variable, every function holding a mutable
@@ -459,10 +472,11 @@ module ShardOutput
     shared
   end
 
-  # The text with comments and literals blanked; a directive line keeps its text (a macro can name a function).
+  # The text with comments and literals blanked, line for line (callers index its lines as the input's); a directive
+  # line keeps its text (a macro can name a function).
   def code_text(lines)
     scan_lines(lines).each_with_index.map do |info, i|
-      info[:pp] ? lines[i].sub(%r{//.*}, '') : "#{info[:code]}\n"
+      info[:pp] ? lines[i].sub(%r{//.*}, '') : "#{info[:code].chomp}\n"
     end.join
   end
 
@@ -525,10 +539,12 @@ module ShardOutput
     scan.each_index.select { |k| scan[k][:item_start] }.map do |k|
       head = String.new
       cut = nil
+      depth = 0
       j = k
       loop do
         code = scan[j][:code]
-        cut = head_cut(code)
+        # A parameter list wrapped over lines carries its parenthesis depth to the line holding the body's `{`.
+        cut, depth = head_cut(code, depth)
         head << (cut ? code[0...cut] : code) << ' '
         break if cut || scan[j][:item_end] || j + 1 >= lines.size
 
@@ -549,17 +565,17 @@ module ShardOutput
   end
 
   # The index where a head meets its body `{`, initializer `=` or end `;` (outside parentheses), or nil.
-  def head_cut(code)
-    depth = 0
+  # [index or nil, the depth after the line]; `depth` is the depth the line starts at.
+  def head_cut(code, depth = 0)
     code.each_char.with_index do |c, i|
       case c
       when '(', '[' then depth += 1
       when ')', ']' then depth -= 1
-      when '{', ';' then return i if depth.zero?
-      when '=' then return i if depth.zero? && code[i + 1] != '=' && !'=!<>'.include?(code[i - 1].to_s)
+      when '{', ';' then return [i, depth] if depth.zero?
+      when '=' then return [i, depth] if depth.zero? && code[i + 1] != '=' && !'=!<>'.include?(code[i - 1].to_s)
       end
     end
-    nil
+    [nil, depth]
   end
 
   # Per line: the brace depth it starts at, its code with comments and literals blanked (:code), whether it is a
