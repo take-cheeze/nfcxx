@@ -80,6 +80,9 @@ root=$(cd "$(dirname "$0")" && pwd)
 owned_cudatmp=${NFCXX_OWNED_CUDATMP-}; owned_tmp=${NFCXX_OWNED_TMP-}; unset NFCXX_OWNED_CUDATMP NFCXX_OWNED_TMP
 # NFCXX_OWNED_CTMP and NFCXX_OWNED_PTMP: the C-input and Path B object directories, made by the Ruby driver the same way.
 owned_ctmp=${NFCXX_OWNED_CTMP-}; owned_ptmp=${NFCXX_OWNED_PTMP-}; unset NFCXX_OWNED_CTMP NFCXX_OWNED_PTMP
+# NFCXX_FALLBACK_MARKER: the file fallback_gcc leaves its message in for the Ruby driver. It is read and unset here: the cache
+# key takes every NFCXX_* variable, and the marker's name is a new temporary file for each run (a key that never repeats).
+fallback_marker=${NFCXX_FALLBACK_MARKER-}; unset NFCXX_FALLBACK_MARKER
 # temp_cleanup: removes the driver's temporary directories the EXIT traps name. Each trap calls it, so a later trap (which
 # replaces an earlier one) does not leave the earlier stage's directory behind. The eccp directory is not here: eccp_cleanup
 # removes it, and only when the intermediates are not kept. A directory the Ruby driver owns (cudatmp_owned, tmp_owned) is not
@@ -97,8 +100,8 @@ temp_cleanup() {
 # arguments, and exits with its status. Run alone, the body prints MESSAGE and execs the driver, as it always did.
 fallback_gcc() {
   temp_cleanup
-  if [ -n "${NFCXX_FALLBACK_MARKER:-}" ]; then
-    printf '%s\n' "$1" > "$NFCXX_FALLBACK_MARKER"
+  if [ -n "$fallback_marker" ]; then
+    printf '%s\n' "$1" > "$fallback_marker"
     trap - EXIT
     exit 0
   fi
