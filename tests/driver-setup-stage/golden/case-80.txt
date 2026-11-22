@@ -1,0 +1,8 @@
+== case 80:  --freestanding -fsafe-pointers a.cpp -o a
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: -fsafe-pointers needs Path B, which compiles hosted programs only
+-- eccp
+(none)
+-- files

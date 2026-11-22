@@ -1,0 +1,8 @@
+== case 62:  -fsanitize=, -c a.cpp -o a.o
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: -fsanitize= is not supported (implemented: undefined, signed-integer-overflow, integer-divide-by-zero, shift, bounds, null, unreachable, return, float-cast-overflow)
+-- eccp
+(none)
+-- files

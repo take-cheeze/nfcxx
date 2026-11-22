@@ -1,0 +1,8 @@
+== case 71: NFCXX_BACKEND=a\$b   -c a.cpp -o a.o
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: unknown backend 'a\$b'
+-- eccp
+(none)
+-- files

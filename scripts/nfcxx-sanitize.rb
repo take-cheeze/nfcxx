@@ -11,7 +11,11 @@ IMPLEMENTED = %w[undefined signed-integer-overflow integer-divide-by-zero shift 
 
 def check(sanitize, freestanding)
   return nil if sanitize.empty?
-  sanitize.split(",").each do |c|
+  # the names as the bash's `IFS=, read -ra` splits them: a trailing comma ends the last name (it makes no empty name), every
+  # other empty name is one (",undefined" and "undefined,,bounds" name "" and are refused)
+  names = sanitize.split(",", -1)
+  names.pop if sanitize.end_with?(",")
+  names.each do |c|
     next if IMPLEMENTED.include?(c)
     return "nfcxx: -fsanitize=#{c} is not supported (implemented: #{IMPLEMENTED.join(', ')})"
   end

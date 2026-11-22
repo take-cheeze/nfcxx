@@ -1,0 +1,38 @@
+== case 29:  --freestanding -c a.cpp -o a.o
+-- status: 1
+-- stdout
+-- stderr
+pathb-cc: a.cpp: the optimized IR is refused (pathb-ssa-build: QBE failed: <REPO>/build/qbe/qbe: invalid option -- 'V'), using the unoptimized IR
+pathb-cc: a.cpp: SSA route: pathb-ssa-build: QBE failed: <REPO>/build/qbe/qbe: invalid option -- 'V'
+nfcxx: Path B did not build a.cpp (status 1); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)
+-- eccp
+eccp:
+  --c++23
+  --g++
+  --wdir
+  /
+  --no_standard_includes
+  -I<REPO>/lib
+  --no_auto_instantiation
+  -tused
+  --c_to_obj_option
+  -ffunction-sections
+  --c_to_obj_option
+  -fdata-sections
+  --c_to_obj_option
+  -Wl,--gc-sections
+  --c_to_obj_option
+  -O2
+  --c_to_obj_option
+  -fwrapv
+  --c_to_obj_option
+  -fno-strict-aliasing
+  --c_to_obj_option
+  -fkeep-static-functions
+  --c_to_obj_option
+  -fgnu89-inline
+  -c
+  a.cpp
+  -o
+  a.o
+-- files

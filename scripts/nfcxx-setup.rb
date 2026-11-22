@@ -44,6 +44,12 @@ module NfcxxSetup
     io.string
   end
 
+  # the values of the default step's statements (backend, default_backend, pb_fs_host), unquoted as the shell reads them
+  def default_values(text)
+    words = Shellwords.split(text).to_h { |kv| kv.split("=", 2) }
+    words.values_at("backend", "default_backend", "pb_fs_host")
+  end
+
   # the words of a bash array the planners print, as "NAME=(...)" (mode "=") or "NAME+=(...)" (mode "+="); [mode, words]
   def array_words(text, name)
     text.each_line do |line|
@@ -58,7 +64,7 @@ module NfcxxSetup
     case step
     when "default"
       backend, default_backend, pb_fs = NfcxxBackend.default_choice(opts)
-      "backend=#{backend} default_backend=#{default_backend} pb_fs_host=#{pb_fs}\n"
+      "backend=#{Shellwords.escape(backend)} default_backend=#{default_backend} pb_fs_host=#{pb_fs}\n"
     when "asan"
       asan = opts.fetch("asan", "")
       backend = opts.fetch("backend", "")
@@ -121,7 +127,7 @@ module NfcxxSetup
     # 1. the default backend: sets backend, default_backend and pb_fs_host
     text = run("default", state, env)
     record.("default", text)
-    state["backend"], state["default_backend"], state["pb_fs_host"] = text.scan(/(\S+)=(\S+)/).map(&:last)
+    state["backend"], state["default_backend"], state["pb_fs_host"] = default_values(text)
 
     # 2. the sanitizer, which reads the backend the default chose
     record.("asan", run("asan", state, env))
@@ -220,7 +226,7 @@ module NfcxxSetup
     flag = ->(k) { state.fetch(k, "0") == "1" }
     out = +""
     out << run("default", state, env)
-    state["backend"], state["default_backend"], state["pb_fs_host"] = out.scan(/(\S+)=(\S+)/).map(&:last)
+    state["backend"], state["default_backend"], state["pb_fs_host"] = default_values(out)
     out << run("asan", state, env)
     out << run("instantiate", state, env)
     out << run("cosmo", state, env) if flag.("cosmo")
@@ -245,7 +251,7 @@ module NfcxxSetup
 
   # The backend stage after the planners and the emit-C path (bash: the sanitizer, -fsafe-pointers and the Path B override):
   # the refusals first, in the bash's order, then the statements that set pb_flags and backend. The sanitizer's check is the
-  # one scripts/nfcxx-sanitize.rb makes (its message and status 2). The text is eval'd by the driver, where the bash ran them.
+  # one scripts/nfcxx-sanitize.rb makes (its message and status 2). The body evals the text, where the bash ran them.
   def stage_text(opts)
     out = +""
     sanitize = opts.fetch("sanitize", "")

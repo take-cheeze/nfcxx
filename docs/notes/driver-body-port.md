@@ -22,6 +22,12 @@ Checked against origin/main after #1432 (the compile cache's lookup planner).
   `freestanding`, the trace unit, `cu_prepare`, `cpp2_prepare`, the cache hit and store (`cache_check`, `cache_store`), the
   eccp call (`eccp_plan`, its trap and its trace span), the depmode step, the CUDA host-symbol second pass, and the second run
   with an environment prefix.
+- The setup's backend choice is planned by Ruby (`scripts/nfcxx-setup.rb` default step: the default backend and `pb_fs_host`),
+  and the stage after the emit-C route is planned by Ruby (its stage step: the `-fsanitize=` names, `-fsafe-pointers`, the Path B
+  override and their refusals). `scripts/nfcxx.rb` plans both on the argument loop's state (`NfcxxSetupArgs.planned_state`) and
+  passes them in `NFCXX_SETUP_DEFAULT`, and in `NFCXX_SETUP_STAGE_STATUS` and `NFCXX_SETUP_STAGE`; the body evals them at its
+  places, and a stage refusal is printed where the bash printed it. The body plans them itself when the driver gave no state
+  (the wrappers' arguments). `tests/driver-setup-stage` checks the argument lists against recordings of the bash setup.
 - The SYCL two-pass build (`scripts/nfcxx-sycl.rb`) now runs in `scripts/nfcxx.rb`, before the body starts:
   the body's early exits never refuse its arguments. `tests/driver-sycl-dispatch` holds the goldens.
 - Helpers still defined in the body: `temp_cleanup`, `abs_path`, `onoff`, `ensure_tool`, `ecp_args`, `state_put`,
@@ -41,20 +47,11 @@ The body can be deleted only when the Ruby driver runs every stage without it. I
 2. **Early exits.** `--emit-hip`, the `-x` and `-MD` checks. The module block is planned in Ruby
    (`scripts/nfcxx-modules-plan.rb`: scans, refusals, the module build of a link, the compile's module options); the body
    only calls it at the block's place and ends with the build's status.
-3. **Setup.** The backend choice, sanitizers, `instantiate`, `cosmo`, `freestanding`, host probes and the trace unit.
-   Most of the decisions are already in the planners; the bash only calls them.
-4. **CUDA and `.cpp2` preparation.** `cu_prepare` and `cpp2_prepare` rewrite the source list and the trap; Ruby must do the
-   rewrite and own the trap.
-5. **Cache hit and store.** `cache_check` and `cache_store` call the Ruby helpers; the remote tier (`cache-io`) and the
-   `--cache-log` writes are called from bash.
-6. **Routes.** The gcc route and the Path B `-c` and link routes still evaluate their planner output in bash.
-7. **eccp call.** The plan, trap, subshell and trace span, then the depmode step and the CUDA host-symbol second pass.
-8. **Temporary directories and traps.** The Ruby driver already owns the temporary root (`Dir.mktmpdir`); the bash
-   `trap ... EXIT` lines for `cudatmp`, `eccp_dir`, `ctmp`, `tmp` and `ptmp` must move to it.
-9. **Second run and exports.** The `$root/nfcxx` re-run with an environment prefix moves into Ruby (`spawn(env, ...)`).
-10. **Test oracles.** The frozen copies under `tests/` (`tests/driver-body/nfcxx-bash`, `tests/nfcxx/nfcxx-bash`,
-    `tests/nfcxx-cache/nfcxx-bash`, `tests/nfcxx-cuda-device/nfcxx-bash`) are read by suites, and some suites extract
-    functions from them with `sed`. Each suite must be moved to a pinned copy or to the Ruby code before its oracle is deleted.
+3. **Setup.** Done: the backend choice (the default backend and `pb_fs_host`) and the stage after the emit-C route (the
+   sanitizer names, `-fsafe-pointers`, the Path B override). Still in bash: the `-fsanitize=address` backend check and `asan_c`,
+   `instantiate`, the `cosmo` block, the freestanding and host header probes (with their trace span), the host cflags, the GNU
+   options, the k1om and target blocks, the Path B `pb_flags` tail and the backend's environment (the unwired planners
+   `planners_text` and `flags_text` in `scripts/nfcxx-setup.rb` cover most of them), and the trace unit's setup.
 
 Items 1 to 9 are code; item 10 is test layout. Item 10 can be done suite by suite, as each suite stops reading an oracle.
 
@@ -79,7 +76,8 @@ suites that exercise its stage. Stage status:
 - **B0: the plan.** Done.
 - **B1: the oracle.** Done: `tests/driver-body/nfcxx-bash` is the frozen copy, and the body tests point at it.
 - **B2: the Ruby skeleton.** Done: `scripts/nfcxx.rb` runs the frozen body, and its route dispatch is back (#1352, #1387).
-- **B3: the setup stage.** Refusals done (#1356). The setup itself still runs in the body (item 3 above).
+- **B3: the setup stage.** Refusals done (#1356). The backend choice and the sanitizer/Path B stage run in Ruby, and the
+  body evals them (item 3 above); the rest of the setup still runs in the body.
 - **B4: the CUDA, `.cpp2` and module stages.** Refusals done (#1363). `cu_prepare` and `cpp2_prepare` still run in the body
   (item 4 above).
 - **B5: the cache.** Configuration refusal done (#1369). The lookup planner is done (#1432). The hit, store and remote

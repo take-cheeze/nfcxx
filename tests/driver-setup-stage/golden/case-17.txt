@@ -1,0 +1,9 @@
+== case 17: NFCXX_PATH=b   -c a.cpp -o a.o
+-- status: 1
+-- stdout
+-- stderr
+pathb-cc: a.cpp: the optimized IR is refused (pathb-ssa-build: QBE failed: <REPO>/build/qbe/qbe: invalid option -- 'V'), using the unoptimized IR
+pathb-cc: a.cpp: SSA route: pathb-ssa-build: QBE failed: <REPO>/build/qbe/qbe: invalid option -- 'V'
+-- eccp
+(none)
+-- files

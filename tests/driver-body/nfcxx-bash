@@ -479,25 +479,21 @@ rm -rf "$modplan"
 # something only qbe or gcc does (cosmo, --emit-c, --target, -E, -M, -shared; a freestanding program takes Path B on
 # x86-64 and aarch64 Linux, arm64 macOS). A program Path B does not build is built again with gcc, below
 # (docs/notes/pathb-default.md). An explicit --backend=, or NFCXX_BACKEND, is used as given.
-default_backend=0
-# pb_fs_host: the hosts Path B compiles freestanding programs on, x86-64 and aarch64 Linux and arm64 macOS (the EDG front end is the
-# x86-64 target on all; see docs/notes/freestanding.md, "Path B on aarch64" and "Path B on macOS"). Used for the default and for an explicit --backend=pathb.
-pb_fs_host=0
-case $(uname -s) in
-  Linux) case $(uname -m) in x86_64|aarch64|arm64) pb_fs_host=1 ;; esac ;;
-  Darwin) [ "$(uname -m)" = arm64 ] && pb_fs_host=1 ;;   # macOS arm64: the same front end; its link is the Darwin one (docs/notes/freestanding.md)
-esac
-if [ -z "$backend" ]; then
-  backend=gcc
-  # A .cu input takes Path B too: its rewritten host copy gets the forced nfcxx_cuda.h include and the launch syntax, and
-  # its device image is a file-scope asm block that Path B passes through (docs/notes/pathb-default.md, "CUDA").
-  # A freestanding program takes Path B on x86-64 and aarch64 Linux and arm64 macOS (the old harness with the lib/ headers, docs/notes/freestanding.md).
-  fs_ok=1; [ $freestanding = 0 ] || [ $pb_fs_host = 1 ] || fs_ok=0
-  if [ $backend_explicit = 0 ] && [ $fs_ok = 1 ] && [ $cosmo = 0 ] \
-     && [ $emit_c = 0 ] && [ -z "$target" ] && [ $preprocess = 0 ] && [ -z "$depmode" ] && [ $shared = 0 ]; then
-    backend=pathb; default_backend=1
-  fi
+# The default backend is planned by scripts/nfcxx-setup.rb (its default step: NfcxxBackend.default_choice), which sets backend,
+# default_backend and pb_fs_host (the Path B hosts for freestanding programs, pb_fs_host: x86-64 and aarch64 Linux and arm64
+# macOS; see docs/notes/freestanding.md, "Path B on aarch64" and "Path B on macOS"). The Ruby driver planned it on the argument
+# loop's state and passed the statements in NFCXX_SETUP_DEFAULT; the body plans it itself when the driver did not (the wrappers'
+# arguments). Path B is the default on x86-64 Linux (and on aarch64 Linux and arm64 macOS for freestanding programs), unless the
+# request needs something only qbe or gcc does (cosmo, --emit-c, --target, -E, -M, -shared). A program Path B does not build is
+# built again with gcc, below (docs/notes/pathb-default.md). An explicit --backend=, or NFCXX_BACKEND, is used as given.
+if [ "${NFCXX_SETUP_DEFAULT+x}" = x ]; then
+  setup_default=$NFCXX_SETUP_DEFAULT; unset NFCXX_SETUP_DEFAULT
+else
+  setup_default=$("${RUBY:-ruby}" "$root/scripts/nfcxx-setup.rb" default backend="$backend" backend_explicit=$backend_explicit \
+    freestanding=$freestanding cosmo=$cosmo emit_c=$emit_c target="$target" preprocess=$preprocess depmode="$depmode" \
+    shared=$shared host="$(uname -s) $(uname -m)") || exit $?
 fi
+eval "$setup_default"
 
 # -fsanitize=address: gcc's instrumentation on the gcc backend. Both link libasan. Path B calls
 # libasan's checks before each access (scripts/pathb-cc.rb --asan, passed below once the backend is final); the default backend gets it too (docs/notes/asan-plan.md; a program Path B does not build falls back to gcc).
@@ -661,29 +657,21 @@ if [ $emit_c = 1 ]; then
   exit 0
 fi
 
-if [ -n "$sanitize" ]; then
-  # The checks live in the Path B IR (docs/notes/ubsan.md); the names are gcc's, and not every one is implemented.
-  IFS=, read -ra sz <<< "$sanitize"
-  for c in ${sz[@]+"${sz[@]}"}; do
-    case $c in
-      undefined|signed-integer-overflow|integer-divide-by-zero|shift|bounds|null|unreachable|return|float-cast-overflow) ;;
-      *) echo "nfcxx: -fsanitize=$c is not supported (implemented: undefined, signed-integer-overflow, integer-divide-by-zero, shift, bounds, null, unreachable, return, float-cast-overflow)" >&2; exit 2 ;;
-    esac
-  done
-  [ $freestanding = 0 ] || { echo "nfcxx: -fsanitize needs Path B, which compiles hosted programs only" >&2; exit 2; }
-  pb_flags+=(--sanitize="$sanitize")   # scripts/pathb-cc.rb: the front end's checks (NFCXX_IR_SANITIZE)
-  backend=pathb
+# The sanitizer, -fsafe-pointers and the Path B override are planned by scripts/nfcxx-setup.rb (its stage step, after the emit-C
+# route): the -fsanitize= names (the checks live in the Path B IR, docs/notes/ubsan.md; the names are gcc's, and not every one is
+# implemented), -fsafe-pointers (docs/notes/safe-pointers.md, which replaces malloc and free) and --backend=pathb or NFCXX_PATH=b
+# (docs/notes/pathb-hosted.md: asked for by name, so a file Path B cannot build is an error, not a fallback to gcc). The driver
+# planned them on the argument loop's state and passed the statements in NFCXX_SETUP_STAGE (its refusal's status and message in
+# NFCXX_SETUP_STAGE_STATUS, printed here, where the bash printed it); the body plans them itself otherwise.
+if [ "${NFCXX_SETUP_STAGE_STATUS+x}" = x ]; then
+  setup_stage_status=$NFCXX_SETUP_STAGE_STATUS; setup_stage=${NFCXX_SETUP_STAGE-}
+  unset NFCXX_SETUP_STAGE_STATUS NFCXX_SETUP_STAGE
+  if [ "$setup_stage_status" != 0 ]; then printf '%s' "$setup_stage" >&2; exit "$setup_stage_status"; fi
+else
+  setup_stage=$("${RUBY:-ruby}" "$root/scripts/nfcxx-setup.rb" stage sanitize="$sanitize" freestanding=$freestanding asan=$asan \
+    safeptr=$safeptr path_b=$path_b) || exit $?
 fi
-if [ $safeptr = 1 ]; then
-  # The checks are emitted from the Path B IR (docs/notes/safe-pointers.md), and the runtime replaces malloc and free.
-  [ $freestanding = 0 ] || { echo "nfcxx: -fsafe-pointers needs Path B, which compiles hosted programs only" >&2; exit 2; }
-  [ $asan = 0 ] || { echo "nfcxx: -fsafe-pointers and -fsanitize=address both replace malloc; use one" >&2; exit 2; }
-  pb_flags+=(--safe-pointers)
-  backend=pathb
-fi
-# --backend=pathb, or NFCXX_PATH=b: the Path B compiler (docs/notes/pathb-hosted.md). Asked for by name, so a file Path B cannot
-# build is an error, not a fallback to gcc (the fallback re-run would also take NFCXX_PATH=b back to Path B).
-[ $path_b = 0 ] || { backend=pathb; default_backend=0; }
+eval "$setup_stage"
 [ $ir_opt_set = 0 ] || pb_flags+=(--ir-opt="$ir_opt")
 [ $asan = 0 ] || [ $backend != pathb ] || pb_flags+=(--asan)   # the SSA emitter's __asan_load/store checks (scripts/pathb-cc.rb)
 [ $pic = 0 ] || pb_flags+=(--pic)   # -shared / -fPIC: scripts/pathb-cc.rb --pic reads a preemptible symbol's address through the GOT

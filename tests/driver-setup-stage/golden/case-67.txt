@@ -1,0 +1,8 @@
+== case 67: NFCXX_BACKEND=bogus   -fsafe-pointers -c a.cpp -o a.o
+-- status: 1
+-- stdout
+-- stderr
+pathb-cc: a.cpp: SSA route: pathb-ssa-build: QBE failed: <REPO>/build/qbe/qbe: invalid option -- 'V'
+-- eccp
+(none)
+-- files
