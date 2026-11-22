@@ -1,0 +1,8 @@
+stdout:
+status=2
+stderr:
+pathb-cc: WORK/home/.cache/nfcxx/cpp2/HASH16/x.cpp: the optimized IR is refused (pathb-ssa-build: QBE failed: REPO/build/qbe/qbe: invalid option -- 'V'), using the unoptimized IR
+pathb-cc: WORK/home/.cache/nfcxx/cpp2/HASH16/x.cpp: SSA route: pathb-ssa-build: QBE failed: REPO/build/qbe/qbe: invalid option -- 'V'
+nfcxx: Path B did not build WORK/home/.cache/nfcxx/cpp2/HASH16/x.cpp (status 1); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)
+nfcxx: -c with several sources needs -o (one object is made per call)
+eccp:

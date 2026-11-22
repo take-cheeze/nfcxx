@@ -43,8 +43,9 @@ The body can be deleted only when the Ruby driver runs every stage without it. I
    only calls it at the block's place and ends with the build's status.
 3. **Setup.** The backend choice, sanitizers, `instantiate`, `cosmo`, `freestanding`, host probes and the trace unit.
    Most of the decisions are already in the planners; the bash only calls them.
-4. **CUDA and `.cpp2` preparation.** `cu_prepare` and `cpp2_prepare` rewrite the source list and the trap; Ruby must do the
-   rewrite and own the trap.
+4. **CUDA and `.cpp2` preparation.** Done for the decisions and the rewriting: `scripts/nfcxx-cu-cpp2-prepare.rb` (cu and cpp2)
+   makes the copies, the rewrite and the translation, and the array edits, and the body evals its statements at the
+   preparation's place. The body still makes the temporary directory and its EXIT trap (item 8).
 5. **Cache hit and store.** `cache_check` and `cache_store` call the Ruby helpers; the remote tier (`cache-io`) and the
    `--cache-log` writes are called from bash.
 6. **Routes.** The gcc route and the Path B `-c` and link routes still evaluate their planner output in bash.
@@ -80,8 +81,8 @@ suites that exercise its stage. Stage status:
 - **B1: the oracle.** Done: `tests/driver-body/nfcxx-bash` is the frozen copy, and the body tests point at it.
 - **B2: the Ruby skeleton.** Done: `scripts/nfcxx.rb` runs the frozen body, and its route dispatch is back (#1352, #1387).
 - **B3: the setup stage.** Refusals done (#1356). The setup itself still runs in the body (item 3 above).
-- **B4: the CUDA, `.cpp2` and module stages.** Refusals done (#1363). `cu_prepare` and `cpp2_prepare` still run in the body
-  (item 4 above).
+- **B4: the CUDA, `.cpp2` and module stages.** Refusals done (#1363). `cu_prepare` and `cpp2_prepare` make their copies and
+  translations in Ruby (`scripts/nfcxx-cu-cpp2-prepare.rb`); the body keeps their trap (item 4 above).
 - **B5: the cache.** Configuration refusal done (#1369). The lookup planner is done (#1432). The hit, store and remote
   calls still run in the body (item 5 above).
 - **B6: traps and temporary directories.** The Ruby driver owns the temporary root, and the leak fix is merged (#1364).

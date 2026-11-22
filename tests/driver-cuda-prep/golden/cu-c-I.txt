@@ -1,0 +1,5 @@
+stdout:
+status=127
+stderr:
+nfcxx-run: /usr/local/cuda/bin/ptxas: No such file or directory - /usr/local/cuda/bin/ptxas
+eccp:
