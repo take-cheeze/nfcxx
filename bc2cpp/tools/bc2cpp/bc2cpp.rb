@@ -152,6 +152,7 @@ require_relative 'codegen_decided_branch'
 require_relative 'codegen_arm_prune'
 require_relative 'codegen_call_facts'
 require_relative 'codegen_nilable_receiver'
+require_relative 'codegen_mono_receiver'
 require_relative 'codegen_setter_pools'
 require_relative 'codegen_self_new'
 require_relative 'codegen_class_object_new'
@@ -1762,6 +1763,10 @@ BC2CPP_MAIN = lambda do
       }
     CPP
   end
+  # MONO_RECEIVER_PROOF (codegen_mono_receiver.rb): an owner-class getter yields nullptr for an undefined constant.
+  puts <<~'CPP'
+    static inline bool bc2cpp_kind_of_owner(mrb_state* M, mrb_value v, struct RClass* cls) { return cls && mrb_obj_is_kind_of(M, v, cls); }
+  CPP
   # mrb_state has no float_class without Float; the Float class test is then false (an object's class is never NULL).
   puts <<~'CPP'
     #ifndef MRB_NO_FLOAT

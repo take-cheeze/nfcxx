@@ -267,7 +267,8 @@ class CodeGen
 
   def native_result_bits(kind, classes)
     case kind
-    when :fixnum then NumericFlow::INT
+    # :integer (NATIVE_INTEGER_RESULTS) may be a heap Integer; NumericFlow's INT already admits one.
+    when :fixnum, :integer then NumericFlow::INT
     when :float then NumericFlow::FLT
     when :nil then NumericFlow::NIL
     when Array then kind.reduce(0) { |mask, member| mask | native_result_bits(member, classes) }

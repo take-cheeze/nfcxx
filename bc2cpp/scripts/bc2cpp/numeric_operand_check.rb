@@ -585,6 +585,21 @@ if ENV['MRBC']
       end
     end
 
+    # NATIVE_INTEGER_RESULTS: a global's class is unknown, so only the name-wide native facts know these results.
+    class NqAnyLen
+      def nq_glob_len
+        $nq_any.length + 1
+      end
+
+      def nq_glob_bytes
+        $nq_any.bytesize * 2
+      end
+
+      def nq_glob_to_i
+        $nq_any.to_i + 1
+      end
+    end
+
     class NqSizeShadow
       def size
         "x"
@@ -642,6 +657,8 @@ if ENV['MRBC']
         w.nq_acc_use
         NqSub.new.nq_own_use
         NqSizeShadow.new.nq_use(NqSizeShadow.new)
+        a = NqAnyLen.new
+        [a.nq_glob_len, a.nq_glob_bytes, a.nq_glob_to_i]
       end
     end
   RUBY
@@ -705,6 +722,10 @@ if ENV['MRBC']
              %w[mrb_num_mul(M mrb_num_sub(M bc2cpp_num_cmp(M bc2cpp_num_div(M].all? do |call|
                chunk_of.call(code, 'NqBox#nq_heap_int').include?(call)
              end)
+  check.call('NATIVE_INTEGER_RESULTS: `length` and `bytesize` of an unknown receiver are Integers',
+             %w[NqAnyLen#nq_glob_len NqAnyLen#nq_glob_bytes].all? { |m| proven.call(m) && integer_note.call(m) })
+  check.call('NATIVE_INTEGER_RESULTS: `to_i` of an unknown receiver is numeric (Time#to_i may be a Float)',
+             proven.call('NqAnyLen#nq_glob_to_i'))
   check.call('NEG: an Integer-or-Float operand keeps its Float arm (no INTEGER_OPERAND_PROOF)',
              !chunk_of.call(code, 'NqBox#nq_half').include?('INTEGER_OPERAND_PROOF') &&
                chunk_of.call(code, 'NqBox#nq_half').include?('bc2cpp_num_div_float('))
@@ -758,6 +779,18 @@ if ENV['MRBC']
   ensure
     saved.nil? ? ENV.delete('BC2CPP_INTEGER_OPERAND_PROOF') : ENV['BC2CPP_INTEGER_OPERAND_PROOF'] = saved
   end
+  native_off = nil
+  Dir.mktmpdir do |dir|
+    saved = ENV['BC2CPP_NATIVE_INTEGER_RESULTS']
+    ENV['BC2CPP_NATIVE_INTEGER_RESULTS'] = '0'
+    native_off, = runtime.generate(fixture, dir)
+  ensure
+    saved.nil? ? ENV.delete('BC2CPP_NATIVE_INTEGER_RESULTS') : ENV['BC2CPP_NATIVE_INTEGER_RESULTS'] = saved
+  end
+  check.call('BC2CPP_NATIVE_INTEGER_RESULTS=0 keeps the sends of `length`, `bytesize` and `to_i` results',
+             %w[NqAnyLen#nq_glob_len NqAnyLen#nq_glob_bytes NqAnyLen#nq_glob_to_i].all? do |m|
+               chunk_of.call(native_off, m).match?(retained_tag)
+             end)
   check.call('BC2CPP_INTEGER_OPERAND_PROOF=0 keeps the numeric proof\'s guarded arms at the same sites',
              !off_code.include?('INTEGER_OPERAND_PROOF') && chunk_of.call(off_code, 'NqBox#nq_area').include?('NUMERIC_OPERAND_PROOF') &&
                chunk_of.call(off_code, 'NqBox#nq_less').include?('mrb_float('))
@@ -777,7 +810,7 @@ if ENV['MRBC']
   else
     puts '-- fixture on real mruby, interpreted and compiled'
     Dir.mktmpdir do |dir|
-      owners = %w[NqBox NqWriter NqBase NqSub NqLatePar NqSizeShadow NqHidden NqDrv NqConfig NqOther NqOther::NqLex]
+      owners = %w[NqBox NqWriter NqBase NqSub NqLatePar NqSizeShadow NqAnyLen NqHidden NqDrv NqConfig NqOther NqOther::NqLex]
       _code, err = runtime.generate(fixture, dir, only_owners: owners)
       body = <<~CPP
         static mrb_value nq_new(mrb_state* M, const char* klass) {
@@ -871,6 +904,14 @@ if ENV['MRBC']
           call(M, "hidden setidx", hid, "nq_setidx");
           call(M, "hidden interp", hid, "nq_interp");
           call(M, "hidden operator", hid, "nq_operator");
+          mrb_value any = nq_new(M, "NqAnyLen");
+          mrb_value anys[3] = { mrb_str_new_cstr(M, "abc"), mrb_ary_new(M), mrb_str_new_cstr(M, "42x") };
+          for (mrb_value v : anys) {
+            mrb_gv_set(M, mrb_intern_lit(M, "$nq_any"), v);
+            call(M, "glob_len", any, "nq_glob_len");
+            call(M, "glob_bytes", any, "nq_glob_bytes");
+            call(M, "glob_to_i", any, "nq_glob_to_i");
+          }
           mrb_value drv = nq_new(M, "NqDrv");
           call(M, "driver", drv, "nq_go");
           return 0;
