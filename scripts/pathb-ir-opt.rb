@@ -220,6 +220,7 @@ $scope_facts = false   # --scope-facts: each inlined body brackets its slots wit
 
 def node_count(x)
   return 0 unless x.is_a?(Array)
+  return 0 if x[0] == "loc"   # a source location (-g) is no code: it must not change what the caps decide
   n = 1
   x.each { |y| n += node_count(y) }
   n
@@ -235,7 +236,7 @@ NODE_WEIGHT = Hash.new(1).merge(
   "function" => 0, "slot" => 0, "params" => 0, "param" => 0, "ret" => 0, "weak" => 0, "const" => 0, "type" => 0,
   "ptr" => 0, "volatile" => 0, "struct" => 0, "array" => 0, "union" => 0, "enum" => 0, "func" => 0,   # type forms
   "block" => 0, "then" => 0, "else" => 0, "body" => 0, "step" => 0, "let" => 0, "addr" => 0, "offset" => 0, "bitcast" => 0,
-  "decl" => 0, "scope-end" => 0, "life-start" => 0, "life-end" => 0,
+  "decl" => 0, "scope-end" => 0, "life-start" => 0, "life-end" => 0, "loc" => 0,
   "call" => 4, "if" => 2, "switch" => 2, "loop" => 3, "break" => 1, "continue" => 1
 ).freeze
 

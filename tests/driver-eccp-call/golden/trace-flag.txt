@@ -1,0 +1,83 @@
+== run 1: nfcxx --backend=gcc --trace=SB/t.json -c main.cpp -o main.o
+env: 
+rc: 0
+-- stdout
+-- stderr (nfcxx: and eccp: lines)
+eccp: status-env FAKE_EDG_FAIL=unset
+eccp: arg --c++23
+eccp: arg --g++
+eccp: arg --wdir
+eccp: arg /
+eccp: arg --no_auto_instantiation
+eccp: arg -tused
+eccp: arg --c_to_obj_option
+eccp: arg -ffunction-sections
+eccp: arg --c_to_obj_option
+eccp: arg -fdata-sections
+eccp: arg --c_to_obj_option
+eccp: arg -Wl,--gc-sections
+eccp: arg --sys_include=/usr/include/c++/13
+eccp: arg --sys_include=/usr/include/x86_64-linux-gnu/c++/13
+eccp: arg --sys_include=/usr/include/c++/13/backward
+eccp: arg --sys_include=/usr/lib/gcc/x86_64-linux-gnu/13/include
+eccp: arg --sys_include=/usr/local/include
+eccp: arg --sys_include=/usr/include/x86_64-linux-gnu
+eccp: arg --sys_include=/usr/include
+eccp: arg --c_to_obj_lib=m
+eccp: arg --c_to_obj_option
+eccp: arg -O2
+eccp: arg --c_to_obj_option
+eccp: arg -fwrapv
+eccp: arg --c_to_obj_option
+eccp: arg -fno-strict-aliasing
+eccp: arg --c_to_obj_option
+eccp: arg -fkeep-static-functions
+eccp: arg --c_to_obj_option
+eccp: arg -fgnu89-inline
+eccp: arg -c
+eccp: arg main.cpp
+eccp: arg -o
+eccp: arg main.o
+eccp: cwd SB
+eccp: env EDG_BUILD=WORK/edg
+eccp: env EDG_CPFE_DEFAULT_OPTIONS=--gnu_version=130300 
+eccp: env NFCXX_CC=TREE/scripts/gcc-cc.rb
+eccp: env NFCXX_TMP_OWNED=1
+eccp: env NFCXX_TRACE=SB/t.json
+eccp: env NFCXX_TRACE_OWNER=PID
+eccp: env NFCXX_TRACE_PENDING=TMPENTRY/nfcxx-trace-pending.PID
+eccp: env NFCXX_TRACE_UNIT=main.cpp
+-- other stderr lines: 0
+== sandbox
+D inc
+F inc/x.h
+| int inc_val = 1;
+F kernel.cu
+| __global__ void k() {}
+| int main() { return 0; }
+F local.h
+| #pragma once
+| 
+| inline int local_value() { return 42; }
+F main.cpp
+| #include "local.h"
+| 
+| int main() { return local_value() == 42 ? 0 : 1; }
+F main.ii
+| RECORD ii
+F main.o
+| OBJECT main.o
+F main.ti
+| RECORD ti
+F main_bad.cpp
+| #include "missing.h"
+| 
+| int main() { return 0; }
+D obj
+F t.json
+== trace spans
+["host C++ headers", "driver", "X"]
+["eccp (front end, C compile, link)", "eccp", "X"]
+["nfcxx", "driver", "X"]
+["trace_end", nil, "i"]
+== temporary root

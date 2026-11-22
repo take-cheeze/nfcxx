@@ -150,6 +150,18 @@ SOURCE = <<~RUBY
       [EyCache.guarded { raise ArgumentError, 'r' }, fiber.resume(2), state]
     end
 
+    # A Fiber body's own rescue around a block: that block is named under the body's function, not the method's.
+    def run_fiber_raise
+      fiber = Fiber.new do
+        begin
+          EyCache.compute { Fiber.yield(1); raise ArgumentError, 'f' }
+        rescue ArgumentError => e
+          e.message
+        end
+      end
+      [fiber.resume, fiber.resume, state]
+    end
+
     def run_direct
       begin
         EyCache.compute { raise ArgumentError, 'direct' }
@@ -169,7 +181,8 @@ SOURCE = <<~RUBY
 RUBY
 
 OWNERS = %w[EyCache EyCache.singleton EyProbe].freeze
-RUNS = %w[run_ok run_raise run_reraise run_shape run_fiber run_fiber_break run_break run_break_nested run_return run_next run_rescue run_direct run_nested].freeze
+RUNS = %w[run_ok run_raise run_reraise run_shape run_fiber run_fiber_raise run_fiber_break run_break run_break_nested run_return
+          run_next run_rescue run_direct run_nested].freeze
 
 def compiled?(code, name)
   code.match?(/^mrb_value #{name}_impl\(mrb_state\* M/)

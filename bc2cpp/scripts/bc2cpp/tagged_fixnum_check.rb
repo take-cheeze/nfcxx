@@ -23,6 +23,9 @@
 #       up to 2**63, bigints, overflow to bigint and back), for Floats, mixed and non-numeric operands, in the default
 #       world and one that reopens Integer#+, #< and #&, with the tagged form on and forced off, and with the outline
 #       switches off.
+#   cold compact (tools/bc2cpp/cold_compact.rb)
+#     - with the fixture's methods on the cold list, each operator site is one call of a noinline helper whose body is
+#       the inline text; BC2CPP_COLD_COMPACT=0 gives the default output; both worlds print what the interpreter prints.
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/tagged_fixnum_check.rb
 
@@ -31,6 +34,7 @@ require 'tmpdir'
 require_relative 'fixture_runtime'
 require_relative 'host_cxx'
 require_relative '../../tools/bc2cpp/tagged_fixnum'
+require_relative '../../tools/bc2cpp/cold_compact'
 require_relative '../../tools/bc2cpp/cmp_num_outline'
 require_relative '../../tools/bc2cpp/int_box_outline'
 
@@ -156,7 +160,9 @@ def code_of(code, name)
   code.scan(/^(?:static )?mrb_value #{name}_impl\w*\(mrb_state\* M.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m).join
 end
 
-dirs = { 'default' => Dir.mktmpdir('bc2cpp-tf'), 'reopened' => Dir.mktmpdir('bc2cpp-tf-reopen') }
+dirs = { 'default' => Dir.mktmpdir('bc2cpp-tf'), 'reopened' => Dir.mktmpdir('bc2cpp-tf-reopen'),
+         'cold' => Dir.mktmpdir('bc2cpp-tf-cold'), 'cold reopened' => Dir.mktmpdir('bc2cpp-tf-cold-reopen'),
+         'cold off' => Dir.mktmpdir('bc2cpp-tf-cold-off') }
 at_exit { dirs.each_value { |dir| FileUtils.remove_entry(dir) } }
 puts '-- generated code'
 code, err = Bc2cppFixtureRuntime.generate(SRC, dirs['default'], core: true, only_owners: OWNERS)
@@ -174,6 +180,20 @@ inline_code, inline_err = with_switches.call('0') do
 end
 reopen_code, reopen_err = Bc2cppFixtureRuntime.generate(SRC + REOPEN, dirs['reopened'], core: true,
                                                                                          only_owners: OWNERS + ['Integer'])
+# COLD_COMPACT: every TfOps method on the cold list.
+cold_list = File.join(dirs['cold'], 'cold_methods.txt')
+File.write(cold_list, "# fixture\n#{SRC.scan(/def (\w+)/).flatten.map { |name| "TfOps##{name}" }.join("\n")}\n")
+cold_gen = lambda do |src, dir, owners, env = {}|
+  saved = ENV.to_h.slice(ColdCompact::LIST_KEY, *env.keys)
+  ENV[ColdCompact::LIST_KEY] = cold_list
+  env.each { |k, v| ENV[k] = v }
+  Bc2cppFixtureRuntime.generate(src, dir, core: true, only_owners: owners)
+ensure
+  [ColdCompact::LIST_KEY, *env.keys].each { |k| saved.key?(k) ? ENV[k] = saved[k] : ENV.delete(k) }
+end
+cold_code, cold_err = cold_gen.call(SRC, dirs['cold'], OWNERS)
+cold_reopen_code, cold_reopen_err = cold_gen.call(SRC + REOPEN, dirs['cold reopened'], OWNERS + ['Integer'])
+cold_off_code, = cold_gen.call(SRC, dirs['cold off'], OWNERS, 'BC2CPP_COLD_COMPACT' => '0')
 check.call('the prelude is in the generated code', code.include?(TaggedFixnum::PRELUDE))
 pair = ->(text) { text.match(/if \(mrb_likely\(BC2CPP_FIXNUM_PAIR_P\((r\d+), (r\d+)\)\)\) \{/) }
 { 'add' => %w[add mrb_num_add], 'sub' => %w[sub mrb_num_sub], 'mul' => %w[mul mrb_num_mul] }.each do |name, (op, slow)|
@@ -248,6 +268,19 @@ check.call('the unbox/rebox tier is gone from the generated methods',
 check.call('the word helpers take no register address',
            !methods.match?(/bc2cpp_fixnum_(?:add|sub|mul)\([^;]*&\s*r\d/))
 check.call('no #error in the generated code', !code.include?('#error') && !reopen_code.include?('#error'))
+helper_call = /^  (r\d+) = (bc2cpp_compact_\h{16})\(M, \1(?:, r\d+)?\);$/
+%w[add sub mul addi subi lt le gt ge eq].each do |name|
+  body = code_of(cold_code, "TfOps_#{name}")
+  m = body.match(helper_call)
+  helper = m && cold_code[/^static __attribute__\(\(noinline, cold\)\) mrb_value #{m[2]}\(.*?^\}$/m]
+  check.call("cold #{name}: the operator site is one helper call, and the helper holds the inline arms",
+             m && helper && !body.include?('BC2CPP_FIXNUM_PAIR_P') && !body.include?('mrb_fixnum_p(') &&
+               helper.match?(/BC2CPP_FIXNUM_PAIR_P\(a\d, a\d\)|mrb_fixnum_p\(a0\)/))
+end
+check.call('cold: a method off the list keeps the inline arms',
+           code_of(cold_code, 'Integer_').empty? || !code_of(cold_code, 'Integer_').include?('bc2cpp_compact_'))
+check.call('cold: BC2CPP_COLD_COMPACT=0 generates the default code', cold_off_code == code)
+check.call('cold: no #error in the generated code', !cold_code.include?('#error') && !cold_reopen_code.include?('#error'))
 
 DRIVER = <<~'RUBY'
   show = lambda do |name, &blk|
@@ -293,7 +326,8 @@ else
     { 'tagged' => [1, cxxflags], 'forced off' => [0, "#{cxxflags} -DBC2CPP_TAGGED_FIXNUM=0"] }.each do |form, (on, flags)|
       ENV['BC2CPP_CXXFLAGS'] = flags
       { 'default' => [err, OWNERS], 'reopened' => [reopen_err, OWNERS + ['Integer']],
-        'inline' => [inline_err, OWNERS] }.each do |world, (diag, owners)|
+        'inline' => [inline_err, OWNERS],
+        'cold' => [cold_err, OWNERS], 'cold reopened' => [cold_reopen_err, OWNERS + ['Integer']] }.each do |world, (diag, owners)|
         body = <<~CPP
           static int scenario(mrb_state* M) {
             std::printf("tagged=%d\\n", BC2CPP_TAGGED_FIXNUM);

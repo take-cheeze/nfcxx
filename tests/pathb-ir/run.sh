@@ -14,8 +14,20 @@ ir_norm() { sed -E -e 's/\(copy ([0-9]+) ([^ ()]+) ([^ ()]+) [0-9]+\)/(copy \1 \
 # No automatic build: a missing harness is an error, so a worktree never rebuilds the shared build/ directory.
 cpfe=${PATHB_CPFE:-build/pathb/cmake/bin/cpfe}
 [ -x "$cpfe" ] || { echo "run.sh: no harness at $cpfe; set PATHB_CPFE (see docs/notes/pathb-stage2.md)" >&2; exit 2; }
+# The goldens are the output of a harness with exception tables (the default, cmake/bin/eh-tables beside its cpfe). A
+# PATHB_EH=frames harness (the supported fallback, docs/notes/pathb-zero-cost-eh.md) lowers EH differently: its differences
+# from the goldens are reported as skips, the other checks still run, and --update is refused (it would write frames output).
+frames=0; [ -f "$(dirname "$cpfe")/eh-tables" ] || frames=1
+if [ $frames = 1 ] && [ $update = 1 ]; then
+  echo "run.sh: --update with a PATHB_EH=frames harness ($cpfe): the goldens are the tables harness's output" >&2; exit 2
+fi
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-fail=0; gaps=0
+fail=0; gaps=0; fskip=0
+# a golden that differs: a failure, or with a frames harness a skip
+golden_diff() { # NAME DIFF
+  if [ $frames = 1 ]; then echo "SKIP $1 (frames harness: the golden is the tables harness's output)"; fskip=$((fskip + 1))
+  else echo "DIFF $1"; head -40 "$2"; fail=1; fi
+}
 # The probes of tests/pathb-qbe/cases that exercise the lowering itself (continue, bool loads, setjmp, unreachable
 # code, EH thunks, volatile accesses, thread-local objects) have goldens here too, so a change in the IR text shows up as a diff.
 probes="tests/pathb-qbe/cases/continue.cpp tests/pathb-qbe/cases/bool_load.cpp tests/pathb-qbe/cases/setjmp.cpp tests/pathb-qbe/cases/reachability.cpp tests/pathb-qbe/cases/eh_thunk.cpp tests/pathb-qbe/cases/volatile.cpp tests/pathb-qbe/cases/tls.cpp tests/pathb-qbe/cases/bitfield_vol.cpp"
@@ -44,7 +56,7 @@ for f in tests/cases/*.cpp $probes; do
   if diff -u <(ir_norm "tests/pathb-ir/$n.ir") <(ir_norm "$tmp/$n.ir") > "$tmp/$n.diff"; then
     echo "ok   $f"
   else
-    echo "DIFF $f"; head -40 "$tmp/$n.diff"; fail=1
+    golden_diff "$f" "$tmp/$n.diff"
   fi
 done
 # Gap probe: tests/pathb-ir/gaps.cpp uses constructs the lowering handled late (VLA, statement
@@ -59,7 +71,7 @@ else
     if [ "$g" = "$gap_expected" ]; then echo "ok   tests/pathb-ir/gaps.cpp ($g unsupported markers)"
     else echo "FAIL tests/pathb-ir/gaps.cpp: $g unsupported markers, expected $gap_expected"; fail=1; fi
   else
-    echo "DIFF tests/pathb-ir/gaps.cpp"; head -40 "$tmp/gaps.diff"; fail=1
+    golden_diff tests/pathb-ir/gaps.cpp "$tmp/gaps.diff"
   fi
 fi
 # Built-ins and va_arg lowered without a library call (va_arg of long double is a helper call), and the inline asm cases the emitter must refuse by name.
@@ -71,7 +83,7 @@ for spec in "builtins:0:" "vaarg_agg:0:" "vaarg_ld:0:" "asm_refuse:3:refused: st
   f=tests/pathb-ir/$n.cpp
   if ! scripts/pathb-dump.rb --ir "$f" > "$tmp/$n.ir" 2> "$tmp/$n.err"; then echo "FAIL (front end) $f"; head -5 "$tmp/$n.err"; fail=1; continue; fi
   if [ $update = 1 ]; then ir_norm "$tmp/$n.ir" > "tests/pathb-ir/$n.ir"; echo "wrote tests/pathb-ir/$n.ir"; continue; fi
-  if diff -u <(ir_norm "tests/pathb-ir/$n.ir") <(ir_norm "$tmp/$n.ir") > "$tmp/$n.diff"; then echo "ok   $f"; else echo "DIFF $f"; head -40 "$tmp/$n.diff"; fail=1; continue; fi
+  if diff -u <(ir_norm "tests/pathb-ir/$n.ir") <(ir_norm "$tmp/$n.ir") > "$tmp/$n.diff"; then echo "ok   $f"; else golden_diff "$f" "$tmp/$n.diff"; [ $frames = 1 ] || continue; fi
   "$mrb" scripts/pathb-qbe-emit.rb "$tmp/$n.ir" > /dev/null 2> "$tmp/$n.emit"; rc=$?
   if [ "$rc" != "$want_rc" ]; then echo "FAIL $f: emitter exit $rc, expected $want_rc: $(head -1 "$tmp/$n.emit")"; fail=1
   elif [ -n "$want_msg" ] && ! grep -qF -- "$want_msg" "$tmp/$n.emit"; then echo "FAIL $f: emitter message lacks '$want_msg': $(head -1 "$tmp/$n.emit")"; fail=1
@@ -93,7 +105,7 @@ for f in tests/pathb-ir/borrow/*.cpp; do
   fi
   if [ $update = 1 ]; then ir_norm "$tmp/borrow_$n.ir" > "tests/pathb-ir/borrow/$n.ir"; echo "wrote tests/pathb-ir/borrow/$n.ir"; continue; fi
   if diff -u <(ir_norm "tests/pathb-ir/borrow/$n.ir") <(ir_norm "$tmp/borrow_$n.ir") > "$tmp/borrow_$n.diff"; then echo "ok   $f (NFCXX_PATHB_BORROW=1)"
-  else echo "DIFF $f (NFCXX_PATHB_BORROW=1)"; head -40 "$tmp/borrow_$n.diff"; fail=1; fi
+  else golden_diff "$f (NFCXX_PATHB_BORROW=1)" "$tmp/borrow_$n.diff"; fi
   scripts/pathb-dump.rb --ir "$f" > "$tmp/default_$n.ir" 2>/dev/null
   if perl -0pe 's/\s*\((decl|scope-end|rref-arg|drop-obligation|drop-live|drop-state) [^()\n]*\)//g; s/^\(borrow-layout [^\n]*\n//mg' "$tmp/borrow_$n.ir" | cmp -s - "$tmp/default_$n.ir"; then
     echo "ok   $f (without the fact forms: the default output)"
@@ -123,4 +135,5 @@ for f in tests/cases/*.cpp; do case $(basename "$f") in qbe_*) continue ;; esac;
     printf "coverage: %d node occurrences lowered, %d unsupported\n", tot_ok, tot_gap;
   }'
 echo "unsupported IR nodes across tests/cases: $gaps"
+[ $fskip = 0 ] || echo "skipped $fskip golden comparisons: $cpfe is a PATHB_EH=frames harness"
 exit $fail
