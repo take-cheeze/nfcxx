@@ -1792,6 +1792,16 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_cptr_value tools/cext2mrbgem
 check test "$rc" -eq 0
 check test "$(grep -c 'VALUE as pointer' "$work/api_cptr_value/REFUSALS.txt")" -eq 0
 check grep -qF 'mrb_value v = mrb_cptr_value(mrb, h);' "$work/api_cptr_value/src/api_cptr_value.c"
+# 2zzz174. the address of a struct carried in a VALUE, (VALUE)&s, is a CPTR value (mrb_cptr_value of the address).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_cptr_addr tools/cext2mrbgem/fixtures/api_cptr_addr/ext/api_cptr_addr "$work/api_cptr_addr" > "$work/api_cptr_addr.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'VALUE as pointer' "$work/api_cptr_addr/REFUSALS.txt")" -eq 0
+check grep -qF 'return mrb_cptr_value(mrb, &s);' "$work/api_cptr_addr/src/api_cptr_addr.c"
+# 2zzz175. a pointer typedef cast of a VALUE ((Ctx)x, Ctx a struct pointer typedef) reads the pointer with mrb_cptr.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_cptr_typedef tools/cext2mrbgem/fixtures/api_cptr_typedef/ext/api_cptr_typedef "$work/api_cptr_typedef" > "$work/api_cptr_typedef.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'VALUE as pointer' "$work/api_cptr_typedef/REFUSALS.txt")" -eq 0
+check grep -qF 'Ctx c = (Ctx)mrb_cptr(x);' "$work/api_cptr_typedef/src/api_cptr_typedef.c"
 check grep -qF 'Holder *h = (Holder *)mrb_cptr(x);' "$work/api_cptr_value/src/api_cptr_value.c"
 check test "$(grep -c 'stuck point (Struct)' "$work/api_struct_va/REFUSALS.txt")" -eq 0
 # 2zzz155. a struct field of CRuby's rb_encoding * type: the Encoding placeholder type is in the prelude (the declaration compiles),
