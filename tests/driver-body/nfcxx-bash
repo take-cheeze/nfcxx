@@ -84,29 +84,7 @@ temp_cleanup() {
   [ -z "${cudatmp:-}" ] || rm -rf "$cudatmp"
   [ -z "${fso_dir:-}" ] || rm -rf "$fso_dir"
 }
-# -fsyntax-only: the compile without keeping its object (a full front-end and back-end pass, so it reports every error a
-# -c would; build systems and scripts use it as a type check). Run as `-c -o TMP.o`, the object removed.
-for a in "$@"; do
-  if [ "$a" = -fsyntax-only ]; then
-    fso_args=(); fso_has_o=0; fso_has_E=0
-    for b in "$@"; do
-      case $b in -fsyntax-only) ;; -o) fso_has_o=1; fso_args+=("$b") ;; -E) fso_has_E=1; fso_args+=("$b") ;; *) fso_args+=("$b") ;; esac
-    done
-    [ $fso_has_E = 1 ] && { temp_cleanup; exec "$0" "${fso_args[@]}"; }
-    if [ $fso_has_o = 1 ]; then
-      # An explicit -o is honoured by the real compile; the type check discards it.
-      fso_dir=$(mktemp -d); trap temp_cleanup EXIT
-      fso_new=(); fso_skip=0
-      for b in "${fso_args[@]}"; do
-        if [ $fso_skip = 1 ]; then fso_skip=0; fso_new+=("$fso_dir/x.o"); continue; fi
-        [ "$b" = -o ] && fso_skip=1; fso_new+=("$b")
-      done
-      "$0" -c "${fso_new[@]}"; exit $?
-    fi
-    fso_dir=$(mktemp -d); trap temp_cleanup EXIT
-    "$0" -c "${fso_args[@]}" -o "$fso_dir/x.o"; exit $?
-  fi
-done
+# -fsyntax-only is rewritten by the Ruby driver before this body runs (scripts/nfcxx-syntax-only.rb).
 source "$root/scripts/wrap.sh"   # --bundle-libs and --cuda-driver= (docs/notes/bundle.md, docs/notes/cuda-driver.md)
 bundle_wrap "$root/nfcxx" "$@"   # --bundle-libs (docs/notes/bundle.md)
 cuda_driver_wrap "$root/nfcxx" "$@"   # --cuda-driver= (docs/notes/cuda-driver.md)

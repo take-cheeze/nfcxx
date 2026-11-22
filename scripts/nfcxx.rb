@@ -90,11 +90,23 @@ require_relative "nfcxx-setup-args"
 require_relative "nfcxx-second-pass"
 require_relative "nfcxx-cache-config"
 require_relative "nfcxx-sycl"
+require_relative "nfcxx-syntax-only"
 
 root = File.expand_path("..", __dir__)
 ROOT = root
 oracle = File.join(root, "tests", "driver-body", "nfcxx-bash")
 SYCL_SCRIPT = File.join(root, "scripts", "nfcxx-sycl.rb")
+
+# -fsyntax-only (the type check) comes first, as it came first in the body: the command is rewritten (scripts/nfcxx-syntax-only.rb),
+# and this driver runs again on the rewritten command in a temporary directory, with its status.
+if (syntax = NfcxxSyntaxOnly.plan(ARGV))
+  status = nil
+  Dir.mktmpdir("nfcxx-fso.") do |dir|
+    system(RbConfig.ruby, __FILE__, *NfcxxSyntaxOnly.args_in(syntax, dir))
+    status = $?.exitstatus || 128 + $?.termsig
+  end
+  exit status
+end
 
 # The route dispatch: the pre-loop plan (scripts/nfcxx-loop.rb) runs in scripts/nfcxx-run.rb, and a gcc-route refusal
 # (scripts/nfcxx-gcc-plan.rb --live, status 2) is printed here, as the bash prints it. Every other argument list goes to the
