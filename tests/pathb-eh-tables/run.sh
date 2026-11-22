@@ -36,6 +36,8 @@ ldrt=$(scripts/pathb-ldrt.rb) || exit 2
 libdir=${EDG_LIB:-$root/build/edg/lib}
 # (scripts/pathb-ldrt.rb copies the helpers out of it)
 [ -f "$libdir/libC.a" ] || { echo "pathb-eh-tables: no $libdir/libC.a" >&2; exit 2; }
+# the host's C++ library: libc++ (its C++ ABI and EH runtime) on macOS, libstdc++ and libgcc_s elsewhere
+if [ "$(uname -s)" = Darwin ]; then hostlibs="-lc++ -lpthread -lm"; else hostlibs="-lstdc++ -lgcc_s -lpthread -lm -latomic"; fi
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 total=0; pass=0; failed=0; skipped=0
 lines=()
@@ -52,7 +54,7 @@ build() { # SRC STEM: SRC through the pipeline to STEM.exe (with SRC's helper); 
     h=$n.helper.o
     g++ -O1 -c -o "$h" "${f%.cpp}.helper.cpp" 2> "$n.hcc" || { echo "helper: $(head -1 "$n.hcc")"; return 1; }
   fi
-  cc -o "$n.exe" "$n.s" $h "$ldrt" -lstdc++ -lgcc_s -lpthread -lm -latomic 2> "$n.ld" ||
+  cc -o "$n.exe" "$n.s" $h "$ldrt" $hostlibs 2> "$n.ld" ||
     { echo "link: $(grep -m1 -o 'undefined reference to .*' "$n.ld" || head -1 "$n.ld")"; return 1; }
 }
 

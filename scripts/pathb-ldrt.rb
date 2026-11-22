@@ -80,9 +80,36 @@ def edg_helpers(root, out)
   lib
 end
 
+# A Mach-O host (macOS) has no linker scripts (ld64 reads none), so the same helpers come as one archive instead: the long
+# double archive's member and the EDG_HELPERS members of libC.a, with libC.a itself out of the link. The links name
+# libc++ (the host C++ library, with its C++ ABI and EH runtime) in its place.
+def mach_eh_archive(root, out, ldrt_lib)
+  libc = File.join(env("EDG_LIB") || File.join(env("EDG_BUILD") || "#{root}/build/edg", "lib"), "libC.a")
+  abort "pathb-ldrt: no #{libc} for the helpers #{EDG_HELPERS.join(' ')}" unless File.file?(libc)
+
+  lib = "#{out}/libnfcxxld-eh.a"
+  return lib if File.file?(lib) && File.mtime(lib) >= [File.mtime(ldrt_lib), File.mtime(libc)].max
+
+  members = IO.popen(["ar", "t", libc], &:read).split("\n") & EDG_HELPERS
+  abort "pathb-ldrt: #{libc} lacks some of #{EDG_HELPERS.join(' ')}" unless members.size == EDG_HELPERS.size
+
+  tmp = IO.popen(["mktemp", "-d", "#{out}/.mach.XXXXXX"], &:read).sub(/\n+\z/, "")
+  exit($?.exitstatus || 1) unless $?.success?
+  at_exit { FileUtils.rm_rf(tmp) }
+  Dir.chdir(tmp) do
+    run!("ar", "x", ldrt_lib)
+    run!("ar", "x", libc, *members)
+    run!("ar", "rcs", "libnfcxxld-eh.a", *Dir.glob("*.o"))
+  end
+  File.rename("#{tmp}/libnfcxxld-eh.a", lib)
+  lib
+end
+
 cpfe = env("PATHB_CPFE") || "#{root}/build/pathb/cmake/bin/cpfe"
-if File.file?(File.join(File.dirname(cpfe), "eh-tables")) && !cc_bin.include?("cosmocc") &&
-   IO.popen(["uname", "-s"], &:read).chomp != "Darwin"
+darwin = IO.popen(["uname", "-s"], &:read).chomp == "Darwin"
+if File.file?(File.join(File.dirname(cpfe), "eh-tables")) && !cc_bin.include?("cosmocc") && darwin
+  lib = mach_eh_archive(root, out, lib)
+elsif File.file?(File.join(File.dirname(cpfe), "eh-tables")) && !cc_bin.include?("cosmocc")
   # named .a: the drivers pass a .a to the link as it is (GNU ld reads a link script whatever its name)
   script = "#{out}/libnfcxxld-eh.a"
   helpers = edg_helpers(root, out)
