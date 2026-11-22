@@ -14,11 +14,11 @@ require_relative 'shard_colocate'
 #     shard k's methods. A shard with no methods is a comment only, so a build can always list N objects.
 #
 # SHARD_SINGLE_DEFINITION: every shard compiles the prelude, which moves into the per-gem namespace
-# `bc2cpp_shard_<symbol>`, and its stateful `static` items (shared_prelude_items) become `inline`: an inline function
-# or variable has one definition, and one copy of each function-local static, in the whole program, where `static`
-# would give every shard its own. The namespace keeps two gems' same-named helpers apart. A methods-section `static`
-# the prelude or another shard names loses `static` (its name is unique per owner and method); every other one stays
-# file-local.
+# `bc2cpp_shard_<symbol>`, and its stateful `static` items (shared_prelude_items) become `inline`, the stateless ones
+# too in a size-optimized build (SHARED_HELPERS): an inline function or variable has one definition, and one copy of
+# each function-local static, in the whole program, where `static` would give every shard its own. The namespace keeps
+# two gems' same-named helpers apart. A methods-section `static` the prelude or another shard names loses `static`
+# (its name is unique per owner and method); every other one stays file-local.
 module ShardOutput
   UNIT_MARK = '/* BC2CPP_SHARD_UNIT '
   HOOKS_MARK = "/* BC2CPP_SHARD_HOOKS */\n"
@@ -213,7 +213,8 @@ module ShardOutput
 
   # SHARD_COLOCATE's affinity: an owner whose units hold copies of another owner's methods joins that owner's chunk,
   # heaviest copies first, while the joined chunk stays within one shard's share. A copy in another shard than its
-  # original still works, but its shard then compiles its own copy of every stateless prelude helper the copy calls.
+  # original still works, but its shard then compiles its own copy of every stateless prelude helper the copy calls
+  # (outside a size-optimized build, SHARED_HELPERS).
   def colocate_affinity(owners, size, target)
     index = owners.each_with_index.to_h { |(owner, _), i| [owner, i] }
     parent = (0...owners.size).to_a
@@ -298,7 +299,9 @@ module ShardOutput
     ns = "bc2cpp_shard_#{symbol}"
     segs = segments(prelude.lines)
     shared = shared_prelude_items(segs, code_text(prelude.lines) + methods_code)
-    out = String.new("namespace #{ns} {}\nusing namespace #{ns};\n")
+    helpers = shared_helpers? ? stateless_helpers(segs, method_names) : Set.new
+    out = String.new(helpers.empty? ? '' : SHARED_HELPER_MACROS)
+    out << "namespace #{ns} {}\nusing namespace #{ns};\n"
     inside = false
     declared = Set.new
     toggle = lambda do |want|
@@ -333,10 +336,17 @@ module ShardOutput
             line = lines[item[:first]]
             if shared.include?(item[:name])
               lines[item[:first]] = to_inline(line)
-            elsif item[:function] && item[:body] && line[/\A[^(]*/].match?(/\bstatic\b/) &&
-                  !line[/\A[^(]*/].match?(/\binline\b|maybe_unused/)
-              # A shard need not call every helper the whole program does.
-              lines[item[:first]] = "[[maybe_unused]] #{line}"
+            else
+              if item[:function] && item[:body] && line[/\A[^(]*/].match?(/\bstatic\b/) &&
+                 !line[/\A[^(]*/].match?(/\binline\b|maybe_unused/)
+                # A shard need not call every helper the whole program does.
+                line = lines[item[:first]] = "[[maybe_unused]] #{line}"
+              end
+              if helpers.include?(item[:name])
+                # An attribute may stand on its own line, before the one with `static`.
+                at = (item[:first]..item[:last]).find { |k| lines[k][/\A[^(]*/].match?(/\bstatic\b/) }
+                lines[at] = to_shared_helper(lines[at]) if at
+              end
             end
           end
         else
@@ -367,11 +377,62 @@ module ShardOutput
     [out, declared]
   end
 
+  # SHARED_HELPERS (BC2CPP_SHARED_HELPERS=0 turns it off): every other `static` function of the prelude is
+  # `inline` in a size-optimized build, so its link keeps one out-of-line body per gem instead of one per shard. Sound
+  # because every shard compiles the same prelude text (one definition), and what such a function names is one entity
+  # already (shared_prelude_items) or a stateless `static`; a unit whose macro says `static` gets its own copy, as
+  # before. Other builds keep `static`: there `inline` moved GCC's inlining enough to cost speed (docs/bc2cpp-shards.md).
+  SHARED_HELPER_MACROS = <<~CPP
+    #ifndef BC2CPP_SHARED_FN
+    #ifdef __OPTIMIZE_SIZE__
+    #define BC2CPP_SHARED_FN inline
+    #define BC2CPP_SHARED_STATIC
+    #else
+    #define BC2CPP_SHARED_FN static
+    #define BC2CPP_SHARED_STATIC static
+    #endif
+    #endif
+  CPP
+
+  def shared_helpers?(env = ENV)
+    env['BC2CPP_SHARED_HELPERS'] != '0'
+  end
+
+  # `static inline` keeps its `inline` and `static` alone becomes BC2CPP_SHARED_FN, so a build whose macros say
+  # `static` compiles the text it did before.
+  def to_shared_helper(line)
+    return line.sub(/\bstatic\s+inline\b/, 'BC2CPP_SHARED_STATIC inline') if line.match?(/\bstatic\s+inline\b/)
+
+    line.sub(/\bstatic\b/, 'BC2CPP_SHARED_FN')
+  end
+
+  # The names of the prelude's `static` functions with a body, less every name an item of an #if region holding a
+  # global names: that region stays at global scope with its `static`s, and one name cannot be both. A function
+  # template (top_level_items names none) stays `static`: its `inline` instantiations measured 2.4 KB larger on Wio.
+  def stateless_helpers(segs, method_names)
+    names = Set.new
+    kept = Set.new
+    segs.each do |seg|
+      next unless seg[:kind] == :code
+
+      lines = seg[:lines]
+      items = top_level_items(lines)
+      if items.any? { |item| (!item[:body] && method_names.include?(item[:name])) || external?(lines[item[:first]], item) }
+        kept.merge(items.filter_map { |item| item[:name] })
+        next
+      end
+      items.each do |item|
+        names << item[:name] if item[:function] && item[:body] && item[:name] && item[:head][/\A[^(]*/].match?(/\bstatic\b/)
+      end
+    end
+    names - kept
+  end
+
   # SHARD_SINGLE_DEFINITION's prelude names: every file-scope variable, every function holding a mutable
   # function-local static or whose address is taken (a shard's own copy would compare unequal), and every static
   # function such an inline function calls (an inline function has one definition, so what it names must be one
-  # entity too). Every other `static` function stays `static` and each shard compiles its own copy: an `inline` one
-  # keeps an out-of-line body GCC cannot drop, which shifts its inlining (docs/bc2cpp-shards.md, "Measurements"). A
+  # entity too). Every other `static` function is SHARED_HELPERS': `static` outside a size-optimized build, where each
+  # shard compiles its own copy, as an `inline` one shifts GCC's inlining (docs/bc2cpp-shards.md, "Measurements"). A
   # per-call-site cache that a macro such as BC2CPP_OWNERS declares belongs to that site, so a second copy of the
   # function is a second site, not a second state. A function whose head carries BC2CPP_SHARD_ONE_BODY is shared too:
   # an out-of-line entry every shard calls, whose own copy per shard would only cost code size.
@@ -403,10 +464,11 @@ module ShardOutput
     shared
   end
 
-  # The text with comments and literals blanked; a directive line keeps its text (a macro can name a function).
+  # The text with comments and literals blanked, line for line (callers index its lines as the input's); a directive
+  # line keeps its text (a macro can name a function).
   def code_text(lines)
     scan_lines(lines).each_with_index.map do |info, i|
-      info[:pp] ? lines[i].sub(%r{//.*}, '') : "#{info[:code]}\n"
+      info[:pp] ? lines[i].sub(%r{//.*}, '') : "#{info[:code].chomp}\n"
     end.join
   end
 
@@ -469,10 +531,12 @@ module ShardOutput
     scan.each_index.select { |k| scan[k][:item_start] }.map do |k|
       head = String.new
       cut = nil
+      depth = 0
       j = k
       loop do
         code = scan[j][:code]
-        cut = head_cut(code)
+        # A parameter list wrapped over lines carries its parenthesis depth to the line holding the body's `{`.
+        cut, depth = head_cut(code, depth)
         head << (cut ? code[0...cut] : code) << ' '
         break if cut || scan[j][:item_end] || j + 1 >= lines.size
 
@@ -493,17 +557,17 @@ module ShardOutput
   end
 
   # The index where a head meets its body `{`, initializer `=` or end `;` (outside parentheses), or nil.
-  def head_cut(code)
-    depth = 0
+  # [index or nil, the depth after the line]; `depth` is the depth the line starts at.
+  def head_cut(code, depth = 0)
     code.each_char.with_index do |c, i|
       case c
       when '(', '[' then depth += 1
       when ')', ']' then depth -= 1
-      when '{', ';' then return i if depth.zero?
-      when '=' then return i if depth.zero? && code[i + 1] != '=' && !'=!<>'.include?(code[i - 1].to_s)
+      when '{', ';' then return [i, depth] if depth.zero?
+      when '=' then return [i, depth] if depth.zero? && code[i + 1] != '=' && !'=!<>'.include?(code[i - 1].to_s)
       end
     end
-    nil
+    [nil, depth]
   end
 
   # Per line: the brace depth it starts at, its code with comments and literals blanked (:code), whether it is a

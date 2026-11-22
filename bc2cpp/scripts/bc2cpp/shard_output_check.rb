@@ -6,8 +6,8 @@
 #
 #   text (no tools)
 #     - a run whose code is under the shard threshold prints its main file unchanged and comment-only shards;
-#     - a split one moves the prelude into the gem's namespace, makes its stateful `static` items `inline` and leaves
-#       a stateless helper `static` (one marked BC2CPP_SHARD_ONE_BODY `inline`), keeps #include and the
+#     - a split one moves the prelude into the gem's namespace, makes its `static` items `inline` (a stateless
+#       helper stays `static` under BC2CPP_SHARED_HELPERS=0, unless marked BC2CPP_SHARD_ONE_BODY), keeps #include and the
 #       declarations of method-section functions global, and drops `static` only from the method-section functions
 #       another shard names;
 #   linkage (needs g++)
@@ -15,7 +15,7 @@
 #       one instance that both shards share;
 #   generated code (needs a host mrbc and a full-core libmruby)
 #     - bc2cpp.rb with BC2CPP_SHARDS=2 writes a non-empty shard, and the two translation units, linked, run the
-#       fixture as the interpreter does.
+#       fixture as the interpreter does, with no gem-namespace function defined in both (SHARED_HELPERS).
 #
 # Usage: [MRBC=path/to/mrbc] [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/shard_output_check.rb
 
@@ -42,6 +42,16 @@ PRELUDE = <<~'CPP'
   #endif
   struct Pair { int a; int b; };
   static int twice(int x) { return 2 * x; }
+  template <int N> static inline int times(int x) { return N * x; }
+  template <class F>
+  static int apply(F f) { return f(); }
+  static int wrapped(int a,
+                     int b) { return a + b; }
+  static int wrapped_state(int a,
+                           int b) {
+    static int seen = 0;
+    return seen += a + b;
+  }
   #define BC2CPP_SHARD_ONE_BODY
   static int thrice(int x) { return 3 * x; }
   BC2CPP_SHARD_ONE_BODY static int one_body(int x) { return thrice(x); }
@@ -122,6 +132,9 @@ suite.check('partial delimiters, UTF-8 and empty raw tags preserve the enclosing
 suite.check('comment and raw-string false endings do not split the function',
             ShardOutput.top_level_items(delimiter_lines).map { |item| item.values_at(:name, :first, :last) } ==
               [['delimiter_guards', 0, delimiter_lines.size - 1]])
+suite.check('the blanked code text keeps one line per input line (item indices address it)',
+            ShardOutput.code_text(PRELUDE.lines).lines.size == PRELUDE.lines.size &&
+              ShardOutput.code_text(delimiter_lines).lines.size == delimiter_lines.size)
 suite.check('division stays code while a trailing line comment hides its brace',
             delimiter_scan[-2][:code].strip == 'return n / 2;')
 small, small_shards = ShardOutput.split(marked, 'chk', 3)
@@ -140,12 +153,26 @@ suite.check('prelude state and helpers are inline in the gem namespace',
             main.include?("namespace bc2cpp_shard_chk {\ninline int counter = 0;\ninline int bump() {") &&
             main.include?('inline const int TABLE[]') && main.include?('inline int (*const registry[])(int)'))
 suite.check('function-local statics are left alone', main.include?('  static int calls = 0;'))
-suite.check('a stateless prelude helper stays static (each shard its own copy)',
-            main.include?("\n[[maybe_unused]] static int twice(int x)"))
+suite.check('SHARED_HELPERS: a stateless prelude helper is inline under -Os (one body per gem), a template stays static',
+            main.include?("\n[[maybe_unused]] BC2CPP_SHARED_FN int twice(int x)") &&
+              main.include?("\ntemplate <int N> static inline int times(int x)") &&
+              main.include?("\ntemplate <class F>\nstatic int apply(F f)") &&
+              main.include?("#ifdef __OPTIMIZE_SIZE__\n#define BC2CPP_SHARED_FN inline\n"))
+suite.check('a head wrapped over lines is read as its function: stateless shared, stateful inline',
+            main.include?("\n[[maybe_unused]] BC2CPP_SHARED_FN int wrapped(int a,\n") &&
+              main.include?("\ninline int wrapped_state(int a,\n"))
+saved_helpers = ENV.fetch('BC2CPP_SHARED_HELPERS', nil)
+ENV['BC2CPP_SHARED_HELPERS'] = '0'
+helpers_off, = ShardOutput.split(marked, 'chk', 3)
+saved_helpers.nil? ? ENV.delete('BC2CPP_SHARED_HELPERS') : ENV['BC2CPP_SHARED_HELPERS'] = saved_helpers
+suite.check('BC2CPP_SHARED_HELPERS=0: a stateless prelude helper stays static (each shard its own copy)',
+            helpers_off.include?("\n[[maybe_unused]] static int twice(int x)") &&
+              !helpers_off.include?('BC2CPP_SHARED_FN'))
 suite.check('a BC2CPP_SHARD_ONE_BODY helper and what it calls are inline (one body for every shard)',
             main.include?("\nBC2CPP_SHARD_ONE_BODY inline int one_body(int x)") && main.include?("\ninline int thrice(int x)"))
 suite.check('#include stays at global scope',
-            main.match?(%r{^\} // namespace bc2cpp_shard_chk\n#include <stdio.h>|\A[^\n]*\n[^\n]*\n#include <stdio.h>}) &&
+            main.delete_prefix(ShardOutput::SHARED_HELPER_MACROS)
+                .match?(%r{^\} // namespace bc2cpp_shard_chk\n#include <stdio.h>|\A[^\n]*\n[^\n]*\n#include <stdio.h>}) &&
             main.include?("#ifdef SHARD_CHECK_NEVER\n#include <never_included.h>\n#endif\n"))
 suite.check('method declarations stay global and lose static',
             main.match?(/^\} \/\/ namespace bc2cpp_shard_chk\n(?:.*\n)*?int A_one_impl\(int\);\n\[\[maybe_unused\]\] int A_one\(int\);/))
@@ -232,14 +259,17 @@ if Bc2cppCxx.executable?(Bc2cppCxx.compiler.first)
       binary = File.join(dir, 'chk')
       sources = [File.join(dir, 'chk_gen.cpp'), *shard_texts.each_index.map { |i| ShardOutput.shard_path(dir, 'chk', i + 1) },
                  File.join(dir, 'main.cpp')]
-      out, err, status = Bc2cppCxx.capture3('-std=c++17', '-O2', '-Wall', '-Werror', "-I#{dir}", *sources, '-o', binary)
-      suite.check("#{description}: the split program compiles warning-free and links", status.success?)
-      puts err.lines.first(20).join unless status.success?
-      if status.success?
+      # -Os makes the stateless helpers inline (SHARED_HELPERS).
+      %w[-O2 -Os].each do |opt|
+        out, err, status = Bc2cppCxx.capture3('-std=c++17', opt, '-Wall', '-Werror', "-I#{dir}", *sources, '-o', binary)
+        suite.check("#{description} #{opt}: the split program compiles warning-free and links", status.success?)
+        puts err.lines.first(20).join unless status.success?
+        next unless status.success?
+
         out, = Open3.capture2(binary)
         # A_one: bump() is the first call (101) + B_helper(2) = 105; B_one: bump() second (202) + 2 = 204. Shared
         # counter and call count carry on into the second round: 305 + 404.
-        suite.check("#{description}: prelude state and statics are one instance across shards (#{out.strip})",
+        suite.check("#{description} #{opt}: prelude state and statics are one instance across shards (#{out.strip})",
                     out == expected)
       end
     end
@@ -585,8 +615,29 @@ Dir.mktmpdir('bc2cpp-shard-generated') do |dir|
         return 0;
       }
     CPP
+    # -Os: the size-optimized build is the one SHARED_HELPERS gives one body per gem. -fno-inline keeps every
+    # called helper out of line, so a per-shard copy cannot hide inside its callers.
+    saved_flags = ENV.fetch('BC2CPP_CXXFLAGS', nil)
+    ENV['BC2CPP_CXXFLAGS'] = "#{saved_flags} -Os -fno-inline"
     built, output = Bc2cppFixtureRuntime.run(dir, err, OWNERS, body, build: build, full: true, extra_srcs: [shard])
+    saved_flags.nil? ? ENV.delete('BC2CPP_CXXFLAGS') : ENV['BC2CPP_CXXFLAGS'] = saved_flags
     suite.check('the main file and the shard compile and link', built)
+    nm = ENV.fetch('NM', 'nm')
+    # -p: symbol-table order, so the two listings pair line for line.
+    syms, nm_status = Open3.capture2(nm, '-p', File.join(dir, 'fixture')) if built
+    names, = Open3.capture2(nm, '-p', '-C', File.join(dir, 'fixture')) if nm_status&.success?
+    if nm_status&.success?
+      # The link keeps every local symbol: a mangled name listed twice is a body each shard compiled. GCC's own
+      # clones (`.isra.0`, `.constprop.0`) are local to the unit that made them whatever the original's linkage, and
+      # a function template's instances stay per unit (stateless_helpers).
+      copies = syms.lines.zip(names.lines).map { |l, d| [*l.split(' ', 3), d.to_s.split(' ', 3)[2].to_s] }
+                   .select { |_, kind, name, plain| kind == 't' && name.include?('bc2cpp_shard_fixture') && !plain[/\A[^(]*/].include?('<') }
+                   .map { |_, _, name, _| name.strip }.grep_v(/\.(?:isra|constprop|part|cold)\b/).tally.select { |_, n| n > 1 }
+      suite.check("SHARED_HELPERS: no gem-namespace function has a copy per shard (#{copies.keys.first(3).join('; ')})",
+                  copies.empty?)
+    else
+      puts "  SKIP helper copy count: no #{nm}"
+    end
     sections = Bc2cppFixtureRuntime.sections(output.to_s)
     suite.check('the sharded build runs the fixture as the interpreter does',
                 sections['interpreted']&.last == 'end' && sections['interpreted'] == sections['compiled'])

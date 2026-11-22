@@ -21,7 +21,8 @@ abort "rom_method_tables: no generated sources under #{dir}/mrbgems" if sources.
 
 DEFINE = /\b(?:mrb_define_(?:private_|class_)?method|bc2cpp_define_private_class_method)\(M, bc2cpp_owner_reg_\w+, "((?:[^"\\]|\\.)*)"/
 LEFT_OUT = /\bbc2cpp_left_out\(M, \w+, "((?:[^"\\]|\\.)*)"/
-REGISTRATION = /^(?:\[\[maybe_unused\]\] )?(?:static|inline) void bc2cpp_register_(?:core|program)_owner_methods\(\[\[maybe_unused\]\] mrb_state\* M\) \{\n(.*?)^\}/m
+# BC2CPP_SHARED_FN: a sharded gem's stateless prelude helper (shard_output.rb, SHARED_HELPERS).
+REGISTRATION = /^(?:\[\[maybe_unused\]\] )?(?:static|inline|BC2CPP_SHARED_FN) void bc2cpp_register_(?:core|program)_owner_methods\(\[\[maybe_unused\]\] mrb_state\* M\) \{\n(.*?)^\}/m
 tables = 0
 walked = 0
 sources.each do |path|
