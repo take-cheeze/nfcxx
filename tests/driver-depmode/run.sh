@@ -1,6 +1,7 @@
 #!/bin/bash
-# Differential test of nfcxx's dependency file command (the -MD/-MMD block of the driver): the bash block verbatim (from the
-# frozen driver, tests/driver-body/nfcxx-bash) against the block now in ./nfcxx, which calls scripts/nfcxx-depmode.rb plan and
+# Differential test of nfcxx's dependency file command (the -MD/-MMD block of the driver): the bash block verbatim (pinned in
+# pinned-bash-block.txt, copied from the frozen driver before its switch to the plan) against the block of the driver body
+# (tests/driver-body/nfcxx-bash, pinned in pinned-depmode-block.txt), which calls scripts/nfcxx-depmode.rb plan and
 # runs the command it prints. Both run with a stub compiler (NFCXX_CXX, or a g++ on PATH when NFCXX_CXX is unset) that logs its
 # arguments NUL-separated and exits with STUB_RC. Each case compares the logs byte for byte and the status.
 #   bash tests/driver-depmode/run.sh
@@ -11,10 +12,12 @@ work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 pass=0; fail=0
 
 block() { sed -n '/^if \[ -n "\$depmode" \]; then$/,/^fi$/p' "$1"; }
-block "$repo/tests/driver-body/nfcxx-bash" > "$work/bash.sh"
-block "$here/pinned-depmode-block.txt" > "$work/driver.sh"   # the pre-switch block of ./nfcxx, pinned (see pinned-depmode-block.txt)
-[ "$(wc -l < "$work/bash.sh")" = 7 ] || { echo "driver-depmode: the bash block is not the seven lines of the frozen driver" >&2; exit 2; }
+block "$here/pinned-bash-block.txt" > "$work/bash.sh"
+block "$here/pinned-depmode-block.txt" > "$work/driver.sh"   # the plan block, pinned (see pinned-depmode-block.txt)
+block "$repo/tests/driver-body/nfcxx-bash" > "$work/body.sh"
+[ "$(wc -l < "$work/bash.sh")" = 7 ] || { echo "driver-depmode: the pinned bash block is not the seven lines of the frozen driver" >&2; exit 2; }
 [ -s "$work/driver.sh" ] || { echo "driver-depmode: no depmode block in the pinned copy" >&2; exit 2; }
+cmp -s "$work/driver.sh" "$work/body.sh" || { echo "driver-depmode: the driver body's depmode block is not the pinned plan block" >&2; exit 2; }
 
 # the stub: logs its arguments, NUL-separated, to $NFCXX_STUB_LOG, then exits with $STUB_RC
 bin=$work/bin; mkdir -p "$bin"

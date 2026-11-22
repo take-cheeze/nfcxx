@@ -298,7 +298,8 @@ eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary direc
   local rc=$?
   local cudatmp_arg=${cudatmp:-}; [ -z "${cudatmp_owned:-}" ] || cudatmp_arg=   # the Ruby driver removes its own cudatmp
   local ctmp_arg=${ctmp:-}; [ -z "${ctmp_owned:-}" ] || ctmp_arg=   # nor its own ctmp
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" cleanup "$keep_intermediates" "$eccp_dir" "$cudatmp_arg" "$ctmp_arg"   # the removals (tests/nfcxx-link/run.sh)
+  local eccp_arg=$eccp_dir; [ "${NFCXX_TMP_OWNED:-}" != 1 ] || eccp_arg=   # nor the eccp directory, when the Ruby driver owns the temp root
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" cleanup "$keep_intermediates" "$eccp_arg" "$cudatmp_arg" "$ctmp_arg"   # the removals (tests/nfcxx-link/run.sh)
   temp_cleanup
   trace_finish
   return $rc
@@ -905,8 +906,7 @@ fi
 cache_store "$out"
 if [ -n "$depmode" ]; then
   # -MD/-MMD (with -MF/-MT/-MQ/-MP): the host preprocessor writes the dependency file, as nfcc does for C.
-  df=${dfile:-${out%.*}.d}; tgt=${dtarget:-$out}
-  mflag=-M; [ "$depmode" = -MMD ] && mflag=-MM
-  "${NFCXX_CXX:-g++}" $mflag $depphony -MT "$tgt" -MF "$df" "-std=${std#--}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} \
-    ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"} ${srcs[@]+${srcs[@]+"${srcs[@]}"}}
+  dep_cmd=(); while IFS= read -r -d '' dep_w; do dep_cmd+=("$dep_w"); done < <("${RUBY:-ruby}" "$root/scripts/nfcxx-depmode.rb" plan depmode="$depmode" out="$out" std="$std" cxx="${NFCXX_CXX:-}" dfile="$dfile" dtarget="$dtarget" depphony="$depphony" ${cflags[@]+"${cflags[@]/#/cflags=}"} ${sysdirs[@]+"${sysdirs[@]/#/sysdirs=}"} ${srcs[@]+"${srcs[@]/#/srcs=}"})   # the command: scripts/nfcxx-depmode.rb
+  [ ${#dep_cmd[@]} -gt 0 ] || exit 1
+  "${dep_cmd[@]}"
 fi
