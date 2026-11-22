@@ -74,14 +74,19 @@
 #                  read from NFCXX_COSMOCC, else build/cosmocc/bin/cosmocc (scripts/setup-cosmo.sh). docs/notes/cosmo.md.
 set -euo pipefail
 root=$(cd "$(dirname "$0")" && pwd)
+# NFCXX_OWNED_CUDATMP and NFCXX_OWNED_TMP: the directories the Ruby driver made for this run (scripts/nfcxx.rb, under its temporary
+# root, removed when the run ends). They are read and unset here, so a driver this body re-runs makes its own. When they are not
+# set (the body run alone), the body makes its directories with mktemp -d and removes them in its EXIT traps.
+owned_cudatmp=${NFCXX_OWNED_CUDATMP-}; owned_tmp=${NFCXX_OWNED_TMP-}; unset NFCXX_OWNED_CUDATMP NFCXX_OWNED_TMP
 # temp_cleanup: removes the driver's temporary directories the EXIT traps name. Each trap calls it, so a later trap (which
 # replaces an earlier one) does not leave the earlier stage's directory behind. The eccp directory is not here: eccp_cleanup
-# removes it, and only when the intermediates are not kept.
+# removes it, and only when the intermediates are not kept. A directory the Ruby driver owns (cudatmp_owned, tmp_owned) is not
+# removed here: the Ruby driver removes it.
 temp_cleanup() {
-  [ -z "${tmp:-}" ] || rm -rf "$tmp"
+  [ -z "${tmp:-}" ] || [ -n "${tmp_owned:-}" ] || rm -rf "$tmp"
   [ -z "${ptmp:-}" ] || rm -rf "$ptmp"
   [ -z "${ctmp:-}" ] || rm -rf "$ctmp"
-  [ -z "${cudatmp:-}" ] || rm -rf "$cudatmp"
+  [ -z "${cudatmp:-}" ] || [ -n "${cudatmp_owned:-}" ] || rm -rf "$cudatmp"
   [ -z "${fso_dir:-}" ] || rm -rf "$fso_dir"
 }
 # -fsyntax-only is rewritten by the Ruby driver before this body runs (scripts/nfcxx-syntax-only.rb).
@@ -153,7 +158,8 @@ cache_sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shas
 cu_inputs=()
 cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs and files in place of the source
   [ ${#cu_inputs[@]} -gt 0 ] || return 0
-  cudatmp=$(mktemp -d); trap 'temp_cleanup; trace_finish' EXIT
+  if [ -n "$owned_cudatmp" ]; then cudatmp=$owned_cudatmp; cudatmp_owned=1; trap 'trace_finish' EXIT
+  else cudatmp=$(mktemp -d); trap 'temp_cleanup; trace_finish' EXIT; fi
   # The state the step needs, as records (state_put). scripts/nfcxx-cu-cpp2-prepare.rb makes the copies (the directory, the
   # rewrite of each input, the -I of each source directory) and prints the statements that set srcs, files, cflags, cuda_opts
   # and preinc: the body evals them here. A failing step ends the driver with its status (its message is printed by the script).
@@ -182,7 +188,10 @@ cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs
 cpp2_inputs=()
 cpp2_prepare() {  # cpp2_prepare: translates every .cpp2 input and puts its translation in srcs and files in place of the source
   [ ${#cpp2_inputs[@]} -gt 0 ] || return 0
-  if [ -z "${cudatmp:-}" ]; then cudatmp=$(mktemp -d); trap 'temp_cleanup' EXIT; fi
+  if [ -z "${cudatmp:-}" ]; then
+    if [ -n "$owned_cudatmp" ]; then cudatmp=$owned_cudatmp; cudatmp_owned=1
+    else cudatmp=$(mktemp -d); trap 'temp_cleanup' EXIT; fi
+  fi
   local inf=$cudatmp/cpp2-in.rec prep
   {
     state_put root "$root"; state_put tmp "$cudatmp"; state_put compile_only "$compile_only"
@@ -285,7 +294,8 @@ eccp_plan() {  # eccp_plan: the eccp command line (eccp_argv), its exports (eccp
 }
 eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary directory (and of the C-input and .cu steps)
   local rc=$?
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" cleanup "$keep_intermediates" "$eccp_dir" "${cudatmp:-}" "${ctmp:-}"   # the removals (tests/nfcxx-link/run.sh)
+  local cudatmp_arg=${cudatmp:-}; [ -z "${cudatmp_owned:-}" ] || cudatmp_arg=   # the Ruby driver removes its own cudatmp
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" cleanup "$keep_intermediates" "$eccp_dir" "$cudatmp_arg" "${ctmp:-}"   # the removals (tests/nfcxx-link/run.sh)
   temp_cleanup
   trace_finish
   return $rc
@@ -493,7 +503,8 @@ fi
 if [ $emit_c = 1 ]; then
   # Run the front end alone and print the generated C.
   base=${EDG_BASE:-$root/build/edg-base}
-  tmp=$(mktemp -d); trap 'temp_cleanup; trace_finish' EXIT
+  if [ -n "$owned_tmp" ]; then tmp=$owned_tmp; tmp_owned=1; trap 'trace_finish' EXIT
+  else tmp=$(mktemp -d); trap 'temp_cleanup; trace_finish' EXIT; fi
   f=$(realpath "${srcs[0]}")   # the first source, not files[0] (which may be an -I option)
   # host dirs first, then EDG's own, as eccp orders user and default include dirs
   inc=(${sys_inc[@]+${sys_inc[@]+"${sys_inc[@]}"}} --sys_include="$base/include"); [ $freestanding = 1 ] && inc=("-I$root/lib")
