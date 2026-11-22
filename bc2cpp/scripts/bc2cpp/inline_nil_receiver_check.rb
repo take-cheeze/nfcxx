@@ -17,7 +17,8 @@
 #       only on a receiver proven to reach the owner (a fresh `.new`, self in the owner or a subclass); a nil-or-owner
 #       ivar takes MONO_NILABLE's nil test, any other receiver MONO_GUARD's class guard with the by-name send (a module
 #       owner, which no guard can name, MONO_UNPROVEN's plain send);
-#       BC2CPP_MONO_RECEIVER_PROOF=0 brings back the unguarded MONO call;
+#       BC2CPP_MONO_RECEIVER_PROOF=0 brings back the unguarded MONO call; a keyword call to a method a `public :name`
+#       in its own class body re-publicises after a private def stays direct (VISIBILITY_SAME_BODY);
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
 #     - interpreted and compiled runs print the same with the ivars assigned and with them left nil, the
 #       NoMethodError's name and args included; a MONO name on nil, a String or an Integer raises as interpreted.
@@ -155,6 +156,12 @@ MONO_SRC = <<~'RUBY'
     def kv(a, k: 1); a + k; end
     def self_kv; kv(1, k: 5); end
   end
+  class MnrPriv
+    private
+
+    def pk(a, k: 1); a + k; end
+    public :pk
+  end
   class MnrSub < MnrNo
     def sub_kv; kv(2, k: 3); end
   end
@@ -182,14 +189,17 @@ MONO_SRC = <<~'RUBY'
     def onum; on(@fill ? -3 : 'x'); end
     def ef(o); o.mnr_first; end
     def efa; ef(@fill ? [4, 5] : 3); end
+    def pv; MnrPriv.new.pk(1, k: 2); end
+    def pvo(o); o.pk(1, k: 2); end
+    def pvn; pvo(@fill ? MnrPriv.new : nil); end
   end
 RUBY
-MONO_OWNERS = %w[Numeric Enumerable MnrNo MnrSub MnrHold].freeze
+MONO_OWNERS = %w[Numeric Enumerable MnrNo MnrPriv MnrSub MnrHold].freeze
 MONO_TAGS = { 'MnrHold_fresh' => 'MONO :nv', 'MnrNo_self_kv' => 'MONO :kv', 'MnrSub_sub_kv' => 'MONO :kv',
               'MnrHold_qv' => 'MONO_NILABLE :nv', 'MnrHold_qk' => 'MONO_NILABLE :kv', 'MnrHold_ql' => 'MONO_NILABLE :kv',
               'MnrHold_wv' => 'MONO_GUARD :nv', 'MnrHold_wk' => 'MONO_GUARD :kv', 'MnrHold_ov' => 'MONO_GUARD :nv',
               'MnrHold_ok' => 'MONO_GUARD :kv', 'MnrHold_on' => 'MONO_GUARD :mnr_neg?',
-              'MnrHold_ef' => 'MONO_UNPROVEN :mnr_first' }.freeze
+              'MnrHold_ef' => 'MONO_UNPROVEN :mnr_first', 'MnrHold_pv' => 'MONO :pk', 'MnrHold_pvo' => 'MONO_NILABLE :pk' }.freeze
 mono_dir = Dir.mktmpdir('bc2cpp-mono-nil')
 at_exit { FileUtils.remove_entry(mono_dir) }
 mono_code, mono_err = Bc2cppFixtureRuntime.generate(MONO_SRC, mono_dir, only_owners: MONO_OWNERS)
@@ -211,16 +221,29 @@ check.call('BC2CPP_MONO_RECEIVER_PROOF=0: every MONO call is unguarded again',
            %w[MnrHold_qv MnrHold_qk MnrHold_wv MnrHold_ov MnrHold_ok].all? { |fn| method_code(off_mono.to_s, fn).match?(%r{// MONO :\w+ -> }) } &&
              !off_mono.to_s.match?(/MONO_(?:NILABLE|GUARD|UNPROVEN) :/))
 
+# VISIBILITY_SAME_BODY (closed_world.rb): a `public :pk` after a private def, in the same class body, leaves the
+# keyword call's visibility proven, so the MONO call stays direct; with every visibility send counted it is the
+# by-name keyword send.
+vis_off, = Dir.mktmpdir('bc2cpp-mono-vis-off') do |off_dir|
+  ENV['BC2CPP_VISIBILITY_SAME_BODY'] = '0'
+  Bc2cppFixtureRuntime.generate(MONO_SRC, off_dir, only_owners: MONO_OWNERS)
+ensure
+  ENV.delete('BC2CPP_VISIBILITY_SAME_BODY')
+end
+check.call('BC2CPP_VISIBILITY_SAME_BODY=0: the re-publicised keyword call is the by-name keyword send',
+           !method_code(vis_off.to_s, 'MnrHold_pv').include?('MnrPriv_pk_impl(M') &&
+             method_code(vis_off.to_s, 'MnrHold_pv').include?('bc2cpp_send_kw(M, '))
+
 MONO_DRIVER = <<~'RUBY'
   [true, false].each do |fill|
     h = MnrHold.new(fill)
-    %i[fresh qv qk ql wv wk onil oint oknil oksub selfk subk onum efa].each do |m|
+    %i[fresh qv qk ql wv wk onil oint oknil oksub selfk subk onum efa pv pvn].each do |m|
       line = begin
         (case m
          when :fresh then h.fresh when :qv then h.qv when :qk then h.qk when :ql then h.ql
          when :wv then h.wv when :wk then h.wk when :onil then h.onil when :oint then h.oint
          when :oknil then h.oknil when :oksub then h.oksub when :selfk then h.selfk when :subk then h.subk
-         when :onum then h.onum else h.efa
+         when :onum then h.onum when :efa then h.efa when :pv then h.pv else h.pvn
          end).inspect
       rescue NoMethodError => e
         "#{e.class}: #{e.message} name=#{e.name.inspect} args=#{e.args.inspect}"
@@ -289,7 +312,7 @@ else
     interpreted = sections['interpreted']
     compiled = sections['compiled']
     check.call('a MONO name on nil, a String and an Integer raises NoMethodError',
-               %w[qv qk ql wv wk onil oint oknil oksub onum efa].all? do |m|
+               %w[qv qk ql wv wk onil oint oknil oksub onum efa pvn].all? do |m|
                  interpreted.to_a.any? { |l| l.start_with?("false #{m}: NoMethodError:") }
                end)
     check.call('MONO: interpreted and compiled runs print the same', interpreted && interpreted.last == 'end' &&
