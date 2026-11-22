@@ -64,6 +64,16 @@ main(int argc, char **argv)
     mrb_print_error(mrb);
     status = EXIT_FAILURE;
   }
-  mrb_close(mrb);
+  /* The process exits now, so freeing a heap of 1-2 GB object by object is work nobody reads: it was 0.6s of a 10s
+     run. The state's atexit functions still run, newest first, as mrb_close runs them, and stdio is flushed.
+     BC2CPP_CLOSE_STATE=1 closes the state as before (for a leak checker). */
+  if (getenv("BC2CPP_CLOSE_STATE") && strcmp(getenv("BC2CPP_CLOSE_STATE"), "1") == 0) {
+    mrb_close(mrb);
+    return status;
+  }
+  for (int i = mrb->atexit_stack_len; i > 0; --i) {
+    mrb->atexit_stack[i - 1](mrb);
+  }
+  fflush(NULL);
   return status;
 }

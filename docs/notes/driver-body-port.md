@@ -52,6 +52,19 @@ The body can be deleted only when the Ruby driver runs every stage without it. I
    `instantiate`, the `cosmo` block, the freestanding and host header probes (with their trace span), the host cflags, the GNU
    options, the k1om and target blocks, the Path B `pb_flags` tail and the backend's environment (the unwired planners
    `planners_text` and `flags_text` in `scripts/nfcxx-setup.rb` cover most of them), and the trace unit's setup.
+4. **CUDA and `.cpp2` preparation.** Done for the decisions and the rewriting: `scripts/nfcxx-cu-cpp2-prepare.rb` (cu and cpp2)
+   makes the copies, the rewrite and the translation, and the array edits, and the body evals its statements at the
+   preparation's place. The body still makes the temporary directory and its EXIT trap (item 8).
+5. **Cache hit and store.** `cache_check` and `cache_store` call the Ruby helpers; the remote tier (`cache-io`) and the
+   `--cache-log` writes are called from bash.
+6. **Routes.** The gcc route and the Path B `-c` and link routes still evaluate their planner output in bash.
+7. **eccp call.** The plan, trap, subshell and trace span, then the depmode step and the CUDA host-symbol second pass.
+8. **Temporary directories and traps.** The Ruby driver already owns the temporary root (`Dir.mktmpdir`); the bash
+   `trap ... EXIT` lines for `cudatmp`, `eccp_dir`, `ctmp`, `tmp` and `ptmp` must move to it.
+9. **Second run and exports.** The `$root/nfcxx` re-run with an environment prefix moves into Ruby (`spawn(env, ...)`).
+10. **Test oracles.** The frozen copies under `tests/` (`tests/driver-body/nfcxx-bash`, `tests/nfcxx/nfcxx-bash`,
+    `tests/nfcxx-cache/nfcxx-bash`, `tests/nfcxx-cuda-device/nfcxx-bash`) are read by suites, and some suites extract
+    functions from them with `sed`. Each suite must be moved to a pinned copy or to the Ruby code before its oracle is deleted.
 
 Items 1 to 9 are code; item 10 is test layout. Item 10 can be done suite by suite, as each suite stops reading an oracle.
 
@@ -78,8 +91,8 @@ suites that exercise its stage. Stage status:
 - **B2: the Ruby skeleton.** Done: `scripts/nfcxx.rb` runs the frozen body, and its route dispatch is back (#1352, #1387).
 - **B3: the setup stage.** Refusals done (#1356). The backend choice and the sanitizer/Path B stage run in Ruby, and the
   body evals them (item 3 above); the rest of the setup still runs in the body.
-- **B4: the CUDA, `.cpp2` and module stages.** Refusals done (#1363). `cu_prepare` and `cpp2_prepare` still run in the body
-  (item 4 above).
+- **B4: the CUDA, `.cpp2` and module stages.** Refusals done (#1363). `cu_prepare` and `cpp2_prepare` make their copies and
+  translations in Ruby (`scripts/nfcxx-cu-cpp2-prepare.rb`); the body keeps their trap (item 4 above).
 - **B5: the cache.** Configuration refusal done (#1369). The lookup planner is done (#1432). The hit, store and remote
   calls still run in the body (item 5 above).
 - **B6: traps and temporary directories.** The Ruby driver owns the temporary root, and the leak fix is merged (#1364).

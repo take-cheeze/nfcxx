@@ -55,8 +55,10 @@ class Tempfile
     self
   end
 
+  # Closing again does nothing, as in CRuby: close! after close (the usual write, close, rename, ensure close!)
+  # raised IOError "closed stream" here.
   def close
-    @file.close
+    @file.close unless @file.closed?
     nil
   end
 

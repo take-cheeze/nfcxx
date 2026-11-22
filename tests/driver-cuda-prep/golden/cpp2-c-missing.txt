@@ -1,0 +1,6 @@
+stdout:
+status=1
+stderr:
+
+nosuch.cpp2: error: file not found: WORK/nosuch.cpp2
+eccp:
