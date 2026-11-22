@@ -16,6 +16,11 @@
 #   generated code (needs a host mrbc and a full-core libmruby)
 #     - bc2cpp.rb with BC2CPP_SHARDS=2 writes a non-empty shard, and the two translation units, linked, run the
 #       fixture as the interpreter does.
+#   IMPLICIT_STATE (tools/bc2cpp/implicit_state.rb)
+#     - a synthetic text loses the state parameter of its called-only functions and keeps it on an address-taken
+#       entry, an overloaded name and an extern "C" init (which stores it); compiled, it runs, a second state aborts
+#       under BC2CPP_IMPLICIT_STATE_CHECK, and without -DBC2CPP_IMPLICIT_STATE it does not compile;
+#     - the colocated generated fixture with BC2CPP_IMPLICIT_STATE=1 compiles, links and runs as the interpreter does.
 #
 # Usage: [MRBC=path/to/mrbc] [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/shard_output_check.rb
 
@@ -25,6 +30,7 @@ require 'tmpdir'
 require_relative 'check_support'
 require_relative 'cxx'
 require_relative '../../tools/bc2cpp/shard_output'
+require_relative '../../tools/bc2cpp/implicit_state'
 
 suite = FixtureCheck.new('shard_output_check')
 
@@ -533,6 +539,69 @@ else
   puts '  SKIP: no C++ compiler'
 end
 
+puts '-- implicit state'
+IMPLICIT_TEXT = <<~'CPP'
+  #include <stdio.h>
+  typedef struct mrb_state { int calls; } mrb_state;
+  typedef struct { long w; } mrb_value;
+  namespace chk {
+  static mrb_value helper(mrb_state* M, mrb_value v, int k) { M->calls++; v.w += k; return v; }
+  static mrb_value over(mrb_value v) { return v; }
+  static mrb_value over(mrb_state* M, mrb_value v) { M->calls += 10; return over(v); }
+  } // namespace chk
+  using namespace chk;
+  mrb_value A_impl(mrb_state* M, mrb_value self);
+  mrb_value A_impl(mrb_state* M, mrb_value self) { return over(M, helper(M, self, 2)); }
+  static mrb_value entry(mrb_state* M, mrb_value self) { return A_impl(M, self); }
+  typedef mrb_value (*fn_t)(mrb_state*, mrb_value);
+  static const fn_t table[] = { entry };
+  extern "C" void chk_gem_init(mrb_state* M) { (void)M; }
+  int run(mrb_state* M) { mrb_value v = { 40 }; return (int)table[0](M, v).w + M->calls; }
+CPP
+implicit = ImplicitState.rewrite([IMPLICIT_TEXT]).first
+suite.check('IMPLICIT_STATE: called-only functions lose the state parameter and read it in their body',
+            implicit.include?('static mrb_value helper(mrb_value v, int k) { BC2CPP_IMPLICIT_M M->calls++;') &&
+              implicit.include?("mrb_value A_impl(mrb_value self);\n") &&
+              implicit.include?('mrb_value A_impl(mrb_value self) { BC2CPP_IMPLICIT_M return over(M, helper(M, self, 2)); }'))
+suite.check('IMPLICIT_STATE: an address-taken entry and an overloaded name keep it, checked; an extern "C" init stores it',
+            implicit.include?('static mrb_value entry(mrb_state* M, mrb_value self) { BC2CPP_STATE_CHECK(M); return') &&
+              implicit.include?('static mrb_value over(mrb_state* M, mrb_value v) { BC2CPP_STATE_CHECK(M);') &&
+              implicit.include?('extern "C" void chk_gem_init(mrb_state* M) { bc2cpp_implicit_state = M; (void)M; }'))
+suite.check('IMPLICIT_STATE: one forwarder per converted function (helper, A_impl, run), in its namespace',
+            implicit.scan(/^#define (BC2CPP_IMPLICIT_FWD_\w+)/).uniq.size == 3 &&
+              implicit.index('decltype(auto) helper(mrb_state* bc2cpp_m, mrb_value bc2cpp_a0, int bc2cpp_a1)') <
+                implicit.index('} // namespace chk'))
+if Bc2cppCxx.executable?(Bc2cppCxx.compiler.first)
+  Dir.mktmpdir('bc2cpp-implicit-state') do |dir|
+    File.write(File.join(dir, 'chk.cpp'), implicit + <<~'CPP')
+      #include <stdlib.h>
+      int main(int argc, char**) {
+        mrb_state s = { 0 }, other = { 0 };
+        chk_gem_init(&s);
+        printf("%d\n", run(&s));
+        fflush(stdout);
+        if (argc > 1) run(&other);
+        return 0;
+      }
+    CPP
+    binary = File.join(dir, 'chk')
+    flags = ['-std=c++17', '-O2', '-Wall', '-Werror', File.join(dir, 'chk.cpp'), '-o', binary]
+    _, err, status = Bc2cppCxx.capture3('-DBC2CPP_IMPLICIT_STATE=1', '-DBC2CPP_IMPLICIT_STATE_CHECK=1', *flags)
+    suite.check('IMPLICIT_STATE: the rewritten text compiles warning-free', status.success?)
+    puts err.lines.first(20).join unless status.success?
+    if status.success?
+      out, = Open3.capture2(binary)
+      suite.check("IMPLICIT_STATE: it runs through the global (#{out.strip})", out == "53\n")
+      _, st = Open3.capture2e(binary, 'second', rlimit_core: 0)
+      suite.check('IMPLICIT_STATE: a second mrb_state aborts under BC2CPP_IMPLICIT_STATE_CHECK', !st.success?)
+    end
+    _, _, plain = Bc2cppCxx.capture3(*flags)
+    suite.check('IMPLICIT_STATE: without -DBC2CPP_IMPLICIT_STATE the text does not compile', !plain.success?)
+  end
+else
+  puts '  SKIP: no C++ compiler'
+end
+
 puts '-- generated code'
 mrbc =ENV['MRBC'] || ENV.fetch('PATH', '').split(File::PATH_SEPARATOR).map { |d| File.join(d, 'mrbc') }.find { |p| File.executable?(p) }
 if mrbc.nil?
@@ -648,6 +717,45 @@ Dir.mktmpdir('bc2cpp-shard-colocate-generated') do |dir|
                 sections['interpreted']&.last == 'end' && sections['interpreted'] == sections['compiled'])
     puts output.to_s.lines.last(20).join unless built && sections['interpreted'] == sections['compiled']
   end
+end
+
+# IMPLICIT_STATE on the colocated generated code: the generation drops the state parameter, and the program built with
+# BC2CPP_IMPLICIT_STATE (its check on) runs as the interpreter does.
+Dir.mktmpdir('bc2cpp-implicit-state-generated') do |dir|
+  keys = %w[BC2CPP_SHARDS BC2CPP_SHARD_MIN_BYTES BC2CPP_SHARD_COLOCATE BC2CPP_IMPLICIT_STATE BC2CPP_CXXFLAGS]
+  saved = keys.to_h { |k| [k, ENV.fetch(k, nil)] }
+  ENV.update('BC2CPP_SHARDS' => '3', 'BC2CPP_SHARD_MIN_BYTES' => '1', 'BC2CPP_SHARD_COLOCATE' => 'all',
+             'BC2CPP_IMPLICIT_STATE' => '1')
+  code, err = Bc2cppFixtureRuntime.generate(COLO_SOURCE, dir, core: true, only_owners: COLO_OWNERS)
+  ENV.delete('BC2CPP_IMPLICIT_STATE')
+  shards = [1, 2].map { |k| ShardOutput.shard_path(dir, 'fixture', k) }
+  text = code + shards.map { |p| File.exist?(p) ? File.read(p) : '' }.join
+  suite.check('IMPLICIT_STATE: the generated methods and their colocated copies lose the state parameter',
+              text.match?(/^mrb_value ColoMid_step_impl\(mrb_value self\b.*\{ BC2CPP_IMPLICIT_M/) &&
+                text.match?(/^BC2CPP_COLO_ATTR static mrb_value bc2cpp_colo_ColoLeaf_scale_impl\(mrb_value self\b/) &&
+                text.match?(/^static void bc2cpp_gem_init\(mrb_state\* M\) \{ bc2cpp_implicit_state = M;|bc2cpp_gem_init\(mrb_state\* M\) \{ bc2cpp_implicit_state = M;/))
+  build = Bc2cppFixtureRuntime.full_or_build
+  if build.nil?
+    puts '  SKIP implicit-state behavioural comparison: needs a full-core libmruby'
+  else
+    ENV['BC2CPP_CXXFLAGS'] = "#{saved['BC2CPP_CXXFLAGS']} -DBC2CPP_IMPLICIT_STATE=1 -DBC2CPP_IMPLICIT_STATE_CHECK=1"
+    body = <<~CPP
+      static int scenario(mrb_state* M) {
+        std::fflush(stdout);
+        mrb_load_string(M, R"SHD(#{COLO_DRIVER})SHD");
+        std::fflush(stdout);
+        if (M->exc) { mrb_print_error(M); M->exc = nullptr; return 1; }
+        return 0;
+      }
+    CPP
+    built, output = Bc2cppFixtureRuntime.run(dir, err, COLO_OWNERS, body, build: build, full: true, extra_srcs: shards)
+    suite.check('IMPLICIT_STATE: the generated shards compile and link', built)
+    sections = Bc2cppFixtureRuntime.sections(output.to_s)
+    suite.check('IMPLICIT_STATE: the generated program runs the fixture as the interpreter does',
+                sections['interpreted']&.last == 'end' && sections['interpreted'] == sections['compiled'])
+    puts output.to_s.lines.last(20).join unless built && sections['interpreted'] == sections['compiled']
+  end
+  saved.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
 end
 
 # SHARD_COLOCATE_GUARDS on generated code: a declared program-class parameter that its one program site proves is left

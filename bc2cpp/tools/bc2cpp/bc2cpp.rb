@@ -1659,6 +1659,8 @@ BC2CPP_MAIN = lambda do
     (1...shards).each { |k| File.write(ShardOutput.shard_path(out_dir, symbol, k), ShardOutput.empty_shard(symbol, k, shards)) }
     shards = 1
   end
+  # IMPLICIT_STATE (implicit_state.rb): registered before ShardOutput, so it rewrites the files the split leaves.
+  ImplicitState.capture_stdout(out_dir, symbol, shards) if ImplicitState.enabled?
   if shards > 1
     ShardOutput.capture_stdout(symbol, out_dir, shards, shard_tier[:tier], shard_tier[:hot],
                                ->(tiers) { bc2cpp_method_report(compiled, tiers) })

@@ -815,7 +815,9 @@ def bc2cpp_compiled_gem_job(spec, gems_root)
     'BC2CPP_RUNTIME_HEADER_DIR' => "#{spec.build.build_dir}/mrbgems/bc2cpp-runtime",
     # CONST_DEF_ELIDE (const_def_elide.rb): a build without the bytecode interpreter runs no Ruby the generation
     # does not compile.
-    'BC2CPP_VM_FREE' => spec.build.cc.defines.flatten.include?('MRB_VM_FREE') ? '1' : '0'
+    'BC2CPP_VM_FREE' => spec.build.cc.defines.flatten.include?('MRB_VM_FREE') ? '1' : '0',
+    # IMPLICIT_STATE (implicit_state.rb): a build whose C++ defines BC2CPP_IMPLICIT_STATE has one mrb_state.
+    'BC2CPP_IMPLICIT_STATE' => bc2cpp_implicit_state(spec) ? '1' : '0'
   }.merge(bc2cpp_closed_world_env(spec, gems_root))
   mrbc = bc2cpp_optional_mrbc(spec)
   env['MRBC'] = mrbc if mrbc
@@ -824,6 +826,13 @@ def bc2cpp_compiled_gem_job(spec, gems_root)
   env['BC2CPP_NATIVE_INVENTORY'] = ENV['BC2CPP_NATIVE_INVENTORY'] if ENV['BC2CPP_NATIVE_INVENTORY']
   env['BC2CPP_SHARDS'] = bc2cpp_gem_shards.to_s
   [env, bc2cpp_closed_world_srcs(spec, gems_root), "#{spec.build_dir}/#{this_gem[:out_symbol]}_gen.cpp"]
+end
+
+# IMPLICIT_STATE: on for a build that defines BC2CPP_IMPLICIT_STATE (not to 0), unless BC2CPP_IMPLICIT_STATE=0.
+def bc2cpp_implicit_state(spec)
+  require_relative 'implicit_state'
+  ENV[ImplicitState::ENV_KEY] != '0' &&
+    spec.build.cxx.defines.flatten.any? { |d| %w[BC2CPP_IMPLICIT_STATE BC2CPP_IMPLICIT_STATE=1].include?(d.to_s) }
 end
 
 # BC2CPP_SHARDS (docs/bc2cpp-shards.md): translation units per compiled gem, default 4 (the CI runners' cores). A
@@ -844,7 +853,7 @@ def bc2cpp_compiled_gem_shards(spec, generated, prereqs)
   File.write(stamp, "#{shards}\n") unless File.exist?(stamp) && File.read(stamp) == "#{shards}\n"
   Rake::Task[generated].enhance([stamp])
   main_stamp = File.join(spec.build_dir, 'bc2cpp_main_roots')
-  main_mode = "#{ENV['BC2CPP_MAIN_AST']}\n#{ENV['BC2CPP_NATIVE_INVENTORY']}\n"
+  main_mode = "#{ENV['BC2CPP_MAIN_AST']}\n#{ENV['BC2CPP_NATIVE_INVENTORY']}\n#{"implicit_state\n" if bc2cpp_implicit_state(spec)}"
   File.write(main_stamp, main_mode) unless File.exist?(main_stamp) && File.read(main_stamp) == main_mode
   Rake::Task[generated].enhance([main_stamp, *bc2cpp_main_prerequisites])
   # A changed list regenerates too: the registrations it drops are in the generated file.
