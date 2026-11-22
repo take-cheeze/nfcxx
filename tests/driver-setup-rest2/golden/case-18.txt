@@ -1,0 +1,8 @@
+== case 18:  -fsafe-pointers -c a.cpp -o a.o
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: Path B did not build a.cpp (status 2); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)
+-- eccp
+(none)
+-- files

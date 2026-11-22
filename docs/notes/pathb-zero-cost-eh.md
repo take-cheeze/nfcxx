@@ -122,7 +122,9 @@ assigns without the call's location). In a function with pads GVN merges only in
 ### QBE (`take-cheeze/qbe`, branch `nfcxx/eh-tables`)
 
 - `ehtype ID $sym | ehtype ID 0`, `ehnoexcept`, `ehspec ID...`, `ehpad CLEANUP ID...`, `ehunwind @pad | ehunwind 0`
-  (std::terminate), `ehnothrow $sym...` (callees that let no exception out).
+  (std::terminate), `ehnothrow $sym...` (callees that let no exception out), `ehspecpad @pad ID...` (a landing pad's own
+  specification: its action chain ends with that list's filter instead of the function's `ehspec`; the lists follow the
+  function's after `.LEHTT`, and the filter is `.LEHTT - list - 1`, so a pad's list is found at its offset as gcc's do).
 - A call site of the LSDA has its block's pad and the pad's action chain, no pad (the exception passes through), or no
   entry (std::terminate). As gcc's, one site covers consecutive calls with the same pad when no call without an entry
   comes between them, and a call of an `ehnothrow` callee has no entry and sits inside any range. It has an action table, a type table with `DW.ref` indirections and the
@@ -176,7 +178,7 @@ body), whose slots are that copy's, not the function's (`tests/pathb-eh-tables/c
 inlined into a pad's code is entered after the pads before it), and appends the outer pad's action chain to the copy's
 pads. A `noexcept` callee's copy gets a pad that calls `std::terminate` for its state 0. A callee with a dynamic exception
 specification is inlined only when `spec_inlinable?` (scripts/pathb-ir-opt.rb) holds: every exception that can leave it is
-one of its types, so its filter never fails and the copy needs none. Every call of the body must be `__cxa_throw` of a
+one of its types, so its filter never fails and the copy needs none. (Below: the copy with its own filter.) Every call of the body must be `__cxa_throw` of a
 type of the specification (the exact typeinfo), `__cxa_allocate_exception`, a function of the module that cannot let an
 exception out (`throwing_functions`), or a nothrow libc routine; its pads may only call `__cxa_free_exception` and
 `__cxa_call_unexpected` (so no destructor of a live object runs on the way out, which the copy would skip). The copy drops
@@ -185,12 +187,18 @@ calls get the state of the call site). `tests/pathb-eh-tables/cases/inline_spec.
 throws another type, or has a destructor, stays a call: std::unexpected runs). A function without tables inlines as
 before: its calls get the state of the call site.
 
-Still refused (gap 11): a callee whose specification's filter is needed in the copy: one with a call of a function that
-can throw (a constructor, `operator new`, a rethrow, a call of a function with its own specification), a destructor
-on the way out, or a throw of a type it does not list. Its copy would have to keep a filter of its own (an action of
-the copy's pads that calls `__cxa_call_unexpected` when the exception is not allowed). QBE takes one `ehspec` list per
-function, and the caller's list is the caller's; a per-pad filter action needs a QBE change (a new `ehpad` action kind,
-on a branch of the QBE fork) before such callees can be inlined. Nothing else is refused for the specification.
+A callee whose filter is needed in the copy (`spec_inlinable?` fails: a throw of another type, a call of a function
+that can throw, a rethrow, a destructor on the way out) is still inlined (`spec_copyable?`, scripts/pathb-ir-opt.rb) when
+the caller can take a filter of its own: no catch clause on its pads (`eh[:caught]`), no filter already (its own
+specification, or a copy's `eh-spec-pad`: `eh[:filtered]`), and no call of a module function still to inline in the callee
+(a call inlined into the copy later would miss the filter). The copy keeps its pads, and each carries the callee's list as
+an `(eh-spec-pad PAD ID...)` form, which the SSA builder writes as `ehspecpad` (QBE): the pad's action chain is its own
+clauses, then that filter (a mismatch calls `__cxa_call_unexpected` in the personality), then its cleanup. The pads of such
+a copy resume into the caller's state, which does not re-check a filter, hence the conditions. A non-spec copy inside
+such a copy takes the copy's list (`eh[:own]`). `tests/pathb-eh-tables/cases/inline_spec_filter.cpp` checks it against g++.
+Still refused (gap 11, the rest): a copy under a caller's `try` or filter, a callee calling a module function that is not
+yet inlined, and a noexcept callee with a list. Two filters on one chain (a copy inside a copy with its own list, or a
+pad that resumes into one) are not expressible yet: QBE's chain has one filter, at its end.
 
 ## Tests
 
@@ -216,7 +224,9 @@ IR passes, the e-graph pass and QBE's optimizations.
 - Targets: tested on x86-64 Linux; QBE's arm64 emitter marks call sites and pads too (CI's arm64 Linux job runs it).
   macOS arm64: see "macOS arm64" below. QBE's rv64 writes no tables, its amd64 Apple target refuses them, and its i386
   neither (refused).
-- CIL: exact catch types only, see `docs/notes/pathb-cil.md`.
+- CIL: catch clauses match exact types, public unambiguous non-virtual bases and pointers to them (not virtual bases,
+  not libstdc++ base classes); a throw from a pad's own code does not call std::terminate; dynamic exception
+  specifications are refused. See `docs/notes/pathb-cil.md`, "Catch matching".
 - Debug info: `-g` gives a line table only (`.debug_line`: gdb has the source line of each frame and steps by line, the
   pads too); there is no variable or type information (`.debug_info` describes the compile unit only).
 
@@ -272,4 +282,3 @@ tables are Mach-O, and what that takes:
 Not done: the `nfcxx` driver's Path B port (`scripts/nfcxx-pathb.rb`) still refuses any host but x86-64 Linux, and the
 default backend on macOS is still gcc. So hosted programs built by `nfcxx` on a Mac do not use this route yet. The
 freestanding and Path B hosted link lines on macOS (`scripts/nfcxx-pathb.rb`, `c_only_link`) name `-lstdc++` too.
-

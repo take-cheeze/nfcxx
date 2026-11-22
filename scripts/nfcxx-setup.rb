@@ -304,8 +304,9 @@ module NfcxxSetup
     opts.map { |w| w + "\0" }.join
   end
 
-  # The Path B option statements after the override (bash: the pb_flags lines and the backend environment, in this order). Every
-  # condition is the bash's; the backend environment comes last, as it reads the final backend. No statement here refuses.
+  # The Path B option statements after the override (bash: the pb_flags lines, from the --ir-opt line to the --freestanding line).
+  # Every condition is the bash's. The backend environment is a step of its own (run "backend_env"), which the body evals after
+  # these. No statement here refuses.
   def flags_text(opts, env = ENV)
     out = +""
     flag = ->(k) { opts.fetch(k, "0") == "1" }
@@ -323,8 +324,15 @@ module NfcxxSetup
     if backend == "pathb" && freestanding != "0"
       pb.("--freestanding", "--eh-runtime", "--gnu-version=#{opts["gnu"]}", "-I#{opts["root"]}/lib")
     end
-    out << text_of(NfcxxBackendEnv.plan(opts))
     out
+  end
+
+  # The trace unit's statements (bash: trace_unit=${srcs[0]-$out}; export NFCXX_TRACE_UNIT=$trace_unit): the first source, else the
+  # output. The body evals them where the bash assigned it, before trace_begin.
+  def trace_unit_text(srcs, out)
+    unit = srcs.empty? ? out : srcs.first
+    word = Shellwords.escape(unit)
+    "trace_unit=#{word}; export NFCXX_TRACE_UNIT=#{word}\n"
   end
 end
 
@@ -361,8 +369,9 @@ module NfcxxSetup
   # of EDG_CPFE_DEFAULT_OPTIONS): instantiation, --cosmo, the freestanding or hosted headers, the host cflags, the GNU options,
   # --target=linux_k1om, --target. The hosted headers' probe is timed here and its span is left to the body (setup_span_start
   # and setup_span_stop are its statements), so a span is recorded only by a body that reaches the setup.
-  # Returns [text, status, message]: text holds the statements up to the first refusal, which the body evals before it prints
-  # the message and exits with the status (status 0 and "" when nothing is refused). The bash variables are the names.
+  # Returns [text, status, message, state]: text holds the statements up to the first refusal, which the body evals before it prints
+  # the message and exits with the status (status 0 and "" when nothing is refused); state is the options after those statements
+  # (backend, gnu and the gnu_opts array). The bash variables are the names.
   def rest(opts, env = ENV)
     state = opts.dup
     flag = ->(k) { state.fetch(k, "0") == "1" }
@@ -404,9 +413,9 @@ module NfcxxSetup
       mode, words = array_words(target_text, "gnu_opts")
       state["gnu_opts"] = [state.fetch("gnu_opts", ""), *words].reject(&:empty?).join("\x1f") if mode == "+="
     rescue Refusal => e
-      return [out, e.status, "#{e.message}\n"]
+      return [out, e.status, "#{e.message}\n", state]
     end
-    [out, 0, ""]
+    [out, 0, "", state]
   end
 end
 

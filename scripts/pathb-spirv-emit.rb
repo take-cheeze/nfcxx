@@ -2950,7 +2950,7 @@ end
 # Zero-cost exception tables (docs/notes/pathb-zero-cost-eh.md): nothing unwinds on this target, so a function's landing
 # pads (eh-pad) never run and its exception states (eh-state, an inlined copy's markers) mean nothing; they are dropped,
 # with the table header (eh-types, eh-noexcept, eh-spec). A throw is still refused where it is (its __cxa_throw call).
-EH_TABLE_ITEMS = %w[eh-types eh-noexcept eh-spec eh-pad].freeze
+EH_TABLE_ITEMS = %w[eh-types eh-noexcept eh-spec eh-pad eh-spec-pad].freeze
 EH_STATE_STMTS = %w[eh-state eh-inline-begin eh-inline-end eh-state-outer].freeze
 
 def strip_eh_stmts(x)

@@ -1390,7 +1390,7 @@ end
       names = {}
       walk = lambda do |x|
         next unless x.is_a?(Array)
-        tables = true if %w[eh-unwind eh-noexcept eh-spec eh-types].include?(head(x))
+        tables = true if %w[eh-unwind eh-noexcept eh-spec eh-spec-pad eh-types].include?(head(x))
         if head(x) == "call" && x[2].is_a?(Ref) && x[2].sigil == "&"
           n = Qbe.symbol(x[2].raw)
           names[n] = true if Qbe.nothrow.key?(n) || n.start_with?("__atomic_")
@@ -1944,6 +1944,8 @@ end
       when "eh-pad"
         raise QbeUnsupported, "exception tables on the 32-bit x86 target (QBE's i386 writes none)" if Qbe.ptr32
         @lines << "  ehpad #{item[1]}#{item[2..].map { |t| " #{t}" }.join}"
+      # the pad's own dynamic exception specification (ehspecpad: its chain ends with this list's filter), in its own block
+      when "eh-spec-pad" then @lines << "  ehspecpad @#{block_label(@cur)}#{item[1..].map { |t| " #{t}" }.join}"
       # A volatile store is a call of its helper (QBE merges, forwards and drops plain volatile stores; a call is kept).
       when "store"
         v = op(item[3])

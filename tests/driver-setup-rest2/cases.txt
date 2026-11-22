@@ -1,0 +1,56 @@
+# One case per line: ENV... | ARGS... (ENV words are NAME=VALUE, possibly none; ARGS are word-split, no quoting).
+# The sources are a.cpp, b.cpp (C++) and a.c (C). tests/driver-setup-rest2/run.sh runs each case in its own directory.
+# The cases cover the setup pieces the body still runs in bash: the -fsanitize=address check and asan_c, the Path B
+# pb_flags tail, the backend environment, and the trace unit.
+| -c a.cpp -o a.o
+| a.cpp -o a.out
+NFCXX_BACKEND=gcc | -c a.cpp -o a.o
+NFCXX_BACKEND=gcc | -fsanitize=address -c a.cpp -o a.o
+| -fsanitize=address -c a.cpp -o a.o
+NFCXX_BACKEND=gcc | -fsanitize=address a.cpp -o a.out
+NFCXX_BACKEND=gcc | -fsanitize=address -fno-omit-frame-pointer -c a.cpp -o a.o
+NFCXX_BACKEND=gcc | -fsanitize=address -fomit-frame-pointer -c a.cpp -o a.o
+NFCXX_BACKEND=bogus | -fsanitize=address -c a.cpp -o a.o
+NFCXX_BACKEND=bogus | -c a.cpp -o a.o
+NFCXX_BACKEND=gcc | -fsanitize=address -fno-sanitize=address -c a.cpp -o a.o
+| -fsanitize=address -fsanitize=undefined -c a.cpp -o a.o
+| -fsanitize=undefined -c a.cpp -o a.o
+NFCXX_BACKEND=gcc | -fsanitize=undefined -c a.cpp -o a.o
+| -fsanitize=bogus -c a.cpp -o a.o
+| -fsanitize=undefined,bogus -c a.cpp -o a.o
+| -fno-sanitize=all -c a.cpp -o a.o
+| -fsafe-pointers -c a.cpp -o a.o
+| -fsafe-pointers -fsanitize=address -c a.cpp -o a.o
+| -fsafe-pointers --freestanding -c a.cpp -o a.o
+| -fsanitize=address --freestanding -c a.cpp -o a.o
+NFCXX_BACKEND=gcc | -fsanitize=address --freestanding -c a.cpp -o a.o
+| --backend=pathb --ir-opt=inline,sroa -c a.cpp -o a.o
+NFCXX_IR_OPT=none NFCXX_BACKEND=gcc | -c a.cpp -o a.o
+| --ir-opt=off -c a.cpp -o a.o
+| -shared -fPIC a.cpp -o a.so
+| -fPIC -c a.cpp -o a.o
+NFCXX_BACKEND=gcc | -fPIC -fsanitize=address -c a.cpp -o a.o
+NFCXX_DIALECT=clang | -c a.cpp -o a.o
+NFCXX_DIALECT=clang NFCXX_BACKEND=gcc | -c a.cpp -o a.o
+| --dialect=clang -c a.cpp -o a.o
+| --dialect=g++ --backend=pathb -c a.cpp -o a.o
+| --freestanding --gnu-version=130000 -c a.cpp -o a.o
+NFCXX_BACKEND=gcc | --freestanding --gnu-version=120000 -c a.cpp -o a.o
+NFCXX_BACKEND=gcc | --gnu-version=130000 -c a.cpp -o a.o
+| --backend=pathb --gnu-version=130000 -c a.cpp -o a.o
+NFCXX_BACKEND=gcc | -Wno-narrowing -c a.cpp -o a.o
+| -Wno-narrowing --backend=pathb -c a.cpp -o a.o
+| --trace=trace.json -c a.cpp -o a.o
+NFCXX_TRACE=trace.json NFCXX_BACKEND=gcc | -c a.cpp -o a.o
+NFCXX_BACKEND=gcc | --trace=trace.json -fsanitize=address a.cpp -o a.out
+NFCXX_BACKEND=gcc | -c a.c -o a.o
+NFCXX_BACKEND=gcc | a.c b.cpp -o a.out
+NFCXX_BACKEND=gcc NFCXX_PATH=b | -c a.cpp -o a.o
+| --backend=pathb a.cpp -o x
+| -c b.cpp -o sub/b.o
+| --trace=trace.json -c a.cpp
+| --trace=trace.json a.cpp a.c -o x
+| -fsanitize=address -shared a.cpp -o a.so
+NFCXX_BACKEND=gcc | -fsanitize=address -fno-omit-frame-pointer -shared a.cpp -o a.so
+NFCXX_BACKEND=gcc | -fsanitize=undefined -fsanitize=address -c a.cpp -o a.o
+NFCXX_BACKEND=gcc | --freestanding -fsanitize=undefined -c a.cpp -o a.o

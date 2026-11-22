@@ -1,0 +1,7 @@
+== case 32:  --dialect=g++ --backend=pathb -c a.cpp -o a.o
+-- status: 2
+-- stdout
+-- stderr
+-- eccp
+(none)
+-- files

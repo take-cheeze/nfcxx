@@ -1,0 +1,7 @@
+== case 23:  --backend=pathb --ir-opt=inline,sroa -c a.cpp -o a.o
+-- status: 2
+-- stdout
+-- stderr
+-- eccp
+(none)
+-- files
