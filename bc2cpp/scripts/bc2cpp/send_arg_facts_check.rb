@@ -114,7 +114,7 @@ RUN_SRC = <<~'RUBY'
   class SAStack
     def s_loop(n); out = []; i = 0; while i < n; out << [65 + i].pack('C*'); i += 1; end; out; end
     def s_branch(f); t = 'C*'; t2 = t; f ? [66].pack(t2) : [67].pack(t); end
-    def s_block(a); t = 'C*'; n = 0; a.each { |v| n += v }; [a.pack(t), n]; end
+    def s_block(a); t = 'C*'; n = 0; a.each { |v| n += v }; [[75].pack(t), n]; end
     def n_receiver; t = 'C*'; [t.size, [68].pack(t)]; end
     def n_closure; t = 'C*'; [69].map { |v| [v].pack(t) }; end
     def n_kept; t = 'C*'; [[70].pack(t), t]; end
