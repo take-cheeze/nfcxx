@@ -106,6 +106,8 @@ class CodeGen
     literal = literal_table_plan(irep, freeze_send: true, claimed: lambda do |_addr, i|
       folded_away.include?(i) || folds.key?(i) || bodies.key?(i) || literal_length_send?(program, irep, i) ||
         literal_native_send?(program, irep, i)
+    end, effect: lambda do |insn, i|
+      class_body_literal_effect(program, irep, insn, i, paired_exec, folds, folded_away)
     end)
     program.each_source do |insn, idx|
       next if paired_exec.include?(idx) && insn.op == :EXEC || folded_away.include?(idx) || literal.skip.include?(idx)
@@ -697,6 +699,39 @@ class CodeGen
     bytes, chars = literal_string_counts(program.source_at(idx - 1), irep)
     "#ifdef MRB_UTF8_STRING\n  r#{insn.reg} = mrb_int_value(M, #{chars});\n" \
       "#else\n  r#{insn.reg} = mrb_int_value(M, #{bytes});\n#endif\n"
+  end
+
+  # LITERAL_WALK (codegen_literal_tables.rb): [reads, writes] of the C++ the loop in compile_class_body_unit emits for an
+  # instruction, or nil when it is not one of these. Reads may be a superset and writes a subset of the real ones: a
+  # register read here keeps a skipped table member's register from being read stale. Keep in step with that loop.
+  def class_body_literal_effect(program, irep, insn, idx, paired_exec, folds, folded_away)
+    a = insn.reg
+    op = insn.op
+    # A skipped instruction emits nothing; a folded SETCONST's fold code reads no register, then the SETCONST reads R[a].
+    return [[], []] if folded_away.include?(idx) || (op == :EXEC && paired_exec.include?(idx))
+    return [[a], []] if folds.key?(idx)
+
+    case op
+    when :CLASS then [[a, a + 1], [a]]
+    when :MODULE, :SCLASS then [[a], [a]]
+    when :TDEF, :SDEF, :TCLASS then [[], [a]]
+    when :METHOD, :ALIAS then [[], []]
+    when :DEF then [[a], [a]]
+    # A visibility send emits nothing; the loop's other self sends pass R[a+1]..R[a+n] (n = 0 for a splat).
+    when :SSEND0 then CLASS_BODY_VISIBILITY_SENDS.include?(insn.sym.to_s) ? [[], []] : [[a], []]
+    when :SSEND then CLASS_BODY_VISIBILITY_SENDS.include?(insn.sym.to_s) ? [[], []] : [(a..(a + insn.argc.to_i)).to_a, []]
+    # A SEND has no block slot (SENDB is not in CLASS_BODY_OPS): compile_send reads R[a] and its argv R[a+1]..R[a+n].
+    # A count with keywords or a splat stops the walk.
+    when :SEND then insn.plain_fixed_argc? ? [(a..(a + insn.argc)).to_a, []] : nil
+    when :SEND0
+      if literal_length_send?(program, irep, idx)
+        [[], [a]]
+      elsif !literal_freeze?(program, idx)
+        [[a], []]
+      end
+    when :ADDI, :SUBI, :ADDILV, :SUBILV then [[a], []]
+    when :ADD, :SUB, :MUL, :DIV, :EQ, :GETIDX, :RANGE_INC, :ARYCAT then [[a, a + 1], []]
+    end
   end
 
   # A `freeze` with no arguments on the register a body holds, emitted as mrb_obj_freeze (Object#freeze) rather than a
