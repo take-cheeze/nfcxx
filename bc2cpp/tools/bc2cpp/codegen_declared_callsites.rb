@@ -39,6 +39,34 @@ class CodeGen
     rows
   end
 
+  # SHARD_COLOCATE_GUARDS (shard_colocate.rb): the markers ("DECLARED_PARAM_GUARD <key> arg <n>") of the program-class
+  # parameter guards every call site the pools read proves: the flow gives each site's argument only the declared
+  # class's bit (and nil's where `T?` admits it). A program class's bit is that one class and the guard tests the exact class,
+  # so no program site can make that guard fire; a site the flow cannot name, or a parameter with no site list,
+  # proves nothing. These are the sites that type an undeclared parameter's pool, so the claim rests on what the
+  # pools already rest on. The guard itself stays in the `_impl` that outside callers reach.
+  def site_proven_param_guards
+    @site_proven_param_guards ||= declared_params_kept.each_with_object(Set.new) do |(label, guards), out|
+      guards.each do |pos, cls, key, _text, kind = :class, nilable = false, optional = nil|
+        # A core class's bit (RETURN_CORE_CLASS) is the flow's container bit, not one exact class.
+        next unless kind == :class && optional.nil? && RETURN_CORE_CLASS.key(cls).nil?
+
+        declared = declared_callsite_bits(cls, kind, nilable)
+        next if declared.nil? || declared.zero?
+
+        reads = declared_callsite_reads([label, pos + 1])
+        next if reads.nil? || reads.empty?
+
+        proven = reads.all? do |irep, idx, reg|
+          mask = declared_callsite_mask(irep, idx, reg)
+          mask && !mask.zero? && !mask.anybits?(CLASS_POOL_UNSHIPPABLE | NumericFlow::OTHER | NumericFlow::CHECKED) &&
+            (mask & ~declared).zero?
+        end
+        out << "DECLARED_PARAM_GUARD #{key} arg #{pos + 1}" if proven
+      end
+    end
+  end
+
   # The bits the flow gives a declaration's class. declared_arg_bits seeds a program class by numeric_class_bit, but
   # Array, Hash, String and Range have NumericFlow bits of their own (RETURN_CORE_CLASS), which is what a call site's
   # flow carries; any other class the flow gives no bit (TrueClass, FalseClass, ...) is skipped: nothing is claimed.
