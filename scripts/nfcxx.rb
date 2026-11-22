@@ -251,6 +251,22 @@ unless ARGV.include?("-fsyntax-only")
   end
 end
 
+# The argument loop (scripts/nfcxx-loop.rb --bash-state) runs here, before the routes, on the arguments the body's loop sees. Its
+# result is handed to the body in the environment (NFCXX_LOOP_STATUS: 0 and NFCXX_LOOP_STATE the statements to eval, or the
+# status and message of a refusal), and the body evals it at the place of its loop: a refusal is printed there, after the
+# body's steps before its loop, as before. The body's wrappers (--bundle-*, --cuda-driver=, a link that names libcuda) rewrite
+# the arguments before its loop, so for those the loop is left to the body (NFCXX_LOOP_STATUS unset).
+LOOP_WRAPPED = /--bundle-|\A--cuda-driver=|libcuda/
+
+def loop_result(args)
+  return nil if args.any? { |a| LOOP_WRAPPED.match?(a) }
+
+  out, err, status = Open3.capture3(RbConfig.ruby, LOOP, "--bash-state", "--", *args)
+  status.success? ? [0, out] : [status.exitstatus || 1, err]
+end
+
+LOOP_RESULT = loop_result(ARGV)
+
 if planned_loop?(ARGV)
   trace_route("plan")
   pid = Process.spawn(RbConfig.ruby, RUNNER, "--root=#{ROOT}", "--", *ARGV)
@@ -316,6 +332,9 @@ begin
   # trace_finish did; the bash only flushes its spans (its trace_finish keeps its span flush, and does not close the trace)
   trace_file = ARGV.reverse.find { |a| a.start_with?("--trace=") }&.delete_prefix("--trace=") || ENV["NFCXX_TRACE"].to_s
   env = { "RUBY" => ENV["RUBY"] || RbConfig.ruby, "TMPDIR" => tmproot, "NFCXX_TMP_OWNED" => "1" }
+  # the argument loop's result (LOOP_RESULT, above); nil unsets a variable the caller may have set, so the body runs its own loop
+  env["NFCXX_LOOP_STATUS"] = LOOP_RESULT&.first&.to_s
+  env["NFCXX_LOOP_STATE"] = LOOP_RESULT&.last
   env["NFCXX_KEEP_INTERMEDIATES"] = "1" if keep
   trace_rb = File.join(__dir__, "trace.rb")
   unless trace_file.empty?

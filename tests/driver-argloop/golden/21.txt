@@ -1,5 +1,5 @@
-== -c m.cpp -fsanitize=bogus -o m.o
+== -c m.cpp --promote-slots=maybe -o m.o
 -- stdout
 -- stderr
-nfcxx: -fsanitize=bogus is not supported (implemented: undefined, signed-integer-overflow, integer-divide-by-zero, shift, bounds, null, unreachable, return, float-cast-overflow)
+nfcxx: --promote-slots takes on or off (got 'maybe')
 status=2
