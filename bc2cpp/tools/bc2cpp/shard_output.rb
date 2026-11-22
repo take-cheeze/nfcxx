@@ -342,11 +342,7 @@ module ShardOutput
                 # A shard need not call every helper the whole program does.
                 line = lines[item[:first]] = "[[maybe_unused]] #{line}"
               end
-              if helpers.include?(helper_name(item))
-                # A template head may stand on its own line, before the one with `static`.
-                at = (item[:first]..item[:last]).find { |k| lines[k][/\A[^(]*/].match?(/\bstatic\b/) }
-                lines[at] = to_shared_helper(lines[at]) if at
-              end
+              lines[item[:first]] = to_shared_helper(line) if helpers.include?(item[:name])
             end
           end
         else
@@ -407,7 +403,8 @@ module ShardOutput
   end
 
   # The names of the prelude's `static` functions with a body, less every name an item of an #if region holding a
-  # global names: that region stays at global scope with its `static`s, and one name cannot be both.
+  # global names: that region stays at global scope with its `static`s, and one name cannot be both. A function
+  # template (top_level_items names none) stays `static`: its `inline` instantiations measured 2.4 KB larger on Wio.
   def stateless_helpers(segs, method_names)
     names = Set.new
     kept = Set.new
@@ -417,23 +414,14 @@ module ShardOutput
       lines = seg[:lines]
       items = top_level_items(lines)
       if items.any? { |item| (!item[:body] && method_names.include?(item[:name])) || external?(lines[item[:first]], item) }
-        kept.merge(items.filter_map { |item| helper_name(item) || item[:name] })
+        kept.merge(items.filter_map { |item| item[:name] })
         next
       end
       items.each do |item|
-        name = helper_name(item)
-        names << name if name && item[:body] && item[:head][/\A[^(]*/].match?(/\bstatic\b/)
+        names << item[:name] if item[:function] && item[:body] && item[:name] && lines[item[:first]][/\A[^(]*/].match?(/\bstatic\b/)
       end
     end
     names - kept
-  end
-
-  # A function's name, a function template's too (top_level_items names no template).
-  def helper_name(item)
-    return nil unless item[:function]
-    return item[:name] unless item[:head].start_with?('template')
-
-    item[:head][/\Atemplate\s*<[^<>]*>\s*(?:\[\[[^\]]*\]\]\s*)*static\b[^(]*?([A-Za-z_]\w*)\s*\(/, 1]
   end
 
   # SHARD_SINGLE_DEFINITION's prelude names: every file-scope variable, every function holding a mutable

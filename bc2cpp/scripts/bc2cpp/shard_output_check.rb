@@ -153,10 +153,10 @@ suite.check('prelude state and helpers are inline in the gem namespace',
             main.include?("namespace bc2cpp_shard_chk {\ninline int counter = 0;\ninline int bump() {") &&
             main.include?('inline const int TABLE[]') && main.include?('inline int (*const registry[])(int)'))
 suite.check('function-local statics are left alone', main.include?('  static int calls = 0;'))
-suite.check('SHARED_HELPERS: a stateless prelude helper is inline under -Os (one body per gem)',
+suite.check('SHARED_HELPERS: a stateless prelude helper is inline under -Os (one body per gem), a template stays static',
             main.include?("\n[[maybe_unused]] BC2CPP_SHARED_FN int twice(int x)") &&
-              main.include?("\ntemplate <int N> BC2CPP_SHARED_STATIC inline int times(int x)") &&
-              main.include?("\ntemplate <class F>\nBC2CPP_SHARED_FN int apply(F f)") &&
+              main.include?("\ntemplate <int N> static inline int times(int x)") &&
+              main.include?("\ntemplate <class F>\nstatic int apply(F f)") &&
               main.include?("#ifdef __OPTIMIZE_SIZE__\n#define BC2CPP_SHARED_FN inline\n"))
 suite.check('a head wrapped over lines is read as its function: stateless shared, stateful inline',
             main.include?("\n[[maybe_unused]] BC2CPP_SHARED_FN int wrapped(int a,\n") &&
@@ -621,12 +621,16 @@ Dir.mktmpdir('bc2cpp-shard-generated') do |dir|
     saved_flags.nil? ? ENV.delete('BC2CPP_CXXFLAGS') : ENV['BC2CPP_CXXFLAGS'] = saved_flags
     suite.check('the main file and the shard compile and link', built)
     nm = ENV.fetch('NM', 'nm')
-    syms, nm_status = Open3.capture2(nm, File.join(dir, 'fixture')) if built
+    # -p: symbol-table order, so the two listings pair line for line.
+    syms, nm_status = Open3.capture2(nm, '-p', File.join(dir, 'fixture')) if built
+    names, = Open3.capture2(nm, '-p', '-C', File.join(dir, 'fixture')) if nm_status&.success?
     if nm_status&.success?
       # The link keeps every local symbol: a mangled name listed twice is a body each shard compiled. GCC's own
-      # clones (`.isra.0`, `.constprop.0`) are local to the unit that made them whatever the original's linkage.
-      copies = syms.lines.map { |l| l.split(' ', 3) }.select { |_, kind, name| kind == 't' && name.include?('bc2cpp_shard_fixture') }
-                   .map { |_, _, name| name.strip }.grep_v(/\.(?:isra|constprop|part|cold)\b/).tally.select { |_, n| n > 1 }
+      # clones (`.isra.0`, `.constprop.0`) are local to the unit that made them whatever the original's linkage, and
+      # a function template's instances stay per unit (stateless_helpers).
+      copies = syms.lines.zip(names.lines).map { |l, d| [*l.split(' ', 3), d.to_s.split(' ', 3)[2].to_s] }
+                   .select { |_, kind, name, plain| kind == 't' && name.include?('bc2cpp_shard_fixture') && !plain[/\A[^(]*/].include?('<') }
+                   .map { |_, _, name, _| name.strip }.grep_v(/\.(?:isra|constprop|part|cold)\b/).tally.select { |_, n| n > 1 }
       suite.check("SHARED_HELPERS: no gem-namespace function has a copy per shard (#{copies.keys.first(3).join('; ')})",
                   copies.empty?)
     else
