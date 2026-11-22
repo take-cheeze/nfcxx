@@ -327,7 +327,7 @@ class RegisterFlow
   # An op the IR says never falls through must not fall through in its text.
   def terminators_leave?
     @insns.each_index.all? do |i|
-      next true if @transparent[i] || !BytecodeIR::NO_FALLTHROUGH.include?(@insns[i].op)
+      next true if @transparent[i] || !BytecodeIR::NO_FALLTHROUGH_SET.include?(@insns[i].op)
 
       @texts[i].match?(/\b(?:goto|return|throw)\b|mrb_raise|bc2cpp_raise/)
     end
