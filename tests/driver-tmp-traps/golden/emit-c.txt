@@ -1,0 +1,6 @@
+== emit-c
+status: 1
+-- stdout
+-- stderr
+-- left in TMPDIR
+-- eccp argv
