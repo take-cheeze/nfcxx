@@ -3,6 +3,7 @@
 
 # LITERAL_TABLES (tools/bc2cpp/codegen_literal_tables.rb): a constant Hash/Array literal in a class body or a free
 # lambda's body is a word table that bc2cpp_lit_build builds, and BC2CPP_LITERAL_TABLES=0 keeps the pair-by-pair code.
+# Array keys and proved Integer constants are table words too (BC2CPP_LITERAL_ARRAY_KEYS=0, BC2CPP_LITERAL_CONST_INTS=0).
 #
 # CLASS_BODY_EMIT, FREE_LAMBDA (tools/bc2cpp/codegen_class_body.rb): a lambda in a class body whose body reads nothing
 # from the creating frame (no self, upvar, block or nested closure) is built as a free RProc over a
@@ -45,6 +46,15 @@ LITERALS = <<~'RUBY'
       3 => { name: :default, first: LIMIT },
     }
     LAZY = -> { { 1 => { name: :name, size: :first }, 2 => { name: :last, size: :inspect, default: 'x' } } }
+  end
+RUBY
+
+# LITERAL_ARRAY_KEYS and LITERAL_CONST_INTS (tools/bc2cpp/codegen_literal_tables.rb): Array keys, and a constant
+# INTEGER_CONSTANT_VALUE_PROOF proved, are table words.
+KEYED = <<~'RUBY'
+  class Router
+    N = -1
+    TURNS = { [2, 4] => [6, N], [4, 2] => [2, 6], [6, 8] => [N, 4] }
   end
 RUBY
 
@@ -133,6 +143,28 @@ begin
   end
 ensure
   ENV.delete('BC2CPP_LITERAL_TABLES')
+end
+
+keyed_code = lambda do |ireps, root, env|
+  saved = CodeGen.integer_constant_values
+  CodeGen.integer_constant_values = { 'N' => -1 }
+  env.each { |key, value| ENV[key] = value }
+  literal_units.call(ireps, root)[1].map { |u| u[:code] }.join
+ensure
+  env.each_key { |key| ENV.delete(key) }
+  CodeGen.integer_constant_values = saved
+end
+
+suite.compile(KEYED) do |ireps, root|
+  code = keyed_code.call(ireps, root, {})
+  suite.check('Array keys and the proved constant are one word table with no kept read',
+              code.scan('bc2cpp_lit_build(M, bc2cpp_lit,').size == 1 && !code.include?('mrb_hash_set') &&
+              code.include?('0xa003, 0xb002, 0x8002, 0x8004, 0xb002, 0x8006, 0x9000, 0xffff, 0xffff') &&
+              !code.include?('bc2cpp_lit_d'))
+  suite.check('BC2CPP_LITERAL_ARRAY_KEYS=0 keeps one mrb_hash_set per pair',
+              keyed_code.call(ireps, root, { 'BC2CPP_LITERAL_ARRAY_KEYS' => '0' }).include?('mrb_hash_set(M, h, '))
+  suite.check('BC2CPP_LITERAL_CONST_INTS=0 hands the constant read over',
+              keyed_code.call(ireps, root, { 'BC2CPP_LITERAL_CONST_INTS' => '0' }).include?('const mrb_value bc2cpp_lit_d[]'))
 end
 
 suite.compile(SELF_USE) do |ireps, root|
