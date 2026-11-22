@@ -1768,6 +1768,14 @@ check test ! -e "$work/api_struct_va/NOT_BUILDABLE"
 check grep -qF 'return nfcx_struct_new(mrb, sv_point, x, y);' "$work/api_struct_va/src/api_struct_va.c"
 check grep -qF 'sv_point = nfcx_struct_define(mrb, "SvPoint", "x", "y", NULL);' "$work/api_struct_va/src/api_struct_va.c"
 check grep -qF "spec.add_dependency 'mruby-struct'" "$work/api_struct_va/mrbgem.rake"
+# 2zzz170. a VALUE local CRuby uses only as a C integer (jd = 5, t = f(jd), f((int)t)) is an mrb_int local; a VALUE local that
+# holds an object (keep = x) stays a VALUE.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_int_local tools/cext2mrbgem/fixtures/api_int_local/ext/api_int_local "$work/api_int_local" > "$work/api_int_local.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_int_local/NOT_BUILDABLE"
+check grep -qF 'mrb_int jd = 5;' "$work/api_int_local/src/api_int_local.c"
+check grep -qF 'mrb_int t;' "$work/api_int_local/src/api_int_local.c"
+check grep -qF 'mrb_value keep = x;' "$work/api_int_local/src/api_int_local.c"
 check test "$(grep -c 'stuck point (Struct)' "$work/api_struct_va/REFUSALS.txt")" -eq 0
 # 2zzz155. a struct field of CRuby's rb_encoding * type: the Encoding placeholder type is in the prelude (the declaration compiles),
 # and the include of ruby/encoding.h is not a blocking refusal (the placeholder covers it).
