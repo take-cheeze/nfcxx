@@ -177,7 +177,7 @@ module Qbe
     # interpose (not static) is read through the GOT or a pointer cell, never as a PC-relative reference, which ld rejects for
     # a symbol of a shared object (R_X86_64_PC32 "can not be used when making a shared object").
     # darwin: the module is for a Darwin target (the builder sets it from the host; a closed script world has no RbConfig).
-    attr_accessor :ptr32, :regparm3, :xadd, :cmpxchg, :jtab, :safe, :asan, :darwin, :got_extern, :pic, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_thunks, :trap_checks, :no_pie, :nothrow
+    attr_accessor :ptr32, :regparm3, :xadd, :cmpxchg, :jtab, :safe, :asan, :darwin, :got_extern, :pic, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_thunks, :trap_checks, :no_pie, :nothrow, :debug_lines
   end
   # --asan, milestone 2: the redzone on each side of a slot that stays in memory (poisoned at the function's entry, unpoisoned
   # before its return). 32 bytes, as the qbe backend's (docs/notes/asan.md).
@@ -197,6 +197,7 @@ module Qbe
   self.module_has_data = false
   self.sp_objects = []
   self.sp_funcs = []
+  self.debug_lines = false   # -g (pathb-cc): the line table of every function, as --asan has it
   self.nothrow = {}   # the callees that let no exception out (module_context, nothrow_callees): symbol => true
   self.asan_objects = []   # --asan, milestone 3: [symbol, size rounded up to 8] of each global with a redzone after it
 
@@ -608,10 +609,27 @@ module Qbe
       @lines << "}"
       resolve_phi_predecessors
       eh_relabel if @eh_block_line&.values&.any?
+      drop_bare_dbgloc if Qbe.asan || Qbe.debug_lines
       self
     end
 
     private
+
+    # A dbgloc with nothing after it in its block but the jmp or ret locates no instruction of its own, and it stands
+    # between a call and the ret, where QBE then makes no tail call: with -g the code would differ from the code without
+    # it. Such a line goes. (QBE itself threads a jump through a block of dbgloc lines, and its vectorizer skips them.)
+    def drop_bare_dbgloc
+      out = []
+      @lines.each_with_index do |l, i|
+        if l.start_with?("  dbgloc ")
+          j = i + 1
+          j += 1 while j < @lines.length && (@lines[j].start_with?("  dbgloc ") || @lines[j].start_with?("  ehunwind "))
+          next if j < @lines.length && (@lines[j].start_with?("  jmp ") || @lines[j].start_with?("  ret"))
+        end
+        out << l
+      end
+      @lines = out
+    end
 
     def header
       sig = []
@@ -1164,9 +1182,10 @@ end
     # --asan: the source line of an access, for libasan's report. QBE's `dbgfile` is a top-level directive that applies to the
     # functions after it, so a function takes the file of its first (loc ...) (module_il writes the `dbgfile` before it), and
     # a `dbgloc LINE` follows each (loc ...) of that file (a location from another file, an inlined header, is left out).
-    # The assembler turns them into .file and .loc, so the object has a line table whether or not -g was given.
+    # The assembler turns them into .file and .loc, so the object has a line table whether or not -g was given. With -g
+    # (Qbe.debug_lines, pathb-ssa-build --debug-lines) every function has them too.
     def asan_dbgloc
-      return unless Qbe.asan
+      return unless Qbe.asan || Qbe.debug_lines
 
       file, line = @loc
       return if line <= 0 || file.empty? || (file.include?('"') || file.include?("\\") || file.include?("\n"))

@@ -85,6 +85,7 @@ ld_trap = ((ENV["PATHB_LONG_DOUBLE"].to_s.empty? ? ENV["NFCXX_LONG_DOUBLE"].to_s
 keep = ENV["PATHB_KEEP"].to_s
 timeout_s = ENV["NFCXX_PATHB_TIMEOUT"].to_s.empty? ? "300" : ENV["NFCXX_PATHB_TIMEOUT"]
 dump_opts = []
+debug_on = 0   # -g: a line table (the IR's (loc ...) statements become QBE's dbgloc lines)
 
 args = ARGV.dup
 while !args.empty?
@@ -93,6 +94,7 @@ while !args.empty?
   when "-o" then out = args.shift.to_s
   when "--safe-pointers" then safe_on = 1
   when "--asan" then asan_on = 1
+  when "-g", /\A-g[0-3]\z/, "-ggdb", /\A-ggdb[0-3]\z/ then debug_on = x != "-g0" && x != "-ggdb0" ? 1 : 0
   when "--no-pie" then nopie = ["--no-pie"]
   when "--i386", "--target=linux_i686" then i386 = 1
   when "--regparm=3" then regparm = 1
@@ -168,6 +170,11 @@ if asan_on == 1
   dump_opts.push("--ir-loc", "--ir-scopes")
 end
 die("pathb-cc: --asan and --safe-pointers both replace malloc; use one") unless asan.empty? || safe.empty?
+debug = []
+if debug_on == 1
+  debug = ["--debug-lines"]
+  dump_opts << "--ir-loc" unless dump_opts.include?("--ir-loc")
+end
 
 # run a stage under --timeout (timeout(1) when it is there): its status
 def tmo_status(timeout_s, *cmd, **io)
@@ -257,7 +264,7 @@ rc = 0
 emit_err = File.join(tmp, "#{n}.emit")
 s_path = File.join(tmp, "#{n}.s")
 ssa_cmd = [File.join(ROOT, "scripts", "pathb-ssa-build"), "--qbe=#{qbe}", "-o", s_path, *i386opt, *pic, *nopie, *ldopt,
-           *safe, *asan, ir]
+           *safe, *asan, *debug, ir]
 if emitter == "ssa"
   rc = tmo_status(timeout_s, *ssa_cmd, err: emit_err)
   if rc != 0 && rc != 124 && rc != 5 && raw == 1   # the optimized IR is refused: emit the unoptimized one
