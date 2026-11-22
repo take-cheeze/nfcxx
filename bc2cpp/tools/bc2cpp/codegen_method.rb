@@ -377,6 +377,7 @@ class CodeGen
       out << emit_register_initializers(irep.nregs, initial, boxed: boxed_registers(block_fallback_regions + lambda_fallback_regions))
       out << sealed_int16_declarations(irep)
       out << stack_tuple_declarations(irep)
+      out << stack_string_declarations(irep)
       out << array_hash_fixnum_prologue(d)
       if embedded_ivars && d.name == 'initialize'
         # At the start of #initialize self is a bare MRB_TT_DATA shell (data == NULL):
@@ -633,7 +634,9 @@ class CodeGen
     end
     pending_splat = nil
     BytecodeIR.for(irep).each_source do |insn, idx|
-      stack_tuple_visit(irep, idx, suppressed.include?(insn.addr) || glue_at.key?(insn.addr) || guarded_inline[:at].key?(insn.addr))
+      bypassed = suppressed.include?(insn.addr) || glue_at.key?(insn.addr) || guarded_inline[:at].key?(insn.addr)
+      stack_tuple_visit(irep, idx, bypassed)
+      stack_string_visit(irep, idx, bypassed)
       # With REGISTER_FLOW the bodies are written at the end, so a label written here would land before the method's
       # first instruction: the guarded loop's `goto` would then jump back to the top and run the loop again.
       out << guarded_inline[:after][insn.addr] if !flow_bodies && guarded_inline[:after].key?(insn.addr)

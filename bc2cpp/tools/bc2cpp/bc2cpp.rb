@@ -219,6 +219,8 @@ require_relative 'codegen_strcat_literal'
 require_relative 'codegen_call_inline'
 require_relative 'codegen_respond_to_fold'
 require_relative 'owner_call_direct'
+# Last: its compile_insn wrapper reads the text every other wrapper settled on.
+require_relative 'codegen_stack_strings'
 
 # The main block is a lambda: its ~250 locals do not fit the one irep a top-level block gets when every file is compiled as
 # one program (docs/bc2cpp-self-compile.md). A host that wants to register compiled code between loading the sources and
@@ -2333,6 +2335,35 @@ BC2CPP_MAIN = lambda do
       Bc2cppBlock(const Bc2cppBlock&) = delete;
       Bc2cppBlock& operator=(const Bc2cppBlock&) = delete;
     };
+    // STACK_STRINGS (codegen_stack_strings.rb): a frame-local String, red like a Bc2cppBlock, over a pool literal's
+    // static bytes (MRB_STR_NOFREE, as str_new makes one over read-only data). BC2CPP_BLOCK_MALLOC: malloc'd storage
+    // freed with the frame, so ASan reports a reference that outlives it.
+    struct Bc2cppStackStr {
+#ifdef BC2CPP_BLOCK_MALLOC
+      struct RString* s_ = static_cast<struct RString*>(calloc(1, sizeof(struct RString)));
+      ~Bc2cppStackStr() { free(s_); }
+      struct RString* get() { return s_; }
+#else
+      struct RString s_;
+      struct RString* get() { return &s_; }
+#endif
+      Bc2cppStackStr() = default;
+      Bc2cppStackStr(const Bc2cppStackStr&) = delete;
+      Bc2cppStackStr& operator=(const Bc2cppStackStr&) = delete;
+    };
+    template<size_t N> [[maybe_unused]] static inline mrb_value bc2cpp_stack_str(mrb_state* M, Bc2cppStackStr& slot, const char (&p)[N]) {
+      struct RString* s = slot.get();
+      s->c = M->string_class;
+      s->tt = MRB_TT_STRING;
+      s->gc_color = MRB_GC_RED;
+      s->frozen = 0;
+      s->flags = 0;
+      s->as.heap.ptr = const_cast<char*>(p);
+      s->as.heap.len = N - 1;
+      s->as.heap.aux.capa = 0;
+      RSTR_SET_TYPE(s, NOFREE);
+      return mrb_obj_value(s);
+    }
     // A frame-local block (a Bc2cppBlock, red) must not go into a heap env: the frame ends with the call, but the
     // env can outlive it (the arena keeps the heap RProc that holds it), and mrb_gc_mark would read the dead frame. A
     // frame-local block is copied to a heap RProc with the same entry and env values; a heap block is returned as is.
