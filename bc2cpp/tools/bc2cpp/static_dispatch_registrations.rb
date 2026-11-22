@@ -481,6 +481,10 @@ module StaticDispatchRegistrations
     src.scan(/bc2cpp_owner_class_(\d+)\(mrb_state\* M\) \{\n[^\n]*\n[^\n]*\n\s*static const char\* const path\[\] = \{([^}]*)\}/) do |n, path|
       slots["bc2cpp_owner_class_#{n}(M)"] = path.scan(STRING_LITERAL).map { |(s)| unescape(s) }.join('::')
     end
+    # CLASS_TEST_FUSE (codegen_send.rb) names each slot's path array instead.
+    src.scan(/static const char\* const bc2cpp_owner_class_path_(\d+)\[\] = \{([^}]*)\}/) do |n, path|
+      slots["bc2cpp_owner_class_#{n}(M)"] = path.scan(STRING_LITERAL).map { |(s)| unescape(s) }.join('::')
+    end
     lines = src.lines
     found = []
     lines.each_with_index do |line, at|

@@ -11,6 +11,8 @@
 #       BC2CPP_CLASS_READ_INLINE=0 makes them plain mrb_obj_class calls;
 #     - MONO_EMBED_GUARD, TYPED, NATIVE_OWNER_MAP, IVAR_ACCESSOR, POLY_SMALL_N, INHERITED_GUARD, POLY_INTEGER_TAG
 #       and USER_RECEIVER_CASES sites all read the class through it, and no compiled method calls mrb_obj_class.
+#     - CLASS_TEST_FUSE: an owner getter is a slot reference that bc2cpp_class_is takes in one indexed call, the
+#       method text is the same as with BC2CPP_CLASS_TEST_FUSE=0, and that switch brings back the per-owner getters.
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
 #     - interpreted and compiled runs print the same for plain instances, subclass instances, objects with a
 #       singleton class, objects extended by a module, instances of a class with a prepended module, immediates
@@ -122,6 +124,42 @@ end
 check.call('BC2CPP_CLASS_READ_INLINE=0 makes both helpers plain mrb_obj_class calls',
            off.include?('static inline struct RClass* bc2cpp_obj_class(mrb_state* M, mrb_value v) { return mrb_obj_class(M, v); }') &&
            off.include?('{ return cls == mrb_obj_class(M, v); }') && !off.include?('MRB_TT_CLASS) return c;'))
+# CLASS_TEST_FUSE (codegen_send.rb's class_test_fuse?): the guard text is the same; each getter is a slot
+# reference, bc2cpp_class_is takes one in a single indexed call, and the struct cannot pass through `...`.
+check.call('CLASS_TEST_FUSE: each owner getter is a slot reference with its path array',
+           code.match?(/static inline bc2cpp_owner_ref bc2cpp_owner_class_\d+\(mrb_state\* M\) \{ return bc2cpp_owner_ref\(M, \d+\); \}/) &&
+           code.match?(/static const char\* const bc2cpp_owner_class_path_\d+\[\] = \{"CrCell"\};/) &&
+           !code.match?(/static inline struct RClass\* bc2cpp_owner_class_\d+\(/))
+check.call('CLASS_TEST_FUSE: a class test on a slot reference is one bc2cpp_is_owner call',
+           code.match?(/static inline bool bc2cpp_class_is\(mrb_state\* M, mrb_value v, bc2cpp_owner_ref o\) \{\n\s+return bc2cpp_is_owner\(M, v, o\.i\);/) &&
+           code.match?(/static bool bc2cpp_is_owner\(mrb_state\* M, mrb_value v, int i\) \{\n\s+struct RClass\* c = bc2cpp_owner_class_slots\[i\];\n\s+if \(!c\) c = bc2cpp_owner_class_at\(M, i\);\n\s+return bc2cpp_class_is\(M, v, c\);/))
+check.call('CLASS_TEST_FUSE: the slot reference has a user-provided copy (clang refuses it through `...`)',
+           code.include?('bc2cpp_owner_ref(const bc2cpp_owner_ref& o) : M(o.M), i(o.i) {}'))
+require_relative '../../tools/bc2cpp/class_test_fuse'
+vararg_unit = <<~'CPP'
+  static mrb_value bc2cpp_vcall(mrb_state* M, struct RClass* owner, mrb_int argc, ...) { return mrb_nil_value(); }
+  void f(mrb_state* M, mrb_value r1) {
+    if (bc2cpp_class_is(M, r1, bc2cpp_owner_class_1(M))) r1 = mrb_obj_value(bc2cpp_owner_class_2(M));
+    bc2cpp_vcall(M, bc2cpp_owner_class_3(M), 1, bc2cpp_owner_class_4(M)); // a comment ( bc2cpp_owner_class_9(M)
+    mrb_funcall(M, r1, "x(", 1, mrb_obj_value(bc2cpp_owner_class_5(M)));
+    mrb_funcall(M, r1, "x", 1, bc2cpp_owner_class_6(M));
+  }
+CPP
+flagged = ClassTestFuse.vararg_sites(vararg_unit).map { |site| site[/bc2cpp_owner_class_\d+/] }
+check.call("CLASS_TEST_FUSE refuses exactly the getters passed as variadic arguments (#{flagged.join(', ')})",
+           flagged == %w[bc2cpp_owner_class_4 bc2cpp_owner_class_6])
+fuse_off = Dir.mktmpdir do |off_dir|
+  ENV['BC2CPP_CLASS_TEST_FUSE'] = '0'
+  Bc2cppFixtureRuntime.generate(SRC, off_dir, core: true, only_owners: OWNERS).first
+ensure
+  ENV.delete('BC2CPP_CLASS_TEST_FUSE')
+end
+check.call('BC2CPP_CLASS_TEST_FUSE=0 keeps one RClass* getter per owner',
+           fuse_off.match?(/static inline struct RClass\* bc2cpp_owner_class_\d+\(mrb_state\* M\) \{/) && !fuse_off.include?('bc2cpp_owner_ref'))
+# Site comments name the fixture's own temporary path.
+methods_of = ->(text) { text.scan(/^(?:static )?mrb_value Cr\w+\(mrb_state\* M.*?(?=^\S)/m).join.gsub(%r{ @ \S*/fixture\.rb:}, ' @ fixture.rb:') }
+check.call('CLASS_TEST_FUSE leaves the text of every compiled method as it is',
+           !methods.empty? && methods_of.call(fuse_off) == methods_of.call(code))
 
 DRIVER = <<~'RUBY'
   show = lambda do |name, &blk|

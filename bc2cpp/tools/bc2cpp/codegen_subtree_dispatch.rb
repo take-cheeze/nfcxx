@@ -259,7 +259,7 @@ module SubtreeDispatchTables
       // (name, argc) its sites use; the lookup is memoized like bc2cpp_poly_lookup.
       typedef void (*bc2cpp_vtbl_fn)(void);
       struct bc2cpp_vtbl_row {
-        struct RClass* (*owner)(mrb_state*);
+        #{owner_row_getter_field}
         int slot;
       };
       struct bc2cpp_vtbl {
@@ -274,7 +274,7 @@ module SubtreeDispatchTables
         int row = -1;
         for (int i = 0; i < t.n; ++i) {
           struct RClass* k = bc2cpp_owner_class_slots[t.rows[i].slot];
-          if (k == c || (!k && t.rows[i].owner(M) == c)) {
+          if (k == c || (!k && #{owner_row_fill('t.rows[i]')} == c)) {
             row = i;
             break;
           }
@@ -294,7 +294,7 @@ module SubtreeDispatchTables
       out << "// SUBTREE_TABLE #{table[:root]}: #{columns.map { |(name, n), _| "#{name}/#{n}" }.join(', ')}\n"
       out << "static const bc2cpp_vtbl_row #{sym}_rows[] = {\n"
       table[:classes].zip(table.fetch(:getters), table.fetch(:cache_slots)).each do |owner, getter, slot|
-        out << "  {#{getter}, #{slot}},  // #{owner}\n"
+        out << "  {#{owner_row_getter(getter)}#{slot}},  // #{owner}\n"
       end
       out << "};\n"
       out << "static const bc2cpp_vtbl_fn #{sym}_fns[#{table[:classes].size}][#{columns.size}] = {\n"

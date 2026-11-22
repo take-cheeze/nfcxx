@@ -2161,6 +2161,8 @@ class CodeGen
         }
       CPP
     end
+    return out + emit_owner_class_fuse(entries) if class_test_fuse? && !entries.empty?
+
     entries.each do |owner, slot|
       i = slot[:index]
       path = lexical_scope_path(owner)
@@ -2176,6 +2178,73 @@ class CodeGen
       CPP
     end
     out
+  end
+
+  # CLASS_TEST_FUSE: a getter per owner made each guard two calls (the getter -Os keeps out of line, then
+  # bc2cpp_class_is). Here bc2cpp_owner_class_N(M) is a bc2cpp_owner_ref naming slot N: passed to bc2cpp_class_is it
+  # selects the overload that makes one indexed call (bc2cpp_is_owner, the same slot fill then the same test), and
+  # anywhere else it converts to the RClass* the slot holds, filled by the same lookup. The generated text is unchanged.
+  def class_test_fuse?
+    ClassTestFuse.enabled?
+  end
+
+  # The fuse-mode slot getters (class_test_fuse?). The path arrays keep `bc2cpp_owner_class_path_N` names, which
+  # StaticDispatchRegistrations#guarded_owner_calls reads back.
+  def emit_owner_class_fuse(entries)
+    out = +"// CLASS_TEST_FUSE -- see codegen_send.rb's class_test_fuse?.\n"
+    paths = entries.map { |owner, slot| [slot[:index], lexical_scope_path(owner)] }.sort_by(&:first)
+    raise 'CLASS_TEST_FUSE: owner slots are not 0...n' unless paths.map(&:first) == (0...paths.size).to_a
+
+    paths.each do |i, path|
+      out << "static const char* const bc2cpp_owner_class_path_#{i}[] = {#{path.map { |seg| "\"#{seg}\"" }.join(', ')}};\n"
+    end
+    out << "static const char* const* const bc2cpp_owner_class_paths[] = {" \
+           "#{paths.map { |i, _| "bc2cpp_owner_class_path_#{i}" }.join(', ')}};\n"
+    out << "static const unsigned char bc2cpp_owner_class_path_lens[] = {#{paths.map { |_, path| path.size }.join(', ')}};\n"
+    out << <<~CPP
+      [[maybe_unused]] [[gnu::noinline]] static struct RClass* bc2cpp_owner_class_at(mrb_state* M, int i) {
+        struct RClass* c = bc2cpp_owner_class_slots[i];
+        if (!c) c = bc2cpp_owner_class_slots[i] = bc2cpp_owner_class_lookup(M, bc2cpp_owner_class_paths[i], bc2cpp_owner_class_path_lens[i]);
+        return c;
+      }
+      // Never passed through `...`, where it would not convert: ClassTestFuse.vararg_sites refuses the unit, and the
+      // user-provided copy makes clang refuse it too.
+      struct bc2cpp_owner_ref {
+        mrb_state* M;
+        int i;
+        [[gnu::always_inline]] bc2cpp_owner_ref(mrb_state* m, int n) : M(m), i(n) {}
+        [[gnu::always_inline]] bc2cpp_owner_ref(const bc2cpp_owner_ref& o) : M(o.M), i(o.i) {}
+        [[gnu::always_inline]] operator struct RClass*() const { return bc2cpp_owner_class_at(M, i); }
+      };
+      [[maybe_unused]] [[gnu::noinline]] static bool bc2cpp_is_owner(mrb_state* M, mrb_value v, int i) {
+        struct RClass* c = bc2cpp_owner_class_slots[i];
+        if (!c) c = bc2cpp_owner_class_at(M, i);
+        return bc2cpp_class_is(M, v, c);
+      }
+      // Every generated guard spells both M arguments as the function's own M.
+      [[maybe_unused]] [[gnu::always_inline]] static inline bool bc2cpp_class_is(mrb_state* M, mrb_value v, bc2cpp_owner_ref o) {
+        return bc2cpp_is_owner(M, v, o.i);
+      }
+    CPP
+    paths.each do |i, _|
+      out << "[[maybe_unused]] [[gnu::always_inline]] static inline bc2cpp_owner_ref bc2cpp_owner_class_#{i}(mrb_state* M) " \
+             "{ return bc2cpp_owner_ref(M, #{i}); }\n"
+    end
+    out
+  end
+
+  # The table rows' slot getter (POLY_TABLE, SUBTREE_TABLE): a row's own getter, or with CLASS_TEST_FUSE the indexed
+  # one, which fills the same slot.
+  def owner_row_getter_field
+    class_test_fuse? ? '// CLASS_TEST_FUSE: the slot names the class.' : 'struct RClass* (*owner)(mrb_state*);'
+  end
+
+  def owner_row_fill(row)
+    class_test_fuse? ? "bc2cpp_owner_class_at(M, #{row}.slot)" : "#{row}.owner(M)"
+  end
+
+  def owner_row_getter(getter)
+    class_test_fuse? ? '' : "#{getter}, "
   end
 
   # The uncached GETCONST lookup: resolve the owner's lexical scope chain, then
