@@ -1,0 +1,7 @@
+stdout:
+status=2
+stderr:
+"WORK/tmp/nfcxx-cu.T/b.dev.cpp", line 40:error: identifier "VALUE" is undefinedvoid other(int *p) { p[1] = VALUE + 1; }^
+
+1 error detected in the compilation of "WORK/tmp/nfcxx-cu.T/b.dev.cpp".
+eccp:
