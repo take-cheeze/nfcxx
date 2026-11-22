@@ -3,6 +3,7 @@
 require 'strscan'
 require_relative 'bytecode_ir'
 require_relative 'reg_name'
+require_relative 'cold_compact'
 
 # CodeGen: compile_method and jump targets.
 
@@ -356,6 +357,7 @@ class CodeGen
       step_body_start = out.length
     else
       out << "mrb_value #{impl_name}(mrb_state* M, #{(['mrb_value self'] + arg_params).join(', ')}) {\n"
+      out << ColdCompact.profile_line("#{d.owner}##{d.name}") if ColdCompact.profile?
       out << errinfo_scope_line(irep)
       out << core_body_fast_prologue(d) if d.core
       # ENTRY_GUARDED_SPECIALIZATION: the entry check; a miss falls through to the generic body below.
@@ -656,7 +658,7 @@ class CodeGen
                shared_send
              else
                inline_prefix = guarded_inline[:at][insn.addr]
-               own = glue_at[insn.addr] || compile_insn(insn, irep, d, idx)
+               own = glue_at[insn.addr] || cold_compact(insn, compile_insn(insn, irep, d, idx), d)
                inline_prefix ? inline_prefix + own : own
              end
       # STEP_EXIT_JUMPS: an exit from an ensure region goes through the ensure body first.

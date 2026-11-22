@@ -3259,9 +3259,13 @@ BC2CPP_MAIN = lambda do
   # NUMERIC_SLOW_PATH: the by-name calls of the numeric arms' else live here once per helper.
   # The helper scans read the text of every unit printed below, class bodies included: a class body's `a | b` (a
   # constant fold of a numeric arm) calls the slow helper too.
-  numeric_slow_code = SymbolCache.rewrite(gen.emit_numeric_slow_helpers(compiled + class_units), symbol_table)
+  # COLD_COMPACT (cold_compact.rb): its helpers call the numeric slow-path helpers, so they are scanned with the units.
+  # Kept on gen, not in a local: BC2CPP_MAIN is at mruby's limit of local variables.
+  numeric_slow_code = SymbolCache.rewrite(gen.emit_numeric_slow_helpers(compiled + class_units + [gen.cold_compact_code(compiled + class_units)]),
+                                          symbol_table)
   # EXCEPTION_INIT: the file-scope declaration and helper of a `super` that reaches Exception#initialize.
   exception_init_code = gen.emit_exception_init_helpers(compiled)
+  warn gen.cold_compact_summary
   warn "== numeric slow-path helpers: #{gen.numeric_slow_site_counts(compiled).map { |k, n| "#{k} #{n}" }.join(', ').then { |s| s.empty? ? 'none' : s }} sites =="
   warn ''
   warn "== outlined index ops: #{gen.index_helper_site_counts(compiled).map { |k, n| "#{k} #{n}" }.join(', ')} sites =="
@@ -3289,7 +3293,7 @@ BC2CPP_MAIN = lambda do
   # registers its helpers too. The site-cache helpers call the scope helpers, so they are counted first. The load
   # code holds no constants, so `used` stays what the compiled entries name.
   # TOP_LEVEL_STATEMENTS is compiled before the helper sets are chosen, so the helpers its statements use are emitted.
-  used = [index_helpers_code, eqq_helper_code, numeric_slow_code, exception_init_code, poly_tables_code, *compiled.map { |m| m[:code] },
+  used = [index_helpers_code, eqq_helper_code, numeric_slow_code, gen.cold_compact_code, exception_init_code, poly_tables_code, *compiled.map { |m| m[:code] },
           *class_units.map { |unit| unit[:code] }, top_level_code].join
   const_site_cache_code = SymbolCache.rewrite(gen.emit_const_site_cache(used), symbol_table)
   const_scope_code = SymbolCache.rewrite(gen.emit_const_scope_helpers(used + const_site_cache_code), symbol_table)
@@ -3305,6 +3309,7 @@ BC2CPP_MAIN = lambda do
   print index_helpers_code
   print eqq_helper_code
   print numeric_slow_code
+  print gen.cold_compact_code
   print exception_init_code
   print poly_tables_code
   warn "== constant definition tables (CONST_DEF_TABLE): #{ConstDefTable.count} writes =="
