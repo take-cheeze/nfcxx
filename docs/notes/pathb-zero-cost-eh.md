@@ -4,6 +4,10 @@ Status: the default (`scripts/setup-pathb.sh`, `PATHB_EH=tables`). `PATHB_EH=fra
 EH lowering instead (an EH stack of runtime frames in thread-local storage, `setjmp`/`longjmp` for `try`, EDG's runtime in
 `libC.a`). A harness says which it is: `cmake/bin/eh-tables` exists beside its cpfe in the tables mode.
 
+The tests' expectations are a tables harness's output. With a frames harness, `tests/pathb-ir/run.sh` reports the
+goldens it differs from as skipped (and refuses `--update`), `tests/pathb-borrow/run.sh` compares the destructor tests'
+slot names without the frames mode's numbering (`tmp.2` for `tmp`), and `tests/pathb-eh-tables/run.sh` refuses to run.
+
 ## Where it goes
 
 | consumer | exception tables |
@@ -191,7 +195,9 @@ IR passes, the e-graph pass and QBE's optimizations.
   description of those types is not the IA-64 typeinfo. The EDG fork makes the typeinfo of every other type of a
   specification (`tests/pathb-eh-tables/cases/spec_pointer_types.cpp`).
 - The frames mode destroys a full expression's temporaries in construction order when an exception leaves it (EDG's
-  runtime walks the region chain as it is); the pads run such a run backwards (below).
+  runtime walks the region chain as it is); the pads run such a run backwards (below). It also destroys the members of
+  an exception object built in place (`throw E{S(...), ...}`) twice when the throw succeeds: their regions are still
+  current when EDG's runtime starts the unwind. The gcc back end has the same two (it uses EDG's runtime too).
 - Targets: tested on x86-64 Linux; QBE's arm64 emitter marks call sites and pads too (CI's arm64 Linux job runs it).
   A macOS host builds a frames harness by default: ld64 reads no linker script, so `scripts/pathb-ldrt.rb` cannot put
   libc++abi ahead of the `libC.a` the links name (its C++ ABI members would win), and QBE's Mach-O tables are untested.

@@ -336,13 +336,18 @@ pass=$((pass + 1))
 # C++ destructors: the frontend gives each object a destructor call ends a (drop-obligation ID object PLACE). Each
 # tests/pathb-borrow/destructors/*.cpp is checked with inferred summaries and loan ends; its // EXIT: and // OUT: lines
 # give the exit status and the output without the inferred summaries. The IR must stay emit-able.
+# The // OUT: lines name the slots as a harness with exception tables (the default) does: a PATHB_EH=frames harness
+# (docs/notes/pathb-zero-cost-eh.md) numbers its temporaries differently (tmp.2 for tmp), so with one the suffix is
+# dropped on both sides.
+dtor_cpfe=${PATHB_CPFE:-build/pathb/cmake/bin/cpfe}
+dtor_norm=cat; [ -f "$(dirname "$dtor_cpfe")/eh-tables" ] || dtor_norm="sed -E s/\b(tmp)\.[0-9]+\b/\1/g"
 for src in tests/pathb-borrow/destructors/*.cpp; do
   NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$src" > "$tmp/dtor.ir" 2>/dev/null
   grep -Fq '(drop-obligation ' "$tmp/dtor.ir" || { echo "FAIL $src: no drop obligation"; exit 1; }
   rc=0
   scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/dtor.ir" > "$tmp/out" 2>&1 || rc=$?
   want=$(sed -n 's,^// EXIT: ,,p' "$src")
-  if [ "$rc" != "$want" ] || ! diff -u <(sed -n 's,^// OUT: ,,p' "$src") <(grep -v '^inferred: ' "$tmp/out"); then
+  if [ "$rc" != "$want" ] || ! diff -u <(sed -n 's,^// OUT: ,,p' "$src" | $dtor_norm) <(grep -v '^inferred: ' "$tmp/out" | $dtor_norm); then
     echo "FAIL $src: expected exit $want, got $rc"; cat "$tmp/out"; exit 1
   fi
   scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/dtor.ir" > "$tmp/dtor.qbe"
