@@ -1,8 +1,10 @@
 # frozen_string_literal: true
 
+require_relative 'int_box_outline'
 require_relative 'branch_hints'
 require_relative 'reg_name'
 require_relative 'tagged_fixnum'
+require_relative 'cmp_num_outline'
 
 # CodeGen: compile_insn and comparisons.
 
@@ -470,7 +472,7 @@ class CodeGen
         <<~CPP
           { mrb_value bc2cpp_nt;
           #{guarded_arm}  if (#{BranchHints.likely("mrb_integer_p(r#{d}) && mrb_integer_p(r#{s})")}) {
-            #{RegName[d]} = mrb_div_int_value(M, mrb_integer(#{RegName[d]}), mrb_integer(#{RegName[s]}));
+            #{IntBoxOutline.div_pair(RegName[d], RegName[d], RegName[s])}
           } else if (!mrb_undef_p(bc2cpp_nt = bc2cpp_num_div_float(M, #{RegName[d]}, #{RegName[s]}))) {
             #{RegName[d]} = bc2cpp_nt;
           } else {
@@ -1184,6 +1186,9 @@ class CodeGen
     fixnum_pair = TaggedFixnum.pair("#{RegName[d]}", "#{RegName[s]}")
     fixnum_pair = BranchHints.likely(fixnum_pair) unless op == :EQ
     fixnum_arm = "if (#{fixnum_pair}) {\n  #{RegName[d]} = mrb_bool_value(#{TaggedFixnum.compare("#{RegName[d]}", sym, "#{RegName[s]}")});\n} else "
+    # CMP_NUM_OUTLINE: the arms below run in the shared helper; the fallback stays here.
+    return CmpNumOutline.dispatch(fixnum_arm, sym, RegName[d], RegName[d], RegName[s], fallback) if CmpNumOutline.on?
+
     numeric_dispatch = <<~CPP
       #{op == :EQ ? '' : fixnum_arm}if (#{pair}) {
       #ifdef MRB_NO_FLOAT

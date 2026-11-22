@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'int_box_outline'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_resumable'
 
@@ -1520,7 +1521,7 @@ class CodeGen
       out << "  if (bc2cpp_made) {\n"
       out << "    Bc2cppResumeFrame* bc2cpp_f = (Bc2cppResumeFrame*)DATA_PTR(((Bc2cppMethodFrame*)bc2cpp_made)->frame);\n"
       upvars.each_index do |i|
-        out << "    bc2cpp_f->slots[#{i}] = (long long)(uintptr_t)mrb_integer(bc2cpp_env->stack[#{i + 1}]);\n"
+        out << "    bc2cpp_f->slots[#{i}] = (long long)(uintptr_t)#{IntBoxOutline.upvar_read("bc2cpp_env->stack[#{i + 1}]")};\n"
       end
       # STEP_CLOSURES: the pointers lead into the cells Array the env keeps (after the block, if it takes one); the frame
       # keeps it too, as the env may go before the frame does.

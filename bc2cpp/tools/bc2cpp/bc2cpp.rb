@@ -52,6 +52,8 @@ require_relative 'outside_ruby_ivar_scopes'
 require_relative 'native_expression_devirt'
 require_relative 'branch_hints'
 require_relative 'tagged_fixnum'
+require_relative 'cmp_num_outline'
+require_relative 'int_box_outline'
 require_relative 'symbol_cache'
 require_relative 'class_test_fuse'
 require_relative 'const_site_cache'
@@ -1912,6 +1914,9 @@ BC2CPP_MAIN = lambda do
     #define mrb_ary_shift bc2cpp_mrb_ary_shift
     #define mrb_hash_delete_key bc2cpp_mrb_hash_delete_key
   CPP
+  print CmpNumOutline::RUNTIME if CmpNumOutline.on?
+  print IntBoxOutline::RUNTIME if IntBoxOutline.upvar_on? || IntBoxOutline.size_on? || IntBoxOutline.pair_on?
+  print IntBoxOutline::AS_INT if IntBoxOutline.pair_on?
   # GC_KEEP_OVERWRITTEN: the same hole from the other side. A compiled register that read a slot (an ivar, a global,
   # an element) still holds the value after the slot is overwritten or emptied, and by then that register is the only
   # thing referencing it: `r = @a; @a = []; r` (Interpreter#take_move_route_requests) returns an Array nothing else
