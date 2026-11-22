@@ -18,6 +18,35 @@ module MRubyRequire
   def self.bake(name, source)
     SOURCES[name] = source
   end
+
+  # BC2CPP_LOAD_TIMES=1: each baked source's own load time (its top-level code, less the sources it requires) is
+  # written to stderr at exit, slowest first, so a self-compiled bc2cpp's startup shows which file it spends in.
+  LOAD_TIMES = {}
+  LOAD_STACK = []
+
+  def self.load_times?
+    return @load_times unless @load_times.nil?
+
+    @load_times = ENV['BC2CPP_LOAD_TIMES'] == '1'
+  end
+
+  def self.timed(feature)
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    LOAD_STACK << 0.0
+    begin
+      yield
+    ensure
+      spent = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+      nested = LOAD_STACK.pop
+      LOAD_TIMES[feature] = (LOAD_TIMES[feature] || 0.0) + spent - nested
+      LOAD_STACK[-1] += spent unless LOAD_STACK.empty?
+    end
+  end
+
+  def self.report_load_times
+    LOAD_TIMES.sort_by { |_, t| -t }.first(40).each { |f, t| $stderr.puts format('BC2CPP_LOAD %8.3fs %s', t, f) }
+    $stderr.puts format('BC2CPP_LOAD %8.3fs total (%d sources)', LOAD_TIMES.values.sum, LOAD_TIMES.size)
+  end
 end
 
 # require is defined on Object, not in module Kernel: the baked source it evaluates runs with the lexical scope of this
@@ -45,7 +74,11 @@ class Object
     # A source compiled into the build (mruby-bc2cpp-sources) is run from its bytecode, with no eval.
     if MRubyRequire.respond_to?(:baked?) && MRubyRequire.baked?(feature)
       MRubyRequire::LOADED[feature] = true
-      MRubyRequire.load_baked(feature)
+      if MRubyRequire.load_times?
+        MRubyRequire.timed(feature) { MRubyRequire.load_baked(feature) }
+      else
+        MRubyRequire.load_baked(feature)
+      end
       return true
     end
 

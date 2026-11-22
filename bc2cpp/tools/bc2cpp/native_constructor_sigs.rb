@@ -30,11 +30,32 @@ module NativeConstructorSigs
   def table(path = PATH, root: ROOT)
     @tables ||= {}
     @tables[[path, root]] ||= begin
-      declared = load(path)
-      problems = audit(declared, root)
-      raise "bc2cpp: #{path}: constructor overloads disagree with their source:\n  #{problems.join("\n  ")}" unless problems.empty?
-
+      declared, ruby_sources = audited(path, root)
+      (@ruby_sources ||= {}).merge!(ruby_sources)
       declared
+    end
+  end
+
+  # [declared, { class => ruby source }] once the audit agrees, kept in ScanCache: the table and the audit read only
+  # the sig file and mruby-rgss's sources. A self-compiled bc2cpp loads this file before its compiled bodies are
+  # installed, so the audit's text scans ran interpreted: 3.5s of a 10s run.
+  def audited(path, root)
+    require 'rbs'
+    sig = NativeSigs.table?(path) ? NativeSigs.file_of(path) : path
+    inputs = [sig, *Dir[File.join(root, 'mruby-rgss/src/*.cxx')].sort, *Dir[File.join(root, 'mruby-rgss/mrblib/*.rb')].sort]
+    ScanCache.fetch("native_constructor_sigs.table.#{path.delete_prefix("#{sig}#")}.prism#{Prism::VERSION}.rbs#{RBS::VERSION}",
+                    inputs, cache_absent: false) do
+      saved = @ruby_sources
+      @ruby_sources = {}
+      begin
+        declared = load(path)
+        problems = audit(declared, root)
+        raise "bc2cpp: #{path}: constructor overloads disagree with their source:\n  #{problems.join("\n  ")}" unless problems.empty?
+
+        [declared, @ruby_sources]
+      ensure
+        @ruby_sources = saved
+      end
     end
   end
 
