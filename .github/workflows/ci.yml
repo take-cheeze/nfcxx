@@ -668,6 +668,7 @@ jobs:
             - "scripts/pathb-ssa.rb"
             - "scripts/pathb-egraph.rb"
             - "scripts/pathb-ssa-qbe.rb"
+            - "scripts/pathb-nothrow.rb"
             - "scripts/pathb-ir-opt.rb"
             - "scripts/pathb-structure.rb"
             - "scripts/pathb-ssa-structurize.rb"
