@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'strscan'
+require_relative 'int_box_outline'
 require_relative 'branch_hints'
 require_relative 'reg_name'
 require_relative 'tagged_fixnum'
@@ -1650,7 +1651,7 @@ class CodeGen
                         end
                       end
         if exact_entry
-          expression = exact_entry[:expression].gsub('recv', recv)
+          expression = IntBoxOutline.size_boxed(exact_entry[:expression]).gsub('recv', recv)
           expression = expression.gsub('BC2CPP_ARG0', argv.fetch(0)) if exact_entry[:arity] == 1
           return "  // CLOSED_WORLD_NATIVE_EXACT :#{name} -> #{known_class} native body; " \
                  "fresh exact-class receiver, no dispatch fallback\n" \

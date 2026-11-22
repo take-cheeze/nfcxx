@@ -1776,6 +1776,12 @@ check test ! -e "$work/api_int_local/NOT_BUILDABLE"
 check grep -qF 'mrb_int jd = 5;' "$work/api_int_local/src/api_int_local.c"
 check grep -qF 'mrb_int t;' "$work/api_int_local/src/api_int_local.c"
 check grep -qF 'mrb_value keep = x;' "$work/api_int_local/src/api_int_local.c"
+# 2zzz176. CRuby's thread-local storage (rb_thread_local_aset/aref of a symbol key) is a per-state hash (nfcx_tls_*): no Thread refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_thread_local tools/cext2mrbgem/fixtures/api_thread_local/ext/api_thread_local "$work/api_thread_local" > "$work/api_thread_local.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'Thread' "$work/api_thread_local/REFUSALS.txt")" -eq 0
+check grep -qF 'nfcx_tls_aset(mrb, mrb_nil_value(), id_mode, v);' "$work/api_thread_local/src/api_thread_local.c"
+check grep -qF 'return nfcx_tls_aref(mrb, mrb_nil_value(), id_mode);' "$work/api_thread_local/src/api_thread_local.c"
 # 2zzz171. a block-scoped long t and a VALUE t in a later block of one function: the (long)t cast of the long is an integer use,
 # no VALUE-as-integer refusal (the lookup is the declaration whose block encloses the use).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_block_shadow tools/cext2mrbgem/fixtures/api_block_shadow/ext/api_block_shadow "$work/api_block_shadow" > "$work/api_block_shadow.log" 2>&1 || rc=$?

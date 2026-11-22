@@ -362,6 +362,17 @@ if ENV['MRBC']
         x * x * x
       end
 
+      # Integer operands past the Fixnum range: the INTEGER_OPERAND_PROOF arms' heap-Integer side.
+      def nq_heap_int
+        x = (@nq_list.size + 2_000_000_000) * 2_000_000_000
+        y = x - 1
+        r = x / 3_000_000_000
+        r += 1 if y < x
+        r += 2 if x == y + 1
+        r += 4 if x >= y
+        r
+      end
+
       def nq_taint
         @nq_mix = "s"
       end
@@ -684,6 +695,19 @@ if ENV['MRBC']
   check.call('Integer arithmetic past the fixnum range still proves, through the overflow-checked tier',
              proven.call('NqBox#nq_edge') && chunk_of.call(code, 'NqBox#nq_edge').include?('bc2cpp_fixnum_mul(') &&
                chunk_of.call(code, 'NqBox#nq_edge').include?('mrb_num_mul(M'))
+  integer_note = lambda do |method|
+    chunk = with_blocks.call(code, method)
+    chunk.include?('INTEGER_OPERAND_PROOF') && !chunk.match?(/bc2cpp_num_\w+_float\(|mrb_float\(/)
+  end
+  check.call('INTEGER_OPERAND_PROOF: Integer-only operands keep no Float arm (+ * < /, heap Integers)',
+             %w[NqBox#nq_area NqBox#nq_fact NqBox#nq_sum NqBox#nq_heap_int].all? { |m| integer_note.call(m) })
+  check.call('INTEGER_OPERAND_PROOF: past Fixnum the arms call the core Integer bodies',
+             %w[mrb_num_mul(M mrb_num_sub(M bc2cpp_num_cmp(M bc2cpp_num_div(M].all? do |call|
+               chunk_of.call(code, 'NqBox#nq_heap_int').include?(call)
+             end)
+  check.call('NEG: an Integer-or-Float operand keeps its Float arm (no INTEGER_OPERAND_PROOF)',
+             !chunk_of.call(code, 'NqBox#nq_half').include?('INTEGER_OPERAND_PROOF') &&
+               chunk_of.call(code, 'NqBox#nq_half').include?('bc2cpp_num_div_float('))
   check.call('an ivar that is Integer or Float proves for both classes', proven.call('NqBox#nq_flt_use'))
   check.call('reading an ivar after a nil test on it proves (the test narrows the slot)', proven.call('NqBox#nq_guarded'))
 
@@ -726,6 +750,17 @@ if ENV['MRBC']
     check.call("NEG: an ivar slot read after an op that runs unseen Ruby (#{m}) keeps its send",
                kept.call("NqHidden##{m}"))
   end
+  off_code = nil
+  Dir.mktmpdir do |dir|
+    saved = ENV['BC2CPP_INTEGER_OPERAND_PROOF']
+    ENV['BC2CPP_INTEGER_OPERAND_PROOF'] = '0'
+    off_code, = runtime.generate(fixture, dir)
+  ensure
+    saved.nil? ? ENV.delete('BC2CPP_INTEGER_OPERAND_PROOF') : ENV['BC2CPP_INTEGER_OPERAND_PROOF'] = saved
+  end
+  check.call('BC2CPP_INTEGER_OPERAND_PROOF=0 keeps the numeric proof\'s guarded arms at the same sites',
+             !off_code.include?('INTEGER_OPERAND_PROOF') && chunk_of.call(off_code, 'NqBox#nq_area').include?('NUMERIC_OPERAND_PROOF') &&
+               chunk_of.call(off_code, 'NqBox#nq_less').include?('mrb_float('))
   facts = err.lines.grep(/NUM(ARG|IVAR|RET|CONST) /).join
   check.call('the diagnostic lists the proven ivar classes', facts.include?('NUMIVAR NqBox#@nq_f (FLT)') &&
                                                           facts.include?('NUMIVAR NqBox#@nq_list (ARR)'))
@@ -775,6 +810,7 @@ if ENV['MRBC']
           call(M, "sum", box, "nq_sum", 1, &five);
           call(M, "fact", box, "nq_fact", 1, &five);
           call(M, "edge (Integer overflow)", box, "nq_edge");
+          call(M, "heap Integer operands", box, "nq_heap_int");
           call(M, "flt_use before", box, "nq_flt_use");
           call(M, "setf", box, "nq_setf");
           call(M, "flt_use after", box, "nq_flt_use");
@@ -854,7 +890,7 @@ if ENV['MRBC']
           at = lines.index { |l| l.start_with?("#{label} =>") }
           at && lines[at + 1].to_s[/dispatches=(\d+)/, 1]&.to_i
         end
-        %w[step\ 2 scale area half\ int less len\ 1 sum fact].each do |label|
+        %w[step\ 2 scale area half\ int less len\ 1 sum fact heap\ Integer\ operands].each do |label|
           check.call("#{label}: the compiled call makes no dynamic dispatch", dispatches.call(label) == 0)
         end
       end

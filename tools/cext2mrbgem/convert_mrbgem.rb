@@ -4130,6 +4130,8 @@ use_problem = lambda do |name, use|
         body_e = fn['body_end']
         next unless decls.all? { |d| d[:start] > body_s && d[:start] < body_e }
         names = decls.map { |d| d[:name] }
+        # a type qualifier is not a declarator name (VALUE const v = f(): the parser reads const as the name)
+        next if names.any? { |n| %w[const volatile restrict register static].include?(n) }
         next unless names.uniq.size == names.size
         next if names.any? { |n| names.count(n) > 1 }
         ok = names.all? { |n| int_local_uses_ok?(rel, masked, fn, n, decls) }
@@ -5878,7 +5880,8 @@ end
       end
       cp = match_close(masked, nxt)   # the matching parenthesis: an argument may hold calls
       args = cp > 0 ? split_args(masked, nxt, cp) : []
-      texts = args.map { |a, b| psl(@files[rel]['text'], a, b) }
+      # a macro's line continuation inside an argument (the backslash at a line end) is not part of the argument's text
+      texts = args.map { |a, b| psl(@files[rel]['text'], a, b).gsub(/[ \t]*\\\n[ \t]*/, ' ').strip }
       if texts.size != entry['arity']
         refuse(rel, s, name, "expected #{entry['arity']} arguments, found #{texts.size}")
         return
@@ -7876,6 +7879,9 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     # the helpers of the gem's sources (api_map nfcx_ptr_value, nfcx_ptr_of, nfcx_int_value, nfcx_int_of) are written where a call's
     # text is copied (a rescue's data arguments), not expanded by a template: their mruby forms are written here
     @files.each_key do |rel|
+      # a macro's last line continuation written after the closing argument ("... \)" at a line end): a backslash that
+      # does not continue into a line is a stray in C, and the closing parenthesis is what the macro body ends with
+      outputs[rel] = outputs[rel].gsub(/ \\\)$/, ')')
       outputs[rel] = outputs[rel].gsub(/\bnfcx_ptr_value\(/, 'mrb_cptr_value(mrb, ')
                                  .gsub(/\bnfcx_ptr_of\(/, 'mrb_cptr(')
                                  .gsub(/\bnfcx_int_value\(/, 'mrb_fixnum_value(')

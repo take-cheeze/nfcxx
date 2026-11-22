@@ -9,8 +9,8 @@
 # `x % 2**k` with a constant divisor is a low-bit mask.
 #
 #   generated code (needs a host mrbc)
-#     - `a == b` tests the Integer pair before the mrb_obj_eq identity call;
-#     - `a != b` has an Integer-pair arm ahead of `!mrb_equal`;
+#     - `a == b` tests the Integer pair before the mrb_obj_eq identity call (in the shared CMP_NUM_OUTLINE helper);
+#     - `a != b` has an Integer-pair arm (that helper) ahead of `!mrb_equal`;
 #     - a world that reopens Integer#== keeps the `!=` Integer-pair arm: BasicObject#!= runs OP_EQ, which compares
 #       two Integers in place whatever Integer#== is (NEQ_OP_EQ);
 #     - `%` carries the power-of-two arm ahead of the general floor modulo.
@@ -75,15 +75,21 @@ reopen_code, reopen_err = Bc2cppFixtureRuntime.generate(SRC + REOPEN, dirs['reop
                                                                                            only_owners: OWNERS + ['Integer'])
 eq = code_of(code, 'IpcCmp_eq')
 ne = code_of(code, 'IpcCmp_ne')
-pair = /if \(mrb_integer_p\(r\d+\) && mrb_integer_p\(r\d+\)\) \{\s*r\d+ = mrb_bool_value\(mrb_integer\(r\d+\) (==|!=) mrb_integer\(r\d+\)\);/
+# CMP_NUM_OUTLINE (cmp_num_outline.rb): past the Fixnum pair, both run OP_EQ's shared helper, whose first arm is the
+# Integer pair, ahead of its mrb_obj_eq.
+helper_eq = code[/mrb_value bc2cpp_cmp_num_eq\(mrb_state\* M, mrb_value d, mrb_value s\) \{.*?^\}/m].to_s
+pair_arm = 'if (mrb_integer_p(d) && mrb_integer_p(s)) return mrb_bool_value(mrb_integer(d) == mrb_integer(s));'
+calls = ->(text) { text.index('bc2cpp_cmp_num_eq(M, ') }
 check.call('== tests the Integer pair before the mrb_obj_eq call',
-           (i = eq =~ pair) && $1 == '==' && eq.index('mrb_obj_eq(M') && i < eq.index('mrb_obj_eq(M'))
+           calls.call(eq) && helper_eq.index(pair_arm) && helper_eq.index('mrb_obj_eq(M, d, s)') &&
+             helper_eq.index(pair_arm) < helper_eq.index('mrb_obj_eq(M, d, s)'))
 check.call('!= has an Integer-pair arm ahead of !mrb_equal',
-           (j = ne =~ pair) && $1 == '!=' && ne.index('!mrb_equal(M') && j < ne.index('!mrb_equal(M'))
-check.call('an ivar != literal takes the same arm', code_of(code, 'IpcCmp_ivar_ne').match?(pair))
+           (j = calls.call(ne)) && ne.include?('mrb_false_p(bc2cpp_nt)') && ne.index('!mrb_equal(M') && j < ne.index('!mrb_equal(M'))
+check.call('an ivar != literal takes the same arm', calls.call(code_of(code, 'IpcCmp_ivar_ne')))
 reopen_ne = code_of(reopen_code, 'IpcCmp_ne')
 check.call('a reopened Integer#== still leaves != its Integer-pair arm, as OP_EQ does',
-           (j = reopen_ne =~ pair) && $1 == '!=' && reopen_ne.index('!mrb_equal(M') && j < reopen_ne.index('!mrb_equal(M'))
+           (j = calls.call(reopen_ne)) && reopen_ne.index('!mrb_equal(M') && j < reopen_ne.index('!mrb_equal(M') &&
+             reopen_code.include?(pair_arm))
 check.call('a bigint receiver of != is one shared bc2cpp_bigint_eq call, no by-name send at the site',
            ne.include?('!bc2cpp_bigint_eq(M,') && !ne.include?('mrb_funcall') && !ne.include?('bc2cpp_neq_arg'))
 helper = ->(text) { text[/^static mrb_bool bc2cpp_bigint_eq.*?^\}/m].to_s }
