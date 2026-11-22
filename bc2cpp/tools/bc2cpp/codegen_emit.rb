@@ -785,7 +785,9 @@ class CodeGen
         if NULLABLE_TYPES.include?(type)
           "  bc2cpp_fixnum_or_nil_set(&((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)}, arg);\n"
         elsif type == :value
-          "  bc2cpp_keep_old(M, ((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)});\n" \
+          field = "((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)}"
+          keep = immediate_old_slot?(owner, ivar) ? '/* IMMEDIATE_OLD */' : "bc2cpp_keep_old(M, #{field});"
+          "  #{keep}\n" \
             "  ((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)} = arg;\n" \
             "  mrb_field_write_barrier_value(M, (struct RBasic*)mrb_obj_ptr(self), arg);\n"
         else

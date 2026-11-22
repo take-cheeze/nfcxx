@@ -277,7 +277,8 @@ class CodeGen
                   else "mrb_field_write_barrier_value(M, (struct RBasic*)mrb_obj_ptr(#{recv}), #{src});"
                   end
         # GC_KEEP_OVERWRITTEN: the value this store replaces may be held only by a register of the caller.
-        return "#{"#{indent}#{frozen}\n" if frozen}#{indent}bc2cpp_keep_old(M, #{field});\n#{indent}#{field} = #{src};\n" \
+        keep = immediate_old_slot?(klass, ivar) ? '/* IMMEDIATE_OLD */' : "bc2cpp_keep_old(M, #{field});"
+        return "#{"#{indent}#{frozen}\n" if frozen}#{indent}#{keep}\n#{indent}#{field} = #{src};\n" \
                "#{indent}#{barrier}#{tail}"
       end
 
@@ -298,6 +299,25 @@ class CodeGen
     elsif embedded_accessor_linkable?(klass, "#{ivar}=")
       "#{dst ? "#{dst} = " : ''}#{sanitize(klass)}_#{sanitize(ivar)}_eq_impl(M, #{recv}, #{src});"
     end
+  end
+
+  # IMMEDIATE_OLD: the slot's class pool (CLASS_POOLS, joined over every store the family can make, nil on entry) holds
+  # only nil, true, false and Symbols, so the value a store replaces is an immediate, which the GC never frees: the
+  # GC_KEEP_OVERWRITTEN root would be a no-op. A pool with OTHER or CHECKED bits is refused. BC2CPP_IMMEDIATE_OLD=0.
+  def immediate_old_slot?(klass, ivar)
+    return false if ENV['BC2CPP_IMMEDIATE_OLD'] == '0' || !@class_pools_on || klass.nil?
+
+    mask = @class_ivar_pools[[numeric_family(klass), ivar.to_s]]
+    mask.is_a?(Integer) && (mask & ~immediate_value_bits).zero?
+  end
+
+  # The value bits of nil, true, false and a Symbol: immediates in every boxing. The class bits are read, not
+  # allocated, so a class no flow has named adds nothing.
+  def immediate_value_bits
+    return NumericFlow::NIL unless immediate_class_bits_enabled?
+
+    bits = @numeric_class_bits || {}
+    %w[TrueClass FalseClass Symbol].reduce(NumericFlow::NIL) { |m, k| m | bits.fetch(k, 0) }
   end
 
   # IMMEDIATE_BARRIER: every definition of `reg` reaching the read at `idx` is nil, true, false, a Symbol or a proven

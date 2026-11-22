@@ -1928,10 +1928,24 @@ BC2CPP_MAIN = lambda do
       static inline void bc2cpp_keep_old_range(mrb_state*, mrb_value, mrb_int, mrb_int) {}
     CPP
   else
+    # ROOT_VALUE_FIRST: a keep's value is mostly the result of the call just before it, already in the first argument
+    # register, and the state is in a callee-saved one; value first saves the register move each site would make.
+    # BC2CPP_ROOT_VALUE_FIRST=0 calls bc2cpp_root directly.
+    if ENV['BC2CPP_ROOT_VALUE_FIRST'] == '0'
+      puts <<~'CPP'
+        // ELEMENT_READ_ROOTS: the caller side. An element a compiled read keeps in a local, while a call may unlink it.
+        static inline void bc2cpp_keep(mrb_state* M, mrb_value v) { bc2cpp_root(M, v); }
+        static inline void bc2cpp_keep_old(mrb_state* M, mrb_value old) { bc2cpp_root(M, old); }
+      CPP
+    else
+      puts <<~'CPP'
+        // ELEMENT_READ_ROOTS: the caller side. An element a compiled read keeps in a local, while a call may unlink it.
+        [[gnu::noinline]] inline void bc2cpp_root_value_first(mrb_value v, mrb_state* M) { bc2cpp_root(M, v); }
+        static inline void bc2cpp_keep(mrb_state* M, mrb_value v) { bc2cpp_root_value_first(v, M); }
+        static inline void bc2cpp_keep_old(mrb_state* M, mrb_value old) { bc2cpp_root_value_first(old, M); }
+      CPP
+    end
     puts <<~'CPP'
-      // ELEMENT_READ_ROOTS: the caller side. An element a compiled read keeps in a local, while a call may unlink it.
-      static inline void bc2cpp_keep(mrb_state* M, mrb_value v) { bc2cpp_root(M, v); }
-      static inline void bc2cpp_keep_old(mrb_state* M, mrb_value old) { bc2cpp_root(M, old); }
       // The elements ary[head, len) an Array store is about to drop, with mrb_ary_splice's own clamping.
       static inline void bc2cpp_keep_old_range(mrb_state* M, mrb_value ary, mrb_int head, mrb_int len) {
         if (!mrb_array_p(ary)) return;

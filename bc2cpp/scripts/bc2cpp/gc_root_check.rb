@@ -30,6 +30,9 @@ SOURCE = <<~RUBY
       @table = { a: "va" + "x", b: "vb" + "y" }
       @cells = ["c0" + "x", "c1" + "x", "c2" + "x"]
       @cur = "cur" + "x"
+      # IMMEDIATE_OLD: @flag only ever holds immediates; @mode also holds a String, so it keeps its root.
+      @flag = :on
+      @mode = "busy" + "x"
       # Built here, so the funcall that ran #new has already dropped its arena entries: the slot is the only owner.
       $gcr_slot = ["g0" + "x", "g1" + "x"]
       # A proc block: Array#map hands each element to it directly (no VM stack), and it clears the Array by name.
@@ -192,6 +195,27 @@ SOURCE = <<~RUBY
       [r, pair]
     end
 
+    def flip_flag
+      @flag = @flag == :on ? true : nil
+    end
+
+    # The slot's pool is immediates only: the replaced value needs no root, and the case matches with roots off too.
+    def imm_flag_overwrite
+      flip_flag
+      r = @flag
+      @flag = :off
+      churn
+      r.inspect
+    end
+
+    # The store is of an immediate, but the value it replaces is the String the constructor stored.
+    def mixed_slot_overwrite
+      r = @mode
+      @mode = :idle
+      churn
+      r.inspect
+    end
+
     def attr_overwrite
       r = cur
       self.cur = nil
@@ -204,9 +228,9 @@ RUBY
 OWNERS = %w[GcRoot].freeze
 CASES = %w[ivar_return ivar_local gvar_overwrite ary_overwrite hash_overwrite ary_clear ary_replace
            attr_overwrite ary_clear_by_name ary_store_by_name hash_clear_by_name hash_store_by_name
-           each_clear_by_name map_clear_by_name map_proc_clear arg_clear_by_name].freeze
+           each_clear_by_name map_clear_by_name map_proc_clear arg_clear_by_name mixed_slot_overwrite].freeze
 # Cases that need no root, so they match with the roots switched off too.
-UNROOTED_CASES = %w[pure_between].freeze
+UNROOTED_CASES = %w[pure_between imm_flag_overwrite].freeze
 
 SCENARIO = <<~CPP
   static int scenario(mrb_state* M) {
@@ -252,6 +276,21 @@ Dir.mktmpdir('bc2cpp-gc-root') do |dir|
   pure_body = ->(text) { text[/GcRoot_pure_between_impl\(mrb_state\* M, mrb_value self\) \{.*?\n\}\n/m].to_s }
   suite.check('an element read followed only by PURE_CALLS is not rooted',
               pure_body.call(code).include?('bc2cpp_ary_entry(M,') && !pure_body.call(code).include?('bc2cpp_keep('))
+  suite.check('a slot holding only immediates replaces its value unrooted (IMMEDIATE_OLD)',
+              !embedded_store.call('ivar_flag') && code.include?('/* IMMEDIATE_OLD */'))
+  suite.check('a slot that also holds a String roots the value an immediate store replaces',
+              embedded_store.call('ivar_mode'))
+  Dir.mktmpdir('bc2cpp-gc-root-imm-old') do |imm_dir|
+    ENV['BC2CPP_IMMEDIATE_OLD'] = '0'
+    begin
+      imm_off, = Bc2cppFixtureRuntime.generate(SOURCE, imm_dir, core: true, only_owners: OWNERS)
+    ensure
+      ENV.delete('BC2CPP_IMMEDIATE_OLD')
+    end
+    suite.check('BC2CPP_IMMEDIATE_OLD=0 roots it again', !imm_off.include?('/* IMMEDIATE_OLD */') &&
+                (imm_off.include?('bc2cpp_keep_old(M, ((GcRoot_ivars*)DATA_PTR(self))->ivar_flag);') ||
+                 imm_off.include?('&((GcRoot_ivars*)DATA_PTR(self))->ivar_flag, ')))
+  end
   Dir.mktmpdir('bc2cpp-gc-root-impure') do |impure_dir|
     ENV['BC2CPP_ELEMENT_READ_PURE'] = '0'
     begin
