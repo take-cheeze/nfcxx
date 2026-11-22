@@ -1051,6 +1051,18 @@ class ClosedWorld
     @user_objects_unfrozen
   end
 
+  # CONST_DEF_ELIDE: a class or module whose last path segment is +bare+ may be frozen. user_objects_unfrozen? admits
+  # `Klass.freeze` on a class-valued constant; here such a send refuses the classes it names, and a frozen value
+  # constant (which might hold any class) refuses every one.
+  def class_object_freeze_possible?(bare)
+    unless defined?(@class_freeze_open)
+      @class_freeze_open = @global_refusal || @freeze_possible || !fresh_builtin_names_core? ||
+                           DynamicNames.universe(@ireps).include?('freeze') ||
+                           @frozen_constants.any? { |name| !class_constant?(name) }
+    end
+    !!@class_freeze_open || @frozen_constants.include?(bare)
+  end
+
   # No Array/Hash/Range/String instance can gain a singleton class or a mixin: nothing in the
   # world (mruby's own Ruby aside, which never does it to those) names a singleton-making
   # method, opens a singleton class on a non-class object, or creates one from native code.

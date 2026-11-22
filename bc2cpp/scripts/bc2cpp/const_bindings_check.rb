@@ -246,4 +246,44 @@ Dir.mktmpdir('bc2cpp-const-bindings') do |dir|
   end
 end
 
+# CONST_DEF_ELIDE (tools/bc2cpp/const_def_elide.rb): a program that enumerates constants keeps every constant
+# definition, even where no bytecode runs. Generated as for a VM-free build, run interpreted and compiled.
+REFLECT = <<~'RUBY'
+  class CdHolder
+    LIMIT = 3
+    def limit = LIMIT
+    def by_name = CdHolder.const_get(:LIMIT)
+    def listed = CdHolder.constants.include?(:LIMIT)
+  end
+RUBY
+
+Dir.mktmpdir('bc2cpp-const-def-elide') do |dir|
+  saved = ENV['BC2CPP_VM_FREE']
+  ENV['BC2CPP_VM_FREE'] = '1'
+  code, err = Bc2cppFixtureRuntime.generate(REFLECT, dir, core: true, only_owners: %w[CdHolder])
+  ENV['BC2CPP_VM_FREE'] = saved
+  suite.check('CONST_DEF_ELIDE: Module#constants refuses the elision world-wide',
+              err.include?('CONST_DEF_ELIDE): off (') && !code.include?('CONST_DEF_ELIDE LIMIT'))
+  build = ENV['CC_GENERATED_ONLY'] == '1' ? nil : Bc2cppFixtureRuntime.full_or_build
+  if build.nil?
+    puts '  SKIP const definition behaviour: needs a full-core libmruby'
+  else
+    scenario = <<~CPP
+      static int scenario(mrb_state* M) {
+        mrb_value obj = mrb_obj_new(M, mrb_class_get(M, "CdHolder"), 0, nullptr);
+        for (const char* meth : {"limit", "by_name", "listed"}) call(M, meth, obj, meth);
+        return 0;
+      }
+    CPP
+    built, output = Bc2cppFixtureRuntime.run(dir, err, %w[CdHolder], scenario, build: build, full: true)
+    suite.check('CONST_DEF_ELIDE: the reflection fixture builds and runs', built)
+    sections = Bc2cppFixtureRuntime.sections(output)
+    plain = ->(lines) { lines.to_a.reject { |l| l.start_with?('  dispatches=') } }
+    interpreted = plain.call(sections['interpreted'])
+    suite.check('CONST_DEF_ELIDE: interpreted and compiled read the constant by name alike',
+                interpreted.include?('by_name => 3') && interpreted.include?('listed => true') &&
+                interpreted == plain.call(sections['compiled']))
+  end
+end
+
 suite.finish!

@@ -803,7 +803,10 @@ def bc2cpp_compiled_gem_job(spec, gems_root)
     # names can be compile-time symbols in const tables.
     'BC2CPP_ROM_METHOD_TABLES' => '1',
     # RUNTIME_HEADER (runtime_header.rb): one directory for every compiled gem, so they share one runtime header.
-    'BC2CPP_RUNTIME_HEADER_DIR' => "#{spec.build.build_dir}/mrbgems/bc2cpp-runtime"
+    'BC2CPP_RUNTIME_HEADER_DIR' => "#{spec.build.build_dir}/mrbgems/bc2cpp-runtime",
+    # CONST_DEF_ELIDE (const_def_elide.rb): a build without the bytecode interpreter runs no Ruby the generation
+    # does not compile.
+    'BC2CPP_VM_FREE' => spec.build.cc.defines.flatten.include?('MRB_VM_FREE') ? '1' : '0'
   }.merge(bc2cpp_closed_world_env(spec, gems_root))
   mrbc = bc2cpp_optional_mrbc(spec)
   env['MRBC'] = mrbc if mrbc
