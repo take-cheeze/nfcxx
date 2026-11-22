@@ -1,5 +1,5 @@
-== -c m.cpp --promote-slots=maybe -o m.o
+== -c m.cpp --instantiate=bogus -o m.o
 -- stdout
 -- stderr
-nfcxx: --promote-slots takes on or off (got 'maybe')
+nfcxx: --instantiate (NFCXX_INSTANTIATE) is auto or used (got bogus)
 status=2

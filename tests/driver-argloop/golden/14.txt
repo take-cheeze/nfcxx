@@ -1,7 +1,5 @@
 == -c p.cpp2 -o p.o
 -- stdout
 -- stderr
-pathb-cc: /root/.cache/nfcxx/cpp2/KEY/p.cpp: the optimized IR is refused (pathb-ssa-build: QBE failed: ROOT/build/qbe/qbe: invalid option -- 'V'), using the unoptimized IR
-pathb-cc: /root/.cache/nfcxx/cpp2/KEY/p.cpp: SSA route: pathb-ssa-build: QBE failed: ROOT/build/qbe/qbe: invalid option -- 'V'
-nfcxx: Path B did not build /root/.cache/nfcxx/cpp2/KEY/p.cpp (status 1); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)
-status=0
+nfcxx: cppfront is not built; run scripts/setup-cppfront.sh (docs/notes/cpp2.md)
+status=2
