@@ -2090,9 +2090,13 @@ class CodeGen
   # "::"). Used only in guard conditions. Uses lexical_scope_path, stripping a
   # ".singleton" suffix (see there), although TYPED owners are never
   # `.singleton` today.
+  # PRESYM_OWNERS (BC2CPP_PRESYM_OWNERS=0 turns it off): under ROM_METHOD_TABLES, whose presym scan reads the
+  # generated sources, a segment is its presym id instead of a string interned at run time.
   def const_chain_value_expr(owner)
+    presym = rom_method_tables? && ENV['BC2CPP_PRESYM_OWNERS'] != '0'
     lexical_scope_path(owner).reduce('mrb_obj_value(M->object_class)') do |expr, seg|
-      "mrb_const_get(M, #{expr}, mrb_intern_cstr(M, \"#{seg}\"))"
+      key = presym && presym_key(seg)
+      "mrb_const_get(M, #{expr}, #{key || "mrb_intern_cstr(M, \"#{seg}\")"})"
     end
   end
 
