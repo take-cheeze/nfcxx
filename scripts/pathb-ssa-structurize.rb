@@ -184,7 +184,7 @@ class SsaFn
     @attrs = attrs
     @order.each do |id|
       b = []
-      @blocks[id].each { |s| ["eh-unwind", "eh-pad"].include?(head(s)) ? (eh = true) : b << s }
+      @blocks[id].each { |s| ["eh-unwind", "eh-pad", "eh-spec-pad"].include?(head(s)) ? (eh = true) : b << s }
       if head(b[-1]) == "eh-entry"
         eh = true
         b[-1] = ["br", b[-1][1]]

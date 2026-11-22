@@ -1227,7 +1227,7 @@ class LocalLifetime
 
   EH_THROWS = %w[__throw __rethrow __cxa_throw __cxa_rethrow].freeze
   EH_NORETURN = %w[_ZSt9terminatev __cxa_call_unexpected].freeze
-  EH_TABLE_HEADER = %w[eh-types eh-noexcept eh-spec].freeze
+  EH_TABLE_HEADER = %w[eh-types eh-noexcept eh-spec eh-spec-pad].freeze
   EH_SLOTS = %w[eh.exc eh.sel eh.thrown].freeze   # (eh.thrown: the exception object a throw builds)
 
   # Zero-cost exception tables (docs/notes/pathb-zero-cost-eh.md): (eh-state N) says the calls after it unwind to landing

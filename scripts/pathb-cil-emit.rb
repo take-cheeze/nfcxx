@@ -1874,6 +1874,8 @@ class Function
         @eh_noexcept = true
       elsif part.is_a?(Array) && truthy(part) && pyidx(part, 0) == 'eh-spec'
         refuse("#{pys(@name)}: a dynamic exception specification is not supported by the CIL backend")
+      elsif part.is_a?(Array) && truthy(part) && pyidx(part, 0) == 'eh-spec-pad'
+        refuse("#{pys(@name)}: a landing pad's exception specification is not supported by the CIL backend")
       elsif part.is_a?(Array) && truthy(part) && pyidx(part, 0) == 'slot'
         slots << part
       elsif part.is_a?(Array) && truthy(part) && pyidx(part, 0) == 'body'
