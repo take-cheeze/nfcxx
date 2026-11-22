@@ -146,6 +146,7 @@ require_relative 'block_self_world'
 require_relative 'codegen_native_results'
 require_relative 'codegen_instance_receivers'
 require_relative 'codegen_class_narrowing'
+require_relative 'codegen_guard_hoist'
 require_relative 'codegen_freeze_fold'
 require_relative 'codegen_decided_branch'
 require_relative 'codegen_arm_prune'
@@ -3300,6 +3301,7 @@ BC2CPP_MAIN = lambda do
   # EXCEPTION_INIT: the file-scope declaration and helper of a `super` that reaches Exception#initialize.
   exception_init_code = gen.emit_exception_init_helpers(compiled)
   warn gen.cold_compact_summary
+  warn gen.guard_hoist_summary
   warn "== numeric slow-path helpers: #{gen.numeric_slow_site_counts(compiled).map { |k, n| "#{k} #{n}" }.join(', ').then { |s| s.empty? ? 'none' : s }} sites =="
   warn ''
   warn "== outlined index ops: #{gen.index_helper_site_counts(compiled).map { |k, n| "#{k} #{n}" }.join(', ')} sites =="
