@@ -9,7 +9,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 SRC=${1:?usage: run_corpus.sh CORPUS_SRC OUT_DIR}
 OUT=${2:?usage: run_corpus.sh CORPUS_SRC OUT_DIR}
-export NFCX_MRUBY_INCLUDE=${NFCX_MRUBY_INCLUDE:-/home/user/mruby/include:/home/user/mruby/build/host/include:/home/user/mruby/mrbgems/mruby-encoding/include}
+export NFCX_MRUBY_INCLUDE=${NFCX_MRUBY_INCLUDE:-/home/user/mruby/include:/home/user/mruby/build/host/include:/home/user/mruby/mrbgems/mruby-encoding/include:/home/user/mruby/mrbgems/mruby-time/include}
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 to=0; ts=0

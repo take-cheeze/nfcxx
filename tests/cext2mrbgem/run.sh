@@ -501,10 +501,11 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_range_values tools/cext2mrbg
 check test "$rc" -eq 0
 check grep -qF '*(&beg) = RANGE_BEG(mrb_range_ptr(mrb, r))' "$work/api_range_values/src/api_range_values.c"
 check grep -qF '#include <mruby/range.h>' "$work/api_range_values/src/api_range_values.c"
-# 2zzz87. rb_time_timespec_new with a fixed offset is a recorded stuck point (mruby-time has only UTC and LOCAL).
+# 2zzz87. rb_time_timespec_new with a fixed offset maps to the fork's fixed-offset Time (mrb_time_at_offset).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_time_new tools/cext2mrbgem/fixtures/api_time_new/ext/api_time_new "$work/api_time_new" > "$work/api_time_new.log" 2>&1 || rc=$?
-check test "$rc" -ne 0
-check grep -q 'rb_time_timespec_new  stuck point (Time offset)' "$work/api_time_new/REFUSALS.txt"
+check test "$rc" -eq 0
+# the fork has fixed-offset Time (mrb_time_at_offset): rb_time_timespec_new maps to it, so no Time-offset refusal
+check grep -q 'nfcx_time_timespec_new' "$work/api_time_new/src/api_time_new.c"
 # 2zzz92. A file-scope table used from a registered method: a member of the same name, a prototype parameter and a shadowing
 # parameter are not uses of the table, so the table's callbacks convert (yajl's callbacks table).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_tbl_names tools/cext2mrbgem/fixtures/api_tbl_names/ext/api_tbl_names "$work/api_tbl_names" > "$work/api_tbl_names.log" 2>&1 || rc=$?
@@ -1789,6 +1790,12 @@ check test "$rc" -eq 0
 check test "$(grep -c 'temporary buffer' "$work/api_allocv_assign/REFUSALS.txt")" -eq 0
 check grep -qF 'buf = (char *)mrb_malloc(mrb, sizeof(char) * (n + 1));' "$work/api_allocv_assign/src/api_allocv_assign.c"
 check grep -qF 'mrb_free(mrb, buf);' "$work/api_allocv_assign/src/api_allocv_assign.c"
+# 2zzz179. rb_time_timespec_new: a fixed UTC offset is mrb_time_at_offset (the fork's mruby-time), CRuby's INT_MAX and INT_MAX-1 are
+# local time and UTC; no Time-offset refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_time_offset tools/cext2mrbgem/fixtures/api_time_offset/ext/api_time_offset "$work/api_time_offset" > "$work/api_time_offset.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'Time offset' "$work/api_time_offset/REFUSALS.txt")" -eq 0
+check grep -qF 'nfcx_time_timespec_new(mrb, &ts, ((int)mrb_int(mrb, off_v)));' "$work/api_time_offset/src/api_time_offset.c"
 # 2zzz171. a block-scoped long t and a VALUE t in a later block of one function: the (long)t cast of the long is an integer use,
 # no VALUE-as-integer refusal (the lookup is the declaration whose block encloses the use).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_block_shadow tools/cext2mrbgem/fixtures/api_block_shadow/ext/api_block_shadow "$work/api_block_shadow" > "$work/api_block_shadow.log" 2>&1 || rc=$?
