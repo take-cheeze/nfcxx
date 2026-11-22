@@ -1,8 +1,8 @@
 == case 35:  --freestanding --target=linux_aarch64 --emit-c a.cpp
--- status: 127
+-- status: 2
 -- stdout
 -- stderr
-<TMPDIR>: line N: <WORK>/stub/bin/cpfe: No such file or directory
+nfcxx: no EDG target 'linux_aarch64' in <REPO>/build/edg-base (lib_* tables: )
 -- eccp
 (none)
 -- files
