@@ -34,6 +34,12 @@ module BytecodeIR
   # Predecessor id of the method-entry edge into instruction 0.
   ENTRY = -1
   BRANCH_OPS = %i[JMP JMPUW JMPIF JMPNOT JMPNIL].freeze
+  # Set copies of the lists the hot loops test membership in. Array#include? is Enumerable's in mruby, a block with
+  # `return`, and each call through it throws a C++ exception: most of a warm run's outside-tree decode.
+  NO_FALLTHROUGH_SET = Set.new(NO_FALLTHROUGH).freeze
+  CONDITIONAL_BRANCHES_SET = Set.new(CONDITIONAL_BRANCHES).freeze
+  TERMINATORS_SET = Set.new(TERMINATORS).freeze
+  BRANCH_OPS_SET = Set.new(BRANCH_OPS).freeze
   # The one frozen empty index list the queries hand out for "none".
   EMPTY_INDICES = [].freeze
   # Conditional-branch kinds (Decoded#cond): which test of R(a) sends control to the branch target.
@@ -51,7 +57,7 @@ module BytecodeIR
   # instruction-like object from a check needs to answer nothing else. Without +address_to_index+ +goto+ stays nil.
   def self.decode(insn, address_to_index = nil)
     op = insn.op
-    goto = address_to_index[insn.branch_target] if address_to_index && BRANCH_OPS.include?(op)
+    goto = address_to_index[insn.branch_target] if address_to_index && BRANCH_OPS_SET.include?(op)
     Decoded.new(op, COND_KINDS[op], insn.reg&.to_i, goto)
   end
 
@@ -246,7 +252,7 @@ module BytecodeIR
           target ? targets << target : @resolved = false
         end
         next_index = instruction.index + 1
-        targets << next_index if next_index < @instructions.length && !NO_FALLTHROUGH.include?(instruction.op)
+        targets << next_index if next_index < @instructions.length && !NO_FALLTHROUGH_SET.include?(instruction.op)
         # OP_ENTER lands on one of the `o + 1` JMP table entries that follow it (vm.c
         # `ci->pc += o*3` and its argc form), so each entry has ENTER as a predecessor.
         if instruction.op == :ENTER
@@ -268,12 +274,12 @@ module BytecodeIR
 
       leaders = [0]
       @instructions.each do |instruction|
-        next unless TERMINATORS.include?(instruction.op)
+        next unless TERMINATORS_SET.include?(instruction.op)
 
         instruction.successors.each do |successor|
           leaders << successor
         end
-        if CONDITIONAL_BRANCHES.include?(instruction.op) && instruction.index + 1 < @instructions.length
+        if CONDITIONAL_BRANCHES_SET.include?(instruction.op) && instruction.index + 1 < @instructions.length
           leaders << instruction.index + 1
         end
       end

@@ -1,0 +1,7 @@
+== case 44: NFCXX_BACKEND=gcc NFCXX_PATH=b   -c a.cpp -o a.o
+-- status: 2
+-- stdout
+-- stderr
+-- eccp
+(none)
+-- files

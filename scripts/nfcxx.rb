@@ -323,6 +323,11 @@ status = nil
 # --keep-intermediates (on the command line) keeps the intermediates too: the oracle reads it from its environment
 keep = ENV["NFCXX_KEEP_INTERMEDIATES"] == "1" || ARGV.include?("--keep-intermediates")
 tmproot = Dir.mktmpdir("nfcxx-tmp.")
+# B6c (docs/notes/driver-body-restructure.md): the body's cu_prepare (cudatmp) and --emit-c (tmp) directories are made here, under
+# tmproot, and passed to the body through NFCXX_OWNED_CUDATMP and NFCXX_OWNED_TMP. The body does not make them, and does not
+# remove them: this process removes them when the run ends, whether or not the intermediates are kept (the body removed them
+# on every exit path before).
+owned = {}
 status_code = 1
 begin
   # the stages not yet ported run in bash: the same arguments and environment, the standard streams inherited. Its status is ours.
@@ -336,6 +341,7 @@ begin
   env["NFCXX_LOOP_STATUS"] = LOOP_RESULT&.first&.to_s
   env["NFCXX_LOOP_STATE"] = LOOP_RESULT&.last
   env["NFCXX_KEEP_INTERMEDIATES"] = "1" if keep
+  owned = { "NFCXX_OWNED_CUDATMP" => Dir.mktmpdir("tmp.", tmproot), "NFCXX_OWNED_TMP" => Dir.mktmpdir("tmp.", tmproot) }
   trace_rb = File.join(__dir__, "trace.rb")
   unless trace_file.empty?
     trace_abs = File.join(File.realpath(File.dirname(trace_file)), File.basename(trace_file))
@@ -365,19 +371,29 @@ begin
     # NFCXX_SETUP_DEFAULT is the default backend's statements; NFCXX_SETUP_REST_STATUS, NFCXX_SETUP_REST and NFCXX_SETUP_REST_ERR
     # are the setup's rest (instantiation through the target: its statements up to a refusal, and the refusal's status and message);
     # NFCXX_SETUP_STAGE_STATUS and NFCXX_SETUP_STAGE are the stage after the emit-C route (its statements, or a refusal's status and
-    # message). The body evals them at its places, and prints a refusal where the bash did. A command the wrappers rewrite
+    # message), NFCXX_SETUP_ASAN_STATUS and NFCXX_SETUP_ASAN the sanitizer check, NFCXX_SETUP_FLAGS the pb_flags tail,
+    # NFCXX_SETUP_BACKEND_ENV_STATUS and NFCXX_SETUP_BACKEND_ENV the backend environment, NFCXX_SETUP_TRACE_UNIT the trace unit.
+    # The body evals them at its places, and prints a refusal where the bash did. A command the wrappers rewrite
     # (LOOP_RESULT is nil) is planned by the body, so none is passed.
     setup = LOOP_RESULT && NfcxxSetupArgs.planned_state(ARGV, ENV)
     rest = setup&.fetch(:rest)
+    asan = setup&.fetch(:asan)
+    backend_env = setup&.fetch(:backend_env)
     setup_env = {
       "NFCXX_SETUP_DEFAULT" => setup&.fetch(:default),
+      "NFCXX_SETUP_ASAN_STATUS" => asan && asan[0].to_s,
+      "NFCXX_SETUP_ASAN" => asan && asan[1],
       "NFCXX_SETUP_REST_STATUS" => rest && rest[0].to_s,
       "NFCXX_SETUP_REST" => rest && rest[1],
       "NFCXX_SETUP_REST_ERR" => rest && rest[2],
       "NFCXX_SETUP_STAGE_STATUS" => setup && setup[:stage].first.to_s,
       "NFCXX_SETUP_STAGE" => setup && setup[:stage].last,
+      "NFCXX_SETUP_FLAGS" => setup&.fetch(:flags),
+      "NFCXX_SETUP_BACKEND_ENV_STATUS" => backend_env && backend_env[0].to_s,
+      "NFCXX_SETUP_BACKEND_ENV" => backend_env && backend_env[1],
+      "NFCXX_SETUP_TRACE_UNIT" => setup&.fetch(:trace_unit),
     }
-    ok = system(env.merge(setup_env), "bash", program.path, *ARGV)
+    ok = system(env.merge(setup_env).merge(owned), "bash", program.path, *ARGV)
     oracle_code = ok ? 0 : ($?.exitstatus || 1)
   end
   unless trace_file.empty?
@@ -387,6 +403,7 @@ begin
   status_code = refusal ? refusal.status : oracle_code
 ensure
   program.unlink
+  owned.each_value { |dir| FileUtils.rm_rf(dir) }
   FileUtils.rm_rf(tmproot) unless keep
 end
 exit status_code

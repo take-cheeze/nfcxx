@@ -1,0 +1,8 @@
+== case 42: NFCXX_BACKEND=gcc   -c a.c -o a.o
+-- status: 0
+-- stdout
+-- stderr
+-- eccp
+(none)
+-- files
+a.o

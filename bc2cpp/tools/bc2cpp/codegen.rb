@@ -720,7 +720,7 @@ class CodeGen
           return false unless prologue_insn_self_free?(insn)
           return false if %i[SEND SEND0].include?(insn.op) && !prologue_calls_cannot_reach_self?
 
-          jumps << insn if BytecodeIR::BRANCH_OPS.include?(insn.op)
+          jumps << insn if BytecodeIR::BRANCH_OPS_SET.include?(insn.op)
           next
         end
       elsif SUPER_LEADING_OPS.include?(insn.op)
