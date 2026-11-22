@@ -96,9 +96,12 @@ module ScanCache
       @computing -= 1
     end
 
+    # An entry ending in `*` allows every variable with that prefix (fetch keys on all of them).
     def env_allowed?(name)
       allowed = @allowed_env&.last
-      !allowed.nil? && allowed.include?(name)
+      return false if allowed.nil? || !name.is_a?(String)
+
+      allowed.any? { |entry| entry.end_with?('*') ? name.start_with?(entry.delete_suffix('*')) : entry == name }
     end
 
     # Outside the `ensure` above, and returning nil: a self-compiled bc2cpp's closed world then sees that the singleton
@@ -126,7 +129,7 @@ module ScanCache
     memo = ScanCache.bypassed? ? nil : memory
     return yield unless dir || memo
 
-    env_text = env && env.map { |var| "#{var}=#{ENV[var].inspect}" }.join("\0")
+    env_text = env && env_values(env).map { |var, value| "#{var}=#{value.inspect}" }.join("\0")
     key = key_for(name, inputs, cache_absent, env_text)
     return yield unless key
 
@@ -135,6 +138,14 @@ module ScanCache
     value = dir ? fetch_entry(dir, name, key) { ScanCache.compute(env) { yield } } : ScanCache.compute(env) { yield }
     memo[key] = value if memo
     value
+  end
+
+  # [[name, value]...] for fetch's `env:`: each named variable, and every set variable a `PREFIX*` entry matches.
+  def env_values(env)
+    names = env.flat_map do |entry|
+      entry.end_with?('*') ? ENV.keys.select { |k| k.start_with?(entry.delete_suffix('*')) } : [entry]
+    end
+    names.uniq.sort.map { |var| [var, ENV[var]] }
   end
 
   def fetch_entry(dir, name, key)

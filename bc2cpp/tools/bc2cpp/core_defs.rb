@@ -51,10 +51,9 @@ module CoreDefs
   # the steps of a compiled Fiber, Enumerator#next over Enumerator#each, is a C boundary its yield cannot cross), and the
   # parse scan drops a name some file defines outside a class body. The compile is kept (outside_compile) for
   # BlockSelfWorld's read of the same sources.
-  # The variables compiling and registering the outside sources read (mrbc's, the irep cache's and the IR switches').
-  OUTSIDE_PAIRS_ENV = %w[MRBC BC2CPP_MRBC_RB BC2CPP_MRBC_RB_LOG BC2CPP_NO_MRBC BC2CPP_IREP_CACHE_DIR BC2CPP_EXT_PREFIX
-                         BC2CPP_CALL_CROSSCHECK BC2CPP_IR_SCALAR_SEEN BC2CPP_IR_QUERY_KEYS
-                         BC2CPP_IR_SHARED_DEFINITIONS].freeze
+  # The variables compiling and registering the outside sources may read: mrbc's, the snapshot recorder's, the irep
+  # cache's and the IR switches' are all BC2CPP_* or MRBC*; mrbc is found on PATH.
+  OUTSIDE_PAIRS_ENV = %w[BC2CPP_* MRBC* PATH].freeze
 
   def outside_redefined_labels(registry, ireps, paths, symbol, out_dir)
     compiled = ireps.each_value.to_set { |irep| File.expand_path(irep.file.to_s) }

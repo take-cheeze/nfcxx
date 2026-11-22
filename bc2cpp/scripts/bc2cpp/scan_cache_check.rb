@@ -130,6 +130,15 @@ Dir.mktmpdir do |tmp|
   check.call('that variable\'s value is in the key: another value is computed again', named.call == 'two')
   check.call('each value is stored on its own', Dir[File.join(cache, 'named_env-*')].size == 2)
   ENV.delete('BC2CPP_SCAN_CHECK_VAR')
+  ENV['BC2CPP_SCAN_PREFIX_A'] = 'a'
+  prefixed = -> { ScanCache.fetch('prefix_env', [one], env: %w[BC2CPP_SCAN_PREFIX_*]) { ENV['BC2CPP_SCAN_PREFIX_A'].dup } }
+  check.call('a `PREFIX*` entry allows the variables with that prefix', prefixed.call == 'a')
+  ENV['BC2CPP_SCAN_PREFIX_B'] = 'b'
+  prefixed.call
+  check.call('and every set variable it matches joins the key (one set later is another entry)',
+             Dir[File.join(cache, 'prefix_env-*')].size == 2)
+  ENV.delete('BC2CPP_SCAN_PREFIX_A')
+  ENV.delete('BC2CPP_SCAN_PREFIX_B')
   check.call('a variable the scan does not name is still an error',
              fails.call { ScanCache.fetch('named_other', [one], env: %w[BC2CPP_SCAN_CHECK_VAR]) { ENV['HOME'] } })
   check.call('a nested scan may not read its outer scan\'s variables',
