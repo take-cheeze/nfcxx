@@ -935,6 +935,9 @@ class CodeGen
       name = insn.const_name
       if name.nil? || owner_def.nil? || owner_def.owner.nil?
         "  #error SETCONST: the target class is unknown here\n"
+      elsif self.class.const_def_elide&.elide?(name)
+        # CONST_DEF_ELIDE: nothing can observe this binding (see ConstDefElide); the value register stays written.
+        "  /* CONST_DEF_ELIDE #{name} */\n"
       else
         "  mrb_const_set(M, mrb_obj_value(#{owner_class_ptr_expr(owner_def.owner)}), mrb_intern_cstr(M, \"#{name}\"), #{RegName[insn.regs.last]});\n"
       end

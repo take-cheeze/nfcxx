@@ -47,7 +47,9 @@ class CodeGen
                   :enumerator_model, :native_singleton_inputs,
                   :rbs_block_signatures,
                   # CORE_SHADOWED: irep labels of core definitions a later definition replaces (CoreDefs.shadowed_labels).
-                  :shadowed_labels
+                  :shadowed_labels,
+                  # CONST_DEF_ELIDE (const_def_elide.rb): the ConstDefElide::Result of this build; nil elides nothing.
+                  :const_def_elide
 
     # INLINED_UNLISTED_SITE: kill switch BC2CPP_INLINED_UNLISTED=0.
     def inlined_unlisted_site?

@@ -71,6 +71,8 @@ require_relative 'core_fact_sigs'
 require_relative 'enumerator_model'
 
 require_relative 'integer_constants'
+require_relative 'const_def_elide'
+require_relative 'const_def_table'
 require_relative 'integer_constant_ranges'
 require_relative 'native_construct_schema'
 require_relative 'dynamic_names'
@@ -1309,6 +1311,15 @@ BC2CPP_MAIN = lambda do
   CodeGen.struct_members = struct_member_lists
   warn "== Struct.new owners with a known member list (STRUCT_INDEX_CACHE): #{CodeGen.struct_members.size} =="
   CodeGen.integer_constant_values = integer_constant_values
+  # CONST_DEF_ELIDE: no local (BC2CPP_MAIN is at mruby's limit of local variables per scope).
+  CodeGen.const_def_elide = ConstDefElide.analyze(
+    ireps: ireps, folded: integer_constant_values, facts: constant_facts.groups,
+    site_keys: LexicalConsts.analyze(ireps, static: true).site_keys, closed_world: closed_world,
+    linked_native: outside_native, spelled_native: (native_paths + outside_native).uniq,
+    mixins: { superclass_of: superclass_of, included: included_modules, prepended: prepended_modules,
+              unknown: unknown_mixins, modules: declared_modules }
+  )
+  ConstDefElide.report(CodeGen.const_def_elide)
   CodeGen.integer_constant_keys = integer_constant_keys || Set.new
   warn "== declared Integer constants proven per definition (LEXICAL_CONST): #{CodeGen.integer_constant_keys.size} =="
   # Constants whose every writer is one frozen-or-literal container class: a read is that class.
@@ -3153,13 +3164,13 @@ BC2CPP_MAIN = lambda do
   class_units = class_units.map do |unit|
     code = unit[:code].gsub('@@SITE@@') { unit[:path].to_s.gsub(/["\\]/) { |c| "\\#{c}" } }
     code = OwnerCallDirect.rewrite(code, *owner_rewrite, **owner_rewrite_opts)
-    unit.merge(code: SymbolCache.rewrite(code, symbol_table))
+    unit.merge(code: ConstDefTable.rewrite(SymbolCache.rewrite(code, symbol_table)))
   end
   # TOP_LEVEL_STATEMENTS takes the same passes: its sends are named calls too (a `Class.new(Base)` constant write is an owner call).
   unless top_level_code.empty?
     code = top_level_code.gsub('@@SITE@@', 'top-level')
     code = OwnerCallDirect.rewrite(code, *owner_rewrite, **owner_rewrite_opts)
-    top_level_code = SymbolCache.rewrite(code, symbol_table)
+    top_level_code = ConstDefTable.rewrite(SymbolCache.rewrite(code, symbol_table))
   end
   # Fused single pass over the compiled methods: all of these closed-world diagnostic counts used to
   # live in separate `.each`/`.sum` scans of the same code strings.
@@ -3275,6 +3286,8 @@ BC2CPP_MAIN = lambda do
           *class_units.map { |unit| unit[:code] }, top_level_code].join
   const_site_cache_code = SymbolCache.rewrite(gen.emit_const_site_cache(used), symbol_table)
   const_scope_code = SymbolCache.rewrite(gen.emit_const_scope_helpers(used + const_site_cache_code), symbol_table)
+  ConstDefElide.assert_unnamed!(CodeGen.const_def_elide, [used, const_site_cache_code, const_scope_code],
+                                symbol_table.literals)
   print OwnerCallDirect.native_prototypes
   print NativeFrameUse.wrappers_source(StaticDispatchLists.current(required: false).frame_free,
                                        NativeFrameUse.reader_entries(compiled))
@@ -3287,6 +3300,8 @@ BC2CPP_MAIN = lambda do
   print numeric_slow_code
   print exception_init_code
   print poly_tables_code
+  warn "== constant definition tables (CONST_DEF_TABLE): #{ConstDefTable.count} writes =="
+  print ConstDefTable::HELPER if ConstDefTable.count.positive?
   class_units.each { |unit| print unit[:code] }
   compiled.each do |m|
     print ShardOutput.unit_mark(m[:owner]) if shards > 1
