@@ -3473,12 +3473,20 @@ use_problem = lambda do |name, use|
   # mruby equivalent (mrb_value is a struct). The argument is still evaluated, and the check is not made: the value is ((void)(E), 1).
   # The caveat is recorded in the refusal list's conversion notes (the rewrite line).
   # the VALUE variables declared at file scope in a file (static VALUE x = ...;)
+  # a position in text the build leaves out (an inactive #if branch): its declarations are not file-scope names
+  def inactive_text_at?(rel, pos)
+    (@excluded_spans&.[](rel) || []).any? { |a, z| a <= pos && pos <= z }
+  end
+
   def file_scope_value_names(rel)
     @fs_value_names ||= {}
     @fs_value_names[rel] ||= begin
       out = Set.new
       value_decl_statements(@files[rel]['masked']).each do |_st, _kw, decls|
-        decls.each { |d| out << d[:name] if d[:name] && !d[:ptr] && enclosing_func(rel, d[:start]).nil? }
+        decls.each do |d|
+          next if inactive_text_at?(rel, d[:start])
+          out << d[:name] if d[:name] && !d[:ptr] && enclosing_func(rel, d[:start]).nil?
+        end
       end
       out
     end
@@ -4076,6 +4084,142 @@ use_problem = lambda do |name, use|
     end
   end
 
+  # A VALUE local that CRuby uses only as a C integer (date's jd, t, nth: jd = m_jd(dat) stores an int in the VALUE, and
+  # c_jd_to_civil(jd, ...) reads the word back as an int). The fork's VALUE is a struct with no integer form, so the local is
+  # declared mrb_int instead, when every use of it is an integer use: a declaration or assignment from an integer (a literal, a
+  # call with an integer return, or a cast to an integer type), a cast to an integer type, an argument at an integer parameter of
+  # a function with one prototype, or a logical not. Any other use (a VALUE call, a return, an address, arithmetic on objects,
+  # a comparison) keeps the local a VALUE, and its refusals stand. Only function-body locals are retyped, never parameters or
+  # file-scope variables. The retyped set is computed before the passes, so value_names_of does not list those names.
+  def int_local_retype_scan
+    @int_locals = Set.new
+    @files.each_key do |rel|
+      masked = @files[rel]['masked']
+      stmts = value_decl_statements(masked)
+      stmts.each do |st, kw_end, decls|
+        fn = enclosing_func(rel, st)
+        next unless fn && fn.key?('brace') && fn.key?('body_end')
+        next if in_dead_init(rel, st) || @edits[rel].overlaps(st, kw_end)
+        next if decls.empty? || decls.any? { |d| d[:name].nil? || d[:ptr] || d[:fn] }
+        body_s = fn['brace']
+        body_e = fn['body_end']
+        next unless decls.all? { |d| d[:start] > body_s && d[:start] < body_e }
+        names = decls.map { |d| d[:name] }
+        next unless names.uniq.size == names.size
+        next if names.any? { |n| names.count(n) > 1 }
+        ok = names.all? { |n| int_local_uses_ok?(rel, masked, fn, n, decls) }
+        next unless ok
+        @edits[rel].add(st, kw_end, 'mrb_int')
+        names.each { |n| @int_locals << [rel, body_s, n] }
+        decls.each { |d| (@int_decl_pos ||= Set.new) << [rel, d[:start]] }
+        rewrite(rel, st, 'VALUE', 'mrb_int', 'a VALUE local that CRuby uses only as a C integer (its word is the integer) is an mrb_int local: every use is an integer use')
+      end
+    end
+  end
+
+  INT_TYPE_WORDS = /\A(?:(?:unsigned|signed|const)\s+)*(?:u?int(?:\d+_t)?|u?long(?:\s+long)?|short|char|size_t|ssize_t|off_t|time_t|st_index_t|st_data_t|ID|uintptr_t|intptr_t|mrb_int)\z/
+
+  def int_type_text?(t)
+    return false if t.nil? || t.include?('*') || t.include?('[')
+    INT_TYPE_WORDS.match?(t.to_s.strip.gsub(/\s+/, ' '))
+  end
+
+  def int_local_uses_ok?(rel, masked, fn, name, decls)
+    body = masked[fn['brace']...fn['body_end']]
+    decl_starts = decls.map { |d| d[:start] }.to_set
+    re = /(?<![#{WC}.>])#{Regexp.escape(name)}(?![#{WC}])/
+    uses = []
+    body.to_enum(:scan, re).each { uses << (fn['brace'] + Regexp.last_match.begin(0)) }
+    return false if uses.empty?
+    uses.all? do |p|
+      if decl_starts.include?(p)
+        init = decl_initializer(masked, p + name.size)
+        init.nil? || int_rhs?(init)
+      elsif masked[p + name.size..] =~ /\A\s*=(?!=)/
+        int_rhs?(assign_rhs(masked, p + name.size))
+      elsif masked[0...p] =~ /\(\s*(?:[A-Za-z_]\w*\s*)+\)\s*\z/ && (ct = masked[0...p][/\(\s*((?:[A-Za-z_]\w*\s*)+)\)\s*\z/, 1]) && int_type_text?(ct) && masked[p + name.size..].match?(/\A\s*(?:[;,)\-+*\/<>=&|?:]|\z)/)
+        true
+      elsif masked[0...p] =~ /!\s*\z/ && masked[0...p] !~ /!=\s*\z/ && masked[p + name.size..].match?(/\A\s*(?:[;)&|?]|\z)/)
+        true
+      else
+        int_arg_use?(rel, masked, p)
+      end
+    end
+  end
+
+  # the initializer after a declarator's name (VALUE jd = e, ...): the text up to the next ',' or ';' at depth 0, or nil
+  def decl_initializer(masked, i)
+    return nil unless masked[i..] =~ /\A\s*=(?!=)/
+    assign_rhs(masked, i)
+  end
+
+  # the right-hand side of the assignment whose '=' follows position i: the text to the ';' or ',' at depth 0
+  def assign_rhs(masked, i)
+    j = masked.index('=', i) + 1
+    depth = 0
+    k = j
+    while k < masked.length
+      c = masked[k]
+      if c == '(' || c == '[' then depth += 1
+      elsif c == ')' || c == ']'
+        break if depth.zero?
+        depth -= 1
+      elsif depth.zero? && (c == ';' || c == ',' || c == '{' || c == '}')
+        break
+      end
+      k += 1
+    end
+    masked[j...k].strip
+  end
+
+  # a right-hand side that is an integer: a literal, or one call with an integer return (f(...) and nothing after it)
+  def int_rhs?(t)
+    return false if t.nil?
+    s = t.strip
+    return true if s.match?(/\A\(\s*(?:int|long|unsigned\s+int|unsigned\s+long|size_t|st_index_t)\s*\)\s*/) && int_rhs?(s.sub(/\A\(\s*[a-z_ ]+\s*\)\s*/, ''))
+    return true if s.match?(/\A-?\d+[uUlL]*\z/)
+    m = /\A([A-Za-z_]\w*)\s*\(/.match(s)
+    return false unless m && s.end_with?(')')
+    depth = 0
+    s[m[0].size - 1..].each_char.with_index do |c, i|
+      depth += 1 if c == '('
+      depth -= 1 if c == ')'
+      return false if depth.zero? && i < s[m[0].size - 1..].size - 1
+    end
+    defs = (@defs[m[1]] || [])
+    !defs.empty? && defs.all? { |d| int_type_text?(d['ret'].to_s.strip) }
+  end
+
+  # the use at p is an argument of a call (name(...)) at a parameter with an integer type: the call has one prototype
+  def int_arg_use?(rel, masked, p)
+    depth = 0
+    commas = 0
+    i = p - 1
+    while i >= 0
+      c = masked[i]
+      if c == ')' || c == ']' then depth += 1
+      elsif c == '(' || c == '['
+        return false if c == '['
+        break if depth.zero?
+        depth -= 1
+      elsif c == ';' || c == '{' || c == '}' then return false
+      elsif c == ',' && depth.zero? then commas += 1
+      end
+      i -= 1
+    end
+    return false if i < 0
+    fname = masked[0...i][/([A-Za-z_]\w*)\s*\z/, 1]
+    return false unless fname && !@entries[fname] && !define_at(rel, i)
+    defs = (@defs[fname] || [])
+    plists = defs.map { |d| (d['params'] || '').split(',', -1).map { |x| py_strip(x) } }.uniq
+    return false unless plists.size == 1
+    ptype = plists[0][commas]
+    return false if ptype.nil? || ptype == 'void'
+    toks = ptype.split
+    toks.pop if toks.size >= 2 && toks.last.match?(/\A[A-Za-z_]\w*\z/)
+    int_type_text?(toks.join(' '))
+  end
+
   # A VALUE variable passed to a converted function whose parameter is not a VALUE, a pointer or a struct (an sid_t key, an
   # ID, an integer): CRuby passes the VALUE's word, and the fork's VALUE is a struct with no integer form of it
   def value_as_integer_arg_pass
@@ -4661,6 +4805,7 @@ use_problem = lambda do |name, use|
         end
       end
     end
+    names.reject! { |n| @int_locals&.include?([fn['file'], fn['brace'], n]) } if fn.key?('brace')
     names
   end
 
@@ -5559,7 +5704,84 @@ end
     dl = define_at(rel, s)
     return macro_value_names(rel, dl).include?(name) if dl
     fl = enclosing_func(rel, s)
-    !!(fl && value_names_of(fl).include?(name))
+    return false unless fl
+    # a body declaration in scope at s decides the type (a block's long t and a later block's VALUE t are two locals)
+    t = local_decl_type_at(rel, s, name)
+    return t == 'VALUE' if t
+    !!value_names_of(fl).include?(name)
+  end
+
+  LOCAL_DECL_KEYWORDS = %w[return else goto case typedef sizeof do].freeze
+
+  # The declared type of the local name in effect at pos, by block scope: the latest declaration in the function body whose
+  # block encloses pos and comes before it. nil when no body declaration of name is in scope (a parameter, or not a local).
+  def local_decl_type_at(rel, pos, name)
+    fn = enclosing_func(rel, pos)
+    return nil unless fn && fn.key?('brace') && fn.key?('body_end')
+    @local_decls ||= {}
+    cands = (@local_decls[[rel, fn['brace'], name]] ||= local_decl_candidates(rel, fn, name))
+    best = nil
+    cands.each do |dpos, type, bs, be|
+      next unless bs < pos && pos < be && dpos < pos
+      best = [dpos, type] if best.nil? || dpos > best[0]
+    end
+    best && best[1]
+  end
+
+  # the declarations of name in a function body: [name position, declared type, block start, block end]
+  def local_decl_candidates(rel, fn, name)
+    masked = @files[rel]['masked']
+    base = fn['brace']
+    out = []
+    re = /((?:(?:const|volatile|static|unsigned|signed|register)\s+)*[A-Za-z_]\w*(?:\s*\*)*)\s+#{Regexp.escape(name)}(?![#{WC}])\s*(?=[;=,)\[])/
+    masked[base...fn['body_end']].to_enum(:scan, re).each do
+      m = Regexp.last_match
+      type = m[1].strip.gsub(/\s+/, ' ')
+      first = type.split.reject { |w| %w[const volatile static unsigned signed register].include?(w) }.first.to_s
+      next if LOCAL_DECL_KEYWORDS.include?(first)
+      dpos = base + m.begin(0) + m[0].rindex(name)
+      type = 'mrb_int' if @int_decl_pos&.include?([rel, dpos])
+      before = masked[0...m.begin(0) + base].rstrip[-1]
+      next unless before.nil? || [';', '{', '}', '(', ','].include?(before)
+      bs, be = block_span(masked, dpos, fn)
+      out << [dpos, type, bs, be]
+    end
+    out
+  end
+
+  # the block that encloses position d: its '{' and matching '}' (the function body when d is at its top level)
+  def block_span(masked, d, fn)
+    depth = 0
+    i = d - 1
+    bs = fn['brace']
+    while i > fn['brace']
+      c = masked[i]
+      if c == '}' then depth += 1
+      elsif c == '{'
+        if depth.zero?
+          bs = i
+          break
+        end
+        depth -= 1
+      end
+      i -= 1
+    end
+    depth = 0
+    j = bs + 1
+    be = fn['body_end']
+    while j < fn['body_end']
+      c = masked[j]
+      if c == '{' then depth += 1
+      elsif c == '}'
+        if depth.zero?
+          be = j
+          break
+        end
+        depth -= 1
+      end
+      j += 1
+    end
+    [bs, be]
   end
 
   def map_entry(rel, s, e, name, entry)
@@ -7785,6 +8007,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     scan
     build_occurrences
     scan_local_names
+    int_local_retype_scan
     compute_splits
     compute_needs
     check_refs

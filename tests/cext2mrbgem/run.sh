@@ -1768,6 +1768,24 @@ check test ! -e "$work/api_struct_va/NOT_BUILDABLE"
 check grep -qF 'return nfcx_struct_new(mrb, sv_point, x, y);' "$work/api_struct_va/src/api_struct_va.c"
 check grep -qF 'sv_point = nfcx_struct_define(mrb, "SvPoint", "x", "y", NULL);' "$work/api_struct_va/src/api_struct_va.c"
 check grep -qF "spec.add_dependency 'mruby-struct'" "$work/api_struct_va/mrbgem.rake"
+# 2zzz170. a VALUE local CRuby uses only as a C integer (jd = 5, t = f(jd), f((int)t)) is an mrb_int local; a VALUE local that
+# holds an object (keep = x) stays a VALUE.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_int_local tools/cext2mrbgem/fixtures/api_int_local/ext/api_int_local "$work/api_int_local" > "$work/api_int_local.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_int_local/NOT_BUILDABLE"
+check grep -qF 'mrb_int jd = 5;' "$work/api_int_local/src/api_int_local.c"
+check grep -qF 'mrb_int t;' "$work/api_int_local/src/api_int_local.c"
+check grep -qF 'mrb_value keep = x;' "$work/api_int_local/src/api_int_local.c"
+# 2zzz171. a block-scoped long t and a VALUE t in a later block of one function: the (long)t cast of the long is an integer use,
+# no VALUE-as-integer refusal (the lookup is the declaration whose block encloses the use).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_block_shadow tools/cext2mrbgem/fixtures/api_block_shadow/ext/api_block_shadow "$work/api_block_shadow" > "$work/api_block_shadow.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_block_shadow/NOT_BUILDABLE"
+check test "$(grep -c 'VALUE as integer' "$work/api_block_shadow/REFUSALS.txt")" -eq 0
+# 2zzz172. a VALUE declared in a dead #if 0 branch is not a file-scope name: an int parameter named the same is not a VALUE use.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dead_decl tools/cext2mrbgem/fixtures/api_dead_decl/ext/api_dead_decl "$work/api_dead_decl" > "$work/api_dead_decl.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'VALUE as integer' "$work/api_dead_decl/REFUSALS.txt")" -eq 0
 check test "$(grep -c 'stuck point (Struct)' "$work/api_struct_va/REFUSALS.txt")" -eq 0
 # 2zzz155. a struct field of CRuby's rb_encoding * type: the Encoding placeholder type is in the prelude (the declaration compiles),
 # and the include of ruby/encoding.h is not a blocking refusal (the placeholder covers it).
