@@ -315,12 +315,75 @@ def asm_needs_constant?(x)
   x.any? { |y| asm_needs_constant?(y) }
 end
 
+# A callee with a dynamic exception specification, throw(T...) (C++14), is inlined when nothing it lets out can fail the
+# specification: its filter (the landing pads of its calls, which call __cxa_call_unexpected for a type that is not allowed)
+# would otherwise have to cover the caller's pads, which one ehspec list per function cannot express. So it is inlined only
+# when every call it makes is one of these: __cxa_throw of a type of its specification (exact typeinfo), __cxa_allocate_exception,
+# a function of the module that cannot let an exception out ($eh_bad: throwing_functions), or a nothrow libc routine; and
+# its pads call only __cxa_free_exception and __cxa_call_unexpected (no destructor of a live object runs on a throw, and a
+# pad of an unlisted type is never reached). The copy then has no pads or specification: its throws are the caller's, and
+# the exception that leaves it is one of the callee's specification, which the caller's handlers see as they would.
+# Otherwise (a throw of another type, a rethrow, a call of a throwing function, a destructor run on the way out) it is refused.
+$eh_bad = {}       # the functions that can let an exception out (throwing_functions), set by inline_pass
+$eh_defs_names = {}   # the functions of the module (inline_pass)
+
+def spec_names(fn)
+  types = fn.find { |f| head(f) == "eh-types" }
+  spec = fn.find { |f| head(f) == "eh-spec" }
+  return nil unless types && spec
+  allowed = types.drop(1).map { |t| show(t) }
+  names = spec.drop(1).map { |i| i.to_i >= 1 ? allowed[i.to_i - 1] : nil }
+  return nil if names.empty? || names.include?(nil)
+  names
+end
+
+def spec_call_ok?(c, call, in_pad, names)
+  return %w[__cxa_free_exception __cxa_call_unexpected].include?(c) if in_pad
+  return true if c == "__cxa_allocate_exception" || c == "__cxa_free_exception"
+  return call.length >= 5 && names.include?(show(call[4])) if c == "__cxa_throw"
+  return !$eh_bad.key?(c) if $eh_defs_names.key?(c)
+  nothrow_extern?(c)
+end
+
+def spec_calls_ok?(x, in_pad, names)
+  return true unless x.is_a?(Array)
+  if head(x) == "call"
+    return false unless x[2].is_a?(String) && x[2].start_with?("&\"")
+    return false unless spec_call_ok?(unq(x[2]), x, in_pad, names)
+  end
+  x.all? { |y| spec_calls_ok?(y, in_pad || head(x) == "eh-pad", names) }
+end
+
+def spec_inlinable?(fn)
+  return false if fn.any? { |f| head(f) == "eh-noexcept" }
+  names = spec_names(fn)
+  return false unless names
+  spec_calls_ok?(fn.drop(2), false, names)
+end
+
+# A callee with a dynamic exception specification that spec_inlinable? refuses is still inlined, as a copy that keeps its landing
+# pads, each with the callee's list (eh-spec-pad; QBE's ehspecpad: the pad's action chain ends with that filter, which the
+# personality checks). Its pads resume into the caller's state, and the caller's filter is not checked there, so expand_call
+# inlines it only where the caller can take no filter of its own (eh[:caught], eh[:filtered]). A call of a module function that is
+# still a call in the copy is covered by the copy's pads (its exception is filtered there, as one of the callee's), and a
+# function inlined into the copy later gets the same pads. The specification must name its types, and the callee must not be noexcept.
+def spec_copyable?(fn)
+  return false if fn.any? { |f| head(f) == "eh-noexcept" }
+  !spec_names(fn).nil?
+end
+
+# The statements of a callee copy without its state markers: the copy's calls get the state of the call site (no tables).
+def without_eh_state(x)
+  return x unless x.is_a?(Array)
+  x.reject { |y| y.is_a?(Array) && head(y) == "eh-state" }.map { |y| without_eh_state(y) }
+end
+
 def refusal(fn, name)
   return "callee over --max-callee" if $inline_max_callee > 0 && node_cost(fn) > $inline_max_callee && !always_inline?(fn) && !$inline_once[name] && !asm_needs_constant?(fn)
   return "ctor/dtor" if fn.any? { |f| head(f) == "constructor" || head(f) == "destructor" }
   # Zero-cost exception tables (docs/notes/pathb-zero-cost-eh.md): a callee with landing pads is inlined with them
-  # (eh_inline); one with a dynamic exception specification is not (its filter would cover the caller's pads).
-  return "dynamic exception specification" if fn.any? { |f| head(f) == "eh-spec" }
+  # (eh_inline); a callee with a dynamic exception specification when spec_copyable? (spec_inlinable?: its filter is dropped).
+  return "dynamic exception specification" if fn.any? { |f| head(f) == "eh-spec" } && !spec_copyable?(fn)
   return "noinline" if fn.any? { |f| head(f) == "noinline" } && !empty_body?(fn)
   return "weak attr" if fn.any? { |f| head(f) == "weak" && f.length == 2 }   # __attribute__((weak)): another object may define the callee
   params = fn.find { |f| head(f) == "params" }
@@ -441,12 +504,20 @@ def callee_info(fn)
   params = fn.find { |f| head(f) == "params" }.drop(1)
   body = fn.drop(2)
   slots = body.select { |f| head(f) == "slot" }
-  eh_heads = %w[eh-pad eh-types eh-noexcept]
+  eh_heads = %w[eh-pad eh-types eh-noexcept eh-spec-pad]
   ehty = body.find { |f| head(f) == "eh-types" }
+  spec_form = body.find { |f| head(f) == "eh-spec" }
+  # spec_inlinable?: the copy has no pads, and its state is the call site's. Otherwise (spec_copyable?) the copy keeps its pads,
+  # each with the callee's list (eh-spec-pad; a pad of a nested copy keeps its own list).
+  safe = spec_form && spec_inlinable?(fn)
   eh = { pads: body.select { |f| head(f) == "eh-pad" }, types: ehty ? ehty.drop(1) : [],
-         noexcept: body.any? { |f| head(f) == "eh-noexcept" } }
-  eh = nil if eh[:pads].empty? && !eh[:noexcept] && eh[:types].empty?
-  stmts = splice_tail_blocks(body.reject { |f| HEADER_HEADS.include?(head(f)) || eh_heads.include?(head(f)) })
+         noexcept: body.any? { |f| head(f) == "eh-noexcept" },
+         specs: body.select { |f| head(f) == "eh-spec-pad" }.to_h { |f| [f[1], f.drop(2)] },
+         own: spec_form && !safe ? spec_form.drop(1) : nil }
+  eh = nil if eh[:pads].empty? && !eh[:noexcept] && eh[:types].empty? && eh[:own].nil?
+  eh = nil if safe
+  stmts = splice_tail_blocks(body.reject { |f| HEADER_HEADS.include?(head(f)) || eh_heads.include?(head(f)) || head(f) == "eh-spec" })
+  stmts = without_eh_state(stmts) if safe
   ret_op = nil
   early = count_heads(stmts, "return") > (stmts.length > 0 && head(stmts.last) == "return" ? 1 : 0)
   if !early && stmts.length > 0 && head(stmts.last) == "return"
@@ -492,6 +563,18 @@ def expand_call(s, fns, st)
   # A tier of the pass takes only callees up to its cap: the small ones are inlined everywhere before the budget goes to big ones.
   return nil if st[:cap] && st[:tc].fetch(fn) { st[:tc][fn] = node_cost(fn) } > st[:cap]
   info = st[:ic].fetch(cname) { st[:ic][cname] = callee_info(fn) }
+  # A copy with its own filter (callee_info: eh[:own]) needs a caller whose pads have no filter and no catch clause (spec_copyable?:
+  # the pads of such a copy resume into the caller's state, which would not check the caller's filter or a catch of it).
+  if info[:eh] && info[:eh][:own]
+    why = if st[:eh][:caught] then "under a catch"
+          elsif st[:eh][:filtered] then "under a filter"
+          end
+    if why
+      key = "dynamic exception specification #{why}"
+      st[:refused][key] = (st[:refused][key] || 0) + 1
+      return nil
+    end
+  end
   rtype = info[:ret][1]
   return nil unless show(call[1]) == info[:rtext]
   return nil if dest && rtype == "void"
@@ -613,6 +696,13 @@ def eh_inline(eh, out, map, st, k, hoisted)
     end
     outer = own ? eh_renumber(q[4], pmap, tidmap, zero) : ["eh-outer", kk]
     ce[:pads] << ["eh-pad", pmap[p[1]], q[2], q[3].map { |x| tidmap.fetch(x, x) }, outer, *stmts]
+    # the pad's filter: its own list (a nested copy's), else the callee's own (the callee has a specification)
+    ids = eh[:specs][p[1]] || eh[:own]
+    if ids
+      ce[:spec_pads] << ["eh-spec-pad", pmap[p[1]], *ids.map { |x| tidmap.fetch(x, x) }]
+      ce[:filtered] = true
+    end
+    ce[:caught] = true unless p[3].empty?
   end
   ce[:changed] = true
   body = eh_renumber(out, pmap, tidmap, zero)
@@ -717,7 +807,7 @@ def eh_write_back(children, st)
   end
   idx = children.index { |x| !(HEADER_HEADS.include?(head(x)) || head(x) == "ret" || head(x) == "params") } || children.size
   children = children[0...idx] + (ce[:types].empty? ? [] : [["eh-types", *ce[:types]]]) + children[idx..]
-  children + ce[:pads]
+  children + ce[:pads] + ce[:spec_pads]
 end
 
 # Hoisted slots go after the header (ret, params and the caller's own slots).
@@ -742,6 +832,8 @@ end
 def inline_pass(forms, max_depth, report)
   fns = {}
   forms.each { |f| fns[unq(f[1])] = f if head(f) == "function" }
+  $eh_defs_names = fns
+  $eh_bad = forms.any? { |f| head(f) == "function" && f.any? { |x| head(x) == "eh-spec" } } ? throwing_functions(forms) : {}
   refused = {}
   inlined = 0
   counter = { k: 0 }
@@ -778,7 +870,9 @@ def inline_pass(forms, max_depth, report)
       ehty = f.find { |x| head(x) == "eh-types" }
       st = { next: ids.fetch(f) { ids[f] = max_id(f) } + 1, k: counter[:k], hoist: [], inlined: 0, caller_size: node_cost(f), refused: refused, rc: reasons,
              ic: infos, attrs: attrs, attr_from: [], over: over, tc: tiny_costs, cap: cap, section: section_of(f),
-             eh: { types: ehty ? ehty.drop(1) : [], pads: [], changed: false, need_slots: false,
+             eh: { types: ehty ? ehty.drop(1) : [], pads: [], spec_pads: [], changed: false, need_slots: false,
+                   caught: f.any? { |x| head(x) == "eh-pad" && x[3].is_a?(Array) && !x[3].empty? },
+                   filtered: f.any? { |x| head(x) == "eh-spec" || head(x) == "eh-spec-pad" },
                    next_pad: f.select { |x| head(x) == "eh-pad" }.map { |x| x[1].to_i }.max || 0 } }
       children = rewrite(f.drop(2), fns, st)
       children = eh_write_back(children, st) if st[:eh][:changed]

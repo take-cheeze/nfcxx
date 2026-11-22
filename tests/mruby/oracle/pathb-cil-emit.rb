@@ -874,7 +874,8 @@ class Function
       return 'int64'
     end
     if head == 'eh-exc' || head == 'eh-sel'   # a pad's exception and selector: cil-link.rb's fields (eh_try)
-      emit("ldsfld int64 Prog::'#{head == 'eh-exc' ? 'cxx_ptr' : 'cxx_sel'}'")
+      # the exception object of a pad is the one the selected clause caught (@eh_adj, set by eh_try's selector)
+      emit(head == 'eh-exc' ? "ldloc #{@eh_adj}" : "ldsfld int64 Prog::'cxx_sel'")
       return 'int64'
     end
     if head == 'const'
@@ -1561,7 +1562,11 @@ class Function
     if head == 'eh-resume'
       expr(pyidx(s, 1))
       emit('pop')
-      eh_rethrow
+      if @eh_noexcept
+        abort   # an exception that leaves a noexcept function: std::terminate (no unwinding past it)
+      else
+        eh_rethrow
+      end
       return
     end
     if ['eh-inline-begin', 'eh-inline-end', 'eh-state-outer', 'eh-resume-outer'].include?(head)
@@ -1778,6 +1783,8 @@ class Function
     @eh_st = new_local('int32')
     @eh_res = new_local('int32')
     @eh_hit = new_local('int32')
+    @eh_code = new_local('int64')   # cil-link.rb's __nfcxx_catch_code: -1, or the base offset * 2 + (pointer)
+    @eh_adj = new_local('int64')    # the caught object's address (the handler's __cxa_begin_catch argument)
     eh_collect_labels(body)
     @eh_top = new_label('IL_ehtop')
     start = new_label('IL_ehbody')
@@ -1821,16 +1828,21 @@ class Function
         tid = py_int(t)
         sym = @eh_types[tid - 1]
         if sym.is_a?(Ref)
+          # the thrown typeinfo against the clause's: exact, a base class, or a pointer (cil-link.rb's tables)
           nx = new_label('IL_ehnext')
           emit("ldsfld int64 Prog::'cxx_ti'")
           expr(sym)
-          emit("bne.un #{nx}", "ldc.i8 #{tid}", "stsfld int64 Prog::'cxx_sel'", "br #{code_l}", "#{nx}:")
+          emit("call int64 Prog::'__nfcxx_catch_code'(int64, int64)", "stloc #{@eh_code}",
+               "ldloc #{@eh_code}", 'ldc.i8 0', "blt #{nx}",
+               "ldsfld int64 Prog::'cxx_ptr'", "ldloc #{@eh_code}", "call int64 Prog::'__nfcxx_adjust'(int64, int64)",
+               "stloc #{@eh_adj}", "ldc.i8 #{tid}", "stsfld int64 Prog::'cxx_sel'", "br #{code_l}", "#{nx}:")
         else
-          emit("ldc.i8 #{tid}", "stsfld int64 Prog::'cxx_sel'", "br #{code_l}")   # catch (...)
+          emit("ldsfld int64 Prog::'cxx_ptr'", "stloc #{@eh_adj}", "ldc.i8 #{tid}", "stsfld int64 Prog::'cxx_sel'",
+               "br #{code_l}")   # catch (...)
         end
       end
       if py_int(pyidx(p, 2)) == 1
-        emit('ldc.i8 0', "stsfld int64 Prog::'cxx_sel'", "br #{code_l}")
+        emit("ldsfld int64 Prog::'cxx_ptr'", "stloc #{@eh_adj}", 'ldc.i8 0', "stsfld int64 Prog::'cxx_sel'", "br #{code_l}")
       else
         eh_rethrow
       end
@@ -1883,7 +1895,7 @@ class Function
     @ret_local = @ret == 'void' ? nil : new_local(@ret)
     @ret_label = new_label('IL_ret')
     emit("ldc.i4 #{@frame}", 'localloc', 'conv.u8', "stloc #{@frame_local}") if @frame != 0
-    if @eh_pads.empty?
+    if @eh_pads.empty? && !@eh_noexcept   # a noexcept function has the protected block too: its exceptions terminate
       body.each { |stmt_form| stmt(stmt_form) }
       if @ret == 'void'
         emit("#{@ret_label}:", 'ret')
@@ -1892,7 +1904,7 @@ class Function
         emit("#{@ret_label}:", "ldloc #{@ret_local}", 'ret')
       end
     else
-      eh_try(body)
+      eh_try(body)   # with no pads, the protected block only ends in std::terminate (eh_try's noexcept path)
       emit("#{@ret_label}:", *(@ret == 'void' ? ['ret'] : ["ldloc #{@ret_local}", 'ret']))
     end
     lines = [".method static #{pys(@ret)} '#{pys(@em.fn_name(@name))}'(#{@params.map { |p| p[2] }.join(', ')}) cil managed {",

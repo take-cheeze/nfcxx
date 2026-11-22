@@ -1,0 +1,7 @@
+== cpp2-c
+status: 2
+-- stdout
+-- stderr
+nfcxx: cppfront is not built; run scripts/setup-cppfront.sh (docs/notes/cpp2.md)
+-- left in TMPDIR
+-- eccp argv

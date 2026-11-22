@@ -22,7 +22,7 @@
 
 Ref = Struct.new(:sigil, :raw)   # $"x", @"x", &"f": raw is the quoted name, quotes included
 Str = Struct.new(:raw)           # a quoted string token, quotes included
-Fn = Struct.new(:name, :ret, :params, :slots, :body, :attrs, :pads)
+Fn = Struct.new(:name, :ret, :params, :slots, :body, :attrs, :pads, :spec_pads)
 Blk = Struct.new(:instrs, :term, :loc, :eh, :reached)  # loc: the (loc FILE LINE) statement the block's last instruction was given under
 # eh (zero-cost exception tables, docs/notes/pathb-zero-cost-eh.md): the landing pad its calls unwind to (N of (eh-state N), 0
 # none), or :term (a landing pad's own code: a throw calls std::terminate). reached: some reached block jumps to it.
@@ -195,13 +195,16 @@ end
 
 # Linkage markers and constructor/destructor attributes follow the parameters; they have no runtime meaning in the body.
 FN_ATTR_HEADS = %w[static weak constructor destructor noinline used section always-inline eh-types eh-noexcept eh-spec].freeze
+# (eh-spec-pad PAD ID...): a landing pad's own dynamic exception specification (an inlined copy's, scripts/pathb-ir-opt.rb)
+PAD_SPEC_HEAD = "eh-spec-pad".freeze
 
 def fn_of(form)
   Fn.new(form[1], form.find { |x| head(x) == "ret" }, form.find { |x| head(x) == "params" },
          form.select { |x| head(x) == "slot" },
-         form[2..].reject { |x| (%w[ret params slot eh-pad] + FN_ATTR_HEADS).include?(head(x)) },
+         form[2..].reject { |x| (%w[ret params slot eh-pad] + FN_ATTR_HEADS + [PAD_SPEC_HEAD]).include?(head(x)) },
          form[2..].select { |x| FN_ATTR_HEADS.include?(head(x)) },
-         form[2..].select { |x| head(x) == "eh-pad" })
+         form[2..].select { |x| head(x) == "eh-pad" },
+         form[2..].select { |x| head(x) == PAD_SPEC_HEAD }.to_h { |x| [x[1].to_s, x[2..]] })
 end
 
 # ---- structured IR to basic blocks ----------------------------------------------------------------------------------
@@ -219,7 +222,7 @@ class Cfg
     @switches = []  # { cases: [[value, block]], default: block or nil } for each enclosing switch
   end
 
-  def build(body, void, pads = [])
+  def build(body, void, pads = [], spec_pads = {})
     entry = new_block
     @blocks[entry].eh = 0
     @blocks[entry].reached = true
@@ -241,6 +244,8 @@ class Cfg
       @blocks[b].eh = :term
       @blocks[b].reached = true
       @blocks[b].instrs << ["eh-pad"]   # its action chain: below, once every copy's entry state is known
+      # (eh-spec-pad N ID...): the pad's own exception specification, its filter ends the chain (qbe ehspecpad)
+      @blocks[b].instrs << ["eh-spec-pad", *spec_pads[p[1].to_s]] if spec_pads.key?(p[1].to_s)
       @eh_text = :term
       @pad_block ||= {}
       @pad_block[p[1]] = b
@@ -548,7 +553,7 @@ class Converter
     @fn = fn
     @void = fn.ret[1] == "void"
     @promoted, twice = promotable_slots(fn)
-    cfg = Cfg.new.build(fn.body, @void, fn.pads || [])
+    cfg = Cfg.new.build(fn.body, @void, fn.pads || [], fn.spec_pads || {})
     @cfg = cfg.blocks
     # The landing pads: the unwinder enters them from the calls of the blocks whose state names them. There is no edge from
     # a call to its pad, so for the analysis each pad is a successor of the entry (it is dominated by it, and no value of the
