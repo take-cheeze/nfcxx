@@ -6,7 +6,6 @@ require_relative 'toolchain'
 require 'digest'
 require 'set'
 require 'fileutils'
-require 'tempfile'
 
 module IrepCache
   module_function
@@ -69,16 +68,15 @@ module IrepCache
       return cached if cached
 
       result = yield
-      temporary = Tempfile.new(['decoded-tree-', '.marshal'], dir)
+      # A unique name and a rename, as ScanCache stores an entry: a self-compiled bc2cpp's Tempfile raised "closed
+      # stream" from close! after the close above, so a cold run learned nothing from the outside sources.
+      snapshot = Marshal.dump(result)
+      temporary = "#{path}.#{Process.pid}.#{rand(0x1_0000_0000)}.tmp"
       begin
-        temporary.binmode
-        snapshot = Marshal.dump(result)
-        temporary.write("#{Digest::SHA256.hexdigest(snapshot)}\n")
-        temporary.write(snapshot)
-        temporary.close
-        File.rename(temporary.path, path)
+        File.binwrite(temporary, "#{Digest::SHA256.hexdigest(snapshot)}\n#{snapshot}")
+        File.rename(temporary, path)
       ensure
-        temporary.close!
+        FileUtils.rm_f(temporary)
       end
       result
     end

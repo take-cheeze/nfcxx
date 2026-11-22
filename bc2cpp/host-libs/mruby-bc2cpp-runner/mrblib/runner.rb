@@ -36,7 +36,14 @@ module BC2CPPRunner
       # CodeGen and register at_exit writers: they stay unloaded, as under CRuby, and registration gets an inert module to
       # attach their compiled methods to.
       DEBUG_MODULES.each { |name| Object.const_set(name, placeholder) unless Object.const_defined?(name) }
-      register_compiled
+      if MRubyRequire.load_times?
+        MRubyRequire.report_load_times
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        register_compiled
+        $stderr.puts format('BC2CPP_LOAD %8.3fs register_compiled', Process.clock_gettime(Process::CLOCK_MONOTONIC) - started)
+      else
+        register_compiled
+      end
       BC2CPP_MAIN.call
     else
       require ENTRY
