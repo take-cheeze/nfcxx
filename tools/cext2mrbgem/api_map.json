@@ -46,8 +46,6 @@
     "T_COMPLEX": "stuck point (gem dependency): a Complex test is the mruby-complex class test, which needs the state and the gem (the decision is made: the gem is a dependency when the test is emitted); a bare use has no test to make here",
     "_comment": "A name with no api_map entry is refused with the reason given here (the converter's no-entry path). PRIsVALUE is converted where rb_raise and rb_sprintf take it; elsewhere it is an argument of rb_enc_sprintf, which takes an rb_encoding *.",
     "PRIsVALUE": "stuck point (PRIsVALUE): PRIsVALUE outside the format of rb_raise, rb_sprintf and rb_enc_sprintf (a VALUE argument of another call) is not converted; it has no mruby form in this position",
-    "T_NONE": "stuck point: the fork has no T_NONE tag (the MRB_TT enum, include/mruby/value.h:106-131); the empty-object marker has no mruby value kind",
-    "RUBY_T_NONE": "stuck point: the fork has no T_NONE tag (the MRB_TT enum, include/mruby/value.h:106-131); the empty-object marker has no mruby value kind",
     "rb_time_timespec_new": "stuck point (Time offset): mruby-time's Time has only UTC and LOCAL timezones (mrbgems/mruby-time/include/mruby/time.h:15-20; getlocal takes no offset), so a fixed UTC offset from the caller cannot be represented",
     "rb_encoder": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
     "rb_enc_interned_str_cstr": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
@@ -97,6 +95,18 @@
     }
   },
   "entries": {
+    "T_NONE": {
+      "kind": "expr",
+      "mruby": "MRB_TT_UNDEF",
+      "type_check": "exact",
+      "caveat": "CRuby's T_NONE is the no-type tag (a sentinel, e.g. oj's fast.c parent_type = T_NONE for no parent); the fork has no empty-object tag, so the sentinel is MRB_TT_UNDEF (include/mruby/value.h:113), which no Ruby object carries"
+    },
+    "RUBY_T_NONE": {
+      "kind": "expr",
+      "mruby": "MRB_TT_UNDEF",
+      "type_check": "exact",
+      "caveat": "CRuby's RUBY_T_NONE is the no-type tag: the sentinel MRB_TT_UNDEF (include/mruby/value.h:113), as for T_NONE"
+    },
     "rb_thread_local_aref": {
       "kind": "template",
       "arity": 2,
