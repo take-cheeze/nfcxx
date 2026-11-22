@@ -32,12 +32,13 @@ module SymbolCache
   FUNCALL_NAME = /\G,\s*(#{STRING})\s*,/n
   NAMED_NAME = /\G,\s*(#{STRING})(?=\s*[,)])/n
   SEND_INDEX = /\G,\s*(\d+)\s*[,)]/n
+  NIL_ID_INDEX = /\G(\d+)\s*[,)]/n
   # OWNER_CALL_DESC: the level and owner set after an owner call's name; the slot and level move into the set's macro.
   OWNER_CALL_SET = /\G,\s*([0-2])\s*,\s*(BC2CPP_OWNERS(?:_D)?)\(/n
   # The slot of a rewritten owner call: the first argument of its set macro (BC2CPP_SHARED's after the key).
   OWNER_CALL_INDEX = /\G,\s*BC2CPP_(?:OWNERS(?:_D)?|SHARED)\((?:0x\h+,\s*)?(\d+)\s*,/n
   private_constant :STRING, :INTERN, :CHECKED_FUNCALLS, :FUNCALLS,
-                   :FUNCALL_START, :FUNCALL_NAME, :NAMED_NAME, :SEND_INDEX, :OWNER_CALL_SET, :OWNER_CALL_INDEX
+                   :FUNCALL_START, :FUNCALL_NAME, :NAMED_NAME, :SEND_INDEX, :NIL_ID_INDEX, :OWNER_CALL_SET, :OWNER_CALL_INDEX
 
   # Symbols found so far, in first-seen order: C string literal => index.
   class Table
@@ -182,7 +183,8 @@ module SymbolCache
                       when 'bc2cpp_nomethod_raise_named' then "bc2cpp_nomethod_raise(M, #{receiver}, #{index}"
                       when 'bc2cpp_guard_violation_named' then "bc2cpp_guard_violation(M, #{receiver}, #{index}"
                       when 'bc2cpp_hint_violation_named' then "bc2cpp_hint_violation(M, #{receiver}, #{index}"
-                      when 'bc2cpp_nil_receiver_named' then "bc2cpp_nil_receiver(M, #{receiver}, #{index}"
+                      when 'bc2cpp_nil_receiver_named'
+                        nil_tested?(code, start, receiver) ? "bc2cpp_nil_receiver_id(M, #{index}" : "bc2cpp_nil_receiver(M, #{receiver}, #{index}"
                       when 'bc2cpp_owner_call_named' then "bc2cpp_owner_call(M, #{receiver}, #{index}"
                       when 'bc2cpp_owner_call_argv_named' then "bc2cpp_owner_call_argv(M, #{receiver}, #{index}"
                       when 'bc2cpp_native_singleton_named' then "bc2cpp_native_singleton(M, #{receiver}, #{index}, BC2CPP_NSC_SLOT,"
@@ -208,6 +210,19 @@ module SymbolCache
 
   OWNER_CALL_EXPLICIT = /\G,\s*2\s*,/n
   private_constant :OWNER_CALL_EXPLICIT
+
+  # NIL_RECEIVER_ID: a nil arm passes no receiver when the text right before the call is the `if (mrb_nil_p(RECV))`
+  # test of that same receiver expression, so RECV is nil there and the helper can rebuild it. Any other shape keeps
+  # the receiver. BC2CPP_NIL_RECEIVER_ID=0 keeps it everywhere.
+  NIL_TEST_TAIL = /if \(mrb_nil_p\(([^()]+)\)\)\s*(?:\{\s*)?(?:(?:BC2CPP_COLD_ARM\s+)?r\d+\s*=\s*)?\z/n
+  private_constant :NIL_TEST_TAIL
+
+  def nil_tested?(code, start, receiver)
+    return false if ENV['BC2CPP_NIL_RECEIVER_ID'] == '0'
+
+    tail = NIL_TEST_TAIL.match(code[[start - 200, 0].max...start])
+    !tail.nil? && tail[1].strip == receiver.strip
+  end
 
   def caller_self_call?(kind, code, after_name)
     case kind
@@ -243,9 +258,16 @@ module SymbolCache
     code = code.b
     found = []
     pos = 0
-    while (start = code.index(/\bbc2cpp_(send|nomethod|nomethod_raise|guard_violation|hint_violation|nil_receiver|native_singleton|native_owner|native_slot|owner_call_argv|owner_call)\(M,\s*/n, pos))
+    while (start = code.index(/\bbc2cpp_(send|nomethod|nomethod_raise|guard_violation|hint_violation|nil_receiver_id|nil_receiver|native_singleton|native_owner|native_slot|owner_call_argv|owner_call)\(M,\s*/n, pos))
       kind = Regexp.last_match(1)
       head_end = Regexp.last_match.end(0)
+      if kind == 'nil_receiver_id'
+        # NIL_RECEIVER_ID: the index is the first argument; the receiver is nil.
+        idx = NIL_ID_INDEX.match(code, head_end)
+        found << ['nil_receiver', 'mrb_nil_value()', idx[1].to_i] if idx
+        pos = head_end
+        next
+      end
       recv_end = expression_end(code, head_end)
       match = recv_end && (kind.start_with?('owner_call') ? OWNER_CALL_INDEX : SEND_INDEX).match(code, recv_end)
       idx = match && match[1]
@@ -450,7 +472,7 @@ module SymbolCache
     checked = table.checks.any? { |check| check.to_i.positive? }
     checks = (0...[table.size, 1].max).map { |slot| table.checks[slot].to_i }.join(', ')
     <<~CPP
-      // BC2CPP_NOIPA: GCC's noipa keeps a slow-path call in place (see bc2cpp_nomethod). Clang has no such
+      // BC2CPP_NOIPA: GCC's noipa keeps a slow-path call in place (see bc2cpp_guard_violation). Clang has no such
       // attribute and warns on it. maybe_unused: a translation unit may call only some of these helpers.
       #ifndef BC2CPP_NOIPA
       #if defined(__clang__)
@@ -998,6 +1020,12 @@ module SymbolCache
   # every class that answers the name, on a receiver with no method_missing.
   # mruby's own dispatch can only raise NoMethodError there; running it keeps
   # the error (message, args, call-depth and memory limits) exactly the same.
+  # COLD_RAISE: the call heads of the helpers that only raise. noreturn lets GCC drop the code after each call (the
+  # join back and any use of its result), which is most of a site's cost. BC2CPP_COLD_NORETURN=0 types them as
+  # returning (BC2CPP_NOIPA), as before.
+  COLD_RAISE = ENV['BC2CPP_COLD_NORETURN'] == '0' ? 'BC2CPP_NOIPA' : '[[noreturn, gnu::cold, gnu::noinline, maybe_unused]]'
+  private_constant :COLD_RAISE
+
   NOMETHOD = <<~CPP
     #ifdef BC2CPP_NOMETHOD_VERIFY
     #include <stdio.h>
@@ -1025,12 +1053,10 @@ module SymbolCache
       mrb_raisef(M, mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")),
                  "bc2cpp: closed-world proof violated: %T#%n was proven undefined but dispatched", recv, mid);
     }
-    // Typed as returning so GCC keeps the call site in place: a known-noreturn
-    // call is moved to the end of its function, which costs more than it saves.
-    BC2CPP_NOIPA static mrb_value bc2cpp_nomethod(mrb_state* M, mrb_value recv, int i) {
+    #{COLD_RAISE} static mrb_value bc2cpp_nomethod(mrb_state* M, mrb_value recv, int i) {
       bc2cpp_nomethod_argv(M, recv, i, 0, nullptr);
     }
-    BC2CPP_NOIPA static mrb_value bc2cpp_nomethod(mrb_state* M, mrb_value recv, int i, mrb_int argc, ...) {
+    #{COLD_RAISE} static mrb_value bc2cpp_nomethod(mrb_state* M, mrb_value recv, int i, mrb_int argc, ...) {
       mrb_value argv[16];
       va_list ap;
       va_start(ap, argc);
@@ -1051,10 +1077,10 @@ module SymbolCache
     #endif
       mrb_no_method_error(M, mid, mrb_ary_new_from_values(M, argc, argv), "undefined method '%n' for %T", mid, recv);
     }
-    BC2CPP_NOIPA static mrb_value bc2cpp_nomethod_raise(mrb_state* M, mrb_value recv, int i) {
+    #{COLD_RAISE} static mrb_value bc2cpp_nomethod_raise(mrb_state* M, mrb_value recv, int i) {
       bc2cpp_nomethod_raise_argv(M, recv, i, 0, nullptr);
     }
-    BC2CPP_NOIPA static mrb_value bc2cpp_nomethod_raise(mrb_state* M, mrb_value recv, int i, mrb_int argc, ...) {
+    #{COLD_RAISE} static mrb_value bc2cpp_nomethod_raise(mrb_state* M, mrb_value recv, int i, mrb_int argc, ...) {
       mrb_value argv[16];
       va_list ap;
       va_start(ap, argc);
@@ -1089,8 +1115,13 @@ module SymbolCache
       struct RClass* klass = mrb_define_class(M, "BC2cppGuardViolation", mrb_exc_get_id(M, mrb_intern_lit(M, "NoMethodError")));
       mrb_exc_raise(M, mrb_exc_new_str(M, klass, msg));
     }
-    // Typed as returning, like bc2cpp_nomethod, so GCC keeps the call in place.
-    BC2CPP_NOIPA static mrb_value bc2cpp_guard_violation(mrb_state* M, mrb_value recv, int i, const char* site, mrb_int argc, ...) {
+    // COLD_RAISE unless the debugging dispatch, which returns the send's result, is compiled in.
+    #ifdef BC2CPP_GUARD_VIOLATION_DISPATCH
+    #define BC2CPP_GUARD_VIOLATION_HEAD BC2CPP_NOIPA
+    #else
+    #define BC2CPP_GUARD_VIOLATION_HEAD #{COLD_RAISE}
+    #endif
+    BC2CPP_GUARD_VIOLATION_HEAD static mrb_value bc2cpp_guard_violation(mrb_state* M, mrb_value recv, int i, const char* site, mrb_int argc, ...) {
     #ifdef BC2CPP_GUARD_VIOLATION_DISPATCH
       mrb_value argv[16];
       va_list ap;
@@ -1132,7 +1163,13 @@ module SymbolCache
       struct RClass* klass = mrb_define_class(M, "BC2cppHintViolation", mrb_exc_get_id(M, mrb_intern_lit(M, "NoMethodError")));
       mrb_exc_raise(M, mrb_exc_new_str(M, klass, mrb_str_plus(M, mrb_str_new_lit(M, "hint violation: "), msg)));
     }
-    BC2CPP_NOIPA static mrb_value bc2cpp_hint_violation(mrb_state* M, mrb_value recv, int i, const char* site, mrb_int argc, ...) {
+    // COLD_RAISE unless a dispatch or log mode, which returns the send's result, is compiled in.
+    #if defined(BC2CPP_HINT_VIOLATION_DISPATCH) || defined(BC2CPP_HINT_VIOLATION_LOG)
+    #define BC2CPP_HINT_VIOLATION_HEAD BC2CPP_NOIPA
+    #else
+    #define BC2CPP_HINT_VIOLATION_HEAD #{COLD_RAISE}
+    #endif
+    BC2CPP_HINT_VIOLATION_HEAD static mrb_value bc2cpp_hint_violation(mrb_state* M, mrb_value recv, int i, const char* site, mrb_int argc, ...) {
     #ifdef BC2CPP_HINT_VIOLATION_LOG
       {
         static struct { const char* site; struct RClass* klass; mrb_sym mid; } seen[1024];
@@ -1174,16 +1211,28 @@ module SymbolCache
       mrb_raisef(M, mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")),
                  "bc2cpp: closed-world proof violated: nil#%n was proven undefined but dispatched", mid);
     }
-    BC2CPP_NOIPA static mrb_value bc2cpp_nil_receiver(mrb_state* M, mrb_value recv, int i) {
+    #{COLD_RAISE} static mrb_value bc2cpp_nil_receiver(mrb_state* M, mrb_value recv, int i) {
       bc2cpp_nil_receiver_argv(M, recv, i, 0, nullptr);
     }
-    BC2CPP_NOIPA static mrb_value bc2cpp_nil_receiver(mrb_state* M, mrb_value recv, int i, mrb_int argc, ...) {
+    #{COLD_RAISE} static mrb_value bc2cpp_nil_receiver(mrb_state* M, mrb_value recv, int i, mrb_int argc, ...) {
       mrb_value argv[16];
       va_list ap;
       va_start(ap, argc);
       for (mrb_int k = 0; k < argc && k < 16; k++) argv[k] = va_arg(ap, mrb_value);
       va_end(ap);
       bc2cpp_nil_receiver_argv(M, recv, i, argc, argv);
+    }
+    // NIL_RECEIVER_ID: the same, at a site whose nil test proves the receiver nil (SymbolCache.nil_tested?).
+    #{COLD_RAISE} static mrb_value bc2cpp_nil_receiver_id(mrb_state* M, int i) {
+      bc2cpp_nil_receiver_argv(M, mrb_nil_value(), i, 0, nullptr);
+    }
+    #{COLD_RAISE} static mrb_value bc2cpp_nil_receiver_id(mrb_state* M, int i, mrb_int argc, ...) {
+      mrb_value argv[16];
+      va_list ap;
+      va_start(ap, argc);
+      for (mrb_int k = 0; k < argc && k < 16; k++) argv[k] = va_arg(ap, mrb_value);
+      va_end(ap);
+      bc2cpp_nil_receiver_argv(M, mrb_nil_value(), i, argc, argv);
     }
   CPP
   private_constant :NIL_RECEIVER

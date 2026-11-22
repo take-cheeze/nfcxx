@@ -1,8 +1,8 @@
 == case 57:  -c a.cpp -o a.o --emit-c
--- status: 127
+-- status: 1
 -- stdout
 -- stderr
-<TMPDIR>: line N: <WORK>/stub/bin/cpfe: No such file or directory
+<TMPDIR>: line N: cd: <REPO>/build/edg-base: No such file or directory
 -- eccp
 (none)
 -- files

@@ -718,6 +718,7 @@ class CodeGen
       if needs_return_catch && unhandled_return && [body, block_fallback_pre, @inline_nested_pre].any? { |code| code.include?('bc2cpp_return_from_block') }
         body << resumable_error('a block that is not inlined returns from the method')
       end
+      body << step_cxx_unwind_block if @resumable.handlers&.any?
       body << step_exit_dispatch if step_ensure_handlers?
       out << resumable_step_function(step_name, body)
       out << "}\n\n"
@@ -735,6 +736,7 @@ class CodeGen
     # INLINE_NESTED_BLOCK_SUPPORT: `@inline_nested_pre` goes first so a nested
     # block's cfunc is defined before the loop that uses it.
     out = drop_dead_statements(drop_unused_registers(out)) unless @resumable || ((@report_only_text || (@clean_probe && ENV['BC2CPP_PROBE_TEXT_CLEANUP'] != '0')) && !@runtime_installed_names)
+    out = KeepOldBatch.apply(out)
     out = block_step_code + @inline_nested_pre + block_fallback_pre + rescue_pre + out
     @inline_nested_pre = bc2cpp_saved_inline_pre
     out << runtime_def_devirt_audit(out)

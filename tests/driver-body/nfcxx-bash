@@ -148,20 +148,6 @@ cudatmp=""
 # images. A file with no kernel gets no device image.
 # The cache helpers (the compile cache below and the device image cache of cu_rewrite).
 cache_sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }
-cache_log() {  # cache_log TEXT: appends TEXT as one write to NFCXX_CACHE_LOG when --cache-log (NFCXX_CACHE_LOG) is set (a diagnostic; no effect on the key).
-  # The append is scripts/nfcxx-cache-io.rb log (a lock shared with the parallel compiles, one write per call).
-  [ -n "$cache_log_file" ] || return 0
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-io.rb" log "$cache_log_file" "$*"
-}
-# The remote tier (NFCXX_CACHE_REMOTE=gha). An entry is the object and its records, as one tar keyed by the cache key. A
-# remote failure is a miss or a store that did not happen, with a note on stderr: a build does not fail for its cache.
-# scripts/nfcxx-cache-io.rb does the work (the temporary entry, the move into place, the GHA client's calls and the note).
-cache_remote_get() {  # cache_remote_get KEY ENTRY: fills ENTRY (a directory) from the remote cache; fails on a miss or an error
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-io.rb" remote-get "$1" "$2"
-}
-cache_remote_put() {  # cache_remote_put KEY ENTRY: stores the files of the local entry ENTRY remotely
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-io.rb" remote-put "$1" "$2" || true
-}
 # The rewritten copy of each .cu input is made after the arguments are read (cu_prepare), so that -c and -o are known:
 # with -c the copy goes to the per-user cache (scripts/nfcxx-cu-cpp2-prepare.rb), not to the user's tree. Otherwise it goes in a temp directory.
 cu_inputs=()
@@ -660,12 +646,15 @@ if [ ${#cfiles[@]} -gt 0 ]; then
 fi
 
 # The compile cache's functions, defined before the routes that use them (the Path B -c route runs before the gcc route's
-# code). The decisions are scripts/nfcxx-cache.rb's: the key of this compile, the --cache-log block, hit or miss, the copy of
-# a hit back beside the output, and the store of the object just built. The bash runs Ruby only when the cache is on.
-# cache_check is the lookup and the hit (exit 0 on a hit); cache_store stores the object just built when the cache is in use
-# and has no entry for it yet. The remote tier (NFCXX_CACHE_REMOTE=gha) is scripts/nfcxx-cache-io.rb, called from here.
-# cache_plan: prints the lookup's options, NUL-separated: the records of this compile (scripts/nfcxx-cache-plan.rb turns them into
-# the options; the command arguments without the cache options, the host preprocessor's -std, cflags, forced includes and sysdirs)
+# code). The decisions are scripts/nfcxx-cache-check.rb's: the key of this compile, the --cache-log block, the remote tier's
+# fetch on a local miss, hit or miss, the copy of a hit back beside the output, the store of the object just built, and the
+# remote put of a new entry. The bash writes cache_plan's records to a file and makes one call for the lookup (check) and one
+# for the store. The bash runs Ruby only when the cache is on.
+# cache_check is the lookup and the hit (exit 0 on a hit) and sets cache_entry (the statements check writes); cache_store
+# stores the object just built when the cache is in use and has an entry for it.
+# cache_plan: prints the lookup's records, NUL-separated: the records of this compile (scripts/nfcxx-cache-plan.rb plans the
+# options from them, in the check; the command arguments without the cache options, the host preprocessor's -std, cflags,
+# forced includes and sysdirs)
 cache_plan() {
   local a
   cache_rec() { printf '%s\0' "$1$2"; }   # cache_rec KIND PAYLOAD: one record
@@ -682,30 +671,22 @@ cache_plan() {
 cache_check() {  # cache_check: sets cache_entry (empty when the cache does not apply) and exits 0 on a hit
 cache_entry=""
 [ -n "$cache_dir" ] || return 0   # the cache is off: no Ruby is started
-local f a look decision state key rec opts=()
-while IFS= read -r -d "" rec; do opts+=("$rec"); done < <(cache_plan | "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-plan.rb")
-# lookup: the --cache-log block (when there is a log) and the last line, "hit KEY" or "miss KEY"; nothing when not cached
-look=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cache.rb" lookup "${opts[@]}") || return 0
-[ -n "$look" ] || return 0
-decision=${look##*$'\n'}
-[ "$look" = "$decision" ] || cache_log "${look%$'\n'*}"
-read -r state key <<<"$decision"
-cache_entry=$cache_dir/objects/$key
-# a local miss is looked up in the remote tier (nfcxx-cache-io.rb remote-get; a failure is a miss)
-if [ "$state" = miss ]; then
-  [ -z "$cache_remote" ] || cache_remote_get "$key" "$cache_entry" || true
-  [ -f "$cache_entry/obj" ] || return 0
-fi
-# hit: the object and its records are copied back, and the program is done
-"${RUBY:-ruby}" "$root/scripts/nfcxx-cache.rb" hit --out="$out" --entry="$cache_entry" && exit 0
+local ctmp cstatus
+ctmp=$(mktemp -d)
+cache_plan > "$ctmp/records"
+# check: the lookup, its --cache-log block, the remote fetch on a local miss, and a hit's copy back. Status 10 is a hit (the program
+# is done); otherwise the statements file names the entry (cache_entry, cc_state, cc_key), which a store of the object needs.
+cstatus=0; "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-check.rb" check --statements="$ctmp/statements" --remote="$cache_remote" \
+  --records="$ctmp/records" || cstatus=$?
+if [ $cstatus = 10 ]; then rm -rf "$ctmp"; exit 0; fi
+[ -f "$ctmp/statements" ] && . "$ctmp/statements"
+rm -rf "$ctmp"
 return 0
 }
 cache_store() {  # cache_store OBJ: a whole entry appears at once (a partial copy is never a hit)
   [ -n "$cache_entry" ] || return 0
-  # store: exit 0 when this call made the entry; a new entry goes to the remote tier (cache_remote_put, a note on failure)
-  if "${RUBY:-ruby}" "$root/scripts/nfcxx-cache.rb" store --out="$1" --entry="$cache_entry" && [ -n "$cache_remote" ]; then
-    cache_remote_put "${cache_entry##*/}" "$cache_entry"
-  fi
+  # store: the object is stored under the entry; a new entry goes to the remote tier (a failure is a note; the build goes on)
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-check.rb" store --out="$1" --entry="$cache_entry" --remote="$cache_remote" || true
 }
 # Path B: no C is generated. Each C++ file goes EDG -> typed IR -> QBE -> object (scripts/pathb-cc.rb), and the objects are
 # linked with EDG's runtime (libC.a: exceptions, operator new) before libstdc++, as tests/pathb-qbe/run.sh links them.

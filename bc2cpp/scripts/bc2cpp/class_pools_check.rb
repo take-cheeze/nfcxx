@@ -175,13 +175,13 @@ if ENV['MRBC']
     end
     check.call('NEG: a name a NilClass method in the world answers keeps the dispatch on the nil arm',
                body_of.call(code, 'PlHost', 'read_maybe_ok').include?('NILABLE_RECEIVER') &&
-                 !body_of.call(code, 'PlHost', 'read_maybe_ok').include?('bc2cpp_nil_receiver(M,'))
+                 !body_of.call(code, 'PlHost', 'read_maybe_ok').include?('bc2cpp_nil_receiver_id(M,'))
     check.call('a local that is a PlBox or nil on two paths takes the same nil test and exact call',
                nilable.call(code, 'PlHost', 'read_local'))
     check.call('the nil arm of a name nil does not answer is the NIL_RECEIVER helper, not a send',
-               body_of.call(code, 'PlHost', 'read_maybe').include?('bc2cpp_nil_receiver(M,') &&
+               body_of.call(code, 'PlHost', 'read_maybe').include?('bc2cpp_nil_receiver_id(M,') &&
                  !body_of.call(code, 'PlHost', 'read_maybe').include?('bc2cpp_send(') &&
-                 code.include?('static mrb_value bc2cpp_nil_receiver(mrb_state* M, mrb_value recv, int i, mrb_int argc, ...)'))
+                 code.include?('static mrb_value bc2cpp_nil_receiver_id(mrb_state* M, int i, mrb_int argc, ...)'))
     check.call('the NIL_RECEIVER sites are listed on stderr, apart from the NOMETHOD sites',
                err.include?('  NIL_RECEIVER_SITE PlHost#read_maybe -> tag') && !err.include?('  NOMETHOD PlHost#read_maybe'))
     check.call('the diagnostic lists the pools',
@@ -190,11 +190,11 @@ if ENV['MRBC']
     check.call('Hash literal and nil: GETIDX/SETIDX test nil once and take the exact fast path',
                %w[ui_get ui_set].all? do |fn|
                  body = body_of.call(code, 'PlHost', fn)
-                 body.include?('NILABLE_RECEIVER') && body.include?('INDEX_EXACT') && body.include?('bc2cpp_nil_receiver(M,') &&
+                 body.include?('NILABLE_RECEIVER') && body.include?('INDEX_EXACT') && body.include?('bc2cpp_nil_receiver_id(M,') &&
                    !body.include?('mrb_hash_p(')
                end)
     check.call('a name nil answers (to_s) keeps the ordinary send on the nil arm',
-               !body_of.call(code, 'PlHost', 'ui_to_s').include?('bc2cpp_nil_receiver(M,'))
+               !body_of.call(code, 'PlHost', 'ui_to_s').include?('bc2cpp_nil_receiver_id(M,'))
     check.call('an exact argument pool drops the guard of PlArgs#pl_use', exact.call(code, 'PlArgs', 'pl_use'))
 
     # NEG: each of these keeps its guard (or its dispatch) in the same world.
