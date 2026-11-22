@@ -1,0 +1,41 @@
+== case 63: NFCXX_COSMOCC=<WORK>/stub/bin/cosmocc   --trace=trace.json --cosmo -c a.cpp -o a.o
+-- status: 1
+-- stdout
+-- stderr
+-- eccp
+eccp:
+  --c++23
+  --g++
+  --wdir
+  /
+  --no_auto_instantiation
+  -tused
+  --c_to_obj_option
+  -ffunction-sections
+  --c_to_obj_option
+  -fdata-sections
+  --c_to_obj_option
+  -Wl,--gc-sections
+  --sys_include=<WORK>/stub/include/third_party/libcxx
+  --sys_include=<WORK>/stub/include
+  --c_to_obj_lib=m
+  --c_to_obj_option
+  -O2
+  --c_to_obj_option
+  -fwrapv
+  --c_to_obj_option
+  -fno-strict-aliasing
+  --c_to_obj_option
+  -fkeep-static-functions
+  --c_to_obj_option
+  -fgnu89-inline
+  -c
+  a.cpp
+  -o
+  a.o
+-- files
+trace.json
+-- trace names
+      1 "name":"host C++ headers"
+      1 "name":"nfcxx"
+      1 "name":"trace_end"

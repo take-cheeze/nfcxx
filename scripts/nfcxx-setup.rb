@@ -328,6 +328,87 @@ module NfcxxSetup
   end
 end
 
+module NfcxxSetup
+  module_function
+
+  # the NAME=VALUE statements of a planner's text, as the value the shell reads (the last one of each NAME in NAMES)
+  def assigned(text, names)
+    values = {}
+    text.each_line do |line|
+      m = line.match(/\A(#{names.map { |n| Regexp.escape(n) }.join("|")})=(.*)\z/) or next
+      values[m[1]] = Shellwords.split(m[2]).first.to_s
+    end
+    values
+  end
+
+  # the NAME=VALUE words of a planner's export lines, as the value the shell exports (a value with a shell expansion is not one:
+  # the target's EDG_CPFE_DEFAULT_OPTIONS line is left to the body)
+  def exports_of(text)
+    vars = {}
+    text.each_line do |line|
+      next unless line.start_with?("export ")
+
+      Shellwords.split(line.delete_prefix("export ")).each do |w|
+        name, value = w.split("=", 2)
+        vars[name] = value if value && !value.include?("$") && name.match?(/\A\w+\z/)
+      end
+    end
+    vars
+  end
+
+  # The setup's rest, in the bash's order (the body's block from the template instantiation to the target, and the export
+  # of EDG_CPFE_DEFAULT_OPTIONS): instantiation, --cosmo, the freestanding or hosted headers, the host cflags, the GNU options,
+  # --target=linux_k1om, --target. The hosted headers' probe is timed here and its span is left to the body (setup_span_start
+  # and setup_span_stop are its statements), so a span is recorded only by a body that reaches the setup.
+  # Returns [text, status, message]: text holds the statements up to the first refusal, which the body evals before it prints
+  # the message and exits with the status (status 0 and "" when nothing is refused). The bash variables are the names.
+  def rest(opts, env = ENV)
+    state = opts.dup
+    flag = ->(k) { state.fetch(k, "0") == "1" }
+    out = +""
+    # the environment the later steps see: the variables a step exports (the bash exports them when it runs), e.g. the
+    # --cosmo's NFCXX_SYS_INCLUDES, which the host's include probe reads
+    penv = env.to_h
+    # the statements of a planner step: its text is kept, and the variables the next steps read are taken from it
+    step = lambda do |name, text|
+      out << text
+      state.merge!(assigned(text, %w[backend gnu])) if %w[cosmo freestanding k1om].include?(name)
+      penv = penv.merge(exports_of(text)) if %w[cosmo k1om].include?(name)
+    end
+    begin
+      step.("instantiate", run("instantiate", state, penv))
+      step.("cosmo", run("cosmo", state, penv)) if flag.("cosmo")
+
+      if state.fetch("freestanding", "0") == "1"
+        step.("freestanding", NfcxxFreestanding.plan(state, penv).map { |l| "#{l}\n" }.join)
+      else
+        start = NfccxxTrace.now_us
+        includes = NfcxxFreestanding.includes(state, penv).map { |l| "#{l}\n" }.join
+        stop = NfccxxTrace.now_us
+        out << "setup_span_start=#{start} setup_span_stop=#{stop}\n"
+        out << includes
+        step.("freestanding", NfcxxFreestanding.gnu_line(state, penv).map { |l| "#{l}\n" }.join)
+      end
+
+      step.("host_cflags", run("host_cflags", state, penv))
+
+      gnu_text = run("gnu_opts", state, penv)
+      out << gnu_text
+      state["gnu_opts"] = array_words(gnu_text, "gnu_opts")[1].join("\x1f")
+
+      step.("k1om", run("k1om", state, penv))
+
+      target_text = run("target", state, penv)
+      out << target_text
+      mode, words = array_words(target_text, "gnu_opts")
+      state["gnu_opts"] = [state.fetch("gnu_opts", ""), *words].reject(&:empty?).join("\x1f") if mode == "+="
+    rescue Refusal => e
+      return [out, e.status, "#{e.message}\n"]
+    end
+    [out, 0, ""]
+  end
+end
+
 if $PROGRAM_NAME == __FILE__
   if ARGV.first == "host-headers"
     opts = NfcxxSetup.options(ARGV.drop(1))
@@ -353,6 +434,13 @@ if $PROGRAM_NAME == __FILE__
       exit e.status
     end
     exit 0
+  end
+  if ARGV.first == "rest"
+    opts = NfcxxSetup.options(ARGV.drop(1))
+    text, status, message = NfcxxSetup.rest(opts, ENV)
+    $stdout.write(text)
+    $stderr.write(message)
+    exit status
   end
   if ARGV.first == "cache-opts"
     $stdout.binmode.write(NfcxxSetup.cache_opts(NfcxxSetup.options(ARGV.drop(1))))

@@ -67,6 +67,8 @@ module NfcxxCosmo
                  "-include", "#{root}/lib/cosmo/libcxx_traits.h"]
     end
     lines << "backend=#{q(backend)}"
+    lines << "cosmo_bin=#{q(cosmo_bin)}"
+    lines << "cosmo_root=#{q(cosmo_root)}"
     lines << "cflags+=(#{cflags.map { |f| q(f) }.join(" ")})"
     lines
   end

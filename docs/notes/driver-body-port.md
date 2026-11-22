@@ -28,6 +28,13 @@ Checked against origin/main after #1432 (the compile cache's lookup planner).
   passes them in `NFCXX_SETUP_DEFAULT`, and in `NFCXX_SETUP_STAGE_STATUS` and `NFCXX_SETUP_STAGE`; the body evals them at its
   places, and a stage refusal is printed where the bash printed it. The body plans them itself when the driver gave no state
   (the wrappers' arguments). `tests/driver-setup-stage` checks the argument lists against recordings of the bash setup.
+- The setup's rest is planned by Ruby too (`NfcxxSetup.rest`, the `rest` step of `scripts/nfcxx-setup.rb`): the template
+  instantiation, `--cosmo`, the freestanding or hosted headers, the host cflags, the GNU options, `--target=linux_k1om` and
+  `--target`, and the export of `EDG_CPFE_DEFAULT_OPTIONS`, in the bash's order. The driver passes its statements up to a refusal
+  in `NFCXX_SETUP_REST`, with the refusal's status and message in `NFCXX_SETUP_REST_STATUS` and `NFCXX_SETUP_REST_ERR`. The
+  hosted headers' probe is timed by the planner, and the body writes its span (`trace_range`, trace.sh) where the bash did, so a
+  span is recorded only by a body that reaches the setup (a `-E` or `-fsyntax-only` command is not planned by the driver).
+  `tests/driver-setup-rest` checks 66 argument lists against recordings of the bash setup, and the body's protocol.
 - The SYCL two-pass build (`scripts/nfcxx-sycl.rb`) now runs in `scripts/nfcxx.rb`, before the body starts:
   the body's early exits never refuse its arguments. `tests/driver-sycl-dispatch` holds the goldens.
 - Helpers still defined in the body: `temp_cleanup`, `abs_path`, `onoff`, `ensure_tool`, `ecp_args`, `state_put`,
@@ -47,11 +54,13 @@ The body can be deleted only when the Ruby driver runs every stage without it. I
 2. **Early exits.** `--emit-hip`, the `-x` and `-MD` checks. The module block is planned in Ruby
    (`scripts/nfcxx-modules-plan.rb`: scans, refusals, the module build of a link, the compile's module options); the body
    only calls it at the block's place and ends with the build's status.
-3. **Setup.** Done: the backend choice (the default backend and `pb_fs_host`) and the stage after the emit-C route (the
-   sanitizer names, `-fsafe-pointers`, the Path B override). Still in bash: the `-fsanitize=address` backend check and `asan_c`,
-   `instantiate`, the `cosmo` block, the freestanding and host header probes (with their trace span), the host cflags, the GNU
-   options, the k1om and target blocks, the Path B `pb_flags` tail and the backend's environment (the unwired planners
-   `planners_text` and `flags_text` in `scripts/nfcxx-setup.rb` cover most of them), and the trace unit's setup.
+3. **Setup.** Done: the backend choice (the default backend and `pb_fs_host`), the stage after the emit-C route (the
+   sanitizer names, `-fsafe-pointers`, the Path B override), and the rest (`instantiate`, the `cosmo` block, the freestanding and
+   hosted header probes with their trace span, the host cflags, the GNU options, the k1om and target blocks, the
+   `EDG_CPFE_DEFAULT_OPTIONS` export). Still in bash: the `-fsanitize=address` backend check and `asan_c`, the Path B `pb_flags`
+   tail and the backend's environment (`flags_text` in `scripts/nfcxx-setup.rb` is unwired), and the trace unit's setup.
+   `planners_text` (also unwired) is superseded by `NfcxxSetup.rest`: it timed the probe's span in the driver, which would
+   record the span for a command the body ends before its setup.
 4. **CUDA and `.cpp2` preparation.** Done for the decisions and the rewriting: `scripts/nfcxx-cu-cpp2-prepare.rb` (cu and cpp2)
    makes the copies, the rewrite and the translation, and the array edits, and the body evals its statements at the
    preparation's place. The body still makes the temporary directory and its EXIT trap (item 8).

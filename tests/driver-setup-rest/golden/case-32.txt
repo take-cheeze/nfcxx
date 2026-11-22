@@ -1,0 +1,8 @@
+== case 32: EDG_BASE=<WORK>/edgbase   --target=nosuch --freestanding --emit-c a.cpp
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: no EDG target 'nosuch' in <WORK>/edgbase (lib_* tables: linux_aarch64 linux_armv7 )
+-- eccp
+(none)
+-- files

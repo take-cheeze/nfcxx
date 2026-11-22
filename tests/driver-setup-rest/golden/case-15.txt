@@ -1,0 +1,8 @@
+== case 15:  --cosmo -c a.cpp -o a.o
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: <REPO>/build/cosmocc/bin/cosmocc is not installed; run scripts/setup-cosmo.sh (or set NFCXX_COSMOCC)
+-- eccp
+(none)
+-- files

@@ -1,0 +1,7 @@
+== case 30: EDG_BASE=<WORK>/edgbase   --target=linux_aarch64 --freestanding --emit-c a.cpp
+-- status: 127
+-- stdout
+-- stderr
+-- eccp
+(none)
+-- files

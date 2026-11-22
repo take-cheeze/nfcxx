@@ -36,6 +36,18 @@ trace_end() {
   "${RUBY:-ruby}" "$_trace_rb" span "$1" "$2" "$3" "${BASHPID:-$$}" "${trace_unit:-${NFCXX_TRACE_UNIT:-}}"
 }
 
+# Record a span from START to STOP (both from trace_now), timed before this process ran (the driver's planner times a probe
+# before the body starts, and the body records its span where the bash recorded it). Args: start stop name category.
+trace_range() {
+  _trace_on || return 0
+  if [ -n "${NFCXX_TRACE_PENDING:-}" ]; then
+    printf '%s\0%s\0%s\0%s\0%s\0%s\0' "$1" "$2" "$3" "$4" "${BASHPID:-$$}" "${trace_unit:-${NFCXX_TRACE_UNIT:-}}" \
+      >> "$NFCXX_TRACE_PENDING"
+    return 0
+  fi
+  "${RUBY:-ruby}" "$_trace_rb" span-range "$1" "$2" "$3" "$4" "${BASHPID:-$$}" "${trace_unit:-${NFCXX_TRACE_UNIT:-}}"
+}
+
 # Writes the pending spans (one trace.rb call), then empties the file.
 trace_flush() {
   [ -n "${NFCXX_TRACE_PENDING:-}" ] && [ -s "$NFCXX_TRACE_PENDING" ] || return 0

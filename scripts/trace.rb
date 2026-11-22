@@ -37,22 +37,23 @@ module NfccxxTrace
 
   # the two texts of a span from START to now: the NFCXX_TIME_LOG line and the trace event, each nil when its output is off.
   # span writes them; the Recorder keeps them until its run ends.
-  def span_texts(start, name, category, unit:, pid:, log:, trace:)
-    dur = now_us - start
+  def span_texts(start, name, category, unit:, pid:, log:, trace:, stop: nil)
+    dur = (stop || now_us) - start
     log_text = log ? format("%d.%06d\t%s\t%s\t%s\n", dur / 1_000_000, dur % 1_000_000, category, name, unit) : nil
     trace_text = trace ? format(%({"name":"%s","cat":"%s","ph":"X","ts":%d,"dur":%d,"pid":%d,"tid":1},\n),
                                 escape(name), category, start, dur, pid) : nil
     [log_text, trace_text]
   end
 
-  # record a span from START (from start) to now
-  def span(start, name, category, unit: nil, pid: Process.pid, env: ENV)
+  # record a span from START (from start) to now, or to STOP when the caller timed it (a probe the driver ran before this process)
+  def span(start, name, category, unit: nil, pid: Process.pid, env: ENV, stop: nil)
     return unless enabled?(env)
 
     log = env["NFCXX_TIME_LOG"].to_s
     trace = env["NFCXX_TRACE"].to_s
     unit ||= env["NFCXX_TRACE_UNIT"].to_s
-    log_text, trace_text = span_texts(start, name, category, unit: unit, pid: pid, log: !log.empty?, trace: !trace.empty?)
+    log_text, trace_text = span_texts(start, name, category, unit: unit, pid: pid, log: !log.empty?, trace: !trace.empty?,
+                                      stop: stop)
     File.open(log, "a") { |f| f.write(log_text) } if log_text
     File.open(trace, "a") { |f| f.write(trace_text) } if trace_text
   end
@@ -163,6 +164,7 @@ end
 # The command line that scripts/trace.sh (nfcxx's shim) calls. The files and the settings are the environment's, as above.
 #   ruby scripts/trace.rb now                          prints the clock reading (microseconds)
 #   ruby scripts/trace.rb span START NAME CAT PID UNIT   records a span from START to now, for process PID
+#   ruby scripts/trace.rb span-range START STOP NAME CAT PID UNIT   the same, to STOP (a span timed earlier)
 #   ruby scripts/trace.rb open FILE                    starts the trace file (the opening "[")
 #   ruby scripts/trace.rb close FILE PID               the closing instant event and "]"
 if $PROGRAM_NAME == __FILE__
@@ -171,12 +173,15 @@ if $PROGRAM_NAME == __FILE__
   when "span"
     _, start, name, cat, pid, unit = ARGV
     NfccxxTrace.span(start.to_i, name, cat, unit: unit, pid: pid.to_i)
+  when "span-range"
+    _, start, stop, name, cat, pid, unit = ARGV
+    NfccxxTrace.span(start.to_i, name, cat, unit: unit, pid: pid.to_i, stop: stop.to_i)
   when "flush" then NfccxxTrace.flush(ARGV[1])
   when "open" then File.write(ARGV[1], "[\n")
   when "close"
     File.open(ARGV[1], "a") do |f|
       f.write(format(%({"name":"trace_end","ph":"i","s":"g","ts":%d,"pid":%d,"tid":1}\n]\n), NfccxxTrace.now_us, ARGV[2].to_i))
     end
-  else abort "trace: unknown command #{ARGV[0].inspect} (now, span, open, close)"
+  else abort "trace: unknown command #{ARGV[0].inspect} (now, span, span-range, open, close, flush)"
   end
 end

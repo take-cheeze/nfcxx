@@ -1,0 +1,7 @@
+== case 43:  --emit-c a.cpp
+-- status: 1
+-- stdout
+-- stderr
+-- eccp
+(none)
+-- files

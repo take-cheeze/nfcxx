@@ -1,0 +1,35 @@
+== case 17: NFCXX_COSMOCC=<WORK>/stub/bin/cosmocc   --cosmo --freestanding -c a.cpp -o a.o
+-- status: 1
+-- stdout
+-- stderr
+-- eccp
+eccp:
+  --c++23
+  --g++
+  --wdir
+  /
+  --no_standard_includes
+  -I<REPO>/lib
+  --no_auto_instantiation
+  -tused
+  --c_to_obj_option
+  -ffunction-sections
+  --c_to_obj_option
+  -fdata-sections
+  --c_to_obj_option
+  -Wl,--gc-sections
+  --c_to_obj_option
+  -O2
+  --c_to_obj_option
+  -fwrapv
+  --c_to_obj_option
+  -fno-strict-aliasing
+  --c_to_obj_option
+  -fkeep-static-functions
+  --c_to_obj_option
+  -fgnu89-inline
+  -c
+  a.cpp
+  -o
+  a.o
+-- files

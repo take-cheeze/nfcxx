@@ -1,0 +1,7 @@
+== case 16: NFCXX_COSMOCC=<WORK>/stub/bin/cosmocc   --cosmo --emit-c a.cpp
+-- status: 1
+-- stdout
+-- stderr
+-- eccp
+(none)
+-- files

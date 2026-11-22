@@ -1,0 +1,11 @@
+== case 51:  --trace=trace.json --cosmo --backend=bogus -c a.cpp -o a.o
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: --cosmo needs --backend=gcc or --backend=pathb
+-- eccp
+(none)
+-- files
+trace.json
+-- trace names
+      1 "name":"trace_end"
