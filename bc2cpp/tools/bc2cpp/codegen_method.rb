@@ -716,6 +716,7 @@ class CodeGen
       if needs_return_catch && unhandled_return && [body, block_fallback_pre, @inline_nested_pre].any? { |code| code.include?('bc2cpp_return_from_block') }
         body << resumable_error('a block that is not inlined returns from the method')
       end
+      body << step_cxx_unwind_block if @resumable.handlers&.any?
       body << step_exit_dispatch if step_ensure_handlers?
       out << resumable_step_function(step_name, body)
       out << "}\n\n"
