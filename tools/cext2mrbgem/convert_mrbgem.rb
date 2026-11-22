@@ -6834,12 +6834,19 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     fn = enclosing_func(rel, s)
     before = masked[[s - 160, 0].max...s].to_s
     decl = before.match(/([A-Za-z_]\w*)[ \t\n]*\*[ \t\n]*([A-Za-z_]\w*)[ \t\n]*=[ \t\n]*\z/)
-    if args.size != 3 || fn.nil? || decl.nil?
-      refuse(rel, s, 'RB_ALLOCV_N', 'stuck point (temporary buffer): RB_ALLOCV_N is used other than as a pointer declaration (T *p = RB_ALLOCV_N(...)) in a function, so its free has no mruby form here')
+    # an assignment to a pointer declared earlier (buf = ALLOCV_N(char, v, n);): the element type is the macro's first argument
+    assign = decl.nil? && args.size == 3 ? before.match(/\b([A-Za-z_]\w*)[ \t\n]*=[ \t\n]*\z/) : nil
+    if args.size != 3 || fn.nil? || (decl.nil? && assign.nil?)
+      refuse(rel, s, 'RB_ALLOCV_N', 'stuck point (temporary buffer): RB_ALLOCV_N is used other than as a pointer declaration or an assignment (p = RB_ALLOCV_N(...)) in a function, so its free has no mruby form here')
       return
     end
-    type = decl[1]
-    ptr = decl[2]
+    if decl
+      type = decl[1]
+      ptr = decl[2]
+    else
+      type = psl(text, args[0][0], args[0][1]).strip
+      ptr = assign[1]
+    end
     v = psl(text, args[1][0], args[1][1]).strip
     n = psl(text, args[2][0], args[2][1]).strip
     unless v.match?(/\A[A-Za-z_]\w*\z/)
@@ -6848,7 +6855,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     end
     (@allocv ||= {})[[rel, v]] = { pos: s, ptr: ptr, fn: fn['name'], type: type }
     ed.add(s, close + 1, "(#{type} *)mrb_malloc(#{mrb_tok(rel, s)}, sizeof(#{type}) * (#{n}))")
-    rewrite(rel, s, 'RB_ALLOCV_N', "(#{type} *)mrb_malloc(...)", 'a temporary buffer: mrb_malloc, freed by RB_ALLOCV_END of the same VALUE')
+    rewrite(rel, s, 'RB_ALLOCV_N', "(#{type} *)mrb_malloc(...)", 'a temporary buffer: mrb_malloc, freed by RB_ALLOCV_END of the same VALUE; mrb_malloc raises (longjmp) on exhaustion, which leaks the buffer as CRuby\'s ALLOCV would not')
   end
 
   def allocv_end_special(rel, s, nxt, called)
