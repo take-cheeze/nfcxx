@@ -1782,6 +1782,13 @@ check test "$rc" -eq 0
 check test "$(grep -c 'Thread' "$work/api_thread_local/REFUSALS.txt")" -eq 0
 check grep -qF 'nfcx_tls_aset(mrb, mrb_nil_value(), id_mode, v);' "$work/api_thread_local/src/api_thread_local.c"
 check grep -qF 'return nfcx_tls_aref(mrb, mrb_nil_value(), id_mode);' "$work/api_thread_local/src/api_thread_local.c"
+# 2zzz177. RB_ALLOCV_N assigned to a pointer declared earlier (buf = ALLOCV_N(char, v, n)): mrb_malloc of the element type, freed by
+# RB_ALLOCV_END of the same VALUE; no temporary-buffer refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_allocv_assign tools/cext2mrbgem/fixtures/api_allocv_assign/ext/api_allocv_assign "$work/api_allocv_assign" > "$work/api_allocv_assign.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'temporary buffer' "$work/api_allocv_assign/REFUSALS.txt")" -eq 0
+check grep -qF 'buf = (char *)mrb_malloc(mrb, sizeof(char) * (n + 1));' "$work/api_allocv_assign/src/api_allocv_assign.c"
+check grep -qF 'mrb_free(mrb, buf);' "$work/api_allocv_assign/src/api_allocv_assign.c"
 # 2zzz171. a block-scoped long t and a VALUE t in a later block of one function: the (long)t cast of the long is an integer use,
 # no VALUE-as-integer refusal (the lookup is the declaration whose block encloses the use).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_block_shadow tools/cext2mrbgem/fixtures/api_block_shadow/ext/api_block_shadow "$work/api_block_shadow" > "$work/api_block_shadow.log" 2>&1 || rc=$?
