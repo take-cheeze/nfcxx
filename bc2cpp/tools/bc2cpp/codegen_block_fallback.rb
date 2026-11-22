@@ -1239,6 +1239,9 @@ class CodeGen
     # LITERAL_TABLES (codegen_literal_tables.rb): an instruction another pass emits stays out of every table.
     claimed_addrs = (nested_suppressed + nested_glue_at.keys + prefix_at.keys).to_set
     literal = literal_table_plan(block_irep, claimed: ->(addr, _idx) { claimed_addrs.include?(addr) })
+    # GUARD_HOIST (codegen_guard_hoist.rb): a literal table only rewrites a straight run of literal builders, no send.
+    hoist_eligible = nested_suppressed.empty? && nested_glue_at.empty? && prefix_at.empty?
+    guard_hoist_session(block_irep, hoist_eligible) do
     BytecodeIR.for(block_irep).each_source do |insn, idx|
       next if insn.op == :ENTER
 
@@ -1253,9 +1256,10 @@ class CodeGen
         body << glue
       else
         with_element_hints(block_irep, insn, idx, elem_hints) do
-          body << compile_insn(insn, block_irep, d, idx)
+          body << guard_hoist_site(block_irep, idx, insn, compile_insn(insn, block_irep, d, idx))
         end
       end
+    end
     end
     @declared_loop_elements = saved_loop_elements
     @tail_yield_block = saved_tail_yield_block

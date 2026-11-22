@@ -7,12 +7,18 @@
 #      keeps its exact-class direct arm and its
 #      else becomes the proven nomethod (no owner call left); `o.pong(x)`, defined by Base which Kid inherits, keeps
 #      the owner call as the else;
-#   2. run on a full-core mruby, compiled against interpreted: Leaf, a Leaf with a singleton class, Kid, Base, nil
-#      and an Integer give the same value or error.
+#   2. GUARD_HOIST (codegen_guard_hoist.rb): `twice` tests its receiver once, the second send's guard is cut by the
+#      first one's raising else; `moved` (the local rewritten) and `looped` (rewritten inside the loop) keep both
+#      guards; in a world that also gives an instance a singleton method nothing is cut; BC2CPP_GUARD_HOIST=0
+#      keeps both tests of `twice`;
+#   3. run on a full-core mruby, compiled against interpreted: Leaf, a Leaf with a singleton class, Kid, Base, nil
+#      and an Integer give the same value or error, and so do the GUARD_HOIST methods (a Kid swapped in after the
+#      first guard raises NoMethodError).
 #
 # Usage: MRBC=path/to/host/mrbc ruby scripts/bc2cpp/leaf_owner_else_check.rb
 # The run needs a full-core libmruby built from this tree's patched 3rd/mruby (BC2CPP_MRUBY_FULL, or one built here).
 
+require 'fileutils'
 require 'tmpdir'
 require_relative 'fixture_runtime'
 
@@ -32,6 +38,7 @@ SOURCE = <<~RUBY
   class Leaf
     def initialize; @v = 1; end
     def ping(x); [:leaf, @v, x]; end
+    def pang(x); [:pang, @v, x]; end
   end
   class Base
     def initialize; @v = 2; end
@@ -42,9 +49,33 @@ SOURCE = <<~RUBY
   class Probe
     def lp(o, x); o.ping(x); end
     def bp(o, x); o.pong(x); end
+    def twice(o, x); [o.ping(x), o.pang(x)]; end
+    def moved(o, p, x); a = o.ping(x); o = p; [a, o.pang(x)]; end
+    def looped(o, p, x)
+      a = o.ping(x)
+      r = nil
+      i = 0
+      while i < 2
+        r = o.pang(x)
+        o = p
+        i += 1
+      end
+      [a, r]
+    end
   end
 RUBY
 OWNERS = %w[Leaf Base Kid Probe].freeze
+# The same world with an instance singleton maker (a singleton method of another name, so pang keeps its guards).
+SINGLE_SOURCE = <<~RUBY
+  #{SOURCE}
+  class Probe
+    def single(o, x)
+      a = o.ping(x)
+      o.define_singleton_method(:zap) { |y| [:sing, y] }
+      [a, o.pang(x)]
+    end
+  end
+RUBY
 
 body = ->(code, name) { code[/^mrb_value Probe_#{name}_impl\(mrb_state\* M[^\n]*\{\n.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m].to_s }
 
@@ -98,19 +129,41 @@ Dir.mktmpdir('leaf-owner-else') do |dir|
              !lp.include?('bc2cpp_owner_call'))
   check.call('pong: Base has a subclass, the owner call stays', bp.include?('bc2cpp_owner_call(M, ') &&
              !bp.include?('LEAF_OWNER_ELSE'))
+  tests = ->(name) { body.call(code, name).scan('bc2cpp_class_is(').size }
+  hoisted = ->(name) { body.call(code, name).include?('GUARD_HOIST') }
+  check.call('hoist: twice tests its receiver once, pang keeps its direct call',
+             tests.call('twice') == 1 && hoisted.call('twice') && body.call(code, 'twice').include?('Leaf_pang_impl(M, '))
+  check.call('hoist: a rewritten local keeps its second guard', tests.call('moved') == 2 && !hoisted.call('moved'))
+  check.call('hoist: a local the loop rewrites keeps its guard in the loop',
+             tests.call('looped') == 2 && !hoisted.call('looped'))
+  single_dir = File.join(dir, 'hoist-single')
+  FileUtils.mkdir_p(single_dir)
+  single_code, = runtime.generate(SINGLE_SOURCE, single_dir, only_owners: OWNERS)
+  check.call('hoist: a world with an instance singleton maker cuts no guard',
+             !single_code.include?('GUARD_HOIST') && body.call(single_code, 'twice').scan('bc2cpp_class_is(').size == 2)
+  off_dir = File.join(dir, 'hoist-off')
+  FileUtils.mkdir_p(off_dir)
+  saved = ENV['BC2CPP_GUARD_HOIST']
+  ENV['BC2CPP_GUARD_HOIST'] = '0'
+  off_code, = runtime.generate(SOURCE, off_dir, only_owners: OWNERS)
+  saved ? ENV['BC2CPP_GUARD_HOIST'] = saved : ENV.delete('BC2CPP_GUARD_HOIST')
+  check.call('hoist: BC2CPP_GUARD_HOIST=0 keeps both tests of twice',
+             body.call(off_code, 'twice').scan('bc2cpp_class_is(').size == 2 && !body.call(off_code, 'twice').include?('GUARD_HOIST'))
 
   unless ENV['CC_GENERATED_ONLY'] == '1'
     harness = <<~'CPP'
       #include <mruby/error.h>
       #include <string>
-      struct Call { mrb_value obj; mrb_sym mid; mrb_value argv[2]; };
+      struct Call { mrb_value obj; mrb_sym mid; mrb_int argc; mrb_value argv[3]; };
       static mrb_value call_body(mrb_state* M, void* ud) {
         Call* c = (Call*)ud;
-        return mrb_funcall_argv(M, c->obj, c->mid, 2, c->argv);
+        return mrb_funcall_argv(M, c->obj, c->mid, c->argc, c->argv);
       }
-      static void row(mrb_state* M, const char* label, const char* meth, mrb_value recv) {
+      static void row(mrb_state* M, const char* label, const char* meth, mrb_value recv,
+                      mrb_value other = mrb_undef_value()) {
         mrb_value probe = mrb_obj_new(M, mrb_class_get(M, "Probe"), 0, nullptr);
-        Call c = { probe, mrb_intern_cstr(M, meth), { recv, mrb_int_value(M, 2) } };
+        Call c = mrb_undef_p(other) ? Call{ probe, mrb_intern_cstr(M, meth), 2, { recv, mrb_int_value(M, 2) } }
+                                    : Call{ probe, mrb_intern_cstr(M, meth), 3, { recv, other, mrb_int_value(M, 2) } };
         mrb_bool raised = FALSE;
         mrb_value v = mrb_protect_error(M, call_body, &c, &raised);
         std::string out;
@@ -133,6 +186,13 @@ Dir.mktmpdir('leaf-owner-else') do |dir|
         row(M, "kid.pong", "bp", eval(M, "Kid.new"));
         row(M, "base.pong", "bp", eval(M, "Base.new"));
         row(M, "nil.pong", "bp", mrb_nil_value());
+        row(M, "leaf.twice", "twice", eval(M, "Leaf.new"));
+        row(M, "kid.twice", "twice", eval(M, "Kid.new"));
+        row(M, "leaf.moved leaf", "moved", eval(M, "Leaf.new"), eval(M, "Leaf.new"));
+        row(M, "leaf.moved kid", "moved", eval(M, "Leaf.new"), eval(M, "Kid.new"));
+        row(M, "leaf.looped leaf", "looped", eval(M, "Leaf.new"), eval(M, "Leaf.new"));
+        row(M, "leaf.looped kid", "looped", eval(M, "Leaf.new"), eval(M, "Kid.new"));
+        row(M, "singleton leaf.twice", "twice", eval(M, "l = Leaf.new; def l.extra; end; l"));
         return 0;
       }
     CPP
@@ -147,6 +207,11 @@ Dir.mktmpdir('leaf-owner-else') do |dir|
       check.call('a singleton Leaf still answers ping', compiled.any? { |l| l.start_with?('singleton leaf.ping') && l.include?(':leaf') })
       check.call('a non-Leaf receiver raises NoMethodError', compiled.any? { |l| l.start_with?('kid.ping') && l.include?('NoMethodError') })
       check.call('the inherited pong still runs', compiled.any? { |l| l.start_with?('kid.pong') && l.include?(':base') })
+      check.call('hoist: a Kid swapped in after the guard raises NoMethodError',
+                 compiled.any? { |l| l.start_with?('leaf.moved kid') && l.include?('NoMethodError') } &&
+                 compiled.any? { |l| l.start_with?('leaf.looped kid') && l.include?('NoMethodError') })
+      check.call('hoist: a Leaf with a singleton class passes the one guard of twice',
+                 compiled.any? { |l| l.start_with?('singleton leaf.twice') && l.include?(':pang') })
       warn output unless failures.empty?
     else
       puts '  SKIP run: no full-core mruby build'
