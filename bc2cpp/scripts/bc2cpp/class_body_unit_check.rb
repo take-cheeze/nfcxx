@@ -25,6 +25,7 @@ UNITS = <<~'RUBY'
   end
   module Mod
     NAME = 1
+    LOW = -7
   end
   class Sub < Object
     Y = 2
@@ -52,6 +53,7 @@ suite.compile(UNITS) do |ireps, root|
               router.include?('(void)mrb_vm_define_class(M, mrb_obj_value(M->object_class), mrb_nil_value(), mrb_intern_cstr(M, "Router"));') &&
               router.include?('(void)bc2cpp_class_body_Router_0(M);'))
   mod = units.find { |unit| unit[:path] == 'Mod' }.to_h[:code].to_s
+  suite.check('a negative Integer constant (LOADINEG) compiles in a body', mod.include?('mrb_fixnum_value(-7)'))
   suite.check('a module unit creates the module and calls its body',
               mod.include?('(void)mrb_vm_define_module(M, mrb_obj_value(M->object_class), mrb_intern_cstr(M, "Mod"));') &&
               mod.include?('(void)bc2cpp_class_body_Mod_0(M);'))

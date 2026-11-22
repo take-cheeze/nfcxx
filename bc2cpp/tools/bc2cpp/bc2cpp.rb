@@ -252,7 +252,7 @@ def bc2cpp_own_unit_file(symbol, own_mrblib)
   return ->(file) { CoreDefs.core_source?(file) } if symbol == 'core_compiled'
   return nil unless BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol }
 
-  ->(file) { file.include?(own_mrblib) }
+  ->(file) { file.match?(own_mrblib) }
 end
 
 BC2CPP_MAIN = lambda do
@@ -3029,10 +3029,10 @@ BC2CPP_MAIN = lambda do
   # the VM's run (UNIT_BLANK removes them from the residual mrblib). The phase fails at its end on an unresolved constant.
   # A class this gem's own mrblib reopens is the gem's too, even when it compiles no method of it (mruby-rpg2k's
   # `class Object; include RGSS; end`): the statements run only from this gem's units. The root holds every linked
-  # engine mrblib, so only this gem's own directory counts.
-  own_mrblib = "/mruby-#{symbol.to_s.delete_suffix('_compiled')}/mrblib/"
+  # engine mrblib, so only this gem's own directories count: mrblib/, and mrblib_rom/ (mruby-lcf's ROM schema).
+  own_mrblib = %r{/mruby-#{Regexp.escape(symbol.to_s.delete_suffix('_compiled'))}/mrblib(?:_rom)?/}
   all_class_units = gen.compile_top_class_units(ireps.fetch(root_label), own_file: bc2cpp_own_unit_file(symbol, own_mrblib))
-  own_reopened = all_class_units.select { |unit| unit[:file].to_s.include?(own_mrblib) }.map { |unit| unit[:path] }
+  own_reopened = all_class_units.select { |unit| unit[:file].to_s.match?(own_mrblib) }.map { |unit| unit[:path] }
   class_units = gen.owned_class_units(all_class_units, only_owners && (only_owners + own_reopened))
   # FOREIGN_CORE_UNITS: the excluded core file's classes (10error.rb) run first, as mrb_init_mrblib would load them.
   if symbol == 'core_compiled'
