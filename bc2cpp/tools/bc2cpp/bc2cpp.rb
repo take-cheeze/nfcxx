@@ -53,6 +53,7 @@ require_relative 'native_expression_devirt'
 require_relative 'branch_hints'
 require_relative 'tagged_fixnum'
 require_relative 'symbol_cache'
+require_relative 'class_test_fuse'
 require_relative 'const_site_cache'
 require_relative 'static_dispatch_lists'
 require_relative 'native_frame_use'
@@ -1663,6 +1664,8 @@ BC2CPP_MAIN = lambda do
   # RUNTIME_HEADER (runtime_header.rb): between the two, so it moves the compacted runtime text ShardOutput then splits.
   RuntimeHeader.capture_stdout(ENV[RuntimeHeader::DIR_KEY])
   CompactOutput.capture_stdout unless annotated
+  # CLASS_TEST_FUSE (class_test_fuse.rb): reads the text the passes registered after it leave.
+  ClassTestFuse.capture_stdout if ClassTestFuse.enabled?
   # OWNER_CALL_ARITY (owner_call_arity.rb): registered before OWNER_SET_SHARE, so it rewrites that pass's text.
   # OWNER_SET_SHARE (owner_set_share.rb): before the split, so shards of one gem share a set too.
   # Both inline, not through a local: BC2CPP_MAIN is at mruby's limit of local variables (see owner_rewrite below).

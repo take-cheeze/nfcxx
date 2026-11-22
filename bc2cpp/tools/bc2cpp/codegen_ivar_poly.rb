@@ -765,7 +765,7 @@ class CodeGen
     out = +<<~CPP
       // POLY_TABLE -- see codegen_ivar_poly.rb's compile_poly_table.
       struct bc2cpp_poly_entry {
-        struct RClass* (*owner)(mrb_state*);
+        #{owner_row_getter_field}
         bc2cpp_poly_fn fn;
         int slot;
       };
@@ -787,7 +787,7 @@ class CodeGen
         bc2cpp_poly_fn fn = nullptr;
         for (int i = 0; i < t.n; ++i) {
           struct RClass* k = bc2cpp_owner_class_slots[t.rows[i].slot];
-          if (k == c || (!k && t.rows[i].owner(M) == c)) {
+          if (k == c || (!k && #{owner_row_fill('t.rows[i]')} == c)) {
             fn = t.rows[i].fn;
             break;
           }
@@ -802,7 +802,7 @@ class CodeGen
       out << "// POLY_TABLE :#{table[:name]}\n"
       out << "static const bc2cpp_poly_entry #{rows}[] = {\n"
       table[:entries].zip(table.fetch(:getters), table.fetch(:slots)).each do |(owner, impl), getter, slot|
-        out << "  {#{getter}, reinterpret_cast<bc2cpp_poly_fn>(#{impl}), #{slot}},  // #{owner}\n"
+        out << "  {#{owner_row_getter(getter)}reinterpret_cast<bc2cpp_poly_fn>(#{impl}), #{slot}},  // #{owner}\n"
       end
       out << "};\n"
       out << "static const bc2cpp_poly_table #{table[:symbol]} = {#{rows}, #{table[:entries].size}, " \
