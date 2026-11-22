@@ -1801,6 +1801,12 @@ check grep -qF "spec.add_dependency 'mruby-onig-regexp'" "$work/api_reg_new/mrbg
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ternary_truth tools/cext2mrbgem/fixtures/api_ternary_truth/ext/api_ternary_truth "$work/api_ternary_truth" > "$work/api_ternary_truth.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'mrb_test(tt_ge(mrb, self, n)) ? 19 : 20' "$work/api_ternary_truth/src/api_ternary_truth.c"
+# 2zzz182. rb_marshal_load(port) is mrb_marshal_load(mrb, str) of the mruby-marshal gem; the converted gem depends on it; no refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_marshal_load tools/cext2mrbgem/fixtures/api_marshal_load/ext/api_marshal_load "$work/api_marshal_load" > "$work/api_marshal_load.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'Marshal' "$work/api_marshal_load/REFUSALS.txt")" -eq 0
+check grep -qF 'return mrb_marshal_load(mrb, data);' "$work/api_marshal_load/src/api_marshal_load.c"
+check grep -qF "spec.add_dependency 'mruby-marshal'" "$work/api_marshal_load/mrbgem.rake"
 # 2zzz179. rb_time_timespec_new: a fixed UTC offset is mrb_time_at_offset (the fork's mruby-time), CRuby's INT_MAX and INT_MAX-1 are
 # local time and UTC; no Time-offset refusal.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_time_offset tools/cext2mrbgem/fixtures/api_time_offset/ext/api_time_offset "$work/api_time_offset" > "$work/api_time_offset.log" 2>&1 || rc=$?

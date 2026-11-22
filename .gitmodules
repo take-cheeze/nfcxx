@@ -21,3 +21,6 @@
 	path = 3rd/mruby
 	url = https://github.com/take-cheeze/mruby
 	branch = claude/fork-integration
+[submodule "3rd/mruby-marshal"]
+	path = 3rd/mruby-marshal
+	url = https://github.com/take-cheeze/mruby-marshal
