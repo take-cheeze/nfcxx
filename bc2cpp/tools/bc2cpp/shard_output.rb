@@ -342,7 +342,11 @@ module ShardOutput
                 # A shard need not call every helper the whole program does.
                 line = lines[item[:first]] = "[[maybe_unused]] #{line}"
               end
-              lines[item[:first]] = to_shared_helper(line) if helpers.include?(item[:name])
+              if helpers.include?(item[:name])
+                # An attribute may stand on its own line, before the one with `static`.
+                at = (item[:first]..item[:last]).find { |k| lines[k][/\A[^(]*/].match?(/\bstatic\b/) }
+                lines[at] = to_shared_helper(lines[at]) if at
+              end
             end
           end
         else
@@ -418,7 +422,7 @@ module ShardOutput
         next
       end
       items.each do |item|
-        names << item[:name] if item[:function] && item[:body] && item[:name] && lines[item[:first]][/\A[^(]*/].match?(/\bstatic\b/)
+        names << item[:name] if item[:function] && item[:body] && item[:name] && item[:head][/\A[^(]*/].match?(/\bstatic\b/)
       end
     end
     names - kept
