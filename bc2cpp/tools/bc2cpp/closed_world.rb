@@ -189,6 +189,8 @@ class ClosedWorld
     @unknown_defs = Set.new
     @unknown_def_sources = Hash.new { |h, k| h[k] = [] }
     @visibility_names = Set.new
+    # VISIBILITY_SAME_BODY: the names some visibility send build_registry cannot fold into the definition names.
+    @visibility_unresolved = Set.new
     @dynamic_visibility = false
     @rebound = Set.new
     @constant_write_counts = Hash.new(0)
@@ -1014,7 +1016,7 @@ class ClosedWorld
   # `private :name` that names an inherited method, or one sent dynamically, makes a
   # copy it never sees.
   def visibility_stable?(name)
-    !@global_refusal && !@dynamic_visibility && !@visibility_names.include?(name)
+    !@global_refusal && !@dynamic_visibility && !@visibility_unresolved.include?(name)
   end
 
   # OWNERLESS_NATIVE_DISPATCH: class-independent native bodies may bypass
@@ -2737,7 +2739,31 @@ class ClosedWorld
 
     sets = n && argument_name_sets(irep, idx, insn, n, definitions: true)
     syms = n ? sets&.flatten : packed_syms(irep, idx, insn)
-    syms ? @visibility_names.merge(syms) : @dynamic_visibility = true
+    return @dynamic_visibility = true unless syms
+
+    @visibility_names.merge(syms)
+    @visibility_unresolved.merge(syms) unless same_body_visibility_send?(irep, idx, insn, syms)
+  end
+
+  # VISIBILITY_SAME_BODY: `private :a` / `public :a` (implicit self) in the class body that defined `a` earlier, in
+  # one class only: build_registry sets that definition's visibility from it, so the registry's answer is mruby's.
+  # A send in another body (an inherited method gets a copy there), or a body whose
+  # `a` the registry places on several owners, is not. BC2CPP_VISIBILITY_SAME_BODY=0 counts every send.
+  def same_body_visibility_send?(irep, idx, insn, syms)
+    return false if ENV['BC2CPP_VISIBILITY_SAME_BODY'] == '0'
+    return false unless %w[private public protected].include?(insn.sym) && %i[SSEND SSEND0].include?(insn.op)
+
+    syms.all? do |sym|
+      body = nil
+      irep.each_with_op(:TDEF, :DEF) do |d, i|
+        next unless i < idx && d.sym == sym
+
+        body = d.op == :TDEF ? irep.reps[d.block_index] : def_method_body(irep, i, d)
+      end
+      # Irep#reps holds the child labels.
+      label = body.respond_to?(:label) ? body.label : body
+      label && method_body_owners.fetch(label, []).size == 1
+    end
   end
 
   # Every reaching argument value must have a finite immutable name set. A String
