@@ -3473,12 +3473,20 @@ use_problem = lambda do |name, use|
   # mruby equivalent (mrb_value is a struct). The argument is still evaluated, and the check is not made: the value is ((void)(E), 1).
   # The caveat is recorded in the refusal list's conversion notes (the rewrite line).
   # the VALUE variables declared at file scope in a file (static VALUE x = ...;)
+  # a position in text the build leaves out (an inactive #if branch): its declarations are not file-scope names
+  def inactive_text_at?(rel, pos)
+    (@excluded_spans&.[](rel) || []).any? { |a, z| a <= pos && pos <= z }
+  end
+
   def file_scope_value_names(rel)
     @fs_value_names ||= {}
     @fs_value_names[rel] ||= begin
       out = Set.new
       value_decl_statements(@files[rel]['masked']).each do |_st, _kw, decls|
-        decls.each { |d| out << d[:name] if d[:name] && !d[:ptr] && enclosing_func(rel, d[:start]).nil? }
+        decls.each do |d|
+          next if inactive_text_at?(rel, d[:start])
+          out << d[:name] if d[:name] && !d[:ptr] && enclosing_func(rel, d[:start]).nil?
+        end
       end
       out
     end

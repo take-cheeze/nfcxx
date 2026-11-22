@@ -1782,6 +1782,10 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_block_shadow tools/cext2mrbg
 check test "$rc" -eq 0
 check test ! -e "$work/api_block_shadow/NOT_BUILDABLE"
 check test "$(grep -c 'VALUE as integer' "$work/api_block_shadow/REFUSALS.txt")" -eq 0
+# 2zzz172. a VALUE declared in a dead #if 0 branch is not a file-scope name: an int parameter named the same is not a VALUE use.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dead_decl tools/cext2mrbgem/fixtures/api_dead_decl/ext/api_dead_decl "$work/api_dead_decl" > "$work/api_dead_decl.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'VALUE as integer' "$work/api_dead_decl/REFUSALS.txt")" -eq 0
 check test "$(grep -c 'stuck point (Struct)' "$work/api_struct_va/REFUSALS.txt")" -eq 0
 # 2zzz155. a struct field of CRuby's rb_encoding * type: the Encoding placeholder type is in the prelude (the declaration compiles),
 # and the include of ruby/encoding.h is not a blocking refusal (the placeholder covers it).
