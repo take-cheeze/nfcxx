@@ -3,10 +3,11 @@
 # cache, its cache-log line, the remote tier's fetch on a local miss, and the hit (the object copied back). The driver passes the
 # lookup's arguments unchanged (the same --cache-dir, --out, --var and --arg options scripts/nfcxx-cache.rb lookup takes).
 #
-#   ruby scripts/nfcxx-cache-check.rb check --statements=FILE [--remote=KIND] (--records=FILE | LOOKUP-ARGS...)
+#   ruby scripts/nfcxx-cache-check.rb check [--statements=FILE] [--remote=KIND] (--records=FILE | LOOKUP-ARGS...)
 #       --records=FILE: the lookup's options are planned from FILE, the records of the driver's cache_plan (NUL-separated; the
-#       planner is scripts/nfcxx-cache-plan.rb), so the driver makes this one call and writes no arguments.
-#       writes cache_entry, cc_state (hit, miss or none) and cc_key to FILE for the driver to source, and logs the decision
+#       planner is scripts/nfcxx-cache-plan.rb; FILE may be /dev/fd/N), so the driver makes this one call and writes no arguments.
+#       writes cache_entry, cc_state (hit, miss or none) and cc_key to FILE for the driver to source, or to stdout when there is
+#       no --statements (the driver captures them; the children's output then goes to stderr), and logs the decision
 #       (--cache-log). On a local miss with --remote, the remote tier is fetched (scripts/nfcxx-cache-io.rb remote-get); an object
 #       then present is a hit, copied back to the output (scripts/nfcxx-cache.rb hit). Exit status 10: the hit was copied, and the
 #       driver exits 0; 0: go on. NFCXX_CACHE_IO replaces the remote helper's script (tests/nfcxx-cache/run.sh's stub).
@@ -101,6 +102,13 @@ module NfcxxCacheCheck
       end
     end
     lookup_args = rest unless records
+    # no --statements: the statements are the stdout (the driver captures them); the children of this check write to stderr, so
+    # their output is not mixed into the statements
+    stmt_out = nil
+    unless statements
+      stmt_out = STDOUT.dup
+      STDOUT.reopen(STDERR)
+    end
     state = "none"
     key = ""
     cache_entry = ""
@@ -130,12 +138,16 @@ module NfcxxCacheCheck
       remote_get(key, cache_entry) if !remote.empty?
       hit_now = File.file?(File.join(cache_entry, "obj"))
     end
+    text = [
+      "cache_entry=#{Shellwords.escape(cache_entry)}",
+      "cc_state=#{Shellwords.escape(state)}",
+      "cc_key=#{Shellwords.escape(key)}",
+    ].join("\n") + "\n"
     if statements
-      File.write(statements, [
-        "cache_entry=#{Shellwords.escape(cache_entry)}",
-        "cc_state=#{Shellwords.escape(state)}",
-        "cc_key=#{Shellwords.escape(key)}",
-      ].join("\n") + "\n")
+      File.write(statements, text)
+    else
+      stmt_out.write(text)
+      stmt_out.flush
     end
     return 0 unless hit_now && opt
     hit(opt, cache_entry) ? 10 : 0

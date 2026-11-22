@@ -275,23 +275,22 @@ eccp_plan_input() {  # the records of the eccp command line: the call's arrays a
 eccp_plan() {  # eccp_plan: the eccp command line (eccp_argv), its exports (eccp_envs) and its directory (eccp_cd), from
   # scripts/nfcxx-eccp-plan.rb (tests/nfcxx-eccp-plan/run.sh checks it against the bash's own construction). The plan also
   # plans the link arguments (eflist and userinc, from the files), and refuses an option it cannot keep: the status is the
-  # plan's, read from the reply file after the call (a refused option ends the driver with 2, as the bash did). The keep note
+  # plan's, read from the s record after the stream (a refused option ends the driver with 2, as the bash did). The keep note
   # is printed by the port.
-  local rec done=0 reply rc
+  local rec done=0 prc=0
   eccp_argv=(); eccp_envs=(); eccp_cd=""
-  local rdir; rdir=$(mktemp -d) || exit $?
-  reply=$rdir/reply.rec
-  eccp_plan_input | "${RUBY:-ruby}" "$root/scripts/nfcxx-eccp-plan.rb" "$eccp_dir" "$keep_intermediates" "$shared" > "$reply" \
-    || { rc=$?; rm -rf "$rdir"; exit $rc; }
+  # the plan's records stream from the process substitution (NUL-separated: a, e, d, z); the bash appends the plan's status as s
+  # after its end record, and the loop reads to the end of the stream, so no temporary file is made
   while IFS= read -r -d "" rec; do
     case $rec in
       a*) eccp_argv+=("${rec:1}") ;;
       e*) eccp_envs+=("${rec:1}") ;;
       d*) eccp_cd=${rec:1} ;;
       z) done=1 ;;
+      s*) prc=${rec:1} ;;
     esac
-  done < "$reply"
-  rm -rf "$rdir"
+  done < <(eccp_plan_input | "${RUBY:-ruby}" "$root/scripts/nfcxx-eccp-plan.rb" "$eccp_dir" "$keep_intermediates" "$shared"; printf 's%d\0' $?)
+  [ "$prc" = 0 ] || exit "$prc"
   [ $done = 1 ] || { echo "nfcxx: scripts/nfcxx-eccp-plan.rb stopped before its end (the eccp command line is incomplete)" >&2; exit 1; }
 }
 eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary directory (and of the C-input and .cu steps)
@@ -725,16 +724,13 @@ cache_plan() {
 cache_check() {  # cache_check: sets cache_entry (empty when the cache does not apply) and exits 0 on a hit
 cache_entry=""
 [ -n "$cache_dir" ] || return 0   # the cache is off: no Ruby is started
-local ctmp cstatus
-ctmp=$(mktemp -d)
-cache_plan > "$ctmp/records"
-# check: the lookup, its --cache-log block, the remote fetch on a local miss, and a hit's copy back. Status 10 is a hit (the program
-# is done); otherwise the statements file names the entry (cache_entry, cc_state, cc_key), which a store of the object needs.
-cstatus=0; "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-check.rb" check --statements="$ctmp/statements" --remote="$cache_remote" \
-  --records="$ctmp/records" || cstatus=$?
-if [ $cstatus = 10 ]; then rm -rf "$ctmp"; exit 0; fi
-[ -f "$ctmp/statements" ] && . "$ctmp/statements"
-rm -rf "$ctmp"
+local stmts cstatus=0
+# check: the lookup, its --cache-log block, the remote fetch on a local miss, and a hit's copy back. The records come from fd 3
+# (cache_plan's, a process substitution) and the statements go to stdout (the check's children write to stderr). Status 10 is a
+# hit (the program is done); otherwise the statements name the entry (cache_entry, cc_state, cc_key), which a store of the object needs.
+stmts=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cache-check.rb" check --remote="$cache_remote" --records=/dev/fd/3 3< <(cache_plan)) || cstatus=$?
+if [ $cstatus = 10 ]; then exit 0; fi
+if [ -n "$stmts" ]; then eval "$stmts"; fi
 return 0
 }
 cache_store() {  # cache_store OBJ: a whole entry appears at once (a partial copy is never a hit)
