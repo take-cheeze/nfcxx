@@ -1,0 +1,5 @@
+== --bundle-exclude=libc -c m.cpp -o m.o
+-- stdout
+-- stderr
+nfcxx: the --bundle-* options need --bundle-libs
+status=2

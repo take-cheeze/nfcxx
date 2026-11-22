@@ -1,0 +1,5 @@
+== --cuda-driver=bogus -o
+-- stdout
+-- stderr
+nfcxx: --cuda-driver=bogus: auto, cudart or libcuda
+status=2

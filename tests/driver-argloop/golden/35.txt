@@ -1,0 +1,4 @@
+== -E -o m.i m.cpp
+-- stdout
+-- stderr
+status=0

@@ -895,6 +895,19 @@ class CodeGen
     classes.freeze
   end
 
+  # NILABLE_SCOPED_RECEIVER: a send whose name nil does not answer (nil_unanswerable?) raises on a nil receiver and
+  # writes nothing, so the value it does return comes from the receiver's other classes. The receiver mask without
+  # NIL, or nil when there is nothing to strip. BC2CPP_NILABLE_SCOPED_RECEIVER=0 keeps nil-or-K receivers unscoped.
+  def nilable_scoped_receiver(name, receiver)
+    return nil unless receiver.is_a?(Integer) && receiver.anybits?(NumericFlow::NIL)
+
+    rest = receiver & ~NumericFlow::NIL
+    return nil if rest.zero? || rest.anybits?(NumericFlow::OTHER)
+    return nil if ENV['BC2CPP_NILABLE_SCOPED_RECEIVER'] == '0' || !nil_unanswerable?(name)
+
+    rest
+  end
+
   # A name-wide summary can be ambiguous even when this exact receiver selects one
   # body. Analyze that body with the CFG-aware flow; the element tracer's linear
   # writer scan is only suitable for guarded hints.
@@ -902,6 +915,11 @@ class CodeGen
     return nil unless %i[SEND SEND0].include?(insn.op)
 
     receiver = state[insn.reg.to_i]
+    stripped = nilable_scoped_receiver(name, receiver)
+    if stripped
+      state = state.dup
+      state[insn.reg.to_i] = receiver = stripped
+    end
     receiver_class = return_class_of_mask(receiver)
     return return_class_union_send_mask(name, insn, state, receiver) unless receiver_class
     return nil unless receiver_class && !RETURN_CORE_CLASS.value?(receiver_class)

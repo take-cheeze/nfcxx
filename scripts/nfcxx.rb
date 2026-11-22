@@ -100,6 +100,7 @@ SYCL_SCRIPT = File.join(root, "scripts", "nfcxx-sycl.rb")
 # -fsyntax-only (the type check) comes first, as it came first in the body: the command is rewritten (scripts/nfcxx-syntax-only.rb),
 # and this driver runs again on the rewritten command in a temporary directory, with its status.
 if (syntax = NfcxxSyntaxOnly.plan(ARGV))
+  $stderr.write("nfcxx: driver: plan\n") if ENV["NFCXX_DRIVER_TRACE"] == "1"   # the route the pre-loop plan took
   status = nil
   Dir.mktmpdir("nfcxx-fso.") do |dir|
     system(RbConfig.ruby, __FILE__, *NfcxxSyntaxOnly.args_in(syntax, dir))
@@ -107,6 +108,28 @@ if (syntax = NfcxxSyntaxOnly.plan(ARGV))
   end
   exit status
 end
+
+# --bundle-libs and --cuda-driver= (docs/notes/bundle.md, docs/notes/cuda-driver.md): the wrappers (scripts/wrap.rb) come after the
+# -fsyntax-only step and before anything else, as they came first in the body. Status 254 from the bundle wrapper means nothing
+# was done and the run goes on; any other status ends the run. A --cuda-driver= run goes on with the arguments the wrapper gives
+# (the --cuda-driver= options left out), or is run again with the shim in place of libcuda (EXEC) and ends with that status.
+WRAP_RB = File.join(root, "scripts", "wrap.rb")
+DRIVER_SHIM = File.join(root, "nfcxx")
+WRAP_GO_ON = 254
+$stderr.write("nfcxx: driver: plan\n") if ENV["NFCXX_DRIVER_TRACE"] == "1" && ARGV.any? { |a| a.start_with?("--bundle-") }
+system(RbConfig.ruby, WRAP_RB, "bundle", DRIVER_SHIM, *ARGV)
+bundle_status = $?.exitstatus || 128 + $?.termsig
+exit bundle_status unless bundle_status == WRAP_GO_ON
+cuda_out = IO.popen([RbConfig.ruby, WRAP_RB, "cuda-driver", DRIVER_SHIM, *ARGV], &:read)
+cuda_status = $?.exitstatus || 128 + $?.termsig
+exit cuda_status unless cuda_status == 0
+cuda_lines = cuda_out.lines.map(&:chomp)
+cuda_kind = cuda_lines.shift
+if cuda_kind == "EXEC"
+  system({ "NFCXX_CUDA_DRIVER" => "libcuda" }, DRIVER_SHIM, *cuda_lines)
+  exit($?.exitstatus || 128 + $?.termsig)
+end
+ARGV.replace(cuda_lines)
 
 # The route dispatch: the pre-loop plan (scripts/nfcxx-loop.rb) runs in scripts/nfcxx-run.rb, and a gcc-route refusal
 # (scripts/nfcxx-gcc-plan.rb --live, status 2) is printed here, as the bash prints it. Every other argument list goes to the
@@ -228,6 +251,22 @@ unless ARGV.include?("-fsyntax-only")
   end
 end
 
+# The argument loop (scripts/nfcxx-loop.rb --bash-state) runs here, before the routes, on the arguments the body's loop sees. Its
+# result is handed to the body in the environment (NFCXX_LOOP_STATUS: 0 and NFCXX_LOOP_STATE the statements to eval, or the
+# status and message of a refusal), and the body evals it at the place of its loop: a refusal is printed there, after the
+# body's steps before its loop, as before. The body's wrappers (--bundle-*, --cuda-driver=, a link that names libcuda) rewrite
+# the arguments before its loop, so for those the loop is left to the body (NFCXX_LOOP_STATUS unset).
+LOOP_WRAPPED = /--bundle-|\A--cuda-driver=|libcuda/
+
+def loop_result(args)
+  return nil if args.any? { |a| LOOP_WRAPPED.match?(a) }
+
+  out, err, status = Open3.capture3(RbConfig.ruby, LOOP, "--bash-state", "--", *args)
+  status.success? ? [0, out] : [status.exitstatus || 1, err]
+end
+
+LOOP_RESULT = loop_result(ARGV)
+
 if planned_loop?(ARGV)
   trace_route("plan")
   pid = Process.spawn(RbConfig.ruby, RUNNER, "--root=#{ROOT}", "--", *ARGV)
@@ -293,6 +332,9 @@ begin
   # trace_finish did; the bash only flushes its spans (its trace_finish keeps its span flush, and does not close the trace)
   trace_file = ARGV.reverse.find { |a| a.start_with?("--trace=") }&.delete_prefix("--trace=") || ENV["NFCXX_TRACE"].to_s
   env = { "RUBY" => ENV["RUBY"] || RbConfig.ruby, "TMPDIR" => tmproot, "NFCXX_TMP_OWNED" => "1" }
+  # the argument loop's result (LOOP_RESULT, above); nil unsets a variable the caller may have set, so the body runs its own loop
+  env["NFCXX_LOOP_STATUS"] = LOOP_RESULT&.first&.to_s
+  env["NFCXX_LOOP_STATE"] = LOOP_RESULT&.last
   env["NFCXX_KEEP_INTERMEDIATES"] = "1" if keep
   trace_rb = File.join(__dir__, "trace.rb")
   unless trace_file.empty?

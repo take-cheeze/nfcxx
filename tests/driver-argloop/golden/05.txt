@@ -1,5 +1,5 @@
 == -x
 -- stdout
 -- stderr
-nfcxx: no input files
-status=2
+ORACLE: line N: $2: unbound variable
+status=1
