@@ -890,21 +890,17 @@ link_records_rm
 # output has an instance of one of them (nm -C), the build runs again with those symbols (NFCXX_CUDA_HOST_SYMBOLS), and
 # the device rewrite makes each instance's entry. A unit whose templates are instantiated by other units (fattn.cu)
 # has none, and builds once. One .cu input only: the symbols of two units' static kernels could not be told apart.
-if [ ${#cu_inputs[@]} = 1 ] && [ -z "${NFCXX_CUDA_HOST_SYMBOLS:-}" ] && [ $preprocess = 0 ] && [ -f "$out" ] \
-   && [ -s "$cudatmp/$(basename "${cu_inputs[0]}" .cu).dev.kernels.unresolved" ]; then
-  hsyms=$cudatmp/host.syms
-  nm -C "$out" 2>/dev/null | sed 's/_INTERNAL_[A-Za-z0-9_]*:://g' > "$hsyms" || true
-  found=0
-  while IFS= read -r k; do
-    [ -n "$k" ] && grep -qE "(^|[ :])$k<" "$hsyms" && found=1
-  done < "$cudatmp/$(basename "${cu_inputs[0]}" .cu).dev.kernels.unresolved"
-  if [ $found = 1 ]; then
-    t=$(trace_start)
-    # (the second pass is not cached: the --cache option is left out, and NFCXX_CACHE emptied)
-    args2=(); for a in "${args0[@]}"; do case $a in --cache=*) ;; *) args2+=("$a") ;; esac; done
-    NFCXX_CUDA_HOST_SYMBOLS=$hsyms NFCXX_CACHE= NFCXX_CACHE_REMOTE= "$root/nfcxx" ${args2[@]+"${args2[@]}"} || exit $?
-    trace_end "$t" "second pass (kernel instances from the host compile)" eccp
-  fi
+# the gate, the host symbols and the found check are planned by scripts/nfcxx-second-pass.rb plan (sp_run, hsyms, args2: the
+# arguments without --cache); the run below is the oracle's line, which the Ruby driver calls with NfcxxSecondPass.run.
+sp_run=0
+if [ ${#cu_inputs[@]} = 1 ]; then   # (only a .cu compile can have a second pass: no Ruby is started otherwise)
+  eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-second-pass.rb" plan "$out" "$cudatmp" "${#cu_inputs[@]}" "${cu_inputs[0]-}" "$preprocess" "${NFCXX_CUDA_HOST_SYMBOLS-}" ${args0[@]+"${args0[@]}"})"
+fi
+if [ $sp_run = 1 ]; then
+  t=$(trace_start)
+  # (the second pass is not cached: the --cache option is left out, and NFCXX_CACHE emptied)
+  NFCXX_CUDA_HOST_SYMBOLS=$hsyms NFCXX_CACHE= NFCXX_CACHE_REMOTE= "$root/nfcxx" ${args2[@]+"${args2[@]}"} || exit $?
+  trace_end "$t" "second pass (kernel instances from the host compile)" eccp
 fi
 cache_store "$out"
 if [ -n "$depmode" ]; then
