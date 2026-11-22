@@ -1470,8 +1470,8 @@ check grep -qF 'mrb_value clas;' "$work/api_class_mixed/src/api_class_mixed.c"
 # 2zzz124. a VALUE cast to a pointer (void *)obj is a stuck point (VALUE as pointer): the fork's VALUE is a struct, so the
 # cast has no mruby form, and the file is marked not buildable with that reason.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_value_ptr tools/cext2mrbgem/fixtures/api_value_ptr/ext/api_value_ptr "$work/api_value_ptr" > "$work/api_value_ptr.log" 2>&1 || rc=$?
-check test -e "$work/api_value_ptr/NOT_BUILDABLE"
-check grep -qF 'stuck point (VALUE as pointer): obj is a VALUE' "$work/api_value_ptr/REFUSALS.txt"
+check test ! -e "$work/api_value_ptr/NOT_BUILDABLE"
+check grep -qF 'void *ctx = (void *)mrb_cptr(obj);' "$work/api_value_ptr/src/api_value_ptr.c"
 # 2zzz125. assert(v) on a VALUE is a stuck point (VALUE truth test): the fork's VALUE is a struct, and no exact truth test is
 # expressed (the assert is not weakened to a nil test).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_value_assert tools/cext2mrbgem/fixtures/api_value_assert/ext/api_value_assert "$work/api_value_assert" > "$work/api_value_assert.log" 2>&1 || rc=$?
@@ -1786,6 +1786,13 @@ check test "$(grep -c 'VALUE as integer' "$work/api_block_shadow/REFUSALS.txt")"
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dead_decl tools/cext2mrbgem/fixtures/api_dead_decl/ext/api_dead_decl "$work/api_dead_decl" > "$work/api_dead_decl.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check test "$(grep -c 'VALUE as integer' "$work/api_dead_decl/REFUSALS.txt")" -eq 0
+# 2zzz173. a pointer carried in a VALUE: (VALUE)h of a struct pointer local is mrb_cptr_value(mrb, h), and a VALUE cast to a
+# struct pointer is read with mrb_cptr; no VALUE-as-pointer refusal for either.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_cptr_value tools/cext2mrbgem/fixtures/api_cptr_value/ext/api_cptr_value "$work/api_cptr_value" > "$work/api_cptr_value.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'VALUE as pointer' "$work/api_cptr_value/REFUSALS.txt")" -eq 0
+check grep -qF 'mrb_value v = mrb_cptr_value(mrb, h);' "$work/api_cptr_value/src/api_cptr_value.c"
+check grep -qF 'Holder *h = (Holder *)mrb_cptr(x);' "$work/api_cptr_value/src/api_cptr_value.c"
 check test "$(grep -c 'stuck point (Struct)' "$work/api_struct_va/REFUSALS.txt")" -eq 0
 # 2zzz155. a struct field of CRuby's rb_encoding * type: the Encoding placeholder type is in the prelude (the declaration compiles),
 # and the include of ruby/encoding.h is not a blocking refusal (the placeholder covers it).

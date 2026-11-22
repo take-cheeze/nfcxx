@@ -4054,13 +4054,26 @@ use_problem = lambda do |name, use|
       ptr_re = ptr_typedefs.empty? ? /(?:struct\s+[A-Za-z_]\w*|void)\s*\*+\s*([A-Za-z_]\w*)/ :
                /(?:struct\s+[A-Za-z_]\w*|void)\s*\*+\s*([A-Za-z_]\w*)|\b(?:#{ptr_typedefs.to_a.map { |t| Regexp.escape(t) }.join('|')})\b\s*\**\s*([A-Za-z_]\w*)/
       mv.to_enum(:scan, ptr_re).each { ptr_names << (Regexp.last_match(1) || Regexp.last_match(2)) }
+      # any statement-level declaration of a pointer (Holder *h;, const char *s = ...): a pointer whatever its type's name
+      decl_ptr_kw = %w[return else case goto sizeof do typedef VALUE mrb_value].freeze
+      mv.to_enum(:scan, /(?:\A|[;{}(,])[ \t\n]*(?:const\s+)?([A-Za-z_]\w*)[ \t\n]*\*+[ \t\n]*([A-Za-z_]\w*)[ \t\n]*(?=[;=,)\[])/).each do
+        m = Regexp.last_match
+        ptr_names << m[2] unless decl_ptr_kw.include?(m[1])
+      end
       mv.to_enum(:scan, /\(\s*(?:VALUE|mrb_value)\s*\)\s*([A-Za-z_]\w*)(?=\s*(?:[;,)\-.\[]|\z))/).each do
         m = Regexp.last_match
         nm = m[1]
         next unless ptr_names.include?(nm) && !local_value_at?(rel, m.begin(1), nm) && !fs_values.include?(nm)
         next if in_dead_init(rel, m.begin(1))
-        next if @edits[rel].overlaps(m.begin(0), m.begin(0) + 1)
-        refuse(rel, m.begin(0), nm, "stuck point (VALUE as pointer): #{nm} is a struct pointer, cast to a VALUE, a struct in the fork (include/mruby/boxing_no.h): a pointer has no VALUE form here")
+        # the cast's VALUE token is already renamed to mrb_value (the type mapping): that rename is replaced with the whole cast
+        items = @edits[rel].overlapping(m.begin(0), m.end(1))
+        next unless items.all? { |a, b, t| t == 'mrb_value' && a >= m.begin(0) && b <= m.begin(1) }
+        @edits[rel].drop(items)
+        # a pointer carried in a VALUE is a CPTR object in the fork: (VALUE)pi is mrb_cptr_value(mrb, pi) (the GC roots of a VALUE
+        # that stores it are the converter's, as for any VALUE field)
+        @edits[rel].add(m.begin(0), m.begin(1), "mrb_cptr_value(#{mrb_tok(rel, m.begin(0))}, ")
+        @edits[rel].add(m.end(1), m.end(1), ')')
+        rewrite(rel, m.begin(0), nm, "mrb_cptr_value(mrb, #{nm})", 'a pointer cast to VALUE is a CPTR object (mrb_cptr_value): the VALUE holds the address, and a VALUE stored in a C struct must be rooted')
       end
       mv.to_enum(:scan, /\(\s*(?:struct\s+[A-Za-z_]\w*\s*\*+|([A-Za-z_]\w*))\s*\)\s*([A-Za-z_]\w*)(?=\s*(?:[;,)\-.\[]|\z))/).each do
         m = Regexp.last_match
@@ -4079,7 +4092,11 @@ use_problem = lambda do |name, use|
         # (nfcx_ptr_value at the call; the last pass inserts mrb_cptr at the cast)
         next if fnh && m[0].include?('*') && protect_callback_name?(fnh['name']) && fnh['params'].to_s.split(',').size == 1 &&
                 fnh['params'].to_s.split.last.to_s.delete('*') == nm
-        refuse(rel, m.begin(2), nm, "stuck point (VALUE as pointer): #{nm} is a VALUE, a struct in the fork (include/mruby/boxing_no.h), and a cast of it to a struct pointer has no mruby form")
+        # a cast to a pointer typedef ((ParseInfo)x) is not mapped by value_to_pointer_cast_pass (it matches the explicit
+        # struct X * and void * forms only), so it stays a refusal; the explicit pointer forms are mapped there (mrb_cptr)
+        if target
+          refuse(rel, m.begin(2), nm, "stuck point (VALUE as pointer): #{nm} is a VALUE, a struct in the fork (include/mruby/boxing_no.h), and a cast of it to a pointer typedef has no mruby form")
+        end
       end
     end
   end
@@ -5438,6 +5455,8 @@ end
       next if fnv && m[0].include?('*') && protect_callback_name?(fnv['name']) && fnv['params'].to_s.split(',').size == 1 &&
               fnv['params'].to_s.split.last.to_s.delete('*') == nm
       next if @edits[rel].overlaps(m.begin(1), m.begin(1) + 1)
+      # a single-word pointer type (void, char, VALUE) is mapped by value_to_pointer_cast_pass (mrb_cptr of the VALUE), which runs last
+      next if m[0].match?(/\(\s*(?:void|char|VALUE)\s*\*\s*\)/)
       refuse(rel, m.begin(1), nm, "stuck point (VALUE as pointer): #{nm} is a VALUE, a struct in the fork (include/mruby/boxing_no.h), and a cast of it to a pointer has no mruby form")
     end
     # assert(v) on a VALUE (a local, parameter or VALUE struct member) is a truth test that the fork's VALUE struct has no
