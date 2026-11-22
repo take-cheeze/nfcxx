@@ -50,14 +50,15 @@ Dir.mktmpdir('bc2cpp-installed-name-devirt') do |dir|
   literal_dir = File.join(dir, 'literal')
   Dir.mkdir(literal_dir)
   code, = Bc2cppFixtureRuntime.generate(source('cls.remove_method(:foo)'), literal_dir, core: true, only_owners: OWNERS)
-  suite.check('a literally removed name keeps dispatching by name', !method_code(code, 'go').include?('MONO :foo'))
-  suite.check('a name nothing removes still binds MONO', method_code(code, 'other').include?('MONO :bar'))
+  suite.check('a literally removed name keeps dispatching by name', !method_code(code, 'go').match?(/MONO\w* :foo/))
+  # MONO_RECEIVER_PROOF: the unproven argument receiver takes the guarded form.
+  suite.check('a name nothing removes still binds MONO', method_code(code, 'other').include?('MONO_GUARD :bar'))
 
   computed_dir = File.join(dir, 'computed')
   Dir.mkdir(computed_dir)
   code, err = Bc2cppFixtureRuntime.generate(source('cls.remove_method(name)'), computed_dir, core: true, only_owners: OWNERS)
   suite.check('with a computed removal no name binds MONO',
-              %w[go other].none? { |m| method_code(code, m).include?('MONO :') } && !method_code(code, 'go').empty?)
+              %w[go other].none? { |m| method_code(code, m).match?(/MONO\w* :/) } && !method_code(code, 'go').empty?)
 
   onig_dir = File.join(dir, 'onig')
   Dir.mkdir(onig_dir)

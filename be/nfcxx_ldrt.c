@@ -755,3 +755,34 @@ int __nfcxx_cpu_supports(const char *name)
 void __nfcxx_cpu_init(void) {}
 int __nfcxx_cpu_supports(const char *name) { (void)name; return 0; }
 #endif
+
+/* The GNU libatomic names Path B's lowering calls (the operations of __atomic_* for sizes 1, 2, 4 and 8) on a Darwin
+   host. Darwin's compiler-rt archive has only the outline helpers (__aarch64_ldadd8_relax and the like), so these are
+   written here. The builtins in them compile inline for these sizes, so none of them calls back into these names. */
+#ifdef __APPLE__
+#include <stdint.h>
+#define NFCXX_ATOMIC_RMW(N, T)                                                           \
+  T __atomic_fetch_add_##N(void *p, T v, int m) { (void)m; return __atomic_fetch_add((T *)p, v, __ATOMIC_SEQ_CST); } \
+  T __atomic_fetch_sub_##N(void *p, T v, int m) { (void)m; return __atomic_fetch_sub((T *)p, v, __ATOMIC_SEQ_CST); } \
+  T __atomic_fetch_and_##N(void *p, T v, int m) { (void)m; return __atomic_fetch_and((T *)p, v, __ATOMIC_SEQ_CST); } \
+  T __atomic_fetch_or_##N(void *p, T v, int m)  { (void)m; return __atomic_fetch_or((T *)p, v, __ATOMIC_SEQ_CST); }  \
+  T __atomic_fetch_xor_##N(void *p, T v, int m) { (void)m; return __atomic_fetch_xor((T *)p, v, __ATOMIC_SEQ_CST); } \
+  T __atomic_fetch_nand_##N(void *p, T v, int m) { (void)m; return __atomic_fetch_nand((T *)p, v, __ATOMIC_SEQ_CST); } \
+  T __atomic_add_fetch_##N(void *p, T v, int m) { (void)m; return __atomic_add_fetch((T *)p, v, __ATOMIC_SEQ_CST); } \
+  T __atomic_sub_fetch_##N(void *p, T v, int m) { (void)m; return __atomic_sub_fetch((T *)p, v, __ATOMIC_SEQ_CST); } \
+  T __atomic_and_fetch_##N(void *p, T v, int m) { (void)m; return __atomic_and_fetch((T *)p, v, __ATOMIC_SEQ_CST); } \
+  T __atomic_or_fetch_##N(void *p, T v, int m)  { (void)m; return __atomic_or_fetch((T *)p, v, __ATOMIC_SEQ_CST); }  \
+  T __atomic_xor_fetch_##N(void *p, T v, int m) { (void)m; return __atomic_xor_fetch((T *)p, v, __ATOMIC_SEQ_CST); } \
+  T __atomic_nand_fetch_##N(void *p, T v, int m) { (void)m; return __atomic_nand_fetch((T *)p, v, __ATOMIC_SEQ_CST); } \
+  T __atomic_exchange_##N(void *p, T v, int m) { (void)m; return __atomic_exchange_n((T *)p, v, __ATOMIC_SEQ_CST); } \
+  void __atomic_store_##N(void *p, T v, int m) { (void)m; __atomic_store_n((T *)p, v, __ATOMIC_SEQ_CST); }            \
+  T __atomic_load_##N(void *p, int m) { (void)m; return __atomic_load_n((T *)p, __ATOMIC_SEQ_CST); }                  \
+  _Bool __atomic_compare_exchange_##N(void *p, void *e, T d, int weak, int s, int f) {                                 \
+    (void)weak; (void)s; (void)f;                                                                                        \
+    return __atomic_compare_exchange_n((T *)p, (T *)e, d, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);                       \
+  }
+NFCXX_ATOMIC_RMW(1, uint8_t)
+NFCXX_ATOMIC_RMW(2, uint16_t)
+NFCXX_ATOMIC_RMW(4, uint32_t)
+NFCXX_ATOMIC_RMW(8, uint64_t)
+#endif

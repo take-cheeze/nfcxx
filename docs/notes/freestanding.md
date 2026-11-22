@@ -52,8 +52,10 @@ What that means for the tests:
 The same gate, `pb_fs_host` in the driver, admits arm64 macOS. Path B's code generation there is the `arm64_apple` QBE target
 (Mach-O symbols with a leading underscore, no `.type`/`.size`, weak definitions as `.weak_definition`), which hosted Path B already
 uses. The freestanding link is the hosted one minus the C++ runtime: `libC.a`, the long double helpers, `-lpthread -lm` and
-the libSystem that `cc` links; no `-lc++` (the hosted macOS link), no `-latomic`, no `-lstdc++`/`-lgcc_s`, no `-z` or
-`--no-pie` options (the driver adds none for a freestanding link on any host).
+the libSystem that `cc` links; no `-latomic`, no `-lstdc++`/`-lgcc_s`, no `-z` or `--no-pie` options (the driver adds none
+for a freestanding link on any host). The one C++ library it names is `-lc++` on macOS, for the personality of the
+exception tables (a freestanding object with a landing pad, a `noexcept` function that calls `std::terminate`, references
+`__gxx_personality_v0`; see docs/notes/pathb-zero-cost-eh.md, "macOS arm64").
 `tests/lib/run.sh` runs the pathb column there (and on Linux), and the macOS CI leg runs it in the pathb job.
 Not verified on an Intel Mac: the gate is arm64 only.
 

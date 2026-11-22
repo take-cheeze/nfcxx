@@ -41,10 +41,13 @@ class CodeGen
   # for unrolled splat register lists. argv/kw_val_exprs are C++ expressions.
   # splat: a C++ expression for a `**h` Hash (KEYWORD_SPLAT_STATIC). Then the keywords are the callee's own, each read
   # from the hash at run time, and the hash's keys are checked against them.
+  # proof_site: [irep, idx, reg] of the send, for MONO_RECEIVER_PROOF; fallback: a Proc building the else arm of a
+  # receiver guard when the call carries no keywords (KEYWORDLESS_CALL's by-name send).
   def compile_keyword_call(name:, d:, recv:, n:, argv:, kw_names:, kw_val_exprs:,
-                           self_implicit: false, owner_def: nil, constant_target: nil, splat: nil)
-    # MONO only, no TYPED: the guard's else branch would need a dynamic keyword
-    # dispatch, which mrb_funcall cannot express. MONO needs no guard.
+                           self_implicit: false, owner_def: nil, constant_target: nil, splat: nil,
+                           proof_site: nil, fallback: nil)
+    # MONO only, no TYPED. An unproven MONO receiver takes MONO_RECEIVER_PROOF's guard, whose else arm is the
+    # keyword send (bc2cpp_send_kw).
     # CONSTANT_OBJECT_KEYWORD: a constant_target (constant_object_keyword_target) is the definition the receiver's
     # class object reaches exactly, so it replaces the name-wide MONO lookup, which two definers defeat.
     target = constant_target || monomorphic_target(name)
@@ -60,14 +63,25 @@ class CodeGen
     end
     return nil unless target&.irep
 
+    mono = !lexical_self && constant_target.nil?
+    # EXPLICIT_RECEIVER_VISIBILITY: OP_SEND raises for a private or protected method; KEYWORD_DYNAMIC_SEND checks it.
+    return nil if mono && !self_implicit && mono_receiver_proof_enabled? && !explicit_call_visible?(name, target)
+
     # monomorphic_target already checked compiles_clean?; fetch the irep for the
     # checks below.
     callee_irep = @ireps.fetch(target.irep)
     # KEYWORD_REST_ONLY: a callee with only `**opts` takes the literal pairs as one fresh Hash (see keyword_rest_call).
     # A `**h` site has no static list of keys to hand that Hash, so such a callee stays `#error`.
     return nil if splat && keyword_rest_only_shape?(callee_irep)
-    return keyword_rest_call(target, callee_irep, d: d, recv: recv, n: n, argv: argv, kw_names: kw_names,
-                             kw_val_exprs: kw_val_exprs, lexical_self: lexical_self) if keyword_rest_only_shape?(callee_irep)
+    if keyword_rest_only_shape?(callee_irep)
+      # MONO_RECEIVER_PROOF: an unproven receiver keeps KEYWORD_DYNAMIC_SEND.
+      return nil if mono && mono_receiver_proof(name, target, recv: recv, self_implicit: self_implicit, owner_def: owner_def,
+                                                irep: proof_site&.at(0), idx: proof_site&.at(1),
+                                                reg: proof_site&.at(2)) != :proven
+
+      return keyword_rest_call(target, callee_irep, d: d, recv: recv, n: n, argv: argv, kw_names: kw_names,
+                               kw_val_exprs: kw_val_exprs, lexical_self: lexical_self)
+    end
     kw_table = keyword_arg_table(callee_irep)
     return nil unless kw_table
     kw_names = kw_table.map { |k| k[:name].to_s } if splat
@@ -156,6 +170,17 @@ class CodeGen
       else
         "  // MONO :#{name} -> #{target.owner}##{target.name} (keyword call), direct C++ call (no by-name send)\n"
       end
+    if mono
+      proof = mono_receiver_proof(name, target, recv: recv, self_implicit: self_implicit, owner_def: owner_def,
+                                  irep: proof_site&.at(0), idx: proof_site&.at(1), reg: proof_site&.at(2))
+      unless proof == :proven
+        # A `**h` call checks the Hash before the lookup; its unproven receiver keeps the dynamic send.
+        return nil if splat
+
+        return mono_keyword_guarded(name, target, d, recv, argv, kw_names, kw_val_exprs, call, proof,
+                                    self_implicit: self_implicit, fallback: fallback)
+      end
+    end
     return "#{note}  #{call}\n" unless splat
 
     # The hash is converted once, and every key must be one the callee declares (an unknown key is the ArgumentError
@@ -166,6 +191,44 @@ class CodeGen
     "  {\n    mrb_value bc2cpp_kwd = bc2cpp_kwsplat_hash(M, #{splat});\n#{decl}" \
       "    bc2cpp_kwsplat_check(M, bc2cpp_kwd, #{check_names}, #{names.size});\n" \
       "#{note}  #{call}\n  }\n"
+  end
+
+  # MONO_RECEIVER_PROOF for a keyword call: a nil test (nil's NoMethodError) for a nil-or-proven receiver, else the
+  # exact owner guard whose else arm is the send OP_SEND makes (KEYWORD_DYNAMIC_SEND's Hash and bc2cpp_send_kw).
+  def mono_keyword_guarded(name, target, d, recv, argv, kw_names, kw_val_exprs, call, proof, self_implicit:, fallback:)
+    nil_arm = proof == :nilable && mono_nil_arm(d, recv, name, argv)
+    if nil_arm
+      return "  // MONO_NILABLE :#{name} -> #{target.owner}##{target.name} (keyword call; receiver nil or proven to " \
+             "reach #{target.owner}), nil test then direct C++ call\n" \
+             "  if (mrb_nil_p(#{recv})) {\n    #{nil_arm}  } else {\n    #{call}\n  }\n"
+    end
+
+    guardable = mono_guardable_owner?(target.owner)
+    check, listed = mono_receiver_check(target.owner, recv)
+    fallback = if fallback then fallback.call(guardable ? listed : nil)
+               else mono_keyword_send_line(d, recv, name, argv, kw_names, kw_val_exprs, explicit: !self_implicit)
+               end
+    unless guardable
+      return "  // MONO_UNPROVEN :#{name} -> #{target.owner}##{target.name} (keyword call; no class to guard), by-name send\n" \
+             "  #{fallback}"
+    end
+    "  // MONO_GUARD :#{name} -> #{target.owner}##{target.name} (keyword call; receiver unproven), " \
+      "runtime-class-checked direct C++ call, by-name send fallback\n" \
+      "  if (#{BranchHints.likely(check)}) {\n    #{call}\n" \
+      "  } else {\n    #{fallback}  }\n"
+  end
+
+  def mono_keyword_send_line(d, recv, name, argv, kw_names, kw_val_exprs, explicit:)
+    out = +"{\n"
+    out << "      mrb_value bc2cpp_kwd_argv[] = { #{argv.join(', ')} };\n" unless argv.empty?
+    out << "      mrb_value bc2cpp_kwd = mrb_hash_new_capa(M, #{kw_names.size});\n"
+    kw_names.each_with_index do |kname, k|
+      out << "      mrb_hash_set(M, bc2cpp_kwd, mrb_symbol_value(mrb_intern_cstr(M, #{c_string_literal(kname.to_s)})), " \
+             "#{kw_val_exprs[k]});\n"
+    end
+    out << "      #{RegName[d]} = bc2cpp_send_kw(M, #{recv}, mrb_intern_cstr(M, #{c_string_literal(name)}), #{argv.size}, " \
+           "#{argv.empty? ? 'NULL' : 'bc2cpp_kwd_argv'}, bc2cpp_kwd, #{explicit}, self);\n"
+    out << "    }\n"
   end
 
   # KEYWORD_REST_ONLY: a keyword send to a callee whose only keyword parameter is `**opts`. The literal pairs become one
@@ -206,21 +269,27 @@ class CodeGen
     # An explicit receiver may not reach a private or protected method.
     return nil unless self_implicit || target.visibility == :public
 
-    call = compile_keyword_call(name: name, d: d, recv: recv, n: n, argv: argv, kw_names: [], kw_val_exprs: [],
-                                self_implicit: self_implicit, owner_def: owner_def)
-    return nil unless call
-    return call unless embeds_storage?(target.owner)
-
     site = closed_world_site(recv, irep, idx, owner_def)
+    # `listed` nil: no guard took a class out (MONO_UNPROVEN), so only the plain send is right.
+    fallback = lambda do |listed|
+      keywordless_fallback? && listed ? guarded_fallback_line(d, recv, name, argv, listed, site) : dynamic_dispatch_line(d, recv, name, argv)
+    end
+    call = compile_keyword_call(name: name, d: d, recv: recv, n: n, argv: argv, kw_names: [], kw_val_exprs: [],
+                                self_implicit: self_implicit, owner_def: owner_def,
+                                proof_site: !self_implicit && idx && recv == RegName[d] ? [irep, idx, d.to_i] : nil,
+                                fallback: fallback)
+    return nil unless call
+    # MONO_RECEIVER_PROOF already guarded an unproven receiver.
+    return call if !embeds_storage?(target.owner) || call.match?(%r{// MONO_(?:GUARD|NILABLE|UNPROVEN) })
+
     return call if self_implicit && site&.dig(:self_owner) == target.owner && @closed_world&.exact_class?(target.owner)
 
     check = exact_class_guard(owner_class_ptr_expr(target.owner), recv)
     # KEYWORDLESS_FALLBACK: the keywordless call is an ordinary send of `name` with `argv`, so the
     # else arm is MONO_EMBED_GUARD's: the closed world's proven fallback (nomethod / unlisted-class arms) or,
     # when it cannot prove the chain, the same by-name dispatch as before.
-    fallback = keywordless_fallback? ? guarded_fallback_line(d, recv, name, argv, [target.owner], site) : dynamic_dispatch_line(d, recv, name, argv)
     "#{call.lines.first}  if (#{check}) {\n  #{call.lines.drop(1).join}  } else {\n    " \
-      "#{fallback}  }\n"
+      "#{fallback.call([target.owner])}  }\n"
   end
 
   # BC2CPP_KEYWORDLESS_FALLBACK=0 restores the by-name else arm of the embedding-owner guard.
@@ -245,7 +314,7 @@ class CodeGen
     direct = compile_keyword_call(name: name, d: d, recv: recv, n: n, argv: argv,
                                   kw_names: kw_names, kw_val_exprs: kw_val_regs.map { |r| "r#{r}" },
                                   self_implicit: self_implicit, owner_def: owner_def,
-                                  constant_target: constant_target)
+                                  constant_target: constant_target, proof_site: [irep, idx, dest_reg])
     return direct if direct
 
     # KEYWORD_DIRECT_CONSTRUCT_SUPPORT: for `:new`, compile_keyword_call always
@@ -266,7 +335,8 @@ class CodeGen
     hashpos = compile_keyword_hash_positional_send(name: name, d: d, recv: recv, n: n, nk: nk,
                                                    argv: argv, kw_sym_regs: kw_sym_regs,
                                                    kw_val_regs: kw_val_regs, kw_names: kw_names,
-                                                   self_implicit: self_implicit, owner_def: owner_def)
+                                                   self_implicit: self_implicit, owner_def: owner_def,
+                                                   proof_site: [irep, idx, dest_reg])
     return hashpos if hashpos
 
     # KEYWORD_NEVER_DEFINED_CONST_RECEIVER_SUPPORT: tried last: every other proof
@@ -535,7 +605,7 @@ class CodeGen
   # Marked KEYWORD_HASH_DEVIRT.
   # Returns the C++ or nil.
   def compile_keyword_hash_positional_send(name:, d:, recv:, n:, nk:, argv:, kw_sym_regs:,
-                                           kw_val_regs:, kw_names:, self_implicit:, owner_def:)
+                                           kw_val_regs:, kw_names:, self_implicit:, owner_def:, proof_site: nil)
     # vm.c's `if (argc < 14)` arm.
     return nil unless nk.positive? && n < 14
 
@@ -588,14 +658,15 @@ class CodeGen
       out << "    mrb_hash_set(M, bc2cpp_kwh, r#{kw_sym_regs[k]}, r#{kw_val_regs[k]});" \
              "  // :#{kw_names[k]}\n"
     end
-    out << "    #{keyword_hash_devirt_line(name: name, d: d, recv: recv, argv: argv, total: total)}"
+    out << "    #{keyword_hash_devirt_line(name: name, d: d, recv: recv, argv: argv, total: total,
+                                         self_implicit: self_implicit, owner_def: owner_def, proof_site: proof_site)}"
     out << "  }\n"
     out
   end
 
   # KEYWORD_HASH_DEVIRT_SUPPORT dispatch tail for the packed-Hash call: MONO, then
   # POLY_SMALL_N, else dynamic dispatch.
-  def keyword_hash_devirt_line(name:, d:, recv:, argv:, total:)
+  def keyword_hash_devirt_line(name:, d:, recv:, argv:, total:, self_implicit: false, owner_def: nil, proof_site: nil)
     ext_argv = argv + ['bc2cpp_kwh']
     target = monomorphic_target(name)
     if target
@@ -608,6 +679,20 @@ class CodeGen
          (!@only_owners || @only_owners.include?(target.owner) || @other_owners&.include?(target.owner))
         impl = cpp_name(target.owner, target.name) + '_impl'
         call_argv, = direct_call_args(target, ext_argv, impl)
+        proof = mono_receiver_proof(name, target, recv: recv, self_implicit: self_implicit, owner_def: owner_def,
+                                    irep: proof_site&.at(0), idx: proof_site&.at(1), reg: proof_site&.at(2))
+        unless proof == :proven
+          # MONO_RECEIVER_PROOF: nil's NoMethodError, or the exact owner guard with the by-name send.
+          call = "r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});"
+          nil_arm = proof == :nilable && mono_nil_arm(d, recv, name, argv)
+          return dynamic_dispatch_line(d, recv, name, ext_argv) unless nil_arm || mono_guardable_owner?(target.owner)
+
+          check = nil_arm ? "!mrb_nil_p(#{recv})" : BranchHints.likely(mono_receiver_check(target.owner, recv).first)
+          return "  // KEYWORD_HASH_DEVIRT :#{name} -> #{target.owner}##{target.name} (MONO_#{nil_arm ? 'NILABLE' : 'GUARD'}, " \
+                 "trailing-Hash positional, direct C++ call)\n" \
+                 "    if (#{check}) {\n      #{call}\n    } else {\n      " \
+                 "#{nil_arm || dynamic_dispatch_line(d, recv, name, ext_argv)}    }\n"
+        end
         return "  // KEYWORD_HASH_DEVIRT :#{name} -> #{target.owner}##{target.name} (MONO, trailing-Hash " \
                "positional, direct C++ call, no by-name send)\n" \
                "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"

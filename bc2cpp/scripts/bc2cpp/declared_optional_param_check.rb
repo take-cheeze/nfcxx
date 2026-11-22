@@ -11,7 +11,9 @@
 #      the typed ones); the guarded body is not inlined;
 #   2. the guard contract (DeclaredReturns.optional_param_guard_failures) refuses a compiled body without the guard;
 #   3. run on a full-core mruby against interpreted: the calls answer as interpreted, and a wrong given argument raises
-#      BC2cppDeclarationViolation.
+#      BC2cppDeclarationViolation;
+#   4. DECLARED_NUMERIC_ENTRY: a required Integer (Float) parameter is an Integer (numeric) operand past its guard, and
+#      BC2CPP_DECLARED_NUMERIC_ENTRY=0 takes that back.
 #
 # Usage: MRBC=path/to/host/mrbc [BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/declared_optional_param_check.rb
 
@@ -79,10 +81,23 @@ SOURCE = <<~RUBY
       s.upcase
     end
 
+    def scale(n)
+      n * 3 + 1
+    end
+
+    def halve(x)
+      x / 2
+    end
+
     def run
       f = Foo.new
       pick(f) + pick(f, f) + add(f) + add(f, 5) + computed(f) + later(f) + later(f, 1, f) + loose(f, f) +
-        sorted(f) + sorted(f, [3, 1]) + sorted(f, nil) + keys_of({ a: 1 }) + shout('a').size
+        sorted(f) + sorted(f, [3, 1]) + sorted(f, nil) + keys_of({ a: 1 }) + shout('a').size +
+        scale($menu_n) + halve($menu_f).to_i
+    end
+
+    def wrong_scale
+      scale($menu_f)
     end
 
     def wrong_sorted
@@ -112,6 +127,8 @@ SIGNATURES = <<~RBS
     def sorted: (Foo a, ?Array[Integer]? xs) -> Integer
     def keys_of: (Hash[Symbol, Integer] h) -> Integer
     def shout: (String s) -> String
+    def scale: (Integer n) -> Integer
+    def halve: (Float x) -> Float
   end
 RBS
 OWNERS = %w[Foo Menu].freeze
@@ -119,15 +136,20 @@ OWNERS = %w[Foo Menu].freeze
 HARNESS = <<~'CPP'
   static int scenario(mrb_state* M) {
     mrb_value menu = mrb_obj_new(M, mrb_class_get(M, "Menu"), 0, nullptr);
+    mrb_gv_set(M, mrb_intern_lit(M, "$menu_n"), mrb_fixnum_value(4));
+    mrb_gv_set(M, mrb_intern_lit(M, "$menu_f"), mrb_float_value(M, 5.0));
     call(M, "run", menu, "run");
     call(M, "wrong pick", menu, "wrong");
     call(M, "wrong add", menu, "wrong_add");
     call(M, "wrong sorted", menu, "wrong_sorted");
+    call(M, "wrong scale", menu, "wrong_scale");
     return 0;
   }
 CPP
 
-generate = lambda do |dir|
+generate = lambda do |dir, env = {}|
+  saved = env.to_h { |k, _| [k, ENV[k]] }
+  env.each { |k, v| ENV[k] = v }
   sigs = File.join(dir, 'sig')
   FileUtils.mkdir_p(sigs)
   File.write(File.join(sigs, 'menu.rbs'), SIGNATURES)
@@ -136,6 +158,7 @@ generate = lambda do |dir|
   [code, err, code.split(%r{^(?=// \w+#)}).to_h { |part| [part[%r{\A// (\S+)}, 1], part] }]
 ensure
   ENV.delete('BC2CPP_SIG_DIRS')
+  saved&.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
 end
 guard = ->(body, name, arg) { body.to_s.include?("/* DECLARED_PARAM_GUARD Menu##{name} arg #{arg} */") }
 direct = ->(body) { body.to_s.include?('MONO_EXACT_FLOW :size2 -> Foo#size2') && !body.to_s.include?('CLOSED_WORLD nomethod: recv.size2') }
@@ -162,6 +185,19 @@ Dir.mktmpdir('declared-optional-param') do |dir|
              by['Menu#keys_of'].to_s.include?('mrb_hash_p(h)))) bc2cpp_declared_param_violation') &&
                by['Menu#shout'].to_s.include?('mrb_string_p(s)))) bc2cpp_declared_param_violation'))
   check.call('the guarded body is not inlined', !by['Menu#run'].to_s.include?('CALL_INLINE Menu#pick'))
+  # DECLARED_NUMERIC_ENTRY: the call sites pass a global, so only the guarded declaration knows the class.
+  integer_only = ->(body) { body.to_s.include?('INTEGER_OPERAND_PROOF') && !body.to_s.match?(/bc2cpp_num_\w+_float\(|mrb_float\(/) }
+  check.call('a required `Integer` parameter is an Integer operand past its guard',
+             guard.call(by['Menu#scale'], 'scale', 1) && integer_only.call(by['Menu#scale']))
+  check.call('a required `Float` parameter is a numeric operand past its guard',
+             guard.call(by['Menu#halve'], 'halve', 1) && by['Menu#halve'].to_s.include?('NUMERIC_OPERAND_PROOF') &&
+               !by['Menu#halve'].to_s.include?('INTEGER_OPERAND_PROOF'))
+  Dir.mktmpdir('declared-numeric-entry-off') do |off_dir|
+    _off_code, _off_err, off = generate.call(off_dir, 'BC2CPP_DECLARED_NUMERIC_ENTRY' => '0')
+    check.call('BC2CPP_DECLARED_NUMERIC_ENTRY=0 leaves the declared parameters unproven operands',
+               guard.call(off['Menu#scale'], 'scale', 1) && !off['Menu#scale'].to_s.include?('NUMERIC_OPERAND_PROOF') &&
+                 !off['Menu#halve'].to_s.include?('NUMERIC_OPERAND_PROOF'))
+  end
 
   params = { 'x' => [[1, 'Foo', 'Menu#pick', 'Foo?', :class, true, 0]] }
   check.call('the contract refuses a compiled body without its optional guard',
@@ -185,7 +221,8 @@ Dir.mktmpdir('declared-optional-param') do |dir|
     check.call('a wrong given argument raises the violation in the compiled run',
                wrong.call(compiled) == ['wrong pick => raised BC2cppDeclarationViolation',
                                         'wrong add => raised BC2cppDeclarationViolation',
-                                        'wrong sorted => raised BC2cppDeclarationViolation'])
+                                        'wrong sorted => raised BC2cppDeclarationViolation',
+                                        'wrong scale => raised BC2cppDeclarationViolation'])
     warn output unless built && compiled.size == interpreted.size
   else
     puts '  SKIP run: no full-core mruby build'

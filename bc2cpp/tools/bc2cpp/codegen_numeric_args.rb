@@ -23,7 +23,33 @@ class CodeGen
     return NumericFlow::INT if fixnum_proof_entry_arg?(irep, reg, owner)
 
     pooled = @entry_arg_numeric && @entry_arg_numeric[[irep.label, reg.to_i]]
+    declared = declared_numeric_entry(irep, reg)
+    return pooled.nil? ? declared : pooled & declared if declared
+
     pooled.nil? ? (lcf_entry_class_pool(irep, reg) || NumericFlow::OTHER) : pooled
+  end
+
+  # DECLARED_NUMERIC_ENTRY: a mandatory parameter declared Integer or Float (`T?` too) holds that on entry, because the
+  # body's DECLARED_PARAM_GUARD raises for anything else before the first instruction runs and such a body is never
+  # inlined (codegen_call_inline). These are the bits the class pools already seed (setup_class_pools); an optional one is
+  # left out, as its register holds the default only after the body's own code. BC2CPP_DECLARED_NUMERIC_ENTRY=0 drops it.
+  def declared_numeric_entry(irep, reg)
+    return nil if ENV['BC2CPP_DECLARED_NUMERIC_ENTRY'] == '0' || @declared_arg_pools.nil?
+
+    # Keyed by the pools' identity: setup_class_pools replaces the Hash when it runs again.
+    @declared_numeric_entries = [@declared_arg_pools, declared_numeric_entries] unless @declared_numeric_entries&.first.equal?(@declared_arg_pools)
+    @declared_numeric_entries[1][[irep.label, reg.to_i]]
+  end
+
+  def declared_numeric_entries
+    declared_params_kept.each_with_object({}) do |(label, guards), out|
+      guards.each do |pos, cls, _key, _text, kind = :class, nilable = false, optional = nil|
+        next if optional || !%i[integer float].include?(kind)
+
+        bits = declared_arg_bits(cls, kind, nilable)
+        out[[label, pos + 1]] = bits if @declared_arg_pools[[label, pos + 1]] == bits
+      end
+    end
   end
 
   # EXACT_LCF_ENTRY: a parameter with no numeric pool (a call site the numeric flow cannot name) still holds what its

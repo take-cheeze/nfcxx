@@ -55,7 +55,8 @@ class CodeGen
       next if defs.empty?
       string_native = name == 'to_s' && native_result_name_kinds(name)
       # The linked-source audit is stricter than the broad foreign-name census.
-      collection_native = NativeClassResults::ARRAY_TRANSFORMS.include?(name) && native_result_name_kinds(name)
+      collection_native = (NativeClassResults::ARRAY_TRANSFORMS.include?(name) || NativeClassResults::INTEGER_RESULTS.include?(name)) &&
+                          native_result_name_kinds(name)
       next if @foreign_method_names.include?(name) && !string_native && !collection_native
       next if aliased.include?(name) && !(string_native && native_struct_string_alias_safe?)
       next unless @closed_world.name_fully_visible?(name) || native_result_name_kinds(name)

@@ -2641,6 +2641,16 @@ data_make_calls_all.each do |rel, pos, mk_name, fr_name, mk_pos, fr_pos|
   end
   (@dtype_mark_names ||= Set.new) << mk_name if mk_name && @defs.key?(mk_name)
 end
+# a mark function stored in a struct's mark field (p->mark = mark) is a mark callback when the gem calls it through that field
+# (p->mark(p) in the data type's mark, as oj's parser does): the registration is the assignment, the call is the mark. Both
+# must be in this gem, so a field nothing marks through is not seeded.
+if @files.each_value.any? { |f| f['masked'].match?(/(?:->|\.)mark\s*\(/) }
+  @files.each_value do |f|
+    f['masked'].scan(/(?:->|\.)mark\s*=\s*([A-Za-z_]\w*)\s*;/) do |(nm)|
+      (@dtype_mark_names ||= Set.new) << nm if @defs.key?(nm)
+    end
+  end
+end
     # rb_hash_foreach callbacks are threaded (see hash_foreach_calls): forced into the needs set, with their call positions
     @hash_calls = hash_foreach_calls
     @onig_calls = onig_foreach_calls
