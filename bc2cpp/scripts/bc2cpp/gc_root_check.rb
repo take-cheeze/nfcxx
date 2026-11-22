@@ -216,6 +216,16 @@ SOURCE = <<~RUBY
       r.inspect
     end
 
+    # KEEP_OLD_BATCH: two stores in a row root both replaced values with one call before the first store.
+    def batch_overwrite
+      a = @list
+      m = @mode
+      @list = nil
+      @mode = :idle
+      churn
+      [a, m].inspect
+    end
+
     def attr_overwrite
       r = cur
       self.cur = nil
@@ -228,7 +238,8 @@ RUBY
 OWNERS = %w[GcRoot].freeze
 CASES = %w[ivar_return ivar_local gvar_overwrite ary_overwrite hash_overwrite ary_clear ary_replace
            attr_overwrite ary_clear_by_name ary_store_by_name hash_clear_by_name hash_store_by_name
-           each_clear_by_name map_clear_by_name map_proc_clear arg_clear_by_name mixed_slot_overwrite].freeze
+           each_clear_by_name map_clear_by_name map_proc_clear arg_clear_by_name mixed_slot_overwrite
+           batch_overwrite].freeze
 # Cases that need no root, so they match with the roots switched off too.
 UNROOTED_CASES = %w[pure_between imm_flag_overwrite].freeze
 
@@ -280,13 +291,22 @@ Dir.mktmpdir('bc2cpp-gc-root') do |dir|
               !embedded_store.call('ivar_flag') && code.include?('/* IMMEDIATE_OLD */'))
   suite.check('a slot that also holds a String roots the value an immediate store replaces',
               embedded_store.call('ivar_mode'))
+  batch_body = ->(text) { text[/GcRoot_batch_overwrite_impl\(mrb_state\* M, mrb_value self\) \{.*?\n\}\n/m].to_s }
+  suite.check('a run of slot stores roots the values it replaces in one call (KEEP_OLD_BATCH)',
+              batch_body.call(code).include?('bc2cpp_keep_olds2(((GcRoot_ivars*)DATA_PTR(self))->ivar_list, ' \
+                                             '((GcRoot_ivars*)DATA_PTR(self))->ivar_mode, M);'))
   Dir.mktmpdir('bc2cpp-gc-root-imm-old') do |imm_dir|
     ENV['BC2CPP_IMMEDIATE_OLD'] = '0'
+    ENV['BC2CPP_KEEP_OLD_BATCH'] = '0'
     begin
       imm_off, = Bc2cppFixtureRuntime.generate(SOURCE, imm_dir, core: true, only_owners: OWNERS)
     ensure
       ENV.delete('BC2CPP_IMMEDIATE_OLD')
+      ENV.delete('BC2CPP_KEEP_OLD_BATCH')
     end
+    suite.check('BC2CPP_KEEP_OLD_BATCH=0 roots each store on its own',
+                !batch_body.call(imm_off).include?('bc2cpp_keep_olds') &&
+                batch_body.call(imm_off).scan('bc2cpp_keep_old(M, ').size == 2)
     suite.check('BC2CPP_IMMEDIATE_OLD=0 roots it again', !imm_off.include?('/* IMMEDIATE_OLD */') &&
                 (imm_off.include?('bc2cpp_keep_old(M, ((GcRoot_ivars*)DATA_PTR(self))->ivar_flag);') ||
                  imm_off.include?('&((GcRoot_ivars*)DATA_PTR(self))->ivar_flag, ')))
