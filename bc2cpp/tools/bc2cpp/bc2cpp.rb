@@ -3335,6 +3335,8 @@ BC2CPP_MAIN = lambda do
   # BC2CPP_ENTRY: the host-callable entry header (codegen_entry_header.rb), beside the declarations and, when
   # BC2CPP_ENTRY_INCLUDE_DIR names it, in the build's include directory, where every host's `__has_include` finds it.
   entry_header = gen.emit_entry_header(compiled, symbol)
+  # SHARD_COLOCATE (shard_colocate.rb): the hosts call these bodies directly, so no copy of them saves code.
+  ShardColocate.keep = entry_header.scan(/(?<![\w$])[A-Za-z_][\w$]*_impl(?![\w$])/)
   File.write(File.join(out_dir, "#{symbol}_entry.h"), entry_header)
   if (entry_dir = ENV['BC2CPP_ENTRY_INCLUDE_DIR'])
     FileUtils.mkdir_p(entry_dir)

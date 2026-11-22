@@ -2,6 +2,7 @@
 
 require 'set'
 require 'stringio'
+require_relative 'shard_colocate'
 
 # BC2CPP_SHARDS (docs/bc2cpp-shards.md): the generated translation unit split into files that compile in parallel.
 #
@@ -126,12 +127,13 @@ module ShardOutput
     # Owners are kept in the main file only under a tier; without one the split is the default.
     hot = tier ? (hot || Set.new) : Set.new
     prelude, units, hooks = sections(text)
+    colocate(symbol, prelude, units, hooks)
     # Each unit remembers its print position, so the placement can be reported after assign has regrouped them.
     indexed = units.each_with_index.map { |u, i| u.merge(index: i) }
     groups = assign(indexed, shards, hot)
     tiers = Array.new(units.size, DEFAULT_TIER)
     if groups.count { |g| !g.empty? } <= 1
-      plain = prelude + units.map { |u| u[:code] }.join + hooks
+      plain = prelude + units.map { |u| u[:code] }.join + units.map { |u| u[:tail].to_s }.join + hooks
       return [plain, Array.new(shards - 1) { |i| empty_shard(symbol, i + 1, shards) }, tiers]
     end
 
@@ -140,6 +142,21 @@ module ShardOutput
     end
     main, files = rewrite(symbol, shards, prelude, groups, hooks, tier)
     [main, files, tiers]
+  end
+
+  # SHARD_COLOCATE (shard_colocate.rb), before the units are placed, so a copy is weighed with its root's unit.
+  # BC2CPP_SHARD_COLOCATE_REPORT=FILE appends one `symbol callee root placement` row per copy.
+  def colocate(symbol, prelude, units, hooks)
+    return unless ShardColocate.enabled?
+
+    rows = ShardColocate.apply!(prelude, units, hooks)
+    return if rows.empty?
+
+    warn "== shard colocate (SHARD_COLOCATE): #{rows.size} single-site callees copied beside " \
+         "#{rows.map { |r| r[1] }.uniq.size} callers =="
+    return unless (path = ENV['BC2CPP_SHARD_COLOCATE_REPORT']) && !path.empty?
+
+    File.open(path, 'a') { |f| rows.each { |r| f.puts([symbol, *r].join("\t")) } }
   end
 
   def empty_shard(symbol, index, shards)
@@ -167,8 +184,8 @@ module ShardOutput
   # `shards` lists of units, each in print order.
   def assign(units, shards, hot = Set.new)
     by_owner = units.each_with_index.group_by { |u, _| u[:owner] }
-    size = ->(list) { list.sum { |u, _| u[:code].bytesize } }
-    total = units.sum { |u| u[:code].bytesize }
+    size = ->(list) { list.sum { |u, _| u[:code].bytesize + u[:tail].to_s.bytesize } }
+    total = units.sum { |u| u[:code].bytesize + u[:tail].to_s.bytesize }
     min_bytes = Integer(ENV.fetch('BC2CPP_SHARD_MIN_BYTES', MIN_SHARD_BYTES.to_s))
     split_owners = ENV['BC2CPP_SHARD_SPLIT_OWNERS'] == '1'
     count = split_owners ? units.size : by_owner.size
@@ -182,6 +199,7 @@ module ShardOutput
       loads[0] += size.call(list)
       placed[0].concat(list)
     end
+    cold_part = colocate_affinity(cold_part, size, target) unless split_owners
     chunks = cold_part.flat_map do |owner, list|
       split_owners && size.call(list) > target ? list.map { |unit| [owner, [unit]] } : [[owner, list]]
     end
@@ -193,8 +211,39 @@ module ShardOutput
     placed.map { |list| list.sort_by(&:last).map(&:first) } + Array.new(shards - wanted) { [] }
   end
 
+  # SHARD_COLOCATE's affinity: an owner whose units hold copies of another owner's methods joins that owner's chunk,
+  # heaviest copies first, while the joined chunk stays within one shard's share. A copy in another shard than its
+  # original still works, but its shard then compiles its own copy of every stateless prelude helper the copy calls.
+  def colocate_affinity(owners, size, target)
+    index = owners.each_with_index.to_h { |(owner, _), i| [owner, i] }
+    parent = (0...owners.size).to_a
+    find = ->(i) { parent[i] == i ? i : (parent[i] = find.call(parent[i])) }
+    weight = owners.map { |_, list| size.call(list) }
+    edges = Hash.new(0)
+    owners.each do |owner, list|
+      list.each do |u, _|
+        (u[:colo_owners] || {}).each { |other, bytes| edges[[owner, other].sort] += bytes if index.key?(other) && other != owner }
+      end
+    end
+    edges.sort_by { |pair, bytes| [-bytes, pair] }.each do |(a, b), _|
+      ra = find.call(index[a])
+      rb = find.call(index[b])
+      next if ra == rb || weight[ra] + weight[rb] > target
+
+      ra, rb = rb, ra if rb < ra
+      parent[rb] = ra
+      weight[ra] += weight[rb]
+    end
+    owners.each_index.group_by { |i| find.call(i) }.sort.map do |_, members|
+      [owners[members.first].first, members.flat_map { |i| owners[i].last }]
+    end
+  end
+
   def rewrite(symbol, shards, prelude, groups, hooks, tier)
-    texts = groups.each_with_index.map { |g, i| g.map { |u| u[:code] }.join + (i.zero? ? hooks : '') }
+    # A unit's :tail (SHARD_COLOCATE's copies) follows every unit of its shard.
+    texts = groups.each_with_index.map do |g, i|
+      g.map { |u| u[:code] }.join + g.map { |u| u[:tail].to_s }.join + (i.zero? ? hooks : '')
+    end
     items = texts.map { |t| top_level_items(t.lines) }
     defined = {}
     items.each_with_index do |list, shard|

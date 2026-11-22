@@ -376,6 +376,163 @@ Dir.mktmpdir('bc2cpp-shard-tiers') do |dir|
   end
 end
 
+# SHARD_COLOCATE (tools/bc2cpp/shard_colocate.rb): a single-site `_impl` is copied, static, beside its caller.
+puts '-- colocate'
+COLO_PRELUDE = <<~'CPP'
+  #include <stdio.h>
+  typedef long mrb_value;
+  struct mrb_gc { int arena_idx; };
+  struct mrb_state { mrb_gc gc; };
+  struct bc2cpp_res { mrb_state* M; int idx; mrb_value v; };
+  static mrb_value bc2cpp_cfunc_result(bc2cpp_res r) { return r.v; }
+  mrb_value A_top_impl(mrb_state* M, mrb_value self);
+  mrb_value A_other_impl(mrb_state* M, mrb_value self);
+  mrb_value B_mid_impl(mrb_state* M, mrb_value self);
+  mrb_value C_leaf_impl(mrb_state* M, mrb_value self, mrb_value x);
+  mrb_value D_two_impl(mrb_state* M, mrb_value self);
+  mrb_value E_state_impl(mrb_state* M, mrb_value self);
+  mrb_value F_live_impl(mrb_state* M, mrb_value self);
+  mrb_value G_rec_impl(mrb_state* M, mrb_value self);
+  mrb_value H_ping_impl(mrb_state* M, mrb_value self);
+  mrb_value H_pong_impl(mrb_state* M, mrb_value self);
+  mrb_value K_kept_impl(mrb_state* M, mrb_value self);
+  mrb_value L_ctx_impl(mrb_state* M, mrb_value self);
+  mrb_value N_guard_impl(mrb_state* M, mrb_value self);
+  mrb_value P_one_impl(mrb_state* M, mrb_value self);
+CPP
+COLO_A = <<~'CPP'
+  mrb_value A_top_impl(mrb_state* M, mrb_value self) {
+    return B_mid_impl(M, self) + D_two_impl(M, self) + E_state_impl(M, self) + F_live_impl(M, self) +
+           G_rec_impl(M, self) + K_kept_impl(M, self);
+  }
+  mrb_value A_other_impl(mrb_state* M, mrb_value self) {
+    return D_two_impl(M, self) + (self > 0 ? H_ping_impl(M, self - 1) : 0) + L_ctx_impl(M, self) +
+           N_guard_impl(M, self) + P_one_impl(M, self);
+  }
+CPP
+COLO_B = <<~'CPP'
+  static const int b_spec = 7;
+  mrb_value B_mid_impl(mrb_state* M, mrb_value self) {
+    /* C_leaf_impl( in a comment is no call */
+    return C_leaf_impl(M, self, b_spec);
+  }
+  static mrb_value B_mid(mrb_state* M, mrb_value self) {
+    return bc2cpp_cfunc_result({M, M->gc.arena_idx, B_mid_impl(M, self)});
+  }
+  mrb_value F_live_impl(mrb_state* M, mrb_value self) { return self * 3; }
+  static mrb_value F_live(mrb_state* M, mrb_value self) {
+    return bc2cpp_cfunc_result({M, M->gc.arena_idx, F_live_impl(M, self)});
+  }
+CPP
+COLO_C = <<~'CPP'
+  mrb_value C_leaf_impl(mrb_state* M, mrb_value self, mrb_value x) {
+    return self + x;
+  }
+  mrb_value D_two_impl(mrb_state* M, mrb_value self) {
+    return self * 10;
+  }
+  mrb_value E_state_impl(mrb_state* M, mrb_value self) {
+    static int calls = 0;
+    return ++calls * 1000;
+  }
+  mrb_value G_rec_impl(mrb_state* M, mrb_value self) {
+    return self > 3 ? self : G_rec_impl(M, self + 1);
+  }
+  mrb_value H_ping_impl(mrb_state* M, mrb_value self) { return self > 0 ? H_pong_impl(M, self - 1) : 100; }
+  mrb_value H_pong_impl(mrb_state* M, mrb_value self) { return self > 0 ? H_ping_impl(M, self - 1) : 200; }
+  mrb_value K_kept_impl(mrb_state* M, mrb_value self) { return 5; }
+  struct L$ctx { long v; };
+  mrb_value L_ctx_impl(mrb_state* M, mrb_value self) { L$ctx c{3}; return self + c.v; }
+  static inline mrb_value N_guard_impl_unguarded(mrb_state* M, mrb_value self) { return self + 11; }
+  mrb_value N_guard_impl(mrb_state* M, mrb_value self) { return N_guard_impl_unguarded(M, self) * 2; }
+  static inline mrb_value P_help(mrb_state* M, mrb_value self) { return self ^ 6; }
+  mrb_value P_one_impl(mrb_state* M, mrb_value self) { return P_help(M, self) + P_help(M, self + 1); }
+CPP
+COLO_HOOKS = <<~'CPP'
+  int run_all() {
+    mrb_value (*const rows[])(mrb_state*, mrb_value) = { F_live };
+    mrb_state m{};
+    return (int)(A_top_impl(&m, 1) + A_other_impl(&m, 3) + rows[0](&m, 1));
+  }
+CPP
+
+def colo_text
+  COLO_PRELUDE + ShardOutput.unit_mark('A') + COLO_A + ShardOutput.unit_mark('B') + COLO_B +
+    ShardOutput.unit_mark('C') + COLO_C + ShardOutput::HOOKS_MARK + COLO_HOOKS
+end
+
+def colo_split(mode, keep = nil)
+  saved_keep = ShardColocate.keep
+  ShardColocate.keep = keep
+  tier_with_env('BC2CPP_SHARD_MIN_BYTES' => '1', 'BC2CPP_SHARD_COLOCATE' => mode) { ShardOutput.split(colo_text, 'colo', 3) }
+ensure
+  ShardColocate.keep = saved_keep
+end
+
+colo_main, colo_shards = colo_split(nil, ['K_kept_impl'])
+colo_all = colo_main + colo_shards.join
+a_shard = [colo_main, *colo_shards].find { |t| t.include?('mrb_value A_top_impl(mrb_state* M, mrb_value self) {') }
+suite.check('a single-site callee and the one its body calls are copied, static, into the caller\'s shard',
+            a_shard.include?("\nBC2CPP_COLO_ATTR static mrb_value bc2cpp_colo_B_mid_impl(mrb_state* M, mrb_value self) {") &&
+              a_shard.include?("\nBC2CPP_COLO_ATTR static mrb_value bc2cpp_colo_C_leaf_impl(mrb_state* M, mrb_value self, mrb_value x) {"))
+suite.check('the copies are declared ahead of their root caller, which calls the first',
+            a_shard.index('BC2CPP_COLO_ATTR static mrb_value bc2cpp_colo_C_leaf_impl(mrb_state* M, mrb_value self, mrb_value x);') <
+              a_shard.index('mrb_value A_top_impl(mrb_state* M, mrb_value self) {') &&
+              a_shard.include?('return bc2cpp_colo_B_mid_impl(M, self) + D_two_impl(M, self)'))
+suite.check('the copy of a chain member calls the next copy; the originals stay as they were',
+            a_shard.include?('return bc2cpp_colo_C_leaf_impl(M, self, b_spec);') &&
+              colo_all.include?("mrb_value B_mid_impl(mrb_state* M, mrb_value self) {\n  /* C_leaf_impl( in a comment is no call */\n  return C_leaf_impl(M, self, b_spec);"))
+refused = { 'two call sites' => 'D_two_impl', 'a mutable function-local static' => 'E_state_impl',
+            'a registered wrapper' => 'F_live_impl', 'recursion' => 'G_rec_impl', 'a cycle' => 'H_ping_impl',
+            'an entry-header name' => 'K_kept_impl', 'a type its unit defines' => 'L_ctx_impl',
+            'an inline helper it does not take along' => 'P_one_impl' }
+refused.each do |why, name|
+  suite.check("#{why} keeps #{name} uncopied", !colo_all.include?("bc2cpp_colo_#{name}"))
+end
+a_other = [colo_main, *colo_shards].find { |t| t.include?('mrb_value A_other_impl(mrb_state* M, mrb_value self) {') }
+suite.check('a guard wrapper\'s static inline body is copied along with it',
+            a_other.include?("\nBC2CPP_COLO_ATTR static mrb_value bc2cpp_colo_N_guard_impl_unguarded(mrb_state* M, mrb_value self) {") &&
+              a_other.include?('return bc2cpp_colo_N_guard_impl_unguarded(M, self) * 2;') &&
+              colo_all.include?("\nstatic inline mrb_value N_guard_impl_unguarded(mrb_state* M, mrb_value self) {"))
+aff_units = [{ owner: 'R', code: 'r' * 100, colo_owners: { 'S' => 80 } }, { owner: 'S', code: 's' * 100 },
+             { owner: 'T', code: 't' * 100 }, { owner: 'U', code: 'u' * 100 }].each_with_index.map { |u, i| u.merge(index: i) }
+aff = ShardOutput.assign(aff_units, 2)
+suite.check('an owner whose copies another owner holds shares that owner\'s shard when both fit',
+            aff.any? { |g| g.map { |u| u[:owner] }.sort == %w[R S] })
+big = aff_units.map { |u| u[:owner] == 'S' ? u.merge(code: 's' * 400) : u }
+suite.check('affinity never makes a chunk larger than one shard\'s share',
+            ShardOutput.assign(big, 2).none? { |g| g.map { |u| u[:owner] }.sort == %w[R S] })
+off_main, off_shards = colo_split('0')
+suite.check('BC2CPP_SHARD_COLOCATE=0 copies nothing', !(off_main + off_shards.join).include?('bc2cpp_colo_'))
+all_main, all_shards = colo_split('all', ['K_kept_impl'])
+suite.check('BC2CPP_SHARD_COLOCATE=all copies a callee whose wrapper is registered, too',
+            (all_main + all_shards.join).include?('BC2CPP_COLO_ATTR static mrb_value bc2cpp_colo_F_live_impl('))
+one_main, = tier_with_env('BC2CPP_SHARD_COLOCATE' => nil, 'BC2CPP_SHARD_MIN_BYTES' => nil) { ShardOutput.split(colo_text, 'colo', 3) }
+suite.check('under the shard threshold the one translation unit holds the copies after every unit',
+            one_main.index('BC2CPP_COLO_ATTR static mrb_value bc2cpp_colo_B_mid_impl(mrb_state* M, mrb_value self) {') >
+              one_main.index('mrb_value K_kept_impl('))
+if Bc2cppCxx.executable?(Bc2cppCxx.compiler.first)
+  outputs = { 'colocated' => [colo_main, colo_shards], 'all' => [all_main, all_shards], 'off' => [off_main, off_shards],
+              'one unit' => [one_main, []] }.map do |label, (main_text, shard_texts)|
+    Dir.mktmpdir('bc2cpp-shard-colocate') do |dir|
+      File.write(File.join(dir, 'colo_gen.cpp'), main_text)
+      shard_texts.each_with_index { |text, i| File.write(ShardOutput.shard_path(dir, 'colo', i + 1), text) }
+      File.write(File.join(dir, 'main.cpp'), "#include <cstdio>\nint run_all();\nint main() { std::printf(\"%d %d\\n\", run_all(), run_all()); }\n")
+      sources = [File.join(dir, 'colo_gen.cpp'), *shard_texts.each_index.map { |i| ShardOutput.shard_path(dir, 'colo', i + 1) },
+                 File.join(dir, 'main.cpp')]
+      _out, err, status = Bc2cppCxx.capture3('-std=c++17', '-O2', '-Wall', '-Werror', '-Wno-unused-function', *sources,
+                                             '-o', File.join(dir, 'colo'))
+      puts err.lines.first(20).join unless status.success?
+      suite.check("colocate #{label}: the program compiles warning-free and links", status.success?)
+      status.success? ? Open3.capture2(File.join(dir, 'colo')).first : nil
+    end
+  end
+  suite.check("the colocated programs print what the uncolocated one prints (#{outputs[2].to_s.strip})",
+              !outputs[2].to_s.strip.empty? && outputs.uniq.size == 1)
+else
+  puts '  SKIP: no C++ compiler'
+end
+
 puts '-- generated code'
 mrbc =ENV['MRBC'] || ENV.fetch('PATH', '').split(File::PATH_SEPARATOR).map { |d| File.join(d, 'mrbc') }.find { |p| File.executable?(p) }
 if mrbc.nil?
@@ -432,6 +589,62 @@ Dir.mktmpdir('bc2cpp-shard-generated') do |dir|
     suite.check('the main file and the shard compile and link', built)
     sections = Bc2cppFixtureRuntime.sections(output.to_s)
     suite.check('the sharded build runs the fixture as the interpreter does',
+                sections['interpreted']&.last == 'end' && sections['interpreted'] == sections['compiled'])
+    puts output.to_s.lines.last(20).join unless built && sections['interpreted'] == sections['compiled']
+  end
+end
+
+# SHARD_COLOCATE on generated code: a chain of single-site methods across owners. The fixture registers every
+# method, so BC2CPP_SHARD_COLOCATE=all reaches the copies a closed build makes of statically dispatched ones.
+COLO_SOURCE = <<~'RUBY'
+  class ColoTop
+    def initialize(n); @n = n; end
+    def run(mid); mid.step(@n, [1, 2, 3]) + 1; end
+  end
+  class ColoMid
+    def initialize(leaf); @leaf = leaf; end
+    def step(n, list); @leaf.scale(list.sum, n) * 2; end
+  end
+  class ColoLeaf
+    def initialize(k); @k = k; end
+    def scale(x, n); n > 2 ? x * n + @k : (x - @k).abs; end
+  end
+RUBY
+COLO_OWNERS = %w[ColoTop ColoMid ColoLeaf].freeze
+COLO_DRIVER = <<~'RUBY'
+  leaf = ColoLeaf.new(5)
+  puts ColoTop.new(4).run(ColoMid.new(leaf))
+  puts ColoTop.new(1).run(ColoMid.new(leaf))
+  puts ColoTop.new(-2).run(ColoMid.new(ColoLeaf.new(-1)))
+  puts 'end'
+RUBY
+Dir.mktmpdir('bc2cpp-shard-colocate-generated') do |dir|
+  saved = %w[BC2CPP_SHARDS BC2CPP_SHARD_MIN_BYTES BC2CPP_SHARD_COLOCATE].to_h { |k| [k, ENV.fetch(k, nil)] }
+  ENV.update('BC2CPP_SHARDS' => '3', 'BC2CPP_SHARD_MIN_BYTES' => '1', 'BC2CPP_SHARD_COLOCATE' => 'all')
+  code, err = Bc2cppFixtureRuntime.generate(COLO_SOURCE, dir, core: true, only_owners: COLO_OWNERS)
+  saved.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
+  shards = [1, 2].map { |k| ShardOutput.shard_path(dir, 'fixture', k) }
+  text = code + shards.map { |p| File.exist?(p) ? File.read(p) : '' }.join
+  suite.check('SHARD_COLOCATE copies the generated single-site callees, static, beside their callers',
+              text.match?(/^BC2CPP_COLO_ATTR static mrb_value bc2cpp_colo_ColoMid_step_impl\(/) &&
+                text.match?(/^BC2CPP_COLO_ATTR static mrb_value bc2cpp_colo_ColoLeaf_scale_impl\(/))
+  build = Bc2cppFixtureRuntime.full_or_build
+  if build.nil?
+    puts '  SKIP colocate behavioural comparison: needs a full-core libmruby'
+  else
+    body = <<~CPP
+      static int scenario(mrb_state* M) {
+        std::fflush(stdout);
+        mrb_load_string(M, R"SHD(#{COLO_DRIVER})SHD");
+        std::fflush(stdout);
+        if (M->exc) { mrb_print_error(M); M->exc = nullptr; return 1; }
+        return 0;
+      }
+    CPP
+    built, output = Bc2cppFixtureRuntime.run(dir, err, COLO_OWNERS, body, build: build, full: true, extra_srcs: shards)
+    suite.check('the colocated shards compile and link', built)
+    sections = Bc2cppFixtureRuntime.sections(output.to_s)
+    suite.check('the colocated build runs the fixture as the interpreter does',
                 sections['interpreted']&.last == 'end' && sections['interpreted'] == sections['compiled'])
     puts output.to_s.lines.last(20).join unless built && sections['interpreted'] == sections['compiled']
   end
