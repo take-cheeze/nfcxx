@@ -75,28 +75,59 @@ module NfcxxSetupArgs
   # (NfcxxSetup.run "default", which sets backend, default_backend and pb_fs_host), and stage is [status, text] for the stage
   # after the emit-C route (NfcxxSetup.stage_text: the statements on success, the refusal's message and status 2 otherwise).
   # nil when the loop gives no state (the body's wrappers rewrite the arguments, so the body plans them itself).
-  # The setup's rest (NfcxxSetup.rest: instantiation through the target, in the bash's order) on the same state: [status, text,
-  # message], the statements up to a refusal. nil for a command that the body ends before its setup (-E, and -fsyntax-only,
-  # which runs the driver again): the body plans it itself if it gets there.
-  def planned_rest(argv, scalars, arrays, env)
+  # The setup's rest (NfcxxSetup.rest: instantiation through the target, in the bash's order) on the setup options after the default
+  # step (applied_default): [status, text, message, state], the statements up to a refusal and the state they leave. nil for a
+  # command that the body ends before its setup (-E, and -fsyntax-only, which runs the driver again): the body plans it itself.
+  def planned_rest(argv, scalars, env, opts)
     return nil if scalars["preprocess"] == "1" || argv.include?("-fsyntax-only")
 
-    text, status, message = NfcxxSetup.rest(setup_opts_for(argv, env), env)
-    [status, text, message]
+    text, status, message, state = NfcxxSetup.rest(opts, env)
+    [status, text, message, state]
   end
 
+  # the setup options as the body has them after its default step: the backend, default_backend and pb_fs_host the default
+  # statements set (the later steps read the backend the default chose, not the command line's)
+  def applied_default(opts, default)
+    backend, default_backend, pb_fs = NfcxxSetup.default_values(default)
+    opts.merge("backend" => backend, "default_backend" => default_backend, "pb_fs_host" => pb_fs)
+  end
+
+  # runs a step, and returns [0, text], or [status, message] for its refusal (the message with its newline, as the body prints it)
+  def step_result(name, opts, env)
+    [0, NfcxxSetup.run(name, opts, env)]
+  rescue NfcxxSetup::Refusal => e
+    [e.status, "#{e.message}\n"]
+  end
+
+  # The setup statements the body evals, planned from the argument loop's full state, in the body's order: default (the default
+  # backend's statements), asan (the sanitizer check and asan_c, after the default), rest (the setup's rest, with its refusal),
+  # stage (the sanitizer, -fsafe-pointers and the Path B override, with their refusals), flags (the pb_flags tail after the override,
+  # planned on the backend and gnu the rest and stage leave), backend_env (the backend's environment, or its refusal) and trace_unit
+  # (the trace unit's assignment). flags and backend_env are nil when the rest is not planned (the body plans them with the rest).
+  # nil when the loop gives no state (the body plans the setup itself).
   def planned_state(argv, env = ENV)
     scalars, arrays = loop_state(argv, env)
     return nil unless scalars
 
-    opts = planner_opts(scalars)
-    default = NfcxxSetup.run("default", opts, env)
+    default = NfcxxSetup.run("default", planner_opts(scalars), env)
+    full = applied_default(setup_opts_for(argv, env), default)
+    asan = step_result("asan", full, env)
+    rest = planned_rest(argv, scalars, env, full)
     stage = begin
-      [0, NfcxxSetup.stage_text(opts)]
+      [0, NfcxxSetup.stage_text(full)]
     rescue NfcxxSetup::Refusal => e
       [e.status, "#{e.message}\n"]
     end
-    { default: default, stage: stage, rest: planned_rest(argv, scalars, arrays, env) }
+    flags = nil
+    backend_env = nil
+    if rest && stage.first.zero?
+      final = rest[3].merge(NfcxxSetup.assigned(stage.last, %w[backend]))
+      flags = NfcxxSetup.flags_text(final, env)
+      backend_env = step_result("backend_env", final, env)
+    end
+    trace_unit = NfcxxSetup.trace_unit_text(arrays.fetch("srcs", []), scalars["out"].to_s)
+    { default: default, asan: asan, stage: stage, rest: rest && rest[0, 3], flags: flags,
+      backend_env: backend_env, trace_unit: trace_unit }
   rescue StandardError
     nil
   end
@@ -134,7 +165,9 @@ module NfcxxSetupArgs
       "preprocess" => s["preprocess"], "depmode" => s["depmode"], "shared" => s["shared"],
       "gnu" => s["gnu"], "dialect" => dialect, "dialect_asked" => s["dialect_asked"],
       "instantiate" => s["instantiate"], "asan" => s["asan"], "safeptr" => s["safeptr"], "sanitize" => s["sanitize"],
-      "asanopts" => arrays.fetch("asanopts", []).join("\x1f")
+      "asanopts" => arrays.fetch("asanopts", []).join("\x1f"),
+      "pic" => s["pic"], "ir_opt" => s["ir_opt"], "ir_opt_set" => s["ir_opt_set"], "gnu_user" => s["gnu_user"],
+      "diag_opts" => arrays.fetch("diag_opts", []).join("\x1f")
     }
   end
 

@@ -3477,6 +3477,10 @@ def emit_function(mod, f)
       eh_header << "\tehnoexcept"
     elsif h == "eh-spec"
       eh_header << "\tehspec #{part.drop(1).map { |t| pstr(t) }.join(" ")}"
+    elsif h == "eh-spec-pad"
+      # (eh-spec-pad PAD ID...): a landing pad's own specification, an inlined copy's (scripts/pathb-ir-opt.rb); this emitter
+      # writes one ehspec list per function, so such a function is refused
+      raise Refused, "a landing pad's own dynamic exception specification (in #{name})"
     elsif h == "eh-pad"
       eh_pads << part
     elsif h == "static"

@@ -1,0 +1,36 @@
+== case 34: NFCXX_BACKEND=gcc   --freestanding --gnu-version=120000 -c a.cpp -o a.o
+-- status: 1
+-- stdout
+-- stderr
+-- eccp
+eccp:
+  --c++23
+  --g++
+  --wdir
+  /
+  --no_standard_includes
+  -I<REPO>/lib
+  --no_auto_instantiation
+  -tused
+  --c_to_obj_option
+  -ffunction-sections
+  --c_to_obj_option
+  -fdata-sections
+  --c_to_obj_option
+  -Wl,--gc-sections
+  --c_to_obj_option
+  -O2
+  --c_to_obj_option
+  -fwrapv
+  --c_to_obj_option
+  -fno-strict-aliasing
+  --c_to_obj_option
+  -fkeep-static-functions
+  --c_to_obj_option
+  -fgnu89-inline
+  -c
+  a.cpp
+  -o
+  a.o
+  env NFCXX_CC=<REPO>/scripts/gcc-cc.rb NFCXX_TRACE_UNIT=a.cpp NFCXX_TRACE_OWNER=
+-- files
