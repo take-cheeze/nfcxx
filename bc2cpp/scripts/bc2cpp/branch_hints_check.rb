@@ -100,8 +100,10 @@ check.call('`a + b` predicts the Integer pair and not the overflow tier',
 check.call('`a < b` predicts the Integer pair',
            code_of(code, 'BhRun_less').match?(/if \(mrb_likely\(BC2CPP_FIXNUM_PAIR_P\(r\d+, r\d+\)\)\)/))
 same = code_of(code, 'BhRun_same')
+# CMP_NUM_OUTLINE: the Integer pair test itself sits in the shared bc2cpp_cmp_num_eq.
 check.call('`a == b` keeps a bare Integer pair test: every type meets ==',
-           same.match?(/if \(mrb_integer_p\(r\d+\) && mrb_integer_p\(r\d+\)\) \{/) && !same.include?('mrb_likely('))
+           same.match?(/if \(BC2CPP_FIXNUM_PAIR_P\(r\d+, r\d+\)\) \{/) && same.include?('bc2cpp_cmp_num_eq(M, ') &&
+             !same.include?('mrb_likely('))
 user = code_of(code, 'BhRun_pick') + code_of(code, 'BhRun_count')
 check.call('the program\'s own `if` and `while` tests carry no hint',
            user.include?('mrb_test(') && !user.match?(/mrb_(?:un)?likely\(!?mrb_test/))
