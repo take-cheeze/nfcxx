@@ -225,7 +225,7 @@ module InsnOperands
 
   # Target address of a branch op, nil for every other op.
   def branch_target
-    return nil unless BytecodeIR::BRANCH_OPS.include?(op)
+    return nil unless BytecodeIR::BRANCH_OPS_SET.include?(op)
 
     first_kind(:addr)&.value
   end
