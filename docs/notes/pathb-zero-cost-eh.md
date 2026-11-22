@@ -190,14 +190,15 @@ before: its calls get the state of the call site.
 A callee whose filter is needed in the copy (`spec_inlinable?` fails: a throw of another type, a call of a function
 that can throw, a rethrow, a destructor on the way out) is still inlined (`spec_copyable?`, scripts/pathb-ir-opt.rb) when
 the caller can take a filter of its own: no catch clause on its pads (`eh[:caught]`), no filter already (its own
-specification, or a copy's `eh-spec-pad`: `eh[:filtered]`), and no call of a module function still to inline in the callee
-(a call inlined into the copy later would miss the filter). The copy keeps its pads, and each carries the callee's list as
+specification, or a copy's `eh-spec-pad`: `eh[:filtered]`). A call of a module function in the callee stays a call in the copy,
+or is inlined into it later: either way the copy's pads filter what it lets out. The copy keeps its pads, and each carries the callee's list as
 an `(eh-spec-pad PAD ID...)` form, which the SSA builder writes as `ehspecpad` (QBE): the pad's action chain is its own
 clauses, then that filter (a mismatch calls `__cxa_call_unexpected` in the personality), then its cleanup. The pads of such
 a copy resume into the caller's state, which does not re-check a filter, hence the conditions. A non-spec copy inside
 such a copy takes the copy's list (`eh[:own]`). `tests/pathb-eh-tables/cases/inline_spec_filter.cpp` checks it against g++.
-Still refused (gap 11, the rest): a copy under a caller's `try` or filter, a callee calling a module function that is not
-yet inlined, and a noexcept callee with a list. Two filters on one chain (a copy inside a copy with its own list, or a
+`tests/pathb-eh-tables/cases/inline_spec_module_call.cpp` checks a callee that calls a variadic module function (never inlined)
+and one that calls a small one (inlined into the copy later), against g++.
+Still refused (gap 11, the rest): a copy under a caller's `try` (`eh[:caught]`) or filter, and a noexcept callee with a list. Two filters on one chain (a copy inside a copy with its own list, or a
 pad that resumes into one) are not expressible yet: QBE's chain has one filter, at its end.
 
 ## Tests

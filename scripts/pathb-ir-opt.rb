@@ -364,8 +364,9 @@ end
 # A callee with a dynamic exception specification that spec_inlinable? refuses is still inlined, as a copy that keeps its landing
 # pads, each with the callee's list (eh-spec-pad; QBE's ehspecpad: the pad's action chain ends with that filter, which the
 # personality checks). Its pads resume into the caller's state, and the caller's filter is not checked there, so expand_call
-# inlines it only where the caller can take no filter of its own (eh[:caught], eh[:filtered], and no module call left in the
-# callee). The specification must name its types, and the callee must not be noexcept.
+# inlines it only where the caller can take no filter of its own (eh[:caught], eh[:filtered]). A call of a module function that is
+# still a call in the copy is covered by the copy's pads (its exception is filtered there, as one of the callee's), and a
+# function inlined into the copy later gets the same pads. The specification must name its types, and the callee must not be noexcept.
 def spec_copyable?(fn)
   return false if fn.any? { |f| head(f) == "eh-noexcept" }
   !spec_names(fn).nil?
@@ -563,12 +564,10 @@ def expand_call(s, fns, st)
   return nil if st[:cap] && st[:tc].fetch(fn) { st[:tc][fn] = node_cost(fn) } > st[:cap]
   info = st[:ic].fetch(cname) { st[:ic][cname] = callee_info(fn) }
   # A copy with its own filter (callee_info: eh[:own]) needs a caller whose pads have no filter and no catch clause (spec_copyable?:
-  # the pads of such a copy resume into the caller's state, which would not check the caller's filter or a catch of it), and a
-  # callee that calls no function of the module still to be inlined (a call inlined into the copy later would miss the filter).
+  # the pads of such a copy resume into the caller's state, which would not check the caller's filter or a catch of it).
   if info[:eh] && info[:eh][:own]
     why = if st[:eh][:caught] then "under a catch"
           elsif st[:eh][:filtered] then "under a filter"
-          elsif calls_module_function?(info[:stmts], fns) then "calls a function still to inline"
           end
     if why
       key = "dynamic exception specification #{why}"
