@@ -27,15 +27,33 @@ module NativeClassResults
     '3rd/mruby/mrbgems/mruby-bigint/core/bigint.c' => %w[dcc607215eb53346f5a2e5b760314f06afa9f629ad3c2f14e18f56059a29117f c32092a6670bc77ca978eb093cd8af6d4dcfa947ce826bbe30834483fde5dad4],
     '3rd/mruby-onig-regexp/src/mruby_onig_regexp.c' => '4b00efbb0d4b26bb8310aff773b8e4d2abf05dca6a993ebd963f69fa9c6cf397',
     '3rd/mruby/mrbgems/mruby-fiber/src/fiber.c' => '5b8aa22575a772a0fb0a194c1720233307f7034a0704e362a315bd30fb44512f',
+    '3rd/mruby/mrbgems/mruby-symbol-ext/src/symbol.c' => 'ed25d0529c93ebbddb6fc5c27bf011a677e6d0816a938168c49ab71d716ac71b',
+    '3rd/mruby/mrbgems/mruby-set/src/set.c' => 'c710f64f2a50650c0be29c01bb96f00fb61c01d1d3f1e0fa99816ecf29d06912',
+    '3rd/mruby-stringio/src/stringio.c' => '624a40811e85cd00d92afaffc251a7b9c55f564c87eb71115e9e7d88cb68f716',
+    '3rd/mruby/mrbgems/mruby-object-ext/src/object.c' => '4de3d5c2ca92e7ca4a5236140a330684dc29d8b7ef29cff178642b5fa43c79a1',
   }.freeze
   FILES = BASE_FILES.merge(WorldAuditPins.class_result_files).freeze
   ARRAY_TRANSFORMS = %w[compact flatten __uniq join].freeze
+  # NATIVE_INTEGER_RESULTS: every registration of these names in the listed files returns mrb_int_value or
+  # mrb_fixnum_value (an Integer, maybe a heap one) or raises. Time#to_i is a Float when time_t passes mrb_int
+  # without mruby-bigint, so a to_i that time.c also defines joins Float in (see kinds).
+  INTEGER_RESULTS = %w[length bytesize to_i].freeze
   BASE_FACTS = {
     'join' => ['String', %w[3rd/mruby/src/array.c 3rd/mruby/mrbgems/mruby-io/src/file.c]],
     'compact' => ['Array', %w[3rd/mruby/mrbgems/mruby-array-ext/src/array.c]],
     'flatten' => ['Array', %w[3rd/mruby/mrbgems/mruby-array-ext/src/array.c]],
     '__uniq' => ['Array', %w[3rd/mruby/mrbgems/mruby-array-ext/src/array.c]],
     '__num_to_a' => [['Array', :nil], %w[3rd/mruby/src/range.c]],
+    'length' => [:integer, %w[
+      3rd/mruby/src/array.c 3rd/mruby/src/string.c 3rd/mruby/src/hash.c 3rd/mruby/mrbgems/mruby-struct/src/struct.c
+      3rd/mruby/mrbgems/mruby-symbol-ext/src/symbol.c 3rd/mruby/mrbgems/mruby-set/src/set.c
+      3rd/mruby-onig-regexp/src/mruby_onig_regexp.c 3rd/mruby-stringio/src/stringio.c
+    ]],
+    'bytesize' => [:integer, %w[3rd/mruby/src/string.c]],
+    'to_i' => [:integer, %w[
+      3rd/mruby/src/string.c 3rd/mruby/src/numeric.c 3rd/mruby/mrbgems/mruby-object-ext/src/object.c
+      3rd/mruby/mrbgems/mruby-time/src/time.c
+    ]],
     'keys' => ['Array', %w[3rd/mruby/src/hash.c]],
     'values' => ['Array', %w[3rd/mruby/src/hash.c 3rd/mruby/mrbgems/mruby-struct/src/struct.c]],
     'bytes' => ['Array', %w[3rd/mruby/src/string.c]],
@@ -71,6 +89,11 @@ module NativeClassResults
 
   module_function
 
+  # Kill switch for NATIVE_INTEGER_RESULTS: BC2CPP_NATIVE_INTEGER_RESULTS=0 drops those facts.
+  def integer_results?
+    ENV['BC2CPP_NATIVE_INTEGER_RESULTS'] != '0'
+  end
+
   def source_matches?(path, relative, digest = FILES[relative])
     return false unless path.is_a?(String) && path.end_with?("/#{relative}") && digest
 
@@ -83,6 +106,7 @@ module NativeClassResults
     return nil if name == '__num_to_a' && ENV['BC2CPP_CORE_RUBY_NESTED_RESULTS'] == '0'
 
     return nil if ARRAY_TRANSFORMS.include?(name) && ENV['BC2CPP_NATIVE_ARRAY_TRANSFORMS'] == '0'
+    return nil if INTEGER_RESULTS.include?(name) && !integer_results?
     return nil if %w[compact join].include?(name) && ENV['BC2CPP_NATIVE_COLLECTION_RESULTS'] == '0'
 
     return nil if name == 'to_s' && (ENV['BC2CPP_NATIVE_STRING_RESULTS'] == '0' || !string_subclass_free)
@@ -131,6 +155,7 @@ module NativeClassResults
       source = SourceText.read(helper, 'native class results', binary: true)
       return nil unless source && Digest::SHA256.hexdigest(source) == FILES.fetch('3rd/mruby/mrbgems/mruby-bigint/core/bigint.c')
     end
+    kind = [:integer, :float] if name == 'to_i' && paths.any? { |path| path.end_with?('/mruby-time/src/time.c') }
     if name == 'parameters' && paths.any? { |path| path.end_with?('/mruby-method/src/method.c') }
       return nil unless paths.any? { |path| path.end_with?('/mruby-proc-ext/src/proc.c') }
     end
