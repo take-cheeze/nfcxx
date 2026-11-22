@@ -304,9 +304,18 @@ end
 
 # mruby-lcf's mrblib for the compiled gem. BC2CPP_SKIP_LCF_SCHEMA_RB=1 leaves out schema.rb, whose LCF::Schema the wio
 # build takes from its blob instead (mruby-lcf/mrbgem.rake); the copy compiled here costs about 147 KB of wio flash.
+# ROM_SCHEMA: a world that has mruby-lcf/mrblib_rom/schema.rb (the schema as handles of constant tables, which
+# mruby-lcf/mrbgem.rake links into every build with compiled gems) compiles it in place of schema.rb. Its class body
+# only assigns literals, so its place in the sorted world does not matter. BC2CPP_ROM_SCHEMA=0 keeps schema.rb;
+# mruby-lcf/mrbgem.rake reads the same switch.
 def lcf_mrblib_srcs(gems_root)
-  Dir["#{gems_root}/mruby-lcf/mrblib/*.rb"].reject do |path|
-    ENV['BC2CPP_SKIP_LCF_SCHEMA_RB'] == '1' && path.end_with?('/schema.rb')
+  rom = "#{gems_root}/mruby-lcf/mrblib_rom/schema.rb"
+  rom = nil unless ENV['BC2CPP_ROM_SCHEMA'] != '0' && File.file?(rom)
+  Dir["#{gems_root}/mruby-lcf/mrblib/*.rb"].filter_map do |path|
+    next path unless path.end_with?('/schema.rb')
+    next if ENV['BC2CPP_SKIP_LCF_SCHEMA_RB'] == '1'
+
+    rom || path
   end
 end
 

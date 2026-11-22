@@ -20,7 +20,7 @@ class CodeGen
   # helpers the gem emits only for its compiled methods.
   CLASS_BODY_VISIBILITY_SENDS = %w[private public protected module_function private_class_method public_class_method].freeze
   CLASS_BODY_OPS = (%i[NOP STOP RETURN RETNIL LOADNIL LOADSELF LOADTRUE LOADFALSE LOADL LOADSYM STRING LOADI__1 LOADI_0
-                       LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6 LOADI_7 LOADI8 LOADI16 LOADI32 SETCONST
+                       LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6 LOADI_7 LOADI8 LOADINEG LOADI16 LOADI32 SETCONST
                        GETCONST SETGV ARRAY HASH ADD ADDI ADDILV SUB SUBI SUBILV MUL DIV GETMCNST SETIV SYMBOL EQ ARYCAT MOVE GETIDX RANGE_INC SEND SEND0]).freeze
 
   # The mruby entry points a class unit calls (vm.c; the same declarations the class-body prelude makes).
