@@ -31,7 +31,7 @@ sandbox() {
   else
     cp "$repo/scripts/$base.rb" "$sb/scripts/$base.rb"; chmod +x "$sb/scripts/$base.rb"; S=$sb/scripts/$base.rb
   fi
-  for c in cc gcc g++ ar llvm-ar llvm-mc mktemp uname nm realpath xcrun; do ln -s "$here/stub.sh" "$sb/bin/$c"; done
+  for c in cc gcc g++ ar llvm-ar llvm-mc mktemp uname nm objcopy realpath xcrun; do ln -s "$here/stub.sh" "$sb/bin/$c"; done
   for c in scripts/mrb.rb scripts/pathb-cil.rb nfcxx; do ln -s "$here/stub.sh" "$sb/$c"; done
   # the sources the scripts read: their mtimes are old, so an object or archive made by a case is newer
   : > "$sb/be/nfcxx_ldrt.c"; : > "$sb/lib/ehshim/nfcxx_eh_shim.cpp"; touch -d 2000-01-01 "$sb/be/nfcxx_ldrt.c" "$sb/lib/ehshim/nfcxx_eh_shim.cpp"

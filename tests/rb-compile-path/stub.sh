@@ -62,6 +62,7 @@ case $name in
       -m) echo "${NFCXX_STUB_UNAME_M:-x86_64}" ;;
     esac
     exit 0 ;;
+  objcopy) exit 0 ;;
   nm) [ -z "${NFCXX_STUB_NM:-}" ] || cat "$NFCXX_STUB_NM"; exit 0 ;;
   realpath) last_arg "$@"; echo; exit 0 ;;
   xcrun) echo "${NFCXX_STUB_SDK:-}"; exit 0 ;;

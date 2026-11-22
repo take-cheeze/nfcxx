@@ -43,7 +43,8 @@ lines=()
 build() { # SRC STEM: SRC through the pipeline to STEM.exe (with SRC's helper); a message on stdout when it fails
   local f=$1 n=$2 std flags h=
   std=$(sed -n 's,^// STD: *\(c++[0-9a-z]*\).*,-std=\1,p' "$f" | head -1)
-  scripts/pathb-dump.rb --ir $std "$f" > "$n.ir" 2> "$n.fe" || { echo "front end: $(head -1 "$n.fe")"; return 1; }
+  flags=$(sed -n 's,^// NFCXX-FLAGS: *,,p' "$f" | head -1)   # (as tests/pathb-qbe/run.sh: front end options)
+  scripts/pathb-dump.rb --ir $std $flags "$f" > "$n.ir" 2> "$n.fe" || { echo "front end: $(head -1 "$n.fe")"; return 1; }
   ruby scripts/pathb-ir-opt.rb --prune-unused --strip-leaf-eh --inline --scope-facts --shrink-eh-frames "$n.ir" > "$n.opt.ir" 2> "$n.opt" &&
     mv "$n.opt.ir" "$n.ir"
   scripts/pathb-ssa-build --qbe="$qbe" -o "$n.s" "$n.ir" 2> "$n.ssa" || { echo "ssa/qbe: $(grep -v '^\s*from ' "$n.ssa" | head -1)"; return 1; }

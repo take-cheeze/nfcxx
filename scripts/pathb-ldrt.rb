@@ -49,7 +49,7 @@ end
 # provide the C++ ABI, its EH runtime, RTTI and operator new instead. So the script prints a GNU ld input script in place of
 # the archive (as glibc's libc.so is one): INPUT puts the archive, the lowering's helpers, libstdc++ and libgcc_s at this
 # position of the link line. The helpers (the VLA pool, C99 complex arithmetic, and the abort message they print) are
-# libC.a's own members, copied into libnfcxxedg.a: libC.a after the script then gives nothing, and a link that does not
+# libC.a's own members, copied into libnfcxxedg.a with their symbols weak: libC.a after the script then gives nothing, and a link that does not
 # name it (g++ x.o $(scripts/pathb-ldrt.rb)) has everything. Not for cosmo (its own C++ runtime) or macOS (ld64 reads no
 # linker scripts).
 EDG_HELPERS = %w[vla_alloc.o c99_complex.o error.o].freeze
@@ -71,6 +71,9 @@ def edg_helpers(root, out)
 
   Dir.chdir(tmp) do
     run!("ar", "x", libc, *members)
+    # weak: a strong definition elsewhere in the link wins wherever it is (the VLA runtime of an ASan link,
+    # scripts/asan-vla.rb, comes after this script on the line, where libC.a's members were never pulled in)
+    members.each { |m| run!("objcopy", "--weaken", m) }
     run!("ar", "rcs", "libnfcxxedg.a", *members)
   end
   File.rename("#{tmp}/libnfcxxedg.a", lib)

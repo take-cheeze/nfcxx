@@ -42,6 +42,7 @@ if [ -f "$(dirname "$cpfe")/eh-tables" ] && case $cc_bin in *cosmocc*) false ;; 
       if [ -n "$members" ]; then
         etmp=$(mktemp -d "$out/.edg.XXXXXX")
         (cd "$etmp" && ar x "$libc" $members)
+        for m in $members; do (cd "$etmp" && objcopy --weaken "$m"); done
         (cd "$etmp" && ar rcs libnfcxxedg.a $members)
         mv "$etmp/libnfcxxedg.a" "$helpers"
         rm -rf "$etmp"
