@@ -290,6 +290,13 @@ eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary direc
   trace_finish
   return $rc
 }
+eccp_run() {  # eccp_run: the eccp call of the plan (eccp_argv, in eccp_cd, with eccp_envs exported for it), and its span
+  # scripts/nfcxx-eccp-run.rb runs it: its status ends the body here (set -e), no span is recorded for a failed call, and the
+  # cache store and the rest are not reached, as before
+  local envs=() e
+  for e in ${eccp_envs[@]+"${eccp_envs[@]}"}; do envs+=("--env=$e"); done
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-eccp-run.rb" ${eccp_cd:+"--cd=$eccp_cd"} ${envs[@]+"${envs[@]}"} -- "${eccp_argv[@]}"
+}
 modules_plan_input() {  # the records of the modules block: the state scripts/nfcxx-modules-plan.rb reads (its header lists the groups)
   state_put root "$root"; state_put out "$out"; state_put moddir "${moddir:-}"; state_put std "$std"
   state_put emit_c "$emit_c"; state_put compile_only "$compile_only"
@@ -825,13 +832,7 @@ link_records_rm
 # -E inputs, -MD (its dependency file), several sources in one command, and an -o without an extension. A file name with
 # spaces in the header list is not handled.
 cache_check
-t=$(trace_start)
-(
-  [ -z "$eccp_cd" ] || cd "$eccp_cd"
-  for e in ${eccp_envs[@]+"${eccp_envs[@]}"}; do export "$e"; done
-  "${eccp_argv[@]}"
-)
-trace_end "$t" "eccp (front end, C compile, link)" eccp
+eccp_run
 link_records_rm
 # Kernel instances from the host compile. The rewriter lists the kernel templates whose instances the text does not
 # give (<kernels>.unresolved: a launch or address in a template the unit calls with deduced or dependent arguments,
