@@ -311,6 +311,62 @@ class CodeGen
     TaggedFixnum.tier(name, dest, register ? rhs : "mrb_fixnum_value(#{rhs})")
   end
 
+  # INTEGER_OPERAND_PROOF: with both operands proven Integer (fixnum or bigint, never a Float) the Float arms are
+  # dead, so a site keeps its Fixnum tier and calls mruby's Integer body (mrb_num_*, bc2cpp_num_cmp/div) for the rest,
+  # which computes a heap Integer, a bigint and an overflow as OP_ADD & co. do. BC2CPP_INTEGER_OPERAND_PROOF=0 keeps them.
+  def integer_operand_proof_enabled?
+    ENV['BC2CPP_INTEGER_OPERAND_PROOF'] != '0'
+  end
+
+  # Both operands of +name+ are proven Integer and +name+ is the core body (a bigint operand sends it in vm.c).
+  # +arg_reg+ nil: an immediate (a Fixnum) is the right operand.
+  def integer_operand_pair?(name, dest_reg, arg_reg, irep, idx, owner_def, reg_offset)
+    return false unless integer_operand_proof_enabled? && numeric_op_native?(name)
+
+    [dest_reg, arg_reg].compact.all? do |reg|
+      mask = numeric_operand_mask(irep, idx, unshift_proof_reg(reg, reg_offset), owner_def)
+      mask && (mask & ~NumericFlow::INT).zero?
+    end
+  end
+
+  # A NUMERIC_OPERAND_PROOF arm too: the note keeps that tag, which the site counts and checks read.
+  INTEGER_PROOF_NOTE = '  // NUMERIC_OPERAND_PROOF %s INTEGER_OPERAND_PROOF -- operands proven Integer; no Float arm'
+
+  # `d = d op rhs` for + - *: the Fixnum tier, and every other operand pair (a heap Integer, a bigint, an
+  # overflow) in one mrb_num_* call. bc2cpp_fixnum_* leaves +d+ untouched when it reports overflow.
+  def integer_arith_tier(name, dest, rhs, fixnum_test)
+    helper, slow = TaggedFixnum::OPS.fetch(name)
+    reg = RegName[dest]
+    "#{format(INTEGER_PROOF_NOTE, ":#{name}")}\n" \
+      "  if (#{BranchHints.unlikely("!(#{fixnum_test}) || #{helper}(#{reg}, #{rhs}, #{reg})")}) " \
+      "{ #{reg} = #{slow}(M, #{reg}, #{rhs}); }\n"
+  end
+
+  # The ordering compare of two proven Integers: tagged words, else mrb_cmp (cmpnum, as Integer#< runs it).
+  def integer_compare_tier(sym, dest, src)
+    d = RegName[dest]
+    s = RegName[src]
+    "#{format(INTEGER_PROOF_NOTE, ":#{sym}")}\n" \
+      "  if (#{BranchHints.likely(TaggedFixnum.pair(d, s))}) {\n" \
+      "    #{d} = mrb_bool_value(#{TaggedFixnum.compare(d, sym, s)});\n" \
+      "  } else {\n" \
+      "    #{d} = mrb_bool_value(bc2cpp_num_cmp(M, #{d}, #{s}) #{sym} 0);\n" \
+      "  }\n"
+  end
+
+  # `d = d / s` for two proven Integers: Integer#/ on a Fixnum or heap Integer pair, else (a bigint) its core
+  # body, bc2cpp_num_div.
+  def integer_div_tier(dest, src)
+    d = RegName[dest]
+    s = RegName[src]
+    "#{format(INTEGER_PROOF_NOTE, ':/')}\n" \
+      "  if (#{BranchHints.likely("mrb_integer_p(#{d}) && mrb_integer_p(#{s})")}) {\n" \
+      "    #{d} = mrb_div_int_value(M, mrb_integer(#{d}), mrb_integer(#{s}));\n" \
+      "  } else {\n" \
+      "    #{d} = bc2cpp_num_div(M, #{d}, #{s});\n" \
+      "  }\n"
+  end
+
   # The C++ that finishes an operator whose operands are both proven numeric, or
   # nil to keep the guarded send. +arg_reg+/+arg_expr+ as compile_operator_fallback.
   def numeric_operator_fallback(name, dest_reg, arg_reg, arg_expr, irep, idx, owner_def, reg_offset)
