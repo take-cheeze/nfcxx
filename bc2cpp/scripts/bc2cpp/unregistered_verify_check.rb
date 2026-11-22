@@ -22,7 +22,9 @@
 #       code calls) answers true for the left-out entry on its class, a subclass and, for a singleton entry, the
 #       class object, and false elsewhere; without it, false;
 #     - LEFT_OUT_TABLE (BC2CPP_ROM_METHOD_TABLES=1): the same, through one walked stream instead of the calls, under
-#       names the full core's presym table spells; BC2CPP_LEFT_OUT_TABLE=0 keeps the calls.
+#       names the full core's presym table spells; BC2CPP_LEFT_OUT_TABLE=0 keeps the calls;
+#     - LOOKUP_FREE_EVERY_SLOT: keyword calls to methods made public in a reopened body and in a subclass are by-name
+#       sends, so the proof leaves neither out (the behaviour above is what leaving one out does);
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/unregistered_verify_check.rb
 
@@ -167,6 +169,44 @@ StaticDispatchRegistrations.native_name_tokens(<<~'C', tokens, [])
 C
 suite.check('an inttypes conversion macro\'s string is no lookup, another macro\'s string is',
             !tokens.include?('fmt_x') && !tokens.include?('fmt_u') && tokens.include?('keep_name'))
+
+# LOOKUP_FREE_EVERY_SLOT (static_dispatch_registrations.rb lookup_free_names): a private keyword method made public
+# outside its own body -- a reopened class body, a subclass -- is called by name (KEYWORD_DYNAMIC_SEND), while the
+# class body's `public :name` holds a quiet `mrb_symbol_value` slot of the same name. A name with a by-name slot is no
+# lookup-free name, whatever its other slots are, so the proof keeps it in the tables.
+KW_SOURCE = <<~'RUBY'
+  class KwA
+    private
+
+    def ka(a, k: 1) = a + k
+  end
+  class KwA
+    public :ka
+  end
+  class KwB
+    private
+
+    def kb(a, k: 1) = a * k
+  end
+  class KwC < KwB
+    public :kb
+  end
+  class KwUse
+    def ra(o) = o.ka(1, k: 2)
+    def rb(o) = o.kb(3, k: 4)
+  end
+RUBY
+KW_OWNERS = %w[KwA KwB KwC KwUse].freeze
+kw_dir = Dir.mktmpdir('bc2cpp-kw-lists')
+at_exit { FileUtils.remove_entry(kw_dir) }
+kw_code, = Bc2cppFixtureRuntime.generate(KW_SOURCE, kw_dir, only_owners: KW_OWNERS)
+kw_use = %w[ra rb].map { |m| kw_code[/^mrb_value KwUse_#{m}_impl\(mrb_state\* M.*?^\}/m].to_s }.join
+suite.check('a keyword call to a method made public outside its body is a by-name keyword send',
+            kw_use.scan('bc2cpp_send_kw(M, ').size == 2)
+kw_free = StaticDispatchRegistrations.lookup_free_names(kw_code, Set.new, symbol_values: true)
+suite.check('LOOKUP_FREE_EVERY_SLOT: neither name is lookup-free, though a quiet slot of each exists',
+            !kw_free.include?('ka') && !kw_free.include?('kb') &&
+              kw_code.match?(/mrb_symbol_value\(bc2cpp_sym\(M, \d+\)\)/))
 
 full = Bc2cppFixtureRuntime.full_or_build
 if full.nil?
