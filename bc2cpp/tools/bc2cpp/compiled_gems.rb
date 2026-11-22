@@ -865,6 +865,11 @@ def bc2cpp_compiled_gem_shards(spec, generated, prereqs)
   File.write(cold_stamp, cold_mode) unless File.exist?(cold_stamp) && File.read(cold_stamp) == cold_mode
   Rake::Task[generated].enhance([cold_stamp])
   Rake::Task[generated].enhance([ColdCompact.list_path]) if File.file?(ColdCompact.list_path)
+  # A kill switch (BC2CPP_<NAME>=0) changes the generated code, so a changed set of them regenerates.
+  switch_stamp = File.join(spec.build_dir, 'bc2cpp_kill_switches')
+  switch_mode = ENV.keys.grep(/\ABC2CPP_[A-Z0-9_]+\z/).select { |k| ENV[k] == '0' }.sort.map { |k| "#{k}=0\n" }.join
+  File.write(switch_stamp, switch_mode) unless File.exist?(switch_stamp) && File.read(switch_stamp) == switch_mode
+  Rake::Task[generated].enhance([switch_stamp])
   # LITERAL_TABLES (codegen_literal_tables.rb): its kill switches choose which literals the generated file builds from tables.
   literal_stamp = File.join(spec.build_dir, 'bc2cpp_literal_tables')
   literal_mode = %w[BC2CPP_LITERAL_TABLES BC2CPP_LITERAL_WALK BC2CPP_LITERAL_ARRAY_KEYS BC2CPP_LITERAL_CONST_INTS]
