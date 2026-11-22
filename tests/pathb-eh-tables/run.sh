@@ -17,14 +17,17 @@
 #
 # --all: every program of tests/pathb-qbe/cases and tests/cases, not only their EH probes (in this mode every function with
 # a destructor has landing pads).
-#   PATHB_CPFE, PATHB_BASE   the harness (scripts/setup-pathb.sh with PATHB_EH=tables); QBE: a QBE with the eh directives.
+#   PATHB_CPFE, PATHB_BASE   the harness (scripts/setup-pathb.sh with PATHB_EH=tables; default build/pathb, the default
+#                            harness, when it has tables); QBE: a QBE with the eh directives.
 # Exit 1 on any failure, 2 when the harness or QBE is missing.
 set -u
 ulimit -c 0   # the traps abort: no core files
 cd "$(dirname "$0")/../.."
 root=$PWD
-cpfe=${PATHB_CPFE:-}
-[ -n "$cpfe" ] && [ -x "$cpfe" ] || { echo "pathb-eh-tables: set PATHB_CPFE and PATHB_BASE to a PATHB_EH=tables harness" >&2; exit 2; }
+cpfe=${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}
+[ -x "$cpfe" ] && [ -f "$(dirname "$cpfe")/eh-tables" ] ||
+  { echo "pathb-eh-tables: set PATHB_CPFE and PATHB_BASE to a PATHB_EH=tables harness ($cpfe has no tables)" >&2; exit 2; }
+export PATHB_CPFE=$cpfe PATHB_BASE=${PATHB_BASE:-$(dirname "$(dirname "$(dirname "$cpfe")")")/edg-base}
 qbe=${QBE:-build/qbe/qbe}
 [ -x "$qbe" ] || { echo "pathb-eh-tables: no QBE at $qbe" >&2; exit 2; }
 printf 'function $f() {\n@s\n\tehnoexcept\n\tret\n}\n' | "$qbe" - >/dev/null 2>&1 || { echo "pathb-eh-tables: $qbe has no exception table directives (set QBE)" >&2; exit 2; }
