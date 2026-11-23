@@ -27,8 +27,9 @@ tables = 0
 walked = 0
 sources.each do |path|
   src = File.read(path)
-  # RUNTIME_HEADER (tools/bc2cpp/runtime_header.rb): the fixed runtime part is in the header the file includes.
-  src.scan(/^#include "([^"]*bc2cpp_runtime_\h+\.hxx)"$/).flatten.uniq.each { |header| src += File.read(header) }
+  # RUNTIME_HEADER (tools/bc2cpp/runtime_header.rb) and CROSS_GEM_SHARE (cross_gem_share.rb): part of the prelude is
+  # in the headers the file includes.
+  src.scan(/^#include "([^"]*bc2cpp_(?:runtime|cs)_\h+\.hxx)"$/).flatten.uniq.each { |header| src += File.read(header) }
   name = File.basename(path)
   failures << "#{name}: no `#define BC2CPP_ROM_METHOD_TABLES 1`" unless src.include?("#define BC2CPP_ROM_METHOD_TABLES 1\n")
   defined = src.scan(/^(?:static|inline) const mrb_mt_entry (bc2cpp_mt_\w+)\[\] = \{$/).flatten.to_set
