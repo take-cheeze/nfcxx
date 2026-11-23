@@ -86,4 +86,75 @@ Dir.mktmpdir('bc2cpp-const-lexical-order') do |dir|
   end
 end
 
+# CONST_CONDITIONAL (tools/bc2cpp/const_conditional.rb): a constant some write of which may not run is never folded to its
+# value, so its read raises NameError as the interpreter's does; an unconditional one still folds. Run with the emitter's
+# annotations and with the bytecode dataflow alone (BC2CPP_CLASS_SCOPE=0).
+CONDITIONAL = <<~RUBY
+  class CoReader
+    CO_W = 2
+    CO_NEVER = 9 if CO_W == 0
+    CO_TERN = CO_W == 0 ? 5 : 5
+    [].each { CO_BLOCK = 6 }
+    CO_ONE = 1
+    begin
+      raise 'skipped'
+      CO_RESCUED = 7
+    rescue StandardError
+      nil
+    end
+    def never = CO_NEVER
+    def tern = CO_TERN
+    def block = CO_BLOCK
+    def rescued = CO_RESCUED
+    def one = CO_ONE
+    def hidden = CO_HIDDEN
+  end
+  if CoReader::CO_W == 0
+    class CoHidden
+      CO_HIDDEN = 8
+    end
+  end
+RUBY
+COND_READS = %w[never tern block rescued one hidden].freeze
+
+Dir.mktmpdir('bc2cpp-const-conditional') do |dir|
+  build = ENV['CC_GENERATED_ONLY'] == '1' ? nil : Bc2cppFixtureRuntime.full_or_build
+  [['annotated', nil], ['dataflow', '0']].each do |mode, scope|
+    run_dir = File.join(dir, mode)
+    FileUtils.mkdir_p(run_dir)
+    saved = ENV['BC2CPP_CLASS_SCOPE']
+    ENV['BC2CPP_CLASS_SCOPE'] = scope
+    code, err = begin
+      Bc2cppFixtureRuntime.generate(CONDITIONAL, run_dir, core: true, only_owners: %w[CoReader])
+    ensure
+      ENV['BC2CPP_CLASS_SCOPE'] = saved
+    end
+    folded = err.scan(/^  CONST (CO_\w+) = (-?\d+)$/).to_h
+    suite.check("CONST_CONDITIONAL (#{mode}): only the unconditional constants fold (#{folded})",
+                folded == { 'CO_ONE' => '1', 'CO_TERN' => '5', 'CO_W' => '2' })
+    never = code[/^mrb_value CoReader_never_impl\(.*?^\}/m].to_s
+    suite.check("CONST_CONDITIONAL (#{mode}): the conditional read keeps its lookup", !never.empty? && !never.include?('mrb_fixnum_value(9)'))
+    next puts("  SKIP const conditional behaviour (#{mode}): needs a full-core libmruby") if build.nil?
+
+    scenario = <<~CPP
+      static int scenario(mrb_state* M) {
+        mrb_value reader = mrb_obj_new(M, mrb_class_get(M, "CoReader"), 0, nullptr);
+        for (const char* meth : {#{COND_READS.map { |m| "\"#{m}\"" }.join(', ')}}) call(M, meth, reader, meth);
+        return 0;
+      }
+    CPP
+    built, output = Bc2cppFixtureRuntime.run(run_dir, err, %w[CoReader], scenario, build: build, full: true)
+    suite.check("CONST_CONDITIONAL (#{mode}): the fixture builds and runs", built)
+    sections = Bc2cppFixtureRuntime.sections(output)
+    plain = ->(lines) { lines.to_a.reject { |l| l.start_with?('  dispatches=') } }
+    interpreted = plain.call(sections['interpreted'])
+    compiled = plain.call(sections['compiled'])
+    expected = %w[never block rescued hidden].map { |m| "#{m} => raised NameError" } + ['tern => 5', 'one => 1']
+    suite.check("CONST_CONDITIONAL (#{mode}): the interpreter raises for every write that did not run",
+                (expected - interpreted).empty? && interpreted.size == COND_READS.size)
+    suite.check("CONST_CONDITIONAL (#{mode}): interpreted and compiled runs print the same", interpreted == compiled)
+    interpreted.zip(compiled).reject { |a, b| a == b }.each { |a, b| puts "    interpreted: #{a}\n    compiled:    #{b}" }
+  end
+end
+
 suite.finish!

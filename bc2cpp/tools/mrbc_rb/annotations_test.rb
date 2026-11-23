@@ -11,6 +11,7 @@
 require_relative '../bc2cpp/irep'
 require_relative '../bc2cpp/lexical_consts'
 require_relative '../bc2cpp/dynamic_names'
+require_relative '../bc2cpp/const_conditional'
 
 # kind => why the dataflow cannot (or does not) give the annotation's answer.
 LIMITATIONS = {
@@ -22,7 +23,8 @@ LIMITATIONS = {
   scope_gain: 'LexicalConsts scope the dataflow proof lost (:unknown) but the cref chain gives exactly',
   key_gain: 'a constant read/site key the dataflow could not resolve that the exact scope resolves',
   key_loss: 'a constant key resolved by dataflow that the exact scope refuses (compact definition now defined in its real scope)',
-  key_change: 'a constant key that differs between the two scope models'
+  key_change: 'a constant key that differs between the two scope models',
+  cond_loose: 'a constant write the emitter knows runs whenever the program loads that the bytecode dataflow cannot prove does (`X = (a rescue b)`: the handler joins before the write)'
 }.freeze
 
 oracle = ENV.fetch('MRBC', nil)
@@ -119,6 +121,16 @@ inputs.each do |tag, build|
     end
   end
 
+  # CONST_CONDITIONAL: the dataflow may only be more conservative than the emitter (a write it calls unconditional must be one).
+  f_cond = ConstConditional.sites(flow)
+  ConstConditional.sites(ann).each do |site, conditional|
+    derived = f_cond[site]
+    if derived == conditional then note.call(:ok, '')
+    elsif !conditional && derived then note.call(:cond_loose, "#{tag} #{site.inspect}")
+    else note.call(:cond_differs, "#{tag} #{site.inspect}: annotation #{conditional.inspect} dataflow #{derived.inspect}")
+    end
+  end
+
   a_scope, a_keys = scope_models.call(ann)
   f_scope, f_keys = scope_models.call(flow)
   a_scope.each do |label, scope|
@@ -203,6 +215,49 @@ MODEL_SYNTHETIC.each do |name, src, const, with, without|
   base = const_keys.call(load_source.call(src, false), const)
   bugs << "model #{name}: dataflow #{base.inspect}, expected #{[without].inspect}" unless base.size == 1 && base.first == without
 end
+# CONST_CONDITIONAL: the writes that may not run, from the annotation and from the dataflow.
+cond_src = <<~RUBY
+  A0 = 1
+  class FoldA
+    W = 2
+    NEVER = 9 if W == 0
+    (P = 3)
+    begin
+      Q = 4
+    end
+    S = (6 rescue nil)
+    [1].each { BLK = 1 }
+    begin
+      RESCUED = 1
+    rescue StandardError
+      nil
+    end
+    while W == 9
+      LOOPED = 1
+    end
+    if W
+      class Inner
+        IN = 1
+      end
+    end
+    class Ok
+      OK = 1
+    end
+    FoldA::PATH = 7
+    T ||= 8
+    M1, M2 = 1, 2
+    raise 'x' if W == 3
+    RAISED = 1
+  end
+  return if A0 == 2
+  LATE = 1
+RUBY
+cond_expected = %w[NEVER BLK RESCUED LOOPED IN T RAISED LATE].to_set
+%w[annotated dataflow].each do |mode|
+  got = ConstConditional.names(load_source.call(cond_src, mode == 'annotated'))
+  bugs << "conditional constants (#{mode}): #{got.to_a.sort.inspect} != #{cond_expected.to_a.sort.inspect}" unless got == cond_expected
+end
+
 # A call past 14 arguments packs them into an Array: only the call record shows the first one is a literal Symbol.
 packed = "class B\n  attr_accessor(#{(1..16).map { |i| ":a#{i}" }.join(', ')})\nend\n"
 bugs << 'dynamic names: a packed literal attr_accessor is computed with the annotation' if DynamicNames.analyze(load_source.call(packed, true))[1]

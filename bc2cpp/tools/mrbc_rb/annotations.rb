@@ -35,9 +35,10 @@ module MrbcRb
   #                      is unknown or the path is relative to a namespace), candidates: [String] | nil (for a relative path
   #                      inside a namespace: the names it can resolve to, innermost namespace first), namespace: the lexical
   #                      namespace path the opener runs in (nil at top level or when unknown), superclass: { kind: :none |
-  #                      :const | :other, text: String|nil }, empty_body: true|false, body_irep: Integer | nil
+  #                      :const | :other, text: String|nil }, empty_body: true|false, body_irep: Integer | nil,
+  #                      conditional: as SETCONST's, for the opener (its body runs whenever the program loads)
   #     SCLASS:          kind: :sclass, target: :self | :const | :other, target_text:, singleton_of: String | nil,
-  #                      path: nil, empty_body:, body_irep:
+  #                      path: nil, empty_body:, body_irep:, conditional:
   #     EXEC:            owner_pc: pc of the opener this EXEC runs the body of, body_irep: Integer
   #     TDEF / SDEF / DEF: name:, owner_kind: :top|:class|:module|:sclass|:block|:dynamic, owner_path: String | nil (the
   #                      class the method lands on when statically evident; "Object" at top level), singleton: true|false,
@@ -47,7 +48,8 @@ module MrbcRb
   #                      subtree with locations stripped, body_irep: Integer
   #     ALIAS / UNDEF:   names: [String] (ALIAS: new, old), owner_kind:, owner_path:, in_block:
   #     SETCONST / SETMCNST: name:, scope_path: String|nil (SETCONST: the lexical class the constant is set on; "Object" at top;
-  #                      nil when unknown), base: for SETMCNST the written base path text (nil when dynamic), base_rooted:
+  #                      nil when unknown), base: for SETMCNST the written base path text (nil when dynamic), base_rooted:,
+  #                      conditional: false only when the write runs whenever the program loads (see straight_nodes)
   #     GETCONST:        name:   (resolves against the irep's cref chain, then the ancestors of the innermost entry, then Object)
   #     GETMCNST:        name:, base: written base path text (nil when dynamic), base_rooted:
   #
@@ -58,11 +60,12 @@ module MrbcRb
   #                      { kind: :const, text: written path, rooted: true|false } | { kind: :splat } | { kind: :keywords } |
   #                      { kind: :other }. The list is the call as written; other sends carry no record.
   #
-  # Versions: 1 = scope records; 2 = adds the `call` record of the sends above (additive: a version-1 table is still valid).
+  # Versions: 1 = scope records; 2 = adds the `call` record of the sends above; 3 = adds `conditional` to the constant writes
+  # and openers (each additive: an older table is still valid, and a reader treats a missing fact as unknown).
   #
   # A table is only meaningful for the irep tree it was built with; Annotations.verify checks the pcs/ops against decoded code.
   module Annotations
-    VERSION = 2
+    VERSION = 3
     SEND_OPS = %i[SEND SEND0 SSEND SSEND0 SENDB SSENDB].to_h { |o| [o, true] }.freeze
     TRACKED = (%i[CLASS MODULE SCLASS EXEC TDEF SDEF DEF ALIAS UNDEF SETCONST SETMCNST GETCONST GETMCNST] + SEND_OPS.keys).to_h { |o| [o, true] }.freeze
     # The sends that get a `call` record (see above): mixins, name-taking sends and visibility/definition sends.
@@ -74,8 +77,12 @@ module MrbcRb
                   private_class_method: true, public_class_method: true, private_constant: true }.freeze
     VIS_CALLS = %i[private public protected module_function private_class_method public_class_method private_constant].freeze
 
-    # Emitter-side state of one irep being compiled.
-    Scope = Struct.new(:kind, :cref, :vis, :in_block, :in_method, :owner_pc, :vis_calls)
+    # Emitter-side state of one irep being compiled. straight: the irep runs whenever the program loads (the top level, or
+    # a body whose opener is one of its parent's straight_nodes).
+    Scope = Struct.new(:kind, :cref, :vis, :in_block, :in_method, :owner_pc, :vis_calls, :straight)
+    # Calls that leave the statement list without returning to it (raise, throw, exit).
+    EXIT_CALLS = { raise: true, fail: true, throw: true, exit: true, exit!: true, abort: true }.freeze
+
 
     module_function
 
@@ -116,6 +123,55 @@ module MrbcRb
     end
 
     def path_text(sp) = sp && "#{'::' if sp[0]}#{sp[1].join('::')}"
+
+    # The constant writes and class/module/singleton openers of +stmts+ (a top-level or class body) that run whenever the body
+    # does: a statement of the list itself (through parentheses and a begin with no rescue, else or ensure), before any
+    # statement that can leave the list early (exits?). Anything under a condition, a loop, a rescue, a block or a value is
+    # not one. An exception out of a load-time body ends the load, so a statement that raises is no earlier exit.
+    def straight_nodes(stmts)
+      out = {}.compare_by_identity
+      work = stmts.reverse
+      until work.empty?
+        node = MrbcRb.unparen(work.pop)
+        case node
+        when Prism::ParenthesesNode
+          work.concat((node.body&.body || []).reverse)
+          next
+        when Prism::BeginNode
+          if node.rescue_clause.nil? && node.else_clause.nil? && node.ensure_clause.nil?
+            work.concat((node.statements&.body || []).reverse)
+            next
+          end
+        end
+        break if exits?(node)
+
+        out[node] = true if STRAIGHT_KINDS.any? { |k| node.is_a?(k) }
+        # `A, B = v`: each constant target of the statement itself is one write.
+        (node.lefts + node.rights).each { |t| out[t] = true if t.is_a?(Prism::ConstantTargetNode) } if node.is_a?(Prism::MultiWriteNode)
+      end
+      out
+    end
+
+    STRAIGHT_KINDS = [Prism::ConstantWriteNode, Prism::ConstantPathWriteNode, Prism::ClassNode, Prism::ModuleNode,
+                      Prism::SingletonClassNode].freeze
+    NESTED_CODE = [Prism::BlockNode, Prism::ClassNode, Prism::ModuleNode, Prism::SingletonClassNode].freeze
+
+    # Can +node+ leave the statement list it is in other than by finishing: a `return` (not one of a def or lambda body; a
+    # block's returns from the list), or an EXIT_CALLS call of the list's own code (not in a def, block or body: one there
+    # raises out of a call, which ends the load). Over-approximate: a hit only makes the writes after it conditional.
+    def exits?(node)
+      stack = [[node, false]]
+      until stack.empty?
+        n, nested = stack.pop
+        next if n.is_a?(Prism::DefNode) || n.is_a?(Prism::LambdaNode)
+        return true if n.is_a?(Prism::ReturnNode)
+        return true if !nested && n.is_a?(Prism::CallNode) && n.receiver.nil? && EXIT_CALLS.key?(n.name)
+
+        inner = nested || NESTED_CODE.any? { |k| n.is_a?(k) }
+        n.compact_child_nodes.each { |c| stack << [c, inner] }
+      end
+      false
+    end
 
     def qualify(namespace, name) = namespace ? "#{namespace}::#{name}" : name
 
@@ -159,7 +215,7 @@ module MrbcRb
     # Emitter-side recording, mixed into MrbcRb::Compiler. Everything here only reads the AST and the emitted operands.
     module Recorder
       def ann_scope
-        @ann_scope ||= Scope.new(:top, [].freeze, :public, false, false, nil, [])
+        @ann_scope ||= Scope.new(:top, [].freeze, :public, false, false, nil, [], true)
       end
 
       def ann_ops = (@ann_ops ||= {})
@@ -171,9 +227,10 @@ module MrbcRb
           case kind
           when :body
             opener = parent.instance_variable_get(:@ann_cur_opener)
-            Scope.new(opener[:body_kind], (ps.cref + [opener[:cref_entry]]).freeze, :public, false, false, opener[:pc], [])
-          when :method then Scope.new(:method, ps.cref, nil, ps.in_block, true, nil, [])
-          else Scope.new(kind, ps.cref, nil, true, ps.in_method, nil, [])
+            Scope.new(opener[:body_kind], (ps.cref + [opener[:cref_entry]]).freeze, :public, false, false, opener[:pc], [],
+                      opener[:straight])
+          when :method then Scope.new(:method, ps.cref, nil, ps.in_block, true, nil, [], false)
+          else Scope.new(kind, ps.cref, nil, true, ps.in_method, nil, [], false)
           end
         @ann_parent = parent
       end
@@ -194,7 +251,8 @@ module MrbcRb
         case name
         when :CLASS, :MODULE, :SCLASS
           rec.merge!(extra || {})
-          @ann_cur_opener = { pc: start, body_kind: :"#{name.to_s.downcase}_body", cref_entry: rec.delete(:cref_entry) }
+          @ann_cur_opener = { pc: start, body_kind: :"#{name.to_s.downcase}_body", cref_entry: rec.delete(:cref_entry),
+                              straight: rec[:conditional] == false }
           @ann_open_pc = start
         when :EXEC
           rec[:owner_pc] = @ann_open_pc
@@ -210,8 +268,12 @@ module MrbcRb
           rec[:child] = extra && extra[:child]
         when :ALIAS then rec.merge!(names: [@syms[operands[0]].to_s, @syms[operands[1]].to_s], **ann_owner_fields)
         when :UNDEF then rec.merge!(names: [@syms[operands[0]].to_s], **ann_owner_fields)
-        when :SETCONST then rec.merge!(name: @syms[operands[1]].to_s, scope_path: ann_scope_path, in_block: sc.in_block)
-        when :SETMCNST then rec.merge!(name: @syms[operands[1]].to_s, base: extra && extra[:base], base_rooted: extra && extra[:base_rooted])
+        when :SETCONST
+          rec.merge!(name: @syms[operands[1]].to_s, scope_path: ann_scope_path, in_block: sc.in_block,
+                     conditional: !ann_straight_write?)
+        when :SETMCNST
+          rec.merge!(name: @syms[operands[1]].to_s, base: extra && extra[:base], base_rooted: extra && extra[:base_rooted],
+                     conditional: !ann_straight_write?)
         when :GETCONST then rec[:name] = @syms[operands[1]].to_s
         when :GETMCNST then rec.merge!(name: @syms[operands[1]].to_s, base: extra && extra[:base], base_rooted: extra && extra[:base_rooted])
         end
@@ -237,6 +299,22 @@ module MrbcRb
 
         entry[1] = true
         ann_ops[start] = { op: name, line: @line, file: @filename, call: Annotations.call_facts(entry[0]) }
+      end
+
+      # The statements of the body this compiler generates (Annotations.straight_nodes), set before the first is generated.
+      def ann_body(stmts)
+        @ann_straight = Annotations.straight_nodes(stmts)
+      end
+
+      # Called by a constant write right before its SETCONST/SETMCNST with the write node; ann_straight_write? reads it once.
+      def ann_const_write(node) = (@ann_write = node)
+
+      def ann_straight?(node) = ann_scope.straight && !@ann_straight.nil? && @ann_straight.key?(node)
+
+      def ann_straight_write?
+        node = @ann_write
+        @ann_write = nil
+        !node.nil? && ann_straight?(node)
       end
 
       def ann_truncate(start)
@@ -317,7 +395,7 @@ module MrbcRb
         stmts = body_statements(node.body)
         facts = { kind: node.is_a?(Prism::ClassNode) ? :class : :module, name: name, written: Annotations.path_text(sp) || pnode.location.slice,
                   outer: outer, path: path, candidates: candidates, namespace: ns_known ? namespace : nil,
-                  empty_body: stmts.empty?, in_block: sc.in_block }
+                  empty_body: stmts.empty?, in_block: sc.in_block, conditional: !ann_straight?(node) }
         if node.is_a?(Prism::ClassNode)
           sup = node.superclass && MrbcRb.unparen(node.superclass)
           ssp = sup && Annotations.static_path(sup)
@@ -334,7 +412,7 @@ module MrbcRb
         target = obj.is_a?(Prism::SelfNode) ? :self : (sp ? :const : :other)
         of = target == :self ? (!ann_scope.in_method && !ann_scope.in_block && (entry.nil? || entry[:path]) ? ann_scope_path : nil) : nil
         { kind: :sclass, target: target, target_text: Annotations.path_text(sp), singleton_of: of, path: nil,
-          empty_body: body_statements(node.body).empty?, in_block: ann_scope.in_block,
+          empty_body: body_statements(node.body).empty?, in_block: ann_scope.in_block, conditional: !ann_straight?(node),
           cref_entry: { kind: :sclass, path: nil, singleton_of: of, outer: :sclass } }
       end
 
