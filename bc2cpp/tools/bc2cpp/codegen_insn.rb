@@ -1176,6 +1176,9 @@ class CodeGen
     if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
       return "#{FIXNUM_PROOF_NOTE}  #{RegName[d]} = mrb_bool_value(#{TaggedFixnum.compare("#{RegName[d]}", sym, "#{RegName[s]}")});\n"
     end
+    if op == :EQ && (identity = literal_eq_identity(irep, idx, d, s, owner_def, reg_offset))
+      return identity
+    end
     integer_pair = integer_operand_pair?(sym, d, s, irep, idx, owner_def, reg_offset)
     return integer_compare_tier(sym, d, s) if integer_pair && op != :EQ
 

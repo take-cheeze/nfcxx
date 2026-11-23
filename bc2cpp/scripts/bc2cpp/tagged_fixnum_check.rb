@@ -120,7 +120,7 @@ end
 
 SRC = <<~'RUBY'
   class TfOps
-    def initialize; @c = 0; end
+    def initialize; @c = 0; @k = 0; end
     def add(a, b); a + b; end
     def sub(a, b); a - b; end
     def mul(a, b); a * b; end
@@ -140,6 +140,15 @@ SRC = <<~'RUBY'
     def sz(a); a.size; end
     def each2; yield 1; yield 2; end
     def cap(n); s = 0; each2 { |x| s += x * n }; s; end
+    # LITERAL_EQ_IDENTITY (codegen_literal_eq.rb): == against a literal; @k only ever holds an Integer.
+    def eq_sym(a); a == :tag; end
+    def eq_nil(a); a == nil; end
+    def eq_true(a); a == true; end
+    def eq_false(a); a == false; end
+    def sym_eq(a); :tag == a; end
+    def eq_one(a); a == 1; end
+    def kinc; @k += 1; end
+    def eq_k1; @k == 1; end
   end
 RUBY
 
@@ -151,6 +160,10 @@ REOPEN = <<~'RUBY'
     def +(o); $tf_hook += 1; o.is_a?(Integer) ? self - (0 - o) : :hooked; end
     def <(o); $tf_hook += 1; o.is_a?(Numeric) ? (self <=> o) == -1 : :hooked; end
     def &(o); $tf_hook += 1; o.is_a?(Integer) ? (self | o) - (self ^ o) : :hooked; end
+  end
+  # A program `==` that answers true for a literal it is not: x == :tag must send it.
+  class TfAny
+    def ==(o); o == :tag || o.nil?; end
   end
 RUBY
 
@@ -166,7 +179,8 @@ dirs = { 'default' => Dir.mktmpdir('bc2cpp-tf'), 'reopened' => Dir.mktmpdir('bc2
 at_exit { dirs.each_value { |dir| FileUtils.remove_entry(dir) } }
 puts '-- generated code'
 code, err = Bc2cppFixtureRuntime.generate(SRC, dirs['default'], core: true, only_owners: OWNERS)
-OUTLINE_SWITCHES = %w[BC2CPP_CMP_NUM_OUTLINE BC2CPP_UPVAR_PTR_FIXNUM BC2CPP_SIZE_FIXNUM BC2CPP_INT_PAIR_OUTLINE].freeze
+OUTLINE_SWITCHES = %w[BC2CPP_CMP_NUM_OUTLINE BC2CPP_UPVAR_PTR_FIXNUM BC2CPP_SIZE_FIXNUM BC2CPP_INT_PAIR_OUTLINE
+                      BC2CPP_LITERAL_EQ_IDENTITY].freeze
 with_switches = lambda do |value, &blk|
   saved = OUTLINE_SWITCHES.to_h { |k| [k, ENV.fetch(k, nil)] }
   OUTLINE_SWITCHES.each { |k| ENV[k] = value }
@@ -259,6 +273,21 @@ check.call('block env: switched off, mrb_int_value and mrb_integer',
              code_of(code, "TfOps_#{name}").match?(/BC2CPP_FIXNUM_PAIR_P\(r\d+, r\d+\).*BC2CPP_FIXNUM_#{op}\(r\d+, r\d+\)/m))
 end
 check.call('a reopened Integer#& keeps its send', !code_of(reopen_code, 'TfOps_band').include?('BC2CPP_FIXNUM_AND'))
+identity = ->(text, name) { code_of(text, "TfOps_#{name}").match?(/BC2CPP_SAME_WORD\(r\d+, r\d+\)/) }
+%w[eq_sym eq_nil eq_true eq_false sym_eq eq_k1].each do |name|
+  body = code_of(code, "TfOps_#{name}")
+  check.call("#{name}: == against the literal is the word identity, no mrb_equal (LITERAL_EQ_IDENTITY)",
+             identity.call(code, name) && !body.include?('mrb_equal(') && !body.include?('bc2cpp_cmp_num_eq('))
+  check.call("#{name}: BC2CPP_LITERAL_EQ_IDENTITY=0 keeps the full compare", !identity.call(inline_code, name))
+end
+eq_one = code_of(code, 'TfOps_eq_one')
+check.call('eq_one: an operand that may be a Float (1 == 1.0) is the word test, else the Float compare',
+           eq_one.match?(/= mrb_fixnum_p\((r\d+)\) \? mrb_bool_value\(BC2CPP_SAME_WORD\(\1, r\d+\)\) : bc2cpp_eq_lit_num\(\1, r\d+\);/) &&
+             !eq_one.include?('mrb_equal(') && !eq_one.include?('bc2cpp_cmp_num_eq('))
+check.call('eq_one: BC2CPP_LITERAL_EQ_IDENTITY=0 keeps the numeric compare',
+           code_of(inline_code, 'TfOps_eq_one').include?('mrb_equal(') && !code_of(inline_code, 'TfOps_eq_one').include?('bc2cpp_eq_lit_num('))
+check.call('a program == (TfAny) keeps every literal compare a send',
+           %w[eq_sym eq_nil eq_true eq_false eq_k1 eq_one].none? { |name| identity.call(reopen_code, name) })
 check.call('a reopened Integer#+ leaves OP_ADD its word arm, as the VM does',
            code_of(reopen_code, 'TfOps_add').include?('bc2cpp_fixnum_add('))
 methods = code.sub(TaggedFixnum::PRELUDE, '')
@@ -297,6 +326,8 @@ DRIVER = <<~'RUBY'
   nan = 0.0 / 0.0
   vals = [0, 1, -1, 2, -2, 100, fmax, fmax - 1, fmax + 1, fmin, fmin + 1, fmin - 1, 0x7fff_ffff_ffff_ffff,
           -0x8000_0000_0000_0000, 0x8000_0000_0000_0000, 2**70, -(2**70), 1.5, -0.0, nan, nil, :tag]
+  vals += [1.0, true, false, 'tag']
+  vals << TfAny.new if Object.const_defined?(:TfAny)
   ops = %i[add sub mul lt le gt ge eq ne band bor bxor dv]
   ops.each do |op|
     vals.each_with_index do |a, i|
@@ -307,6 +338,10 @@ DRIVER = <<~'RUBY'
   vals.each_with_index do |a, i|
     show.call("addi/subi #{i}") { [t.addi(a), t.subi(a), t.subi(t.addi(a)), t.addi(t.subi(a))] }
   end
+  vals.each_with_index do |a, i|
+    show.call("literal == #{i}") { %i[eq_sym eq_nil eq_true eq_false sym_eq eq_one].map { |op| t.__send__(op, a) } }
+  end
+  show.call('eq_k1') { r = [t.eq_k1]; t.kinc; r << t.eq_k1; t.kinc; r << t.eq_k1 }
   show.call('back to fixnum') { [t.sub(t.add(fmax, 1), 1), t.add(t.sub(fmin, 1), 1), t.sub(t.mul(fmax, 2), fmax)] }
   show.call('step') { [t.step(1), t.step(1), t.step(fmax), t.step(fmin), t.step(-fmax)] }
   show.call('size') { [t.sz([1, 2, 3]), t.sz([]), t.sz('abcd'), t.sz({ a: 1 }), t.sz(nil)] }
