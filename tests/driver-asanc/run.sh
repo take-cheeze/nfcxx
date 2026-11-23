@@ -8,8 +8,12 @@ here=$(cd "$(dirname "$0")" && pwd -P)
 repo=$(cd "$here/../.." && pwd -P)
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 pass=0; fail=0
-sed -n '/^if \[ \$asan = 1 \]; then$/,/^fi$/p' "$repo/tests/driver-body/nfcxx-bash" > "$work/bash.sh"
-[ -s "$work/bash.sh" ] || { echo "driver-asanc: no ASan block in the frozen driver" >&2; exit 2; }
+# The body's ASan block now starts at its fallback: the elif after the driver's NFCXX_SETUP_ASAN state (the driver's Ruby
+# planner, scripts/nfcxx-setup.rb asan, makes that state). The fallback runs when the driver gave no state; it is the elif
+# through its fi (the else clears asanopts), made an if so the suite sources it as it sourced the old block.
+sed -n '/^elif \[ \$asan = 1 \]; then$/,/^fi$/p' "$repo/tests/driver-body/nfcxx-bash" | sed '1s/^elif /if /' > "$work/bash.sh"
+grep -q '^if \[ \$asan = 1 \]; then$' "$work/bash.sh" && grep -q '^else$' "$work/bash.sh" \
+  || { echo "driver-asanc: no ASan fallback block in the frozen driver" >&2; exit 2; }
 
 # run SIDE ASAN BACKEND [OPT...]: prints the arrays, the stderr and the status
 run() {

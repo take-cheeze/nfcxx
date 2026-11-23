@@ -73,12 +73,12 @@ if [ "$evil" = refused ] && [ ! -e "$work/escape" ] && [ ! -e "$work/evil-dest/.
   pass=$((pass + 1)); echo "ok   an entry with a path outside its directory is refused"
 else fail=$((fail + 1)); echo "FAIL an entry with a path outside its directory: $evil"; fi
 
-# The driver's remote tier: its two functions, taken from nfcxx itself (they use $root and the helper).
-funcs=$work/remote-funcs.sh
-sed -n '/^cache_remote_get() {/,/^}/p; /^cache_remote_put() {/,/^}/p' "$root/tests/driver-body/nfcxx-bash" > "$funcs"
+# The driver's remote tier: the two calls of scripts/nfcxx-cache-io.rb that the bash helpers made (the frozen body no
+# longer defines them; the same wrappers are in tests/nfcxx-gcc/pinned-nfcxx.txt).
 (
   set -eu
-  root=$root; . "$funcs"
+  cache_remote_get() { "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-io.rb" remote-get "$1" "$2"; }
+  cache_remote_put() { "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-io.rb" remote-put "$1" "$2" || true; }
   local_entry=$work/driver/objects/k1; mkdir -p "$local_entry"
   cp "$src/obj" "$src/ti" "$src/ii" "$local_entry/"
   cache_remote_put drv1 "$local_entry"                       # a store: obj, ti and ii go up
