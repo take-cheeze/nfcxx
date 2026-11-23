@@ -1873,6 +1873,23 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_value tools/cext2mrbgem
 check test "$rc" -eq 0
 check test "$(grep -c 'VALUE as integer' "$work/api_hash_value/REFUSALS.txt")" -eq 0
 check grep -qF 'h[1] = nfcx_value_hash(mrb, hv_sf(mrb, obj));' "$work/api_hash_value/src/api_hash_value.c"
+# 2zzz195. a VALUE-returning call that is the whole parenthesised if condition gets one truth test (mrb_test), not two: the
+# operand pass (a call next to && or ||) does not take it.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_truth_twice tools/cext2mrbgem/fixtures/api_truth_twice/ext/api_truth_twice "$work/api_truth_twice" > "$work/api_truth_twice.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'if (mrb_test(tt_zero(x)))' "$work/api_truth_twice/src/api_truth_twice.c"
+check test "$(grep -c 'mrb_test(mrb_test' "$work/api_truth_twice/src/api_truth_twice.c")" -eq 0
+# 2zzz196. a later declarator of a declaration (const char *s1, *s2;) is a pointer local in its block: its if (s2) is a pointer
+# test, not the VALUE of the function's own s2 (no mrb_false_p on it).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_decl_comma tools/cext2mrbgem/fixtures/api_decl_comma/ext/api_decl_comma "$work/api_decl_comma" > "$work/api_decl_comma.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'mrb_false_p(s2)' "$work/api_decl_comma/src/api_decl_comma.c")" -eq 0
+check grep -qF '        if (s2) {' "$work/api_decl_comma/src/api_decl_comma.c"
+# 2zzz197. an if on a VALUE member of a nested struct (h->options.hook) is a truth test of the VALUE: the member chain is resolved
+# through the base's declared struct type, so the function-pointer member of another struct with the same name does not decide it.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_field_chain tools/cext2mrbgem/fixtures/api_field_chain/ext/api_field_chain "$work/api_field_chain" > "$work/api_field_chain.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF '    if (!mrb_false_p(h->options.hook))' "$work/api_field_chain/src/api_field_chain.c"
 # 2zzz193. RB_ENC_INTERNED_STR_NULL_CHECK is a CRuby build flag (1 only for Ruby 3.0.0 to 3.0.5): the port's value is its default 0,
 # so the check is the dead branch 0 && ..., with no refusal.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_enc_null_check tools/cext2mrbgem/fixtures/api_enc_null_check/ext/api_enc_null_check "$work/api_enc_null_check" > "$work/api_enc_null_check.log" 2>&1 || rc=$?
