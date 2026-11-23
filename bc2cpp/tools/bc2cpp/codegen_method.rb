@@ -4,6 +4,7 @@ require 'strscan'
 require_relative 'bytecode_ir'
 require_relative 'reg_name'
 require_relative 'cold_compact'
+require_relative 'cold_compact_calls'
 
 # CodeGen: compile_method and jump targets.
 

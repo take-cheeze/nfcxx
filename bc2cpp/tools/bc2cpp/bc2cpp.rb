@@ -3355,6 +3355,10 @@ BC2CPP_MAIN = lambda do
   print poly_tables_code
   warn "== constant definition tables (CONST_DEF_TABLE): #{ConstDefTable.count} writes =="
   print ConstDefTable::HELPER if ConstDefTable.count.positive?
+  # COLD_COMPACT_CALLS (cold_compact_calls.rb): last, on the finished text, so every helper scan above read the sites
+  # in their methods and every helper they name is printed above.
+  print ColdCompactCalls.apply(compiled)
+  warn ColdCompactCalls.summary
   class_units.each { |unit| print unit[:code] }
   compiled.each do |m|
     print ShardOutput.unit_mark(m[:owner]) if shards > 1
