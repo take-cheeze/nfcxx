@@ -1901,7 +1901,9 @@ end
         # a data argument is a VALUE name or Q constant, or a pointer to a local: (VALUE)&x (carried as mrb_cptr_value;
         # the callbacks must use it only in pointer casts, checked below)
         data_ok = ->(d) { d.match?(/\A[A-Za-z_][#{WC}]*\z/) && (!@entries.key?(d) || d.match?(/\AQ(?:nil|undef|true|false)\z/)) }
-        ptr_data = ->(d) { d.match?(/\A\(VALUE\)\s*&[A-Za-z_][#{WC}]*\z/) }
+        # (VALUE)p where p is a pointer declared in this file (oj's (VALUE)out): the pointer is carried in the VALUE
+        ptr_name = ->(d) { (pm = /\A\(VALUE\)\s*([A-Za-z_]\w*)\z/.match(d)) && masked.match?(/\*\s*#{Regexp.escape(pm[1])}\b/) }
+        ptr_data = ->(d) { d.match?(/\A\(VALUE\)\s*&[A-Za-z_][#{WC}]*\z/) || ptr_name.call(d) }
         next unless [d1, d2].all? { |d| data_ok.call(d) || ptr_data.call(d) }
         cands << { rel: rel, s: s, e: close + 1, b: b_cb, d1: d1, ecb: e_cb, d2: d2,
                    bpos: args_pos[0], epos: args_pos[2] }
@@ -6176,6 +6178,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       conv = lambda do |x|
         if (pm = /\A\(VALUE\)\s*&([A-Za-z_][#{WC}]*)\z/.match(x))
           "mrb_cptr_value(#{mrb_tok(rel, s)}, &#{pm[1]})"
+        elsif (pm = /\A\(VALUE\)\s*([A-Za-z_]\w*)\z/.match(x)) && !x.match?(/\AQ(?:nil|undef|true|false)\z/)
+          "mrb_cptr_value(#{mrb_tok(rel, s)}, #{pm[1]})"
         elsif x.match?(/\AQ(?:nil|undef|true|false)\z/)
           @entries[x]['mruby']
         else

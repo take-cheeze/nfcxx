@@ -1813,6 +1813,12 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_str_encode tools/cext2mrbgem
 check test "$rc" -eq 0
 check test "$(grep -c 'stuck point' "$work/api_str_encode/REFUSALS.txt")" -eq 0
 check grep -qF 'rb_str_encode(mrb, str, enc, 0, mrb_nil_value())' "$work/api_str_encode/src/api_str_encode.c"
+# 2zzz185. rb_ensure with a pointer carried in the data VALUE ((VALUE)p, a pointer local): mrb_ensure with mrb_cptr_value of the
+# pointer; no pointer-as-VALUE refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ensure_pdata tools/cext2mrbgem/fixtures/api_ensure_pdata/ext/api_ensure_pdata "$work/api_ensure_pdata" > "$work/api_ensure_pdata.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'VALUE as pointer' "$work/api_ensure_pdata/REFUSALS.txt")" -eq 0
+check grep -qF 'mrb_ensure(mrb, ep_body, mrb_cptr_value(mrb, p), ep_done, mrb_cptr_value(mrb, p));' "$work/api_ensure_pdata/src/api_ensure_pdata.c"
 check grep -qF "spec.add_dependency 'mruby-marshal'" "$work/api_marshal_load/mrbgem.rake"
 # 2zzz179. rb_time_timespec_new: a fixed UTC offset is mrb_time_at_offset (the fork's mruby-time), CRuby's INT_MAX and INT_MAX-1 are
 # local time and UTC; no Time-offset refusal.
