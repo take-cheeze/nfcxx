@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The runner (scripts/nfcxx-run.rb) runs a plan for real. For the corpus lines that give the port a RUN or EXEC plan, the
 # commands the runner runs (against a fake driver that logs its argv) must be the commands the oracle prints
-# (tests/nfcxx/option-state.sh). The rest checks the plan format and the runner's behaviour: the exit status, the first
+# (recorded in tests/nfcxx/loop-golden.txt). The rest checks the plan format and the runner's behaviour: the exit status, the first
 # failure, CP, LN, CAT, arguments with spaces, the environment, and the working directory.
 #   tests/nfcxx/run-test.sh     prints the counts; exits nonzero on a failure
 cd "$(dirname "$0")/../.."
@@ -47,10 +47,16 @@ done
 
 # the oracle's commands, as the runner's log writes them: ROOT for the repository (the driver nfcxx is "nfcxx" in the oracle),
 # TMP for the temporary directory, and tabs between the words
+# golden_block CASE: the output tests/nfcxx/loop-golden.txt records for the case line CASE (loop-consumer.sh has the same function)
+golden_block() {
+  CASE_KEY="@@ $1" awk '
+    found == 0 && $0 == ENVIRON["CASE_KEY"] { found = 1; st = 1; next }
+    found && /^@@ / { exit }
+    found && st { st = 0; next }
+    found { print }' tests/nfcxx/loop-golden.txt
+}
 oracle_commands() {
-  local -a words
-  read -r -a words <<< "$1"
-  tests/nfcxx/option-state.sh "${words[@]}" 2>&1 | sed -E -e 's/^(RUN|EXEC) //' -e 's/^nfcxx( |$)/ROOT\/nfcxx\1/' | tr ' ' '\t'
+  golden_block "$1" | sed -E -e 's/^(RUN|EXEC) //' -e 's/^nfcxx( |$)/ROOT\/nfcxx\1/' | tr ' ' '\t'
 }
 
 for line in "${corpus_lines[@]}"; do

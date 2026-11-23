@@ -81,6 +81,8 @@ owned_cudatmp=${NFCXX_OWNED_CUDATMP-}; owned_tmp=${NFCXX_OWNED_TMP-}; unset NFCX
 early_pre_done=${NFCXX_EARLY_PRE_DONE-}; unset NFCXX_EARLY_PRE_DONE
 # NFCXX_OWNED_CTMP and NFCXX_OWNED_PTMP: the C-input and Path B object directories, made by the Ruby driver the same way.
 owned_ctmp=${NFCXX_OWNED_CTMP-}; owned_ptmp=${NFCXX_OWNED_PTMP-}; unset NFCXX_OWNED_CTMP NFCXX_OWNED_PTMP
+# NFCXX_OWNED_MODPLAN: the directory of the modules block's state and reply records, made by the Ruby driver the same way.
+owned_modplan=${NFCXX_OWNED_MODPLAN-}; unset NFCXX_OWNED_MODPLAN
 # NFCXX_FALLBACK_MARKER: the file fallback_gcc leaves its message in for the Ruby driver. It is read and unset here: the cache
 # key takes every NFCXX_* variable, and the marker's name is a new temporary file for each run (a key that never repeats).
 fallback_marker=${NFCXX_FALLBACK_MARKER-}; unset NFCXX_FALLBACK_MARKER
@@ -417,12 +419,14 @@ early_status=0; "${RUBY:-ruby}" "$root/scripts/nfcxx-early-exit.rb" post < <(ear
 # with scripts/nfcxx-modules.rb build (the driver ends with the build's status, as the bash's mod_build_program did), and gives a
 # compile its module options: --modules, the directory of the interface files (BMIs, --module-dir, else the directory of -o)
 # and, for an interface unit, the BMI it writes. The EXIT trap is left as it is, so cu_prepare's cleanup and trace_finish still
-# run when the build ends the driver. Its state and reply are records in a temporary directory, removed before the driver ends.
+# run when the build ends the driver. Its state and reply are records in NFCXX_OWNED_MODPLAN's directory (made by the Ruby driver,
+# which removes it when the run ends: the body does not make or remove it).
 modules=0; modopts=()
-modplan=$(mktemp -d) || exit $?
+modplan=$owned_modplan
+[ -n "$modplan" ] || { echo "nfcxx: NFCXX_OWNED_MODPLAN is not set (the Ruby driver, scripts/nfcxx.rb, makes it)" >&2; exit 2; }
 modules_plan_input > "$modplan/state"
 modrc=0; "${RUBY:-ruby}" "$root/scripts/nfcxx-modules-plan.rb" "$modplan/state" "$modplan/reply" || modrc=$?
-if [ $modrc != 0 ]; then rm -rf "$modplan"; exit $modrc; fi
+if [ $modrc != 0 ]; then exit $modrc; fi
 modgroup=""; modbuilt=""; modz=0
 while IFS= read -r -d "" modrec; do
   case $modrec in
@@ -435,7 +439,6 @@ while IFS= read -r -d "" modrec; do
     z) modz=1 ;;
   esac
 done < "$modplan/reply"
-rm -rf "$modplan"
 [ $modz = 1 ] || { echo "nfcxx: scripts/nfcxx-modules-plan.rb stopped before its end (the module block is incomplete)" >&2; exit 1; }
 [ -z "$modbuilt" ] || exit "$modbuilt"
 

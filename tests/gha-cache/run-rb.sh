@@ -166,18 +166,13 @@ end' "$rb" "$work/link.tar" "$work/link-dest")
 if [ "$linked" = "unexpected entry 'lnk'" ]; then ok "a symlink member is refused (ruby reader takes regular files only)"
 else bad "a symlink member: $linked"; fi
 
-# 12. The driver's remote tier: the two functions from nfcxx, which call scripts/nfcxx-cache-io.rb (that calls the GHA client).
-funcs=$work/remote-funcs.sh
-sed -n '/^cache_remote_get() {/,/^}/p; /^cache_remote_put() {/,/^}/p' "$root/tests/driver-body/nfcxx-bash" \
-  > "$funcs"
-if ! grep -q '"\${RUBY:-ruby}" "\$root/scripts/nfcxx-cache-io.rb" remote-get' "$funcs" \
-   || ! grep -q '"\${RUBY:-ruby}" "\$root/scripts/nfcxx-cache-io.rb" remote-put' "$funcs"; then
-  bad "the driver functions do not call the Ruby helper (substitution did not apply)"
-fi
+# 12. The driver's remote tier: the two calls of scripts/nfcxx-cache-io.rb that the bash helpers made (the frozen body no
+# longer defines them; the same wrappers are in tests/nfcxx-gcc/pinned-nfcxx.txt). The io script calls the GHA client.
 drv=0
 (
   set -eu
-  root=$root; . "$funcs"
+  cache_remote_get() { "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-io.rb" remote-get "$1" "$2"; }
+  cache_remote_put() { "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-io.rb" remote-put "$1" "$2" || true; }
   local_entry=$work/driver/objects/k1; mkdir -p "$local_entry"
   cp "$src/obj" "$src/ti" "$src/ii" "$local_entry/"
   cache_remote_put rb-drv1-$$ "$local_entry"

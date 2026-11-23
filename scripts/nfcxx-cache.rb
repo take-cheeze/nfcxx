@@ -21,8 +21,9 @@
 #
 # The key covers what the bash covered (docs/notes/cxx-driver.md): the argv (--cache=, --cache-log=, --time-log= and --trace=
 # left out, as nfcxx passes them), the working directory, the absolute output and source, every NFCXX_* environment variable
-# but the logs and the remote tier's, nfcxx and scripts/, the EDG binaries, build/qbe/qbe, tools/weak-symbols, the EDG driver
-# and its configuration, the host compiler versions, the Path B front end when backend=pathb, and each header (hashed).
+# but the logs, the remote tier's and the driver-to-body handoffs (KEY_ENV_LEFT_OUT), nfcxx and scripts/, the EDG binaries,
+# build/qbe/qbe, tools/weak-symbols, the EDG driver and its configuration, the host compiler versions, the Path B front end
+# when backend=pathb, and each header (hashed).
 #
 # Not covered: the GitHub Actions calls (nfcxx runs scripts/nfcxx-cache-io.rb between a miss and the hit check, and after a
 # store), the device image cache, and the CUDA second pass.
@@ -34,8 +35,16 @@ require "open3"
 
 ROOT = File.expand_path("..", __dir__)
 
-# The environment variables the key leaves out (their names are the bash's grep -Ev).
-KEY_ENV_LEFT_OUT = %w[NFCXX_CACHE_LOG NFCXX_CACHE_REMOTE NFCXX_TIME_LOG NFCXX_TRACE NFCXX_TRACE_OWNER NFCXX_TRACE_UNIT].freeze
+# The environment variables the key leaves out: the logs and the remote tier's (the bash's grep -Ev names), and the handoffs
+# the Ruby driver and the body pass each other. A handoff is not an input to the object: NFCXX_TRACE_PENDING is a per-run
+# file (its name carries the driver's pid and temporary directory), so a key that took it would never repeat when the
+# trace is on. NFCXX_TMP_OWNED and the body's own handoffs (fallback marker, owned directories, loop and setup records)
+# say who removes what, not what is compiled.
+KEY_ENV_LEFT_OUT = %w[NFCXX_CACHE_LOG NFCXX_CACHE_REMOTE NFCXX_TIME_LOG NFCXX_TRACE NFCXX_TRACE_OWNER NFCXX_TRACE_UNIT
+                      NFCXX_TRACE_PENDING NFCXX_TMP_OWNED NFCXX_FALLBACK_MARKER NFCXX_OWNED_CUDATMP NFCXX_OWNED_TMP
+                      NFCXX_OWNED_CTMP NFCXX_OWNED_PTMP NFCXX_LOOP_STATUS NFCXX_LOOP_STATE].freeze
+# the handoff prefixes: the setup records the Ruby driver passes the body (NFCXX_SETUP_*), unset by the body when it reads them
+KEY_ENV_LEFT_OUT_PREFIXES = %w[NFCXX_SETUP_].freeze
 
 # A usage error: nfcxx prints it and exits 2.
 class Fatal < StandardError
@@ -141,7 +150,9 @@ end
 
 # env | grep '^NFCXX_' | grep -Ev the left-out names | LC_ALL=C sort
 def nfcxx_env_lines
-  ENV.keys.select { |k| k.start_with?("NFCXX_") && !KEY_ENV_LEFT_OUT.include?(k) }
+  ENV.keys.select do |k|
+    k.start_with?("NFCXX_") && !KEY_ENV_LEFT_OUT.include?(k) && KEY_ENV_LEFT_OUT_PREFIXES.none? { |p| k.start_with?(p) }
+  end
      .map { |k| "#{k}=#{ENV[k]}" }
      .sort
 end

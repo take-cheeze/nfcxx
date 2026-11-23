@@ -464,11 +464,14 @@ module SymbolCache
     names = table.literals.map { |literal| "  #{literal}," }.join("\n")
     # PRESYM_ALL: a slot's entry is its presym id, or the high bit and the index of its RAM slot; only the names presym
     # cannot spell keep a RAM slot (bc2cpp_syms) and an intern.
-    dynamic = 0
-    entries = table.literals.map do |literal|
+    dynamic = []
+    entries = table.literals.each_with_index.map do |literal, slot|
       macro = presym_macro(literal)
-      macro ? "(uint32_t)#{macro}" : "0x80000000u | #{(dynamic += 1) - 1}u"
+      macro ? "(uint32_t)#{macro}" : "0x80000000u | #{(dynamic << slot).size - 1}u"
     end
+    # SYM_DYN_NAMES: bc2cpp_sym_names is constexpr and read only at compile time, by the RAM slots' own name list, so a
+    # presym name keeps no string in the image. BC2CPP_SYM_DYN_NAMES=0 interns from bc2cpp_sym_names again.
+    dyn_names = ENV['BC2CPP_SYM_DYN_NAMES'] != '0'
     checked = table.checks.any? { |check| check.to_i.positive? }
     checks = (0...[table.size, 1].max).map { |slot| table.checks[slot].to_i }.join(', ')
     <<~CPP
@@ -493,11 +496,11 @@ module SymbolCache
       #{LITERAL_TABLES_PRELUDE.chomp}
       // SYMBOL_CACHE -- see tools/bc2cpp/symbol_cache.rb.
       static mrb_state* bc2cpp_sym_state = nullptr;
-      static mrb_sym bc2cpp_syms[#{[dynamic, 1].max}] = {};
+      static mrb_sym bc2cpp_syms[#{[dynamic.size, 1].max}] = {};
       static const uint32_t bc2cpp_sym_entry[#{[table.size, 1].max}] = { #{entries.empty? ? '0x80000000u' : entries.join(', ')} };
-      static const char* const bc2cpp_sym_names[#{[table.size, 1].max}] = {
+      static #{dyn_names ? 'constexpr const char*' : 'const char* const'} bc2cpp_sym_names[#{[table.size, 1].max}] = {
       #{names.empty? ? '  "",' : names}
-      };
+      };#{dyn_names ? "\nstatic const char* const bc2cpp_sym_dyn_names[#{[dynamic.size, 1].max}] = { #{dynamic.empty? ? 'nullptr' : dynamic.map { |slot| "bc2cpp_sym_names[#{slot}]" }.join(', ')} };" : ''}
       #{table.native_singleton_used ? "// NATIVE_SINGLETON_CALL: bumped with the symbol table, so no slot outlives its VM.\nstatic unsigned bc2cpp_nsc_epoch = 1;" : ''}#{table.owner_call_used ? "\n// OUTSIDE_OWNER_CALL: bumped with the symbol table, so no owner set outlives its VM.\nstatic unsigned bc2cpp_owner_epoch = 1;" : ''}
       static void bc2cpp_reset_symbol_cache() {
         bc2cpp_sym_state = nullptr;
@@ -513,7 +516,7 @@ module SymbolCache
         uint32_t e = bc2cpp_sym_entry[i];
         if (!(e & 0x80000000u)) return (mrb_sym)e;
         mrb_sym& s = bc2cpp_syms[e & 0x7fffffffu];
-        if (!s) s = mrb_intern_cstr(M, bc2cpp_sym_names[i]);
+        if (!s) s = mrb_intern_cstr(M, #{dyn_names ? 'bc2cpp_sym_dyn_names[e & 0x7fffffffu]' : 'bc2cpp_sym_names[i]'});
         return s;
       }
       #{checked ? "static const unsigned char bc2cpp_sym_check[#{[table.size, 1].max}] = { #{checks} };\n#{CHECKED_SEND}" : ''}

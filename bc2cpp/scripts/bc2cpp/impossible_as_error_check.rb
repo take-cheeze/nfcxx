@@ -68,6 +68,18 @@ table.nomethod_used = true
 cache = SymbolCache.emit(table)
 check.call('a violated proof raises a distinct RuntimeError, not a look-alike NoMethodError',
            cache.include?('closed-world proof violated') && !cache.include?('mrb_method_missing('))
+# SYM_DYN_NAMES: the name list is read at compile time only; the run-time list holds the names presym cannot spell.
+SymbolCache.presym_names = Set['bar']
+presym_cache = SymbolCache.emit(table)
+ENV['BC2CPP_SYM_DYN_NAMES'] = '0'
+named_cache = SymbolCache.emit(table)
+ENV.delete('BC2CPP_SYM_DYN_NAMES')
+SymbolCache.presym_names = Set.new
+check.call('SYM_DYN_NAMES: a presym name is no run-time string, a dynamic one is interned from its own list',
+           presym_cache.include?('static constexpr const char* bc2cpp_sym_names[2] = {') &&
+             presym_cache.include?('bc2cpp_sym_dyn_names[1] = { bc2cpp_sym_names[0] };') &&
+             presym_cache.include?('mrb_intern_cstr(M, bc2cpp_sym_dyn_names[e & 0x7fffffffu])') &&
+             named_cache.include?('mrb_intern_cstr(M, bc2cpp_sym_names[i])') && !named_cache.include?('bc2cpp_sym_dyn_names'))
 
 candidates = [ENV['BC2CPP_MRUBY_CORE']].compact + Dir[File.join(root, 'build*/mruby/host/mrbc')]
 core = candidates.find { |dir| File.exist?(File.join(dir, 'lib/libmruby_core.a')) && File.directory?(File.join(dir, 'include')) }
