@@ -2742,7 +2742,13 @@ BC2CPP_MAIN = lambda do
         for (const mrb_value* a = args.begin(); a != args.end(); a++) {
           mrb_sym method = mrb_obj_to_sym(M, *a);
           mrb_int len;
+          // The name is only copied: mrb_sym_name_tmp keeps a compact presym table from caching it.
+        #ifdef MRB_SYM_TMP_LEN
+          char nmbuf[MRB_SYM_TMP_LEN];
+          const char* nm = mrb_sym_name_tmp(M, method, nmbuf, &len);
+        #else
           const char* nm = mrb_sym_name_len(M, method, &len);
+        #endif
           std::string ivar = "@" + std::string(nm, (size_t)len);
           mrb_sym ivsym = mrb_intern(M, ivar.data(), (mrb_int)ivar.size());
           mrb_iv_name_sym_check(M, ivsym);
