@@ -28,6 +28,7 @@ module ShardOutput
   # fixture lowers it with BC2CPP_SHARD_MIN_BYTES.
   MIN_SHARD_BYTES = 400_000
   IDENT = /[A-Za-z_$][\w$]*/.freeze
+  ASCII_CHARS = Array.new(128) { |byte| byte.chr.freeze }.freeze
 
   class Error < StandardError; end
 
@@ -558,7 +559,25 @@ module ShardOutput
 
   # The index where a head meets its body `{`, initializer `=` or end `;` (outside parentheses), or nil.
   # [index or nil, the depth after the line]; `depth` is the depth the line starts at.
+  # ASCII heads compare bytes directly: byte and character indices coincide, so no
+  # one-character String is allocated per step. Non-ASCII heads keep the character path.
   def head_cut(code, depth = 0)
+    if code.ascii_only?
+      i = 0
+      while i < code.bytesize
+        case code.getbyte(i)
+        when 40, 91 then depth += 1
+        when 41, 93 then depth -= 1
+        when 123, 59 then return [i, depth] if depth.zero?
+        when 61
+          if depth.zero? && code.getbyte(i + 1) != 61 && ![61, 33, 60, 62].include?(code.getbyte(i - 1))
+            return [i, depth]
+          end
+        end
+        i += 1
+      end
+      return [nil, depth]
+    end
     code.each_char.with_index do |c, i|
       case c
       when '(', '[' then depth += 1
@@ -611,8 +630,10 @@ module ShardOutput
         code = String.new
         i = 0
         in_str = nil
+        chars = line.ascii_only? && ASCII_CHARS
         while i < line.size
-          c = line[i]
+          # Byte and character indices coincide on ASCII lines; reuse their character strings.
+          c = chars ? chars[line.getbyte(i)] : line[i]
           if in_comment
             if c == '*' && line[i, 2] == '*/'
               in_comment = false
