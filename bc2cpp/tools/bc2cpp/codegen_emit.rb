@@ -1417,6 +1417,9 @@ class CodeGen
       leaves |= copied
     end
     leaves.select! { |label| live_labels.include?(label) } if live_labels
+    # MULTI_RETURN: the callees a destructuring caller may name by their `X_mr` are this unit's.
+    @unit_leaves = leaves
+    @multi_return_unit_impls = nil
     leaves.map { |label| compile_timed(label) }
   end
 
@@ -1580,6 +1583,7 @@ class CodeGen
     out = String.new
     compiled.each do |m|
       out << "#{decl_line(m)};\n"
+      out << "#{m[:mr_decl]};\n" if m[:mr_decl]
       # The entry wrapper stays static: only this gem's registration calls it. An entry the build leaves out of the
       # tables (StaticDispatchLists#for_build) is reached only by direct `_impl` calls, so it can go unused.
       out << "[[maybe_unused]] static mrb_value #{m[:entry]}(mrb_state*, mrb_value);\n"

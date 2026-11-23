@@ -227,6 +227,8 @@ require_relative 'codegen_strcat_literal'
 require_relative 'codegen_call_inline'
 require_relative 'codegen_respond_to_fold'
 require_relative 'owner_call_direct'
+require_relative 'codegen_multi_return'
+require_relative 'codegen_literal_minmax'
 # Last: its compile_insn wrapper reads the text every other wrapper settled on.
 require_relative 'codegen_stack_strings'
 
@@ -1642,6 +1644,8 @@ BC2CPP_MAIN = lambda do
     end
     skipped_entries = skipped.map { |m| m[:entry] }.compact
   end
+  # MULTI_RETURN: the callees a destructuring caller names get their `X_mr` (codegen_multi_return.rb).
+  compiled = gen.multi_return_link!(compiled)
 
   # CORE_INTERPRETED_REPORT: every core-source bytecode method this run leaves
   # interpreted, with the reason and the language features it uses.
@@ -3155,6 +3159,7 @@ BC2CPP_MAIN = lambda do
   print gen.emit_native_construct_decls
   print gen.emit_direct_construct_decls
   print gen.emit_forward_decls(compiled)
+  print gen.emit_literal_minmax_helpers(compiled)
   print gen.emit_resumable_helpers(compiled)
   print gen.emit_instance_tt_setup(compiled)
   # TOP_LEVEL_STATEMENTS: compiled before any owner-class slot is numbered and printed, since a statement
