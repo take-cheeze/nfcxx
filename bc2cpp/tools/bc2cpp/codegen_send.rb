@@ -2338,11 +2338,12 @@ class CodeGen
 
   # The CONST_SITE_CACHE helper index for (lexical scope, name). +paths+ (CONST_BINDING_CACHE) are the owner paths
   # of every binding of the name; the helper stores a result only once all of them exist.
-  def const_site_slot(owner_path, name, value: false, paths: nil)
+  # +drop+ (CONST_BINDING_DROP) is the name's slot in the per-VM table.
+  def const_site_slot(owner_path, name, value: false, paths: nil, drop: nil)
     @const_site_cache ||= {}
     slot = (@const_site_cache[[owner_path, name]] ||=
               { index: @const_site_cache.size, body: const_lookup_block('0', name, owner_path), value: value,
-                paths: paths, name: name, scope: owner_path })
+                paths: paths, name: name, scope: owner_path, drop: drop })
     slot[:index]
   end
 

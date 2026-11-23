@@ -336,8 +336,9 @@ module Bc2cppFixtureRuntime
   # so one crashing scenario cannot hide the others, and `output` is the Array
   # of their outputs paired with the exit status: [[output, success], ...].
   # `extra_srcs`: further translation units linked in, e.g. the shards of a BC2CPP_SHARDS run.
+  # `compiled_load: false`: the compiled VM loads no bytecode, as a VM-free build: gem_init's class units make the classes.
   def run(dir, err, owners, body, build:, full: false, vms: [false, true], envs: nil, exact_arity: false,
-          extra_srcs: [])
+          extra_srcs: [], compiled_load: true)
     regs = registrations(err, owners, exact_arity: exact_arity).join("\n")
     File.write(File.join(dir, 'main.cpp'), <<~CPP)
       #include <mruby.h>
@@ -384,7 +385,7 @@ module Bc2cppFixtureRuntime
       #{body}
       static int run_vm(const std::vector<uint8_t>& bin, bool with_compiled) {
         mrb_state* M = #{full ? 'mrb_open()' : 'mrb_open_core()'};
-        mrb_load_irep_buf(M, bin.data(), bin.size());
+        if (#{compiled_load ? 'true' : '!with_compiled'}) mrb_load_irep_buf(M, bin.data(), bin.size());
         if (M->exc) { mrb_print_error(M); return 2; }
         compiled = with_compiled;
         if (with_compiled) {

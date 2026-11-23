@@ -634,6 +634,10 @@ class CodeGen
       end
 
       owner_path = lexical_scope_path(owner_def.owner)
+      if const_drop?(name)
+        # CONST_BINDING_DROP: the site cache row reads the per-VM table (see tools/bc2cpp/const_binding_drop.rb).
+        return "  #{RegName[d]} = bc2cpp_cconst_#{const_site_slot(owner_path, name, value: true, drop: const_drop_index(name))}(M);\n"
+      end
       value_const = self.class.stable_value_constants&.include?(name)
       if value_const || self.class.stable_class_constants&.include?(name)
         # CONST_SITE_CACHE: see tools/bc2cpp/const_site_cache.rb. One helper per
@@ -667,6 +671,11 @@ class CodeGen
         return "  #{RegName[d]} = mrb_fixnum_value(#{value});\n"
       end
 
+      if const_drop?(name)
+        # CONST_BINDING_DROP: the receiver is the binding's owner (LexicalConsts read_keys), so a hit is what
+        # mrb_const_get returns; a miss runs it.
+        return "  #{RegName[d]} = bc2cpp_cdef_mget_#{const_drop_read(name)}(M, #{RegName[d]});\n"
+      end
       if immutable_constant?(name) && constant_scope_register?(irep, idx, d - reg_offset)
         # CONST_BINDING_CACHE: a binding in the receiver's own table is the one mrb_const_get returns, and an
         # immutable one never changes; the receiver came from a constant that is never rebound, so it stays alive.
@@ -952,6 +961,9 @@ class CodeGen
       elsif self.class.const_def_elide&.elide?(name)
         # CONST_DEF_ELIDE: nothing can observe this binding (see ConstDefElide); the value register stays written.
         "  /* CONST_DEF_ELIDE #{name} */\n"
+      elsif const_drop?(name)
+        # CONST_BINDING_DROP: see tools/bc2cpp/const_binding_drop.rb.
+        const_drop_set(name, owner_def.owner, RegName[insn.regs.last])
       else
         "  mrb_const_set(M, mrb_obj_value(#{owner_class_ptr_expr(owner_def.owner)}), mrb_intern_cstr(M, \"#{name}\"), #{RegName[insn.regs.last]});\n"
       end

@@ -323,4 +323,117 @@ Dir.mktmpdir('bc2cpp-const-def-elide') do |dir|
   end
 end
 
+# CONST_BINDING_DROP (tools/bc2cpp/const_binding_drop.rb): a value constant whose every read is a generated one keeps no
+# binding. Generated as for a VM-free build; the compiled VM loads no bytecode, so gem_init's class units make every
+# class and constant, as the closed build does. Interpreted and compiled runs must print the same.
+DROP = <<~'RUBY'
+  class CdDrop
+    def self.late = LATE
+    def self.try_late
+      late
+    rescue NameError => e
+      e.message
+    end
+    BEFORE = try_late
+    LATE = [1, 'two', :three]
+    AFTER = try_late
+    NOTHING = nil
+    KLASS = Class.new
+    class Inner
+      DEEP = 'deep'
+    end
+    def late = LATE
+    def before = BEFORE
+    def after = AFTER
+    def nothing = NOTHING
+    def scoped = CdDrop::LATE
+    def deep = Inner::DEEP
+    def klass = KLASS
+    def inner = Inner
+    def by_name = CdKept.const_get(:BY_NAME)
+    def kept = CdKept::BY_NAME
+    def defined = defined?(LATE)
+  end
+  class CdKept
+    BY_NAME = 'by name'
+  end
+  # The owner mruby-lcf's reviewed native read reaches (ConstDefElide::NATIVE_COMPUTED_READS) must be known.
+  module LCF
+    module Schema; end
+  end
+RUBY
+
+Dir.mktmpdir('bc2cpp-const-binding-drop') do |dir|
+  generate = lambda do |run_dir, switch|
+    saved = %w[BC2CPP_VM_FREE BC2CPP_DROP_CONST_BINDINGS].to_h { |k| [k, ENV[k]] }
+    ENV['BC2CPP_VM_FREE'] = '1'
+    ENV['BC2CPP_DROP_CONST_BINDINGS'] = switch
+    FileUtils.mkdir_p(run_dir)
+    # The full-core library the fixture links has no mruby-marshal, whose by-name class lookup is no reviewed read.
+    Bc2cppFixtureRuntime.generate(DROP, run_dir, core: true, only_owners: %w[CdDrop CdDrop.singleton CdDrop::Inner CdKept],
+                                                 drop_native: %w[/3rd/mruby-marshal/], drop_gems: %w[mruby-marshal])
+  ensure
+    saved.each { |k, v| ENV[k] = v }
+  end
+  code, err = generate.call(dir, nil)
+  dropped = err.scan(/^  CONST_BINDING_DROP (\S+)(?: plain)?$/).flatten
+  plain = err.scan(/^  CONST_BINDING_DROP (\S+) plain$/).flatten
+  kept = err.scan(/^  CONST_BINDING_KEPT (\S+) \((.*)\)$/).to_h
+  suite.check('CONST_BINDING_DROP: the value constants read only by generated code are dropped',
+              (%w[CdDrop::LATE CdDrop::BEFORE CdDrop::AFTER CdDrop::KLASS CdDrop::Inner::DEEP] - dropped).empty?)
+  suite.check('CONST_BINDING_DROP: a constant read by const_get keeps its binding', kept['BY_NAME'] == 'spelled by another opcode')
+  suite.check('CONST_BINDING_DROP: a class keeps its binding', !dropped.include?('CdDrop::Inner') && !kept.key?('Inner'))
+  suite.check('CONST_BINDING_DROP: an Array value is only stored; a value that may be a class keeps the checked write',
+              plain.include?('CdDrop::LATE') && !plain.include?('CdDrop::KLASS') && code.include?('bc2cpp_cdef_put(M, '))
+  suite.check('CONST_BINDING_DROP: a dropped definition makes no mrb_const_set',
+              code.include?('bc2cpp_cdef_set') && !code.match?(/mrb_const_set\(M, [^;]*\b(?:MRB_SYM\(LATE\)|"LATE")/))
+  _, off_err = generate.call(File.join(dir, 'off'), '0')
+  suite.check('CONST_BINDING_DROP: BC2CPP_DROP_CONST_BINDINGS=0 drops nothing',
+              off_err.include?('CONST_BINDING_DROP): off (BC2CPP_DROP_CONST_BINDINGS=0'))
+  build = ENV['CC_GENERATED_ONLY'] == '1' ? nil : Bc2cppFixtureRuntime.full_or_build
+  if build.nil?
+    puts '  SKIP constant binding drop behaviour: needs a full-core libmruby'
+  else
+    scenario = <<~CPP
+      static int scenario(mrb_state* M) {
+        mrb_value obj = mrb_obj_new(M, mrb_class_get(M, "CdDrop"), 0, nullptr);
+        static const char* const reads[] = {"late", "before", "after", "nothing", "scoped", "deep", "klass", "inner",
+                                            "by_name", "kept", "defined"};
+        for (int round = 0; round < 3; ++round) {
+          // The dropped values live only in the per-VM table: collect, with garbage in between, before each read.
+          for (int i = 0; i < 200; ++i) mrb_ary_new_from_values(M, 0, nullptr), mrb_str_new_lit(M, "garbage");
+          mrb_full_gc(M);
+          for (const char* meth : reads) call(M, meth, obj, meth);
+        }
+        mrb_value cls = mrb_obj_value(mrb_class_get(M, "CdDrop"));
+        call(M, "listed", cls, "constants");
+        return 0;
+      }
+    CPP
+    [['', dir], ['BC2CPP_DROP_CONST_BINDINGS=0: ', File.join(dir, 'off')]].each do |tag, run_dir|
+      run_err = run_dir == dir ? err : off_err
+      built, output = Bc2cppFixtureRuntime.run(run_dir, run_err, %w[CdDrop CdDrop.singleton CdDrop::Inner CdKept], scenario, build: build,
+                                               full: true, compiled_load: false)
+      suite.check("CONST_BINDING_DROP: #{tag}the fixture builds and runs", built)
+      sections = Bc2cppFixtureRuntime.sections(output)
+      plain = ->(lines) { lines.to_a.reject { |l| l.start_with?('  dispatches=') } }
+      interpreted = plain.call(sections['interpreted'])
+      compiled = plain.call(sections['compiled'])
+      suite.check("CONST_BINDING_DROP: #{tag}a read before the definition raises the interpreter's NameError",
+                  interpreted.include?('before => "uninitialized constant CdDrop::LATE"'))
+      suite.check("CONST_BINDING_DROP: #{tag}a heap value survives collections", interpreted.include?('late => [1, "two", :three]'))
+      suite.check("CONST_BINDING_DROP: #{tag}a class value is still named by its constant", interpreted.include?('klass => CdDrop::KLASS'))
+      listed = compiled.find { |l| l.start_with?('listed => ') }.to_s
+      suite.check("CONST_BINDING_DROP: #{tag}#{tag.empty? ? 'the dropped names are not in the table' : 'every name is in the table'}",
+                  tag.empty? ? !listed.include?(':LATE') && listed.include?(':KLASS') : listed.include?(':LATE'))
+      # Module#constants lists the bindings, which is what the drop removes; the reads are the same.
+      same = ->(lines) { lines.reject { |l| l.start_with?('listed => ') } }
+      suite.check("CONST_BINDING_DROP: #{tag}interpreted and compiled runs print the same", same.call(interpreted) == same.call(compiled))
+      same.call(interpreted).zip(same.call(compiled)).reject { |a, b| a == b }.first(10).each do |a, b|
+        puts "    interpreted: #{a}\n    compiled:    #{b}"
+      end
+    end
+  end
+end
+
 suite.finish!
