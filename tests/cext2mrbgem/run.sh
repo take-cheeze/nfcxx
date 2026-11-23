@@ -1867,6 +1867,12 @@ check grep -qF 'static unsigned long long nfcx_value_word(mrb_value v) {' "$work
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_multi_decl tools/cext2mrbgem/fixtures/api_multi_decl/ext/api_multi_decl "$work/api_multi_decl" > "$work/api_multi_decl.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check grep -qF 'h is an integer array (st_index_t), and md_get returns a VALUE' "$work/api_multi_decl/REFUSALS.txt"
+# 2zzz194. a VALUE call stored in an array the function hashes (rb_memhash(h, ...)): the VALUE is hashed by value
+# (nfcx_value_hash: its integer if a fixnum, else its hash method), with no refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_value tools/cext2mrbgem/fixtures/api_hash_value/ext/api_hash_value "$work/api_hash_value" > "$work/api_hash_value.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'VALUE as integer' "$work/api_hash_value/REFUSALS.txt")" -eq 0
+check grep -qF 'h[1] = nfcx_value_hash(mrb, hv_sf(mrb, obj));' "$work/api_hash_value/src/api_hash_value.c"
 # 2zzz193. RB_ENC_INTERNED_STR_NULL_CHECK is a CRuby build flag (1 only for Ruby 3.0.0 to 3.0.5): the port's value is its default 0,
 # so the check is the dead branch 0 && ..., with no refusal.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_enc_null_check tools/cext2mrbgem/fixtures/api_enc_null_check/ext/api_enc_null_check "$work/api_enc_null_check" > "$work/api_enc_null_check.log" 2>&1 || rc=$?
