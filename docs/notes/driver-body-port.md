@@ -38,6 +38,11 @@ Checked against origin/main at the time of this update (after #1564, which merge
   `cu_prepare`, `cpp2_prepare`, `state_put`, `eccp_plan_input`, `eccp_plan`, `eccp_cleanup`, `eccp_run`,
   `modules_plan_input`, `loop_no_value`, `early_rec`, `early_records`, `preprocess_records`, `cache_plan`, `cache_check`,
   `cache_store`. `cache_sha` has no caller in the body (only its definition), so it is dead code.
+- `loop_no_value` stays in the body (decision, recorded here). Its only effect is bash's `set -u` failure when a value option
+  is given last. The Ruby planner already reports that case (`loop_no_value OPTION`), but reproducing bash's exact diagnostic
+  (the runtime file name and line number) and exit status (1; removing the function gives 127) would change user-visible
+  output, which the port does not do. `tests/driver-argloop/golden/03.txt`, `05.txt` and `25.txt` pin that output. Revisit only
+  if the diagnostic is allowed to change.
 - EXIT traps in the body on origin/main: 10 set an EXIT trap, at the places listed in item 8 below, plus `trap - EXIT` in
   `fallback_gcc` and `trap eccp_cleanup EXIT`. The single-exit-trap branch (`claude/single-exit-trap`, 4ad52e0be) replaces
   them with one trap; it is not merged, and merging it changes the cache key, so the key-dependent cache goldens need
