@@ -26,8 +26,8 @@ run() {
   rm -rf "$sb"; mkdir -p "$sb/sub" "$sb/tmp1/x" "$sb/tmp2" "$sb/tmp3"
   : > "$sb/a.o"; : > "$sb/a.ii"; : > "$sb/b.o"; : > "$sb/b.ii"; : > "$sb/c.ii"; : > "$sb/sub/d.ii"; : > "$sb/.ii"
   ln -s nowhere "$sb/dang.ii"; mkdir "$sb/dir.ii"; : > "$sb/dir.o"
-  # the globals nfcxx sets before the link (eccp_dir and keep_intermediates always; cudatmp and ctmp only when a build made them)
-  local prelude="set -euo pipefail; root=$repo; RUBY=$ruby_bin; trace_finish() { :; }; eccp_dir=; keep_intermediates=0; source $src"
+  # the globals nfcxx sets before the link (eccp_dir, eccp_owned and keep_intermediates always; cudatmp and ctmp only when a build made them)
+  local prelude="set -euo pipefail; root=$repo; RUBY=$ruby_bin; trace_finish() { :; }; eccp_dir=; eccp_owned=; keep_intermediates=0; source $src"
   local err rc
   err=$( cd "$sb" && bash -c "$prelude; ${setup:+$setup; }$body" 2>&1 >/dev/null ); rc=$?
   err=${err//$sb/<sb>}
@@ -100,6 +100,23 @@ case_ "compile-clean: a failing first source stops the loop" 'mkdir a.ti; : > b.
 case_ "compile-clean: an option-like source is rm's to read" ': > -x.ti' 'compile_only=1; ncpp=1; srcs=(-x.cc); out=-x.o; @CC@; echo after'
 case_ "compile-clean: no sources" '' 'compile_only=1; ncpp=1; srcs=(); out=a.o; @CC@; echo after'
 case_ "compile-clean: sources unset" '' 'compile_only=1; ncpp=1; unset srcs; out=a.o; @CC@; echo after'
+
+# eccp_cleanup with the eccp directory the Ruby driver made (eccp_owned=1, cudatmp owned): the trap leaves both directories to the
+# driver, keeps the status and calls trace_finish. The oracle is the bash before the driver owned the directory, so these cases
+# check the thin functions alone.
+owned_case() {  # owned_case NAME KEEP BODY WANT_STATUS: the eccp and .cu directories survive, the status is WANT_STATUS
+  local name=$1 keep=$2 body=$3 want=$4 sb out rc
+  sb=$(mktemp -d "$work/owned.XXXXXX"); mkdir "$sb/eccp" "$sb/cu"
+  out=$(cd "$sb" && bash -c "set -euo pipefail; root=$repo; RUBY=$ruby_bin; trace_finish() { echo traced; }; eccp_dir=$sb/eccp; eccp_owned=1; keep_intermediates=$keep; cudatmp=$sb/cu; cudatmp_owned=1; source $work/thin.sh; $body" 2>/dev/null) && rc=0 || rc=$?
+  if [ "$rc" = "$want" ] && [ -d "$sb/eccp" ] && [ -d "$sb/cu" ] && [ "$out" = traced ]; then
+    pass=$((pass + 1))
+  else
+    fail=$((fail + 1)); echo "FAIL $name: status $rc (want $want), out [$out], directories: $(ls "$sb" | tr '\n' ' ')"
+  fi
+}
+owned_case "owned: the driver removes the eccp directory (not kept)" 0 'trap eccp_cleanup EXIT; exit 5' 5
+owned_case "owned: keep-intermediates" 1 'trap eccp_cleanup EXIT; exit 5' 5
+owned_case "owned: the status of a failed build is kept" 0 'trap eccp_cleanup EXIT; false' 1
 
 echo "nfcxx-link: $pass passed, $fail failed"
 [ "$fail" = 0 ]

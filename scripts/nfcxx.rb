@@ -360,7 +360,9 @@ begin
   env["NFCXX_FALLBACK_MARKER"] = fallback_marker
   owned = { "NFCXX_OWNED_CUDATMP" => Dir.mktmpdir("tmp.", tmproot), "NFCXX_OWNED_TMP" => Dir.mktmpdir("tmp.", tmproot),
             "NFCXX_OWNED_CTMP" => Dir.mktmpdir("tmp.", tmproot), "NFCXX_OWNED_PTMP" => Dir.mktmpdir("tmp.", tmproot),
-            "NFCXX_OWNED_MODPLAN" => Dir.mktmpdir("tmp.", tmproot) }
+            "NFCXX_OWNED_MODPLAN" => Dir.mktmpdir("tmp.", tmproot),
+            # the eccp directory is only a path here: the body makes it when it runs eccp, so a run that never gets there leaves none
+            "NFCXX_OWNED_ECCP" => Dir::Tmpname.create("tmp.", tmproot) { |path| path } }
   trace_rb = File.join(__dir__, "trace.rb")
   unless trace_file.empty?
     trace_abs = File.join(File.realpath(File.dirname(trace_file)), File.basename(trace_file))
@@ -441,7 +443,8 @@ begin
   status_code = refusal ? refusal.status : oracle_code
 ensure
   program.unlink
-  owned.each_value { |dir| FileUtils.rm_rf(dir) }
+  # the eccp directory, when the body made it, stays with --keep-intermediates (the bash kept it before it was owned here)
+  owned.each { |name, dir| FileUtils.rm_rf(dir) unless keep && name == "NFCXX_OWNED_ECCP" }
   FileUtils.rm_rf(tmproot) unless keep
 end
 exit status_code

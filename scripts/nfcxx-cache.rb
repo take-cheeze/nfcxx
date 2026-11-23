@@ -42,7 +42,7 @@ ROOT = File.expand_path("..", __dir__)
 # say who removes what, not what is compiled.
 KEY_ENV_LEFT_OUT = %w[NFCXX_CACHE_LOG NFCXX_CACHE_REMOTE NFCXX_TIME_LOG NFCXX_TRACE NFCXX_TRACE_OWNER NFCXX_TRACE_UNIT
                       NFCXX_TRACE_PENDING NFCXX_TMP_OWNED NFCXX_FALLBACK_MARKER NFCXX_OWNED_CUDATMP NFCXX_OWNED_TMP
-                      NFCXX_OWNED_CTMP NFCXX_OWNED_PTMP NFCXX_LOOP_STATUS NFCXX_LOOP_STATE].freeze
+                      NFCXX_OWNED_CTMP NFCXX_OWNED_PTMP NFCXX_OWNED_ECCP NFCXX_LOOP_STATUS NFCXX_LOOP_STATE].freeze
 # the handoff prefixes: the setup records the Ruby driver passes the body (NFCXX_SETUP_*), unset by the body when it reads them
 KEY_ENV_LEFT_OUT_PREFIXES = %w[NFCXX_SETUP_].freeze
 

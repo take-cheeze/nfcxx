@@ -83,13 +83,17 @@ early_pre_done=${NFCXX_EARLY_PRE_DONE-}; unset NFCXX_EARLY_PRE_DONE
 owned_ctmp=${NFCXX_OWNED_CTMP-}; owned_ptmp=${NFCXX_OWNED_PTMP-}; unset NFCXX_OWNED_CTMP NFCXX_OWNED_PTMP
 # NFCXX_OWNED_MODPLAN: the directory of the modules block's state and reply records, made by the Ruby driver the same way.
 owned_modplan=${NFCXX_OWNED_MODPLAN-}; unset NFCXX_OWNED_MODPLAN
+# NFCXX_OWNED_ECCP: the path of the eccp directory of the one-step build, under the Ruby driver's temporary root. The body makes it
+# (mkdir) only when it runs eccp, and the driver removes it when the run ends unless it is kept (--keep-intermediates). Run alone,
+# the body makes it with mktemp -d and eccp_cleanup removes it.
+owned_eccp=${NFCXX_OWNED_ECCP-}; unset NFCXX_OWNED_ECCP
 # NFCXX_FALLBACK_MARKER: the file fallback_gcc leaves its message in for the Ruby driver. It is read and unset here: the cache
 # key takes every NFCXX_* variable, and the marker's name is a new temporary file for each run (a key that never repeats).
 fallback_marker=${NFCXX_FALLBACK_MARKER-}; unset NFCXX_FALLBACK_MARKER
 # temp_cleanup: removes the driver's temporary directories the EXIT traps name. Each trap calls it, so a later trap (which
 # replaces an earlier one) does not leave the earlier stage's directory behind. The eccp directory is not here: eccp_cleanup
-# removes it, and only when the intermediates are not kept. A directory the Ruby driver owns (cudatmp_owned, tmp_owned) is not
-# removed here: the Ruby driver removes it.
+# removes it when the body made it (and only when the intermediates are not kept); the Ruby driver removes its own (NFCXX_OWNED_ECCP).
+# A directory the Ruby driver owns (cudatmp_owned, tmp_owned) is not removed here: the Ruby driver removes it.
 temp_cleanup() {
   [ -z "${tmp:-}" ] || [ -n "${tmp_owned:-}" ] || rm -rf "$tmp"
   [ -z "${ptmp:-}" ] || [ -n "${ptmp_owned:-}" ] || rm -rf "$ptmp"
@@ -235,7 +239,7 @@ cpp2_prepare() {  # cpp2_prepare: translates every .cpp2 input and puts its tran
 # records of one build could be read by the next build in the same directory. The arguments of such a run are made
 # absolute first (the -isystem list below), because its working directory changes. A -c compile is not moved: the link that follows reads
 # its <stem>.ii and <stem>.ti beside the object (see "-c" before the eccp call).
-moves=0; eccp_dir=""
+moves=0; eccp_dir=""; eccp_owned=""
 state_put() {  # state_put NAME VALUE...: one group of the records scripts/driver-state.rb reads (k NAME, then v VALUE for each)
   local n=$1 v
   shift
@@ -280,9 +284,10 @@ eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary direc
   local rc=$?
   local cudatmp_arg=${cudatmp:-}; [ -z "${cudatmp_owned:-}" ] || cudatmp_arg=   # the Ruby driver removes its own cudatmp
   local ctmp_arg=${ctmp:-}; [ -z "${ctmp_owned:-}" ] || ctmp_arg=   # nor its own ctmp
-  local eccp_arg=$eccp_dir; [ "${NFCXX_TMP_OWNED:-}" != 1 ] || eccp_arg=   # nor the eccp directory, when the Ruby driver owns the temp root
+  local eccp_arg=$eccp_dir; [ -z "$eccp_owned" ] || eccp_arg=   # nor the eccp directory the Ruby driver made (it removes it, unless kept)
+  [ "${NFCXX_TMP_OWNED:-}" != 1 ] || eccp_arg=   # nor the eccp directory, when the Ruby driver owns the temp root
   "${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" cleanup "$keep_intermediates" "$eccp_arg" "$cudatmp_arg" "$ctmp_arg"   # the removals (tests/nfcxx-link/run.sh)
-  temp_cleanup
+  [ -n "$eccp_owned" ] || temp_cleanup   # the driver owns every directory of a run that owns the eccp directory
   trace_finish
   return $rc
 }
@@ -844,7 +849,8 @@ fi
 # The one-step build: eccp runs in a temporary directory, so its paths are made absolute before the cd (in the plan).
 eccp_bin="$edg/eccp"; eccp_out=$out
 if [ $moves = 1 ]; then
-  eccp_dir=$(mktemp -d); trap eccp_cleanup EXIT
+  if [ -n "$owned_eccp" ]; then eccp_dir=$owned_eccp; eccp_owned=1; mkdir "$eccp_dir"; else eccp_dir=$(mktemp -d); fi
+  trap eccp_cleanup EXIT
 fi
 # The command line (its arguments, the variable a shared link exports, and the directory it runs in) is planned by
 # scripts/nfcxx-eccp-plan.rb, which also prints the note for a kept temporary directory (--keep-intermediates).
