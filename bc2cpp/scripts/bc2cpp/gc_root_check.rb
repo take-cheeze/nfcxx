@@ -232,6 +232,33 @@ SOURCE = <<~RUBY
       churn
       r.inspect
     end
+
+    # ELEMENT_READ_SUMMARY: a compiled callee (a `$`-escaped name) that unlinks the element by name and collects. The
+    # caller's only call between the read and the use is that direct call, and its root must stay.
+    def zap!
+      @cells.send(:clear)
+      churn
+    end
+
+    def callee_unlinks
+      r = @cells[0]
+      zap!
+      r.inspect
+    end
+
+    # The callee between the read and the use runs no Ruby code and unlinks nothing (its stores replace immediates
+    # and restore no arena), so the read is not rooted. Long enough not to be inlined (INLINE_CALL_MAX_INSNS).
+    def mark_all
+      @m1 = :a; @m2 = :b; @m3 = :c; @m4 = :d; @m5 = :e; @m6 = :f; @m7 = :g
+      @m8 = :h; @m9 = :i; @m10 = :j; @m11 = :k; @m12 = :l; @m13 = :m
+      nil
+    end
+
+    def clean_callee_between
+      r = @cells[2]
+      mark_all
+      [r, @m13]
+    end
   end
 RUBY
 
@@ -239,9 +266,9 @@ OWNERS = %w[GcRoot].freeze
 CASES = %w[ivar_return ivar_local gvar_overwrite ary_overwrite hash_overwrite ary_clear ary_replace
            attr_overwrite ary_clear_by_name ary_store_by_name hash_clear_by_name hash_store_by_name
            each_clear_by_name map_clear_by_name map_proc_clear arg_clear_by_name mixed_slot_overwrite
-           batch_overwrite].freeze
+           batch_overwrite callee_unlinks].freeze
 # Cases that need no root, so they match with the roots switched off too.
-UNROOTED_CASES = %w[pure_between imm_flag_overwrite].freeze
+UNROOTED_CASES = %w[pure_between imm_flag_overwrite clean_callee_between].freeze
 
 SCENARIO = <<~CPP
   static int scenario(mrb_state* M) {
@@ -291,6 +318,13 @@ Dir.mktmpdir('bc2cpp-gc-root') do |dir|
               !embedded_store.call('ivar_flag') && code.include?('/* IMMEDIATE_OLD */'))
   suite.check('a slot that also holds a String roots the value an immediate store replaces',
               embedded_store.call('ivar_mode'))
+  body_of = ->(text, name) { text[/GcRoot_#{name}_impl\(mrb_state\* M, mrb_value self\) \{.*?\n\}\n/m].to_s }
+  suite.check('a read held across a direct call that unlinks it keeps its root',
+              body_of.call(code, 'callee_unlinks').include?('bc2cpp_keep(M, ') &&
+              body_of.call(code, 'callee_unlinks').include?('GcRoot_zap$21_impl(M, '))
+  suite.check('a read held only across clean direct calls is not rooted (ELEMENT_READ_SUMMARY)',
+              body_of.call(code, 'clean_callee_between').include?('GcRoot_mark_all_impl(M, ') &&
+              !body_of.call(code, 'clean_callee_between').include?('bc2cpp_keep(') && !code.include?('KEEP_SUMMARY'))
   batch_body = ->(text) { text[/GcRoot_batch_overwrite_impl\(mrb_state\* M, mrb_value self\) \{.*?\n\}\n/m].to_s }
   suite.check('a run of slot stores roots the values it replaces in one call (KEEP_OLD_BATCH)',
               batch_body.call(code).include?('bc2cpp_keep_olds2(((GcRoot_ivars*)DATA_PTR(self))->ivar_list, ' \
@@ -310,6 +344,16 @@ Dir.mktmpdir('bc2cpp-gc-root') do |dir|
     suite.check('BC2CPP_IMMEDIATE_OLD=0 roots it again', !imm_off.include?('/* IMMEDIATE_OLD */') &&
                 (imm_off.include?('bc2cpp_keep_old(M, ((GcRoot_ivars*)DATA_PTR(self))->ivar_flag);') ||
                  imm_off.include?('&((GcRoot_ivars*)DATA_PTR(self))->ivar_flag, ')))
+  end
+  Dir.mktmpdir('bc2cpp-gc-root-summary') do |summary_dir|
+    ENV['BC2CPP_ELEMENT_READ_SUMMARY'] = '0'
+    begin
+      unsummarised, = Bc2cppFixtureRuntime.generate(SOURCE, summary_dir, core: true, only_owners: OWNERS)
+    ensure
+      ENV.delete('BC2CPP_ELEMENT_READ_SUMMARY')
+    end
+    suite.check('BC2CPP_ELEMENT_READ_SUMMARY=0 roots it again',
+                body_of.call(unsummarised, 'clean_callee_between').include?('bc2cpp_keep('))
   end
   Dir.mktmpdir('bc2cpp-gc-root-impure') do |impure_dir|
     ENV['BC2CPP_ELEMENT_READ_PURE'] = '0'

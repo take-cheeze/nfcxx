@@ -1703,6 +1703,8 @@ BC2CPP_MAIN = lambda do
   OwnerSetShare.capture_stdout(symbol) if OwnerSetShare.enabled?(BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol })
   # COMPACT_LABELS (label_table.rb): registered last of these, so it reads the text as printed.
   LabelTable.capture_stdout(LabelTable.enabled?(BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol }))
+  # ELEMENT_READ_SUMMARY (keep_summary.rb): registered last of these, so it reads the unit as printed, markers included.
+  KeepSummary.capture_stdout if ElementReadRoots.summary_on?
 
   # PARAM_TRACE (tools/bc2cpp/param_trace.rb): opt-in runtime classes of compiled method and block
   # parameters; unset (or any value but 1) leaves stdout untouched. Registered BEFORE ELSE_TRACE so the
