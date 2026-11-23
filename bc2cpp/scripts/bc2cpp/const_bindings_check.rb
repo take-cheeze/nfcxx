@@ -387,6 +387,24 @@ Dir.mktmpdir('bc2cpp-const-binding-drop') do |dir|
               plain.include?('CdDrop::LATE') && !plain.include?('CdDrop::KLASS') && code.include?('bc2cpp_cdef_put(M, '))
   suite.check('CONST_BINDING_DROP: a dropped definition makes no mrb_const_set',
               code.include?('bc2cpp_cdef_set') && !code.match?(/mrb_const_set\(M, [^;]*\b(?:MRB_SYM\(LATE\)|"LATE")/))
+  # Reflection that sees a constant table refuses the drop world-wide: a Ruby Module#constants, and the same method
+  # called from linked native code as a C function.
+  reflect_dir = File.join(dir, 'reflect')
+  FileUtils.mkdir_p(reflect_dir)
+  saved = ENV['BC2CPP_VM_FREE']
+  ENV['BC2CPP_VM_FREE'] = '1'
+  _, ruby_err = Bc2cppFixtureRuntime.generate("#{DROP}class CdDrop\n  def listed = CdDrop.constants\nend\n", reflect_dir,
+                                              core: true, only_owners: %w[CdDrop CdDrop.singleton CdDrop::Inner CdKept],
+                                              drop_native: %w[/3rd/mruby-marshal/], drop_gems: %w[mruby-marshal])
+  _, native_err = Bc2cppFixtureRuntime.generate(DROP, File.join(dir, 'reflect-native'), core: true,
+                                                only_owners: %w[CdDrop CdDrop.singleton CdDrop::Inner CdKept],
+                                                drop_native: %w[/3rd/mruby-marshal/], drop_gems: %w[mruby-marshal],
+                                                native: [['enum.c', "void f(mrb_state* M, mrb_value m) { mrb_mod_constants(M, m); }\n"]])
+  ENV['BC2CPP_VM_FREE'] = saved
+  suite.check('CONST_BINDING_DROP: a Ruby Module#constants refuses the drop',
+              ruby_err.match?(/CONST_BINDING_DROP\): off \(.*names :constants/))
+  suite.check('CONST_BINDING_DROP: a native mrb_mod_constants call refuses the drop',
+              native_err.include?('CONST_BINDING_DROP): off (') && native_err.match?(/CONST_BINDING_DROP\): off \([^\n]*calls mrb_mod_constants/))
   _, off_err = generate.call(File.join(dir, 'off'), '0')
   suite.check('CONST_BINDING_DROP: BC2CPP_DROP_CONST_BINDINGS=0 drops nothing',
               off_err.include?('CONST_BINDING_DROP): off (BC2CPP_DROP_CONST_BINDINGS=0'))
@@ -426,7 +444,8 @@ Dir.mktmpdir('bc2cpp-const-binding-drop') do |dir|
       listed = compiled.find { |l| l.start_with?('listed => ') }.to_s
       suite.check("CONST_BINDING_DROP: #{tag}#{tag.empty? ? 'the dropped names are not in the table' : 'every name is in the table'}",
                   tag.empty? ? !listed.include?(':LATE') && listed.include?(':KLASS') : listed.include?(':LATE'))
-      # Module#constants lists the bindings, which is what the drop removes; the reads are the same.
+      # The scenario's Module#constants is C test code outside the world (a world that calls it refuses the drop, checked
+      # above); it shows the bindings the drop removes, so it is the one line left out of the comparison.
       same = ->(lines) { lines.reject { |l| l.start_with?('listed => ') } }
       suite.check("CONST_BINDING_DROP: #{tag}interpreted and compiled runs print the same", same.call(interpreted) == same.call(compiled))
       same.call(interpreted).zip(same.call(compiled)).reject { |a, b| a == b }.first(10).each do |a, b|

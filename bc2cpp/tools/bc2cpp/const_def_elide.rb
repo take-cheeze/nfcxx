@@ -24,6 +24,10 @@ module ConstDefElide
   REFLECTION = %w[constants const_get const_defined? const_source_location const_missing const_added const_set
                   remove_const eval memsize_of memsize_of_all].to_set.freeze
   CONST_OPS = %i[GETCONST GETMCNST SETCONST SETMCNST].to_set.freeze
+  # REFLECTION's methods called as C functions, which no funcall-name scan sees. mruby's own gems define them (mruby-metaprog)
+  # and reach them only through the Ruby method names the scan already checks, so only sources outside 3rd/mruby count.
+  NATIVE_REFLECTION_OWN = %r{/3rd/mruby/}
+  NATIVE_REFLECTION = /\bmrb_mod_(?:constants|const_defined|const_get|const_source_location|const_missing|const_set|remove_const)\s*\(/
   IMMEDIATE_CLASSES = %i[NilClass TrueClass FalseClass Symbol].to_set.freeze
   # Calls that read a class's iv/constant table by a name (or walk it). The name argument's position follows.
   NATIVE_READ = /\b(mrb_const_get|mrb_const_defined(?:_at)?|mrb_cv_get|mrb_cv_defined|mrb_mod_cv_get|mrb_mod_cv_defined|
@@ -185,6 +189,9 @@ module ConstDefElide
       called = ((ClosedWorld.native_funcall_names(text) - ClosedWorld::IMPLICIT_HOOKS) +
                 ClosedWorld.native_other_literals(text)).to_set & reflection
       return "#{path} names :#{called.min}" unless called.empty?
+
+      direct = !path.match?(NATIVE_REFLECTION_OWN) && text.gsub(%r{//[^\n]*|/\*.*?\*/}m, ' ')[NATIVE_REFLECTION]
+      return "#{path} calls #{direct.delete_suffix('(').strip}" if direct
     end
     unreviewed = native_reads(linked_native).find { |_path, _call, verdict| verdict.nil? }
     return "unreviewed native table read #{unreviewed[0]}: #{unreviewed[1]}" if unreviewed
