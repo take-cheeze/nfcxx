@@ -317,3 +317,32 @@ shard check passes 55 cases, including linked generated-code/runtime parity and 
 delimiter, empty raw-tag and division/comment cases. The scanner also produces identical records on
 33,294 prelude/edge-case lines in mruby-onig. The current pinned-world registry audit passes.
 Local measurements and file hashes are in `build/bench/shard-delimiters/results.json`.
+
+## Raise the self-build probe depth to 16
+
+Probe counts on the current-main self input (CRuby 4 + YJIT, `BC2CPP_PROBE_DEPTH=4`
+as the self build sets) showed 242,315 `probe_clean` calls for 5,305 distinct
+labels: 132,114 calls (64%) refused at the depth limit, and each refusal poisoned
+its whole tree's memoization under the global guard-generation counter, so every
+outermost probe recompiled its reachable set (~46 probes per label, 8,257
+outermost probes).
+
+Depth 8 is slower than 4 (deeper per-probe compiles without enough memoization
+payoff: 233.7s vs 205.9s compile-all). Depth 16 and 32 both plateau at ~98s.
+The self build now defaults to 16, far below the interpreter-stack concern that
+motivates the limit (self-generation always runs on CRuby 4 + YJIT):
+
+| Depth | Compile all methods | Wall | Allocations |
+| --- | ---: | ---: | ---: |
+| 4 | 205.9s | 257.5s | 384.6M |
+| 8 | 233.7s | 282.3s | 309.7M |
+| 16 | 97.4s | 138.6s | 234.5M |
+| 32 | 98.2s | 139.7s | (same input) |
+
+Single-pair alternating runs, not a statistical guarantee; depth 4 vs 16 was
+also confirmed end to end (261.9s vs 120.5s compile-all on the newer base,
+6,139 translated methods). The depth-16 output devirtualizes slightly more
+(25,082 vs 25,086 `_impl`, 45 fewer dispatches); headers, entry and bytecode
+are identical. A full self pipeline at 16 (bootstrap, generation, native
+build) plus the `runner_generation` C++/bytecode parity and runtime-behavior
+check passes.
