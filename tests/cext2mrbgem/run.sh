@@ -1507,8 +1507,8 @@ check grep -qF 'nfcx_memsearch(RSTRING_PTR(needle), RSTRING_LEN(needle),' "$work
 # 2zzz130. rb_hash_foreach with a pointer cast to VALUE as its data is a stuck point (VALUE as pointer): the VALUE struct cannot hold
 # the pointer, so the file is marked not buildable with that reason (not the generic form refusal).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_ptr_stuck tools/cext2mrbgem/fixtures/api_hash_ptr_stuck/ext/api_hash_ptr_stuck "$work/api_hash_ptr_stuck" > "$work/api_hash_ptr_stuck.log" 2>&1 || rc=$?
-check test -e "$work/api_hash_ptr_stuck/NOT_BUILDABLE"
-check grep -qF 'stuck point (VALUE as pointer): rb_hash_foreach gets a pointer cast to VALUE' "$work/api_hash_ptr_stuck/REFUSALS.txt"
+check test ! -e "$work/api_hash_ptr_stuck/NOT_BUILDABLE"
+check test "$(grep -c 'mrb_hash_foreach(mrb, RHASH(h), count_cb, (void \*)p);' "$work/api_hash_ptr_stuck/src/api_hash_ptr_stuck.c")" -eq 2
 # 2zzz131. a struct field declared with the name of a registered method (char to_json;) and member accesses of it are not uses of the
 # method: the method converts, and the file is not refused as a direct-called or address-taken function.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_field_named_fn tools/cext2mrbgem/fixtures/api_field_named_fn/ext/api_field_named_fn "$work/api_field_named_fn" > "$work/api_field_named_fn.log" 2>&1 || rc=$?
@@ -1624,14 +1624,11 @@ check grep -qF 'stuck point (VALUE as integer): obj is a VALUE' "$work/api_value
 # 2zzz148. if (v) on a VALUE is a stuck point (VALUE truth test): CRuby's nonzero word is true for nil as well, which the fork's
 # VALUE struct has no exact test of, so the file is marked not buildable with that reason.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_value_if tools/cext2mrbgem/fixtures/api_value_if/ext/api_value_if "$work/api_value_if" > "$work/api_value_if.log" 2>&1 || rc=$?
-check test -e "$work/api_value_if/NOT_BUILDABLE"
-check grep -qF 'stuck point (VALUE truth test): if tests v' "$work/api_value_if/REFUSALS.txt"
-# 2zzz149. the stub policy (option A): the function holding a refused use has its body replaced by a stub that raises
-# NotImplementedError when it runs, so gem_init.c carries no #error (the refusal is recorded in REFUSALS.txt as stubbed).
-check grep -qF 'BC2CPP-MRBGEM stub: refused code' "$work/api_value_if/src/api_value_if.c"
-check grep -qF 'NotImplementedError' "$work/api_value_if/src/api_value_if.c"
+check test ! -e "$work/api_value_if/NOT_BUILDABLE"
+check grep -qF 'if (!mrb_false_p(v))' "$work/api_value_if/src/api_value_if.c"
+# 2zzz149. if (v) is mapped (no stub): the function keeps its body, and gem_init.c carries no #error.
+check test "$(grep -c 'BC2CPP-MRBGEM stub' "$work/api_value_if/src/api_value_if.c")" -eq 0
 check test "$(grep -c '#error' "$work/api_value_if/src/gem_init.c")" -eq 0
-check grep -qF 'STATUS: STUBBED' "$work/api_value_if/REFUSALS.txt"
 # 2zzz150. an ID returned from a VALUE function is the symbol value (mrb_symbol_value), and a VALUE call returned from an ID
 # function is read as its symbol (mrb_symbol), the fork's symbol carried in a value.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_id_return tools/cext2mrbgem/fixtures/api_id_return/ext/api_id_return "$work/api_id_return" > "$work/api_id_return.log" 2>&1 || rc=$?
@@ -1806,6 +1803,11 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_marshal_load tools/cext2mrbg
 check test "$rc" -eq 0
 check test "$(grep -c 'Marshal' "$work/api_marshal_load/REFUSALS.txt")" -eq 0
 check grep -qF 'return mrb_marshal_load(mrb, data);' "$work/api_marshal_load/src/api_marshal_load.c"
+# 2zzz183. RB_OBJ_FROZEN_RAW is the fork's frozen bit (MRB_FROZEN_P on a heap object; an immediate is not frozen); no refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_frozen_raw tools/cext2mrbgem/fixtures/api_frozen_raw/ext/api_frozen_raw "$work/api_frozen_raw" > "$work/api_frozen_raw.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'stuck point' "$work/api_frozen_raw/REFUSALS.txt")" -eq 0
+check grep -qF 'MRB_FROZEN_P(mrb_basic_ptr(str))' "$work/api_frozen_raw/src/api_frozen_raw.c"
 check grep -qF "spec.add_dependency 'mruby-marshal'" "$work/api_marshal_load/mrbgem.rake"
 # 2zzz179. rb_time_timespec_new: a fixed UTC offset is mrb_time_at_offset (the fork's mruby-time), CRuby's INT_MAX and INT_MAX-1 are
 # local time and UTC; no Time-offset refusal.

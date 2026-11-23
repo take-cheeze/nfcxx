@@ -146,11 +146,27 @@ SOURCE = <<~RUBY
     class CbD
       K = 8
     end
+    # W shadowed in a subclass; K and ONLY_LATE reached through the superclass only.
+    class CbE < CbA
+      W = 5
+      def w = W
+      def late = LATE
+    end
+    class CbF < CbA
+      def w = K
+      def late = ONLY_LATE
+    end
   end
   module CbOuter
     class CbA
-      # Declared but not made: the scenario binds it from C, as a later class body would.
+      # Declared but not made: the scenario binds them from C, as a later class body would.
       LATE = 3 if W == 0
+      ONLY_LATE = [9] if W == 0
+    end
+    # Not below CbA: ONLY_LATE is never in its lookup.
+    class CbG
+      def w = ONLY_LATE
+      def late = LATE
     end
   end
   LATE = 4
@@ -169,11 +185,12 @@ SOURCE = <<~RUBY
   end
 RUBY
 
-OWNERS = %w[CbOuter::CbA CbOuter::CbB CbOuter::CbC CbTop].freeze
+OWNERS = %w[CbOuter::CbA CbOuter::CbB CbOuter::CbC CbOuter::CbE CbOuter::CbF CbOuter::CbG CbTop].freeze
 
 Dir.mktmpdir('bc2cpp-const-bindings') do |dir|
   code, err = Bc2cppFixtureRuntime.generate(SOURCE, dir, core: true, only_owners: OWNERS)
-  suite.check('a multi-binding read uses the guarded site cache', code.include?('bc2cpp_const_path_has(M, "CbOuter::CbA"'))
+  suite.check('a multi-binding read uses the guarded site cache', code.include?('bc2cpp_const_path_has(M, "CbOuter::CbA"') ||
+                                                                  (code.include?('bc2cpp_cconst_tests') && code.include?('"CbOuter::CbA\\0"')))
   suite.check('a scoped read of an immutable name uses the receiver cache', code.match?(/bc2cpp_mcnst_\d+\(M, r\d+\)/))
   # One receiver cache per name: the two `::K` reads (different receivers) share a slot.
   last_mcnst = ->(meth) { code[/^mrb_value CbTop_#{meth}_impl\(mrb_state\* M.*?^}/m].to_s.scan(/bc2cpp_mcnst_(\d+)\(M, r\d+\)/).flatten.last }
@@ -199,7 +216,8 @@ Dir.mktmpdir('bc2cpp-const-bindings') do |dir|
         return mrb_obj_new(M, mrb_class_ptr(c), 0, nullptr);
       }
       static void round(mrb_state* M, const char* when) {
-        static const char* const classes[] = {"CbOuter::CbA", "CbOuter::CbB", "CbOuter::CbC", "CbTop"};
+        static const char* const classes[] = {"CbOuter::CbA", "CbOuter::CbB", "CbOuter::CbC", "CbOuter::CbE",
+                                              "CbOuter::CbF", "CbOuter::CbG", "CbTop"};
         char label[96];
         for (const char* path : classes) {
           mrb_value obj = make(M, path);
@@ -227,21 +245,40 @@ Dir.mktmpdir('bc2cpp-const-bindings') do |dir|
         mrb_value a = mrb_const_get(M, mrb_const_get(M, mrb_obj_value(M->object_class), mrb_intern_lit(M, "CbOuter")),
                                     mrb_intern_lit(M, "CbA"));
         mrb_define_const(M, mrb_class_ptr(a), "LATE", mrb_fixnum_value(3));
+        mrb_define_const(M, mrb_class_ptr(a), "ONLY_LATE", mrb_fixnum_value(9));
         round(M, "after");
         return 0;
       }
     CPP
-    built, output = Bc2cppFixtureRuntime.run(dir, err, OWNERS, "#include <cstring>\n#{scenario}", build: build, full: true)
-    suite.check('fixture builds and runs', built)
-    sections = Bc2cppFixtureRuntime.sections(output)
-    plain = ->(lines) { lines.to_a.reject { |l| l.start_with?('  dispatches=') } }
-    interpreted = plain.call(sections['interpreted'])
-    compiled = plain.call(sections['compiled'])
-    suite.check('every read ran', !interpreted.empty? && interpreted.size == compiled.size)
-    suite.check('the late binding changes the reads that reach it', interpreted.include?('after CbOuter::CbA#late 0 => 3'))
-    suite.check('interpreted and compiled runs print the same', interpreted == compiled)
-    interpreted.zip(compiled).reject { |a, b| a == b }.first(10).each do |a, b|
-      puts "    interpreted: #{a}\n    compiled:    #{b}"
+    # STATIC_CONSTANTS (codegen_const_tables.rb) on, as generated above, and off.
+    [['', dir, err], ['BC2CPP_STATIC_CONSTANTS=0: ', nil, nil]].each do |tag, run_dir, run_err|
+      unless run_dir
+        run_dir = File.join(dir, 'static-off')
+        FileUtils.mkdir_p(run_dir)
+        saved = ENV['BC2CPP_STATIC_CONSTANTS']
+        ENV['BC2CPP_STATIC_CONSTANTS'] = '0'
+        off_code, run_err = Bc2cppFixtureRuntime.generate(SOURCE, run_dir, core: true, only_owners: OWNERS)
+        ENV['BC2CPP_STATIC_CONSTANTS'] = saved
+        suite.check("#{tag}the generated fills are back", off_code.include?('bc2cpp_cconst_fill_') && !off_code.include?('bc2cpp_cconst_rows'))
+      end
+      built, output = Bc2cppFixtureRuntime.run(run_dir, run_err, OWNERS, "#include <cstring>\n#{scenario}", build: build, full: true)
+      suite.check("#{tag}fixture builds and runs", built)
+      sections = Bc2cppFixtureRuntime.sections(output)
+      plain = ->(lines) { lines.to_a.reject { |l| l.start_with?('  dispatches=') } }
+      interpreted = plain.call(sections['interpreted'])
+      compiled = plain.call(sections['compiled'])
+      suite.check("#{tag}every read ran", !interpreted.empty? && interpreted.size == compiled.size)
+      suite.check("#{tag}the late binding changes the reads that reach it", interpreted.include?('after CbOuter::CbA#late 0 => 3'))
+      suite.check("#{tag}a read before its only binding raises, then finds it",
+                  interpreted.include?('before CbOuter::CbF#late 0 => raised NameError') &&
+                  interpreted.include?('after CbOuter::CbF#late 1 => 9') &&
+                  interpreted.include?('after CbOuter::CbG#w 1 => raised NameError'))
+      suite.check("#{tag}a subclass's own binding shadows its superclass's",
+                  interpreted.include?('before CbOuter::CbE#w 0 => 5') && interpreted.include?('before CbOuter::CbF#w 0 => 7'))
+      suite.check("#{tag}interpreted and compiled runs print the same", interpreted == compiled)
+      interpreted.zip(compiled).reject { |a, b| a == b }.first(10).each do |a, b|
+        puts "    interpreted: #{a}\n    compiled:    #{b}"
+      end
     end
   end
 end

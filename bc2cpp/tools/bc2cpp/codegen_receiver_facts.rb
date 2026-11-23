@@ -362,10 +362,13 @@ class CodeGen
   def constant_object_candidate_clean?(label)
     return false if @constant_object_probe
 
+    # Only the probe that sets the guard clears it; a nested refusal must leave its caller guarded.
     @constant_object_probe = true
-    compiles_clean?(label)
-  ensure
-    @constant_object_probe = false
+    begin
+      compiles_clean?(label)
+    ensure
+      @constant_object_probe = false
+    end
   end
 
   # A module_function copy shares its instance method's irep but runs with the

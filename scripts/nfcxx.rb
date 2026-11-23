@@ -135,6 +135,7 @@ ARGV.replace(cuda_lines)
 # (scripts/nfcxx-gcc-plan.rb --live, status 2) is printed here, as the bash prints it. Every other argument list goes to the
 # oracle below, which runs the gcc and Path B plans itself (its routes call nfcxx_plan_run and the --records planner).
 LOOP = File.join(ROOT, "scripts", "nfcxx-loop.rb")
+EARLY = File.join(ROOT, "scripts", "nfcxx-early-exit.rb")
 GCC_PLAN = File.join(ROOT, "scripts", "nfcxx-gcc-plan.rb")
 PATHB_PLAN = File.join(ROOT, "scripts", "nfcxx-pathb.rb")
 CUDA_LIVE = File.join(ROOT, "scripts", "nfcxx-cuda-live.rb")
@@ -267,6 +268,18 @@ end
 
 LOOP_RESULT = loop_result(ARGV)
 
+# the body's early exits before its setup (scripts/nfcxx-early-exit.rb pre), run here on the argument loop's state
+# (nfcxx-loop.rb --pre-records): [status, records] when the loop finished, status 0 to go on (the body then skips its own
+# check: NFCXX_EARLY_PRE_DONE), 2 for a refusal (printed here), 3 for --emit-hip (run here). nil when the loop is left to the body.
+def early_pre(args)
+  return nil unless LOOP_RESULT && LOOP_RESULT.first == 0
+  records, _err, status = Open3.capture3(RbConfig.ruby, LOOP, "--pre-records", "--", *args, binmode: true)
+  return nil unless status.success?
+  _out, err, check = Open3.capture3(RbConfig.ruby, EARLY, "pre", stdin_data: records, binmode: true)
+  $stderr.write(err)
+  [check.exitstatus || 1, records]
+end
+
 if planned_loop?(ARGV)
   trace_route("plan")
   pid = Process.spawn(RbConfig.ruby, RUNNER, "--root=#{ROOT}", "--", *ARGV)
@@ -346,7 +359,8 @@ begin
   fallback_marker = File.join(tmproot, "fallback")
   env["NFCXX_FALLBACK_MARKER"] = fallback_marker
   owned = { "NFCXX_OWNED_CUDATMP" => Dir.mktmpdir("tmp.", tmproot), "NFCXX_OWNED_TMP" => Dir.mktmpdir("tmp.", tmproot),
-            "NFCXX_OWNED_CTMP" => Dir.mktmpdir("tmp.", tmproot), "NFCXX_OWNED_PTMP" => Dir.mktmpdir("tmp.", tmproot) }
+            "NFCXX_OWNED_CTMP" => Dir.mktmpdir("tmp.", tmproot), "NFCXX_OWNED_PTMP" => Dir.mktmpdir("tmp.", tmproot),
+            "NFCXX_OWNED_MODPLAN" => Dir.mktmpdir("tmp.", tmproot) }
   trace_rb = File.join(__dir__, "trace.rb")
   unless trace_file.empty?
     trace_abs = File.join(File.realpath(File.dirname(trace_file)), File.basename(trace_file))
@@ -371,6 +385,17 @@ begin
     oracle_code = $?.exitstatus || 128 + $?.termsig
   elsif refusal
     $stderr.puts(refusal.message)
+  elsif (early = early_pre(ARGV)) && early.first != 0
+    if early.first == 2
+      oracle_code = 2
+    else
+      # --emit-hip: the .cu input as HIP source on stdout, for hipcc (the body's route: the rewriter with the -I, -D and -U options)
+      recs = early.last.split("\0")
+      hip = recs.select { |r| r.start_with?("h") }.map { |r| r[1..] }
+      cu = recs.find { |r| r.start_with?("u") }[1..]
+      system(File.join(ROOT, "build", "cuda-rewrite"), "--hip", *hip, cu)
+      oracle_code = $?.exitstatus || 128 + $?.termsig
+    end
   else
     # The setup's planners run here, before the body, on the argument loop's state (scripts/nfcxx-setup-args.rb planned_state):
     # NFCXX_SETUP_DEFAULT is the default backend's statements; NFCXX_SETUP_REST_STATUS, NFCXX_SETUP_REST and NFCXX_SETUP_REST_ERR
@@ -399,12 +424,13 @@ begin
       "NFCXX_SETUP_TRACE_UNIT" => setup&.fetch(:trace_unit),
     }
     body_env = env.merge(setup_env).merge(owned)
+    body_env["NFCXX_EARLY_PRE_DONE"] = early ? "1" : nil   # the driver ran the pre check (early_pre): the body skips it
     ok = system(body_env, "bash", program.path, *ARGV)
     oracle_code = ok ? 0 : ($?.exitstatus || 1)
     if File.file?(fallback_marker)
       $stderr.write(File.binread(fallback_marker))
       trace_route("gcc-fallback")
-      ok = system(body_env.merge("NFCXX_BACKEND" => "gcc", "NFCXX_FALLBACK_MARKER" => nil), File.join(root, "nfcxx"), *ARGV)
+      ok = system(body_env.merge("NFCXX_BACKEND" => "gcc", "NFCXX_FALLBACK_MARKER" => nil, "NFCXX_EARLY_PRE_DONE" => nil), File.join(root, "nfcxx"), *ARGV)
       oracle_code = ok ? 0 : ($?.exitstatus || 1)
     end
   end

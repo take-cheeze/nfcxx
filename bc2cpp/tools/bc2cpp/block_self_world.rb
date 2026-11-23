@@ -354,8 +354,27 @@ module BlockSelfWorld
     def mixin_names
       return @mixin_names if defined?(@mixin_names)
 
-      @mixin_alias_unproven = false
-      @mixin_names = compute_mixin_names
+      # WORLD_SCAN_CACHE: a whole-world pass over the same sources as every other scan here, so ScanCache keeps it.
+      # The unproven-alias flag it leaves behind is part of the value.
+      names, unproven = cached_world_scan('mixin_names') do
+        @mixin_alias_unproven = false
+        names = compute_mixin_names
+        [names, @mixin_alias_unproven]
+      end
+      @mixin_alias_unproven = unproven
+      @mixin_names = names
+    end
+
+    # The value of a whole-world scan +name+, kept by ScanCache under the Ruby sources and native sources this world
+    # reads and the environment the scan may read (a source it cannot key is computed, not stored). The block's value
+    # must be Marshal-able data.
+    def cached_world_scan(name, &block)
+      sources = (@ireps.values + @outside.values).map { |irep| irep.file.to_s }
+      inputs = (sources + @native_paths.map(&:to_s)).map { |path| File.expand_path(path) }.uniq.sort
+      # The reaching-definitions (bytecode_ir_dataflow.rb) reads these IR switches: their values are keyed. Named one by
+      # one, since a prefix entry would list the whole environment, which a scan may not do.
+      ScanCache.fetch("block_self_world.#{name}", inputs, cache_absent: false,
+                      env: %w[BC2CPP_IR_QUERY_KEYS BC2CPP_IR_SHARED_DEFINITIONS BC2CPP_IR_SCALAR_SEEN], &block)
     end
 
     # SCOPED_CONSTANT_WRITES: the world fact is now known. When it holds, no compiled block checks its self at entry,
@@ -683,7 +702,7 @@ module BlockSelfWorld
     def symbol_block_names
       return @symbol_block_names if defined?(@symbol_block_names)
 
-      @symbol_block_names = compute_symbol_block_names
+      @symbol_block_names = cached_world_scan('symbol_block_names') { compute_symbol_block_names }
     end
 
     def compute_symbol_block_names

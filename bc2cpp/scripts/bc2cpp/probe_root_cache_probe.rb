@@ -6,6 +6,7 @@
 # probe implementation with small synthetic method compilers, without mrbc.
 require 'set'
 require_relative '../../tools/bc2cpp/codegen_emit'
+require_relative '../../tools/bc2cpp/codegen_receiver_facts'
 
 def probe_fixture(handlers)
   counts = Hash.new(0)
@@ -105,3 +106,37 @@ ensure
 end
 
 puts 'probe root cache: contexts, fact changes, guards and invalidation PASS'
+
+# Refusing an already-active constant-object probe must not clear its caller's
+# guard and admit the next nested candidate in the same outer compilation.
+events = []
+generator, counts = probe_fixture(
+  root: lambda do |gen|
+    %i[first_nested second_nested root].each do |label|
+      events << gen.constant_object_candidate_clean?(label)
+      raise 'a nested refusal cleared the outer constant-object guard' unless gen.instance_variable_get(:@constant_object_probe)
+    end
+    { code: 'clean' }
+  end
+)
+raise 'lost the outer constant-object result' unless generator.constant_object_candidate_clean?(:root)
+raise 'admitted a nested constant-object candidate' unless events == [false, false, false]
+raise 'compiled a refused nested constant-object candidate' unless counts == { root: 1 }
+raise 'left the constant-object guard set after success' if generator.instance_variable_get(:@constant_object_probe)
+
+generator, = probe_fixture(root: ->(_) { { code: '#error unsupported' } })
+raise 'lost an unclean constant-object result' if generator.constant_object_candidate_clean?(:root)
+raise 'left the constant-object guard set after an unclean result' if generator.instance_variable_get(:@constant_object_probe)
+
+generator, = probe_fixture(root: ->(_) { raise 'probe failure' })
+begin
+  generator.constant_object_candidate_clean?(:root)
+  raise 'swallowed a probe exception'
+rescue RuntimeError => error
+  raise unless error.message == 'probe failure'
+end
+raise 'left the constant-object guard set after an exception' if generator.instance_variable_get(:@constant_object_probe)
+raise 'left an exception on the probing stack' unless generator.instance_variable_get(:@probing).empty?
+generator.define_singleton_method(:compile_method) { |_| { code: 'clean' } }
+raise 'an exception blocked a later independent probe' unless generator.constant_object_candidate_clean?(:after_failure)
+puts 'constant-object probe: nested refusals, cycles and exception cleanup PASS'

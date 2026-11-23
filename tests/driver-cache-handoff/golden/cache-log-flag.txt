@@ -19,7 +19,6 @@ F cache.log
 | out: WORK/sb/main.o
 | src: WORK/sb/main.cpp
 | NFCXX_CC=WORK/tree/scripts/gcc-cc.rb
-| NFCXX_TMP_OWNED=1
 | SRCSHA  -
 | SRCSHA  -
 | 0d27bb460be1b5b59c571bd6048065d6dc4db3fb35a200abd22497e481201e2e  -
@@ -41,7 +40,6 @@ F cache.log
 | out: WORK/sb/main.o
 | src: WORK/sb/main.cpp
 | NFCXX_CC=WORK/tree/scripts/gcc-cc.rb
-| NFCXX_TMP_OWNED=1
 | SRCSHA  -
 | SRCSHA  -
 | 0d27bb460be1b5b59c571bd6048065d6dc4db3fb35a200abd22497e481201e2e  -

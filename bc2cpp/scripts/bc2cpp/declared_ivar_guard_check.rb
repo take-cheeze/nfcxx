@@ -318,4 +318,95 @@ if build
   end
 end
 
+# COMPACT_LABELS (label_table.rb): the label of a declared return, parameter, keyword and ivar check is a table row in a
+# real gem build. Run both ways, the compiled run raises and logs the same bytes: a presym name (fetch, take, store,
+# with the fixture's own presym table) and a name without one (@level) alike.
+LABEL_SOURCE = <<~RUBY
+  class Peer
+    def name; 'peer'; end
+  end
+  class Box
+    def initialize; @level = 0; nil; end
+    def set(v); @level = v; nil; end
+    def fetch(x); x; end
+    def take(peer); peer.name; end
+    def store(k:); k + 1; end
+  end
+RUBY
+LABEL_SIGS = <<~RBS
+  class Box
+    @level: Integer
+    def fetch: (untyped x) -> Peer
+    def take: (Peer peer) -> String
+    def store: (k: Integer) -> Integer
+  end
+RBS
+LABEL_OWNERS = %w[Peer Box].freeze
+LABEL_DRIVER = <<~'RUBY'
+  class LabelLog
+    def puts(line); print("log: #{line}\n"); nil; end
+  end
+  $stderr = LabelLog.new
+  b = Box.new
+  puts b.fetch(Peer.new).name, b.take(Peer.new), b.store(k: 1)
+  [[:set, 'x'], [:fetch, 'str'], [:take, 1], [:store, 'k']].each do |m, v|
+    begin
+      m == :store ? b.store(k: v) : b.send(m, v)
+      puts "#{m}: no violation"
+    rescue StandardError => e
+      puts e.class.to_s == 'BC2cppDeclarationViolation' ? "violation: #{e.message}" : "#{m}: #{e.class}: #{e.message}"
+    end
+  end
+  puts 'end'
+RUBY
+
+puts '-- COMPACT_LABELS: a label row prints the same bytes as its string'
+if build
+  header = File.join(build, 'include/mruby/presym/id.h')
+  label_runs = %w[1 0].to_h do |flag|
+    Dir.mktmpdir('declared_labels') do |dir|
+      sig = File.join(dir, 'sig')
+      FileUtils.mkdir_p(sig)
+      File.write(File.join(sig, 'labels.rbs'), LABEL_SIGS)
+      ENV['BC2CPP_SIG_DIRS'] = sig
+      ENV['BC2CPP_COMPACT_LABELS'] = flag
+      ENV['BC2CPP_PRESYM_HEADER'] = header
+      code, stderr = Bc2cppFixtureRuntime.generate(LABEL_SOURCE, dir, only_owners: LABEL_OWNERS)
+      scenario = <<~CPP
+        static int scenario(mrb_state* M) {
+          std::fflush(stdout);
+          const char* src = R"APD(#{LABEL_DRIVER})APD";
+          mrb_load_string(M, src);
+          std::fflush(stdout);
+          if (M->exc) { mrb_print_error(M); M->exc = nullptr; return 1; }
+          return 0;
+        }
+      CPP
+      built, output = Bc2cppFixtureRuntime.run(dir, stderr, LABEL_OWNERS, scenario, build: build, full: true)
+      puts output.lines.last(30) unless built
+      [flag, [code, built ? Bc2cppFixtureRuntime.sections(output)['compiled'] : nil]]
+    ensure
+      %w[BC2CPP_SIG_DIRS BC2CPP_COMPACT_LABELS BC2CPP_PRESYM_HEADER].each { |k| ENV.delete(k) }
+    end
+  end
+  on_code, on_lines = label_runs['1']
+  off_code, off_lines = label_runs['0']
+  sites = %w[return param keyword ivar]
+  check.call('with the rows every declared site names its row, and no label string is left',
+             sites.all? { |kind| on_code.include?("bc2cpp_declared_#{kind}_violation_at(M, ") } &&
+               !on_code.match?(/"Box#(?:fetch|take|store|@level)"/) && on_code.match?(/\{\d+, MRB_SYM\(fetch\), 0\}/) &&
+               on_code.include?('"@level",'))
+  check.call('BC2CPP_COMPACT_LABELS=0 keeps the strings and no table',
+             sites.all? { |kind| off_code.include?("bc2cpp_declared_#{kind}_violation(M, ") } &&
+               off_code.include?('"Box#fetch", "Peer")') && !off_code.include?('bc2cpp_label_rows'))
+  expected = ['declaration violation: Box#@level was assigned String, declared Integer',
+              'declaration violation: Box#fetch returned String, declared -> Peer',
+              'declaration violation: Box#take argument 1 is Integer, declared Peer',
+              'declaration violation: Box#store keyword is String, declared k: Integer']
+  same = on_lines && on_lines == off_lines && on_lines.last == 'end' &&
+         expected.all? { |m| on_lines.include?("violation: #{m}") && on_lines.include?("log: [RPG2k] #{m}") }
+  check.call('the compiled runs print the same bytes both ways, the log lines included', same)
+  puts on_lines.to_a.zip(off_lines.to_a).map { |a, b| "    #{a.to_s.ljust(70)}| #{b}" } unless same
+end
+
 suite.finish!
