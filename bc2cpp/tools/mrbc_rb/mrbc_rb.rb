@@ -673,6 +673,7 @@ module MrbcRb
 
     def compile(program)
       stmts = program.statements.body
+      ann_body(stmts)
       set_locals(program.locals)
       value_reg = generate(stmts, val: true)
       return_value(value_reg)
@@ -691,6 +692,7 @@ module MrbcRb
       @segment_name = units.first.filename
       @filename = @segment_name
       set_locals(locals)
+      ann_body(units.flat_map(&:stmts))
       value_reg = generate(units.flat_map(&:stmts), val: true)
       return_value(value_reg)
       emit(:STOP)
@@ -727,6 +729,7 @@ module MrbcRb
     # is generated as a top-level program is, but without STOP. With +val+ its last statement's value is returned;
     # without it the body returns nil (gen_return with source register 0).
     def compile_body(locals, stmts, val)
+      ann_body(stmts)
       set_locals(locals)
       value_reg = generate(stmts, val: val)
       if val
@@ -2143,6 +2146,7 @@ module MrbcRb
     def const_write(node, last:)
       t = temp
       value_into(node.value, t)
+      ann_const_write(node)
       gen_setxv(:SETCONST, t, node.name, last) # drops a MOVE just before when the value is unused
       last ? t : nil
     end
@@ -2210,6 +2214,7 @@ module MrbcRb
       end
       @sp = saved
       ann_const_path(target)
+      ann_const_write(node)
       emit(:SETMCNST, t, sym)
       last ? t : nil
     end
@@ -2683,7 +2688,9 @@ module MrbcRb
       when Prism::InstanceVariableTargetNode then gen_setxv(:SETIV, src, target.name, false)
       when Prism::GlobalVariableTargetNode then gen_setxv(:SETGV, src, target.name, false)
       when Prism::ClassVariableTargetNode then gen_setxv(:SETCV, src, target.name, false)
-      when Prism::ConstantTargetNode then gen_setxv(:SETCONST, src, target.name, false)
+      when Prism::ConstantTargetNode
+        ann_const_write(target)
+        gen_setxv(:SETCONST, src, target.name, false)
       when Prism::MultiTargetNode
         target.lefts.each_with_index do |l, i|
           emit(:AREF, cursp, src, i)

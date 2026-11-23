@@ -11,9 +11,9 @@
 module ClassScope
   OPENERS = %i[CLASS MODULE SCLASS].freeze
   # The newest annotation table version this reader knows (MrbcRb::Annotations::VERSION). Tables are additive across versions
-  # (2 added the `call` record), so an older one is read as it is: a record kind it lacks is simply absent. A newer one may
-  # change the meaning of what is here and is dropped whole.
-  MAX_VERSION = 2
+  # (2 added the `call` record, 3 the `conditional` fact), so an older one is read as it is: a record kind it lacks is simply
+  # absent. A newer one may change the meaning of what is here and is dropped whole.
+  MAX_VERSION = 3
 
   module_function
 
