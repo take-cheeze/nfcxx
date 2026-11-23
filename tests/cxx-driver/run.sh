@@ -227,6 +227,13 @@ check "cache: a changed header is compiled again" "$nfcxx" -c -I "$c15" "$c15/tp
 printf '#define BIAS 1\ntemplate <class T> T twice(T x) { return x + x; }\n' > "$c15/tpl.h"
 check "cache: reverting the header takes the first copy" "$nfcxx" -c -I "$c15" "$c15/tpl.cpp" -o "$c15/o/tpl.o"
 [ "$(c15_entries)" = 2 ] && ok "cache: reverted header adds no entry" || bad "cache: reverted header adds no entry" "$(c15_entries) entries"
+# NFCXX_TRACE: the trace is no part of the key, and the driver's pending-trace file is made per run (its name carries the pid), so a
+# traced compile of the same source takes the entry, and a second traced compile adds none.
+c15_traced() { NFCXX_TRACE="$c15/trace.json" "$nfcxx" -c -I "$c15" "$c15/tpl.cpp" -o "$c15/o/tpl.o"; }
+check "cache: a traced compile is taken from the cache" c15_traced
+[ "$(c15_entries)" = 2 ] && ok "cache: a traced compile adds no entry" || bad "cache: a traced compile adds no entry" "$(c15_entries) entries"
+check "cache: a second traced compile is taken from the cache" c15_traced
+[ "$(c15_entries)" = 2 ] && ok "cache: a second traced compile adds no entry" || bad "cache: a second traced compile adds no entry" "$(c15_entries) entries"
 # NFCXX_CACHE_LOG: each lookup appends its key and hit or miss. The log is no part of the key, so a logged hit keeps its entry.
 export NFCXX_CACHE_LOG=$c15/log; : > "$c15/log"
 check "cache log: a hit is logged with its key" sh -c "
