@@ -121,6 +121,7 @@ delimiters = <<~'CPP'
     )TAG";
     const char* empty_tag = R"(雪 /* } )";
     const char* quoted = "雪 \" // /*";
+    int café = 4;
     int n = 1'000;
     return n / 2; // }
   }
@@ -137,6 +138,8 @@ suite.check('the blanked code text keeps one line per input line (item indices a
               ShardOutput.code_text(delimiter_lines).lines.size == delimiter_lines.size)
 suite.check('division stays code while a trailing line comment hides its brace',
             delimiter_scan[-2][:code].strip == 'return n / 2;')
+suite.check('non-ASCII identifiers retain their original characters',
+            delimiter_scan.any? { |line| line[:code].include?('int café = 4;') })
 small, small_shards = ShardOutput.split(marked, 'chk', 3)
 suite.check('under the threshold the main file is the unmarked text',
             small == PRELUDE + UNIT_B + UNIT_A + HOOKS)

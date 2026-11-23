@@ -28,6 +28,7 @@ module ShardOutput
   # fixture lowers it with BC2CPP_SHARD_MIN_BYTES.
   MIN_SHARD_BYTES = 400_000
   IDENT = /[A-Za-z_$][\w$]*/.freeze
+  ASCII_CHARS = Array.new(128) { |byte| byte.chr.freeze }.freeze
 
   class Error < StandardError; end
 
@@ -611,8 +612,10 @@ module ShardOutput
         code = String.new
         i = 0
         in_str = nil
+        chars = line.ascii_only? && ASCII_CHARS
         while i < line.size
-          c = line[i]
+          # Byte and character indices coincide on ASCII lines; reuse their character strings.
+          c = chars ? chars[line.getbyte(i)] : line[i]
           if in_comment
             if c == '*' && line[i, 2] == '*/'
               in_comment = false
