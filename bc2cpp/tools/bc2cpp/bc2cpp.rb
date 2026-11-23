@@ -2105,7 +2105,8 @@ BC2CPP_MAIN = lambda do
   # for an mruby exception: reset mrb->jmp and pop the leftover callinfos,
   # unsharing each popped frame's env as the VM's cipop does.
   # FRAME_FREE: which found natives a call runs without a frame (native_frame_use.rb).
-  puts NativeFrameUse.cpp_source(StaticDispatchLists.current(required: false).frame_free)
+  puts NativeFrameUse.cpp_source(StaticDispatchLists.current(required: false).frame_free,
+                                 ram: StaticDispatchLists.current(required: false).frame_free_ram)
   puts <<~'CPP'
     struct Bc2cppVmMark { struct mrb_jmpbuf* jmp; ptrdiff_t ci_index; };
     static inline Bc2cppVmMark bc2cpp_vm_mark(mrb_state* M) {
@@ -3238,7 +3239,8 @@ BC2CPP_MAIN = lambda do
   owner_rewrite = [owner_call_direct, gen.owner_class_slots, gen.program_superclasses, gen.unregistered_keys]
   # CROSS_UNIT_ROW (CodeGen#other_unit_direct_entry): a row for a method another gem of this link compiles.
   owner_rewrite_opts = { other: ENV['BC2CPP_CROSS_UNIT_ROW'] == '0' ? nil : gen.method(:other_unit_direct_entry),
-                         trim: gen.owner_rows_trim? }
+                         trim: gen.owner_rows_trim?,
+                         entry_flags: ->(m) { NativeFrameUse.entry_flags(m, StaticDispatchLists.current(required: false).frame_free) } }
   # GUARD_VIOLATION: name the method a violation site sits in.
   # Fuse the three per-method rewrite passes (@@SITE@@ substitution, DIRECT_RAISE, SymbolCache.rewrite) into one.
   compiled.each do |m|

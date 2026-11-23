@@ -12,6 +12,10 @@
 #                  of `closed`
 #   frame_free     the natives (Owner#name) the closed build calls without a frame (native_frame_use.rb); not a proof
 #                  about names, so it is no part of the fixed point and a file without it reads as empty
+#   frame_free_fns the C functions of those natives, by name (FRAME_FREE_FLAG: the exclusion header flags their ROM
+#                  entries). A file without it reads as empty
+#   frame_free_ram the `frame_free` keys some run-time registration gives (FRAME_FREE_FLAG marks only those at run
+#                  time). A file without it reads as empty
 #   ctor_rows      `initialize`/`initialize_copy` entries the closed build keeps as constructor rows (Owner#name; CTOR_ROWS
 #                  in static_dispatch_registrations.rb): the native ones are also in `engine_rom`, the compiled ones stay
 #                  registered as rows of their generated table
@@ -38,19 +42,21 @@ require 'set'
 
 module StaticDispatchLists
   PATH_ENV = 'BC2CPP_STATIC_DISPATCH_LISTS'
-  KEYS = %w[open closed core_excluded core_left_out engine_rom ctor_rows core_rows frame_free core_undef_left_out engine_rows
-            unmade_classes].freeze
-  REQUIRED_KEYS = (KEYS - %w[frame_free core_rows core_undef_left_out engine_rows unmade_classes]).freeze
+  KEYS = %w[open closed core_excluded core_left_out engine_rom ctor_rows core_rows frame_free frame_free_fns frame_free_ram
+            core_undef_left_out engine_rows unmade_classes].freeze
+  REQUIRED_KEYS = (KEYS - %w[frame_free frame_free_fns frame_free_ram core_rows core_undef_left_out engine_rows unmade_classes]).freeze
 
   class Missing < StandardError; end
 
   Lists = Struct.new(:open, :closed, :core_excluded, :core_left_out, :engine_rom, :ctor_rows, :core_rows, :frame_free,
-                     :core_undef_left_out, :engine_rows, :unmade_classes, :digest, :world,
+                     :frame_free_fns, :frame_free_ram, :core_undef_left_out, :engine_rows, :unmade_classes, :digest, :world,
                      keyword_init: true) do
     # mruby's Struct.new forwards keyword-init values as a positional Hash.
     def initialize(kwargs = {})
       super(kwargs)
       self.frame_free ||= Set.new.freeze
+      self.frame_free_fns ||= Set.new.freeze
+      self.frame_free_ram ||= Set.new.freeze
       self.core_rows ||= Set.new.freeze
       self.core_undef_left_out ||= Set.new.freeze
       self.engine_rows ||= Set.new.freeze
@@ -71,7 +77,8 @@ module StaticDispatchLists
 
   EMPTY = Lists.new(open: Set.new.freeze, closed: Set.new.freeze, core_excluded: Set.new.freeze,
                     core_left_out: Set.new.freeze, engine_rom: Set.new.freeze, ctor_rows: Set.new.freeze,
-                    core_rows: Set.new.freeze, frame_free: Set.new.freeze, core_undef_left_out: Set.new.freeze,
+                    core_rows: Set.new.freeze, frame_free: Set.new.freeze, frame_free_fns: Set.new.freeze, frame_free_ram: Set.new.freeze,
+                    core_undef_left_out: Set.new.freeze,
                     engine_rows: Set.new.freeze, unmade_classes: Set.new.freeze, digest: 'none').freeze
 
   module_function
