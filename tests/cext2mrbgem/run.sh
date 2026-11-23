@@ -1808,6 +1808,24 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_frozen_raw tools/cext2mrbgem
 check test "$rc" -eq 0
 check test "$(grep -c 'stuck point' "$work/api_frozen_raw/REFUSALS.txt")" -eq 0
 check grep -qF 'MRB_FROZEN_P(mrb_basic_ptr(str))' "$work/api_frozen_raw/src/api_frozen_raw.c"
+# 2zzz184. rb_str_encode is the fork's mruby-encoding rb_str_encode (ASCII-compatible encodings): no refusal; mruby-encoding is a dependency.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_str_encode tools/cext2mrbgem/fixtures/api_str_encode/ext/api_str_encode "$work/api_str_encode" > "$work/api_str_encode.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'stuck point' "$work/api_str_encode/REFUSALS.txt")" -eq 0
+check grep -qF 'rb_str_encode(mrb, str, enc, 0, mrb_nil_value())' "$work/api_str_encode/src/api_str_encode.c"
+# 2zzz185. rb_ensure with a pointer carried in the data VALUE ((VALUE)p, a pointer local): mrb_ensure with mrb_cptr_value of the
+# pointer; no pointer-as-VALUE refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ensure_pdata tools/cext2mrbgem/fixtures/api_ensure_pdata/ext/api_ensure_pdata "$work/api_ensure_pdata" > "$work/api_ensure_pdata.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'VALUE as pointer' "$work/api_ensure_pdata/REFUSALS.txt")" -eq 0
+check grep -qF 'mrb_ensure(mrb, ep_body, mrb_cptr_value(mrb, p), ep_done, mrb_cptr_value(mrb, p));' "$work/api_ensure_pdata/src/api_ensure_pdata.c"
+# 2zzz186. rb_protect with a VALUE array as its data ((VALUE)args): the array is mrb_cptr_value of its address, its element casts
+# are mrb_cptr of the element; no VALUE-array refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_protect_array tools/cext2mrbgem/fixtures/api_protect_array/ext/api_protect_array "$work/api_protect_array" > "$work/api_protect_array.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'VALUE as pointer' "$work/api_protect_array/REFUSALS.txt")" -eq 0
+check grep -qF 'mrb_protect(mrb, pa_cb, mrb_cptr_value(mrb, args), &state);' "$work/api_protect_array/src/api_protect_array.c"
+check grep -qF 'struct pa_state *st = (struct pa_state *)mrb_cptr(args[0]);' "$work/api_protect_array/src/api_protect_array.c"
 check grep -qF "spec.add_dependency 'mruby-marshal'" "$work/api_marshal_load/mrbgem.rake"
 # 2zzz179. rb_time_timespec_new: a fixed UTC offset is mrb_time_at_offset (the fork's mruby-time), CRuby's INT_MAX and INT_MAX-1 are
 # local time and UTC; no Time-offset refusal.

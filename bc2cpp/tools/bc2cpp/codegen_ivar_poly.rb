@@ -76,8 +76,16 @@ class CodeGen
 
     # An owner with two definitions of the name (attr_reader later redefined by a
     # def, or the reverse) never joins: which one is live depends on definition
-    # order.
-    repeated_owners = defs.group_by(&:owner).select { |_, group| group.size > 1 }.keys
+    # order. A single pass finds repeats without building a group per owner.
+    seen_owners = Set.new
+    repeated_owners = Set.new
+    defs.each do |t|
+      if seen_owners.include?(t.owner)
+        repeated_owners << t.owner
+      else
+        seen_owners << t.owner
+      end
+    end
     candidates = defs.select do |t|
       next false if repeated_owners.include?(t.owner)
       # An exact class test does not skip a module prepended before that class.
