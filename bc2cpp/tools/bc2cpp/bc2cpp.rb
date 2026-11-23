@@ -840,9 +840,8 @@ BC2CPP_MAIN = lambda do
 
   # The values of the admitted names, folded at GETCONST/GETMCNST (CodeGen.integer_constant_values). A name with a write that
   # may not run is never folded: its read may raise NameError (CONST_CONDITIONAL).
-  conditional_constants = ConstConditional.names(ireps)
-  integer_constant_values = constant_facts.values.select do |name, _|
-    integer_constants.include?(name) && !conditional_constants.include?(name.to_s)
+  integer_constant_values = ConstConditional.names(ireps).then do |conditional|
+    constant_facts.values.select { |name, _| integer_constants.include?(name) && !conditional.include?(name.to_s) }
   end
   profile_phase.call('global facts + annotations')
   warn "== integer constant literal values (BYTECODE_CONSTANT_FACTS): #{integer_constant_values.size} of #{integer_constants.size} =="
