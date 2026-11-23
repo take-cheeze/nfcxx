@@ -341,14 +341,16 @@ struct Bc2cppRunArgs {
       result;  // the fiber's result when an unwind finished its last frame
 };
 
-static mrb_value bc2cpp_iv(mrb_state* M, mrb_value obj, const char* name) {
+static mrb_value bc2cpp_fiber_iv(mrb_state* M,
+                                 mrb_value obj,
+                                 const char* name) {
   return mrb_iv_get(M, obj, mrb_intern_cstr(M, name));
 }
 
-static void bc2cpp_iv_set(mrb_state* M,
-                          mrb_value obj,
-                          const char* name,
-                          mrb_value v) {
+static void bc2cpp_fiber_iv_set(mrb_state* M,
+                                mrb_value obj,
+                                const char* name,
+                                mrb_value v) {
   mrb_iv_set(M, obj, mrb_intern_cstr(M, name), v);
 }
 
@@ -369,10 +371,10 @@ static mrb_value bc2cpp_unwind_new(mrb_state* M,
                                    mrb_value value,
                                    bool to_return) {
   mrb_value u = mrb_obj_new(M, bc2cpp_unwind_class(M), 0, nullptr);
-  bc2cpp_iv_set(M, u, "__target__", mrb_cptr_value(M, target));
-  bc2cpp_iv_set(M, u, "__value__", value);
-  bc2cpp_iv_set(M, u, "__return__", mrb_bool_value(to_return));
-  bc2cpp_iv_set(M, u, "__ran__", mrb_false_value());
+  bc2cpp_fiber_iv_set(M, u, "__target__", mrb_cptr_value(M, target));
+  bc2cpp_fiber_iv_set(M, u, "__value__", value);
+  bc2cpp_fiber_iv_set(M, u, "__return__", mrb_bool_value(to_return));
+  bc2cpp_fiber_iv_set(M, u, "__ran__", mrb_false_value());
   return u;
 }
 
@@ -390,9 +392,9 @@ static struct RClass* bc2cpp_exit_class(mrb_state* M) {
                                                   mrb_value value,
                                                   mrb_int target) {
   mrb_value e = mrb_obj_new(M, bc2cpp_exit_class(M), 0, nullptr);
-  bc2cpp_iv_set(M, e, "__site__", mrb_int_value(M, site));
-  bc2cpp_iv_set(M, e, "__value__", value);
-  bc2cpp_iv_set(M, e, "__target__", mrb_int_value(M, target));
+  bc2cpp_fiber_iv_set(M, e, "__site__", mrb_int_value(M, site));
+  bc2cpp_fiber_iv_set(M, e, "__value__", value);
+  bc2cpp_fiber_iv_set(M, e, "__target__", mrb_int_value(M, target));
   return e;
 }
 
@@ -401,15 +403,15 @@ static struct RClass* bc2cpp_exit_class(mrb_state* M) {
 }
 
 [[maybe_unused]] static mrb_int bc2cpp_exit_site(mrb_state* M, mrb_value e) {
-  return mrb_integer(bc2cpp_iv(M, e, "__site__"));
+  return mrb_integer(bc2cpp_fiber_iv(M, e, "__site__"));
 }
 
 [[maybe_unused]] static mrb_int bc2cpp_exit_target(mrb_state* M, mrb_value e) {
-  return mrb_integer(bc2cpp_iv(M, e, "__target__"));
+  return mrb_integer(bc2cpp_fiber_iv(M, e, "__target__"));
 }
 
 [[maybe_unused]] static mrb_value bc2cpp_exit_value(mrb_state* M, mrb_value e) {
-  return bc2cpp_iv(M, e, "__value__");
+  return bc2cpp_fiber_iv(M, e, "__value__");
 }
 
 static bool bc2cpp_frame_is(Bc2cppFiberFrame* frame, const void* target) {
@@ -531,17 +533,17 @@ static int bc2cpp_fiber_unwind(mrb_state* M,
     Bc2cppFiberFrame* frame = fiber->top;
     bool ends_here =
         is_unwind &&
-        bc2cpp_frame_is(frame, mrb_cptr(bc2cpp_iv(M, exc, "__target__")));
+        bc2cpp_frame_is(frame, mrb_cptr(bc2cpp_fiber_iv(M, exc, "__target__")));
     mrb_value value =
-        ends_here ? bc2cpp_iv(M, exc, "__value__") : mrb_nil_value();
-    if (ends_here && !mrb_test(bc2cpp_iv(M, exc, "__return__"))) {
+        ends_here ? bc2cpp_fiber_iv(M, exc, "__value__") : mrb_nil_value();
+    if (ends_here && !mrb_test(bc2cpp_fiber_iv(M, exc, "__return__"))) {
       args->resume = value;
       return BC2CPP_UNWIND_CONTINUE;
     }
     // The target's own handlers get one go at the unwind.
-    bool offer = !ends_here || !mrb_test(bc2cpp_iv(M, exc, "__ran__"));
+    bool offer = !ends_here || !mrb_test(bc2cpp_fiber_iv(M, exc, "__ran__"));
     if (ends_here && offer)
-      bc2cpp_iv_set(M, exc, "__ran__", mrb_true_value());
+      bc2cpp_fiber_iv_set(M, exc, "__ran__", mrb_true_value());
     if (offer && frame->unwind_into && frame->unwind_into(M, frame, exc)) {
       args->resume = exc;
       return BC2CPP_UNWIND_CONTINUE;
