@@ -1842,6 +1842,15 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_switch_rb_type/NOT_BUILDABLE"
 check grep -qF 'switch (nfcx_type_key_regexp(mrb, (v))) {' "$work/api_switch_rb_type/src/api_switch_rb_type.c"
 check grep -qF 'case NFCX_TT_REGEXP:' "$work/api_switch_rb_type/src/api_switch_rb_type.c"
+# 2zzz189. object-like aliases of rb_gc_mark: #define rb_gc_mark_movable rb_gc_mark (a mapped mark call) is dropped and its uses
+# convert through the entry; #define mark_second rb_gc_mark (not an API name) becomes the function-like mark macro with mrb in scope.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_gc_alias tools/cext2mrbgem/fixtures/api_gc_alias/ext/api_gc_alias "$work/api_gc_alias" > "$work/api_gc_alias.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_gc_alias/NOT_BUILDABLE"
+check test "$(grep -c 'rb_gc_mark' "$work/api_gc_alias/REFUSALS.txt")" -eq 0
+check grep -qF '#define mark_second(x) mrb_gc_mark_value(mrb, x)' "$work/api_gc_alias/src/api_gc_alias.c"
+check grep -qF 'static void pair_mark(mrb_state *mrb, void *ptr) {' "$work/api_gc_alias/src/api_gc_alias.c"
+check test "$(grep -c 'define rb_gc_mark_movable' "$work/api_gc_alias/src/api_gc_alias.c")" -eq 0
 check grep -qF "spec.add_dependency 'mruby-marshal'" "$work/api_marshal_load/mrbgem.rake"
 # 2zzz179. rb_time_timespec_new: a fixed UTC offset is mrb_time_at_offset (the fork's mruby-time), CRuby's INT_MAX and INT_MAX-1 are
 # local time and UTC; no Time-offset refusal.
