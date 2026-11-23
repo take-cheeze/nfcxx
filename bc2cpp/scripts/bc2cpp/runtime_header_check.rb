@@ -22,7 +22,12 @@
 #     - two sharded gems printing the same tail link, run, and nm finds each moved helper defined once, in no gem
 #       namespace, while each gem keeps its own state; BC2CPP_CROSS_GEM_SHARE=0 leaves the tail as printed.
 #
-# Usage: ruby scripts/bc2cpp/runtime_header_check.rb
+#   isolation (--isolation BUILD_DIR; a real build, needs a C++ compiler)
+#     - each compiled gem's main file, with every gem-namespace item after the runtime region dropped, still
+#       compiles: no cross-gem header names a gem's own item (which ShardOutput's using-directive would hide).
+#       BC2CPP_ISOLATION_FLAGS holds the build's other -I/-D flags.
+#
+# Usage: ruby scripts/bc2cpp/runtime_header_check.rb [--isolation BUILD_DIR]
 
 require 'open3'
 require 'tmpdir'
@@ -32,6 +37,59 @@ require_relative '../../tools/bc2cpp/runtime_header'
 require_relative '../../tools/bc2cpp/cross_gem_share'
 
 suite = FixtureCheck.new('runtime_header_check')
+
+# The main file up to SHARD_DECLS with the gem-namespace items after the runtime region dropped; directives,
+# includes and using-declarations stay.
+def isolation_skeleton(text)
+  lines = "#define BC2CPP_SHARD_PRELUDE_ONLY 1\n#{text[0...text.index('// SHARD_DECLS')]}".lines
+  last_rt = lines.rindex { |l| l.start_with?('#undef BC2CPP_RUNTIME_PART') } || 0
+  out = String.new
+  inside = false
+  depth = 0
+  cont = false
+  lines.each_with_index do |l, i|
+    directive = cont || l.match?(/\A\s*#/)
+    cont = directive && l.rstrip.end_with?('\\')
+    if i <= last_rt || directive
+      out << l
+    elsif !inside && l.match?(/\Anamespace bc2cpp_shard_\w+ \{\s*\z/)
+      inside = true
+      out << l
+    elsif inside && depth.zero? && l.match?(%r{\A\} // namespace bc2cpp_shard_})
+      inside = false
+      out << l
+    elsif inside
+      out << l if depth.zero? && l.match?(/\Ausing (?:namespace bc2cpp_rt_\h+|bc2cpp_(?:cs|rt)_\h+::\w+);\s*\z/)
+      code = l.gsub(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\/\/.*/, '')
+      depth += code.count('{') - code.count('}')
+    else
+      out << l
+    end
+  end
+  out
+end
+
+if (at = ARGV.index('--isolation'))
+  build = File.expand_path(ARGV.fetch(at + 1))
+  mains = Dir["#{build}/**/mrbgems/*/*_compiled_gen.cpp"].sort
+  suite.check("#{mains.size} compiled gem main files under #{build}", !mains.empty?)
+  flags = ['-std=c++17', '-fsyntax-only', "-I#{Dir["#{build}/*/include"].first || "#{build}/include"}",
+           *ENV.fetch('BC2CPP_ISOLATION_FLAGS', '').split]
+  Dir.mktmpdir('bc2cpp-isolation') do |dir|
+    mains.each do |main|
+      text = File.read(main)
+      next unless text.include?('// SHARD_DECLS') && text.include?('bc2cpp_cs_')
+
+      skeleton = File.join(dir, File.basename(main))
+      File.write(skeleton, isolation_skeleton(text))
+      _out, err, status = Bc2cppCxx.capture3(*flags, "-I#{File.dirname(main)}", skeleton)
+      suite.check("#{File.basename(main)}: the cross-gem headers compile without the gem's own items", status.success?)
+      puts err.lines.grep(/error/).first(10).join unless status.success?
+    end
+  end
+  suite.finish!
+  exit
+end
 
 REGION = <<~'CPP'
   #include <stdio.h>
