@@ -191,6 +191,7 @@ require_relative 'codegen_keyword_send'
 require_relative 'codegen_send'
 require_relative 'codegen_const_tables'
 require_relative 'codegen_eqq'
+require_relative 'codegen_literal_eq'
 require_relative 'codegen_constant_object'
 require_relative 'codegen_unlisted_class_call'
 require_relative 'codegen_arg_shapes'
@@ -1703,6 +1704,8 @@ BC2CPP_MAIN = lambda do
   OwnerSetShare.capture_stdout(symbol) if OwnerSetShare.enabled?(BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol })
   # COMPACT_LABELS (label_table.rb): registered last of these, so it reads the text as printed.
   LabelTable.capture_stdout(LabelTable.enabled?(BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol }))
+  # ELEMENT_READ_SUMMARY (keep_summary.rb): registered last of these, so it reads the unit as printed, markers included.
+  KeepSummary.capture_stdout if ElementReadRoots.summary_on?
 
   # PARAM_TRACE (tools/bc2cpp/param_trace.rb): opt-in runtime classes of compiled method and block
   # parameters; unset (or any value but 1) leaves stdout untouched. Registered BEFORE ELSE_TRACE so the
@@ -1759,6 +1762,7 @@ BC2CPP_MAIN = lambda do
   if gen.rom_method_tables?
     puts '#define BC2CPP_ROM_METHOD_TABLES 1'
     puts CodeGen::ROM_INSTALL_HELPER
+    puts CodeGen::CONST_PATH_WALK_HELPER if gen.const_path_walk?
   end
   # CLASS_READ_INLINE (docs/bc2cpp-class-read-inline.md): mrb_obj_class is mrb_class_real(mrb_class(v)), out of
   # line in src/class.c, and class_real returns its argument unless it is a singleton class or an iclass. So a heap
@@ -2742,7 +2746,13 @@ BC2CPP_MAIN = lambda do
         for (const mrb_value* a = args.begin(); a != args.end(); a++) {
           mrb_sym method = mrb_obj_to_sym(M, *a);
           mrb_int len;
+          // The name is only copied: mrb_sym_name_tmp keeps a compact presym table from caching it.
+        #ifdef MRB_SYM_TMP_LEN
+          char nmbuf[MRB_SYM_TMP_LEN];
+          const char* nm = mrb_sym_name_tmp(M, method, nmbuf, &len);
+        #else
           const char* nm = mrb_sym_name_len(M, method, &len);
+        #endif
           std::string ivar = "@" + std::string(nm, (size_t)len);
           mrb_sym ivsym = mrb_intern(M, ivar.data(), (mrb_int)ivar.size());
           mrb_iv_name_sym_check(M, ivsym);
@@ -2998,6 +3008,13 @@ BC2CPP_MAIN = lambda do
       Bc2cppErrinfoScope(const Bc2cppErrinfoScope&) = delete;
       Bc2cppErrinfoScope& operator=(const Bc2cppErrinfoScope&) = delete;
     };
+    // RESCUE_PROTECT_FOLD: a rescue glue's protect and its OP_EXCEPT `$!` in one shared call (emit_rescue_glue).
+    [[gnu::noinline, maybe_unused]] static mrb_value bc2cpp_rescue_protect(mrb_state* M, mrb_value (*body)(mrb_state*, void*),
+                                                                          void* ud, mrb_bool* error) {
+      mrb_value result = bc2cpp_protect(M, body, ud, error);
+      if (*error) bc2cpp_set_errinfo(M, result);
+      return result;
+    }
   ERRINFO
   # GETIDX's String arm calls mrb_str_aref (src/string.c, non-static), declared
   # only in mruby/internal.h, which has no C-linkage guard; including it would
