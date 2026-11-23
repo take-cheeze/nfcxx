@@ -93,6 +93,16 @@
     }
   },
   "entries": {
+    "rb_str_encode": {
+      "kind": "template",
+      "arity": 4,
+      "needs_mrb": true,
+      "gem_dep": "mruby-encoding",
+      "prelude": "#include <mruby/encoding.h>",
+      "prelude_name": "nfcx_encoding_h",
+      "template": "rb_str_encode($m, $0, $1, $2, $3)",
+      "caveat": "CRuby's rb_str_encode(str, to, ecflags, ecopts) is mruby-encoding's rb_str_encode (the fork): the three encodings are ASCII-compatible, so a conversion among them is defined for ASCII only; an ASCII-only string takes the target tag, and other bytes raise ArgumentError (CRuby raises Encoding::UndefinedConversionError). ecflags and ecopts are not used"
+    },
     "RB_OBJ_FROZEN_RAW": {
       "kind": "template",
       "arity": 1,
@@ -2420,7 +2430,6 @@
     "onig_foreach_name": {"kind": "special", "handler": "onig_foreach", "needs_mrb": true, "caveat": "the callback takes the mruby state as its first argument (threaded like a helper); a trampoline passes it, and the state is stored for the call"},
     "rb_struct_new": {"kind": "special", "handler": "struct_variadic", "needs_mrb": true, "caveat": "Struct is the mruby-struct gem: Struct.new with the member symbols (rb_struct_define), or klass.new with the members' count of values (rb_struct_new)"},
     "rb_struct_define": {"kind": "special", "handler": "struct_variadic", "needs_mrb": true, "caveat": "Struct is the mruby-struct gem: Struct.new with the member symbols (rb_struct_define), or klass.new with the members' count of values (rb_struct_new)"},
-    "rb_str_encode": {"kind": "refuse", "reason": "stuck point (Encoding): transcoding a string needs an encoding converter; mruby-encoding (mrbgems/mruby-encoding) has rb_str_conv_enc, which changes only the encoding tag of an ASCII-only string and returns any other string unchanged, so there is no transcoder to map this to"},
     "RB_ENC_INTERNED_STR_NULL_CHECK": {"kind": "refuse", "reason": "stuck point (Encoding): the null-encoding check of an interned string; mruby-encoding tags a string with an encoding index (rb_enc_get_index) and an interned string has no separate null encoding, so the check has no mruby form here without a per-string null flag"},
     "RBIGNUM_POSITIVE_P": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "(mrb_bint_sign($m, $0) > 0)", "caveat": "a Bignum is never zero, and a fixnum is a plain sign test; mirrors CRuby RBIGNUM_POSITIVE_P"},
     "RBIGNUM_NEGATIVE_P": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "(mrb_bint_sign($m, $0) < 0)", "caveat": "mirrors CRuby RBIGNUM_NEGATIVE_P"},
