@@ -178,10 +178,7 @@ class CodeGen
   # BC2CPP_UNREGISTERED_EXTRA ("Owner#name,..."): more entries to leave unregistered, for a check fixture that has
   # no place in the committed lists (scripts/bc2cpp/unregistered_verify_check.rb).
   def emit_owner_registrations(compiled, owners, core_owners: owners, unregistered: unregistered_keys)
-    by_owner = compiled.group_by { |m| m[:owner] }
-    copies = module_function_copies(compiled)
-    copies.each { |m| (by_owner[m[:owner]] ||= []) << m }
-    targets = (owners + copies.map { |m| m[:owner] }).uniq.select { |o| by_owner.key?(o) }
+    by_owner, targets = registration_targets(compiled, owners)
     accessors = left_out_accessors(compiled, unregistered)
     natives = left_out_natives(compiled, unregistered)
     core_rom = left_out_core_rom
@@ -400,21 +397,12 @@ class CodeGen
       ops = []
       left_out = Set.new
       by_owner[owner].each do |m|
-        fn = if singleton
-               m[:visibility] == :private ? 'bc2cpp_define_private_class_method' : 'mrb_define_class_method'
-             elsif m[:visibility] == :private
-               'mrb_define_private_method'
-             elsif m[:visibility] == :public
-               'mrb_define_method'
-             end
+        fn = registration_define_fn(m, singleton)
         unless fn
           ops << "  // #{owner}##{m[:name]} left unregistered (:#{m[:visibility]} has no safe registration call).\n"
           next
         end
-        names = [m[:name]]
-        # CORE_ALIASES: the same entry under the names the bytecode aliased it to. A left-out source still registers
-        # the aliases the build keeps (SETTLED_ALIASES, core_native_candidates.rb).
-        names += self.class.core_aliases&.dig([owner, m[:name]]) || [] if @owner_of[m[:label]]&.core
+        names = registration_names(owner, m)
         if unregistered.include?("#{owner}##{m[:name]}")
           ops << "  // #{owner}##{m[:name]} left unregistered: statically dispatched only (docs/adr/0203).\n"
         end
@@ -454,6 +442,49 @@ class CodeGen
       whole << out
       out = whole
     end
+  end
+
+  # The compiled entries by owner (with the MODULE_FUNCTION_COPY copies) and the owners emit_owner_registrations
+  # registers, in its order.
+  def registration_targets(compiled, owners)
+    by_owner = compiled.group_by { |m| m[:owner] }
+    copies = module_function_copies(compiled)
+    copies.each { |m| (by_owner[m[:owner]] ||= []) << m }
+    [by_owner, (owners + copies.map { |m| m[:owner] }).uniq.select { |o| by_owner.key?(o) }]
+  end
+
+  # The mruby call that registers +m+ on its owner, or nil when its visibility has no safe one.
+  def registration_define_fn(m, singleton)
+    if singleton
+      m[:visibility] == :private ? 'bc2cpp_define_private_class_method' : 'mrb_define_class_method'
+    elsif m[:visibility] == :private
+      'mrb_define_private_method'
+    elsif m[:visibility] == :public
+      'mrb_define_method'
+    end
+  end
+
+  # The names +m+ registers under: its own, and for a core entry (CORE_ALIASES) the names the bytecode aliased it to.
+  # A left-out source still registers the aliases the build keeps (SETTLED_ALIASES, core_native_candidates.rb).
+  def registration_names(owner, m)
+    names = [m[:name]]
+    names += self.class.core_aliases&.dig([owner, m[:name]]) || [] if @owner_of[m[:label]]&.core
+    names
+  end
+
+  # LEFT_OUT_ATTR: the "Owner#name" keys the registration removes from their owner (each left_out of
+  # emit_owner_registration_lines, and each left_out_accessors entry): a class unit of this gem runs before it.
+  def registration_removed_keys(compiled, owners, unregistered: unregistered_keys)
+    by_owner, targets = registration_targets(compiled, owners)
+    keys = left_out_accessors(compiled, unregistered).to_set { |owner, name| "#{owner}##{name}" }
+    targets.each do |owner|
+      by_owner[owner].each do |m|
+        next unless registration_define_fn(m, owner.end_with?('.singleton'))
+
+        registration_names(owner, m).each { |name| keys << "#{owner}##{name}" if unregistered.include?("#{owner}##{name}") }
+      end
+    end
+    keys
   end
 
   # CONST_PATH_WALK: the class at +owner+'s path for init code, `mrb_const_get` from Object down each segment (a

@@ -190,6 +190,10 @@ class CodeGen
           lines << alias_line
           next
         end
+        if !overridden && (attr_line = left_out_attr_line(irep, idx, insn, owner))
+          lines << attr_line
+          next
+        end
         call = case overridden ? '' : insn.sym.to_s
                when 'include' then "bc2cpp_mod_include(M, self, {#{args.join(', ')}})"
                when 'attr_reader', 'attr' then "bc2cpp_mod_attr(M, self, true, false, {#{args.join(', ')}})"
@@ -525,6 +529,41 @@ class CodeGen
     return false unless compiled
 
     unregistered_keys.include?("#{compiled[:owner]}##{compiled[:name]}")
+  end
+
+  # LEFT_OUT_ATTR: an attr_* send defines only the accessors the gem's registration keeps. One it removes again
+  # (registration_removed_keys: bc2cpp_register_owner_methods runs after the units, and records the phantom either
+  # way) is not defined here, as a left-out def registers nothing (left_out_def?): nothing looks its name up. Each
+  # name must be a literal whose ivar name mrb_iv_name_sym_check accepts, so no NameError is lost. Nil when nothing
+  # is left out. BC2CPP_LEFT_OUT_ATTR=0 is off.
+  attr_writer :registration_removed
+  ATTR_SEND_PASSES = { 'attr' => [true, false], 'attr_reader' => [true, false], 'attr_writer' => [false, true],
+                       'attr_accessor' => [true, true] }.freeze
+
+  def left_out_attr_line(irep, idx, insn, owner)
+    passes = ATTR_SEND_PASSES[insn.sym.to_s]
+    return nil unless passes && insn.op == :SSEND && insn.plain_fixed_argc? && insn.argc.to_i.positive?
+    return nil if ENV['BC2CPP_LEFT_OUT_ATTR'] == '0'
+
+    names = (1..insn.argc).map do |k|
+      irep.walk_dominating_writers(idx - 1, insn.reg + k, follow_moves: true) { |w| w.sym.to_s if w.op == :LOADSYM }
+    end
+    return nil unless names.all? { |n| n&.match?(/\A[A-Za-z_][A-Za-z0-9_]*\z/) }
+
+    return nil unless @registration_removed
+
+    keep = [passes[0] ? names : [], passes[1] ? names.map { |n| "#{n}=" } : []]
+    kept = keep.map { |list| list.reject { |n| @registration_removed.include?("#{owner}##{n}") } }
+    return nil if kept == keep
+
+    line = "  // #{owner} #{insn.sym} #{(keep.flatten - kept.flatten).join(' ')}: left out (LEFT_OUT_ATTR)\n"
+    kept.each_with_index do |list, pass|
+      next if list.empty?
+
+      regs = list.map { |n| "r#{insn.reg + 1 + names.index(pass.zero? ? n : n.chomp('='))}" }
+      line << "  (void)bc2cpp_mod_attr(M, self, #{pass.zero?}, #{pass == 1}, {#{regs.join(', ')}});\n"
+    end
+    line << "  r#{insn.reg} = mrb_nil_value();\n"
   end
 
   # The body of the `def` a DEF installs: the child of the METHOD built into R[a+1] just before it. Nil when there is none.

@@ -3153,6 +3153,7 @@ BC2CPP_MAIN = lambda do
   # No class unit is emitted: the VM runs every class body, and a compiled copy would run it a second time.
   # compile_top_class_units stays for its checks; the gem_init call is not emitted.
   gen.compiled_methods = compiled.to_h { |m| [m[:label], m] }
+  gen.registration_removed = gen.registration_removed_keys(compiled, bc2cpp_registration_owners(compiled.map { |m| m[:owner] }).first)
   # CLASS_UNITS: the top-level class and module bodies that compile are emitted as units and run from gem_init in place of
   # the VM's run (UNIT_BLANK removes them from the residual mrblib). The phase fails at its end on an unresolved constant.
   # A class this gem's own mrblib reopens is the gem's too, even when it compiles no method of it (mruby-rpg2k's
