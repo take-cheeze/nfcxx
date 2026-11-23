@@ -1,0 +1,2 @@
+(ir-module "bad.cpp" (layout (int 4))
+(function "f" (ret int)
