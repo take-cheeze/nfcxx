@@ -1,6 +1,7 @@
 #!/bin/bash
-# Differential test of the link steps: nfcxx's link_records_rm and eccp_cleanup (the thin bash functions of nfcxx, which run
-# scripts/nfcxx-link.rb) against tests/nfcxx-link/oracle.sh (their bash originals, verbatim). Each case builds the same
+# Differential test of the link steps: nfcxx's link_records_rm (inlined in the body: the same records-rm call of
+# scripts/nfcxx-link.rb) and eccp_cleanup (the thin bash function of nfcxx, which runs scripts/nfcxx-link.rb) against
+# tests/nfcxx-link/oracle.sh (their bash originals, verbatim). Each case builds the same
 # sandbox twice and runs the same body under the same prelude (set -euo pipefail, as nfcxx has it) once with each set of
 # functions. The status, the standard error (its sandbox path normalized) and the files left must be the same.
 #
@@ -11,18 +12,21 @@ repo=$(cd "$here/../.." && pwd -P)
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 ruby_bin=$(command -v ruby)
 # the functions as nfcxx has them now (the port is what they call)
-sed -n '/^temp_cleanup() {/,/^}/p;/^eccp_cleanup() {/,/^}/p;/^link_records_rm() {/,/^}/p' "$repo/tests/driver-body/nfcxx-bash" > "$work/thin.sh"
+sed -n '/^temp_cleanup() {/,/^}/p;/^eccp_cleanup() {/,/^}/p' "$repo/tests/driver-body/nfcxx-bash" > "$work/thin.sh"
 [ -s "$work/thin.sh" ] || { echo "nfcxx-link: no link steps in nfcxx" >&2; exit 2; }
-# compile_clean is not a function of nfcxx any more: its body call is inlined, and the thin side runs the same gated call of
-# scripts/nfcxx-link.rb compile-clean (the oracle keeps its bash loop, compile_clean in oracle.sh). @CC@ in a case stands for the call.
+# link_records_rm and compile_clean are not functions of nfcxx any more: their body calls are inlined, and the thin side runs
+# the same calls of scripts/nfcxx-link.rb (records-rm, and compile-clean gated as the body gates it). The oracle keeps its bash
+# functions (link_records_rm and compile_clean in oracle.sh). @RR@ and @CC@ in a case stand for the calls.
+RR_THIN='"${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" records-rm -- ${files[@]+"${files[@]}"}'
 CC_THIN='if [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then "${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" compile-clean "$out" ${srcs[@]+"${srcs[@]}"}; fi'
 
 # run WHICH SB SETUP BODY: builds SB, runs BODY in bash with the functions of WHICH (thin or oracle); prints the outcome
 run() {
-  local which=$1 sb=$2 setup=$3 body=$4 src cc=compile_clean
-  src=$here/oracle.sh; if [ "$which" = thin ]; then src=$work/thin.sh; cc=$CC_THIN; fi
+  local which=$1 sb=$2 setup=$3 body=$4 src cc=compile_clean rr=link_records_rm
+  src=$here/oracle.sh; if [ "$which" = thin ]; then src=$work/thin.sh; cc=$CC_THIN; rr=$RR_THIN; fi
   # (no pattern replacement here: the call has &&, which a replacement string would read as a match reference in bash 5.2)
   case $body in *@CC@*) body=${body%%@CC@*}$cc${body#*@CC@} ;; esac
+  case $body in *@RR@*) body=${body%%@RR@*}$rr${body#*@RR@} ;; esac
   rm -rf "$sb"; mkdir -p "$sb/sub" "$sb/tmp1/x" "$sb/tmp2" "$sb/tmp3"
   : > "$sb/a.o"; : > "$sb/a.ii"; : > "$sb/b.o"; : > "$sb/b.ii"; : > "$sb/c.ii"; : > "$sb/sub/d.ii"; : > "$sb/.ii"
   ln -s nowhere "$sb/dang.ii"; mkdir "$sb/dir.ii"; : > "$sb/dir.o"
@@ -50,31 +54,31 @@ case_() {  # case_ NAME SETUP BODY: the thin functions and the oracle must agree
 }
 
 # link_records_rm: the .ii beside each .o of the link
-case_ "records: each object's .ii goes, others stay" '' 'files=(a.o b.o c.o); link_records_rm'
-case_ "records: a link option and a library are not objects" '' 'files=(a.o -lm x.a -Wl,y.o -Wl,z); link_records_rm'
-case_ "records: no files" '' 'files=(); link_records_rm'
-case_ "records: files unset" '' 'unset files; link_records_rm'
-case_ "records: a .ii that is a directory fails the last object" '' 'files=(dir.o a.o); link_records_rm'
-case_ "records: the failing object is not last" '' 'files=(dir.o a.o); link_records_rm; echo after'
-case_ "records: a dangling .ii symbolic link is removed" '' 'files=(dang.o); link_records_rm'
-case_ "records: an object in a directory" '' 'files=(sub/d.o); link_records_rm'
-case_ "records: a file named .o" '' 'files=(.o); link_records_rm'
-case_ "records: an object with no .ii" '' 'files=(c.o); link_records_rm'
-case_ "records: a non-object last (status 0)" '' 'files=(a.o dir.o b.o x.so); link_records_rm'
+case_ "records: each object's .ii goes, others stay" '' 'files=(a.o b.o c.o); @RR@'
+case_ "records: a link option and a library are not objects" '' 'files=(a.o -lm x.a -Wl,y.o -Wl,z); @RR@'
+case_ "records: no files" '' 'files=(); @RR@'
+case_ "records: files unset" '' 'unset files; @RR@'
+case_ "records: a .ii that is a directory fails the last object" '' 'files=(dir.o a.o); @RR@'
+case_ "records: the failing object is not last" '' 'files=(dir.o a.o); @RR@; echo after'
+case_ "records: a dangling .ii symbolic link is removed" '' 'files=(dang.o); @RR@'
+case_ "records: an object in a directory" '' 'files=(sub/d.o); @RR@'
+case_ "records: a file named .o" '' 'files=(.o); @RR@'
+case_ "records: an object with no .ii" '' 'files=(c.o); @RR@'
+case_ "records: a non-object last (status 0)" '' 'files=(a.o dir.o b.o x.so); @RR@'
 # a name rm reads as an option: rm reports it (its own words and status), so the port runs rm for it
-case_ "records: --name=value is rm's to report" '' 'files=(--a=b.o); link_records_rm'
-case_ "records: --force=value (an option with no argument)" '' 'files=(--force=x.o); link_records_rm'
-case_ "records: --fo.o (a long-option prefix)" '' 'files=(--fo.o); link_records_rm'
-case_ "records: -i.o (a letter, then the dot)" '' 'files=(-i.o); link_records_rm'
-case_ "records: -fi.o (letters that rm takes, then the dot)" '' 'files=(-fi.o); link_records_rm'
-case_ "records: -x=y.o (an unknown letter)" '' 'files=(-x=y.o); link_records_rm'
-case_ "records: --interactive=value (an optional argument)" '' 'files=(--interactive=x.o); link_records_rm'
-case_ "records: --.o" '' 'files=(--.o); link_records_rm'
-case_ "records: an option-like name stops the loop after the objects before it" '' 'files=(a.o -x.o b.o); link_records_rm; echo after'
-case_ "records: a name with a space" ': > "a b.ii"' 'files=("a b.o"); link_records_rm'
-case_ "records: a name ending in .o.o takes its stem" ': > a.o.ii' 'files=(a.o.o); link_records_rm'
-case_ "records: a symbolic link to a directory is removed, not followed" 'ln -s sub link.ii' 'files=(link.o); link_records_rm; echo done'
-case_ "records: a -- argument is a name, not the end of the list" ': > a.ii' 'files=(-- a.o); link_records_rm'
+case_ "records: --name=value is rm's to report" '' 'files=(--a=b.o); @RR@'
+case_ "records: --force=value (an option with no argument)" '' 'files=(--force=x.o); @RR@'
+case_ "records: --fo.o (a long-option prefix)" '' 'files=(--fo.o); @RR@'
+case_ "records: -i.o (a letter, then the dot)" '' 'files=(-i.o); @RR@'
+case_ "records: -fi.o (letters that rm takes, then the dot)" '' 'files=(-fi.o); @RR@'
+case_ "records: -x=y.o (an unknown letter)" '' 'files=(-x=y.o); @RR@'
+case_ "records: --interactive=value (an optional argument)" '' 'files=(--interactive=x.o); @RR@'
+case_ "records: --.o" '' 'files=(--.o); @RR@'
+case_ "records: an option-like name stops the loop after the objects before it" '' 'files=(a.o -x.o b.o); @RR@; echo after'
+case_ "records: a name with a space" ': > "a b.ii"' 'files=("a b.o"); @RR@'
+case_ "records: a name ending in .o.o takes its stem" ': > a.o.ii' 'files=(a.o.o); @RR@'
+case_ "records: a symbolic link to a directory is removed, not followed" 'ln -s sub link.ii' 'files=(link.o); @RR@; echo done'
+case_ "records: a -- argument is a name, not the end of the list" ': > a.ii' 'files=(-- a.o); @RR@'
 
 # eccp_cleanup: the EXIT trap (the status it leaves is the driver's, not the removals')
 case_ "cleanup: all three removed" 'keep_intermediates=0; eccp_dir=tmp1; cudatmp=tmp2; ctmp=tmp3' 'trap eccp_cleanup EXIT; exit 5'

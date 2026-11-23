@@ -856,14 +856,11 @@ eccp_plan
 if [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then  # the records of the sources of a -c compile (scripts/nfcxx-link.rb compile-clean)
   "${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" compile-clean "$out" ${srcs[@]+"${srcs[@]}"}
 fi
-link_records_rm() {  # link_records_rm: removes <stem>.ii beside each object of this link (see "A link writes" below)
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" records-rm -- ${files[@]+"${files[@]}"}   # the loop (tests/nfcxx-link/run.sh)
-}
 # A link writes <stem>.ii beside each object it uses: the instances the link assigned to that object (the <stem>.ti requests
 # stay). An assignment left by an earlier link can name an instance that a later link assigns to another object ("assigned
 # to more than one file"), so these records are removed before the link and again once it succeeds (set -e: a failed link
 # exits before the second removal).
-link_records_rm
+"${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" records-rm -- ${files[@]+"${files[@]}"}   # the loop (tests/nfcxx-link/run.sh)
 # Compile cache (opt-in: --cache=DIR, or NFCXX_CACHE=DIR). A -c compile of one C++ source with -o is kept in DIR/objects under a key of
 # everything that can change the object: the command as given, the absolute output path (the prelinker records it in the
 # object's .ti), the working directory, the source and each header the host preprocessor lists (-M), the NFCXX_* environment,
@@ -873,7 +870,7 @@ link_records_rm
 # spaces in the header list is not handled.
 cache_check
 eccp_run
-link_records_rm
+"${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" records-rm -- ${files[@]+"${files[@]}"}   # the loop (tests/nfcxx-link/run.sh)
 # Kernel instances from the host compile. The rewriter lists the kernel templates whose instances the text does not
 # give (<kernels>.unresolved: a launch or address in a template the unit calls with deduced or dependent arguments,
 # binbcast.cu's launch_bin_bcast_pack), and their device code is not made. The host compile made them, though: when its
