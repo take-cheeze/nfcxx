@@ -1867,6 +1867,12 @@ check grep -qF 'static unsigned long long nfcx_value_word(mrb_value v) {' "$work
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_multi_decl tools/cext2mrbgem/fixtures/api_multi_decl/ext/api_multi_decl "$work/api_multi_decl" > "$work/api_multi_decl.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check grep -qF 'h is an integer array (st_index_t), and md_get returns a VALUE' "$work/api_multi_decl/REFUSALS.txt"
+# 2zzz193. RB_ENC_INTERNED_STR_NULL_CHECK is a CRuby build flag (1 only for Ruby 3.0.0 to 3.0.5): the port's value is its default 0,
+# so the check is the dead branch 0 && ..., with no refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_enc_null_check tools/cext2mrbgem/fixtures/api_enc_null_check/ext/api_enc_null_check "$work/api_enc_null_check" > "$work/api_enc_null_check.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'NULL_CHECK' "$work/api_enc_null_check/REFUSALS.txt")" -eq 0
+check grep -qF 'if (0 && ((long)mrb_int(mrb, len)) == 0) {' "$work/api_enc_null_check/src/api_enc_null_check.c"
 check grep -qF "spec.add_dependency 'mruby-marshal'" "$work/api_marshal_load/mrbgem.rake"
 # 2zzz179. rb_time_timespec_new: a fixed UTC offset is mrb_time_at_offset (the fork's mruby-time), CRuby's INT_MAX and INT_MAX-1 are
 # local time and UTC; no Time-offset refusal.
