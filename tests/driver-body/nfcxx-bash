@@ -194,19 +194,8 @@ cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs
   # rewrite of each input, the -I of each source directory) and prints the statements that set srcs, files, cflags, cuda_opts
   # and preinc: the body evals them here. A failing step ends the driver with its status (its message is printed by the script).
   local inf=$cudatmp/cu-in.rec prep
-  {
-    state_put root "$root"; state_put tmp "$cudatmp"; state_put bash_pid "$BASHPID"
-    state_put compile_only "$compile_only"; state_put out "$out"; state_put outset "$outset"
-    state_put trace_unit "${trace_unit:-${NFCXX_TRACE_UNIT:-}}"
-    state_put inputs ${cu_inputs[@]+"${cu_inputs[@]}"}; state_put srcs ${srcs[@]+"${srcs[@]}"}; state_put files ${files[@]+"${files[@]}"}
-    state_put cflags ${cflags[@]+"${cflags[@]}"}
-    if [ "$obfuscate" = 1 ]; then state_put obfuscate 1; else state_put obfuscate 0; fi
-    if [ "$ir_opt_set" = 1 ]; then state_put ir_opt "$ir_opt"; else state_put ir_opt; fi
-    state_put promote_slots "$promote_slots"; state_put unroll "$unroll"; state_put struct_slots "$struct_slots"
-    state_put cache_dir "$cache_dir"; state_put cache_log "${cache_log_file:-}"
-    state_put preinc ${preinc[@]+"${preinc[@]}"}; state_put cuda ${cuda_opts[@]+"${cuda_opts[@]}"}
-    state_put edg_launch "${NFCXX_CUDA_EDG_LAUNCH:-1}"
-  } > "$inf"
+  # the records are planned by scripts/nfcxx-cu-records.rb from the arguments as given (the same loop and environment defaults)
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-cu-records.rb" "$root" "$cudatmp" "$BASHPID" -- "${args0[@]}" > "$inf" || exit $?
   prep=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cu-cpp2-prepare.rb" cu < "$inf") || exit $?
   eval "$prep"
 }
