@@ -1851,6 +1851,22 @@ check test "$(grep -c 'rb_gc_mark' "$work/api_gc_alias/REFUSALS.txt")" -eq 0
 check grep -qF '#define mark_second(x) mrb_gc_mark_value(mrb, x)' "$work/api_gc_alias/src/api_gc_alias.c"
 check grep -qF 'static void pair_mark(mrb_state *mrb, void *ptr) {' "$work/api_gc_alias/src/api_gc_alias.c"
 check test "$(grep -c 'define rb_gc_mark_movable' "$work/api_gc_alias/src/api_gc_alias.c")" -eq 0
+# 2zzz190. a fixnum VALUE cast to an integer inside its FIXNUM_P branch: the fixnum's integer (mrb_fixnum), no VALUE-as-integer refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fixnum_cast tools/cext2mrbgem/fixtures/api_fixnum_cast/ext/api_fixnum_cast "$work/api_fixnum_cast" > "$work/api_fixnum_cast.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'VALUE as integer' "$work/api_fixnum_cast/REFUSALS.txt")" -eq 0
+check grep -qF 'h[1] = mrb_fixnum(nth);' "$work/api_fixnum_cast/src/api_fixnum_cast.c"
+# 2zzz191. a VALUE passed as an sid_t key: its word through nfcx_value_word (the union's bits); an ID parameter stays refused.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_sid_key tools/cext2mrbgem/fixtures/api_sid_key/ext/api_sid_key "$work/api_sid_key" > "$work/api_sid_key.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'VALUE as integer' "$work/api_sid_key/REFUSALS.txt")" -eq 0
+check grep -qF 'return sk_lookup(nfcx_value_word(obj))' "$work/api_sid_key/src/api_sid_key.c"
+check grep -qF 'static unsigned long long nfcx_value_word(mrb_value v) {' "$work/api_sid_key/src/api_sid_key.c"
+# 2zzz192. an integer array declared after another declarator (st_index_t v, h[2];) assigned a VALUE-returning call is a refusal
+# (the array is found in a multi-declarator declaration), not a silent compile error.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_multi_decl tools/cext2mrbgem/fixtures/api_multi_decl/ext/api_multi_decl "$work/api_multi_decl" > "$work/api_multi_decl.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check grep -qF 'h is an integer array (st_index_t), and md_get returns a VALUE' "$work/api_multi_decl/REFUSALS.txt"
 check grep -qF "spec.add_dependency 'mruby-marshal'" "$work/api_marshal_load/mrbgem.rake"
 # 2zzz179. rb_time_timespec_new: a fixed UTC offset is mrb_time_at_offset (the fork's mruby-time), CRuby's INT_MAX and INT_MAX-1 are
 # local time and UTC; no Time-offset refusal.
