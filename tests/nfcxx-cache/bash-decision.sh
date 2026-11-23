@@ -16,6 +16,10 @@ first=$(grep -n -F -x 'compile_clean' "$file" | head -1 | cut -d: -f1)
 end=$(grep -n -F -x 'if [ -n "$depmode" ]; then' "$file" | cut -d: -f1 | awk -v s="$first" '$1 > s { print; exit }')
 
 harness() {
+  # the backend's compiler, as the body exports it for the gcc and Path B routes (and as nfcxx-backend-env.rb plans it): the cache
+  # key takes NFCXX_CC, so both drivers must have it here. The pinned driver's bash route does not export it (only its plan
+  # route does), so without this the two sides' keys differ by that one line.
+  printf 'export NFCXX_CC=%s\n' "$root/scripts/gcc-cc.rb"
   cat <<'EOT'
 _out() { local s=$1 x; shift; for x in "$@"; do s+=" $x"; done; printf '%s\n' "$s"; }
 RUBY=ruby   # the driver runs the Ruby helpers as "${RUBY:-ruby}": the ruby stub below records the remote helper's runs
