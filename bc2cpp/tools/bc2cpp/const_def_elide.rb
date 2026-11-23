@@ -42,6 +42,7 @@ module ConstDefElide
   # an Array -- the read reaches only these owners' tables (mrb_const_get then walks their ancestors and Object's).
   NATIVE_COMPUTED_READS = {
     'mruby-lcf/src/schema_tables.hxx' => { 'mrb_const_get(M, mrb_obj_value(schema), sym(varint()))' => ['LCF::Schema'] },
+    'mruby-lcf/src/schema_rom.hxx' => { 'mrb_obj_iv_get(M, lcf, LCF_ROM_LEAVES_SYM(M))' => :literal },
     'mruby-rgss/src/lib.cxx' => {
       'mrb_iv_get(M, self, font_iv)' => :literal, 'mrb_const_defined(M, obj, sym)' => :literal,
       'mrb_const_get(M, obj, sym)' => :literal, 'mrb_const_defined(M, rgss_mod, font_sym)' => :literal,
@@ -72,15 +73,8 @@ module ConstDefElide
   # native read reaches (lookup_scope).
   def analyze(ireps:, folded:, facts:, site_keys:, closed_world:, linked_native:, spelled_native:, mixins:)
     refusal = world_refusal(ireps, closed_world, linked_native)
-    reached = Set.new
-    native_reads(linked_native).each do |_path, _call, verdict|
-      next unless verdict.is_a?(Array)
-
-      verdict.each do |owner|
-        scope = lookup_scope(owner, **mixins)
-        scope ? reached.merge(scope) : refusal ||= "the ancestors of #{owner} are not known"
-      end
-    end
+    reached, why = native_reached(linked_native, mixins)
+    refusal ||= why
     return Result.new(names: Set.new, refusal: refusal, kept: {}) if refusal
 
     spelled = spelled_names(spelled_native)
@@ -124,7 +118,7 @@ module ConstDefElide
                     bc2cpp_const_path_has].to_set.freeze
   GENERATED_NAME = /(?:\b(\w+)\(M,\s*)?"((?:[^"\\\n]|\\.)*)"|\bMRB_SYM(?:_[QBE])?\(\s*(\w+)\s*\)/
 
-  def assert_unnamed!(result, texts, symbol_literals)
+  def assert_unnamed!(result, texts, symbol_literals, label: 'CONST_DEF_ELIDE', switch: 'BC2CPP_CONST_DEF_ELIDE=0')
     return if result.nil? || result.names.empty?
 
     hits = {}
@@ -132,8 +126,8 @@ module ConstDefElide
     scan_names(result, symbol_literals.join("\n"), hits) { true }
     return if hits.empty?
 
-    abort "bc2cpp: CONST_DEF_ELIDE: the generated code still names #{hits.keys.sort.join(', ')}, whose definitions were " \
-          "elided (BC2CPP_CONST_DEF_ELIDE=0 keeps them):\n#{hits.map { |name, at| "  #{name}: ...#{at}..." }.join("\n")}"
+    abort "bc2cpp: #{label}: the generated code still names #{hits.keys.sort.join(', ')}, whose bindings were " \
+          "elided (#{switch} keeps them):\n#{hits.map { |name, at| "  #{name}: ...#{at}..." }.join("\n")}"
   end
 
   # Records in +hits+ (name => context) each elided name of +text+; a literal counts when the block accepts its call.
@@ -147,8 +141,26 @@ module ConstDefElide
     end
   end
 
-  def world_refusal(ireps, closed_world, linked_native)
-    return 'BC2CPP_CONST_DEF_ELIDE=0' unless enabled?
+  # [owners whose tables a reviewed native read reaches, nil or why their ancestors are not known].
+  def native_reached(linked_native, mixins)
+    reached = Set.new
+    native_reads(linked_native).each do |_path, _call, verdict|
+      next unless verdict.is_a?(Array)
+
+      verdict.each do |owner|
+        scope = lookup_scope(owner, **mixins)
+        return [reached, "the ancestors of #{owner} are not known"] unless scope
+
+        reached.merge(scope)
+      end
+    end
+    [reached, nil]
+  end
+
+  # +switch+: BC2CPP_CONST_DEF_ELIDE=0 refuses too; +reflection+: the method names that refuse (CONST_BINDING_DROP shares
+  # the rest of the gate and names more).
+  def world_refusal(ireps, closed_world, linked_native, switch: true, reflection: REFLECTION)
+    return 'BC2CPP_CONST_DEF_ELIDE=0' if switch && !enabled?
     return 'bytecode can run (the build does not define MRB_VM_FREE)' unless ENV['BC2CPP_VM_FREE'] == '1'
     return 'no closed world' unless closed_world
     return 'constant bindings are not static' unless closed_world.constants_static?
@@ -156,13 +168,13 @@ module ConstDefElide
     ireps.each_value do |irep|
       BytecodeIR.for(irep).each_source do |insn, idx|
         name = insn.sym.to_s
-        next unless REFLECTION.include?(name)
+        next unless reflection.include?(name)
         next if literal_name_read?(irep, idx, insn)
 
         return "#{File.basename(irep.file.to_s)} #{irep.label}:#{idx} names :#{name}"
       end
     end
-    dynamic = DynamicNames.universe(ireps) & REFLECTION
+    dynamic = DynamicNames.universe(ireps) & reflection
     return "a computed name may be :#{dynamic.min}" unless dynamic.empty?
 
     linked_native.each do |path|
@@ -171,7 +183,7 @@ module ConstDefElide
       text = File.read(path, encoding: 'BINARY')
       # native_funcall_names seeds the hooks mruby itself calls (const_missing on a failed lookup): not calls here.
       called = ((ClosedWorld.native_funcall_names(text) - ClosedWorld::IMPLICIT_HOOKS) +
-                ClosedWorld.native_other_literals(text)).to_set & REFLECTION
+                ClosedWorld.native_other_literals(text)).to_set & reflection
       return "#{path} names :#{called.min}" unless called.empty?
     end
     unreviewed = native_reads(linked_native).find { |_path, _call, verdict| verdict.nil? }

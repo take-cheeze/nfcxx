@@ -9,6 +9,9 @@
 class CodeGen
   STATIC_CONST_CLASS_TEST = 0xffff
   STATIC_CONST_VALUE_TEST = 0xfffe
+  # CONST_BINDING_DROP rows: the test is this plus the name's slot in the per-VM table; path lists stay below it.
+  STATIC_CONST_DROP_TEST = 0x8000
+  STATIC_CONST_DROP_LIMIT = STATIC_CONST_VALUE_TEST - STATIC_CONST_DROP_TEST
 
   def static_constants?
     ENV['BC2CPP_STATIC_CONSTANTS'] != '0'
@@ -115,16 +118,27 @@ class CodeGen
     out << "static bool bc2cpp_cconst_have[#{count}] = {};\n"
     out << "static struct RClass* bc2cpp_mcnst_from[#{members}];\n"
     out << "static mrb_value bc2cpp_mcnst_slots[#{members}];\n"
+    drop_reads = const_drop_live(@const_drop_reads, used, 'bc2cpp_cdef_mget_')
+    drop_defs = const_drop_live(@const_drop_defs, used, 'bc2cpp_cdef_set_')
+    out << "static mrb_value bc2cpp_cdef_mslots[#{[drop_reads.size, 1].max}];\n"
+    out << "static bool bc2cpp_cdef_mhave[#{[drop_reads.size, 1].max}] = {};\n"
     out << "static void bc2cpp_reset_const_site_cache() {\n" \
            "  bc2cpp_cconst_state = nullptr;\n" \
            "  for (bool& h : bc2cpp_cconst_have) h = false;\n" \
            "  for (struct RClass*& f : bc2cpp_mcnst_from) f = nullptr;\n" \
+           "  for (bool& h : bc2cpp_cdef_mhave) h = false;\n" \
            "}\n"
     out << vm_cache_bind('bc2cpp_cconst_bind', 'bc2cpp_cconst_state', 'CONST_SITE_CACHE')
+    dropped = live.any? { |slot| slot[:drop] }
+    out << emit_const_drop_table(drop_defs, drop_reads) if dropped || @const_drop_put || !drop_defs.empty? || !drop_reads.empty?
     tests = [0]
     lists = {}
     rows = live.map do |slot|
-      test = if slot[:paths]
+      test = if slot[:drop]
+               raise 'CONST_BINDING_DROP: the per-VM table outgrew a row test' if slot[:drop] >= STATIC_CONST_DROP_LIMIT
+
+               STATIC_CONST_DROP_TEST + slot[:drop]
+             elsif slot[:paths]
                lists[slot[:paths]] ||= begin
                  at = tests.size
                  tests << slot[:paths].size
@@ -136,7 +150,7 @@ class CodeGen
              else
                STATIC_CONST_CLASS_TEST
              end
-      raise 'STATIC_CONSTANTS: the test table outgrew a uint16_t offset' if tests.size >= STATIC_CONST_VALUE_TEST
+      raise 'STATIC_CONSTANTS: the test table outgrew a uint16_t offset' if tests.size >= STATIC_CONST_DROP_TEST
 
       "{#{static_const_scope(slot[:scope])}, #{static_const_string(slot[:name])}, #{test}},"
     end
@@ -169,10 +183,24 @@ class CodeGen
                   else
                     "    keep = false;\n"
                   end
+      # CONST_BINDING_DROP: a defined constant is the value the lookup would find (ConstBindingDrop's read_keys
+      # condition); an undefined one runs the lookup, which raises as before, and stores nothing.
+      drop_fill = if dropped
+                    "  if (row.test >= #{STATIC_CONST_DROP_TEST} && row.test < #{STATIC_CONST_VALUE_TEST}) {\n" \
+                      "    mrb_value v;\n" \
+                      "    if (!bc2cpp_cdef_value(M, row.test - #{STATIC_CONST_DROP_TEST}, &v)) return bc2cpp_const_lookup(M, row.scope, name);\n" \
+                      "    bc2cpp_cconst_slots[i] = v;\n" \
+                      "    bc2cpp_cconst_have[i] = true;\n" \
+                      "    return v;\n" \
+                      "  }\n"
+                  else
+                    ''
+                  end
       out << "[[gnu::noinline]] static mrb_value bc2cpp_cconst_fill(mrb_state* M, int i) {\n" \
              "  bc2cpp_cconst_bind(M);\n" \
              "  const bc2cpp_cconst_row& row = bc2cpp_cconst_rows[i];\n" \
              "  mrb_sym name = mrb_intern_cstr(M, bc2cpp_const_strings + row.name);\n" \
+             "#{drop_fill}" \
              "  mrb_value r0 = bc2cpp_const_lookup(M, row.scope, name);\n" \
              "  bool keep;\n" \
              "  if (row.test == #{STATIC_CONST_CLASS_TEST}) {\n" \
@@ -220,6 +248,130 @@ class CodeGen
            "}\n"
     member_live.each_with_index do |(_, index), i|
       out << "static inline mrb_value bc2cpp_mcnst_#{index}(mrb_state* M, mrb_value recv) { return bc2cpp_mcnst_get(M, #{i}, recv); }\n"
+    end
+    out
+  end
+
+  # CONST_BINDING_DROP (const_binding_drop.rb) -----------------------------------------------------------------------
+
+  def const_drop?(name)
+    !!self.class.const_binding_drop&.drop?(name)
+  end
+
+  def const_drop_index(name)
+    self.class.const_binding_drop.index(name)
+  end
+
+  # The write of the one SETCONST of +name+, in the class body of +owner+: a PLAIN_WRITE (ConstBindingDrop.plain_write?)
+  # is the table store alone, any other the bc2cpp_cdef_set_<N> call of its row.
+  def const_drop_set(name, owner, value)
+    if self.class.const_binding_drop.names.fetch(name)[:plain]
+      @const_drop_put = true
+      return "  bc2cpp_cdef_put(M, #{const_drop_index(name)}, #{value});\n"
+    end
+
+    @const_drop_defs ||= []
+    n = @const_drop_defs.size
+    fn = owner_class_fn_name(owner)
+    @const_drop_defs << { name: name, k: const_drop_index(name), owner: owner }
+    args = class_test_fuse? ? '' : ", #{fn}(M)"
+    "  bc2cpp_cdef_set_#{n}(M#{args}, #{value});\n"
+  end
+
+  # The bc2cpp_cdef_mget_<N> helper index of a GETMCNST of +name+; the sites of one name share it.
+  def const_drop_read(name)
+    @const_drop_reads ||= []
+    @const_drop_read_index ||= {}
+    @const_drop_read_index[name] ||= (@const_drop_reads << { name: name, k: const_drop_index(name) }).size - 1
+  end
+
+  # [[helper index, row], ...] of the rows +used+ calls (all of them without +used+), numbered densely by position.
+  def const_drop_live(rows, used, prefix)
+    called = used && helper_calls(used, prefix)
+    (rows || []).each_with_index.reject { |_, i| called && !called.include?(i) }.map { |row, i| [i, row] }
+  end
+
+  # The per-VM table: an Array in a global no Ruby can spell (hidden from ObjectSpace, as mrb_gc_register's root
+  # table is), slot 0 the world's fingerprint, slot k + 1 constant k (nil while undefined, undef for a nil value).
+  # The table roots every value and is made at its full size; the fingerprint stops a gem of another world reading the
+  # wrong slot.
+  def emit_const_drop_table(defs, reads)
+    drop = self.class.const_binding_drop
+    world = drop.fingerprint
+    out = +"// CONST_BINDING_DROP -- see tools/bc2cpp/const_binding_drop.rb.\n"
+    out << "[[gnu::noinline]] static mrb_value bc2cpp_cdef_table(mrb_state* M, bool make) {\n" \
+           "  mrb_sym key = mrb_intern_lit(M, \"__bc2cpp_cdef\");\n" \
+           "  mrb_value t = mrb_gv_get(M, key);\n" \
+           "  if (mrb_array_p(t)) {\n" \
+           "    if (RARRAY_LEN(t) == 0 || !mrb_fixnum_p(RARRAY_PTR(t)[0]) || mrb_fixnum(RARRAY_PTR(t)[0]) != #{world}) {\n" \
+           "      mrb_bug(M, \"bc2cpp CONST_BINDING_DROP: the constant table belongs to another world\");\n" \
+           "    }\n" \
+           "    return t;\n" \
+           "  }\n" \
+           "  if (!make) return mrb_nil_value();\n" \
+           "  t = mrb_ary_new_capa(M, #{drop.names.size + 1});\n" \
+           "  mrb_obj_ptr(t)->c = NULL;\n" \
+           "  mrb_ary_push(M, t, mrb_fixnum_value(#{world}));\n" \
+           "  mrb_gv_set(M, key, t);\n" \
+           "  return t;\n" \
+           "}\n"
+    out << "[[maybe_unused]] static bool bc2cpp_cdef_value(mrb_state* M, int k, mrb_value* out) {\n" \
+           "  mrb_value t = bc2cpp_cdef_table(M, false);\n" \
+           "  if (!mrb_array_p(t) || k + 1 >= RARRAY_LEN(t)) return false;\n" \
+           "  mrb_value v = RARRAY_PTR(t)[k + 1];\n" \
+           "  if (mrb_nil_p(v)) return false;\n" \
+           "  *out = mrb_undef_p(v) ? mrb_nil_value() : v;\n" \
+           "  return true;\n" \
+           "}\n"
+    out << "[[maybe_unused]] [[gnu::noinline]] static void bc2cpp_cdef_put(mrb_state* M, int k, mrb_value v) {\n" \
+           "  bc2cpp_cconst_bind(M);\n" \
+           "  mrb_ary_set(M, bc2cpp_cdef_table(M, true), k + 1, mrb_nil_p(v) ? mrb_undef_value() : v);\n" \
+           "}\n"
+    unless defs.empty?
+      fuse = class_test_fuse?
+      rows = defs.map do |_, row|
+        slot = fuse ? @owner_class_cache.fetch(row[:owner])[:index] : 0
+        "  {#{row[:k]}, #{slot}, #{static_const_string(row[:name])}},\n"
+      end
+      out << "struct bc2cpp_cdef_def { uint16_t k, owner, name; };\n"
+      out << "static const bc2cpp_cdef_def bc2cpp_cdef_defs[] = {\n#{rows.join}};\n"
+      # mrb_const_set's effects: FrozenError for a frozen owner (mrb_obj_iv_set), and a class or module value is
+      # still bound, which names it. The const_added hook is ruled out (ConstDefElide::REFLECTION).
+      owner = fuse ? '' : ', struct RClass* c'
+      out << "[[gnu::noinline]] static void bc2cpp_cdef_set(mrb_state* M, int i#{owner}, mrb_value v) {\n" \
+             "  bc2cpp_cconst_bind(M);\n" \
+             "  const bc2cpp_cdef_def& d = bc2cpp_cdef_defs[i];\n" \
+             "#{fuse ? "  struct RClass* c = bc2cpp_owner_class_at(M, d.owner);\n" : ''}" \
+             "  mrb_check_frozen(M, c);\n" \
+             "  if (mrb_type(v) == MRB_TT_CLASS || mrb_type(v) == MRB_TT_MODULE) {\n" \
+             "    mrb_const_set(M, mrb_obj_value(c), mrb_intern_cstr(M, bc2cpp_const_strings + d.name), v);\n" \
+             "  }\n" \
+             "  bc2cpp_cdef_put(M, d.k, v);\n" \
+             "}\n"
+      defs.each_with_index do |(index, _), i|
+        out << "[[gnu::always_inline]] static inline void bc2cpp_cdef_set_#{index}(mrb_state* M#{owner}, mrb_value v) " \
+               "{ bc2cpp_cdef_set(M, #{i}#{fuse ? '' : ', c'}, v); }\n"
+      end
+    end
+    unless reads.empty?
+      rows = reads.map { |_, row| "  {#{row[:k]}, #{static_const_string(row[:name])}},\n" }
+      out << "struct bc2cpp_cdef_read { uint16_t k, name; };\n"
+      out << "static const bc2cpp_cdef_read bc2cpp_cdef_reads[] = {\n#{rows.join}};\n"
+      out << "[[gnu::noinline]] static mrb_value bc2cpp_cdef_mget(mrb_state* M, int i, mrb_value recv) {\n" \
+             "  if (bc2cpp_cdef_mhave[i]) return bc2cpp_cdef_mslots[i];\n" \
+             "  bc2cpp_cconst_bind(M);\n" \
+             "  mrb_value v;\n" \
+             "  if (bc2cpp_cdef_value(M, bc2cpp_cdef_reads[i].k, &v)) {\n" \
+             "    bc2cpp_cdef_mslots[i] = v;\n" \
+             "    bc2cpp_cdef_mhave[i] = true;\n" \
+             "    return v;\n" \
+             "  }\n" \
+             "  return mrb_const_get(M, recv, mrb_intern_cstr(M, bc2cpp_const_strings + bc2cpp_cdef_reads[i].name));\n" \
+             "}\n"
+      reads.each_with_index do |(index, _), i|
+        out << "[[gnu::always_inline]] static inline mrb_value bc2cpp_cdef_mget_#{index}(mrb_state* M, mrb_value recv) " \
+               "{ return bc2cpp_cdef_mget(M, #{i}, recv); }\n"
+      end
     end
     out
   end

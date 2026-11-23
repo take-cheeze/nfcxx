@@ -49,7 +49,9 @@ class CodeGen
                   # CORE_SHADOWED: irep labels of core definitions a later definition replaces (CoreDefs.shadowed_labels).
                   :shadowed_labels,
                   # CONST_DEF_ELIDE (const_def_elide.rb): the ConstDefElide::Result of this build; nil elides nothing.
-                  :const_def_elide
+                  :const_def_elide,
+                  # CONST_BINDING_DROP (const_binding_drop.rb): the ConstBindingDrop::Result of this build; nil drops nothing.
+                  :const_binding_drop
 
     # INLINED_UNLISTED_SITE: kill switch BC2CPP_INLINED_UNLISTED=0.
     def inlined_unlisted_site?
