@@ -17,6 +17,41 @@ class CodeGen
     ENV['BC2CPP_STATIC_CONSTANTS'] != '0'
   end
 
+  # CONST_SLOT_NIL_EMPTY (BC2CPP_CONST_SLOT_NIL_EMPTY=0 keeps a have-flag array per slot table): a constant slot is empty
+  # while it holds nil. A zero-initialised mrb_value is nil in every boxing mode (word: MRB_Qnil is 0; NaN: nil is u == 0;
+  # unboxed: {0, MRB_TT_FALSE}, MRB_TT_FALSE being 0), so a static slot starts empty with no reset having run, and a
+  # stored nil reads as empty again: a nil-valued constant is looked up on every read, which finds the same nil.
+  def const_slot_nil_empty?
+    ENV['BC2CPP_CONST_SLOT_NIL_EMPTY'] != '0'
+  end
+
+  # The zero-is-nil premise as far as a boxing mode states it at compile time (NaN boxing's nil is a macro:
+  # const_bindings_check runs a zero slot in each mode).
+  CONST_SLOT_NIL_ASSERTS = "#if defined(MRB_WORD_BOXING)\nstatic_assert(MRB_Qnil == 0, \"CONST_SLOT_NIL_EMPTY\");\n" \
+                           "#elif !defined(MRB_NAN_BOXING)\nstatic_assert(MRB_TT_FALSE == 0, \"CONST_SLOT_NIL_EMPTY\");\n#endif\n"
+
+  # The declaration of a slot table's have flags, or the assertions when nil marks the empty slot.
+  def const_slot_have_decl(flags, count)
+    const_slot_nil_empty? ? CONST_SLOT_NIL_ASSERTS : "static bool #{flags}[#{count}] = {};\n"
+  end
+
+  # The reset of a slot table: every slot empty again.
+  def const_slot_reset(slots, flags)
+    const_slot_nil_empty? ? "  for (mrb_value& s : #{slots}) s = mrb_nil_value();\n" : "  for (bool& h : #{flags}) h = false;\n"
+  end
+
+  # Whether slot +at+ holds a value.
+  def const_slot_full(slots, flags, at)
+    const_slot_nil_empty? ? "!mrb_nil_p(#{slots}[#{at}])" : "#{flags}[#{at}]"
+  end
+
+  # The store of +value+ into slot +at+ (indented by +pad+).
+  def const_slot_store(slots, flags, at, value, pad)
+    out = "#{pad}#{slots}[#{at}] = #{value};\n"
+    out << "#{pad}#{flags}[#{at}] = true;\n" unless const_slot_nil_empty?
+    out
+  end
+
   # One NUL-terminated pool for every string the rows name; the offset of +text+.
   def static_const_string(text)
     @static_const_pool ||= { text: +'', at: {} }
@@ -115,18 +150,18 @@ class CodeGen
     out = +"// CONST_SITE_CACHE -- see tools/bc2cpp/const_site_cache.rb; the rows are STATIC_CONSTANTS'.\n"
     out << "static mrb_state* bc2cpp_cconst_state = nullptr;\n"
     out << "static mrb_value bc2cpp_cconst_slots[#{count}];\n"
-    out << "static bool bc2cpp_cconst_have[#{count}] = {};\n"
+    out << const_slot_have_decl('bc2cpp_cconst_have', count)
     out << "static struct RClass* bc2cpp_mcnst_from[#{members}];\n"
     out << "static mrb_value bc2cpp_mcnst_slots[#{members}];\n"
     drop_reads = const_drop_live(@const_drop_reads, used, 'bc2cpp_cdef_mget_')
     drop_defs = const_drop_live(@const_drop_defs, used, 'bc2cpp_cdef_set_')
     out << "static mrb_value bc2cpp_cdef_mslots[#{[drop_reads.size, 1].max}];\n"
-    out << "static bool bc2cpp_cdef_mhave[#{[drop_reads.size, 1].max}] = {};\n"
+    out << "static bool bc2cpp_cdef_mhave[#{[drop_reads.size, 1].max}] = {};\n" unless const_slot_nil_empty?
     out << "static void bc2cpp_reset_const_site_cache() {\n" \
            "  bc2cpp_cconst_state = nullptr;\n" \
-           "  for (bool& h : bc2cpp_cconst_have) h = false;\n" \
+           "#{const_slot_reset('bc2cpp_cconst_slots', 'bc2cpp_cconst_have')}" \
            "  for (struct RClass*& f : bc2cpp_mcnst_from) f = nullptr;\n" \
-           "  for (bool& h : bc2cpp_cdef_mhave) h = false;\n" \
+           "#{const_slot_reset('bc2cpp_cdef_mslots', 'bc2cpp_cdef_mhave')}" \
            "}\n"
     out << vm_cache_bind('bc2cpp_cconst_bind', 'bc2cpp_cconst_state', 'CONST_SITE_CACHE')
     dropped = live.any? { |slot| slot[:drop] }
@@ -189,8 +224,7 @@ class CodeGen
                     "  if (row.test >= #{STATIC_CONST_DROP_TEST} && row.test < #{STATIC_CONST_VALUE_TEST}) {\n" \
                       "    mrb_value v;\n" \
                       "    if (!bc2cpp_cdef_value(M, row.test - #{STATIC_CONST_DROP_TEST}, &v)) return bc2cpp_const_lookup(M, row.scope, name);\n" \
-                      "    bc2cpp_cconst_slots[i] = v;\n" \
-                      "    bc2cpp_cconst_have[i] = true;\n" \
+                      "#{const_slot_store('bc2cpp_cconst_slots', 'bc2cpp_cconst_have', 'i', 'v', '    ')}" \
                       "    return v;\n" \
                       "  }\n"
                   else
@@ -210,13 +244,12 @@ class CodeGen
              "  } else {\n#{path_test}" \
              "  }\n" \
              "  if (keep) {\n" \
-             "    bc2cpp_cconst_slots[i] = r0;\n" \
-             "    bc2cpp_cconst_have[i] = true;\n" \
+             "#{const_slot_store('bc2cpp_cconst_slots', 'bc2cpp_cconst_have', 'i', 'r0', '    ')}" \
              "  }\n" \
              "  return r0;\n" \
              "}\n"
       out << "static inline mrb_value bc2cpp_cconst_get(mrb_state* M, int i) {\n" \
-             "  return bc2cpp_cconst_have[i] ? bc2cpp_cconst_slots[i] : bc2cpp_cconst_fill(M, i);\n" \
+             "  return #{const_slot_full('bc2cpp_cconst_slots', 'bc2cpp_cconst_have', 'i')} ? bc2cpp_cconst_slots[i] : bc2cpp_cconst_fill(M, i);\n" \
              "}\n"
       live.each_with_index do |slot, i|
         out << "static inline mrb_value bc2cpp_cconst_#{slot[:index]}(mrb_state* M) { return bc2cpp_cconst_get(M, #{i}); }\n"
@@ -358,12 +391,11 @@ class CodeGen
       out << "struct bc2cpp_cdef_read { uint16_t k, name; };\n"
       out << "static const bc2cpp_cdef_read bc2cpp_cdef_reads[] = {\n#{rows.join}};\n"
       out << "[[gnu::noinline]] static mrb_value bc2cpp_cdef_mget(mrb_state* M, int i, mrb_value recv) {\n" \
-             "  if (bc2cpp_cdef_mhave[i]) return bc2cpp_cdef_mslots[i];\n" \
+             "  if (#{const_slot_full('bc2cpp_cdef_mslots', 'bc2cpp_cdef_mhave', 'i')}) return bc2cpp_cdef_mslots[i];\n" \
              "  bc2cpp_cconst_bind(M);\n" \
              "  mrb_value v;\n" \
              "  if (bc2cpp_cdef_value(M, bc2cpp_cdef_reads[i].k, &v)) {\n" \
-             "    bc2cpp_cdef_mslots[i] = v;\n" \
-             "    bc2cpp_cdef_mhave[i] = true;\n" \
+             "#{const_slot_store('bc2cpp_cdef_mslots', 'bc2cpp_cdef_mhave', 'i', 'v', '    ')}" \
              "    return v;\n" \
              "  }\n" \
              "  return mrb_const_get(M, recv, mrb_intern_cstr(M, bc2cpp_const_strings + bc2cpp_cdef_reads[i].name));\n" \

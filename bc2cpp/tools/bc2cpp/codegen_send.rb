@@ -2463,7 +2463,7 @@ class CodeGen
     out = +"// CONST_SITE_CACHE -- see tools/bc2cpp/const_site_cache.rb.\n"
     out << "static mrb_state* bc2cpp_cconst_state = nullptr;\n"
     out << "static mrb_value bc2cpp_cconst_slots[#{count}];\n"
-    out << "static bool bc2cpp_cconst_have[#{count}] = {};\n"
+    out << const_slot_have_decl('bc2cpp_cconst_have', count)
     members = [(@const_member_sites || []).size, 1].max
     # A GETMCNST slot is filled only for a class/module receiver, so the receiver's RClass* is the key and nullptr
     # marks an empty slot.
@@ -2471,7 +2471,7 @@ class CodeGen
     out << "static mrb_value bc2cpp_mcnst_slots[#{members}];\n"
     out << "static void bc2cpp_reset_const_site_cache() {\n" \
            "  bc2cpp_cconst_state = nullptr;\n" \
-           "  for (bool& h : bc2cpp_cconst_have) h = false;\n" \
+           "#{const_slot_reset('bc2cpp_cconst_slots', 'bc2cpp_cconst_have')}" \
            "  for (struct RClass*& f : bc2cpp_mcnst_from) f = nullptr;\n" \
            "}\n"
     out << vm_cache_bind('bc2cpp_cconst_bind', 'bc2cpp_cconst_state', 'CONST_SITE_CACHE')
@@ -2499,13 +2499,12 @@ class CodeGen
                'mrb_type(r0) == MRB_TT_CLASS || mrb_type(r0) == MRB_TT_MODULE'
              end
       out << "  if (#{fill}) {\n" \
-             "    bc2cpp_cconst_slots[#{i}] = r0;\n" \
-             "    bc2cpp_cconst_have[#{i}] = true;\n" \
+             "#{const_slot_store('bc2cpp_cconst_slots', 'bc2cpp_cconst_have', i, 'r0', '    ')}" \
              "  }\n" \
              "  return r0;\n" \
              "}\n" \
              "static inline mrb_value bc2cpp_cconst_#{i}(mrb_state* M) {\n" \
-             "  return bc2cpp_cconst_have[#{i}] ? bc2cpp_cconst_slots[#{i}] : bc2cpp_cconst_fill_#{i}(M);\n" \
+             "  return #{const_slot_full('bc2cpp_cconst_slots', 'bc2cpp_cconst_have', i)} ? bc2cpp_cconst_slots[#{i}] : bc2cpp_cconst_fill_#{i}(M);\n" \
              "}\n"
     end
     out << emit_const_member_cache(used)
