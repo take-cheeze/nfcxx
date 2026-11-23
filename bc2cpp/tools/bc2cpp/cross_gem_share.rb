@@ -90,7 +90,7 @@ module CrossGemShare
     defined = Set.new
     entries.each { |e| defined.merge(e[:defines]) }
     roots = outside | (keep & defined)
-    entries.each { |e| roots.merge(e[:declares] - defined) }
+    entries.each { |e| roots.merge(e[:declares] - defined - e[:c_prototypes]) }
     roots.merge(address_taken(entries, rest + head))
     groups = group(entries)
     local = local_groups(groups, roots)
@@ -110,18 +110,22 @@ module CrossGemShare
     defines = Set.new
     movable = !seg[:include] && !code.match?(FORBIDDEN)
     maybe = Set.new
+    c_prototypes = Set.new
     items.each do |item|
       names, ok = declared_names(item, ShardOutput.code_text(lines[item[:first]..item[:last]]))
       declares.merge(names)
+      c_prototypes << item[:name] if c_prototype?(item, lines)
       maybe.merge(possible_names(item))
-      movable &&= ok && !state?(item, lines, code) && !external?(item, lines) && !item[:head].match?(/\boperator\b/)
+      movable &&= ok && !state?(item, lines, code) && (!external?(item, lines) || c_prototype?(item, lines)) &&
+                  !item[:head].match?(/\boperator\b/)
       defines.merge(names) if item[:body]
     end
     maybe.merge(declares)
     ids = expand(code.scan(IDENT).to_set, macros)
     # A head read two ways must agree: a name it might declare is never left to the global using-directive.
     movable &&= (ids & stateful_macros).empty? && (maybe - declares).empty?
-    { index: index, items: items, declares: declares, maybe: maybe, defines: defines, ids: ids - declares, movable: movable }
+    { index: index, items: items, declares: declares, maybe: maybe, defines: defines, ids: ids - declares, movable: movable,
+      c_prototypes: c_prototypes }
   end
 
   # [names an item declares, whether it can move].
@@ -219,6 +223,17 @@ module CrossGemShare
     ShardOutput.external?(line, item) || item[:head].match?(/\bextern\b/)
   end
 
+  # C_PROTOTYPE: an `extern "C"` function declaration with no body names the one C function of that name whatever
+  # namespace it stands in, so it means the same in a header; a helper calling such a function can move with it.
+  # BC2CPP_CROSS_GEM_C_PROTOTYPE=0 keeps them in the unit.
+  def c_prototype?(item, lines)
+    return false if ENV['BC2CPP_CROSS_GEM_C_PROTOTYPE'] == '0'
+    return false unless item[:function] && !item[:body] && item[:name] && !item[:head].match?(/\(\s*\*/)
+
+    text = lines[item[:first]..item[:last]].join.sub(/\A\s*(?:\[\[[^\]]*\]\]\s*)*/, '')
+    text.match?(/\Aextern\s+"C"\s+[^{(]*(?<![\w$])#{Regexp.escape(item[:name])}\s*\(/) && head_functions(item[:head]) == [item[:name]]
+  end
+
   # The names declared by the items of `lines` (the unit's text before the tail).
   def declared_in(lines)
     names = Set.new
@@ -301,9 +316,13 @@ module CrossGemShare
     defs
   end
 
+  # PROGRAM_OWNER_SITES (symbol_cache.rb): the site state of these macros is dated by the program's owner epoch, which
+  # names the calling VM in every gem, so one copy for the program reads what one per gem would.
+  PROGRAM_STATE_MACROS = %w[BC2CPP_OWNERS_PW].to_set.freeze
+
   # Macros whose expansion declares a mutable static (a per-site cache such as BC2CPP_OWNERS's), transitively.
   def stateful(macros)
-    direct = macros.select { |_, defs| defs.any? { |d| d.scan(/\bstatic\b[^=;{(]*/).any? { |s| !ShardOutput.constant_static?(s) } } }.keys.to_set
+    direct = macros.select { |name, defs| !PROGRAM_STATE_MACROS.include?(name) && defs.any? { |d| d.scan(/\bstatic\b[^=;{(]*/).any? { |s| !ShardOutput.constant_static?(s) } } }.keys.to_set
     loop do
       grown = macros.select { |name, defs| !direct.include?(name) && defs.any? { |d| d.scan(IDENT).any? { |id| direct.include?(id) } } }.keys
       break if grown.empty?
@@ -329,6 +348,11 @@ module CrossGemShare
   def write_headers(shared, entries, segs, macros, rt_ns, dir)
     by_name = {}
     shared.each_with_index { |g, gi| g.each { |e| e[:declares].each { |n| by_name[n] = gi } } }
+    # CONDITIONAL_USINGS: a name an #if region declares is reached through its namespace's using-directive, which
+    # compiles whichever branch declared it.
+    conditional = shared.flat_map { |g| g.select { |e| segs[e[:index]][:lines].first.match?(/\A\s*#\s*if/) } }
+                        .flat_map { |e| e[:declares].to_a }.to_set
+    conditional = Set.new if ENV['BC2CPP_CROSS_GEM_CONDITIONAL_USINGS'] == '0'
     deps = shared.map { |g| g.flat_map { |e| e[:ids].filter_map { |n| by_name[n] } }.to_set }
     comps = strongly_connected(deps)
     ns_of = {}
@@ -336,7 +360,7 @@ module CrossGemShare
     comps.each do |members|
       group = members.flat_map { |gi| shared[gi] }.sort_by { |e| e[:index] }
       names = group.flat_map { |e| e[:declares].to_a }.to_set
-      text, macro_names = header_text(group, segs, names, by_name, ns_of, rt_ns, macros)
+      text, macro_names = header_text(group, segs, names, by_name, ns_of, rt_ns, macros, conditional)
       text = ImplicitState.rewrite([text]).first if ImplicitState.enabled?
       macro_text = expand(macro_names, macros).select { |m| macros.key?(m) }.sort.flat_map { |m| macros[m] }.join
       digest = Digest::SHA256.hexdigest("#{FORMAT}\n#{macro_text}\n#{text}")[0, 16]
@@ -345,7 +369,7 @@ module CrossGemShare
       RuntimeHeader.write_once(path, text.gsub(NS_PLACEHOLDER, ns))
       members.each { |gi| ns_of[gi] = ns }
       group.each_with_index do |e, k|
-        usings = e[:declares].to_a.sort.map { |n| "using #{ns}::#{n};\n" }.join
+        usings = usings_text(segs[e[:index]][:lines], e, ns)
         replace[e[:index]] = "#define #{PART_MACRO} #{k + 1}\n#include \"#{path}\"\n#undef #{PART_MACRO}\n#{usings}"
       end
     end
@@ -353,9 +377,32 @@ module CrossGemShare
     segs.each_with_index.map { |seg, i| replace.key?(i) ? replace[i] : seg[:lines].join }.join
   end
 
+  # CONDITIONAL_USINGS: the using-declarations that bring a segment's names back. A segment that is one #if region
+  # keeps its conditional directives around them, so a name is brought back only where its branch declared it (a
+  # using-declaration of a name the header did not declare would not compile).
+  CONDITIONAL = /\A\s*#\s*(?:if|ifdef|ifndef|elif|else|endif)\b/
+
+  def usings_text(lines, entry, ns)
+    if ENV['BC2CPP_CROSS_GEM_CONDITIONAL_USINGS'] == '0' || !lines.first.match?(/\A\s*#\s*if/)
+      return entry[:declares].to_a.sort.map { |n| "using #{ns}::#{n};\n" }.join
+    end
+
+    starts = entry[:items].to_h { |item| [item[:first], item] }
+    out = +''
+    lines.each_with_index do |line, i|
+      if line.match?(CONDITIONAL)
+        out << line
+      elsif (item = starts[i])
+        names, = declared_names(item, ShardOutput.code_text(lines[item[:first]..item[:last]]))
+        (names & entry[:declares].to_a).sort.each { |n| out << "using #{ns}::#{n};\n" }
+      end
+    end
+    out
+  end
+
   # The header text of one group: each segment in its own part, in the group's namespace, with the runtime namespace
   # and the names of earlier groups in reach. [text, the macro names its code names].
-  def header_text(group, segs, names, by_name, ns_of, rt_ns, macros)
+  def header_text(group, segs, names, by_name, ns_of, rt_ns, macros, conditional = Set.new)
     out = String.new("// bc2cpp cross-gem helpers (CROSS_GEM_SHARE, cross_gem_share.rb): generated, shared by the gems that print them.\n")
     out << ShardOutput::SHARED_HELPER_MACROS
     seen_deps = {}
@@ -364,10 +411,15 @@ module CrossGemShare
       macro_names.merge(e[:ids].select { |n| macros.key?(n) })
       out << "#if #{PART_MACRO} == #{k + 1}\nnamespace #{NS_PLACEHOLDER} {\n"
       out << "using namespace #{rt_ns};\n" if rt_ns
+      directives = Set.new
       e[:ids].select { |n| by_name.key?(n) && !names.include?(n) }.sort.each do |n|
         ns = ns_of.fetch(by_name[n])
         seen_deps[n] = true
-        out << "using #{ns}::#{n};\n"
+        if conditional.include?(n)
+          out << "using namespace #{ns};\n" if directives.add?(ns)
+        else
+          out << "using #{ns}::#{n};\n"
+        end
       end
       out << convert(segs[e[:index]][:lines], e[:items])
       out << "} // namespace #{NS_PLACEHOLDER}\n#endif\n"
