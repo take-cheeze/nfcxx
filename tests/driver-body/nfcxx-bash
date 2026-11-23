@@ -80,6 +80,9 @@ root=$(cd "$(dirname "$0")" && pwd)
 owned_cudatmp=${NFCXX_OWNED_CUDATMP-}; owned_tmp=${NFCXX_OWNED_TMP-}; unset NFCXX_OWNED_CUDATMP NFCXX_OWNED_TMP
 # NFCXX_OWNED_CTMP and NFCXX_OWNED_PTMP: the C-input and Path B object directories, made by the Ruby driver the same way.
 owned_ctmp=${NFCXX_OWNED_CTMP-}; owned_ptmp=${NFCXX_OWNED_PTMP-}; unset NFCXX_OWNED_CTMP NFCXX_OWNED_PTMP
+# NFCXX_FALLBACK_MARKER: the file fallback_gcc leaves its message in for the Ruby driver. It is read and unset here: the cache
+# key takes every NFCXX_* variable, and the marker's name is a new temporary file for each run (a key that never repeats).
+fallback_marker=${NFCXX_FALLBACK_MARKER-}; unset NFCXX_FALLBACK_MARKER
 # temp_cleanup: removes the driver's temporary directories the EXIT traps name. Each trap calls it, so a later trap (which
 # replaces an earlier one) does not leave the earlier stage's directory behind. The eccp directory is not here: eccp_cleanup
 # removes it, and only when the intermediates are not kept. A directory the Ruby driver owns (cudatmp_owned, tmp_owned) is not
@@ -90,6 +93,20 @@ temp_cleanup() {
   [ -z "${ctmp:-}" ] || [ -n "${ctmp_owned:-}" ] || rm -rf "$ctmp"
   [ -z "${cudatmp:-}" ] || [ -n "${cudatmp_owned:-}" ] || rm -rf "$cudatmp"
   [ -z "${fso_dir:-}" ] || rm -rf "$fso_dir"
+}
+# fallback_gcc MESSAGE: the program is built again with the gcc backend, which reports its own errors if it fails too. The temporary
+# directories are removed first. Under the Ruby driver (scripts/nfcxx.rb sets NFCXX_FALLBACK_MARKER) the body leaves MESSAGE in that
+# marker file and exits 0 without its EXIT trap: the driver prints MESSAGE and runs the driver again with NFCXX_BACKEND=gcc, the same
+# arguments, and exits with its status. Run alone, the body prints MESSAGE and execs the driver, as it always did.
+fallback_gcc() {
+  temp_cleanup
+  if [ -n "$fallback_marker" ]; then
+    printf '%s\n' "$1" > "$fallback_marker"
+    trap - EXIT
+    exit 0
+  fi
+  echo "$1" >&2
+  exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
 }
 # -fsyntax-only is rewritten by the Ruby driver before this body runs (scripts/nfcxx-syntax-only.rb).
 # --bundle-libs and --cuda-driver= are wrapped by the Ruby driver before this body runs (scripts/wrap.rb, from scripts/nfcxx.rb).
@@ -133,9 +150,6 @@ promote_slots=${NFCXX_PROMOTE_SLOTS:-1}; unroll=${NFCXX_UNROLL:-1}; struct_slots
 ld_name=${NFCXX_LD:-}                                  # -fuse-ld=NAME
 pathb_c=${NFCXX_PATHB_C:-}                                              # --pathb-c=gcc
 pb_flags=()   # the options scripts/pathb-cc.rb gets (--asan, --safe-pointers, --sanitize=, --ir-opt=): flags, not exported variables
-onoff() {  # onoff FLAG VALUE: on|1 -> 1, off|0 -> 0; anything else is an error
-  case $2 in on|1) echo 1 ;; off|0) echo 0 ;; *) echo "nfcxx: $1 takes on or off (got '$2')" >&2; exit 2 ;; esac
-}
 # CUDA kernel names are obfuscated (docs/notes/gpu.md, "Kernel name obfuscation"): --obfuscate-kernels, or NFCXX_OBFUSCATE_KERNELS=1
 # in the environment (which reaches a CMake build through nfcxx-cuda without any change to its command line).
 obfuscate=0; case ${NFCXX_OBFUSCATE_KERNELS:-0} in 0|"") ;; *) obfuscate=1 ;; esac
@@ -275,30 +289,30 @@ eccp_plan_input() {  # the records of the eccp command line: the call's arrays a
 eccp_plan() {  # eccp_plan: the eccp command line (eccp_argv), its exports (eccp_envs) and its directory (eccp_cd), from
   # scripts/nfcxx-eccp-plan.rb (tests/nfcxx-eccp-plan/run.sh checks it against the bash's own construction). The plan also
   # plans the link arguments (eflist and userinc, from the files), and refuses an option it cannot keep: the status is the
-  # plan's, read from the reply file after the call (a refused option ends the driver with 2, as the bash did). The keep note
+  # plan's, read from the s record after the stream (a refused option ends the driver with 2, as the bash did). The keep note
   # is printed by the port.
-  local rec done=0 reply rc
+  local rec done=0 prc=0
   eccp_argv=(); eccp_envs=(); eccp_cd=""
-  local rdir; rdir=$(mktemp -d) || exit $?
-  reply=$rdir/reply.rec
-  eccp_plan_input | "${RUBY:-ruby}" "$root/scripts/nfcxx-eccp-plan.rb" "$eccp_dir" "$keep_intermediates" "$shared" > "$reply" \
-    || { rc=$?; rm -rf "$rdir"; exit $rc; }
+  # the plan's records stream from the process substitution (NUL-separated: a, e, d, z); the bash appends the plan's status as s
+  # after its end record, and the loop reads to the end of the stream, so no temporary file is made
   while IFS= read -r -d "" rec; do
     case $rec in
       a*) eccp_argv+=("${rec:1}") ;;
       e*) eccp_envs+=("${rec:1}") ;;
       d*) eccp_cd=${rec:1} ;;
       z) done=1 ;;
+      s*) prc=${rec:1} ;;
     esac
-  done < "$reply"
-  rm -rf "$rdir"
+  done < <(eccp_plan_input | "${RUBY:-ruby}" "$root/scripts/nfcxx-eccp-plan.rb" "$eccp_dir" "$keep_intermediates" "$shared"; printf 's%d\0' $?)
+  [ "$prc" = 0 ] || exit "$prc"
   [ $done = 1 ] || { echo "nfcxx: scripts/nfcxx-eccp-plan.rb stopped before its end (the eccp command line is incomplete)" >&2; exit 1; }
 }
 eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary directory (and of the C-input and .cu steps)
   local rc=$?
   local cudatmp_arg=${cudatmp:-}; [ -z "${cudatmp_owned:-}" ] || cudatmp_arg=   # the Ruby driver removes its own cudatmp
   local ctmp_arg=${ctmp:-}; [ -z "${ctmp_owned:-}" ] || ctmp_arg=   # nor its own ctmp
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" cleanup "$keep_intermediates" "$eccp_dir" "$cudatmp_arg" "$ctmp_arg"   # the removals (tests/nfcxx-link/run.sh)
+  local eccp_arg=$eccp_dir; [ "${NFCXX_TMP_OWNED:-}" != 1 ] || eccp_arg=   # nor the eccp directory, when the Ruby driver owns the temp root
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" cleanup "$keep_intermediates" "$eccp_arg" "$cudatmp_arg" "$ctmp_arg"   # the removals (tests/nfcxx-link/run.sh)
   temp_cleanup
   trace_finish
   return $rc
@@ -660,9 +674,8 @@ if [ ${#cfiles[@]} -gt 0 ]; then
         # as for a C++ file: the default backend failed on this one (status 3: a construct Path B refuses), so the whole
         # program is built again with gcc, which reports its own errors if it fails too. An explicit backend is an error.
         [ $default_backend = 1 ] || exit $prc
-        echo "nfcxx: Path B did not build $c (status $prc); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)" >&2
         rm -rf "$ctmp"
-        temp_cleanup; exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
+        fallback_gcc "nfcxx: Path B did not build $c (status $prc); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)"
       fi
     else
       "${NFCXX_GCC:-gcc}" -c -O2 -fwrapv -fno-strict-aliasing ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${cflags_pic[@]+${cflags_pic[@]+"${cflags_pic[@]}"}} ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o"
@@ -725,16 +738,13 @@ cache_plan() {
 cache_check() {  # cache_check: sets cache_entry (empty when the cache does not apply) and exits 0 on a hit
 cache_entry=""
 [ -n "$cache_dir" ] || return 0   # the cache is off: no Ruby is started
-local ctmp cstatus
-ctmp=$(mktemp -d)
-cache_plan > "$ctmp/records"
-# check: the lookup, its --cache-log block, the remote fetch on a local miss, and a hit's copy back. Status 10 is a hit (the program
-# is done); otherwise the statements file names the entry (cache_entry, cc_state, cc_key), which a store of the object needs.
-cstatus=0; "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-check.rb" check --statements="$ctmp/statements" --remote="$cache_remote" \
-  --records="$ctmp/records" || cstatus=$?
-if [ $cstatus = 10 ]; then rm -rf "$ctmp"; exit 0; fi
-[ -f "$ctmp/statements" ] && . "$ctmp/statements"
-rm -rf "$ctmp"
+local stmts cstatus=0
+# check: the lookup, its --cache-log block, the remote fetch on a local miss, and a hit's copy back. The records come from fd 3
+# (cache_plan's, a process substitution) and the statements go to stdout (the check's children write to stderr). Status 10 is a
+# hit (the program is done); otherwise the statements name the entry (cache_entry, cc_state, cc_key), which a store of the object needs.
+stmts=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cache-check.rb" check --remote="$cache_remote" --records=/dev/fd/3 3< <(cache_plan)) || cstatus=$?
+if [ $cstatus = 10 ]; then exit 0; fi
+if [ -n "$stmts" ]; then eval "$stmts"; fi
 return 0
 }
 cache_store() {  # cache_store OBJ: a whole entry appears at once (a partial copy is never a hit)
@@ -750,8 +760,7 @@ if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
   # A .cu unit with kernel instances only the host compile makes (its .dev.kernels.unresolved is not empty) needs the second pass
   # (below, on the EDG route); Path B does not build them, so this unit takes the gcc route, which runs it.
   if [ ${#cu_inputs[@]} -gt 0 ] && [ -n "${cudatmp:-}" ] && [ -s "$cudatmp/$(basename "${cu_inputs[0]}" .cu).dev.kernels.unresolved" ]; then
-    echo "nfcxx: ${cu_inputs[0]} has kernel instances only the host compile makes; building it with the gcc backend, which runs the second pass" >&2
-    temp_cleanup; exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
+    fallback_gcc "nfcxx: ${cu_inputs[0]} has kernel instances only the host compile makes; building it with the gcc backend, which runs the second pass"
   fi
   cache_check   # a hit: the object is copied back and the program is done
   # -c: one object per C++ file, named as the gcc and Path B backends name it (-o FILE for one file, else basename.o)
@@ -763,8 +772,7 @@ if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
          if [ $prc != 0 ]; then
            # the default backend failed on this file: the object is built again with gcc, which reports its own errors
            [ $default_backend = 1 ] || exit $prc
-           echo "nfcxx: Path B did not build $f (status $prc); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)" >&2
-           temp_cleanup; exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
+           fallback_gcc "nfcxx: Path B did not build $f (status $prc); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)"
          fi ;;
     esac
   done
@@ -790,9 +798,8 @@ if [ $backend = pathb ]; then
          if [ $prc != 0 ] && [ $default_backend = 1 ]; then
            # the default backend failed on this file (status 3: a construct Path B refuses; otherwise a Path B fault):
            # the whole program is built again with gcc, which reports its own errors if it fails too
-           echo "nfcxx: Path B did not build $f (status $prc); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)" >&2
            rm -rf "$ptmp"
-           temp_cleanup; exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
+           fallback_gcc "nfcxx: Path B did not build $f (status $prc); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)"
          fi
          [ $prc = 0 ] || exit $prc
          pobjs+=("$o") ;;
@@ -905,8 +912,7 @@ fi
 cache_store "$out"
 if [ -n "$depmode" ]; then
   # -MD/-MMD (with -MF/-MT/-MQ/-MP): the host preprocessor writes the dependency file, as nfcc does for C.
-  df=${dfile:-${out%.*}.d}; tgt=${dtarget:-$out}
-  mflag=-M; [ "$depmode" = -MMD ] && mflag=-MM
-  "${NFCXX_CXX:-g++}" $mflag $depphony -MT "$tgt" -MF "$df" "-std=${std#--}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} \
-    ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"} ${srcs[@]+${srcs[@]+"${srcs[@]}"}}
+  dep_cmd=(); while IFS= read -r -d '' dep_w; do dep_cmd+=("$dep_w"); done < <("${RUBY:-ruby}" "$root/scripts/nfcxx-depmode.rb" plan depmode="$depmode" out="$out" std="$std" cxx="${NFCXX_CXX:-}" dfile="$dfile" dtarget="$dtarget" depphony="$depphony" ${cflags[@]+"${cflags[@]/#/cflags=}"} ${sysdirs[@]+"${sysdirs[@]/#/sysdirs=}"} ${srcs[@]+"${srcs[@]/#/srcs=}"})   # the command: scripts/nfcxx-depmode.rb
+  [ ${#dep_cmd[@]} -gt 0 ] || exit 1
+  "${dep_cmd[@]}"
 fi

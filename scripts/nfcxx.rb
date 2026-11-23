@@ -341,6 +341,10 @@ begin
   env["NFCXX_LOOP_STATUS"] = LOOP_RESULT&.first&.to_s
   env["NFCXX_LOOP_STATE"] = LOOP_RESULT&.last
   env["NFCXX_KEEP_INTERMEDIATES"] = "1" if keep
+  # the body's gcc fallback (fallback_gcc in the body): it leaves its message here and exits 0; the run below prints it and runs the
+  # driver again with the gcc backend, in the body's environment, as the body's exec did
+  fallback_marker = File.join(tmproot, "fallback")
+  env["NFCXX_FALLBACK_MARKER"] = fallback_marker
   owned = { "NFCXX_OWNED_CUDATMP" => Dir.mktmpdir("tmp.", tmproot), "NFCXX_OWNED_TMP" => Dir.mktmpdir("tmp.", tmproot),
             "NFCXX_OWNED_CTMP" => Dir.mktmpdir("tmp.", tmproot), "NFCXX_OWNED_PTMP" => Dir.mktmpdir("tmp.", tmproot) }
   trace_rb = File.join(__dir__, "trace.rb")
@@ -394,8 +398,15 @@ begin
       "NFCXX_SETUP_BACKEND_ENV" => backend_env && backend_env[1],
       "NFCXX_SETUP_TRACE_UNIT" => setup&.fetch(:trace_unit),
     }
-    ok = system(env.merge(setup_env).merge(owned), "bash", program.path, *ARGV)
+    body_env = env.merge(setup_env).merge(owned)
+    ok = system(body_env, "bash", program.path, *ARGV)
     oracle_code = ok ? 0 : ($?.exitstatus || 1)
+    if File.file?(fallback_marker)
+      $stderr.write(File.binread(fallback_marker))
+      trace_route("gcc-fallback")
+      ok = system(body_env.merge("NFCXX_BACKEND" => "gcc", "NFCXX_FALLBACK_MARKER" => nil), File.join(root, "nfcxx"), *ARGV)
+      oracle_code = ok ? 0 : ($?.exitstatus || 1)
+    end
   end
   unless trace_file.empty?
     system(env, env["RUBY"], trace_rb, "flush", env["NFCXX_TRACE_PENDING"]) if File.size?(env["NFCXX_TRACE_PENDING"])

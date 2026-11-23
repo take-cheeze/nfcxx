@@ -2053,7 +2053,8 @@ end
             nx >= 0 && masked[nx] == '(' && (dc = match_close(masked, nx)) > 0 && split_args(masked, nx, dc).size == 3
           end
         else
-          next unless cb_occ.count == 2
+          calls_here = cb_occ.count { |_r, p, _e| masked[[p - 80, 0].max...p].to_s.match?(/(?:rb_hash_foreach|rb_ivar_foreach)#{SS}\([^,()]*,#{SS}&?#{SS}\z/) }
+          next unless calls_here >= 1 && cb_occ.count == 1 + calls_here
         end
         pars = split_args(masked, d[0]['po'], d[0]['pc']).map { |a2, b2| [a2, b2, psl(text, a2, b2)] }
         out << { rel: rel, s: s, e: close + 1, h: h, cb: cb, fe: fe_name,
@@ -3831,7 +3832,10 @@ use_problem = lambda do |name, use|
         next unless is_value
         next if in_dead_init(rel, m.begin(1))
         next if @edits[rel].overlaps(m.begin(1), m.begin(1) + 1)
-        refuse(rel, m.begin(1), field ? "#{base}->#{field}" : base, "stuck point (VALUE truth test): if tests #{field ? "#{base}->#{field}" : base}, a VALUE (a struct in the fork, include/mruby/boxing_no.h); CRuby's nonzero word is true for nil too, which has no exact struct test")
+        # CRuby's if (v) is true for every word but Qfalse (0), so nil is true: mrb_false_p is the same test on the struct (false only)
+        @edits[rel].add(m.begin(1), m.begin(1), '!mrb_false_p(')
+        @edits[rel].add(m.end(1), m.end(1), ')')
+        rewrite(rel, m.begin(1), field ? "#{base}->#{field}" : base, "!mrb_false_p(...)", 'if (v) on a VALUE: CRuby is true for every word but Qfalse, so nil is true; !mrb_false_p is that test (false only)')
       end
       # if (f(...)) of a VALUE-returning function: the whole condition is that VALUE
       mv.to_enum(:scan, /(?<![#{WC}])if\s*\(\s*([A-Za-z_]\w*)\s*\(/).each do
@@ -4482,6 +4486,31 @@ use_problem = lambda do |name, use|
                                    masked[nxt_t, 2] == '&&' || masked[nxt_t, 2] == '||')
         next if @edits[rel].touches_strictly?(rs) || @edits[rel].touches_strictly?(close + 1)
         @edits[rel].add(rs, rs, 'mrb_test(')
+        @edits[rel].add(close + 1, close + 1, ')')
+      end
+    end
+  end
+
+  # a VALUE funcall as the condition of ?: (date's f_ge_p(n, 69) ? 19 : 20): CRuby tests the word, and a boolean result is
+  # exact under mrb_test (nil and false are false). Same funcall criteria as value_truth_call_pass; the call ends at the ?.
+  def value_ternary_truth_pass
+    @files.each_key do |rel|
+      masked = @files[rel]['masked']
+      masked.to_enum(:scan, /(?<![#{WC}.>])([A-Za-z_]\w*)[ \t\n]*\(/).each do
+        m = Regexp.last_match
+        name = m[1]
+        ent = @entries[name]
+        macro_funcall = @files[rel]['text'].match?(/^[ \t]*#[ \t]*define[ \t]+#{Regexp.escape(name)}\s*\([^)]*\)\s*(?:mrb_funcall|rb_funcall)/)
+        # a funcall macro, a funcall entry, or a converted function returning VALUE (date's f_ge_p helper)
+        next unless macro_funcall || value_call_name?(name) || (ent.is_a?(Hash) && (ent['mruby'].to_s.start_with?('mrb_funcall') || ent['template'].to_s.start_with?('mrb_funcall') || ent['handler'] == 'funcall'))
+        open = m.end(0) - 1
+        close = match_close(masked, open)
+        next if close < 0
+        q = next_nonspace(masked, close + 1)
+        next unless q >= 0 && masked[q] == '?'
+        next if in_dead_init(rel, m.begin(0))
+        next if @edits[rel].touches_strictly?(m.begin(0)) || @edits[rel].touches_strictly?(close + 1)
+        @edits[rel].add(m.begin(0), m.begin(0), 'mrb_test(')
         @edits[rel].add(close + 1, close + 1, ')')
       end
     end
@@ -5914,6 +5943,8 @@ end
       end
       # a template that needs a file-scope helper (api_map "prelude": its definition text, "prelude_name": its name) gets it once
       # per file, before the enclosing function (as nfcx_block_arg is)
+      # a template that needs a gem at run time declares it (api_map gem_dep): the converted gem depends on it
+      (@gem_deps ||= Set.new) << entry['gem_dep'] if entry['gem_dep']
       if entry['prelude']
         # a call in a function: the helper goes before that function; a call in a macro body: before the #define (file scope)
         dpre = define_at(rel, s)
@@ -6076,6 +6107,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         end
       end
       ed.add(s, cp + 1, out)
+      # a template that needs a gem at run time declares it (api_map gem_dep): the converted gem depends on it
+      (@gem_deps ||= Set.new) << entry['gem_dep'] if entry['gem_dep']
       rewrite(rel, s, name, out, entry['caveat'])
     when 'rescue_call'
       c = (@rescue_calls || []).find { |x| x[:rel] == rel && x[:s] == s }
@@ -8078,6 +8111,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     value_compare_wrap_pass
     owned_class_assign_pass
     value_truth_call_pass
+    value_ternary_truth_pass
     value_condition_operand_pass
     value_order_stuck_pass
     value_identity_pass

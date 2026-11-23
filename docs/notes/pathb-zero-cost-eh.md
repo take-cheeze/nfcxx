@@ -204,7 +204,18 @@ A copy under a caller's `try` or clauses is inlined too: the copy's filter comes
 the callee does not allow goes to std::unexpected and not to a caller's handler (`inline_spec_caught.cpp`). A copy inside a copy
 with a list of its own has both filters on its chain, in order (`inline_spec_nested.cpp`). A noexcept callee whose copies carry
 lists is inlined: its terminate pad comes after them (`inline_noexcept_spec*.cpp`, `traps/inline_noexcept_spec_*.cpp`).
-Still refused: a copy with a list under a caller with a function-level dynamic specification (`eh[:filtered]`).
+A caller with a function-level dynamic specification (`ehspec`) takes such copies too. The caller's filter is the last
+record of every copy's chain: QBE appends it to a pad without lists, and `scripts/pathb-ssa.rb` (`fn_spec_tail`) appends it
+to a copy's pad with lists (QBE's ehspecpad: a pad with lists gets no ehspec of its own). A copy's pad whose outer state is
+a terminate state (a noexcept copy's, or a pad's own code) ends in catch (...) instead, so the caller's filter is not
+checked for an exception that leaves a noexcept copy: it calls std::terminate. A noexcept copy's terminate pad always has
+the catch (...) clause. `inline_spec_caller_list.cpp`, `inline_spec_caller_list_rev.cpp`, `inline_spec_caller_nested.cpp`,
+`inline_spec_caller_plain.cpp` and the traps `inline_noexcept_caller_spec.cpp`, `inline_spec_callee_unexpected.cpp` check it
+against g++.
+Known difference (not refused): with a copy of a callee that has its own list and a destructor, the callee's own list is
+checked before the cleanups of an enclosing copy's body run when the exception enters that body through a copy's resume
+(g++ runs them first: destructor output of a doubly nested copy, `inline_spec_caller_nested.cpp` keeps its destructor in the
+inner copy only, where the order matches). The handler that runs and what it throws are the same.
 
 ## Tests
 

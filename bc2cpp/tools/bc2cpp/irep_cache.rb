@@ -107,11 +107,13 @@ module IrepCache
     raise TypeError, 'invalid decoded tree' unless result.is_a?(Array) && result.size == 2 && result[0].is_a?(Hash)
 
     result[0].each_value do |irep|
-      # Marshal restores containers unfrozen; decoded operand lists remain read-only.
+      # Marshal restores containers unfrozen; decoded operand lists remain read-only. The instruction's kind
+      # positions were marshaled with its operands and depend only on their kinds, which deduplicate_name! keeps,
+      # so freezing in place is the whole fixup (installing the list again recomputed them for every instruction).
       BytecodeIR.for(irep).each_source do |insn, _index|
         operands = insn.typed
         operands.each(&:deduplicate_name!)
-        insn.typed = operands
+        operands.freeze
       end
     end
     result

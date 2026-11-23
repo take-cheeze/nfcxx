@@ -363,8 +363,9 @@ end
 
 # A callee with a dynamic exception specification that spec_inlinable? refuses is still inlined, as a copy that keeps its landing
 # pads, each with the callee's list (eh-spec-pad; QBE's ehspecpad: the pad's action chain ends with that filter, which the
-# personality checks). Its pads resume into the caller's state, and the caller's filter is not checked there, so expand_call
-# inlines it only where the caller has no filter of its own (eh[:filtered]); its filter precedes the caller's catch clauses. A call of a module function that is
+# personality checks). Its filter precedes the caller's catch clauses. The caller's own filter is the last one of a copy's
+# chain (scripts/pathb-ssa.rb, pad_actions and the tail of each pad): a pad of a copy with a list gets it after the clauses of
+# the state the copy was entered in, as the caller's own pads do. A call of a module function that is
 # still a call in the copy is covered by the copy's pads (its exception is filtered there, as one of the callee's), and a
 # function inlined into the copy later gets the same pads. The specification must name its types, and the callee must not be noexcept.
 def spec_copyable?(fn)
@@ -512,7 +513,7 @@ def callee_info(fn)
   safe = spec_form && spec_inlinable?(fn)
   eh = { pads: body.select { |f| head(f) == "eh-pad" }, types: ehty ? ehty.drop(1) : [],
          noexcept: body.any? { |f| head(f) == "eh-noexcept" },
-         specs: body.select { |f| head(f) == "eh-spec-pad" }.to_h { |f| [f[1], f.drop(2)] },
+         specs: body.select { |f| head(f) == "eh-spec-pad" }.group_by { |f| f[1] }.transform_values { |fs| fs.map { |f| f.drop(2) } },
          own: spec_form && !safe ? spec_form.drop(1) : nil }
   eh = nil if eh[:pads].empty? && !eh[:noexcept] && eh[:types].empty? && eh[:own].nil?
   eh = nil if safe
@@ -563,17 +564,8 @@ def expand_call(s, fns, st)
   # A tier of the pass takes only callees up to its cap: the small ones are inlined everywhere before the budget goes to big ones.
   return nil if st[:cap] && st[:tc].fetch(fn) { st[:tc][fn] = node_cost(fn) } > st[:cap]
   info = st[:ic].fetch(cname) { st[:ic][cname] = callee_info(fn) }
-  # A copy with its own filter (callee_info: eh[:own]) needs a caller with no specification of its own (eh[:filtered]: its
-  # function-level filter is not in the action chains of the copy's pads, which resume into the caller's state). The caller's
-  # catch clauses and the filters of its copies are no obstacle: the chains of the copy's pads take them after its own filter.
-  if info[:eh] && info[:eh][:own]
-    why = if st[:eh][:filtered] then "under the caller's dynamic exception specification" end
-    if why
-      key = "dynamic exception specification #{why}"
-      st[:refused][key] = (st[:refused][key] || 0) + 1
-      return nil
-    end
-  end
+  # (A copy with its own filter under a caller with a specification of its own (eh[:filtered]) is inlined too: the caller's
+  # filter is the last of the chains of the copy's pads, and a pad that has no list of its own gets it from QBE.)
   rtype = info[:ret][1]
   return nil unless show(call[1]) == info[:rtext]
   return nil if dest && rtype == "void"
@@ -678,11 +670,15 @@ def eh_inline(eh, out, map, st, k, hoisted)
   kk = k.to_s
   zero = ["eh-state-outer", kk]
   if eh[:noexcept]
+    # A terminate pad catches everything (catch (...), the caller's type table's "0"): the caller's own specification, which
+    # the pads of a filtered caller end with, is then never checked for an exception that leaves a noexcept copy.
     t = (ce[:next_pad] += 1).to_s
     lbl = "\"eh.t.#{kk}\""
-    ce[:pads] << ["eh-pad", t, "1", [], ["goto", lbl], ["label", lbl], ["eval", ["call", "void", "&\"_ZSt9terminatev\""]],
+    ce[:pads] << ["eh-pad", t, "1", [catch_all_tid(ce)], ["goto", lbl], ["label", lbl], ["eval", ["call", "void", "&\"_ZSt9terminatev\""]],
                   ["unreachable"]]
     zero = ["eh-state", t]
+  elsif ce[:filtered]
+    catch_all_tid(ce)   # the copy's pads that end in a terminate state (scripts/pathb-ssa.rb) take it before the caller's filter
   end
   sel = map["$\"eh.sel\""]
   eh[:pads].each do |p|
@@ -695,15 +691,25 @@ def eh_inline(eh, out, map, st, k, hoisted)
     end
     outer = own ? eh_renumber(q[4], pmap, tidmap, zero) : ["eh-outer", kk]
     ce[:pads] << ["eh-pad", pmap[p[1]], q[2], q[3].map { |x| tidmap.fetch(x, x) }, outer, *stmts]
-    # the pad's filter: its own list (a nested copy's), else the callee's own (the callee has a specification)
-    ids = eh[:specs][p[1]] || eh[:own]
-    if ids
+    # the pad's filters, in the order of its chain: the lists of the nested copies it has, then the callee's own (the callee has
+    # a specification), which the states outside the callee follow
+    ((eh[:specs][p[1]] || []) + (eh[:own] ? [eh[:own]] : [])).each do |ids|
       ce[:spec_pads] << ["eh-spec-pad", pmap[p[1]], *ids.map { |x| tidmap.fetch(x, x) }]
     end
   end
   ce[:changed] = true
   body = eh_renumber(out, pmap, tidmap, zero)
   [["eh-inline-begin", kk]] + (eh[:noexcept] ? [zero] : []) + body + [["eh-inline-end", kk]]
+end
+
+# The caller's type id of catch (...) (the "0" of its type table), added when there is none.
+def catch_all_tid(ce)
+  j = ce[:types].index("0")
+  unless j
+    ce[:types] << "0"
+    j = ce[:types].size - 1
+  end
+  (j + 1).to_s
 end
 
 # The callee's states, pad numbers and type ids in the caller's numbering

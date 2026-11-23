@@ -47,8 +47,7 @@
     "_comment": "A name with no api_map entry is refused with the reason given here (the converter's no-entry path). PRIsVALUE is converted where rb_raise and rb_sprintf take it; elsewhere it is an argument of rb_enc_sprintf, which takes an rb_encoding *.",
     "PRIsVALUE": "stuck point (PRIsVALUE): PRIsVALUE outside the format of rb_raise, rb_sprintf and rb_enc_sprintf (a VALUE argument of another call) is not converted; it has no mruby form in this position",
     "rb_encoder": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
-    "rb_enc_interned_str_cstr": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
-    "rb_marshal_load": "stuck point: the fork has no Marshal (no marshal mrbgem in mrbgems/), so there is no loader to call"
+    "rb_enc_interned_str_cstr": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)"
   },
   "includes": {
     "ruby.h": {
@@ -94,6 +93,33 @@
     }
   },
   "entries": {
+    "RB_OBJ_FROZEN_RAW": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": false,
+      "template": "(!mrb_immediate_p($0) && MRB_FROZEN_P(mrb_basic_ptr($0)))",
+      "caveat": "CRuby's RB_OBJ_FROZEN_RAW tests the frozen bit of an object's flags; the fork keeps it in the object's basic header (MRB_FL_OBJ_IS_FROZEN, include/mruby/object.h), tested for heap objects only (an immediate has no flags, so it is not frozen here)"
+    },
+    "rb_marshal_load": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "gem_dep": "mruby-marshal",
+      "prelude": "#include <mruby/marshal.h>",
+      "prelude_name": "nfcx_marshal_load",
+      "template": "mrb_marshal_load($m, $0)",
+      "caveat": "CRuby's rb_marshal_load(port) reads a marshalled object from a string: the mruby-marshal gem (3rd/mruby-marshal) provides mrb_marshal_load(mrb, str), and the converted gem depends on it (api_map gem_dep). The argument is a String, as CRuby's port reads from one"
+    },
+    "rb_reg_new": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "gem_dep": "mruby-onig-regexp",
+      "prelude": "static mrb_value nfcx_reg_new(mrb_state *mrb, const char *src, long len, int opt) {\n  mrb_value args[2];\n  args[0] = mrb_str_new(mrb, src, len);\n  args[1] = mrb_fixnum_value(opt);\n  return mrb_obj_new(mrb, mrb_class_get(mrb, \"OnigRegexp\"), 2, args);\n}",
+      "prelude_name": "nfcx_reg_new",
+      "template": "nfcx_reg_new($m, $0, $1, $2)",
+      "caveat": "CRuby's rb_reg_new(src, len, options) is a Regexp: the mruby-onig-regexp gem (3rd/mruby-onig-regexp, Onigmo) provides OnigRegexp, built with the same options, and the converted code builds an OnigRegexp (OnigRegexp.new(source, options)). The class is OnigRegexp, not Regexp; the options are passed as given (CRuby ONIG_OPTION_* values, e.g. IGNORECASE)"
+    },
     "rb_time_timespec_new": {
       "kind": "template",
       "arity": 2,
@@ -1461,10 +1487,6 @@
       "template": "mrb_funcall_argv($m, $0, $1, RARRAY_LEN($2), RARRAY_PTR($2))",
       "caveat": "rb_apply(recv, mid, args) calls mid with the elements of the array args, as rb_funcallv does; the array is read, not retained"
     },
-    "rb_reg_new": {
-      "kind": "refuse",
-      "reason": "stuck point: the fork has no Regexp class (no mruby-regexp mrbgem in mrbgems/) and no Regexp tag (include/mruby/value.h:106-131), so there is no regexp object to build or read"
-    },
     "rb_reg_regcomp": {
       "kind": "refuse",
       "reason": "stuck point: the fork has no Regexp class (no mruby-regexp mrbgem in mrbgems/) and no Regexp tag (include/mruby/value.h:106-131), so there is no regexp object to build or read"
@@ -2407,7 +2429,6 @@
     "rb_big2ull": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "mrb_bint_as_uint64($m, $0)", "caveat": "raises RangeError when x is negative or does not fit uint64_t, as CRuby"},
     "rb_big2ll": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "mrb_bint_as_int64($m, $0)", "caveat": "raises RangeError when x does not fit int64_t, as CRuby"},
     "rb_ull2inum": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "mrb_bint_new_uint64($m, (uint64_t)($0))", "caveat": "a fixnum when the value fits one, a bigint otherwise, as CRuby"},
-    "RB_OBJ_FROZEN_RAW": {"kind": "refuse", "reason": "stuck point: the raw frozen flag of an object (CRuby's RBasic flags) has no mruby form beyond MRB_FROZEN_P on heap objects (accepted stuck point)"},
     "rb_hash_foreach": {
       "kind": "hash_foreach",
       "needs_mrb": true,
