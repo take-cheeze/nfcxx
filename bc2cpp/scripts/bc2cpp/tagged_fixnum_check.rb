@@ -280,10 +280,14 @@ identity = ->(text, name) { code_of(text, "TfOps_#{name}").match?(/BC2CPP_SAME_W
              identity.call(code, name) && !body.include?('mrb_equal(') && !body.include?('bc2cpp_cmp_num_eq('))
   check.call("#{name}: BC2CPP_LITERAL_EQ_IDENTITY=0 keeps the full compare", !identity.call(inline_code, name))
 end
-check.call('eq_one: an operand that may be a Float (1 == 1.0) keeps the numeric compare',
-           !identity.call(code, 'eq_one') && code_of(code, 'TfOps_eq_one').include?('bc2cpp_cmp_num_eq('))
+eq_one = code_of(code, 'TfOps_eq_one')
+check.call('eq_one: an operand that may be a Float (1 == 1.0) is the word test, else the Float compare',
+           eq_one.match?(/= mrb_fixnum_p\((r\d+)\) \? mrb_bool_value\(BC2CPP_SAME_WORD\(\1, r\d+\)\) : bc2cpp_eq_lit_num\(\1, r\d+\);/) &&
+             !eq_one.include?('mrb_equal(') && !eq_one.include?('bc2cpp_cmp_num_eq('))
+check.call('eq_one: BC2CPP_LITERAL_EQ_IDENTITY=0 keeps the numeric compare',
+           code_of(inline_code, 'TfOps_eq_one').include?('mrb_equal(') && !code_of(inline_code, 'TfOps_eq_one').include?('bc2cpp_eq_lit_num('))
 check.call('a program == (TfAny) keeps every literal compare a send',
-           %w[eq_sym eq_nil eq_true eq_false eq_k1].none? { |name| identity.call(reopen_code, name) })
+           %w[eq_sym eq_nil eq_true eq_false eq_k1 eq_one].none? { |name| identity.call(reopen_code, name) })
 check.call('a reopened Integer#+ leaves OP_ADD its word arm, as the VM does',
            code_of(reopen_code, 'TfOps_add').include?('bc2cpp_fixnum_add('))
 methods = code.sub(TaggedFixnum::PRELUDE, '')

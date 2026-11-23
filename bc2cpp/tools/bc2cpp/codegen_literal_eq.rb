@@ -2,11 +2,13 @@
 
 require_relative 'numeric_flow'
 
-# LITERAL_EQ_IDENTITY: `x == lit` (OP_EQ) for a literal Symbol, nil, true or false, and for a Fixnum literal when x is
-# proven not a Float, is the identity test of the two words. OP_EQ answers identity first; past it, the answer is x's
-# `==` with the literal as argument, and literal_eq_identity_safe? proves that every `==` the world can reach answers
-# false then. `lit == x` with an immediate literal on the left is Symbol#==, nil's, true's or false's, all identity.
-# BC2CPP_LITERAL_EQ_IDENTITY=0 keeps the full compare.
+# LITERAL_EQ_IDENTITY: `x == lit` (OP_EQ) for a literal Symbol, nil, true or false is the identity test of the two
+# words. OP_EQ answers identity first; past it, the answer is x's `==` with the literal as argument, and
+# literal_eq_identity_safe? proves that every `==` the world can reach answers false then. `lit == x` with an
+# immediate literal on the left is Symbol#==, nil's, true's or false's, all identity. For a Fixnum literal N the
+# only other `==` that can answer true is Float#== (Integer#== of a heap Integer or a bigint never equals a Fixnum),
+# so a Fixnum x is the word test, a Float x the compare with N (bc2cpp_eq_lit_num), and anything else false; when the
+# flow proves x no Float, the word test alone. BC2CPP_LITERAL_EQ_IDENTITY=0 keeps the full compare.
 class CodeGen
   # The native `==` bodies that answer false for an argument that is not identical and is a Symbol, nil, true, false
   # or a Fixnum the receiver does not equal (src/*.c of the pinned mruby): each tests the argument's type or class
@@ -39,14 +41,15 @@ class CodeGen
              right.klass
            elsif left && LITERAL_EQ_IMMEDIATE.include?(left.klass)
              left.klass
-           elsif right&.klass == :Integer && literal_eq_fixnum?(right.value) &&
-                 literal_eq_not_float?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
-             :Integer
+           elsif right&.klass == :Integer && literal_eq_fixnum?(right.value)
+             literal_eq_not_float?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def) ? :Integer : :Numeric
            end
     return nil unless kind
 
-    "  // LITERAL_EQ_IDENTITY #{kind} -- every == the world reaches answers identity for this literal\n" \
-      "  r#{d} = mrb_bool_value(BC2CPP_SAME_WORD(r#{d}, r#{s}));\n"
+    note = "  // LITERAL_EQ_IDENTITY #{kind} -- every == the world reaches answers identity for this literal\n"
+    return "#{note}  r#{d} = mrb_bool_value(BC2CPP_SAME_WORD(r#{d}, r#{s}));\n" unless kind == :Numeric
+
+    "#{note}  r#{d} = mrb_fixnum_p(r#{d}) ? mrb_bool_value(BC2CPP_SAME_WORD(r#{d}, r#{s})) : bc2cpp_eq_lit_num(r#{d}, r#{s});\n"
   end
 
   LITERAL_EQ_IMMEDIATE = %i[Symbol NilClass TrueClass FalseClass].freeze

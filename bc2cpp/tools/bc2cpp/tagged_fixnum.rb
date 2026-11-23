@@ -16,6 +16,15 @@ module TaggedFixnum
     #else
     #define BC2CPP_SAME_WORD(a, b) mrb_obj_eq(M, (a), (b))
     #endif
+    // `x == n` for a Fixnum literal n and an x that is no Fixnum: Float#== (int_equal's Float arm), false otherwise.
+    [[maybe_unused, gnu::noinline]] static mrb_value bc2cpp_eq_lit_num(mrb_value x, mrb_value n) {
+    #ifndef MRB_NO_FLOAT
+      if (mrb_float_p(x)) return mrb_bool_value(mrb_float(x) == (mrb_float)mrb_fixnum(n));
+    #endif
+      (void)x;
+      (void)n;
+      return mrb_false_value();
+    }
     #ifndef BC2CPP_TAGGED_FIXNUM
     #define BC2CPP_TAGGED_FIXNUM 0
     #if defined(MRB_WORD_BOXING) && defined(__GNUC__)
