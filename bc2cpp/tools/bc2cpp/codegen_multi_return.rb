@@ -303,11 +303,11 @@ class CodeGen
   end
 
   # Blank and `//` comment lines may lead the call; they are kept.
-  DIRECT_CALL = %r{\A((?:[ \t]*(?://[^\n]*)?\n)*)  r(\d+) = ([A-Za-z_]\w*_impl)\(([\w, ()]*)\);\n\z}.freeze
+  MULTI_RETURN_DIRECT_CALL = %r{\A((?:[ \t]*(?://[^\n]*)?\n)*)  r(\d+) = ([A-Za-z_]\w*_impl)\(([\w, ()]*)\);\n\z}.freeze
 
   # {mr:, args:, n:} when +text+ is exactly a direct call of a qualifying callee of this unit into r+dest+.
   def multi_return_direct_call(text, dest)
-    m = DIRECT_CALL.match(text)
+    m = MULTI_RETURN_DIRECT_CALL.match(text)
     return nil unless m && m[2].to_i == dest && multi_return_balanced?(m[4])
 
     label = multi_return_unit_impls[m[3]]
