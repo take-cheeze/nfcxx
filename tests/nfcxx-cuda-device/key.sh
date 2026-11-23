@@ -1,20 +1,42 @@
 #!/usr/bin/env bash
-# The device image cache key of scripts/nfcxx-cuda-device.rb (--key, the port of cu_device_key) against nfcxx's own
-# cu_device_key, from the driver before the port (tests/nfcxx-cuda-device/nfcxx-bash). Each case is a tree (the device
-# unit, the emitter's sources, a ptxas stub, the toolkit's absence), the environment, the flags and the -D/-U words; the bash
-# function and the port must print the same key. Environment words are NAME=VALUE, with @W@ for the case's tree.
+# The device image cache key of scripts/nfcxx-cuda-device.rb (--key, the port of cu_device_key). Each case is a tree (the
+# device unit, the emitter's sources, a ptxas stub, the toolkit's absence), the environment, the flags and the -D/-U words.
+# Environment words are NAME=VALUE, with @W@ for the case's tree.
+#
+# The expected keys are pinned: they are the keys the bash cu_device_key of the frozen driver (tests/nfcxx-cuda-device/
+# nfcxx-bash, origin/main c06e138fb) printed for each case, so the port is no longer checked against a copy of the bash
+# function. The keys hash file contents and the flags only, so they do not change from one run to the next.
+#
+# cpfe-missing is not pinned. Its key hashes a "missing <path>" line for the absent PATHB_CPFE, and that path is inside
+# this run's temporary tree, so the value differs on every run. The case checks its structure instead: the port exits 0,
+# prints a 40-digit hex key, prints the same key on a second run of the same tree, and that key is not the default key (the
+# missing file changes the key).
 #   tests/nfcxx-cuda-device/key.sh     exit 1 on a mismatch
 cd "$(dirname "$0")/../.." || exit 2
-here=tests/nfcxx-cuda-device
 work=$(mktemp -d) || exit 2
 trap 'rm -rf "$work"' EXIT
 pass=0; fail=0
 
-# the bash's cache_sha and cu_device_key, from the fixture
-oracle=$work/oracle.sh
-{ awk 'index($0, "cache_sha() {") == 1' "$here/nfcxx-bash"
-  awk 'index($0, "cu_device_key() {") == 1 { p = 1 } p { print } p && $0 == "}" { p = 0 }' "$here/nfcxx-bash"; } > "$oracle"
-grep -q '^cu_device_key() {' "$oracle" || { echo "key.sh: cu_device_key was not extracted from the fixture" >&2; exit 2; }
+# pinned NAME: the key the frozen driver's cu_device_key prints for the case NAME
+pinned() {
+  case $1 in
+    default) echo 3cdba39da0a57e99f68a8d94c5bb0effd511dfdf ;;
+    defines) echo a4095b3824a80ff46b21ef27c0556b3de2e2f949 ;;
+    quoted-defines) echo 13ebed1a72795d41acfcfd62c449ce14d60cf629 ;;
+    non-ascii-define) echo bf9872d37752776df8472e8cac2ecbe57d3360d9 ;;
+    empty-define) echo 75449e035869f9cfd8f3ede10ebcbfe903c230f3 ;;
+    ir-opt-off) echo 19e87ef792c44bd3a69f59759b1a58c8d7dc3524 ;;
+    ir-opt-inline) echo 2dd3efb132d1653eabd6152901bc78886b787ac8 ;;
+    ir-opt-empty) echo d06e65b052efa7faead2d7dae3a40e9a48851a24 ;;
+    promote-unroll-struct-0) echo b60b24dbdfeb8624c9068d3af33e56161dbac8ce ;;
+    sm-80-budgets) echo 811530faa3b98e018d2d59e0d3d53ef6b8fe39cb ;;
+    inline-device-0) echo dd7510628af79b51b6fcdb57e6129a4ae023cc39 ;;
+    jit-ptx) echo ee6b0ef6bbeb54a71a12421d336d1a6687046317 ;;
+    pathb-base-missing) echo 8dd49196b1ec269519f0690a7a530de550df9bc5 ;;
+    jit-no-ptxas-path) echo ba17d9483cef63549b54772faf3fbe39a5d6a516 ;;
+    *) return 1 ;;  # cpfe-missing: structural check, see above
+  esac
+}
 
 mk_tree() {  # mk_tree W: the case's tree (the tools' stand-ins are text; the ptxas stub prints a version with two lines)
   local w=$1
@@ -35,42 +57,36 @@ mk_tree() {  # mk_tree W: the case's tree (the tools' stand-ins are text; the pt
 }
 
 check() {  # check NAME "ENV..." "DEF|DEF..." "FLAG..."  (DEFs are separated by |, so a -D word may hold a space; FLAG: --ir-opt=V, ...)
-  local name=$1 envs=$2 defs=$3 flags=$4 w=$work/case e d f
+  local name=$1 envs=$2 defs=$3 flags=$4 w=$work/case e d
   mk_tree "$w"
   envs=${envs//@W@/$w}
   local -a envw defw flagw
   read -r -a envw <<< "$envs"; IFS='|' read -r -a defw <<< "$defs"; read -r -a flagw <<< "$flags"
-  # the driver's variables (the bash's own state, as the driver sets it from its flags and the environment)
-  local ir_set=0 ir_val=inline,sroa promote=1 unroll=1 struct=1 ext=cubin sm=75 ptxas="$w/bin/ptxas"
-  for f in ${flagw[@]+"${flagw[@]}"}; do
-    case $f in
-      --ir-opt=*) ir_set=1; ir_val=${f#--ir-opt=} ;;
-      --promote-slots=*) promote=${f#*=} ;;
-      --unroll=*) unroll=${f#*=} ;;
-      --struct-slots=*) struct=${f#*=} ;;
-    esac
-  done
-  for e in ${envw[@]+"${envw[@]}"}; do
-    case $e in NFCXX_CUDA_JIT=1) ext=ptx ;; NFCXX_SM=*) sm=${e#NFCXX_SM=} ;; NFCXX_PTXAS=*) ptxas=${e#NFCXX_PTXAS=} ;; esac
-  done
-  local bo bs ro rs
-  bo=$(env -i PATH="$PATH" CUDA_HOME="$w/no-toolkit" ${envw[@]+"${envw[@]}"} bash -c '
-    set -u
-    root=$1; promote_slots=$2; unroll=$3; struct_slots=$4; ir_opt_set=$5; ir_opt=$6; oracle=$7
-    shift 7
-    . "$oracle"
-    cu_device_key "$@"' _ "$w/root" "$promote" "$unroll" "$struct" "$ir_set" "$ir_val" "$oracle" \
-    "$w/tmp/x.dev" "$sm" "$ptxas" "$ext" ${defw[@]+"${defw[@]}"}); bs=$?
-  local nenv=()
+  local nenv=() ndef=()
   for e in ${envw[@]+"${envw[@]}"}; do nenv+=("--nfcxx-env=$e"); done
-  local ndef=() ; for d in ${defw[@]+"${defw[@]}"}; do ndef+=("--cflag=$d"); done
-  ro=$(env -i PATH="$PATH" ruby scripts/nfcxx-cuda-device.rb --key --root="$w/root" --tmp="$w/tmp" \
-       "--nfcxx-env=CUDA_HOME=$w/no-toolkit" ${nenv[@]+"${nenv[@]}"} ${ndef[@]+"${ndef[@]}"} ${flagw[@]+"${flagw[@]}"} \
-       "$w/x.cu" 2>&1); rs=$?
-  if [ "$bs" = 0 ] && [ "$rs" = 0 ] && [ "$bo" = "$ro" ] && [ ${#bo} = 40 ]; then
-    pass=$((pass + 1)); echo "ok   $name ($bo)"
+  for d in ${defw[@]+"${defw[@]}"}; do ndef+=("--cflag=$d"); done
+  # the port's key for this case's tree
+  port_key() {
+    env -i PATH="$PATH" ruby scripts/nfcxx-cuda-device.rb --key --root="$w/root" --tmp="$w/tmp" \
+      "--nfcxx-env=CUDA_HOME=$w/no-toolkit" ${nenv[@]+"${nenv[@]}"} ${ndef[@]+"${ndef[@]}"} ${flagw[@]+"${flagw[@]}"} \
+      "$w/x.cu" 2>&1
+  }
+  local ro rs ro2 rs2 want
+  ro=$(port_key); rs=$?
+  if want=$(pinned "$name"); then
+    if [ "$rs" = 0 ] && [ "$ro" = "$want" ]; then
+      pass=$((pass + 1)); echo "ok   $name ($ro)"
+    else
+      fail=$((fail + 1)); echo "FAIL $name: pinned [$want], port [$ro] status $rs"
+    fi
   else
-    fail=$((fail + 1)); echo "FAIL $name: bash [$bo] status $bs, port [$ro] status $rs"
+    # structural check for a key that varies per run (see the header)
+    ro2=$(port_key); rs2=$?
+    if [ "$rs" = 0 ] && [ "$rs2" = 0 ] && [ "$ro" = "$ro2" ] && [[ $ro =~ ^[0-9a-f]{40}$ ]] && [ "$ro" != "$(pinned default)" ]; then
+      pass=$((pass + 1)); echo "ok   $name (structure: 40 hex, stable within a run, not the default key)"
+    else
+      fail=$((fail + 1)); echo "FAIL $name: port [$ro] status $rs, second run [$ro2] status $rs2"
+    fi
   fi
 }
 
