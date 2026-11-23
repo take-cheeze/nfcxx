@@ -98,10 +98,11 @@ module OwnerCallDirect
   # The direct rows of the native registrations (`dispose` and NATIVE_ROWS), keyed like entries.
   def native_entries
     rows = NATIVE_DISPOSE_OWNERS.to_h do |owner, body|
-      [[owner, 'dispose'], { owner: owner, entry: NATIVE_DISPOSE.fetch(body), aspec: 'MRB_ARGS_NONE()', visibility: :public }]
+      [[owner, 'dispose'], { owner: owner, name: 'dispose', entry: NATIVE_DISPOSE.fetch(body), aspec: 'MRB_ARGS_NONE()',
+                             visibility: :public, native: true }]
     end
     NATIVE_ROWS.each do |owner, name, wrapper, aspec, visibility|
-      rows[[owner, name]] = { owner: owner, entry: wrapper, aspec: aspec, visibility: visibility }
+      rows[[owner, name]] = { owner: owner, name: name, entry: wrapper, aspec: aspec, visibility: visibility, native: true }
     end
     rows
   end
@@ -116,7 +117,8 @@ module OwnerCallDirect
   # `unregistered`: the "Owner#name" keys the build leaves out (CodeGen#unregistered_keys).
   # `other`: (owner, name) -> a row for a method another gem compiles (CodeGen#other_unit_direct_entry), or nil.
   # `trim`: rows only for the owners left out (OWNER_ROWS_TRIM, CodeGen#owner_rows_trim?).
-  def rewrite(code, entries, slots, subclassed, unregistered, other: nil, trim: false)
+  # `entry_flags`: a row -> the flags it adds past its visibility (FRAME_FREE_FLAG, NativeFrameUse.entry_flags).
+  def rewrite(code, entries, slots, subclassed, unregistered, other: nil, trim: false, entry_flags: nil)
     return code if entries.empty? || ENV['BC2CPP_OWNER_CALL_DIRECT'] == '0' || !code.include?('BC2CPP_OWNERS(')
 
     lines = Lines.new(code)
@@ -146,7 +148,8 @@ module OwnerCallDirect
       next if direct.empty? || direct.size > MAX
 
       rows = direct.map do |m|
-        "BC2CPP_OWNER_DIRECT(\"#{m[:owner]}\", #{m[:entry]}, #{m[:aspec]}, #{VISIBILITY.fetch(m[:visibility])})"
+        flags = "#{VISIBILITY.fetch(m[:visibility])}#{entry_flags&.call(m)}"
+        "BC2CPP_OWNER_DIRECT(\"#{m[:owner]}\", #{m[:entry]}, #{m[:aspec]}, #{flags})"
       end
       line = "#{site.pre_match}#{head}BC2CPP_OWNERS_D(#{rows.join(' ')}, #{list})#{site.post_match}"
       lines.rewrite(at, line)

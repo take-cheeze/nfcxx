@@ -724,7 +724,8 @@ static mrb_value funcall_found_framed(mrb_state* mrb,
 }
 
 // The frame-free decision for every caller of a found method, C included (mrb_obj_init's initialize):
-// a function the closed build registered as frame-free (mrb->frame_free_p) runs through mrb_call_direct.
+// a function the closed build flagged (MRB_METHOD_FRAMEFREE_FL) or registered (mrb->frame_free_p) as frame-free runs
+// through mrb_call_direct.
 mrb_value mrb_funcall_with_method(mrb_state* mrb,
                                   mrb_value self,
                                   mrb_sym mid,
@@ -735,8 +736,12 @@ mrb_value mrb_funcall_with_method(mrb_state* mrb,
                                   mrb_value blk) {
   if (mrb->direct_call)
     mrb_direct_materialize(mrb);
-  if (mrb->frame_free_p && mrb_nil_p(blk) && MRB_METHOD_FUNC_P(*m) &&
-      mrb->frame_free_p(mrb, MRB_METHOD_FUNC(*m)))
+#ifndef MRB_METHOD_FRAMEFREE_FL
+#define MRB_METHOD_FRAMEFREE_FL 0  // a fork without the flag: only the hook decides
+#endif
+  if (mrb_nil_p(blk) && MRB_METHOD_FUNC_P(*m) &&
+      ((m->flags & MRB_METHOD_FRAMEFREE_FL) ||
+       (mrb->frame_free_p && mrb->frame_free_p(mrb, MRB_METHOD_FUNC(*m)))))
     return mrb_call_direct(mrb, self, mid, MRB_METHOD_FUNC(*m), owner, argc, argv);
   return funcall_found_framed(mrb, self, mid, m, owner, argc, argv, blk);
 }

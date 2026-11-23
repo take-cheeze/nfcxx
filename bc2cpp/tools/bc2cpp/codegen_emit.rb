@@ -3,6 +3,7 @@
 require_relative 'branch_hints'
 require_relative 'presym_spelling'
 require_relative 'core_native_candidates'
+require_relative 'native_frame_use'
 
 # CodeGen: per-method compile state and file-level emission.
 
@@ -422,7 +423,8 @@ class CodeGen
         left_out.merge(omitted)
         names.each do |name|
           ops << { name: name, key: rom && presym_key(name), fn: fn, entry: m[:entry], aspec: m[:aspec],
-                   private: m[:visibility] == :private, ctor: ctor_row_keys.include?("#{owner}##{name}") }
+                   private: m[:visibility] == :private, ctor: ctor_row_keys.include?("#{owner}##{name}"),
+                   frame_free: NativeFrameUse.flag? && NativeFrameUse.reader?(m) }
         end
       end
       rows = ops.grep(Hash)
@@ -441,7 +443,9 @@ class CodeGen
         end
         next if table && op[:key]
 
-        out << "  #{op[:fn]}(M, #{var}, #{c_string_literal(op[:name])}, #{op[:entry]}, #{op[:aspec]});\n"
+        # FRAME_FREE_FLAG (native_frame_use.rb): define_method_id ORs the aspec argument into the entry's flags.
+        aspec = op[:frame_free] ? "(#{op[:aspec]}) | MRB_METHOD_FRAMEFREE_FL" : op[:aspec]
+        out << "  #{op[:fn]}(M, #{var}, #{c_string_literal(op[:name])}, #{op[:entry]}, #{aspec});\n"
       end
       rows = rows.select { |row| row[:key] }
       out << rom_method_table(rom, owner, var, singleton, rows) if table && !rows.empty?
@@ -468,6 +472,7 @@ class CodeGen
     rows.each do |row|
       flags = row[:aspec].to_s
       flags = "(#{flags}) | MRB_MT_PRIVATE" if row[:private] || ROM_FORCED_PRIVATE.include?(row[:name])
+      flags = "(#{flags}) | MRB_MT_FRAMEFREE" if row[:frame_free]
       # CTOR_ROWS: a row only the constructions find (MRB_MT_CTOR_ROW).
       macro = row[:ctor] ? 'MRB_MT_ENTRY_CTOR_' : 'MRB_MT_ENTRY'
       tables << "  #{macro}(#{row[:entry]}, #{row[:key]}, #{flags})\n"
