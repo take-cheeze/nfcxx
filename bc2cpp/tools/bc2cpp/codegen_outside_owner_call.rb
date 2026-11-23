@@ -154,16 +154,32 @@ module OutsideOwnerCall
   # helper's operator site (CheckedSend never sees it).
   HELPER_FUNCALL = /\b(?:mrb_funcall|bc2cpp_funcall_keep)\(M, (\w+), "([^"]+)", (\d+)((?:, \w+)*)\)/
 
+  # PROGRAM_OWNER_SITES (symbol_cache.rb): with a presym id for the name, the owner call and a proven nomethod name
+  # no slot of the gem's symbol table, so the helper prints the same in every gem.
+  HELPER_NOMETHOD = /\bbc2cpp_nomethod_named\(M, (\w+), "([^"]+)"(?:, ([01]))?((?:, \w+)?)\)/
+
   def helper_owner_calls(code)
-    code.gsub(HELPER_FUNCALL) do
+    code = code.gsub(HELPER_FUNCALL) do
       call = Regexp.last_match
       recv, name, argc, args = call.captures
       owners = argc.to_i <= CodeGen::FUNCALL_ARGC_MAX && args.count(',') == argc.to_i && name_owner_set(name)
       next call[0] unless owners
 
       list = owner_call_owner_list(owners)
+      mid = argc.to_i <= 2 && SymbolCache.program_mid(name, owner_site: true)
+      if mid
+        next "bc2cpp_owner_call_pw#{argc}(M, #{recv}, BC2CPP_OWNERS_PW(#{mid}, #{list})#{args}) " \
+             "/* CLOSED_WORLD owner-call: #{name} */"
+      end
+
       "bc2cpp_owner_call_named(M, #{recv}, \"#{name}\", 0, BC2CPP_OWNERS(#{list}), mrb_nil_value(), #{argc}#{args}) " \
         "/* CLOSED_WORLD owner-call: #{name} */"
+    end
+    code.gsub(HELPER_NOMETHOD) do
+      call = Regexp.last_match
+      recv, name, argc, args = call.captures
+      mid = args.count(',') == argc.to_i && SymbolCache.program_mid(name)
+      mid ? "bc2cpp_nomethod_pw(M, #{recv}, #{mid}#{args})" : call[0]
     end
   end
 

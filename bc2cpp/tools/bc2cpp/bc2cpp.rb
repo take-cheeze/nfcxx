@@ -191,6 +191,7 @@ require_relative 'codegen_keyword_send'
 require_relative 'codegen_send'
 require_relative 'codegen_const_tables'
 require_relative 'codegen_eqq'
+require_relative 'codegen_literal_eq'
 require_relative 'codegen_constant_object'
 require_relative 'codegen_unlisted_class_call'
 require_relative 'codegen_arg_shapes'
@@ -1703,6 +1704,8 @@ BC2CPP_MAIN = lambda do
   OwnerSetShare.capture_stdout(symbol) if OwnerSetShare.enabled?(BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol })
   # COMPACT_LABELS (label_table.rb): registered last of these, so it reads the text as printed.
   LabelTable.capture_stdout(LabelTable.enabled?(BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol }))
+  # ELEMENT_READ_SUMMARY (keep_summary.rb): registered last of these, so it reads the unit as printed, markers included.
+  KeepSummary.capture_stdout if ElementReadRoots.summary_on?
 
   # PARAM_TRACE (tools/bc2cpp/param_trace.rb): opt-in runtime classes of compiled method and block
   # parameters; unset (or any value but 1) leaves stdout untouched. Registered BEFORE ELSE_TRACE so the
@@ -2102,7 +2105,8 @@ BC2CPP_MAIN = lambda do
   # for an mruby exception: reset mrb->jmp and pop the leftover callinfos,
   # unsharing each popped frame's env as the VM's cipop does.
   # FRAME_FREE: which found natives a call runs without a frame (native_frame_use.rb).
-  puts NativeFrameUse.cpp_source(StaticDispatchLists.current(required: false).frame_free)
+  puts NativeFrameUse.cpp_source(StaticDispatchLists.current(required: false).frame_free,
+                                 ram: StaticDispatchLists.current(required: false).frame_free_ram)
   puts <<~'CPP'
     struct Bc2cppVmMark { struct mrb_jmpbuf* jmp; ptrdiff_t ci_index; };
     static inline Bc2cppVmMark bc2cpp_vm_mark(mrb_state* M) {
@@ -2742,7 +2746,13 @@ BC2CPP_MAIN = lambda do
         for (const mrb_value* a = args.begin(); a != args.end(); a++) {
           mrb_sym method = mrb_obj_to_sym(M, *a);
           mrb_int len;
+          // The name is only copied: mrb_sym_name_tmp keeps a compact presym table from caching it.
+        #ifdef MRB_SYM_TMP_LEN
+          char nmbuf[MRB_SYM_TMP_LEN];
+          const char* nm = mrb_sym_name_tmp(M, method, nmbuf, &len);
+        #else
           const char* nm = mrb_sym_name_len(M, method, &len);
+        #endif
           std::string ivar = "@" + std::string(nm, (size_t)len);
           mrb_sym ivsym = mrb_intern(M, ivar.data(), (mrb_int)ivar.size());
           mrb_iv_name_sym_check(M, ivsym);
@@ -3230,7 +3240,8 @@ BC2CPP_MAIN = lambda do
   owner_rewrite = [owner_call_direct, gen.owner_class_slots, gen.program_superclasses, gen.unregistered_keys]
   # CROSS_UNIT_ROW (CodeGen#other_unit_direct_entry): a row for a method another gem of this link compiles.
   owner_rewrite_opts = { other: ENV['BC2CPP_CROSS_UNIT_ROW'] == '0' ? nil : gen.method(:other_unit_direct_entry),
-                         trim: gen.owner_rows_trim? }
+                         trim: gen.owner_rows_trim?,
+                         entry_flags: ->(m) { NativeFrameUse.entry_flags(m, StaticDispatchLists.current(required: false).frame_free) } }
   # GUARD_VIOLATION: name the method a violation site sits in.
   # Fuse the three per-method rewrite passes (@@SITE@@ substitution, DIRECT_RAISE, SymbolCache.rewrite) into one.
   compiled.each do |m|
