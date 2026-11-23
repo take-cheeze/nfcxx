@@ -3430,7 +3430,10 @@ use_problem = lambda do |name, use|
       changed = false
       @defs.each_key do |name|
         next if ctx.include?(name)
-        occs = (@occ[name] || []).reject { |orel, os, _oe| in_header.call(name, orel, os) }
+        # a function's own recursive calls do not count: a helper is mark context when every outside call is in one
+        occs = (@occ[name] || []).reject do |orel, os, _oe|
+          in_header.call(name, orel, os) || (f0 = enclosing_func(orel, os)) && f0['name'] == name
+        end
         next if occs.empty?
         if occs.all? { |orel, os, _oe| (f = enclosing_func(orel, os)) && ctx.include?(f['name']) }
           ctx << name
@@ -3491,6 +3494,38 @@ use_problem = lambda do |name, use|
   # The caveat is recorded in the refusal list's conversion notes (the rewrite line).
   # the VALUE variables declared at file scope in a file (static VALUE x = ...;)
   # a position in text the build leaves out (an inactive #if branch): its declarations are not file-scope names
+  # An object-like alias of rb_gc_mark, #define NAME rb_gc_mark (the mark of an active #define: date's rb_gc_mark_movable, oj's mark).
+  # When NAME is itself a mapped mark call (api_map gc_mark_context, e.g. rb_gc_mark_movable), the alias is dead: its uses convert
+  # through NAME's entry, so the define goes. Otherwise NAME becomes the function-like macro NAME(x) mrb_gc_mark_value(mrb, x), when
+  # every use of NAME is in a mark callback (the same test as a call in a macro body). Returns false when neither applies.
+  def gc_mark_alias_fix(rel, s)
+    dl = define_at(rel, s)
+    return false unless dl
+    name, a, b = dl[0], dl[1], dl[2]
+    text = @files[rel]['text']
+    body = text[a...b].to_s
+    return false unless body.match?(/\A[ \t]*#[ \t]*define[ \t]+#{Regexp.escape(name)}[ \t]+rb_gc_mark[ \t]*(\/\*.*\*\/[ \t]*)?\z/m)
+    return false if inactive_text_at?(rel, a)
+    ent = @entries[name]
+    # the uses the macro changes: this file's text after the define (a #define is file-local and applies from its line on)
+    uses = (@occ[name] || []).select { |orel, os, _oe| orel == rel && b <= os }
+    if ent.is_a?(Hash) && ent['gc_mark_context']
+      ed = @edits[rel]
+      ed.drop(ed.overlapping(a, b))
+      @refusals.reject! { |r| r['file'] == rel && r['api'] == 'rb_gc_mark' && r['pos'] == s }
+      ed.add(a, b, '')
+      rewrite(rel, a, 'rb_gc_mark', name, "the alias #define #{name} rb_gc_mark is dropped: #{name} is a mapped mark call (its uses convert through its entry)")
+      return true
+    end
+    return false unless !uses.empty? && uses.all? { |orel, os, _oe| (uf = enclosing_func(orel, os)) && mark_context_names.include?(uf['name']) }
+    ed = @edits[rel]
+    ed.drop(ed.overlapping(a, b))
+    @refusals.reject! { |r| r['file'] == rel && r['api'] == 'rb_gc_mark' && r['pos'] == s }
+    ed.add(a, b, "#define #{name}(x) mrb_gc_mark_value(mrb, x)")
+    rewrite(rel, a, 'rb_gc_mark', "#{name}(x) mrb_gc_mark_value(mrb, x)", "the alias #define #{name} rb_gc_mark is a function-like mark macro: every use is in a mark callback, which has the state")
+    true
+  end
+
   def inactive_text_at?(rel, pos)
     (@excluded_spans&.[](rel) || []).any? { |a, z| a <= pos && pos <= z }
   end
@@ -6278,6 +6313,9 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
               'the callback gets (mrb, key, value, void *): its third VALUE parameter is a pointer; the callback result is passed through (0 continues, as CRuby ST_CONTINUE)')
     when 'call'
       unless called
+        if name == 'rb_gc_mark' && gc_mark_alias_fix(rel, s)
+          return
+        end
         if name == 'rb_gc_mark'
           refuse(rel, s, name, 'stuck point (GC mark callback): rb_gc_mark is used as a value outside a data type mark callback (the fork calls mrb_data_type.mark with the state, include/mruby/data.h, and marks only there)')
         else
