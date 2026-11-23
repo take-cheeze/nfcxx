@@ -54,6 +54,24 @@ program's results do not change.
 | Path B `-fassociative-math` | 0.081 s |
 | clang++ -O2 -fwrapv | 0.026 s |
 
-The checksum is the same in all three (the sums of this input are exact). The remaining gap is the loop's shape: one
-accumulator, so each iteration waits for the previous `addps` (4 cycles), where clang unrolls and keeps several.
-Multiple accumulators would be the next change in vec.c. Test: `tests/vectorize/assoc/run.sh`.
+The checksum is the same in all three (the sums of this input are exact). The remaining gap to clang is not explained yet. Two accumulators in the vector loop (the second copy of the body per
+iteration, summed at the end) were tried and did not change the time: the dot loop alone takes 0.078 s with one and 0.079 s
+with two (minimum of five, 40000 rounds). So the loop is not limited by the add latency, as first assumed. The kernel is
+probably limited by its loads (the two arrays fit in L2) and per-iteration index code. The clang build of the same loop was
+not measured in isolation: clang removes the repeated call. The two-accumulator change was not kept.
+
+Tests: `tests/vectorize/assoc/run.sh` (the flag adds packed float ops; both builds print the same line), and
+`tests/vectorize/assoc/float_sum_lengths.cpp` (sums of every length 0 to 70, so the scalar tail runs).
+
+## The branchy kernel's flag test (`k_branchy`, `step`)
+
+The SSA emitter writes the test of `r[i].flag & 1` as `t = and x, 1; c = cnew t, 0; jnz c`. The amd64 selector then
+emits `and; cmp $0; jne`, where `test $1` (gcc's form) would do. Two things stop it:
+
+- `flagi` (amd64/isel.c) returns the nearest flag-setting instruction before the jump. In `step`'s block that is an
+  `add` that comes after the `and` and has nothing to do with the test, so the `and` is not fused.
+- Removing the `cnew` (a block-level fold of `jnz (cnew x, 0)` into `jnz x`, tried in simpl.c) did not change the code
+  while the `add` stays in place. A fix belongs in the selector: the flag instruction of a jump should be the one that
+  sets the jump's condition, or the test of a single-use `and` should not depend on what follows it.
+
+The change was tried and not kept; the kernel's time is unchanged (0.37 s).
