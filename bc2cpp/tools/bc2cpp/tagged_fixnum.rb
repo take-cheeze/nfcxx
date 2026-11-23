@@ -10,6 +10,12 @@ module TaggedFixnum
 
   # Printed once per translation unit, after the mruby includes and ahead of every generated function.
   PRELUDE = <<~'CPP'
+    // LITERAL_EQ_IDENTITY (codegen_literal_eq.rb): mrb_obj_eq, which is the word compare under word boxing.
+    #ifdef MRB_WORD_BOXING
+    #define BC2CPP_SAME_WORD(a, b) ((a).w == (b).w)
+    #else
+    #define BC2CPP_SAME_WORD(a, b) mrb_obj_eq(M, (a), (b))
+    #endif
     #ifndef BC2CPP_TAGGED_FIXNUM
     #define BC2CPP_TAGGED_FIXNUM 0
     #if defined(MRB_WORD_BOXING) && defined(__GNUC__)
