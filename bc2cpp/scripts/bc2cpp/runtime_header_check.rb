@@ -18,9 +18,12 @@
 #   cross-gem share (CROSS_GEM_SHARE, tools/bc2cpp/cross_gem_share.rb; nm too)
 #     - a stateless tail helper, its declaration, a constant table and a type move to a digest-named header; a
 #       state, a function naming one (through a default argument or a continued macro too), an address-taken
-#       function and a method declaration stay;
+#       function, a C++ `extern` declaration and a method declaration stay; an `extern "C"` prototype, its caller
+#       and a program-wide site (BC2CPP_OWNERS_PW) move; an #if region's names come back under their own branch
+#       (a header naming them reaches them through a using-directive);
 #     - two sharded gems printing the same tail link, run, and nm finds each moved helper defined once, in no gem
-#       namespace, while each gem keeps its own state; BC2CPP_CROSS_GEM_SHARE=0 leaves the tail as printed.
+#       namespace, while each gem keeps its own state and both advance the one program-wide site;
+#       BC2CPP_CROSS_GEM_SHARE=0 leaves the tail as printed.
 #
 #   isolation (--isolation BUILD_DIR; a real build, needs a C++ compiler)
 #     - each compiled gem's main file, with every gem-namespace item after the runtime region dropped, still
@@ -254,12 +257,30 @@ CGS_TAIL = <<~'CPP'
   static int site_user() { return CGS_SITE(1); }
   static int bump_$3f() { return bump(); }
   static int uses_q() { return bump_$3f(); }
+  extern "C" int cgs_c_abs(int);
+  static int via_c(int x) { return cgs_c_abs(x); }
+  extern int cgs_cxx_ext(int);
+  #define BC2CPP_OWNERS_PW(x) \
+    ([]() -> int { static int n = 0; return ++n + (x); }())
+  static int program_site() { return BC2CPP_OWNERS_PW(1); }
+  #ifdef CGS_NEVER
+  static int never_helper() { return 1; }
+  #else
+  static int other_helper() { return 2; }
+  #endif
+  static int uses_branch() {
+  #ifdef CGS_NEVER
+    return never_helper();
+  #else
+    return other_helper();
+  #endif
+  }
   int GEM_method(int x);
 CPP
 def cgs_gem(gem, dir)
   tail = CGS_TAIL.gsub('GEM', gem)
   text = "#{RuntimeHeader::BEGIN_MARK}static inline int twice(int x) { return 2 * x; }\n#{RuntimeHeader::END_MARK}#{tail}" \
-         "#{ShardOutput.unit_mark('A')}int #{gem}_method(int x) { CgsPair p{x, 2}; return third(p) + via_bump() + target_ptr(1) + calls_default() + site_user(); }\n" \
+         "#{ShardOutput.unit_mark('A')}int #{gem}_method(int x) { CgsPair p{x, 2}; return third(p) + via_bump() + target_ptr(1) + calls_default() + site_user() + via_c(-3) + program_site() + uses_branch(); }\n" \
          "#{ShardOutput.unit_mark('B')}int #{gem}_b(int x) { return helper(x) + #{gem}_method(x); }\n#{ShardOutput::HOOKS_MARK}"
   CrossGemShare.rewrite(RuntimeHeader.rewrite(text, dir, tail_mark: true), dir)
 end
@@ -281,6 +302,13 @@ Dir.mktmpdir('bc2cpp-cross-gem') do |dir|
   suite.check('a function using a macro whose continued body holds a static stays', a.include?('static int site_user()'))
   suite.check('a caller of a `$`-spelled local stays', a.include?('static int uses_q()'))
   suite.check('the unit names a moved item through a using-declaration', a.match?(/^using bc2cpp_cs_\h{16}::helper;$/))
+  suite.check('an extern "C" prototype and its caller move; a C++ extern declaration stays',
+              moved.include?('extern "C" int cgs_c_abs(int);') && moved.include?('int via_c(int x)') &&
+              a.include?('extern int cgs_cxx_ext(int);') && !moved.include?('cgs_cxx_ext'))
+  suite.check('a program-wide site (BC2CPP_OWNERS_PW) moves with its helper', moved.include?('int program_site()'))
+  suite.check('an #if region brings each name back under its own branch',
+              a.match?(/^#ifdef CGS_NEVER\nusing bc2cpp_cs_\h{16}::never_helper;\n#else\nusing bc2cpp_cs_\h{16}::other_helper;\n#endif\n/) &&
+              moved.match?(/^using namespace bc2cpp_cs_\h{16};\n[^\n]*int uses_branch\(\)/))
   ENV['BC2CPP_CROSS_GEM_SHARE'] = '0'
   off = RuntimeHeader.rewrite("#{RuntimeHeader::BEGIN_MARK}#{RuntimeHeader::END_MARK}#{CGS_TAIL}", nil, tail_mark: CrossGemShare.enabled?)
   ENV.delete('BC2CPP_CROSS_GEM_SHARE')
@@ -300,7 +328,8 @@ Dir.mktmpdir('bc2cpp-cross-gem') do |dir|
     end
     ENV.delete('BC2CPP_SHARD_MIN_BYTES')
     File.write(File.join(dir, 'main.cpp'), "#include <cstdio>\nint ga_b(int); int gb_b(int);\n" \
-                                           "int main() { std::printf(\"%d %d\\n\", ga_b(1), gb_b(1)); }\n")
+                                           "extern \"C\" int cgs_c_abs(int x) { return x < 0 ? -x : x; }\n" \
+                                           "int main() { int x = ga_b(1); int y = gb_b(1); std::printf(\"%d %d\\n\", x, y); }\n")
     binary = File.join(dir, 'cgs')
     # GCC's local clones would hide the entries nm counts; clang makes none and does not know the flags.
     version, = Open3.capture2e(Bc2cppCxx.compiler.first, '--version')
@@ -310,14 +339,16 @@ Dir.mktmpdir('bc2cpp-cross-gem') do |dir|
     puts err.lines.first(20).join unless status.success?
     if status.success?
       out, = Open3.capture2(binary)
-      # b(1) = helper 3 + method: third (3 + 3 + 2) + bump 1 + target 8 + calls_default (bump 2 + 1 + 1) + site 2 = 26.
-      suite.check("each gem's own state stays its own (#{out.strip})", out == "26 26\n")
+      # b(1) = helper 3 + method: third (3 + 3 + 2) + bump 1 + target 8 + calls_default (bump 2 + 1 + 1) + site 2
+      # + via_c 3 + uses_branch 2 + the program-wide site, whose one counter both gems advance (2, then 3) = 33, 34.
+      suite.check("each gem's own state stays its own, a program-wide site is one (#{out.strip})", out == "33 34\n")
       # A local clone the optimizer makes ([clone .isra.0]) is a copy per object of its own; the entries count.
       syms, = Open3.capture2(nm, '-C', '--defined-only', binary)
       syms = syms.lines.grep_v(/\[clone /).join
-      defs = ->(name) { syms.lines.select { |l| l.match?(/\s(?:\S+::)?#{name}\(/) } }
+      # A function-local lambda's operator() names its function too; only the function counts.
+      defs = ->(name) { syms.lines.select { |l| l.match?(/\s(?:\S+::)?#{name}\(/) && !l.include?('{lambda') } }
       suite.check('nm: each moved helper is defined once, in no gem namespace',
-                  %w[helper third].all? { |n| defs.call(n).size == 1 && defs.call(n).none? { |l| l.include?('bc2cpp_shard_') } })
+                  %w[helper third via_c program_site].all? { |n| defs.call(n).size == 1 && defs.call(n).none? { |l| l.include?('bc2cpp_shard_') } })
       suite.check('nm: a function naming per-gem state is defined in each gem', defs.call('via_bump').size == 2)
       shared = syms.lines.select { |l| l.include?('bc2cpp_cs_') && l.match?(/ [tTwW] /) }.map { |l| l.split(' ', 3).last }
       suite.check('nm: no shared helper is defined in two gems', !shared.empty? && shared.uniq.size == shared.size)

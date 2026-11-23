@@ -97,6 +97,9 @@ module SymbolCache
 
   # Rewrite one function's C++ text against `table`.
   def rewrite(code, table)
+    # PROGRAM_OWNER_SITES: a helper's program-wide calls name no slot, but need the owner call and nomethod bodies.
+    table.owner_call_used = true if code.include?('bc2cpp_owner_call_pw')
+    table.nomethod_used = true if code.include?('bc2cpp_nomethod_pw(')
     rewrite_interns(rewrite_funcalls(code, table), table)
   end
 
@@ -454,6 +457,7 @@ module SymbolCache
   # OWNER_CALL, with OWNER_CALL_ICACHE compiled out when BC2CPP_OWNER_ICACHE=0.
   def owner_call_source
     text = ENV['BC2CPP_OWNER_CALL_CORE'] == '0' ? OWNER_CALL : owner_call_core(OWNER_CALL)
+    text = program_owner_sites(text) if program_sites?
     ENV['BC2CPP_OWNER_ICACHE'] == '0' ? "#define BC2CPP_NO_OWNER_ICACHE 1\n#{text}" : text
   end
 
@@ -547,6 +551,104 @@ BC2CPP_SHARD_ONE_BODY static mrb_value bc2cpp_owner_call_argv(mrb_state* M, mrb_
     end
   end
 
+  # PROGRAM_OWNER_SITES: a shared helper's owner call and proven nomethod (HELPER_OWNER_CALL,
+  # codegen_outside_owner_call.rb) name their method by presym id, not by a slot of the gem's symbol table, and the
+  # owner site (BC2CPP_OWNERS_PW) is dated by the program's owner epoch, not the gem's, so the helper's text is the
+  # same in every gem and CROSS_GEM_SHARE keeps one copy. BC2CPP_HELPER_PROGRAM_SITES=0 (or OWNER_CALL_CORE off) keeps
+  # the per-gem forms.
+  PROGRAM_STATE_HEADER = File.expand_path('runtime/bc2cpp_program_state.hxx', __dir__)
+  # The fiber runtime's definer test is one per gem (bc2cpp_fiber_definer_p), so a site of a name it defines stays
+  # per gem; a program-wide site runs the core with no definer.
+  FIBER_RUNTIME_NAMES = %w[raise new yield resume transfer alive? current].freeze
+
+  def program_sites?(env = ENV)
+    env['BC2CPP_HELPER_PROGRAM_SITES'] != '0' && env['BC2CPP_OWNER_CALL_CORE'] != '0'
+  end
+
+  # The presym macro a program-wide site names `name` by, or nil (the site keeps the gem's slot).
+  def program_mid(name, owner_site: false)
+    return nil unless program_sites?
+    return nil if owner_site && FIBER_RUNTIME_NAMES.include?(name)
+
+    presym_macro(%("#{name}"))
+  end
+
+  # OWNER_SET_EPOCH holds for a program-wide site with the program's epoch in place of the gem's: the entry checks
+  # the calling VM itself and bumps the epoch when it changes, and every gem's symbol reset (a VM change it sees,
+  # gem_final) bumps it too, so a current epoch names the calling VM and no set outlives it. The kept call (ICACHE)
+  # is dated the same way. Its hits and lookups are not counted (the counters are each gem's).
+  OWNER_CALL_PROGRAM = <<~CPP
+    // PROGRAM_OWNER_SITES (symbol_cache.rb): MID is a presym id; the set is dated by bc2cpp_program_owner_epoch.
+    #define BC2CPP_OWNERS_PW(MID, ...) ([]() -> const bc2cpp_owner_desc* { static const char* const names[] = { __VA_ARGS__, nullptr }; static bc2cpp_owner_set s; static const bc2cpp_owner_desc d = { names, nullptr, &s, MID, 0 }; return &d; }())
+    static const bc2cpp_owner_gem bc2cpp_owner_program_state = {
+      &bc2cpp_program_owner_epoch,
+      nullptr,
+    };
+    BC2CPP_SHARD_ONE_BODY static mrb_value bc2cpp_owner_call_pw_argv(mrb_state* M, mrb_value recv, const bc2cpp_owner_desc* d, mrb_int argc, const mrb_value* argv) {
+      if (bc2cpp_program_owner_vm != M) {
+        bc2cpp_program_owner_vm = M;
+        ++bc2cpp_program_owner_epoch;
+      }
+      mrb_sym mid = (mrb_sym)d->mid;
+      if (mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return bc2cpp_yield_argv(M, recv, argc, argv);
+    #ifdef BC2CPP_OWNER_ICACHE
+      bc2cpp_owner_set& s = *d->set;
+      if (bc2cpp_owner_icache_hit_at(M, s, mrb_class(M, recv), mid, argc, bc2cpp_program_owner_epoch)) return bc2cpp_keep_call(M, [&] { return bc2cpp_call_found(M, recv, mid, &s.hit_m, s.hit_c, argc, argv, mrb_nil_value()); });
+    #endif
+      return bc2cpp_owner_call_core(M, recv, d, mid, &bc2cpp_owner_program_state, mrb_nil_value(), argc, argv, mrb_nil_value());
+    }
+    BC2CPP_SHARD_ONE_BODY [[gnu::noinline, maybe_unused]] static mrb_value bc2cpp_owner_call_pw0(mrb_state* M, mrb_value recv, const bc2cpp_owner_desc* d) {
+      return bc2cpp_owner_call_pw_argv(M, recv, d, 0, nullptr);
+    }
+    BC2CPP_SHARD_ONE_BODY [[gnu::noinline, maybe_unused]] static mrb_value bc2cpp_owner_call_pw1(mrb_state* M, mrb_value recv, const bc2cpp_owner_desc* d, mrb_value a) {
+      return bc2cpp_owner_call_pw_argv(M, recv, d, 1, &a);
+    }
+    BC2CPP_SHARD_ONE_BODY [[gnu::noinline, maybe_unused]] static mrb_value bc2cpp_owner_call_pw2(mrb_state* M, mrb_value recv, const bc2cpp_owner_desc* d, mrb_value a, mrb_value b) {
+      const mrb_value argv[2] = {a, b};
+      return bc2cpp_owner_call_pw_argv(M, recv, d, 2, argv);
+    }
+  CPP
+
+  # The kept-call test with the epoch as a parameter, so the program-wide entry shares it with the gem's.
+  ICACHE_HIT_EDIT = [
+    'static inline bool bc2cpp_owner_icache_hit(mrb_state* M, const bc2cpp_owner_set& s, struct RClass* klass, mrb_sym mid, mrb_int argc) {
+  if (s.hit_klass != klass || (mrb_int)s.hit_argc != argc || s.epoch != bc2cpp_owner_epoch) return false;',
+    'static inline bool bc2cpp_owner_icache_hit_at(mrb_state* M, const bc2cpp_owner_set& s, struct RClass* klass, mrb_sym mid, mrb_int argc, unsigned epoch) {
+  if (s.hit_klass != klass || (mrb_int)s.hit_argc != argc || s.epoch != epoch) return false;'
+  ].freeze
+  ICACHE_HIT_TAIL = [
+    '#ifdef BC2CPP_OWNER_ICACHE_STATS
+  ++bc2cpp_owner_icache_hits;
+#endif
+  return true;
+}
+#endif
+',
+    '  return true;
+}
+#endif
+// Its own region, so the stateless test above is a segment of its own (CROSS_GEM_SHARE).
+#ifdef BC2CPP_OWNER_ICACHE
+static inline bool bc2cpp_owner_icache_hit(mrb_state* M, const bc2cpp_owner_set& s, struct RClass* klass, mrb_sym mid, mrb_int argc) {
+  if (!bc2cpp_owner_icache_hit_at(M, s, klass, mid, argc, bc2cpp_owner_epoch)) return false;
+#ifdef BC2CPP_OWNER_ICACHE_STATS
+  ++bc2cpp_owner_icache_hits;
+#endif
+  return true;
+}
+#endif
+'
+  ].freeze
+
+  def program_owner_sites(text)
+    [ICACHE_HIT_EDIT, ICACHE_HIT_TAIL].each do |from, to|
+      raise "PROGRAM_OWNER_SITES: the owner-call source no longer has #{from.lines.first.strip}" unless text.include?(from)
+
+      text = text.sub(from) { to }
+    end
+    "#{text}#{OWNER_CALL_PROGRAM}"
+  end
+
   # The file-scope cache. Keyed on the mrb_state so a second live VM cannot read
   # the first one's ids, and reset from each gem's gem_final so a VM opened
   # later at a reused address cannot either. Symbols are never collected, so a
@@ -565,7 +667,9 @@ BC2CPP_SHARD_ONE_BODY static mrb_value bc2cpp_owner_call_argv(mrb_state* M, mrb_
     dyn_names = ENV['BC2CPP_SYM_DYN_NAMES'] != '0'
     checked = table.checks.any? { |check| check.to_i.positive? }
     checks = (0...[table.size, 1].max).map { |slot| table.checks[slot].to_i }.join(', ')
+    program = table.owner_call_used && program_sites?
     <<~CPP
+      #{program ? "#include \"#{PROGRAM_STATE_HEADER}\"" : ''}
       // BC2CPP_NOIPA: GCC's noipa keeps a slow-path call in place (see bc2cpp_guard_violation). Clang has no such
       // attribute and warns on it. maybe_unused: a translation unit may call only some of these helpers.
       #ifndef BC2CPP_NOIPA
@@ -596,7 +700,7 @@ BC2CPP_SHARD_ONE_BODY static mrb_value bc2cpp_owner_call_argv(mrb_state* M, mrb_
       static void bc2cpp_reset_symbol_cache() {
         bc2cpp_sym_state = nullptr;
         for (mrb_sym& s : bc2cpp_syms) s = 0;
-      #{table.native_singleton_used ? '  ++bc2cpp_nsc_epoch;' : ''}#{table.owner_call_used ? "\n  ++bc2cpp_owner_epoch;" : ''}
+      #{table.native_singleton_used ? '  ++bc2cpp_nsc_epoch;' : ''}#{table.owner_call_used ? "\n  ++bc2cpp_owner_epoch;" : ''}#{program ? "\n  ++bc2cpp_program_owner_epoch;" : ''}
       }
       static inline mrb_sym bc2cpp_sym(mrb_state* M, int i) {
         if (bc2cpp_sym_state != M) {
@@ -610,7 +714,7 @@ BC2CPP_SHARD_ONE_BODY static mrb_value bc2cpp_owner_call_argv(mrb_state* M, mrb_
         if (!s) s = mrb_intern_cstr(M, #{dyn_names ? 'bc2cpp_sym_dyn_names[e & 0x7fffffffu]' : 'bc2cpp_sym_names[i]'});
         return s;
       }
-      #{checked ? "static const unsigned char bc2cpp_sym_check[#{[table.size, 1].max}] = { #{checks} };\n#{CHECKED_SEND}" : ''}
+      #{checked ? "static const unsigned char bc2cpp_sym_check[#{[table.size, 1].max}] = { #{checks} };\n#{checked_send_source}" : ''}
       // mrb_funcall_id with the symbol lookup folded in, so a dynamic call site is one
       // call. Same argc limit and error as mruby's (MRB_FUNCALL_ARGC_MAX, src/vm.c).
       static mrb_value bc2cpp_send(mrb_state* M, mrb_value recv, int i, mrb_int argc, ...) {
@@ -629,7 +733,7 @@ BC2CPP_SHARD_ONE_BODY static mrb_value bc2cpp_owner_call_argv(mrb_state* M, mrb_
         return bc2cpp_funcall_argv(M, recv, bc2cpp_sym(M, i), argc, argv);
       }
       #{table.native_singleton_used ? NATIVE_SINGLETON : ''}#{table.native_slots.empty? ? '' : native_slot_source(table)}#{table.owner_call_used ? owner_call_source : ''}
-      #{table.nomethod_used ? NOMETHOD : ''}
+      #{table.nomethod_used ? nomethod_source : ''}
       #{GUARD_VIOLATION}#{table.hint_violation_used ? HINT_VIOLATION : ''}
       #{table.nil_receiver_used ? NIL_RECEIVER : ''}
     CPP
@@ -1184,6 +1288,54 @@ BC2CPP_SHARD_ONE_BODY static mrb_value bc2cpp_owner_call_argv(mrb_state* M, mrb_
     }
   CPP
   private_constant :NOMETHOD
+
+  # PROGRAM_OWNER_SITES: the nomethod body takes the method id, so a shared helper's proven nomethod
+  # (bc2cpp_nomethod_pw, a presym id) and the gem's slot form (bc2cpp_nomethod) run the same one.
+  NOMETHOD_MID_EDIT = [
+    "[[noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_nomethod_argv(mrb_state* M, mrb_value recv, int i, mrb_int argc, const mrb_value* argv) {\n  mrb_sym mid = bc2cpp_sym(M, i);\n",
+    "[[noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_nomethod_mid_argv(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_int argc, const mrb_value* argv) {\n"
+  ].freeze
+  NOMETHOD_PROGRAM = <<~CPP
+    [[noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_nomethod_argv(mrb_state* M, mrb_value recv, int i, mrb_int argc, const mrb_value* argv) {
+      bc2cpp_nomethod_mid_argv(M, recv, bc2cpp_sym(M, i), argc, argv);
+    }
+    #{COLD_RAISE} static mrb_value bc2cpp_nomethod_pw(mrb_state* M, mrb_value recv, mrb_sym mid) {
+      bc2cpp_nomethod_mid_argv(M, recv, mid, 0, nullptr);
+    }
+    #{COLD_RAISE} static mrb_value bc2cpp_nomethod_pw(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_value a) {
+      bc2cpp_nomethod_mid_argv(M, recv, mid, 1, &a);
+    }
+  CPP
+  private_constant :NOMETHOD_MID_EDIT, :NOMETHOD_PROGRAM
+
+  def nomethod_source
+    return NOMETHOD unless program_sites?
+
+    from, to = NOMETHOD_MID_EDIT
+    raise 'PROGRAM_OWNER_SITES: the nomethod source no longer has bc2cpp_nomethod_argv' unless NOMETHOD.include?(from)
+
+    text = NOMETHOD.sub(from) { to }
+    at = text.index("#{COLD_RAISE} static mrb_value bc2cpp_nomethod(")
+    text[0...at] + NOMETHOD_PROGRAM + text[at..]
+  end
+
+  # CHECKED_SEND with `public_send` as its presym id when the build has one: the function-local cache of its interned
+  # id is a state of the gem's, so bc2cpp_check_send stayed one copy per gem.
+  CHECKED_SEND_PUBLIC_SEND = [
+    "static bool bc2cpp_is_public_send(mrb_state* M, mrb_sym mid) {\n  static mrb_state* st; static mrb_sym ps;\n  if (st != M) { ps = mrb_intern_lit(M, \"public_send\"); st = M; }\n  return mid == ps;\n}\n",
+    "static bool bc2cpp_is_public_send(mrb_state*, mrb_sym mid) {\n  return mid == %s;\n}\n"
+  ].freeze
+  private_constant :CHECKED_SEND_PUBLIC_SEND
+
+  def checked_send_source
+    macro = program_mid('public_send')
+    return CHECKED_SEND unless macro
+
+    from, to = CHECKED_SEND_PUBLIC_SEND
+    raise 'PROGRAM_OWNER_SITES: the checked-send source no longer has bc2cpp_is_public_send' unless CHECKED_SEND.include?(from)
+
+    CHECKED_SEND.sub(from) { format(to, macro) }
+  end
 
   # GUARD_VIOLATION: the else arm of a guard whose register the
   # closed world proves holds a stable class constant. Unlike bc2cpp_nomethod it
