@@ -1335,7 +1335,7 @@ BC2CPP_MAIN = lambda do
   # CONST_BINDING_DROP: no local either.
   CodeGen.const_binding_drop = ConstBindingDrop.analyze(
     ireps: ireps, root_label: root_label, stable_values: CodeGen.stable_value_constants,
-    elided: CodeGen.const_def_elide.names, lexical: LexicalConsts.analyze(ireps, static: true),
+    elided: CodeGen.const_def_elide.names, lexical: LexicalConsts.analyze(ireps, static: true), facts: constant_facts.groups,
     closed_world: closed_world, linked_native: outside_native, spelled_native: (native_paths + outside_native).uniq,
     mixins: { superclass_of: superclass_of, included: included_modules, prepended: prepended_modules,
               unknown: unknown_mixins, modules: declared_modules }

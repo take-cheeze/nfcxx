@@ -130,7 +130,7 @@ class CodeGen
            "}\n"
     out << vm_cache_bind('bc2cpp_cconst_bind', 'bc2cpp_cconst_state', 'CONST_SITE_CACHE')
     dropped = live.any? { |slot| slot[:drop] }
-    out << emit_const_drop_table(drop_defs, drop_reads) if dropped || !drop_defs.empty? || !drop_reads.empty?
+    out << emit_const_drop_table(drop_defs, drop_reads) if dropped || @const_drop_put || !drop_defs.empty? || !drop_reads.empty?
     tests = [0]
     lists = {}
     rows = live.map do |slot|
@@ -262,8 +262,14 @@ class CodeGen
     self.class.const_binding_drop.index(name)
   end
 
-  # The bc2cpp_cdef_set_<N> call of the one SETCONST of +name+, in the class body of +owner+.
+  # The write of the one SETCONST of +name+, in the class body of +owner+: a PLAIN_WRITE (ConstBindingDrop.plain_write?)
+  # is the table store alone, any other the bc2cpp_cdef_set_<N> call of its row.
   def const_drop_set(name, owner, value)
+    if self.class.const_binding_drop.names.fetch(name)[:plain]
+      @const_drop_put = true
+      return "  bc2cpp_cdef_put(M, #{const_drop_index(name)}, #{value});\n"
+    end
+
     @const_drop_defs ||= []
     n = @const_drop_defs.size
     fn = owner_class_fn_name(owner)
@@ -317,6 +323,10 @@ class CodeGen
            "  *out = mrb_undef_p(v) ? mrb_nil_value() : v;\n" \
            "  return true;\n" \
            "}\n"
+    out << "[[maybe_unused]] [[gnu::noinline]] static void bc2cpp_cdef_put(mrb_state* M, int k, mrb_value v) {\n" \
+           "  bc2cpp_cconst_bind(M);\n" \
+           "  mrb_ary_set(M, bc2cpp_cdef_table(M, true), k + 1, mrb_nil_p(v) ? mrb_undef_value() : v);\n" \
+           "}\n"
     unless defs.empty?
       fuse = class_test_fuse?
       rows = defs.map do |_, row|
@@ -336,10 +346,10 @@ class CodeGen
              "  if (mrb_type(v) == MRB_TT_CLASS || mrb_type(v) == MRB_TT_MODULE) {\n" \
              "    mrb_const_set(M, mrb_obj_value(c), mrb_intern_cstr(M, bc2cpp_const_strings + d.name), v);\n" \
              "  }\n" \
-             "  mrb_ary_set(M, bc2cpp_cdef_table(M, true), d.k + 1, mrb_nil_p(v) ? mrb_undef_value() : v);\n" \
+             "  bc2cpp_cdef_put(M, d.k, v);\n" \
              "}\n"
       defs.each_with_index do |(index, _), i|
-        out << "static inline void bc2cpp_cdef_set_#{index}(mrb_state* M#{owner}, mrb_value v) " \
+        out << "[[gnu::always_inline]] static inline void bc2cpp_cdef_set_#{index}(mrb_state* M#{owner}, mrb_value v) " \
                "{ bc2cpp_cdef_set(M, #{i}#{fuse ? '' : ', c'}, v); }\n"
       end
     end
@@ -347,7 +357,8 @@ class CodeGen
       rows = reads.map { |_, row| "  {#{row[:k]}, #{static_const_string(row[:name])}},\n" }
       out << "struct bc2cpp_cdef_read { uint16_t k, name; };\n"
       out << "static const bc2cpp_cdef_read bc2cpp_cdef_reads[] = {\n#{rows.join}};\n"
-      out << "[[gnu::noinline]] static mrb_value bc2cpp_cdef_mfill(mrb_state* M, int i, mrb_value recv) {\n" \
+      out << "[[gnu::noinline]] static mrb_value bc2cpp_cdef_mget(mrb_state* M, int i, mrb_value recv) {\n" \
+             "  if (bc2cpp_cdef_mhave[i]) return bc2cpp_cdef_mslots[i];\n" \
              "  bc2cpp_cconst_bind(M);\n" \
              "  mrb_value v;\n" \
              "  if (bc2cpp_cdef_value(M, bc2cpp_cdef_reads[i].k, &v)) {\n" \
@@ -358,8 +369,8 @@ class CodeGen
              "  return mrb_const_get(M, recv, mrb_intern_cstr(M, bc2cpp_const_strings + bc2cpp_cdef_reads[i].name));\n" \
              "}\n"
       reads.each_with_index do |(index, _), i|
-        out << "static inline mrb_value bc2cpp_cdef_mget_#{index}(mrb_state* M, mrb_value recv) " \
-               "{ return bc2cpp_cdef_mhave[#{i}] ? bc2cpp_cdef_mslots[#{i}] : bc2cpp_cdef_mfill(M, #{i}, recv); }\n"
+        out << "[[gnu::always_inline]] static inline mrb_value bc2cpp_cdef_mget_#{index}(mrb_state* M, mrb_value recv) " \
+               "{ return bc2cpp_cdef_mget(M, #{i}, recv); }\n"
       end
     end
     out

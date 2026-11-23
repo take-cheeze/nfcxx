@@ -376,12 +376,15 @@ Dir.mktmpdir('bc2cpp-const-binding-drop') do |dir|
     saved.each { |k, v| ENV[k] = v }
   end
   code, err = generate.call(dir, nil)
-  dropped = err.scan(/^  CONST_BINDING_DROP (\S+)$/).flatten
+  dropped = err.scan(/^  CONST_BINDING_DROP (\S+)(?: plain)?$/).flatten
+  plain = err.scan(/^  CONST_BINDING_DROP (\S+) plain$/).flatten
   kept = err.scan(/^  CONST_BINDING_KEPT (\S+) \((.*)\)$/).to_h
   suite.check('CONST_BINDING_DROP: the value constants read only by generated code are dropped',
               (%w[CdDrop::LATE CdDrop::BEFORE CdDrop::AFTER CdDrop::KLASS CdDrop::Inner::DEEP] - dropped).empty?)
   suite.check('CONST_BINDING_DROP: a constant read by const_get keeps its binding', kept['BY_NAME'] == 'spelled by another opcode')
   suite.check('CONST_BINDING_DROP: a class keeps its binding', !dropped.include?('CdDrop::Inner') && !kept.key?('Inner'))
+  suite.check('CONST_BINDING_DROP: an Array value is only stored; a value that may be a class keeps the checked write',
+              plain.include?('CdDrop::LATE') && !plain.include?('CdDrop::KLASS') && code.include?('bc2cpp_cdef_put(M, '))
   suite.check('CONST_BINDING_DROP: a dropped definition makes no mrb_const_set',
               code.include?('bc2cpp_cdef_set') && !code.match?(/mrb_const_set\(M, [^;]*\b(?:MRB_SYM\(LATE\)|"LATE")/))
   _, off_err = generate.call(File.join(dir, 'off'), '0')

@@ -38,8 +38,9 @@ module ConstBindingDrop
     ENV['BC2CPP_DROP_CONST_BINDINGS'] != '0' && ENV['BC2CPP_STATIC_CONSTANTS'] != '0'
   end
 
-  def analyze(ireps:, root_label:, stable_values:, elided:, lexical:, closed_world:, linked_native:, spelled_native:,
-              mixins:)
+  # facts: the BYTECODE_CONSTANT_FACTS groups, for the plain writes (plain_write?).
+  def analyze(ireps:, root_label:, stable_values:, elided:, lexical:, facts:, closed_world:, linked_native:,
+              spelled_native:, mixins:)
     refusal = world_refusal(ireps, root_label, stable_values, closed_world, linked_native)
     reached, why = ConstDefElide.native_reached(linked_native, mixins)
     refusal ||= why
@@ -72,7 +73,8 @@ module ConstBindingDrop
       why = name_refusal(name, sites, reads[name], ireps, root_label, once, elided, lexical, other, spelled, reached)
       next kept[name] = why if why
 
-      names[name] = { owner: lexical.site_keys[sites.first[1]].delete_suffix("::#{name}") }
+      owner = lexical.site_keys[sites.first[1]].delete_suffix("::#{name}")
+      names[name] = { owner: owner, plain: plain_write?(facts[name], owner, closed_world) }
     end
     names.keys.sort.each_with_index { |name, i| names[name][:index] = i }
     Result.new(names: names, refusal: nil, kept: kept, fingerprint: Zlib.crc32(names.keys.sort.join("\n")) & 0x3fff_ffff)
@@ -105,12 +107,24 @@ module ConstBindingDrop
     nil
   end
 
+  # PLAIN_WRITE: the write needs neither its owner nor its name, only the table store: every value the binding can hold
+  # is of a known class that is not Class or Module (nothing to name), and its owner can never be frozen (no
+  # FrozenError to raise). Otherwise bc2cpp_cdef_set checks both at run time.
+  NAMED_CLASSES = %i[Class Module].freeze
+
+  def plain_write?(fact, owner, closed_world)
+    classes = fact&.classes
+    return false if classes.nil? || classes.empty? || classes.any? { |c| NAMED_CLASSES.include?(c.to_sym) }
+
+    !closed_world.class_object_freeze_possible?(owner.split('::').last)
+  end
+
   def report(result)
     if result.refusal
       warn "== constant bindings dropped (CONST_BINDING_DROP): off (#{result.refusal}) =="
     else
       warn "== constant bindings dropped (CONST_BINDING_DROP): #{result.names.size} names, #{result.kept.size} kept =="
-      result.names.sort.each { |name, row| warn "  CONST_BINDING_DROP #{row[:owner]}::#{name}" }
+      result.names.sort.each { |name, row| warn "  CONST_BINDING_DROP #{row[:owner]}::#{name}#{' plain' if row[:plain]}" }
       result.kept.sort.each { |name, why| warn "  CONST_BINDING_KEPT #{name} (#{why})" }
     end
     warn ''
