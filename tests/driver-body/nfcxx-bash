@@ -251,25 +251,9 @@ ensure_tool "$root/tools/cuda-rewrite" "$root/build/cuda-rewrite" || exit $?
 # A compile and link (or a link of objects) runs eccp in a temporary directory, which the EXIT trap removes. eccp writes
 # <stem>.o, <stem>.ii and <stem>.ti into its working directory, and the prelinker reads the .ii and .ti there, so the
 # records of one build could be read by the next build in the same directory. The arguments of such a run are made
-# absolute first (ecp_args), because its working directory changes. A -c compile is not moved: the link that follows reads
+# absolute first (the -isystem list below), because its working directory changes. A -c compile is not moved: the link that follows reads
 # its <stem>.ii and <stem>.ti beside the object (see "-c" before the eccp call).
 moves=0; eccp_dir=""
-ecp_args() {  # ecp_args ARG...: ARG as eccp receives it, for each ARG in order, into ecp_list (one ruby call for all of them)
-  local rec done=0 group=
-  ecp_list=()
-  [ $# -gt 0 ] || return 0
-  # the port (tests/nfcxx-ecp-arg/run.sh checks it against the bash original): NUL-separated records, a group "k ecp" with one
-  # v ANSWER per argument, and the end marker z, which the port writes last: without it the helper stopped early and the driver stops
-  while IFS= read -r -d '' rec; do
-    case $rec in
-      k*) group=${rec:1} ;;
-      v*) if [ "$group" = ecp ]; then ecp_list+=("${rec:1}"); fi ;;
-      z) done=1 ;;
-    esac
-  done < <("${RUBY:-ruby}" "$root/scripts/ecp-arg.rb" --batch "$moves" "$@")
-  [ $done = 1 ] || { echo "nfcxx: scripts/ecp-arg.rb stopped before its end (the argument answers are incomplete)" >&2; exit 1; }
-  return 0
-}
 state_put() {  # state_put NAME VALUE...: one group of the records scripts/driver-state.rb reads (k NAME, then v VALUE for each)
   local n=$1 v
   shift
@@ -374,7 +358,7 @@ case $early_status in
     exec "$root/build/cuda-rewrite" --hip ${hip_opts[@]+"${hip_opts[@]}"} "${cu_inputs[0]}" ;;
   *) exit $early_status ;;
 esac
-[ $compile_only = 1 ] || moves=1   # a -c compile stays in the user's directory (see ecp_args)
+[ $compile_only = 1 ] || moves=1   # a -c compile stays in the user's directory (see the -isystem list)
 # The unit of the time log's lines (scripts/trace.sh): the first source, else the output. Tracing starts before the .cu
 # and .cpp2 inputs are prepared, whose stages it records.
 # The trace unit's assignment is planned by scripts/nfcxx-setup.rb (trace_unit_text) and passed in NFCXX_SETUP_TRACE_UNIT when the
@@ -527,7 +511,21 @@ eval "$setup_rest"
 [ -z "${setup_span_start:-}" ] || trace_range "$setup_span_start" "$setup_span_stop" "host C++ headers" driver
 if [ "$setup_rest_status" != 0 ]; then printf '%s' "$setup_rest_err" >&2; exit "$setup_rest_status"; fi
 # -isystem DIR from the command line: searched after the host's own directories, as the host compiler does.
-ecp_args ${sysdirs[@]+"${sysdirs[@]}"}
+# ecp-planner-begin: the answers for the -isystem directories (scripts/ecp-arg.rb, the planner, called directly). Its records are
+# NUL-separated: a group "k ecp" with one v ANSWER per argument, and the end marker z, which the planner writes last (without it
+# the planner stopped early, and the driver stops). The answers are in ecp_list. No argument, no planner call.
+ecp_list=(); ecp_in=(${sysdirs[@]+"${sysdirs[@]}"}); ecp_done=0; ecp_group=
+if [ ${#ecp_in[@]} -gt 0 ]; then
+  while IFS= read -r -d '' ecp_rec; do
+    case $ecp_rec in
+      k*) ecp_group=${ecp_rec:1} ;;
+      v*) if [ "$ecp_group" = ecp ]; then ecp_list+=("${ecp_rec:1}"); fi ;;
+      z) ecp_done=1 ;;
+    esac
+  done < <("${RUBY:-ruby}" "$root/scripts/ecp-arg.rb" --batch "$moves" "${ecp_in[@]}")
+  [ $ecp_done = 1 ] || { echo "nfcxx: scripts/ecp-arg.rb stopped before its end (the argument answers are incomplete)" >&2; exit 1; }
+fi
+# ecp-planner-end
 for d in ${ecp_list[@]+"${ecp_list[@]}"}; do sys_inc+=("--sys_include=$d"); done
 # -include FILE is found through the include directories as well as here, so it is made absolute only when it exists here.
 pre_opts=(); for f in ${preinc[@]+${preinc[@]+"${preinc[@]}"}}; do

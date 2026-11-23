@@ -1,9 +1,12 @@
 #!/bin/bash
-# Differential test of the link argument loop: nfcxx's link_args and ecp_args (thin bash, calling scripts/nfcxx-linkargs.rb
-# and scripts/ecp-arg.rb --batch) against tests/nfcxx-linkargs/oracle.sh (the bash loop and ecp_arg, verbatim from before the
-# port). Each case runs the same arguments in the same sandbox (rebuilt before each run) with the same environment, once per
-# side. The stdout (the eflist and userinc values, declared), the standard error, the status and the files left must be the
-# same.
+# Differential test of the link argument loop and of the -isystem planner call: nfcxx's link_args (thin bash, calling
+# scripts/nfcxx-linkargs.rb) and the body's ecp-planner block (between its "ecp-planner" markers, calling scripts/ecp-arg.rb
+# --batch) against tests/nfcxx-linkargs/oracle.sh (the bash loop and ecp_arg, verbatim from before the port). Each case runs the
+# same arguments in the same sandbox (rebuilt before each run) with the same environment, once per side. The stdout (the eflist
+# and userinc values, declared), the standard error, the status and the files left must be the same.
+#
+# The planner call's answers and its stop path are also checked against tests/nfcxx-linkargs/golden/ecp-args.txt: the golden
+# was recorded from the bash function ecp_args (retired with the planner call), so its cases keep the old answers and messages.
 #
 #   bash tests/nfcxx-linkargs/run.sh
 set -u
@@ -12,9 +15,19 @@ repo=$(cd "$here/../.." && pwd -P)
 ruby_bin=$(command -v ruby)
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 sb=$work/sb
-# the functions as nfcxx has them now
-sed -n '/^ecp_args() {/,/^}/p' "$repo/tests/driver-body/nfcxx-bash" > "$work/thin.sh"; cat "$here/thin-link-args.sh" >> "$work/thin.sh"
-[ -s "$work/thin.sh" ] || { echo "nfcxx-linkargs: no link functions in nfcxx" >&2; exit 2; }
+golden=$here/golden/ecp-args.txt
+# the link functions, and the body's planner block as a function (ecp_run: the -isystem answers of sysdirs, into ecp_list)
+sed -n '/^# ecp-planner-begin/,/^# ecp-planner-end/p' "$repo/tests/driver-body/nfcxx-bash" > "$work/ecp.sh"
+[ -s "$work/ecp.sh" ] || { echo "nfcxx-linkargs: no ecp planner block in nfcxx" >&2; exit 2; }
+{ echo 'ecp_run() {'; cat "$work/ecp.sh"; echo '}'; cat "$here/thin-link-args.sh"; } > "$work/thin.sh"
+[ -s "$golden" ] || { echo "nfcxx-linkargs: no golden at $golden" >&2; exit 2; }
+
+# the golden's lines for the case NAME (the lines after its "== NAME" line, up to the next case)
+golden_entry() {
+  awk -v n="== $1" '$0 == n { f = 1; next } /^== / { f = 0 } f' "$golden"
+}
+# the paths that vary per run, and the bash's own location in an error message, as the golden has them
+nrm() { sed -e "s#$work#<work>#g" -e "s#[^ []*: line [0-9]*: #SRC: line N: #g"; }
 
 # the CUDA home and the CUB archive a case may name (cuda-cub prints the archive when it is newer than its inputs)
 mkdir -p "$work/cuda/lib64" "$work/cuda-nolib" "$work/cubdir/pathb/sm75"
@@ -60,7 +73,7 @@ link_case() {  # link_case NAME COMPILE_ONLY MOVES EXTRA_ENV FILE...: the port a
   fi
 }
 
-# the same for the batched ecp_args: each answer is the bash ecp_arg's, in order (moves 0 and 1)
+# the -isystem planner call: each answer is the bash ecp_arg's, in order (moves 0 and 1), and the answers are the golden's
 ecp_case() {  # ecp_case NAME MOVES ARG...
   local name=$1 mv=$2; shift 2
   local t o
@@ -69,15 +82,15 @@ ecp_case() {  # ecp_case NAME MOVES ARG...
     set -euo pipefail
     root=$1; RUBY=$2; src=$3; moves=$4; kind=$5; shift 5
     source "$src"
-    if [ "$kind" = thin ]; then ecp_args "$@"; for v in ${ecp_list[@]+"${ecp_list[@]}"}; do printf "[%s]\n" "$v"; done
+    if [ "$kind" = thin ]; then sysdirs=("$@"); ecp_run; for v in ${ecp_list[@]+"${ecp_list[@]}"}; do printf "[%s]\n" "$v"; done
     else for a in "$@"; do printf "[%s]\n" "$(ecp_arg "$a")"; done; fi' bash "$repo" "$ruby_bin" "$work/thin.sh" "$mv" thin "$@" 2>&1)
   o=$(cd "$sb" && "${base_env[@]}" bash -c '
     set -euo pipefail
     root=$1; RUBY=$2; src=$3; moves=$4; kind=$5; shift 5
     source "$src"
     for a in "$@"; do printf "[%s]\n" "$(ecp_arg "$a")"; done' bash "$repo" "$ruby_bin" "$here/oracle.sh" "$mv" oracle "$@" 2>&1)
-  if [ "$t" = "$o" ]; then pass=$((pass + 1))
-  else fail=$((fail + 1)); echo "FAIL $name"; echo "--- oracle"; echo "$o"; echo "--- port"; echo "$t"; fi
+  if [ "$t" = "$o" ] && [ "$(printf %s "$t" | nrm)" = "$(golden_entry "$name")" ]; then pass=$((pass + 1))
+  else fail=$((fail + 1)); echo "FAIL $name"; echo "--- oracle"; echo "$o"; echo "--- port"; echo "$t"; echo "--- golden"; golden_entry "$name"; fi
 }
 
 # -I, -l and -L
@@ -129,7 +142,7 @@ link_case "refused -Bstatic in a span" 0 1 "" -Wl,-Bstatic,-lm a.o
 link_case "refused start-group" 0 1 "" -Wl,--start-group libfoo.a -Wl,--end-group
 link_case "not refused: a longer option name" 0 1 "" -Wl,--whole-archivex a.o -Wl,--as-neededx
 
-# ecp_args: one batch for the arguments, the same answers as ecp_arg one at a time
+# the -isystem planner call: one batch for the arguments, the same answers as ecp_arg one at a time (and the golden's)
 ecp_case "batch: paths and options, moves 1" 1 a.o "my obj.o" sub -Iinc -Lsub "-Wl,-rpath,sub" -O2 "" nothere.o dangling.o
 ecp_case "batch: link options with files, moves 1" 1 "-Wl,--version-script=x.map" "-Wl,-soname,a.o" "-Wl,--dependency-file=sub/d.d" "-Wl,a,,b," "-Wl,x=sub/d.d"
 ecp_case "batch: no answers" 1
@@ -150,22 +163,25 @@ mk_crash_ruby() {  # mk_crash_ruby MODE FILE: MODE partial (60 bytes, status 3) 
   } > "$2"
   chmod +x "$2"
 }
-crash_case() {  # crash_case NAME MODE KIND ARG...: KIND link (link_args, the files) or ecp (ecp_args, the arguments)
+crash_case() {  # crash_case NAME MODE KIND ARG...: KIND link (link_args, the files) or ecp (the planner call, the arguments)
   local name=$1 mode=$2 kind=$3; shift 3
-  local w=$work/crash-ruby-$mode out err rc call
+  local w=$work/crash-ruby-$mode out err rc call got
   mk_crash_ruby "$mode" "$w"
-  [ "$kind" = link ] && call='link_args 0 1 "$@"' || call='ecp_args "$@"'
+  [ "$kind" = link ] && call='link_args 0 1 "$@"' || call='sysdirs=("$@"); ecp_run'
   make_sb
   out=$(cd "$sb" && "${base_env[@]}" bash -c '
     set -euo pipefail
-    root=$1; RUBY=$2; source "$3"; shift 3
+    root=$1; RUBY=$2; source "$3"; moves=1; shift 3
     '"$call"'
     echo reached' bash "$repo" "$w" "$work/thin.sh" "$@" 2>"$work/err"); rc=$?
   err=$(cat "$work/err")
-  if [ "$rc" = 1 ] && [ "$out" = "" ] && [[ "$err" == *"stopped before its end"* ]]; then
+  got=$(printf 'status %s\nstdout [%s]\nstderr [%s]' "$rc" "$out" "$(printf %s "$err" | nrm)")
+  if [ "$kind" = ecp ] && [ "$got" = "$(golden_entry "$name")" ] && [ "$rc" = 1 ] && [ "$out" = "" ] && [[ "$err" == *"stopped before its end"* ]]; then
+    pass=$((pass + 1))
+  elif [ "$kind" = link ] && [ "$rc" = 1 ] && [ "$out" = "" ] && [[ "$err" == *"stopped before its end"* ]]; then
     pass=$((pass + 1))
   else
-    fail=$((fail + 1)); echo "FAIL $name"; echo "  status $rc"; echo "  stdout [$out]"; echo "  stderr [$err]"
+    fail=$((fail + 1)); echo "FAIL $name"; echo "  status $rc"; echo "  stdout [$out]"; echo "  stderr [$err]"; echo "  golden:"; golden_entry "$name" | sed 's/^/    /'
   fi
 }
 crash_case "link: the helper cut partway exits the driver with status 1" partial link -lm -lpthread -lz -lfoo -lbar -lbaz -lqux a.o
