@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# The check of scripts/nfcxx-cuda-device.rb against nfcxx's own CUDA device build. For each case of
+# The check of scripts/nfcxx-cuda-device.rb against nfcxx's CUDA device build. For each case of
 # tests/nfcxx-cuda-device/cases.txt, the case's tree is made (stub tools, a toolkit, a -I directory, a cache entry), the port
-# prints the commands for it, and oracle.sh (nfcxx's functions with the tools stubbed) prints the commands the bash runs on
-# the same tree and environment. The two must print the same lines in the same order, with the same status. A case the port
-# refuses as "unported" (exit 3) is counted, not compared.
+# prints the commands for it, and oracle.sh prints the commands nfcxx's build runs on the same tree and environment (recorded in
+# golden/NAME.txt). The two must print the same lines in the same order, with the same status. A case the port refuses as
+# "unported" (exit 3) is counted, not compared; every case needs its golden, unported or not.
 #   tests/nfcxx-cuda-device/run.sh     runs every case; exit 1 on a mismatch
 cd "$(dirname "$0")/../.." || exit 2
 here=tests/nfcxx-cuda-device
 src=$PWD/$here/fixtures/mul2.cu
 work=$(mktemp -d) || exit 2
 trap 'rm -rf "$work"' EXIT
-pass=0; fail=0; skipped=0
+pass=0; fail=0; skipped=0; ncases=0
 
 trim() { local s=$1; s=${s#"${s%%[![:space:]]*}"}; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
 
@@ -40,10 +40,14 @@ setup() {  # setup W HAVE: the case's tree: nfcxx's root (W/root) with stub tool
 
 while IFS= read -r line; do
   case $line in ''|'#'*) continue ;; esac
+  ncases=$((ncases + 1))
   IFS='|' read -r name envs have kernels groups args <<< "$line"
   name=$(trim "$name"); envs=$(trim "$envs"); have=$(trim "$have")
   kernels=$(trim "$kernels"); groups=$(trim "$groups"); args=$(trim "$args")
   for v in envs have kernels groups args; do [ "${!v}" = - ] && printf -v "$v" '%s' ''; done
+  if [ ! -r "$here/golden/$name.txt" ]; then
+    fail=$((fail + 1)); echo "FAIL $name (no golden)"; continue
+  fi
   w=$work/case
   envs=${envs//@W@/$w}; args=${args//@W@/$w}
   kernels=${kernels//,/ }; groups=${groups//,/ }
@@ -63,24 +67,24 @@ while IFS= read -r line; do
     skipped=$((skipped + 1)); echo "skip $name (${pout#unported: })"; continue
   fi
 
-  # the oracle, on a fresh tree of the same shape
-  setup "$w" "$have"
-  oout=$(env -i PATH="$PATH" "${allenv[@]}" CU_TEST_ROOT="$w/root" CU_TEST_TMP="$w/tmp" CU_TEST_LOG="$w/oracle.log" \
-           CU_TEST_KERNELS="$kernels" CU_TEST_GROUPS="$groups" \
-           bash "$here/oracle.sh" "$w/root" "$src" "${argw[@]}" 2>&1); ost=$?
+  # the recorded build (golden/NAME.txt, normalized when it was recorded)
+  oout=$(bash "$here/oracle.sh" "$name"); ost=$?
 
-  # the PID of a cache store's temporary directory is not part of the plan
   # the prefixes (OUT, APP, ENV1) are the redirections and environment of the next command: the oracle's stubs do not see them
+  # the work tree, the checkout and the PID of a cache store's temporary directory are normalized as the goldens are
   pout=$(printf '%s\n' "$pout" | grep -v '^\(OUT\|APP\|ENV1\) ')
-  pnorm=$(printf '%s\n' "$pout" | sed 's/\.tmp\.[0-9][0-9]*/.tmp.PID/g')
-  onorm=$(printf '%s\n' "$oout" | sed 's/\.tmp\.[0-9][0-9]*/.tmp.PID/g')
+  pnorm=$(printf '%s\n' "$pout" | sed -e "s#$work#@WORK@#g" -e "s#$PWD#@REPO@#g" -e 's/\.tmp\.[0-9][0-9]*/.tmp.PID/g')
+  onorm=$oout
   if [ "$pst" = "$ost" ] && [ "$pnorm" = "$onorm" ]; then
     pass=$((pass + 1))
   else
-    fail=$((fail + 1)); echo "FAIL $name (port status $pst, oracle status $ost)"
+    fail=$((fail + 1)); echo "FAIL $name (port status $pst, golden status $ost)"
     diff <(printf '%s\n' "$pnorm") <(printf '%s\n' "$onorm") | head -12 | sed 's/^/  /'
   fi
 done < "$here/cases.txt"
+# no golden without a case
+ngold=$(ls "$here/golden" | wc -l)
+[ "$ngold" = "$ncases" ] || { fail=$((fail + 1)); echo "FAIL goldens: $ngold golden files for $ncases cases"; }
 # the phases: the prep, emit and finish plans together are the all-phase plan (the composition plans them one at a time, with the
 # facts each stage made). The mul2 case with its group, and the cubin ptxas lines.
 phase_fail=0

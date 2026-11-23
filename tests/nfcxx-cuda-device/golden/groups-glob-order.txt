@@ -1,0 +1,14 @@
+status 0
+RUN @WORK@/case/root/build/cuda-rewrite -I@REPO@/tests/nfcxx-cuda-device/fixtures --edg-launches @REPO@/tests/nfcxx-cuda-device/fixtures/mul2.cu
+RUN @WORK@/case/root/build/cuda-rewrite -I@REPO@/tests/nfcxx-cuda-device/fixtures -DCUDART_VERSION=12040 -DCUDA_VERSION=12040 --device --kernels=@WORK@/case/tmp/mul2.dev.kernels @REPO@/tests/nfcxx-cuda-device/fixtures/mul2.cu
+RUN ensure_tool @WORK@/case/root/tools/pathb-ptx-emit @WORK@/case/root/build/pathb-ptx-emit
+RUN rm -rf @WORK@/case/tmp/mul2.groups
+RUN @WORK@/case/root/scripts/pathb-dump.rb --cuda-device -DCUDART_VERSION=12040 -DCUDA_VERSION=12040 --ir --freestanding @WORK@/case/tmp/mul2.dev.cpp
+RUN ruby @WORK@/case/root/scripts/pathb-ir-opt.rb --inline --sroa @WORK@/case/tmp/mul2.dev.ir
+RUN mv @WORK@/case/tmp/mul2.dev.ir.opt @WORK@/case/tmp/mul2.dev.ir
+RUN @WORK@/case/root/build/pathb-ptx-emit --emit --sm=75 --f2i=convert --int=gpu --groups-dir=@WORK@/case/tmp/mul2.groups --max-const-bytes=65536 --max-ptx-lines=1000000 --kernel=mul2 @WORK@/case/tmp/mul2.dev.ir
+JOBS 4
+RUN @WORK@/case/cuda/bin/ptxas -arch=sm_75 @WORK@/case/tmp/mul2.groups/g0000.ptx -o @WORK@/case/tmp/mul2.groups/g0000.cubin
+RUN @WORK@/case/cuda/bin/ptxas -arch=sm_75 @WORK@/case/tmp/mul2.groups/g0001.ptx -o @WORK@/case/tmp/mul2.groups/g0001.cubin
+RUN @WORK@/case/cuda/bin/ptxas -arch=sm_75 @WORK@/case/tmp/mul2.groups/g0002.ptx -o @WORK@/case/tmp/mul2.groups/g0002.cubin
+RUN @WORK@/case/root/build/pathb-ptx-emit --embed --groups=@WORK@/case/tmp/mul2.groups --ext=cubin @WORK@/case/tmp/mul2.dev.ir @WORK@/case/tmp/mul2.dev.kernels @WORK@/case/tmp/mul2.dev.kernels.addr

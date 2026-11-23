@@ -1,0 +1,3 @@
+status 0
+RUN @WORK@/case/root/build/cuda-rewrite -I@REPO@/tests/nfcxx-cuda-device/fixtures --edg-launches @REPO@/tests/nfcxx-cuda-device/fixtures/mul2.cu
+RUN @WORK@/case/root/build/cuda-rewrite -I@REPO@/tests/nfcxx-cuda-device/fixtures -DCUDART_VERSION=12040 -DCUDA_VERSION=12040 --device --kernels=@WORK@/case/tmp/mul2.dev.kernels @REPO@/tests/nfcxx-cuda-device/fixtures/mul2.cu
