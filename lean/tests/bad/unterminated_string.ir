@@ -1,0 +1,2 @@
+(ir-module "bad.cpp")
+(function "f
