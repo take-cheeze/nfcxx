@@ -1,10 +1,19 @@
 #!/usr/bin/env bash
 # The Ruby port of nfcxx's argument loop (scripts/nfcxx-loop.rb) must leave the same state, and fail with the same message, as
 # nfcxx's own loop (tests/nfcxx/option-state.sh) for every argument list of tests/nfcxx/loop-cases.txt. A case the port refuses
-# as "unported" is counted, not compared.
+# as "unported" is counted, not compared. The oracle is tests/nfcxx/loop-status-golden.txt (the frozen driver's state and real
+# exit status, recorded through option-state.sh), not a live run of the frozen copy.
 cd "$(dirname "$0")/../.."
 pass=0; fail=0; skipped=0
 ldav=""
+# golden_block CASE out|status: what loop-status-golden.txt records for the case line CASE (its output, or its exit status)
+golden_block() {
+  CASE_KEY="@@ $1" KIND=$2 awk '
+    found == 0 && $0 == ENVIRON["CASE_KEY"] { found = 1; st = 1; next }
+    found && /^@@ / { exit }
+    found && st { st = 0; if (ENVIRON["KIND"] == "status") print substr($0, 9); next }
+    found && ENVIRON["KIND"] == "out" { print }' tests/nfcxx/loop-status-golden.txt
+}
 # The facts of the CUDA wrap (scripts/wrap.rb) for the toolkits given: the headers that exist, the lib64
 # directories that exist, and the CUDART_VERSION of cuda_runtime_api.h (the wrap's own sed), as the port's options.
 cuda_facts() {
@@ -41,7 +50,7 @@ while IFS= read -r line; do
   mapfile -t cudafacts < <(cuda_facts "${cudahomes[@]}")
   nenv+=("${cudafacts[@]}" "${cudaopts[@]}")
   tmpdir=${TMPDIR-}; for e in "${envs[@]+"${envs[@]}"}"; do case $e in TMPDIR=*) tmpdir=${e#TMPDIR=} ;; esac; done
-  oracle=$(env "${envs[@]+"${envs[@]}"}" tests/nfcxx/option-state.sh "${args[@]}" 2>&1); ostatus=$?
+  oracle=$(golden_block "$line" out); ostatus=$(golden_block "$line" status)
   port=$(ruby scripts/nfcxx-loop.rb --ld-available="$ldav" --nfcxx-uid="$(id -u)" --nfcxx-tmpdir="$tmpdir" \
            "${nenv[@]+"${nenv[@]}"}" "${args[@]}" 2>&1); pstatus=$?
   case $port in
