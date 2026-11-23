@@ -149,6 +149,7 @@ promote_slots=${NFCXX_PROMOTE_SLOTS:-1}; unroll=${NFCXX_UNROLL:-1}; struct_slots
 ld_name=${NFCXX_LD:-}                                  # -fuse-ld=NAME
 pathb_c=${NFCXX_PATHB_C:-}                                              # --pathb-c=gcc
 pb_flags=()   # the options scripts/pathb-cc.rb gets (--asan, --safe-pointers, --sanitize=, --ir-opt=): flags, not exported variables
+vec_pb=      # -ftree-vectorize (--vectorize) or -fno-tree-vectorize (--no-vectorize), the last one given: the loop vectorizer of Path B
 onoff() {  # onoff FLAG VALUE: on|1 -> 1, off|0 -> 0; anything else is an error
   case $2 in on|1) echo 1 ;; off|0) echo 0 ;; *) echo "nfcxx: $1 takes on or off (got '$2')" >&2; exit 2 ;; esac
 }
@@ -413,6 +414,8 @@ while [ $# -gt 0 ]; do
     -g|-g[0-3]|-ggdb|-ggdb[0-3]) files+=("$1"); dbg_g=$1 ;;   # also scripts/pathb-cc.rb -g: the object's line table
     -W*|-w) ;;                                      # warnings do not change the object code
     -m*) isa+=("$1") ;;                             # ISA/target options (-mavx2, -march=..): see the -m block below
+    -ftree-vectorize) vec_pb=--vectorize ;;         # Path B: scripts/pathb-cc.rb --vectorize (its default on amd64 Linux); the gcc backend ignores it
+    -fno-tree-vectorize) vec_pb=--no-vectorize ;;   # Path B: scripts/pathb-cc.rb --no-vectorize
     -MD|-MMD) depmode=$1 ;;
     -MP) depphony=-MP ;;
     -MF) dfile=$2; shift ;;
@@ -716,6 +719,7 @@ fi
 [ $asan = 0 ] || [ $backend != pathb ] || pb_flags+=(--asan)   # the SSA emitter's __asan_load/store checks (scripts/pathb-cc.rb)
 [ $pic = 0 ] || pb_flags+=(--pic)   # -shared / -fPIC: scripts/pathb-cc.rb --pic reads a preemptible symbol's address through the GOT
 case ${dbg_g:-} in ''|-g0|-ggdb0) ;; *) pb_flags+=(-g) ;; esac   # -g (the last, unless -g0): the line table
+[ $backend != pathb ] || [ -z "$vec_pb" ] || pb_flags+=("$vec_pb")   # the loop vectorizer (vec_pb, set by the loop)
 # Freestanding: the front end reads only lib/ (the old harness, which has no host headers), emulates GNU $gnu, and the program links
 # EDG's runtime, so its exception handling state is declared as that runtime has it (scripts/pathb-dump.rb --eh-runtime).
 # Hosted Path B: scripts/pathb-dump.rb takes the host's GNU version unless the command line gave one.

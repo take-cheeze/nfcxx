@@ -269,6 +269,10 @@ for ((i = 0; i < n; i++)); do
     -m64|-mtune=*|-mcpu=*|-mfpmath=*|-mcmodel=*|-mstackrealign|-mpreferred-stack-boundary=*|-mtls-dialect=*|-mrelax*|-masm=*|-mno-red-zone|-mred-zone) gccplain "$a" || : ;;
     -m*) gcconly "$a" || die "$a is not supported" ;;
     -fno-strict-aliasing|-fwrapv|-fno-strict-overflow) gccplain "$a" || : ;;
+    # the loop vectorizer of Path B (scripts/pathb-cc.rb --vectorize, --no-vectorize; nfcc's pathb_option): the Path B compile
+    # takes the flag; the gcc backend (and the gcc passthrough) takes gcc's own option
+    -ftree-vectorize) if [ "$backend" = pathb ]; then pbf+=(--vectorize); else gccplain "$a" || :; fi ;;
+    -fno-tree-vectorize) if [ "$backend" = pathb ]; then pbf+=(--no-vectorize); else gccplain "$a" || :; fi ;;
     -fopenmp*|-fsanitize*|-fprofile*|-fcoverage*|--coverage|-ftest-coverage|-fstack-check|-fmudflap) die "$a is not supported (instrumentation would be dropped)" ;;
     -ffast-math|-Ofast|-ffinite-math-only|-funsafe-math-optimizations|-fassociative-math|-freciprocal-math|-fno-signed-zeros|-fno-math-errno) gcconly "$a" || die "$a is not supported (changes floating-point semantics)" ;;
     -funsigned-char|-fshort-enums|-fpack-struct*|-ftrapv|-fgnu89-inline|-fms-extensions|-fplan9-extensions|-fno-signed-char|-fshort-wchar|-fshort-double|-fno-short-double|-fleading-underscore|-fno-leading-underscore|-fnon-call-exceptions|-fcheck-pointer-bounds|-fsigned-bitfields|-funsigned-bitfields|-fno-asm|-fno-gnu-keywords|-ffreestanding|-fhosted|-fopenacc*|-fgnu-tm|-fcilkplus|-fsplit-stack|-fgnu-unique|-fno-gnu-unique|-fstack-reuse=*|-fno-zero-initialized-in-bss|-fgraphite*|-fsel-sched*|-fcall-used-*|-fcall-saved-*|-ffixed-*|-finstrument-functions*|-fwhole-program|-fplugin*|-fdump-*|-fchecking*)
