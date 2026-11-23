@@ -11,6 +11,9 @@
 #      and each value matches the value written here.
 #   3. the kill switch: BC2CPP_STACK_TUPLES=0 generates no `bc2cpp_tup` at all.
 #
+# The same three halves cover MULTI_RETURN (`x, y = f` through a buffer, BC2CPP_MULTI_RETURN) and LITERAL_MINMAX
+# (`[a, b].min`, BC2CPP_LITERAL_MINMAX), the other Arrays that never leave their frame, and the literal rewrites below.
+#
 # Usage: MRBC=path/to/host/mrbc ruby scripts/bc2cpp/stack_tuples_check.rb
 # Without MRBC the check aborts; without a full-core build (fixture_runtime.rb) its runtime half prints SKIP and the
 # generation half still runs.
@@ -474,6 +477,105 @@ CALL_INL_EXPECTED = {
 }.freeze
 OWNERS_INL = %w[IcPoint IcUse].freeze
 
+# MULTI_RETURN (codegen_multi_return.rb): `x, y = f` with f a direct call whose every return is a fresh literal passes
+# the elements through a frame-local buffer (`f_mr`); every other caller still gets an Array from `f_impl`. MrPos holds
+# the placed callers (MULTI_RETURN_PLACED) and the callers that must keep the Array (MULTI_RETURN_KEPT): one that keeps
+# the result, one that uses the masgn's value, an aliased Array, a destructure of a non-call, a callee with another
+# return, a call in a rescue body. The strings are fresh per call, so a mutated element and a 300-iteration loop exercise identity and the GC.
+MULTI_RET = <<~'RUBY7'
+  class MrPos
+    def initialize(x, y); @x = x; @y = y; end
+    def pair; [@x * 2, @y + 1]; end
+    def strs; ["a#{@x}", "b#{@y}"]; end
+    def pick(c); c ? [@x, "s#{@y}"] : [@y, nil]; end
+    def raising(c); raise ArgumentError, 'no' if c; [1, 2]; end
+    def mixed(c); return nil if c; [3, 4]; end
+
+    def both; x, y = pair; x + y; end
+    def three; a, b, c = pair; [a, b, c]; end
+    def one; a, = pair; a; end
+    def branch(c); p, q = pick(c); [p, q]; end
+    def mutated; s, t = strs; s << '!'; [s, t, strs]; end
+    def raised(c); x, y = raising(c); [x, y]; end
+    def rescued(c); begin; x, y = raising(c); rescue ArgumentError; x = :r; end; [x, y]; end
+    def looped; i = 0; n = 0; while i < 300; a, b = strs; n += a.size + b.size; i += 1; end; n; end
+
+    def kept; a = pair; a << 9; a; end
+    def masgn_value; r = (x, y = pair); [r, x, y, r.frozen?]; end
+    def aliased; a = pair; b = a; x, y = a; b << 5; [x, y, b]; end
+    def use_mixed(c); a, b = mixed(c); [a, b]; end
+    # A callee that destructures its own recursive call is a caller of its own buffer form.
+    def rec(n); return [n, 0] if n == 0; a, b = rec(n - 1); [a + 1, b + n]; end
+  end
+RUBY7
+MULTI_RET_EXPECTED = {
+  'MrPos.new(1, 2).both' => '5',
+  'MrPos.new(1, 2).three' => '[2, 3, nil]',
+  'MrPos.new(1, 2).one' => '2',
+  'MrPos.new(1, 2).branch(true)' => '[1, "s2"]',
+  'MrPos.new(1, 2).branch(false)' => '[2, nil]',
+  'MrPos.new(1, 2).mutated' => '["a1!", "b2", ["a1", "b2"]]',
+  'MrPos.new(1, 2).rescued(true)' => '[:r, nil]',
+  'MrPos.new(1, 2).rescued(false)' => '[1, 2]',
+  'MrPos.new(1, 2).raised(false)' => '[1, 2]',
+  'begin; MrPos.new(1, 2).raised(true); rescue ArgumentError => e; e.message; end' => '"no"',
+  'MrPos.new(1, 2).looped' => '1200',
+  'MrPos.new(2**40, 2).both' => '2199023255555',
+  'MrPos.new(1.5, 2).both' => '6.0',
+  'MrPos.new(1, 2).kept' => '[2, 3, 9]',
+  'MrPos.new(1, 2).masgn_value' => '[[2, 3], 2, 3, false]',
+  'MrPos.new(1, 2).aliased' => '[2, 3, [2, 3, 5]]',
+  'MrPos.new(1, 2).use_mixed(true)' => '[nil, nil]',
+  'MrPos.new(1, 2).use_mixed(false)' => '[3, 4]',
+  'MrPos.new(1, 2).pair' => '[2, 3]',
+  'MrPos.new(1, 2).pair.frozen?' => 'false',
+  'begin; MrPos.new(nil, 2).both; rescue NoMethodError => e; e.class; end' => 'NoMethodError',
+  'MrPos.new(1, 2).rec(3)' => '[3, 6]',
+}.freeze
+MULTI_RETURN_PLACED = { 'both' => 'pair', 'three' => 'pair', 'one' => 'pair', 'branch' => 'pick', 'mutated' => 'strs',
+                        'raised' => 'raising', 'looped' => 'strs', 'rec' => 'rec' }.freeze
+# A call inside a rescue body is compiled into the body's own function, which has no buffer: it keeps the Array.
+MULTI_RETURN_KEPT = %w[kept masgn_value aliased use_mixed rescued].freeze
+OWNERS_MR = %w[MrPos].freeze
+
+# LITERAL_MINMAX (codegen_literal_minmax.rb): `[a, b].min` / `.max` straight into Enumerable#min is one helper call over
+# the element registers; an all-fixnum list is answered in place, any other goes through an Array to Enumerable#min.
+# MINMAX_KEPT reads the literal again (kept2) or calls min on a local copy (kept), so it keeps the Array.
+MINMAX = <<~'RUBY8'
+  class MmUse
+    def lo(a, b); [a, b].min; end
+    def hi(a, b); [a, b].max; end
+    def three(a, b, c); [a, b, c].min; end
+    def clamp(v); [[v, 0].max, 10].min; end
+    def first_wins(a, b); [a, b].min.equal?(a); end
+    def kept(a, b); x = [a, b]; x.min; end
+    def kept2(a, b); x = [a, b]; [x.max, x]; end
+  end
+RUBY8
+MINMAX_EXPECTED = {
+  'MmUse.new.lo(1, 2)' => '1',
+  'MmUse.new.lo(2, 1)' => '1',
+  'MmUse.new.lo(-5, 5)' => '-5',
+  'MmUse.new.hi(3, 3)' => '3',
+  'MmUse.new.hi(-1, 4)' => '4',
+  'MmUse.new.three(3, 1, 2)' => '1',
+  'MmUse.new.clamp(15)' => '10',
+  'MmUse.new.clamp(-3)' => '0',
+  'MmUse.new.clamp(4)' => '4',
+  'MmUse.new.lo(1.5, 1)' => '1',
+  'MmUse.new.hi(1.5, 1)' => '1.5',
+  'MmUse.new.lo(2**40, 1)' => '1',
+  'MmUse.new.hi(2**40, 1)' => '1099511627776',
+  'MmUse.new.lo("b", "a")' => '"a"',
+  'MmUse.new.first_wins("a", "a")' => 'true',
+  'begin; MmUse.new.lo(1, nil); rescue NoMethodError => e; e.class; end' => 'NoMethodError',
+  'MmUse.new.kept(2, 1)' => '1',
+  'MmUse.new.kept2(2, 1)' => '[2, [2, 1]]',
+}.freeze
+MINMAX_PLACED = { 'lo' => 'min', 'hi' => 'max', 'three' => 'min', 'clamp' => 'min', 'first_wins' => 'min' }.freeze
+MINMAX_KEPT = %w[kept kept2].freeze
+OWNERS_MM = %w[MmUse].freeze
+
 # The text of one method's C++ body, from its `// Owner#name (compiled from ...)` header to the next method's header.
 def method_chunk(code, owner, name)
   code.split(%r{^(?=// \S+#\S+ \(compiled from)}).find { |chunk| chunk.start_with?("// #{owner}##{name} (") } || ''
@@ -618,6 +720,52 @@ Dir.mktmpdir('stack-tuples') do |dir|
   saved_inl.nil? ? ENV.delete('BC2CPP_INLINE_CALLS') : ENV['BC2CPP_INLINE_CALLS'] = saved_inl
   check.call('kill switch: BC2CPP_INLINE_CALLS=0 inlines nothing', !inl_off_code.include?('CALL_INLINE'))
 
+  mr_dir = File.join(dir, 'mr')
+  Dir.mkdir(mr_dir)
+  mr_code, mr_err = runtime.generate(MULTI_RET, mr_dir, only_owners: OWNERS_MR)
+  File.write(File.join(ENV['BC2CPP_KEEP_DIR'], 'multi_return.cxx'), mr_code) if ENV['BC2CPP_KEEP_DIR']
+  MULTI_RETURN_PLACED.each do |name, callee|
+    # The body only: a later method's rescue body is emitted ahead of that method's header.
+    chunk = method_chunk(mr_code, 'MrPos', name).split(/^static mrb_value MrPos_/).first.to_s
+    check.call("MrPos##{name} destructures MrPos##{callee} through its buffer, with no Array",
+               chunk.include?("MrPos_#{callee}_mr(M, ") && !chunk.include?('bc2cpp_ary_entry'))
+  end
+  %w[pair strs pick raising].each do |name|
+    check.call("MrPos##{name} writes its elements into the caller's buffer",
+               method_chunk(mr_code, 'MrPos', name).include?("mrb_value MrPos_#{name}_mr(mrb_state* M, "))
+  end
+  MULTI_RETURN_KEPT.each do |name|
+    check.call("MrPos##{name} keeps the Array", !method_chunk(mr_code, 'MrPos', name).match?(/MrPos_\w+_mr\(/))
+  end
+  check.call('MrPos#mixed (a nil return) has no buffer form', !mr_code.include?('MrPos_mixed_mr'))
+  saved_mr = ENV.fetch('BC2CPP_MULTI_RETURN', nil)
+  ENV['BC2CPP_MULTI_RETURN'] = '0'
+  mr_off_code = Dir.mktmpdir('multi-return-off') { |off| runtime.generate(MULTI_RET, off, only_owners: OWNERS_MR).first }
+  neg_mr_off = generate_without_tuples(NEGATIVE, OWNERS_NEG)
+  saved_mr.nil? ? ENV.delete('BC2CPP_MULTI_RETURN') : ENV['BC2CPP_MULTI_RETURN'] = saved_mr
+  check.call('kill switch: BC2CPP_MULTI_RETURN=0 passes no buffer', !mr_off_code.match?(/_mr\(/))
+  check.call('a program with no destructured tuple call is byte-identical with BC2CPP_MULTI_RETURN=0',
+             neg_mr_off == off_code)
+
+  mm_dir = File.join(dir, 'mm')
+  Dir.mkdir(mm_dir)
+  mm_code, mm_err = runtime.generate(MINMAX, mm_dir, core: true, only_owners: OWNERS_MM)
+  File.write(File.join(ENV['BC2CPP_KEEP_DIR'], 'literal_minmax.cxx'), mm_code) if ENV['BC2CPP_KEEP_DIR']
+  MINMAX_PLACED.each do |name, op|
+    chunk = method_chunk(mm_code, 'MmUse', name)
+    check.call("MmUse##{name} calls bc2cpp_ary_#{op} with no Array", chunk.include?("bc2cpp_ary_#{op}(M, ") &&
+               !chunk.include?('mrb_ary_new_from_values'))
+  end
+  check.call('MmUse#clamp places both literals', method_chunk(mm_code, 'MmUse', 'clamp').scan(/bc2cpp_ary_m(?:in|ax)\(M, /).size == 2)
+  MINMAX_KEPT.each do |name|
+    check.call("MmUse##{name} keeps the Array", !method_chunk(mm_code, 'MmUse', name).include?('bc2cpp_ary_m'))
+  end
+  saved_mm = ENV.fetch('BC2CPP_LITERAL_MINMAX', nil)
+  ENV['BC2CPP_LITERAL_MINMAX'] = '0'
+  mm_off_code = Dir.mktmpdir('literal-minmax-off') { |off| runtime.generate(MINMAX, off, core: true, only_owners: OWNERS_MM).first }
+  saved_mm.nil? ? ENV.delete('BC2CPP_LITERAL_MINMAX') : ENV['BC2CPP_LITERAL_MINMAX'] = saved_mm
+  check.call('kill switch: BC2CPP_LITERAL_MINMAX=0 calls no bc2cpp_ary_min/max', !mm_off_code.match?(/bc2cpp_ary_m(?:in|ax)\(/))
+
   # 2. parity, interpreted against compiled
   build = runtime.full_or_build
   if build
@@ -627,7 +775,9 @@ Dir.mktmpdir('stack-tuples') do |dir|
      [OWNERS_STR, str_dir, str_err, STR_EQ_EXPECTED, 'string literal compare'],
      [OWNERS_CHR, chr_dir, chr_err, CHR_APP_EXPECTED, 'chr append'],
      [OWNERS_SC, sc_dir, sc_err, STRCAT_LIT_EXPECTED, 'interpolation literal append'],
-     [OWNERS_INL, inl_dir, inl_err, CALL_INL_EXPECTED, 'call inline']].each do |owners, sub, err, expected, label|
+     [OWNERS_INL, inl_dir, inl_err, CALL_INL_EXPECTED, 'call inline'],
+     [OWNERS_MR, mr_dir, mr_err, MULTI_RET_EXPECTED, 'multi return'],
+     [OWNERS_MM, mm_dir, mm_err, MINMAX_EXPECTED, 'literal min/max']].each do |owners, sub, err, expected, label|
       built, output = runtime.run(sub, err, owners, harness_rows.call(expected), build: build, full: true)
       sections = runtime.sections(output)
       check.call("#{label}: built and ran", built)
