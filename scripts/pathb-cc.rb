@@ -10,7 +10,7 @@
 # variable as a fallback, and the flag wins when both are given.
 #   --keep=DIR, --timeout=SEC (NFCXX_PATHB_TIMEOUT, default 300; 0: no limit; a stage over it is stopped with status 124),
 #   --safe-pointers, --asan, --sanitize=LIST, --ir-opt=LIST, --ir-opt-max=BYTES, --emitter=ssa|mruby, --i386, --regparm=3,
-#   --m16, --pic, --no-pie, --long-double=trap, --trap-checks, --no-fp, --as-opt=OPT, --no-unwind, --vectorize (default on amd64 Linux with the SSA emitter), --no-vectorize, --avx2.
+#   --m16, --pic, --no-pie, --long-double=trap, --trap-checks, --no-fp, --as-opt=OPT, --vectorize-assoc, --no-unwind, --vectorize (default on amd64 Linux with the SSA emitter), --no-vectorize, --avx2.
 # Exit status: 0 done; 3 the IR has a node, type or marker the emitter refuses (reason on stderr); anything else failed.
 # Needs the Path B harness (scripts/setup-pathb.sh; PATHB_CPFE, PATHB_BASE) and build/qbe/qbe (QBE).
 require "fileutils"
@@ -77,6 +77,7 @@ emitter = ENV["NFCXX_PATHB_EMITTER"].to_s.empty? ? "ssa" : ENV["NFCXX_PATHB_EMIT
 nofp = 0
 nounwind = 0
 vectorize = nil
+assoc = 0   # --vectorize-assoc: float reductions are vectorized (reassociated), qbe -F
 avx2 = 0
 trapchk = 0
 trapimp = 0
@@ -115,6 +116,7 @@ while !args.empty?
   when "--no-unwind" then nounwind = 1
   when "--vectorize" then vectorize = 1
   when "--no-vectorize" then vectorize = 0
+  when "--vectorize-assoc" then assoc = 1
   when "--avx2" then avx2 = 1
   when "-funsigned-char", "-fno-signed-char" then uchar = 1; opts << x
   when "-fsigned-char", "-fno-unsigned-char" then uchar = 0; opts << x
@@ -240,6 +242,8 @@ if vectorize.nil?
               IO.popen(["uname", "-m"], &:read).chomp == "x86_64" ? 1 : 0
 end
 ldopt << "--vectorize" if vectorize != 0
+die("pathb-cc: --vectorize-assoc needs --vectorize") if assoc != 0 && vectorize == 0
+ldopt << "--vectorize-assoc" if assoc != 0
 die("pathb-cc: --avx2 needs --vectorize") if avx2 != 0 && vectorize == 0
 ldopt << "--avx2" if avx2 != 0
 trapimp = 1 if nofp != 0
