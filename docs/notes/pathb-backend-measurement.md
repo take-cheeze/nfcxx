@@ -37,3 +37,23 @@ Findings:
 
 Limits: three kernels, one host, minimum of five runs (run-to-run noise is a few percent). Per-kernel stats count the
 instructions of the named functions only. gcc's and clang's vectorizers are not controlled by these flags beyond -O2.
+
+## Reassociated float sums (`-fassociative-math`)
+
+A float sum is not associative, so the vectorizer may keep four partial sums only when the user allows it. The QBE
+vectorizer already had this (`qbe -F`, `vecassoc` in 3rd/qbe vec.c); the driver now maps `-fassociative-math` to it
+(`--vectorize-assoc` in scripts/pathb-cc.rb, `-F` in scripts/pathb-ssa-build). Off by default: without the flag the
+program's results do not change.
+
+`k_float` (minimum of five runs, same host as the table above): the `dot` loop becomes four packed lanes with one
+`mulps` and one `addps` per iteration; the four lanes are then added in order.
+
+| Build | `k_float` |
+| --- | ---: |
+| Path B default | 0.182 s |
+| Path B `-fassociative-math` | 0.081 s |
+| clang++ -O2 -fwrapv | 0.026 s |
+
+The checksum is the same in all three (the sums of this input are exact). The remaining gap is the loop's shape: one
+accumulator, so each iteration waits for the previous `addps` (4 cycles), where clang unrolls and keeps several.
+Multiple accumulators would be the next change in vec.c. Test: `tests/vectorize/assoc/run.sh`.
