@@ -1885,6 +1885,12 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_decl_comma tools/cext2mrbgem
 check test "$rc" -eq 0
 check test "$(grep -c 'mrb_false_p(s2)' "$work/api_decl_comma/src/api_decl_comma.c")" -eq 0
 check grep -qF '        if (s2) {' "$work/api_decl_comma/src/api_decl_comma.c"
+# 2zzz198. ENC_CODERANGE_ASCIIONLY (CRuby's cached coderange: a byte scan here) and ENCODING_GET (the encoding index) map, with no refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_coderange tools/cext2mrbgem/fixtures/api_coderange/ext/api_coderange "$work/api_coderange" > "$work/api_coderange.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'CODERANGE\|ENCODING_GET' "$work/api_coderange/REFUSALS.txt")" -eq 0
+check grep -qF 'nfcx_str_ascii_only(v)' "$work/api_coderange/src/api_coderange.c"
+check grep -qF 'rb_enc_get_index(v) == 0' "$work/api_coderange/src/api_coderange.c"
 # 2zzz197. an if on a VALUE member of a nested struct (h->options.hook) is a truth test of the VALUE: the member chain is resolved
 # through the base's declared struct type, so the function-pointer member of another struct with the same name does not decide it.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_field_chain tools/cext2mrbgem/fixtures/api_field_chain/ext/api_field_chain "$work/api_field_chain" > "$work/api_field_chain.log" 2>&1 || rc=$?
