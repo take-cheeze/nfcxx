@@ -3,6 +3,7 @@
 require 'set'
 require_relative 'native_expression_devirt'
 require_relative 'owner_call_direct'
+require_relative 'symbol_cache'
 
 # FRAME_FREE: which registered native methods the fork can call without pushing a frame (mrb_call_direct, vm.c), decided
 # for every native by one property of its C or C++ body instead of a list of names.
@@ -517,18 +518,20 @@ module NativeFrameUse
     end
 
     capacity = 1 << ((rows.size + wrapper_names(keys).size + READER_HEADROOM) * 2).bit_length
-    table = rows.map { |owner, name| "  { #{c_string(owner)}, #{c_string(name)} }," }.join("\n")
+    table, names = row_entries(rows)
     <<~CPP
       // FRAME_FREE (native_frame_use.rb): #{rows.size} natives mrb_call_direct may call without their frame.
       #include <stdint.h>
       #include <string.h>
       extern "C" mrb_value mrb_funcall_with_method(mrb_state*, mrb_value, mrb_sym, const mrb_method_t*, struct RClass*, mrb_int, const mrb_value*, mrb_value);
-      struct bc2cpp_ff_row { const char* owner; const char* name; };
-      static const bc2cpp_ff_row bc2cpp_ff_rows[] = {
+      // FRAME_FREE_PRESYM: a row's name is its presym id, or the high bit and its index in bc2cpp_ff_names.
+      struct bc2cpp_ff_row { const char* owner; uint32_t name; };
       #{ROWS_BEGIN}
+      static const char* const bc2cpp_ff_names[#{[names.size, 1].max}] = { #{names.empty? ? 'nullptr' : names.map { |n| c_string(n) }.join(', ')} };
+      static const bc2cpp_ff_row bc2cpp_ff_rows[] = {
       #{table}
-      #{ROWS_END}
       };
+      #{ROWS_END}
       // FRAME_FREE_SHARED: the set and what it is built from are one per program, not one per gem: `inline`, not `static`,
       // so RUNTIME_HEADER places them in the header every gem includes (its namespace is the runtime text's digest, and the
       // rows are the lists' frame_free, the same in every gem). Being frame-free is a property of the function, so one set
@@ -598,7 +601,8 @@ module NativeFrameUse
           struct RClass* start = bc2cpp_ff_class(M, r.owner);
           if (!start) continue;
           struct RClass* c = start;
-          mrb_method_t m = bc2cpp_find_proven(M, &c, mrb_intern_cstr(M, r.name));
+          mrb_sym mid = r.name & 0x80000000u ? mrb_intern_cstr(M, bc2cpp_ff_names[r.name & 0x7fffffffu]) : (mrb_sym)r.name;
+          mrb_method_t m = bc2cpp_find_proven(M, &c, mid);
           if (MRB_METHOD_UNDEF_P(m) || !MRB_METHOD_FUNC_P(m)) continue;
           if (c != start && !(c->tt == MRB_TT_ICLASS && c->c == start) && c != bc2cpp_ff_origin(start)) continue;
           bc2cpp_ff_add(MRB_METHOD_FUNC(m));
@@ -677,6 +681,17 @@ module NativeFrameUse
 
   def c_string(text)
     "\"#{text.gsub(/["\\]/) { |c| "\\#{c}" }}\""
+  end
+
+  # [row lines, the names presym cannot spell]. BC2CPP_FRAME_FREE_PRESYM=0 keeps every name a string.
+  def row_entries(rows)
+    names = []
+    lines = rows.map do |owner, name|
+      macro = ENV['BC2CPP_FRAME_FREE_PRESYM'] == '0' ? nil : SymbolCache.presym_macro(c_string(name))
+      field = macro ? "(uint32_t)#{macro}" : "0x80000000u | #{(names << name).size - 1}u"
+      "  { #{c_string(owner)}, #{field} },"
+    end
+    [lines.join("\n"), names]
   end
 end
 

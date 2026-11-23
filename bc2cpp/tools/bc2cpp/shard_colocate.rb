@@ -55,7 +55,7 @@ module ShardColocate
     env['BC2CPP_SHARD_COLOCATE_GUARDS'] != '0'
   end
 
-  GUARD_LINE = /\A  if \(mrb_unlikely\(!\(.*\)\)\) bc2cpp_declared_param_violation\(M, [^;]*\); \/\* (DECLARED_PARAM_GUARD \S+ arg \d+) \*\/\n\z/.freeze
+  GUARD_LINE = /\A  if \(mrb_unlikely\(!\(.*\)\)\) bc2cpp_declared_param_violation(?:_at)?\(M, [^;]*\); \/\* (DECLARED_PARAM_GUARD \S+ arg \d+) \*\/\n\z/.freeze
 
   # BC2CPP_SHARD_COLOCATE=all also copies a callee whose wrapper is registered. Still sound (the site runs the same
   # text), only larger; a check's fixture, whose methods are all registered, uses it to reach the copies.

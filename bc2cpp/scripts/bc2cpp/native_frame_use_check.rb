@@ -312,8 +312,18 @@ Dir.mktmpdir('native_frame_use_check') do |dir|
 
   source = NativeFrameUse.cpp_source(Set['IO#getbyte', 'Thing.singleton#make'])
   suite.check('the helper lists each row and installs the frame-free hook mrb_funcall_with_method consults',
-              source.include?('{ "IO", "getbyte" }') && source.include?('{ "Thing.singleton", "make" }') &&
-              source.include?('M->frame_free_p = bc2cpp_frame_free_hook'))
+              source.include?('bc2cpp_ff_names[2] = { "getbyte", "make" }') && source.include?('{ "IO", 0x80000000u | 0u }') &&
+              source.include?('{ "Thing.singleton", 0x80000000u | 1u }') && source.include?('M->frame_free_p = bc2cpp_frame_free_hook'))
+  # FRAME_FREE_PRESYM: a name presym spells is its id, with no string.
+  SymbolCache.presym_names = Set['getbyte']
+  presym_source = NativeFrameUse.cpp_source(Set['IO#getbyte', 'Thing.singleton#make'])
+  ENV['BC2CPP_FRAME_FREE_PRESYM'] = '0'
+  string_source = NativeFrameUse.cpp_source(Set['IO#getbyte', 'Thing.singleton#make'])
+  ENV.delete('BC2CPP_FRAME_FREE_PRESYM')
+  SymbolCache.presym_names = Set.new
+  suite.check('BC2CPP_FRAME_FREE_PRESYM=0 keeps every name a string', string_source.include?('bc2cpp_ff_names[2] = { "getbyte", "make" }'))
+  suite.check('a row whose name presym spells holds its id, and only the others keep a string',
+              presym_source.include?('{ "IO", (uint32_t)MRB_SYM(getbyte) }') && presym_source.include?('bc2cpp_ff_names[1] = { "make" }'))
   suite.check('the found call defers the decision to mrb_funcall_with_method', !source.include?('mrb_call_direct('))
   owner, name, wrapper, = OwnerCallDirect::NATIVE_ROWS.first
   handed = NativeFrameUse.wrappers_source(Set["#{owner}##{name}"])

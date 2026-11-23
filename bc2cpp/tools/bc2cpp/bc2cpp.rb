@@ -27,6 +27,7 @@ TypeCheckVariants.arm_guard if type_check_variants
 require_relative 'compact_output'
 require_relative 'owner_call_arity'
 require_relative 'owner_set_share'
+require_relative 'label_table'
 require_relative 'foreign_core_units'
 require_relative 'shard_output'
 require_relative 'runtime_header'
@@ -1683,6 +1684,8 @@ BC2CPP_MAIN = lambda do
   # Both inline, not through a local: BC2CPP_MAIN is at mruby's limit of local variables (see owner_rewrite below).
   OwnerCallArity.capture_stdout if OwnerCallArity.enabled?(BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol })
   OwnerSetShare.capture_stdout(symbol) if OwnerSetShare.enabled?(BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol })
+  # COMPACT_LABELS (label_table.rb): registered last of these, so it reads the text as printed.
+  LabelTable.capture_stdout(LabelTable.enabled?(BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol }))
 
   # PARAM_TRACE (tools/bc2cpp/param_trace.rb): opt-in runtime classes of compiled method and block
   # parameters; unset (or any value but 1) leaves stdout untouched. Registered BEFORE ELSE_TRACE so the
@@ -3345,6 +3348,7 @@ BC2CPP_MAIN = lambda do
   print NativeFrameUse.wrappers_source(StaticDispatchLists.current(required: false).frame_free,
                                        NativeFrameUse.reader_entries(compiled))
   print SymbolCache.emit(symbol_table)
+  print LabelTable::AT
   print SymbolCache.rewrite(gen.emit_to_enum_helper(compiled), symbol_table)
   print const_scope_code
   print const_site_cache_code
