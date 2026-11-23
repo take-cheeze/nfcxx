@@ -108,7 +108,7 @@ block there it would be caught instead of terminating. Few functions have such a
 passes off, `--ir-opt=LIST` names others, and `--ir-opt-max=BYTES` sets the largest IR they run on (default 268435456; larger units go
 unoptimized with a message). The inliner is preceded by `--prune-unused`: only what a definition of external linkage reaches
 is kept, as a host unit of libstdc++ and vulkan.hpp is mostly unused template instances (`ggml-vulkan.cpp`: 42720 functions and
-129 MB of IR, 8248 and 48 MB after; the inliner then takes about 30 s). The environment variables `NFCXX_IR_OPT` and `NFCXX_IR_OPT_MAX` still work as fallbacks. The device
+129 MB of IR, 8248 and 48 MB after; the inliner then takes about 30 s). `--ir-opt=LIST` sets the passes (`--ir-opt=inline` turns the pure-call hoisting off, `--ir-opt=none` all of them); `pathb-cc.rb` no longer reads `NFCXX_IR_OPT`. The environment variable `NFCXX_IR_OPT_MAX` still works. The device
 passes below still read `NFCXX_IR_OPT`.
 
 `NFCXX_IR_OPT=inline` makes `scripts/sycl-build.rb` run the pass on the device IR before the SPIR-V emitter (any list of passes
