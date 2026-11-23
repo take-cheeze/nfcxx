@@ -73,8 +73,7 @@ if (at = ARGV.index('--isolation'))
   build = File.expand_path(ARGV.fetch(at + 1))
   mains = Dir["#{build}/**/mrbgems/*/*_compiled_gen.cpp"].sort
   suite.check("#{mains.size} compiled gem main files under #{build}", !mains.empty?)
-  flags = ['-std=c++17', '-fsyntax-only', "-I#{Dir["#{build}/*/include"].first || "#{build}/include"}",
-           *ENV.fetch('BC2CPP_ISOLATION_FLAGS', '').split]
+  flags = ['-std=c++17', '-fsyntax-only', *ENV.fetch('BC2CPP_ISOLATION_FLAGS', '').split]
   Dir.mktmpdir('bc2cpp-isolation') do |dir|
     mains.each do |main|
       text = File.read(main)
@@ -82,7 +81,9 @@ if (at = ARGV.index('--isolation'))
 
       skeleton = File.join(dir, File.basename(main))
       File.write(skeleton, isolation_skeleton(text))
-      _out, err, status = Bc2cppCxx.capture3(*flags, "-I#{File.dirname(main)}", skeleton)
+      # The gem's own build's include directory: its presym table.
+      target = main[%r{\A(.*)/mrbgems/}, 1]
+      _out, err, status = Bc2cppCxx.capture3("-I#{target}/include", *flags, "-I#{File.dirname(main)}", skeleton)
       suite.check("#{File.basename(main)}: the cross-gem headers compile without the gem's own items", status.success?)
       puts err.lines.grep(/error/).first(10).join unless status.success?
     end
