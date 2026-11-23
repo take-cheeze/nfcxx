@@ -417,6 +417,15 @@ class ClosedWorld
     !@global_refusal && !@dynamic_constant_mutation && class_constant?(name)
   end
 
+  # PROGRAM_CLASS_SLOTS: the modules the closed world declares, and the superclasses its class declarations name.
+  def declared_module_names
+    @module_names
+  end
+
+  def declared_superclass_names
+    @class_decls.each_value.flat_map { |decls| decls.map { |d| d[:super] } }.grep(String).uniq
+  end
+
   # CALL_FACTS: the classes (never modules) the closed world declares.
   def declared_class_names
     @class_decls.keys.select { |k| !k.include?('.') && !k.include?('<') }

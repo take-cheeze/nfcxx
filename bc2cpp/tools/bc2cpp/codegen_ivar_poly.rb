@@ -814,7 +814,7 @@ class CodeGen
         if (m.c == c) return m.fn;
         bc2cpp_poly_fn fn = nullptr;
         for (int i = 0; i < t.n; ++i) {
-          struct RClass* k = bc2cpp_owner_class_slots[t.rows[i].slot];
+          struct RClass* k = #{owner_slot_ref('t.rows[i].slot')};
           if (k == c || (!k && #{owner_row_fill('t.rows[i]')} == c)) {
             fn = t.rows[i].fn;
             break;
@@ -997,6 +997,7 @@ end
     name, argv = INDEX_CHAIN_ARGS.fetch(kind)
     # INDEX_CLOSED when every class that can answer has an arm; else the by-name tail.
     body = index_helper_closed_source(fast, name, argv) || index_helper_open_source(kind, fast, name, argv)
+    body = helper_nomethods(body) if @program_class_universe
     whole = "// OUTLINED_INDEX_OPS -- #{kind.upcase}'s generic chain, see bc2cpp.rb's INDEX_HELPERS comment.\n" \
             "static mrb_value bc2cpp_#{kind}(mrb_state* M, #{INDEX_HELPERS.fetch(kind)}) {\n" \
             "#{body.gsub(/^(?=.)/, '  ')}}\n\n"

@@ -156,7 +156,7 @@ module OutsideOwnerCall
 
   # PROGRAM_OWNER_SITES (symbol_cache.rb): with a presym id for the name, the owner call and a proven nomethod name
   # no slot of the gem's symbol table, so the helper prints the same in every gem.
-  HELPER_NOMETHOD = /\bbc2cpp_nomethod_named\(M, (\w+), "([^"]+)"(?:, ([01]))?((?:, \w+)?)\)/
+  HELPER_NOMETHOD = /\bbc2cpp_nomethod_named\(M, (\w+), "([^"]+)"(?:, ([012]))?((?:, \w+){0,2})\)/
 
   def helper_owner_calls(code)
     code = code.gsub(HELPER_FUNCALL) do
@@ -175,6 +175,12 @@ module OutsideOwnerCall
       "bc2cpp_owner_call_named(M, #{recv}, \"#{name}\", 0, BC2CPP_OWNERS(#{list}), mrb_nil_value(), #{argc}#{args}) " \
         "/* CLOSED_WORLD owner-call: #{name} */"
     end
+    helper_nomethods(code)
+  end
+
+  # PROGRAM_OWNER_SITES: a shared helper's proven nomethod by presym id (the index helpers take only this part: their
+  # class arms are PROGRAM_CLASS_SLOTS', so the nomethod's slot was all that differed between gems).
+  def helper_nomethods(code)
     code.gsub(HELPER_NOMETHOD) do
       call = Regexp.last_match
       recv, name, argc, args = call.captures
