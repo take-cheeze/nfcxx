@@ -3859,6 +3859,9 @@ use_problem = lambda do |name, use|
         if m[2]
           # !f(...) of a VALUE-returning call: mrb_test of the result (nil and false are false)
           close = match_close(mv, m.end(0) - 1)
+          # an earlier pass may have wrapped this call already (value_condition_operand_pass: the call next to !): one wrap
+          already = @edits[rel].at_point(m.begin(1)).any? { |_a, _b, t| t.to_s.start_with?('mrb_test(') }
+          next if already
           if close >= 0 && !@edits[rel].overlaps(m.begin(1), m.begin(1) + 1) && !@edits[rel].overlaps(close + 1, close + 2)
             @edits[rel].add(m.begin(1), m.begin(1), 'mrb_test(')
             @edits[rel].add(close + 1, close + 1, ')')
@@ -3883,7 +3886,7 @@ use_problem = lambda do |name, use|
         path = m[1].split(/\s*(?:->|\.)\s*/)
         base = path.first
         field = path.length > 1 ? path.last : nil
-        is_value = field ? vfields.include?(field) : (local_value_at?(rel, m.begin(1), base) || fs_values.include?(base)) && !@class_vars.include?(base)
+        is_value = field ? if_field_value?(rel, m.begin(1), path, vfields) : (local_value_at?(rel, m.begin(1), base) || fs_values.include?(base)) && !@class_vars.include?(base)
         next unless is_value
         next if in_dead_init(rel, m.begin(1))
         next if @edits[rel].overlaps(m.begin(1), m.begin(1) + 1)
@@ -3906,6 +3909,8 @@ use_problem = lambda do |name, use|
         next if @edits[rel].overlaps(m.begin(1), m.begin(1) + 1)
         # if (f(...)) of a VALUE-returning call: the condition is mrb_test of the result (nil and false are false)
         next if @edits[rel].overlaps(close + 1, close + 2)
+        # an earlier pass (value_truth_call_pass: a macro funcall in an if) may have wrapped it: one wrap
+        next if @edits[rel].at_point(m.begin(1)).any? { |_a, _b, t| t.to_s.start_with?('mrb_test(') }
         @edits[rel].add(m.begin(1), m.begin(1), 'mrb_test(')
         @edits[rel].add(close + 1, close + 1, ')')
         rewrite(rel, m.begin(1), nm, "mrb_test(#{nm}(...))", TRUTH_TEST_CAVEAT)
@@ -4577,6 +4582,9 @@ use_problem = lambda do |name, use|
         post = next_nonspace(masked, cl + 1)
         next unless pre >= 0 && post >= 0
         next unless '(&|!'.include?(masked[pre]) && ')&|'.include?(masked[post])
+        # a call that is the whole parenthesised condition (if (f(x)): '(' and ')') is not an operand: the if's own truth
+        # test (value_truth_call_pass, value_if_truth_stuck_pass) is the one wrap
+        next if masked[pre] == '(' && masked[post] == ')'
         ch, owner = innermost_open(masked, st)
         next unless ch == '(' && %w[if while].include?(owner)
         ed = @edits[rel]
@@ -4990,6 +4998,83 @@ use_problem = lambda do |name, use|
 
   # the member names declared VALUE in every struct of the input that declares them (a name declared with another type
   # anywhere is not VALUE: its comparison stays as it is)
+  # whether the member chain path (base first, its fields after) of an if condition is a VALUE: resolved through the base's declared
+  # struct type (struct T *base), member by member, so a field name declared VALUE in one struct and as a pointer or function
+  # pointer in another is decided by its struct. nil when the chain does not resolve: the name set (vfields) decides then.
+  def if_field_value?(rel, pos, path, vfields)
+    fn = enclosing_func(rel, pos)
+    tag = nil
+    if fn
+      masked = @files[rel]['masked']
+      region = (fn['params'].to_s + "\n" + masked[fn['brace']...fn['body_end']].to_s)
+      mm = region.match(/struct\s+(\w+)\s*\*\s*#{Regexp.escape(path[0])}\b/)
+      tag = mm && mm[1]
+    end
+    r = nil
+    if tag
+      (1...path.length).each do |i|
+        t = struct_member_type(tag, path[i])
+        break if t.nil?
+        if i == path.length - 1
+          r = (t == :value)
+        elsif t.is_a?(Array)
+          tag = t[1]
+        else
+          break
+        end
+      end
+    end
+    return r unless r.nil?
+    vfields.include?(path.last)
+  end
+
+  # the type of a member of struct tag: :value, [:struct, tag] for a struct value member, :other for any other member, nil when
+  # the struct or the member is not found
+  def struct_member_type(tag, field)
+    @struct_bodies ||= {}
+    body = (@struct_bodies[tag] ||= begin
+      found = nil
+      @files.each_value do |f|
+        masked = f['masked']
+        masked.to_enum(:scan, /struct[ \t\n]+#{Regexp.escape(tag)}[ \t\n]*\{/).each do
+          mm = Regexp.last_match
+          bc = match_close(masked, mm.end(0) - 1)
+          found ||= masked[mm.end(0)...bc].to_s if bc > 0
+        end
+        break if found
+      end
+      found
+    end)
+    return nil unless body
+    decl = top_level_decls(body).find do |d|
+      d.match?(/\(\s*\*\s*#{Regexp.escape(field)}\s*\)/) || d.match?(/\b#{Regexp.escape(field)}\s*(?:\[[^\]]*\])?\s*\z/)
+    end
+    return nil unless decl
+    return :other if decl.match?(/\(\s*\*\s*#{Regexp.escape(field)}\s*\)/) || decl.include?('*')
+    return :value if decl.strip.match?(/\AVALUE\s+#{Regexp.escape(field)}\s*(?:\[[^\]]*\])?\z/)
+    sm = decl.strip.match(/\Astruct[ \t\n]+(\w+)[ \t\n]+#{Regexp.escape(field)}\b/)
+    return [:struct, sm[1]] if sm
+    :other
+  end
+
+  # the declarations of a struct or union body at its top level (a nested body's ';' does not end the outer declaration)
+  def top_level_decls(body)
+    out = []
+    cur = +''
+    depth = 0
+    body.each_char do |c|
+      depth += 1 if c == '{'
+      if c == ';' && depth == 0
+        out << cur
+        cur = +''
+        next
+      end
+      cur << c if depth == 0
+      depth -= 1 if c == '}'
+    end
+    out
+  end
+
   def value_field_names
     return @value_fields if @value_fields
     value = Set.new
@@ -4997,9 +5082,18 @@ use_problem = lambda do |name, use|
     @files.each_value do |f|
       masked = f['masked']
       # struct and union bodies: a union member is a field too (a name declared as a non-VALUE member anywhere is not a VALUE field)
-      masked.to_enum(:scan, /(?:struct|union)[ \t\n]*[A-Za-z_]?\w*[ \t\n]*\{([^{}]*)\}/).each do
-        body = Regexp.last_match[1]
-        body.split(';').each do |decl|
+      # (balanced: a body may hold a nested struct, whose braces are not the outer body's end; the outer body's declarations are
+      # its top-level ones)
+      masked.to_enum(:scan, /(?:struct|union)[ \t\n]*[A-Za-z_]?\w*[ \t\n]*\{/).each do
+        bo = Regexp.last_match.end(0) - 1
+        bc = match_close(masked, bo)
+        next if bc < 0
+        top_level_decls(masked[(bo + 1)...bc].to_s).each do |decl|
+          # a function-pointer member (void (*name)(...)) is not a VALUE: its name is a non-VALUE field
+          if (fp = decl.match(/\(\s*\*\s*([A-Za-z_]\w*)\s*\)/))
+            other << fp[1]
+            next
+          end
           m = /\A\s*((?:(?:const|volatile|unsigned|signed|static)\s+)*[A-Za-z_]\w*(?:\s*\*)?)\s*\*?\s*([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*\z/.match(decl)
           next unless m
           if m[1].strip == 'VALUE' && !decl.include?('*')
@@ -5676,7 +5770,7 @@ end
     mv.to_enum(:scan, /(?<![#{WC}])assert\s*\(\s*([A-Za-z_]\w*)(?:\s*->\s*([A-Za-z_]\w*))?\s*\)/).each do
       m = Regexp.last_match
       base, field = m[1], m[2]
-      is_value = field ? vfields.include?(field) : (local_value_at?(rel, m.begin(1), base) || fs_values.include?(base)) && !@class_vars.include?(base)
+      is_value = field ? if_field_value?(rel, m.begin(1), [base, field], vfields) : (local_value_at?(rel, m.begin(1), base) || fs_values.include?(base)) && !@class_vars.include?(base)
       next unless is_value
       next if @edits[rel].overlaps(m.begin(0), m.begin(0) + 1)
       refuse(rel, m.begin(0), 'assert', "stuck point (VALUE truth test): assert(#{field ? "#{base}->#{field}" : base}) tests a VALUE, a struct in the fork (include/mruby/boxing_no.h), and no exact truth test of it is expressed")
@@ -5952,6 +6046,9 @@ end
     !!value_names_of(fl).include?(name)
   end
 
+  # mruby.h's exception-class macros (E_ARGUMENT_ERROR and the rest): the class each names
+  MRB_E_EXC_CLASSES = { 'E_RUNTIME_ERROR' => 'RuntimeError', 'E_TYPE_ERROR' => 'TypeError', 'E_ARGUMENT_ERROR' => 'ArgumentError', 'E_INDEX_ERROR' => 'IndexError', 'E_RANGE_ERROR' => 'RangeError', 'E_ZERODIV_ERROR' => 'ZeroDivisionError', 'E_NAME_ERROR' => 'NameError', 'E_NOMETHOD_ERROR' => 'NoMethodError', 'E_SCRIPT_ERROR' => 'ScriptError', 'E_SYNTAX_ERROR' => 'SyntaxError', 'E_LOCALJUMP_ERROR' => 'LocalJumpError', 'E_REGEXP_ERROR' => 'RegexpError', 'E_FROZEN_ERROR' => 'FrozenError', 'E_NOTIMP_ERROR' => 'NotImplementedError', 'E_FLOATDOMAIN_ERROR' => 'FloatDomainError', 'E_KEY_ERROR' => 'KeyError', 'E_FIBER_ERROR' => 'FiberError' }.freeze
+
   LOCAL_DECL_KEYWORDS = %w[return else goto case typedef sizeof do].freeze
 
   # The declared type of the local name in effect at pos, by block scope: the latest declaration in the function body whose
@@ -5984,6 +6081,24 @@ end
       type = 'mrb_int' if @int_decl_pos&.include?([rel, dpos])
       before = masked[0...m.begin(0) + base].rstrip[-1]
       next unless before.nil? || [';', '{', '}', '(', ','].include?(before)
+      bs, be = block_span(masked, dpos, fn)
+      out << [dpos, type, bs, be]
+    end
+    # a later declarator of a declaration (const char *s1, *s2;): its type is the statement's base type, a pointer when it has a *
+    comma_re = /,[ \t\n]*((?:\*[ \t\n]*)*)#{Regexp.escape(name)}(?![#{WC}])[ \t\n]*(?=[;=,)\[])/
+    masked[base...fn['body_end']].to_enum(:scan, comma_re).each do
+      m = Regexp.last_match
+      comma = base + m.begin(0)
+      st = comma
+      st -= 1 while st > base && !";{}(".include?(masked[st - 1])
+      head = masked[st...comma].to_s.strip
+      hm = head.match(/\A((?:(?:const|volatile|static|unsigned|signed|register)\s+)*[A-Za-z_]\w*)/)
+      next unless hm
+      first = hm[1].split.reject { |w| %w[const volatile static unsigned signed register].include?(w) }.first.to_s
+      next if first.empty? || LOCAL_DECL_KEYWORDS.include?(first)
+      type = m[1].to_s.include?('*') ? "#{first} *" : first
+      dpos = base + m.begin(0) + m[0].rindex(name)
+      type = 'mrb_int' if @int_decl_pos&.include?([rel, dpos])
       bs, be = block_span(masked, dpos, fn)
       out << [dpos, type, bs, be]
     end
@@ -6616,7 +6731,13 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       end
       # a class expression (RClass *: mrb->object_class, mrb_class_get(...)) used as a plain value is its VALUE
       # an expression that names the state (mrb->object_class) names the state of this context (the global, in a global-state helper)
-      text = entry['mruby'].gsub(/\bmrb->/) { "#{mrb_tok(rel, s)}->" }
+      # an mruby exception-class macro (E_ARGUMENT_ERROR: mrb_exc_get(mrb, "ArgumentError") over the variable mrb) names the state of
+      # this context: mrb_exc_get of that state (a function with only a global state has no mrb to name)
+      text = if (ecls = MRB_E_EXC_CLASSES[entry['mruby']]) && mrb_tok(rel, s) != 'mrb'
+               "mrb_exc_get(#{mrb_tok(rel, s)}, \"#{ecls}\")"
+             else
+               entry['mruby'].gsub(/\bmrb->/) { "#{mrb_tok(rel, s)}->" }
+             end
       # not in a class argument of a call: that position takes the RClass * itself (mrb_define_method(mrb, mrb->object_class, ...))
       callee_c, idx_c = call_context(masked, s)
       class_pos = callee_c && ((@special_pos[callee_c] || []).include?(idx_c) ||
