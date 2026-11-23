@@ -346,3 +346,38 @@ also confirmed end to end (261.9s vs 120.5s compile-all on the newer base,
 are identical. A full self pipeline at 16 (bootstrap, generation, native
 build) plus the `runner_generation` C++/bytecode parity and runtime-behavior
 check passes.
+
+## Byte-oriented identifier scans in the shard pipeline
+
+Identifier scans (`String#scan` with a capture group) allocated a MatchData
+per identifier plus result arrays: on the 82 MB current-main self-generation
+capture the shard phase spent 82.0M allocations, 46.8M in `ShardColocate`
+(index + scan) and 35.2M in `ShardOutput.rewrite` alone. `each_identifier`
+and `each_delimited_identifier` (in `shard_output.rb`) scan bytes directly on
+ASCII-only lines — byte and character offsets coincide there — and fall back
+to the original expressions otherwise. The byte loops replicate their
+expression's edge rules exactly, including `$` handling: the delimited form
+matches `ShardColocate::IDENT` (no `$` start, no adjacent word char or `$`),
+the plain form matches `ShardOutput::IDENT`. Both forms were verified
+identifier-for-identifier and offset-for-offset against the regex on all
+1,560,268 capture lines (zero non-ASCII lines) plus the check fixtures'
+non-ASCII cases. The rewrite prelude/shard scans, the shared-prelude
+fixpoint (which also memoizes each body's identifier set instead of
+rescanning it every round), and the colocate index/scan/outside-names scans
+all use them; the shared-prelude per-body scan keeps its own `word`-boundary
+expression, and the join for colocate `ids` is unchanged.
+
+Per-phase allocations on the identical 82 MB input:
+
+| Phase | Before | After |
+| --- | ---: | ---: |
+| colocate index | 21.64M | 16.49M |
+| colocate scan | 23.33M | 5.36M |
+| rewrite | 35.17M | 35.03M |
+| shared prelude | 9.22M | 9.08M |
+| shard phase total | 82.02M | 58.26M (-29%) |
+
+Full-generation A/B at the depth-16 default: 236.6M vs 228.4M total
+allocations; every main/shard/header/entry/bytecode artifact is
+byte-identical. The registered shard check passes, including the non-ASCII
+identifier, prelude/edge-case, colocate linkage and runtime-parity cases.
