@@ -1,0 +1,20 @@
+--- frame_core.h	2026-11-20 18:48:01.802188092 +0900
++++ frame_core.h	2026-11-23 10:10:42.927151544 +0900
+@@ -292,7 +292,7 @@
+     b = nr_v4_sel(big, a, b);
+     return nr_v4_sel(tiny, nr_uv4_asf(nr_uv4_and(nr_v4_asu(a), nr_uv4_splat(0x80000000u))), b);
+ }
+-NR_HELPER_ATTR nr_v4 nr_v4_frc(nr_v4 a) { return nr_v4_sel(nr_v4_issubnormal(a), nr_v4_zero(), nr_v4_sub(a, nr_v4_floor(a))); }
++NR_INLINE nr_v4 nr_v4_frc(nr_v4 a) { return nr_v4_sel(nr_v4_issubnormal(a), nr_v4_zero(), nr_v4_sub(a, nr_v4_floor(a))); }
+ /* SM4 mirror addressing on a normalised coordinate: reflect at every integer so [0, 1] maps onto
+  * itself and odd cells reverse; equivalent to mirroring the integer taps (the reference's method)
+  * because the edge taps of the reduced coordinate coincide with the clamped ones. */
+@@ -307,7 +307,7 @@
+ #else
+ NR_INLINE nr_v4 nr_v4_itof(nr_v4 a) { nr_v4 r; nr_u32 i; for (i = 0; i < 4; ++i) r.v[i] = (nr_f32)(nr_i32)nr_bits(a.v[i]); return r; }
+ #endif
+-NR_HELPER_ATTR nr_v4 nr_v4_movc(nr_v4 a, nr_v4 b, nr_v4 e) { return nr_v4_sel(nr_uv4_not(nr_uv4_eq(nr_v4_asu(a), nr_uv4_splat(0u))), b, e); }
++NR_INLINE nr_v4 nr_v4_movc(nr_v4 a, nr_v4 b, nr_v4 e) { return nr_v4_sel(nr_uv4_not(nr_uv4_eq(nr_v4_asu(a), nr_uv4_splat(0u))), b, e); }
+ /* SM4 comparisons are IEEE ordered: a NaN operand makes lt/ge/eq false and ne true, whatever
+  * the target's compare instruction does with unordered lanes. */
+ NR_INLINE nr_uv4 nr_v4_unordered(nr_v4 a, nr_v4 b) { return nr_uv4_or(nr_v4_isnan(a), nr_v4_isnan(b)); }

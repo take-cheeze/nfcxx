@@ -4083,6 +4083,12 @@ use_problem = lambda do |name, use|
     end
   end
 
+  # the function hashes the array (rb_memhash or st_hash* of arr, in its body)
+  def hashed_array?(masked, fn, arr)
+    body = masked[fn['brace'].to_i...fn['body_end'].to_i].to_s
+    body.match?(/\b(?:rb_memhash|st_hash\w*)[ \t\n]*\([ \t\n]*#{Regexp.escape(arr)}\b/)
+  end
+
   # (uintptr_t)v of a VALUE: CRuby's word as an integer (the fork's VALUE is a struct, with no integer form of the word)
   def value_cast_integer_stuck_pass
     @files.each_key do |rel|
@@ -4119,6 +4125,27 @@ use_problem = lambda do |name, use|
           m = Regexp.last_match
           next unless value_call_name?(m[1]) || ((@defs[m[1]] || []).reject { |x| x['proto'] }.any? && (@defs[m[1]] || []).reject { |x| x['proto'] }.all? { |x| x['ret'].to_s.strip == 'VALUE' })
           next if in_dead_init(rel, m.begin(0)) || @edits[rel].overlaps(m.begin(0), m.begin(0) + 1)
+          # an array that the function hashes (rb_memhash(arr, ...)): the VALUE is hashed, not stored as its word. A fixnum is its
+          # integer, anything else its hash method (the value meaning of the hash, as d_lite_hash's nth branch takes it)
+          fnh = enclosing_func(rel, m.begin(0))
+          cl = match_close(mv, m.end(0) - 1)
+          if fnh && cl > 0 && hashed_array?(mv, fnh, arr)
+            ed = @edits[rel]
+            rs = m.begin(1)
+            ed.add(rs, rs, "nfcx_value_hash(#{mrb_tok(rel, rs)}, ")
+            ed.add(cl + 1, cl + 1, ')')
+            rewrite(rel, rs, m[1], 'nfcx_value_hash(mrb, call)',
+                    "#{arr} is hashed (rb_memhash): #{m[1]}'s VALUE is hashed by value (its integer if a fixnum, else its hash method), not stored as its word")
+            @prelude_done ||= Set.new
+            at = define_at(rel, rs) ? define_at(rel, rs)[1] : (fnh['hstart'] || nil)
+            if at && !@prelude_done.include?([rel, 'nfcx_value_hash'])
+              @prelude_done << [rel, 'nfcx_value_hash']
+              ed.add(at, at, "static long nfcx_value_hash(mrb_state *mrb, mrb_value v) {\n" \
+                             "  if (mrb_fixnum_p(v)) return mrb_fixnum(v);\n" \
+                             "  return mrb_fixnum(mrb_funcall_argv(mrb, v, mrb_intern_cstr(mrb, \"hash\"), 0, NULL));\n}\n")
+            end
+            next
+          end
           refuse(rel, m.begin(0), arr, "stuck point (VALUE as integer): #{arr} is an integer array (st_index_t), and #{m[1]} returns a VALUE, a struct in the fork (include/mruby/boxing_no.h); the word has no integer form here")
         end
       end
@@ -7773,7 +7800,18 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       _o, err, _st = Open3.capture3(*args)
       out_lines = File.exist?(path) ? File.readlines(path, encoding: 'UTF-8').map { |x| x.scrub } : []
       stuck_fns = stuck_function_names(rel)
+      header_seen = Set.new
       err.each_line do |ln|
+        # an error reported in a fork header (the converted code misuses an mruby header: gcc reports the header's line, and the
+        # call site is the file's own 'In function' context) is a compile error of this file, recorded once per header line
+        hm = ln.chomp.match(/\A(\/[^:]*\/mruby\/[^:]*):(\d+):\d+: (?:fatal )?error: (.+)\z/)
+        if hm && hm[1] != path
+          next if header_seen.include?([hm[1], hm[2]])
+          header_seen << [hm[1], hm[2]]
+          @refusals << { 'file' => rel, 'line' => 0, 'api' => 'compile check',
+                         'reason' => "compile error in the fork header #{File.basename(hm[1])}:#{hm[2]} (the converted code's use of it): #{hm[3].strip}" }
+          next
+        end
         m = ln.chomp.match(/\A#{Regexp.escape(path)}:(\d+):\d+: (?:fatal )?error: (.+)\z/)
         next unless m
         # a compile error inside a function that has a stuck-point refusal is that stuck point's cascade: the stuck call

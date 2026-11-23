@@ -1080,15 +1080,18 @@ module StaticDispatchRegistrations
   # run time to the function the owner's own table holds under the name, so an alias (the same function) or an undef
   # (nothing there) is harmless; a key is left out when Ruby defines the name on that owner too (the table would hold
   # the compiled method's function) or when the owner has a computed-name registration (any function could be there).
+  # FRAME_FREE_FLAG: [keys, functions, run-time keys]: the C functions of those rows by name, for the exclusion header's
+  # MRB_MT_FRAMEFREE_<function> (CoreNativeCandidates.header), and the keys some run-time registration gives, the only
+  # ones the generated marking resolves (a ROM entry already carries its flag).
   def frame_free_names(repo_root, registry)
     _ruby, native = outside_world_files(repo_root, closed_only: true)
     map = NativeOwnerMap.build(native)
-    NativeFrameUse.rows(native, native, owner_map: map).filter_map do |owner, name, _function|
-      key = "#{owner}##{name}"
-      next if map.computed.include?(owner) || Array(registry[name]).any? { |d| d.owner == owner }
-
-      key
-    end.to_set
+    ram = Set.new
+    rows = NativeFrameUse.rows(native, native, owner_map: map, ram: ram).reject do |owner, name, _function|
+      map.computed.include?(owner) || Array(registry[name]).any? { |d| d.owner == owner }
+    end
+    [rows.to_set { |owner, name, _| "#{owner}##{name}" }, rows.to_set { |_, _, function| function },
+     rows.select { |owner, name, _| ram.include?([owner, name]) }.to_set { |owner, name, _| "#{owner}##{name}" }]
   end
 
   # REGISTRATION_NAME_EXEMPTION (closed only): a native's own registration call (mrb_define_method and the other
@@ -1501,7 +1504,7 @@ module StaticDispatchRegistrations
       ctor_rows: closed_only ? ctor_rows(repo_root, candidates, ireps, superclass_of, symbol_lookups, super_reach, super_unknown,
                                          gens: runs.values.map { |r| NativeFrameUse.strip_rows(r[:gen]) }) : Set.new,
       engine_rows: closed_only ? engine_rows(candidates, core_excluded&.at(4), super_reach, super_unknown, class_owners) : Set.new,
-      frame_free: closed_only ? frame_free_names(repo_root, registry) : Set.new }
+      frame_free: closed_only ? frame_free_names(repo_root, registry) : [Set.new, Set.new, Set.new] }
   end
 
   # ENGINE_ROWS (closed only): compiled engine entries the closed build keeps as rows of their generated ROM table
@@ -2168,7 +2171,9 @@ module StaticDispatchRegistrations
                                    core_rows: closed[:core_excluded][2].to_set.freeze,
                                    core_undef_left_out: Array(closed[:core_excluded][3]).to_set.freeze,
                                    engine_rows: (closed[:engine_rows] - closed_names).freeze,
-                                   frame_free: closed[:frame_free].freeze,
+                                   frame_free: closed[:frame_free][0].freeze,
+                                   frame_free_fns: closed[:frame_free][1].freeze,
+                                   frame_free_ram: closed[:frame_free][2].freeze,
                                    unmade_classes: closed[:core_excluded][5]&.holds ? CoreFiberFree::UNMADE.to_set.freeze : Set.new.freeze,
                                    digest: digest, world: ListsWorld.name)
   end
