@@ -273,7 +273,7 @@ module SubtreeDispatchTables
         if (m.c == c) return m.row;
         int row = -1;
         for (int i = 0; i < t.n; ++i) {
-          struct RClass* k = bc2cpp_owner_class_slots[t.rows[i].slot];
+          struct RClass* k = #{owner_slot_ref('t.rows[i].slot')};
           if (k == c || (!k && #{owner_row_fill('t.rows[i]')} == c)) {
             row = i;
             break;

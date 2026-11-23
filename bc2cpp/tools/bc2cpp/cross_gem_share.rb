@@ -89,11 +89,12 @@ module CrossGemShare
 
     defined = Set.new
     entries.each { |e| defined.merge(e[:defines]) }
+    methods = method_prototypes(entries, rest[tail.size..])
     roots = outside | (keep & defined)
-    entries.each { |e| roots.merge(e[:declares] - defined - e[:c_prototypes]) }
+    entries.each { |e| roots.merge(e[:declares] - defined - e[:c_prototypes] - methods) }
     roots.merge(address_taken(entries, rest + head))
     groups = group(entries)
-    local = local_groups(groups, roots)
+    local = local_groups(groups, roots, methods)
     shared = groups.each_index.reject { |g| local.include?(g) }.map { |g| groups[g] }
     return tail if shared.empty?
 
@@ -115,6 +116,8 @@ module CrossGemShare
       names, ok = declared_names(item, ShardOutput.code_text(lines[item[:first]..item[:last]]))
       declares.merge(names)
       c_prototypes << item[:name] if c_prototype?(item, lines)
+      item[:prototype] = item[:function] && !item[:body] && external?(item, lines) && !c_prototype?(item, lines) &&
+                         head_functions(item[:head]) == [item[:name]]
       maybe.merge(possible_names(item))
       movable &&= ok && !state?(item, lines, code) && (!external?(item, lines) || c_prototype?(item, lines)) &&
                   !item[:head].match?(/\boperator\b/)
@@ -231,6 +234,9 @@ module CrossGemShare
     return false unless item[:function] && !item[:body] && item[:name] && !item[:head].match?(/\(\s*\*/)
 
     text = lines[item[:first]..item[:last]].join.sub(/\A\s*(?:\[\[[^\]]*\]\]\s*)*/, '')
+    # C_ADDRESS: a GNU attribute (`__attribute__((weak))`, a function that may be absent) still names the one C
+    # function. BC2CPP_CROSS_GEM_C_ADDRESS=0 keeps such a prototype in the unit.
+    text = text.gsub(/__attribute__\s*\(\([^()]*(?:\([^()]*\)[^()]*)*\)\)\s*/, '') if c_address?
     text.match?(/\Aextern\s+"C"\s+[^{(]*(?<![\w$])#{Regexp.escape(item[:name])}\s*\(/) && head_functions(item[:head]) == [item[:name]]
   end
 
@@ -245,12 +251,38 @@ module CrossGemShare
     names
   end
 
-  # Function names of the tail that the unit names other than as a call.
+  # METHOD_PROTOTYPE: the tail's declarations of the unit's own compiled methods. ShardOutput keeps each at global
+  # scope, and another gem declares the same function through the unit's decls header, so a moved helper calling one
+  # names the one function of the program in every gem that prints it; the declaration itself stays in place
+  # (an external item never moves). BC2CPP_CROSS_GEM_METHOD_PROTOTYPE=0 keeps such helpers in the unit.
+  def method_prototypes(entries, methods_text)
+    return Set.new if ENV['BC2CPP_CROSS_GEM_METHOD_PROTOTYPE'] == '0'
+
+    declared = Set.new
+    entries.each do |e|
+      e[:items].each { |item| declared << item[:name] if item[:prototype] }
+    end
+    return declared if declared.empty?
+
+    lines = methods_text.lines
+    defined = ShardOutput.top_level_items(lines).filter_map do |item|
+      item[:name] if item[:function] && item[:body] && ShardOutput.external?(lines[item[:first]], item)
+    end
+    declared & defined.to_set
+  end
+
+  def c_address?
+    ENV['BC2CPP_CROSS_GEM_C_ADDRESS'] != '0'
+  end
+
+  # Function names of the tail that the unit names other than as a call. C_ADDRESS: an `extern "C"` prototype names
+  # the one C function of the program, whose address (a weak one's null test) is the same in every unit.
   def address_taken(entries, text)
     functions = Set.new
     entries.each do |e|
       e[:items].each { |item| functions.merge(e[:declares] & [item[:name]]) if item[:function] }
     end
+    entries.each { |e| functions.subtract(e[:c_prototypes]) } if c_address?
     return Set.new if functions.empty?
 
     found = Set.new
@@ -279,7 +311,7 @@ module CrossGemShare
   end
 
   # Indices of the groups that stay in the unit: a root name, an unmovable segment, or a name of such a group.
-  def local_groups(groups, roots)
+  def local_groups(groups, roots, methods = Set.new)
     local = Set.new
     names = roots.dup
     loop do
@@ -291,7 +323,7 @@ module CrossGemShare
         next unless stays
 
         local << gi
-        g.each { |e| names.merge(e[:maybe]) }
+        g.each { |e| names.merge(e[:maybe] - methods) }
         grown = true
       end
       break unless grown

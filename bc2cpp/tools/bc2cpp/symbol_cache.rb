@@ -1305,6 +1305,10 @@ static inline bool bc2cpp_owner_icache_hit(mrb_state* M, const bc2cpp_owner_set&
     #{COLD_RAISE} static mrb_value bc2cpp_nomethod_pw(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_value a) {
       bc2cpp_nomethod_mid_argv(M, recv, mid, 1, &a);
     }
+    #{COLD_RAISE} static mrb_value bc2cpp_nomethod_pw(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_value a, mrb_value b) {
+      const mrb_value argv[2] = {a, b};
+      bc2cpp_nomethod_mid_argv(M, recv, mid, 2, argv);
+    }
   CPP
   private_constant :NOMETHOD_MID_EDIT, :NOMETHOD_PROGRAM
 
