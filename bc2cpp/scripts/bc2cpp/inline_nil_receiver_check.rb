@@ -19,9 +19,13 @@
 #       owner, which no guard can name, MONO_UNPROVEN's plain send);
 #       BC2CPP_MONO_RECEIVER_PROOF=0 brings back the unguarded MONO call; a keyword call to a method a `public :name`
 #       in its own class body re-publicises after a private def stays direct (VISIBILITY_SAME_BODY);
+#     - COLD_COMPACT_CALLS (cold_compact_calls.rb): with the CcHold methods on the cold list, each pair of identical
+#       guarded sends (nil-receiver, class-guard, two-owner, keyword, block and element sites) calls one shared
+#       helper; BC2CPP_COLD_COMPACT_CALLS=0 keeps the inline text;
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
 #     - interpreted and compiled runs print the same with the ivars assigned and with them left nil, the
-#       NoMethodError's name and args included; a MONO name on nil, a String or an Integer raises as interpreted.
+#       NoMethodError's name and args included; a MONO name on nil, a String or an Integer raises as interpreted;
+#       the cold-compacted world prints what the interpreter prints, wrong-class, nil, keyword and block cases included.
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/inline_nil_receiver_check.rb
 
@@ -234,6 +238,110 @@ check.call('BC2CPP_VISIBILITY_SAME_BODY=0: the re-publicised keyword call is the
            !method_code(vis_off.to_s, 'MnrHold_pv').include?('MnrPriv_pk_impl(M') &&
              method_code(vis_off.to_s, 'MnrHold_pv').include?('bc2cpp_send_kw(M, '))
 
+# COLD_COMPACT_CALLS: every method a pair with the same send, so each guarded site has a twin to share a helper with.
+COLD_SRC = <<~'RUBY'
+  class CcA
+    def initialize; @n = 1; end
+    def nv; @n + 1; end
+    def kv(a, k: 1); a + k + @n; end
+    def each_v; yield @n; yield 4; end
+    private
+
+    def secret; @n; end
+  end
+  class CcB
+    def initialize; @n = 2; end
+    def nv; @n * 2; end
+    def kv(a, k: 1); a * k + @n; end
+    def each_v; yield @n; end
+  end
+  class CcHold
+    def initialize(fill)
+      @q = fill ? CcA.new : nil
+      @w = fill ? CcA.new : 'str'
+      @p = fill ? CcB.new : (@q || CcA.new)
+      @a = fill ? [7, 8] : nil
+      @h = fill ? { k: 9 } : nil
+    end
+    def qv1; @q.nv; end
+    def qv2; @q.nv; end
+    def wv1; @w.nv; end
+    def wv2; @w.nv; end
+    def pv1; @p.nv; end
+    def pv2; @p.nv; end
+    def qk1; @q.kv(1, k: 2); end
+    def qk2; @q.kv(1, k: 2); end
+    def wk1; @w.kv(3, k: 4); end
+    def wk2; @w.kv(3, k: 4); end
+    def pk1; @p.kv(2, k: 5); end
+    def pk2; @p.kv(2, k: 5); end
+    def qb1; r = 0; @q.each_v { |x| r += x }; r; end
+    def qb2; r = 0; @q.each_v { |x| r += x }; r; end
+    def pb1; r = []; @p.each_v { |x| r << x }; r; end
+    def pb2; r = []; @p.each_v { |x| r << x }; r; end
+    def ae1; @a[1]; end
+    def ae2; @a[1]; end
+    def he1; @h[:k]; end
+    def he2; @h[:k]; end
+    def as1; @a[0] = 6; end
+    def as2; @a[0] = 6; end
+    def qs1; @q.secret; end
+    def qs2; @q.secret; end
+  end
+RUBY
+COLD_OWNERS = %w[CcA CcB CcHold].freeze
+COLD_NAMES = COLD_SRC[/class CcHold.*/m].scan(/def (\w+)/).flatten - ['initialize']
+# The pairs whose send is a guarded statement; the rest (a stack block's send, a single by-name or index call) are one
+# call already and only take part in the behavioural comparison.
+COLD_PAIRS = %w[qv wv pv qk wk pk he].map { |n| ["#{n}1", "#{n}2"] }
+cold_list = File.join(Dir.mktmpdir('bc2cpp-cold-calls-list'), 'cold_methods.txt')
+File.write(cold_list, "# fixture\n#{COLD_NAMES.map { |n| "CcHold##{n}" }.join("\n")}\n")
+cold_gen = lambda do |env|
+  cdir = Dir.mktmpdir('bc2cpp-cold-calls')
+  saved = ENV.to_h.slice('BC2CPP_COLD_LIST', *env.keys)
+  ENV['BC2CPP_COLD_LIST'] = cold_list
+  env.each { |k, v| ENV[k] = v }
+  begin
+    [cdir, *Bc2cppFixtureRuntime.generate(COLD_SRC, cdir, only_owners: COLD_OWNERS)]
+  ensure
+    ['BC2CPP_COLD_LIST', *env.keys].each { |k| saved.key?(k) ? ENV[k] = saved[k] : ENV.delete(k) }
+  end
+end
+cold_dir, cold_code, cold_err = cold_gen.call({})
+off_cold_dir, off_cold_code, off_cold_err = cold_gen.call('BC2CPP_COLD_COMPACT_CALLS' => '0')
+at_exit { [cold_dir, off_cold_dir].each { |d| FileUtils.remove_entry(d) } }
+File.write(ENV['COLD_CALLS_DUMP'], cold_code) if ENV['COLD_CALLS_DUMP']
+check.call('COLD_COMPACT_CALLS fixture: no #error in the generated code',
+           !cold_code.include?('#error') && !off_cold_code.include?('#error'))
+ccalls = ->(fn) { method_code(cold_code, fn).scan(/\bbc2cpp_ccall_\h{16}\b/) }
+COLD_PAIRS.each do |a, b|
+  check.call("COLD_COMPACT_CALLS #{a}/#{b}: the guarded send is one call of the same helper",
+             !ccalls.call("CcHold_#{a}").empty? && ccalls.call("CcHold_#{a}") == ccalls.call("CcHold_#{b}"))
+end
+check.call('COLD_COMPACT_CALLS: a helper keeps its non-destination parameters const',
+           cold_code.scan(
+             /^static __attribute__\(\(noinline, cold\)\) \w+ bc2cpp_ccall_\h{16}\(mrb_state\* M(?:, (?:const )?mrb_value a\d+)*\)/
+           ).size ==
+             cold_code.scan(/^static [^\n]*\bbc2cpp_ccall_\h{16}\(/).size)
+check.call('BC2CPP_COLD_COMPACT_CALLS=0: no helper, the inline guards stay',
+           !off_cold_code.include?('bc2cpp_ccall_') && method_code(off_cold_code, 'CcHold_qv1').include?('mrb_nil_p('))
+COLD_DRIVER = <<~RUBY
+  [true, false].each do |fill|
+    h = CcHold.new(fill)
+    %i[#{COLD_NAMES.join(' ')}].each do |m|
+      line = begin
+        h.__send__(m).inspect
+      rescue NoMethodError => e
+        "\#{e.class}: \#{e.message} name=\#{e.name.inspect} args=\#{e.args.inspect}"
+      rescue StandardError => e
+        "\#{e.class}: \#{e.message}"
+      end
+      puts "\#{fill} \#{m}: \#{line}"
+    end
+  end
+  puts 'end'
+RUBY
+
 MONO_DRIVER = <<~'RUBY'
   [true, false].each do |fill|
     h = MnrHold.new(fill)
@@ -321,6 +429,38 @@ else
       interpreted.zip(compiled).reject { |a, b| a == b }.first(10).each { |a, b| puts "    interpreted: #{a}\n    compiled:    #{b}" }
     end
     puts output.lines.last(30).join unless built && interpreted && compiled
+
+    { 'cold' => [cold_dir, cold_err], 'cold off' => [off_cold_dir, off_cold_err] }.each do |world, (wdir, werr)|
+      puts "-- COLD_COMPACT_CALLS fixture (#{world}) on real mruby, interpreted and compiled"
+      cold_body = <<~CPP
+        static int scenario(mrb_state* M) {
+          std::fflush(stdout);
+          const char* src = R"CCC(#{COLD_DRIVER})CCC";
+          mrb_load_string(M, src);
+          std::fflush(stdout);
+          if (M->exc) { mrb_print_error(M); M->exc = nullptr; return 1; }
+          return 0;
+        }
+      CPP
+      built, output = Bc2cppFixtureRuntime.run(wdir, werr, COLD_OWNERS, cold_body, build: build, full: true)
+      check.call("COLD_COMPACT_CALLS (#{world}): the fixtures build and run", built)
+      sections = Bc2cppFixtureRuntime.sections(output)
+      interpreted = sections['interpreted']
+      compiled = sections['compiled']
+      check.call("COLD_COMPACT_CALLS (#{world}): nil, wrong-class and private receivers raise NoMethodError",
+                 %w[qv1 wv1 qk1 wk1 qb1 ae1 he1 as1].all? do |m|
+                   interpreted.to_a.any? { |l| l.start_with?("false #{m}: NoMethodError:") }
+                 end &&
+                   interpreted.to_a.any? { |l| l.start_with?('true qs1: NoMethodError:') })
+      check.call("COLD_COMPACT_CALLS (#{world}): interpreted and compiled runs print the same",
+                 interpreted && interpreted.last == 'end' && interpreted == compiled)
+      if interpreted && compiled
+        interpreted.zip(compiled).reject { |a, b| a == b }.first(10).each do |a, b|
+          puts "    interpreted: #{a}\n    compiled:    #{b}"
+        end
+      end
+      puts output.lines.last(30).join unless built && interpreted && compiled
+    end
   end
 end
 
