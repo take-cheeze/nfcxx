@@ -17,3 +17,9 @@
 [submodule "bc2cpp/3rd/rbs"]
 	path = bc2cpp/3rd/rbs
 	url = https://github.com/take-cheeze/rbs.git
+
+[submodule "3rd/mruby"]
+	path = 3rd/mruby
+	url = https://github.com/take-cheeze/mruby
+	branch = claude/fork-integration
+[submodule "3rd/mruby-marshal"]
