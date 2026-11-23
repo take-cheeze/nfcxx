@@ -941,7 +941,93 @@ class CodeGen
       out << "#error rescue body builds a block over the method's cells array, which the try function does not capture\n"
     end
     # The nested try bodies above are in +out+ too, so a shared name is only ever kept.
-    @resumable ? out : drop_dead_statements(drop_unused_registers(out))
+    return out if @resumable
+
+    field_names = ['self'] + arg_names + extra_fields.map { |f| f[:name] }
+    prune_rescue_ctx(drop_dead_statements(drop_unused_registers(out)), try_name, field_names, arg_names.size)
+  end
+
+  # RESCUE_CTX_PRUNE kill switch: BC2CPP_RESCUE_CTX_PRUNE=0 passes every Ctx field.
+  def rescue_ctx_prune_enabled?
+    ENV['BC2CPP_RESCUE_CTX_PRUNE'] != '0'
+  end
+
+  # RESCUE_PROTECT_FOLD kill switch: BC2CPP_RESCUE_PROTECT_FOLD=0 calls bc2cpp_protect and sets `$!` at each glue.
+  def rescue_protect_fold_enabled?
+    ENV['BC2CPP_RESCUE_PROTECT_FOLD'] != '0'
+  end
+
+  # A declaration copying a Ctx field (or boxing one) or another local: no side effect, so it goes with its last reader.
+  RESCUE_CTX_PURE_LOAD =
+    /\A  (?:mrb_value&?|[A-Za-z_]\w*\*?) (\w+) = (?:\*?bc2cpp_ctx->\w+|\w*\(bc2cpp_ctx->\w+\)|self|r\d+|bc2cpp_saved_r\d+);\n\z/
+
+  # RESCUE_CTX_PRUNE: the Ctx is a by-value copy (or, for `bc2cpp_ref_rN`, an alias) that only the try body reads. A
+  # field whose name its text no longer holds once the unread pure loads are gone has no effect, so neither has storing
+  # it, or rooting it again, at the glue. Rewrites try_name's struct and loads in +text+ and records which fields stay.
+  def prune_rescue_ctx(text, try_name, field_names, arg_count)
+    @rescue_ctx_kept ||= {}
+    @rescue_ctx_kept.delete(try_name)
+    return text unless rescue_ctx_prune_enabled?
+
+    struct_head = "struct #{try_name}_Ctx { "
+    s = text.index(struct_head)
+    struct_end = s && text.index(" };\n", s)
+    fn_open = struct_end && text.index("static mrb_value #{try_name}(mrb_state* M, void* ud) {", struct_end)
+    # The body ends at its fell_off_end raise: a `}` in column 0 can also close a block inside it.
+    tail = "#{try_name} fell off the end of its body\");\n}\n"
+    fn_close = fn_open && (t = text.index(tail, fn_open)) && t + tail.size - 3
+    return text unless fn_close
+
+    fields = text[(s + struct_head.size)...struct_end].chomp(';').split('; ')
+    return text unless fields.map { |f| f[/(\w+)\z/, 1] } == field_names
+
+    first, *lines = text[fn_open..fn_close].lines
+    # Only register locals go; self stays, since later passes may add a use of it (an owner call's caller).
+    loop do
+      dead = lines.index do |l|
+        (m = RESCUE_CTX_PURE_LOAD.match(l)) && m[1].match?(/\A(?:bc2cpp_saved_)?r\d+\z/) &&
+          lines.none? { |o| !o.equal?(l) && o.match?(/\b#{m[1]}\b/) }
+      end
+      if dead
+        lines.delete_at(dead)
+      elsif (i = lines.index { |l| rescue_ctx_load_overwritten?(lines, l) })
+        lines[i] = "  mrb_value #{RESCUE_CTX_PURE_LOAD.match(lines[i])[1]} = mrb_nil_value();\n"
+      else
+        break
+      end
+    end
+    # Only self, the arguments and the register captures are pruned; the block, upvar and cell fields stay.
+    kept = field_names.each_with_index.map do |name, i|
+      !(i.positive? && (i < 1 + arg_count || name.match?(/\Abc2cpp_(?:saved|ref)_r\d+\z/))) ||
+        lines.any? { |l| l.match?(/bc2cpp_ctx->#{name}\b/) }
+    end
+    @rescue_ctx_kept[try_name] = kept
+    struct = "#{struct_head}#{fields.select.with_index { |_, i| kept[i] }.map { |f| "#{f}; " }.join}};\n"
+    text[0...s] + struct + text[(struct_end + 4)...fn_open] + first + lines.join + text[(fn_close + 1)..]
+  end
+
+  # A line that may branch, be branched to, or open or close a scope.
+  RESCUE_CTX_CONTROL = /\bL\d+:|\b(?:goto|return|if|else|case|default|for|while|do|switch)\b|[{}]/
+
+  # RESCUE_CTX_PRUNE: is +line+ a by-value register load (not a `mrb_value&` alias) whose value nothing reads? It is when
+  # the first later line naming the register overwrites it, and every line before that one runs straight on into it.
+  def rescue_ctx_load_overwritten?(lines, line)
+    m = RESCUE_CTX_PURE_LOAD.match(line)
+    return false unless m && line.start_with?('  mrb_value r') && !line.include?('mrb_nil_value()')
+
+    var = m[1]
+    word = /\b#{var}\b/
+    i = lines.index { |l| l.equal?(line) }
+    j = (i + 1...lines.size).find { |k| lines[k].match?(word) }
+    return false unless j && lines[(i + 1)...j].none? { |l| l.match?(RESCUE_CTX_CONTROL) }
+
+    (w = lines[j].match(/\A  #{var} = (.*);\n\z/)) && !w[1].match?(word) && !w[1].match?(RESCUE_CTX_CONTROL)
+  end
+
+  # RESCUE_CTX_PRUNE: is the field at +index+ of try_name's Ctx (self, the arguments, then the extra fields) kept?
+  def rescue_ctx_field_kept?(try_name, index)
+    kept = @rescue_ctx_kept&.[](try_name)
+    kept.nil? || kept[index]
   end
 
   # RESCUE_SUPPORT: glue at begin_addr replacing [begin_addr, end_addr]: run the
@@ -958,17 +1044,24 @@ class CodeGen
   # `extra_fields`, appended in order to the aggregate `ctx{...}` initializer.
   def emit_rescue_glue(try_name, region, arg_names, arg_native_types, extra_field_values: [])
     ctx_struct = "#{try_name}_Ctx"
-    ctx_args = (['self'] + arg_names + extra_field_values).join(', ')
+    fields = (['self'] + arg_names + extra_field_values).each_with_index.select { |_, i| rescue_ctx_field_kept?(try_name, i) }
+    ctx_args = fields.map(&:first).join(', ')
     err_var = "#{try_name}_err"
     result_var = "#{try_name}_result"
     out = String.new
     out << "  {\n"
     out << "    #{ctx_struct} bc2cpp_ctx{#{ctx_args}};\n"
-    out << "    mrb_bool #{err_var} = FALSE;\n"
-    out << "    mrb_value #{result_var} = bc2cpp_protect(M, #{try_name}, &bc2cpp_ctx, &#{err_var});\n"
+    # RESCUE_PROTECT_FOLD: bc2cpp_rescue_protect sets the error flag before anything reads it, and `$!` on an error.
+    if rescue_protect_fold_enabled?
+      out << "    mrb_bool #{err_var};\n"
+      out << "    mrb_value #{result_var} = bc2cpp_rescue_protect(M, #{try_name}, &bc2cpp_ctx, &#{err_var});\n"
+    else
+      out << "    mrb_bool #{err_var} = FALSE;\n"
+      out << "    mrb_value #{result_var} = bc2cpp_protect(M, #{try_name}, &bc2cpp_ctx, &#{err_var});\n"
+    end
     # bc2cpp_protect restores the arena to where it was before the try body, so an object the body stored into an outer
     # register (a `&rN` field) loses the arena slot that kept it alive: root it again here, or the next collection frees it.
-    extra_field_values.each do |v|
+    fields.each do |v, _|
       out << "    bc2cpp_root(M, #{Regexp.last_match(1)});\n" if v =~ /\A&(r\d+)\z/
     end
     out << if region[:tail_return]
@@ -976,7 +1069,7 @@ class CodeGen
             else
               "    if (!#{err_var}) { r#{region[:connector_reg]} = #{result_var}; goto L#{region[:shared_target]}; }\n"
             end
-    out << "    bc2cpp_set_errinfo(M, #{result_var});\n"
+    out << "    bc2cpp_set_errinfo(M, #{result_var});\n" unless rescue_protect_fold_enabled?
     out << "    r#{region[:exc_reg]} = #{result_var};\n"
     out << "  }\n"
     out

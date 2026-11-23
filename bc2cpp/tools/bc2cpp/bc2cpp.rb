@@ -2997,6 +2997,13 @@ BC2CPP_MAIN = lambda do
       Bc2cppErrinfoScope(const Bc2cppErrinfoScope&) = delete;
       Bc2cppErrinfoScope& operator=(const Bc2cppErrinfoScope&) = delete;
     };
+    // RESCUE_PROTECT_FOLD: a rescue glue's protect and its OP_EXCEPT `$!` in one shared call (emit_rescue_glue).
+    [[gnu::noinline, maybe_unused]] static mrb_value bc2cpp_rescue_protect(mrb_state* M, mrb_value (*body)(mrb_state*, void*),
+                                                                          void* ud, mrb_bool* error) {
+      mrb_value result = bc2cpp_protect(M, body, ud, error);
+      if (*error) bc2cpp_set_errinfo(M, result);
+      return result;
+    }
   ERRINFO
   # GETIDX's String arm calls mrb_str_aref (src/string.c, non-static), declared
   # only in mruby/internal.h, which has no C-linkage guard; including it would
