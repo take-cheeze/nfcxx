@@ -252,6 +252,8 @@ CGS_TAIL = <<~'CPP'
   #define CGS_SITE(x) \
     ([]() -> int { static int n = 0; return ++n + (x); }())
   static int site_user() { return CGS_SITE(1); }
+  static int bump_$3f() { return bump(); }
+  static int uses_q() { return bump_$3f(); }
   int GEM_method(int x);
 CPP
 def cgs_gem(gem, dir)
@@ -277,6 +279,7 @@ Dir.mktmpdir('bc2cpp-cross-gem') do |dir|
   suite.check('a caller of a function whose default argument is a call stays with it',
               a.include?('static int with_default(int a, int b = dflt())') && a.include?('static int calls_default()'))
   suite.check('a function using a macro whose continued body holds a static stays', a.include?('static int site_user()'))
+  suite.check('a caller of a `$`-spelled local stays', a.include?('static int uses_q()'))
   suite.check('the unit names a moved item through a using-declaration', a.match?(/^using bc2cpp_cs_\h{16}::helper;$/))
   ENV['BC2CPP_CROSS_GEM_SHARE'] = '0'
   off = RuntimeHeader.rewrite("#{RuntimeHeader::BEGIN_MARK}#{RuntimeHeader::END_MARK}#{CGS_TAIL}", nil, tail_mark: CrossGemShare.enabled?)

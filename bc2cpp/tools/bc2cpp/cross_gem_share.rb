@@ -33,7 +33,8 @@ module CrossGemShare
   # Bumped when the header layout changes.
   FORMAT = 1
   FORBIDDEN = /\b(?:__FILE__|__LINE__|__COUNTER__|namespace|asm|__asm__|BC2CPP_SHARD_PRELUDE_ONLY)\b/.freeze
-  IDENT = /\b[A-Za-z_]\w*\b/.freeze
+  # Generated names spell `$` (`Array_$5b$5d`), as ShardOutput::IDENT reads them.
+  IDENT = /(?<![\w$])[A-Za-z_$][\w$]*(?![\w$])/.freeze
   KEYWORDS = %w[int bool char void long short unsigned signed float double auto const static inline struct class union
                 enum decltype sizeof return operator __attribute__ alignas noexcept throw].to_set.freeze
 
@@ -126,7 +127,7 @@ module CrossGemShare
   # [names an item declares, whether it can move].
   def declared_names(item, code)
     head = item[:head]
-    pointer = head[/\(\s*\*\s*(?:const\s+)?([A-Za-z_]\w*)\s*\)\s*\(/, 1]
+    pointer = head[/\(\s*\*\s*(?:const\s+)?([A-Za-z_$][\w$]*)\s*\)\s*\(/, 1]
     if item[:name] && !head.match?(/\A(?:template|extern\s+"C"|typedef)\b/)
       # A function-pointer variable reads as a function named by its return type.
       return [[pointer], true] if pointer && head.index('(') == head.index(/\(\s*\*/)
@@ -141,19 +142,19 @@ module CrossGemShare
     case head
     when /\Atemplate\b/
       rest = head.sub(/\Atemplate\s*<[^>]*>\s*/, '')
-      name = rest[/\A(?:struct|class|union)\s+([A-Za-z_]\w*)/, 1] || rest[/\A[^(]*?([A-Za-z_]\w*)\s*\(/, 1]
+      name = rest[/\A(?:struct|class|union)\s+([A-Za-z_$][\w$]*)/, 1] || rest[/\A[^(]*?([A-Za-z_$][\w$]*)\s*\(/, 1]
       [[name].compact, false]
     when /\Aextern\s+"C"/
-      [[item[:name] || head[/([A-Za-z_]\w*)\s*\(/, 1]].compact, false]
+      [[item[:name] || head[/([A-Za-z_$][\w$]*)\s*\(/, 1]].compact, false]
     when /\Atypedef\b/
-      name = head[/\(\s*\*\s*([A-Za-z_]\w*)\s*\)/, 1] || head[/([A-Za-z_]\w*)\s*(?:\[[^\]]*\])*\s*\z/, 1]
+      name = head[/\(\s*\*\s*([A-Za-z_$][\w$]*)\s*\)/, 1] || head[/([A-Za-z_$][\w$]*)\s*(?:\[[^\]]*\])*\s*\z/, 1]
       [[name].compact, !name.nil?]
     when /\Aenum\b/
       body = code[/\{(.*)\}/m, 1].to_s
-      [[head[/\Aenum\s+(?:class\s+)?([A-Za-z_]\w*)/, 1], *body.split(',').map { |e| e[/\A\s*([A-Za-z_]\w*)/, 1] }].compact, false]
-    when /\A(?:struct|class|union)\s+([A-Za-z_]\w*)/
+      [[head[/\Aenum\s+(?:class\s+)?([A-Za-z_$][\w$]*)/, 1], *body.split(',').map { |e| e[/\A\s*([A-Za-z_$][\w$]*)/, 1] }].compact, false]
+    when /\A(?:struct|class|union)\s+([A-Za-z_$][\w$]*)/
       [[Regexp.last_match(1)], true]
-    when /\Ausing\s+([A-Za-z_]\w*)\s*=/
+    when /\Ausing\s+([A-Za-z_$][\w$]*)\s*=/
       [[Regexp.last_match(1)], true]
     else
       [[], false]
@@ -170,7 +171,7 @@ module CrossGemShare
     found = head_functions(head)
     found = [item[:name]].compact if found.empty?
     # A variable's declarator ends its head (`decltype(x) name`, `T name[N]`), whatever top_level_items made of it.
-    last = head.sub(/(?:\s*\[[^\]]*\])+\s*\z/, '')[/([A-Za-z_]\w*)\s*\z/, 1]
+    last = head.sub(/(?:\s*\[[^\]]*\])+\s*\z/, '')[/([A-Za-z_$][\w$]*)\s*\z/, 1]
     found += [last] if last && !head.rstrip.end_with?(')')
     found.to_set - KEYWORDS
   end
@@ -179,16 +180,16 @@ module CrossGemShare
   def head_functions(head)
     names = []
     depth = 0
-    head.scan(/[A-Za-z_]\w*\s*\(\s*\*?|\(|\)/) do |tok|
+    head.scan(/[A-Za-z_$][\w$]*\s*\(\s*\*?|\(|\)/) do |tok|
       if tok == ')'
         depth -= 1
       else
         # `T (*name)(...)`: T is a function pointer's return type, its name is the pointer's (declared_names).
-        names << tok[/\A[A-Za-z_]\w*/] if depth.zero? && tok != '(' && !tok.end_with?('*')
+        names << tok[/\A[A-Za-z_$][\w$]*/] if depth.zero? && tok != '(' && !tok.end_with?('*')
         depth += 1
       end
     end
-    pointer = head[/\(\s*\*\s*(?:const\s+)?([A-Za-z_]\w*)\s*\)\s*\(/, 1]
+    pointer = head[/\(\s*\*\s*(?:const\s+)?([A-Za-z_$][\w$]*)\s*\)\s*\(/, 1]
     names << pointer if pointer
     (names - KEYWORDS.to_a).uniq
   end
@@ -238,7 +239,7 @@ module CrossGemShare
     return Set.new if functions.empty?
 
     found = Set.new
-    pattern = /\b(#{functions.to_a.sort.map { |n| Regexp.escape(n) }.join('|')})\b(?!\s*\()/
+    pattern = /(?<![\w$])(#{functions.to_a.sort.map { |n| Regexp.escape(n) }.join('|')})(?![\w$])(?!\s*\()/
     text.scan(pattern) { found << Regexp.last_match(1) }
     found
   end
@@ -290,7 +291,7 @@ module CrossGemShare
     text.each_line do |line|
       if open
         open << line
-      elsif (m = line.match(/\A\s*#\s*define\s+([A-Za-z_]\w*)/))
+      elsif (m = line.match(/\A\s*#\s*define\s+([A-Za-z_$][\w$]*)/))
         open = String.new(line)
         defs[m[1]] << open
       end
@@ -317,7 +318,7 @@ module CrossGemShare
     queue = ids.select { |id| macros.key?(id) }
     while (id = queue.pop)
       macros[id].each do |d|
-        d.sub(/\A\s*#\s*define\s+[A-Za-z_]\w*/, '').scan(IDENT).each { |x| queue << x if seen.add?(x) && macros.key?(x) }
+        d.sub(/\A\s*#\s*define\s+[A-Za-z_$][\w$]*/, '').scan(IDENT).each { |x| queue << x if seen.add?(x) && macros.key?(x) }
       end
     end
     seen
