@@ -1819,6 +1819,13 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ensure_pdata tools/cext2mrbg
 check test "$rc" -eq 0
 check test "$(grep -c 'VALUE as pointer' "$work/api_ensure_pdata/REFUSALS.txt")" -eq 0
 check grep -qF 'mrb_ensure(mrb, ep_body, mrb_cptr_value(mrb, p), ep_done, mrb_cptr_value(mrb, p));' "$work/api_ensure_pdata/src/api_ensure_pdata.c"
+# 2zzz186. rb_protect with a VALUE array as its data ((VALUE)args): the array is mrb_cptr_value of its address, its element casts
+# are mrb_cptr of the element; no VALUE-array refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_protect_array tools/cext2mrbgem/fixtures/api_protect_array/ext/api_protect_array "$work/api_protect_array" > "$work/api_protect_array.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'VALUE as pointer' "$work/api_protect_array/REFUSALS.txt")" -eq 0
+check grep -qF 'mrb_protect(mrb, pa_cb, mrb_cptr_value(mrb, args), &state);' "$work/api_protect_array/src/api_protect_array.c"
+check grep -qF 'struct pa_state *st = (struct pa_state *)mrb_cptr(args[0]);' "$work/api_protect_array/src/api_protect_array.c"
 check grep -qF "spec.add_dependency 'mruby-marshal'" "$work/api_marshal_load/mrbgem.rake"
 # 2zzz179. rb_time_timespec_new: a fixed UTC offset is mrb_time_at_offset (the fork's mruby-time), CRuby's INT_MAX and INT_MAX-1 are
 # local time and UTC; no Time-offset refusal.

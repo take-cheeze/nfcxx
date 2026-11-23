@@ -2556,6 +2556,10 @@ end
     end
     # a split registered method (compute_splits) is forced only through its body: its impl gets mrb when the body needs it
 forced = (@reg_names - @split_names) | Set.new(@init_defs.map { |d| d['name'] })
+    # the first argument of rb_protect is called as mruby's mrb_func_t (mrb, data): a callback defined here takes mrb
+    prot_names = Set.new
+    @files.each_value { |f| f['masked'].to_enum(:scan, /rb_protect\s*\(\s*([A-Za-z_]\w*)/).each { prot_names << Regexp.last_match(1) } }
+    forced |= prot_names.select { |n| @defs.key?(n) }
     # struct function-pointer fields (fnptr_decls): the callbacks assigned to a field are threaded with mrb, as the field's
     # type takes mrb (fnptr_global; the edits are in edit_fnptr_fields)
     @fnptr_recs = []
@@ -3714,6 +3718,13 @@ use_problem = lambda do |name, use|
         fn = enclosing_func(rel, m.begin(1))
         next unless fn && value_pointer_names(fn).include?(nm)
         next if @edits[rel].overlaps(m.begin(1), m.begin(1) + 1)
+        # an element (args[i]) carrying a pointer is read with mrb_cptr: the element is the VALUE, its pointer is the CPTR value
+        close_b = mv.index(']', m.end(1))
+        if close_b && mv[m.end(1)...close_b].match?(/\A\s*\[[^\[\]\n]*\z/) && !@edits[rel].overlaps(m.begin(1), close_b + 1)
+          @edits[rel].add(m.begin(1), m.begin(1), 'mrb_cptr(')
+          @edits[rel].add(close_b + 1, close_b + 1, ')')
+          next
+        end
         refuse(rel, m.begin(1), nm, "stuck point (VALUE as pointer): #{nm} is a VALUE array (mrb_value *, the data of rb_protect), and an element cast to a struct pointer has no mruby form (the fork's VALUE is a struct, include/mruby/boxing_no.h)")
       end
       mv.to_enum(:scan, /\(\s*(?:VALUE|mrb_value)\s*\)\s*([A-Za-z_]\w*)(?![\w\[(])/).each do
@@ -3721,6 +3732,13 @@ use_problem = lambda do |name, use|
         nm = m[1]
         fn = enclosing_func(rel, m.begin(1))
         next unless fn && value_pointer_names(fn).include?(nm)
+        # the array's address carried in a VALUE (rb_protect's data): mrb_cptr_value of the array; the VALUE token is renamed
+        items = @edits[rel].overlapping(m.begin(0), m.end(1))
+        if items.all? { |a, b, t| t == 'mrb_value' && a >= m.begin(0) && b <= m.begin(1) } && !@edits[rel].overlaps(m.end(1), m.end(1) + 1)
+          @edits[rel].drop(items)
+          @edits[rel].add(m.begin(0), m.end(1), "mrb_cptr_value(#{mrb_tok(rel, m.begin(0))}, #{nm})")
+          next
+        end
         next if @edits[rel].overlaps(m.begin(1), m.begin(1) + 1)
         refuse(rel, m.begin(1), nm, "stuck point (VALUE as pointer): #{nm} is a VALUE array (mrb_value *), and a pointer cast to VALUE is a struct in the fork (include/mruby/boxing_no.h), which cannot hold an address")
       end
