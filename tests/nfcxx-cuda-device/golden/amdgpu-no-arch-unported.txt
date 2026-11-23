@@ -1,0 +1,2 @@
+status 2
+nfcxx: @REPO@/tests/nfcxx-cuda-device/fixtures/mul2.cu: NFCXX_CUDA_TARGET=amdgpu: no AMD GPU found (set NFCXX_AMDGPU_ARCH, e.g. gfx1151)
