@@ -2313,6 +2313,8 @@ class CodeGen
   # With +used+ (the rest of the emitted text), a helper only a discarded body
   # named is left out; the indices stay as assigned.
   def emit_const_scope_helpers(used = nil)
+    return emit_const_scope_helpers_table(used) if static_constants?
+
     out = String.new
     called = used && helper_calls(used, 'bc2cpp_const_scope_')
     (@const_scope_helpers || {}).each do |owner_path, slot|
@@ -2395,6 +2397,8 @@ class CodeGen
   # (bc2cpp_cconst_bind). Always emitted so the gems can call the reset.
   # +used+ as for emit_const_scope_helpers: the slots stay sized for every index.
   def emit_const_site_cache(used = nil)
+    return emit_const_site_cache_table(used) if static_constants?
+
     entries = (@const_site_cache || {}).values
     called = used && helper_calls(used, 'bc2cpp_cconst_')
     count = [entries.size, 1].max
