@@ -1803,6 +1803,11 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_marshal_load tools/cext2mrbg
 check test "$rc" -eq 0
 check test "$(grep -c 'Marshal' "$work/api_marshal_load/REFUSALS.txt")" -eq 0
 check grep -qF 'return mrb_marshal_load(mrb, data);' "$work/api_marshal_load/src/api_marshal_load.c"
+# 2zzz183. RB_OBJ_FROZEN_RAW is the fork's frozen bit (MRB_FROZEN_P on a heap object; an immediate is not frozen); no refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_frozen_raw tools/cext2mrbgem/fixtures/api_frozen_raw/ext/api_frozen_raw "$work/api_frozen_raw" > "$work/api_frozen_raw.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'stuck point' "$work/api_frozen_raw/REFUSALS.txt")" -eq 0
+check grep -qF 'MRB_FROZEN_P(mrb_basic_ptr(str))' "$work/api_frozen_raw/src/api_frozen_raw.c"
 check grep -qF "spec.add_dependency 'mruby-marshal'" "$work/api_marshal_load/mrbgem.rake"
 # 2zzz179. rb_time_timespec_new: a fixed UTC offset is mrb_time_at_offset (the fork's mruby-time), CRuby's INT_MAX and INT_MAX-1 are
 # local time and UTC; no Time-offset refusal.
