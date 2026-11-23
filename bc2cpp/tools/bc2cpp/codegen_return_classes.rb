@@ -44,7 +44,7 @@ class CodeGen
       mask = @cg.record_index_mask(irep, index, insn) || @cg.exact_lcf_index_mask(irep, index, insn, state)
       return mask unless mask == NumericFlow::OTHER
 
-      @cg.declared_element_index_mask(irep, index, insn) || mask
+      @cg.declared_element_index_mask(irep, index, insn, state) || mask
     end
     # ELEMENT (generic step 2): the element class mask of a map/collect result, or nil (unknown).
     def block_element_mask(irep, index, insn, _state) = @cg.block_element_class_mask(irep, index, insn)
