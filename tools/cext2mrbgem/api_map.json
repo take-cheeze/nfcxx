@@ -39,7 +39,7 @@
     "T_TRUE": "not in the type-check subset of this change (refused as listed); mruby's MRB_TT_TRUE (include/mruby/value.h:107) is true only, so it can be added as its own change",
     "T_UNDEF": "CRuby's Qundef is an internal marker, not a Ruby object type; mruby's MRB_TT_UNDEF (value.h:111) is a separate value kind",
     "T_STRUCT": "the fork has no MRB_TT_STRUCT tag (include/mruby/value.h:106-131); Struct instances are an mrbgem class (mrbgems/mruby-struct), so a type test would be a class test, which is not made here",
-    "T_REGEXP": "stuck point: the fork has no Regexp tag (include/mruby/value.h:106-131) and no mrbgem defines a Regexp class (mrbgems/ lists no mruby-regexp), so there is nothing to compare with"
+    "T_REGEXP": "stuck point (Regexp): a T_REGEXP tag has no mruby tag to compare with (include/mruby/value.h:106-131): a Regexp is the mruby-onig-regexp data object, so the test is its data type, which RB_TYPE_P and a switch on TYPE use (the switch pass); this bare use has no such test"
   },
   "unmapped_reasons": {
     "T_RATIONAL": "stuck point (gem dependency): a Rational test is the mruby-rational class test, which needs the state and the gem (the decision is made: the gem is a dependency when the test is emitted); a bare use has no test to make here",
