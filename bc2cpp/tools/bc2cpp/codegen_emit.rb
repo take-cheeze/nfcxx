@@ -450,11 +450,45 @@ class CodeGen
       rows = rows.select { |row| row[:key] }
       out << rom_method_table(rom, owner, var, singleton, rows) if table && !rows.empty?
       # An owner the stream took every call of needs no lookup here.
-      whole << "  struct RClass* #{var} = mrb_class_ptr(#{const_chain_value_expr(owner)});\n" if out.include?(var)
+      whole << "  struct RClass* #{var} = #{registration_class_expr(owner, whole)};\n" if out.include?(var)
       whole << out
       out = whole
     end
   end
+
+  # CONST_PATH_WALK: the class at +owner+'s path for init code, `mrb_const_get` from Object down each segment (a
+  # missing one raises NameError). A path of two or more presym segments is a function-local uint16_t row, written to
+  # +out+ ahead of the use and walked by bc2cpp_const_path_class (CONST_PATH_WALK_HELPER), in place of one inlined call
+  # per segment. BC2CPP_CONST_PATH_WALK=0 keeps the inlined chain.
+  def registration_class_expr(owner, out)
+    path = lexical_scope_path(owner)
+    keys = const_path_walk? && path.size >= 2 && path.map { |seg| presym_key(seg) }
+    return "mrb_class_ptr(#{const_chain_value_expr(owner)})" unless keys && keys.all?
+
+    @const_path_rows = (@const_path_rows || 0) + 1
+    row = "bc2cpp_cpath_#{@const_path_rows}"
+    out << "  static constexpr uint16_t #{row}[] = {#{keys.size}, #{keys.map { |k| "bc2cpp_cpath_sym(#{k})" }.join(', ')}};\n"
+    "bc2cpp_const_path_class(M, #{row})"
+  end
+
+  # The presym keys CONST_PATH_WALK rows hold exist only with ROM_METHOD_TABLES and BC2CPP_PRESYM_OWNERS.
+  def const_path_walk?
+    rom_method_tables? && ENV['BC2CPP_PRESYM_OWNERS'] != '0' && ENV['BC2CPP_CONST_PATH_WALK'] != '0'
+  end
+
+  # CONST_PATH_WALK's row reader: the chained mrb_const_get calls it replaces, in the same order.
+  CONST_PATH_WALK_HELPER = <<~CPP
+    [[maybe_unused]] static uint16_t bc2cpp_cpath_sym_too_wide(mrb_sym s) { return (uint16_t)s; }
+    [[maybe_unused]] static constexpr uint16_t bc2cpp_cpath_sym(mrb_sym s) {
+      // Not a constant expression past 16 bits, so a row naming such a presym does not compile.
+      return s < 0xffff ? (uint16_t)s : bc2cpp_cpath_sym_too_wide(s);
+    }
+    [[maybe_unused]] [[gnu::noinline]] static struct RClass* bc2cpp_const_path_class(mrb_state* M, const uint16_t* row) {
+      mrb_value v = mrb_obj_value(M->object_class);
+      for (unsigned i = 1; i <= row[0]; i++) v = mrb_const_get(M, v, (mrb_sym)row[i]);
+      return mrb_class_ptr(v);
+    }
+  CPP
 
   # ROM_METHOD_TABLES (BC2CPP_ROM_METHOD_TABLES=1, set for the rake gem build, whose presym scan reads the generated
   # sources): one const mrb_mt_entry table per owner and half. A later row of a name wins, as the later
@@ -571,7 +605,7 @@ class CodeGen
       next if entries.empty?
 
       var = "bc2cpp_owner_acc_#{sanitize(owner)}"
-      out << "  struct RClass* #{var} = mrb_class_ptr(#{const_chain_value_expr(owner)});\n"
+      out << "  struct RClass* #{var} = #{registration_class_expr(owner, out)};\n"
       entries.each do |_, name|
         out << "  // #{owner}##{name} (attr accessor) left unregistered: statically dispatched only (docs/adr/0203).\n"
         out << "  bc2cpp_left_out(M, #{var}, #{c_string_literal(name)}, #{owner.end_with?('.singleton')});\n"
@@ -719,7 +753,7 @@ class CodeGen
     end
     out << "static void bc2cpp_capture_direct_construct_classes([[maybe_unused]] mrb_state* M) {\n"
     owners.each do |owner|
-      out << "  bc2cpp_direct_construct_#{sanitize(owner)} = mrb_class_ptr(#{const_chain_value_expr(owner)});\n"
+      out << "  bc2cpp_direct_construct_#{sanitize(owner)} = #{registration_class_expr(owner, out)};\n"
     end
     out << "}\n"
     out << "static void bc2cpp_reset_direct_construct_classes() {\n"

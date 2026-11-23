@@ -65,6 +65,7 @@ def main():
     p.add_argument("--only", default="", help="run fixtures whose name contains this")
     p.add_argument("--time", type=int, default=0, help="time each matching fixture with this many inferences")
     p.add_argument("--loop-fixpoint", action="store_true", help="apply the loop fixed-point transform")
+    p.add_argument("--vector-lower", action="store_true", help="apply the ext-vector lowering")
     args = p.parse_args()
 
     work = args.work.resolve()
@@ -72,11 +73,18 @@ def main():
     wine = rk.Wine(args.movi_root, args.wine_host)
     base, _ = grow_carrier.grow(rk.base_blob(ELEMENTS, work).read_bytes(), 262144)
     core = flatten_vertex(flatten(inline(args.kernels / "frame_core.h")))   # both native trees flattened
+    if args.vector_lower:
+        from vector_lower import vector_lower
+        core = vector_lower(core)     # ext-vector four-lane helpers
     if args.loop_fixpoint:
         from loop_fixpoint import loop_fixpoint
         core = loop_fixpoint(core)
     (work / "frame_fill_entry.c").write_text(core + ENTRY)
     text, hazards = rk.build_text(work / "frame_fill_entry.c", "nr_probe_kernel", work, wine, args.movi_root)
+    import os
+    win = int(os.environ.get("NR_WINDOW", "0"))
+    if win and win > rk.section(base, "shave.text")[1]:
+        base, _ = grow_carrier.grow(base, win)
     off, size = rk.section(base, "shave.text")
     patched = bytearray(base)
     patched[off : off + size] = text + bytes(size - len(text))
@@ -136,6 +144,8 @@ def main():
         print(f"  {kind[0]}: {count} not exact", flush=True)
     for name, why in failures:
         print(f"  FAIL {name}: {why}")
+    if timings:
+        print(f"  total of p50 over {len(timings)} timed spans: {sum(ms for ms, _ in timings):.1f} ms", flush=True)
     for ms, name in sorted(timings, reverse=True)[:25]:
         print(f"  time p50 {ms:8.3f} ms  {name}")
 

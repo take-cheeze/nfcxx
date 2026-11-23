@@ -145,6 +145,12 @@
       "type_check": "exact",
       "caveat": "CRuby's T_NONE is the no-type tag (a sentinel, e.g. oj's fast.c parent_type = T_NONE for no parent); the fork has no empty-object tag, so the sentinel is MRB_TT_UNDEF (include/mruby/value.h:113), which no Ruby object carries"
     },
+    "RB_ENC_INTERNED_STR_NULL_CHECK": {
+      "kind": "expr",
+      "mruby": "0",
+      "type_check": "exact",
+      "caveat": "a CRuby build flag, not a runtime value: msgpack's extconf.rb defines it as 1 only for Ruby 3.0.0 to 3.0.5 (the CRuby bug ruby/ruby#18772, where an interned empty string had a null encoding), and buffer.h defaults it to 0. The mruby port has no such Ruby version and no interned-string null encoding, so the check is the default 0 (its branch is dead)"
+    },
     "RUBY_T_NONE": {
       "kind": "expr",
       "mruby": "MRB_TT_UNDEF",
@@ -2430,7 +2436,6 @@
     "onig_foreach_name": {"kind": "special", "handler": "onig_foreach", "needs_mrb": true, "caveat": "the callback takes the mruby state as its first argument (threaded like a helper); a trampoline passes it, and the state is stored for the call"},
     "rb_struct_new": {"kind": "special", "handler": "struct_variadic", "needs_mrb": true, "caveat": "Struct is the mruby-struct gem: Struct.new with the member symbols (rb_struct_define), or klass.new with the members' count of values (rb_struct_new)"},
     "rb_struct_define": {"kind": "special", "handler": "struct_variadic", "needs_mrb": true, "caveat": "Struct is the mruby-struct gem: Struct.new with the member symbols (rb_struct_define), or klass.new with the members' count of values (rb_struct_new)"},
-    "RB_ENC_INTERNED_STR_NULL_CHECK": {"kind": "refuse", "reason": "stuck point (Encoding): the null-encoding check of an interned string; mruby-encoding tags a string with an encoding index (rb_enc_get_index) and an interned string has no separate null encoding, so the check has no mruby form here without a per-string null flag"},
     "RBIGNUM_POSITIVE_P": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "(mrb_bint_sign($m, $0) > 0)", "caveat": "a Bignum is never zero, and a fixnum is a plain sign test; mirrors CRuby RBIGNUM_POSITIVE_P"},
     "RBIGNUM_NEGATIVE_P": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "(mrb_bint_sign($m, $0) < 0)", "caveat": "mirrors CRuby RBIGNUM_NEGATIVE_P"},
     "rb_big_cmp": {"kind": "template", "arity": 2, "needs_mrb": true, "template": "mrb_fixnum_value(mrb_bint_cmp($m, $0, $1))", "caveat": "Integer -1, 0 or 1 as CRuby rb_big_cmp; both operands are Integers"},
