@@ -37,7 +37,9 @@ module CoreRows
     # STEP_SUPER_STATIC: the name only names the frame of the entry called (StaticDispatchRegistrations::STEP_SUPER_STATIC_NAME).
     /\bbc2cpp_dyn_super_static\(/,
     # ARRAY_FIXNUM_HASH (bc2cpp_ary_fixnum_hash): `hash` is compared with the frames' method ids, the recursion guard.
-    /\bbc2cpp_ary_fixnum_hash\(/
+    /\bbc2cpp_ary_fixnum_hash\(/,
+    # COMPACT_LABELS (label_table.rb): a label row's name is the text of a violation message.
+    /\bbc2cpp_label_rows\[\d+\] = \{/
   ].freeze
   # `mrb_sym name = <sym>;` is inert only as the operand of the constant read on the next line.
   CONST_NAME = /\A\s*mrb_sym name = bc2cpp_sym\(M, \d+\);\s*\z/

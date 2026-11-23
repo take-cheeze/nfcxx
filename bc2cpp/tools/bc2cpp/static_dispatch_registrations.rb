@@ -300,6 +300,8 @@ module StaticDispatchRegistrations
     # PROC_SPEC names (bc2cpp.rb's bc2cpp_proc_spec_stand_in): a compiled block's local names, bound with
     # mrb_intern_cstr as the parameter names of a stand-in proc. They name no method a lookup can reach.
     body = body.gsub(PROC_SPEC_NAMES, '')
+    # COMPACT_LABELS (label_table.rb): owners, tails and names of violation messages, as the labels they replace.
+    body = body.gsub(LABEL_TEXTS, '')
     table = nil
     body = body.sub(SYM_TABLE) { table = Regexp.last_match(1); '' }
     names = body.scan(STRING_LITERAL).map { |(s)| unescape(s) }
@@ -308,6 +310,7 @@ module StaticDispatchRegistrations
 
   STRING_LITERAL = /"((?:[^"\\\n]|\\.)*)"/
   PROC_SPEC_NAMES = /static const char\* const bc2cpp_proc_spec_\d+_names\[\] = \{[^}]*\};/
+  LABEL_TEXTS = /bc2cpp_label_texts\[\d+\] = \{\n.*?^\};/m
   # PROC_PARAMETERS (closed only; bc2cpp.rb's bc2cpp_proc_specs_install): the stand-in Proc#parameters is looked up from
   # M->proc_class and defined there, so only Proc's own chain can answer or lose it. A `parameters` of an engine class
   # is neither looked up nor replaced; a module or singleton owner stays reached (super_reached?).
