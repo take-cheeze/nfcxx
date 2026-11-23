@@ -4350,14 +4350,24 @@ use_problem = lambda do |name, use|
     end
   end
 
-  # switch (TYPE(x)) with case T_RATIONAL labels: a Rational is a data object of the mruby-rational gem, so the switch is on a type
-  # key that tells it apart (nfcx_type_key: NFCX_TT_RATIONAL for a Rational, else the tag), and each label is that key. The labels
-  # were refused in process and their refusal markers are removed here; the subject's TYPE is the key, not its tag.
+  # switch (TYPE(x)) with case labels of a data-object type (T_RATIONAL, T_REGEXP): such an object is told apart from the other
+  # data objects by a type key (nfcx_type_key_<kind>: the kind's constant for the object, else the tag), and each label is that key.
+  # A Rational is the mruby-rational data object (a class test); a Regexp is the mruby-onig-regexp data object (its data type).
+  # The labels were refused in process and their refusal markers are removed here; the subject's TYPE is the key, not its tag.
+  # A switch with labels of two such kinds is not rewritten (its labels stay refused): one key function per switch.
+  SWITCH_KEY_KINDS = {
+    'T_RATIONAL' => { 'const' => 'NFCX_TT_RATIONAL', 'fn' => 'nfcx_type_key_rational', 'gem' => 'mruby-rational' },
+    'T_REGEXP' => { 'const' => 'NFCX_TT_REGEXP', 'fn' => 'nfcx_type_key_regexp', 'gem' => 'mruby-onig-regexp' }
+  }.freeze
+
   def value_rational_switch_pass
+    @switch_key_kind ||= {}
     @files.each_key do |rel|
       masked = @files[rel]['masked']
-      masked.to_enum(:scan, /(?<![#{WC}])T_RATIONAL(?![#{WC}])/).each do
+      masked.to_enum(:scan, /(?<![#{WC}])(T_RATIONAL|T_REGEXP)(?![#{WC}])/).each do
         m = Regexp.last_match
+        kind = m[1]
+        info = SWITCH_KEY_KINDS[kind]
         lab = m.begin(0)
         lab_e = m.end(0)
         before = masked[0...lab].to_s
@@ -4377,42 +4387,63 @@ use_problem = lambda do |name, use|
         end
         next if sw.nil?
         subj = masked[(sw[0] + 1)...sw[1]].to_s.strip
-        next unless subj.match?(/\ATYPE[ \t]*\(/)
-        tp = masked.index('TYPE', sw[0] + 1)
+        # the subject is TYPE(x) or rb_type(x) (the same type read: rb_type maps to mrb_type)
+        sj = subj.match(/\A(TYPE|rb_type)[ \t]*\(/)
+        next unless sj
+        tp = masked.index(sj[1], sw[0] + 1)
         next if tp.nil? || tp >= sw[1]
+        tlen = sj[1].length
         top = masked.index('(', tp)
         tc = match_close(masked, top)
         next if tc < 0 || tc >= sw[1]
         fn = enclosing_func(rel, lab)
         # the state token of this position (the parameter, or the file-scope state of a global-state helper: mrb_tok)
         next unless fn
+        # one key function per switch: a switch already keyed by another kind keeps this label refused
+        sw_kind = (@switch_key_kind[[rel, sw[0]]] ||= kind)
+        next unless sw_kind == kind
         ed = @edits[rel]
-        # the switch subject: TYPE(x) becomes nfcx_type_key(mrb, (x))
-        ed.drop(ed.overlapping(tp, tp + 4))
-        ed.add(tp, tp + 4, "nfcx_type_key(#{mrb_tok(rel, tp)}, ")
-        ed.add(tc + 1, tc + 1, ')')
-        # the label: the key of a Rational; the refusal and its marker go
-        ed.drop(ed.at_point(lab).select { |_a, _b, t| t.to_s.include?('REFUSED: T_RATIONAL') })
-        @refusals.reject! { |r| r['file'] == rel && r['api'] == 'T_RATIONAL' && r['pos'] == lab }
+        if @switch_key_kind[[rel, sw[0], :subject]].nil?
+          @switch_key_kind[[rel, sw[0], :subject]] = true
+          # the switch subject: TYPE(x) becomes the kind's key function (nfcx_type_key_<kind>(mrb, (x)))
+          ed.drop(ed.overlapping(tp, tp + tlen))
+          ed.add(tp, tp + tlen, "#{info['fn']}(#{mrb_tok(rel, tp)}, ")
+          ed.add(tc + 1, tc + 1, ')')
+        end
+        # the label: the key of the kind; the refusal and its marker go
+        ed.drop(ed.at_point(lab).select { |_a, _b, t| t.to_s.include?("REFUSED: #{kind}") })
+        @refusals.reject! { |r| r['file'] == rel && r['api'] == kind && r['pos'] == lab }
         ed.drop(ed.overlapping(lab, lab_e))
-        ed.add(lab, lab_e, 'NFCX_TT_RATIONAL')
-        (@gem_deps ||= Set.new) << 'mruby-rational'
-        rewrite(rel, lab, 'T_RATIONAL', 'NFCX_TT_RATIONAL',
-                'a Rational label: the switch is on nfcx_type_key, which tells a Rational (the mruby-rational data object) from other data')
-        # the helper, once per file, before the enclosing function
+        ed.add(lab, lab_e, info['const'])
+        (@gem_deps ||= Set.new) << info['gem']
+        rewrite(rel, lab, kind, info['const'], "a #{kind} label: the switch is on #{info['fn']}, which tells that data object (#{info['gem']}) from other data")
+        # the helper, once per file and kind, before the enclosing function
         at = define_at(rel, lab) ? define_at(rel, lab)[1] : (fn['hstart'] || nil)
         next unless at
         @prelude_done ||= Set.new
-        unless @prelude_done.include?([rel, 'nfcx_type_key'])
-          @prelude_done << [rel, 'nfcx_type_key']
-          ed.add(at, at,
-                 "#define NFCX_TT_RATIONAL (MRB_TT_MAXDEFINE + 1)\n" \
-                 "static int nfcx_type_key(mrb_state *mrb, mrb_value v) {\n" \
-                 "  if (mrb_type(v) == MRB_TT_DATA && mrb_class_defined(mrb, \"Rational\") &&\n" \
-                 "      mrb_obj_is_kind_of(mrb, v, mrb_class_get(mrb, \"Rational\"))) return NFCX_TT_RATIONAL;\n" \
-                 "  return (int)mrb_type(v);\n}\n")
-        end
+        next if @prelude_done.include?([rel, info['fn']])
+        @prelude_done << [rel, info['fn']]
+        ed.add(at, at, switch_key_helper(kind, info))
       end
+    end
+  end
+
+  # the key function of a data-object kind: its constant, and the test that tells the object (the state is taken, not used, for a
+  # Regexp, whose test is the gem's data type)
+  def switch_key_helper(kind, info)
+    if kind == 'T_RATIONAL'
+      "#define #{info['const']} (MRB_TT_MAXDEFINE + 1)\n" \
+      "static int #{info['fn']}(mrb_state *mrb, mrb_value v) {\n" \
+      "  if (mrb_type(v) == MRB_TT_DATA && mrb_class_defined(mrb, \"Rational\") &&\n" \
+      "      mrb_obj_is_kind_of(mrb, v, mrb_class_get(mrb, \"Rational\"))) return #{info['const']};\n" \
+      "  return (int)mrb_type(v);\n}\n"
+    else
+      "#include <mruby/onigmo.h>\n" \
+      "#define #{info['const']} (MRB_TT_MAXDEFINE + 2)\n" \
+      "static int #{info['fn']}(mrb_state *mrb, mrb_value v) {\n" \
+      "  (void)mrb;\n" \
+      "  if (mruby_onig_regexp_is(v)) return #{info['const']};\n" \
+      "  return (int)mrb_type(v);\n}\n"
     end
   end
 

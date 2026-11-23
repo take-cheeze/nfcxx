@@ -1826,6 +1826,22 @@ check test "$rc" -eq 0
 check test "$(grep -c 'VALUE as pointer' "$work/api_protect_array/REFUSALS.txt")" -eq 0
 check grep -qF 'mrb_protect(mrb, pa_cb, mrb_cptr_value(mrb, args), &state);' "$work/api_protect_array/src/api_protect_array.c"
 check grep -qF 'struct pa_state *st = (struct pa_state *)mrb_cptr(args[0]);' "$work/api_protect_array/src/api_protect_array.c"
+# 2zzz187. switch (TYPE(v)) with a case T_REGEXP label: the switch is on the type key, and a Regexp (the mruby-onig-regexp data
+# object) is the label's key; the Regexp refusal of the label is gone and the gem is a dependency.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_switch_regexp tools/cext2mrbgem/fixtures/api_switch_regexp/ext/api_switch_regexp "$work/api_switch_regexp" > "$work/api_switch_regexp.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_switch_regexp/NOT_BUILDABLE"
+check test "$(grep -c 'T_REGEXP' "$work/api_switch_regexp/REFUSALS.txt")" -eq 0
+check grep -qF 'switch (nfcx_type_key_regexp(mrb, (v))) {' "$work/api_switch_regexp/src/api_switch_regexp.c"
+check grep -qF 'case NFCX_TT_REGEXP:' "$work/api_switch_regexp/src/api_switch_regexp.c"
+check grep -qF 'mruby_onig_regexp_is(v)' "$work/api_switch_regexp/src/api_switch_regexp.c"
+check grep -qF "spec.add_dependency 'mruby-onig-regexp'" "$work/api_switch_regexp/mrbgem.rake"
+# 2zzz188. the same switch on rb_type(v) (the subject is the type read the macro TYPE is): the key function is the subject too.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_switch_rb_type tools/cext2mrbgem/fixtures/api_switch_rb_type/ext/api_switch_rb_type "$work/api_switch_rb_type" > "$work/api_switch_rb_type.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_switch_rb_type/NOT_BUILDABLE"
+check grep -qF 'switch (nfcx_type_key_regexp(mrb, (v))) {' "$work/api_switch_rb_type/src/api_switch_rb_type.c"
+check grep -qF 'case NFCX_TT_REGEXP:' "$work/api_switch_rb_type/src/api_switch_rb_type.c"
 check grep -qF "spec.add_dependency 'mruby-marshal'" "$work/api_marshal_load/mrbgem.rake"
 # 2zzz179. rb_time_timespec_new: a fixed UTC offset is mrb_time_at_offset (the fork's mruby-time), CRuby's INT_MAX and INT_MAX-1 are
 # local time and UTC; no Time-offset refusal.
