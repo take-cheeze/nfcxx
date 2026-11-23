@@ -4069,6 +4069,20 @@ use_problem = lambda do |name, use|
     end
   end
 
+  # the body of an if whose condition is FIXNUM_P(nm) holds pos (the cast is in the fixnum branch of nm)
+  def fixnum_guarded?(masked, nm, pos)
+    masked.to_enum(:scan, /(?<![#{WC}])if[ \t]*\(/).any? do
+      m = Regexp.last_match
+      op = m.end(0) - 1
+      cl = match_close(masked, op)
+      next false if cl < 0 || cl > pos
+      next false unless masked[(op + 1)...cl].to_s.match?(/\bFIXNUM_P[ \t]*\([ \t]*#{Regexp.escape(nm)}[ \t]*\)/)
+      br = next_nonspace(masked, cl + 1)
+      next false unless br >= 0 && masked[br] == '{' && br < pos
+      match_close(masked, br) > pos
+    end
+  end
+
   # (uintptr_t)v of a VALUE: CRuby's word as an integer (the fork's VALUE is a struct, with no integer form of the word)
   def value_cast_integer_stuck_pass
     @files.each_key do |rel|
@@ -4079,10 +4093,27 @@ use_problem = lambda do |name, use|
         nm = m[1]
         next unless (local_value_at?(rel, m.begin(1), nm) || fs_values.include?(nm)) && !@class_vars.include?(nm)
         next if in_dead_init(rel, m.begin(1)) || @edits[rel].overlaps(m.begin(0), m.begin(0) + 1)
+        if fixnum_guarded?(mv, nm, m.begin(0))
+          # inside if (FIXNUM_P(v)) { ... }: the integer the fixnum holds (CRuby's FIX2LONG). The hash of a fixnum is the same for
+          # equal fixnums; the bits CRuby would cast are its tagged word, which nothing outside the process sees
+          ed = @edits[rel]
+          ed.drop(ed.overlapping(m.begin(0), m.end(0)))
+          ed.add(m.begin(0), m.end(0), "mrb_fixnum(#{nm})")
+          rewrite(rel, m.begin(0), "(#{m[0][/\(\s*([^)]*)\)/, 1].to_s.strip}) #{nm}", "mrb_fixnum(#{nm})",
+                  'a fixnum-guarded cast: the integer the fixnum holds (FIX2LONG), inside if (FIXNUM_P(v)); CRuby casts the tagged word')
+          next
+        end
         refuse(rel, m.begin(0), nm, "stuck point (VALUE as integer): #{nm} is a VALUE, a struct in the fork (include/mruby/boxing_no.h), and its word is read as an integer in CRuby; the fork has no integer form of it")
       end
       # an element of an integer hash array (st_index_t h[5]) assigned a VALUE-returning call: the word is stored as an integer
-      int_arrays = mv.to_enum(:scan, /\bst_index_t\s+([A-Za-z_]\w*)\s*\[/).map { Regexp.last_match(1) }.to_set
+      # the array declarators of an st_index_t declaration, also after another declarator (st_index_t v, h[5];)
+      int_arrays = Set.new
+      mv.to_enum(:scan, /\bst_index_t\s+([^;{}]+);/).each do
+        Regexp.last_match(1).split(',').each do |d|
+          dm = d.match(/\A\s*\*?\s*([A-Za-z_]\w*)\s*\[/)
+          int_arrays << dm[1] if dm
+        end
+      end
       int_arrays.each do |arr|
         mv.to_enum(:scan, /(?<![#{WC}])#{Regexp.escape(arr)}\s*\[[^\]\n]*\]\s*=\s*([A-Za-z_]\w*)\s*\(/).each do
           m = Regexp.last_match
@@ -4341,6 +4372,24 @@ use_problem = lambda do |name, use|
           next unless arg.match?(/\A[A-Za-z_]\w*\z/)
           next unless (local_value_at?(rel, s, arg) || fs_values.include?(arg)) && !@class_vars.include?(arg)
           next if @edits[rel].overlaps(s, s + 1)
+          if ptype.match?(/\bsid_t\b/)
+            # an sid_t key is an identity key (oj's cache is keyed by the object): the VALUE's word, read through the union
+            # (value.p, the same bits as value.i, value.f and value.sym: C's union reads), as an integer
+            ed = @edits[rel]
+            ed.drop(ed.overlapping(s, e))
+            ed.add(s, e, "nfcx_value_word(#{arg})")
+            rewrite(rel, s, arg, "nfcx_value_word(#{arg})", "a VALUE passed as an sid_t key: its word (the union's bits, the object's identity for a heap object) is the key")
+            fn_v = enclosing_func(rel, s)
+            at = define_at(rel, s) ? define_at(rel, s)[1] : (fn_v && fn_v['hstart'])
+            if at
+              @prelude_done ||= Set.new
+              unless @prelude_done.include?([rel, 'nfcx_value_word'])
+                @prelude_done << [rel, 'nfcx_value_word']
+                ed.add(at, at, "static unsigned long long nfcx_value_word(mrb_value v) {\n  return (unsigned long long)(uintptr_t)v.value.p;\n}\n")
+              end
+            end
+            next
+          end
           refuse(rel, s, arg, "stuck point (VALUE as integer): #{arg} is a VALUE, a struct in the fork (include/mruby/boxing_no.h), passed as #{name}'s #{ptype} parameter, which takes the VALUE's word in CRuby; the fork has no integer form of it")
         end
       end
