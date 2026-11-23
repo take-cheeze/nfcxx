@@ -2475,23 +2475,25 @@ BC2CPP_MAIN = lambda do
     // PROC_SPEC: a compiled block is a C function proc, so Proc#arity would answer -1 and Proc#parameters []. Each compiled
     // block registers its ENTER word and local names under its entry (bc2cpp_proc_spec_register); the two methods answer for a
     // registered block from a stand-in irep proc that holds them, and for any other proc as mruby does.
-    #include <unordered_map>
+    // PROC_SPEC_ROWS: each spec is a constant row of the image; registering keeps its address only, so the table costs
+    // one pointer per block where a hash node per block cost about 30 bytes of heap. A later row of a key wins.
+    #include <vector>
     #include <mruby/irep.h>
     #include <mruby/opcode.h>
     struct Bc2cppProcSpec {
+      const void* key;
       const mrb_code* iseq;
       uint16_t ilen;
       uint16_t nlocals;
       const char* const* names;  // nlocals - 1 local names, then a null
     };
     extern "C" mrb_int mrb_proc_arity(const struct RProc* p);
-    inline std::unordered_map<const void*, Bc2cppProcSpec>& bc2cpp_proc_specs() {
-      static std::unordered_map<const void*, Bc2cppProcSpec> specs;
+    inline std::vector<const Bc2cppProcSpec*>& bc2cpp_proc_specs() {
+      static std::vector<const Bc2cppProcSpec*> specs;
       return specs;
     }
-    [[maybe_unused]] static int bc2cpp_proc_spec_register(const void* key, const mrb_code* iseq, uint16_t ilen,
-                                                          uint16_t nlocals, const char* const* names) {
-      bc2cpp_proc_specs()[key] = Bc2cppProcSpec{iseq, ilen, nlocals, names};
+    [[maybe_unused]] static int bc2cpp_proc_spec_register(const Bc2cppProcSpec* row) {
+      bc2cpp_proc_specs().push_back(row);
       return 0;
     }
     static const Bc2cppProcSpec* bc2cpp_proc_spec_of(const struct RProc* p) {
@@ -2502,8 +2504,11 @@ BC2CPP_MAIN = lambda do
         if (!e || MRB_ENV_LEN(e) < 3) return nullptr;
         key = (const void*)bc2cpp_block_entry(const_cast<struct REnv*>(e));
       }
-      auto it = bc2cpp_proc_specs().find(key);
-      return it == bc2cpp_proc_specs().end() ? nullptr : &it->second;
+      const auto& specs = bc2cpp_proc_specs();
+      for (auto it = specs.rbegin(); it != specs.rend(); ++it) {
+        if ((*it)->key == key) return *it;
+      }
+      return nullptr;
     }
     static mrb_value bc2cpp_proc_spec_stand_in(mrb_state* M, const struct RProc* p, const Bc2cppProcSpec& spec) {
       mrb_irep* irep = mrb_add_irep(M);

@@ -984,7 +984,10 @@ class CodeGen
     out << "static const char* const #{id}_names[] = { #{(names.map { |n| c_string_literal(n.to_s) } + ['nullptr']).join(', ')} };\n"
     # A direct-entry block has no C function of its own (its proc runs the shared thunk, and the entry names the block).
     keys = [region[:direct_entry] ? "(const void*)&#{fn_name}_direct" : "(const void*)&#{fn_name}"]
-    out << "static const int #{id} = #{keys.map { |k| "bc2cpp_proc_spec_register(#{k}, #{id}_iseq, 6, #{block.nlocals.to_i}, #{id}_names)" }.join(' + ')};\n\n"
+    keys.each_with_index do |k, i|
+      out << "static const Bc2cppProcSpec #{id}_row#{i} = { #{k}, #{id}_iseq, 6, #{block.nlocals.to_i}, #{id}_names };\n"
+    end
+    out << "static const int #{id} = #{keys.each_index.map { |i| "bc2cpp_proc_spec_register(&#{id}_row#{i})" }.join(' + ')};\n\n"
     out
   end
 
