@@ -87,7 +87,14 @@ env = {
   'BC2CPP_SIG_DIRS' => '', 'BC2CPP_SELF_REGISTERING' => '1',
   'BC2CPP_SHARDS' => ENV.fetch('BC2CPP_SELF_SHARDS', '16'),
   'BC2CPP_SHARD_SPLIT_OWNERS' => '1',
-  'BC2CPP_PROBE_DEPTH' => ENV.fetch('BC2CPP_PROBE_DEPTH', '4'),
+  # Deep call chains (the compiler's own) exceed a shallow probe limit on nearly
+  # every outermost probe, discarding the whole tree's memoization: on the
+  # 370-file self input, depth 4 compiles each label ~46 times (242k probes),
+  # while 16 compiles all methods in about half the time (98s vs 206s) with
+  # 39% fewer allocations. 16 is far below the interpreter stack concern that
+  # motivates the limit, and CRuby 4 + YJIT (which always runs self-generation)
+  # nests 32 deep without trouble.
+  'BC2CPP_PROBE_DEPTH' => ENV.fetch('BC2CPP_PROBE_DEPTH', '16'),
   'BC2CPP_PROFILE_TIMINGS' => '1', 'BC2CPP_CLASS_BODY_EMIT' => '0'
 }
 # These describe the caller's input program, not the compiler being built.
