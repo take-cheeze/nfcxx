@@ -201,6 +201,11 @@ code = suite.generate(SRC, OWNERS)
                                                 !code.include?("BC2CPP_SKIPPED_ScClosures_#{name} "))
 end
 
+# PROC_SPEC_ROWS: each compiled block's spec is a constant row, registered by its address; no hash node per block.
+suite.check('the blocks\' Proc#arity specs are constant rows registered by address',
+            code.match?(/static const Bc2cppProcSpec bc2cpp_proc_spec_\d+_row0 = \{/) &&
+            code.include?('bc2cpp_proc_spec_register(&bc2cpp_proc_spec_') && !code.include?('std::unordered_map<const void*, Bc2cppProcSpec>'))
+
 suite.behaviour(DRIVER, same: false) do |interpreted, compiled|
   interpreted.zip(compiled).each do |a, b|
     suite.check("#{a.to_s[/\A[^:]+/]}: interpreted and compiled runs print the same", a == b)
