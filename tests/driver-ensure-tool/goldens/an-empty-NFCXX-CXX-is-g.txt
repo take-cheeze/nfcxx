@@ -1,0 +1,4 @@
+rc 0
+lock absent
+out executable
+ninja -C <sb>/tools/t CXX=g++

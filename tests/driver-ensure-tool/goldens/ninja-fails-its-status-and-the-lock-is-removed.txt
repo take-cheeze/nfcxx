@@ -1,0 +1,5 @@
+ninja: build failed
+rc 3
+lock absent
+out missing
+ninja -C <sb>/tools/t CXX=g++
