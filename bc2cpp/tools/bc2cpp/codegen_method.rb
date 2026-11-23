@@ -455,7 +455,9 @@ class CodeGen
                                                                                                   inline_mand: mand)
       glue_at[region[:begin_addr]] = emit_rescue_glue(try_name, region, arg_names, arg_native_types,
                                                       extra_field_values: saved.map { |f| rescue_field_value(f) })
-      rescue_glue_reads[region[:begin_addr]] = saved.filter_map do |f|
+      rescue_glue_reads[region[:begin_addr]] = saved.each_with_index.filter_map do |f, k|
+        next unless rescue_ctx_field_kept?(try_name, 1 + arg_names.size + k)
+
         f[:name][/\Abc2cpp_(?:saved|ref)_r(\d+)\z/, 1]&.to_i
       end
     end

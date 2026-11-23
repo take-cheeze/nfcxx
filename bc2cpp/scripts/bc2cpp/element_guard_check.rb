@@ -717,6 +717,10 @@ INDEX_SOURCE = <<~RUBY
       frames[a, n].map { |t| t.ok? }
     end
 
+    def pair_head(frames, a, n)
+      frames[a, n][0].ok?
+    end
+
     def any(frames, k)
       frames[k]
     end
@@ -748,6 +752,7 @@ INDEX_SIG = <<~RBS
     def at: (Array[Thing], Integer) -> untyped
     def win: (Array[Thing], Integer, Integer) -> untyped
     def pair: (Array[Thing], Integer, Integer) -> untyped
+    def pair_head: (Array[Thing], Integer, Integer) -> untyped
     def any: (Array[Thing], untyped) -> untyped
     def any_ok: (Array[Thing], untyped) -> untyped
     def iat: (Integer) -> untyped
@@ -769,6 +774,8 @@ INDEX_DRIVER = <<~'RUBY'
   show('at') { s.at(good, 1) }
   show('win') { s.win(good, 1, 2) }
   show('pair') { s.pair(good, 1, 2) }
+  show('pair_head') { s.pair_head(good, 1, 2) }
+  show('pair_head past end') { s.pair_head(good, 4, 1) }
   show('any range') { s.any(bad, 0..1).size }
   show('any past end') { s.any(good, 9) }
   show('any_ok range') { s.any_ok(good, 0..1) }
@@ -779,6 +786,7 @@ INDEX_DRIVER = <<~'RUBY'
   show('bad at') { s.at(bad, 1) }
   show('bad win') { s.win(bad, 1, 2) }
   show('bad pair') { s.pair(bad, 0, 2) }
+  show('bad pair_head') { s.pair_head(bad, 1, 1) }
   show('bad any') { s.any(bad, 1).ok? }
   s.fill(bad)
   show('bad ihead') { s.ihead }
@@ -808,6 +816,10 @@ Dir.mktmpdir('element_guard_index_sig') do |sig_dir|
                  bodies['win'].to_s.include?('CLOSED_WORLD_EXACT_CLASS :ok? -> Thing#ok?'))
     check.call('the loop over `xs[a, n]` keeps the declared element',
                fallback.call(code, 'pair').include?('DECLARED_ELEMENT_GUARD Stack#pair arg1 yielded'))
+    check.call('`xs[a, n][0]` is a slice read as an Array, then a typed element read (ARRAY_SLICE2_RESULT)',
+               bodies['pair_head'].to_s.scan('DECLARED_ELEMENT_GUARD Stack#pair_head arg1 read').size == 1 &&
+                 bodies['pair_head'].to_s.include?('receiver is nil or exactly Array') &&
+                 bodies['pair_head'].to_s.include?('CLOSED_WORLD_EXACT_CLASS :ok? -> Thing#ok?'))
     check.call('an unproven index is tested at run time before the element guard',
                bodies['any'].to_s.match?(/if \(mrb_integer_p\((r\d+)\) \|\| mrb_bigint_p\(\1\)\) \{\n.*DECLARED_ELEMENT_GUARD Stack#any arg1 read/))
     check.call('and gives the read no element class', !bodies['any_ok'].to_s.include?('CLOSED_WORLD_EXACT_CLASS :ok? -> Thing#ok?'))
@@ -825,6 +837,13 @@ Dir.mktmpdir('element_guard_index_sig') do |sig_dir|
                  bodies['ihead'].to_s.include?('DECLARED_ELEMENT_GUARD Stack#items read') && !code.include?('mrb_bigint_p(r'))
   end
   ENV.delete('BC2CPP_DECLARED_INDEX_KIND')
+  ENV['BC2CPP_ARRAY_SLICE2_RESULT'] = '0'
+  Dir.mktmpdir('element_guard_slice2_off') do |dir|
+    code, = Bc2cppFixtureRuntime.generate(INDEX_SOURCE, dir, only_owners: %w[Stack Thing Other])
+    check.call('BC2CPP_ARRAY_SLICE2_RESULT=0 leaves `xs[a, n]` untyped',
+               !split.call(code)['pair_head'].to_s.include?('receiver is nil or exactly Array'))
+  end
+  ENV.delete('BC2CPP_ARRAY_SLICE2_RESULT')
   suite.generate(INDEX_SOURCE, %w[Stack Thing Other])
   suite.behaviour(INDEX_DRIVER, banner: 'declared element index kinds, interpreted and compiled', same: false) do |interpreted, compiled|
     good = ->(lines) { lines&.reject { |l| l.start_with?('bad ', '[RPG2k]') } }
@@ -832,12 +851,164 @@ Dir.mktmpdir('element_guard_index_sig') do |sig_dir|
                interpreted && compiled && good.call(interpreted) == good.call(compiled))
     check.call('the interpreted run returns every wrong element', interpreted&.none? { |l| l.include?('raised BC2cpp') })
     check.call('every compiled element read and slice loop raises on a wrong element',
-               compiled&.select { |l| l.start_with?('bad ') }&.size == 7 &&
+               compiled&.select { |l| l.start_with?('bad ') }&.size == 8 &&
                  compiled.select { |l| l.start_with?('bad ') }.all? { |l| l.end_with?('raised BC2cppDeclarationViolation') })
   end
 ensure
   ENV.delete('BC2CPP_SIG_DIRS')
   ENV.delete('BC2CPP_DECLARED_INDEX_KIND')
+  ENV.delete('BC2CPP_ARRAY_SLICE2_RESULT')
+end
+
+# DECLARED_ELEMENT_READER: `@pack.things`, where the flow proves `@pack` exactly Pack (or a subclass that keeps the
+# reader) and Pack#things is the attr_reader of the declared `@things: Array[Thing]`, is that ivar: its loop and its
+# Integer read are guarded and typed as `@things` is. A subclass overriding the reader gets nothing.
+READER_SOURCE = <<~RUBY
+  class Thing
+    def ok?
+      true
+    end
+
+    def hp
+      3
+    end
+  end
+
+  class Other
+    def ok?
+      false
+    end
+
+    def hp
+      1
+    end
+  end
+
+  class Pack
+    attr_reader :things
+
+    def initialize
+      @things = [Thing.new, Thing.new]
+      nil
+    end
+
+    def poison
+      @things.replace([Thing.new, Thing.new, Other.new])
+      nil
+    end
+  end
+
+  class Kept < Pack
+  end
+
+  class Fake < Pack
+    def things
+      [Other.new]
+    end
+  end
+
+  class Team
+    def initialize
+      @pack = Pack.new
+      @kept = Kept.new
+      @fake = Fake.new
+      nil
+    end
+
+    def total
+      s = 0
+      @pack.things.each { |t| s += t.hp }
+      s
+    end
+
+    def at(i)
+      @pack.things[i].ok?
+    end
+
+    def kept_total
+      s = 0
+      @kept.things.each { |t| s += t.hp }
+      s
+    end
+
+    def fake_total
+      s = 0
+      @fake.things.each { |t| s += t.hp }
+      s
+    end
+
+    def poison
+      @pack.poison
+      @kept.poison
+    end
+  end
+RUBY
+
+READER_SIG = <<~RBS
+  class Pack
+    @things: Array[Thing]
+  end
+  class Team
+    def at: (Integer) -> untyped
+  end
+RBS
+
+READER_DRIVER = <<~'RUBY'
+  def show(label)
+    puts "#{label}: #{yield.inspect}"
+  rescue => e
+    puts "#{label}: raised #{e.class}"
+  end
+  t = Team.new
+  show('total') { t.total }
+  show('at') { t.at(1) }
+  show('at past end') { t.at(9) }
+  show('kept') { t.kept_total }
+  show('fake') { t.fake_total }
+  t.poison
+  show('bad total') { t.total }
+  show('bad at') { t.at(2) }
+  show('bad kept') { t.kept_total }
+  show('fake after') { t.fake_total }
+  puts 'end'
+RUBY
+
+Dir.mktmpdir('element_guard_reader_sig') do |sig_dir|
+  File.write(File.join(sig_dir, 'pack.rbs'), READER_SIG)
+  ENV['BC2CPP_SIG_DIRS'] = sig_dir
+  owners = %w[Team Pack Kept Fake Thing Other]
+  split = ->(code) { code.split(%r{^// (?=Team#)}).to_h { |chunk| [chunk[/\ATeam#(\w+)/, 1], chunk] } }
+  Dir.mktmpdir('element_guard_reader') do |dir|
+    code, = Bc2cppFixtureRuntime.generate(READER_SOURCE, dir, only_owners: owners)
+    bodies = split.call(code)
+    check.call('a loop over an exact receiver\'s attr_reader of a declared ivar tests each element',
+               bodies['total'].to_s.include?('DECLARED_ELEMENT_GUARD Pack#things iterated') &&
+                 bodies['total'].to_s.include?('CLOSED_WORLD_EXACT_CLASS :hp -> Thing#hp'))
+    check.call('an Integer read through the reader is guarded and typed',
+               bodies['at'].to_s.include?('DECLARED_ELEMENT_GUARD Pack#things read') &&
+                 bodies['at'].to_s.include?('CLOSED_WORLD_EXACT_CLASS :ok? -> Thing#ok?'))
+    check.call('a subclass keeping the reader reads the declaring class\'s ivar',
+               bodies['kept_total'].to_s.include?('DECLARED_ELEMENT_GUARD Pack#things iterated'))
+    check.call('a subclass overriding the reader gets no element', !bodies['fake_total'].to_s.include?('DECLARED_ELEMENT_GUARD'))
+  end
+  ENV['BC2CPP_DECLARED_ELEMENT_READER'] = '0'
+  Dir.mktmpdir('element_guard_reader_off') do |dir|
+    code, = Bc2cppFixtureRuntime.generate(READER_SOURCE, dir, only_owners: owners)
+    check.call('BC2CPP_DECLARED_ELEMENT_READER=0 leaves reader results unguarded', split.call(code).select { |name, _| name }.values.none? { |body| body.include?('DECLARED_ELEMENT_GUARD') })
+  end
+  ENV.delete('BC2CPP_DECLARED_ELEMENT_READER')
+  suite.generate(READER_SOURCE, owners)
+  suite.behaviour(READER_DRIVER, banner: 'declared elements through an attr_reader, interpreted and compiled', same: false) do |interpreted, compiled|
+    good = ->(lines) { lines&.reject { |l| l.start_with?('bad ', '[RPG2k]') } }
+    check.call('good elements read the same through the reader in both runs', interpreted && compiled && good.call(interpreted) == good.call(compiled))
+    check.call('the interpreted run reads the wrong-class element', interpreted&.none? { |l| l.include?('raised BC2cpp') })
+    check.call('every compiled read through the reader raises on it',
+               compiled&.select { |l| l.start_with?('bad ') }&.size == 3 &&
+                 compiled.select { |l| l.start_with?('bad ') }.all? { |l| l.end_with?('raised BC2cppDeclarationViolation') })
+  end
+ensure
+  ENV.delete('BC2CPP_SIG_DIRS')
+  ENV.delete('BC2CPP_DECLARED_ELEMENT_READER')
 end
 
 suite.finish
