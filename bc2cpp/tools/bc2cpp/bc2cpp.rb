@@ -76,6 +76,7 @@ require_relative 'enumerator_model'
 
 require_relative 'integer_constants'
 require_relative 'const_def_elide'
+require_relative 'const_binding_drop'
 require_relative 'const_def_table'
 require_relative 'integer_constant_ranges'
 require_relative 'native_construct_schema'
@@ -1331,6 +1332,15 @@ BC2CPP_MAIN = lambda do
               unknown: unknown_mixins, modules: declared_modules }
   )
   ConstDefElide.report(CodeGen.const_def_elide)
+  # CONST_BINDING_DROP: no local either.
+  CodeGen.const_binding_drop = ConstBindingDrop.analyze(
+    ireps: ireps, root_label: root_label, stable_values: CodeGen.stable_value_constants,
+    elided: CodeGen.const_def_elide.names, lexical: LexicalConsts.analyze(ireps, static: true),
+    closed_world: closed_world, linked_native: outside_native, spelled_native: (native_paths + outside_native).uniq,
+    mixins: { superclass_of: superclass_of, included: included_modules, prepended: prepended_modules,
+              unknown: unknown_mixins, modules: declared_modules }
+  )
+  ConstBindingDrop.report(CodeGen.const_binding_drop)
   CodeGen.integer_constant_keys = integer_constant_keys || Set.new
   warn "== declared Integer constants proven per definition (LEXICAL_CONST): #{CodeGen.integer_constant_keys.size} =="
   # Constants whose every writer is one frozen-or-literal container class: a read is that class.
@@ -3341,6 +3351,9 @@ BC2CPP_MAIN = lambda do
   const_scope_code = SymbolCache.rewrite(gen.emit_const_scope_helpers(used + const_site_cache_code), symbol_table)
   ConstDefElide.assert_unnamed!(CodeGen.const_def_elide, [used, const_site_cache_code, const_scope_code],
                                 symbol_table.literals)
+  ConstDefElide.assert_unnamed!(CodeGen.const_binding_drop && ConstDefElide::Result.new(names: CodeGen.const_binding_drop.names.keys.to_set),
+                                [used, const_site_cache_code, const_scope_code], symbol_table.literals,
+                                label: 'CONST_BINDING_DROP', switch: 'BC2CPP_DROP_CONST_BINDINGS=0')
   print OwnerCallDirect.native_prototypes
   print NativeFrameUse.wrappers_source(StaticDispatchLists.current(required: false).frame_free,
                                        NativeFrameUse.reader_entries(compiled))
