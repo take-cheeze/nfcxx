@@ -4,6 +4,7 @@ require 'prism'
 require 'set'
 require_relative 'file_identity'
 require_relative 'ruby_parse_cache'
+require_relative 'scan_cache'
 
 # OUTSIDE_OWNER_CALL: the class or module each outside Ruby source (the build's mrblib, mruby's own
 # Ruby included) defines a method name on, spelled as mruby's `mrb_class_name` spells it at run time: the full
