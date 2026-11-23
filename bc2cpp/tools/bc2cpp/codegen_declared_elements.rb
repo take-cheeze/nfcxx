@@ -198,7 +198,7 @@ class CodeGen
   def element_preserving_receiver(irep, idx, producer, owner, depth)
     insn = producer.insn
     return nil if insn.nil? || depth >= 4 || ENV['BC2CPP_DECLARED_ELEMENT_DERIVED'] == '0'
-    return nil unless %i[SEND SEND0 SENDB ADD].include?(insn.op)
+    return nil unless %i[SEND SEND0 SENDB ADD GETIDX].include?(insn.op)
 
     uses = FactoryFlow.uses(irep, producer.index, producer.reg)
     return nil unless uses && uses.map(&:first).uniq == [idx]
@@ -211,9 +211,25 @@ class CodeGen
 
       return nil
     end
+    return inner.call(insn.reg) if declared_slice_producer?(irep, producer.index, insn)
+    return nil unless %i[SEND SEND0 SENDB].include?(insn.op)
     return nil unless ELEMENT_PRESERVING.include?(insn.sym.to_s) && insn.argc.to_i.zero? && insn.plain_fixed_argc?
 
     inner.call(insn.reg)
+  end
+
+  # DECLARED_INDEX_KIND: a slice of the receiver (`xs[a..b]`, `xs[0...-1]`, `xs[i, n]`): Array#[] with a Range or with two
+  # arguments returns a fresh Array of receiver elements (ary_subseq) or nil. Only a Range literal's index proves the
+  # one-argument form here: this runs inside the flows, which give no settled index class.
+  def declared_slice_producer?(irep, index, insn)
+    return false if ENV['BC2CPP_DECLARED_INDEX_KIND'] == '0'
+    return insn.sym.to_s == '[]' && insn.argc.to_i == 2 && insn.plain_fixed_argc? if insn.op == :SEND
+    return false unless insn.op == :GETIDX
+
+    defs = BytecodeIR.reaching_definitions(irep, index, insn.regs[1], shared: true)
+    !defs.nil? && !defs.empty? && defs.all? do |d|
+      !d.entry? && BytecodeIR::Ops::RANGE_BUILD.include?(BytecodeIR.for(irep).source_at(d.index).op)
+    end
   end
 
   # DECLARED_ARG_ELEMENT: a receiver whose reaching definitions are a declared `Array[T]` parameter's entry value, plus
@@ -253,8 +269,44 @@ class CodeGen
       return field ? element_guard_statement(field, RegName[insn.regs.first], nil_ok: field[:nilable], verb: 'read') : ''
     end
 
+    read = declared_index_read(irep, idx, insn)
+    return '' unless read
+
     # The read result is nil past the end, so nil is allowed here.
-    element_guard_statement(entry, RegName[insn.regs.first], nil_ok: true, verb: 'read')
+    guard = element_guard_statement(entry, RegName[insn.regs.first], nil_ok: true, verb: 'read')
+    return guard if read == :always
+
+    key = RegName[insn.regs[1]]
+    "  if (mrb_integer_p(#{key}) || mrb_bigint_p(#{key})) {\n  #{guard}  }\n"
+  end
+
+  # DECLARED_INDEX_KIND: what a one-index read of a declared element receiver returns, given the flow's class bits
+  # +key+ for its index. :element when the index is only an Integer (fixnum or heap): Array#[] reads one element, nil
+  # past the end. :slice when it is only an exact Range: a fresh Array of receiver elements (ary_subseq) or nil. 0 for
+  # an index with no value yet, nil for anything else. BC2CPP_DECLARED_INDEX_KIND=0 reads every index as an element.
+  def declared_index_kind(insn, key)
+    return :element if insn.op == :GETIDX0 || ENV['BC2CPP_DECLARED_INDEX_KIND'] == '0'
+    return nil unless key.is_a?(Integer) && !key.negative?
+    return 0 if key.zero?
+    return :element if (key & ~NumericFlow::INT).zero?
+
+    key == NumericFlow::RNG ? :slice : nil
+  end
+
+  # DECLARED_INDEX_KIND, where it is enforced: every flow gives the read its element class only for an index its own
+  # state proves Integer (declared_element_index_mask), so the guard must test every read some flow may prove Integer.
+  # The settled table flow decides: proven Integer, always (:always); neither INT nor OTHER (unknown), so no Integer
+  # reaches it and no sound flow proves one, none (nil); otherwise, or with no settled flow, the guard tests the index
+  # itself at run time (:tested).
+  def declared_index_read(irep, idx, insn)
+    return :always if declared_index_kind(insn, nil) == :element
+
+    ready = @foreign_method_names && @closed_world&.exact_instances_singleton_free? && @native_results_ready && @rc_scoped_ready
+    key = ready ? return_class_states(irep)&.[](idx)&.[](insn.regs[1].to_i) : nil
+    return :tested unless key.is_a?(Integer) && key.positive?
+    return :always if declared_index_kind(insn, key) == :element
+
+    key.anybits?(NumericFlow::INT | NumericFlow::OTHER) ? :tested : nil
   end
 
   # DECLARED_ELEMENT_GUARD on a store: `@items[i] = v` tests the stored value before the store writes it. nil is not an
@@ -364,15 +416,21 @@ class CodeGen
     bits.zero? ? nil : bits
   end
 
-  # DECLARED_ELEMENT_MASK: the class set of a GETIDX/GETIDX0 result the flow may use: the declared element's class and
-  # nil (guarded by DECLARED_ELEMENT_GUARD, so the read is never another class). nil when no element is declared.
-  def declared_element_index_mask(irep, index, insn)
+  # DECLARED_ELEMENT_MASK: the class set of a GETIDX/GETIDX0 result the flow may use: for an element read, the declared
+  # element's class and nil (guarded by DECLARED_ELEMENT_GUARD, see declared_index_read); for a slice, Array or nil.
+  # nil when no element is declared or the index kind is unproven.
+  def declared_element_index_mask(irep, index, insn, state)
     return nil unless %i[GETIDX GETIDX0].include?(insn.op)
 
     receiver = insn.op == :GETIDX0 ? insn.regs[1] : insn.regs.first
     owner = @owner_of[irep.label]&.owner
     entry = declared_element_receiver(irep, index, receiver, owner, derived: true)
     return declared_record_index_mask(irep, index, insn) unless entry
+
+    kind = declared_index_kind(insn, insn.op == :GETIDX ? state[insn.regs[1].to_i] : nil)
+    return kind if kind == 0
+    return declared_slice_mask(state[receiver.to_i]) if kind == :slice
+    return nil unless kind == :element
 
     bits = if entry[:kind] == :class
              declared_arg_bits(entry[:klass], :class, false)
@@ -381,6 +439,15 @@ class CodeGen
            end
     # A class with no bit yet gives no mask: the flow keeps the unknown answer rather than renumbering the masks.
     bits.zero? ? nil : bits | NumericFlow::NIL
+  end
+
+  # DECLARED_INDEX_KIND: a Range read of an exact ::Array whose `[]` is mruby's own is an exact ::Array or nil; it needs
+  # no guard. Its elements are the receiver's, which only a consumer testing them uses (declared_slice_producer?).
+  def declared_slice_mask(receiver)
+    return nil unless receiver.is_a?(Integer) && receiver.anybits?(NumericFlow::ARR)
+    return nil unless (receiver & ~(NumericFlow::ARR | NumericFlow::NIL)).zero? && frozen_table_name_safe?('[]', 'Array')
+
+    NumericFlow::ARR | NumericFlow::NIL
   end
 
   # DECLARED_RECORD_READ: the field's class (nil too when it may be absent or nil), for the guarded read only.

@@ -6,7 +6,8 @@
 # (the interpreted run has no declaration, so it returns the element). A good element behaves the same in both runs.
 # Loops over the ivar (each, map, select, inject, sort_by) test each element they bind (DECLARED_LOOP_ELEMENT), and a
 # block-fallback iterator body tests its element parameters on entry (DECLARED_BLOCK_ELEMENT). A record parameter's
-# literal-key field read is tested the same way (DECLARED_RECORD_READ).
+# literal-key field read is tested the same way (DECLARED_RECORD_READ). Only an Integer index is an element read; a
+# Range or two-argument index is a slice of the receiver's elements (DECLARED_INDEX_KIND).
 # Read from the generated code's DECLARED_ELEMENT_GUARD lines and the behaviour comparison.
 #
 #   MRBC=path/to/mrbc ruby scripts/bc2cpp/element_guard_check.rb
@@ -671,6 +672,172 @@ Dir.mktmpdir('element_guard_core_sig') do |sig_dir|
 ensure
   ENV.delete('BC2CPP_SIG_DIRS')
   ENV.delete('BC2CPP_DECLARED_CORE_ELEMENT')
+end
+
+
+# DECLARED_INDEX_KIND: a declared element receiver's `[]` is an element read (guarded, typed) only for an Integer index.
+# A Range or two-argument read is a slice: no element guard, an Array-or-nil result, and the loop or read over it keeps
+# the declared element (tested there). An index the flow does not prove is tested at run time and typed nothing.
+INDEX_SOURCE = <<~RUBY
+  class Thing
+    def ok?
+      true
+    end
+  end
+
+  class Other
+    def ok?
+      false
+    end
+  end
+
+  class Stack
+    def initialize
+      @items = []
+      nil
+    end
+
+    def head(frames)
+      frames[0...-1].size
+    end
+
+    def rest(frames)
+      frames[1..].map { |t| t.ok? }
+    end
+
+    def at(frames, i)
+      frames[i].ok?
+    end
+
+    def win(frames, a, b)
+      frames[a..b][0].ok?
+    end
+
+    def pair(frames, a, n)
+      frames[a, n].map { |t| t.ok? }
+    end
+
+    def any(frames, k)
+      frames[k]
+    end
+
+    def any_ok(frames, k)
+      frames[k].ok?
+    end
+
+    def fill(v)
+      @items = v
+      nil
+    end
+
+    def ihead
+      @items[0...-1].map { |t| t.ok? }
+    end
+
+    def iat(i)
+      @items[i].ok?
+    end
+  end
+RUBY
+
+INDEX_SIG = <<~RBS
+  class Stack
+    @items: Array[Thing]
+    def head: (Array[Thing]?) -> untyped
+    def rest: (Array[Thing]) -> untyped
+    def at: (Array[Thing], Integer) -> untyped
+    def win: (Array[Thing], Integer, Integer) -> untyped
+    def pair: (Array[Thing], Integer, Integer) -> untyped
+    def any: (Array[Thing], untyped) -> untyped
+    def any_ok: (Array[Thing], untyped) -> untyped
+    def iat: (Integer) -> untyped
+  end
+RBS
+
+INDEX_DRIVER = <<~'RUBY'
+  def show(label)
+    puts "#{label}: #{yield.inspect}"
+  rescue => e
+    puts "#{label}: raised #{e.class}"
+  end
+  s = Stack.new
+  good = [Thing.new, Thing.new, Thing.new]
+  bad = [Thing.new, Other.new, Thing.new]
+  show('head') { s.head(good) }
+  show('head bad') { s.head(bad) }
+  show('rest') { s.rest(good) }
+  show('at') { s.at(good, 1) }
+  show('win') { s.win(good, 1, 2) }
+  show('pair') { s.pair(good, 1, 2) }
+  show('any range') { s.any(bad, 0..1).size }
+  show('any past end') { s.any(good, 9) }
+  show('any_ok range') { s.any_ok(good, 0..1) }
+  s.fill(good)
+  show('ihead') { s.ihead }
+  show('iat') { s.iat(2) }
+  show('bad rest') { s.rest(bad) }
+  show('bad at') { s.at(bad, 1) }
+  show('bad win') { s.win(bad, 1, 2) }
+  show('bad pair') { s.pair(bad, 0, 2) }
+  show('bad any') { s.any(bad, 1).ok? }
+  s.fill(bad)
+  show('bad ihead') { s.ihead }
+  show('bad iat') { s.iat(1) }
+  puts 'end'
+RUBY
+
+Dir.mktmpdir('element_guard_index_sig') do |sig_dir|
+  File.write(File.join(sig_dir, 'stack.rbs'), INDEX_SIG)
+  ENV['BC2CPP_SIG_DIRS'] = sig_dir
+  split = ->(code) { code.split(%r{^// (?=Stack#)}).to_h { |chunk| [chunk[/\AStack#(\w+)/, 1], chunk] } }
+  fallback = ->(code, name) { code[/^static mrb_value Stack_#{name}_block_fallback\w*_impl\(.*?^}\n/m].to_s }
+  Dir.mktmpdir('element_guard_index') do |dir|
+    code, = Bc2cppFixtureRuntime.generate(INDEX_SOURCE, dir, only_owners: %w[Stack Thing Other])
+    bodies = split.call(code)
+    check.call('a Range read of a declared Array[T]? parameter is a slice, with no element guard',
+               !code.include?('DECLARED_ELEMENT_GUARD Stack#head'))
+    rest = fallback.call(code, 'rest')
+    check.call('the loop over `xs[1..]` tests its element and calls it exactly',
+               rest.include?('DECLARED_ELEMENT_GUARD Stack#rest arg1 yielded') &&
+                 rest.include?('CLOSED_WORLD_EXACT_CLASS :ok? -> Thing#ok?') && !rest.include?('owner-call: ok?'))
+    check.call('an Integer index is still an element read, guarded with no index test',
+               bodies['at'].to_s.include?('DECLARED_ELEMENT_GUARD Stack#at arg1 read') && !bodies['at'].to_s.include?('mrb_bigint_p(r'))
+    check.call('`xs[a..b][0]` is a slice read as an Array, then a typed element read',
+               bodies['win'].to_s.scan('DECLARED_ELEMENT_GUARD Stack#win arg1 read').size == 1 &&
+                 bodies['win'].to_s.include?('receiver is nil or exactly Array') &&
+                 bodies['win'].to_s.include?('CLOSED_WORLD_EXACT_CLASS :ok? -> Thing#ok?'))
+    check.call('the loop over `xs[a, n]` keeps the declared element',
+               fallback.call(code, 'pair').include?('DECLARED_ELEMENT_GUARD Stack#pair arg1 yielded'))
+    check.call('an unproven index is tested at run time before the element guard',
+               bodies['any'].to_s.match?(/if \(mrb_integer_p\((r\d+)\) \|\| mrb_bigint_p\(\1\)\) \{\n.*DECLARED_ELEMENT_GUARD Stack#any arg1 read/))
+    check.call('and gives the read no element class', !bodies['any_ok'].to_s.include?('CLOSED_WORLD_EXACT_CLASS :ok? -> Thing#ok?'))
+    ihead = fallback.call(code, 'ihead')
+    check.call('a Range read of a declared @items is a slice whose loop keeps the element',
+               !bodies['ihead'].to_s.include?('Stack#items read') && ihead.include?('DECLARED_ELEMENT_GUARD Stack#items yielded'))
+    check.call('an Integer read of @items is still guarded', bodies['iat'].to_s.include?('DECLARED_ELEMENT_GUARD Stack#items read'))
+  end
+  ENV['BC2CPP_DECLARED_INDEX_KIND'] = '0'
+  Dir.mktmpdir('element_guard_index_off') do |dir|
+    code, = Bc2cppFixtureRuntime.generate(INDEX_SOURCE, dir, only_owners: %w[Stack Thing Other])
+    bodies = split.call(code)
+    check.call('BC2CPP_DECLARED_INDEX_KIND=0 guards every read as an element again',
+               bodies['head'].to_s.include?('DECLARED_ELEMENT_GUARD Stack#head arg1 read') &&
+                 bodies['ihead'].to_s.include?('DECLARED_ELEMENT_GUARD Stack#items read') && !code.include?('mrb_bigint_p(r'))
+  end
+  ENV.delete('BC2CPP_DECLARED_INDEX_KIND')
+  suite.generate(INDEX_SOURCE, %w[Stack Thing Other])
+  suite.behaviour(INDEX_DRIVER, banner: 'declared element index kinds, interpreted and compiled', same: false) do |interpreted, compiled|
+    good = ->(lines) { lines&.reject { |l| l.start_with?('bad ', '[RPG2k]') } }
+    check.call('slices, Integer reads and unproven indexes return the same in both runs',
+               interpreted && compiled && good.call(interpreted) == good.call(compiled))
+    check.call('the interpreted run returns every wrong element', interpreted&.none? { |l| l.include?('raised BC2cpp') })
+    check.call('every compiled element read and slice loop raises on a wrong element',
+               compiled&.select { |l| l.start_with?('bad ') }&.size == 7 &&
+                 compiled.select { |l| l.start_with?('bad ') }.all? { |l| l.end_with?('raised BC2cppDeclarationViolation') })
+  end
+ensure
+  ENV.delete('BC2CPP_SIG_DIRS')
+  ENV.delete('BC2CPP_DECLARED_INDEX_KIND')
 end
 
 suite.finish
