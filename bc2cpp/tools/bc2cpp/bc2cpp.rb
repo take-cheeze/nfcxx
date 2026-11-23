@@ -2500,6 +2500,11 @@ BC2CPP_MAIN = lambda do
       bc2cpp_proc_specs().push_back(row);
       return 0;
     }
+    // BC2CPP_PROC_SPEC_ROWS=0: the row is built at static init on the heap, as before the rows.
+    [[maybe_unused]] static int bc2cpp_proc_spec_register(const void* key, const mrb_code* iseq, uint16_t ilen,
+                                                          uint16_t nlocals, const char* const* names) {
+      return bc2cpp_proc_spec_register(new Bc2cppProcSpec{key, iseq, ilen, nlocals, names});
+    }
     static const Bc2cppProcSpec* bc2cpp_proc_spec_of(const struct RProc* p) {
       if (!MRB_PROC_CFUNC_P(p) || bc2cpp_proc_specs().empty()) return nullptr;
       const void* key = (const void*)MRB_PROC_CFUNC(p);
