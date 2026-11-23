@@ -64,7 +64,7 @@ src = ""
 out = ""
 safe_on = ENV["NFCXX_SAFE_POINTERS"] == "1" ? 1 : 0
 asan_on = ENV["NFCXX_PATHB_ASAN"] == "1" ? 1 : 0
-passes = ENV.key?("NFCXX_IR_OPT") ? ENV["NFCXX_IR_OPT"] : "inline"
+passes = ENV.key?("NFCXX_IR_OPT") ? ENV["NFCXX_IR_OPT"] : "inline,hoist-pure"
 ir_opt_max = ENV["NFCXX_IR_OPT_MAX"].to_s.empty? ? "268435456" : ENV["NFCXX_IR_OPT_MAX"]
 passes_given = ENV.key?("NFCXX_IR_OPT") ? 1 : 0
 pic = []
@@ -201,7 +201,8 @@ if uchar == 1
   File.write(ir, text)
 end
 
-# The IR-to-IR passes (scripts/pathb-ir-opt.rb): inline by default; IR over --ir-opt-max is not optimized
+# The IR-to-IR passes (scripts/pathb-ir-opt.rb): inline and hoist-pure (memoised pure calls in loops) by default; IR over
+# --ir-opt-max is not optimized
 raw = 0
 if !passes.empty? && passes != "none" && passes != "off" && ENV["PATHB_IR"].to_s.empty?
   size = File.size(ir)
