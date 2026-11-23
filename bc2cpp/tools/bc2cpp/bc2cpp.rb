@@ -1704,6 +1704,8 @@ BC2CPP_MAIN = lambda do
   OwnerSetShare.capture_stdout(symbol) if OwnerSetShare.enabled?(BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol })
   # COMPACT_LABELS (label_table.rb): registered last of these, so it reads the text as printed.
   LabelTable.capture_stdout(LabelTable.enabled?(BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol }))
+  # ELEMENT_READ_SUMMARY (keep_summary.rb): registered last of these, so it reads the unit as printed, markers included.
+  KeepSummary.capture_stdout if ElementReadRoots.summary_on?
 
   # PARAM_TRACE (tools/bc2cpp/param_trace.rb): opt-in runtime classes of compiled method and block
   # parameters; unset (or any value but 1) leaves stdout untouched. Registered BEFORE ELSE_TRACE so the
@@ -2103,7 +2105,8 @@ BC2CPP_MAIN = lambda do
   # for an mruby exception: reset mrb->jmp and pop the leftover callinfos,
   # unsharing each popped frame's env as the VM's cipop does.
   # FRAME_FREE: which found natives a call runs without a frame (native_frame_use.rb).
-  puts NativeFrameUse.cpp_source(StaticDispatchLists.current(required: false).frame_free)
+  puts NativeFrameUse.cpp_source(StaticDispatchLists.current(required: false).frame_free,
+                                 ram: StaticDispatchLists.current(required: false).frame_free_ram)
   puts <<~'CPP'
     struct Bc2cppVmMark { struct mrb_jmpbuf* jmp; ptrdiff_t ci_index; };
     static inline Bc2cppVmMark bc2cpp_vm_mark(mrb_state* M) {
@@ -2476,24 +2479,31 @@ BC2CPP_MAIN = lambda do
     // PROC_SPEC: a compiled block is a C function proc, so Proc#arity would answer -1 and Proc#parameters []. Each compiled
     // block registers its ENTER word and local names under its entry (bc2cpp_proc_spec_register); the two methods answer for a
     // registered block from a stand-in irep proc that holds them, and for any other proc as mruby does.
-    #include <unordered_map>
+    // PROC_SPEC_ROWS: each spec is a constant row of the image; registering keeps its address only, so the table costs
+    // one pointer per block where a hash node per block cost about 30 bytes of heap. A later row of a key wins.
+    #include <vector>
     #include <mruby/irep.h>
     #include <mruby/opcode.h>
     struct Bc2cppProcSpec {
+      const void* key;
       const mrb_code* iseq;
       uint16_t ilen;
       uint16_t nlocals;
       const char* const* names;  // nlocals - 1 local names, then a null
     };
     extern "C" mrb_int mrb_proc_arity(const struct RProc* p);
-    inline std::unordered_map<const void*, Bc2cppProcSpec>& bc2cpp_proc_specs() {
-      static std::unordered_map<const void*, Bc2cppProcSpec> specs;
+    inline std::vector<const Bc2cppProcSpec*>& bc2cpp_proc_specs() {
+      static std::vector<const Bc2cppProcSpec*> specs;
       return specs;
     }
+    [[maybe_unused]] static int bc2cpp_proc_spec_register(const Bc2cppProcSpec* row) {
+      bc2cpp_proc_specs().push_back(row);
+      return 0;
+    }
+    // BC2CPP_PROC_SPEC_ROWS=0: the row is built at static init on the heap, as before the rows.
     [[maybe_unused]] static int bc2cpp_proc_spec_register(const void* key, const mrb_code* iseq, uint16_t ilen,
                                                           uint16_t nlocals, const char* const* names) {
-      bc2cpp_proc_specs()[key] = Bc2cppProcSpec{iseq, ilen, nlocals, names};
-      return 0;
+      return bc2cpp_proc_spec_register(new Bc2cppProcSpec{key, iseq, ilen, nlocals, names});
     }
     static const Bc2cppProcSpec* bc2cpp_proc_spec_of(const struct RProc* p) {
       if (!MRB_PROC_CFUNC_P(p) || bc2cpp_proc_specs().empty()) return nullptr;
@@ -2503,8 +2513,11 @@ BC2CPP_MAIN = lambda do
         if (!e || MRB_ENV_LEN(e) < 3) return nullptr;
         key = (const void*)bc2cpp_block_entry(const_cast<struct REnv*>(e));
       }
-      auto it = bc2cpp_proc_specs().find(key);
-      return it == bc2cpp_proc_specs().end() ? nullptr : &it->second;
+      const auto& specs = bc2cpp_proc_specs();
+      for (auto it = specs.rbegin(); it != specs.rend(); ++it) {
+        if ((*it)->key == key) return *it;
+      }
+      return nullptr;
     }
     static mrb_value bc2cpp_proc_spec_stand_in(mrb_state* M, const struct RProc* p, const Bc2cppProcSpec& spec) {
       mrb_irep* irep = mrb_add_irep(M);
@@ -3150,6 +3163,7 @@ BC2CPP_MAIN = lambda do
   # No class unit is emitted: the VM runs every class body, and a compiled copy would run it a second time.
   # compile_top_class_units stays for its checks; the gem_init call is not emitted.
   gen.compiled_methods = compiled.to_h { |m| [m[:label], m] }
+  gen.registration_removed = gen.registration_removed_keys(compiled, bc2cpp_registration_owners(compiled.map { |m| m[:owner] }).first)
   # CLASS_UNITS: the top-level class and module bodies that compile are emitted as units and run from gem_init in place of
   # the VM's run (UNIT_BLANK removes them from the residual mrblib). The phase fails at its end on an unresolved constant.
   # A class this gem's own mrblib reopens is the gem's too, even when it compiles no method of it (mruby-rpg2k's
@@ -3236,7 +3250,8 @@ BC2CPP_MAIN = lambda do
   owner_rewrite = [owner_call_direct, gen.owner_class_slots, gen.program_superclasses, gen.unregistered_keys]
   # CROSS_UNIT_ROW (CodeGen#other_unit_direct_entry): a row for a method another gem of this link compiles.
   owner_rewrite_opts = { other: ENV['BC2CPP_CROSS_UNIT_ROW'] == '0' ? nil : gen.method(:other_unit_direct_entry),
-                         trim: gen.owner_rows_trim? }
+                         trim: gen.owner_rows_trim?,
+                         entry_flags: ->(m) { NativeFrameUse.entry_flags(m, StaticDispatchLists.current(required: false).frame_free) } }
   # GUARD_VIOLATION: name the method a violation site sits in.
   # Fuse the three per-method rewrite passes (@@SITE@@ substitution, DIRECT_RAISE, SymbolCache.rewrite) into one.
   compiled.each do |m|

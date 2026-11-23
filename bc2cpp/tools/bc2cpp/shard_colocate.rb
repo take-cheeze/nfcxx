@@ -175,7 +175,12 @@ module ShardColocate
         body = code[it[:first]..it[:last]]
         it.merge(unit: ui, key: [ui, it[:first]], raw: lines[it[:first]..it[:last]], code: body, impl: impl,
                  static: first.match?(/\A(?:\[\[maybe_unused\]\] )?static\b/),
-                 ids: impl ? body.join.scan(IDENT).flatten.to_set : Set.new)
+                 ids: if impl
+                   joined = body.join
+                   Set.new.tap { |ids| ShardOutput.each_delimited_identifier(joined) { |name, _| ids << name } }
+                 else
+                   Set.new
+                 end)
       end
     end
   end
@@ -188,14 +193,12 @@ module ShardColocate
   # Records each reference to a compiled `_impl` (refs) and, for every identifier, the items naming it (namers).
   def scan(item, defs, refs, namers)
     item[:code].each_with_index do |line, k|
-      line.scan(IDENT) do
-        name = Regexp.last_match(1)
+      ShardOutput.each_delimited_identifier(line) do |name, at|
         namers[name] << item[:name] unless name == item[:name]
         next unless defs.key?(name)
         next if name == item[:name] && k.zero?
 
-        at = Regexp.last_match.begin(1)
-        refs[name] << { item: item, line: item[:first] + k, col: at, call: line[(at + name.size)..].match?(/\A\s*\(/) }
+        refs[name] << { item: item, line: item[:first] + k, col: at, call: line.match?(/\G\s*\(/, at + name.size) }
       end
     end
   end
@@ -209,7 +212,9 @@ module ShardColocate
       ShardOutput.top_level_items(lines).each do |it|
         next unless it[:body]
 
-        code[it[:first]..it[:last]].each { |l| l.scan(IDENT) { names << Regexp.last_match(1) } }
+        code[it[:first]..it[:last]].each do |l|
+          ShardOutput.each_delimited_identifier(l) { |name, _| names << name }
+        end
       end
     end
     names

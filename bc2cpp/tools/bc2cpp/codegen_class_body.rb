@@ -35,7 +35,8 @@ class CodeGen
   # A checked send (codegen_checked_send.rb) names a helper the gem does not define, so a unit's sends keep the plain
   # mrb_funcall the generator starts from. @class_body_unit is set only while a unit compiles.
   # UNIT_TAG: a unit's function names carry its tag ("_<occurrence>" for a reopened top-level class), so each occurrence
-  # of one class path is its own function in the translation unit. Nested bodies inherit the tag of their unit.
+  # of one class path is its own function in the translation unit. Nested bodies inherit the tag of their unit; a path
+  # one body opens again gets "_r<n>" more (reopen_tag), as `module G; class A; end; class A; end; end` opens G::A twice.
   def compile_class_body(irep, owner, tag: '')
     was_unit = @class_body_unit
     outer_notes = @class_body_notes
@@ -102,6 +103,7 @@ class CodeGen
     # The instance methods this body has registered so far: an alias may name only one of them (its old name must exist
     # when the unit runs, and the gem's own registrations come after the units).
     registered = Set.new
+    reopened = Hash.new(0)
     # LITERAL_TABLES (codegen_literal_tables.rb): only the plain instruction texts the loop below emits are modelled.
     literal = literal_table_plan(irep, freeze_send: true, claimed: lambda do |_addr, i|
       folded_away.include?(i) || folds.key?(i) || bodies.key?(i) || literal_length_send?(program, irep, i) ||
@@ -121,12 +123,13 @@ class CodeGen
         child_path = child_body_path(program, irep, idx, owner)
         return [nil, [:UNRESOLVED_CLASS_PATH]] unless child_path
 
-        child_code, child_refused = compile_class_body(@ireps.fetch(bodies.fetch(idx)), child_path, tag: @unit_tag)
+        child_tag = reopen_tag(child_path, reopened)
+        child_code, child_refused = compile_class_body(@ireps.fetch(bodies.fetch(idx)), child_path, tag: child_tag)
         return [nil, child_refused] unless child_code
 
         texts << child_code
         lines << class_unit_define(insn)
-        lines << "  (void)bc2cpp_class_body_#{sanitize(child_path)}#{@unit_tag}(M);\n"
+        lines << "  (void)bc2cpp_class_body_#{sanitize(child_path)}#{child_tag}(M);\n"
       elsif %i[TDEF SDEF].include?(insn.op) && omitted_def?(insn, owner, omitted)
         lines << "  // #{owner}##{insn.sym} omitted: statically dispatched only (no registration)\n"
         lines << "  r#{insn.reg} = mrb_symbol_value(mrb_intern_cstr(M, \"#{insn.sym}\"));\n"
@@ -190,6 +193,10 @@ class CodeGen
           lines << alias_line
           next
         end
+        if !overridden && (attr_line = left_out_attr_line(irep, idx, insn, owner))
+          lines << attr_line
+          next
+        end
         call = case overridden ? '' : insn.sym.to_s
                when 'include' then "bc2cpp_mod_include(M, self, {#{args.join(', ')}})"
                when 'attr_reader', 'attr' then "bc2cpp_mod_attr(M, self, true, false, {#{args.join(', ')}})"
@@ -235,6 +242,13 @@ class CodeGen
     code << lines
     code << "}\n"
     [texts + code, nil]
+  end
+
+  # The tag of the +n+th opening (from 0) of +path+ in one body: the unit's own tag first, then one per reopening.
+  def reopen_tag(path, seen)
+    n = seen[path]
+    seen[path] += 1
+    n.zero? ? @unit_tag : "#{@unit_tag}_r#{n}"
   end
 
   # The qualified name of a class unit's child body. A singleton body (`class << self`) is the body's own owner with
@@ -525,6 +539,41 @@ class CodeGen
     return false unless compiled
 
     unregistered_keys.include?("#{compiled[:owner]}##{compiled[:name]}")
+  end
+
+  # LEFT_OUT_ATTR: an attr_* send defines only the accessors the gem's registration keeps. One it removes again
+  # (registration_removed_keys: bc2cpp_register_owner_methods runs after the units, and records the phantom either
+  # way) is not defined here, as a left-out def registers nothing (left_out_def?): nothing looks its name up. Each
+  # name must be a literal whose ivar name mrb_iv_name_sym_check accepts, so no NameError is lost. Nil when nothing
+  # is left out. BC2CPP_LEFT_OUT_ATTR=0 is off.
+  attr_writer :registration_removed
+  ATTR_SEND_PASSES = { 'attr' => [true, false], 'attr_reader' => [true, false], 'attr_writer' => [false, true],
+                       'attr_accessor' => [true, true] }.freeze
+
+  def left_out_attr_line(irep, idx, insn, owner)
+    passes = ATTR_SEND_PASSES[insn.sym.to_s]
+    return nil unless passes && insn.op == :SSEND && insn.plain_fixed_argc? && insn.argc.to_i.positive?
+    return nil if ENV['BC2CPP_LEFT_OUT_ATTR'] == '0'
+
+    names = (1..insn.argc).map do |k|
+      irep.walk_dominating_writers(idx - 1, insn.reg + k, follow_moves: true) { |w| w.sym.to_s if w.op == :LOADSYM }
+    end
+    return nil unless names.all? { |n| n&.match?(/\A[A-Za-z_][A-Za-z0-9_]*\z/) }
+
+    return nil unless @registration_removed
+
+    keep = [passes[0] ? names : [], passes[1] ? names.map { |n| "#{n}=" } : []]
+    kept = keep.map { |list| list.reject { |n| @registration_removed.include?("#{owner}##{n}") } }
+    return nil if kept == keep
+
+    line = "  // #{owner} #{insn.sym} #{(keep.flatten - kept.flatten).join(' ')}: left out (LEFT_OUT_ATTR)\n"
+    kept.each_with_index do |list, pass|
+      next if list.empty?
+
+      regs = list.map { |n| "r#{insn.reg + 1 + names.index(pass.zero? ? n : n.chomp('='))}" }
+      line << "  (void)bc2cpp_mod_attr(M, self, #{pass.zero?}, #{pass == 1}, {#{regs.join(', ')}});\n"
+    end
+    line << "  r#{insn.reg} = mrb_nil_value();\n"
   end
 
   # The body of the `def` a DEF installs: the child of the METHOD built into R[a+1] just before it. Nil when there is none.

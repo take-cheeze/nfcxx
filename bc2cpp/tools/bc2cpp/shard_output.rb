@@ -34,6 +34,74 @@ module ShardOutput
 
   module_function
 
+  # Yields each identifier [name, offset] in a line of generated C++. ASCII
+  # lines scan bytes directly (byte and character offsets coincide); any other
+  # line uses the IDENT expression. Byte and regex paths agree identifier for
+  # identifier on ASCII text, including `$` handling.
+  def each_identifier(line)
+    return enum_for(:each_identifier, line) unless block_given?
+
+    unless line.ascii_only?
+      line.scan(IDENT) { yield Regexp.last_match(0), Regexp.last_match.begin(0) }
+      return
+    end
+    i = 0
+    n = line.bytesize
+    while i < n
+      b = line.getbyte(i)
+      if (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95 || b == 36
+        j = i + 1
+        while j < n
+          c = line.getbyte(j)
+          break unless (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95 || c == 36
+
+          j += 1
+        end
+        yield line.byteslice(i, j - i), i
+        i = j
+      else
+        i += 1
+      end
+    end
+  end
+
+  # Yields each identifier [name, offset] with ShardColocate::IDENT's edge
+  # rules: `$` continues an identifier but never starts one, and a match must
+  # not touch another word character or `$` on either side. Same ASCII fast
+  # path as each_identifier; anything else uses the expression.
+  def each_delimited_identifier(line)
+    return enum_for(:each_delimited_identifier, line) unless block_given?
+
+    unless line.ascii_only?
+      line.scan(ShardColocate::IDENT) { yield Regexp.last_match(1), Regexp.last_match.begin(1) }
+      return
+    end
+    i = 0
+    n = line.bytesize
+    while i < n
+      b = line.getbyte(i)
+      if (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95
+        j = i + 1
+        while j < n
+          c = line.getbyte(j)
+          break unless (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95 || c == 36
+
+          j += 1
+        end
+        if i.zero?
+          yield line.byteslice(i, j - i), i
+        else
+          p = line.getbyte(i - 1)
+          yield line.byteslice(i, j - i), i unless (p >= 65 && p <= 90) || (p >= 97 && p <= 122) ||
+                                                   (p >= 48 && p <= 57) || p == 95 || p == 36
+        end
+        i = j
+      else
+        i += 1
+      end
+    end
+  end
+
   # How many files a run writes: BC2CPP_SHARDS, default 1 (no shard files).
   def count(env = ENV)
     raw = env.fetch('BC2CPP_SHARDS', '1')
@@ -256,8 +324,13 @@ module ShardOutput
         defined[item[:name]] = shard
       end
     end
-    prelude_ids = prelude.scan(IDENT).to_set
-    shard_ids = texts.map { |t| t.scan(IDENT).to_set }
+    prelude_ids = Set.new
+    ShardOutput.each_identifier(prelude) { |name, _| prelude_ids << name }
+    shard_ids = texts.map do |t|
+      ids = Set.new
+      ShardOutput.each_identifier(t) { |name, _| ids << name }
+      ids
+    end
     shared = defined.select do |name, shard|
       prelude_ids.include?(name) || shard_ids.each_with_index.any? { |ids, i| i != shard && ids.include?(name) }
     end.keys.to_set
@@ -450,14 +523,30 @@ module ShardOutput
     functions = by_name.select { |_, list| list.all? { |item| item[:function] } }.keys.to_set
     shared = by_name.keys.to_set - functions
     shared |= items.select { |item| item[:head].include?('BC2CPP_SHARD_ONE_BODY') }.to_set { |item| item[:name] } & functions
-    shared |= code.scan(/\b([A-Za-z_][\w$]*)\b(?!\s*\()/).flatten.to_set & functions
+    code_idents = Set.new
+    code.scan(/\b([A-Za-z_][\w$]*)\b(?!\s*\()/) { |cap| code_idents.merge(cap) }
+    shared |= code_idents & functions
     items.each do |item|
       locals = item[:text].sub(/\A[^{]*\{/, '').scan(/\bstatic\b[^=;{(]*/)
       shared << item[:name] if locals.any? { |decl| !constant_static?(decl) }
     end
+    # Each body is scanned at most once across all iterations: the fixpoint only
+    # re-reads memoized identifier sets. Lazy, so a fast-converging loop never
+    # pays for bodies it does not revisit.
+    idents_by_item = Array.new(items.size)
     loop do
-      grown = items.select { |item| shared.include?(item[:name]) }
-                   .flat_map { |item| item[:text].scan(/\b[A-Za-z_][\w$]*\b/) }.to_set & functions
+      grown = Set.new
+      items.each_with_index do |item, i|
+        next unless shared.include?(item[:name])
+
+        idents = idents_by_item[i] ||= begin
+          set = Set.new
+          item[:text].scan(/\b[A-Za-z_][\w$]*\b/) { |name| set << name }
+          set
+        end
+        grown.merge(idents)
+      end
+      grown &= functions
       break if grown.subset?(shared)
 
       shared |= grown

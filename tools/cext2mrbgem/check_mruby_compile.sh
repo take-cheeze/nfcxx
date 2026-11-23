@@ -15,6 +15,12 @@ for N in "$@"; do
   W=$(mktemp -d)
   DEFS=$(python3 -I "$HERE/corpus_defs.py" "$HERE/corpus_flags.json" "$N")
   INC="-I $G/include -I $MR/include -I $MR/build/host/include -I $UV/fork/src -I $UV/fork/include"
+  # the fork builds every object with MRB_USE_BIGINT (mrbgems/mruby-bigint/mrbgem.rake): the bigint helpers are declared under it
+  DEFS="$DEFS -DMRB_USE_BIGINT"
+  # the same extra mruby gem headers the corpus runner gives (mruby-encoding, mruby-time, mruby-marshal)
+  for d in $(echo "${NFCX_MRUBY_INCLUDE:-/home/user/mruby/include:/home/user/mruby/build/host/include:/home/user/mruby/mrbgems/mruby-encoding/include:/home/user/mruby/mrbgems/mruby-time/include:/home/user/nfcxx/3rd/mruby-marshal/include}" | tr : " "); do
+    INC="$INC -I $d"
+  done
   errs=0
   for c in "$G"/src/*.c "$G"/src/*.cc; do
     [ -f "$c" ] || continue

@@ -471,12 +471,20 @@ module NativeFrameUse
   # `corpus` is every native source the closed world links (the library's own included): the effects follow calls
   # across files. A function the corpus does not define is not frame-free. `owner_map` (NativeOwnerMap) adds the ROM
   # tables and the C++ registrations that name their function; a lambda registered in place names none, so it is framed.
-  def rows(paths, corpus, owner_map: nil)
+  # `ram`: also the [owner, name] of the rows some run-time registration gives (owner_map's registrations and the plain
+  # defines; class_registrations and owner_map's rom are ROM table entries).
+  def rows(paths, corpus, owner_map: nil, ram: nil)
     table = effects(definitions(corpus), callable_names(corpus))
     out = []
     if owner_map
-      (owner_map.rom + owner_map.registrations).each do |owner, name, function|
+      owner_map.rom.each do |owner, name, function|
         out << [owner, name, function] if owner && function && table.key?(function) && frame_free?(table[function])
+      end
+      owner_map.registrations.each do |owner, name, function|
+        next unless owner && function && table.key?(function) && frame_free?(table[function])
+
+        out << [owner, name, function]
+        ram&.add([owner, name])
       end
     end
     by_name, = NativeExpressionDevirt.class_registrations(paths)
@@ -492,7 +500,12 @@ module NativeFrameUse
     paths.each do |path|
       next unless File.file?(path) && (path.end_with?('.c') || path.match?(CPP_SOURCE))
 
-      plain_defines(path).each { |row| out << row if table.key?(row[2]) && frame_free?(table[row[2]]) }
+      plain_defines(path).each do |row|
+        next unless table.key?(row[2]) && frame_free?(table[row[2]])
+
+        out << row
+        ram&.add(row[0, 2])
+      end
     end
     out.uniq.sort
   end
@@ -502,9 +515,25 @@ module NativeFrameUse
   # once to the functions they are registered as -- a row counts only while the owner's own table holds a plain C
   # function under the name -- and a call goes through mrb_call_direct when the function it found is one of them: a
   # subclass's override, a redefinition or a Ruby method under the same name is another function, so it is framed.
-  # BC2CPP_FRAMEFREE=0 turns it off.
-  def cpp_source(keys)
+  # BC2CPP_FRAMEFREE=0 turns it off. `ram` (FRAME_FREE_FLAG): the keys a run-time registration gives, the only rows the
+  # marking needs (nil: every key).
+  def cpp_source(keys, ram: nil)
+    keys = keys & ram if ram && flag?
     rows = keys.to_a.sort.map { |key| key.split('#', 2) }
+    FLAG_FALLBACK + cpp_body(keys, rows)
+  end
+
+  # FRAME_FREE_FLAG: a fork without the method flag compiles the flags the generated tables and rows name as nothing,
+  # and the marking as no marking: every call keeps its frame.
+  FLAG_FALLBACK = <<~CPP
+    #ifndef MRB_METHOD_FRAMEFREE_FL
+    #define MRB_METHOD_FRAMEFREE_FL 0
+    #define MRB_MT_FRAMEFREE 0
+    #define BC2CPP_NO_FRAMEFREE_FLAG 1
+    #endif
+  CPP
+
+  def cpp_body(keys, rows)
     if ENV['BC2CPP_FRAMEFREE'] == '0' || rows.empty?
       return <<~CPP
         extern "C" mrb_value mrb_funcall_with_method(mrb_state*, mrb_value, mrb_sym, const mrb_method_t*, struct RClass*, mrb_int, const mrb_value*, mrb_value);
@@ -517,8 +546,10 @@ module NativeFrameUse
       CPP
     end
 
-    capacity = 1 << ((rows.size + wrapper_names(keys).size + READER_HEADROOM) * 2).bit_length
     table, names = row_entries(rows)
+    return flag_source(rows, table, names) if flag?
+
+    capacity = 1 << ((rows.size + wrapper_names(keys).size + READER_HEADROOM) * 2).bit_length
     <<~CPP
       // FRAME_FREE (native_frame_use.rb): #{rows.size} natives mrb_call_direct may call without their frame.
       #include <stdint.h>
@@ -639,6 +670,102 @@ module NativeFrameUse
     CPP
   end
 
+  # FRAME_FREE_FLAG: the decision is the entry's MRB_METHOD_FRAMEFREE_FL (mrb_funcall_with_method), carried by the method
+  # itself instead of a run-time set of functions: a ROM entry gets it from the exclusion header (MRB_MT_FRAMEFREE_<fn>,
+  # CoreNativeCandidates.header), a compiled reader and a direct row from their generated flags (reader?, direct_flags),
+  # and a native registered at run time from the marking below, which resolves the rows as the set did. A function is
+  # flagged only where the set would have held it, so a missing flag costs a frame, never a call without one.
+  # BC2CPP_FRAMEFREE_FLAG=0 keeps the set.
+  def flag?
+    ENV['BC2CPP_FRAMEFREE_FLAG'] != '0' && ENV['BC2CPP_FRAMEFREE'] != '0'
+  end
+
+  # The marking: each row's function, found in the owner's own table as the set resolved it, has its writable entries
+  # flagged at the end of every compiled gem's init, and once more at the first found-method call after the last one
+  # (natives defined after it). The hook never answers yes itself, and it bumps the method epoch rather than clearing
+  # mrb->cache, which the call in progress may point into.
+  def flag_source(rows, table, names)
+    <<~CPP
+      // FRAME_FREE (native_frame_use.rb): #{rows.size} natives mrb_call_direct may call without their frame (FRAME_FREE_FLAG).
+      #include <stdint.h>
+      #include <string.h>
+      extern "C" mrb_value mrb_funcall_with_method(mrb_state*, mrb_value, mrb_sym, const mrb_method_t*, struct RClass*, mrb_int, const mrb_value*, mrb_value);
+      // FRAME_FREE_PRESYM: a row's name is its presym id, or the high bit and its index in bc2cpp_ff_names.
+      struct bc2cpp_ff_row { const char* owner; uint32_t name; };
+      #{ROWS_BEGIN}
+      static const char* const bc2cpp_ff_names[#{[names.size, 1].max}] = { #{names.empty? ? 'nullptr' : names.map { |n| c_string(n) }.join(', ')} };
+      static const bc2cpp_ff_row bc2cpp_ff_rows[] = {
+      #{table}
+      };
+      #{ROWS_END}
+      // "A::B" or "A::B.singleton" to the class whose own table holds the name; null where there is none (no constant, or a
+      // class object without a singleton class).
+      static struct RClass* bc2cpp_ff_class(mrb_state* M, const char* path) {
+        char buf[160];
+        size_t n = strlen(path);
+        bool singleton = n > 10 && strcmp(path + n - 10, ".singleton") == 0;
+        if (singleton) n -= 10;
+        if (n >= sizeof buf) return nullptr;
+        memcpy(buf, path, n);
+        buf[n] = 0;
+        mrb_value scope = mrb_obj_value(M->object_class);
+        for (char* part = buf; part; ) {
+          char* sep = strstr(part, "::");
+          if (sep) *sep = 0;
+          mrb_sym id = mrb_intern_cstr(M, part);
+          if (!mrb_const_defined_at(M, scope, id)) return nullptr;
+          scope = mrb_const_get(M, scope, id);
+          if (!mrb_class_p(scope) && !mrb_module_p(scope)) return nullptr;
+          part = sep ? sep + 2 : nullptr;
+        }
+        struct RClass* c = mrb_class_ptr(scope);
+        if (!singleton) return c;
+        return c->c && c->c->tt == MRB_TT_SCLASS ? c->c : nullptr;
+      }
+      static inline struct RClass* bc2cpp_ff_origin(struct RClass* k) { MRB_CLASS_ORIGIN(k); return k; }
+      static int bc2cpp_ff_mark(mrb_state* M) {
+        int marked = 0;
+        for (const bc2cpp_ff_row& r : bc2cpp_ff_rows) {
+          struct RClass* start = bc2cpp_ff_class(M, r.owner);
+          if (!start) continue;
+          struct RClass* c = start;
+          mrb_sym mid = r.name & 0x80000000u ? mrb_intern_cstr(M, bc2cpp_ff_names[r.name & 0x7fffffffu]) : (mrb_sym)r.name;
+          mrb_method_t m = bc2cpp_find_proven(M, &c, mid);
+          if (MRB_METHOD_UNDEF_P(m) || !MRB_METHOD_FUNC_P(m) || (m.flags & MRB_METHOD_FRAMEFREE_FL)) continue;
+          if (c != start && !(c->tt == MRB_TT_ICLASS && c->c == start) && c != bc2cpp_ff_origin(start)) continue;
+      #ifndef BC2CPP_NO_FRAMEFREE_FLAG
+          marked += mrb_mt_mark_frame_free(M, c, mid, MRB_METHOD_FUNC(m));
+      #endif
+        }
+        return marked;
+      }
+      static mrb_bool bc2cpp_ff_late(mrb_state* M, mrb_func_t) {
+        M->frame_free_p = nullptr;
+        if (bc2cpp_ff_mark(M)) M->mt_epoch++;
+        return FALSE;
+      }
+      // Installed at the end of each compiled gem's init, so the rows resolve against the classes defined so far.
+      static inline void bc2cpp_frame_free_install(mrb_state* M) {
+        if (bc2cpp_ff_mark(M)) mrb_method_cache_clear(M);
+        M->frame_free_p = bc2cpp_ff_late;
+      }
+      static inline bool bc2cpp_frame_free_wrappers(const mrb_func_t*, size_t) { return false; }
+      static inline mrb_value bc2cpp_call_found(mrb_state* M, mrb_value recv, mrb_sym mid, const mrb_method_t* m, struct RClass* c,
+                                                mrb_int argc, const mrb_value* argv, mrb_value blk) {
+        return mrb_funcall_with_method(M, recv, mid, m, c, argc, argv, blk);
+      }
+    CPP
+  end
+
+  # FRAME_FREE_FLAG: the flags a compiled registration or a direct row adds for `m` (a compiled entry, or a native row
+  # of OwnerCallDirect.native_entries whose key `keys` holds).
+  def entry_flags(m, keys)
+    return '' unless flag?
+
+    frame_free = m[:native] ? keys.include?("#{m[:owner]}##{m[:name]}") : reader?(m)
+    frame_free ? ' | MRB_METHOD_FRAMEFREE_FL' : ''
+  end
+
   # FRAME_FREE_WRAPPERS: an owner call's direct row (OwnerCallDirect.native_entries) runs the entry's body through an
   # exported wrapper that only calls it, so the wrapper is frame-free when its row is; the table lookup never finds it.
   def wrapper_names(keys)
@@ -650,15 +777,19 @@ module NativeFrameUse
   # without a frame too. Each unit hands over its own; READER_HEADROOM keeps the shared table's capacity above them.
   READER_HEADROOM = 1024
 
+  def reader?(m)
+    m[:entry] && m[:label].to_s.start_with?('synth:') && m[:arity].to_i.zero?
+  end
+
   def reader_entries(compiled)
-    compiled.filter_map { |m| m[:entry] if m[:label].to_s.start_with?('synth:') && m[:arity].to_i.zero? }.uniq.sort
+    compiled.filter_map { |m| m[:entry] if reader?(m) }.uniq.sort
   end
 
   # The unit's hand-over of those wrappers, printed after OwnerCallDirect.native_prototypes: there, at global scope,
   # each name has its one declaration (the runtime text may sit in a namespace of its own, where a declaration
   # would name another function).
   def wrappers_source(keys, readers = [])
-    names = ENV['BC2CPP_FRAMEFREE'] == '0' ? [] : wrapper_names(keys) + readers.first(READER_HEADROOM)
+    names = ENV['BC2CPP_FRAMEFREE'] == '0' || flag? ? [] : wrapper_names(keys) + readers.first(READER_HEADROOM)
     return '' if names.empty?
 
     <<~CPP

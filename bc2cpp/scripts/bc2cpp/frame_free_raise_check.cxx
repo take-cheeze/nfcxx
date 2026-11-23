@@ -1,7 +1,8 @@
 // A native called with mrb_call_direct against the same native called through a pushed frame (mrb_funcall_with_method):
 // the same result, the same exception (class, message, backtrace length) and the same depth of frames afterwards, and
-// no frame pushed for a call that returns normally. With mrb->frame_free_p set, mrb_funcall_with_method makes the same
-// call frame-free for any caller, and so does mrb_obj_new's initialize.
+// no frame pushed for a call that returns normally. With mrb->frame_free_p set, or the method flagged
+// MRB_METHOD_FRAMEFREE_FL (mrb_mt_mark_frame_free), mrb_funcall_with_method makes the same call frame-free for any
+// caller, and so does mrb_obj_new's initialize.
 #include <mruby.h>
 #include <mruby/array.h>
 #include <mruby/class.h>
@@ -71,6 +72,7 @@ static Outcome run(mrb_state* mrb, int mode, mrb_value self, const char* name, m
   seen_depth = -1;
   struct Call { mrb_value self; mrb_sym mid; mrb_method_t* m; struct RClass* c; mrb_int argc; const mrb_value* argv; int mode; } call{self, mid, &m, c, argc, argv, mode};
   mrb->frame_free_p = mode == 2 ? all_free : nullptr;
+  if (mode == 3) m.flags |= MRB_METHOD_FRAMEFREE_FL;
   mrb_bool error = FALSE;
   mrb_value r = mrb_protect_error(mrb, [](mrb_state* mrb, void* p) -> mrb_value {
     Call* k = (Call*)p;
@@ -144,9 +146,11 @@ int main() {
     Outcome f = run(mrb, 0, self, c.name, c.argc, c.argv);
     Outcome d = run(mrb, 1, self, c.name, c.argc, c.argv);
     Outcome h = run(mrb, 2, self, c.name, c.argc, c.argv); /* mrb_funcall_with_method with the hook: as direct */
+    Outcome g = run(mrb, 3, self, c.name, c.argc, c.argv); /* ... with the method's flag: as direct */
     bool same = f.raised == d.raised && f.repr == d.repr && f.bt == d.bt && f.depth_after == d.depth_after &&
                 h.raised == d.raised && h.repr == d.repr && h.bt == d.bt && h.depth_after == d.depth_after &&
-                h.depth_inside == d.depth_inside;
+                h.depth_inside == d.depth_inside && g.raised == d.raised && g.repr == d.repr && g.bt == d.bt &&
+                g.depth_after == d.depth_after && g.depth_inside == d.depth_inside;
     bool frames = c.pushed_when_direct ? true : (d.depth_inside == f.depth_inside - 1);
     ++total;
     printf("%s %s(%d): framed{%s %s bt=%ld} direct{%s %s bt=%ld} inside framed=%ld direct=%ld\n", same && frames ? "ok  " : "FAIL", c.name, (int)c.argc,
@@ -167,6 +171,25 @@ int main() {
            (long)mrb_integer(*arg), f.raised ? "raised" : "value", (long)f.bt, (long)f.depth_inside, h.raised ? "raised" : "value",
            (long)h.bt, (long)h.depth_inside);
     if (!(same && frames)) ++failures;
+  }
+  /* FRAME_FREE_FLAG: the marked table entry is what mrb_obj_new finds, and the call is as hooked */
+  mrb_sym init = mrb_intern_lit(mrb, "initialize");
+  int marked = mrb_mt_mark_frame_free(mrb, ik, init, n_init);
+  int again = mrb_mt_mark_frame_free(mrb, ik, init, n_init);
+  int other = mrb_mt_mark_frame_free(mrb, ik, init, n_double);
+  mrb_method_cache_clear(mrb);  /* as the generated marking does: the cache holds the unflagged copy */
+  ++total;
+  printf("%s mark: marked=%d again=%d other function=%d\n", marked == 1 && again == 0 && other == 0 ? "ok  " : "FAIL", marked, again, other);
+  if (!(marked == 1 && again == 0 && other == 0)) ++failures;
+  for (const mrb_value* arg : { &one, &neg }) {
+    Outcome h = construct(mrb, true, ik, 1, arg);
+    Outcome g = construct(mrb, false, ik, 1, arg);
+    bool same = g.raised == h.raised && g.repr == h.repr && g.bt == h.bt && g.depth_after == h.depth_after &&
+                g.depth_inside == h.depth_inside;
+    ++total;
+    printf("%s new(%ld) flagged{%s bt=%ld inside=%ld} hooked{inside=%ld}\n", same ? "ok  " : "FAIL", (long)mrb_integer(*arg),
+           g.raised ? "raised" : "value", (long)g.bt, (long)g.depth_inside, (long)h.depth_inside);
+    if (!same) ++failures;
   }
   printf("frame_free_raise_check: %d of %d cases %s\n", total - failures, total, failures ? "FAILED" : "pass");
   mrb_close(mrb);
