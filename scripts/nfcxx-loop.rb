@@ -651,8 +651,8 @@ end
 # bash-state mode (the frozen body's argument loop, `--bash-state -- ARG...`): the state the loop leaves, as the shell statements
 # that set the body's variables, from the same loop as the records (run_records). The body evals the output: a scalar the loop
 # assigned is "NAME=VALUE", an array element is "NAME+=(VALUE)" in order, and a value option given last is a "loop_no_value OPTION"
-# statement (the body's set -u ends it, as the bash did). A refusal is its message on standard error with status 2; a loop that
-# does not finish (or a refusal with no message) is the stopped message with status 1. The loop's -fuse-ld= values are the ld.NAME
+# option given last is a refusal: "nfcxx: OPTION needs a value" on standard error, with status 1. A refusal is its message on
+# standard error with status 2; a loop that does not finish (or a refusal with no message) is the stopped message with status 1. The loop's -fuse-ld= values are the ld.NAME
 # programs on PATH. No NFCXX_* environment is read: the body's setup has set those variables already.
 def run_bash_state(argv)
   state = LoopState.new
@@ -666,8 +666,8 @@ rescue NfcxxExit => e
   $stderr.write("#{e.message}\n")
   2
 rescue NfcxxMissing => e
-  $stdout.write("loop_no_value #{Shellwords.escape(e.message)}\n")
-  0
+  $stderr.write("nfcxx: #{e.message} needs a value\n")
+  1
 rescue StandardError
   stopped_status
 end
