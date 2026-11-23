@@ -1759,6 +1759,7 @@ BC2CPP_MAIN = lambda do
   if gen.rom_method_tables?
     puts '#define BC2CPP_ROM_METHOD_TABLES 1'
     puts CodeGen::ROM_INSTALL_HELPER
+    puts CodeGen::CONST_PATH_WALK_HELPER if gen.const_path_walk?
   end
   # CLASS_READ_INLINE (docs/bc2cpp-class-read-inline.md): mrb_obj_class is mrb_class_real(mrb_class(v)), out of
   # line in src/class.c, and class_real returns its argument unless it is a singleton class or an iclass. So a heap
