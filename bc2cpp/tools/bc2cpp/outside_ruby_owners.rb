@@ -31,7 +31,15 @@ module OutsideRubyOwners
 
   def scan(paths)
     files, key = FileIdentity.files_and_key(paths)
-    @cache[key] ||= begin
+    @cache[key] ||= scan_files_cached(files)
+  end
+
+  # OUTSIDE_OWNERS_SCAN_CACHE: the walk of every outside Ruby file depends only on the files' contents, and was about
+  # 5% of a self-compiled run in every process. ScanCache keeps the names, wild and unknown owners under the files'
+  # digests, as plain collections (the collector's default block does not marshal). A scan the cache cannot key is
+  # walked as before.
+  def scan_files_cached(files)
+    names, wild, unknown = ScanCache.fetch('outside_ruby_owners.scan_files', files, cache_absent: false) do
       collector = Collector.new
       files.each do |path|
         parsed = RubyParseCache.parse_file(path)
@@ -39,8 +47,11 @@ module OutsideRubyOwners
 
         collector.visit(parsed.value)
       end
-      Result.new(collector.names, collector.wild, collector.unknown)
+      plain = {}
+      collector.names.each { |owner, set| plain[owner] = set }
+      [plain, collector.wild, collector.unknown]
     end
+    Result.new(names, wild, unknown)
   end
 
   # One lexical scope: `path` is nil when the scope's object cannot be named.
