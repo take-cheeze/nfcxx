@@ -182,7 +182,9 @@ class CodeGen
 
     producer = producers.first
     unless producer.insn&.op == :GETIV
-      return derived ? element_preserving_receiver(irep, idx, producer, owner, depth) : nil
+      return nil unless derived
+
+      return declared_reader_receiver(irep, producer) || element_preserving_receiver(irep, idx, producer, owner, depth)
     end
     return nil unless self.class.declared_ivar_elements && !self.class.declared_ivar_elements.empty?
 
@@ -216,6 +218,63 @@ class CodeGen
     return nil unless ELEMENT_PRESERVING.include?(insn.sym.to_s) && insn.argc.to_i.zero? && insn.plain_fixed_argc?
 
     inner.call(insn.reg)
+  end
+
+  # DECLARED_ELEMENT_READER (reads and loops only): `x.actors` returns `@actors` of `x` itself when `x` is exactly one
+  # class whose lookup of the name reaches a public attr_reader. The class comes from declared_reader_states, a flow
+  # that never takes this branch, so every flow typing the read and the codegen emitting its guard read one fixed
+  # answer. BC2CPP_DECLARED_ELEMENT_READER=0 turns it off.
+  def declared_reader_receiver(irep, producer)
+    insn = producer.insn
+    return nil unless insn && (insn.op == :SEND0 || (insn.op == :SEND && insn.plain_fixed_argc? && insn.argc.to_i.zero?))
+    return nil if ENV['BC2CPP_DECLARED_ELEMENT_READER'] == '0' || @rc_reader_prior || !@rc_scoped_ready
+
+    name = insn.sym.to_s
+    @declared_reader_names ||= self.class.declared_ivar_elements.to_h.keys.to_set { |(_, ivar)| ivar }
+    return nil unless @declared_reader_names.include?(name)
+
+    klass = declared_reader_receiver_class(irep, producer.index, insn.reg)
+    return nil unless klass && declared_reader_target?(klass, name)
+
+    declared_element_entry(klass, name)
+  end
+
+  # The one program class declared_reader_states gives +reg+ read at +index+ (no nil, no other class), or nil.
+  def declared_reader_receiver_class(irep, index, reg)
+    return nil unless @closed_world&.exact_instances_singleton_free?
+    return nil if reg.to_i >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg)
+
+    klass = return_class_of_mask(declared_reader_states(irep)&.[](index)&.[](reg.to_i))
+    klass if klass.is_a?(String) && !RETURN_BITLESS_CLASSES.include?(klass) && @closed_world.class_hierarchy(klass)
+  end
+
+  # The receiver-scoped exact-class flow of +irep+ (return_class_method_oracle), run once with DECLARED_ELEMENT_READER
+  # off (@rc_reader_prior) and kept out of the scoped cache. The answer it gives is fixed once computed.
+  def declared_reader_states(irep)
+    @rc_reader_states ||= {}
+    return @rc_reader_states[irep.label] if @rc_reader_states.key?(irep.label)
+
+    prior = @rc_reader_prior
+    begin
+      @rc_reader_prior = true
+      @rc_reader_states[irep.label] =
+        BytecodeIR::NumericClasses.states(irep, return_class_method_oracle(irep), fixnum_proof_ctx(irep)[:upvars], {})
+    ensure
+      @rc_reader_prior = prior
+    end
+  end
+
+  # Does an explicit `name` call on an exact +klass+ instance run a plain attr_reader (mrb_iv_get of `@name`)?
+  def declared_reader_target?(klass, name)
+    @declared_reader_targets ||= {}
+    key = [klass, name]
+    return @declared_reader_targets[key] if @declared_reader_targets.key?(key)
+
+    ok = @closed_world.inherited_lookup_safe?(name, klass) && !devirt_blocked_name?(name) &&
+         !bytecode_ir_name_removed?(name)
+    target, known = ok ? closed_world_lookup_target(name, klass, Set.new, any_visibility: true) : [nil, false]
+    @declared_reader_targets[key] = known && target && target.kind == :ivar_accessor && target.irep.nil? &&
+                                    target.owner != '<native>' && explicit_call_visible?(name, target) ? true : false
   end
 
   # DECLARED_INDEX_KIND: a slice of the receiver (`xs[a..b]`, `xs[0...-1]`, `xs[i, n]`): Array#[] with a Range or with two

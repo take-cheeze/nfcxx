@@ -278,6 +278,7 @@ class CodeGen
     # Receiver-specific summaries read the settled name-wide and class-pool facts.
     @rc_scoped_ready = true
     @rc_scoped_states = {}
+    @rc_reader_states = {}
     @rc_scoped_writes = {}
     @rc_scoped_active_labels = Set.new
     # Every answer cut short by a query already on the stack (a recursive cycle) bumps this. A scoped answer that
@@ -567,6 +568,9 @@ class CodeGen
     return times if times
     # A removed name's body may not be the one that runs: the same refusal as bytecode_ir_call_result_classes.
     return NumericFlow::OTHER if @closed_world && bytecode_ir_name_removed?(name)
+
+    slice = state && native_array_slice2_result(insn, state)
+    return slice if slice
 
     numeric = state && exact_numeric_send_mask(insn, state)
     return numeric if numeric
