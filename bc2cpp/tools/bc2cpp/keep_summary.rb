@@ -35,13 +35,15 @@ module KeepSummary
     'mrb_hash_ptr', 'mrb_str_ptr', 'mrb_ptr', 'mrb_true_value', 'mrb_false_value', 'mrb_bool', 'mrb_true_p',
     'mrb_false_p', 'mrb_type', 'mrb_class_ptr', 'mrb_basic_ptr', 'mrb_frozen_p', 'mrb_likely', 'mrb_unlikely',
     'mrb_ary_entry', 'mrb_ary_ref', 'RARRAY_LEN', 'RARRAY_PTR', 'ARY_PTR', 'ARY_LEN', 'ARY_EMBED_P', 'RSTRING_LEN',
-    'RSTRING_PTR', 'ARY_EMBED_PTR', 'ARY_SHARED_P', 'ARY_EMBED_LEN', 'DATA_PTR', 'MRB_SYM', 'MRB_OPSYM', 'MRB_IVSYM', 'MRB_QSYM', 'mrb_intern_cstr', 'mrb_intern_lit',
+    'RSTRING_PTR', 'ARY_EMBED_PTR', 'ARY_SHARED_P', 'ARY_EMBED_LEN', 'DATA_PTR', 'MRB_SYM', 'MRB_OPSYM', 'MRB_IVSYM',
+    'MRB_QSYM', 'mrb_intern_cstr', 'mrb_intern_lit',
     'mrb_intern_static', 'mrb_intern', 'mrb_iv_get', 'mrb_obj_eq', 'mrb_obj_equal', 'mrb_str_equal', 'mrb_obj_class',
     'mrb_obj_is_kind_of', 'mrb_obj_is_instance_of', 'mrb_field_write_barrier', 'mrb_field_write_barrier_value',
     'mrb_write_barrier', 'mrb_ary_new', 'mrb_ary_new_capa', 'mrb_ary_new_from_values', 'mrb_str_new',
     'mrb_str_new_cstr', 'mrb_str_new_static', 'mrb_str_new_lit', 'mrb_hash_new', 'mrb_hash_new_capa', 'mrb_int_value',
     'mrb_gc_arena_save', 'bc2cpp_keep', 'bc2cpp_root', 'mrb_gc_protect', 'BC2CPP_FIXNUM_PAIR_P', 'BC2CPP_FIXNUM_WORD',
-    'BC2CPP_SAME_WORD', '__builtin_add_overflow', '__builtin_sub_overflow', '__builtin_mul_overflow', 'mrb_int_add_overflow',
+    'BC2CPP_SAME_WORD', '__builtin_add_overflow', '__builtin_sub_overflow', '__builtin_mul_overflow',
+    'mrb_int_add_overflow',
     'mrb_int_sub_overflow', 'mrb_int_mul_overflow', 'FIXABLE',
     # numops.c: Integer, bigint and Float arithmetic, which allocates and otherwise raises a TypeError.
     'mrb_num_add', 'mrb_num_sub', 'mrb_num_mul',
@@ -86,13 +88,15 @@ module KeepSummary
                  'int32_t', 'uint32_t', 'int64_t', 'uint64_t', 'uint8_t', 'mrb_int', 'mrb_float', 'mrb_sym'].freeze
   # SymbolCache rewrites a `_named` helper of a method's text into these by the time the unit is printed, so a
   # marker naming the first stands for all of the second.
-  RENAMED = { 'bc2cpp_nomethod_named' => %w[bc2cpp_nomethod], 'bc2cpp_nomethod_raise_named' => %w[bc2cpp_nomethod_raise],
+  RENAMED = { 'bc2cpp_nomethod_named' => %w[bc2cpp_nomethod],
+              'bc2cpp_nomethod_raise_named' => %w[bc2cpp_nomethod_raise],
               'bc2cpp_guard_violation_named' => %w[bc2cpp_guard_violation],
               'bc2cpp_hint_violation_named' => %w[bc2cpp_hint_violation],
               'bc2cpp_nil_receiver_named' => %w[bc2cpp_nil_receiver bc2cpp_nil_receiver_id] }.freeze
   NAME = /(?<![\w$])([A-Za-z_][\w$]*)\s*\(/
   # `Type name{...}` / `Type{...}`: an object whose constructor and destructor the scan cannot see.
-  BRACE_INIT = /(?<![\w$])([A-Za-z_][\w$:<>]*)\s+[A-Za-z_]\w*\s*\{|(?<![\w$])(?!(?:else|do|try)\b)([A-Za-z_][\w$:<>]*)\s*\{/
+  BRACE_INIT = /(?<![\w$])([A-Za-z_][\w$:<>]*)\s+[A-Za-z_]\w*\s*\{|
+                (?<![\w$])(?!(?:else|do|try)\b)([A-Za-z_][\w$:<>]*)\s*\{/x
 
   module_function
 
@@ -114,7 +118,7 @@ module KeepSummary
   def rewrite(text)
     return text unless text.include?(MARK)
 
-
+    report = ENV['BC2CPP_KEEP_SUMMARY_REPORT'] == '1'
     unit = Unit.new(text)
     dropped = 0
     out = text.gsub(MARKED) do
@@ -123,18 +127,22 @@ module KeepSummary
         dropped += 1
         ''
       else
-        unit.explain(names.split, handler == 'H') if ENV['BC2CPP_KEEP_SUMMARY_REPORT'] == '1'
+        unit.explain(names.split, handler == 'H') if report
         "#{indent}bc2cpp_keep(M, #{value});\n"
       end
     end
-    warn "KEEP_SUMMARY: dropped #{dropped} of #{text.scan(MARKED).size} marked roots" if ENV['BC2CPP_KEEP_SUMMARY_REPORT'] == '1'
-    unit.report if ENV['BC2CPP_KEEP_SUMMARY_REPORT'] == '1'
+    if report
+      warn "KEEP_SUMMARY: dropped #{dropped} of #{text.scan(MARKED).size} marked roots"
+      unit.report
+    end
     out
   end
 
   # The unit's top-level function definitions and their summaries.
   class Unit
     class Unreadable < StandardError; end
+
+    VALUE_GLOBAL = /^(?:static\s+|inline\s+)*mrb_value\s+([A-Za-z_]\w*)\s*(?:\[[^\]\n]*\])?\s*[=;]/
 
     Summary = Struct.new(:unknown, :stores, :restores, :raises, :blocker)
 
@@ -144,7 +152,7 @@ module KeepSummary
       @bodies = {}
       @noreturn = Set.new
       # File-scope mrb_value variables: a store to one by name is a slot store, not a local's.
-      @value_globals = Set.new(@text.scan(/^(?:static\s+|inline\s+)*mrb_value\s+([A-Za-z_]\w*)\s*(?:\[[^\]\n]*\])?\s*[=;]/).flatten)
+      @value_globals = Set.new(@text.scan(VALUE_GLOBAL).flatten)
       @summaries = {}
       begin
         scan_definitions
@@ -176,7 +184,8 @@ module KeepSummary
         s = summary(name)
         next if caller_safe?(name, handler)
 
-        warn "KEEP_SUMMARY kept for #{name}: unknown=#{s.unknown} (#{s.blocker}) stores=#{s.stores} restores=#{s.restores} raises=#{s.raises} handler=#{handler}"
+        warn "KEEP_SUMMARY kept for #{name}: unknown=#{s.unknown} (#{s.blocker}) stores=#{s.stores} " \
+             "restores=#{s.restores} raises=#{s.raises} handler=#{handler}"
       end
     end
 
@@ -196,7 +205,9 @@ module KeepSummary
     private
 
     def compute_all
-      own = @bodies.to_h { |name, bodies| [name, @noreturn.include?(name) ? noreturn_effects : own_effects(bodies.join("\n"))] }
+      own = @bodies.to_h do |name, bodies|
+        [name, @noreturn.include?(name) ? noreturn_effects : own_effects(bodies.join("\n"))]
+      end
       cur = own.transform_values(&:dup)
       changed = true
       while changed
@@ -221,7 +232,9 @@ module KeepSummary
           changed = true
         end
       end
-      cur.each { |name, s| @summaries[name] = Summary.new(s[:unknown], s[:stores], s[:restores], s[:raises], s[:blocker]) }
+      cur.each do |name, s|
+        @summaries[name] = Summary.new(s[:unknown], s[:stores], s[:restores], s[:raises], s[:blocker])
+      end
     end
 
     # A [[noreturn]] function only ever leaves by a raise, whatever it runs first.
@@ -289,7 +302,8 @@ module KeepSummary
         # The assigned expression starts after the last open parenthesis, comma or operator: `if (!f(x = g()))`.
         lhs = lhs[/(?:\A|[(,!?]|&&|\|\||\breturn\b)([^(,!?]*)\z/, 1].to_s
         name = lhs[/([A-Za-z_]\w*)\s*\z/, 1]
-        next if (lhs.match?(PLAIN_LHS) && !@value_globals.include?(name)) || ((m = VALUE_MEMBER.match(lhs)) && values.include?(m[1]))
+        next if lhs.match?(PLAIN_LHS) && !@value_globals.include?(name)
+        next if (m = VALUE_MEMBER.match(lhs)) && values.include?(m[1])
 
         return :raw
       end
