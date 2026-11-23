@@ -31,6 +31,7 @@ require_relative 'label_table'
 require_relative 'foreign_core_units'
 require_relative 'shard_output'
 require_relative 'runtime_header'
+require_relative 'cross_gem_share'
 require_relative 'shared_generation'
 require_relative 'core_c_facts'
 require_relative 'embed_init_guard'
@@ -1688,8 +1689,10 @@ BC2CPP_MAIN = lambda do
   else
     at_exit { bc2cpp_method_report(compiled, nil) unless $! }
   end
+  # CROSS_GEM_SHARE (cross_gem_share.rb): after RUNTIME_HEADER, before the split; it reads the tail mark that leaves.
+  CrossGemShare.capture_stdout(ENV[RuntimeHeader::DIR_KEY], File.join(out_dir, "#{symbol}_entry.h")) if CrossGemShare.enabled?
   # RUNTIME_HEADER (runtime_header.rb): between the two, so it moves the compacted runtime text ShardOutput then splits.
-  RuntimeHeader.capture_stdout(ENV[RuntimeHeader::DIR_KEY])
+  RuntimeHeader.capture_stdout(ENV[RuntimeHeader::DIR_KEY], tail_mark: CrossGemShare.enabled?)
   CompactOutput.capture_stdout unless annotated
   # CLASS_TEST_FUSE (class_test_fuse.rb): reads the text the passes registered after it leave.
   ClassTestFuse.capture_stdout if ClassTestFuse.enabled?

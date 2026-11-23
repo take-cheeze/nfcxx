@@ -453,7 +453,98 @@ module SymbolCache
 
   # OWNER_CALL, with OWNER_CALL_ICACHE compiled out when BC2CPP_OWNER_ICACHE=0.
   def owner_call_source
-    ENV['BC2CPP_OWNER_ICACHE'] == '0' ? "#define BC2CPP_NO_OWNER_ICACHE 1\n#{OWNER_CALL}" : OWNER_CALL
+    text = ENV['BC2CPP_OWNER_CALL_CORE'] == '0' ? OWNER_CALL : owner_call_core(OWNER_CALL)
+    ENV['BC2CPP_OWNER_ICACHE'] == '0' ? "#define BC2CPP_NO_OWNER_ICACHE 1\n#{text}" : text
+  end
+
+  # OWNER_CALL_CORE: the argv form's miss path (lookup, definer and argument checks, the kept-call store) becomes
+  # bc2cpp_owner_call_core, which reads the gem's owner epoch and fiber definer test through a bc2cpp_owner_gem and
+  # names no other per-gem item, so CROSS_GEM_SHARE keeps one body for every gem. The argv form keeps the symbol
+  # lookup, the Proc#call test and the kept-call hit, in the same order as before. BC2CPP_OWNER_CALL_CORE=0 keeps one
+  # argv body per gem.
+  OWNER_CORE_EDITS = [
+    ['static void bc2cpp_owner_direct_pick(mrb_state* M, const bc2cpp_owner_directs& t, struct RClass* klass, mrb_method_t* m, struct RClass** c) {
+  if (*t.epoch != bc2cpp_owner_epoch) {
+    for (int d = 0; d < t.count; ++d) t.cls[d] = bc2cpp_owner_direct_class(M, t.rows[d].owner);
+    *t.epoch = bc2cpp_owner_epoch;
+  }',
+     'static void bc2cpp_owner_direct_pick(mrb_state* M, const bc2cpp_owner_directs& t, struct RClass* klass, mrb_method_t* m, struct RClass** c, unsigned epoch) {
+  if (*t.epoch != epoch) {
+    for (int d = 0; d < t.count; ++d) t.cls[d] = bc2cpp_owner_direct_class(M, t.rows[d].owner);
+    *t.epoch = epoch;
+  }'],
+    ['BC2CPP_SHARD_ONE_BODY static mrb_value bc2cpp_owner_call_argv(mrb_state* M, mrb_value recv, const bc2cpp_owner_desc* d, mrb_value blk, mrb_int argc, const mrb_value* argv,
+                                        mrb_value caller_self = mrb_nil_value()) {
+  bc2cpp_owner_set& s = *d->set;
+  int level = d->level;
+  mrb_sym mid = bc2cpp_sym(M, d->mid);
+',
+     '// The gem\'s own state the core reads: its owner epoch, and its fiber runtime\'s definer test (or none).
+struct bc2cpp_owner_gem {
+  unsigned* epoch;
+  bool (*definer)(const mrb_method_t&);
+};
+BC2CPP_SHARD_ONE_BODY static mrb_value bc2cpp_owner_call_core(mrb_state* M, mrb_value recv, const bc2cpp_owner_desc* d, mrb_sym mid,
+                                        const bc2cpp_owner_gem* g, mrb_value blk, mrb_int argc, const mrb_value* argv,
+                                        mrb_value caller_self) {
+  bc2cpp_owner_set& s = *d->set;
+  int level = d->level;
+  struct RClass* klass = mrb_class(M, recv);
+'],
+    ['  // As bc2cpp_funcall_argv: Proc#call and its aliases on a compiled block are a yield, not an OP_CALL in a C frame.
+  if (mrb_nil_p(blk) && mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return bc2cpp_yield_argv(M, recv, argc, argv);
+  struct RClass* klass = mrb_class(M, recv);
+#ifdef BC2CPP_OWNER_ICACHE
+  if (bc2cpp_owner_icache_hit(M, s, klass, mid, argc)) return bc2cpp_keep_call(M, [&] { return bc2cpp_call_found(M, recv, mid, &s.hit_m, s.hit_c, argc, argv, blk); });
+#endif
+#ifdef BC2CPP_OWNER_ICACHE_STATS
+  ++bc2cpp_owner_icache_misses;
+#endif
+', ''],
+    ['  if (d->direct) bc2cpp_owner_direct_pick(M, *d->direct, klass, &m, &c);', '  if (d->direct) bc2cpp_owner_direct_pick(M, *d->direct, klass, &m, &c, *g->epoch);'],
+    ['  if (s.epoch != bc2cpp_owner_epoch) {
+    s.epoch = bc2cpp_owner_epoch;', '  if (s.epoch != *g->epoch) {
+    s.epoch = *g->epoch;'],
+    ['#ifdef BC2CPP_FIBER_RUNTIME
+        && !bc2cpp_fiber_definer_p(m)
+#endif
+', "        && !(g->definer && g->definer(m))\n"],
+    ['  return bc2cpp_keep_call(M, [&] { return bc2cpp_call_found(M, recv, mid, &m, c, argc, argv, blk); });
+}
+[[maybe_unused]] static mrb_value bc2cpp_owner_call(',
+     '  return bc2cpp_keep_call(M, [&] { return bc2cpp_call_found(M, recv, mid, &m, c, argc, argv, blk); });
+}
+static const bc2cpp_owner_gem bc2cpp_owner_gem_state = {
+  &bc2cpp_owner_epoch,
+#ifdef BC2CPP_FIBER_RUNTIME
+  bc2cpp_fiber_definer_p,
+#else
+  nullptr,
+#endif
+};
+BC2CPP_SHARD_ONE_BODY static mrb_value bc2cpp_owner_call_argv(mrb_state* M, mrb_value recv, const bc2cpp_owner_desc* d, mrb_value blk, mrb_int argc, const mrb_value* argv,
+                                        mrb_value caller_self = mrb_nil_value()) {
+  mrb_sym mid = bc2cpp_sym(M, d->mid);
+  // As bc2cpp_funcall_argv: Proc#call and its aliases on a compiled block are a yield, not an OP_CALL in a C frame.
+  if (mrb_nil_p(blk) && mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return bc2cpp_yield_argv(M, recv, argc, argv);
+#ifdef BC2CPP_OWNER_ICACHE
+  bc2cpp_owner_set& s = *d->set;
+  if (bc2cpp_owner_icache_hit(M, s, mrb_class(M, recv), mid, argc)) return bc2cpp_keep_call(M, [&] { return bc2cpp_call_found(M, recv, mid, &s.hit_m, s.hit_c, argc, argv, blk); });
+#endif
+#ifdef BC2CPP_OWNER_ICACHE_STATS
+  ++bc2cpp_owner_icache_misses;
+#endif
+  return bc2cpp_owner_call_core(M, recv, d, mid, &bc2cpp_owner_gem_state, blk, argc, argv, caller_self);
+}
+[[maybe_unused]] static mrb_value bc2cpp_owner_call(']
+  ].freeze
+
+  def owner_call_core(text)
+    OWNER_CORE_EDITS.reduce(text) do |out, (from, to)|
+      raise "OWNER_CALL_CORE: the owner-call source no longer has #{from.lines.first.strip}" unless out.include?(from)
+
+      out.sub(from) { to }
+    end
   end
 
   # The file-scope cache. Keyed on the mrb_state so a second live VM cannot read

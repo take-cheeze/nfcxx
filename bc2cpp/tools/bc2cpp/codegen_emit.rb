@@ -793,33 +793,63 @@ class CodeGen
     }
   CPP
 
+  # INSTANCE_TT_FLAT: the class paths are one flat table, each path's segments ended by a null, at file scope: a
+  # [][6] table was mostly null padding, and every gem prints the same world's table, which CROSS_GEM_SHARE then keeps
+  # once. BC2CPP_INSTANCE_TT_FLAT=0 prints the function-local [][6] table again.
   def emit_instance_tt_setup(compiled = [])
     out = +"// INSTANCE_TT_SETUP -- see bc2cpp.rb's own emit_instance_tt_setup comment.\n"
     out << INSTANCE_TT_SUBCLASS_WALK
-    out << "static void bc2cpp_set_instance_tts(mrb_state* M) {\n"
-    out << "  static const char* const paths[][6] = {\n"
-    embedding_classes.each do |klass|
-      next if klass.end_with?('.singleton')
-
+    paths = embedding_classes.reject { |klass| klass.end_with?('.singleton') }.map do |klass|
       segments = klass.split('::')
       raise "INSTANCE_TT_SETUP: #{klass} nests deeper than 5 levels" if segments.size > 5
 
-      out << "    { #{(segments.map { |seg| "\"#{seg}\"" } + ['nullptr']).join(', ')} },\n"
+      segments
     end
-    out << "    { nullptr },\n  };\n"
+    flat = ENV['BC2CPP_INSTANCE_TT_FLAT'] != '0'
+    if flat
+      out << "static const char* const bc2cpp_instance_tt_paths[] = {\n"
+      paths.each { |segments| out << "  #{(segments.map { |seg| "\"#{seg}\"" } + ['nullptr']).join(', ')},\n" }
+      out << "  nullptr,\n};\n"
+    end
+    out << "static void bc2cpp_set_instance_tts(mrb_state* M) {\n"
+    unless flat
+      out << "  static const char* const paths[][6] = {\n"
+      paths.each { |segments| out << "    { #{(segments.map { |seg| "\"#{seg}\"" } + ['nullptr']).join(', ')} },\n" }
+      out << "    { nullptr },\n  };\n"
+    end
+    loop_head = if flat
+                  <<~CPP
+                    struct RClass* found_classes[#{[paths.size, 1].max}];
+                    Bc2cppInstanceTtRoots roots = { found_classes, 0 };
+                    bool switched = false, inherited = false;
+                    for (const char* const* path = bc2cpp_instance_tt_paths; *path; ++path) {
+                      mrb_value scope = mrb_obj_value(M->object_class);
+                      bool found = true;
+                      for (; *path; ++path) {
+                        if (!found) continue;
+                        mrb_sym name = mrb_intern_cstr(M, *path);
+                        if (!mrb_const_defined_at(M, scope, name)) { found = false; continue; }
+                        scope = mrb_const_get(M, scope, name);
+                      }
+                  CPP
+                else
+                  <<~CPP
+                    struct RClass* found_classes[sizeof(paths) / sizeof(paths[0])];
+                    Bc2cppInstanceTtRoots roots = { found_classes, 0 };
+                    bool switched = false, inherited = false;
+                    for (const auto& path : paths) {
+                      if (!path[0]) break;
+                      mrb_value scope = mrb_obj_value(M->object_class);
+                      bool found = true;
+                      for (int i = 0; path[i]; ++i) {
+                        mrb_sym name = mrb_intern_cstr(M, path[i]);
+                        if (!mrb_const_defined_at(M, scope, name)) { found = false; break; }
+                        scope = mrb_const_get(M, scope, name);
+                      }
+                  CPP
+                end
+    out << loop_head
     out << <<~CPP
-      struct RClass* found_classes[sizeof(paths) / sizeof(paths[0])];
-      Bc2cppInstanceTtRoots roots = { found_classes, 0 };
-      bool switched = false, inherited = false;
-      for (const auto& path : paths) {
-        if (!path[0]) break;
-        mrb_value scope = mrb_obj_value(M->object_class);
-        bool found = true;
-        for (int i = 0; path[i]; ++i) {
-          mrb_sym name = mrb_intern_cstr(M, path[i]);
-          if (!mrb_const_defined_at(M, scope, name)) { found = false; break; }
-          scope = mrb_const_get(M, scope, name);
-        }
         if (!found || mrb_type(scope) != MRB_TT_CLASS) continue;
         struct RClass* c = mrb_class_ptr(scope);
         switched = switched || MRB_INSTANCE_TT(c) != MRB_TT_DATA;

@@ -26,6 +26,8 @@ module RuntimeHeader
   DIR_KEY = 'BC2CPP_RUNTIME_HEADER_DIR'
   PART_MACRO = 'BC2CPP_RUNTIME_PART'
   NS_PLACEHOLDER = '@BC2CPP_RT_NS@'
+  # CROSS_GEM_SHARE (cross_gem_share.rb): where the region ended, for the pass that reads the text this leaves.
+  TAIL_MARK = "/* BC2CPP_RUNTIME_TAIL */\n"
   # Bumped when the header's layout changes, so an old file of the same region text is not reused.
   FORMAT = 1
 
@@ -35,18 +37,19 @@ module RuntimeHeader
 
   # Registered after ShardOutput and before CompactOutput: at_exit runs last-in first-out, so this reads the
   # compacted (and instrumented) text and ShardOutput splits what it leaves.
-  def capture_stdout(dir)
+  def capture_stdout(dir, tail_mark: false)
     original = $stdout
     buffer = StringIO.new
     $stdout = buffer
     at_exit do
       $stdout = original
-      original.write(rewrite(buffer.string, dir)) unless $!
+      original.write(rewrite(buffer.string, dir, tail_mark: tail_mark)) unless $!
     end
   end
 
   # The text with the marked region moved to the header in `dir`; with no `dir`, the text without the marks.
-  def rewrite(text, dir)
+  # `tail_mark` leaves TAIL_MARK where the region ended.
+  def rewrite(text, dir, tail_mark: false)
     first = text.index(BEGIN_MARK)
     last = text.index(END_MARK)
     return text unless first && last
@@ -54,6 +57,7 @@ module RuntimeHeader
     head = text[0...first]
     region = text[(first + BEGIN_MARK.size)...last]
     tail = text[(last + END_MARK.size)..]
+    tail = TAIL_MARK + tail if tail_mark
     return head + region + tail if dir.nil? || dir.empty?
 
     header, local = split(region, head + tail)
@@ -162,9 +166,17 @@ module RuntimeHeader
     internal = head.match?(/\bstatic\b/) && !head.match?(/extern\s*"C"/)
     mutable_var = item[:var] && item[:body] && !head.match?(/\b(?:const|constexpr)\b/) &&
                   !head.match?(/\A\s*(?:template|struct|class|union|enum|typedef|using)\b/)
+    # `static decltype(e) name = ...;` reads as a function named decltype: a head that does not end in a parameter
+    # list declares a variable, named by its last identifier.
+    name = item[:name]
+    if item[:function] && item[:body] && !item[:head].rstrip.end_with?(')') && item[:head].match?(/\bdecltype\s*\(/)
+      name = item[:head][/([A-Za-z_]\w*)\s*\z/, 1]
+      mutable_var = !item[:head].match?(/\A[^(]*\b(?:const|constexpr)\b/)
+      return { name: name, state: internal && mutable_var, ids: expand(text.scan(/\b[A-Za-z_]\w*\b/).to_set, macros) }
+    end
     body = text.sub(/\A[^{]*\{/, '')
     mutable_local = item[:function] && item[:body] && body.scan(/\bstatic\b[^=;{(]*/).any? { |d| !ShardOutput.constant_static?(d) }
-    { name: item[:name], state: internal && (mutable_var || mutable_local), ids: expand(text.scan(/\b[A-Za-z_]\w*\b/).to_set, macros) }
+    { name: name, state: internal && (mutable_var || mutable_local), ids: expand(text.scan(/\b[A-Za-z_]\w*\b/).to_set, macros) }
   end
 
   # Macro name -> the identifiers of its body, so a use of the macro names what it expands to.
