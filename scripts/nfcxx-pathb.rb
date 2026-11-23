@@ -291,6 +291,7 @@ class Plan
     @sanitize = nil # the -fsanitize= checks (a comma list), "" after -fno-sanitize=all
     @depmode = nil
     @ir_opt = nil
+    @vec_pb = nil # -ftree-vectorize / -fno-tree-vectorize (the last): pathb-cc.rb --vectorize / --no-vectorize
     @dialect = "g++"
     @dialect_asked = false
     @gnu_user = nil
@@ -443,6 +444,8 @@ class Plan
         @dbg_g = x # also pathb-cc.rb -g: the object's line table (pb_flags)
       elsif x.start_with?("-W") || x == "-w"
         nil # warnings do not change the object code
+      elsif x == "-ftree-vectorize" || x == "-fno-tree-vectorize"
+        @vec_pb = x == "-ftree-vectorize" ? "--vectorize" : "--no-vectorize"
       elsif x.start_with?("-m")
         nil # ISA options: their macros go to the bash's files list and are skipped there, and -fPIC-style picopts are gcc-only
       elsif x == "-MD" || x == "-MMD"
@@ -559,7 +562,7 @@ class Plan
   end
 
   # The options scripts/pathb-cc.rb gets, in the order the bash appends them (pb_flags): --sanitize, --safe-pointers, --ir-opt,
-  # --asan (Path B only), --pic, -g, the EDG diagnostic options, --dialect=clang (only when asked), --gnu-version.
+  # --asan (Path B only), --pic, -g, --vectorize / --no-vectorize, the EDG diagnostic options, --dialect=clang (only when asked), --gnu-version.
   def pb_flags
     f = []
     f << "--sanitize=#{@sanitize}" unless @sanitize.to_s.empty?
@@ -568,6 +571,7 @@ class Plan
     f << "--asan" if @asan
     f << "--pic" if @pic
     f << "-g" if @dbg_g && !%w[-g0 -ggdb0].include?(@dbg_g) # -g (the last, unless -g0): the line table
+    f << @vec_pb if @vec_pb
     f.concat(@diag)
     f << "--dialect=clang" if @dialect == "clang" && @dialect_asked
     f << "--gnu-version=#{@gnu_user}" if @gnu_user && !@gnu_user.empty?

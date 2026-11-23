@@ -128,8 +128,11 @@ class LoopState
     @isa = []
     @diag_opts = []
     @asanopts = []
+    @vec_pb = nil
     @assigned = []
   end
+
+  attr_accessor :vec_pb
 end
 
 # The NFCXX_* variables that set the loop's state during nfcxx's setup, as the setup reads them: the port takes them as
@@ -315,6 +318,9 @@ def run_loop(args, state, ld_available)
     elsif starts_with?(a, "-l") && a.length > 2 then state.files << a
     elsif a == "-Wno-narrowing" then state.diag_opts << "--diag_warning=narrowing_conversion"
     elsif starts_with?(a, "-W") || a == "-w" then nil
+    elsif a == "-ftree-vectorize" || a == "-fno-tree-vectorize"
+      # the loop vectorizer of Path B (pathb-cc.rb --vectorize, --no-vectorize): not a file, not dumped (bash: vec_pb)
+      state.vec_pb = a == "-ftree-vectorize" ? "--vectorize" : "--no-vectorize"
     elsif starts_with?(a, "-m") then state.isa << a
     elsif a == "-MD" || a == "-MMD" then state.depmode = a
     elsif a == "-MP" then state.depphony = "-MP"

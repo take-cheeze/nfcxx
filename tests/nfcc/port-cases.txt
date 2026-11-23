@@ -60,3 +60,4 @@ CUDA_HOME=CUDAHOME NFCC -o prog a.c m.c --cuda-driver=cudart -lcuda
 CUDA_HOME=CUDAHOME NFCC -o prog a.c m.c --cuda-driver=libcuda -lcuda
 NFCC s1.s s2.s sm.c -o sprog && ./sprog; echo "run=$?"
 NFCC -c s1.s -o s1o.o && NFCC s1o.o s2.s sm.c -o sprog2 && ./sprog2; echo "run=$?"
+NFCC -c -fno-tree-vectorize a.c -o nv.o && NFCC -c -ftree-vectorize a.c -o v.o
