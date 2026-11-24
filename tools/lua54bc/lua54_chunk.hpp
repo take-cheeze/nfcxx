@@ -51,6 +51,7 @@ struct Insn {
   int sBx() const { return static_cast<int>(Bx()) - 65535; }   // OFFSET_sBx
   unsigned Ax() const { return raw >> 7; }
   int sJ() const { return static_cast<int>(raw >> 7) - 16777215; }  // OFFSET_sJ
+  int sB() const { return static_cast<int>(B()) - 127; }      // GETARG_sB: OFFSET_sC applied to B
   int sC() const { return static_cast<int>(C()) - 127; }      // OFFSET_sC
 };
 
