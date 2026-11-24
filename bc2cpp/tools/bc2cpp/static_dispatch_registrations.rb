@@ -71,6 +71,7 @@ require_relative 'core_fiber_free'
 require_relative 'core_methods'
 require_relative 'core_native_candidates'
 require_relative 'core_rows'
+require_relative 'class_reach'
 require_relative 'native_owner_map'
 require_relative 'native_frame_use'
 require_relative 'index_closed_planner'
@@ -1496,6 +1497,7 @@ module StaticDispatchRegistrations
                                                 engine_tuple, symbol_lookups, proven,
                                                 engine_dynamic: symbol_lookups &&
                                                   (CoreRows.bytecode_sends_count?(closed_only, bytecode_blocks) ? rows_dynamic | rows_bytecode : rows_dynamic),
+                                                engine_compiled: CoreRows.engine_sends_compiled?(closed_only, bytecode_blocks),
                                                 super_names: super_reach.keys.to_set | super_unknown, core_run: core_run) : nil
 
     { super_reach: super_reach, class_owners: class_owners,
@@ -1538,16 +1540,23 @@ module StaticDispatchRegistrations
   # bodies count while their names are reachable (LIVE_CORE) -- and every native source, with the generated code.
   # The third list is CORE_ROWS (core_rows.rb): the ROM entries left only to proven-receiver lookups, kept as rows.
   def core_excluded(repo_root, mrbc, ireps, generated, engine_registry, engine_superclass_of, engine_tuple, symbol_lookups,
-                    proven = {}, engine_dynamic: nil, super_names: Set.new, core_run: nil)
+                    proven = {}, engine_dynamic: nil, super_names: Set.new, core_run: nil, engine_compiled: false)
     _ruby, native = outside_world_files(repo_root, closed_only: true)
     third = "#{File.expand_path(repo_root)}/3rd/"
     core = core_files(repo_root, mrbc)
     map = NativeOwnerMap.build(native)
     # One proof, made when first asked, for the name scan and the removal of the Enumerator methods.
     proof = -> { @enumerator_free_proof ||= enumerator_free_proof(core, ireps, native, map, engine_tuple, symbol_lookups, repo_root) }
+    # ENGINE_SENDS_COMPILED (core_rows.rb): the engine's sends count through the lookups its generated code keeps.
+    first_engine = engine_compiled && engine_dynamic ? CoreRows.engine_names(ireps, generated, engine_dynamic, super_names, rows: false) : nil
+    # CLASS_REACH (class_reach.rb): name => the owners the generated owner calls reach it on.
+    typed = first_engine && ClassReach.enabled? ? {} : nil
+    ClassReach.classes = class_reach_classes(core, engine_superclass_of, engine_tuple) if typed
     names, fragments, undef_only = CoreNativeCandidates.reachable(ireps, native, generated, core: core, exact_impls: true,
+                                                      engine_names: first_engine, typed: typed,
                                                       strip_generated: lambda { |src|
-                                                        src.gsub(GENERATED_COMMENT, '').gsub(REGISTRATION_CALL, '').gsub(LEFT_OUT_CALL, '')
+                                                        src = src.gsub(GENERATED_COMMENT, '').gsub(REGISTRATION_CALL, '').gsub(LEFT_OUT_CALL, '')
+                                                        first_engine ? CoreRows.blank_inert_sym_entries(src, typed: typed) : src
                                                       },
                                                       diagnostic_literals: !symbol_lookups.nil?,
                                                       enumerator_free: -> { proof.call.holds },
@@ -1556,9 +1565,9 @@ module StaticDispatchRegistrations
                                                    operator_names: !proven.empty?)
     private_ruby = private_ruby_candidates(core, ireps, native, generated, entries, map, engine_registry, engine_superclass_of,
                                            engine_tuple, symbol_lookups, repo_root)
-    ruby = CoreNativeCandidates.ruby_candidates(core, names, fragments, entries, proven)
-    self.core_state = [entries, names, fragments, proven] if core_names
-    rom = CoreNativeCandidates.candidates(entries, names, fragments, proven)
+    ruby = CoreNativeCandidates.ruby_candidates(core, names, fragments, entries, proven, typed: typed)
+    self.core_state = [entries, names, fragments, proven, typed] if core_names
+    rom = CoreNativeCandidates.candidates(entries, names, fragments, proven, typed: typed)
     rows = []
     row_reach = nil
     if engine_dynamic
@@ -1576,12 +1585,26 @@ module StaticDispatchRegistrations
       row_reach = [row_names, row_fragments]
     end
     # The fifth element is the rows run's [names, fragments] (ENGINE_ROWS), nil when it did not run; the sixth
-    # CORE_FIBER_FREE's result.
-    left_out = (CoreNativeCandidates.ram_candidates(map, names, fragments, entries, proven) + private_ruby + ruby).uniq.sort
-    [rom, left_out, rows, CoreNativeCandidates.undef_candidates(map, names, fragments, undef_only), row_reach,
-     fiber_free_proof(proof, native, left_out.to_set)]
+    # CORE_FIBER_FREE's result; the seventh the keys CLASS_REACH left out (an owner call names them on other owners).
+    left_out = (CoreNativeCandidates.ram_candidates(map, names, fragments, entries, proven, typed: typed) + private_ruby + ruby).uniq.sort
+    # An undef's removal changes what every owner below it answers, so a name an owner call spells counts there as any.
+    undef_names = typed ? names | typed.keys : names
+    [rom, left_out, rows, CoreNativeCandidates.undef_candidates(map, undef_names, fragments, undef_only), row_reach,
+     fiber_free_proof(proof, native, left_out.to_set),
+     (rom + left_out).select { |key| (name = key.split('#', 2).last) && typed&.key?(name) && !proven[name] }.sort]
   ensure
     @enumerator_free_proof = @enumerator_free_inputs = nil
+  end
+
+  # CLASS_REACH's NIL_SITES: the names the world declares or defines as classes (CoreHierarchySigs, every superclass_of
+  # key), less any it also defines as a module.
+  def class_reach_classes(core, engine_superclass_of, engine_tuple)
+    require_relative 'core_hierarchy_sigs'
+    modules = Set.new(Array(engine_tuple[11]).map(&:to_s))
+    core.each { |file| modules.merge(Array(file[:tuple][11]).map(&:to_s)) }
+    names = CoreHierarchySigs.hierarchy[0].keys.to_set | engine_superclass_of.keys
+    core.each { |file| names.merge(file[:superclass_of].keys) }
+    names.select { |n| n.is_a?(String) && !n.end_with?('.singleton') && !modules.include?(n) }.to_set.freeze
   end
 
   # The generated text the core rows run reads literals from. C_CALL_ROWS: funcall names and inert literals as in a
@@ -2176,6 +2199,7 @@ module StaticDispatchRegistrations
                                    frame_free_fns: closed[:frame_free][1].freeze,
                                    frame_free_ram: closed[:frame_free][2].freeze,
                                    unmade_classes: closed[:core_excluded][5]&.holds ? CoreFiberFree::UNMADE.to_set.freeze : Set.new.freeze,
+                                   class_reach: Array(closed[:core_excluded][6]).to_set.freeze,
                                    digest: digest, world: ListsWorld.name)
   end
 

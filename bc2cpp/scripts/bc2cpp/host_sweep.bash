@@ -48,7 +48,7 @@ fi
 # What a run must never print: a left-out entry reached (verify build), a violated proof, hint or declaration
 # (BC2cppDeclarationViolation is a StandardError, so a caller's rescue only logs it), a stubbed body run, or a
 # method lookup that failed.
-bad_re='declaration violation|UNREGISTERED_VERIFY|hint violation|proof violated|NoMethodError|ScriptError|guard violation|bytecode execution in a native-only|missing native continuation|bytecode interpreter is not built in'
+bad_re='declaration violation|UNREGISTERED_VERIFY|CLASS_REACH_VERIFY|hint violation|proof violated|NoMethodError|ScriptError|guard violation|bytecode execution in a native-only|missing native continuation|bytecode interpreter is not built in'
 failed=0
 
 taps() { local out="" f; for ((f = $1; f <= $2; f += $3)); do out+="$f:C,"; done; echo "${out%,}"; }
