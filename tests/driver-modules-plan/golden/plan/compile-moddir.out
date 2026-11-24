@@ -1,9 +1,0 @@
-kmodules
-v1
-kmodopts
-v--modules
-v--modules_directory
-vWORK/plan-cases/compile-moddir/mods
-v--create_module_interface
-vWORK/plan-cases/compile-moddir/mods/geom.eifc
-z

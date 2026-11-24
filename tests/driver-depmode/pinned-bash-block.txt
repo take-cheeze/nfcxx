@@ -1,7 +1,0 @@
-if [ -n "$depmode" ]; then
-  # -MD/-MMD (with -MF/-MT/-MQ/-MP): the host preprocessor writes the dependency file, as nfcc does for C.
-  df=${dfile:-${out%.*}.d}; tgt=${dtarget:-$out}
-  mflag=-M; [ "$depmode" = -MMD ] && mflag=-MM
-  "${NFCXX_CXX:-g++}" $mflag $depphony -MT "$tgt" -MF "$df" "-std=${std#--}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} \
-    ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"} ${srcs[@]+${srcs[@]+"${srcs[@]}"}}
-fi
