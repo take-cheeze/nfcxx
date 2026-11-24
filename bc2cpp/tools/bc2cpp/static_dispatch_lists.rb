@@ -30,6 +30,8 @@
 #                  UNDEF_LEFT_OUT, CoreNativeCandidates.undef_candidates). A file without it reads as empty
 #   unmade_classes the classes no instance of which the closed build ever makes (CORE_FIBER_FREE, core_fiber_free.rb:
 #                  Fiber, whose absence drops the resumable variants). A file without it reads as empty
+#   class_reach    the `core_excluded` and `core_left_out` keys whose names only owner calls of other owners spell
+#                  (CLASS_REACH, class_reach.rb); a CLASS_REACH_VERIFY build stubs them. A file without it reads as empty
 #
 # `world` (LISTS_WORLD, lists_world.rb) names the one build the closed-only parts were proven for; a file without it
 # is the closed build's.
@@ -43,13 +45,15 @@ require 'set'
 module StaticDispatchLists
   PATH_ENV = 'BC2CPP_STATIC_DISPATCH_LISTS'
   KEYS = %w[open closed core_excluded core_left_out engine_rom ctor_rows core_rows frame_free frame_free_fns frame_free_ram
-            core_undef_left_out engine_rows unmade_classes].freeze
-  REQUIRED_KEYS = (KEYS - %w[frame_free frame_free_fns frame_free_ram core_rows core_undef_left_out engine_rows unmade_classes]).freeze
+            core_undef_left_out engine_rows unmade_classes class_reach].freeze
+  REQUIRED_KEYS = (KEYS - %w[frame_free frame_free_fns frame_free_ram core_rows core_undef_left_out engine_rows unmade_classes
+                             class_reach]).freeze
 
   class Missing < StandardError; end
 
   Lists = Struct.new(:open, :closed, :core_excluded, :core_left_out, :engine_rom, :ctor_rows, :core_rows, :frame_free,
-                     :frame_free_fns, :frame_free_ram, :core_undef_left_out, :engine_rows, :unmade_classes, :digest, :world,
+                     :frame_free_fns, :frame_free_ram, :core_undef_left_out, :engine_rows, :unmade_classes, :class_reach, :digest,
+                     :world,
                      keyword_init: true) do
     # mruby's Struct.new forwards keyword-init values as a positional Hash.
     def initialize(kwargs = {})
@@ -61,6 +65,7 @@ module StaticDispatchLists
       self.core_undef_left_out ||= Set.new.freeze
       self.engine_rows ||= Set.new.freeze
       self.unmade_classes ||= Set.new.freeze
+      self.class_reach ||= Set.new.freeze
       self.world ||= 'closed'
     end
 
@@ -79,7 +84,7 @@ module StaticDispatchLists
                     core_left_out: Set.new.freeze, engine_rom: Set.new.freeze, ctor_rows: Set.new.freeze,
                     core_rows: Set.new.freeze, frame_free: Set.new.freeze, frame_free_fns: Set.new.freeze, frame_free_ram: Set.new.freeze,
                     core_undef_left_out: Set.new.freeze,
-                    engine_rows: Set.new.freeze, unmade_classes: Set.new.freeze, digest: 'none').freeze
+                    engine_rows: Set.new.freeze, unmade_classes: Set.new.freeze, class_reach: Set.new.freeze, digest: 'none').freeze
 
   module_function
 

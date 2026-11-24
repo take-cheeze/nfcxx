@@ -5,6 +5,7 @@ require_relative 'bytecode_ir'
 require_relative 'diagnostics'
 require_relative 'native_names'
 require_relative 'c_call_rows'
+require_relative 'class_reach'
 
 # CORE_ROWS (closed only): core ROM entries the closed build keeps as rows (MRB_MT_CTOR_ROW, value 2 in the exclusion
 # header) instead of method-table entries. A row answers only a lookup made for a receiver the compiler proved
@@ -54,13 +55,22 @@ module CoreRows
     !closed_only || bytecode_blocks || ENV['BC2CPP_ENGINE_ROWS_COMPILED'] == '0'
   end
 
+  # ENGINE_SENDS_COMPILED: the same reading for the entries the closed build removes outright. Only a lookup reaches an
+  # entry, and a VM-free build looks up only what its generated code and natives spell: that code's literals (its symbol
+  # table included) and presyms count there (engine_names, CoreNativeCandidates.reachable), so a send it compiled to a
+  # direct call or inline code looks nothing up. BC2CPP_ENGINE_SENDS_COMPILED=0 reads every engine symbol again.
+  def engine_sends_compiled?(closed_only, bytecode_blocks)
+    !bytecode_sends_count?(closed_only, bytecode_blocks) && ENV['BC2CPP_ENGINE_SENDS_COMPILED'] != '0'
+  end
+
   # What the engine may look up by name: the engine proof's dynamic names of the engine's own giving (Symbol literals
   # that may name a method, identifier literals that may be looked up, names in a native source outside 3rd/; not the
   # core Ruby, 3rd/ native and generated-literal ones this run reads itself, nor the engine's bytecode sends:
   # ENGINE_ROWS_COMPILED, StaticDispatchRegistrations#analyze), the
   # names a `super` reaches, every other symbol operand of an engine irep (an alias source, an undef, ...), and the
   # lookups left in the generated code.
-  def engine_names(ireps, generated, dynamic, super_names)
+  # +rows+: a generated funcall's name finds a row (C_CALL_ROWS), so only the rows run blanks it.
+  def engine_names(ireps, generated, dynamic, super_names, rows: true)
     names = Set.new(dynamic).merge(super_names)
     ireps.each_value do |irep|
       BytecodeIR.for(irep).each_source do |insn, _index|
@@ -71,7 +81,7 @@ module CoreRows
       end
     end
     # C_CALL_ROWS: a generated funcall's literal name finds a row where its entry would be (c_call_rows.rb).
-    generated.each { |src| names.merge(generated_lookups(CCallRows.blank_generated(src))) }
+    generated.each { |src| names.merge(generated_lookups(rows ? CCallRows.blank_generated(src) : src)) }
     names
   end
 
@@ -94,6 +104,38 @@ module CoreRows
       found.merge(refs)
     end
     found
+  end
+
+  # ENGINE_SENDS_COMPILED: `src` with each symbol table entry blanked whose every use is a `bc2cpp_sym(M, i)` on a line
+  # generated_lookups reads as looking nothing up. A helper that looks a name up by its bare index spells the index as a
+  # number, so any other spelling of the number keeps the entry, whatever that number means. With `typed`, an owner
+  # call's slot is no such spelling: the site's name and owners go to `typed` instead (CLASS_REACH, class_reach.rb).
+  def blank_inert_sym_entries(src, typed: nil)
+    table = src.match(/^[^\n]*bc2cpp_sym_names\[\d+\] = \{\n(.*?)^\};/m) or return src
+    rest = src[0...table.begin(0)] + src[table.end(0)..]
+    if typed
+      names = table[1].scan(/^\s*"((?:[^"\\]|\\.)*)",/).flatten.map { |n| StaticDispatchRegistrations.unescape(n) }
+      rest = ClassReach.blank_owner_slots(rest, names, typed)
+    end
+    live = Set.new
+    lines = rest.lines
+    lines.each_with_index do |line, k|
+      inert = INERT_LINES.any? { |re| line.match?(re) } ||
+              (line.match?(CONST_NAME) && lines[k + 1].to_s.include?('mrb_const_get('))
+      refs = line.scan(SYMREF).flatten
+      refs.each { |i| live << i.to_i } unless inert
+      # bc2cpp_sym_dyn_names (symbol_cache.rb) spells every entry as `bc2cpp_sym_names[i]` to intern it on demand.
+      # A number inside a string or a comment is no index.
+      bare = line.gsub(SYMREF, ' ').gsub(/\bbc2cpp_sym_names\[\d+\]/, ' ').gsub(/"(?:[^"\\\n]|\\.)*"/, ' ')
+                 .gsub(%r{/\*.*?\*/}, ' ').sub(%r{//.*}, '')
+      bare.scan(/(?<![\w.$])\d+(?![\w.])/) { |n| live << n.to_i }
+    end
+    i = -1
+    body = table[1].gsub(/^(\s*)"((?:[^"\\]|\\.)*)",/) do
+      i += 1
+      live.include?(i) ? Regexp.last_match(0) : "#{Regexp.last_match(1)}#{' ' * (Regexp.last_match(2).size + 2)},"
+    end
+    src[0...table.begin(1)] + body + src[table.end(1)..]
   end
 
   def strip_sym_table(src)

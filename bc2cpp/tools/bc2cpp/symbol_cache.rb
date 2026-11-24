@@ -896,7 +896,7 @@ static inline bool bc2cpp_owner_icache_hit(mrb_state* M, const bc2cpp_owner_set&
   OWNER_CALL = <<~CPP
     #include <string.h>
     #include <stdlib.h>
-    #ifdef BC2CPP_NOMETHOD_VERIFY
+    #if defined(BC2CPP_NOMETHOD_VERIFY) || defined(BC2CPP_CLASS_REACH_VERIFY)
     #include <stdio.h>
     #include <stdlib.h>
     #endif
@@ -991,6 +991,13 @@ static inline bool bc2cpp_owner_icache_hit(mrb_state* M, const bc2cpp_owner_set&
     // site's slot, level and owner list stay spelled for the reader.
     #define BC2CPP_SHARED(K, ...) (&bc2cpp_owner_sd_##K)
     [[noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_owner_violation(mrb_state* M, mrb_value recv, mrb_sym mid, const char* what) {
+    #ifdef BC2CPP_CLASS_REACH_VERIFY
+      // CLASS_REACH (class_reach.rb): the build left out the definitions of owners a site does not list.
+      fprintf(stderr, "bc2cpp: CLASS_REACH_VERIFY: owner-call violation: %s", mrb_class_name(M, mrb_obj_class(M, recv)));
+      fprintf(stderr, "#%s: %s\\n", mrb_sym_name(M, mid), what);
+      fflush(stderr);
+      abort();
+    #endif
     #ifdef BC2CPP_NOMETHOD_VERIFY
       fprintf(stderr, "bc2cpp: NOMETHOD_VERIFY: owner-call violation: %s", mrb_class_name(M, mrb_obj_class(M, recv)));
       fprintf(stderr, "#%s: %s\\n", mrb_sym_name(M, mid), what);

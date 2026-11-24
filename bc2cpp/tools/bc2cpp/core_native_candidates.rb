@@ -39,6 +39,7 @@ require_relative 'diagnostics'
 require_relative 'alias_sites'
 require_relative 'core_defs'
 require_relative 'c_call_rows'
+require_relative 'class_reach'
 
 module CoreNativeCandidates
   # CTOR_ROWS (static_dispatch_registrations.rb): the names a constructor row may carry.
@@ -315,7 +316,7 @@ module CoreNativeCandidates
   # +engine_names+ (CORE_ROWS, core_rows.rb) stands for what the engine's ireps look up, read from them otherwise.
   def reachable(ireps, native_paths, generated, core: [], lookup: method(:lookup_names), strip: nil, strip_generated: nil,
                 exact_impls: false, diagnostic_literals: false, enumerator_free: false, names: Set.new, engine_names: nil,
-                compiled_core: nil, operators: false, row_calls: false)
+                compiled_core: nil, operators: false, row_calls: false, typed: nil)
     # Closed (VM-free) only: no protocol name seeds +names+ (see StaticDispatchRegistrations#analyze).
     # A +names+ that answers `note` is told where each name comes from (scripts/bc2cpp/core_kept_report.rb).
     note = ->(label) { names.note(label) if names.respond_to?(:note) }
@@ -367,7 +368,8 @@ module CoreNativeCandidates
     undef_only = undef_names.reject { |name| names.include?(name) || core_mentions?(core, name) }.to_set
     note.call('undef call (an existence check at init)')
     names.merge(undef_names)
-    live_core(core, generated, names, fragments, lookup: lookup, exact_impls: exact_impls, aliases: aliases, compiled: compiled_core)
+    live_core(core, generated, names, fragments, lookup: lookup, exact_impls: exact_impls, aliases: aliases, compiled: compiled_core,
+                                                  typed: typed)
     [names, fragments, undef_only]
   ensure
     CoreNativeCandidates.settled_sites = previous if previous
@@ -479,7 +481,9 @@ module CoreNativeCandidates
   # (`owner_of`) is read by name alone, as without the flag.
   # +compiled+ (CORE_ROWS_COMPILED): the "Owner#name" bodies the core gem's generation compiles, whose lookups +generated+
   # holds (the core generation is one of its sources), so their ireps are not read again.
-  def live_core(core, generated, names, fragments, lookup: method(:lookup_names), exact_impls: false, aliases: {}, compiled: nil)
+  # +typed+ (CLASS_REACH, class_reach.rb): name => the owners an owner call reaches it on; a body there is live too.
+  def live_core(core, generated, names, fragments, lookup: method(:lookup_names), exact_impls: false, aliases: {}, compiled: nil,
+                typed: nil)
     impls = Set.new
     # `$` is the mangling's escape (`Array_include$3f_impl`).
     generated.each { |src| src.scan(/[\w$]+_impl\b/) { |t| impls << t } }
@@ -525,7 +529,8 @@ module CoreNativeCandidates
       names.merge(pending.keys.select(&by_name))
     end
     # A settled alias (SETTLED_ALIASES) runs its source's body under the new name too.
-    reached = ->(own, owner) { names.include?(own) || Array(aliases[[owner, own]]).any? { |n| names.include?(n) } }
+    hit = ->(name, owner) { names.include?(name) || ClassReach.reaches?(typed, name, owner) }
+    reached = ->(own, owner) { hit.call(own, owner) || Array(aliases[[owner, own]]).any? { |n| hit.call(n, owner) } }
     loop do
       grew = false
       pending.each do |own, bodies|
@@ -554,8 +559,11 @@ module CoreNativeCandidates
   # The listed keys, "MtClass#name" sorted: every entry of the key a candidate, its name unreachable.
   # +operators+ (OPERATOR_ROWS, the rows run only): an operator is a candidate once nothing reaches its name; no
   # fragment builds one.
-  def candidates(entries, names, fragments, proven = {}, operators: false)
+  # +typed+: CLASS_REACH (class_reach.rb), whose owner calls reach the entries of the classes they list.
+  def candidates(entries, names, fragments, proven = {}, operators: false, typed: nil)
     entries.group_by { |e| [e[:mt_class], e[:name]] }.filter_map do |(mt_class, name), group|
+      # INDEX_CLOSED's verdict covers every lookup of a proven name, an owner call's too.
+      next if !proven[name] && ClassReach.reaches_token?(typed, name, mt_class)
       operator = operators && name && !name.match?(NAME) && OPSYM_TO_RUBY.value?(name)
       next unless (name&.match?(NAME) || proven[name] || operator) && group.all? { |e| e[:installed] }
       next if operator && names.include?(name)
@@ -567,7 +575,7 @@ module CoreNativeCandidates
 
   # Core Ruby registrations, compiled or interpreted, whose names no lookup reaches.
   # ROM-shared keys stay: omitting a Ruby override must not replace a readonly entry with a RAM tombstone.
-  def ruby_candidates(core, names, fragments, entries, proven = {})
+  def ruby_candidates(core, names, fragments, entries, proven = {}, typed: nil)
     rom = entries.to_set { |entry| "#{entry[:mt_class]}##{entry[:name]}" }
     definitions = core.flat_map do |file|
       file.fetch(:registry).flat_map do |name, definitions|
@@ -581,7 +589,7 @@ module CoreNativeCandidates
           next if owner.match?(/\b([A-Z]\w*)::\1\b/)
 
           key = "#{owner}##{name}"
-          key unless rom.include?(key.sub('.singleton#', '#'))
+          key unless rom.include?(key.sub('.singleton#', '#')) || (!proven[name] && ClassReach.reaches?(typed, name, owner))
         end
       end
     end
@@ -592,6 +600,8 @@ module CoreNativeCandidates
         next if owner.match?(/\b([A-Z]\w*)::\1\b/)
 
         key = "#{owner}##{name}"
+        next if !proven[name] && ClassReach.reaches?(typed, name, owner)
+
         key unless rom.include?(key.sub('.singleton#', '#')) || StaticDispatchRegistrations.dynamic_name?(name, names, fragments)
       end
     end
@@ -624,7 +634,7 @@ module CoreNativeCandidates
   # rule; a registration with a computed name, a native alias or undef of the key, or a ROM entry of the same class and
   # name keeps it (the removal would take the ROM one, leaving a tombstone). Native aliases are candidates separately
   # when their new names are unreachable; the source names still count as lookups.
-  def ram_candidates(map, names, fragments, entries, proven = {})
+  def ram_candidates(map, names, fragments, entries, proven = {}, typed: nil)
     rom = entries.to_set { |e| "#{e[:mt_class]}##{e[:name]}" }
     blocked = Set.new
     map.aliases.each { |owner, new_name, old_name| blocked << "#{owner}##{new_name}" << "#{owner}##{old_name}" }
@@ -639,7 +649,7 @@ module CoreNativeCandidates
       # instance ROM entry the planner also excludes: the class-method table
       # the header does not touch. Only an exact ROM twin still blocks.
       rom_key = proven[name] ? key : key.sub('.singleton#', '#')
-      next if blocked.include?(key) || rom.include?(rom_key)
+      next if blocked.include?(key) || rom.include?(rom_key) || (!proven[name] && ClassReach.reaches?(typed, name, owner))
       next if !proven[name] && StaticDispatchRegistrations.dynamic_name?(name, names, fragments)
 
       key
@@ -653,7 +663,7 @@ module CoreNativeCandidates
 
       key = "#{owner}##{name}"
       rom_key = proven[name] ? key : key.sub('.singleton#', '#')
-      next if rom.include?(rom_key)
+      next if rom.include?(rom_key) || (!proven[name] && ClassReach.reaches?(typed, name, owner))
       next if !proven[name] && StaticDispatchRegistrations.dynamic_name?(name, names, fragments)
 
       key
