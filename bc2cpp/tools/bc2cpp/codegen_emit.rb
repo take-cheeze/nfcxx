@@ -1085,12 +1085,22 @@ class CodeGen
     table
   end
 
+  # IVAR_SYM: a slot table entry is MRB_DATA_IVAR_ENTRY, which an mruby whose descriptor holds the ivar's symbol
+  # defines (MRB_IVSYM, a presym: no "@name" string in ROM); an mruby without it (MRB_DATA_IVAR_BY_NAME) takes the
+  # fallback below, the "@name" string as before.
+  IVAR_SYM_FALLBACK = <<~CPP
+    #ifndef MRB_DATA_IVAR_ENTRY
+    #define MRB_DATA_IVAR_ENTRY(name, offset, kind) { "@" #name, (offset), (kind) }
+    #endif
+  CPP
+
   # One slot + mrb_data_type marker per statically named ivar. The marker lets
   # mruby's normal ivar APIs and GC find slots; dynamic names remain in RData's
   # ordinary iv_tbl.
   def emit_structs
     out = String.new
     out << emit_nullable_structs
+    out << IVAR_SYM_FALLBACK unless @ivar_layout.empty?
     @ivar_layout.each do |owner, ivars|
       # As compile_all's only_owners filter: no struct for a class this run does not
       # emit (it would be dead code and an unused-static warning).
@@ -1132,10 +1142,13 @@ class CodeGen
       # marks VALUE slots only.
       slots = ivars.keys
       slots.each do |name|
-        out << "  { \"@#{name}\", offsetof(#{struct_name(owner)}, #{ivar_field_name(name)}), " \
-               "#{RDATA_IVAR_KIND.fetch(ivars.fetch(name))} },\n"
+        field = "offsetof(#{struct_name(owner)}, #{ivar_field_name(name)}), #{RDATA_IVAR_KIND.fetch(ivars.fetch(name))}"
+        # MRB_IVSYM pastes the name into an identifier.
+        raise "IVAR_SYM: @#{name} of #{owner} is not a C identifier" unless name.to_s.match?(/\A[A-Za-z_][A-Za-z0-9_]*\z/)
+
+        out << "  MRB_DATA_IVAR_ENTRY(#{name}, #{field}),\n"
       end
-      out << "  { \"\", 0 }, // placeholder: a zero-length array is not standard C++\n" if slots.empty?
+      out << "  {}, // placeholder: a zero-length array is not standard C++\n" if slots.empty?
       out << "};\n"
       hash_fields = 'nullptr, 0'
       unless slots.empty?

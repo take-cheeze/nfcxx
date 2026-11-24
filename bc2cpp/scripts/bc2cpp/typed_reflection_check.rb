@@ -88,7 +88,7 @@ if ENV['MRBC']
       'opt' => 'MRB_DATA_IVAR_INT_OR_NIL', 'name' => 'MRB_DATA_IVAR_VALUE'
     }.each do |name, kind|
       check.call("@#{name} is listed with #{kind}",
-                 slots.include?("{ \"@#{name}\", offsetof(TrMixed_ivars, ivar_#{name}), #{kind} }"))
+                 slots.include?("MRB_DATA_IVAR_ENTRY(#{name}, offsetof(TrMixed_ivars, ivar_#{name}), #{kind})"))
     end
     check.call('the descriptor count and index cover all five', code.include?('TrMixed_ivar_slots, 5, sizeof(TrMixed_ivars), TrMixed_ivar_hash, 15 };') ||
                                                                  code.match?(/TrMixed_ivar_slots, 5, sizeof\(TrMixed_ivars\), TrMixed_ivar_hash, \d+ \};/))
@@ -109,7 +109,7 @@ if ENV['MRBC']
     spelled_slots = spelled[/TrSpelled_ivar_slots\[\] = \{\n(.*?)\n\};/m, 1].to_s
     check.call('a name a native source spells (@a) stays a :value slot, not the typed slot it would otherwise be',
                spelled_fields.include?('mrb_value ivar_a;') && !spelled_fields.include?('mrb_int ivar_a;') &&
-                 spelled_slots.include?('{ "@a", offsetof(TrSpelled_ivars, ivar_a), MRB_DATA_IVAR_VALUE }'))
+                 spelled_slots.include?('MRB_DATA_IVAR_ENTRY(a, offsetof(TrSpelled_ivars, ivar_a), MRB_DATA_IVAR_VALUE)'))
   end
 
   core = runtime.core
