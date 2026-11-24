@@ -87,6 +87,59 @@ suite.compile(TWICE) do |ireps, root|
               twice.map { |u| u[:name] }.sort == %w[Router_0 Router_1])
 end
 
+# A literal longer than mrbc's register window is ARRAY then ARYPUSH chunks. A nested body refusing ARYPUSH refused the
+# whole top-level unit, and a VM-free build, which loads no mrblib, then never ran it (VM_FREE_UNIT_REFUSED).
+LONG_LITERAL = <<~RUBY
+  module Outer
+    module Inner
+      TABLE = [#{(1..100).to_a.join(', ')}].freeze
+    end
+    AFTER = 1
+  end
+RUBY
+
+suite.compile(LONG_LITERAL) do |ireps, root|
+  gen = CodeGen.new(ireps, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  code = gen.compile_top_class_units(ireps.fetch(root)).find { |unit| unit[:path] == 'Outer' }.to_h[:code].to_s
+  suite.check('a literal past the register window (ARRAY then ARYPUSH) compiles in a nested body',
+              code.include?('bc2cpp_class_body_Outer__Inner_0') && code.include?('mrb_ary_push(M, '))
+end
+
+# A body the unit compiler refuses (a branch): the VM runs it in a VM build, and a VM-free build stops.
+REFUSED = <<~'RUBY'
+  module Kept
+    K = 1
+  end
+  module Refused
+    module Inner
+      LIMIT = 3
+      WIDE = 1 if LIMIT > 2
+    end
+  end
+RUBY
+
+suite.compile(REFUSED) do |ireps, root|
+  gen = CodeGen.new(ireps, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  saved = ENV['BC2CPP_VM_FREE']
+  begin
+    ENV['BC2CPP_VM_FREE'] = '0'
+    paths = gen.compile_top_class_units(ireps.fetch(root)).map { |unit| unit[:path] }
+    suite.check('a VM build leaves a refused body to the VM and keeps the others', paths == %w[Kept])
+    ENV['BC2CPP_VM_FREE'] = '1'
+    raised = begin
+      gen.compile_top_class_units(ireps.fetch(root))
+      nil
+    rescue RuntimeError => e
+      e.message
+    end
+    suite.check('VM_FREE_UNIT_REFUSED: a VM-free build stops on a refused top-level body, naming it',
+                raised.to_s.start_with?('VM_FREE_UNIT_REFUSED') && raised.to_s.include?('  Refused (') &&
+                !raised.to_s.include?('Kept'))
+  ensure
+    ENV['BC2CPP_VM_FREE'] = saved
+  end
+end
+
 # A constant built by a no-argument send: GETCONST Object then SEND0 :new, as core Enumerable's `NONE = Object.new`.
 SEND0 = <<~'RUBY'
   module Sent

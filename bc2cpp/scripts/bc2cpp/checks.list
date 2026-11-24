@@ -152,6 +152,7 @@ ruby scripts/bc2cpp/block_self_method_boundary_check.rb
 ruby scripts/bc2cpp/helper_owner_call_check.rb
 ruby scripts/bc2cpp/owner_lookup_shapes_check.rb
 ruby scripts/bc2cpp/frozen_literal_persist_check.rb
+ruby scripts/bc2cpp/frozen_slot_check.rb
 ruby scripts/bc2cpp/ir_argument_types_check.rb
 ruby scripts/bc2cpp/shared_generation_check.rb
 ruby scripts/bc2cpp/define_method_check.rb

@@ -195,6 +195,11 @@ module BytecodeIR
       when :GETMCNST then (name = insn.mcnst_name) && [:alias, name].freeze
       when *ARITH_OPS then policy.operators_safe ? arith_node(irep, index, insn, policy, depth) : nil
       when :GETIDX then policy.hash_lookup_safe ? hash_lookup_node(irep, index, insn, policy, depth) : nil
+      when :ARYPUSH
+        # mrbc builds a literal longer than its register window as ARRAY then ARYPUSH chunks; the push appends in
+        # place, so the binding is still the Array the literal made.
+        receiver = alternatives(irep, index, insn.reg, policy, depth: depth + 1)
+        receiver&.all? { |node| node == [:cls, :Array] } ? [:cls, :Array].freeze : nil
       when :SEND0
         # Object#freeze answers its receiver, for the classes whose freeze is stock (freeze_classes; freeze_safe is
         # the Integer case). The node carries the classes it may answer for, and node_classes checks the receiver.
