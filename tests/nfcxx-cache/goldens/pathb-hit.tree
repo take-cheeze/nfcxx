@@ -1,8 +1,0 @@
-D ./cache
-D ./cache/objects
-D ./cache/objects/KEY
-F ./cache/objects/KEY/obj 5ebcaf131c76b59fee9f5ab9f558a1d70a9a200fc5d7b92ab133c3d0dfa9482e
-F ./local.h 1940772be4d8471c268914889698bbd1047323c154b045953350edd07bca3abe
-F ./main.cpp a20b5f4f20bd8a90384bf640540c5bf5f3cccb781a0ca2cb0c953ff6fff97946
-F ./main.o 5ebcaf131c76b59fee9f5ab9f558a1d70a9a200fc5d7b92ab133c3d0dfa9482e
-F ./main_bad.cpp 304e717138d83abbe0e1923925a8d5b93664f8a956b9cb037d1d8f33d1388161

@@ -1,3 +1,0 @@
-RUN ruby ROOT/scripts/nfcxx-cache-io.rb remote-get KEY SANDBOX/cache/objects/KEY
-RUN build main.o
-RUN ruby ROOT/scripts/nfcxx-cache-io.rb remote-put KEY SANDBOX/cache/objects/KEY
