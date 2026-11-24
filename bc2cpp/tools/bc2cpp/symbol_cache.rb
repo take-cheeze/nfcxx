@@ -557,8 +557,8 @@ BC2CPP_SHARD_ONE_BODY static mrb_value bc2cpp_owner_call_argv(mrb_state* M, mrb_
   # same in every gem and CROSS_GEM_SHARE keeps one copy. BC2CPP_HELPER_PROGRAM_SITES=0 (or OWNER_CALL_CORE off) keeps
   # the per-gem forms.
   PROGRAM_STATE_HEADER = File.expand_path('runtime/bc2cpp_program_state.hxx', __dir__)
-  # The fiber runtime's definer test is one per gem (bc2cpp_fiber_definer_p), so a site of a name it defines stays
-  # per gem; a program-wide site runs the core with no definer.
+  # A gem's owner site asks its fiber runtime's definer test (bc2cpp_fiber_definer_p, one per program under
+  # FIBER_SHARE), so a site of a name it defines stays per gem; a program-wide site runs the core with no definer.
   FIBER_RUNTIME_NAMES = %w[raise new yield resume transfer alive? current].freeze
 
   def program_sites?(env = ENV)

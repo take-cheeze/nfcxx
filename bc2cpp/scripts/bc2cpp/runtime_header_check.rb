@@ -371,6 +371,82 @@ Dir.mktmpdir('bc2cpp-cross-gem') do |dir|
   end
 end
 
+# FIBER_SHARE: the Fiber runtime's items (named as in tools/bc2cpp/runtime) move with their state and addresses, one per
+# program; one naming a gem's own state stays; a self-guarded #if region's names come back after its include.
+puts '-- cross-gem share: the Fiber runtime'
+FS_TAIL = <<~'CPP'
+  static int counter = 0;
+  #ifndef BC2CPP_LIT_SYM
+  struct Bc2cppLitSymCache { int sym; };
+  static int bc2cpp_lit_sym(Bc2cppLitSymCache& c, int v) { return c.sym ? c.sym : (c.sym = v); }
+  #define BC2CPP_LIT_SYM(v) ([]() -> int { static Bc2cppLitSymCache bc2cpp_lit_cache = {0}; return bc2cpp_lit_sym(bc2cpp_lit_cache, (v)); }())
+  #endif
+  static int bc2cpp_running_fibers() { static int n = 0; return ++n; }
+  static int bc2cpp_fiber_m_alive_p(int x) { return bc2cpp_running_fibers() + x + BC2CPP_LIT_SYM(1); }
+  static int (*bc2cpp_fiber_orig_alive_p)(int) = nullptr;
+  static const void* bc2cpp_fiber_definer_p() { return reinterpret_cast<const void*>(&bc2cpp_fiber_m_alive_p); }
+  static int bc2cpp_fiber_own_p(int x) { return ++counter + x; }
+CPP
+def fs_gem(gem, dir)
+  text = "#{RuntimeHeader::BEGIN_MARK}#{RuntimeHeader::END_MARK}#{FS_TAIL}" \
+         "#{ShardOutput.unit_mark('A')}int #{gem}_run() { bc2cpp_fiber_orig_alive_p = &bc2cpp_fiber_m_alive_p; " \
+         "return bc2cpp_fiber_orig_alive_p(0) * 100 + bc2cpp_fiber_own_p(0) * 10 + BC2CPP_LIT_SYM(2); }\n" \
+         "const void* #{gem}_addr() { return bc2cpp_fiber_definer_p(); }\n#{ShardOutput::HOOKS_MARK}"
+  CrossGemShare.rewrite(RuntimeHeader.rewrite(text, dir, tail_mark: true), dir)
+end
+Dir.mktmpdir('bc2cpp-cgs-fiber') do |dir|
+  a = fs_gem('ga', dir)
+  b = fs_gem('gb', dir)
+  moved = Dir[File.join(dir, 'bc2cpp_cs_*.hxx')].map { |h| File.read(h) }.join
+  suite.check('the runtime moves with its state, an address-taken function and a mutable variable, inline',
+              moved.include?('inline int bc2cpp_running_fibers()') && moved.include?('inline int bc2cpp_fiber_m_alive_p(int x)') &&
+              moved.include?('inline int (*bc2cpp_fiber_orig_alive_p)(int) = nullptr;') && !a.include?('int bc2cpp_running_fibers()'))
+  suite.check("a runtime item naming the gem's own state stays", a.include?('static int bc2cpp_fiber_own_p(int x)') && !moved.include?('bc2cpp_fiber_own_p'))
+  suite.check("a self-guarded region's names come back under a marker set before its include",
+              a.match?(/^#ifndef BC2CPP_LIT_SYM\n#define (BC2CPP_CGS_TAKEN_\w+) 1\n#endif\n#define BC2CPP_CROSS_GEM_PART \d+\n#include "[^"]+"\n#undef BC2CPP_CROSS_GEM_PART\n#ifdef \1\nusing bc2cpp_cs_\h{16}::Bc2cppLitSymCache;\n#endif\n#ifdef \1\nusing bc2cpp_cs_\h{16}::bc2cpp_lit_sym;\n#endif\n#undef \1\n/))
+  ENV['BC2CPP_FIBER_SHARE'] = '0'
+  Dir.mktmpdir('bc2cpp-cgs-fiber-off') do |off_dir|
+    suite.check('BC2CPP_FIBER_SHARE=0 keeps the runtime in the gem', fs_gem('ga', off_dir).include?('static int bc2cpp_running_fibers()'))
+  end
+  ENV.delete('BC2CPP_FIBER_SHARE')
+  nm = ENV.fetch('NM', 'nm')
+  if Bc2cppCxx.executable?(Bc2cppCxx.compiler.first) && system("#{nm} --version > /dev/null 2>&1")
+    ENV['BC2CPP_SHARD_MIN_BYTES'] = '1'
+    sources = []
+    { 'ga' => a, 'gb' => b }.each do |gem, text|
+      main, shards = ShardOutput.split(text, gem, 2)
+      File.write(File.join(dir, "#{gem}_gen.cpp"), main)
+      sources << File.join(dir, "#{gem}_gen.cpp")
+      shards.each_with_index do |t, i|
+        File.write(ShardOutput.shard_path(dir, gem, i + 1), t)
+        sources << ShardOutput.shard_path(dir, gem, i + 1)
+      end
+    end
+    ENV.delete('BC2CPP_SHARD_MIN_BYTES')
+    File.write(File.join(dir, 'main.cpp'), "#include <cstdio>\nint ga_run(); int gb_run(); const void* ga_addr(); const void* gb_addr();\n" \
+                                           "int main() { int x = ga_run(); int y = gb_run(); std::printf(\"%d %d %d\\n\", x, y, ga_addr() == gb_addr()); }\n")
+    binary = File.join(dir, 'fs')
+    [%w[-O2], %w[-Os]].each do |opt|
+      _out, err, status = Bc2cppCxx.capture3('-std=c++17', *opt, '-Wall', '-Werror', *sources, File.join(dir, 'main.cpp'), '-o', binary)
+      suite.check("two gems sharing the runtime compile warning-free and link (#{opt.first})", status.success?)
+      puts err.lines.first(20).join unless status.success?
+      next unless status.success?
+
+      out, = Open3.capture2(binary)
+      # run = alive_p (running_fibers + 0 + lit 1) * 100 + own_p * 10 + lit 2: the runtime's counter is one for the
+      # program (2, then 3) and its literal cache one per site; own_p's counter is each gem's (1, 1).
+      suite.check("the runtime's state is one per program, the gem's per gem, one address (#{opt.first}: #{out.strip})",
+                  out == "212 312 1\n")
+      syms, = Open3.capture2(nm, '-C', '--defined-only', binary)
+      defs = ->(name) { syms.lines.grep_v(/\[clone /).select { |l| l.match?(/\s(?:\S+::)?#{name}\(/) && !l.include?('{lambda') } }
+      suite.check("nm: the runtime state function is defined once, in no gem namespace (#{opt.first})",
+                  defs.call('bc2cpp_running_fibers').size <= 1 && defs.call('bc2cpp_running_fibers').none? { |l| l.include?('bc2cpp_shard_') })
+    end
+  else
+    puts '  SKIP: no C++ compiler or nm'
+  end
+end
+
 # METHOD_PROTOTYPE: a helper calling the unit's own compiled method, and one testing a weak `extern "C"` function's
 # address, move; a gem that only declares the method keeps its copy.
 puts '-- cross-gem share: method prototypes'
