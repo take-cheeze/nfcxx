@@ -117,6 +117,7 @@ end
 class Fiber
   def alive?: () -> bool
   def initialize: (*untyped) -> untyped
+  def inspect: () -> String
   def resume: (*untyped) -> untyped
   def to_s: () -> String
   def transfer: (*untyped) -> untyped
@@ -210,6 +211,7 @@ class IO
   def close_on_exec?: () -> bool
   def close_write: () -> nil
   def closed?: () -> bool
+  def eof: () -> bool
   def eof?: () -> bool
   def fileno: () -> Integer
   def flush: () -> untyped
@@ -237,6 +239,9 @@ class IO
   def sysread: (Numeric, ?String) -> untyped
   def sysseek: (Numeric, ?Numeric) -> Integer
   def syswrite: (String) -> Integer
+  def tell: () -> Integer
+  def to_i: () -> Integer
+  def tty?: () -> bool
   def ungetbyte: (untyped) -> nil
   def ungetc: (String) -> nil
   def write: (*untyped) -> Integer

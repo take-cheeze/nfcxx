@@ -1552,7 +1552,9 @@ module StaticDispatchRegistrations
                                                       diagnostic_literals: !symbol_lookups.nil?,
                                                       enumerator_free: -> { proof.call.holds },
                                                       names: core_names || Set.new)
-    entries = CoreNativeCandidates.entries(native.select { |p| p.start_with?("#{third}mruby/") },
+    # The core's ROM tables: mruby's own and those of the external core gems (mruby-stringio), as build_config.rb reads.
+    core_dirs = ['mruby', *BC2CPP_EXTERNAL_MRBLIB_GEMS].map { |g| "#{third}#{g}/" }
+    entries = CoreNativeCandidates.entries(native.select { |p| p.start_with?(*core_dirs) },
                                                    operator_names: !proven.empty?)
     private_ruby = private_ruby_candidates(core, ireps, native, generated, entries, map, engine_registry, engine_superclass_of,
                                            engine_tuple, symbol_lookups, repo_root)
