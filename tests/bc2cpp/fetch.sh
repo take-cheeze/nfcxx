@@ -8,7 +8,7 @@
 #   BC2CPP_WORLD_FULL=1     every submodule the fixture checks read (the world's scripts/checkout-submodules.bash),
 #                           not only the ones the optcarrot world needs
 # Bumping the pin is a one-line change here; the mruby fork commit (3rd/mruby) comes with it.
-rpg_pin=2451c8509f7f7ada06060c5e311849b46a2a8530 # take-cheeze/rpg-maker-clone claude/mruby-float-fix (the frame-free-flag pin plus the 3rd/mruby bump to the fork's full CRuby-compat port, 7f31655)
+rpg_pin=e4608fd71e3f2da1d62a9697ff5a48ca6966ffd8 # take-cheeze/rpg-maker-clone claude/class-reach-world-8699bd (the mruby-float-fix pin 2451c85 plus the policy entry of proc_spec_lazy_check)
 rpg_url=https://github.com/take-cheeze/rpg-maker-clone
 # The submodules the optcarrot world reads: the mruby fork, the gems of the probe's closed world and optcarrot itself.
 bc2cpp_submodules=(3rd/mruby 3rd/mruby-onig-regexp 3rd/mruby-stringio 3rd/mruby-marshal 3rd/optcarrot)
