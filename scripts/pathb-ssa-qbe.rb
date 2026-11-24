@@ -967,6 +967,8 @@ module Qbe
         @lines << "  #{name} =#{Qbe.kp} alloc8 8"
         @sp_objs << [name, 8 + Qbe::SP_NOPAD] if Qbe.safe
       end
+      # The scratch word of the inline __atomic_exchange_N loops (atomic_xchg_lines): one per function, as they never nest.
+      @lines << "  %axs =l alloc8 8" if xchg_inline? && @blocks.any? { |b| b[2..].any? { |it| contains_xchg?(it) } }
       @share = share_slots
       group = {}   # a representative's index => [size, align] of its group's object: the largest of its members
       @share.each do |m, r|
@@ -2013,6 +2015,10 @@ end
           atomic_cas_lines(fresh, item[1])
           return
         end
+        if atomic_xchg?(item[1])
+          atomic_xchg_lines(fresh, item[1])
+          return
+        end
 
         sret, dest, sym, args = call_parts(item[1])
         if sret.nil? || sret.shape == "empty"
@@ -2192,6 +2198,8 @@ end
           atomic_fetch_lines(dst, c, rv)
         elsif atomic_cas?(rv)
           atomic_cas_lines(dst, rv)
+        elsif atomic_xchg?(rv)
+          atomic_xchg_lines(dst, rv)
         elsif Qbe.f16?(rv[1])
           # The result is the low 16 bits of xmm0.
           raw = fresh
@@ -3096,8 +3104,10 @@ end
       return false unless atomic_fetch_kind(c)
       order = c[5]
       # Any memory order: a locked xadd is a full barrier, so it satisfies relaxed, acquire, release, acq_rel and seq_cst alike
-      # (libstdc++'s shared_ptr counts use acq_rel, 4).
-      head(order) == "const" && %w[0 1 2 3 4 5].include?(order[2].to_s)
+      # (libstdc++'s shared_ptr counts use acq_rel, 4). A runtime order (an out-of-line std::atomic_fetch_add_explicit, whose
+      # order is a parameter) is the same, provided its expression holds no call: the order is not evaluated.
+      return !contains_call?(order) unless head(order) == "const"
+      %w[0 1 2 3 4 5].include?(order[2].to_s)
     end
 
     # A call of __atomic_*_1 or __atomic_*_2 (fetch, exchange, compare-exchange): its result is an integer of 1 or 2 bytes.
@@ -3192,7 +3202,8 @@ end
       return false unless name.start_with?("__atomic_compare_exchange_") && CAS_SIZES.include?(name[-1])
       return false unless name.length == "__atomic_compare_exchange_".length + 1
 
-      [7, 8].all? { |i| head(c[i]) == "const" && %w[0 1 2 3 4 5].include?(c[i][2].to_s) }
+      # The orders may be runtime values (as for fetch): then they must hold no call, as they are not evaluated.
+      [7, 8].all? { |i| head(c[i]) == "const" ? %w[0 1 2 3 4 5].include?(c[i][2].to_s) : !contains_call?(c[i]) }
     end
 
     # The expected value is loaded, the exchange is made on the object, and the old value is stored back to the expected
@@ -3211,6 +3222,70 @@ end
       @lines << "  #{old} =#{k} cmpxchg1 #{h}, #{des}"
       @lines << "  store#{k} #{old}, #{exp}"
       @lines << "  #{dst} =w ceq#{k} #{old}, #{ev}"
+    end
+
+    # __atomic_exchange_4 and __atomic_exchange_8 (any order: every locked compare-exchange is a full barrier, so the order is not
+    # needed). QBE has no public exchange op (its swap is internal to the register allocator), so the inline form is a loop of
+    # cmpxchg0/cmpxchg1 (atomic_xchg_lines). Only without --safe and --asan, which check the calls. The order is not evaluated,
+    # so it must hold no call.
+    XCHG_SIZES = %w[4 8].freeze
+
+    def xchg_inline?
+      ATOMIC_XADD && Qbe.cmpxchg && !Qbe.safe && !Qbe.asan
+    end
+
+    # The size (4 or 8) of a __atomic_exchange_N call that the loop lowers, or nil.
+    def xchg_size(c)
+      return nil unless xchg_inline? && c.length == 6
+      f = c[2]
+      return nil unless f.is_a?(Ref) && f.sigil == "&"
+      name = f.raw.delete('"')
+      return nil unless name.start_with?("__atomic_exchange_") && name.length == "__atomic_exchange_".length + 1
+      return nil unless XCHG_SIZES.include?(name[-1])
+      return nil if contains_call?(c[5])
+
+      name[-1]
+    end
+
+    def atomic_xchg?(c) = !xchg_size(c).nil?
+
+    # Whether a form holds an exchange this lowering takes (the scratch slot is needed).
+    def contains_xchg?(x)
+      return false unless x.is_a?(Array)
+      return true if head(x) == "call" && !xchg_size(x).nil?
+
+      x.any? { |y| contains_xchg?(y) }
+    end
+
+    # The expected value is in the scratch word %axs. The loop reads it, compare-exchanges the object (expected value, then the
+    # desired one), and falls out when the object held the expected value: then the old value is the result, which the word
+    # holds. On failure the word takes what the object held, and the loop retries. The first value is the object's own, read
+    # once before the loop, so the first attempt usually succeeds.
+    def atomic_xchg_lines(dst, c)
+      size = xchg_size(c)
+      k = size == "4" ? "w" : "l"
+      addr = op(c[3])
+      des = op(c[4])
+      n = (@temps += 1)
+      init = fresh
+      @lines << "  #{init} =#{k} load#{k} #{addr}"
+      @lines << "  store#{k} #{init}, %axs"
+      @lines << "@axh#{n}"
+      old = fresh
+      @lines << "  #{old} =#{k} load#{k} %axs"
+      h = fresh
+      @lines << "  #{h} =#{k} cmpxchg0 #{addr}, #{old}"
+      got = fresh
+      @lines << "  #{got} =#{k} cmpxchg1 #{h}, #{des}"
+      same = fresh
+      @lines << "  #{same} =w ceq#{k} #{got}, #{old}"
+      @lines << "  jnz #{same}, @axd#{n}, @axr#{n}"
+      @lines << "@axr#{n}"
+      @lines << "  store#{k} #{got}, %axs"
+      @lines << "  jmp @axh#{n}"
+      @lines << "@axd#{n}"
+      @label = "axd#{n}"
+      @lines << "  #{dst} =#{k} load#{k} %axs"
     end
 
     def atomic_fetch_lines(dst, cls, c)
