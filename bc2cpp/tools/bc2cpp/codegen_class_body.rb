@@ -73,6 +73,14 @@ class CodeGen
   end
 
   def compile_class_body_unit(irep, owner)
+    outer_fn = @unit_fn
+    @unit_fn = "bc2cpp_class_body_#{sanitize(owner)}#{@unit_tag}"
+    compile_class_body_unit_text(irep, owner)
+  ensure
+    @unit_fn = outer_fn
+  end
+
+  def compile_class_body_unit_text(irep, owner)
     program = BytecodeIR.for(irep)
     check_const_reads(program, owner)
     omitted = unregistered_keys
@@ -191,6 +199,10 @@ class CodeGen
         overridden = @registry.fetch(insn.sym.to_s, []).any?(&:irep)
         if !overridden && (alias_line = class_body_alias_method(irep, idx, insn, registered))
           lines << alias_line
+          next
+        end
+        if !overridden && (attr_line = rom_attr_line(irep, idx, insn, owner))
+          lines << attr_line
           next
         end
         if !overridden && (attr_line = left_out_attr_line(irep, idx, insn, owner))
@@ -600,6 +612,38 @@ class CodeGen
     line << "  r#{insn.reg} = mrb_nil_value();\n"
   end
 
+  # ROM_CLASS_BODY_DEFS for an attr_* send with literal names: one bc2cpp_mod_attr call per pass, each carrying a site
+  # marker, so rom_class_body_defs leaves out the accessors the owner's table holds as public rows (the install there
+  # replaces the proc by the row, as the registration's install did). The names LEFT_OUT_ATTR removes are not defined.
+  def rom_attr_line(irep, idx, insn, owner)
+    passes = ATTR_SEND_PASSES[insn.sym.to_s]
+    return nil unless passes && rom_class_body_defs? && @unit_fn
+    return nil unless insn.op == :SSEND0 || (insn.op == :SSEND && insn.plain_fixed_argc?)
+
+    names = (1..(insn.op == :SSEND0 ? 0 : insn.argc.to_i)).map do |k|
+      irep.walk_dominating_writers(idx - 1, insn.reg + k, follow_moves: true) { |w| w.sym.to_s if w.op == :LOADSYM }
+    end
+    return nil unless names.all? { |n| n&.match?(/\A[A-Za-z_][A-Za-z0-9_]*\z/) }
+
+    removed = ENV['BC2CPP_LEFT_OUT_ATTR'] == '0' ? Set.new : (@registration_removed || Set.new)
+    line = +''
+    passes.each_with_index do |on, pass|
+      next unless on
+
+      kept = names.each_with_index.filter_map do |n, k|
+        method = pass.zero? ? n : "#{n}="
+        [method, "r#{insn.reg + 1 + k}"] unless removed.include?("#{owner}##{method}")
+      end
+      next if kept.empty?
+
+      @rom_def_sites ||= []
+      @rom_def_sites << { attr: true, owner: owner, fn: @unit_fn, cls: 'mrb_class_ptr(self)', pass: pass, names: kept }
+      line << "  (void)bc2cpp_mod_attr(M, self, #{pass.zero?}, #{pass == 1}, {#{kept.map(&:last).join(', ')}}); " \
+              "//@@ROM_DEF #{@rom_def_sites.size - 1}@@\n"
+    end
+    line << "  r#{insn.reg} = mrb_nil_value();\n"
+  end
+
   # The body of the `def` a DEF installs: the child of the METHOD built into R[a+1] just before it. Nil when there is none.
   def def_method_child(insn, program, idx, irep)
     method = (idx - 1).downto(idx - 4).map { |j| program.source_at(j) }.find { |m| m&.op == :METHOD && m.reg == insn.reg + 1 }
@@ -625,7 +669,7 @@ class CodeGen
     define = { public: 'mrb_define_method', private: 'mrb_define_private_method' }[compiled[:visibility]]
     return nil unless define
 
-    "  #{define}(M, mrb_class_ptr(r#{insn.reg}), #{c_string_literal(compiled[:name])}, #{compiled[:entry]}, #{compiled[:aspec]});\n"
+    rom_def_line(compiled, define, "mrb_class_ptr(r#{insn.reg})")
   end
 
   def class_body_registration(insn, irep, owner)
@@ -655,8 +699,101 @@ class CodeGen
            end
     return class_body_refusal(insn, compiled, child, "visibility #{compiled[:visibility].inspect}") unless call
 
-    "  #{call}(M, mrb_class_ptr(self), #{c_string_literal(compiled[:name])}, #{compiled[:entry]}, #{compiled[:aspec]});\n"
+    rom_def_line(compiled, call, 'mrb_class_ptr(self)')
   end
+
+  # ROM_CLASS_BODY_DEFS (with ROM_METHOD_TABLES; BC2CPP_ROM_CLASS_BODY_DEFS=0 is off): a unit's registration of an entry
+  # its owner's ROM table holds becomes the install of that table, at the first such def of the unit's function, so
+  # the body makes no heap entry. The line carries a site marker that rom_class_body_defs resolves once the tables exist.
+  def rom_class_body_defs?
+    rom_method_tables? && ENV['BC2CPP_ROM_CLASS_BODY_DEFS'] != '0'
+  end
+
+  def rom_def_line(compiled, define, cls)
+    line = "  #{define}(M, #{cls}, #{c_string_literal(compiled[:name])}, #{compiled[:entry]}, #{compiled[:aspec]});"
+    return "#{line}\n" unless rom_class_body_defs? && @unit_fn
+
+    @rom_def_sites ||= []
+    @rom_def_sites << { owner: compiled[:owner], name: compiled[:name], entry: compiled[:entry], cls: cls, fn: @unit_fn,
+                        singleton: define == 'mrb_define_class_method',
+                        private: define == 'mrb_define_private_method' || ROM_FORCED_PRIVATE.include?(compiled[:name]) }
+    "#{line} //@@ROM_DEF #{@rom_def_sites.size - 1}@@\n"
+  end
+
+  ROM_DEF_SITE = %r{^(.*) //@@ROM_DEF (\d+)@@\n}
+
+  # The unit text with each ROM_DEF site resolved: a def whose row (same entry and visibility) is in its owner's table
+  # is the table's install (once per function, class and owner) and, in a verify build, a check of what the install
+  # gives; any other keeps its registration call.
+  def rom_class_body_defs(code)
+    return code unless code.include?('//@@ROM_DEF ')
+
+    installed = Set.new
+    code.gsub(ROM_DEF_SITE) do
+      line = Regexp.last_match(1)
+      site = @rom_def_sites.fetch(Regexp.last_match(2).to_i)
+      next rom_attr_site(site, line, installed) if site[:attr]
+
+      rom = @rom_tables&.[](site[:owner])
+      row = rom && rom[:rows][site[:name]]
+      next "#{line}\n" unless row && row[:entry] == site[:entry] && row[:private] == site[:private]
+
+      table = rom[:table]
+      out = +''
+      out << rom_install_line(site, table) if installed.add?([site[:fn], site[:cls], site[:owner]])
+      out << "  // #{site[:owner]}##{site[:name]}: a row of #{table} (ROM_CLASS_BODY_DEFS)\n"
+      # A constructor row (CTOR_ROWS) is not what a lookup by name finds, as it was not after the registration's install.
+      next out if row[:ctor]
+
+      out << "#ifdef BC2CPP_UNREGISTERED_VERIFY\n"
+      out << "  bc2cpp_rom_def_check(M, #{site[:cls]}, #{site[:singleton]}, #{c_string_literal(site[:name])}, " \
+             "#{site[:entry]}, #{site[:private]});\n"
+      out << "#endif\n"
+    end
+  end
+
+  # An attr pass with the accessors the owner's table holds as public rows left out (attr_* defines public methods).
+  def rom_attr_site(site, line, installed)
+    rom = @rom_tables&.[](site[:owner])
+    rows, kept = site[:names].partition { |method, _| rom && (row = rom[:rows][method]) && !row[:private] }
+    return "#{line}\n" if rows.empty?
+
+    out = +''
+    out << rom_install_line(site, rom[:table]) if installed.add?([site[:fn], site[:cls], site[:owner]])
+    out << "  // #{site[:owner]} #{rows.map(&:first).join(' ')}: rows of #{rom[:table]} (ROM_CLASS_BODY_DEFS)\n"
+    return out if kept.empty?
+
+    out << "  (void)bc2cpp_mod_attr(M, self, #{site[:pass].zero?}, #{site[:pass] == 1}, {#{kept.map(&:last).join(', ')}});\n"
+  end
+
+  def rom_install_line(site, table)
+    "  bc2cpp_mt_install(M, #{site[:cls]}, #{table}, (int)(sizeof(#{table}) / sizeof(#{table}[0])), #{!!site[:singleton]});\n"
+  end
+
+  # ROM_CLASS_BODY_DEFS' verify (BC2CPP_UNREGISTERED_VERIFY): the class finds, as its own method, the function and
+  # visibility the registration call it replaced would have defined.
+  ROM_DEF_CHECK_HELPER = <<~CPP
+    #ifdef BC2CPP_UNREGISTERED_VERIFY
+    #include <stdio.h>
+    #include <stdlib.h>
+    #include <mruby/proc.h>
+    [[maybe_unused]] static void bc2cpp_rom_def_check(mrb_state* M, struct RClass* c, bool singleton, const char* name,
+                                                      mrb_func_t func, bool priv) {
+      if (singleton) c = mrb_class_ptr(mrb_singleton_class(M, mrb_obj_value(c)));
+      struct RClass* owner = c;
+      mrb_method_t m = mrb_method_search_vm(M, &owner, mrb_intern_cstr(M, name));
+      MRB_CLASS_ORIGIN(c);
+      bool ok = !MRB_METHOD_UNDEF_P(m) && owner == c && MRB_METHOD_FUNC_P(m) && MRB_METHOD_FUNC(m) == func &&
+                (MRB_METHOD_VISIBILITY(m) == MRB_METHOD_PRIVATE_FL) == priv;
+      if (!ok) {
+        fprintf(stderr, "bc2cpp: ROM_CLASS_BODY_DEFS: %s#%s is not the row its class body defined\\n",
+                mrb_class_name(M, c), name);
+        fflush(stderr);
+        abort();
+      }
+    }
+    #endif
+  CPP
 
   # Why a TDEF or SDEF of a unit registers nothing (nil): the method's compiled entry is missing or refused, with the
   # `#error` line its refusal wrote. Recorded for BC2CPP_DUMP_UNITS.

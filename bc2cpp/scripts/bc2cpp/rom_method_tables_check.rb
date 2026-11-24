@@ -6,6 +6,7 @@
 #   static: no owner registration in the generated sources defines a presym-spellable name through mrb_define_*method,
 #     or leaves one out through a bc2cpp_left_out call instead of a walked LEFT_OUT_TABLE stream,
 #     each file installs the fiber runtime's tables, and every bc2cpp_mt_install names a table the file defines;
+#     ROM_CLASS_BODY_DEFS: no class unit registers through mrb_define_*method an entry a ROM table holds;
 #     CONST_PATH_WALK: no registration or direct-construct capture chains mrb_const_get, and each path it walks is a
 #     row its own function defines;
 #   --host TRACE_HOST GAME_DIR: after boot no heap entry duplicates a ROM entry below it and none is a C function of the
@@ -23,6 +24,9 @@ abort "rom_method_tables: no generated sources under #{dir}/mrbgems" if sources.
 
 DEFINE = /\b(?:mrb_define_(?:private_|class_)?method|bc2cpp_define_private_class_method)\(M, bc2cpp_owner_reg_\w+, "((?:[^"\\]|\\.)*)"/
 LEFT_OUT = /\bbc2cpp_left_out\(M, \w+, "((?:[^"\\]|\\.)*)"/
+# A class unit's registration (codegen_class_body.rb): the class is the unit's self or a register.
+UNIT_DEFINE = /\bmrb_define_(?:private_|class_)?method\(M, mrb_class_ptr\((?:self|r\d+)\), "(?:[^"\\]|\\.)*", (\w+), /
+ROW_ENTRY = /\bMRB_MT_ENTRY(?:_CTOR_)?\((\w+), /
 # BC2CPP_SHARED_FN: a sharded gem's stateless prelude helper (shard_output.rb, SHARED_HELPERS).
 REGISTRATION = /^(?:\[\[maybe_unused\]\] )?(?:static|inline|BC2CPP_SHARED_FN) void bc2cpp_register_(?:core|program)_owner_methods\(\[\[maybe_unused\]\] mrb_state\* M\) \{\n(.*?)^\}/m
 # DIRECT_CONSTRUCT_ACCESSORS' capture function, which resolves its classes the way the registrations do.
@@ -41,6 +45,12 @@ sources.each do |path|
   streams = src.scan(/^(?:static|inline) constexpr uint16_t (bc2cpp_left_out_\w+)\[\] = \{$/).flatten.to_set
   walked += streams.size
   tables += defined.size
+  if ENV['BC2CPP_ROM_CLASS_BODY_DEFS'] != '0'
+    rows = src.scan(ROW_ENTRY).flatten.to_set
+    src.scan(UNIT_DEFINE).flatten.uniq.each do |entry|
+      failures << "#{name}: a class unit registers #{entry}, a ROM table row" if rows.include?(entry)
+    end
+  end
   bodies = src.scan(REGISTRATION).flatten
   failures << "#{name}: no registration functions" if bodies.empty?
   if ENV['BC2CPP_CONST_PATH_WALK'] != '0'

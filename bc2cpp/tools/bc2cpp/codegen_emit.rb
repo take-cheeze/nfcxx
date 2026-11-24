@@ -533,6 +533,7 @@ class CodeGen
   def rom_method_table((tables, part), owner, var, singleton, rows)
     rows = rows.reverse.uniq { |row| row[:name] }.reverse
     table = "bc2cpp_mt_#{part}_#{sanitize(owner)}"
+    record_rom_table(owner, table, rows)
     tables << "static const mrb_mt_entry #{table}[] = {\n"
     rows.each do |row|
       flags = row[:aspec].to_s
@@ -544,6 +545,15 @@ class CodeGen
     end
     tables << "};\n"
     "  bc2cpp_mt_install(M, #{var}, #{table}, (int)(sizeof(#{table}) / sizeof(#{table}[0])), #{singleton});\n"
+  end
+
+  # The owner's table and its rows by name, with the visibility each row gives (ROM_CLASS_BODY_DEFS reads them).
+  def record_rom_table(owner, table, rows)
+    by_name = rows.to_h do |row|
+      [row[:name], { entry: row[:entry], private: !!row[:private] || ROM_FORCED_PRIVATE.include?(row[:name]),
+                     ctor: !!row[:ctor] }]
+    end
+    (@rom_tables ||= {})[owner] = { table: table, rows: by_name }
   end
 
   # CTOR_ROWS, ENGINE_ROWS: the compiled entries this closed build keeps as rows of their table.
@@ -561,11 +571,14 @@ class CodeGen
 
   # ROM_INSTALL: chains one table into the class (its origin, as mrb_define_method_raw writes there) and drops the
   # heap top's entries of the same names (a class unit's or a native's definition), which mrb_define_method replaced.
+  # A table already in the chain (a class unit installed it, ROM_CLASS_BODY_DEFS) is not chained again.
   ROM_INSTALL_HELPER = <<~CPP
     [[maybe_unused]] static void bc2cpp_mt_install(mrb_state* M, struct RClass* c, const mrb_mt_entry* entries, int n, bool singleton) {
       if (singleton) c = mrb_class_ptr(mrb_singleton_class(M, mrb_obj_value(c)));
       MRB_CLASS_ORIGIN(c);
-      mrb_mt_init_rom(M, c, entries, n);
+      bool chained = false;
+      for (mrb_mt_tbl* t = c->mt; t && !chained; t = t->next) chained = t->ptr == entries;
+      if (!chained) mrb_mt_init_rom(M, c, entries, n);
       const int flag_bits = MRB_MT_READONLY_BIT | MRB_MT_FROZEN_BIT;
       for (mrb_mt_tbl* t = c->mt; t && t->ptr != entries; t = t->next) {
         if (t->alloc & MRB_MT_READONLY_BIT) continue;
