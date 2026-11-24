@@ -767,15 +767,19 @@ module NfcxxBody
     records.binmode
     records.write(cache_plan_records)
     records.close
-    stmts, err, st = Open3.capture3(@env, ruby_cmd, script("nfcxx-cache-check.rb"), "check", "--remote=#{v("cache_remote")}",
-                                    "--records=#{records.path}", binmode: true)
-    $stderr.write(err)
+    # the statements go to a file, so the children of the lookup (the remote tier's client) write to the driver's own standard output
+    statements = Tempfile.new("nfcxx-cache-statements")
+    statements.close
+    pid = Process.spawn(@env, ruby_cmd, script("nfcxx-cache-check.rb"), "check", "--remote=#{v("cache_remote")}",
+                        "--records=#{records.path}", "--statements=#{statements.path}")
+    Process.wait(pid)
+    code = $?.exitstatus || 1
+    stmts = File.read(statements.path)
     records.unlink
-    code = st.exitstatus || 1
-    if code == 10
-      raise Exit.new(0)
-    end
-    apply(stmts) unless stmts.to_s.empty?
+    statements.unlink
+    raise Exit.new(0) if code == 10
+    fail!("", code) unless code == 0
+    apply(stmts) unless stmts.empty?
     @cache_entry = @state_values["cache_entry"]
   end
 
