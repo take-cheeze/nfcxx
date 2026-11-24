@@ -781,7 +781,7 @@ class CodeGen
                                                       mrb_func_t func, bool priv) {
       if (singleton) c = mrb_class_ptr(mrb_singleton_class(M, mrb_obj_value(c)));
       struct RClass* owner = c;
-      mrb_method_t m = mrb_method_search_vm(M, &owner, mrb_intern_cstr(M, name));
+      mrb_method_t m = bc2cpp_find_method(M, &owner, mrb_intern_cstr(M, name));
       MRB_CLASS_ORIGIN(c);
       bool ok = !MRB_METHOD_UNDEF_P(m) && owner == c && MRB_METHOD_FUNC_P(m) && MRB_METHOD_FUNC(m) == func &&
                 (MRB_METHOD_VISIBILITY(m) == MRB_METHOD_PRIVATE_FL) == priv;
