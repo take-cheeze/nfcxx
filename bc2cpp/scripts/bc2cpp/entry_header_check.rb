@@ -14,6 +14,7 @@
 #     - a raise inside leaves the exception in M->exc and returns it, as mrb_funcall does, and does not escape, with
 #       M->jmp and the frame stack as before and one arena root (the exception);
 #     - each call leaves the arena as mrb_funcall does: its result rooted, self not;
+#     - a registered method's exit with the arena grown (CFUNC_RESULT_ROOT) keeps no root to its result;
 #       inside a protected region it propagates to that region instead;
 #     - a subclass receiver and a receiver with a singleton class take the by-name call;
 #   constructor entries (Owner.new/argc, BC2CPP_ENTRY_NEW)
@@ -196,6 +197,15 @@ Dir.mktmpdir('bc2cpp-entry-header') do |dir|
       mrb_gc_arena_restore(M, ai_loop);
       std::printf("arena tick=%d/%d label=%d/%d\\n", tick_direct, tick_funcall, label_direct, label_funcall);
 
+      // CFUNC_RESULT_ROOT: a by-name call made while the arena is grown takes the slow exit, which must not keep
+      // the result rooted afterwards.
+      for (int i = 0, n = M->gc.arena_capa + 8; i < n; i++) mrb_gc_protect(M, mrb_str_new_lit(M, "grow"));
+      mrb_gc_arena_restore(M, ai_loop);
+      mrb_value slow = mrb_funcall(M, g, "label", 0);
+      mrb_value held = mrb_gv_get(M, mrb_intern_lit(M, "$__bc2cpp_result"));
+      std::printf("slow exit label=%s held=%d\\n", mrb_string_p(slow) ? RSTRING_PTR(slow) : "?", !mrb_nil_p(held));
+      mrb_gc_arena_restore(M, ai_loop);
+
       dispatches = 0;
       ptrdiff_t ci0 = M->c->ci - M->c->cibase;
       int ai0 = mrb_gc_arena_save(M);
@@ -286,6 +296,8 @@ Dir.mktmpdir('bc2cpp-entry-header') do |dir|
              lines.include?('boom state jmp=0 ci_same=1 arena_grew=1'))
   check.call('a direct call leaves the arena as mrb_funcall does (the result rooted, self not)',
              lines.include?('arena tick=0/0 label=50/50'))
+  check.call('the grown-arena exit returns its result and keeps no global root to it',
+             lines.include?('slow exit label=n106 held=0'))
   check.call('a raise out of a cfunc frame pops that frame',
              lines.include?('bad_int state exc=ArgumentError jmp=0 ci_same=1'))
   check.call('inside a protected region the raise reaches that region',
