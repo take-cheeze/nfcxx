@@ -157,7 +157,8 @@ if [ "$got" -eq 0 ] && [ -z "$(ls -A "$tmp/cwd" | grep -E '\.(ii|ti|o)$')" ]; th
 else
   bad "compile and link leave no .ii, .ti or .o in the directory" "exit $got, $(ls -A "$tmp/cwd" | tr '\n' ' ')"
 fi
-keep_msg=$(cd "$tmp/cwd" && "$nfcxx" --instantiate=auto --keep-intermediates -o prog2 x.cpp main.cpp 2>&1 >/dev/null | grep 'intermediates kept in' | sed 's/.*kept in \([^ ]*\).*/\1/')
+# the records are the EDG route's (the prelinker's .ti files): the gcc backend is named, so the check does not depend on the Path B harness
+keep_msg=$(cd "$tmp/cwd" && NFCXX_BACKEND=gcc "$nfcxx" --instantiate=auto --keep-intermediates -o prog2 x.cpp main.cpp 2>&1 >/dev/null | grep 'intermediates kept in' | sed 's/.*kept in \([^ ]*\).*/\1/')
 if [ -n "$keep_msg" ] && [ -f "$keep_msg/x.ti" ] && [ -z "$(ls -A "$tmp/cwd" | grep -E '\.(ii|ti|o)$')" ]; then
   ok "--keep-intermediates keeps the records in the named directory"
 else

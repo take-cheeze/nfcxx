@@ -60,9 +60,9 @@ module NfcxxBody
     @temps = []
     # the directories of the run are made under TMPDIR (the driver's temporary root), as the body's mktemp -d made them
     @owned_root = env["TMPDIR"].to_s.empty? ? Dir.tmpdir : env["TMPDIR"]
-    @keep = env["NFCXX_KEEP_INTERMEDIATES"] == "1"
     # --keep-intermediates: the directories of the eccp call are kept, and the children see the setting (as the bash exported it)
     env["NFCXX_KEEP_INTERMEDIATES"] = "1" if env["NFCXX_KEEP_INTERMEDIATES"] == "1" || argv.include?("--keep-intermediates")
+    @keep = env["NFCXX_KEEP_INTERMEDIATES"] == "1"
     begin
       body
     rescue Exit => e
