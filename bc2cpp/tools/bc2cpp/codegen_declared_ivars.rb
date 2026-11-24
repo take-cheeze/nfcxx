@@ -5,7 +5,8 @@ require 'set'
 # CodeGen: DECLARED_IVAR_GUARD and DECLARED_IVAR_PROOF.
 #
 # An RBS `@x: T` (or `attr_reader x: T`) declaration of a program class is a fact nothing proves. For T = Integer, Float,
-# Symbol or an exact program class (and `T?`) it is checked where the slot is written instead:
+# Symbol, an exact program class or a native class (DECLARED_NATIVE: its exact class, or its closed family as a union,
+# RbsParamCheck.native_ivar_kind), and `T?`, it is checked where the slot is written instead:
 #
 # DECLARED_IVAR_GUARD   every store a compiled body makes to the slot (SETIV, and an inlined `x=`) tests the declared kind
 #                       first and raises BC2cppDeclarationViolation through bc2cpp_declared_ivar_violation, naming the
@@ -114,6 +115,20 @@ class CodeGen
     src = insn.regs.first
     mask = idx && irep ? exact_flow_mask(irep, idx, unshift_proof_reg(src, reg_offset)) : nil
     declared_ivar_store_guard(klass, insn.ivar, RegName[src], mask)
+  end
+
+  # DECLARED_IVAR_VERIFY: in a BC2CPP_CLASS_REACH_VERIFY=1 build a GETIV of a seeded slot (DECLARED_IVAR_PROOF) checks
+  # the seed it read, so a store that bypassed the guards (a native's mrb_iv_set) aborts the run instead of being trusted.
+  def declared_ivar_read_verify(klass, name, var)
+    # An early probe (embedding selection) compiles before the ivar groups exist; the seeds are not known yet.
+    return '' unless ENV['BC2CPP_CLASS_REACH_VERIFY'] == '1' && klass && @numeric_ivar_groups && @numeric_family_find
+
+    entry = declared_ivar_entry(klass, name)
+    return '' unless entry && declared_ivar_seeds.key?([numeric_family(entry.owner), entry.name])
+
+    "  if (!(mrb_nil_p(#{var}) || (#{declared_ivar_condition(entry, var)}))) { fprintf(stderr, " \
+      "\"bc2cpp: CLASS_REACH_VERIFY: #{entry.key.gsub(/["\\%]/, '_')} holds %s\\n\", mrb_obj_classname(M, #{var})); " \
+      "fflush(stderr); abort(); } /* DECLARED_IVAR_VERIFY #{entry.key} */\n"
   end
 
   # DECLARED_IVAR_PROOF: { [family, name] => [entry, class bits] } of the declarations whose guarded stores make the
