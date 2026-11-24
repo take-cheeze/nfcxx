@@ -19,7 +19,7 @@ the module options and builds the program one source at a time. Test: `tests/mod
   identifiers there (`tests/modules/plain.cpp`).
 
 The driver's module block (the scans, the refusals, the build of a link and the options of a compile) is
-`scripts/nfcxx-modules-plan.rb`. The frozen body calls it once, at the block's place, and reads its reply: `modules`, `modopts`
+`scripts/nfcxx-modules-plan.rb`. The driver body (`scripts/nfcxx-body.rb`) calls it once, at the block's place, and reads its reply: `modules`, `modopts`
 and, for a link, the build's status. `tests/driver-modules-plan/run.sh` checks its refusals against goldens and its answers
 against a stub build. `tests/modules/run.sh` runs the Path B, qbe and gcc backends. Path B is the default for a program with modules on
 x86-64 Linux (and a file it does not build falls back to gcc, as everywhere, docs/notes/pathb-default.md): the driver

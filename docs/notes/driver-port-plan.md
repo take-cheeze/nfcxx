@@ -1,13 +1,9 @@
 # Porting the bash drivers (nfcxx, nfcc) and their sourced helpers to Ruby
 
-The goal is to remove the shell drivers. The bash `nfcxx` is now the frozen body `tests/driver-body/nfcxx-oracle.sh` (918 lines,
-23 functions), and `./nfcxx` is a shim that runs `scripts/nfcxx.rb` (docs/notes/driver-body-port.md has the status). The bash
-`nfcc` is kept as `tests/nfcc/nfcc-bash` (483 lines, 12 functions), the reference for the differential tests; `./nfcc` is a
-5-line shim that runs `scripts/nfcc.rb`. The body still runs every path that the Ruby routes do not plan. It sources
-`scripts/trace.sh`; `bundle-wrap.sh`, `cuda-driver-wrap.sh` and `amdgpu-env.sh` are no longer on origin/main. Each stage
-below moves one group of functions to Ruby, with a differential test against the bash driver on the same arguments (status,
-stdout and the produced objects or programs). A stage is done when its bash functions have no callers left; the bash driver
-keeps the rest, and the Ruby entry (scripts/nfcxx.rb) routes to it until the last stage.
+The shell drivers are removed (PR #1618). `./nfcxx` and `./nfcc` are Ruby launchers; the driver body is `scripts/nfcxx-body.rb`
+(in process, in `scripts/nfcxx.rb`), and `scripts/nfcc.rb` is the C driver. The frozen bash copies (`tests/driver-body/nfcxx-oracle.sh`,
+`tests/nfcc/nfcc-bash`) are gone, and the differential tests that ran them are retired. docs/notes/driver-body-port.md has the
+current status. The steps below are the plan as it was written; where a step names a frozen copy, that copy is gone.
 
 ## Ported already (on origin/main)
 
