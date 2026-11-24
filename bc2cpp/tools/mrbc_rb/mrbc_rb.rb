@@ -1832,25 +1832,15 @@ module MrbcRb
       pool_index([:float, float_bits(node)])
     end
 
-    # src/readfloat.c: the integer part, up to 18 fraction places (the rest are skipped) and the exponent are read with
-    # integer arithmetic and combined in double arithmetic, which is not always the correctly rounded value.
+    # src/readnum.c, src/readfloat.c: a decimal literal is rounded by strtod, which rounds correctly (5e-324 is a
+    # subnormal, not 0.0). Float() rounds the same way, so the emitter reads the text with it: the digit-by-digit reader
+    # the fork had (integer arithmetic and pow10, which lost subnormals) is no longer the reader of mrb_read_float.
     def read_float(text)
       m = /\A(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?\z/.match(text.delete('_'))
       raise Unsupported, 'float literal form' unless m
-      raise Unsupported, 'float literal with a long integer part' if m[2].size > 18
 
-      res = m[2].to_i.to_f
-      if m[3]
-        frac = m[3][0, 18]
-        res += frac.to_i.to_f / pow10(frac.size)
-      end
-      if m[4]
-        e = m[4].to_i
-        e = 10_000 * (e.negative? ? -1 : 1) if e.abs >= 10_000
-        res *= pow10(e)
-      end
-      res *= m[1].empty? ? 1 : -1
-      res
+      value = Float(text.delete('_').sub(/\A-/, ''))
+      m[1].empty? ? value : -value
     end
 
     # mrb_pow10: the table entries are correctly rounded literals; beyond the table the result is infinity or 0.

@@ -14,6 +14,7 @@
 # Exits 1 on any real-build difference. Not part of CI: the synthetic classes
 # below differ by design, which is why the barriers were not migrated.
 
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 require_relative '../../tools/bc2cpp/world_root'
 require 'open3'
 require 'set'
@@ -62,7 +63,7 @@ srcs = closed_world_mrblib_srcs(ROOT)
 native_srcs = Dir["#{ROOT}/mruby-rgss/src/*.cxx"] + core_native_srcs("#{ROOT}/3rd/mruby") +
               external_gem_native_srcs(ROOT)
 env = {
-  'MRBC' => ENV['MRBC'] || 'mrbc',
+  'MRBC' => ENV['MRBC'] || MrbcRbDefault.command,
   'OUT_SYMBOL' => 'barrier_shadow',
   'ONLY_OWNERS' => BC2CPP_COMPILED_GEMS.values.flat_map { |g| g[:owners] }.join(','),
   'NATIVE_SRCS' => Shellwords.join(native_srcs),

@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 require 'tmpdir'
 
 # Each compilation keeps its own source and output directory: fixture constants and core-method replacements
@@ -21,7 +22,7 @@ class FixtureCheck
             else
               ENV.fetch('PATH', '').split(File::PATH_SEPARATOR)
                  .map { |directory| File.join(directory, 'mrbc') }
-                 .find { |path| File.file?(path) && File.executable?(path) }
+                 .find { |path| File.file?(path) && File.executable?(path) } || MrbcRbDefault.command
             end
     if @mrbc && File.file?(@mrbc) && File.executable?(@mrbc)
       return

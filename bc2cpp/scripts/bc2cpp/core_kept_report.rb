@@ -8,6 +8,7 @@
 #   --summary  counts per reason kind instead of one line per entry
 #   --runtime  the core run-time registrations instead (native defining calls and core Ruby definitions,
 #              CoreNativeCandidates.ram_candidates / ruby_candidates) the build keeps
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 require_relative '../../tools/bc2cpp/world_root'
 require 'set'
 require_relative '../../tools/bc2cpp/static_dispatch_registrations'
@@ -39,7 +40,7 @@ root = BC2CPP_WORLD_ROOT
 path = ARGV.reject { |a| a.start_with?('--') }.first or abort 'usage: core_kept_report.rb LISTS.json [--summary]'
 lists = StaticDispatchRegistrations.read_lists(path) or abort "no lists at #{path}"
 StaticDispatchRegistrations.core_names = ReasonSet.new
-StaticDispatchRegistrations.analyze(root, ENV.fetch('MRBC', 'mrbc'), lists: lists, lists_path: path, closed_only: true)
+StaticDispatchRegistrations.analyze(root, ENV.fetch('MRBC', MrbcRbDefault.command), lists: lists, lists_path: path, closed_only: true)
 entries, names, fragments, proven = StaticDispatchRegistrations.core_state
 reasons = names.reasons
 
@@ -54,7 +55,7 @@ end
 if ARGV.include?('--runtime')
   _ruby, native = StaticDispatchRegistrations.outside_world_files(root, closed_only: true)
   map = NativeOwnerMap.build(native)
-  core = StaticDispatchRegistrations.core_files(root, ENV.fetch('MRBC', 'mrbc'))
+  core = StaticDispatchRegistrations.core_files(root, ENV.fetch('MRBC', MrbcRbDefault.command))
   rom = entries.to_set { |e| "#{e[:mt_class]}##{e[:name]}" }
   blocked = Set.new
   map.aliases.each { |owner, new_name, old_name| blocked << "#{owner}##{new_name}" << "#{owner}##{old_name}" }
