@@ -60,6 +60,7 @@ module NfcxxBody
     @temps = []
     # the directories of the run are made under TMPDIR (the driver's temporary root), as the body's mktemp -d made them
     @owned_root = env["TMPDIR"].to_s.empty? ? Dir.tmpdir : env["TMPDIR"]
+    @keep = env["NFCXX_KEEP_INTERMEDIATES"] == "1"
     # --keep-intermediates: the directories of the eccp call are kept, and the children see the setting (as the bash exported it)
     env["NFCXX_KEEP_INTERMEDIATES"] = "1" if env["NFCXX_KEEP_INTERMEDIATES"] == "1" || argv.include?("--keep-intermediates")
     begin
@@ -69,7 +70,9 @@ module NfcxxBody
       e.status
     rescue Fallback
       # the body's fallback_gcc ends this run without its span: the file gets this run's end marker, and the gcc run writes its span
+      # (the directories this run made are removed, as the bash's fallback_gcc removed them, whether or not they are kept)
       close_trace_marker
+      cleanup_temps(force: true)
       raise
     ensure
       cleanup_temps
@@ -102,8 +105,9 @@ module NfcxxBody
     end
   end
 
-  def cleanup_temps
-    @temps.each { |d| FileUtils.rm_rf(d) }
+  # the run's directories are removed when it ends, unless the intermediates are kept (the eccp directory then stays, as the bash kept it)
+  def cleanup_temps(force: false)
+    @temps.each { |d| FileUtils.rm_rf(d) } if force || !@keep
     @temps = []
     finish_trace
   end
@@ -461,7 +465,16 @@ module NfcxxBody
   end
 
   def modules_block
-    dir = temp_dir("modplan")
+    # the modules block's records: made by the driver for this block only, removed when the block ends (never kept)
+    dir = Dir.mktmpdir("modplan.", @owned_root)
+    begin
+      modules_block_records(dir)
+    ensure
+      FileUtils.rm_rf(dir)
+    end
+  end
+
+  def modules_block_records(dir)
     File.binwrite(File.join(dir, "state"), modules_plan_input)
     st = run_cmd(ruby_cmd, script("nfcxx-modules-plan.rb"), File.join(dir, "state"), File.join(dir, "reply"))
     fail!("", st) unless st == 0
