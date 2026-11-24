@@ -34,7 +34,7 @@ struct Ctx {
   const Proto &p;
   const FnIndex &index;
   std::size_t pc = 0;
-  int next = 2;                    // %0 is ret, %1 is base
+  int next = 3;                    // %0 is ret, %1 is base, %2 is the closure (cl)
   std::ostringstream body;
   std::vector<std::string> slots;  // slot declarations, emitted before the body
 
@@ -370,14 +370,35 @@ void lower_shli(Ctx &c, const Insn &i) {
 void lower_unm(Ctx &c, const Insn &i) { emit_helper_unary(c, UNM, i.A(), i.B()); }
 void lower_bnot(Ctx &c, const Insn &i) { emit_helper_unary(c, BNOT, i.A(), i.B()); }
 
-// CLOSURE A Bx: a function value for prototype Bx. Only prototypes without upvalues are lowered so far.
+// CLOSURE A Bx: a closure of prototype Bx. Its upvalues are captured one by one (lvm.c's pushclosure): from the frame
+// (instack: the register idx) or from the enclosing closure (%2: its upvalue idx).
 void lower_closure(Ctx &c, const Insn &i) {
   const Proto &child = *c.p.p.at(i.Bx());
-  if (!child.upvalues.empty()) throw std::runtime_error("refused: a closure with upvalues is not lowered yet");
   std::size_t fn = c.index.at(&child);
   std::string dst = reg(c, i.A());
   c.line("(eval (call void &\"lua54rt_closure\" " + dst + " &\"lua54_fn_" + std::to_string(fn) + "\" (const int " +
          std::to_string(child.numparams) + ") (const int " + std::to_string(child.upvalues.size()) + ")))");
+  for (std::size_t k = 0; k < child.upvalues.size(); ++k) {
+    const UpvalDesc &u = child.upvalues[k];
+    c.line("(eval (call void &\"lua54rt_capture\" " + dst + " (const int " + std::to_string(k) + ") (const int " +
+           std::to_string(u.instack) + ") (const int " + std::to_string(u.idx) + ") %2 %1))");
+  }
+}
+
+// GETUPVAL A B: R[A] := upvalue B. SETUPVAL A B: upvalue B := R[A].
+void lower_getupval(Ctx &c, const Insn &i) {
+  std::string dst = reg(c, i.A());
+  c.line("(eval (call void &\"lua54rt_getupval\" " + dst + " %2 (const int " + std::to_string(i.B()) + ")))");
+}
+
+void lower_setupval(Ctx &c, const Insn &i) {
+  std::string src = reg(c, i.A());
+  c.line("(eval (call void &\"lua54rt_setupval\" %2 (const int " + std::to_string(i.B()) + ") " + src + "))");
+}
+
+// CLOSE A: the upvalues of the registers from R[A] up are closed.
+void lower_close(Ctx &c, const Insn &i) {
+  c.line("(eval (call void &\"lua54rt_close\" " + reg(c, i.A()) + "))");
 }
 
 // CALL A B C: R[A] is the function, R[A+1..] its B-1 arguments, the results go to R[A..A+C-2]. The callee's base is
@@ -403,7 +424,7 @@ void lower_call(Ctx &c, const Insn &i) {
 
 // TAILCALL A B k: a call whose one result is returned (`return f(x)`). Not lowered with upvalues to close (k).
 void lower_tailcall(Ctx &c, const Insn &i) {
-  if (i.k()) throw std::runtime_error("refused: TAILCALL with upvalues to close is not lowered yet");
+  if (i.k()) c.line("(eval (call void &\"lua54rt_close\" %1))");   // lvm.c closes the frame before the tail call
   if (i.B() == 0) throw std::runtime_error("refused: TAILCALL with arguments up to the stack top is not lowered yet");
   emit_call(c, i.A(), i.B(), 1);
   c.line("(copy 16 %0 " + reg(c, i.A()) + ")");
@@ -534,7 +555,7 @@ void lower_jmp(Ctx &c, const Insn &i) {
 // RETURN A B k: B is the number of results plus one. B = 1 returns nothing and B = 2 returns R[A]. A count taken from
 // the stack top (B = 0), more than one value, or upvalues to close (k) are refused for now.
 void lower_return(Ctx &c, const Insn &i) {
-  if (i.k()) throw std::runtime_error("refused: RETURN with upvalues to close is not lowered yet");
+  if (i.k()) c.line("(eval (call void &\"lua54rt_close\" %1))");   // the frame's upvalues close before it goes
   bool after_tailcall = c.pc > 0 && c.p.code[c.pc - 1].op() == TAILCALL;
   if (i.B() == 1) {
     c.line("(return)");
@@ -605,6 +626,9 @@ const Entry *table() {
   t[FORPREP] = {lower_forprep, nullptr};
   t[FORLOOP] = {lower_forloop, nullptr};
   t[CLOSURE] = {lower_closure, nullptr};
+  t[GETUPVAL] = {lower_getupval, nullptr};
+  t[SETUPVAL] = {lower_setupval, nullptr};
+  t[CLOSE] = {lower_close, nullptr};
   t[CALL] = {lower_call, nullptr};
   t[TAILCALL] = {lower_tailcall, nullptr};
   t[MMBIN] = {lower_nothing, nullptr};
@@ -645,7 +669,7 @@ std::string lower_function(const Proto &p, const std::string &name, const FnInde
   }
   std::ostringstream out;
   out << "(function \"" << name << "\" (ret void) (params (param %0 \"ret\" (ptr (struct \"LV\")))"
-      << " (param %1 \"base\" (ptr (struct \"LV\"))))\n";
+      << " (param %1 \"base\" (ptr (struct \"LV\"))) (param %2 \"cl\" (ptr unsigned_char)))\n";
   for (const std::string &s : c.slots) out << "  " << s << "\n";
   out << c.body.str() << ")\n";
   return out.str();

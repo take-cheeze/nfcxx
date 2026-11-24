@@ -13,13 +13,13 @@ typedef struct LV {
   } v;
 } LV;
 
-void lua54_fn_0(LV *ret, LV *base);
+void lua54_fn_0(LV *ret, LV *base, void *cl);
 
 int main(void) {
   LV ret, base[4096];
   memset(&ret, 0, sizeof ret);
   memset(base, 0, sizeof base);
-  lua54_fn_0(&ret, base);
+  lua54_fn_0(&ret, base, NULL);
   if (ret.tag == 0x03) {
     printf("%lld\n", (long long)ret.v.i);
   } else if (ret.tag == 0x13) {

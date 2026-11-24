@@ -31,28 +31,79 @@ static void die(const char *what) {
 }
 
 /* A Lua function value made from a lowered prototype. A function with upvalues is not lowered yet, so there are none. */
-typedef void (*lua_fn)(LV *ret, LV *base);
+/* Functions and closures (docs/notes/lua54-pathb.md, "Calls and upvalues").
+ * A lowered function is fn(ret, base, cl): ret receives the one result, base is the frame, cl is the closure.
+ * An upvalue is a cell. While its variable is on the stack it is open: v points at the stack slot. When the frame
+ * ends, or a CLOSE covers the slot, the value moves into closed and v points there (lfunc.c's luaF_close). */
+typedef struct UpVal UpVal;
+struct UpVal {
+  LV *v;
+  LV closed;
+  UpVal *open_next;   /* the open list, highest address first */
+};
+
+typedef void (*lua_fn)(LV *ret, LV *base, void *cl);
 typedef struct LClosure {
   lua_fn fn;
   int numparams;
+  int nupvals;
+  UpVal *upvals[1];   /* nupvals entries; the closure is allocated with room for them */
 } LClosure;
 
+static UpVal *open_upvals = NULL;
+
 void lua54rt_closure(LV *dst, void *fn, int numparams, int nupvals) {
-  (void)nupvals;
-  LClosure *c = (LClosure *)malloc(sizeof *c);
+  size_t size = sizeof(LClosure) + sizeof(UpVal *) * (size_t)(nupvals > 0 ? nupvals - 1 : 0);
+  LClosure *c = (LClosure *)malloc(size);
   if (c == NULL) die("out of memory");
   c->fn = (lua_fn)fn;
   c->numparams = numparams;
+  c->nupvals = nupvals;
+  for (int k = 0; k < nupvals; ++k) c->upvals[k] = NULL;
   dst->tag = TAG_LCL;
   dst->v.p = c;
 }
+
+/* The open upvalue for stack slot level, made if there is none (luaF_findupval). */
+static UpVal *find_upval(LV *level) {
+  UpVal **pp = &open_upvals;
+  while (*pp != NULL && (*pp)->v > level) pp = &(*pp)->open_next;
+  if (*pp != NULL && (*pp)->v == level) return *pp;
+  UpVal *uv = (UpVal *)malloc(sizeof *uv);
+  if (uv == NULL) die("out of memory");
+  uv->v = level;
+  uv->open_next = *pp;
+  *pp = uv;
+  return uv;
+}
+
+/* Upvalue k of the new closure dst: captured from the frame (instack) or from the enclosing closure. */
+void lua54rt_capture(LV *dst, int k, int instack, int idx, void *encl, LV *base) {
+  LClosure *c = (LClosure *)dst->v.p;
+  if (instack) c->upvals[k] = find_upval(&base[idx]);
+  else c->upvals[k] = ((LClosure *)encl)->upvals[idx];
+}
+
+/* Closes the open upvalues at or above level: their values move into the cells (luaF_close). */
+void lua54rt_close(LV *level) {
+  while (open_upvals != NULL && open_upvals->v >= level) {
+    UpVal *uv = open_upvals;
+    uv->closed = *uv->v;
+    uv->v = &uv->closed;
+    open_upvals = uv->open_next;
+  }
+}
+
+void lua54rt_getupval(LV *dst, void *cl, int idx) { *dst = *((LClosure *)cl)->upvals[idx]->v; }
+
+void lua54rt_setupval(void *cl, int idx, LV *src) { *((LClosure *)cl)->upvals[idx]->v = *src; }
 
 /* OP_CALL with one result: the callee's base is args, its result goes to ret. Missing parameters are nil. */
 void lua54rt_call(LV *fn, int nargs, LV *args, LV *ret) {
   if (fn->tag != TAG_LCL) die("attempt to call a value that is not a lowered function");
   LClosure *c = (LClosure *)fn->v.p;
   for (int k = nargs; k < c->numparams; ++k) args[k].tag = TAG_NIL;
-  c->fn(ret, args);
+  c->fn(ret, args, c);
 }
 
 static int is_number(const LV *x) { return x->tag == TAG_INT || x->tag == TAG_FLOAT; }
