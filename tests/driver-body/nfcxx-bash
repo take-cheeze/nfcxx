@@ -276,10 +276,9 @@ eccp_run() {  # eccp_run: the eccp call of the plan (eccp_argv, in eccp_cd, with
   for e in ${eccp_envs[@]+"${eccp_envs[@]}"}; do envs+=("--env=$e"); done
   "${RUBY:-ruby}" "$root/scripts/nfcxx-eccp-run.rb" ${eccp_cd:+"--cd=$eccp_cd"} ${envs[@]+"${envs[@]}"} -- "${eccp_argv[@]}"
 }
-modules_plan_input() {  # the records of the modules block: the state scripts/nfcxx-modules-plan.rb reads (its header lists the groups)
-  state_put root "$root"; state_put out "$out"; state_put moddir "${moddir:-}"; state_put std "$std"
-  state_put emit_c "$emit_c"; state_put compile_only "$compile_only"
-  state_put cfiles ${cfiles[@]+"${cfiles[@]}"}; state_put srcs ${srcs[@]+"${srcs[@]}"}; state_put argv ${nfcxx_argv[@]+"${nfcxx_argv[@]}"}
+modules_plan_input() {  # the records of the modules block: scripts/nfcxx-modules-state.rb writes them (its header lists the groups)
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-modules-state.rb" "$root" "$out" "${moddir:-}" "$std" "$emit_c" "$compile_only" \
+    "${#cfiles[@]}" ${cfiles[@]+"${cfiles[@]}"} "${#srcs[@]}" ${srcs[@]+"${srcs[@]}"} -- ${nfcxx_argv[@]+"${nfcxx_argv[@]}"}
 }
 nfcxx_argv=("$@")   # the command as given: the compile cache keys on it (see cache_key)
 args0=("$@")   # the arguments as given: the SYCL two-pass build below re-runs the driver with them
