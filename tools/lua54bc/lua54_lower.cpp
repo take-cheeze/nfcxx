@@ -30,15 +30,22 @@ constexpr int kCmpLt = 0, kCmpLe = 1, kCmpEq = 2;
 // Function numbers of every prototype of the chunk (pre-order, the main function is 0).
 using FnIndex = std::map<const Proto *, std::size_t>;
 
+// What the whole module needs: the function numbers, and the data items of its string constants.
+struct Module {
+  FnIndex index;
+  std::vector<std::string> data;   // IR `(data ...)` lines
+  std::size_t nstr = 0;
+};
+
 struct Ctx {
   const Proto &p;
-  const FnIndex &index;
+  Module &m;
   std::size_t pc = 0;
   int next = 3;                    // %0 is ret, %1 is base, %2 is the closure (cl)
   std::ostringstream body;
   std::vector<std::string> slots;  // slot declarations, emitted before the body
 
-  Ctx(const Proto &proto, const FnIndex &fn_index) : p(proto), index(fn_index) {}
+  Ctx(const Proto &proto, Module &module) : p(proto), m(module) {}
 
   std::string fresh() { return "%" + std::to_string(next++); }
   void line(const std::string &s) { body << "  " << s << "\n"; }
@@ -113,13 +120,31 @@ void store_float(Ctx &c, const std::string &dst, const std::string &value) {
   store_value(c, dst, "double", value);
 }
 
+// The bytes of a string as IR string text: printable ASCII as it is, the rest as octal escapes.
+std::string ir_escape(const std::string &s) {
+  std::string out;
+  char buf[8];
+  for (unsigned char ch : s) {
+    if (ch == '"' || ch == '\\') {
+      out += '\\';
+      out += static_cast<char>(ch);
+    } else if (ch >= 0x20 && ch < 0x7f) {
+      out += static_cast<char>(ch);
+    } else {
+      std::snprintf(buf, sizeof buf, "\\%03o", ch);
+      out += buf;
+    }
+  }
+  return out;
+}
+
 std::string fmt_double(double d) {
   char buf[64];
   std::snprintf(buf, sizeof buf, "%.17g", d);
   return buf;
 }
 
-// The LV of a numeric, boolean or nil constant, written to a temporary. Strings are refused for now.
+// The LV of a constant, written to a temporary.
 std::string constant_lv(Ctx &c, const Constant &k) {
   std::string t = c.temp_lv();
   switch (k.kind) {
@@ -128,7 +153,15 @@ std::string constant_lv(Ctx &c, const Constant &k) {
     case Constant::Kind::Nil: store_tag(c, t, kTagNil); break;
     case Constant::Kind::False: store_tag(c, t, kTagFalse); break;
     case Constant::Kind::True: store_tag(c, t, kTagTrue); break;
-    case Constant::Kind::String: throw std::runtime_error("refused: string constants are not lowered yet");
+    case Constant::Kind::String: {
+      // A data item holds the bytes with a NUL; lua54rt_str makes the string object.
+      std::string sym = "lua54.s." + std::to_string(c.m.nstr++);
+      std::size_t n = k.s.size();
+      c.m.data.push_back("(data \"" + sym + "\" (const (array " + std::to_string(n + 1) + " (const char))) (string \"" +
+                         ir_escape(k.s) + "\\000\"))\n");
+      c.line("(eval (call void &\"lua54rt_str\" " + t + " @\"" + sym + "\" (const long " + std::to_string(n) + ")))");
+      break;
+    }
   }
   return t;
 }
@@ -374,7 +407,7 @@ void lower_bnot(Ctx &c, const Insn &i) { emit_helper_unary(c, BNOT, i.A(), i.B()
 // (instack: the register idx) or from the enclosing closure (%2: its upvalue idx).
 void lower_closure(Ctx &c, const Insn &i) {
   const Proto &child = *c.p.p.at(i.Bx());
-  std::size_t fn = c.index.at(&child);
+  std::size_t fn = c.m.index.at(&child);
   std::string dst = reg(c, i.A());
   c.line("(eval (call void &\"lua54rt_closure\" " + dst + " &\"lua54_fn_" + std::to_string(fn) + "\" (const int " +
          std::to_string(child.numparams) + ") (const int " + std::to_string(child.upvalues.size()) + ")))");
@@ -403,32 +436,231 @@ void lower_close(Ctx &c, const Insn &i) {
 
 // CALL A B C: R[A] is the function, R[A+1..] its B-1 arguments, the results go to R[A..A+C-2]. The callee's base is
 // R[A+1]; the function value is copied first, because R[A] receives the first result.
-void emit_call(Ctx &c, unsigned a, unsigned b, unsigned nresults) {
+void emit_call(Ctx &c, unsigned a, const std::string &nargs, int wanted) {
   std::string fn_slot = c.temp_lv();
   std::string fn_reg = reg(c, a);
   c.line("(copy 16 " + fn_slot + " " + fn_reg + ")");
-  store_tag(c, fn_reg, kTagNil);   // no value returned leaves R[A] nil
+  store_tag(c, fn_reg, kTagNil);   // a call that returns nothing leaves R[A] nil
   std::string args = reg(c, a + 1);
   std::string ret = reg(c, a);
-  c.line("(eval (call void &\"lua54rt_call\" " + fn_slot + " (const int " + std::to_string(b - 1) + ") " + args + " " +
-         ret + "))");
-  // Results past the first are nil (the callee returns at most one value here).
-  for (unsigned k = 1; k < nresults; ++k) store_tag(c, reg(c, a + k), kTagNil);
+  c.line("(eval (call void &\"lua54rt_call\" " + fn_slot + " " + nargs + " " + args + " " + ret + " (const int " +
+         std::to_string(wanted) + ") (const int " + std::to_string(a) + ")))");
 }
 
+// The number of values up to the stack top, from register index `from` on: top - from, as an IR int register.
+std::string values_to_top(Ctx &c, unsigned from) {
+  std::string t = c.fresh(), n = c.fresh();
+  c.line("(let " + t + " int (call int &\"lua54rt_gettop\"))");
+  c.line("(let " + n + " int (wsub int " + t + " (const int " + std::to_string(from) + ")))");
+  return n;
+}
+
+// Results are returned: n values (an IR int register or a constant) are copied from src to the caller's ret.
+void emit_return_values(Ctx &c, const std::string &src, const std::string &n) {
+  c.line("(eval (call void &\"lua54rt_setret\" %0 " + src + " " + n + "))");
+  c.line("(return)");
+}
+
+// CALL A B C: R[A] is the function, R[A+1..] its arguments: B-1 of them, or those up to the stack top when B is 0.
+// The results go to R[A..]: C-1 of them, or all of them and the stack top when C is 0.
 void lower_call(Ctx &c, const Insn &i) {
-  if (i.B() == 0) throw std::runtime_error("refused: CALL with arguments up to the stack top is not lowered yet");
-  if (i.C() == 0) throw std::runtime_error("refused: CALL with several results is not lowered yet");
-  emit_call(c, i.A(), i.B(), i.C() - 1);
+  std::string nargs = i.B() == 0 ? values_to_top(c, i.A() + 1) : "(const int " + std::to_string(i.B() - 1) + ")";
+  emit_call(c, i.A(), nargs, i.C() == 0 ? -1 : static_cast<int>(i.C()) - 1);
 }
 
 // TAILCALL A B k: a call whose one result is returned (`return f(x)`). Not lowered with upvalues to close (k).
+// TAILCALL A B k: `return f(x)`. The frame's upvalues close first (lvm.c). The call's values are returned.
 void lower_tailcall(Ctx &c, const Insn &i) {
-  if (i.k()) c.line("(eval (call void &\"lua54rt_close\" %1))");   // lvm.c closes the frame before the tail call
-  if (i.B() == 0) throw std::runtime_error("refused: TAILCALL with arguments up to the stack top is not lowered yet");
-  emit_call(c, i.A(), i.B(), 1);
-  c.line("(copy 16 %0 " + reg(c, i.A()) + ")");
-  c.line("(return)");
+  if (i.k()) c.line("(eval (call void &\"lua54rt_close\" %1))");
+  std::string nargs = i.B() == 0 ? values_to_top(c, i.A() + 1) : "(const int " + std::to_string(i.B() - 1) + ")";
+  emit_call(c, i.A(), nargs, -1);
+  emit_return_values(c, reg(c, i.A()), values_to_top(c, i.A()));
+}
+
+// --- Tables and strings (docs/notes/lua54-pathb.md, "Tables and strings"). ---
+
+// An RK operand: a constant (k set) or a register.
+std::string rk(Ctx &c, unsigned idx, bool is_k) {
+  return is_k ? constant_lv(c, c.p.k.at(idx)) : reg(c, idx);
+}
+
+void lower_newtable(Ctx &c, const Insn &i) {
+  c.line("(eval (call void &\"lua54rt_newtable\" " + reg(c, i.A()) + "))");
+}
+
+void lower_gettable(Ctx &c, const Insn &i) {
+  std::string dst = reg(c, i.A()), t = reg(c, i.B()), key = reg(c, i.C());
+  c.line("(eval (call void &\"lua54rt_gettable\" " + dst + " " + t + " " + key + "))");
+}
+
+void lower_geti(Ctx &c, const Insn &i) {
+  std::string dst = reg(c, i.A()), t = reg(c, i.B());
+  std::string key = imm_lv(c, static_cast<int>(i.C()), false);
+  c.line("(eval (call void &\"lua54rt_gettable\" " + dst + " " + t + " " + key + "))");
+}
+
+void lower_getfield(Ctx &c, const Insn &i) {
+  std::string dst = reg(c, i.A()), t = reg(c, i.B());
+  std::string key = constant_lv(c, c.p.k.at(i.C()));
+  c.line("(eval (call void &\"lua54rt_gettable\" " + dst + " " + t + " " + key + "))");
+}
+
+// The upvalue B (a table, for _ENV) loaded into a temporary, then indexed.
+void lower_gettabup(Ctx &c, const Insn &i) {
+  std::string up = c.temp_lv();
+  c.line("(eval (call void &\"lua54rt_getupval\" " + up + " %2 (const int " + std::to_string(i.B()) + ")))");
+  std::string dst = reg(c, i.A());
+  std::string key = constant_lv(c, c.p.k.at(i.C()));
+  c.line("(eval (call void &\"lua54rt_gettable\" " + dst + " " + up + " " + key + "))");
+}
+
+void lower_settable(Ctx &c, const Insn &i) {
+  std::string t = reg(c, i.A()), key = reg(c, i.B());
+  std::string val = rk(c, i.C(), i.k());
+  c.line("(eval (call void &\"lua54rt_settable\" " + t + " " + key + " " + val + "))");
+}
+
+void lower_seti(Ctx &c, const Insn &i) {
+  std::string t = reg(c, i.A());
+  std::string key = imm_lv(c, static_cast<int>(i.B()), false);
+  std::string val = rk(c, i.C(), i.k());
+  c.line("(eval (call void &\"lua54rt_settable\" " + t + " " + key + " " + val + "))");
+}
+
+void lower_setfield(Ctx &c, const Insn &i) {
+  std::string t = reg(c, i.A());
+  std::string key = constant_lv(c, c.p.k.at(i.B()));
+  std::string val = rk(c, i.C(), i.k());
+  c.line("(eval (call void &\"lua54rt_settable\" " + t + " " + key + " " + val + "))");
+}
+
+void lower_settabup(Ctx &c, const Insn &i) {
+  std::string up = c.temp_lv();
+  c.line("(eval (call void &\"lua54rt_getupval\" " + up + " %2 (const int " + std::to_string(i.A()) + ")))");
+  std::string key = constant_lv(c, c.p.k.at(i.B()));
+  std::string val = rk(c, i.C(), i.k());
+  c.line("(eval (call void &\"lua54rt_settable\" " + up + " " + key + " " + val + "))");
+}
+
+// SELF A B C: R[A+1] := R[B]; R[A] := R[B][RK(C)]. The object and the key are copied first: A may be B.
+void lower_self(Ctx &c, const Insn &i) {
+  std::string obj = c.temp_lv(), key = c.temp_lv();
+  c.line("(copy 16 " + obj + " " + reg(c, i.B()) + ")");
+  std::string k = rk(c, i.C(), i.k());
+  c.line("(copy 16 " + key + " " + k + ")");
+  c.line("(copy 16 " + reg(c, i.A() + 1) + " " + obj + ")");
+  c.line("(eval (call void &\"lua54rt_gettable\" " + reg(c, i.A()) + " " + obj + " " + key + "))");
+}
+
+void lower_len(Ctx &c, const Insn &i) {
+  std::string dst = reg(c, i.A()), src = reg(c, i.B());
+  c.line("(eval (call void &\"lua54rt_len\" " + dst + " " + src + "))");
+}
+
+// CONCAT A B: R[A] := R[A] .. ... .. R[A+B-1]. The helper reads all of them before it writes R[A].
+void lower_concat(Ctx &c, const Insn &i) {
+  std::string base = reg(c, i.A());
+  c.line("(eval (call void &\"lua54rt_concat\" " + base + " " + base + " (const int " + std::to_string(i.B()) + ")))");
+}
+
+// SETLIST A B C k: t[C + j] := R[A+j] for j = 1..B, with C plus EXTRAARG * 256 when k. The EXTRAARG is skipped.
+// SETLIST A B C k: t[C + j] := R[A+j] for j = 1..n, n = B or the values up to the stack top when B is 0. With k, C
+// is extended by the EXTRAARG after it, and that instruction is skipped.
+void lower_setlist(Ctx &c, const Insn &i) {
+  long long offset = static_cast<long long>(i.C());
+  bool skip_extra = i.k() != 0;
+  if (skip_extra) {
+    const Insn &extra = c.p.code.at(c.pc + 1);
+    if (extra.op() != EXTRAARG) throw std::runtime_error("refused: SETLIST with k is not followed by EXTRAARG");
+    offset += static_cast<long long>(extra.Ax()) * 256;   // MAXARG_C + 1
+  }
+  std::string t = reg(c, i.A()), vals = reg(c, i.A() + 1);
+  std::string count = i.B() == 0 ? values_to_top(c, i.A() + 1) : "(const int " + std::to_string(i.B()) + ")";
+  c.line("(eval (call void &\"lua54rt_setlist\" " + t + " (const long " + std::to_string(offset) + ") " + vals + " " +
+         count + "))");
+  if (skip_extra) go(c, c.pc + 2);
+}
+
+void lower_extraarg(Ctx &, const Insn &) {}
+
+
+// VARARGPREP: the extra arguments are saved in the frame's `va` slot; the runtime knows their count at this point.
+void lower_varargprep(Ctx &c, const Insn &i) {
+  std::string vp = c.fresh();
+  c.line("(let " + vp + " (ptr unsigned_char) (call (ptr unsigned_char) &\"lua54rt_varargprep\" %1 (const int " +
+         std::to_string(i.A()) + ")))");
+  c.line("(store (ptr unsigned_char) $\"va\" " + vp + ")");
+}
+
+// VARARG A C: R[A..] := the extra arguments; C is 0 for all of them, and then the stack top is set.
+void lower_vararg(Ctx &c, const Insn &i) {
+  std::string vp = c.fresh();
+  c.line("(let " + vp + " (ptr unsigned_char) (load (ptr unsigned_char) $\"va\"))");
+  std::string dst = reg(c, i.A());
+  c.line("(eval (call void &\"lua54rt_vararg\" " + vp + " " + dst + " (const int " +
+         std::to_string(i.C() == 0 ? -1 : static_cast<int>(i.C()) - 1) + ") (const int " + std::to_string(i.A()) + ")))");
+}
+
+// TESTSET A B k: when R[B] is falsy equal to k, skip the JMP after this; otherwise R[A] := R[B] and take the JMP.
+void lower_testset(Ctx &c, const Insn &i) {
+  std::size_t jmp_pc = c.pc + 1;
+  const Insn &j = c.insn_at(jmp_pc);
+  if (j.op() != JMP) throw std::runtime_error("refused: a TESTSET is not followed by a JMP");
+  std::size_t dest = jmp_pc + 1 + static_cast<std::size_t>(static_cast<long long>(j.sJ()));
+  std::size_t skip = c.pc + 2;
+  std::string rb = reg(c, i.B());
+  std::string t = load_tag(c, rb);
+  std::string is_nil = tag_is(c, t, kTagNil), is_false = tag_is(c, t, kTagFalse);
+  std::string falsy = c.fresh();
+  c.line("(let " + falsy + " bool (const bool 0))");
+  c.line("(if " + is_nil + " (then (set " + falsy + " (const bool 1))) (else");
+  c.line("(if " + is_false + " (then (set " + falsy + " (const bool 1))) (else (set " + falsy + " (const bool 0))))");
+  c.line("))");
+  std::string take_copy = "(copy 16 " + reg(c, i.A()) + " " + reg(c, i.B()) + ")";
+  if (i.k() != 0) {
+    c.line("(if " + falsy + " (then (goto " + lbl(skip) + ")) (else");
+    c.line(take_copy);
+    c.line("(goto " + lbl(dest) + ")))");
+  } else {
+    c.line("(if " + falsy + " (then");
+    c.line(take_copy);
+    c.line("(goto " + lbl(dest) + ")) (else (goto " + lbl(skip) + ")))");
+  }
+}
+
+// LFALSESKIP A: R[A] := false and skip the next instruction.
+void lower_lfalseskip(Ctx &c, const Insn &i) {
+  store_tag(c, reg(c, i.A()), kTagFalse);
+  go(c, c.pc + 2);
+}
+
+// LOADKX A: R[A] := K[Ax] where the EXTRAARG after this instruction holds Ax; that instruction is skipped.
+void lower_loadkx(Ctx &c, const Insn &i) {
+  const Insn &extra = c.p.code.at(c.pc + 1);
+  if (extra.op() != EXTRAARG) throw std::runtime_error("refused: LOADKX is not followed by EXTRAARG");
+  std::string src = constant_lv(c, c.p.k.at(extra.Ax()));
+  c.line("(copy 16 " + reg(c, i.A()) + " " + src + ")");
+  go(c, c.pc + 2);
+}
+
+// TFORPREP A Bx: go to the TFORCALL. (The to-be-closed fourth value is not tracked yet.)
+void lower_tforprep(Ctx &c, const Insn &i) { go(c, c.pc + 1 + i.Bx()); }
+
+// TFORCALL A C: R[A+4..A+3+C] := R[A](R[A+1], R[A+2]).
+void lower_tforcall(Ctx &c, const Insn &i) {
+  for (unsigned k = 0; k < 3; ++k) c.line("(copy 16 " + reg(c, i.A() + 4 + k) + " " + reg(c, i.A() + k) + ")");
+  emit_call(c, i.A() + 4, "(const int 2)", static_cast<int>(i.C()));
+}
+
+// TFORLOOP A Bx: if R[A+4] is not nil, R[A+2] := R[A+4] and jump back to the loop body.
+void lower_tforloop(Ctx &c, const Insn &i) {
+  std::string v = reg(c, i.A() + 4);
+  std::string t = load_tag(c, v);
+  std::string nil = tag_is(c, t, kTagNil);
+  std::size_t back = c.pc + 1 - i.Bx();
+  c.line("(if " + nil + " (then (goto " + lbl(c.pc + 1) + ")) (else");
+  c.line("(copy 16 " + reg(c, i.A() + 2) + " " + reg(c, i.A() + 4) + ")");
+  c.line("(goto " + lbl(back) + ")))");
 }
 
 void lower_addk(Ctx &c, const Insn &i) { arith_k(c, i, ADD); }
@@ -554,28 +786,19 @@ void lower_jmp(Ctx &c, const Insn &i) {
 
 // RETURN A B k: B is the number of results plus one. B = 1 returns nothing and B = 2 returns R[A]. A count taken from
 // the stack top (B = 0), more than one value, or upvalues to close (k) are refused for now.
+// RETURN A B k: B is the number of results plus one; B = 0 returns the values up to the stack top.
 void lower_return(Ctx &c, const Insn &i) {
   if (i.k()) c.line("(eval (call void &\"lua54rt_close\" %1))");   // the frame's upvalues close before it goes
-  bool after_tailcall = c.pc > 0 && c.p.code[c.pc - 1].op() == TAILCALL;
-  if (i.B() == 1) {
-    c.line("(return)");
-  } else if (i.B() == 0 && after_tailcall) {
-    // lvm.c's RETURN after TAILCALL returns the call's values, which TAILCALL has already returned: unreachable here.
-    c.line("(return)");
-  } else if (i.B() == 2) {
-    c.line("(copy 16 %0 " + reg(c, i.A()) + ")");
-    c.line("(return)");
+  if (i.B() == 0) {
+    emit_return_values(c, reg(c, i.A()), values_to_top(c, i.A()));
   } else {
-    throw std::runtime_error("refused: RETURN with several values is not lowered yet");
+    emit_return_values(c, reg(c, i.A()), "(const int " + std::to_string(i.B() - 1) + ")");
   }
 }
 
-void lower_return0(Ctx &c, const Insn &) { c.line("(return)"); }
+void lower_return0(Ctx &c, const Insn &) { emit_return_values(c, "%1", "(const int 0)"); }
 
-void lower_return1(Ctx &c, const Insn &i) {
-  c.line("(copy 16 %0 " + reg(c, i.A()) + ")");
-  c.line("(return)");
-}
+void lower_return1(Ctx &c, const Insn &i) { emit_return_values(c, reg(c, i.A()), "(const int 1)"); }
 
 // Table: an entry is null for an opcode that is not lowered yet. `refuse_reason` gives the reason for the refusal.
 struct Entry {
@@ -629,6 +852,20 @@ const Entry *table() {
   t[GETUPVAL] = {lower_getupval, nullptr};
   t[SETUPVAL] = {lower_setupval, nullptr};
   t[CLOSE] = {lower_close, nullptr};
+  t[NEWTABLE] = {lower_newtable, nullptr};
+  t[GETTABLE] = {lower_gettable, nullptr};
+  t[GETI] = {lower_geti, nullptr};
+  t[GETFIELD] = {lower_getfield, nullptr};
+  t[GETTABUP] = {lower_gettabup, nullptr};
+  t[SETTABLE] = {lower_settable, nullptr};
+  t[SETI] = {lower_seti, nullptr};
+  t[SETFIELD] = {lower_setfield, nullptr};
+  t[SETTABUP] = {lower_settabup, nullptr};
+  t[SELF] = {lower_self, nullptr};
+  t[LEN] = {lower_len, nullptr};
+  t[CONCAT] = {lower_concat, nullptr};
+  t[SETLIST] = {lower_setlist, nullptr};
+  t[EXTRAARG] = {lower_extraarg, nullptr};
   t[CALL] = {lower_call, nullptr};
   t[TAILCALL] = {lower_tailcall, nullptr};
   t[MMBIN] = {lower_nothing, nullptr};
@@ -649,13 +886,21 @@ const Entry *table() {
   t[RETURN0] = {lower_return0, nullptr};
   t[RETURN1] = {lower_return1, nullptr};
   // VARARGPREP moves the fixed parameters above the varargs; registers keep their contents, and no lowered op reads varargs.
-  t[VARARGPREP] = {lower_nothing, nullptr};
+  t[VARARGPREP] = {lower_varargprep, nullptr};
+  t[VARARG] = {lower_vararg, nullptr};
+  t[TESTSET] = {lower_testset, nullptr};
+  t[LFALSESKIP] = {lower_lfalseskip, nullptr};
+  t[LOADKX] = {lower_loadkx, nullptr};
+  t[TFORPREP] = {lower_tforprep, nullptr};
+  t[TFORCALL] = {lower_tforcall, nullptr};
+  t[TFORLOOP] = {lower_tforloop, nullptr};
   return t;
 }
 
 // The IR of one function. The body lowers instruction by instruction, each with its label.
-std::string lower_function(const Proto &p, const std::string &name, const FnIndex &index) {
-  Ctx c(p, index);
+std::string lower_function(const Proto &p, const std::string &name, Module &m) {
+  Ctx c(p, m);
+  if (p.is_vararg) c.slots.push_back("(slot \"va\" (ptr unsigned_char) 8 8)");   // the saved extra arguments
   for (std::size_t pc = 0; pc < p.code.size(); ++pc) {
     c.pc = pc;
     const Insn &i = p.code[pc];
@@ -690,11 +935,14 @@ std::string lower_module(const Chunk &chunk, const std::string &source_name) {
       << " (double 8) (long_double 16)))\n";
   out << "(producer \"lua-5.4\")\n";
   out << "(abi-type \"LV\" 16 8 (memory))\n";
-  FnIndex index;
-  for (std::size_t n = 0; n < protos.size(); ++n) index[protos[n]] = n;
+  Module m;
+  for (std::size_t n = 0; n < protos.size(); ++n) m.index[protos[n]] = n;
+  std::ostringstream fns;
   for (std::size_t n = 0; n < protos.size(); ++n) {
-    out << "\n" << lower_function(*protos[n], "lua54_fn_" + std::to_string(n), index);
+    fns << "\n" << lower_function(*protos[n], "lua54_fn_" + std::to_string(n), m);
   }
+  for (const std::string &d : m.data) out << d;   // string data first: the functions refer to it
+  out << fns.str();
   return out.str();
 }
 

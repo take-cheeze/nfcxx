@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 typedef struct LV {
   uint8_t tag;
@@ -17,7 +18,10 @@ typedef struct LV {
   } v;
 } LV;
 
-enum { TAG_NIL = 0x00, TAG_INT = 0x03, TAG_FLOAT = 0x13, TAG_LCL = 0x06 };
+enum {
+  TAG_NIL = 0x00, TAG_FALSE = 0x01, TAG_TRUE = 0x11, TAG_INT = 0x03, TAG_FLOAT = 0x13, TAG_STR = 0x04,
+  TAG_TABLE = 0x05, TAG_LCL = 0x06
+};
 /* lopcodes.h opcode numbers of the binary ops (the helper takes the base op, not the K or I form). */
 enum {
   OP_ADD = 34, OP_SUB = 35, OP_MUL = 36, OP_MOD = 37, OP_POW = 38, OP_DIV = 39, OP_IDIV = 40,
@@ -30,7 +34,6 @@ static void die(const char *what) {
   exit(4);
 }
 
-/* A Lua function value made from a lowered prototype. A function with upvalues is not lowered yet, so there are none. */
 /* Functions and closures (docs/notes/lua54-pathb.md, "Calls and upvalues").
  * A lowered function is fn(ret, base, cl): ret receives the one result, base is the frame, cl is the closure.
  * An upvalue is a cell. While its variable is on the stack it is open: v points at the stack slot. When the frame
@@ -98,12 +101,63 @@ void lua54rt_getupval(LV *dst, void *cl, int idx) { *dst = *((LClosure *)cl)->up
 
 void lua54rt_setupval(void *cl, int idx, LV *src) { *((LClosure *)cl)->upvals[idx]->v = *src; }
 
-/* OP_CALL with one result: the callee's base is args, its result goes to ret. Missing parameters are nil. */
-void lua54rt_call(LV *fn, int nargs, LV *args, LV *ret) {
+/* The calling protocol (docs/notes/lua54-pathb.md, "Calls"). A callee writes its results to ret[0..n-1] and records n in
+ * lua54rt_nret. The stack top, lua54rt_top, is the index after the last value of a multi-result op; the next op that
+ * takes "up to top" reads it at once. The callee's arguments are the caller's registers. A vararg function saves its
+ * extra arguments at entry (lua54rt_varargprep), while their count is still in lua54rt_nargs. */
+static int lua54rt_nret = 0;
+static int lua54rt_top = 0;
+static int lua54rt_nargs = 0;
+
+int lua54rt_gettop(void) { return lua54rt_top; }
+
+/* RETURN: copy n values from src to ret. ret lies below src (it is the caller's register A), so a forward copy is safe. */
+void lua54rt_setret(LV *ret, LV *src, int n) {
+  for (int k = 0; k < n; ++k) ret[k] = src[k];
+  lua54rt_nret = n;
+}
+
+/* OP_CALL: the callee's base is args; its results go to ret. wanted is the number of results the caller takes, or -1
+ * for all of them, which sets the stack top to a + n (a is the caller's register index of the call). */
+void lua54rt_call(LV *fn, int nargs, LV *args, LV *ret, int wanted, int a) {
   if (fn->tag != TAG_LCL) die("attempt to call a value that is not a lowered function");
   LClosure *c = (LClosure *)fn->v.p;
   for (int k = nargs; k < c->numparams; ++k) args[k].tag = TAG_NIL;
+  lua54rt_nargs = nargs;
+  lua54rt_nret = 0;
   c->fn(ret, args, c);
+  if (wanted < 0) {
+    lua54rt_top = a + lua54rt_nret;
+    return;
+  }
+  for (int k = lua54rt_nret; k < wanted; ++k) ret[k].tag = TAG_NIL;
+}
+
+/* VARARGPREP: the extra arguments of the current call, saved for VARARG. */
+typedef struct VarArgs {
+  int count;
+  LV *vals;
+} VarArgs;
+
+void *lua54rt_varargprep(LV *base, int nfixed) {
+  VarArgs *va = (VarArgs *)malloc(sizeof *va);
+  if (va == NULL) die("out of memory");
+  va->count = lua54rt_nargs > nfixed ? lua54rt_nargs - nfixed : 0;
+  va->vals = (LV *)malloc(sizeof(LV) * (size_t)(va->count > 0 ? va->count : 1));
+  if (va->vals == NULL) die("out of memory");
+  for (int k = 0; k < va->count; ++k) va->vals[k] = base[nfixed + k];
+  return va;
+}
+
+/* VARARG A C: R[a..] := the saved extra arguments; wanted < 0 takes them all and sets the stack top. */
+void lua54rt_vararg(void *vap, LV *dst, int wanted, int a) {
+  VarArgs *va = (VarArgs *)vap;
+  int n = wanted < 0 ? va->count : wanted;
+  for (int k = 0; k < n; ++k) {
+    if (k < va->count) dst[k] = va->vals[k];
+    else dst[k].tag = TAG_NIL;
+  }
+  if (wanted < 0) lua54rt_top = a + va->count;
 }
 
 static int is_number(const LV *x) { return x->tag == TAG_INT || x->tag == TAG_FLOAT; }
@@ -328,16 +382,329 @@ int lua54rt_forloop(LV *ra) {
   return 0;
 }
 
-/* kind 0: a < b, 1: a <= b, 2: a == b */
+
+/* Strings: immutable, compared by content. No interning: each lowered string constant or result is a new object. */
+typedef struct LString {
+  size_t len;
+  char bytes[1];   /* len bytes and a NUL */
+} LString;
+
+static LV make_str(const char *p, size_t len) {
+  LString *s = (LString *)malloc(sizeof(LString) + len);
+  if (s == NULL) die("out of memory");
+  s->len = len;
+  if (len > 0) memcpy(s->bytes, p, len);
+  s->bytes[len] = '\0';
+  LV v;
+  v.tag = TAG_STR;
+  v.v.p = s;
+  return v;
+}
+
+void lua54rt_str(LV *dst, const char *p, long len) { *dst = make_str(p, (size_t)len); }
+
+/* Tables: a hash of key/value nodes with linear probing. Keys are normalized as lvm.c does: a float with an integer
+ * value is the integer key. Setting nil keeps the node until the next resize. No array part yet. */
+typedef struct Node {
+  LV key;
+  LV val;
+  int used;
+} Node;
+
+typedef struct Table {
+  Node *nodes;
+  size_t cap;    /* a power of two, or 0 */
+  size_t count;  /* used nodes, including those with a nil value */
+} Table;
+
+static const char *type_name(uint8_t tag) {
+  switch (tag) {
+    case TAG_NIL: return "nil";
+    case TAG_FALSE:
+    case TAG_TRUE: return "boolean";
+    case TAG_INT:
+    case TAG_FLOAT: return "number";
+    case TAG_STR: return "string";
+    case TAG_TABLE: return "table";
+    case TAG_LCL: return "function";
+    default: return "?";
+  }
+}
+
+static void die_type(const char *what, uint8_t tag) {
+  char buf[128];
+  snprintf(buf, sizeof buf, "attempt to %s a %s value", what, type_name(tag));
+  die(buf);
+}
+
+static uint64_t mix(uint64_t x) {
+  x ^= x >> 33;
+  x *= 0xff51afd7ed558ccdULL;
+  x ^= x >> 33;
+  return x;
+}
+
+static uint64_t hash_key(const LV *k) {
+  switch (k->tag) {
+    case TAG_INT: return mix((uint64_t)k->v.i);
+    case TAG_FLOAT: {
+      uint64_t bits;
+      memcpy(&bits, &k->v.n, sizeof bits);
+      return mix(bits);
+    }
+    case TAG_STR: {
+      const LString *s = (const LString *)k->v.p;
+      uint64_t h = 1469598103934665603ULL;
+      for (size_t i = 0; i < s->len; ++i) h = (h ^ (unsigned char)s->bytes[i]) * 1099511628211ULL;
+      return h;
+    }
+    case TAG_NIL:
+    case TAG_FALSE:
+    case TAG_TRUE: return k->tag;
+    default: return mix((uint64_t)(uintptr_t)k->v.p);
+  }
+}
+
+static int same_key(const LV *a, const LV *b) {
+  if (a->tag != b->tag) return 0;
+  switch (a->tag) {
+    case TAG_INT: return a->v.i == b->v.i;
+    case TAG_FLOAT: return a->v.n == b->v.n;
+    case TAG_STR: {
+      const LString *x = (const LString *)a->v.p, *y = (const LString *)b->v.p;
+      return x->len == y->len && memcmp(x->bytes, y->bytes, x->len) == 0;
+    }
+    case TAG_NIL:
+    case TAG_FALSE:
+    case TAG_TRUE: return 1;
+    default: return a->v.p == b->v.p;
+  }
+}
+
+/* The key as lvm.c stores it: nil and NaN are errors; a float with an exact integer value is an integer. */
+static LV normal_key(const LV *k) {
+  LV r = *k;
+  if (k->tag == TAG_NIL) die("table index is nil");
+  if (k->tag == TAG_FLOAT) {
+    double f = k->v.n;
+    if (f != f) die("table index is NaN");
+    if (floor(f) == f && f >= -9223372036854775808.0 && f < 9223372036854775808.0) {
+      r.tag = TAG_INT;
+      r.v.i = (int64_t)f;
+    }
+  }
+  return r;
+}
+
+static Node *table_find(const Table *t, const LV *key) {
+  if (t->cap == 0) return NULL;
+  size_t mask = t->cap - 1;
+  for (size_t i = (size_t)hash_key(key) & mask;; i = (i + 1) & mask) {
+    Node *n = &t->nodes[i];
+    if (!n->used) return NULL;
+    if (same_key(&n->key, key)) return n;
+  }
+}
+
+static void table_resize(Table *t, size_t cap) {
+  Node *old = t->nodes;
+  size_t oldcap = t->cap;
+  t->nodes = (Node *)calloc(cap, sizeof(Node));
+  if (t->nodes == NULL) die("out of memory");
+  t->cap = cap;
+  t->count = 0;
+  for (size_t i = 0; i < oldcap; ++i) {
+    if (old[i].used && old[i].val.tag != TAG_NIL) {
+      size_t mask = t->cap - 1;
+      size_t j = (size_t)hash_key(&old[i].key) & mask;
+      while (t->nodes[j].used) j = (j + 1) & mask;
+      t->nodes[j] = old[i];
+      t->count++;
+    }
+  }
+  free(old);
+}
+
+static Node *table_slot(Table *t, const LV *key) {
+  Node *n = table_find(t, key);
+  if (n != NULL) return n;
+  if ((t->count + 1) * 2 > t->cap) table_resize(t, t->cap == 0 ? 4 : t->cap * 2);
+  size_t mask = t->cap - 1;
+  size_t j = (size_t)hash_key(key) & mask;
+  while (t->nodes[j].used) j = (j + 1) & mask;
+  t->nodes[j].used = 1;
+  t->nodes[j].key = *key;
+  t->nodes[j].val.tag = TAG_NIL;
+  t->count++;
+  return &t->nodes[j];
+}
+
+void lua54rt_newtable(LV *dst) {
+  Table *t = (Table *)calloc(1, sizeof *t);
+  if (t == NULL) die("out of memory");
+  dst->tag = TAG_TABLE;
+  dst->v.p = t;
+}
+
+static Table *as_table(const LV *t, const char *what) {
+  if (t->tag != TAG_TABLE) die_type(what, t->tag);
+  return (Table *)t->v.p;
+}
+
+void lua54rt_gettable(LV *dst, LV *t, LV *key) {
+  Table *tb = as_table(t, "index");
+  LV k = normal_key(key);
+  Node *n = table_find(tb, &k);
+  if (n != NULL) *dst = n->val;
+  else dst->tag = TAG_NIL;
+}
+
+void lua54rt_settable(LV *t, LV *key, LV *val) {
+  Table *tb = as_table(t, "index");
+  LV k = normal_key(key);
+  if (val->tag == TAG_NIL) {
+    Node *n = table_find(tb, &k);
+    if (n != NULL) n->val.tag = TAG_NIL;
+    return;
+  }
+  Node *n = table_slot(tb, &k);
+  n->val = *val;
+}
+
+/* The border: the largest n with t[1..n] all non-nil, found by counting from 1. */
+static int64_t table_border(const Table *t) {
+  int64_t n = 0;
+  for (;;) {
+    LV k;
+    k.tag = TAG_INT;
+    k.v.i = n + 1;
+    Node *node = table_find(t, &k);
+    if (node == NULL || node->val.tag == TAG_NIL) return n;
+    n++;
+  }
+}
+
+void lua54rt_len(LV *dst, LV *src) {
+  /* read the source before the destination is written: they may be the same register */
+  int64_t n;
+  if (src->tag == TAG_STR) n = (int64_t)((LString *)src->v.p)->len;
+  else n = table_border(as_table(src, "get the length of"));
+  dst->tag = TAG_INT;
+  dst->v.i = n;
+}
+
+/* Number to string as lobject.c's tostring: integers as %d, floats as %.14g, with ".0" when that looks like an integer. */
+static size_t number_text(const LV *x, char *buf, size_t size) {
+  if (x->tag == TAG_INT) return (size_t)snprintf(buf, size, "%lld", (long long)x->v.i);
+  size_t n = (size_t)snprintf(buf, size, "%.14g", x->v.n);
+  if (strspn(buf, "-0123456789") == n && n + 2 < size) {
+    buf[n++] = '.';
+    buf[n++] = '0';
+    buf[n] = '\0';
+  }
+  return n;
+}
+
+/* OP_CONCAT: R[dst] := the n values from base, concatenated; strings and numbers only. */
+void lua54rt_concat(LV *dst, LV *base, int n) {
+  size_t total = 0;
+  char numbuf[64];
+  for (int i = 0; i < n; ++i) {
+    if (base[i].tag == TAG_STR) total += ((LString *)base[i].v.p)->len;
+    else if (is_number(&base[i])) total += number_text(&base[i], numbuf, sizeof numbuf);
+    else die_type("concatenate", base[i].tag);
+  }
+  char *buf = (char *)malloc(total + 1);
+  if (buf == NULL) die("out of memory");
+  size_t pos = 0;
+  for (int i = 0; i < n; ++i) {
+    if (base[i].tag == TAG_STR) {
+      LString *s = (LString *)base[i].v.p;
+      memcpy(buf + pos, s->bytes, s->len);
+      pos += s->len;
+    } else {
+      pos += number_text(&base[i], buf + pos, total + 1 - pos);
+    }
+  }
+  *dst = make_str(buf, total);
+  free(buf);
+}
+
+/* OP_SETLIST: t[offset + j] := vals[j - 1] for j = 1..count. */
+void lua54rt_setlist(LV *t, long offset, LV *vals, int count) {
+  Table *tb = as_table(t, "index");
+  for (int j = 1; j <= count; ++j) {
+    LV k;
+    k.tag = TAG_INT;
+    k.v.i = offset + j;
+    if (vals[j - 1].tag == TAG_NIL) continue;
+    Node *n = table_slot(tb, &k);
+    n->val = vals[j - 1];
+  }
+}
+
+/* A closure for the main function of a chunk: upvalue 0 is _ENV, a fresh table; the others are nil. */
+void *lua54rt_make_main(void *fn, int nupvals) {
+  LV cl;
+  lua54rt_closure(&cl, fn, 0, nupvals);
+  LClosure *c = (LClosure *)cl.v.p;
+  for (int k = 0; k < nupvals; ++k) {
+    UpVal *uv = (UpVal *)malloc(sizeof *uv);
+    if (uv == NULL) die("out of memory");
+    uv->open_next = NULL;
+    if (k == 0) lua54rt_newtable(&uv->closed);
+    else uv->closed.tag = TAG_NIL;
+    uv->v = &uv->closed;
+    c->upvals[k] = uv;
+  }
+  return c;
+}
+
+/* Equality as lvm.c's luaV_equalobj without metamethods: numbers by value, other types by tag, then content (strings)
+ * or identity (tables and functions); nil and booleans are equal to themselves. */
+static int equal_values(const LV *a, const LV *b) {
+  if (is_number(a) && is_number(b)) {
+    if (a->tag == TAG_INT && b->tag == TAG_INT) return a->v.i == b->v.i;
+    return as_float(a) == as_float(b);
+  }
+  if (a->tag != b->tag) return 0;
+  return same_key(a, b);
+}
+
+/* kind 0: a < b, 1: a <= b, 2: a == b. Returns 0 or 1. Numbers compare as doubles when they differ in type; strings by
+ * bytes (the C locale's collation, as strcoll gives there). */
 int lua54rt_cmp(int kind, LV *a, LV *b) {
-  if (!is_number(a) || !is_number(b)) die("comparison of a non-number");
+  if (kind == 2) return equal_values(a, b);
   if (a->tag == TAG_INT && b->tag == TAG_INT) {
     if (kind == 0) return a->v.i < b->v.i;
-    if (kind == 1) return a->v.i <= b->v.i;
-    return a->v.i == b->v.i;
+    return a->v.i <= b->v.i;
   }
-  double x = as_float(a), y = as_float(b);
-  if (kind == 0) return x < y;
-  if (kind == 1) return x <= y;
-  return x == y;
+  if (is_number(a) && is_number(b)) {
+    double x = as_float(a), y = as_float(b);
+    if (kind == 0) return x < y;
+    return x <= y;
+  }
+  if (a->tag == TAG_STR && b->tag == TAG_STR) {
+    const LString *x = (const LString *)a->v.p, *y = (const LString *)b->v.p;
+    size_t m = x->len < y->len ? x->len : y->len;
+    int c = memcmp(x->bytes, y->bytes, m);
+    if (c == 0) c = x->len < y->len ? -1 : (x->len > y->len ? 1 : 0);
+    return kind == 0 ? c < 0 : c <= 0;
+  }
+  die("attempt to compare two incompatible values");
+  return 0;
+}
+
+/* Runs the main function of a chunk on a stack the runtime owns. The results are copied to out (at most outsize of
+ * them); the number of results is returned. */
+#define LUA54RT_STACK 65536
+int lua54rt_run_main(void *cl, LV *out, int outsize) {
+  static LV stack[LUA54RT_STACK];
+  LV ret[256];
+  lua54rt_nargs = 0;
+  lua54rt_top = 0;
+  ((LClosure *)cl)->fn(ret, stack, cl);
+  int n = lua54rt_nret < outsize ? lua54rt_nret : outsize;
+  for (int k = 0; k < n; ++k) out[k] = ret[k];
+  return n;
 }
