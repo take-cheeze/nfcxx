@@ -1033,7 +1033,7 @@ module NfcxxBody
 
     hsyms = @state_values["hsyms"].to_s
     args2 = @state_values.fetch("args2", [])
-    env2 = @env.merge("NFCXX_CUDA_HOST_SYMBOLS" => hsyms, "NFCXX_CACHE" => "", "NFCXX_CACHE_REMOTE" => "")
+    env2 = @env.to_h.merge("NFCXX_CUDA_HOST_SYMBOLS" => hsyms, "NFCXX_CACHE" => "", "NFCXX_CACHE_REMOTE" => "")
     st2 = run_cmd(RbConfig.ruby, File.join(ROOT, "scripts", "nfcxx.rb"), *args2, env: env2)
     raise Exit.new(st2) unless st2 == 0
   end
