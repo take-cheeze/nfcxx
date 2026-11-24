@@ -1769,6 +1769,7 @@ BC2CPP_MAIN = lambda do
   if gen.rom_method_tables?
     puts '#define BC2CPP_ROM_METHOD_TABLES 1'
     puts CodeGen::ROM_INSTALL_HELPER
+    puts CodeGen::ROM_DEF_CHECK_HELPER if gen.rom_class_body_defs?
     puts CodeGen::CONST_PATH_WALK_HELPER if gen.const_path_walk?
   end
   # CLASS_READ_INLINE (docs/bc2cpp-class-read-inline.md): mrb_obj_class is mrb_class_real(mrb_class(v)), out of
@@ -3268,7 +3269,7 @@ BC2CPP_MAIN = lambda do
   end
   # The class units' text takes the same passes as the compiled methods (a unit's helper calls are named the same way).
   class_units = class_units.map do |unit|
-    code = unit[:code].gsub('@@SITE@@') { unit[:path].to_s.gsub(/["\\]/) { |c| "\\#{c}" } }
+    code = gen.rom_class_body_defs(unit[:code]).gsub('@@SITE@@') { unit[:path].to_s.gsub(/["\\]/) { |c| "\\#{c}" } }
     code = OwnerCallDirect.rewrite(code, *owner_rewrite, **owner_rewrite_opts)
     unit.merge(code: ConstDefTable.rewrite(SymbolCache.rewrite(code, symbol_table)))
   end
