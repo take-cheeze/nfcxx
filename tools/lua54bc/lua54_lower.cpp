@@ -11,6 +11,7 @@
 #include "lua54_lower.hpp"
 
 #include <cstdio>
+#include <map>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -26,14 +27,18 @@ constexpr int kTagNil = 0x00, kTagFalse = 0x01, kTagTrue = 0x11, kTagInt = 0x03,
 // Helper kinds for lua54rt_cmp (docs/notes/lua54-pathb.md).
 constexpr int kCmpLt = 0, kCmpLe = 1, kCmpEq = 2;
 
+// Function numbers of every prototype of the chunk (pre-order, the main function is 0).
+using FnIndex = std::map<const Proto *, std::size_t>;
+
 struct Ctx {
   const Proto &p;
+  const FnIndex &index;
   std::size_t pc = 0;
   int next = 2;                    // %0 is ret, %1 is base
   std::ostringstream body;
   std::vector<std::string> slots;  // slot declarations, emitted before the body
 
-  explicit Ctx(const Proto &proto) : p(proto) {}
+  Ctx(const Proto &proto, const FnIndex &fn_index) : p(proto), index(fn_index) {}
 
   std::string fresh() { return "%" + std::to_string(next++); }
   void line(const std::string &s) { body << "  " << s << "\n"; }
@@ -211,7 +216,74 @@ void emit_cond_jump(Ctx &c, const std::string &cond, unsigned k) {
   }
 }
 
-// --- The op table: one lowering function per opcode. ---
+// --- Helper-backed templates. ---
+
+// A binary op the helper performs whole (floats, bitwise, division, modulo, power, shifts). On success lvm.c skips the
+// MMBIN after the op, so control goes to pc+2; the helper covers the metamethod path too.
+void emit_helper_arith(Ctx &c, Op base, unsigned a, const std::string &lhs, const std::string &rhs) {
+  std::string dst = reg(c, a);
+  c.line("(eval (call void &\"lua54rt_arith\" (const int " + std::to_string(static_cast<int>(base)) + ") " + dst + " " +
+         lhs + " " + rhs + "))");
+  go(c, c.pc + 2);
+}
+
+// A unary op the helper performs (UNM, BNOT). No MMBIN follows these, so control falls through.
+void emit_helper_unary(Ctx &c, int op, unsigned a, unsigned b) {
+  std::string src = reg(c, b), dst = reg(c, a);
+  c.line("(eval (call void &\"lua54rt_unary\" (const int " + std::to_string(op) + ") " + dst + " " + src + "))");
+}
+
+// The numeric for loop (lvm.c forprep and OP_FORLOOP). The helpers do the work on the four registers from R[A].
+void lower_forprep(Ctx &c, const Insn &i) {
+  std::string ra = reg(c, i.A());
+  std::string s = c.fresh();
+  c.line("(let " + s + " int (call int &\"lua54rt_forprep\" " + ra + "))");
+  std::string skip = c.fresh();
+  c.line("(let " + skip + " bool (ne int " + s + " (const int 0)))");
+  // lvm.c: `pc += Bx + 1` after pc was advanced, so the loop is skipped to pc + Bx + 2.
+  std::size_t exit_pc = c.pc + i.Bx() + 2;
+  c.line("(if " + skip + " (then (goto " + lbl(exit_pc) + ")) (else (goto " + lbl(c.pc + 1) + ")))");
+}
+
+void lower_forloop(Ctx &c, const Insn &i) {
+  std::string ra = reg(c, i.A());
+  std::string s = c.fresh();
+  c.line("(let " + s + " int (call int &\"lua54rt_forloop\" " + ra + "))");
+  std::string again = c.fresh();
+  c.line("(let " + again + " bool (ne int " + s + " (const int 0)))");
+  // lvm.c: `pc -= Bx` after pc was advanced, so the jump back goes to pc + 1 - Bx.
+  std::size_t back = c.pc + 1 - i.Bx();
+  c.line("(if " + again + " (then (goto " + lbl(back) + ")) (else (goto " + lbl(c.pc + 1) + ")))");
+}
+
+// NOT A B: R[A] is true when R[B] is nil or false.
+void lower_not(Ctx &c, const Insn &i) {
+  std::string rb = reg(c, i.B());
+  std::string t = load_tag(c, rb);
+  std::string is_nil = tag_is(c, t, kTagNil), is_false = tag_is(c, t, kTagFalse);
+  std::string falsy = c.fresh();
+  c.line("(let " + falsy + " bool (const bool 0))");
+  // if nil then falsy := true else (if false then falsy := true else falsy := false)
+  c.line("(if " + is_nil + " (then (set " + falsy + " (const bool 1))) (else");
+  c.line("(if " + is_false + " (then (set " + falsy + " (const bool 1))) (else (set " + falsy + " (const bool 0))))");
+  c.line("))");   // closes the else of the nil test and the nil test itself
+  std::string dst = reg(c, i.A());
+  c.line("(if " + falsy + " (then");
+  store_tag(c, dst, kTagTrue);
+  c.line(") (else");
+  store_tag(c, dst, kTagFalse);
+  c.line("))");
+}
+
+// A binary op with a K operand (DIVK, MODK, ...): the constant goes through a temporary, the helper does the op.
+void arith_k_helper(Ctx &c, const Insn &i, Op base) {
+  std::string rb = reg(c, i.B());
+  std::string kv = constant_lv(c, c.p.k.at(i.C()));
+  emit_helper_arith(c, base, i.A(), rb, kv);
+}
+
+// The op table: one lowering function per opcode.
+
 
 using Lower = void (*)(Ctx &, const Insn &);
 
@@ -263,6 +335,79 @@ void arith_k(Ctx &c, const Insn &i, Op op) {
   } else {
     emit_arith(c, op, i.A(), rb, kv, nullptr);
   }
+}
+
+void lower_div(Ctx &c, const Insn &i) { emit_helper_arith(c, DIV, i.A(), reg(c, i.B()), reg(c, i.C())); }
+void lower_idiv(Ctx &c, const Insn &i) { emit_helper_arith(c, IDIV, i.A(), reg(c, i.B()), reg(c, i.C())); }
+void lower_mod(Ctx &c, const Insn &i) { emit_helper_arith(c, MOD, i.A(), reg(c, i.B()), reg(c, i.C())); }
+void lower_pow(Ctx &c, const Insn &i) { emit_helper_arith(c, POW, i.A(), reg(c, i.B()), reg(c, i.C())); }
+void lower_band(Ctx &c, const Insn &i) { emit_helper_arith(c, BAND, i.A(), reg(c, i.B()), reg(c, i.C())); }
+void lower_bor(Ctx &c, const Insn &i) { emit_helper_arith(c, BOR, i.A(), reg(c, i.B()), reg(c, i.C())); }
+void lower_bxor(Ctx &c, const Insn &i) { emit_helper_arith(c, BXOR, i.A(), reg(c, i.B()), reg(c, i.C())); }
+void lower_shl(Ctx &c, const Insn &i) { emit_helper_arith(c, SHL, i.A(), reg(c, i.B()), reg(c, i.C())); }
+void lower_shr(Ctx &c, const Insn &i) { emit_helper_arith(c, SHR, i.A(), reg(c, i.B()), reg(c, i.C())); }
+
+void lower_divk(Ctx &c, const Insn &i) { arith_k_helper(c, i, DIV); }
+void lower_idivk(Ctx &c, const Insn &i) { arith_k_helper(c, i, IDIV); }
+void lower_modk(Ctx &c, const Insn &i) { arith_k_helper(c, i, MOD); }
+void lower_powk(Ctx &c, const Insn &i) { arith_k_helper(c, i, POW); }
+void lower_bandk(Ctx &c, const Insn &i) { arith_k_helper(c, i, BAND); }
+void lower_bork(Ctx &c, const Insn &i) { arith_k_helper(c, i, BOR); }
+void lower_bxork(Ctx &c, const Insn &i) { arith_k_helper(c, i, BXOR); }
+
+// SHRI A B sC: R[A] := R[B] >> sC (shiftl by -sC). SHLI A B sC: R[A] := sC << R[B].
+void lower_shri(Ctx &c, const Insn &i) {
+  std::string rb = reg(c, i.B());
+  std::string imm = imm_lv(c, i.sC(), false);
+  emit_helper_arith(c, SHR, i.A(), rb, imm);
+}
+void lower_shli(Ctx &c, const Insn &i) {
+  std::string imm = imm_lv(c, i.sC(), false);
+  std::string rb = reg(c, i.B());
+  emit_helper_arith(c, SHL, i.A(), imm, rb);
+}
+
+void lower_unm(Ctx &c, const Insn &i) { emit_helper_unary(c, UNM, i.A(), i.B()); }
+void lower_bnot(Ctx &c, const Insn &i) { emit_helper_unary(c, BNOT, i.A(), i.B()); }
+
+// CLOSURE A Bx: a function value for prototype Bx. Only prototypes without upvalues are lowered so far.
+void lower_closure(Ctx &c, const Insn &i) {
+  const Proto &child = *c.p.p.at(i.Bx());
+  if (!child.upvalues.empty()) throw std::runtime_error("refused: a closure with upvalues is not lowered yet");
+  std::size_t fn = c.index.at(&child);
+  std::string dst = reg(c, i.A());
+  c.line("(eval (call void &\"lua54rt_closure\" " + dst + " &\"lua54_fn_" + std::to_string(fn) + "\" (const int " +
+         std::to_string(child.numparams) + ") (const int " + std::to_string(child.upvalues.size()) + ")))");
+}
+
+// CALL A B C: R[A] is the function, R[A+1..] its B-1 arguments, the results go to R[A..A+C-2]. The callee's base is
+// R[A+1]; the function value is copied first, because R[A] receives the first result.
+void emit_call(Ctx &c, unsigned a, unsigned b, unsigned nresults) {
+  std::string fn_slot = c.temp_lv();
+  std::string fn_reg = reg(c, a);
+  c.line("(copy 16 " + fn_slot + " " + fn_reg + ")");
+  store_tag(c, fn_reg, kTagNil);   // no value returned leaves R[A] nil
+  std::string args = reg(c, a + 1);
+  std::string ret = reg(c, a);
+  c.line("(eval (call void &\"lua54rt_call\" " + fn_slot + " (const int " + std::to_string(b - 1) + ") " + args + " " +
+         ret + "))");
+  // Results past the first are nil (the callee returns at most one value here).
+  for (unsigned k = 1; k < nresults; ++k) store_tag(c, reg(c, a + k), kTagNil);
+}
+
+void lower_call(Ctx &c, const Insn &i) {
+  if (i.B() == 0) throw std::runtime_error("refused: CALL with arguments up to the stack top is not lowered yet");
+  if (i.C() == 0) throw std::runtime_error("refused: CALL with several results is not lowered yet");
+  emit_call(c, i.A(), i.B(), i.C() - 1);
+}
+
+// TAILCALL A B k: a call whose one result is returned (`return f(x)`). Not lowered with upvalues to close (k).
+void lower_tailcall(Ctx &c, const Insn &i) {
+  if (i.k()) throw std::runtime_error("refused: TAILCALL with upvalues to close is not lowered yet");
+  if (i.B() == 0) throw std::runtime_error("refused: TAILCALL with arguments up to the stack top is not lowered yet");
+  emit_call(c, i.A(), i.B(), 1);
+  c.line("(copy 16 %0 " + reg(c, i.A()) + ")");
+  c.line("(return)");
 }
 
 void lower_addk(Ctx &c, const Insn &i) { arith_k(c, i, ADD); }
@@ -390,7 +535,11 @@ void lower_jmp(Ctx &c, const Insn &i) {
 // the stack top (B = 0), more than one value, or upvalues to close (k) are refused for now.
 void lower_return(Ctx &c, const Insn &i) {
   if (i.k()) throw std::runtime_error("refused: RETURN with upvalues to close is not lowered yet");
+  bool after_tailcall = c.pc > 0 && c.p.code[c.pc - 1].op() == TAILCALL;
   if (i.B() == 1) {
+    c.line("(return)");
+  } else if (i.B() == 0 && after_tailcall) {
+    // lvm.c's RETURN after TAILCALL returns the call's values, which TAILCALL has already returned: unreachable here.
     c.line("(return)");
   } else if (i.B() == 2) {
     c.line("(copy 16 %0 " + reg(c, i.A()) + ")");
@@ -432,6 +581,32 @@ const Entry *table() {
   t[ADDK] = {lower_addk, nullptr};
   t[SUBK] = {lower_subk, nullptr};
   t[MULK] = {lower_mulk, nullptr};
+  t[DIV] = {lower_div, nullptr};
+  t[IDIV] = {lower_idiv, nullptr};
+  t[MOD] = {lower_mod, nullptr};
+  t[POW] = {lower_pow, nullptr};
+  t[BAND] = {lower_band, nullptr};
+  t[BOR] = {lower_bor, nullptr};
+  t[BXOR] = {lower_bxor, nullptr};
+  t[SHL] = {lower_shl, nullptr};
+  t[SHR] = {lower_shr, nullptr};
+  t[DIVK] = {lower_divk, nullptr};
+  t[IDIVK] = {lower_idivk, nullptr};
+  t[MODK] = {lower_modk, nullptr};
+  t[POWK] = {lower_powk, nullptr};
+  t[BANDK] = {lower_bandk, nullptr};
+  t[BORK] = {lower_bork, nullptr};
+  t[BXORK] = {lower_bxork, nullptr};
+  t[SHRI] = {lower_shri, nullptr};
+  t[SHLI] = {lower_shli, nullptr};
+  t[UNM] = {lower_unm, nullptr};
+  t[BNOT] = {lower_bnot, nullptr};
+  t[NOT] = {lower_not, nullptr};
+  t[FORPREP] = {lower_forprep, nullptr};
+  t[FORLOOP] = {lower_forloop, nullptr};
+  t[CLOSURE] = {lower_closure, nullptr};
+  t[CALL] = {lower_call, nullptr};
+  t[TAILCALL] = {lower_tailcall, nullptr};
   t[MMBIN] = {lower_nothing, nullptr};
   t[MMBINI] = {lower_nothing, nullptr};
   t[MMBINK] = {lower_nothing, nullptr};
@@ -455,8 +630,8 @@ const Entry *table() {
 }
 
 // The IR of one function. The body lowers instruction by instruction, each with its label.
-std::string lower_function(const Proto &p, const std::string &name) {
-  Ctx c(p);
+std::string lower_function(const Proto &p, const std::string &name, const FnIndex &index) {
+  Ctx c(p, index);
   for (std::size_t pc = 0; pc < p.code.size(); ++pc) {
     c.pc = pc;
     const Insn &i = p.code[pc];
@@ -491,8 +666,10 @@ std::string lower_module(const Chunk &chunk, const std::string &source_name) {
       << " (double 8) (long_double 16)))\n";
   out << "(producer \"lua-5.4\")\n";
   out << "(abi-type \"LV\" 16 8 (memory))\n";
+  FnIndex index;
+  for (std::size_t n = 0; n < protos.size(); ++n) index[protos[n]] = n;
   for (std::size_t n = 0; n < protos.size(); ++n) {
-    out << "\n" << lower_function(*protos[n], "lua54_fn_" + std::to_string(n));
+    out << "\n" << lower_function(*protos[n], "lua54_fn_" + std::to_string(n), index);
   }
   return out.str();
 }

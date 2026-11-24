@@ -41,7 +41,7 @@ for lua in "$dir"/lower/*.lua; do
     continue
   fi
   "$root/build/qbe/qbe" "$work/$base.ssa" > "$work/$base.s" 2> "$work/$base.err" || { echo "FAIL $base: qbe: $(cat "$work/$base.err")"; fail=1; continue; }
-  cc -o "$work/$base" "$work/$base.s" "$work/rt.o" "$work/driver.o" || { echo "FAIL $base: link"; fail=1; continue; }
+  cc -o "$work/$base" "$work/$base.s" "$work/rt.o" "$work/driver.o" -lm || { echo "FAIL $base: link"; fail=1; continue; }
   got=$("$work/$base") || { echo "FAIL $base: the program exited with status $?"; fail=1; continue; }
   want=$("$LUA" -e "print((dofile('$lua')))")
   n=$((n + 1))
@@ -51,10 +51,10 @@ for lua in "$dir"/lower/*.lua; do
   fi
 done
 
-# A program with an opcode that is not lowered yet (a call) must be refused, not compiled.
+# A program with an opcode that is not lowered yet (a table constructor) must be refused, not compiled.
 cat > "$work/refuse.lua" <<'LUA'
-local function f(x) return x end
-return f(1)
+local t = {}
+return 1
 LUA
 "$LUA" "$dir/dump.lua" "$work/refuse.lua" "$work/refuse.luac" full
 if "$work/lower" "$work/refuse.luac" > "$work/refuse.ir" 2> "$work/refuse.err"; then
@@ -69,4 +69,4 @@ if [ "$fail" -ne 0 ]; then
   echo "lua54bc-lower: FAILED"
   exit 1
 fi
-echo "lua54bc-lower: $n programs run and match Lua 5.4.9; CALL is refused"
+echo "lua54bc-lower: $n programs run and match Lua 5.4.9; NEWTABLE is refused"

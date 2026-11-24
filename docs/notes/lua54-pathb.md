@@ -1,7 +1,7 @@
 # Lua 5.4 bytecode to Path B IR
 
-Status, 2026-11-24: first lowering. Six small programs run end to end and match Lua 5.4.9; CALL and most other opcodes
-are refused. The producer rule for this IR is in `docs/notes/pathb-stage2.md`, section 1 (amended for bytecode
+Status, 2026-11-24: numbers, comparisons, numeric loops, calls and closures without upvalues lower and run; 19 programs match
+Lua 5.4.9. Tables, strings, upvalues, varargs, generic loops and error paths are not lowered yet. The producer rule for this IR is in `docs/notes/pathb-stage2.md`, section 1 (amended for bytecode
 producers). The IR's header names the producer: `(producer "lua-5.4")`.
 
 ## Pipeline
@@ -42,39 +42,50 @@ Each IR function's numbers are pre-order over the prototypes of the chunk: `lua5
 ## Op table
 
 `lua54_lower.cpp` has one lowering function per opcode. An opcode with no entry, or an entry that refuses an operand
-shape, is refused with `refused: ...`; nothing is dropped.
+shape, is refused by name; nothing is dropped.
 
 | opcode | lowering |
 | --- | --- |
 | `MOVE`, `LOADI`, `LOADF`, `LOADK` (numbers, booleans, nil), `LOADFALSE`, `LOADTRUE`, `LOADNIL` | inline stores and copies |
 | `ADD`, `SUB`, `MUL`, `ADDI`, `ADDK`, `SUBK`, `MULK` | integer fast path (wrapping `wadd`/`wsub`/`wmul`); otherwise `lua54rt_arith` |
-| `MMBIN`, `MMBINI`, `MMBINK` | nothing: the arithmetic op skips them on both paths (see below) |
+| `DIV`, `IDIV`, `MOD`, `POW`, `BAND`, `BOR`, `BXOR`, `SHL`, `SHR`, their `K` forms, `SHRI`, `SHLI` | `lua54rt_arith` (the helper does the whole op) |
+| `UNM`, `BNOT` | `lua54rt_unary` |
+| `NOT` | inline: true when the tag is nil or false |
+| `MMBIN`, `MMBINI`, `MMBINK` | nothing: the binary op skips them on both paths |
 | `EQ`, `LT`, `LE`, `EQI`, `LTI`, `LEI`, `GTI`, `GEI` | integer fast path; otherwise `lua54rt_cmp`; then the next `JMP` as `docondjump` does |
 | `EQK` | `lua54rt_cmp` (no fast path) |
 | `TEST` | truthiness from the tag (nil and false are falsy), then the next `JMP` |
 | `JMP` | `goto` |
+| `FORPREP`, `FORLOOP` | `lua54rt_forprep` and `lua54rt_forloop` (lvm.c's rules, integer and float loops) |
+| `CLOSURE` (prototypes without upvalues) | `lua54rt_closure`, a closure object that holds the function's address |
+| `CALL` (`B` fixed, `C` fixed) | `lua54rt_call`; the callee's base is `R[A+1]`, its result goes to `R[A]` |
+| `TAILCALL` (`k` clear, `B` fixed) | a call, then the result is returned; the `RETURN` after it is unreachable |
 | `RETURN0`, `RETURN1`, `RETURN` with `B` = 1 or 2 | `ret` gets nothing or `R[A]`, then `return` |
 | `VARARGPREP` | nothing: registers keep their contents, and no lowered op reads varargs |
 
-Refused for now: `LFALSESKIP`, `LOADKX`, `EXTRAARG`, `CALL`, `TAILCALL`, `RETURN` with several values or `k` set,
-`CLOSURE`, `VARARG`, `GETTABUP`, `GETTABLE`, `GETI`, `GETFIELD`, `SETTABUP`, `SETTABLE`, `SETI`, `SETFIELD`,
-`NEWTABLE`, `SELF`, `CONCAT`, `CLOSE`, `TBC`, `FORPREP`, `FORLOOP`, `TFORPREP`, `TFORCALL`, `TFORLOOP`, `SETLIST`,
-`SHRI`, `SHLI`, `BANDK`, `BORK`, `BXORK`, `POWK`, `DIVK`, `IDIVK`, `MODK`, `DIV`, `IDIV`, `MOD`, `POW`, `BAND`, `BOR`,
-`BXOR`, `SHL`, `SHR`, `UNM`, `BNOT`, `NOT`, `LEN`, `TESTSET`, and any string constant.
+Refused for now: `LFALSESKIP`, `LOADKX`, `EXTRAARG`, `CALL` with `B = 0` or `C = 0`, `TAILCALL` with `k` or `B = 0`,
+`RETURN` with several values or `k` set, `CLOSURE` of a prototype with upvalues, `VARARG`, `GETTABUP`, `GETTABLE`,
+`GETI`, `GETFIELD`, `SETTABUP`, `SETTABLE`, `SETI`, `SETFIELD`, `NEWTABLE`, `SELF`, `CONCAT`, `CLOSE`, `TBC`,
+`TFORPREP`, `TFORCALL`, `TFORLOOP`, `SETLIST`, `LEN`, `GETUPVAL`, `SETUPVAL`, `TESTSET`, and any string constant.
 
 ### Arithmetic and MMBIN
 
-lvm.c runs the arithmetic op and skips the following `MMBIN*` when the operands are numbers. A lowered arithmetic op
-does the same: an integer fast path, and otherwise `lua54rt_arith(op, dst, a, b)`, which performs the whole operation
-(floats, mixed operands, and metamethods). The `MMBIN*` that follows is then never reached by falling through, so it
-lowers to nothing. The helper must produce the same result and error as the `MMBIN` path would (`docs/notes/lua54-pathb.md`,
-"Runtime helpers").
+lvm.c runs the binary op and skips the following `MMBIN*` when the operands are numbers (`pc++`). A lowered binary op
+does the same: an inline integer fast path for `ADD`, `SUB`, `MUL` (and their K and I forms), and otherwise the helper,
+which performs the whole operation, metamethods included. The `MMBIN*` that follows is then never reached by falling
+through, so it lowers to nothing. The helper must produce the same result and error as the `MMBIN` path would.
 
 ### Comparisons and jumps
 
 A comparison is followed by a `JMP` in Lua 5.4 bytecode. `docondjump` takes that `JMP` when the condition equals the
 instruction's `k` bit and skips it otherwise. The lowering computes the condition as a bool register, then branches to
 the jump's destination or to the instruction after it.
+
+### Calls
+
+`CALL A B C` passes `R[A+1..]` as the callee's base, so the callee's registers are the caller's registers above `A`,
+as in Lua's own stack. The callee is `lua54_fn_N(LV *ret, LV *base)`; `ret` is `R[A]`. The helper nil-fills the
+parameters the caller did not pass. The IR function's numbers are the pre-order numbers of the prototypes.
 
 ## Runtime helpers
 
