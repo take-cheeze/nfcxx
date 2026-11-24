@@ -254,6 +254,9 @@ module NfcxxBody
       raise Exit.new(e.status, e.message.end_with?("\n") ? e.message : "#{e.message}\n")
     rescue NfcxxMissing => e
       raise Exit.new(1, "nfcxx: #{e.message} needs a value\n")
+    rescue NfcxxUnported => e
+      # the loop does not port this option: its message and status (scripts/nfcxx-loop.rb main)
+      raise Exit.new(3, "unported: #{e.message}\n")
     end
     @v = {}
     @a = {}
@@ -484,6 +487,7 @@ module NfcxxBody
     @a["gnu_opts"] = @state_values.fetch("gnu_opts", [])
     @v["gnu"] = @state_values.fetch("gnu", v("gnu")).to_s
     @v["target"] = v("target")
+    @v["cosmo_root"] = @state_values.fetch("cosmo_root", "").to_s
     span = @state_values.fetch("setup_span_start", nil)
     if span && @state_values["setup_span_stop"]
       NfccxxTrace.span(span.to_i, "host C++ headers", "driver", env: @env, stop: @state_values["setup_span_stop"].to_i) if NfccxxTrace.enabled?(@env)
@@ -851,11 +855,36 @@ module NfcxxBody
     if flag?("safeptr") && !flag?("compile_only")
       sprt = [capture(File.join(ROOT, "scripts", "safeptr-rt.rb"))[0].chomp, "-pthread"]
     end
-    fail!("nfcxx: cosmo links are not ported yet", 2) if flag?("cosmo")
+    if flag?("cosmo")
+      st = cosmo_link(pobjs, plink, ldrt.chomp, sprt, t)
+      raise Exit.new(st)
+    end
     st = run_cmd(cc, *a("asan_c"), *@a["ldopts"], *sprt, *@a["cobjs"], *pobjs, *plink, ldrt.chomp, *@a["shim"], *@a["vlart"],
                  libc_a, *cxx.split, "-lpthread", "-lm", *atomic.split, "-o", v("out"), env: @env)
     trace_end(t, "link", "pathb")
     raise Exit.new(st)
+  end
+
+  # --cosmo with Path B: cosmocc's x86_64 link (ape.o, crt.o, its linker script and libraries), the ELF fixed up and packaged as APE
+  # (bash: the cosmo branch of the Path B link; docs/notes/cosmo.md)
+  def cosmo_link(pobjs, plink, ldrt, sprt, t)
+    root = @v["cosmo_root"].to_s
+    lib = File.join(root, "x86_64-linux-cosmo", "lib")
+    libc, = capture(File.join(ROOT, "scripts", "cosmo-libc.rb"))
+    dir = temp_dir("ptmp")
+    elf = File.join(dir, "cosmo.elf")
+    st = run_cmd(File.join(root, "bin", "x86_64-linux-cosmo-g++"), "-nostartfiles", "-nodefaultlibs", "-static",
+                 "-Wl,-T,#{lib}/ape.lds", "-L#{lib}", "-o", elf, *sprt, "#{lib}/ape.o", "#{lib}/crt.o", *@a["cobjs"], *pobjs,
+                 *plink, ldrt, *@a["shim"], "-L#{libc.chomp}", "-lC", "-lcxx", "-lc", "-lcosmo", "-lm", env: @env)
+    return st unless st == 0
+
+    st = run_cmd(File.join(root, "bin", "fixupobj"), elf, env: @env)
+    return st unless st == 0
+
+    st = run_cmd(File.join(root, "bin", "apelink"), "-V", "-1", "-l", File.join(root, "bin", "ape-x86_64.elf"), "-o", v("out"), elf,
+                 env: @env)
+    trace_end(t, "link", "pathb")
+    st
   end
 
   # the gcc backend: the one-step eccp build (compile and link), with its compile cache, the second pass and the depmode
