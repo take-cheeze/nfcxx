@@ -37,7 +37,7 @@ chmod +x "$work/stub/bin/eccp"
 normalize() {
   sed -e "s#$repo#<REPO>#g" -e "s#$work#<WORK>#g" \
       -e 's#nfcxx-[a-z]*\.[A-Za-z0-9_]*#nfcxx-<T>#g' -e 's#\.build\.[A-Za-z0-9]*/#.build.<T>/#g' \
-      -e 's#nfcxx-[^/ ]*-[0-9][0-9]*-[A-Za-z0-9][A-Za-z0-9]*#nfcxx-<T>#g' -e 's#tmp\.[A-Za-z0-9][A-Za-z0-9]*/#tmp.<R>/#g' -e 's#<WORK>/tmp/[^ :/]*#<TMPDIR>#g' -e 's#line [0-9][0-9]*: #line N: #g'
+      -e 's#nfcxx-[^/ ]*-[0-9][0-9]*-[A-Za-z0-9][A-Za-z0-9]*#nfcxx-<T>#g' -e 's#tmp\.[A-Za-z0-9][A-Za-z0-9-]*/#tmp.<R>/#g' -e 's#<WORK>/tmp/[^ :/]*#<TMPDIR>#g' -e 's#line [0-9][0-9]*: #line N: #g'
 }
 
 # run_case N LINE: writes the recording of case N to $work/out/case-NN.txt
@@ -47,7 +47,7 @@ run_case() {
   d=$work/run/$n; mkdir -p "$d"; cp "$work"/src/* "$d/"
   # the environment is fixed: the variables the driver reads are the ones named on the case's line
   # shellcheck disable=SC2086
-  (cd "$d" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$work/tmp" EDG_BUILD="$work/stub" NFCXX_STUB_LOG="$d/eccp.log" \
+  (cd "$d" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$work/tmp" EDG_BUILD="$work/stub" NFCXX_STUB_LOG="$d/eccp.log" NFCXX_OWNED_MODPLAN="$work/modplan" \
       $envs "$repo/nfcxx" $args > "$d/.out" 2> "$d/.err"; echo $? > "$d/.rc")
   {
     echo "== case $n:${envs:+ $envs}${args:+ $args}" | normalize
@@ -94,8 +94,8 @@ mkdir -p "$work/proto"
 proto() {  # proto NAME ARGS...: the body in a directory of its own, with the environment words the caller sets first
   local name=$1; shift
   local d=$work/proto/$name
-  mkdir -p "$d"; cp "$work"/src/a.cpp "$d/"
-  (cd "$d" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$work/tmp" EDG_BUILD="$work/stub" NFCXX_STUB_LOG="$d/eccp.log" \
+  mkdir -p "$d" "$work/modplan"; cp "$work"/src/a.cpp "$d/"
+  (cd "$d" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$work/tmp" EDG_BUILD="$work/stub" NFCXX_STUB_LOG="$d/eccp.log" NFCXX_OWNED_MODPLAN="$work/modplan" \
      NFCXX_SETUP_DEFAULT="$default_state" NFCXX_SETUP_REST_STATUS=0 NFCXX_SETUP_REST_ERR= "$@" > "$d/out" 2> "$d/err"); echo $? > "$d/rc"
 }
 pass_if() {  # pass_if NAME CONDITION-DESCRIPTION COMMAND...: counts a protocol check

@@ -86,12 +86,12 @@ done
 # takes (the gcc route calls eccp), and a stage refusal is printed where the body prints it (status 2)
 body=$work/body.sh
 sed "s#^root=.*#root=$repo#" "$repo/tests/driver-body/nfcxx-oracle.sh" > "$body"
-pd=$work/protocol; mkdir -p "$pd"; cp "$work"/src/a.cpp "$pd/"
-(cd "$pd" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$work/tmp" EDG_BUILD="$work/stub" NFCXX_STUB_LOG="$pd/eccp.log" \
+pd=$work/protocol; mkdir -p "$pd" "$work/modplan"; cp "$work"/src/a.cpp "$pd/"   # the modules directory the Ruby driver makes (NFCXX_OWNED_MODPLAN)
+(cd "$pd" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$work/tmp" EDG_BUILD="$work/stub" NFCXX_STUB_LOG="$pd/eccp.log" NFCXX_OWNED_MODPLAN="$work/modplan" \
    NFCXX_SETUP_DEFAULT='backend=gcc default_backend=0 pb_fs_host=0' bash "$body" -c a.cpp -o a.o > "$pd/out" 2> "$pd/err"); rc=$?
 if [ "$rc" = 1 ] && [ -s "$pd/eccp.log" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL protocol: the default state (status $rc)"; fi
 rm -f "$pd/eccp.log"
-(cd "$pd" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$work/tmp" EDG_BUILD="$work/stub" NFCXX_STUB_LOG="$pd/eccp.log" \
+(cd "$pd" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$work/tmp" EDG_BUILD="$work/stub" NFCXX_STUB_LOG="$pd/eccp.log" NFCXX_OWNED_MODPLAN="$work/modplan" \
    NFCXX_SETUP_STAGE_STATUS=2 NFCXX_SETUP_STAGE=$'nfcxx: stage refusal\n' bash "$body" -fsanitize=undefined -c a.cpp -o a.o > "$pd/out" 2> "$pd/err"); rc=$?
 if [ "$rc" = 2 ] && [ "$(cat "$pd/err")" = "nfcxx: stage refusal" ] && [ ! -e "$pd/eccp.log" ]; then
   pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL protocol: the stage refusal (status $rc)"; fi

@@ -53,7 +53,7 @@ run_case() {
   d=$work/run/$n; mkdir -p "$d"; cp "$work"/src/* "$d/"
   # the environment is fixed: the variables the driver reads are the ones named on the case's line
   # shellcheck disable=SC2086
-  (cd "$d" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$work/tmp" EDG_BUILD="$work/stub" NFCXX_STUB_LOG="$d/eccp.log" \
+  (cd "$d" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$work/tmp" EDG_BUILD="$work/stub" NFCXX_STUB_LOG="$d/eccp.log" NFCXX_OWNED_MODPLAN="$work/modplan" \
       $envs "$repo/nfcxx" $args > "$d/.out" 2> "$d/.err"; echo $? > "$d/.rc")
   {
     echo "== case $n:${envs:+ $envs}${args:+ $args}" | normalize
@@ -104,8 +104,8 @@ default_state='backend=gcc default_backend=0 pb_fs_host=0'
 proto() {  # proto NAME ARGS...: the body run in a directory of its own, with the environment the caller sets (env words first)
   local name=$1; shift
   local d=$work/proto/$name
-  mkdir -p "$d"; cp "$work"/src/a.cpp "$d/"
-  (cd "$d" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$work/tmp" EDG_BUILD="$work/stub" NFCXX_STUB_LOG="$d/eccp.log" \
+  mkdir -p "$d" "$work/modplan"; cp "$work"/src/a.cpp "$d/"
+  (cd "$d" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$work/tmp" EDG_BUILD="$work/stub" NFCXX_STUB_LOG="$d/eccp.log" NFCXX_OWNED_MODPLAN="$work/modplan" \
      NFCXX_SETUP_DEFAULT="$default_state" "$@" > "$d/out" 2> "$d/err"); echo $? > "$d/rc"
 }
 pwork=$work/proto
