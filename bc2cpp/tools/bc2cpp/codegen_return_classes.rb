@@ -90,6 +90,8 @@ class CodeGen
     end
 
     def class_test(irep, index, insn, _state) = @cg.class_test_for(irep, index, insn)
+    def receiver_survives?(name) = @cg.receiver_survives?(name)
+    def note_receiver_survives(irep, index, before, after, nregs) = @cg.note_receiver_survives(irep, index, before, after, nregs)
     def noreturn_call?(irep, index, insn) = @cg.class_narrowing_noreturn_call?(irep, index, insn)
     def class_narrowing_active? = @cg.class_narrowing_enabled?
     def const_lookup_quiet? = @cg.const_missing_free?

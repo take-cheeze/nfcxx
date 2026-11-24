@@ -55,9 +55,9 @@ turn = analyze.call(<<~RUBY)
   def top_read; Game::Character::TURN_LEFT; end
 RUBY
 check.call('TURN_LEFT read in Game::Character is Game::Character::TURN_LEFT',
-           turn[:reads].include?(['GETCONST', 'TURN_LEFT', 'Game::Character::TURN_LEFT']))
+           turn[:reads].include?([:GETCONST, 'TURN_LEFT', 'Game::Character::TURN_LEFT']))
 check.call('TURN_LEFT read in Game::MoveRoute is Game::MoveRoute::TURN_LEFT',
-           turn[:reads].include?(['GETCONST', 'TURN_LEFT', 'Game::MoveRoute::TURN_LEFT']))
+           turn[:reads].include?([:GETCONST, 'TURN_LEFT', 'Game::MoveRoute::TURN_LEFT']))
 check.call('Character::TURN_LEFT (GETMCNST from Game) is Game::Character::TURN_LEFT',
            turn[:reads].count([:GETMCNST, 'TURN_LEFT', 'Game::Character::TURN_LEFT']) == 2)
 check.call('the definitions are keyed by their own scope', turn[:sites].sort == [['TURN_LEFT', 'Game::Character::TURN_LEFT'],
