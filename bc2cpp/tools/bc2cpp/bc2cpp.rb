@@ -318,11 +318,7 @@ BC2CPP_MAIN = lambda do
   ireps, root_label = profile_call.call('compile_ireps') { compile_ireps(srcs, symbol, out_dir) }
   dfs_order(ireps, root_label)
   # LOOP_RECORDS: an emitter loop or block-send record its own bytecode contradicts is an emitter bug (loop_records.rb).
-  loop_records = profile_call.call('LoopRecords.check') { LoopRecords.check(ireps) }
-  unless loop_records.contradictions.empty?
-    loop_records.contradictions.each { |row| warn "  LOOP_RECORD #{row}" }
-    abort "\n[bc2cpp] LOOP_RECORDS: #{loop_records.contradictions.size} record(s) disagree with their bytecode (see above)."
-  end
+  profile_call.call('LoopRecords.check') { LoopRecords.enforce!(ireps) }
   registry, superclass_of, container_constants, included_modules, prepended_modules, unknown_mixins,
     struct_member_lists, class_decls, walked_ireps, module_body_ivar_labels, constant_assignment_sites,
     declared_modules, alias_sites = profile_call.call('build_registry') { build_registry(ireps, root_label) }

@@ -51,6 +51,16 @@ module LoopRecords
     result
   end
 
+  # The build's check (bc2cpp.rb): stops with every contradiction listed. A method of its own, as the build's main body is
+  # at mrbc's local-variable limit.
+  def enforce!(ireps)
+    rows = check(ireps).contradictions
+    return if rows.empty?
+
+    rows.each { |row| warn "  LOOP_RECORD #{row}" }
+    abort "\n[bc2cpp] LOOP_RECORDS: #{rows.size} record(s) disagree with their bytecode (see above)."
+  end
+
   def check_loops(ireps, irep, insns, loops, report, counts)
     by_addr = insns.to_h { |i| [i.addr, i] }
     index = insns.each_with_index.to_h { |i, k| [i.addr, k] }
