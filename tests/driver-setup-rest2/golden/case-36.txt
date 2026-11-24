@@ -1,0 +1,7 @@
+== case 36:  --backend=pathb --gnu-version=130000 -c a.cpp -o a.o
+-- status: 2
+-- stdout
+-- stderr
+-- eccp
+(none)
+-- files

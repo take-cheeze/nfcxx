@@ -4,6 +4,7 @@ require 'prism'
 require 'set'
 require_relative 'file_identity'
 require_relative 'ruby_parse_cache'
+require_relative 'scan_cache'
 require_relative 'outside_ruby_owners'
 
 # FOREIGN_DEFINERS: which method names outside Ruby (the build's
@@ -36,9 +37,22 @@ module ForeignDefiners
     hit = @cache[files]
     return hit[1] if hit && hit[0].eql?(key)
 
-    result = scan_files(files)
+    result = scan_files_cached(files)
     @cache[files.freeze] = [key, result]
     result
+  end
+
+  # FOREIGN_DEFINERS_SCAN_CACHE: the walk of every foreign Ruby file is the same in every process, and was about a
+  # tenth of a self-compiled run. ScanCache keeps the names and wild owners under the files' digests (a plain Hash:
+  # the collector's default block does not marshal). A scan the cache cannot key is walked as before.
+  def scan_files_cached(files)
+    names, wild = ScanCache.fetch('foreign_definers.scan_files', files, cache_absent: false) do
+      result = scan_files(files)
+      plain = {}
+      result.names.each { |owner, set| plain[owner] = set }
+      [plain, result.wild]
+    end
+    Result.new(names, wild)
   end
 
   def scan_files(files)

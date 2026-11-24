@@ -12,6 +12,10 @@
 #                  of `closed`
 #   frame_free     the natives (Owner#name) the closed build calls without a frame (native_frame_use.rb); not a proof
 #                  about names, so it is no part of the fixed point and a file without it reads as empty
+#   frame_free_fns the C functions of those natives, by name (FRAME_FREE_FLAG: the exclusion header flags their ROM
+#                  entries). A file without it reads as empty
+#   frame_free_ram the `frame_free` keys some run-time registration gives (FRAME_FREE_FLAG marks only those at run
+#                  time). A file without it reads as empty
 #   ctor_rows      `initialize`/`initialize_copy` entries the closed build keeps as constructor rows (Owner#name; CTOR_ROWS
 #                  in static_dispatch_registrations.rb): the native ones are also in `engine_rom`, the compiled ones stay
 #                  registered as rows of their generated table
@@ -27,6 +31,9 @@
 #   unmade_classes the classes no instance of which the closed build ever makes (CORE_FIBER_FREE, core_fiber_free.rb:
 #                  Fiber, whose absence drops the resumable variants). A file without it reads as empty
 #
+# `world` (LISTS_WORLD, lists_world.rb) names the one build the closed-only parts were proven for; a file without it
+# is the closed build's.
+#
 # The file named by BC2CPP_STATIC_DISPATCH_LISTS is JSON. Its `digest` is the digest of the proof's inputs, which
 # verify_current! compares with the tree. 'none' stands for empty lists: the proof's own first pass, and fixtures
 # that are not the engine.
@@ -35,34 +42,43 @@ require 'set'
 
 module StaticDispatchLists
   PATH_ENV = 'BC2CPP_STATIC_DISPATCH_LISTS'
-  KEYS = %w[open closed core_excluded core_left_out engine_rom ctor_rows core_rows frame_free core_undef_left_out engine_rows
-            unmade_classes].freeze
-  REQUIRED_KEYS = (KEYS - %w[frame_free core_rows core_undef_left_out engine_rows unmade_classes]).freeze
+  KEYS = %w[open closed core_excluded core_left_out engine_rom ctor_rows core_rows frame_free frame_free_fns frame_free_ram
+            core_undef_left_out engine_rows unmade_classes].freeze
+  REQUIRED_KEYS = (KEYS - %w[frame_free frame_free_fns frame_free_ram core_rows core_undef_left_out engine_rows unmade_classes]).freeze
 
   class Missing < StandardError; end
 
   Lists = Struct.new(:open, :closed, :core_excluded, :core_left_out, :engine_rom, :ctor_rows, :core_rows, :frame_free,
-                     :core_undef_left_out, :engine_rows, :unmade_classes, :digest,
+                     :frame_free_fns, :frame_free_ram, :core_undef_left_out, :engine_rows, :unmade_classes, :digest, :world,
                      keyword_init: true) do
     # mruby's Struct.new forwards keyword-init values as a positional Hash.
     def initialize(kwargs = {})
       super(kwargs)
       self.frame_free ||= Set.new.freeze
+      self.frame_free_fns ||= Set.new.freeze
+      self.frame_free_ram ||= Set.new.freeze
       self.core_rows ||= Set.new.freeze
       self.core_undef_left_out ||= Set.new.freeze
       self.engine_rows ||= Set.new.freeze
       self.unmade_classes ||= Set.new.freeze
+      self.world ||= 'closed'
     end
 
-    # Only the closed build drops the closed-only names.
+    # Whether `build_name` is the build these lists' closed-only parts were proven for (LISTS_WORLD).
+    def closed_for?(build_name)
+      build_name.to_s == world
+    end
+
+    # Only the world's build drops the closed-only names.
     def for_build(build_name)
-      build_name == 'closed' ? closed : open
+      closed_for?(build_name) ? closed : open
     end
   end
 
   EMPTY = Lists.new(open: Set.new.freeze, closed: Set.new.freeze, core_excluded: Set.new.freeze,
                     core_left_out: Set.new.freeze, engine_rom: Set.new.freeze, ctor_rows: Set.new.freeze,
-                    core_rows: Set.new.freeze, frame_free: Set.new.freeze, core_undef_left_out: Set.new.freeze,
+                    core_rows: Set.new.freeze, frame_free: Set.new.freeze, frame_free_fns: Set.new.freeze, frame_free_ram: Set.new.freeze,
+                    core_undef_left_out: Set.new.freeze,
                     engine_rows: Set.new.freeze, unmade_classes: Set.new.freeze, digest: 'none').freeze
 
   module_function
@@ -72,11 +88,18 @@ module StaticDispatchLists
     missing = REQUIRED_KEYS - data.keys
     raise Missing, "static dispatch lists lack #{missing.join(', ')}" unless missing.empty?
 
-    Lists.new(**KEYS.to_h { |key| [key.to_sym, data.fetch(key, []).to_set.freeze] }, digest: data['digest'].to_s).freeze
+    Lists.new(**KEYS.to_h { |key| [key.to_sym, data.fetch(key, []).to_set.freeze] }, digest: data['digest'].to_s,
+              world: data.fetch('world', 'closed').to_s).freeze
+  end
+
+  # Whether this run's build takes the closed-only parts of its lists (LISTS_WORLD: the build they were proven for).
+  def closed_build?(build_name = ENV['BC2CPP_BUILD_NAME'], env: ENV)
+    current(env: env).closed_for?(build_name)
   end
 
   def dump(lists)
-    JSON.pretty_generate('digest' => lists.digest, **KEYS.to_h { |key| [key, lists.public_send(key).to_a.sort] }) + "\n"
+    world = lists.world == 'closed' ? {} : { 'world' => lists.world }
+    JSON.pretty_generate('digest' => lists.digest, **world, **KEYS.to_h { |key| [key, lists.public_send(key).to_a.sort] }) + "\n"
   end
 
   # The lists a run uses. `required` is true for a real gem build, which must never run without the proof's output:
@@ -108,7 +131,8 @@ module StaticDispatchLists
     return if ENV['BC2CPP_LISTS_REUSE'] == '1'
 
     require_relative 'static_dispatch_registrations'
-    now = StaticDispatchRegistrations.inputs_digest(repo_root)
+    # The digest of the world the file was proven for (LISTS_WORLD), whatever this run's BC2CPP_LISTS_WORLD.
+    now = ListsWorld.use(lists.world) { StaticDispatchRegistrations.inputs_digest(repo_root) }
     return if now == lists.digest
 
     raise Missing, "#{ENV[PATH_ENV]} was computed for inputs #{lists.digest[0, 12]}, but this tree is #{now[0, 12]}; " \

@@ -40,7 +40,7 @@ module CorePrivateRuby
   # (the symbol is an index).
   REGISTER = /\Ar\d+\z/
   EXPLICIT_SYMBOL_CALL = /\b(?:bc2cpp_io_puts|bc2cpp_funcall_argv)\(M, r\d+, bc2cpp_sym\(M, (\d+)\)/
-  EXPLICIT_INDEX_CALLS = %w[send owner_call owner_call_argv].freeze
+  EXPLICIT_INDEX_CALLS = %w[send owner_call owner_call_argv native_slot].freeze
   # The failure reports (symbol_cache.rb, bc2cpp.rb) print through `$stderr.puts`: a local symbol, a respond_to? and a
   # funcall on the receiver `err`, nothing else.
   STDERR_REPORT = /(\b(\w+_id) = )mrb_intern_lit\(M, "\w+"\)(;\n\s*if \(mrb_respond_to\(M, err, \2\)\) mrb_funcall_id\(M, err, \2,)/

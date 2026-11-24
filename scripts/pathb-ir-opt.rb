@@ -12,6 +12,8 @@
 #                and ellipsis parameters, struct or array results, struct parameters, printf, recursion, goto and
 #                label, and work-group statics (the emitters key those by their function). Rounds repeat for nested calls,
 #                up to --max-depth (default 4, the device inliner's depth in pathb-ptx-emit).
+#   --hoist-pure a call of a pure function (no writes outside its frame, nothing opaque, nothing that throws) in a loop, with
+#                invariant arguments that the loop cannot change what it reads, is memoised per entry to the loop (hoist_pure_pass).
 #   --report     the number of calls inlined and the refusal reasons, on stderr.
 #   --sroa       scalar replacement with unrolling and constant propagation (below); --jobs=N shares its functions out among
 #                N forked workers (default NFCXX_IR_OPT_JOBS, or the processor count up to 8).
@@ -220,6 +222,7 @@ $scope_facts = false   # --scope-facts: each inlined body brackets its slots wit
 
 def node_count(x)
   return 0 unless x.is_a?(Array)
+  return 0 if x[0] == "loc"   # a source location (-g) is no code: it must not change what the caps decide
   n = 1
   x.each { |y| n += node_count(y) }
   n
@@ -235,7 +238,7 @@ NODE_WEIGHT = Hash.new(1).merge(
   "function" => 0, "slot" => 0, "params" => 0, "param" => 0, "ret" => 0, "weak" => 0, "const" => 0, "type" => 0,
   "ptr" => 0, "volatile" => 0, "struct" => 0, "array" => 0, "union" => 0, "enum" => 0, "func" => 0,   # type forms
   "block" => 0, "then" => 0, "else" => 0, "body" => 0, "step" => 0, "let" => 0, "addr" => 0, "offset" => 0, "bitcast" => 0,
-  "decl" => 0, "scope-end" => 0, "life-start" => 0, "life-end" => 0,
+  "decl" => 0, "scope-end" => 0, "life-start" => 0, "life-end" => 0, "loc" => 0,
   "call" => 4, "if" => 2, "switch" => 2, "loop" => 3, "break" => 1, "continue" => 1
 ).freeze
 
@@ -314,9 +317,76 @@ def asm_needs_constant?(x)
   x.any? { |y| asm_needs_constant?(y) }
 end
 
+# A callee with a dynamic exception specification, throw(T...) (C++14), is inlined when nothing it lets out can fail the
+# specification: its filter (the landing pads of its calls, which call __cxa_call_unexpected for a type that is not allowed)
+# would otherwise have to cover the caller's pads, which one ehspec list per function cannot express. So it is inlined only
+# when every call it makes is one of these: __cxa_throw of a type of its specification (exact typeinfo), __cxa_allocate_exception,
+# a function of the module that cannot let an exception out ($eh_bad: throwing_functions), or a nothrow libc routine; and
+# its pads call only __cxa_free_exception and __cxa_call_unexpected (no destructor of a live object runs on a throw, and a
+# pad of an unlisted type is never reached). The copy then has no pads or specification: its throws are the caller's, and
+# the exception that leaves it is one of the callee's specification, which the caller's handlers see as they would.
+# Otherwise (a throw of another type, a rethrow, a call of a throwing function, a destructor run on the way out) it is refused.
+$eh_bad = {}       # the functions that can let an exception out (throwing_functions), set by inline_pass
+$eh_defs_names = {}   # the functions of the module (inline_pass)
+
+def spec_names(fn)
+  types = fn.find { |f| head(f) == "eh-types" }
+  spec = fn.find { |f| head(f) == "eh-spec" }
+  return nil unless types && spec
+  allowed = types.drop(1).map { |t| show(t) }
+  names = spec.drop(1).map { |i| i.to_i >= 1 ? allowed[i.to_i - 1] : nil }
+  return nil if names.empty? || names.include?(nil)
+  names
+end
+
+def spec_call_ok?(c, call, in_pad, names)
+  return %w[__cxa_free_exception __cxa_call_unexpected].include?(c) if in_pad
+  return true if c == "__cxa_allocate_exception" || c == "__cxa_free_exception"
+  return call.length >= 5 && names.include?(show(call[4])) if c == "__cxa_throw"
+  return !$eh_bad.key?(c) if $eh_defs_names.key?(c)
+  nothrow_extern?(c)
+end
+
+def spec_calls_ok?(x, in_pad, names)
+  return true unless x.is_a?(Array)
+  if head(x) == "call"
+    return false unless x[2].is_a?(String) && x[2].start_with?("&\"")
+    return false unless spec_call_ok?(unq(x[2]), x, in_pad, names)
+  end
+  x.all? { |y| spec_calls_ok?(y, in_pad || head(x) == "eh-pad", names) }
+end
+
+def spec_inlinable?(fn)
+  return false if fn.any? { |f| head(f) == "eh-noexcept" }
+  names = spec_names(fn)
+  return false unless names
+  spec_calls_ok?(fn.drop(2), false, names)
+end
+
+# A callee with a dynamic exception specification that spec_inlinable? refuses is still inlined, as a copy that keeps its landing
+# pads, each with the callee's list (eh-spec-pad; QBE's ehspecpad: the pad's action chain ends with that filter, which the
+# personality checks). Its filter precedes the caller's catch clauses. The caller's own filter is the last one of a copy's
+# chain (scripts/pathb-ssa.rb, pad_actions and the tail of each pad): a pad of a copy with a list gets it after the clauses of
+# the state the copy was entered in, as the caller's own pads do. A call of a module function that is
+# still a call in the copy is covered by the copy's pads (its exception is filtered there, as one of the callee's), and a
+# function inlined into the copy later gets the same pads. The specification must name its types, and the callee must not be noexcept.
+def spec_copyable?(fn)
+  return false if fn.any? { |f| head(f) == "eh-noexcept" }
+  !spec_names(fn).nil?
+end
+
+# The statements of a callee copy without its state markers: the copy's calls get the state of the call site (no tables).
+def without_eh_state(x)
+  return x unless x.is_a?(Array)
+  x.reject { |y| y.is_a?(Array) && head(y) == "eh-state" }.map { |y| without_eh_state(y) }
+end
+
 def refusal(fn, name)
   return "callee over --max-callee" if $inline_max_callee > 0 && node_cost(fn) > $inline_max_callee && !always_inline?(fn) && !$inline_once[name] && !asm_needs_constant?(fn)
   return "ctor/dtor" if fn.any? { |f| head(f) == "constructor" || head(f) == "destructor" }
+  # Zero-cost exception tables (docs/notes/pathb-zero-cost-eh.md): a callee with landing pads is inlined with them
+  # (eh_inline); a callee with a dynamic exception specification when spec_copyable? (spec_inlinable?: its filter is dropped).
+  return "dynamic exception specification" if fn.any? { |f| head(f) == "eh-spec" } && !spec_copyable?(fn)
   return "noinline" if fn.any? { |f| head(f) == "noinline" } && !empty_body?(fn)
   return "weak attr" if fn.any? { |f| head(f) == "weak" && f.length == 2 }   # __attribute__((weak)): another object may define the callee
   params = fn.find { |f| head(f) == "params" }
@@ -437,7 +507,20 @@ def callee_info(fn)
   params = fn.find { |f| head(f) == "params" }.drop(1)
   body = fn.drop(2)
   slots = body.select { |f| head(f) == "slot" }
-  stmts = splice_tail_blocks(body.reject { |f| HEADER_HEADS.include?(head(f)) })
+  eh_heads = %w[eh-pad eh-types eh-noexcept eh-spec-pad]
+  ehty = body.find { |f| head(f) == "eh-types" }
+  spec_form = body.find { |f| head(f) == "eh-spec" }
+  # spec_inlinable?: the copy has no pads, and its state is the call site's. Otherwise (spec_copyable?) the copy keeps its pads,
+  # each with the callee's list (eh-spec-pad; a pad of a nested copy keeps its own list).
+  safe = spec_form && spec_inlinable?(fn)
+  eh = { pads: body.select { |f| head(f) == "eh-pad" }, types: ehty ? ehty.drop(1) : [],
+         noexcept: body.any? { |f| head(f) == "eh-noexcept" },
+         specs: body.select { |f| head(f) == "eh-spec-pad" }.group_by { |f| f[1] }.transform_values { |fs| fs.map { |f| f.drop(2) } },
+         own: spec_form && !safe ? spec_form.drop(1) : nil }
+  eh = nil if eh[:pads].empty? && !eh[:noexcept] && eh[:types].empty? && eh[:own].nil?
+  eh = nil if safe
+  stmts = splice_tail_blocks(body.reject { |f| HEADER_HEADS.include?(head(f)) || eh_heads.include?(head(f)) || head(f) == "eh-spec" })
+  stmts = without_eh_state(stmts) if safe
   ret_op = nil
   early = count_heads(stmts, "return") > (stmts.length > 0 && head(stmts.last) == "return" ? 1 : 0)
   if !early && stmts.length > 0 && head(stmts.last) == "return"
@@ -445,7 +528,7 @@ def callee_info(fn)
     stmts = stmts[0...-1]
   end
   { ret: ret, rtext: show(ret[1]), params: params, slots: slots, stmts: stmts, ret_op: ret_op, early: early,
-    deep: early && return_in_loop?(stmts, false) }
+    deep: early && return_in_loop?(stmts, false), eh: eh }
 end
 
 # Replaces one call statement by the callee's statements. Returns [hoisted slots, statements] or nil.
@@ -483,6 +566,8 @@ def expand_call(s, fns, st)
   # A tier of the pass takes only callees up to its cap: the small ones are inlined everywhere before the budget goes to big ones.
   return nil if st[:cap] && st[:tc].fetch(fn) { st[:tc][fn] = node_cost(fn) } > st[:cap]
   info = st[:ic].fetch(cname) { st[:ic][cname] = callee_info(fn) }
+  # (A copy with its own filter under a caller with a specification of its own (eh[:filtered]) is inlined too: the caller's
+  # filter is the last of the chains of the copy's pads, and a pad that has no list of its own gets it from QBE.)
   rtype = info[:ret][1]
   return nil unless show(call[1]) == info[:rtext]
   return nil if dest && rtype == "void"
@@ -550,6 +635,7 @@ def expand_call(s, fns, st)
     out = pre + [["loop", ["body"] + body + [["break"]], ["step"]]]
     out << ["let", dest, dtype, ["load", rt, rslot]] if dest
     hoisted += hoisted_ret if dest
+    out = eh_inline(info[:eh], out, map, st, k, hoisted) if info[:eh]
     st[:inlined] += 1
     st[:attr_from] << cname if st[:attrs].key?(cname)
     return [hoisted, scope_slots(hoisted, out)]
@@ -557,9 +643,115 @@ def expand_call(s, fns, st)
   return nil if dest && ret_op.nil?
   out = byval_pre + stmts.map { |x| subst(x, map, st) }
   out << ["let", dest, dtype, subst(ret_op, map, st)] if dest
+  out = eh_inline(info[:eh], out, map, st, k, hoisted) if info[:eh]
   st[:inlined] += 1
   st[:attr_from] << cname if st[:attrs].key?(cname)
   [hoisted, scope_slots(hoisted, out)]
+end
+
+# A callee with exception tables (docs/notes/pathb-zero-cost-eh.md), inlined as copy K: its landing pads become the
+# caller's (renumbered after the caller's), its catch types join the caller's table (eh-tid operands renumbered), and
+# the copy is bracketed by (eh-inline-begin K) and (eh-inline-end K). The callee's state 0 is the state the copy was
+# entered in (eh-state-outer K), or for a noexcept callee a pad that calls std::terminate. A callee pad's resume goes on
+# into the pad of that state (eh-resume-outer K EXC, after it hands the caller's slots the exception and the selector);
+# scripts/pathb-ssa.rb resolves the states along the control flow. Returns the copy's statements; the pads and the type
+# table are the caller's (st[:eh]), written by inline_pass.
+def eh_inline(eh, out, map, st, k, hoisted)
+  ce = st[:eh]
+  tidmap = {}
+  eh[:types].each_with_index do |t, i|
+    j = ce[:types].index { |u| show(u) == show(t) }
+    unless j
+      ce[:types] << t
+      j = ce[:types].size - 1
+    end
+    tidmap[(i + 1).to_s] = (j + 1).to_s
+  end
+  pmap = {}
+  eh[:pads].each { |p| pmap[p[1]] = (ce[:next_pad] += 1).to_s }
+  kk = k.to_s
+  zero = ["eh-state-outer", kk]
+  if eh[:noexcept]
+    # A terminate pad catches everything (catch (...), the caller's type table's "0"): the caller's own specification, which
+    # the pads of a filtered caller end with, is then never checked for an exception that leaves a noexcept copy.
+    t = (ce[:next_pad] += 1).to_s
+    lbl = "\"eh.t.#{kk}\""
+    ce[:pads] << ["eh-pad", t, "1", [catch_all_tid(ce)], ["goto", lbl], ["label", lbl], ["eval", ["call", "void", "&\"_ZSt9terminatev\""]],
+                  ["unreachable"]]
+    zero = ["eh-state", t]
+  elsif ce[:filtered]
+    catch_all_tid(ce)   # the copy's pads that end in a terminate state (scripts/pathb-ssa.rb) take it before the caller's filter
+  end
+  sel = map["$\"eh.sel\""]
+  eh[:pads].each do |p|
+    q = subst(p, map, st)   # labels, registers and slots of the copy
+    own = head(q[4]) == "eh-outer"
+    stmts = eh_renumber(q[(own ? 5 : 4)..], pmap, tidmap, zero)
+    unless own
+      ce[:need_slots] = true
+      stmts = eh_resumes(stmts, kk, sel, st)
+    end
+    outer = own ? eh_renumber(q[4], pmap, tidmap, zero) : ["eh-outer", kk]
+    ce[:pads] << ["eh-pad", pmap[p[1]], q[2], q[3].map { |x| tidmap.fetch(x, x) }, outer, *stmts]
+    # the pad's filters, in the order of its chain: the lists of the nested copies it has, then the callee's own (the callee has
+    # a specification), which the states outside the callee follow
+    ((eh[:specs][p[1]] || []) + (eh[:own] ? [eh[:own]] : [])).each do |ids|
+      ce[:spec_pads] << ["eh-spec-pad", pmap[p[1]], *ids.map { |x| tidmap.fetch(x, x) }]
+    end
+  end
+  ce[:changed] = true
+  body = eh_renumber(out, pmap, tidmap, zero)
+  [["eh-inline-begin", kk]] + (eh[:noexcept] ? [zero] : []) + body + [["eh-inline-end", kk]]
+end
+
+# The caller's type id of catch (...) (the "0" of its type table), added when there is none.
+def catch_all_tid(ce)
+  j = ce[:types].index("0")
+  unless j
+    ce[:types] << "0"
+    j = ce[:types].size - 1
+  end
+  (j + 1).to_s
+end
+
+# The callee's states, pad numbers and type ids in the caller's numbering
+def eh_renumber(x, pmap, tidmap, zero)
+  return x unless x.is_a?(Array)
+  if head(x) == "eh-state"
+    return copy_form(zero) if x[1] == "0"
+    return ["eh-state", pmap.fetch(x[1]) { raise "eh-state #{x[1]}: no such pad" }]
+  end
+  return ["eh-tid", tidmap.fetch(x[1], x[1])] if head(x) == "eh-tid"
+  # a copy inlined into the callee before: its number gets this copy's (two copies of the callee keep theirs apart)
+  if %w[eh-inline-begin eh-inline-end eh-state-outer eh-resume-outer eh-outer].include?(head(x))
+    return [x[0], "#{x[1]}_#{zero[-1]}"] + x.drop(2).map { |y| eh_renumber(y, pmap, tidmap, zero) }
+  end
+  x.map { |y| eh_renumber(y, pmap, tidmap, zero) }
+end
+
+# A callee pad's (eh-resume EXC): (eh-resume-outer K EXC SEL), the exception and the copy's selector. Where they go is
+# the SSA builder's: the slots the stub of the pad of the state copy K was entered in stores to (that pad may be another
+# copy's, whose slots are that copy's: a callee inlined into an inlined body).
+def eh_resumes(list, kk, sel, st)
+  out = []
+  list.each do |y|
+    if head(y) == "eh-resume"
+      if sel
+        r = "%#{st[:next]}"   # a let, not a load inside the form: the SSA builder promotes a slot's lets
+        st[:next] += 1
+        out << ["let", r, "long", ["load", "long", sel]]
+        out << ["eh-resume-outer", kk, y[1], r]
+      else
+        out << ["eh-resume-outer", kk, y[1]]
+      end
+      next
+    elsif y.is_a?(Array)
+      out << eh_resumes(y, kk, sel, st)
+    else
+      out << y
+    end
+  end
+  out
 end
 
 # --scope-facts: the slots of an inlined body live exactly as long as its statements (the callee's frame), so the copy is bracketed by
@@ -608,6 +800,21 @@ def rewrite(list, fns, st)
   out
 end
 
+# The caller's exception tables after its inlining: its type table, the inlined pads after its own, and its pad slots
+# (the inlined pads hand it the exception there).
+def eh_write_back(children, st)
+  ce = st[:eh]
+  children = children.reject { |x| head(x) == "eh-types" }
+  if ce[:need_slots]
+    names = children.select { |x| head(x) == "slot" }.map { |x| x[1] } + st[:hoist].map { |x| x[1] }
+    st[:hoist] << ["slot", "\"eh.exc\"", ["ptr", "void"], "8", "8"] unless names.include?("\"eh.exc\"")
+    st[:hoist] << ["slot", "\"eh.sel\"", "long", "8", "8"] unless names.include?("\"eh.sel\"")
+  end
+  idx = children.index { |x| !(HEADER_HEADS.include?(head(x)) || head(x) == "ret" || head(x) == "params") } || children.size
+  children = children[0...idx] + (ce[:types].empty? ? [] : [["eh-types", *ce[:types]]]) + children[idx..]
+  children + ce[:pads] + ce[:spec_pads]
+end
+
 # Hoisted slots go after the header (ret, params and the caller's own slots).
 def insert_slots(children, slots)
   return children if slots.empty?
@@ -630,6 +837,8 @@ end
 def inline_pass(forms, max_depth, report)
   fns = {}
   forms.each { |f| fns[unq(f[1])] = f if head(f) == "function" }
+  $eh_defs_names = fns
+  $eh_bad = forms.any? { |f| head(f) == "function" && f.any? { |x| head(x) == "eh-spec" } } ? throwing_functions(forms) : {}
   refused = {}
   inlined = 0
   counter = { k: 0 }
@@ -663,9 +872,14 @@ def inline_pass(forms, max_depth, report)
         next
       end
       name = unq(f[1])
+      ehty = f.find { |x| head(x) == "eh-types" }
       st = { next: ids.fetch(f) { ids[f] = max_id(f) } + 1, k: counter[:k], hoist: [], inlined: 0, caller_size: node_cost(f), refused: refused, rc: reasons,
-             ic: infos, attrs: attrs, attr_from: [], over: over, tc: tiny_costs, cap: cap, section: section_of(f) }
+             ic: infos, attrs: attrs, attr_from: [], over: over, tc: tiny_costs, cap: cap, section: section_of(f),
+             eh: { types: ehty ? ehty.drop(1) : [], pads: [], spec_pads: [], changed: false, need_slots: false,
+                   filtered: f.any? { |x| head(x) == "eh-spec" },
+                   next_pad: f.select { |x| head(x) == "eh-pad" }.map { |x| x[1].to_i }.max || 0 } }
       children = rewrite(f.drop(2), fns, st)
+      children = eh_write_back(children, st) if st[:eh][:changed]
       counter[:k] = st[:k]
       next if st[:inlined] == 0
       round += st[:inlined]
@@ -1848,6 +2062,8 @@ NOTHROW_EXTERN = %w[memcpy memmove memset memcmp memchr strlen strcmp strncmp st
                     abort _exit __assert_fail __assert_perror_fail __stack_chk_fail _ZSt21__glibcxx_assert_failPKciS0_S0_ _ZSt9terminatev
                     _ZdlPv _ZdlPvm _ZdaPv _ZdaPvm _ZdlPvSt11align_val_t _ZdlPvmSt11align_val_t _ZdaPvSt11align_val_t
                     _ZdaPvmSt11align_val_t].freeze
+# (scripts/pathb-nothrow.rb has the exception tables' copy of the list, without stdio's cancellation points: this file
+# stays one file for the bc2cpp world)
 # --nothrow-extern=NAME,NAME: more functions the module does not define that let no exception out (a project's own abort).
 $nothrow_extra = []
 
@@ -2210,6 +2426,363 @@ def prune_pass(forms, substr, report)
 end
 
 # The workers of --sroa: the serial pass (see sroa_pass), so one.
+# ---- pure calls in loops (--hoist-pure) ---------------------------------------------------------------------------------
+# A call of a function of the module that has no side effects, with arguments that do not change during a loop, is computed
+# at most once per entry to the loop: the first execution the program makes stores the result and sets a flag (both slots
+# of the caller, the flag reset before the loop), and the later executions read the result. Rule: no call is speculated.
+# The memoised call runs exactly where the original program first runs it, so a loop that never reaches it never calls the
+# function, and a call under a condition runs the first time the condition holds. The result equals the original's because
+# the callee is deterministic, its arguments are the same, and nothing in the loop changes the memory it reads.
+#
+# A function is pure when it writes no memory outside its own frame and has no opaque operation (asm, a volatile or
+# fence access, a call of an extern or indirect function) and cannot let an exception out (throwing_functions). Its reads
+# are not restricted: the loop decides whether they can change (hp_conflict?).
+#
+# Memory is named by roots, per pointer value: "P<i>" the pointee of parameter i, "G:<name>" a global object, "L:<name>" a
+# slot of the function, "U" unknown memory. A root of a pointer value is found flow-insensitively (hp_state): a parameter
+# is P<i>, a global or slot address is G or L, a pointer loaded from a slot is what was stored in it, and anything else
+# (a pointer loaded through memory, a call result, an int converted to a pointer) is U. A slot whose address is passed
+# to a call, returned or stored, or written through a derived address, holds U. A loop writes the roots of its stores and
+# of the writes of its callees (mapped through their arguments); a parameter's pointee is external memory, so in a loop
+# it is U. The loop keeps a pure call only when its arguments are invariant (constants, addresses, or registers defined
+# outside the loop) and no root it writes is a root it reads (hp_conflict?). A loop with an opaque operation, a label or
+# an extern call is left alone.
+HP_U = "U"
+HP_SIZES = { "bool" => 1, "char" => 1, "unsigned_char" => 1, "short" => 2, "unsigned_short" => 2, "int" => 4,
+             "unsigned_int" => 4, "long" => 8, "unsigned_long" => 8, "long_long" => 8, "unsigned_long_long" => 8,
+             "float" => 4, "double" => 8 }.freeze
+HP_OPAQUE_HEADS = %w[asm-block asm-decl fence load.v store.v label].freeze
+
+def hp_ptr?(t)
+  while t.is_a?(Array) && (head(t) == "const" || head(t) == "volatile") && t.length == 2
+    t = t[1]
+  end
+  head(t) == "ptr"
+end
+
+def hp_norm(roots)
+  roots.map { |r| r.start_with?("P") ? HP_U : r }.uniq
+end
+
+def hp_local(roots)
+  roots.select { |r| r.start_with?("L:") }
+end
+
+# The roots of a value used as a pointer (a base of offset, index or bitcast).
+def hp_base_roots(x, st)
+  if x.is_a?(String)
+    return st[:regs].fetch(x) { [HP_U] } if x.start_with?("%") && (hp_ptr?(st[:types][x]) || st[:types][x].nil?)
+    return [HP_U] if x.start_with?("%")
+    return hp_roots(x, st) if x.start_with?("$") || x.start_with?("@")
+    return []
+  end
+  return [] unless x.is_a?(Array)
+  case head(x)
+  when "const", "null" then []
+  when "load", "offset", "index", "bitcast" then hp_roots(x, st)
+  else [HP_U]
+  end
+end
+
+def hp_roots(x, st)
+  if x.is_a?(String)
+    if x.start_with?("%")
+      return [HP_U] if st[:setregs].key?(x)
+      return st[:regs].fetch(x) { [HP_U] }
+    end
+    return ["L:" + unq(x)] if x.start_with?("$\"")
+    return ["G:" + unq(x)] if x.start_with?("@\"")
+    return []
+  end
+  return [] unless x.is_a?(Array)
+  case head(x)
+  when "const", "null" then []
+  when "load"
+    return [] unless hp_ptr?(x[1])
+    a = x[2]
+    if a.is_a?(String) && a.start_with?("$\"")
+      st[:slots].fetch(unq(a)) { [] }
+    else
+      [HP_U]
+    end
+  when "offset", "index" then hp_base_roots(x[1], st)
+  when "bitcast" then hp_ptr?(x[1]) ? hp_base_roots(x[2], st) : []
+  else hp_ptr?(x[1]) ? [HP_U] : []
+  end
+end
+
+# The call arguments of a call form (x[3..]).
+def hp_args(c)
+  c[3..-1] || []
+end
+
+# The roots of each module function's pointer slots and registers, and the slots whose address leaves the function.
+def hp_state(f)
+  st = { regs: {}, types: {}, slots: {}, setregs: {} }
+  f.each do |c|
+    next unless head(c) == "params"
+    c.drop(1).each_with_index do |p, i|
+      st[:regs][p[1]] = ["P#{i}"]
+      st[:types][p[1]] = p[3]
+    end
+  end
+  forms = all_forms(f)
+  forms.each { |x| st[:setregs][x[1]] = true if head(x) == "set" }
+  loop do
+    changed = false
+    forms.each do |x|
+      next unless head(x) == "let"
+      st[:types][x[1]] = x[2]
+      r = st[:setregs].key?(x[1]) ? [HP_U] : hp_roots(x[3], st)
+      if st[:regs][x[1]] != r
+        st[:regs][x[1]] = r
+        changed = true
+      end
+    end
+    forms.each do |x|
+      case head(x)
+      when "call"
+        hp_args(x).each { |a| changed = true if hp_escape(hp_roots(a, st), st) }
+      when "return"
+        changed = true if x.length > 1 && hp_escape(hp_roots(x[1], st), st)
+      when "set"
+        changed = true if hp_escape(hp_roots(x[2], st), st)
+      when "store"
+        r = hp_roots(x[3], st)
+        changed = true if hp_escape(r, st)
+        a = x[2]
+        if a.is_a?(String) && a.start_with?("$\"")
+          s = unq(a)
+          add = if hp_ptr?(x[1]) then r
+                elsif HP_SIZES.key?(x[1]) then []
+                else [HP_U]
+                end
+          changed = true if hp_add_slot(st, s, add)
+        else
+          # a store through a derived address may write a pointer into the slots it reaches
+          hp_local(hp_roots(a, st)).each { |l| changed = true if hp_add_slot(st, l[2..-1], [HP_U]) }
+        end
+      end
+    end
+    break unless changed
+  end
+  st
+end
+
+def hp_add_slot(st, s, roots)
+  old = st[:slots].fetch(s) { [] }
+  new_roots = old | roots
+  return false if new_roots.length == old.length
+  st[:slots][s] = new_roots
+  true
+end
+
+# Records the locals whose address is in roots as escaped (their contents may change through any call, return or store):
+# a slot whose address escapes holds U. Returns whether something new was recorded.
+def hp_escape(roots, st)
+  changed = false
+  hp_local(roots).each do |l|
+    changed = true if hp_add_slot(st, l[2..-1], [HP_U])
+  end
+  changed
+end
+
+# The summary of a function (its writes and reads of non-local memory, in its own parameters' terms, and whether it has an
+# opaque operation). Callee summaries come from summ; calls to functions of the module map their roots through the arguments.
+def hp_map(roots, args, st)
+  out = []
+  roots.each do |q|
+    if q.start_with?("P")
+      i = q[1..-1].to_i
+      out.concat(i < args.length ? hp_base_roots(args[i], st) : [HP_U])
+    else
+      out << q
+    end
+  end
+  out.uniq
+end
+
+def hp_summary(f, st, defs, summ)
+  w = []
+  r = []
+  opaque = false
+  all_forms(f).each do |x|
+    h = head(x)
+    if HP_OPAQUE_HEADS.include?(h)
+      opaque = true
+    elsif h == "store"
+      w |= hp_roots(x[2], st)
+    elsif h == "load"
+      r |= hp_roots(x[2], st)
+    elsif h == "call"
+      callee = x[2]
+      if callee.is_a?(String) && callee.start_with?("&\"") && defs.key?(unq(callee))
+        s = summ[unq(callee)]
+        if s[:opaque]
+          opaque = true
+        else
+          w |= hp_map(s[:w], hp_args(x), st)
+          r |= hp_map(s[:r], hp_args(x), st)
+        end
+      else
+        opaque = true
+      end
+    end
+  end
+  { w: w.reject { |q| q.start_with?("L:") }, r: r.reject { |q| q.start_with?("L:") }, opaque: opaque }
+end
+
+def hp_same?(a, b)
+  a[:opaque] == b[:opaque] && a[:w].sort == b[:w].sort && a[:r].sort == b[:r].sort
+end
+
+# The summaries of the module's functions: the least fixed point over the calls.
+def hp_summaries(defs, states)
+  summ = {}
+  defs.each_key { |g| summ[g] = { w: [], r: [], opaque: false } }
+  loop do
+    changed = false
+    defs.each do |g, f|
+      s = hp_summary(f, states[g], defs, summ)
+      unless hp_same?(s, summ[g])
+        summ[g] = s
+        changed = true
+      end
+    end
+    break unless changed
+  end
+  summ
+end
+
+# Whether a loop's writes (w) can change what a call reads (r): unknown memory on either side, or a root on both.
+def hp_conflict?(w, r)
+  return false if w.empty?
+  w.include?(HP_U) || r.include?(HP_U) || !(w & r).empty?
+end
+
+# The loop's writes (normalised to the caller's roots), its defined registers, and whether it has an opaque operation.
+def hp_loop_info(loop, st, defs, summ)
+  w = []
+  dset = {}
+  opaque = false
+  all_forms(loop).each do |x|
+    h = head(x)
+    if h == "let" || h == "set"
+      dset[x[1]] = true
+    end
+    if HP_OPAQUE_HEADS.include?(h)
+      opaque = true
+    elsif h == "store"
+      w |= hp_roots(x[2], st)
+    elsif h == "call"
+      callee = x[2]
+      if callee.is_a?(String) && callee.start_with?("&\"") && defs.key?(unq(callee))
+        s = summ[unq(callee)]
+        if s[:opaque]
+          opaque = true
+        else
+          w |= hp_map(s[:w], hp_args(x), st)
+        end
+      else
+        opaque = true
+      end
+    end
+  end
+  { w: hp_norm(w), defs: dset, opaque: opaque, flags: [] }
+end
+
+def hp_invariant?(a, defs)
+  if a.is_a?(String)
+    a.start_with?("%") ? !defs.key?(a) : true
+  else
+    head(a) == "const" || head(a) == "null"
+  end
+end
+
+# The statement (let %n T (call T &"g" ARGS)) may become the memoised form: g is pure, its arguments are invariant in the loop
+# and the loop cannot change what g reads.
+def hp_memo_candidate?(s, info, st, defs, summ, pure)
+  return false unless head(s) == "let" && head(s[3]) == "call" && !info[:opaque]
+  c = s[3]
+  callee = c[2]
+  return false unless callee.is_a?(String) && callee.start_with?("&\"")
+  g = unq(callee)
+  return false unless pure[g]
+  t = s[2]
+  return false unless (t.is_a?(String) && HP_SIZES.key?(t)) || hp_ptr?(t)
+  args = hp_args(c)
+  return false unless args.all? { |a| hp_invariant?(a, info[:defs]) }
+  r = hp_norm(hp_map(summ[g][:r], args, st))
+  !hp_conflict?(info[:w], r)
+end
+
+# Rewrites the statements of list x. ctx is the innermost loop (nil outside loops), env the pass state.
+def hp_rewrite(x, ctx, env)
+  return x unless x.is_a?(Array)
+  out = []
+  x.each do |y|
+    if y.is_a?(Array) && head(y) == "loop"
+      info = hp_loop_info(y, env[:st], env[:defs], env[:summ])
+      ny = [y[0]] + y.drop(1).map { |c| c.is_a?(Array) ? hp_rewrite(c, info, env) : c }
+      info[:flags].each { |d| out << ["store", "bool", "$\"#{d}\"", ["const", "bool", "0"]] }
+      out << ny
+    elsif ctx && y.is_a?(Array) && hp_memo_candidate?(y, ctx, env[:st], env[:defs], env[:summ], env[:pure])
+      out.concat(hp_memo_stmts(y, ctx, env))
+    else
+      out << hp_rewrite(y, ctx, env)
+    end
+  end
+  out
+end
+
+def hp_fresh(env)
+  id = "%#{env[:next_id]}"
+  env[:next_id] += 1
+  id
+end
+
+# (let %n T (call ...)) becomes: if the flag is clear, call and store the result and set the flag; then %n reads the result.
+def hp_memo_stmts(s, ctx, env)
+  t = s[2]
+  size = t.is_a?(String) ? HP_SIZES[t] : 8
+  env[:counter] += 1
+  d = "pc.d.#{env[:counter]}"
+  v = "pc.v.#{env[:counter]}"
+  env[:slots] << ["slot", "\"#{d}\"", "bool", "1", "1"]
+  env[:slots] << ["slot", "\"#{v}\"", t, size.to_s, size.to_s]
+  ctx[:flags] << d
+  flag = hp_fresh(env)
+  res = hp_fresh(env)
+  [["block",
+    ["let", flag, "bool", ["load", "bool", "$\"#{d}\""]],
+    ["if", flag, ["then"], ["else", ["block", ["let", res, t, s[3]], ["store", t, "$\"#{v}\"", res],
+                                     ["store", "bool", "$\"#{d}\"", ["const", "bool", "1"]]]]]],
+   ["let", s[1], t, ["load", t, "$\"#{v}\""]]]
+end
+
+def hoist_pure_pass(forms, report)
+  defs = {}
+  forms.each { |f| defs[unq(f[1])] = f if head(f) == "function" }
+  states = {}
+  defs.each { |g, f| states[g] = hp_state(f) }
+  summ = hp_summaries(defs, states)
+  bad = throwing_functions(forms)
+  pure = {}
+  summ.each { |g, s| pure[g] = !s[:opaque] && s[:w].empty? && !bad.key?(g) }
+  total = 0
+  forms = forms.map do |f|
+    next f unless head(f) == "function" && count_heads(f, "loop") > 0
+    env = { st: states[unq(f[1])], defs: defs, summ: summ, pure: pure, counter: 0, slots: [],
+            next_id: max_id(f) + 1 }
+    children = hp_rewrite(f.drop(2), nil, env)
+    next f if env[:counter] == 0
+    total += env[:counter]
+    ["function", f[1]] + insert_slots(children, env[:slots])
+  end
+  $stderr.write("pathb-ir-opt: memoised #{total} pure call(s) in loops\n") if report
+  forms
+end
+
 def default_jobs
   1
 end
@@ -2227,6 +2800,7 @@ def main(argv)
   strip_eh = false
   strip_leaf = false
   shrink_eh = false
+  hoist = false
   prune = nil
   jobs = default_jobs
   file = nil
@@ -2274,6 +2848,8 @@ def main(argv)
       strip_leaf = true
     elsif a == "--shrink-eh-frames"
       shrink_eh = true
+    elsif a == "--hoist-pure"
+      hoist = true
     elsif a.start_with?("--nothrow-extern=")
       $nothrow_extra.concat(a[17..-1].split(","))
     elsif a.start_with?("--jobs=")
@@ -2292,7 +2868,7 @@ def main(argv)
     end
   end
   $sroa_debug = report
-  unless inline || sroa || forward || strip_eh || strip_leaf || shrink_eh || prune
+  unless inline || sroa || forward || strip_eh || strip_leaf || shrink_eh || prune || hoist
     $stderr.write("pathb-ir-opt: no pass selected (--prune-unreachable=S, --strip-eh, --inline, --sroa, --forward)\n")
     return 1
   end
@@ -2308,6 +2884,8 @@ def main(argv)
     forms = strip_eh_pass(forms, report) if strip_eh
     forms = strip_leaf_eh_pass(forms, report) if strip_leaf
     forms = inline_pass(forms, max_depth, report) if inline
+    # the calls the inliner exposed, and the pure calls of loops (hoist_pure_pass)
+    forms = hoist_pure_pass(forms, report) if hoist
     # a function whose calls were all inlined (or are atomics) is a leaf now: its frames, and those of the bodies copied into it
     forms = strip_leaf_eh_pass(forms, report) if strip_leaf && inline
     # the callees that the inliner copied into every caller are not reached any more

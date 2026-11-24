@@ -18,7 +18,7 @@ Machine.function_parser = ->(form) { PathbEgraph.parse_fn(form) }
 
 module PathbEgraph
   INF = Float::INFINITY
-  TERMINATORS = %w[br condbr switch ret unreachable].freeze
+  TERMINATORS = %w[br condbr switch ret unreachable eh-entry].freeze
   TYPE_HEADS = %w[ptr struct union array fn].freeze
   # Ops that compute a value from their operands and may be evaluated in any order (no trap, no effect).
   COMMUTATIVE = %w[wadd wmul and or xor eq ne].freeze
@@ -70,6 +70,7 @@ module PathbEgraph
   def self.parse_term(x)
     case x[0]
     when "br" then ["br", Integer(x[1], 10)]
+    when "eh-entry" then ["eh-entry", *x[1..].map { |y| Integer(y, 10) }]
     when "condbr" then ["condbr", x[1], Integer(x[2], 10), Integer(x[3], 10)]
     when "switch" then parse_switch(x)
     else x.dup
@@ -928,7 +929,7 @@ module PathbEgraph
 
         memory_write?(ins[3])
       when "set" then memory_write?(ins[2])
-      when "nonnull", "bounds", "life-start", "life-end" then false   # the lifetime facts neither read nor write memory
+      when "nonnull", "bounds", "life-start", "life-end", "loc" then false   # the lifetime facts and a source location (-g) neither read nor write memory
       else true
       end
     end

@@ -73,6 +73,16 @@ module Bc2cppFixtureRuntime
     Shellwords.split(cflags).grep(/\A-D/).uniq
   end
 
+  # A custom full runtime may link gems such as digest, whose dependencies
+  # (libcrypto) must follow libmruby.a on the fixture's link line too.
+  def library_libraries(build)
+    mak = File.join(build, 'lib', 'libmruby.flags.mak')
+    libraries = File.read(mak)[/^MRUBY_LIBS = (.*)$/, 1]
+    raise "#{mak} has no MRUBY_LIBS line" unless libraries
+
+    Shellwords.split(libraries).reject { |flag| flag == '-lmruby' }
+  end
+
   def compiler?
     system('g++', '--version', out: File::NULL, err: File::NULL)
   end
@@ -206,6 +216,8 @@ module Bc2cppFixtureRuntime
     env = { 'MRBC' => mrbc, 'OUT_SYMBOL' => 'fixture', 'OUT_DIR' => dir,
             'BC2CPP_SELF_REGISTERING' => '1' }
     env['SKIP_UNSUPPORTED'] = '1' if skip_unsupported
+    # COLD_COMPACT: a fixture is its own world, so the world's cold list (profiled on its methods) is not read.
+    env['BC2CPP_COLD_LIST'] = ENV.fetch('BC2CPP_COLD_LIST', File::NULL)
     only_owners = BC2CPP_CORE_OWNERS + only_owners if core && only_owners
     env['ONLY_OWNERS'] = only_owners.join(',') if only_owners
       # `native`/`foreign` are [name, text] pairs of outside sources the closed world must scan.
@@ -217,10 +229,14 @@ module Bc2cppFixtureRuntime
       world = closed_world_native_srcs
       world = world.reject { |path| path.include?('/mruby-rgss/src/') } if core
       world = world.reject { |path| drop_native.any? { |fragment| path.include?(fragment) } }
-      natives = world + write_outside.call(native)
+      linked_native = write_outside.call(native)
+      linked_ruby = write_outside.call(foreign)
+      natives = world + linked_native
     env = bc2cpp_closed_world_probe_env(env.merge(
       'NATIVE_SRCS' => Shellwords.join(natives),
-                 'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_mrblib_srcs(ROOT) + write_outside.call(foreign)),
+      'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_mrblib_srcs(ROOT) + linked_ruby),
+      'BC2CPP_LINKED_NATIVE_SRCS' => Shellwords.join(linked_native),
+      'BC2CPP_LINKED_RUBY_SRCS' => Shellwords.join(linked_ruby),
       'BC2CPP_BUILD_GEMS' => Shellwords.join(NomethodReviewedProbe.closed_gems(ROOT).merge(build_gems.to_h).except(*drop_gems).map { |n, d| "#{n}=#{d}" })
     ), ROOT)
       env['BC2CPP_COLLECTION_EXPORTS'] = '1' if Bc2cppFixtureRuntime.collection_exports_linked
@@ -321,8 +337,9 @@ module Bc2cppFixtureRuntime
   # so one crashing scenario cannot hide the others, and `output` is the Array
   # of their outputs paired with the exit status: [[output, success], ...].
   # `extra_srcs`: further translation units linked in, e.g. the shards of a BC2CPP_SHARDS run.
+  # `compiled_load: false`: the compiled VM loads no bytecode, as a VM-free build: gem_init's class units make the classes.
   def run(dir, err, owners, body, build:, full: false, vms: [false, true], envs: nil, exact_arity: false,
-          extra_srcs: [])
+          extra_srcs: [], compiled_load: true)
     regs = registrations(err, owners, exact_arity: exact_arity).join("\n")
     File.write(File.join(dir, 'main.cpp'), <<~CPP)
       #include <mruby.h>
@@ -369,7 +386,7 @@ module Bc2cppFixtureRuntime
       #{body}
       static int run_vm(const std::vector<uint8_t>& bin, bool with_compiled) {
         mrb_state* M = #{full ? 'mrb_open()' : 'mrb_open_core()'};
-        mrb_load_irep_buf(M, bin.data(), bin.size());
+        if (#{compiled_load ? 'true' : '!with_compiled'}) mrb_load_irep_buf(M, bin.data(), bin.size());
         if (M->exc) { mrb_print_error(M); return 2; }
         compiled = with_compiled;
         if (with_compiled) {
@@ -405,7 +422,7 @@ module Bc2cppFixtureRuntime
     flags.concat(Shellwords.split(ENV.fetch('BC2CPP_CXXFLAGS', '')))
     built = Bc2cppCxx.system(*flags, "-I#{dir}", "-I#{build}/include", "-I#{ROOT}/3rd/mruby/include",
                    "-I#{ROOT}/mruby-rgss/src", "-I#{ROOT}/include", File.join(dir, 'main.cpp'), *extra_srcs, lib, '-lm',
-                   '-o', binary)
+                   *(full ? library_libraries(build) : []), '-o', binary)
     return [false, ''] unless built
 
     FileUtils.cp_r(dir, ENV['BC2CPP_KEEP_DIR'], remove_destination: true) if ENV['BC2CPP_KEEP_DIR']

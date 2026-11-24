@@ -13,3 +13,9 @@
  :: NFCXX_GCC=clang NFCXX_LDRT_X86=1 "$S"
  :: NFCXX_GCC= "$S"
  :: NFCXX_STUB_CC_RC=3 "$S"
+# a harness with exception tables (eh-tables beside its cpfe): the link script in place of the archive, then unchanged
+ :: mkdir -p "$SB/build/pathb/cmake/bin" && : > "$SB/build/pathb/cmake/bin/eh-tables"; "$S"; "$S"
+# ... with EDG's libC.a: its VLA, complex and error members are copied into libnfcxxedg.a, which the script names
+ :: mkdir -p "$SB/build/pathb/cmake/bin" "$SB/build/edg/lib" && : > "$SB/build/pathb/cmake/bin/eh-tables" && printf 'AR\nmember vla_alloc.o\nmember throw.o\nmember c99_complex.o\nmember error.o\n' > "$SB/build/edg/lib/libC.a"; "$S"; cat "$SB/build/pathb-ldrt/libnfcxxld-eh.a" "$SB/build/pathb-ldrt/libnfcxxedg.a"
+# ... a libC.a without those members: no helper archive
+ :: mkdir -p "$SB/build/pathb/cmake/bin" "$SB/build/edg/lib" && : > "$SB/build/pathb/cmake/bin/eh-tables" && printf 'AR\nmember throw.o\n' > "$SB/build/edg/lib/libC.a"; "$S"; cat "$SB/build/pathb-ldrt/libnfcxxld-eh.a"

@@ -33,6 +33,31 @@ class CodeGen
     nil
   end
 
+  # PREPENDED_OVERRIDE: a module prepended to +owner+ (directly, or included or prepended into one that is) comes
+  # before +owner+ in its lookup, so when it defines +name+ an exact-class arm for +owner+ must not call +owner+'s own
+  # body: lookup on an instance of exactly +owner+ finds the module's first. An owner with a mixin the registry could
+  # not resolve may have one too.
+  def prepended_override?(owner, name)
+    return true if @unknown_mixins&.include?(owner)
+
+    prepended = @prepended_modules[owner]
+    return false if prepended.nil?
+
+    work = Array(prepended)
+    return false if work.empty?
+
+    seen = Set.new
+    work = work.dup
+    until work.empty?
+      mod = work.pop
+      next unless seen.add?(mod)
+      return true if @unknown_mixins&.include?(mod) || (@registry[name] || []).any? { |d| d.owner == mod }
+
+      work.concat(Array(@included_modules[mod])).concat(Array(@prepended_modules[mod]))
+    end
+    false
+  end
+
   # Every definition of `name` a runtime-class-checked direct call can reach
   # for an `n`-argument send, uncapped; nil when there is none.
   def poly_candidates(name, n, optional: false)
@@ -51,10 +76,21 @@ class CodeGen
 
     # An owner with two definitions of the name (attr_reader later redefined by a
     # def, or the reverse) never joins: which one is live depends on definition
-    # order.
-    repeated_owners = defs.group_by(&:owner).select { |_, group| group.size > 1 }.keys
+    # order. A single pass finds repeats without building a group per owner.
+    seen_owners = Set.new
+    repeated_owners = Set.new
+    defs.each do |t|
+      if seen_owners.include?(t.owner)
+        repeated_owners << t.owner
+      else
+        seen_owners << t.owner
+      end
+    end
     candidates = defs.select do |t|
       next false if repeated_owners.include?(t.owner)
+      # An exact class test does not skip a module prepended before that class.
+      # Its method may stay on the VM even when the class's own body compiles.
+      next false if prepended_override?(t.owner, name) || poly_prepend_may_shadow?(name, t.owner)
       # EXPLICIT_RECEIVER_VISIBILITY: an arm for a non-public or re-scoped def would run what OP_SEND raises for.
       next false if @explicit_visibility_site && !explicit_call_visible?(name, t)
 
@@ -95,6 +131,15 @@ class CodeGen
       true
     end
     candidates unless candidates.empty?
+  end
+
+  def poly_prepend_may_shadow?(name, owner)
+    return true if @unknown_mixins.include?(owner)
+    modules = @prepended_modules[owner]
+    return false if no_mixins?(modules)
+    return true unless @closed_world
+
+    Array(modules).any? { |mod| cha_module_may_define?(name, mod, Set.new) }
   end
 
   def poly_arity_fits?(irep, n, optional)
@@ -212,7 +257,8 @@ class CodeGen
   # IVAR_ACCESS's write half: the statement storing `src` into @ivar, or nil.
   # Same rules as ivar_get_code. With `dst`, it also leaves `src` (attr_writer's
   # return value) in `dst`.
-  def ivar_set_code(klass, recv, ivar, src, self_of_klass: false, dst: nil, indent: '  ')
+  # `immediate`: `src` is proven an immediate (proven_immediate_operand?), so the store needs no write barrier.
+  def ivar_set_code(klass, recv, ivar, src, self_of_klass: false, dst: nil, indent: '  ', immediate: false)
     type = ivar_embed_type(klass, ivar)
     tail = dst ? "\n#{indent}#{dst} = #{src};" : ''
     return "bc2cpp_iv_set(M, #{recv}, mrb_intern_cstr(M, \"@#{ivar}\"), #{src});#{tail}" if type.nil?
@@ -227,9 +273,21 @@ class CodeGen
       frozen = embedded_store_frozen_check(recv)
       if type == :value
         field = "((#{struct_name(klass)}*)DATA_PTR(#{recv}))->#{ivar_field_name(ivar)}"
+        # EMBED_STORE_OUTLINED: an IMMEDIATE_BARRIER store has no barrier to share, so it stays inline.
+        if !immediate && ENV['BC2CPP_EMBED_STORE_OUTLINED'] != '0'
+          helper = frozen ? 'bc2cpp_embed_store' : 'bc2cpp_embed_store_unfrozen'
+          return "#{indent}#{helper}(M, #{recv}, &#{field}, #{src});#{tail}"
+        end
+        # BC2CPP_IMMEDIATE_BARRIER=verify aborts where the proof would be wrong instead, for a sweep.
+        barrier = if immediate && ENV['BC2CPP_IMMEDIATE_BARRIER'] == 'verify'
+                    "if (!mrb_immediate_p(#{src})) { fputs(\"IMMEDIATE_BARRIER violated: @#{ivar}\\n\", stderr); abort(); }"
+                  elsif immediate then '/* IMMEDIATE_BARRIER */'
+                  else "mrb_field_write_barrier_value(M, (struct RBasic*)mrb_obj_ptr(#{recv}), #{src});"
+                  end
         # GC_KEEP_OVERWRITTEN: the value this store replaces may be held only by a register of the caller.
-        return "#{"#{indent}#{frozen}\n" if frozen}#{indent}bc2cpp_keep_old(M, #{field});\n#{indent}#{field} = #{src};\n" \
-               "#{indent}mrb_field_write_barrier_value(M, (struct RBasic*)mrb_obj_ptr(#{recv}), #{src});#{tail}"
+        keep = immediate_old_slot?(klass, ivar) ? '/* IMMEDIATE_OLD */' : "bc2cpp_keep_old(M, #{field});"
+        return "#{"#{indent}#{frozen}\n" if frozen}#{indent}#{keep}\n#{indent}#{field} = #{src};\n" \
+               "#{indent}#{barrier}#{tail}"
       end
 
       ops = TYPE_OPS.fetch(type)
@@ -249,6 +307,48 @@ class CodeGen
     elsif embedded_accessor_linkable?(klass, "#{ivar}=")
       "#{dst ? "#{dst} = " : ''}#{sanitize(klass)}_#{sanitize(ivar)}_eq_impl(M, #{recv}, #{src});"
     end
+  end
+
+  # IMMEDIATE_OLD: the slot's class pool (CLASS_POOLS, joined over every store the family can make, nil on entry) holds
+  # only nil, true, false and Symbols, so the value a store replaces is an immediate, which the GC never frees: the
+  # GC_KEEP_OVERWRITTEN root would be a no-op. A pool with OTHER or CHECKED bits is refused. BC2CPP_IMMEDIATE_OLD=0.
+  def immediate_old_slot?(klass, ivar)
+    return false if ENV['BC2CPP_IMMEDIATE_OLD'] == '0' || !@class_pools_on || klass.nil?
+
+    mask = @class_ivar_pools[[numeric_family(klass), ivar.to_s]]
+    mask.is_a?(Integer) && (mask & ~immediate_value_bits).zero?
+  end
+
+  # The value bits of nil, true, false and a Symbol: immediates in every boxing. The class bits are read, not
+  # allocated, so a class no flow has named adds nothing.
+  def immediate_value_bits
+    return NumericFlow::NIL unless immediate_class_bits_enabled?
+
+    bits = @numeric_class_bits || {}
+    %w[TrueClass FalseClass Symbol].reduce(NumericFlow::NIL) { |m, k| m | bits.fetch(k, 0) }
+  end
+
+  # IMMEDIATE_BARRIER: every definition of `reg` reaching the read at `idx` is nil, true, false, a Symbol or a proven
+  # Fixnum (fixnum_proof_source?), all immediates in every boxing, so a store of it needs no write barrier: the GC
+  # never marks an immediate. The use guards are proven_fixnum_operand?'s. BC2CPP_IMMEDIATE_BARRIER=0 keeps them all.
+  IMMEDIATE_LOAD_OPS = %i[LOADNIL LOADTRUE LOADFALSE LOADSYM].freeze
+  def proven_immediate_operand?(irep, idx, reg, owner_def)
+    return false if ENV['BC2CPP_IMMEDIATE_BARRIER'] == '0'
+    return false unless irep && idx && reg && owner_def
+
+    ctx = fixnum_proof_ctx(irep)
+    program = BytecodeIR.for(irep)
+    use_insn = idx >= 0 && program.source_at(idx)
+    return false if !use_insn || ctx[:upvars].include?(reg) || ctx[:protected].include?(use_insn.addr)
+
+    program.every_reaching_definition(idx, reg, opaque_regs: ctx[:upvars], max_states: fixnum_proof_max_states(irep),
+                                                shared: true) do |definition|
+      next fixnum_proof_entry_arg?(irep, definition.reg, owner_def) if definition.entry?
+
+      insn = program.source_at(definition.index)
+      IMMEDIATE_LOAD_OPS.include?(insn.op) ||
+        fixnum_proof_source?(irep, definition.index, insn, definition.reg, owner_def, 0)
+    end || false
   end
 
   # The frozen test mrb_iv_set makes and a direct struct store would skip, or nil when
@@ -693,7 +793,7 @@ class CodeGen
     out = +<<~CPP
       // POLY_TABLE -- see codegen_ivar_poly.rb's compile_poly_table.
       struct bc2cpp_poly_entry {
-        struct RClass* (*owner)(mrb_state*);
+        #{owner_row_getter_field}
         bc2cpp_poly_fn fn;
         int slot;
       };
@@ -714,8 +814,8 @@ class CodeGen
         if (m.c == c) return m.fn;
         bc2cpp_poly_fn fn = nullptr;
         for (int i = 0; i < t.n; ++i) {
-          struct RClass* k = bc2cpp_owner_class_slots[t.rows[i].slot];
-          if (k == c || (!k && t.rows[i].owner(M) == c)) {
+          struct RClass* k = #{owner_slot_ref('t.rows[i].slot')};
+          if (k == c || (!k && #{owner_row_fill('t.rows[i]')} == c)) {
             fn = t.rows[i].fn;
             break;
           }
@@ -730,7 +830,7 @@ class CodeGen
       out << "// POLY_TABLE :#{table[:name]}\n"
       out << "static const bc2cpp_poly_entry #{rows}[] = {\n"
       table[:entries].zip(table.fetch(:getters), table.fetch(:slots)).each do |(owner, impl), getter, slot|
-        out << "  {#{getter}, reinterpret_cast<bc2cpp_poly_fn>(#{impl}), #{slot}},  // #{owner}\n"
+        out << "  {#{owner_row_getter(getter)}reinterpret_cast<bc2cpp_poly_fn>(#{impl}), #{slot}},  // #{owner}\n"
       end
       out << "};\n"
       out << "static const bc2cpp_poly_table #{table[:symbol]} = {#{rows}, #{table[:entries].size}, " \
@@ -897,6 +997,7 @@ end
     name, argv = INDEX_CHAIN_ARGS.fetch(kind)
     # INDEX_CLOSED when every class that can answer has an arm; else the by-name tail.
     body = index_helper_closed_source(fast, name, argv) || index_helper_open_source(kind, fast, name, argv)
+    body = helper_nomethods(body) if @program_class_universe
     whole = "// OUTLINED_INDEX_OPS -- #{kind.upcase}'s generic chain, see bc2cpp.rb's INDEX_HELPERS comment.\n" \
             "static mrb_value bc2cpp_#{kind}(mrb_state* M, #{INDEX_HELPERS.fetch(kind)}) {\n" \
             "#{body.gsub(/^(?=.)/, '  ')}}\n\n"

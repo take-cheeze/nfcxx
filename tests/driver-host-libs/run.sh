@@ -7,7 +7,7 @@ uname() { if [ "$1" = -s ]; then echo "$SYS"; else echo "$MACH"; fi; }
 bash_rules() {
   posix_def=(-D_POSIX_SOURCE); [ "$(uname -s)" = Darwin ] && posix_def=(-D_DARWIN_C_SOURCE -U__BLOCKS__)
   if [ "$(uname -s)" = Darwin ]; then pb_cxx_libs="-lc++"; pb_atomic_lib=""; else pb_cxx_libs="-lstdc++ -lgcc_s"; pb_atomic_lib="-latomic"; fi
-  [ $freestanding = 0 ] || { pb_cxx_libs=""; pb_atomic_lib=""; }
+  [ $freestanding = 0 ] || { [ "$sys" = Darwin ] || pb_cxx_libs=""; pb_atomic_lib=""; }   # macOS: libc++ (the tables' personality)
 }
 state() { printf 'posix=%s cxx=[%s] atomic=[%s]\n' "$(printf '%s|' ${posix_def[@]+"${posix_def[@]}"})" "$pb_cxx_libs" "$pb_atomic_lib"; }
 for sys in Linux Darwin FreeBSD; do for fs in 0 1; do

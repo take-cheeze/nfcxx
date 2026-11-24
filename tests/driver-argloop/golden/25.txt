@@ -1,0 +1,5 @@
+== --bundle-libs -c m.cpp -o
+-- stdout
+-- stderr
+nfcxx: -o needs a value
+status=1

@@ -243,7 +243,8 @@ used for preprocessing, dependency files, assembling and linking (default `cc`).
   and `-MP`, which become the options without the `-Wp,`; any other `-Wp,` item is rejected. On the gcc backend
   `-O0 -O1 -O2 -O3 -Os -Og` (the last one wins; `-O2` when none is given, as before) and `-g*` (none unless asked)
   are passed to gcc. `-Ofast` is rejected (it was silently dropped before).
-- **Ignored on purpose:** `-O*` and `-g*` on the QBE backend (no optimisation levels, no debug info), `-W*` (including `-Werror`), `-w`, `-pipe`, `-v` with other arguments,
+- **Ignored on purpose:** `-O*` on the QBE backend (no optimisation levels; `-g` gives Path B a line table, the same code
+  otherwise: `tests/pathb-debug/run.sh`), `-W*` (including `-Werror`), `-w`, `-pipe`, `-v` with other arguments,
   `-m64`, `-march=`, `-mtune=`, other `-m<feature>` x86 options, and an allow list of `-f` options that cannot
   change what the program means here (`-fPIC`, `-fvisibility=`, `-fno-strict-aliasing`, `-fwrapv`,
   `-fno-common`, `-fstack-protector*`, `-f(no-)omit-frame-pointer`, `-ffunction-sections`, `-flto`, ...; the full
@@ -334,7 +335,7 @@ Other things the build exposed, not on cproc's side:
 - `nfcc` rejects `-Wp,` items other than the preprocessor options listed above, and does not generate dependency
   files for a compile-and-link command; `-std=c89`/`-ansi` change only the preprocessing (cproc always parses C11 plus
   its GNU subset).
-- The QBE backend of `nfcc` ignores `-O*`/`-g`: no optimisation levels and no debug info (assembly from `-S`
+- The QBE backend of `nfcc` ignores `-O*` (no optimisation levels); `-g` gives a line table and no other debug info (assembly from `-S`
   has no `.loc` lines). The gcc backend honours them.
 
 ## optcarrot (benchmark on an nfcc-built mruby)

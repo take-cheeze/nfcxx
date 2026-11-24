@@ -6,6 +6,7 @@ require_relative 'bytecode_ir_containers'
 require_relative 'bytecode_ir_ops'
 require_relative 'ir_block_operands'
 require_relative 'core_hierarchy_sigs'
+require_relative 'lexical_consts'
 require_relative 'send_names'
 
 # BLOCK_SELF_WORLD: `self` inside a block is the self of the frame that created it, unless something
@@ -141,6 +142,7 @@ module BlockSelfWorld
         ireps.each_value { |irep| scan_irep(irep, ireps, parents, compiled) }
       end
       scan_natives
+      rescan_scoped_writes
       Result.new(why: @failures.first, failures: @failures.uniq.freeze, rebound: @rebound.freeze, sites: @sites.freeze)
     end
 
@@ -189,10 +191,13 @@ module BlockSelfWorld
       if STRING_EVALS.include?(name) && !BytecodeIR::Ops::BLOCK_SEND.include?(insn.op) && (name == 'eval' || insn.argc != 0)
         return fail!(irep, insn, "evaluates a String with #{name} (code this analysis cannot read)")
       end
+      @scoped_write_used = false
       kind = if REBIND_NAMES.include?(name) then [:rebinder, name]
              elsif FACTORY_SENDS.key?(name) then factory_send?(irep, idx, insn) ? [:rebinder, name] : nil
              elsif NAME_SENDS.include?(name) || METHOD_MAKERS.include?(name) then computed_send(irep, idx, insn, ireps, parents)
              end
+      # SCOPED_CONSTANT_WRITES: kept to be scanned again without the lenient proof (rescan_scoped_writes).
+      (@scoped_write_sends ||= []) << [irep, idx, insn, ireps, parents, compiled] if @scoped_write_used
       return unless kind
 
       what, detail = kind
@@ -255,10 +260,262 @@ module BlockSelfWorld
       return true unless const
 
       simple = const.split('::').last
-      return true if assigned_constants.include?(simple)
+      if assigned_constants.include?(simple)
+        return true if @scoped_writes_off || assignment_may_reach?(irep, idx, insn.reg, simple)
+
+        @scoped_write_used = true
+      end
 
       chain = ancestors(simple)
       chain.nil? || chain.any? { |klass| factories.include?(klass) || FACTORY_SENDS.values.any? { |set| set.include?(klass) } }
+    end
+
+    # SCOPED_CONSTANT_WRITES: may one of the Ruby writes of the constant +simple+ be what the receiver read at +idx+
+    # (register +reg+) finds? assigned_constants matches by simple name, so `RBS::BuiltinNames::Hash = ...` (rbs's
+    # mrblib) would make every `Hash.new { }` a possible factory and its block rebound. A bare read (every writer of
+    # +reg+ a GETCONST) is resolved by mruby's vm.c mrb_vm_const_get: the body's own class, then the classes of the
+    # lexically enclosing bodies (the proc->upper chain), then const_get on the innermost class: its ancestors, then
+    # Object. A write in scope S binds S::simple, so it can only be found when S is on the read's lexical chain
+    # (LexicalConsts.chain_of, which ends at the top level, Object's table), is Object, or may be an ancestor of the
+    # reading class (ancestor_scope?; mruby reaches the top level's Object before any ancestor, which this does not use).
+    # Anything not proven keeps the old answer (true): a scoped read (`A::Hash`), a
+    # read whose body's scope is unknown (a compact `class A::B`, `class << x`), a write in an unknown scope (SETMCNST,
+    # or below such a body), or a world read without its native sources (a unit check).
+    def assignment_may_reach?(irep, idx, reg, simple)
+      return true if @native_paths.empty?
+      return true unless IrBlockOperands.all_writers?(irep, idx, reg) { |w| w.op == :GETCONST }
+
+      read_scope = scope_of(irep)
+      return true if read_scope == :unknown
+
+      chain = LexicalConsts.chain_of(read_scope)
+      constant_write_scopes.fetch(simple, [:unknown]).any? do |scope|
+        scope == :unknown || scope == 'Object' || chain.include?(scope) || ancestor_scope?(scope)
+      end
+    end
+
+    # The lexical scope (LexicalConsts::Model) of a body of either Ruby set, or :unknown. The two sets are compiled
+    # apart, so their labels may coincide: the set is picked by identity.
+    def scope_of(irep)
+      ireps = @ireps[irep.label].equal?(irep) ? @ireps : (@outside[irep.label].equal?(irep) ? @outside : nil)
+      return :unknown unless ireps
+
+      @scope_models ||= {}.compare_by_identity
+      model = (@scope_models[ireps] ||= LexicalConsts::Model.new(ireps, scopes_only: true))
+      model.scope_of(irep.label)
+    end
+
+    # simple name => the scopes its SETCONST writes sit in (:unknown for a SETMCNST, `A::K = v`).
+    def constant_write_scopes
+      @constant_write_scopes ||= begin
+        out = Hash.new { |h, k| h[k] = Set.new }
+        [@ireps, @outside].each do |ireps|
+          ireps.each_value do |irep|
+            irep.each_with_op(:SETCONST, :SETMCNST) do |insn, _|
+              next unless insn.const_name
+
+              out[insn.const_name.to_s.split('::').last] << (insn.op == :SETCONST ? scope_of(irep) : :unknown)
+            end
+          end
+        end
+        out.default_proc = nil
+        out
+      end
+    end
+
+    # Can the body +scope+ be an ancestor of the class a constant read starts from? A class always may be (a `class`
+    # statement's superclass, `Class.new(sup)`, ...). A module only through a mixin: a Ruby mixin call (mixin_names), or a
+    # native source that names it (mrb_include_module of a module it looks up). Matched by the last segment of the name.
+    # mruby's Kernel, Comparable and Enumerable are mixed in natively, and their names are spelled there.
+    def ancestor_scope?(scope)
+      return true if scope == LexicalConsts::TOP
+
+      last = scope.split('::').last
+      return true if class_statement_names.include?(last)
+
+      mixins = mixin_names
+      mixins.nil? || mixins.include?(last) || native_spelled?(last)
+    end
+
+    # The sends that make a module an ancestor (the hooks include/prepend/extend call are public too).
+    MIXIN_SENDS = Set['include', 'prepend', 'extend', 'append_features', 'prepend_features', 'extend_object'].freeze
+
+    # Simple names of every module Ruby code may mix in, or nil when one is not proven. A mixin call is a send of a
+    # MIXIN_SENDS name, or a SUPER in a method of such a name; each argument must be a constant, or (in a method of such a
+    # name, the forwarder mruby-toplevel-ext's `def include(*modules) = Object.include(*modules)` is) one of that
+    # method's own parameters or its zsuper list, which only a mixin call passes it. A mixin name must not be the old name
+    # of an ALIAS or an alias_method, or a name a computed-name send (send/__send__/public_send, a Method maker,
+    # Symbol#to_proc) is proven to send. A computed send whose names are NOT proven already fails the world fact
+    # (scan_send), and a compiled block then checks its self at entry (bc2cpp_block_self_check), as for every other
+    # unproven rebinding.
+    #
+    # That proof is lenient about one thing the world fact does not refuse: an alias_method whose old name it cannot
+    # prove. It is skipped here and recorded in @mixin_alias_unproven, which rescan_scoped_writes reads.
+    def mixin_names
+      return @mixin_names if defined?(@mixin_names)
+
+      # WORLD_SCAN_CACHE: a whole-world pass over the same sources as every other scan here, so ScanCache keeps it.
+      # The unproven-alias flag it leaves behind is part of the value.
+      names, unproven = cached_world_scan('mixin_names') do
+        @mixin_alias_unproven = false
+        names = compute_mixin_names
+        [names, @mixin_alias_unproven]
+      end
+      @mixin_alias_unproven = unproven
+      @mixin_names = names
+    end
+
+    # The value of a whole-world scan +name+, kept by ScanCache under the Ruby sources and native sources this world
+    # reads and the environment the scan may read (a source it cannot key is computed, not stored). The block's value
+    # must be Marshal-able data.
+    def cached_world_scan(name, &block)
+      sources = (@ireps.values + @outside.values).map { |irep| irep.file.to_s }
+      inputs = (sources + @native_paths.map(&:to_s)).map { |path| File.expand_path(path) }.uniq.sort
+      # The reaching-definitions (bytecode_ir_dataflow.rb) reads these IR switches: their values are keyed. Named one by
+      # one, since a prefix entry would list the whole environment, which a scan may not do.
+      ScanCache.fetch("block_self_world.#{name}", inputs, cache_absent: false,
+                      env: %w[BC2CPP_IR_QUERY_KEYS BC2CPP_IR_SHARED_DEFINITIONS BC2CPP_IR_SCALAR_SEEN], &block)
+    end
+
+    # SCOPED_CONSTANT_WRITES: the world fact is now known. When it holds, no compiled block checks its self at entry,
+    # so the lenient mixin proof is not enough: if an alias_method it skipped is in the world, every send the refinement
+    # answered (recorded by scan_send) is scanned again with the old answer, as a factory send.
+    def rescan_scoped_writes
+      return if @scoped_write_sends.nil? || !@failures.empty? || !@mixin_alias_unproven
+
+      @scoped_writes_off = true
+      @scoped_write_sends.each { |args| scan_send(*args) }
+    end
+
+    def compute_mixin_names
+      out = Set.new
+      symbols = symbol_block_names
+      return nil if symbols != :unknown && symbols.intersect?(MIXIN_SENDS)
+
+      [@ireps, @outside].each do |ireps|
+        parents = nil
+        def_names = method_def_names(ireps)
+        ireps.each_value do |irep|
+          forwarder = MIXIN_SENDS.include?(def_names[irep.label])
+          irep.each_with_op(:ALIAS, :SUPER, *SENDS) do |insn, idx|
+            parents ||= parent_map(ireps) if insn.op == :SUPER
+            name = insn.sym
+            if insn.op == :ALIAS
+              # OP_ALIAS a b: the new name a for the method b. Only an old name that is a mixin passes one on.
+              return nil if MIXIN_SENDS.include?(insn.typed[1]&.value.to_s)
+            elsif insn.op == :SUPER
+              # A SUPER in a block calls the super method of the method the block is in.
+              next unless MIXIN_SENDS.include?(enclosing_def_name(irep, def_names, parents))
+              return nil unless mixin_arguments(irep, idx, insn, forwarder, out)
+            elsif MIXIN_SENDS.include?(name)
+              return nil unless mixin_arguments(irep, idx, insn, forwarder, out)
+            elsif name == 'alias_method'
+              parents ||= parent_map(ireps)
+              old = insn.reg && insn.argc == 2 && !insn.positional_splat? ? names_at(irep, idx, insn.reg + 2, ireps, parents) : :unknown
+              if old == :unknown
+                @mixin_alias_unproven = true
+              elsif old.intersect?(MIXIN_SENDS)
+                return nil
+              end
+            elsif NAME_SENDS.include?(name) || METHOD_MAKERS.include?(name)
+              parents ||= parent_map(ireps)
+              names = name_operand(irep, idx, insn, ireps, parents)
+              # Unproven (or forwarded again): the world fact fails on this send, see above.
+              next if names == :unknown || names.intersect?(INDIRECT_NAMES)
+              return nil if names.intersect?(MIXIN_SENDS) || names.include?('alias_method')
+            end
+          end
+        end
+      end
+      out
+    end
+
+    # Adds the simple names of the constants a mixin call at +idx+ passes to +out+; false when an argument is neither a
+    # constant nor (+forwarder+: the call sits in a method of a mixin name) the method's own parameter or zsuper list.
+    def mixin_arguments(irep, idx, insn, forwarder, out)
+      return false unless insn.reg
+
+      regs = insn.positional_splat? || insn.argc.nil? ? [insn.reg + 1] : (1..insn.argc).map { |k| insn.reg + k }
+      regs.all? do |reg|
+        const = !insn.positional_splat? && IrBlockOperands.constant_name(irep, idx, reg)
+        if const
+          out << const.split('::').last
+          true
+        else
+          forwarder && forwarded_parameters?(irep, idx, reg)
+        end
+      end
+    end
+
+    # Does +reg+ at +idx+ hold only the method's own parameters: an entry value, the zsuper list (ARGARY), or an Array
+    # packed from those (`f(*a)` is LOADNIL, MOVE, ARYCAT; vm.c OP_ARYCAT/OP_ARYPUSH append R(b) to R(a) in place)?
+    def forwarded_parameters?(irep, idx, reg, depth = 0)
+      return false if depth > 8
+
+      defs = BlockSelfWorld.definitions(irep, idx, reg)
+      return false if defs.nil? || defs.empty?
+
+      defs.all? do |df|
+        next true if df.entry?
+
+        w = BytecodeIR.for(irep).source_at(df.index)
+        case w.op
+        when :ARGARY, :LOADNIL then true
+        when :ARYCAT, :ARYPUSH
+          w.regs.size == 2 && forwarded_parameters?(irep, df.index, w.regs[0], depth + 1) &&
+            forwarded_parameters?(irep, df.index, w.regs[1], depth + 1)
+        else false
+        end
+      end
+    end
+
+    # The `def` name of the method +irep+ is (or, for a block, sits in), or nil.
+    def enclosing_def_name(irep, def_names, parents)
+      label = irep.label
+      until def_names.key?(label)
+        parent = parents[label]
+        return nil unless parent
+
+        label = parent.label
+      end
+      def_names[label]
+    end
+
+    # label => the name its `def` gives each method body of +ireps+ (TDEF/SDEF, or METHOD then DEF).
+    def method_def_names(ireps)
+      @method_def_names ||= {}.compare_by_identity
+      @method_def_names[ireps] ||= ireps.each_value.with_object({}) do |irep, out|
+        program = BytecodeIR.for(irep)
+        irep.each_with_op(:TDEF, :SDEF, :DEF) do |insn, idx|
+          if insn.op == :DEF
+            at = idx.positive? ? irep.previous_real_index(idx - 1) : -1
+            method = at >= 0 ? program.source_at(at) : nil
+            next unless method&.op == :METHOD && method.reg == insn.paren_reg
+
+            out[irep.reps[method.block_index]] = insn.sym
+          else
+            out[irep.reps[insn.block_index]] = insn.sym
+          end
+        end
+      end
+    end
+
+    # Simple names a `class` statement opens.
+    def class_statement_names
+      @class_statement_names ||= (@ireps.values + @outside.values).each_with_object(Set.new) do |irep, out|
+        irep.each_with_op(:CLASS) { |insn, _| out << insn.sym.split('::').last if insn.sym }
+      end
+    end
+
+    # Does a native source of the world spell +name+ (it may look the module up and mix it in)?
+    def native_spelled?(name)
+      @native_spelled ||= {}
+      return @native_spelled[name] if @native_spelled.key?(name)
+
+      pattern = /\b#{Regexp.escape(name)}\b/
+      @native_spelled[name] = @native_paths.any? do |path|
+        File.file?(path) ? File.read(path, encoding: 'BINARY').match?(pattern) : true
+      end
     end
 
     # Simple names a SETCONST assigns anywhere (`K = Class` is not a class declaration).
@@ -445,7 +702,7 @@ module BlockSelfWorld
     def symbol_block_names
       return @symbol_block_names if defined?(@symbol_block_names)
 
-      @symbol_block_names = compute_symbol_block_names
+      @symbol_block_names = cached_world_scan('symbol_block_names') { compute_symbol_block_names }
     end
 
     def compute_symbol_block_names

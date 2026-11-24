@@ -166,11 +166,57 @@ class SsaFn
       end
     end
     raise BadSSA, "no blocks in #{@name}" if @order.empty?
+    drop_eh_tables
     @types = {}
     @params.each { |p| @types[p[1]] = p[3] if head(p) == "param" }
     @order.each do |id|
       @blocks[id].each { |s| @types[s[1]] = s[2] if head(s) == "let" || head(s) == "phi" }
     end
+  end
+
+  # Zero-cost exception tables (docs/notes/pathb-zero-cost-eh.md): nothing unwinds on the structured targets, so the
+  # entry's (eh-entry BODY PAD...) is a branch to the body, the blocks' unwind targets and pad markers go, and the blocks
+  # no branch reaches any more (the pads, and the catch handlers only they jump to) with them.
+  def drop_eh_tables
+    eh = false
+    attrs = []
+    @attrs.each { |a| ["eh-types", "eh-noexcept", "eh-spec"].include?(head(a)) ? (eh = true) : attrs << a }
+    @attrs = attrs
+    @order.each do |id|
+      b = []
+      @blocks[id].each { |s| ["eh-unwind", "eh-pad", "eh-spec-pad"].include?(head(s)) ? (eh = true) : b << s }
+      if head(b[-1]) == "eh-entry"
+        eh = true
+        b[-1] = ["br", b[-1][1]]
+      end
+      @blocks[id] = b
+    end
+    return unless eh
+    reach = {}
+    work = [@order.first]
+    until work.empty?
+      id = work.pop
+      next if reach[id] || !@blocks.key?(id)
+      reach[id] = true
+      work.concat(succs(id))
+    end
+    order = []
+    blocks = {}
+    @order.each do |id|
+      next unless reach[id]
+      order << id
+      blocks[id] = @blocks[id].map do |s|
+        if head(s) == "phi"
+          incs = []
+          s.drop(3).each { |inc| incs << inc if reach[inc[0].to_i] }
+          s[0, 3] + incs
+        else
+          s
+        end
+      end
+    end
+    @order = order
+    @blocks = blocks
   end
 
   def phis_of(id)

@@ -7,7 +7,7 @@ here=$(cd "$(dirname "$0")" && pwd -P); repo=$(cd "$here/../.." && pwd -P)
 pass=0; fail=0
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 cd "$repo" || exit 1
-git show origin/main:nfcxx > "$work/nfcxx-main" 2>/dev/null || git show HEAD:nfcxx > "$work/nfcxx-main"
+cp "$here/pinned-nfcxx.txt" "$work/nfcxx-main"
 sed -n '/^ecp_args() {/,/^}/p' "$work/nfcxx-main" > "$work/ecp_args.sh"
 [ -s "$work/ecp_args.sh" ] || { echo "driver-setup-trace: ecp_args not found in main's ./nfcxx"; exit 1; }
 

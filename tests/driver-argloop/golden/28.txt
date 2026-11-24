@@ -1,0 +1,5 @@
+== -c m.cpp -o m.o --cuda-driver=bogus
+-- stdout
+-- stderr
+nfcxx: --cuda-driver=bogus: auto, cudart or libcuda
+status=2

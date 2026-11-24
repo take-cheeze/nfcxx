@@ -1,0 +1,8 @@
+== case 64: NFCXX_PATH=b   -fsanitize=undefined --freestanding -c a.cpp -o a.o
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: -fsanitize needs Path B, which compiles hosted programs only
+-- eccp
+(none)
+-- files

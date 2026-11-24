@@ -1,0 +1,8 @@
+== case 65: NFCXX_PATH=b   -fsafe-pointers -fsanitize=address -c a.cpp -o a.o
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: -fsafe-pointers and -fsanitize=address both replace malloc; use one
+-- eccp
+(none)
+-- files

@@ -1,0 +1,7 @@
+== case 42:  --freestanding --emit-c --gnu-version=130000 a.cpp
+-- status: 1
+-- stdout
+-- stderr
+-- eccp
+(none)
+-- files

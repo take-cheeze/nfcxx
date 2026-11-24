@@ -39,12 +39,28 @@ tool source), configured runtime defines, the explicit self-build settings, and 
 the generator inherits (`RUBYOPT`, `NFCXX_AST_DUMP`, `LIBCLANG_EDG_CPFE`); `docs/notes/bc2cpp-cache-keys.md` has the
 audit. The input program's owner filters and optimization controls are isolated from self-generation.
 Identical generated files retain their timestamps so warm setup does not rebuild every translation unit.
+Self-generation supplies the runtime manifest through `BC2CPP_LINKED_NATIVE_SRCS` and `BC2CPP_LINKED_RUBY_SRCS`:
+these definite linked sources supplement the closed world's gem-directory inventory, including generated Prism
+accessors. They are separate from the broader analysis lists `NATIVE_SRCS` and `FOREIGN_RUBY_SRCS`, which may
+include alternative core implementations. The input program's linked-source settings are isolated from this manifest.
 `generation/host.json` records the actual Ruby version, YJIT state and inputs. `generation/coverage.json` records
 translated methods and the exact fallback reasons. Its `methods` array has one object per translated method, with
 `entry`, `owner`, `name`, `tier` (the `--shard-cold-opt` level when the method is in a cold shard, else `"default"`)
 and `compile_seconds` (set when the generation ran with `BC2CPP_PROFILE_TIMINGS=1`, else `null`). The same objects
 are the `== compiled method report ==` section of `generation.log`, written by bc2cpp at exit. Self-generation passes
 no shard tier, so its tiers are `"default"`. `compile_seconds` includes the probes each method's compilation runs.
+
+Generation reuses a guarded cleanliness answer only at an empty probe stack with unchanged unconditional
+cleanliness facts. Reuse preserves the guard signal, and forgetting layout-dependent probe code also forgets
+these answers. Nested probes continue to use their existing context-sensitive rules. For diagnostic comparisons,
+`BC2CPP_PROBE_ROOT_CACHE=0` disables this reuse in a direct compiler invocation.
+
+Native builds also [split oversized owners across shards](bc2cpp-owner-shards.md), so the large `CodeGen` class
+does not leave one compiler process running after all other shard workers finish. Explicit hot-owner pins retain
+their existing placement.
+
+[Measured bottlenecks and results](bc2cpp-self-performance.md) separate Ruby generation, native build balance
+and compiled-compiler runtime checks.
 
 ## Validation
 

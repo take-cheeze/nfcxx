@@ -1,0 +1,18 @@
+if [ $moves = 1 ]; then
+  eccp_dir=$(mktemp -d)
+  # the eccp directory and its temporary directories are removed by eccp_cleanup, unless the Ruby driver owns the temporary root
+  # (NFCXX_TMP_OWNED=1: it removes them when the run ends, unless intermediates are kept)
+  if [ "${NFCXX_TMP_OWNED:-}" = 1 ]; then trap trace_finish EXIT; else trap eccp_cleanup EXIT; fi
+fi
+# The command line (its arguments, the variable a shared link exports, and the directory it runs in) is planned by
+# scripts/nfcxx-eccp-plan.rb, which also prints the note for a kept temporary directory (--keep-intermediates).
+# A shared link: EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS replaces eccp's link options (see the port).
+eccp_plan
+t=$(trace_start)
+(
+  [ -z "$eccp_cd" ] || cd "$eccp_cd"
+  # the eccp environment (scripts/nfcxx-eccp-env.rb plan, restructure step 3): the elements of eccp_envs, exported
+  eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-eccp-env.rb" plan envs="$(IFS=$'\x1f'; echo "${eccp_envs[*]-}")")"
+  "${eccp_argv[@]}"
+)
+trace_end "$t" "eccp (front end, C compile, link)" eccp

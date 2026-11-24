@@ -191,6 +191,9 @@ end
 #   - `bsearch`, `bsearch_index`: mruby-array-ext's mrblib (array.rb) calls
 #     `block.call` inside its loop and nothing stores it; `to_enum(:bsearch_index)`
 #     keeps the method name, not the block. No program definition uses either name.
+#   - `with_fresh_method_state` (codegen_emit.rb, and the codegen_arg_shapes.rb wrapper that calls `super`),
+#     `straight_line` (BytecodeIR::Program) and `each_call_site` (codegen_loop_regions.rb): bc2cpp's own methods, which
+#     yield while they run (each_call_site from inside adjacent_pairs' block) and keep nothing.
 BLOCK_FALLBACK_UPVAR_SAFE_METHODS = %w[
   each each_with_index each_index each_key each_event_position
   times map select reject reject! delete_if
@@ -200,6 +203,7 @@ BLOCK_FALLBACK_UPVAR_SAFE_METHODS = %w[
   auto_battle_best_target cached_bitmap flat_map gsub gsub! scan zip each_value
   sub sub! with_index step each_line bsearch bsearch_index filter_map
   each_source each_with_op each_nested_insn each_body adjacent_pairs each_irep_of_method
+  with_fresh_method_state straight_line each_call_site
 ].freeze
 
 # CORE_BLOCK_REST: `{ |*args| }` (ENTER 0:0:1:0:0:0:0:0), the shape of every Enumerable
@@ -239,20 +243,27 @@ end
 # block (lambda_body with blk=1), so only the constructing opcode tells them
 # apart; this recognizer fires only for LAMBDA, so RETURN_BLK/BREAK are allowed
 # here and compile to a plain return.
-# Nested LAMBDA/BLOCK/SENDB/SSENDB and RESCUE/RAISEIF/EXCEPT are still
-# rejected.
+# Nested LAMBDA and RESCUE/RAISEIF/EXCEPT are still rejected.
+# LAMBDA_NESTED_BLOCKS: a BLOCK/SENDB/SSENDB in the body is a nested region of
+# emit_proc_fallback_fn, as in a block body. Only a `return` inside such a nested
+# block is refused (recognize_lambda_fallback_regions): it must leave the lambda,
+# and a lambda body's env carries no return token for it.
 # CONFINED_LAMBDA_UPVAR_SUPPORT: upvars are captured as raw pointers into the
 # enclosing C++ frame, so the proc must not outlive it. A lambda has no call
 # site to vet, so recognize_lambda_fallback_regions requires
 # lambda_proc_frame_confined? over the enclosing irep instead. A lambda with no
-# upvars needs no such proof.
+# upvars needs no such proof. LAMBDA_CELLS: one that may escape captures through
+# heap cells instead.
 LAMBDA_FALLBACK_UNSAFE_OPS = %i[
-  LAMBDA BLOCK SENDB SSENDB
+  LAMBDA
   RESCUE RAISEIF EXCEPT
 ].freeze
 
+# LAMBDA_REST: `->(a, *r) { }` and `->(*r) { }` (CORE_BLOCK_REST / MIXED_REST_BLOCK's shapes) bind as a strict proc does
+# (emit_proc_fallback_fn_body); BC2CPP_LAMBDA_REST=0 keeps them refused.
 def lambda_fallback_safe?(lambda_irep)
-  return false unless pure_mandatory_arity?(lambda_irep)
+  rest = ENV['BC2CPP_LAMBDA_REST'] != '0' && (rest_only_block?(lambda_irep) || mixed_rest_block?(lambda_irep))
+  return false unless pure_mandatory_arity?(lambda_irep) || rest
 
   !BytecodeIR.for(lambda_irep).op?(*LAMBDA_FALLBACK_UNSAFE_OPS)
 end

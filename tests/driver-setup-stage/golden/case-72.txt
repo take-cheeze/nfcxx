@@ -1,0 +1,9 @@
+== case 72:  -c a.cpp -o a.o -lcuda
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: note: linking the CUDA driver library -lcuda as named (no cuda.h and cudaTypedefs.h in /usr/local/cuda/include; docs/notes/cuda-driver.md)
+nfcxx: QBE not built; run scripts/setup-qbe.sh
+-- eccp
+(none)
+-- files

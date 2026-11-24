@@ -1,0 +1,11 @@
+== case 52:  --trace=trace.json a.cpp -o a
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: QBE not built; run scripts/setup-qbe.sh
+-- eccp
+(none)
+-- files
+trace.json
+-- trace names
+      1 "name":"trace_end"

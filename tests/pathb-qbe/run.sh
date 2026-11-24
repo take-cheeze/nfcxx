@@ -12,6 +12,8 @@
 #                                 A probe with a `// GCC-SKIP: reason` line uses something the host gcc lacks (its reason is
 #                                 printed): only EXPECT is checked, gcc is not compared.
 #                                 volatile.cpp and tls.cpp: volatile accesses and thread-local objects (a second pthread).
+#                                 A probe with a `// IR-OPT: FLAGS` line runs scripts/pathb-ir-opt.rb FLAGS on its IR before the
+#                                 emitter (pure_call_*.cpp: --hoist-pure), so the emitted code of the passes is checked too.
 #                                 A probe may carry `// ASM-COUNT: FUNCTION PREFIX N` lines: the assembly of FUNCTION must
 #                                 call exactly N functions whose name starts with PREFIX (check_asm below);
 #                                 `// ASM-ORDER: FUNCTION FIRST SECOND` lines: a call of FIRST* comes before one of SECOND*.
@@ -57,8 +59,11 @@ qbe_target=${PATHB_QBE_TARGET:-$(host_qbe_target)}
 [ -x "$qbe" ] || { echo "pathb-qbe: no QBE at $qbe; run scripts/setup-qbe.sh" >&2; exit 2; }
 libdir=${EDG_LIB:-$root/build/edg/lib}
 # The EH shim (lib/ehshim; exceptions thrown by libstdc++.so, std::exception_ptr) is part of every hosted program the
-# driver links, so it is part of every program linked here. Empty when it cannot be built (NFCXX_EHSHIM=0 too).
-shim=$(scripts/ehshim.rb) || shim=
+# driver links, so it is part of every program linked here. Empty when it cannot be built (NFCXX_EHSHIM=0 too), and with a
+# harness that has exception tables (eh-tables beside its cpfe): those programs use libstdc++'s EH runtime, which
+# scripts/pathb-ldrt.rb's link script puts ahead of libC.a (docs/notes/pathb-zero-cost-eh.md).
+eh_tables=0; [ -f "$(dirname "$cpfe")/eh-tables" ] && eh_tables=1
+shim=; [ $eh_tables = 1 ] || shim=$(scripts/ehshim.rb) || shim=
 export PATHB_CPFE=$cpfe
 export PATHB_BASE=${PATHB_BASE:-$root/build/pathb/edg-base}
 emit=scripts/pathb-qbe-emit.rb
@@ -135,6 +140,14 @@ run_one() {
     scripts/pathb-dump.rb --ir $std $flags "$f" > "$ir" 2> "$tmp/$n.fe" || {
       failed=$((failed + 1)); lines+=("FAIL     $name: front end: $(head -1 "$tmp/$n.fe")"); return; }
   fi
+  # `// IR-OPT: FLAGS` runs the IR passes (scripts/pathb-ir-opt.rb FLAGS) on the IR before the emitter, so the probe checks
+  # their output against the gcc backend (pure_call_*.cpp: --hoist-pure).
+  ir_opt=$(sed -n 's,^// IR-OPT: *,,p' "$f" | head -1)
+  if [ -n "$ir_opt" ]; then
+    ruby scripts/pathb-ir-opt.rb $ir_opt "$ir" > "$ir.opt" 2> "$tmp/$n.opt" || {
+      failed=$((failed + 1)); lines+=("FAIL     $name: IR passes: $(head -1 "$tmp/$n.opt")"); return; }
+    mv "$ir.opt" "$ir"
+  fi
   "$mrb" "$emit" ${emit_opts[@]+"${emit_opts[@]}"} "$ir" > "$ssa" 2> "$tmp/$n.emit" ; rc=$?
   if [ $rc = 3 ]; then
     refused=$((refused + 1)); lines+=("REFUSED  $name: $(head -1 "$tmp/$n.emit")"); return
@@ -182,6 +195,9 @@ run_one() {
     # A `// TRAP-STDERR: text` line names a message the abort must have printed, so that a program which aborts for
     # another reason (a broken unwinder, say) is not taken for the trap it is testing.
     want=$(sed -n 's,^// TRAP-STDERR: *\(.*\),\1,p' "$f" | head -1)
+    # With exception tables (eh_tables) std::terminate is libstdc++'s, whose message is "terminate called ..." where EDG's
+    # runtime prints "terminate() called".
+    [ $eh_tables = 1 ] && [ "$want" = "terminate() called" ] && want="terminate called"
     # `// TRAP-EXIT: 132` names another fatal signal (128 + signal): __builtin_trap and ud2 are SIGILL, not SIGABRT.
     wsig=$(sed -n 's,^// TRAP-EXIT: *\([0-9][0-9]*\).*,\1,p' "$f" | head -1); wsig=${wsig:-134}
     # `// TRAP-EXIT-AARCH64: 133` replaces TRAP-EXIT on Linux aarch64 only: there an illegal instruction (ud2, __builtin_trap)
@@ -228,6 +244,8 @@ run_one() {
   fi
   if [ "$gcc_rc" != "$((want & 255))" ] && [ "$gcc_rc" != "$want" ]; then
     failed=$((failed + 1)); lines+=("MISMATCH $name: path B matches EXPECT $want but gcc gives $gcc_rc")
+    # the gcc backend's own stderr, so a host-only compile failure shows its message in the log
+    [ "$gcc_rc" = compile-error ] && { lines+=("  gcc stderr:"); while IFS= read -r l; do lines+=("    $l"); done < "$tmp/$n.gccerr"; }
     return
   fi
   # A probe with a `// STDOUT: same` line prints (constructor and destructor order, ...): the output of the Path B

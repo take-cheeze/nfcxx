@@ -1,0 +1,8 @@
+== case 79:  -c a.cpp -o a.o --backend=gcc -fno-sanitize=all -fsanitize=bounds
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: QBE not built; run scripts/setup-qbe.sh
+-- eccp
+(none)
+-- files

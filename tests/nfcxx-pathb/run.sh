@@ -8,7 +8,7 @@
 #   cc                  the link: logged (RUN), not run
 #   pathb-cc            logged (RUN ROOT/scripts/pathb-cc.rb ARGS); its status is the facts' pathb-status
 #   env                 the gcc fallback's exec: logged (EXEC); the bash is replaced, so no STATUS line follows it
-#   mktemp -d           a directory under the sandbox's tmp, printed as TMP
+#   mktemp -d           a directory under the sandbox's tmp, printed as TMP; mktemp alone is a file there (the cache check's statements)
 #   g++, gcc            probes answer; no others run here
 # Everything else (rm, sed, awk, grep, ...) runs for real. The bash runs under env -i (no NFCXX_* variables) in the sandbox's
 # work directory, whose files and directories are the "exists" facts. In the output the sandbox's repository is ROOT, its work
@@ -30,8 +30,9 @@ trap 'rm -rf "$sb"' EXIT
 root=$sb/root; work=$sb/work; bin=$sb/bin; tmp=$sb/tmp
 mkdir -p "$root/build/edg/bin" "$root/build/edg/lib" "$root/build/qbe" "$bin" "$work" "$tmp"
 cp -r "$repo/scripts" "$root/scripts"
-# the copy of nfcxx, unchanged
-cp "$repo/nfcxx" "$root/nfcxx"
+# the bash oracle: the pre-switch driver text (pinned-nfcxx.txt, ./nfcxx at 25005e00d). ./nfcxx is a shim for the Ruby driver
+# since B8, so it cannot be the oracle.
+cp "$here/pinned-nfcxx.txt" "$root/nfcxx"
 chmod +x "$root/nfcxx"
 for s in ehshim.rb asan-vla.rb safeptr-rt.rb pathb-cc.rb pathb-ldrt.rb; do ln -sf "$here/stub.sh" "$root/scripts/$s"; done
 for c in cc g++ gcc cp mktemp ninja env; do ln -s "$here/stub.sh" "$bin/$c"; done

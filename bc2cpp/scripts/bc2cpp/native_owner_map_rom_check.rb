@@ -99,6 +99,30 @@ Dir.mktmpdir do |dir|
   check.call("mruby's own tables keep their owner", map.by_name['one'] == Set['Thing'])
 end
 
+# UNKNOWN_CLASS_TABLE: mruby-struct's make_struct puts `members` on the singleton of a class it computes. Only a class
+# or module receiver looks that table up, so an instance chain stays proven and a class-object chain is refused.
+Dir.mktmpdir do |dir|
+  factory = File.join(dir, 'mruby-factory/src/factory.c')
+  FileUtils.mkdir_p(File.dirname(factory))
+  File.write(factory, <<~'C')
+    static mrb_value make(mrb_state *mrb, struct RClass *klass) {
+      struct RClass *c = mrb_class_new(mrb, klass);
+      mrb_define_class_method_id(mrb, c, MRB_SYM(members), make_members, MRB_ARGS_NONE());
+      mrb_define_method_id(mrb, c, MRB_SYM(fields), make_fields, MRB_ARGS_NONE());
+      return mrb_obj_value(c);
+    }
+  C
+  map = NativeOwnerMap.build([factory])
+  check.call('a class method on a computed class is the unknown class table',
+             map.by_name['members'] == Set[NativeOwnerMap::UNKNOWN_CLASS_TABLE] && map.registrations.empty?)
+  check.call('an instance method on a computed class stays UNKNOWN', map.by_name['fields'] == Set[NativeOwnerMap::UNKNOWN])
+  check.call('an instance chain is proven against the unknown class table',
+             NativeOwnerMap.verdict(map, 'members', %w[Troop Object Kernel BasicObject]) == [:proven])
+  check.call('a class-object chain is refused by the unknown class table',
+             NativeOwnerMap.verdict(map, 'members', %w[Troop.singleton Object.singleton Class Module Object]).first == :refused &&
+               NativeOwnerMap.verdict(map, 'members', %w[Class Module Object]).first == :refused)
+end
+
 # A ROM entry's MRB_SYM(blt) names a method: a `mrb_sym blt` local dispatched through is still one spelled name, so the
 # source does not open every module's includers.
 local_sym = <<~'C'

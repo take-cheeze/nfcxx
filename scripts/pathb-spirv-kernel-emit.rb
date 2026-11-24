@@ -1058,8 +1058,28 @@ def visit_calls(name, calls, state)
   state[name] = :done
 end
 
+# Zero-cost exception tables (docs/notes/pathb-zero-cost-eh.md): nothing unwinds on this target, so a function's landing
+# pads (eh-pad) never run and its exception states (eh-state, an inlined copy's markers) mean nothing; they are dropped,
+# with the table header (eh-types, eh-noexcept, eh-spec). A throw is still refused where it is (its __cxa_throw call).
+EH_TABLE_ITEMS = %w[eh-types eh-noexcept eh-spec eh-pad eh-spec-pad].freeze
+EH_STATE_STMTS = %w[eh-state eh-inline-begin eh-inline-end eh-state-outer].freeze
+
+def strip_eh_stmts(x)
+  return x unless x.is_a?(Array)
+
+  x.reject { |y| y.is_a?(Array) && EH_STATE_STMTS.include?(y[0]) }.map { |y| strip_eh_stmts(y) }
+end
+
+def strip_eh_tables(forms)
+  forms.map do |f|
+    next f unless f.is_a?(Array) && f[0] == "function"
+
+    strip_eh_stmts(f.reject { |p| p.is_a?(Array) && EH_TABLE_ITEMS.include?(p[0]) })
+  end
+end
+
 def emit_module(src)
-  forms = parse_forms(tokenize(strip_comments(src)))
+  forms = strip_eh_tables(parse_forms(tokenize(strip_comments(src))))
   mod = SpvModule.new
   fns = []
   forms.each do |f|

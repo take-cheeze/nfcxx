@@ -104,7 +104,8 @@ module StaticDispatchRegistrations
   # GENERATED_COMMENTS: a whole-line comment of the generated code (the probe's annotations, `// POLY_DIAG ... name="x"`)
   # looks nothing up, so its quoted names are no literals.
   GENERATED_COMMENT = %r{^[ \t]*//[^\n]*$}
-  LEFT_OUT_CALL = /bc2cpp_left_out\(\s*M\s*,\s*[A-Za-z_][A-Za-z0-9_$]*\s*,\s*"(?:[^"\\]|\\.)*"\s*,\s*(?:true|false)\s*\);/m
+  # A LEFT_OUT_TABLE stream is the same calls, as presym spellings.
+  LEFT_OUT_CALL = /bc2cpp_left_out\(\s*M\s*,\s*[A-Za-z_][A-Za-z0-9_$]*\s*,\s*"(?:[^"\\]|\\.)*"\s*,\s*(?:true|false)\s*\);|(?:static|inline) constexpr uint16_t bc2cpp_left_out_\w+\[\] = \{[^;]*\};/m
   # STEP_SUPER_STATIC (codegen_resumable.rb): the name a static step `super` passes only names the frame; the entry
   # before it is called with no lookup. The name argument (a presym or a literal) is what this blanks.
   STEP_SUPER_STATIC_NAME = /(?<=\bbc2cpp_dyn_super_static\(M, self, )([A-Za-z_][\w$]*, \w+\(M\), )(?:MRB_[QS]?SYM(?:_[QBE])?\(\w+\)|bc2cpp_sym\(M, \d+\)|mrb_intern_lit\(M, "(?:[^"\\]|\\.)*"\))/
@@ -184,14 +185,16 @@ module StaticDispatchRegistrations
   def index_planner(repo_root, mrbc, ireps, registry, superclass_of, engine_tuple)
     root = File.expand_path(repo_root)
     gems = NomethodReviewedProbe.closed_gems(root)
-    native_paths, _ruby_paths = bc2cpp_closed_world_outside_srcs('closed', gems, root)
+    native_paths, _ruby_paths = bc2cpp_closed_world_outside_srcs(ListsWorld.name, gems, root)
+    # LISTS_WORLD: the host sources a world's binary links beside its gems (the closed one's are src/, above).
+    native_paths |= ListsWorld.host_natives(root) unless ListsWorld.closed?
     native_sources = extract_native_method_sources(native_paths)
     engine_ireps = ireps.reject { |label, irep| label != engine_tuple[1] && CoreDefs.core_source?(irep.file) }
     engine_registry = registry.transform_values { |defs| defs.reject(&:core) }.reject { |_, defs| defs.empty? }
     world = ClosedWorld.new(ireps: engine_ireps, registry: engine_registry,
                             class_decls: engine_tuple[7], walked: engine_tuple[8] & engine_ireps.keys,
                             native_paths: native_paths,
-                            ruby_paths: bc2cpp_closed_world_outside_srcs('closed', gems, root).last,
+                            ruby_paths: bc2cpp_closed_world_outside_srcs(ListsWorld.name, gems, root).last,
                             module_names: engine_tuple[11])
     return nil unless world.global_refusal.nil? && world.exact_instances_singleton_free? &&
                       world.method_missing_classes.empty?
@@ -298,6 +301,8 @@ module StaticDispatchRegistrations
     # PROC_SPEC names (bc2cpp.rb's bc2cpp_proc_spec_stand_in): a compiled block's local names, bound with
     # mrb_intern_cstr as the parameter names of a stand-in proc. They name no method a lookup can reach.
     body = body.gsub(PROC_SPEC_NAMES, '')
+    # COMPACT_LABELS (label_table.rb): owners, tails and names of violation messages, as the labels they replace.
+    body = body.gsub(LABEL_TEXTS, '')
     table = nil
     body = body.sub(SYM_TABLE) { table = Regexp.last_match(1); '' }
     names = body.scan(STRING_LITERAL).map { |(s)| unescape(s) }
@@ -306,6 +311,7 @@ module StaticDispatchRegistrations
 
   STRING_LITERAL = /"((?:[^"\\\n]|\\.)*)"/
   PROC_SPEC_NAMES = /static const char\* const bc2cpp_proc_spec_\d+_names\[\] = \{[^}]*\};/
+  LABEL_TEXTS = /bc2cpp_label_texts\[\d+\] = \{\n.*?^\};/m
   # PROC_PARAMETERS (closed only; bc2cpp.rb's bc2cpp_proc_specs_install): the stand-in Proc#parameters is looked up from
   # M->proc_class and defined there, so only Proc's own chain can answer or lose it. A `parameters` of an engine class
   # is neither looked up nor replaced; a module or singleton owner stays reached (super_reached?).
@@ -325,8 +331,10 @@ module StaticDispatchRegistrations
   # class register rN of codegen_class_body.rb): its name is a method being defined, not a lookup, as REGISTRATION_CALL's.
   SELF_REGISTRATION_CALL = /mrb_define_(?:private_|class_)?method\(\s*M\s*,\s*mrb_class_ptr\((?:self|r\d+)\)\s*,\s*"(?:[^"\\\n]|\\.)*"\s*,\s*[A-Za-z_][A-Za-z0-9_$]*\s*,/
   RAW_SYMBOL_VALUE = /mrb_symbol_value\(mrb_intern_cstr\(M, "(?:[^"\\\n]|\\.)*"\)\)/
-  # codegen_insn.rb's pool string value (bc2cpp_pool_str, symbol_cache.rb's prelude), not a folded constant.
-  POOL_STRING_VALUE = /bc2cpp_pool_str\(M, "((?:[^"\\\n]|\\.)*)"\)/
+  # codegen_insn.rb's pool string value (bc2cpp_pool_str, symbol_cache.rb's prelude), not a folded constant, or the
+  # same value appended by STRCAT_LITERAL (bc2cpp_str_cat_lit); a LITERAL_TABLES String slot (BC2CPP_LIT_STR) is the
+  # same STRING instruction's value, and so is a STACK_STRINGS frame-local one (bc2cpp_stack_str).
+  POOL_STRING_VALUE = /(?:bc2cpp_pool_str\(M, |bc2cpp_stack_str\(M, bc2cpp_str\d+, |bc2cpp_str_cat_lit\(M, r\d+, |BC2CPP_LIT_STR\()"((?:[^"\\\n]|\\.)*)"\)/
   # symbol_cache.rb's interned-name table; every use is `bc2cpp_sym(M, <index>)`
   # or the index argument of `bc2cpp_send(M, recv, <index>, ...)`.
   SYM_TABLE = /bc2cpp_sym_names\[\d+\] = \{\n(.*?)^\};/m
@@ -374,6 +382,11 @@ module StaticDispatchRegistrations
   # The names in `src`'s symbol table none of whose uses is a dynamic lookup of a compiled owner's method: each use
   # is a NON_LOOKUP_HELPERS call or an EMBED_GUARD_FALLBACK one.
   #
+  # LOOKUP_FREE_EVERY_SLOT: the table holds one slot per name and checked kind (SymbolCache#index_for), so a name
+  # is lookup-free only when every slot of it is: a quiet `mrb_symbol_value` slot says nothing about another slot's
+  # `bc2cpp_send_kw` (KEYWORD_DYNAMIC_SEND) or `bc2cpp_send`. This is the soundness condition of leaving a generated
+  # name out of the tables: no generated by-name lookup may name it.
+  #
   # EMBED_GUARD_FALLBACK: the by-name fallback of a MONO_EMBED_GUARD for that same method, on an owner nothing
   # subclasses. The fallback runs only when the receiver's class is not exactly the owner; with no subclass
   # anywhere, such a receiver's method lookup never reaches the owner's method table, so it cannot need the owner's
@@ -404,7 +417,8 @@ module StaticDispatchRegistrations
       quiet[i] += 1
     end
     guarded_owner_calls(src, subclassed).each { |i| quiet[i] += 1 }
-    quiet.select { |i, n| n == uses[i] }.keys.to_set { |i| names[i] }
+    looked_up = uses.keys.reject { |i| quiet[i] == uses[i] }.to_set { |i| names[i] }
+    quiet.select { |i, n| n == uses[i] }.keys.to_set { |i| names[i] } - looked_up
   end
 
   # OWNER_CALL_GUARDED: `bc2cpp_owner_call` (symbol_cache.rb) runs only a method its one lookup finds on a listed
@@ -418,7 +432,9 @@ module StaticDispatchRegistrations
   # world's (CLOSED_OWNER_RE, a superset of the open list's) looks up nothing either list may drop: the symbol index
   # of each.
   # The result may be discarded (a `&:sym` loop's `each` call), which is the same owner call.
-  OWNER_CALL_SITE = /^[ \t]*(?:BC2CPP_COLD_ARM[ \t]+)?(?:\w+ = )?bc2cpp_owner_call(?:_argv)?\(M, (\w+), (\d+), \d+, BC2CPP_OWNERS(?:_D)?\((.*)$/
+  # The descriptor macro (symbol_cache.rb OWNER_CALL_DESC) spells the symbol slot, then the level.
+  OWNER_CALL_SET = /BC2CPP_(?:OWNERS(?:_D)?|SHARED)\((?:0x\h+, )?/
+  OWNER_CALL_SITE = /^[ \t]*(?:BC2CPP_COLD_ARM[ \t]+)?(?:\w+ = )?bc2cpp_owner_call(?:_argv|[0-2]|_b0)?\(M, (\w+), #{OWNER_CALL_SET.source}(\d+), \d+, (.*)$/
   OWNER_DIRECT = /BC2CPP_OWNER_DIRECT\("((?:[^"\\]|\\.)*)"/
 
   # SYM_SITE (codegen_loop_inline.rb emit_sym_inline): the marker of an inlined `&:sym` loop, `// SYM_SITE <irep label>
@@ -448,7 +464,7 @@ module StaticDispatchRegistrations
 
         text = body.join
         next if text.match?(SYM_SITE_BY_NAME)
-        next unless text.scan(/bc2cpp_owner_call(?:_argv)?\(M, \w+, (\d+),/).flatten.map(&:to_i).all? { |i| found.include?(i) }
+        next unless text.scan(/bc2cpp_owner_call(?:_argv|[0-2]|_b0)?\(M, \w+, #{OWNER_CALL_SET.source}(\d+),/).flatten.map(&:to_i).all? { |i| found.include?(i) }
 
         covered[[marker[1], marker[2].to_i]] += 1
       end
@@ -474,6 +490,10 @@ module StaticDispatchRegistrations
   def guarded_owner_calls(src, subclassed)
     slots = {}
     src.scan(/bc2cpp_owner_class_(\d+)\(mrb_state\* M\) \{\n[^\n]*\n[^\n]*\n\s*static const char\* const path\[\] = \{([^}]*)\}/) do |n, path|
+      slots["bc2cpp_owner_class_#{n}(M)"] = path.scan(STRING_LITERAL).map { |(s)| unescape(s) }.join('::')
+    end
+    # CLASS_TEST_FUSE (codegen_send.rb) names each slot's path array instead.
+    src.scan(/static const char\* const bc2cpp_owner_class_path_(\d+)\[\] = \{([^}]*)\}/) do |n, path|
       slots["bc2cpp_owner_class_#{n}(M)"] = path.scan(STRING_LITERAL).map { |(s)| unescape(s) }.join('::')
     end
     lines = src.lines
@@ -615,8 +635,9 @@ module StaticDispatchRegistrations
       # mrbgem.rake swaps out there (mruby-rpg2k's scene/map_tts.rb, for mrblib_limited/map_tts_off.rb).
       world_gems = %w[mruby-rpg2k mruby-lcf mruby-rgss].map { |g| "#{File.expand_path(repo_root)}/#{g}/mrblib/" }
       ruby = ruby.map { |p| File.expand_path(p) }.reject { |p| p.start_with?(*unlinked, *world_gems) }
-      native = native.map { |p| File.expand_path(p) }.reject { |p| p.start_with?(*unlinked) }
-      native << File.expand_path('scripts/bc2cpp/trace_host.cxx', BC2CPP_TREE_ROOT)
+      linked = ListsWorld.linked_app_dirs(repo_root)
+      native = native.map { |p| File.expand_path(p) }.reject { |p| p.start_with?(*unlinked) && !p.start_with?(*linked) }
+      native.concat(ListsWorld.host_natives(repo_root))
     end
     [(ruby.map { |p| File.expand_path(p) }.to_set - closed).to_a.sort, native.map { |p| File.expand_path(p) }.uniq.sort]
   end
@@ -632,7 +653,7 @@ module StaticDispatchRegistrations
   def closed_unlinked_dirs(repo_root)
     root = File.expand_path(repo_root)
     core = bc2cpp_closed_core_gems(root).to_set
-    lines = bc2cpp_rpg_maker_gem_lines(bc2cpp_build_config_text, 'closed', root)
+    lines = bc2cpp_rpg_maker_gem_lines(bc2cpp_build_config_text, ListsWorld.name, root)
     # Only mruby-* gems: the closure follows add_dependency lines, and a HAL gem is added by a rake's own Ruby
     # (mruby-io's `spec.build.gem core: 'hal-posix-io'`), so hal-* stays scanned whatever the closure says.
     dirs = Dir["#{root}/3rd/mruby/mrbgems/mruby-*/"].map { |d| File.basename(d) }.reject { |g| core.include?(g) }
@@ -1060,15 +1081,18 @@ module StaticDispatchRegistrations
   # run time to the function the owner's own table holds under the name, so an alias (the same function) or an undef
   # (nothing there) is harmless; a key is left out when Ruby defines the name on that owner too (the table would hold
   # the compiled method's function) or when the owner has a computed-name registration (any function could be there).
+  # FRAME_FREE_FLAG: [keys, functions, run-time keys]: the C functions of those rows by name, for the exclusion header's
+  # MRB_MT_FRAMEFREE_<function> (CoreNativeCandidates.header), and the keys some run-time registration gives, the only
+  # ones the generated marking resolves (a ROM entry already carries its flag).
   def frame_free_names(repo_root, registry)
     _ruby, native = outside_world_files(repo_root, closed_only: true)
     map = NativeOwnerMap.build(native)
-    NativeFrameUse.rows(native, native, owner_map: map).filter_map do |owner, name, _function|
-      key = "#{owner}##{name}"
-      next if map.computed.include?(owner) || Array(registry[name]).any? { |d| d.owner == owner }
-
-      key
-    end.to_set
+    ram = Set.new
+    rows = NativeFrameUse.rows(native, native, owner_map: map, ram: ram).reject do |owner, name, _function|
+      map.computed.include?(owner) || Array(registry[name]).any? { |d| d.owner == owner }
+    end
+    [rows.to_set { |owner, name, _| "#{owner}##{name}" }, rows.to_set { |_, _, function| function },
+     rows.select { |owner, name, _| ram.include?([owner, name]) }.to_set { |owner, name, _| "#{owner}##{name}" }]
   end
 
   # REGISTRATION_NAME_EXEMPTION (closed only): a native's own registration call (mrb_define_method and the other
@@ -1481,7 +1505,7 @@ module StaticDispatchRegistrations
       ctor_rows: closed_only ? ctor_rows(repo_root, candidates, ireps, superclass_of, symbol_lookups, super_reach, super_unknown,
                                          gens: runs.values.map { |r| NativeFrameUse.strip_rows(r[:gen]) }) : Set.new,
       engine_rows: closed_only ? engine_rows(candidates, core_excluded&.at(4), super_reach, super_unknown, class_owners) : Set.new,
-      frame_free: closed_only ? frame_free_names(repo_root, registry) : Set.new }
+      frame_free: closed_only ? frame_free_names(repo_root, registry) : [Set.new, Set.new, Set.new] }
   end
 
   # ENGINE_ROWS (closed only): compiled engine entries the closed build keeps as rows of their generated ROM table
@@ -1555,7 +1579,7 @@ module StaticDispatchRegistrations
     # CORE_FIBER_FREE's result.
     left_out = (CoreNativeCandidates.ram_candidates(map, names, fragments, entries, proven) + private_ruby + ruby).uniq.sort
     [rom, left_out, rows, CoreNativeCandidates.undef_candidates(map, names, fragments, undef_only), row_reach,
-     fiber_free_proof(proof, left_out.to_set)]
+     fiber_free_proof(proof, native, left_out.to_set)]
   ensure
     @enumerator_free_proof = @enumerator_free_inputs = nil
   end
@@ -1703,11 +1727,23 @@ module StaticDispatchRegistrations
     CoreEnumeratorFree.prove(inputs)
   end
 
-  # CORE_FIBER_FREE over the inputs of +proof+'s world (enumerator_free_proof, which it builds on); +left_out+ as
-  # CoreFiberFree.prove's.
-  def fiber_free_proof(proof, left_out = Set.new)
+  # CORE_FIBER_FREE over the inputs of +proof+'s world (enumerator_free_proof, which it builds on); +native+ is that
+  # world's native sources, +left_out+ as CoreFiberFree.prove's.
+  def fiber_free_proof(proof, native, left_out = Set.new)
     result = proof.call
-    CoreFiberFree.prove(@enumerator_free_inputs, enumerator_free: -> { result.holds }, left_out: left_out)
+    fiber = CoreFiberFree.prove(@enumerator_free_inputs, enumerator_free: -> { result.holds }, left_out: left_out,
+                                defining: -> { fiber_c_makers(native).empty? })
+    warn "CORE_FIBER_FREE unproven: #{fiber.unproven.first(10).join('; ')}" unless fiber.holds
+    fiber
+  end
+
+  # The natives of +native+ other than mruby-fiber's fiber.c that call mrb_fiber_new (CoreFiberFree.prove's +defining+).
+  # mruby.h's MRB_API declaration is no call.
+  def fiber_c_makers(native)
+    native.reject do |f|
+      f.end_with?(CoreFiberFree::FIBER_SRC) ||
+        !File.read(f, encoding: 'BINARY').gsub(/^\s*MRB_API\s+mrb_value\s+mrb_fiber_new\(/, '').include?('mrb_fiber_new')
+    end
   end
 
   # BLOCK_RETURNS: the `[T] ... { ... -> T } -> T` and `-> self` declarations of the signature files, by method name. Each is
@@ -2101,6 +2137,11 @@ module StaticDispatchRegistrations
     files.concat(Dir["#{root}/sig/**/*.rbs"])
     sha = Digest::SHA256.new
     sha << "lists-format 1\n"
+    # LISTS_WORLD: a closed lists file is never current for another world (the closed digest is unchanged).
+    unless ListsWorld.closed?
+      sha << "world #{ListsWorld.name}\n"
+      files.concat(ListsWorld.digest_inputs(root))
+    end
     files.map { |p| File.expand_path(p) }.uniq.sort.each do |path|
       next unless File.file?(path)
 
@@ -2131,9 +2172,11 @@ module StaticDispatchRegistrations
                                    core_rows: closed[:core_excluded][2].to_set.freeze,
                                    core_undef_left_out: Array(closed[:core_excluded][3]).to_set.freeze,
                                    engine_rows: (closed[:engine_rows] - closed_names).freeze,
-                                   frame_free: closed[:frame_free].freeze,
+                                   frame_free: closed[:frame_free][0].freeze,
+                                   frame_free_fns: closed[:frame_free][1].freeze,
+                                   frame_free_ram: closed[:frame_free][2].freeze,
                                    unmade_classes: closed[:core_excluded][5]&.holds ? CoreFiberFree::UNMADE.to_set.freeze : Set.new.freeze,
-                                   digest: digest)
+                                   digest: digest, world: ListsWorld.name)
   end
 
   def read_lists(path)

@@ -8,12 +8,15 @@ module HostSys
   module_function
 
   # abs_path PATH: the absolute path of PATH, which need not exist (what realpath -m does)
+  # a directory that exists without search permission is not entered (bash's cd fails), so the path is returned as it is
   def abs_path(path)
     dir = File.dirname(path)
     base = File.basename(path)
-    return path unless File.directory?(dir)
+    return path unless File.directory?(dir) && File.executable?(dir)
 
     "#{File.realpath(dir)}/#{base}"
+  rescue SystemCallError
+    path
   end
 
   # the host C++ compiler (NFCXX_CXX, default g++)

@@ -1,0 +1,8 @@
+== case 13: NFCXX_BACKEND=bogus   -fsanitize=address -c a.cpp -o a.o
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: -fsanitize=address: unknown backend bogus
+-- eccp
+(none)
+-- files

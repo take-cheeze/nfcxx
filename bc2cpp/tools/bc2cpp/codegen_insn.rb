@@ -1,8 +1,10 @@
 # frozen_string_literal: true
 
+require_relative 'int_box_outline'
 require_relative 'branch_hints'
 require_relative 'reg_name'
 require_relative 'tagged_fixnum'
+require_relative 'cmp_num_outline'
 
 # CodeGen: compile_insn and comparisons.
 
@@ -78,6 +80,8 @@ class CodeGen
   # compiles it (the resumable paths call this too).
   def compile_insn_op(insn, irep, owner_def, idx = nil, reg_offset = 0)
     code = compile_insn_op_plain(insn, irep, owner_def, idx, reg_offset)
+    # DECLARED_KEYWORD_PARAM: the value KARG just wrote, checked before anything reads it.
+    return code + declared_keyword_guard_statement(irep, insn, RegName[insn.reg]) if insn.op == :KARG && irep && code.is_a?(String)
     return code unless code.is_a?(String) && idx && irep
 
     if insn.op == :SEND && %w[<< push unshift].include?(insn.sym.to_s)
@@ -254,9 +258,11 @@ class CodeGen
     when :STRCAT
       # Matches OP_STRCAT's own real semantics exactly (src/vm.c):
       # mrb_ensure_string_type then mrb_str_concat (mutates r<d> in place).
+      # The check is dropped only for a proven String (STRCAT_STRING_ACC, codegen_strcat_literal.rb).
       d = insn.reg
       s = insn.paren_reg
-      "  #{RegName[d]} = mrb_ensure_string_type(M, #{RegName[d]});\n  mrb_str_concat(M, #{RegName[d]}, #{RegName[s]});\n"
+      check = strcat_accumulator_string?(irep, idx) ? '' : "  #{RegName[d]} = mrb_ensure_string_type(M, #{RegName[d]});\n"
+      "#{check}  mrb_str_concat(M, #{RegName[d]}, #{RegName[s]});\n"
     when :GETIV
       d = insn.reg
       ivar = insn.ivar
@@ -275,7 +281,8 @@ class CodeGen
       # Not `$`-anchored: a trailing "; R1:name" comment (see IvarLayout.analyze).
       s = insn.regs.first
       klass = self_class(owner_def)
-      code = ivar_set_code(klass, 'self', ivar, "#{RegName[s]}", self_of_klass: true)
+      immediate = proven_immediate_operand?(irep, idx, unshift_proof_reg(s, reg_offset), owner_def)
+      code = ivar_set_code(klass, 'self', ivar, "#{RegName[s]}", self_of_klass: true, immediate: immediate)
       type = embed_type(klass, ivar) if klass
       # DECLARED_IVAR_GUARD: the declared kind of the slot is checked before the value is stored.
       guard = code ? declared_ivar_setiv_guard(insn, irep, owner_def, idx, reg_offset) : ''
@@ -293,6 +300,8 @@ class CodeGen
       # needs proving.
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('+', d, lit)}\n"
+      elsif integer_operand_pair?('+', d, nil, irep, idx, owner_def, reg_offset)
+        integer_arith_tier('+', d, "mrb_fixnum_value(#{lit})", "mrb_fixnum_p(#{RegName[d]})")
       else
         guarded = guarded_game_integer_immediate(:ADD, irep, idx, unshift_proof_reg(d, reg_offset), lit,
                                                  owner_def)
@@ -321,6 +330,8 @@ class CodeGen
       s = insn.paren_reg
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('+', d, "#{RegName[s]}")}\n"
+      elsif integer_operand_pair?('+', d, s, irep, idx, owner_def, reg_offset)
+        integer_arith_tier('+', d, RegName[s], TaggedFixnum.pair(RegName[d], RegName[s]))
       else
         guarded = guarded_game_integer_pair(:ADD, irep, idx, unshift_proof_reg(d, reg_offset),
                                             unshift_proof_reg(s, reg_offset), owner_def)
@@ -354,6 +365,8 @@ class CodeGen
       lit = BytecodeIR::OperandModel.imm_operand(insn)
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('-', d, lit)}\n"
+      elsif integer_operand_pair?('-', d, nil, irep, idx, owner_def, reg_offset)
+        integer_arith_tier('-', d, "mrb_fixnum_value(#{lit})", "mrb_fixnum_p(#{RegName[d]})")
       else
         guarded = guarded_game_integer_immediate(:SUB, irep, idx, unshift_proof_reg(d, reg_offset), lit,
                                                  owner_def)
@@ -381,6 +394,8 @@ class CodeGen
       s = insn.paren_reg
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('-', d, "#{RegName[s]}")}\n"
+      elsif integer_operand_pair?('-', d, s, irep, idx, owner_def, reg_offset)
+        integer_arith_tier('-', d, RegName[s], TaggedFixnum.pair(RegName[d], RegName[s]))
       else
         guarded = guarded_game_integer_pair(:SUB, irep, idx, unshift_proof_reg(d, reg_offset),
                                             unshift_proof_reg(s, reg_offset), owner_def)
@@ -414,6 +429,8 @@ class CodeGen
       s = insn.paren_reg
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('*', d, "#{RegName[s]}")}\n"
+      elsif integer_operand_pair?('*', d, s, irep, idx, owner_def, reg_offset)
+        integer_arith_tier('*', d, RegName[s], TaggedFixnum.pair(RegName[d], RegName[s]))
       else
         guarded = guarded_game_integer_pair(:MUL, irep, idx, unshift_proof_reg(d, reg_offset),
                                             unshift_proof_reg(s, reg_offset), owner_def)
@@ -451,6 +468,8 @@ class CodeGen
       s = insn.paren_reg
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  #{RegName[d]} = mrb_div_int_value(M, mrb_fixnum(#{RegName[d]}), mrb_fixnum(#{RegName[s]}));\n"
+      elsif integer_operand_pair?('/', d, s, irep, idx, owner_def, reg_offset)
+        integer_div_tier(d, s)
       else
         guarded = guarded_game_integer_pair(:DIV, irep, idx, unshift_proof_reg(d, reg_offset),
                                             unshift_proof_reg(s, reg_offset), owner_def)
@@ -465,7 +484,7 @@ class CodeGen
         <<~CPP
           { mrb_value bc2cpp_nt;
           #{guarded_arm}  if (#{BranchHints.likely("mrb_integer_p(r#{d}) && mrb_integer_p(r#{s})")}) {
-            #{RegName[d]} = mrb_div_int_value(M, mrb_integer(#{RegName[d]}), mrb_integer(#{RegName[s]}));
+            #{IntBoxOutline.div_pair(RegName[d], RegName[d], RegName[s])}
           } else if (!mrb_undef_p(bc2cpp_nt = bc2cpp_num_div_float(M, #{RegName[d]}, #{RegName[s]}))) {
             #{RegName[d]} = bc2cpp_nt;
           } else {
@@ -615,6 +634,10 @@ class CodeGen
       end
 
       owner_path = lexical_scope_path(owner_def.owner)
+      if const_drop?(name)
+        # CONST_BINDING_DROP: the site cache row reads the per-VM table (see tools/bc2cpp/const_binding_drop.rb).
+        return "  #{RegName[d]} = bc2cpp_cconst_#{const_site_slot(owner_path, name, value: true, drop: const_drop_index(name))}(M);\n"
+      end
       value_const = self.class.stable_value_constants&.include?(name)
       if value_const || self.class.stable_class_constants&.include?(name)
         # CONST_SITE_CACHE: see tools/bc2cpp/const_site_cache.rb. One helper per
@@ -648,6 +671,11 @@ class CodeGen
         return "  #{RegName[d]} = mrb_fixnum_value(#{value});\n"
       end
 
+      if const_drop?(name)
+        # CONST_BINDING_DROP: the receiver is the binding's owner (LexicalConsts read_keys), so a hit is what
+        # mrb_const_get returns; a miss runs it.
+        return "  #{RegName[d]} = bc2cpp_cdef_mget_#{const_drop_read(name)}(M, #{RegName[d]});\n"
+      end
       if immutable_constant?(name) && constant_scope_register?(irep, idx, d - reg_offset)
         # CONST_BINDING_CACHE: a binding in the receiver's own table is the one mrb_const_get returns, and an
         # immutable one never changes; the receiver came from a constant that is never rebound, so it stays alive.
@@ -930,6 +958,12 @@ class CodeGen
       name = insn.const_name
       if name.nil? || owner_def.nil? || owner_def.owner.nil?
         "  #error SETCONST: the target class is unknown here\n"
+      elsif self.class.const_def_elide&.elide?(name)
+        # CONST_DEF_ELIDE: nothing can observe this binding (see ConstDefElide); the value register stays written.
+        "  /* CONST_DEF_ELIDE #{name} */\n"
+      elsif const_drop?(name)
+        # CONST_BINDING_DROP: see tools/bc2cpp/const_binding_drop.rb.
+        const_drop_set(name, owner_def.owner, RegName[insn.regs.last])
       else
         "  mrb_const_set(M, mrb_obj_value(#{owner_class_ptr_expr(owner_def.owner)}), mrb_intern_cstr(M, \"#{name}\"), #{RegName[insn.regs.last]});\n"
       end
@@ -950,6 +984,8 @@ class CodeGen
       # between the write and this use).
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('+', d, lit)}\n"
+      elsif integer_operand_pair?('+', d, nil, irep, idx, owner_def, reg_offset)
+        integer_arith_tier('+', d, "mrb_fixnum_value(#{lit})", "mrb_fixnum_p(#{RegName[d]})")
       else
         <<~CPP
           if (#{BranchHints.likely("mrb_fixnum_p(#{RegName[d]})")}) {
@@ -968,6 +1004,8 @@ class CodeGen
       lit = insn.src_and_literal&.last
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('-', d, lit)}\n"
+      elsif integer_operand_pair?('-', d, nil, irep, idx, owner_def, reg_offset)
+        integer_arith_tier('-', d, "mrb_fixnum_value(#{lit})", "mrb_fixnum_p(#{RegName[d]})")
       else
         <<~CPP
           if (#{BranchHints.likely("mrb_fixnum_p(#{RegName[d]})")}) {
@@ -1070,6 +1108,8 @@ class CodeGen
        site_marker = irep ? initializer_site_marker(irep, idx) : ''
        zsuper_plan = reg_offset.zero? ? zsuper_forward_plan(owner_def, irep, idx) : nil
        zsuper_lookup = reg_offset.zero? && zsuper_plan.nil? ? zsuper_lookup_plan(owner_def, irep, idx) : nil
+       # BLOCK_ZSUPER: a bare `super` in a block body, with the method's parameters read through the upvars.
+       zsuper_lookup ||= reg_offset.zero? && zsuper_plan.nil? ? block_zsuper_plan(owner_def, irep, idx) : nil
        super_code = if target_def && d_reg && n && super_arity_ok?(target_def, n)
          note_super_site(:direct, owner_def, irep, idx)
          args = (1..n.to_i).map { |i| "#{RegName[d_reg.to_i + i]}" }
@@ -1111,8 +1151,8 @@ class CodeGen
       if reg_offset.zero? && zsuper_forward_plan(owner_def, irep, idx)
         # ZSUPER_GENERAL_SUPPORT: the SUPER arm calls the superclass `_impl` with the original registers.
         "  // #{insn.raw.strip} (zsuper argument array not built -- forwarded to the superclass _impl below)\n"
-      elsif reg_offset.zero? && zsuper_lookup_plan(owner_def, irep, idx)
-        # ZSUPER_LOOKUP: the SUPER arm builds the same list for the looked-up method.
+      elsif reg_offset.zero? && (zsuper_lookup_plan(owner_def, irep, idx) || block_zsuper_plan(owner_def, irep, idx))
+        # ZSUPER_LOOKUP: the SUPER arm builds the same list for the looked-up method (BLOCK_ZSUPER: from the upvars).
         "  // #{insn.raw.strip} (zsuper argument array built by the SUPER below)\n"
       else
         "  #error unhandled opcode ARGARY -- not in this prototype's supported subset\n"
@@ -1136,6 +1176,11 @@ class CodeGen
     if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
       return "#{FIXNUM_PROOF_NOTE}  #{RegName[d]} = mrb_bool_value(#{TaggedFixnum.compare("#{RegName[d]}", sym, "#{RegName[s]}")});\n"
     end
+    if op == :EQ && (identity = literal_eq_identity(irep, idx, d, s, owner_def, reg_offset))
+      return identity
+    end
+    integer_pair = integer_operand_pair?(sym, d, s, irep, idx, owner_def, reg_offset)
+    return integer_compare_tier(sym, d, s) if integer_pair && op != :EQ
 
     # OP_CMP's MRB_TT_INTEGER is the full Integer tag, and with floats all three
     # Integer/Float pairs compare natively; the tag checks come before
@@ -1162,6 +1207,7 @@ class CodeGen
     end
     # String/Symbol `==` use their registered C bodies; Integer's other numeric
     # forms and unmatched tags keep mruby's mrb_equal semantics in the fallback.
+    plain_fallback = fallback
     fallback = generated_eq_dispatch(d, s, fallback) || fallback if op == :EQ
 
     integer_accessor = "mrb_integer(#{RegName[d]}) #{sym} mrb_integer(#{RegName[s]})"
@@ -1174,6 +1220,9 @@ class CodeGen
     fixnum_pair = TaggedFixnum.pair("#{RegName[d]}", "#{RegName[s]}")
     fixnum_pair = BranchHints.likely(fixnum_pair) unless op == :EQ
     fixnum_arm = "if (#{fixnum_pair}) {\n  #{RegName[d]} = mrb_bool_value(#{TaggedFixnum.compare("#{RegName[d]}", sym, "#{RegName[s]}")});\n} else "
+    # CMP_NUM_OUTLINE: the arms below run in the shared helper; the fallback stays here.
+    return CmpNumOutline.dispatch(fixnum_arm, sym, RegName[d], RegName[d], RegName[s], fallback) if CmpNumOutline.on?
+
     numeric_dispatch = <<~CPP
       #{op == :EQ ? '' : fixnum_arm}if (#{pair}) {
       #ifdef MRB_NO_FLOAT
@@ -1196,7 +1245,20 @@ class CodeGen
       }
     CPP
 
-    if op == :EQ
+    if integer_pair
+      # INTEGER_OPERAND_PROOF: neither operand is a Symbol or a Float, so only the Integer pair, identity and
+      # the fallback (a bigint) remain of OP_EQ.
+      <<~CPP
+        #{format(INTEGER_PROOF_NOTE, ':==')}
+        #{fixnum_arm}if (mrb_integer_p(r#{d}) && mrb_integer_p(r#{s})) {
+          #{RegName[d]} = mrb_bool_value(mrb_integer(#{RegName[d]}) == mrb_integer(#{RegName[s]}));
+        } else if (mrb_obj_eq(M, #{RegName[d]}, #{RegName[s]})) {
+          #{RegName[d]} = mrb_true_value();
+        } else {
+          #{plain_fallback}
+        }
+      CPP
+    elsif op == :EQ
       # INTEGER_PAIR_EQ: mrb_obj_eq on two Integers is their value equality, so testing the
       # pair ahead of identity gives OP_EQ's answer without the out-of-line mrb_obj_eq call.
       <<~CPP

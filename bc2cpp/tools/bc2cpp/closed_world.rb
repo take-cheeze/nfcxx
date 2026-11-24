@@ -17,6 +17,7 @@ require_relative 'scan_cache'
 require_relative 'send_names'
 require_relative 'factory_flow'
 require_relative 'bytecode_ir_ops'
+require_relative 'outside_singletons'
 
 # CLOSED_WORLD: bc2cpp compiles closed-world builds only, where the only Ruby that
 # can ever run is the closed world bc2cpp compiles, plus the scanned core and
@@ -58,7 +59,8 @@ class ClosedWorld
   # mruby core's own computed definitions only ever run for a Ruby-level
   # attr_*/define_method/alias/Struct.new, which scan_closed_world tracks.
   NATIVE_CORE = %r{/3rd/mruby/(?:src|mrbgems)/}
-  RUBY_DYNAMIC = /\b(?:define_method|define_singleton_method|alias_method|attr_reader|attr_writer|attr_accessor)
+  # A definer word right after `:` is a Symbol literal (`member: :attr_reader`), never a call.
+  RUBY_DYNAMIC = /(?<!:)\b(?:define_method|define_singleton_method|alias_method|attr_reader|attr_writer|attr_accessor)
                   \b[ \t]*\(?[ \t]*(?![:"'\s])/x
   RUBY_CONST_DYNAMIC = /\b(?:const_set|remove_const)\b/
   # DYNAMIC_NAME_LOOPS: a definer whose name is an interpolated Symbol (`alias_method :"x_#{v}", v`) is dynamic too.
@@ -79,8 +81,16 @@ class ClosedWorld
   # Core iterators whose result on a builtin receiver is a new Array or Hash (fresh_builtin_result?).
   FRESH_BUILTIN_SENDS = %w[map collect select filter reject flat_map collect_concat sort sort_by to_a entries zip
                            uniq compact reverse].freeze
+  # FRESH_BUILTIN_OPS: ops that leave a builtin value in their register when it held one. ARYCAT/ARYPUSH append to
+  # the Array in place (vm.c; ARYCAT on nil stores a dup'd splat, anything else but an Array raises), and ADD on an
+  # Array or a String sends `+` unless both are Strings, which must then be core's (fresh_builtin_names_core?).
+  # BC2CPP_FRESH_FREEZE_OPS=0 refuses them.
+  FRESH_BUILTIN_OPS = { ADD: '+', ARYCAT: nil, ARYPUSH: nil }.freeze
+  # The receivers ADD may have: an Array or String literal, or an Array op's result. A Hash or Range has no `+`, so
+  # method_missing would answer it.
+  FRESH_ADD_RECEIVERS = %i[ARRAY ARRAY2 STRING STRCAT ADD ARYCAT ARYPUSH].freeze
   # Kernel methods that give an arbitrary receiver a singleton class (`extend` is a global
-  # refusal already, see scan_send).
+  # refusal already, see scan_send). OutsideSingletons::MAKERS repeats them.
   SINGLETON_MAKERS = %w[singleton_class define_singleton_method instance_eval instance_exec].freeze
   # A project native that makes a singleton class by hand.
   NATIVE_SINGLETON = /\bmrb_singleton_class(?:_ptr|_clone)?\b|\bmrb_define_singleton_method(?:_id)?\b|\bmrb_obj_extend\b/
@@ -117,13 +127,38 @@ class ClosedWorld
   end
   private :profile_mark
 
-  def initialize(ireps:, registry:, class_decls:, walked:, native_paths:, ruby_paths:, module_names: Set.new, root_label: nil)
+  def initialize(ireps:, registry:, class_decls:, walked:, native_paths:, ruby_paths:, module_names: Set.new, root_label: nil,
+                 struct_classes: [], included: nil, prepended: nil, unknown_mixins: nil, constant_writes: nil)
     @ireps = ireps
     @module_names = module_names.to_set
     @root_label = root_label
     @clone_sent = false
+    @clone_symbol_loads = []
     @registry = registry
-    @class_decls = class_decls
+    # STRUCT_CLASS_DECLS: a class body-level `X = Struct.new(:a, ...)` whose members the registry lists (struct_member_lists)
+    # runs once, before main, and makes X a class below Struct. It is declared here as such, so its members (registered
+    # definers of X) and the methods its block defines bind like any declared class's (see struct_class?).
+    @struct_classes = struct_classes.to_set
+    # QUALIFIED_REBINDS: the registry's class-body and top-level constant writes, [irep label, index] => the qualified
+    # constant written (constant_assignment_sites). Such a write rebinds that path only; any other write rebinds every
+    # constant of its bare name (rebound?).
+    @constant_write_sites = (constant_writes || []).to_h { |site| [[site[:irep], site[:idx]], site[:name]] }
+    @rebound_qualified = Hash.new(0)
+    @rebound_bare = Set.new
+    # MODULE_DEFINER_INCLUDERS: the registry's class-body mixins (owner => modules), or nil when the caller has none.
+    @mixins = included && prepended ? merge_mixins(included, prepended) : nil
+    @unknown_mixins = unknown_mixins
+    # Without the registry's default block: a read of an undeclared name (derives_from_module_or_class?, the superclass walk)
+    # must not add a key, or class_declared? answers true for it from then on (a module_function module's self was taken
+    # for an instance, so its singleton copy got no arm and the module object fell to the nomethod else).
+    @class_decls = {}.merge(class_decls)
+    @struct_classes.each do |owner|
+      @class_decls[owner] = [{ super: 'Struct', outer_nil: true, outer_qualified: false, struct: true }] unless @class_decls.key?(owner)
+    end
+    # DECLARED_CLASS_SET: the registry's class_decls is a default Hash, so a read of any name adds it with no
+    # declaration; whether a module looked declared then depended on which scan read it first. opaque? asks this
+    # fixed set: the classes with a declaration (and the struct classes above).
+    @declared_classes = @class_decls.select { |_, decls| !decls.empty? }.keys.to_set
     @walked = walked
     @global_refusal = nil
     @outside_names = Set.new
@@ -143,6 +178,8 @@ class ClosedWorld
     @outside_ruby_names = Set.new
     @outside_name_paths = {}
     @native_code_tokens = {}
+    @native_class_events = []
+    @native_class_assigns = {}
     @outside_ruby_supers = Set.new
     @native_arms_name = nil
     @outside_owner_name = nil
@@ -152,6 +189,8 @@ class ClosedWorld
     @unknown_defs = Set.new
     @unknown_def_sources = Hash.new { |h, k| h[k] = [] }
     @visibility_names = Set.new
+    # VISIBILITY_SAME_BODY: the names some visibility send build_registry cannot fold into the definition names.
+    @visibility_unresolved = Set.new
     @dynamic_visibility = false
     @rebound = Set.new
     @constant_write_counts = Hash.new(0)
@@ -171,10 +210,19 @@ class ClosedWorld
     # bound to a class with that superclass returns it, so two of them bind one class (see native_class_unshadowed?).
     @outside_plain_class_defines = Hash.new(0)
     @deferred_constant_writes = Set.new
+    @struct_factory_members = []
     @dynamic_constant_mutation = false
     @basic_object_referenced = false
     @singleton_makers = []
     @singleton_opens = []
+    # INSTANCE_SINGLETON_TAINT: the singleton-making sends ([irep, idx, insn]) and maker Symbol loads ([irep, idx, reg])
+    # of the closed world's own Ruby, and each outside Ruby source's placement (OutsideSingletons), nil when one
+    # is not placed.
+    @singleton_sends = []
+    @singleton_symbol_loads = []
+    @outside_singleton_taint = []
+    @outside_singleton_modules = Hash.new { |h, k| h[k] = [] }
+    @outside_open_modules = Set.new
     @outside_constant_writes = Set.new
     @outside_constant_write_counts = Hash.new(0)
     @dynamic_subclassed = Set.new
@@ -216,8 +264,11 @@ class ClosedWorld
   # CALL_FACTS: `scoped` says `instances` is the whole receiver set, so only its classes need an
   # arm, and `native_free` that no native or outside definer of `name` reaches any of them.
   def refusal(name, listed, self_owner, installed, instances: nil, scoped: false, native_free: false,
-              instance_scope: false, singleton_arms: nil)
+              instance_scope: false, singleton_arms: nil, method_missing_arms: nil)
     return @global_refusal if @global_refusal
+    # PUBLIC_SEND_DISPATCH: Kernel#public_send checks its target's visibility against how it was itself called; run
+    # through an owner call it reaches private and protected methods the VM's send refuses, so it keeps that send.
+    return :visibility_send if name == 'public_send'
     return :dynamic_install if installed.nil? || installed.include?(name)
     return :unknown_definer if instance_scope ? instance_unknown_def?(name) : @unknown_defs.include?(name)
     # A native singleton function is one more outside owner, which the owner call names (`Graphics.singleton`).
@@ -230,7 +281,9 @@ class ClosedWorld
 
     required &= instances.to_set if scoped && instances
     return :unlisted_class unless required.subset?(listed.to_set)
-    return :method_missing_receiver unless method_missing_free?(self_owner, instances)
+    # METHOD_MISSING_ARMS: an exact-class arm per method_missing class sends by name before this else is reached.
+    return :method_missing_receiver unless method_missing_free?(self_owner, instances) ||
+                                           method_missing_arms&.to_set&.superset?(@mm_classes)
 
     nil
   end
@@ -364,6 +417,15 @@ class ClosedWorld
     !@global_refusal && !@dynamic_constant_mutation && class_constant?(name)
   end
 
+  # PROGRAM_CLASS_SLOTS: the modules the closed world declares, and the superclasses its class declarations name.
+  def declared_module_names
+    @module_names
+  end
+
+  def declared_superclass_names
+    @class_decls.each_value.flat_map { |decls| decls.map { |d| d[:super] } }.grep(String).uniq
+  end
+
   # CALL_FACTS: the classes (never modules) the closed world declares.
   def declared_class_names
     @class_decls.keys.select { |k| !k.include?('.') && !k.include?('<') }
@@ -448,7 +510,7 @@ class ClosedWorld
   end
 
   def bounded_subclasses(klass, set)
-    return nil if @global_refusal || !@wild.empty? || @rebound.include?(simple(klass))
+    return nil if @global_refusal || !@wild.empty? || rebound?(klass)
     return nil unless set.all? { |k| @class_decls.key?(k) || k == klass }
 
     names = set.map { |k| simple(k) }.to_set
@@ -498,13 +560,24 @@ class ClosedWorld
   # include it: native_file_facts names every include a non-core native can make (see native_include_facts). A foreign
   # Ruby source that spells the name stays refused, since its include sites are not classified.
   def includer_candidates_uncached(mod)
-    return nil if @global_refusal || !@wild.empty? || !module_declared?(mod) || @rebound.include?(simple(mod))
+    return nil if @global_refusal || !@wild.empty? || !module_declared?(mod) || rebound?(mod)
 
     name = simple(mod)
     return nil if @outside_include_open || @outside_include_names.include?(name) || @outside_alias_names.include?(name)
     return nil if @ruby_tokens.each_value.any? { |tokens| tokens.include?(name) }
+    # A mixin the analysis could not place (defer_mixin_module?: `obj.extend(Mod)`, a mixin made in a method) puts the
+    # module on a receiver no declared class lists.
+    return nil if deferred_mixin_module?(mod)
 
     declared_class_names
+  end
+
+  # Is +mod+ (a declared name) one a deferred mixin may name? The same superset resolve_deferred_mixin_modules takes.
+  def deferred_mixin_module?(mod)
+    @deferred_mixin_modules.any? do |ref|
+      bare = ref.delete_prefix('::')
+      mod == bare || mod.end_with?("::#{bare}")
+    end
   end
 
   # NATIVE_CORE_DIRECT: nothing outside the registry (an outside Ruby
@@ -762,7 +835,7 @@ class ClosedWorld
     # their constant identity needs the same closed-world stability proof.
     return false if owner.include?('.') || owner.include?('<')
     return false unless ConstructClassNames.table&.key?(owner)
-    return false if @rebound.include?(simple(owner))
+    return false if rebound?(owner)
 
     touches_for([owner.split('::').first, simple(owner)].uniq, source: true).empty?
   end
@@ -777,7 +850,7 @@ class ClosedWorld
     # already rejected bytecode, native, and foreign constant reassignment.
     return true if UniqueClassNames.table&.value?(owner)
 
-    !@rebound.include?(simple(owner))
+    !rebound?(owner)
   end
 
   # `self` in a `def self.x` of a declared module is that module's
@@ -785,7 +858,7 @@ class ClosedWorld
   # nothing else can run them with another self; a `clone` spelled anywhere in
   # the closed world or its outside sources refuses.
   def module_object_self?(owner)
-    !@global_refusal && !@clone_sent && @module_names.include?(owner) && !@class_decls.key?(owner) &&
+    !@global_refusal && !@clone_sent && @module_names.include?(owner) && !@declared_classes.include?(owner) &&
       stable_constant_identity?(owner)
   end
 
@@ -864,6 +937,29 @@ class ClosedWorld
     end
   end
 
+  # EXACT_NEW: `klass.new` answers an instance of exactly +klass+. Its constant is stable and no outside source touches
+  # the class (stable_class_constant?), and `new` / `allocate` are Class's natives: no Ruby definition on Class, on
+  # +klass+ or a superclass or their singletons, or on a module (which `extend` could put on a singleton), and no mixin
+  # into Class or those singletons.
+  def exact_constructor_class?(klass, superclass_of)
+    return false unless standard_constructor_lookup? && class_declared?(klass) && @mixins && @unknown_mixins
+    return false unless stable_class_constant?(klass)
+    return false if @unknown_mixins.include?('Class') || !@mixins.fetch('Class', []).empty?
+
+    defs = %w[new allocate].flat_map { |name| @registry.fetch(name, []) }.reject { |d| d.owner == '<native>' }
+    return false if defs.any? { |d| d.owner == 'Class' || @module_names.include?(d.owner.to_s) }
+
+    seen = Set.new
+    while klass.is_a?(String) && seen.add?(klass)
+      singleton = "#{klass}.singleton"
+      return false if @unknown_mixins.include?(singleton) || !@mixins.fetch(singleton, []).empty?
+      return false if defs.any? { |d| d.owner == klass || d.owner == singleton }
+
+      klass = superclass_of[klass]
+    end
+    true
+  end
+
   # NUMERIC_RETURN_PROOF: can a call to `name` reach only the definitions the
   # registry lists? False for a name some native or foreign source defines or
   # calls a runtime installer with, or whenever a method_missing hook exists.
@@ -929,7 +1025,7 @@ class ClosedWorld
   # `private :name` that names an inherited method, or one sent dynamically, makes a
   # copy it never sees.
   def visibility_stable?(name)
-    !@global_refusal && !@dynamic_visibility && !@visibility_names.include?(name)
+    !@global_refusal && !@dynamic_visibility && !@visibility_unresolved.include?(name)
   end
 
   # OWNERLESS_NATIVE_DISPATCH: class-independent native bodies may bypass
@@ -966,12 +1062,61 @@ class ClosedWorld
     @user_objects_unfrozen
   end
 
+  # CONST_DEF_ELIDE: a class or module whose last path segment is +bare+ may be frozen. user_objects_unfrozen? admits
+  # `Klass.freeze` on a class-valued constant; here such a send refuses the classes it names, and a frozen value
+  # constant (which might hold any class) refuses every one.
+  def class_object_freeze_possible?(bare)
+    unless defined?(@class_freeze_open)
+      @class_freeze_open = @global_refusal || @freeze_possible || !fresh_builtin_names_core? ||
+                           DynamicNames.universe(@ireps).include?('freeze') ||
+                           @frozen_constants.any? { |name| !class_constant?(name) }
+    end
+    !!@class_freeze_open || @frozen_constants.include?(bare)
+  end
+
   # No Array/Hash/Range/String instance can gain a singleton class or a mixin: nothing in the
   # world (mruby's own Ruby aside, which never does it to those) names a singleton-making
   # method, opens a singleton class on a non-class object, or creates one from native code.
+  # INSTANCE_SINGLETON_TAINT, for the generation log: "none", "not placed (reason)", or each tainted class with the
+  # names its instances' singletons may answer.
+  def instance_singleton_report
+    taint = instance_singleton_taint
+    return "not placed (#{singleton_taint_unplaced})" if taint.nil?
+    return 'none' if taint.empty?
+
+    taint.sort.map do |klass, gain|
+      names = gain == :any ? ['any name'] : gain.map { |n| n == SINGLETON_INSTALLED ? '<installed names>' : n }.sort
+      "#{klass} (#{names.join(' ')})"
+    end.join(', ')
+  end
+
   def exact_instances_singleton_free?
     !@global_refusal && singleton_makers.empty?
   end
+
+  # INSTANCE_SINGLETON_TAINT: the per-class form of exact_instances_singleton_free?. Which classes' instances may get a
+  # singleton class, and what it may answer: { class path => :any | Set of method names }, read as that class and
+  # every class below it. A gain holding SINGLETON_INSTALLED also answers every name installed by Symbol. {} when
+  # exact_instances_singleton_free? holds.
+  #
+  # A maker in the closed world's own Ruby is placed on the class whose instance its receiver is (`self` in an instance
+  # method of a declared class, instance_singleton_place); one whose receiver may be any object but whose gain is
+  # bounded (define_singleton_method(:x), `def obj.x`, a singleton_class only asked include? or given a listed module)
+  # is placed on Object, so on every class. nil when some maker cannot be placed (then any instance may have one with
+  # any method): a global refusal, a native maker, an outside Ruby maker OutsideSingletons does not place, a maker
+  # whose receiver and gain are both open, or a maker-named Symbol whose value may reach a send.
+  #
+  # The singleton class an `extend Mod` makes answers Mod's methods; Mod must be a module the outside sources or the
+  # registry fully list (no mixin, hook or other definer in its body), else :any. A class or module object's
+  # singleton (`class << self`, `def self.x`, `Const.singleton_class`) taints nothing: an instance never sees it.
+  def instance_singleton_taint
+    return @instance_singleton_taint if defined?(@instance_singleton_taint)
+
+    @instance_singleton_taint = compute_instance_singleton_taint
+  end
+
+  # Why instance_singleton_taint is nil (a label for the generation log), or nil when it is placed.
+  attr_reader :singleton_taint_unplaced
 
   # NUMERIC_SLOW_CLOSED `%`: the constant +name+ of a core class names that class in every scope
   # core Ruby looks it up from: no bytecode binds it, no outside source rebinds it (the core's own definition is
@@ -1132,7 +1277,112 @@ class ClosedWorld
     @freeze_possible = true if file.fetch(:freeze_possible)
     @singleton_makers << [path, :native] if file.fetch(:singleton_maker)
     record_native_touches(path, file.fetch(:touch), file.fetch(:defines_class), file.fetch(:legacy_names))
+    touch = file.fetch(:touch)
+    @native_class_assigns[path] = touch.fetch(:class_assigns)
+    touch.fetch(:events).each { |event| @native_class_events << [path, *event] if NATIVE_CLASS_MAKERS.match?(event[0]) }
   end
+
+  # The native events that can make a class (TouchScan.native_facts kinds).
+  NATIVE_CLASS_MAKERS = /\A(?:define_class|class_new\z|super\z|obj_alloc\z|obj_new\z|instance_new\z|funcall)/
+  # mruby's own implementation of the class-making API (and of the funcall family it forwards through): each event
+  # there forwards a caller's class, which is that caller's own event, or serves Class.new / Class#initialize /
+  # Module#dup, which the closed world's dynamic-subclass facts bound.
+  NATIVE_CLASS_API = %r{/3rd/mruby/src/(?:class|gc|vm)\.c\z}
+
+  # NATIVE_LEAF_CORE: no native source can make an instance of a subclass of +klass+. Outside NATIVE_CLASS_API:
+  #   - every class definition and class_new names a superclass that resolves (a built-in handle, a class_get, a
+  #     local assigned only such values) to another class, and nothing assigns ->super;
+  #   - every instantiation (obj_new, instance_new, a funcall of `new`/`allocate`) is of a class that resolves to no
+  #     class factory (Class, Module, Struct, Data), or passes no argument a superclass could be (none, or only
+  #     integer/nil/string values), or is NATIVE_INSTANCE_REVIEWED.
+  # An obj_alloc of a class object makes a class with no superclass until ->super is set. A funcall of a computed
+  # name forwards a Ruby send, which the Ruby facts bound. False when any of those cannot be read.
+  def native_unsubclassed?(klass)
+    names = native_superclass_names
+    !names.nil? && !names.include?(simple(klass))
+  end
+
+  # [path suffix, call prefix] of instantiations reviewed against the pinned mruby: error.c's mrb_make_exception
+  # sends `new` to the class `raise` was given and raises TypeError unless the result is an exception, so a class it
+  # makes there has no instance.
+  NATIVE_INSTANCE_REVIEWED = [['/3rd/mruby/src/error.c', 'mrb_funcall_argv(mrb, exc, MRB_SYM(new), n, &mesg)']].freeze
+
+  # The simple names native class definitions take as superclass, or nil when one cannot be resolved.
+  def native_superclass_names
+    return @native_superclass_names if defined?(@native_superclass_names)
+
+    norm = (@class_decls.keys.map { |k| simple(k) } + CoreHierarchySigs.hierarchy[0].keys).uniq
+                                                                                   .group_by { |n| n.downcase.delete('_') }
+    @native_superclass_names = @native_class_events.each_with_object(Set.new) do |(path, kind, args, why, helper), out|
+      next if path.match?(NATIVE_CLASS_API) || kind == 'obj_alloc'
+      next if NATIVE_INSTANCE_REVIEWED.any? { |suffix, call| path.end_with?(suffix) && why.to_s.start_with?(call) }
+
+      args = Array(args)
+      # A function's own definition or declaration (`mrb_define_class(mrb_state *mrb, ...)`), not a call.
+      next if args.first.to_s.match?(/\bmrb_state\s*\*/)
+
+      names = native_class_event_supers(kind, args, helper, @native_class_assigns.fetch(path, {}), norm)
+      break nil unless names
+
+      out.merge(names)
+    end
+  end
+
+  # A value no superclass can be.
+  NATIVE_NON_CLASS_ARG = /\A(?:mrb_(?:fixnum|int|nil|bool|true|false|symbol)_value\s*\(.*\)|mrb_str_new\w*\s*\(.*\)|
+                            NULL|nullptr|0)\z/mx
+
+  # The superclass names one NATIVE_CLASS_MAKERS event may give a new class (empty when it makes none), or nil.
+  def native_class_event_supers(kind, args, helper, assigns, norm)
+    instance = lambda do |cls, rest|
+      names = native_class_resolve(cls, assigns, norm)
+      next Set.new if names && (names & TouchScan::CLASS_FACTORIES).empty?
+
+      rest.all? { |arg| arg.to_s.strip.match?(NATIVE_NON_CLASS_ARG) } ? Set.new : nil
+    end
+    case kind
+    when 'super' then nil
+    when 'obj_new', 'instance_new' then instance.(args[1], args[3..].to_a)
+    when /\Afuncall/
+      mids = helper || [TouchScan.native_literal(args[2])].compact
+      next_args = args[3].to_s.strip == '0' ? [] : args[4..].to_a
+      mids.empty? || (mids & %w[new allocate]).empty? ? Set.new : instance.(args[1], next_args)
+    when 'class_new' then native_class_resolve(args[1], assigns, norm)
+    else native_class_resolve(args[kind.include?('_under') ? 3 : 2], assigns, norm)
+    end
+  end
+
+  # The simple names a native class expression can denote: TouchScan.native_resolve, a class definition's own name,
+  # an exception class get, or each value a local is assigned. nil when one cannot be named.
+  def native_class_resolve(expr, assigns, norm, depth = 0)
+    e = expr.to_s.strip.sub(/\A\(\s*(?:struct\s+)?RClass\s*\*\s*\)\s*/, '')
+    e = Regexp.last_match(1).strip while e.match(/\Amrb_(?:obj_value|class_ptr)\s*\(\s*(\w+)\s*\)\z/)
+    return nil if depth > 4
+
+    if (m = e.match(/\Amrb_define_class(_under)?(?:_id)?\s*\((.*)\)\z/m))
+      name = TouchScan.native_literal(bc2cpp_c_call_args(m[2])[m[1] ? 2 : 1])
+      return name ? Set[TouchScan.path_names(name).last] : nil
+    end
+    if (m = e.match(/\Amrb_exc_get(?:_id)?\s*\((.*)\)\z/m))
+      name = TouchScan.native_literal(bc2cpp_c_call_args(m[1])[1])
+      return name ? Set[name] : nil
+    end
+    resolved = TouchScan.native_resolve(e, norm)
+    return resolved - [TouchScan::WILD] if resolved
+    return nil unless e.match?(TouchScan::IDENTIFIER) && !(values = assigns[e]).to_a.empty?
+
+    values.each_with_object(Set.new) do |value, out|
+      # `a = mrb->x_class = expr;` assigns expr; a null pointer is no class.
+      value = value.sub(/\A(?:[\w.]+(?:\s*->\s*\w+)*\s*=(?!=)\s*)+/, '')
+      next if value.match?(/\A(?:NULL|nullptr|0)\z/)
+
+      names = native_class_resolve(value, assigns, norm, depth + 1)
+      return nil unless names
+
+      out.merge(names)
+    end
+  end
+  public :native_unsubclassed?
 
   # The facts of each path in `paths`, in order: plain data (Hash, Array, Set, String, Symbol, true/false) with
   # no state and no ENV, so the result can be stored and loaded as it is.
@@ -1445,12 +1695,14 @@ class ClosedWorld
       @clone_sent = true if file.fetch(:clone_sent)
       @freeze_possible = true if file.fetch(:freeze_possible)
       @singleton_makers << [path, :ruby] if file.fetch(:singleton_maker)
+      note_outside_singletons(file)
 
       file.fetch(:constant_writes).each { |name| note_outside_constant_write(name) }
 
       global!(:outside_dynamic_definition) if file.fetch(:dynamic)
       @dynamic_constant_mutation = true if file.fetch(:dynamic_constant_mutation)
       global!(:outside_class_factory) if file.fetch(:class_factory)
+      @struct_factory_used = true if file.fetch(:struct_factory)
     end
     # Every constant write is noted by now, native ones included, so the loops can be judged.
     facts.fetch(:files).each { |file| resolve_definer_loops(file) }
@@ -1554,6 +1806,43 @@ class ClosedWorld
     { const: head[:const], names: names.uniq, dyn: dyn }
   end
 
+  # FOREIGN_DEFINER_CALLS: `define_method(a, b, c)` with three or more arguments is not Module#define_method, which
+  # takes one or two (it would raise ArgumentError and define nothing): RBS's DefinitionBuilder has its own
+  # `define_method(methods, definition, method, ...)`. Keyword arguments count as the one Hash they would pass. Only a
+  # parenthesised list whose top level the scan below reads exactly is counted: names, calls, `::`, ternaries and
+  # comparisons, Symbols, nested brackets; a string, comment, block pass or splat (`&`, `*`, which can change the
+  # count) stops the scan, and that call stays a dynamic definer.
+  def self.foreign_definer_calls(text)
+    RegexpMatches.of(text, /\bdefine_method\(/).count do |match|
+      args = definer_call_args(text, match.end(0))
+      next false unless args
+
+      keywords, positional = args.partition { |arg| arg.match?(/\A\s*[a-z_]\w*:(?!:)/) }
+      positional.size + (keywords.empty? ? 0 : 1) >= 3
+    end
+  end
+
+  # The top-level arguments of the call whose `(` ends just before +from+, or nil when the scan cannot read them exactly.
+  def self.definer_call_args(text, from)
+    depth = 0
+    args = [+'']
+    text[from..].each_char do |char|
+      case char
+      when '(', '[', '{' then depth += 1
+      when ')', ']', '}'
+        return args.all? { |arg| arg.match?(/\S/) } ? args : nil if depth.zero? && char == ')'
+        return nil if depth.zero?
+
+        depth -= 1
+      when ',' then (args << +'') && next if depth.zero?
+      when /[\w\s.:?!=<>+\-|]/ then nil
+      else return nil
+      end
+      args.last << char
+    end
+    nil
+  end
+
   def self.ruby_file_facts(path)
     text = File.read(path, encoding: 'BINARY').gsub(/^\s*#.*$/, '')
 
@@ -1579,24 +1868,61 @@ class ClosedWorld
     # DYNAMIC_NAME_LOOPS: every dynamic definer is either inside a loop this file enumerates exactly, or unresolved.
     loops = RegexpMatches.of(text, RUBY_LOOP_HEAD).map { |head| definer_loop(text, head) }
     covered = loops.compact.sum { |loop| loop[:dyn] }
-    dynamic_total = text.scan(RUBY_DYNAMIC).size + text.scan(RUBY_DYNAMIC_SYMBOL).size
+    dynamic_total = text.scan(RUBY_DYNAMIC).size + text.scan(RUBY_DYNAMIC_SYMBOL).size - foreign_definer_calls(text)
     dynamic_unresolved = covered != dynamic_total
     definer_loops = dynamic_unresolved ? [] : loops.compact.select { |loop| loop[:dyn].positive? }
+    class_factory, struct_factory = ruby_factory_facts(text)
+    # INSTANCE_SINGLETON_TAINT: read from the syntax tree; a source that does not parse keeps the text scan, unplaced.
+    singletons = core ? nil : OutsideSingletons.scan(path)
 
     {
       path: path,
       tokens: tokens.to_a,
       supers: supers,
       touch: touch,
-      clone_sent: text.match?(/\bclone\b/),
+      # A full-line comment sends nothing; any other spelling (code or a string) counts.
+      clone_sent: text.gsub(/^[ \t]*#.*$/, '').match?(/\bclone\b/),
       freeze_possible: !core && text.match?(/\bfreeze\b/),
-      singleton_maker: !core && text.match?(RUBY_SINGLETON),
+      singleton_maker: !core && (singletons ? singletons.fetch(:maker) : text.match?(RUBY_SINGLETON)),
+      singleton_taint: core ? [] : singletons&.fetch(:taint),
+      singleton_modules: singletons ? singletons.fetch(:modules) : {},
+      open_modules: singletons ? singletons.fetch(:open_modules) : [],
       constant_writes: text.scan(/\b(?:[A-Z]\w*::)*([A-Z]\w*)\s*=(?!=|>)/).map(&:first),
       dynamic: dynamic_unresolved,
       definer_loops: definer_loops,
       dynamic_constant_mutation: text.match?(RUBY_CONST_DYNAMIC),
-      class_factory: text.match?(/\b(?:Class|Struct)\.new\b/)
+      class_factory: class_factory,
+      struct_factory: struct_factory
     }
+  end
+
+  # OUTSIDE_STRUCT_FACTORY: `Struct.new(:a, :b)` or `Struct.new(:a, keyword_init: true)`, on one line, with no block
+  # after it. Its class has Symbol members only (accessors mruby-struct defines natively under computed names) and no
+  # Ruby body, so it is the program's own Struct.new case (@struct_factory_used: factory_class_free? fails and those
+  # names keep their unknown native owner) rather than a global refusal. A block (whose `def`s OutsideRubyOwners
+  # would place on the enclosing body), any other argument, or a spelling this does not read stays a class factory.
+  RUBY_SAFE_STRUCT_NEW = /\GStruct\.new\([ \t]*:\w+(?:[ \t]*,[ \t]*:\w+)*(?:[ \t]*,[ \t]*keyword_init:[ \t]*true)?[ \t]*\)
+                          (?![ \t]*(?:do\b|\{))/x
+  # A factory receiver: `Class` or `Struct`, bare, `::`-rooted or namespaced (`Foo::Class`, which mruby's scoped lookup
+  # may resolve to the top-level class). A namespaced one is the file's own class only when the file defines a class of
+  # that name (RBS's `AST::Declarations::Class`).
+  RUBY_FACTORY_NEW = /(?<![\w:])(?:::)?(?<recv>Class|Struct)\.new\b|(?<ns>\w::)(?<recv>Class|Struct)\.new\b/
+
+  # [class_factory, struct_factory] of a file's text (see RUBY_SAFE_STRUCT_NEW).
+  def self.ruby_factory_facts(text)
+    class_factory = false
+    struct_factory = false
+    RegexpMatches.of(text, RUBY_FACTORY_NEW).each do |match|
+      at = match.begin(:recv)
+      next if match[:ns] && text.match?(/^[ \t]*class[ \t]+#{match[:recv]}\b/)
+
+      if match[:recv] == 'Struct' && text.match?(RUBY_SAFE_STRUCT_NEW, at) && text.match(RUBY_SAFE_STRUCT_NEW, at)&.begin(0) == at
+        struct_factory = true
+      else
+        class_factory = true
+      end
+    end
+    [class_factory, struct_factory]
   end
 
   # YIELD_REACH: the method names outside code can call back into Ruby by. Native code
@@ -1707,7 +2033,9 @@ class ClosedWorld
           sym = loaded_symbol_name(irep, insn)
           next unless sym
 
-          @clone_sent = true if sym == 'clone'
+          # CLONE_SYMBOL_PROOF: a `:clone` that is only compared or listed (`%i[clone dup].include?(m)`) copies nothing;
+          # resolve_installer_symbol_loads counts it as a clone only when its value may reach a send.
+          @clone_symbol_loads << [irep, idx, insn.reg] if sym == 'clone'
           @dynamic_visibility = true if VISIBILITY_SENDS.include?(sym)
           # An installer or rebinder name loaded as a symbol may be sent by name: its value must stay on safe paths
           # (resolve_installer_symbol_loads), not refuse the program outright.
@@ -1727,12 +2055,19 @@ class ClosedWorld
         when :SETCONST, :SETMCNST
           name = insn.const_name.to_s
           @rebound << name
+          qualified = insn.op == :SETCONST && @constant_write_sites[[irep.label, idx]]
+          if qualified
+            @rebound_qualified[qualified] += 1
+          else
+            @rebound_bare << name
+          end
           @constant_write_counts[name] += 1
           @deferred_constant_writes << name unless @walked.include?(irep.label)
         end
       end
     end
     resolve_struct_splats
+    resolve_struct_class_members
     resolve_deferred_mixin_modules
     resolve_installer_symbol_loads
     # A read name (scan_factory) can run a definition the scan only finishes seeing here.
@@ -1762,6 +2097,225 @@ class ClosedWorld
 
   # -- singleton classes --------------------------------------------
 
+  def compute_instance_singleton_taint
+    return {} if exact_instances_singleton_free?
+    return unplaced_singleton(:global_refusal) if @global_refusal
+
+    native = @singleton_makers.find { |_, kind| kind == :native }
+    return unplaced_singleton("native #{native[0]}") if native
+
+    taint = Hash.new { |h, k| h[k] = Set.new }
+    @outside_singleton_taint.each do |path, entries|
+      return unplaced_singleton("outside #{path}") if entries.nil?
+
+      entries.each { |klass, gain, modules| add_singleton_gain(taint, klass, gain || module_gain(modules)) }
+    end
+    makers = @singleton_opens.map { |irep, idx, insn| [irep, idx, insn, insn.op == :SDEF ? [insn.sym.to_s] : :any] } +
+             @singleton_sends.map { |irep, idx, insn| [irep, idx, insn, nil] }
+    makers.each do |irep, idx, insn, gain|
+      next if !SELF_SEND_OPS.include?(insn.op) && class_object_value?(irep, idx, insn.reg)
+
+      gain ||= singleton_send_gain(irep, idx, insn)
+      # A receiver that cannot be placed may be any object: a bounded gain still holds for every class.
+      klass = instance_singleton_place(irep, idx, insn) || (gain == :any ? nil : 'Object')
+      return unplaced_singleton("#{irep.label}:#{idx} #{insn.sym || insn.op} in #{File.basename(irep.file.to_s)}") unless klass
+
+      add_singleton_gain(taint, klass, gain)
+    end
+    @singleton_symbol_loads.each do |irep, idx, reg|
+      # The value only compared or listed (resolve_installer_symbol_loads' proof) is never sent.
+      next if installer_symbol_value_safe?(irep, idx, reg, 0, false)
+
+      return unplaced_singleton("#{irep.label}:#{idx} a maker Symbol")
+    end
+    taint.to_h { |klass, gain| [klass, gain == :any ? :any : gain.freeze] }
+  end
+
+  SELF_SEND_OPS = %i[SSEND SSEND0 SSENDB].freeze
+  # A module's hooks that run on what it is mixed into.
+  MIXIN_HOOKS = %w[extended extend_object included append_features prepended prepend_features].freeze
+
+  # `reg` holds a class or module object on every path: `self` in a class body, or a constant that names a class or
+  # module the closed world or the core declares and that nothing (bytecode or outside source) binds another value
+  # to. Stricter than class_object_register?, which also takes a constant only outside code writes (`ENV`) and a
+  # fresh `Object.new`, both instances.
+  def class_object_value?(irep, idx, reg)
+    return false if reg.nil?
+
+    every_definition?(irep, idx, reg) do |writer, _|
+      case writer.op
+      # The root body's self is the main object, an instance of Object.
+      when :LOADSELF then @walked.include?(irep.label) && irep.label != @root_label
+      when :GETCONST, :GETMCNST
+        name = simple((writer.op == :GETCONST ? writer.const_name : writer.mcnst_name).to_s)
+        class_constant?(name) && !@outside_constant_writes.include?(name) && named_class_or_module?(name)
+      else false
+      end
+    end
+  end
+
+  def named_class_or_module?(name)
+    return true if !classes_named(name).empty? || @module_names.any? { |mod| simple(mod) == name }
+
+    super_of, mixins = CoreHierarchySigs.hierarchy
+    super_of.key?(name) || mixins.each_value.any? { |mods| Array(mods).include?(name) }
+  end
+
+  def unplaced_singleton(why)
+    @singleton_taint_unplaced = why.to_s
+    nil
+  end
+
+  def add_singleton_gain(taint, klass, gain)
+    if gain == :any || taint[klass] == :any
+      taint[klass] = :any
+    else
+      taint[klass].merge(gain)
+    end
+  end
+
+  # What the singleton class `extend` gives with these module references can answer: the instance methods of every
+  # module whose path ends in one of them (a superset, as resolve_deferred_mixin_modules), or :any when one is not
+  # found or not fully listed.
+  def module_gain(refs)
+    outside = @outside_singleton_modules
+    owners = Set.new
+    @registry.each_value { |defs| defs.each { |d| owners << d.owner } }
+    known = (outside.keys + @module_names.to_a + owners.to_a).uniq
+    names = Set.new
+    refs.each do |ref|
+      bare = ref.delete_prefix('::')
+      matches = known.select { |mod| mod == bare || mod.end_with?("::#{bare}") }
+      return :any if matches.empty?
+
+      matches.each do |mod|
+        return :any unless module_listed?(mod, owners)
+
+        names.merge(outside.fetch(mod, []))
+        @registry.each { |name, defs| names << name if defs.any? { |d| d.owner == mod } }
+        # A module of the closed world's own Ruby may also define a name by Symbol (a define_method loop the registry
+        # does not hold): CodeGen reads this mark as every name the build installs that way (symbol_installed_names).
+        names << SINGLETON_INSTALLED if @module_names.include?(mod) || owners.include?(mod)
+      end
+    end
+    names
+  end
+
+  # In a gain: also every name the closed world's own Ruby installs by Symbol.
+  SINGLETON_INSTALLED = :installed
+
+  # No mixin into +mod+, no class of that name, no computed definer and no extend hook: its instance methods are the
+  # ones listed.
+  def module_listed?(mod, owners)
+    return false if @outside_open_modules.include?(mod) || @declared_classes.include?(mod)
+    return false if @mixins.nil? || !@mixins.fetch(mod, []).empty? || @unknown_mixins&.include?(mod)
+
+    hooks = owners.include?("#{mod}.singleton") &&
+            MIXIN_HOOKS.any? { |hook| @registry.fetch(hook, []).any? { |d| d.owner == "#{mod}.singleton" } }
+    !hooks
+  end
+
+  # The declared class whose instance `self` is at a maker in the closed world's own Ruby, or nil: the maker's receiver
+  # (SDEF and SCLASS's register, a send's receiver, implicit in SSEND) is `self` on every path, in the body of a method
+  # the registry defines on a class (not a module, not a class object). A block's `self` may be rebound, so a block is
+  # not placed.
+  def instance_singleton_place(irep, idx, insn)
+    self_receiver = %i[SSEND SSEND0 SSENDB].include?(insn.op) ||
+                    (insn.reg && every_definition?(irep, idx, insn.reg) { |writer, _| writer.op == :LOADSELF })
+    return nil unless self_receiver
+
+    owners = method_body_owners.fetch(irep.label, [])
+    return nil unless owners.size == 1
+
+    owner = owners.first
+    return nil if owner.end_with?('.singleton') || module_declared?(owner) || !class_declared?(owner)
+
+    owner
+  end
+
+  # { irep label => the owners the registry defines that irep's body on }.
+  def method_body_owners
+    @method_body_owners ||= begin
+      map = Hash.new { |h, k| h[k] = [] }
+      @registry.each_value { |defs| defs.each { |d| map[d.irep] << d.owner if d.irep && !d.core } }
+      map.transform_values(&:uniq)
+    end
+  end
+
+  # The names whose lookup a maker send may change on its receiver: define_singleton_method(:x) answers x, a
+  # `singleton_class` whose value is only read as below changes what those reads say, and any other maker send may
+  # define anything (:any).
+  def singleton_send_gain(irep, idx, insn)
+    return :any unless insn.reg
+
+    case insn.sym
+    when 'define_singleton_method'
+      names = literal_symbol_args(irep, idx, insn, 1)
+      names && names.size == 1 ? names : :any
+    when 'singleton_class' then singleton_class_use_gain(irep, idx, insn.reg)
+    else :any
+    end
+  end
+
+  # The value `x.singleton_class` wrote to +reg+ at +idx+ is only the receiver of `include?`, of an `include` or
+  # `prepend` of a listed module (its methods), or of a `remove_method`/`undef_method` of literal names, directly or
+  # through `send` (those names). Any other use may define anything: :any.
+  def singleton_class_use_gain(irep, idx, reg)
+    uses = FactoryFlow.uses(irep, idx, reg)
+    return :any if uses.nil? || uses.empty?
+
+    program = BytecodeIR.for(irep)
+    gain = Set.new
+    uses.each do |use_idx, use_reg|
+      use = program.source_at(use_idx)
+      return :any unless SEND_OPS.include?(use.op) && !SELF_SEND_OPS.include?(use.op) && use.reg == use_reg
+
+      names =
+        case use.sym
+        when 'include?' then []
+        when 'include', 'prepend'
+          ref = mixin_module_ref(irep, use_idx, use)
+          ref && ref[:name] ? module_gain([ref[:name]]) : :any
+        when 'remove_method', 'undef_method' then literal_symbol_args(irep, use_idx, use, :all)
+        when 'send', '__send__', 'public_send'
+          all = literal_symbol_args(irep, use_idx, use, :all)
+          all && %w[remove_method undef_method].include?(all.first) && all.size > 1 ? all.drop(1) : nil
+        end
+      return :any if names.nil? || names == :any
+
+      gain.merge(names)
+    end
+    gain.to_a
+  end
+
+  # The Symbol literals a send passes at argument position +range+ (1-based), or at every one for :all, or nil when the
+  # argument list is not plain or one of them is not a literal.
+  def literal_symbol_args(irep, idx, insn, range)
+    return nil unless insn.reg && insn.plain_fixed_argc?
+
+    argc = insn.argc.to_i
+    positions = range == :all ? (1..argc).to_a : [range]
+    return nil if positions.empty? || positions.max > argc
+
+    positions.map do |i|
+      names = []
+      literal = every_definition?(irep, idx, insn.reg + i) do |writer, _|
+        name = %i[LOADSYM SYMBOL].include?(writer.op) ? loaded_symbol_name(irep, writer) : nil
+        names << name if name
+        !name.nil?
+      end
+      return nil unless literal && names.uniq.size == 1
+
+      names.first
+    end
+  end
+
+  def note_outside_singletons(file)
+    @outside_singleton_taint << [file.fetch(:path), file.fetch(:singleton_taint)]
+    file.fetch(:singleton_modules).each { |mod, names| @outside_singleton_modules[mod].concat(names) }
+    @outside_open_modules.merge(file.fetch(:open_modules))
+  end
+
   # Judged after the scan: class_constant? needs every SETCONST counted.
   def singleton_makers
     @singleton_makers_all ||= @singleton_makers + @singleton_opens.filter_map do |irep, idx, insn|
@@ -1777,9 +2331,15 @@ class ClosedWorld
       @singleton_opens << [irep, idx, insn]
     when :LOADSYM, :SYMBOL
       name = loaded_symbol_name(irep, insn)
-      @singleton_makers << [irep.label, name] if name && SINGLETON_MAKERS.include?(name)
+      return unless name && SINGLETON_MAKERS.include?(name)
+
+      @singleton_makers << [irep.label, name]
+      @singleton_symbol_loads << [irep, idx, insn.reg]
     when SEND_OPS
-      @singleton_makers << [irep.label, insn.sym] if SINGLETON_MAKERS.include?(insn.sym)
+      return unless SINGLETON_MAKERS.include?(insn.sym)
+
+      @singleton_makers << [irep.label, insn.sym]
+      @singleton_sends << [irep, idx, insn]
     end
   end
 
@@ -1859,6 +2419,9 @@ class ClosedWorld
       else
         global!(:dynamic_install)
       end
+    end
+    @clone_symbol_loads.each do |irep, idx, reg|
+      @clone_sent = true unless installer_symbol_value_safe?(irep, idx, reg, 0, false)
     end
     # These names refuse nothing here; CodeGen's installed-name scan asks for the proof instead (symbol_load_proven?).
     @name_installer_loads.each do |irep, idx, reg, _sym|
@@ -2125,7 +2688,7 @@ class ClosedWorld
                  when *FREEZE_LITERAL_WRITERS then true
                  when :GETCONST then (constant = writer.const_name) && true
                  when :GETMCNST then (constant = writer.mcnst_name) && true
-                 when BytecodeIR::Ops::SEND_PREFIX_OPS then fresh_builtin_result?(irep, index, writer)
+                 else fresh_builtin_result?(irep, index, writer)
                  end
                end
     return @freeze_possible = true unless harmless == true
@@ -2133,22 +2696,38 @@ class ClosedWorld
     @frozen_constants << constant if constant
   end
 
-  # FRESH_BUILTIN_FREEZE: `(0..n).map { }.freeze`. A core iterator of FRESH_BUILTIN_SENDS called on a builtin
-  # literal (or on such a result) returns a new builtin value, never a user object, as long as only mruby's own
-  # code defines the name. That is judged after the scan (fresh_builtin_names_core?), when every definer is known.
+  # FRESH_BUILTIN_FREEZE: `(0..n).map { }.freeze`, `(%w[a] + [b]).freeze`. A core iterator of FRESH_BUILTIN_SENDS or
+  # an op of FRESH_BUILTIN_OPS on a builtin literal (or on such a result) leaves a builtin value, never a user object,
+  # as long as only mruby's own code defines the name. That is judged after the scan (fresh_builtin_names_core?), when every definer is known.
   # BC2CPP_FRESH_FREEZE=0 refuses it, for comparison.
   def fresh_builtin_result?(irep, index, writer, depth = 0)
-    return false if ENV['BC2CPP_FRESH_FREEZE'] == '0'
-    return false unless FRESH_BUILTIN_SENDS.include?(writer.sym.to_s) && depth < 4
+    return false if ENV['BC2CPP_FRESH_FREEZE'] == '0' || depth >= 4
+
+    name = fresh_builtin_name(writer)
+    return false if name == false
 
     literal = irep.walk_dominating_writers(index - 1, writer.reg, use: index, follow_moves: true) do |receiver, at|
-      FREEZE_LITERAL_WRITERS.include?(receiver.op) ||
-        (BytecodeIR::Ops::SEND_PREFIX_OPS.include?(receiver.op) && fresh_builtin_result?(irep, at, receiver, depth + 1))
+      next false if writer.op == :ADD && !FRESH_ADD_RECEIVERS.include?(receiver.op)
+
+      FREEZE_LITERAL_WRITERS.include?(receiver.op) || (writer.op == :ARYCAT && receiver.op == :LOADNIL) ||
+        fresh_builtin_result?(irep, at, receiver, depth + 1)
     end
     return false unless literal == true
 
-    @fresh_freeze_names << writer.sym.to_s
+    @fresh_freeze_names << name if name
     true
+  end
+
+  # The method name a FRESH_BUILTIN_FREEZE writer dispatches (nil: none, it is an Array op), or false when the writer
+  # is not one.
+  def fresh_builtin_name(writer)
+    if BytecodeIR::Ops::SEND_PREFIX_OPS.include?(writer.op)
+      FRESH_BUILTIN_SENDS.include?(writer.sym.to_s) && writer.sym.to_s
+    elsif FRESH_BUILTIN_OPS.key?(writer.op) && ENV['BC2CPP_FRESH_FREEZE_OPS'] != '0'
+      FRESH_BUILTIN_OPS[writer.op]
+    else
+      false
+    end
   end
 
   # Every definer of a FRESH_BUILTIN_FREEZE name is mruby's own: core Ruby or a core native.
@@ -2169,7 +2748,31 @@ class ClosedWorld
 
     sets = n && argument_name_sets(irep, idx, insn, n, definitions: true)
     syms = n ? sets&.flatten : packed_syms(irep, idx, insn)
-    syms ? @visibility_names.merge(syms) : @dynamic_visibility = true
+    return @dynamic_visibility = true unless syms
+
+    @visibility_names.merge(syms)
+    @visibility_unresolved.merge(syms) unless same_body_visibility_send?(irep, idx, insn, syms)
+  end
+
+  # VISIBILITY_SAME_BODY: `private :a` / `public :a` (implicit self) in the class body that defined `a` earlier, in
+  # one class only: build_registry sets that definition's visibility from it, so the registry's answer is mruby's.
+  # A send in another body (an inherited method gets a copy there), or a body whose
+  # `a` the registry places on several owners, is not. BC2CPP_VISIBILITY_SAME_BODY=0 counts every send.
+  def same_body_visibility_send?(irep, idx, insn, syms)
+    return false if ENV['BC2CPP_VISIBILITY_SAME_BODY'] == '0'
+    return false unless %w[private public protected].include?(insn.sym) && %i[SSEND SSEND0].include?(insn.op)
+
+    syms.all? do |sym|
+      body = nil
+      irep.each_with_op(:TDEF, :DEF) do |d, i|
+        next unless i < idx && d.sym == sym
+
+        body = d.op == :TDEF ? irep.reps[d.block_index] : def_method_body(irep, i, d)
+      end
+      # Irep#reps holds the child labels.
+      label = body.respond_to?(:label) ? body.label : body
+      label && method_body_owners.fetch(label, []).size == 1
+    end
   end
 
   # Every reaching argument value must have a finite immutable name set. A String
@@ -2316,16 +2919,16 @@ class ClosedWorld
         end
         argc = call.argc if struct_keyword_init?(call)
         return global!(:class_factory_escape) unless argc
-
+        member_names = []
         argc.times do |argument|
           names = factory_argument_names(irep, use, call.reg.to_i + argument + 1, %i[LOADSYM])
           return global!(:class_factory_escape) unless names
 
-          names.each do |name|
-            note_unknown_def(name, nil)
-            note_unknown_def("#{name}=", nil)
-          end
+          member_names.concat(names.to_a)
         end
+        # STRUCT_CLASS_DECLS: whether this is a declared struct class's factory is known once every constant write is
+        # counted (resolve_struct_class_members).
+        @struct_factory_members << [irep, use, call, member_names]
       when 'Class'
         return global!(:class_factory_escape) unless argc && argc <= 1
 
@@ -2361,6 +2964,19 @@ class ClosedWorld
       return nil unless name.is_a?(String)
 
       name
+    end
+  end
+
+  # STRUCT_CLASS_DECLS: a Struct.new's members are unknown definers unless the call is a declared struct class's one
+  # `X = Struct.new(...)`, whose members the registry lists as definers of X.
+  def resolve_struct_class_members
+    @struct_factory_members.each do |irep, use, call, names|
+      next if struct_class_factory?(irep, use, call)
+
+      names.each do |name|
+        note_unknown_def(name, nil)
+        note_unknown_def("#{name}=", nil)
+      end
     end
   end
 
@@ -2447,13 +3063,41 @@ class ClosedWorld
   # dynamically, and named by a plain constant path.
   def opaque?(owner)
     return true if owner.include?('.') || owner.include?('<') || BOOT_CLASSES.include?(owner)
-    return true unless @class_decls.key?(owner)
-    return true if @rebound.include?(simple(owner)) || @dynamic_subclassed.include?(simple(owner))
+    return true unless @declared_classes.include?(owner)
+    return true if (rebound?(owner) && !struct_class?(owner)) || @dynamic_subclassed.include?(simple(owner))
 
     # Touch scans are complete after construction; declaration and rebinding guards stay live.
     return @opaque_touches.fetch(owner) { @opaque_touches[owner] = outside_class_touch?(owner) } if @opaque_touches
 
     outside_class_touch?(owner)
+  end
+
+  # QUALIFIED_REBINDS: may the constant naming +owner+ be bound to another value? A write the registry qualified
+  # rebinds only its own path; a write it did not (in a method body, `Outer::X =`, or one it does not record) rebinds
+  # every constant of that bare name.
+  def rebound?(owner)
+    @rebound_bare.include?(simple(owner)) || @rebound_qualified[owner].positive?
+  end
+
+  # STRUCT_CLASS_DECLS: X is a struct class whose one constant write is the `X = Struct.new(...)` the registry saw. That
+  # write is a declaration, not a rebinding: a second write of X, or a write of its bare name the registry did not
+  # qualify, leaves X rebound.
+  def struct_class?(owner)
+    return false unless @struct_classes.include?(owner)
+
+    @rebound_qualified[owner] == 1 && !@rebound_bare.include?(simple(owner))
+  end
+
+  # STRUCT_CLASS_DECLS: the Struct.new call at +use+ is the one `X = Struct.new(...)` of a declared struct class, so the
+  # registry holds its members as definers of X.
+  def struct_class_factory?(irep, use, call)
+    return false unless @walked.include?(irep.label)
+
+    store = BytecodeIR.for(irep).source_at(use + 1)
+    return false unless store&.op == :SETCONST && store.reg_operand == call.reg
+
+    owner = @constant_write_sites[[irep.label, use + 1]]
+    !owner.nil? && struct_class?(owner)
   end
 
   def outside_class_touch?(owner)
@@ -2513,7 +3157,7 @@ class ClosedWorld
     @class_decls.each do |klass, decls|
       decls.each do |d|
         case d[:super]
-        when nil then @wild << klass
+        when nil then @wild << klass unless d[:fresh_struct_super]
         when String
           parents = superclass_candidates(d[:super], by_simple)
           if parents.empty?
@@ -2575,8 +3219,8 @@ class ClosedWorld
     end
   end
 
-  # SINGLETON_ARMS: the modules whose `.singleton` definition of `name` a guard chain can
-  # answer with an identity arm, or nil when some singleton definer cannot be armed. A module object is
+  # SINGLETON_ARMS: the modules (and, CLASS_OBJECT_ARMS, the class objects) whose `.singleton` definition of `name` a
+  # guard chain can answer with an identity arm, or nil when some singleton definer cannot be armed. A module object is
   # reached only by its own constant: no subclasses (module_object_self? also bars a class and any
   # `clone`, the one way to copy singleton methods). The caller proves the singleton chain has no mixin.
   public def singleton_arm_modules(name)
@@ -2585,10 +3229,76 @@ class ClosedWorld
     owners = @registry.fetch(name, []).map(&:owner).select { |o| o.end_with?('.singleton') }.uniq
     return nil if owners.empty?
 
-    modules = owners.map { |o| o.delete_suffix('.singleton') }
-    return nil unless modules.all? { |m| module_object_self?(m) }
+    arms = Set.new
+    owners.each do |owner|
+      base = owner.delete_suffix('.singleton')
+      if module_object_self?(base)
+        arms << base
+      elsif (objects = class_object_arms(base))
+        arms.merge(objects)
+      else
+        return nil
+      end
+    end
+    arms.to_a
+  end
 
-    modules
+  # CLASS_OBJECT_ARMS: a class's `def self.x` answers for that class object and for every subclass's class object
+  # (singleton methods are inherited by subclasses), so the arm set is the class and its known subclasses, each a
+  # declared, non-opaque class whose constant names one object. nil when the hierarchy below it is not closed.
+  def class_object_arms(klass)
+    return nil if @global_refusal || @clone_sent || !@declared_classes.include?(klass) || @module_names.include?(klass)
+
+    subclasses = known_subclasses(klass)
+    return nil unless subclasses
+    return nil unless subclasses.all? { |c| @declared_classes.include?(c) && !opaque?(c) && stable_constant_identity?(c) }
+
+    subclasses
+  end
+
+  def merge_mixins(included, prepended)
+    merged = Hash.new { |h, k| h[k] = Set.new }
+    [included, prepended].each { |table| table.each { |owner, mods| merged[owner].merge(Array(mods)) } }
+    merged
+  end
+
+  # MODULE_DEFINER_INCLUDERS: the classes whose instances reach +mod+'s instance methods, through a class-body
+  # include or prepend of +mod+ or of a module that includes it, or nil when that is not known: +mod+ is not a
+  # declared module, an includer may be one the registry does not see (known_includer_candidates), an outside
+  # source or a dynamic mixin may name it, some mixin did not resolve, or a root class (Object, Kernel, BasicObject)
+  # takes it, which reaches every object. A module nothing includes answers no instance: its instance methods (the
+  # private copies `module_function` makes) bind no receiver, and its `.singleton` definitions are judged on their own.
+  public def module_definer_includers(mod)
+    return nil unless @mixins && @unknown_mixins && @unknown_mixins.empty? && @module_names.include?(mod)
+
+    @module_includer_memo ||= {}
+    return @module_includer_memo[mod] if @module_includer_memo.key?(mod)
+
+    @module_includer_memo[mod] = module_includers_uncached(mod)
+  end
+
+  def module_includers_uncached(mod)
+    return nil if known_includer_candidates(mod).nil? || outside_class_touch?(mod)
+
+    classes = Set.new
+    seen = Set[mod]
+    work = [mod]
+    until work.empty?
+      target = work.pop
+      @mixins.each do |owner, mods|
+        next unless mods.include?(target)
+        return nil if BOOT_CLASSES.include?(owner) || owner.include?('.') || owner.include?('<')
+
+        if @module_names.include?(owner)
+          return nil if outside_class_touch?(owner)
+
+          work << owner if seen.add?(owner)
+        else
+          classes << owner
+        end
+      end
+    end
+    classes
   end
 
   def required_classes(name, instance_self = false, singleton_arms = nil)
@@ -2601,6 +3311,14 @@ class ClosedWorld
           next if instance_self || singleton_arms&.include?(d.owner.delete_suffix('.singleton'))
 
           break reason = :singleton_definer
+        end
+        if (includers = module_definer_includers(d.owner))
+          # MODULE_DEFINER_INCLUDERS: a module's method is reached through the classes that include or prepend it.
+          blocked = includers.find { |c| opaque?(c) || descendants(c).any? { |sub| opaque?(sub) } }
+          break reason = :opaque_definer if blocked
+
+          includers.each { |c| required << c; required.merge(descendants(c)) }
+          next
         end
         break reason = :opaque_definer if opaque?(d.owner)
 
@@ -2639,6 +3357,18 @@ class ClosedWorld
   # Can the fallback's receiver be an instance of a method_missing class? Only
   # `self` is known: every entry into a compiled method passes a kind_of? its
   # owner (dispatch, a guarded or lexical-self direct call, super).
+  # METHOD_MISSING_ARMS: the classes whose instances reach a Ruby method_missing (with the subclasses that inherit it),
+  # when each is a declared, non-opaque class of stable constant identity and none is open below, so an exact-class arm
+  # per class (bc2cpp_class_is, which looks through an object's singleton class) catches every such receiver. nil
+  # when there are none or that is not so.
+  public def method_missing_arm_classes
+    return nil if @global_refusal || @mm_classes.empty? || !@wild.empty?
+    return nil unless @mm_classes.all? { |c| @declared_classes.include?(c) && !opaque?(c) && stable_constant_identity?(c) }
+    return nil unless @mm_classes.all? { |c| (subs = known_subclasses(c)) && subs.to_set.subset?(@mm_classes) }
+
+    @mm_classes.to_a.sort
+  end
+
   def method_missing_free?(self_owner, instances = nil)
     return true if @mm_classes.empty?
     # A proven class set: a class inherits method_missing exactly when @mm_classes holds it.

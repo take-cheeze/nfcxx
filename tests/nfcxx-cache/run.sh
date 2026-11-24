@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
-# Checks nfcxx's compile cache, now decided and stored by scripts/nfcxx-cache.rb, against the driver it was before
-# (tests/nfcxx-cache/nfcxx-bash, frozen). Each case runs in one sandbox (a copy of fixtures/): the live driver, then the frozen
-# one, from the same state. Compared: the printed decisions (CP and RUN lines of the file operations are left out: the Ruby
-# helper makes its own copies, so the sandbox is compared instead), the exit status, stderr, and the sandbox after the run
-# (every file and directory, with the cache entries and the cache log). The live driver's sandbox must also pass the case's
-# CHECK, and its decision lines must print the case's EXPECT.
-#   tests/nfcxx-cache/run.sh           runs the cases
-#   tests/nfcxx-cache/run.sh --mutate  changes the key length in the Ruby helper and checks that cases fail, then restores it
-#                                      and runs them again
+# Checks nfcxx's compile cache, now decided and stored by scripts/nfcxx-cache.rb, against goldens recorded from the driver it was
+# before (tests/nfcxx-cache/nfcxx-bash, frozen). Each case runs in one sandbox (a copy of fixtures/) with the live driver
+# (pinned-nfcxx.txt). Compared with the case's golden (goldens/CASE.*): the printed decisions (CP and RUN lines of the file
+# operations are left out: the Ruby helper makes its own copies, so the sandbox is compared instead), the exit status, stderr,
+# and the sandbox after the run (every file and directory, with the sha-256 of each file; the names of the cache entries are the
+# keys, which are left out). The live driver's sandbox must also pass the case's CHECK, and its decision lines must print the
+# case's EXPECT. A case's cache key (the frozen driver's, from its cache log) is rebuilt for the sandbox from its recorded key
+# inputs (goldens/keys/CASE.BACKEND): the key depends on the sandbox path, the compiler and the files under scripts/.
+#   tests/nfcxx-cache/run.sh            runs the cases against the goldens (the frozen driver is not run)
+#   tests/nfcxx-cache/run.sh --record   records the goldens and key inputs from the frozen driver (the only run that reads it)
+#   tests/nfcxx-cache/run.sh --mutate   changes the key length in the Ruby helper and checks that cases fail, then restores it
+#                                       and runs them again
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 port=$root/scripts/nfcxx-cache.rb
 frozen=$here/nfcxx-bash
 oracle=$here/bash-decision.sh
+gold=$here/goldens
 work=$(realpath "$(mktemp -d)")
 scratch=$(realpath "$(mktemp -d)")
 backup=$scratch/nfcxx-cache.rb.orig
@@ -23,8 +27,14 @@ trap 'cp "$backup" "$port" 2>/dev/null; rm -rf "$work" "$scratch"' EXIT
 mkdir -p "$scratch/edg/bin" && printf '#!/bin/sh\nexit 1\n' > "$scratch/edg/bin/eccp" && chmod +x "$scratch/edg/bin/eccp"
 base_env=("EDG_BUILD=$scratch/edg" "NFCXX_CACHE_IO=$here/remote-stub.rb")   # the remote helper: the stand-in of the remote tier
 # The backend of a case is CASE_BACKEND (set_case: gcc, or pathb with the stubbed Path B compile).
+# mode: compare (the live driver against the goldens), record (the goldens from the frozen driver), keys (the key inputs, recorded
+# from the frozen driver's cache log, by the PRE functions of the cases)
+mode=compare
 
-norm() { sed -e "s#$work#SANDBOX#g" -e "s#$root#ROOT#g" -e 's/\.\(tmp\|remote\)\.[0-9][0-9]*/.\1.PID/g'; }
+# norm_paths: the sandbox and the repository as SANDBOX and ROOT (the paths of one run differ from the next)
+norm_paths() { sed -e "s#$work#SANDBOX#g" -e "s#$root#ROOT#g" -e 's/\.\(tmp\|remote\)\.[0-9][0-9]*/.\1.PID/g'; }
+# norm: norm_paths, and the cache keys (40 hex digits as a token: a 64-digit sha-256 is not one) as KEY; a key depends on the path
+norm() { norm_paths | sed -E -e 's/(^|[^0-9a-f])[0-9a-f]{40}([^0-9a-f]|$)/\1KEY\2/g' -e 's/(^|[^0-9a-f])[0-9a-f]{40}([^0-9a-f]|$)/\1KEY\2/g'; }
 # The decision lines: the file operations (CP, and the RUN of rm, mkdir and mv) are left out; the build, the remote helper and
 # EXIT are kept.
 decisions() { grep -v -E '^(CP |RUN (rm|mkdir|mv) )' | norm; }
@@ -39,10 +49,10 @@ run_driver() {
      bash "$oracle" "$1" "--backend=$CASE_BACKEND" "${CASE_ARGS[@]}")
 }
 
-snapshot() {  # the sandbox: every directory and file (with its sha-256), as the names and the contents
+snapshot() {  # the sandbox: every directory and file (with the sha-256 of its normalized text), as the names and the contents
   (cd "$work" && find . -mindepth 1 | LC_ALL=C sort | while IFS= read -r p; do
-     if [ -d "$p" ]; then echo "D $p"; else echo "F $p $(sha256sum < "$p" | cut -c1-64)"; fi
-   done) | norm
+     if [ -d "$p" ]; then echo "D $p"; else echo "F $p $(norm < "$p" | sha256sum | cut -c1-64)"; fi
+   done) | norm | LC_ALL=C sort
 }
 
 prepare() {  # prepare: the sandbox as the case starts (the fixtures, then PRE and MUTATE)
@@ -53,24 +63,40 @@ prepare() {  # prepare: the sandbox as the case starts (the fixtures, then PRE a
 
 bad() { echo "      $*"; bad_case=1; }
 
-run_case() {  # run_case: runs the case set up by set_case, and prints ok or FAIL
+run_case() {  # run_case: runs the case set up by set_case, and prints ok or FAIL (in record mode: records its golden)
   bad_case=0
   prepare
-  run_driver "$root/nfcxx" > "$scratch/new.raw" 2> "$scratch/new.err"; new_rc=$?
+  [ "$mode" = keys ] && return 0
+  if [ "$mode" = record ]; then record_case; return 0; fi
+  run_driver "$here/pinned-nfcxx.txt" > "$scratch/new.raw" 2> "$scratch/new.err"; new_rc=$?
   [ -z "$CHECK" ] || $CHECK
   snapshot > "$scratch/new.tree"
-  prepare
-  run_driver "$frozen" > "$scratch/old.raw" 2> "$scratch/old.err"; old_rc=$?
-  snapshot > "$scratch/old.tree"
-
-  decisions < "$scratch/new.raw" > "$scratch/new.dec"; decisions < "$scratch/old.raw" > "$scratch/old.dec"
-  if ! diff -u "$scratch/old.dec" "$scratch/new.dec" > "$scratch/dec.diff"; then bad "decisions differ:"; sed 's/^/      /' "$scratch/dec.diff"; fi
-  [ "$new_rc" = "$old_rc" ] || bad "exit status: new $new_rc, frozen $old_rc"
-  norm < "$scratch/new.err" > "$scratch/new.errn"; norm < "$scratch/old.err" > "$scratch/old.errn"
-  if ! diff -u "$scratch/old.errn" "$scratch/new.errn" > "$scratch/err.diff"; then bad "stderr differs:"; sed 's/^/      /' "$scratch/err.diff"; fi
-  if ! diff -u "$scratch/old.tree" "$scratch/new.tree" > "$scratch/tree.diff"; then bad "the sandbox differs:"; sed 's/^/      /' "$scratch/tree.diff"; fi
+  decisions < "$scratch/new.raw" > "$scratch/new.dec"
+  for g in dec rc err tree; do [ -f "$gold/$CASE.$g" ] || bad "no golden $CASE.$g (run tests/nfcxx-cache/run.sh --record)"; done
+  if [ -f "$gold/$CASE.dec" ]; then
+    if ! diff -u "$gold/$CASE.dec" "$scratch/new.dec" > "$scratch/dec.diff"; then bad "decisions differ:"; sed 's/^/      /' "$scratch/dec.diff"; fi
+  fi
+  [ -f "$gold/$CASE.rc" ] && { [ "$new_rc" = "$(cat "$gold/$CASE.rc")" ] || bad "exit status: new $new_rc, golden $(cat "$gold/$CASE.rc")"; }
+  norm < "$scratch/new.err" > "$scratch/new.errn"
+  if [ -f "$gold/$CASE.err" ]; then
+    if ! diff -u "$gold/$CASE.err" "$scratch/new.errn" > "$scratch/err.diff"; then bad "stderr differs:"; sed 's/^/      /' "$scratch/err.diff"; fi
+  fi
+  if [ -f "$gold/$CASE.tree" ]; then
+    if ! diff -u "$gold/$CASE.tree" "$scratch/new.tree" > "$scratch/tree.diff"; then bad "the sandbox differs:"; sed 's/^/      /' "$scratch/tree.diff"; fi
+  fi
   [ -z "$EXPECT" ] || grep -qF -- "$EXPECT" "$scratch/new.dec" || bad "EXPECT not printed: $EXPECT"
   if [ "$bad_case" = 0 ]; then pass=$((pass + 1)); echo "ok    $CASE"; else fail=$((fail + 1)); echo "FAIL  $CASE"; fi
+}
+
+record_case() {  # the golden of the case: the frozen driver run from the case's prepared sandbox
+  run_driver "$frozen" > "$scratch/old.raw" 2> "$scratch/old.err"; local rc=$?
+  snapshot > "$scratch/old.tree"
+  mkdir -p "$gold"
+  decisions < "$scratch/old.raw" > "$gold/$CASE.dec"
+  echo "$rc" > "$gold/$CASE.rc"
+  norm < "$scratch/old.err" > "$gold/$CASE.err"
+  cp "$scratch/old.tree" "$gold/$CASE.tree"
+  pass=$((pass + 1)); echo "recorded $CASE (exit $rc)"
 }
 
 # set_case NAME SRC OUT: a case with no environment, no extra options and no checks; the case then sets what it needs.
@@ -79,13 +105,27 @@ set_case() {
   PRE=""; MUTATE=""; CHECK=""; EXPECT=""
 }
 
-# The key the frozen driver gives this case, from its cache log in the sandbox (run in the sandbox's own path, as the key needs it).
-port_key() {
+# The key inputs of the frozen driver for this case and backend, as its cache log prints them (goldens/keys/CASE.BACKEND, with
+# the sandbox and the repository written as SANDBOX and ROOT); the key is the first 40 hex digits of the SHA-256 of the inputs.
+key_file() { echo "$gold/keys/$CASE.$CASE_BACKEND"; }
+rebuild_key() {  # rebuild_key FILE: the key of the inputs in FILE, with this sandbox's paths
+  local text; text=$(sed -e "s#SANDBOX#$work#g" -e "s#ROOT#$root#g" "$1") && printf '%s\n' "$text" | sha256sum | cut -c1-40
+}
+port_key() {  # the key the frozen driver gives this case (CASE_BACKEND); in keys mode it is recorded from the frozen driver's log
+  local f; f=$(key_file)
+  if [ "$mode" != keys ]; then
+    rebuild_key "$f" 2>/dev/null || { echo "no golden key $f (run tests/nfcxx-cache/run.sh --record)" >&2; return 0; }
+    return 0
+  fi
   reset
   local keylog=$scratch/keylog.txt; rm -f "$keylog"
   (cd "$work" && env -i RUBY="$(command -v ruby)" PATH="$PATH" HOME="$HOME" "${base_env[@]}" "${CASE_ENV[@]}" "NFCXX_CACHE_LOG=$keylog" \
      "${CASE_TEST[@]}" bash "$oracle" "$frozen" "--backend=$CASE_BACKEND" "${CASE_ARGS[@]}") > /dev/null 2>&1
-  sed -n 's/^key //p' "$keylog" 2>/dev/null | head -1
+  local printed; printed=$(sed -n 's/^key //p' "$keylog" 2>/dev/null | head -1)
+  mkdir -p "$(dirname "$f")"
+  sed -n '/^== /,/^key /p' "$keylog" 2>/dev/null | sed '1d;$d' | norm_paths > "$f"
+  [ "$(rebuild_key "$f")" = "$printed" ] || { echo "keys: $CASE $CASE_BACKEND: the recorded inputs do not rebuild the frozen key" >&2; exit 1; }
+  echo "$printed"
 }
 entry_dir() { echo "$work/cache/objects/$1"; }
 # the entries the live driver stored (their keys, by name)
@@ -205,6 +245,11 @@ run_all() {
   [ "$fail" = 0 ]
 }
 
+if [ "${1:-}" = --record ]; then
+  mode=keys; run_all > /dev/null   # the key inputs first: the PRE functions of the cases take their keys from them
+  mode=record; run_all
+  exit $?
+fi
 if [ "${1:-}" = --mutate ]; then
   cp "$port" "$backup"
   sed -i 's/hexdigest(inputs + "\\n")\[0, 40\]/hexdigest(inputs + "\\n")[0, 39]/' "$port"

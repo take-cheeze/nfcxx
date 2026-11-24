@@ -5,6 +5,7 @@ require 'set'
 require_relative 'bytecode_ir_ops'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
+require_relative 'irep_arity'
 require_relative 'call_site_index'
 require_relative 'dynamic_names'
 require_relative 'native_names'
@@ -48,16 +49,65 @@ module RbsParamCheck
     # RBS only: every declared parameter class is trusted as written, so no caller is proven against it. The compiled
     # body checks it at entry instead (DECLARED_PARAM_GUARD): guards is label => [[position, class, key, text], ...].
     found = targets(ctx)
+    diags = optional_notes(ctx, found)
     trusted = found.flat_map { |_sig, d, positions| positions.map { |pos, *| [d.irep, pos] } }.to_set
     guards = found.to_h do |sig, d, positions|
-      [d.irep, positions.map { |pos, cls, kind, nilable| [pos, cls, "#{sig.owner}##{sig.name}", sig.args[pos].text, kind, nilable] }]
+      [d.irep, positions.map do |pos, cls, kind, nilable, optional|
+        text = optional ? sig.optional_args[optional].text : sig.args[pos].text
+        [pos, cls, "#{sig.owner}##{sig.name}", text, kind, nilable, optional]
+      end]
     end
-    [[], trusted, guards]
+    [diags, trusted, guards]
   end
 
-  # DECLARED_IVAR_GUARD: one `@x: T` declaration the compiled stores check. kind is :float, :integer, :symbol or :class
-  # (the exact program class cls); nilable admits nil too (`T?`).
+  # DECLARED_KEYWORD_PARAM: label => [[name, class, key, text, kind, nilable], ...] for the keyword parameters a
+  # signature types with a guardable kind (as for a positional `T?`: a value kind, Array/Hash/String, or a program class
+  # nothing subclasses). Only bodies whose KEY_P/KARG table is exactly the declared keywords (no `**rest`) qualify. The
+  # compiled KARG checks the given value (CodeGen#declared_keyword_guard), and only KARG's result is typed: an
+  # omitted keyword's default is ordinary code the flow reads.
+  def keyword_guards(loaded, ireps, registry, superclass_of, comment_class_args: {})
+    ctx = context(loaded, ireps, registry, superclass_of)
+    ctx[:sig_of].each_with_object({}) do |(label, sig), out|
+      next if (sig.keywords || {}).empty? || comment_class_args[label]
+
+      table = ireps[label] && keyword_arg_table(ireps[label], rest_block: true)
+      next unless table && table.to_h { |kw| [kw[:name], kw[:required]] } ==
+                           sig.keywords.keys.to_h { |name| [name, sig.required_keywords.include?(name)] }
+
+      guards = sig.keywords.filter_map do |name, type|
+        inner = type.optional
+        t = inner || type
+        kind, cls = if VALUE_CLASSES.key?(t.value) then [t.value, VALUE_CLASSES[t.value]]
+                    elsif (core = core_kind(t)) then [core, CORE_IVAR_KINDS.fetch(core)]
+                    elsif t.kind == :class && ctx[:classes].include?(t.cls) && !ctx[:subclassed].include?(t.cls)
+                      [:class, t.cls]
+                    end
+        [name, cls, "#{sig.owner}##{sig.name}", "#{name}: #{type.text}", kind, !inner.nil?] if kind
+      end
+      out[label] = guards unless guards.empty?
+    end
+  end
+
+  # TC1005 info for each typed optional parameter optional_targets does not guard (and so gives no hint).
+  def optional_notes(ctx, found)
+    guarded = found.to_h { |_sig, d, positions| [d.irep, positions.map(&:first).to_set] }
+    ctx[:sig_of].flat_map do |label, sig|
+      mand = sig.args.size
+      Array(sig.optional_args).each_with_index.filter_map do |type, k|
+        next if type.value_classes.nil? || guarded[label]&.include?(mand + k) || ctx[:comment_class_args][label]&.[](mand + k)
+
+        RbsSignatures::Diag.new(file: sig.loc.file, line: sig.loc.line, col: sig.loc.col, severity: 'info', code: 'TC1005',
+                                message: "#{sig.owner}##{sig.name} parameter #{mand + k + 1}: optional #{type.text} gives " \
+                                         'no hint (a guardable kind with a literal default of that kind is needed)')
+      end
+    end
+  end
+
+  # DECLARED_IVAR_GUARD: one `@x: T` declaration the compiled stores check. kind is :float, :integer, :symbol, :class
+  # (the exact program class cls) or :array, :hash, :string (CORE_IVAR_KINDS: the core class cls, kept only in a build
+  # with no subclass of it, see CodeGen#declared_ivar_entry); nilable admits nil too (`T?`).
   IvarGuard = Struct.new(:owner, :name, :cls, :kind, :nilable, :key, :text)
+  CORE_IVAR_KINDS = { array: 'Array', hash: 'Hash', string: 'String' }.freeze
 
   # { [owner, name without @] => IvarGuard } of the instance-variable declarations (`@x: T`, `attr_reader x: T`) of a
   # program class whose type is Integer, Float, Symbol or an exact program class, or the same with `?`. A program class
@@ -74,10 +124,19 @@ module RbsParamCheck
       nilable = !inner.nil?
       kind = VALUE_CLASSES.key?(t.value) ? t.value : nil
       cls = kind ? VALUE_CLASSES[kind] : t.cls
+      # An element type is not checked: `Array[T]` is the Array kind.
+      core = t.kind == :class && t.cls == 'String' ? :string : CORE_IVAR_KINDS.key?(t.kind) && t.kind
+      kind, cls = core, CORE_IVAR_KINDS.fetch(core) if !kind && core
       unless kind
-        next unless t.kind == :class && classes.include?(t.cls) && !subclassed.include?(t.cls)
+        union = union_classes(iv.type, classes, superclass_of)
+        if union && union.first.size > 1
+          cls, nilable = union
+          kind = :union
+        else
+          next unless t.kind == :class && classes.include?(t.cls) && !subclassed.include?(t.cls)
 
-        kind = :class
+          kind = :class
+        end
       end
       name = iv.name.delete_prefix('@')
       out[[iv.owner, name]] = IvarGuard.new(iv.owner, name, cls, kind, nilable, "#{iv.owner}##{iv.name}", iv.type.text)
@@ -87,7 +146,7 @@ module RbsParamCheck
   # The tables every query reads: method owners (`self_of` only for def bodies, never blocks, whose self an
   # instance_exec may change; `owner_of` also for blocks, for lexical constant lookup) and the signature of each body.
   def context(loaded, ireps, registry, superclass_of)
-    ctx = { ireps: ireps, registry: registry, subclassed: superclass_of.values.grep(String).to_set,
+    ctx = { ireps: ireps, registry: registry, subclassed: superclass_of.values.grep(String).to_set, superclass_of: superclass_of,
             classes: superclass_of.keys.to_set,
             dynamic: DynamicNames.universe(ireps), self_of: {}, method_name: {}, owner_of: {}, sig_of: {}, def_of: {},
             aliased: alias_names(ireps), parent: {} }
@@ -146,6 +205,14 @@ module RbsParamCheck
           # annotation; `T?` also admits nil.
           next [i, VALUE_CLASSES[kind], kind, nilable]
         end
+        # CORE_IVAR_KINDS: Array, Hash and String by their kind test (CodeGen#declared_param_guards keeps them only
+        # in a build with no subclass of the class).
+        if (core = core_kind(t))
+          next [i, CORE_IVAR_KINDS.fetch(core), core, nilable]
+        end
+        if (union = union_classes(type, ctx[:classes], ctx[:superclass_of])) && union.first.size > 1
+          next [i, union.first, :union, union.last]
+        end
         if nilable
           # A nilable program class gives no hint, so no annotation names it: take the class itself when it is a class
           # the program defines and nothing subclasses (the guard is the exact-class test).
@@ -157,9 +224,160 @@ module RbsParamCheck
 
         [i, type.cls, :class, false]
       end
+      positions.concat(optional_targets(ctx, label, sig))
       out << [sig, d, positions] unless positions.empty?
     end
     out
+  end
+
+  # DECLARED_OPTIONAL_PARAM: [[position, class, kind, nilable, k], ...] for the optional parameters (k-th optional) whose
+  # declaration the guard can test and whose default is a literal of that kind (optional_defaults). The guard checks
+  # a given argument only (bc2cpp_given_opt > k); an omitted one holds its default, so either way the register has
+  # the declared kind wherever the body reads it.
+  def optional_targets(ctx, label, sig)
+    types = Array(sig.optional_args)
+    return [] if types.empty?
+
+    irep = ctx[:ireps][label]
+    mand = sig.args.size
+    defaults = irep && optional_defaults(irep, mand, types.size)
+    return [] unless defaults
+
+    types.each_with_index.filter_map do |type, k|
+      pos = mand + k
+      next if ctx[:comment_class_args][label]&.[](pos)
+
+      inner = type.optional
+      t = inner || type
+      nilable = !inner.nil?
+      core = core_kind(t)
+      kind, cls = if VALUE_CLASSES.key?(t.value) then [t.value, VALUE_CLASSES[t.value]]
+                  elsif core then [core, CORE_IVAR_KINDS.fetch(core)]
+                  elsif t.kind == :class && ctx[:classes].include?(t.cls) && !ctx[:subclassed].include?(t.cls)
+                    [:class, t.cls]
+                  end
+      next unless kind
+
+      default = defaults[k]
+      next unless default && (default == kind || (default == :nil && nilable))
+
+      [pos, cls, kind, nilable, k]
+    end
+  end
+
+  # DECLARED_UNION: a union of program classes (`A | B`, `nil | A | B`) or a program class with subclasses (`A`, `A?`)
+  # is checked as the exact classes it stands for: [classes, nilable], a member with subclasses standing for its
+  # whole program subtree. Callers take only two or more classes: one is the :class kind's own rule. Kept only where
+  # the closed world bounds every listed class's subclasses by the list (union_closed?). BC2CPP_DECLARED_UNION=0: none.
+  DECLARED_UNION_MAX = 8
+  UNION_CORE_NAMES = %w[BasicObject Object Module Class Kernel Comparable Enumerable Integer Float Numeric Symbol String
+                        Array Hash Range Proc NilClass TrueClass FalseClass Exception].to_set.freeze
+
+  def union_classes(type, classes, superclass_of)
+    return nil if ENV['BC2CPP_DECLARED_UNION'] == '0' || superclass_of.nil?
+
+    values = type.value_classes
+    return nil unless values && !values.empty?
+
+    nilable = values.include?(:NilClass)
+    members = values.reject { |v| v == :NilClass }.map(&:to_s)
+    return nil if members.empty?
+    return nil unless members.all? { |m| classes.include?(m) && !UNION_CORE_NAMES.include?(m) }
+
+    children = Hash.new { |h, k| h[k] = [] }
+    superclass_of.each { |k, sup| children[sup] << k if sup.is_a?(String) }
+    listed = Set.new
+    work = members.dup
+    until work.empty?
+      k = work.pop
+      work.concat(children[k]) if listed.add?(k)
+    end
+    return nil if listed.size > DECLARED_UNION_MAX
+
+    [listed.to_a.sort.freeze, nilable]
+  end
+
+  # DECLARED_UNION: a union guard is kept only where the closed world sees every subclass of each listed class and
+  # lists it too, so "A or a subclass" is exactly the listed classes. Without a closed world none is kept.
+  def union_closed?(classes, closed_world)
+    return false unless closed_world
+
+    classes.all? { |k| (subs = closed_world.known_subclasses(k)) && subs.all? { |sub| classes.include?(sub) } }
+  end
+
+  def closed_union_params(guards, closed_world)
+    guards.transform_values do |list|
+      list.reject { |_pos, cls, _key, _text, kind, *| kind == :union && !union_closed?(cls, closed_world) }
+    end.reject { |_label, list| list.empty? }
+  end
+
+  def closed_union_ivars(guards, closed_world)
+    guards.reject { |_key, entry| entry.kind == :union && !union_closed?(entry.cls, closed_world) }
+  end
+
+  # :array, :hash or :string for an `Array` / `Array[T]` / `Hash` / `Hash[K, V]` / `String` type (elements unchecked).
+  def core_kind(t)
+    return t.kind if %i[array hash].include?(t.kind)
+
+    :string if t.kind == :class && t.cls == 'String'
+  end
+
+  # Ops that write their register from their operands alone and read no register (OPTIONAL_DEFAULT_READS).
+  DEFAULT_LITERAL_OPS = (BytecodeIR::Ops::LOADI_OPS | %i[LOADNIL LOADTRUE LOADFALSE LOADSYM LOADL STRING LOADSELF]).freeze
+  # Past it a LOADI32 literal may not be a fixnum on a 32-bit mrb_int target (see mrb_fixnum_p).
+  DEFAULT_FIXNUM_LIMIT = 0x2000_0000
+
+  # The kind of each optional default (:integer, :symbol, :nil, or nil for anything else) when the ENTER jump table is
+  # the plain one (optional_arg_table's shape) and every default reads no register; nil otherwise.
+  # OPTIONAL_DEFAULT_READS: an omitted optional is nil, not its declared kind, until its own default runs, and only the
+  # defaults before it run first. Default code that reads no register cannot see it, so the entry state the class pool
+  # seeds (declared kind) is what every read of the register finds.
+  def optional_defaults(irep, mand, count)
+    enter = irep.enter
+    return nil unless enter
+
+    fields = enter.enter_fields.map(&:to_i)
+    return nil unless fields[0] == mand && fields[1] == count
+
+    program = BytecodeIR.for(irep)
+    first = irep.enter_index + 1
+    return nil unless first + count + 1 <= program.size
+
+    jmps = (first..first + count).map { |index| program.source_at(index) }
+    return nil unless jmps.all? { |insn| insn.op == :JMP }
+
+    targets = jmps.map(&:jmp_addr)
+    index = first + count + 1
+    count.times.map do |k|
+      segment = []
+      while index < program.size && program.source_at(index).addr < targets[k + 1]
+        segment << program.source_at(index)
+        index += 1
+      end
+      return nil unless segment.first&.addr == targets[k] && segment.all? { |insn| default_reads_nothing?(insn) }
+
+      literal = segment.size == 1 && segment.first.reg == mand + 1 + k ? segment.first : nil
+      literal && default_kind(literal)
+    end.then { |kinds| program.source_at(index)&.addr == targets[count] ? kinds : nil }
+  end
+
+  # `ARRAY R3 0` / `HASH R3 0` (`[]`, `{}`) read the zero registers after R3.
+  def default_reads_nothing?(insn)
+    DEFAULT_LITERAL_OPS.include?(insn.op) || (%i[ARRAY HASH].include?(insn.op) && insn.uint_operand&.zero?)
+  end
+
+  def default_kind(insn)
+    case insn.op
+    when :LOADNIL then :nil
+    when :LOADSYM then :symbol
+    when :STRING then :string
+    when :ARRAY then insn.uint_operand&.zero? ? :array : nil
+    when :HASH then insn.uint_operand&.zero? ? :hash : nil
+    when *BytecodeIR::Ops::LOADI_OPS
+      value = BytecodeIR::Ops::LOADI_SLOT_VALUE[insn.op] || (insn.op == :LOADI__1 ? -1 : insn.imm_operand)
+      value = -value.abs if value && insn.op == :LOADINEG
+      value && value.abs < DEFAULT_FIXNUM_LIMIT ? :integer : nil
+    end
   end
 
   # Every name code outside the analysed bytecode can call a Ruby method by: in a native source (comments dropped),

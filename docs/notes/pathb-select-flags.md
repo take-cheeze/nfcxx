@@ -19,4 +19,4 @@ Measured (minimum of five runs, the same host as the measurement note):
 All checksums are unchanged. `step` now compares with `cmp` directly before `cmov` (no `setl`/`movzbl`). The SSA-to-QBE
 regression (`tests/pathb-ssa-qbe/run.rb`, 59 cases) passes, and the fork's 78 `test/*.ssa` files compile with identical output.
 
-The float reduction is still 10x behind clang: no vectorizer in either backend (docs/notes/pathb-backend-measurement.md).
+The float reduction is 10x behind clang without `-fassociative-math`, which vectorizes the sum (see docs/notes/pathb-backend-measurement.md, "Reassociated float sums").

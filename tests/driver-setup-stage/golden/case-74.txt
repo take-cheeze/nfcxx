@@ -1,0 +1,8 @@
+== case 74:  --cuda-driver=auto -c a.cpp -o a.o
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: QBE not built; run scripts/setup-qbe.sh
+-- eccp
+(none)
+-- files

@@ -207,8 +207,11 @@ class CodeGen
   end
 
   # The literal Symbol a GETIDX key register holds, nil when there is not exactly one definition.
+  # LCF_KEY_HANDLERS: the walk crosses handler edges (every value a raise can leave counts), so a read inside a
+  # `rescue`-protected body keeps its key. BC2CPP_LCF_KEY_HANDLERS=0 refuses there again.
   def lcf_literal_key(irep, index, key_reg)
-    defs = BytecodeIR.reaching_definitions(irep, index, key_reg, shared: true)
+    through = ENV['BC2CPP_LCF_KEY_HANDLERS'] != '0'
+    defs = BytecodeIR.reaching_definitions(irep, index, key_reg, through_handlers: through, shared: true)
     return nil unless defs && defs.size == 1 && !defs.first.entry?
 
     writer = BytecodeIR.for(irep).source_at(defs.first.index)

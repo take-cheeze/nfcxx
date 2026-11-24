@@ -25,8 +25,13 @@ require_relative 'type_check_variants'
 type_check_variants = TypeCheckVariants.parse_argv(ARGV) if $PROGRAM_NAME == __FILE__
 TypeCheckVariants.arm_guard if type_check_variants
 require_relative 'compact_output'
+require_relative 'owner_call_arity'
+require_relative 'owner_set_share'
+require_relative 'label_table'
+require_relative 'foreign_core_units'
 require_relative 'shard_output'
 require_relative 'runtime_header'
+require_relative 'cross_gem_share'
 require_relative 'shared_generation'
 require_relative 'core_c_facts'
 require_relative 'embed_init_guard'
@@ -39,6 +44,7 @@ require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_constants'
 require_relative 'register_flow'
 require_relative 'element_read_roots'
+require_relative 'keep_old_batch'
 require_relative 'registry'
 require_relative 'native_return_classes'
 require_relative 'lint_crosscheck'
@@ -49,7 +55,10 @@ require_relative 'outside_ruby_ivar_scopes'
 require_relative 'native_expression_devirt'
 require_relative 'branch_hints'
 require_relative 'tagged_fixnum'
+require_relative 'cmp_num_outline'
+require_relative 'int_box_outline'
 require_relative 'symbol_cache'
+require_relative 'class_test_fuse'
 require_relative 'const_site_cache'
 require_relative 'static_dispatch_lists'
 require_relative 'native_frame_use'
@@ -68,6 +77,11 @@ require_relative 'core_fact_sigs'
 require_relative 'enumerator_model'
 
 require_relative 'integer_constants'
+require_relative 'const_def_elide'
+require_relative 'const_conditional'
+require_relative 'loop_records'
+require_relative 'const_binding_drop'
+require_relative 'const_def_table'
 require_relative 'integer_constant_ranges'
 require_relative 'native_construct_schema'
 require_relative 'dynamic_names'
@@ -92,6 +106,7 @@ require_relative 'codegen_outside_owner_call'
 require_relative 'codegen_static_owner_arms'
 require_relative 'codegen_leaf_owner_else'
 require_relative 'codegen_owner_set_direct'
+require_relative 'codegen_arms_complete_else'
 require_relative 'codegen_native_direct'
 require_relative 'codegen_native_exact_direct'
 require_relative 'codegen_native_singleton'
@@ -136,11 +151,13 @@ require_relative 'block_self_world'
 require_relative 'codegen_native_results'
 require_relative 'codegen_instance_receivers'
 require_relative 'codegen_class_narrowing'
+require_relative 'codegen_guard_hoist'
 require_relative 'codegen_freeze_fold'
 require_relative 'codegen_decided_branch'
 require_relative 'codegen_arm_prune'
 require_relative 'codegen_call_facts'
 require_relative 'codegen_nilable_receiver'
+require_relative 'codegen_mono_receiver'
 require_relative 'codegen_setter_pools'
 require_relative 'codegen_self_new'
 require_relative 'codegen_class_object_new'
@@ -174,7 +191,9 @@ require_relative 'codegen_class_body'
 require_relative 'codegen_sealed_int16'
 require_relative 'codegen_keyword_send'
 require_relative 'codegen_send'
+require_relative 'codegen_const_tables'
 require_relative 'codegen_eqq'
+require_relative 'codegen_literal_eq'
 require_relative 'codegen_constant_object'
 require_relative 'codegen_unlisted_class_call'
 require_relative 'codegen_arg_shapes'
@@ -205,13 +224,20 @@ require_relative 'native_arms_report' if ENV['BC2CPP_NATIVE_ARMS_REPORT']
 require_relative 'provable_error_report' if ENV['BC2CPP_PROVABLE_ERROR_REPORT']
 require_relative 'element_site_report' if ENV['BC2CPP_ELEMENT_REPORT']
 require_relative 'receiver_proof_report' if ENV['BC2CPP_RECEIVER_PROOF_REPORT']
+require_relative 'codegen_exact_native_slot'
+require_relative 'owner_call_proof_note' if ENV['BC2CPP_OWNER_CALL_PROOF_NOTE']
 # Last: its compile_method and compile_insn prepends must be outermost.
 require_relative 'codegen_stack_tuples'
 require_relative 'codegen_string_eq'
 require_relative 'codegen_chr_append'
+require_relative 'codegen_strcat_literal'
 require_relative 'codegen_call_inline'
 require_relative 'codegen_respond_to_fold'
 require_relative 'owner_call_direct'
+require_relative 'codegen_multi_return'
+require_relative 'codegen_literal_minmax'
+# Last: its compile_insn wrapper reads the text every other wrapper settled on.
+require_relative 'codegen_stack_strings'
 
 # The main block is a lambda: its ~250 locals do not fit the one irep a top-level block gets when every file is compiled as
 # one program (docs/bc2cpp-self-compile.md). A host that wants to register compiled code between loading the sources and
@@ -235,6 +261,17 @@ def bc2cpp_method_report(compiled, tiers)
     fields << "\"compile_seconds\": #{seconds ? format('%.9f', seconds) : 'null'}"
     warn "  {#{fields.join(', ')}}"
   end
+end
+
+require_relative 'profile_timings'
+
+# The files a gem run's class units stand for (compile_top_class_units' `own_file`): the core run's are mruby's own Ruby,
+# an engine gem's its own mrblib. Nil for any other run (a probe or fixture world), where every file counts.
+def bc2cpp_own_unit_file(symbol, own_mrblib)
+  return ->(file) { CoreDefs.core_source?(file) } if symbol == 'core_compiled'
+  return nil unless BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol }
+
+  ->(file) { file.match?(own_mrblib) }
 end
 
 BC2CPP_MAIN = lambda do
@@ -271,60 +308,20 @@ BC2CPP_MAIN = lambda do
   symbol = ENV['OUT_SYMBOL'] || File.basename(srcs.first, '.rb').gsub(/[^a-zA-Z0-9_]/, '_')
   out_dir = ENV['OUT_DIR'] || File.dirname(srcs.first)
   SharedGeneration.arm_guard(SharedGeneration::UNIT_KEYS | shared_units.flat_map { |unit| unit.env.keys }) if shared_units
-  profile_started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-  profile_last = profile_started
-  # NFCXX_TIME_LOG (set by the nfcxx driver, docs/notes/tracing.md): each phase is also appended to that file as a
-  # time-log line, "SECONDS<Tab>bc2cpp<Tab>PHASE<Tab>UNIT", the format scripts/trace.sh writes. UNIT is the source the
-  # driver compiles (NFCXX_TRACE_UNIT), else the build name.
-  time_log = ENV['NFCXX_TIME_LOG'].to_s
-  time_log_unit = ENV['NFCXX_TRACE_UNIT'] || ENV['BC2CPP_BUILD_NAME'] || ''
-  profile_phase = lambda do |name|
-    profiling = ENV['BC2CPP_PROFILE_TIMINGS'] == '1'
-    next unless profiling || !time_log.empty?
-
-    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    if profiling
-      # Resident memory (Linux), so a run shows where its memory grows; -1 where /proc is not there.
-      rss_kb = begin
-        File.read('/proc/self/status').lines.grep(/\AVmRSS:/).first.to_s.split[1].to_i
-      rescue StandardError
-        -1
-      end
-      warn format('BC2CPP_TIME %-32s %8.3fs (total %8.3fs) rss %d MB', name, now - profile_last, now - profile_started,
-                  rss_kb / 1024)
-    end
-    unless time_log.empty?
-      micros = ((now - profile_last) * 1_000_000).round
-      line = format("%d.%06d\tbc2cpp\t%s\t%s\n", micros / 1_000_000, micros % 1_000_000, name, time_log_unit)
-      # A time log that cannot be written must not fail the build it times.
-      begin
-        File.open(time_log, 'a') { |file| file.write(line) }
-      rescue StandardError
-        nil
-      end
-    end
-    profile_last = now
-  end
-  profile_call = lambda do |name, &block|
-    next block.call unless ENV['BC2CPP_PROFILE_TIMINGS'] == '1'
-
-    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    value = block.call
-    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
-    warn format('BC2CPP_DETAIL %-40s %8.3fs', name, elapsed)
-    value
-  end
+  profile_phase, profile_call, profile_reset = Bc2cppTimings.callbacks
 
   # CONVERSION_RETURNS: to_s, to_str, to_int, to_ary and to_hash take only optional positional parameters; their returns
   # are runtime-checked hints, declared in a generated signature file that joins the program's signatures.
   ConversionReturns.enforce!(srcs.select { |path| path.end_with?('.rb') })
   # Mruby's own Ruby defining a native-named method (File#inspect) is hidden from the registry, so it gets no hint.
   conversion_sigs = ConversionReturns.write_sigs(srcs.select { |path| path.end_with?('.rb') && !CoreDefs.core_source?(path) })
-  ireps, root_label = compile_ireps(srcs, symbol, out_dir)
+  ireps, root_label = profile_call.call('compile_ireps') { compile_ireps(srcs, symbol, out_dir) }
   dfs_order(ireps, root_label)
+  # LOOP_RECORDS: an emitter loop or block-send record its own bytecode contradicts is an emitter bug (loop_records.rb).
+  profile_call.call('LoopRecords.check') { LoopRecords.enforce!(ireps) }
   registry, superclass_of, container_constants, included_modules, prepended_modules, unknown_mixins,
     struct_member_lists, class_decls, walked_ireps, module_body_ivar_labels, constant_assignment_sites,
-    declared_modules, alias_sites = build_registry(ireps, root_label)
+    declared_modules, alias_sites = profile_call.call('build_registry') { build_registry(ireps, root_label) }
   # ESCAPE_ANALYSIS: callees are every definition of a name, so the registry is copied before
   # the core filtering below drops the methods the build keeps interpreted.
   escape_registry = EscapeAnalysis.enabled? ? registry.transform_values(&:dup) : nil
@@ -335,7 +332,14 @@ BC2CPP_MAIN = lambda do
   # method the interpreter ends up with, so it must not make the name POLY nor be
   # emitted. Dropped before anything reads the registry.
   CodeGen.module_names = declared_modules
-  core_shadowed = CoreDefs.shadowed_labels(registry, ireps)
+  core_shadowed = profile_call.call('CoreDefs.shadowed_labels') { CoreDefs.shadowed_labels(registry, ireps) }
+  # CORE_LOOP_ALIASES: a core alias loop (mruby-onig-regexp's String#gsub) replaces the definitions before it.
+  alias_sites.each { |site| core_shadowed.merge(site[:replaces]) if site[:replaces] }
+  # CORE_OUTSIDE_REDEFINED: so does a linked Ruby source this build does not compile (mruby-require's Hash#to_h).
+  linked_ruby = Shellwords.split(ENV.fetch('BC2CPP_LINKED_RUBY_SRCS', ''))
+  core_shadowed.merge(profile_call.call('CoreDefs.outside_redefined_labels') do
+    CoreDefs.outside_redefined_labels(registry, ireps, linked_ruby, symbol, out_dir)
+  end)
   CodeGen.shadowed_labels = core_shadowed
   core_shadowed_pairs = registry.values.flatten.select { |d| d.irep && core_shadowed.include?(d.irep) }
                                 .to_set { |d| [d.owner, d.name] }
@@ -345,12 +349,14 @@ BC2CPP_MAIN = lambda do
   end
   CodeGen.core_aliases = CoreDefs.alias_map(alias_sites, registry, ireps, core_shadowed_pairs)
   # CORE_METHODS: what mruby's own Ruby must keep interpreted is no registry definition either.
-  core_ineligible = CoreMethods.excluded_labels(registry, ireps)
+  core_ineligible = profile_call.call('CoreMethods.excluded_labels') { CoreMethods.excluded_labels(registry, ireps) }
   # An interpreted core replacement still intercepts inherited lookup.
-  CodeGen.core_result_opaque_defs = CoreRubyResults.opaque_definitions(registry, core_ineligible, ireps, alias_sites, CodeGen.core_aliases)
+  CodeGen.core_result_opaque_defs = profile_call.call('CoreRubyResults.opaque_definitions') do
+    CoreRubyResults.opaque_definitions(registry, core_ineligible, ireps, alias_sites, CodeGen.core_aliases)
+  end
   CodeGen.core_result_installed_names = CoreRubyResults.installed_names(ireps)
   # ENUMERATOR_MODEL: read before the core filtering below drops the interpreted Kernel#to_enum.
-  CodeGen.enumerator_model = EnumeratorModel.analyze(registry, ireps, alias_sites)
+  CodeGen.enumerator_model = profile_call.call('EnumeratorModel.analyze') { EnumeratorModel.analyze(registry, ireps, alias_sites) }
   core_bytecode = registry.values.flatten.count { |d| d.irep && CoreDefs.core_source?(ireps.fetch(d.irep).file) }
   core_all_defs = registry.values.flatten.select { |d| d.irep && d.core }
   # A core attr_* accessor or module_function copy has no body to compile: it stays the interpreter's.
@@ -370,7 +376,10 @@ BC2CPP_MAIN = lambda do
   abort "bc2cpp: build '#{build_name}' is not a closed world:\n  #{errors.join("\n  ")}" unless errors.empty?
   profile_phase.call('closed world: build check')
 
-    outside_native, outside_ruby = bc2cpp_closed_world_outside_srcs(build_name, build_gems, repo_root)
+    outside_native, outside_ruby = bc2cpp_closed_world_outside_srcs(build_name, build_gems, repo_root,
+      native_paths: Shellwords.split(ENV.fetch('BC2CPP_LINKED_NATIVE_SRCS', '')),
+      ruby_paths: Shellwords.split(ENV.fetch('BC2CPP_LINKED_RUBY_SRCS', '')),
+      compiled_srcs: srcs)
   profile_phase.call('closed world: outside sources')
     # Core Ruby is compiled input here but stays an OUTSIDE source for these proofs: the
     # closed world is the engine's own Ruby, and a name mruby's own Ruby defines is one
@@ -380,12 +389,18 @@ BC2CPP_MAIN = lambda do
     closed_world = ClosedWorld.new(ireps: engine_ireps, registry: engine_registry, class_decls: class_decls,
                                    walked: walked_ireps & engine_ireps.keys,
                                    native_paths: outside_native, ruby_paths: outside_ruby,
-                                   module_names: declared_modules, root_label: root_label)
+                                   module_names: declared_modules, root_label: root_label,
+                                   struct_classes: struct_member_lists.keys, included: included_modules,
+                                   prepended: prepended_modules, unknown_mixins: unknown_mixins,
+                                   constant_writes: constant_assignment_sites)
     profile_phase.call('closed world: ClosedWorld.new')
     warn "== closed world (#{build_name}: #{build_gems.size} gems, #{outside_native.size} native + " \
          "#{outside_ruby.size} Ruby outside sources) =="
     warn "  global refusal: #{closed_world.global_refusal || 'none'}"
     warn "  method_missing classes: #{closed_world.method_missing_classes.to_a.sort.join(', ')}"
+    # INSTANCE_SINGLETON_TAINT: the classes whose instances may get a singleton class, and what it may answer. One line
+    # and no local here: BC2CPP_MAIN is at mruby's limit of local variables.
+    warn "  instance singletons: #{closed_world.instance_singleton_report}"
     warn ''
     LintCrosscheck.enforce!(repo_root, closed_world)
     profile_phase.call('closed world: lint cross-check')
@@ -500,6 +515,10 @@ BC2CPP_MAIN = lambda do
   linked_mrblib = build_gems.values.flat_map { |dir| Dir["#{dir}/mrblib/**/*.rb"] }.select { |path| CoreDefs.core_source?(path) }
   unread_ruby = (Shellwords.split(ENV['FOREIGN_RUBY_SRCS']) + outside_ruby + linked_mrblib)
                 .map { |path| File.expand_path(path) }.uniq
+  # UNREAD_RUBY_OWNERS: the outside owner sets (OutsideOwnerCall) read these too. A linked core gem's mrblib that this
+  # build does not compile (bc2cpp-self runs mruby's own gems as Ruby) is in neither outside_ruby nor the program's
+  # core, and its `module Kernel; alias enum_for to_enum` was missing from the enum_for owner set.
+  CodeGen.unread_ruby_paths = unread_ruby.reject { |path| compiled_ruby.include?(path) }.sort
   unseen_flipped = CoreDefs.add_unseen_placeholders!(
     registry, ireps, core_all_defs, alias_sites,
     foreign_method_names(unread_ruby.reject { |path| compiled_ruby.include?(path) }.sort)
@@ -609,7 +628,7 @@ BC2CPP_MAIN = lambda do
   refusal = nil
   unless unread.empty?
     begin
-      outside_ireps, outside_root = compile_ireps(unread, "#{symbol}_block_self_world", out_dir)
+      outside_ireps, outside_root = profile_call.call('CoreDefs.outside_compile') { CoreDefs.outside_compile(unread, symbol, out_dir) }
     rescue StandardError => e
       refusal = "an outside Ruby source does not compile (#{e.message.lines.first&.strip})"
     end
@@ -669,10 +688,21 @@ BC2CPP_MAIN = lambda do
                                                               outside_names: param_outside, constructor_entries: param_constructors,
                                                               superclass_of: superclass_of, display_root: sig_root, applied: sig_applied,
                                                               declared_returns: CodeGen.declared_returns)
-    CodeGen.declared_params = DeclaredReturns.guard? ? param_guards : {}
+    CodeGen.declared_params = DeclaredReturns.guard? ? RbsParamCheck.closed_union_params(param_guards, closed_world) : {}
+    # DECLARED_KEYWORD_PARAM: a typed keyword is checked where its KARG writes it.
+    CodeGen.declared_keywords = if DeclaredReturns.guard?
+                                  RbsParamCheck.keyword_guards(sig_loaded, ireps, registry, superclass_of,
+                                                               comment_class_args: sig_comment_class_args)
+                                else {}
+                                end
     # DECLARED_IVAR_GUARD: an `@x: T` declaration of Integer, Float, Symbol or a program class is checked on every store.
-    CodeGen.declared_ivars = DeclaredReturns.guard? ? RbsParamCheck.ivar_guards(sig_loaded, superclass_of) : {}
+    CodeGen.declared_ivars = if DeclaredReturns.guard?
+                               RbsParamCheck.closed_union_ivars(RbsParamCheck.ivar_guards(sig_loaded, superclass_of), closed_world)
+                             else {}
+                             end
     CodeGen.declared_ivar_elements = DeclaredReturns.guard? ? CodeGen.declared_element_table(sig_applied) : {}
+    CodeGen.declared_arg_elements = DeclaredReturns.guard? ? CodeGen.declared_arg_element_table(sig_applied) : {}
+    CodeGen.declared_arg_records = DeclaredReturns.guard? ? CodeGen.declared_arg_record_table(sig_applied) : {}
     sig_applied.diagnostics.concat(param_diags)
     param_diags.each { |d| warn "  #{d.file}:#{d.line}:#{d.col}: #{d.severity}: #{d.message} [#{d.code}]" }
     # An unproven parameter type is not trusted, so its argument stays `any` (an mrb_value): it is reported, not fatal.
@@ -811,8 +841,11 @@ BC2CPP_MAIN = lambda do
     integer_constants.sort.each { |n| warn "  CONST #{n}" }
   end
 
-  # The values of the admitted names, folded at GETCONST/GETMCNST (CodeGen.integer_constant_values).
-  integer_constant_values = constant_facts.values.select { |name, _| integer_constants.include?(name) }
+  # The values of the admitted names, folded at GETCONST/GETMCNST (CodeGen.integer_constant_values). A name with a write that
+  # may not run is never folded: its read may raise NameError (CONST_CONDITIONAL).
+  integer_constant_values = ConstConditional.names(ireps).then do |conditional|
+    constant_facts.values.select { |name, _| integer_constants.include?(name) && !conditional.include?(name.to_s) }
+  end
   profile_phase.call('global facts + annotations')
   warn "== integer constant literal values (BYTECODE_CONSTANT_FACTS): #{integer_constant_values.size} of #{integer_constants.size} =="
   integer_constant_values.sort.each { |n, v| warn "  CONST #{n} = #{v}" }
@@ -879,13 +912,13 @@ BC2CPP_MAIN = lambda do
     shared_units = nil
     symbol = ENV['OUT_SYMBOL'] || File.basename(srcs.first, '.rb').gsub(/[^a-zA-Z0-9_]/, '_')
     out_dir = ENV['OUT_DIR'] || File.dirname(srcs.first)
-    profile_started = profile_last = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    profile_reset.call
   end
 
   if type_check_variants
     TypeCheckVariants.fork_variants(type_check_variants)
     # A child's phase timings exclude time spent waiting for earlier variants.
-    profile_started = profile_last = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    profile_reset.call
   end
 
   known_owners = registry.values.flatten.map(&:owner).uniq
@@ -960,15 +993,18 @@ BC2CPP_MAIN = lambda do
   # BC2CPP_SELF_REGISTERING: a caller that compiles another program and installs its own registrations
   # (tools/optcarrot_probe/compiled_run.rb) sets it; an engine build registers each owner on its own.
   CodeGen.engine_registrations = true unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
-  CodeGen.core_compare = CoreCompare.verified(foreign_ruby_srcs | core_mrbgem_mrblib_srcs(BC2CPP_WORLD_ROOT),
-                                              native_name_sources)
+  CodeGen.core_compare = profile_call.call('CoreCompare.verified') do
+    CoreCompare.verified(foreign_ruby_srcs | core_mrbgem_mrblib_srcs(BC2CPP_WORLD_ROOT), native_name_sources)
+  end
   warn "== Comparable comparison operators verified against the build's sources (CORE_COMPARE): #{CodeGen.core_compare.to_a.sort.join(', ')} =="
-  return_names_probe = CodeGen.new(ireps, registry, ivar_layout, class_layout_probe, class_annotations,
-                                    annotations, superclass_of, {}, {}, container_constants, {},
-                                    Set.new, foreign_methods, nil, nil,
-                                    analysis_only: true,
-                                    native_expression_devirt: native_expression_devirt,
-                                    native_registered_expressions: native_registered_expressions)
+  return_names_probe = profile_call.call('CodeGen.new probe') do
+    CodeGen.new(ireps, registry, ivar_layout, class_layout_probe, class_annotations,
+                annotations, superclass_of, {}, {}, container_constants, {},
+                Set.new, foreign_methods, nil, nil,
+                analysis_only: true,
+                native_expression_devirt: native_expression_devirt,
+                native_registered_expressions: native_registered_expressions)
+  end
   array_return_probe = profile_call.call('CodeGen.array_return_names probe') { return_names_probe.array_return_names }
   # RETCLASS_SELF_CALL_SUPPORT: from the same Level-0 probe as
   # array_return_probe (see ClassLayout.analyze's `ret_class_proof`).
@@ -1299,6 +1335,24 @@ BC2CPP_MAIN = lambda do
   CodeGen.struct_members = struct_member_lists
   warn "== Struct.new owners with a known member list (STRUCT_INDEX_CACHE): #{CodeGen.struct_members.size} =="
   CodeGen.integer_constant_values = integer_constant_values
+  # CONST_DEF_ELIDE: no local (BC2CPP_MAIN is at mruby's limit of local variables per scope).
+  CodeGen.const_def_elide = ConstDefElide.analyze(
+    ireps: ireps, folded: integer_constant_values, facts: constant_facts.groups,
+    site_keys: LexicalConsts.analyze(ireps, static: true).site_keys, closed_world: closed_world,
+    linked_native: outside_native, spelled_native: (native_paths + outside_native).uniq,
+    mixins: { superclass_of: superclass_of, included: included_modules, prepended: prepended_modules,
+              unknown: unknown_mixins, modules: declared_modules }
+  )
+  ConstDefElide.report(CodeGen.const_def_elide)
+  # CONST_BINDING_DROP: no local either.
+  CodeGen.const_binding_drop = ConstBindingDrop.analyze(
+    ireps: ireps, root_label: root_label, stable_values: CodeGen.stable_value_constants,
+    elided: CodeGen.const_def_elide.names, lexical: LexicalConsts.analyze(ireps, static: true), facts: constant_facts.groups,
+    closed_world: closed_world, linked_native: outside_native, spelled_native: (native_paths + outside_native).uniq,
+    mixins: { superclass_of: superclass_of, included: included_modules, prepended: prepended_modules,
+              unknown: unknown_mixins, modules: declared_modules }
+  )
+  ConstBindingDrop.report(CodeGen.const_binding_drop)
   CodeGen.integer_constant_keys = integer_constant_keys || Set.new
   warn "== declared Integer constants proven per definition (LEXICAL_CONST): #{CodeGen.integer_constant_keys.size} =="
   # Constants whose every writer is one frozen-or-literal container class: a read is that class.
@@ -1536,6 +1590,13 @@ BC2CPP_MAIN = lambda do
   # OTHER_OWNERS: classes another gem's run compiles and exposes (with
   # OTHER_DECLS_HEADER); see compile_send.
   other_owners = ENV['OTHER_OWNERS']&.split(',')
+  # Set before codegen: LITERAL_TABLES (codegen_literal_tables.rb) spells its Symbols with the same macros.
+  # PRESYM_SYMBOL (symbol_cache.rb): the names mruby's presym table has, as the build's id.h enum spells them.
+  if (presym_header = ENV['BC2CPP_PRESYM_HEADER']) && File.file?(presym_header)
+    SymbolCache.presym_names = File.read(presym_header).scan(/^\s*MRB_SYM__([A-Za-z_]\w*) = \d+,?$/).flatten.to_set
+  end
+  # PRESYM_ALL (symbol_cache.rb): a real gem build's presym scan reads this output. BC2CPP_PRESYM_ALL=0 keeps the table.
+  SymbolCache.presym_all = ENV['BC2CPP_PRESYM_ALL'] != '0' && BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol }
   compiled = profile_call.call('CodeGen.compile_all') do
     gen.compile_all(only_owners: only_owners, other_owners: other_owners, live_labels: main_reach&.labels)
   end
@@ -1548,6 +1609,18 @@ BC2CPP_MAIN = lambda do
   unless guard_failures.empty?
     abort "\n[bc2cpp] DECLARED_RETURN_GUARD: #{guard_failures.size} runtime-checked return declaration(s) " \
           "without their compiled check:\n  #{guard_failures.join("\n  ")}"
+  end
+  param_failures = DeclaredReturns.optional_param_guard_failures(gen.declared_params_kept, compiled)
+  unless param_failures.empty?
+    abort "\n[bc2cpp] DECLARED_PARAM_GUARD: #{param_failures.size} seeded optional parameter declaration(s) without " \
+          "their compiled check:\n  #{param_failures.join("\n  ")}"
+  end
+  DeclaredReturns.check_traced_params!(compiled, only_owners, other_owners)
+  keyword_guards = (CodeGen.declared_keywords || {}).each_key.to_h { |label| [label, gen.declared_keyword_guards(label)] }
+  keyword_failures = DeclaredReturns.keyword_guard_failures(keyword_guards, compiled)
+  unless keyword_failures.empty?
+    abort "\n[bc2cpp] DECLARED_KEYWORD_GUARD: #{keyword_failures.size} typed keyword declaration(s) without their " \
+          "compiled check:\n  #{keyword_failures.join("\n  ")}"
   end
   # DECLARED_IVAR_PROOF: a declared slot seeded as its declared kind is trusted only because every store to it is
   # checked; abort unless each method that stores to one compiled with its guard.
@@ -1592,6 +1665,8 @@ BC2CPP_MAIN = lambda do
     end
     skipped_entries = skipped.map { |m| m[:entry] }.compact
   end
+  # MULTI_RETURN: the callees a destructuring caller names get their `X_mr` (codegen_multi_return.rb).
+  compiled = gen.multi_return_link!(compiled)
 
   # CORE_INTERPRETED_REPORT: every core-source bytecode method this run leaves
   # interpreted, with the reason and the language features it uses.
@@ -1614,15 +1689,30 @@ BC2CPP_MAIN = lambda do
     (1...shards).each { |k| File.write(ShardOutput.shard_path(out_dir, symbol, k), ShardOutput.empty_shard(symbol, k, shards)) }
     shards = 1
   end
+  # IMPLICIT_STATE (implicit_state.rb): registered before ShardOutput, so it rewrites the files the split leaves.
+  ImplicitState.capture_stdout(out_dir, symbol, shards) if ImplicitState.enabled?
   if shards > 1
     ShardOutput.capture_stdout(symbol, out_dir, shards, shard_tier[:tier], shard_tier[:hot],
                                ->(tiers) { bc2cpp_method_report(compiled, tiers) })
   else
     at_exit { bc2cpp_method_report(compiled, nil) unless $! }
   end
+  # CROSS_GEM_SHARE (cross_gem_share.rb): after RUNTIME_HEADER, before the split; it reads the tail mark that leaves.
+  CrossGemShare.capture_stdout(ENV[RuntimeHeader::DIR_KEY], File.join(out_dir, "#{symbol}_entry.h")) if CrossGemShare.enabled?
   # RUNTIME_HEADER (runtime_header.rb): between the two, so it moves the compacted runtime text ShardOutput then splits.
-  RuntimeHeader.capture_stdout(ENV[RuntimeHeader::DIR_KEY])
+  RuntimeHeader.capture_stdout(ENV[RuntimeHeader::DIR_KEY], tail_mark: CrossGemShare.enabled?)
   CompactOutput.capture_stdout unless annotated
+  # CLASS_TEST_FUSE (class_test_fuse.rb): reads the text the passes registered after it leave.
+  ClassTestFuse.capture_stdout if ClassTestFuse.enabled?
+  # OWNER_CALL_ARITY (owner_call_arity.rb): registered before OWNER_SET_SHARE, so it rewrites that pass's text.
+  # OWNER_SET_SHARE (owner_set_share.rb): before the split, so shards of one gem share a set too.
+  # Both inline, not through a local: BC2CPP_MAIN is at mruby's limit of local variables (see owner_rewrite below).
+  OwnerCallArity.capture_stdout if OwnerCallArity.enabled?(BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol })
+  OwnerSetShare.capture_stdout(symbol) if OwnerSetShare.enabled?(BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol })
+  # COMPACT_LABELS (label_table.rb): registered last of these, so it reads the text as printed.
+  LabelTable.capture_stdout(LabelTable.enabled?(BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == symbol }))
+  # ELEMENT_READ_SUMMARY (keep_summary.rb): registered last of these, so it reads the unit as printed, markers included.
+  KeepSummary.capture_stdout if ElementReadRoots.summary_on?
 
   # PARAM_TRACE (tools/bc2cpp/param_trace.rb): opt-in runtime classes of compiled method and block
   # parameters; unset (or any value but 1) leaves stdout untouched. Registered BEFORE ELSE_TRACE so the
@@ -1679,6 +1769,7 @@ BC2CPP_MAIN = lambda do
   if gen.rom_method_tables?
     puts '#define BC2CPP_ROM_METHOD_TABLES 1'
     puts CodeGen::ROM_INSTALL_HELPER
+    puts CodeGen::CONST_PATH_WALK_HELPER if gen.const_path_walk?
   end
   # CLASS_READ_INLINE (docs/bc2cpp-class-read-inline.md): mrb_obj_class is mrb_class_real(mrb_class(v)), out of
   # line in src/class.c, and class_real returns its argument unless it is a singleton class or an iclass. So a heap
@@ -1704,6 +1795,10 @@ BC2CPP_MAIN = lambda do
       }
     CPP
   end
+  # MONO_RECEIVER_PROOF (codegen_mono_receiver.rb): an owner-class getter yields nullptr for an undefined constant.
+  puts <<~'CPP'
+    static inline bool bc2cpp_kind_of_owner(mrb_state* M, mrb_value v, struct RClass* cls) { return cls && mrb_obj_is_kind_of(M, v, cls); }
+  CPP
   # mrb_state has no float_class without Float; the Float class test is then false (an object's class is never NULL).
   puts <<~'CPP'
     #ifndef MRB_NO_FLOAT
@@ -1860,6 +1955,9 @@ BC2CPP_MAIN = lambda do
     #define mrb_ary_shift bc2cpp_mrb_ary_shift
     #define mrb_hash_delete_key bc2cpp_mrb_hash_delete_key
   CPP
+  print CmpNumOutline::RUNTIME if CmpNumOutline.on?
+  print IntBoxOutline::RUNTIME if IntBoxOutline.upvar_on? || IntBoxOutline.size_on? || IntBoxOutline.pair_on?
+  print IntBoxOutline::AS_INT if IntBoxOutline.pair_on?
   # GC_KEEP_OVERWRITTEN: the same hole from the other side. A compiled register that read a slot (an ivar, a global,
   # an element) still holds the value after the slot is overwritten or emptied, and by then that register is the only
   # thing referencing it: `r = @a; @a = []; r` (Interpreter#take_move_route_requests) returns an Array nothing else
@@ -1874,12 +1972,38 @@ BC2CPP_MAIN = lambda do
       static inline void bc2cpp_keep(mrb_state*, mrb_value) {}
       static inline void bc2cpp_keep_old(mrb_state*, mrb_value) {}
       static inline void bc2cpp_keep_old_range(mrb_state*, mrb_value, mrb_int, mrb_int) {}
+      static inline void bc2cpp_keep_olds2(mrb_value, mrb_value, mrb_state*) {}
+      static inline void bc2cpp_keep_olds3(mrb_value, mrb_value, mrb_value, mrb_state*) {}
     CPP
   else
+    # ROOT_VALUE_FIRST: a keep's value is mostly the result of the call just before it, already in the first argument
+    # register, and the state is in a callee-saved one; value first saves the register move each site would make.
+    # BC2CPP_ROOT_VALUE_FIRST=0 calls bc2cpp_root directly.
+    if ENV['BC2CPP_ROOT_VALUE_FIRST'] == '0'
+      puts <<~'CPP'
+        // ELEMENT_READ_ROOTS: the caller side. An element a compiled read keeps in a local, while a call may unlink it.
+        static inline void bc2cpp_keep(mrb_state* M, mrb_value v) { bc2cpp_root(M, v); }
+        static inline void bc2cpp_keep_old(mrb_state* M, mrb_value old) { bc2cpp_root(M, old); }
+      CPP
+    else
+      puts <<~'CPP'
+        // ELEMENT_READ_ROOTS: the caller side. An element a compiled read keeps in a local, while a call may unlink it.
+        [[gnu::noinline]] inline void bc2cpp_root_value_first(mrb_value v, mrb_state* M) { bc2cpp_root(M, v); }
+        static inline void bc2cpp_keep(mrb_state* M, mrb_value v) { bc2cpp_root_value_first(v, M); }
+        static inline void bc2cpp_keep_old(mrb_state* M, mrb_value old) { bc2cpp_root_value_first(old, M); }
+      CPP
+    end
     puts <<~'CPP'
-      // ELEMENT_READ_ROOTS: the caller side. An element a compiled read keeps in a local, while a call may unlink it.
-      static inline void bc2cpp_keep(mrb_state* M, mrb_value v) { bc2cpp_root(M, v); }
-      static inline void bc2cpp_keep_old(mrb_state* M, mrb_value old) { bc2cpp_root(M, old); }
+      // KEEP_OLD_BATCH (keep_old_batch.rb): the roots of a run of slot stores, in one call.
+      [[gnu::noinline]] inline void bc2cpp_keep_olds2(mrb_value a, mrb_value b, mrb_state* M) {
+        bc2cpp_root(M, a);
+        bc2cpp_root(M, b);
+      }
+      [[gnu::noinline]] inline void bc2cpp_keep_olds3(mrb_value a, mrb_value b, mrb_value c, mrb_state* M) {
+        bc2cpp_root(M, a);
+        bc2cpp_root(M, b);
+        bc2cpp_root(M, c);
+      }
       // The elements ary[head, len) an Array store is about to drop, with mrb_ary_splice's own clamping.
       static inline void bc2cpp_keep_old_range(mrb_state* M, mrb_value ary, mrb_int head, mrb_int len) {
         if (!mrb_array_p(ary)) return;
@@ -1899,6 +2023,17 @@ BC2CPP_MAIN = lambda do
       bc2cpp_keep_old(M, mrb_iv_get(M, obj, id));
     #endif
       mrb_iv_set(M, obj, id, v);
+    }
+    // EMBED_STORE_OUTLINED (codegen_ivar_poly.rb ivar_set_code): an embedded mrb_value slot's store, the same frozen
+    // test, keep of the old value, store and write barrier as the inline form, in one out-of-line copy.
+    [[maybe_unused, gnu::noinline]] static void bc2cpp_embed_store_unfrozen(mrb_state* M, mrb_value obj, mrb_value* slot, mrb_value v) {
+      bc2cpp_keep_old(M, *slot);
+      *slot = v;
+      mrb_field_write_barrier_value(M, (struct RBasic*)mrb_obj_ptr(obj), v);
+    }
+    [[maybe_unused, gnu::noinline]] static void bc2cpp_embed_store(mrb_state* M, mrb_value obj, mrb_value* slot, mrb_value v) {
+      if (mrb_unlikely(mrb_frozen_p(mrb_obj_ptr(obj)))) mrb_check_frozen(M, mrb_obj_ptr(obj));
+      bc2cpp_embed_store_unfrozen(M, obj, slot, v);
     }
     static inline void bc2cpp_gv_set(mrb_state* M, mrb_sym id, mrb_value v) {
     #ifndef BC2CPP_NO_GC_KEEP_OVERWRITTEN
@@ -1950,7 +2085,7 @@ BC2CPP_MAIN = lambda do
   # TAGGED_FIXNUM (tagged_fixnum.rb): the Fixnum pair test and the word-level arithmetic and compares.
   print TaggedFixnum::PRELUDE
   # RESPOND_TO_PHANTOM (closed build): see CodeGen#respond_to_phantom_runtime.
-  if ENV['BC2CPP_BUILD_NAME'] == 'closed' || !ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').empty?
+  if StaticDispatchLists.closed_build? || !ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').empty?
     puts CodeGen.respond_to_phantom_runtime
   end
   # EXCEPTION_BREAK_SUPPORT: the exception a BLOCK_FALLBACK BREAK throws and the
@@ -1977,7 +2112,8 @@ BC2CPP_MAIN = lambda do
   # for an mruby exception: reset mrb->jmp and pop the leftover callinfos,
   # unsharing each popped frame's env as the VM's cipop does.
   # FRAME_FREE: which found natives a call runs without a frame (native_frame_use.rb).
-  puts NativeFrameUse.cpp_source(StaticDispatchLists.current(required: false).frame_free)
+  puts NativeFrameUse.cpp_source(StaticDispatchLists.current(required: false).frame_free,
+                                 ram: StaticDispatchLists.current(required: false).frame_free_ram)
   puts <<~'CPP'
     struct Bc2cppVmMark { struct mrb_jmpbuf* jmp; ptrdiff_t ci_index; };
     static inline Bc2cppVmMark bc2cpp_vm_mark(mrb_state* M) {
@@ -2137,6 +2273,14 @@ BC2CPP_MAIN = lambda do
     #endif
       bc2cpp_declaration_violation(M, mrb_format(M, "declaration violation: %s argument %d is %T, declared %s", method, position, value, declared));
     }
+    [[maybe_unused, noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_declared_keyword_violation(mrb_state* M, mrb_value value, const char* method, const char* declared) {
+    #ifdef BC2CPP_NOMETHOD_VERIFY
+      fprintf(stderr, "bc2cpp: NOMETHOD_VERIFY: declared keyword violated: %s keyword is %s, declared %s\n", method, mrb_obj_classname(M, value), declared);
+      fflush(stderr);
+      abort();
+    #endif
+      bc2cpp_declaration_violation(M, mrb_format(M, "declaration violation: %s keyword is %T, declared %s", method, value, declared));
+    }
     [[maybe_unused, noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_declared_ivar_violation(mrb_state* M, mrb_value value, const char* ivar, const char* declared) {
     #ifdef BC2CPP_NOMETHOD_VERIFY
       fprintf(stderr, "bc2cpp: NOMETHOD_VERIFY: declared instance variable violated: %s was assigned %s, declared %s\n", ivar, mrb_obj_classname(M, value), declared);
@@ -2285,6 +2429,35 @@ BC2CPP_MAIN = lambda do
       Bc2cppBlock(const Bc2cppBlock&) = delete;
       Bc2cppBlock& operator=(const Bc2cppBlock&) = delete;
     };
+    // STACK_STRINGS (codegen_stack_strings.rb): a frame-local String, red like a Bc2cppBlock, over a pool literal's
+    // static bytes (MRB_STR_NOFREE, as str_new makes one over read-only data). BC2CPP_BLOCK_MALLOC: malloc'd storage
+    // freed with the frame, so ASan reports a reference that outlives it.
+    struct Bc2cppStackStr {
+#ifdef BC2CPP_BLOCK_MALLOC
+      struct RString* s_ = static_cast<struct RString*>(calloc(1, sizeof(struct RString)));
+      ~Bc2cppStackStr() { free(s_); }
+      struct RString* get() { return s_; }
+#else
+      struct RString s_;
+      struct RString* get() { return &s_; }
+#endif
+      Bc2cppStackStr() = default;
+      Bc2cppStackStr(const Bc2cppStackStr&) = delete;
+      Bc2cppStackStr& operator=(const Bc2cppStackStr&) = delete;
+    };
+    template<size_t N> [[maybe_unused]] static inline mrb_value bc2cpp_stack_str(mrb_state* M, Bc2cppStackStr& slot, const char (&p)[N]) {
+      struct RString* s = slot.get();
+      s->c = M->string_class;
+      s->tt = MRB_TT_STRING;
+      s->gc_color = MRB_GC_RED;
+      s->frozen = 0;
+      s->flags = 0;
+      s->as.heap.ptr = const_cast<char*>(p);
+      s->as.heap.len = N - 1;
+      s->as.heap.aux.capa = 0;
+      RSTR_SET_TYPE(s, NOFREE);
+      return mrb_obj_value(s);
+    }
     // A frame-local block (a Bc2cppBlock, red) must not go into a heap env: the frame ends with the call, but the
     // env can outlive it (the arena keeps the heap RProc that holds it), and mrb_gc_mark would read the dead frame. A
     // frame-local block is copied to a heap RProc with the same entry and env values; a heap block is returned as is.
@@ -2313,24 +2486,31 @@ BC2CPP_MAIN = lambda do
     // PROC_SPEC: a compiled block is a C function proc, so Proc#arity would answer -1 and Proc#parameters []. Each compiled
     // block registers its ENTER word and local names under its entry (bc2cpp_proc_spec_register); the two methods answer for a
     // registered block from a stand-in irep proc that holds them, and for any other proc as mruby does.
-    #include <unordered_map>
+    // PROC_SPEC_ROWS: each spec is a constant row of the image; registering keeps its address only, so the table costs
+    // one pointer per block where a hash node per block cost about 30 bytes of heap. A later row of a key wins.
+    #include <vector>
     #include <mruby/irep.h>
     #include <mruby/opcode.h>
     struct Bc2cppProcSpec {
+      const void* key;
       const mrb_code* iseq;
       uint16_t ilen;
       uint16_t nlocals;
       const char* const* names;  // nlocals - 1 local names, then a null
     };
     extern "C" mrb_int mrb_proc_arity(const struct RProc* p);
-    inline std::unordered_map<const void*, Bc2cppProcSpec>& bc2cpp_proc_specs() {
-      static std::unordered_map<const void*, Bc2cppProcSpec> specs;
+    inline std::vector<const Bc2cppProcSpec*>& bc2cpp_proc_specs() {
+      static std::vector<const Bc2cppProcSpec*> specs;
       return specs;
     }
+    [[maybe_unused]] static int bc2cpp_proc_spec_register(const Bc2cppProcSpec* row) {
+      bc2cpp_proc_specs().push_back(row);
+      return 0;
+    }
+    // BC2CPP_PROC_SPEC_ROWS=0: the row is built at static init on the heap, as before the rows.
     [[maybe_unused]] static int bc2cpp_proc_spec_register(const void* key, const mrb_code* iseq, uint16_t ilen,
                                                           uint16_t nlocals, const char* const* names) {
-      bc2cpp_proc_specs()[key] = Bc2cppProcSpec{iseq, ilen, nlocals, names};
-      return 0;
+      return bc2cpp_proc_spec_register(new Bc2cppProcSpec{key, iseq, ilen, nlocals, names});
     }
     static const Bc2cppProcSpec* bc2cpp_proc_spec_of(const struct RProc* p) {
       if (!MRB_PROC_CFUNC_P(p) || bc2cpp_proc_specs().empty()) return nullptr;
@@ -2340,8 +2520,11 @@ BC2CPP_MAIN = lambda do
         if (!e || MRB_ENV_LEN(e) < 3) return nullptr;
         key = (const void*)bc2cpp_block_entry(const_cast<struct REnv*>(e));
       }
-      auto it = bc2cpp_proc_specs().find(key);
-      return it == bc2cpp_proc_specs().end() ? nullptr : &it->second;
+      const auto& specs = bc2cpp_proc_specs();
+      for (auto it = specs.rbegin(); it != specs.rend(); ++it) {
+        if ((*it)->key == key) return *it;
+      }
+      return nullptr;
     }
     static mrb_value bc2cpp_proc_spec_stand_in(mrb_state* M, const struct RProc* p, const Bc2cppProcSpec& spec) {
       mrb_irep* irep = mrb_add_irep(M);
@@ -2580,7 +2763,13 @@ BC2CPP_MAIN = lambda do
         for (const mrb_value* a = args.begin(); a != args.end(); a++) {
           mrb_sym method = mrb_obj_to_sym(M, *a);
           mrb_int len;
+          // The name is only copied: mrb_sym_name_tmp keeps a compact presym table from caching it.
+        #ifdef MRB_SYM_TMP_LEN
+          char nmbuf[MRB_SYM_TMP_LEN];
+          const char* nm = mrb_sym_name_tmp(M, method, nmbuf, &len);
+        #else
           const char* nm = mrb_sym_name_len(M, method, &len);
+        #endif
           std::string ivar = "@" + std::string(nm, (size_t)len);
           mrb_sym ivsym = mrb_intern(M, ivar.data(), (mrb_int)ivar.size());
           mrb_iv_name_sym_check(M, ivsym);
@@ -2628,11 +2817,23 @@ BC2CPP_MAIN = lambda do
   # IO_PUTS_MODEL: one shared body for every explicit-receiver `puts`, so the
   # by-name fallback exists once instead of once per site.
   puts <<~'IO_PUTS'
-    static inline mrb_value bc2cpp_io_puts(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_int argc, const mrb_value* argv) {
+    // The site is an explicit-receiver OP_SEND, so the by-name fallback makes its visibility check: Kernel#puts is
+    // private, and `"s".puts` raises NoMethodError (caller_self decides a protected one).
+    static inline mrb_value bc2cpp_io_puts(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_int argc, const mrb_value* argv,
+                                           mrb_value caller_self) {
     #ifdef HAVE_MRUBY_IO_GEM
       mrb_value result;
       if (mrb_io_puts_direct(M, recv, argc, argv, &result)) return result;
     #endif
+      struct RClass* c = mrb_class(M, recv);
+      mrb_method_t m = bc2cpp_find_method(M, &c, mid);
+      if (!MRB_METHOD_UNDEF_P(m) && (m.flags & (MRB_METHOD_PRIVATE_FL | MRB_METHOD_PROTECTED_FL))) {
+        bool priv = (m.flags & MRB_METHOD_PRIVATE_FL) != 0;
+        if (priv || !mrb_obj_is_kind_of(M, caller_self, c)) {
+          mrb_no_method_error(M, mid, mrb_ary_new_from_values(M, argc, argv), "%s method '%n' called for %T",
+                              priv ? "private" : "protected", mid, recv);
+        }
+      }
       return bc2cpp_funcall_argv(M, recv, mid, argc, argv);
     }
   IO_PUTS
@@ -2824,6 +3025,13 @@ BC2CPP_MAIN = lambda do
       Bc2cppErrinfoScope(const Bc2cppErrinfoScope&) = delete;
       Bc2cppErrinfoScope& operator=(const Bc2cppErrinfoScope&) = delete;
     };
+    // RESCUE_PROTECT_FOLD: a rescue glue's protect and its OP_EXCEPT `$!` in one shared call (emit_rescue_glue).
+    [[gnu::noinline, maybe_unused]] static mrb_value bc2cpp_rescue_protect(mrb_state* M, mrb_value (*body)(mrb_state*, void*),
+                                                                          void* ud, mrb_bool* error) {
+      mrb_value result = bc2cpp_protect(M, body, ud, error);
+      if (*error) bc2cpp_set_errinfo(M, result);
+      return result;
+    }
   ERRINFO
   # GETIDX's String arm calls mrb_str_aref (src/string.c, non-static), declared
   # only in mruby/internal.h, which has no C-linkage guard; including it would
@@ -2962,15 +3170,22 @@ BC2CPP_MAIN = lambda do
   # No class unit is emitted: the VM runs every class body, and a compiled copy would run it a second time.
   # compile_top_class_units stays for its checks; the gem_init call is not emitted.
   gen.compiled_methods = compiled.to_h { |m| [m[:label], m] }
+  gen.registration_removed = gen.registration_removed_keys(compiled, bc2cpp_registration_owners(compiled.map { |m| m[:owner] }).first)
   # CLASS_UNITS: the top-level class and module bodies that compile are emitted as units and run from gem_init in place of
   # the VM's run (UNIT_BLANK removes them from the residual mrblib). The phase fails at its end on an unresolved constant.
   # A class this gem's own mrblib reopens is the gem's too, even when it compiles no method of it (mruby-rpg2k's
   # `class Object; include RGSS; end`): the statements run only from this gem's units. The root holds every linked
-  # engine mrblib, so only this gem's own directory counts.
-  all_class_units = gen.compile_top_class_units(ireps.fetch(root_label))
-  own_mrblib = "/mruby-#{symbol.to_s.delete_suffix('_compiled')}/mrblib/"
-  own_reopened = all_class_units.select { |unit| unit[:file].to_s.include?(own_mrblib) }.map { |unit| unit[:path] }
+  # engine mrblib, so only this gem's own directories count: mrblib/, and mrblib_rom/ (mruby-lcf's ROM schema).
+  own_mrblib = %r{/mruby-#{Regexp.escape(symbol.to_s.delete_suffix('_compiled'))}/mrblib(?:_rom)?/}
+  all_class_units = gen.compile_top_class_units(ireps.fetch(root_label), own_file: bc2cpp_own_unit_file(symbol, own_mrblib))
+  own_reopened = all_class_units.select { |unit| unit[:file].to_s.match?(own_mrblib) }.map { |unit| unit[:path] }
   class_units = gen.owned_class_units(all_class_units, only_owners && (only_owners + own_reopened))
+  # FOREIGN_CORE_UNITS: the excluded core file's classes (10error.rb) run first, as mrb_init_mrblib would load them.
+  if symbol == 'core_compiled'
+    class_units = ForeignCoreUnits.units(ForeignCoreUnits.files(BC2CPP_WORLD_ROOT), lambda { |owner, name|
+      registry.fetch(name, []).any? { |d| d.owner == owner && d.irep }
+    }) + class_units
+  end
   File.write(File.join(out_dir, "#{symbol}_units.txt"), class_units.map { |u| "#{u[:path]}\n" }.uniq.join)
   # BC2CPP_DUMP_UNITS: the units this gem emits (the dump of every attempt, in CodeGen#dump_class_unit, also has the
   # units of other gems' owners that owned_class_units drops).
@@ -2980,10 +3195,6 @@ BC2CPP_MAIN = lambda do
   end
   # SYMBOL_CACHE: rewrite every function first, so the table is complete before
   # it is printed ahead of the code that uses it.
-  # PRESYM_SYMBOL (symbol_cache.rb): the names mruby's presym table has, as the build's id.h enum spells them.
-  if (presym_header = ENV['BC2CPP_PRESYM_HEADER']) && File.file?(presym_header)
-    SymbolCache.presym_names = File.read(presym_header).scan(/^\s*MRB_SYM__([A-Za-z_]\w*) = \d+,?$/).flatten.to_set
-  end
   symbol_table = SymbolCache::Table.new
   print gen.emit_structs
   warn InitializerTables::PREFIX + JSON.generate(gen.initializer_table_evidence(compiled, InitializerTables.direct_candidate_keys(compiled, ireps, registry)))
@@ -3001,6 +3212,7 @@ BC2CPP_MAIN = lambda do
   print gen.emit_native_construct_decls
   print gen.emit_direct_construct_decls
   print gen.emit_forward_decls(compiled)
+  print gen.emit_literal_minmax_helpers(compiled)
   print gen.emit_resumable_helpers(compiled)
   print gen.emit_instance_tt_setup(compiled)
   # TOP_LEVEL_STATEMENTS: compiled before any owner-class slot is numbered and printed, since a statement
@@ -3040,27 +3252,31 @@ BC2CPP_MAIN = lambda do
   # OWNER_CALL_DIRECT (owner_call_direct.rb): an owner call its listed owners' entries complete carries them.
   owner_call_direct = OwnerCallDirect.entries(compiled + gen.module_function_copies(compiled), registration_owners)
   owner_call_direct = owner_call_direct.merge(OwnerCallDirect.native_entries) if ENV['BC2CPP_OWNER_CALL_DIRECT'] != '0'
-  owner_class_slots = gen.owner_class_slots
-  program_superclasses = gen.program_superclasses
-  unregistered = gen.unregistered_keys
+  # Two locals for OwnerCallDirect.rewrite's tables and options: BC2CPP_MAIN is at mruby's limit of local variables per scope (a
+  # self-compiled bc2cpp is built from this file by mrbc, which refuses "too many local variables").
+  owner_rewrite = [owner_call_direct, gen.owner_class_slots, gen.program_superclasses, gen.unregistered_keys]
+  # CROSS_UNIT_ROW (CodeGen#other_unit_direct_entry): a row for a method another gem of this link compiles.
+  owner_rewrite_opts = { other: ENV['BC2CPP_CROSS_UNIT_ROW'] == '0' ? nil : gen.method(:other_unit_direct_entry),
+                         trim: gen.owner_rows_trim?,
+                         entry_flags: ->(m) { NativeFrameUse.entry_flags(m, StaticDispatchLists.current(required: false).frame_free) } }
   # GUARD_VIOLATION: name the method a violation site sits in.
   # Fuse the three per-method rewrite passes (@@SITE@@ substitution, DIRECT_RAISE, SymbolCache.rewrite) into one.
   compiled.each do |m|
     code = m[:code].gsub('@@SITE@@') { "#{m[:owner]}##{m[:name]}".gsub(/["\\]/) { |c| "\\#{c}" } }
-    code = OwnerCallDirect.rewrite(code, owner_call_direct, owner_class_slots, program_superclasses, unregistered)
+    code = OwnerCallDirect.rewrite(code, *owner_rewrite, **owner_rewrite_opts)
     m[:code] = SymbolCache.rewrite(code, symbol_table)
   end
   # The class units' text takes the same passes as the compiled methods (a unit's helper calls are named the same way).
   class_units = class_units.map do |unit|
     code = unit[:code].gsub('@@SITE@@') { unit[:path].to_s.gsub(/["\\]/) { |c| "\\#{c}" } }
-    code = OwnerCallDirect.rewrite(code, owner_call_direct, owner_class_slots, program_superclasses, unregistered)
-    unit.merge(code: SymbolCache.rewrite(code, symbol_table))
+    code = OwnerCallDirect.rewrite(code, *owner_rewrite, **owner_rewrite_opts)
+    unit.merge(code: ConstDefTable.rewrite(SymbolCache.rewrite(code, symbol_table)))
   end
   # TOP_LEVEL_STATEMENTS takes the same passes: its sends are named calls too (a `Class.new(Base)` constant write is an owner call).
   unless top_level_code.empty?
     code = top_level_code.gsub('@@SITE@@', 'top-level')
-    code = OwnerCallDirect.rewrite(code, owner_call_direct, owner_class_slots, program_superclasses, unregistered)
-    top_level_code = SymbolCache.rewrite(code, symbol_table)
+    code = OwnerCallDirect.rewrite(code, *owner_rewrite, **owner_rewrite_opts)
+    top_level_code = ConstDefTable.rewrite(SymbolCache.rewrite(code, symbol_table))
   end
   # Fused single pass over the compiled methods: all of these closed-world diagnostic counts used to
   # live in separate `.each`/`.sum` scans of the same code strings.
@@ -3142,9 +3358,14 @@ BC2CPP_MAIN = lambda do
   # NUMERIC_SLOW_PATH: the by-name calls of the numeric arms' else live here once per helper.
   # The helper scans read the text of every unit printed below, class bodies included: a class body's `a | b` (a
   # constant fold of a numeric arm) calls the slow helper too.
-  numeric_slow_code = SymbolCache.rewrite(gen.emit_numeric_slow_helpers(compiled + class_units), symbol_table)
+  # COLD_COMPACT (cold_compact.rb): its helpers call the numeric slow-path helpers, so they are scanned with the units.
+  # Kept on gen, not in a local: BC2CPP_MAIN is at mruby's limit of local variables.
+  numeric_slow_code = SymbolCache.rewrite(gen.emit_numeric_slow_helpers(compiled + class_units + [gen.cold_compact_code(compiled + class_units)]),
+                                          symbol_table)
   # EXCEPTION_INIT: the file-scope declaration and helper of a `super` that reaches Exception#initialize.
   exception_init_code = gen.emit_exception_init_helpers(compiled)
+  warn gen.cold_compact_summary
+  warn gen.guard_hoist_summary
   warn "== numeric slow-path helpers: #{gen.numeric_slow_site_counts(compiled).map { |k, n| "#{k} #{n}" }.join(', ').then { |s| s.empty? ? 'none' : s }} sites =="
   warn ''
   warn "== outlined index ops: #{gen.index_helper_site_counts(compiled).map { |k, n| "#{k} #{n}" }.join(', ')} sites =="
@@ -3172,26 +3393,40 @@ BC2CPP_MAIN = lambda do
   # registers its helpers too. The site-cache helpers call the scope helpers, so they are counted first. The load
   # code holds no constants, so `used` stays what the compiled entries name.
   # TOP_LEVEL_STATEMENTS is compiled before the helper sets are chosen, so the helpers its statements use are emitted.
-  used = [index_helpers_code, eqq_helper_code, numeric_slow_code, exception_init_code, poly_tables_code, *compiled.map { |m| m[:code] },
+  used = [index_helpers_code, eqq_helper_code, numeric_slow_code, gen.cold_compact_code, exception_init_code, poly_tables_code, *compiled.map { |m| m[:code] },
           *class_units.map { |unit| unit[:code] }, top_level_code].join
   const_site_cache_code = SymbolCache.rewrite(gen.emit_const_site_cache(used), symbol_table)
   const_scope_code = SymbolCache.rewrite(gen.emit_const_scope_helpers(used + const_site_cache_code), symbol_table)
+  ConstDefElide.assert_unnamed!(CodeGen.const_def_elide, [used, const_site_cache_code, const_scope_code],
+                                symbol_table.literals)
+  ConstDefElide.assert_unnamed!(CodeGen.const_binding_drop && ConstDefElide::Result.new(names: CodeGen.const_binding_drop.names.keys.to_set),
+                                [used, const_site_cache_code, const_scope_code], symbol_table.literals,
+                                label: 'CONST_BINDING_DROP', switch: 'BC2CPP_DROP_CONST_BINDINGS=0')
   print OwnerCallDirect.native_prototypes
   print NativeFrameUse.wrappers_source(StaticDispatchLists.current(required: false).frame_free,
                                        NativeFrameUse.reader_entries(compiled))
   print SymbolCache.emit(symbol_table)
+  print LabelTable::AT
   print SymbolCache.rewrite(gen.emit_to_enum_helper(compiled), symbol_table)
   print const_scope_code
   print const_site_cache_code
   print index_helpers_code
   print eqq_helper_code
   print numeric_slow_code
+  print gen.cold_compact_code
   print exception_init_code
   print poly_tables_code
+  warn "== constant definition tables (CONST_DEF_TABLE): #{ConstDefTable.count} writes =="
+  print ConstDefTable::HELPER if ConstDefTable.count.positive?
+  # COLD_COMPACT_CALLS (cold_compact_calls.rb): last, on the finished text, so every helper scan above read the sites
+  # in their methods and every helper they name is printed above.
+  print ColdCompactCalls.apply(compiled)
+  warn ColdCompactCalls.summary
   class_units.each { |unit| print unit[:code] }
   compiled.each do |m|
     print ShardOutput.unit_mark(m[:owner]) if shards > 1
     print m[:code]
+    print gen.cross_unit_thunk(m)
   end
   print ShardOutput::HOOKS_MARK if shards > 1
   print top_level_code
@@ -3217,6 +3452,9 @@ BC2CPP_MAIN = lambda do
   # BC2CPP_ENTRY: the host-callable entry header (codegen_entry_header.rb), beside the declarations and, when
   # BC2CPP_ENTRY_INCLUDE_DIR names it, in the build's include directory, where every host's `__has_include` finds it.
   entry_header = gen.emit_entry_header(compiled, symbol)
+  # SHARD_COLOCATE (shard_colocate.rb): the hosts call these bodies directly, so no copy of them saves code.
+  ShardColocate.keep = entry_header.scan(/(?<![\w$])[A-Za-z_][\w$]*_impl(?![\w$])/)
+  ShardColocate.proven_guards = gen.site_proven_param_guards if ShardColocate.enabled? && ShardColocate.guards_enabled?
   File.write(File.join(out_dir, "#{symbol}_entry.h"), entry_header)
   if (entry_dir = ENV['BC2CPP_ENTRY_INCLUDE_DIR'])
     FileUtils.mkdir_p(entry_dir)

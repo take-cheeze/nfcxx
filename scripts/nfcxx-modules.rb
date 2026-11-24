@@ -249,7 +249,8 @@ def main(argv)
   end
 end
 
-# build: mod_build_program of nfcxx, in Ruby (docs/notes/modules.md). The bash driver calls it as
+# build: mod_build_program of nfcxx, in Ruby (docs/notes/modules.md). scripts/nfcxx-modules-plan.rb (the driver's module block)
+# calls it as
 #   ruby scripts/nfcxx-modules.rb build ROOT OUT MODDIR NSRCS SRC... ARGV...
 # ROOT is the repository (nfcxx is ROOT/nfcxx), OUT the -o output, MODDIR the --module-dir value ("" when unset), SRC the
 # NSRCS source arguments and ARGV the command as given. Each source is compiled on its own by nfcxx (-c, the interface

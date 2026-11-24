@@ -468,13 +468,23 @@ class YieldReach
     return false if @opaque_names.nil? || @opaque_names.include?(name) || @opaque_names.include?("@#{name}")
     return false if dynamic_ivar_writes_unlisted?
 
-    @ireps.each_value.all? do |irep|
-      program = BytecodeIR.for(irep)
-      program.each_source.all? do |src, j|
-        next true unless src.op == :SETIV && src.ivar.to_s == name
+    proc_free_ivar_writes.fetch(name, []).all? do |irep, index, reg|
+      non_proc_value?(irep, index, reg, 1)
+    end
+  end
 
-        non_proc_value?(irep, j, src.regs.first, 1)
+  # Every queried name used to rescan every instruction in the closed world.
+  # Ireps are immutable during this analysis, so retain the writes once, in the
+  # same order, and only revisit the definitions relevant to the queried name.
+  def proc_free_ivar_writes
+    @proc_free_ivar_writes ||= begin
+      writes = {}
+      @ireps.each_value do |irep|
+        BytecodeIR.for(irep).each_with_op(:SETIV) do |src, index|
+          (writes[src.ivar.to_s] ||= []) << [irep, index, src.regs.first]
+        end
       end
+      writes
     end
   end
 

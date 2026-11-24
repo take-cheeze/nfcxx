@@ -16,6 +16,7 @@ require_relative '../bc2cpp/bake_sources'
 require_relative '../bc2cpp/scan_cache'
 require_relative '../bc2cpp/toolchain'
 require_relative '../bc2cpp/native_ast_source'
+require_relative '../bc2cpp/compiled_gems'
 require_relative '../../host-libs/mruby-bc2cpp-runner/mrblib/runner'
 require_relative 'artifacts'
 
@@ -64,16 +65,36 @@ files = bake('tools/bc2cpp/bc2cpp.rb').filter_map do |name, source|
   File.write(path, source) unless File.file?(path) && File.binread(path) == source.b
   path
 end
+# SELF_CORE: mruby's own Ruby (mrblib/*.rb and the linked core gems' mrblib, in the interpreter's load order) is compiled
+# with the compiler's sources, as a game build compiles it, so Array#each, Hash#each, Integer#times, Enumerable and the
+# rest run as C++ instead of on the VM under every compiled caller. They come first, as the interpreter defines them.
+# BC2CPP_SELF_CORE=0 compiles the compiler's sources alone (the small benchmark, scan caches warm: 22.9 s, against 17.9 s
+# with core compiled; a cold first run is several times slower either way).
+if ENV.fetch('BC2CPP_SELF_CORE', '1') != '0'
+  files = core_compiled_mrblib_srcs(world, manifest.fetch('gems').map(&:first)) + files
+end
 env = {
   'BC2CPP_WORLD_ROOT' => world, 'BC2CPP_TREE_ROOT' => tree,
   'MRBC' => mrbc, 'BC2CPP_MRBC_RB' => '', 'BC2CPP_BUILD_NAME' => 'bc2cpp-self',
   'BC2CPP_BUILD_GEMS' => Shellwords.join(manifest.fetch('gems').map { |name, dir| "#{name}=#{dir}" }),
   'NATIVE_SRCS' => Shellwords.join(manifest.fetch('native')),
   'FOREIGN_RUBY_SRCS' => Shellwords.join(manifest.fetch('ruby')),
+  # The general analysis lists may include alternative core implementations.
+  # This manifest describes exactly what this runtime links, generated files too.
+  'BC2CPP_LINKED_NATIVE_SRCS' => Shellwords.join(manifest.fetch('native')),
+  'BC2CPP_LINKED_RUBY_SRCS' => Shellwords.join(manifest.fetch('ruby')),
   'OUT_DIR' => generation, 'OUT_SYMBOL' => 'bc2cpp_self', 'SKIP_UNSUPPORTED' => '1',
   'BC2CPP_SIG_DIRS' => '', 'BC2CPP_SELF_REGISTERING' => '1',
   'BC2CPP_SHARDS' => ENV.fetch('BC2CPP_SELF_SHARDS', '16'),
-  'BC2CPP_PROBE_DEPTH' => ENV.fetch('BC2CPP_PROBE_DEPTH', '4'),
+  'BC2CPP_SHARD_SPLIT_OWNERS' => '1',
+  # Deep call chains (the compiler's own) exceed a shallow probe limit on nearly
+  # every outermost probe, discarding the whole tree's memoization: on the
+  # 370-file self input, depth 4 compiles each label ~46 times (242k probes),
+  # while 16 compiles all methods in about half the time (98s vs 206s) with
+  # 39% fewer allocations. 16 is far below the interpreter stack concern that
+  # motivates the limit, and CRuby 4 + YJIT (which always runs self-generation)
+  # nests 32 deep without trouble.
+  'BC2CPP_PROBE_DEPTH' => ENV.fetch('BC2CPP_PROBE_DEPTH', '16'),
   'BC2CPP_PROFILE_TIMINGS' => '1', 'BC2CPP_CLASS_BODY_EMIT' => '0'
 }
 # These describe the caller's input program, not the compiler being built.
@@ -81,6 +102,9 @@ env = {
 env, controls = Bc2cppSelfCompile.generation_environment(env)
 # The generation runs without BC2CPP_AST_PRODUCER, so it parses with the producer that auto selection picks here.
 controls = controls.merge('ast_producer' => NativeAstSource.available?('nfcxx') ? 'nfcxx' : 'clang')
+# The input list itself, in order: the dependency digests below cover the files' contents, and a core file that the
+# runtime links is a dependency whether or not it is compiled, so SELF_CORE alone would leave the fingerprint unchanged.
+controls = controls.merge('sources' => files)
 # Every tool source (ScanCache.tools_sources) is a dependency, not only the ones baked into the generator's input: the
 # .yml data and the mrbc_rb sources the generator loads are read too.
 dependencies = (files + manifest.fetch('native') + manifest.fetch('ruby') + manifest.fetch('headers') +

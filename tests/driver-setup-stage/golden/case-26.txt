@@ -1,0 +1,8 @@
+== case 26:  -fsafe-pointers a.cpp -o a
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: QBE not built; run scripts/setup-qbe.sh
+-- eccp
+(none)
+-- files

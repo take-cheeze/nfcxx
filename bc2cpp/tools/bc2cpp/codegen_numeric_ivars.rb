@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'native_ivar_scopes'
+require_relative 'captured_local_writers'
 require_relative 'numeric_flow'
 require_relative 'core_hierarchy_sigs'
 require_relative 'bytecode_ir'
@@ -41,7 +42,8 @@ class CodeGen
   # an attr_writer), which the class pools reuse.
   # `checked` is nil, or the stores outside the group's own SETIVs that its class pool may account for
   # instead: { setters: [setter names], classes: [classes natives construct] }. The numeric proof ignores it.
-  NumericIvarGroup = Struct.new(:family, :name, :mask, :sites, :readers, :failed, :structural, :checked)
+  # `accessor_only`: an attr_writer is the one structural cause (DECLARED_IVAR_PROOF may still seed the slot).
+  NumericIvarGroup = Struct.new(:family, :name, :mask, :sites, :readers, :failed, :structural, :checked, :accessor_only)
 
   # Sends that write an ivar by computed name: only a Symbol literal argument
   # (poisoned by name) is tolerated.
@@ -234,14 +236,7 @@ class CodeGen
 
   # SENDB whose block register is written by BLOCK/LAMBDA in the same irep.
   def literal_block_argument?(irep, idx, insn)
-    return false unless BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op) && insn.reg
-
-    n = insn.argc
-    return false unless n
-
-    writers = BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg + n + 1))
-    program = BytecodeIR.for(irep)
-    writers&.all? { |i| BytecodeIR::Ops::LITERAL_PROC.include?(program.source_at(i).op) } || false
+    CapturedLocalWriters.literal_block_argument?(irep, idx, insn)
   end
 
   # `instance_variable_set(:@x, v)`: every write that reaches the name is a LOADSYM of an ivar name (already
@@ -269,8 +264,10 @@ class CodeGen
     @numeric_ivar_groups.each_value do |group|
       native_family = numeric_ivar_native_poisoned?(group.family, group.name)
       wrote = writers.include?([group.family, group.name])
-      group.failed = native_family || poisoned.include?(group.name) || wild.include?(group.family) || wrote
+      other = native_family || poisoned.include?(group.name) || wild.include?(group.family)
+      group.failed = other || wrote
       group.structural = group.failed
+      group.accessor_only = wrote && !other
       group.checked = checked_pool_stores(group, native_family, wrote) unless poisoned.include?(group.name) || wild.include?(group.family)
     end
   end

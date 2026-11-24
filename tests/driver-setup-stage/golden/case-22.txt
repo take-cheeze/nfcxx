@@ -1,0 +1,8 @@
+== case 22:  -fsanitize=bogus a.cpp -o a
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: -fsanitize=bogus is not supported (implemented: undefined, signed-integer-overflow, integer-divide-by-zero, shift, bounds, null, unreachable, return, float-cast-overflow)
+-- eccp
+(none)
+-- files

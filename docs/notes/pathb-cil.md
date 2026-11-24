@@ -32,6 +32,15 @@ longjmps in EDG's runtime.
 
 ## The translation
 
+With exception tables (the default harness, `docs/notes/pathb-zero-cost-eh.md`) a function with landing pads is one
+protected block: the body runs in `.try`, entered at its start through a `switch` on a resume index; `(eh-state N)`
+stores N in a local; the `catch class CxxThrow` handler keeps the state and leaves to the pads, after the block. The
+pad of the state computes its selector (the first catch type whose typeinfo address is the thrown one's, kept by
+`__cxa_throw` in cil-link.rb's `cxx_ti`; 0 for a cleanup), and its code runs; a jump to a handler of the body sets the
+resume index and goes back to the block's start; `(eh-resume ...)` throws `CxxThrow` again. `__cxa_allocate_exception`,
+`__cxa_throw`, `__cxa_begin_catch` and `__cxa_end_catch` are cil-link.rb's runtime. The rest of this section is the
+frames mode's translation.
+
 - The emitter recognises the `if` whose condition is `_setjmp(...) == 0` and emits `.try { B } catch class CxxThrow { H }`.
 - `_setjmp` is 0 (it is only ever the entry test). `__throw_setup` allocates the storage and records its pointer in
   `cxx_ptr`. `__throw` raises `CxxThrow`. The catch copies `cxx_ptr` into `__caught_object_address` and sets
@@ -51,7 +60,8 @@ longjmps in EDG's runtime.
 | `throw_across_frames` | the throw is in a callee, caught in the caller | 41 |
 | `no_throw` | a `try` that returns normally | 5 |
 | `loop_break_in_catch` | `break` out of a handler inside a loop | 150 |
-| `two_catches` | several catch clauses: refused, with a message | refused |
+| `two_catches` | several catch clauses, selected by the thrown typeinfo | 5 |
+| `unwind_dtor` | a destructor runs while the exception unwinds its frame (a landing pad) | 42 |
 | `rem_shift` | `crem` (with a negative dividend), `cshl` and `cshr` with variable counts | 5 |
 | `float_ptr` | `fneg`, a volatile load (`load.v`), `pdiff`, a compiler barrier | 12 |
 | `small_wrap` | `++` and `--` on `unsigned char`, `signed char` and `short` wrap to the type, in the value of the expression | 42 |
@@ -154,12 +164,19 @@ A file Path B refuses falls back to cproc.
 
 ## Limits of this spike (each a refusal or a known wrong result)
 
-- **One catch clause only.** The catch assumes clause 1. Selecting among clauses (and checking the thrown type) needs
-  typeinfo objects: EDG's `_ZTI*` are extern here (libc++/libstdc++ define them on hosted builds), so the emitter cannot
-  compare them. A try with several clauses is refused. A single catch of a different type than the one thrown is not
-  detected: it is a wrong result, so it must be fixed before this route is used on real programs.
-- **No destructors during unwinding.** EDG's cleanup tables are not translated. Objects with destructors in the `try`
-  block are not destroyed when a throw leaves it.
+- **Catch matching, what is not matched** (exception tables; see "Catch matching" above): a clause whose type is a
+  virtual base of the thrown class (the relation is not computed: no match, silently, so the throw goes on); a class
+  deriving from a libstdc++ type such as `std::exception` (its typeinfo is native, and resolves to null here; not tested,
+  since `<stdexcept>` is refused on this route: `std::float16_t`); pointers to members (exact types only). With a frames
+  harness (`PATHB_EH=frames`) the old limits hold: one catch clause (a try with several is refused), and no destructors
+  during unwinding.
+- **No std::terminate from a pad's own code**: an exception thrown by a handler or a cleanup (`throw;` in a catch, a
+  destructor that throws during unwinding) leaves a `noexcept` function as an ordinary exception. Terminate is called for
+  an exception that reaches a `noexcept` function's body or its `eh-resume`, with or without landing pads.
+- **Dynamic exception specifications are refused** (`eh-spec`); C++17 removed them except `throw()`.
+- **Nested exceptions and the thrown object.** `cxx_ptr` and `cxx_ti` are global: an exception caught and thrown again
+  inside a destructor that runs during another exception's unwinding replaces the outer exception's object before the
+  outer `eh-resume` rethrows it.
 - **Native exceptions.** Exceptions thrown by native code (the host's libstdc++) are not CLR exceptions and are not caught.
 - **The IR is a subset.** Classes with virtual dispatch, variadic calls and `sret` need more emitter work (above).
   `cf2i` (a checked float-to-int conversion) and volatile stores (`store.v`) are refused too. Floating-point arithmetic
@@ -170,9 +187,36 @@ A file Path B refuses falls back to cproc.
   is wrong for it. Calls through such a pointer are not supported; calls through pointers to the unit's own functions
   are.
 
+## Catch matching (exception tables)
+
+A catch clause matches as the Itanium ABI's `__do_catch` does, for the cases that are in the link's data. The typeinfo
+objects are data of the program, and their layout is the ABI's (vptr, `__name`, then `__base_type` for a single base;
+`__flags` and the base list for a `vmi` class; `__flags` and `__pointee` for a pointer), so `cil-link.rb` reads them once,
+at link time (`cxx_ti_info`, `cxx_catch_entries`):
+
+- the same typeinfo; a public, unambiguous, non-virtual base (its offset is the adjustment);
+- a pointer `T*` thrown, caught as `U*` where `U` is `T` or a base of it (adjusted), or `void`, and no qualifier of the
+  thrown pointee is dropped (`const A*` thrown, `A*` caught: no match).
+
+`__nfcxx_catch_code(thrown, catch)` (generated into `Prog`) returns 0 for an exact class match, 1 for an exact pointer
+match, `2 * offset + 1` (pointer) or `2 * offset` (class) for a base, and -1 for no match. The tables have entries only
+for the typeinfos the program takes the address of (the emitter records them in `addrs`), so they are as big as the
+program's exceptions. `void*` and `const void*` are libstdc++'s typeinfos, which EDG does not emit: `cil-link.rb` makes
+them as data when the program names them (`cxx_synth_typeinfo`).
+
+The selector of a pad (pathb-cil-emit.rb, `eh_try`) calls `__nfcxx_catch_code` for each clause, and then
+`__nfcxx_adjust(cxx_ptr, code)` for the object the handler gets: the object's address moved by the offset, or for a pointer
+clause the pointer value moved by the offset (`__cxa_begin_catch` returns that value, as libstdc++'s adjusted pointer
+does: the IR's `catch (T *p)` reads the pointer from it). The result is kept in an IL local of the function (`@eh_adj`, the
+pads' `eh-exc`), not in a global, so a rethrow (`eh-resume`, `__cxa_rethrow`) still carries the original object.
+
+Test: `tests/pathb-cil/cases/catch_*.cpp` (base reference and pointer with offsets, `void*`, `const` pointers, a dropped
+`const`, an ambiguous base, a private base, a base by value, a rethrow of a base catch, an outer clause, a base chain, and
+a derived clause that does not match a base throw). `noexcept_*.cpp`: `noexcept` with and without landing pads, and a
+`noexcept` function that catches inside itself.
+
 ## Next steps, in order
 
 1. `byval` and aggregate values, and the variadic calls (they carry most of the refusals).
-2. Typeinfo objects for the thrown and caught types, so catch clauses can be selected and checked by type.
-3. Cleanups: translate the destructor calls of the `try` block's objects to `finally` (or `fault`) regions.
-4. `sret` and aggregate values (C++ classes passed or returned by value).
+2. Virtual bases in the catch match (the vbase offset is read from the vtable, which the link does not have).
+3. `sret` and aggregate values (C++ classes passed or returned by value).

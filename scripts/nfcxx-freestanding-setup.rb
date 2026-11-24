@@ -14,35 +14,49 @@ module NfcxxFreestanding
 
   def q(s) = Shellwords.escape(s)
 
-  def host_sys(root, command)
-    ruby = ENV["RUBY"] || "ruby"
-    out = IO.popen([ruby, File.join(root, "scripts", "host-sys.rb"), command], err: File::NULL, &:read)
+  # host-sys.rb's answer, run with the environment the driver has so far (a --cosmo's NFCXX_SYS_INCLUDES, as the bash exports it)
+  def host_sys(root, command, env = ENV)
+    ruby = env["RUBY"] || ENV["RUBY"] || "ruby"
+    out = IO.popen(env.to_h, [ruby, File.join(root, "scripts", "host-sys.rb"), command], err: File::NULL, &:read)
     out.to_s
   end
 
-  def plan(opts)
+  # the statements of the freestanding or hosted headers: plan is includes and gnu_line together, in the bash's order
+  def plan(opts, env = ENV)
+    includes(opts, env) + gnu_line(opts, env)
+  end
+
+  # the include statements (freestanding: extra; hosted: the host's include directories and hosted_libs): the probe the
+  # driver times for the host C++ headers span
+  def includes(opts, env = ENV)
     freestanding = opts.fetch("freestanding") == "1"
-    gnu = opts.fetch("gnu", "")
     sys = opts.fetch("sys")
     root = opts.fetch("root")
     lines = []
     if freestanding
       lines << "extra=(--no_standard_includes #{q("-I#{root}/lib")})"
-      lines << "gnu=130000" if gnu.empty?
     else
       # the host's include directories: one per line, empty lines skipped (the bash read loop)
-      host_sys(root, "host_sys_includes").each_line do |d|
+      host_sys(root, "host_sys_includes", env).each_line do |d|
         d = d.chomp
         lines << "sys_inc+=(#{q("--sys_include=#{d}")})" unless d.empty?
       end
       lines << "hosted_libs=(--c_to_obj_lib=m)"
       lines << "hosted_libs+=(--c_to_obj_lib=c++)" if sys == "Darwin"
-      if gnu.empty?
-        version = host_sys(root, "host_gnu_version").sub(/\n+\z/, "")
-        lines << "gnu=#{q(version)}"
-      end
     end
     lines
+  end
+
+  # the GNU version the headers emulate: 130000 when freestanding, the host's (when none was given) when hosted
+  def gnu_line(opts, env = ENV)
+    freestanding = opts.fetch("freestanding") == "1"
+    gnu = opts.fetch("gnu", "")
+    root = opts.fetch("root")
+    return [] unless gnu.empty?
+    return ["gnu=130000"] if freestanding
+
+    version = host_sys(root, "host_gnu_version", env).sub(/\n+\z/, "")
+    ["gnu=#{q(version)}"]
   end
 end
 

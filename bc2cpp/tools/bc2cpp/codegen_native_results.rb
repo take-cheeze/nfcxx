@@ -129,6 +129,17 @@ class CodeGen
     entry && native_core_entry_safe?(entry) && integer_to_str_free? && array_ancestors_times_free? ? NumericFlow::ARR : nil
   end
 
+  # ARRAY_SLICE2_RESULT: `ary[start, len]` on an exact Array is mrb_ary_aget's two-argument form, which answers a fresh
+  # exact Array (ary_subseq, mrb_ary_new) or nil, or raises. Only while Array#[] is mruby's own (frozen_table_name_safe?).
+  # BC2CPP_ARRAY_SLICE2_RESULT=0 drops the fact.
+  def native_array_slice2_result(insn, state)
+    return nil unless insn.op == :SEND && insn.sym == '[]' && insn.plain_fixed_argc? && insn.argc == 2
+    return nil unless ENV['BC2CPP_ARRAY_SLICE2_RESULT'] != '0' && state[insn.reg.to_i] == NumericFlow::ARR
+    return nil unless @closed_world&.exact_instances_singleton_free? && frozen_table_name_safe?('[]', 'Array')
+
+    NumericFlow::ARR | NumericFlow::NIL
+  end
+
   # No ancestor of Array but Array itself can answer `*`: no registry definition on one, no outside Ruby definition,
   # and no native spelling of the name outside mruby's core (which defines it on Array and the numbers only).
   def array_ancestors_times_free?
@@ -267,7 +278,8 @@ class CodeGen
 
   def native_result_bits(kind, classes)
     case kind
-    when :fixnum then NumericFlow::INT
+    # :integer (NATIVE_INTEGER_RESULTS) may be a heap Integer; NumericFlow's INT already admits one.
+    when :fixnum, :integer then NumericFlow::INT
     when :float then NumericFlow::FLT
     when :nil then NumericFlow::NIL
     when Array then kind.reduce(0) { |mask, member| mask | native_result_bits(member, classes) }

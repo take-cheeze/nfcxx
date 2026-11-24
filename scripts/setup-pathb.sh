@@ -49,7 +49,7 @@ sed '/set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64")/d' "$src/CMakeLists.txt" > "$t
 # 1. Back end swap: c_gen_be.c is no longer compiled; nfcxx_be.c takes its place in the CORE list.
 sed 's/attribute\.c c_gen_be\.c cfe\.c/attribute.c nfcxx_be.c nfcxx_ir.c cfe.c/' "$src/src/CMakeLists.txt" > "$tree/src/CMakeLists.txt"
 grep -q 'attribute.c nfcxx_be.c nfcxx_ir.c cfe.c' "$tree/src/CMakeLists.txt" || { echo "setup-pathb: CORE list patch failed" >&2; exit 1; }
-cp "$root"/be/nfcxx_be.c "$root"/be/nfcxx_be.h "$root"/be/nfcxx_be_int.h "$root"/be/nfcxx_ir.c "$root"/be/nfcxx_names.h "$tree/src/"
+cp "$root"/be/nfcxx_be.c "$root"/be/nfcxx_be.h "$root"/be/nfcxx_be_int.h "$root"/be/nfcxx_ir.c "$root"/be/nfcxx_ir_eh.h "$root"/be/nfcxx_names.h "$tree/src/"
 
 # 1b. SYCL kernel attributes: [[sycl::reqd_sub_group_size(N)]] is a known attribute (namespace sycl, one integral
 # constant argument, evaluated in the template instance), so the back end can read N (be/nfcxx_ir.c: ir_kernel_attrs).
@@ -81,6 +81,25 @@ LOWER_VARIABLE_LENGTH_ARRAYS=1
 import <support/platform/linux/cpfe>
 import <support/build-type/release/cpfe>
 CFG
+# Exception handling (docs/notes/pathb-zero-cost-eh.md). PATHB_EH=tables (the default): zero-cost exception handling,
+# EDG's "partial lowering" EH scheme: try, catch and throw stay in the IL; the cleanups are described by the region table
+# EDG's portable scheme builds (with stack-offset handles), and leck_cleanup_state nodes say which region is current. There
+# is no EH stack and no __eh_curr_region: the back end (be/nfcxx_ir_eh.h) turns the region chains into landing pads, and
+# throw/catch into the Itanium C++ ABI runtime's calls (libstdc++). PATHB_EH=frames: EDG's portable lowering (an EH stack
+# of runtime frames, setjmp/longjmp, EDG's runtime in libC.a). The scheme is recorded next to cpfe: cmake/bin/eh-tables
+# exists in a tables harness (scripts/pathb-ldrt.rb, the driver and the emitters read it).
+# On macOS the tables are Mach-O (QBE's __gcc_except_tab and the CFI of arm64 Apple, with libc++abi's personality). ld64
+# reads no linker script, so scripts/pathb-ldrt.rb prints one archive there, and the links name libc++ (-lc++), not libC.a.
+pathb_eh_default=tables
+pathb_eh=${PATHB_EH:-$pathb_eh_default}
+case $pathb_eh in tables|frames) ;; *) echo "setup-pathb: PATHB_EH must be tables or frames, not '$pathb_eh'" >&2; exit 2 ;; esac
+if [ "$pathb_eh" = tables ]; then
+cat >> "$tree/cmake/macro-conf/nfcxx-pathb/cpfe.cmakedef" <<'CFG'
+DO_FULL_PORTABLE_EH_LOWERING=0
+GENERATE_EH_TABLES=1
+NFCXX_ITANIUM_EH_TYPEINFO=1
+CFG
+fi
 if [ "$emscripten" != 1 ]; then  # native host: SoftFloat from the host C compiler; the wasm build is below
 # Floating point: SoftFloat (EDG's USE_SOFTFLOAT, as its Windows configuration) on every host. Without it EDG takes the
 # host's float128 (defines_linux.h), which Apple clang lacks on arm64. Berkeley SoftFloat 3e, pinned, with x86's NaN
@@ -136,7 +155,8 @@ if [ "$emscripten" = 1 ]; then
       -e 's/^#define MIN_HOST_LARGE_INTEGER PTRDIFF_MIN$/#define MIN_HOST_LARGE_INTEGER LLONG_MIN/' \
       -e 's/^#define MAX_HOST_LARGE_UNSIGNED SIZE_MAX$/#define MAX_HOST_LARGE_UNSIGNED ULLONG_MAX/' \
       "$src/src/targ_def.h" > "$tree/src/targ_def.h"
-  [ "$(grep -c 'nfcxx' "$tree/src/targ_def.h")" = 2 ] && grep -q 'ULLONG_MAX$' "$tree/src/targ_def.h" \
+  grep -q 'a_host_large_integer;  /\* nfcxx: 64-bit' "$tree/src/targ_def.h" &&
+    grep -q 'a_host_large_unsigned;  /\* nfcxx \*/' "$tree/src/targ_def.h" && grep -q 'ULLONG_MAX$' "$tree/src/targ_def.h" \
     || { echo "setup-pathb: targ_def.h patch failed" >&2; exit 1; }
   cat >> "$tree/cmake/macro-conf/nfcxx-pathb/base.cmakedef" <<'CFG'
 USE_SOFTFLOAT=1
@@ -213,6 +233,7 @@ if [ "$emscripten" != 1 ] && [ "$(uname -s)" = Linux ]; then
 fi
 cd "$out/cmake"
 ninja ${PATHB_JOBS:+-j$PATHB_JOBS} $target >"$out/build.log" 2>&1 || { grep -m20 -B2 -A8 'error' "$out/build.log" >&2; exit 1; }
+if [ "$pathb_eh" = tables ]; then : > "$out/cmake/bin/eh-tables"; else rm -f "$out/cmake/bin/eh-tables"; fi
 if [ "$emscripten" = 1 ]; then
   echo "Path B cpfe built for the browser: $out/cmake/bin/cpfe.js, cpfe.wasm (base dir: $base)"
 else

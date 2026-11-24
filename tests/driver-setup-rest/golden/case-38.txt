@@ -1,0 +1,8 @@
+== case 38: NFCXX_K1OM_ROOT=<WORK>/k1om   --target=linux_k1om --freestanding -c a.cpp -o a.o
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: no k1om runtime at <REPO>/build/k1om/libC.a (run scripts/setup-k1om.sh)
+-- eccp
+(none)
+-- files

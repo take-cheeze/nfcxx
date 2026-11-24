@@ -119,3 +119,14 @@ a.cc -o prog
 --backend=gcc -fsanitize=address,undefined -c a.cc
 --backend=gcc -fsanitize=undefined,,bounds -c a.cc
 --backend=gcc -fno-sanitize=address -fsanitize=address -c a.cc
+# gap 4: --keep-intermediates prints the kept directory's note (a link only: a -c keeps nothing in a temporary directory)
+--backend=gcc --keep-intermediates a.cc -o prog
+--backend=gcc --keep-intermediates -c a.cc -o a.o
+--backend=gcc --keep-intermediates --cache=cachedir a.cc -o prog
+# gap 6: -MD names the dependency file from the object (${out%.*}.d, the text before the last dot), and -c without -o names the object
+--backend=gcc -c -MD a.cc
+--backend=gcc -c -MD a.cc -o x.y/out.o
+--backend=gcc -c -MMD -MP a.cc -o out.o
+# gap 1: the cache lookup with -MD, and with a --cache-log
+--backend=gcc --cache=cachedir -c -MD a.cc -o a.o
+--backend=gcc --cache=cachedir --cache-log=cachelog -c a.cc -o a.o

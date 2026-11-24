@@ -14,6 +14,115 @@
 require 'tmpdir'
 require_relative 'fixture_runtime'
 
+require_relative '../../tools/bc2cpp/codegen'
+require_relative '../../tools/bc2cpp/codegen_outside_owner_call'
+require_relative '../../tools/bc2cpp/codegen_send'
+require_relative '../../tools/bc2cpp/presym_spelling'
+require_relative '../../tools/bc2cpp/symbol_cache'
+
+module OutsideOwnerFallbackCheck
+  class World
+    attr_accessor :lifted
+
+    def with_outside_owner_call(_name)
+      @lifted = true
+      yield
+    ensure
+      @lifted = false
+    end
+  end
+
+  class Base
+    def guarded_fallback_line(*)
+      @closed_world.lifted ? @lifted : 'dispatch(); /* CLOSED_WORLD kept: core_or_native */'
+    end
+  end
+
+  class Emitter < Base
+    include OutsideOwnerCall
+
+    def initialize(lifted)
+      @closed_world = World.new
+      @lifted = lifted
+    end
+
+    def outside_owner_call_owners(*) = ['Object']
+
+    def outside_owner_call_line(*)
+      # mruby-onig reuses a match region: the caller must save its boundary first.
+      /.+/.match('a different match region')
+      'OWNER_CALL'
+    end
+  end
+
+  cases = 0
+  ['self', 'r12', 'values[index + 1]', 'é_receiver'].product(['work', '[]=', 'a.b?', 'méthode']).each do |recv, name|
+    prefix = "r7 = bc2cpp_nomethod_named(M, #{recv}, \"#{name}\""
+    error = %r{r7 = bc2cpp_nomethod_named\(M, #{Regexp.escape(recv)}, "#{Regexp.escape(name)}"[^\n]*?\); /\* CLOSED_WORLD nomethod: (?:self|recv)\.\S+ @ \S+ \*/}
+    ['', ', 2, r8, r9'].product(['self', 'recv']).each do |args, kind|
+      call = "#{prefix}#{args}); /* CLOSED_WORLD nomethod: #{kind}.#{name} @ source.rb:12 */"
+      [call, "é before\n  #{call}\n after", "#{call}\n#{call}",
+       "#{prefix}\n#{call}", "#{prefix}\nnot a marker", "#{prefix}); /* wrong marker */\n#{call}",
+       call.sub('r7 =', 'r70 ='), call.sub('nomethod:', 'kept:'), call.sub('); /*', ");\n/*")].each do |lifted|
+        expected = lifted.sub(error) { 'OWNER_CALL' }
+        actual = Emitter.new(lifted).guarded_fallback_line(7, recv, name, [], [], {})
+        raise "fallback replacement changed: #{[lifted, expected, actual].inspect}" unless actual == expected
+
+        cases += 1
+      end
+    end
+  end
+  puts "outside owner fallback: #{cases} replacement comparisons passed"
+end
+
+# PROGRAM_OWNER_SITES (symbol_cache.rb): with a presym id for the name, a helper's owner call and proven nomethod name
+# no slot of the gem's symbol table, so two gems print the same text; a fiber runtime name, a name with no presym id
+# and BC2CPP_HELPER_PROGRAM_SITES=0 keep the gem's slot.
+module ProgramSitesCheck
+  class Emitter
+    include OutsideOwnerCall
+
+    def name_owner_set(_name) = %w[Integer String].freeze
+  end
+
+  helper = "if (x) return bc2cpp_funcall_keep(M, a, \"<<\", 1, b);\n" \
+           "if (y) return bc2cpp_funcall_keep(M, a, \"resume\", 0);\n" \
+           "if (z) return bc2cpp_nomethod_named(M, a, \"-@\", 0);\n" \
+           "return bc2cpp_nomethod_named(M, a, \"^\", 1, b);\n"
+  gem = lambda do |taken|
+    table = SymbolCache::Table.new
+    taken.each { |name| table.index_for(%("#{name}")) }
+    [SymbolCache.rewrite(Emitter.new.helper_owner_calls(helper), table), table]
+  end
+  failures = []
+  expect = ->(what, ok) { failures << what unless ok }
+  SymbolCache.presym_all = true
+  a, table = gem.call([])
+  b, = gem.call(%w[x y z])
+  expect.call('the owner call names its presym id and a program-wide set',
+              a.include?('bc2cpp_owner_call_pw1(M, a, BC2CPP_OWNERS_PW(MRB_OPSYM(lshift), "Integer", "String"), b)'))
+  expect.call('the proven nomethod names its presym id',
+              a.include?('bc2cpp_nomethod_pw(M, a, MRB_OPSYM(minus))') && a.include?('bc2cpp_nomethod_pw(M, a, MRB_OPSYM(xor), b)'))
+  expect.call('a fiber runtime name keeps the gem slot', a.match?(/bc2cpp_owner_call\(M, a, BC2CPP_OWNERS\(\d+, 0,/))
+  expect.call('two gems with other symbol tables print the same program-wide text',
+              a.lines.reject { |l| l.include?('resume') } == b.lines.reject { |l| l.include?('resume') })
+  expect.call('the gem emits the owner call and nomethod bodies', table.owner_call_used && table.nomethod_used)
+  emitted = SymbolCache.emit(table)
+  expect.call('the program state is included and every symbol reset bumps its epoch',
+              emitted.include?(%(#include "#{SymbolCache::PROGRAM_STATE_HEADER}")) && emitted.include?('++bc2cpp_program_owner_epoch;'))
+  expect.call('the program-wide entry checks the calling VM before the set',
+              emitted.match?(/bc2cpp_owner_call_pw_argv\(.*?\n  if \(bc2cpp_program_owner_vm != M\) \{\n    bc2cpp_program_owner_vm = M;\n    \+\+bc2cpp_program_owner_epoch;/m))
+  ENV['BC2CPP_HELPER_PROGRAM_SITES'] = '0'
+  off, off_table = gem.call([])
+  expect.call('BC2CPP_HELPER_PROGRAM_SITES=0 keeps the gem slots',
+              !off.include?('_pw') && !SymbolCache.emit(off_table).include?('bc2cpp_program_owner'))
+  ENV.delete('BC2CPP_HELPER_PROGRAM_SITES')
+  SymbolCache.presym_all = false
+  expect.call('an operator with no presym id keeps the gem slot', !gem.call([]).first.include?('_pw'))
+  abort "program-wide helper sites FAILED: #{failures.join(', ')}" unless failures.empty?
+  puts 'program-wide helper sites: 9 checks passed'
+end
+
 ENV['BC2CPP_SIG_DIRS'] ||= ''
 runtime = Bc2cppFixtureRuntime
 failures = []
@@ -45,7 +154,7 @@ Dir.mktmpdir('helper-owner-call') do |dir|
   helper = code[/static mrb_value bc2cpp_slow_lshift\(mrb_state\* M.*?\n\}\n/m].to_s
   check.call('the << slow helper is emitted', !helper.empty?)
   check.call('its fallback is the owner call over the << owner set',
-             helper.match?(/bc2cpp_owner_call\(M, a, \d+, 0, BC2CPP_OWNERS\([^)]*"Acc"[^)]*\), mrb_nil_value\(\), 1, b\)/))
+             helper.match?(/bc2cpp_owner_call\(M, a, BC2CPP_OWNERS\(\d+, 0, [^)]*"Acc"[^)]*\), mrb_nil_value\(\), 1, b\)/))
   check.call('no by-name fallback left in the numeric slow helpers',
              !code.match?(/bc2cpp_funcall_keep\(M, a, "(?:<<|\+|-)"/))
 

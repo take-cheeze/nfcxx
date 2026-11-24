@@ -47,7 +47,7 @@ LOOP_SCALARS = %i[std out outset emit_c emit_hip backend backend_explicit path_b
                   cache_dir cache_log_file keep_intermediates time_log instantiate promote_slots unroll struct_slots pathb_c
                   ld_name obfuscate dialect dialect_asked gnu gnu_user freestanding cosmo target trace moddir asan safeptr
                   sanitize shared pic rdynamic compile_only pthread preprocess xlang stdin_src depmode dfile dtarget depphony
-                  ncpp nobj system_paths].freeze
+                  ncpp nobj system_paths vec_assoc].freeze
 # the array state of the loop, in the order the text output prints them
 LOOP_ARRAYS = %i[files cflags cfiles cu_inputs cpp2_inputs srcs ppflags pie_opts preinc sysdirs isa diag_opts asanopts].freeze
 
@@ -128,8 +128,11 @@ class LoopState
     @isa = []
     @diag_opts = []
     @asanopts = []
+    @vec_pb = nil
     @assigned = []
   end
+
+  attr_accessor :vec_pb
 end
 
 # The NFCXX_* variables that set the loop's state during nfcxx's setup, as the setup reads them: the port takes them as
@@ -315,6 +318,12 @@ def run_loop(args, state, ld_available)
     elsif starts_with?(a, "-l") && a.length > 2 then state.files << a
     elsif a == "-Wno-narrowing" then state.diag_opts << "--diag_warning=narrowing_conversion"
     elsif starts_with?(a, "-W") || a == "-w" then nil
+    elsif a == "-ftree-vectorize" || a == "-fno-tree-vectorize"
+      # the loop vectorizer of Path B (pathb-cc.rb --vectorize, --no-vectorize): not a file, not dumped (bash: vec_pb)
+      state.vec_pb = a == "-ftree-vectorize" ? "--vectorize" : "--no-vectorize"
+    elsif a == "-fassociative-math" || a == "-fno-associative-math"
+      # the vectorizer may reassociate float sums (pathb-cc.rb --vectorize-assoc, qbe -F): off by default (the setup's flags)
+      state.vec_assoc = a == "-fassociative-math" ? 1 : 0
     elsif starts_with?(a, "-m") then state.isa << a
     elsif a == "-MD" || a == "-MMD" then state.depmode = a
     elsif a == "-MP" then state.depphony = "-MP"
@@ -373,6 +382,8 @@ def emit(state)
                sanitize shared pic rdynamic compile_only pthread preprocess xlang stdin_src depmode dfile dtarget depphony
                ncpp nobj system_paths]
   scalars.each { |name| $stdout.write("#{name}=#{state.public_send(name)}\n") }
+  # -fassociative-math (only when it is given: the frozen bash body's state has no such line otherwise)
+  $stdout.write("vec_assoc=1\n") if state.vec_assoc.to_s == "1"
   %w[files cflags cfiles cu_inputs cpp2_inputs srcs ppflags pie_opts preinc sysdirs isa diag_opts asanopts].each do |name|
     state.public_send(name).each { |x| $stdout.write("#{name}+=#{x}\n") }
   end
@@ -642,7 +653,63 @@ rescue NfcxxMissing => e
   0
 end
 
+# bash-state mode (the frozen body's argument loop, `--bash-state -- ARG...`): the state the loop leaves, as the shell statements
+# that set the body's variables, from the same loop as the records (run_records). The body evals the output: a scalar the loop
+# assigned is "NAME=VALUE", an array element is "NAME+=(VALUE)" in order, and a value option given last is a "loop_no_value OPTION"
+# option given last is a refusal: "nfcxx: OPTION needs a value" on standard error, with status 1. A refusal is its message on
+# standard error with status 2; a loop that does not finish (or a refusal with no message) is the stopped message with status 1. The loop's -fuse-ld= values are the ld.NAME
+# programs on PATH. No NFCXX_* environment is read: the body's setup has set those variables already.
+def run_bash_state(argv)
+  state = LoopState.new
+  run_loop(argv, state, ld_on_path(argv))
+  state.assigned.each { |name| $stdout.write("#{name}=#{Shellwords.escape(state.public_send(name).to_s)}\n") }
+  LOOP_ARRAYS.each { |name| state.public_send(name).each { |x| $stdout.write("#{name}+=(#{Shellwords.escape(x)})\n") } }
+  0
+rescue NfcxxExit => e
+  return stopped_status if e.message.empty?  # the body treats an empty refusal as no refusal, and the loop as not finished
+
+  $stderr.write("#{e.message}\n")
+  2
+rescue NfcxxMissing => e
+  $stderr.write("nfcxx: #{e.message} needs a value\n")
+  1
+rescue StandardError
+  stopped_status
+end
+
+def stopped_status
+  $stderr.write("nfcxx: scripts/nfcxx-loop.rb stopped before its end (the argument state is incomplete)\n")
+  1
+end
+
+# --pre-records (the driver's early exits, scripts/nfcxx-early-exit.rb pre): the state the pre check reads, as NUL-terminated
+# records: "s NAME=VALUE" for ncpp, nobj, cfiles_n, cu_n, stdin_src and emit_hip (the body's names, early_records); "u PATH" for
+# the first .cu input and "h FLAG" for each -I, -D or -U option (the --emit-hip route's flags). Status 0 when the loop finishes;
+# otherwise 1, and nothing is written (the caller then leaves the checks to the body).
+def run_pre_records(argv)
+  state = LoopState.new
+  run_loop(argv, state, ld_on_path(argv))
+  emit_hip = state.emit_hip.to_s.empty? ? "0" : state.emit_hip.to_s
+  { "ncpp" => state.ncpp, "nobj" => state.nobj, "cfiles_n" => state.cfiles.size, "cu_n" => state.cu_inputs.size,
+    "stdin_src" => state.stdin_src, "emit_hip" => emit_hip }.each { |k, v| $stdout.write("s#{k}=#{v}\0") }
+  $stdout.write("u#{state.cu_inputs.first}\0") unless state.cu_inputs.empty?
+  state.cflags.each { |f| $stdout.write("h#{f}\0") if f.start_with?("-I", "-D", "-U") }
+  0
+rescue NfcxxExit, NfcxxMissing, StandardError
+  1
+end
+
 def main(argv)
+  if argv.first == "--bash-state"
+    argv.shift
+    argv.shift if argv.first == "--"
+    return run_bash_state(argv)
+  end
+  if argv.first == "--pre-records"
+    argv.shift
+    argv.shift if argv.first == "--"
+    return run_pre_records(argv)
+  end
   if argv.first == "--fso"
     # the -fsyntax-only pre-loop (the bash runs it before its setup): fso_kind and fso_argv as shell statements, with the
     # scratch directory of the object as the token @@NFCXX_FSO_TMP@@ for the bash to replace
@@ -717,5 +784,7 @@ rescue NfcxxMissing => e
   1
 end
 
-rc = main(ARGV)
-exit(rc) if rc != 0
+if __FILE__ == $PROGRAM_NAME
+  rc = main(ARGV)
+  exit(rc) if rc != 0
+end

@@ -87,6 +87,9 @@ class CodeGen
 
     plan = {}
     creations.each do |ins|
+      # MULTI_RETURN's second compile of a callee places its returned literals itself.
+      next if multi_return_site?(irep, ins.index)
+
       @stack_tuple_where = "#{irep.label}##{ins.index}"
       site = stack_tuple_site(irep, prog, ins.index, analyzer)
       plan[ins.index] = site if site

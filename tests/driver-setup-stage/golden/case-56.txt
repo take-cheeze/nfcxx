@@ -1,0 +1,8 @@
+== case 56:  --backend=gcc -c a.cpp b.cpp
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: -c with several sources needs -o (one object is made per call)
+-- eccp
+(none)
+-- files

@@ -108,7 +108,8 @@ Dir.mktmpdir('owner-call-icache') do |dir|
   code, err = runtime.generate(SOURCE, dir, only_owners: OWNERS)
   pk = code[/^mrb_value Probe_pk_impl\(mrb_state\* M[^\n]*\{\n.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m].to_s
   check.call('pack is an owner call', pk.include?('bc2cpp_owner_call(M, '))
-  check.call('the helper keeps a per-site slot', code.include?('bc2cpp_owner_icache_hit(M, s, klass, mid, argc)') &&
+  # OWNER_CALL_CORE: the hit test stays in the argv form, the receiver's class read in place.
+  check.call('the helper keeps a per-site slot', code.match?(/bc2cpp_owner_icache_hit\(M, s, (?:klass|mrb_class\(M, recv\)), mid, argc\)/) &&
                                                     code.include?('s.hit_klass = klass;'))
   check.call('the slot is checked against mruby\'s method cache', code.include?('M->cache[h]'))
   begin

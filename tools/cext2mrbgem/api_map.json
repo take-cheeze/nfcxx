@@ -33,33 +33,21 @@
     "_comment": "Check_Type and rb_check_type (handler check_type in convert_mrbgem.rb) map a T_ name only when its entry has type_check exact or caveat. These names are refused with the reason given here.",
     "T_OBJECT": "mruby's MRB_TT_OBJECT does not match CRuby's T_OBJECT: CRuby allocates exceptions as T_OBJECT (ruby4src error.c:3583 via object.c:118), mruby allocates them as MRB_TT_EXCEPTION (src/error.c:42), so the check would reject exceptions",
     "T_CLASS": "mruby's MRB_TT_CLASS does not match CRuby's T_CLASS: a CRuby singleton class is a class with RUBY_FL_SINGLETON (ruby4src class.c:42), mruby allocates singleton classes as MRB_TT_SCLASS (src/class.c:371), so the check would reject them",
-    "T_BIGNUM": "stuck point: the fork has no Bignum. No MRB_TT_BIGINT tag exists (include/mruby/value.h:106-131) and no mrbgem defines a big-integer class, so no tag or class test can select CRuby's T_BIGNUM values",
     "RUBY_T_NIL": "nil and false share mruby's tag MRB_TT_FALSE (include/mruby/value.h:106, MRB_TT_FALSE; mrb_nil_p tells them apart by value, value.h:184), so a type check cannot tell nil from false",
     "T_NIL": "nil and false share mruby's tag MRB_TT_FALSE (include/mruby/value.h:106, MRB_TT_FALSE; mrb_nil_p tells them apart by value, value.h:184), so a type check cannot tell nil from false",
     "T_FALSE": "mruby's MRB_TT_FALSE (include/mruby/value.h:106) also matches nil, which CRuby reports as T_NIL",
     "T_TRUE": "not in the type-check subset of this change (refused as listed); mruby's MRB_TT_TRUE (include/mruby/value.h:107) is true only, so it can be added as its own change",
     "T_UNDEF": "CRuby's Qundef is an internal marker, not a Ruby object type; mruby's MRB_TT_UNDEF (value.h:111) is a separate value kind",
     "T_STRUCT": "the fork has no MRB_TT_STRUCT tag (include/mruby/value.h:106-131); Struct instances are an mrbgem class (mrbgems/mruby-struct), so a type test would be a class test, which is not made here",
-    "T_REGEXP": "stuck point: the fork has no Regexp tag (include/mruby/value.h:106-131) and no mrbgem defines a Regexp class (mrbgems/ lists no mruby-regexp), so there is nothing to compare with"
+    "T_REGEXP": "stuck point (Regexp): a T_REGEXP tag has no mruby tag to compare with (include/mruby/value.h:106-131): a Regexp is the mruby-onig-regexp data object, so the test is its data type, which RB_TYPE_P and a switch on TYPE use (the switch pass); this bare use has no such test"
   },
   "unmapped_reasons": {
     "T_RATIONAL": "stuck point (gem dependency): a Rational test is the mruby-rational class test, which needs the state and the gem (the decision is made: the gem is a dependency when the test is emitted); a bare use has no test to make here",
     "T_COMPLEX": "stuck point (gem dependency): a Complex test is the mruby-complex class test, which needs the state and the gem (the decision is made: the gem is a dependency when the test is emitted); a bare use has no test to make here",
     "_comment": "A name with no api_map entry is refused with the reason given here (the converter's no-entry path). PRIsVALUE is converted where rb_raise and rb_sprintf take it; elsewhere it is an argument of rb_enc_sprintf, which takes an rb_encoding *.",
-    "onig_foreach_name": "stuck point (onig_foreach_name): onig_foreach_name calls its callback with only the user data, and the callback (strscan's named_captures_iter) needs the mruby state; the rb_hash_foreach-style callback wrapper that carries it is not implemented for this call (the next Onigmo item)",
     "PRIsVALUE": "stuck point (PRIsVALUE): PRIsVALUE outside the format of rb_raise, rb_sprintf and rb_enc_sprintf (a VALUE argument of another call) is not converted; it has no mruby form in this position",
-    "rb_thread_current": "stuck point (Thread): the fork has no Thread (accepted stuck point)",
-    "rb_thread_local_aref": "stuck point (Thread): thread-local storage; the fork has no Thread (accepted stuck point)",
-    "rb_thread_local_aset": "stuck point (Thread): thread-local storage; the fork has no Thread (accepted stuck point)",
-    "rb_mutex_new": "stuck point (Thread): a Mutex; the fork has no Thread or Mutex (accepted stuck point)",
-    "rb_mutex_lock": "stuck point (Thread): a Mutex; the fork has no Thread or Mutex (accepted stuck point)",
-    "rb_mutex_unlock": "stuck point (Thread): a Mutex; the fork has no Thread or Mutex (accepted stuck point)",
-    "T_NONE": "stuck point: the fork has no T_NONE tag (the MRB_TT enum, include/mruby/value.h:106-131); the empty-object marker has no mruby value kind",
-    "RUBY_T_NONE": "stuck point: the fork has no T_NONE tag (the MRB_TT enum, include/mruby/value.h:106-131); the empty-object marker has no mruby value kind",
-    "rb_time_timespec_new": "stuck point (Time offset): mruby-time's Time has only UTC and LOCAL timezones (mrbgems/mruby-time/include/mruby/time.h:15-20; getlocal takes no offset), so a fixed UTC offset from the caller cannot be represented",
     "rb_encoder": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
-    "rb_enc_interned_str_cstr": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
-    "rb_marshal_load": "stuck point: the fork has no Marshal (no marshal mrbgem in mrbgems/), so there is no loader to call"
+    "rb_enc_interned_str_cstr": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)"
   },
   "includes": {
     "ruby.h": {
@@ -105,6 +93,88 @@
     }
   },
   "entries": {
+    "rb_str_encode": {
+      "kind": "template",
+      "arity": 4,
+      "needs_mrb": true,
+      "gem_dep": "mruby-encoding",
+      "prelude": "#include <mruby/encoding.h>",
+      "prelude_name": "nfcx_encoding_h",
+      "template": "rb_str_encode($m, $0, $1, $2, $3)",
+      "caveat": "CRuby's rb_str_encode(str, to, ecflags, ecopts) is mruby-encoding's rb_str_encode (the fork): the three encodings are ASCII-compatible, so a conversion among them is defined for ASCII only; an ASCII-only string takes the target tag, and other bytes raise ArgumentError (CRuby raises Encoding::UndefinedConversionError). ecflags and ecopts are not used"
+    },
+    "RB_OBJ_FROZEN_RAW": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": false,
+      "template": "(!mrb_immediate_p($0) && MRB_FROZEN_P(mrb_basic_ptr($0)))",
+      "caveat": "CRuby's RB_OBJ_FROZEN_RAW tests the frozen bit of an object's flags; the fork keeps it in the object's basic header (MRB_FL_OBJ_IS_FROZEN, include/mruby/object.h), tested for heap objects only (an immediate has no flags, so it is not frozen here)"
+    },
+    "rb_marshal_load": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "gem_dep": "mruby-marshal",
+      "prelude": "#include <mruby/marshal.h>",
+      "prelude_name": "nfcx_marshal_load",
+      "template": "mrb_marshal_load($m, $0)",
+      "caveat": "CRuby's rb_marshal_load(port) reads a marshalled object from a string: the mruby-marshal gem (3rd/mruby-marshal) provides mrb_marshal_load(mrb, str), and the converted gem depends on it (api_map gem_dep). The argument is a String, as CRuby's port reads from one"
+    },
+    "rb_reg_new": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "gem_dep": "mruby-onig-regexp",
+      "prelude": "static mrb_value nfcx_reg_new(mrb_state *mrb, const char *src, long len, int opt) {\n  mrb_value args[2];\n  args[0] = mrb_str_new(mrb, src, len);\n  args[1] = mrb_fixnum_value(opt);\n  return mrb_obj_new(mrb, mrb_class_get(mrb, \"OnigRegexp\"), 2, args);\n}",
+      "prelude_name": "nfcx_reg_new",
+      "template": "nfcx_reg_new($m, $0, $1, $2)",
+      "caveat": "CRuby's rb_reg_new(src, len, options) is a Regexp: the mruby-onig-regexp gem (3rd/mruby-onig-regexp, Onigmo) provides OnigRegexp, built with the same options, and the converted code builds an OnigRegexp (OnigRegexp.new(source, options)). The class is OnigRegexp, not Regexp; the options are passed as given (CRuby ONIG_OPTION_* values, e.g. IGNORECASE)"
+    },
+    "rb_time_timespec_new": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "prelude": "#include <mruby/time.h>\nstatic mrb_value nfcx_time_timespec_new(mrb_state *mrb, const struct timespec *ts, int offset) {\n  time_t sec = ts->tv_sec;\n  time_t usec = ts->tv_nsec / 1000;\n  if (offset == 0x7fffffff) return mrb_time_at(mrb, sec, usec, MRB_TIMEZONE_LOCAL);\n  if (offset == 0x7ffffffe) return mrb_time_at(mrb, sec, usec, MRB_TIMEZONE_UTC);\n  return mrb_time_at_offset(mrb, sec, usec, offset);\n}",
+      "prelude_name": "nfcx_time_timespec_new",
+      "template": "nfcx_time_timespec_new($m, $0, $1)",
+      "caveat": "CRuby's rb_time_timespec_new(ts, offset): offset INT_MAX is local time, INT_MAX-1 is UTC, and any other is a fixed UTC offset in seconds (mrb_time_at_offset, mruby-time in the fork). mruby's Time keeps microseconds, so the nanoseconds are divided by 1000"
+    },
+    "T_NONE": {
+      "kind": "expr",
+      "mruby": "MRB_TT_UNDEF",
+      "type_check": "exact",
+      "caveat": "CRuby's T_NONE is the no-type tag (a sentinel, e.g. oj's fast.c parent_type = T_NONE for no parent); the fork has no empty-object tag, so the sentinel is MRB_TT_UNDEF (include/mruby/value.h:113), which no Ruby object carries"
+    },
+    "RB_ENC_INTERNED_STR_NULL_CHECK": {
+      "kind": "expr",
+      "mruby": "0",
+      "type_check": "exact",
+      "caveat": "a CRuby build flag, not a runtime value: msgpack's extconf.rb defines it as 1 only for Ruby 3.0.0 to 3.0.5 (the CRuby bug ruby/ruby#18772, where an interned empty string had a null encoding), and buffer.h defaults it to 0. The mruby port has no such Ruby version and no interned-string null encoding, so the check is the default 0 (its branch is dead)"
+    },
+    "RUBY_T_NONE": {
+      "kind": "expr",
+      "mruby": "MRB_TT_UNDEF",
+      "type_check": "exact",
+      "caveat": "CRuby's RUBY_T_NONE is the no-type tag: the sentinel MRB_TT_UNDEF (include/mruby/value.h:113), as for T_NONE"
+    },
+    "rb_thread_local_aref": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "prelude": "static mrb_value nfcx_tls_hash(mrb_state *mrb) {\n  mrb_sym s = mrb_intern_cstr(mrb, \"$__nfcx_thread_locals\");\n  mrb_value h = mrb_gv_get(mrb, s);\n  if (mrb_nil_p(h)) { h = mrb_hash_new(mrb); mrb_gv_set(mrb, s, h); }\n  return h;\n}\nstatic mrb_value nfcx_tls_aref(mrb_state *mrb, mrb_value thread, mrb_sym key) {\n  (void)thread;\n  return mrb_hash_get(mrb, nfcx_tls_hash(mrb), mrb_symbol_value(key));\n}\nstatic mrb_value nfcx_tls_aset(mrb_state *mrb, mrb_value thread, mrb_sym key, mrb_value val) {\n  (void)thread;\n  mrb_hash_set(mrb, nfcx_tls_hash(mrb), mrb_symbol_value(key), val);\n  return val;\n}",
+      "prelude_name": "nfcx_tls",
+      "template": "nfcx_tls_aref($m, $0, $1)",
+      "caveat": "CRuby's thread-local storage (rb_thread_local_aref/aset of a symbol key): a per-state hash in a global of the mrb_state. Each mruby-uv thread has its own mrb_state, so each thread has its own values; the thread argument is ignored, and a state shared between threads shares its values"
+    },
+    "rb_thread_local_aset": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "prelude": "static mrb_value nfcx_tls_hash(mrb_state *mrb) {\n  mrb_sym s = mrb_intern_cstr(mrb, \"$__nfcx_thread_locals\");\n  mrb_value h = mrb_gv_get(mrb, s);\n  if (mrb_nil_p(h)) { h = mrb_hash_new(mrb); mrb_gv_set(mrb, s, h); }\n  return h;\n}\nstatic mrb_value nfcx_tls_aref(mrb_state *mrb, mrb_value thread, mrb_sym key) {\n  (void)thread;\n  return mrb_hash_get(mrb, nfcx_tls_hash(mrb), mrb_symbol_value(key));\n}\nstatic mrb_value nfcx_tls_aset(mrb_state *mrb, mrb_value thread, mrb_sym key, mrb_value val) {\n  (void)thread;\n  mrb_hash_set(mrb, nfcx_tls_hash(mrb), mrb_symbol_value(key), val);\n  return val;\n}",
+      "prelude_name": "nfcx_tls",
+      "template": "nfcx_tls_aset($m, $0, $1, $2)",
+      "caveat": "CRuby's thread-local storage (rb_thread_local_aref/aset of a symbol key): a per-state hash in a global of the mrb_state. Each mruby-uv thread has its own mrb_state, so each thread has its own values; the thread argument is ignored, and a state shared between threads shares its values"
+    },
     "rb_define_module": {
       "kind": "call",
       "mruby": "mrb_define_module",
@@ -785,6 +855,21 @@
       "arity": 1,
       "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): three encodings (ASCII-8BIT, UTF-8, US-ASCII), no transcoding"
     },
+    "ENCODING_GET": {
+      "kind": "call",
+      "mruby": "rb_enc_get_index",
+      "arity": 1,
+      "caveat": "CRuby's ENCODING_GET(obj) is the encoding index of obj, as ENCODING_GET_INLINED; the fork's rb_enc_get_index (mrbgems/mruby-encoding, include/mruby/encoding.h) returns the same index, for the three encodings the fork has"
+    },
+    "ENC_CODERANGE_ASCIIONLY": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": false,
+      "prelude": "static int nfcx_str_ascii_only(mrb_value s) {\n  mrb_int i, n = RSTRING_LEN(s);\n  const unsigned char *p = (const unsigned char *)RSTRING_PTR(s);\n  for (i = 0; i < n; i++) if (p[i] & 0x80) return 0;\n  return 1;\n}",
+      "prelude_name": "nfcx_str_ascii_only",
+      "template": "nfcx_str_ascii_only($0)",
+      "caveat": "CRuby caches a string's coderange and this macro reads the cache; mruby keeps no coderange, so the test scans the bytes for one with the high bit set (the same answer: an ASCII-only string)"
+    },
     "ENCODING_GET_INLINED": {
       "kind": "call",
       "mruby": "rb_enc_get_index",
@@ -1063,6 +1148,11 @@
       "kind": "expr",
       "mruby": "mrb_undef_value()",
       "caveat": "mrb_value is a struct: test with mrb_undef_p(), not with =="
+    },
+    "T_BIGNUM": {
+      "kind": "expr",
+      "mruby": "MRB_TT_BIGINT",
+      "type_check": "exact"
     },
     "T_STRING": {
       "kind": "expr",
@@ -1427,10 +1517,6 @@
       "needs_mrb": true,
       "template": "mrb_funcall_argv($m, $0, $1, RARRAY_LEN($2), RARRAY_PTR($2))",
       "caveat": "rb_apply(recv, mid, args) calls mid with the elements of the array args, as rb_funcallv does; the array is read, not retained"
-    },
-    "rb_reg_new": {
-      "kind": "refuse",
-      "reason": "stuck point: the fork has no Regexp class (no mruby-regexp mrbgem in mrbgems/) and no Regexp tag (include/mruby/value.h:106-131), so there is no regexp object to build or read"
     },
     "rb_reg_regcomp": {
       "kind": "refuse",
@@ -2362,10 +2448,9 @@
       "template": "mrb_funcall($m, $0, \"replace\", 1, $1)",
       "caveat": "replaces the string's contents through its replace method (mruby has no mrb_str_replace); the result is the receiver, as CRuby's"
     },
-    "rb_struct_new": {"kind": "refuse", "reason": "stuck point (Struct): Struct is mrbgems/mruby-struct, not in the core, and rb_struct_new builds a CRuby Struct instance with its member layout (accepted stuck point)"},
-    "rb_struct_define": {"kind": "refuse", "reason": "stuck point (Struct): Struct is mrbgems/mruby-struct, not in the core; rb_struct_define creates a CRuby Struct class with its accessors (accepted stuck point)"},
-    "rb_str_encode": {"kind": "refuse", "reason": "stuck point (Encoding): transcoding a string needs CRuby's encoding converter; the fork has no Encoding (accepted stuck point)"},
-    "RB_ENC_INTERNED_STR_NULL_CHECK": {"kind": "refuse", "reason": "stuck point (Encoding): the null-encoding check of an interned string; the fork has no Encoding (accepted stuck point)"},
+    "onig_foreach_name": {"kind": "special", "handler": "onig_foreach", "needs_mrb": true, "caveat": "the callback takes the mruby state as its first argument (threaded like a helper); a trampoline passes it, and the state is stored for the call"},
+    "rb_struct_new": {"kind": "special", "handler": "struct_variadic", "needs_mrb": true, "caveat": "Struct is the mruby-struct gem: Struct.new with the member symbols (rb_struct_define), or klass.new with the members' count of values (rb_struct_new)"},
+    "rb_struct_define": {"kind": "special", "handler": "struct_variadic", "needs_mrb": true, "caveat": "Struct is the mruby-struct gem: Struct.new with the member symbols (rb_struct_define), or klass.new with the members' count of values (rb_struct_new)"},
     "RBIGNUM_POSITIVE_P": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "(mrb_bint_sign($m, $0) > 0)", "caveat": "a Bignum is never zero, and a fixnum is a plain sign test; mirrors CRuby RBIGNUM_POSITIVE_P"},
     "RBIGNUM_NEGATIVE_P": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "(mrb_bint_sign($m, $0) < 0)", "caveat": "mirrors CRuby RBIGNUM_NEGATIVE_P"},
     "rb_big_cmp": {"kind": "template", "arity": 2, "needs_mrb": true, "template": "mrb_fixnum_value(mrb_bint_cmp($m, $0, $1))", "caveat": "Integer -1, 0 or 1 as CRuby rb_big_cmp; both operands are Integers"},
@@ -2373,7 +2458,6 @@
     "rb_big2ull": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "mrb_bint_as_uint64($m, $0)", "caveat": "raises RangeError when x is negative or does not fit uint64_t, as CRuby"},
     "rb_big2ll": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "mrb_bint_as_int64($m, $0)", "caveat": "raises RangeError when x does not fit int64_t, as CRuby"},
     "rb_ull2inum": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "mrb_bint_new_uint64($m, (uint64_t)($0))", "caveat": "a fixnum when the value fits one, a bigint otherwise, as CRuby"},
-    "RB_OBJ_FROZEN_RAW": {"kind": "refuse", "reason": "stuck point: the raw frozen flag of an object (CRuby's RBasic flags) has no mruby form beyond MRB_FROZEN_P on heap objects (accepted stuck point)"},
     "rb_hash_foreach": {
       "kind": "hash_foreach",
       "needs_mrb": true,
@@ -2558,6 +2642,34 @@
     "prelude_name": "nfcx_alloc",
     "prelude": "/* BC2CPP-MRBGEM: a per-class allocator (rb_define_alloc_func). The fork has one global allocator, so the class's allocate\n   and new are singleton methods that call the allocator registered for the class (or for a superclass). new is allocate\n   followed by initialize with the same arguments and block, as Class#new. */\ntypedef mrb_value (*nfcx_alloc_fn)(mrb_state *, mrb_value);\nstatic struct { struct RClass *c; nfcx_alloc_fn f; } nfcx_alloc_tab[64];\nstatic int nfcx_alloc_n = 0;\nstatic nfcx_alloc_fn\nnfcx_alloc_for(struct RClass *c)\n{\n  for (; c; c = c->super) {\n    int i;\n    for (i = 0; i < nfcx_alloc_n; i++) {\n      if (nfcx_alloc_tab[i].c == c) return nfcx_alloc_tab[i].f;\n    }\n  }\n  return NULL;\n}\nstatic mrb_value\nnfcx_alloc_allocate(mrb_state *mrb, mrb_value self)\n{\n  nfcx_alloc_fn f = nfcx_alloc_for(mrb_class_ptr(self));\n  if (f == NULL) mrb_raise(mrb, E_RUNTIME_ERROR, \"no allocator for this class\");\n  return f(mrb, self);\n}\nstatic mrb_value\nnfcx_alloc_new(mrb_state *mrb, mrb_value self)\n{\n  mrb_value obj = nfcx_alloc_allocate(mrb, self);\n  mrb_value *argv;\n  mrb_int argc;\n  mrb_value blk;\n  mrb_get_args(mrb, \"*&\", &argv, &argc, &blk);\n  mrb_funcall_with_block(mrb, obj, mrb_intern_lit(mrb, \"initialize\"), argc, argv, blk);\n  return obj;\n}\nstatic void\nnfcx_alloc_register(mrb_state *mrb, struct RClass *c, nfcx_alloc_fn f)\n{\n  if (nfcx_alloc_n >= 64) mrb_raise(mrb, E_RUNTIME_ERROR, \"too many allocators\");\n  nfcx_alloc_tab[nfcx_alloc_n].c = c;\n  nfcx_alloc_tab[nfcx_alloc_n].f = f;\n  nfcx_alloc_n++;\n  mrb_define_class_method(mrb, c, \"allocate\", nfcx_alloc_allocate, MRB_ARGS_NONE());\n  mrb_define_class_method(mrb, c, \"new\", nfcx_alloc_new, MRB_ARGS_ANY());\n}",
     "caveat": "the allocator becomes the class's allocate and new (singleton methods, see the prelude); a subclass uses its superclass's allocator"
+  },
+    "rb_thread_current": {
+    "kind": "template",
+    "arity": 0,
+    "needs_mrb": false,
+    "template": "mrb_nil_value()",
+    "caveat": "the fork has no Thread: the current thread is nil (a single-threaded runtime; thread-local storage stays a stuck point)"
+  },
+    "rb_mutex_new": {
+    "kind": "template",
+    "arity": 0,
+    "needs_mrb": false,
+    "template": "mrb_nil_value()",
+    "caveat": "the fork has no Mutex: a mutex is nil; lock and unlock do nothing (a single-threaded runtime never contends for a lock)"
+  },
+    "rb_mutex_lock": {
+    "kind": "template",
+    "arity": 1,
+    "needs_mrb": false,
+    "template": "((void)($0), mrb_nil_value())",
+    "caveat": "no-op: a single-threaded runtime never contends for a lock"
+  },
+    "rb_mutex_unlock": {
+    "kind": "template",
+    "arity": 1,
+    "needs_mrb": false,
+    "template": "((void)($0), mrb_nil_value())",
+    "caveat": "no-op: a single-threaded runtime never contends for a lock"
   },
     "rb_undef_alloc_func": {
       "kind": "template",

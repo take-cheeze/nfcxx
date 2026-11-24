@@ -1,0 +1,5 @@
+== -c p.cpp2 -o p.o
+-- stdout
+-- stderr
+nfcxx: cppfront is not built; run scripts/setup-cppfront.sh (docs/notes/cpp2.md)
+status=2

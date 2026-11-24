@@ -42,4 +42,83 @@ if !File.file?(lib) || (File.exist?(src) && File.mtime(src) > File.mtime(lib))
   run!("ar", "rcs", "#{tmp}/libnfcxxld.a", "#{tmp}/nfcxx_ldrt.o")
   File.rename("#{tmp}/libnfcxxld.a", lib)
 end
+
+# A Path B harness with zero-cost exception handling (scripts/setup-pathb.sh writes eh-tables next to its cpfe) links the
+# Itanium C++ ABI runtime of libstdc++ (docs/notes/pathb-zero-cost-eh.md). Every Path B link names EDG's libC.a after this
+# archive and ahead of libstdc++ (the frames mode's order: libC.a's EH runtime must win there); in this mode libstdc++ must
+# provide the C++ ABI, its EH runtime, RTTI and operator new instead. So the script prints a GNU ld input script in place of
+# the archive (as glibc's libc.so is one): INPUT puts the archive, the lowering's helpers, libstdc++ and libgcc_s at this
+# position of the link line. The helpers (the VLA pool, C99 complex arithmetic, and the abort message they print) are
+# libC.a's own members, copied into libnfcxxedg.a with their symbols weak: libC.a after the script then gives nothing, and a link that does not
+# name it (g++ x.o $(scripts/pathb-ldrt.rb)) has everything. Not for cosmo (its own C++ runtime) or macOS (ld64 reads no
+# linker scripts).
+EDG_HELPERS = %w[vla_alloc.o c99_complex.o error.o].freeze
+
+# libnfcxxedg.a in out: the EDG_HELPERS members of the harness's libC.a, or nil when there is no libC.a
+def edg_helpers(root, out)
+  libc = File.join(env("EDG_LIB") || File.join(env("EDG_BUILD") || "#{root}/build/edg", "lib"), "libC.a")
+  return nil unless File.file?(libc)
+
+  lib = "#{out}/libnfcxxedg.a"
+  return lib if File.file?(lib) && File.mtime(lib) >= File.mtime(libc)
+
+  members = IO.popen(["ar", "t", libc], &:read).split("\n") & EDG_HELPERS
+  return nil if members.empty?
+
+  tmp = IO.popen(["mktemp", "-d", "#{out}/.edg.XXXXXX"], &:read).sub(/\n+\z/, "")
+  exit($?.exitstatus || 1) unless $?.success?
+  at_exit { FileUtils.rm_rf(tmp) }
+
+  Dir.chdir(tmp) do
+    run!("ar", "x", libc, *members)
+    # weak: a strong definition elsewhere in the link wins wherever it is (the VLA runtime of an ASan link,
+    # scripts/asan-vla.rb, comes after this script on the line, where libC.a's members were never pulled in)
+    members.each { |m| run!("objcopy", "--weaken", m) }
+    run!("ar", "rcs", "libnfcxxedg.a", *members)
+  end
+  File.rename("#{tmp}/libnfcxxedg.a", lib)
+  lib
+end
+
+# A Mach-O host (macOS) has no linker scripts (ld64 reads none), so the same helpers come as one archive instead: the long
+# double archive's member and the EDG_HELPERS members of libC.a, with libC.a itself out of the link. The links name
+# libc++ (the host C++ library, with its C++ ABI and EH runtime) in its place.
+def mach_eh_archive(root, out, ldrt_lib)
+  libc = File.join(env("EDG_LIB") || File.join(env("EDG_BUILD") || "#{root}/build/edg", "lib"), "libC.a")
+  abort "pathb-ldrt: no #{libc} for the helpers #{EDG_HELPERS.join(' ')}" unless File.file?(libc)
+
+  lib = "#{out}/libnfcxxld-eh.a"
+  return lib if File.file?(lib) && File.mtime(lib) >= [File.mtime(ldrt_lib), File.mtime(libc)].max
+
+  members = IO.popen(["ar", "t", libc], &:read).split("\n") & EDG_HELPERS
+  abort "pathb-ldrt: #{libc} lacks some of #{EDG_HELPERS.join(' ')}" unless members.size == EDG_HELPERS.size
+
+  tmp = IO.popen(["mktemp", "-d", "#{out}/.mach.XXXXXX"], &:read).sub(/\n+\z/, "")
+  exit($?.exitstatus || 1) unless $?.success?
+  at_exit { FileUtils.rm_rf(tmp) }
+  Dir.chdir(tmp) do
+    run!("ar", "x", ldrt_lib)
+    run!("ar", "x", libc, *members)
+    run!("ar", "rcs", "libnfcxxld-eh.a", *Dir.glob("*.o"))
+  end
+  File.rename("#{tmp}/libnfcxxld-eh.a", lib)
+  lib
+end
+
+cpfe = env("PATHB_CPFE") || "#{root}/build/pathb/cmake/bin/cpfe"
+darwin = IO.popen(["uname", "-s"], &:read).chomp == "Darwin"
+if File.file?(File.join(File.dirname(cpfe), "eh-tables")) && !cc_bin.include?("cosmocc") && darwin
+  lib = mach_eh_archive(root, out, lib)
+elsif File.file?(File.join(File.dirname(cpfe), "eh-tables")) && !cc_bin.include?("cosmocc")
+  # named .a: the drivers pass a .a to the link as it is (GNU ld reads a link script whatever its name)
+  script = "#{out}/libnfcxxld-eh.a"
+  helpers = edg_helpers(root, out)
+  text = "/* nfcxx: scripts/pathb-ldrt.rb, a Path B link with exception tables (docs/notes/pathb-zero-cost-eh.md) */\n" \
+         "INPUT ( #{lib}#{helpers ? " #{helpers}" : ""} -lstdc++ -lgcc_s )\n"
+  unless File.file?(script) && File.read(script) == text
+    File.write("#{script}.#{$$}", text)
+    File.rename("#{script}.#{$$}", script)
+  end
+  lib = script
+end
 puts lib

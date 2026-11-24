@@ -1,0 +1,9 @@
+== case 55:  -c nosuch.cpp -o n.o
+-- status: 2
+-- stdout
+-- stderr
+nfcxx-modscan: nosuch.cpp: No such file or directory
+nfcxx: QBE not built; run scripts/setup-qbe.sh
+-- eccp
+(none)
+-- files

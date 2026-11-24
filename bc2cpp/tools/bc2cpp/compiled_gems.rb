@@ -55,6 +55,7 @@ BC2CPP_CANONICAL_CORE_GEMS = (BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_G
 # would claim them. A class also owned by an engine gem (Array, StringIO) is split per definition by
 # source file: see emit_unit in bc2cpp.rb.
 require_relative 'world_root'
+require_relative 'lists_world'
 require_relative 'ruby_parse_cache'
 require_relative 'scan_cache'
 BC2CPP_OWNER_SOURCE_ROOT = File.join(BC2CPP_WORLD_ROOT, "3rd").freeze
@@ -303,9 +304,18 @@ end
 
 # mruby-lcf's mrblib for the compiled gem. BC2CPP_SKIP_LCF_SCHEMA_RB=1 leaves out schema.rb, whose LCF::Schema the wio
 # build takes from its blob instead (mruby-lcf/mrbgem.rake); the copy compiled here costs about 147 KB of wio flash.
+# ROM_SCHEMA: a world that has mruby-lcf/mrblib_rom/schema.rb (the schema as handles of constant tables, which
+# mruby-lcf/mrbgem.rake links into every build with compiled gems) compiles it in place of schema.rb. Its class body
+# only assigns literals, so its place in the sorted world does not matter. BC2CPP_ROM_SCHEMA=0 keeps schema.rb;
+# mruby-lcf/mrbgem.rake reads the same switch.
 def lcf_mrblib_srcs(gems_root)
-  Dir["#{gems_root}/mruby-lcf/mrblib/*.rb"].reject do |path|
-    ENV['BC2CPP_SKIP_LCF_SCHEMA_RB'] == '1' && path.end_with?('/schema.rb')
+  rom = "#{gems_root}/mruby-lcf/mrblib_rom/schema.rb"
+  rom = nil unless ENV['BC2CPP_ROM_SCHEMA'] != '0' && File.file?(rom)
+  Dir["#{gems_root}/mruby-lcf/mrblib/*.rb"].filter_map do |path|
+    next path unless path.end_with?('/schema.rb')
+    next if ENV['BC2CPP_SKIP_LCF_SCHEMA_RB'] == '1'
+
+    rom || path
   end
 end
 
@@ -378,7 +388,7 @@ BC2CPP_SELF_GEMS = %w[
   mruby-array-ext mruby-hash-ext mruby-enum-ext mruby-io mruby-dir mruby-numeric-ext mruby-range-ext
   mruby-symbol-ext mruby-compar-ext mruby-fiber mruby-exit mruby-sprintf mruby-kernel-ext mruby-random
   mruby-math mruby-time mruby-bigint mruby-string-ext mruby-metaprog mruby-pack mruby-enumerator mruby-enum-lazy
-  mruby-struct mruby-set mruby-method mruby-proc-ext mruby-errno mruby-error mruby-encoding
+  mruby-struct mruby-set mruby-method mruby-proc-ext mruby-errno mruby-error mruby-encoding mruby-object-ext
   mruby-require mruby-onig-regexp mruby-marshal
   mruby-shellwords mruby-json mruby-digest mruby-fileutils mruby-tmpdir mruby-tempfile mruby-dir-glob
   mruby-strscan mruby-compare-by-identity mruby-yaml mruby-zlib
@@ -533,7 +543,7 @@ end
 # The non-test add_dependency names of a mrbgem.rake. add_test_dependency is not built, so it is not followed.
 # A `Dir.exist?` modifier (mruby-marshal's metaprog) is evaluated, and an `unless %w[...].include?(build.name)`
 # modifier drops the gem for the closed build; any other modifier raises.
-def bc2cpp_rake_dependencies(dir, root)
+def bc2cpp_rake_dependencies(dir, root, world = 'closed')
   text = bc2cpp_gem_rake_text(dir, root)
   raise "bc2cpp: #{dir}/mrbgem.rake is missing; the closed-world gem closure is derived from it" unless text
 
@@ -543,8 +553,8 @@ def bc2cpp_rake_dependencies(dir, root)
     if (cond = line[/\bif\s+Dir\.exist\?\s+"\#\{MRUBY_ROOT\}\/mrbgems\/([\w-]+)"/, 1])
       next unless File.directory?(File.join(root, '3rd/mruby/mrbgems', cond))
     elsif (excluded = line[/\bunless\s+%w\[([^\]]*)\]\.include\?\(build\.name\)/, 1])
-      # The closure is always the closed build's, so a gem its list names is left out.
-      next if excluded.split.include?('closed')
+      # The closure is the world's (LISTS_WORLD, closed unless named), so a gem its list names is left out.
+      next if excluded.split.include?(world)
     elsif line.match?(/\b(?:if|unless)\b/)
       raise "bc2cpp: unsupported add_dependency condition in #{rake}: #{line.strip}"
     end
@@ -555,8 +565,8 @@ end
 # Gems the closed build lists under another directory (mruby-fiber is a source-less placeholder there).
 BC2CPP_GEM_STAND_INS = { 'mruby-fiber' => 'mruby-fiber-placeholder' }.freeze
 
-def bc2cpp_gem_dir(name, root)
-  stand_in = BC2CPP_GEM_STAND_INS[name]
+def bc2cpp_gem_dir(name, root, world = 'closed')
+  stand_in = world == 'closed' && BC2CPP_GEM_STAND_INS[name]
   return File.join(root, stand_in) if stand_in && bc2cpp_gem_rake_text(File.join(root, stand_in), root)
 
   dirs = [File.join(root, '3rd/mruby/mrbgems', name), File.join(root, name), File.join(root, '3rd', name)]
@@ -565,7 +575,7 @@ def bc2cpp_gem_dir(name, root)
 end
 
 # { name => dir } of `roots` and everything they reach. `extra` adds the edges a rake builds in Ruby.
-def bc2cpp_gem_closure(roots, root, extra = {})
+def bc2cpp_gem_closure(roots, root, extra = {}, world = 'closed')
   table = {}
   queue = roots.to_a
   until queue.empty?
@@ -573,8 +583,8 @@ def bc2cpp_gem_closure(roots, root, extra = {})
     next if table.key?(name)
 
     table[name] = dir
-    (bc2cpp_rake_dependencies(dir, root) + extra.fetch(name, [])).each do |dep|
-      queue << [dep, bc2cpp_gem_dir(dep, root)]
+    (bc2cpp_rake_dependencies(dir, root, world) + extra.fetch(name, [])).each do |dep|
+      queue << [dep, bc2cpp_gem_dir(dep, root, world)]
     end
   end
   table
@@ -597,12 +607,14 @@ def bc2cpp_core_compiled_edges(root, build_names)
   end
 end
 
-# The core gems (3rd/mruby/mrbgems) the closed build loads. Its build_config conf.gem lines and compiled gems are roots.
-def bc2cpp_closed_core_gems(root = BC2CPP_GEMS_ROOT)
-  lines = bc2cpp_rpg_maker_gem_lines(bc2cpp_build_config_text, 'closed', root)
+# The core gems (3rd/mruby/mrbgems) the closed build loads (`world`: the LISTS_WORLD build's instead). Its build_config
+# conf.gem lines and compiled gems are roots.
+def bc2cpp_closed_core_gems(root = BC2CPP_GEMS_ROOT, world: ListsWorld.name)
+  lines = bc2cpp_rpg_maker_gem_lines(bc2cpp_build_config_text, world, root)
   roots = lines.merge(BC2CPP_COMPILED_GEMS.keys.to_h { |g| [g, File.join(root, g)] })
+  roots.merge!(ListsWorld::EXTRA_GEMS.fetch(world).to_h { |d| [File.basename(d), File.join(root, d)] })
   edges = { 'mruby-core-compiled' => bc2cpp_core_compiled_edges(root, lines.keys) }
-  core = bc2cpp_gem_closure(roots, root, edges).select { |_, dir| dir.start_with?("#{root}/3rd/mruby/mrbgems/") }.keys
+  core = bc2cpp_gem_closure(roots, root, edges, world).select { |_, dir| dir.start_with?("#{root}/3rd/mruby/mrbgems/") }.keys
   raise 'bc2cpp: the closed build derives no core gems' if core.empty?
 
   core.freeze
@@ -711,7 +723,7 @@ end
 # The native and Ruby sources outside the closed world that share its VM on a
 # closed-world build: mruby core, every other gem's src and mrblib, the
 # closed-world gems' own native src, and the target's host sources.
-def bc2cpp_closed_world_outside_srcs(build_name, gems, repo_root)
+def bc2cpp_closed_world_outside_srcs(build_name, gems, repo_root, native_paths: [], ruby_paths: [], compiled_srcs: [])
   native = Dir["#{repo_root}/3rd/mruby/src/**/#{BC2CPP_NATIVE_GLOB}"] +
            Dir["#{repo_root}/include/**/#{BC2CPP_NATIVE_GLOB}"] +
            bc2cpp_host_native_srcs(build_name, repo_root)
@@ -728,6 +740,13 @@ def bc2cpp_closed_world_outside_srcs(build_name, gems, repo_root)
                                                (!probe && BC2CPP_PROGRAM_CORE_MRBLIB_GEMS.include?(name)) ||
                                                (probe && name == BC2CPP_PROBE_BUILDS.fetch(build_name).first)
   end
+  # Definite linked-source manifests also name generated files outside a gem's
+  # src/mrblib directories (Prism's rendered Ruby AST classes, for example).
+  # The broader NATIVE_SRCS/FOREIGN_RUBY_SRCS analysis lists can contain
+  # alternative core implementations and must not be substituted here.
+  compiled = compiled_srcs.map { |path| File.expand_path(path) }.to_set
+  native.concat(native_paths)
+  ruby.concat(ruby_paths.reject { |path| compiled.include?(File.expand_path(path)) })
   [native.map { |p| File.expand_path(p) }.uniq.sort, ruby.map { |p| File.expand_path(p) }.uniq.sort]
 end
 
@@ -793,7 +812,12 @@ def bc2cpp_compiled_gem_job(spec, gems_root)
     # names can be compile-time symbols in const tables.
     'BC2CPP_ROM_METHOD_TABLES' => '1',
     # RUNTIME_HEADER (runtime_header.rb): one directory for every compiled gem, so they share one runtime header.
-    'BC2CPP_RUNTIME_HEADER_DIR' => "#{spec.build.build_dir}/mrbgems/bc2cpp-runtime"
+    'BC2CPP_RUNTIME_HEADER_DIR' => "#{spec.build.build_dir}/mrbgems/bc2cpp-runtime",
+    # CONST_DEF_ELIDE (const_def_elide.rb): a build without the bytecode interpreter runs no Ruby the generation
+    # does not compile.
+    'BC2CPP_VM_FREE' => spec.build.cc.defines.flatten.include?('MRB_VM_FREE') ? '1' : '0',
+    # IMPLICIT_STATE (implicit_state.rb): a build whose C++ defines BC2CPP_IMPLICIT_STATE has one mrb_state.
+    'BC2CPP_IMPLICIT_STATE' => bc2cpp_implicit_state(spec) ? '1' : '0'
   }.merge(bc2cpp_closed_world_env(spec, gems_root))
   mrbc = bc2cpp_optional_mrbc(spec)
   env['MRBC'] = mrbc if mrbc
@@ -802,6 +826,13 @@ def bc2cpp_compiled_gem_job(spec, gems_root)
   env['BC2CPP_NATIVE_INVENTORY'] = ENV['BC2CPP_NATIVE_INVENTORY'] if ENV['BC2CPP_NATIVE_INVENTORY']
   env['BC2CPP_SHARDS'] = bc2cpp_gem_shards.to_s
   [env, bc2cpp_closed_world_srcs(spec, gems_root), "#{spec.build_dir}/#{this_gem[:out_symbol]}_gen.cpp"]
+end
+
+# IMPLICIT_STATE: on for a build that defines BC2CPP_IMPLICIT_STATE (not to 0), unless BC2CPP_IMPLICIT_STATE=0.
+def bc2cpp_implicit_state(spec)
+  require_relative 'implicit_state'
+  ENV[ImplicitState::ENV_KEY] != '0' &&
+    spec.build.cxx.defines.flatten.any? { |d| %w[BC2CPP_IMPLICIT_STATE BC2CPP_IMPLICIT_STATE=1].include?(d.to_s) }
 end
 
 # BC2CPP_SHARDS (docs/bc2cpp-shards.md): translation units per compiled gem, default 4 (the CI runners' cores). A
@@ -822,9 +853,30 @@ def bc2cpp_compiled_gem_shards(spec, generated, prereqs)
   File.write(stamp, "#{shards}\n") unless File.exist?(stamp) && File.read(stamp) == "#{shards}\n"
   Rake::Task[generated].enhance([stamp])
   main_stamp = File.join(spec.build_dir, 'bc2cpp_main_roots')
-  main_mode = "#{ENV['BC2CPP_MAIN_AST']}\n#{ENV['BC2CPP_NATIVE_INVENTORY']}\n"
+  main_mode = "#{ENV['BC2CPP_MAIN_AST']}\n#{ENV['BC2CPP_NATIVE_INVENTORY']}\n#{"implicit_state\n" if bc2cpp_implicit_state(spec)}"
   File.write(main_stamp, main_mode) unless File.exist?(main_stamp) && File.read(main_stamp) == main_mode
   Rake::Task[generated].enhance([main_stamp, *bc2cpp_main_prerequisites])
+  # COLD_COMPACT (cold_compact.rb): the switches and the cold list choose which sites the generated file outlines.
+  require_relative 'cold_compact'
+  cold_stamp = File.join(spec.build_dir, 'bc2cpp_cold_compact')
+  # GUARD_HOIST (codegen_guard_hoist.rb) and COLD_COMPACT_CALLS (cold_compact_calls.rb) ride on the same stamp.
+  cold_mode = %w[BC2CPP_COLD_COMPACT BC2CPP_COLD_PROFILE BC2CPP_GUARD_HOIST BC2CPP_COLD_COMPACT_CALLS]
+              .map { |k| "#{k}=#{ENV[k]}\n" }.join +
+              "#{ColdCompact.list_path}\n"
+  File.write(cold_stamp, cold_mode) unless File.exist?(cold_stamp) && File.read(cold_stamp) == cold_mode
+  Rake::Task[generated].enhance([cold_stamp])
+  Rake::Task[generated].enhance([ColdCompact.list_path]) if File.file?(ColdCompact.list_path)
+  # A kill switch (BC2CPP_<NAME>=0) changes the generated code, so a changed set of them regenerates.
+  switch_stamp = File.join(spec.build_dir, 'bc2cpp_kill_switches')
+  switch_mode = ENV.keys.grep(/\ABC2CPP_[A-Z0-9_]+\z/).select { |k| ENV[k] == '0' }.sort.map { |k| "#{k}=0\n" }.join
+  File.write(switch_stamp, switch_mode) unless File.exist?(switch_stamp) && File.read(switch_stamp) == switch_mode
+  Rake::Task[generated].enhance([switch_stamp])
+  # LITERAL_TABLES (codegen_literal_tables.rb): its kill switches choose which literals the generated file builds from tables.
+  literal_stamp = File.join(spec.build_dir, 'bc2cpp_literal_tables')
+  literal_mode = %w[BC2CPP_LITERAL_TABLES BC2CPP_LITERAL_WALK BC2CPP_LITERAL_ARRAY_KEYS BC2CPP_LITERAL_CONST_INTS]
+                 .map { |k| "#{k}=#{ENV[k]}\n" }.join
+  File.write(literal_stamp, literal_mode) unless File.exist?(literal_stamp) && File.read(literal_stamp) == literal_mode
+  Rake::Task[generated].enhance([literal_stamp])
   # A changed list regenerates too: the registrations it drops are in the generated file.
   lists = ENV['BC2CPP_STATIC_DISPATCH_LISTS']
   Rake::Task[generated].enhance([lists]) if lists && lists != 'none' && File.file?(lists)

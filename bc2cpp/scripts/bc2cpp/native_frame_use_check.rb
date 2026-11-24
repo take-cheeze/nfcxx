@@ -20,6 +20,7 @@ require 'tmpdir'
 require 'fileutils'
 require_relative 'check_support'
 require_relative '../../tools/bc2cpp/native_frame_use'
+require_relative '../../tools/bc2cpp/core_native_candidates'
 
 suite = FixtureCheck.new('native_frame_use_check')
 
@@ -310,15 +311,34 @@ Dir.mktmpdir('native_frame_use_check') do |dir|
   suite.check('a native calling a global hook has no row', cxx_rows.none? { |_o, n, _f| n == 'hook' })
   suite.check('a lambda registered in place names no function and has no row', cxx_rows.none? { |_o, n, _f| n == 'inline' })
 
+  # The run-time set (BC2CPP_FRAMEFREE_FLAG=0).
+  ENV['BC2CPP_FRAMEFREE_FLAG'] = '0'
   source = NativeFrameUse.cpp_source(Set['IO#getbyte', 'Thing.singleton#make'])
   suite.check('the helper lists each row and installs the frame-free hook mrb_funcall_with_method consults',
-              source.include?('{ "IO", "getbyte" }') && source.include?('{ "Thing.singleton", "make" }') &&
-              source.include?('M->frame_free_p = bc2cpp_frame_free_hook'))
+              source.include?('bc2cpp_ff_names[2] = { "getbyte", "make" }') && source.include?('{ "IO", 0x80000000u | 0u }') &&
+              source.include?('{ "Thing.singleton", 0x80000000u | 1u }') && source.include?('M->frame_free_p = bc2cpp_frame_free_hook'))
+  # FRAME_FREE_PRESYM: a name presym spells is its id, with no string.
+  SymbolCache.presym_names = Set['getbyte']
+  presym_source = NativeFrameUse.cpp_source(Set['IO#getbyte', 'Thing.singleton#make'])
+  ENV['BC2CPP_FRAME_FREE_PRESYM'] = '0'
+  string_source = NativeFrameUse.cpp_source(Set['IO#getbyte', 'Thing.singleton#make'])
+  ENV.delete('BC2CPP_FRAME_FREE_PRESYM')
+  SymbolCache.presym_names = Set.new
+  suite.check('BC2CPP_FRAME_FREE_PRESYM=0 keeps every name a string', string_source.include?('bc2cpp_ff_names[2] = { "getbyte", "make" }'))
+  suite.check('a row whose name presym spells holds its id, and only the others keep a string',
+              presym_source.include?('{ "IO", (uint32_t)MRB_SYM(getbyte) }') && presym_source.include?('bc2cpp_ff_names[1] = { "make" }'))
   suite.check('the found call defers the decision to mrb_funcall_with_method', !source.include?('mrb_call_direct('))
   owner, name, wrapper, = OwnerCallDirect::NATIVE_ROWS.first
   handed = NativeFrameUse.wrappers_source(Set["#{owner}##{name}"])
   suite.check('a frame-free row\'s owner-call wrapper is handed to the set', handed.include?("{ #{wrapper} }") &&
-              NativeFrameUse.cpp_source(Set["#{owner}##{name}"]).include?('bc2cpp_ff_add(bc2cpp_ff_wrapper_fns[i])'))
+              NativeFrameUse.cpp_source(Set["#{owner}##{name}"]).include?('bc2cpp_ff_add(bc2cpp_ff_wrapper_fns[u][i])'))
+  # FRAME_FREE_SHARED: the set and its registry are inline (one per program through RUNTIME_HEADER); the hook's
+  # predecessor stays per gem, so two gems' hooks chain instead of one calling itself.
+  shared = NativeFrameUse.cpp_source(Set["#{owner}##{name}"])
+  suite.check('the set, its count and the wrapper registry are inline, the hook\'s predecessor static',
+              shared.match?(/^inline mrb_func_t bc2cpp_ff_set\[\d+\] = \{\};$/) && shared.include?('inline unsigned bc2cpp_ff_wrapper_units = 0;') &&
+              shared.include?('static decltype(mrb_state::frame_free_p) bc2cpp_ff_prev = nullptr;'))
+  suite.check('the table stops filling at three quarters, so the probe always ends', shared.include?('if (4 * (bc2cpp_ff_count + 1) > 3 *'))
   suite.check('a framed row\'s wrapper is not', NativeFrameUse.wrappers_source(Set['IO#getbyte']).empty?)
   compiled = [{ label: 'synth:Font#bold', entry: 'Font_bold', arity: 0 }, { label: 'synth:Font#bold=', entry: 'Font_bold_eq', arity: 1 },
               { label: 'Font#size', entry: 'Font_size', arity: 0 }]
@@ -334,6 +354,39 @@ Dir.mktmpdir('native_frame_use_check') do |dir|
   ENV['BC2CPP_FRAMEFREE'] = '0'
   suite.check('BC2CPP_FRAMEFREE=0 turns the rewrite off', !NativeFrameUse.cpp_source(Set['IO#getbyte']).include?('frame_free_p'))
   ENV.delete('BC2CPP_FRAMEFREE')
+  ENV.delete('BC2CPP_FRAMEFREE_FLAG')
+
+  # FRAME_FREE_FLAG: no set; the method entries carry the decision.
+  flagged = NativeFrameUse.cpp_source(Set["#{owner}##{name}", 'IO#getbyte'])
+  ram_keys = Set.new
+  NativeFrameUse.rows([cxx], cxx_corpus, ram: ram_keys)
+  suite.check('FRAME_FREE_FLAG: a plain define is a run-time row', ram_keys.include?(%w[Cx args]))
+  trimmed = NativeFrameUse.cpp_source(Set['IO#getbyte', 'Thing.singleton#make'], ram: Set['Thing.singleton#make'])
+  suite.check('FRAME_FREE_FLAG: only the run-time rows are resolved', trimmed.include?('bc2cpp_ff_names[1] = { "make" }') &&
+              !trimmed.include?('getbyte'))
+  suite.check('FRAME_FREE_FLAG: no run-time row, no marking', !NativeFrameUse.cpp_source(Set['IO#getbyte'], ram: Set.new).include?('frame_free_p'))
+  suite.check('FRAME_FREE_FLAG: no set and no wrapper registry in RAM',
+              !flagged.include?('bc2cpp_ff_set') && !flagged.include?('bc2cpp_ff_wrapper_fns') && flagged.include?('{ "IO", 0x80000000u | 0u }'))
+  suite.check('FRAME_FREE_FLAG: a row resolves as the set did and marks the entries holding its function',
+              flagged.include?('if (c != start && !(c->tt == MRB_TT_ICLASS && c->c == start) && c != bc2cpp_ff_origin(start)) continue;') &&
+              flagged.include?('marked += mrb_mt_mark_frame_free(M, c, mid, MRB_METHOD_FUNC(m));'))
+  suite.check('FRAME_FREE_FLAG: the late hook never answers yes and does not clear mrb->cache',
+              flagged.match?(/bc2cpp_ff_late\(mrb_state\* M, mrb_func_t\) \{\n\s*M->frame_free_p = nullptr;\n\s*if \(bc2cpp_ff_mark\(M\)\) M->mt_epoch\+\+;\n\s*return FALSE;/))
+  suite.check('FRAME_FREE_FLAG: nothing is handed over', NativeFrameUse.wrappers_source(Set["#{owner}##{name}"], ['Font_bold']).empty?)
+  suite.check('FRAME_FREE_FLAG: a synthesized reader is flagged, a method and a setter are not',
+              compiled.map { |m| NativeFrameUse.entry_flags(m, Set.new) } == [' | MRB_METHOD_FRAMEFREE_FL', '', ''])
+  native = OwnerCallDirect.native_entries.fetch([owner, name])
+  suite.check('FRAME_FREE_FLAG: a native direct row is flagged only while its key is frame-free',
+              NativeFrameUse.entry_flags(native, Set["#{owner}##{name}"]) == ' | MRB_METHOD_FRAMEFREE_FL' &&
+              NativeFrameUse.entry_flags(native, Set.new).empty?)
+  header = CoreNativeCandidates.header([], [], frame_free_fns: %w[io_getbyte Foo::bar])
+  suite.check('FRAME_FREE_FLAG: the exclusion header names each plain function', header.include?("#define MRB_MT_FRAMEFREE_io_getbyte 1\n") &&
+              !header.include?('Foo::bar'))
+  ENV['BC2CPP_FRAMEFREE_FLAG'] = '0'
+  suite.check('BC2CPP_FRAMEFREE_FLAG=0 keeps the set and flags nothing',
+              NativeFrameUse.cpp_source(Set['IO#getbyte']).include?('bc2cpp_ff_set') && NativeFrameUse.entry_flags(compiled[0], Set.new).empty? &&
+              !CoreNativeCandidates.header([], [], frame_free_fns: %w[io_getbyte]).include?('FRAMEFREE'))
+  ENV.delete('BC2CPP_FRAMEFREE_FLAG')
 end
 
 suite.finish!

@@ -21,6 +21,9 @@
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/owner_call_direct_check.rb
 ENV['BC2CPP_SIG_DIRS'] = ''
+# The runtime rows make a class the closed world does not see (Class.new at run time), which ARMS_COMPLETE_ELSE
+# rules out; off, the owner call stays the else they test.
+ENV['BC2CPP_ARMS_COMPLETE_ELSE'] = '0'
 
 require 'tmpdir'
 require 'fileutils'
@@ -87,8 +90,9 @@ HARNESS = <<~'CPP'
   }
 CPP
 
+# The site's line with the slot and level its set macro starts with (OWNER_CALL_DESC) left out: the owner set as written.
 def go_site(code, name)
-  code.lines.find { |l| l.include?("CLOSED_WORLD owner-call: #{name} */") }.to_s
+  code.lines.find { |l| l.include?("CLOSED_WORLD owner-call: #{name} */") }.to_s.sub(/(BC2CPP_OWNERS(?:_D)?\()\d+, \d, /, '\\1')
 end
 
 Dir.mktmpdir('bc2cpp-owner-call-direct') do |dir|
@@ -109,6 +113,23 @@ Dir.mktmpdir('bc2cpp-owner-call-direct') do |dir|
   end
   suite.check('an engine owner with no entry the build leaves out keeps the plain owner set',
               go_site(left_out, 'pick').include?('BC2CPP_OWNERS("Game::OcdA", "Game::OcdD")'))
+  # OWNER_ROWS_TRIM: a real build's call carries rows only for the owners it leaves out.
+  saved = %w[BC2CPP_UNREGISTERED_EXTRA BC2CPP_OWNER_ROWS].to_h { |k| [k, ENV[k]] }
+  begin
+    ENV['BC2CPP_UNREGISTERED_EXTRA'] = 'Game::OcdC#push'
+    ENV['BC2CPP_OWNER_ROWS'] = 'left_out'
+    # Its own directory: the behaviour runs below build from `dir`'s files.
+    trimmed, = Bc2cppFixtureRuntime.generate(SOURCE, FileUtils.mkdir_p(File.join(dir, 'trimmed')).first, core: true,
+                                             only_owners: OWNERS)
+  ensure
+    saved.each { |k, v| v ? ENV[k] = v : ENV.delete(k) }
+  end
+  trimmed_push = go_site(trimmed, 'push')
+  suite.check('trimmed: the call carries a row for the left-out owner only',
+              trimmed_push.include?('BC2CPP_OWNERS_D(BC2CPP_OWNER_DIRECT("Game::OcdC", Game__OcdC_push, ') &&
+              !trimmed_push.include?('BC2CPP_OWNER_DIRECT("Game::OcdA"'))
+  suite.check('trimmed: a call with no left-out owner keeps the plain owner set',
+              go_site(trimmed, 'pick').include?('BC2CPP_OWNERS("Game::OcdA", "Game::OcdD")'))
   # As the text scan finds `< OcdA`.
   subclassed = %w[Game::OcdA OcdA]
   suite.check('the proof counts the completed call as no lookup',
@@ -144,6 +165,17 @@ Dir.mktmpdir('bc2cpp-owner-call-direct') do |dir|
     suite.check('BC2CPP_OWNER_CALL_DIRECT=0 with the entry removed: the made instance raises',
                 off_compiled && off_compiled.any? { |l| l.start_with?('made => raised') })
   end
+end
+
+# Generated gem sources need not live below the gem's mrblib/src directories.
+# Their methods still belong to the closed world's outside-owner inventory.
+Dir.mktmpdir('owner-call-generated-source') do |dir|
+  generated = "class GeneratedAccessor\n  attr_reader :generated_reader\nend\n"
+  source = "class GeneratedCaller\n  def read(object); object.generated_reader; end\nend\n"
+  code, = Bc2cppFixtureRuntime.generate(source, dir, only_owners: ['GeneratedCaller'],
+    foreign: [['generated_ast.rb', generated]])
+  suite.check('generated foreign readers remain in the closed owner set',
+              code.include?('"GeneratedAccessor"') && code.include?('CLOSED_WORLD owner-call: generated_reader'))
 end
 
 suite.finish!

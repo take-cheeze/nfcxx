@@ -11,9 +11,9 @@
 module ClassScope
   OPENERS = %i[CLASS MODULE SCLASS].freeze
   # The newest annotation table version this reader knows (MrbcRb::Annotations::VERSION). Tables are additive across versions
-  # (2 added the `call` record), so an older one is read as it is: a record kind it lacks is simply absent. A newer one may
-  # change the meaning of what is here and is dropped whole.
-  MAX_VERSION = 2
+  # (2 added the `call` record, 3 the `conditional` fact, 4 the loop and block-send records), so an older one is read as it
+  # is: a record kind it lacks is simply absent. A newer one may change the meaning of what is here and is dropped whole.
+  MAX_VERSION = 4
 
   module_function
 
@@ -31,12 +31,16 @@ module ClassScope
 
     normalized = []
     order.each_with_index do |label, i|
-      ops, error = normalize(ireps.fetch(label), records[i])
+      irep = ireps.fetch(label)
+      ops, error = normalize(irep, records[i])
       return reject(error, label, i) if error
 
-      normalized << ops
+      loops, sends, error = normalize_loops(irep, records[i])
+      return reject(error, label, i) if error
+
+      normalized << { labels: order, ops: ops, loops: loops, block_sends: sends }
     end
-    order.each_with_index { |label, i| ireps.fetch(label).class_scope = records[i].merge(labels: order, ops: normalized[i]) }
+    order.each_with_index { |label, i| ireps.fetch(label).class_scope = records[i].merge(normalized[i]) }
     true
   end
 
@@ -61,6 +65,38 @@ module ClassScope
       ops[insn.addr] = op
     end
     [ops, nil]
+  end
+
+  # [loops, block_sends, error] of a version 4 record, with every exit and send pc moved to its decoded instruction as
+  # normalize does; a pc that starts no instruction, or a send whose op is not the recorded one, is an error String. A table
+  # before version 4 has neither (nil, nil). What the records claim about the code is LoopRecords' check.
+  def normalize_loops(irep, record)
+    return [nil, nil, nil] unless record.key?(:loops)
+
+    by_addr = {}
+    irep.instructions.each { |insn| by_addr[insn.addr] = insn }
+    sends = {}
+    record[:block_sends].each do |pc, send|
+      insn = decoded_at(by_addr, pc)
+      return [nil, nil, "block send pc #{pc} #{send[:op]} vs #{insn&.op.inspect}"] unless insn && insn.op == send[:op]
+
+      sends[insn.addr] = send
+    end
+    loops = record[:loops].map do |loop_rec|
+      exits = loop_rec[:exits].map do |e|
+        insn = decoded_at(by_addr, e[:pc])
+        return [nil, nil, "loop exit pc #{e[:pc]} #{e[:kind]}"] unless insn
+
+        e.merge(pc: insn.addr)
+      end
+      loop_rec.merge(exits: exits)
+    end
+    [loops, sends, nil]
+  end
+
+  def decoded_at(by_addr, pc)
+    insn = by_addr[pc]
+    insn && %i[EXT1 EXT2 EXT3].include?(insn.op) ? by_addr[pc + 1] : insn
   end
 
   # The op record of +insn+ (an Insn of +irep+); nil when the irep has no annotation or none for it.

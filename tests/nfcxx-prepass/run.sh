@@ -1,4 +1,5 @@
 #!/bin/bash
+# The pinned copy (pinned-driver.txt) was taken from the driver at commit 1aa750d8b52163609481ea3cb4ad631389529a7b, before the B8 switch.
 # Compares scripts/nfcxx-prepass.rb (the port) with the two pre-passes of nfcxx's bash driver: the cppfront translation of
 # .cpp2 inputs, and the SYCL two-pass build of a -c compile that includes <sycl/...>.
 #
@@ -34,7 +35,7 @@ while IFS= read -r line; do
   ln -sf "$here/stub.sh" "$root/scripts/sycl-integration-header.rb"
   # the driver, cut after its cpp2_prepare call, is root/driver (its -fsyntax-only re-run is itself); root/nfcxx is what its
   # nested runs call (the two SYCL passes, scripts/nfcxx-sycl.rb): a wrapper that runs the stub
-  awk '{ print } /^cpp2_prepare$/ { print "exit 0"; exit }' "$repo/nfcxx" > "$root/driver"
+  awk '{ print } /^cpp2_prepare$/ { print "exit 0"; exit }' "$here/pinned-driver.txt" > "$root/driver"
   chmod +x "$root/driver"
   printf '#!/bin/bash\nexec "$(dirname "$0")/nfcxx-nested" "$@"\n' > "$root/nfcxx"; chmod +x "$root/nfcxx"
   ln -s "$here/stub.sh" "$root/nfcxx-nested"

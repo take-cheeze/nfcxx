@@ -10,7 +10,7 @@
 # variable as a fallback, and the flag wins when both are given.
 #   --keep=DIR, --timeout=SEC (NFCXX_PATHB_TIMEOUT, default 300; 0: no limit; a stage over it is stopped with status 124),
 #   --safe-pointers, --asan, --sanitize=LIST, --ir-opt=LIST, --ir-opt-max=BYTES, --emitter=ssa|mruby, --i386, --regparm=3,
-#   --m16, --pic, --no-pie, --long-double=trap, --trap-checks, --no-fp, --as-opt=OPT, --no-unwind, --vectorize, --avx2.
+#   --m16, --pic, --no-pie, --long-double=trap, --trap-checks, --no-fp, --as-opt=OPT, --vectorize-assoc, --no-unwind, --vectorize (default on amd64 Linux with the SSA emitter), --no-vectorize, --avx2.
 # Exit status: 0 done; 3 the IR has a node, type or marker the emitter refuses (reason on stderr); anything else failed.
 # Needs the Path B harness (scripts/setup-pathb.sh; PATHB_CPFE, PATHB_BASE) and build/qbe/qbe (QBE).
 require "fileutils"
@@ -64,9 +64,9 @@ src = ""
 out = ""
 safe_on = ENV["NFCXX_SAFE_POINTERS"] == "1" ? 1 : 0
 asan_on = ENV["NFCXX_PATHB_ASAN"] == "1" ? 1 : 0
-passes = ENV.key?("NFCXX_IR_OPT") ? ENV["NFCXX_IR_OPT"] : "inline"
+passes = "inline,hoist-pure"   # the default; --ir-opt=LIST changes it (--ir-opt=inline turns hoist-pure off, --ir-opt=none the passes)
 ir_opt_max = ENV["NFCXX_IR_OPT_MAX"].to_s.empty? ? "268435456" : ENV["NFCXX_IR_OPT_MAX"]
-passes_given = ENV.key?("NFCXX_IR_OPT") ? 1 : 0
+passes_given = 0
 pic = []
 nopie = []
 asopt = []
@@ -76,7 +76,8 @@ m16 = 0
 emitter = ENV["NFCXX_PATHB_EMITTER"].to_s.empty? ? "ssa" : ENV["NFCXX_PATHB_EMITTER"]
 nofp = 0
 nounwind = 0
-vectorize = 0
+vectorize = nil
+assoc = 0   # --vectorize-assoc: float reductions are vectorized (reassociated), qbe -F
 avx2 = 0
 trapchk = 0
 trapimp = 0
@@ -85,6 +86,7 @@ ld_trap = ((ENV["PATHB_LONG_DOUBLE"].to_s.empty? ? ENV["NFCXX_LONG_DOUBLE"].to_s
 keep = ENV["PATHB_KEEP"].to_s
 timeout_s = ENV["NFCXX_PATHB_TIMEOUT"].to_s.empty? ? "300" : ENV["NFCXX_PATHB_TIMEOUT"]
 dump_opts = []
+debug_on = 0   # -g: a line table (the IR's (loc ...) statements become QBE's dbgloc lines)
 
 args = ARGV.dup
 while !args.empty?
@@ -93,6 +95,7 @@ while !args.empty?
   when "-o" then out = args.shift.to_s
   when "--safe-pointers" then safe_on = 1
   when "--asan" then asan_on = 1
+  when "-g", /\A-g[0-3]\z/, "-ggdb", /\A-ggdb[0-3]\z/ then debug_on = x != "-g0" && x != "-ggdb0" ? 1 : 0
   when "--no-pie" then nopie = ["--no-pie"]
   when "--i386", "--target=linux_i686" then i386 = 1
   when "--regparm=3" then regparm = 1
@@ -112,6 +115,8 @@ while !args.empty?
   when /\A--as-opt=/ then asopt << x.delete_prefix("--as-opt=")
   when "--no-unwind" then nounwind = 1
   when "--vectorize" then vectorize = 1
+  when "--no-vectorize" then vectorize = 0
+  when "--vectorize-assoc" then assoc = 1
   when "--avx2" then avx2 = 1
   when "-funsigned-char", "-fno-signed-char" then uchar = 1; opts << x
   when "-fsigned-char", "-fno-unsigned-char" then uchar = 0; opts << x
@@ -167,6 +172,11 @@ if asan_on == 1
   dump_opts.push("--ir-loc", "--ir-scopes")
 end
 die("pathb-cc: --asan and --safe-pointers both replace malloc; use one") unless asan.empty? || safe.empty?
+debug = []
+if debug_on == 1
+  debug = ["--debug-lines"]
+  dump_opts << "--ir-loc" unless dump_opts.include?("--ir-loc")
+end
 
 # run a stage under --timeout (timeout(1) when it is there): its status
 def tmo_status(timeout_s, *cmd, **io)
@@ -193,7 +203,8 @@ if uchar == 1
   File.write(ir, text)
 end
 
-# The IR-to-IR passes (scripts/pathb-ir-opt.rb): inline by default; IR over --ir-opt-max is not optimized
+# The IR-to-IR passes (scripts/pathb-ir-opt.rb): inline and hoist-pure (memoised pure calls in loops) by default; IR over
+# --ir-opt-max is not optimized
 raw = 0
 if !passes.empty? && passes != "none" && passes != "off" && ENV["PATHB_IR"].to_s.empty?
   size = File.size(ir)
@@ -225,7 +236,15 @@ end
 ldopt = ld_trap == 0 ? [] : ["--long-double=trap"]
 ldopt << "--no-fp" if nofp != 0
 ldopt << "--no-unwind" if nounwind != 0
+# The loop vectorizer is on by default where its QBE pass exists: the SSA emitter on amd64 Linux (amd64_sysv only).
+# --no-vectorize (driver: -fno-tree-vectorize) turns it off.
+if vectorize.nil?
+  vectorize = emitter == "ssa" && IO.popen(["uname", "-s"], &:read).chomp == "Linux" &&
+              IO.popen(["uname", "-m"], &:read).chomp == "x86_64" ? 1 : 0
+end
 ldopt << "--vectorize" if vectorize != 0
+die("pathb-cc: --vectorize-assoc needs --vectorize") if assoc != 0 && vectorize == 0
+ldopt << "--vectorize-assoc" if assoc != 0
 die("pathb-cc: --avx2 needs --vectorize") if avx2 != 0 && vectorize == 0
 ldopt << "--avx2" if avx2 != 0
 trapimp = 1 if nofp != 0
@@ -250,7 +269,7 @@ rc = 0
 emit_err = File.join(tmp, "#{n}.emit")
 s_path = File.join(tmp, "#{n}.s")
 ssa_cmd = [File.join(ROOT, "scripts", "pathb-ssa-build"), "--qbe=#{qbe}", "-o", s_path, *i386opt, *pic, *nopie, *ldopt,
-           *safe, *asan, ir]
+           *safe, *asan, *debug, ir]
 if emitter == "ssa"
   rc = tmo_status(timeout_s, *ssa_cmd, err: emit_err)
   if rc != 0 && rc != 124 && rc != 5 && raw == 1   # the optimized IR is refused: emit the unoptimized one

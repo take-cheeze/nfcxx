@@ -1,0 +1,8 @@
+== case 70: NFCXX_BACKEND=gcc   --target=linux_aarch64 -c a.cpp -o a.o
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: --target needs --freestanding (the host's library headers are the host target's)
+-- eccp
+(none)
+-- files

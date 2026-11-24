@@ -3,7 +3,7 @@
 # DIR when it is missing, or older than a source file of DIR (the top-level .c, .cpp, .h, .hpp, .inc and .rb files). The driver runs
 # in parallel (one process per source file), so the build is serialized by the lock directory OUT.lock: the first run builds, the
 # others wait and find OUT (a wait of 3000 polls of 0.2 s is an error that names the lock). ninja's output goes to standard error;
-# a failed build gives its status. tests/driver-ensure-tool/run.sh checks the port against the bash function verbatim.
+# a failed build gives its status. tests/driver-ensure-tool/run.sh checks the port against goldens recorded from the bash function.
 #
 #   ruby scripts/nfcxx-ensure-tool.rb DIR OUT      status 0, or the build's status, 1 when the lock is stuck
 

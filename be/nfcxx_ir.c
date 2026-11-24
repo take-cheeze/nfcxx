@@ -579,10 +579,22 @@ static void ir_reserve_name(const char *name)
 
 /* The symbol of a routine: its GNU asm label (`int f() __asm__("g")`, which glibc's string.h gives the C++ overloads
    of strchr and friends so that they are the C functions) if it has one, else its name. */
+/* An asm label as the IR names the symbol. On a Darwin host the C library's labels are the Darwin symbols (__DARWIN_ALIAS
+   is __asm("_" name)): the IR names a C symbol by its C name, and the emitter adds the one leading underscore of Mach-O
+   itself, so the label's underscore is taken off here. Elsewhere the label is the name. */
+static const char *ir_asm_label_sym(const char *label)
+{
+#ifdef __APPLE__
+  if (label[0] == '_')
+    return label + 1;
+#endif
+  return label;
+}
+
 static const char *ir_rout_sym(a_routine_ptr r)
 {
   if (has_gnu_routine_supp(r) && gnu_routine_supp(r)->asm_name != NULL && gnu_routine_supp(r)->asm_name[0] != '\0')
-    return gnu_routine_supp(r)->asm_name;
+    return ir_asm_label_sym(gnu_routine_supp(r)->asm_name);
   return r->source_corresp.name;
 }
 
@@ -1091,7 +1103,7 @@ static int ir_var_is_thread(a_variable_ptr var)
 static const char *ir_var_sym(a_variable_ptr var)
 {
   if (var->asm_name_is_valid && var->asm_name_or_reg.name != NULL && var->asm_name_or_reg.name[0] != '\0')
-    return var->asm_name_or_reg.name;
+    return ir_asm_label_sym(var->asm_name_or_reg.name);
   return var->source_corresp.name;
 }
 
@@ -2685,6 +2697,8 @@ static an_expr_node_ptr ir_choose_operand(an_expr_node_ptr e)
 }
 #endif
 
+#include "nfcxx_ir_eh.h"
+
 static ir_val ir_rval(an_expr_node_ptr e)
 {
   if (e == NULL) return ir_mk_void();
@@ -2742,6 +2756,12 @@ static ir_val ir_rval(an_expr_node_ptr e)
       return ir_rval_op(e);
     case enk_result_of_overriding_function:
       return ir_roof(e);
+#if IR_EH_TABLES
+    case enk_lowered_eh_construct:
+      return ir_eh_construct(e);
+    case enk_throw:
+      return ir_eh_throw(e);
+#endif
     default:
       return ir_gap(e->type, ir_fmt("node %s", nfcxx_enk_name((an_expr_node_kind)e->kind) != NULL ? nfcxx_enk_name((an_expr_node_kind)e->kind) : "?"),
                     2, (int)e->kind);
@@ -8253,6 +8273,12 @@ static void ir_stmt(a_statement_ptr s, int d)
       ir_tmp_end(&tmps, d);
       return;
     }
+#if IR_EH_TABLES
+    case stmk_try_block:
+      ir_note(1, stmk_try_block, 1);
+      ir_eh_try(s, d);
+      return;
+#endif
     case stmk_block: {
       ir_decl_rec *mark = ir_decl_top;
       a_scope_ptr cl_scope = s->variant.block.extra_info != NULL ? ir_cl_enter(s->variant.block.extra_info->assoc_scope) : NULL;
@@ -8774,6 +8800,9 @@ static void ir_function(a_routine_ptr rout)
   /* Body. Scalar parameters are copied into slots first, so that every named variable has an address. */
   ir_buf_open(&body);
   ir_buf_begin(&body);
+#if IR_EH_TABLES
+  ir_eh_begin(rout);
+#endif
   if (IR_A64_ABI && !ir_a64_on() && ir_a64_refuse_sig(fn_type))
     ir_emit("(unsupported long double calling convention on aarch64: set NFCXX_LONG_DOUBLE_ABI=aarch64)");
   free(ir_loc_file);
@@ -8839,6 +8868,9 @@ static void ir_function(a_routine_ptr rout)
     }
   }
   ir_assigned_goto_tail(ir_is_void(ret) && !ir_ends_in_return(scope->assoc_block));
+#if IR_EH_TABLES
+  ir_eh_end_body(); /* the landing pads: (eh-pad N ...) after the body's statements */
+#endif
   ir_buf_end(&body);
 
   /* Output: header, slots, body. */
@@ -8889,6 +8921,9 @@ static void ir_function(a_routine_ptr rout)
     fputs("\n  (weak)", nf_out); /* the _ZTW wrapper / _ZTH function of a thread_local: every unit that uses the variable defines it */
   else if (rout->is_weak) fputs("\n  (weak attr)", nf_out); /* __attribute__((weak)) definition: an interface symbol, kept by pruning */
   ir_startup_markers(rout);
+#if IR_EH_TABLES
+  ir_eh_header(nf_out);
+#endif
   ir_buf_write(&ir_slot_buf, nf_out);
   if (ir_borrow) {
     int i;

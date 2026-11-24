@@ -2,8 +2,10 @@
 
 # CodeGen: sends devirtualized to native primitives.
 
+require_relative 'int_box_outline'
 require_relative 'native_direct'
 require_relative 'tagged_fixnum'
+require_relative 'cmp_num_outline'
 
 class CodeGen
   # Owners of the wrapper tables below come from NativeDirect::ENTRIES (the
@@ -228,6 +230,14 @@ class CodeGen
   # the rest but a bigint receiver, which it compares without the send (shared bc2cpp_bigint_eq).
   def compile_neq_op_eq(d, recv, arg)
     num = ->(lhs, rhs) { "mrb_bool_value(#{lhs}(#{recv}) != #{rhs}(#{arg}))" }
+    if CmpNumOutline.on?
+      # CMP_NUM_OUTLINE: OP_EQ's helper, negated, up to the bigint arm and mrb_equal.
+      fixnum_arm = "  if (#{TaggedFixnum.pair(recv, arg)}) {\n    r#{d} = mrb_bool_value(#{TaggedFixnum.compare(recv, '!=', arg)});\n  } else "
+      rest = "#ifdef MRB_USE_BIGINT\n  if (mrb_bigint_p(#{recv})) {\n    r#{d} = mrb_bool_value(!bc2cpp_bigint_eq(M, #{recv}, #{arg}));\n  } else\n" \
+             "#endif\n  {\n    r#{d} = mrb_bool_value(!mrb_equal(M, #{recv}, #{arg}));\n  }\n"
+      return "  // NEQ_OP_EQ :!= -- OP_EQ negated, as class.c's `!(self == other)` runs it (codegen_native_send.rb)\n" +
+             CmpNumOutline.dispatch(fixnum_arm, '==', "r#{d}", recv, arg, rest, negate: true)
+    end
     "  // NEQ_OP_EQ :!= -- OP_EQ negated, as class.c's `!(self == other)` runs it (codegen_native_send.rb)\n" \
       "  if (#{TaggedFixnum.pair(recv, arg)}) {\n" \
       "    r#{d} = mrb_bool_value(#{TaggedFixnum.compare(recv, '!=', arg)});\n" \
@@ -328,7 +338,7 @@ class CodeGen
       matches.first
     end
     arms = entries.map do |entry|
-      expression = entry[:expression].gsub('recv', recv)
+      expression = IntBoxOutline.size_boxed(entry[:expression]).gsub('recv', recv)
       expression = expression.gsub('BC2CPP_ARG0', argv.fetch(0)) if entry[:arity] == 1
       "case #{entry[:owner][:tag]}: r#{d} = #{expression}; break;"
     end.join("\n    ")
@@ -350,12 +360,14 @@ class CodeGen
 
     # EXACT_CORE_RECEIVER: a proven exact class takes its own arm without the tag
     # test, or none when no registration is its own (the arms' classes are all other ones).
-    site = exact_core_site_for(recv, name)
+    site = native_exact_site_for(recv, name)
     if site
       exact = entries.find { |entry| entry[:owner][:class_name] == site[:klass] }
-      return fallback unless exact
+      # CORE_EXACT_DIRECT: a class with no registration of its own reaches a compiled core body (Array#include? is
+      # Enumerable's), the direct call the bare send would have become.
+      return core_exact_direct_line(d, recv, name, argv, dynamic_dispatch_line(d, recv, name, argv)) || fallback unless exact
 
-      expression = exact[:expression].gsub('recv', recv)
+      expression = IntBoxOutline.size_boxed(exact[:expression]).gsub('recv', recv)
       expression = expression.gsub('BC2CPP_ARG0', argv.fetch(0)) if exact[:arity] == 1
       return "// CLOSED_WORLD_NATIVE_EXACT :#{name} -> #{site[:klass]} registered body; exact receiver (unguarded proof), no dispatch fallback\n" \
              "  r#{d} = #{expression};\n"
@@ -363,7 +375,7 @@ class CodeGen
 
     arms = entries.map do |entry|
       owner = entry[:owner]
-      expression = entry[:expression].gsub('recv', recv)
+      expression = IntBoxOutline.size_boxed(entry[:expression]).gsub('recv', recv)
       expression = expression.gsub('BC2CPP_ARG0', argv.fetch(0)) if entry[:arity] == 1
       source_comment = if name == 'clear' && owner[:class_name] == 'Array' && expression.include?('mrb_ary_clear')
                          '// ARRAY_CLEAR :clear -- generated from mruby core C'

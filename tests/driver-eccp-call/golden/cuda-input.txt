@@ -1,0 +1,28 @@
+== run 1: nfcxx --backend=gcc -c kernel.cu -o kernel.o
+env: 
+rc: 2
+-- stdout
+-- stderr (nfcxx: and eccp: lines)
+nfcxx: kernel.cu: device code: the front end refused it (see above; needs scripts/setup-pathb.sh)
+-- other stderr lines: 24
+== sandbox
+D inc
+F inc/x.h
+| int inc_val = 1;
+F kernel.cu
+| __global__ void k() {}
+| int main() { return 0; }
+F local.h
+| #pragma once
+| 
+| inline int local_value() { return 42; }
+F main.cpp
+| #include "local.h"
+| 
+| int main() { return local_value() == 42 ? 0 : 1; }
+F main_bad.cpp
+| #include "missing.h"
+| 
+| int main() { return 0; }
+D obj
+== temporary root

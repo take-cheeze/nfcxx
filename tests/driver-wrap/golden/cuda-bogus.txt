@@ -1,0 +1,4 @@
+stdout:
+status=2
+stderr:
+nfcxx: --cuda-driver=bogus: auto, cudart or libcuda

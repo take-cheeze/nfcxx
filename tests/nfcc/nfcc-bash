@@ -28,7 +28,7 @@
 #              -mcx16, -mmmx, -mrdrnd, -mrdseed, given to the C compile (pathb: ignored)
 #              gcc backend: --param name=value and --param=name=value (optimiser tuning), given to the C compile (pathb: ignored)
 #              gcc backend: -fno-jump-tables, and -fno-crossjumping when the host gcc is GNU gcc, given to the C compile (pathb: ignored)
-#   ignored:   -O* and -g* on the pathb backend (QBE has no optimisation levels and writes no debug info);
+#   ignored:   -O* on the pathb backend (QBE has no optimisation levels); -g* gives Path B a line table (pathb-cc.rb -g);
 #              -W* (except -Wp, -Wa) -w -pipe -v -m64 -mtune/-m<feature> (but see below), and the -f options in
 #              the allow list below (-fPIC ... -fwrapv -fno-strict-aliasing, which this pipeline implies)
 #   rejected with an error: -m32, -fsanitize*, -fopenmp, -fprofile*, --coverage, -ffast-math, -Ofast,
@@ -236,7 +236,7 @@ for ((i = 0; i < n; i++)); do
     -Ofast) die "$a is not supported (changes floating-point semantics)" ;;
     -O|-O0|-O1|-O2|-O3|-Os|-Og) optlvl=$a; [ "$a" != -O ] || optlvl=-O1 ;;
     -O?*) die "unknown optimisation option '$a'" ;;
-    -g|-g?*) dbg+=("$a") ;;   # gcc validates the rest; QBE writes no debug info
+    -g|-g?*) dbg+=("$a") ;;   # gcc validates the rest; Path B writes a line table (pathb_reason)
     -pipe|-v|-time) ;;
     # QBE output is already PIC (GOT-relative); gcc needs the flag, in command-line order with the other codegen options
     # (gcc takes the last of -fno-PIE ... -fPIC, as the kernel's vDSO build relies on)
@@ -269,6 +269,10 @@ for ((i = 0; i < n; i++)); do
     -m64|-mtune=*|-mcpu=*|-mfpmath=*|-mcmodel=*|-mstackrealign|-mpreferred-stack-boundary=*|-mtls-dialect=*|-mrelax*|-masm=*|-mno-red-zone|-mred-zone) gccplain "$a" || : ;;
     -m*) gcconly "$a" || die "$a is not supported" ;;
     -fno-strict-aliasing|-fwrapv|-fno-strict-overflow) gccplain "$a" || : ;;
+    # the loop vectorizer of Path B (scripts/pathb-cc.rb --vectorize, --no-vectorize; nfcc's pathb_option): the Path B compile
+    # takes the flag; the gcc backend (and the gcc passthrough) takes gcc's own option
+    -ftree-vectorize) if [ "$backend" = pathb ]; then pbf+=(--vectorize); else gccplain "$a" || :; fi ;;
+    -fno-tree-vectorize) if [ "$backend" = pathb ]; then pbf+=(--no-vectorize); else gccplain "$a" || :; fi ;;
     -fopenmp*|-fsanitize*|-fprofile*|-fcoverage*|--coverage|-ftest-coverage|-fstack-check|-fmudflap) die "$a is not supported (instrumentation would be dropped)" ;;
     -ffast-math|-Ofast|-ffinite-math-only|-funsafe-math-optimizations|-fassociative-math|-freciprocal-math|-fno-signed-zeros|-fno-math-errno) gcconly "$a" || die "$a is not supported (changes floating-point semantics)" ;;
     -funsigned-char|-fshort-enums|-fpack-struct*|-ftrapv|-fgnu89-inline|-fms-extensions|-fplan9-extensions|-fno-signed-char|-fshort-wchar|-fshort-double|-fno-short-double|-fleading-underscore|-fno-leading-underscore|-fnon-call-exceptions|-fcheck-pointer-bounds|-fsigned-bitfields|-funsigned-bitfields|-fno-asm|-fno-gnu-keywords|-ffreestanding|-fhosted|-fopenacc*|-fgnu-tm|-fcilkplus|-fsplit-stack|-fgnu-unique|-fno-gnu-unique|-fstack-reuse=*|-fno-zero-initialized-in-bss|-fgraphite*|-fsel-sched*|-fcall-used-*|-fcall-saved-*|-ffixed-*|-finstrument-functions*|-fwhole-program|-fplugin*|-fdump-*|-fchecking*)
@@ -362,6 +366,8 @@ pathb_reason() {   # pathb_reason CSRC [-iquote DIR]: pb_reason empty, and pb_op
   # gnu modes (the default, -std=gnu99, ...) do not, and glibc then turns on _DEFAULT_SOURCE: do the same.
   [ $pb_gnu = 0 ] || pb_opts=(-D_DEFAULT_SOURCE "${pb_opts[@]+"${pb_opts[@]}"}")
   [ $pathb_pic = 0 ] || pb_opts+=(--pic)   # -fPIC: the object goes into a shared object (scripts/pathb-ssa-qbe.rb, Qbe.pic)
+  # -g (the last -g option, unless -g0): the object's line table (scripts/pathb-cc.rb)
+  [ ${#dbg[@]} = 0 ] || case ${dbg[${#dbg[@]}-1]} in -g0|-ggdb0) ;; *) pb_opts+=(-g) ;; esac
   if [ $wchar16 = 1 ]; then
     # -fshort-wchar: the headers' wchar_t is unsigned short (pathb-dump), but EDG types a wide literal as the target's int, so a unit that
     # has one goes to gcc. The host preprocessor (same options) shows the literals of the headers and macros too.

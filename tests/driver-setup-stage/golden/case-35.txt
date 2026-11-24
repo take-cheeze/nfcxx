@@ -1,0 +1,8 @@
+== case 35:  --freestanding --target=linux_aarch64 --emit-c a.cpp
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: no EDG target 'linux_aarch64' in <REPO>/build/edg-base (lib_* tables: )
+-- eccp
+(none)
+-- files

@@ -1,0 +1,8 @@
+== case 15: NFCXX_PATH=b   a.cpp -o a
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: QBE not built; run scripts/setup-qbe.sh
+-- eccp
+(none)
+-- files

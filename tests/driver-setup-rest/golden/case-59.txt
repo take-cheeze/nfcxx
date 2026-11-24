@@ -1,0 +1,36 @@
+== case 59:  -shared --freestanding a.cpp -o a.so
+-- status: 1
+-- stdout
+-- stderr
+-- eccp
+eccp:
+  --c++23
+  --g++
+  --wdir
+  /
+  --no_standard_includes
+  -I<REPO>/lib
+  --no_auto_instantiation
+  -tused
+  --c_to_obj_option
+  -ffunction-sections
+  --c_to_obj_option
+  -fdata-sections
+  --c_to_obj_option
+  -Wl,--gc-sections
+  --c_to_obj_option
+  -O2
+  --c_to_obj_option
+  -fwrapv
+  --c_to_obj_option
+  -fno-strict-aliasing
+  --c_to_obj_option
+  -fkeep-static-functions
+  --c_to_obj_option
+  -fgnu89-inline
+  --c_to_obj_option
+  -fPIC
+  <WORK>/run/59/a.cpp
+  -o
+  <WORK>/run/59/a.so
+-- files

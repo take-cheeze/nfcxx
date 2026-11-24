@@ -74,33 +74,63 @@
 #                  read from NFCXX_COSMOCC, else build/cosmocc/bin/cosmocc (scripts/setup-cosmo.sh). docs/notes/cosmo.md.
 set -euo pipefail
 root=$(cd "$(dirname "$0")" && pwd)
-# -fsyntax-only: the compile without keeping its object (a full front-end and back-end pass, so it reports every error a
-# -c would; build systems and scripts use it as a type check). Run as `-c -o TMP.o`, the object removed.
-for a in "$@"; do
-  if [ "$a" = -fsyntax-only ]; then
-    fso_args=(); fso_has_o=0; fso_has_E=0
-    for b in "$@"; do
-      case $b in -fsyntax-only) ;; -o) fso_has_o=1; fso_args+=("$b") ;; -E) fso_has_E=1; fso_args+=("$b") ;; *) fso_args+=("$b") ;; esac
-    done
-    [ $fso_has_E = 1 ] && exec "$0" "${fso_args[@]}"
-    if [ $fso_has_o = 1 ]; then
-      # An explicit -o is honoured by the real compile; the type check discards it.
-      fso_dir=$(mktemp -d); trap 'rm -rf "$fso_dir"' EXIT
-      fso_new=(); fso_skip=0
-      for b in "${fso_args[@]}"; do
-        if [ $fso_skip = 1 ]; then fso_skip=0; fso_new+=("$fso_dir/x.o"); continue; fi
-        [ "$b" = -o ] && fso_skip=1; fso_new+=("$b")
-      done
-      "$0" -c "${fso_new[@]}"; exit $?
-    fi
-    fso_dir=$(mktemp -d); trap 'rm -rf "$fso_dir"' EXIT
-    "$0" -c "${fso_args[@]}" -o "$fso_dir/x.o"; exit $?
+# NFCXX_OWNED_CUDATMP and NFCXX_OWNED_TMP: the directories the Ruby driver made for this run (scripts/nfcxx.rb, under its temporary
+# root, removed when the run ends). They are read and unset here, so a driver this body re-runs makes its own. When they are not
+# set (the body run alone), the body makes its directories with mktemp -d and removes them in its exit_cleanup.
+owned_cudatmp=${NFCXX_OWNED_CUDATMP-}; owned_tmp=${NFCXX_OWNED_TMP-}; unset NFCXX_OWNED_CUDATMP NFCXX_OWNED_TMP
+early_pre_done=${NFCXX_EARLY_PRE_DONE-}; unset NFCXX_EARLY_PRE_DONE
+# NFCXX_OWNED_CTMP and NFCXX_OWNED_PTMP: the C-input and Path B object directories, made by the Ruby driver the same way.
+owned_ctmp=${NFCXX_OWNED_CTMP-}; owned_ptmp=${NFCXX_OWNED_PTMP-}; unset NFCXX_OWNED_CTMP NFCXX_OWNED_PTMP
+# NFCXX_OWNED_MODPLAN: the directory of the modules block's state and reply records, made by the Ruby driver the same way.
+owned_modplan=${NFCXX_OWNED_MODPLAN-}; unset NFCXX_OWNED_MODPLAN
+# NFCXX_OWNED_ECCP: the path of the eccp directory of the one-step build, under the Ruby driver's temporary root. The body makes it
+# (mkdir) only when it runs eccp, and the driver removes it when the run ends unless it is kept (--keep-intermediates). Run alone,
+# the body makes it with mktemp -d and eccp_cleanup removes it.
+owned_eccp=${NFCXX_OWNED_ECCP-}; unset NFCXX_OWNED_ECCP
+# NFCXX_FALLBACK_MARKER: the file fallback_gcc leaves its message in for the Ruby driver. It is read and unset here: the cache
+# key takes every NFCXX_* variable, and the marker's name is a new temporary file for each run (a key that never repeats).
+fallback_marker=${NFCXX_FALLBACK_MARKER-}; unset NFCXX_FALLBACK_MARKER
+# temp_cleanup: removes the driver's temporary directories. exit_cleanup (the body's one EXIT trap) calls it in the modes that
+# need it, and a stage's mode replaces the earlier one, so the directories of the stage that ends the run are the ones removed.
+# The eccp directory is not here: eccp_cleanup removes it when the body made it (and only when the intermediates are not kept); the Ruby driver removes its own (NFCXX_OWNED_ECCP).
+# A directory the Ruby driver owns (cudatmp_owned, tmp_owned) is not removed here: the Ruby driver removes it.
+temp_cleanup() {
+  [ -z "${tmp:-}" ] || [ -n "${tmp_owned:-}" ] || rm -rf "$tmp"
+  [ -z "${ptmp:-}" ] || [ -n "${ptmp_owned:-}" ] || rm -rf "$ptmp"
+  [ -z "${ctmp:-}" ] || [ -n "${ctmp_owned:-}" ] || rm -rf "$ctmp"
+  [ -z "${cudatmp:-}" ] || [ -n "${cudatmp_owned:-}" ] || rm -rf "$cudatmp"
+  [ -z "${fso_dir:-}" ] || rm -rf "$fso_dir"
+}
+# exit_cleanup: the body's one EXIT trap (set where the trace is, below). exit_mode is the cleanup the run has now: none,
+# temp (temp_cleanup), trace (trace_finish), temp_trace (temp_cleanup, then trace_finish) or eccp (eccp_cleanup). Each stage
+# sets it where it used to set its EXIT trap, and fallback_gcc sets none where it used to remove the trap, so the run ends
+# with the cleanup of the last trap the body set, as before.
+exit_mode=none
+exit_cleanup() {
+  case $exit_mode in
+    none) ;;
+    temp) temp_cleanup ;;
+    trace) trace_finish ;;
+    temp_trace) temp_cleanup; trace_finish ;;
+    eccp) eccp_cleanup ;;
+  esac
+}
+# fallback_gcc MESSAGE: the program is built again with the gcc backend, which reports its own errors if it fails too. The temporary
+# directories are removed first. Under the Ruby driver (scripts/nfcxx.rb sets NFCXX_FALLBACK_MARKER) the body leaves MESSAGE in that
+# marker file and exits 0 with no exit mode (exit_cleanup does nothing): the driver prints MESSAGE and runs the driver again with
+# NFCXX_BACKEND=gcc, the same arguments, and exits with its status. Run alone, the body prints MESSAGE and execs the driver, as it always did.
+fallback_gcc() {
+  temp_cleanup
+  if [ -n "$fallback_marker" ]; then
+    printf '%s\n' "$1" > "$fallback_marker"
+    exit_mode=none
+    exit 0
   fi
-done
-source "$root/scripts/wrap.sh"   # --bundle-libs and --cuda-driver= (docs/notes/bundle.md, docs/notes/cuda-driver.md)
-bundle_wrap "$root/nfcxx" "$@"   # --bundle-libs (docs/notes/bundle.md)
-cuda_driver_wrap "$root/nfcxx" "$@"   # --cuda-driver= (docs/notes/cuda-driver.md)
-set -- ${cuda_driver_args[@]+"${cuda_driver_args[@]}"}
+  echo "$1" >&2
+  exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
+}
+# -fsyntax-only is rewritten by the Ruby driver before this body runs (scripts/nfcxx-syntax-only.rb).
+# --bundle-libs and --cuda-driver= are wrapped by the Ruby driver before this body runs (scripts/wrap.rb, from scripts/nfcxx.rb).
 source "$root/scripts/trace.sh"
 edg=${EDG_BUILD:-$root/build/edg}/bin
 # The exception handling state is per thread when the EDG runtime was built so (lib_src's RUNTIME_EH_TLS, Linux targets;
@@ -109,14 +139,7 @@ edg=${EDG_BUILD:-$root/build/edg}/bin
 # stack of EH entries before.
 eh_tls=(); [ ! -f "$edg/../eh-tls" ] || eh_tls=(--nfcxx_eh_thread_local)
 
-# The host probes are scripts/host-sys.rb's (the Ruby port of the functions this driver sourced); abs_path is the bash
-# one, which runs once per argument and stays here.
-abs_path() {
-  local d b
-  d=$(dirname "$1"); b=$(basename "$1")
-  if (cd "$d" 2>/dev/null); then (cd "$d" && printf '%s/%s\n' "$(pwd -P)" "$b")
-  else printf '%s\n' "$1"; fi
-}
+# The host probes, abs_path included, are scripts/host-sys.rb's (the Ruby port of the functions this driver sourced).
 sanitize=""
 std=--c++23; out=a.out; emit_c=0; backend=${NFCXX_BACKEND:-}; files=()   # empty: chosen below (default_backend)
 cfiles=(); cflags=(); cflags_pic=(); ncpp=0; nobj=0
@@ -141,9 +164,6 @@ promote_slots=${NFCXX_PROMOTE_SLOTS:-1}; unroll=${NFCXX_UNROLL:-1}; struct_slots
 ld_name=${NFCXX_LD:-}                                  # -fuse-ld=NAME
 pathb_c=${NFCXX_PATHB_C:-}                                              # --pathb-c=gcc
 pb_flags=()   # the options scripts/pathb-cc.rb gets (--asan, --safe-pointers, --sanitize=, --ir-opt=): flags, not exported variables
-onoff() {  # onoff FLAG VALUE: on|1 -> 1, off|0 -> 0; anything else is an error
-  case $2 in on|1) echo 1 ;; off|0) echo 0 ;; *) echo "nfcxx: $1 takes on or off (got '$2')" >&2; exit 2 ;; esac
-}
 # CUDA kernel names are obfuscated (docs/notes/gpu.md, "Kernel name obfuscation"): --obfuscate-kernels, or NFCXX_OBFUSCATE_KERNELS=1
 # in the environment (which reaches a CMake build through nfcxx-cuda without any change to its command line).
 obfuscate=0; case ${NFCXX_OBFUSCATE_KERNELS:-0} in 0|"") ;; *) obfuscate=1 ;; esac
@@ -153,7 +173,7 @@ moddir=""   # --module-dir=DIR: where C++ module interface files are written and
 sysdirs=(); srcs=(); ppflags=(); pie_opts=(); xlang=""; stdin_src=0; preinc=(); isa=(); cuda_opts=()
 # A .cu input is rewritten to C++ before the front end (tools/cuda-rewrite: launches become calls of
 # __nfcxx_cuda_launch), and the runtime helper lib/cuda/nfcxx_cuda.h is included first. The copy goes in a temp
-# directory that the EXIT traps below remove. Its basename is the source's, so default output names are unchanged.
+# directory that exit_cleanup removes. Its basename is the source's, so default output names are unchanged.
 cudatmp=""
 # Device code of a .cu file: its __global__ and __device__ functions go through the Path B front end
 # (scripts/pathb-dump.rb), the IR-to-PTX emitter (tools/pathb-ptx-emit) and ptxas for NFCXX_SM (default 75). The kernels
@@ -162,131 +182,25 @@ cudatmp=""
 # the host copy with a registration tail (pathb-ptx-emit --embed), so the one object holds the host code and its device
 # images. A file with no kernel gets no device image.
 # The cache helpers (the compile cache below and the device image cache of cu_rewrite).
-cache_sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }
-cache_log() {  # cache_log TEXT: appends TEXT as one write to NFCXX_CACHE_LOG when --cache-log (NFCXX_CACHE_LOG) is set (a diagnostic; no effect on the key).
-  # The append is scripts/nfcxx-cache-io.rb log (a lock shared with the parallel compiles, one write per call).
-  [ -n "$cache_log_file" ] || return 0
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-io.rb" log "$cache_log_file" "$*"
-}
-# The remote tier (NFCXX_CACHE_REMOTE=gha). An entry is the object and its records, as one tar keyed by the cache key. A
-# remote failure is a miss or a store that did not happen, with a note on stderr: a build does not fail for its cache.
-# scripts/nfcxx-cache-io.rb does the work (the temporary entry, the move into place, the GHA client's calls and the note).
-cache_remote_get() {  # cache_remote_get KEY ENTRY: fills ENTRY (a directory) from the remote cache; fails on a miss or an error
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-io.rb" remote-get "$1" "$2"
-}
-cache_remote_put() {  # cache_remote_put KEY ENTRY: stores the files of the local entry ENTRY remotely
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-io.rb" remote-put "$1" "$2" || true
-}
 # The rewritten copy of each .cu input is made after the arguments are read (cu_prepare), so that -c and -o are known:
-# with -c the copy goes to the per-user cache (see cu_prepare), not to the user's tree. Otherwise it goes in a temp directory.
+# with -c the copy goes to the per-user cache (scripts/nfcxx-cu-cpp2-prepare.rb), not to the user's tree. Otherwise it goes in a temp directory.
 cu_inputs=()
-cu_keep=""   # with -c: the directory the device images are kept in (the link re-reads the copy, and the copy names them)
-cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs and files in place of the source
-  [ ${#cu_inputs[@]} -gt 0 ] || return 0
-  cudatmp=$(mktemp -d); trap 'rm -rf "$cudatmp"; trace_finish' EXIT
-  local dir=$cudatmp
-  if [ $compile_only = 1 ]; then
-    # The copy must outlive the compile: the prelinker re-reads it when it needs a template instance at link time,
-    # and a failed link deletes the objects. It goes to a per-user cache, keyed by the absolute object path, and the
-    # object records that absolute path, so the link finds it from any directory.
-    local obj=$out; [ $outset = 1 ] || obj=$(basename "${cu_inputs[0]}" .cu).o
-    # The directory is scripts/nfcxx-cuda-device.rb's (--cu-dir: the key is the SHA-1 of realpath -m OBJ, as before).
-    dir=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cuda-device.rb" --cu-dir="$obj") || exit $?
-    mkdir -p "$dir"
-    cu_keep=$dir
+cpp2_inputs=()   # the .cpp2 inputs (cu_prepare translates them after the .cu rewrites)
+cu_prepare() {  # cu_prepare: rewrites every .cu input, then translates every .cpp2 input; one step (scripts/nfcxx-cu-cpp2-prepare.rb both)
+  [ ${#cu_inputs[@]} -gt 0 ] || [ ${#cpp2_inputs[@]} -gt 0 ] || return 0
+  if [ ${#cu_inputs[@]} -gt 0 ]; then
+    if [ -n "$owned_cudatmp" ]; then cudatmp=$owned_cudatmp; cudatmp_owned=1; exit_mode=trace
+    else cudatmp=$(mktemp -d); exit_mode=temp_trace; fi
+  else
+    if [ -n "$owned_cudatmp" ]; then cudatmp=$owned_cudatmp; cudatmp_owned=1
+    else cudatmp=$(mktemp -d); exit_mode=temp; fi
   fi
-  # The loop over the inputs is scripts/nfcxx-cuda-device.rb --cu-prepare: the copies, the -I of each source directory, the
-  # rewrite of each input (in that process) and the state it changes, which come back as the groups sdirs, copies, cuda and
-  # preinc. The state goes in as records (state_put). The bash keeps the array edits (srcs, files, cflags) and sets cuda_opts
-  # and preinc from the reply. A failing rewrite ends the driver with its status (the reply's file is read after the call).
-  local rec group done=0 idx src copy i bpid=$BASHPID inf=$cudatmp/cu-in.rec outf=$cudatmp/cu-out.rec
-  local cu_sdirs=() cu_copies=() cu_cuda=() cu_pre=()
-  {
-    state_put root "$root"; state_put tmp "$cudatmp"; state_put keep "$cu_keep"; state_put bash_pid "$bpid"
-    state_put trace_unit "${trace_unit:-${NFCXX_TRACE_UNIT:-}}"; state_put dir "$dir"
-    state_put inputs ${cu_inputs[@]+"${cu_inputs[@]}"}; state_put cflags ${cflags[@]+"${cflags[@]}"}
-    if [ "$obfuscate" = 1 ]; then state_put obfuscate 1; else state_put obfuscate 0; fi
-    if [ "$ir_opt_set" = 1 ]; then state_put ir_opt "$ir_opt"; else state_put ir_opt; fi
-    state_put promote_slots "$promote_slots"; state_put unroll "$unroll"; state_put struct_slots "$struct_slots"
-    state_put cache_dir "$cache_dir"; state_put cache_log "${cache_log_file:-}"
-    state_put preinc ${preinc[@]+"${preinc[@]}"}; state_put cuda ${cuda_opts[@]+"${cuda_opts[@]}"}
-    state_put edg_launch "${NFCXX_CUDA_EDG_LAUNCH:-1}"
-  } > "$inf"
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-cuda-device.rb" --cu-prepare < "$inf" > "$outf" || exit $?
-  while IFS= read -r -d '' rec; do
-    case $rec in
-      k*) group=${rec:1} ;;
-      v*)
-        case $group in
-          sdirs) cu_sdirs+=("${rec:1}") ;;
-          copies) cu_copies+=("${rec:1}") ;;
-          cuda) cu_cuda+=("${rec:1}") ;;
-          preinc) cu_pre+=("${rec:1}") ;;
-        esac ;;
-      x*) printf '%s\n' "${rec:1}" >&2; exit 2 ;;
-      z) done=1 ;;
-    esac
-  done < "$outf"
-  [ $done = 1 ] || { echo "nfcxx: scripts/nfcxx-cuda-device.rb stopped before its end (the .cu inputs are incomplete)" >&2; exit 1; }
-  for idx in "${!cu_inputs[@]}"; do
-    src=${cu_inputs[$idx]}; copy=${cu_copies[$idx]}
-    cflags+=("-I${cu_sdirs[$idx]}"); files+=("-I${cu_sdirs[$idx]}")
-    # if, not `[ ] && x`: a loop whose last test fails returns non-zero, and set -e would end the driver.
-    for i in "${!srcs[@]}"; do if [ "${srcs[$i]}" = "$src" ]; then srcs[$i]=$copy; fi; done
-    for i in "${!files[@]}"; do if [ "${files[$i]}" = "$src" ]; then files[$i]=$copy; fi; done
-  done
-  cuda_opts=(${cu_cuda[@]+"${cu_cuda[@]}"}); preinc=(${cu_pre[@]+"${cu_pre[@]}"})
-}
-# A .cpp2 input (experimental, docs/notes/cpp2.md) is translated to C++1 by cppfront (scripts/setup-cppfront.sh) before the
-# front end, the way .cu inputs are rewritten: the copy has the source's basename, so default output names are unchanged, and
-# its #line directives name the .cpp2 file. cppfront writes cpp2_post_build.sh into its working directory, so it runs in a
-# scratch directory. The metaclass build steps that file would hold are not run. cpp2util.h, which the copy includes, comes from the pinned source.
-cpp2_inputs=()
-cpp2_prepare() {  # cpp2_prepare: translates every .cpp2 input and puts its translation in srcs and files in place of the source
-  [ ${#cpp2_inputs[@]} -gt 0 ] || return 0
-  local cppfront_src=${CPPFRONT_SRC:-$root/build/cppfront-src}
-  [ -x "$root/build/cppfront" ] || { echo "nfcxx: cppfront is not built; run scripts/setup-cppfront.sh (docs/notes/cpp2.md)" >&2; exit 2; }
-  [ -f "$cppfront_src/include/cpp2util.h" ] || { echo "nfcxx: no cpp2util.h under $cppfront_src; run scripts/setup-cppfront.sh" >&2; exit 2; }
-  if [ -z "${cudatmp:-}" ]; then cudatmp=$(mktemp -d); trap 'rm -rf "$cudatmp"' EXIT; fi
-  local dir=$cudatmp
-  if [ $compile_only = 1 ]; then
-    # As for .cu inputs (cu_prepare): the translation outlives the compile, because the prelinker re-reads it at link time.
-    local obj=$out; [ $outset = 1 ] || obj=$(basename "${cpp2_inputs[0]}" .cpp2).o
-    local key; key=$(realpath -m "$obj" | sha1sum | cut -c1-16)
-    dir=${NFCXX_CU_CACHE:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/nfcxx}/cpp2/$key
-    mkdir -p "$dir"
-  fi
-  local scratch; scratch=$(mktemp -d -p "$cudatmp")
-  # The translations are scripts/nfcxx-cpp2.rb --prepare (the source directories, and cppfront in the scratch directory, from
-  # the records of the driver's state); the bash keeps the array edits. A failing step ends the driver with its status (the
-  # reply's file is read after the call).
-  local rec group done=0 idx src copy i inf=$cudatmp/cpp2-in.rec outf=$cudatmp/cpp2-out.rec
-  local cpp2_sdirs=() cpp2_copies=()
-  {
-    state_put root "$root"; state_put dir "$dir"; state_put scratch "$scratch"; state_put cppfront "$root/build/cppfront"
-    state_put inputs ${cpp2_inputs[@]+"${cpp2_inputs[@]}"}
-  } > "$inf"
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-cpp2.rb" --prepare < "$inf" > "$outf" || exit $?
-  while IFS= read -r -d '' rec; do
-    case $rec in
-      k*) group=${rec:1} ;;
-      v*)
-        case $group in
-          sdirs) cpp2_sdirs+=("${rec:1}") ;;
-          copies) cpp2_copies+=("${rec:1}") ;;
-        esac ;;
-      x*) printf '%s\n' "${rec:1}" >&2; exit 2 ;;
-      z) done=1 ;;
-    esac
-  done < "$outf"
-  [ $done = 1 ] || { echo "nfcxx: scripts/nfcxx-cpp2.rb stopped before its end (the translations are incomplete)" >&2; exit 1; }
-  for idx in "${!cpp2_inputs[@]}"; do
-    src=${cpp2_inputs[$idx]}; copy=${cpp2_copies[$idx]}
-    cflags+=("-I${cpp2_sdirs[$idx]}"); files+=("-I${cpp2_sdirs[$idx]}")
-    for i in "${!srcs[@]}"; do if [ "${srcs[$i]}" = "$src" ]; then srcs[$i]=$copy; fi; done
-    for i in "${!files[@]}"; do if [ "${files[$i]}" = "$src" ]; then files[$i]=$copy; fi; done
-  done
-  cflags+=("-I$cppfront_src/include"); files+=("-I$cppfront_src/include")
+  # The records are planned by scripts/nfcxx-cu-records.rb from the arguments as given (the same loop and environment defaults,
+  # with the .cpp2 inputs as well). The copies and translations go to the statements the body evals.
+  local inf=$cudatmp/cu-in.rec prep
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-cu-records.rb" "$root" "$cudatmp" "$BASHPID" -- "${args0[@]}" > "$inf" || exit $?
+  prep=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cu-cpp2-prepare.rb" both < "$inf") || exit $?
+  eval "$prep"
 }
 # A CUDA_HOME outside /usr is still a system directory for the rewriter (its headers are not inlined into the device unit),
 # so a CUDA_HOME-shaped directory from PyPI wheels (scripts/fetch-cudart-wheel.sh) behaves like the toolkit's.
@@ -294,49 +208,15 @@ cpp2_prepare() {  # cpp2_prepare: translates every .cpp2 input and puts its tran
 # NFCXX_CUDA_TARGET=amdgpu: lib/hip (the CUDA runtime on HIP, lib/hip/cuda_runtime.h) is a system directory for the rewriter too.
 # (and ROCm's include directory, where the HIP headers are: the host copy's -I is the caller's.)
 [ "${NFCXX_CUDA_TARGET:-nvidia}" = amdgpu ] && export NFCXX_SYSTEM_PATHS="$root/lib/hip:${ROCM:-/opt/rocm}/include${NFCXX_SYSTEM_PATHS:+:$NFCXX_SYSTEM_PATHS}"
-# ensure_tool DIR OUT: builds the repo tool in DIR (its build.ninja) into OUT on first use. The driver runs in parallel
-# (one process per source file), so the build is serialized by a lock directory: the first run builds, the others wait
-# and find OUT. ninja's output is not hidden: a failed build says why.
-ensure_tool() {
-  local dir=$1 out=$2 lock=$2.lock waited=0
-  # Fresh when the binary is newer than the sources in DIR (a binary from an older checkout is rebuilt, not reused).
-  tool_fresh() { [ -x "$out" ] && [ -z "$(find "$dir" -maxdepth 1 -type f \( -name '*.c' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.rb' \) -newer "$out" -print -quit 2>/dev/null)" ]; }
-  tool_fresh && return 0
-  mkdir -p "$(dirname "$out")"   # a fresh checkout has no build/: the lock mkdir would fail and every run would wait
-  while ! mkdir "$lock" 2>/dev/null; do
-    tool_fresh && return 0
-    sleep 0.2; waited=$((waited + 1))
-    [ "$waited" -lt 3000 ] || { echo "nfcxx: $lock is stuck (remove it if no build is running)" >&2; return 1; }
-  done
-  local rc=0
-  tool_fresh || CXX=${NFCXX_CXX:-g++} ninja -C "$dir" >&2 || rc=$?
-  rmdir "$lock"
-  return $rc
-}
-# The rewriter: the C++ tool (build/cuda-rewrite, built from tools/cuda-rewrite on first use).
-ensure_tool "$root/tools/cuda-rewrite" "$root/build/cuda-rewrite" || exit $?
-# A compile and link (or a link of objects) runs eccp in a temporary directory, which the EXIT trap removes. eccp writes
+# The rewriter: the C++ tool (build/cuda-rewrite, built from tools/cuda-rewrite on first use) by scripts/nfcxx-ensure-tool.rb
+# (DIR OUT: its build is serialized by the lock directory OUT.lock; tests/driver-ensure-tool checks it against goldens).
+"${RUBY:-ruby}" "$root/scripts/nfcxx-ensure-tool.rb" "$root/tools/cuda-rewrite" "$root/build/cuda-rewrite" || exit $?
+# A compile and link (or a link of objects) runs eccp in a temporary directory, which exit_cleanup removes (mode eccp). eccp writes
 # <stem>.o, <stem>.ii and <stem>.ti into its working directory, and the prelinker reads the .ii and .ti there, so the
 # records of one build could be read by the next build in the same directory. The arguments of such a run are made
-# absolute first (ecp_args), because its working directory changes. A -c compile is not moved: the link that follows reads
+# absolute first (the -isystem list below), because its working directory changes. A -c compile is not moved: the link that follows reads
 # its <stem>.ii and <stem>.ti beside the object (see "-c" before the eccp call).
-moves=0; eccp_dir=""
-ecp_args() {  # ecp_args ARG...: ARG as eccp receives it, for each ARG in order, into ecp_list (one ruby call for all of them)
-  local rec done=0 group=
-  ecp_list=()
-  [ $# -gt 0 ] || return 0
-  # the port (tests/nfcxx-ecp-arg/run.sh checks it against the bash original): NUL-separated records, a group "k ecp" with one
-  # v ANSWER per argument, and the end marker z, which the port writes last: without it the helper stopped early and the driver stops
-  while IFS= read -r -d '' rec; do
-    case $rec in
-      k*) group=${rec:1} ;;
-      v*) if [ "$group" = ecp ]; then ecp_list+=("${rec:1}"); fi ;;
-      z) done=1 ;;
-    esac
-  done < <("${RUBY:-ruby}" "$root/scripts/ecp-arg.rb" --batch "$moves" "$@")
-  [ $done = 1 ] || { echo "nfcxx: scripts/ecp-arg.rb stopped before its end (the argument answers are incomplete)" >&2; exit 1; }
-  return 0
-}
+moves=0; eccp_dir=""; eccp_owned=""
 state_put() {  # state_put NAME VALUE...: one group of the records scripts/driver-state.rb reads (k NAME, then v VALUE for each)
   local n=$1 v
   shift
@@ -359,194 +239,189 @@ eccp_plan_input() {  # the records of the eccp command line: the call's arrays a
 eccp_plan() {  # eccp_plan: the eccp command line (eccp_argv), its exports (eccp_envs) and its directory (eccp_cd), from
   # scripts/nfcxx-eccp-plan.rb (tests/nfcxx-eccp-plan/run.sh checks it against the bash's own construction). The plan also
   # plans the link arguments (eflist and userinc, from the files), and refuses an option it cannot keep: the status is the
-  # plan's, read from the reply file after the call (a refused option ends the driver with 2, as the bash did). The keep note
+  # plan's, read from the s record after the stream (a refused option ends the driver with 2, as the bash did). The keep note
   # is printed by the port.
-  local rec done=0 reply rc
+  local rec done=0 prc=0
   eccp_argv=(); eccp_envs=(); eccp_cd=""
-  local rdir; rdir=$(mktemp -d) || exit $?
-  reply=$rdir/reply.rec
-  eccp_plan_input | "${RUBY:-ruby}" "$root/scripts/nfcxx-eccp-plan.rb" "$eccp_dir" "$keep_intermediates" "$shared" > "$reply" \
-    || { rc=$?; rm -rf "$rdir"; exit $rc; }
+  # the plan's records stream from the process substitution (NUL-separated: a, e, d, z); the bash appends the plan's status as s
+  # after its end record, and the loop reads to the end of the stream, so no temporary file is made
   while IFS= read -r -d "" rec; do
     case $rec in
       a*) eccp_argv+=("${rec:1}") ;;
       e*) eccp_envs+=("${rec:1}") ;;
       d*) eccp_cd=${rec:1} ;;
       z) done=1 ;;
+      s*) prc=${rec:1} ;;
     esac
-  done < "$reply"
-  rm -rf "$rdir"
+  done < <(eccp_plan_input | "${RUBY:-ruby}" "$root/scripts/nfcxx-eccp-plan.rb" "$eccp_dir" "$keep_intermediates" "$shared"; printf 's%d\0' $?)
+  [ "$prc" = 0 ] || exit "$prc"
   [ $done = 1 ] || { echo "nfcxx: scripts/nfcxx-eccp-plan.rb stopped before its end (the eccp command line is incomplete)" >&2; exit 1; }
 }
-eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary directory (and of the C-input and .cu steps)
+eccp_cleanup() {  # the exit mode eccp: a build that runs eccp in a temporary directory (and the C-input and .cu steps)
   local rc=$?
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" cleanup "$keep_intermediates" "$eccp_dir" "${cudatmp:-}" "${ctmp:-}"   # the removals (tests/nfcxx-link/run.sh)
+  local cudatmp_arg=${cudatmp:-}; [ -z "${cudatmp_owned:-}" ] || cudatmp_arg=   # the Ruby driver removes its own cudatmp
+  local ctmp_arg=${ctmp:-}; [ -z "${ctmp_owned:-}" ] || ctmp_arg=   # nor its own ctmp
+  local eccp_arg=$eccp_dir; [ -z "$eccp_owned" ] || eccp_arg=   # nor the eccp directory the Ruby driver made (it removes it, unless kept)
+  [ "${NFCXX_TMP_OWNED:-}" != 1 ] || eccp_arg=   # nor the eccp directory, when the Ruby driver owns the temp root
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" cleanup "$keep_intermediates" "$eccp_arg" "$cudatmp_arg" "$ctmp_arg"   # the removals (tests/nfcxx-link/run.sh)
+  [ -n "$eccp_owned" ] || temp_cleanup   # the driver owns every directory of a run that owns the eccp directory
   trace_finish
   return $rc
 }
-# C++ modules (docs/notes/modules.md): the source scans are scripts/nfcxx-modscan.rb (is-module, decl-name, check; they read
-# the declarations at the start of a line only; tests/nfcxx-modscan/oracle-wrappers.sh is the bash they replaced).
-# mod_build_program: a program with modules is built by scripts/nfcxx-modules.rb build (docs/notes/modules.md): each source is
-# compiled on its own (EDG takes one translation unit per call with modules on), the interface units first in dependency order,
-# then the objects are linked; each compile is this driver again. The build's temporary directory is the Ruby's. The EXIT trap
-# is left as it is, so cu_prepare's cleanup and trace_finish still run. A failing step ends the build with its status (set -e).
-mod_build_program() {
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-modules.rb" build "$root" "$out" "${moddir:-}" "${#srcs[@]}" "${srcs[@]}" "${nfcxx_argv[@]}"
-  exit $?
+eccp_run() {  # eccp_run: the eccp call of the plan (eccp_argv, in eccp_cd, with eccp_envs exported for it), and its span
+  # scripts/nfcxx-eccp-run.rb runs it: its status ends the body here (set -e), no span is recorded for a failed call, and the
+  # cache store and the rest are not reached, as before
+  local envs=() e
+  for e in ${eccp_envs[@]+"${eccp_envs[@]}"}; do envs+=("--env=$e"); done
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-eccp-run.rb" ${eccp_cd:+"--cd=$eccp_cd"} ${envs[@]+"${envs[@]}"} -- "${eccp_argv[@]}"
+}
+modules_plan_input() {  # the records of the modules block: the state scripts/nfcxx-modules-plan.rb reads (its header lists the groups)
+  state_put root "$root"; state_put out "$out"; state_put moddir "${moddir:-}"; state_put std "$std"
+  state_put emit_c "$emit_c"; state_put compile_only "$compile_only"
+  state_put cfiles ${cfiles[@]+"${cfiles[@]}"}; state_put srcs ${srcs[@]+"${srcs[@]}"}; state_put argv ${nfcxx_argv[@]+"${nfcxx_argv[@]}"}
 }
 nfcxx_argv=("$@")   # the command as given: the compile cache keys on it (see cache_key)
 args0=("$@")   # the arguments as given: the SYCL two-pass build below re-runs the driver with them
-# BEGIN the argument loop: scripts/nfcxx-loop.rb --records reads the arguments and answers the state they leave; this block
-# sets that state. The records are NUL-terminated: "s NAME=VALUE" a scalar the loop assigns; "a NAME=VALUE" an element the
-# loop appends to an array; "x MESSAGE" an argument the loop refuses (printed; status 2); "u OPTION" a value option given
-# last (set -u ends the driver, as the bash loop did: "$2: unbound variable"); "z" the end marker, written only on success.
-# A planner that stops before "z" ends the driver with status 1, so a crash is never silent.
-loop_set() {  # loop_set NAME=VALUE: the loop's scalar NAME
-  printf -v "${1%%=*}" '%s' "${1#*=}"
-}
-loop_append() {  # loop_append NAME=VALUE: appends VALUE to the loop's array NAME
-  case ${1%%=*} in
-    files) files+=("${1#*=}") ;;
-    cflags) cflags+=("${1#*=}") ;;
-    cfiles) cfiles+=("${1#*=}") ;;
-    cu_inputs) cu_inputs+=("${1#*=}") ;;
-    cpp2_inputs) cpp2_inputs+=("${1#*=}") ;;
-    srcs) srcs+=("${1#*=}") ;;
-    ppflags) ppflags+=("${1#*=}") ;;
-    pie_opts) pie_opts+=("${1#*=}") ;;
-    preinc) preinc+=("${1#*=}") ;;
-    sysdirs) sysdirs+=("${1#*=}") ;;
-    isa) isa+=("${1#*=}") ;;
-    diag_opts) diag_opts+=("${1#*=}") ;;
-    asanopts) asanopts+=("${1#*=}") ;;
-    *) echo "nfcxx: scripts/nfcxx-loop.rb sent an unknown array (${1%%=*})" >&2; exit 1 ;;
-  esac
-}
-loop_no_value() { : "$2"; }   # a value option given last: $2 is unset here (set -u ends the driver)
-# the ld.NAME programs that exist, for -fuse-ld=NAME (the planner does not ask the shell)
-loop_ld=""
-for loop_a in "$@"; do
-  case $loop_a in
-    -fuse-ld=*) loop_n=${loop_a#-fuse-ld=}
-                if [ -n "$loop_n" ] && command -v "ld.$loop_n" >/dev/null 2>&1; then loop_ld+="$loop_n,"; fi ;;
-  esac
-done
-loop_recs=(); loop_done=0; loop_refused=""; loop_missing=""
-while IFS= read -r -d '' loop_rec; do
-  case $loop_rec in
-    z) loop_done=1 ;;
-    x*) loop_refused=${loop_rec:1} ;;
-    u*) loop_missing=${loop_rec:1} ;;
-    *) loop_recs+=("$loop_rec") ;;
-  esac
-done < <("${RUBY:-ruby}" "$root/scripts/nfcxx-loop.rb" --records --ld-available="$loop_ld" -- "$@")
-if [ -n "$loop_refused" ]; then printf '%s\n' "$loop_refused" >&2; exit 2; fi
-if [ -n "$loop_missing" ]; then loop_no_value "$loop_missing"; fi
-[ $loop_done = 1 ] || { echo "nfcxx: scripts/nfcxx-loop.rb stopped before its end (the argument state is incomplete)" >&2; exit 1; }
-for loop_rec in ${loop_recs[@]+"${loop_recs[@]}"}; do
-  case $loop_rec in
-    s*) loop_set "${loop_rec:1}" ;;
-    a*) loop_append "${loop_rec:1}" ;;
-  esac
-done
+# BEGIN the argument loop: scripts/nfcxx-loop.rb --bash-state reads the arguments and prints the statements that set the state
+# they leave (the loop's scalars and arrays, from the planner's records; the setup above has set the NFCXX_* defaults). A refusal
+# is its message on standard error, with status 2 (the driver ends with it). A value option given last is a refusal too:
+# "nfcxx: OPTION needs a value", status 1. A planner that stops before its end ends the driver with 1.
+# The Ruby driver (scripts/nfcxx.rb) ran the loop before this body, on these arguments, and passes its result in the environment:
+# NFCXX_LOOP_STATUS (0: NFCXX_LOOP_STATE is the statements; otherwise the refusal's status, and NFCXX_LOOP_STATE its message).
+# Without it (the arguments the wrappers rewrite, or the body run alone) the loop runs here.
+if [ "${NFCXX_LOOP_STATUS+x}" = x ]; then
+  loop_status=$NFCXX_LOOP_STATUS; loop_state=${NFCXX_LOOP_STATE-}
+  unset NFCXX_LOOP_STATUS NFCXX_LOOP_STATE
+  if [ "$loop_status" != 0 ]; then printf '%s' "$loop_state" >&2; exit "$loop_status"; fi
+else
+  loop_state=$("${RUBY:-ruby}" "$root/scripts/nfcxx-loop.rb" --bash-state -- "$@") || exit $?
+fi
+eval "$loop_state"
 shift $#
 # END the argument loop
-[ $((ncpp + nobj + ${#cfiles[@]} + stdin_src)) -gt 0 ] || { echo "nfcxx: no input files" >&2; exit 2; }
-# --emit-hip: the .cu input as HIP source on stdout, for hipcc (tools/cuda-rewrite --hip). Nothing is compiled, and the
-# -I, -D and -U options go to the rewriter as they go to the host copy.
-if [ "${emit_hip:-0}" = 1 ]; then
-  [ ${#cu_inputs[@]} = 1 ] || { echo "nfcxx: --emit-hip takes one .cu file" >&2; exit 2; }
-  hip_opts=(); for f in ${cflags[@]+"${cflags[@]}"}; do case $f in -I*|-D*|-U*) hip_opts+=("$f");; esac; done
-  exec "$root/build/cuda-rewrite" --hip ${hip_opts[@]+"${hip_opts[@]}"} "${cu_inputs[0]}"
-fi
-# SYCL kernel integration (docs/notes/sycl-kernel-builtins.md). A -c compile of one C++ source that includes the oneAPI SYCL
-# headers (a -I directory holding sycl/detail/kernel_desc.hpp) runs in two passes, as the real toolchain's integration headers
-# do. Pass 1 (NFCXX_SYCL_DUMP) records each kernel's stable name, closure size and parameters; scripts/sycl-integration-header.rb
-# turns them into KernelInfoData specializations; pass 2 compiles a wrapper that includes sycl.hpp, that header and the source,
-# with __SYCL_UNNAMED_LAMBDA__ defined as the real toolchain defines it. Other sources are unchanged.
-# The pass decision and the two passes are scripts/nfcxx-sycl.rb's (tests/nfcxx-sycl/run.sh checks them against the bash block).
-if "${RUBY:-ruby}" "$root/scripts/nfcxx-sycl.rb" check ${args0[@]+"${args0[@]}"}; then
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-sycl.rb" run --root="$root" ${args0[@]+"${args0[@]}"}; exit $?
-fi
-[ $compile_only = 1 ] || moves=1   # a -c compile stays in the user's directory (see ecp_args)
+# The early exits: the refusals of the state above and the --emit-hip route are scripts/nfcxx-early-exit.rb's (pre: status 2 is a
+# refusal, its message on stderr; status 3 is the route). early_records gives the state as records.
+early_rec() { printf 's%s\0' "$1"; }
+early_records() {
+  local kv
+  for kv in "ncpp=$ncpp" "nobj=$nobj" "cfiles_n=${#cfiles[@]}" "cu_n=${#cu_inputs[@]}" "stdin_src=$stdin_src" \
+    "emit_hip=${emit_hip:-0}" "compile_only=$compile_only" "emit_c=$emit_c" "xlang=$xlang" "depmode=$depmode" \
+    "dialect=$dialect" "edg=$edg"; do
+    early_rec "$kv"
+  done
+}
+early_status=0
+# NFCXX_EARLY_PRE_DONE: the Ruby driver ran this check on the loop's state before the body (scripts/nfcxx.rb early_pre); unset here
+if [ -z "${early_pre_done:-}" ]; then "${RUBY:-ruby}" "$root/scripts/nfcxx-early-exit.rb" pre < <(early_records) || early_status=$?; fi
+case $early_status in
+  0) ;;
+  3)  # --emit-hip: the .cu input as HIP source on stdout, for hipcc (tools/cuda-rewrite --hip). Nothing is compiled, and the
+      # -I, -D and -U options go to the rewriter as they go to the host copy.
+    hip_opts=(); for f in ${cflags[@]+"${cflags[@]}"}; do case $f in -I*|-D*|-U*) hip_opts+=("$f");; esac; done
+    exec "$root/build/cuda-rewrite" --hip ${hip_opts[@]+"${hip_opts[@]}"} "${cu_inputs[0]}" ;;
+  *) exit $early_status ;;
+esac
+[ $compile_only = 1 ] || moves=1   # a -c compile stays in the user's directory (see the -isystem list)
 # The unit of the time log's lines (scripts/trace.sh): the first source, else the output. Tracing starts before the .cu
 # and .cpp2 inputs are prepared, whose stages it records.
+# The trace unit's assignment is planned by scripts/nfcxx-setup.rb (trace_unit_text) and passed in NFCXX_SETUP_TRACE_UNIT when the
+# driver planned the setup; the body evals it here, where the bash assigned it.
+if [ "${NFCXX_SETUP_TRACE_UNIT+x}" = x ]; then
+  setup_trace_unit=$NFCXX_SETUP_TRACE_UNIT; unset NFCXX_SETUP_TRACE_UNIT
+  eval "$setup_trace_unit"
+else
 trace_unit=${srcs[0]-$out}; export NFCXX_TRACE_UNIT=$trace_unit   # the back-end scripts it runs log under it too
+fi
 # The time log is read by every script that sources scripts/trace.sh (the gcc-cc that eccp runs, ...): the one setting that is
 # handed to the processes below as an environment variable, as NFCXX_TRACE is (trace_begin).
-[ -z "$time_log" ] || export NFCXX_TIME_LOG=$(abs_path "$time_log")
-[ -z "$trace" ] || trace_begin "$trace"
+[ -z "$time_log" ] || export NFCXX_TIME_LOG=$("${RUBY:-ruby}" "$root/scripts/host-sys.rb" abs_path "$time_log")
+exit_mode=none
+if [ -n "$trace" ]; then trace_begin "$trace"; exit_mode=trace; fi
+trap exit_cleanup EXIT   # the body's one EXIT trap (trace_begin's own trap is replaced here)
 cu_prepare
-cpp2_prepare
+# preprocess_records: the state of the -E command line, as NUL-terminated records for scripts/nfcxx-preprocess.rb (s NAME=VALUE for
+# the scalars; e, c, d, i and r for the ppflags, cflags, sysdirs, forced includes and sources).
+preprocess_records() {
+  local a
+  pp_rec() { printf '%s\0' "$1$2"; }
+  pp_rec s "host=${NFCXX_CXX:-g++}"; pp_rec s "std=$std"; pp_rec s "xlang=$xlang"; pp_rec s "outset=$outset"
+  pp_rec s "out=$out"; pp_rec s "stdin_src=$stdin_src"
+  for a in ${ppflags[@]+"${ppflags[@]}"}; do pp_rec e "$a"; done
+  for a in ${cflags[@]+"${cflags[@]}"}; do pp_rec c "$a"; done
+  for a in ${sysdirs[@]+"${sysdirs[@]}"}; do pp_rec d "$a"; done
+  for a in ${preinc[@]+"${preinc[@]}"}; do pp_rec i "$a"; done
+  for a in ${srcs[@]+"${srcs[@]}"}; do pp_rec r "$a"; done
+}
 if [ $preprocess = 1 ]; then
-  # -E: the host C++ compiler preprocesses, as nfcc does for C (build systems run the compiler this way).
-  hostcxx=${NFCXX_CXX:-g++}
-  pp_out=(); [ $outset = 0 ] || pp_out=(-o "$out")
-  pp_x=(); [ -z "$xlang" ] || pp_x=(-x "$xlang")
-  pp_in=(); [ $stdin_src = 0 ] || pp_in=(-)
-  pp_pre=(); for f in ${preinc[@]+${preinc[@]+"${preinc[@]}"}}; do pp_pre+=(-include "$f"); done
-  exec "$hostcxx" -E "-std=${std#--}" ${pp_x[@]+${pp_x[@]+"${pp_x[@]}"}} ${ppflags[@]+${ppflags[@]+"${ppflags[@]}"}} ${cflags[@]+${cflags[@]+"${cflags[@]}"}} \
-    ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"} ${pp_pre[@]+${pp_pre[@]+"${pp_pre[@]}"}} ${srcs[@]+${srcs[@]+"${srcs[@]}"}} ${pp_in[@]+${pp_in[@]+"${pp_in[@]}"}} ${pp_out[@]+"${pp_out[@]}"}
+  # -E: the host C++ compiler preprocesses, as nfcc does for C (build systems run the compiler this way). The command line is
+  # scripts/nfcxx-preprocess.rb's, from the records of preprocess_records.
+  preprocess_argv=(); while IFS= read -r -d "" pp_arg; do preprocess_argv+=("$pp_arg"); done < <(preprocess_records | "${RUBY:-ruby}" "$root/scripts/nfcxx-preprocess.rb")
+  [ ${#preprocess_argv[@]} -gt 0 ] || { echo "nfcxx: scripts/nfcxx-preprocess.rb planned no command" >&2; exit 2; }
+  exec "${preprocess_argv[@]}"
 fi
-if [ $stdin_src = 1 ]; then
-  echo "nfcxx: a source on stdin is supported only with -E" >&2; exit 2
-fi
-case $xlang in ""|c++|none) ;; *) echo "nfcxx: -x $xlang: only C++ sources (use nfcc for C)" >&2; exit 2 ;; esac
-if [ -n "$depmode" ] && [ $compile_only = 0 ]; then
-  echo "nfcxx: $depmode needs -c (dependency files are written for a compile only)" >&2; exit 2
-fi
-if [ $ncpp -gt 0 ] || [ $emit_c = 1 ] || { [ $nobj -gt 0 ] && [ ${#cfiles[@]} = 0 ]; }; then
-  [ -x "$edg/eccp" ] || { echo "nfcxx: EDG not built; run scripts/setup-edg.sh" >&2; exit 2; }
-fi
-case $dialect in g++|clang) ;; *) echo "nfcxx: unknown dialect '$dialect'" >&2; exit 2 ;; esac
-# C++ modules (docs/notes/modules.md). A program whose sources declare or import a module is built by mod_build_program, which
-# runs this driver once per source. A compile gets the module options: --modules, the directory of the interface files (BMIs,
-# --module-dir, else the directory of -o) and, for an interface unit, the BMI it writes.
+# The refusals after the -E route (stdin without -E, -x, dependency files without -c, the EDG build, the dialect): the same planner.
+early_status=0; "${RUBY:-ruby}" "$root/scripts/nfcxx-early-exit.rb" post < <(early_records) || early_status=$?
+[ $early_status = 0 ] || exit $early_status
+# C++ modules (docs/notes/modules.md): scripts/nfcxx-modules-plan.rb plans the block. It scans the sources, refuses a module program
+# (the standard, --emit-c, C sources, a partition, a header unit, an import of std, -c with more than one source), builds a link
+# with scripts/nfcxx-modules.rb build (the driver ends with the build's status, as the bash's mod_build_program did), and gives a
+# compile its module options: --modules, the directory of the interface files (BMIs, --module-dir, else the directory of -o)
+# and, for an interface unit, the BMI it writes. The exit mode is left as it is, so cu_prepare's cleanup and trace_finish still
+# run when the build ends the driver. Its state and reply are records in NFCXX_OWNED_MODPLAN's directory (made by the Ruby driver,
+# which removes it when the run ends: the body does not make or remove it).
 modules=0; modopts=()
-for s in ${srcs[@]+"${srcs[@]}"}; do
-  if "${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" is-module "$s"; then modules=1; fi
-done
-if [ $modules = 1 ]; then
-  case $std in --c++98|--c++03|--c++11|--c++14|--c++17) echo "nfcxx: C++ modules need -std=c++20 or later" >&2; exit 2 ;; esac
-  [ $emit_c = 0 ] || { echo "nfcxx: --emit-c does not support C++ modules yet (docs/notes/modules.md)" >&2; exit 2; }
-  [ ${#cfiles[@]} = 0 ] || { echo "nfcxx: C sources cannot be built with C++ modules yet (docs/notes/modules.md)" >&2; exit 2; }
-  for s in ${srcs[@]+"${srcs[@]}"}; do "${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" check "$s" || exit $?; done
-  if [ $compile_only = 0 ]; then mod_build_program; fi
-  [ ${#srcs[@]} = 1 ] || { echo "nfcxx: -c with C++ modules takes one source" >&2; exit 2; }
-  mdir=${moddir:-$(dirname "$out")}; mkdir -p "$mdir"; mdir=$(cd "$mdir" && pwd -P)
-  modopts=(--modules --modules_directory "$mdir")
-  n=$("${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" decl-name "${srcs[0]}")
-  [ -z "$n" ] || modopts+=(--create_module_interface "$mdir/$n.eifc")
-fi
+modplan=$owned_modplan
+[ -n "$modplan" ] || { echo "nfcxx: NFCXX_OWNED_MODPLAN is not set (the Ruby driver, scripts/nfcxx.rb, makes it)" >&2; exit 2; }
+modules_plan_input > "$modplan/state"
+modrc=0; "${RUBY:-ruby}" "$root/scripts/nfcxx-modules-plan.rb" "$modplan/state" "$modplan/reply" || modrc=$?
+if [ $modrc != 0 ]; then exit $modrc; fi
+modgroup=""; modbuilt=""; modz=0
+while IFS= read -r -d "" modrec; do
+  case $modrec in
+    k*) modgroup=${modrec:1} ;;
+    v*) case $modgroup in
+          modules) modules=${modrec:1} ;;
+          modopts) modopts+=("${modrec:1}") ;;
+          built) modbuilt=${modrec:1} ;;
+        esac ;;
+    z) modz=1 ;;
+  esac
+done < "$modplan/reply"
+[ $modz = 1 ] || { echo "nfcxx: scripts/nfcxx-modules-plan.rb stopped before its end (the module block is incomplete)" >&2; exit 1; }
+[ -z "$modbuilt" ] || exit "$modbuilt"
 
 # The default backend: Path B on x86-64 Linux (and on aarch64 Linux and arm64 macOS for freestanding programs), unless the request needs
 # something only qbe or gcc does (cosmo, --emit-c, --target, -E, -M, -shared; a freestanding program takes Path B on
 # x86-64 and aarch64 Linux, arm64 macOS). A program Path B does not build is built again with gcc, below
 # (docs/notes/pathb-default.md). An explicit --backend=, or NFCXX_BACKEND, is used as given.
-default_backend=0
-# pb_fs_host: the hosts Path B compiles freestanding programs on, x86-64 and aarch64 Linux and arm64 macOS (the EDG front end is the
-# x86-64 target on all; see docs/notes/freestanding.md, "Path B on aarch64" and "Path B on macOS"). Used for the default and for an explicit --backend=pathb.
-pb_fs_host=0
-case $(uname -s) in
-  Linux) case $(uname -m) in x86_64|aarch64|arm64) pb_fs_host=1 ;; esac ;;
-  Darwin) [ "$(uname -m)" = arm64 ] && pb_fs_host=1 ;;   # macOS arm64: the same front end; its link is the Darwin one (docs/notes/freestanding.md)
-esac
-if [ -z "$backend" ]; then
-  backend=gcc
-  # A .cu input takes Path B too: its rewritten host copy gets the forced nfcxx_cuda.h include and the launch syntax, and
-  # its device image is a file-scope asm block that Path B passes through (docs/notes/pathb-default.md, "CUDA").
-  # A freestanding program takes Path B on x86-64 and aarch64 Linux and arm64 macOS (the old harness with the lib/ headers, docs/notes/freestanding.md).
-  fs_ok=1; [ $freestanding = 0 ] || [ $pb_fs_host = 1 ] || fs_ok=0
-  if [ $backend_explicit = 0 ] && [ $fs_ok = 1 ] && [ $cosmo = 0 ] \
-     && [ $emit_c = 0 ] && [ -z "$target" ] && [ $preprocess = 0 ] && [ -z "$depmode" ] && [ $shared = 0 ]; then
-    backend=pathb; default_backend=1
-  fi
+# The default backend is planned by scripts/nfcxx-setup.rb (its default step: NfcxxBackend.default_choice), which sets backend,
+# default_backend and pb_fs_host (the Path B hosts for freestanding programs, pb_fs_host: x86-64 and aarch64 Linux and arm64
+# macOS; see docs/notes/freestanding.md, "Path B on aarch64" and "Path B on macOS"). The Ruby driver planned it on the argument
+# loop's state and passed the statements in NFCXX_SETUP_DEFAULT; the body plans it itself when the driver did not (the wrappers'
+# arguments). Path B is the default on x86-64 Linux (and on aarch64 Linux and arm64 macOS for freestanding programs), unless the
+# request needs something only qbe or gcc does (cosmo, --emit-c, --target, -E, -M, -shared). A program Path B does not build is
+# built again with gcc, below (docs/notes/pathb-default.md). An explicit --backend=, or NFCXX_BACKEND, is used as given.
+if [ "${NFCXX_SETUP_DEFAULT+x}" = x ]; then
+  setup_default=$NFCXX_SETUP_DEFAULT; unset NFCXX_SETUP_DEFAULT
+else
+  setup_default=$("${RUBY:-ruby}" "$root/scripts/nfcxx-setup.rb" default backend="$backend" backend_explicit=$backend_explicit \
+    freestanding=$freestanding cosmo=$cosmo emit_c=$emit_c target="$target" preprocess=$preprocess depmode="$depmode" \
+    shared=$shared host="$(uname -s) $(uname -m)") || exit $?
 fi
+eval "$setup_default"
 
 # -fsanitize=address: gcc's instrumentation on the gcc backend. Both link libasan. Path B calls
 # libasan's checks before each access (scripts/pathb-cc.rb --asan, passed below once the backend is final); the default backend gets it too (docs/notes/asan-plan.md; a program Path B does not build falls back to gcc).
 asan_c=()   # options for every C compile and link of the program
-if [ $asan = 1 ]; then
+# The check and the options are planned by scripts/nfcxx-setup.rb (its asan step, after the default backend) when the driver planned
+# the setup: NFCXX_SETUP_ASAN holds the statements, and NFCXX_SETUP_ASAN_STATUS the status of a refusal (its message in
+# NFCXX_SETUP_ASAN, printed here, where the bash printed it). The bash below runs when the driver gave no state.
+if [ "${NFCXX_SETUP_ASAN_STATUS+x}" = x ]; then
+  setup_asan_status=$NFCXX_SETUP_ASAN_STATUS; setup_asan=${NFCXX_SETUP_ASAN-}
+  unset NFCXX_SETUP_ASAN_STATUS NFCXX_SETUP_ASAN
+  if [ "$setup_asan_status" != 0 ]; then printf '%s' "$setup_asan" >&2; exit "$setup_asan_status"; fi
+  eval "$setup_asan"
+elif [ $asan = 1 ]; then
   case $backend in
     gcc) ;;
     pathb) ;;
@@ -569,119 +444,58 @@ fi
 # Hosted mode (default) uses the host C++ library headers, so real code can include <cstdio>,
 # <cctype>, <string> and friends. Their include directories and the GNU version come from the host
 # g++ (override with NFCXX_CXX, or NFCXX_SYS_INCLUDES as a colon-separated list).
+# The template instantiation, --cosmo, the freestanding or hosted headers, the host cflags, the GNU options, --target=linux_k1om
+# and --target are planned by scripts/nfcxx-setup.rb (its rest step, the bash's order: docs/notes/driver-body-port.md, item 3). The
+# driver planned them on the argument loop's state and passed them in NFCXX_SETUP_REST_STATUS, NFCXX_SETUP_REST and
+# NFCXX_SETUP_REST_ERR (the statements up to a refusal, its status and message); the body plans them itself when the driver gave
+# no state (the wrappers' arguments). The statements are eval'd here. The host C++ headers' span is recorded here, as the bash
+# recorded it (setup_span_start and setup_span_stop, the probe's times), and a refusal is printed after the statements before it.
+# The rules: instantiate=auto leaves the instantiation to the front end; used asks for the used instantiations, with the sections the
+# linker collects (not on Mach-O). --cosmo: cosmocc is the C compiler (NFCXX_GCC) and its libc++ headers are the C++ target.
+# Freestanding headers come only from lib/ (--no_standard_includes), with GCC 13 emulation by default; hosted mode uses the host's
+# C++ library headers and GNU version (NFCXX_SYS_INCLUDES overrides the directories). Path B's host cflags are its macOS and
+# aarch64 Linux headers (lib/pathb). --target=linux_k1om is freestanding with the gcc backend (the k1om GCC); --target is the EDG
+# target of the generated C. EDG_CPFE_DEFAULT_OPTIONS carries the gnu_opts array to the front end.
 extra=()
 sys_inc=()
 hosted_libs=()
-# Template instantiation. Default (--instantiate=used, or NFCXX_INSTANTIATE): each unit instantiates the templates it uses, as g++ does,
-# so the link recompiles nothing (libggml-sycl: 8 minutes in all, a 3 s link). The C output has the instances as weak
-# symbols in one .text, not as COMDAT groups, so the link would keep every unit's copy (libggml-sycl: 77 MB of code): each
-# function and object gets its own section, and the link drops the sections nothing reaches (--gc-sections), among them
-# the copies the link did not choose (24 MB). --instantiate=auto: EDG's automatic instantiation, where the prelinker
-# assigns each instance a unit and recompiles that unit at link time, one unit per pass (libggml-sycl: 3087 instances in
-# 98 passes, a 33-minute link; 59 MB of code).
+gnu_opts=()
 inst_opts=()
-case $instantiate in
-  auto) ;;
-  used)
-    inst_opts=(--no_auto_instantiation -tused)
-    # Mach-O: ld64 coalesces the weak definitions itself (and takes no --gc-sections)
-    [ "$(uname -s)" = Darwin ] || inst_opts+=(--c_to_obj_option -ffunction-sections --c_to_obj_option -fdata-sections
-                                              --c_to_obj_option -Wl,--gc-sections) ;;
-  *) echo "nfcxx: --instantiate (NFCXX_INSTANTIATE) is auto or used (got $instantiate)" >&2; exit 2 ;;
-esac
-# --cosmo (docs/notes/cosmo.md): cosmocc is the C compiler (NFCXX_GCC: gcc-cc runs it, pathb-cc assembles with it), and
-# its libc++ headers and predefined macros are the C++ target. The backend is gcc, or Path B with --backend=pathb (NFCXX_PATH=b).
-if [ $cosmo = 1 ]; then
-  [ $path_b = 0 ] || backend=pathb
-  if [ $backend != pathb ]; then
-    [ $backend_explicit = 0 ] || [ $backend = gcc ] || { echo "nfcxx: --cosmo needs --backend=gcc or --backend=pathb" >&2; exit 2; }
-    backend=gcc
-  fi
-  cosmo_bin=${NFCXX_COSMOCC:-$root/build/cosmocc/bin/cosmocc}
-  [ -x "$cosmo_bin" ] || { echo "nfcxx: $cosmo_bin is not installed; run scripts/setup-cosmo.sh (or set NFCXX_COSMOCC)" >&2; exit 2; }
-  cosmo_root=$(cd "$(dirname "$cosmo_bin")/.." && pwd)
-  export NFCXX_GCC=$cosmo_bin
-  # cosmoc++ is a wrapper that prints no include list, so the directories are named here: libc++ first, then the C library.
-  export NFCXX_SYS_INCLUDES=$cosmo_root/include/third_party/libcxx:$cosmo_root/include
-  gver=$cosmo_root/bin/x86_64-linux-cosmo-g++; [ -x "$gver" ] || gver=$cosmo_bin
-  [ -n "${gnu:-}" ] || gnu=$({ "$gver" -dumpfullversion 2>/dev/null || true; } | awk -F. '{ printf "%d%02d%02d\n", $1, $2, $3 }')
-  # cosmo's own build force-includes libc/integral/normalize.inc (libcesque, bool32, __static_yoink, the c.inc macros); the
-  # front end needs it too. __has_feature is clang's: libc++'s __config uses it, and cosmo's gcc does not define it.
-  cflags+=(-D__COSMOPOLITAN__ -D__COSMOCC__ -D__FATCOSMOCC__)
-  # Path B only: its front end reads libc++, whose __config uses __has_feature (clang's; cosmo's gcc does not define it)
-  [ $backend = pathb ] && cflags+=('-D__has_feature(x)=0' -include "$cosmo_root/include/libc/integral/normalize.inc" -include "$root/lib/cosmo/libcxx_traits.h")
-fi
-if [ $freestanding = 1 ]; then
-  extra=(--no_standard_includes "-I$root/lib")
-  [ -n "$gnu" ] || gnu=130000
+if [ "${NFCXX_SETUP_REST_STATUS+x}" = x ]; then
+  setup_rest_status=$NFCXX_SETUP_REST_STATUS; setup_rest=${NFCXX_SETUP_REST-}; setup_rest_err=${NFCXX_SETUP_REST_ERR-}
+  unset NFCXX_SETUP_REST_STATUS NFCXX_SETUP_REST NFCXX_SETUP_REST_ERR
 else
-  t=$(trace_start)
-  while IFS= read -r d; do [ -n "$d" ] && sys_inc+=("--sys_include=$d"); done < <("${RUBY:-ruby}" "$root/scripts/host-sys.rb" host_sys_includes)
-  trace_end "$t" "host C++ headers" driver
-  # g++ links libm implicitly through libstdc++; the hosted headers (<cmath>, used by doctest for
-  # log10) need it too. The EDG link appends --c_to_obj_lib libraries after the objects.
-  hosted_libs=(--c_to_obj_lib=m)
-  # macOS has libc++, not libstdc++: the link needs it explicitly (eccp's Linux default is libstdc++).
-  [ "$(uname -s)" = Darwin ] && hosted_libs+=(--c_to_obj_lib=c++)
-  if [ -z "$gnu" ]; then
-    gnu=$("${RUBY:-ruby}" "$root/scripts/host-sys.rb" host_gnu_version)
-  fi
+  setup_rest_status=0; setup_rest_err=
+  setup_rest=$("${RUBY:-ruby}" "$root/scripts/nfcxx-setup.rb" rest backend="$backend" backend_explicit=$backend_explicit \
+    path_b=$path_b freestanding=$freestanding cosmo=$cosmo emit_c=$emit_c target="$target" instantiate=$instantiate \
+    gnu="${gnu:-}" dialect="$dialect" root="$root" sys="$(uname -s)" mach="$(uname -m)" host="$(uname -s) $(uname -m)") \
+    || setup_rest_status=$?
 fi
+eval "$setup_rest"
+[ -z "${setup_span_start:-}" ] || trace_range "$setup_span_start" "$setup_span_stop" "host C++ headers" driver
+if [ "$setup_rest_status" != 0 ]; then printf '%s' "$setup_rest_err" >&2; exit "$setup_rest_status"; fi
 # -isystem DIR from the command line: searched after the host's own directories, as the host compiler does.
-ecp_args ${sysdirs[@]+"${sysdirs[@]}"}
+# ecp-planner-begin: the answers for the -isystem directories (scripts/ecp-arg.rb, the planner, called directly). Its records are
+# NUL-separated: a group "k ecp" with one v ANSWER per argument, and the end marker z, which the planner writes last (without it
+# the planner stopped early, and the driver stops). The answers are in ecp_list. No argument, no planner call.
+ecp_list=(); ecp_in=(${sysdirs[@]+"${sysdirs[@]}"}); ecp_done=0; ecp_group=
+if [ ${#ecp_in[@]} -gt 0 ]; then
+  while IFS= read -r -d '' ecp_rec; do
+    case $ecp_rec in
+      k*) ecp_group=${ecp_rec:1} ;;
+      v*) if [ "$ecp_group" = ecp ]; then ecp_list+=("${ecp_rec:1}"); fi ;;
+      z) ecp_done=1 ;;
+    esac
+  done < <("${RUBY:-ruby}" "$root/scripts/ecp-arg.rb" --batch "$moves" "${ecp_in[@]}")
+  [ $ecp_done = 1 ] || { echo "nfcxx: scripts/ecp-arg.rb stopped before its end (the argument answers are incomplete)" >&2; exit 1; }
+fi
+# ecp-planner-end
 for d in ${ecp_list[@]+"${ecp_list[@]}"}; do sys_inc+=("--sys_include=$d"); done
 # -include FILE is found through the include directories as well as here, so it is made absolute only when it exists here.
 pre_opts=(); for f in ${preinc[@]+${preinc[@]+"${preinc[@]}"}}; do
-  if [ $moves = 1 ] && [ -e "$f" ]; then f=$(abs_path "$f"); fi
+  if [ $moves = 1 ] && [ -e "$f" ]; then f=$("${RUBY:-ruby}" "$root/scripts/host-sys.rb" abs_path "$f"); fi
   pre_opts+=(--preinclude "$f")
 done
-# Path B hosted on macOS (the SDK's libc++): its __config evaluates __has_feature and friends in #if, which EDG's g++
-# mode does not define (lib/pathb/clang_macros.h). Gated on Darwin, not on the dialect: a Linux clang host keeps libstdc++
-# and its own feature checks.
-[ $backend = pathb ] && [ $freestanding = 0 ] && [ "$(uname -s)" = Darwin ] && cflags+=(-include "$root/lib/pathb/clang_macros.h" -I "$root/lib/pathb/darwin-include")
-# Path B's front end is an x86-64 EDG target (no __aarch64__, no __clang__), so libc++ takes the x86-64 std::string layout on
-# an arm64 Mac, where the SDK's libc++ (clang's Apple arm64 config) uses the alternate layout: the size in byte 23, the
-# short-string flag in its top bit. Path B would read a string made by the library wrongly. Defining the layout macro is
-# the only ABI knob of that config that changes the object. Darwin arm64 only: x86-64 Macs keep the old layout.
-[ $backend = pathb ] && [ $freestanding = 0 ] && [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ] && cflags+=(-D_LIBCPP_ABI_ALTERNATE_STRING_LAYOUT)
-# Hosted Path B on Linux aarch64: the host's <bits/math-vector.h> uses GCC's AdvSIMD/SVE vector types, which EDG (x86-64
-# target) does not have; lib/pathb/linux-aarch64-include/bits/math-vector.h stands in for it (scripts/pathb-dump.rb does the same).
-[ $backend = pathb ] && [ $freestanding = 0 ] && [ "$(uname -s)" = Linux ] && { [ "$(uname -m)" = aarch64 ] || [ "$(uname -m)" = arm64 ]; } && cflags+=(-I "$root/lib/pathb/linux-aarch64-include")
-# Hosted Linux aarch64 (either backend): the front end's predefined macros have __aarch64__ but not __AARCH64EL__, which gcc
-# defines there. glibc's and CPython's multiarch headers (python3.12's pyconfig.h) choose their directory by both, so without
-# it Python.h stops with "unknown multiarch location for pyconfig.h". The value is the one gcc defines.
-[ $freestanding = 0 ] && [ "$(uname -s)" = Linux ] && { [ "$(uname -m)" = aarch64 ] || [ "$(uname -m)" = arm64 ]; } && { cflags+=(-D__AARCH64EL__=1); files+=(-D__AARCH64EL__=1); }
-gnu_opts=()
-if [ "$dialect" = clang ]; then
-  cv=$("${RUBY:-ruby}" "$root/scripts/host-sys.rb" host_clang_version); [ -n "$cv" ] && gnu_opts=(--clang_version="$cv")
-elif [ -n "$gnu" ]; then
-  gnu_opts=(--gnu_version="$gnu")
-fi
-# --target: the EDG configuration of the generated C (only with --freestanding --emit-c, see the usage above). The host
-# library headers and the host C compiler would be the build host's, so a hosted or compiled build with a target is refused.
-# --target=linux_k1om: Intel Knights Corner (k1om). The front end lays out the program for the build host (LP64, the
-# same sizes as k1om); the C is compiled and linked by the k1om GCC 5.1.1 (scripts/k1om-cc.rb) with the k1om assembler and
-# runtime (scripts/setup-k1om.sh). Freestanding and the gcc backend only: the k1om toolchain is GCC's.
-if [ "$target" = linux_k1om ]; then
-  [ $freestanding = 1 ] || { echo "nfcxx: --target=linux_k1om needs --freestanding (the host's C++ headers are GCC 13's, not k1om's)" >&2; exit 2; }
-  [ "$backend_explicit" = 0 ] || [ "$backend" = gcc ] || { echo "nfcxx: --target=linux_k1om uses the gcc backend (the k1om GCC)" >&2; exit 2; }
-  backend=gcc
-  k1om_root=${NFCXX_K1OM_ROOT:-/opt/k1om}
-  [ -x "$k1om_root/bin/k1om-mpss-linux-gcc" ] || { echo "nfcxx: no k1om toolchain at $k1om_root (NFCXX_K1OM_ROOT; docs/notes/k1om.md)" >&2; exit 2; }
-  [ -f "$root/build/k1om/libC.a" ] || { echo "nfcxx: no k1om runtime at $root/build/k1om/libC.a (run scripts/setup-k1om.sh)" >&2; exit 2; }
-  export NFCXX_GCC="$root/scripts/k1om-cc.rb" NFCXX_AS="$root/scripts/k1om-bin/as.rb" NFCXX_K1OM_ROOT="$k1om_root"
-fi
-if [ -n "$target" ] && [ "$target" != linux_k1om ]; then
-  [ $freestanding = 1 ] || { echo "nfcxx: --target needs --freestanding (the host's library headers are the host target's)" >&2; exit 2; }
-  [ $emit_c = 1 ] || { echo "nfcxx: --target needs --emit-c (the generated C is for the target; compile it with a cross compiler)" >&2; exit 2; }
-  tbase=${EDG_BASE:-$root/build/edg-base}
-  [ -d "$tbase/lib_$target" ] || { echo "nfcxx: no EDG target '$target' in $tbase (lib_* tables: $(cd "$tbase" && ls -d lib_* | sed 's/^lib_//' | tr '\n' ' '))" >&2; exit 2; }
-  gnu_opts+=(--target "$target")
-  # Plain char is unsigned on these ABIs (clang -dM: __CHAR_UNSIGNED__ for each triple). EDG's table says signed for
-  # linux_aarch64 and linux_armv7 (src/defines.h, TARG_HAS_SIGNED_CHARS_*), so the driver sets it: the EDG base is not patched.
-  case $target in linux_aarch64|linux_armv7|linux_riscv32|linux_riscv64) gnu_opts+=(--unsigned_chars) ;; esac
-fi
-[ ${#gnu_opts[@]} -gt 0 ] && export EDG_CPFE_DEFAULT_OPTIONS="${gnu_opts[*]} ${EDG_CPFE_DEFAULT_OPTIONS:-}"
 
 if [ $emit_c = 1 ] && [ ${#cfiles[@]} -gt 0 ]; then
   echo "nfcxx: --emit-c does not apply to .c inputs (they skip the front end)" >&2; exit 2
@@ -689,13 +503,14 @@ fi
 if [ $emit_c = 1 ]; then
   # Run the front end alone and print the generated C.
   base=${EDG_BASE:-$root/build/edg-base}
-  tmp=$(mktemp -d); trap 'rm -rf "$tmp" "$cudatmp"; trace_finish' EXIT
+  if [ -n "$owned_tmp" ]; then tmp=$owned_tmp; tmp_owned=1; exit_mode=trace
+  else tmp=$(mktemp -d); exit_mode=temp_trace; fi
   f=$(realpath "${srcs[0]}")   # the first source, not files[0] (which may be an -I option)
   # host dirs first, then EDG's own, as eccp orders user and default include dirs
   inc=(${sys_inc[@]+${sys_inc[@]+"${sys_inc[@]}"}} --sys_include="$base/include"); [ $freestanding = 1 ] && inc=("-I$root/lib")
   # The user's -I directories (kept in files, with the other options) go in front, as eccp puts them.
   # cpfe runs from the EDG base directory, so a relative -I is made absolute first.
-  for x in ${files[@]+${files[@]+"${files[@]}"}}; do case $x in -I?*) inc=("-I$(abs_path "${x#-I}")" ${inc[@]+${inc[@]+"${inc[@]}"}}) ;; esac; done
+  for x in ${files[@]+${files[@]+"${files[@]}"}}; do case $x in -I?*) inc=("-I$("${RUBY:-ruby}" "$root/scripts/host-sys.rb" abs_path "${x#-I}")" ${inc[@]+${inc[@]+"${inc[@]}"}}) ;; esac; done
   t=$(trace_start)
   posix_def=(-D_POSIX_SOURCE); [ "$(uname -s)" = Darwin ] && posix_def=(-D_DARWIN_C_SOURCE -U__BLOCKS__)   # as the macOS base
   (cd "$base" && "$edg/cpfe" ${posix_def[@]+"${posix_def[@]}"} -D__CHAR_BIT__=8 "$std" --"$dialect" ${eh_tls[@]+"${eh_tls[@]}"} ${gnu_opts[@]+"${gnu_opts[@]}"} ${diag_opts[@]+"${diag_opts[@]}"} \
@@ -705,29 +520,27 @@ if [ $emit_c = 1 ]; then
   exit 0
 fi
 
-if [ -n "$sanitize" ]; then
-  # The checks live in the Path B IR (docs/notes/ubsan.md); the names are gcc's, and not every one is implemented.
-  IFS=, read -ra sz <<< "$sanitize"
-  for c in ${sz[@]+"${sz[@]}"}; do
-    case $c in
-      undefined|signed-integer-overflow|integer-divide-by-zero|shift|bounds|null|unreachable|return|float-cast-overflow) ;;
-      *) echo "nfcxx: -fsanitize=$c is not supported (implemented: undefined, signed-integer-overflow, integer-divide-by-zero, shift, bounds, null, unreachable, return, float-cast-overflow)" >&2; exit 2 ;;
-    esac
-  done
-  [ $freestanding = 0 ] || { echo "nfcxx: -fsanitize needs Path B, which compiles hosted programs only" >&2; exit 2; }
-  pb_flags+=(--sanitize="$sanitize")   # scripts/pathb-cc.rb: the front end's checks (NFCXX_IR_SANITIZE)
-  backend=pathb
+# The sanitizer, -fsafe-pointers and the Path B override are planned by scripts/nfcxx-setup.rb (its stage step, after the emit-C
+# route): the -fsanitize= names (the checks live in the Path B IR, docs/notes/ubsan.md; the names are gcc's, and not every one is
+# implemented), -fsafe-pointers (docs/notes/safe-pointers.md, which replaces malloc and free) and --backend=pathb or NFCXX_PATH=b
+# (docs/notes/pathb-hosted.md: asked for by name, so a file Path B cannot build is an error, not a fallback to gcc). The driver
+# planned them on the argument loop's state and passed the statements in NFCXX_SETUP_STAGE (its refusal's status and message in
+# NFCXX_SETUP_STAGE_STATUS, printed here, where the bash printed it); the body plans them itself otherwise.
+if [ "${NFCXX_SETUP_STAGE_STATUS+x}" = x ]; then
+  setup_stage_status=$NFCXX_SETUP_STAGE_STATUS; setup_stage=${NFCXX_SETUP_STAGE-}
+  unset NFCXX_SETUP_STAGE_STATUS NFCXX_SETUP_STAGE
+  if [ "$setup_stage_status" != 0 ]; then printf '%s' "$setup_stage" >&2; exit "$setup_stage_status"; fi
+else
+  setup_stage=$("${RUBY:-ruby}" "$root/scripts/nfcxx-setup.rb" stage sanitize="$sanitize" freestanding=$freestanding asan=$asan \
+    safeptr=$safeptr path_b=$path_b) || exit $?
 fi
-if [ $safeptr = 1 ]; then
-  # The checks are emitted from the Path B IR (docs/notes/safe-pointers.md), and the runtime replaces malloc and free.
-  [ $freestanding = 0 ] || { echo "nfcxx: -fsafe-pointers needs Path B, which compiles hosted programs only" >&2; exit 2; }
-  [ $asan = 0 ] || { echo "nfcxx: -fsafe-pointers and -fsanitize=address both replace malloc; use one" >&2; exit 2; }
-  pb_flags+=(--safe-pointers)
-  backend=pathb
-fi
-# --backend=pathb, or NFCXX_PATH=b: the Path B compiler (docs/notes/pathb-hosted.md). Asked for by name, so a file Path B cannot
-# build is an error, not a fallback to gcc (the fallback re-run would also take NFCXX_PATH=b back to Path B).
-[ $path_b = 0 ] || { backend=pathb; default_backend=0; }
+eval "$setup_stage"
+# The Path B option statements after the override are planned by scripts/nfcxx-setup.rb (flags_text) on the backend and gnu the setup
+# leaves, and passed in NFCXX_SETUP_FLAGS when the driver planned the setup; the bash below runs when it gave no state.
+if [ "${NFCXX_SETUP_FLAGS+x}" = x ]; then
+  setup_flags=$NFCXX_SETUP_FLAGS; unset NFCXX_SETUP_FLAGS
+  eval "$setup_flags"
+else
 [ $ir_opt_set = 0 ] || pb_flags+=(--ir-opt="$ir_opt")
 [ $asan = 0 ] || [ $backend != pathb ] || pb_flags+=(--asan)   # the SSA emitter's __asan_load/store checks (scripts/pathb-cc.rb)
 [ $pic = 0 ] || pb_flags+=(--pic)   # -shared / -fPIC: scripts/pathb-cc.rb --pic reads a preemptible symbol's address through the GOT
@@ -740,6 +553,16 @@ pb_flags+=(${diag_opts[@]+"${diag_opts[@]}"})   # EDG diagnostic options (-Wno-n
 [ $backend != pathb ] || [ "$dialect" != clang ] || [ -z "${dialect_asked:-}" ] || pb_flags+=(--dialect=clang)   # scripts/pathb-dump.rb
 [ $backend != pathb ] || [ $freestanding != 0 ] || [ -z "${gnu_user:-}" ] || pb_flags+=("--gnu-version=$gnu_user")
 [ $backend != pathb ] || [ $freestanding = 0 ] || pb_flags+=(--freestanding --eh-runtime "--gnu-version=$gnu" "-I$root/lib")
+fi
+# The backend's environment is planned by scripts/nfcxx-setup.rb (its backend_env step, on the final backend) and passed in
+# NFCXX_SETUP_BACKEND_ENV (the export) or NFCXX_SETUP_BACKEND_ENV_STATUS and NFCXX_SETUP_BACKEND_ENV (a refusal, printed here); the
+# case below runs when the driver gave no state.
+if [ "${NFCXX_SETUP_BACKEND_ENV_STATUS+x}" = x ]; then
+  setup_backend_env_status=$NFCXX_SETUP_BACKEND_ENV_STATUS; setup_backend_env=${NFCXX_SETUP_BACKEND_ENV-}
+  unset NFCXX_SETUP_BACKEND_ENV_STATUS NFCXX_SETUP_BACKEND_ENV
+  if [ "$setup_backend_env_status" != 0 ]; then printf '%s' "$setup_backend_env" >&2; exit "$setup_backend_env_status"; fi
+  eval "$setup_backend_env"
+else
 case $backend in
   pathb) [ $freestanding = 0 ] || [ $pb_fs_host = 1 ] ||
            { echo "nfcxx: Path B (--backend=pathb) compiles freestanding programs on x86-64 and aarch64 Linux and arm64 macOS only" >&2; exit 2; }
@@ -748,6 +571,7 @@ case $backend in
   gcc) export NFCXX_CC=$root/scripts/gcc-cc.rb ;;   # EDG's generated C through gcc, with the pragma filter (edg_eccp_config reads NFCXX_CC)
   *) echo "nfcxx: unknown backend '$backend'" >&2; exit 2 ;;
 esac
+fi
 
 # Hosted link (not -c, -shared or --freestanding): two additions to what eccp links.
 #  - the EH shim (lib/ehshim, docs/notes/eh-shim.md): exceptions thrown by libstdc++.so and std::exception_ptr on EDG's
@@ -759,7 +583,10 @@ esac
 shim=(); rtlib=(); vlart=()
 if [ $freestanding = 0 ] && [ $compile_only = 0 ] && [ $shared = 0 ] && [ $((ncpp + nobj)) -gt 0 ]; then
   t=$(trace_start)
-  s=""; [ $eh_shim_on = 0 ] || s=$("$root/scripts/ehshim.rb") || s=""
+  # a Path B harness with exception tables (its cpfe has eh-tables beside it, scripts/setup-pathb.sh) links libstdc++'s own
+  # EH runtime (docs/notes/pathb-zero-cost-eh.md): the shim, which hands libstdc++'s throws to EDG's runtime, is not linked
+  pb_tables=0; [ "$backend" = pathb ] && [ -f "$(dirname "${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}")/eh-tables" ] && pb_tables=1
+  s=""; [ $eh_shim_on = 0 ] || [ $pb_tables = 1 ] || s=$("$root/scripts/ehshim.rb") || s=""
   trace_end "$t" "EH shim" driver
   # cosmo: the shim interoperates with libstdc++.so (its type_info vtables and __cxa layout); cosmo links libc++ only
   [ $cosmo = 1 ] || { [ -z "$s" ] || shim=("$s"); }
@@ -801,7 +628,8 @@ fi
 # C inputs: compile each .c to an object. Link options (-l, -L, ...) stay in files for the final link.
 cobjs=()
 if [ ${#cfiles[@]} -gt 0 ]; then
-  ctmp=$(mktemp -d); trap 'rm -rf "$ctmp" "$cudatmp"; trace_finish' EXIT
+  if [ -n "$owned_ctmp" ]; then ctmp=$owned_ctmp; ctmp_owned=1; exit_mode=temp_trace
+  else ctmp=$(mktemp -d); exit_mode=temp_trace; fi
   n=0
   for c in ${cfiles[@]+"${cfiles[@]}"}; do
     o=$ctmp/$n.o; n=$((n + 1))
@@ -814,9 +642,8 @@ if [ ${#cfiles[@]} -gt 0 ]; then
         # as for a C++ file: the default backend failed on this one (status 3: a construct Path B refuses), so the whole
         # program is built again with gcc, which reports its own errors if it fails too. An explicit backend is an error.
         [ $default_backend = 1 ] || exit $prc
-        echo "nfcxx: Path B did not build $c (status $prc); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)" >&2
         rm -rf "$ctmp"
-        exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
+        fallback_gcc "nfcxx: Path B did not build $c (status $prc); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)"
       fi
     else
       "${NFCXX_GCC:-gcc}" -c -O2 -fwrapv -fno-strict-aliasing ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${cflags_pic[@]+${cflags_pic[@]+"${cflags_pic[@]}"}} ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o"
@@ -840,7 +667,13 @@ if [ ${#cfiles[@]} -gt 0 ]; then
       # Path B objects: EDG's runtime (libC.a: the VLA and EH entry points), the long double helpers and, with -fsanitize=address, libasan
       # (the C++ VLA runtime too: EDG lowers a C VLA to the same __vla_alloc calls, so each VLA is a malloc block libasan checks)
       cvla=(); [ $asan = 0 ] || cvla=("$("$root/scripts/asan-vla.rb")")
-      cc ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} ${cvla[@]+"${cvla[@]}"} -o "$out" "$("$root/scripts/pathb-ldrt.rb")" "${EDG_BUILD:-$root/build/edg}/lib/libC.a" $([ "$(uname -s)" = Darwin ] && echo -lc++ || echo -lstdc++) -lm $([ "$(uname -s)" = Darwin ] || echo -latomic)
+      # a link that names -lcudart also gets the CUB archive (scripts/cuda-cub.rb), before the -lcudart it needs; no archive, no argument
+      linkf=()
+      for f in ${files[@]+"${files[@]}"}; do
+        if [ "$f" = -lcudart ]; then cub=$("$root/scripts/cuda-cub.rb") && [ -n "$cub" ] && linkf+=("$cub"); fi
+        linkf+=("$f")
+      done
+      cc ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${linkf[@]+${linkf[@]+"${linkf[@]}"}} ${cvla[@]+"${cvla[@]}"} -o "$out" "$("$root/scripts/pathb-ldrt.rb")" "${EDG_BUILD:-$root/build/edg}/lib/libC.a" $([ "$(uname -s)" = Darwin ] && echo -lc++ || echo -lstdc++) -lm $([ "$(uname -s)" = Darwin ] || echo -latomic)
     else "${NFCXX_GCC:-gcc}" ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} -o "$out"; fi
     trace_end "$t" "link (C only)" cinput
     exit 0
@@ -848,54 +681,55 @@ if [ ${#cfiles[@]} -gt 0 ]; then
 fi
 
 # The compile cache's functions, defined before the routes that use them (the Path B -c route runs before the gcc route's
-# code). The decisions are scripts/nfcxx-cache.rb's: the key of this compile, the --cache-log block, hit or miss, the copy of
-# a hit back beside the output, and the store of the object just built. The bash runs Ruby only when the cache is on.
-# cache_check is the lookup and the hit (exit 0 on a hit); cache_store stores the object just built when the cache is in use
-# and has no entry for it yet. The remote tier (NFCXX_CACHE_REMOTE=gha) is scripts/nfcxx-cache-io.rb, called from here.
+# code). The decisions are scripts/nfcxx-cache-check.rb's: the key of this compile, the --cache-log block, the remote tier's
+# fetch on a local miss, hit or miss, the copy of a hit back beside the output, the store of the object just built, and the
+# remote put of a new entry. The bash writes cache_plan's records to a file and makes one call for the lookup (check) and one
+# for the store. The bash runs Ruby only when the cache is on.
+# cache_check is the lookup and the hit (exit 0 on a hit) and sets cache_entry (the statements check writes); cache_store
+# stores the object just built when the cache is in use and has an entry for it.
+# cache_plan: prints the lookup's records, NUL-separated: the records of this compile (scripts/nfcxx-cache-plan.rb plans the
+# options from them, in the check; the command arguments without the cache options, the host preprocessor's -std, cflags,
+# forced includes and sysdirs)
+cache_plan() {
+  local a
+  cache_rec() { printf '%s\0' "$1$2"; }   # cache_rec KIND PAYLOAD: one record
+  cache_rec o "cache-dir=$cache_dir"; cache_rec o "cache-log=$cache_log_file"; cache_rec o "out=$out"; cache_rec o "src=${srcs[0]-}"; cache_rec o "cwd=$PWD"
+  cache_rec v "backend=$backend"; cache_rec v "compile_only=$compile_only"; cache_rec v "ncpp=$ncpp"; cache_rec v "outset=$outset"; cache_rec v "nobj=$nobj"
+  cache_rec v "modules=$modules"; cache_rec v "preprocess=$preprocess"; cache_rec v "stdin_src=$stdin_src"; cache_rec v "depmode=$depmode"
+  cache_rec v "cfiles_n=${#cfiles[@]}"; cache_rec v "cu_n=${#cu_inputs[@]}"; cache_rec v "cpp2_n=${#cpp2_inputs[@]}"
+  for a in ${nfcxx_argv[@]+"${nfcxx_argv[@]}"}; do cache_rec a "$a"; done
+  cache_rec s "$std"
+  for a in ${cflags[@]+"${cflags[@]}"}; do cache_rec f "$a"; done
+  for a in ${preinc[@]+"${preinc[@]}"}; do cache_rec p "$a"; done
+  for a in ${sysdirs[@]+"${sysdirs[@]}"}; do cache_rec d "$a"; done
+}
 cache_check() {  # cache_check: sets cache_entry (empty when the cache does not apply) and exits 0 on a hit
 cache_entry=""
 [ -n "$cache_dir" ] || return 0   # the cache is off: no Ruby is started
-local f a look decision state key pre=() cpp=() opts=() key_argv=()
-for a in ${nfcxx_argv[@]+"${nfcxx_argv[@]}"}; do
-  case $a in --cache=*|--cache-log=*|--time-log=*|--trace=*) ;; *) key_argv+=("$a") ;; esac
-done
-for f in ${preinc[@]+"${preinc[@]}"}; do pre+=(-include "$f"); done
-# the host preprocessor's arguments (its -M command line, after -M and before the source)
-cpp=("-std=${std#--}" ${cflags[@]+"${cflags[@]}"} ${pre[@]+"${pre[@]}"} ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"})
-opts=(--cache-dir="$cache_dir" --cache-log="$cache_log_file" --out="$out" --src="${srcs[0]-}" --cwd="$PWD"
-      --var=backend="$backend" --var=compile_only="$compile_only" --var=ncpp="$ncpp" --var=outset="$outset"
-      --var=nobj="$nobj" --var=modules="$modules" --var=preprocess="$preprocess" --var=stdin_src="$stdin_src"
-      --var=depmode="$depmode" --var=cfiles_n="${#cfiles[@]}" --var=cu_n="${#cu_inputs[@]}" --var=cpp2_n="${#cpp2_inputs[@]}")
-for a in "${key_argv[@]+"${key_argv[@]}"}"; do opts+=(--arg="$a"); done
-for a in "${cpp[@]+"${cpp[@]}"}"; do opts+=(--cpp="$a"); done
-# lookup: the --cache-log block (when there is a log) and the last line, "hit KEY" or "miss KEY"; nothing when not cached
-look=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cache.rb" lookup "${opts[@]}") || return 0
-[ -n "$look" ] || return 0
-decision=${look##*$'\n'}
-[ "$look" = "$decision" ] || cache_log "${look%$'\n'*}"
-read -r state key <<<"$decision"
-cache_entry=$cache_dir/objects/$key
-# a local miss is looked up in the remote tier (nfcxx-cache-io.rb remote-get; a failure is a miss)
-if [ "$state" = miss ]; then
-  [ -z "$cache_remote" ] || cache_remote_get "$key" "$cache_entry" || true
-  [ -f "$cache_entry/obj" ] || return 0
-fi
-# hit: the object and its records are copied back, and the program is done
-"${RUBY:-ruby}" "$root/scripts/nfcxx-cache.rb" hit --out="$out" --entry="$cache_entry" && exit 0
+local stmts cstatus=0
+# check: the lookup, its --cache-log block, the remote fetch on a local miss, and a hit's copy back. The records come from fd 3
+# (cache_plan's, a process substitution) and the statements go to stdout (the check's children write to stderr). Status 10 is a
+# hit (the program is done); otherwise the statements name the entry (cache_entry, cc_state, cc_key), which a store of the object needs.
+stmts=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cache-check.rb" check --remote="$cache_remote" --records=/dev/fd/3 3< <(cache_plan)) || cstatus=$?
+if [ $cstatus = 10 ]; then exit 0; fi
+if [ -n "$stmts" ]; then eval "$stmts"; fi
 return 0
 }
 cache_store() {  # cache_store OBJ: a whole entry appears at once (a partial copy is never a hit)
   [ -n "$cache_entry" ] || return 0
-  # store: exit 0 when this call made the entry; a new entry goes to the remote tier (cache_remote_put, a note on failure)
-  if "${RUBY:-ruby}" "$root/scripts/nfcxx-cache.rb" store --out="$1" --entry="$cache_entry" && [ -n "$cache_remote" ]; then
-    cache_remote_put "${cache_entry##*/}" "$cache_entry"
-  fi
+  # store: the object is stored under the entry; a new entry goes to the remote tier (a failure is a note; the build goes on)
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-check.rb" store --out="$1" --entry="$cache_entry" --remote="$cache_remote" || true
 }
 # Path B: no C is generated. Each C++ file goes EDG -> typed IR -> QBE -> object (scripts/pathb-cc.rb), and the objects are
 # linked with EDG's runtime (libC.a: exceptions, operator new) before libstdc++, as tests/pathb-qbe/run.sh links them.
 # The forced includes (a .cu input's nfcxx_cuda.h, and -include) reach pathb-cc as -include, as they reach EDG's preinclude.
 pb_pre=(); for f in ${preinc[@]+"${preinc[@]}"}; do pb_pre+=(-include "$f"); done
 if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
+  # A .cu unit with kernel instances only the host compile makes (its .dev.kernels.unresolved is not empty) needs the second pass
+  # (below, on the EDG route); Path B does not build them, so this unit takes the gcc route, which runs it.
+  if [ ${#cu_inputs[@]} -gt 0 ] && [ -n "${cudatmp:-}" ] && [ -s "$cudatmp/$(basename "${cu_inputs[0]}" .cu).dev.kernels.unresolved" ]; then
+    fallback_gcc "nfcxx: ${cu_inputs[0]} has kernel instances only the host compile makes; building it with the gcc backend, which runs the second pass"
+  fi
   cache_check   # a hit: the object is copied back and the program is done
   # -c: one object per C++ file, named as the gcc and Path B backends name it (-o FILE for one file, else basename.o)
   for f in ${files[@]+"${files[@]}"}; do
@@ -906,8 +740,7 @@ if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
          if [ $prc != 0 ]; then
            # the default backend failed on this file: the object is built again with gcc, which reports its own errors
            [ $default_backend = 1 ] || exit $prc
-           echo "nfcxx: Path B did not build $f (status $prc); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)" >&2
-           exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
+           fallback_gcc "nfcxx: Path B did not build $f (status $prc); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)"
          fi ;;
     esac
   done
@@ -915,11 +748,15 @@ if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
   exit 0
 fi
 if [ $backend = pathb ]; then
-  ptmp=$(mktemp -d); trap 'rm -rf "$ptmp" "$cudatmp"; trace_finish' EXIT
+  if [ -n "$owned_ptmp" ]; then ptmp=$owned_ptmp; ptmp_owned=1; exit_mode=temp_trace
+  else ptmp=$(mktemp -d); exit_mode=temp_trace; fi
   pobjs=(); plink=(); n=0
   for f in ${files[@]+"${files[@]}"}; do
     case $f in
       -I*|-D*|-U*) ;;                       # reach pathb-cc through cflags
+      -lcudart)                             # the CUB archive (scripts/cuda-cub.rb) before the -lcudart it needs; none when it fails
+        if [ $shared = 0 ]; then cub=$("$root/scripts/cuda-cub.rb") && [ -n "$cub" ] && plink+=("$cub"); fi
+        plink+=("$f") ;;
       -*|*.o|*.a|*.so) plink+=("$f") ;;
       *) o=$ptmp/p$n.o; n=$((n + 1))
          t=$(trace_start)
@@ -929,9 +766,8 @@ if [ $backend = pathb ]; then
          if [ $prc != 0 ] && [ $default_backend = 1 ]; then
            # the default backend failed on this file (status 3: a construct Path B refuses; otherwise a Path B fault):
            # the whole program is built again with gcc, which reports its own errors if it fails too
-           echo "nfcxx: Path B did not build $f (status $prc); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)" >&2
            rm -rf "$ptmp"
-           exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
+           fallback_gcc "nfcxx: Path B did not build $f (status $prc); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)"
          fi
          [ $prc = 0 ] || exit $prc
          pobjs+=("$o") ;;
@@ -942,7 +778,9 @@ if [ $backend = pathb ]; then
   ldrt=$("$root/scripts/pathb-ldrt.rb")
   # The C++ and atomic libraries of the host: macOS has libc++ (in libSystem's SDK) and no libstdc++, libgcc_s or libatomic.
   if [ "$(uname -s)" = Darwin ]; then pb_cxx_libs="-lc++"; pb_atomic_lib=""; else pb_cxx_libs="-lstdc++ -lgcc_s"; pb_atomic_lib="-latomic"; fi
-  [ $freestanding = 0 ] || { pb_cxx_libs=""; pb_atomic_lib=""; }   # no hosted C++ runtime: the program links EDG's runtime and libc
+  # no hosted C++ runtime: the program links EDG's runtime and libc. On macOS the exception tables' personality is libc++abi's (a
+  # landing pad that calls std::terminate is enough for it), so libc++ is named there.
+  [ $freestanding = 0 ] || { [ "$(uname -s)" = Darwin ] || pb_cxx_libs=""; pb_atomic_lib=""; }
   sprt=(); [ $safeptr = 0 ] || [ $compile_only = 1 ] || sprt=("$("$root/scripts/safeptr-rt.rb")" -pthread)   # first: its malloc wins
   if [ $cosmo = 1 ]; then
     # cosmo: cosmocc links, its libc++ comes with the C++ driver, and the glibc-only libraries are not there
@@ -988,7 +826,8 @@ fi
 # The one-step build: eccp runs in a temporary directory, so its paths are made absolute before the cd (in the plan).
 eccp_bin="$edg/eccp"; eccp_out=$out
 if [ $moves = 1 ]; then
-  eccp_dir=$(mktemp -d); trap eccp_cleanup EXIT
+  if [ -n "$owned_eccp" ]; then eccp_dir=$owned_eccp; eccp_owned=1; mkdir "$eccp_dir"; else eccp_dir=$(mktemp -d); fi
+  exit_mode=eccp
 fi
 # The command line (its arguments, the variable a shared link exports, and the directory it runs in) is planned by
 # scripts/nfcxx-eccp-plan.rb, which also prints the note for a kept temporary directory (--keep-intermediates).
@@ -997,20 +836,14 @@ eccp_plan
 # -c: eccp writes the records of each source (<stem>.ti, the requests) beside its object, and the link reads them there. eccp
 # adds to a .ti that exists, so the records of the sources being compiled are removed first and the compile starts clean
 # (eccp keeps the old content of a .ti and writes the new record ahead of it). The first source takes the name of -o, as eccp names it.
-compile_clean() {  # compile_clean: removes the records of the sources of a -c compile (scripts/nfcxx-link.rb compile-clean)
-  if [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
-    "${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" compile-clean "$out" ${srcs[@]+"${srcs[@]}"}
-  fi
-}
-compile_clean
-link_records_rm() {  # link_records_rm: removes <stem>.ii beside each object of this link (see "A link writes" below)
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" records-rm -- ${files[@]+"${files[@]}"}   # the loop (tests/nfcxx-link/run.sh)
-}
+if [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then  # the records of the sources of a -c compile (scripts/nfcxx-link.rb compile-clean)
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" compile-clean "$out" ${srcs[@]+"${srcs[@]}"}
+fi
 # A link writes <stem>.ii beside each object it uses: the instances the link assigned to that object (the <stem>.ti requests
 # stay). An assignment left by an earlier link can name an instance that a later link assigns to another object ("assigned
 # to more than one file"), so these records are removed before the link and again once it succeeds (set -e: a failed link
 # exits before the second removal).
-link_records_rm
+"${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" records-rm -- ${files[@]+"${files[@]}"}   # the loop (tests/nfcxx-link/run.sh)
 # Compile cache (opt-in: --cache=DIR, or NFCXX_CACHE=DIR). A -c compile of one C++ source with -o is kept in DIR/objects under a key of
 # everything that can change the object: the command as given, the absolute output path (the prelinker records it in the
 # object's .ti), the working directory, the source and each header the host preprocessor lists (-M), the NFCXX_* environment,
@@ -1019,41 +852,30 @@ link_records_rm
 # -E inputs, -MD (its dependency file), several sources in one command, and an -o without an extension. A file name with
 # spaces in the header list is not handled.
 cache_check
-t=$(trace_start)
-(
-  [ -z "$eccp_cd" ] || cd "$eccp_cd"
-  for e in ${eccp_envs[@]+"${eccp_envs[@]}"}; do export "$e"; done
-  "${eccp_argv[@]}"
-)
-trace_end "$t" "eccp (front end, C compile, link)" eccp
-link_records_rm
+eccp_run
+"${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" records-rm -- ${files[@]+"${files[@]}"}   # the loop (tests/nfcxx-link/run.sh)
 # Kernel instances from the host compile. The rewriter lists the kernel templates whose instances the text does not
 # give (<kernels>.unresolved: a launch or address in a template the unit calls with deduced or dependent arguments,
 # binbcast.cu's launch_bin_bcast_pack), and their device code is not made. The host compile made them, though: when its
 # output has an instance of one of them (nm -C), the build runs again with those symbols (NFCXX_CUDA_HOST_SYMBOLS), and
 # the device rewrite makes each instance's entry. A unit whose templates are instantiated by other units (fattn.cu)
 # has none, and builds once. One .cu input only: the symbols of two units' static kernels could not be told apart.
-if [ ${#cu_inputs[@]} = 1 ] && [ -z "${NFCXX_CUDA_HOST_SYMBOLS:-}" ] && [ $preprocess = 0 ] && [ -f "$out" ] \
-   && [ -s "$cudatmp/$(basename "${cu_inputs[0]}" .cu).dev.kernels.unresolved" ]; then
-  hsyms=$cudatmp/host.syms
-  nm -C "$out" 2>/dev/null | sed 's/_INTERNAL_[A-Za-z0-9_]*:://g' > "$hsyms" || true
-  found=0
-  while IFS= read -r k; do
-    [ -n "$k" ] && grep -qE "(^|[ :])$k<" "$hsyms" && found=1
-  done < "$cudatmp/$(basename "${cu_inputs[0]}" .cu).dev.kernels.unresolved"
-  if [ $found = 1 ]; then
-    t=$(trace_start)
-    # (the second pass is not cached: the --cache option is left out, and NFCXX_CACHE emptied)
-    args2=(); for a in "${args0[@]}"; do case $a in --cache=*) ;; *) args2+=("$a") ;; esac; done
-    NFCXX_CUDA_HOST_SYMBOLS=$hsyms NFCXX_CACHE= NFCXX_CACHE_REMOTE= "$root/nfcxx" ${args2[@]+"${args2[@]}"} || exit $?
-    trace_end "$t" "second pass (kernel instances from the host compile)" eccp
-  fi
+# the gate, the host symbols and the found check are planned by scripts/nfcxx-second-pass.rb plan (sp_run, hsyms, args2: the
+# arguments without --cache); the run below is the oracle's line, which the Ruby driver calls with NfcxxSecondPass.run.
+sp_run=0
+if [ ${#cu_inputs[@]} = 1 ]; then   # (only a .cu compile can have a second pass: no Ruby is started otherwise)
+  eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-second-pass.rb" plan "$out" "$cudatmp" "${#cu_inputs[@]}" "${cu_inputs[0]-}" "$preprocess" "${NFCXX_CUDA_HOST_SYMBOLS-}" ${args0[@]+"${args0[@]}"})"
+fi
+if [ $sp_run = 1 ]; then
+  t=$(trace_start)
+  # (the second pass is not cached: the --cache option is left out, and NFCXX_CACHE emptied)
+  NFCXX_CUDA_HOST_SYMBOLS=$hsyms NFCXX_CACHE= NFCXX_CACHE_REMOTE= "$root/nfcxx" ${args2[@]+"${args2[@]}"} || exit $?
+  trace_end "$t" "second pass (kernel instances from the host compile)" eccp
 fi
 cache_store "$out"
 if [ -n "$depmode" ]; then
   # -MD/-MMD (with -MF/-MT/-MQ/-MP): the host preprocessor writes the dependency file, as nfcc does for C.
-  df=${dfile:-${out%.*}.d}; tgt=${dtarget:-$out}
-  mflag=-M; [ "$depmode" = -MMD ] && mflag=-MM
-  "${NFCXX_CXX:-g++}" $mflag $depphony -MT "$tgt" -MF "$df" "-std=${std#--}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} \
-    ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"} ${srcs[@]+${srcs[@]+"${srcs[@]}"}}
+  dep_cmd=(); while IFS= read -r -d '' dep_w; do dep_cmd+=("$dep_w"); done < <("${RUBY:-ruby}" "$root/scripts/nfcxx-depmode.rb" plan depmode="$depmode" out="$out" std="$std" cxx="${NFCXX_CXX:-}" dfile="$dfile" dtarget="$dtarget" depphony="$depphony" ${cflags[@]+"${cflags[@]/#/cflags=}"} ${sysdirs[@]+"${sysdirs[@]/#/sysdirs=}"} ${srcs[@]+"${srcs[@]/#/srcs=}"})   # the command: scripts/nfcxx-depmode.rb
+  [ ${#dep_cmd[@]} -gt 0 ] || exit 1
+  "${dep_cmd[@]}"
 fi

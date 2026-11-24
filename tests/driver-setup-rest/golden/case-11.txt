@@ -1,0 +1,8 @@
+== case 11: NFCXX_COSMOCC=<WORK>/stub/bin/cosmocc NFCXX_PATH=b   --cosmo -c a.cpp -o a.o
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: QBE not built; run scripts/setup-qbe.sh
+-- eccp
+(none)
+-- files

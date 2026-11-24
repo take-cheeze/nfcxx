@@ -24,6 +24,8 @@ suite.compile(source) do |ireps, root, _dir|
   generator = CodeGen.allocate
   generator.instance_variable_set(:@registry, registry)
   generator.instance_variable_set(:@ireps, ireps)
+  generator.instance_variable_set(:@unknown_mixins, Set.new)
+  generator.instance_variable_set(:@prepended_modules, {})
   generator.define_singleton_method(:devirt_blocked_name?) { |_name| false }
   probes = []
   unclean = nil

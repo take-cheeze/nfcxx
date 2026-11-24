@@ -9,6 +9,7 @@
 #   scripts/pathb-ssa-qbe.rb FILE.ssa > FILE.qbe      then:  build/qbe/qbe FILE.qbe > FILE.s
 #
 require_relative "pathb-ssa"
+require_relative "pathb-nothrow"
 
 QbeUnsupported = Class.new(StandardError)
 
@@ -176,7 +177,7 @@ module Qbe
     # interpose (not static) is read through the GOT or a pointer cell, never as a PC-relative reference, which ld rejects for
     # a symbol of a shared object (R_X86_64_PC32 "can not be used when making a shared object").
     # darwin: the module is for a Darwin target (the builder sets it from the host; a closed script world has no RbConfig).
-    attr_accessor :ptr32, :regparm3, :xadd, :cmpxchg, :jtab, :safe, :asan, :darwin, :got_extern, :pic, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_thunks, :trap_checks, :no_pie
+    attr_accessor :ptr32, :regparm3, :xadd, :cmpxchg, :jtab, :safe, :asan, :darwin, :got_extern, :pic, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_thunks, :trap_checks, :no_pie, :nothrow, :debug_lines
   end
   # --asan, milestone 2: the redzone on each side of a slot that stays in memory (poisoned at the function's entry, unpoisoned
   # before its return). 32 bytes, as the qbe backend's (docs/notes/asan.md).
@@ -196,6 +197,8 @@ module Qbe
   self.module_has_data = false
   self.sp_objects = []
   self.sp_funcs = []
+  self.debug_lines = false   # -g (pathb-cc): the line table of every function, as --asan has it
+  self.nothrow = {}   # the callees that let no exception out (module_context, nothrow_callees): symbol => true
   self.asan_objects = []   # --asan, milestone 3: [symbol, size rounded up to 8] of each global with a redzone after it
 
   module_function
@@ -592,6 +595,9 @@ module Qbe
         @label = block_label(@cur)
         @lines << "@#{@label}"
         items = b[2..]
+        @eh_block_line ||= {}
+        ehu = items.find { |it| head(it) == "eh-unwind" }
+        @eh_block_line[@label] = ehu && "  ehunwind #{ehu[1] == "0" ? "0" : "@#{block_label(ehu[1])}"}"
         # A trap or unreachable ends the block in QBE (hlt): what follows it in the SSA block is dead, and QBE rejects an
         # instruction after hlt, so the block is cut there.
         halt = items.index { |it| %w[trap unreachable].include?(head(it)) }
@@ -602,10 +608,28 @@ module Qbe
       end
       @lines << "}"
       resolve_phi_predecessors
+      eh_relabel if @eh_block_line&.values&.any?
+      drop_bare_dbgloc if Qbe.asan || Qbe.debug_lines
       self
     end
 
     private
+
+    # A dbgloc with nothing after it in its block but the jmp or ret locates no instruction of its own, and it stands
+    # between a call and the ret, where QBE then makes no tail call: with -g the code would differ from the code without
+    # it. Such a line goes. (QBE itself threads a jump through a block of dbgloc lines, and its vectorizer skips them.)
+    def drop_bare_dbgloc
+      out = []
+      @lines.each_with_index do |l, i|
+        if l.start_with?("  dbgloc ")
+          j = i + 1
+          j += 1 while j < @lines.length && (@lines[j].start_with?("  dbgloc ") || @lines[j].start_with?("  ehunwind "))
+          next if j < @lines.length && (@lines[j].start_with?("  jmp ") || @lines[j].start_with?("  ret"))
+        end
+        out << l
+      end
+      @lines = out
+    end
 
     def header
       sig = []
@@ -696,6 +720,7 @@ module Qbe
         @lines << "#{static ? "" : "export "}#{secl}function #{ret}$#{@name}(#{sig.join(", ")}) {"
       end
       @lines << "@start"
+      eh_header
       @f16_params.each { |n| f16_from_sse("%h#{n}", "%p#{n}") }
     end
 
@@ -919,6 +944,7 @@ module Qbe
     def block_successors(term)
       case head(term)
       when "br" then [term[1].to_s]
+      when "eh-entry" then term[1..].map(&:to_s)
       when "condbr" then [term[2].to_s, term[3].to_s]
       when "switch" then term[2..].select { |c| head(c) == "case" || head(c) == "default" }.map { |c| c.last.to_s }
       else []
@@ -941,6 +967,8 @@ module Qbe
         @lines << "  #{name} =#{Qbe.kp} alloc8 8"
         @sp_objs << [name, 8 + Qbe::SP_NOPAD] if Qbe.safe
       end
+      # The scratch word of the inline __atomic_exchange_N loops (atomic_xchg_lines): one per function, as they never nest.
+      @lines << "  %axs =l alloc8 8" if xchg_inline? && @blocks.any? { |b| b[2..].any? { |it| contains_xchg?(it) } }
       @share = share_slots
       group = {}   # a representative's index => [size, align] of its group's object: the largest of its members
       @share.each do |m, r|
@@ -1156,9 +1184,10 @@ end
     # --asan: the source line of an access, for libasan's report. QBE's `dbgfile` is a top-level directive that applies to the
     # functions after it, so a function takes the file of its first (loc ...) (module_il writes the `dbgfile` before it), and
     # a `dbgloc LINE` follows each (loc ...) of that file (a location from another file, an inlined header, is left out).
-    # The assembler turns them into .file and .loc, so the object has a line table whether or not -g was given.
+    # The assembler turns them into .file and .loc, so the object has a line table whether or not -g was given. With -g
+    # (Qbe.debug_lines, pathb-ssa-build --debug-lines) every function has them too.
     def asan_dbgloc
-      return unless Qbe.asan
+      return unless Qbe.asan || Qbe.debug_lines
 
       file, line = @loc
       return if line <= 0 || file.empty? || (file.include?('"') || file.include?("\\") || file.include?("\n"))
@@ -1334,6 +1363,64 @@ end
     end
 
     def block_label(num) = "b#{num}"
+
+    # Zero-cost exception tables (docs/notes/pathb-zero-cost-eh.md): the function's catch clause types and noexcept.
+    def eh_header
+      eh_nothrow_line
+      @form.drop(2).each do |p|
+        next unless p.is_a?(Array)
+        # QBE's i386 target writes no exception tables (no CFI either): an exception would reach std::terminate
+        if Qbe.ptr32 && %w[eh-types eh-noexcept eh-spec].include?(head(p))
+          raise QbeUnsupported, "exception tables on the 32-bit x86 target (QBE's i386 writes none)"
+        end
+
+        case head(p)
+        when "eh-noexcept" then @lines << "  ehnoexcept"
+        when "eh-spec" then @lines << "  ehspec #{p[1..].join(' ')}"
+        when "eh-types"
+          p[1..].each_with_index do |t, i|
+            @lines << "  ehtype #{i + 1} #{t.is_a?(Ref) ? "$#{Qbe.symbol(t.raw)}" : "0"}"
+          end
+        end
+      end
+    end
+
+    # The direct callees of a function with exception tables that let no exception out (Qbe.nothrow): their calls have
+    # no call site entry.
+    def eh_nothrow_line
+      tables = false
+      names = {}
+      walk = lambda do |x|
+        next unless x.is_a?(Array)
+        tables = true if %w[eh-unwind eh-noexcept eh-spec eh-spec-pad eh-types].include?(head(x))
+        if head(x) == "call" && x[2].is_a?(Ref) && x[2].sigil == "&"
+          n = Qbe.symbol(x[2].raw)
+          names[n] = true if Qbe.nothrow.key?(n) || n.start_with?("__atomic_")
+        end
+        x.each { |y| walk.call(y) }
+      end
+      walk.call(@form)
+      @lines << "  ehnothrow #{names.keys.sort.map { |n| "$#{n}" }.join(" ")}" if tables && !names.empty?
+    end
+
+    # A label the emitter writes inside an SSA block (a loop of an expansion) begins a QBE block, whose calls unwind to
+    # the SSA block's pad too: its ehunwind line is written again after every such label.
+    def eh_relabel
+      cur = nil
+      out = []
+      @lines.each do |l|
+        out << l
+        if l.start_with?("@")
+          name = l[1..]
+          if @eh_block_line.key?(name)
+            cur = @eh_block_line[name]
+          elsif cur && name != "start"
+            out << cur
+          end
+        end
+      end
+      @lines = out
+    end
 
     # QBE reads at most 63 predecessors in a phi ("too many arguments"). A block that has more (the join of the dispatch
     # switches of a computed-goto interpreter: Lua's lvm.c has 83 `goto *` and a label every one of them reaches) gets
@@ -1855,6 +1942,12 @@ end
         end.join(", ")
         @lines << "  #{reg(item[1])} =#{Qbe.cls(item[2])} phi #{pairs}"
       when "let" then let_lines(item[1], item[2], item[3])
+      when "eh-unwind" then @lines << "  ehunwind #{item[1] == "0" ? "0" : "@#{block_label(item[1])}"}"
+      when "eh-pad"
+        raise QbeUnsupported, "exception tables on the 32-bit x86 target (QBE's i386 writes none)" if Qbe.ptr32
+        @lines << "  ehpad #{item[1]}#{item[2..].map { |t| " #{t}" }.join}"
+      # the pad's own dynamic exception specification (ehspecpad: its chain ends with this list's filter), in its own block
+      when "eh-spec-pad" then @lines << "  ehspecpad @#{block_label(@cur)} #{item[1]}#{item[2..].map { |t| " #{t}" }.join}"
       # A volatile store is a call of its helper (QBE merges, forwards and drops plain volatile stores; a call is kept).
       when "store"
         v = op(item[3])
@@ -1896,7 +1989,7 @@ end
         safe_check(item[2], dst, n)
         asan_check(item[2], dst, n, "store")
         @lines << "  call $memset(#{Qbe.kp} #{dst}, w 0, #{Qbe.kp} #{n})" unless n.to_i.zero?
-      when "br"
+      when "br", "eh-entry"   # eh-entry: the landing pads after the body block are no jump's targets
         jump_to(item[1])
         @lines << "  jmp @#{block_label(item[1])}"
       when "switch" then switch_lines(item)
@@ -1920,6 +2013,10 @@ end
         end
         if atomic_cas?(item[1])
           atomic_cas_lines(fresh, item[1])
+          return
+        end
+        if atomic_xchg?(item[1])
+          atomic_xchg_lines(fresh, item[1])
           return
         end
 
@@ -2101,6 +2198,8 @@ end
           atomic_fetch_lines(dst, c, rv)
         elsif atomic_cas?(rv)
           atomic_cas_lines(dst, rv)
+        elsif atomic_xchg?(rv)
+          atomic_xchg_lines(dst, rv)
         elsif Qbe.f16?(rv[1])
           # The result is the low 16 bits of xmm0.
           raw = fresh
@@ -2157,6 +2256,10 @@ end
         end
       # `(p2i T P)`: a pointer's address as an integer of type T, truncated or kept as the type's canonical form.
       when "p2i" then canon_lines(dst, t, op(rv[2]))
+      # `(eh-exc)`, `(eh-sel)`: in a landing pad, the exception and the selector the personality installed (QBE's ehptr and
+      # ehsel: the unwinder's registers, docs/notes/pathb-zero-cost-eh.md).
+      when "eh-exc" then @lines << "  #{dst} =l ehptr"
+      when "eh-sel" then @lines << "  #{dst} =l ehsel"
       # `(rdtsc)`: the time-stamp counter, from the helper the driver appends.
       when "rdtsc"
         asm_helpers << "rdtsc"
@@ -3001,8 +3104,10 @@ end
       return false unless atomic_fetch_kind(c)
       order = c[5]
       # Any memory order: a locked xadd is a full barrier, so it satisfies relaxed, acquire, release, acq_rel and seq_cst alike
-      # (libstdc++'s shared_ptr counts use acq_rel, 4).
-      head(order) == "const" && %w[0 1 2 3 4 5].include?(order[2].to_s)
+      # (libstdc++'s shared_ptr counts use acq_rel, 4). A runtime order (an out-of-line std::atomic_fetch_add_explicit, whose
+      # order is a parameter) is the same, provided its expression holds no call: the order is not evaluated.
+      return !contains_call?(order) unless head(order) == "const"
+      %w[0 1 2 3 4 5].include?(order[2].to_s)
     end
 
     # A call of __atomic_*_1 or __atomic_*_2 (fetch, exchange, compare-exchange): its result is an integer of 1 or 2 bytes.
@@ -3097,7 +3202,8 @@ end
       return false unless name.start_with?("__atomic_compare_exchange_") && CAS_SIZES.include?(name[-1])
       return false unless name.length == "__atomic_compare_exchange_".length + 1
 
-      [7, 8].all? { |i| head(c[i]) == "const" && %w[0 1 2 3 4 5].include?(c[i][2].to_s) }
+      # The orders may be runtime values (as for fetch): then they must hold no call, as they are not evaluated.
+      [7, 8].all? { |i| head(c[i]) == "const" ? %w[0 1 2 3 4 5].include?(c[i][2].to_s) : !contains_call?(c[i]) }
     end
 
     # The expected value is loaded, the exchange is made on the object, and the old value is stored back to the expected
@@ -3116,6 +3222,70 @@ end
       @lines << "  #{old} =#{k} cmpxchg1 #{h}, #{des}"
       @lines << "  store#{k} #{old}, #{exp}"
       @lines << "  #{dst} =w ceq#{k} #{old}, #{ev}"
+    end
+
+    # __atomic_exchange_4 and __atomic_exchange_8 (any order: every locked compare-exchange is a full barrier, so the order is not
+    # needed). QBE has no public exchange op (its swap is internal to the register allocator), so the inline form is a loop of
+    # cmpxchg0/cmpxchg1 (atomic_xchg_lines). Only without --safe and --asan, which check the calls. The order is not evaluated,
+    # so it must hold no call.
+    XCHG_SIZES = %w[4 8].freeze
+
+    def xchg_inline?
+      ATOMIC_XADD && Qbe.cmpxchg && !Qbe.safe && !Qbe.asan
+    end
+
+    # The size (4 or 8) of a __atomic_exchange_N call that the loop lowers, or nil.
+    def xchg_size(c)
+      return nil unless xchg_inline? && c.length == 6
+      f = c[2]
+      return nil unless f.is_a?(Ref) && f.sigil == "&"
+      name = f.raw.delete('"')
+      return nil unless name.start_with?("__atomic_exchange_") && name.length == "__atomic_exchange_".length + 1
+      return nil unless XCHG_SIZES.include?(name[-1])
+      return nil if contains_call?(c[5])
+
+      name[-1]
+    end
+
+    def atomic_xchg?(c) = !xchg_size(c).nil?
+
+    # Whether a form holds an exchange this lowering takes (the scratch slot is needed).
+    def contains_xchg?(x)
+      return false unless x.is_a?(Array)
+      return true if head(x) == "call" && !xchg_size(x).nil?
+
+      x.any? { |y| contains_xchg?(y) }
+    end
+
+    # The expected value is in the scratch word %axs. The loop reads it, compare-exchanges the object (expected value, then the
+    # desired one), and falls out when the object held the expected value: then the old value is the result, which the word
+    # holds. On failure the word takes what the object held, and the loop retries. The first value is the object's own, read
+    # once before the loop, so the first attempt usually succeeds.
+    def atomic_xchg_lines(dst, c)
+      size = xchg_size(c)
+      k = size == "4" ? "w" : "l"
+      addr = op(c[3])
+      des = op(c[4])
+      n = (@temps += 1)
+      init = fresh
+      @lines << "  #{init} =#{k} load#{k} #{addr}"
+      @lines << "  store#{k} #{init}, %axs"
+      @lines << "@axh#{n}"
+      old = fresh
+      @lines << "  #{old} =#{k} load#{k} %axs"
+      h = fresh
+      @lines << "  #{h} =#{k} cmpxchg0 #{addr}, #{old}"
+      got = fresh
+      @lines << "  #{got} =#{k} cmpxchg1 #{h}, #{des}"
+      same = fresh
+      @lines << "  #{same} =w ceq#{k} #{got}, #{old}"
+      @lines << "  jnz #{same}, @axd#{n}, @axr#{n}"
+      @lines << "@axr#{n}"
+      @lines << "  store#{k} #{got}, %axs"
+      @lines << "  jmp @axh#{n}"
+      @lines << "@axd#{n}"
+      @label = "axd#{n}"
+      @lines << "  #{dst} =#{k} load#{k} %axs"
     end
 
     def atomic_fetch_lines(dst, cls, c)
@@ -3918,7 +4088,68 @@ end
     [rcls, classes]
   end
 
+  # The exception tables' nothrow analysis (as gcc's): the callees whose calls need no call site entry (QBE's
+  # ehnothrow). A function the module defines lets no exception out when it is noexcept (an exception that would leave it
+  # calls std::terminate), or when the definition is the one every call reaches (static, an inline or template instance,
+  # or an exported function outside a shared object: not __attribute__((weak)), not preemptible with -fPIC), has no
+  # dynamic exception specification, and makes only direct calls of such functions or of PathbNothrow::EXTERN (libc's
+  # nothrow routines). Computed as the least set of the functions that can throw, through their callers.
+  def nothrow_callees(forms)
+    defs = {}
+    forms.each { |f| defs[f[1].raw.delete('"')] = f if head(f) == "ssa-function" }
+    callers = Hash.new { |h, k| h[k] = [] }
+    bad = {}
+    work = []
+    defs.each do |name, f|
+      attrs = f.drop(2).select { |p| p.is_a?(Array) }
+      next if attrs.any? { |p| head(p) == "eh-noexcept" }
+
+      fixed = attrs.any? { |p| head(p) == "static" } || attrs.any? { |p| head(p) == "weak" && p.length == 1 } ||
+              !(pic || attrs.any? { |p| head(p) == "weak" })
+      risky = !fixed || attrs.any? { |p| head(p) == "eh-spec" }
+      callees = {}
+      unless risky
+        walk = lambda do |x|
+          next unless x.is_a?(Array)
+          if head(x) == "call"
+            if x[2].is_a?(Ref) && x[2].sigil == "&"
+              callees[x[2].raw.delete('"')] = true
+            else
+              risky = true
+            end
+          end
+          x.each { |y| walk.call(y) }
+        end
+        walk.call(f)
+      end
+      callees.each_key do |c|
+        if defs.key?(c)
+          callers[c] << name
+        elsif !PathbNothrow.extern?(c)
+          risky = true
+        end
+      end
+      next unless risky
+
+      bad[name] = true
+      work << name
+    end
+    until work.empty?
+      callers[work.pop].each do |name|
+        next if bad[name]
+
+        bad[name] = true
+        work << name
+      end
+    end
+    out = {}
+    defs.each_key { |n| out[symbol(n)] = true unless bad[n] }
+    PathbNothrow::EXTERN.each { |n| out[n] = true }
+    out
+  end
+
   def module_context(forms)
+    self.nothrow = nothrow_callees(forms)
     gs = forms.select { |g| head(g) == "global" }
     self.module_has_data = forms.any? { |f| %w[global data].include?(head(f)) }
     self.sp_objects = []

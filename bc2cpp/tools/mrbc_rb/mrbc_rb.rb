@@ -396,7 +396,19 @@ module MrbcRb
   # the file, the number of lines the next file's numbering is ahead].
   def self.file_tail(source)
     # (heredoc bodies are lexed before the rest of their line: the last token is the one that ends last)
-    last = Prism.lex(source).value.map(&:first).reject { |t| NON_TOKENS.include?(t.type) }.each_with_index.max_by { |t, i| [t.location.end_offset, i] }&.first
+    # The token that ends last, the later one on a tie. Not max_by with [offset, index] keys: mruby's max_by compares
+    # its keys with `>`, which an Array does not answer, so a self-hosted compile of several files raised there.
+    last = nil
+    last_end = nil
+    Prism.lex(source).value.each do |(t, _)|
+      next if NON_TOKENS.include?(t.type)
+
+      end_offset = t.location.end_offset
+      next if last_end && end_offset < last_end
+
+      last = t
+      last_end = end_offset
+    end
     return [false, 0] unless last
     raise Unsupported, 'file ending in a heredoc' if last.type == :HEREDOC_START
     heredoc = last.type == :HEREDOC_END
@@ -661,6 +673,7 @@ module MrbcRb
 
     def compile(program)
       stmts = program.statements.body
+      ann_body(stmts)
       set_locals(program.locals)
       value_reg = generate(stmts, val: true)
       return_value(value_reg)
@@ -679,6 +692,7 @@ module MrbcRb
       @segment_name = units.first.filename
       @filename = @segment_name
       set_locals(locals)
+      ann_body(units.flat_map(&:stmts))
       value_reg = generate(units.flat_map(&:stmts), val: true)
       return_value(value_reg)
       emit(:STOP)
@@ -715,6 +729,7 @@ module MrbcRb
     # is generated as a top-level program is, but without STOP. With +val+ its last statement's value is returned;
     # without it the body returns nil (gen_return with source register 0).
     def compile_body(locals, stmts, val)
+      ann_body(stmts)
       set_locals(locals)
       value_reg = generate(stmts, val: val)
       if val
@@ -932,6 +947,7 @@ module MrbcRb
       index = @children.size - 1
       
       emit(:BLOCK, sp, index)
+      ann_block_send(node, :literal, index)
       emit_send(a, recv, node.name, argc, true)
       dispatch(skip)
       @nregs = [@nregs, sp + 1].max
@@ -1563,6 +1579,7 @@ module MrbcRb
       lp = Loop.new(last ? t : nil, @code.size, [])
       @labels << lp.pc0
       @loops << lp
+      ann = ann_loop_open(node)
       begin
         unless forever
           value_into(pred, t)
@@ -1579,6 +1596,7 @@ module MrbcRb
         back = emit_jump(:JMP)
         patch_jump(back, lp.pc0)
         dispatch(to_exit)
+        ann_loop_close(ann, header_pc: lp.pc0, body_pc: lp.pc1, back_pc: back, exit_pc: @code.size)
         emit(:LOADNIL, t) if last
         lp.breaks.each { |j| dispatch(j) }
       ensure
@@ -1611,6 +1629,7 @@ module MrbcRb
 
       lp = Loop.new(last ? t : nil, nil, [])
       @loops << lp
+      ann = ann_loop_open(node)
       begin
         @line = pred.location.start_line # the loop node is stamped with the line of its condition (verified)
         to_body = emit_jump(:JMP)
@@ -1628,6 +1647,7 @@ module MrbcRb
         back = emit_jump(:JMP)
         patch_jump(back, lp.pc0)
         dispatch(to_exit)
+        ann_loop_close(ann, header_pc: lp.pc0, body_pc: lp.pc1, back_pc: back, exit_pc: @code.size)
         emit(:LOADNIL, t) if last
         lp.breaks.each { |j| dispatch(j) }
       ensure
@@ -1655,6 +1675,7 @@ module MrbcRb
         @nregs = [@nregs, lp.reg + args.size].max
         emit(:ARRAY, lp.reg, args.size)
         lp.breaks << emit_jump(:JMPUW)
+        ann_loop_exit(:break, lp.breaks.last)
         return last ? temp : nil
       end
       raise Unsupported, 'break with several values' if args && args.size != 1 && lp.reg
@@ -1674,6 +1695,7 @@ module MrbcRb
         emit(:LOADNIL, lp.reg)
       end
       lp.breaks << emit_jump(:JMPUW)
+      ann_loop_exit(:break, lp.breaks.last)
       last ? temp : nil
     end
 
@@ -1694,6 +1716,7 @@ module MrbcRb
       end
       jump = emit_jump(:JMPUW)
       patch_jump(jump, lp.pc0)
+      ann_loop_exit(:next, jump)
       last ? temp : nil
     end
 
@@ -2121,6 +2144,7 @@ module MrbcRb
     def const_write(node, last:)
       t = temp
       value_into(node.value, t)
+      ann_const_write(node)
       gen_setxv(:SETCONST, t, node.name, last) # drops a MOVE just before when the value is unused
       last ? t : nil
     end
@@ -2188,6 +2212,7 @@ module MrbcRb
       end
       @sp = saved
       ann_const_path(target)
+      ann_const_write(node)
       emit(:SETMCNST, t, sym)
       last ? t : nil
     end
@@ -2661,7 +2686,9 @@ module MrbcRb
       when Prism::InstanceVariableTargetNode then gen_setxv(:SETIV, src, target.name, false)
       when Prism::GlobalVariableTargetNode then gen_setxv(:SETGV, src, target.name, false)
       when Prism::ClassVariableTargetNode then gen_setxv(:SETCV, src, target.name, false)
-      when Prism::ConstantTargetNode then gen_setxv(:SETCONST, src, target.name, false)
+      when Prism::ConstantTargetNode
+        ann_const_write(target)
+        gen_setxv(:SETCONST, src, target.name, false)
       when Prism::MultiTargetNode
         target.lefts.each_with_index do |l, i|
           emit(:AREF, cursp, src, i)
@@ -2944,6 +2971,7 @@ module MrbcRb
       skip = safe_jump(a, need) if node.safe_navigation?
       args, block = forwarding_arguments(node)
       argc, blk = gen_args(block, a, args, node.closing_loc&.start_line)
+      ann_block_send(node, ann_pass_kind(block)) if blk
       emit_send(a, recv, node.name, argc, blk)
       dispatch(skip)
       a
@@ -3243,8 +3271,10 @@ module MrbcRb
         return a
       end
 
-      # milestone 13: gen_values flushes into ARRAY/ARYPUSH once an argument reaches register 99 (GEN_VAL_STACK_MAX).
-      return call_with_args(node, need: need) if args.size >= 2 && a + 1 < 99 && a + args.size >= 99 && node.name.to_s.match?(PLAIN_NAME)
+      # milestone 13: gen_values flushes into ARRAY/ARYPUSH once an argument reaches register 99 (GEN_VAL_STACK_MAX). An
+      # index call with two or more arguments (`out[re, 1]`) is a plain gen_call as well, so it flushes the same way.
+      return call_with_args(node, need: need) if args.size >= 2 && a + 1 < 99 && a + args.size >= 99 &&
+                                                (node.name.to_s.match?(PLAIN_NAME) || node.name == :[])
 
       operand_into(recv, a) if recv
       skip = safe_jump(a, need) if node.safe_navigation?
@@ -3946,6 +3976,7 @@ module MrbcRb
       
       reach(t + 2)
       emit(:BLOCK, t + 1, index)
+      ann_block_send(node, :for, index)
       emit(:SENDB, t, sym_index(:each), 0)
       last ? t : nil
     end
@@ -5505,6 +5536,7 @@ module MrbcRb
       region = @regions.reverse.find { |g| g.type == :rescue } or raise Unsupported, 'retry outside a rescue clause'
       jump = emit_jump(:JMPUW)
       patch_jump(jump, region.pc0)
+      ann_loop_exit(:retry, jump)
       last ? temp : nil
     end
 
@@ -5578,6 +5610,7 @@ module MrbcRb
       lp = @loops.last or raise Unsupported, 'redo outside a loop or block'
       jump = emit_jump(:JMPUW)
       patch_jump(jump, lp == BLOCK_LOOP ? 0 : (lp.pc1 or raise(Unsupported, 'redo in this loop')))
+      ann_loop_exit(:redo, jump) unless lp == BLOCK_LOOP
       last ? temp : nil
     end
 
@@ -5695,6 +5728,7 @@ module MrbcRb
         end
       end
       @sp = a
+      ann_block_send(node, literal ? :literal : (node.block ? ann_pass_kind(node.block) : :implicit), literal ? @children.size - 1 : nil)
       emit(:SUPER, a, n)
       last ? a : nil
     ensure

@@ -165,6 +165,8 @@ module SelfNewConstruct
     return nil unless argv.size.between?(mand, mand + opt)
     return nil if opt.positive? && !optional_arg_table(init)[1]
     return nil if mandatory_optional_and_keyword_arity?(init) || native_arg_types(definition, mand).any?
+    # Its `_impl` takes the block Class#new would hand it (SUPER_FRAME_BLOCK, a yield): this call has none to give.
+    return nil if takes_block_param?(init)
 
     args = argv.dup
     if opt.positive?

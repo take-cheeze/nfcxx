@@ -103,6 +103,7 @@ module OutsideOwnerCall
   end
 
   OWNER_PATH = /\A[A-Z]\w*(?:::[A-Z]\w*)*(?:\.singleton)?\z/
+  NOMETHOD_TAIL = /\G[^\n]*?\); \/\* CLOSED_WORLD nomethod: (?:self|recv)\.\S+ @ \S+ \*\//
 
   def guarded_fallback_line(d, recv, name, argv, listed, site)
     base = super
@@ -117,11 +118,20 @@ module OutsideOwnerCall
     return base unless owners
 
     lifted = @closed_world.with_outside_owner_call(name) { super }
-    error = %r{r#{d} = bc2cpp_nomethod_named\(M, #{Regexp.escape(recv)}, "#{Regexp.escape(name)}"[^\n]*?\); /\* CLOSED_WORLD nomethod: (?:self|recv)\.\S+ @ \S+ \*/}
-    # Another gate still keeps the else: the site dispatches by name, under that gate's reason.
-    return lifted unless lifted.match?(error)
+    # Only the literal call prefix varies by site; reuse the marker matcher instead of compiling a regexp.
+    prefix = "r#{d} = bc2cpp_nomethod_named(M, #{recv}, \"#{name}\""
+    offset = 0
+    while (start = lifted.index(prefix, offset))
+      if (tail = NOMETHOD_TAIL.match(lifted, start + prefix.length))
+        # mruby-onig reuses match regions, including across calls made while emitting the replacement.
+        finish = tail.end(0)
+        return lifted[0...start] + outside_owner_call_line(d, recv, name, argv, owners) + lifted[finish..]
+      end
+      offset = start + 1
+    end
 
-    lifted.sub(error) { outside_owner_call_line(d, recv, name, argv, owners) }
+    # Another gate still keeps the else: the site dispatches by name, under that gate's reason.
+    lifted
   end
 
   # A send with no guard chain (POLY's bare dispatch): the same closed-world question with no Ruby arm listed. The
@@ -144,16 +154,38 @@ module OutsideOwnerCall
   # helper's operator site (CheckedSend never sees it).
   HELPER_FUNCALL = /\b(?:mrb_funcall|bc2cpp_funcall_keep)\(M, (\w+), "([^"]+)", (\d+)((?:, \w+)*)\)/
 
+  # PROGRAM_OWNER_SITES (symbol_cache.rb): with a presym id for the name, the owner call and a proven nomethod name
+  # no slot of the gem's symbol table, so the helper prints the same in every gem.
+  HELPER_NOMETHOD = /\bbc2cpp_nomethod_named\(M, (\w+), "([^"]+)"(?:, ([012]))?((?:, \w+){0,2})\)/
+
   def helper_owner_calls(code)
-    code.gsub(HELPER_FUNCALL) do
+    code = code.gsub(HELPER_FUNCALL) do
       call = Regexp.last_match
       recv, name, argc, args = call.captures
       owners = argc.to_i <= CodeGen::FUNCALL_ARGC_MAX && args.count(',') == argc.to_i && name_owner_set(name)
       next call[0] unless owners
 
       list = owner_call_owner_list(owners)
+      mid = argc.to_i <= 2 && SymbolCache.program_mid(name, owner_site: true)
+      if mid
+        next "bc2cpp_owner_call_pw#{argc}(M, #{recv}, BC2CPP_OWNERS_PW(#{mid}, #{list})#{args}) " \
+             "/* CLOSED_WORLD owner-call: #{name} */"
+      end
+
       "bc2cpp_owner_call_named(M, #{recv}, \"#{name}\", 0, BC2CPP_OWNERS(#{list}), mrb_nil_value(), #{argc}#{args}) " \
         "/* CLOSED_WORLD owner-call: #{name} */"
+    end
+    helper_nomethods(code)
+  end
+
+  # PROGRAM_OWNER_SITES: a shared helper's proven nomethod by presym id (the index helpers take only this part: their
+  # class arms are PROGRAM_CLASS_SLOTS', so the nomethod's slot was all that differed between gems).
+  def helper_nomethods(code)
+    code.gsub(HELPER_NOMETHOD) do
+      call = Regexp.last_match
+      recv, name, argc, args = call.captures
+      mid = args.count(',') == argc.to_i && SymbolCache.program_mid(name)
+      mid ? "bc2cpp_nomethod_pw(M, #{recv}, #{mid}#{args})" : call[0]
     end
   end
 
@@ -246,8 +278,9 @@ module OutsideOwnerCall
     return nil if mode == :strict && (map.core_dynamic_unknown.positive? || map.refusals[:core_prepend].positive?)
 
     native = map.by_name.fetch(name, Set.new)
-    native = factory_unknown_dropped(name, paths, native) if native.include?(NativeOwnerMap::UNKNOWN)
-    return nil if native.nil? || native.include?(NativeOwnerMap::UNKNOWN)
+    unknown = [NativeOwnerMap::UNKNOWN, NativeOwnerMap::UNKNOWN_CLASS_TABLE]
+    native = factory_unknown_dropped(name, paths, native) if native.intersect?(unknown)
+    return nil if native.nil? || native.intersect?(unknown)
 
     ruby = OutsideRubyOwners.scan(Array(owner_call_world.ruby_paths))
     return nil if ruby.unknown.include?(name) || ruby.unknown.include?(:all)
@@ -257,11 +290,16 @@ module OutsideOwnerCall
     core = OutsideRubyOwners.scan(program_core_ruby_paths)
     return nil if core.unknown.include?(name) || core.unknown.include?(:all)
 
+    # UNREAD_RUBY_OWNERS: linked Ruby the program neither compiles nor lists as outside (see bc2cpp.rb), named and
+    # wild owners alike (mruby-enumerator's `module Kernel; alias enum_for to_enum`, complex.rb's Numeric#i).
+    unread = OutsideRubyOwners.scan(self.class.unread_ruby_paths || [])
+    return nil if unread.unknown.include?(name) || unread.unknown.include?(:all)
+
     # Core Ruby definitions whose name a native also registers (mruby-io's IO.open, beside StringIO's native open) are
     # moved out of the registry into core_hidden_defs, so the registry alone cannot name them.
     hidden = (self.class.core_hidden_defs || []).select { |definition| definition.name == name }.map(&:owner)
     owners = native | (map.computed - [NativeOwnerMap::UNKNOWN]) | ruby.names.fetch(name, Set.new) | ruby.wild | hidden |
-             core.names.fetch(name, Set.new) | core.wild
+             core.names.fetch(name, Set.new) | core.wild | unread.names.fetch(name, Set.new) | unread.wild
     return nil if owners.empty? || owners.any? { |owner| !owner.match?(OWNER_PATH) }
 
     freeze_owner_call_owners(owners.to_a.sort)
@@ -286,14 +324,14 @@ module OutsideOwnerCall
       key = FACTORY_UNKNOWN_NAMES.keys.find { |suffix| File.expand_path(path).end_with?(suffix) }
       key && native_unknown_names(path).sort == FACTORY_UNKNOWN_NAMES.fetch(key).sort
     end
-    factory && !sources.empty? ? native - [NativeOwnerMap::UNKNOWN] : nil
+    factory && !sources.empty? ? native - [NativeOwnerMap::UNKNOWN, NativeOwnerMap::UNKNOWN_CLASS_TABLE] : nil
   end
 
   # The names `path` registers on a class the owner map cannot name.
   def native_unknown_names(path)
     @native_unknown_names ||= {}
     @native_unknown_names[path] ||= NativeOwnerMap.build([path]).by_name
-                                                  .select { |_, owners| owners.include?(NativeOwnerMap::UNKNOWN) }.keys
+                                                  .select { |_, owners| owners.include?(NativeOwnerMap::UNKNOWN) || owners.include?(NativeOwnerMap::UNKNOWN_CLASS_TABLE) }.keys
   end
 
   def program_core_ruby_paths

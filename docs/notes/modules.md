@@ -18,7 +18,10 @@ the module options and builds the program one source at a time. Test: `tests/mod
 - A source with no `export module` and no `import` takes the unchanged path, so `import` and `module` stay ordinary
   identifiers there (`tests/modules/plain.cpp`).
 
-`tests/modules/run.sh` runs the Path B, qbe and gcc backends. Path B is the default for a program with modules on
+The driver's module block (the scans, the refusals, the build of a link and the options of a compile) is
+`scripts/nfcxx-modules-plan.rb`. The frozen body calls it once, at the block's place, and reads its reply: `modules`, `modopts`
+and, for a link, the build's status. `tests/driver-modules-plan/run.sh` checks its refusals against goldens and its answers
+against a stub build. `tests/modules/run.sh` runs the Path B, qbe and gcc backends. Path B is the default for a program with modules on
 x86-64 Linux (and a file it does not build falls back to gcc, as everywhere, docs/notes/pathb-default.md): the driver
 gives `scripts/pathb-cc` (and so `scripts/pathb-dump` and the harness front end) the same `--modules`,
 `--modules_directory` and `--create_module_interface` options it gives EDG's `eccp`, and the object comes from the

@@ -38,7 +38,8 @@ module NativeCoreCandidates
     mrb_ary_new mrb_ary_new_capa mrb_ary_new_from_values mrb_ary_push mrb_ary_ref mrb_ary_entry
     mrb_ary_set mrb_ary_shift mrb_ary_pop mrb_ary_clear mrb_ary_concat mrb_boxing_int_value
     mrb_word_boxing_float_value mrb_word_boxing_cptr_value mrb_float_value mrb_int_value mrb_fixnum_value mrb_class_get
-    mrb_class_get_under mrb_module_get mrb_module_get_under mrb_const_defined mrb_const_get mrb_const_set
+    mrb_class_get_under mrb_module_get mrb_module_get_under mrb_class_get_id mrb_class_get_under_id mrb_module_get_id
+    mrb_module_get_under_id mrb_const_defined mrb_const_get mrb_const_set
     mrb_data_get_ptr mrb_data_check_get_ptr mrb_data_object_alloc mrb_data_init mrb_ensure_float_type mrb_ensure_int_type
     mrb_ensure_string_type mrb_check_type mrb_format mrb_free mrb_malloc mrb_realloc
     mrb_calloc mrb_funcall mrb_funcall_argv mrb_funcall_id mrb_gc_type_counts mrb_gc_arena_save

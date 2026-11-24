@@ -20,6 +20,9 @@ require_relative 'core_hierarchy_sigs'
 # registrations and are skipped.
 module NativeOwnerMap
   UNKNOWN = :unknown
+  # UNKNOWN_CLASS_TABLE: a literal name a `define_class_method` family call registers on a class the map cannot name.
+  # It sits in a class object's singleton table, which only a class or module receiver looks up (see verdict).
+  UNKNOWN_CLASS_TABLE = '?.singleton'
 
   # mrb_state's class fields (3rd/mruby/include/mruby.h) and the class each one holds.
   CORE_FIELD_OWNERS = {
@@ -44,8 +47,8 @@ module NativeOwnerMap
     'define_method_raw' => { name: 2, owner: 1, suffix: nil },
     'define_private_method' => { name: 2, owner: 1, suffix: nil, fn: 3 },
     'define_private_method_id' => { name: 2, owner: 1, suffix: nil, fn: 3 },
-    'define_class_method' => { name: 2, owner: 1, suffix: '.singleton', fn: 3 },
-    'define_class_method_id' => { name: 2, owner: 1, suffix: '.singleton', fn: 3 },
+    'define_class_method' => { name: 2, owner: 1, suffix: '.singleton', fn: 3, class_table: true },
+    'define_class_method_id' => { name: 2, owner: 1, suffix: '.singleton', fn: 3, class_table: true },
     'define_singleton_method' => { name: 2, owner: 1, suffix: '.singleton', fn: 3 },
     'define_singleton_method_id' => { name: 2, owner: 1, suffix: '.singleton', fn: 3 },
     'define_module_function' => { name: 2, owner: 1, suffix: :both, fn: 3 },
@@ -55,8 +58,8 @@ module NativeOwnerMap
     'alias_method' => { name: 2, owner: 1, suffix: nil },
     'undef_method' => { name: 2, owner: 1, suffix: nil },
     'undef_method_id' => { name: 2, owner: 1, suffix: nil },
-    'undef_class_method' => { name: 2, owner: 1, suffix: '.singleton' },
-    'undef_class_method_id' => { name: 2, owner: 1, suffix: '.singleton' }
+    'undef_class_method' => { name: 2, owner: 1, suffix: '.singleton', class_table: true },
+    'undef_class_method_id' => { name: 2, owner: 1, suffix: '.singleton', class_table: true }
   }.freeze
 
   # Calls that look like a definer the table above does not parse: counted as a refusal, not ignored.
@@ -419,14 +422,17 @@ module NativeOwnerMap
                  [owner]
                end
       name = name_of(args.fetch(spec[:name], ''))
+      # Computed names keep UNKNOWN: computed_unknown and core_dynamic_unknown count them.
+      owners = [UNKNOWN_CLASS_TABLE] if spec[:class_table] && owner == UNKNOWN && name
+      known = !owners.include?(UNKNOWN) && !owners.include?(UNKNOWN_CLASS_TABLE)
       # The main object's singleton and a class-object table are never on an instance's lookup path.
       result.instance << [owner, name, core] unless instance || spec[:suffix] == '.singleton'
-      if spec[:alias_of] && name && !owners.include?(UNKNOWN)
+      if spec[:alias_of] && name && known
         original = name_of(args.fetch(spec[:alias_of], ''))
         owners.each { |registered| result.aliases << [registered, name, original] } if original
       end
-      owners.each { |registered| result.undefs << [registered, name] } if family.start_with?('undef_') && name && !owners.include?(UNKNOWN)
-      if spec[:fn] && name && !owners.include?(UNKNOWN)
+      owners.each { |registered| result.undefs << [registered, name] } if family.start_with?('undef_') && name && known
+      if spec[:fn] && name && known
         # `&f` is the address of the function `f`: the same body as `f` (mrb_define_method(..., &match_data_to_s, ...)).
         fn = args.fetch(spec[:fn], '').strip.delete_prefix('&').strip
         owners.each { |registered| result.registrations << [registered, name, fn.match?(/\A\w+\z/) ? fn : nil] }
@@ -548,6 +554,9 @@ module NativeOwnerMap
 
     owners = map.by_name.fetch(name, Set.new)
     return [:refused, :native_owner_unknown] if owners.include?(UNKNOWN)
+    if owners.include?(UNKNOWN_CLASS_TABLE) && arm_owners.any? { |o| %w[Class Module].include?(o) || o.to_s.end_with?('.singleton') }
+      return [:refused, :native_owner_unknown_class_table]
+    end
 
     overlap = (owners | map.computed) & arm_owners.to_set
     return [:refused, :native_owner_overlap] unless overlap.empty?

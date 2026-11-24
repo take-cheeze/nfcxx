@@ -42,12 +42,16 @@ class CodeGen
     attr_accessor :known_const_names, :const_unresolved
     attr_accessor :engine_registrations, :stable_class_constants, :stable_value_constants, :const_bindings, :struct_members,
                   :integer_constant_values, :integer_constant_keys, :integer_constant_ranges, :constant_value_classes,
-                  :module_names, :core_hidden_defs,
+                  :module_names, :core_hidden_defs, :unread_ruby_paths,
                   :core_aliases, :core_result_opaque_defs, :core_result_installed_names, :build_gem_names,
                   :enumerator_model, :native_singleton_inputs,
                   :rbs_block_signatures,
                   # CORE_SHADOWED: irep labels of core definitions a later definition replaces (CoreDefs.shadowed_labels).
-                  :shadowed_labels
+                  :shadowed_labels,
+                  # CONST_DEF_ELIDE (const_def_elide.rb): the ConstDefElide::Result of this build; nil elides nothing.
+                  :const_def_elide,
+                  # CONST_BINDING_DROP (const_binding_drop.rb): the ConstBindingDrop::Result of this build; nil drops nothing.
+                  :const_binding_drop
 
     # INLINED_UNLISTED_SITE: kill switch BC2CPP_INLINED_UNLISTED=0.
     def inlined_unlisted_site?
@@ -198,6 +202,9 @@ class CodeGen
     # SUPER_SUPPORT: resolve_superclass_ref's table (name, :none, or absent); read
     # by compile_insn's SUPER case.
     @superclass_of = superclass_of
+    # PROGRAM_CLASS_SLOTS (program_class_slots.rb): fixed here, before SHARED_GENERATION forks.
+    @program_class_universe = ProgramClassSlots.universe(@known_owners + (self.class.core_hidden_defs || []).map(&:owner),
+                                                         @superclass_of, closed_world)
     # ANCESTOR_MIXINS_SUPPORT: build_registry's include/prepend tables. Prepended
     # modules are never consulted by `super`'s intervening-module check (they sit
     # above the class).
@@ -231,7 +238,9 @@ class CodeGen
     # Any direct allocation needs the shared helper; only allowlisted classes
     # need the gem-init class accessor declared by emit_direct_construct_decls.
     @direct_alloc_used = false
-    @clean_cache = {} # irep label -> does compile_method(label) end up #error-free? (memoized -- see compiles_clean?'s own comment)
+    # Immutable facts: adding an unconditional answer creates a new version,
+    # so guarded root probes can recognize unchanged facts by identity.
+    @clean_cache = {}.freeze # irep label -> does compile_method(label) end up #error-free?
     @probing = Set.new # recursion guard for compiles_clean? (mutually-MONO-recursive methods)
     # Bumped when module_super_block_clean? meets a label already being probed. A probe that saw a bump
     # answered from an in-progress probe, so its answer is not memoized (see compiles_clean?).
@@ -326,6 +335,7 @@ class CodeGen
   # compiled once and kept: its text would read a slot as the type the final layout no longer gives it, or a struct it dropped.
   def forget_layout_probe_code
     @block_steps = @block_step_emitted = @block_step_names = @rsm_variants = @step_super_targets = nil
+    forget_root_probe_answers
   end
 
   def const_lookup_helper_used?
@@ -516,8 +526,10 @@ class CodeGen
   def embed_family_foldable?(root, members)
     family = [root, *members]
     return false if family.any? { |owner| NATIVE_DATA_OWNERS.include?(owner) }
-    # Engine worlds keep one layout per chain for now: their registrations wire each owner separately.
-    return false if self.class.engine_registrations
+    # ENGINE_EMBED_FAMILIES: an engine world registers every owner, and switches each one's instance type, on its
+    # own (bc2cpp_set_instance_tts walks subclasses), so a folded family needs no wiring of its own.
+    # BC2CPP_ENGINE_EMBED_FAMILIES=0 keeps engine worlds at one layout per chain.
+    return false if self.class.engine_registrations && ENV['BC2CPP_ENGINE_EMBED_FAMILIES'] == '0'
 
     @superclass_of.each_key.all? do |klass|
       next true unless strict_subclass?(klass, root)
@@ -663,12 +675,36 @@ class CodeGen
   def without_probe_side_effects
     saved = instance_variables.to_h do |ivar|
       value = instance_variable_get(ivar)
-      [ivar, value.is_a?(Hash) || value.is_a?(Array) || value.is_a?(Set) ? value.dup : value]
+      immutable_facts = ivar == :@clean_cache || ivar == :@root_clean_cache_facts
+      [ivar, !immutable_facts && (value.is_a?(Hash) || value.is_a?(Array) || value.is_a?(Set)) ? value.dup : value]
     end
     yield
   ensure
     (instance_variables - saved.keys - [:@clean_cache]).each { |ivar| remove_instance_variable(ivar) }
     saved.each { |ivar, value| instance_variable_set(ivar, value) unless ivar == :@clean_cache }
+  end
+
+  SUPER_LEADING_OPS = %i[ENTER LINE NOP MOVE].freeze
+  # SUPER_ARGUMENT_PROLOGUE: what mrbc emits ahead of the first statement for optional and keyword parameters with
+  # literal defaults (the ENTER jump table, KEY_P/KARG/KEYEND, a `**` Hash) and for the arguments of the `super`
+  # itself (`super map.parent`). No op here reads R0 (prologue_insn_self_free?) or makes a closure, so code run
+  # before the storage exists never has `self`: a call made there runs on another object. Family roots only.
+  # The LOADI forms are spelled out (BytecodeIR::Ops::LOADI_OPS): checks load this file without bytecode_ir.
+  SUPER_PROLOGUE_OPS = (SUPER_LEADING_OPS + %i[KEY_P KARG KEYEND LOADTRUE LOADFALSE LOADNIL LOADSYM LOADL HASH
+                                              SEND SEND0 JMP JMPIF JMPNOT JMPNIL
+                                              LOADI8 LOADINEG LOADI__1 LOADI_0 LOADI_1 LOADI_2 LOADI_3 LOADI_4
+                                              LOADI_5 LOADI_6 LOADI_7 LOADI16 LOADI32]).freeze
+
+  # A prologue op of SUPER_PROLOGUE_OPS whose register operands leave out R0 (`self`), so neither a MOVE copies
+  # self for a later SEND nor a SEND targets it.
+  def prologue_insn_self_free?(insn)
+    insn.regs.none?(&:zero?)
+  end
+
+  # A call in the prologue runs Ruby while `self` has no storage yet; only ObjectSpace.each_object could hand it out
+  # (ivar_slot_assured.rb slot_opening_call has the same test).
+  def prologue_calls_cannot_reach_self?
+    @closed_world && !(slot_name_definable?('each_object') && slot_world_names?('each_object'))
   end
 
   def initializer_starts_with_super?(definition, bare: false)
@@ -680,9 +716,30 @@ class CodeGen
     # A bare `super` passes the method's own arguments: ARGARY (which only gathers them) builds the array SUPER's
     # `n=*` reads from the next register (`ARGARY R4`, `SUPER R3 n=*`). Only EMBED_FAMILY roots accept it yet, so
     # the single-layout chains of engine worlds embed exactly as before.
-    leading = BytecodeIR.for(irep).each_source.lazy.map { |insn, _| insn }
-                        .reject { |insn| %i[ENTER LINE NOP MOVE].include?(insn.op) }.first(2)
+    extended = bare && ENV['BC2CPP_SUPER_ARGUMENT_PROLOGUE'] != '0'
+    jumps = []
+    leading = []
+    BytecodeIR.for(irep).each_source do |insn, _|
+      if leading.empty? && extended
+        if SUPER_PROLOGUE_OPS.include?(insn.op)
+          return false unless prologue_insn_self_free?(insn)
+          return false if %i[SEND SEND0].include?(insn.op) && !prologue_calls_cannot_reach_self?
+
+          jumps << insn if BytecodeIR::BRANCH_OPS_SET.include?(insn.op)
+          next
+        end
+      elsif SUPER_LEADING_OPS.include?(insn.op)
+        next
+      end
+
+      leading << insn
+      break if leading.size == 2
+    end
     first = leading.first
+    # SUPER_ARGUMENT_PROLOGUE: a prologue branch only skips forward, to an address up to the first statement, so every
+    # path through the self-free prologue reaches it.
+    forward = jumps.all? { |j| first && j.branch_target && j.branch_target > j.addr && j.branch_target <= first.addr }
+    return false unless forward
     first = leading[1] if bare && first&.op == :ARGARY && leading[1]&.op == :SUPER && leading[1].reg.to_i + 1 == first.reg.to_i
     first&.op == :SUPER && super_reaches_superclass?(definition) &&
       Array(@prepended_modules[definition.owner]).empty?

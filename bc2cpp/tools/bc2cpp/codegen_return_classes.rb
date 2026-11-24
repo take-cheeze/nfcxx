@@ -44,7 +44,7 @@ class CodeGen
       mask = @cg.record_index_mask(irep, index, insn) || @cg.exact_lcf_index_mask(irep, index, insn, state)
       return mask unless mask == NumericFlow::OTHER
 
-      @cg.declared_element_index_mask(irep, index, insn) || mask
+      @cg.declared_element_index_mask(irep, index, insn, state) || mask
     end
     # ELEMENT (generic step 2): the element class mask of a map/collect result, or nil (unknown).
     def block_element_mask(irep, index, insn, _state) = @cg.block_element_class_mask(irep, index, insn)
@@ -58,6 +58,7 @@ class CodeGen
 
       @cg.numeric_class_bit(klass)
     end
+    def keyword_mask(irep, insn) = @cg.declared_keyword_mask(irep, insn)
     def keyword_presence(_insn)
       return NumericFlow::OTHER unless @cg.immediate_class_bits_enabled?
 
@@ -277,6 +278,7 @@ class CodeGen
     # Receiver-specific summaries read the settled name-wide and class-pool facts.
     @rc_scoped_ready = true
     @rc_scoped_states = {}
+    @rc_reader_states = {}
     @rc_scoped_writes = {}
     @rc_scoped_active_labels = Set.new
     # Every answer cut short by a query already on the stack (a recursive cycle) bumps this. A scoped answer that
@@ -567,6 +569,9 @@ class CodeGen
     # A removed name's body may not be the one that runs: the same refusal as bytecode_ir_call_result_classes.
     return NumericFlow::OTHER if @closed_world && bytecode_ir_name_removed?(name)
 
+    slice = state && native_array_slice2_result(insn, state)
+    return slice if slice
+
     numeric = state && exact_numeric_send_mask(insn, state)
     return numeric if numeric
 
@@ -575,6 +580,9 @@ class CodeGen
 
     core_result = state && native_core_class_result(insn, state)
     return core_result if core_result
+
+    vetted = state && vetted_fresh_array_mask(insn, state)
+    return vetted if vetted
 
     if name == 'dup' && insn.op == :SEND0 && state && native_dup_result_safe?
       mask = state[insn.reg.to_i]
@@ -891,6 +899,19 @@ class CodeGen
     classes.freeze
   end
 
+  # NILABLE_SCOPED_RECEIVER: a send whose name nil does not answer (nil_unanswerable?) raises on a nil receiver and
+  # writes nothing, so the value it does return comes from the receiver's other classes. The receiver mask without
+  # NIL, or nil when there is nothing to strip. BC2CPP_NILABLE_SCOPED_RECEIVER=0 keeps nil-or-K receivers unscoped.
+  def nilable_scoped_receiver(name, receiver)
+    return nil unless receiver.is_a?(Integer) && receiver.anybits?(NumericFlow::NIL)
+
+    rest = receiver & ~NumericFlow::NIL
+    return nil if rest.zero? || rest.anybits?(NumericFlow::OTHER)
+    return nil if ENV['BC2CPP_NILABLE_SCOPED_RECEIVER'] == '0' || !nil_unanswerable?(name)
+
+    rest
+  end
+
   # A name-wide summary can be ambiguous even when this exact receiver selects one
   # body. Analyze that body with the CFG-aware flow; the element tracer's linear
   # writer scan is only suitable for guarded hints.
@@ -898,6 +919,11 @@ class CodeGen
     return nil unless %i[SEND SEND0].include?(insn.op)
 
     receiver = state[insn.reg.to_i]
+    stripped = nilable_scoped_receiver(name, receiver)
+    if stripped
+      state = state.dup
+      state[insn.reg.to_i] = receiver = stripped
+    end
     receiver_class = return_class_of_mask(receiver)
     return return_class_union_send_mask(name, insn, state, receiver) unless receiver_class
     return nil unless receiver_class && !RETURN_CORE_CLASS.value?(receiver_class)
@@ -925,18 +951,70 @@ class CodeGen
     cuts = @rc_scoped_cuts
     mask = contextual && return_class_context_def_mask(definition, state[insn.reg.to_i], arguments)
     mask ||= return_class_scoped_def_mask(definition)
+    # DECLARED_DEF_RETURN: a body the flow cannot type answers its own checked declaration.
+    unless mask.is_a?(Integer) && mask.positive? && (mask & NumericFlow::OTHER).zero?
+      mask = respond_to?(:declared_def_return_mask, true) && declared_def_return_mask(definition) || mask
+    end
     unless mask.is_a?(Integer) && mask.positive? && (mask & NumericFlow::OTHER).zero?
       # SCOPED_NEGATIVE_MEMO: no cycle was cut while this was computed, so asking again gives the same nil.
       @rc_scoped_return_cache[key] = nil if @rc_scoped_cuts == cuts
       return nil
     end
 
-    klass = return_class_of_mask(mask)
+    klass = return_class_of_mask(mask) || scoped_nilable_result_class(mask)
     valid = klass && (contextual || !RETURN_CORE_CLASS.value?(klass))
     result = valid ? mask : nil
     @rc_scoped_return_cache[key] = result
   ensure
     @rc_scoped_return_active.delete(key) if acquired
+  end
+
+  # VETTED_FRESH_ARRAY: on an exact Array, a name whose every definition is native, mruby's own Ruby or a vetted
+  # fresh-Array override (core_array_return?, `# bc2cpp-vetted: fresh-array`) answers a copy, an exact Array too.
+  # BC2CPP_VETTED_FRESH_ARRAY=0 leaves it unknown.
+  def vetted_fresh_array_mask(insn, state)
+    return nil unless ENV['BC2CPP_VETTED_FRESH_ARRAY'] != '0' && %i[SEND SEND0].include?(insn.op) && state[insn.reg.to_i] == NumericFlow::ARR
+
+    name = insn.sym
+    @vetted_fresh_array ||= {}
+    return @vetted_fresh_array[name] if @vetted_fresh_array.key?(name)
+
+    @vetted_fresh_array[name] = vetted_fresh_array_name?(name) ? NumericFlow::ARR : nil
+  end
+
+  def vetted_fresh_array_name?(name)
+    return false unless defined?(VETTED_ARRAY_RETURN_OVERRIDES) && VETTED_ARRAY_RETURN_OVERRIDES.include?("Array##{name}")
+    return false unless @closed_world&.exact_instances_singleton_free? && @closed_world.method_missing_classes.empty?
+    return false if @closed_world.unknown_def?(name) || Array(@prepended_modules['Array']).any? || @unknown_mixins.include?('Array')
+
+    installed = symbol_installed_names
+    return false unless installed && !installed.include?(name) && !numeric_aliased_names.include?(name)
+    return false if bytecode_ir_name_removed?(name) || singleton_tainted_for?('Array', [name])
+    return false unless @closed_world.outside_ruby_paths_defining(name).all? { |path| CoreDefs.core_source?(path) }
+    return false unless @native_name_sources && !block_core_native_registered?('Array', name)
+
+    # mruby's own Ruby bodies (MethodDef#core) are among those core_array_return? vouches for, as RbsRecordValues reads it.
+    core_array_return?(name, { name => (@registry[name] || []).reject(&:core) })
+  end
+
+  SCOPED_SCALAR_CLASSES = { NumericFlow::INT => 'Integer', NumericFlow::FLT => 'Float' }.freeze
+
+  # SCOPED_NILABLE_RESULT: the one class of a resolved body's result that may also be nil (`C?`, `Array?`), or an
+  # Integer or Float result, which have no class bit. The mask is the body's whole result set either way, so it is
+  # passed on as is. BC2CPP_SCOPED_NILABLE_RESULTS=0 keeps one class bit only.
+  def scoped_nilable_result_class(mask)
+    return nil unless scoped_nilable_results? && mask.is_a?(Integer) && mask.positive?
+
+    base = mask & ~NumericFlow::NIL
+    return nil if base.zero?
+
+    SCOPED_SCALAR_CLASSES[base] || return_class_of_mask(base)
+  end
+
+  def scoped_nilable_results?
+    return @scoped_nilable_results if defined?(@scoped_nilable_results)
+
+    @scoped_nilable_results = ENV['BC2CPP_SCOPED_NILABLE_RESULTS'] != '0'
   end
 
   # BOTTOM_BLOCK_RECEIVER: the receiver of a literal-block send is a name the table has not given a class yet (its
@@ -998,6 +1076,8 @@ class CodeGen
     receiver = exact_flow_mask(irep, index, reg)
     return nil unless receiver.is_a?(Integer) && receiver.positive?
 
+    # NILABLE_UNION: inside the non-nil arm of a nil-or-union receiver the tested register is not nil.
+    receiver = exact_flow_strip_nil(irep, index, reg.to_i, receiver)
     bits = numeric_receiver_class_bits(receiver)
     return nil unless bits && bits.size >= 2
 
@@ -1159,6 +1239,9 @@ class CodeGen
 
     # The one register CHECKED_POOL_EXACT is compiling under its class test.
     return @checked_pool_override[:klass] if @checked_pool_override && @checked_pool_override[:key] == [irep.label, idx, r]
+    # DECLARED_LOOP_ELEMENT: an inlined loop's parameter under its element guard.
+    loop_class = declared_loop_element_class(irep, idx, reg)
+    return loop_class if loop_class
 
     states = return_class_scoped_states(irep)
     state = states && states[idx]
@@ -1171,6 +1254,10 @@ class CodeGen
 
     r = reg.to_i
     return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg)
+
+    # DECLARED_LOOP_ELEMENT: the same override as exact_flow_class, as the class's flow bits.
+    loop_bits = declared_loop_element_bits(irep, idx, reg)
+    return loop_bits if loop_bits
 
     states = return_class_scoped_states(irep)
     state = states && states[idx]

@@ -1,0 +1,7 @@
+stdout:
+status=2
+stderr:
+"WORK/tmp/nfcxx-cu.T/a.dev.cpp", line 40:error: identifier "VALUE" is undefinedvoid kern(int *p) { p[0] = VALUE; }^
+
+1 error detected in the compilation of "WORK/tmp/nfcxx-cu.T/a.dev.cpp".
+eccp:

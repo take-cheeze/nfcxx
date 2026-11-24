@@ -2758,8 +2758,28 @@ def resolve_aliases(forms)
   forms
 end
 
+# Zero-cost exception tables (docs/notes/pathb-zero-cost-eh.md): nothing unwinds on this target, so a function's landing
+# pads (eh-pad) never run and its exception states (eh-state, an inlined copy's markers) mean nothing; they are dropped,
+# with the table header (eh-types, eh-noexcept, eh-spec). A throw is still refused where it is (its __cxa_throw call).
+EH_TABLE_ITEMS = %w[eh-types eh-noexcept eh-spec eh-pad eh-spec-pad].freeze
+EH_STATE_STMTS = %w[eh-state eh-inline-begin eh-inline-end eh-state-outer].freeze
+
+def strip_eh_stmts(x)
+  return x unless x.is_a?(Array)
+
+  x.reject { |y| y.is_a?(Array) && EH_STATE_STMTS.include?(y[0]) }.map { |y| strip_eh_stmts(y) }
+end
+
+def strip_eh_tables(forms)
+  forms.map do |f|
+    next f unless f.is_a?(Array) && f[0] == "function"
+
+    strip_eh_stmts(f.reject { |p| p.is_a?(Array) && EH_TABLE_ITEMS.include?(p[0]) })
+  end
+end
+
 def emit_module(src, asan = false, emscripten = false, import_memory = false, memory64 = false, threads = false)
-  forms = resolve_aliases(parse_forms(tokenize(src)))
+  forms = strip_eh_tables(resolve_aliases(parse_forms(tokenize(src))))
   # The data model comes from the header's (layout ...): LP64 by default, ILP32 only for --emscripten (and --emscripten
   # takes ILP32 only). The model is set before any type is read.
   sizes = {}

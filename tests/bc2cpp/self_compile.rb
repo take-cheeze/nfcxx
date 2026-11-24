@@ -4,14 +4,17 @@
 require 'tmpdir'
 require 'open3'
 require 'rbconfig'
+require 'stringio'
 require_relative '../../bc2cpp/tools/self_compile/artifacts'
 require_relative '../../bc2cpp/host-libs/mruby-bc2cpp-runner/mrblib/runner'
+require_relative '../../bc2cpp/tools/bc2cpp/profile_timings'
 
 base = { 'BC2CPP_BUILD_NAME' => 'bc2cpp-self', 'BC2CPP_BUILD_GEMS' => 'compiler=runtime',
          'BC2CPP_TREE_ROOT' => '/compiler', 'BC2CPP_MRBC_RB' => '' }
 plain = Bc2cppSelfCompile.generation_environment(base, {})
 guest = Bc2cppSelfCompile.generation_environment(base, {
   'ONLY_OWNERS' => 'Guest', 'BC2CPP_BUILD_NAME' => 'closed', 'BC2CPP_BUILD_GEMS' => 'guest=world',
+  'BC2CPP_LINKED_NATIVE_SRCS' => '/guest/generated.c', 'BC2CPP_LINKED_RUBY_SRCS' => '/guest/generated.rb',
   'BC2CPP_TREE_ROOT' => '/compiler', 'BC2CPP_TYPE_CHECK_ONLY' => '1', 'BC2CPP_SELF_STATS' => '1',
   'BC2CPP_MRUBY_RUNNER' => '/launcher', 'BC2CPP_SCCACHE' => '0'
 })
@@ -34,6 +37,18 @@ raise 'worker count invalidates Ruby generation' unless fingerprint.call({}) ==
   fingerprint.call('BC2CPP_BUILD_JOBS' => '8')
 raise 'shard count must invalidate Ruby generation' if fingerprint.call({}) ==
   fingerprint.call('BC2CPP_SELF_SHARDS' => '8')
+
+# Every module bc2cpp.rb loads only under an environment variable stays out of the self-compiled graph: its source is a
+# DEBUG_SOURCE, its constant a DEBUG_MODULE, and its variable a SELF_DYNAMIC_OPTION the self runner refuses. A module left
+# off is compiled and registered, and runs in every self run (OwnerCallProofNote's notes changed the C++ it generates).
+entry = File.read(File.expand_path('../../bc2cpp/tools/bc2cpp/bc2cpp.rb', __dir__))
+entry.scan(/^require_relative '([a-z_]+)' if ENV\['([A-Z0-9_]+)'\]/) do |name, var|
+  abort "self_compile: #{name} is required under #{var} but is no DEBUG_SOURCE" unless
+    BC2CPPRunner::DEBUG_SOURCES.include?("tools/bc2cpp/#{name}")
+  abort "self_compile: #{var} gates #{name} but is no SELF_DYNAMIC_OPTION" unless BC2CPPRunner::SELF_DYNAMIC_OPTIONS.include?(var)
+  mod = File.read(File.expand_path("../../bc2cpp/tools/bc2cpp/#{name}.rb", __dir__))[/^(?:module|class) ([A-Z]\w*)/, 1]
+  abort "self_compile: #{name}'s #{mod} is no DEBUG_MODULE" if mod && !BC2CPPRunner::DEBUG_MODULES.include?(mod)
+end
 
 keys = BC2CPPRunner::SELF_DYNAMIC_OPTIONS + ['BC2CPP_STRICT_KEYS']
 saved = keys.to_h { |key| [key, ENV[key]] }
@@ -107,5 +122,38 @@ Dir.mktmpdir('self-compile-check') do |dir|
   rescue RuntimeError => error
     raise unless error.message == 'late self installation cannot change existing object layouts'
   end
+end
+
+# Timing callbacks retain their shared clock when a forked variant resets it.
+timing_keys = %w[BC2CPP_PROFILE_TIMINGS NFCXX_TIME_LOG NFCXX_TRACE_UNIT]
+timing_env = timing_keys.to_h { |key| [key, ENV[key]] }
+timing_clock = Process.method(:clock_gettime)
+timing_stderr = $stderr
+Dir.mktmpdir('self-compile-timing') do |dir|
+  ticks = [10.0, 10.25, 10.5, 10.75, 20.0, 20.125, 30.0, 30.5, 40.0]
+  Process.define_singleton_method(:clock_gettime) { |_| ticks.shift || raise('unexpected clock read') }
+  $stderr = StringIO.new
+  ENV['BC2CPP_PROFILE_TIMINGS'] = '1'
+  ENV['NFCXX_TIME_LOG'] = File.join(dir, 'times')
+  ENV['NFCXX_TRACE_UNIT'] = 'fixture.rb'
+  phase, call, reset = Bc2cppTimings.callbacks
+  phase.call('first')
+  raise 'timed callback lost its result' unless call.call('detail') { 7 } == 7
+  reset.call
+  phase.call('after reset')
+  expected = "0.250000\tbc2cpp\tfirst\tfixture.rb\n0.125000\tbc2cpp\tafter reset\tfixture.rb\n"
+  raise 'phase clock did not reset' unless File.read(ENV['NFCXX_TIME_LOG']) == expected
+  raise 'elapsed diagnostic changed' unless $stderr.string.match?(/after reset\s+0\.125s \(total\s+0\.125s\)/)
+  ENV.delete('BC2CPP_PROFILE_TIMINGS')
+  raise 'disabled timing lost callback result' unless call.call('disabled') { 9 } == 9
+  ENV['NFCXX_TIME_LOG'] = dir # A logging error must not fail compilation.
+  Bc2cppTimings.callbacks.first.call('unwritable')
+  ENV.delete('NFCXX_TIME_LOG')
+  Bc2cppTimings.callbacks.first.call('disabled')
+  raise 'unexpected timing clock behavior' unless ticks.empty?
+ensure
+  Process.define_singleton_method(:clock_gettime, timing_clock)
+  $stderr = timing_stderr
+  timing_env.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
 end
 puts 'self compilation registration, counters, fallbacks and incremental artifacts: PASS'

@@ -103,14 +103,64 @@ module ArgShapeCalls
   def yields_block_param?(irep, regions = nil)
     # OPTIONAL_REST_YIELD: an optional or rest signature with no `&blk` and a bare `yield` (BLKPUSH lv 0) also takes
     # the block as its extra parameter; the wrapper extracts it with `&` after the rest, as the `&blk` form does.
-    return optional_rest_yield?(irep) unless pure_mandatory_arity?(irep)
+    return optional_rest_yield?(irep) || keyword_yield?(irep, regions) unless pure_mandatory_arity?(irep)
+    return true if BytecodeIR.for(irep).instructions_with_op(:BLKPUSH).any? { |insn| insn.paren_value == '0' }
+    return true if block_given_modelled? && block_given_reads?(irep)
+    return true if super_forwards_frame_block?(irep)
+
+    (regions || recognize_block_fallback_regions(irep, available_upvars: block_upvar_needs(irep) || [], blk_available: true)).any? { |region| region[:needs_blk] }
+  end
+
+  # SUPER_FRAME_BLOCK: OP_SUPER sends this frame's block on, as a yield would read it: a bare `super` (`ARGARY` then
+  # `SUPER n=*`, vm.c OP_ARGARY copies the frame's block next to the arguments) or `super(args)`, whose block register is
+  # a MOVE of the frame's block slot R(mand+1) just before the SUPER (codegen.c gen_call for NODE_SUPER). A compiled
+  # `_impl` sees that block only when its wrapper extracts it, so without SUPER_NO_CALLER_BLOCK's proof that no caller
+  # passes one (super_direct_call_allowed?), the method extracts it like a yield-only method and the SUPER rules
+  # forward it (super_block_arg). Only a def body of the program's own with a pure-mandatory signature or the
+  # OPTIONAL_REST_YIELD one (its callers check the shape); mruby's core bodies compile without the closed world that
+  # proof reads.
+  # BC2CPP_SUPER_FRAME_BLOCK=0 turns it off.
+  def super_forwards_frame_block?(irep)
+    return false if ENV['BC2CPP_SUPER_FRAME_BLOCK'] == '0'
+
+    d = @owner_of && @owner_of[irep.label]
+    return false unless d && !d.core && d.irep == irep.label
+    return false if exception_initialize_chain_reached?(d)
+
+    program = BytecodeIR.for(irep)
+    # The frame's block slot follows the positionals (OPTIONAL_REST_YIELD's shapes have no post or keyword ones).
+    slot = irep.enter ? irep.enter.enter_fields.first(4).sum(&:to_i) + 1 : 1
+    forwards = program.instructions_with_op(:SUPER).any? do |insn|
+      idx = irep.index_of_addr(insn.addr)
+      prev = idx&.positive? && program.source_at(idx - 1)
+      next false unless prev
+
+      prev.op == :ARGARY ||
+        (prev.op == :MOVE && insn.plain_fixed_argc? && prev.regs.first(2) == [insn.reg.to_i + insn.argc.to_i + 1, slot])
+    end
+    forwards && !super_direct_call_allowed?(d)
+  end
+
+  # KEYWORD_YIELD: named keyword parameters (ENTER m:o:0:0:k:0:0:0, the shape keyword_arg_table reads, optionals with
+  # their jump table) and no `&blk`, with a bare `yield`, a `block_given?` read, or a block region that forwards the
+  # frame's block. The wrapper extracts the block after the keywords (keyword_rest_block_entry, as for `&blk` beside
+  # keywords) and the `_impl` takes it after the positionals, ahead of the optionals' count and the keywords; a keyword
+  # call site passes it there (compile_keyword_call). BC2CPP_KEYWORD_YIELD=0 keeps such a method interpreted.
+  def keyword_yield?(irep, regions = nil)
+    return false if ENV['BC2CPP_KEYWORD_YIELD'] == '0'
+
+    fields = irep.enter&.enter_fields
+    return false unless fields && fields.length >= 8 && fields[4].positive?
+    return false unless [2, 3, 5, 6, 7].all? { |i| fields[i].zero? } && keyword_arg_table(irep)
+    return false if fields[1].positive? && !optional_arg_table(irep)[1]
     return true if BytecodeIR.for(irep).instructions_with_op(:BLKPUSH).any? { |insn| insn.paren_value == '0' }
     return true if block_given_modelled? && block_given_reads?(irep)
 
     (regions || recognize_block_fallback_regions(irep, available_upvars: block_upvar_needs(irep) || [], blk_available: true)).any? { |region| region[:needs_blk] }
   end
 
-  # OPTIONAL_REST_YIELD shape: optionals and/or a rest, no post, keyword or `&blk` parameter, and a bare `yield`.
+  # OPTIONAL_REST_YIELD shape: optionals and/or a rest, no post, keyword or `&blk` parameter, and a bare `yield` (or a
+  # SUPER_FRAME_BLOCK super).
   # Only this shape gets the block extracted; any other non-mandatory signature keeps its `#error`.
   def optional_rest_yield?(irep)
     return false if ENV['BC2CPP_OPTIONAL_REST_YIELD'] == '0'
@@ -123,7 +173,16 @@ module ArgShapeCalls
     return false unless post.zero? && kw.zero? && kwrest.zero? && blk.zero?
     return false unless opt.positive? || rest.positive?
 
-    BytecodeIR.for(irep).instructions_with_op(:BLKPUSH).any? { |insn| insn.paren_value == '0' } && mand >= 0
+    BytecodeIR.for(irep).instructions_with_op(:BLKPUSH).any? { |insn| insn.paren_value == '0' } && mand >= 0 ||
+      super_forwards_frame_block?(irep) || optional_rest_region_yield?(irep)
+  end
+
+  # OPTIONAL_REST_YIELD: a block region of the method forwards its block (a `yield` inside `list.reduce(init) { }`), as
+  # yields_block_param? asks of a pure-mandatory method. BC2CPP_OPTIONAL_REST_REGION_YIELD=0 keeps such a method interpreted.
+  def optional_rest_region_yield?(irep)
+    return false if ENV['BC2CPP_OPTIONAL_REST_REGION_YIELD'] == '0'
+
+    recognize_block_fallback_regions(irep, available_upvars: block_upvar_needs(irep) || [], blk_available: true).any? { |region| region[:needs_blk] }
   end
 
   # Whether the callee's `_impl` has a trailing `bc2cpp_blk` parameter.
@@ -165,7 +224,7 @@ module ArgShapeCalls
 
   def pure_mandatory_or_optional_arity?(irep)
     ok = super || (@extended_callee_shapes &&
-                   (block_only_callee?(irep) || rest_only_callee?(irep) || optional_block_callee?(irep)))
+                   (block_only_callee?(irep) || rest_only_callee?(irep) || optional_block_direct_callee?(irep)))
     ok && (!(@call_block_expr || takes_block_param?(irep)) || block_transparent_callee?(irep))
   end
 
@@ -178,6 +237,16 @@ module ArgShapeCalls
   # `bc2cpp_given_opt`, which is the order direct_call_args builds.
   def optional_block_callee?(irep)
     !optional_block_arg_table(irep).nil?
+  end
+
+  # A plain positional/block call can omit optional named keywords, but a
+  # required keyword must reach the wrapper so it raises ArgumentError.
+  def optional_block_direct_callee?(irep)
+    return false unless optional_block_callee?(irep)
+    return true if irep.enter.enter_fields[4].zero?
+
+    table = keyword_arg_table(irep, rest_block: true)
+    table && table.none? { |kw| kw[:required] }
   end
 
   # ENTER 1:0:0:0:0:0:1:0: mandatory positionals plus `&blk` only.
@@ -229,6 +298,13 @@ module ArgShapeCalls
               end
     end
     head.insert(mand + (rest ? 1 : positional_optional_count(t_irep)), direct_call_block(target)) if takes_block_param?(t_irep)
+    # STEP_KEYWORDS: compile_method puts named keywords after the block and
+    # optional-positional count. This positional-only call supplied none, so
+    # every admitted optional keyword needs a placeholder and a false flag.
+    keyword_arg_table(t_irep, rest_block: true)&.each do |kw|
+      head << 'mrb_nil_value()'
+      head << '0' unless kw[:required]
+    end
     [head, note]
   end
 

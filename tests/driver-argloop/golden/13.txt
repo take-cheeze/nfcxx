@@ -1,0 +1,6 @@
+== -c k.cu -o k.o
+-- stdout
+-- stderr
+pathb-dump: harness not built; run scripts/setup-pathb.sh
+nfcxx: k.cu: device code: the front end refused it (see above; needs scripts/setup-pathb.sh)
+status=2

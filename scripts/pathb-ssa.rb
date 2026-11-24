@@ -22,8 +22,10 @@
 
 Ref = Struct.new(:sigil, :raw)   # $"x", @"x", &"f": raw is the quoted name, quotes included
 Str = Struct.new(:raw)           # a quoted string token, quotes included
-Fn = Struct.new(:name, :ret, :params, :slots, :body, :attrs)
-Blk = Struct.new(:instrs, :term, :loc)  # loc: the (loc FILE LINE) statement the block's last instruction was given under
+Fn = Struct.new(:name, :ret, :params, :slots, :body, :attrs, :pads, :spec_pads)
+Blk = Struct.new(:instrs, :term, :loc, :eh, :reached)  # loc: the (loc FILE LINE) statement the block's last instruction was given under
+# eh (zero-cost exception tables, docs/notes/pathb-zero-cost-eh.md): the landing pad its calls unwind to (N of (eh-state N), 0
+# none), or :term (a landing pad's own code: a throw calls std::terminate). reached: some reached block jumps to it.
 Phi = Struct.new(:var, :name, :type, :inc)
 Unsupported = Class.new(StandardError)
 # A run that takes more steps than its budget (Machine#initialize). An Unsupported, so a caller that does not budget
@@ -176,6 +178,10 @@ def scalar_type?(t) = !(AGG_HEADS.include?(head(t)) || t == "long_double" || t =
 def succs(term)
   case term[0]
   when "br" then [term[1]]
+  # The entry of a function with landing pads (zero-cost exception tables): an empty block that jumps to the body. The
+  # pads are its successors too, for every analysis: the unwinder enters them, mid-call, from the calls of the blocks
+  # whose (eh-unwind B) names them, with no edge, so no value of the body reaches them (they read memory).
+  when "eh-entry" then term[1..]
   when "condbr" then [term[2], term[3]]
   when "switch" then term[2].map { |_, b| b } + [term[3]]
   else []
@@ -188,13 +194,28 @@ def clause(s, name)
 end
 
 # Linkage markers and constructor/destructor attributes follow the parameters; they have no runtime meaning in the body.
-FN_ATTR_HEADS = %w[static weak constructor destructor noinline used section always-inline].freeze
+FN_ATTR_HEADS = %w[static weak constructor destructor noinline used section always-inline eh-types eh-noexcept eh-spec].freeze
+# (eh-spec-pad PAD ID...): a landing pad's own dynamic exception specification (an inlined copy's, scripts/pathb-ir-opt.rb)
+PAD_SPEC_HEAD = "eh-spec-pad".freeze
 
 def fn_of(form)
   Fn.new(form[1], form.find { |x| head(x) == "ret" }, form.find { |x| head(x) == "params" },
          form.select { |x| head(x) == "slot" },
-         form[2..].reject { |x| (%w[ret params slot] + FN_ATTR_HEADS).include?(head(x)) },
-         form[2..].select { |x| FN_ATTR_HEADS.include?(head(x)) })
+         form[2..].reject { |x| (%w[ret params slot eh-pad] + FN_ATTR_HEADS + [PAD_SPEC_HEAD]).include?(head(x)) },
+         form[2..].select { |x| FN_ATTR_HEADS.include?(head(x)) },
+         form[2..].select { |x| head(x) == "eh-pad" },
+         form[2..].select { |x| head(x) == PAD_SPEC_HEAD }.group_by { |x| x[1].to_s }.transform_values { |xs| xs.map { |x| x[2..] } })
+end
+
+# The caller's own dynamic exception specification as the tail of the action chains of an inlined copy's pads (see build):
+# [its type ids, the type id of catch (...)], or nil. A function with a specification has no pads of its own that need it:
+# QBE's ehspec filter ends their chains.
+def fn_spec_tail(fn)
+  spec = fn.attrs.find { |x| head(x) == "eh-spec" }
+  return nil unless spec
+  types = fn.attrs.find { |x| head(x) == "eh-types" }
+  all = types ? types[1..].each_with_index.select { |t, _| !t.is_a?(Ref) && t.to_s == "0" }.map { |_, i| (i + 1).to_s }.first : nil
+  [spec[1..], all]
 end
 
 # ---- structured IR to basic blocks ----------------------------------------------------------------------------------
@@ -202,17 +223,95 @@ end
 class Cfg
   attr_reader :blocks
 
+  def pad_block = (@pad_block || {})
+
   def initialize
     @blocks = []
     @labels = {}
+    @defined_labels = {}
     @targets = []   # [break target, continue target or nil] for each enclosing loop and switch, innermost last
     @switches = []  # { cases: [[value, block]], default: block or nil } for each enclosing switch
   end
 
-  def build(body, void)
+  def build(body, void, pads = [], spec_pads = {}, fn_spec = nil)
     entry = new_block
+    @blocks[entry].eh = 0
+    @blocks[entry].reached = true
+    @eh_text = 0
+    unless pads.empty?
+      first = new_block
+      set_term(entry, ["br", first])
+      entry = first
+    end
     cur = lower_list(body, entry)
     set_term(cur, void ? ["ret"] : ["unreachable"]) if @blocks[cur].term.nil?
+    # (eh-pad N CLEANUP (TID...) [(eh-outer K)] STMT...): pad N's code. Its first block is the landing pad (no jump reaches
+    # it); its code runs in the :term state; it ends in a handler's label, std::terminate, (eh-resume EXC) or, for a pad of
+    # an inlined callee (eh-outer K: the copy K, scripts/pathb-ir-opt.rb), (eh-resume-outer K EXC).
+    @pad_forms = pads.to_h { |p| [p[1], p] }
+    @spec_pads = spec_pads
+    @fn_spec = fn_spec
+    @in_pads = true
+    pads.each do |p|
+      b = new_block
+      @blocks[b].eh = :term
+      @blocks[b].reached = true
+      @blocks[b].instrs << ["eh-pad"]   # its action chain and specification lists: below, once every copy's entry state is known
+      @eh_text = :term
+      @pad_block ||= {}
+      @pad_block[p[1]] = b
+      c = lower_list(p[(head(p[4]) == "eh-outer" ? 5 : 4)..], b)
+      set_term(c, ["unreachable"]) if @blocks[c].term.nil?
+    end
+    @in_pads = false
+    # An inlined callee's resume, and the pads' action chains: a copy inlined into a pad's code is entered after the pads
+    # lowered before that pad.
+    (@deferred || []).each do |cur, k, exc, sel|
+      o = outer_of(k)
+      if o == :term
+        @blocks[cur].instrs << ["eval", ["call", "void", Ref.new("&", '"_ZSt9terminatev"')]]
+        set_term(cur, ["unreachable"])
+      elsif o.is_a?(Integer) && o > 0
+        # into that pad's chain as its stub goes there: the exception and the selector in the slots its stub stores to
+        # (the pad of another inlined copy has that copy's slots)
+        exc_st, sel_st = pad_stub_stores(o.to_s)
+        @blocks[cur].instrs << [exc_st[0], exc_st[1], exc_st[2], exc] if exc_st
+        @blocks[cur].instrs << [sel_st[0], sel_st[1], sel_st[2], sel] if sel_st && sel
+        set_term(cur, ["br", label_block(pad_chain_label(o.to_s))])
+      else
+        nb = new_block
+        @blocks[nb].eh = 0
+        set_term(cur, ["br", nb])
+        @blocks[nb].instrs << ["eval", ["call", "void", Ref.new("&", '"_Unwind_Resume"'), exc]]
+        set_term(nb, ["unreachable"])
+      end
+    end
+    (@pad_block || {}).each do |id, b|
+      lists = []
+      cl, types = pad_actions(id, {}, lists)
+      # The caller's own specification (a function with one) is the last filter of a copy's chain, as QBE's ehspec is that of
+      # the function's own pads. A pad with a list of its own has no ehspec of QBE's: its chain gets the filter here, unless it
+      # ends in a terminate state (its outer state is one: an exception that leaves it calls std::terminate, so the chain's last
+      # record is catch (...)).
+      p = @pad_forms[id]
+      if @fn_spec && head(p[4]) == "eh-outer"
+        ids, catch_all = @fn_spec
+        if outer_of(p[4][1]) == :term
+          raise Fail, "a function with a dynamic exception specification has no catch (...) type" unless catch_all
+          types << catch_all
+        elsif !lists.empty?
+          lists << ids
+          types << -lists.size
+        end
+      end
+      @blocks[b].instrs[0] = ["eh-pad", cl, *types]
+      # (eh-spec-pad K ID...): the pad's list K, its filter is the chain's -K (qbe ehspecpad K)
+      lists.each_with_index { |ids, i| @blocks[b].instrs.insert(1 + i, ["eh-spec-pad", i + 1, *ids]) }
+    end
+    @blocks[0].term = ["eh-entry", 1, *@pad_block.values] unless pads.empty?
+    # a jump to a label no (label) statement defines would become an empty block that ends in unreachable
+    undefined = @labels.keys.reject { |l| (@defined_labels || {})[l] }
+    raise Fail, "goto to the undefined label #{undefined.first}" unless undefined.empty?
     @blocks.each { |b| b.term ||= ["unreachable"] }
     self
   end
@@ -228,6 +327,30 @@ class Cfg
     raise Fail, "B#{b} terminated twice" if @blocks[b].term
 
     @blocks[b].term = t
+    # A block begins in the exception state of the first reached block that jumps to it.
+    if @blocks[b].reached
+      succs(t).each do |s|
+        @blocks[s].reached = true
+        @blocks[s].eh = @blocks[b].eh if @blocks[s].eh.nil?
+      end
+    end
+    true   # `set_term(...) && new_block`
+  end
+
+  # (eh-state N): the calls after it unwind to pad N. A block has one state: a change after an instruction begins a block.
+  def eh_state(n, cur)
+    blk = @blocks[cur]
+    @eh_text = n
+    return cur if blk.eh == n
+
+    if blk.instrs.empty?
+      blk.eh = n
+      return cur
+    end
+    nb = new_block
+    @blocks[nb].eh = n
+    set_term(cur, ["br", nb])
+    nb
   end
 
   def lower_list(stmts, cur)
@@ -237,11 +360,83 @@ class Cfg
 
   def label_block(name) = (@labels[name] ||= new_block)
 
+  # The state an inlined copy K was entered in (eh-inline-begin K): its callee's state 0 and its pads' resume go there.
+  def outer_of(k) = (@inline_outer || {})[k] || 0
+
+  # Pad id's cleanup flag and action chain: its own clauses, then its own specification's filter (-K: its list K, appended to
+  # lists), and for an inlined callee's pad what the pad of the state the copy was entered in adds after them (the exception
+  # goes on there, past that pad's filter too).
+  def pad_actions(id, seen, lists)
+    p = @pad_forms.fetch(id) { raise Fail, "no landing pad #{id}" }
+    cl = p[2]
+    types = p[3].dup
+    (@spec_pads[id.to_s] || []).each do |ids|
+      lists << ids
+      types << -lists.size
+    end
+    if head(p[4]) == "eh-outer" && !seen[id]
+      seen[id] = true
+      o = outer_of(p[4][1])
+      if o == :term
+        cl = "1"
+      elsif o.is_a?(Integer) && o > 0
+        ocl, otypes = pad_actions(o.to_s, seen, lists)
+        types += otypes
+        cl = "1" if ocl == "1"
+      end
+    end
+    [cl, types]
+  end
+
+  # (eh-tid N) in a pad's code: the type id N as a long constant
+  def eh_tids(x)
+    return x unless x.is_a?(Array)
+    return ["const", "long", x[1]] if head(x) == "eh-tid"
+
+    x.map { |y| eh_tids(y) }
+  end
+
+  # The stores of pad id's stub, before its first jump: [the exception's, the selector's] (be/nfcxx_ir_eh.h writes them in
+  # that order, of (eh-exc) and (eh-sel)).
+  def pad_stub_stores(id)
+    p = @pad_forms.fetch(id) { raise Fail, "no landing pad #{id}" }
+    stub = p.drop(head(p[4]) == "eh-outer" ? 5 : 4).take_while { |x| head(x) != "goto" }
+    stub.select { |x| head(x) == "store" }.first(2)
+  end
+
+  # The first jump of pad id's code: the node of its chain, past the stub that keeps the exception and the selector.
+  def pad_chain_label(id)
+    g = @pad_forms.fetch(id) { raise Fail, "no landing pad #{id}" }.find { |x| head(x) == "goto" }
+    raise Fail, "landing pad #{id} has no chain" unless g
+
+    g[1].raw
+  end
+
   # Every case returns the block where control continues; that block is always open. After a jump the
   # continuation is a fresh block with no predecessor, which the converter drops.
   def lower_stmt(s, cur)
+    @blocks[cur].eh = @eh_text if @blocks[cur].eh.nil?
+    @eh_text = @blocks[cur].eh
     case head(s)
     when "block" then lower_list(s[1..], cur)
+    when "eh-state" then eh_state(s[1].to_i, cur)
+    # an inlined callee with exception tables (scripts/pathb-ir-opt.rb): its copy K begins in the caller's state, which its
+    # state 0 means, and which holds again after it
+    when "eh-inline-begin"
+      (@inline_outer ||= {})[s[1]] = @blocks[cur].eh
+      cur
+    when "eh-state-outer", "eh-inline-end" then eh_state(outer_of(s[1]), cur)
+    when "eh-resume-outer"
+      (@deferred ||= []) << [cur, s[1], s[2], s[3]]   # (eh-resume-outer K EXC [SEL]): resolved after the pads (build)
+      new_block
+    when "eh-resume"
+      # _Unwind_Resume in a block of the default state: its call site passes the exception on, out of this function.
+      nb = new_block
+      @blocks[nb].eh = 0
+      set_term(cur, ["br", nb])
+      @blocks[nb].instrs << ["eval", ["call", "void", Ref.new("&", '"_Unwind_Resume"'), s[1]]]
+      set_term(nb, ["unreachable"])
+      new_block
     when "if"
       t = new_block
       e = new_block
@@ -283,6 +478,7 @@ class Cfg
     when "goto" then set_term(cur, ["br", label_block(s[1].raw)]) && new_block
     when "label"
       l = label_block(s[1].raw)
+      (@defined_labels ||= {})[s[1].raw] = true
       set_term(cur, ["br", l])
       l
     when "loc"
@@ -291,6 +487,7 @@ class Cfg
       @loc_now = s
       cur
     else
+      s = eh_tids(s) if @in_pads
       blk = @blocks[cur]
       if @loc_now && (blk.loc.nil? || blk.loc.object_id != @loc_now.object_id)
         blk.instrs << @loc_now
@@ -344,7 +541,8 @@ end
 def promotable_slots(fn)
   types = fn.slots.to_h { |s| ["$#{s[1].raw}", s[2]] }
   bad = {}
-  twice = fn.body.map { |s| scan_slot_uses(s, types, bad) }.any?
+  # the landing pads' code too (fn.pads): a slot whose address a pad takes stays in memory
+  twice = (fn.body + (fn.pads || [])).map { |s| scan_slot_uses(s, types, bad) }.any?
   [types.select { |k, t| !bad[k] && scalar_type?(t) }, twice]
 end
 
@@ -389,7 +587,16 @@ class Converter
     @fn = fn
     @void = fn.ret[1] == "void"
     @promoted, twice = promotable_slots(fn)
-    @cfg = Cfg.new.build(fn.body, @void).blocks
+    cfg = Cfg.new.build(fn.body, @void, fn.pads || [], fn.spec_pads || {}, fn_spec_tail(fn))
+    @cfg = cfg.blocks
+    # The landing pads: the unwinder enters them from the calls of the blocks whose state names them. There is no edge from
+    # a call to its pad, so for the analysis each pad is a successor of the entry (it is dominated by it, and no value of the
+    # body reaches it), and a promoted slot that is live into a pad stays in memory, as across a setjmp.
+    @pad_of = cfg.pad_block
+    @cfg.each do |b|
+      raise Unsupported, "no landing pad #{b.eh}" if b.eh.is_a?(Integer) && b.eh > 0 && !@pad_of.key?(b.eh.to_s)
+    end
+    drop_live_into_pads unless @pad_of.empty?
     if twice
       # A huge function that calls _setjmp (mruby's mrb_vm_exec: thousands of blocks, over a thousand candidate slots) keeps all its slots in
       # memory, as every function with a setjmp did: promoting them made its SSA text 2.3 times larger and the SSA stage take more than
@@ -431,6 +638,12 @@ class Converter
       blk = @out[b]
       lines << "  (bb #{b}"
       blk[:phis].each { |ph| lines << "    (phi #{ph.name} #{sx(ph.type)} #{ph.inc.keys.sort.map { |p| sx([p, ph.inc[p]]) }.join(' ')})" }
+      eh = @cfg[b].eh
+      if eh == :term
+        lines << "    (eh-unwind 0)"
+      elsif eh.is_a?(Integer) && eh > 0
+        lines << "    (eh-unwind #{@pad_of.fetch(eh.to_s) { raise Unsupported, "no landing pad #{eh}" }})"
+      end
       blk[:instrs].each { |i| lines << "    #{sx(i)}" }
       lines << "    #{term_text(blk[:term])})"
     end
@@ -444,6 +657,31 @@ class Converter
   # after the call runs again when a throw lands there, and a promoted slot would hold the value of the first return. Only a slot
   # that is live after a call (read, on some path from it, before it is written) can show that: the handler's path starts at the
   # call, so a slot that every path writes before it reads has nothing to restore. The others are promoted as in any function.
+  # A promoted slot live into a landing pad would need the value it had at the call that threw: it stays in memory.
+  def drop_live_into_pads
+    return if @promoted.empty?
+
+    live_in = slot_liveness
+    @pad_of.each_value { |p| live_in[p].each_key { |k| @promoted.delete(k) } }
+  end
+
+  def slot_liveness
+    live_in = Array.new(@cfg.size) { {} }
+    changed = true
+    while changed
+      changed = false
+      (@cfg.size - 1).downto(0) do |b|
+        live = live_out_of(b, live_in)
+        @cfg[b].instrs.reverse_each { |i| step_liveness(i, live) }
+        next if live.size == live_in[b].size
+
+        live_in[b] = live
+        changed = true
+      end
+    end
+    live_in
+  end
+
   def drop_live_across_setjmp
     return if @promoted.empty?
 

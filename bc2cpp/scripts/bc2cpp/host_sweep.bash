@@ -14,6 +14,8 @@
 #   JOBS      maps run at once (default nproc).
 #   SEND_COUNT_DIR  count by-name sends and method searches per call site: runs trace_host_counted (send_counter.bash
 #             builds it) and leaves one NAME.tsv per process in this directory (send_counter_report.rb reads them).
+#   ALLOC_COUNT_DIR  count heap objects and malloc bytes per allocation chain the same way: trace_host_alloc
+#             (alloc_counter.bash), one NAME.tsv per process, read by alloc_counter_report.rb.
 set -uo pipefail
 
 # WORLD_ROOT (tools/bc2cpp/world_root.rb): bc2cpp's own tree, and the repository it compiles (the same unless BC2CPP_WORLD_ROOT).
@@ -35,9 +37,18 @@ if [ -n "$send_dir" ]; then
   BC2CPP_GAME_DIR="$src" "$tree/scripts/bc2cpp/send_counter.bash" "$build" || exit 1
   host=$build/trace-host/trace_host_counted
 fi
-# What a run must never print: a left-out entry reached (verify build), a violated proof or hint, a stubbed
-# body run, or a method lookup that failed.
-bad_re='UNREGISTERED_VERIFY|hint violation|proof violated|NoMethodError|ScriptError|guard violation|bytecode execution in a native-only|missing native continuation|bytecode interpreter is not built in'
+alloc_dir=${ALLOC_COUNT_DIR:-}
+if [ -n "$alloc_dir" ]; then
+  [ -n "$send_dir" ] && { echo "host_sweep: SEND_COUNT_DIR and ALLOC_COUNT_DIR each need their own host" >&2; exit 1; }
+  mkdir -p "$alloc_dir"
+  alloc_dir=$(cd "$alloc_dir" && pwd)
+  BC2CPP_GAME_DIR="$src" "$tree/scripts/bc2cpp/alloc_counter.bash" "$build" || exit 1
+  host=$build/trace-host/trace_host_alloc
+fi
+# What a run must never print: a left-out entry reached (verify build), a violated proof, hint or declaration
+# (BC2cppDeclarationViolation is a StandardError, so a caller's rescue only logs it), a stubbed body run, or a
+# method lookup that failed.
+bad_re='declaration violation|UNREGISTERED_VERIFY|hint violation|proof violated|NoMethodError|ScriptError|guard violation|bytecode execution in a native-only|missing native continuation|bytecode interpreter is not built in'
 failed=0
 
 taps() { local out="" f; for ((f = $1; f <= $2; f += $3)); do out+="$f:C,"; done; echo "${out%,}"; }
@@ -49,7 +60,8 @@ run() { # name, then env assignments
   local survey=()
   if [ "${LOOKUP_SURVEY:-0}" = 1 ]; then survey=("BC2CPP_HOST_LOOKUP_SURVEY=$logs/$name.lookups.tsv" "BC2CPP_VMCNT_OUT=$logs/$name.vm.tsv"); fi
   [ -n "$send_dir" ] && survey+=("BC2CPP_SENDCNT_OUT=$send_dir/$name.tsv")
-  if [ -x "$host" ] && [ -n "${built:-}" ] || [ -n "$send_dir" ]; then
+  [ -n "$alloc_dir" ] && survey+=("BC2CPP_ALLOCCNT_OUT=$alloc_dir/$name.tsv")
+  if [ -x "$host" ] && [ -n "${built:-}" ] || [ -n "$send_dir$alloc_dir" ]; then
     env "${survey[@]}" "$@" BC2CPP_TRACE_TYPES_OUT=/dev/null "$host" "$game" "$frames" > "$logs/$name.log" 2>&1
   else
     env "${survey[@]}" "$@" "$tree/scripts/bc2cpp/trace_host.bash" "$build" "$game" > "$logs/$name.log" 2>&1
@@ -92,6 +104,7 @@ map() {
   local survey=()
   if [ "${LOOKUP_SURVEY:-0}" = 1 ]; then survey=("BC2CPP_HOST_LOOKUP_SURVEY=$logs/map-$id.lookups.tsv" "BC2CPP_VMCNT_OUT=$logs/map-$id.vm.tsv"); fi
   [ -n "$send_dir" ] && survey+=("BC2CPP_SENDCNT_OUT=$send_dir/map-$id.tsv")
+  [ -n "$alloc_dir" ] && survey+=("BC2CPP_ALLOCCNT_OUT=$alloc_dir/map-$id.tsv")
   env "${survey[@]}" BC2CPP_HOST_FRAMES=150 BC2CPP_HOST_PREVIEW_MAP="$id" BC2CPP_HOST_KEYS="$MAP_TAPS" \
     BC2CPP_TRACE_TYPES_OUT=/dev/null "$host" "$game" 150 > "$log" 2>&1
   local rc=$?
@@ -100,7 +113,7 @@ map() {
   fi
 }
 export -f map
-export host game logs bad_re LOOKUP_SURVEY send_dir
+export host game logs bad_re LOOKUP_SURVEY send_dir alloc_dir
 MAP_TAPS=$(taps 20 150 12)
 export MAP_TAPS
 total=$(ls "$game"/Map*.lmu | wc -l)

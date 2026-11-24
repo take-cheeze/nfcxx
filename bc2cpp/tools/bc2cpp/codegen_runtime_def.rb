@@ -11,7 +11,12 @@ class CodeGen
   # one-instruction region that only builds the proc.
   # CONFINED_LAMBDA_UPVAR_SUPPORT: `available_upvars` as in
   # recognize_block_fallback_regions (empty at method level).
-  def recognize_lambda_fallback_regions(irep, available_upvars: [])
+  # LAMBDA_CELLS: a lambda that reads or writes this frame's locals and is not
+  # proven to stay in the frame (lambda_confined_call_sites) captures them through
+  # heap cells, as a STEP_CLOSURES block does (region[:boxed]): those registers live
+  # in the cells Array its env keeps, so the proc may be stored, returned or called
+  # after the frame has gone. `cell_levels` as in recognize_block_fallback_regions.
+  def recognize_lambda_fallback_regions(irep, available_upvars: [], cell_levels: [])
     regions = []
     irep.each_with_op(:LAMBDA) do |insn, _index|
       dest_reg = insn.reg
@@ -25,6 +30,9 @@ class CodeGen
       next unless lambda_irep && lambda_fallback_safe?(lambda_irep)
       # BLOCK_SELF_WORLD: `instance_exec(&->{ })` runs the lambda under another self.
       next if block_self_rebound?(lambda_label)
+      # LAMBDA_NESTED_BLOCKS: a `return` in a block nested in the lambda leaves the lambda, which no token in its
+      # nested envs names. (The lambda's own RETURN_BLK is a plain return: the proc is strict.)
+      next if lambda_nested_return?(lambda_irep)
 
       # CONFINED_LAMBDA_UPVAR_SUPPORT: what does the body need captured
       # (block_upvar_needs), can this level supply it, and (lambda-specific) does
@@ -34,12 +42,26 @@ class CodeGen
       next unless upvars.all? { |(l, x)| l.zero? || available_upvars.include?([l - 1, x]) }
 
       call_sites = lambda_confined_call_sites(irep, insn, dest_reg.to_i, lambda_irep)
-      next if upvars.any? && call_sites.nil?
+      # LAMBDA_CELLS: not confined, so its captured registers become cells.
+      boxed = upvars.any? && call_sites.nil? && cells_capture?(upvars, cell_levels)
+      next if upvars.any? && call_sites.nil? && !boxed
 
-      regions << { block_addr: insn.addr, dest_reg: dest_reg, block_irep: lambda_irep,
-                   kind: 'lambda_fallback', upvars: upvars, call_sites: call_sites || [] }
+      region = { block_addr: insn.addr, dest_reg: dest_reg, block_irep: lambda_irep,
+                 kind: 'lambda_fallback', upvars: upvars, call_sites: call_sites || [], boxed: boxed }
+      region[:cell_levels] = upvars.map(&:first).uniq.sort if boxed
+      regions << region
     end
     regions
+  end
+
+  # LAMBDA_NESTED_BLOCKS: does a block nested in +lambda_irep+ (at any depth, a nested lambda's body included) hold a
+  # RETURN_BLK? A child irep that cannot be looked up counts as one.
+  def lambda_nested_return?(lambda_irep)
+    found = false
+    walked = BytecodeIR.each_nested_insn(lambda_irep, ->(label) { @ireps[label] }, max_depth: MAX_UPVAR_NEST_DEPTH) do |insn, depth|
+      found = true if depth.positive? && insn.op == :RETURN_BLK
+    end
+    found || !walked || (lambda_irep.reps || []).any? { |label| label.nil? || @ireps[label].nil? }
   end
 
   # CONFINED_LAMBDA_UPVAR_SUPPORT: prove the proc built by `LAMBDA R<d> I[n]`
@@ -88,6 +110,8 @@ class CodeGen
   # emitter needs them (see emit_lambda_confined_call_glue).
   def lambda_confined_call_sites(irep, lambda_insn, d, lambda_irep)
     nlocals = irep.nlocals.to_i
+    # LAMBDA_REST: a direct call passes the positionals as they are; a rest lambda's `_impl` takes them packed.
+    return nil unless pure_mandatory_arity?(lambda_irep)
     # (1) a named local, so no implicit register window can alias it.
     return nil unless d >= 1 && d < nlocals
     # (2) the two opcodes that read a named local without printing it.
@@ -185,15 +209,19 @@ class CodeGen
   # LAMBDA_FALLBACK_SUPPORT: build the RProc (emit_rproc_construction) and store
   # it (`mrb_obj_value`); a LAMBDA calls nothing.
   # CONFINED_LAMBDA_UPVAR_SUPPORT: region[:upvars] uses the same construction;
-  # non-empty only for a frame-confined lambda.
+  # non-empty for a frame-confined lambda, or (LAMBDA_CELLS) a boxed one, whose
+  # pointers lead into the cells Array the env then carries.
   def emit_lambda_fallback_glue(region, fn_name)
     dest_reg = region[:dest_reg].to_i
-    rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, region[:upvars] || [])
+    rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, region[:upvars] || [],
+                                              cells: region_cells_exprs(region))
     out = String.new
     out << "  // LAMBDA_FALLBACK -- lambda body compiled as a standalone cfunc, wrapped as a real RProc " \
            "(self captured at construction time), stored -- not dispatched\n"
     out << "  {\n"
     out << ctor
+    # OP_LAMBDA builds a strict proc (Proc#lambda? is true), as the FREE_LAMBDA glue marks its own.
+    out << "    #{rproc_var}->flags |= MRB_PROC_STRICT;\n"
     out << "    r#{dest_reg} = mrb_obj_value(#{rproc_var});\n"
     out << "  }\n"
     out

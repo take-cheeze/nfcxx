@@ -30,6 +30,18 @@ require 'tmpdir'
 
 suite = FixtureCheck.new('core_rows_check')
 
+# SymbolCache scans a binary view even when a generated literal or comment is
+# UTF-8. Match offsets must slice that same byte view and preserve its literals.
+unicode_call = '/* café */ mrb_funcall(M, receiver("日本語"), "méthode", 0);'
+unicode_table = SymbolCache::Table.new
+unicode_rewrite = SymbolCache.rewrite_funcalls(unicode_call, unicode_table)
+suite.check('binary funcall scans preserve UTF-8 text and literal encoding',
+            unicode_rewrite == '/* café */ bc2cpp_send(M, receiver("日本語"), 0, 0);' &&
+            unicode_rewrite.encoding == unicode_call.encoding && unicode_table.literals == ['"méthode"'])
+unicode_sites = SymbolCache.send_sites('/* café */ bc2cpp_send(M, receiver("日本語"), 7, 0);')
+suite.check('binary send scans use byte offsets after UTF-8 text',
+            unicode_sites == [['send', 'receiver("日本語")'.b, 7]])
+
 gen = <<~CPP
   static const char* const bc2cpp_sym_names[9] = {
     "first",
@@ -43,7 +55,7 @@ gen = <<~CPP
     "zip",
   };
   mrb_value f(mrb_state* M, mrb_value self, mrb_value r1) {
-    r1 = bc2cpp_owner_call(M, r1, 0, 2, BC2CPP_OWNERS("Array"), mrb_nil_value(), 0, self); /* CLOSED_WORLD owner-call: first */
+    r1 = bc2cpp_owner_call(M, r1, BC2CPP_OWNERS(0, 2, "Array"), mrb_nil_value(), 0, self); /* CLOSED_WORLD owner-call: first */
     r1 = mrb_iv_get(M, self, bc2cpp_sym(M, 1));
     mrb_sym name = bc2cpp_sym(M, 2);
     mrb_value r0 = mrb_const_get(M, recv, name);

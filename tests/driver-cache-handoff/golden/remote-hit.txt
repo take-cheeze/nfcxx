@@ -1,0 +1,40 @@
+== run 1: nfcxx --backend=gcc -c main.cpp -o main.o
+env: NFCXX_CACHE=WORK/sb/cache NFCXX_CACHE_REMOTE=gha FAKE_GHA=hit FAKE_GHA_LOG=WORK/sb/gha.log
+rc: 0
+-- stdout
+fake get KEY
+-- stderr
+(main.o removed between the runs)
+== run 2: nfcxx --backend=gcc -c main.cpp -o main.o
+env: NFCXX_CACHE=WORK/sb/cache NFCXX_CACHE_REMOTE=gha FAKE_GHA=hit FAKE_GHA_LOG=WORK/sb/gha.log
+rc: 0
+-- stdout
+-- stderr
+== sandbox
+D cache
+D cache/objects
+D cache/objects/KEY
+F cache/objects/KEY/ii
+| FAKE II
+F cache/objects/KEY/obj
+| FAKE OBJ KEY
+F cache/objects/KEY/ti
+| FAKE TI
+F local.h
+| #pragma once
+| 
+| inline int local_value() { return 42; }
+F main.cpp
+| #include "local.h"
+| 
+| int main() { return local_value() == 42 ? 0 : 1; }
+F main.ii
+| FAKE II
+F main.o
+| FAKE OBJ KEY
+F main.ti
+| FAKE TI
+F main_bad.cpp
+| #include "missing.h"
+| 
+| int main() { return 0; }

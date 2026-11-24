@@ -3,6 +3,8 @@
 require 'strscan'
 require_relative 'bytecode_ir'
 require_relative 'reg_name'
+require_relative 'cold_compact'
+require_relative 'cold_compact_calls'
 
 # CodeGen: compile_method and jump targets.
 
@@ -69,6 +71,8 @@ class CodeGen
   end
 
   NO_PASS_CONTEXT = [].freeze
+  # EMBED_UNDEF_LOOP: below this many slots the per-field stores are no larger than the loop.
+  EMBED_UNDEF_LOOP_MIN = 8
 
   def run_inline_loop_passes_in(irep, d, mand, claimed, suppressed, glue_at, guarded, try_range: nil)
     ctx_ivar = @class_layout[d.owner]
@@ -180,6 +184,9 @@ class CodeGen
     # bc2cpp_method_return out to this same top-level catch (the per-call-site
     # catches only match bc2cpp_block_break), so search regions recursively.
     needs_return_catch = block_fallback_regions.any? { |region| block_fallback_region_has_return_blk?(region) }
+    # LAMBDA_CELLS: recognized here, before the registers are declared, since a boxed lambda's captured registers are
+    # cells. A resumable frame keeps its registers in its own frame object, so there a boxed lambda keeps its `#error`.
+    lambda_fallback_regions = recognize_lambda_fallback_regions(irep)
     # BLOCK_STEP: the steps of the blocks that suspend, compiled ahead so the blocks' procs can name their makers.
     block_step_code = compile_block_steps(block_fallback_regions, d)
 
@@ -351,6 +358,7 @@ class CodeGen
       step_body_start = out.length
     else
       out << "mrb_value #{impl_name}(mrb_state* M, #{(['mrb_value self'] + arg_params).join(', ')}) {\n"
+      out << ColdCompact.profile_line("#{d.owner}##{d.name}") if ColdCompact.profile?
       out << errinfo_scope_line(irep)
       out << core_body_fast_prologue(d) if d.core
       # ENTRY_GUARDED_SPECIALIZATION: the entry check; a miss falls through to the generic body below.
@@ -369,9 +377,11 @@ class CodeGen
         type ? "#{TYPE_OPS.fetch(type)[:box]}(#{arg})" : arg
       end
       initial[blk_slot] = 'bc2cpp_blk' if has_blk
-      out << emit_register_initializers(irep.nregs, initial, boxed: boxed_registers(block_fallback_regions))
+      out << emit_register_initializers(irep.nregs, initial, boxed: boxed_registers(block_fallback_regions + lambda_fallback_regions))
       out << sealed_int16_declarations(irep)
       out << stack_tuple_declarations(irep)
+      out << stack_string_declarations(irep)
+      out << multi_return_declarations(irep)
       out << array_hash_fixnum_prologue(d)
       if embedded_ivars && d.name == 'initialize'
         # At the start of #initialize self is a bare MRB_TT_DATA shell (data == NULL):
@@ -379,9 +389,18 @@ class CodeGen
         sname = struct_name(d.owner)
         out << "  {\n"
         out << "    #{sname}* embedded = (#{sname}*)mrb_calloc(M, 1, sizeof(#{sname}));\n"
-        embedded_ivars.each do |ivar, type|
-          initial = type == :value ? 'mrb_undef_value()' : '{}'
-          out << "    embedded->#{ivar_field_name(ivar)} = #{initial};\n"
+        if embedded_ivars.size >= EMBED_UNDEF_LOOP_MIN && embedded_ivars.each_value.all?(:value) &&
+           ENV['BC2CPP_EMBED_UNDEF_LOOP'] != '0'
+          # EMBED_UNDEF_LOOP: a struct of mrb_value slots only is an mrb_value array (the static_assert), so one loop
+          # leaves every slot unset, as the per-field stores below do.
+          n = embedded_ivars.size
+          out << "    static_assert(sizeof(#{sname}) == #{n} * sizeof(mrb_value), \"#{sname}: mrb_value slots only\");\n"
+          out << "    for (mrb_value* p = (mrb_value*)embedded; p != (mrb_value*)embedded + #{n}; ++p) *p = mrb_undef_value();\n"
+        else
+          embedded_ivars.each do |ivar, type|
+            initial = type == :value ? 'mrb_undef_value()' : '{}'
+            out << "    embedded->#{ivar_field_name(ivar)} = #{initial};\n"
+          end
         end
         out << "    mrb_data_init(self, embedded, &#{type_var(d.owner)});\n"
         out << "  }\n"
@@ -436,7 +455,9 @@ class CodeGen
                                                                                                   inline_mand: mand)
       glue_at[region[:begin_addr]] = emit_rescue_glue(try_name, region, arg_names, arg_native_types,
                                                       extra_field_values: saved.map { |f| rescue_field_value(f) })
-      rescue_glue_reads[region[:begin_addr]] = saved.filter_map do |f|
+      rescue_glue_reads[region[:begin_addr]] = saved.each_with_index.filter_map do |f, k|
+        next unless rescue_ctx_field_kept?(try_name, 1 + arg_names.size + k)
+
         f[:name][/\Abc2cpp_(?:saved|ref)_r(\d+)\z/, 1]&.to_i
       end
     end
@@ -476,8 +497,9 @@ class CodeGen
     # (emit_lambda_fallback_glue). LAMBDA is disjoint from BLOCK/SENDB, so the
     # order and the `suppressed` check are defensive only. See
     # lambda_fallback_safe? for why RETURN_BLK/BREAK are allowed.
-    recognize_lambda_fallback_regions(irep).each do |region|
+    lambda_fallback_regions.each do |region|
       next if suppressed.include?(region[:block_addr])
+      next if region[:boxed] && @resumable
 
       fn_result = emit_proc_fallback_fn(region, d)
       next unless fn_result
@@ -558,10 +580,18 @@ class CodeGen
     # destructor). glue_at REPLACES an address's code, so `prefix_at` is emitted
     # ahead of the suppression check and the label.
     prefix_at = {}
-    ensure_region = recognize_ensure_region(irep)
+    # ENSURE_BODY_BLOCKS: the block passes above have run, so a block call in the ensure body is emitted from its glue,
+    # inside the guard's lambda; the main loop below must then not emit that glue a second time.
+    ensure_region = recognize_ensure_region(irep, blocks: !@resumable)
+    # A guarded inline loop's text is emitted around the main loop's instructions, never inside the lambda.
+    if ensure_region && (guarded_inline[:at].keys + guarded_inline[:after].keys)
+                        .any? { |addr| (ensure_region[:except_addr]..ensure_region[:raiseif_addr]).cover?(addr) }
+      ensure_region = recognize_ensure_region(irep)
+    end
     if ensure_region
-      open_glue, ok = emit_ensure_guard(ensure_region, irep, d)
+      open_glue, ok = emit_ensure_guard(ensure_region, irep, d, glue_at: glue_at, suppressed: suppressed)
       if ok
+        (ensure_region[:except_addr]..ensure_region[:raiseif_addr]).each { |addr| glue_at.delete(addr) }
         # ENSURE_ENTRY_LABEL: a jump onto the first protected instruction lands before the guard's scope opens.
         entry = ensure_region[:entry_label] ? "  L#{ensure_region[:begin_addr]}:;\n" : ''
         prefix_at[ensure_region[:begin_addr]] = entry + open_glue
@@ -609,8 +639,15 @@ class CodeGen
         prefix_at.key?(addr) || guarded_inline[:at].key?(addr) || guarded_inline[:after].key?(addr)
     end
     pending_splat = nil
+    # GUARD_HOIST (codegen_guard_hoist.rb): no site inside a glued or guarded-inline range (guard_hoist_bypassed).
+    guard_hoist_session(irep, prefix_at.empty?,
+                        bypassed: guard_hoist_bypassed(irep, suppressed, glue_at, guarded_inline)) do
     BytecodeIR.for(irep).each_source do |insn, idx|
-      stack_tuple_visit(irep, idx, suppressed.include?(insn.addr) || glue_at.key?(insn.addr) || guarded_inline[:at].key?(insn.addr))
+      bypassed = suppressed.include?(insn.addr) || glue_at.key?(insn.addr) || guarded_inline[:at].key?(insn.addr)
+      stack_tuple_visit(irep, idx, bypassed)
+      stack_string_visit(irep, idx, bypassed)
+      multi_return_visit(irep, idx, bypassed)
+      literal_minmax_visit(irep, idx, bypassed)
       # With REGISTER_FLOW the bodies are written at the end, so a label written here would land before the method's
       # first instruction: the guarded loop's `goto` would then jump back to the top and run the loop again.
       out << guarded_inline[:after][insn.addr] if !flow_bodies && guarded_inline[:after].key?(insn.addr)
@@ -630,7 +667,7 @@ class CodeGen
                shared_send
              else
                inline_prefix = guarded_inline[:at][insn.addr]
-               own = glue_at[insn.addr] || compile_insn(insn, irep, d, idx)
+               own = glue_at[insn.addr] || cold_compact(insn, guard_hoist_site(irep, idx, insn, compile_insn(insn, irep, d, idx)), d)
                inline_prefix ? inline_prefix + own : own
              end
       # STEP_EXIT_JUMPS: an exit from an ensure region goes through the ensure body first.
@@ -651,6 +688,7 @@ class CodeGen
       else
         out << jump_label << text
       end
+    end
     end
     if arm_prune_drop && !arm_texts.empty?
       held = arm_texts.transform_values { |label, text| label + text }
@@ -690,6 +728,7 @@ class CodeGen
       if needs_return_catch && unhandled_return && [body, block_fallback_pre, @inline_nested_pre].any? { |code| code.include?('bc2cpp_return_from_block') }
         body << resumable_error('a block that is not inlined returns from the method')
       end
+      body << step_cxx_unwind_block if @resumable.handlers&.any?
       body << step_exit_dispatch if step_ensure_handlers?
       out << resumable_step_function(step_name, body)
       out << "}\n\n"
@@ -707,6 +746,7 @@ class CodeGen
     # INLINE_NESTED_BLOCK_SUPPORT: `@inline_nested_pre` goes first so a nested
     # block's cfunc is defined before the loop that uses it.
     out = drop_dead_statements(drop_unused_registers(out)) unless @resumable || ((@report_only_text || (@clean_probe && ENV['BC2CPP_PROBE_TEXT_CLEANUP'] != '0')) && !@runtime_installed_names)
+    out = KeepOldBatch.apply(out)
     out = block_step_code + @inline_nested_pre + block_fallback_pre + rescue_pre + out
     @inline_nested_pre = bc2cpp_saved_inline_pre
     out << runtime_def_devirt_audit(out)
@@ -732,13 +772,14 @@ class CodeGen
     out << "static mrb_value #{entry_name}(mrb_state* M, mrb_value self) {\n"
     if arg_names.empty? && !kw_table && !needs_blk_param && !has_blk
       out << entry_return_line(label, d, impl_name, [])
-    elsif arg_names.empty? && (needs_blk_param || has_blk) && !kw_rest_block
+    elsif arg_names.empty? && (needs_blk_param || has_blk) && !kw_rest_block && !kw_table
       # BLKPUSH_YIELD_SUPPORT/EXPLICIT_BLOCK_PARAM_SUPPORT with zero mandatory
       # arguments: a standalone mrb_get_args("&") call.
       out << "  mrb_value bc2cpp_blk = mrb_nil_value();\n"
       out << "  mrb_get_args(M, \"&\", &bc2cpp_blk);\n"
       out << entry_return_line(label, d, impl_name, 'bc2cpp_blk')
-    elsif kw_rest_block
+    elsif kw_rest_block || (kw_table && needs_blk_param)
+      # KEYWORD_YIELD: a keyword method that yields takes its block as the `&blk` form does.
       out << keyword_rest_block_entry(label, d, impl_name, arg_names, arg_native_types, mand: mand, opt: opt, has_rest: has_rest,
                                                            has_blk: has_blk || needs_blk_param, kw_table: kw_table)
     elsif kw_table
@@ -1184,7 +1225,7 @@ class CodeGen
     return @fiber_free if defined?(@fiber_free)
 
     # The lists themselves, not static_dispatch_lists: that reads OUT_SYMBOL, which the shared analysis may not.
-    @fiber_free = ENV['BC2CPP_BUILD_NAME'] == 'closed' && StaticDispatchLists.current.unmade_classes.include?('Fiber')
+    @fiber_free = StaticDispatchLists.closed_build? && StaticDispatchLists.current.unmade_classes.include?('Fiber')
   end
 
   def rsm_impl_name(d) = "#{cpp_name(d.owner, d.name)}#{RSM_SUFFIX}_impl"

@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'int_box_outline'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_resumable'
 
@@ -256,6 +257,37 @@ class CodeGen
       "  }\n"
   end
 
+  # RESUME_FROM_C_UNWIND: the exit site of a block's `break`/`return` the driver kept in the frame (above every address).
+  STEP_CXX_UNWIND_SITE = 999_999
+
+  # The block a block call's resume label jumps to when the driver kept a C++ unwind of the block (F->cxx_unwind): the
+  # innermost ensure covering the call (F->pc, the handler loop's order) gets it as an exit token, which goes past every
+  # rescue, and the ensure's end (RAISEIF, then Lbc2cpp_exit_dispatch) reaches the site that rethrows it. With no
+  # covering ensure it is rethrown here.
+  def step_cxx_unwind_block
+    ensures = @resumable.handlers.each_with_index.to_a.reverse.select { |h, _| h.type == :ensure }
+    out = String.new
+    out << "  Lbc2cpp_cxx_unwind:;
+"
+    ensures.each do |h, _|
+      out << "  if (F->pc >= #{h.begin_addr} && F->pc < #{h.end_addr}) {
+" \
+             "    M->exc = (struct RObject*)mrb_obj_ptr(bc2cpp_exit_new(M, #{STEP_CXX_UNWIND_SITE}, mrb_nil_value(), -1));
+" \
+             "    goto L#{h.target};
+  }
+"
+    end
+    unless ensures.empty?
+      (@resumable.exit_sites ||= []) << [STEP_CXX_UNWIND_SITE, nil]
+      out << "  Lbc2cpp_exit_#{STEP_CXX_UNWIND_SITE}:;
+"
+    end
+    out << "  bc2cpp_resume_unwind_rethrow(M, F);
+"
+    out
+  end
+
   # The code after the step's instructions that continues a parked exit: its address picks the instruction's label.
   def step_exit_dispatch
     out = String.new
@@ -446,6 +478,7 @@ class CodeGen
       *(call_argc && call_argc <= 1 ? ["  F->block_call = #{3 + call_argc}; // scalar block arguments"] : []),
       '  return bc2cpp_frame_value;',
       "  Lbc2cpp_resume_#{state}:;",
+      *(call && @resumable.handlers&.any? ? ['  if (F->cxx_unwind) goto Lbc2cpp_cxx_unwind;'] : []),
       "  r#{dest} = R[1];"
     ]
   end
@@ -600,12 +633,14 @@ class CodeGen
     lines.compact.reject(&:empty?).join("\n") + "\n"
   end
 
-  # A `send`-family call without a literal block (a forwarded `&blk` included), in any argument shape.
+  # A call without a literal block (a forwarded `&blk` included), in any argument shape: a `send`-family call, whose first
+  # argument is the method name, or a blockless call of a yielding name (blockless_yielding_send?), whose name is fixed.
   def resumable_dyn_send_insn(insn)
     shape = dyn_call_shape(insn)
     recv = %i[SSEND SSENDB].include?(insn.op) ? 'self' : "r#{shape[:dest]}"
     block_value = %i[SENDB SSENDB].include?(insn.op) ? "bc2cpp_env_block(M, r#{shape[:blk_reg]})" : 'mrb_nil_value()'
-    resumable_dyn_site(recv, shape[:dest], shape[:n], block_value, splat_reg: shape[:argv_reg], kw: shape[:kw])
+    name = DYN_SEND_NAMES.include?(insn.sym) ? nil : insn.sym
+    resumable_dyn_site(recv, shape[:dest], shape[:n], block_value, name: name, splat_reg: shape[:argv_reg], kw: shape[:kw])
   end
 
   # DYN_SUPER: `super(args)` in a method step; the block is the register after the arguments (OP_SUPER's R(a+n+1)).
@@ -923,6 +958,8 @@ class CodeGen
     out << "    mrb_bool bc2cpp_err = FALSE;\n"
     out << "    mrb_value bc2cpp_res = bc2cpp_protect_call(M, bc2cpp_body, &bc2cpp_err);\n"
     out << "    if (!bc2cpp_err) return bc2cpp_res;\n"
+    # An ensure that raises while running for a block's `break`/`return` replaces it, as in Ruby: the kept unwind is dropped.
+    out << "    bc2cpp_resume_unwind_drop(M, F);\n"
     out << "    mrb_int bc2cpp_hs = -1;\n"
     handlers.each_with_index.to_a.reverse.each_with_index do |(h, k), i|
       out << "    #{'else ' unless i.zero?}if (F->pc >= #{h.begin_addr} && F->pc < #{h.end_addr}) bc2cpp_hs = #{RESUMABLE_HANDLER_STATE + k};\n"
@@ -996,12 +1033,12 @@ class CodeGen
     <<~CPP.gsub(/^(?=.)/, '  ')
       // However the loop ends (a return, or an unwind such as the return token of Enumerable#all?), the caller's frame-local
       // block goes out of scope: the frame must not keep it. (A frame that parks in a Fiber returns above this point.)
-      Bc2cppResumeRelease bc2cpp_release = { M, &frame };
+      Bc2cppResumeRelease bc2cpp_release = { M, &bc2cpp_rframe };
       for (;;) {
-        mrb_value result = #{step_name}(M, self, frame, resume);
-        if (!bc2cpp_resume_frame_p(M, result)) return result;
-        frame = result;
-        resume = bc2cpp_resumable_resume_from_c(M, frame);
+        mrb_value bc2cpp_rresult = #{step_name}(M, self, bc2cpp_rframe, bc2cpp_rresume);
+        if (!bc2cpp_resume_frame_p(M, bc2cpp_rresult)) return bc2cpp_rresult;
+        bc2cpp_rframe = bc2cpp_rresult;
+        bc2cpp_rresume = bc2cpp_resumable_resume_handled(M, bc2cpp_rframe);
       }
     CPP
   end
@@ -1043,11 +1080,11 @@ class CodeGen
           // An armed entry is reached from the runtime (a dispatcher, a CALL site, a Fiber body's start), which counted already.
           if (!bc2cpp_prologue.expect) bc2cpp_check_argc(M, 0, 0);
           bc2cpp_resumable_init(M);
-          mrb_value frame = mrb_nil_value(), resume = mrb_nil_value();
+          mrb_value bc2cpp_rframe = mrb_nil_value(), bc2cpp_rresume = mrb_nil_value();
           if (bc2cpp_prologue_armed(M, #{owner_literal}, self)) {
             // The frame exists before it is parked: the maker of a block step stores the pointers it captured in it.
-            bc2cpp_resume_frame(M, &frame, #{ctx.nregs}, #{ctx.slot_count});
-            return bc2cpp_prologue_park(M, bc2cpp_method_frame_new(M, #{step_name}, self, frame));
+            bc2cpp_resume_frame(M, &bc2cpp_rframe, #{ctx.nregs}, #{ctx.slot_count});
+            return bc2cpp_prologue_park(M, bc2cpp_method_frame_new(M, #{step_name}, self, bc2cpp_rframe));
           }
       CPP
         }
@@ -1069,16 +1106,18 @@ class CodeGen
     head = <<~CPP
       mrb_value #{impl_name}(mrb_state* M, mrb_value self, #{params}) {
       bc2cpp_resumable_init(M);#{arm_block}
-        mrb_value frame = mrb_nil_value();
-        Bc2cppResumeFrame* F = bc2cpp_resume_frame(M, &frame, #{ctx.nregs}, #{ctx.slot_count});
+        // RESUME_LOCALS: the entry's own locals carry the bc2cpp_ prefix, so a Ruby parameter named frame, resume or
+        // result (OutsideRubyOwners::Collector#scoped(frame)) cannot clash with them.
+        mrb_value bc2cpp_rframe = mrb_nil_value();
+        Bc2cppResumeFrame* F = bc2cpp_resume_frame(M, &bc2cpp_rframe, #{ctx.nregs}, #{ctx.slot_count});
     CPP
     fill = resumable_entry_fill(arg_names, ctx, blk, kw).map { |line| "  #{line}\n" }.join
     tail = <<~CPP.gsub(/^(?=.)/, '  ')
       mrb_write_barrier(M, (struct RBasic*)mrb_ary_ptr(F->regs_ary));
       if (bc2cpp_prologue_armed(M, #{owner_literal}, self)) {
-        return bc2cpp_prologue_park(M, bc2cpp_method_frame_new(M, #{step_name}, self, frame));
+        return bc2cpp_prologue_park(M, bc2cpp_method_frame_new(M, #{step_name}, self, bc2cpp_rframe));
       }
-      mrb_value resume = mrb_nil_value();
+      mrb_value bc2cpp_rresume = mrb_nil_value();
     CPP
     footer = <<~CPP
       }
@@ -1516,7 +1555,7 @@ class CodeGen
       out << "  if (bc2cpp_made) {\n"
       out << "    Bc2cppResumeFrame* bc2cpp_f = (Bc2cppResumeFrame*)DATA_PTR(((Bc2cppMethodFrame*)bc2cpp_made)->frame);\n"
       upvars.each_index do |i|
-        out << "    bc2cpp_f->slots[#{i}] = (long long)(uintptr_t)mrb_integer(bc2cpp_env->stack[#{i + 1}]);\n"
+        out << "    bc2cpp_f->slots[#{i}] = (long long)(uintptr_t)#{IntBoxOutline.upvar_read("bc2cpp_env->stack[#{i + 1}]")};\n"
       end
       # STEP_CLOSURES: the pointers lead into the cells Array the env keeps (after the block, if it takes one); the frame
       # keeps it too, as the env may go before the frame does.
@@ -1756,6 +1795,8 @@ class CodeGen
       void* unwind_key; // UNWIND: the heap frame of the method frame a `break`/`return` ends
       int unwind_mode; // 0 none, 1 break (resume the target with the value), 2 return (the target finishes with it)
       int block_call; // 0 none, 1 yield, 2 packed Array, 3 no arguments, 4 one scalar argument
+      void* cxx_unwind; // RESUME_FROM_C_UNWIND: a std::exception_ptr* (a block's `break`/`return`) the step's ensure runs for
+      mrb_value cxx_unwind_value; // its value, a GC root (mrb_gc_register) while cxx_unwind is set
       mrb_value regs_ary; // the hidden ivar's Array, which is never replaced: read here instead of by name
       mrb_value block; // BLOCK_CALL: the block a suspension asks the fiber to call; rooted by the register holding it
       long long slots[1];
@@ -1960,6 +2001,56 @@ class CodeGen
       if (!mrb_test(bc2cpp_resume_frame_block_call(M, frame))) return bc2cpp_resumable_yield_from_c(M, frame);
       mrb_value blk = bc2cpp_resume_frame_block(M, frame);
       return bc2cpp_yield_foreign(M, blk, bc2cpp_resume_frame_argc(suspended), bc2cpp_resume_frame_argv(suspended));
+    }
+    // RESUME_FROM_C_HANDLERS: what the block (or callee) a suspended step asked for raises is the step's to handle,
+    // as it is when a Fiber drives the step (bc2cpp_method_frame_unwind_into): a step with handlers is re-entered with
+    // the exception pending (raise_pending, the exception as its resume value), so its ensure and rescue run, and
+    // re-raise what they do not handle. Run from C without this, the raise left the step's ensure unrun
+    // (ScanCache.compute's counter stayed raised in a self-compiled bc2cpp).
+    // RESUME_FROM_C_UNWIND: a `break` or block `return` is a C++ unwind (bc2cpp_block_break, bc2cpp_method_return), which
+    // bc2cpp_protect lets pass. It is kept in the frame (its value rooted) and the step is re-entered: the resume label
+    // sends it to the innermost ensure covering the call as an exit token, which no rescue sees, and the ensure's end
+    // rethrows it (bc2cpp_resume_unwind_rethrow). A step that has no such ensure rethrows it at once.
+    static void bc2cpp_resume_unwind_store(mrb_state* M, Bc2cppResumeFrame* f, std::exception_ptr e) {
+      mrb_value v = mrb_nil_value();
+      try {
+        std::rethrow_exception(e);
+      } catch (bc2cpp_block_break& b) {
+        v = b.value;
+      } catch (bc2cpp_method_return& r) {
+        v = r.value;
+      } catch (...) {
+      }
+      f->cxx_unwind_value = v;
+      mrb_gc_register(M, v);
+      f->cxx_unwind = new std::exception_ptr(e);
+    }
+    static void bc2cpp_resume_unwind_drop(mrb_state* M, Bc2cppResumeFrame* f) {
+      if (!f->cxx_unwind) return;
+      delete (std::exception_ptr*)f->cxx_unwind;
+      f->cxx_unwind = nullptr;
+      mrb_gc_unregister(M, f->cxx_unwind_value);
+    }
+    [[noreturn, maybe_unused]] static void bc2cpp_resume_unwind_rethrow(mrb_state* M, Bc2cppResumeFrame* f) {
+      std::exception_ptr e = *(std::exception_ptr*)f->cxx_unwind;
+      bc2cpp_resume_unwind_drop(M, f);
+      std::rethrow_exception(e);
+    }
+    static mrb_value bc2cpp_resumable_resume_handled(mrb_state* M, mrb_value frame) {
+      Bc2cppResumeFrame* suspended = (Bc2cppResumeFrame*)DATA_PTR(frame);
+      if (!suspended || !suspended->has_handlers) return bc2cpp_resumable_resume_from_c(M, frame);
+      mrb_bool bc2cpp_err = FALSE;
+      auto bc2cpp_resume = [&]() { return bc2cpp_resumable_resume_from_c(M, frame); };
+      try {
+        mrb_value bc2cpp_value = bc2cpp_protect_call(M, bc2cpp_resume, &bc2cpp_err);
+        if (bc2cpp_err) suspended->raise_pending = 1;
+        return bc2cpp_value;
+      } catch (mrb_jmpbuf*) {
+        throw;
+      } catch (...) {
+        bc2cpp_resume_unwind_store(M, suspended, std::current_exception());
+        return mrb_nil_value();
+      }
     }
   CPP
 end

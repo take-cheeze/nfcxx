@@ -543,7 +543,7 @@ report << "  TYPED calls: #{typed_guarded_sites} behind a class guard with a sen
           "#{typed_exact_sites} guard-free (EXACT_TYPED)\n"
 # A receiver proven nil-or-one-class takes one nil test; its non-nil path is the exact call.
 nilable_sites = @shipped_stdout.scan(%r{^\s*// NILABLE_RECEIVER :}).size
-nil_arms = @shipped_stdout.scan(/\bbc2cpp_nil_receiver\(M,/).size
+nil_arms = @shipped_stdout.scan(/\bbc2cpp_nil_receiver(?:_id)?\(M,/).size
 index_exact = @shipped_stdout.scan(%r{^\s*// INDEX_EXACT }).size
 report << "  NILABLE_RECEIVER sites: #{nilable_sites} (#{nil_arms} with a bc2cpp_nil_receiver arm instead of a send), " \
           "INDEX_EXACT arms: #{index_exact}\n"

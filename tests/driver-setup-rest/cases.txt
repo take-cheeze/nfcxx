@@ -1,0 +1,69 @@
+# One case per line: ENV... | ARGS... (ENV words are NAME=VALUE, possibly none; ARGS are word-split, no quoting).
+# @WORK@ is the test's work directory (the stub cosmocc, the EDG base with lib_* tables, the k1om root). The sources are
+# a.cpp, b.cpp (C++), a.c (C). tests/driver-setup-rest/run.sh runs each case in its own directory.
+| -c a.cpp -o a.o
+NFCXX_BACKEND=gcc | -c a.cpp -o a.o
+| --backend=gcc a.cpp -o a
+| --instantiate=used -c a.cpp -o a.o
+| --instantiate=auto -c a.cpp -o a.o
+| --instantiate=bogus -c a.cpp -o a.o
+| --instantiate=used --backend=gcc -c a.cpp -o a.o
+NFCXX_COSMOCC=@WORK@/stub/bin/cosmocc | --cosmo -c a.cpp -o a.o
+NFCXX_COSMOCC=@WORK@/stub/bin/cosmocc | --cosmo --gnu-version=130000 -c a.cpp -o a.o
+NFCXX_COSMOCC=@WORK@/stub/bin/cosmocc | --cosmo --backend=pathb -c a.cpp -o a.o
+NFCXX_COSMOCC=@WORK@/stub/bin/cosmocc NFCXX_PATH=b | --cosmo -c a.cpp -o a.o
+NFCXX_COSMOCC=@WORK@/stub/bin/cosmocc | --cosmo --backend=gcc -c a.cpp -o a.o
+NFCXX_COSMOCC=@WORK@/stub/bin/cosmocc | --cosmo --backend=bogus -c a.cpp -o a.o
+NFCXX_COSMOCC=@WORK@/nosuch/cosmocc | --cosmo -c a.cpp -o a.o
+| --cosmo -c a.cpp -o a.o
+NFCXX_COSMOCC=@WORK@/stub/bin/cosmocc | --cosmo --emit-c a.cpp
+NFCXX_COSMOCC=@WORK@/stub/bin/cosmocc | --cosmo --freestanding -c a.cpp -o a.o
+NFCXX_COSMOCC=@WORK@/stub/bin/cosmocc | --cosmo --backend=pathb --freestanding -c a.cpp -o a.o
+NFCXX_COSMOCC=@WORK@/stub/bin/cosmocc | --cosmo --instantiate=bogus -c a.cpp -o a.o
+NFCXX_COSMOCC=@WORK@/stub/bin/cosmocc | --cosmo --instantiate=used -c a.cpp -o a.o
+| --freestanding -c a.cpp -o a.o
+| --freestanding --gnu-version=120300 -c a.cpp -o a.o
+| --freestanding --backend=pathb -c a.cpp -o a.o
+| --freestanding --backend=gcc --emit-c a.cpp
+| --backend=gcc --gnu-version=99999 -c a.cpp -o a.o
+| --dialect=clang -c a.cpp -o a.o
+| --dialect=clang --backend=gcc -c a.cpp -o a.o
+| --dialect=g++ --gnu-version=130000 --backend=gcc -c a.cpp -o a.o
+| --freestanding --dialect=clang --backend=gcc -c a.cpp -o a.o
+EDG_BASE=@WORK@/edgbase | --target=linux_aarch64 --freestanding --emit-c a.cpp
+EDG_BASE=@WORK@/edgbase | --target=linux_armv7 --freestanding --emit-c a.cpp
+EDG_BASE=@WORK@/edgbase | --target=nosuch --freestanding --emit-c a.cpp
+EDG_BASE=@WORK@/edgbase | --target=linux_aarch64 -c a.cpp -o a.o
+EDG_BASE=@WORK@/edgbase | --target=linux_aarch64 --freestanding -c a.cpp -o a.o
+EDG_BASE=@WORK@/edgbase | --target=linux_aarch64 --freestanding --emit-c --backend=gcc a.cpp
+EDG_BASE=@WORK@/edgbase | --emit-c --freestanding --target=linux_aarch64 a.c
+EDG_BASE=@WORK@/edgbase | --target=linux_aarch64 --freestanding --emit-c --dialect=clang a.cpp
+NFCXX_K1OM_ROOT=@WORK@/k1om | --target=linux_k1om --freestanding -c a.cpp -o a.o
+| --target=linux_k1om -c a.cpp -o a.o
+| --target=linux_k1om --freestanding --backend=pathb -c a.cpp -o a.o
+| --target=linux_k1om --freestanding --backend=gcc -c a.cpp -o a.o
+| --freestanding --emit-c --gnu-version=130000 a.cpp
+| --emit-c a.cpp
+| --emit-c --dialect=clang a.cpp
+NFCXX_TIME_LOG=time.log | --backend=gcc -c a.cpp -o a.o
+NFCXX_TIME_LOG=time.log | --backend=gcc --freestanding -c a.cpp -o a.o
+| --trace=trace.json --backend=gcc -c a.cpp -o a.o
+| --trace=trace.json --backend=gcc --freestanding -c a.cpp -o a.o
+| --trace=trace.json --target=linux_aarch64 --freestanding --emit-c a.cpp
+| --trace=trace.json --backend=gcc --target=linux_aarch64 -c a.cpp -o a.o
+| --trace=trace.json --cosmo --backend=bogus -c a.cpp -o a.o
+| -E a.cpp
+| -fsyntax-only a.cpp
+| --backend=bogus -c a.cpp -o a.o
+| -fsanitize=address --backend=gcc --instantiate=used -c a.cpp -o a.o
+| -fsanitize=address --instantiate=bogus -c a.cpp -o a.o
+| --backend=bogus -fsanitize=address --cosmo -c a.cpp -o a.o
+| -shared a.cpp -o a.so
+| -shared --freestanding a.cpp -o a.so
+| -c a.c -o a.o
+| -c a.c -o a.o --freestanding
+NFCXX_COSMOCC=@WORK@/stub/bin/cosmocc NFCXX_TIME_LOG=time.log | --cosmo --backend=gcc -c a.cpp -o a.o
+NFCXX_COSMOCC=@WORK@/stub/bin/cosmocc | --trace=trace.json --cosmo -c a.cpp -o a.o
+| --trace=trace.json --backend=gcc --dialect=clang -c a.cpp -o a.o
+| --trace=trace.json --backend=gcc --freestanding --gnu-version=120300 -c a.cpp -o a.o
+| --backend=gcc --instantiate=used --dialect=clang --freestanding -c a.cpp -o a.o

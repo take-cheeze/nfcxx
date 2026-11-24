@@ -68,7 +68,7 @@ Dir.mktmpdir('ctor-rows') do |root|
   suite.check('a singleton owner is never a row',
               rows.call([{ owner: 'Gfx::Color.singleton', name: 'initialize' }]).empty?)
   suite.check('another name is never a row', rows.call([{ owner: 'Gfx::Color', name: 'dispose' }]).empty?)
-  gen = %(  r1 = bc2cpp_owner_call(M, r1, 6, 0, BC2CPP_OWNERS("BasicObject", "Game::Map"), mrb_nil_value(), 0); /* CLOSED_WORLD owner-call: initialize */\n)
+  gen = %(  r1 = bc2cpp_owner_call(M, r1, BC2CPP_OWNERS(6, 0, "BasicObject", "Game::Map"), mrb_nil_value(), 0); /* CLOSED_WORLD owner-call: initialize */\n)
   BytecodeIR.define_singleton_method(:for) { |_irep| program.new([]) }
   suite.check('an owner call of the generated code that lists the owner keeps it',
               SDR.ctor_rows(root, all, { 'a' => irep.new('a') }, {}, Set.new, {}, Set.new, gens: [gen]) ==

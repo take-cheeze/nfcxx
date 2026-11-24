@@ -90,7 +90,7 @@ class CodeGen
   # argument; without it the wrapper cannot reach the Fixnum proof at all.
   def exact_core_site(irep, idx, receiver_reg, argv, reg_offset, new_class = nil, recv: nil, name: nil, owner_def: nil, dest: nil)
     if @closed_world&.exact_instances_singleton_free?
-      klass = exact_core_value_class(irep, idx, receiver_reg) || new_class
+      klass = exact_core_value_class(irep, idx, receiver_reg) || new_class || integer_exact_class(irep, idx, receiver_reg, owner_def)
       return nil unless klass
 
       return { klass: klass, recv: recv, name: name,
@@ -102,6 +102,31 @@ class CodeGen
     end
 
     checked_core_body_site(irep, idx, receiver_reg, argv, recv, name, dest, owner_def, reg_offset)
+  end
+
+  # INTEGER_EXACT: 'Integer' when the flow proves the receiver an Integer, a fixnum or a bigint; both are instances of
+  # the one Integer class, so a lookup answers them alike. A native entry's expression may read a fixnum only, so
+  # native consumers take native_exact_site_for. BC2CPP_INTEGER_EXACT=0 turns it off.
+  def integer_exact_class(irep, idx, reg, owner_def)
+    return nil if ENV['BC2CPP_INTEGER_EXACT'] == '0' || @rsm_variant || !(irep && idx&.positive? && reg)
+
+    'Integer' if integer_flow_exact?(irep, idx, reg, owner_def)
+  end
+
+  # NumericFlow's or the class flow's proof that the register holds an Integer and nothing else (nil included).
+  def integer_flow_exact?(irep, idx, reg, owner_def)
+    return true if numeric_operand_mask(irep, idx, reg, owner_def) == NumericFlow::INT
+    return false unless ENV['BC2CPP_INTEGER_EXACT'] != '0' && @closed_world&.exact_instances_singleton_free?
+
+    mask = exact_flow_mask(irep, idx, reg)
+    !mask.nil? && exact_flow_strip_nil(irep, idx, reg.to_i, mask) == NumericFlow::INT
+  end
+
+  # The exact site a native entry or registered expression may drop its class test on: an INTEGER_EXACT site may hold a
+  # bigint, which those fixnum-reading expressions do not take, so it keeps their guards.
+  def native_exact_site_for(recv, name)
+    site = exact_core_site_for(recv, name)
+    site unless site && site[:klass] == 'Integer'
   end
 
   # CORE_BODY_EXACT: the receiver proof of a compiled core body. Only the receiver is

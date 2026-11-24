@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'core_mixins'
+require_relative 'scan_cache'
 
 # CORE_COMPARE: mruby's Comparable#<, #<=, #> and #>= as a known body. bc2cpp_slow_lt & co. mirror it
 # for String and Symbol receivers, so a build whose core sources differ from the model keeps the by-name helper.
@@ -26,19 +27,28 @@ module CoreCompare
   def self.verified(ruby_paths, native_sources)
     return Set.new if ruby_paths.nil? || native_sources.nil?
 
-    texts = ruby_paths.to_h { |path| [path, File.read(path, encoding: 'UTF-8')] }
-    expected = OTHERS.map { |owner, file| [owner, file] }.sort
-    layouts = Hash.new { |memo, path| memo[path] = CoreMixins.layout(texts.fetch(path)) }
-    OPS.each_with_object(Set.new) do |op, ok|
-      found = texts.flat_map { |path, text| text.include?(op) ? CoreMixins.definers_in(path, text, op, layouts[path]) : [] }
-      primary = found.select { |d| d.owner == 'Comparable' && CoreMixins.suffix?(d.path, FILE) && !d.alias_only }
-      rest = found - primary
-      next unless primary.one? && primary.first.body == body(op)
-      # nil-safe: an outside definer in a file that is not a model one sorts as ''.
-      next unless rest.map { |d| [d.owner, OTHERS.find { |_, f| CoreMixins.suffix?(d.path, f) }&.last.to_s] }.sort == expected
-      next unless native_sources.fetch(op, []).all? { |path| NATIVES.any? { |f| CoreMixins.suffix?(path, f) } }
+    ruby_verified(ruby_paths).select do |op|
+      native_sources.fetch(op, []).all? { |path| NATIVES.any? { |f| CoreMixins.suffix?(path, f) } }
+    end.to_set
+  end
 
-      ok << op
+  # The operators whose Ruby definers match the model. Nearly every source holds a `<`, so this lays out each one;
+  # the result is kept in ScanCache, keyed by those sources (a tenth of the class layout phase, and most of it in a
+  # self-compiled bc2cpp).
+  def self.ruby_verified(ruby_paths)
+    ScanCache.fetch('core_compare.ruby', ruby_paths, cache_absent: false) do
+      texts = ruby_paths.to_h { |path| [path, File.read(path, encoding: 'UTF-8')] }
+      expected = OTHERS.map { |owner, file| [owner, file] }.sort
+      layouts = Hash.new { |memo, path| memo[path] = CoreMixins.layout(texts.fetch(path)) }
+      OPS.select do |op|
+        found = texts.flat_map { |path, text| text.include?(op) ? CoreMixins.definers_in(path, text, op, layouts[path]) : [] }
+        primary = found.select { |d| d.owner == 'Comparable' && CoreMixins.suffix?(d.path, FILE) && !d.alias_only }
+        rest = found - primary
+        next false unless primary.one? && primary.first.body == body(op)
+
+        # nil-safe: an outside definer in a file that is not a model one sorts as ''.
+        rest.map { |d| [d.owner, OTHERS.find { |_, f| CoreMixins.suffix?(d.path, f) }&.last.to_s] }.sort == expected
+      end
     end
   end
 end

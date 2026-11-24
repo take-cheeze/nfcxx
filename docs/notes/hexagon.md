@@ -81,12 +81,14 @@ char, long long, double, pointer, short, float, function pointer, plus `size_t`,
 | pointer / `long` / `size_t` / `wchar_t` | 4 / 4 / 4 / 4 | 4 / 4 / 4 / 4 | yes |
 | `long long`, `double` alignment | 8 / 8 | 8 / 8 | yes |
 | `struct {char; long long}` size, `offsetof` | 16, 8 | 16, 8 | yes |
-| `long double` size / alignment | **16 / 16** | **8 / 8** | **no** |
-| `struct {long double; char}` size | **32** | **16** | **no** |
+| `long double` size / alignment | **16 / 16** | **8 / 8** | **no** (`linux_hexagon` gives 8 / 8: yes) |
+| `struct {long double; char}` size | **32** | **16** | **no** (`linux_hexagon` gives 16: yes) |
 | jmp_buf (EH runtime) | 36 × `long long` (288 B) | unknown: needs hexagon libC `jmp_buf` | unverified |
 
-Only the `long double` rows disagree. The `tests/hexagon/layout.sh` probe leaves `long double`
-out. The probe does discriminate: with `EDG_TARGET=linux_i686` it fails against the Hexagon clang
+Only the `long double` rows disagree. The `tests/hexagon/layout.sh` probe checks
+26 facts under the stand-in and 30 under `EDG_TARGET=linux_hexagon` (the extra 4 pin
+`long double` size/alignment and `struct {char; long double}` size/`offsetof` at 8/16).
+The probe does discriminate: with `EDG_TARGET=linux_i686` it fails against the Hexagon clang
 (EDG's i686 gives `struct {char; long long}` 12 bytes, Hexagon 16).
 
 Other generated-C differences from the default x86_64 config (diffed for `tests/cases`): `size_t` is
@@ -94,16 +96,31 @@ Other generated-C differences from the default x86_64 config (diffed for `tests/
 EH jmp_buf is `long long[36]`. EDG also emits explicit padding (`char __dummy[N]`) computed from
 its own layout, so the C compiler must agree with EDG's layout, which the probe checks.
 
-### What a real `linux_hexagon` target needs (not built)
+### The real `linux_hexagon` target (built in scratch)
 
-To make `long double` and `TARG_JMP_BUF_*` exact, EDG needs a real target. Copy `linux_riscv32`'s
-`base.cmakedef` to `support/target/linux_hexagon/` in a scratch copy of `3rd/edg`, change
-`TARG_SIZEOF_LONG_DOUBLE`/`TARG_ALIGNOF_LONG_DOUBLE` to 8 and the `LDBL` constants to IEEE double,
-set `TARG_JMP_BUF_NUM_ELEMENTS` from the Hexagon libc, add `TARGET_CONFIGURATION_8=linux_hexagon`
-in `linux-x86_64/base.cmakedef`, add `lib_linux_hexagon/predefined_macros.txt` (from `clang -dM`
-for hexagon; `__hexagon__`, `__HEXAGON_ARCH__`, `__CHAR_UNSIGNED__`, sizes), and rebuild `cpfe`
-(~3 min). This is the next step if `long double` or real jmp_buf layout matters. Nothing here
-modifies `3rd/edg`.
+`scripts/setup-edg-hexagon.sh` builds it: a scratch copy of `3rd/edg` (the submodule stays
+clean) with `linux_riscv32`'s `base.cmakedef` copied to `support/target/linux_hexagon/`,
+`long double` as IEEE double (size/align 8, `LDBL` = `DBL` constants), all `SUPPORTS_*` 0,
+registered as `TARGET_CONFIGURATION_8`, plus `lib_linux_hexagon/predefined_macros.txt`
+generated from `clang --target=hexagon -dM` (`scripts/hexagon-predef.rb`). Use it with
+`EDG_BUILD`/`EDG_BASE` pointed at the hexagon build and `-t linux_hexagon`:
+
+```
+scripts/setup-edg-hexagon.sh                              # build/edg-hex (cpfe, edg_prelink, libC.a)
+EDG_BUILD=$PWD/build/edg-hex EDG_BASE=$PWD/build/edg-hex-base \
+  scripts/gen-c-target.rb -t linux_hexagon tests/cases/hvx_add_i16.cpp
+EDG_BUILD=$PWD/build/edg-hex EDG_BASE=$PWD/build/edg-hex-base \
+  CLANG=clang-19 EDG_TARGET=linux_hexagon tests/hexagon/layout.sh
+```
+
+Verified: `layout.sh` passes (26 facts on the stand-in, 30 on `linux_hexagon` including
+the new long-double rows), a `long double` case generates 8-byte layout
+(`sizeof(struct {long double; char})` = 16, `sizeof(long double)` = 8, matching clang Hexagon;
+the riscv32 stand-in gives 32 and 16), and the full `tests/hexagon/run.sh` suite gives the
+same results as the stand-in (33 passed including the HVX kernels, 26 skipped, same 5
+pre-existing clang-19 `void (*dtor)(...)` failures). `TARG_JMP_BUF_*` is still riscv32's
+36 `long long` (the real hexagon libc `jmp_buf` is unknown without the SDK). Upstreaming the
+target into the `take-cheeze/edg-compiler` fork is still open. Nothing here modifies `3rd/edg`.
 
 Notes from the generated C:
 
@@ -146,6 +163,11 @@ Results (`tests/hexagon/run.sh`, `QEMU_HEXAGON` set):
 | `hvx_add_i16` | ok (exit 67) | |
 | `hvx_mul_i16` | ok (exit 184) | |
 | `hvx_vaddh` (hand-written, `-mhvx -mhvx-length=128b`) | ok (exit 192) | real HVX `vadd` in the object |
+| `hvx_vmpy` (hand-written, `-mhvx -mhvx-length=128b`) | ok (exit 96) | widening-multiply lane semantics: `vmpyhv`/`vmpyhus` even-odd deinterleave, `vmpyh` scalar even half (section 5) |
+| `hvx_tail` (hand-written, `-mhvx -mhvx-length=128b`) | ok (exit 68) | `vaddh` vector main loop plus scalar tail (`n` = 100, 5, 0): the loop shape Path B must emit (section 5) |
+| `hvx_vrmpy` (hand-written, `-mhvx -mhvx-length=128b`) | ok (exit 64) | real HVX `vrmpyubv` byte dot-product in the object |
+| `hvx_vdmpy` (hand-written, `-mhvx -mhvx-length=128b`) | ok (exit 64) | real HVX `vdmpybus` mixed-sign widening dot: out[2i] uses Rt[0:2], out[2i+1] uses Rt[2:4] |
+| `hvx_vrmpy_su` (hand-written, `-mhvx -mhvx-length=128b`) | ok (exit 128) | real HVX `vrmpybusv` mixed-sign (u8 x i8) lane dot, checked against a scalar reference |
 | `float_neg_switch` | ok (exit 42) | `.rodata` (FP constants, switch table) via `R_HEX_32_6_X`/`R_HEX_6_X` |
 | `struct_libc` | ok (exit 9) | `.rodata.str1.1`; `strlen` is defined in `stub.c` |
 | `raii_templates_class` | ok (exit 7) | `.data`/`.bss`; EH bookkeeping globals in `stub.c`, `-G0` |
@@ -153,8 +175,8 @@ Results (`tests/hexagon/run.sh`, `QEMU_HEXAGON` set):
 | `exceptions` | ok (exit 15) | `tests/hexagon/eh_rt.c` supplies EDG's EH ABI (section 3a) |
 | `templates_lambdas` | ok (exit 12) | `scripts/gen-c-target.rb` passes `-tused` (instantiate used templates), as the host driver does; no `edg_prelink` needed |
 
-All 11 Hexagon checks in this table run (the generated cases and HVX).
-Compile-only mode (no qemu) compiles all 11.
+All 16 Hexagon checks in this table run (the generated cases and HVX).
+Compile-only mode (no qemu) compiles all 16.
 
 Layout: `tests/hexagon/layout.sh` passes (26 facts); with `EDG_TARGET=linux_i686` it fails
 (verified), so it isn't vacuous.
@@ -237,7 +259,58 @@ Hexagon plan:
    are `__HVX__`, `__HVX_ARCH__`, `__HVX_LENGTH__`. The SDK's `hvx_hexagon_protos.h` is not needed.
 2. **Vector shapes.** One vector is 128 bytes (64 `int16`, 32 `int32`). Path B must emit loops
    with a scalar tail (or masked stores via `vmaskedstore`) instead of assuming multiples of 64
-   elements. The int16 kernels in `tests/cases/hvx_*.cpp` are the test shape.
+   elements. The int16 kernels in `tests/cases/hvx_*.cpp` are the test shape; `tests/hexagon/hvx_tail.c`
+   is the vector-main-loop plus scalar-tail shape over non-multiple counts (`n` = 100, 5, 0, exit 68).
+   Widening multiply lane order (verified on qemu-hexagon 8.2.2, `tests/hexagon/hvx_vmpy.c`,
+   exit 96): `V6_vmpyhv_128B` (signed x signed) and `V6_vmpyhus_128B` (signed x unsigned)
+   widen all 64 lanes, lane-aligned, deinterleaved as V0 = even-lane products, V1 = odd-lane
+   products. `V6_vmpyh_128B` (vector x scalar `Rt`) puts the even-lane products in V0; V1 reads
+   zero on this qemu, so the odd half is unconfirmed there (real hardware may fill it) and the
+   emitter must not rely on scalar-form V1 until it is checked on hardware or `hexagon-sim`.
+   Builtin names need the `_128B` suffix with raw vector types
+   (`typedef int V128 __attribute__((__vector_size__(128)))`); the unsuffixed
+   `__builtin_HEXAGON_V6_vmpyh` takes 64-byte vectors. `V6_vrmpyubv_128B` (uint8
+   dot product, 32 lanes of 4-byte dots) compiles and runs on qemu
+   (`tests/hexagon/hvx_vrmpy.c`, exit 64, checked against a scalar reference);
+   `V6_vrmpybusv_128B` (u8 x i8 mixed-sign lane dot to int32, V0 = even lanes,
+   V1 = odd lanes) compiles and runs on qemu (`tests/hexagon/hvx_vrmpy_su.c`,
+   exit 128, checked against a scalar reference);
+   `V6_vrmpyubv_acc_128B` accumulates per lane for reductions. `V6_vdmpybus_128B`
+   (u8 vector x i8 scalar broadcast, mixed-sign widening dot to int16 lanes)
+   compiles and runs on qemu (`tests/hexagon/hvx_vdmpy.c`, exit 64): output pair
+   `out[2i]` uses Rt bytes [0:2], `out[2i+1]` uses Rt bytes [2:4]. Reinterleaving a
+   deinterleaved pair (e.g. `vmpybusv` halves) back to sequential lanes has no
+   verified single op here: `vshufeh`/`vshufoh` interleave same-parity lanes and
+   no `vdealvdd`/`vshuffvdd` control word tried so far produces sequential order
+   (all fail at lane 0 on qemu). True HMX matrix-unit builtins are out of reach:
+   `V6_vdmpy_128B` does not exist as such (only the bus/bus_acc/dv forms) and a
+   `V6_vmpyewuh_128B` probe crashes clang-19's Hexagon backend ("Cannot select");
+   qemu user-mode cannot run HMX anyway.
+   Prototype emitter: `scripts/pathb-hvx-emit.rb` reads Path B IR text and emits C with
+   HVX builtins for the patterns it handles (counted int16/int32 wrapping-add loops,
+   int32 max-against-zero selects, int16 widening multiplies with a constant
+   arithmetic shift, and uint8 dot-product reductions (u8xu8 and u8xi8 lanes),
+   each over the matching lanes and an int bound, matched structurally):
+   `vaddh`/`vaddw`/`vmaxw` vector main loops, `vmpyhv`/`vmpyhus` (signed-first
+   order) split through a stack temporary and narrowed with `vasrwh` with the
+   odd half first so lanes come back sequential (verified on qemu), or
+   `vrmpyubv_acc`/`vrmpybusv_acc` over 128-byte chunks into a 32-lane accumulator
+   plus a horizontal sum, each plus a scalar tail. Unsigned x unsigned widening
+   is refused (no verified builtin). Anything else is refused (exit 3), never
+   silently dropped.
+   `tests/pathb-hvx/run.sh` is its translation validation: dump the probe loop with
+   `pathb-dump --ir`, emit, compile with clang for Hexagon, check the vector
+   instruction in the assembly, flatlink, run under qemu-hexagon against `// EXPECT:`,
+   and pin two refusals (a scalar module, a whole runnable module).
+   `tests/pathb-hvx/cases/add_i16` passes (exit 67), `cases/add_i32` passes (exit 0),
+   `cases/max_i32` passes (exit 194), `cases/max_i16` passes (exit 194),
+   `cases/min_i32` passes (exit 120), `cases/min_i16` passes (exit 120),
+   `cases/dot_u8` passes (exit 212), `cases/dot_su8` passes (exit 80),
+   `cases/mul_i16` passes (exit 184), `cases/mul_su_i16` passes (exit 184) and
+   `cases/mul_us_i16` passes (exit 184), equal to the host models. CRuby
+   and mruby agree byte-for-byte on the output and the refusal text. A sweep over
+   every dumpable `tests/cases/*.cpp` module (61 files) refuses all of them with
+   exit 3 and `refused:` on stderr: no crash, no garbage emission.
 3. **Alignment and memory ops.** Aligned vector loads and stores need the IR to guarantee alignment;
    otherwise use the unaligned forms. clang 18 does not recognize `__builtin_HEXAGON_V6_vmemu_128B` or
    `__builtin_HEXAGON_V6_vmem_128B` (checked), so `tests/hexagon/hvx_vaddh.c` loads with plain vector
@@ -247,8 +320,6 @@ Hexagon plan:
    the int16 kernels is an explicit wrap.
 5. **Testing.** `qemu-hexagon` runs HVX (verified). Path B tests can follow `tests/hexagon/run.sh`
    with the same flatlink path, as long as the kernel has no data relocations.
-6. **Open:** HVX `vmpy`-style multiply widening (`V6_vmpyh`) needs a check against qemu for
-   the exact lane semantics before relying on it; not done here.
 
 ## 6. Findings outside the Hexagon work
 
@@ -296,9 +367,16 @@ Run it the way CI does:
 
     CLANG=clang-19 QEMU_HEXAGON=qemu-hexagon-static tests/hexagon/run.sh
 
-Result: 13 passed (`constexpr_static`, `exceptions`, `float_neg_switch`, `qbe_builtins_libc`, `qbe_global_ctor`,
+The `hexagon-target` CI job builds the scratch `linux_hexagon` EDG once per EDG revision
+(cached as `build/edg-hex`; `scripts/setup-edg-hexagon.sh` is idempotent, and the
+source-tree copy is quick next to the compile) and runs the same layout + suite against it:
+
+    EDG_BUILD=$PWD/build/edg-hex EDG_BASE=$PWD/build/edg-hex-base \
+      CLANG=clang-19 QEMU_HEXAGON=qemu-hexagon-static EDG_TARGET=linux_hexagon tests/hexagon/run.sh
+
+Result: 18 passed (`constexpr_static`, `exceptions`, `float_neg_switch`, `qbe_builtins_libc`, `qbe_global_ctor`,
 `raii_templates_class`, `signed_overflow_wraps`, `struct_libc`, `templates_lambdas`, `virtual_dispatch`, and the HVX
-kernels `hvx_add_i16`, `hvx_mul_i16`, `hvx_vaddh`), 3 skipped (`qbe_atomics`, `qbe_gnu_forms`, `qbe_int3_break`:
+kernels `hvx_add_i16`, `hvx_mul_i16`, `hvx_vaddh`, `hvx_vmpy`, `hvx_tail`, `hvx_vrmpy`, `hvx_vrmpy_su`, `hvx_vdmpy`), 3 skipped (`qbe_atomics`, `qbe_gnu_forms`, `qbe_int3_break`:
 they include hosted C++ headers that the `linux_riscv32` EDG configuration lacks).
 
 `flatlink.rb` lays every `SHF_ALLOC` section out in one `PT_LOAD` (`.text` first, `.bss` last, memsz > filesz)

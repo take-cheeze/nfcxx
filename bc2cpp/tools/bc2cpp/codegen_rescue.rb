@@ -98,7 +98,11 @@ class CodeGen
   # bc2cpp_ensure_guard); this file's own C++ break/return exceptions run the
   # destructor and continue to their catch sites.
   # Everything below rejects unproven shapes.
-  def recognize_ensure_region(irep)
+  # ENSURE_BODY_BLOCKS: `blocks: true` (compile_method, whose block passes run first) also admits a block call in the
+  # ensure body (`saved.each { |k, v| ... }`), compiled through the glue those passes made for it (emit_ensure_guard).
+  # The block, at any depth, must hold no `return` or `break`: either unwinds by a C++ exception that would leave the
+  # destructor's lambda.
+  def recognize_ensure_region(irep, blocks: false)
     return nil if irep.catch_handlers.nil?
     # STEP_HANDLERS: a step handles its own handler table (resumable_step_function); the RAII form cannot be jumped into.
     return nil if step_with_handlers?(irep)
@@ -133,7 +137,9 @@ class CodeGen
     # could throw a C++ exception out of a destructor that may already be running
     # during unwinding (std::terminate). The nested rescue's own EXCEPT and RAISEIF are its handler.
     handler_addrs = nested ? [nested[:except_addr], nested[:raise_addr]] : []
-    return nil if body.any? { |i| ENSURE_BODY_REFUSED_OPS.include?(i.op) && !handler_addrs.include?(i.addr) }
+    refused = blocks ? ENSURE_BODY_REFUSED_OPS - ENSURE_BODY_BLOCK_OPS : ENSURE_BODY_REFUSED_OPS
+    return nil if body.any? { |i| refused.include?(i.op) && !handler_addrs.include?(i.addr) }
+    return nil if blocks && body.any? { |i| i.op == :BLOCK && !ensure_body_block_exits_free?(irep, i) }
     # Branches inside the ensure body must stay inside it; its RAISEIF address is
     # allowed (mrbc's "skip the rest" target for a conditional ensure body) and
     # becomes a label at the end of the lambda.
@@ -181,6 +187,25 @@ class CodeGen
   end
 
   ENSURE_BODY_REFUSED_OPS = %i[RETURN RETURN_BLK BREAK BLOCK SENDB SSENDB LAMBDA EXCEPT RAISEIF].freeze
+  ENSURE_BODY_BLOCK_OPS = %i[BLOCK SENDB SSENDB].freeze
+
+  # ENSURE_BODY_BLOCKS: the block built by +insn+ (a BLOCK) and every irep nested in it hold no RETURN_BLK or BREAK.
+  def ensure_body_block_exits_free?(irep, insn)
+    label = insn.block_index && irep.reps && irep.reps[insn.block_index.to_i]
+    block = label && @ireps[label]
+    return false unless block
+
+    clean = true
+    walked = BytecodeIR.each_nested_insn(block, ->(child) { @ireps[child] }, max_depth: MAX_UPVAR_NEST_DEPTH) do |nested, _depth|
+      clean = false if %i[RETURN_BLK BREAK].include?(nested.op)
+    end
+    walked && clean && irep_tree(block).size == 1 + nested_rep_count(block)
+  end
+
+  # How many ireps are nested in +irep+, counting every rep label (a label irep_tree cannot look up is not counted there).
+  def nested_rep_count(irep)
+    (irep.reps || []).sum { |label| 1 + ((child = label && @ireps[label]) ? nested_rep_count(child) : 0) }
+  end
 
   # ENSURE_NESTED_RESCUE: `begin X rescue C ... end` inside an ensure body (mruby-io's IO.open closes its io that way).
   # The rescue has the shape recognize_rescue_regions reads: [begin, end) protected, `JMP S` at end, `EXCEPT Rexc` at
@@ -244,7 +269,11 @@ class CodeGen
   # The lambda captures `[&]`, so it uses the function's own `rN` locals. Those
   # are declared at the top, before the guard, so reverse destruction order
   # keeps them alive when the guard runs.
-  def emit_ensure_guard(region, irep, d)
+  # ENSURE_BODY_BLOCKS: +glue_at+ and +suppressed+ are compile_method's, from the passes that already claimed the block
+  # calls in the body. A claimed instruction is emitted as its glue inside the lambda; one claimed with no glue of its own
+  # (the SENDB a BLOCK's glue calls) is skipped. Only a block op may be claimed, and a glue that jumps (`goto`) to a
+  # label it does not define itself, or returns, keeps the `#error`: inside the lambda neither leaves the method.
+  def emit_ensure_guard(region, irep, d, glue_at: nil, suppressed: nil)
     body = String.new
     ok = true
     # The ensure body's branches target the body or the RAISEIF; both become
@@ -268,7 +297,14 @@ class CodeGen
         next
       end
       body << "    L#{insn.addr}:;\n" if body_targets.include?(insn.addr)
-      code = compile_insn(insn, irep, d, idx)
+      if glue_at&.key?(insn.addr) || suppressed&.include?(insn.addr)
+        code = glue_at&.[](insn.addr) || ''
+        own_labels = code.scan(/^\s*(\w+):;/).flatten
+        jumps_out = code.scan(/\bgoto\s+(\w+)\s*;/).flatten.any? { |label| !own_labels.include?(label) }
+        ok = false unless ENSURE_BODY_BLOCK_OPS.include?(insn.op) && !jumps_out && !code.match?(/\breturn\b/)
+      else
+        code = compile_insn(insn, irep, d, idx)
+      end
       ok = false if code.include?('#error')
       body << code
     end
@@ -290,8 +326,8 @@ class CodeGen
   # whole-method `rescue` and the `EXPR rescue FALLBACK` modifier: same
   # EXCEPT/RESCUE/RAISEIF shape). Chained single-class clauses and namespaced
   # classes are supported (recognize_rescue_class_handler), and proper nesting
-  # (NESTED_RESCUE_SUPPORT). Not supported: `retry`, `ensure`, a multi-class
-  # clause `rescue A, B`, partial overlap. Unrecognized shapes keep
+  # (NESTED_RESCUE_SUPPORT), and a multi-class clause `rescue A, B`
+  # (RESCUE_MULTI_CLASS). Not supported: `retry`, `ensure`, partial overlap. Unrecognized shapes keep
   # `#error unhandled opcode EXCEPT`: RESCUE/RAISEIF translate anywhere, but
   # EXCEPT only means something inside this bc2cpp_protect wrapping.
   #
@@ -572,6 +608,15 @@ class CodeGen
 
       match_addr = jmpif_i.uint_operand.to_i
       return nil unless match_addr && match_addr > jmpif_i.addr
+
+      # RESCUE_MULTI_CLASS: `rescue A, B => e` tests each class in turn (GETCONST, RESCUE, JMPIF to the one handler),
+      # with the clause's `JMP next` only after its last class. The next class's test head follows the JMPIF directly.
+      if jmp_i.op == :GETCONST
+        cls_names << cls_name
+        first_match_addr ||= match_addr
+        clause_idx = seg_idx + 2
+        next
+      end
       return nil unless jmp_i.op == :JMP
       next_addr = jmp_i.jmp_addr
       # Strictly forward: bounds the walk and excludes a backward `retry`.
@@ -762,7 +807,7 @@ class CodeGen
   end
 
   def emit_rescue_try_body(try_name, region, irep, d, arg_names, arg_native_types, extra_fields: [],
-                           available_upvars: [], inline_mand: nil)
+                           available_upvars: [], inline_mand: nil, fn_prefix: nil)
     ctx_struct = "#{try_name}_Ctx"
     ctx_fields = ['mrb_value self'] + arg_names.each_with_index.map { |a, i| "#{native_c_type(arg_native_types[i])} #{a}" } +
                  extra_fields.map { |f| "#{f[:c_type]} #{f[:name]}" }
@@ -807,7 +852,10 @@ class CodeGen
     nested_block_regions = recognize_block_fallback_regions(irep, available_upvars: available_upvars)
                            .select { |r| range.cover?(r[:block_addr]) }
     nested_arg_regions = recognize_explicit_block_arg_regions(irep).select { |r| range.cover?(r[:sendb_addr]) }
-    out << emit_block_fallback_glue_pass(nested_block_regions, nested_arg_regions, d, local_suppressed, local_glue_at)
+    # A try body of a block's own rescue names its blocks under that block's fn_name (`fn_prefix`), as the block's
+    # nested pass does: their block_addr lives in the block irep, and would collide with the method's own blocks.
+    out << emit_block_fallback_glue_pass(nested_block_regions, nested_arg_regions, d, local_suppressed, local_glue_at,
+                                         fn_prefix: fn_prefix)
 
     # NESTED_RESCUE_SUPPORT: each direct child region gets its own further-nested
     # try body. Its begin_addr is reached after arbitrary code in this body, so
@@ -832,7 +880,7 @@ class CodeGen
       nested_extra_values = nested_extra_fields.map { |f| f[:value] || f[:name].sub('bc2cpp_saved_', '') }
       out << emit_rescue_try_body(nested_try_name, nregion, irep, d, [], [], extra_fields: nested_extra_fields,
                                                                             available_upvars: available_upvars,
-                                                                            inline_mand: inline_mand)
+                                                                            inline_mand: inline_mand, fn_prefix: fn_prefix)
       local_glue_at[nregion[:begin_addr]] =
         emit_rescue_glue(nested_try_name, nregion, [], [], extra_field_values: nested_extra_values)
     end
@@ -893,7 +941,93 @@ class CodeGen
       out << "#error rescue body builds a block over the method's cells array, which the try function does not capture\n"
     end
     # The nested try bodies above are in +out+ too, so a shared name is only ever kept.
-    @resumable ? out : drop_dead_statements(drop_unused_registers(out))
+    return out if @resumable
+
+    field_names = ['self'] + arg_names + extra_fields.map { |f| f[:name] }
+    prune_rescue_ctx(drop_dead_statements(drop_unused_registers(out)), try_name, field_names, arg_names.size)
+  end
+
+  # RESCUE_CTX_PRUNE kill switch: BC2CPP_RESCUE_CTX_PRUNE=0 passes every Ctx field.
+  def rescue_ctx_prune_enabled?
+    ENV['BC2CPP_RESCUE_CTX_PRUNE'] != '0'
+  end
+
+  # RESCUE_PROTECT_FOLD kill switch: BC2CPP_RESCUE_PROTECT_FOLD=0 calls bc2cpp_protect and sets `$!` at each glue.
+  def rescue_protect_fold_enabled?
+    ENV['BC2CPP_RESCUE_PROTECT_FOLD'] != '0'
+  end
+
+  # A declaration copying a Ctx field (or boxing one) or another local: no side effect, so it goes with its last reader.
+  RESCUE_CTX_PURE_LOAD =
+    /\A  (?:mrb_value&?|[A-Za-z_]\w*\*?) (\w+) = (?:\*?bc2cpp_ctx->\w+|\w*\(bc2cpp_ctx->\w+\)|self|r\d+|bc2cpp_saved_r\d+);\n\z/
+
+  # RESCUE_CTX_PRUNE: the Ctx is a by-value copy (or, for `bc2cpp_ref_rN`, an alias) that only the try body reads. A
+  # field whose name its text no longer holds once the unread pure loads are gone has no effect, so neither has storing
+  # it, or rooting it again, at the glue. Rewrites try_name's struct and loads in +text+ and records which fields stay.
+  def prune_rescue_ctx(text, try_name, field_names, arg_count)
+    @rescue_ctx_kept ||= {}
+    @rescue_ctx_kept.delete(try_name)
+    return text unless rescue_ctx_prune_enabled?
+
+    struct_head = "struct #{try_name}_Ctx { "
+    s = text.index(struct_head)
+    struct_end = s && text.index(" };\n", s)
+    fn_open = struct_end && text.index("static mrb_value #{try_name}(mrb_state* M, void* ud) {", struct_end)
+    # The body ends at its fell_off_end raise: a `}` in column 0 can also close a block inside it.
+    tail = "#{try_name} fell off the end of its body\");\n}\n"
+    fn_close = fn_open && (t = text.index(tail, fn_open)) && t + tail.size - 3
+    return text unless fn_close
+
+    fields = text[(s + struct_head.size)...struct_end].chomp(';').split('; ')
+    return text unless fields.map { |f| f[/(\w+)\z/, 1] } == field_names
+
+    first, *lines = text[fn_open..fn_close].lines
+    # Only register locals go; self stays, since later passes may add a use of it (an owner call's caller).
+    loop do
+      dead = lines.index do |l|
+        (m = RESCUE_CTX_PURE_LOAD.match(l)) && m[1].match?(/\A(?:bc2cpp_saved_)?r\d+\z/) &&
+          lines.none? { |o| !o.equal?(l) && o.match?(/\b#{m[1]}\b/) }
+      end
+      if dead
+        lines.delete_at(dead)
+      elsif (i = lines.index { |l| rescue_ctx_load_overwritten?(lines, l) })
+        lines[i] = "  mrb_value #{RESCUE_CTX_PURE_LOAD.match(lines[i])[1]} = mrb_nil_value();\n"
+      else
+        break
+      end
+    end
+    # Only self, the arguments and the register captures are pruned; the block, upvar and cell fields stay.
+    kept = field_names.each_with_index.map do |name, i|
+      !(i.positive? && (i < 1 + arg_count || name.match?(/\Abc2cpp_(?:saved|ref)_r\d+\z/))) ||
+        lines.any? { |l| l.match?(/bc2cpp_ctx->#{name}\b/) }
+    end
+    @rescue_ctx_kept[try_name] = kept
+    struct = "#{struct_head}#{fields.select.with_index { |_, i| kept[i] }.map { |f| "#{f}; " }.join}};\n"
+    text[0...s] + struct + text[(struct_end + 4)...fn_open] + first + lines.join + text[(fn_close + 1)..]
+  end
+
+  # A line that may branch, be branched to, or open or close a scope.
+  RESCUE_CTX_CONTROL = /\bL\d+:|\b(?:goto|return|if|else|case|default|for|while|do|switch)\b|[{}]/
+
+  # RESCUE_CTX_PRUNE: is +line+ a by-value register load (not a `mrb_value&` alias) whose value nothing reads? It is when
+  # the first later line naming the register overwrites it, and every line before that one runs straight on into it.
+  def rescue_ctx_load_overwritten?(lines, line)
+    m = RESCUE_CTX_PURE_LOAD.match(line)
+    return false unless m && line.start_with?('  mrb_value r') && !line.include?('mrb_nil_value()')
+
+    var = m[1]
+    word = /\b#{var}\b/
+    i = lines.index { |l| l.equal?(line) }
+    j = (i + 1...lines.size).find { |k| lines[k].match?(word) }
+    return false unless j && lines[(i + 1)...j].none? { |l| l.match?(RESCUE_CTX_CONTROL) }
+
+    (w = lines[j].match(/\A  #{var} = (.*);\n\z/)) && !w[1].match?(word) && !w[1].match?(RESCUE_CTX_CONTROL)
+  end
+
+  # RESCUE_CTX_PRUNE: is the field at +index+ of try_name's Ctx (self, the arguments, then the extra fields) kept?
+  def rescue_ctx_field_kept?(try_name, index)
+    kept = @rescue_ctx_kept&.[](try_name)
+    kept.nil? || kept[index]
   end
 
   # RESCUE_SUPPORT: glue at begin_addr replacing [begin_addr, end_addr]: run the
@@ -910,17 +1044,24 @@ class CodeGen
   # `extra_fields`, appended in order to the aggregate `ctx{...}` initializer.
   def emit_rescue_glue(try_name, region, arg_names, arg_native_types, extra_field_values: [])
     ctx_struct = "#{try_name}_Ctx"
-    ctx_args = (['self'] + arg_names + extra_field_values).join(', ')
+    fields = (['self'] + arg_names + extra_field_values).each_with_index.select { |_, i| rescue_ctx_field_kept?(try_name, i) }
+    ctx_args = fields.map(&:first).join(', ')
     err_var = "#{try_name}_err"
     result_var = "#{try_name}_result"
     out = String.new
     out << "  {\n"
     out << "    #{ctx_struct} bc2cpp_ctx{#{ctx_args}};\n"
-    out << "    mrb_bool #{err_var} = FALSE;\n"
-    out << "    mrb_value #{result_var} = bc2cpp_protect(M, #{try_name}, &bc2cpp_ctx, &#{err_var});\n"
+    # RESCUE_PROTECT_FOLD: bc2cpp_rescue_protect sets the error flag before anything reads it, and `$!` on an error.
+    if rescue_protect_fold_enabled?
+      out << "    mrb_bool #{err_var};\n"
+      out << "    mrb_value #{result_var} = bc2cpp_rescue_protect(M, #{try_name}, &bc2cpp_ctx, &#{err_var});\n"
+    else
+      out << "    mrb_bool #{err_var} = FALSE;\n"
+      out << "    mrb_value #{result_var} = bc2cpp_protect(M, #{try_name}, &bc2cpp_ctx, &#{err_var});\n"
+    end
     # bc2cpp_protect restores the arena to where it was before the try body, so an object the body stored into an outer
     # register (a `&rN` field) loses the arena slot that kept it alive: root it again here, or the next collection frees it.
-    extra_field_values.each do |v|
+    fields.each do |v, _|
       out << "    bc2cpp_root(M, #{Regexp.last_match(1)});\n" if v =~ /\A&(r\d+)\z/
     end
     out << if region[:tail_return]
@@ -928,7 +1069,7 @@ class CodeGen
             else
               "    if (!#{err_var}) { r#{region[:connector_reg]} = #{result_var}; goto L#{region[:shared_target]}; }\n"
             end
-    out << "    bc2cpp_set_errinfo(M, #{result_var});\n"
+    out << "    bc2cpp_set_errinfo(M, #{result_var});\n" unless rescue_protect_fold_enabled?
     out << "    r#{region[:exc_reg]} = #{result_var};\n"
     out << "  }\n"
     out

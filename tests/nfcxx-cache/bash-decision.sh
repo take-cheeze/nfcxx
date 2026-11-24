@@ -16,6 +16,10 @@ first=$(grep -n -F -x 'compile_clean' "$file" | head -1 | cut -d: -f1)
 end=$(grep -n -F -x 'if [ -n "$depmode" ]; then' "$file" | cut -d: -f1 | awk -v s="$first" '$1 > s { print; exit }')
 
 harness() {
+  # the backend's compiler, as the body exports it for the gcc and Path B routes (and as nfcxx-backend-env.rb plans it): the cache
+  # key takes NFCXX_CC, so both drivers must have it here. The pinned driver's bash route does not export it (only its plan
+  # route does), so without this the two sides' keys differ by that one line.
+  printf 'export NFCXX_CC=%s\n' "$root/scripts/gcc-cc.rb"
   cat <<'EOT'
 _out() { local s=$1 x; shift; for x in "$@"; do s+=" $x"; done; printf '%s\n' "$s"; }
 RUBY=ruby   # the driver runs the Ruby helpers as "${RUBY:-ruby}": the ruby stub below records the remote helper's runs
@@ -50,18 +54,24 @@ pathbcc_stub() {  # the Path B compile of one file (scripts/pathb-cc.rb): the ob
   printf 'OBJECT %s\n' "$o" > "$o"
   return 0
 }
+pathb_run() {  # a planned command of the Path B -c route (scripts/nfcxx-pathb.rb --records): a pathb-cc call is the stub
+  case $1 in */scripts/pathb-cc.rb) shift; pathbcc_stub "$@"; return ;; esac
+  "$@"
+}
 EOT
   # the setup and argument loop, up to the cache block (the build step stubbed, the root and the exec of the driver replaced)
   head -n "$((first - 1))" "$file" |
     sed -e "s|^root=\$(cd \"\$(dirname \"\$0\")\" && pwd)|root=$root|" -e 's/^ensure_tool() {/ensure_tool_real() {/' \
         -e 's|exec "\$0" |exec_stub nfcxx |g' -e 's|"\$0" |run_stub nfcxx |g' \
         -e 's|"\$root/scripts/pathb-cc.rb" |pathbcc_stub |g' \
+        -e 's|"\${cpc\[@\]}" |pathb_run "\${cpc[@]}" |' \
         -e 's|cp "\$pb_entry/obj" "\$out"; exit 0|cp "$pb_entry/obj" "$out"; _out EXIT 0; exit 0|' \
         -e '/^cache_check() {/,/^}/ s/^\( *\)exit 0$/\1_out EXIT 0; exit 0/' \
         -e '/^cache_check() {/,/^}/ s/&& exit 0$/\&\& { _out EXIT 0; exit 0; }/'
   # the cache block: from the pre-compile removal to the line before the -MD block
   sed -n "${first},$((end - 1))p" "$file" |
     sed -e 's/"\$eccp_bin" /eccp_stub /' -e 's/^  "\${eccp_argv\[@\]}"$/  eccp_stub/' -e 's|"\$root/scripts/pathb-cc.rb" |pathbcc_stub |g' \
+        -e 's|"\${cpc\[@\]}" |pathb_run "\${cpc[@]}" |' \
         -e 's/^\( *\)exit 0$/\1_out EXIT 0; exit 0/' -e 's/&& exit 0$/\&\& { _out EXIT 0; exit 0; }/'
 }
 harness > "$tmp/harness.sh"

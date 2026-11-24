@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'int_box_outline'
 require_relative 'ir_rbs_block_types'
 require_relative 'core_block_param_sigs'
 require_relative 'core_fact_sigs'
@@ -134,7 +135,17 @@ class CodeGen
 
   def compute_block_upvar_needs(irep)
     needs = []
+    opaque = false
     walked = BytecodeIR.each_nested_insn(irep, ->(label) { @ireps[label] }, max_depth: MAX_UPVAR_NEST_DEPTH) do |insn, depth|
+      if insn.op == :ARGARY
+        # BLOCK_ZSUPER: as BlockCaptureIndex#upvars, ARGARY (lv >= 1) reads the method frame's parameters.
+        reads = insn.argary_frame_reads
+        opaque ||= reads.nil?
+        next unless reads && reads[0] >= 1
+
+        reads[1].each { |index| needs << [reads[0] - 1 - depth, index] } if reads[0] - 1 >= depth
+        next
+      end
       next unless %i[GETUPVAR SETUPVAR].include?(insn.op)
 
       upvar_idx, level = insn.upvar_ref
@@ -142,7 +153,7 @@ class CodeGen
       # enclosing frame, which +irep+ does not need.
       needs << [level - depth, upvar_idx] if level >= depth
     end
-    walked ? needs.uniq.sort : nil
+    walked && !opaque ? needs.uniq.sort : nil
   end
 
   # BLOCK_FALLBACK_YIELD_SUPPORT: which enclosing frames' received blocks does
@@ -185,6 +196,12 @@ class CodeGen
       return nil unless lv
 
       needs << lv.to_i
+    end
+    # BLOCK_ZSUPER: OP_ARGARY copies the block slot of the frame `lv` names, as BLKPUSH reads it.
+    BytecodeIR.for(irep).instructions_with_op(:ARGARY).each do |insn|
+      return nil unless insn.paren_int
+
+      needs << insn.paren_int
     end
     # `block_given?` reads the method's block like a BLKPUSH from `depth + 1`
     # levels up (the root is one level below its method).
@@ -485,13 +502,17 @@ class CodeGen
       # (`ary.inject(0) { }`, `ary.each_slice(2) { }`), but never `n=*` (a splat has
       # no static layout).
       # BLOCK_KEYWORD_CALL: keywords sit between the positionals and the block (a Hash register or key/value pairs).
-      next if paired.positional_splat?
+      # BLOCK_SPLAT_SEND: `n=*` (`recv.m(*list) { }`) takes the args Array in R(dest+1) and the block after it; outside
+      # a step, without keywords, it is a by-name call over the Array's items (emit_block_splat_glue).
+      splat = paired.positional_splat?
+      next if splat && !block_splat_send_enabled?
       next unless paired.argc_operand
 
-      n = paired.argc.to_i
+      n = splat ? 1 : paired.argc.to_i
       dest_reg = paired.reg
       block_reg = insn.reg
       kw = dyn_call_shape(paired)[:kw]
+      next if splat && (kw || paired.keyword_slots != 0)
       next unless dest_reg && block_reg && block_reg == dest_reg + n + paired.keyword_slots + 1
 
       name = paired.sym
@@ -505,10 +526,11 @@ class CodeGen
 
       block_label = irep.reps[block_irep_idx.to_i]
       block_irep = block_label && @ireps[block_label]
-      next unless block_irep && block_fallback_safe?(block_irep)
+      next unless block_irep && (block_fallback_safe?(block_irep) || optional_param_block?(block_irep))
       # BLOCK_SELF_WORLD: a rebinder runs this block under another self; the compiled body would read
       # its creator's. It stays interpreted (with the method holding it).
-      next if block_self_rebound?(block_label)
+      # BLOCK_SELF_METHOD_BOUNDARY: a block in a method a rebinder's block defines is not one of them.
+      next if block_self_rebound_from_creator?(block_label)
 
       upvars = block_upvar_needs(block_irep)
       next if upvars.nil?
@@ -572,7 +594,7 @@ class CodeGen
                   (synchronous || block_blk_needs(block_irep, given: false) == [])
 
       region = { block_addr: insn.addr, block_index: idx, sendb_addr: paired.addr, dest_reg: dest_reg,
-                 block_irep: block_irep, name: name, n: n, kw: kw,
+                 block_irep: block_irep, name: name, n: splat ? '*' : n, kw: kw,
                  self_implicit: paired.op == :SSENDB, upvars: upvars, needs_blk: needs_blk,
                  parent_irep: irep, boxed: boxed, by_value: by_value }
       # BLOCK_SEMANTICS: the tokens this block's env must carry. A return token is
@@ -589,6 +611,25 @@ class CodeGen
 
   # STEP_CLOSURES: only the registers of the function that makes the block can be boxed. A level >= 1 pointer is the enclosing
   # function's, so +cell_levels+ lists the upvar levels this function holds cells for.
+  # OPTIONAL_PARAM_BLOCK: `{ |a, b = x| }` (ENTER m:o:0:0:0:0:0:0, o >= 1, then the o + 1 JMPs of OP_ENTER's jump table).
+  # The body takes all m + o values and how many optionals were given (bc2cpp_given_opt); the jump table becomes the
+  # switch compile_method emits for an optional def (OPTIONAL_ARG_SUPPORT), so a default is computed only when its value
+  # was not given. Not in a step, whose block makers bind fixed counts. BC2CPP_OPTIONAL_PARAM_BLOCK=0 keeps the `#error`.
+  def optional_param_block?(block_irep)
+    return false if ENV['BC2CPP_OPTIONAL_PARAM_BLOCK'] == '0' || @resumable
+
+    fields = block_irep.enter&.enter_fields
+    return false unless fields && fields.length >= 7 && fields[1].to_i.positive? && fields.drop(2).all? { |f| f.to_i.zero? }
+    return false unless optional_arg_table(block_irep)[1]
+
+    !BytecodeIR.for(block_irep).op?(*BLOCK_FALLBACK_UNSAFE_OPS)
+  end
+
+  # BLOCK_SPLAT_SEND: not in a step (its glue takes fixed counts only). BC2CPP_BLOCK_SPLAT_SEND=0 keeps the `#error`.
+  def block_splat_send_enabled?
+    ENV['BC2CPP_BLOCK_SPLAT_SEND'] != '0' && !@resumable
+  end
+
   def cells_capture?(upvars, cell_levels = [])
     ENV['BC2CPP_STEP_CLOSURES'] != '0' && upvars.all? { |(level, _)| level.zero? || cell_levels.include?(level - 1) }
   end
@@ -597,8 +638,12 @@ class CodeGen
   # region holds those frames' cells for it.
   def nested_keeps_upper_cells?(block_irep, upvars)
     levels = upvars.map(&:first).uniq
-    recognize_block_fallback_regions(block_irep, available_upvars: upvars, cell_levels: levels)
-      .any? { |nested| nested[:boxed] && nested[:upvars].any? { |(level, _)| level >= 1 } }
+    nested = recognize_block_fallback_regions(block_irep, available_upvars: upvars, cell_levels: levels)
+    # NESTED_LAMBDA_FALLBACK: an escaping lambda in the body holds the frames above it the same way.
+    if ENV['BC2CPP_NESTED_LAMBDA'] != '0'
+      nested += recognize_lambda_fallback_regions(block_irep, available_upvars: upvars, cell_levels: levels)
+    end
+    nested.any? { |region| region[:boxed] && region[:upvars].any? { |(level, _)| level >= 1 } }
   end
 
   # The C++ values a boxed region's env carries as cells, one per level of its upvars (in the function that builds it:
@@ -636,7 +681,7 @@ class CodeGen
   BLOCK_ELEMENT_CHAINS = %w[Array Hash].to_h { |klass| [klass, CoreHierarchySigs.ancestors(klass)] }.freeze
 
   def block_fallback_element_hints(irep, region, owner_name)
-    return {} unless irep && !region[:self_implicit] && !region[:kw]
+    return {} unless irep && !region[:self_implicit] && !region[:kw] && region[:n].is_a?(Integer)
 
     block_irep = region[:block_irep]
     fields = block_irep.enter&.enter_fields
@@ -648,11 +693,16 @@ class CodeGen
     insn = idx && BytecodeIR.for(irep).source_at(idx)
     return {} unless insn&.op == :SENDB
 
-    shapes = CoreBlockParamSigs.shapes.select do |(klass, name), shape|
-      name == region[:name] && shape.argc.cover?(region[:n]) && shape.arity == fields.first && !shape.elements.empty? &&
-        block_element_chain_core?(klass, name)
+    fitting = CoreBlockParamSigs.shapes.select do |(_klass, name), shape|
+      name == region[:name] && shape.argc.cover?(region[:n]) && shape.arity == fields.first && !shape.elements.empty?
     end
-    return {} if shapes.empty?
+    shapes = fitting.select { |(klass, name), _| block_element_chain_core?(klass, name) }
+    # DECLARED_BLOCK_ELEMENT needs no core chain: its entry guard holds whoever yields (a program `Array#sort` too).
+    if shapes.empty?
+      shape = fitting.find { |(klass, _), _| klass == 'Array' }&.last
+      declared = shape && declared_block_element(irep, idx, region, owner_name)
+      return declared ? declared_block_element_hints(region, declared, shape) : {}
+    end
 
     recv_class = block_fallback_receiver_class(irep, idx, region[:dest_reg], owner_name)
     mand = mandatory_arity(irep)
@@ -669,13 +719,57 @@ class CodeGen
                 end
       # Only a class of this program: the scans also return primitive tags and VACUOUS, which
       # PRIMITIVE_ELEMENT_SUPPORT keeps away from the element-hint consumers.
-      next unless element.is_a?(String) && known_owner_set.include?(element) &&
-                  !PRIMITIVE_ELEMENT_CLASSES.include?(element)
+      unless element.is_a?(String) && known_owner_set.include?(element) && !PRIMITIVE_ELEMENT_CLASSES.include?(element)
+        declared = klass == 'Array' && declared_block_element(irep, idx, region, owner_name)
+        next unless declared
+
+        return declared_block_element_hints(region, declared, shape)
+      end
 
       strict = STRICT_BLOCK_ELEMENT_SHAPES.include?([klass, name]) && shape.elements == [0]
       return shape.elements.to_h { |pos| [pos + 1, strict ? element : SoftElementHint.new(element)] }
     end
     {}
+  end
+
+  # DECLARED_BLOCK_ELEMENT: the declared program-class element of a block-taking Array iterator's receiver (a declared
+  # `@x`, a declared parameter, or a used-once filter of one; see declared_element_receiver), or nil.
+  # BC2CPP_DECLARED_BLOCK_ELEMENT=0 turns it off.
+  def declared_block_element(irep, idx, region, owner_name)
+    return nil if ENV['BC2CPP_DECLARED_BLOCK_ELEMENT'] == '0' || region[:self_implicit]
+
+    entry = declared_element_receiver(irep, idx, region[:dest_reg], owner_name, derived: true)
+    entry if entry && declared_element_exact?(entry)
+  end
+
+  # The body tests each element parameter on entry (declared_block_element_guards), so inside it the hint is exact. A
+  # core class gives no send hint (PRIMITIVE_ELEMENT_CLASSES); the body's exact flow reads it instead
+  # (declared_block_element_scope).
+  def declared_block_element_hints(region, declared, shape)
+    region[:declared_block_element] = [declared, shape.elements.map { |pos| pos + 1 }]
+    return {} unless declared[:kind] == :class
+
+    shape.elements.to_h { |pos| [pos + 1, declared[:klass]] }
+  end
+
+  # DECLARED_LOOP_ELEMENT's scope for a block body: each guarded parameter is its class while its entry value holds.
+  def declared_block_element_scope(region, block_irep)
+    entry, positions = region[:declared_block_element]
+    return [] unless entry
+
+    positions.map { |pos| { irep: block_irep, reg: pos.to_s, klass: entry[:klass] } }
+  end
+
+  # The entry tests of the parameters DECLARED_BLOCK_ELEMENT hints: whoever calls the body, a parameter the hint names
+  # is exactly the class past this point, or the call raised BC2cppDeclarationViolation.
+  def declared_block_element_guards(region, arg_names)
+    entry, positions = region[:declared_block_element]
+    return '' unless entry
+
+    positions.filter_map do |pos|
+      name = arg_names[pos - 1]
+      element_guard_statement(entry, name, nil_ok: false, verb: 'yielded') if name
+    end.join
   end
 
   # Does an exact `klass` instance answer `name` with the core method? A program
@@ -695,7 +789,7 @@ class CodeGen
   # run time.
   def block_fallback_rbs_param_class(irep, region, owner_name)
     signatures = self.class.rbs_block_signatures
-    return nil unless signatures && irep
+    return nil unless signatures && irep && region[:n].is_a?(Integer)
 
     block_irep = region[:block_irep]
     fields = block_irep.enter&.enter_fields
@@ -890,7 +984,14 @@ class CodeGen
     out << "static const char* const #{id}_names[] = { #{(names.map { |n| c_string_literal(n.to_s) } + ['nullptr']).join(', ')} };\n"
     # A direct-entry block has no C function of its own (its proc runs the shared thunk, and the entry names the block).
     keys = [region[:direct_entry] ? "(const void*)&#{fn_name}_direct" : "(const void*)&#{fn_name}"]
-    out << "static const int #{id} = #{keys.map { |k| "bc2cpp_proc_spec_register(#{k}, #{id}_iseq, 6, #{block.nlocals.to_i}, #{id}_names)" }.join(' + ')};\n\n"
+    if ENV['BC2CPP_PROC_SPEC_ROWS'] == '0'
+      registrations = keys.map { |k| "bc2cpp_proc_spec_register(#{k}, #{id}_iseq, 6, #{block.nlocals.to_i}, #{id}_names)" }
+      return out << "static const int #{id} = #{registrations.join(' + ')};\n\n"
+    end
+    keys.each_with_index do |k, i|
+      out << "static const Bc2cppProcSpec #{id}_row#{i} = { #{k}, #{id}_iseq, 6, #{block.nlocals.to_i}, #{id}_names };\n"
+    end
+    out << "static const int #{id} = #{keys.each_index.map { |i| "bc2cpp_proc_spec_register(&#{id}_row#{i})" }.join(' + ')};\n\n"
     out
   end
 
@@ -898,12 +999,18 @@ class CodeGen
     block_irep = region[:block_irep]
     # BLOCK_SELF_WORLD: every block or lambda body compiled here reads its creator's self; a rebound one
     # never runs under it. The recognizers already skip these; this keeps any other caller from compiling one.
-    return nil if !runtime_def_fallback_kind?(region[:kind]) && block_self_rebound?(block_irep.label)
+    return nil if !runtime_def_fallback_kind?(region[:kind]) && block_self_rebound_from_creator?(block_irep.label)
     mand = mandatory_arity(block_irep)
-    rest_block = (region[:kind] || 'block_fallback') == 'block_fallback' && rest_only_block?(block_irep)
+    # LAMBDA_REST: a lambda body takes the same two rest shapes, bound strictly.
+    rest_kind = %w[block_fallback lambda_fallback].include?(region[:kind] || 'block_fallback')
+    rest_block = rest_kind && rest_only_block?(block_irep)
     # MIXED_REST_BLOCK: m values, then the rest Array as the last parameter (mixed_rest_unpack fills them).
-    mixed_rest = (region[:kind] || 'block_fallback') == 'block_fallback' && !rest_block && mixed_rest_block?(block_irep)
-    arg_count = rest_block ? 1 : (mixed_rest ? mand + 1 : mand)
+    mixed_rest = rest_kind && !rest_block && mixed_rest_block?(block_irep)
+    # OPTIONAL_PARAM_BLOCK: [opt, JMP addresses, JMP targets] of the body's jump table (only a block_fallback body).
+    opt_table = !rest_block && !mixed_rest && (region[:kind] || 'block_fallback') == 'block_fallback' &&
+                optional_param_block?(block_irep) ? optional_arg_table(block_irep) : nil
+    opt = opt_table ? opt_table[0] : 0
+    arg_count = rest_block ? 1 : (mixed_rest ? mand + 1 : mand + opt)
     arg_names = (1..arg_count).map { |i| "bc2cpp_barg#{i}" }
     # UPVAR_CAPTURE_SUPPORT: region[:upvars] comes from
     # recognize_block_fallback_regions, or from recognize_lambda_fallback_regions
@@ -979,6 +1086,10 @@ class CodeGen
     @blk_param_level = @block_fallback_depth
     # RANGE_MAP_INLINE: a counted `(a..b).map` in this body runs as a loop here, not as one nested cfunc call per
     # element (fallback_range_map_inlines); claimed before the nested pass so it does not take the block.
+    if opt_table
+      opt_table[1].each { |addr| nested_suppressed << addr }
+      nested_glue_at[opt_table[1].first] = emit_optional_dispatch(opt_table[2])
+    end
     fallback_range_map_inlines(block_irep, upvar_regs, d).each do |rregion, code|
       next if nested_suppressed.include?(rregion[:block_addr]) || nested_suppressed.include?(rregion[:sendb_addr])
 
@@ -1008,6 +1119,33 @@ class CodeGen
 
       nested_suppressed << nregion[:sendb_addr]
       nested_glue_at[nregion[:sendb_addr]] = emit_explicit_block_arg_glue(nregion, owner_def: d)
+    end
+
+    # NESTED_LAMBDA_FALLBACK: a LAMBDA in this body (`list.map { |x| ->(y) { x + y } }`) is a lambda region of this
+    # body's frame, as compile_method claims one of the method's: its level-0 upvars are this body's registers, a deeper
+    # one is forwarded from this body's own upvars (available_upvars), a lambda that may escape captures through this
+    # body's cells, and a confined lambda's `.call` sites become direct calls. BC2CPP_NESTED_LAMBDA=0 keeps the `#error`.
+    nested_lambda_regions = []
+    if ENV['BC2CPP_NESTED_LAMBDA'] != '0' && [nil, 'block_fallback'].include?(region[:kind])
+      recognize_lambda_fallback_regions(block_irep, available_upvars: upvar_regs, cell_levels: cell_levels).each do |lregion|
+        next if nested_suppressed.include?(lregion[:block_addr])
+        next if lregion[:boxed] && @resumable
+
+        lfn_result = emit_proc_fallback_fn(lregion, d, fn_name)
+        next unless lfn_result
+
+        lfn_name, lfn_code = lfn_result
+        nested_pre << lfn_code
+        nested_lambda_regions << lregion
+        nested_suppressed << lregion[:block_addr]
+        nested_glue_at[lregion[:block_addr]] = emit_lambda_fallback_glue(lregion, lfn_name)
+        lregion[:call_sites].each do |site|
+          next if nested_suppressed.include?(site[:send_addr])
+
+          nested_suppressed << site[:send_addr]
+          nested_glue_at[site[:send_addr]] = emit_lambda_confined_call_glue(lregion, lfn_name, site)
+        end
+      end
     end
 
     # RUNTIME_DEF_FALLBACK_SUPPORT: a `def` inside an EXEC-opened class body
@@ -1077,7 +1215,8 @@ class CodeGen
       extra_fields += cell_args.map { |name| { name: name, c_type: 'mrb_value' } }
       saved = rescue_entry_saved_fields(block_irep, rregion)
       nested_pre << emit_rescue_try_body(try_name, rregion, block_irep, d, arg_names, Array.new(arg_names.size),
-                                          extra_fields: extra_fields + saved, available_upvars: upvar_regs)
+                                          extra_fields: extra_fields + saved, available_upvars: upvar_regs,
+                                          fn_prefix: fn_name)
       nested_glue_at[rregion[:begin_addr]] =
         emit_rescue_glue(try_name, rregion, arg_names, Array.new(arg_names.size),
                          extra_field_values: extra_fields.map { |f| f[:name] } +
@@ -1101,21 +1240,35 @@ class CodeGen
     # BLOCK_ENSURE: a `begin ... ensure` in the body is the guard scope compile_method opens (ENSURE_RAII_SUPPORT), so a
     # `break` or `return` thrown out of it runs the ensure body on the way.
     prefix_at = block_ensure_prefixes(block_irep, d, targets, nested_suppressed)
+    saved_loop_elements = @declared_loop_elements
+    scope = declared_block_element_scope(region, block_irep)
+    @declared_loop_elements = (saved_loop_elements || []) + scope unless scope.empty?
+    # LITERAL_TABLES (codegen_literal_tables.rb): an instruction another pass emits stays out of every table.
+    claimed_addrs = (nested_suppressed + nested_glue_at.keys + prefix_at.keys).to_set
+    literal = literal_table_plan(block_irep, claimed: ->(addr, _idx) { claimed_addrs.include?(addr) })
+    # GUARD_HOIST (codegen_guard_hoist.rb): a literal table only rewrites a straight run of literal builders, no send.
+    hoist_eligible = nested_suppressed.empty? && nested_glue_at.empty? && prefix_at.empty?
+    guard_hoist_session(block_irep, hoist_eligible) do
     BytecodeIR.for(block_irep).each_source do |insn, idx|
       next if insn.op == :ENTER
 
       body << prefix_at[insn.addr] if prefix_at.key?(insn.addr)
       next if nested_suppressed.include?(insn.addr) && !nested_glue_at.key?(insn.addr)
+      next if literal.skip.include?(idx)
 
       body << "  L#{insn.addr}:;\n" if targets.include?(insn.addr)
       if nested_glue_at.key?(insn.addr)
         body << nested_glue_at[insn.addr]
+      elsif (glue = literal.glue[idx])
+        body << glue
       else
         with_element_hints(block_irep, insn, idx, elem_hints) do
-          body << compile_insn(insn, block_irep, d, idx)
+          body << guard_hoist_site(block_irep, idx, insn, compile_insn(insn, block_irep, d, idx))
         end
       end
     end
+    end
+    @declared_loop_elements = saved_loop_elements
     @tail_yield_block = saved_tail_yield_block
     @ensure_except_remaps = nil
     @block_fallback_upvars = nil
@@ -1134,9 +1287,10 @@ class CodeGen
     # unchanged.
     out << "static mrb_value #{impl_name}(mrb_state* M, mrb_value self" \
            "#{upvar_params.map { |p| ", #{p}" }.join}#{blk_param.map { |p| ", #{p}" }.join}#{cell_params.map { |p| ", #{p}" }.join}" \
-           "#{arg_names.map { |a| ", mrb_value #{a}" }.join}) {\n"
+           "#{arg_names.map { |a| ", mrb_value #{a}" }.join}#{opt.positive? ? ', mrb_int bc2cpp_given_opt' : ''}) {\n"
     out << errinfo_scope_line(block_irep)
-    out << emit_register_initializers(block_irep.nregs, arg_names, boxed: boxed_registers(nested_regions))
+    out << emit_register_initializers(block_irep.nregs, arg_names, boxed: boxed_registers(nested_regions + nested_lambda_regions))
+    out << declared_block_element_guards(region, arg_names)
     out << body
     out << fell_off_end(impl_name)
     out << "}\n\n"
@@ -1154,7 +1308,7 @@ class CodeGen
     region[:yield_free] = region[:direct_entry] && note_block_yield_free(region[:block_irep])
     if region[:direct_entry]
       out << emit_block_direct_entry(fn_name, impl_name, region, upvar_regs, needs_blk, mand, arg_names, rest_block,
-                                     mixed_rest: mixed_rest, cells: [cell_args, cells_slot])
+                                     mixed_rest: mixed_rest, cells: [cell_args, cells_slot], opt: opt)
       return [fn_name, out]
     end
 
@@ -1183,7 +1337,7 @@ class CodeGen
     # order emit_rproc_construction builds (both read upvar_regs).
     upvar_args = upvar_regs.each_with_index.map do |(l, b), i|
       vname = upvar_var_name(l, b)
-      out << "  mrb_value* #{vname} = reinterpret_cast<mrb_value*>(static_cast<uintptr_t>(mrb_integer(mrb_proc_cfunc_env_get(M, #{i + 1}))));\n"
+      out << "  mrb_value* #{vname} = #{IntBoxOutline.upvar_read("mrb_proc_cfunc_env_get(M, #{i + 1})")};\n"
       vname
     end
     # BLOCK_FALLBACK_YIELD_SUPPORT: the forwarded block is the last env slot, read
@@ -1214,7 +1368,13 @@ class CodeGen
       # argument is spread over several parameters (vm.c `len > 1 && argc == 1
       # && mrb_array_p`). Kernel#lambda makes the same RProc strict later, and a
       # strict proc raises on any other count instead.
-      if mand.zero?
+      if opt.positive?
+        out << "  mrb_value* bc2cpp_argv;\n"
+        out << "  mrb_int bc2cpp_argc;\n"
+        out << "  mrb_get_args(M, \"*\", &bc2cpp_argv, &bc2cpp_argc);\n"
+        out << optional_block_unpack(arg_names, mand, opt, 'bc2cpp_proc_strict_p(M)')
+        out << call_impl.call("M, #{call_args}, #{arg_names.join(', ')}, bc2cpp_given_opt")
+      elsif mand.zero?
         out << "  if (bc2cpp_proc_strict_p(M) && mrb_get_argc(M) != 0) mrb_argnum_error(M, mrb_get_argc(M), 0, 0);\n"
         out << call_impl.call("M, #{call_args}")
       elsif mixed_rest
@@ -1244,6 +1404,13 @@ class CodeGen
         end
         out << call_impl.call("M, #{call_args}, #{arg_names.join(', ')}")
       end
+    elsif mixed_rest
+      # LAMBDA_REST: a lambda is strict: at least m values, none spread.
+      out << "  mrb_value* bc2cpp_argv;\n"
+      out << "  mrb_int bc2cpp_argc;\n"
+      out << "  mrb_get_args(M, \"*\", &bc2cpp_argv, &bc2cpp_argc);\n"
+      out << mixed_rest_unpack(arg_names, mand, 'bc2cpp_argc', 'bc2cpp_argv', strict: 'true')
+      out << "  return #{impl_name}(M, #{call_args}, #{arg_names.join(', ')});\n"
     elsif mand.zero?
       # A lambda is strict.
       out << "  if (mrb_get_argc(M) != 0) mrb_argnum_error(M, mrb_get_argc(M), 0, 0);\n" if kind == 'lambda_fallback'
@@ -1278,13 +1445,14 @@ class CodeGen
   # (Kernel#lambda over the block) raises on any other count.
   # MIXED_REST_BLOCK: binds `arg_names` for `{ |x, *r| }` from the yielded values (argc, argv), as vm.c does for a
   # non-lambda block: one Array argument is spread over the parameters (only when the block takes more than one).
-  # A strict (lambda) block also rejects too few arguments; an extra one goes to the rest Array.
+  # A strict (lambda) block takes the values as given (vm.c spreads an Array only for a plain proc), rejects too few with
+  # vm.c's message (argnum_error names m1 + m2), and puts an extra one in the rest Array.
   def mixed_rest_unpack(arg_names, mand, argc, argv, strict:)
     values = arg_names[0...mand]
     rest = arg_names[mand]
     out = String.new
-    out << "  if (#{strict} && #{argc} < #{mand}) mrb_argnum_error(M, #{argc}, #{mand}, -1);\n"
-    out << "  mrb_value bc2cpp_mixed_vals = (#{argc} == 1 && mrb_array_p(#{argv}[0])) ? #{argv}[0] : " \
+    out << "  if (#{strict} && #{argc} < #{mand}) mrb_argnum_error(M, #{argc}, #{mand}, #{mand});\n"
+    out << "  mrb_value bc2cpp_mixed_vals = (!(#{strict}) && #{argc} == 1 && mrb_array_p(#{argv}[0])) ? #{argv}[0] : " \
            "mrb_ary_new_from_values(M, #{argc}, #{argv});\n"
     out << "  mrb_int bc2cpp_mixed_len = RARRAY_LEN(bc2cpp_mixed_vals);\n"
     values.each_with_index do |a, i|
@@ -1296,8 +1464,32 @@ class CodeGen
     out
   end
 
+  # OPTIONAL_PARAM_BLOCK: binds the m + o parameters and bc2cpp_given_opt from (bc2cpp_argc, bc2cpp_argv) as vm.c
+  # OP_ENTER does for a proc with optionals: a strict one (Kernel#lambda) raises unless m <= argc <= m + o (the message
+  # names m, as argnum_error does); a plain one spreads a lone Array argument over its m + o > 1 parameters, drops extra
+  # values and leaves missing ones nil. Every optional at or after position argc - m runs its default (the jump table).
+  # bc2cpp_argv may be reassigned (the spread).
+  def optional_block_unpack(arg_names, mand, opt, strict)
+    len = mand + opt
+    out = String.new
+    out << "  if (#{strict} && (bc2cpp_argc < #{mand} || bc2cpp_argc > #{len})) mrb_argnum_error(M, bc2cpp_argc, #{mand}, #{mand});\n"
+    if len > 1
+      out << "  mrb_value bc2cpp_opt_spread = mrb_nil_value();\n"
+      out << "  if (!(#{strict}) && bc2cpp_argc == 1 && mrb_array_p(bc2cpp_argv[0])) {\n"
+      out << "    bc2cpp_opt_spread = bc2cpp_argv[0];\n"
+      out << "    bc2cpp_argc = RARRAY_LEN(bc2cpp_opt_spread);\n"
+      out << "    bc2cpp_argv = RARRAY_PTR(bc2cpp_opt_spread);\n"
+      out << "  }\n"
+    end
+    arg_names.each_with_index do |a, i|
+      out << "  mrb_value #{a} = bc2cpp_argc > #{i} ? bc2cpp_argv[#{i}] : mrb_nil_value();\n"
+    end
+    out << "  mrb_int bc2cpp_given_opt = bc2cpp_argc <= #{mand} ? 0 : (bc2cpp_argc >= #{len} ? #{opt} : bc2cpp_argc - #{mand});\n"
+    out
+  end
+
   def emit_block_direct_entry(fn_name, impl_name, region, upvar_regs, needs_blk, mand, arg_names, rest_block,
-                              mixed_rest: false, cells: [[], 0])
+                              mixed_rest: false, cells: [[], 0], opt: 0)
     out = String.new
     out << "static mrb_value #{fn_name}_direct(mrb_state* M, struct REnv* bc2cpp_env, bool bc2cpp_strict, " \
            "mrb_int bc2cpp_argc, const mrb_value* bc2cpp_argv) {\n"
@@ -1306,7 +1498,7 @@ class CodeGen
     out << "  Bc2cppTailYieldScope bc2cpp_tail_scope(bc2cpp_env);\n" if region[:tail_yield]
     upvar_args = upvar_regs.each_with_index.map do |(l, b), i|
       vname = upvar_var_name(l, b)
-      out << "  mrb_value* #{vname} = reinterpret_cast<mrb_value*>(static_cast<uintptr_t>(mrb_integer(bc2cpp_env->stack[#{i + 1}])));\n"
+      out << "  mrb_value* #{vname} = #{IntBoxOutline.upvar_read("bc2cpp_env->stack[#{i + 1}]")};\n"
       vname
     end
     out << "  mrb_value bc2cpp_blk = bc2cpp_env->stack[#{upvar_regs.size + 1}];\n" if needs_blk
@@ -1315,6 +1507,11 @@ class CodeGen
     call_args = (['bc2cpp_captured_self'] + upvar_args + (needs_blk ? ['bc2cpp_blk'] : []) + cell_names).join(', ')
     if rest_block
       out << "  return #{impl_name}(M, #{call_args}, mrb_ary_new_from_values(M, bc2cpp_argc, bc2cpp_argv));\n"
+    elsif opt.positive?
+      out << "  const mrb_value* bc2cpp_argv_in = bc2cpp_argv;\n  mrb_int bc2cpp_argc_in = bc2cpp_argc;\n"
+      out << optional_block_unpack(arg_names, mand, opt, 'bc2cpp_strict').gsub('bc2cpp_argc', 'bc2cpp_argc_in')
+                                                                        .gsub('bc2cpp_argv', 'bc2cpp_argv_in')
+      out << "  return #{impl_name}(M, #{call_args}, #{arg_names.join(', ')}, bc2cpp_given_opt);\n"
     elsif mixed_rest
       out << mixed_rest_unpack(arg_names, mand, 'bc2cpp_argc', 'bc2cpp_argv', strict: 'bc2cpp_strict')
       out << "  return #{impl_name}(M, #{call_args}, #{arg_names.join(', ')});\n"
@@ -1368,16 +1565,17 @@ class CodeGen
     # mrb_get_args "&" at method level or forwarded again) is appended by value:
     # nothing writes back through it, and the env keeps it GC-rooted.
     ptr = ->(expr) { "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(#{expr})))" }
+    uptr = ->(expr) { IntBoxOutline.upvar_write(expr) || ptr.call(expr) }
     env_entries = ['self'] + upvar_regs.each_with_index.map do |(l, b), i|
       if upvar_cells
         # FIBER_BODY_CAPTURE: the pointers lead into a heap Array holding a snapshot of the locals, not into this frame.
-        ptr.call("&#{upvar_cells}[#{i}]")
+        uptr.call("&#{upvar_cells}[#{i}]")
       elsif inline_offset
-        ptr.call("&r#{l.zero? ? b + inline_offset : b}")
+        uptr.call("&r#{l.zero? ? b + inline_offset : b}")
       elsif l.zero?
-        ptr.call("&r#{b}")
+        uptr.call("&r#{b}")
       else
-        ptr.call(upvar_var_name(l - 1, b))
+        uptr.call(upvar_var_name(l - 1, b))
       end
     end
     # FIBER_BODY_CAPTURE: the snapshot Array rides in the env, right after the upvar pointers, so the GC keeps it.
@@ -1432,7 +1630,11 @@ class CodeGen
   def emit_block_fallback_glue(region, fn_name, inline_offset: nil, owner_def: nil)
     dest_reg = region[:dest_reg].to_i + (inline_offset || 0)
     recv = region[:self_implicit] ? 'self' : "r#{dest_reg}"
-    argv = (1..region[:n]).map { |k| "r#{dest_reg + k}" }
+    # BLOCK_SPLAT_SEND: the args Array is R(dest+1); only the by-name call over its items takes it.
+    splat = region[:n] == '*'
+    return "  #error unhandled opcode BLOCK -- a splat block send in a step\n" if splat && @resumable
+
+    argv = splat ? [] : (1..region[:n]).map { |k| "r#{dest_reg + k}" }
     kw = shifted_keywords(region[:kw], inline_offset)
     # BLOCK_SEMANTICS: a `break` in the body unwinds to this site while the site
     # is on the stack, so the site owns a frame (and its token) only then. The
@@ -1449,14 +1651,14 @@ class CodeGen
                 end
     # FIBER_BODY: `Fiber.new { prologue; m(args) }` is a C++ Fiber whose root frame runs the block and then the
     # suspendable method `m` (tools/bc2cpp/runtime/bc2cpp_fiber.hxx), not an mruby Fiber over a cfunc proc.
-    if !kw && (fiber_id = fiber_body_target_id(region, owner_def))
+    if !splat && !kw && (fiber_id = fiber_body_target_id(region, owner_def))
       @fiber_body_used = true
       return emit_fiber_body_site(region, fn_name, fiber_id, dest_reg)
     end
-    if inline_offset.nil? && (call = resumable_block_call_glue(region, fn_name, dest_reg, owner_def))
+    if !splat && inline_offset.nil? && (call = resumable_block_call_glue(region, fn_name, dest_reg, owner_def))
       return call
     end
-    if !kw && owner_def && region[:direct_entry] && fiber_new_site?(region) && block_step_maker_for(region)
+    if !splat && !kw && owner_def && region[:direct_entry] && fiber_new_site?(region) && block_step_maker_for(region)
       return emit_fiber_body_step_site(region, fn_name, dest_reg)
     end
     rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, region[:upvars] || [],
@@ -1468,12 +1670,12 @@ class CodeGen
                                               step_maker: region[:direct_entry] ? block_step_maker_for(region) : nil)
     # ARG_SHAPES_BLOCK: a top-level site whose call resolves to compiled code.
     # BLOCK_ARM_REACH: a block nested in an inlined loop body takes the same arms, shifted.
-    stack_expr = stack_block_expr(region)
+    stack_expr = splat ? nil : stack_block_expr(region)
     # FIBER_BODY: the tail call of a Fiber body prologue goes through the method's entry (no inlined arm), after storing
     # its receiver for the handoff check (bc2cpp_prologue_armed).
     prologue_tail = !kw && fiber_prologue_tail_region?(region)
     # BLOCK_KEYWORD_CALL: no direct arm models keywords.
-    direct = if prologue_tail || kw
+    direct = if prologue_tail || kw || splat
                nil
              elsif inline_offset.nil?
                compile_direct_block_send(region, "mrb_obj_value(#{rproc_var})", owner_def, stack_expr: stack_expr)
@@ -1483,7 +1685,11 @@ class CodeGen
              end
     ctor, direct = stack_block_glue(region, rproc_var, ctor, direct) if direct && stack_expr && direct.include?(stack_expr)
     owner_call = nil
-    unless direct || kw
+    if splat
+      ary = "r#{dest_reg + 1}"
+      owner_call = block_owner_call_argv_line("r#{dest_reg}", recv, region[:name], "ary_size(#{ary})", "ary_items(#{ary})",
+                                              "mrb_obj_value(#{rproc_var})")
+    elsif !(direct || kw)
       owner_call = block_owner_call_line("r#{dest_reg}", recv, region[:name], argv, "mrb_obj_value(#{rproc_var})")
       # STATIC_OWNER_ARMS may put compiled arms in front of this owner call; built over the frame, they take the
       # stack block the way a direct call does, and the heap RProc is made only when the owner call runs.
@@ -1509,7 +1715,7 @@ class CodeGen
       args = argv.empty? ? 'NULL' : "bc2cpp_blk_argv_#{region[:block_addr]}"
       out << "#{indent}mrb_value bc2cpp_blk_argv_#{region[:block_addr]}[] = { #{argv.join(', ')} };\n" unless argv.empty?
       name = "mrb_intern_cstr(M, \"#{region[:name]}\")"
-      if PROC_CALL_NAMES.include?(region[:name]) && !kw
+      if PROC_CALL_NAMES.include?(region[:name]) && !kw && !splat
         out << "#{indent}if (mrb_type(#{recv}) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, #{recv}, #{name})) {\n"
         out << "#{indent}  r#{dest_reg} = bc2cpp_yield_argv(M, #{recv}, #{argv.size}, #{args});\n"
         out << "#{indent}} else\n"
@@ -1520,6 +1726,9 @@ class CodeGen
                  "bc2cpp_kd_#{region[:block_addr]}, mrb_obj_value(#{rproc_var}));\n"
              elsif owner_call
                "#{indent}#{owner_call}\n"
+             elsif splat
+               "#{indent}r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, #{name}, ary_size(r#{dest_reg + 1}), " \
+                 "ary_items(r#{dest_reg + 1}), mrb_obj_value(#{rproc_var}));\n"
              else
                "#{indent}r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, #{name}, #{argv.size}, #{args}, " \
                  "mrb_obj_value(#{rproc_var}));\n"
@@ -1823,12 +2032,12 @@ class CodeGen
   # suppress-and-glue pass, used by compile_method and emit_rescue_try_body.
   # Takes recognized region lists (the caller chooses the scope), mutates the
   # caller's suppressed/glue_at, and returns the nested-function pre-code.
-  def emit_block_fallback_glue_pass(block_regions, explicit_arg_regions, d, suppressed, glue_at, irep: nil)
+  def emit_block_fallback_glue_pass(block_regions, explicit_arg_regions, d, suppressed, glue_at, irep: nil, fn_prefix: nil)
     pre = String.new
     block_regions.each do |region|
       next if suppressed.include?(region[:block_addr]) || suppressed.include?(region[:sendb_addr])
 
-      fn_result = emit_proc_fallback_fn(region, d) || step_only_block_fn(region, d)
+      fn_result = emit_proc_fallback_fn(region, d, fn_prefix) || (fn_prefix ? nil : step_only_block_fn(region, d))
       next unless fn_result
 
       fn_name, fn_code = fn_result

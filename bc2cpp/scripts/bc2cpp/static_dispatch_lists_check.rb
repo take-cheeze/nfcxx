@@ -15,7 +15,8 @@
 #   the generator (needs a host mrbc)
 #     - a compiled gem's OUT_SYMBOL with no lists stops emit_owner_registrations, naming the command that makes them;
 #     - with 'none' it registers everything, and with a file the open set applies to a build and the closed set to
-#       the closed one, as the committed lists did.
+#       the closed one, as the committed lists did; a file proven for another world (LISTS_WORLD, `world`) gives the
+#       closed set to that world's build instead, and is verified against that world's digest.
 #
 # Usage: MRBC=path/to/mrbc ruby scripts/bc2cpp/static_dispatch_lists_check.rb
 
@@ -47,6 +48,16 @@ lists = LISTS::Lists.new(open: Set['A#a'], closed: Set['A#a', 'B#b'], core_exclu
 suite.check('a dump parses back to the same lists', LISTS.parse(LISTS.dump(lists)).to_h == lists.to_h)
 suite.check('the closed build takes the closed set, any other build the open one',
             lists.for_build('closed') == lists.closed && lists.for_build('wio') == lists.open)
+# LISTS_WORLD (tools/bc2cpp/lists_world.rb): a file proven for another world gives its closed set to that build alone.
+wio = LISTS::Lists.new(**lists.to_h, world: 'wio')
+suite.check('lists proven for wio give the closed set to wio and the open one to closed',
+            wio.for_build('wio') == wio.closed && wio.for_build('closed') == wio.open)
+suite.check('the world survives a dump, and a closed file names none',
+            LISTS.parse(LISTS.dump(wio)).world == 'wio' && !JSON.parse(LISTS.dump(lists)).key?('world') &&
+              LISTS.parse(LISTS.dump(lists)).world == 'closed')
+suite.check('an unknown world is refused', raises.call(RuntimeError) { ListsWorld.name('BC2CPP_LISTS_WORLD' => 'desktop') })
+suite.check('ListsWorld.use names the world for its block only',
+            ListsWorld.use('wio') { ListsWorld.name({}) } == 'wio' && ListsWorld.name({}) == 'closed')
 LISTS::REQUIRED_KEYS.each do |key|
   broken = JSON.parse(LISTS.dump(lists)).tap { |data| data.delete(key) }
   suite.check("a file without #{key} is refused", raises.call { LISTS.parse(JSON.generate(broken)) })
@@ -75,6 +86,16 @@ Dir.mktmpdir('static_dispatch_lists') do |dir|
   suite.check('a file for this tree is current', StaticDispatchRegistrations.current?(ROOT, dir))
   LISTS.reset!
   suite.check('and verify_current! accepts it', LISTS.verify_current!(LISTS.current(env: { LISTS::PATH_ENV => File.join(dir, 'static_dispatch_lists.json') }), ROOT).nil?)
+
+  # A world's digest is its own: a closed file is not current for wio, and a wio file is verified against the wio
+  # world whatever this run's BC2CPP_LISTS_WORLD.
+  wio_here = ListsWorld.use('wio') { StaticDispatchRegistrations.inputs_digest(ROOT) }
+  suite.check("the wio world's digest is not the closed one's", wio_here != here)
+  suite.check('a closed file is not current for wio', !ListsWorld.use('wio') { StaticDispatchRegistrations.current?(ROOT, dir) })
+  suite.check('a wio file for this tree is verified against the wio world',
+              LISTS.verify_current!(LISTS::Lists.new(**lists.to_h, digest: wio_here, world: 'wio'), ROOT).nil?)
+  suite.check('a wio file with the closed digest is refused',
+              raises.call { LISTS.verify_current!(LISTS::Lists.new(**lists.to_h, digest: here, world: 'wio'), ROOT) })
 end
 
 # A restored prefix cache is only a seed. Its omissions must be replaced by the proof's fixed point.
@@ -228,6 +249,14 @@ Dir.mktmpdir('static_dispatch_lists') do |dir|
                                                               other.include?('vfix_closed_only, MRB_ARGS_NONE())'))
   suite.check('other builds retain listed core Ruby entries', other.include?('vfix_core_only, MRB_ARGS_NONE())'))
   suite.check('other builds retain the compiled replacement of a ROM name', other.include?('vfix_rom_only, MRB_ARGS_NONE())'))
+  data = JSON.parse(File.read(path)).merge('world' => 'wio')
+  File.write(File.join(dir, 'wio.json'), JSON.generate(data))
+  wio_build = generate.call(out_symbol: 'rgss_compiled', build: 'wio', lists_value: File.join(dir, 'wio.json'))
+  suite.check("the build of the lists' world takes their closed-only parts",
+              !wio_build.include?('vfix_closed_only') && !wio_build.include?('vfix_core_only') && wio_build.include?('vfix_kept, MRB_ARGS_NONE())'))
+  closed_given_wio = generate.call(out_symbol: 'rgss_compiled', lists_value: File.join(dir, 'wio.json'))
+  suite.check('and the closed build given them only the open ones',
+              closed_given_wio.include?('vfix_closed_only, MRB_ARGS_NONE())') && closed_given_wio.include?('vfix_core_only, MRB_ARGS_NONE())'))
   fixture = generate.call(out_symbol: 'a_fixture')
   suite.check('a fixture with no lists registers every entry and is not stopped',
               %w[vfix_kept vfix_pruned vfix_closed_only vfix_core_only].all? { |entry| fixture.include?("#{entry}, MRB_ARGS_NONE())") })

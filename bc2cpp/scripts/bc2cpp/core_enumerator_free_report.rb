@@ -34,7 +34,8 @@ result.unproven.each do |u|
 end
 # CORE_FIBER_FREE (tools/bc2cpp/core_fiber_free.rb), which builds on it: no Fiber is made, so the resumable variants go.
 # The left-out core methods are those of the lists BC2CPP_STATIC_DISPATCH_LISTS names, none without it.
-fiber = StaticDispatchRegistrations.fiber_free_proof(-> { result }, StaticDispatchLists.current.core_left_out)
+native = StaticDispatchRegistrations.outside_world_files(root, closed_only: true).last
+fiber = StaticDispatchRegistrations.fiber_free_proof(-> { result }, native, StaticDispatchLists.current.core_left_out)
 puts "fiber-free proof #{fiber.holds ? 'holds' : 'does not hold'}"
 fiber.unproven.each { |why| puts "UNPROVEN fiber: #{why}" }
 exit(result.holds && fiber.holds ? 0 : 1)

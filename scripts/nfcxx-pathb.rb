@@ -7,6 +7,42 @@
 # has the same design for the gcc backend).
 #
 #   ruby scripts/nfcxx-pathb.rb --facts=FILE --backend=default|pathb -- ARG...
+#   ruby scripts/nfcxx-pathb.rb --live=ROOT --tabs --checks --backend=default|pathb -- ARG...
+#                                    --checks: the status rule of each pathb-cc is a CHECK line (the bash's own CHECK, which
+#                                    scripts/nfcxx-run.rb applies), not an EXEC or an exit. Used by scripts/nfcxx.rb.
+#   ruby scripts/nfcxx-pathb.rb --records [--shell] < STATE     the Path B -c route, planned from the driver's state (below)
+#
+# --records (the -c route, CompilePlan): the driver's own values, not the argv. STATE is the record stream of
+# scripts/driver-state.rb (NUL-terminated: "k NAME" starts a group, each "v VALUE" adds one value; state_put writes it). Every
+# group is sent, in any order; a scalar group has exactly one value (an empty one is ""), a list has any number. The groups:
+#   root            ROOT: the repository (scripts/pathb-cc.rb and nfcxx are under it)
+#   backend         the driver's backend: pathb (the route is Path B only; anything else is refused, exit 2)
+#   default_backend 1 when the backend is the default (a failed compile is built again with gcc), 0 for --backend=pathb
+#   compile_only    1 (-c); ncpp  the number of C++ sources (positive: the route is taken only with C++ sources)
+#   outset          1 with -o; out  the -o value, or the one object's name (the driver sets it to <stem>.o without -o)
+#   std             the driver's standard, as it is set (--c++23): pathb-cc gets -std=c++23
+#   srcs            the C++ sources (the .cu inputs are their host copies), one per source
+#   files           the driver's files list after the .cu copies replaced their inputs: the options (-I, -D, -U, -W, ...), the
+#                   inputs and the link files; the planner compiles each input (not an option, .o, .a or .so)
+#   cflags          -I, -D and -U options (as pathb-cc gets them)
+#   pb_flags        the options scripts/pathb-cc.rb gets (--sanitize=, --safe-pointers, --ir-opt=, --asan, --pic, diagnostics)
+#   pb_pre          -include FILE pairs, as the driver builds them from preinc
+#   cuda_opts       the options of a .cu input's host copy (--cuda, ...), from the CUDA device state
+#   modules         1 when a source declares or imports a module (the driver's module scan), else 0
+#   modopts         the module options the driver's plan gives (nfcxx-modopts.rb: --modules and the directory); they go on
+#                   each compile when modules is 1, and must be empty otherwise
+#   nfcxx_argv      the command as the driver got it: the gcc fallback re-runs the driver with it
+#   cache_entry     the compile cache's entry name, "" when the cache does not apply (the driver's cache_check sets it)
+# Output: the RUN and CHECK lines of the compiles, then a STORE line when the cache stores the object (cache_entry, one source).
+# A CHECK line is the rule for the status of the compile before it (the driver evaluates it after each RUN):
+#   CHECK exit                          a nonzero status ends the driver with that status
+#   CHECK gcc BEFORE AFTER ARG...       a nonzero status: the driver prints BEFORE, the status, AFTER (on standard error), then
+#                                       runs ARG... (exec env NFCXX_BACKEND=gcc ROOT/nfcxx ARGS: the program built again with gcc)
+# The default backend takes the gcc form and an explicit --backend=pathb the exit form (the bash's rule, in the planner). The
+# text output is one line per record, its words tab-separated, with the kind first; --shell prints the plan as the statements
+# nfcxx_plan_state=PLAN, nfcxx_plan_kinds=(KIND...), nfcxx_plan_nwords=(N...) and nfcxx_plan_words=(WORD...), every value escaped
+# with Shellwords (the driver evals it: nfcxx_plan_nwords counts the words of each line after its kind).
+# A state the bash never has (a missing group, a value count that is not one for a scalar, backend not pathb) exits 2.
 #
 # --backend is the backend the driver is asked for: default (no --backend and no NFCXX_BACKEND: the driver picks Path B, and
 # a file Path B fails on makes the driver build the program again with gcc), or pathb (--backend=pathb: the status of
@@ -72,6 +108,9 @@
 
 require "open3"
 require "pathname"
+require "shellwords"
+require_relative "driver-state"
+require_relative "nfcxx-objname"
 
 # A construct the port does not cover (exit 3): the bash may do anything with it, so nothing is guessed.
 class NfcxxUnported < StandardError
@@ -219,10 +258,11 @@ end
 class Plan
   attr_reader :lines
 
-  def initialize(facts, choice, args)
+  def initialize(facts, choice, args, checks: false)
     @facts = facts
     @choice = choice
     @args = args
+    @checks = checks  # --checks: each pathb-cc status is a CHECK line for the runner (see check_status)
     @lines = []
     @files = []    # the bash's files: link options, objects, C++ sources, and -c (in order); not C sources
     @cflags = []   # -I, -D, -U (joined), for pathb-cc and the -E preprocess
@@ -251,6 +291,8 @@ class Plan
     @sanitize = nil # the -fsanitize= checks (a comma list), "" after -fno-sanitize=all
     @depmode = nil
     @ir_opt = nil
+    @vec_pb = nil # -ftree-vectorize / -fno-tree-vectorize (the last): pathb-cc.rb --vectorize / --no-vectorize
+    @vec_assoc = false # -fassociative-math (the last): pathb-cc.rb --vectorize-assoc
     @dialect = "g++"
     @dialect_asked = false
     @gnu_user = nil
@@ -398,8 +440,16 @@ class Plan
         @files << x
       elsif x == "-Wno-narrowing"
         @diag << "--diag_warning=narrowing_conversion"
+      elsif x.match?(/\A-g(gdb)?[0-3]?\z/)
+        @files << x
+        @dbg_g = x # also pathb-cc.rb -g: the object's line table (pb_flags)
       elsif x.start_with?("-W") || x == "-w"
         nil # warnings do not change the object code
+      elsif x == "-ftree-vectorize" || x == "-fno-tree-vectorize"
+        @vec_pb = x == "-ftree-vectorize" ? "--vectorize" : "--no-vectorize"
+      elsif x == "-fassociative-math" || x == "-fno-associative-math"
+        # the vectorizer may reassociate float sums (pathb-cc.rb --vectorize-assoc, qbe -F); off by default
+        @vec_assoc = x == "-fassociative-math"
       elsif x.start_with?("-m")
         nil # ISA options: their macros go to the bash's files list and are skipped there, and -fPIC-style picopts are gcc-only
       elsif x == "-MD" || x == "-MMD"
@@ -516,7 +566,7 @@ class Plan
   end
 
   # The options scripts/pathb-cc.rb gets, in the order the bash appends them (pb_flags): --sanitize, --safe-pointers, --ir-opt,
-  # --asan (Path B only), --pic, the EDG diagnostic options, --dialect=clang (only when asked), --gnu-version.
+  # --asan (Path B only), --pic, -g, --vectorize / --no-vectorize, the EDG diagnostic options, --dialect=clang (only when asked), --gnu-version.
   def pb_flags
     f = []
     f << "--sanitize=#{@sanitize}" unless @sanitize.to_s.empty?
@@ -524,6 +574,9 @@ class Plan
     f << "--ir-opt=#{@ir_opt}" unless @ir_opt.nil?
     f << "--asan" if @asan
     f << "--pic" if @pic
+    f << "-g" if @dbg_g && !%w[-g0 -ggdb0].include?(@dbg_g) # -g (the last, unless -g0): the line table
+    f << @vec_pb if @vec_pb
+    f << "--vectorize-assoc" if @vec_assoc
     f.concat(@diag)
     f << "--dialect=clang" if @dialect == "clang" && @dialect_asked
     f << "--gnu-version=#{@gnu_user}" if @gnu_user && !@gnu_user.empty?
@@ -539,14 +592,31 @@ class Plan
   end
 
   # A non-zero pathb-cc status: under the default backend the driver builds the program again with gcc (the EXEC line);
-  # an explicit --backend=pathb ends with that status.
+  # an explicit --backend=pathb ends with that status. With --checks the rule is a CHECK line instead, which the runner
+  # applies to the status it gets (scripts/nfcxx-run.rb): the bash's own rule, the same words as its CHECK.
   def check_status(source, status)
+    if @checks
+      @lines << check_line(source)
+      return
+    end
     return if status.zero?
     exit_with("nfcxx: pathb-cc status #{status} on #{source}", status) unless @default_backend
     warn "nfcxx: Path B did not build #{source} (status #{status}); building the program with the gcc backend, which " \
          "compiles with C semantics (-fwrapv -fno-strict-aliasing)"
     @lines << ["EXEC", "env", "NFCXX_BACKEND=gcc", DRIVER, *@args]
     raise PlanExec
+  end
+
+  # The CHECK line of a compile (--checks): the default backend builds the program again with gcc, the explicit one exits with
+  # the compile's status. The message and the command are the bash's (its C and C++ branches print the same words).
+  def check_line(source)
+    if @default_backend
+      ["CHECK", "gcc", "nfcxx: Path B did not build #{source} (status ",
+       "); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)",
+       "env", "NFCXX_BACKEND=gcc", DRIVER, *@args]
+    else
+      ["CHECK", "exit"]
+    end
   end
 
   # The C sources, each to an object TMP/N.o (N counts the C sources), with the C options of the bash: no -fwrapv, no -include.
@@ -717,6 +787,106 @@ class Plan
   end
 end
 
+# A --records state the driver never sends (a missing group, a scalar without one value, the backend not pathb): exit 2.
+class StateRefusal < StandardError
+end
+
+# The -c route's plan (the header's --records): one pathb-cc call per C++ input of the files list, each followed by its CHECK,
+# then the cache's STORE. The values are the driver's own (its state_put groups): no argument is parsed here.
+class CompilePlan
+  attr_reader :lines
+
+  def initialize(groups)
+    @groups = groups
+    @lines = []
+  end
+
+  def run
+    refuse("backend #{scalar("backend")}: the -c plan is for the Path B route") unless scalar("backend") == "pathb"
+    refuse("the -c plan is for -c with a C++ source") unless scalar("compile_only") == "1" && scalar("ncpp").to_i.positive?
+    modules = scalar("modules")
+    refuse("modules is #{modules}: 0 or 1") unless %w[0 1].include?(modules)
+    refuse("modopts without modules") if modules == "0" && !list("modopts").empty?
+    list("files").each do |f|
+      next if f.start_with?("-") || f.end_with?(".o", ".a", ".so")
+
+      dst = scalar("outset") == "1" ? scalar("out") : NfcxxObjname.object_name(f).to_s
+      @lines << ["RUN", "#{root}/scripts/pathb-cc.rb", *list("pb_flags"), "-std=c++#{scalar("std").delete_prefix("--c++")}",
+                 *list("cflags"), *list("pb_pre"), *list("cuda_opts"), *module_opts, f, "-o", dst]
+      check(f)
+    end
+    @lines << ["STORE", scalar("out")] if !scalar("cache_entry").empty? && list("srcs").size == 1
+  end
+
+  private
+
+  def root
+    scalar("root")
+  end
+
+  # the module options of the compile: the driver's modopts when the module scan found a module (else none)
+  def module_opts
+    scalar("modules") == "1" ? list("modopts") : []
+  end
+
+  # the rule for the status of the compile before it (see the header): the default backend builds the program again with gcc,
+  # an explicit --backend=pathb ends with the status
+  def check(file)
+    if scalar("default_backend") == "1"
+      @lines << ["CHECK", "gcc", "nfcxx: Path B did not build #{file} (status ",
+                 "); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)",
+                 "env", "NFCXX_BACKEND=gcc", "#{root}/nfcxx", *list("nfcxx_argv")]
+    else
+      @lines << ["CHECK", "exit"]
+    end
+  end
+
+  # the one value of a scalar group (a state the driver never sends is refused)
+  def scalar(name)
+    values = list(name)
+    refuse("group #{name} needs one value") unless values.size == 1
+    values[0]
+  end
+
+  # the values of a group (a missing group is refused)
+  def list(name)
+    @groups.fetch(name) { refuse("group #{name} is missing") }
+  end
+
+  def refuse(message)
+    raise StateRefusal, message
+  end
+end
+
+# The --records mode: the state on standard input, the plan on standard output (tab-separated, or with --shell as statements).
+def records_main(argv)
+  shell = argv == ["--shell"]
+  unless argv.empty? || shell
+    warn "usage: nfcxx-pathb.rb --records [--shell] < STATE"
+    return 2
+  end
+  plan = CompilePlan.new(DriverState.read_groups($stdin.binmode.read))
+  plan.run
+  if shell
+    emit_compile_shell(plan.lines)
+  else
+    plan.lines.each { |l| puts l.join("\t") }
+  end
+  0
+rescue StateRefusal, ArgumentError => e
+  warn "nfcxx-pathb: #{e.message}"
+  2
+end
+
+# the --shell output of the records plan (the gcc plan's form): the kinds, the word counts and the words, Shellwords-escaped
+def emit_compile_shell(lines)
+  words = lines.flat_map { |fields| fields.drop(1) }
+  puts "nfcxx_plan_state=PLAN"
+  puts "nfcxx_plan_kinds=(#{lines.map { |fields| Shellwords.escape(fields.first) }.join(" ")})"
+  puts "nfcxx_plan_nwords=(#{lines.map { |fields| fields.size - 1 }.join(" ")})"
+  puts "nfcxx_plan_words=(#{words.map { |w| Shellwords.escape(w) }.join(" ")})"
+end
+
 # The facts of this machine (--live=ROOT): each one is probed when the port asks for it, with the commands the bash runs.
 # Path B's status is not a fact here: every pathb-cc call is planned as succeeding, and the driver (scripts/nfcxx.rb) builds the
 # program again with the bash when one fails. Anything the live facts do not model is unported.
@@ -790,12 +960,18 @@ class LiveFacts < Facts
     when "qbe" then File.executable?(File.join(@root, "build/qbe/qbe")) ? "1" : "0"
     when "libc-a" then File.file?(File.join(@root, "build/edg/lib/libC.a")) ? "1" : "0"
     when "pathb-ldrt" then script_output("scripts/pathb-ldrt.rb", require_success: true)
-    when "ehshim" then script_output("scripts/ehshim.rb", require_success: true)
+    # a harness with exception tables (eh-tables beside its cpfe, scripts/setup-pathb.sh) links libstdc++'s EH runtime: no shim
+    when "ehshim" then pathb_eh_tables? ? "" : script_output("scripts/ehshim.rb", require_success: true)
     when "asan-vla" then script_output("scripts/asan-vla.rb", require_success: true)
     when "safeptr-rt" then script_output("scripts/safeptr-rt.rb", require_success: false)
     when "cuda-cub" then script_output("scripts/cuda-cub.rb", require_success: true)   # the CUB archive, or no path (no line)
     else unported("#{key} is not in the live facts")
     end
+  end
+
+  def pathb_eh_tables?
+    cpfe = ENV["PATHB_CPFE"].to_s.empty? ? File.join(@root, "build/pathb/cmake/bin/cpfe") : ENV["PATHB_CPFE"]
+    File.file?(File.join(File.dirname(cpfe), "eh-tables"))
   end
 
   def script_output(script, require_success:)
@@ -809,9 +985,12 @@ class LiveFacts < Facts
 end
 
 def main(argv)
+  return records_main(argv.drop(1)) if argv.first == "--records"
+
   facts_path = nil
   choice = "default"
   tabs = false
+  checks = false
   live = nil
   i = 0
   while i < argv.size && argv[i] != "--"
@@ -822,6 +1001,8 @@ def main(argv)
       live = a.delete_prefix("--live=")
     elsif a == "--tabs"
       tabs = true
+    elsif a == "--checks"
+      checks = true
     elsif a.start_with?("--backend=")
       choice = a.delete_prefix("--backend=")
     else
@@ -838,7 +1019,7 @@ def main(argv)
 
   begin
     facts = live ? LiveFacts.new(live, Dir.pwd) : Facts.load(facts_path)
-    plan = Plan.new(facts, choice, fsyntax_only_args(args))
+    plan = Plan.new(facts, choice, fsyntax_only_args(args), checks: checks)
     plan.run
     plan.lines.each { |l| puts(tabs ? l.join("\t") : l.join(" ")) }
     puts "STATUS 0" unless tabs

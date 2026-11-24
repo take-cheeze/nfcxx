@@ -44,6 +44,12 @@ module NfcxxSetup
     io.string
   end
 
+  # the values of the default step's statements (backend, default_backend, pb_fs_host), unquoted as the shell reads them
+  def default_values(text)
+    words = Shellwords.split(text).to_h { |kv| kv.split("=", 2) }
+    words.values_at("backend", "default_backend", "pb_fs_host")
+  end
+
   # the words of a bash array the planners print, as "NAME=(...)" (mode "=") or "NAME+=(...)" (mode "+="); [mode, words]
   def array_words(text, name)
     text.each_line do |line|
@@ -58,7 +64,7 @@ module NfcxxSetup
     case step
     when "default"
       backend, default_backend, pb_fs = NfcxxBackend.default_choice(opts)
-      "backend=#{backend} default_backend=#{default_backend} pb_fs_host=#{pb_fs}\n"
+      "backend=#{Shellwords.escape(backend)} default_backend=#{default_backend} pb_fs_host=#{pb_fs}\n"
     when "asan"
       asan = opts.fetch("asan", "")
       backend = opts.fetch("backend", "")
@@ -121,7 +127,7 @@ module NfcxxSetup
     # 1. the default backend: sets backend, default_backend and pb_fs_host
     text = run("default", state, env)
     record.("default", text)
-    state["backend"], state["default_backend"], state["pb_fs_host"] = text.scan(/(\S+)=(\S+)/).map(&:last)
+    state["backend"], state["default_backend"], state["pb_fs_host"] = default_values(text)
 
     # 2. the sanitizer, which reads the backend the default chose
     record.("asan", run("asan", state, env))
@@ -220,7 +226,7 @@ module NfcxxSetup
     flag = ->(k) { state.fetch(k, "0") == "1" }
     out = +""
     out << run("default", state, env)
-    state["backend"], state["default_backend"], state["pb_fs_host"] = out.scan(/(\S+)=(\S+)/).map(&:last)
+    state["backend"], state["default_backend"], state["pb_fs_host"] = default_values(out)
     out << run("asan", state, env)
     out << run("instantiate", state, env)
     out << run("cosmo", state, env) if flag.("cosmo")
@@ -245,7 +251,7 @@ module NfcxxSetup
 
   # The backend stage after the planners and the emit-C path (bash: the sanitizer, -fsafe-pointers and the Path B override):
   # the refusals first, in the bash's order, then the statements that set pb_flags and backend. The sanitizer's check is the
-  # one scripts/nfcxx-sanitize.rb makes (its message and status 2). The text is eval'd by the driver, where the bash ran them.
+  # one scripts/nfcxx-sanitize.rb makes (its message and status 2). The body evals the text, where the bash ran them.
   def stage_text(opts)
     out = +""
     sanitize = opts.fetch("sanitize", "")
@@ -298,8 +304,9 @@ module NfcxxSetup
     opts.map { |w| w + "\0" }.join
   end
 
-  # The Path B option statements after the override (bash: the pb_flags lines and the backend environment, in this order). Every
-  # condition is the bash's; the backend environment comes last, as it reads the final backend. No statement here refuses.
+  # The Path B option statements after the override (bash: the pb_flags lines, from the --ir-opt line to the --freestanding line).
+  # Every condition is the bash's. The backend environment is a step of its own (run "backend_env"), which the body evals after
+  # these. No statement here refuses.
   def flags_text(opts, env = ENV)
     out = +""
     flag = ->(k) { opts.fetch(k, "0") == "1" }
@@ -309,6 +316,7 @@ module NfcxxSetup
     pb.("--ir-opt=#{opts["ir_opt"]}") if flag.("ir_opt_set")
     pb.("--asan") if flag.("asan") && backend == "pathb"
     pb.("--pic") if flag.("pic")
+    pb.("--vectorize-assoc") if flag.("vec_assoc") && backend == "pathb"
     diag = opts.fetch("diag_opts", "").split("\x1f", -1).reject(&:empty?)
     pb.(*diag) unless diag.empty?
     pb.("--dialect=clang") if backend == "pathb" && opts.fetch("dialect", "") == "clang" && !opts.fetch("dialect_asked", "").empty?
@@ -317,8 +325,98 @@ module NfcxxSetup
     if backend == "pathb" && freestanding != "0"
       pb.("--freestanding", "--eh-runtime", "--gnu-version=#{opts["gnu"]}", "-I#{opts["root"]}/lib")
     end
-    out << text_of(NfcxxBackendEnv.plan(opts))
     out
+  end
+
+  # The trace unit's statements (bash: trace_unit=${srcs[0]-$out}; export NFCXX_TRACE_UNIT=$trace_unit): the first source, else the
+  # output. The body evals them where the bash assigned it, before trace_begin.
+  def trace_unit_text(srcs, out)
+    unit = srcs.empty? ? out : srcs.first
+    word = Shellwords.escape(unit)
+    "trace_unit=#{word}; export NFCXX_TRACE_UNIT=#{word}\n"
+  end
+end
+
+module NfcxxSetup
+  module_function
+
+  # the NAME=VALUE statements of a planner's text, as the value the shell reads (the last one of each NAME in NAMES)
+  def assigned(text, names)
+    values = {}
+    text.each_line do |raw|
+      line = raw.chomp # a line keeps its newline, which the anchored match below must not see
+      m = line.match(/\A(#{names.map { |n| Regexp.escape(n) }.join("|")})=(.*)\z/) or next
+      values[m[1]] = Shellwords.split(m[2]).first.to_s
+    end
+    values
+  end
+
+  # the NAME=VALUE words of a planner's export lines, as the value the shell exports (a value with a shell expansion is not one:
+  # the target's EDG_CPFE_DEFAULT_OPTIONS line is left to the body)
+  def exports_of(text)
+    vars = {}
+    text.each_line do |line|
+      next unless line.start_with?("export ")
+
+      Shellwords.split(line.delete_prefix("export ")).each do |w|
+        name, value = w.split("=", 2)
+        vars[name] = value if value && !value.include?("$") && name.match?(/\A\w+\z/)
+      end
+    end
+    vars
+  end
+
+  # The setup's rest, in the bash's order (the body's block from the template instantiation to the target, and the export
+  # of EDG_CPFE_DEFAULT_OPTIONS): instantiation, --cosmo, the freestanding or hosted headers, the host cflags, the GNU options,
+  # --target=linux_k1om, --target. The hosted headers' probe is timed here and its span is left to the body (setup_span_start
+  # and setup_span_stop are its statements), so a span is recorded only by a body that reaches the setup.
+  # Returns [text, status, message, state]: text holds the statements up to the first refusal, which the body evals before it prints
+  # the message and exits with the status (status 0 and "" when nothing is refused); state is the options after those statements
+  # (backend, gnu and the gnu_opts array). The bash variables are the names.
+  def rest(opts, env = ENV)
+    state = opts.dup
+    flag = ->(k) { state.fetch(k, "0") == "1" }
+    out = +""
+    # the environment the later steps see: the variables a step exports (the bash exports them when it runs), e.g. the
+    # --cosmo's NFCXX_SYS_INCLUDES, which the host's include probe reads
+    penv = env.to_h
+    # the statements of a planner step: its text is kept, and the variables the next steps read are taken from it
+    step = lambda do |name, text|
+      out << text
+      state.merge!(assigned(text, %w[backend gnu])) if %w[cosmo freestanding k1om].include?(name)
+      penv = penv.merge(exports_of(text)) if %w[cosmo k1om].include?(name)
+    end
+    begin
+      step.("instantiate", run("instantiate", state, penv))
+      step.("cosmo", run("cosmo", state, penv)) if flag.("cosmo")
+
+      if state.fetch("freestanding", "0") == "1"
+        step.("freestanding", NfcxxFreestanding.plan(state, penv).map { |l| "#{l}\n" }.join)
+      else
+        start = NfccxxTrace.now_us
+        includes = NfcxxFreestanding.includes(state, penv).map { |l| "#{l}\n" }.join
+        stop = NfccxxTrace.now_us
+        out << "setup_span_start=#{start} setup_span_stop=#{stop}\n"
+        out << includes
+        step.("freestanding", NfcxxFreestanding.gnu_line(state, penv).map { |l| "#{l}\n" }.join)
+      end
+
+      step.("host_cflags", run("host_cflags", state, penv))
+
+      gnu_text = run("gnu_opts", state, penv)
+      out << gnu_text
+      state["gnu_opts"] = array_words(gnu_text, "gnu_opts")[1].join("\x1f")
+
+      step.("k1om", run("k1om", state, penv))
+
+      target_text = run("target", state, penv)
+      out << target_text
+      mode, words = array_words(target_text, "gnu_opts")
+      state["gnu_opts"] = [state.fetch("gnu_opts", ""), *words].reject(&:empty?).join("\x1f") if mode == "+="
+    rescue Refusal => e
+      return [out, e.status, "#{e.message}\n", state]
+    end
+    [out, 0, "", state]
   end
 end
 
@@ -347,6 +445,13 @@ if $PROGRAM_NAME == __FILE__
       exit e.status
     end
     exit 0
+  end
+  if ARGV.first == "rest"
+    opts = NfcxxSetup.options(ARGV.drop(1))
+    text, status, message = NfcxxSetup.rest(opts, ENV)
+    $stdout.write(text)
+    $stderr.write(message)
+    exit status
   end
   if ARGV.first == "cache-opts"
     $stdout.binmode.write(NfcxxSetup.cache_opts(NfcxxSetup.options(ARGV.drop(1))))

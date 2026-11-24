@@ -260,6 +260,12 @@ def host_clang_version(facts)
   facts.value("clang-version") || (facts.live? ? nil : "200000")
 end
 
+# the host is macOS: the uname fact when the facts have it, else the Ruby host (the driver's facts may have no uname)
+def darwin_host?(facts)
+  uname = facts.value("uname")
+  uname.nil? ? RbConfig::CONFIG["host_os"].include?("darwin") : uname == "Darwin"
+end
+
 # pb_fs_host: Path B compiles freestanding programs on this host (x86-64 and aarch64 Linux, arm64 macOS)
 def pb_fs_host?(facts)
   (PATHB_FS_MACHINES[facts.value("uname")] || []).include?(facts.value("machine"))
@@ -409,7 +415,10 @@ def pathb_plan(o, facts, env, dialect, gnu)
       lines += run_lines(env, "#{ROOT}/scripts/pathb-cc.rb", common + [f, "-o", obj])
       pobjs << obj
     end
-    link = ["-o", o[:out]] + pobjs + ["#{ROOT}/#{ldrt}", EDG_LIBC, "-lpthread", "-lm"]
+    # on macOS the tables' personality (__gxx_personality_v0, libc++abi's) is a dylib symbol: the Linux link gets it from
+    # the libstdc++ that pathb-ldrt.rb's INPUT script names, which ld64 cannot read, so the library is named here
+    cxx = darwin_host?(facts) ? ["-lc++"] : []
+    link = ["-o", o[:out]] + pobjs + ["#{ROOT}/#{ldrt}"] + cxx + [EDG_LIBC, "-lpthread", "-lm"]
     lines += run_lines(env, "cc", link)
   end
   lines + [["STATUS", "0"]]

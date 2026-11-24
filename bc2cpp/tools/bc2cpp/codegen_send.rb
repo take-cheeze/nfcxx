@@ -1,12 +1,14 @@
 # frozen_string_literal: true
 
 require 'strscan'
+require_relative 'int_box_outline'
 require_relative 'branch_hints'
 require_relative 'reg_name'
 require_relative 'tagged_fixnum'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 require_relative 'class_world_gate'
+require_relative 'program_class_slots'
 
 # CodeGen: compile_send and const/owner caches.
 require_relative 'strict_hints'
@@ -165,7 +167,7 @@ class CodeGen
       return "  // IO_PUTS_MODEL: shared bc2cpp_io_puts; exact core IO#puts body, else dispatch by name.\n" \
              "  {\n" \
              "#{args_decl}" \
-             "    #{RegName[d]} = bc2cpp_io_puts(M, #{recv}, mrb_intern_lit(M, \"puts\"), #{n}, #{direct_argv});\n" \
+             "    #{RegName[d]} = bc2cpp_io_puts(M, #{recv}, mrb_intern_lit(M, \"puts\"), #{n}, #{direct_argv}, self);\n" \
              "  }\n"
     end
 
@@ -341,12 +343,14 @@ class CodeGen
           if native_param_unbox_name?('_init_size')
             # Bitmap#initialize branches on `f.kind_of? String` (a dispatched test), so only the first argument keeps
             # its tag test; _init_size then converts both as "ii".
-            arg_checks = native_int_arg_proven?(*int_site, argv, 0) ? '' : "mrb_integer_p(#{argv[0]})"
-            unbox_stmts, unboxed_argv = native_param_unbox_args(d, argv, [:int] * argv.size, unboxed: [0])
+            first_proven = native_int_arg_proven?(*int_site, argv, 0)
+            arg_checks = first_proven ? '' : "mrb_integer_p(#{argv[0]})"
+            unbox_stmts, unboxed_argv = native_param_unbox_args(d, argv, [:int] * argv.size, unboxed: [0],
+                                                                fixnum: first_proven ? [0] : [])
           else
-            arg_checks = argv.each_index.reject { |i| native_int_arg_proven?(*int_site, argv, i) }
-                             .map { |i| "mrb_integer_p(#{argv[i]})" }.join(' && ')
-            unboxed_argv = argv.map { |a| "mrb_integer(#{a})" }
+            proven_args = argv.each_index.select { |i| native_int_arg_proven?(*int_site, argv, i) }
+            arg_checks = (argv.each_index.to_a - proven_args).map { |i| "mrb_integer_p(#{argv[i]})" }.join(' && ')
+            unboxed_argv = argv.each_with_index.map { |a, i| "#{native_int_read(proven_args.include?(i))}(#{a})" }
           end
           arg_checks = nil if arg_checks.empty?
           guard = [class_guard, arg_checks].compact.join(' && ')
@@ -508,6 +512,9 @@ class CodeGen
         # the sound and small answer: such a class keeps its dynamic dispatch
         # until a path that unboxes properly exists.
         arity_ok &&= native_arg_types(init_def, t_mand).all? { |ty| ty.nil? } if arity_ok
+        # An #initialize whose `_impl` takes the call's block (a yield, block_given? or SUPER_FRAME_BLOCK) is reached
+        # through Class#new, which hands it the block; this positional call has no block argument to give.
+        arity_ok &&= !takes_block_param?(init_irep) if arity_ok
         if no_custom_new && no_custom_allocate && arity_ok
           # 4: the ONLY_OWNERS/OTHER_OWNERS emission guard.
           owner_emitted = !@only_owners || @only_owners.include?(known) || @other_owners&.include?(known)
@@ -927,7 +934,7 @@ class CodeGen
       CPP
     end
 
-    if name == 'push' && n == 1 && builtin_class_send_safe?(name, %w[Array])
+    if name == 'push' && n == 1 && builtin_class_send_safe?(name, %w[Array]) && !self_never_array?(self_implicit, irep, new_proof_idx)
       value = argv.first
       exact_push = exact_array_push_code(irep, new_proof_idx, new_proof_reg, self_implicit, name, d, recv, value)
       return exact_push if exact_push
@@ -1189,6 +1196,8 @@ class CodeGen
       singleton_candidate = lex_owner.nil? && lexical_self_singleton_def(name, owner_def)
       if target.nil? && (lex_owner || singleton_candidate)
         lex_candidate = singleton_candidate || @registry[name]&.find { |md| md.owner == lex_owner }
+        # PREPENDED_OVERRIDE: a module prepended to the owner answers before its own definition.
+        lex_candidate = nil if lex_candidate && prepended_override?(lex_candidate.owner, name)
         if direct_callable?(lex_candidate, n)
           target = lex_candidate
           lexical_self = true
@@ -1391,6 +1400,11 @@ class CodeGen
       target = nil unless @other_owners&.include?(target.owner) || module_function_emitted
     end
 
+    # INSTALLED_NAME_DEVIRT_GUARD: a name the program aliases or defines outside the registry (an alias in mruby's own Ruby
+    # included: mruby-onig-regexp replaces String#gsub) may no longer run the registry body, whatever the receiver's
+    # class; a class guard (TYPED) or an exactness proof (EXACT_TYPED) cannot see that.
+    target = nil if target && installed_name_blocks_devirt?(name)
+
     # EXPLICIT_RECEIVER_VISIBILITY: a direct `_impl` call would run a private or protected method that OP_SEND raises for;
     # only a public def whose visibility nothing in the program changes is bound, the rest keeps the checked dispatch.
     unless self_implicit || explicit_call_visible?(name, target)
@@ -1560,9 +1574,33 @@ class CodeGen
           "    #{fallback}" \
           "  }\n"
       else
-        # target.owner embeds no ivar, so its GETIV/SETIV never cast DATA_PTR(self); a
-        # wrong receiver is only semantically wrong, as unguarded MONO always was. No
-        # guard.
+        # target.owner embeds no ivar, so a wrong receiver is no memory hazard, but it still
+        # must raise: see MONO_RECEIVER_PROOF.
+        call = "#{RegName[d]} = #{impl}(M, #{([recv] + call_argv).join(', ')});"
+        proof = mono_receiver_proof(name, target, recv: recv, self_implicit: self_implicit, owner_def: owner_def,
+                                    irep: irep, idx: guard_proof_site, reg: drawing_proof_reg)
+        nil_arm = proof == :nilable && mono_nil_arm(d, recv, name, argv)
+        if nil_arm
+          return "  // MONO_NILABLE :#{name} -> #{target.owner}##{target.name} (receiver nil or proven to reach " \
+                 "#{target.owner}), nil test then direct C++ call#{native_note}\n" \
+                 "  if (mrb_nil_p(#{recv})) {\n    #{nil_arm}  } else {\n    #{call}\n  }\n"
+        end
+        unless proof == :proven
+          cw_site = closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx,
+                                      trace_insn: insn, trace_reg_offset: trace_reg_offset)
+          unless mono_guardable_owner?(target.owner)
+            # guarded_fallback_line's proofs read `listed` as the classes a guard took out; with no guard the
+            # receiver may still reach target, so only the plain send is right.
+            return "  // MONO_UNPROVEN :#{name} -> #{target.owner}##{target.name} (no class to guard), by-name send\n" \
+                   "  #{dynamic_dispatch_line(d, recv, name, argv)}"
+          end
+          check, listed = mono_receiver_check(target.owner, recv)
+          fallback = guarded_fallback_line(d, recv, name, argv, listed, cw_site)
+          return "  // MONO_GUARD :#{name} -> #{target.owner}##{target.name} (receiver unproven), " \
+                 "runtime-class-checked direct C++ call, by-name send fallback#{native_note}\n" \
+                 "  if (#{BranchHints.likely(check)}) {\n    #{call}\n" \
+                 "  } else {\n    #{fallback}  }\n"
+        end
         note = "  // MONO :#{name} -> #{target.owner}##{target.name}, direct C++ call (no by-name send)" \
                "#{native_note}\n"
         # PROVEN_MISS: MONO trusts the name alone, so a receiver proven to be another class
@@ -1638,7 +1676,7 @@ class CodeGen
                         end
                       end
         if exact_entry
-          expression = exact_entry[:expression].gsub('recv', recv)
+          expression = IntBoxOutline.size_boxed(exact_entry[:expression]).gsub('recv', recv)
           expression = expression.gsub('BC2CPP_ARG0', argv.fetch(0)) if exact_entry[:arity] == 1
           return "  // CLOSED_WORLD_NATIVE_EXACT :#{name} -> #{known_class} native body; " \
                  "fresh exact-class receiver, no dispatch fallback\n" \
@@ -1781,6 +1819,15 @@ class CodeGen
     end
   end
 
+  # SELF_NOT_ARRAY: the class flow proves an implicit receiver is no Array, so the ARRAY_PUSH arm is dead and the send
+  # takes the ordinary self-call path. BC2CPP_SELF_NOT_ARRAY=0 keeps the arm.
+  def self_never_array?(self_implicit, irep, idx)
+    return false unless self_implicit && irep && idx && ENV['BC2CPP_SELF_NOT_ARRAY'] != '0'
+
+    mask = exact_flow_mask(irep, idx, 0)
+    !mask.nil? && mask.positive? && (mask & (NumericFlow::ARR | NumericFlow::OTHER)).zero?
+  end
+
   # The argument list of a direct `_impl` call to `target` and the note naming
   # any unboxed positions.
   def direct_call_args(target, argv, impl)
@@ -1798,7 +1845,7 @@ class CodeGen
     call_argv = Array.new(argv.size) do |i|
       a = argv[i]
       case call_types[i]
-      when :fixnum then "mrb_as_int(M, #{a})"
+      when :fixnum then fixnum_arg_unbox?(a) ? "mrb_fixnum(#{a})" : "mrb_as_int(M, #{a})"
       when :symbol then "mrb_obj_to_sym(M, #{a})"
       else a
       end
@@ -1816,6 +1863,17 @@ class CodeGen
                                                   "#{native_positions.join(', ')} unboxed here to match " \
                                                   "#{impl}'s own native argument type)"
     [call_argv, native_note]
+  end
+
+  # FIXNUM_ARG_UNBOX: a NATIVE_ARGS position holds a Fixnum at every SEND site of the name (ENTRY_ARG_CALLSITE_PROOF
+  # rule 9), so a site register passed there reads with mrb_fixnum. Any other expression (a C local of a helper arm)
+  # keeps mrb_as_int. BC2CPP_FIXNUM_ARG_UNBOX=0 keeps mrb_as_int everywhere.
+  def fixnum_arg_unbox?(arg)
+    fixnum_arg_unbox_on? && arg.match?(/\Ar\d+\z/)
+  end
+
+  def fixnum_arg_unbox_on?
+    ENV['BC2CPP_FIXNUM_ARG_UNBOX'] != '0'
   end
 
   # Prove the first implementation in a receiver's inherited lookup chain. An
@@ -1841,6 +1899,12 @@ class CodeGen
   def closed_world_lookup_target(name, owner, active, self_call: false, any_visibility: false)
     return [nil, false] unless active.add?(owner)
     return [nil, false] if @unknown_mixins.include?(owner)
+
+    # MIXIN_ORDER_UNKNOWN: @prepended_modules / @included_modules list a class's mixins in the order the generator read
+    # their sites, which is the run-time order only within one file; across files it follows the require graph. With two
+    # or more of them defining the name, which one answers first is not known here, so the lookup is unknown.
+    return [nil, false] if mixins_defining(name, @prepended_modules[owner]) > 1 ||
+                           mixins_defining(name, @included_modules[owner]) > 1
 
     Array(@prepended_modules[owner]).reverse.each do |mod|
       return [nil, false] unless @closed_world.stable_constant_identity?(mod)
@@ -1880,6 +1944,23 @@ class CodeGen
     return [nil, true] if superclass.nil?
 
     closed_world_lookup_target(name, superclass, active, self_call: self_call, any_visibility: any_visibility)
+  end
+
+  # MIXIN_ORDER_UNKNOWN: how many of +mods+ define +name+, themselves or through the modules they include or prepend.
+  def mixins_defining(name, mods)
+    Array(mods).count do |mod|
+      seen = Set.new
+      work = [mod]
+      found = false
+      until work.empty? || found
+        m = work.pop
+        next unless seen.add?(m)
+
+        found = @registry.fetch(name, []).any? { |definition| definition.owner == m }
+        work.concat(Array(@included_modules[m])).concat(Array(@prepended_modules[m]))
+      end
+      found
+    end
   end
 
   # DIRECT_CALLABLE: can a call with `n` positional arguments reach `definition`'s compiled `_impl` as a
@@ -1995,7 +2076,7 @@ class CodeGen
     return nil unless map && !map.computed_unknown && map.refusals[:native_prepend].to_i.zero?
 
     owners = Array(map.by_name['initialize'])
-    return nil if owners.include?(NativeOwnerMap::UNKNOWN)
+    return nil if owners.include?(NativeOwnerMap::UNKNOWN) || owners.include?(NativeOwnerMap::UNKNOWN_CLASS_TABLE)
 
     owners.to_set
   end
@@ -2003,6 +2084,7 @@ class CodeGen
   def closed_world_exact_target(name, receiver_class, accessor: false)
     return nil unless @closed_world&.stable_class_constant?(receiver_class)
     return nil unless call_facts_enabled? && call_facts_answers.resolves_in_ruby?(receiver_class, name)
+    return nil if singleton_tainted_for?(receiver_class, [name])
     return nil if devirt_blocked_name?(name)
     # A different class body can install this instance name after its `def` is scanned.
     installed = symbol_installed_names
@@ -2034,9 +2116,13 @@ class CodeGen
   # "::"). Used only in guard conditions. Uses lexical_scope_path, stripping a
   # ".singleton" suffix (see there), although TYPED owners are never
   # `.singleton` today.
+  # PRESYM_OWNERS (BC2CPP_PRESYM_OWNERS=0 turns it off): under ROM_METHOD_TABLES, whose presym scan reads the
+  # generated sources, a segment is its presym id instead of a string interned at run time.
   def const_chain_value_expr(owner)
+    presym = rom_method_tables? && ENV['BC2CPP_PRESYM_OWNERS'] != '0'
     lexical_scope_path(owner).reduce('mrb_obj_value(M->object_class)') do |expr, seg|
-      "mrb_const_get(M, #{expr}, mrb_intern_cstr(M, \"#{seg}\"))"
+      key = presym && presym_key(seg)
+      "mrb_const_get(M, #{expr}, #{key || "mrb_intern_cstr(M, \"#{seg}\")"})"
     end
   end
 
@@ -2075,8 +2161,34 @@ class CodeGen
   # The cache getter itself, for a table that stores it (POLY_TABLE).
   def owner_class_fn_name(owner)
     @owner_class_cache ||= {}
-    slot = (@owner_class_cache[owner] ||= { index: @owner_class_cache.size })
+    slot = (@owner_class_cache[owner] ||= { index: owner_class_index(owner) })
     slot[:name] ||= "bc2cpp_owner_class_#{slot[:index]}".freeze
+  end
+
+  # PROGRAM_CLASS_SLOTS: an owner's rank in the program's universe, else the next slot of the gem's own (after the
+  # universe). Without it, the next slot of the gem's table.
+  def owner_class_index(owner)
+    universe = @program_class_universe
+    return @owner_class_cache.size unless universe
+
+    at = universe.bsearch_index { |o| o >= owner }
+    return at if at && universe[at] == owner
+
+    universe.size + (@owner_class_extras = (@owner_class_extras || 0) + 1) - 1
+  end
+
+  # The slot `i` (a C++ expression) of the owner-class table, as an lvalue.
+  def owner_slot_ref(i)
+    @program_class_universe ? "bc2cpp_owner_class_slot(#{i})" : "bc2cpp_owner_class_slots[#{i}]"
+  end
+
+  # The owner a slot index names, for every slot 0...n of the table (PROGRAM_CLASS_SLOTS fills the universe's).
+  def owner_class_table_owners(entries)
+    by_index = entries.to_h { |owner, slot| [slot[:index], owner] }
+    universe = @program_class_universe
+    return by_index.sort.map(&:last) unless universe
+
+    universe + (universe.size...universe.size + (@owner_class_extras || 0)).map { |i| by_index.fetch(i) }
   end
 
   # File-scope cache emitted ahead of the compiled bodies. A static per owner,
@@ -2090,21 +2202,20 @@ class CodeGen
   # is not noticed (as with g_direct_construct_*).
   def emit_owner_class_cache
     entries = (@owner_class_cache || {}).to_a
+    # CLOSED_WORLD: a guard whose else arm raises must name exactly the class
+    # the registry means, never a same-named constant found through ancestry.
+    defined = @closed_world ? 'mrb_const_defined_at' : 'mrb_const_defined'
     out = +"// OWNER_CLASS_CACHE -- see bc2cpp.rb's own owner_class_ptr_expr comment.\n"
-    out << "static mrb_state* bc2cpp_owner_class_state = nullptr;\n"
-    out << "static struct RClass* bc2cpp_owner_class_slots[#{[entries.size, 1].max}] = {};\n"
+    state, clear = emit_owner_class_table(entries, defined, out)
     memo = poly_table_memo_decl
     out << memo
     out << "static void bc2cpp_reset_owner_classes() {\n" \
-           "  bc2cpp_owner_class_state = nullptr;\n" \
-           "  for (struct RClass*& c : bc2cpp_owner_class_slots) c = nullptr;\n" \
+           "  #{state} = nullptr;\n" \
+           "#{clear}" \
            "#{memo.empty? ? '' : "  for (bc2cpp_poly_memo& m : bc2cpp_poly_memos) m = {};\n"}" \
            "}\n"
-    out << vm_cache_bind('bc2cpp_owner_class_bind', 'bc2cpp_owner_class_state', 'OWNER_CLASS_CACHE')
+    out << vm_cache_bind('bc2cpp_owner_class_bind', state, 'OWNER_CLASS_CACHE')
     unless entries.empty?
-      # CLOSED_WORLD: a guard whose else arm raises must name exactly the class
-      # the registry means, never a same-named constant found through ancestry.
-      defined = @closed_world ? 'mrb_const_defined_at' : 'mrb_const_defined'
       out << <<~CPP
         [[gnu::noinline]] static struct RClass* bc2cpp_owner_class_lookup(mrb_state* M, const char* const* path, int n) {
           bc2cpp_owner_class_bind(M);
@@ -2118,21 +2229,125 @@ class CodeGen
         }
       CPP
     end
+    return out + emit_owner_class_fuse(entries) if class_test_fuse? && !entries.empty?
+
     entries.each do |owner, slot|
       i = slot[:index]
       path = lexical_scope_path(owner)
       out << <<~CPP
         static inline struct RClass* bc2cpp_owner_class_#{i}(mrb_state* M) {
-          struct RClass* c = bc2cpp_owner_class_slots[#{i}];
+          struct RClass* c = #{owner_slot_ref(i)};
           if (!c) {
             static const char* const path[] = {#{path.map { |seg| "\"#{seg}\"" }.join(', ')}};
-            c = bc2cpp_owner_class_slots[#{i}] = bc2cpp_owner_class_lookup(M, path, #{path.size});
+            c = #{owner_slot_ref(i)} = bc2cpp_owner_class_lookup(M, path, #{path.size});
           }
           return c;
         }
       CPP
     end
     out
+  end
+
+  # The slot table's declarations into `out`; returns its VM variable and the reset's clearing lines. With
+  # PROGRAM_CLASS_SLOTS (a gem that tests any owner) the universe's slots are the program's (program_class_slots.rb)
+  # and only the gem's extra owners keep slots of its own.
+  def emit_owner_class_table(entries, defined, out)
+    unless @program_class_universe && !entries.empty?
+      out << "static mrb_state* bc2cpp_owner_class_state = nullptr;\n"
+      out << "static struct RClass* bc2cpp_owner_class_slots[#{[entries.size, 1].max}] = {};\n"
+      out << "static inline struct RClass*& bc2cpp_owner_class_slot(int i) { return bc2cpp_owner_class_slots[i]; }\n" if @program_class_universe
+      return ['bc2cpp_owner_class_state', "  for (struct RClass*& c : bc2cpp_owner_class_slots) c = nullptr;\n"]
+    end
+
+    universe = @program_class_universe
+    digest, include = ProgramClassSlots.include_line(universe, defined)
+    slots = ProgramClassSlots.slots_name(digest)
+    extras = @owner_class_extras || 0
+    out << include
+    clear = +"  for (struct RClass*& c : #{slots}) c = nullptr;\n"
+    if extras.zero?
+      out << "static inline struct RClass*& bc2cpp_owner_class_slot(int i) { return #{slots}[i]; }\n"
+    else
+      gem_owners = owner_class_table_owners(entries).drop(universe.size)
+      out << "// PROGRAM_CLASS_SLOTS: the gem's own slots: #{gem_owners.join(', ')}\n"
+      out << "static struct RClass* bc2cpp_owner_class_xslots[#{extras}] = {};\n"
+      out << "static inline struct RClass*& bc2cpp_owner_class_slot(int i) {\n" \
+             "  return i < #{universe.size} ? #{slots}[i] : bc2cpp_owner_class_xslots[i - #{universe.size}];\n" \
+             "}\n"
+      clear << "  for (struct RClass*& c : bc2cpp_owner_class_xslots) c = nullptr;\n"
+    end
+    [ProgramClassSlots.state_name(digest), clear]
+  end
+
+  # CLASS_TEST_FUSE: a getter per owner made each guard two calls (the getter -Os keeps out of line, then
+  # bc2cpp_class_is). Here bc2cpp_owner_class_N(M) is a bc2cpp_owner_ref naming slot N: passed to bc2cpp_class_is it
+  # selects the overload that makes one indexed call (bc2cpp_is_owner, the same slot fill then the same test), and
+  # anywhere else it converts to the RClass* the slot holds, filled by the same lookup. The generated text is unchanged.
+  def class_test_fuse?
+    ClassTestFuse.enabled?
+  end
+
+  # The fuse-mode slot getters (class_test_fuse?). The path arrays keep `bc2cpp_owner_class_path_N` names, which
+  # StaticDispatchRegistrations#guarded_owner_calls reads back.
+  def emit_owner_class_fuse(entries)
+    out = +"// CLASS_TEST_FUSE -- see codegen_send.rb's class_test_fuse?.\n"
+    paths = owner_class_table_owners(entries).each_with_index.map { |owner, i| [i, lexical_scope_path(owner)] }
+    raise 'CLASS_TEST_FUSE: owner slots are not 0...n' unless entries.all? { |_, slot| slot[:index] < paths.size }
+
+    paths.each do |i, path|
+      out << "static const char* const bc2cpp_owner_class_path_#{i}[] = {#{path.map { |seg| "\"#{seg}\"" }.join(', ')}};\n"
+    end
+    out << "static const char* const* const bc2cpp_owner_class_paths[] = {" \
+           "#{paths.map { |i, _| "bc2cpp_owner_class_path_#{i}" }.join(', ')}};\n"
+    out << "static const unsigned char bc2cpp_owner_class_path_lens[] = {#{paths.map { |_, path| path.size }.join(', ')}};\n"
+    out << <<~CPP
+      [[maybe_unused]] [[gnu::noinline]] static struct RClass* bc2cpp_owner_class_at(mrb_state* M, int i) {
+        struct RClass* c = #{owner_slot_ref('i')};
+        if (!c) c = #{owner_slot_ref('i')} = bc2cpp_owner_class_lookup(M, bc2cpp_owner_class_paths[i], bc2cpp_owner_class_path_lens[i]);
+        return c;
+      }
+      // Never passed through `...`, where it would not convert: ClassTestFuse.vararg_sites refuses the unit, and the
+      // user-provided copy makes clang refuse it too.
+      struct bc2cpp_owner_ref {
+        mrb_state* M;
+        int i;
+        [[gnu::always_inline]] bc2cpp_owner_ref(mrb_state* m, int n) : M(m), i(n) {}
+        [[gnu::always_inline]] bc2cpp_owner_ref(const bc2cpp_owner_ref& o) : M(o.M), i(o.i) {}
+        [[gnu::always_inline]] operator struct RClass*() const { return bc2cpp_owner_class_at(M, i); }
+      };
+      // bc2cpp_class_is's test, spelled with mruby's own API so the cache also compiles where no prelude is
+      // (a class-body unit): a slot holds a plain class or null (see CodeGen#exact_class_guard), and for one the
+      // pointer test first, then mrb_obj_class, gives exactly `c == mrb_obj_class(M, v)`.
+      [[maybe_unused]] [[gnu::noinline]] static bool bc2cpp_is_owner(mrb_state* M, mrb_value v, int i) {
+        struct RClass* c = #{owner_slot_ref('i')};
+        if (!c) c = bc2cpp_owner_class_at(M, i);
+        if (!mrb_immediate_p(v) && mrb_obj_ptr(v)->c == c) return true;
+        return c == mrb_obj_class(M, v);
+      }
+      // Every generated guard spells both M arguments as the function's own M.
+      [[maybe_unused]] [[gnu::always_inline]] static inline bool bc2cpp_class_is(mrb_state* M, mrb_value v, bc2cpp_owner_ref o) {
+        return bc2cpp_is_owner(M, v, o.i);
+      }
+    CPP
+    paths.each do |i, _|
+      out << "[[maybe_unused]] [[gnu::always_inline]] static inline bc2cpp_owner_ref bc2cpp_owner_class_#{i}(mrb_state* M) " \
+             "{ return bc2cpp_owner_ref(M, #{i}); }\n"
+    end
+    out
+  end
+
+  # The table rows' slot getter (POLY_TABLE, SUBTREE_TABLE): a row's own getter, or with CLASS_TEST_FUSE the indexed
+  # one, which fills the same slot.
+  def owner_row_getter_field
+    class_test_fuse? ? '// CLASS_TEST_FUSE: the slot names the class.' : 'struct RClass* (*owner)(mrb_state*);'
+  end
+
+  def owner_row_fill(row)
+    class_test_fuse? ? "bc2cpp_owner_class_at(M, #{row}.slot)" : "#{row}.owner(M)"
+  end
+
+  def owner_row_getter(getter)
+    class_test_fuse? ? '' : "#{getter}, "
   end
 
   # The uncached GETCONST lookup: resolve the owner's lexical scope chain, then
@@ -2155,6 +2370,8 @@ class CodeGen
   # With +used+ (the rest of the emitted text), a helper only a discarded body
   # named is left out; the indices stay as assigned.
   def emit_const_scope_helpers(used = nil)
+    return emit_const_scope_helpers_table(used) if static_constants?
+
     out = String.new
     called = used && helper_calls(used, 'bc2cpp_const_scope_')
     (@const_scope_helpers || {}).each do |owner_path, slot|
@@ -2178,11 +2395,12 @@ class CodeGen
 
   # The CONST_SITE_CACHE helper index for (lexical scope, name). +paths+ (CONST_BINDING_CACHE) are the owner paths
   # of every binding of the name; the helper stores a result only once all of them exist.
-  def const_site_slot(owner_path, name, value: false, paths: nil)
+  # +drop+ (CONST_BINDING_DROP) is the name's slot in the per-VM table.
+  def const_site_slot(owner_path, name, value: false, paths: nil, drop: nil)
     @const_site_cache ||= {}
     slot = (@const_site_cache[[owner_path, name]] ||=
               { index: @const_site_cache.size, body: const_lookup_block('0', name, owner_path), value: value,
-                paths: paths, name: name, scope: owner_path })
+                paths: paths, name: name, scope: owner_path, drop: drop })
     slot[:index]
   end
 
@@ -2218,11 +2436,13 @@ class CodeGen
     [[idx - 1, previous]]
   end
 
-  # One GETMCNST cache per site of +name+; each keeps the receiver its value was read from.
+  # One GETMCNST cache per name: a slot keeps the receiver its value was read from and answers only that receiver, so
+  # every site reading +name+ from it reads the same binding (mrb_const_defined_at, the receiver's own table) and the
+  # sites of one name can share it; another receiver refills it.
   def const_member_slot(name)
     @const_member_sites ||= []
-    @const_member_sites << name
-    @const_member_sites.size - 1
+    @const_member_index ||= {}
+    @const_member_index[name] ||= (@const_member_sites << name).size - 1
   end
 
   # File-scope state and helpers for CONST_SITE_CACHE. Each helper returns the
@@ -2235,13 +2455,15 @@ class CodeGen
   # (bc2cpp_cconst_bind). Always emitted so the gems can call the reset.
   # +used+ as for emit_const_scope_helpers: the slots stay sized for every index.
   def emit_const_site_cache(used = nil)
+    return emit_const_site_cache_table(used) if static_constants?
+
     entries = (@const_site_cache || {}).values
     called = used && helper_calls(used, 'bc2cpp_cconst_')
     count = [entries.size, 1].max
     out = +"// CONST_SITE_CACHE -- see tools/bc2cpp/const_site_cache.rb.\n"
     out << "static mrb_state* bc2cpp_cconst_state = nullptr;\n"
     out << "static mrb_value bc2cpp_cconst_slots[#{count}];\n"
-    out << "static bool bc2cpp_cconst_have[#{count}] = {};\n"
+    out << const_slot_have_decl('bc2cpp_cconst_have', count)
     members = [(@const_member_sites || []).size, 1].max
     # A GETMCNST slot is filled only for a class/module receiver, so the receiver's RClass* is the key and nullptr
     # marks an empty slot.
@@ -2249,7 +2471,7 @@ class CodeGen
     out << "static mrb_value bc2cpp_mcnst_slots[#{members}];\n"
     out << "static void bc2cpp_reset_const_site_cache() {\n" \
            "  bc2cpp_cconst_state = nullptr;\n" \
-           "  for (bool& h : bc2cpp_cconst_have) h = false;\n" \
+           "#{const_slot_reset('bc2cpp_cconst_slots', 'bc2cpp_cconst_have')}" \
            "  for (struct RClass*& f : bc2cpp_mcnst_from) f = nullptr;\n" \
            "}\n"
     out << vm_cache_bind('bc2cpp_cconst_bind', 'bc2cpp_cconst_state', 'CONST_SITE_CACHE')
@@ -2277,13 +2499,12 @@ class CodeGen
                'mrb_type(r0) == MRB_TT_CLASS || mrb_type(r0) == MRB_TT_MODULE'
              end
       out << "  if (#{fill}) {\n" \
-             "    bc2cpp_cconst_slots[#{i}] = r0;\n" \
-             "    bc2cpp_cconst_have[#{i}] = true;\n" \
+             "#{const_slot_store('bc2cpp_cconst_slots', 'bc2cpp_cconst_have', i, 'r0', '    ')}" \
              "  }\n" \
              "  return r0;\n" \
              "}\n" \
              "static inline mrb_value bc2cpp_cconst_#{i}(mrb_state* M) {\n" \
-             "  return bc2cpp_cconst_have[#{i}] ? bc2cpp_cconst_slots[#{i}] : bc2cpp_cconst_fill_#{i}(M);\n" \
+             "  return #{const_slot_full('bc2cpp_cconst_slots', 'bc2cpp_cconst_have', i)} ? bc2cpp_cconst_slots[#{i}] : bc2cpp_cconst_fill_#{i}(M);\n" \
              "}\n"
     end
     out << emit_const_member_cache(used)
@@ -2416,6 +2637,15 @@ class CodeGen
                                                                                 instance_scope: instance_scope,
                                                                                 singleton_arms: singleton_arms)
     end
+    mm_branches = ''
+    if reason == :method_missing_receiver && (mm_arms = method_missing_arm_branches(d, recv, name, argv))
+      mm_classes, mm_branches = mm_arms
+      reason = @closed_world.refusal(name, listed, site[:self_owner], installed, instances: instances, scoped: scoped,
+                                                                                native_free: native_free,
+                                                                                instance_scope: instance_scope,
+                                                                                singleton_arms: singleton_arms,
+                                                                                method_missing_arms: mm_classes)
+    end
     return dispatch.sub(/\n\z/, " /* CLOSED_WORLD kept: #{reason} */\n") if reason
 
     args = argv.empty? ? '' : ", #{argv.size}, #{argv.join(', ')}"
@@ -2423,10 +2653,25 @@ class CodeGen
     # to hold every such site to its source-line annotation.
     marker = NomethodReviewed.marker(name, self_receiver: !site[:self_owner].nil?, site: insn_source_site)
     error = "r#{d} = bc2cpp_nomethod_named(M, #{recv}, \"#{name}\"#{args}); #{marker}\n"
-    extra_branches = singleton_branches
+    extra_branches = singleton_branches + mm_branches
     return error if extra_branches.empty?
 
     "#{extra_branches}{\n      #{error.chomp}\n    }\n"
+  end
+
+  # METHOD_MISSING_ARMS: one exact-class arm per class whose instances reach a Ruby method_missing, each sending by
+  # name as the fallback would, so the else arm can close for every other receiver. [classes, branches], or nil.
+  def method_missing_arm_branches(d, recv, name, argv)
+    return nil if ENV['BC2CPP_METHOD_MISSING_ARMS'] == '0'
+
+    classes = @closed_world.method_missing_arm_classes
+    return nil if classes.nil? || classes.size > UNLISTED_CLASS_GUARDS_MAX
+
+    branches = classes.map do |klass|
+      code = dynamic_dispatch_line(d, recv, name, argv).sub(/\n\z/, " /* METHOD_MISSING_ARM #{klass} */\n")
+      "if (bc2cpp_class_is(M, #{recv}, #{owner_class_ptr_expr(klass)})) {\n#{code.gsub(/^/, '    ').chomp}\n    } else "
+    end
+    [classes, branches.join]
   end
 
   # SINGLETON_ARMS: one identity arm per module whose `.singleton` definition answers `name`,
@@ -2441,9 +2686,16 @@ class CodeGen
 
     branches = modules.sort.map do |mod|
       code = constant_object_send_code(name, argv.size, d, recv, argv, mod)
-      return nil unless code && code.include?('CLOSED_WORLD_CONSTANT_OBJECT')
+      # SINGLETON_ARM_DISPATCH: a module whose singleton method has no direct call here still gets its arm, which sends by
+      # name exactly as the fallback would for that one receiver; the arm is what lets every other receiver take the
+      # owner call.
+      unless code&.include?('CLOSED_WORLD_CONSTANT_OBJECT')
+        code = dynamic_dispatch_line(d, recv, name, argv).sub(/\n\z/, " /* SINGLETON_ARM_DISPATCH #{mod} */\n")
+      end
 
-      "if (mrb_type(#{recv}) == MRB_TT_MODULE && mrb_class_ptr(#{recv}) == #{owner_class_ptr_expr(mod)}) {\n" \
+      # CLASS_OBJECT_ARMS: a class object's arm tests for a class, a module's for a module.
+      tt = @closed_world.module_declared?(mod) ? 'MRB_TT_MODULE' : 'MRB_TT_CLASS'
+      "if (mrb_type(#{recv}) == #{tt} && mrb_class_ptr(#{recv}) == #{owner_class_ptr_expr(mod)}) {\n" \
         "#{code.gsub(/^/, '    ').chomp}\n    } else "
     end
     [modules, branches.join]

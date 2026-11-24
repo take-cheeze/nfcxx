@@ -4,7 +4,7 @@
 # ZSUPER_LOOKUP (zsuper_lookup_plan): a bare `super` into a method no direct rule calls -- here the C methods
 # Array#initialize and Array#push -- is looked up from the superclass at run time and called with the arguments
 # OP_ARGARY would pack (mandatory and optional ones, a rest Array's elements). A method some caller may hand a block
-# it would forward (method_missing gets the missing call's block) keeps the `#error`. The check reads the generated
+# it would forward (method_missing gets the missing call's block) takes that block and forwards it. The check reads the generated
 # calls and runs the methods interpreted and compiled. Needs MRBC and a full-core libmruby (BC2CPP_MRUBY_FULL, or
 # rake and a C++ compiler).
 ENV['BC2CPP_SIG_DIRS'] = ''
@@ -48,8 +48,12 @@ Dir.mktmpdir('bc2cpp-zsuper-lookup') do |dir|
               %w[ZlArr_initialize_impl ZlArr_push_impl].all? { |fn| body.call(fn)&.include?('bc2cpp_zsuper_args') })
   suite.check('a rest parameter is spliced, as OP_ARGARY does',
               body.call('ZlArr_push_impl').to_s.include?('if (mrb_array_p(r2)) mrb_ary_concat(M, bc2cpp_zsuper_args, r2);'))
-  suite.check('a method whose callers may pass a block keeps its bytecode',
-              !code.include?('mrb_value ZlMm_method_missing_impl(mrb_state* M'))
+  # IMPLICIT_SUPERCLASS made ZlMm (no superclass written) a lookup owner; its method_missing, which any missing call may
+  # hand a block, takes that block (SUPER_FRAME_BLOCK) and forwards it, as OP_SUPER does.
+  suite.check('a method whose callers may pass a block forwards it',
+              code.include?('mrb_value ZlMm_method_missing_impl(mrb_state* M, mrb_value self, mrb_value name, mrb_value args, ' \
+                            'mrb_value bc2cpp_blk)') &&
+              body.call('ZlMm_method_missing_impl').to_s.include?('RARRAY_PTR(bc2cpp_zsuper_args), bc2cpp_blk);'))
 
   build = ENV['CC_GENERATED_ONLY'] == '1' ? nil : Bc2cppFixtureRuntime.full_or_build
   if build.nil?

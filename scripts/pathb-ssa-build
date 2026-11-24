@@ -90,7 +90,7 @@ EXIT_PARTIAL = 3
 EXIT_NOFP = 5   # --no-fp: the code QBE wrote uses SSE or x87 (nfcc's -mno-sse; scripts/pathb-cc.rb does not retry this one)
 
 def usage_exit
-  warn "usage: pathb-ssa-build [-o OUT.s] [--qbe=PATH] [--no-opt] [--no-fp] [--no-unwind] [--vectorize] [--avx2] [--trap-checks] [--no-pie] [--safe | --asan] [--pic] [--target=i386|i386_regparm3] [--m16] FILE.ir"
+  warn "usage: pathb-ssa-build [-o OUT.s] [--qbe=PATH] [--no-opt] [--no-fp] [--no-unwind] [--vectorize] [--vectorize-assoc] [--avx2] [--trap-checks] [--no-pie] [--safe | --asan] [--pic] [--debug-lines] [--target=i386|i386_regparm3] [--m16] FILE.ir"
   exit EXIT_USAGE
 end
 
@@ -447,6 +447,7 @@ def assemble(il)
   Dir.mktmpdir("pathb-ssa-build") do |dir|
     path = File.join(dir, "module.qbe")
     File.write(path, il)
+    File.write(ENV["PATHB_SSA_KEEP_QBE"], il) unless ENV["PATHB_SSA_KEEP_QBE"].to_s.empty?   # debugging: the QBE input
     qbe_args = ENV.key?("PATHB_QBE_TARGET") && !$target32 ? ["-t", qbe_target] : []
     qbe_args += $qbe_flags
     asm, err, st = Open3.capture3(qbe_binary, *qbe_args, path)
@@ -467,6 +468,7 @@ pic = false
 no_pie = false
 trap_checks = false
 m16 = false
+debug_lines = false
 args = ARGV.dup
 usage_exit if args.empty?
 while args.first&.start_with?("-") && args.first != "-"
@@ -479,9 +481,11 @@ while args.first&.start_with?("-") && args.first != "-"
   when "--no-fp" then no_fp = true; $qbe_flags << "-n"
   when "--no-unwind" then $qbe_flags << "-U"
   when "--vectorize" then $qbe_flags << "-V"
+  when "--vectorize-assoc" then $qbe_flags << "-F"
   when "--avx2" then $qbe_flags << "-Y"
   when "--safe" then safe = true
   when "--asan" then asan = true
+  when "--debug-lines" then debug_lines = true   # -g: a dbgloc line for each (loc ...): the object's line table
   when "--pic" then pic = true
   when "--no-pie" then no_pie = true   # -fno-PIE: a function address is the symbol, not a cell
   when "--trap-checks" then trap_checks = true   # a failed check is the trap instruction, not a call of abort (no libc)
@@ -497,6 +501,7 @@ usage_exit if safe && output.nil?
 usage_exit if asan && safe   # both replace malloc and check accesses: one at a time
 Qbe.safe = safe
 Qbe.asan = asan
+Qbe.debug_lines = debug_lines
 Qbe.pic = pic
 Qbe.trap_checks = trap_checks
 Qbe.no_pie = no_pie && !pic   # -fPIC wins

@@ -193,7 +193,7 @@ module NativeCoreDirectFallback
   end
 
   def native_core_direct_wrap(d, recv, name, argv, tail)
-    site = exact_core_site_for(recv, name)
+    site = native_exact_site_for(recv, name)
     entries = native_core_entries(name, argv.size)
     # An exact-literal receiver is never another builtin, so their arms are dead code.
     entries = entries.select { |entry| entry.owner == site[:klass] } if site && CodeGen::EXACT_LITERAL_CLASS.value?(site[:klass])
@@ -299,7 +299,7 @@ module NativeCoreDirectFallback
   # EXACT_CORE_RECEIVER: the entry whose owner the receiver provably is, when its
   # argument guard is proven too; the send is then dead code.
   def native_core_exact_entry(entries, recv, name, argv)
-    site = exact_core_site_for(recv, name)
+    site = native_exact_site_for(recv, name)
     return nil unless site
 
     entries.find do |entry|

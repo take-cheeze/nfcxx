@@ -342,10 +342,17 @@ class CodeGen
     names = Set.new
     children = @ireps.values.flat_map(&:reps).compact.to_set
     @ireps.each do |label, irep|
-      # mruby's own Ruby is outside this closed world (the aliases in its
-      # mrblib rename core methods, not the engine's), as it was before it became
-      # compiled input. The root irep spans every file, so it is always scanned.
-      next if children.include?(label) && CoreDefs.core_source?(irep.file)
+      # mruby's own Ruby is outside this closed world, as it was before it became compiled input: its other installers
+      # do not count. The root irep spans every file, so it is always scanned. CORE_ALIAS_DESTINATIONS: an alias there
+      # still replaces the method of its new name, which may be one the registry compiles (mruby-onig-regexp aliases
+      # String#gsub to its C onig_regexp_gsub over mrblib's String-only body), so that name counts.
+      if children.include?(label) && CoreDefs.core_source?(irep.file)
+        installed = core_alias_destinations(label, irep)
+        return nil unless installed
+
+        names.merge(installed)
+        next
+      end
 
       scoped = skip_class_object && @closed_world&.class_object_body?(label)
       BytecodeIR.for(irep).each_source do |insn, idx|
@@ -396,6 +403,32 @@ class CodeGen
       end
     end
     names
+  end
+
+  # CORE_ALIAS_DESTINATIONS: the names the computed aliases of a core-source irep install over a core method
+  # (collect_installed_names): `alias_method v, :"onig_regexp_#{v}"` in a loop names what the file's literal loops
+  # enumerate (ClosedWorld.ruby_file_facts' definer_loops); nil, as for any computed name, when the file has none. A
+  # literal alias is the registry walk's: it shadows the owner's earlier definitions (CORE_ALIAS_REPLACES, registry.rb)
+  # and leaves every other owner's name bound.
+  def core_alias_destinations(label, irep)
+    names = Set.new
+    BytecodeIR.for(irep).each_source do |insn, idx|
+      next unless %i[SEND SSEND].include?(insn.op) && insn.sym == 'alias_method' && !AliasSites.settled?(@registry, label, idx)
+
+      syms = insn.plain_fixed_argc? && literal_symbol_args(irep, idx, insn.reg.to_i, insn.argc)
+      next if syms && !syms.empty?
+
+      installed = core_loop_defined_names(irep.file)
+      return nil if installed.empty?
+
+      names.merge(installed)
+    end
+    names
+  end
+
+  def core_loop_defined_names(file)
+    @core_loop_defined_names ||= {}
+    @core_loop_defined_names[file] ||= ClosedWorld.ruby_file_facts(file).fetch(:definer_loops).flat_map { |l| l.fetch(:names) }
   end
 
   # A self-call from `owner` never reaches method_missing when `owner`'s own

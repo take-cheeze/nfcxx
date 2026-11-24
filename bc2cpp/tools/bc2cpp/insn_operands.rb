@@ -225,7 +225,7 @@ module InsnOperands
 
   # Target address of a branch op, nil for every other op.
   def branch_target
-    return nil unless BytecodeIR::BRANCH_OPS.include?(op)
+    return nil unless BytecodeIR::BRANCH_OPS_SET.include?(op)
 
     first_kind(:addr)&.value
   end
@@ -302,6 +302,20 @@ module InsnOperands
 
   def argary_spec
     first_kind(:spec)&.value
+  end
+
+  # BLOCK_ZSUPER: [level, registers] an ARGARY reads from the method frame it packs (vm.c OP_ARGARY): level is its
+  # `(lv)` (0 is this frame, lv >= 1 is uvenv(lv - 1), i.e. upvar level lv - 1), the registers R1..R(m1+r+m2+kd)
+  # (the positionals, the rest Array, the post ones and the keyword hash; the block slot after them is not listed).
+  # nil for any other op or an unparsed operand.
+  def argary_frame_reads
+    return nil unless op == :ARGARY
+
+    spec = argary_spec
+    level = paren_int
+    return nil unless spec && spec.size == 4 && level
+
+    [level, (1..spec.sum).to_a]
   end
 
   # Child irep index of a DEF-family op whose operands are exactly

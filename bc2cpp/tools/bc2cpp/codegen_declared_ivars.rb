@@ -40,11 +40,26 @@ class CodeGen
       return nil unless k.is_a?(String)
 
       entry = table[[k, name]]
-      return entry if entry
+      return declared_ivar_kept?(entry) ? entry : nil if entry
 
       k = @superclass_of[k]
     end
     nil
+  end
+
+  # CORE_IVAR_KINDS: a core container or String declaration is checked by its kind test (mrb_array_p, ...), which is
+  # its exact class only in a build with no subclass of it (core_class_subclass_free?); the exact-class flow already
+  # requires singleton-free instances. Elsewhere the declaration is left out (no guard, no seed).
+  def declared_ivar_kept?(entry)
+    return true unless RbsParamCheck::CORE_IVAR_KINDS.key?(entry.kind)
+
+    declared_core_kind_kept?(entry.cls)
+  end
+
+  def declared_core_kind_kept?(cls)
+    (@declared_ivar_core_kept ||= {}).fetch(cls) do
+      @declared_ivar_core_kept[cls] = !block_core_world.nil? && !@native_name_sources.nil? && core_class_subclass_free?(cls)
+    end
   end
 
   # The C++ test that `var` (an mrb_value) has the declared kind. Integer is any Integer (mrb_integer_p, or a bignum:
@@ -55,9 +70,18 @@ class CodeGen
            when :float then "mrb_float_p(#{var})"
            when :integer then "(mrb_integer_p(#{var}) || mrb_bigint_p(#{var}))"
            when :symbol then "mrb_symbol_p(#{var})"
+           when :array then "mrb_array_p(#{var})"
+           when :hash then "mrb_hash_p(#{var})"
+           when :string then "mrb_string_p(#{var})"
+           when :union then declared_union_condition(entry.cls, var)
            else exact_class_guard(owner_class_ptr_expr(entry.cls), var)
            end
     entry.nilable ? "mrb_nil_p(#{var}) || (#{cond})" : cond
+  end
+
+  # DECLARED_UNION: one exact-class test per listed class (RbsParamCheck.union_classes).
+  def declared_union_condition(classes, var)
+    classes.map { |klass| exact_class_guard(owner_class_ptr_expr(klass), var) }.join(' || ')
   end
 
   # Does a flow mask (NumericFlow bits) put the stored value inside the declared kind?
@@ -102,14 +126,14 @@ class CodeGen
     return @declared_ivar_seeds if table.nil? || table.empty? || ENV['BC2CPP_DECLARED_IVAR_PROOF'] == '0' ||
                                    @numeric_ivar_disabled || @numeric_ivar_groups.nil?
 
-    by_slot = table.values.group_by { |e| [numeric_family(e.owner), e.name] }
+    by_slot = table.values.select { |e| declared_ivar_kept?(e) }.group_by { |e| [numeric_family(e.owner), e.name] }
     by_slot.each do |key, entries|
       next unless entries.size == 1
 
       group = @numeric_ivar_groups[key]
-      next unless group && !group.structural && !group.checked
-
       entry = entries.first
+      next unless group && (!(group.structural || group.checked) || declared_ivar_writers_guarded?(group, entry))
+
       bits = declared_arg_bits(entry.cls, entry.kind, entry.nilable)
       next if bits.zero?
 
@@ -119,6 +143,24 @@ class CodeGen
       @declared_ivar_seeds[key] = [entry, bits]
     end
     @declared_ivar_seeds
+  end
+
+  # ACCESSOR_GUARDED_WRITER: a slot an attr_writer stores to is still seeded when every native writer of the name in
+  # the family is replaced by its synthesized struct-field writer (ATTR_STRUCT_DEVIRT), which carries the guard.
+  def declared_ivar_accessor_writers(family, name)
+    (@registry["#{name}="] || []).select do |d|
+      d.kind == :ivar_accessor && d.irep.nil? && numeric_family(d.owner) == family
+    end
+  end
+
+  def declared_ivar_writers_guarded?(group, entry)
+    return false unless group.accessor_only && ENV['BC2CPP_DECLARED_IVAR_ACCESSOR'] != '0'
+
+    writers = declared_ivar_accessor_writers(group.family, group.name)
+    !writers.empty? && writers.all? do |d|
+      declared_ivar_inherits?(d.owner, entry.owner) && @synthesize_accessor_for.include?([d.owner, group.name, :writer]) &&
+        !embed_type(d.owner, group.name).nil?
+    end
   end
 
   # Is +owner+ a class equal to or descending from +ancestor+ (through superclass links only)?
@@ -138,10 +180,17 @@ class CodeGen
   def declared_ivar_writer_failures(compiled, only_owners, other_owners, live: nil)
     by_label = compiled.each_with_object({}) { |m, h| h[m[:label]] ||= m if m[:label] }
     declared_ivar_seeds.flat_map do |(_family, _name), (entry, _bits)|
-      writers = @numeric_ivar_groups.fetch([numeric_family(entry.owner), entry.name]).sites.filter_map do |irep, _idx, _reg|
+      family = numeric_family(entry.owner)
+      writers = @numeric_ivar_groups.fetch([family, entry.name]).sites.filter_map do |irep, _idx, _reg|
         numeric_irep_owner[irep.label]
       end.uniq
-      writers.filter_map do |d|
+      accessors = declared_ivar_accessor_writers(family, entry.name).filter_map do |d|
+        next if only_owners.nil? || only_owners.include?(d.owner) || other_owners&.include?(d.owner)
+
+        "#{entry.key} is trusted as declared (DECLARED_IVAR_PROOF) because every store is checked, but no compiled " \
+          "gem of this build compiles #{d.owner}, whose attr_writer #{d.name} stores to it"
+      end
+      accessors + writers.filter_map do |d|
         next if live && !live.include?(d.irep)
 
         where = "#{entry.key} is trusted as declared (DECLARED_IVAR_PROOF) because every store is checked, but"
@@ -163,7 +212,7 @@ class CodeGen
     return [] if table.nil? || table.empty?
 
     seeded = declared_ivar_seeds.values.map { |entry, _| entry.key }.to_set
-    table.values.sort_by(&:key).map do |e|
+    table.values.select { |e| declared_ivar_kept?(e) }.sort_by(&:key).map do |e|
       "  DECLARED_IVAR #{e.key}: #{e.text}, #{seeded.include?(e.key) ? 'guarded stores, pool seeded' : 'guarded stores'}"
     end
   end

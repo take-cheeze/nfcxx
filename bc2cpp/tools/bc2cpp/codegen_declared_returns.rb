@@ -29,6 +29,8 @@ class CodeGen
     attr_accessor :declared_returns, :declared_return_root, :declared_return_hint_refusals
     # label => [[position, class, key, text], ...]: the declared parameter classes the bodies trust (DECLARED_PARAM_GUARD).
     attr_accessor :declared_params
+    # label => [[name, class, key, text, kind, nilable], ...]: RbsParamCheck.keyword_guards (DECLARED_KEYWORD_PARAM).
+    attr_accessor :declared_keywords
   end
 
   # The checked declarations: statically checked ones and the runtime-checked %a{bc2cpp:hint} ones.
@@ -38,15 +40,20 @@ class CodeGen
 
   # The declarations that need their compiled check (DECLARED_RETURN_GUARD): every %a{bc2cpp:hint} one, and every plain
   # one that adds a fact and whose body the return proofs do not already prove (BC2CPP_DECLARATION_GUARD=0 leaves the
-  # plain ones unchecked). A hint whose name admits no fact (refused as info: another definition outside the program
-  # also defines it, such as native `inspect`) is relied on by nothing, so its body keeps no check and the build does
-  # not require one. An error refusal still does.
+  # plain ones unchecked). A declaration whose name admits no name-wide fact (refused as info) is still read per
+  # definition (DECLARED_DEF_RETURN), so it is checked the same way when that reading can use it
+  # (declared_def_return_checkable?); otherwise nothing relies on it, and its body keeps no check. An error refusal
+  # still keeps the hinted one's.
   def declared_return_hints
     return @declared_return_hints if @declared_return_hints
 
     list = declared_return_entries.select do |e|
       refusal = declared_return_refusal(e.name)
-      e.hint ? refusal&.first != 'info' : DeclaredReturns.guard? && refusal.nil? && !declared_return_proven?(e)
+      if refusal&.first == 'info'
+        declared_def_return_checkable?(e) && (e.hint || (DeclaredReturns.guard? && !declared_return_proven_exact?(e)))
+      else
+        e.hint || (DeclaredReturns.guard? && refusal.nil? && !declared_return_proven_exact?(e))
+      end
     end
     @declared_return_hints = list if @declared_returns_final # earlier probes run before the return sets are final
     list
@@ -70,6 +77,12 @@ class CodeGen
       entry.nilable && class_return_analyzable?(irep) && class_return_sites_proven(d, proof) == entry.cls
     else false
     end
+  end
+
+  # declared_return_proven? strong enough for the exact-class flow. ARRAY_RETURN_PROOF may rest on a ClassLayout hint
+  # (its consumers keep an mrb_array_p tripwire), so an Array declaration it proves still needs its guard.
+  def declared_return_proven_exact?(entry)
+    !DECLARED_CORE_KIND_CLASS.key?(entry.kind) && declared_return_proven?(entry)
   end
 
   # The runtime-checked declaration of the body `label` compiles, or nil.
@@ -151,7 +164,8 @@ class CodeGen
   # EXACT_DECLARED_RETURN: the exact-class flow's mask of a call of +name+ whose declaration is checked at run time, or
   # nil. The guard raises on a mismatch, so a value that comes back IS what the declaration says: `-> Foo` is exactly
   # Foo (the guard is the exact class test), `-> Float` a Float, `-> Integer` a Fixnum, `-> Symbol`, `bool`, `nil` the
-  # immediate classes (their bits exist only under immediate_class_bits_enabled?). Applied only when every definition of
+  # immediate classes (their bits exist only under immediate_class_bits_enabled?), `-> Array`, `-> Hash`, `-> String`
+  # the core class (declared_kind_mask). Applied only when every definition of
   # the name is declared alike (declared_return_refusal), each one's guard is emitted (declared_return_guard) or its
   # body is proven (declared_return_proven?), and the class is a program class nothing derives from, as RBS_CHECKED_PARAMS
   # trusts one (the `subclassed` rule of rbs_param_check.rb). Otherwise the declaration stays the ceiling it was.
@@ -164,15 +178,76 @@ class CodeGen
     spec = @declared_exact_return[name]
     return nil unless spec
 
-    kind, cls, nilable = spec
+    declared_kind_mask(*spec)
+  end
+
+  # The core class a container or String declaration's guard tests the kind of (mrb_array_p, mrb_hash_p, mrb_string_p).
+  DECLARED_CORE_KIND_CLASS = { array: 'Array', array_of: 'Array', hash: 'Hash', hash_of: 'Hash', string: 'String' }.freeze
+
+  # The exact-class mask a checked declaration of [kind, cls, nilable] gives its call's result, or nil. A container or
+  # String guard admits a subclass instance, so it is the exact core class only while the build has no subclass of
+  # it (core_class_subclass_free?); the flow already requires singleton-free instances (compute_return_classes).
+  def declared_kind_mask(kind, cls, nilable)
     bit = case kind
           when :fixnum then NumericFlow::INT
           when :float then NumericFlow::FLT
           when :nil then NumericFlow::NIL
           when :symbol then immediate_class_bits_enabled? ? numeric_class_bit('Symbol') : nil
           when :class then RETURN_CORE_CLASS.key(cls) || numeric_class_bit(cls)
+          when *DECLARED_CORE_KIND_CLASS.keys
+            core = DECLARED_CORE_KIND_CLASS.fetch(kind)
+            RETURN_CORE_CLASS.key(core) if block_core_world && @native_name_sources && core_class_subclass_free?(core)
           end
     bit && (nilable ? bit | NumericFlow::NIL : bit)
+  end
+
+  # DECLARED_DEF_RETURN: the exact-class mask of a call already resolved to the one definition +definition+
+  # (return_class_scoped_send_mask: the receiver's exact class and its closed-world lookup), read from that
+  # definition's own declaration, or nil. No other definition can answer the call, so the name-wide agreement of
+  # declared_exact_return_mask is not needed. The declaration must still be checked where it is defined: its guard is
+  # compiled into that body (declared_return_guard; bc2cpp.rb aborts a run that leaves it out) or the return proofs
+  # prove it. An error refusal (another body can be installed under the name at run time) keeps it out.
+  # BC2CPP_DECLARED_DEF_RETURNS=0 turns it off.
+  def declared_def_return_mask(definition)
+    return nil unless @declared_returns_final && definition&.irep && declared_def_returns_enabled?
+
+    entry = declared_return_entry_at(definition.irep)
+    return nil unless entry && entry.owner == definition.owner && declared_def_return_spec?(entry)
+    return nil if declared_return_refusal(entry.name)&.first == 'error'
+    return nil unless declared_return_guard(entry.label) || declared_return_proven_exact?(entry)
+
+    declared_kind_mask(entry.kind, entry.cls, entry.nilable)
+  end
+
+  def declared_def_returns_enabled?
+    ENV['BC2CPP_DECLARED_DEF_RETURNS'] != '0'
+  end
+
+  def declared_return_entry_at(label)
+    (@declared_return_at ||= declared_return_entries.to_h { |e| [e.label, e] })[label]
+  end
+
+  # The kinds DECLARED_DEF_RETURN reads, with declared_exact_return_spec's limits: a nilable immediate is left out, and
+  # a class must be an instance class nothing in the program derives from (an exact class test admits no subclass).
+  def declared_def_return_spec?(entry)
+    case entry.kind
+    when :fixnum, :float, :symbol, :nil then !entry.nilable
+    when :class
+      klass = entry.cls
+      # A core body's compile hides @closed_world (compile_method); the class graph is the program's, as for the refusal.
+      world = @closed_world || @core_program_world
+      !RETURN_BITLESS_CLASSES.include?(klass) && world &&
+        (world.instance_class?(klass) || NATIVE_WRAPPER_CLASS_ACCESSORS.key?(klass)) &&
+        !(@declared_subclassed ||= @superclass_of.values.grep(String).to_set).include?(klass)
+    else DECLARED_CORE_KIND_CLASS.key?(entry.kind)
+    end
+  end
+
+  # An info-refused declaration DECLARED_DEF_RETURN can read (a kind it reads). Its guard is then held to the contract
+  # of every other one (DeclaredReturns.guard_failures: the body some gem of the build compiles carries it). The
+  # choice is the whole program's, never one gem's: it is made before SHARED_GENERATION forks the units.
+  def declared_def_return_checkable?(entry)
+    declared_def_returns_enabled? && declared_def_return_spec?(entry)
   end
 
   # [kind, class, nilable] when +name+ may be read as an exact result (declared_exact_return_mask), or nil.
@@ -180,7 +255,7 @@ class CodeGen
     entries = declared_return_by_name[name]
     return nil if entries.nil? || entries.empty? || declared_return_refusal(name)
 
-    guarded = entries.all? { |e| @ireps[e.label] && @owner_of[e.label] && (declared_return_guard(e.label) || declared_return_proven?(e)) }
+    guarded = entries.all? { |e| @ireps[e.label] && @owner_of[e.label] && (declared_return_guard(e.label) || declared_return_proven_exact?(e)) }
     return nil unless guarded
 
     entry = entries.first
@@ -190,6 +265,7 @@ class CodeGen
     case entry.kind
     when :fixnum, :float then entry.nilable ? nil : spec
     when :symbol, :nil then entry.nilable ? nil : spec
+    when *DECLARED_CORE_KIND_CLASS.keys then spec
     when :class
       klass = entry.cls
       return nil if RETURN_BITLESS_CLASSES.include?(klass) || !instance_class?(klass)
@@ -222,15 +298,17 @@ class CodeGen
     end
     declared_return_entries.each do |entry|
       refusal = declared_return_refusal(entry.name)
+      guarded = declared_return_guard(entry.label)
       if refusal
-        message = refusal.first == 'error' ? "cannot be checked: #{refusal.last}" : "#{refusal.last}; no return fact"
+        fact = guarded ? 'no name-wide return fact (checked in its body)' : 'no return fact'
+        message = refusal.first == 'error' ? "cannot be checked: #{refusal.last}" : "#{refusal.last}; #{fact}"
         loc = entry.loc
         @declared_return_diagnostics << declared_return_diag(loc.file, loc.line, loc.col, refusal.first,
                                                              "#{entry.key} -> #{entry.text}: #{message}")
       end
       how = if entry.hint then 'runtime-checked (%a{bc2cpp:hint})'
-            elsif refusal then 'declared'
-            elsif declared_return_proven?(entry) then 'proven'
+            elsif refusal then guarded ? 'runtime-checked per definition' : 'declared'
+            elsif !guarded && declared_return_proven?(entry) then 'proven'
             elsif DeclaredReturns.guard? then 'runtime-checked'
             else 'trusted'
             end
@@ -332,7 +410,7 @@ class CodeGen
   # DECLARED_PARAM_GUARD: the C++ statements that check the declared class of each trusted parameter of `label`, given
   # the impl's parameter names (M, self, then the positionals), or "" when it has none.
   def declared_param_guard_statements(label, names, types = [])
-    (self.class.declared_params&.[](label) || []).filter_map do |pos, cls, key, text, kind = :class, nilable = false|
+    declared_param_guards(label).filter_map do |pos, cls, key, text, kind = :class, nilable = false, optional = nil|
       var = names[2 + pos]
       next unless var
       # An unboxed specialization (`mrb_int id`, `mrb_float f`) already carries the kind: its callers box-check it.
@@ -344,12 +422,67 @@ class CodeGen
              when :float then declared_return_condition(:float, cls, false, var)
              when :integer then declared_return_condition(:fixnum, cls, false, var)
              when :symbol then declared_return_condition(:symbol, cls, false, var)
+             when :array, :hash, :string then declared_return_condition(kind, cls, false, var)
+             when :union then declared_union_condition(cls, var)
              else exact_class_guard(owner_class_ptr_expr(cls), var)
              end
       cond = "mrb_nil_p(#{var}) || (#{cond})" if nilable
+      # DECLARED_OPTIONAL_PARAM: an omitted optional holds its default (RbsParamCheck.optional_defaults), not a value.
+      if optional
+        raise "DECLARED_PARAM_GUARD: #{key} arg #{pos + 1}: no bc2cpp_given_opt in #{names.join(', ')}" unless names.include?('bc2cpp_given_opt')
+
+        cond = "bc2cpp_given_opt <= #{optional} || (#{cond})"
+      end
       "  if (mrb_unlikely(!(#{cond}))) bc2cpp_declared_param_violation(M, #{var}, \"#{key}\", #{pos + 1}, \"#{text}\"); " \
         "/* DECLARED_PARAM_GUARD #{key} arg #{pos + 1} */\n"
     end.join
+  end
+
+  # The declared parameter guards of `label` this build keeps: a core container or String kind only where its kind test
+  # is its exact class (declared_core_kind_kept?, as for an ivar declaration).
+  def declared_param_guards(label)
+    (self.class.declared_params&.[](label) || []).select do |_pos, cls, _key, _text, kind = :class, *|
+      !RbsParamCheck::CORE_IVAR_KINDS.key?(kind) || declared_core_kind_kept?(cls)
+    end
+  end
+
+  # DECLARED_KEYWORD_PARAM: the keyword guards of `label` this build keeps (as declared_param_guards), by name.
+  def declared_keyword_guards(label)
+    @declared_keyword_guards ||= {}
+    @declared_keyword_guards[label] ||= (self.class.declared_keywords&.[](label) || []).select do |_name, cls, _key, _text, kind, _nilable|
+      !RbsParamCheck::CORE_IVAR_KINDS.key?(kind) || declared_core_kind_kept?(cls)
+    end.to_h { |guard| [guard.first, guard] }
+  end
+
+  # The class bits KARG `insn` of `irep` leaves in its register, or nil: the declared kind, which the check right after
+  # the KARG (declared_keyword_guard_statement) holds the given value to.
+  def declared_keyword_bits(irep, insn)
+    _name, cls, _key, _text, kind, nilable = declared_keyword_guards(irep.label)[insn.sym.to_s]
+    return nil unless kind
+
+    bit = declared_arg_bits(cls, kind, nilable)
+    bit.zero? ? nil : bit
+  end
+
+  # The C++ statement that checks KARG `insn`'s register `var` against its declared keyword type, or ''.
+  def declared_keyword_guard_statement(irep, insn, var)
+    name, cls, key, text, kind, nilable = declared_keyword_guards(irep.label)[insn.sym.to_s]
+    return '' unless name
+
+    cond = case kind
+           when :float, :symbol, :array, :hash, :string then declared_return_condition(kind, cls, false, var)
+           when :integer then declared_return_condition(:fixnum, cls, false, var)
+           else exact_class_guard(owner_class_ptr_expr(cls), var)
+           end
+    cond = "mrb_nil_p(#{var}) || (#{cond})" if nilable
+    "  if (mrb_unlikely(!(#{cond}))) bc2cpp_declared_keyword_violation(M, #{var}, \"#{key}\", \"#{text}\"); " \
+      "#{DeclaredReturns.keyword_guard_marker(key, name)}\n"
+  end
+
+  # label => guards for every label (declared_param_guards), what the class pools, the call-site report and the
+  # optional guard contract read.
+  def declared_params_kept
+    @declared_params_kept ||= (self.class.declared_params || {}).each_key.to_h { |label| [label, declared_param_guards(label)] }
   end
 
   # DECLARED_RETURN_GUARD: `code` (one compile_method result) with every exit of `impl_name` checked against the

@@ -4,6 +4,7 @@ require 'set'
 require_relative 'bytecode_ir_ops'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
+require_relative 'scan_cache'
 
 # CORE_DEFS: what decides whether a definition from mruby's own Ruby
 # may be compiled and registered over the interpreter's. The registry walks a
@@ -39,6 +40,107 @@ module CoreDefs
       end
     end
     out
+  end
+
+  # CORE_OUTSIDE_REDEFINED: the labels of the core-source definitions in +registry+ that a linked Ruby source this build does
+  # not compile defines again on the same owner (mruby-require's Hash#to_h, which takes a block where mruby-hash-ext's
+  # returns self). Those sources load after mruby's own Ruby, so the interpreter ends up with their method: the core body
+  # may be neither bound nor registered over it (a self build registers after every gem has run). +paths+: the linked
+  # Ruby sources (BC2CPP_LINKED_RUBY_SRCS); the ones +ireps+ compiles are left out. Read as bytecode, owner by owner: a
+  # text or parse scan is no substitute, since keeping a core body interpreted is not free (an interpreted frame between
+  # the steps of a compiled Fiber, Enumerator#next over Enumerator#each, is a C boundary its yield cannot cross), and the
+  # parse scan drops a name some file defines outside a class body. The compile is kept (outside_compile) for
+  # BlockSelfWorld's read of the same sources.
+  # The variables compiling and registering the outside sources may read: mrbc's, the snapshot recorder's, the irep
+  # cache's and the IR switches' are all BC2CPP_* or MRBC*; mrbc is found on PATH.
+  OUTSIDE_PAIRS_ENV = %w[BC2CPP_* MRBC* PATH].freeze
+
+  def outside_redefined_labels(registry, ireps, paths, symbol, out_dir)
+    compiled = ireps.each_value.to_set { |irep| File.expand_path(irep.file.to_s) }
+    unread = paths.map { |path| File.expand_path(path) }.uniq.sort.reject { |path| compiled.include?(path) }
+    return Set.new if unread.empty?
+
+    # The [owner, name] pairs depend on those sources, the compile's settings and the IR switches alone (OUTSIDE_PAIRS_ENV),
+    # so ScanCache keeps them: the compile and the registry over every linked Prism and RBS source were most of this
+    # phase. A compile that fails (deterministic for the same sources and settings) is kept as [:refused, why] and
+    # reported each run: the block returns rather than raises, as a self-compiled bc2cpp left ScanCache's computing
+    # count raised when an exception unwound its scan.
+    pairs = ScanCache.fetch('core_defs.outside_pairs', unread, cache_absent: false, env: OUTSIDE_PAIRS_ENV) do
+      compiled_outside = begin
+        outside_compile(unread, symbol, out_dir)
+      rescue ScanCache::Error
+        raise
+      rescue StandardError => e
+        [:refused, e.message.lines.first&.strip]
+      end
+      if compiled_outside.first == :refused
+        compiled_outside
+      else
+        outside_ireps, outside_root = compiled_outside
+        build_registry(outside_ireps.dup, outside_root)[0].values.flatten.to_set { |d| [d.owner, d.name] }
+      end
+    end
+    if pairs.is_a?(Array)
+      # As BlockSelfWorld's read of the same sources: one that does not compile is reported, and nothing is learned.
+      warn "bc2cpp: CORE_OUTSIDE_REDEFINED: an outside Ruby source does not compile (#{pairs[1]})"
+      return Set.new
+    end
+    registry.values.flatten.select do |d|
+      d.irep && pairs.include?([d.owner, d.name]) && core_source?(ireps.fetch(d.irep).file)
+    end.to_set(&:irep)
+  end
+
+  # The outside Ruby sources +paths+ (sorted, expanded) as [ireps, root], compiled once per list for every reader.
+  def outside_compile(paths, symbol, out_dir)
+    @outside_compiles ||= {}
+    @outside_compiles[paths] ||= compile_ireps(paths, "#{symbol}_block_self_world", out_dir, emitter: false,
+                                                                 cache: IrepCache.analysis_directory(paths))
+  end
+
+  # CORE_LOOP_ALIASES: the names `%i[sub gsub].each { |v| alias_method v, :"onig_regexp_#{v}" }` installs, when the SENDB at
+  # +idx+ of +irep+ is such a loop: `each` over an Array literal of Symbols, whose block aliases to a name its parameter
+  # holds (the alias_method's first argument is a MOVE from R1). nil for any other send. The aliases replace whatever
+  # method of those names the owner has, which a walk-order registry entry would otherwise stand for.
+  def loop_alias_names(irep, idx, ireps)
+    program = BytecodeIR.for(irep)
+    send = program.source_at(idx)
+    return nil unless send&.op == :SENDB && send.sym == 'each' && send.argc.to_i.zero? && idx >= 2
+
+    block = program.source_at(idx - 1)
+    literal = program.container_literal(idx - 2)
+    return nil unless block&.op == :BLOCK && literal && literal.kind == :array && literal.base == send.reg.to_i
+
+    names = (0...literal.count).map do |k|
+      load = program.source_at(idx - 2 - literal.count + k)
+      return nil unless load && load.reg.to_i == literal.base + k
+
+      sym = case load.op
+            when :LOADSYM then load.sym
+            when :SYMBOL then load.pool_index && irep.pool&.[](load.pool_index.to_i)
+            end
+      return nil unless sym.is_a?(String)
+
+      sym
+    end
+    child = block.block_index && irep.reps&.[](block.block_index.to_i)
+    body = child && ireps[child]
+    return nil unless body && loop_param_alias?(body)
+
+    names
+  end
+
+  # Does the block +body+ send alias_method with its first parameter (R1) as the new name?
+  def loop_param_alias?(body)
+    program = BytecodeIR.for(body)
+    found = false
+    program.each_source do |insn, i|
+      next unless insn.op == :SSEND && insn.sym == 'alias_method' && insn.plain_fixed_argc? && insn.argc.to_i == 2
+
+      arg = insn.reg.to_i + 1
+      writer = (0...i).reverse_each.lazy.map { |j| program.source_at(j) }.find { |w| w && w.reg.to_i == arg }
+      found = true if writer && writer.op == :MOVE && writer.regs.map(&:to_i) == [arg, 1]
+    end
+    found
   end
 
   # Irep labels of every def instruction that a conditional forward jump can skip

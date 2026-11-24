@@ -35,6 +35,17 @@ CXX_RUNTIME = [
   ["__rethrow", "void", [], ["newobj instance void class CxxThrow::.ctor()", "throw"]],
   ["__exception_caught", "void", [], ["ret"]],
   ["__destroy_exception_object", "void", [], ["ret"]],
+  # Zero-cost exception tables (docs/notes/pathb-zero-cost-eh.md, pathb-cil-emit.rb's eh_try): the Itanium C++ ABI calls a
+  # throw and a catch make. The thrown object's typeinfo is kept in cxx_ti (the pads' selectors compare it), the selector
+  # the pad computed in cxx_sel; the exception pointer of a pad is the object's address.
+  ["__cxa_allocate_exception", "int64", ["int64"], ["ldc.i8 1", "ldarg.0", "call int64 Prog::'calloc'(int64, int64)", "ret"]],
+  ["__cxa_throw", "void", ["int64", "int64", "int64"],
+   ["ldarg.0", "stsfld int64 Prog::'cxx_ptr'", "ldarg.1", "stsfld int64 Prog::'cxx_ti'",
+    "newobj instance void class CxxThrow::.ctor()", "throw"]],
+  ["__cxa_rethrow", "void", [], ["newobj instance void class CxxThrow::.ctor()", "throw"]],
+  ["__cxa_begin_catch", "int64", ["int64"], ["ldarg.0", "ret"]],
+  ["__cxa_end_catch", "void", [], ["ret"]],
+  ["_ZSt9terminatev", "void", [], ["ldstr \"terminate called\"", "call void [System.Runtime]System.Environment::FailFast(string)", "ret"]],
 ]
 
 SHIM_C = <<'C'
@@ -51,6 +62,153 @@ long nfcxx_vcall(const char *name, long i0, long i1, long i2, long i3, long i4, 
 C
 
 class Die < StandardError; end
+
+# Catch matching of the Itanium typeinfo objects (docs/notes/pathb-cil.md, "Catch matching"). A clause of a try matches the
+# thrown typeinfo by the C++ rules of __do_catch: the same type, a public unambiguous non-virtual base, or a pointer whose
+# pointee is the clause's (or a base of it, or void) with no qualifier added on the thrown side. The matches are read from
+# the typeinfo objects of the link (their layout is the ABI's: vptr, __name, then the class's own fields), once, here.
+CXX_TI_KINDS = {
+  "_ZTVN10__cxxabiv117__class_type_infoE" => :class,
+  "_ZTVN10__cxxabiv120__si_class_type_infoE" => :si,
+  "_ZTVN10__cxxabiv121__vmi_class_type_infoE" => :vmi,
+  "_ZTVN10__cxxabiv119__pointer_type_infoE" => :ptr,
+}
+CXX_ITEM_WIDTH = { "int8" => 1, "int16" => 2, "int32" => 4, "int64" => 8, "float32" => 4, "float64" => 8, "addr" => 8 }
+
+# name => { kind:, at: { byte offset => item } } for the typeinfo objects of the link (a pointer to member is not one: its
+# vtable is not in CXX_TI_KINDS, so it matches exactly only).
+def cxx_ti_info(data)
+  info = {}
+  data.each do |n, d|
+    next unless n.start_with?("_ZTI") && d["items"].is_a?(Array) && !d["items"].empty?
+    first = d["items"][0]
+    next unless first[0] == "addr" && first[2] == 16 && CXX_TI_KINDS.key?(first[1])
+    at = {}
+    off = 0
+    d["items"].each do |it|
+      at[off] = it
+      off += it[0] == "zero" ? it[1] : CXX_ITEM_WIDTH.fetch(it[0]) { die("typeinfo #{n}: item #{it[0]}") }
+    end
+    info[n] = { kind: CXX_TI_KINDS[first[1]], at: at }
+  end
+  info
+end
+
+# The direct bases of a class typeinfo: [name, offset, public, virtual].
+def cxx_bases(info, n)
+  i = info[n]
+  return [] if i.nil?   # not a typeinfo of the link (a fundamental type, or a class of another link)
+  at = i[:at]
+  case i[:kind]
+  when :si
+    [[at[16][1], 0, true, false]]
+  when :vmi
+    (0...at[20][1]).map do |k|
+      ofl = at[32 + 16 * k][1]
+      [at[24 + 16 * k][1], ofl >> 8, (ofl & 2) != 0, (ofl & 1) != 0]
+    end
+  else
+    []
+  end
+end
+
+# Every path from class n to its bases: [base, offset, all public and non-virtual, a virtual edge on it].
+def cxx_paths(info, n, off = 0, clean = true, virt = false, out = [], depth = 0)
+  return out if depth > 64
+  cxx_bases(info, n).each do |b, o, pub, v|
+    c2 = clean && pub && !v
+    out << [b, off + o, c2, virt || v]
+    cxx_paths(info, b, off + o, c2, virt || v, out, depth + 1) if info.key?(b) && !v
+  end
+  out
+end
+
+# The catch codes: [thrown, catch, code], code = -1 (none) or 2 * adjustment + (1 for a pointer, whose object holds the
+# pointer that the adjustment moves). Only the unambiguous, public, non-virtual relations are listed; a relation through a
+# virtual base is not matched (a documented limit).
+def cxx_catch_entries(info)
+  entries = []
+  info.each do |s, sv|
+    next if sv[:kind] == :ptr
+    cxx_paths(info, s).group_by(&:first).each do |c, ps|
+      next if ps.size != 1 || ps[0][3] || !ps[0][2]
+      entries << [s, c, ps[0][1] * 2]
+    end
+  end
+  ptrs = info.select { |_, v| v[:kind] == :ptr }
+  ptrs.each do |s, sv|
+    pf = sv[:at][16][1]
+    pn = sv[:at][24][1]
+    ptrs.each do |c, cv|
+      next if c == s
+      qf = cv[:at][16][1]
+      qn = cv[:at][24][1]
+      next unless (pf & qf) == pf   # no qualifier of the thrown pointee is dropped
+      adj = if qn == pn || qn == "_ZTIv" then 0
+            else
+              ps = cxx_paths(info, pn).select { |b, _, _, _| b == qn }
+              next unless ps.size == 1 && ps[0][2] && !ps[0][3]
+              ps[0][1]
+            end
+      entries << [s, c, adj * 2 + 1]
+    end
+  end
+  entries
+end
+
+# The typeinfo of void* and const void* (libstdc++'s, which EDG does not emit): a catch of one of them is a pointer clause
+# whose pointee is void. Made as data here when the program names one and defines none, so the table has its address.
+def cxx_synth_typeinfo(data, addrs)
+  referenced = addrs.keys + data.values.flat_map { |d| d["items"].select { |it| it[0] == "addr" }.map { |it| it[1] } }
+  { "_ZTIPv" => 0, "_ZTIPKv" => 1 }.each do |n, flags|
+    next if data.key?(n) || !referenced.include?(n)
+    str = ->(text) { text.bytes.map { |c| ["int8", c] } + [["int8", 0]] }
+    data["_ZTIv"] ||= { "name" => "_ZTIv", "exported" => true, "align" => 8, "size" => 16,
+                        "items" => [["addr", "_ZTVN10__cxxabiv123__fundamental_type_infoE", 16], ["addr", "_ZTSv", 0]] }
+    data["_ZTSv"] ||= { "name" => "_ZTSv", "exported" => false, "align" => 1, "size" => 2, "items" => str.call("v") }
+    name = "_ZTS" + n[4..]   # _ZTSPv, _ZTSPKv: the type's name, P (and K) then v
+    text = n == "_ZTIPv" ? "Pv" : "PKv"
+    data[n] = { "name" => n, "exported" => true, "align" => 8, "size" => 32,
+                "items" => [["addr", "_ZTVN10__cxxabiv119__pointer_type_infoE", 16], ["addr", name, 0],
+                            ["int32", flags], ["zero", 4], ["addr", "_ZTIv", 0]] }
+    data[name] = { "name" => name, "exported" => false, "align" => 1, "size" => text.size + 1, "items" => str.call(text) }
+  end
+end
+
+# The two runtime methods the emitted selectors call (pathb-cil-emit.rb, eh_try). __nfcxx_catch_code(thrown, catch) is 0 for
+# the same typeinfo, the code of the table, or -1. __nfcxx_adjust(object, code) is the address of the object the clause
+# catches: the object itself, moved by the base offset; for a pointer, a new 8-byte object holding the moved pointer.
+def cxx_catch_methods(data, addrs)
+  # the entries of the typeinfos the program takes the address of (a thrown type and a catch type both are: the emitter's
+  # expr), so the table is as big as the program's exceptions, not the typeinfos of the link
+  info = cxx_ti_info(data)
+  il = [".method static int64 '__nfcxx_catch_code'(int64, int64) cil managed {", "  .maxstack 4",
+        "    ldarg.1", "    ldc.i8 0", "    bne.un CC_start", "    ldc.i8 -1", "    ret", "  CC_start:"]
+  # the typeinfo's own code first: a pointer's is 1 (the pointer is what the clause gets), a class's 0
+  self_codes = info.map { |s, v| [s, s, v[:kind] == :ptr ? 1 : 0] }
+  table = (self_codes + cxx_catch_entries(info)).select { |s, c, _| addrs.key?(s) && addrs.key?(c) }
+  table.each_with_index do |(s, c, code), k|
+    il << "    ldarg.0" << "    ldsfld int64 Prog::'addr_#{qname(s)}'" << "    bne.un CC_#{k}" <<
+          "    ldarg.1" << "    ldsfld int64 Prog::'addr_#{qname(c)}'" << "    bne.un CC_#{k}" <<
+          "    ldc.i8 #{code}" << "    ret" << "  CC_#{k}:"
+  end
+  # any other equal pair (a typeinfo the unit does not define) is the same type
+  il << "    ldarg.0" << "    ldarg.1" << "    bne.un CC_none" << "    ldc.i8 0" << "    ret" << "  CC_none:"
+  il << "    ldc.i8 -1" << "    ret" << "}"
+  # the value __cxa_begin_catch gives for the clause: the object's address, or for a pointer clause the pointer itself
+  # (libstdc++'s adjusted pointer; the IR's catch (T *p) reads the pointer from it)
+  adjust = [".method static int64 '__nfcxx_adjust'(int64, int64) cil managed {",
+            "  .maxstack 6", "  .locals init (int64 V0)",
+            "    ldarg.1", "    ldc.i8 0", "    beq AD_obj",
+            "    ldarg.1", "    ldc.i8 1", "    and", "    ldc.i8 0", "    beq AD_class",
+            "    ldarg.0", "    ldind.i8", "    stloc V0",
+            "    ldloc V0", "    brfalse AD_null",
+            "    ldloc V0", "    ldarg.1", "    ldc.i4.1", "    shr", "    add", "    ret",
+            "  AD_null:", "    ldc.i8 0", "    ret",
+            "  AD_class:", "    ldarg.0", "    ldarg.1", "    ldc.i4.1", "    shr", "    add", "    ret",
+            "  AD_obj:", "    ldarg.0", "    ret", "}"]
+  [il.join("\n"), adjust.join("\n")]
+end
 
 def die(msg)
   raise Die, msg
@@ -472,6 +630,8 @@ def link(args)
                             "size" => char_len(prog) + 1,
                             "items" => prog.bytes.map { |c| ["int8", c] } + [["int8", 0]] }
 
+  cxx_synth_typeinfo(data, addrs)
+
   # Data addresses: every data symbol, every symbol used as a value, and every symbol a data item points at.
   names = {}
   data.each_key { |n| names[n] = true }
@@ -501,6 +661,8 @@ def link(args)
   lines << ".class public abstract sealed auto ansi beforefieldinit Prog extends [System.Runtime]System.Object {"
   sorted_names.each { |n| lines << "  .field public static int64 'addr_#{qname(n)}'" }
   lines << "  .field public static int64 'cxx_ptr'"
+  lines << "  .field public static int64 'cxx_ti'"
+  lines << "  .field public static int64 'cxx_sel'"
 
   # P/Invoke stubs for the functions this program calls and no unit defines (a variadic call goes through the shim).
   variadic = calls.values.any? { |s| s["variadic"] } || frags.any? { |fr| fr["variadic"] }
@@ -531,6 +693,9 @@ def link(args)
     lines << "  .method public static pinvokeimpl(\"libc.so.6\" as \"#{n}\") #{ret} '#{n}'(#{ps.join(', ')}) " \
              "cil managed preservesig { }"
   end
+
+  # The catch matching of the exception runtime (cxx_catch_methods).
+  lines.concat(cxx_catch_methods(data, addrs))
 
   # Functions.
   functions.each_value { |fn| lines << fn["il"].join("\n") }

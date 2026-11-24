@@ -400,9 +400,13 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_errinfo tools/cext2mrbgem/fi
 check test "$rc" -eq 0
 check grep -qF '(mrb->exc ? mrb_obj_value(mrb->exc) : mrb_nil_value())' "$work/api_errinfo/src/api_errinfo.c"
 # 2zzz63. T_BIGNUM is a recorded stuck point (the fork has no Bignum): the refusal carries that reason.
-rc=0; "$rb" "$conv" --scanner "$scanner" --name api_bignum_stuck tools/cext2mrbgem/fixtures/api_bignum_stuck/ext/api_bignum_stuck "$work/api_bignum_stuck" > "$work/api_bignum_stuck.log" 2>&1 || rc=$?
-check test "$rc" -ne 0
-check grep -qF 'stuck point: the fork has no Bignum' "$work/api_bignum_stuck/REFUSALS.txt"
+# 2zzz165. T_BIGNUM is the MRB_TT_BIGINT tag (a bigint is the value outside the fixnum range): a type test and a Check_Type on it.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_bignum_tag tools/cext2mrbgem/fixtures/api_bignum_tag/ext/api_bignum_tag "$work/api_bignum_tag" > "$work/api_bignum_tag.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_bignum_tag/NOT_BUILDABLE"
+check grep -qF 'return mrb_type(v) == MRB_TT_BIGINT ? mrb_true_value() : mrb_false_value();' "$work/api_bignum_tag/src/api_bignum_tag.c"
+check grep -qF 'mrb_check_type(mrb, v, MRB_TT_BIGINT);' "$work/api_bignum_tag/src/api_bignum_tag.c"
+check test "$(grep -c 'stuck point' "$work/api_bignum_tag/REFUSALS.txt")" -eq 0
 # 2zzz64. rb_hash_bulk_insert and rb_class_inherited_p map to the fork's mrb_hash_bulk_insert and mrb_class_inherited_p.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_class tools/cext2mrbgem/fixtures/api_hash_class/ext/api_hash_class "$work/api_hash_class" > "$work/api_hash_class.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
@@ -497,10 +501,11 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_range_values tools/cext2mrbg
 check test "$rc" -eq 0
 check grep -qF '*(&beg) = RANGE_BEG(mrb_range_ptr(mrb, r))' "$work/api_range_values/src/api_range_values.c"
 check grep -qF '#include <mruby/range.h>' "$work/api_range_values/src/api_range_values.c"
-# 2zzz87. rb_time_timespec_new with a fixed offset is a recorded stuck point (mruby-time has only UTC and LOCAL).
+# 2zzz87. rb_time_timespec_new with a fixed offset maps to the fork's fixed-offset Time (mrb_time_at_offset).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_time_new tools/cext2mrbgem/fixtures/api_time_new/ext/api_time_new "$work/api_time_new" > "$work/api_time_new.log" 2>&1 || rc=$?
-check test "$rc" -ne 0
-check grep -q 'rb_time_timespec_new  stuck point (Time offset)' "$work/api_time_new/REFUSALS.txt"
+check test "$rc" -eq 0
+# the fork has fixed-offset Time (mrb_time_at_offset): rb_time_timespec_new maps to it, so no Time-offset refusal
+check grep -q 'nfcx_time_timespec_new' "$work/api_time_new/src/api_time_new.c"
 # 2zzz92. A file-scope table used from a registered method: a member of the same name, a prototype parameter and a shadowing
 # parameter are not uses of the table, so the table's callbacks convert (yajl's callbacks table).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_tbl_names tools/cext2mrbgem/fixtures/api_tbl_names/ext/api_tbl_names "$work/api_tbl_names" > "$work/api_tbl_names.log" 2>&1 || rc=$?
@@ -621,7 +626,8 @@ check grep -qF 'MRB_TT_DATA' "$work/api_type_refused/src/api_type_refused.c"
 check test "$(grep -c '  RB_TYPE_P  T_FIXNUM has no exact' "$work/api_type_refused/REFUSALS.txt")" -eq 0
 check grep -qF 'MRB_TT_FIXNUM' "$work/api_type_refused/src/api_type_refused.c"
 check grep -q "  RB_TYPE_P  object 'rb_ary_entry(a, 0)' is not a plain local variable" "$work/api_type_refused/REFUSALS.txt"
-check grep -q '  RB_TYPE_P  stuck point (Bignum): the fork has no Bignum' "$work/api_type_refused/REFUSALS.txt"
+# T_BIGNUM is the MRB_TT_BIGINT tag now (api_map: the bigint of the fork), not refused
+check grep -qF 'MRB_TT_BIGINT' "$work/api_type_refused/src/api_type_refused.c"
 
 # 2m. class-name and method-undef calls (api_map.json batch C1): the class variable is passed as a struct RClass * (not
 # wrapped in mrb_obj_value, which the mruby functions do not take)
@@ -1438,8 +1444,10 @@ check grep -qF "spec.add_dependency 'mruby-rational'" "$work/api_rational_gem/mr
 # 2zzz120. the address of an owned class variable (struct RClass *) given to rb_gc_register_address is refused with its
 # reason; the converter does not emit &mrb_obj_value(...), which does not compile.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_gc_addr_cls tools/cext2mrbgem/fixtures/api_gc_addr_cls/ext/api_gc_addr_cls "$work/api_gc_addr_cls" > "$work/api_gc_addr_cls.log" 2>&1 || rc=$?
-check test -e "$work/api_gc_addr_cls/NOT_BUILDABLE"
-check grep -qF 'stuck point (GC root): the address of an owned class variable' "$work/api_gc_addr_cls/REFUSALS.txt"
+check test ! -e "$work/api_gc_addr_cls/NOT_BUILDABLE"
+# the registration of an owned class variable goes through the address helper (no GC-root refusal)
+check grep -qF 'nfcx_gc_root_addr(mrb, (void *)&err_class, sizeof(err_class));' "$work/api_gc_addr_cls/src/api_gc_addr_cls.c"
+check test "$(grep -c 'GC root' "$work/api_gc_addr_cls/REFUSALS.txt")" -eq 0
 check bash -c "! grep -rqF '&mrb_obj_value(' '$work/api_gc_addr_cls'"
 # 2zzz121. an ID pointer declared in a function body (ID *idp) is an mrb_sym pointer, as an ID variable is (the declaration
 # test takes the * with or without spaces).
@@ -1463,8 +1471,8 @@ check grep -qF 'mrb_value clas;' "$work/api_class_mixed/src/api_class_mixed.c"
 # 2zzz124. a VALUE cast to a pointer (void *)obj is a stuck point (VALUE as pointer): the fork's VALUE is a struct, so the
 # cast has no mruby form, and the file is marked not buildable with that reason.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_value_ptr tools/cext2mrbgem/fixtures/api_value_ptr/ext/api_value_ptr "$work/api_value_ptr" > "$work/api_value_ptr.log" 2>&1 || rc=$?
-check test -e "$work/api_value_ptr/NOT_BUILDABLE"
-check grep -qF 'stuck point (VALUE as pointer): obj is a VALUE' "$work/api_value_ptr/REFUSALS.txt"
+check test ! -e "$work/api_value_ptr/NOT_BUILDABLE"
+check grep -qF 'void *ctx = (void *)mrb_cptr(obj);' "$work/api_value_ptr/src/api_value_ptr.c"
 # 2zzz125. assert(v) on a VALUE is a stuck point (VALUE truth test): the fork's VALUE is a struct, and no exact truth test is
 # expressed (the assert is not weakened to a nil test).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_value_assert tools/cext2mrbgem/fixtures/api_value_assert/ext/api_value_assert "$work/api_value_assert" > "$work/api_value_assert.log" 2>&1 || rc=$?
@@ -1499,8 +1507,8 @@ check grep -qF 'nfcx_memsearch(RSTRING_PTR(needle), RSTRING_LEN(needle),' "$work
 # 2zzz130. rb_hash_foreach with a pointer cast to VALUE as its data is a stuck point (VALUE as pointer): the VALUE struct cannot hold
 # the pointer, so the file is marked not buildable with that reason (not the generic form refusal).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_ptr_stuck tools/cext2mrbgem/fixtures/api_hash_ptr_stuck/ext/api_hash_ptr_stuck "$work/api_hash_ptr_stuck" > "$work/api_hash_ptr_stuck.log" 2>&1 || rc=$?
-check test -e "$work/api_hash_ptr_stuck/NOT_BUILDABLE"
-check grep -qF 'stuck point (VALUE as pointer): rb_hash_foreach gets a pointer cast to VALUE' "$work/api_hash_ptr_stuck/REFUSALS.txt"
+check test ! -e "$work/api_hash_ptr_stuck/NOT_BUILDABLE"
+check test "$(grep -c 'mrb_hash_foreach(mrb, RHASH(h), count_cb, (void \*)p);' "$work/api_hash_ptr_stuck/src/api_hash_ptr_stuck.c")" -eq 2
 # 2zzz131. a struct field declared with the name of a registered method (char to_json;) and member accesses of it are not uses of the
 # method: the method converts, and the file is not refused as a direct-called or address-taken function.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_field_named_fn tools/cext2mrbgem/fixtures/api_field_named_fn/ext/api_field_named_fn "$work/api_field_named_fn" > "$work/api_field_named_fn.log" 2>&1 || rc=$?
@@ -1616,14 +1624,11 @@ check grep -qF 'stuck point (VALUE as integer): obj is a VALUE' "$work/api_value
 # 2zzz148. if (v) on a VALUE is a stuck point (VALUE truth test): CRuby's nonzero word is true for nil as well, which the fork's
 # VALUE struct has no exact test of, so the file is marked not buildable with that reason.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_value_if tools/cext2mrbgem/fixtures/api_value_if/ext/api_value_if "$work/api_value_if" > "$work/api_value_if.log" 2>&1 || rc=$?
-check test -e "$work/api_value_if/NOT_BUILDABLE"
-check grep -qF 'stuck point (VALUE truth test): if tests v' "$work/api_value_if/REFUSALS.txt"
-# 2zzz149. the stub policy (option A): the function holding a refused use has its body replaced by a stub that raises
-# NotImplementedError when it runs, so gem_init.c carries no #error (the refusal is recorded in REFUSALS.txt as stubbed).
-check grep -qF 'BC2CPP-MRBGEM stub: refused code' "$work/api_value_if/src/api_value_if.c"
-check grep -qF 'NotImplementedError' "$work/api_value_if/src/api_value_if.c"
+check test ! -e "$work/api_value_if/NOT_BUILDABLE"
+check grep -qF 'if (!mrb_false_p(v))' "$work/api_value_if/src/api_value_if.c"
+# 2zzz149. if (v) is mapped (no stub): the function keeps its body, and gem_init.c carries no #error.
+check test "$(grep -c 'BC2CPP-MRBGEM stub' "$work/api_value_if/src/api_value_if.c")" -eq 0
 check test "$(grep -c '#error' "$work/api_value_if/src/gem_init.c")" -eq 0
-check grep -qF 'STATUS: STUBBED' "$work/api_value_if/REFUSALS.txt"
 # 2zzz150. an ID returned from a VALUE function is the symbol value (mrb_symbol_value), and a VALUE call returned from an ID
 # function is read as its symbol (mrb_symbol), the fork's symbol carried in a value.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_id_return tools/cext2mrbgem/fixtures/api_id_return/ext/api_id_return "$work/api_id_return" > "$work/api_id_return.log" 2>&1 || rc=$?
@@ -1632,7 +1637,7 @@ check grep -qF 'mrb_symbol(' "$work/api_id_return/src/api_id_return.c"
 # 2zzz151. a refused statement in Init is dropped as a no-op (the user's decision): the gem loads, so gem_init.c has no #error
 # and the statement is recorded as dropped in REFUSALS.txt.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_init_drop tools/cext2mrbgem/fixtures/api_init_drop/ext/api_init_drop "$work/api_init_drop" > "$work/api_init_drop.log" 2>&1 || rc=$?
-check grep -qF 'BC2CPP-MRBGEM dropped in Init (rb_thread_current)' "$work/api_init_drop/src/api_init_drop.c"
+check grep -qF 'BC2CPP-MRBGEM dropped in Init (rb_thread_local_aset)' "$work/api_init_drop/src/api_init_drop.c"
 check test "$(grep -c '#error' "$work/api_init_drop/src/gem_init.c")" -eq 0
 check grep -qF '[dropped in Init' "$work/api_init_drop/REFUSALS.txt"
 check grep -qF 'STATUS: STUBBED' "$work/api_init_drop/REFUSALS.txt"
@@ -1721,6 +1726,14 @@ check grep -qF 'mrb_fixnum_value(mrb_bint_cmp(mrb, ' "$work/api_bignum/src/api_b
 check grep -qF '(mrb_bint_sign(mrb, ' "$work/api_bignum/src/api_bignum.c"
 check test "$(grep -c 'stuck point' "$work/api_bignum/REFUSALS.txt" 2>/dev/null)" -eq 0
 
+# 2zzz166. a class variable registered as a GC root (rb_gc_register_address, rb_global_variable): the registration is the
+# nfcx_gc_root_addr helper on the variable's address (a class is rooted by its class value once set), not a stuck point.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_gc_class_root tools/cext2mrbgem/fixtures/api_gc_class_root/ext/api_gc_class_root "$work/api_gc_class_root" > "$work/api_gc_class_root.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_gc_class_root/NOT_BUILDABLE"
+check grep -qF 'nfcx_gc_root_addr(mrb, (void *)&cWidget, sizeof(cWidget));' "$work/api_gc_class_root/src/api_gc_class_root.c"
+check grep -qF 'nfcx_gc_root_addr(mrb, (void *)&cGizmo, sizeof(cGizmo));' "$work/api_gc_class_root/src/api_gc_class_root.c"
+check test "$(grep -c 'GC root' "$work/api_gc_class_root/REFUSALS.txt")" -eq 0
 # 2zzz164. rb_define_alloc_func: the allocator is a registered function of the state, and the class gets allocate and new
 # singleton methods that call it (nfcx_alloc_register, with the prelude in the same file); no per-class-allocator refusal.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_alloc_class tools/cext2mrbgem/fixtures/api_alloc_class/ext/api_alloc_class "$work/api_alloc_class" > "$work/api_alloc_class.log" 2>&1 || rc=$?
@@ -1730,6 +1743,200 @@ check grep -qF 'static mrb_value ac_alloc(mrb_state *mrb, mrb_value klass) {' "$
 check grep -qF 'nfcx_alloc_register(mrb, k, ac_alloc);' "$work/api_alloc_class/src/api_alloc_class.c"
 check grep -qF 'mrb_define_class_method(mrb, c, "new", nfcx_alloc_new, MRB_ARGS_ANY());' "$work/api_alloc_class/src/api_alloc_class.c"
 check test "$(grep -c 'per-class allocator' "$work/api_alloc_class/REFUSALS.txt")" -eq 0
+# 2zzz167. == and != between VALUEs are identity: a VALUE parameter against another VALUE (mrb_obj_equal, the existing pass) and
+# a VALUE against a symbol call (mrb_value_identical: the operand is a call the existing pass does not take).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_value_identity tools/cext2mrbgem/fixtures/api_value_identity/ext/api_value_identity "$work/api_value_identity" > "$work/api_value_identity.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_value_identity/NOT_BUILDABLE"
+check grep -qF 'return (mrb_obj_equal(mrb, a, b)) ? mrb_true_value() : mrb_false_value();' "$work/api_value_identity/src/api_value_identity.c"
+check grep -qF 'mrb_value_identical(k ,  mrb_symbol_value(mrb_intern_cstr(mrb, "ordinal")))' "$work/api_value_identity/src/api_value_identity.c"
+# 2zzz168. a mutex (rb_mutex_new, lock, unlock) and the current thread convert to nil and no-ops (one thread in mruby, so the lock
+# never contends); no Thread refusal for them.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_mutex_thread tools/cext2mrbgem/fixtures/api_mutex_thread/ext/api_mutex_thread "$work/api_mutex_thread" > "$work/api_mutex_thread.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_mutex_thread/NOT_BUILDABLE"
+check grep -qF 'mrb_value mu = mrb_nil_value();' "$work/api_mutex_thread/src/api_mutex_thread.c"
+check grep -qF '((void)(mu), mrb_nil_value());' "$work/api_mutex_thread/src/api_mutex_thread.c"
+check test "$(grep -c 'Thread' "$work/api_mutex_thread/REFUSALS.txt")" -eq 0
+# 2zzz169. rb_struct_define and rb_struct_new of the mruby-struct gem: the variadic helpers (Struct.new of the member symbols, and
+# klass.new with the members' count of values); the gem is a dependency.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_struct_va tools/cext2mrbgem/fixtures/api_struct_va/ext/api_struct_va "$work/api_struct_va" > "$work/api_struct_va.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_struct_va/NOT_BUILDABLE"
+check grep -qF 'return nfcx_struct_new(mrb, sv_point, x, y);' "$work/api_struct_va/src/api_struct_va.c"
+check grep -qF 'sv_point = nfcx_struct_define(mrb, "SvPoint", "x", "y", NULL);' "$work/api_struct_va/src/api_struct_va.c"
+check grep -qF "spec.add_dependency 'mruby-struct'" "$work/api_struct_va/mrbgem.rake"
+# 2zzz170. a VALUE local CRuby uses only as a C integer (jd = 5, t = f(jd), f((int)t)) is an mrb_int local; a VALUE local that
+# holds an object (keep = x) stays a VALUE.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_int_local tools/cext2mrbgem/fixtures/api_int_local/ext/api_int_local "$work/api_int_local" > "$work/api_int_local.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_int_local/NOT_BUILDABLE"
+check grep -qF 'mrb_int jd = 5;' "$work/api_int_local/src/api_int_local.c"
+check grep -qF 'mrb_int t;' "$work/api_int_local/src/api_int_local.c"
+check grep -qF 'mrb_value keep = x;' "$work/api_int_local/src/api_int_local.c"
+# 2zzz176. CRuby's thread-local storage (rb_thread_local_aset/aref of a symbol key) is a per-state hash (nfcx_tls_*): no Thread refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_thread_local tools/cext2mrbgem/fixtures/api_thread_local/ext/api_thread_local "$work/api_thread_local" > "$work/api_thread_local.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'Thread' "$work/api_thread_local/REFUSALS.txt")" -eq 0
+check grep -qF 'nfcx_tls_aset(mrb, mrb_nil_value(), id_mode, v);' "$work/api_thread_local/src/api_thread_local.c"
+check grep -qF 'return nfcx_tls_aref(mrb, mrb_nil_value(), id_mode);' "$work/api_thread_local/src/api_thread_local.c"
+# 2zzz177. RB_ALLOCV_N assigned to a pointer declared earlier (buf = ALLOCV_N(char, v, n)): mrb_malloc of the element type, freed by
+# RB_ALLOCV_END of the same VALUE; no temporary-buffer refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_allocv_assign tools/cext2mrbgem/fixtures/api_allocv_assign/ext/api_allocv_assign "$work/api_allocv_assign" > "$work/api_allocv_assign.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'temporary buffer' "$work/api_allocv_assign/REFUSALS.txt")" -eq 0
+check grep -qF 'buf = (char *)mrb_malloc(mrb, sizeof(char) * (n + 1));' "$work/api_allocv_assign/src/api_allocv_assign.c"
+check grep -qF 'mrb_free(mrb, buf);' "$work/api_allocv_assign/src/api_allocv_assign.c"
+# 2zzz180. rb_reg_new is a Regexp: the mruby-onig-regexp gem's OnigRegexp (OnigRegexp.new(source, options)); the converted gem
+# depends on mruby-onig-regexp; no Regexp refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_reg_new tools/cext2mrbgem/fixtures/api_reg_new/ext/api_reg_new "$work/api_reg_new" > "$work/api_reg_new.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'Regexp' "$work/api_reg_new/REFUSALS.txt")" -eq 0
+check grep -qF 'OnigRegexp' "$work/api_reg_new/src/api_reg_new.c"
+check grep -qF "spec.add_dependency 'mruby-onig-regexp'" "$work/api_reg_new/mrbgem.rake"
+# 2zzz181. a VALUE funcall as the condition of ?: is mrb_test (CRuby tests the word; a boolean result is exact under mrb_test).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ternary_truth tools/cext2mrbgem/fixtures/api_ternary_truth/ext/api_ternary_truth "$work/api_ternary_truth" > "$work/api_ternary_truth.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_test(tt_ge(mrb, self, n)) ? 19 : 20' "$work/api_ternary_truth/src/api_ternary_truth.c"
+# 2zzz182. rb_marshal_load(port) is mrb_marshal_load(mrb, str) of the mruby-marshal gem; the converted gem depends on it; no refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_marshal_load tools/cext2mrbgem/fixtures/api_marshal_load/ext/api_marshal_load "$work/api_marshal_load" > "$work/api_marshal_load.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'Marshal' "$work/api_marshal_load/REFUSALS.txt")" -eq 0
+check grep -qF 'return mrb_marshal_load(mrb, data);' "$work/api_marshal_load/src/api_marshal_load.c"
+# 2zzz183. RB_OBJ_FROZEN_RAW is the fork's frozen bit (MRB_FROZEN_P on a heap object; an immediate is not frozen); no refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_frozen_raw tools/cext2mrbgem/fixtures/api_frozen_raw/ext/api_frozen_raw "$work/api_frozen_raw" > "$work/api_frozen_raw.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'stuck point' "$work/api_frozen_raw/REFUSALS.txt")" -eq 0
+check grep -qF 'MRB_FROZEN_P(mrb_basic_ptr(str))' "$work/api_frozen_raw/src/api_frozen_raw.c"
+# 2zzz184. rb_str_encode is the fork's mruby-encoding rb_str_encode (ASCII-compatible encodings): no refusal; mruby-encoding is a dependency.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_str_encode tools/cext2mrbgem/fixtures/api_str_encode/ext/api_str_encode "$work/api_str_encode" > "$work/api_str_encode.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'stuck point' "$work/api_str_encode/REFUSALS.txt")" -eq 0
+check grep -qF 'rb_str_encode(mrb, str, enc, 0, mrb_nil_value())' "$work/api_str_encode/src/api_str_encode.c"
+# 2zzz185. rb_ensure with a pointer carried in the data VALUE ((VALUE)p, a pointer local): mrb_ensure with mrb_cptr_value of the
+# pointer; no pointer-as-VALUE refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ensure_pdata tools/cext2mrbgem/fixtures/api_ensure_pdata/ext/api_ensure_pdata "$work/api_ensure_pdata" > "$work/api_ensure_pdata.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'VALUE as pointer' "$work/api_ensure_pdata/REFUSALS.txt")" -eq 0
+check grep -qF 'mrb_ensure(mrb, ep_body, mrb_cptr_value(mrb, p), ep_done, mrb_cptr_value(mrb, p));' "$work/api_ensure_pdata/src/api_ensure_pdata.c"
+# 2zzz186. rb_protect with a VALUE array as its data ((VALUE)args): the array is mrb_cptr_value of its address, its element casts
+# are mrb_cptr of the element; no VALUE-array refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_protect_array tools/cext2mrbgem/fixtures/api_protect_array/ext/api_protect_array "$work/api_protect_array" > "$work/api_protect_array.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'VALUE as pointer' "$work/api_protect_array/REFUSALS.txt")" -eq 0
+check grep -qF 'mrb_protect(mrb, pa_cb, mrb_cptr_value(mrb, args), &state);' "$work/api_protect_array/src/api_protect_array.c"
+check grep -qF 'struct pa_state *st = (struct pa_state *)mrb_cptr(args[0]);' "$work/api_protect_array/src/api_protect_array.c"
+# 2zzz187. switch (TYPE(v)) with a case T_REGEXP label: the switch is on the type key, and a Regexp (the mruby-onig-regexp data
+# object) is the label's key; the Regexp refusal of the label is gone and the gem is a dependency.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_switch_regexp tools/cext2mrbgem/fixtures/api_switch_regexp/ext/api_switch_regexp "$work/api_switch_regexp" > "$work/api_switch_regexp.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_switch_regexp/NOT_BUILDABLE"
+check test "$(grep -c 'T_REGEXP' "$work/api_switch_regexp/REFUSALS.txt")" -eq 0
+check grep -qF 'switch (nfcx_type_key_regexp(mrb, (v))) {' "$work/api_switch_regexp/src/api_switch_regexp.c"
+check grep -qF 'case NFCX_TT_REGEXP:' "$work/api_switch_regexp/src/api_switch_regexp.c"
+check grep -qF 'mruby_onig_regexp_is(v)' "$work/api_switch_regexp/src/api_switch_regexp.c"
+check grep -qF "spec.add_dependency 'mruby-onig-regexp'" "$work/api_switch_regexp/mrbgem.rake"
+# 2zzz188. the same switch on rb_type(v) (the subject is the type read the macro TYPE is): the key function is the subject too.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_switch_rb_type tools/cext2mrbgem/fixtures/api_switch_rb_type/ext/api_switch_rb_type "$work/api_switch_rb_type" > "$work/api_switch_rb_type.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_switch_rb_type/NOT_BUILDABLE"
+check grep -qF 'switch (nfcx_type_key_regexp(mrb, (v))) {' "$work/api_switch_rb_type/src/api_switch_rb_type.c"
+check grep -qF 'case NFCX_TT_REGEXP:' "$work/api_switch_rb_type/src/api_switch_rb_type.c"
+# 2zzz189. object-like aliases of rb_gc_mark: #define rb_gc_mark_movable rb_gc_mark (a mapped mark call) is dropped and its uses
+# convert through the entry; #define mark_second rb_gc_mark (not an API name) becomes the function-like mark macro with mrb in scope.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_gc_alias tools/cext2mrbgem/fixtures/api_gc_alias/ext/api_gc_alias "$work/api_gc_alias" > "$work/api_gc_alias.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_gc_alias/NOT_BUILDABLE"
+check test "$(grep -c 'rb_gc_mark' "$work/api_gc_alias/REFUSALS.txt")" -eq 0
+check grep -qF '#define mark_second(x) mrb_gc_mark_value(mrb, x)' "$work/api_gc_alias/src/api_gc_alias.c"
+check grep -qF 'static void pair_mark(mrb_state *mrb, void *ptr) {' "$work/api_gc_alias/src/api_gc_alias.c"
+check test "$(grep -c 'define rb_gc_mark_movable' "$work/api_gc_alias/src/api_gc_alias.c")" -eq 0
+# 2zzz190. a fixnum VALUE cast to an integer inside its FIXNUM_P branch: the fixnum's integer (mrb_fixnum), no VALUE-as-integer refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fixnum_cast tools/cext2mrbgem/fixtures/api_fixnum_cast/ext/api_fixnum_cast "$work/api_fixnum_cast" > "$work/api_fixnum_cast.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'VALUE as integer' "$work/api_fixnum_cast/REFUSALS.txt")" -eq 0
+check grep -qF 'h[1] = mrb_fixnum(nth);' "$work/api_fixnum_cast/src/api_fixnum_cast.c"
+# 2zzz191. a VALUE passed as an sid_t key: its word through nfcx_value_word (the union's bits); an ID parameter stays refused.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_sid_key tools/cext2mrbgem/fixtures/api_sid_key/ext/api_sid_key "$work/api_sid_key" > "$work/api_sid_key.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'VALUE as integer' "$work/api_sid_key/REFUSALS.txt")" -eq 0
+check grep -qF 'return sk_lookup(nfcx_value_word(obj))' "$work/api_sid_key/src/api_sid_key.c"
+check grep -qF 'static unsigned long long nfcx_value_word(mrb_value v) {' "$work/api_sid_key/src/api_sid_key.c"
+# 2zzz192. an integer array declared after another declarator (st_index_t v, h[2];) assigned a VALUE-returning call is a refusal
+# (the array is found in a multi-declarator declaration), not a silent compile error.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_multi_decl tools/cext2mrbgem/fixtures/api_multi_decl/ext/api_multi_decl "$work/api_multi_decl" > "$work/api_multi_decl.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check grep -qF 'h is an integer array (st_index_t), and md_get returns a VALUE' "$work/api_multi_decl/REFUSALS.txt"
+# 2zzz194. a VALUE call stored in an array the function hashes (rb_memhash(h, ...)): the VALUE is hashed by value
+# (nfcx_value_hash: its integer if a fixnum, else its hash method), with no refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_value tools/cext2mrbgem/fixtures/api_hash_value/ext/api_hash_value "$work/api_hash_value" > "$work/api_hash_value.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'VALUE as integer' "$work/api_hash_value/REFUSALS.txt")" -eq 0
+check grep -qF 'h[1] = nfcx_value_hash(mrb, hv_sf(mrb, obj));' "$work/api_hash_value/src/api_hash_value.c"
+# 2zzz195. a VALUE-returning call that is the whole parenthesised if condition gets one truth test (mrb_test), not two: the
+# operand pass (a call next to && or ||) does not take it.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_truth_twice tools/cext2mrbgem/fixtures/api_truth_twice/ext/api_truth_twice "$work/api_truth_twice" > "$work/api_truth_twice.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'if (mrb_test(tt_zero(x)))' "$work/api_truth_twice/src/api_truth_twice.c"
+check test "$(grep -c 'mrb_test(mrb_test' "$work/api_truth_twice/src/api_truth_twice.c")" -eq 0
+# 2zzz196. a later declarator of a declaration (const char *s1, *s2;) is a pointer local in its block: its if (s2) is a pointer
+# test, not the VALUE of the function's own s2 (no mrb_false_p on it).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_decl_comma tools/cext2mrbgem/fixtures/api_decl_comma/ext/api_decl_comma "$work/api_decl_comma" > "$work/api_decl_comma.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'mrb_false_p(s2)' "$work/api_decl_comma/src/api_decl_comma.c")" -eq 0
+check grep -qF '        if (s2) {' "$work/api_decl_comma/src/api_decl_comma.c"
+# 2zzz198. ENC_CODERANGE_ASCIIONLY (CRuby's cached coderange: a byte scan here) and ENCODING_GET (the encoding index) map, with no refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_coderange tools/cext2mrbgem/fixtures/api_coderange/ext/api_coderange "$work/api_coderange" > "$work/api_coderange.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'CODERANGE\|ENCODING_GET' "$work/api_coderange/REFUSALS.txt")" -eq 0
+check grep -qF 'nfcx_str_ascii_only(v)' "$work/api_coderange/src/api_coderange.c"
+check grep -qF 'rb_enc_get_index(v) == 0' "$work/api_coderange/src/api_coderange.c"
+# 2zzz197. an if on a VALUE member of a nested struct (h->options.hook) is a truth test of the VALUE: the member chain is resolved
+# through the base's declared struct type, so the function-pointer member of another struct with the same name does not decide it.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_field_chain tools/cext2mrbgem/fixtures/api_field_chain/ext/api_field_chain "$work/api_field_chain" > "$work/api_field_chain.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF '    if (!mrb_false_p(h->options.hook))' "$work/api_field_chain/src/api_field_chain.c"
+# 2zzz193. RB_ENC_INTERNED_STR_NULL_CHECK is a CRuby build flag (1 only for Ruby 3.0.0 to 3.0.5): the port's value is its default 0,
+# so the check is the dead branch 0 && ..., with no refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_enc_null_check tools/cext2mrbgem/fixtures/api_enc_null_check/ext/api_enc_null_check "$work/api_enc_null_check" > "$work/api_enc_null_check.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'NULL_CHECK' "$work/api_enc_null_check/REFUSALS.txt")" -eq 0
+check grep -qF 'if (0 && ((long)mrb_int(mrb, len)) == 0) {' "$work/api_enc_null_check/src/api_enc_null_check.c"
+check grep -qF "spec.add_dependency 'mruby-marshal'" "$work/api_marshal_load/mrbgem.rake"
+# 2zzz179. rb_time_timespec_new: a fixed UTC offset is mrb_time_at_offset (the fork's mruby-time), CRuby's INT_MAX and INT_MAX-1 are
+# local time and UTC; no Time-offset refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_time_offset tools/cext2mrbgem/fixtures/api_time_offset/ext/api_time_offset "$work/api_time_offset" > "$work/api_time_offset.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'Time offset' "$work/api_time_offset/REFUSALS.txt")" -eq 0
+check grep -qF 'nfcx_time_timespec_new(mrb, &ts, ((int)mrb_int(mrb, off_v)));' "$work/api_time_offset/src/api_time_offset.c"
+# 2zzz171. a block-scoped long t and a VALUE t in a later block of one function: the (long)t cast of the long is an integer use,
+# no VALUE-as-integer refusal (the lookup is the declaration whose block encloses the use).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_block_shadow tools/cext2mrbgem/fixtures/api_block_shadow/ext/api_block_shadow "$work/api_block_shadow" > "$work/api_block_shadow.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_block_shadow/NOT_BUILDABLE"
+check test "$(grep -c 'VALUE as integer' "$work/api_block_shadow/REFUSALS.txt")" -eq 0
+# 2zzz172. a VALUE declared in a dead #if 0 branch is not a file-scope name: an int parameter named the same is not a VALUE use.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dead_decl tools/cext2mrbgem/fixtures/api_dead_decl/ext/api_dead_decl "$work/api_dead_decl" > "$work/api_dead_decl.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'VALUE as integer' "$work/api_dead_decl/REFUSALS.txt")" -eq 0
+# 2zzz173. a pointer carried in a VALUE: (VALUE)h of a struct pointer local is mrb_cptr_value(mrb, h), and a VALUE cast to a
+# struct pointer is read with mrb_cptr; no VALUE-as-pointer refusal for either.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_cptr_value tools/cext2mrbgem/fixtures/api_cptr_value/ext/api_cptr_value "$work/api_cptr_value" > "$work/api_cptr_value.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'VALUE as pointer' "$work/api_cptr_value/REFUSALS.txt")" -eq 0
+check grep -qF 'mrb_value v = mrb_cptr_value(mrb, h);' "$work/api_cptr_value/src/api_cptr_value.c"
+# 2zzz174. the address of a struct carried in a VALUE, (VALUE)&s, is a CPTR value (mrb_cptr_value of the address).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_cptr_addr tools/cext2mrbgem/fixtures/api_cptr_addr/ext/api_cptr_addr "$work/api_cptr_addr" > "$work/api_cptr_addr.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'VALUE as pointer' "$work/api_cptr_addr/REFUSALS.txt")" -eq 0
+check grep -qF 'return mrb_cptr_value(mrb, &s);' "$work/api_cptr_addr/src/api_cptr_addr.c"
+# 2zzz175. a pointer typedef cast of a VALUE ((Ctx)x, Ctx a struct pointer typedef) reads the pointer with mrb_cptr.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_cptr_typedef tools/cext2mrbgem/fixtures/api_cptr_typedef/ext/api_cptr_typedef "$work/api_cptr_typedef" > "$work/api_cptr_typedef.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'VALUE as pointer' "$work/api_cptr_typedef/REFUSALS.txt")" -eq 0
+check grep -qF 'Ctx c = (Ctx)mrb_cptr(x);' "$work/api_cptr_typedef/src/api_cptr_typedef.c"
+check grep -qF 'Holder *h = (Holder *)mrb_cptr(x);' "$work/api_cptr_value/src/api_cptr_value.c"
+check test "$(grep -c 'stuck point (Struct)' "$work/api_struct_va/REFUSALS.txt")" -eq 0
 # 2zzz155. a struct field of CRuby's rb_encoding * type: the Encoding placeholder type is in the prelude (the declaration compiles),
 # and the include of ruby/encoding.h is not a blocking refusal (the placeholder covers it).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rb_encoding_field tools/cext2mrbgem/fixtures/api_rb_encoding_field/ext/api_rb_encoding_field "$work/api_rb_encoding_field" > "$work/api_rb_encoding_field.log" 2>&1 || rc=$?

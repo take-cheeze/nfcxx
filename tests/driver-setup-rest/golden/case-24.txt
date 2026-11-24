@@ -1,0 +1,7 @@
+== case 24:  --freestanding --backend=gcc --emit-c a.cpp
+-- status: 1
+-- stdout
+-- stderr
+-- eccp
+(none)
+-- files

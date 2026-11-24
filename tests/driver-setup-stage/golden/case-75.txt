@@ -1,0 +1,8 @@
+== case 75:  -fsyntax-only a.cpp
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: QBE not built; run scripts/setup-qbe.sh
+-- eccp
+(none)
+-- files

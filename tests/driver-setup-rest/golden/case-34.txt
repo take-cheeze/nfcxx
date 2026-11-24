@@ -1,0 +1,8 @@
+== case 34: EDG_BASE=<WORK>/edgbase   --target=linux_aarch64 --freestanding -c a.cpp -o a.o
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: --target needs --emit-c (the generated C is for the target; compile it with a cross compiler)
+-- eccp
+(none)
+-- files

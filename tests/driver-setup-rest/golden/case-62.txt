@@ -1,0 +1,39 @@
+== case 62: NFCXX_COSMOCC=<WORK>/stub/bin/cosmocc NFCXX_TIME_LOG=time.log   --cosmo --backend=gcc -c a.cpp -o a.o
+-- status: 1
+-- stdout
+-- stderr
+-- eccp
+eccp:
+  --c++23
+  --g++
+  --wdir
+  /
+  --no_auto_instantiation
+  -tused
+  --c_to_obj_option
+  -ffunction-sections
+  --c_to_obj_option
+  -fdata-sections
+  --c_to_obj_option
+  -Wl,--gc-sections
+  --sys_include=<WORK>/stub/include/third_party/libcxx
+  --sys_include=<WORK>/stub/include
+  --c_to_obj_lib=m
+  --c_to_obj_option
+  -O2
+  --c_to_obj_option
+  -fwrapv
+  --c_to_obj_option
+  -fno-strict-aliasing
+  --c_to_obj_option
+  -fkeep-static-functions
+  --c_to_obj_option
+  -fgnu89-inline
+  -c
+  a.cpp
+  -o
+  a.o
+-- files
+time.log
+-- time log (category, name, unit)
+driver	host C++ headers	a.cpp

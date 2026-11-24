@@ -1,13 +1,15 @@
 # Porting the bash drivers (nfcxx, nfcc) and their sourced helpers to Ruby
 
-The goal is to remove the shell drivers. The bash `nfcxx` (about 1,340 lines, 22 functions) and `nfcc` (about 500
-lines, 13 functions) run every path that the Ruby routes do not plan (scripts/nfcxx.rb). They source trace.sh,
-bundle-wrap.sh, cuda-driver-wrap.sh, amdgpu-env.sh and host-sys.sh. Each stage below moves one group of functions to
-Ruby, with a differential test against the bash driver on the same arguments (status, stdout and the produced
-objects or programs). A stage is done when its bash functions have no callers left; the bash driver keeps the rest,
-and the Ruby entry (scripts/nfcxx.rb) routes to it until the last stage.
+The goal is to remove the shell drivers. The bash `nfcxx` is now the frozen body `tests/driver-body/nfcxx-bash` (918 lines,
+23 functions), and `./nfcxx` is a shim that runs `scripts/nfcxx.rb` (docs/notes/driver-body-port.md has the status). The bash
+`nfcc` is kept as `tests/nfcc/nfcc-bash` (483 lines, 12 functions), the reference for the differential tests; `./nfcc` is a
+5-line shim that runs `scripts/nfcc.rb`. The body still runs every path that the Ruby routes do not plan. It sources
+`scripts/trace.sh`; `bundle-wrap.sh`, `cuda-driver-wrap.sh` and `amdgpu-env.sh` are no longer on origin/main. Each stage
+below moves one group of functions to Ruby, with a differential test against the bash driver on the same arguments (status,
+stdout and the produced objects or programs). A stage is done when its bash functions have no callers left; the bash driver
+keeps the rest, and the Ruby entry (scripts/nfcxx.rb) routes to it until the last stage.
 
-## Ported already (on this branch)
+## Ported already (on origin/main)
 
 - The plan printers and runner for the gcc and Path B routes, the argument loops (scripts/nfcxx-loop.rb,
   scripts/driver-loop.rb), and the live facts (scripts/nfcxx-gcc-plan.rb, scripts/nfcxx-pathb.rb).
@@ -31,10 +33,13 @@ and the Ruby entry (scripts/nfcxx.rb) routes to it until the last stage.
    Done: the gating, the key, the --cache-log block, the hit copy and the store are scripts/nfcxx-cache.rb (`lookup`,
    `hit`, `store`); `cache_check` and `cache_store` in nfcxx call it, and run Ruby only when the cache is on. `cache_log`,
    `cache_remote_get` and `cache_remote_put` are calls of scripts/nfcxx-cache-io.rb (log, remote-get, remote-put; the GHA
-   client is behind it). Test of those: tests/nfcxx-cache-io (against the frozen bash, bash-oracle.sh). Still in bash:
-   the remote calls, `cache_log` (the bash writes the block the lookup prints), and the removals before a compile.
-   `cache_sha` is defined but nfcxx no longer calls it (tests/nfcxx-cache-io reads it).
-   The key covers nfcxx and scripts/, so a change to either changes every key, as it always did.
+   client is behind it). Test of those: tests/nfcxx-cache-io (against the frozen bash, bash-oracle.sh). The remote calls, the
+   --cache-log line and the removals before a compile are Ruby too: the removals are `compile_clean`, a call of
+   `scripts/nfcxx-link.rb compile-clean`, which the body still makes. The body no longer defines `cache_log`,
+   `cache_remote_get`, `cache_remote_put` or `cache_sha` (removed, no caller there); scripts/nfcxx-cache-io.rb still has
+   the sha, and tests/nfcxx-cache-io/run.sh checks it against the bash command the body used.
+   The key covers `tests/driver-body/nfcxx-bash` and every file under `scripts/` (scripts/nfcxx-cache.rb `key_inputs`), so a
+   change to either changes every key, as it always did.
 3. Modules: `mod_is_module_src`, `mod_decl_name`, `mod_imports`, `mod_check_src`, `mod_build_program`. Test:
    tests/nfcxx-modules (its plan printer exists: scripts/nfcxx-modules.rb).
 4. Eccp steps and link: `ecp_arg`, `eccp_cleanup`, `link_records_rm`, and the link dispatch. Test: the live
@@ -45,29 +50,38 @@ and the Ruby entry (scripts/nfcxx.rb) routes to it until the last stage.
    The eccp command line is planned by scripts/nfcxx-eccp-plan.rb: the argument vector in the bash's order, the variable
    a shared link exports (EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS) and the directory the call runs in (the temporary directory of
    a link, and the keep-intermediates note). It reads the call's arrays as NUL-separated records (`eccp_plan_input`).
-   Still in bash: `mktemp -d` and the EXIT trap (eccp_cleanup), the `moves` decision (ecp_args needs it before the plan),
-   the trace spans, the subshell that runs the command, and the second CUDA pass.
+   The call itself runs through scripts/nfcxx-eccp-run.rb (`eccp_run`), so the subshell is gone.
+   Still in bash: `mktemp -d` for `eccp_dir` and its EXIT trap (eccp_cleanup, which skips the directory when the driver owns the
+   root, #1519), the `moves` decision (ecp_args needs it before the plan), the trace spans, and the CUDA host-symbol gate of the
+   second pass (planned by scripts/nfcxx-second-pass.rb, #1517; the driver runs the second run).
 5. SYCL pre-pass: `sycl_kernel_headers` (the header script is already ported). Test: tests/nfcxx-prepass.
+   The two-pass SYCL build (scripts/nfcxx-sycl.rb) runs in scripts/nfcxx.rb before the body starts.
 6. CUDA: `cu_prepare`, `cu_rewrite`, `ir_opt_device`, `cu_amd_build`, `cu_device_key`, `cu_device_build`, and the
    rewriter build (tools/cuda-rewrite). Needs a CUDA toolkit to test end to end; the stubs (tests/nfcxx-cuda-device,
    tests/nfcxx-cuda-driver) cover the planning.
-   Done: none of the bash functions above is left. cu_rewrite is one call to `scripts/nfcxx-cuda-device.rb --execute`,
+   Done: `cu_rewrite`, `ir_opt_device`, `cu_amd_build`, `cu_device_key` and `cu_device_build` are not defined in the body.
+   cu_rewrite is one call to `scripts/nfcxx-cuda-device.rb --execute`,
    which runs the plan through scripts/nfcxx-run.rb (the host copy, the device unit, the device IR, ptxas, the device image
    cache, the embedding), with the bash's messages, statuses and trace spans. cu_prepare asks `--cu-dir` for the copy's
-   directory. The bash originals are kept as tests/nfcxx-cuda-device/nfcxx-bash (the oracle of run.sh and key.sh, and of
-   tests/nfcxx-cuda-live with a toolkit). The rewriter's build stays in the driver's startup (ensure_tool).
+   directory. Not done: `cu_prepare` is still defined in the body as the caller of scripts/nfcxx-cu-cpp2-prepare.rb (item 4 of
+   docs/notes/driver-body-port.md). The bash originals are kept as tests/nfcxx-cuda-device/nfcxx-bash (the oracle of run.sh
+   and key.sh, and of tests/nfcxx-cuda-live with a toolkit). The rewriter's build stays in the driver's startup (ensure_tool).
 7. Trace and time log: trace.sh (sourced by the driver and by every helper it runs). Port the functions to a Ruby
    module used by the Ruby helpers, and keep the driver's inline calls until stage 8.
    Done as a module: scripts/trace.rb (the same files and formats), checked against trace.sh by tests/trace/run.sh.
-   trace.sh stays until stage 8, since the bash driver still calls it.
-8. The remaining driver body (the dispatch in nfcxx, and nfcc's main), and bundle-wrap.sh, cuda-driver-wrap.sh,
-   amdgpu-env.sh (sourced; they go when the body does). The last stage removes the bash drivers and makes
+   trace.sh stays until stage 8, since the bash body still sources it (scripts/trace.sh, its line 113).
+8. The remaining driver body (the dispatch in nfcxx, and nfcc's main), and the shell helpers that the body sourced. The
+   bundle, CUDA-driver and amdgpu helpers (scripts/bundle-wrap.sh, scripts/cuda-driver-wrap.sh, scripts/amdgpu-env.sh) are
+   no longer on origin/main, and the body does not source them. The last stage removes the bash drivers and makes
    scripts/nfcxx.rb and scripts/nfcc.rb the entries.
 
-Stage 8 depends on stages 1 to 7. Stages 1 to 5 are testable here; stage 6 needs CUDA. For nfcc, stage 8 is done except
-the bundle and CUDA wrappers (see "Ported already"); nfcxx is not started.
+Stage 8 depends on stages 1 to 7. Stages 1 to 5 are testable here; stage 6 needs CUDA. For nfcc, the bundle and CUDA
+wrappers run in scripts/nfcc.rb (see "Ported already"), and ./nfcc is a 5-line shim, so the nfcc part of stage 8 is done
+apart from the bash kept as tests/nfcc/nfcc-bash, which is the oracle. For nfcxx the switch is done (B8, #1402, in
+docs/notes/driver-body-port.md), and the frozen body still runs the stages that item lists.
 
 ## Not done yet
 
-- scripts/pathb-cc: the bash file is still in the tree with an uncommitted on-disk edit that calls the removed
-  scripts/pathb-dump. The committed Ruby port (scripts/pathb-cc.rb) is the one the callers use.
+- scripts/pathb-cc (bash): origin/main has no bash scripts/pathb-cc; only the Ruby port scripts/pathb-cc.rb is there, and
+  the callers use it. The earlier note about an uncommitted local edit to a bash pathb-cc (one that calls scripts/pathb-dump)
+  is not something origin/main shows, so it is unverified here.

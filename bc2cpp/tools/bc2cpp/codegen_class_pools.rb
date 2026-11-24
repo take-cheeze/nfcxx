@@ -53,10 +53,11 @@ class CodeGen
     end
     # DECLARED_IVAR_PROOF: a declared slot whose every store is checked holds exactly the declared kind (and nil unless a
     # constructor assigns it first, class_pool_ivar_entry_mask), whatever the stores' flows show: a fixed seed, never
-    # grown. A slot the pools already refused (a writer outside the SETIV sites) is not seeded.
+    # grown. A slot the pools already refused (a writer outside the SETIV sites) is not seeded, unless that writer is a
+    # guarded synthesized attr_writer (declared_ivar_writers_guarded?).
     @declared_ivar_pools = {}
     declared_ivar_seeds.each do |key, (_entry, bits)|
-      next unless @class_ivar_pools.key?(key)
+      next unless @class_ivar_pools.key?(key) || @numeric_ivar_groups[key]&.accessor_only
 
       @class_ivar_pools[key] = bits
       @declared_ivar_pools[key] = bits
@@ -66,7 +67,7 @@ class CodeGen
     # sites pass (an unmodelled read would otherwise delete the pool), so the declared bits are fixed, not grown.
     # A Float declaration seeds the Float bit.
     @declared_arg_pools = {}
-    (self.class.declared_params || {}).each do |label, guards|
+    declared_params_kept.each do |label, guards|
       guards.each do |pos, cls, _key, _text, kind = :class, nilable = false|
         key = [label, pos + 1]
         bit = declared_arg_bits(cls, kind, nilable)
@@ -164,9 +165,16 @@ class CodeGen
            when :integer then NumericFlow::INT
            when :float then NumericFlow::FLT
            when :symbol then immediate_class_bits_enabled? ? numeric_class_bit('Symbol') : 0
+           when :array, :hash, :string then RETURN_CORE_CLASS.key(cls) || 0
+           when :union then cls.reduce(0) { |mask, klass| mask | numeric_class_bit(klass) }
            else numeric_class_bit(cls)
            end
     base.zero? || !nilable ? base : base | NumericFlow::NIL
+  end
+
+  # DECLARED_KEYWORD_PARAM: KARG's result, the declared kind when the body checks it there (declared_keyword_bits).
+  def declared_keyword_mask(irep, insn)
+    (@class_pools_on && declared_keyword_bits(irep, insn)) || NumericFlow::OTHER
   end
 
   def class_pool_entry_mask(irep, reg)

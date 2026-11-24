@@ -1,0 +1,24 @@
+== run 1: nfcxx --backend=gcc -c main_bad.cpp -o main_bad.o
+env: NFCXX_CACHE=WORK/sb/cache
+rc: 0
+-- stdout
+-- stderr
+== sandbox
+F local.h
+| #pragma once
+| 
+| inline int local_value() { return 42; }
+F main.cpp
+| #include "local.h"
+| 
+| int main() { return local_value() == 42 ? 0 : 1; }
+F main_bad.cpp
+| #include "missing.h"
+| 
+| int main() { return 0; }
+F main_bad.ii
+| RECORD ii
+F main_bad.o
+| OBJECT main_bad.o
+F main_bad.ti
+| RECORD ti

@@ -1287,7 +1287,7 @@ module NumericFlow
     irep = c.irep
     case step.kind
     when K_KARG
-      c.keyword_mask ? oracle.keyword_mask(insn) : OTHER
+      c.keyword_mask ? oracle.keyword_mask(irep, insn) : OTHER
     when K_KEY_P
       c.keyword_presence ? oracle.keyword_presence(insn) : OTHER
     when K_CONST

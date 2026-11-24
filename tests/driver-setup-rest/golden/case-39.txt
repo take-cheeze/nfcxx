@@ -1,0 +1,8 @@
+== case 39:  --target=linux_k1om -c a.cpp -o a.o
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: --target=linux_k1om needs --freestanding (the host's C++ headers are GCC 13's, not k1om's)
+-- eccp
+(none)
+-- files

@@ -26,6 +26,9 @@ require 'tmpdir'
 require_relative 'fixture_runtime'
 
 ENV['BC2CPP_SIG_DIRS'] ||= ''
+# The runtime rows make a subclass and singleton classes the closed world does not see, which ARMS_COMPLETE_ELSE
+# rules out; off, the owner call stays the else they test.
+ENV['BC2CPP_ARMS_COMPLETE_ELSE'] = '0'
 runtime = Bc2cppFixtureRuntime
 failures = []
 check = lambda do |what, condition|
@@ -100,7 +103,7 @@ Dir.mktmpdir('static-owner-dispatch') do |dir|
   check.call('block each: a block that breaks or returns is a frame-local cfunc block (Bc2cppBlock over its wrapper)',
              [eb, er].all? { |b| b.match?(/Bc2cppBlock bc2cpp_blk_stack_\d+\(M, \w+_block_fallback_\d+, \d+, bc2cpp_blk_env_\d+\)/) })
   check.call('block each: the block owner call stays as the else',
-             es.match?(/bc2cpp_owner_call\(M, r\d+, \d+, 0, BC2CPP_OWNERS(?:_D)?\(.*?\), bc2cpp_blk_stack_\d+\.proc\(\), 0\)/))
+             es.match?(/bc2cpp_owner_call\(M, r\d+, BC2CPP_OWNERS(?:_D)?\(\d+, 0, .*?\), bc2cpp_blk_stack_\d+\.proc\(\), 0\)/))
   tg = body.call(code, 'tg')
   check.call('a block to a definition that takes none: no block arm',
              !tg.include?('STATIC_OWNER_ARMS') && !tg.match?(/Bag_tag_impl\(M, [^;]*blk/))

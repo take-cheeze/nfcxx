@@ -1,0 +1,8 @@
+== case 54:  -c a.cpp -o a.o -fuse-ld=gold
+-- status: 2
+-- stdout
+-- stderr
+nfcxx: QBE not built; run scripts/setup-qbe.sh
+-- eccp
+(none)
+-- files

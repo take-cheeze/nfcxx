@@ -1,0 +1,5 @@
+== -x
+-- stdout
+-- stderr
+nfcxx: -x needs a value
+status=1
