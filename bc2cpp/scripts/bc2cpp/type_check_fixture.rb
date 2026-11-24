@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 require_relative '../../tools/bc2cpp/world_root'
 require 'json'
 require 'open3'
@@ -31,7 +32,7 @@ module TypeCheckFixture
     root = BC2CPP_WORLD_ROOT
     directory = File.expand_path(directory)
     sources = files.map { |file| File.expand_path(file, directory) }
-    mrbc = ENV['MRBC'] ? File.expand_path(ENV['MRBC']) : 'mrbc'
+    mrbc = ENV['MRBC'] ? File.expand_path(ENV['MRBC']) : MrbcRbDefault.command
     Dir.mktmpdir('type-check-fixture') do |work|
       result = Dir.chdir(directory) do
         TypeCheckRun.run(root: root, mrbc: mrbc, workdir: work, sources: sources, sends: false,
@@ -53,7 +54,7 @@ module TypeCheckFixture
     directory = File.expand_path(directory)
     root = BC2CPP_WORLD_ROOT
     sources = files.map { |file| File.expand_path(file, directory) }
-    mrbc = ENV['MRBC'] ? File.expand_path(ENV['MRBC']) : 'mrbc'
+    mrbc = ENV['MRBC'] ? File.expand_path(ENV['MRBC']) : MrbcRbDefault.command
     Dir.mktmpdir('type-check-variants') do |work|
       common = TypeCheckRun.env(root: root, mrbc: mrbc, workdir: work, sources: sources, sends: false,
                                 display_root: directory).merge(env)

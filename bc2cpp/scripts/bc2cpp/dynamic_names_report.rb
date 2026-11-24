@@ -8,6 +8,7 @@
 # Usage: MRBC=path/to/mrbc BC2CPP_STATIC_DISPATCH_LISTS=<scripts/bc2cpp/static_dispatch_lists.bash output> \
 #        ruby scripts/bc2cpp/dynamic_names_report.rb [--entries] [--entries-out PATH]
 
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 require_relative '../../tools/bc2cpp/world_root'
 require 'set'
 require 'optparse'
@@ -61,7 +62,7 @@ sdr.why = {}
 sdr.why_all = {} if options[:all]
 # The report is of the state the build is in, so it reads the lists the build was given.
 lists = StaticDispatchLists.current(required: true)
-analysis = sdr.analyze(root, ENV.fetch('MRBC', 'mrbc'), lists: lists, lists_path: ENV.fetch(StaticDispatchLists::PATH_ENV),
+analysis = sdr.analyze(root, ENV.fetch('MRBC', MrbcRbDefault.command), lists: lists, lists_path: ENV.fetch(StaticDispatchLists::PATH_ENV),
                                                          closed_only: true)
 why = sdr.why
 eligible = sdr.eligible(analysis).to_set { |m| [m[:owner], m[:name]] }

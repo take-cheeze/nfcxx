@@ -9,6 +9,7 @@
 #     BC2CPP_BUILD_NAME=closed ruby scripts/bc2cpp/class_body_compile_list.rb [--refused]
 #   The lists are the build's omittable set: without them every TDEF is refused, with them the omitted defs are skipped.
 
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 require_relative '../../tools/bc2cpp/world_root'
 require 'set'
 require 'tmpdir'
@@ -18,7 +19,7 @@ require_relative '../../tools/bc2cpp/class_world'
 require_relative '../../tools/bc2cpp/class_world_gate'
 
 ROOT = BC2CPP_WORLD_ROOT
-mrbc = ENV['MRBC'] || 'mrbc'
+mrbc = ENV['MRBC'] || MrbcRbDefault.command
 only_refused = ARGV.include?('--refused')
 
 results = []
