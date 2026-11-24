@@ -338,9 +338,16 @@ class CodeGen
   # `own_file` (a predicate on a unit's source file) names the files this run's units stand for; nil means every file.
   def compile_top_class_units(root_irep, own_file: nil)
     program = BytecodeIR.for(root_irep)
+    first_return = top_level_return_indices(program).min
     candidates = BytecodeIR.class_bodies(root_irep, :CLASS, :MODULE).filter_map do |idx, child|
       insn = program.source_at(idx)
       path = BytecodeIR.class_body_path(root_irep, idx, nil)
+      # TOP_LEVEL_RETURN: gem_init runs every unit before the statements, so one after a top-level return would run
+      # even when the return is taken.
+      if first_return && idx > first_return
+        raise "TOP_LEVEL_RETURN: #{path || insn.sym} is opened after a top-level return (#{root_irep.file}); " \
+              'its class unit cannot run after the return'
+      end
       superclass = path && top_unit_superclass(program, idx, insn)
       next nil unless superclass
 
@@ -398,15 +405,29 @@ class CodeGen
     end
   end
 
+  # The root's own return instructions. The VM ends the file's execution at one, whatever follows it.
+  TOP_LEVEL_RETURNS = %i[RETURN RETNIL RETSELF RETTRUE RETFALSE].freeze
+
+  def top_level_return_indices(program)
+    (0...program.size).select { |i| TOP_LEVEL_RETURNS.include?(program.source_at(i)&.op) }
+  end
+
   # TOP_LEVEL_STATEMENTS: the top-level constant and global writes of a gem's root body, as C++ statements in one function
   # gem_init calls after the class units. A statement is the run of root instructions ending in a SETCONST or SETGV (or a
   # class EXEC). Returns '' for none.
+  # TOP_LEVEL_RETURN: a top-level `return` inside a statement is `return;` here, so no later statement runs, as in the VM.
+  # A statement holding one that is left out would let the later ones run, so generation stops instead.
   def compile_top_level_statements(root_irep)
     program = BytecodeIR.for(root_irep)
     body = +''
     start = 0
     targets = jump_targets(root_irep)
     jump_sources = top_level_jump_sources(program)
+    returns = top_level_return_indices(program)
+    left_out = lambda do |from, to|
+      at = returns.find { |i| i.between?(from, to) }
+      raise "TOP_LEVEL_RETURN: the statement holding the top-level return at #{at} (#{root_irep.file}) does not compile" if at
+    end
     program.each_source do |insn, idx|
       if insn.op == :EXEC
         start = idx + 1
@@ -417,6 +438,7 @@ class CodeGen
       # A run whose branches leave it (`if cond; X = 1; else; X = 2; end` spans two runs) would emit a `goto` to a label that
       # is in no statement, or jump over a declaration into one. The VM still runs such a statement from the bytecode.
       unless top_level_run_self_contained?(program, start, idx, jump_sources)
+        left_out.call(start, idx)
         start = idx + 1
         next
       end
@@ -430,11 +452,13 @@ class CodeGen
 
         # A jump inside the run (`x = cond ? A : B`) lands on a label of this statement; compile_insn writes the `goto` only.
         lines << "  L#{source.addr}:;\n" if targets.include?(source.addr)
-        lines << compile_insn(source, root_irep, owner_def, index)
+        lines << (TOP_LEVEL_RETURNS.include?(source.op) ? "  return;\n" : compile_insn(source, root_irep, owner_def, index))
       end
       # A statement with an opcode the translator does not handle (a block, a splat send) is left to the VM like any method
       # with such an opcode (SKIP_UNSUPPORTED); its #error would otherwise fail the whole translation unit.
-      unless lines.include?('#error')
+      if lines.include?('#error')
+        left_out.call(start, idx)
+      else
         body << "  {\n#{emit_register_initializers(body_register_count(program, root_irep), [])}#{lines}  }\n"
       end
       start = idx + 1
