@@ -1,5 +1,4 @@
 == -c m.cpp -o m.o --backend=pathb
 -- stdout
 -- stderr
-pathb-dump: harness not built; run scripts/setup-pathb.sh
-status=2
+status=0
