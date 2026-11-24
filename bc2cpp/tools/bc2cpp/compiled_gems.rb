@@ -859,8 +859,8 @@ def bc2cpp_compiled_gem_shards(spec, generated, prereqs)
   # COLD_COMPACT (cold_compact.rb): the switches and the cold list choose which sites the generated file outlines.
   require_relative 'cold_compact'
   cold_stamp = File.join(spec.build_dir, 'bc2cpp_cold_compact')
-  # GUARD_HOIST (codegen_guard_hoist.rb) and COLD_COMPACT_CALLS (cold_compact_calls.rb) ride on the same stamp.
-  cold_mode = %w[BC2CPP_COLD_COMPACT BC2CPP_COLD_PROFILE BC2CPP_GUARD_HOIST BC2CPP_COLD_COMPACT_CALLS]
+  # GUARD_HOIST (codegen_guard_hoist.rb), COLD_COMPACT_CALLS (cold_compact_calls.rb) and COLD_COMPACT_TAIL ride on the same stamp.
+  cold_mode = %w[BC2CPP_COLD_COMPACT BC2CPP_COLD_PROFILE BC2CPP_GUARD_HOIST BC2CPP_COLD_COMPACT_CALLS BC2CPP_COLD_COMPACT_TAIL]
               .map { |k| "#{k}=#{ENV[k]}\n" }.join +
               "#{ColdCompact.list_path}\n"
   File.write(cold_stamp, cold_mode) unless File.exist?(cold_stamp) && File.read(cold_stamp) == cold_mode

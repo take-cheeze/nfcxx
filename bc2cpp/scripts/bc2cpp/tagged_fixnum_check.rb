@@ -180,7 +180,7 @@ at_exit { dirs.each_value { |dir| FileUtils.remove_entry(dir) } }
 puts '-- generated code'
 code, err = Bc2cppFixtureRuntime.generate(SRC, dirs['default'], core: true, only_owners: OWNERS)
 OUTLINE_SWITCHES = %w[BC2CPP_CMP_NUM_OUTLINE BC2CPP_UPVAR_PTR_FIXNUM BC2CPP_SIZE_FIXNUM BC2CPP_INT_PAIR_OUTLINE
-                      BC2CPP_LITERAL_EQ_IDENTITY].freeze
+                      BC2CPP_LITERAL_EQ_IDENTITY BC2CPP_COLD_COMPACT_TAIL].freeze
 with_switches = lambda do |value, &blk|
   saved = OUTLINE_SWITCHES.to_h { |k| [k, ENV.fetch(k, nil)] }
   OUTLINE_SWITCHES.each { |k| ENV[k] = value }
@@ -208,16 +208,33 @@ end
 cold_code, cold_err = cold_gen.call(SRC, dirs['cold'], OWNERS)
 cold_reopen_code, cold_reopen_err = cold_gen.call(SRC + REOPEN, dirs['cold reopened'], OWNERS + ['Integer'])
 cold_off_code, = cold_gen.call(SRC, dirs['cold off'], OWNERS, 'BC2CPP_COLD_COMPACT' => '0')
+dirs['tail off'] = Dir.mktmpdir('bc2cpp-tf-tail-off')
+tail_off_code, = cold_gen.call(SRC, dirs['tail off'], OWNERS, 'BC2CPP_COLD_COMPACT_TAIL' => '0', ColdCompact::LIST_KEY => '/nonexistent')
 check.call('the prelude is in the generated code', code.include?(TaggedFixnum::PRELUDE))
 pair = ->(text) { text.match(/if \(mrb_likely\(BC2CPP_FIXNUM_PAIR_P\((r\d+), (r\d+)\)\)\) \{/) }
 { 'add' => %w[add mrb_num_add], 'sub' => %w[sub mrb_num_sub], 'mul' => %w[mul mrb_num_mul] }.each do |name, (op, slow)|
-  body = code_of(code, "TfOps_#{name}")
+  body = code_of(inline_code, "TfOps_#{name}")
   m = pair.call(body)
   check.call("#{name}: one pair test, the word helper, its mrb_num_* overflow, the shared Float helper and the fallback",
              m && body.include?("if (mrb_unlikely(bc2cpp_fixnum_#{op}(#{m[1]}, #{m[2]}, #{m[1]}))) " \
                                 "{ #{m[1]} = #{slow}(M, #{m[1]}, #{m[2]}); }") &&
                body.include?("bc2cpp_num_#{name}_float(M, #{m[1]}, #{m[2]})") &&
-               code.include?("mrb_value bc2cpp_num_#{name}_float(mrb_state* M, mrb_value d, mrb_value s)"))
+               inline_code.include?("mrb_value bc2cpp_num_#{name}_float(mrb_state* M, mrb_value d, mrb_value s)"))
+end
+# COLD_COMPACT_TAIL (cold_compact.rb): the Fixnum tier stays inline, and one helper call holds the arms after it.
+tail_site = lambda do |body, test, op, rhs|
+  body.match(/if \(mrb_likely\(#{test}\) && !mrb_unlikely\(bc2cpp_fixnum_#{op}\((r\d+), #{rhs}, \1\)\)\) \{\n  \} else \{\n(?:  \/\/[^\n]*\n)*  \1 = (bc2cpp_compact_\h{16})\(M, \1(?:, r\d+)?\);\n  \}/)
+end
+{ 'add' => %w[add mrb_num_add], 'sub' => %w[sub mrb_num_sub], 'mul' => %w[mul mrb_num_mul],
+  'addi' => %w[add mrb_num_add], 'subi' => %w[sub mrb_num_sub] }.each do |name, (op, slow)|
+  body = code_of(code, "TfOps_#{name}")
+  imm = name.end_with?('i')
+  m = tail_site.call(body, imm ? 'mrb_fixnum_p\\(r\\d+\\)' : 'BC2CPP_FIXNUM_PAIR_P\\(r\\d+, r\\d+\\)', op,
+                     imm ? 'mrb_fixnum_value\\(1\\)' : 'r\\d+')
+  helper = m && code[/^static __attribute__\(\(noinline, cold\)\) mrb_value #{m[2]}\(.*?^\}$/m]
+  check.call("#{name}: the Fixnum tier is inline and one helper holds the Integer, Float and fallback arms (COLD_COMPACT_TAIL)",
+             m && helper && helper.include?("= #{slow}(M, a0, ") && !helper.include?('bc2cpp_fixnum_') &&
+               !body.include?(slow) && (imm || helper.include?("bc2cpp_num_#{name}_float(M, a0, a1)")))
 end
 { 'addi' => 'add', 'subi' => 'sub' }.each do |name, op|
   check.call("#{name}: the literal is a boxed constant to the word helper",
@@ -308,7 +325,7 @@ helper_call = /^  (r\d+) = (bc2cpp_compact_\h{16})\(M, \1(?:, r\d+)?\);$/
 end
 check.call('cold: a method off the list keeps the inline arms',
            code_of(cold_code, 'Integer_').empty? || !code_of(cold_code, 'Integer_').include?('bc2cpp_compact_'))
-check.call('cold: BC2CPP_COLD_COMPACT=0 generates the default code', cold_off_code == code)
+check.call('cold: BC2CPP_COLD_COMPACT=0 generates the default code less its arithmetic tails', cold_off_code == tail_off_code)
 check.call('cold: no #error in the generated code', !cold_code.include?('#error') && !cold_reopen_code.include?('#error'))
 
 DRIVER = <<~'RUBY'
