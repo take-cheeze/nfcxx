@@ -57,13 +57,17 @@ module NfcxxBody
     @a = {}
     @trace_t0 = nil
     @temps = []
-    @owned_root = Dir.mktmpdir("nfcxx-body.", env["TMPDIR"].to_s.empty? ? nil : env["TMPDIR"])
-    @temps << @owned_root
+    # the directories of the run are made under TMPDIR (the driver's temporary root), as the body's mktemp -d made them
+    @owned_root = env["TMPDIR"].to_s.empty? ? Dir.tmpdir : env["TMPDIR"]
     begin
       body
     rescue Exit => e
       $stderr.write(e.message) unless e.message.empty?
       e.status
+    rescue Fallback
+      # the gcc run that follows closes the trace; this run's span and its end are not written (the body's fallback_gcc set no exit mode)
+      @trace_t0 = nil
+      raise
     ensure
       cleanup_temps
     end
@@ -145,11 +149,20 @@ module NfcxxBody
 
   def temp_dir(kind)
     d = Dir.mktmpdir("tmp.", @owned_root)
+    @temps << d
     d
   end
 
+  def edg_base
+    @env["EDG_BUILD"].to_s.empty? ? EDG_DEFAULT : @env["EDG_BUILD"]
+  end
+
   def edg
-    File.join(@env["EDG_BUILD"].to_s.empty? ? EDG_DEFAULT : @env["EDG_BUILD"], "bin")
+    File.join(edg_base, "bin")
+  end
+
+  def libc_a
+    File.join(edg_base, "lib", "libC.a")
   end
 
   def trace_start
@@ -384,7 +397,7 @@ module NfcxxBody
   end
 
   def modules_block
-    dir = Dir.mktmpdir("nfcxx-modplan.", @owned_root)
+    dir = temp_dir("modplan")
     File.binwrite(File.join(dir, "state"), modules_plan_input)
     st = run_cmd(ruby_cmd, script("nfcxx-modules-plan.rb"), File.join(dir, "state"), File.join(dir, "reply"))
     fail!("", st) unless st == 0
@@ -520,7 +533,7 @@ module NfcxxBody
       inc = ["-I#{abs_path(x[2..])}", *inc]
     end
     posix = `uname -s`.chomp == "Darwin" ? %w[-D_DARWIN_C_SOURCE -U__BLOCKS__] : %w[-D_POSIX_SOURCE]
-    eh_tls = File.exist?(File.join(edg, "..", "eh-tls")) ? ["--nfcxx_eh_thread_local"] : []
+    eh_tls = File.exist?(File.join(edg_base, "eh-tls")) ? ["--nfcxx_eh_thread_local"] : []
     cmd = [File.join(edg, "cpfe"), *posix, "-D__CHAR_BIT__=8", v("std"), "--#{v("dialect")}", *eh_tls,
            *a("gnu_opts"), *a("diag_opts"), *inc, "--gen_c_file_name=#{tmp}/out.c", f]
     pid = Process.spawn(@env, *cmd, chdir: base, out: File::NULL)
@@ -550,7 +563,7 @@ module NfcxxBody
       end
       trace_end(t, "EH shim", "driver")
       @a["shim"] = [s] if !flag?("cosmo") && !s.empty?
-      @a["rtlib"] = [File.join(edg, "..", "lib", "libC.a")]
+      @a["rtlib"] = [libc_a]
       if flag?("asan")
         t = trace_start
         v_out, _e, vst = capture(File.join(ROOT, "scripts", "asan-vla.rb"))
@@ -640,7 +653,7 @@ module NfcxxBody
         cxx = RbConfig::CONFIG["host_os"] =~ /darwin/ ? ["-lc++"] : ["-lstdc++"]
         atomic = RbConfig::CONFIG["host_os"] =~ /darwin/ ? [] : ["-latomic"]
         st = run_cmd(cc, *a("asan_c"), *@a["ldopts"], *a("cobjs"), *linkf, *cvla, "-o", v("out"), ldrt.chomp,
-                     File.join(edg, "..", "lib", "libC.a"), *cxx, "-lm", *atomic, env: @env)
+                     libc_a, *cxx, "-lm", *atomic, env: @env)
       else
         st = run_cmd(gcc_cc, *a("asan_c"), *@a["ldopts"], *a("cobjs"), *a("files"), "-o", v("out"), env: @env)
       end
@@ -661,7 +674,7 @@ module NfcxxBody
 
   # the default backend failed on one source: the program is built again with gcc (the body's fallback_gcc)
   def fail_fallback(source, status)
-    raise Exit.new(status, "nfcxx: Path B (--backend=pathb) fails on #{source}\n") unless flag?("default_backend")
+    raise Exit.new(status) unless flag?("default_backend")
     raise Fallback, "nfcxx: Path B did not build #{source} (status #{status}); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)"
   end
 
@@ -794,7 +807,7 @@ module NfcxxBody
     end
     fail!("nfcxx: cosmo links are not ported yet", 2) if flag?("cosmo")
     st = run_cmd(cc, *a("asan_c"), *@a["ldopts"], *sprt, *@a["cobjs"], *pobjs, *plink, ldrt.chomp, *@a["shim"], *@a["vlart"],
-                 File.join(edg, "..", "lib", "libC.a"), *cxx.split, "-lpthread", "-lm", *atomic.split, "-o", v("out"), env: @env)
+                 libc_a, *cxx.split, "-lpthread", "-lm", *atomic.split, "-o", v("out"), env: @env)
     trace_end(t, "link", "pathb")
     raise Exit.new(st)
   end
@@ -804,7 +817,7 @@ module NfcxxBody
     keep_static = ["--c_to_obj_option", "-fkeep-static-functions"]
     keep_static = [] if clang_cc?
     eh_unwind = []
-    eh_unwind << "--nfcxx_eh_thread_local" if File.exist?(File.join(edg, "..", "eh-tls"))
+    eh_unwind << "--nfcxx_eh_thread_local" if File.exist?(File.join(edg_base, "eh-tls"))
     if flag?("eh_unwind_on") && v("backend") == "gcc"
       eh_unwind += ["--nfcxx_eh_unwind", "--c_to_obj_option", "-fexceptions", "--c_to_obj_option", "-include",
                     "--c_to_obj_option", File.join(ROOT, "lib", "ehshim", "nfcxx_eh_unwind.h")]
@@ -819,7 +832,7 @@ module NfcxxBody
     eccp_dir = nil
     eccp_owned = false
     if moves == "1"
-      eccp_dir = Dir.mktmpdir("eccp.", @owned_root)
+      eccp_dir = temp_dir("eccp")
     end
     eccp_bin = File.join(edg, "eccp")
     @a["keep_static"] = keep_static
