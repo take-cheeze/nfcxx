@@ -186,12 +186,12 @@ end
   end
 
   # The shape of the literal a `freeze` at SEND0 +idx+ receives, or nil. Only a literal built by a
-  # single ARRAY / HASH op qualifies (a literal grown by ARYPUSH/HASHADD/ARYCAT is another writer).
+  # single ARRAY / HASH op qualifies, or an ARRAY grown by ARYPUSH chunks (frozen_table_push_chain).
   def frozen_table_literal_shape(irep, idx, insn, registry)
     literal = frozen_table_freeze_literal(irep, idx, insn)
     return nil unless literal
 
-    lit, at, container = literal
+    lit, at, container, segments = literal
     n = lit.uint_operand
     return nil unless n
 
@@ -199,27 +199,67 @@ end
     stride = container == :array ? 1 : 2
     slot_regs = (0...n).map { |k| base + stride * k + (container == :array ? 0 : 1) }
     slots = slot_regs.map { |r| frozen_table_slot_mask(irep, at, r) }
+    segments.each { |push_at, push_n| slots.concat((1..push_n).map { |k| frozen_table_slot_mask(irep, push_at, base + k) }) }
     keys = container == :hash ? frozen_table_hash_keys(irep, at, base, n) : nil
     registry.intern(container, slots, keys)
   end
 
-  # [literal op, its index, container] when the `freeze` at SEND0 +idx+ is applied to a single ARRAY/HASH
-  # op right before it (same register), else nil. The shape and a frozen-literal slot both need it.
+  # [literal op, its index, container, ARYPUSH segments] when the `freeze` at SEND0 +idx+ is applied to a single
+  # ARRAY/HASH op right before it (same register), or to an ARRAY grown by an ARYPUSH chain, else nil. The shape and a
+  # frozen-literal slot both need it.
   def frozen_table_freeze_literal(irep, idx, insn)
     defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg, shared: true)
     return nil unless defs && defs.size == 1 && !defs.first.entry?
 
     at = defs.first.index
     lit = BytecodeIR.for(irep).source_at(at)
+    segments = []
+    if lit.op == :ARYPUSH && lit.reg == insn.reg && at + 1 == idx
+      at, segments = frozen_table_push_chain(irep, at)
+      return nil unless at
+
+      lit = BytecodeIR.for(irep).source_at(at)
+      return nil unless lit.op == :ARRAY
+    end
     return nil unless %i[ARRAY HASH].include?(lit.op) && lit.regs.size == 1
     # The literal's own `.freeze`, back to back: any other instruction in between could hand the
     # still-mutable array to code that changes its slots.
-    return nil unless at + 1 == idx && lit.reg == insn.reg
+    return nil unless (segments.empty? ? at + 1 == idx : true) && lit.reg == insn.reg
 
     container = lit.op == :ARRAY ? :array : :hash
     return nil unless frozen_table_name_safe?('freeze', container == :array ? 'Array' : 'Hash')
 
-    [lit, at, container]
+    [lit, at, container, segments]
+  end
+
+  # Ops that can sit between a literal's ARYPUSH chunks: each loads one element register and runs no Ruby.
+  FROZEN_TABLE_CHUNK_LOADS = (BytecodeIR::Ops::LOADI_OPS | %i[LOADL LOADNIL LOADTRUE LOADFALSE LOADSYM STRING GETCONST]).freeze
+
+  # mrbc builds a literal longer than its register window as ARRAY then `ARYPUSH Ra n` chunks, each after the loads of
+  # its elements. [the ARRAY's index, [[push index, n], ...] in order] when the ARYPUSH at +last+ ends such a chain:
+  # only element loads above Ra between the ops, and each push's array the op before it in the chain; else nil.
+  def frozen_table_push_chain(irep, last)
+    program = BytecodeIR.for(irep)
+    reg = program.source_at(last).reg
+    segments = []
+    at = last
+    loop do
+      insn = program.source_at(at)
+      return nil unless insn.op == :ARYPUSH && insn.reg == reg && insn.uint_operand
+
+      defs = BytecodeIR.reaching_definitions(irep, at, reg, shared: true)
+      return nil unless defs && defs.size == 1 && !defs.first.entry?
+
+      prev = defs.first.index
+      ((prev + 1)...at).each do |i|
+        between = program.source_at(i)
+        return nil unless between && FROZEN_TABLE_CHUNK_LOADS.include?(between.op) && between.reg.to_i > reg
+      end
+      segments.unshift([at, insn.uint_operand.to_i])
+      return [prev, segments] if program.source_at(prev).op == :ARRAY
+
+      at = prev
+    end
   end
 
   # A slot whose value is `LITERAL.freeze`. Kernel#freeze answers its receiver

@@ -127,17 +127,23 @@ if ENV['MRBC']
     'T = [[1].freeze, [2, 3].freeze].freeze' => [ARR, ARR],
     'T = [[1, 2].dup, 3].freeze' => [OTHER, INT],
     'x = [1, 2]; x.push(9); T = [x.freeze, 3].freeze' => [OTHER, INT],
-    'T = [foo.freeze, 3].freeze' => [OTHER, INT]
+    'T = [foo.freeze, 3].freeze' => [OTHER, INT],
+    # FROZEN_PUSH_CHAIN: past the register window mrbc emits ARRAY then ARYPUSH chunks; each chunk's slots count.
+    "T = [#{(1..100).to_a.join(', ')}].freeze" => [INT] * 100,
+    "T = [#{(1..70).to_a.join(', ')}, \"s\"].freeze" => [INT] * 70 + [STR],
+    # A call between the chunks could change the still-mutable array: no table.
+    "T = [#{(1..70).to_a.join(', ')}, foo, 72].freeze" => nil
   }.freeze
   Dir.mktmpdir('frozen-slot') do |dir|
     FIXTURES.each_with_index do |(source, slots), n|
       src = File.join(dir, "case#{n}.rb")
       File.write(src, "#{source}\n")
       ireps, root = compile_ireps([src], "case#{n}", dir)
-      with_switch(nil) { check.call("#{source}: switch on -> #{slots.inspect}", outer_table(codegen, ireps.fetch(root))&.last == slots) }
+      label = source.size > 60 ? "#{source[0, 40]}...#{source[-20..]}" : source
+      with_switch(nil) { check.call("#{label}: switch on -> #{slots.inspect[0, 40]}", outer_table(codegen, ireps.fetch(root))&.last == slots) }
       with_switch('0') do
-        off = slots.map { |s| s == ARR || s == HSH ? OTHER : s }
-        check.call("#{source}: BC2CPP_FREEZE_SLOT=0", outer_table(codegen, ireps.fetch(root))&.last == off)
+        off = slots&.map { |s| s == ARR || s == HSH ? OTHER : s }
+        check.call("#{label}: BC2CPP_FREEZE_SLOT=0", outer_table(codegen, ireps.fetch(root))&.last == off)
       end
     end
   end

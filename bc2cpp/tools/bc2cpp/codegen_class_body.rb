@@ -21,7 +21,7 @@ class CodeGen
   CLASS_BODY_VISIBILITY_SENDS = %w[private public protected module_function private_class_method public_class_method].freeze
   CLASS_BODY_OPS = (%i[NOP STOP RETURN RETNIL LOADNIL LOADSELF LOADTRUE LOADFALSE LOADL LOADSYM STRING LOADI__1 LOADI_0
                        LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6 LOADI_7 LOADI8 LOADINEG LOADI16 LOADI32 SETCONST
-                       GETCONST SETGV ARRAY HASH ADD ADDI ADDILV SUB SUBI SUBILV MUL DIV GETMCNST SETIV SYMBOL EQ ARYCAT MOVE GETIDX RANGE_INC SEND SEND0]).freeze
+                       GETCONST SETGV ARRAY ARYPUSH HASH ADD ADDI ADDILV SUB SUBI SUBILV MUL DIV GETMCNST SETIV SYMBOL EQ ARYCAT MOVE GETIDX RANGE_INC SEND SEND0]).freeze
 
   # The mruby entry points a class unit calls (vm.c; the same declarations the class-body prelude makes).
   CLASS_UNIT_DECLS = <<~CPP
@@ -369,8 +369,8 @@ class CodeGen
     compiled = candidates.map do |insn, path, child, superclass|
       tag = "_#{occurrences[path]}"
       occurrences[path] += 1
-      code, _refused = compile_class_body(@ireps.fetch(child), path, tag: tag)
-      { path: path, insn: insn, code: code, tag: tag, superclass: superclass, file: @ireps.fetch(child).file }
+      code, refused = compile_class_body(@ireps.fetch(child), path, tag: tag)
+      { path: path, insn: insn, code: code, refused: refused, tag: tag, superclass: superclass, file: @ireps.fetch(child).file }
     end
     missing = (CodeGen.const_unresolved || []).uniq
     unless missing.empty?
@@ -382,10 +382,21 @@ class CodeGen
     # (rgss's `class Array`) compiles in that gem's run, and refusing it here would drop the core's own Array body.
     refused_paths = compiled.reject { |unit| unit[:code] || (own_file && !own_file.call(unit[:file].to_s)) }
                             .map { |unit| unit[:path] }.to_set
+    vm_free_refusals!(compiled, refused_paths)
     compiled.select { |unit| unit[:code] && !refused_paths.include?(unit[:path]) }.map do |unit|
       { path: unit[:path], name: "#{sanitize(unit[:path])}#{unit[:tag]}", file: unit[:file],
         code: top_class_unit_code(unit[:insn], unit[:path], unit[:code], unit[:tag], unit[:superclass]) }
     end
+  end
+
+  # VM_FREE_UNIT_REFUSED: a VM-free build loads no mrblib, so a refused unit's statements would never run and every
+  # constant and class its body makes would be missing at gem init. Such a body stops generation instead.
+  def vm_free_refusals!(compiled, refused_paths)
+    return if refused_paths.empty? || ENV['BC2CPP_VM_FREE'] != '1'
+
+    listing = compiled.select { |unit| refused_paths.include?(unit[:path]) && unit[:code].nil? }
+                      .map { |unit| "  #{unit[:path]} (#{Array(unit[:refused]).map(&:to_s).sort.join(' ')})" }.uniq
+    raise "VM_FREE_UNIT_REFUSED: a VM-free build has no VM to run these class bodies:\n#{listing.join("\n")}"
   end
 
   # The function that creates a top-level unit's class and calls its body function (compile_class_body names it).

@@ -1074,6 +1074,15 @@ def literal_container_definition_class(irep, definition, path)
     path.delete(key)
     classes.first if classes&.first && classes.uniq.size == 1
   when :ARRAY, :ARRAY2 then 'Array'
+  when :ARYPUSH
+    # A literal past the register window: ARRAY, then ARYPUSH chunks appending to that same Array in place.
+    key = [definition.index, definition.reg]
+    return nil unless path.add?(key)
+
+    grown = BytecodeIR.reaching_definitions(irep, definition.index, definition.reg, shared: true)
+    classes = grown&.map { |inner| literal_container_definition_class(irep, inner, path) }
+    path.delete(key)
+    'Array' if classes&.first == 'Array' && classes.uniq.size == 1
   when :HASH then 'Hash'
   when :RANGE_INC, :RANGE_EXC then 'Range'
   end

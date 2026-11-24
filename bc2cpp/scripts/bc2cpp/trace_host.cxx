@@ -357,6 +357,11 @@ int main(int argc, char** argv) {
     fprintf(stderr, "TRACE_HOST mrb_open failed\n");
     return 2;
   }
+  // mrb_open returns the state with mrb->exc set when a gem's init raised; every later gem is then uninitialized.
+  if (M->exc) {
+    report_exception(M, "mrb_open (gem init)");
+    return 2;
+  }
   // BC2CPP_HOST_GC_STRESS=STEP_RATIO: a GC cycle starts as soon as one ends,
   // so a value nothing roots is freed within a few allocations (MRB_GC_STRESS's
   // full GC per allocation is too slow for the game).
