@@ -13,9 +13,8 @@
 // way.
 //
 // HOST_ARENA: the GC arena is restored after the boot and after every frame, as
-// a device host does. A main_loop call that leaves more than its result in the
-// arena (mrb_funcall's contract) fails the run: on a device that slot would be
-// held forever.
+// a device host does. A main_loop call that leaves more in the arena than
+// mrb_funcall would (its result, if that is a heap object) fails the run.
 
 #include <link.h>
 #include <cstdint>
@@ -514,7 +513,7 @@ int main(int argc, char** argv) {
       return 4;
     }
     const int entry_idx = M->gc.arena_idx;
-    bc2cpp_entry_RPG2k_main_loop(M, game);
+    const mrb_value result = bc2cpp_entry_RPG2k_main_loop(M, game);
     const int left = M->gc.arena_idx - entry_idx;
     if (M->exc) {
       const bool clean = report_exception(M, "main_loop");
@@ -522,7 +521,7 @@ int main(int argc, char** argv) {
               clean ? "exit" : "error");
       return clean ? 0 : 4;
     }
-    if (left > 1) {
+    if (left > (mrb_immediate_p(result) ? 0 : 1)) {
       fprintf(stderr,
               "TRACE_HOST arena leak: main_loop left %d arena entries at "
               "frame=%ld\n",
