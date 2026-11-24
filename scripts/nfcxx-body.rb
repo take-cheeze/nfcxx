@@ -59,6 +59,8 @@ module NfcxxBody
     @temps = []
     # the directories of the run are made under TMPDIR (the driver's temporary root), as the body's mktemp -d made them
     @owned_root = env["TMPDIR"].to_s.empty? ? Dir.tmpdir : env["TMPDIR"]
+    # --keep-intermediates: the directories of the eccp call are kept, and the children see the setting (as the bash exported it)
+    env["NFCXX_KEEP_INTERMEDIATES"] = "1" if env["NFCXX_KEEP_INTERMEDIATES"] == "1" || argv.include?("--keep-intermediates")
     begin
       body
     rescue Exit => e
@@ -91,6 +93,7 @@ module NfcxxBody
     return unless @trace_t0
 
     @trace_t0 = nil
+    flush_pending
     return unless @env["NFCXX_TRACE_OWNER"].to_s == Process.pid.to_s
 
     File.open(@env["NFCXX_TRACE"], "a") do |f|
@@ -211,7 +214,16 @@ module NfcxxBody
 
     t0 = @trace_t0
     @trace_t0 = nil
+    flush_pending
     NfccxxTrace.finish_trace(t0, env: @env)
+  end
+
+  # the spans the children of this run recorded in the pending file (the eccp call's, scripts/nfcxx-eccp-run.rb) go to the trace
+  def flush_pending
+    pending = @env["NFCXX_TRACE_PENDING"].to_s
+    return if pending.empty? || !File.size?(pending)
+
+    NfccxxTrace.flush(pending, env: @env)
   end
 
   # ---------------------------------------------------------------------------------------------------------------------
@@ -334,6 +346,9 @@ module NfcxxBody
     return if file.empty?
 
     @trace_t0 = NfccxxTrace.begin_trace(file, env: @env)
+    # the spans of this run are written as they end; the pending file the children see stays empty (the bash batched them there)
+    @env["NFCXX_TRACE_PENDING"] = File.join(@owned_root, "nfcxx-trace-pending.#{Process.pid}")
+    File.write(@env["NFCXX_TRACE_PENDING"], "")
   end
 
   # --- the .cu and .cpp2 inputs ------------------------------------------------------------------------------------

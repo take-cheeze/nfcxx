@@ -53,7 +53,7 @@ chmod +x "$edg/bin/eccp"
 norm() {  # the normalization of the transcript
   sed -E -e "s|$work/tmp/[^ /\"]*|TMPENTRY|g" -e "s|$sb|SB|g" -e "s|$tree|TREE|g" -e "s|$work|WORK|g" \
          -e 's/\b[0-9a-f]{40}\b/KEY/g' -e 's/\.(tmp|remote)\.[0-9]+/.\1.PID/g' -e 's/\bpid [0-9]+/pid PID/g' -e 's/NFCXX_TRACE_OWNER=[0-9]+/NFCXX_TRACE_OWNER=PID/g' -e 's/trace-pending\.[0-9]+/trace-pending.PID/g' \
-         -e 's/\btmp\.[A-Za-z0-9]{10}\b/tmp.RAND/g' -e 's/\bnfcxx-tmp\.[0-9]{8}-[0-9]+-[A-Za-z0-9]+/nfcxx-tmp.DATE-PID-RAND/g' \
+         -e 's/\btmp\.[A-Za-z0-9]{10}\b/tmp.RAND/g' -e 's/(^|[^-A-Za-z0-9])tmp\.[0-9]{8}-[0-9]+-[A-Za-z0-9]+\b/\1tmp.RAND/g' -e 's/\bnfcxx-tmp\.[0-9]{8}-[0-9]+-[A-Za-z0-9]+/nfcxx-tmp.DATE-PID-RAND/g' \
          -e 's/"ts":[0-9]+/"ts":TS/g' -e 's/"dur":[0-9]+/"dur":DUR/g' -e 's/"pid":[0-9]+/"pid":PID/g' \
          -e 's/^(\| )[0-9]+\.[0-9]+\t/\1SEC\t/'
 }
