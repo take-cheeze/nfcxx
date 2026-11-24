@@ -14,7 +14,7 @@ printf 'int main(){return 0;}\n' > m.cpp
 check_same() {  # check_same ARG...
   local got want
   got=$(ruby "$repo/scripts/nfcxx.rb" "$@" 2>&1; echo "status=$?")
-  want=$(bash "$repo/nfcxx" "$@" 2>&1; echo "status=$?")
+  want=$("$repo/nfcxx" "$@" 2>&1; echo "status=$?")
   if [ "$got" = "$want" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL $*"; echo "  driver: $got"; echo "  bash:   $want"; fi
 }
 
@@ -40,7 +40,7 @@ refused "nfcxx: --instantiate (NFCXX_INSTANTIATE) is auto or used (got bogus)" -
 check_same --backend=bogus -c nosuch.cc -o a.o
 # the backend comes from the environment (NFCXX_BACKEND), as the bash reads it
 got=$(NFCXX_BACKEND=bogus ruby "$repo/scripts/nfcxx.rb" -c m.cpp -o m.o 2>&1 >/dev/null); st=$?
-want=$(NFCXX_BACKEND=bogus bash "$repo/nfcxx" -c m.cpp -o m.o 2>&1 >/dev/null); wst=$?
+want=$(NFCXX_BACKEND=bogus "$repo/nfcxx" -c m.cpp -o m.o 2>&1 >/dev/null); wst=$?
 if [ "$got" = "$want" ] && [ "$st" = 2 ] && [ "$wst" = 2 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL NFCXX_BACKEND=bogus: driver [$got] $st, bash [$want] $wst"; fi
 
 # the commands the setup does not refuse, and the ones the bash ends before its setup, go to the bash: the same output and status

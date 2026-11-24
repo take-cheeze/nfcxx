@@ -18,6 +18,7 @@ require_relative "nfcxx-loop"
 require_relative "nfcxx-setup-args"
 require_relative "nfcxx-setup-state"
 require_relative "trace"
+require_relative "nfcxx-emit-c"
 
 module NfcxxBody
   ROOT = File.expand_path("..", __dir__)
@@ -591,20 +592,22 @@ module NfcxxBody
     # the front end runs in its base directory (the body's cd "$base"): a missing one is status 1 with a message
     fail!("nfcxx: cd: #{base}: No such file or directory", 1) unless File.directory?(base)
     tmp = temp_dir("tmp")
-    f = File.realpath(a("srcs")[0])
-    inc = a("sys_inc") + ["--sys_include=#{base}/include"]
-    inc = ["-I#{ROOT}/lib"] if flag?("freestanding")
-    a("files").each do |x|
-      next unless x.start_with?("-I")
-      inc = ["-I#{abs_path(x[2..])}", *inc]
-    end
     posix = `uname -s`.chomp == "Darwin" ? %w[-D_DARWIN_C_SOURCE -U__BLOCKS__] : %w[-D_POSIX_SOURCE]
-    eh_tls = File.exist?(File.join(edg_base, "eh-tls")) ? ["--nfcxx_eh_thread_local"] : []
-    cmd = [File.join(edg, "cpfe"), *posix, "-D__CHAR_BIT__=8", v("std"), "--#{v("dialect")}", *eh_tls,
-           *a("gnu_opts"), *a("diag_opts"), *inc, "--gen_c_file_name=#{tmp}/out.c", f]
-    status = run_cmd(*cmd, env: @env, out: File::NULL, chdir: base)
-    raise Exit.new(status) unless status == 0
-    $stdout.write(File.binread("#{tmp}/out.c"))
+    eh_tls = File.file?(File.join(edg_base, "eh-tls")) ? ["--nfcxx_eh_thread_local"] : []
+    opts = {
+      "edg" => edg, "base" => base, "root" => ROOT, "freestanding" => v("freestanding"), "std" => v("std"),
+      "dialect" => v("dialect"), "tmp" => tmp, "file" => File.realpath(a("srcs")[0]), "unit" => @env["NFCXX_TRACE_UNIT"].to_s,
+      "bash_pid" => Process.pid.to_s,
+      "posix_def" => posix.join("\x1f"), "eh_tls" => eh_tls.join("\x1f"), "gnu_opts" => a("gnu_opts").join("\x1f"),
+      "diag_opts" => a("diag_opts").join("\x1f"), "sys_inc" => a("sys_inc").join("\x1f"),
+      "files" => a("files").join("\x1f")
+    }
+    begin
+      NfcxxEmitC.run(opts, @env)
+    rescue NfcxxEmitC::Failed => e
+      raise Exit.new(e.status)
+    end
+    $stdout.write(File.binread(File.join(tmp, "out.c")))
     raise Exit.new(0)
   end
 

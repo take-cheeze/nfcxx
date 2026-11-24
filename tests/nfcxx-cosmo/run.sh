@@ -73,7 +73,7 @@ while IFS= read -r line; do
   fi
   : > "$sb/stublog"
   (cd "$work" && env -i RUBY="$(command -v ruby)" PATH="$bin:/usr/bin:/bin" NFCXX_STUB_LOG="$sb/stublog" NFCXX_STUB_TMP="$tmp" \
-     ${oenv[@]+"${oenv[@]}"} bash "$root/nfcxx" ${args[@]+"${args[@]}"} >/dev/null 2>"$sb/oerr"); orc=$?
+     ${oenv[@]+"${oenv[@]}"} "$root/nfcxx" ${args[@]+"${args[@]}"} >/dev/null 2>"$sb/oerr"); orc=$?
   oracle_out=$(sed -e "s#$tmp/[^/]*#TMP#g" -e "s#$work#WORK#g" -e "s#$root#ROOT#g" -e "s#$sb/#SB/#g" "$sb/stublog"; echo "STATUS $orc")
   if [ "$port_out" = "$oracle_out" ]; then
     pass=$((pass + 1))

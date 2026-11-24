@@ -45,7 +45,7 @@ refused 1 "realpath: /nonexistent/x.cpp2: No such file or directory" --backend=b
 refused 1 "realpath: /nonexistent/a: No such file or directory" -c /nonexistent/a/x.cpp2 x.cpp2 -o q.o
 # cppfront's support files: CPPFRONT_SRC without include/cpp2util.h (status 2), before the setup's refusal
 got=$(CPPFRONT_SRC="$work/empty-cf" ruby "$repo/scripts/nfcxx.rb" --backend=bogus -c x.cpp2 -o x.o 2>&1 >/dev/null); status=$?
-want=$(CPPFRONT_SRC="$work/empty-cf" bash "$repo/nfcxx" --backend=bogus -c x.cpp2 -o x.o 2>&1 >/dev/null); wstatus=$?
+want=$(CPPFRONT_SRC="$work/empty-cf" "$repo/nfcxx" --backend=bogus -c x.cpp2 -o x.o 2>&1 >/dev/null); wstatus=$?
 if [ "$got" = "$want" ] && [ "$status" = 2 ] && [ "$wstatus" = 2 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL CPPFRONT_SRC: driver [$got] $status, bash [$want] $wstatus"; fi
 
 # modules: the bash's module block, before the setup's refusals (the backend, for example)

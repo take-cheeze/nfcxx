@@ -86,7 +86,7 @@ while IFS= read -r line; do
   : > "$sb/stublog"
   # ruby is on the PATH too: scripts/k1om-cc.rb (the k1om GCC's wrapper) is a Ruby script
   (cd "$work" && env -i RUBY="$(command -v ruby)" PATH="$bin:$(dirname "$(command -v ruby)"):/usr/bin:/bin" NFCXX_STUB_LOG="$sb/stublog" NFCXX_STUB_TMP="$tmp" \
-     NFCXX_K1OM_ROOT="$k1om" bash "$root/nfcxx" "${args[@]}" >/dev/null 2>"$sb/oerr"); orc=$?
+     NFCXX_K1OM_ROOT="$k1om" "$root/nfcxx" "${args[@]}" >/dev/null 2>"$sb/oerr"); orc=$?
   if [ $rc = 3 ]; then
     # not compared, but a refusal the bash makes (status 2) that the port left unported is a failure
     if [ $orc = 2 ]; then

@@ -90,7 +90,7 @@ while IFS= read -r line; do
   fi
   : > "$sb/stublog"
   (cd "$work" && env -i RUBY="$(command -v ruby)" PATH="$bin:/usr/bin:/bin" NFCXX_FACTS="$facts" NFCXX_STUB_LOG="$sb/stublog" \
-     NFCXX_STUB_TMP="$tmp" bash "$root/nfcxx" "${args[@]}" >/dev/null 2>"$sb/oerr"); orc=$?
+     NFCXX_STUB_TMP="$tmp" "$root/nfcxx" "${args[@]}" >/dev/null 2>"$sb/oerr"); orc=$?
   oracle_out=$(sed -e "s#$tmp/[^/]*#TMP#g" -e "s#$work#WORK#g" -e "s#$root#ROOT#g" "$sb/stublog")
   if ! grep -q '^EXEC ' "$sb/stublog"; then   # after EXEC the status is the program's: none is compared
     if [ -n "$oracle_out" ]; then oracle_out="$oracle_out
