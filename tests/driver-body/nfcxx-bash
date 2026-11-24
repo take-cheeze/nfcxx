@@ -285,9 +285,8 @@ nfcxx_argv=("$@")   # the command as given: the compile cache keys on it (see ca
 args0=("$@")   # the arguments as given: the SYCL two-pass build below re-runs the driver with them
 # BEGIN the argument loop: scripts/nfcxx-loop.rb --bash-state reads the arguments and prints the statements that set the state
 # they leave (the loop's scalars and arrays, from the planner's records; the setup above has set the NFCXX_* defaults). A refusal
-# is its message on standard error, with status 2 (the driver ends with it). A value option given last is a loop_no_value
-# statement: set -u ends the driver there ("$2: unbound variable"). A planner that stops before its end ends the driver with 1.
-loop_no_value() { : "$2"; }   # a value option given last: $2 is unset here (set -u ends the driver)
+# is its message on standard error, with status 2 (the driver ends with it). A value option given last is a refusal too:
+# "nfcxx: OPTION needs a value", status 1. A planner that stops before its end ends the driver with 1.
 # The Ruby driver (scripts/nfcxx.rb) ran the loop before this body, on these arguments, and passes its result in the environment:
 # NFCXX_LOOP_STATUS (0: NFCXX_LOOP_STATE is the statements; otherwise the refusal's status, and NFCXX_LOOP_STATE its message).
 # Without it (the arguments the wrappers rewrite, or the body run alone) the loop runs here.
