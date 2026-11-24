@@ -70,6 +70,13 @@ ARRAY_OPS = SRC + <<~'RUBY'
   end
 RUBY
 
+# A literal past mrbc's register window is ARRAY then one ARYPUSH per chunk; a long chain is still the literal.
+LONG_LITERAL = SRC + <<~RUBY
+  class FfTable
+    TABLE = [#{(1..400).to_a.join(', ')}].freeze
+  end
+RUBY
+
 # A non-literal receiver of `+` (a constant) could be anything `+` returns.
 CONST_PLUS = SRC + <<~'RUBY'
   class FfTable
@@ -120,6 +127,7 @@ ops, = generate(ARRAY_OPS)
 check.call('a freeze of an Array literal grown by +, a splat or a push leaves no frozen check',
            !frozen_test?(ops) && !ops.include?('mrb_check_frozen(M, mrb_obj_ptr(self))'))
 check.call('the synthesized writer carries no frozen check', ops.include?('/* FROZEN_FREE */'))
+check.call('a freeze of a literal grown by a long ARYPUSH chain leaves no frozen check', !frozen_test?(generate(LONG_LITERAL).first))
 check.call('a freeze of a constant + a literal keeps the frozen check',
            frozen_test?(code_of(generate(CONST_PLUS).first, 'FfTable_bump')))
 check.call('a + on a Hash literal keeps the frozen check',

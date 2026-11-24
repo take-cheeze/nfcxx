@@ -99,10 +99,69 @@ LONG_LITERAL = <<~RUBY
 RUBY
 
 suite.compile(LONG_LITERAL) do |ireps, root|
-  gen = CodeGen.new(ireps, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
-  code = gen.compile_top_class_units(ireps.fetch(root)).find { |unit| unit[:path] == 'Outer' }.to_h[:code].to_s
+  unit = lambda do
+    gen = CodeGen.new(ireps, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+    gen.compile_top_class_units(ireps.fetch(root)).find { |u| u[:path] == 'Outer' }.to_h[:code].to_s
+  end
+  code = unit.call
   suite.check('a literal past the register window (ARRAY then ARYPUSH) compiles in a nested body',
-              code.include?('bc2cpp_class_body_Outer__Inner_0') && code.include?('mrb_ary_push(M, '))
+              code.include?('bc2cpp_class_body_Outer__Inner_0'))
+  # LITERAL_PUSH_CHUNKS: every chunk joins one table (0xb064: an Array of 100), with no push left.
+  suite.check('the pushed chunks are one literal table', code.include?('0xb064') && !code.include?('mrb_ary_push(M, '))
+  saved = ENV['BC2CPP_LITERAL_TABLES']
+  ENV['BC2CPP_LITERAL_TABLES'] = '0'
+  plain = unit.call
+  ENV['BC2CPP_LITERAL_TABLES'] = saved
+  suite.check('without literal tables the chunks are pushes', plain.include?('mrb_ary_push(M, '))
+end
+
+# LITERAL_PUSH_CHUNKS at run time: the table the unit builds is the Array the VM's body builds.
+PUSHED = <<~RUBY
+  module LpOuter
+    N = -1
+    module LpInner
+      TABLE = [#{(1..70).map { |i| (i % 7).zero? ? 'N' : (i % 11).zero? ? "'s#{i}'" : (i % 13).zero? ? "[#{i}, N]" : i.to_s }.join(', ')}].freeze
+    end
+  end
+RUBY
+
+Dir.mktmpdir('bc2cpp-class-body-pushed') do |dir|
+  saved = %w[BC2CPP_VM_FREE BC2CPP_SIG_DIRS].to_h { |k| [k, ENV[k]] }
+  ENV['BC2CPP_VM_FREE'] = '1'
+  ENV['BC2CPP_SIG_DIRS'] = ''
+  code, err = begin
+    Bc2cppFixtureRuntime.generate(PUSHED, dir, core: true, only_owners: %w[LpOuter LpOuter::LpInner])
+  ensure
+    saved.each { |k, v| ENV[k] = v }
+  end
+  suite.check('LITERAL_PUSH_CHUNKS: the pushed literal is one table in the gem', code.include?('0xb046') && code.include?('bc2cpp_lit_build('))
+  build = ENV['CC_GENERATED_ONLY'] == '1' ? nil : Bc2cppFixtureRuntime.full_or_build
+  if build.nil?
+    puts '  SKIP pushed literal behaviour: needs a full-core libmruby'
+  else
+    scenario = <<~CPP
+      static int scenario(mrb_state* M) {
+        mrb_value inner = mrb_obj_value(mrb_module_get_under(M, mrb_module_get(M, "LpOuter"), "LpInner"));
+        mrb_value table = mrb_const_get(M, inner, mrb_intern_lit(M, "TABLE"));
+        show(M, "TABLE", table);
+        show(M, "frozen", mrb_bool_value(mrb_frozen_p(mrb_basic_ptr(table))));
+        return 0;
+      }
+    CPP
+    built, output = Bc2cppFixtureRuntime.run(dir, err, %w[LpOuter LpOuter::LpInner], scenario, build: build, full: true,
+                                             compiled_load: false)
+    suite.check('LITERAL_PUSH_CHUNKS: the fixture builds and runs', built)
+    sections = Bc2cppFixtureRuntime.sections(output)
+    plain = ->(lines) { lines.to_a.reject { |l| l.start_with?('  dispatches=') } }
+    interpreted = plain.call(sections['interpreted'])
+    compiled = plain.call(sections['compiled'])
+    suite.check('LITERAL_PUSH_CHUNKS: the interpreter sees the frozen 70-element table',
+                interpreted.size == 2 && interpreted.first.start_with?('TABLE => [1, 2, 3, 4, 5, 6, -1,') &&
+                interpreted.last == 'frozen => true')
+    suite.check('LITERAL_PUSH_CHUNKS: interpreted and compiled runs print the same', built && interpreted == compiled)
+    interpreted.zip(compiled).reject { |a, b| a == b }.each { |a, b| puts "    interpreted: #{a}\n    compiled:    #{b}" }
+    puts output.lines.last(15).join unless built
+  end
 end
 
 # A body the unit compiler refuses (a branch): the VM runs it in a VM build, and a VM-free build stops.

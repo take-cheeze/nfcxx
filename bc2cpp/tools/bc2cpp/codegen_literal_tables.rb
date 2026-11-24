@@ -111,12 +111,35 @@ class CodeGen
           containers << node
         end
         state[a] = node
+      when :ARYPUSH
+        state[a] = literal_table_push(state, containers, insn, idx, forbidden)
       else
         state.clear
       end
     end
     # A table pays a call and its pointers: below LITERAL_TABLE_MIN_NODES the instructions are as small.
     containers.select { |node| node.parent.nil? && literal_table_members(node).size >= LITERAL_TABLE_MIN_NODES }
+  end
+
+  # LITERAL_PUSH_CHUNKS: mrbc builds an Array literal past its register window as ARRAY, then `ARYPUSH Ra n` per chunk
+  # of loads. A chunk of static nodes joins the literal still in Ra: the ARYPUSH becomes the root and the instructions
+  # it grows (the ARRAY, earlier ARYPUSHes) are skipped members (`value`). nil when the chunk is not static.
+  def literal_table_push(state, containers, insn, idx, forbidden)
+    a = insn.reg
+    base = state[a]
+    n = insn.uint_operand
+    return nil unless n && base&.kind == :array && base.parent.nil? && !forbidden.include?(idx)
+
+    regs = ((a + 1)..(a + n)).to_a
+    nodes = regs.map { |r| state[r] }
+    regs.each { |r| state.delete(r) }
+    return nil unless nodes.all? && base.children.size + nodes.size < LITERAL_TABLE_LIMIT
+
+    grown = LiteralNode.new(:array, idx, [*base.value, base.idx], base.children + nodes, a)
+    grown.children.each { |child| child.parent = grown }
+    containers.delete(base)
+    containers << grown
+    grown
   end
 
   # A Hash key the table may hold: a scalar literal, or (LITERAL_ARRAY_KEYS) an Array literal of non-String scalars.
@@ -269,6 +292,7 @@ class CodeGen
 
   # Every node a root's table replaces: its containers and static leaves, not the root itself or a kept read.
   def literal_table_members(root, out = [])
+    Array(root.value).each { |grown| out << LiteralNode.new(:grown, grown, nil, nil, root.reg) } if root.kind == :array
     root.children.each do |child|
       next if child.kind == :dyn
 
