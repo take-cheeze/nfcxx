@@ -2208,12 +2208,14 @@ BC2CPP_MAIN = lambda do
     // (a quarter per call) before storing the result; a GC there (MRB_GC_STRESS) would free a fresh result, and the later
     // steps would free the result of an unrelated cfunc. So a grown arena is dropped to the entry index and shrunk to its
     // floor here, with the result rooted in a global meanwhile; the VM's epilogue then has nothing left to realloc.
+    // The global is cleared once the reallocs are done, or it would keep the last such result alive for good.
     struct Bc2cppCfuncExit { mrb_state* M; int ai; mrb_value v; };
     [[maybe_unused]] static inline mrb_value bc2cpp_cfunc_result(Bc2cppCfuncExit e) {
     #ifndef MRB_GC_FIXED_ARENA
       if (mrb_unlikely(e.M->gc.arena_capa > MRB_GC_ARENA_SIZE)) {
         mrb_state* M = e.M;
-        if (!mrb_immediate_p(e.v)) mrb_gv_set(M, mrb_intern_lit(M, "$__bc2cpp_result"), e.v);
+        mrb_sym root = mrb_intern_lit(M, "$__bc2cpp_result");
+        if (!mrb_immediate_p(e.v)) mrb_gv_set(M, root, e.v);
         mrb_gc* gc = &M->gc;
         gc->arena_idx = e.ai;
         while (gc->arena_capa > MRB_GC_ARENA_SIZE && e.ai < gc->arena_capa / 4) {
@@ -2222,6 +2224,7 @@ BC2CPP_MAIN = lambda do
           gc->arena = (struct RBasic**)mrb_realloc(M, gc->arena, sizeof(struct RBasic*) * capa);
           gc->arena_capa = capa;
         }
+        if (!mrb_immediate_p(e.v)) mrb_gv_set(M, root, mrb_nil_value());
       }
     #endif
       return e.v;

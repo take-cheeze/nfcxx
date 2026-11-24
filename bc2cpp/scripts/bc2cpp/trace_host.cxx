@@ -11,6 +11,10 @@
 // BC2CPP_HOST_MT_COUNT=1 prints the method-table size and exits before the game
 // starts; BC2CPP_HOST_MT_HEAP=1 dumps the heap method-table entries the same
 // way.
+//
+// HOST_ARENA: the GC arena is restored after the boot and after every frame, as
+// a device host does. A main_loop call that leaves more in the arena than
+// mrb_funcall would (its result, if that is a heap object) fails the run.
 
 #include <link.h>
 #include <cstdint>
@@ -450,6 +454,9 @@ int main(int argc, char** argv) {
     return 0;
   }
 
+  // What the boot leaves in the arena is kept by a constant or by the game,
+  // which is registered below.
+  const int boot_ai = mrb_gc_arena_save(M);
   set_const(M, "GAME_DIR", mrb_str_new_cstr(M, game_dir));
   set_const(M, "RTP_DIR", mrb_str_new_cstr(M, ""));
   set_const(M, "TEST_PLAY", mrb_false_value());
@@ -485,6 +492,7 @@ int main(int argc, char** argv) {
     return 3;
   }
   mrb_gc_register(M, game);
+  mrb_gc_arena_restore(M, boot_ai);
   fprintf(stdout, "TRACE_HOST game=RPG2k dir=%s frames=%ld\n", game_dir,
           frames);
   // BC2CPP_ENTRY (include/bc2cpp_entry.hxx): whether new, main_loop and
@@ -496,6 +504,7 @@ int main(int argc, char** argv) {
           BC2CPP_ENTRY_RPG2k_current_scene_name ? "direct" : "by-name");
 
   const std::vector<KeyTap> taps = parse_keys(getenv("BC2CPP_HOST_KEYS"));
+  const int frame_ai = mrb_gc_arena_save(M);
   for (long frame = 0; frame < frames; ++frame) {
     print_scene(M, game, frame, frame % 50 == 0);
     tap_keys(M, taps, frame);
@@ -503,15 +512,27 @@ int main(int argc, char** argv) {
       report_exception(M, "BC2CPP_HOST_KEYS");
       return 4;
     }
-    bc2cpp_entry_RPG2k_main_loop(M, game);
+    const int entry_idx = M->gc.arena_idx;
+    const mrb_value result = bc2cpp_entry_RPG2k_main_loop(M, game);
+    const int left = M->gc.arena_idx - entry_idx;
     if (M->exc) {
       const bool clean = report_exception(M, "main_loop");
       fprintf(stdout, "TRACE_HOST stopped frame=%ld reason=%s\n", frame,
               clean ? "exit" : "error");
       return clean ? 0 : 4;
     }
+    if (left > (mrb_immediate_p(result) ? 0 : 1)) {
+      fprintf(stderr,
+              "TRACE_HOST arena leak: main_loop left %d arena entries at "
+              "frame=%ld\n",
+              left, frame);
+      return 5;
+    }
+    mrb_gc_arena_restore(M, frame_ai);
   }
   print_scene(M, game, frames, true);
-  fprintf(stdout, "TRACE_HOST done frames=%ld\n", frames);
+  mrb_gc_arena_restore(M, frame_ai);
+  fprintf(stdout, "TRACE_HOST done frames=%ld arena=%d\n", frames,
+          M->gc.arena_idx);
   return 0;
 }
