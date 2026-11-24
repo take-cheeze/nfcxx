@@ -5,7 +5,8 @@
 # cache that fills only once every binding exists, and a `Scope::NAME` read of an immutable name from an immutable
 # scope caches per receiver. The analysis part checks which names qualify; the runtime part reads the names from
 # every scope, interpreted and compiled, before and after a binding the program declares but has not made yet
-# (defined from C, as a late class body would), and compares the output. Needs MRBC; the runtime part also needs a
+# (defined from C, as a late class body would), and compares the output, with CONST_SLOT_NIL_EMPTY (nil marks the empty
+# slot, a zero mrb_value being nil in every boxing mode) on and off. Needs MRBC; the runtime part also needs a
 # full-core libmruby (BC2CPP_MRUBY_FULL, or rake and a C++ compiler).
 ENV['BC2CPP_SIG_DIRS'] = ''
 
@@ -14,6 +15,7 @@ require_relative 'check_support'
 require_relative 'fixture_runtime'
 require_relative '../../tools/bc2cpp/irep'
 require_relative '../../tools/bc2cpp/const_site_cache'
+require_relative '../../tools/bc2cpp/bc2cpp'
 
 suite = FixtureCheck.new('const_bindings_check')
 suite.require_mrbc!
@@ -168,6 +170,13 @@ SOURCE = <<~RUBY
       def w = ONLY_LATE
       def late = LATE
     end
+    # CONST_SLOT_NIL_EMPTY: a nil value is the empty slot, so it is looked up again; false is stored.
+    class CbH
+      NIL_V = nil
+      FALSE_V = false
+      def w = NIL_V
+      def late = FALSE_V
+    end
   end
   LATE = 4
   class CbTop
@@ -185,13 +194,16 @@ SOURCE = <<~RUBY
   end
 RUBY
 
-OWNERS = %w[CbOuter::CbA CbOuter::CbB CbOuter::CbC CbOuter::CbE CbOuter::CbF CbOuter::CbG CbTop].freeze
+OWNERS = %w[CbOuter::CbA CbOuter::CbB CbOuter::CbC CbOuter::CbE CbOuter::CbF CbOuter::CbG CbOuter::CbH CbTop].freeze
 
 Dir.mktmpdir('bc2cpp-const-bindings') do |dir|
   code, err = Bc2cppFixtureRuntime.generate(SOURCE, dir, core: true, only_owners: OWNERS)
   suite.check('a multi-binding read uses the guarded site cache', code.include?('bc2cpp_const_path_has(M, "CbOuter::CbA"') ||
                                                                   (code.include?('bc2cpp_cconst_tests') && code.include?('"CbOuter::CbA\\0"')))
   suite.check('a scoped read of an immutable name uses the receiver cache', code.match?(/bc2cpp_mcnst_\d+\(M, r\d+\)/))
+  suite.check('CONST_SLOT_NIL_EMPTY: no have flags; nil marks the empty slot',
+              !code.include?('bc2cpp_cconst_have') && !code.include?('bc2cpp_cdef_mhave') &&
+              code.include?('static_assert(MRB_Qnil == 0') && code.include?('!mrb_nil_p(bc2cpp_cconst_slots[i])'))
   # One receiver cache per name: the two `::K` reads (different receivers) share a slot.
   last_mcnst = ->(meth) { code[/^mrb_value CbTop_#{meth}_impl\(mrb_state\* M.*?^}/m].to_s.scan(/bc2cpp_mcnst_(\d+)\(M, r\d+\)/).flatten.last }
   suite.check('the GETMCNST reads of one name share one receiver cache',
@@ -217,7 +229,7 @@ Dir.mktmpdir('bc2cpp-const-bindings') do |dir|
       }
       static void round(mrb_state* M, const char* when) {
         static const char* const classes[] = {"CbOuter::CbA", "CbOuter::CbB", "CbOuter::CbC", "CbOuter::CbE",
-                                              "CbOuter::CbF", "CbOuter::CbG", "CbTop"};
+                                              "CbOuter::CbF", "CbOuter::CbG", "CbOuter::CbH", "CbTop"};
         char label[96];
         for (const char* path : classes) {
           mrb_value obj = make(M, path);
@@ -250,16 +262,23 @@ Dir.mktmpdir('bc2cpp-const-bindings') do |dir|
         return 0;
       }
     CPP
-    # STATIC_CONSTANTS (codegen_const_tables.rb) on, as generated above, and off.
-    [['', dir, err], ['BC2CPP_STATIC_CONSTANTS=0: ', nil, nil]].each do |tag, run_dir, run_err|
+    # STATIC_CONSTANTS (codegen_const_tables.rb) on, as generated above, and off; CONST_SLOT_NIL_EMPTY off, with each.
+    [['', dir, err, {}], ['BC2CPP_STATIC_CONSTANTS=0: ', nil, nil, { 'BC2CPP_STATIC_CONSTANTS' => '0' }],
+     ['BC2CPP_CONST_SLOT_NIL_EMPTY=0: ', nil, nil, { 'BC2CPP_CONST_SLOT_NIL_EMPTY' => '0' }],
+     ['both 0: ', nil, nil, { 'BC2CPP_STATIC_CONSTANTS' => '0', 'BC2CPP_CONST_SLOT_NIL_EMPTY' => '0' }]].each do |tag, run_dir, run_err, env|
       unless run_dir
-        run_dir = File.join(dir, 'static-off')
+        run_dir = File.join(dir, env.keys.join('-'))
         FileUtils.mkdir_p(run_dir)
-        saved = ENV['BC2CPP_STATIC_CONSTANTS']
-        ENV['BC2CPP_STATIC_CONSTANTS'] = '0'
+        saved = env.keys.to_h { |k| [k, ENV[k]] }
+        env.each { |k, v| ENV[k] = v }
         off_code, run_err = Bc2cppFixtureRuntime.generate(SOURCE, run_dir, core: true, only_owners: OWNERS)
-        ENV['BC2CPP_STATIC_CONSTANTS'] = saved
-        suite.check("#{tag}the generated fills are back", off_code.include?('bc2cpp_cconst_fill_') && !off_code.include?('bc2cpp_cconst_rows'))
+        saved.each { |k, v| ENV[k] = v }
+        if env.key?('BC2CPP_STATIC_CONSTANTS')
+          suite.check("#{tag}the generated fills are back", off_code.include?('bc2cpp_cconst_fill_') && !off_code.include?('bc2cpp_cconst_rows'))
+        end
+        if env.key?('BC2CPP_CONST_SLOT_NIL_EMPTY')
+          suite.check("#{tag}the have flags are back", off_code.include?('bc2cpp_cconst_have[') && !off_code.include?('static_assert(MRB_Qnil'))
+        end
       end
       built, output = Bc2cppFixtureRuntime.run(run_dir, run_err, OWNERS, "#include <cstring>\n#{scenario}", build: build, full: true)
       suite.check("#{tag}fixture builds and runs", built)
@@ -275,10 +294,22 @@ Dir.mktmpdir('bc2cpp-const-bindings') do |dir|
                   interpreted.include?('after CbOuter::CbG#w 1 => raised NameError'))
       suite.check("#{tag}a subclass's own binding shadows its superclass's",
                   interpreted.include?('before CbOuter::CbE#w 0 => 5') && interpreted.include?('before CbOuter::CbF#w 0 => 7'))
+      suite.check("#{tag}a nil and a false constant read as themselves",
+                  interpreted.include?('after CbOuter::CbH#w 1 => nil') && interpreted.include?('after CbOuter::CbH#late 1 => false'))
       suite.check("#{tag}interpreted and compiled runs print the same", interpreted == compiled)
       interpreted.zip(compiled).reject { |a, b| a == b }.first(10).each do |a, b|
         puts "    interpreted: #{a}\n    compiled:    #{b}"
       end
+    end
+    # CONST_SLOT_NIL_EMPTY's premise in each boxing mode: a zero-initialised (static) mrb_value is nil, and the emitted
+    # static_asserts compile.
+    probe = File.join(dir, 'zero_nil.cc')
+    File.write(probe, "#include <mruby.h>\n#{CodeGen::CONST_SLOT_NIL_ASSERTS}" \
+                      "static mrb_value zero_slot;\nint main() { return mrb_nil_p(zero_slot) && !mrb_nil_p(mrb_false_value()) ? 0 : 1; }\n")
+    %w[MRB_WORD_BOXING MRB_NAN_BOXING MRB_NO_BOXING].each do |mode|
+      exe = File.join(dir, "zero_nil_#{mode}")
+      made = Bc2cppCxx.system('-std=c++17', "-D#{mode}", "-I#{build}/include", "-I#{Bc2cppFixtureRuntime::ROOT}/3rd/mruby/include", probe, '-o', exe)
+      suite.check("CONST_SLOT_NIL_EMPTY: a zero mrb_value is nil under #{mode}", made && system(exe))
     end
   end
 end

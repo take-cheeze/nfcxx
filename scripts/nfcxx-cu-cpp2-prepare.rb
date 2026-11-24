@@ -52,7 +52,10 @@ module NfcxxCuCpp2Prepare
   # cu_prepare: each .cu input is rewritten, its copy takes the input's place in srcs and files, and the -I of its directory
   # goes into cflags and files. The copies go to the per-user cache for a -c compile (the object's key), else to the temporary
   # directory. Returns the statements the body evals.
-  def cu(groups, env = ENV)
+  def cu(groups, env = ENV) = cu_result(groups, env)[0]
+
+  # cu's statements and the arrays they set (srcs, files, cflags), for cpp2 to continue from
+  def cu_result(groups, env = ENV)
     dir = str(groups, "tmp")
     keep = ""
     if compile_only?(groups)
@@ -67,7 +70,8 @@ module NfcxxCuCpp2Prepare
     reply = StringIO.new
     DriverState.write_groups(reply, result)
     DriverState.write_end(reply)
-    NfcxxCuApply.plan(arrays(groups, "cu"), reply.string)
+    applied = NfcxxCuApply.arrays(arrays(groups, "cu"), reply.string)
+    [NfcxxCuApply.plan(arrays(groups, "cu"), reply.string), applied]
   rescue CuCopiesFailed => e
     raise Failed.new(e.message, 2)
   rescue CudaRefused => e
@@ -90,6 +94,22 @@ module NfcxxCuCpp2Prepare
     raise Failed.new(e.message, e.status)
   end
 
+  # both: the .cu inputs (cu_prepare), then the .cpp2 inputs (cpp2_prepare) in the same process, so cpp2 continues from the arrays
+  # cu set. The records' "cpp2_inputs" group is the .cpp2 list (the "inputs" group is the .cu list). Returns the statements the body evals.
+  def both(groups, env = ENV)
+    statements = []
+    g = groups
+    unless list(groups, "inputs").empty?
+      text, applied = cu_result(groups, env)
+      statements << text
+      g = g.merge("srcs" => applied["srcs"], "files" => applied["files"], "cflags" => applied["cflags"])
+    end
+    unless list(groups, "cpp2_inputs").empty?
+      statements << cpp2(g.merge("inputs" => list(groups, "cpp2_inputs")), env)
+    end
+    statements.join("\n")
+  end
+
   # the options NfcxxCuApply.plan and NfcxxCpp2.run take: the input list and the arrays, joined
   def arrays(groups, kind)
     { "kind" => kind, "inputs" => joined(groups, "inputs"), "srcs" => joined(groups, "srcs"),
@@ -101,7 +121,7 @@ end
 
 if $PROGRAM_NAME == __FILE__
   kind = ARGV[0]
-  abort "nfcxx-cu-cpp2-prepare: cu or cpp2 (records on standard input)" unless ARGV.size == 1 && %w[cu cpp2].include?(kind)
+  abort "nfcxx-cu-cpp2-prepare: cu, cpp2 or both (records on standard input)" unless ARGV.size == 1 && %w[cu cpp2 both].include?(kind)
 
   begin
     groups = DriverState.read_groups($stdin.binmode.read)
@@ -115,7 +135,11 @@ if $PROGRAM_NAME == __FILE__
   failure = nil
   begin
     $stdout.reopen(File::NULL)
-    statements = kind == "cu" ? NfcxxCuCpp2Prepare.cu(groups) : NfcxxCuCpp2Prepare.cpp2(groups)
+    statements = case kind
+                 when "cu" then NfcxxCuCpp2Prepare.cu(groups)
+                 when "cpp2" then NfcxxCuCpp2Prepare.cpp2(groups)
+                 else NfcxxCuCpp2Prepare.both(groups)
+                 end
   rescue NfcxxCuCpp2Prepare::Failed => e
     failure = e
   ensure

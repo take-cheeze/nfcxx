@@ -21,14 +21,22 @@
 #       function, a C++ `extern` declaration and a method declaration stay; an `extern "C"` prototype, its caller
 #       and a program-wide site (BC2CPP_OWNERS_PW) move; an #if region's names come back under their own branch
 #       (a header naming them reaches them through a using-directive);
+#     - a helper calling the unit's own compiled method (METHOD_PROTOTYPE) or comparing a weak `extern "C"`
+#       function's address moves; one in a gem that only declares the method stays;
 #     - two sharded gems printing the same tail link, run, and nm finds each moved helper defined once, in no gem
 #       namespace, while each gem keeps its own state and both advance the one program-wide site;
 #       BC2CPP_CROSS_GEM_SHARE=0 leaves the tail as printed.
 #
+#   program-wide class slots (PROGRAM_CLASS_SLOTS, tools/bc2cpp/program_class_slots.rb; nm too)
+#     - two gems asking for owners in different orders number each alike, by its rank in the sorted universe; an
+#       owner outside it takes a slot of the gem's own after it; both include one header with the one table, a
+#       different lookup gets a different one; the two compile and define the same mergeable table symbol;
+#       BC2CPP_PROGRAM_CLASS_SLOTS=0, or no runtime header directory, keeps the gem's table 0...n.
+#
 #   isolation (--isolation BUILD_DIR; a real build, needs a C++ compiler)
 #     - each compiled gem's main file, with every gem-namespace item after the runtime region dropped, still
 #       compiles: no cross-gem header names a gem's own item (which ShardOutput's using-directive would hide).
-#       BC2CPP_ISOLATION_FLAGS holds the build's other -I/-D flags.
+#       BC2CPP_ISOLATION_FLAGS holds the build's other -I/-D flags. Every gem includes the same program class table.
 #
 # Usage: ruby scripts/bc2cpp/runtime_header_check.rb [--isolation BUILD_DIR]
 
@@ -38,6 +46,7 @@ require_relative 'check_support'
 require_relative 'cxx'
 require_relative '../../tools/bc2cpp/runtime_header'
 require_relative '../../tools/bc2cpp/cross_gem_share'
+require_relative '../../tools/bc2cpp/bc2cpp'
 
 suite = FixtureCheck.new('runtime_header_check')
 
@@ -91,6 +100,10 @@ if (at = ARGV.index('--isolation'))
       puts err.lines.grep(/error/).first(10).join unless status.success?
     end
   end
+  # PROGRAM_CLASS_SLOTS: the gems of a build agree on the universe, so they include one program class table.
+  tables = mains.map { |main| File.read(main).scan(/bc2cpp_pw_classes_\h{16}\.hxx/).uniq }
+  suite.check("the compiled gems include one program class table (#{tables.flatten.uniq.join(', ')})",
+              tables.flatten.uniq.size <= 1 && (tables.flatten.empty? || tables.all? { |t| t.size == 1 }))
   suite.finish!
   exit
 end
@@ -356,6 +369,192 @@ Dir.mktmpdir('bc2cpp-cross-gem') do |dir|
   else
     puts '  SKIP: no C++ compiler or nm'
   end
+end
+
+# FIBER_SHARE: the Fiber runtime's items (named as in tools/bc2cpp/runtime) move with their state and addresses, one per
+# program; one naming a gem's own state stays; a self-guarded #if region's names come back after its include.
+puts '-- cross-gem share: the Fiber runtime'
+FS_TAIL = <<~'CPP'
+  static int counter = 0;
+  #ifndef BC2CPP_LIT_SYM
+  struct Bc2cppLitSymCache { int sym; };
+  static int bc2cpp_lit_sym(Bc2cppLitSymCache& c, int v) { return c.sym ? c.sym : (c.sym = v); }
+  #define BC2CPP_LIT_SYM(v) ([]() -> int { static Bc2cppLitSymCache bc2cpp_lit_cache = {0}; return bc2cpp_lit_sym(bc2cpp_lit_cache, (v)); }())
+  #endif
+  static int bc2cpp_running_fibers() { static int n = 0; return ++n; }
+  static int bc2cpp_fiber_m_alive_p(int x) { return bc2cpp_running_fibers() + x + BC2CPP_LIT_SYM(1); }
+  static int (*bc2cpp_fiber_orig_alive_p)(int) = nullptr;
+  static const void* bc2cpp_fiber_definer_p() { return reinterpret_cast<const void*>(&bc2cpp_fiber_m_alive_p); }
+  static int bc2cpp_fiber_own_p(int x) { return ++counter + x; }
+CPP
+def fs_gem(gem, dir)
+  text = "#{RuntimeHeader::BEGIN_MARK}#{RuntimeHeader::END_MARK}#{FS_TAIL}" \
+         "#{ShardOutput.unit_mark('A')}int #{gem}_run() { bc2cpp_fiber_orig_alive_p = &bc2cpp_fiber_m_alive_p; " \
+         "return bc2cpp_fiber_orig_alive_p(0) * 100 + bc2cpp_fiber_own_p(0) * 10 + BC2CPP_LIT_SYM(2); }\n" \
+         "const void* #{gem}_addr() { return bc2cpp_fiber_definer_p(); }\n#{ShardOutput::HOOKS_MARK}"
+  CrossGemShare.rewrite(RuntimeHeader.rewrite(text, dir, tail_mark: true), dir)
+end
+Dir.mktmpdir('bc2cpp-cgs-fiber') do |dir|
+  a = fs_gem('ga', dir)
+  b = fs_gem('gb', dir)
+  moved = Dir[File.join(dir, 'bc2cpp_cs_*.hxx')].map { |h| File.read(h) }.join
+  suite.check('the runtime moves with its state, an address-taken function and a mutable variable, inline',
+              moved.include?('inline int bc2cpp_running_fibers()') && moved.include?('inline int bc2cpp_fiber_m_alive_p(int x)') &&
+              moved.include?('inline int (*bc2cpp_fiber_orig_alive_p)(int) = nullptr;') && !a.include?('int bc2cpp_running_fibers()'))
+  suite.check("a runtime item naming the gem's own state stays", a.include?('static int bc2cpp_fiber_own_p(int x)') && !moved.include?('bc2cpp_fiber_own_p'))
+  suite.check("a self-guarded region's names come back under a marker set before its include",
+              a.match?(/^#ifndef BC2CPP_LIT_SYM\n#define (BC2CPP_CGS_TAKEN_\w+) 1\n#endif\n#define BC2CPP_CROSS_GEM_PART \d+\n#include "[^"]+"\n#undef BC2CPP_CROSS_GEM_PART\n#ifdef \1\nusing bc2cpp_cs_\h{16}::Bc2cppLitSymCache;\n#endif\n#ifdef \1\nusing bc2cpp_cs_\h{16}::bc2cpp_lit_sym;\n#endif\n#undef \1\n/))
+  ENV['BC2CPP_FIBER_SHARE'] = '0'
+  Dir.mktmpdir('bc2cpp-cgs-fiber-off') do |off_dir|
+    suite.check('BC2CPP_FIBER_SHARE=0 keeps the runtime in the gem', fs_gem('ga', off_dir).include?('static int bc2cpp_running_fibers()'))
+  end
+  ENV.delete('BC2CPP_FIBER_SHARE')
+  nm = ENV.fetch('NM', 'nm')
+  if Bc2cppCxx.executable?(Bc2cppCxx.compiler.first) && system("#{nm} --version > /dev/null 2>&1")
+    ENV['BC2CPP_SHARD_MIN_BYTES'] = '1'
+    sources = []
+    { 'ga' => a, 'gb' => b }.each do |gem, text|
+      main, shards = ShardOutput.split(text, gem, 2)
+      File.write(File.join(dir, "#{gem}_gen.cpp"), main)
+      sources << File.join(dir, "#{gem}_gen.cpp")
+      shards.each_with_index do |t, i|
+        File.write(ShardOutput.shard_path(dir, gem, i + 1), t)
+        sources << ShardOutput.shard_path(dir, gem, i + 1)
+      end
+    end
+    ENV.delete('BC2CPP_SHARD_MIN_BYTES')
+    File.write(File.join(dir, 'main.cpp'), "#include <cstdio>\nint ga_run(); int gb_run(); const void* ga_addr(); const void* gb_addr();\n" \
+                                           "int main() { int x = ga_run(); int y = gb_run(); std::printf(\"%d %d %d\\n\", x, y, ga_addr() == gb_addr()); }\n")
+    binary = File.join(dir, 'fs')
+    [%w[-O2], %w[-Os]].each do |opt|
+      _out, err, status = Bc2cppCxx.capture3('-std=c++17', *opt, '-Wall', '-Werror', *sources, File.join(dir, 'main.cpp'), '-o', binary)
+      suite.check("two gems sharing the runtime compile warning-free and link (#{opt.first})", status.success?)
+      puts err.lines.first(20).join unless status.success?
+      next unless status.success?
+
+      out, = Open3.capture2(binary)
+      # run = alive_p (running_fibers + 0 + lit 1) * 100 + own_p * 10 + lit 2: the runtime's counter is one for the
+      # program (2, then 3) and its literal cache one per site; own_p's counter is each gem's (1, 1).
+      suite.check("the runtime's state is one per program, the gem's per gem, one address (#{opt.first}: #{out.strip})",
+                  out == "212 312 1\n")
+      syms, = Open3.capture2(nm, '-C', '--defined-only', binary)
+      defs = ->(name) { syms.lines.grep_v(/\[clone /).select { |l| l.match?(/\s(?:\S+::)?#{name}\(/) && !l.include?('{lambda') } }
+      suite.check("nm: the runtime state function is defined once, in no gem namespace (#{opt.first})",
+                  defs.call('bc2cpp_running_fibers').size <= 1 && defs.call('bc2cpp_running_fibers').none? { |l| l.include?('bc2cpp_shard_') })
+    end
+  else
+    puts '  SKIP: no C++ compiler or nm'
+  end
+end
+
+# METHOD_PROTOTYPE: a helper calling the unit's own compiled method, and one testing a weak `extern "C"` function's
+# address, move; a gem that only declares the method keeps its copy.
+puts '-- cross-gem share: method prototypes'
+MP_TAIL = <<~'CPP'
+  extern "C" __attribute__((weak)) int mp_weak(int);
+  int Mp__Box_get_impl(int x);
+  static int mp_helper(int x) { return (mp_weak != nullptr ? mp_weak(x) : 0) + Mp__Box_get_impl(x); }
+CPP
+def mp_unit(dir, own)
+  methods = own ? "int Mp__Box_get_impl(int x) { return x + 1; }\n" : ''
+  text = "#{RuntimeHeader::BEGIN_MARK}#{RuntimeHeader::END_MARK}#{MP_TAIL}#{ShardOutput.unit_mark('A')}#{methods}" \
+         "int mp_run(int x) { return mp_helper(x); }\n#{ShardOutput::HOOKS_MARK}"
+  CrossGemShare.rewrite(RuntimeHeader.rewrite(text, dir, tail_mark: true), dir)
+end
+Dir.mktmpdir('bc2cpp-cgs-method') do |dir|
+  own = mp_unit(dir, true)
+  other = mp_unit(dir, false)
+  suite.check('a helper calling the unit\'s own method and a weak C function\'s address moves; the declaration stays',
+              !own.include?('static int mp_helper') && own.include?('int Mp__Box_get_impl(int x);') &&
+              Dir[File.join(dir, 'bc2cpp_cs_*.hxx')].any? { |h| File.read(h).include?('int mp_helper(int x)') })
+  suite.check('a gem that only declares the method keeps the helper', other.include?('static int mp_helper'))
+  ENV['BC2CPP_CROSS_GEM_METHOD_PROTOTYPE'] = '0'
+  Dir.mktmpdir('bc2cpp-cgs-method-off') do |off_dir|
+    suite.check('BC2CPP_CROSS_GEM_METHOD_PROTOTYPE=0 keeps the helper', mp_unit(off_dir, true).include?('static int mp_helper'))
+  end
+  ENV.delete('BC2CPP_CROSS_GEM_METHOD_PROTOTYPE')
+end
+
+# PROGRAM_CLASS_SLOTS (tools/bc2cpp/program_class_slots.rb): two gems number an owner alike and share one table.
+puts '-- program-wide class slots'
+def pcs_gen(registry, superclass_of)
+  CodeGen.new({}, registry, {}, {}, {}, {}, superclass_of, {}, {}, {}, {}, Set.new)
+end
+PCS_REGISTRY = {
+  'run' => [MethodDef.new(name: 'run', owner: 'Alpha'), MethodDef.new(name: 'run', owner: 'Beta::Gamma'),
+            MethodDef.new(name: 'run', owner: 'Alpha.singleton'), MethodDef.new(name: 'run', owner: '<dynamic>')]
+}.freeze
+PCS_SUPER = { 'Beta::Gamma' => 'Alpha', 'Delta' => 'Alpha' }.freeze
+Dir.mktmpdir('bc2cpp-pcs') do |dir|
+  ENV[RuntimeHeader::DIR_KEY] = dir
+  a = pcs_gen(PCS_REGISTRY, PCS_SUPER)
+  b = pcs_gen(PCS_REGISTRY, PCS_SUPER)
+  a_names = %w[Beta::Gamma Alpha Delta].to_h { |o| [o, a.owner_class_fn_name(o)] }
+  b_names = %w[Alpha Zed Delta Beta::Gamma].to_h { |o| [o, b.owner_class_fn_name(o)] }
+  universe = (%w[Alpha Alpha.singleton Beta::Gamma Delta] + CallFacts::CORE_SUPER.keys).uniq.sort
+  n = universe.size
+  suite.check('the universe is every registry, superclass and core owner spelled as a constant path, sorted',
+              a.instance_variable_get(:@program_class_universe) == universe)
+  suite.check('two gems asking in different orders number each owner alike, by its rank',
+              %w[Alpha Beta::Gamma Delta].all? { |o| a_names[o] == b_names[o] && a_names[o] == "bc2cpp_owner_class_#{universe.index(o)}" })
+  suite.check('an owner outside the universe takes the gem slot after it', b_names['Zed'] == "bc2cpp_owner_class_#{n}")
+  a_text = a.emit_owner_class_cache
+  b_text = b.emit_owner_class_cache
+  headers = Dir[File.join(dir, 'bc2cpp_pw_classes_*.hxx')]
+  header = headers.first.to_s
+  suite.check('both gems include one header holding the one table',
+              headers.size == 1 && a_text.include?("#include \"#{header}\"") && b_text.include?("#include \"#{header}\"") &&
+              File.read(header).match?(/^inline struct RClass\* bc2cpp_pw_class_slots_\h{16}\[#{n}\] = \{\};$/))
+  suite.check('only the gem with an extra owner keeps slots of its own, after the universe',
+              !a_text.include?('bc2cpp_owner_class_xslots') && b_text.include?('bc2cpp_owner_class_xslots[1]') &&
+              b_text.include?("i < #{n} ?") && !a_text.include?('static struct RClass* bc2cpp_owner_class_slots['))
+  suite.check("the gems' fuse getters and table readers print the same text",
+              a_text[/^\[\[maybe_unused\]\] \[\[gnu::noinline\]\] static struct RClass\* bc2cpp_owner_class_at.*?^}\n/m] ==
+                b_text[/^\[\[maybe_unused\]\] \[\[gnu::noinline\]\] static struct RClass\* bc2cpp_owner_class_at.*?^}\n/m] &&
+              a_text.include?('bc2cpp_owner_class_slot(i)'))
+  suite.check('the reset clears the program table and the VM it is bound to',
+              a_text.match?(/bc2cpp_reset_owner_classes\(\) \{\n  bc2cpp_pw_class_state_\h{16} = nullptr;\n  for \(struct RClass\*& c : bc2cpp_pw_class_slots_\h{16}\) c = nullptr;\n/))
+  closed = pcs_gen(PCS_REGISTRY, PCS_SUPER)
+  closed.owner_class_fn_name('Alpha')
+  closed.instance_variable_set(:@closed_world, Object.new)
+  closed.emit_owner_class_cache
+  suite.check('a different lookup gets a different table', Dir[File.join(dir, 'bc2cpp_pw_classes_*.hxx')].size == 2)
+  mruby_inc = "#{BC2CPP_WORLD_ROOT}/3rd/mruby/include"
+  build_inc = ENV.fetch('BC2CPP_BUILD_INCLUDE', "#{BC2CPP_WORLD_ROOT}/build-closed-bc2cpp/closed/include")
+  if Bc2cppCxx.executable?(Bc2cppCxx.compiler.first) && File.directory?(mruby_inc) && File.directory?(build_inc) &&
+     system("#{ENV.fetch('NM', 'nm')} --version > /dev/null 2>&1")
+    objs = { 'ga' => a_text, 'gb' => b_text }.map do |gem, text|
+      src = File.join(dir, "#{gem}.cpp")
+      File.write(src, "#include <mruby.h>\n#include <mruby/class.h>\n#include <mruby/variable.h>\nnamespace pcs_#{gem} {\n" \
+                      "#{text.sub(/^#include "[^"]+"\n/, '')}" \
+                      "struct RClass* probe(mrb_state* M) { bc2cpp_reset_owner_classes(); return bc2cpp_owner_class_at(M, 0); }\n}\n"
+                      .sub("namespace pcs_#{gem} {\n", "#include \"#{header}\"\nnamespace pcs_#{gem} {\n"))
+      obj = File.join(dir, "#{gem}.o")
+      _o, err, st = Bc2cppCxx.capture3('-std=c++17', '-O1', '-c', "-I#{mruby_inc}", "-I#{build_inc}", src, '-o', obj)
+      puts err.lines.first(10).join unless st.success?
+      st.success? ? obj : nil
+    end
+    suite.check('both gems compile with the mruby headers', objs.all?)
+    if objs.all?
+      syms = objs.map { |o| Open3.capture2(ENV.fetch('NM', 'nm'), '--defined-only', o).first }
+      tables = syms.map { |s| s.lines.grep(/bc2cpp_pw_class_slots_\h{16}/).map { |l| l.split.last } }
+      suite.check('nm: each gem defines the same program table symbol, mergeable (inline, not per gem)',
+                  tables.all? { |t| t.size == 1 } && tables.uniq.size == 1 && !tables.first.first.include?('pcs_'))
+    end
+  else
+    puts '  SKIP: no C++ compiler, nm, mruby headers or build include directory'
+  end
+  ENV['BC2CPP_PROGRAM_CLASS_SLOTS'] = '0'
+  off = pcs_gen(PCS_REGISTRY, PCS_SUPER)
+  off_names = %w[Delta Alpha].map { |o| off.owner_class_fn_name(o) }
+  off_text = off.emit_owner_class_cache
+  ENV.delete('BC2CPP_PROGRAM_CLASS_SLOTS')
+  suite.check('BC2CPP_PROGRAM_CLASS_SLOTS=0 numbers the gem table 0...n and includes no program table',
+              off_names == %w[bc2cpp_owner_class_0 bc2cpp_owner_class_1] && !off_text.include?('bc2cpp_pw_class_') &&
+              off_text.include?('static struct RClass* bc2cpp_owner_class_slots[2] = {};'))
+  ENV.delete(RuntimeHeader::DIR_KEY)
+  suite.check('no runtime header directory (a fixture world) keeps the gem table',
+              pcs_gen(PCS_REGISTRY, PCS_SUPER).instance_variable_get(:@program_class_universe).nil?)
 end
 
 suite.finish!

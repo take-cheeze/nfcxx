@@ -22,7 +22,7 @@ cases=(
   "plain:|-c plain.cc -o out.o"
   "template:|-c tmpl.cc -o out.o"
   "aggregate:|-c agg.cc -o out.o"
-  "no-ir-opt:NFCXX_IR_OPT=none|-c tmpl.cc -o out.o"
+  "no-ir-opt:|--ir-opt=none -c tmpl.cc -o out.o"
   "ir-opt-inline-explicit:|--ir-opt=inline -c tmpl.cc -o out.o"
   "asan:|--asan -c plain.cc -o out.o"
   "safe-pointers:|--safe-pointers -c plain.cc -o out.o"

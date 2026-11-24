@@ -12,6 +12,8 @@
 #                and ellipsis parameters, struct or array results, struct parameters, printf, recursion, goto and
 #                label, and work-group statics (the emitters key those by their function). Rounds repeat for nested calls,
 #                up to --max-depth (default 4, the device inliner's depth in pathb-ptx-emit).
+#   --hoist-pure a call of a pure function (no writes outside its frame, nothing opaque, nothing that throws) in a loop, with
+#                invariant arguments that the loop cannot change what it reads, is memoised per entry to the loop (hoist_pure_pass).
 #   --report     the number of calls inlined and the refusal reasons, on stderr.
 #   --sroa       scalar replacement with unrolling and constant propagation (below); --jobs=N shares its functions out among
 #                N forked workers (default NFCXX_IR_OPT_JOBS, or the processor count up to 8).
@@ -2424,6 +2426,363 @@ def prune_pass(forms, substr, report)
 end
 
 # The workers of --sroa: the serial pass (see sroa_pass), so one.
+# ---- pure calls in loops (--hoist-pure) ---------------------------------------------------------------------------------
+# A call of a function of the module that has no side effects, with arguments that do not change during a loop, is computed
+# at most once per entry to the loop: the first execution the program makes stores the result and sets a flag (both slots
+# of the caller, the flag reset before the loop), and the later executions read the result. Rule: no call is speculated.
+# The memoised call runs exactly where the original program first runs it, so a loop that never reaches it never calls the
+# function, and a call under a condition runs the first time the condition holds. The result equals the original's because
+# the callee is deterministic, its arguments are the same, and nothing in the loop changes the memory it reads.
+#
+# A function is pure when it writes no memory outside its own frame and has no opaque operation (asm, a volatile or
+# fence access, a call of an extern or indirect function) and cannot let an exception out (throwing_functions). Its reads
+# are not restricted: the loop decides whether they can change (hp_conflict?).
+#
+# Memory is named by roots, per pointer value: "P<i>" the pointee of parameter i, "G:<name>" a global object, "L:<name>" a
+# slot of the function, "U" unknown memory. A root of a pointer value is found flow-insensitively (hp_state): a parameter
+# is P<i>, a global or slot address is G or L, a pointer loaded from a slot is what was stored in it, and anything else
+# (a pointer loaded through memory, a call result, an int converted to a pointer) is U. A slot whose address is passed
+# to a call, returned or stored, or written through a derived address, holds U. A loop writes the roots of its stores and
+# of the writes of its callees (mapped through their arguments); a parameter's pointee is external memory, so in a loop
+# it is U. The loop keeps a pure call only when its arguments are invariant (constants, addresses, or registers defined
+# outside the loop) and no root it writes is a root it reads (hp_conflict?). A loop with an opaque operation, a label or
+# an extern call is left alone.
+HP_U = "U"
+HP_SIZES = { "bool" => 1, "char" => 1, "unsigned_char" => 1, "short" => 2, "unsigned_short" => 2, "int" => 4,
+             "unsigned_int" => 4, "long" => 8, "unsigned_long" => 8, "long_long" => 8, "unsigned_long_long" => 8,
+             "float" => 4, "double" => 8 }.freeze
+HP_OPAQUE_HEADS = %w[asm-block asm-decl fence load.v store.v label].freeze
+
+def hp_ptr?(t)
+  while t.is_a?(Array) && (head(t) == "const" || head(t) == "volatile") && t.length == 2
+    t = t[1]
+  end
+  head(t) == "ptr"
+end
+
+def hp_norm(roots)
+  roots.map { |r| r.start_with?("P") ? HP_U : r }.uniq
+end
+
+def hp_local(roots)
+  roots.select { |r| r.start_with?("L:") }
+end
+
+# The roots of a value used as a pointer (a base of offset, index or bitcast).
+def hp_base_roots(x, st)
+  if x.is_a?(String)
+    return st[:regs].fetch(x) { [HP_U] } if x.start_with?("%") && (hp_ptr?(st[:types][x]) || st[:types][x].nil?)
+    return [HP_U] if x.start_with?("%")
+    return hp_roots(x, st) if x.start_with?("$") || x.start_with?("@")
+    return []
+  end
+  return [] unless x.is_a?(Array)
+  case head(x)
+  when "const", "null" then []
+  when "load", "offset", "index", "bitcast" then hp_roots(x, st)
+  else [HP_U]
+  end
+end
+
+def hp_roots(x, st)
+  if x.is_a?(String)
+    if x.start_with?("%")
+      return [HP_U] if st[:setregs].key?(x)
+      return st[:regs].fetch(x) { [HP_U] }
+    end
+    return ["L:" + unq(x)] if x.start_with?("$\"")
+    return ["G:" + unq(x)] if x.start_with?("@\"")
+    return []
+  end
+  return [] unless x.is_a?(Array)
+  case head(x)
+  when "const", "null" then []
+  when "load"
+    return [] unless hp_ptr?(x[1])
+    a = x[2]
+    if a.is_a?(String) && a.start_with?("$\"")
+      st[:slots].fetch(unq(a)) { [] }
+    else
+      [HP_U]
+    end
+  when "offset", "index" then hp_base_roots(x[1], st)
+  when "bitcast" then hp_ptr?(x[1]) ? hp_base_roots(x[2], st) : []
+  else hp_ptr?(x[1]) ? [HP_U] : []
+  end
+end
+
+# The call arguments of a call form (x[3..]).
+def hp_args(c)
+  c[3..-1] || []
+end
+
+# The roots of each module function's pointer slots and registers, and the slots whose address leaves the function.
+def hp_state(f)
+  st = { regs: {}, types: {}, slots: {}, setregs: {} }
+  f.each do |c|
+    next unless head(c) == "params"
+    c.drop(1).each_with_index do |p, i|
+      st[:regs][p[1]] = ["P#{i}"]
+      st[:types][p[1]] = p[3]
+    end
+  end
+  forms = all_forms(f)
+  forms.each { |x| st[:setregs][x[1]] = true if head(x) == "set" }
+  loop do
+    changed = false
+    forms.each do |x|
+      next unless head(x) == "let"
+      st[:types][x[1]] = x[2]
+      r = st[:setregs].key?(x[1]) ? [HP_U] : hp_roots(x[3], st)
+      if st[:regs][x[1]] != r
+        st[:regs][x[1]] = r
+        changed = true
+      end
+    end
+    forms.each do |x|
+      case head(x)
+      when "call"
+        hp_args(x).each { |a| changed = true if hp_escape(hp_roots(a, st), st) }
+      when "return"
+        changed = true if x.length > 1 && hp_escape(hp_roots(x[1], st), st)
+      when "set"
+        changed = true if hp_escape(hp_roots(x[2], st), st)
+      when "store"
+        r = hp_roots(x[3], st)
+        changed = true if hp_escape(r, st)
+        a = x[2]
+        if a.is_a?(String) && a.start_with?("$\"")
+          s = unq(a)
+          add = if hp_ptr?(x[1]) then r
+                elsif HP_SIZES.key?(x[1]) then []
+                else [HP_U]
+                end
+          changed = true if hp_add_slot(st, s, add)
+        else
+          # a store through a derived address may write a pointer into the slots it reaches
+          hp_local(hp_roots(a, st)).each { |l| changed = true if hp_add_slot(st, l[2..-1], [HP_U]) }
+        end
+      end
+    end
+    break unless changed
+  end
+  st
+end
+
+def hp_add_slot(st, s, roots)
+  old = st[:slots].fetch(s) { [] }
+  new_roots = old | roots
+  return false if new_roots.length == old.length
+  st[:slots][s] = new_roots
+  true
+end
+
+# Records the locals whose address is in roots as escaped (their contents may change through any call, return or store):
+# a slot whose address escapes holds U. Returns whether something new was recorded.
+def hp_escape(roots, st)
+  changed = false
+  hp_local(roots).each do |l|
+    changed = true if hp_add_slot(st, l[2..-1], [HP_U])
+  end
+  changed
+end
+
+# The summary of a function (its writes and reads of non-local memory, in its own parameters' terms, and whether it has an
+# opaque operation). Callee summaries come from summ; calls to functions of the module map their roots through the arguments.
+def hp_map(roots, args, st)
+  out = []
+  roots.each do |q|
+    if q.start_with?("P")
+      i = q[1..-1].to_i
+      out.concat(i < args.length ? hp_base_roots(args[i], st) : [HP_U])
+    else
+      out << q
+    end
+  end
+  out.uniq
+end
+
+def hp_summary(f, st, defs, summ)
+  w = []
+  r = []
+  opaque = false
+  all_forms(f).each do |x|
+    h = head(x)
+    if HP_OPAQUE_HEADS.include?(h)
+      opaque = true
+    elsif h == "store"
+      w |= hp_roots(x[2], st)
+    elsif h == "load"
+      r |= hp_roots(x[2], st)
+    elsif h == "call"
+      callee = x[2]
+      if callee.is_a?(String) && callee.start_with?("&\"") && defs.key?(unq(callee))
+        s = summ[unq(callee)]
+        if s[:opaque]
+          opaque = true
+        else
+          w |= hp_map(s[:w], hp_args(x), st)
+          r |= hp_map(s[:r], hp_args(x), st)
+        end
+      else
+        opaque = true
+      end
+    end
+  end
+  { w: w.reject { |q| q.start_with?("L:") }, r: r.reject { |q| q.start_with?("L:") }, opaque: opaque }
+end
+
+def hp_same?(a, b)
+  a[:opaque] == b[:opaque] && a[:w].sort == b[:w].sort && a[:r].sort == b[:r].sort
+end
+
+# The summaries of the module's functions: the least fixed point over the calls.
+def hp_summaries(defs, states)
+  summ = {}
+  defs.each_key { |g| summ[g] = { w: [], r: [], opaque: false } }
+  loop do
+    changed = false
+    defs.each do |g, f|
+      s = hp_summary(f, states[g], defs, summ)
+      unless hp_same?(s, summ[g])
+        summ[g] = s
+        changed = true
+      end
+    end
+    break unless changed
+  end
+  summ
+end
+
+# Whether a loop's writes (w) can change what a call reads (r): unknown memory on either side, or a root on both.
+def hp_conflict?(w, r)
+  return false if w.empty?
+  w.include?(HP_U) || r.include?(HP_U) || !(w & r).empty?
+end
+
+# The loop's writes (normalised to the caller's roots), its defined registers, and whether it has an opaque operation.
+def hp_loop_info(loop, st, defs, summ)
+  w = []
+  dset = {}
+  opaque = false
+  all_forms(loop).each do |x|
+    h = head(x)
+    if h == "let" || h == "set"
+      dset[x[1]] = true
+    end
+    if HP_OPAQUE_HEADS.include?(h)
+      opaque = true
+    elsif h == "store"
+      w |= hp_roots(x[2], st)
+    elsif h == "call"
+      callee = x[2]
+      if callee.is_a?(String) && callee.start_with?("&\"") && defs.key?(unq(callee))
+        s = summ[unq(callee)]
+        if s[:opaque]
+          opaque = true
+        else
+          w |= hp_map(s[:w], hp_args(x), st)
+        end
+      else
+        opaque = true
+      end
+    end
+  end
+  { w: hp_norm(w), defs: dset, opaque: opaque, flags: [] }
+end
+
+def hp_invariant?(a, defs)
+  if a.is_a?(String)
+    a.start_with?("%") ? !defs.key?(a) : true
+  else
+    head(a) == "const" || head(a) == "null"
+  end
+end
+
+# The statement (let %n T (call T &"g" ARGS)) may become the memoised form: g is pure, its arguments are invariant in the loop
+# and the loop cannot change what g reads.
+def hp_memo_candidate?(s, info, st, defs, summ, pure)
+  return false unless head(s) == "let" && head(s[3]) == "call" && !info[:opaque]
+  c = s[3]
+  callee = c[2]
+  return false unless callee.is_a?(String) && callee.start_with?("&\"")
+  g = unq(callee)
+  return false unless pure[g]
+  t = s[2]
+  return false unless (t.is_a?(String) && HP_SIZES.key?(t)) || hp_ptr?(t)
+  args = hp_args(c)
+  return false unless args.all? { |a| hp_invariant?(a, info[:defs]) }
+  r = hp_norm(hp_map(summ[g][:r], args, st))
+  !hp_conflict?(info[:w], r)
+end
+
+# Rewrites the statements of list x. ctx is the innermost loop (nil outside loops), env the pass state.
+def hp_rewrite(x, ctx, env)
+  return x unless x.is_a?(Array)
+  out = []
+  x.each do |y|
+    if y.is_a?(Array) && head(y) == "loop"
+      info = hp_loop_info(y, env[:st], env[:defs], env[:summ])
+      ny = [y[0]] + y.drop(1).map { |c| c.is_a?(Array) ? hp_rewrite(c, info, env) : c }
+      info[:flags].each { |d| out << ["store", "bool", "$\"#{d}\"", ["const", "bool", "0"]] }
+      out << ny
+    elsif ctx && y.is_a?(Array) && hp_memo_candidate?(y, ctx, env[:st], env[:defs], env[:summ], env[:pure])
+      out.concat(hp_memo_stmts(y, ctx, env))
+    else
+      out << hp_rewrite(y, ctx, env)
+    end
+  end
+  out
+end
+
+def hp_fresh(env)
+  id = "%#{env[:next_id]}"
+  env[:next_id] += 1
+  id
+end
+
+# (let %n T (call ...)) becomes: if the flag is clear, call and store the result and set the flag; then %n reads the result.
+def hp_memo_stmts(s, ctx, env)
+  t = s[2]
+  size = t.is_a?(String) ? HP_SIZES[t] : 8
+  env[:counter] += 1
+  d = "pc.d.#{env[:counter]}"
+  v = "pc.v.#{env[:counter]}"
+  env[:slots] << ["slot", "\"#{d}\"", "bool", "1", "1"]
+  env[:slots] << ["slot", "\"#{v}\"", t, size.to_s, size.to_s]
+  ctx[:flags] << d
+  flag = hp_fresh(env)
+  res = hp_fresh(env)
+  [["block",
+    ["let", flag, "bool", ["load", "bool", "$\"#{d}\""]],
+    ["if", flag, ["then"], ["else", ["block", ["let", res, t, s[3]], ["store", t, "$\"#{v}\"", res],
+                                     ["store", "bool", "$\"#{d}\"", ["const", "bool", "1"]]]]]],
+   ["let", s[1], t, ["load", t, "$\"#{v}\""]]]
+end
+
+def hoist_pure_pass(forms, report)
+  defs = {}
+  forms.each { |f| defs[unq(f[1])] = f if head(f) == "function" }
+  states = {}
+  defs.each { |g, f| states[g] = hp_state(f) }
+  summ = hp_summaries(defs, states)
+  bad = throwing_functions(forms)
+  pure = {}
+  summ.each { |g, s| pure[g] = !s[:opaque] && s[:w].empty? && !bad.key?(g) }
+  total = 0
+  forms = forms.map do |f|
+    next f unless head(f) == "function" && count_heads(f, "loop") > 0
+    env = { st: states[unq(f[1])], defs: defs, summ: summ, pure: pure, counter: 0, slots: [],
+            next_id: max_id(f) + 1 }
+    children = hp_rewrite(f.drop(2), nil, env)
+    next f if env[:counter] == 0
+    total += env[:counter]
+    ["function", f[1]] + insert_slots(children, env[:slots])
+  end
+  $stderr.write("pathb-ir-opt: memoised #{total} pure call(s) in loops\n") if report
+  forms
+end
+
 def default_jobs
   1
 end
@@ -2441,6 +2800,7 @@ def main(argv)
   strip_eh = false
   strip_leaf = false
   shrink_eh = false
+  hoist = false
   prune = nil
   jobs = default_jobs
   file = nil
@@ -2488,6 +2848,8 @@ def main(argv)
       strip_leaf = true
     elsif a == "--shrink-eh-frames"
       shrink_eh = true
+    elsif a == "--hoist-pure"
+      hoist = true
     elsif a.start_with?("--nothrow-extern=")
       $nothrow_extra.concat(a[17..-1].split(","))
     elsif a.start_with?("--jobs=")
@@ -2506,7 +2868,7 @@ def main(argv)
     end
   end
   $sroa_debug = report
-  unless inline || sroa || forward || strip_eh || strip_leaf || shrink_eh || prune
+  unless inline || sroa || forward || strip_eh || strip_leaf || shrink_eh || prune || hoist
     $stderr.write("pathb-ir-opt: no pass selected (--prune-unreachable=S, --strip-eh, --inline, --sroa, --forward)\n")
     return 1
   end
@@ -2522,6 +2884,8 @@ def main(argv)
     forms = strip_eh_pass(forms, report) if strip_eh
     forms = strip_leaf_eh_pass(forms, report) if strip_leaf
     forms = inline_pass(forms, max_depth, report) if inline
+    # the calls the inliner exposed, and the pure calls of loops (hoist_pure_pass)
+    forms = hoist_pure_pass(forms, report) if hoist
     # a function whose calls were all inlined (or are atomics) is a leaf now: its frames, and those of the bodies copied into it
     forms = strip_leaf_eh_pass(forms, report) if strip_leaf && inline
     # the callees that the inliner copied into every caller are not reached any more

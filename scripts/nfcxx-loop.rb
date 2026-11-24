@@ -779,5 +779,7 @@ rescue NfcxxMissing => e
   1
 end
 
-rc = main(ARGV)
-exit(rc) if rc != 0
+if __FILE__ == $PROGRAM_NAME
+  rc = main(ARGV)
+  exit(rc) if rc != 0
+end

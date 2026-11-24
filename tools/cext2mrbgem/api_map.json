@@ -855,6 +855,21 @@
       "arity": 1,
       "caveat": "the fork's C encoding API (mrbgems/mruby-encoding, include/mruby/encoding.h): three encodings (ASCII-8BIT, UTF-8, US-ASCII), no transcoding"
     },
+    "ENCODING_GET": {
+      "kind": "call",
+      "mruby": "rb_enc_get_index",
+      "arity": 1,
+      "caveat": "CRuby's ENCODING_GET(obj) is the encoding index of obj, as ENCODING_GET_INLINED; the fork's rb_enc_get_index (mrbgems/mruby-encoding, include/mruby/encoding.h) returns the same index, for the three encodings the fork has"
+    },
+    "ENC_CODERANGE_ASCIIONLY": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": false,
+      "prelude": "static int nfcx_str_ascii_only(mrb_value s) {\n  mrb_int i, n = RSTRING_LEN(s);\n  const unsigned char *p = (const unsigned char *)RSTRING_PTR(s);\n  for (i = 0; i < n; i++) if (p[i] & 0x80) return 0;\n  return 1;\n}",
+      "prelude_name": "nfcx_str_ascii_only",
+      "template": "nfcx_str_ascii_only($0)",
+      "caveat": "CRuby caches a string's coderange and this macro reads the cache; mruby keeps no coderange, so the test scans the bytes for one with the high bit set (the same answer: an ASCII-only string)"
+    },
     "ENCODING_GET_INLINED": {
       "kind": "call",
       "mruby": "rb_enc_get_index",

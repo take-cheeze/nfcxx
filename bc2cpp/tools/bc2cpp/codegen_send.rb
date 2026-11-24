@@ -8,6 +8,7 @@ require_relative 'tagged_fixnum'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 require_relative 'class_world_gate'
+require_relative 'program_class_slots'
 
 # CodeGen: compile_send and const/owner caches.
 require_relative 'strict_hints'
@@ -2160,8 +2161,34 @@ class CodeGen
   # The cache getter itself, for a table that stores it (POLY_TABLE).
   def owner_class_fn_name(owner)
     @owner_class_cache ||= {}
-    slot = (@owner_class_cache[owner] ||= { index: @owner_class_cache.size })
+    slot = (@owner_class_cache[owner] ||= { index: owner_class_index(owner) })
     slot[:name] ||= "bc2cpp_owner_class_#{slot[:index]}".freeze
+  end
+
+  # PROGRAM_CLASS_SLOTS: an owner's rank in the program's universe, else the next slot of the gem's own (after the
+  # universe). Without it, the next slot of the gem's table.
+  def owner_class_index(owner)
+    universe = @program_class_universe
+    return @owner_class_cache.size unless universe
+
+    at = universe.bsearch_index { |o| o >= owner }
+    return at if at && universe[at] == owner
+
+    universe.size + (@owner_class_extras = (@owner_class_extras || 0) + 1) - 1
+  end
+
+  # The slot `i` (a C++ expression) of the owner-class table, as an lvalue.
+  def owner_slot_ref(i)
+    @program_class_universe ? "bc2cpp_owner_class_slot(#{i})" : "bc2cpp_owner_class_slots[#{i}]"
+  end
+
+  # The owner a slot index names, for every slot 0...n of the table (PROGRAM_CLASS_SLOTS fills the universe's).
+  def owner_class_table_owners(entries)
+    by_index = entries.to_h { |owner, slot| [slot[:index], owner] }
+    universe = @program_class_universe
+    return by_index.sort.map(&:last) unless universe
+
+    universe + (universe.size...universe.size + (@owner_class_extras || 0)).map { |i| by_index.fetch(i) }
   end
 
   # File-scope cache emitted ahead of the compiled bodies. A static per owner,
@@ -2175,21 +2202,20 @@ class CodeGen
   # is not noticed (as with g_direct_construct_*).
   def emit_owner_class_cache
     entries = (@owner_class_cache || {}).to_a
+    # CLOSED_WORLD: a guard whose else arm raises must name exactly the class
+    # the registry means, never a same-named constant found through ancestry.
+    defined = @closed_world ? 'mrb_const_defined_at' : 'mrb_const_defined'
     out = +"// OWNER_CLASS_CACHE -- see bc2cpp.rb's own owner_class_ptr_expr comment.\n"
-    out << "static mrb_state* bc2cpp_owner_class_state = nullptr;\n"
-    out << "static struct RClass* bc2cpp_owner_class_slots[#{[entries.size, 1].max}] = {};\n"
+    state, clear = emit_owner_class_table(entries, defined, out)
     memo = poly_table_memo_decl
     out << memo
     out << "static void bc2cpp_reset_owner_classes() {\n" \
-           "  bc2cpp_owner_class_state = nullptr;\n" \
-           "  for (struct RClass*& c : bc2cpp_owner_class_slots) c = nullptr;\n" \
+           "  #{state} = nullptr;\n" \
+           "#{clear}" \
            "#{memo.empty? ? '' : "  for (bc2cpp_poly_memo& m : bc2cpp_poly_memos) m = {};\n"}" \
            "}\n"
-    out << vm_cache_bind('bc2cpp_owner_class_bind', 'bc2cpp_owner_class_state', 'OWNER_CLASS_CACHE')
+    out << vm_cache_bind('bc2cpp_owner_class_bind', state, 'OWNER_CLASS_CACHE')
     unless entries.empty?
-      # CLOSED_WORLD: a guard whose else arm raises must name exactly the class
-      # the registry means, never a same-named constant found through ancestry.
-      defined = @closed_world ? 'mrb_const_defined_at' : 'mrb_const_defined'
       out << <<~CPP
         [[gnu::noinline]] static struct RClass* bc2cpp_owner_class_lookup(mrb_state* M, const char* const* path, int n) {
           bc2cpp_owner_class_bind(M);
@@ -2210,16 +2236,47 @@ class CodeGen
       path = lexical_scope_path(owner)
       out << <<~CPP
         static inline struct RClass* bc2cpp_owner_class_#{i}(mrb_state* M) {
-          struct RClass* c = bc2cpp_owner_class_slots[#{i}];
+          struct RClass* c = #{owner_slot_ref(i)};
           if (!c) {
             static const char* const path[] = {#{path.map { |seg| "\"#{seg}\"" }.join(', ')}};
-            c = bc2cpp_owner_class_slots[#{i}] = bc2cpp_owner_class_lookup(M, path, #{path.size});
+            c = #{owner_slot_ref(i)} = bc2cpp_owner_class_lookup(M, path, #{path.size});
           }
           return c;
         }
       CPP
     end
     out
+  end
+
+  # The slot table's declarations into `out`; returns its VM variable and the reset's clearing lines. With
+  # PROGRAM_CLASS_SLOTS (a gem that tests any owner) the universe's slots are the program's (program_class_slots.rb)
+  # and only the gem's extra owners keep slots of its own.
+  def emit_owner_class_table(entries, defined, out)
+    unless @program_class_universe && !entries.empty?
+      out << "static mrb_state* bc2cpp_owner_class_state = nullptr;\n"
+      out << "static struct RClass* bc2cpp_owner_class_slots[#{[entries.size, 1].max}] = {};\n"
+      out << "static inline struct RClass*& bc2cpp_owner_class_slot(int i) { return bc2cpp_owner_class_slots[i]; }\n" if @program_class_universe
+      return ['bc2cpp_owner_class_state', "  for (struct RClass*& c : bc2cpp_owner_class_slots) c = nullptr;\n"]
+    end
+
+    universe = @program_class_universe
+    digest, include = ProgramClassSlots.include_line(universe, defined)
+    slots = ProgramClassSlots.slots_name(digest)
+    extras = @owner_class_extras || 0
+    out << include
+    clear = +"  for (struct RClass*& c : #{slots}) c = nullptr;\n"
+    if extras.zero?
+      out << "static inline struct RClass*& bc2cpp_owner_class_slot(int i) { return #{slots}[i]; }\n"
+    else
+      gem_owners = owner_class_table_owners(entries).drop(universe.size)
+      out << "// PROGRAM_CLASS_SLOTS: the gem's own slots: #{gem_owners.join(', ')}\n"
+      out << "static struct RClass* bc2cpp_owner_class_xslots[#{extras}] = {};\n"
+      out << "static inline struct RClass*& bc2cpp_owner_class_slot(int i) {\n" \
+             "  return i < #{universe.size} ? #{slots}[i] : bc2cpp_owner_class_xslots[i - #{universe.size}];\n" \
+             "}\n"
+      clear << "  for (struct RClass*& c : bc2cpp_owner_class_xslots) c = nullptr;\n"
+    end
+    [ProgramClassSlots.state_name(digest), clear]
   end
 
   # CLASS_TEST_FUSE: a getter per owner made each guard two calls (the getter -Os keeps out of line, then
@@ -2234,8 +2291,8 @@ class CodeGen
   # StaticDispatchRegistrations#guarded_owner_calls reads back.
   def emit_owner_class_fuse(entries)
     out = +"// CLASS_TEST_FUSE -- see codegen_send.rb's class_test_fuse?.\n"
-    paths = entries.map { |owner, slot| [slot[:index], lexical_scope_path(owner)] }.sort_by(&:first)
-    raise 'CLASS_TEST_FUSE: owner slots are not 0...n' unless paths.map(&:first) == (0...paths.size).to_a
+    paths = owner_class_table_owners(entries).each_with_index.map { |owner, i| [i, lexical_scope_path(owner)] }
+    raise 'CLASS_TEST_FUSE: owner slots are not 0...n' unless entries.all? { |_, slot| slot[:index] < paths.size }
 
     paths.each do |i, path|
       out << "static const char* const bc2cpp_owner_class_path_#{i}[] = {#{path.map { |seg| "\"#{seg}\"" }.join(', ')}};\n"
@@ -2245,8 +2302,8 @@ class CodeGen
     out << "static const unsigned char bc2cpp_owner_class_path_lens[] = {#{paths.map { |_, path| path.size }.join(', ')}};\n"
     out << <<~CPP
       [[maybe_unused]] [[gnu::noinline]] static struct RClass* bc2cpp_owner_class_at(mrb_state* M, int i) {
-        struct RClass* c = bc2cpp_owner_class_slots[i];
-        if (!c) c = bc2cpp_owner_class_slots[i] = bc2cpp_owner_class_lookup(M, bc2cpp_owner_class_paths[i], bc2cpp_owner_class_path_lens[i]);
+        struct RClass* c = #{owner_slot_ref('i')};
+        if (!c) c = #{owner_slot_ref('i')} = bc2cpp_owner_class_lookup(M, bc2cpp_owner_class_paths[i], bc2cpp_owner_class_path_lens[i]);
         return c;
       }
       // Never passed through `...`, where it would not convert: ClassTestFuse.vararg_sites refuses the unit, and the
@@ -2262,7 +2319,7 @@ class CodeGen
       // (a class-body unit): a slot holds a plain class or null (see CodeGen#exact_class_guard), and for one the
       // pointer test first, then mrb_obj_class, gives exactly `c == mrb_obj_class(M, v)`.
       [[maybe_unused]] [[gnu::noinline]] static bool bc2cpp_is_owner(mrb_state* M, mrb_value v, int i) {
-        struct RClass* c = bc2cpp_owner_class_slots[i];
+        struct RClass* c = #{owner_slot_ref('i')};
         if (!c) c = bc2cpp_owner_class_at(M, i);
         if (!mrb_immediate_p(v) && mrb_obj_ptr(v)->c == c) return true;
         return c == mrb_obj_class(M, v);
@@ -2406,7 +2463,7 @@ class CodeGen
     out = +"// CONST_SITE_CACHE -- see tools/bc2cpp/const_site_cache.rb.\n"
     out << "static mrb_state* bc2cpp_cconst_state = nullptr;\n"
     out << "static mrb_value bc2cpp_cconst_slots[#{count}];\n"
-    out << "static bool bc2cpp_cconst_have[#{count}] = {};\n"
+    out << const_slot_have_decl('bc2cpp_cconst_have', count)
     members = [(@const_member_sites || []).size, 1].max
     # A GETMCNST slot is filled only for a class/module receiver, so the receiver's RClass* is the key and nullptr
     # marks an empty slot.
@@ -2414,7 +2471,7 @@ class CodeGen
     out << "static mrb_value bc2cpp_mcnst_slots[#{members}];\n"
     out << "static void bc2cpp_reset_const_site_cache() {\n" \
            "  bc2cpp_cconst_state = nullptr;\n" \
-           "  for (bool& h : bc2cpp_cconst_have) h = false;\n" \
+           "#{const_slot_reset('bc2cpp_cconst_slots', 'bc2cpp_cconst_have')}" \
            "  for (struct RClass*& f : bc2cpp_mcnst_from) f = nullptr;\n" \
            "}\n"
     out << vm_cache_bind('bc2cpp_cconst_bind', 'bc2cpp_cconst_state', 'CONST_SITE_CACHE')
@@ -2442,13 +2499,12 @@ class CodeGen
                'mrb_type(r0) == MRB_TT_CLASS || mrb_type(r0) == MRB_TT_MODULE'
              end
       out << "  if (#{fill}) {\n" \
-             "    bc2cpp_cconst_slots[#{i}] = r0;\n" \
-             "    bc2cpp_cconst_have[#{i}] = true;\n" \
+             "#{const_slot_store('bc2cpp_cconst_slots', 'bc2cpp_cconst_have', i, 'r0', '    ')}" \
              "  }\n" \
              "  return r0;\n" \
              "}\n" \
              "static inline mrb_value bc2cpp_cconst_#{i}(mrb_state* M) {\n" \
-             "  return bc2cpp_cconst_have[#{i}] ? bc2cpp_cconst_slots[#{i}] : bc2cpp_cconst_fill_#{i}(M);\n" \
+             "  return #{const_slot_full('bc2cpp_cconst_slots', 'bc2cpp_cconst_have', i)} ? bc2cpp_cconst_slots[#{i}] : bc2cpp_cconst_fill_#{i}(M);\n" \
              "}\n"
     end
     out << emit_const_member_cache(used)
