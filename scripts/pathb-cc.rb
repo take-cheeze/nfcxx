@@ -216,6 +216,10 @@ if !passes.empty? && passes != "none" && passes != "off" && ENV["PATHB_IR"].to_s
     end
     # the inlined bodies bracket their slots with scope facts (the SSA emitter shares the slots), unless the checks keep every slot
     irpasses << "--scope-facts" if emitter == "ssa" && asan_on == 0 && safe_on == 0 && passes.include?("inline")
+    # A caller over this many IR nodes takes in no more copies (pathb-ir-opt --max-caller): on Lean's generated C one function
+    # grew from 3.4 MB to 14.9 MB of IR by inlining, and the SSA stage took 128 s on it, against 19 s with the cap. Smaller
+    # functions are inlined as before. NFCXX_INLINE_MAX_CALLER=0 turns the cap off.
+    irpasses << "--max-caller=#{ENV.fetch("NFCXX_INLINE_MAX_CALLER", "30000")}" if passes.include?("inline")
     irpasses << "--shrink-eh-frames" if passes.include?("inline")
     raw_ir = "#{ir}.raw"
     FileUtils.cp(ir, raw_ir)
