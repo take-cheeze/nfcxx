@@ -241,8 +241,8 @@ module NfcxxBody
     setup_asan
     trace_unit
     trace_begin
-    cu_prepare
     syntax_and_tool
+    cu_prepare
     preprocess_route if flag?("preprocess")
     post_early
     modules_block
