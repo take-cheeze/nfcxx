@@ -1,6 +1,6 @@
 # Lua 5.4 bytecode to Path B IR
 
-Status, 2026-11-24: every opcode but `TBC` lowers. 62 programs match Lua 5.4.9 (`tests/lua54bc/lower/run.sh`), and 21
+Status, 2026-11-24: every opcode but `TBC` lowers. 67 programs match Lua 5.4.9 (`tests/lua54bc/lower/run.sh`), and 21
 error programs print the same first line as lua.c, with its position, message and variable info. The runtime has numbers
 with coercion, strings with the string metatable, tables with metatables, closures and upvalues, multiple results,
 varargs, the metamethods listed below, protected calls (`pcall`, with `error` and `assert`), and the libraries:
@@ -109,6 +109,25 @@ truncation (the last 56 characters after `...`).
 An error goes to stderr as `lua: <site line> <message><info>` and the process stops with status 1, as lua.c does. Only
 the first line is printed: the traceback is not. The run checks that first line, after the progname, against `lua`.
 
+## Garbage collection
+
+The runtime has a mark-and-sweep collector. Every object (strings, tables, closures, upvalues, host functions, saved
+varargs) starts with a header and is linked into one list and into a set of addresses. A collection marks from:
+
+- the Lua stack (`lua_stack`, all of it: a stale slot holds an address that is no longer in the set, so it is ignored);
+- the open upvalues, the string metatable, the `next` and `ipairs` iterators, and the running main closure;
+- the C stack, conservatively. The helpers keep values in their locals, so every word of the C stack that is the address
+  of an object in the set counts as a reference (`__builtin_unwind_init` and `setjmp` put the registers on the stack).
+
+The sweep frees the unmarked objects. A collection runs when the bytes allocated since the last one exceed a threshold
+of at least 4 MB, or twice the live bytes. The collector is off until the main function starts, since the stack top is
+recorded then. `collectgarbage` supports `collect`, `step`, `count` (KB), `isrunning`, `stop` and `restart`.
+
+The suite runs twice: normally, and with `LUA54RT_GC_THRESHOLD=1`, which collects at nearly every allocation. Both pass.
+On the garbage-heavy program (`gc_garbage.lua`) the peak resident size is 19 MB with collection, against 90 MB without.
+
+Not done: weak tables (`__mode`), finalizers (`__gc`), and incremental or generational collection.
+
 ## Metamethods
 
 Implemented in the runtime, with ltm.c's order (the first operand's metatable, then the second's):
@@ -135,7 +154,7 @@ gives lstrlib's `attempt to add a 'string' with a 'number'`. Only tables have me
 
 - `tests/lua54bc/run.sh`: the reader loads real 5.4.9 chunks (dumped with `string.dump`); the opcode sequence matches
   `luac -l -l` when `LUAC` is set. The opcode check has not run: no `luac` is available here.
-- `tests/lua54bc/lower/run.sh`: 62 programs lower, emit, assemble, link (with `-lm`), run, and match
+- `tests/lua54bc/lower/run.sh`: 67 programs lower, emit, assemble, link (with `-lm`), run, and match
   `print(dofile(...))` from Lua 5.4.9. 21 programs in `lower/err/` must give lua.c's first error line and status 1. A
   `TBC` program is refused. Needs `LUA` (a 5.4.9 interpreter).
 
@@ -151,5 +170,4 @@ gives lstrlib's `attempt to add a 'string' with a 'number'`. Only tables have me
 - **To-be-closed variables** (`TBC`, `__close`, and the fourth value of a generic `for`).
 - **`__gc`, `__mode`, `__metatable`**, `__pairs`, and `__name` in messages.
 - **Length of tables with holes**: `#` counts from 1 up to the first nil, which is one border; Lua's `#` can pick another.
-- **Garbage collection**: nothing is freed. Tests are short; a real runtime needs a collector and root maps.
 - **`LOADKX` with more than 2^17 constants** is lowered but untested.

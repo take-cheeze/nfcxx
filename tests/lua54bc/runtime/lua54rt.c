@@ -33,7 +33,19 @@ enum {
 };
 enum { OP_UNM = 49, OP_BNOT = 50 };
 
+/* The header of every collected object (the collector is further down). */
+typedef struct GCObj {
+  struct GCObj *next;
+  size_t size;
+  uint8_t kind;
+  uint8_t marked;
+} GCObj;
+enum { GC_STR = 1, GC_TABLE, GC_LCL, GC_UPVAL, GC_LCF, GC_VARARGS };
+static void *gc_alloc(uint8_t kind, size_t size);
+static int host_collectgarbage(LV *out, LV *args, int nargs);
+
 typedef struct LString {
+  GCObj gc;
   size_t len;
   char bytes[1];   /* len bytes and a NUL */
 } LString;
@@ -129,7 +141,7 @@ static void type_fail(const char *op, uint8_t tag, int operand) {
 /* ---- strings: immutable, compared by content; no interning ---- */
 
 static LV make_str(const char *p, size_t len) {
-  LString *s = (LString *)malloc(sizeof(LString) + len);
+  LString *s = (LString *)gc_alloc(GC_STR, sizeof(LString) + len);
   if (s == NULL) die("out of memory");
   s->len = len;
   if (len > 0) memcpy(s->bytes, p, len);
@@ -295,6 +307,7 @@ typedef struct Node {
 } Node;
 
 typedef struct Table {
+  GCObj gc;
   Node *nodes;
   size_t cap;      /* a power of two, or 0 */
   size_t count;    /* used nodes, including those with a nil value */
@@ -426,7 +439,7 @@ static void raw_set(Table *t, const LV *key, const LV *val) {
 }
 
 void lua54rt_newtable(LV *dst) {
-  Table *t = (Table *)calloc(1, sizeof *t);
+  Table *t = (Table *)gc_alloc(GC_TABLE, sizeof *t);
   if (t == NULL) die("out of memory");
   dst->tag = TAG_TABLE;
   dst->v.p = t;
@@ -481,6 +494,7 @@ static LV call_mmv(const LV *fn, const LV *args, int nargs) {
  * ends, or a CLOSE covers the slot, the value moves into closed and v points there (lfunc.c's luaF_close). */
 typedef struct UpVal UpVal;
 struct UpVal {
+  GCObj gc;
   LV *v;
   LV closed;
   UpVal *open_next;   /* the open list, highest address first */
@@ -488,6 +502,7 @@ struct UpVal {
 
 typedef void (*lua_fn)(LV *ret, LV *base, void *cl);
 typedef struct LClosure {
+  GCObj gc;
   lua_fn fn;
   int numparams;
   int nupvals;
@@ -498,7 +513,7 @@ static UpVal *open_upvals = NULL;
 
 void lua54rt_closure(LV *dst, void *fn, int numparams, int nupvals) {
   size_t size = sizeof(LClosure) + sizeof(UpVal *) * (size_t)(nupvals > 0 ? nupvals - 1 : 0);
-  LClosure *c = (LClosure *)malloc(size);
+  LClosure *c = (LClosure *)gc_alloc(GC_LCL, size);
   if (c == NULL) die("out of memory");
   c->fn = (lua_fn)fn;
   c->numparams = numparams;
@@ -513,7 +528,7 @@ static UpVal *find_upval(LV *level) {
   UpVal **pp = &open_upvals;
   while (*pp != NULL && (*pp)->v > level) pp = &(*pp)->open_next;
   if (*pp != NULL && (*pp)->v == level) return *pp;
-  UpVal *uv = (UpVal *)malloc(sizeof *uv);
+  UpVal *uv = (UpVal *)gc_alloc(GC_UPVAL, sizeof *uv);
   if (uv == NULL) die("out of memory");
   uv->v = level;
   uv->open_next = *pp;
@@ -561,11 +576,12 @@ void lua54rt_setret(LV *ret, LV *src, int n) {
 /* A host function (the library): it reads args and writes up to 64 results to out, returning their count. */
 typedef int (*lua_cfn)(LV *out, LV *args, int nargs);
 typedef struct HostFn {
+  GCObj gc;
   lua_cfn fn;
 } HostFn;
 
 static void make_host(LV *dst, lua_cfn fn) {
-  HostFn *h = (HostFn *)malloc(sizeof *h);
+  HostFn *h = (HostFn *)gc_alloc(GC_LCF, sizeof *h);
   if (h == NULL) die("out of memory");
   h->fn = fn;
   dst->tag = TAG_LCF;
@@ -616,12 +632,13 @@ void lua54rt_call(LV *fn, int nargs, LV *args, LV *ret, int wanted, int a) {
 
 /* VARARGPREP: the extra arguments of the current call, saved for VARARG. */
 typedef struct VarArgs {
+  GCObj gc;
   int count;
   LV *vals;
 } VarArgs;
 
 void *lua54rt_varargprep(LV *base, int nfixed) {
-  VarArgs *va = (VarArgs *)malloc(sizeof *va);
+  VarArgs *va = (VarArgs *)gc_alloc(GC_VARARGS, sizeof *va);
   if (va == NULL) die("out of memory");
   va->count = lua54rt_nargs > nfixed ? lua54rt_nargs - nfixed : 0;
   va->vals = (LV *)malloc(sizeof(LV) * (size_t)(va->count > 0 ? va->count : 1));
@@ -1112,7 +1129,7 @@ void *lua54rt_make_main(void *fn, int nupvals) {
   lua54rt_closure(&cl, fn, 0, nupvals);
   LClosure *c = (LClosure *)cl.v.p;
   for (int k = 0; k < nupvals; ++k) {
-    UpVal *uv = (UpVal *)malloc(sizeof *uv);
+    UpVal *uv = (UpVal *)gc_alloc(GC_UPVAL, sizeof *uv);
     if (uv == NULL) die("out of memory");
     uv->open_next = NULL;
     if (k == 0) lua54rt_newtable(&uv->closed);
@@ -1980,6 +1997,8 @@ static void install_more(LV *env) {
   set_global(env, "rawequal", &f);
   make_host(&f, host_rawlen);
   set_global(env, "rawlen", &f);
+  make_host(&f, host_collectgarbage);
+  set_global(env, "collectgarbage", &f);
 
   LV tbl;
   lua54rt_newtable(&tbl);
@@ -2028,21 +2047,273 @@ static void install_more(LV *env) {
   add_fn(&str, "char", host_schar);
   add_fn(&str, "format", host_sformat);
   register_table(env, "string", &str);
-  string_meta = (Table *)calloc(1, sizeof(Table));
+  string_meta = (Table *)gc_alloc(GC_TABLE, sizeof(Table));
   if (string_meta == NULL) die("out of memory");
   key = make_str("__index", 7);
   raw_set(string_meta, &key, &str);
 }
 
+/* ---- the garbage collector: mark and sweep (docs/notes/lua54-pathb.md, "Garbage collection") ----
+ * Every object (strings, tables, closures, upvalues, host functions, saved varargs) starts with a GCObj header and is
+ * linked into one list and into a set of addresses. A collection marks from the roots: the Lua stack, the open upvalues,
+ * the string metatable, the two library iterators and the running main closure. The C stack is scanned conservatively,
+ * because the helpers keep values in their locals: a word counts only if it is the address of an object in the set, so a
+ * stale word can only keep an object one cycle longer. The sweep frees the objects that are not marked.
+ * The collector is off until the main function starts (stack_base is set by lua54rt_run_main). */
+#define GC_MIN_THRESHOLD ((size_t)4 << 20)
+#define LUA54RT_STACK 65536
+#define GC_TOMB ((void *)1)
+
+static LV lua_stack[LUA54RT_STACK];
+static GCObj *all_objects = NULL;
+static size_t gc_allocated = 0;             /* bytes allocated since the last collection */
+static size_t gc_live = 0;                  /* bytes live after the last collection */
+static size_t gc_min_threshold = GC_MIN_THRESHOLD;   /* LUA54RT_GC_THRESHOLD overrides it, for the tests */
+static size_t gc_threshold = GC_MIN_THRESHOLD;
+static void *stack_base = NULL;             /* the top of the C stack that the collector scans */
+static void *running_main = NULL;           /* the closure of the main function, while it runs */
+
+/* The set of object addresses: linear probing; a removed slot holds GC_TOMB. */
+static void **obj_set = NULL;
+static size_t obj_cap = 0, obj_used = 0;
+
+static size_t set_hash(const void *p) { return (size_t)mix((uint64_t)(uintptr_t)p); }
+
+static int set_has(const void *p) {
+  if (obj_cap == 0) return 0;
+  size_t mask = obj_cap - 1;
+  for (size_t i = set_hash(p) & mask;; i = (i + 1) & mask) {
+    void *q = obj_set[i];
+    if (q == NULL) return 0;
+    if (q == p && q != GC_TOMB) return 1;   /* a removed slot is not a member, even for the tombstone's own value */
+  }
+}
+
+static void set_insert_raw(void *p) {
+  size_t mask = obj_cap - 1;
+  size_t i = set_hash(p) & mask;
+  while (obj_set[i] != NULL && obj_set[i] != GC_TOMB) i = (i + 1) & mask;
+  if (obj_set[i] == NULL) obj_used++;
+  obj_set[i] = p;
+}
+
+static void set_rehash(size_t cap) {
+  void **old = obj_set;
+  size_t oldcap = obj_cap;
+  obj_set = (void **)calloc(cap, sizeof(void *));
+  if (obj_set == NULL) die("out of memory");
+  obj_cap = cap;
+  obj_used = 0;
+  for (size_t i = 0; i < oldcap; ++i) {
+    if (old[i] != NULL && old[i] != GC_TOMB) set_insert_raw(old[i]);
+  }
+  free(old);
+}
+
+static void set_insert(void *p) {
+  if ((obj_used + 1) * 2 > obj_cap) set_rehash(obj_cap == 0 ? 256 : obj_cap * 2);
+  set_insert_raw(p);
+}
+
+static void set_remove(void *p) {
+  if (obj_cap == 0) return;
+  size_t mask = obj_cap - 1;
+  for (size_t i = set_hash(p) & mask;; i = (i + 1) & mask) {
+    void *q = obj_set[i];
+    if (q == NULL) return;
+    if (q == p) {
+      obj_set[i] = GC_TOMB;
+      return;
+    }
+  }
+}
+
+static void gc_collect(void);
+
+/* Allocates an object of kind with size bytes, zeroed. A collection runs first when enough has been allocated. */
+static void *gc_alloc(uint8_t kind, size_t size) {
+  if (stack_base != NULL && gc_allocated >= gc_threshold) gc_collect();
+  GCObj *o = (GCObj *)calloc(1, size);
+  if (o == NULL) die("out of memory");
+  o->kind = kind;
+  o->size = size;
+  o->next = all_objects;
+  all_objects = o;
+  set_insert(o);
+  gc_allocated += size;
+  return o;
+}
+
+/* The gray objects, to traverse after the roots. */
+static GCObj **gray = NULL;
+static size_t gray_n = 0, gray_cap = 0;
+
+static void mark_obj(const void *p) {
+  if (p == NULL || !set_has(p)) return;
+  GCObj *o = (GCObj *)p;
+  if (o->marked) return;
+  o->marked = 1;
+  if (gray_n == gray_cap) {
+    gray_cap = gray_cap == 0 ? 256 : gray_cap * 2;
+    gray = (GCObj **)realloc(gray, gray_cap * sizeof(GCObj *));
+    if (gray == NULL) die("out of memory");
+  }
+  gray[gray_n++] = o;
+}
+
+static void mark_value(const LV *v) {
+  if (v->tag == TAG_STR || v->tag == TAG_TABLE || v->tag == TAG_LCL || v->tag == TAG_LCF) mark_obj(v->v.p);
+}
+
+static void traverse(GCObj *o) {
+  switch (o->kind) {
+    case GC_TABLE: {
+      Table *t = (Table *)o;
+      for (size_t i = 0; i < t->cap; ++i) {
+        if (t->nodes[i].used) {
+          mark_value(&t->nodes[i].key);
+          mark_value(&t->nodes[i].val);
+        }
+      }
+      mark_obj(t->meta);
+      break;
+    }
+    case GC_LCL: {
+      LClosure *c = (LClosure *)o;
+      for (int k = 0; k < c->nupvals; ++k) mark_obj(c->upvals[k]);
+      break;
+    }
+    case GC_UPVAL: {
+      UpVal *u = (UpVal *)o;
+      if (u->v != NULL) mark_value(u->v);
+      break;
+    }
+    case GC_VARARGS: {
+      VarArgs *va = (VarArgs *)o;
+      for (int k = 0; k < va->count; ++k) mark_value(&va->vals[k]);
+      break;
+    }
+    default: break;
+  }
+}
+
+static void propagate(void) {
+  while (gray_n > 0) {
+    GCObj *o = gray[--gray_n];
+    traverse(o);
+  }
+}
+
+/* The C stack, from here up to the main function's frame: the registers are spilled into a jmp_buf first. */
+static void scan_c_stack(void) {
+  jmp_buf regs;
+  volatile int here = 0;
+  __builtin_unwind_init();   /* every callee-saved register goes to the stack */
+  setjmp(regs);
+  uintptr_t lo = (uintptr_t)&here;
+  uintptr_t lo2 = (uintptr_t)&regs;
+  if (lo2 < lo) lo = lo2;
+  uintptr_t hi = (uintptr_t)stack_base;
+  for (uintptr_t p = lo & ~(uintptr_t)(sizeof(uintptr_t) - 1); p + sizeof(uintptr_t) <= hi; p += sizeof(uintptr_t)) {
+    uintptr_t w = *(volatile uintptr_t *)p;
+    if (w != 0 && set_has((const void *)w)) mark_obj((const void *)w);
+  }
+  (void)here;
+}
+
+static void free_object(GCObj *o) {
+  set_remove(o);
+  switch (o->kind) {
+    case GC_TABLE: free(((Table *)o)->nodes); break;
+    case GC_VARARGS: free(((VarArgs *)o)->vals); break;
+    default: break;
+  }
+  free(o);
+}
+
+static void sweep(void) {
+  GCObj **pp = &all_objects;
+  size_t live = 0;
+  while (*pp != NULL) {
+    GCObj *o = *pp;
+    if (o->marked) {
+      o->marked = 0;
+      live += o->size;
+      pp = &o->next;
+    } else {
+      *pp = o->next;
+      free_object(o);
+    }
+  }
+  gc_live = live;
+}
+
+static void gc_collect(void) {
+  if (stack_base == NULL) return;
+  gray_n = 0;
+  for (size_t i = 0; i < LUA54RT_STACK; ++i) mark_value(&lua_stack[i]);
+  scan_c_stack();
+  for (UpVal *u = open_upvals; u != NULL; u = u->open_next) mark_obj(u);
+  mark_obj(string_meta);
+  mark_value(&next_fn);
+  mark_value(&ipairs_iter_fn);
+  mark_obj(running_main);
+  propagate();
+  sweep();
+  gc_threshold = gc_live * 2 > gc_min_threshold ? gc_live * 2 : gc_min_threshold;
+  gc_allocated = 0;
+}
+
+/* collectgarbage(opt): "collect" (the default), "step", "count" (in KB), "isrunning", "stop", "restart". */
+static int host_collectgarbage(LV *out, LV *args, int nargs) {
+  const char *opt = "collect";
+  if (nargs >= 1 && args[0].tag != TAG_NIL) {
+    if (args[0].tag != TAG_STR) lib_arg_error(1, "collectgarbage", "string", arg_typename(args, nargs, 1));
+    opt = ((LString *)args[0].v.p)->bytes;
+  }
+  if (strcmp(opt, "collect") == 0) {
+    gc_collect();
+    out[0].tag = TAG_INT;
+    out[0].v.i = 0;
+    return 1;
+  }
+  if (strcmp(opt, "step") == 0) {
+    gc_collect();
+    out[0].tag = TAG_TRUE;
+    return 1;
+  }
+  if (strcmp(opt, "count") == 0) {
+    out[0].tag = TAG_FLOAT;
+    out[0].v.n = (double)(gc_live + gc_allocated) / 1024.0;
+    return 1;
+  }
+  if (strcmp(opt, "isrunning") == 0) {
+    out[0].tag = TAG_TRUE;
+    return 1;
+  }
+  if (strcmp(opt, "stop") == 0 || strcmp(opt, "restart") == 0) {
+    out[0].tag = TAG_INT;
+    out[0].v.i = 0;
+    return 1;
+  }
+  char msg[160];
+  snprintf(msg, sizeof msg, "bad argument #1 to 'collectgarbage' (invalid option '%s')", opt);
+  rt_fail(msg, -1);
+  return 0;
+}
+
 /* Runs the main function of a chunk on a stack the runtime owns. The results are copied to out (at most outsize of
  * them); the number of results is returned. */
-#define LUA54RT_STACK 65536
 int lua54rt_run_main(void *cl, LV *out, int outsize) {
-  static LV stack[LUA54RT_STACK];
   LV ret[256];
   lua54rt_nargs = 0;
   lua54rt_top = 0;
-  ((LClosure *)cl)->fn(ret, stack, cl);
+  const char *gcenv = getenv("LUA54RT_GC_THRESHOLD");
+  if (gcenv != NULL) gc_min_threshold = gc_threshold = (size_t)strtoul(gcenv, NULL, 10);
+  stack_base = __builtin_frame_address(0);
+  running_main = cl;
+  ((LClosure *)cl)->fn(ret, lua_stack, cl);
+  running_main = NULL;
   int n = lua54rt_nret < outsize ? lua54rt_nret : outsize;
   for (int k = 0; k < n; ++k) out[k] = ret[k];
   return n;

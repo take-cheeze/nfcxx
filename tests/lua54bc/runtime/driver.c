@@ -14,7 +14,16 @@ typedef struct LV {
   } v;
 } LV;
 
+/* The header of a collected object, then the string (lua54rt.c's LString). */
+typedef struct GCObj {
+  struct GCObj *next;
+  size_t size;
+  uint8_t kind;
+  uint8_t marked;
+} GCObj;
+
 typedef struct LString {
+  GCObj gc;
   size_t len;
   char bytes[1];
 } LString;
