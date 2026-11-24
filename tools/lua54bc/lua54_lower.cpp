@@ -1,17 +1,21 @@
 // Lua 5.4 bytecode -> Path B mid-level IR text (docs/notes/pathb-stage2.md; the producer rule is section 1, as amended).
 //
-// Each Proto becomes one IR function `lua54_fn_N(LV *ret, LV *base)`. A register R(i) is `base + 16*i`; an LV is
-// { u8 tag at offset 0; i64 or f64 at offset 8 }, 16 bytes, align 8. The tags are lobject.h's variants.
-// Integer fast paths are inline IR. Everything else calls a runtime helper (docs/notes/lua54-pathb.md) that performs the
-// whole operation, metamethods included. An opcode with no template in the table below is refused by name.
+// Each Proto becomes one IR function `lua54_fn_N(LV *ret, LV *base, void *cl)`. A register R(i) is `base + 16*i`; an LV
+// is { u8 tag at offset 0; i64 or f64 at offset 8 }, 16 bytes, align 8. The tags are lobject.h's variants.
 //
-// Arithmetic skips the MMBIN* after it, as lvm.c does on success. On the slow path the helper performs the operation and
-// stores the result where the MMBIN would have stored it. So the MMBIN* opcodes lower to nothing: they are never reached
-// by falling through an arithmetic op.
+// Integer fast paths are inline IR. Everything else calls a runtime helper (docs/notes/lua54-pathb.md) that performs the
+// whole operation, metamethods included. An operation that can fail first sets its site: the source position and the
+// variable info of its operands, computed here from ldebug.c's rules (namespace dbg), so the runtime prints the messages
+// lua.c prints. An opcode without a template is refused by name.
+//
+// Arithmetic skips the MMBIN* after it, as lvm.c does on success. The helpers do the metamethod work, so the MMBIN*
+// opcodes lower to nothing.
 #include "lua54_lower.hpp"
 
+#include <cstdint>
 #include <cstdio>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -27,14 +31,206 @@ constexpr int kTagNil = 0x00, kTagFalse = 0x01, kTagTrue = 0x11, kTagInt = 0x03,
 // Helper kinds for lua54rt_cmp (docs/notes/lua54-pathb.md).
 constexpr int kCmpLt = 0, kCmpLe = 1, kCmpEq = 2;
 
+// testAMode (lopcodes.c): the opcodes that set register A. Generated from the pinned source.
+const bool kOpSetsA[NUM_OPCODES] = {
+    true, true, true, true, true, true, true, true, true, true, false, true, true, true, true, false,
+    false, false, false, true, true, true, true, true, true, true, true, true, true, true, true, true,
+    true, true, true, true, true, true, true, true, true, true, true, true, true, true, false, false,
+    false, true, true, true, true, true, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, true, true, true, false, false, false, true, true, false, false, true, false, true,
+    true, true, false,
+};
+bool testmm(std::uint8_t op) { return op == MMBIN || op == MMBINI || op == MMBINK; }
+bool testa(std::uint8_t op) { return op < NUM_OPCODES && kOpSetsA[op]; }
+
+// ---- ldebug.c: the names of variables in the messages (getobjname and its helpers) ----
+namespace dbg {
+
+constexpr int kMaxIWthAbs = 128;   // ldebug.h
+
+// luaF_getlocalname: the name of the local_number-th active local at pc.
+std::optional<std::string> local_name(const Proto &p, int local_number, int pc) {
+  for (std::size_t i = 0; i < p.locvars.size() && p.locvars[i].startpc <= pc; ++i) {
+    if (pc < p.locvars[i].endpc) {
+      if (--local_number == 0) return p.locvars[i].name ? *p.locvars[i].name : std::string("?");
+    }
+  }
+  return std::nullopt;
+}
+
+std::string upvalname(const Proto &p, int uv) {
+  const UpvalDesc &u = p.upvalues.at(static_cast<std::size_t>(uv));
+  return u.name ? *u.name : std::string("?");
+}
+
+// kname: a constant's name when it is a string.
+std::string kname(const Proto &p, unsigned c, std::string &name) {
+  const Constant &k = p.k.at(c);
+  name = k.kind == Constant::Kind::String ? k.s : std::string("?");
+  return "constant";
+}
+
+int findsetreg(const Proto &p, int lastpc, int reg);
+
+// basicgetobjname: "local", "upvalue", "constant" or "" (none); updates pc like the C version.
+std::string basicgetobjname(const Proto &p, int &pc, int reg, std::string &name) {
+  if (auto ln = local_name(p, reg + 1, pc)) {
+    name = *ln;
+    return "local";
+  }
+  pc = findsetreg(p, pc, reg);
+  if (pc != -1) {
+    const Insn &i = p.code[static_cast<std::size_t>(pc)];
+    switch (i.op()) {
+      case MOVE: {
+        int b = static_cast<int>(i.B());
+        if (b < static_cast<int>(i.A())) return basicgetobjname(p, pc, b, name);
+        break;
+      }
+      case GETUPVAL:
+        name = upvalname(p, static_cast<int>(i.B()));
+        return "upvalue";
+      case LOADK: return kname(p, i.Bx(), name);
+      case LOADKX: return kname(p, p.code[static_cast<std::size_t>(pc) + 1].Ax(), name);
+      default: break;
+    }
+  }
+  return "";
+}
+
+// filterpc / findsetreg: the last instruction before lastpc that set reg, if it is not inside a conditional jump.
+int findsetreg(const Proto &p, int lastpc, int reg) {
+  int setreg = -1, jmptarget = 0;
+  if (testmm(p.code[static_cast<std::size_t>(lastpc)].op())) lastpc--;   // the MMBIN was not executed
+  for (int pc = 0; pc < lastpc; ++pc) {
+    const Insn &i = p.code[static_cast<std::size_t>(pc)];
+    std::uint8_t op = i.op();
+    int a = static_cast<int>(i.A());
+    bool change;
+    switch (op) {
+      case LOADNIL: change = a <= reg && reg <= a + static_cast<int>(i.B()); break;
+      case TFORCALL: change = reg >= a + 2; break;
+      case CALL:
+      case TAILCALL: change = reg >= a; break;
+      case JMP: {
+        int dest = pc + 1 + i.sJ();
+        if (dest <= lastpc && dest > jmptarget) jmptarget = dest;
+        change = false;
+        break;
+      }
+      default: change = testa(op) && reg == a; break;
+    }
+    if (change) setreg = pc < jmptarget ? -1 : pc;
+  }
+  return setreg;
+}
+
+// isEnv: "global" when the indexed table is _ENV, "field" otherwise.
+std::string is_env(const Proto &p, int pc, const Insn &i, bool isup) {
+  int t = static_cast<int>(i.B());
+  std::string name;
+  bool named = false;
+  if (isup) {
+    name = upvalname(p, t);
+    named = true;
+  } else {
+    int at = pc;
+    std::string what = basicgetobjname(p, at, t, name);
+    named = what == "local" || what == "upvalue";
+  }
+  return (named && name == "_ENV") ? "global" : "field";
+}
+
+// rname: the name of a key in register c, if it is a constant; "?" otherwise.
+void rname(const Proto &p, int pc, int c, std::string &name) {
+  std::string what = basicgetobjname(p, pc, c, name);
+  if (what != "constant") name = "?";
+}
+
+void rkname(const Proto &p, int pc, const Insn &i, std::string &name) {
+  unsigned c = i.C();
+  if (i.k()) kname(p, c, name);
+  else rname(p, pc, static_cast<int>(c), name);
+}
+
+// getobjname: the kind ("local", "global", "field", "method", "upvalue", "constant") and the name of the value that
+// register reg holds at lastpc; "" when there is none.
+std::string getobjname(const Proto &p, int lastpc, int reg, std::string &name) {
+  std::string kind = basicgetobjname(p, lastpc, reg, name);
+  if (!kind.empty()) return kind;
+  if (lastpc != -1) {
+    const Insn &i = p.code[static_cast<std::size_t>(lastpc)];
+    switch (i.op()) {
+      case GETTABUP:
+        kname(p, i.C(), name);
+        return is_env(p, lastpc, i, true);
+      case GETTABLE:
+        rname(p, lastpc, static_cast<int>(i.C()), name);
+        return is_env(p, lastpc, i, false);
+      case GETI:
+        name = "integer index";
+        return "field";
+      case GETFIELD:
+        kname(p, i.C(), name);
+        return is_env(p, lastpc, i, false);
+      case SELF:
+        rkname(p, lastpc, i, name);
+        return "method";
+      default: break;
+    }
+  }
+  return "";
+}
+
+// formatvarinfo: " (kind 'name')", or "" when there is no information.
+std::string formatvarinfo(const std::string &kind, const std::string &name) {
+  if (kind.empty()) return "";
+  return " (" + kind + " '" + name + "')";
+}
+
+// varinfo of a register at pc: the operand of an operation that fails there.
+std::string varinfo_reg(const Proto &p, int pc, int reg) {
+  std::string name;
+  std::string kind = getobjname(p, pc, reg, name);
+  return formatvarinfo(kind, name);
+}
+
+// varinfo of an upvalue (the table of a GETTABUP or SETTABUP, when it is not a table).
+std::string varinfo_upval(const Proto &p, int uv) { return formatvarinfo("upvalue", upvalname(p, uv)); }
+
+// The line of an instruction: luaG_getfuncline with the base lines of ldebug.c.
+int getbaseline(const Proto &p, int pc, int &basepc) {
+  if (p.abslineinfo.empty() || pc < p.abslineinfo[0].pc) {
+    basepc = -1;
+    return p.linedefined;
+  }
+  int i = pc / kMaxIWthAbs - 1;
+  while (i + 1 < static_cast<int>(p.abslineinfo.size()) && pc >= p.abslineinfo[static_cast<std::size_t>(i) + 1].pc) i++;
+  basepc = p.abslineinfo[static_cast<std::size_t>(i)].pc;
+  return p.abslineinfo[static_cast<std::size_t>(i)].line;
+}
+
+int getfuncline(const Proto &p, int pc) {
+  if (p.lineinfo.empty()) return -1;
+  int basepc;
+  int baseline = getbaseline(p, pc, basepc);
+  while (basepc++ < pc) baseline += static_cast<int8_t>(p.lineinfo[static_cast<std::size_t>(basepc)]);
+  return baseline;
+}
+
+}  // namespace dbg
+
 // Function numbers of every prototype of the chunk (pre-order, the main function is 0).
 using FnIndex = std::map<const Proto *, std::size_t>;
 
-// What the whole module needs: the function numbers, and the data items of its string constants.
+// What the whole module needs: the function numbers, the data items (string constants and sites), the chunk name.
 struct Module {
   FnIndex index;
-  std::vector<std::string> data;   // IR `(data ...)` lines
+  std::vector<std::string> data;                // IR `(data ...)` lines
   std::size_t nstr = 0;
+  std::map<std::string, std::string> strings;   // string constant text -> data symbol
+  std::map<std::string, std::string> sites;     // site text -> data symbol
+  std::string chunkname;
 };
 
 struct Ctx {
@@ -58,7 +254,14 @@ struct Ctx {
   }
 
   const Insn &insn_at(std::size_t i) const { return p.code.at(i); }
+
+  // The info of a register operand at this instruction, and of an upvalue.
+  std::string reg_info(unsigned r) const { return dbg::varinfo_reg(p, static_cast<int>(pc), static_cast<int>(r)); }
+  std::string upval_info(unsigned uv) const { return dbg::varinfo_upval(p, static_cast<int>(uv)); }
 };
+
+std::string lbl(std::size_t pc) { return "\"pc" + std::to_string(pc) + "\""; }
+void go(Ctx &c, std::size_t pc) { c.line("(goto " + lbl(pc) + ")"); }
 
 // `set cond RVALUE`: the IR's set takes an operand, so an rvalue (a comparison) goes through a temporary.
 void set_rv(Ctx &c, const std::string &cond, const std::string &rvalue) {
@@ -66,9 +269,6 @@ void set_rv(Ctx &c, const std::string &cond, const std::string &rvalue) {
   c.line("(let " + t + " bool " + rvalue + ")");
   c.line("(set " + cond + " " + t + ")");
 }
-
-std::string lbl(std::size_t pc) { return "\"pc" + std::to_string(pc) + "\""; }
-void go(Ctx &c, std::size_t pc) { c.line("(goto " + lbl(pc) + ")"); }
 
 // The address of R(i). A fresh register each time, so each IR register is declared once.
 std::string reg(Ctx &c, unsigned i) {
@@ -144,7 +344,7 @@ std::string fmt_double(double d) {
   return buf;
 }
 
-// The LV of a constant, written to a temporary.
+// The LV of a constant, written to a temporary. A string is a data item and lua54rt_str makes the object.
 std::string constant_lv(Ctx &c, const Constant &k) {
   std::string t = c.temp_lv();
   switch (k.kind) {
@@ -154,12 +354,18 @@ std::string constant_lv(Ctx &c, const Constant &k) {
     case Constant::Kind::False: store_tag(c, t, kTagFalse); break;
     case Constant::Kind::True: store_tag(c, t, kTagTrue); break;
     case Constant::Kind::String: {
-      // A data item holds the bytes with a NUL; lua54rt_str makes the string object.
-      std::string sym = "lua54.s." + std::to_string(c.m.nstr++);
-      std::size_t n = k.s.size();
-      c.m.data.push_back("(data \"" + sym + "\" (const (array " + std::to_string(n + 1) + " (const char))) (string \"" +
-                         ir_escape(k.s) + "\\000\"))\n");
-      c.line("(eval (call void &\"lua54rt_str\" " + t + " @\"" + sym + "\" (const long " + std::to_string(n) + ")))");
+      auto it = c.m.strings.find(k.s);
+      std::string sym;
+      if (it != c.m.strings.end()) {
+        sym = it->second;
+      } else {
+        sym = "lua54.s." + std::to_string(c.m.nstr++);
+        c.m.strings[k.s] = sym;
+        c.m.data.push_back("(data \"" + sym + "\" (const (array " + std::to_string(k.s.size() + 1) +
+                           " (const char))) (string \"" + ir_escape(k.s) + "\\000\"))\n");
+      }
+      c.line("(eval (call void &\"lua54rt_str\" " + t + " @\"" + sym + "\" (const long " +
+             std::to_string(k.s.size()) + ")))");
       break;
     }
   }
@@ -174,10 +380,31 @@ std::string imm_lv(Ctx &c, int value, bool is_float) {
   return t;
 }
 
+// An RK operand: a constant (is_k set) or a register.
+std::string rk(Ctx &c, unsigned idx, bool is_k) { return is_k ? constant_lv(c, c.p.k.at(idx)) : reg(c, idx); }
+
+// Sets the site of the operation about to run: the runtime reports its errors with this position and these operand infos.
+// The data item is shared by sites with the same text.
+void set_site(Ctx &c, const std::vector<std::string> &infos) {
+  std::string text = c.m.chunkname + ":" + std::to_string(dbg::getfuncline(c.p, static_cast<int>(c.pc))) + ":";
+  for (const std::string &s : infos) text += "\n" + s;
+  std::string sym;
+  auto it = c.m.sites.find(text);
+  if (it != c.m.sites.end()) {
+    sym = it->second;
+  } else {
+    sym = "lua54.site." + std::to_string(c.m.sites.size());
+    c.m.sites[text] = sym;
+    c.m.data.push_back("(data \"" + sym + "\" (const (array " + std::to_string(text.size() + 1) +
+                       " (const char))) (string \"" + ir_escape(text) + "\\000\"))\n");
+  }
+  c.line("(eval (call void &\"lua54rt_site\" @\"" + sym + "\"))");
+}
+
 // Arithmetic `R[a] := lhs op rhs` where op is ADD, SUB or MUL. The inline path needs both operands to be ints; a
 // constant int right operand is known to be an int, so its tag test is not emitted. Otherwise the helper runs.
-void emit_arith(Ctx &c, Op op, unsigned a, const std::string &lhs, const std::string &rhs,
-                const std::string *int_const) {
+void emit_arith(Ctx &c, int op, unsigned a, const std::string &lhs, const std::string &rhs,
+                const std::string *int_const, const std::vector<std::string> &infos) {
   std::string dst = reg(c, a);
   std::string ta = load_tag(c, lhs);
   std::string a_int = tag_is(c, ta, kTagInt);
@@ -201,24 +428,20 @@ void emit_arith(Ctx &c, Op op, unsigned a, const std::string &lhs, const std::st
   c.line("))");   // closes (then of the inner if and the inner if
   c.line("))");   // closes (then of the outer if and the outer if
   // Slow path: the helper does the whole operation, metamethods included.
-  c.line("(eval (call void &\"lua54rt_arith\" (const int " + std::to_string(static_cast<int>(op)) + ") " + dst + " " +
-         lhs + " " + rhs + "))");
+  set_site(c, infos);
+  c.line("(eval (call void &\"lua54rt_arith\" (const int " + std::to_string(op) + ") " + dst + " " + lhs + " " + rhs + "))");
   go(c, c.pc + 2);
 }
 
-// The bool of a comparison: `(lt.s|le.s|eq long X Y)` when both are ints, else the helper. `fast_kind` names the
-// inline form; the helper gets (kind, A, B), and the result is 0 or 1.
-void emit_compare(Ctx &c, const char *fast_op, int kind, const std::string &a, const std::string &b,
-                  bool inline_ok, const std::string &ta_tag, const std::string &tb_tag, const std::string &cond) {
+// A comparison: the int compare inline when both are ints, else the helper; the result is a bool in `cond`.
+void emit_compare(Ctx &c, const std::string &fast_op, int kind, const std::string &a, const std::string &b,
+                  const std::string &ta_tag, const std::string &tb_tag, const std::string &cond) {
   auto slow = [&]() {
     std::string r = c.fresh();
+    set_site(c, {});
     c.line("(let " + r + " int (call int &\"lua54rt_cmp\" (const int " + std::to_string(kind) + ") " + a + " " + b + "))");
     set_rv(c, cond, "(ne int " + r + " (const int 0))");
   };
-  if (!inline_ok) {
-    slow();
-    return;
-  }
   std::string ai = tag_is(c, ta_tag, kTagInt);
   c.line("(if " + ai + " (then");
   std::string bi = tag_is(c, tb_tag, kTagInt);
@@ -249,45 +472,287 @@ void emit_cond_jump(Ctx &c, const std::string &cond, unsigned k) {
   }
 }
 
-// --- Helper-backed templates. ---
-
 // A binary op the helper performs whole (floats, bitwise, division, modulo, power, shifts). On success lvm.c skips the
-// MMBIN after the op, so control goes to pc+2; the helper covers the metamethod path too.
-void emit_helper_arith(Ctx &c, Op base, unsigned a, const std::string &lhs, const std::string &rhs) {
+// MMBIN after the op, so control goes to pc+2.
+void emit_helper_arith(Ctx &c, Op base, unsigned a, const std::string &lhs, const std::string &rhs,
+                       const std::vector<std::string> &infos) {
   std::string dst = reg(c, a);
+  set_site(c, infos);
   c.line("(eval (call void &\"lua54rt_arith\" (const int " + std::to_string(static_cast<int>(base)) + ") " + dst + " " +
          lhs + " " + rhs + "))");
   go(c, c.pc + 2);
 }
 
-// A unary op the helper performs (UNM, BNOT). No MMBIN follows these, so control falls through.
+// A unary op (UNM, BNOT). No MMBIN follows these, so control falls through.
 void emit_helper_unary(Ctx &c, int op, unsigned a, unsigned b) {
   std::string src = reg(c, b), dst = reg(c, a);
+  set_site(c, {c.reg_info(b)});
   c.line("(eval (call void &\"lua54rt_unary\" (const int " + std::to_string(op) + ") " + dst + " " + src + "))");
 }
 
-// The numeric for loop (lvm.c forprep and OP_FORLOOP). The helpers do the work on the four registers from R[A].
-void lower_forprep(Ctx &c, const Insn &i) {
-  std::string ra = reg(c, i.A());
-  std::string s = c.fresh();
-  c.line("(let " + s + " int (call int &\"lua54rt_forprep\" " + ra + "))");
-  std::string skip = c.fresh();
-  c.line("(let " + skip + " bool (ne int " + s + " (const int 0)))");
-  // lvm.c: `pc += Bx + 1` after pc was advanced, so the loop is skipped to pc + Bx + 2.
-  std::size_t exit_pc = c.pc + i.Bx() + 2;
-  c.line("(if " + skip + " (then (goto " + lbl(exit_pc) + ")) (else (goto " + lbl(c.pc + 1) + ")))");
+// CALL: R[a] is the function; its arguments are R[a+1..] (nargs values, an IR int); the results go to R[a..] (wanted of
+// them, or all of them with -1). The callee's base is R[a+1]; the function value is copied first, because R[a] receives
+// the first result. `info` is the variable info of the function for an error.
+void emit_call(Ctx &c, unsigned a, const std::string &nargs, int wanted, const std::string &info) {
+  std::string fn_slot = c.temp_lv();
+  std::string fn_reg = reg(c, a);
+  c.line("(copy 16 " + fn_slot + " " + fn_reg + ")");
+  store_tag(c, fn_reg, kTagNil);   // a call that returns nothing leaves R[A] nil
+  std::string args = reg(c, a + 1);
+  std::string ret = reg(c, a);
+  set_site(c, {info});
+  c.line("(eval (call void &\"lua54rt_call\" " + fn_slot + " " + nargs + " " + args + " " + ret + " (const int " +
+         std::to_string(wanted) + ") (const int " + std::to_string(a) + ")))");
 }
 
-void lower_forloop(Ctx &c, const Insn &i) {
-  std::string ra = reg(c, i.A());
-  std::string s = c.fresh();
-  c.line("(let " + s + " int (call int &\"lua54rt_forloop\" " + ra + "))");
-  std::string again = c.fresh();
-  c.line("(let " + again + " bool (ne int " + s + " (const int 0)))");
-  // lvm.c: `pc -= Bx` after pc was advanced, so the jump back goes to pc + 1 - Bx.
-  std::size_t back = c.pc + 1 - i.Bx();
-  c.line("(if " + again + " (then (goto " + lbl(back) + ")) (else (goto " + lbl(c.pc + 1) + ")))");
+// The number of values up to the stack top, from register index `from` on: top - from, as an IR int register.
+std::string values_to_top(Ctx &c, unsigned from) {
+  std::string t = c.fresh(), n = c.fresh();
+  c.line("(let " + t + " int (call int &\"lua54rt_gettop\"))");
+  c.line("(let " + n + " int (wsub int " + t + " (const int " + std::to_string(from) + ")))");
+  return n;
 }
+
+// Results are returned: n values (an IR int register or a constant) are copied from src to the caller's ret.
+void emit_return_values(Ctx &c, const std::string &src, const std::string &n) {
+  c.line("(eval (call void &\"lua54rt_setret\" %0 " + src + " " + n + "))");
+  c.line("(return)");
+}
+
+// --- The op table: one lowering function per opcode. ---
+
+using Lower = void (*)(Ctx &, const Insn &);
+
+void lower_move(Ctx &c, const Insn &i) {
+  std::string dst = reg(c, i.A()), src = reg(c, i.B());
+  c.line("(copy 16 " + dst + " " + src + ")");
+}
+
+void lower_loadi(Ctx &c, const Insn &i) { store_int(c, reg(c, i.A()), "(const long " + std::to_string(i.sBx()) + ")"); }
+
+void lower_loadf(Ctx &c, const Insn &i) {
+  store_float(c, reg(c, i.A()), "(const double " + fmt_double(i.sBx()) + ")");
+}
+
+void lower_loadk(Ctx &c, const Insn &i) {
+  std::string src = constant_lv(c, c.p.k.at(i.Bx()));
+  c.line("(copy 16 " + reg(c, i.A()) + " " + src + ")");
+}
+
+void lower_loadfalse(Ctx &c, const Insn &i) { store_tag(c, reg(c, i.A()), kTagFalse); }
+void lower_loadtrue(Ctx &c, const Insn &i) { store_tag(c, reg(c, i.A()), kTagTrue); }
+
+void lower_loadnil(Ctx &c, const Insn &i) {
+  for (unsigned n = 0; n <= i.B(); ++n) store_tag(c, reg(c, i.A() + n), kTagNil);
+}
+
+void lower_add(Ctx &c, const Insn &i) {
+  std::string b = reg(c, i.B()), cc = reg(c, i.C());
+  emit_arith(c, ADD, i.A(), b, cc, nullptr, {c.reg_info(i.B()), c.reg_info(i.C())});
+}
+void lower_sub(Ctx &c, const Insn &i) {
+  std::string b = reg(c, i.B()), cc = reg(c, i.C());
+  emit_arith(c, SUB, i.A(), b, cc, nullptr, {c.reg_info(i.B()), c.reg_info(i.C())});
+}
+void lower_mul(Ctx &c, const Insn &i) {
+  std::string b = reg(c, i.B()), cc = reg(c, i.C());
+  emit_arith(c, MUL, i.A(), b, cc, nullptr, {c.reg_info(i.B()), c.reg_info(i.C())});
+}
+
+// ADDI A B sC: R[A] := R[B] + sC, the immediate being an integer.
+void lower_addi(Ctx &c, const Insn &i) {
+  std::string rb = reg(c, i.B());
+  std::string imm = imm_lv(c, i.sC(), false);
+  std::string v = "(const long " + std::to_string(i.sC()) + ")";
+  emit_arith(c, ADD, i.A(), rb, imm, &v, {c.reg_info(i.B()), ""});
+}
+
+// The K operand of ADDK/SUBK/MULK: an integer keeps the inline path, anything else goes to the helper.
+void arith_k(Ctx &c, const Insn &i, Op op) {
+  const Constant &k = c.p.k.at(i.C());
+  std::string rb = reg(c, i.B());
+  std::string kv = constant_lv(c, k);
+  if (k.kind == Constant::Kind::Integer) {
+    std::string v = "(const long " + std::to_string(k.i) + ")";
+    emit_arith(c, op, i.A(), rb, kv, &v, {c.reg_info(i.B()), ""});
+  } else {
+    emit_arith(c, op, i.A(), rb, kv, nullptr, {c.reg_info(i.B()), ""});
+  }
+}
+
+void lower_addk(Ctx &c, const Insn &i) { arith_k(c, i, ADD); }
+void lower_subk(Ctx &c, const Insn &i) { arith_k(c, i, SUB); }
+void lower_mulk(Ctx &c, const Insn &i) { arith_k(c, i, MUL); }
+
+// The MMBIN* after an arithmetic op: never reached by falling through, so nothing.
+void lower_nothing(Ctx &, const Insn &) {}
+
+// EQ/LT/LE on two registers. The fast path is the int compare; the helper handles the rest.
+void lower_compare_regs(Ctx &c, const Insn &i, const char *fast, int kind) {
+  std::string cond = c.fresh();
+  c.line("(let " + cond + " bool (const bool 0))");
+  std::string a = reg(c, i.A()), b = reg(c, i.B());
+  std::string ta = load_tag(c, a), tb = load_tag(c, b);
+  emit_compare(c, fast, kind, a, b, ta, tb, cond);
+  emit_cond_jump(c, cond, i.k());
+}
+
+void lower_eq(Ctx &c, const Insn &i) { lower_compare_regs(c, i, "eq", kCmpEq); }
+void lower_lt(Ctx &c, const Insn &i) { lower_compare_regs(c, i, "lt.s", kCmpLt); }
+void lower_le(Ctx &c, const Insn &i) { lower_compare_regs(c, i, "le.s", kCmpLe); }
+
+// Comparisons with an immediate: `R[A] op sB`. C is the isf flag: a float immediate always goes to the helper.
+// GTI and GEI compare the other way round (sB < R[A], sB <= R[A]).
+void imm_compare(Ctx &c, const Insn &i, const char *fast_op, int kind, bool swapped) {
+  std::string cond = c.fresh();
+  c.line("(let " + cond + " bool (const bool 0))");
+  std::string ra = reg(c, i.A());
+  std::string ta = load_tag(c, ra);
+  std::string imm = imm_lv(c, i.sB(), i.C() != 0);
+  auto call = [&](const std::string &x, const std::string &y) {
+    std::string r = c.fresh();
+    set_site(c, {});
+    c.line("(let " + r + " int (call int &\"lua54rt_cmp\" (const int " + std::to_string(kind) + ") " + x + " " + y + "))");
+    set_rv(c, cond, "(ne int " + r + " (const int 0))");
+  };
+  if (i.C() == 0) {
+    // The immediate is an int, so only R[A]'s tag is tested.
+    std::string ai = tag_is(c, ta, kTagInt);
+    c.line("(if " + ai + " (then");
+    std::string x = load_value(c, ra, "long");
+    std::string y = "(const long " + std::to_string(i.sB()) + ")";
+    if (swapped) set_rv(c, cond, std::string("(") + fast_op + " long " + y + " " + x + ")");
+    else set_rv(c, cond, std::string("(") + fast_op + " long " + x + " " + y + ")");
+    c.line(") (else");
+    if (swapped) call(imm, ra);
+    else call(ra, imm);
+    c.line("))");
+  } else {
+    if (swapped) call(imm, ra);
+    else call(ra, imm);
+  }
+  emit_cond_jump(c, cond, i.k());
+}
+
+void lower_lti(Ctx &c, const Insn &i) { imm_compare(c, i, "lt.s", kCmpLt, false); }
+void lower_lei(Ctx &c, const Insn &i) { imm_compare(c, i, "le.s", kCmpLe, false); }
+void lower_gti(Ctx &c, const Insn &i) { imm_compare(c, i, "lt.s", kCmpLt, true); }
+void lower_gei(Ctx &c, const Insn &i) { imm_compare(c, i, "le.s", kCmpLe, true); }
+
+void lower_eqi(Ctx &c, const Insn &i) {
+  std::string cond = c.fresh();
+  c.line("(let " + cond + " bool (const bool 0))");
+  std::string ra = reg(c, i.A());
+  std::string ta = load_tag(c, ra);
+  std::string imm = imm_lv(c, i.sB(), i.C() != 0);
+  if (i.C() == 0) {
+    std::string ai = tag_is(c, ta, kTagInt);
+    c.line("(if " + ai + " (then");
+    std::string x = load_value(c, ra, "long");
+    set_rv(c, cond, "(eq long " + x + " (const long " + std::to_string(i.sB()) + "))");
+    c.line(") (else");
+  }
+  std::string r = c.fresh();
+  set_site(c, {});
+  c.line("(let " + r + " int (call int &\"lua54rt_cmp\" (const int " + std::to_string(kCmpEq) + ") " + ra + " " + imm + "))");
+  set_rv(c, cond, "(ne int " + r + " (const int 0))");
+  if (i.C() == 0) c.line("))");
+  emit_cond_jump(c, cond, i.k());
+}
+
+void lower_eqk(Ctx &c, const Insn &i) {
+  std::string cond = c.fresh();
+  c.line("(let " + cond + " bool (const bool 0))");
+  std::string ra = reg(c, i.A());
+  std::string kv = constant_lv(c, c.p.k.at(i.B()));
+  std::string r = c.fresh();
+  set_site(c, {});
+  c.line("(let " + r + " int (call int &\"lua54rt_cmp\" (const int " + std::to_string(kCmpEq) + ") " + ra + " " + kv + "))");
+  set_rv(c, cond, "(ne int " + r + " (const int 0))");
+  emit_cond_jump(c, cond, i.k());
+}
+
+// TEST A k: the condition is the truthiness of R[A] (lvm.c: !l_isfalse). Nil and false are the falsy tags.
+void lower_test(Ctx &c, const Insn &i) {
+  std::string cond = c.fresh();
+  c.line("(let " + cond + " bool (const bool 0))");
+  std::string ra = reg(c, i.A());
+  std::string t = load_tag(c, ra);
+  std::string is_nil = tag_is(c, t, kTagNil), is_false = tag_is(c, t, kTagFalse);
+  // if nil then false else (if false then false else true)
+  c.line("(if " + is_nil + " (then (set " + cond + " (const bool 0))) (else");
+  c.line("(if " + is_false + " (then (set " + cond + " (const bool 0))) (else (set " + cond + " (const bool 1))))");
+  c.line("))");   // closes the else of the nil test and the nil test itself
+  emit_cond_jump(c, cond, i.k());
+}
+
+void lower_jmp(Ctx &c, const Insn &i) { go(c, c.pc + 1 + static_cast<std::size_t>(static_cast<long long>(i.sJ()))); }
+
+void lower_div(Ctx &c, const Insn &i) {
+  std::string b = reg(c, i.B()), cc = reg(c, i.C());
+  emit_helper_arith(c, DIV, i.A(), b, cc, {c.reg_info(i.B()), c.reg_info(i.C())});
+}
+void lower_idiv(Ctx &c, const Insn &i) {
+  std::string b = reg(c, i.B()), cc = reg(c, i.C());
+  emit_helper_arith(c, IDIV, i.A(), b, cc, {c.reg_info(i.B()), c.reg_info(i.C())});
+}
+void lower_mod(Ctx &c, const Insn &i) {
+  std::string b = reg(c, i.B()), cc = reg(c, i.C());
+  emit_helper_arith(c, MOD, i.A(), b, cc, {c.reg_info(i.B()), c.reg_info(i.C())});
+}
+void lower_pow(Ctx &c, const Insn &i) {
+  std::string b = reg(c, i.B()), cc = reg(c, i.C());
+  emit_helper_arith(c, POW, i.A(), b, cc, {c.reg_info(i.B()), c.reg_info(i.C())});
+}
+void lower_band(Ctx &c, const Insn &i) {
+  std::string b = reg(c, i.B()), cc = reg(c, i.C());
+  emit_helper_arith(c, BAND, i.A(), b, cc, {c.reg_info(i.B()), c.reg_info(i.C())});
+}
+void lower_bor(Ctx &c, const Insn &i) {
+  std::string b = reg(c, i.B()), cc = reg(c, i.C());
+  emit_helper_arith(c, BOR, i.A(), b, cc, {c.reg_info(i.B()), c.reg_info(i.C())});
+}
+void lower_bxor(Ctx &c, const Insn &i) {
+  std::string b = reg(c, i.B()), cc = reg(c, i.C());
+  emit_helper_arith(c, BXOR, i.A(), b, cc, {c.reg_info(i.B()), c.reg_info(i.C())});
+}
+void lower_shl(Ctx &c, const Insn &i) {
+  std::string b = reg(c, i.B()), cc = reg(c, i.C());
+  emit_helper_arith(c, SHL, i.A(), b, cc, {c.reg_info(i.B()), c.reg_info(i.C())});
+}
+void lower_shr(Ctx &c, const Insn &i) {
+  std::string b = reg(c, i.B()), cc = reg(c, i.C());
+  emit_helper_arith(c, SHR, i.A(), b, cc, {c.reg_info(i.B()), c.reg_info(i.C())});
+}
+
+// The K forms: the constant goes through a temporary; the helper does the op.
+void arith_k_helper(Ctx &c, const Insn &i, Op base) {
+  std::string rb = reg(c, i.B());
+  std::string kv = constant_lv(c, c.p.k.at(i.C()));
+  emit_helper_arith(c, base, i.A(), rb, kv, {c.reg_info(i.B()), ""});
+}
+void lower_divk(Ctx &c, const Insn &i) { arith_k_helper(c, i, DIV); }
+void lower_idivk(Ctx &c, const Insn &i) { arith_k_helper(c, i, IDIV); }
+void lower_modk(Ctx &c, const Insn &i) { arith_k_helper(c, i, MOD); }
+void lower_powk(Ctx &c, const Insn &i) { arith_k_helper(c, i, POW); }
+void lower_bandk(Ctx &c, const Insn &i) { arith_k_helper(c, i, BAND); }
+void lower_bork(Ctx &c, const Insn &i) { arith_k_helper(c, i, BOR); }
+void lower_bxork(Ctx &c, const Insn &i) { arith_k_helper(c, i, BXOR); }
+
+// SHRI A B sC: R[A] := R[B] >> sC (shiftl by -sC). SHLI A B sC: R[A] := sC << R[B].
+void lower_shri(Ctx &c, const Insn &i) {
+  std::string rb = reg(c, i.B());
+  std::string imm = imm_lv(c, i.sC(), false);
+  emit_helper_arith(c, SHR, i.A(), rb, imm, {c.reg_info(i.B()), ""});
+}
+void lower_shli(Ctx &c, const Insn &i) {
+  std::string imm = imm_lv(c, i.sC(), false);
+  std::string rb = reg(c, i.B());
+  emit_helper_arith(c, SHL, i.A(), imm, rb, {"", c.reg_info(i.B())});
+}
+
+void lower_unm(Ctx &c, const Insn &i) { emit_helper_unary(c, UNM, i.A(), i.B()); }
+void lower_bnot(Ctx &c, const Insn &i) { emit_helper_unary(c, BNOT, i.A(), i.B()); }
 
 // NOT A B: R[A] is true when R[B] is nil or false.
 void lower_not(Ctx &c, const Insn &i) {
@@ -308,100 +773,29 @@ void lower_not(Ctx &c, const Insn &i) {
   c.line("))");
 }
 
-// A binary op with a K operand (DIVK, MODK, ...): the constant goes through a temporary, the helper does the op.
-void arith_k_helper(Ctx &c, const Insn &i, Op base) {
-  std::string rb = reg(c, i.B());
-  std::string kv = constant_lv(c, c.p.k.at(i.C()));
-  emit_helper_arith(c, base, i.A(), rb, kv);
+// The numeric for loop (lvm.c forprep and OP_FORLOOP). The helpers do the work on the four registers from R[A].
+void lower_forprep(Ctx &c, const Insn &i) {
+  std::string ra = reg(c, i.A());
+  std::string s = c.fresh();
+  set_site(c, {});
+  c.line("(let " + s + " int (call int &\"lua54rt_forprep\" " + ra + "))");
+  std::string skip = c.fresh();
+  c.line("(let " + skip + " bool (ne int " + s + " (const int 0)))");
+  // lvm.c: `pc += Bx + 1` after pc was advanced, so the loop is skipped to pc + Bx + 2.
+  std::size_t exit_pc = c.pc + i.Bx() + 2;
+  c.line("(if " + skip + " (then (goto " + lbl(exit_pc) + ")) (else (goto " + lbl(c.pc + 1) + ")))");
 }
 
-// The op table: one lowering function per opcode.
-
-
-using Lower = void (*)(Ctx &, const Insn &);
-
-void lower_move(Ctx &c, const Insn &i) {
-  std::string dst = reg(c, i.A()), src = reg(c, i.B());
-  c.line("(copy 16 " + dst + " " + src + ")");
+void lower_forloop(Ctx &c, const Insn &i) {
+  std::string ra = reg(c, i.A());
+  std::string s = c.fresh();
+  c.line("(let " + s + " int (call int &\"lua54rt_forloop\" " + ra + "))");
+  std::string again = c.fresh();
+  c.line("(let " + again + " bool (ne int " + s + " (const int 0)))");
+  // lvm.c: `pc -= Bx` after pc was advanced, so the jump back goes to pc + 1 - Bx.
+  std::size_t back = c.pc + 1 - i.Bx();
+  c.line("(if " + again + " (then (goto " + lbl(back) + ")) (else (goto " + lbl(c.pc + 1) + ")))");
 }
-
-void lower_loadi(Ctx &c, const Insn &i) {
-  store_int(c, reg(c, i.A()), "(const long " + std::to_string(i.sBx()) + ")");
-}
-
-void lower_loadf(Ctx &c, const Insn &i) {
-  store_float(c, reg(c, i.A()), "(const double " + fmt_double(i.sBx()) + ")");
-}
-
-void lower_loadk(Ctx &c, const Insn &i) {
-  std::string src = constant_lv(c, c.p.k.at(i.Bx()));
-  c.line("(copy 16 " + reg(c, i.A()) + " " + src + ")");
-}
-
-void lower_loadfalse(Ctx &c, const Insn &i) { store_tag(c, reg(c, i.A()), kTagFalse); }
-void lower_loadtrue(Ctx &c, const Insn &i) { store_tag(c, reg(c, i.A()), kTagTrue); }
-
-void lower_loadnil(Ctx &c, const Insn &i) {
-  for (unsigned n = 0; n <= i.B(); ++n) store_tag(c, reg(c, i.A() + n), kTagNil);
-}
-
-void lower_add(Ctx &c, const Insn &i) { emit_arith(c, ADD, i.A(), reg(c, i.B()), reg(c, i.C()), nullptr); }
-void lower_sub(Ctx &c, const Insn &i) { emit_arith(c, SUB, i.A(), reg(c, i.B()), reg(c, i.C()), nullptr); }
-void lower_mul(Ctx &c, const Insn &i) { emit_arith(c, MUL, i.A(), reg(c, i.B()), reg(c, i.C()), nullptr); }
-
-// ADDI A B sC: R[A] := R[B] + sC, the immediate being an integer.
-void lower_addi(Ctx &c, const Insn &i) {
-  std::string rb = reg(c, i.B());
-  std::string imm = imm_lv(c, i.sC(), false);
-  std::string v = "(const long " + std::to_string(i.sC()) + ")";
-  emit_arith(c, ADD, i.A(), rb, imm, &v);
-}
-
-// The K operand of ADDK/SUBK/MULK: an integer keeps the inline path, anything else goes to the helper.
-void arith_k(Ctx &c, const Insn &i, Op op) {
-  const Constant &k = c.p.k.at(i.C());
-  std::string rb = reg(c, i.B());
-  std::string kv = constant_lv(c, k);
-  if (k.kind == Constant::Kind::Integer) {
-    std::string v = "(const long " + std::to_string(k.i) + ")";
-    emit_arith(c, op, i.A(), rb, kv, &v);
-  } else {
-    emit_arith(c, op, i.A(), rb, kv, nullptr);
-  }
-}
-
-void lower_div(Ctx &c, const Insn &i) { emit_helper_arith(c, DIV, i.A(), reg(c, i.B()), reg(c, i.C())); }
-void lower_idiv(Ctx &c, const Insn &i) { emit_helper_arith(c, IDIV, i.A(), reg(c, i.B()), reg(c, i.C())); }
-void lower_mod(Ctx &c, const Insn &i) { emit_helper_arith(c, MOD, i.A(), reg(c, i.B()), reg(c, i.C())); }
-void lower_pow(Ctx &c, const Insn &i) { emit_helper_arith(c, POW, i.A(), reg(c, i.B()), reg(c, i.C())); }
-void lower_band(Ctx &c, const Insn &i) { emit_helper_arith(c, BAND, i.A(), reg(c, i.B()), reg(c, i.C())); }
-void lower_bor(Ctx &c, const Insn &i) { emit_helper_arith(c, BOR, i.A(), reg(c, i.B()), reg(c, i.C())); }
-void lower_bxor(Ctx &c, const Insn &i) { emit_helper_arith(c, BXOR, i.A(), reg(c, i.B()), reg(c, i.C())); }
-void lower_shl(Ctx &c, const Insn &i) { emit_helper_arith(c, SHL, i.A(), reg(c, i.B()), reg(c, i.C())); }
-void lower_shr(Ctx &c, const Insn &i) { emit_helper_arith(c, SHR, i.A(), reg(c, i.B()), reg(c, i.C())); }
-
-void lower_divk(Ctx &c, const Insn &i) { arith_k_helper(c, i, DIV); }
-void lower_idivk(Ctx &c, const Insn &i) { arith_k_helper(c, i, IDIV); }
-void lower_modk(Ctx &c, const Insn &i) { arith_k_helper(c, i, MOD); }
-void lower_powk(Ctx &c, const Insn &i) { arith_k_helper(c, i, POW); }
-void lower_bandk(Ctx &c, const Insn &i) { arith_k_helper(c, i, BAND); }
-void lower_bork(Ctx &c, const Insn &i) { arith_k_helper(c, i, BOR); }
-void lower_bxork(Ctx &c, const Insn &i) { arith_k_helper(c, i, BXOR); }
-
-// SHRI A B sC: R[A] := R[B] >> sC (shiftl by -sC). SHLI A B sC: R[A] := sC << R[B].
-void lower_shri(Ctx &c, const Insn &i) {
-  std::string rb = reg(c, i.B());
-  std::string imm = imm_lv(c, i.sC(), false);
-  emit_helper_arith(c, SHR, i.A(), rb, imm);
-}
-void lower_shli(Ctx &c, const Insn &i) {
-  std::string imm = imm_lv(c, i.sC(), false);
-  std::string rb = reg(c, i.B());
-  emit_helper_arith(c, SHL, i.A(), imm, rb);
-}
-
-void lower_unm(Ctx &c, const Insn &i) { emit_helper_unary(c, UNM, i.A(), i.B()); }
-void lower_bnot(Ctx &c, const Insn &i) { emit_helper_unary(c, BNOT, i.A(), i.B()); }
 
 // CLOSURE A Bx: a closure of prototype Bx. Its upvalues are captured one by one (lvm.c's pushclosure): from the frame
 // (instack: the register idx) or from the enclosing closure (%2: its upvalue idx).
@@ -430,140 +824,36 @@ void lower_setupval(Ctx &c, const Insn &i) {
 }
 
 // CLOSE A: the upvalues of the registers from R[A] up are closed.
-void lower_close(Ctx &c, const Insn &i) {
-  c.line("(eval (call void &\"lua54rt_close\" " + reg(c, i.A()) + "))");
-}
-
-// CALL A B C: R[A] is the function, R[A+1..] its B-1 arguments, the results go to R[A..A+C-2]. The callee's base is
-// R[A+1]; the function value is copied first, because R[A] receives the first result.
-void emit_call(Ctx &c, unsigned a, const std::string &nargs, int wanted) {
-  std::string fn_slot = c.temp_lv();
-  std::string fn_reg = reg(c, a);
-  c.line("(copy 16 " + fn_slot + " " + fn_reg + ")");
-  store_tag(c, fn_reg, kTagNil);   // a call that returns nothing leaves R[A] nil
-  std::string args = reg(c, a + 1);
-  std::string ret = reg(c, a);
-  c.line("(eval (call void &\"lua54rt_call\" " + fn_slot + " " + nargs + " " + args + " " + ret + " (const int " +
-         std::to_string(wanted) + ") (const int " + std::to_string(a) + ")))");
-}
-
-// The number of values up to the stack top, from register index `from` on: top - from, as an IR int register.
-std::string values_to_top(Ctx &c, unsigned from) {
-  std::string t = c.fresh(), n = c.fresh();
-  c.line("(let " + t + " int (call int &\"lua54rt_gettop\"))");
-  c.line("(let " + n + " int (wsub int " + t + " (const int " + std::to_string(from) + ")))");
-  return n;
-}
-
-// Results are returned: n values (an IR int register or a constant) are copied from src to the caller's ret.
-void emit_return_values(Ctx &c, const std::string &src, const std::string &n) {
-  c.line("(eval (call void &\"lua54rt_setret\" %0 " + src + " " + n + "))");
-  c.line("(return)");
-}
+void lower_close(Ctx &c, const Insn &i) { c.line("(eval (call void &\"lua54rt_close\" " + reg(c, i.A()) + "))"); }
 
 // CALL A B C: R[A] is the function, R[A+1..] its arguments: B-1 of them, or those up to the stack top when B is 0.
 // The results go to R[A..]: C-1 of them, or all of them and the stack top when C is 0.
 void lower_call(Ctx &c, const Insn &i) {
   std::string nargs = i.B() == 0 ? values_to_top(c, i.A() + 1) : "(const int " + std::to_string(i.B() - 1) + ")";
-  emit_call(c, i.A(), nargs, i.C() == 0 ? -1 : static_cast<int>(i.C()) - 1);
+  emit_call(c, i.A(), nargs, i.C() == 0 ? -1 : static_cast<int>(i.C()) - 1, c.reg_info(i.A()));
 }
 
-// TAILCALL A B k: a call whose one result is returned (`return f(x)`). Not lowered with upvalues to close (k).
 // TAILCALL A B k: `return f(x)`. The frame's upvalues close first (lvm.c). The call's values are returned.
 void lower_tailcall(Ctx &c, const Insn &i) {
   if (i.k()) c.line("(eval (call void &\"lua54rt_close\" %1))");
   std::string nargs = i.B() == 0 ? values_to_top(c, i.A() + 1) : "(const int " + std::to_string(i.B() - 1) + ")";
-  emit_call(c, i.A(), nargs, -1);
+  emit_call(c, i.A(), nargs, -1, c.reg_info(i.A()));
   emit_return_values(c, reg(c, i.A()), values_to_top(c, i.A()));
 }
 
-// --- Tables and strings (docs/notes/lua54-pathb.md, "Tables and strings"). ---
-
-// An RK operand: a constant (k set) or a register.
-std::string rk(Ctx &c, unsigned idx, bool is_k) {
-  return is_k ? constant_lv(c, c.p.k.at(idx)) : reg(c, idx);
+// RETURN A B k: B is the number of results plus one; B = 0 returns the values up to the stack top.
+void lower_return(Ctx &c, const Insn &i) {
+  if (i.k()) c.line("(eval (call void &\"lua54rt_close\" %1))");   // the frame's upvalues close before it goes
+  if (i.B() == 0) {
+    emit_return_values(c, reg(c, i.A()), values_to_top(c, i.A()));
+  } else {
+    emit_return_values(c, reg(c, i.A()), "(const int " + std::to_string(i.B() - 1) + ")");
+  }
 }
 
-void lower_newtable(Ctx &c, const Insn &i) {
-  c.line("(eval (call void &\"lua54rt_newtable\" " + reg(c, i.A()) + "))");
-}
+void lower_return0(Ctx &c, const Insn &) { emit_return_values(c, "%1", "(const int 0)"); }
+void lower_return1(Ctx &c, const Insn &i) { emit_return_values(c, reg(c, i.A()), "(const int 1)"); }
 
-void lower_gettable(Ctx &c, const Insn &i) {
-  std::string dst = reg(c, i.A()), t = reg(c, i.B()), key = reg(c, i.C());
-  c.line("(eval (call void &\"lua54rt_gettable\" " + dst + " " + t + " " + key + "))");
-}
-
-void lower_geti(Ctx &c, const Insn &i) {
-  std::string dst = reg(c, i.A()), t = reg(c, i.B());
-  std::string key = imm_lv(c, static_cast<int>(i.C()), false);
-  c.line("(eval (call void &\"lua54rt_gettable\" " + dst + " " + t + " " + key + "))");
-}
-
-void lower_getfield(Ctx &c, const Insn &i) {
-  std::string dst = reg(c, i.A()), t = reg(c, i.B());
-  std::string key = constant_lv(c, c.p.k.at(i.C()));
-  c.line("(eval (call void &\"lua54rt_gettable\" " + dst + " " + t + " " + key + "))");
-}
-
-// The upvalue B (a table, for _ENV) loaded into a temporary, then indexed.
-void lower_gettabup(Ctx &c, const Insn &i) {
-  std::string up = c.temp_lv();
-  c.line("(eval (call void &\"lua54rt_getupval\" " + up + " %2 (const int " + std::to_string(i.B()) + ")))");
-  std::string dst = reg(c, i.A());
-  std::string key = constant_lv(c, c.p.k.at(i.C()));
-  c.line("(eval (call void &\"lua54rt_gettable\" " + dst + " " + up + " " + key + "))");
-}
-
-void lower_settable(Ctx &c, const Insn &i) {
-  std::string t = reg(c, i.A()), key = reg(c, i.B());
-  std::string val = rk(c, i.C(), i.k());
-  c.line("(eval (call void &\"lua54rt_settable\" " + t + " " + key + " " + val + "))");
-}
-
-void lower_seti(Ctx &c, const Insn &i) {
-  std::string t = reg(c, i.A());
-  std::string key = imm_lv(c, static_cast<int>(i.B()), false);
-  std::string val = rk(c, i.C(), i.k());
-  c.line("(eval (call void &\"lua54rt_settable\" " + t + " " + key + " " + val + "))");
-}
-
-void lower_setfield(Ctx &c, const Insn &i) {
-  std::string t = reg(c, i.A());
-  std::string key = constant_lv(c, c.p.k.at(i.B()));
-  std::string val = rk(c, i.C(), i.k());
-  c.line("(eval (call void &\"lua54rt_settable\" " + t + " " + key + " " + val + "))");
-}
-
-void lower_settabup(Ctx &c, const Insn &i) {
-  std::string up = c.temp_lv();
-  c.line("(eval (call void &\"lua54rt_getupval\" " + up + " %2 (const int " + std::to_string(i.A()) + ")))");
-  std::string key = constant_lv(c, c.p.k.at(i.B()));
-  std::string val = rk(c, i.C(), i.k());
-  c.line("(eval (call void &\"lua54rt_settable\" " + up + " " + key + " " + val + "))");
-}
-
-// SELF A B C: R[A+1] := R[B]; R[A] := R[B][RK(C)]. The object and the key are copied first: A may be B.
-void lower_self(Ctx &c, const Insn &i) {
-  std::string obj = c.temp_lv(), key = c.temp_lv();
-  c.line("(copy 16 " + obj + " " + reg(c, i.B()) + ")");
-  std::string k = rk(c, i.C(), i.k());
-  c.line("(copy 16 " + key + " " + k + ")");
-  c.line("(copy 16 " + reg(c, i.A() + 1) + " " + obj + ")");
-  c.line("(eval (call void &\"lua54rt_gettable\" " + reg(c, i.A()) + " " + obj + " " + key + "))");
-}
-
-void lower_len(Ctx &c, const Insn &i) {
-  std::string dst = reg(c, i.A()), src = reg(c, i.B());
-  c.line("(eval (call void &\"lua54rt_len\" " + dst + " " + src + "))");
-}
-
-// CONCAT A B: R[A] := R[A] .. ... .. R[A+B-1]. The helper reads all of them before it writes R[A].
-void lower_concat(Ctx &c, const Insn &i) {
-  std::string base = reg(c, i.A());
-  c.line("(eval (call void &\"lua54rt_concat\" " + base + " " + base + " (const int " + std::to_string(i.B()) + ")))");
-}
-
-// SETLIST A B C k: t[C + j] := R[A+j] for j = 1..B, with C plus EXTRAARG * 256 when k. The EXTRAARG is skipped.
 // SETLIST A B C k: t[C + j] := R[A+j] for j = 1..n, n = B or the values up to the stack top when B is 0. With k, C
 // is extended by the EXTRAARG after it, and that instruction is skipped.
 void lower_setlist(Ctx &c, const Insn &i) {
@@ -580,9 +870,6 @@ void lower_setlist(Ctx &c, const Insn &i) {
          count + "))");
   if (skip_extra) go(c, c.pc + 2);
 }
-
-void lower_extraarg(Ctx &, const Insn &) {}
-
 
 // VARARGPREP: the extra arguments are saved in the frame's `va` slot; the runtime knows their count at this point.
 void lower_varargprep(Ctx &c, const Insn &i) {
@@ -649,7 +936,7 @@ void lower_tforprep(Ctx &c, const Insn &i) { go(c, c.pc + 1 + i.Bx()); }
 // TFORCALL A C: R[A+4..A+3+C] := R[A](R[A+1], R[A+2]).
 void lower_tforcall(Ctx &c, const Insn &i) {
   for (unsigned k = 0; k < 3; ++k) c.line("(copy 16 " + reg(c, i.A() + 4 + k) + " " + reg(c, i.A() + k) + ")");
-  emit_call(c, i.A() + 4, "(const int 2)", static_cast<int>(i.C()));
+  emit_call(c, i.A() + 4, "(const int 2)", static_cast<int>(i.C()), " (for iterator 'for iterator')");
 }
 
 // TFORLOOP A Bx: if R[A+4] is not nil, R[A+2] := R[A+4] and jump back to the loop body.
@@ -663,237 +950,192 @@ void lower_tforloop(Ctx &c, const Insn &i) {
   c.line("(goto " + lbl(back) + ")))");
 }
 
-void lower_addk(Ctx &c, const Insn &i) { arith_k(c, i, ADD); }
-void lower_subk(Ctx &c, const Insn &i) { arith_k(c, i, SUB); }
-void lower_mulk(Ctx &c, const Insn &i) { arith_k(c, i, MUL); }
+// NEWTABLE A: a fresh table. The size hints are not used.
+void lower_newtable(Ctx &c, const Insn &i) { c.line("(eval (call void &\"lua54rt_newtable\" " + reg(c, i.A()) + "))"); }
 
-// The MMBIN* after an arithmetic op: never reached by falling through (see the header comment), so nothing.
-void lower_nothing(Ctx &, const Insn &) {}
-
-// EQ/LT/LE on two registers. The fast path is the int compare; the helper handles the rest.
-void lower_eq(Ctx &c, const Insn &i) {
-  std::string cond = c.fresh();
-  c.line("(let " + cond + " bool (const bool 0))");
-  std::string a = reg(c, i.A()), b = reg(c, i.B());
-  std::string ta = load_tag(c, a), tb = load_tag(c, b);
-  emit_compare(c, "eq", kCmpEq, a, b, true, ta, tb, cond);
-  emit_cond_jump(c, cond, i.k());
+// GETTABLE A B C: R[A] := R[B][R[C]]. GETI: the key is the integer C. GETFIELD: the key is the string K[C].
+void emit_gettable(Ctx &c, unsigned a, const std::string &t, const std::string &key, const std::string &info) {
+  std::string dst = reg(c, a);
+  set_site(c, {info});
+  c.line("(eval (call void &\"lua54rt_gettable\" " + dst + " " + t + " " + key + "))");
 }
 
-void lower_lt(Ctx &c, const Insn &i) {
-  std::string cond = c.fresh();
-  c.line("(let " + cond + " bool (const bool 0))");
-  std::string a = reg(c, i.A()), b = reg(c, i.B());
-  std::string ta = load_tag(c, a), tb = load_tag(c, b);
-  emit_compare(c, "lt.s", kCmpLt, a, b, true, ta, tb, cond);
-  emit_cond_jump(c, cond, i.k());
+void lower_gettable(Ctx &c, const Insn &i) {
+  std::string t = reg(c, i.B()), key = reg(c, i.C());
+  emit_gettable(c, i.A(), t, key, c.reg_info(i.B()));
 }
 
-void lower_le(Ctx &c, const Insn &i) {
-  std::string cond = c.fresh();
-  c.line("(let " + cond + " bool (const bool 0))");
-  std::string a = reg(c, i.A()), b = reg(c, i.B());
-  std::string ta = load_tag(c, a), tb = load_tag(c, b);
-  emit_compare(c, "le.s", kCmpLe, a, b, true, ta, tb, cond);
-  emit_cond_jump(c, cond, i.k());
+void lower_geti(Ctx &c, const Insn &i) {
+  std::string t = reg(c, i.B());
+  std::string key = imm_lv(c, static_cast<int>(i.C()), false);
+  emit_gettable(c, i.A(), t, key, c.reg_info(i.B()));
 }
 
-// Comparisons with an immediate: `R[A] op sB`. C is the isf flag: a float immediate always goes to the helper.
-// GTI and GEI compare the other way round (sB < R[A], sB <= R[A]).
-void imm_compare(Ctx &c, const Insn &i, const char *fast_op, int kind, bool swapped) {
-  std::string cond = c.fresh();
-  c.line("(let " + cond + " bool (const bool 0))");
-  std::string ra = reg(c, i.A());
-  std::string ta = load_tag(c, ra);
-  std::string imm = imm_lv(c, i.sB(), i.C() != 0);
-  bool inline_ok = i.C() == 0;   // a float immediate (C flag set) always goes to the helper
-  if (inline_ok) {
-    // The immediate is an int, so only R[A]'s tag is tested.
-    std::string ai = tag_is(c, ta, kTagInt);
-    c.line("(if " + ai + " (then");
-    std::string x = load_value(c, ra, "long");
-    std::string y = "(const long " + std::to_string(i.sB()) + ")";
-    if (swapped) set_rv(c, cond, std::string("(") + fast_op + " long " + y + " " + x + ")");
-    else set_rv(c, cond, std::string("(") + fast_op + " long " + x + " " + y + ")");
-    c.line(") (else");
-    std::string r = c.fresh();
-    if (swapped) c.line("(let " + r + " int (call int &\"lua54rt_cmp\" (const int " + std::to_string(kind) + ") " + imm + " " + ra + "))");
-    else c.line("(let " + r + " int (call int &\"lua54rt_cmp\" (const int " + std::to_string(kind) + ") " + ra + " " + imm + "))");
-    set_rv(c, cond, "(ne int " + r + " (const int 0))");
-    c.line("))");
-  } else {
-    std::string r = c.fresh();
-    if (swapped) c.line("(let " + r + " int (call int &\"lua54rt_cmp\" (const int " + std::to_string(kind) + ") " + imm + " " + ra + "))");
-    else c.line("(let " + r + " int (call int &\"lua54rt_cmp\" (const int " + std::to_string(kind) + ") " + ra + " " + imm + "))");
-    set_rv(c, cond, "(ne int " + r + " (const int 0))");
-  }
-  emit_cond_jump(c, cond, i.k());
+void lower_getfield(Ctx &c, const Insn &i) {
+  std::string t = reg(c, i.B());
+  std::string key = constant_lv(c, c.p.k.at(i.C()));
+  emit_gettable(c, i.A(), t, key, c.reg_info(i.B()));
 }
 
-void lower_lti(Ctx &c, const Insn &i) { imm_compare(c, i, "lt.s", kCmpLt, false); }
-void lower_lei(Ctx &c, const Insn &i) { imm_compare(c, i, "le.s", kCmpLe, false); }
-void lower_gti(Ctx &c, const Insn &i) { imm_compare(c, i, "lt.s", kCmpLt, true); }
-void lower_gei(Ctx &c, const Insn &i) { imm_compare(c, i, "le.s", kCmpLe, true); }
-
-void lower_eqi(Ctx &c, const Insn &i) {
-  std::string cond = c.fresh();
-  c.line("(let " + cond + " bool (const bool 0))");
-  std::string ra = reg(c, i.A());
-  std::string ta = load_tag(c, ra);
-  std::string imm = imm_lv(c, i.sB(), i.C() != 0);
-  if (i.C() == 0) {
-    std::string ai = tag_is(c, ta, kTagInt);
-    c.line("(if " + ai + " (then");
-    std::string x = load_value(c, ra, "long");
-    set_rv(c, cond, "(eq long " + x + " (const long " + std::to_string(i.sB()) + "))");
-    c.line(") (else");
-  }
-  std::string r = c.fresh();
-  c.line("(let " + r + " int (call int &\"lua54rt_cmp\" (const int " + std::to_string(kCmpEq) + ") " + ra + " " + imm + "))");
-  set_rv(c, cond, "(ne int " + r + " (const int 0))");
-  if (i.C() == 0) c.line("))");
-  emit_cond_jump(c, cond, i.k());
+// GETTABUP A B C: R[A] := upvalue B [K[C]]. The upvalue is loaded into a temporary first.
+void lower_gettabup(Ctx &c, const Insn &i) {
+  std::string up = c.temp_lv();
+  c.line("(eval (call void &\"lua54rt_getupval\" " + up + " %2 (const int " + std::to_string(i.B()) + ")))");
+  std::string key = constant_lv(c, c.p.k.at(i.C()));
+  emit_gettable(c, i.A(), up, key, c.upval_info(i.B()));
 }
 
-void lower_eqk(Ctx &c, const Insn &i) {
-  std::string cond = c.fresh();
-  c.line("(let " + cond + " bool (const bool 0))");
-  std::string ra = reg(c, i.A());
-  std::string kv = constant_lv(c, c.p.k.at(i.B()));
-  std::string r = c.fresh();
-  c.line("(let " + r + " int (call int &\"lua54rt_cmp\" (const int " + std::to_string(kCmpEq) + ") " + ra + " " + kv + "))");
-  set_rv(c, cond, "(ne int " + r + " (const int 0))");
-  emit_cond_jump(c, cond, i.k());
+// SETTABLE A B C k: R[A][R[B]] := RK(C). SETI: the key is the integer B. SETFIELD: the key is the string K[B].
+void emit_settable(Ctx &c, const std::string &t, const std::string &key, const std::string &val, const std::string &info) {
+  set_site(c, {info});
+  c.line("(eval (call void &\"lua54rt_settable\" " + t + " " + key + " " + val + "))");
 }
 
-// TEST A k: the condition is the truthiness of R[A] (lvm.c: !l_isfalse). Nil and false are the falsy tags.
-void lower_test(Ctx &c, const Insn &i) {
-  std::string cond = c.fresh();
-  c.line("(let " + cond + " bool (const bool 0))");
-  std::string ra = reg(c, i.A());
-  std::string t = load_tag(c, ra);
-  std::string is_nil = tag_is(c, t, kTagNil), is_false = tag_is(c, t, kTagFalse);
-  // if nil then false else (if false then false else true)
-  c.line("(if " + is_nil + " (then (set " + cond + " (const bool 0))) (else");
-  c.line("(if " + is_false + " (then (set " + cond + " (const bool 0))) (else (set " + cond + " (const bool 1))))");
-  c.line("))");   // closes the else of the nil test and the nil test itself
-  emit_cond_jump(c, cond, i.k());
+void lower_settable(Ctx &c, const Insn &i) {
+  std::string t = reg(c, i.A()), key = reg(c, i.B());
+  std::string val = rk(c, i.C(), i.k());
+  emit_settable(c, t, key, val, c.reg_info(i.A()));
 }
 
-void lower_jmp(Ctx &c, const Insn &i) {
-  go(c, c.pc + 1 + static_cast<std::size_t>(static_cast<long long>(i.sJ())));
+void lower_seti(Ctx &c, const Insn &i) {
+  std::string t = reg(c, i.A());
+  std::string key = imm_lv(c, static_cast<int>(i.B()), false);
+  std::string val = rk(c, i.C(), i.k());
+  emit_settable(c, t, key, val, c.reg_info(i.A()));
 }
 
-// RETURN A B k: B is the number of results plus one. B = 1 returns nothing and B = 2 returns R[A]. A count taken from
-// the stack top (B = 0), more than one value, or upvalues to close (k) are refused for now.
-// RETURN A B k: B is the number of results plus one; B = 0 returns the values up to the stack top.
-void lower_return(Ctx &c, const Insn &i) {
-  if (i.k()) c.line("(eval (call void &\"lua54rt_close\" %1))");   // the frame's upvalues close before it goes
-  if (i.B() == 0) {
-    emit_return_values(c, reg(c, i.A()), values_to_top(c, i.A()));
-  } else {
-    emit_return_values(c, reg(c, i.A()), "(const int " + std::to_string(i.B() - 1) + ")");
-  }
+void lower_setfield(Ctx &c, const Insn &i) {
+  std::string t = reg(c, i.A());
+  std::string key = constant_lv(c, c.p.k.at(i.B()));
+  std::string val = rk(c, i.C(), i.k());
+  emit_settable(c, t, key, val, c.reg_info(i.A()));
 }
 
-void lower_return0(Ctx &c, const Insn &) { emit_return_values(c, "%1", "(const int 0)"); }
+// SETTABUP A B C k: upvalue A [K[B]] := RK(C).
+void lower_settabup(Ctx &c, const Insn &i) {
+  std::string up = c.temp_lv();
+  c.line("(eval (call void &\"lua54rt_getupval\" " + up + " %2 (const int " + std::to_string(i.A()) + ")))");
+  std::string key = constant_lv(c, c.p.k.at(i.B()));
+  std::string val = rk(c, i.C(), i.k());
+  emit_settable(c, up, key, val, c.upval_info(i.A()));
+}
 
-void lower_return1(Ctx &c, const Insn &i) { emit_return_values(c, reg(c, i.A()), "(const int 1)"); }
+// SELF A B C: R[A+1] := R[B]; R[A] := R[B][RK(C)]. The object and the key are copied first: A may be B.
+void lower_self(Ctx &c, const Insn &i) {
+  std::string obj = c.temp_lv(), key = c.temp_lv();
+  c.line("(copy 16 " + obj + " " + reg(c, i.B()) + ")");
+  std::string k = rk(c, i.C(), i.k());
+  c.line("(copy 16 " + key + " " + k + ")");
+  c.line("(copy 16 " + reg(c, i.A() + 1) + " " + obj + ")");
+  emit_gettable(c, i.A(), obj, key, c.reg_info(i.B()));
+}
 
-// Table: an entry is null for an opcode that is not lowered yet. `refuse_reason` gives the reason for the refusal.
-struct Entry {
-  Lower fn;
-  const char *note;
-};
+void lower_len(Ctx &c, const Insn &i) {
+  std::string dst = reg(c, i.A()), src = reg(c, i.B());
+  set_site(c, {c.reg_info(i.B())});
+  c.line("(eval (call void &\"lua54rt_len\" " + dst + " " + src + "))");
+}
 
-const Entry *table() {
-  static Entry t[NUM_OPCODES] = {};
+// CONCAT A B: R[A] := R[A] .. ... .. R[A+B-1]. The helper reads all of them before it writes R[A].
+void lower_concat(Ctx &c, const Insn &i) {
+  std::string base = reg(c, i.A());
+  std::vector<std::string> infos;
+  for (unsigned k = 0; k < i.B(); ++k) infos.push_back(c.reg_info(i.A() + k));
+  set_site(c, infos);
+  c.line("(eval (call void &\"lua54rt_concat\" " + base + " " + base + " (const int " + std::to_string(i.B()) + ")))");
+}
+
+void lower_extraarg(Ctx &, const Insn &) {}
+
+// ---- the table: an entry is null for an opcode that is not lowered yet ----
+
+const Lower *table() {
+  static Lower t[NUM_OPCODES] = {};
   static bool built = false;
   if (built) return t;
   built = true;
-  t[MOVE] = {lower_move, nullptr};
-  t[LOADI] = {lower_loadi, nullptr};
-  t[LOADF] = {lower_loadf, nullptr};
-  t[LOADK] = {lower_loadk, nullptr};
-  t[LOADFALSE] = {lower_loadfalse, nullptr};
-  t[LOADTRUE] = {lower_loadtrue, nullptr};
-  t[LOADNIL] = {lower_loadnil, nullptr};
-  t[ADD] = {lower_add, nullptr};
-  t[SUB] = {lower_sub, nullptr};
-  t[MUL] = {lower_mul, nullptr};
-  t[ADDI] = {lower_addi, nullptr};
-  t[ADDK] = {lower_addk, nullptr};
-  t[SUBK] = {lower_subk, nullptr};
-  t[MULK] = {lower_mulk, nullptr};
-  t[DIV] = {lower_div, nullptr};
-  t[IDIV] = {lower_idiv, nullptr};
-  t[MOD] = {lower_mod, nullptr};
-  t[POW] = {lower_pow, nullptr};
-  t[BAND] = {lower_band, nullptr};
-  t[BOR] = {lower_bor, nullptr};
-  t[BXOR] = {lower_bxor, nullptr};
-  t[SHL] = {lower_shl, nullptr};
-  t[SHR] = {lower_shr, nullptr};
-  t[DIVK] = {lower_divk, nullptr};
-  t[IDIVK] = {lower_idivk, nullptr};
-  t[MODK] = {lower_modk, nullptr};
-  t[POWK] = {lower_powk, nullptr};
-  t[BANDK] = {lower_bandk, nullptr};
-  t[BORK] = {lower_bork, nullptr};
-  t[BXORK] = {lower_bxork, nullptr};
-  t[SHRI] = {lower_shri, nullptr};
-  t[SHLI] = {lower_shli, nullptr};
-  t[UNM] = {lower_unm, nullptr};
-  t[BNOT] = {lower_bnot, nullptr};
-  t[NOT] = {lower_not, nullptr};
-  t[FORPREP] = {lower_forprep, nullptr};
-  t[FORLOOP] = {lower_forloop, nullptr};
-  t[CLOSURE] = {lower_closure, nullptr};
-  t[GETUPVAL] = {lower_getupval, nullptr};
-  t[SETUPVAL] = {lower_setupval, nullptr};
-  t[CLOSE] = {lower_close, nullptr};
-  t[NEWTABLE] = {lower_newtable, nullptr};
-  t[GETTABLE] = {lower_gettable, nullptr};
-  t[GETI] = {lower_geti, nullptr};
-  t[GETFIELD] = {lower_getfield, nullptr};
-  t[GETTABUP] = {lower_gettabup, nullptr};
-  t[SETTABLE] = {lower_settable, nullptr};
-  t[SETI] = {lower_seti, nullptr};
-  t[SETFIELD] = {lower_setfield, nullptr};
-  t[SETTABUP] = {lower_settabup, nullptr};
-  t[SELF] = {lower_self, nullptr};
-  t[LEN] = {lower_len, nullptr};
-  t[CONCAT] = {lower_concat, nullptr};
-  t[SETLIST] = {lower_setlist, nullptr};
-  t[EXTRAARG] = {lower_extraarg, nullptr};
-  t[CALL] = {lower_call, nullptr};
-  t[TAILCALL] = {lower_tailcall, nullptr};
-  t[MMBIN] = {lower_nothing, nullptr};
-  t[MMBINI] = {lower_nothing, nullptr};
-  t[MMBINK] = {lower_nothing, nullptr};
-  t[EQ] = {lower_eq, nullptr};
-  t[LT] = {lower_lt, nullptr};
-  t[LE] = {lower_le, nullptr};
-  t[EQK] = {lower_eqk, nullptr};
-  t[EQI] = {lower_eqi, nullptr};
-  t[LTI] = {lower_lti, nullptr};
-  t[LEI] = {lower_lei, nullptr};
-  t[GTI] = {lower_gti, nullptr};
-  t[GEI] = {lower_gei, nullptr};
-  t[TEST] = {lower_test, nullptr};
-  t[JMP] = {lower_jmp, nullptr};
-  t[RETURN] = {lower_return, nullptr};
-  t[RETURN0] = {lower_return0, nullptr};
-  t[RETURN1] = {lower_return1, nullptr};
-  // VARARGPREP moves the fixed parameters above the varargs; registers keep their contents, and no lowered op reads varargs.
-  t[VARARGPREP] = {lower_varargprep, nullptr};
-  t[VARARG] = {lower_vararg, nullptr};
-  t[TESTSET] = {lower_testset, nullptr};
-  t[LFALSESKIP] = {lower_lfalseskip, nullptr};
-  t[LOADKX] = {lower_loadkx, nullptr};
-  t[TFORPREP] = {lower_tforprep, nullptr};
-  t[TFORCALL] = {lower_tforcall, nullptr};
-  t[TFORLOOP] = {lower_tforloop, nullptr};
+  t[MOVE] = lower_move;
+  t[LOADI] = lower_loadi;
+  t[LOADF] = lower_loadf;
+  t[LOADK] = lower_loadk;
+  t[LOADKX] = lower_loadkx;
+  t[LOADFALSE] = lower_loadfalse;
+  t[LFALSESKIP] = lower_lfalseskip;
+  t[LOADTRUE] = lower_loadtrue;
+  t[LOADNIL] = lower_loadnil;
+  t[ADD] = lower_add;
+  t[SUB] = lower_sub;
+  t[MUL] = lower_mul;
+  t[ADDI] = lower_addi;
+  t[ADDK] = lower_addk;
+  t[SUBK] = lower_subk;
+  t[MULK] = lower_mulk;
+  t[MMBIN] = lower_nothing;
+  t[MMBINI] = lower_nothing;
+  t[MMBINK] = lower_nothing;
+  t[DIV] = lower_div;
+  t[IDIV] = lower_idiv;
+  t[MOD] = lower_mod;
+  t[POW] = lower_pow;
+  t[BAND] = lower_band;
+  t[BOR] = lower_bor;
+  t[BXOR] = lower_bxor;
+  t[SHL] = lower_shl;
+  t[SHR] = lower_shr;
+  t[DIVK] = lower_divk;
+  t[IDIVK] = lower_idivk;
+  t[MODK] = lower_modk;
+  t[POWK] = lower_powk;
+  t[BANDK] = lower_bandk;
+  t[BORK] = lower_bork;
+  t[BXORK] = lower_bxork;
+  t[SHRI] = lower_shri;
+  t[SHLI] = lower_shli;
+  t[UNM] = lower_unm;
+  t[BNOT] = lower_bnot;
+  t[NOT] = lower_not;
+  t[FORPREP] = lower_forprep;
+  t[FORLOOP] = lower_forloop;
+  t[EQ] = lower_eq;
+  t[LT] = lower_lt;
+  t[LE] = lower_le;
+  t[EQK] = lower_eqk;
+  t[EQI] = lower_eqi;
+  t[LTI] = lower_lti;
+  t[LEI] = lower_lei;
+  t[GTI] = lower_gti;
+  t[GEI] = lower_gei;
+  t[TEST] = lower_test;
+  t[TESTSET] = lower_testset;
+  t[JMP] = lower_jmp;
+  t[RETURN] = lower_return;
+  t[RETURN0] = lower_return0;
+  t[RETURN1] = lower_return1;
+  t[VARARGPREP] = lower_varargprep;
+  t[VARARG] = lower_vararg;
+  t[CLOSURE] = lower_closure;
+  t[GETUPVAL] = lower_getupval;
+  t[SETUPVAL] = lower_setupval;
+  t[CLOSE] = lower_close;
+  t[NEWTABLE] = lower_newtable;
+  t[GETTABLE] = lower_gettable;
+  t[GETI] = lower_geti;
+  t[GETFIELD] = lower_getfield;
+  t[GETTABUP] = lower_gettabup;
+  t[SETTABLE] = lower_settable;
+  t[SETI] = lower_seti;
+  t[SETFIELD] = lower_setfield;
+  t[SETTABUP] = lower_settabup;
+  t[SELF] = lower_self;
+  t[LEN] = lower_len;
+  t[CONCAT] = lower_concat;
+  t[CALL] = lower_call;
+  t[TAILCALL] = lower_tailcall;
+  t[SETLIST] = lower_setlist;
+  t[EXTRAARG] = lower_extraarg;
+  t[TFORPREP] = lower_tforprep;
+  t[TFORCALL] = lower_tforcall;
+  t[TFORLOOP] = lower_tforloop;
   return t;
 }
 
@@ -906,11 +1148,11 @@ std::string lower_function(const Proto &p, const std::string &name, Module &m) {
     const Insn &i = p.code[pc];
     c.line("");   // blank line keeps the labels readable
     c.body << "  (label " << lbl(pc) << ")\n";
-    if (i.op() >= NUM_OPCODES || table()[i.op()].fn == nullptr) {
+    if (i.op() >= NUM_OPCODES || table()[i.op()] == nullptr) {
       throw std::runtime_error(std::string("refused: opcode ") + op_name(i.op()) + " is not lowered yet (pc " +
                                std::to_string(pc) + ")");
     }
-    table()[i.op()].fn(c, i);
+    table()[i.op()](c, i);
   }
   std::ostringstream out;
   out << "(function \"" << name << "\" (ret void) (params (param %0 \"ret\" (ptr (struct \"LV\")))"
@@ -925,23 +1167,37 @@ void collect(const Proto &p, std::vector<const Proto *> &out) {
   for (const auto &child : p.p) collect(*child, out);
 }
 
+// The chunk name as lua.c's messages show it (lobject.c's luaO_chunkid, LUA_IDSIZE 60): a file name is the source
+// without '@', and a longer one keeps only its last 56 characters after "...".
+std::string chunk_name(const Proto &main) {
+  if (!main.source) return "?";
+  const std::string &s = *main.source;
+  if (!s.empty() && s[0] == '@') {
+    if (s.size() <= 60) return s.substr(1);
+    return "..." + s.substr(s.size() - 56);
+  }
+  if (!s.empty() && s[0] == '=') return s.size() <= 60 ? s.substr(1) : s.substr(1, 59);
+  return s;
+}
+
 }  // namespace
 
 std::string lower_module(const Chunk &chunk, const std::string &source_name) {
   std::vector<const Proto *> protos;
   collect(*chunk.main, protos);
-  std::ostringstream out;
-  out << "(ir-module \"" << source_name << "\" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4)"
-      << " (double 8) (long_double 16)))\n";
-  out << "(producer \"lua-5.4\")\n";
-  out << "(abi-type \"LV\" 16 8 (memory))\n";
   Module m;
+  m.chunkname = chunk_name(*chunk.main);
   for (std::size_t n = 0; n < protos.size(); ++n) m.index[protos[n]] = n;
   std::ostringstream fns;
   for (std::size_t n = 0; n < protos.size(); ++n) {
     fns << "\n" << lower_function(*protos[n], "lua54_fn_" + std::to_string(n), m);
   }
-  for (const std::string &d : m.data) out << d;   // string data first: the functions refer to it
+  std::ostringstream out;
+  out << "(ir-module \"" << source_name << "\" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4)"
+      << " (double 8) (long_double 16)))\n";
+  out << "(producer \"lua-5.4\")\n";
+  out << "(abi-type \"LV\" 16 8 (memory))\n";
+  for (const std::string &d : m.data) out << d;   // data first: the functions refer to it
   out << fns.str();
   return out.str();
 }

@@ -1,10 +1,10 @@
 # Lua 5.4 bytecode to Path B IR
 
-Status, 2026-11-24: every opcode but `TBC` lowers, and 46 programs match Lua 5.4.9 (`tests/lua54bc/lower/run.sh`). The
-runtime has numbers, strings, tables, closures and upvalues, multiple results, varargs, and the host functions `print`,
-`type`, `tostring`, `pairs`, `next`, `ipairs`, `select`. No metamethods, no `string` library, and runtime errors stop the
-program without Lua's messages. The producer rule for this IR is in `docs/notes/pathb-stage2.md`, section 1 (amended for bytecode
-producers). The IR's header names the producer: `(producer "lua-5.4")`.
+Status, 2026-11-24: every opcode but `TBC` lowers. 53 programs match Lua 5.4.9 (`tests/lua54bc/lower/run.sh`), and 20
+error programs print the same first line as lua.c, with its position, message and variable info. The runtime has numbers
+with coercion, strings, tables with metatables, closures and upvalues, multiple results, varargs, the host functions
+`print`, `type`, `tostring`, `pairs`, `next`, `ipairs`, `select`, `setmetatable`, `getmetatable`, and the metamethods
+below.
 
 ## Pipeline
 
@@ -94,24 +94,25 @@ A comparison is followed by a `JMP` in Lua 5.4 bytecode. `docondjump` takes that
 instruction's `k` bit and skips it otherwise. The lowering computes the condition as a bool register, then branches to
 the jump's destination or to the instruction after it.
 
-## Runtime helpers
+## Errors
 
-The IR calls these C functions. `tests/lua54bc/runtime/lua54rt.c` implements them; `driver.c` runs the main function and
-prints its results the way `print` does. Metamethods are not implemented: an operation that would need one stops the
-program with a message.
+An operation that can fail is preceded by its site: `lua54rt_site` points at a data string whose first line is
+`source:line:` (lua.c's position, from the line table) and whose further lines are the variable info of each operand.
+The info is computed here with ldebug.c's rules (`namespace dbg` in `lua54_lower.cpp`: `getobjname`, `findsetreg`,
+`basicgetobjname`, `isEnv`, `getfuncline`), so the runtime prints `local 'x'`, `global 'x'`, `field 'x'`, `method 'x'`,
+`upvalue 'x'`, `constant 'x'` and `for iterator 'for iterator'` as lua.c does. The source name keeps luaO_chunkid's
+truncation (the last 56 characters after `...`).
 
-```
-arith(op, dst, a, b)              binary ops with Lua's rules; op is the base opcode (ADD=34 .. SHR=45)
-unary(op, dst, a)                 UNM (49), BNOT (50)
-forprep(ra) / forloop(ra)         numeric for, lvm.c's rules; return 1 to skip / to jump back
-cmp(kind, a, b)                   0 is <, 1 is <=, 2 is ==; returns 0 or 1
-closure(dst, fn, nparams, nups) / capture(dst, k, instack, idx, encl, base) / getupval / setupval / close
-call(fn, nargs, args, ret, wanted, a) / setret(ret, src, n) / gettop()
-varargprep(base, nfixed) / vararg(va, dst, wanted, a)
-str(dst, p, len) / newtable(dst) / gettable(dst, t, k) / settable(t, k, v) / len(dst, src)
-concat(dst, base, n) / setlist(t, offset, vals, count)
-make_main(fn, nups) / run_main(cl, out, outsize)
-```
+An error goes to stderr as `lua: <site line> <message><info>` and the process stops with status 1, as lua.c does. Only
+the first line is printed: the traceback is not. The run checks that first line, after the progname, against `lua`.
+
+## Metamethods
+
+Implemented in the runtime, with ltm.c's order (the first operand's metatable, then the second's):
+`__index` and `__newindex` (tables, functions, and chains), `__call`, the arithmetic and bitwise events, `__unm`,
+`__bnot`, `__eq` (for two tables), `__lt`, `__le`, `__concat` (pairwise from the right, as luaV_concat), `__len`,
+`__tostring` (in `print` and `tostring`). Strings convert to numbers in arithmetic, and a string that does not convert
+gives lstrlib's `attempt to add a 'string' with a 'number'`. Only tables have metatables.
 
 ## Decisions
 
@@ -120,7 +121,7 @@ make_main(fn, nups) / run_main(cl, out, outsize)
 - **Integer arithmetic wraps.** Lua integers are two's complement, so `wadd`, `wsub`, `wmul`. The test
   `wrap.lua` checks `maxinteger + 1`.
 - **MMBIN folded into its op.** The helper does the metamethod work, so the MMBIN is never executed. This matches lvm.c
-  on the success path. The error path needs the runtime's messages, which are not in place.
+  on the success path.
 - **One result type per helper, one protocol for calls.** Results and the top go through `lua54rt_setret`,
   `lua54rt_call` and `lua54rt_gettop`; no global is read by the IR.
 - **Strings are objects without interning.** Each string constant and each result is a new object. Equality compares the
@@ -131,21 +132,18 @@ make_main(fn, nups) / run_main(cl, out, outsize)
 
 - `tests/lua54bc/run.sh`: the reader loads real 5.4.9 chunks (dumped with `string.dump`); the opcode sequence matches
   `luac -l -l` when `LUAC` is set. The opcode check has not run: no `luac` is available here.
-- `tests/lua54bc/lower/run.sh`: 41 programs lower, emit, assemble, link (with `-lm`), run, and match `print(dofile(...))`
-  from Lua 5.4.9; a `TBC` program is refused. Needs `LUA` (a 5.4.9 interpreter).
-- The emitter's own tests (`tests/mruby/run.sh`) do not use `(producer ...)`, so the one-line change to accept it does
-  not change their output.
+- `tests/lua54bc/lower/run.sh`: 53 programs lower, emit, assemble, link (with `-lm`), run, and match
+  `print(dofile(...))` from Lua 5.4.9. 20 programs in `lower/err/` must give lua.c's first error line and status 1. A
+  `TBC` program is refused. Needs `LUA` (a 5.4.9 interpreter).
 
 ## Not yet
 
-- **The rest of the base library** (`error`, `pcall`, `tonumber`, `rawget`, `setmetatable`, ...) and the `string`,
-  `table` and `math` libraries. Each is a host function in the runtime, like the ones there.
-- **Metamethods**: `__index`, `__newindex`, `__add` and the rest, `__eq`, `__lt`, `__le`, `__concat`, `__len`, `__call`.
-  Today a table without them is the only kind that works: the helpers stop on anything else.
-- **Errors**: Lua's messages with `file:line:` and variable names (`attempt to index a nil value (local 'x')`). The IR has
-  no line information yet; the reader has `lineinfo`, and a helper call could take the line.
-- **String coercion** in arithmetic (`"10" + 1`), and `tostring`-style conversion of strings to numbers.
-- **To-be-closed variables** (`TBC`, and the fourth value of a generic `for`).
+- **The rest of the base library** (`error`, `pcall`, `tonumber`, `rawget`, `rawset`, `rawequal`, `rawlen`, `next` with
+  `__pairs`, `load`, ...) and the `string`, `table` and `math` libraries. Each is a host function in the runtime.
+  `string` in particular gives strings their metatable, so `("x"):upper()` is not reachable yet.
+- **Full tracebacks**: lua.c prints `stack traceback:` lines after the message; only the message is printed.
+- **To-be-closed variables** (`TBC`, `__close`, and the fourth value of a generic `for`).
+- **`__gc`, `__mode`, `__metatable`**, and `__name` in messages.
 - **Length of tables with holes**: `#` counts from 1 up to the first nil, which is one border; Lua's `#` can pick another.
 - **Garbage collection**: nothing is freed. Tests are short; a real runtime needs a collector and root maps.
 - **`LOADKX` with more than 2^17 constants** is lowered but untested.
