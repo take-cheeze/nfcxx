@@ -18,6 +18,7 @@
 # Writes the report to stdout. Set BC2CPP_COVERAGE_REPORT_PATH to capture it
 # in a file; CI publishes it in the build job summary.
 
+require_relative '../mrbc_rb/mrbc_default.rb'
 require_relative '../bc2cpp/world_root'
 require 'shellwords'
 require 'open3'
@@ -30,7 +31,7 @@ require_relative 'sealed_build'
 require 'fileutils'
 
 BC2CPP = File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/bc2cpp.rb')
-MRBC = ENV['MRBC'] || 'mrbc'
+MRBC = ENV['MRBC'] || MrbcRbDefault.command
 REPORT_PATH = ENV['BC2CPP_COVERAGE_REPORT_PATH']
 OPTCARROT_LIB = File.join(ROOT, '3rd/optcarrot/lib')
 MRUBY_DIR = File.join(ROOT, '3rd/mruby')

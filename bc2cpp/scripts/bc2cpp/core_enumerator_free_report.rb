@@ -10,11 +10,12 @@
 # Usage: MRBC=path/to/mrbc [BC2CPP_STATIC_DISPATCH_LISTS=lists.json] ruby scripts/bc2cpp/core_enumerator_free_report.rb [--sites]
 #   --sites  also lists every checked engine site, not only the unproven ones
 
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 require_relative '../../tools/bc2cpp/world_root'
 require_relative '../../tools/bc2cpp/static_dispatch_registrations'
 
 root = BC2CPP_WORLD_ROOT
-result = StaticDispatchRegistrations.enumerator_free_result(root, ENV.fetch('MRBC', 'mrbc'))
+result = StaticDispatchRegistrations.enumerator_free_result(root, ENV.fetch('MRBC', MrbcRbDefault.command))
 engine = result.sites.select(&:engine)
 puts "proof #{result.holds ? 'holds' : 'does not hold'}: #{result.creators.map(&:name).uniq.size} creator names, " \
      "#{engine.size} engine sites and #{result.sites.size - engine.size} core sites checked"
