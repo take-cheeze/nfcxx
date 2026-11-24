@@ -112,11 +112,12 @@ module EntryHeader
         return v;
       }
       M->exc = NULL;
+      // Saved before self is rooted, so the restore drops that root: a host calling every frame keeps the arena flat.
+      int ai = mrb_gc_arena_save(M);
       bc2cpp_entry_root(M, self);
       // The VM protect call as a typed catch (bc2cpp_protect): the raise is a thrown mrb_jmpbuf*.
       struct mrb_jmpbuf c_jmp;
       mrb_value v;
-      int ai = mrb_gc_arena_save(M);
       struct mrb_context* c = M->c;
       ptrdiff_t ci_index = c->ci - c->cibase;
       bool error = false;

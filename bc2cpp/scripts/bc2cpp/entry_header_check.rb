@@ -12,7 +12,8 @@
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
 #     - the direct form makes no dynamic dispatch and returns what mrb_funcall returns;
 #     - a raise inside leaves the exception in M->exc and returns it, as mrb_funcall does, and does not escape, with
-#       M->jmp and the frame stack as before and two arena roots (self, the exception);
+#       M->jmp and the frame stack as before and one arena root (the exception);
+#     - each call leaves the arena as mrb_funcall does: its result rooted, self not;
 #       inside a protected region it propagates to that region instead;
 #     - a subclass receiver and a receiver with a singleton class take the by-name call;
 #   constructor entries (Owner.new/argc, BC2CPP_ENTRY_NEW)
@@ -75,6 +76,10 @@ SRC = <<~'RUBY'
       @n
     end
 
+    def label
+      "n#{@n}"
+    end
+
     def boom
       raise ArgumentError, 'entry boom'
     end
@@ -127,7 +132,8 @@ SRC = <<~'RUBY'
 RUBY
 
 OWNERS = %w[EntryGame EntrySub EntryMade EntryBoomInit EntryRestInit].freeze
-ENV['BC2CPP_ENTRY_POINTS'] = %w[EntryGame#tick/0 EntryGame#add/1 EntryGame#count/0 EntryGame#boom/0 EntryGame#bad_int/0
+ENV['BC2CPP_ENTRY_POINTS'] = %w[EntryGame#tick/0 EntryGame#add/1 EntryGame#count/0 EntryGame#label/0
+                                EntryGame#boom/0 EntryGame#bad_int/0
                                 EntryGame#gather/0 EntryGame#each_twice/0 EntryGame.new/0 EntryMade.new/1
                                 EntryBoomInit.new/1 EntryRestInit.new/1].join(' ')
 
@@ -137,7 +143,7 @@ Dir.mktmpdir('bc2cpp-entry-header') do |dir|
   path = File.join(dir, 'fixture_entry.h')
   header = File.exist?(path) ? File.read(path) : ''
   check.call('bc2cpp writes fixture_entry.h beside the generated code', !header.empty?)
-  %w[tick add count boom].each do |name|
+  %w[tick add count label boom].each do |name|
     check.call("EntryGame##{name} is the direct form", header.include?("#define BC2CPP_ENTRY_EntryGame_#{name} 1\n"))
   end
   check.call('EntryGame#gather (rest argument) stays by name', header.include?("#define BC2CPP_ENTRY_EntryGame_gather 0\n"))
@@ -173,6 +179,22 @@ Dir.mktmpdir('bc2cpp-entry-header') do |dir|
       long counted = fix(bc2cpp_entry_EntryGame_count(M, g));
       int made = dispatches;
       std::printf("direct add=%ld count=%ld dispatches=%d\\n", added, counted, made);
+
+      // A host's frame loop: 50 calls must leave what 50 mrb_funcalls leave.
+      int ai_loop = mrb_gc_arena_save(M);
+      for (int i = 0; i < 50; i++) bc2cpp_entry_EntryGame_tick(M, g);
+      int tick_direct = mrb_gc_arena_save(M) - ai_loop;
+      mrb_gc_arena_restore(M, ai_loop);
+      for (int i = 0; i < 50; i++) mrb_funcall(M, g, "tick", 0);
+      int tick_funcall = mrb_gc_arena_save(M) - ai_loop;
+      mrb_gc_arena_restore(M, ai_loop);
+      for (int i = 0; i < 50; i++) bc2cpp_entry_EntryGame_label(M, g);
+      int label_direct = mrb_gc_arena_save(M) - ai_loop;
+      mrb_gc_arena_restore(M, ai_loop);
+      for (int i = 0; i < 50; i++) mrb_funcall(M, g, "label", 0);
+      int label_funcall = mrb_gc_arena_save(M) - ai_loop;
+      mrb_gc_arena_restore(M, ai_loop);
+      std::printf("arena tick=%d/%d label=%d/%d\\n", tick_direct, tick_funcall, label_direct, label_funcall);
 
       dispatches = 0;
       ptrdiff_t ci0 = M->c->ci - M->c->cibase;
@@ -260,8 +282,10 @@ Dir.mktmpdir('bc2cpp-entry-header') do |dir|
   check.call('a raise leaves the exception in M->exc and returns it, as mrb_funcall does',
              lines.include?('boom exc=ArgumentError same=1 dispatches=0') &&
                lines.include?('funcall boom exc=ArgumentError same=1'))
-  check.call('a caught raise resets M->jmp and the frame stack and roots self and the exception',
-             lines.include?('boom state jmp=0 ci_same=1 arena_grew=2'))
+  check.call('a caught raise resets M->jmp and the frame stack and roots only the exception',
+             lines.include?('boom state jmp=0 ci_same=1 arena_grew=1'))
+  check.call('a direct call leaves the arena as mrb_funcall does (the result rooted, self not)',
+             lines.include?('arena tick=0/0 label=50/50'))
   check.call('a raise out of a cfunc frame pops that frame',
              lines.include?('bad_int state exc=ArgumentError jmp=0 ci_same=1'))
   check.call('inside a protected region the raise reaches that region',
