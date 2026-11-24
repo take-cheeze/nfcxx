@@ -79,6 +79,7 @@ require_relative 'enumerator_model'
 require_relative 'integer_constants'
 require_relative 'const_def_elide'
 require_relative 'const_conditional'
+require_relative 'loop_records'
 require_relative 'const_binding_drop'
 require_relative 'const_def_table'
 require_relative 'integer_constant_ranges'
@@ -316,6 +317,8 @@ BC2CPP_MAIN = lambda do
   conversion_sigs = ConversionReturns.write_sigs(srcs.select { |path| path.end_with?('.rb') && !CoreDefs.core_source?(path) })
   ireps, root_label = profile_call.call('compile_ireps') { compile_ireps(srcs, symbol, out_dir) }
   dfs_order(ireps, root_label)
+  # LOOP_RECORDS: an emitter loop or block-send record its own bytecode contradicts is an emitter bug (loop_records.rb).
+  profile_call.call('LoopRecords.check') { LoopRecords.enforce!(ireps) }
   registry, superclass_of, container_constants, included_modules, prepended_modules, unknown_mixins,
     struct_member_lists, class_decls, walked_ireps, module_body_ivar_labels, constant_assignment_sites,
     declared_modules, alias_sites = profile_call.call('build_registry') { build_registry(ireps, root_label) }
