@@ -239,6 +239,8 @@ require_relative 'codegen_multi_return'
 require_relative 'codegen_literal_minmax'
 # Last: its compile_insn wrapper reads the text every other wrapper settled on.
 require_relative 'codegen_stack_strings'
+# After STACK_STRINGS: its compile_insn wrapper rewrites the settled text of the Rect sites and their draws.
+require_relative 'codegen_stack_rect'
 
 # The main block is a lambda: its ~250 locals do not fit the one irep a top-level block gets when every file is compiled as
 # one program (docs/bc2cpp-self-compile.md). A host that wants to register compiled code between loading the sources and
