@@ -25,18 +25,6 @@ if [ ! -f "$src/CMakeLists.txt" ]; then
   git -C "$root" submodule update --init --depth 1 3rd/edg
 fi
 
-# nfcxx's patches to the EDG front end that the fork does not carry yet (scripts/edg-patches/*.patch, each against src/<file>).
-# They apply to a copy of the source, made of hard links, so 3rd/edg itself is never written. EDG_SRC skips the copy.
-if [ -z "${EDG_SRC:-}" ] && ls "$root"/scripts/edg-patches/*.patch >/dev/null 2>&1; then
-  patched="$out-src"
-  rm -rf "$patched"; cp -al "$src" "$patched"
-  for p in "$root"/scripts/edg-patches/*.patch; do
-    f=$(sed -n 's|^+++ b/||p' "$p" | head -1)
-    rm -f "$patched/$f"; cp "$src/$f" "$patched/$f"   # break the hard link before the file is written
-    patch -s "$patched/$f" < "$p"
-  done
-  src="$patched"
-fi
 
 # macOS (Apple Silicon or Intel): EDG's own clang base and CMake preset. Its long double (8 bytes, binary64 on arm64)
 # and predefined macros are the macOS ones, so none of the Linux workarounds below apply.

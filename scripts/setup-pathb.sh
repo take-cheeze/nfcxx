@@ -40,14 +40,6 @@ link_all "$src" "$tree" src cmake
 link_all "$src/src" "$tree/src" CMakeLists.txt attribute.c
 link_all "$src/cmake" "$tree/cmake" macro-conf
 link_all "$src/cmake/macro-conf" "$tree/cmake/macro-conf" nfcxx-pathb
-# nfcxx's EDG patches (scripts/edg-patches/*.patch, as setup-edg.sh applies them): each patched file becomes a real copy in the view,
-# so the symlink to the submodule is replaced, not written through.
-for p in "$root"/scripts/edg-patches/*.patch; do
-  [ -e "$p" ] || continue
-  f=$(sed -n 's|^+++ b/||p' "$p" | head -1)
-  rm -f "$tree/$f"; cp "$src/$f" "$tree/$f"
-  patch -s "$tree/$f" < "$p"
-done
 # EDG's top CMakeLists.txt builds a Release on macOS as a universal binary (CMAKE_OSX_ARCHITECTURES arm64;x86_64). The
 # harness is for the host only: its SoftFloat archive is the host's, so a second architecture cannot link. Drop that line.
 rm -f "$tree/CMakeLists.txt"
