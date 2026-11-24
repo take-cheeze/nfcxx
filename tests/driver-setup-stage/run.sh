@@ -81,20 +81,7 @@ for f in "$work"/out/case-*.txt; do
   g=$here/golden/$(basename "$f")
   if [ -f "$g" ] && cmp -s "$f" "$g"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL $(basename "$f"): $(head -1 "$f")"; [ -f "$g" ] && diff "$g" "$f" | head -20; fi
 done
-# the body evals the state the Ruby driver passes (scripts/nfcxx.rb: NFCXX_SETUP_DEFAULT, NFCXX_SETUP_STAGE_STATUS and
-# NFCXX_SETUP_STAGE), and plans it itself without them: a default backend given as the driver's statements is the one the body
-# takes (the gcc route calls eccp), and a stage refusal is printed where the body prints it (status 2)
-body=$work/body.sh
-sed "s#^root=.*#root=$repo#" "$repo/tests/driver-body/nfcxx-bash" > "$body"
-pd=$work/protocol; mkdir -p "$pd"; cp "$work"/src/a.cpp "$pd/"
-(cd "$pd" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$work/tmp" EDG_BUILD="$work/stub" NFCXX_STUB_LOG="$pd/eccp.log" \
-   NFCXX_SETUP_DEFAULT='backend=gcc default_backend=0 pb_fs_host=0' bash "$body" -c a.cpp -o a.o > "$pd/out" 2> "$pd/err"); rc=$?
-if [ "$rc" = 1 ] && [ -s "$pd/eccp.log" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL protocol: the default state (status $rc)"; fi
-rm -f "$pd/eccp.log"
-(cd "$pd" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$work/tmp" EDG_BUILD="$work/stub" NFCXX_STUB_LOG="$pd/eccp.log" \
-   NFCXX_SETUP_STAGE_STATUS=2 NFCXX_SETUP_STAGE=$'nfcxx: stage refusal\n' bash "$body" -fsanitize=undefined -c a.cpp -o a.o > "$pd/out" 2> "$pd/err"); rc=$?
-if [ "$rc" = 2 ] && [ "$(cat "$pd/err")" = "nfcxx: stage refusal" ] && [ ! -e "$pd/eccp.log" ]; then
-  pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL protocol: the stage refusal (status $rc)"; fi
-
+# The body's protocol checks (the statements it evals from the driver's environment) were retired with the
+# bash body (driver-setup-rest, -rest2 and -stage: the Ruby driver reads its own planner's values).
 echo "driver-setup-stage: $pass passed, $fail failed"
 [ "$fail" = 0 ]

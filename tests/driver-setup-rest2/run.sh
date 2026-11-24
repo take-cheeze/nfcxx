@@ -37,7 +37,7 @@ chmod +x "$work/stub/bin/eccp"
 normalize() {
   sed -e "s#$repo#<REPO>#g" -e "s#$work#<WORK>#g" \
       -e 's#nfcxx-[a-z]*\.[A-Za-z0-9_]*#nfcxx-<T>#g' -e 's#\.build\.[A-Za-z0-9]*/#.build.<T>/#g' \
-      -e 's#nfcxx-[^/ ]*-[0-9][0-9]*-[A-Za-z0-9][A-Za-z0-9]*#nfcxx-<T>#g' -e 's#tmp\.[A-Za-z0-9][A-Za-z0-9]*/#tmp.<R>/#g' -e 's#<WORK>/tmp/[^ :/]*#<TMPDIR>#g' -e 's#line [0-9][0-9]*: #line N: #g'
+      -e 's#nfcxx-[^/ ]*-[0-9][0-9]*-[A-Za-z0-9][A-Za-z0-9]*#nfcxx-<T>#g' -e 's#tmp\.[A-Za-z0-9][A-Za-z0-9-]*/#tmp.<R>/#g' -e 's#<WORK>/tmp/[^ :/]*#<TMPDIR>#g' -e 's#line [0-9][0-9]*: #line N: #g'
 }
 
 # run_case N LINE: writes the recording of case N to $work/out/case-NN.txt
@@ -47,7 +47,7 @@ run_case() {
   d=$work/run/$n; mkdir -p "$d"; cp "$work"/src/* "$d/"
   # the environment is fixed: the variables the driver reads are the ones named on the case's line
   # shellcheck disable=SC2086
-  (cd "$d" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$work/tmp" EDG_BUILD="$work/stub" NFCXX_STUB_LOG="$d/eccp.log" \
+  (cd "$d" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$work/tmp" EDG_BUILD="$work/stub" NFCXX_STUB_LOG="$d/eccp.log" NFCXX_OWNED_MODPLAN="$work/modplan" \
       $envs "$repo/nfcxx" $args > "$d/.out" 2> "$d/.err"; echo $? > "$d/.rc")
   {
     echo "== case $n:${envs:+ $envs}${args:+ $args}" | normalize
@@ -85,41 +85,7 @@ for f in "$work"/out/case-*.txt; do
   g=$here/golden/$(basename "$f")
   if [ -f "$g" ] && cmp -s "$f" "$g"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL $(basename "$f"): $(head -1 "$f")"; [ -f "$g" ] && diff "$g" "$f" | head -20; fi
 done
-# the protocol: the body evals the setup statements the driver passes (NFCXX_SETUP_ASAN, NFCXX_SETUP_FLAGS, NFCXX_SETUP_BACKEND_ENV,
-# NFCXX_SETUP_TRACE_UNIT), prints a refusal where the bash printed it, and runs its own bash when the driver passes none
-body=$work/body.sh
-sed "s#^root=.*#root=$repo#" "$repo/tests/driver-body/nfcxx-bash" > "$body"
-default_state='backend=gcc default_backend=0 pb_fs_host=0'
-mkdir -p "$work/proto"
-proto() {  # proto NAME ARGS...: the body in a directory of its own, with the environment words the caller sets first
-  local name=$1; shift
-  local d=$work/proto/$name
-  mkdir -p "$d"; cp "$work"/src/a.cpp "$d/"
-  (cd "$d" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$work/tmp" EDG_BUILD="$work/stub" NFCXX_STUB_LOG="$d/eccp.log" \
-     NFCXX_SETUP_DEFAULT="$default_state" NFCXX_SETUP_REST_STATUS=0 NFCXX_SETUP_REST_ERR= "$@" > "$d/out" 2> "$d/err"); echo $? > "$d/rc"
-}
-pass_if() {  # pass_if NAME CONDITION-DESCRIPTION COMMAND...: counts a protocol check
-  local name=$1 what=$2; shift 2
-  if "$@"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL protocol $name: $what"; fi
-}
-pw=$work/proto
-proto asan-refusal NFCXX_SETUP_ASAN_STATUS=2 'NFCXX_SETUP_ASAN=nfcxx: planned asan refusal
-' bash "$body" -c a.cpp -o a.o
-pass_if asan-refusal "status 2, the message, no eccp" test "$(cat $pw/asan-refusal/rc)" = 2 -a "$(cat $pw/asan-refusal/err)" = "nfcxx: planned asan refusal" -a ! -e "$pw/asan-refusal/eccp.log"
-proto asan-statements NFCXX_BACKEND=gcc NFCXX_SETUP_ASAN_STATUS=0 'NFCXX_SETUP_ASAN=asan_c=(-fsanitize=address-planned)
-' bash "$body" -c a.cpp -o a.o
-pass_if asan-statements "the planned asan_c reaches the compile's options" grep -qx -- '  -fsanitize=address-planned' "$pw/asan-statements/eccp.log"
-proto backend-refusal NFCXX_SETUP_BACKEND_ENV_STATUS=2 'NFCXX_SETUP_BACKEND_ENV=nfcxx: planned backend refusal' bash "$body" -c a.cpp -o a.o
-pass_if backend-refusal "status 2, the message, no eccp" test "$(cat $pw/backend-refusal/rc)" = 2 -a "$(cat $pw/backend-refusal/err)" = "nfcxx: planned backend refusal" -a ! -e "$pw/backend-refusal/eccp.log"
-proto backend-export NFCXX_SETUP_BACKEND_ENV_STATUS=0 'NFCXX_SETUP_BACKEND_ENV=export NFCXX_CC=/planned/cc' bash "$body" -c a.cpp -o a.o
-pass_if backend-export "the planned export reaches eccp's environment" grep -q -- 'NFCXX_CC=/planned/cc ' "$pw/backend-export/eccp.log"
-proto trace-unit NFCXX_SETUP_TRACE_UNIT='trace_unit=planned.cpp; export NFCXX_TRACE_UNIT=planned.cpp' bash "$body" -c a.cpp -o a.o
-pass_if trace-unit "the planned trace unit is exported to eccp" grep -q -- 'NFCXX_TRACE_UNIT=planned.cpp ' "$pw/trace-unit/eccp.log"
-proto flags NFCXX_SETUP_FLAGS='echo planned-flags-ran >&2' bash "$body" -c a.cpp -o a.o
-pass_if flags "the planned pb_flags statements are eval'd" grep -qx -- 'planned-flags-ran' "$pw/flags/err"
-proto fallback NFCXX_BACKEND=gcc bash "$body" -c a.cpp -o a.o
-pass_if fallback "without state, the body's bash sets the backend environment and the trace unit" \
-  grep -q -- "NFCXX_CC=$repo/scripts/gcc-cc.rb NFCXX_TRACE_UNIT=a.cpp " "$pw/fallback/eccp.log"
-
+# The body's protocol checks (the statements it evals from the driver's environment) were retired with the
+# bash body (driver-setup-rest, -rest2 and -stage: the Ruby driver reads its own planner's values).
 echo "driver-setup-rest2: $pass passed, $fail failed"
 [ "$fail" = 0 ]

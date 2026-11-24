@@ -1,5 +1,4 @@
 == -c m.cpp -o m.o --backend=pathb
 -- stdout
 -- stderr
-nfcxx: QBE not built; run scripts/setup-qbe.sh
-status=2
+status=0

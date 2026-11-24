@@ -1,18 +1,24 @@
 # Porting the driver body (`./nfcxx`) to Ruby
 
 Status: B8 done (the switch, #1402): `./nfcxx` is a shim that runs `scripts/nfcxx.rb`. The bash body is frozen at
-`tests/driver-body/nfcxx-bash`, and the Ruby driver runs it for every stage that is not yet ported. Follows
+`tests/driver-body/nfcxx-oracle.sh`, and the Ruby driver runs it for every stage that is not yet ported. Follows
 docs/notes/driver-state-design.md (the helpers are done).
 
 ## Latest status
 
-Checked against origin/main after #1529 (b2c5b7ef6).
+Checked against origin/main at 4eed9f571 (the merge of #1607).
 
+- Merged since the last check, with the PRs still open: the single EXIT trap (`exit_cleanup`, #1595), the driver-side
+  early-exit `pre` check (#1528), and the cu/cpp2 planner (`scripts/nfcxx-cu-records.rb`, #1600).
+- Open, not merged: #1608 (one Ruby step for the `.cu` and `.cpp2` inputs, which removes `cpp2_prepare`), #1611 (migrates
+  `loop_no_value` to the Ruby argument loop), and #1612 (retires the dead `cache_sha` helper). None of the three is on origin/main.
+- The earlier decision to keep `loop_no_value` in the body (commit 2dcfed7, on `docs/driver-body-status`) is superseded by
+  #1611: the function moves to the Ruby argument loop when #1611 merges. Until then the body keeps it.
 - `./nfcxx` is a 4-line shim. `scripts/nfcxx.rb` does the route dispatch and the refusals (the setup refusal, the
   `.cu`/`.cpp2`/module refusal, the cache configuration refusal, the gcc plan, the Path B plan). Before the body runs, it runs
   the argument loop (`scripts/nfcxx-loop.rb --bash-state`), the wrappers (`scripts/wrap.rb bundle` and `scripts/wrap.rb
   cuda-driver`), and the SYCL two-pass build (`scripts/nfcxx-sycl.rb`). It then runs the frozen body
-  `tests/driver-body/nfcxx-bash` (918 lines, 23 functions) as its oracle for the rest.
+  `tests/driver-body/nfcxx-oracle.sh` (902 lines, 19 top-level functions and 2 nested helpers) as its oracle for the rest.
 - Merged slices, by PR: setup refusals (#1356), CUDA/`.cpp2`/module refusals (#1363), cache configuration refusal (#1369),
   second-pass helper (`scripts/nfcxx-second-pass.rb`, #1372), temporary-directory leak fix (#1364), trace exit status (#1378),
   Path B dispatch with CHECK and STORE lines (#1387), the switch (#1402), the compile cache's lookup planner
@@ -20,11 +26,12 @@ Checked against origin/main after #1529 (b2c5b7ef6).
   temporary directories (#1499, #1505), the CUDA second run's gate and its rewrite of the body's line (#1517), the eccp
   cleanup that skips a directory the driver owns (#1519), the removal of `onoff` (#1520), and the gcc fallback, where the
   body hands the driver a marker and the driver re-runs with `NFCXX_BACKEND=gcc` (#1523).
-- The frozen body still does these in bash, and the Ruby driver calls them through the body: the early-exit checks (the body
-  runs `scripts/nfcxx-early-exit.rb pre` before the `-E` route, where status 3 is `--emit-hip`, and `post` after it), the
-  module block (planned by `scripts/nfcxx-modules-plan.rb`, called from the body), the `cu_prepare` and `cpp2_prepare`
-  calls (their copies are made by `scripts/nfcxx-cu-cpp2-prepare.rb`), the cache lookup and store (`cache_check` and
-  `cache_store` call `scripts/nfcxx-cache-check.rb`), the eccp call (`eccp_plan`, `eccp_run`, its EXIT trap and its trace span),
+- The frozen body still does these in bash, and the Ruby driver calls them through the body: the early-exit checks (the driver
+  runs `scripts/nfcxx-early-exit.rb pre` on the argument loop's state, and the body skips its own `pre` when `NFCXX_EARLY_PRE_DONE`
+  is set; the body still runs `post` after the route), the module block (planned by `scripts/nfcxx-modules-plan.rb`, called from
+  the body), the `cu_prepare` and `cpp2_prepare` calls (their copies are made by `scripts/nfcxx-cu-cpp2-prepare.rb`), the cache
+  lookup and store (`cache_check` and `cache_store` call `scripts/nfcxx-cache-check.rb`), the eccp call (`eccp_plan`, `eccp_run`,
+  its exit mode under the EXIT trap and its trace span),
   the depmode step, and the CUDA host-symbol gate (`scripts/nfcxx-second-pass.rb plan`, #1517). The driver rewrites the body's
   second-run line, so that run is the Ruby driver (see item 9).
 - The setup's statements are planned by Ruby on the argument loop's state (`NfcxxSetupArgs.planned_state`), and the body evals
@@ -46,12 +53,13 @@ Checked against origin/main after #1529 (b2c5b7ef6).
   `tests/driver-setup-rest` checks 66 argument lists (`cases.txt`) against recordings of the bash setup, and the body's protocol.
 - The SYCL two-pass build (`scripts/nfcxx-sycl.rb`) runs in `scripts/nfcxx.rb`, before the body starts, so the body's early
   exits never refuse its arguments. `tests/driver-sycl-dispatch` holds the goldens.
-- Helpers still defined in the body (checked with grep on origin/main): `temp_cleanup`, `fallback_gcc`,
-  `abs_path`, `cu_prepare`, `cpp2_prepare`, `ensure_tool`, `ecp_args`, `state_put`, `eccp_plan_input`,
-  `eccp_plan`, `eccp_cleanup`, `eccp_run`, `modules_plan_input`, `loop_no_value`, `early_rec`, `early_records`,
-  `preprocess_records`, `cache_plan`, `cache_check`, `cache_store`, `compile_clean`, `link_records_rm`. Not defined in the body:
-  `onoff` (removed, #1520), `loop_set`, `loop_append`, `cache_log`, `cache_remote_get`, `cache_remote_put` and `cache_sha`
-  (`cache_sha` removed: it had no caller in the body).
+- Functions defined in the body (checked with grep on origin/main: 902 lines, 19 top-level functions): `temp_cleanup`,
+  `exit_cleanup`, `fallback_gcc`, `cache_sha`, `cu_prepare`, `cpp2_prepare`, `state_put`, `eccp_plan_input`, `eccp_plan`,
+  `eccp_cleanup`, `eccp_run`, `modules_plan_input`, `loop_no_value`, `early_rec`, `early_records`, `preprocess_records`,
+  `cache_plan`, `cache_check`, `cache_store`. Two nested helpers: `pp_rec` (in `preprocess_records`) and `cache_rec` (in
+  `cache_plan`). `cache_sha` has no caller in the body (only its definition); #1612 (open) retires it. Not defined in the body,
+  so not listed: `abs_path` (a call to `scripts/host-sys.rb abs_path`), `ensure_tool`, `ecp_args`, `compile_clean`,
+  `link_records_rm`, `onoff` (removed, #1520), `loop_set`, `loop_append`, `cache_log`, `cache_remote_get` and `cache_remote_put`.
 
 ## What blocks deleting the frozen body
 
@@ -67,8 +75,7 @@ The body can be deleted only when the Ruby driver runs every stage without it. I
 2. **Early exits.** `scripts/nfcxx-early-exit.rb` plans them (#1438). The body calls it twice: `pre` (status 2 is a refusal,
    status 3 is the `--emit-hip` route) before the `-E` route, and `post` (the refusals after the route: stdin without `-E`,
    `-x`, dependency files without `-c`, the EDG build, the dialect) after it. The driver does not call
-   `nfcxx-early-exit.rb`, so the pre check is still in the body on origin/main; the driver-side pre check in #1528 is not
-   merged. The module block is planned in Ruby (`scripts/nfcxx-modules-plan.rb`: scans, refusals, the module build of a link,
+   `nfcxx-early-exit.rb`: the driver runs `pre` (#1528), and the body runs it only when the driver did not. The module block is planned in Ruby (`scripts/nfcxx-modules-plan.rb`: scans, refusals, the module build of a link,
    the compile's module options); the body only calls it at the block's place and ends with the build's status.
 3. **Setup.** Planned in Ruby, and the body evals the statements: the default backend (`NFCXX_SETUP_DEFAULT`), the stage after
    the emit-C route (`NFCXX_SETUP_STAGE_STATUS`, `NFCXX_SETUP_STAGE`), the sanitizer check and `asan_c` (`NFCXX_SETUP_ASAN_STATUS`,
@@ -79,10 +86,11 @@ The body can be deleted only when the Ruby driver runs every stage without it. I
    bash for each of these stays in the body for a run with no driver state. `planners_text` in `scripts/nfcxx-setup.rb` is
    still unwired (its only caller is that script's own command line); it is superseded by `NfcxxSetup.rest`, which times the
    probe's span in the body rather than in the driver, so the span is recorded only by a body that reaches the setup.
-4. **CUDA and `.cpp2` preparation.** Done for the decisions and the rewriting: `scripts/nfcxx-cu-cpp2-prepare.rb` (cu and cpp2)
-   makes the copies, the rewrite and the translation, and the array edits, and the body evals its statements at
-   `cu_prepare`'s and `cpp2_prepare`'s places. Both functions remain in the body as those callers. Their temporary directory
-   is the driver's `NFCXX_OWNED_CUDATMP` (item 8).
+4. **CUDA and `.cpp2` preparation.** Done for the decisions and the rewriting: `scripts/nfcxx-cu-cpp2-prepare.rb` has both
+   modes (`cu` and `cpp2`), and makes the copies, the rewrite and the translation, and the array edits. Its planner
+   `scripts/nfcxx-cu-records.rb` is merged (#1600). The body still defines and calls two functions, `cu_prepare` and
+   `cpp2_prepare` (lines 189, 208, 361 and 362 on origin/main), and evals their statements. Making them one step and removing
+   `cpp2_prepare` is #1608, which is open. Their temporary directory is the driver's `NFCXX_OWNED_CUDATMP` (item 8).
 5. **Cache lookup and store.** `cache_check` and `cache_store` call `scripts/nfcxx-cache-check.rb` (`check` and `store`), which
    plans the lookup (`scripts/nfcxx-cache-plan.rb`, #1432) and calls `scripts/nfcxx-cache-io.rb` for the `--cache-log` line
    (`log`), the remote tier's fetch on a local miss (`remote-get`) and its put after a store (`remote-put`). The body does not
@@ -93,22 +101,25 @@ The body can be deleted only when the Ruby driver runs every stage without it. I
    message to the marker file and exits 0, and the driver prints it and re-runs `./nfcxx` with `NFCXX_BACKEND=gcc`. Without
    the marker it re-executes itself, as before.
 7. **eccp call.** `eccp_plan` (`scripts/nfcxx-eccp-plan.rb`) and `eccp_run` (`scripts/nfcxx-eccp-run.rb`, which runs the
-   command in `eccp_cd`) are called from the body, with its EXIT trap (`eccp_cleanup`, which calls `scripts/nfcxx-link.rb
-   cleanup`) and its trace span. `eccp_dir` is still made by the body with `mktemp -d` (about line 861); its trap skips it when
+   command in `eccp_cd`) are called from the body, with its exit mode `eccp` under the single EXIT trap (`exit_cleanup` calls
+   `eccp_cleanup`, which calls `scripts/nfcxx-link.rb cleanup`) and its trace span. `eccp_dir` is still made by the body with
+   `mktemp -d` (about line 850); its cleanup skips it when
    the driver owns the root (#1519). Still in the body: the `moves` decision (`moves=1` for a compile that is not `-c`, which
    `ecp_args` needs before the plan), the trace spans, the depmode step, and the CUDA host-symbol gate (item 9).
-8. **Temporary directories and traps.** The Ruby driver makes four directories under the temporary root it owns
-   (`Dir.mktmpdir`): `NFCXX_OWNED_CUDATMP`, `NFCXX_OWNED_TMP`, `NFCXX_OWNED_CTMP` and `NFCXX_OWNED_PTMP` (#1499, #1505). It sets
-   `NFCXX_TMP_OWNED=1` and removes them when the run ends (#1364). The body uses them when it has them, and otherwise makes its
-   own with `mktemp -d` and an EXIT trap, which is only for a run without the driver. Those fallback lines remain in the body
-   (about lines 177-178, 209, 538-539, 663-664 and 783-784). Still made by the body: `eccp_dir` (about line 861, with the
-   `eccp_cleanup` trap) and `modplan` (about line 419, which the body removes itself on both exits, lines 422 and 435).
+8. **Temporary directories and traps.** The body has one EXIT trap, `trap exit_cleanup EXIT` (#1595, merged), which dispatches
+   on `exit_mode`. The Ruby driver makes four directories under the temporary root it owns (`Dir.mktmpdir`):
+   `NFCXX_OWNED_CUDATMP`, `NFCXX_OWNED_TMP`, `NFCXX_OWNED_CTMP` and `NFCXX_OWNED_PTMP` (#1499, #1505). It also makes
+   `NFCXX_OWNED_MODPLAN` (a directory, for the modules block's records) and `NFCXX_OWNED_ECCP` (a path under the root). It sets
+   `NFCXX_TMP_OWNED=1` and removes them when the run ends (#1364). The body uses them when it has them. Without the driver it
+   makes its own with `mktemp -d` for the `cudatmp`, `tmp`, `ctmp` and `ptmp` directories (about lines 192, 212, 528, 653 and
+   773). The body no longer makes the modules directory: it exits with status 2 when `NFCXX_OWNED_MODPLAN` is not set (about
+   line 395). Still made by the body: `eccp_dir` (about line 850, with `eccp_cleanup` in its exit mode).
 9. **Second run and exports.** The CUDA second pass's gate is planned by `scripts/nfcxx-second-pass.rb plan` (#1517), and the
-   gate and its second-run line are still in the body (about lines 900-910). The driver rewrites that line
+   gate and its second-run line are still in the body (about lines 880-896). The driver rewrites that line
    (`NfcxxSecondPass.oracle_text`, `scripts/nfcxx-second-pass.rb run`), so the live second run is the Ruby driver with the same
    environment and arguments, and the body's trace span still wraps it. Deleting the body needs the gate in Ruby too.
-10. **Test oracles.** 26 files under `tests/` name `tests/driver-body/nfcxx-bash`, and the frozen copies under `tests/`
-    (`tests/driver-body/nfcxx-bash`, `tests/nfcxx/nfcxx-bash`, `tests/nfcxx-cache/nfcxx-bash`, `tests/nfcxx-cuda-device/nfcxx-bash`)
+10. **Test oracles.** 23 files under `tests/` name `tests/driver-body/nfcxx-oracle.sh`, and the frozen copies under `tests/`
+    (`tests/driver-body/nfcxx-oracle.sh`, `tests/nfcxx/nfcxx-bash`, `tests/nfcxx-cache/nfcxx-bash`, `tests/nfcxx-cuda-device/nfcxx-bash`)
     are read by suites; some suites extract functions from them with `sed` (for example `tests/driver-ensure-tool`,
     `tests/driver-abspath`, `tests/driver-setup-rest`, `tests/driver-setup-stage`). Each suite must be moved to a pinned copy or
     to the Ruby code before its oracle is deleted.
@@ -134,26 +145,26 @@ Each stage is one PR. Every stage keeps `./nfcxx` working and is checked against
 suites that exercise its stage. Stage status:
 
 - **B0: the plan.** Done.
-- **B1: the oracle.** Done: `tests/driver-body/nfcxx-bash` is the frozen copy, and the body tests point at it.
+- **B1: the oracle.** Done: `tests/driver-body/nfcxx-oracle.sh` is the frozen copy, and the body tests point at it.
 - **B2: the Ruby skeleton.** Done: `scripts/nfcxx.rb` runs the frozen body, and its route dispatch is back (#1352, #1387).
 - **B3: the setup stage.** Done for the planning, and the body evals the result (item 3 above). The refusals are #1356. The
   backend choice, the stage after the emit-C route, the sanitizer check, the `pb_flags` tail, the backend environment, the trace
   unit and the rest are planned in Ruby (the last four in c325d76cd). The body keeps its bash for a run with no driver state.
 - **B4: the CUDA, `.cpp2` and module stages.** Refusals done (#1363). `cu_prepare` and `cpp2_prepare` make their copies and
-  translations in Ruby (`scripts/nfcxx-cu-cpp2-prepare.rb`), and the module block is planned in Ruby (item 2). The body keeps
-  the two functions as their callers (item 4).
+  translations in Ruby (`scripts/nfcxx-cu-cpp2-prepare.rb`, both modes), and the module block is planned in Ruby (item 2). The
+  body keeps the two functions as their callers (item 4). Merging them into one step is #1608 (open).
 - **B5: the cache.** Configuration refusal done (#1369). The lookup planner is done (#1432). The lookup, the hit, the store, the
   `--cache-log` line and the remote tier run in Ruby (`scripts/nfcxx-cache-check.rb` and `scripts/nfcxx-cache-io.rb`). The body
   calls `cache_check` and `cache_store` (item 5 above).
-- **B6: traps and temporary directories.** The Ruby driver owns the temporary root and its four owned directories (#1499,
-  #1505), and the leak fix is merged (#1364). The eccp cleanup skips the directory the driver owns (#1519). The body still makes
-  `eccp_dir` and its fallback directories for a run without the driver (item 8 above).
-- **B7: the second pass.** The second-pass helper is merged (#1372), and its gate is planned by `nfcxx-second-pass.rb plan`
+- **B6: traps and temporary directories.** The body's single EXIT trap is merged (`exit_cleanup`, #1595). The Ruby driver owns
+  the temporary root and its owned directories (#1499, #1505), and the leak fix is merged (#1364). The eccp cleanup skips the
+  directory the driver owns (#1519). The body still makes `eccp_dir` and its fallback directories for a run without the driver
+  (item 8 above).- **B7: the second pass.** The second-pass helper is merged (#1372), and its gate is planned by `nfcxx-second-pass.rb plan`
   (#1517). The driver rewrites the body's second-run line, so the live second run is Ruby (item 9). The gate is still in the body.
 - **B8: the switch. Done (#1402).** `./nfcxx` is a shim (`"${RUBY:-ruby}" "$(dirname "$0")/scripts/nfcxx.rb" "$@"`). The
   Ruby driver is the entry point, and the `NFCXX_RUBY_DRIVER` gate is gone. The operational bash body is
-  `tests/driver-body/nfcxx-bash` (frozen; `scripts/nfcxx.rb` runs it as its oracle). The cache key hashes
-  `tests/driver-body/nfcxx-bash` and every file under `scripts/` (`scripts/nfcxx-cache.rb`), not `./nfcxx`.
+  `tests/driver-body/nfcxx-oracle.sh` (frozen; `scripts/nfcxx.rb` runs it as its oracle). The cache key hashes
+  `tests/driver-body/nfcxx-oracle.sh` and every file under `scripts/` (`scripts/nfcxx-cache.rb`), not `./nfcxx`.
   `tests/driver-body/run.sh` no longer diffs the body against `./nfcxx` (that text is now a shim). Suites that read `./nfcxx`
   text use a pinned copy of the pre-switch file (`pinned-*.txt`, taken at 25005e00d).
 

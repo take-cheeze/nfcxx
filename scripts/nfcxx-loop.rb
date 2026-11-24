@@ -699,6 +699,14 @@ rescue NfcxxExit, NfcxxMissing, StandardError
   1
 end
 
+# The state the loop leaves for these arguments, as a LoopState (no shell text): the Ruby API the driver calls.
+# env is the NFCXX_* environment (a Hash); uid and tmpdir are the values the bash read from id and TMPDIR.
+def loop_state(argv, env = {}, uid = "0", tmpdir = "", ld_available = [])
+  state = LoopState.new
+  apply_environment(state, env, uid, tmpdir)
+  run_loop(argv.dup, state, ld_available)
+end
+
 def main(argv)
   if argv.first == "--bash-state"
     argv.shift
@@ -765,10 +773,7 @@ def main(argv)
     plan.each { |kind, cmd| $stdout.write("#{kind} #{cmd.join(" ")}\n") }
     return 0
   end
-  state = LoopState.new
-  apply_environment(state, env, uid, tmpdir)
-  state = run_loop(argv, state, ld_available)
-  emit(state)
+  emit(loop_state(argv, env, uid, tmpdir, ld_available))
   0
 rescue NfcxxExit => e
   $stdout.flush

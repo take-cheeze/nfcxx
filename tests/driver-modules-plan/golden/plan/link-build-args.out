@@ -1,7 +1,0 @@
-kmodules
-v1
-kmodopts
-kbuilt
-v0
-z
-["build", "WORK/stub", "prog", "mods", "1", "geom.cppm", "-DNAME=a b", "", "geom.cppm", "-o", "prog"]

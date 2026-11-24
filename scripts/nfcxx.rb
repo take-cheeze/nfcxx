@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 # The Ruby driver (docs/notes/driver-body-port.md). ./nfcxx is a shim that runs this script (stage B8, the switch).
-# The stages not yet ported run in the bash body, tests/driver-body/nfcxx-bash (the frozen oracle), with the same arguments,
+# The stages not yet ported run in the bash body, tests/driver-body/nfcxx-oracle.sh (the frozen oracle), with the same arguments,
 # environment, standard streams and status. Each stage moves a part of the flow here; the bash body is the reference the
 # differential tests compare against.
 #
@@ -94,7 +94,7 @@ require_relative "nfcxx-syntax-only"
 
 root = File.expand_path("..", __dir__)
 ROOT = root
-oracle = File.join(root, "tests", "driver-body", "nfcxx-bash")
+oracle = File.join(root, "tests", "driver-body", "nfcxx-oracle.sh")
 SYCL_SCRIPT = File.join(root, "scripts", "nfcxx-sycl.rb")
 
 # -fsyntax-only (the type check) comes first, as it came first in the body: the command is rewritten (scripts/nfcxx-syntax-only.rb),
@@ -313,138 +313,36 @@ unless driver_refusals.any?
 end
 trace_route("bash")
 
-# the oracle computes its root from its own location; here it is this repository's root (the same substitution the
-# differential tests make), so its paths are the repository's
-text = File.read(oracle).sub(/^root=\$\(cd "\$\(dirname "\$0"\)" && pwd\)$/) { "root=#{root}" }
-# the oracle re-runs the driver as "$0" (the -fsyntax-only route): run from a temporary program, $0 is that file, so the
-# driver's own path is put there (the program is an executable file of its own, not a driver)
-text = text.gsub('"$0"', "\"#{File.join(root, "nfcxx")}\"")
-abort "nfcxx: the oracle's root line is not as expected" unless text.include?("root=#{root}")
-# B7 (scripts/nfcxx-second-pass.rb): the oracle's second run is the Ruby driver itself, with the same environment and arguments
-# (run), inside the oracle's own trace span around it. Its line is the one the oracle has (the oracle is frozen).
-text = NfcxxSecondPass.oracle_text(text) or abort "nfcxx: the oracle's second-pass run is not as expected"
-program = Tempfile.new(["nfcxx-oracle", ".sh"])
-program.write(text)
-program.close
+# The driver body (scripts/nfcxx-body.rb) runs in this process: the same arguments and environment, the trace, the temporary
+# directories (a root this process owns, removed when the run ends unless the intermediates are kept), and the SYCL build and the
+# refusals before it, as the driver has them above. A fallback to the gcc backend runs the body again with NFCXX_BACKEND=gcc.
+require_relative "nfcxx-body"
 
-# B6 (docs/notes/driver-body-restructure.md): the temporary directories of the driver are made under a root that this process
-# owns. TMPDIR points at it, so every mktemp -d the bash makes lands there; the bash removes its own directories in its EXIT
-# traps, and this removes whatever is left (a failing or interrupted driver) when the run ends, normally or not.
-status = nil
-# --keep-intermediates (NFCXX_KEEP_INTERMEDIATES=1): the bash keeps its eccp directory, which is made under this root; the root is then
-# kept too, so the directory the user asked for survives the run (the bash's eccp_cleanup removes it only when the flag is off)
-# --keep-intermediates (on the command line) keeps the intermediates too: the oracle reads it from its environment
 keep = ENV["NFCXX_KEEP_INTERMEDIATES"] == "1" || ARGV.include?("--keep-intermediates")
 tmproot = Dir.mktmpdir("nfcxx-tmp.")
-# B6c (docs/notes/driver-body-restructure.md): the body's cu_prepare (cudatmp) and --emit-c (tmp) directories are made here, under
-# tmproot, and passed to the body through NFCXX_OWNED_CUDATMP and NFCXX_OWNED_TMP. The body does not make them, and does not
-# remove them: this process removes them when the run ends, whether or not the intermediates are kept (the body removed them
-# on every exit path before).
-owned = {}
 status_code = 1
 begin
-  # the stages not yet ported run in bash: the same arguments and environment, the standard streams inherited. Its status is ours.
-  # NFCXX_TMP_OWNED: the temporary directories are this process's, removed when it ends (unless intermediates are kept), so the
-  # driver's eccp trap keeps only its trace finish (nfcxx: eccp_cleanup is for the plain driver)
-  # the trace (--trace=FILE, the last one, or NFCXX_TRACE): this process opens it and closes it, as the bash's trace_begin and
-  # trace_finish did; the bash only flushes its spans (its trace_finish keeps its span flush, and does not close the trace)
-  trace_file = ARGV.reverse.find { |a| a.start_with?("--trace=") }&.delete_prefix("--trace=") || ENV["NFCXX_TRACE"].to_s
-  env = { "RUBY" => ENV["RUBY"] || RbConfig.ruby, "TMPDIR" => tmproot, "NFCXX_TMP_OWNED" => "1" }
-  # the argument loop's result (LOOP_RESULT, above); nil unsets a variable the caller may have set, so the body runs its own loop
-  env["NFCXX_LOOP_STATUS"] = LOOP_RESULT&.first&.to_s
-  env["NFCXX_LOOP_STATE"] = LOOP_RESULT&.last
-  env["NFCXX_KEEP_INTERMEDIATES"] = "1" if keep
-  # the body's gcc fallback (fallback_gcc in the body): it leaves its message here and exits 0; the run below prints it and runs the
-  # driver again with the gcc backend, in the body's environment, as the body's exec did
-  fallback_marker = File.join(tmproot, "fallback")
-  env["NFCXX_FALLBACK_MARKER"] = fallback_marker
-  owned = { "NFCXX_OWNED_CUDATMP" => Dir.mktmpdir("tmp.", tmproot), "NFCXX_OWNED_TMP" => Dir.mktmpdir("tmp.", tmproot),
-            "NFCXX_OWNED_CTMP" => Dir.mktmpdir("tmp.", tmproot), "NFCXX_OWNED_PTMP" => Dir.mktmpdir("tmp.", tmproot),
-            "NFCXX_OWNED_MODPLAN" => Dir.mktmpdir("tmp.", tmproot),
-            # the eccp directory is only a path here: the body makes it when it runs eccp, so a run that never gets there leaves none
-            "NFCXX_OWNED_ECCP" => Dir::Tmpname.create("tmp.", tmproot) { |path| path } }
-  trace_rb = File.join(__dir__, "trace.rb")
-  unless trace_file.empty?
-    trace_abs = File.join(File.realpath(File.dirname(trace_file)), File.basename(trace_file))
-    env["NFCXX_TRACE"] = trace_abs
-    env["NFCXX_TRACE_OWNER"] = Process.pid.to_s
-    env["NFCXX_TRACE_PENDING"] = File.join(tmproot, "nfcxx-trace-pending.#{Process.pid}")
-    File.write(env["NFCXX_TRACE_PENDING"], "")
-    system(env["RUBY"], trace_rb, "open", trace_abs)
-  end
-  # B3 and B4: the refusals before the oracle (scripts/nfcxx-setup-args.rb refusals): the CUDA, .cpp2 and module refusals, which the
-  # bash prints before its setup, then the setup's. The bash prints the message and exits with the status, after the trace is
-  # opened. Any other command goes on to the oracle unchanged.
+  ENV["NFCXX_TMP_OWNED"] = "1"
+  ENV["TMPDIR"] = tmproot
   input, setup = driver_refusals
-  # the SYCL two-pass build comes before the refusals, as it came before the setup in the body
   sycl = sycl_applies?
   refusal = sycl ? nil : (input || setup)
-  # the oracle's status is read here, before the trace calls below: each system call sets $?, so reading it after them
-  # gave the trace's status (0) for a failing build
-  oracle_code = 0
   if sycl
-    system(env, env["RUBY"], SYCL_SCRIPT, "run", "--root=#{ROOT}", *ARGV)
-    oracle_code = $?.exitstatus || 128 + $?.termsig
+    system(ENV.to_h, ENV["RUBY"] || RbConfig.ruby, SYCL_SCRIPT, "run", "--root=#{ROOT}", *ARGV)
+    status_code = $?.exitstatus || 128 + $?.termsig
   elsif refusal
-    $stderr.puts(refusal.message)
-  elsif (early = early_pre(ARGV)) && early.first != 0
-    if early.first == 2
-      oracle_code = 2
-    else
-      # --emit-hip: the .cu input as HIP source on stdout, for hipcc (the body's route: the rewriter with the -I, -D and -U options)
-      recs = early.last.split("\0")
-      hip = recs.select { |r| r.start_with?("h") }.map { |r| r[1..] }
-      cu = recs.find { |r| r.start_with?("u") }[1..]
-      system(File.join(ROOT, "build", "cuda-rewrite"), "--hip", *hip, cu)
-      oracle_code = $?.exitstatus || 128 + $?.termsig
-    end
+    status_code = NfcxxBody.refuse(ARGV, ENV, refusal.message.end_with?("\n") ? refusal.message : "#{refusal.message}\n", refusal.status)
   else
-    # The setup's planners run here, before the body, on the argument loop's state (scripts/nfcxx-setup-args.rb planned_state):
-    # NFCXX_SETUP_DEFAULT is the default backend's statements; NFCXX_SETUP_REST_STATUS, NFCXX_SETUP_REST and NFCXX_SETUP_REST_ERR
-    # are the setup's rest (instantiation through the target: its statements up to a refusal, and the refusal's status and message);
-    # NFCXX_SETUP_STAGE_STATUS and NFCXX_SETUP_STAGE are the stage after the emit-C route (its statements, or a refusal's status and
-    # message), NFCXX_SETUP_ASAN_STATUS and NFCXX_SETUP_ASAN the sanitizer check, NFCXX_SETUP_FLAGS the pb_flags tail,
-    # NFCXX_SETUP_BACKEND_ENV_STATUS and NFCXX_SETUP_BACKEND_ENV the backend environment, NFCXX_SETUP_TRACE_UNIT the trace unit.
-    # The body evals them at its places, and prints a refusal where the bash did. A command the wrappers rewrite
-    # (LOOP_RESULT is nil) is planned by the body, so none is passed.
-    setup = LOOP_RESULT && NfcxxSetupArgs.planned_state(ARGV, ENV)
-    rest = setup&.fetch(:rest)
-    asan = setup&.fetch(:asan)
-    backend_env = setup&.fetch(:backend_env)
-    setup_env = {
-      "NFCXX_SETUP_DEFAULT" => setup&.fetch(:default),
-      "NFCXX_SETUP_ASAN_STATUS" => asan && asan[0].to_s,
-      "NFCXX_SETUP_ASAN" => asan && asan[1],
-      "NFCXX_SETUP_REST_STATUS" => rest && rest[0].to_s,
-      "NFCXX_SETUP_REST" => rest && rest[1],
-      "NFCXX_SETUP_REST_ERR" => rest && rest[2],
-      "NFCXX_SETUP_STAGE_STATUS" => setup && setup[:stage].first.to_s,
-      "NFCXX_SETUP_STAGE" => setup && setup[:stage].last,
-      "NFCXX_SETUP_FLAGS" => setup&.fetch(:flags),
-      "NFCXX_SETUP_BACKEND_ENV_STATUS" => backend_env && backend_env[0].to_s,
-      "NFCXX_SETUP_BACKEND_ENV" => backend_env && backend_env[1],
-      "NFCXX_SETUP_TRACE_UNIT" => setup&.fetch(:trace_unit),
-    }
-    body_env = env.merge(setup_env).merge(owned)
-    body_env["NFCXX_EARLY_PRE_DONE"] = early ? "1" : nil   # the driver ran the pre check (early_pre): the body skips it
-    ok = system(body_env, "bash", program.path, *ARGV)
-    oracle_code = ok ? 0 : ($?.exitstatus || 1)
-    if File.file?(fallback_marker)
-      $stderr.write(File.binread(fallback_marker))
+    begin
+      status_code = NfcxxBody.run(ARGV, ENV)
+    rescue NfcxxBody::Fallback => e
+      $stderr.puts(e.message)
       trace_route("gcc-fallback")
-      ok = system(body_env.merge("NFCXX_BACKEND" => "gcc", "NFCXX_FALLBACK_MARKER" => nil, "NFCXX_EARLY_PRE_DONE" => nil), File.join(root, "nfcxx"), *ARGV)
-      oracle_code = ok ? 0 : ($?.exitstatus || 1)
+      ENV["NFCXX_BACKEND"] = "gcc"
+      status_code = NfcxxBody.run(ARGV, ENV)
     end
   end
-  unless trace_file.empty?
-    system(env, env["RUBY"], trace_rb, "flush", env["NFCXX_TRACE_PENDING"]) if File.size?(env["NFCXX_TRACE_PENDING"])
-    system(env["RUBY"], trace_rb, "close", trace_abs, Process.pid.to_s)
-  end
-  status_code = refusal ? refusal.status : oracle_code
 ensure
-  program.unlink
-  # the eccp directory, when the body made it, stays with --keep-intermediates (the bash kept it before it was owned here)
-  owned.each { |name, dir| FileUtils.rm_rf(dir) unless keep && name == "NFCXX_OWNED_ECCP" }
   FileUtils.rm_rf(tmproot) unless keep
 end
 exit status_code

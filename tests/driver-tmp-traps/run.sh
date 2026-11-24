@@ -59,7 +59,7 @@ run_case() {
   if [ -n "${CASE_SETUP:-}" ]; then (cd "$d" && eval "$CASE_SETUP"); fi
   local st
   (cd "$d" && env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$d/home" TMPDIR="$T" RUBY=ruby \
-      EDG_BUILD="$edg" NFCXX_BACKEND=gcc NFCXX_STUB_LOG="$log" "${envs[@]}" \
+      EDG_BUILD="$edg" EDG_BASE="$d/no-edg-base" NFCXX_BACKEND=gcc NFCXX_STUB_LOG="$log" "${envs[@]}" \
       "$repo/nfcxx" "$@" > "$out" 2> "$err")
   st=$?
   {

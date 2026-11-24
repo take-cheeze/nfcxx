@@ -1,6 +1,0 @@
-if [ -n "$depmode" ]; then
-  # -MD/-MMD (with -MF/-MT/-MQ/-MP): the host preprocessor writes the dependency file, as nfcc does for C.
-  dep_cmd=(); while IFS= read -r -d '' dep_w; do dep_cmd+=("$dep_w"); done < <("${RUBY:-ruby}" "$root/scripts/nfcxx-depmode.rb" plan depmode="$depmode" out="$out" std="$std" cxx="${NFCXX_CXX:-}" dfile="$dfile" dtarget="$dtarget" depphony="$depphony" ${cflags[@]+"${cflags[@]/#/cflags=}"} ${sysdirs[@]+"${sysdirs[@]/#/sysdirs=}"} ${srcs[@]+"${srcs[@]/#/srcs=}"})   # the command: scripts/nfcxx-depmode.rb
-  [ ${#dep_cmd[@]} -gt 0 ] || exit 1
-  "${dep_cmd[@]}"
-fi

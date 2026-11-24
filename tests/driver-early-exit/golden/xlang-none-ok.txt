@@ -1,4 +1,3 @@
 stdout:
-status=2
+status=0
 stderr:
-nfcxx: QBE not built; run scripts/setup-qbe.sh

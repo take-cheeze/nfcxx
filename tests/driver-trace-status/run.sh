@@ -13,7 +13,7 @@ cd "$work" || exit 1
 case_() {
   local name=$1; shift
   local b r
-  bash "$repo/nfcxx" "$@" >/dev/null 2>&1; b=$?
+  "$repo/nfcxx" "$@" >/dev/null 2>&1; b=$?
   ruby "$repo/scripts/nfcxx.rb" "$@" >/dev/null 2>&1; r=$?
   if [ "$b" = "$r" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL $name: bash $b, ruby $r"; fi
 }

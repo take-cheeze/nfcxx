@@ -28,6 +28,12 @@ module NfcxxSetupArgs
 
   ROOT = File.expand_path("..", __dir__)
 
+  # the memoized states of this process: a driver that runs again (the gcc fallback) plans its setup from the environment it has now
+  def forget
+    @loop_states = nil
+    @setup_opts = nil
+  end
+
   # the loop's state: [scalars, arrays] (name => value, name => [elements]), or nil when the loop refuses, is unported, or
   # prints a plan instead (the -fsyntax-only, --bundle- and --cuda-driver= re-runs)
   def loop_state(argv, env)

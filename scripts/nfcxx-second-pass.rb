@@ -68,7 +68,7 @@ module NfcxxSecondPass
     { "NFCXX_CUDA_HOST_SYMBOLS" => hostsyms, "NFCXX_CACHE" => "", "NFCXX_CACHE_REMOTE" => "" }
   end
 
-  # B7: the oracle's second run when the Ruby driver runs. The oracle (tests/driver-body/nfcxx-bash, frozen) re-runs the driver
+  # B7: the oracle's second run when the Ruby driver runs. The oracle (tests/driver-body/nfcxx-oracle.sh, frozen) re-runs the driver
   # as "$root/nfcxx" with NFCXX_CUDA_HOST_SYMBOLS; oracle_text (scripts/nfcxx.rb) makes that line call run instead, which starts
   # the Ruby driver (scripts/nfcxx.rb) with the same environment (second_pass_env) and arguments. The oracle's own trace_start
   # and trace_end around the line keep the span, so none is recorded here. The status is the line's "|| exit $?". A run ended

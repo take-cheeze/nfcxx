@@ -1,6 +1,0 @@
-nfcxx-modscan: nosuch.cpp: No such file or directory
-ROOT/scripts/nfcxx-modscan.rb:27:in `initialize': No such file or directory @ rb_sysopen - nosuch.cpp (Errno::ENOENT)
-	from ROOT/scripts/nfcxx-modscan.rb:27:in `open'
-	from ROOT/scripts/nfcxx-modscan.rb:27:in `each_line_bytes'
-	from ROOT/scripts/nfcxx-modscan.rb:60:in `check_source'
-	from ROOT/scripts/nfcxx-modscan.rb:94:in `<main>'

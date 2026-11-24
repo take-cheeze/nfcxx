@@ -1,5 +1,5 @@
 #!/usr/bin/env ruby
-# The C++ modules block of nfcxx (docs/notes/modules.md), planned in Ruby. The frozen body (tests/driver-body/nfcxx-bash) calls
+# The C++ modules block of nfcxx (docs/notes/modules.md), planned in Ruby. The frozen body (tests/driver-body/nfcxx-oracle.sh) calls
 # it once, at the block's place (after the -E route and the post early exits), in place of its own module block:
 #
 #   ruby scripts/nfcxx-modules-plan.rb STATE REPLY

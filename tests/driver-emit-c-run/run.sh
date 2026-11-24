@@ -22,7 +22,7 @@ run() {  # run STATUS: the driver with --emit-c; the output, the status and the 
   rm -f "$work/log" "$work/cpfe.log"
   (env -i PATH="$PATH" HOME="$HOME" RUBY="$(command -v ruby)" EDG_BUILD="$work/edg" EDG_BASE="$work/base" \
      NFCXX_TIME_LOG="$work/log" CPFE_LOG="$work/cpfe.log" CPFE_STATUS="$1" \
-     bash "$repo/nfcxx" --emit-c main.cpp) > "$work/out" 2> "$work/err"; st=$?
+     "$repo/nfcxx" --emit-c main.cpp) > "$work/out" 2> "$work/err"; st=$?
 }
 
 run 0
@@ -40,7 +40,7 @@ if ! grep -q 'frontend' "$work/log" 2>/dev/null; then pass=$((pass + 1)); else f
 rm -f "$work/log" "$work/t.json"
 (env -i PATH="$PATH" HOME="$HOME" RUBY="$(command -v ruby)" EDG_BUILD="$work/edg" EDG_BASE="$work/base" \
    NFCXX_TIME_LOG="$work/log" CPFE_LOG="$work/cpfe.log" CPFE_STATUS=0 \
-   bash "$repo/nfcxx" --emit-c --trace="$work/t.json" main.cpp) > /dev/null 2>&1; st=$?
+   "$repo/nfcxx" --emit-c --trace="$work/t.json" main.cpp) > /dev/null 2>&1; st=$?
 if [ $st = 0 ] && [ "$(grep -c 'cpfe --emit-c (front end)' "$work/log")" = 1 ] && grep -q 'cpfe --emit-c (front end)' "$work/t.json"; then
   pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL the batched front end span is in the time log and the trace (status $st)"; fi
 

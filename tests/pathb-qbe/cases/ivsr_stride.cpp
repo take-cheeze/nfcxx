@@ -77,8 +77,10 @@ static long ref_step2(const int32_t *x, int n) {
 
 static long ref_rev(const Rec *r, int n) {
 	long s = 0;
-	const Rec *p = r + n - 1;
-	for (int i = n - 1; i >= 0; i--, p--) s += p->b;
+	// the walk starts one past the end and steps back before each read, so it never leaves the array (a p-- after the
+	// last read would point before r, which -fsafe-pointers reports as arithmetic out of the object)
+	const Rec *p = r + n;
+	for (int i = n - 1; i >= 0; i--) { --p; s += p->b; }
 	return s;
 }
 

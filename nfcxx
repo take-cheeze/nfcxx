@@ -1,4 +1,5 @@
-#!/usr/bin/env bash
-# nfcxx: the C++ compiler driver. The driver is scripts/nfcxx.rb; this file only starts it (stage B8 of
-# docs/notes/driver-body-port.md). The bash body it runs is tests/driver-body/nfcxx-bash.
-exec "${RUBY:-ruby}" "$(dirname "$0")/scripts/nfcxx.rb" "$@"
+#!/usr/bin/env ruby
+# nfcxx: the C++ compiler driver, the Ruby driver (scripts/nfcxx.rb). This file only starts it, so callers that run ./nfcxx keep
+# working. The driver body is scripts/nfcxx-body.rb (in this process).
+require "rbconfig"
+exec(ENV["RUBY"] || RbConfig.ruby, File.join(__dir__, "scripts", "nfcxx.rb"), *ARGV)

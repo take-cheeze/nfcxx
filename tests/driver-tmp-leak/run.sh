@@ -21,7 +21,7 @@ check() {
   for a in "$@"; do if [ $sep = 0 ] && [ "$a" = -- ]; then sep=1; elif [ $sep = 0 ]; then env_words+=("$a"); else args+=("$a"); fi; done
   local t st left
   t=$(mktemp -d)
-  ( cd "$src" && env TMPDIR="$t" ${env_words[@]+"${env_words[@]}"} bash "$repo/nfcxx" "${args[@]}" >/dev/null 2>&1 ); st=$?
+  ( cd "$src" && env TMPDIR="$t" ${env_words[@]+"${env_words[@]}"} "$repo/nfcxx" "${args[@]}" >/dev/null 2>&1 ); st=$?
   left=$(find "$t" -mindepth 1 | wc -l)
   rm -rf "$t"
   if [ "$st" = "$want" ] && [ "$left" = 0 ]; then pass=$((pass + 1))

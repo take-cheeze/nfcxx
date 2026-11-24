@@ -1,7 +1,7 @@
 #!/bin/bash
 # scripts/nfcxx-cosmo-setup.rb setup must leave the driver in the state the bash --cosmo block leaves: the same backend, environment,
 # gnu version and cflags, or the same refusal (message and status), for each combination of the inputs. The block is copied
-# verbatim from tests/driver-body/nfcxx-bash; the compiler is a stub (its -dumpfullversion prints STUB_GCC).
+# verbatim from tests/driver-body/nfcxx-oracle.sh; the compiler is a stub (its -dumpfullversion prints STUB_GCC).
 #   bash tests/driver-cosmo/run.sh
 here=$(cd "$(dirname "$0")" && pwd -P); repo=$(cd "$here/../.." && pwd -P)
 t=$(mktemp -d); trap 'rm -rf "$t"' EXIT

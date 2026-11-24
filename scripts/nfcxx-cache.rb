@@ -130,7 +130,7 @@ def key_inputs(opt, deps)
   lines = ["nfcxx-cache-1", "argv:" + opt[:args].map { |a| " #{shell_quote(a)}" }.join,
            "cwd: #{opt[:cwd]}", "out: #{realpath_m(opt[:out], opt[:cwd])}", "src: #{realpath_m(opt[:src], opt[:cwd])}"]
   lines.concat(nfcxx_env_lines)
-  lines << sha_line(File.binread(File.join(ROOT, "tests", "driver-body", "nfcxx-bash")))
+  lines << sha_line(File.binread(File.join(ROOT, "scripts", "nfcxx-body.rb")))
   lines << sha_line(concat_files(regular_files_under(File.join(ROOT, "scripts"))))
   lines << sha_line(concat_files(regular_files_directly_in(edg)))
   qbe = File.join(ROOT, "build/qbe/qbe")

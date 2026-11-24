@@ -1,2 +1,0 @@
-RUN ruby ROOT/scripts/nfcxx-cache-io.rb remote-get KEY SANDBOX/cache/objects/KEY
-EXIT 0

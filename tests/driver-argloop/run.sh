@@ -9,7 +9,8 @@
 #   bash tests/driver-argloop/run.sh --record   write the golden (only on the tree whose behaviour is the reference)
 # The tools the driver builds on first use (build/cuda-rewrite, build/pathb-ptx-emit) are built by a warm-up run whose output is
 # dropped, so the goldens are the same whether build/ existed before or not. NFCXX_EHSHIM=0 leaves out the EH shim (its build is
-# not pinned by this test).
+# not pinned by this test). Two goldens depend on the tree's build/: 11 (build/edg-base exists, so the front end's base is entered)
+# and 31 (build/qbe/qbe is built, so Path B's check passes); they were recorded on this tree.
 here=$(cd "$(dirname "$0")" && pwd -P); repo=$(cd "$here/../.." && pwd -P)
 mode=check; [ "${1:-}" = --record ] && mode=record
 warm=$(mktemp -d "${TMPDIR:-/tmp}/argloop.warm.XXXXXX")

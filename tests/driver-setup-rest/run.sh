@@ -53,7 +53,7 @@ run_case() {
   d=$work/run/$n; mkdir -p "$d"; cp "$work"/src/* "$d/"
   # the environment is fixed: the variables the driver reads are the ones named on the case's line
   # shellcheck disable=SC2086
-  (cd "$d" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$work/tmp" EDG_BUILD="$work/stub" NFCXX_STUB_LOG="$d/eccp.log" \
+  (cd "$d" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$work/tmp" EDG_BUILD="$work/stub" NFCXX_STUB_LOG="$d/eccp.log" NFCXX_OWNED_MODPLAN="$work/modplan" \
       $envs "$repo/nfcxx" $args > "$d/.out" 2> "$d/.err"; echo $? > "$d/.rc")
   {
     echo "== case $n:${envs:+ $envs}${args:+ $args}" | normalize
@@ -95,50 +95,7 @@ for f in "$work"/out/case-*.txt; do
   g=$here/golden/$(basename "$f")
   if [ -f "$g" ] && cmp -s "$f" "$g"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL $(basename "$f"): $(head -1 "$f")"; [ -f "$g" ] && diff "$g" "$f" | head -20; fi
 done
-# the protocol: the body evals the rest the driver passes (NFCXX_SETUP_REST_STATUS, NFCXX_SETUP_REST and NFCXX_SETUP_REST_ERR),
-# writes the host span the driver timed (setup_span_start and setup_span_stop), prints a refusal where it stands, and plans the
-# rest itself when the driver passes none (the wrappers' arguments)
-body=$work/body.sh
-sed "s#^root=.*#root=$repo#" "$repo/tests/driver-body/nfcxx-bash" > "$body"
-default_state='backend=gcc default_backend=0 pb_fs_host=0'
-proto() {  # proto NAME ARGS...: the body run in a directory of its own, with the environment the caller sets (env words first)
-  local name=$1; shift
-  local d=$work/proto/$name
-  mkdir -p "$d"; cp "$work"/src/a.cpp "$d/"
-  (cd "$d" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$work/tmp" EDG_BUILD="$work/stub" NFCXX_STUB_LOG="$d/eccp.log" \
-     NFCXX_SETUP_DEFAULT="$default_state" "$@" > "$d/out" 2> "$d/err"); echo $? > "$d/rc"
-}
-pwork=$work/proto
-# P1: the state's statements are eval'd where the bash evaluated them (inst_opts reaches eccp)
-proto eval NFCXX_SETUP_REST_STATUS=0 NFCXX_SETUP_REST='inst_opts=(--sentinel-inst)' NFCXX_SETUP_REST_ERR= \
-  bash "$body" -c a.cpp -o a.o
-if [ "$(cat "$pwork/eval/rc")" = 1 ] && grep -qx -- '  --sentinel-inst' "$pwork/eval/eccp.log"; then
-  pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL protocol: the rest's statements are not eval'd"; fi
-# P2: a refusal of the rest is printed where it stands, with its status, and no compile runs
-proto refuse NFCXX_SETUP_REST_STATUS=2 NFCXX_SETUP_REST= 'NFCXX_SETUP_REST_ERR=nfcxx: rest refusal' \
-  bash "$body" -c a.cpp -o a.o
-if [ "$(cat "$pwork/refuse/rc")" = 2 ] && [ "$(cat "$pwork/refuse/err")" = "nfcxx: rest refusal" ] && [ ! -e "$pwork/refuse/eccp.log" ]; then
-  pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL protocol: the rest's refusal (status $(cat "$pwork/refuse/rc"))"; fi
-# P3: the timed span is written as a time log line with the driver's duration (1.0025 s here)
-proto span NFCXX_TIME_LOG="$pwork/span/time.log" NFCXX_SETUP_REST_STATUS=0 NFCXX_SETUP_REST_ERR= \
-  'NFCXX_SETUP_REST=setup_span_start=1000000 setup_span_stop=1002500' bash "$body" -c a.cpp -o a.o
-if grep -q "^0.002500	driver	host C++ headers	" "$pwork/span/time.log" 2>/dev/null; then
-  pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL protocol: the host span's time log line"; fi
-# P4: with a trace, the span is a pending record that the body's trace flushes as a trace event (ts 1000000, dur 2500)
-mkdir -p "$pwork/pend"
-proto pend NFCXX_TRACE="$pwork/pend/t.json" NFCXX_TRACE_PENDING="$pwork/pend/pending" NFCXX_SETUP_REST_STATUS=0 \
-  NFCXX_SETUP_REST_ERR= 'NFCXX_SETUP_REST=setup_span_start=1000000 setup_span_stop=1002500' bash "$body" -c a.cpp -o a.o
-if grep -q '"name":"host C++ headers","cat":"driver","ph":"X","ts":1000000,"dur":2500' "$pwork/pend/t.json" 2>/dev/null; then
-  pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL protocol: the host span's trace event"; fi
-# P5: without the driver's state, the body plans the rest itself: --cosmo's include directories reach eccp
-proto plan NFCXX_COSMOCC="$work/stub/bin/cosmocc" bash "$body" --cosmo -c a.cpp -o a.o
-if grep -qx -- "  --sys_include=$work/stub/include/third_party/libcxx" "$pwork/plan/eccp.log" 2>/dev/null; then
-  pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL protocol: the body's own plan of --cosmo"; fi
-# P6: without the driver's state, a refusal of the rest is the planner's (message and status 2), and no compile runs
-proto planrefuse bash "$body" --instantiate=bogus -c a.cpp -o a.o
-if [ "$(cat "$pwork/planrefuse/rc")" = 2 ] && grep -q "instantiate (NFCXX_INSTANTIATE) is auto or used (got bogus)" "$pwork/planrefuse/err" \
-   && [ ! -e "$pwork/planrefuse/eccp.log" ]; then
-  pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL protocol: the body's own refusal"; fi
-
+# The body's protocol checks (the statements it evals from the driver's environment) were retired with the
+# bash body (driver-setup-rest, -rest2 and -stage: the Ruby driver reads its own planner's values).
 echo "driver-setup-rest: $pass passed, $fail failed"
 [ "$fail" = 0 ]
