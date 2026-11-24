@@ -42,7 +42,7 @@ run_set() {
   # finds its scripts. ./nfcxx is a shim for the Ruby driver since B8, so it cannot be the oracle. The frozen body is not used
   # here: its cache statements are bash cp calls, which the sandbox stubs. The commands after the eccp call run as the pinned text has them.
   cp "$here/pinned-nfcxx.txt" "$root/nfcxx"
-  mkdir -p "$root/tests/driver-body"; cp "$repo/tests/driver-body/nfcxx-bash" "$root/tests/driver-body/nfcxx-bash"   # the cache key reads it (scripts/nfcxx-cache.rb)
+  mkdir -p "$root/tests/driver-body"; cp "$repo/tests/driver-body/nfcxx-oracle.sh" "$root/tests/driver-body/nfcxx-oracle.sh"   # the cache key reads it (scripts/nfcxx-cache.rb)
   chmod +x "$root/nfcxx"
   for s in ehshim.rb asan-vla.rb cuda-cub.rb cuda-driver-shim.rb; do ln -sf "$here/stub.sh" "$root/scripts/$s"; done
   for c in gcc cc g++ cp mktemp ninja uname; do ln -s "$here/stub.sh" "$bin/$c"; done

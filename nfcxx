@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 # nfcxx: the C++ compiler driver. The driver is scripts/nfcxx.rb; this file only starts it (stage B8 of
-# docs/notes/driver-body-port.md). The bash body it runs is tests/driver-body/nfcxx-bash.
+# docs/notes/driver-body-port.md). The bash body it runs is tests/driver-body/nfcxx-oracle.sh.
 exec "${RUBY:-ruby}" "$(dirname "$0")/scripts/nfcxx.rb" "$@"

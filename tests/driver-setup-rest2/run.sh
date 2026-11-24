@@ -88,7 +88,7 @@ done
 # the protocol: the body evals the setup statements the driver passes (NFCXX_SETUP_ASAN, NFCXX_SETUP_FLAGS, NFCXX_SETUP_BACKEND_ENV,
 # NFCXX_SETUP_TRACE_UNIT), prints a refusal where the bash printed it, and runs its own bash when the driver passes none
 body=$work/body.sh
-sed "s#^root=.*#root=$repo#" "$repo/tests/driver-body/nfcxx-bash" > "$body"
+sed "s#^root=.*#root=$repo#" "$repo/tests/driver-body/nfcxx-oracle.sh" > "$body"
 default_state='backend=gcc default_backend=0 pb_fs_host=0'
 mkdir -p "$work/proto"
 proto() {  # proto NAME ARGS...: the body in a directory of its own, with the environment words the caller sets first

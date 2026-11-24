@@ -1,5 +1,5 @@
 #!/bin/bash
-# scripts/nfcxx-sanitize.rb must answer what nfcxx's bash validation did (the block copied verbatim from tests/driver-body/nfcxx-bash)
+# scripts/nfcxx-sanitize.rb must answer what nfcxx's bash validation did (the block copied verbatim from tests/driver-body/nfcxx-oracle.sh)
 # for each -fsanitize= value and host kind: the same status and the same message.   bash tests/driver-sanitize/run.sh
 here=$(cd "$(dirname "$0")" && pwd -P); repo=$(cd "$here/../.." && pwd -P)
 root=$repo; pass=0; fail=0

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Differential test of nfcxx's keep_static choice: the two bash lines verbatim (from the frozen driver,
-# tests/driver-body/nfcxx-bash) against scripts/nfcxx-keep-static.rb plan, with stub compilers: gcc, clang, one that fails,
+# tests/driver-body/nfcxx-oracle.sh) against scripts/nfcxx-keep-static.rb plan, with stub compilers: gcc, clang, one that fails,
 # one that prints nothing, one that names clang only on its second line, a missing name, and the default cc (NFCXX_GCC unset).
 #   bash tests/driver-keep-static/run.sh
 set -u
@@ -9,7 +9,7 @@ repo=$(cd "$here/../.." && pwd -P)
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 pass=0; fail=0
 sed -n '/^keep_static=(--c_to_obj_option -fkeep-static-functions)$/,/grep -qi clang && keep_static=()$/p' \
-  "$repo/tests/driver-body/nfcxx-bash" > "$work/bash.sh"
+  "$repo/tests/driver-body/nfcxx-oracle.sh" > "$work/bash.sh"
 [ "$(wc -l < "$work/bash.sh")" = 2 ] || { echo "driver-keep-static: the two lines are not in the frozen driver" >&2; exit 2; }
 ruby_bin=$(command -v ruby)
 

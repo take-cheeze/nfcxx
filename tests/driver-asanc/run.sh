@@ -1,5 +1,5 @@
 #!/bin/bash
-# Differential test of nfcxx's ASan options block: the bash block verbatim (from the frozen driver, tests/driver-body/nfcxx-bash)
+# Differential test of nfcxx's ASan options block: the bash block verbatim (from the frozen driver, tests/driver-body/nfcxx-oracle.sh)
 # against scripts/nfcxx-asan-c.rb plan, over asan 0 and 1 with the gcc and pathb backends, an unknown backend (the refusal's
 # stderr and status 2), and asanopts with spaces and a quote. The arrays asan_c and asanopts, stderr and status must match.
 #   bash tests/driver-asanc/run.sh
@@ -11,7 +11,7 @@ pass=0; fail=0
 # The body's ASan block now starts at its fallback: the elif after the driver's NFCXX_SETUP_ASAN state (the driver's Ruby
 # planner, scripts/nfcxx-setup.rb asan, makes that state). The fallback runs when the driver gave no state; it is the elif
 # through its fi (the else clears asanopts), made an if so the suite sources it as it sourced the old block.
-sed -n '/^elif \[ \$asan = 1 \]; then$/,/^fi$/p' "$repo/tests/driver-body/nfcxx-bash" | sed '1s/^elif /if /' > "$work/bash.sh"
+sed -n '/^elif \[ \$asan = 1 \]; then$/,/^fi$/p' "$repo/tests/driver-body/nfcxx-oracle.sh" | sed '1s/^elif /if /' > "$work/bash.sh"
 grep -q '^if \[ \$asan = 1 \]; then$' "$work/bash.sh" && grep -q '^else$' "$work/bash.sh" \
   || { echo "driver-asanc: no ASan fallback block in the frozen driver" >&2; exit 2; }
 

@@ -38,15 +38,15 @@ STUB
 for f in nfcxx-second-pass.rb trace.rb host-sys.rb; do ln -s "$repo/scripts/$f" "$ruby_stub/scripts/$f"; done
 
 # the oracle's second-run line (the bash's), and the same line as the Ruby driver makes it (scripts/nfcxx.rb's oracle text)
-want_line=$(grep -F 'NFCXX_CUDA_HOST_SYMBOLS=$hsyms NFCXX_CACHE= NFCXX_CACHE_REMOTE=' "$repo/tests/driver-body/nfcxx-bash" | head -1 | sed 's/^ *//')
+want_line=$(grep -F 'NFCXX_CUDA_HOST_SYMBOLS=$hsyms NFCXX_CACHE= NFCXX_CACHE_REMOTE=' "$repo/tests/driver-body/nfcxx-oracle.sh" | head -1 | sed 's/^ *//')
 got_line=$(ruby -I "$repo/scripts" -e 'require "nfcxx-second-pass"; text = NfcxxSecondPass.oracle_text(File.read(ARGV[0])); abort "no line" unless text
-  puts text.lines.grep(/nfcxx-second-pass\.rb" run /).map { |l| l.sub(/^ */, "") }' "$repo/tests/driver-body/nfcxx-bash")
+  puts text.lines.grep(/nfcxx-second-pass\.rb" run /).map { |l| l.sub(/^ */, "") }' "$repo/tests/driver-body/nfcxx-oracle.sh")
 if [ -n "$want_line" ] && [ -n "$got_line" ] && [ "$(echo "$got_line" | wc -l)" = 1 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL the substituted line: [$got_line]"; fi
 
 # the substitution changes that one line of the oracle, and nothing else
 if ruby -I "$repo/scripts" -e 'require "nfcxx-second-pass"; t = File.read(ARGV[0]); o = NfcxxSecondPass.oracle_text(t)
   exit(1) unless o && t.lines.size == o.lines.size && t.lines.zip(o.lines).count { |a, b| a != b } == 1
-  exit(1) unless NfcxxSecondPass.oracle_text("no such line\n").nil?' "$repo/tests/driver-body/nfcxx-bash"; then
+  exit(1) unless NfcxxSecondPass.oracle_text("no such line\n").nil?' "$repo/tests/driver-body/nfcxx-oracle.sh"; then
   pass=$((pass + 1))
 else
   fail=$((fail + 1)); echo "FAIL the oracle text: the substitution changes more than the second-run line, or does not apply"

@@ -4,7 +4,7 @@
 here=$(cd "$(dirname "$0")" && pwd -P); repo=$(cd "$here/../.." && pwd -P)
 root=/case/root
 pass=0; fail=0
-# the bash rules, verbatim from tests/driver-body/nfcxx-bash (the uname function is the stub)
+# the bash rules, verbatim from tests/driver-body/nfcxx-oracle.sh (the uname function is the stub)
 bash_rules() {
   [ $backend = pathb ] && [ $freestanding = 0 ] && [ "$(uname -s)" = Darwin ] && cflags+=(-include "$root/lib/pathb/clang_macros.h" -I "$root/lib/pathb/darwin-include")
   [ $backend = pathb ] && [ $freestanding = 0 ] && [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ] && cflags+=(-D_LIBCPP_ABI_ALTERNATE_STRING_LAYOUT)

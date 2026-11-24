@@ -17,7 +17,7 @@ work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 sb=$work/sb
 golden=$here/golden/ecp-args.txt
 # the link functions, and the body's planner block as a function (ecp_run: the -isystem answers of sysdirs, into ecp_list)
-sed -n '/^# ecp-planner-begin/,/^# ecp-planner-end/p' "$repo/tests/driver-body/nfcxx-bash" > "$work/ecp.sh"
+sed -n '/^# ecp-planner-begin/,/^# ecp-planner-end/p' "$repo/tests/driver-body/nfcxx-oracle.sh" > "$work/ecp.sh"
 [ -s "$work/ecp.sh" ] || { echo "nfcxx-linkargs: no ecp planner block in nfcxx" >&2; exit 2; }
 { echo 'ecp_run() {'; cat "$work/ecp.sh"; echo '}'; cat "$here/thin-link-args.sh"; } > "$work/thin.sh"
 [ -s "$golden" ] || { echo "nfcxx-linkargs: no golden at $golden" >&2; exit 2; }

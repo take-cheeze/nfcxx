@@ -1,6 +1,6 @@
 #!/bin/bash
 # Differential test of nfcxx's cache configuration (cache_dir, cache_log_file, cache_remote, and the NFCXX_CACHE_REMOTE refusal):
-# the bash lines verbatim (from the frozen driver, tests/driver-body/nfcxx-bash) against scripts/nfcxx-cache-config.rb plan as the
+# the bash lines verbatim (from the frozen driver, tests/driver-body/nfcxx-oracle.sh) against scripts/nfcxx-cache-config.rb plan as the
 # driver runs it (cfg_sh=$(...) || exit $?; eval "$cfg_sh"). Each case runs both under env -i with the same environment: stdout
 # (the three variables), standard error and exit status must match.
 #   bash tests/driver-cacheconfig/run.sh
@@ -10,7 +10,7 @@ repo=$(cd "$here/../.." && pwd -P)
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 pass=0; fail=0
 sed -n '/^cache_dir=\${NFCXX_CACHE:-}; cache_log_file=\${NFCXX_CACHE_LOG:-}/,/^\[ -n "\$cache_dir" \] || \[ -z "\$cache_remote" \] || cache_dir=/p' \
-  "$repo/tests/driver-body/nfcxx-bash" > "$work/lines.sh"
+  "$repo/tests/driver-body/nfcxx-oracle.sh" > "$work/lines.sh"
 [ "$(wc -l < "$work/lines.sh")" = 6 ] || { echo "driver-cacheconfig: the bash lines are not in the frozen driver" >&2; exit 2; }
 dump='printf "cache_dir=[%s]\ncache_log_file=[%s]\ncache_remote=[%s]\n" "$cache_dir" "$cache_log_file" "$cache_remote"'
 { cat "$work/lines.sh"; echo "$dump"; } > "$work/bash.sh"

@@ -1,6 +1,6 @@
 # nfcxx's -fsyntax-only (the type check): the command the driver runs instead, planned from the arguments as given. A command
 # without -fsyntax-only is not one of these (plan returns nil). The rewrite is the one the frozen body made (its pre-loop block,
-# tests/driver-body/nfcxx-bash before this change):
+# tests/driver-body/nfcxx-oracle.sh before this change):
 #   -E                  the command without -fsyntax-only (the preprocessor runs; nothing is compiled)
 #   an explicit -o      -c, with the -o value replaced by the temporary object (the type check discards it)
 #   otherwise           -c, the arguments, and -o to the temporary object

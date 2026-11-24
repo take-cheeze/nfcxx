@@ -72,7 +72,7 @@ done < "$here/cases.txt"
 
 # ---- part 2: the planner on the body's state
 # the body's state encoding and the state writer, extracted from the body (they are not separate files)
-state_fns=$(sed -n '/^state_put() {/,/^}/p; /^modules_plan_input() {/,/^}/p' "$repo/tests/driver-body/nfcxx-bash")
+state_fns=$(sed -n '/^state_put() {/,/^}/p; /^modules_plan_input() {/,/^}/p' "$repo/tests/driver-body/nfcxx-oracle.sh")
 [ -n "$state_fns" ] || { echo "driver-modules-plan: the body has no state_put or modules_plan_input" >&2; exit 2; }
 
 # a stub root: its nfcxx-modules.rb logs its arguments and exits with the status in $stub/status; the scanner is the repository's

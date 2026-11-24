@@ -12,7 +12,7 @@ repo=$(cd "$here/../.." && pwd -P)
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 ruby_bin=$(command -v ruby)
 # the functions as nfcxx has them now (the port is what they call)
-sed -n '/^temp_cleanup() {/,/^}/p;/^eccp_cleanup() {/,/^}/p' "$repo/tests/driver-body/nfcxx-bash" > "$work/thin.sh"
+sed -n '/^temp_cleanup() {/,/^}/p;/^eccp_cleanup() {/,/^}/p' "$repo/tests/driver-body/nfcxx-oracle.sh" > "$work/thin.sh"
 [ -s "$work/thin.sh" ] || { echo "nfcxx-link: no link steps in nfcxx" >&2; exit 2; }
 # link_records_rm and compile_clean are not functions of nfcxx any more: their body calls are inlined, and the thin side runs
 # the same calls of scripts/nfcxx-link.rb (records-rm, and compile-clean gated as the body gates it). The oracle keeps its bash

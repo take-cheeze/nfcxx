@@ -15,7 +15,7 @@ here=$(cd "$(dirname "$0")" && pwd -P)
 repo=$(cd "$here/../.." && pwd -P)
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 pass=0; fail=0; skip=0
-# the two snippets of the driver are pinned copies, recorded from tests/driver-body/nfcxx-bash at origin/main with
+# the two snippets of the driver are pinned copies, recorded from tests/driver-body/nfcxx-oracle.sh at origin/main with
 #   sed -n '/^pre_opts=(); for f in/,/^done$/p' > forced-include-loop.sh
 #   sed -n '/^state_put() {/,/^}/p' > state-put.sh
 # so the frozen body can be deleted without changing what this suite checks

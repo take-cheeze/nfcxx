@@ -1,6 +1,6 @@
 #!/bin/bash
 # The compile cache's lookup arguments, planned by NfcxxCachePlan.plan (scripts/nfcxx-cache-plan.rb), from the records that
-# cache_plan (tests/driver-body/nfcxx-bash) prints. The bash cache_check before the change (pinned-old-cache-check.txt, verbatim)
+# cache_plan (tests/driver-body/nfcxx-oracle.sh) prints. The bash cache_check before the change (pinned-old-cache-check.txt, verbatim)
 # runs the same planner through its CLI and passes the options to scripts/nfcxx-cache.rb lookup; a stub ruby records that call.
 # The planner's options through its module entry must be those arguments, past the script and the lookup word, byte for byte,
 # with the same stderr. Also checked: the planner's own record kinds, through the same module entry.
@@ -28,7 +28,7 @@ plan_entry() {
 }
 
 # the two functions: the pinned old cache_check, and cache_plan of the frozen body (its records are the planner's input)
-sed -n '/^cache_plan() {/,/^}/p' "$repo/tests/driver-body/nfcxx-bash" > "$work/new.sh"
+sed -n '/^cache_plan() {/,/^}/p' "$repo/tests/driver-body/nfcxx-oracle.sh" > "$work/new.sh"
 cp "$here/pinned-old-cache-check.txt" "$work/old.sh"
 
 # run_case NAME FILE CALL: the state of the case (set by the caller), then CALL from FILE; its stdout goes to $work/NAME.out, and

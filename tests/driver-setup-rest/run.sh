@@ -99,7 +99,7 @@ done
 # writes the host span the driver timed (setup_span_start and setup_span_stop), prints a refusal where it stands, and plans the
 # rest itself when the driver passes none (the wrappers' arguments)
 body=$work/body.sh
-sed "s#^root=.*#root=$repo#" "$repo/tests/driver-body/nfcxx-bash" > "$body"
+sed "s#^root=.*#root=$repo#" "$repo/tests/driver-body/nfcxx-oracle.sh" > "$body"
 default_state='backend=gcc default_backend=0 pb_fs_host=0'
 proto() {  # proto NAME ARGS...: the body run in a directory of its own, with the environment the caller sets (env words first)
   local name=$1; shift

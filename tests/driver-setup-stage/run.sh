@@ -85,7 +85,7 @@ done
 # NFCXX_SETUP_STAGE), and plans it itself without them: a default backend given as the driver's statements is the one the body
 # takes (the gcc route calls eccp), and a stage refusal is printed where the body prints it (status 2)
 body=$work/body.sh
-sed "s#^root=.*#root=$repo#" "$repo/tests/driver-body/nfcxx-bash" > "$body"
+sed "s#^root=.*#root=$repo#" "$repo/tests/driver-body/nfcxx-oracle.sh" > "$body"
 pd=$work/protocol; mkdir -p "$pd"; cp "$work"/src/a.cpp "$pd/"
 (cd "$pd" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$work/tmp" EDG_BUILD="$work/stub" NFCXX_STUB_LOG="$pd/eccp.log" \
    NFCXX_SETUP_DEFAULT='backend=gcc default_backend=0 pb_fs_host=0' bash "$body" -c a.cpp -o a.o > "$pd/out" 2> "$pd/err"); rc=$?

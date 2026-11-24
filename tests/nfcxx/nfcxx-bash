@@ -850,7 +850,7 @@ cache_lookup() {  # cache_lookup SRC OUT: prints the key, or fails when the head
     printf 'nfcxx-cache-1\nargv:'; printf ' %q' ${key_argv[@]+"${key_argv[@]}"}; printf '\ncwd: %s\nout: %s\nsrc: %s\n' "$PWD" "$(realpath -m "$out")" "$(realpath -m "$src")"
     # The logs and the trace are diagnostics: they must not change the key.
     (env | grep '^NFCXX_' | grep -Ev '^NFCXX_(CACHE_LOG|CACHE_REMOTE|TIME_LOG|TRACE|TRACE_OWNER|TRACE_UNIT)=' || true) | LC_ALL=C sort
-    cache_sha < "$root/tests/driver-body/nfcxx-bash"
+    cache_sha < "$root/tests/driver-body/nfcxx-oracle.sh"
     find "$root/scripts" -type f -print0 | LC_ALL=C sort -z | xargs -0 cat | cache_sha
     find "$edg" -maxdepth 1 -type f -print0 | LC_ALL=C sort -z | xargs -0 cat | cache_sha
     for f in "$root/build/qbe/qbe"; do [ ! -f "$f" ] || cache_sha < "$f"; done

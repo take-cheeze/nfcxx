@@ -14,7 +14,7 @@ printf '#include <cstdio>\nmain: () -> int = {\n    std::printf("hi\\n");\n    r
 mk() {
   local dir=$1; shift
   mkdir -p "$dir/build" "$dir/tests/driver-body"
-  cp "$repo/nfcxx" "$dir/nfcxx"; cp -r "$repo/scripts" "$dir/scripts"; cp "$repo/tests/driver-body/nfcxx-bash" "$dir/tests/driver-body/nfcxx-bash"
+  cp "$repo/nfcxx" "$dir/nfcxx"; cp -r "$repo/scripts" "$dir/scripts"; cp "$repo/tests/driver-body/nfcxx-oracle.sh" "$dir/tests/driver-body/nfcxx-oracle.sh"
   local e x s skip
   for e in "$repo"/build/*; do
     x=$(basename "$e"); skip=0

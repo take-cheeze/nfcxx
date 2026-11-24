@@ -92,7 +92,7 @@ case_run "log: text that looks like an option" miss 0 '' 'cache_log_file=$PWD/ca
 case_run "log: no file set writes nothing" miss 0 '' 'cache_log_file=; cache_log nothing'
 
 # sha: nfcxx's cache_sha (bash, unchanged) and the Ruby helper's sha agree on the same input
-sed -n '/^cache_sha()/p' "$repo/tests/driver-body/nfcxx-bash" > "$work/sha.sh"
+sed -n '/^cache_sha()/p' "$repo/tests/driver-body/nfcxx-oracle.sh" > "$work/sha.sh"
 printf 'some input\n' | (. "$work/sha.sh"; cache_sha) > "$work/b.sha"
 printf 'some input\n' | ruby "$repo/scripts/nfcxx-cache-io.rb" sha > "$work/r.sha"
 cmp -s "$work/b.sha" "$work/r.sha" && ok "sha (bash and ruby agree)" || bad "sha"

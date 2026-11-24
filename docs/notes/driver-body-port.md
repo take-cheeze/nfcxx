@@ -1,7 +1,7 @@
 # Porting the driver body (`./nfcxx`) to Ruby
 
 Status: B8 done (the switch, #1402): `./nfcxx` is a shim that runs `scripts/nfcxx.rb`. The bash body is frozen at
-`tests/driver-body/nfcxx-bash`, and the Ruby driver runs it for every stage that is not yet ported. Follows
+`tests/driver-body/nfcxx-oracle.sh`, and the Ruby driver runs it for every stage that is not yet ported. Follows
 docs/notes/driver-state-design.md (the helpers are done).
 
 ## Latest status
@@ -18,7 +18,7 @@ Checked against origin/main at 4eed9f571 (the merge of #1607).
   `.cu`/`.cpp2`/module refusal, the cache configuration refusal, the gcc plan, the Path B plan). Before the body runs, it runs
   the argument loop (`scripts/nfcxx-loop.rb --bash-state`), the wrappers (`scripts/wrap.rb bundle` and `scripts/wrap.rb
   cuda-driver`), and the SYCL two-pass build (`scripts/nfcxx-sycl.rb`). It then runs the frozen body
-  `tests/driver-body/nfcxx-bash` (902 lines, 19 top-level functions and 2 nested helpers) as its oracle for the rest.
+  `tests/driver-body/nfcxx-oracle.sh` (902 lines, 19 top-level functions and 2 nested helpers) as its oracle for the rest.
 - Merged slices, by PR: setup refusals (#1356), CUDA/`.cpp2`/module refusals (#1363), cache configuration refusal (#1369),
   second-pass helper (`scripts/nfcxx-second-pass.rb`, #1372), temporary-directory leak fix (#1364), trace exit status (#1378),
   Path B dispatch with CHECK and STORE lines (#1387), the switch (#1402), the compile cache's lookup planner
@@ -118,8 +118,8 @@ The body can be deleted only when the Ruby driver runs every stage without it. I
    gate and its second-run line are still in the body (about lines 880-896). The driver rewrites that line
    (`NfcxxSecondPass.oracle_text`, `scripts/nfcxx-second-pass.rb run`), so the live second run is the Ruby driver with the same
    environment and arguments, and the body's trace span still wraps it. Deleting the body needs the gate in Ruby too.
-10. **Test oracles.** 23 files under `tests/` name `tests/driver-body/nfcxx-bash`, and the frozen copies under `tests/`
-    (`tests/driver-body/nfcxx-bash`, `tests/nfcxx/nfcxx-bash`, `tests/nfcxx-cache/nfcxx-bash`, `tests/nfcxx-cuda-device/nfcxx-bash`)
+10. **Test oracles.** 23 files under `tests/` name `tests/driver-body/nfcxx-oracle.sh`, and the frozen copies under `tests/`
+    (`tests/driver-body/nfcxx-oracle.sh`, `tests/nfcxx/nfcxx-bash`, `tests/nfcxx-cache/nfcxx-bash`, `tests/nfcxx-cuda-device/nfcxx-bash`)
     are read by suites; some suites extract functions from them with `sed` (for example `tests/driver-ensure-tool`,
     `tests/driver-abspath`, `tests/driver-setup-rest`, `tests/driver-setup-stage`). Each suite must be moved to a pinned copy or
     to the Ruby code before its oracle is deleted.
@@ -145,7 +145,7 @@ Each stage is one PR. Every stage keeps `./nfcxx` working and is checked against
 suites that exercise its stage. Stage status:
 
 - **B0: the plan.** Done.
-- **B1: the oracle.** Done: `tests/driver-body/nfcxx-bash` is the frozen copy, and the body tests point at it.
+- **B1: the oracle.** Done: `tests/driver-body/nfcxx-oracle.sh` is the frozen copy, and the body tests point at it.
 - **B2: the Ruby skeleton.** Done: `scripts/nfcxx.rb` runs the frozen body, and its route dispatch is back (#1352, #1387).
 - **B3: the setup stage.** Done for the planning, and the body evals the result (item 3 above). The refusals are #1356. The
   backend choice, the stage after the emit-C route, the sanitizer check, the `pb_flags` tail, the backend environment, the trace
@@ -163,8 +163,8 @@ suites that exercise its stage. Stage status:
   (#1517). The driver rewrites the body's second-run line, so the live second run is Ruby (item 9). The gate is still in the body.
 - **B8: the switch. Done (#1402).** `./nfcxx` is a shim (`"${RUBY:-ruby}" "$(dirname "$0")/scripts/nfcxx.rb" "$@"`). The
   Ruby driver is the entry point, and the `NFCXX_RUBY_DRIVER` gate is gone. The operational bash body is
-  `tests/driver-body/nfcxx-bash` (frozen; `scripts/nfcxx.rb` runs it as its oracle). The cache key hashes
-  `tests/driver-body/nfcxx-bash` and every file under `scripts/` (`scripts/nfcxx-cache.rb`), not `./nfcxx`.
+  `tests/driver-body/nfcxx-oracle.sh` (frozen; `scripts/nfcxx.rb` runs it as its oracle). The cache key hashes
+  `tests/driver-body/nfcxx-oracle.sh` and every file under `scripts/` (`scripts/nfcxx-cache.rb`), not `./nfcxx`.
   `tests/driver-body/run.sh` no longer diffs the body against `./nfcxx` (that text is now a shim). Suites that read `./nfcxx`
   text use a pinned copy of the pre-switch file (`pinned-*.txt`, taken at 25005e00d).
 

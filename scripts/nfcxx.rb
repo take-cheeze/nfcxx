@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 # The Ruby driver (docs/notes/driver-body-port.md). ./nfcxx is a shim that runs this script (stage B8, the switch).
-# The stages not yet ported run in the bash body, tests/driver-body/nfcxx-bash (the frozen oracle), with the same arguments,
+# The stages not yet ported run in the bash body, tests/driver-body/nfcxx-oracle.sh (the frozen oracle), with the same arguments,
 # environment, standard streams and status. Each stage moves a part of the flow here; the bash body is the reference the
 # differential tests compare against.
 #
@@ -94,7 +94,7 @@ require_relative "nfcxx-syntax-only"
 
 root = File.expand_path("..", __dir__)
 ROOT = root
-oracle = File.join(root, "tests", "driver-body", "nfcxx-bash")
+oracle = File.join(root, "tests", "driver-body", "nfcxx-oracle.sh")
 SYCL_SCRIPT = File.join(root, "scripts", "nfcxx-sycl.rb")
 
 # -fsyntax-only (the type check) comes first, as it came first in the body: the command is rewritten (scripts/nfcxx-syntax-only.rb),

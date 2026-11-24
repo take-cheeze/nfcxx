@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 # nfcxx's compile-cache lookup arguments: the options that nfcxx's cache_check passes to scripts/nfcxx-cache.rb lookup, planned
-# from records on stdin (the bash driver writes them; see cache_plan in tests/driver-body/nfcxx-bash). Each record is one kind
+# from records on stdin (the bash driver writes them; see cache_plan in tests/driver-body/nfcxx-oracle.sh). Each record is one kind
 # letter and its payload, NUL-terminated; the options are printed the same way, in the records' order:
 #   o NAME=VALUE   --NAME=VALUE                 (cache-dir, cache-log, out, src, cwd)
 #   v NAME=VALUE   --var=NAME=VALUE             (the loop state the key and the lookup read)
