@@ -6,6 +6,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <setjmp.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -31,6 +32,14 @@ enum {
   OP_BAND = 41, OP_BOR = 42, OP_BXOR = 43, OP_SHL = 44, OP_SHR = 45
 };
 enum { OP_UNM = 49, OP_BNOT = 50 };
+
+typedef struct LString {
+  size_t len;
+  char bytes[1];   /* len bytes and a NUL */
+} LString;
+
+static LV make_str(const char *p, size_t len);
+static const char *type_name(uint8_t tag);
 
 /* An internal inconsistency of the runtime, not a Lua error. */
 static void die(const char *what) {
@@ -62,15 +71,35 @@ static void site_line(int n, char *buf, size_t size) {
   buf[len] = '\0';
 }
 
+/* lua_error: the error value goes to the innermost protected call (pcall), which longjmps back to it; without one, lua.c
+ * reports the value and stops with status 1. */
+typedef struct PCall {
+  jmp_buf jb;
+  LV err;
+  struct PCall *prev;
+  LV *base;   /* the arguments of the protected call: the frames above it are closed on error */
+} PCall;
+static PCall *pcall_top = NULL;
+
+static void raise_value(LV err) {
+  if (pcall_top != NULL) {
+    pcall_top->err = err;
+    longjmp(pcall_top->jb, 1);
+  }
+  if (err.tag == TAG_STR) fprintf(stderr, "lua: %s\n", ((LString *)err.v.p)->bytes);
+  else fprintf(stderr, "lua: (error object is a %s value)\n", type_name(err.tag));
+  exit(1);
+}
+
 /* luaG_runerror with the info of operand (or none when operand < 0): before + info + after. */
 static void rt_fail3(const char *before, int operand, const char *after) {
-  char where[512], info[512];
+  char where[512], info[512], msg[1400];
   info[0] = '\0';
   site_line(0, where, sizeof where);
   if (operand >= 0) site_line(1 + operand, info, sizeof info);
-  if (where[0] != '\0') fprintf(stderr, "lua: %s %s%s%s\n", where, before, info, after);
-  else fprintf(stderr, "lua: %s%s%s\n", before, info, after);
-  exit(1);
+  if (where[0] != '\0') snprintf(msg, sizeof msg, "%s %s%s%s", where, before, info, after);
+  else snprintf(msg, sizeof msg, "%s%s%s", before, info, after);
+  raise_value(make_str(msg, strlen(msg)));
 }
 
 static void rt_fail(const char *msg, int operand) { rt_fail3(msg, operand, ""); }
@@ -98,10 +127,6 @@ static void type_fail(const char *op, uint8_t tag, int operand) {
 }
 
 /* ---- strings: immutable, compared by content; no interning ---- */
-typedef struct LString {
-  size_t len;
-  char bytes[1];   /* len bytes and a NUL */
-} LString;
 
 static LV make_str(const char *p, size_t len) {
   LString *s = (LString *)malloc(sizeof(LString) + len);
@@ -421,9 +446,13 @@ static int64_t table_border(const Table *t) {
 }
 
 /* ---- metamethods (ltm.c): looked up in the metatable of a table; only tables have metatables here ---- */
+static Table *string_meta = NULL;   /* the metatable of every string; its __index is the string library */
+
 static int get_mt(const LV *o, const char *event, LV *out) {
-  if (o->tag != TAG_TABLE) return 0;
-  const Table *mt = ((const Table *)o->v.p)->meta;
+  const Table *mt;
+  if (o->tag == TAG_TABLE) mt = ((const Table *)o->v.p)->meta;
+  else if (o->tag == TAG_STR) mt = string_meta;
+  else return 0;
   if (mt == NULL) return 0;
   LV key = make_str(event, strlen(event));
   LV v = raw_get(mt, &key);
@@ -435,6 +464,7 @@ static int get_mt(const LV *o, const char *event, LV *out) {
 static int truthy(const LV *v) { return v->tag != TAG_NIL && v->tag != TAG_FALSE; }
 
 void lua54rt_call(LV *fn, int nargs, LV *args, LV *ret, int wanted, int a);
+static void install_more(LV *env);
 void lua54rt_install_library(LV *env);
 
 /* Calls a metamethod with nargs values and returns its first result (luaT_callTMres). */
@@ -1295,6 +1325,713 @@ void lua54rt_install_library(LV *env) {
   set_global(env, "setmetatable", &f);
   make_host(&f, host_getmetatable);
   set_global(env, "getmetatable", &f);
+  install_more(env);
+}
+
+/* ---- the base library's errors and protected calls (lbaselib.c) ---- */
+
+/* lua_error with a value: a protected call (pcall) takes it; otherwise lua.c reports it and stops. */
+static void host_raise(LV v) { raise_value(v); }
+
+static int host_error(LV *out, LV *args, int nargs) {
+  (void)out;
+  LV msg = nargs >= 1 ? args[0] : (LV){0};
+  int64_t level = nargs >= 2 && args[1].tag != TAG_NIL ? (args[1].tag == TAG_INT ? args[1].v.i : 1) : 1;
+  if (msg.tag == TAG_STR && level > 0 && site != NULL) {
+    char where[512];
+    site_line(0, where, sizeof where);
+    if (where[0] != '\0') {
+      size_t n = strlen(where) + 1 + ((LString *)msg.v.p)->len;
+      char *buf = (char *)malloc(n + 1);
+      if (buf == NULL) die("out of memory");
+      snprintf(buf, n + 1, "%s %s", where, ((LString *)msg.v.p)->bytes);
+      msg = make_str(buf, n);
+      free(buf);
+    }
+  }
+  host_raise(msg);
+  return 0;
+}
+
+static int host_assert(LV *out, LV *args, int nargs) {
+  expect_arg(nargs, 1, "assert", "value");
+  if (truthy(&args[0])) {
+    for (int k = 0; k < nargs && k < 64; ++k) out[k] = args[k];
+    return nargs < 64 ? nargs : 64;
+  }
+  if (nargs >= 2) host_raise(args[1]);
+  rt_fail("assertion failed!", -1);
+  return 0;
+}
+
+/* pcall(f, ...): the results of f behind true, or false and the error value. The error longjmps to here. */
+static int host_pcall(LV *out, LV *args, int nargs) {
+  expect_arg(nargs, 1, "pcall", "value");
+  PCall p;
+  p.prev = pcall_top;
+  p.base = args + 1;
+  const char *saved_site = site;
+  pcall_top = &p;
+  if (setjmp(p.jb) == 0) {
+    LV fn = args[0];
+    LV res[64];
+    site = NULL;   /* a function called from here has no caller position, as in Lua */
+    lua54rt_call(&fn, nargs - 1, args + 1, res, -1, 0);
+    site = saved_site;
+    pcall_top = p.prev;
+    int n = lua54rt_top < 63 ? lua54rt_top : 63;
+    out[0].tag = TAG_TRUE;
+    for (int k = 0; k < n; ++k) out[k + 1] = res[k];
+    return n + 1;
+  }
+  site = saved_site;
+  pcall_top = p.prev;
+  lua54rt_close(p.base);   /* the upvalues of the frames the error left */
+  out[0].tag = TAG_FALSE;
+  out[1] = p.err;
+  return 2;
+}
+
+/* ---- argument checks (lauxlib.c's luaL_check*) ---- */
+static void lib_arg_error(int k, const char *fname, const char *what, const char *got) {
+  char buf[256];
+  snprintf(buf, sizeof buf, "bad argument #%d to '%s' (%s expected, got %s)", k, fname, what, got);
+  rt_fail(buf, -1);
+}
+
+static const char *arg_typename(const LV *args, int nargs, int k) {
+  return k > nargs ? "no value" : type_name(args[k - 1].tag);
+}
+
+static LV arg_str(const LV *args, int nargs, int k, const char *fname) {
+  if (k <= nargs && args[k - 1].tag == TAG_STR) return args[k - 1];
+  if (k <= nargs && is_number(&args[k - 1])) {
+    char buf[64];
+    size_t n = number_text(&args[k - 1], buf, sizeof buf);
+    return make_str(buf, n);
+  }
+  lib_arg_error(k, fname, "string", arg_typename(args, nargs, k));
+  return make_str("", 0);
+}
+
+static int64_t arg_int(const LV *args, int nargs, int k, const char *fname) {
+  LV n;
+  if (k <= nargs && to_number(&args[k - 1], &n)) {
+    if (n.tag == TAG_INT) return n.v.i;
+    int64_t i;
+    if (to_int_exact(&n, &i)) return i;
+    lib_arg_error(k, fname, "integer", "number");
+  }
+  lib_arg_error(k, fname, "number", arg_typename(args, nargs, k));
+  return 0;
+}
+
+static int64_t opt_int(const LV *args, int nargs, int k, const char *fname, int64_t def) {
+  if (k > nargs || args[k - 1].tag == TAG_NIL) return def;
+  return arg_int(args, nargs, k, fname);
+}
+
+static Table *arg_table(const LV *args, int nargs, int k, const char *fname) {
+  if (k <= nargs && args[k - 1].tag == TAG_TABLE) return (Table *)args[k - 1].v.p;
+  lib_arg_error(k, fname, "table", arg_typename(args, nargs, k));
+  return NULL;
+}
+
+static int host_tonumber(LV *out, LV *args, int nargs) {
+  if (nargs < 2 || args[1].tag == TAG_NIL) {
+    expect_arg(nargs, 1, "tonumber", "value");
+    LV n;
+    if (to_number(&args[0], &n)) out[0] = n;
+    else out[0].tag = TAG_NIL;
+    return 1;
+  }
+  int64_t base = arg_int(args, nargs, 2, "tonumber");
+  if (args[0].tag != TAG_STR) lib_arg_error(1, "tonumber", "string", arg_typename(args, nargs, 1));
+  if (base < 2 || base > 36) rt_fail("bad argument #2 to 'tonumber' (base out of range)", -1);
+  const LString *s = (const LString *)args[0].v.p;
+  size_t i = 0;
+  while (i < s->len && isspace((unsigned char)s->bytes[i])) i++;
+  int neg = 0;
+  if (i < s->len && (s->bytes[i] == '-' || s->bytes[i] == '+')) neg = s->bytes[i++] == '-';
+  int digits = 0;
+  uint64_t acc = 0;
+  while (i < s->len) {
+    int c = (unsigned char)s->bytes[i];
+    int d = isdigit(c) ? c - '0' : isalpha(c) ? tolower(c) - 'a' + 10 : 99;
+    if (d >= base) break;
+    acc = acc * (uint64_t)base + (uint64_t)d;
+    digits++;
+    i++;
+  }
+  while (i < s->len && isspace((unsigned char)s->bytes[i])) i++;
+  if (digits == 0 || i != s->len) out[0].tag = TAG_NIL;
+  else {
+    out[0].tag = TAG_INT;
+    out[0].v.i = (int64_t)(neg ? 0u - acc : acc);
+  }
+  return 1;
+}
+
+static int host_rawget(LV *out, LV *args, int nargs) {
+  Table *t = arg_table(args, nargs, 1, "rawget");
+  expect_arg(nargs, 2, "rawget", "value");
+  out[0] = raw_get(t, &args[1]);
+  return 1;
+}
+
+static int host_rawset(LV *out, LV *args, int nargs) {
+  Table *t = arg_table(args, nargs, 1, "rawset");
+  expect_arg(nargs, 3, "rawset", "value");
+  raw_set(t, &args[1], &args[2]);
+  out[0] = args[0];
+  return 1;
+}
+
+static int host_rawequal(LV *out, LV *args, int nargs) {
+  expect_arg(nargs, 2, "rawequal", "value");
+  out[0].tag = equal_values(&args[0], &args[1]) ? TAG_TRUE : TAG_FALSE;
+  return 1;
+}
+
+static int host_rawlen(LV *out, LV *args, int nargs) {
+  expect_arg(nargs, 1, "rawlen", "table or string");
+  out[0].tag = TAG_INT;
+  if (args[0].tag == TAG_STR) out[0].v.i = (int64_t)((LString *)args[0].v.p)->len;
+  else if (args[0].tag == TAG_TABLE) out[0].v.i = table_border((const Table *)args[0].v.p);
+  else lib_arg_error(1, "rawlen", "table or string", arg_typename(args, nargs, 1));
+  return 1;
+}
+
+/* ---- table ---- */
+static int host_tinsert(LV *out, LV *args, int nargs) {
+  (void)out;
+  Table *t = arg_table(args, nargs, 1, "insert");
+  int64_t e = table_border(t) + 1;
+  LV key;
+  if (nargs == 2) {
+    key.tag = TAG_INT;
+    key.v.i = e;
+    raw_set(t, &key, &args[1]);
+    return 0;
+  }
+  if (nargs != 3) rt_fail("wrong number of arguments to 'insert'", -1);
+  int64_t pos = arg_int(args, nargs, 2, "insert");
+  if ((uint64_t)pos - 1u >= (uint64_t)e) lib_arg_error(2, "insert", "position out of bounds", "number");
+  for (int64_t i = e; i > pos; --i) {
+    LV from, to;
+    to.tag = TAG_INT;
+    to.v.i = i;
+    from.tag = TAG_INT;
+    from.v.i = i - 1;
+    LV v = raw_get(t, &from);
+    raw_set(t, &to, &v);
+  }
+  key.tag = TAG_INT;
+  key.v.i = pos;
+  raw_set(t, &key, &args[2]);
+  return 0;
+}
+
+static int host_tremove(LV *out, LV *args, int nargs) {
+  Table *t = arg_table(args, nargs, 1, "remove");
+  int64_t size = table_border(t);
+  int64_t pos = opt_int(args, nargs, 2, "remove", size);
+  if (pos != size && (uint64_t)pos - 1u > (uint64_t)size) lib_arg_error(2, "remove", "position out of bounds", "number");
+  LV key;
+  key.tag = TAG_INT;
+  key.v.i = pos;
+  out[0] = raw_get(t, &key);
+  for (; pos < size; pos++) {
+    LV from, to;
+    from.tag = TAG_INT;
+    from.v.i = pos + 1;
+    to.tag = TAG_INT;
+    to.v.i = pos;
+    LV x = raw_get(t, &from);
+    raw_set(t, &to, &x);
+  }
+  LV nil;
+  nil.tag = TAG_NIL;
+  key.v.i = pos;
+  raw_set(t, &key, &nil);
+  return 1;
+}
+
+static int host_tconcat(LV *out, LV *args, int nargs) {
+  Table *t = arg_table(args, nargs, 1, "concat");
+  LV sep = nargs >= 2 && args[1].tag != TAG_NIL ? arg_str(args, nargs, 2, "concat") : make_str("", 0);
+  int64_t i = opt_int(args, nargs, 3, "concat", 1);
+  int64_t j = opt_int(args, nargs, 4, "concat", table_border(t));
+  size_t cap = 64, len = 0;
+  char *buf = (char *)malloc(cap);
+  if (buf == NULL) die("out of memory");
+  for (int64_t k = i; k <= j; ++k) {
+    LV key;
+    key.tag = TAG_INT;
+    key.v.i = k;
+    LV v = raw_get(t, &key);
+    const char *text;
+    size_t n;
+    char num[64];
+    if (v.tag == TAG_STR) {
+      text = ((LString *)v.v.p)->bytes;
+      n = ((LString *)v.v.p)->len;
+    } else if (is_number(&v)) {
+      n = number_text(&v, num, sizeof num);
+      text = num;
+    } else {
+      char msg[160];
+      snprintf(msg, sizeof msg, "invalid value (at index %lld) in table for 'concat'", (long long)k);
+      free(buf);
+      rt_fail(msg, -1);
+      return 0;
+    }
+    size_t sepn = k > i ? ((LString *)sep.v.p)->len : 0;
+    while (len + n + sepn + 1 > cap) {
+      cap *= 2;
+      buf = (char *)realloc(buf, cap);
+      if (buf == NULL) die("out of memory");
+    }
+    if (sepn > 0) {
+      memcpy(buf + len, ((LString *)sep.v.p)->bytes, sepn);
+      len += sepn;
+    }
+    memcpy(buf + len, text, n);
+    len += n;
+  }
+  out[0] = make_str(buf, len);
+  free(buf);
+  return 1;
+}
+
+static int host_tunpack(LV *out, LV *args, int nargs) {
+  Table *t = nargs >= 1 && args[0].tag == TAG_TABLE ? (Table *)args[0].v.p : NULL;
+  int64_t i = opt_int(args, nargs, 2, "unpack", 1);
+  int64_t j = opt_int(args, nargs, 3, "unpack", t ? table_border(t) : 0);
+  if (t == NULL) lib_arg_error(1, "unpack", "table", arg_typename(args, nargs, 1));
+  if (j - i >= 63) rt_fail("too many results to unpack", -1);
+  int n = 0;
+  for (int64_t k = i; k <= j; ++k) {
+    LV key;
+    key.tag = TAG_INT;
+    key.v.i = k;
+    out[n++] = raw_get(t, &key);
+  }
+  return n;
+}
+
+/* ---- math ---- */
+static int host_mfloor(LV *out, LV *args, int nargs) {
+  LV n = nargs >= 1 ? args[0] : (LV){0};
+  LV x;
+  if (!to_number(&n, &x)) lib_arg_error(1, "floor", "number", arg_typename(args, nargs, 1));
+  if (x.tag == TAG_INT) {
+    out[0] = x;
+    return 1;
+  }
+  double f = floor(x.v.n);
+  out[0].tag = TAG_FLOAT;
+  out[0].v.n = f;
+  if (f >= -9223372036854775808.0 && f < 9223372036854775808.0) {
+    out[0].tag = TAG_INT;
+    out[0].v.i = (int64_t)f;
+  }
+  return 1;
+}
+
+static int host_mceil(LV *out, LV *args, int nargs) {
+  LV n = nargs >= 1 ? args[0] : (LV){0};
+  LV x;
+  if (!to_number(&n, &x)) lib_arg_error(1, "ceil", "number", arg_typename(args, nargs, 1));
+  if (x.tag == TAG_INT) {
+    out[0] = x;
+    return 1;
+  }
+  double f = ceil(x.v.n);
+  out[0].tag = TAG_FLOAT;
+  out[0].v.n = f;
+  if (f >= -9223372036854775808.0 && f < 9223372036854775808.0) {
+    out[0].tag = TAG_INT;
+    out[0].v.i = (int64_t)f;
+  }
+  return 1;
+}
+
+static int host_mabs(LV *out, LV *args, int nargs) {
+  expect_arg(nargs, 1, "abs", "number");
+  LV x;
+  if (!to_number(&args[0], &x)) lib_arg_error(1, "abs", "number", arg_typename(args, nargs, 1));
+  if (x.tag == TAG_INT) {
+    out[0].tag = TAG_INT;
+    out[0].v.i = x.v.i < 0 ? (int64_t)(0u - (uint64_t)x.v.i) : x.v.i;
+  } else {
+    out[0].tag = TAG_FLOAT;
+    out[0].v.n = fabs(x.v.n);
+  }
+  return 1;
+}
+
+static int host_mminmax(LV *out, LV *args, int nargs, int want_max, const char *fname) {
+  if (nargs < 1) lib_arg_error(1, fname, "number", "no value");
+  LV best;
+  if (!to_number(&args[0], &best)) lib_arg_error(1, fname, "number", arg_typename(args, nargs, 1));
+  for (int k = 2; k <= nargs; ++k) {
+    LV x;
+    if (!to_number(&args[k - 1], &x)) lib_arg_error(k, fname, "number", arg_typename(args, nargs, k));
+    if (want_max ? lua54rt_cmp(0, &best, &x) : lua54rt_cmp(0, &x, &best)) best = x;
+  }
+  out[0] = best;
+  return 1;
+}
+static int host_mmax(LV *out, LV *args, int nargs) { return host_mminmax(out, args, nargs, 1, "max"); }
+static int host_mmin(LV *out, LV *args, int nargs) { return host_mminmax(out, args, nargs, 0, "min"); }
+
+static int host_msqrt(LV *out, LV *args, int nargs) {
+  LV x;
+  if (nargs < 1 || !to_number(&args[0], &x)) lib_arg_error(1, "sqrt", "number", arg_typename(args, nargs, 1));
+  out[0].tag = TAG_FLOAT;
+  out[0].v.n = sqrt(as_float(&x));
+  return 1;
+}
+
+static int host_mtointeger(LV *out, LV *args, int nargs) {
+  expect_arg(nargs, 1, "tointeger", "value");
+  int64_t i;
+  if (args[0].tag == TAG_INT) out[0] = args[0];
+  else if (args[0].tag == TAG_FLOAT && to_int_exact(&args[0], &i)) {
+    out[0].tag = TAG_INT;
+    out[0].v.i = i;
+  } else out[0].tag = TAG_NIL;
+  return 1;
+}
+
+/* ---- string ---- */
+static int host_slen(LV *out, LV *args, int nargs) {
+  LV s = arg_str(args, nargs, 1, "len");
+  out[0].tag = TAG_INT;
+  out[0].v.i = (int64_t)((LString *)s.v.p)->len;
+  return 1;
+}
+
+/* Lua's index translation for string.sub and friends: negative counts from the end. */
+static int64_t str_posrelat(int64_t pos, size_t len) {
+  if (pos >= 0) return pos;
+  if ((size_t)(-pos) > len) return 0;
+  return (int64_t)len + pos + 1;
+}
+
+static int host_ssub(LV *out, LV *args, int nargs) {
+  LV s = arg_str(args, nargs, 1, "sub");
+  const LString *str = (const LString *)s.v.p;
+  int64_t i = str_posrelat(opt_int(args, nargs, 2, "sub", 1), str->len);
+  int64_t j = str_posrelat(opt_int(args, nargs, 3, "sub", -1), str->len);
+  if (i < 1) i = 1;
+  if (j > (int64_t)str->len) j = (int64_t)str->len;
+  if (i > j) out[0] = make_str("", 0);
+  else out[0] = make_str(str->bytes + i - 1, (size_t)(j - i + 1));
+  return 1;
+}
+
+static int host_supper(LV *out, LV *args, int nargs) {
+  LV s = arg_str(args, nargs, 1, "upper");
+  const LString *str = (const LString *)s.v.p;
+  char *buf = (char *)malloc(str->len + 1);
+  if (buf == NULL) die("out of memory");
+  for (size_t k = 0; k < str->len; ++k) buf[k] = (char)toupper((unsigned char)str->bytes[k]);
+  out[0] = make_str(buf, str->len);
+  free(buf);
+  return 1;
+}
+
+static int host_slower(LV *out, LV *args, int nargs) {
+  LV s = arg_str(args, nargs, 1, "lower");
+  const LString *str = (const LString *)s.v.p;
+  char *buf = (char *)malloc(str->len + 1);
+  if (buf == NULL) die("out of memory");
+  for (size_t k = 0; k < str->len; ++k) buf[k] = (char)tolower((unsigned char)str->bytes[k]);
+  out[0] = make_str(buf, str->len);
+  free(buf);
+  return 1;
+}
+
+static int host_srep(LV *out, LV *args, int nargs) {
+  LV s = arg_str(args, nargs, 1, "rep");
+  int64_t n = arg_int(args, nargs, 2, "rep");
+  LV sep = nargs >= 3 && args[2].tag != TAG_NIL ? arg_str(args, nargs, 3, "rep") : make_str("", 0);
+  const LString *str = (const LString *)s.v.p, *sp = (const LString *)sep.v.p;
+  if (n <= 0) {
+    out[0] = make_str("", 0);
+    return 1;
+  }
+  size_t total = (size_t)n * str->len + (size_t)(n - 1) * sp->len;
+  char *buf = (char *)malloc(total + 1);
+  if (buf == NULL) die("out of memory");
+  size_t pos = 0;
+  for (int64_t k = 0; k < n; ++k) {
+    if (k > 0) {
+      memcpy(buf + pos, sp->bytes, sp->len);
+      pos += sp->len;
+    }
+    memcpy(buf + pos, str->bytes, str->len);
+    pos += str->len;
+  }
+  out[0] = make_str(buf, total);
+  free(buf);
+  return 1;
+}
+
+static int host_sreverse(LV *out, LV *args, int nargs) {
+  LV s = arg_str(args, nargs, 1, "reverse");
+  const LString *str = (const LString *)s.v.p;
+  char *buf = (char *)malloc(str->len + 1);
+  if (buf == NULL) die("out of memory");
+  for (size_t k = 0; k < str->len; ++k) buf[k] = str->bytes[str->len - 1 - k];
+  out[0] = make_str(buf, str->len);
+  free(buf);
+  return 1;
+}
+
+static int host_sbyte(LV *out, LV *args, int nargs) {
+  LV s = arg_str(args, nargs, 1, "byte");
+  const LString *str = (const LString *)s.v.p;
+  int64_t i = str_posrelat(opt_int(args, nargs, 2, "byte", 1), str->len);
+  int64_t j = str_posrelat(opt_int(args, nargs, 3, "byte", i), str->len);
+  if (i < 1) i = 1;
+  if (j > (int64_t)str->len) j = (int64_t)str->len;
+  int n = 0;
+  for (int64_t k = i; k <= j && n < 64; ++k) {
+    out[n].tag = TAG_INT;
+    out[n].v.i = (unsigned char)str->bytes[k - 1];
+    n++;
+  }
+  return n;
+}
+
+static int host_schar(LV *out, LV *args, int nargs) {
+  char *buf = (char *)malloc((size_t)nargs + 1);
+  if (buf == NULL) die("out of memory");
+  for (int k = 1; k <= nargs; ++k) buf[k - 1] = (char)arg_int(args, nargs, k, "char");
+  out[0] = make_str(buf, (size_t)nargs);
+  free(buf);
+  return 1;
+}
+
+/* string.format: %d %i %u %c %x %X %o %e %E %f %g %G %s %q %% with flags, width and precision as printf. */
+static int host_sformat(LV *out, LV *args, int nargs) {
+  LV fmt = arg_str(args, nargs, 1, "format");
+  const LString *f = (const LString *)fmt.v.p;
+  size_t cap = 256, len = 0;
+  char *buf = (char *)malloc(cap);
+  if (buf == NULL) die("out of memory");
+  int arg = 1;
+  for (size_t i = 0; i < f->len; ++i) {
+    char c = f->bytes[i];
+    if (c != '%') {
+      buf[len++] = c;
+      if (len + 1 >= cap) {
+        cap *= 2;
+        buf = (char *)realloc(buf, cap);
+      }
+      continue;
+    }
+    if (i + 1 < f->len && f->bytes[i + 1] == '%') {
+      buf[len++] = '%';
+      i++;
+      continue;
+    }
+    size_t start = i;
+    i++;
+    while (i < f->len && strchr("-+ #0123456789.", f->bytes[i]) != NULL) i++;
+    if (i >= f->len) rt_fail("invalid conversion to 'format'", -1);
+    char conv = f->bytes[i];
+    char spec[32];
+    size_t sl = i - start;
+    if (sl + 2 > sizeof spec) rt_fail("invalid conversion to 'format'", -1);
+    memcpy(spec, f->bytes + start, sl);
+    spec[sl] = '\0';
+    arg++;
+    char piece[512];
+    int pl = 0;
+    switch (conv) {
+      case 'd':
+      case 'i': {
+        int64_t v = arg_int(args, nargs, arg, "format");
+        snprintf(spec + sl, 4, "lld");
+        pl = snprintf(piece, sizeof piece, spec, (long long)v);
+        break;
+      }
+      case 'u':
+      case 'x':
+      case 'X':
+      case 'o': {
+        int64_t v = arg_int(args, nargs, arg, "format");
+        char cv[3] = {conv == 'u' ? 'd' : conv, '\0', '\0'};
+        snprintf(spec + sl, 4, "ll%c", cv[0]);
+        pl = snprintf(piece, sizeof piece, spec, (unsigned long long)v);
+        break;
+      }
+      case 'c': {
+        int64_t v = arg_int(args, nargs, arg, "format");
+        snprintf(spec + sl, 2, "c");
+        pl = snprintf(piece, sizeof piece, spec, (int)v);
+        break;
+      }
+      case 'e':
+      case 'E':
+      case 'f':
+      case 'g':
+      case 'G': {
+        LV n;
+        if (arg > nargs || !to_number(&args[arg - 1], &n)) lib_arg_error(arg, "format", "number", arg_typename(args, nargs, arg));
+        snprintf(spec + sl, 2, "%c", conv);
+        pl = snprintf(piece, sizeof piece, spec, as_float(&n));
+        break;
+      }
+      case 's': {
+        LV s;
+        if (arg > nargs) lib_arg_error(arg, "format", "value", "no value");
+        if (args[arg - 1].tag == TAG_STR) s = args[arg - 1];
+        else if (!tostring_mm(&args[arg - 1], &s)) {
+          char num[64];
+          if (is_number(&args[arg - 1])) {
+            size_t n = number_text(&args[arg - 1], num, sizeof num);
+            s = make_str(num, n);
+          } else {
+            char *tb = NULL;
+            size_t tsz = 0;
+            FILE *tf = open_memstream(&tb, &tsz);
+            write_value(tf, &args[arg - 1]);
+            fclose(tf);
+            s = make_str(tb, tsz);
+            free(tb);
+          }
+        }
+        const LString *ss = (const LString *)s.v.p;
+        if (sl == 1) {
+          if (len + ss->len + 1 >= cap) {
+            while (len + ss->len + 1 >= cap) cap *= 2;
+            buf = (char *)realloc(buf, cap);
+          }
+          memcpy(buf + len, ss->bytes, ss->len);
+          len += ss->len;
+          pl = 0;
+        } else {
+          snprintf(spec + sl, 2, "s");
+          char *big = (char *)malloc(ss->len + 512);
+          if (big == NULL) die("out of memory");
+          pl = snprintf(big, ss->len + 512, spec, ss->bytes);
+          if (len + (size_t)pl + 1 >= cap) {
+            while (len + (size_t)pl + 1 >= cap) cap *= 2;
+            buf = (char *)realloc(buf, cap);
+          }
+          memcpy(buf + len, big, (size_t)pl);
+          len += (size_t)pl;
+          free(big);
+          pl = 0;
+        }
+        break;
+      }
+      default: {
+        char msg[96];
+        snprintf(msg, sizeof msg, "invalid conversion '%%%c' to 'format'", conv);
+        rt_fail(msg, -1);
+      }
+    }
+    if (conv != 's' || sl != 1) {
+      if (len + (size_t)pl + 1 >= cap) {
+        while (len + (size_t)pl + 1 >= cap) cap *= 2;
+        buf = (char *)realloc(buf, cap);
+      }
+      memcpy(buf + len, piece, (size_t)pl);
+      len += (size_t)pl;
+    }
+  }
+  out[0] = make_str(buf, len);
+  free(buf);
+  return 1;
+}
+
+/* The tables of the libraries; the string metatable is created in install_more. */
+
+static void register_table(LV *env, const char *name, LV *tbl) { set_global(env, name, tbl); }
+
+static void add_fn(LV *tbl, const char *name, lua_cfn fn) {
+  LV f;
+  make_host(&f, fn);
+  LV key = make_str(name, strlen(name));
+  raw_set((Table *)tbl->v.p, &key, &f);
+}
+
+static void install_more(LV *env) {
+  LV f;
+  make_host(&f, host_error);
+  set_global(env, "error", &f);
+  make_host(&f, host_assert);
+  set_global(env, "assert", &f);
+  make_host(&f, host_pcall);
+  set_global(env, "pcall", &f);
+  make_host(&f, host_tonumber);
+  set_global(env, "tonumber", &f);
+  make_host(&f, host_rawget);
+  set_global(env, "rawget", &f);
+  make_host(&f, host_rawset);
+  set_global(env, "rawset", &f);
+  make_host(&f, host_rawequal);
+  set_global(env, "rawequal", &f);
+  make_host(&f, host_rawlen);
+  set_global(env, "rawlen", &f);
+
+  LV tbl;
+  lua54rt_newtable(&tbl);
+  add_fn(&tbl, "insert", host_tinsert);
+  add_fn(&tbl, "remove", host_tremove);
+  add_fn(&tbl, "concat", host_tconcat);
+  add_fn(&tbl, "unpack", host_tunpack);
+  register_table(env, "table", &tbl);
+
+  LV math;
+  lua54rt_newtable(&math);
+  add_fn(&math, "floor", host_mfloor);
+  add_fn(&math, "ceil", host_mceil);
+  add_fn(&math, "abs", host_mabs);
+  add_fn(&math, "max", host_mmax);
+  add_fn(&math, "min", host_mmin);
+  add_fn(&math, "sqrt", host_msqrt);
+  add_fn(&math, "tointeger", host_mtointeger);
+  LV v;
+  v.tag = TAG_FLOAT;
+  v.v.n = HUGE_VAL;
+  LV key = make_str("huge", 4);
+  raw_set((Table *)math.v.p, &key, &v);
+  v.tag = TAG_FLOAT;
+  v.v.n = 3.141592653589793238462643383279502884;
+  key = make_str("pi", 2);
+  raw_set((Table *)math.v.p, &key, &v);
+  v.tag = TAG_INT;
+  v.v.i = INT64_MAX;
+  key = make_str("maxinteger", 10);
+  raw_set((Table *)math.v.p, &key, &v);
+  v.v.i = INT64_MIN;
+  key = make_str("mininteger", 10);
+  raw_set((Table *)math.v.p, &key, &v);
+  register_table(env, "math", &math);
+
+  LV str;
+  lua54rt_newtable(&str);
+  add_fn(&str, "len", host_slen);
+  add_fn(&str, "sub", host_ssub);
+  add_fn(&str, "upper", host_supper);
+  add_fn(&str, "lower", host_slower);
+  add_fn(&str, "rep", host_srep);
+  add_fn(&str, "reverse", host_sreverse);
+  add_fn(&str, "byte", host_sbyte);
+  add_fn(&str, "char", host_schar);
+  add_fn(&str, "format", host_sformat);
+  register_table(env, "string", &str);
+  string_meta = (Table *)calloc(1, sizeof(Table));
+  if (string_meta == NULL) die("out of memory");
+  key = make_str("__index", 7);
+  raw_set(string_meta, &key, &str);
 }
 
 /* Runs the main function of a chunk on a stack the runtime owns. The results are copied to out (at most outsize of

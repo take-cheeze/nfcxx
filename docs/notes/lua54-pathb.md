@@ -1,10 +1,13 @@
 # Lua 5.4 bytecode to Path B IR
 
-Status, 2026-11-24: every opcode but `TBC` lowers. 53 programs match Lua 5.4.9 (`tests/lua54bc/lower/run.sh`), and 20
+Status, 2026-11-24: every opcode but `TBC` lowers. 62 programs match Lua 5.4.9 (`tests/lua54bc/lower/run.sh`), and 21
 error programs print the same first line as lua.c, with its position, message and variable info. The runtime has numbers
-with coercion, strings, tables with metatables, closures and upvalues, multiple results, varargs, the host functions
-`print`, `type`, `tostring`, `pairs`, `next`, `ipairs`, `select`, `setmetatable`, `getmetatable`, and the metamethods
-below.
+with coercion, strings with the string metatable, tables with metatables, closures and upvalues, multiple results,
+varargs, the metamethods listed below, protected calls (`pcall`, with `error` and `assert`), and the libraries:
+base (`print`, `type`, `tostring`, `tonumber`, `pairs`, `next`, `ipairs`, `select`, `setmetatable`, `getmetatable`,
+`rawget`, `rawset`, `rawequal`, `rawlen`), `table` (`insert`, `remove`, `concat`, `unpack`), `math` (`floor`, `ceil`,
+`abs`, `max`, `min`, `sqrt`, `tointeger`, `huge`, `pi`, `maxinteger`, `mininteger`) and `string` (`len`, `sub`, `upper`,
+`lower`, `rep`, `reverse`, `byte`, `char`, `format`).
 
 ## Pipeline
 
@@ -132,18 +135,21 @@ gives lstrlib's `attempt to add a 'string' with a 'number'`. Only tables have me
 
 - `tests/lua54bc/run.sh`: the reader loads real 5.4.9 chunks (dumped with `string.dump`); the opcode sequence matches
   `luac -l -l` when `LUAC` is set. The opcode check has not run: no `luac` is available here.
-- `tests/lua54bc/lower/run.sh`: 53 programs lower, emit, assemble, link (with `-lm`), run, and match
-  `print(dofile(...))` from Lua 5.4.9. 20 programs in `lower/err/` must give lua.c's first error line and status 1. A
+- `tests/lua54bc/lower/run.sh`: 62 programs lower, emit, assemble, link (with `-lm`), run, and match
+  `print(dofile(...))` from Lua 5.4.9. 21 programs in `lower/err/` must give lua.c's first error line and status 1. A
   `TBC` program is refused. Needs `LUA` (a 5.4.9 interpreter).
 
 ## Not yet
 
-- **The rest of the base library** (`error`, `pcall`, `tonumber`, `rawget`, `rawset`, `rawequal`, `rawlen`, `next` with
-  `__pairs`, `load`, ...) and the `string`, `table` and `math` libraries. Each is a host function in the runtime.
-  `string` in particular gives strings their metatable, so `("x"):upper()` is not reachable yet.
+- **The rest of the libraries**: `string.find`, `match`, `gsub`, `gmatch` and the pattern matching, `%q` and `%a` in
+  `string.format`, `table.sort` and `table.move`, `math.random`, `load`, `dofile`, `require`, `select` with negative
+  indices, `utf8`, `os`, `io`, `coroutine`. Each is a host function in the runtime.
+- **Error levels**: `error(msg, 2)` reports the caller's position as level 1 does. A `pcall` that calls a library
+  function directly has no position in its message, as in Lua, but the library names (`'rep'`) are the short ones,
+  where Lua qualifies them (`'string.rep'`) in that case.
 - **Full tracebacks**: lua.c prints `stack traceback:` lines after the message; only the message is printed.
 - **To-be-closed variables** (`TBC`, `__close`, and the fourth value of a generic `for`).
-- **`__gc`, `__mode`, `__metatable`**, and `__name` in messages.
+- **`__gc`, `__mode`, `__metatable`**, `__pairs`, and `__name` in messages.
 - **Length of tables with holes**: `#` counts from 1 up to the first nil, which is one border; Lua's `#` can pick another.
 - **Garbage collection**: nothing is freed. Tests are short; a real runtime needs a collector and root maps.
 - **`LOADKX` with more than 2^17 constants** is lowered but untested.
