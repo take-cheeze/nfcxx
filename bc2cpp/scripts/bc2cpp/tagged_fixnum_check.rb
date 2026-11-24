@@ -236,6 +236,11 @@ end
              m && helper && helper.include?("= #{slow}(M, a0, ") && !helper.include?('bc2cpp_fixnum_') &&
                !body.include?(slow) && (imm || helper.include?("bc2cpp_num_#{name}_float(M, a0, a1)")))
 end
+dv = code_of(code, 'TfOps_dv')
+dv_call = dv.match(/= bc2cpp_div_int_pair\(M, (r\d+), (r\d+)\);\n  \} else \{\n(?:  \/\/[^\n]*\n)*  \1 = (bc2cpp_compact_\h{16})\(M, \1, \2\);/)
+dv_helper = dv_call && code[/^static __attribute__\(\(noinline, cold\)\) mrb_value #{dv_call[3]}\(.*?^\}$/m]
+check.call('/: the Integer pair stays inline and one helper holds the Float and fallback arms (COLD_COMPACT_TAIL)',
+           dv_helper&.include?('bc2cpp_num_div_float(M, a0, a1)') && !dv.include?('bc2cpp_num_div_float'))
 { 'addi' => 'add', 'subi' => 'sub' }.each do |name, op|
   check.call("#{name}: the literal is a boxed constant to the word helper",
              code_of(code, "TfOps_#{name}").match?(/bc2cpp_fixnum_#{op}\((r\d+), mrb_fixnum_value\(1\), \1\)/))
