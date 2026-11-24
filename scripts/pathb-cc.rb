@@ -84,6 +84,7 @@ uchar = 0
 ld_trap = ((ENV["PATHB_LONG_DOUBLE"].to_s.empty? ? ENV["NFCXX_LONG_DOUBLE"].to_s : ENV["PATHB_LONG_DOUBLE"]) == "trap") ? 1 : 0
 keep = ENV["PATHB_KEEP"].to_s
 timeout_s = ENV["NFCXX_PATHB_TIMEOUT"].to_s.empty? ? "300" : ENV["NFCXX_PATHB_TIMEOUT"]
+timeout_given = !ENV["NFCXX_PATHB_TIMEOUT"].to_s.empty?   # an explicit limit is kept for every stage (see the SSA route)
 dump_opts = []
 debug_on = 0   # -g: a line table (the IR's (loc ...) statements become QBE's dbgloc lines)
 
@@ -124,7 +125,7 @@ while !args.empty?
   when "-isystem", "-idirafter" then opts.push(x, args.shift.to_s)
   when /\A-isystem./, /\A-idirafter./ then opts << x
   when /\A--keep=/ then keep = x.delete_prefix("--keep=")
-  when /\A--timeout=/ then timeout_s = x.delete_prefix("--timeout=")
+  when /\A--timeout=/ then timeout_s = x.delete_prefix("--timeout="); timeout_given = true
   when "-I", "-D", "-U" then opts << "#{x}#{args.shift}"
   when "--modules" then opts << "--modules"
   when "--modules_directory", "--create_module_interface" then opts.push(x, args.shift.to_s)
@@ -265,17 +266,21 @@ emit_err = File.join(tmp, "#{n}.emit")
 s_path = File.join(tmp, "#{n}.s")
 ssa_cmd = [File.join(ROOT, "scripts", "pathb-ssa-build"), "--qbe=#{qbe}", "-o", s_path, *i386opt, *pic, *nopie, *ldopt,
            *safe, *asan, *debug, ir]
+# The SSA route's budget grows with the IR it is given: QBE with the default loop vectorizer takes about 23 s per MB of IL (a
+# 17 MB unit, one large function of Lean's generated C, took 390 s), and the budget allows 40 s per MB, so a loaded machine still
+# fits. Only the default limit grows; an explicit --timeout or NFCXX_PATHB_TIMEOUT stands for every stage.
+ssa_timeout = timeout_given || timeout_s == "0" ? timeout_s : [timeout_s.to_i, (File.size(ir) / 25_000.0).ceil].max.to_s
 if emitter == "ssa"
-  rc = tmo_status(timeout_s, *ssa_cmd, err: emit_err)
+  rc = tmo_status(ssa_timeout, *ssa_cmd, err: emit_err)
   if rc != 0 && rc != 124 && rc != 5 && raw == 1   # the optimized IR is refused: emit the unoptimized one
     warn("pathb-cc: #{src}: the optimized IR is refused (#{first_line(emit_err)}), using the unoptimized IR")
     FileUtils.cp("#{ir}.raw", ir)
-    rc = tmo_status(timeout_s, *ssa_cmd, err: emit_err)
+    rc = tmo_status(ssa_timeout, *ssa_cmd, err: emit_err)
   end
   if rc != 0
     # a function outside the SSA route's subset refuses the unit (no fallback to the mruby emitter)
     if rc == 124
-      warn("pathb-cc: #{src}: SSA route: ran over #{timeout_s} s (--timeout) and was stopped")
+      warn("pathb-cc: #{src}: SSA route: ran over #{ssa_timeout} s (--timeout) and was stopped")
     else
       warn("pathb-cc: #{src}: SSA route: #{first_line(emit_err)}")
     end
