@@ -25,6 +25,7 @@ if [ ! -f "$src/CMakeLists.txt" ]; then
   git -C "$root" submodule update --init --depth 1 3rd/edg
 fi
 
+
 # macOS (Apple Silicon or Intel): EDG's own clang base and CMake preset. Its long double (8 bytes, binary64 on arm64)
 # and predefined macros are the macOS ones, so none of the Linux workarounds below apply.
 # NFCXX_EDG_TARGET=macos-arm64 (cross path, scripts/setup-cross-macos.sh) takes this branch on a Linux host too: the
