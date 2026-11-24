@@ -182,7 +182,6 @@ cudatmp=""
 # the host copy with a registration tail (pathb-ptx-emit --embed), so the one object holds the host code and its device
 # images. A file with no kernel gets no device image.
 # The cache helpers (the compile cache below and the device image cache of cu_rewrite).
-cache_sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }
 # The rewritten copy of each .cu input is made after the arguments are read (cu_prepare), so that -c and -o are known:
 # with -c the copy goes to the per-user cache (scripts/nfcxx-cu-cpp2-prepare.rb), not to the user's tree. Otherwise it goes in a temp directory.
 cu_inputs=()
