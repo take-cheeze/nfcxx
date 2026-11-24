@@ -604,6 +604,9 @@ module NfcxxBody
     base = @env["EDG_BASE"].to_s.empty? ? File.join(ROOT, "build", "edg-base") : @env["EDG_BASE"]
     # the front end runs in its base directory (the body's cd "$base"): a missing one is status 1 with a message
     fail!("nfcxx: cd: #{base}: No such file or directory", 1) unless File.directory?(base)
+    cpfe = File.join(edg, "cpfe")
+    # the front end is started by the shell in the base directory: a missing binary is its error, status 127
+    raise Exit.new(127, "No such file or directory - #{cpfe}\n") unless File.executable?(cpfe)
     tmp = temp_dir("tmp")
     posix = `uname -s`.chomp == "Darwin" ? %w[-D_DARWIN_C_SOURCE -U__BLOCKS__] : %w[-D_POSIX_SOURCE]
     eh_tls = File.file?(File.join(edg_base, "eh-tls")) ? ["--nfcxx_eh_thread_local"] : []
