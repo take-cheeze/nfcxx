@@ -16,11 +16,11 @@ class CodeGen
   # for Integer by identity and for Float by the operand proof.
   LITERAL_EQ_FALSE_BODIES = %w[
     mrb_obj_equal_m mrb_str_equal_m mrb_int_equal_m mrb_flo_equal_m mrb_ary_eq_m mrb_hash_equal_m range_eq proc_eql
-    mrb_struct_equal time_eq method_eql set_equal
+    mrb_struct_equal time_eq method_eql set_equal fiber_eq
   ].freeze
   # The classes whose native `==` the registration scan cannot name, read by hand: Rect, Color and Tone
-  # (mruby-rgss/src/lib.cxx *_eq_native_body), OnigRegexp (onig_regexp_equal), Fiber (fiber_eq) and Data
-  # (mrb_data_equal) each answer false unless the argument is of the receiver's class or identical.
+  # (mruby-rgss/src/lib.cxx *_eq_native_body), OnigRegexp (onig_regexp_equal), Fiber (fiber_eq, until its ROM table
+  # names it) and Data (mrb_data_equal) each answer false unless the argument is of the receiver's class or identical.
   LITERAL_EQ_OPAQUE_OWNERS = %w[Rect Color Tone OnigRegexp Fiber Data].freeze
   # The core classes that include Comparable, whose Comparable#== (mrblib/compar.rb, `(self <=> other).equal?(0)`)
   # their instances reach only through Numeric, the one without a native `==` of its own; a Numeric's `<=>` is the
