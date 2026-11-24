@@ -45,6 +45,7 @@ module NfcxxCuRecords
     group(out, "cache_log", [state.cache_log_file.to_s])
     group(out, "preinc", state.preinc)
     group(out, "cuda", [])
+    group(out, "cpp2_inputs", state.cpp2_inputs)
     group(out, "edg_launch", [env["NFCXX_CUDA_EDG_LAUNCH"].to_s.empty? ? "1" : env["NFCXX_CUDA_EDG_LAUNCH"]])
     out
   end
