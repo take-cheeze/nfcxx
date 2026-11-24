@@ -45,6 +45,7 @@
 # a literal or fragment (read from a game file, then `send`) would be missed.
 # Nothing does that for an RPG2000/2003-internal class today, and a listed name
 # must stay free of dynamic references, or it ships a NoMethodError.
+require_relative '../mrbc_rb/mrbc_default.rb'
 require_relative 'world_root'
 require 'digest'
 require 'fileutils'
@@ -2254,7 +2255,7 @@ if $PROGRAM_NAME == __FILE__
     # Exit 0 when DIR holds the lists for this tree: the cheap test that lets a caller skip building a host mrbc.
     exit(StaticDispatchRegistrations.current?(repo_root, check_dir) ? 0 : 1)
   elsif emit_dir
-    lists = StaticDispatchRegistrations.emit(repo_root, ENV['MRBC'] || 'mrbc', emit_dir)
+    lists = StaticDispatchRegistrations.emit(repo_root, ENV['MRBC'] || MrbcRbDefault.command, emit_dir)
     warn "open #{lists.open.size}, closed #{lists.closed.size}, core ROM #{lists.core_excluded.size}, " \
          "core run-time #{lists.core_left_out.size}, engine ROM #{lists.engine_rom.size}"
   else

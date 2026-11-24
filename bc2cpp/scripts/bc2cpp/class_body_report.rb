@@ -8,6 +8,7 @@
 #
 # Usage: [MRBC=path/to/mrbc] ruby scripts/bc2cpp/class_body_report.rb [--blockers] [--bytecode] [--world[=FILE]]
 # --world: the class graph facts (tools/bc2cpp/class_world.rb): how much is exact, and as JSON in FILE.
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 require_relative '../../tools/bc2cpp/world_root'
 require 'json'
 require 'set'
@@ -81,7 +82,7 @@ end
 LOAD_ONLY = %i[CLASS MODULE SCLASS EXEC TDEF SDEF DEF METHOD ALIAS UNDEF TCLASS OCLASS].freeze
 
 def bytecode_report(roots)
-  mrbc = ENV['MRBC'] || 'mrbc'
+  mrbc = ENV['MRBC'] || MrbcRbDefault.command
   handled = handled_ops
   kinds = Hash.new { |h, k| h[k] = { ireps: 0, insns: 0, iseq: 0 } }
   load_ops = Hash.new(0)
@@ -170,7 +171,7 @@ rescue StandardError
 end
 
 def tag_report(roots, scans, omit)
-  mrbc = ENV['MRBC'] || 'mrbc'
+  mrbc = ENV['MRBC'] || MrbcRbDefault.command
   handled = handled_ops
   world = ClassWorld.build(scans.values)
   consts = Hash.new(0)
