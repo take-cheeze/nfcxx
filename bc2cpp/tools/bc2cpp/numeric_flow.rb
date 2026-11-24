@@ -744,7 +744,7 @@ module NumericFlow
                 :tests, :test_ids, :const_quiet, :rescue_only, :context_edges, :self_mask, :block_send, :super_mask,
                 :preserves, :loadself, :keyword_mask, :keyword_presence, :array_mask, :hash_mask, :index_mask,
                 :aref_mask, :operator_mask, :literal_class, :false_class, :class_eq_test, :note_class_test, :noreturn,
-                :elide_load_copies
+                :elide_load_copies, :survives
 
     # The run of NumericFlow.states, asking the oracle what the old setup asked, in the same order.
     def self.for_run(irep, oracle, opaque, writes, rescue_only)
@@ -825,6 +825,7 @@ module NumericFlow
       @class_eq_test = oracle.respond_to?(:class_eq_test)
       @note_class_test = oracle.respond_to?(:note_class_test)
       @noreturn = oracle.respond_to?(:noreturn_call?)
+      @survives = oracle.respond_to?(:receiver_survives?)
     end
 
     def narrowing(test_base, tests, test_ids, const_quiet)
@@ -861,6 +862,42 @@ module NumericFlow
         @test_reach << codes.reduce(-1) { |reach, code| code > slots && code - slots - 1 > reach ? code - slots - 1 : reach }
       end
     end
+  end
+
+  # RECEIVER_SURVIVES: a call or index whose name nil cannot answer (the oracle's receiver_survives?) raises on a nil
+  # receiver, so the state it hands its normal successors has NIL stripped from the receiver and from the variable
+  # behind it (narrow_chain). Handler edges join the state from before the op (step_raise_state), which keeps nil.
+  SURVIVE_INDEX_NAMES = { :GETIDX => '[]', :GETIDX0 => '[]', :SETIDX => '[]=' }.freeze
+  SURVIVE_SEND_OPS = Set[:SEND, :SEND0, :SENDB].freeze
+
+  def survive_receiver(index, insn, step, state, c)
+    op = step.op
+    if (name = SURVIVE_INDEX_NAMES[op])
+      recv = op == :GETIDX0 ? step.b : step.a
+    elsif SURVIVE_SEND_OPS.include?(op)
+      name = insn.sym
+      recv = step.a
+    else
+      return state
+    end
+    return state unless name && recv && recv < c.nregs
+
+    mask = state[recv]
+    return state unless mask.is_a?(Integer) && mask.anybits?(NIL) && mask != NIL
+    return state unless c.oracle.receiver_survives?(name.to_s)
+
+    out = narrow_chain(state, recv, B_NIL, false, c, [])
+    return state unless out
+
+    # SETIDX leaves the assigned value in its receiver register (mruby vm.c OP_SETIDX): only the variable behind it
+    # keeps the receiver.
+    if op == :SETIDX && !out[recv].eql?(state[recv])
+      out = out.dup if out.equal?(state)
+      out[recv] = state[recv]
+    end
+
+    c.oracle.note_receiver_survives(c.irep, index, state, out, c.nregs) if c.oracle.respond_to?(:note_receiver_survives)
+    out
   end
 
   # The state a handler starts from when +insn+ raises. A callee frame starts at R(a) and may
@@ -1132,6 +1169,7 @@ module NumericFlow
   end
 
   def step_transfer(index, insn, step, state, c)
+    state = survive_receiver(index, insn, step, state, c) if c.survives
     kind = step.kind
     if kind == K_NO_WRITE
       return state
