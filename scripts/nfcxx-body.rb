@@ -568,8 +568,8 @@ module NfcxxBody
   def emit_c_route
     raise Exit.new(2, "nfcxx: --emit-c does not apply to .c inputs (they skip the front end)\n") unless a("cfiles").empty?
     base = @env["EDG_BASE"].to_s.empty? ? File.join(ROOT, "build", "edg-base") : @env["EDG_BASE"]
-    # the front end runs in its base directory (the body's cd "$base"): a missing one is the shell's failure, status 1, no message
-    raise Exit.new(1) unless File.directory?(base)
+    # the front end runs in its base directory (the body's cd "$base"): a missing one is status 1 with a message
+    fail!("nfcxx: cd: #{base}: No such file or directory", 1) unless File.directory?(base)
     tmp = temp_dir("tmp")
     f = File.realpath(a("srcs")[0])
     inc = a("sys_inc") + ["--sys_include=#{base}/include"]
@@ -602,7 +602,8 @@ module NfcxxBody
       s = ""
       pb_tables = v("backend") == "pathb" && File.file?(File.join(File.dirname(@env["PATHB_CPFE"] || File.join(ROOT, "build", "pathb", "cmake", "bin", "cpfe")), "eh-tables"))
       unless !flag?("eh_shim_on") || pb_tables
-        s, _e, _st = capture(File.join(ROOT, "scripts", "ehshim.rb"))
+        s, shim_err, _st = capture(File.join(ROOT, "scripts", "ehshim.rb"))
+        $stderr.write(shim_err)
         s = s.chomp
       end
       trace_end(t, "EH shim", "driver")
