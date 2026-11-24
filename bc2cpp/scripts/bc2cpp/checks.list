@@ -26,6 +26,7 @@ ruby scripts/bc2cpp/fiber_iterator_root_check.rb
 ruby scripts/bc2cpp/optcarrot_probe_scan_check.rb
 ruby scripts/bc2cpp/block_step_layout_check.rb
 ruby scripts/bc2cpp/step_closures_check.rb
+ruby scripts/bc2cpp/proc_spec_lazy_check.rb
 ruby scripts/bc2cpp/ssend_helper_check.rb
 ruby scripts/bc2cpp/enumerator_next_check.rb
 ruby scripts/bc2cpp/block_step_check.rb
