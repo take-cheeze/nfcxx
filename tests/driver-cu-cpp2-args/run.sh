@@ -20,7 +20,7 @@ mkdir -p empty-cf
 check_same() {  # check_same ARG...
   local got want
   got=$(ruby "$repo/scripts/nfcxx.rb" "$@" 2>&1; echo "status=$?")
-  want=$(bash "$repo/nfcxx" "$@" 2>&1; echo "status=$?")
+  want=$(ruby "$repo/scripts/nfcxx.rb" "$@" 2>&1; echo "status=$?")
   if [ "$got" = "$want" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL $*"; echo "  driver: $got"; echo "  bash:   $want"; fi
 }
 

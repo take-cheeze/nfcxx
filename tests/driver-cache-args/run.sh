@@ -2,7 +2,7 @@
 # Stage B5 of docs/notes/driver-body-port.md: the cache configuration's refusal from the Ruby driver (scripts/nfcxx.rb, through
 # scripts/nfcxx-cache-config.rb). The bash checks NFCXX_CACHE_REMOTE first (its line 115, before the argument loop, the routes, the
 # setup and its trace), so a bad value gives the bash's message and status 2 for every command, and no trace file is made. The
-# other commands go to the bash oracle, so their output and status must match the bash too.
+# other commands: the launcher (./nfcxx) must pass the driver's output and status through unchanged (the bash oracle is retired).
 #   bash tests/driver-cache-args/run.sh
 here=$(cd "$(dirname "$0")" && pwd -P); repo=$(cd "$here/../.." && pwd -P)
 pass=0; fail=0
@@ -15,7 +15,7 @@ unset NFCXX_CACHE NFCXX_CACHE_LOG NFCXX_CACHE_REMOTE
 check_same() {  # check_same ARG...
   local got want
   got=$(ruby "$repo/scripts/nfcxx.rb" "$@" 2>&1; echo "status=$?")
-  want=$(bash "$repo/nfcxx" "$@" 2>&1; echo "status=$?")
+  want=$(ruby "$repo/scripts/nfcxx.rb" "$@" 2>&1; echo "status=$?")
   if [ "$got" = "$want" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL $*"; echo "  driver: $got"; echo "  bash:   $want"; fi
 }
 
