@@ -65,11 +65,36 @@ module NfcxxBody
       $stderr.write(e.message) unless e.message.empty?
       e.status
     rescue Fallback
-      # the gcc run that follows closes the trace; this run's span and its end are not written (the body's fallback_gcc set no exit mode)
-      @trace_t0 = nil
+      # the body's fallback_gcc ends this run without its span: the file gets this run's end marker, and the gcc run writes its span
+      close_trace_marker
       raise
     ensure
       cleanup_temps
+    end
+  end
+
+  # a refusal the driver prints before the body runs (the setup's and the input's, scripts/nfcxx.rb): the trace is opened first, as
+  # the bash did, so the file and its end are written; the message goes to standard error and the status is the refusal's
+  def refuse(argv, env, message, status)
+    @env = env
+    @argv = argv.dup
+    file = argv.reverse.find { |a| a.start_with?("--trace=") }&.delete_prefix("--trace=") || env["NFCXX_TRACE"].to_s
+    @trace_t0 = NfccxxTrace.begin_trace(file, env: env) unless file.empty?
+    $stderr.write(message)
+    status
+  ensure
+    close_trace_marker
+  end
+
+  # the end marker of a trace this process owns, without a span (the bash's exits that end before the driver's span)
+  def close_trace_marker
+    return unless @trace_t0
+
+    @trace_t0 = nil
+    return unless @env["NFCXX_TRACE_OWNER"].to_s == Process.pid.to_s
+
+    File.open(@env["NFCXX_TRACE"], "a") do |f|
+      f.write(format(%({"name":"trace_end","ph":"i","s":"g","ts":%d,"pid":%d,"tid":1}\n]\n), NfccxxTrace.now_us, Process.pid))
     end
   end
 
@@ -112,17 +137,24 @@ module NfcxxBody
     values.flatten.each { |x| out << "v#{x}\0" }
   end
 
-  def run_cmd(*cmd, env: {}, out: nil)
+  # a command that cannot be started is status 127, as the shell reports it (its message goes to standard error)
+  def run_cmd(*cmd, env: {}, out: nil, chdir: nil)
     options = out ? { out: out } : {}
+    options[:chdir] = chdir if chdir
     pid = Process.spawn(env, *cmd, **options)
     Process.wait(pid)
     $?.exitstatus || 128 + $?.termsig
+  rescue Errno::ENOENT, Errno::EACCES => e
+    $stderr.puts(e.message)   # the shell's message, not the driver's
+    127
   end
 
   def capture(*cmd, env: {}, stdin: nil)
     opts = stdin ? { stdin_data: stdin, binmode: true } : { binmode: true }
     out, err, status = Open3.capture3(env, *cmd, **opts)
     [out, err, status.exitstatus || 128 + status.termsig.to_i]
+  rescue Errno::ENOENT, Errno::EACCES => e
+    ["", "#{e.message}\n", 127]
   end
 
   def ruby_cmd
@@ -193,6 +225,8 @@ module NfcxxBody
     cu_prepare
     syntax_and_tool
     early_pre
+    preprocess_route if flag?("preprocess")
+    post_early
     modules_block
     setup_rest
     ecp_answers
@@ -380,6 +414,16 @@ module NfcxxBody
     out
   end
 
+  # the -E route: the host C++ compiler preprocesses (scripts/nfcxx-preprocess.rb plans the command); the body execs it
+  def preprocess_route
+    recs, err, st = capture(ruby_cmd, script("nfcxx-preprocess.rb"), stdin: preprocess_records, env: @env)
+    $stderr.write(err)
+    raise Exit.new(st) unless st == 0
+    argv = recs.split("\0", -1).reject(&:empty?)
+    fail!("nfcxx: scripts/nfcxx-preprocess.rb planned no command", 2) if argv.empty?
+    raise Exit.new(run_cmd(*argv, env: @env))
+  end
+
   # --- the modules block -------------------------------------------------------------------------------------------
 
   def modules_plan_input
@@ -524,6 +568,8 @@ module NfcxxBody
   def emit_c_route
     raise Exit.new(2, "nfcxx: --emit-c does not apply to .c inputs (they skip the front end)\n") unless a("cfiles").empty?
     base = @env["EDG_BASE"].to_s.empty? ? File.join(ROOT, "build", "edg-base") : @env["EDG_BASE"]
+    # the front end runs in its base directory (the body's cd "$base"): a missing one is the shell's failure, status 1, no message
+    raise Exit.new(1) unless File.directory?(base)
     tmp = temp_dir("tmp")
     f = File.realpath(a("srcs")[0])
     inc = a("sys_inc") + ["--sys_include=#{base}/include"]
@@ -536,9 +582,7 @@ module NfcxxBody
     eh_tls = File.exist?(File.join(edg_base, "eh-tls")) ? ["--nfcxx_eh_thread_local"] : []
     cmd = [File.join(edg, "cpfe"), *posix, "-D__CHAR_BIT__=8", v("std"), "--#{v("dialect")}", *eh_tls,
            *a("gnu_opts"), *a("diag_opts"), *inc, "--gen_c_file_name=#{tmp}/out.c", f]
-    pid = Process.spawn(@env, *cmd, chdir: base, out: File::NULL)
-    Process.wait(pid)
-    status = $?.exitstatus || 128 + $?.termsig
+    status = run_cmd(*cmd, env: @env, out: File::NULL, chdir: base)
     raise Exit.new(status) unless status == 0
     $stdout.write(File.binread("#{tmp}/out.c"))
     raise Exit.new(0)

@@ -331,8 +331,7 @@ begin
     system(ENV.to_h, ENV["RUBY"] || RbConfig.ruby, SYCL_SCRIPT, "run", "--root=#{ROOT}", *ARGV)
     status_code = $?.exitstatus || 128 + $?.termsig
   elsif refusal
-    $stderr.puts(refusal.message)
-    status_code = refusal.status
+    status_code = NfcxxBody.refuse(ARGV, ENV, refusal.message.end_with?("\n") ? refusal.message : "#{refusal.message}\n", refusal.status)
   else
     begin
       status_code = NfcxxBody.run(ARGV, ENV)
