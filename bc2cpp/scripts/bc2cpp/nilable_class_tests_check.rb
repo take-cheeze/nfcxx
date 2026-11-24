@@ -302,7 +302,9 @@ ensure
 end
 Dir.mktmpdir('nilable-scoped-receiver') do |dir|
   on_body, _code, on_err = scoped_body.call(scoped_source, File.join(dir, 'on'))
-  off_body, = scoped_body.call(scoped_source, File.join(dir, 'off'), 'BC2CPP_NILABLE_SCOPED_RECEIVER' => '0')
+  # RECEIVER_SURVIVES strips the same nil from the receiver the send's result is computed from, so it is off too.
+  off_body, = scoped_body.call(scoped_source, File.join(dir, 'off'), 'BC2CPP_NILABLE_SCOPED_RECEIVER' => '0',
+                                                                     'BC2CPP_RECEIVER_SURVIVES' => '0')
   nil_body, = scoped_body.call(scoped_source + nil_party, File.join(dir, 'nil'))
   nil_off_body, = scoped_body.call(scoped_source + nil_party, File.join(dir, 'nil_off'), 'BC2CPP_NILABLE_SCOPED_RECEIVER' => '0')
   count_arm = 'CLOSED_WORLD nomethod: recv.count'
@@ -351,5 +353,72 @@ Dir.mktmpdir('nilable-scoped-receiver') do |dir|
     end
   end
 end
+
+# RECEIVER_SURVIVES (numeric_flow.rb survive_receiver): after `x[k]`, `x[k] = v` or `x.m` returns, where nil answers
+# neither `[]`, `[]=` nor `m`, the variable x is not nil, so a later index or call on it needs no NILABLE_RECEIVER nil
+# test. A rescue handler still sees nil; BC2CPP_RECEIVER_SURVIVES=0 is the output before.
+SURVIVE_SOURCE = <<~RUBY
+  class Spot
+    def initialize; @n = 1; nil; end
+    def bump; @n += 1; end
+    def peek; @n; end
+  end
+
+  class Holder
+    def initialize
+      @ui = nil
+      @spot = nil
+      nil
+    end
+
+    def open; @ui = { a: 1, b: 2 }; @spot = Spot.new; nil; end
+    def close; @ui = nil; @spot = nil; nil; end
+
+    def two_reads; ui = @ui; a = ui[:a]; b = ui[:b]; [a, b]; end
+    def write_then_read; ui = @ui; ui[:a] = 3; ui[:b]; end
+    def call_then_call; s = @spot; s.bump; s.peek; end
+    def rescued_read
+      ui = @ui
+      begin
+        ui[:a]
+      rescue NoMethodError
+        nil
+      end
+      ui[:b]
+    end
+    def branch_read(f); ui = @ui; ui[:a] if f; ui[:b]; end
+  end
+RUBY
+
+survive_bodies = lambda do |env|
+  env.each { |k, v| ENV[k] = v }
+  Dir.mktmpdir('receiver_survives') do |dir|
+    code, = Bc2cppFixtureRuntime.generate(SURVIVE_SOURCE, dir, only_owners: %w[Spot Holder])
+    # Each method's own functions: its body and the try body a rescue splits out of it.
+    %w[two_reads write_then_read call_then_call rescued_read branch_read].to_h do |name|
+      ["Holder##{name}", code.scan(/^(?:static )?mrb_value Holder_#{name}_impl\w*\([^\n]*\{\n.*?^\}/m).join("\n")]
+    end
+  end
+ensure
+  env.each_key { |k| ENV.delete(k) }
+end
+survive_on = survive_bodies.call({})
+survive_off = survive_bodies.call('BC2CPP_RECEIVER_SURVIVES' => '0')
+survive_verify = survive_bodies.call('BC2CPP_RECEIVER_SURVIVES_VERIFY' => '1')
+nil_tests = ->(body) { body.to_s.scan(/NILABLE_RECEIVER :/).size }
+
+check.call('RECEIVER_SURVIVES: the fixture compiles without #error', survive_on.values.none? { |b| b.include?('#error') })
+check.call('switched off, both reads of a nil-or-Hash local keep their nil test', nil_tests.call(survive_off['Holder#two_reads']) == 2)
+check.call('the read after a read of the same local has no nil test', nil_tests.call(survive_on['Holder#two_reads']) == 1)
+check.call('the read after `ui[:a] = 3` has no nil test',
+           nil_tests.call(survive_off['Holder#write_then_read']) == 2 && nil_tests.call(survive_on['Holder#write_then_read']) == 1)
+check.call('the call after `s.bump` has no nil test',
+           nil_tests.call(survive_off['Holder#call_then_call']) == 2 && nil_tests.call(survive_on['Holder#call_then_call']) == 1)
+check.call('the read after a rescued read keeps its nil test', nil_tests.call(survive_on['Holder#rescued_read']) == 2)
+check.call('the read after a read on one branch only keeps its nil test', nil_tests.call(survive_on['Holder#branch_read']) == 2)
+check.call('verify mode checks the narrowed local after the op',
+           survive_verify['Holder#two_reads'].to_s.include?('RECEIVER_SURVIVES_VERIFY') &&
+             !survive_on['Holder#two_reads'].to_s.include?('RECEIVER_SURVIVES_VERIFY'))
+check.call('verify mode keeps the narrowing', nil_tests.call(survive_verify['Holder#two_reads']) == 1)
 
 suite.finish!
