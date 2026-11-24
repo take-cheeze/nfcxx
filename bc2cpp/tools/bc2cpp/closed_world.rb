@@ -2709,8 +2709,10 @@ class ClosedWorld
     literal = irep.walk_dominating_writers(index - 1, writer.reg, use: index, follow_moves: true) do |receiver, at|
       next false if writer.op == :ADD && !FRESH_ADD_RECEIVERS.include?(receiver.op)
 
+      # A literal past the register window is ARRAY then one ARYPUSH per chunk: the chain costs no depth.
+      chunk = writer.op == :ARYPUSH && receiver.op == :ARYPUSH
       FREEZE_LITERAL_WRITERS.include?(receiver.op) || (writer.op == :ARYCAT && receiver.op == :LOADNIL) ||
-        fresh_builtin_result?(irep, at, receiver, depth + 1)
+        fresh_builtin_result?(irep, at, receiver, chunk ? depth : depth + 1)
     end
     return false unless literal == true
 
