@@ -18,6 +18,7 @@
 #
 # Usage: [MRBC=path/to/mrbc] [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/shard_output_check.rb
 
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 require 'fileutils'
 require 'open3'
 require 'tmpdir'
@@ -272,7 +273,7 @@ Dir.mktmpdir('bc2cpp-shard-tiers') do |dir|
 end
 
 puts '-- generated code'
-mrbc =ENV['MRBC'] || ENV.fetch('PATH', '').split(File::PATH_SEPARATOR).map { |d| File.join(d, 'mrbc') }.find { |p| File.executable?(p) }
+mrbc = ENV['MRBC'] || ENV.fetch('PATH', '').split(File::PATH_SEPARATOR).map { |d| File.join(d, 'mrbc') }.find { |p| File.executable?(p) } || MrbcRbDefault.command
 if mrbc.nil?
   puts '  SKIP: no host mrbc (set MRBC)'
   suite.finish!

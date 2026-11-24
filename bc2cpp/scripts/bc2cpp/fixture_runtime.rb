@@ -12,6 +12,7 @@
 # BC2CPP_CXXFLAGS adds compiler flags, e.g. -DMRB_INT32 for a build whose mrb_int is 32 bits
 # wide (the Emscripten width); run with that build's own MRBC.
 # BC2CPP_KEEP_DIR=path keeps the last fixture directory (generated code, binary).
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 require_relative '../../tools/bc2cpp/world_root'
 require 'etc'
 require 'fileutils'
@@ -40,7 +41,7 @@ module Bc2cppFixtureRuntime
   module_function
 
   def mrbc
-    ENV['MRBC'] || 'mrbc'
+    ENV['MRBC'] || MrbcRbDefault.command
   end
 
   # A build dir holding `library` and include/, from `env` or nil.

@@ -38,6 +38,7 @@
 # Exit status: 0 clean, 1 when a declared type contradicts the inference or a signature cannot be used, 2 when the
 # analysis itself failed.
 # BC2CPP_TOOLS_DIR: another copy of tools/bc2cpp (a mutant of type_check_mutation_check.rb).
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 TOOLS = ENV['BC2CPP_TOOLS_DIR'] || File.expand_path('../../tools/bc2cpp', __dir__)
 $LOAD_PATH.unshift(TOOLS)
 require_relative '../../tools/bc2cpp/world_root'
@@ -82,7 +83,7 @@ abort 'type_check: --iterate runs the analysis, so it cannot be combined with --
 # One analysis under the given signature directories (nil: the default); returns [facts, rows].
 analyse = lambda do |sig_dirs|
   require 'type_check_run'
-  mrbc = ENV['MRBC'] || 'mrbc'
+  mrbc = ENV['MRBC'] || MrbcRbDefault.command
   Dir.mktmpdir('bc2cpp_type_check') do |dir|
     work = opts[:keep] ? FileUtils.mkdir_p(opts[:keep]).first : dir
     begin

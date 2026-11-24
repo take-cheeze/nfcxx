@@ -2,5 +2,11 @@
 # frozen_string_literal: true
 
 # A drop-in for the fork's `mrbc` command line (see ../cli.rb for the switches, the fallback and the environment).
+# The emitter needs Prism 1.9.0 (the pin of bc2cpp/3rd/prism); when that version is not installed the default one is used.
+begin
+  gem 'prism', '1.9.0'
+rescue Gem::LoadError
+  nil
+end
 require_relative '../cli'
 exit MrbcRb::Cli.run(ARGV)

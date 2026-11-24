@@ -29,6 +29,7 @@
 #   NATIVE_SRCS      optional override for bc2cpp's own NATIVE_SRCS (defaults
 #                     to mruby-rgss/src/*.cxx, matching both mrbgem.rake files).
 
+require_relative '../mrbc_rb/mrbc_default.rb'
 require_relative 'world_root'
 require 'json'
 require 'shellwords'
@@ -66,7 +67,7 @@ DEFAULT_HARNESSES = [
 # reproduces the project-wide list. Parses `== annotation candidates ==`.
 # ---------------------------------------------------------------------------
 def live_candidates
-  mrbc = ENV['MRBC'] || 'mrbc'
+  mrbc = ENV['MRBC'] || MrbcRbDefault.command
   closed_world = Dir[File.join(ROOT, 'mruby-rpg2k/mrblib/**/*.rb')] +
                  Dir[File.join(ROOT, 'mruby-lcf/mrblib/*.rb')] +
                  Dir[File.join(ROOT, 'mruby-rgss/mrblib/*.rb')]
