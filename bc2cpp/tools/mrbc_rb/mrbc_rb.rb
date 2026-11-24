@@ -947,6 +947,7 @@ module MrbcRb
       index = @children.size - 1
       
       emit(:BLOCK, sp, index)
+      ann_block_send(node, :literal, index)
       emit_send(a, recv, node.name, argc, true)
       dispatch(skip)
       @nregs = [@nregs, sp + 1].max
@@ -1578,6 +1579,7 @@ module MrbcRb
       lp = Loop.new(last ? t : nil, @code.size, [])
       @labels << lp.pc0
       @loops << lp
+      ann = ann_loop_open(node)
       begin
         unless forever
           value_into(pred, t)
@@ -1594,6 +1596,7 @@ module MrbcRb
         back = emit_jump(:JMP)
         patch_jump(back, lp.pc0)
         dispatch(to_exit)
+        ann_loop_close(ann, header_pc: lp.pc0, body_pc: lp.pc1, back_pc: back, exit_pc: @code.size)
         emit(:LOADNIL, t) if last
         lp.breaks.each { |j| dispatch(j) }
       ensure
@@ -1626,6 +1629,7 @@ module MrbcRb
 
       lp = Loop.new(last ? t : nil, nil, [])
       @loops << lp
+      ann = ann_loop_open(node)
       begin
         @line = pred.location.start_line # the loop node is stamped with the line of its condition (verified)
         to_body = emit_jump(:JMP)
@@ -1643,6 +1647,7 @@ module MrbcRb
         back = emit_jump(:JMP)
         patch_jump(back, lp.pc0)
         dispatch(to_exit)
+        ann_loop_close(ann, header_pc: lp.pc0, body_pc: lp.pc1, back_pc: back, exit_pc: @code.size)
         emit(:LOADNIL, t) if last
         lp.breaks.each { |j| dispatch(j) }
       ensure
@@ -1670,6 +1675,7 @@ module MrbcRb
         @nregs = [@nregs, lp.reg + args.size].max
         emit(:ARRAY, lp.reg, args.size)
         lp.breaks << emit_jump(:JMPUW)
+        ann_loop_exit(:break, lp.breaks.last)
         return last ? temp : nil
       end
       raise Unsupported, 'break with several values' if args && args.size != 1 && lp.reg
@@ -1689,6 +1695,7 @@ module MrbcRb
         emit(:LOADNIL, lp.reg)
       end
       lp.breaks << emit_jump(:JMPUW)
+      ann_loop_exit(:break, lp.breaks.last)
       last ? temp : nil
     end
 
@@ -1709,6 +1716,7 @@ module MrbcRb
       end
       jump = emit_jump(:JMPUW)
       patch_jump(jump, lp.pc0)
+      ann_loop_exit(:next, jump)
       last ? temp : nil
     end
 
@@ -2973,6 +2981,7 @@ module MrbcRb
       skip = safe_jump(a, need) if node.safe_navigation?
       args, block = forwarding_arguments(node)
       argc, blk = gen_args(block, a, args, node.closing_loc&.start_line)
+      ann_block_send(node, ann_pass_kind(block)) if blk
       emit_send(a, recv, node.name, argc, blk)
       dispatch(skip)
       a
@@ -3977,6 +3986,7 @@ module MrbcRb
       
       reach(t + 2)
       emit(:BLOCK, t + 1, index)
+      ann_block_send(node, :for, index)
       emit(:SENDB, t, sym_index(:each), 0)
       last ? t : nil
     end
@@ -5536,6 +5546,7 @@ module MrbcRb
       region = @regions.reverse.find { |g| g.type == :rescue } or raise Unsupported, 'retry outside a rescue clause'
       jump = emit_jump(:JMPUW)
       patch_jump(jump, region.pc0)
+      ann_loop_exit(:retry, jump)
       last ? temp : nil
     end
 
@@ -5609,6 +5620,7 @@ module MrbcRb
       lp = @loops.last or raise Unsupported, 'redo outside a loop or block'
       jump = emit_jump(:JMPUW)
       patch_jump(jump, lp == BLOCK_LOOP ? 0 : (lp.pc1 or raise(Unsupported, 'redo in this loop')))
+      ann_loop_exit(:redo, jump) unless lp == BLOCK_LOOP
       last ? temp : nil
     end
 
@@ -5726,6 +5738,7 @@ module MrbcRb
         end
       end
       @sp = a
+      ann_block_send(node, literal ? :literal : (node.block ? ann_pass_kind(node.block) : :implicit), literal ? @children.size - 1 : nil)
       emit(:SUPER, a, n)
       last ? a : nil
     ensure

@@ -26,7 +26,9 @@ module MrbcRb
   #     owner:  { irep: Integer, pc: Integer } | nil,   # for a class/module/sclass body: the opener (CLASS/MODULE/SCLASS)
   #     in_block: true|false,                  # inside a literal block (def/alias/constants there have a dynamic owner)
   #     vis_calls: [ { name:, args: [String]|nil, line:, owner_path: } ],   # `private :a, :b`, `private_class_method ...`
-  #     ops: { pc => op_record } }             # pc = byte offset of the instruction in this irep (including an EXT prefix)
+  #     ops: { pc => op_record },              # pc = byte offset of the instruction in this irep (including an EXT prefix)
+  #     loops: [ loop_record, ... ],           # its while/until loops, by header_pc
+  #     block_sends: { pc => block_send_record } }
   #
   #   op_record (every one has op:, line:, file:):
   #     CLASS / MODULE:  kind: :class|:module, name: written last segment, written: source text of the path,
@@ -60,12 +62,27 @@ module MrbcRb
   #                      { kind: :const, text: written path, rooted: true|false } | { kind: :splat } | { kind: :keywords } |
   #                      { kind: :other }. The list is the call as written; other sends carry no record.
   #
+  #   loop_record (a while/until of this irep's own code): kind: :while | :until, post_test: true|false (`begin ... end while`),
+  #                      line:, header_pc: the condition (the target of the back edge and of `next`), body_pc: the NOP that
+  #                      starts the body (the target of `redo`), back_pc: the JMP back to header_pc, exit_pc: the pc after it,
+  #                      exits: [ { kind:, pc: } ] with kind :break | :next | :redo | :retry (the JMPUW of the innermost
+  #                      loop's own jump) | :return (a RETURN-family op) | :break_block (BREAK) | :raise (an EXIT_CALLS send),
+  #                      the last three for every loop they are inside; writes: [String] the names of this irep's locals the
+  #                      loop's code assigns, a nested block's assignment of them (an upvar) included, sorted.
+  #   block_send_record (every SENDB / SSENDB / SUPER): op:, method: (the name; 'each' for `for`, 'super' for SUPER), line:,
+  #                      block: :literal | :for | :sym | :pass (`&expr`) | :forward (`&`) | :implicit (a SUPER without one),
+  #                      sym: the Symbol of `&:sym` | nil, block_irep: Integer (:literal / :for) | nil, recv: { kind:
+  #                      :implicit | :self | :local | :ivar | :integer | :range | :array | :hash | :call | :const | :other, text: },
+  #                      params: [ { kind: :req|:opt|:rest|:post|:key|:keyrest|:block|:numbered|:it, name: } ] | nil (a
+  #                      literal block's parameters as written).
+  #
   # Versions: 1 = scope records; 2 = adds the `call` record of the sends above; 3 = adds `conditional` to the constant writes
-  # and openers (each additive: an older table is still valid, and a reader treats a missing fact as unknown).
+  # and openers; 4 = adds `loops` and `block_sends` (each additive: an older table is still valid, and a reader treats a
+  # missing fact as unknown).
   #
   # A table is only meaningful for the irep tree it was built with; Annotations.verify checks the pcs/ops against decoded code.
   module Annotations
-    VERSION = 3
+    VERSION = 4
     SEND_OPS = %i[SEND SEND0 SSEND SSEND0 SENDB SSENDB].to_h { |o| [o, true] }.freeze
     TRACKED = (%i[CLASS MODULE SCLASS EXEC TDEF SDEF DEF ALIAS UNDEF SETCONST SETMCNST GETCONST GETMCNST] + SEND_OPS.keys).to_h { |o| [o, true] }.freeze
     # The sends that get a `call` record (see above): mixins, name-taking sends and visibility/definition sends.
@@ -173,6 +190,75 @@ module MrbcRb
       false
     end
 
+    LOCAL_WRITES = [Prism::LocalVariableWriteNode, Prism::LocalVariableOperatorWriteNode, Prism::LocalVariableOrWriteNode,
+                    Prism::LocalVariableAndWriteNode, Prism::LocalVariableTargetNode].freeze
+    NEW_SCOPE = [Prism::DefNode, Prism::ClassNode, Prism::ModuleNode, Prism::SingletonClassNode].freeze
+
+    # The names of the locals of the enclosing scope written anywhere in +node+ (a nested block's writes of them included,
+    # as upvars), sorted.
+    def local_writes(node)
+      names = {}
+      stack = [[node, 0]]
+      until stack.empty?
+        n, level = stack.pop
+        next if NEW_SCOPE.any? { |k| n.is_a?(k) }
+
+        names[n.name.to_s] = true if LOCAL_WRITES.any? { |k| n.is_a?(k) } && n.depth == level
+        inner = n.is_a?(Prism::BlockNode) || n.is_a?(Prism::LambdaNode) ? level + 1 : level
+        n.compact_child_nodes.each { |c| stack << [c, inner] }
+      end
+      names.keys.sort
+    end
+
+    # The block-send record (see the header) of +node+ (a call, super or for node).
+    def block_send_facts(node, block)
+      recv = node.respond_to?(:receiver) && node.receiver ? MrbcRb.unparen(node.receiver) : nil
+      blk = node.is_a?(Prism::ForNode) ? nil : node.block
+      params = blk.is_a?(Prism::BlockNode) ? block_params(blk) : nil
+      { method: node.is_a?(Prism::ForNode) ? 'each' : (node.respond_to?(:name) ? node.name.to_s : 'super'),
+        recv: recv_kind(node.is_a?(Prism::ForNode) ? MrbcRb.unparen(node.collection) : recv),
+        block: block, sym: block == :sym ? blk.expression.unescaped.to_s : nil, params: params,
+        line: node.location.start_line }
+    end
+
+    def recv_kind(recv)
+      kind = case recv
+             when nil then :implicit
+             when Prism::SelfNode then :self
+             when Prism::LocalVariableReadNode then :local
+             when Prism::InstanceVariableReadNode then :ivar
+             when Prism::IntegerNode then :integer
+             when Prism::RangeNode then :range
+             when Prism::ArrayNode then :array
+             when Prism::HashNode then :hash
+             when Prism::CallNode then :call
+             else static_path(recv) ? :const : :other
+             end
+      { kind: kind, text: recv && recv.location.slice[0, 60] }
+    end
+
+    # [{ kind: :req|:opt|:rest|:post|:key|:keyrest|:block|:numbered|:it, name: }] of a literal block.
+    def block_params(blk)
+      p = blk.parameters
+      case p
+      when nil then []
+      when Prism::NumberedParametersNode then [{ kind: :numbered, name: p.maximum.to_s }]
+      when Prism::ItParametersNode then [{ kind: :it, name: 'it' }]
+      else
+        q = p.parameters
+        return [] unless q
+
+        out = q.requireds.map { |r| { kind: :req, name: r.respond_to?(:name) ? r.name.to_s : nil } }
+        out.concat(q.optionals.map { |r| { kind: :opt, name: r.name.to_s } })
+        out << { kind: :rest, name: q.rest.respond_to?(:name) ? q.rest.name.to_s : nil } if q.rest
+        out.concat(q.posts.map { |r| { kind: :post, name: r.respond_to?(:name) ? r.name.to_s : nil } })
+        out.concat(q.keywords.map { |r| { kind: :key, name: r.name.to_s } })
+        out << { kind: :keyrest, name: nil } if q.keyword_rest
+        out << { kind: :block, name: q.block.name.to_s } if q.block
+        out
+      end
+    end
+
     def qualify(namespace, name) = namespace ? "#{namespace}::#{name}" : name
 
     # Hash of the subtree of +node+ with locations (and anything position-derived) removed.
@@ -237,6 +323,7 @@ module MrbcRb
 
       # Hook of Compiler#emit: +start+ is the pc (the EXT prefix included), +operands+ the instruction's operands.
       def ann_emit(name, start, operands)
+        ann_emit_loop_facts(name, start, operands) if @ann_bsend || @ann_open_loops
         return unless TRACKED.key?(name)
         return ann_emit_send(name, start, operands) if SEND_OPS.key?(name)
 
@@ -319,6 +406,59 @@ module MrbcRb
 
       def ann_truncate(start)
         @ann_ops&.delete_if { |pc, _| pc >= start }
+        @ann_block_sends&.delete_if { |pc, _| pc >= start }
+        @ann_loops&.reject! { |rec| rec[:header_pc] >= start }
+        @ann_open_loops&.each { |rec| rec[:exits].reject! { |e| e[:pc] >= start } }
+      end
+
+      # LOOP RECORDS (version 4, see the header). A while/until opens a record before its condition; the exits emitted while it
+      # is open are added to it (break/next/redo/retry to the innermost, return and raise to every open one).
+      def ann_loop_open(node)
+        rec = { kind: node.is_a?(Prism::UntilNode) ? :until : :while, post_test: node.begin_modifier?, line: node.location.start_line,
+                exits: [], writes: Annotations.local_writes(node) }
+        (@ann_open_loops ||= []) << rec
+        rec
+      end
+
+      def ann_loop_close(rec, header_pc:, body_pc:, back_pc:, exit_pc:)
+        @ann_open_loops.pop
+        # +back_pc+ and an exit jump's pc are emit_jump's operand positions; JMP/JMPUW take no register, so the op is a byte before.
+        rec.merge!(header_pc: header_pc, body_pc: body_pc, back_pc: back_pc - 1, exit_pc: exit_pc)
+        (@ann_loops ||= []) << rec
+      end
+
+      def ann_loop_exit(kind, pc)
+        rec = @ann_open_loops&.last
+        rec[:exits] << { kind: kind, pc: pc - 1 } if rec
+      end
+
+      def ann_loops = @ann_loops || []
+      def ann_block_sends = @ann_block_sends || {}
+
+      # The facts of the block-carrying send about to be emitted (SENDB/SSENDB/SUPER); the next instruction takes them.
+      def ann_block_send(node, block, child = nil)
+        @ann_bsend = Annotations.block_send_facts(node, block).merge(child: child)
+      end
+
+      def ann_pass_kind(blk)
+        e = blk.is_a?(Prism::BlockArgumentNode) ? blk.expression : nil
+        e.is_a?(Prism::SymbolNode) ? :sym : (e ? :pass : :forward)
+      end
+
+      LOOP_EXIT_OPS = { RETURN: :return, RETURN_BLK: :return, RETSELF: :return, RETNIL: :return, RETTRUE: :return,
+                        RETFALSE: :return, BREAK: :break_block }.freeze
+      BLOCK_SEND_OPS = { SENDB: true, SSENDB: true, SUPER: true }.freeze
+
+      def ann_emit_loop_facts(name, start, operands)
+        if (facts = @ann_bsend)
+          @ann_bsend = nil
+          (@ann_block_sends ||= {})[start] = facts.merge(op: name) if BLOCK_SEND_OPS.key?(name)
+        end
+        return if @ann_open_loops.nil? || @ann_open_loops.empty?
+
+        kind = LOOP_EXIT_OPS[name]
+        kind ||= :raise if SEND_OPS.key?(name) && EXIT_CALLS.key?(@syms[operands[1]].to_s.to_sym)
+        @ann_open_loops.each { |rec| rec[:exits] << { kind: kind, pc: start } } if kind
       end
 
       # Extra facts about the instruction about to be emitted.
@@ -466,9 +606,16 @@ module MrbcRb
             op
           end
           opener = sc.owner_pc && parent
+          sends = c.ann_block_sends.transform_values do |s|
+            s = s.dup
+            k = s.delete(:child)
+            s[:block_irep] = k && c.children[k]&.instance_variable_get(:@ann_index)
+            s
+          end
           { index: i, parent: parent&.instance_variable_get(:@ann_index), kind: sc.kind, cref: sc.cref.map(&:dup),
             owner: opener ? { irep: parent.instance_variable_get(:@ann_index), pc: sc.owner_pc } : nil,
-            in_block: sc.in_block, vis_calls: sc.vis_calls, ops: ops.sort.to_h }
+            in_block: sc.in_block, vis_calls: sc.vis_calls, ops: ops.sort.to_h,
+            loops: c.ann_loops.sort_by { |l| l[:header_pc] }, block_sends: sends.sort.to_h }
         end
         { version: VERSION, ireps: ireps }
       end

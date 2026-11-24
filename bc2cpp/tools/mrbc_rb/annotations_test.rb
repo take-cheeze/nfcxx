@@ -4,7 +4,8 @@
 # input of the corpus (bc2cpp/**/*.rb; with MRBC also the gem mrblib sets and rpg-maker-clone's .rb files, as structured_test.rb):
 #   * class_body_path: annotation (exact) vs reaching-definitions dataflow, given the same lexical namespace;
 #   * class_bodies (opener -> body irep): annotation vs the opener-EXEC adjacency;
-#   * the LexicalConsts scope of every irep and the keys it resolves (read_keys / site_keys).
+#   * the LexicalConsts scope of every irep and the keys it resolves (read_keys / site_keys);
+#   * the loop and block-send records (version 4) against their bytecode (LoopRecords.check: any contradiction fails).
 # Every difference is classified. A difference in LIMITATIONS is a documented dataflow limitation (listed with a sample); any other
 # is a bug in one of the two and fails the run. Annotations must also be well formed (every recorded pc is the recorded op).
 #   MRBC=<mrbc> bundle exec ruby bc2cpp/tools/mrbc_rb/annotations_test.rb
@@ -12,6 +13,7 @@ require_relative '../bc2cpp/irep'
 require_relative '../bc2cpp/lexical_consts'
 require_relative '../bc2cpp/dynamic_names'
 require_relative '../bc2cpp/const_conditional'
+require_relative '../bc2cpp/loop_records'
 
 # kind => why the dataflow cannot (or does not) give the annotation's answer.
 LIMITATIONS = {
@@ -68,6 +70,7 @@ SYNTHETIC = {
 }.freeze
 synthetic_failures = []
 
+loop_counts = Hash.new(0)
 covered = 0
 inputs = corpus.map { |paths| ["#{paths.first}#{paths.size > 1 ? " (+#{paths.size - 1})" : ''}", -> { mrbc_rb_image(paths).first }] }
 SYNTHETIC.each do |name, (src, expected)|
@@ -95,6 +98,9 @@ inputs.each do |tag, build|
   err = MrbcRb::Annotations.verify(result.annotations, dfs_order(ann, root).map { |l| ann[l].class_scope[:ops].to_h { |a, o| [a, o[:op]] } })
   # (addresses are decoded addresses here; pcs agree with them unless an EXT prefix is not folded)
   note.call(:malformed, "#{tag}: #{err}") if err && InsnDecoder.fold_ext_prefix?
+  loops = LoopRecords.check(ann)
+  loops.contradictions.each { |row| note.call(:loop_contradiction, "#{tag} #{row}") }
+  loops.counts.each { |k, n| loop_counts[k] += n }
 
   ann.each do |label, irep|
     other = flow.fetch(label)
@@ -264,7 +270,109 @@ bugs << 'dynamic names: a packed literal attr_accessor is computed with the anno
 bugs << 'dynamic names: a packed literal attr_accessor stays computed without the annotation (the documented dataflow limit)' unless DynamicNames.analyze(load_source.call(packed, false))[1]
 bugs << 'dynamic names: send(name) must stay computed' unless DynamicNames.analyze(load_source.call("def f(n)\n  send(n)\nend\n", true))[1]
 
+# ---- loop and block-send records (annotations version 4) ----------------------------------------------------------------------
+loop_src = <<~RUBY
+  def f(n, a)
+    i = 0
+    while i < n
+      i += 1
+      next if i == 2
+      redo if i == 99
+      j = 0
+      until j > i
+        j += 1
+        break if j == 5
+        return nil if j == 7
+        raise 'x' if j < 0
+      end
+      if false
+        dead = 1
+      end
+      begin
+        a.fetch(i)
+      rescue IndexError => e
+        retry if i == 50
+      end
+      a.each { |x| i += x }
+      a.map(&:to_s)
+      for k in a do; end
+    end
+    begin
+      i -= 1
+    end while i > 0
+    i
+  end
+  class LoopB
+    def g(*r, &b)
+      super { |q, *s, o: 1, &c| q }
+      super(&b)
+      super
+      r.each { _1 }
+    end
+  end
+RUBY
+loop_result = MrbcRb.compile_result(loop_src, 'loops.rb')
+bugs << "loop records: table version #{loop_result.annotations[:version]}" unless loop_result.annotations[:version] == 4
+loop_recs = loop_result.annotations[:ireps].flat_map { |rec| rec[:loops] }
+got = loop_recs.map { |l| [l[:kind], l[:post_test], l[:line], l[:exits].map { |e| e[:kind] }, l[:writes]] }
+want = [[:while, false, 3, %i[next redo return raise retry], %w[dead e i j k]], [:until, false, 8, %i[break return raise], %w[j]],
+        [:while, true, 26, [], %w[i]]]
+bugs << "loop records: #{got.inspect} != #{want.inspect}" unless got == want
+sends = loop_result.annotations[:ireps].flat_map { |rec| rec[:block_sends].values }
+got = sends.map { |b| [b[:op], b[:method], b[:block], b[:sym], b[:recv][:kind], b[:params]&.map { |p| p[:kind] }] }
+want = [[:SENDB, 'each', :literal, nil, :local, %i[req]], [:SENDB, 'map', :sym, 'to_s', :local, nil], [:SENDB, 'each', :for, nil, :local, nil],
+        [:SUPER, 'super', :literal, nil, :implicit, %i[req rest key block]], [:SUPER, 'super', :pass, nil, :implicit, nil],
+        [:SUPER, 'super', :implicit, nil, :implicit, nil], [:SENDB, 'each', :literal, nil, :local, %i[numbered]]]
+bugs << "block-send records: #{got.inspect} != #{want.inspect}" unless got == want
+
+# Each edit of the table is a record its bytecode contradicts, which LoopRecords.check reports (the unedited table passes,
+# with `dead` the one name the AST counts and the code never stores).
+loop_check = lambda do |edit|
+  table = Marshal.load(Marshal.dump(loop_result.annotations))
+  edit&.call(table[:ireps])
+  ireps, = load_ireps(RiteImage.new(loop_result.image, rites_from_tree(loop_result.tree), table), cache: nil)
+  next nil unless ireps.each_value.all?(&:class_scope)
+
+  LoopRecords.check(ireps)
+end
+clean = loop_check.call(nil)
+bugs << "loop records: the emitter's table is contradicted: #{clean.contradictions.first(3)}" unless clean&.contradictions&.empty?
+bugs << "loop records: write sets #{clean.counts.inspect}" unless clean && clean.counts[:writes_ast_only] == 1 && clean.counts[:writes_equal] == 2
+outer = ->(ireps) { ireps.find { |r| r[:loops].any? }[:loops].first }
+sends_of = ->(ireps) { ireps.find { |r| r[:block_sends].size > 1 }[:block_sends] }
+LOOP_EDITS = {
+  'back edge' => ->(t) { outer.call(t)[:back_pc] -= 3 },
+  'body pc' => ->(t) { outer.call(t)[:body_pc] += 1 },
+  'next as break' => ->(t) { outer.call(t)[:exits].find { |e| e[:kind] == :next }[:kind] = :break },
+  'dropped next' => ->(t) { outer.call(t)[:exits].reject! { |e| e[:kind] == :next } },
+  'dropped redo' => ->(t) { outer.call(t)[:exits].reject! { |e| e[:kind] == :redo } },
+  'dropped return' => ->(t) { outer.call(t)[:exits].reject! { |e| e[:kind] == :return } },
+  'dropped raise' => ->(t) { outer.call(t)[:exits].reject! { |e| e[:kind] == :raise } },
+  'raise as return' => ->(t) { outer.call(t)[:exits].find { |e| e[:kind] == :raise }[:kind] = :return },
+  'dropped write' => ->(t) { outer.call(t)[:writes].delete('j') },
+  'dropped upvar write' => ->(t) { outer.call(t)[:writes].delete('i') },
+  'block irep' => ->(t) { sends_of.call(t).each_value.find { |b| b[:block] == :literal }[:block_irep] = 0 },
+  'sym' => ->(t) { sends_of.call(t).each_value.find { |b| b[:block] == :sym }[:sym] = 'to_i' },
+  'literal as pass' => ->(t) { sends_of.call(t).each_value.find { |b| b[:block] == :literal }[:block] = :pass },
+  'method' => ->(t) { sends_of.call(t).each_value.find { |b| b[:block] == :for }[:method] = 'map' },
+  'dropped send' => ->(t) { sends_of.call(t).delete(sends_of.call(t).keys.first) }
+}.freeze
+LOOP_EDITS.each do |name, edit|
+  r = loop_check.call(edit)
+  bugs << "loop records: edit '#{name}' is not reported" unless r && !r.contradictions.empty?
+end
+# A version 3 table (no loop records) still attaches, and there is nothing to check.
+v3 = Marshal.load(Marshal.dump(loop_result.annotations))
+v3[:version] = 3
+v3[:ireps].each { |rec| rec.delete(:loops) && rec.delete(:block_sends) }
+v3_ireps, = load_ireps(RiteImage.new(loop_result.image, rites_from_tree(loop_result.tree), v3), cache: nil)
+v3_check = LoopRecords.check(v3_ireps)
+bugs << 'loop records: a version 3 table does not attach' unless v3_ireps.each_value.all?(&:class_scope)
+bugs << "loop records: a version 3 table is checked #{v3_check.counts.inspect}" unless v3_check.counts.empty? && v3_check.contradictions.empty?
+
 puts "annotations: #{covered} of #{inputs.size} inputs covered by the emitter; #{counts[:ok]} annotation/dataflow answers agree"
+puts "loop records: #{loop_counts[:loops]} loops (writes equal #{loop_counts[:writes_equal]}, a recorded name the code never " \
+     "stores #{loop_counts[:writes_ast_only]}), #{loop_counts[:block_sends]} block sends"
 counts.each do |kind, n|
   next if kind == :ok
 
