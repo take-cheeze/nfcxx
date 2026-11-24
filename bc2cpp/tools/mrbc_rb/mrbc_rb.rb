@@ -673,6 +673,7 @@ module MrbcRb
 
     def compile(program)
       stmts = program.statements.body
+      ann_body(stmts)
       set_locals(program.locals)
       value_reg = generate(stmts, val: true)
       return_value(value_reg)
@@ -691,6 +692,7 @@ module MrbcRb
       @segment_name = units.first.filename
       @filename = @segment_name
       set_locals(locals)
+      ann_body(units.flat_map(&:stmts))
       value_reg = generate(units.flat_map(&:stmts), val: true)
       return_value(value_reg)
       emit(:STOP)
@@ -727,6 +729,7 @@ module MrbcRb
     # is generated as a top-level program is, but without STOP. With +val+ its last statement's value is returned;
     # without it the body returns nil (gen_return with source register 0).
     def compile_body(locals, stmts, val)
+      ann_body(stmts)
       set_locals(locals)
       value_reg = generate(stmts, val: val)
       if val
@@ -944,6 +947,7 @@ module MrbcRb
       index = @children.size - 1
       
       emit(:BLOCK, sp, index)
+      ann_block_send(node, :literal, index)
       emit_send(a, recv, node.name, argc, true)
       dispatch(skip)
       @nregs = [@nregs, sp + 1].max
@@ -1575,6 +1579,7 @@ module MrbcRb
       lp = Loop.new(last ? t : nil, @code.size, [])
       @labels << lp.pc0
       @loops << lp
+      ann = ann_loop_open(node)
       begin
         unless forever
           value_into(pred, t)
@@ -1591,6 +1596,7 @@ module MrbcRb
         back = emit_jump(:JMP)
         patch_jump(back, lp.pc0)
         dispatch(to_exit)
+        ann_loop_close(ann, header_pc: lp.pc0, body_pc: lp.pc1, back_pc: back, exit_pc: @code.size)
         emit(:LOADNIL, t) if last
         lp.breaks.each { |j| dispatch(j) }
       ensure
@@ -1623,6 +1629,7 @@ module MrbcRb
 
       lp = Loop.new(last ? t : nil, nil, [])
       @loops << lp
+      ann = ann_loop_open(node)
       begin
         @line = pred.location.start_line # the loop node is stamped with the line of its condition (verified)
         to_body = emit_jump(:JMP)
@@ -1640,6 +1647,7 @@ module MrbcRb
         back = emit_jump(:JMP)
         patch_jump(back, lp.pc0)
         dispatch(to_exit)
+        ann_loop_close(ann, header_pc: lp.pc0, body_pc: lp.pc1, back_pc: back, exit_pc: @code.size)
         emit(:LOADNIL, t) if last
         lp.breaks.each { |j| dispatch(j) }
       ensure
@@ -1667,6 +1675,7 @@ module MrbcRb
         @nregs = [@nregs, lp.reg + args.size].max
         emit(:ARRAY, lp.reg, args.size)
         lp.breaks << emit_jump(:JMPUW)
+        ann_loop_exit(:break, lp.breaks.last)
         return last ? temp : nil
       end
       raise Unsupported, 'break with several values' if args && args.size != 1 && lp.reg
@@ -1686,6 +1695,7 @@ module MrbcRb
         emit(:LOADNIL, lp.reg)
       end
       lp.breaks << emit_jump(:JMPUW)
+      ann_loop_exit(:break, lp.breaks.last)
       last ? temp : nil
     end
 
@@ -1706,6 +1716,7 @@ module MrbcRb
       end
       jump = emit_jump(:JMPUW)
       patch_jump(jump, lp.pc0)
+      ann_loop_exit(:next, jump)
       last ? temp : nil
     end
 
@@ -1821,25 +1832,15 @@ module MrbcRb
       pool_index([:float, float_bits(node)])
     end
 
-    # src/readfloat.c: the integer part, up to 18 fraction places (the rest are skipped) and the exponent are read with
-    # integer arithmetic and combined in double arithmetic, which is not always the correctly rounded value.
+    # src/readnum.c, src/readfloat.c: a decimal literal is rounded by strtod, which rounds correctly (5e-324 is a
+    # subnormal, not 0.0). Float() rounds the same way, so the emitter reads the text with it: the digit-by-digit reader
+    # the fork had (integer arithmetic and pow10, which lost subnormals) is no longer the reader of mrb_read_float.
     def read_float(text)
       m = /\A(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?\z/.match(text.delete('_'))
       raise Unsupported, 'float literal form' unless m
-      raise Unsupported, 'float literal with a long integer part' if m[2].size > 18
 
-      res = m[2].to_i.to_f
-      if m[3]
-        frac = m[3][0, 18]
-        res += frac.to_i.to_f / pow10(frac.size)
-      end
-      if m[4]
-        e = m[4].to_i
-        e = 10_000 * (e.negative? ? -1 : 1) if e.abs >= 10_000
-        res *= pow10(e)
-      end
-      res *= m[1].empty? ? 1 : -1
-      res
+      value = Float(text.delete('_').sub(/\A-/, ''))
+      m[1].empty? ? value : -value
     end
 
     # mrb_pow10: the table entries are correctly rounded literals; beyond the table the result is infinity or 0.
@@ -2143,6 +2144,7 @@ module MrbcRb
     def const_write(node, last:)
       t = temp
       value_into(node.value, t)
+      ann_const_write(node)
       gen_setxv(:SETCONST, t, node.name, last) # drops a MOVE just before when the value is unused
       last ? t : nil
     end
@@ -2210,6 +2212,7 @@ module MrbcRb
       end
       @sp = saved
       ann_const_path(target)
+      ann_const_write(node)
       emit(:SETMCNST, t, sym)
       last ? t : nil
     end
@@ -2683,7 +2686,9 @@ module MrbcRb
       when Prism::InstanceVariableTargetNode then gen_setxv(:SETIV, src, target.name, false)
       when Prism::GlobalVariableTargetNode then gen_setxv(:SETGV, src, target.name, false)
       when Prism::ClassVariableTargetNode then gen_setxv(:SETCV, src, target.name, false)
-      when Prism::ConstantTargetNode then gen_setxv(:SETCONST, src, target.name, false)
+      when Prism::ConstantTargetNode
+        ann_const_write(target)
+        gen_setxv(:SETCONST, src, target.name, false)
       when Prism::MultiTargetNode
         target.lefts.each_with_index do |l, i|
           emit(:AREF, cursp, src, i)
@@ -2966,6 +2971,7 @@ module MrbcRb
       skip = safe_jump(a, need) if node.safe_navigation?
       args, block = forwarding_arguments(node)
       argc, blk = gen_args(block, a, args, node.closing_loc&.start_line)
+      ann_block_send(node, ann_pass_kind(block)) if blk
       emit_send(a, recv, node.name, argc, blk)
       dispatch(skip)
       a
@@ -3970,6 +3976,7 @@ module MrbcRb
       
       reach(t + 2)
       emit(:BLOCK, t + 1, index)
+      ann_block_send(node, :for, index)
       emit(:SENDB, t, sym_index(:each), 0)
       last ? t : nil
     end
@@ -5529,6 +5536,7 @@ module MrbcRb
       region = @regions.reverse.find { |g| g.type == :rescue } or raise Unsupported, 'retry outside a rescue clause'
       jump = emit_jump(:JMPUW)
       patch_jump(jump, region.pc0)
+      ann_loop_exit(:retry, jump)
       last ? temp : nil
     end
 
@@ -5602,6 +5610,7 @@ module MrbcRb
       lp = @loops.last or raise Unsupported, 'redo outside a loop or block'
       jump = emit_jump(:JMPUW)
       patch_jump(jump, lp == BLOCK_LOOP ? 0 : (lp.pc1 or raise(Unsupported, 'redo in this loop')))
+      ann_loop_exit(:redo, jump) unless lp == BLOCK_LOOP
       last ? temp : nil
     end
 
@@ -5719,6 +5728,7 @@ module MrbcRb
         end
       end
       @sp = a
+      ann_block_send(node, literal ? :literal : (node.block ? ann_pass_kind(node.block) : :implicit), literal ? @children.size - 1 : nil)
       emit(:SUPER, a, n)
       last ? a : nil
     ensure

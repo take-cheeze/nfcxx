@@ -499,6 +499,8 @@ jobs:
               tests/pathb-qbe/run.sh
               tests/pathb-eh-tables/run.sh --all
               tests/pathb-debug/run.sh
+              tests/vectorize/run.sh
+              tests/vectorize/assoc/run.sh
               tests/pathb-qbe/hosted.sh
               tests/pathb-qbe/static_linkage.sh
           - name: C++11 and C++14 probes (Path B) and the EH shim (gcc, qbe and Path B)
@@ -1042,8 +1044,14 @@ jobs:
 
   # A full self build is intentionally requested through workflow_dispatch;
   # the fast artifact checks above run on ordinary changes.
+  # self-aot: the full CRuby 4 + YJIT / nfcxx self build and its parity check. A push or pull request that changes bc2cpp
+  # runs it (the same path filter as the other bc2cpp jobs); a workflow dispatch runs it only with self_aot=true.
   self-aot:
-    if: github.event_name == 'workflow_dispatch' && inputs.self_aot
+    needs: bc2cpp-changes
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.self_aot) ||
+      ((github.event_name == 'push' || github.event_name == 'pull_request') &&
+        needs.bc2cpp-changes.outputs.changed == 'true')
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:

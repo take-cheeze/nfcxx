@@ -139,6 +139,11 @@ assigns without the call's location). In a function with pads GVN merges only in
   no register for them; `simplcfg` keeps blocks with different unwind targets apart; a function with pads keeps its
   frame and its stack slots; a call that unwinds to a pad or to std::terminate is never a tail call. Tested on x86-64
   ELF; the arm64 emitter marks call sites and pads too (CI's arm64 Linux job runs it); rv64 has no tables.
+- Cold code (`ehcoldmark`, ELF only, `3rd/qbe` commit 159392a): a function with landing pads emits the blocks that only
+  its pads reach (cleanups, catch clauses, the pads themselves) after the hot code, in `.text.unlikely`, with an FDE and an
+  LSDA of their own. A hot call's pad is cold code too, so the hot LSDA has LPStart at the start of the cold part. No
+  nfcxx change is needed to get it: QBE marks the blocks itself. Measured: `f_try` in `tests/pathb-eh-tables/cases/cold_pads.cpp`
+  391 to 173 bytes of hot code, `main` of `bench.cpp` 1536 to 837; hot plus cold code is about the same size (3415 to 3402).
 
 ### Nothrow callees (`scripts/pathb-ssa-qbe.rb` `nothrow_callees`)
 

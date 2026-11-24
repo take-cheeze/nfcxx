@@ -317,6 +317,12 @@ def pathb_option(state, arg)
   elsif arg == "-fno-tree-vectorize"
     # turns the default loop vectorizer off (pathb-cc.rb --no-vectorize)
     state.pbf << "--no-vectorize"
+  elsif arg == "-fassociative-math"
+    # the vectorizer may reassociate float sums (qbe -F; pathb-cc.rb --vectorize-assoc): the sum of a loop is then not in
+    # source order, so a result can differ in the last bits. Off by default; -fno-associative-math is the default.
+    state.pbf << "--vectorize-assoc"
+  elsif arg == "-fno-associative-math"
+    nil
   elsif PATHB_PBF_FLAGS.include?(arg) || PATHB_TRIVIAL.include?(arg)
     state.pbf << arg
   elsif arg == "-fshort-wchar"

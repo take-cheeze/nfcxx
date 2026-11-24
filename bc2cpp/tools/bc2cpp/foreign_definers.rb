@@ -4,6 +4,7 @@ require 'prism'
 require 'set'
 require_relative 'file_identity'
 require_relative 'ruby_parse_cache'
+require_relative 'scan_cache'
 require_relative 'outside_ruby_owners'
 
 # FOREIGN_DEFINERS: which method names outside Ruby (the build's

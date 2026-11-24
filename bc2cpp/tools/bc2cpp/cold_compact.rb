@@ -10,6 +10,11 @@ require_relative 'world_root'
 # same values; `outline` refuses any text where that renaming could change what runs (see outline_refusal). An unlisted
 # method keeps the inline text, so a stale profile can only cost size. BC2CPP_COLD_COMPACT=0 turns it off.
 #
+# COLD_COMPACT_TAIL: in every other method, an ADD/SUB/MUL/ADDI/SUBI/DIV keeps its Fixnum (DIV: Integer pair) tier
+# inline and only the arms after it (overflow, heap Integer, Float, the operator send) move into a helper of the same
+# kind; see split_tail.
+# BC2CPP_COLD_COMPACT_TAIL=0 turns it off.
+#
 # COLD_PROFILE (BC2CPP_COLD_PROFILE=1): each compiled method body counts its calls, and the host writes the counts to
 # BC2CPP_COLD_PROFILE_DIR at exit; scripts/bc2cpp/cold_profile.bash turns a host sweep's counts into the list.
 module ColdCompact
@@ -47,6 +52,114 @@ module ColdCompact
 
   def profile?
     ENV['BC2CPP_COLD_PROFILE'] == '1'
+  end
+
+  def tail?
+    enabled? && ENV['BC2CPP_COLD_COMPACT_TAIL'] != '0'
+  end
+
+  TAIL_OPS = %i[ADD SUB MUL ADDI SUBI DIV].to_set.freeze
+  PAIR_TEST = /\ABC2CPP_FIXNUM_PAIR_P\((r\d+), (r\d+)\)\z/
+  IMM_TEST = /\Amrb_fixnum_p\((r\d+)\)\z/
+  TIER = /\A\s*if \((.*)\) \{ (r\d+) = mrb_num_(add|sub|mul)\(M, (r\d+), ([^;]*)\); \}\n\z/
+
+  # `cond` without the BranchHints wrapper `hint` (BC2CPP_BRANCH_HINTS=0 prints none).
+  def unhinted(cond, hint)
+    cond.start_with?("#{hint}(") && cond.end_with?(')') ? cond[(hint.size + 1)...-1] : cond
+  end
+
+  # [fast, tail] for an arithmetic instruction's text: `fast`, the condition under which the Fixnum tier has stored
+  # the result, and `tail`, the arms after the tier as one statement; nil for any other shape (a guarded range arm, a
+  # proven operand). The tier (TaggedFixnum.tier) leaves the destination untouched when it reports an overflow and
+  # then runs mrb_num_* on the operands; the tail must open with the Integer arm, which runs that same call on them
+  # (two Fixnums are Integers), so `if (!fast) tail` runs what the whole text runs.
+  def split_tail(text)
+    div = split_div_tail(text)
+    return div if div
+
+    lines = text.lines
+    pair = lines.first.match?(/\A\s*\{ mrb_value bc2cpp_nt;\n\z/)
+    lines.shift if pair
+    test = lines[0].to_s[/\A\s*if \((.*)\) \{\n\z/, 1]
+    tier = TIER.match(lines[1].to_s)
+    return nil unless test && tier
+
+    m = (pair ? PAIR_TEST : IMM_TEST).match(unhinted(test, 'mrb_likely'))
+    return nil unless m
+
+    dest = m[1]
+    rhs = pair ? m[2] : tier[5]
+    return nil unless pair || rhs.match?(/\Amrb_fixnum_value\(-?\d+\)\z/)
+
+    op = tier[3]
+    overflow = unhinted(tier[1], 'mrb_unlikely')
+    return nil unless overflow == "bc2cpp_fixnum_#{op}(#{dest}, #{rhs}, #{dest})" && tier[2] == dest &&
+                      tier[4] == dest && tier[5] == rhs
+
+    integer = pair ? "mrb_integer_p(#{dest}) && mrb_integer_p(#{rhs})" : "mrb_integer_p(#{dest})"
+    return nil unless lines[2] == "} else if (#{integer}) {\n" && lines[3].to_s.strip == "#{dest} = mrb_num_#{op}(M, #{dest}, #{rhs});"
+
+    chain = whole_chain("  if #{lines[2..].join.delete_prefix('} else if ')}", pair)
+    return nil unless chain
+
+    ["#{test} && !#{tier[1]}", "#{pair ? "{ mrb_value bc2cpp_nt;\n" : ''}#{chain}\n#{pair ? "}\n" : ''}"]
+  end
+
+  # `text` less its closing brace (with `close`) when, under every choice of arms of its #if lines, it is one if/else
+  # chain and that brace; nil otherwise. A statement after the chain would run on the fast path too, so it may not move.
+  def whole_chain(text, close)
+    conds = text.lines.count { |l| l.match?(/\A\s*#\s*if/) }
+    return nil if conds > 4
+
+    ok = (0...(1 << conds)).all? do |bits|
+      t = preprocess(text, bits)
+      stop = t.index('(') && ColdCompactCalls.chain_end(t, t.index('('))
+      stop && t[stop..].strip == (close ? '}' : '')
+    end
+    return nil unless ok
+
+    close ? text[0...text.rindex('}')].rstrip : text.rstrip
+  end
+
+  # `text` with the directive lines dropped and, of the n-th #if, the #else arm kept when bit n of `bits` is set.
+  def preprocess(text, bits)
+    stack = []
+    n = 0
+    text.lines.filter_map do |l|
+      if l.match?(/\A\s*#\s*if/)
+        stack.push(bits[n].zero?)
+        n += 1
+        nil
+      elsif l.match?(/\A\s*#\s*else/)
+        stack[-1] = !stack[-1] unless stack.empty?
+        nil
+      elsif l.match?(/\A\s*#\s*endif/)
+        stack.pop
+        nil
+      elsif stack.all?
+        l
+      end
+    end.join
+  end
+
+  DIV_TEST = /\Amrb_integer_p\((r\d+)\) && mrb_integer_p\((r\d+)\)\z/
+  DIV_PAIR = /\A\s*(r\d+) = (?:bc2cpp_div_int_pair\(M, (r\d+), (r\d+)\)|mrb_div_int_value\(M, mrb_integer\((r\d+)\), mrb_integer\((r\d+)\)\));\n\z/
+
+  # DIV's Integer pair arm is a call already, so the tail is its `else` as a whole: [fast, tail, fast_stmt].
+  def split_div_tail(text)
+    lines = text.lines
+    return nil unless lines.first.match?(/\A\s*\{ mrb_value bc2cpp_nt;\n\z/)
+
+    test = lines[1].to_s[/\A\s*if \((.*)\) \{\n\z/, 1]
+    m = test && DIV_TEST.match(unhinted(test, 'mrb_likely'))
+    stmt = m && DIV_PAIR.match(lines[2].to_s)
+    return nil unless stmt && stmt[1] == m[1] && [stmt[2] || stmt[4], stmt[3] || stmt[5]] == [m[1], m[2]]
+    return nil unless lines[3].to_s.start_with?('} else if (!mrb_undef_p(bc2cpp_nt = bc2cpp_num_div_float(')
+
+    chain = whole_chain("  if #{lines[3..].join.delete_prefix('} else if ')}", true)
+    return nil unless chain
+
+    [test, "{ mrb_value bc2cpp_nt;\n#{chain}\n}\n", lines[2].strip]
   end
 
   def list_path
@@ -210,13 +323,31 @@ end
 class CodeGen
   # COLD_COMPACT: `text`, instruction `insn`'s code in method `d`, or the call to its helper.
   def cold_compact(insn, text, d)
-    return text if @resumable || !ColdCompact::OPS.include?(insn.op) || !ColdCompact.cold?("#{d.owner}##{d.name}")
+    return text if @resumable || !ColdCompact::OPS.include?(insn.op)
+    return cold_compact_tail(insn, text) unless ColdCompact.cold?("#{d.owner}##{d.name}")
 
     call, name, source = ColdCompact.outline(text)
     return text unless call
 
     (@cold_compact_helpers ||= {})[name] ||= source
     call
+  end
+
+  # COLD_COMPACT_TAIL: `text` with the arms after its Fixnum tier as one helper call (ColdCompact.split_tail).
+  def cold_compact_tail(insn, text)
+    return text unless ColdCompact.tail? && ColdCompact::TAIL_OPS.include?(insn.op)
+
+    fast, tail, fast_stmt = ColdCompact.split_tail(text)
+    return text unless tail
+
+    call, name, source = ColdCompact.outline(tail)
+    return text unless call
+
+    ColdCompact.stats[:tail] += 1
+    (@cold_compact_helpers ||= {})[name] ||= source
+    # The arms' tags (FIXNUM_ARITHMETIC, ...) stay at the site, which still makes the send they mark.
+    notes = tail.scan(%r{//[^\n]*}).uniq.map { |note| "  #{note}\n" }.join
+    "  if (#{fast}) {\n#{"  #{fast_stmt}\n" if fast_stmt}  } else {\n#{notes}#{call}  }\n"
   end
 
   # File-scope definitions of the helpers `codes` call, and the COLD_PROFILE counter when that is on; computed on the
@@ -236,8 +367,8 @@ class CodeGen
 
   def cold_compact_summary
     helpers = cold_compact_code.scan(/^static __attribute__\(\(noinline, cold\)\) mrb_value /).size
-    refused = ColdCompact.stats.reject { |k, _| k == :outlined }.sort_by { |k, n| [-n, k.to_s] }.map { |k, n| "#{k} #{n}" }
-    "== cold compact (COLD_COMPACT): #{ColdCompact.stats[:outlined]} outlines (probe compiles included) into #{helpers} helpers; " \
-      "refused: #{refused.empty? ? 'none' : refused.join(', ')} =="
+    refused = ColdCompact.stats.reject { |k, _| %i[outlined tail].include?(k) }.sort_by { |k, n| [-n, k.to_s] }.map { |k, n| "#{k} #{n}" }
+    "== cold compact (COLD_COMPACT): #{ColdCompact.stats[:outlined]} outlines (probe compiles included, " \
+      "#{ColdCompact.stats[:tail]} arithmetic tails) into #{helpers} helpers; refused: #{refused.empty? ? 'none' : refused.join(', ')} =="
   end
 end

@@ -94,9 +94,10 @@ at_exit { FileUtils.remove_entry(dir) }
 check.call('no #error in the generated code', !code.include?('#error'))
 check.call('the prelude defines BC2CPP_COLD_ARM as a cold label', code.include?('__attribute__((cold, unused))'))
 add = code_of(code, 'BhRun_add')
+# COLD_COMPACT_TAIL (cold_compact.rb): the two predictions share one condition ahead of the outlined arms.
 check.call('`a + b` predicts the Integer pair and not the overflow tier',
-           add.match?(/if \(mrb_likely\(BC2CPP_FIXNUM_PAIR_P\(r\d+, r\d+\)\)\) \{/) &&
-             add.include?('if (mrb_unlikely(bc2cpp_fixnum_add('))
+           add.match?(/if \(mrb_likely\(BC2CPP_FIXNUM_PAIR_P\(r\d+, r\d+\)\)(?:\) \{| && !mrb_unlikely\(bc2cpp_fixnum_add\()/) &&
+             add.include?('mrb_unlikely(bc2cpp_fixnum_add('))
 check.call('`a < b` predicts the Integer pair',
            code_of(code, 'BhRun_less').match?(/if \(mrb_likely\(BC2CPP_FIXNUM_PAIR_P\(r\d+, r\d+\)\)\)/))
 same = code_of(code, 'BhRun_same')

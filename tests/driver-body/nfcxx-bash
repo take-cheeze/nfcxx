@@ -76,7 +76,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")" && pwd)
 # NFCXX_OWNED_CUDATMP and NFCXX_OWNED_TMP: the directories the Ruby driver made for this run (scripts/nfcxx.rb, under its temporary
 # root, removed when the run ends). They are read and unset here, so a driver this body re-runs makes its own. When they are not
-# set (the body run alone), the body makes its directories with mktemp -d and removes them in its EXIT traps.
+# set (the body run alone), the body makes its directories with mktemp -d and removes them in its exit_cleanup.
 owned_cudatmp=${NFCXX_OWNED_CUDATMP-}; owned_tmp=${NFCXX_OWNED_TMP-}; unset NFCXX_OWNED_CUDATMP NFCXX_OWNED_TMP
 early_pre_done=${NFCXX_EARLY_PRE_DONE-}; unset NFCXX_EARLY_PRE_DONE
 # NFCXX_OWNED_CTMP and NFCXX_OWNED_PTMP: the C-input and Path B object directories, made by the Ruby driver the same way.
@@ -90,9 +90,9 @@ owned_eccp=${NFCXX_OWNED_ECCP-}; unset NFCXX_OWNED_ECCP
 # NFCXX_FALLBACK_MARKER: the file fallback_gcc leaves its message in for the Ruby driver. It is read and unset here: the cache
 # key takes every NFCXX_* variable, and the marker's name is a new temporary file for each run (a key that never repeats).
 fallback_marker=${NFCXX_FALLBACK_MARKER-}; unset NFCXX_FALLBACK_MARKER
-# temp_cleanup: removes the driver's temporary directories the EXIT traps name. Each trap calls it, so a later trap (which
-# replaces an earlier one) does not leave the earlier stage's directory behind. The eccp directory is not here: eccp_cleanup
-# removes it when the body made it (and only when the intermediates are not kept); the Ruby driver removes its own (NFCXX_OWNED_ECCP).
+# temp_cleanup: removes the driver's temporary directories. exit_cleanup (the body's one EXIT trap) calls it in the modes that
+# need it, and a stage's mode replaces the earlier one, so the directories of the stage that ends the run are the ones removed.
+# The eccp directory is not here: eccp_cleanup removes it when the body made it (and only when the intermediates are not kept); the Ruby driver removes its own (NFCXX_OWNED_ECCP).
 # A directory the Ruby driver owns (cudatmp_owned, tmp_owned) is not removed here: the Ruby driver removes it.
 temp_cleanup() {
   [ -z "${tmp:-}" ] || [ -n "${tmp_owned:-}" ] || rm -rf "$tmp"
@@ -101,15 +101,29 @@ temp_cleanup() {
   [ -z "${cudatmp:-}" ] || [ -n "${cudatmp_owned:-}" ] || rm -rf "$cudatmp"
   [ -z "${fso_dir:-}" ] || rm -rf "$fso_dir"
 }
+# exit_cleanup: the body's one EXIT trap (set where the trace is, below). exit_mode is the cleanup the run has now: none,
+# temp (temp_cleanup), trace (trace_finish), temp_trace (temp_cleanup, then trace_finish) or eccp (eccp_cleanup). Each stage
+# sets it where it used to set its EXIT trap, and fallback_gcc sets none where it used to remove the trap, so the run ends
+# with the cleanup of the last trap the body set, as before.
+exit_mode=none
+exit_cleanup() {
+  case $exit_mode in
+    none) ;;
+    temp) temp_cleanup ;;
+    trace) trace_finish ;;
+    temp_trace) temp_cleanup; trace_finish ;;
+    eccp) eccp_cleanup ;;
+  esac
+}
 # fallback_gcc MESSAGE: the program is built again with the gcc backend, which reports its own errors if it fails too. The temporary
 # directories are removed first. Under the Ruby driver (scripts/nfcxx.rb sets NFCXX_FALLBACK_MARKER) the body leaves MESSAGE in that
-# marker file and exits 0 without its EXIT trap: the driver prints MESSAGE and runs the driver again with NFCXX_BACKEND=gcc, the same
-# arguments, and exits with its status. Run alone, the body prints MESSAGE and execs the driver, as it always did.
+# marker file and exits 0 with no exit mode (exit_cleanup does nothing): the driver prints MESSAGE and runs the driver again with
+# NFCXX_BACKEND=gcc, the same arguments, and exits with its status. Run alone, the body prints MESSAGE and execs the driver, as it always did.
 fallback_gcc() {
   temp_cleanup
   if [ -n "$fallback_marker" ]; then
     printf '%s\n' "$1" > "$fallback_marker"
-    trap - EXIT
+    exit_mode=none
     exit 0
   fi
   echo "$1" >&2
@@ -159,7 +173,7 @@ moddir=""   # --module-dir=DIR: where C++ module interface files are written and
 sysdirs=(); srcs=(); ppflags=(); pie_opts=(); xlang=""; stdin_src=0; preinc=(); isa=(); cuda_opts=()
 # A .cu input is rewritten to C++ before the front end (tools/cuda-rewrite: launches become calls of
 # __nfcxx_cuda_launch), and the runtime helper lib/cuda/nfcxx_cuda.h is included first. The copy goes in a temp
-# directory that the EXIT traps below remove. Its basename is the source's, so default output names are unchanged.
+# directory that exit_cleanup removes. Its basename is the source's, so default output names are unchanged.
 cudatmp=""
 # Device code of a .cu file: its __global__ and __device__ functions go through the Path B front end
 # (scripts/pathb-dump.rb), the IR-to-PTX emitter (tools/pathb-ptx-emit) and ptxas for NFCXX_SM (default 75). The kernels
@@ -168,54 +182,24 @@ cudatmp=""
 # the host copy with a registration tail (pathb-ptx-emit --embed), so the one object holds the host code and its device
 # images. A file with no kernel gets no device image.
 # The cache helpers (the compile cache below and the device image cache of cu_rewrite).
-cache_sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }
 # The rewritten copy of each .cu input is made after the arguments are read (cu_prepare), so that -c and -o are known:
 # with -c the copy goes to the per-user cache (scripts/nfcxx-cu-cpp2-prepare.rb), not to the user's tree. Otherwise it goes in a temp directory.
 cu_inputs=()
-cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs and files in place of the source
-  [ ${#cu_inputs[@]} -gt 0 ] || return 0
-  if [ -n "$owned_cudatmp" ]; then cudatmp=$owned_cudatmp; cudatmp_owned=1; trap 'trace_finish' EXIT
-  else cudatmp=$(mktemp -d); trap 'temp_cleanup; trace_finish' EXIT; fi
-  # The state the step needs, as records (state_put). scripts/nfcxx-cu-cpp2-prepare.rb makes the copies (the directory, the
-  # rewrite of each input, the -I of each source directory) and prints the statements that set srcs, files, cflags, cuda_opts
-  # and preinc: the body evals them here. A failing step ends the driver with its status (its message is printed by the script).
-  local inf=$cudatmp/cu-in.rec prep
-  {
-    state_put root "$root"; state_put tmp "$cudatmp"; state_put bash_pid "$BASHPID"
-    state_put compile_only "$compile_only"; state_put out "$out"; state_put outset "$outset"
-    state_put trace_unit "${trace_unit:-${NFCXX_TRACE_UNIT:-}}"
-    state_put inputs ${cu_inputs[@]+"${cu_inputs[@]}"}; state_put srcs ${srcs[@]+"${srcs[@]}"}; state_put files ${files[@]+"${files[@]}"}
-    state_put cflags ${cflags[@]+"${cflags[@]}"}
-    if [ "$obfuscate" = 1 ]; then state_put obfuscate 1; else state_put obfuscate 0; fi
-    if [ "$ir_opt_set" = 1 ]; then state_put ir_opt "$ir_opt"; else state_put ir_opt; fi
-    state_put promote_slots "$promote_slots"; state_put unroll "$unroll"; state_put struct_slots "$struct_slots"
-    state_put cache_dir "$cache_dir"; state_put cache_log "${cache_log_file:-}"
-    state_put preinc ${preinc[@]+"${preinc[@]}"}; state_put cuda ${cuda_opts[@]+"${cuda_opts[@]}"}
-    state_put edg_launch "${NFCXX_CUDA_EDG_LAUNCH:-1}"
-  } > "$inf"
-  prep=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cu-cpp2-prepare.rb" cu < "$inf") || exit $?
-  eval "$prep"
-}
-# A .cpp2 input (experimental, docs/notes/cpp2.md) is translated to C++1 by cppfront (scripts/setup-cppfront.sh) before the
-# front end, the way .cu inputs are rewritten: the copy has the source's basename, so default output names are unchanged, and
-# its #line directives name the .cpp2 file. cppfront writes cpp2_post_build.sh into its working directory, so it runs in a
-# scratch directory. The metaclass build steps that file would hold are not run. cpp2util.h, which the copy includes, comes from the pinned source.
-# The checks, the directories and the translations are scripts/nfcxx-cu-cpp2-prepare.rb cpp2's (scripts/nfcxx-cpp2.rb).
-cpp2_inputs=()
-cpp2_prepare() {  # cpp2_prepare: translates every .cpp2 input and puts its translation in srcs and files in place of the source
-  [ ${#cpp2_inputs[@]} -gt 0 ] || return 0
-  if [ -z "${cudatmp:-}" ]; then
+cpp2_inputs=()   # the .cpp2 inputs (cu_prepare translates them after the .cu rewrites)
+cu_prepare() {  # cu_prepare: rewrites every .cu input, then translates every .cpp2 input; one step (scripts/nfcxx-cu-cpp2-prepare.rb both)
+  [ ${#cu_inputs[@]} -gt 0 ] || [ ${#cpp2_inputs[@]} -gt 0 ] || return 0
+  if [ ${#cu_inputs[@]} -gt 0 ]; then
+    if [ -n "$owned_cudatmp" ]; then cudatmp=$owned_cudatmp; cudatmp_owned=1; exit_mode=trace
+    else cudatmp=$(mktemp -d); exit_mode=temp_trace; fi
+  else
     if [ -n "$owned_cudatmp" ]; then cudatmp=$owned_cudatmp; cudatmp_owned=1
-    else cudatmp=$(mktemp -d); trap 'temp_cleanup' EXIT; fi
+    else cudatmp=$(mktemp -d); exit_mode=temp; fi
   fi
-  local inf=$cudatmp/cpp2-in.rec prep
-  {
-    state_put root "$root"; state_put tmp "$cudatmp"; state_put compile_only "$compile_only"
-    state_put out "$out"; state_put outset "$outset"
-    state_put inputs ${cpp2_inputs[@]+"${cpp2_inputs[@]}"}; state_put srcs ${srcs[@]+"${srcs[@]}"}
-    state_put files ${files[@]+"${files[@]}"}; state_put cflags ${cflags[@]+"${cflags[@]}"}
-  } > "$inf"
-  prep=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cu-cpp2-prepare.rb" cpp2 < "$inf") || exit $?
+  # The records are planned by scripts/nfcxx-cu-records.rb from the arguments as given (the same loop and environment defaults,
+  # with the .cpp2 inputs as well). The copies and translations go to the statements the body evals.
+  local inf=$cudatmp/cu-in.rec prep
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-cu-records.rb" "$root" "$cudatmp" "$BASHPID" -- "${args0[@]}" > "$inf" || exit $?
+  prep=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cu-cpp2-prepare.rb" both < "$inf") || exit $?
   eval "$prep"
 }
 # A CUDA_HOME outside /usr is still a system directory for the rewriter (its headers are not inlined into the device unit),
@@ -227,7 +211,7 @@ cpp2_prepare() {  # cpp2_prepare: translates every .cpp2 input and puts its tran
 # The rewriter: the C++ tool (build/cuda-rewrite, built from tools/cuda-rewrite on first use) by scripts/nfcxx-ensure-tool.rb
 # (DIR OUT: its build is serialized by the lock directory OUT.lock; tests/driver-ensure-tool checks it against goldens).
 "${RUBY:-ruby}" "$root/scripts/nfcxx-ensure-tool.rb" "$root/tools/cuda-rewrite" "$root/build/cuda-rewrite" || exit $?
-# A compile and link (or a link of objects) runs eccp in a temporary directory, which the EXIT trap removes. eccp writes
+# A compile and link (or a link of objects) runs eccp in a temporary directory, which exit_cleanup removes (mode eccp). eccp writes
 # <stem>.o, <stem>.ii and <stem>.ti into its working directory, and the prelinker reads the .ii and .ti there, so the
 # records of one build could be read by the next build in the same directory. The arguments of such a run are made
 # absolute first (the -isystem list below), because its working directory changes. A -c compile is not moved: the link that follows reads
@@ -273,7 +257,7 @@ eccp_plan() {  # eccp_plan: the eccp command line (eccp_argv), its exports (eccp
   [ "$prc" = 0 ] || exit "$prc"
   [ $done = 1 ] || { echo "nfcxx: scripts/nfcxx-eccp-plan.rb stopped before its end (the eccp command line is incomplete)" >&2; exit 1; }
 }
-eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary directory (and of the C-input and .cu steps)
+eccp_cleanup() {  # the exit mode eccp: a build that runs eccp in a temporary directory (and the C-input and .cu steps)
   local rc=$?
   local cudatmp_arg=${cudatmp:-}; [ -z "${cudatmp_owned:-}" ] || cudatmp_arg=   # the Ruby driver removes its own cudatmp
   local ctmp_arg=${ctmp:-}; [ -z "${ctmp_owned:-}" ] || ctmp_arg=   # nor its own ctmp
@@ -300,9 +284,8 @@ nfcxx_argv=("$@")   # the command as given: the compile cache keys on it (see ca
 args0=("$@")   # the arguments as given: the SYCL two-pass build below re-runs the driver with them
 # BEGIN the argument loop: scripts/nfcxx-loop.rb --bash-state reads the arguments and prints the statements that set the state
 # they leave (the loop's scalars and arrays, from the planner's records; the setup above has set the NFCXX_* defaults). A refusal
-# is its message on standard error, with status 2 (the driver ends with it). A value option given last is a loop_no_value
-# statement: set -u ends the driver there ("$2: unbound variable"). A planner that stops before its end ends the driver with 1.
-loop_no_value() { : "$2"; }   # a value option given last: $2 is unset here (set -u ends the driver)
+# is its message on standard error, with status 2 (the driver ends with it). A value option given last is a refusal too:
+# "nfcxx: OPTION needs a value", status 1. A planner that stops before its end ends the driver with 1.
 # The Ruby driver (scripts/nfcxx.rb) ran the loop before this body, on these arguments, and passes its result in the environment:
 # NFCXX_LOOP_STATUS (0: NFCXX_LOOP_STATE is the statements; otherwise the refusal's status, and NFCXX_LOOP_STATE its message).
 # Without it (the arguments the wrappers rewrite, or the body run alone) the loop runs here.
@@ -352,9 +335,10 @@ fi
 # The time log is read by every script that sources scripts/trace.sh (the gcc-cc that eccp runs, ...): the one setting that is
 # handed to the processes below as an environment variable, as NFCXX_TRACE is (trace_begin).
 [ -z "$time_log" ] || export NFCXX_TIME_LOG=$("${RUBY:-ruby}" "$root/scripts/host-sys.rb" abs_path "$time_log")
-[ -z "$trace" ] || trace_begin "$trace"
+exit_mode=none
+if [ -n "$trace" ]; then trace_begin "$trace"; exit_mode=trace; fi
+trap exit_cleanup EXIT   # the body's one EXIT trap (trace_begin's own trap is replaced here)
 cu_prepare
-cpp2_prepare
 # preprocess_records: the state of the -E command line, as NUL-terminated records for scripts/nfcxx-preprocess.rb (s NAME=VALUE for
 # the scalars; e, c, d, i and r for the ppflags, cflags, sysdirs, forced includes and sources).
 preprocess_records() {
@@ -382,7 +366,7 @@ early_status=0; "${RUBY:-ruby}" "$root/scripts/nfcxx-early-exit.rb" post < <(ear
 # (the standard, --emit-c, C sources, a partition, a header unit, an import of std, -c with more than one source), builds a link
 # with scripts/nfcxx-modules.rb build (the driver ends with the build's status, as the bash's mod_build_program did), and gives a
 # compile its module options: --modules, the directory of the interface files (BMIs, --module-dir, else the directory of -o)
-# and, for an interface unit, the BMI it writes. The EXIT trap is left as it is, so cu_prepare's cleanup and trace_finish still
+# and, for an interface unit, the BMI it writes. The exit mode is left as it is, so cu_prepare's cleanup and trace_finish still
 # run when the build ends the driver. Its state and reply are records in NFCXX_OWNED_MODPLAN's directory (made by the Ruby driver,
 # which removes it when the run ends: the body does not make or remove it).
 modules=0; modopts=()
@@ -519,8 +503,8 @@ fi
 if [ $emit_c = 1 ]; then
   # Run the front end alone and print the generated C.
   base=${EDG_BASE:-$root/build/edg-base}
-  if [ -n "$owned_tmp" ]; then tmp=$owned_tmp; tmp_owned=1; trap 'trace_finish' EXIT
-  else tmp=$(mktemp -d); trap 'temp_cleanup; trace_finish' EXIT; fi
+  if [ -n "$owned_tmp" ]; then tmp=$owned_tmp; tmp_owned=1; exit_mode=trace
+  else tmp=$(mktemp -d); exit_mode=temp_trace; fi
   f=$(realpath "${srcs[0]}")   # the first source, not files[0] (which may be an -I option)
   # host dirs first, then EDG's own, as eccp orders user and default include dirs
   inc=(${sys_inc[@]+${sys_inc[@]+"${sys_inc[@]}"}} --sys_include="$base/include"); [ $freestanding = 1 ] && inc=("-I$root/lib")
@@ -644,8 +628,8 @@ fi
 # C inputs: compile each .c to an object. Link options (-l, -L, ...) stay in files for the final link.
 cobjs=()
 if [ ${#cfiles[@]} -gt 0 ]; then
-  if [ -n "$owned_ctmp" ]; then ctmp=$owned_ctmp; ctmp_owned=1; trap 'temp_cleanup; trace_finish' EXIT
-  else ctmp=$(mktemp -d); trap 'temp_cleanup; trace_finish' EXIT; fi
+  if [ -n "$owned_ctmp" ]; then ctmp=$owned_ctmp; ctmp_owned=1; exit_mode=temp_trace
+  else ctmp=$(mktemp -d); exit_mode=temp_trace; fi
   n=0
   for c in ${cfiles[@]+"${cfiles[@]}"}; do
     o=$ctmp/$n.o; n=$((n + 1))
@@ -764,8 +748,8 @@ if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
   exit 0
 fi
 if [ $backend = pathb ]; then
-  if [ -n "$owned_ptmp" ]; then ptmp=$owned_ptmp; ptmp_owned=1; trap 'temp_cleanup; trace_finish' EXIT
-  else ptmp=$(mktemp -d); trap 'temp_cleanup; trace_finish' EXIT; fi
+  if [ -n "$owned_ptmp" ]; then ptmp=$owned_ptmp; ptmp_owned=1; exit_mode=temp_trace
+  else ptmp=$(mktemp -d); exit_mode=temp_trace; fi
   pobjs=(); plink=(); n=0
   for f in ${files[@]+"${files[@]}"}; do
     case $f in
@@ -843,7 +827,7 @@ fi
 eccp_bin="$edg/eccp"; eccp_out=$out
 if [ $moves = 1 ]; then
   if [ -n "$owned_eccp" ]; then eccp_dir=$owned_eccp; eccp_owned=1; mkdir "$eccp_dir"; else eccp_dir=$(mktemp -d); fi
-  trap eccp_cleanup EXIT
+  exit_mode=eccp
 fi
 # The command line (its arguments, the variable a shared link exports, and the directory it runs in) is planned by
 # scripts/nfcxx-eccp-plan.rb, which also prints the note for a kept temporary directory (--keep-intermediates).

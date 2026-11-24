@@ -167,6 +167,7 @@ module NfcxxSetupArgs
       "instantiate" => s["instantiate"], "asan" => s["asan"], "safeptr" => s["safeptr"], "sanitize" => s["sanitize"],
       "asanopts" => arrays.fetch("asanopts", []).join("\x1f"),
       "pic" => s["pic"], "ir_opt" => s["ir_opt"], "ir_opt_set" => s["ir_opt_set"], "gnu_user" => s["gnu_user"],
+      "vec_assoc" => s["vec_assoc"],
       "diag_opts" => arrays.fetch("diag_opts", []).join("\x1f")
     }
   end

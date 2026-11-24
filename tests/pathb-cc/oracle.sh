@@ -16,7 +16,7 @@
 #   --asan           (NFCXX_PATHB_ASAN=1)  -fsanitize=address (docs/notes/asan-plan.md): the SSA emitter calls libasan's __asan_load/store checks before
 #                    each access through a computed address. Link the program with -fsanitize=address. Not with the mruby emitter or -fsafe-pointers.
 #   --sanitize=LIST  (NFCXX_IR_SANITIZE)  the checks of -fsanitize=undefined (docs/notes/ubsan.md), made by the front end (pathb-dump)
-#   --ir-opt=LIST    (NFCXX_IR_OPT)  the IR passes (scripts/pathb-ir-opt.rb), below; default inline; --ir-opt=none turns them off;
+#   --ir-opt=LIST    the IR passes (scripts/pathb-ir-opt.rb), below; default inline; --ir-opt=none turns them off;
 #                    --ir-opt-max=BYTES (NFCXX_IR_OPT_MAX)
 #                    With the inliner the pass also gets --shrink-eh-frames and, for the SSA emitter without --asan and --safe-pointers,
 #                    --scope-facts (docs/notes/pathb-ir-passes.md): smaller EH entries and stack slots of inlined bodies that share frames
@@ -45,8 +45,8 @@ qbe_target=${PATHB_QBE_TARGET:-$(host_qbe_target)}
 opts=(); src=""; out=""
 safe_on=0; [ "${NFCXX_SAFE_POINTERS:-0}" != 1 ] || safe_on=1
 asan_on=0; [ "${NFCXX_PATHB_ASAN:-0}" != 1 ] || asan_on=1
-passes=${NFCXX_IR_OPT-inline}; ir_opt_max=${NFCXX_IR_OPT_MAX:-268435456}   # the inliner by default; none or off turns the passes off
-passes_given=0; [ -z "${NFCXX_IR_OPT+x}" ] || passes_given=1
+passes=inline,hoist-pure; ir_opt_max=${NFCXX_IR_OPT_MAX:-268435456}   # the default; --ir-opt=LIST changes it, none or off turns the passes off
+passes_given=0
 pic=(); nopie=(); asopt=()
 i386=0; regparm=0; m16=0
 emitter=${NFCXX_PATHB_EMITTER:-ssa}

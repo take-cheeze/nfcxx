@@ -26,6 +26,13 @@ require_relative 'implicit_state'
 #     `#define` of a macro it names, so a different text or a different meaning gets a different namespace.
 # Compile flags are taken to be the same for every gem of a link, as RUNTIME_HEADER takes them.
 # BC2CPP_CROSS_GEM_SHARE=0 turns it off.
+#
+# FIBER_SHARE (BC2CPP_FIBER_SHARE=0 turns it off): the C++ Fiber runtime (codegen_resumable.rb's lit_sym_cpp,
+# RESUMABLE_HELPERS_CPP and fiber_runtime_cpp) is the program's one Fiber, so its state is one per program, not per
+# gem: a fiber, the dynamic-call registry and the method-table entries it installs are the same whichever gem's code
+# reaches them. Its segments may therefore keep state, take addresses and be templates or enums; every other rule
+# above still holds, so a segment naming a gem's own item stays in the gem. Its functions become `inline` in every
+# build, so the program has one of each (and of each function-local static).
 module CrossGemShare
   ENV_KEY = 'BC2CPP_CROSS_GEM_SHARE'
   PART_MACRO = 'BC2CPP_CROSS_GEM_PART'
@@ -42,6 +49,35 @@ module CrossGemShare
 
   def enabled?(env = ENV)
     env[ENV_KEY] != '0'
+  end
+
+  def fiber_share?(env = ENV)
+    env['BC2CPP_FIBER_SHARE'] != '0'
+  end
+
+  RUNTIME_DIR = File.expand_path('runtime', __dir__)
+  FIBER_FILES = %w[bc2cpp_lit_sym.hxx bc2cpp_fiber.hxx bc2cpp_fiber_methods.hxx bc2cpp_fiber_catch.hxx
+                   bc2cpp_fiber_sort.hxx].freeze
+
+  # FIBER_SHARE: every name the Fiber runtime's text declares at top level, read as codegen_resumable.rb prints it.
+  def fiber_names
+    @fiber_names ||= begin
+      texts = FIBER_FILES.map do |name|
+        File.read(File.join(RUNTIME_DIR, name)).gsub(%r{^// STANDALONE_BEGIN\n.*?^// STANDALONE_END\n}m, '')
+      end
+      texts << CodeGen::RESUMABLE_HELPERS_CPP if defined?(CodeGen::RESUMABLE_HELPERS_CPP)
+      texts.each_with_object(Set.new) do |text, names|
+        lines = text.lines
+        ShardOutput.top_level_items(lines).each do |item|
+          found, = declared_names(item, ShardOutput.code_text(lines[item[:first]..item[:last]]))
+          names.merge(found)
+        end
+      end.freeze
+    end
+  end
+
+  def fiber_item?(names)
+    fiber_share? && !names.empty? && names.all? { |n| fiber_names.include?(n) }
   end
 
   # Registered between ShardOutput and RuntimeHeader: at_exit runs last-in first-out, so this reads the text
@@ -89,15 +125,20 @@ module CrossGemShare
 
     defined = Set.new
     entries.each { |e| defined.merge(e[:defines]) }
+    methods = method_prototypes(entries, rest[tail.size..])
     roots = outside | (keep & defined)
-    entries.each { |e| roots.merge(e[:declares] - defined - e[:c_prototypes]) }
-    roots.merge(address_taken(entries, rest + head))
+    entries.each { |e| roots.merge(e[:declares] - defined - e[:c_prototypes] - methods) }
+    # FIBER_SHARE: a runtime function has one definition in the program, so its address is the same in every gem. It
+    # keeps its state parameter (IMPLICIT_STATE leaves a name used other than as a call alone).
+    addressed = address_taken(entries, rest + head)
+    runtime_addressed = fiber_share? ? addressed & fiber_names : Set.new
+    roots.merge(addressed - runtime_addressed)
     groups = group(entries)
-    local = local_groups(groups, roots)
+    local = local_groups(groups, roots, methods)
     shared = groups.each_index.reject { |g| local.include?(g) }.map { |g| groups[g] }
     return tail if shared.empty?
 
-    write_headers(shared, entries, segs, macros, rt_ns, dir)
+    write_headers(shared, entries, segs, macros, rt_ns, dir, keep: runtime_addressed)
   end
 
   # One entry per code segment: what it declares and defines, the identifiers its code names (macros expanded), and
@@ -111,21 +152,28 @@ module CrossGemShare
     movable = !seg[:include] && !code.match?(FORBIDDEN)
     maybe = Set.new
     c_prototypes = Set.new
+    fiber = !items.empty?
     items.each do |item|
       names, ok = declared_names(item, ShardOutput.code_text(lines[item[:first]..item[:last]]))
       declares.merge(names)
       c_prototypes << item[:name] if c_prototype?(item, lines)
+      item[:prototype] = item[:function] && !item[:body] && external?(item, lines) && !c_prototype?(item, lines) &&
+                         head_functions(item[:head]) == [item[:name]]
       maybe.merge(possible_names(item))
-      movable &&= ok && !state?(item, lines, code) && (!external?(item, lines) || c_prototype?(item, lines)) &&
-                  !item[:head].match?(/\boperator\b/)
-      defines.merge(names) if item[:body]
+      runtime = fiber_item?(names) && !item[:head].match?(/\bextern\b/)
+      fiber &&= runtime || c_prototype?(item, lines)
+      movable &&= (ok || runtime) && (runtime || !state?(item, lines, code)) &&
+                  (!external?(item, lines) || c_prototype?(item, lines)) && !item[:head].match?(/\boperator\b/)
+      # A runtime typedef or alias is its whole definition.
+      defines.merge(names) if item[:body] || (runtime && item[:head].match?(/\A(?:typedef|using)\b/))
     end
+    fiber &&= !declares.empty?
     maybe.merge(declares)
     ids = expand(code.scan(IDENT).to_set, macros)
     # A head read two ways must agree: a name it might declare is never left to the global using-directive.
-    movable &&= (ids & stateful_macros).empty? && (maybe - declares).empty?
+    movable &&= (fiber || (ids & stateful_macros).empty?) && (maybe - declares).empty?
     { index: index, items: items, declares: declares, maybe: maybe, defines: defines, ids: ids - declares, movable: movable,
-      c_prototypes: c_prototypes }
+      c_prototypes: c_prototypes, fiber: fiber }
   end
 
   # [names an item declares, whether it can move].
@@ -231,6 +279,9 @@ module CrossGemShare
     return false unless item[:function] && !item[:body] && item[:name] && !item[:head].match?(/\(\s*\*/)
 
     text = lines[item[:first]..item[:last]].join.sub(/\A\s*(?:\[\[[^\]]*\]\]\s*)*/, '')
+    # C_ADDRESS: a GNU attribute (`__attribute__((weak))`, a function that may be absent) still names the one C
+    # function. BC2CPP_CROSS_GEM_C_ADDRESS=0 keeps such a prototype in the unit.
+    text = text.gsub(/__attribute__\s*\(\([^()]*(?:\([^()]*\)[^()]*)*\)\)\s*/, '') if c_address?
     text.match?(/\Aextern\s+"C"\s+[^{(]*(?<![\w$])#{Regexp.escape(item[:name])}\s*\(/) && head_functions(item[:head]) == [item[:name]]
   end
 
@@ -245,12 +296,38 @@ module CrossGemShare
     names
   end
 
-  # Function names of the tail that the unit names other than as a call.
+  # METHOD_PROTOTYPE: the tail's declarations of the unit's own compiled methods. ShardOutput keeps each at global
+  # scope, and another gem declares the same function through the unit's decls header, so a moved helper calling one
+  # names the one function of the program in every gem that prints it; the declaration itself stays in place
+  # (an external item never moves). BC2CPP_CROSS_GEM_METHOD_PROTOTYPE=0 keeps such helpers in the unit.
+  def method_prototypes(entries, methods_text)
+    return Set.new if ENV['BC2CPP_CROSS_GEM_METHOD_PROTOTYPE'] == '0'
+
+    declared = Set.new
+    entries.each do |e|
+      e[:items].each { |item| declared << item[:name] if item[:prototype] }
+    end
+    return declared if declared.empty?
+
+    lines = methods_text.lines
+    defined = ShardOutput.top_level_items(lines).filter_map do |item|
+      item[:name] if item[:function] && item[:body] && ShardOutput.external?(lines[item[:first]], item)
+    end
+    declared & defined.to_set
+  end
+
+  def c_address?
+    ENV['BC2CPP_CROSS_GEM_C_ADDRESS'] != '0'
+  end
+
+  # Function names of the tail that the unit names other than as a call. C_ADDRESS: an `extern "C"` prototype names
+  # the one C function of the program, whose address (a weak one's null test) is the same in every unit.
   def address_taken(entries, text)
     functions = Set.new
     entries.each do |e|
       e[:items].each { |item| functions.merge(e[:declares] & [item[:name]]) if item[:function] }
     end
+    entries.each { |e| functions.subtract(e[:c_prototypes]) } if c_address?
     return Set.new if functions.empty?
 
     found = Set.new
@@ -279,7 +356,7 @@ module CrossGemShare
   end
 
   # Indices of the groups that stay in the unit: a root name, an unmovable segment, or a name of such a group.
-  def local_groups(groups, roots)
+  def local_groups(groups, roots, methods = Set.new)
     local = Set.new
     names = roots.dup
     loop do
@@ -291,7 +368,7 @@ module CrossGemShare
         next unless stays
 
         local << gi
-        g.each { |e| names.merge(e[:maybe]) }
+        g.each { |e| names.merge(e[:maybe] - methods) }
         grown = true
       end
       break unless grown
@@ -345,7 +422,7 @@ module CrossGemShare
 
   # Writes one header per shared group (after the groups it names) and returns the tail with each moved segment
   # replaced by its part's include and using-declarations.
-  def write_headers(shared, entries, segs, macros, rt_ns, dir)
+  def write_headers(shared, entries, segs, macros, rt_ns, dir, keep: Set.new)
     by_name = {}
     shared.each_with_index { |g, gi| g.each { |e| e[:declares].each { |n| by_name[n] = gi } } }
     # CONDITIONAL_USINGS: a name an #if region declares is reached through its namespace's using-directive, which
@@ -354,14 +431,15 @@ module CrossGemShare
                         .flat_map { |e| e[:declares].to_a }.to_set
     conditional = Set.new if ENV['BC2CPP_CROSS_GEM_CONDITIONAL_USINGS'] == '0'
     deps = shared.map { |g| g.flat_map { |e| e[:ids].filter_map { |n| by_name[n] } }.to_set }
+    c_protos = c_prototype_copies(shared, segs)
     comps = strongly_connected(deps)
     ns_of = {}
     replace = {}
     comps.each do |members|
       group = members.flat_map { |gi| shared[gi] }.sort_by { |e| e[:index] }
       names = group.flat_map { |e| e[:declares].to_a }.to_set
-      text, macro_names = header_text(group, segs, names, by_name, ns_of, rt_ns, macros, conditional)
-      text = ImplicitState.rewrite([text]).first if ImplicitState.enabled?
+      text, macro_names = header_text(group, segs, names, by_name, ns_of, rt_ns, macros, conditional, c_protos)
+      text = ImplicitState.rewrite([text], keep: keep).first if ImplicitState.enabled?
       macro_text = expand(macro_names, macros).select { |m| macros.key?(m) }.sort.flat_map { |m| macros[m] }.join
       digest = Digest::SHA256.hexdigest("#{FORMAT}\n#{macro_text}\n#{text}")[0, 16]
       ns = "bc2cpp_cs_#{digest}"
@@ -369,8 +447,9 @@ module CrossGemShare
       RuntimeHeader.write_once(path, text.gsub(NS_PLACEHOLDER, ns))
       members.each { |gi| ns_of[gi] = ns }
       group.each_with_index do |e, k|
-        usings = usings_text(segs[e[:index]][:lines], e, ns)
-        replace[e[:index]] = "#define #{PART_MACRO} #{k + 1}\n#include \"#{path}\"\n#undef #{PART_MACRO}\n#{usings}"
+        lines = segs[e[:index]][:lines]
+        pre, usings = self_guarded?(lines) ? taken_usings(lines, e, ns, k + 1) : ['', usings_text(lines, e, ns)]
+        replace[e[:index]] = "#{pre}#define #{PART_MACRO} #{k + 1}\n#include \"#{path}\"\n#undef #{PART_MACRO}\n#{usings}"
       end
     end
     warn "== cross-gem share (CROSS_GEM_SHARE): #{replace.size} of #{entries.size} prelude segments in #{comps.size} shared headers =="
@@ -400,9 +479,69 @@ module CrossGemShare
     out
   end
 
+  # SELF_GUARD: an #if region that defines a macro its own directives test (`#ifndef X ... #define X ... #endif`). Once
+  # the header part has run, re-testing the directive after the include reads the macro the part just defined.
+  def self_guarded?(lines)
+    return false unless lines.first.match?(/\A\s*#\s*if/)
+
+    tested = lines.grep(CONDITIONAL).flat_map { |l| l.scan(IDENT) }.to_set
+    !(macro_defs(lines.join).keys.to_set & tested).empty?
+  end
+
+  # SELF_GUARD: the region's directives run once before the include, each branch they take defining its own marker;
+  # a using-declaration is kept under its innermost branch's marker. [text before the include, the usings].
+  def taken_usings(lines, entry, ns, part)
+    pre = +''
+    usings = +''
+    stack = []
+    ids = []
+    branch = lambda do
+      id = "BC2CPP_CGS_TAKEN_#{ns.delete_prefix('bc2cpp_cs_')}_#{part}_#{ids.size}"
+      ids << id
+      pre << "#define #{id} 1\n"
+      id
+    end
+    starts = entry[:items].to_h { |item| [item[:first], item] }
+    lines.each_with_index do |line, i|
+      if line.match?(/\A\s*#\s*if/)
+        pre << line
+        stack.push(branch.call)
+      elsif line.match?(/\A\s*#\s*(?:elif|else)\b/)
+        pre << line
+        stack[-1] = branch.call
+      elsif line.match?(/\A\s*#\s*endif\b/)
+        pre << line
+        stack.pop
+      elsif (item = starts[i])
+        names, = declared_names(item, ShardOutput.code_text(lines[item[:first]..item[:last]]))
+        found = (names & entry[:declares].to_a).sort.map { |n| "using #{ns}::#{n};\n" }.join
+        next if found.empty?
+
+        usings << (stack.empty? ? found : "#ifdef #{stack.last}\n#{found}#endif\n")
+      end
+    end
+    usings << ids.map { |id| "#undef #{id}\n" }.join
+    [pre, usings]
+  end
+
   # The header text of one group: each segment in its own part, in the group's namespace, with the runtime namespace
   # and the names of earlier groups in reach. [text, the macro names its code names].
-  def header_text(group, segs, names, by_name, ns_of, rt_ns, macros, conditional = Set.new)
+  # C_PROTOTYPE_COPY (BC2CPP_CROSS_GEM_C_PROTOTYPE_COPY=0 turns it off): name => the text of a moved segment that only
+  # declares `extern "C"` functions. A header naming one repeats the declaration, which names the same C function in
+  # any namespace, instead of a using-declaration of the group it landed in: how a gem groups its prototypes then does
+  # not change the digest of the helpers calling them.
+  def c_prototype_copies(shared, segs)
+    return {} if ENV['BC2CPP_CROSS_GEM_C_PROTOTYPE_COPY'] == '0'
+
+    shared.flatten.each_with_object({}) do |e, out|
+      next if e[:c_prototypes].empty? || !e[:declares].subset?(e[:c_prototypes])
+
+      text = segs[e[:index]][:lines].join
+      e[:declares].each { |n| out[n] ||= text }
+    end
+  end
+
+  def header_text(group, segs, names, by_name, ns_of, rt_ns, macros, conditional = Set.new, c_protos = {})
     out = String.new("// bc2cpp cross-gem helpers (CROSS_GEM_SHARE, cross_gem_share.rb): generated, shared by the gems that print them.\n")
     out << ShardOutput::SHARED_HELPER_MACROS
     seen_deps = {}
@@ -412,16 +551,19 @@ module CrossGemShare
       out << "#if #{PART_MACRO} == #{k + 1}\nnamespace #{NS_PLACEHOLDER} {\n"
       out << "using namespace #{rt_ns};\n" if rt_ns
       directives = Set.new
+      copied = Set.new
       e[:ids].select { |n| by_name.key?(n) && !names.include?(n) }.sort.each do |n|
         ns = ns_of.fetch(by_name[n])
         seen_deps[n] = true
-        if conditional.include?(n)
+        if c_protos.key?(n) && !conditional.include?(n)
+          out << c_protos[n] if copied.add?(c_protos[n])
+        elsif conditional.include?(n)
           out << "using namespace #{ns};\n" if directives.add?(ns)
         else
           out << "using #{ns}::#{n};\n"
         end
       end
-      out << convert(segs[e[:index]][:lines], e[:items])
+      out << convert(segs[e[:index]][:lines], e[:items], fiber: e[:fiber])
       out << "} // namespace #{NS_PLACEHOLDER}\n#endif\n"
     end
     [out, macro_names]
@@ -429,20 +571,22 @@ module CrossGemShare
 
   # A segment's text as the header holds it: `static` functions as SHARED_HELPERS has them (an out-of-line entry every
   # shard calls `inline`), `static` constants `inline`.
-  def convert(lines, items)
+  def convert(lines, items, fiber: false)
     lines = lines.dup
     items.each do |item|
       next unless item[:function] || item[:var]
 
       # The head's own line: an attribute may stand on the line before it, a member's `static` never counts.
       at = [item[:first], item[:first] + 1].find do |k|
-        k <= item[:last] && lines[k][/\A[^(=]*/].match?(/\bstatic\b/) && (k == item[:first] || lines[item[:first]].strip.match?(/\A\[\[.*\]\]\z/))
+        k <= item[:last] && lines[k][/\A[^(=]*/].match?(/\bstatic\b/) &&
+          (k == item[:first] || lines[item[:first]].strip.match?(/\A\[\[.*\]\]\z/) ||
+           (fiber && lines[item[:first]].strip.match?(/\Atemplate\s*<[^>]*>\z/)))
       end
       next unless at
 
       line = lines[at]
       lines[at] =
-        if item[:function] && item[:head].include?('BC2CPP_SHARD_ONE_BODY')
+        if (item[:function] && item[:head].include?('BC2CPP_SHARD_ONE_BODY')) || fiber
           ShardOutput.to_inline(line)
         elsif item[:function]
           fn = ShardOutput.to_shared_helper(line)

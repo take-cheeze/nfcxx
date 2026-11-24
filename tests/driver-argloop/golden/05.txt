@@ -1,5 +1,5 @@
 == -x
 -- stdout
 -- stderr
-ORACLE: line N: $2: unbound variable
+nfcxx: -x needs a value
 status=1

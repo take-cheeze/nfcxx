@@ -5,7 +5,7 @@
 # inside $(...), so trailing newlines go, as the bash did. The expected values of the abs_path cases are the bash function's
 # results, recorded from the frozen driver before it was retired (run as a non-root user, for the case without search
 # permission). Each case is checked against the driver's call and against scripts/ecp-arg.rb's EcpArg.abs. The forced-include
-# loop is the frozen driver's own, run as it is; the --preinclude options are checked against scripts/nfcxx-eccp-plan.rb, which
+# loop is the driver's own, as pinned in forced-include-loop.sh and run as it is; the --preinclude options are checked against scripts/nfcxx-eccp-plan.rb, which
 # plans them from the preinc group (its records come from nfcxx's own state_put). Each case runs in a sandbox with a directory,
 # a symbolic link to it, a file, a symbolic link to a file, a directory name with a space, and a file where a directory is
 # expected; the case without search permission is skipped as root, where that permission check cannot be reproduced.
@@ -15,12 +15,15 @@ here=$(cd "$(dirname "$0")" && pwd -P)
 repo=$(cd "$here/../.." && pwd -P)
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 pass=0; fail=0; skip=0
-oracle=$repo/tests/driver-body/nfcxx-bash
-sed -n '/^pre_opts=(); for f in/,/^done$/p' "$oracle" > "$work/loop.sh"
-[ -s "$work/loop.sh" ] || { echo "driver-abspath: no forced-include loop in the frozen driver" >&2; exit 2; }
-grep -q 'scripts/host-sys.rb" abs_path' "$oracle" || { echo "driver-abspath: the driver does not call host-sys.rb abs_path" >&2; exit 2; }
-sed -n '/^state_put() {/,/^}/p' "$oracle" > "$work/state.sh"
-[ -s "$work/state.sh" ] || { echo "driver-abspath: no state_put in nfcxx" >&2; exit 2; }
+# the two snippets of the driver are pinned copies, recorded from tests/driver-body/nfcxx-bash at origin/main with
+#   sed -n '/^pre_opts=(); for f in/,/^done$/p' > forced-include-loop.sh
+#   sed -n '/^state_put() {/,/^}/p' > state-put.sh
+# so the frozen body can be deleted without changing what this suite checks
+cp "$here/forced-include-loop.sh" "$work/loop.sh"
+[ -s "$work/loop.sh" ] || { echo "driver-abspath: no forced-include loop in the pinned copy" >&2; exit 2; }
+grep -q 'scripts/host-sys.rb" abs_path' "$work/loop.sh" || { echo "driver-abspath: the pinned loop does not call host-sys.rb abs_path" >&2; exit 2; }
+cp "$here/state-put.sh" "$work/state.sh"
+[ -s "$work/state.sh" ] || { echo "driver-abspath: no state_put in the pinned copy" >&2; exit 2; }
 ruby_bin=$(command -v ruby)
 
 # the sandbox: sub/f.cpp, f.cpp, afile, my dir/a b.cpp, and the links link (to sub), link2 (to link), flink.cpp (to f.cpp)

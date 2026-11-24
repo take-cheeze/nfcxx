@@ -12,6 +12,8 @@
 #                                 A probe with a `// GCC-SKIP: reason` line uses something the host gcc lacks (its reason is
 #                                 printed): only EXPECT is checked, gcc is not compared.
 #                                 volatile.cpp and tls.cpp: volatile accesses and thread-local objects (a second pthread).
+#                                 A probe with a `// IR-OPT: FLAGS` line runs scripts/pathb-ir-opt.rb FLAGS on its IR before the
+#                                 emitter (pure_call_*.cpp: --hoist-pure), so the emitted code of the passes is checked too.
 #                                 A probe may carry `// ASM-COUNT: FUNCTION PREFIX N` lines: the assembly of FUNCTION must
 #                                 call exactly N functions whose name starts with PREFIX (check_asm below);
 #                                 `// ASM-ORDER: FUNCTION FIRST SECOND` lines: a call of FIRST* comes before one of SECOND*.
@@ -137,6 +139,14 @@ run_one() {
   else
     scripts/pathb-dump.rb --ir $std $flags "$f" > "$ir" 2> "$tmp/$n.fe" || {
       failed=$((failed + 1)); lines+=("FAIL     $name: front end: $(head -1 "$tmp/$n.fe")"); return; }
+  fi
+  # `// IR-OPT: FLAGS` runs the IR passes (scripts/pathb-ir-opt.rb FLAGS) on the IR before the emitter, so the probe checks
+  # their output against the gcc backend (pure_call_*.cpp: --hoist-pure).
+  ir_opt=$(sed -n 's,^// IR-OPT: *,,p' "$f" | head -1)
+  if [ -n "$ir_opt" ]; then
+    ruby scripts/pathb-ir-opt.rb $ir_opt "$ir" > "$ir.opt" 2> "$tmp/$n.opt" || {
+      failed=$((failed + 1)); lines+=("FAIL     $name: IR passes: $(head -1 "$tmp/$n.opt")"); return; }
+    mv "$ir.opt" "$ir"
   fi
   "$mrb" "$emit" ${emit_opts[@]+"${emit_opts[@]}"} "$ir" > "$ssa" 2> "$tmp/$n.emit" ; rc=$?
   if [ $rc = 3 ]; then

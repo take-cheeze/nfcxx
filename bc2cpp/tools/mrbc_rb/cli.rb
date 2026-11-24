@@ -149,12 +149,22 @@ module MrbcRb
       File.open(path, 'a') { |f| f.puts [served, reason.to_s.tr("\n\t", '  '), @argv.join(' ')].join("\t") }
     end
 
-    # Runs the real mrbc (MRBC_FALLBACK) with the original arguments; its output and status are this command's.
+    # The real mrbc for what the emitter does not cover: MRBC_FALLBACK, else the first mrbc on PATH that is not the wrapper.
+    def fallback_mrbc
+      explicit = @env.fetch('MRBC_FALLBACK', '')
+      return explicit unless explicit.empty?
+
+      wrapper = File.expand_path(File.join(__dir__, 'bin', 'mrbc_rb'))
+      @env.fetch('PATH', '').split(File::PATH_SEPARATOR).map { |d| File.join(d, 'mrbc') }
+          .find { |p| File.file?(p) && File.executable?(p) && File.expand_path(p) != wrapper } || ''
+    end
+
+    # Runs the real mrbc (MRBC_FALLBACK, or the one on PATH) with the original arguments; its output and status are this command's.
     def fallback(reason)
-      real = @env.fetch('MRBC_FALLBACK', '')
+      real = fallback_mrbc
       if real.empty?
         log('error', reason)
-        @err.puts "#{@prog}: not handled by the Ruby emitter (#{reason}); set MRBC_FALLBACK=<mrbc> to run the real mrbc for it"
+        @err.puts "#{@prog}: not handled by the Ruby emitter (#{reason}); set MRBC_FALLBACK=<mrbc> (or put mrbc on PATH) to run the real mrbc for it"
         finish 1
       end
       log('fallback', reason)

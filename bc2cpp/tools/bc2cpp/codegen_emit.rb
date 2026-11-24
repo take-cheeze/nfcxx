@@ -1085,12 +1085,28 @@ class CodeGen
     table
   end
 
+  # IVAR_SYM: a slot table entry is MRB_DATA_IVAR_ENTRY, which an mruby whose descriptor holds the ivar's symbol
+  # defines (MRB_IVSYM, a presym: no "@name" string in ROM); an mruby without it (MRB_DATA_IVAR_BY_NAME) takes the
+  # fallback below, the "@name" string as before. A presym exists only for a build whose presym scan reads the
+  # generated sources (rom_method_tables?); any other run (a fixture) names its entries in the type's ivar_names.
+  IVAR_SYM_FALLBACK = <<~CPP
+    #ifndef MRB_DATA_IVAR_ENTRY
+    #define MRB_DATA_IVAR_ENTRY(name, offset, kind) { "@" #name, (offset), (kind) }
+    #define BC2CPP_IVAR_UNSPELLED(name, offset, kind) { "@" #name, (offset), (kind) }
+    #define BC2CPP_IVAR_NAMES(names)
+    #else
+    #define BC2CPP_IVAR_UNSPELLED(name, offset, kind) { 0, (offset), (kind) }
+    #define BC2CPP_IVAR_NAMES(names) , names
+    #endif
+  CPP
+
   # One slot + mrb_data_type marker per statically named ivar. The marker lets
   # mruby's normal ivar APIs and GC find slots; dynamic names remain in RData's
   # ordinary iv_tbl.
   def emit_structs
     out = String.new
     out << emit_nullable_structs
+    out << IVAR_SYM_FALLBACK unless @ivar_layout.empty?
     @ivar_layout.each do |owner, ivars|
       # As compile_all's only_owners filter: no struct for a class this run does not
       # emit (it would be dead code and an unused-static warning).
@@ -1132,16 +1148,24 @@ class CodeGen
       # marks VALUE slots only.
       slots = ivars.keys
       slots.each do |name|
-        out << "  { \"@#{name}\", offsetof(#{struct_name(owner)}, #{ivar_field_name(name)}), " \
-               "#{RDATA_IVAR_KIND.fetch(ivars.fetch(name))} },\n"
+        field = "offsetof(#{struct_name(owner)}, #{ivar_field_name(name)}), #{RDATA_IVAR_KIND.fetch(ivars.fetch(name))}"
+        # MRB_IVSYM pastes the name into an identifier.
+        raise "IVAR_SYM: @#{name} of #{owner} is not a C identifier" unless name.to_s.match?(/\A[A-Za-z_][A-Za-z0-9_]*\z/)
+
+        out << "  #{rom_method_tables? ? 'MRB_DATA_IVAR_ENTRY' : 'BC2CPP_IVAR_UNSPELLED'}(#{name}, #{field}),\n"
       end
-      out << "  { \"\", 0 }, // placeholder: a zero-length array is not standard C++\n" if slots.empty?
+      out << "  {}, // placeholder: a zero-length array is not standard C++\n" if slots.empty?
       out << "};\n"
       hash_fields = 'nullptr, 0'
       unless slots.empty?
         table = rdata_ivar_hash(slots.map { |name| "@#{name}" })
         out << "static const uint16_t #{sanitize(owner)}_ivar_hash[] = { #{table.join(', ')} };\n"
         hash_fields = "#{sanitize(owner)}_ivar_hash, #{table.size - 1}"
+        unless rom_method_tables?
+          out << "[[maybe_unused]] static const char* const #{sanitize(owner)}_ivar_names[] = { " \
+                 "#{slots.map { |name| "\"@#{name}\"" }.join(', ')} };\n"
+          hash_fields += " BC2CPP_IVAR_NAMES(#{sanitize(owner)}_ivar_names)"
+        end
       end
       out << "static const mrb_data_type #{type_var(owner)} = " \
              "{ \"#{struct_name(owner)}\", #{sanitize(owner)}_ivars_free, " \

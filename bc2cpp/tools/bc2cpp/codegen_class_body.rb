@@ -35,7 +35,8 @@ class CodeGen
   # A checked send (codegen_checked_send.rb) names a helper the gem does not define, so a unit's sends keep the plain
   # mrb_funcall the generator starts from. @class_body_unit is set only while a unit compiles.
   # UNIT_TAG: a unit's function names carry its tag ("_<occurrence>" for a reopened top-level class), so each occurrence
-  # of one class path is its own function in the translation unit. Nested bodies inherit the tag of their unit.
+  # of one class path is its own function in the translation unit. Nested bodies inherit the tag of their unit; a path
+  # one body opens again gets "_r<n>" more (reopen_tag), as `module G; class A; end; class A; end; end` opens G::A twice.
   def compile_class_body(irep, owner, tag: '')
     was_unit = @class_body_unit
     outer_notes = @class_body_notes
@@ -102,6 +103,7 @@ class CodeGen
     # The instance methods this body has registered so far: an alias may name only one of them (its old name must exist
     # when the unit runs, and the gem's own registrations come after the units).
     registered = Set.new
+    reopened = Hash.new(0)
     # LITERAL_TABLES (codegen_literal_tables.rb): only the plain instruction texts the loop below emits are modelled.
     literal = literal_table_plan(irep, freeze_send: true, claimed: lambda do |_addr, i|
       folded_away.include?(i) || folds.key?(i) || bodies.key?(i) || literal_length_send?(program, irep, i) ||
@@ -121,12 +123,13 @@ class CodeGen
         child_path = child_body_path(program, irep, idx, owner)
         return [nil, [:UNRESOLVED_CLASS_PATH]] unless child_path
 
-        child_code, child_refused = compile_class_body(@ireps.fetch(bodies.fetch(idx)), child_path, tag: @unit_tag)
+        child_tag = reopen_tag(child_path, reopened)
+        child_code, child_refused = compile_class_body(@ireps.fetch(bodies.fetch(idx)), child_path, tag: child_tag)
         return [nil, child_refused] unless child_code
 
         texts << child_code
         lines << class_unit_define(insn)
-        lines << "  (void)bc2cpp_class_body_#{sanitize(child_path)}#{@unit_tag}(M);\n"
+        lines << "  (void)bc2cpp_class_body_#{sanitize(child_path)}#{child_tag}(M);\n"
       elsif %i[TDEF SDEF].include?(insn.op) && omitted_def?(insn, owner, omitted)
         lines << "  // #{owner}##{insn.sym} omitted: statically dispatched only (no registration)\n"
         lines << "  r#{insn.reg} = mrb_symbol_value(mrb_intern_cstr(M, \"#{insn.sym}\"));\n"
@@ -241,6 +244,13 @@ class CodeGen
     [texts + code, nil]
   end
 
+  # The tag of the +n+th opening (from 0) of +path+ in one body: the unit's own tag first, then one per reopening.
+  def reopen_tag(path, seen)
+    n = seen[path]
+    seen[path] += 1
+    n.zero? ? @unit_tag : "#{@unit_tag}_r#{n}"
+  end
+
   # The qualified name of a class unit's child body. A singleton body (`class << self`) is the body's own owner with
   # `.singleton` appended, and only when its SCLASS takes self from the LOADSELF just before it; any other singleton
   # target refuses the body.
@@ -328,9 +338,16 @@ class CodeGen
   # `own_file` (a predicate on a unit's source file) names the files this run's units stand for; nil means every file.
   def compile_top_class_units(root_irep, own_file: nil)
     program = BytecodeIR.for(root_irep)
+    first_return = top_level_return_indices(program).min
     candidates = BytecodeIR.class_bodies(root_irep, :CLASS, :MODULE).filter_map do |idx, child|
       insn = program.source_at(idx)
       path = BytecodeIR.class_body_path(root_irep, idx, nil)
+      # TOP_LEVEL_RETURN: gem_init runs every unit before the statements, so one after a top-level return would run
+      # even when the return is taken.
+      if first_return && idx > first_return
+        raise "TOP_LEVEL_RETURN: #{path || insn.sym} is opened after a top-level return (#{root_irep.file}); " \
+              'its class unit cannot run after the return'
+      end
       superclass = path && top_unit_superclass(program, idx, insn)
       next nil unless superclass
 
@@ -388,15 +405,29 @@ class CodeGen
     end
   end
 
+  # The root's own return instructions. The VM ends the file's execution at one, whatever follows it.
+  TOP_LEVEL_RETURNS = %i[RETURN RETNIL RETSELF RETTRUE RETFALSE].freeze
+
+  def top_level_return_indices(program)
+    (0...program.size).select { |i| TOP_LEVEL_RETURNS.include?(program.source_at(i)&.op) }
+  end
+
   # TOP_LEVEL_STATEMENTS: the top-level constant and global writes of a gem's root body, as C++ statements in one function
   # gem_init calls after the class units. A statement is the run of root instructions ending in a SETCONST or SETGV (or a
   # class EXEC). Returns '' for none.
+  # TOP_LEVEL_RETURN: a top-level `return` inside a statement is `return;` here, so no later statement runs, as in the VM.
+  # A statement holding one that is left out would let the later ones run, so generation stops instead.
   def compile_top_level_statements(root_irep)
     program = BytecodeIR.for(root_irep)
     body = +''
     start = 0
     targets = jump_targets(root_irep)
     jump_sources = top_level_jump_sources(program)
+    returns = top_level_return_indices(program)
+    left_out = lambda do |from, to|
+      at = returns.find { |i| i.between?(from, to) }
+      raise "TOP_LEVEL_RETURN: the statement holding the top-level return at #{at} (#{root_irep.file}) does not compile" if at
+    end
     program.each_source do |insn, idx|
       if insn.op == :EXEC
         start = idx + 1
@@ -407,6 +438,7 @@ class CodeGen
       # A run whose branches leave it (`if cond; X = 1; else; X = 2; end` spans two runs) would emit a `goto` to a label that
       # is in no statement, or jump over a declaration into one. The VM still runs such a statement from the bytecode.
       unless top_level_run_self_contained?(program, start, idx, jump_sources)
+        left_out.call(start, idx)
         start = idx + 1
         next
       end
@@ -420,11 +452,13 @@ class CodeGen
 
         # A jump inside the run (`x = cond ? A : B`) lands on a label of this statement; compile_insn writes the `goto` only.
         lines << "  L#{source.addr}:;\n" if targets.include?(source.addr)
-        lines << compile_insn(source, root_irep, owner_def, index)
+        lines << (TOP_LEVEL_RETURNS.include?(source.op) ? "  return;\n" : compile_insn(source, root_irep, owner_def, index))
       end
       # A statement with an opcode the translator does not handle (a block, a splat send) is left to the VM like any method
       # with such an opcode (SKIP_UNSUPPORTED); its #error would otherwise fail the whole translation unit.
-      unless lines.include?('#error')
+      if lines.include?('#error')
+        left_out.call(start, idx)
+      else
         body << "  {\n#{emit_register_initializers(body_register_count(program, root_irep), [])}#{lines}  }\n"
       end
       start = idx + 1

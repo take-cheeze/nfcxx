@@ -202,6 +202,9 @@ class CodeGen
     # SUPER_SUPPORT: resolve_superclass_ref's table (name, :none, or absent); read
     # by compile_insn's SUPER case.
     @superclass_of = superclass_of
+    # PROGRAM_CLASS_SLOTS (program_class_slots.rb): fixed here, before SHARED_GENERATION forks.
+    @program_class_universe = ProgramClassSlots.universe(@known_owners + (self.class.core_hidden_defs || []).map(&:owner),
+                                                         @superclass_of, closed_world)
     # ANCESTOR_MIXINS_SUPPORT: build_registry's include/prepend tables. Prepended
     # modules are never consulted by `super`'s intervening-module check (they sit
     # above the class).

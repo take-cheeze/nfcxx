@@ -46,12 +46,12 @@ Checked against origin/main after #1529 (b2c5b7ef6).
   `tests/driver-setup-rest` checks 66 argument lists (`cases.txt`) against recordings of the bash setup, and the body's protocol.
 - The SYCL two-pass build (`scripts/nfcxx-sycl.rb`) runs in `scripts/nfcxx.rb`, before the body starts, so the body's early
   exits never refuse its arguments. `tests/driver-sycl-dispatch` holds the goldens.
-- Helpers still defined in the body (23 functions, checked with grep on origin/main): `temp_cleanup`, `fallback_gcc`,
-  `abs_path`, `cache_sha`, `cu_prepare`, `cpp2_prepare`, `ensure_tool`, `ecp_args`, `state_put`, `eccp_plan_input`,
+- Helpers still defined in the body (checked with grep on origin/main): `temp_cleanup`, `fallback_gcc`,
+  `abs_path`, `cu_prepare`, `cpp2_prepare`, `ensure_tool`, `ecp_args`, `state_put`, `eccp_plan_input`,
   `eccp_plan`, `eccp_cleanup`, `eccp_run`, `modules_plan_input`, `loop_no_value`, `early_rec`, `early_records`,
-  `preprocess_records`, `cache_plan`, `cache_check`, `cache_store`, `compile_clean`, `link_records_rm`. `cache_sha` is still
-  defined there with no caller in the body; a deletion on an unmerged branch is not reflected here. Not defined in the body:
-  `onoff` (removed, #1520), `loop_set`, `loop_append`, `cache_log`, `cache_remote_get` and `cache_remote_put`.
+  `preprocess_records`, `cache_plan`, `cache_check`, `cache_store`, `compile_clean`, `link_records_rm`. Not defined in the body:
+  `onoff` (removed, #1520), `loop_set`, `loop_append`, `cache_log`, `cache_remote_get`, `cache_remote_put` and `cache_sha`
+  (`cache_sha` removed: it had no caller in the body).
 
 ## What blocks deleting the frozen body
 

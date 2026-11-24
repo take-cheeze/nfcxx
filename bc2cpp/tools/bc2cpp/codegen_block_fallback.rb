@@ -961,7 +961,7 @@ class CodeGen
     saved_self_class_unknown = @self_class_unknown
     @self_class_unknown = saved_self_class_unknown || runtime_def_fallback_kind?(region[:kind])
     result = emit_proc_fallback_fn_body(region, d, fn_prefix)
-    result && [result[0], result[1] + proc_spec_registration(region, result[0])]
+    result && [result[0], result[1] + proc_spec_registration(region, result[0], d)]
   ensure
     @self_class_unknown = saved_self_class_unknown
     @fiber_prologue = saved_fiber_prologue
@@ -969,7 +969,7 @@ class CodeGen
 
   # PROC_SPEC: a compiled block is a C function proc with no ENTER word or parameter names, so bc2cpp_proc_spec_stand_in is
   # registered under its C function and direct entry for Proc#arity and Proc#parameters.
-  def proc_spec_registration(region, fn_name)
+  def proc_spec_registration(region, fn_name, d = nil)
     return '' unless (region[:kind] || 'block_fallback') == 'block_fallback'
 
     block = region[:block_irep]
@@ -991,8 +991,31 @@ class CodeGen
     keys.each_with_index do |k, i|
       out << "static const Bc2cppProcSpec #{id}_row#{i} = { #{k}, #{id}_iseq, 6, #{block.nlocals.to_i}, #{id}_names };\n"
     end
-    out << "static const int #{id} = #{keys.each_index.map { |i| "bc2cpp_proc_spec_register(&#{id}_row#{i})" }.join(' + ')};\n\n"
+    rows = keys.each_index.map { |i| "bc2cpp_proc_spec_register(&#{id}_row#{i})" }
+    if lazy_proc_spec?(d)
+      # PROC_SPEC_LAZY: registered where the proc is made (emit_rproc_construction), so an unreached body keeps no row.
+      # Keyed by what bc2cpp_proc_spec_of looks the proc up by: its direct entry, else its C function.
+      (@lazy_proc_specs ||= {})[region[:direct_entry] ? "#{fn_name}_direct" : fn_name] = "#{id}_note"
+      # A gem init that found the table empty installed nothing (bc2cpp_proc_specs_install), so the first row installs it;
+      # a later state's gem init finds the row.
+      return out << "[[gnu::noinline]] static void #{id}_note(mrb_state* M) {\n  static bool done = false;\n" \
+                    "  if (!done) { done = true; #{rows.join('; ')}; bc2cpp_proc_specs_install(M); }\n}\n\n"
+    end
+    out << "static const int #{id} = #{rows.join(' + ')};\n\n"
     out
+  end
+
+  # PROC_SPEC_LAZY: a static registration roots its block (and all the block reaches) whether or not the enclosing body
+  # can run. For a core body whose every registration the closed build leaves out, the row is registered by the code
+  # that makes the proc instead, which a body nothing reaches drops with it. The spec is only read for a proc that
+  # exists, so either placement answers alike. BC2CPP_PROC_SPEC_LAZY=0 registers every row at static init again.
+  def lazy_proc_spec?(d)
+    return false unless d.respond_to?(:core) && d.core && d.owner.is_a?(String) && ENV['BC2CPP_PROC_SPEC_LAZY'] != '0'
+    return false unless StaticDispatchLists.closed_build?
+
+    left_out = StaticDispatchLists.current.core_left_out
+    names = [d.name.to_s, *Array(self.class.core_aliases&.dig([d.owner, d.name.to_s]))]
+    names.all? { |name| left_out.include?("#{d.owner}##{name}") }
   end
 
   def emit_proc_fallback_fn_body(region, d, fn_prefix)
@@ -1606,6 +1629,8 @@ class CodeGen
       env_entries << 'mrb_int_value(M, 0)'
       env_entries << "mrb_int_value(M, #{BLOCK_STEP_MAGIC | 4 | 8})"
     end
+    note = @lazy_proc_specs&.[](direct_entry || fn_name)
+    out << "    #{note}(M);\n" if note
     out << "    mrb_value bc2cpp_blk_env_#{addr}[] = { #{env_entries.join(', ')} };\n"
     out << "    struct RProc* #{var} = bc2cpp_heap_proc(M, #{direct_entry ? 'bc2cpp_block_thunk' : fn_name}, " \
            "#{env_entries.size}, bc2cpp_blk_env_#{addr});\n"

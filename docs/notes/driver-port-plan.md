@@ -36,8 +36,8 @@ keeps the rest, and the Ruby entry (scripts/nfcxx.rb) routes to it until the las
    client is behind it). Test of those: tests/nfcxx-cache-io (against the frozen bash, bash-oracle.sh). The remote calls, the
    --cache-log line and the removals before a compile are Ruby too: the removals are `compile_clean`, a call of
    `scripts/nfcxx-link.rb compile-clean`, which the body still makes. The body no longer defines `cache_log`,
-   `cache_remote_get` or `cache_remote_put`. `cache_sha` is still defined in the body (no caller there) and in
-   scripts/nfcxx-cache-io.rb; tests/nfcxx-cache-io/run.sh reads it.
+   `cache_remote_get`, `cache_remote_put` or `cache_sha` (removed, no caller there); scripts/nfcxx-cache-io.rb still has
+   the sha, and tests/nfcxx-cache-io/run.sh checks it against the bash command the body used.
    The key covers `tests/driver-body/nfcxx-bash` and every file under `scripts/` (scripts/nfcxx-cache.rb `key_inputs`), so a
    change to either changes every key, as it always did.
 3. Modules: `mod_is_module_src`, `mod_decl_name`, `mod_imports`, `mod_check_src`, `mod_build_program`. Test:

@@ -261,7 +261,9 @@ for b in $backends; do
   for u in gc_common gc_copy; do (cd "$d" && "$root/nfcc" "${cflags[@]}" -c "$r/precise_gc/$u.c" -o "$u.o" >"$tmp/kp-$b-$u.log" 2>&1) & pids+=($!); done
   cfail=0; for p in "${pids[@]}"; do wait "$p" || cfail=1; done
   if [ $cfail = 1 ]; then
-    echo "FAIL $b astro koruby_precise: compile: $(cat "$tmp"/kp-$b-*.log | grep -m1 -E 'error')"; fail=1; continue
+    # the first line that says why (a Ruby exception or an abort has no "error" in it), then the last lines of each failed log
+    echo "FAIL $b astro koruby_precise: compile: $(cat "$tmp"/kp-$b-*.log | grep -m1 -iE 'error|exception|abort|refus|killed|signal')"
+    for lg in "$tmp"/kp-$b-*.log; do grep -q . "$lg" || continue; echo "--- $(basename "$lg")"; tail -5 "$lg" | cut -c1-240; done; fail=1; continue
   fi
   if ! out=$(cd "$d" && "$root/nfcc" -rdynamic -o koruby_precise main.o node.o korb_runtime.o parse.o gc_common.o gc_copy.o prism/build/libprism.a -ldl -lm -lcrypt $libz $liby $libgmp 2>&1); then
     echo "FAIL $b astro koruby_precise: link: $(grep -m1 -E 'error|undefined' <<<"$out" || head -1 <<<"$out")"; fail=1; continue

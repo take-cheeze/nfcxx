@@ -15,7 +15,8 @@ module NfcxxCuApply
 
   def split(s) = s.to_s.split("\x1f", -1).reject(&:empty?)
 
-  def plan(opts, reply)
+  # the arrays the body sets after the step: srcs, files, cflags, and for cu cuda and preinc (plan renders them as statements)
+  def arrays(opts, reply)
     kind = opts.fetch("kind", "cu")
     inputs = split(opts["inputs"])
     srcs = split(opts["srcs"])
@@ -59,14 +60,19 @@ module NfcxxCuApply
       cflags << inc
       files << inc
     end
+    { "srcs" => srcs, "files" => files, "cflags" => cflags, "cuda" => groups["cuda"], "preinc" => groups["preinc"], "kind" => kind }
+  end
+
+  def plan(opts, reply)
+    a = arrays(opts, reply)
     out = [
-      "srcs=(#{srcs.map { |w| Shellwords.escape(w) }.join(" ")})",
-      "files=(#{files.map { |w| Shellwords.escape(w) }.join(" ")})",
-      "cflags=(#{cflags.map { |w| Shellwords.escape(w) }.join(" ")})",
+      "srcs=(#{a["srcs"].map { |w| Shellwords.escape(w) }.join(" ")})",
+      "files=(#{a["files"].map { |w| Shellwords.escape(w) }.join(" ")})",
+      "cflags=(#{a["cflags"].map { |w| Shellwords.escape(w) }.join(" ")})",
     ]
-    if kind == "cu"
-      out << "cuda_opts=(#{groups["cuda"].map { |w| Shellwords.escape(w) }.join(" ")})"
-      out << "preinc=(#{groups["preinc"].map { |w| Shellwords.escape(w) }.join(" ")})"
+    if a["kind"] == "cu"
+      out << "cuda_opts=(#{a["cuda"].map { |w| Shellwords.escape(w) }.join(" ")})"
+      out << "preinc=(#{a["preinc"].map { |w| Shellwords.escape(w) }.join(" ")})"
     end
     out.join("\n")
   end

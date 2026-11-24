@@ -1,7 +1,7 @@
 D ./cache
 D ./cache/objects
 D ./cache/objects/KEY
-F ./cache.log ba6adf9abbbcfd33d6d7a434dd9e28d3305415430e82d77c6b4ef78b4f4d4cbb
+F ./cache.log 53f3f5f434a0cdd8757f1e3bc264e74d263631720271e684aa7314fa9fd5a880
 F ./cache/objects/KEY/obj ae5bc6d8934c41350bd909e90955e154051f666e6a7461607a2d0f19af00d6f0
 F ./local.h 1940772be4d8471c268914889698bbd1047323c154b045953350edd07bca3abe
 F ./main.cpp a20b5f4f20bd8a90384bf640540c5bf5f3cccb781a0ca2cb0c953ff6fff97946

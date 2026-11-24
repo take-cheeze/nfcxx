@@ -16,6 +16,7 @@ tests/cpp2/run.sh         # Cpp2 inputs: build, -c and link, mixed with .cpp, in
 ./nfcxx --emit-c hello.cpp   # print the generated C
 ./nfcxx x.cpp -o x           # loop vectorizer of the QBE back end, on by default on amd64 Linux (SSE2; 3rd/qbe/doc/vectorize.md)
 ./nfcxx -fno-tree-vectorize x.cpp -o x # the same without the vectorizer
+./nfcxx -fassociative-math x.cpp -o x # also vectorize float sums: they are reassociated, so the last bits can change (tests/vectorize/assoc/run.sh)
 ./nfcxx -fsanitize=address x.cpp -o x # AddressSanitizer via the gcc backend (docs/notes/asan.md); tests/asan/run.sh
 ./nfcxx -fsafe-pointers x.cpp -o x # Fil-C-style pointer checks on Path B, prototype (docs/notes/safe-pointers.md); tests/safeptr/run.sh
 ./nfcxx --trace=t.json x.cpp # Chrome/Perfetto trace of the driver steps (docs/notes/tracing.md)
