@@ -4,8 +4,9 @@
 # CLASS_BODY_EMIT_GEM (tools/bc2cpp/codegen_class_body.rb, on unless BC2CPP_CLASS_BODY_EMIT=0): the top-level class and module
 # units of a gem's root body. A class with a nil superclass and a module compile to a function that creates the class
 # the way vm.c does and calls the body; a class with a named superclass, or a path opened twice, is left out. gem_init
-# calls the units after the owner-class reset and before the registrations. Needs MRBC and g++; without MRBC it prints
-# SKIP and exits 0.
+# calls the units after the owner-class reset and before the registrations. TOP_LEVEL_RETURN: a top-level return ends
+# the compiled statements as it ends the VM's run, and a class opened after one stops generation. Needs MRBC and g++;
+# without MRBC it prints SKIP and exits 0.
 #
 #   MRBC=path/to/host/mrbc ruby scripts/bc2cpp/class_body_unit_check.rb
 
@@ -432,6 +433,87 @@ Dir.mktmpdir('bc2cpp-class-body-reopen') do |dir|
     compiled = plain.call(sections['compiled'])
     suite.check('UNIT_TAG: the interpreter sees both openings', interpreted == ['a => 1', 'b => 2', 'P => 3', 'Q => 4'])
     suite.check('UNIT_TAG: interpreted and compiled runs print the same', interpreted == compiled)
+    interpreted.zip(compiled).reject { |a, b| a == b }.each { |a, b| puts "    interpreted: #{a}\n    compiled:    #{b}" }
+    puts output.lines.last(15).join unless built
+  end
+end
+
+# TOP_LEVEL_RETURN (compile_top_level_statements): a top-level `return` ends the file in the VM, so the compiled
+# statements stop there too; a class opened after one is refused, since its unit would run before the return.
+TOP_RETURN = <<~'RUBY'
+  class TrProbe
+    def b = TR_B
+  end
+  TR_A = 1
+  return if TR_A == 2
+  TR_B = 2
+  TR_C = TR_B + 1
+  return if TR_C == 3
+  TR_D = 4
+RUBY
+
+TOP_RETURN_CLASS = <<~'RUBY'
+  TR_A = 1
+  return if TR_A == 1
+  class TrLate
+    X = 1
+  end
+RUBY
+
+suite.compile(TOP_RETURN) do |ireps, root|
+  gen = CodeGen.new(ireps, build_registry(ireps, root)[0], {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  code = gen.compile_top_level_statements(ireps.fetch(root))
+  suite.check('TOP_LEVEL_RETURN: a top-level return ends the statements function (no value return in it)',
+              code.scan('return;').size == 2 && !code.include?('return mrb_'))
+end
+
+suite.compile(TOP_RETURN_CLASS) do |ireps, root|
+  gen = CodeGen.new(ireps, build_registry(ireps, root)[0], {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  raised = begin
+    gen.compile_top_class_units(ireps.fetch(root))
+    nil
+  rescue RuntimeError => e
+    e.message
+  end
+  suite.check('TOP_LEVEL_RETURN: a class opened after a top-level return stops generation',
+              raised.to_s.start_with?('TOP_LEVEL_RETURN: TrLate'))
+end
+
+Dir.mktmpdir('bc2cpp-top-level-return') do |dir|
+  saved = %w[BC2CPP_VM_FREE BC2CPP_SIG_DIRS].to_h { |k| [k, ENV[k]] }
+  ENV['BC2CPP_VM_FREE'] = '1'
+  ENV['BC2CPP_SIG_DIRS'] = ''
+  code, err = begin
+    Bc2cppFixtureRuntime.generate(TOP_RETURN, dir, core: true, only_owners: %w[TrProbe])
+  ensure
+    saved.each { |k, v| ENV[k] = v }
+  end
+  suite.check('TOP_LEVEL_RETURN: the gem runs the top-level statements', code.include?('bc2cpp_top_level_statements(M);'))
+  build = ENV['CC_GENERATED_ONLY'] == '1' ? nil : Bc2cppFixtureRuntime.full_or_build
+  if build.nil?
+    puts '  SKIP top-level return behaviour: needs a full-core libmruby'
+  else
+    scenario = <<~CPP
+      static int scenario(mrb_state* M) {
+        mrb_value top = mrb_obj_value(M->object_class);
+        for (const char* name : {"TR_A", "TR_B", "TR_C", "TR_D"}) {
+          mrb_sym sym = mrb_intern_cstr(M, name);
+          if (mrb_const_defined(M, top, sym)) show(M, name, mrb_const_get(M, top, sym));
+          else std::printf("%s => undefined\\n", name);
+        }
+        call(M, "b", mrb_obj_new(M, mrb_class_get(M, "TrProbe"), 0, nullptr), "b");
+        return 0;
+      }
+    CPP
+    built, output = Bc2cppFixtureRuntime.run(dir, err, %w[TrProbe], scenario, build: build, full: true, compiled_load: false)
+    suite.check('TOP_LEVEL_RETURN: the fixture builds and runs', built)
+    sections = Bc2cppFixtureRuntime.sections(output)
+    plain = ->(lines) { lines.to_a.reject { |l| l.start_with?('  dispatches=') } }
+    interpreted = plain.call(sections['interpreted'])
+    compiled = plain.call(sections['compiled'])
+    suite.check('TOP_LEVEL_RETURN: the interpreter stops at the taken return',
+                interpreted == ['TR_A => 1', 'TR_B => 2', 'TR_C => 3', 'TR_D => undefined', 'b => 2'])
+    suite.check('TOP_LEVEL_RETURN: interpreted and compiled runs print the same', built && interpreted == compiled)
     interpreted.zip(compiled).reject { |a, b| a == b }.each { |a, b| puts "    interpreted: #{a}\n    compiled:    #{b}" }
     puts output.lines.last(15).join unless built
   end
