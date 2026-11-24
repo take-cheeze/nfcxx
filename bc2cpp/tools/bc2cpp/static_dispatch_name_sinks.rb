@@ -43,6 +43,8 @@ module StaticDispatchNameSinks
     'src/string.c' => { 'mrb_str_intern' => :conversion },
     'src/kernel.c' => { 'mrb_obj_method_recursive_p' => :comparison, 'mrb_obj_remove_instance_variable' => :variable,
                         'obj_respond_to' => :phantom },
+    # Module#private_constant (core, CRuby): converts each constant name to a Symbol and records it; it names a constant, never a method.
+    'src/variable.c' => { 'mrb_mod_private_constant' => :variable },
     'src/class.c' => { 'mrb_mod_alias' => :definition, 'mrb_mod_const_defined' => :variable, 'mrb_mod_const_set' => :variable,
                        'mrb_mod_remove_const' => :variable, 'mrb_mod_const_missing' => :error,
                        'mrb_mod_method_defined' => :introspection, 'define_method_m' => :lookup,
