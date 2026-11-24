@@ -1,8 +1,9 @@
 # Lua 5.4 bytecode to Path B IR
 
-Status, 2026-11-24: every opcode but `TBC` lowers, and 41 programs match Lua 5.4.9 (`tests/lua54bc/lower/run.sh`). The
-runtime is a small one: numbers, strings, tables, closures and upvalues, multiple results and varargs; no host library
-(`print`, `pairs`, `string.*`), no metamethods, and runtime errors stop the program without Lua's messages. The producer rule for this IR is in `docs/notes/pathb-stage2.md`, section 1 (amended for bytecode
+Status, 2026-11-24: every opcode but `TBC` lowers, and 46 programs match Lua 5.4.9 (`tests/lua54bc/lower/run.sh`). The
+runtime has numbers, strings, tables, closures and upvalues, multiple results, varargs, and the host functions `print`,
+`type`, `tostring`, `pairs`, `next`, `ipairs`, `select`. No metamethods, no `string` library, and runtime errors stop the
+program without Lua's messages. The producer rule for this IR is in `docs/notes/pathb-stage2.md`, section 1 (amended for bytecode
 producers). The IR's header names the producer: `(producer "lua-5.4")`.
 
 ## Pipeline
@@ -137,9 +138,10 @@ make_main(fn, nups) / run_main(cl, out, outsize)
 
 ## Not yet
 
-- **Host library**: `print`, `pairs`, `next`, `ipairs`, `select`, `type`, `tostring`, and the string functions. Each is a
-  light C function in the runtime; the programs here do not need them.
+- **The rest of the base library** (`error`, `pcall`, `tonumber`, `rawget`, `setmetatable`, ...) and the `string`,
+  `table` and `math` libraries. Each is a host function in the runtime, like the ones there.
 - **Metamethods**: `__index`, `__newindex`, `__add` and the rest, `__eq`, `__lt`, `__le`, `__concat`, `__len`, `__call`.
+  Today a table without them is the only kind that works: the helpers stop on anything else.
 - **Errors**: Lua's messages with `file:line:` and variable names (`attempt to index a nil value (local 'x')`). The IR has
   no line information yet; the reader has `lineinfo`, and a helper call could take the line.
 - **String coercion** in arithmetic (`"10" + 1`), and `tostring`-style conversion of strings to numbers.

@@ -20,7 +20,7 @@ typedef struct LV {
 
 enum {
   TAG_NIL = 0x00, TAG_FALSE = 0x01, TAG_TRUE = 0x11, TAG_INT = 0x03, TAG_FLOAT = 0x13, TAG_STR = 0x04,
-  TAG_TABLE = 0x05, TAG_LCL = 0x06
+  TAG_TABLE = 0x05, TAG_LCL = 0x06, TAG_LCF = 0x16
 };
 /* lopcodes.h opcode numbers of the binary ops (the helper takes the base op, not the K or I form). */
 enum {
@@ -119,18 +119,45 @@ void lua54rt_setret(LV *ret, LV *src, int n) {
 
 /* OP_CALL: the callee's base is args; its results go to ret. wanted is the number of results the caller takes, or -1
  * for all of them, which sets the stack top to a + n (a is the caller's register index of the call). */
-void lua54rt_call(LV *fn, int nargs, LV *args, LV *ret, int wanted, int a) {
-  if (fn->tag != TAG_LCL) die("attempt to call a value that is not a lowered function");
-  LClosure *c = (LClosure *)fn->v.p;
-  for (int k = nargs; k < c->numparams; ++k) args[k].tag = TAG_NIL;
-  lua54rt_nargs = nargs;
-  lua54rt_nret = 0;
-  c->fn(ret, args, c);
+/* A host function (the library): it reads args and writes up to 64 results to out, returning their count. */
+typedef int (*lua_cfn)(LV *out, LV *args, int nargs);
+typedef struct HostFn {
+  lua_cfn fn;
+} HostFn;
+
+static void make_host(LV *dst, lua_cfn fn) {
+  HostFn *h = (HostFn *)malloc(sizeof *h);
+  if (h == NULL) die("out of memory");
+  h->fn = fn;
+  dst->tag = TAG_LCF;
+  dst->v.p = h;
+}
+
+/* The results of a call are in ret[0..lua54rt_nret-1]: all of them, or wanted of them with nil after. */
+static void finish_call(LV *ret, int wanted, int a) {
   if (wanted < 0) {
     lua54rt_top = a + lua54rt_nret;
     return;
   }
   for (int k = lua54rt_nret; k < wanted; ++k) ret[k].tag = TAG_NIL;
+}
+
+void lua54rt_call(LV *fn, int nargs, LV *args, LV *ret, int wanted, int a) {
+  if (fn->tag == TAG_LCF) {
+    LV out[64];
+    int n = ((HostFn *)fn->v.p)->fn(out, args, nargs);
+    lua54rt_nret = n;
+    for (int k = 0; k < n; ++k) ret[k] = out[k];
+    finish_call(ret, wanted, a);
+    return;
+  }
+  if (fn->tag != TAG_LCL) die("attempt to call a value that is not a function");
+  LClosure *c = (LClosure *)fn->v.p;
+  for (int k = nargs; k < c->numparams; ++k) args[k].tag = TAG_NIL;
+  lua54rt_nargs = nargs;
+  lua54rt_nret = 0;
+  c->fn(ret, args, c);
+  finish_call(ret, wanted, a);
 }
 
 /* VARARGPREP: the extra arguments of the current call, saved for VARARG. */
@@ -644,6 +671,13 @@ void lua54rt_setlist(LV *t, long offset, LV *vals, int count) {
 }
 
 /* A closure for the main function of a chunk: upvalue 0 is _ENV, a fresh table; the others are nil. */
+void lua54rt_install_library(LV *env);
+
+static void set_global(LV *env, const char *name, LV *value) {
+  LV key = make_str(name, strlen(name));
+  lua54rt_settable(env, &key, value);
+}
+
 void *lua54rt_make_main(void *fn, int nupvals) {
   LV cl;
   lua54rt_closure(&cl, fn, 0, nupvals);
@@ -657,6 +691,7 @@ void *lua54rt_make_main(void *fn, int nupvals) {
     uv->v = &uv->closed;
     c->upvals[k] = uv;
   }
+  if (nupvals > 0) lua54rt_install_library(&c->upvals[0]->closed);
   return c;
 }
 
@@ -693,6 +728,157 @@ int lua54rt_cmp(int kind, LV *a, LV *b) {
   }
   die("attempt to compare two incompatible values");
   return 0;
+}
+
+/* The host library: print, type, tostring, pairs, next, ipairs, select. The rest of the base library is not here. */
+static void write_value(FILE *f, const LV *v) {
+  char buf[64];
+  switch (v->tag) {
+    case TAG_INT: fprintf(f, "%lld", (long long)v->v.i); break;
+    case TAG_FLOAT:
+      snprintf(buf, sizeof buf, "%.14g", v->v.n);
+      if (strspn(buf, "-0123456789") == strlen(buf)) strcat(buf, ".0");
+      fputs(buf, f);
+      break;
+    case TAG_STR: fwrite(((LString *)v->v.p)->bytes, 1, ((LString *)v->v.p)->len, f); break;
+    case TAG_NIL: fputs("nil", f); break;
+    case TAG_FALSE: fputs("false", f); break;
+    case TAG_TRUE: fputs("true", f); break;
+    case TAG_TABLE: fprintf(f, "table: %p", v->v.p); break;
+    case TAG_LCL:
+    case TAG_LCF: fprintf(f, "function: %p", v->v.p); break;
+    default: fprintf(f, "?"); break;
+  }
+}
+
+static int host_print(LV *out, LV *args, int nargs) {
+  (void)out;
+  for (int k = 0; k < nargs; ++k) {
+    if (k > 0) fputc('\t', stdout);
+    write_value(stdout, &args[k]);
+  }
+  fputc('\n', stdout);
+  return 0;
+}
+
+static void set_string(LV *dst, const char *s) { *dst = make_str(s, strlen(s)); }
+
+static int host_type(LV *out, LV *args, int nargs) {
+  if (nargs < 1) die("bad argument #1 to 'type' (value expected)");
+  const char *name = type_name(args[0].tag);
+  if (args[0].tag == TAG_LCF) name = "function";
+  set_string(&out[0], name);
+  return 1;
+}
+
+static int host_tostring(LV *out, LV *args, int nargs) {
+  if (nargs < 1) die("bad argument #1 to 'tostring' (value expected)");
+  if (args[0].tag == TAG_STR) {
+    out[0] = args[0];
+    return 1;
+  }
+  char *buf = NULL;
+  size_t size = 0;
+  FILE *f = open_memstream(&buf, &size);
+  if (f == NULL) die("out of memory");
+  write_value(f, &args[0]);
+  fclose(f);
+  out[0] = make_str(buf, size);
+  free(buf);
+  return 1;
+}
+
+static LV next_fn, ipairs_iter_fn;
+
+/* next(t, k): the entry after k, in the order of the nodes; nil at the end. */
+static int host_next(LV *out, LV *args, int nargs) {
+  Table *t = as_table(&args[0], "traverse");
+  size_t start = 0;
+  if (nargs >= 2 && args[1].tag != TAG_NIL) {
+    LV k = normal_key(&args[1]);
+    Node *nd = table_find(t, &k);
+    if (nd == NULL) die("invalid key to 'next'");
+    start = (size_t)(nd - t->nodes) + 1;
+  }
+  for (size_t i = start; i < t->cap; ++i) {
+    if (t->nodes[i].used && t->nodes[i].val.tag != TAG_NIL) {
+      out[0] = t->nodes[i].key;
+      out[1] = t->nodes[i].val;
+      return 2;
+    }
+  }
+  out[0].tag = TAG_NIL;
+  return 1;
+}
+
+static int host_pairs(LV *out, LV *args, int nargs) {
+  if (nargs < 1) die("bad argument #1 to 'pairs' (table expected)");
+  as_table(&args[0], "traverse");
+  out[0] = next_fn;
+  out[1] = args[0];
+  out[2].tag = TAG_NIL;
+  return 3;
+}
+
+static int host_ipairs_iter(LV *out, LV *args, int nargs) {
+  (void)nargs;
+  LV i;
+  i.tag = TAG_INT;
+  i.v.i = args[1].v.i + 1;
+  LV v;
+  lua54rt_gettable(&v, &args[0], &i);
+  if (v.tag == TAG_NIL) {
+    out[0].tag = TAG_NIL;
+    return 1;
+  }
+  out[0] = i;
+  out[1] = v;
+  return 2;
+}
+
+static int host_ipairs(LV *out, LV *args, int nargs) {
+  if (nargs < 1) die("bad argument #1 to 'ipairs' (table expected)");
+  out[0] = ipairs_iter_fn;
+  out[1] = args[0];
+  out[2].tag = TAG_INT;
+  out[2].v.i = 0;
+  return 3;
+}
+
+/* select('#', ...) or select(n, ...): the values from the n-th on. */
+static int host_select(LV *out, LV *args, int nargs) {
+  if (nargs < 1) die("bad argument #1 to 'select' (number expected)");
+  int count = nargs - 1;
+  if (args[0].tag == TAG_STR && ((LString *)args[0].v.p)->len == 1 && ((LString *)args[0].v.p)->bytes[0] == '#') {
+    out[0].tag = TAG_INT;
+    out[0].v.i = count;
+    return 1;
+  }
+  if (args[0].tag != TAG_INT) die("bad argument #1 to 'select' (number expected)");
+  int64_t n = args[0].v.i;
+  if (n < 1) die("bad argument #1 to 'select' (index out of range)");
+  int produced = 0;
+  for (int64_t k = n; k <= count; ++k) out[produced++] = args[k];
+  return produced;
+}
+
+void lua54rt_install_library(LV *env) {
+  make_host(&next_fn, host_next);
+  make_host(&ipairs_iter_fn, host_ipairs_iter);
+  LV f;
+  make_host(&f, host_print);
+  set_global(env, "print", &f);
+  make_host(&f, host_type);
+  set_global(env, "type", &f);
+  make_host(&f, host_tostring);
+  set_global(env, "tostring", &f);
+  make_host(&f, host_pairs);
+  set_global(env, "pairs", &f);
+  set_global(env, "next", &next_fn);
+  make_host(&f, host_ipairs);
+  set_global(env, "ipairs", &f);
+  make_host(&f, host_select);
+  set_global(env, "select", &f);
 }
 
 /* Runs the main function of a chunk on a stack the runtime owns. The results are copied to out (at most outsize of
