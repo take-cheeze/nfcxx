@@ -91,7 +91,7 @@ plan() {
   local name=$1 dir=$2 f=$work/plan-$1
   rm -f "$f.reply" "$stub/log"
   (
-    cd "$dir" && eval "$state_fns" && modules_plan_input > "$f.state" || exit 1
+    cd "$dir" && eval "$state_fns" && (root=$repo; modules_plan_input) > "$f.state" || exit 1   # the state step runs from the repository (its formatter is scripts/nfcxx-modules-state.rb); the planner keeps the case's root
     env -i PATH="$PATH" HOME="$HOME" TMPDIR="$work/tmp" ruby "$repo/scripts/nfcxx-modules-plan.rb" \
       "$f.state" "$f.reply" >"$f.stdout" 2>"$f.err"
     echo $? > "$f.status"

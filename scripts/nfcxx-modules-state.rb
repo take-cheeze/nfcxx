@@ -4,7 +4,7 @@
 #
 #   ruby scripts/nfcxx-modules-state.rb ROOT OUT MODDIR STD EMIT_C COMPILE_ONLY NCFILES CFILE... NSRCS SRC... -- ARG...
 #
-# The format is state_put's: k NAME, then v VALUE for each non-empty value (an empty scalar or array gives the key only), NUL-terminated.
+# The format is state_put's: k NAME, then v VALUE for each value (an empty array gives the key only; empty values are kept), NUL-terminated.
 # srcs are the sources after the .cu and .cpp2 steps (the body's array at this point), so they are passed in, not planned here.
 module NfcxxModulesState
   module_function
@@ -12,7 +12,7 @@ module NfcxxModulesState
   def records(root:, out:, moddir:, std:, emit_c:, compile_only:, cfiles:, srcs:, argv:)
     groups = [["root", [root]], ["out", [out]], ["moddir", [moddir]], ["std", [std]], ["emit_c", [emit_c]],
               ["compile_only", [compile_only]], ["cfiles", cfiles], ["srcs", srcs], ["argv", argv]]
-    groups.map { |name, values| "k#{name}\0" + values.reject(&:empty?).map { |v| "v#{v}\0" }.join }.join
+    groups.map { |name, values| "k#{name}\0" + values.map { |v| "v#{v}\0" }.join }.join
   end
 end
 
