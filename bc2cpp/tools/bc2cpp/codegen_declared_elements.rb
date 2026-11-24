@@ -11,7 +11,8 @@ require_relative 'factory_flow'
 # read (DECLARED_ELEMENT_GUARD): the element must be the declared built-in class or nil (an index past the end). A
 # mismatch raises BC2cppDeclarationViolation through bc2cpp_declared_ivar_violation, as a declared ivar's store does.
 # Reading the element is the only place the flow uses the declaration (DECLARED_ELEMENT_MASK), so a read the guard does
-# not cover is never given the class. Only single built-in classes are declared here: Integer, Float, Symbol, String.
+# not cover is never given the class. One class is declared: a built-in one, a program class, or a native class with no
+# subclass (declared_element_kept?).
 class CodeGen
   class << self
     # { [owner, name without @] => { kind:, text: } } for this build (nil or empty: none).
@@ -55,6 +56,16 @@ class CodeGen
 
         out[[owner, name.to_s.delete_prefix('@')]] = { kind: :class, text: "Array[#{klass}]", klass: klass }
       end
+    end
+    # DECLARED_NATIVE: any other one-class Array element is a candidate, kept only for a native class
+    # (declared_element_kept?).
+    (applied.ivar_sigs || {}).each_value do |iv|
+      key = [iv.owner, iv.name.to_s.delete_prefix('@')]
+      classes = iv.type.element_classes
+      next unless iv.type.kind == :array && classes && classes.size == 1 && !out.key?(key)
+
+      klass = classes.first.to_s
+      out[key] = { kind: :class, text: "Array[#{klass}]", klass: klass, native_only: true } if klass.match?(/\A[A-Z][\w:]*\z/)
     end
     out
   end
@@ -161,11 +172,29 @@ class CodeGen
       return nil unless k.is_a?(String)
 
       entry = table[[k, name]]
-      return entry.merge(owner: k, name: name) if entry
+      return declared_element_kept?(entry) ? entry.merge(owner: k, name: name) : nil if entry
 
       k = @superclass_of[k]
     end
     nil
+  end
+
+  # DECLARED_NATIVE: an element of a native class (ClosedWorld#native_class?) is tested by its exact class, so it is kept
+  # only while ClosedWorld#native_family is the class alone; a candidate entry (native_only) only for such a class.
+  def declared_element_kept?(entry)
+    return true unless entry[:kind] == :class
+
+    native = @closed_world&.native_class?(entry[:klass])
+    return !entry[:native_only] unless native
+
+    declared_native_exact?(entry[:klass])
+  end
+
+  def declared_native_exact?(klass)
+    (@declared_native_exact ||= {}).fetch(klass) do
+      @declared_native_exact[klass] = !@closed_world.nil? && RbsParamCheck.native_declarations? &&
+                                      @closed_world.native_family(klass) == [klass]
+    end
   end
 
   # The receiver's declared element entry when its one reaching definition is an ivar read, else nil.
@@ -433,7 +462,7 @@ class CodeGen
   # with no subclass of them (core_class_subclass_free?, as for the parameter and keyword guards).
   def declared_element_exact?(entry)
     case entry[:kind]
-    when :class then @closed_world&.exact_class?(entry[:klass]) || false
+    when :class then @closed_world&.exact_class?(entry[:klass]) || declared_native_exact?(entry[:klass])
     when :integer, :float, :symbol then ENV['BC2CPP_DECLARED_CORE_ELEMENT'] != '0'
     when :string, :array, :hash
       ENV['BC2CPP_DECLARED_CORE_ELEMENT'] != '0' && !block_core_world.nil? && core_class_subclass_free?(entry[:klass])

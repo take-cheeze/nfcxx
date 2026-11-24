@@ -12,7 +12,8 @@
 #   3. interpreted and compiled runs agree on a right declaration; a wrong store raises the violation, naming the ivar;
 #   4. DECLARED_UNION: a union of program classes (`A | B`, `nil | A | B`) and a class with subclasses (its closed
 #      subtree) are checked as the exact classes they stand for, seed the pool with them, and a send on such a slot is
-#      one exact-class arm per class with no by-name fallback (USER_RECEIVER_CASES, NILABLE_RECEIVER for nil).
+#      one exact-class arm per class with no by-name fallback (USER_RECEIVER_CASES, NILABLE_RECEIVER for nil);
+#   5. DECLARED_NATIVE: a declaration may name a native class too (its own section below).
 #
 #   MRBC=path/to/mrbc ruby scripts/bc2cpp/declared_ivar_guard_check.rb
 require 'tmpdir'
@@ -407,6 +408,173 @@ if build
          expected.all? { |m| on_lines.include?("violation: #{m}") && on_lines.include?("log: [RPG2k] #{m}") }
   check.call('the compiled runs print the same bytes both ways, the log lines included', same)
   puts on_lines.to_a.zip(off_lines.to_a).map { |a, b| "    #{a.to_s.ljust(70)}| #{b}" } unless same
+end
+
+
+# DECLARED_NATIVE: an RBS ivar declaration may name a class a native defines (ClosedWorld#native_class?), not only a
+# program class. End to end, on fixtures over the natives StringIO and Time:
+#   1. a native class with no subclass (`@io: StringIO`) is checked by its exact class at every store and seeds the
+#      slot's pool, so a send on it needs no nil test and no by-name fallback;
+#   2. a native class with a program subclass (`@at: Time`, `class Stamp < Time`) is checked as its closed family, one
+#      exact test per class, and a Stamp store is accepted as Ruby accepts it;
+#   3. `@ios: Array[StringIO]` tests each element it reads and pushes;
+#   4. a family the closed world cannot bound (`Class.new(StringIO)`) and BC2CPP_DECLARED_NATIVE=0 leave the slots
+#      unchecked and unseeded; a BC2CPP_CLASS_REACH_VERIFY=1 build checks each read of a seeded slot too;
+#   5. interpreted and compiled runs agree on right stores, and a wrong store raises the violation, naming the ivar.
+
+NATIVE_SOURCE = <<~RUBY
+  class Stamp < Time
+    def tag; :stamp; end
+  end
+  class Cup
+    def initialize
+      @at = Time.at(0)
+      @io = StringIO.new('ab')
+      @ios = [StringIO.new('c')]
+      nil
+    end
+
+    def set_at(t); @at = t; nil; end
+    def set_io(x); @io = x; nil; end
+    def push(x); @ios << x; nil; end
+    def at_i; @at.to_i; end
+    def io_s; @io.string; end
+    def first_s; @ios[0].string; end
+    def last_s; @ios[-1].string; end
+  end
+RUBY
+
+NATIVE_SIGS = <<~RBS
+  class Cup
+    @at: Time
+    @io: StringIO
+    @ios: Array[StringIO]
+  end
+RBS
+
+NATIVE_OWNERS = %w[Stamp Cup].freeze
+
+native_generate = lambda do |source, env = {}|
+  env.each { |k, v| ENV[k] = v }
+  Dir.mktmpdir('declared_native') do |dir|
+    sig = File.join(dir, 'sig')
+    FileUtils.mkdir_p(sig)
+    File.write(File.join(sig, 'natives.rbs'), NATIVE_SIGS)
+    ENV['BC2CPP_SIG_DIRS'] = sig
+    Bc2cppFixtureRuntime.generate(source, dir, only_owners: NATIVE_OWNERS)
+  rescue RuntimeError => e
+    [nil, e.message]
+  end
+ensure
+  env.each_key { |k| ENV.delete(k) }
+  ENV.delete('BC2CPP_SIG_DIRS')
+end
+
+native_body_of = ->(code, name) { code.to_s[%r{^// #{Regexp.escape(name)} \(compiled.*?(?=^// \w+#|\z)}m].to_s }
+native_pool = ->(err, slot) { err.to_s[/CLASSIVAR #{Regexp.escape(slot)} \(([^)]*)\)/, 1] }
+native_class_test = /bc2cpp_class_is\(M, r1, bc2cpp_owner_class_\d+\(M\)\)/
+
+puts '-- DECLARED_NATIVE: the stores check the declared native class'
+ncode, nerr = native_generate.call(NATIVE_SOURCE)
+check.call('native fixture generated', !ncode.nil?)
+
+set_io = native_body_of.call(ncode, 'Cup#set_io')
+check.call('a native class with no subclass: one exact class test before the store, raising the helper',
+           set_io.include?('DECLARED_IVAR_GUARD Cup#@io') && set_io.scan(native_class_test).size == 1 &&
+             set_io.include?('bc2cpp_declared_ivar_violation(M, r1, "Cup#@io", "StringIO");'))
+set_at = native_body_of.call(ncode, 'Cup#set_at')
+check.call('a native class with a program subclass: one exact test per class of its family',
+           set_at.include?('DECLARED_IVAR_GUARD Cup#@at') && set_at.scan(native_class_test).size == 2)
+check.call('the report lists both slots as seeded',
+           nerr.include?('DECLARED_IVAR Cup#@io: StringIO, guarded stores, pool seeded') &&
+             nerr.include?('DECLARED_IVAR Cup#@at: Time, guarded stores, pool seeded'))
+check.call('the pools: the native class, and the family for the subclassed one',
+           native_pool.call(nerr, 'Cup#@io') == 'StringIO' &&
+             native_pool.call(nerr, 'Cup#@at')&.split('|')&.sort == %w[Stamp Time])
+io_s = native_body_of.call(ncode, 'Cup#io_s')
+check.call('a send on the seeded slot: no nil test and no by-name fallback',
+           !io_s.empty? && !io_s.include?('bc2cpp_nil_receiver') && !io_s.include?('NILABLE_RECEIVER') &&
+             !io_s.match?(/mrb_funcall|bc2cpp_send\(/))
+check.call('Array[StringIO]: an element read and a push test the element against the exact class',
+           native_body_of.call(ncode, 'Cup#first_s').include?('"Cup#@ios[]", "Array[StringIO]"') &&
+             native_body_of.call(ncode, 'Cup#push').include?('DECLARED_ELEMENT_GUARD Cup#ios assigned'))
+
+puts '-- DECLARED_NATIVE: an unbounded family, the kill switch, the verify reads'
+loose, loose_err = native_generate.call("#{NATIVE_SOURCE}LooseIO = Class.new(StringIO)\n")
+check.call('Class.new(StringIO): the StringIO slot and its elements are left unchecked and unseeded',
+           loose && !loose.include?('DECLARED_IVAR_GUARD Cup#@io') && native_pool.call(loose_err, 'Cup#@io') != 'StringIO' &&
+             !loose.include?('DECLARED_ELEMENT_GUARD Cup#ios') && loose.include?('DECLARED_IVAR_GUARD Cup#@at'))
+off, off_err = native_generate.call(NATIVE_SOURCE, { 'BC2CPP_DECLARED_NATIVE' => '0' })
+check.call('BC2CPP_DECLARED_NATIVE=0: no native slot or element is checked or seeded',
+           off && !off.match?(/DECLARED_IVAR_GUARD Cup#@(?:at|io)\b/) && !off.include?('DECLARED_ELEMENT_GUARD Cup#') &&
+             native_pool.call(off_err, 'Cup#@io') != 'StringIO' && !off_err.match?(/DECLARED_IVAR Cup#@(?:at|io):/))
+
+verify, = native_generate.call(NATIVE_SOURCE, { 'BC2CPP_CLASS_REACH_VERIFY' => '1' })
+check.call('BC2CPP_CLASS_REACH_VERIFY=1: a read of a seeded slot checks what it read (DECLARED_IVAR_VERIFY)',
+           native_body_of.call(verify, 'Cup#io_s').include?('DECLARED_IVAR_VERIFY Cup#@io') &&
+             !ncode.include?('DECLARED_IVAR_VERIFY'))
+
+puts '-- DECLARED_NATIVE: interpreted and compiled runs'
+NATIVE_DRIVER = <<~'RUBY'
+  c = Cup.new
+  c.set_io(StringIO.new('xy'))
+  c.set_at(Stamp.at(5))
+  c.push(StringIO.new('z'))
+  puts c.at_i, c.io_s, c.first_s, c.last_s
+  [[:set_io, 'xy'], [:set_io, nil], [:set_at, Object.new], [:set_at, 3], [:push, 9]].each do |m, v|
+    begin
+      c.send(m, v)
+      puts "#{m}: stored"
+    rescue BC2cppDeclarationViolation => e
+      puts "violation: #{e.message}"
+    end
+  end
+  puts 'end'
+RUBY
+
+if build
+  Dir.mktmpdir('declared_native_run') do |dir|
+    sig = File.join(dir, 'sig')
+    FileUtils.mkdir_p(sig)
+    File.write(File.join(sig, 'natives.rbs'), NATIVE_SIGS)
+    ENV['BC2CPP_SIG_DIRS'] = sig
+    # The read checks (DECLARED_IVAR_VERIFY) are compiled in too: they must hold on every right store.
+    ENV['BC2CPP_CLASS_REACH_VERIFY'] = '1'
+    _code, stderr = Bc2cppFixtureRuntime.generate(NATIVE_SOURCE, dir, only_owners: NATIVE_OWNERS)
+    ENV.delete('BC2CPP_CLASS_REACH_VERIFY')
+    scenario = <<~CPP
+      static int scenario(mrb_state* M) {
+        std::fflush(stdout);
+        const char* src = R"APD(#{NATIVE_DRIVER})APD";
+        mrb_load_string(M, src);
+        std::fflush(stdout);
+        if (M->exc) { mrb_print_error(M); M->exc = nullptr; return 1; }
+        return 0;
+      }
+    CPP
+    built, output = Bc2cppFixtureRuntime.run(dir, stderr, NATIVE_OWNERS, scenario, build: build, full: true)
+    sections = built ? Bc2cppFixtureRuntime.sections(output) : {}
+    interpreted = sections['interpreted']
+    compiled = sections['compiled']
+    puts output.lines.last(30) unless built && interpreted&.last == 'end' && compiled&.last == 'end'
+    check.call('the fixtures build and run', built && interpreted&.last == 'end' && compiled&.last == 'end')
+    if interpreted && compiled
+      check.call('right stores, a program subclass of the native class included: the reads match',
+                 interpreted.first(4) == %w[5 xy c z] && compiled.first(4) == interpreted.first(4))
+      violations = compiled.select { |l| l.start_with?('violation: ') }
+      check.call('each wrong store raises the violation, naming the ivar and the declared type',
+                 violations.size == 5 &&
+                   violations[0].include?('Cup#@io was assigned String, declared StringIO') &&
+                   violations[1].include?('Cup#@io was assigned NilClass, declared StringIO') &&
+                   violations[2].include?('Cup#@at was assigned Object, declared Time') &&
+                   violations[3].include?('Cup#@at was assigned Integer, declared Time') &&
+                   violations[4].include?('Cup#@ios[] was assigned Integer, declared Array[StringIO]'))
+      check.call('the interpreter stores every one of them', interpreted.count { |l| l.end_with?(': stored') } == 5)
+    end
+  ensure
+    ENV.delete('BC2CPP_SIG_DIRS')
+    ENV.delete('BC2CPP_CLASS_REACH_VERIFY')
+  end
 end
 
 suite.finish!
