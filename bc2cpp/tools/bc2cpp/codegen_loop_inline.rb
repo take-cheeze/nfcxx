@@ -409,12 +409,21 @@ class CodeGen
     out << "      #{inline_nil_arm(recv_expr, 'each_value')}" \
            "#{inline_raise('TypeError', 'expected exact Hash receiver for inlined #each_value')}\n"
     out << "    }\n"
-    out << "    mrb_value bc2cpp_heval_values_#{addr} = mrb_hash_values(M, #{recv_expr});\n"
-    out << "    for (mrb_int bc2cpp_heval_i_#{addr} = 0; " \
-           "bc2cpp_heval_i_#{addr} < ary_size(bc2cpp_heval_values_#{addr}); " \
-           "++bc2cpp_heval_i_#{addr}) {\n"
-    out << inline_block_frame(block_irep, offset)
-    out << "      r#{value_reg} = bc2cpp_ary_entry(M, bc2cpp_heval_values_#{addr}, bc2cpp_heval_i_#{addr});\n"
+    if HashInplaceIter.on?
+      snap = "bc2cpp_heval_s_#{addr}"
+      out << hash_snapshot_lines(recv_expr, :values, snap, irep)
+      out << "    for (mrb_int bc2cpp_heval_i_#{addr} = 0; bc2cpp_heval_i_#{addr} < #{snap}_n; " \
+             "++bc2cpp_heval_i_#{addr}) {\n"
+      out << inline_block_frame(block_irep, offset)
+      out << "      r#{value_reg} = #{snap}_v[bc2cpp_heval_i_#{addr}];\n"
+    else
+      out << "    mrb_value bc2cpp_heval_values_#{addr} = mrb_hash_values(M, #{recv_expr});\n"
+      out << "    for (mrb_int bc2cpp_heval_i_#{addr} = 0; " \
+             "bc2cpp_heval_i_#{addr} < ary_size(bc2cpp_heval_values_#{addr}); " \
+             "++bc2cpp_heval_i_#{addr}) {\n"
+      out << inline_block_frame(block_irep, offset)
+      out << "      r#{value_reg} = bc2cpp_ary_entry(M, bc2cpp_heval_values_#{addr}, bc2cpp_heval_i_#{addr});\n"
+    end
     out << body
     out << "      #{iter_label}:;\n"
     out << "    }\n"
@@ -448,15 +457,25 @@ class CodeGen
     out = String.new
     out << "  {\n"
     out << inline_receiver_guard('mrb_hash_p', recv_expr, 'Hash receiver for inlined #each', name: 'each')
-    out << "    mrb_value bc2cpp_heach_keys_#{addr} = mrb_hash_keys(M, #{recv_expr});\n"
-    out << "    mrb_value bc2cpp_heach_vals_#{addr} = mrb_hash_values(M, #{recv_expr});\n"
-    out << "    mrb_int bc2cpp_heach_len_#{addr} = mrb_hash_size(M, #{recv_expr});\n"
-    out << "    for (mrb_int bc2cpp_heach_i_#{addr} = 0; " \
-           "bc2cpp_heach_i_#{addr} < bc2cpp_heach_len_#{addr}; " \
-           "++bc2cpp_heach_i_#{addr}) {\n"
-    out << inline_block_frame(block_irep, offset)
-    out << "      r#{key_reg} = bc2cpp_ary_entry(M, bc2cpp_heach_keys_#{addr}, bc2cpp_heach_i_#{addr});\n"
-    out << "      r#{val_reg} = bc2cpp_ary_entry(M, bc2cpp_heach_vals_#{addr}, bc2cpp_heach_i_#{addr});\n"
+    if HashInplaceIter.on?
+      snap = "bc2cpp_heach_s_#{addr}"
+      out << hash_snapshot_lines(recv_expr, :pairs, snap, irep)
+      out << "    for (mrb_int bc2cpp_heach_i_#{addr} = 0; bc2cpp_heach_i_#{addr} < #{snap}_n; " \
+             "++bc2cpp_heach_i_#{addr}) {\n"
+      out << inline_block_frame(block_irep, offset)
+      out << "      r#{key_reg} = #{snap}_v[2 * bc2cpp_heach_i_#{addr}];\n"
+      out << "      r#{val_reg} = #{snap}_v[2 * bc2cpp_heach_i_#{addr} + 1];\n"
+    else
+      out << "    mrb_value bc2cpp_heach_keys_#{addr} = mrb_hash_keys(M, #{recv_expr});\n"
+      out << "    mrb_value bc2cpp_heach_vals_#{addr} = mrb_hash_values(M, #{recv_expr});\n"
+      out << "    mrb_int bc2cpp_heach_len_#{addr} = mrb_hash_size(M, #{recv_expr});\n"
+      out << "    for (mrb_int bc2cpp_heach_i_#{addr} = 0; " \
+             "bc2cpp_heach_i_#{addr} < bc2cpp_heach_len_#{addr}; " \
+             "++bc2cpp_heach_i_#{addr}) {\n"
+      out << inline_block_frame(block_irep, offset)
+      out << "      r#{key_reg} = bc2cpp_ary_entry(M, bc2cpp_heach_keys_#{addr}, bc2cpp_heach_i_#{addr});\n"
+      out << "      r#{val_reg} = bc2cpp_ary_entry(M, bc2cpp_heach_vals_#{addr}, bc2cpp_heach_i_#{addr});\n"
+    end
     out << body
     out << "      #{iter_label}:;\n"
     out << "    }\n"
@@ -482,13 +501,22 @@ class CodeGen
     out = String.new
     out << "  {\n"
     out << inline_receiver_guard('mrb_hash_p', recv_expr, 'Hash receiver for inlined #each_key', name: 'each_key')
-    out << "    mrb_value bc2cpp_ekey_keys_#{addr} = mrb_hash_keys(M, #{recv_expr});\n"
-    out << "    mrb_int bc2cpp_ekey_len_#{addr} = mrb_hash_size(M, #{recv_expr});\n"
-    out << "    for (mrb_int bc2cpp_ekey_i_#{addr} = 0; " \
-           "bc2cpp_ekey_i_#{addr} < bc2cpp_ekey_len_#{addr}; " \
-           "++bc2cpp_ekey_i_#{addr}) {\n"
-    out << inline_block_frame(block_irep, offset)
-    out << "      r#{key_reg} = bc2cpp_ary_entry(M, bc2cpp_ekey_keys_#{addr}, bc2cpp_ekey_i_#{addr});\n"
+    if HashInplaceIter.on?
+      snap = "bc2cpp_ekey_s_#{addr}"
+      out << hash_snapshot_lines(recv_expr, :keys, snap, irep)
+      out << "    for (mrb_int bc2cpp_ekey_i_#{addr} = 0; bc2cpp_ekey_i_#{addr} < #{snap}_n; " \
+             "++bc2cpp_ekey_i_#{addr}) {\n"
+      out << inline_block_frame(block_irep, offset)
+      out << "      r#{key_reg} = #{snap}_v[bc2cpp_ekey_i_#{addr}];\n"
+    else
+      out << "    mrb_value bc2cpp_ekey_keys_#{addr} = mrb_hash_keys(M, #{recv_expr});\n"
+      out << "    mrb_int bc2cpp_ekey_len_#{addr} = mrb_hash_size(M, #{recv_expr});\n"
+      out << "    for (mrb_int bc2cpp_ekey_i_#{addr} = 0; " \
+             "bc2cpp_ekey_i_#{addr} < bc2cpp_ekey_len_#{addr}; " \
+             "++bc2cpp_ekey_i_#{addr}) {\n"
+      out << inline_block_frame(block_irep, offset)
+      out << "      r#{key_reg} = bc2cpp_ary_entry(M, bc2cpp_ekey_keys_#{addr}, bc2cpp_ekey_i_#{addr});\n"
+    end
     out << body
     out << "      #{iter_label}:;\n"
     out << "    }\n"
@@ -633,17 +661,19 @@ class CodeGen
 
     out = String.new
     out << "  {\n"
-    out << inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined ##{meth}", name: meth)
+    guard = inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined ##{meth}", name: meth)
+    lead, size, entry = loop_element_source(region, recv_expr, "bc2cpp_collect_s_#{addr}", irep, guard)
+    out << lead
     out << "    mrb_value bc2cpp_collect_acc_#{addr} = mrb_ary_new(M);\n" if %w[map select reject filter_map].include?(meth)
     out << "    mrb_value bc2cpp_collect_found_#{addr} = mrb_nil_value();\n" if meth == 'find'
     # each_with_index has no final assignment to skip, but a `break` in its block still sets the flag.
     out << "    mrb_bool bc2cpp_collect_broke_#{addr} = FALSE;\n" if meth != 'each_with_index' || body.include?("bc2cpp_collect_broke_#{addr}")
     out << "    for (mrb_int bc2cpp_collect_i_#{addr} = 0; " \
-           "bc2cpp_collect_i_#{addr} < ary_size(#{recv_expr}); " \
+           "bc2cpp_collect_i_#{addr} < #{size}; " \
            "++bc2cpp_collect_i_#{addr}) {\n"
     out << inline_block_frame(block_irep, offset)
     out << "      mrb_value #{result_var} = mrb_nil_value();\n"
-    out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_collect_i_#{addr});\n"
+    out << "      r#{param_reg} = #{entry.call("bc2cpp_collect_i_#{addr}")};\n"
     out << declared_loop_element_guard(region, "r#{param_reg}")
     out << "      r#{param2_reg} = mrb_fixnum_value(bc2cpp_collect_i_#{addr});\n" if meth == 'each_with_index'
     out << ElementReadRoots.loop_keep(body, [param_reg])
@@ -719,8 +749,10 @@ class CodeGen
 
     out = String.new
     out << "  {\n"
-    out << inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined ##{meth}", name: meth,
-                                                                                                args: is_fold ? ["r#{region[:init_reg]}"] : [])
+    guard = inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined ##{meth}", name: meth,
+                                                                                                 args: is_fold ? ["r#{region[:init_reg]}"] : [])
+    lead, size, entry = loop_element_source(region, recv_expr, "bc2cpp_accum_s_#{addr}", irep, guard)
+    out << lead
     out << "    mrb_bool bc2cpp_accum_broke_#{addr} = FALSE;\n"
     case meth
     when 'any?'
@@ -735,15 +767,15 @@ class CodeGen
       out << "    mrb_value #{acc_var} = r#{region[:init_reg]};\n"
     end
     out << "    for (mrb_int bc2cpp_accum_i_#{addr} = 0; " \
-           "bc2cpp_accum_i_#{addr} < ary_size(#{recv_expr}); " \
+           "bc2cpp_accum_i_#{addr} < #{size}; " \
            "++bc2cpp_accum_i_#{addr}) {\n"
     out << inline_block_frame(block_irep, offset)
     out << "      mrb_value #{result_var} = mrb_nil_value();\n"
     if is_fold
       out << "      r#{param_reg} = #{acc_var};\n"
-      out << "      r#{param2_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_accum_i_#{addr});\n"
+      out << "      r#{param2_reg} = #{entry.call("bc2cpp_accum_i_#{addr}")};\n"
     else
-      out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_accum_i_#{addr});\n"
+      out << "      r#{param_reg} = #{entry.call("bc2cpp_accum_i_#{addr}")};\n"
     end
     out << declared_loop_element_guard(region, "r#{is_fold ? param2_reg : param_reg}")
     out << ElementReadRoots.loop_keep(body, [is_fold ? param2_reg : param_reg])
@@ -984,7 +1016,9 @@ class CodeGen
     end_label = "Lbc2cpp_sym_end_#{region[:sym_addr]}"
     out = String.new
     out << "  {\n"
-    out << inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined &:#{sym}", name: meth)
+    guard = inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined &:#{sym}", name: meth)
+    lead, size, entry = loop_element_source(region, recv_expr, "bc2cpp_sym_s_#{region[:sym_addr]}", irep, guard)
+    out << lead
     case meth
     when 'map', 'select', 'reject'
       out << "    mrb_value bc2cpp_sym_acc_#{region[:sym_addr]} = mrb_ary_new(M);\n"
@@ -1001,10 +1035,10 @@ class CodeGen
     # (static_dispatch_registrations.rb, covered_block_sites).
     out << "    // SYM_SITE #{irep.content_digest} #{region[:sendb_addr]}\n"
     out << "    for (mrb_int bc2cpp_sym_i_#{region[:sym_addr]} = 0; " \
-           "bc2cpp_sym_i_#{region[:sym_addr]} < ary_size(#{recv_expr}); " \
+           "bc2cpp_sym_i_#{region[:sym_addr]} < #{size}; " \
            "++bc2cpp_sym_i_#{region[:sym_addr]}) {\n"
     out << "      mrb_value bc2cpp_sym_e_#{region[:sym_addr]} = " \
-           "bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_sym_i_#{region[:sym_addr]});\n"
+           "#{entry.call("bc2cpp_sym_i_#{region[:sym_addr]}")};\n"
     # The element is used after the by-name call on it, so it is rooted for the whole call (ELEMENT_READ_ROOTS).
     out << "      bc2cpp_keep(M, bc2cpp_sym_e_#{region[:sym_addr]});\n"
     if meth == 'each'
