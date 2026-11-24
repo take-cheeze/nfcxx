@@ -316,6 +316,7 @@ module NfcxxSetup
     pb.("--ir-opt=#{opts["ir_opt"]}") if flag.("ir_opt_set")
     pb.("--asan") if flag.("asan") && backend == "pathb"
     pb.("--pic") if flag.("pic")
+    pb.("--vectorize-assoc") if flag.("vec_assoc") && backend == "pathb"
     diag = opts.fetch("diag_opts", "").split("\x1f", -1).reject(&:empty?)
     pb.(*diag) unless diag.empty?
     pb.("--dialect=clang") if backend == "pathb" && opts.fetch("dialect", "") == "clang" && !opts.fetch("dialect_asked", "").empty?

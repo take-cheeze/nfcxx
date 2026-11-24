@@ -47,7 +47,7 @@ LOOP_SCALARS = %i[std out outset emit_c emit_hip backend backend_explicit path_b
                   cache_dir cache_log_file keep_intermediates time_log instantiate promote_slots unroll struct_slots pathb_c
                   ld_name obfuscate dialect dialect_asked gnu gnu_user freestanding cosmo target trace moddir asan safeptr
                   sanitize shared pic rdynamic compile_only pthread preprocess xlang stdin_src depmode dfile dtarget depphony
-                  ncpp nobj system_paths].freeze
+                  ncpp nobj system_paths vec_assoc].freeze
 # the array state of the loop, in the order the text output prints them
 LOOP_ARRAYS = %i[files cflags cfiles cu_inputs cpp2_inputs srcs ppflags pie_opts preinc sysdirs isa diag_opts asanopts].freeze
 
@@ -321,6 +321,9 @@ def run_loop(args, state, ld_available)
     elsif a == "-ftree-vectorize" || a == "-fno-tree-vectorize"
       # the loop vectorizer of Path B (pathb-cc.rb --vectorize, --no-vectorize): not a file, not dumped (bash: vec_pb)
       state.vec_pb = a == "-ftree-vectorize" ? "--vectorize" : "--no-vectorize"
+    elsif a == "-fassociative-math" || a == "-fno-associative-math"
+      # the vectorizer may reassociate float sums (pathb-cc.rb --vectorize-assoc, qbe -F): off by default (the setup's flags)
+      state.vec_assoc = a == "-fassociative-math" ? 1 : 0
     elsif starts_with?(a, "-m") then state.isa << a
     elsif a == "-MD" || a == "-MMD" then state.depmode = a
     elsif a == "-MP" then state.depphony = "-MP"
@@ -379,6 +382,8 @@ def emit(state)
                sanitize shared pic rdynamic compile_only pthread preprocess xlang stdin_src depmode dfile dtarget depphony
                ncpp nobj system_paths]
   scalars.each { |name| $stdout.write("#{name}=#{state.public_send(name)}\n") }
+  # -fassociative-math (only when it is given: the frozen bash body's state has no such line otherwise)
+  $stdout.write("vec_assoc=1\n") if state.vec_assoc.to_s == "1"
   %w[files cflags cfiles cu_inputs cpp2_inputs srcs ppflags pie_opts preinc sysdirs isa diag_opts asanopts].each do |name|
     state.public_send(name).each { |x| $stdout.write("#{name}+=#{x}\n") }
   end

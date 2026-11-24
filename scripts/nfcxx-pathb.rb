@@ -292,6 +292,7 @@ class Plan
     @depmode = nil
     @ir_opt = nil
     @vec_pb = nil # -ftree-vectorize / -fno-tree-vectorize (the last): pathb-cc.rb --vectorize / --no-vectorize
+    @vec_assoc = false # -fassociative-math (the last): pathb-cc.rb --vectorize-assoc
     @dialect = "g++"
     @dialect_asked = false
     @gnu_user = nil
@@ -446,6 +447,9 @@ class Plan
         nil # warnings do not change the object code
       elsif x == "-ftree-vectorize" || x == "-fno-tree-vectorize"
         @vec_pb = x == "-ftree-vectorize" ? "--vectorize" : "--no-vectorize"
+      elsif x == "-fassociative-math" || x == "-fno-associative-math"
+        # the vectorizer may reassociate float sums (pathb-cc.rb --vectorize-assoc, qbe -F); off by default
+        @vec_assoc = x == "-fassociative-math"
       elsif x.start_with?("-m")
         nil # ISA options: their macros go to the bash's files list and are skipped there, and -fPIC-style picopts are gcc-only
       elsif x == "-MD" || x == "-MMD"
@@ -572,6 +576,7 @@ class Plan
     f << "--pic" if @pic
     f << "-g" if @dbg_g && !%w[-g0 -ggdb0].include?(@dbg_g) # -g (the last, unless -g0): the line table
     f << @vec_pb if @vec_pb
+    f << "--vectorize-assoc" if @vec_assoc
     f.concat(@diag)
     f << "--dialect=clang" if @dialect == "clang" && @dialect_asked
     f << "--gnu-version=#{@gnu_user}" if @gnu_user && !@gnu_user.empty?
