@@ -1,5 +1,5 @@
 == -c m.cpp --emit-c -o m.o
 -- stdout
 -- stderr
-ORACLE: line N: cd: ROOT/build/edg-base: No such file or directory
-status=1
+No such file or directory - TMP/edg/bin/cpfe
+status=127

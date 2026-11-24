@@ -105,7 +105,8 @@ module NfcxxBody
   end
 
   def fail!(message, status = 2)
-    raise Exit.new(status, message.end_with?("\n") ? message : "#{message}\n")
+    text = message.to_s.empty? || message.end_with?("\n") ? message.to_s : "#{message}\n"
+    raise Exit.new(status, text)
   end
 
   # ---------------------------------------------------------------------------------------------------------------------
@@ -218,13 +219,13 @@ module NfcxxBody
 
   def body
     read_loop
+    early_pre
     setup_default
     setup_asan
     trace_unit
     trace_begin
     cu_prepare
     syntax_and_tool
-    early_pre
     preprocess_route if flag?("preprocess")
     post_early
     modules_block

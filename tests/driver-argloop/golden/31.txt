@@ -1,5 +1,5 @@
 == -c m.cpp -o m.o --backend=pathb
 -- stdout
 -- stderr
-nfcxx: QBE not built; run scripts/setup-qbe.sh
+pathb-dump: harness not built; run scripts/setup-pathb.sh
 status=2
