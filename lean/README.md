@@ -13,10 +13,9 @@ Build and test (Lean 4 via elan; the toolchain is pinned in `lean-toolchain`):
     cd lean && lake build nfcxx_ir
     ../tests/lean/run.sh   # skips with a message when lake is not installed
 
-Status: written but not yet compiled. The toolchain could not be installed in the session that
-wrote it, so the first step is `lake build` and fixing whatever it reports. The grammar was checked
-separately with a Python mirror of the lexer and parser: all 94 goldens in `tests/pathb-ir`
-(11,786 top-level forms) parse with balanced parens and round-trip.
+Status: builds with Lean 4.14.0 (lake 5.0.0) and passes `tests/lean/run.sh`: the 94 goldens in `tests/pathb-ir`
+(11,786 top-level forms) parse, round-trip, and decode to the typed AST; the 4 malformed inputs in `lean/tests/bad` are
+refused; and the functions in `lean/tests/sem` give their expected outcomes.
 
 `NfcxxIR/Semantics.lean` is the executable semantics of a subset of the IR: integer types, registers,
 constants, the wrapping, checked and bitwise integer operators, comparisons, `iconv`, same-width `bitcast`,
