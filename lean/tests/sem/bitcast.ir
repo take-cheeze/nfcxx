@@ -1,0 +1,10 @@
+(ir-module "bitcast.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "main"
+  (ret unsigned_int)
+  (params)
+  (let %0 int (const int -1))
+  (let %1 unsigned_int (bitcast unsigned_int %0))
+  (let %2 int (bitcast int %1))
+  (let %3 int (wadd int %2 (const int 1)))
+  (let %4 unsigned_int (bitcast unsigned_int %3))
+  (return %1))

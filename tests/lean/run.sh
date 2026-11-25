@@ -36,5 +36,13 @@ expect tests/sem/div_zero.ir "trap: division by zero"
 expect tests/sem/slot_store.ir "value 42"
 expect tests/sem/slot_uninit.ir "stuck: slot \$\"x\" is read before it is written"
 expect tests/sem/float_add.ir "stuck: constant of type double is not an integer literal: 1.5"
+# switch: fall-through, break, default, no match, and a break inside a loop inside an arm (1011, then +7)
+expect tests/sem/switch.ir "value 1018"
+expect tests/sem/switch_nested.ir "stuck: a case label nested inside a statement of a switch body is not modelled"
+expect tests/sem/bitcast.ir "value 4294967295"
+expect tests/sem/bitcast_width.ir "stuck: bitcast between integer types of different widths (64 and 32 bits)"
+expect tests/sem/eval.ir "value 5"
+expect tests/sem/eval_trap.ir "trap: division by zero"
+expect tests/sem/eval_call.ir "stuck: value form call not modelled"
 echo "ok: the semantics gives the expected outcome for the IR functions in tests/sem"
 exit $fail
