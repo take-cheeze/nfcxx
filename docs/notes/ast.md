@@ -595,7 +595,7 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
 
 ### JIT: machine code for loops (a first, narrow slice)
 
-`TierOptions::jit` (off by default; `NFCAST_JIT=1`, with the tier on, for the test drivers) takes a hot loop over with x86-64 machine
+`TierOptions::jit` (off by default; the test driver takes `--jit`, with the tier on) takes a hot loop over with x86-64 machine
 code instead of the C tier. It uses the same hook as the C tier's on-stack replacement (`tier_loop` in `nfcast_tier.cpp`, the same
 takeover points at the top of an iteration, the same state handed over for a `for` loop), the same rule that an assumption checked at
 entry that fails leaves the loop to the interpreter, and the same reason that is sound: the code has no side effects and allocates
@@ -642,7 +642,7 @@ not measured: this slice is about the encoder and the takeover, not about the lo
 **Verification.** `tests/ast/jit.cpp` runs a set of loops (the refusals, the guard miss, the wraparound, nested and re-entered loops,
 `break`, the conditions) and 300 generated loops with nested ifs, whiles and wrapping arithmetic; each must give the interpreter's
 result, the counters must say what the case expects, and the generated loops must all compile and be taken over. `tests/ast/run.sh`
-runs it, and it also runs every `tests/ast/cases/*.lua` program with the tier on and the JIT on (`NFCAST_JIT=1`), against the output of a
+runs it, and it also runs every `tests/ast/cases/*.lua` program with the tier on and the JIT on (`--jit`), against the output of a
 real Lua 5.4. In the sandbox this was written in, `tests/ast/tier.cpp` fails two checks of "a host that ignores SIGCHLD" (lines 685 and 691
 of the file): the unmodified HEAD fails the same two, with the same output, so they are the environment's, not the JIT's.
 
