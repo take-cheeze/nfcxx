@@ -61,6 +61,30 @@ for src in "$dir"/lower/err/*.py; do
   n=$((n + 1))
 done
 
+# lower/rterr/*.py lower and run, and must fail at run time (exit 1) with the exception line that MicroPython raises for the
+# same module (its last output line, e.g. "TypeError: ..."), which is then the runtime's message after its "mpy: " prefix.
+for src in "$dir"/lower/rterr/*.py; do
+  base=$(basename "$src" .py)
+  mkdir -p "$work/rterr/$base"
+  "$MPY_CROSS" -o "$work/rterr/$base/$base.mpy" "$src" || { echo "FAIL rterr/$base: mpy-cross refused the source"; fail=1; continue; }
+  "$work/lower" "$work/rterr/$base/$base.mpy" > "$work/rterr/$base.ir" 2> "$work/rterr/$base.err" \
+    || { echo "FAIL rterr/$base: lowering refused: $(cat "$work/rterr/$base.err")"; fail=1; continue; }
+  "$root/scripts/mrb.rb" "$root/scripts/pathb-qbe-emit.rb" "$work/rterr/$base.ir" > "$work/rterr/$base.ssa" 2> "$work/rterr/$base.err" \
+    || { echo "FAIL rterr/$base: emitter: $(cat "$work/rterr/$base.err")"; fail=1; continue; }
+  "$root/build/qbe/qbe" "$work/rterr/$base.ssa" > "$work/rterr/$base.s" 2> "$work/rterr/$base.err" \
+    || { echo "FAIL rterr/$base: qbe: $(cat "$work/rterr/$base.err")"; fail=1; continue; }
+  cc -o "$work/rterr/$base.bin" "$work/rterr/$base.s" "$work/rt.o" "$work/driver.o" -lm || { echo "FAIL rterr/$base: link"; fail=1; continue; }
+  got=$("$work/rterr/$base.bin" 2>&1)
+  status=$?
+  want=$("$MICROPY" -c "import sys; sys.path.insert(0,'$work/rterr/$base'); import $base" 2>&1 | tail -1)
+  if [ "$status" -ne 1 ] || [ -z "$want" ] || [ "${got#*"$want"}" = "$got" ]; then
+    echo "FAIL rterr/$base: expected exit 1 with '$want', got exit $status: '$got'"
+    fail=1
+    continue
+  fi
+  n=$((n + 1))
+done
+
 if [ "$fail" -ne 0 ]; then
   echo "mpy-lower: FAILED"
   exit 1
