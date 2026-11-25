@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Checks of the timing model in ptxi (the header of ptxi.c describes it): --timing, --sms, --lat and --l1. CPU only.
-# The estimates below are derived by hand from the model: each thread's clock adds the latency of each instruction it
-# issues, a barrier leaves every waiting thread at the latest arrival, a block takes its largest clock, and the blocks
-# of an SM run one after another.
+# Checks of the timing model in ptxi (the header of ptxi.c describes it): --timing, --sms, --issue, --bw, --lat and
+# --l1. CPU only. The estimates below are derived by hand from the model: a warp (32 threads) issues each instruction as
+# often as its busiest lane steps through it, a barrier leaves every waiting warp at the latest arrival, a block takes
+# the largest of its warp times, issue slots and bytes, and the blocks of an SM run one after another.
 set -euo pipefail
 cd "$(dirname "$0")"
 out=$(mktemp -d)
@@ -36,15 +36,28 @@ one=$(cycles "$ex" exchange --grid 8 --block 2 ptr:16 ptr:16 --sms 1)
 eight=$(cycles "$ex" exchange --grid 8 --block 2 ptr:16 ptr:16 --sms 8)
 expect_eq "8 blocks on 1 SM is 8 times one block" "$one" "$((8 * eight))"
 
-# 3. The barrier makes a thread wait for the latest arrival. Thread 0 arrives at 48 cycles, thread 1 at 444 (its load
-#    is 400 cycles). With the barrier thread 0 leaves at 444 and then does two loads: 444 + 800 + 4 (ret) = 1248. Without
-#    it, each thread does its own two loads: 832 for both. The block estimate is the maximum over the threads.
+# 3. The barrier makes the warp wait for the latest arrival. The two threads are one warp. Thread 1's predicated load
+#    (pc 6, 400 cycles) is issued by the warp, so the epoch before the barrier costs 24 (six alu) + 400 + 20 (bar.sync)
+#    = 444, and thread 0 leaves the barrier at 444. Then the warp issues the shared load (pc 8) and thread 0's predicated
+#    load (pc 9): 444 + 400 + 400 + 4 (ret) = 1248. This is the value the per-thread model gave too.
+#    Without the barrier the warp issues three global loads, one per predicated side and the shared one: 24 + 3 x 400
+#    + 4 (ret) = 1228. The per-thread model gave 832 (each thread's own two loads), because it did not pay the other
+#    side of the predicated load in the same warp. Divergence is serialized, so the warp pays for all three.
 bw=barwait.ptx
 with=$(cycles "$bw" barwait --grid 1 --block 2 ptr:2)
 sed '/bar.sync 0;/d' "$bw" > "$out/barwait_nobarrier.ptx"
 without=$(cycles "$out/barwait_nobarrier.ptx" barwait --grid 1 --block 2 ptr:2)
-expect_eq "barrier: the waiting thread pays for the slow arrival" "$with" 1248
-expect_eq "no barrier: each thread pays only its own loads" "$without" 832
+expect_eq "barrier: the warp waits for the slow arrival" "$with" 1248
+expect_eq "no barrier: the warp pays for both sides of the predicated loads" "$without" 1228
+
+# 3b. Divergent if/else in one warp. Thread 0 runs the then side (two global loads, pc 6 and 7), thread 1 the else side
+#     (one global load, pc 8). The per-lane-max model gave 832: thread 0's own path, 24 (six alu) + 400 + 400 + 4 (its
+#     off else-load) + 4 (ret). The warp issues every instruction of both sides once: 24 + 400 (pc 6) + 400 (pc 7)
+#     + 400 (pc 8) + 4 (ret) = 1228. The difference is 396: the else side's 400-cycle load, less the 4-cycle off slot
+#     the per-lane model charged thread 0 for it.
+div=divergent.ptx
+div_est=$(cycles "$div" divergent --grid 1 --block 2 ptr:2)
+expect_eq "divergent if/else: the warp pays for both sides" "$div_est" 1228
 
 # 4. Schedules. A kernel whose path does not depend on the schedule gives one estimate over every schedule: the barrier
 #    exchange, the barrier kernel, and the atomic megakernel of run_sched.sh. The megakernel without its atomic takes

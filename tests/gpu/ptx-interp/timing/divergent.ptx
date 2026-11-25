@@ -1,0 +1,26 @@
+// One warp of two threads takes a divergent if/else, written with predicates. Thread 0 runs the then side (two global
+// loads); thread 1 runs the else side (one global load). The warp issues every instruction of both sides, so it pays
+// for three global loads. run_timing.sh checks the exact estimate (1228 cycles; the per-thread model gave 832).
+.version 8.0
+.target sm_75
+.address_size 64
+
+.visible .entry divergent(
+  .param .u64 a_param
+)
+{
+  .reg .b32 %r<4>;
+  .reg .b64 %rd<3>;
+  .reg .pred %p<2>;
+
+  ld.param.u64 %rd0, [a_param];
+  mov.u32 %r0, %tid.x;
+  mul.wide.u32 %rd1, %r0, 4;
+  add.s64 %rd2, %rd0, %rd1;
+  setp.eq.u32 %p0, %r0, 0;
+  setp.ne.u32 %p1, %r0, 0;
+  @%p0 ld.global.u32 %r1, [%rd2];
+  @%p0 ld.global.u32 %r2, [%rd2];
+  @%p1 ld.global.u32 %r3, [%rd2];
+  ret;
+}
