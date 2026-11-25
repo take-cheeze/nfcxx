@@ -44,6 +44,32 @@ extern "C" void rgss_set_display(mrb_state* M, lv_display_t* display);
 #include "method_lookup_survey.hxx"
 #endif
 
+// BC2CPP_HOST_GC_STRESS=N: a full GC before every Nth object allocation, as
+// MRB_GC_STRESS does before every one, so a value no root keeps is freed at the
+// next allocation. mruby's own pacing cannot do this: its threshold never drops
+// below GC_STEP_SIZE (1024) allocations past the live count. trace_host.bash
+// links with --wrap=mrb_obj_alloc, so every allocation outside gc.c comes here.
+// Both ends are weak: alloc_counter.cxx's own wrapper replaces this one, and a
+// host linked without the wrap (send_counter.bash) never calls it.
+static long gc_stress_every = 0;
+static long gc_stress_count = 0;
+static long gc_stress_runs = 0;
+extern "C" [[gnu::weak]] struct RBasic* __real_mrb_obj_alloc(
+    mrb_state* M,
+    enum mrb_vtype ttype,
+    struct RClass* cls);
+extern "C" [[gnu::weak]] struct RBasic* __wrap_mrb_obj_alloc(
+    mrb_state* M,
+    enum mrb_vtype ttype,
+    struct RClass* cls) {
+  if (gc_stress_every > 0 && ++gc_stress_count >= gc_stress_every) {
+    gc_stress_count = 0;
+    ++gc_stress_runs;
+    mrb_full_gc(M);
+  }
+  return __real_mrb_obj_alloc(M, ttype, cls);
+}
+
 namespace {
 
 #ifdef MRB_USE_METHOD_LOOKUP_HOOK
@@ -366,13 +392,9 @@ int main(int argc, char** argv) {
     report_exception(M, "mrb_open (gem init)");
     return 2;
   }
-  // BC2CPP_HOST_GC_STRESS=STEP_RATIO: a GC cycle starts as soon as one ends,
-  // so a value nothing roots is freed within a few allocations (MRB_GC_STRESS's
-  // full GC per allocation is too slow for the game).
-  if (const char* const stress = getenv("BC2CPP_HOST_GC_STRESS")) {
-    M->gc.interval_ratio = 1;
-    M->gc.step_ratio = atoi(stress) > 0 ? atoi(stress) : 1000;
-  }
+  // After the boot: the gem inits are the same in every run.
+  if (const char* const stress = getenv("BC2CPP_HOST_GC_STRESS"))
+    gc_stress_every = atol(stress) > 0 ? atol(stress) : 1;
 #ifdef MRB_USE_METHOD_LOOKUP_HOOK
   if (survey_path)
     lookup_survey::snapshot(M);
@@ -534,5 +556,8 @@ int main(int argc, char** argv) {
   mrb_gc_arena_restore(M, frame_ai);
   fprintf(stdout, "TRACE_HOST done frames=%ld arena=%d\n", frames,
           M->gc.arena_idx);
+  if (gc_stress_every > 0)
+    fprintf(stdout, "TRACE_HOST gc_stress every=%ld full_gcs=%ld\n",
+            gc_stress_every, gc_stress_runs);
   return 0;
 }

@@ -25,8 +25,8 @@
 #                     save. Saving writes into GAME_DIR, so point it at a copy.
 #   BC2CPP_HOST_CONTINUE  1: pick Continue on the title instead of New Game.
 #   BC2CPP_HOST_PREVIEW_MAP  start New Game on this map id's centre tile.
-#   BC2CPP_HOST_GC_STRESS  run the GC without pause, in steps of this step_ratio
-#                     (e.g. 1000), so a missing GC root shows up; host_sweep.bash passes it on.
+#   BC2CPP_HOST_GC_STRESS  a full GC before every Nth object allocation after the boot (1: every
+#                     one, as MRB_GC_STRESS), so a missing GC root shows up; host_sweep.bash passes it on.
 #
 # Needs on PATH: c++ (g++), cc, ar, nproc, clock_gettime-capable libc (Linux).
 set -euo pipefail
@@ -104,7 +104,8 @@ int_defs=()
 # --gc-sections: the closed libmruby.a is built with one section per function (build_config.rb
 # GC_SECTIONS), so the host keeps only what it reaches, as a device build does.
 "$cxx" "${lookup_link[@]}" -o "$host_dir/trace_host" "$host_dir/trace_host.o" \
-  "$mruby_lib" "$host_dir/liblvgl.a" "$host_dir/libuni-algo.a" -lpthread -lm -Wl,--gc-sections
+  "$mruby_lib" "$host_dir/liblvgl.a" "$host_dir/libuni-algo.a" -lpthread -lm -Wl,--gc-sections \
+  -Wl,--wrap=mrb_obj_alloc
 
 echo "built $host_dir/trace_host"
 
