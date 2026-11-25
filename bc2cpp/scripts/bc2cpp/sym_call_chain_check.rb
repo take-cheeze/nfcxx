@@ -9,7 +9,7 @@
 #      mrb_funcall; the private definer gets its arm too (Symbol#to_proc sends with __send__ semantics); the chain is
 #      indented past the loop's closing brace and its owner call, if any, is level 0;
 #   2. covered_block_sites reads the loop as covered, a proven nomethod in it included;
-#   3. run on a full-core mruby, compiled against interpreted: map/select/reject/count/find/each over every definer,
+#   3. run on a full-core mruby, compiled against interpreted: map/select/reject/count/find/each/any?/all?/none? over every definer,
 #      a private definer, a subclass, and an element that answers nothing give the same value or error.
 #
 # Usage: MRBC=path/to/host/mrbc ruby scripts/bc2cpp/sym_call_chain_check.rb
@@ -50,6 +50,9 @@ SOURCE = <<~RUBY
     def ct(a); a.count(&:tag); end
     def fd(a); x = a.find(&:tag); x && x.class; end
     def ea(a); a.each(&:tag).size; end
+    def an(a); ([] + a).any?(&:tag); end
+    def al(a); ([] + a).all?(&:tag); end
+    def no(a); ([] + a).none?(&:tag); end
   end
 RUBY
 OWNERS = %w[SymA SymB SymC SymD SymE SymF SymA2 SymNone SymProbe].freeze
@@ -71,6 +74,9 @@ Dir.mktmpdir('sym-call-chain') do |dir|
   loop_lines = mp[%r{// SYM_SITE .*?^    \}$}m].to_s.lines
   check.call('map(&:tag): the chain is indented past the loop brace',
              loop_lines.any? { |l| l.include?('SYM_CALL_CHAIN') } && loop_lines[0..-2].none? { |l| l.match?(/\A    \}\s*\z/) })
+  %w[an al no].each do |name|
+    check.call("#{name}: the predicate loop is inlined", body.call(code, name).include?('inlined &:tag'))
+  end
   ea = body.call(code, 'ea')
   check.call('each(&:tag): SYM_CALL_CHAIN, result discarded', ea.include?('// SYM_CALL_CHAIN &:tag'))
 
@@ -127,7 +133,7 @@ Dir.mktmpdir('sym-call-chain') do |dir|
         "[]",
         "[SymE.new, SymE.new]",
       };
-      const char* meths[] = {"mp", "sl", "rj", "ct", "fd", "ea"};
+      const char* meths[] = {"mp", "sl", "rj", "ct", "fd", "ea", "an", "al", "no"};
       for (const char* m : meths) {
         for (const char* l : lists) row(M, l, m, eval(M, l));
       }
@@ -143,6 +149,8 @@ Dir.mktmpdir('sym-call-chain') do |dir|
     check.call('built and ran', built)
     check.call('runtime parity (every row)', !compiled.empty? && compiled == interpreted)
     check.call('a private definer answers (__send__ semantics)', compiled.any? { |l| l.start_with?('mp [SymF.new') && l.include?('[:f, :a]') })
+    check.call('none?(&:tag) is true when no element answers truthy',
+               compiled.include?('no [SymC.new, SymD.new] => true') && compiled.include?('no [] => true'))
     check.call('an element answering nothing raises NoMethodError', compiled.any? { |l| l.start_with?('mp [SymNone.new]') && l.include?('NoMethodError') })
     warn output unless failures.empty?
   else

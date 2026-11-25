@@ -179,6 +179,7 @@ require_relative 'codegen_fixnum_ranges'
 require_relative 'codegen_tuple_returns'
 require_relative 'codegen_return_analysis'
 require_relative 'codegen_loop_inline'
+require_relative 'hash_inplace_iter'
 require_relative 'codegen_sort_array_cmp'
 require_relative 'codegen_step_loop'
 require_relative 'codegen_kernel_loop'
@@ -2024,6 +2025,8 @@ BC2CPP_MAIN = lambda do
       }
     CPP
   end
+  print HashInplaceIter::RUNTIME if HashInplaceIter.on?
+  print HashInplaceIter::VERIFY_RUNTIME if HashInplaceIter.on? && HashInplaceIter.verify?
   puts <<~'CPP'
     // Stores that look the old value up first. mrb_hash_fetch, not mrb_hash_get: a default proc must not run.
     static inline void bc2cpp_iv_set(mrb_state* M, mrb_value obj, mrb_sym id, mrb_value v) {

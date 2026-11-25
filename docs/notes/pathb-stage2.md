@@ -18,15 +18,33 @@ C++ -> EDG front end -> lowered file-scope IL (in memory)
 
 Both modes are one `cpfe` built by `scripts/setup-pathb.sh`. `scripts/pathb-dump --ir file.cpp` selects the IR mode.
 
-## 1. Decision (a): the IR is built inside the back end, from the lowered IL
+## 1. Decision (a): the IR has more than one producer (amended)
 
-The IR is produced by `back_end()` from the lowered IL that is in memory, as stage 1 does. Consequences:
+**Amended 2026-11-24.** The original rule was: the IR is built only inside `back_end()`, from the lowered IL. That is
+still true for C and C++, and it stays the default producer. Bytecode front ends are now a second producer of the same
+IR, so the rule is:
+
+- **Producers.** The C/C++ producer is `back_end()` in `be/nfcxx_ir.c`, from EDG's lowered IL in memory. A bytecode
+  producer decodes a bytecode image (Lua 5.4 chunk first; mruby irep and CPython `.pyc` only later, if at all) and
+  emits the same s-expression IR. It needs no EDG and no `cpfe`.
+- **The IR is the contract, not the producer.** Forms, the layout header and the goldens in section 2 onward apply to
+  every producer. A producer may use only forms the IR already has, or add a new form in this document first. A new form
+  is a spec change for every emitter, not a producer-local extension.
+- **Each producer marks its output.** The header names the producer (`(producer c++)`, `(producer lua-5.4)`, ...) so an
+  emitter can refuse a producer it does not support. The emitters do not otherwise change.
+- **Runtime concerns stay with the producer.** A bytecode producer does not add value representation, GC roots or
+  error unwinding to the IR. Each language's runtime model (tagged values, GC rooting, its error model) is lowered
+  into ordinary IR forms by that producer's op table, so the IR gains no language-specific forms. Where a language needs
+  a runtime entry point, the producer emits a `(call ...)` to it.
+
+What holds for the C/C++ producer (unchanged):
 
 - The IR sees exactly what EDG's C generator sees after `DO_IL_LOWERING=1`: templates instantiated, constructors,
   destructors, `new`/`delete` expanded, exceptions turned into EH-runtime calls, vtables chosen. Nothing is re-parsed.
 - There is no text round trip. The s-expression text is the IR's output format for goldens and for Lean; it is not
   read back by the compiler.
-- The cost is that the IR is only available while `cpfe` runs. A separate step would need the IL serialized first.
+- The cost is that the C/C++ IR is only available while `cpfe` runs. A separate step would need the IL serialized first.
+  A bytecode producer has no such limit, since its input is a file.
 
 **The unlowered C++ IL path is not used now.** Stage 1 found that `-N` (`no_il_lowering`) sets `suppress_back_end` in
 this EDG (`optk_write_unlowered_il`), so `back_end()` is never called and no C++ IL reaches our code. Getting it means

@@ -44,6 +44,7 @@ ruby scripts/bc2cpp/method_missing_arms_check.rb
 ruby scripts/bc2cpp/block_rest_mixed_check.rb
 ruby scripts/bc2cpp/hash_build_ops_check.rb
 ruby scripts/bc2cpp/kernel_loop_check.rb
+ruby scripts/bc2cpp/hash_inplace_iter_check.rb
 ruby scripts/bc2cpp/const_lexical_order_check.rb
 ruby scripts/bc2cpp/zsuper_optional_check.rb
 ruby scripts/bc2cpp/super_lookup_check.rb

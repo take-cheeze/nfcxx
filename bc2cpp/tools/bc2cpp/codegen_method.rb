@@ -99,6 +99,12 @@ class CodeGen
         region[:label_tag] = guarded_klass ? "_#{guarded_klass[0]}" : nil
         # No element-class hint: it describes the elements of a receiver the flow proved, and this one is not.
         region[:elem_class] = nil if guarded_klass
+        # HASH_INPLACE_ITER: the region reads the Hash behind its `values`/`keys` receiver; that send is suppressed.
+        if !guarded_klass && !try_range && HashInplaceIter::FUSED_PASSES.include?(pass.recognize)
+          source = hash_fused_source(irep, region, *full_ctx)
+          region[:hash_source] = source unless source.nil? || claimed.include?(source[:addr]) ||
+                                               suppressed.include?(source[:addr])
+        end
         inlined = send(pass.emit, region, irep, d)
         unless inlined
           next
@@ -124,6 +130,7 @@ class CodeGen
         end
 
         suppressed << anchor << region[:sendb_addr]
+        suppressed << region[:hash_source][:addr] if region[:hash_source]
         glue_at[anchor] = inlined
       end
     end
