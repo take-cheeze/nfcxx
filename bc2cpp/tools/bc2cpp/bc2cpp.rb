@@ -1676,6 +1676,9 @@ BC2CPP_MAIN = lambda do
   end
   # MULTI_RETURN: the callees a destructuring caller names get their `X_mr` (codegen_multi_return.rb).
   compiled = gen.multi_return_link!(compiled)
+  # RESCUE_SHARED_HANDLER (rescue_shared_handler.rb): each helper defined ahead of its first site, before any pass reads
+  # the methods' text.
+  warn RescueSharedHandler.summary(RescueSharedHandler.place(compiled, symbol))
 
   # CORE_INTERPRETED_REPORT: every core-source bytecode method this run leaves
   # interpreted, with the reason and the language features it uses.

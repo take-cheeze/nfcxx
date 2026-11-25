@@ -5,6 +5,7 @@ require_relative 'bytecode_ir'
 require_relative 'reg_name'
 require_relative 'cold_compact'
 require_relative 'cold_compact_calls'
+require_relative 'rescue_shared_handler'
 
 # CodeGen: compile_method and jump targets.
 
@@ -647,6 +648,12 @@ class CodeGen
         prefix_at.key?(addr) || guarded_inline[:at].key?(addr) || guarded_inline[:after].key?(addr)
     end
     pending_splat = nil
+    # RESCUE_SHARED_HANDLER (rescue_shared_handler.rb): a handler's logging run, held until its last instruction.
+    shared_claimed = lambda do |addr|
+      suppressed.include?(addr) || glue_at.key?(addr) || prefix_at.key?(addr) || guarded_inline[:at].key?(addr) ||
+        guarded_inline[:after].key?(addr)
+    end
+    shared_runs = RescueSharedRuns.new(arm_prune_drop ? {} : rescue_shared_plan(irep, shared_claimed), BytecodeIR.for(irep))
     # GUARD_HOIST (codegen_guard_hoist.rb): no site inside a glued or guarded-inline range (guard_hoist_bypassed).
     guard_hoist_session(irep, prefix_at.empty?,
                         bypassed: guard_hoist_bypassed(irep, suppressed, glue_at, guarded_inline)) do
@@ -691,14 +698,17 @@ class CodeGen
         out << "\x01ARM_PRUNE:#{idx}\x01" unless flow_bodies
         next
       end
-      if flow_bodies
-        flow_labels[idx] += jump_label unless jump_label.empty?
-        flow_bodies[idx] = text
-      else
-        out << jump_label << text
+      shared_runs.feed(idx, jump_label, text).each do |at, label, placed|
+        if flow_bodies
+          flow_labels[at] += label unless label.empty?
+          flow_bodies[at] = placed
+        else
+          out << label << placed
+        end
       end
     end
     end
+    raise 'RESCUE_SHARED_HANDLER: a run was left open' if shared_runs.pending?
     if arm_prune_drop && !arm_texts.empty?
       held = arm_texts.transform_values { |label, text| label + text }
       if !flow_bodies

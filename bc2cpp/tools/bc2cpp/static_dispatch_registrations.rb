@@ -334,8 +334,9 @@ module StaticDispatchRegistrations
   RAW_SYMBOL_VALUE = /mrb_symbol_value\(mrb_intern_cstr\(M, "(?:[^"\\\n]|\\.)*"\)\)/
   # codegen_insn.rb's pool string value (bc2cpp_pool_str, symbol_cache.rb's prelude), not a folded constant, or the
   # same value appended by STRCAT_LITERAL (bc2cpp_str_cat_lit); a LITERAL_TABLES String slot (BC2CPP_LIT_STR) is the
-  # same STRING instruction's value, and so is a STACK_STRINGS frame-local one (bc2cpp_stack_str).
-  POOL_STRING_VALUE = /(?:bc2cpp_pool_str\(M, |bc2cpp_stack_str\(M, bc2cpp_str\d+, |bc2cpp_str_cat_lit\(M, r\d+, |BC2CPP_LIT_STR\()"((?:[^"\\\n]|\\.)*)"\)/
+  # same STRING instruction's value, and so is a STACK_STRINGS frame-local one (bc2cpp_stack_str) or one a
+  # RESCUE_SHARED_HANDLER site hands its helper (BC2CPP_RH_LIT, rescue_shared_handler.rb).
+  POOL_STRING_VALUE = /(?:bc2cpp_pool_str\(M, |bc2cpp_stack_str\(M, bc2cpp_str\d+, |bc2cpp_str_cat_lit\(M, r\d+, |BC2CPP_LIT_STR\(|BC2CPP_RH_LIT\()"((?:[^"\\\n]|\\.)*)"\)/
   # symbol_cache.rb's interned-name table; every use is `bc2cpp_sym(M, <index>)`
   # or the index argument of `bc2cpp_send(M, recv, <index>, ...)`.
   SYM_TABLE = /bc2cpp_sym_names\[\d+\] = \{\n(.*?)^\};/m
