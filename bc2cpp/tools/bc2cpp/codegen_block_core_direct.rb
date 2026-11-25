@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'probe_stats'
 require_relative 'block_self'
 require_relative 'core_defs'
 require_relative 'foreign_definers'
@@ -374,12 +375,17 @@ module BlockCoreDirectFallback
   # compiles_clean? for a body whose entry carries the root-context guard: the guard is why that
   # predicate says no, and the arms above supply it.
   def block_core_clean?(label)
-    return @clean_cache[label] if @clean_cache.key?(label)
+    if @clean_cache.key?(label)
+      ProbeStats.count(:clean_hit)
+      return @clean_cache[label]
+    end
     return false if @probing.include?(label)
 
     probe_clean(label) do
       # Only #error is read, as in compiles_clean?: the probe skips the register-flow cleanup the same way.
       @clean_probe = ENV['BC2CPP_PROBE_REGISTER_FLOW'] != '0' && !entry_specialize_enabled?
+      ProbeStats.count(:probe_compile)
+      ProbeStats.note_probe_label(label)
       compile_method(label)
     end
   end

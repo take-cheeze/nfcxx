@@ -3526,6 +3526,17 @@ module MrbcRb
           @sp = saved
         end
         gen_move(dst, r, false)
+      when Prism::MultiWriteNode
+        # A multiple assignment as a value: its right side (the array) is the value, built at the first temporary.
+        saved = @sp
+        base = dst >= @nlocals ? dst : temp
+        begin
+          @sp = base
+          r = statement(node, last: true)
+        ensure
+          @sp = saved
+        end
+        gen_move(dst, r, false)
       when Prism::BeginNode, Prism::RescueModifierNode, Prism::ParenthesesNode
         # A begin block as a value: built at the destination when it is a temporary, else at the first temporary and moved.
         saved = @sp

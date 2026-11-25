@@ -18,6 +18,7 @@
 # symbols, lv, instructions) from it.
 
 require_relative 'world_root'
+require_relative 'probe_stats'
 require 'shellwords'
 require 'set'
 require 'fileutils'
@@ -3569,5 +3570,6 @@ BC2CPP_MAIN = lambda do
     never_called.each { |m| warn "  #{m[:owner]}##{m[:name]}" }
   end
   profile_phase.call('diagnostics + sidecar writes')
+  ProbeStats.report
 end
 BC2CPP_MAIN.call unless defined?(BC2CPP_DEFER_MAIN)

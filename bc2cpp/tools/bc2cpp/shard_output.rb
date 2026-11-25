@@ -314,7 +314,9 @@ module ShardOutput
     texts = groups.each_with_index.map do |g, i|
       g.map { |u| u[:code] }.join + g.map { |u| u[:tail].to_s }.join + (i.zero? ? hooks : '')
     end
-    items = texts.map { |t| top_level_items(t.lines) }
+    line_arrays = texts.map(&:lines)
+    scans = line_arrays.map { |lines| scan_lines(lines) }
+    items = line_arrays.zip(scans).map { |lines, scan| top_level_items(lines, scan: scan) }
     defined = {}
     items.each_with_index do |list, shard|
       list.each do |item|
@@ -334,10 +336,9 @@ module ShardOutput
     shared = defined.select do |name, shard|
       prelude_ids.include?(name) || shard_ids.each_with_index.any? { |ids, i| i != shard && ids.include?(name) }
     end.keys.to_set
-    prelude_out, declared = rewrite_prelude(symbol, prelude, defined.keys.to_set, texts.map { |t| code_text(t.lines) }.join)
+    prelude_out, declared = rewrite_prelude(symbol, prelude, defined.keys.to_set, line_arrays.zip(scans).map { |lines, scan| code_text(lines, scan: scan) }.join)
     decls = String.new
-    bodies = texts.zip(items).map do |text, list|
-      lines = text.lines
+    bodies = line_arrays.zip(items).map do |lines, list|
       list.each do |item|
         next unless item[:body] && shared.include?(item[:name])
 
@@ -371,8 +372,10 @@ module ShardOutput
   # `<Owner>_compiled_class`). An external definition is the main file's alone; a shard sees its declaration.
   def rewrite_prelude(symbol, prelude, method_names, methods_code)
     ns = "bc2cpp_shard_#{symbol}"
-    segs = segments(prelude.lines)
-    shared = shared_prelude_items(segs, code_text(prelude.lines) + methods_code)
+    prelude_lines = prelude.lines
+    prelude_scan = scan_lines(prelude_lines)
+    segs = segments(prelude_lines, scan: prelude_scan)
+    shared = shared_prelude_items(segs, code_text(prelude_lines, scan: prelude_scan) + methods_code)
     helpers = shared_helpers? ? stateless_helpers(segs, method_names) : Set.new
     out = String.new(helpers.empty? ? '' : SHARED_HELPER_MACROS)
     out << "namespace #{ns} {}\nusing namespace #{ns};\n"
@@ -515,8 +518,9 @@ module ShardOutput
       next [] unless seg[:kind] == :code
 
       lines = seg[:lines]
-      code_lines = code_text(lines).lines
-      top_level_items(lines).select { |item| item[:name] && item[:body] && lines[item[:first]].match?(/\bstatic\b/) }
+      seg_scan = scan_lines(lines)
+      code_lines = code_text(lines, scan: seg_scan).lines
+      top_level_items(lines, scan: seg_scan).select { |item| item[:name] && item[:body] && lines[item[:first]].match?(/\bstatic\b/) }
                             .map { |item| item.merge(text: code_lines[item[:first]..item[:last]].join) }
     end
     by_name = items.group_by { |item| item[:name] }
@@ -556,8 +560,9 @@ module ShardOutput
 
   # The text with comments and literals blanked, line for line (callers index its lines as the input's); a directive
   # line keeps its text (a macro can name a function).
-  def code_text(lines)
-    scan_lines(lines).each_with_index.map do |info, i|
+  # A precomputed scan_lines(lines) avoids rescanning the same lines for every reader.
+  def code_text(lines, scan: scan_lines(lines))
+    scan.each_with_index.map do |info, i|
       info[:pp] ? lines[i].sub(%r{//.*}, '') : "#{info[:code].chomp}\n"
     end.join
   end
@@ -573,8 +578,7 @@ module ShardOutput
 
   # The prelude cut into: `#include` lines, top-level `#if` regions and items (:code, with :include when the region
   # holds an include), and everything else (:other: blank lines, comments, other directives).
-  def segments(lines)
-    scan = scan_lines(lines)
+  def segments(lines, scan: scan_lines(lines))
     segs = []
     i = 0
     while i < lines.size
@@ -616,8 +620,8 @@ module ShardOutput
   end
 
   # Top-level items: {name:, body:, var:, first:, head:}; `head` is the text before the body or initializer.
-  def top_level_items(lines)
-    scan = scan_lines(lines)
+  # A precomputed scan_lines(lines) avoids rescanning the same lines for every reader.
+  def top_level_items(lines, scan: scan_lines(lines))
     scan.each_index.select { |k| scan[k][:item_start] }.map do |k|
       head = String.new
       cut = nil

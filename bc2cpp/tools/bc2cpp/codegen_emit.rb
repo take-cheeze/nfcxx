@@ -4,6 +4,7 @@ require_relative 'branch_hints'
 require_relative 'presym_spelling'
 require_relative 'core_native_candidates'
 require_relative 'native_frame_use'
+require_relative 'probe_stats'
 
 # CodeGen: per-method compile state and file-level emission.
 
@@ -19,12 +20,17 @@ class CodeGen
     # call may reach a guarded body.
     # RESUMABLE_ENTRY: `_impl` is the entry that hands over to the driver, not the body.
     return false if resumable_method?(label)
-    return @clean_cache[label] if @clean_cache.key?(label)
+    if @clean_cache.key?(label)
+      ProbeStats.count(:clean_hit)
+      return @clean_cache[label]
+    end
     return false if @probing.include?(label)
 
     probe_clean(label) do
       # Specialization caches emitted clone text, so its probes must keep final-code optimization.
       @clean_probe = ENV['BC2CPP_PROBE_REGISTER_FLOW'] != '0' && !entry_specialize_enabled?
+      ProbeStats.count(:probe_compile)
+      ProbeStats.note_probe_label(label)
       compile_method(label)
     end
   end
@@ -44,6 +50,7 @@ class CodeGen
     # so it is not memoized per label (@guard_cycles).
     if @probing.size >= PROBE_DEPTH_LIMIT
       @guard_cycles += 1
+      ProbeStats.count(:depth_cutoff)
       return false
     end
     outermost = @probing.empty?
@@ -59,10 +66,14 @@ class CodeGen
       end
       if ENV['BC2CPP_PROBE_ROOT_CACHE'] != '0' && @root_clean_cache.key?(label)
         @guard_cycles += 1
+        ProbeStats.count(:root_hit)
         return @root_clean_cache[label]
       end
     end
-    return @cycle_clean_cache[label] if @cycle_clean_cache&.key?(label) && ENV['BC2CPP_PROBE_CYCLE_CACHE'] != '0'
+    if @cycle_clean_cache&.key?(label) && ENV['BC2CPP_PROBE_CYCLE_CACHE'] != '0'
+      ProbeStats.count(:cycle_hit)
+      return @cycle_clean_cache[label]
+    end
 
     @probing << label
     begin
@@ -75,8 +86,10 @@ class CodeGen
         unless @clean_cache.key?(label) && @clean_cache[label] == clean
           @clean_cache = @clean_cache.merge(label => clean).freeze
         end
+        ProbeStats.count(:clean_store)
       else
         (@cycle_clean_cache ||= {})[label] = clean
+        ProbeStats.count(:cycle_store)
         if outermost && @root_clean_cache_facts.equal?(@clean_cache) && ENV['BC2CPP_PROBE_ROOT_CACHE'] != '0'
           @root_clean_cache[label] = clean
         end

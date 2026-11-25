@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'strscan'
+require_relative 'probe_stats'
 require_relative 'bytecode_ir'
 require_relative 'reg_name'
 require_relative 'cold_compact'
@@ -138,6 +139,8 @@ class CodeGen
   end
 
   def compile_method(label)
+    ProbeStats.count(:compile_method)
+    ProbeStats.note_label(label)
     @ir_inline_remaining = 512
     irep = @ireps.fetch(label)
     d = @owner_of.fetch(label)
