@@ -101,6 +101,22 @@ module EntryHeader
       explicit Bc2cppEntryGcPause(mrb_state* m) : M(m), was(m->gc.disabled) { m->gc.disabled = TRUE; }
       ~Bc2cppEntryGcPause() { M->gc.disabled = was; }
     };
+    // ENTRY_ARENA_TRIM: the arena only grows (gc_arena_keep), so what one call grew it to would stay allocated. A
+    // call leaves it as its caller had it: back to half again that (or the floor) once it is over twice that, the
+    // result already rooted in the part kept. A failed shrink keeps it.
+    static inline void bc2cpp_entry_arena_trim(mrb_state* M) {
+    #ifndef MRB_GC_FIXED_ARENA
+      int keep = M->gc.arena_idx + M->gc.arena_idx / 2;
+      if (keep < MRB_GC_ARENA_SIZE) keep = MRB_GC_ARENA_SIZE;
+      if (M->gc.arena_capa <= keep * 2) return;
+      void* p = mrb_realloc_simple(M, M->gc.arena, sizeof(struct RBasic*) * keep);
+      if (!p) return;
+      M->gc.arena = (struct RBasic**)p;
+      M->gc.arena_capa = keep;
+    #else
+      (void)M;
+    #endif
+    }
     template <class F>
     static inline mrb_value bc2cpp_entry_call(mrb_state* M, mrb_value self, F&& body) {
       if (M->jmp) {
@@ -109,6 +125,7 @@ module EntryHeader
         mrb_value v = body();
         mrb_gc_arena_restore(M, ai);
         bc2cpp_entry_root(M, v);
+        bc2cpp_entry_arena_trim(M);
         return v;
       }
       M->exc = NULL;
@@ -142,22 +159,7 @@ module EntryHeader
       }
       mrb_gc_arena_restore(M, ai);
       bc2cpp_entry_root(M, v);
-      // ENTRY_ARENA_TRIM: the arena only grows (gc_arena_keep), so what one call grew it to would stay allocated.
-      // The host's call leaves it as the host had it: back to half again that (or the floor) once it is over twice
-      // that, v rooted in the part kept. A failed shrink keeps it.
-    #ifndef MRB_GC_FIXED_ARENA
-      {
-        int keep = M->gc.arena_idx + M->gc.arena_idx / 2;
-        if (keep < MRB_GC_ARENA_SIZE) keep = MRB_GC_ARENA_SIZE;
-        if (M->gc.arena_capa > keep * 2) {
-          void* p = mrb_realloc_simple(M, M->gc.arena, sizeof(struct RBasic*) * keep);
-          if (p) {
-            M->gc.arena = (struct RBasic**)p;
-            M->gc.arena_capa = keep;
-          }
-        }
-      }
-    #endif
+      bc2cpp_entry_arena_trim(M);
       // A by-name call leaves the exception in M->exc.
       if (error) M->exc = mrb_obj_ptr(v);
       return v;
