@@ -25,11 +25,22 @@ SRC = <<~RUBY
     def kw_up_block(a, k: 1, j: 2)
       [a, k, j]
     end
+
+    def kw_up_pos(a)
+      [a]
+    end
   end
 
   class KwFix < KwBase
     def kw_sum(a, k: 1, j: 2)
       a + k + j
+    end
+
+    def kw_ivar(a, k: 1, j: 2)
+      @kw_a = a
+      @kw_k = k ? k : 0
+      $kw_j = j
+      [@kw_a, @kw_k, $kw_j]
     end
 
     def kw_req(a, k:, j: 5)
@@ -60,6 +71,10 @@ SRC = <<~RUBY
       super
     end
 
+    def kw_up_pos(a, k: 7, j: 8)
+      [k, j, super(a)]
+    end
+
     def kw_up_block(a, k: 7, j: 8)
       [0].map { super }
     end
@@ -74,7 +89,7 @@ SRC = <<~RUBY
   end
 RUBY
 # kw_up and kw_up_block forward k and j with a bare super, from the method and from a block.
-POSITIVE = %w[kw_sum kw_req kw_fwd kw_rescue kw_block kw_explicit_super kw_up_block_bare].freeze
+POSITIVE = %w[kw_sum kw_ivar kw_req kw_fwd kw_rescue kw_block kw_explicit_super kw_up_pos kw_up_block_bare].freeze
 # KwFix's refusals and the reason BC2CPP_KWARG_NO_HASH_REPORT gives; kw_up_block stays interpreted. kw_rest's
 # `**opts` is read, and its shape is refused before any body compiles; it is in the parity rows only.
 REFUSED = { 'kw_up' => 'read', 'kw_up_block' => 'captured' }.freeze
@@ -83,6 +98,7 @@ DRIVER = Bc2cppStepCheck::SHOW + <<~'RUBY'
   f = KwFix.new
   show('sum') { [f.kw_sum(1), f.kw_sum(1, k: 10), f.kw_sum(1, j: 100, k: 10)] }
   show('sum unknown') { f.kw_sum(1, z: 1) }
+  show('ivar') { [f.kw_ivar(1), f.kw_ivar(2, k: nil, j: 3)] }
   show('req') { [f.kw_req(2, k: 3), f.kw_req(2, j: 0, k: 4)] }
   show('req missing') { f.kw_req(2) }
   show('fwd') { [f.kw_fwd(1), f.kw_fwd(1, k: false), f.kw_fwd(1, k: nil)] }
@@ -90,6 +106,7 @@ DRIVER = Bc2cppStepCheck::SHOW + <<~'RUBY'
   show('block') { [f.kw_block, f.kw_block(k: 5)] }
   show('explicit super') { [f.kw_explicit_super(1), f.kw_explicit_super(1, j: 3)] }
   show('bare super') { [f.kw_up(1), f.kw_up(1, k: 2), f.kw_up(1, j: 3, k: 4)] }
+  show('positional super') { f.kw_up_pos(1, k: 2) }
   show('super in block') { f.kw_up_block(1, k: 2) }
   show('call in block') { f.kw_up_block_bare(1, k: 2) }
   show('rest') { [f.kw_rest(1), f.kw_rest(1, k: 2, z: 3, y: 4)] }
@@ -130,8 +147,8 @@ suite.check('KwBase#kw_up, which no super reaches through a Hash, builds none',
             !code.scan(/^mrb_value KwBase_kw_up_impl\w*\(mrb_state\* M[^;{]*\{\n.*?^\}\n/m).join.include?('mrb_hash_new_capa('))
 
 EXPECTED = [
-  'sum: [4, 13, 111]', 'req: [11, 8]', 'fwd: [13, 23, 23]', 'rescue: [4, ["neg", 9]]', 'block: [[2, 4, 6], [5, 10, 15]]',
-  'bare super: [[1, 7, 8], [1, 2, 8], [1, 4, 3]]', 'super in block: [[1, 2, 8]]', 'call in block: [[1, 2, 8]]'
+  'sum: [4, 13, 111]', 'ivar: [[1, 1, 2], [2, 0, 3]]', 'req: [11, 8]', 'fwd: [13, 23, 23]', 'rescue: [4, ["neg", 9]]', 'block: [[2, 4, 6], [5, 10, 15]]',
+  'bare super: [[1, 7, 8], [1, 2, 8], [1, 4, 3]]', 'positional super: [2, 8, [1]]', 'super in block: [[1, 2, 8]]', 'call in block: [[1, 2, 8]]'
 ].freeze
 suite.behaviour(DRIVER) do |_interpreted, compiled|
   EXPECTED.each { |line| suite.check("compiled prints #{line}", compiled.to_a.include?(line)) }

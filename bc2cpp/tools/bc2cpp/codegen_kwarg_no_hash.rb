@@ -27,7 +27,7 @@ class CodeGen
     @kwarg_no_hash_plans ||= {}.compare_by_identity
     @kwarg_no_hash_plans[irep] ||= begin
       plan, reason = compute_kwarg_no_hash_plan(irep)
-      if ENV['BC2CPP_KWARG_NO_HASH_REPORT'] == '1' && (plan.any? || reason != :no_keywords)
+      if kwarg_no_hash_report? && (plan.any? || reason != :no_keywords)
         where = "#{File.basename(irep.file.to_s)}:#{irep.instructions&.first&.lineno}"
         warn "bc2cpp KWARG_NO_HASH: #{where} (irep #{irep.label}): #{plan.any? ? 'no Hash' : "kept (#{reason})"}"
       end
@@ -36,6 +36,10 @@ class CodeGen
   end
 
   private
+
+  def kwarg_no_hash_report?
+    ENV['BC2CPP_KWARG_NO_HASH_REPORT'] == '1'
+  end
 
   def compute_kwarg_no_hash_plan(irep)
     return [{}, :disabled] unless kwarg_no_hash_enabled?
@@ -100,15 +104,49 @@ class CodeGen
       j = ins.index
       next true if j == hash_idx + 1 || KWARG_NO_HASH_NO_READS.include?(ins.source.op)
 
-      reads = string_eq_reads(ins.source, params)
+      reads = kwarg_no_hash_reads(ins.source, params)
       regs.all? do |reg|
         next true unless reads == :all || reads.include?(reg)
         # handler_ops: a handler's EXCEPT and RESCUE are walked as vm.c runs them, not refused.
         defs = prog.reaching_definitions(j, reg, opaque_regs: BytecodeIR.own_upvar_written_regs(irep),
                                             through_handlers: true, handler_ops: true)
-        defs && defs.none? { |d| !d.entry? && writers.include?(d.index) }
+        ok = defs ? defs.none? { |d| !d.entry? && writers.include?(d.index) } : kwarg_no_hash_just_written?(prog, j, reg)
+        warn "bc2cpp KWARG_NO_HASH:   r#{reg} read at #{j} (#{ins.source.op})" if !ok && kwarg_no_hash_report?
+        ok
       end
     end
+  end
+
+  # A refused query still has an answer when the instruction before +j+, the only way to +j+, writes +reg+ outright.
+  def kwarg_no_hash_just_written?(prog, j, reg)
+    return false unless j.positive? && string_eq_only_predecessor?(prog, j - 1)
+
+    prev = prog.source_at(j - 1)
+    return false unless reg_int(prev.reg) == reg
+
+    (prev.op == :MOVE && reg_int(prev.regs[1]) != reg) || STACK_TUPLE_PURE_OPS.include?(prev.op) ||
+      BytecodeIR::Ops::LOADI_OPS.include?(prev.op)
+  end
+
+  # Stores that read R(a) only (vm.c); stack_tuple_reads also lists their name operand as if it were a register.
+  KWARG_NO_HASH_STORES = Set[:SETIV, :SETGV, :SETSV, :SETCV, :SETCONST, :SETUPVAR].freeze
+
+  # string_eq_reads, with KWARG_NO_HASH_STORES read precisely.
+  def kwarg_no_hash_reads(insn, params)
+    return insn.regs.map(&:to_i) if KWARG_NO_HASH_STORES.include?(insn.op) && insn.regs.size == 1
+    # An explicit-argument SUPER reads self, its arguments and its block slot (vm.c OP_SUPER, L_SENDB_SYM); only the bare
+    # form's ARGARY packs the frame.
+    if insn.op == :SUPER && insn.plain_fixed_argc?
+      lead = reg_int(insn.reg)
+      return [0, *(lead..(lead + insn.argc.to_i + 1))]
+    end
+    # HASH a n reads R(a)..R(a+2n-1) (vm.c OP_HASH); `HASH R4 0` reads nothing.
+    if insn.op == :HASH && insn.uint_operand
+      lead = reg_int(insn.reg)
+      return (lead...(lead + (2 * insn.uint_operand.to_i))).to_a
+    end
+
+    string_eq_reads(insn, params)
   end
 
   # No nested block packs a frame (ARGARY) or touches one of +regs+ of +irep+ through its env.
