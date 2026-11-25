@@ -1,9 +1,9 @@
 # MicroPython .mpy to Path B IR
 
 Status, 2026-11-25: the `.mpy` reader (`tools/mpy/mpy_reader.{hpp,cpp}`) loads format 6 bytecode modules and decodes every
-function's prelude and instructions. The first lowering slice (`tools/mpy/mpy_lower.{hpp,cpp}`) turns a module's top-level
-code into Path B IR, and `tests/mpy/lower/run.sh` checks it against the reference interpreter. Functions and everything
-else in the not-yet list below are refused by name.
+function's prelude and instructions. The lowering (`tools/mpy/mpy_lower.{hpp,cpp}`) turns a module's top-level code and its functions, including closures
+(cell and free variables), into Path B IR, and `tests/mpy/lower/run.sh` checks it against the reference interpreter.
+Everything else in the not-yet list below is refused by name.
 
 ## Reference
 
@@ -35,8 +35,8 @@ One 64-bit word per value, with the tagging of `MICROPY_OBJ_REPR_A` (the default
 - `xxx1` is a small int, the value in the bits above the tag. The range is the reference's small-int range, 62 bits
   signed on 64-bit hosts. A wider result is an error until big ints exist.
 - `x110` is an immediate: None `0x06`, False `0x0e`, True `0x16`.
-- A pointer (`xx00`, not zero) to a heap object whose first member is a pointer to its type. Two heap types exist: str and
-  function (see Strings below).
+- A pointer (`xx00`, not zero) to a heap object whose first member is a pointer to its type. Heap types: str, function,
+  cell (see Strings and Closures below).
 
 The runtime is `tests/mpy/runtime/mpy_rt.c`. The in-place operators (`MP_BINARY_OP_INPLACE_*`, codes 9..21) are the
 binary operators plus 13, as in `py/runtime0.h`; on ints they give the same result.
@@ -48,14 +48,41 @@ each instruction is computed first, and a join must agree on it. Each instructio
 labels of their targets. It covers small-int and None/bool constants, names (`LOAD_NAME`, `STORE_NAME`, `LOAD_GLOBAL`,
 `STORE_GLOBAL`), locals (`LOAD_FAST`/`STORE_FAST`), `POP_TOP`, `DUP_TOP`, `ROT_TWO`, the binary and unary operators,
 `POP_JUMP_IF_FALSE`/`TRUE`, `JUMP`, the `JUMP_IF_*_OR_POP` pair (short-circuit `or`/`and`), `ROT_THREE` (chained
-comparisons), `LOAD_CONST_STRING` and `LOAD_CONST_OBJ` (str constants), `MAKE_FUNCTION`, `CALL_FUNCTION` and `RETURN_VALUE`.
-Any other opcode is refused by name and no IR is written.
+comparisons), `LOAD_CONST_STRING` and `LOAD_CONST_OBJ` (str constants), `MAKE_FUNCTION`, `LOAD_DEREF`, `STORE_DEREF`,
+`MAKE_CLOSURE`, `CALL_FUNCTION` and `RETURN_VALUE`. Any other opcode is refused by name and no IR is written.
 
 Each code object is one IR function. The module body is `mpy_module`. A function is `mpy_fn_K(ret, args, nargs)`: it
 copies its arguments into its locals `loc.N` and stores its result through `ret`. The IR has no function-address value, so
 `mpy_dispatch(K, ret, args, nargs)` routes a call to `mpy_fn_K`, and a function object is a runtime record holding K and the
 argument count. A call pushes each argument on the runtime value stack (`mpy_push`), then calls `mpy_call(fn, n)`, which
-checks the arity and dispatches. Functions with defaults, keyword arguments, closures or `*args` are refused.
+checks the arity and dispatches. Functions with defaults, keyword arguments or `*args` are refused.
+
+## Closures
+
+MicroPython's layout (`py/compile.c` `compute_scope_locals`, `py/objclosure.c`), which the lowering follows:
+
+- A function's locals are its captured cells first (the free variables), then its parameters, then its other locals,
+  and then the cell variables it owns. The prelude's `n_pos_args` counts the free variables too. The prelude's cell list
+  names the owned cell variables by local index.
+- `MAKE_CLOSURE k` (k is the number of captured cells) pops k cells that `LOAD_FAST` pushed, one per free variable of
+  the child, in the parent's order. It makes a function object that holds them.
+- `LOAD_DEREF i` and `STORE_DEREF i` read and write the cell in local i. A variable that is not a parameter starts
+  unbound, and a read of an unbound cell is a `NameError`.
+
+Representation and calling convention (`tests/mpy/runtime/mpy_rt.c`):
+
+- A cell is `MpyCell { value }`, a heap box. The prologue of a function boxes each owned cell variable (`mpy_make_cell`).
+  A parameter keeps its value in the box; any other variable starts at 0.
+- A function object is `MpyFunc { index, nargs, n_closed, closed[] }`. `nargs` is the count the caller passes, without
+  the captured cells. A closure is the same record with `n_closed` cells, made by `mpy_make_closure(K, nargs, k)`, which
+  pops the k cells off the value stack. A plain function has `n_closed` 0.
+- The captured cells are passed as the first arguments. `mpy_call` inserts a closure's cells in front of the arguments
+  on the value stack, as MicroPython's `closure_call` does, and then calls `mpy_dispatch` with `nargs + n_closed`
+  arguments. So `mpy_fn_K` copies all of its arguments, the cells included, into its locals with no special case, and
+  `LOAD_DEREF` and `STORE_DEREF` read and write through the cell in the local.
+
+A nested def that has default arguments (`MAKE_CLOSURE_DEFARGS`) and a `del` of a closure variable (`DELETE_DEREF`) are
+refused by name.
 
 ## Strings
 
@@ -88,8 +115,9 @@ and every other operator on a str are a runtime error saying they are not lowere
 
 ## Not yet
 
-Closures (cells), defaults and keyword arguments, generators, containers, str methods and formatting, str ordering and
-repetition, classes, exceptions, `is`, big ints, and the rest of the opcodes. A str constant through `LOAD_CONST_OBJ` is
-lowered, but mpy-cross emits text literals as qstrs, so no test program reaches that path yet. Nothing is freed: a str lives until
-the process ends. Also the `luac`-style opcode oracle is
+Defaults and keyword arguments (`MAKE_FUNCTION_DEFARGS`, `MAKE_CLOSURE_DEFARGS`), `del` of a closure variable
+(`DELETE_DEREF`), generators, containers, str methods and formatting, str ordering and repetition, classes, exceptions,
+`is`, big ints, and the rest of the opcodes. A str constant through `LOAD_CONST_OBJ` is lowered, but mpy-cross emits text
+literals as qstrs, so no test program reaches that path yet. Nothing is freed: a str lives until the process ends. Also the
+`luac`-style opcode oracle is still blocked, and string pattern matching is paused.
 still blocked, and string pattern matching is paused.
