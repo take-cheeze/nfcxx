@@ -148,11 +148,12 @@ module KeepSummary
 
     def initialize(text)
       @text = text.gsub(CompactOutput::TOKENS) { |token| token.gsub(/[^\n]/, ' ') }.b
-      @macros = Set.new(@text.scan(/^[ \t]*#[ \t]*define[ \t]+([A-Za-z_][\w$]*)/).flatten)
+      @macros = Set.new
       @bodies = {}
       @noreturn = Set.new
       # File-scope mrb_value variables: a store to one by name is a slot store, not a local's.
-      @value_globals = Set.new(@text.scan(VALUE_GLOBAL).flatten)
+      # Both sets are collected by scan_definitions' own line walk below, so the text is read once.
+      @value_globals = Set.new
       @summaries = {}
       begin
         scan_definitions
@@ -269,8 +270,10 @@ module KeepSummary
       end
       body.scan(BRACE_INIT) { |a, b| flag.call("brace-init #{a || b}") }
       values = Set.new(body.scan(/\bmrb_value\s+([A-Za-z_]\w*)/).flatten)
+      # Attributes never contain a statement boundary, so they are blanked once for the body
+      # instead of once per statement below.
+      body = body.gsub(/\[\[[^\]]*\]\]/, ' ')
       statements(body).each do |stmt|
-        stmt = stmt.gsub(/\[\[[^\]]*\]\]/, ' ')
         case store_kind(stmt, values)
         when :embedded then s[:stores] = true
         when :raw then flag.call("store #{stmt.strip[0, 60]}")
@@ -291,6 +294,9 @@ module KeepSummary
 
     # :none when a statement writes only plain locals, :embedded for an embedded ivar store, :raw for any other write
     # (an assignment through a pointer, a member or a subscript, or an increment of one).
+    # PLAIN_IDENT is PLAIN_LHS's single-identifier shape, without its backtracking-heavy optional groups: anything it
+    # accepts PLAIN_LHS accepts too (zero group iterations), so only the rest needs the full pattern.
+    PLAIN_IDENT = /\A\s*[A-Za-z_]\w*\s*\z/
     def store_kind(stmt, values)
       kind = :none
       stmt.scan(ASSIGN_AT) do
@@ -302,17 +308,19 @@ module KeepSummary
         # The assigned expression starts after the last open parenthesis, comma or operator: `if (!f(x = g()))`.
         lhs = lhs[/(?:\A|[(,!?]|&&|\|\||\breturn\b)([^(,!?]*)\z/, 1].to_s
         name = lhs[/([A-Za-z_]\w*)\s*\z/, 1]
-        next if lhs.match?(PLAIN_LHS) && !@value_globals.include?(name)
+        next if (lhs.match?(PLAIN_IDENT) || lhs.match?(PLAIN_LHS)) && !@value_globals.include?(name)
         next if (m = VALUE_MEMBER.match(lhs)) && values.include?(m[1])
 
         return :raw
       end
-      stmt.scan(STEP) do
-        m = Regexp.last_match
-        before = stmt.byteslice(0, m.begin(0))[/[\w$.\->\[\]*]*\z/]
-        after = stmt.byteslice(m.end(0)..)[/\A[\w$.\->\[\]*]*/]
-        operand = before.empty? ? after : before
-        return :raw unless operand.match?(/\A[A-Za-z_]\w*\z/)
+      if stmt.include?('++') || stmt.include?('--')
+        stmt.scan(STEP) do
+          m = Regexp.last_match
+          before = stmt.byteslice(0, m.begin(0))[/[\w$.\->\[\]*]*\z/]
+          after = stmt.byteslice(m.end(0)..)[/\A[\w$.\->\[\]*]*/]
+          operand = before.empty? ? after : before
+          return :raw unless operand.match?(/\A[A-Za-z_]\w*\z/)
+        end
       end
       kind
     end
@@ -324,8 +332,11 @@ module KeepSummary
 
     # Top-level `name(...) {` definitions. Every branch of an #if group is read, each from the depth at its #if; the
     # group must leave the same depth on every branch, or the unit is not read at all. A name defined twice with
-    # different bodies is unknown.
+    # different bodies is unknown. The walk also collects the #define names and the mrb_value globals the summaries
+    # read, so the text is scanned once: a continued directive line is not a definition, and a global spanning lines
+    # (which the generated code never emits) is missed, keeping its stores conservative.
     def scan_definitions
+      macro_define = /\A[ \t]*#[ \t]*define[ \t]+([A-Za-z_][\w$]*)/
       depth = 0
       start = nil
       header_from = 0
@@ -336,6 +347,9 @@ module KeepSummary
         directive = continued || line.lstrip.start_with?('#')
         if directive
           unless continued
+            if (defined_name = macro_define.match(line))
+              @macros << defined_name[1]
+            end
             case line.lstrip[/\A#\s*(\w+)/, 1]
             when 'if', 'ifdef', 'ifndef' then groups << [depth, nil]
             when 'elif', 'else'
@@ -353,6 +367,9 @@ module KeepSummary
           pos += line.bytesize
           header_from = pos if depth.zero?
           next
+        end
+        if (global = VALUE_GLOBAL.match(line))
+          @value_globals << global[1]
         end
         line.each_byte.with_index do |ch, i|
           if ch == 123 # {
