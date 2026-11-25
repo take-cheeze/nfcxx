@@ -99,6 +99,12 @@ class CodeGen
         region[:label_tag] = guarded_klass ? "_#{guarded_klass[0]}" : nil
         # No element-class hint: it describes the elements of a receiver the flow proved, and this one is not.
         region[:elem_class] = nil if guarded_klass
+        # HASH_INPLACE_ITER: the region reads the Hash behind its `values`/`keys` receiver; that send is suppressed.
+        if !guarded_klass && !try_range && HashInplaceIter::FUSED_PASSES.include?(pass.recognize)
+          source = hash_fused_source(irep, region, *full_ctx)
+          region[:hash_source] = source unless source.nil? || claimed.include?(source[:addr]) ||
+                                               suppressed.include?(source[:addr])
+        end
         inlined = send(pass.emit, region, irep, d)
         unless inlined
           next
@@ -124,6 +130,7 @@ class CodeGen
         end
 
         suppressed << anchor << region[:sendb_addr]
+        suppressed << region[:hash_source][:addr] if region[:hash_source]
         glue_at[anchor] = inlined
       end
     end
@@ -381,6 +388,7 @@ class CodeGen
       out << sealed_int16_declarations(irep)
       out << stack_tuple_declarations(irep)
       out << stack_string_declarations(irep)
+      out << stack_rect_declarations(irep)
       out << multi_return_declarations(irep)
       out << array_hash_fixnum_prologue(d)
       if embedded_ivars && d.name == 'initialize'
@@ -646,6 +654,7 @@ class CodeGen
       bypassed = suppressed.include?(insn.addr) || glue_at.key?(insn.addr) || guarded_inline[:at].key?(insn.addr)
       stack_tuple_visit(irep, idx, bypassed)
       stack_string_visit(irep, idx, bypassed)
+      stack_rect_visit(irep, idx, bypassed)
       multi_return_visit(irep, idx, bypassed)
       literal_minmax_visit(irep, idx, bypassed)
       # With REGISTER_FLOW the bodies are written at the end, so a label written here would land before the method's

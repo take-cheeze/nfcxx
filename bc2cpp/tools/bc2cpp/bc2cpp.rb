@@ -177,8 +177,10 @@ require_relative 'codegen_native_int_args'
 require_relative 'codegen_native_param_unbox'
 require_relative 'codegen_fixnum_ranges'
 require_relative 'codegen_tuple_returns'
+require_relative 'codegen_fixed_tuples'
 require_relative 'codegen_return_analysis'
 require_relative 'codegen_loop_inline'
+require_relative 'hash_inplace_iter'
 require_relative 'codegen_sort_array_cmp'
 require_relative 'codegen_step_loop'
 require_relative 'codegen_kernel_loop'
@@ -240,6 +242,8 @@ require_relative 'codegen_multi_return'
 require_relative 'codegen_literal_minmax'
 # Last: its compile_insn wrapper reads the text every other wrapper settled on.
 require_relative 'codegen_stack_strings'
+# After STACK_STRINGS: its compile_insn wrapper rewrites the settled text of the Rect sites and their draws.
+require_relative 'codegen_stack_rect'
 
 # The main block is a lambda: its ~250 locals do not fit the one irep a top-level block gets when every file is compiled as
 # one program (docs/bc2cpp-self-compile.md). A host that wants to register compiled code between loading the sources and
@@ -2023,6 +2027,8 @@ BC2CPP_MAIN = lambda do
       }
     CPP
   end
+  print HashInplaceIter::RUNTIME if HashInplaceIter.on?
+  print HashInplaceIter::VERIFY_RUNTIME if HashInplaceIter.on? && HashInplaceIter.verify?
   puts <<~'CPP'
     // Stores that look the old value up first. mrb_hash_fetch, not mrb_hash_get: a default proc must not run.
     static inline void bc2cpp_iv_set(mrb_state* M, mrb_value obj, mrb_sym id, mrb_value v) {
@@ -3210,6 +3216,7 @@ BC2CPP_MAIN = lambda do
   warn InitializerTables::PREFIX + JSON.generate(gen.initializer_table_evidence(compiled, InitializerTables.direct_candidate_keys(compiled, ireps, registry)))
   helper_codes = compiled
   print gen.emit_ary_entry_helper(helper_codes)
+  print gen.emit_fixed_tuple_helper(helper_codes)
   print gen.emit_ary_write_helpers(helper_codes)
   print gen.emit_collect_direct_helper(compiled)
   print gen.emit_transpose_direct_helper(compiled)

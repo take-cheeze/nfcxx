@@ -17,9 +17,9 @@ module NfcxxCuRecords
   end
 
   # The records for the command ARG... (the loop's state with the environment's defaults, as the body's setup gives it).
-  def plan(argv, env, root:, tmp:, bash_pid:)
+  def plan(argv, env, root:, tmp:, bash_pid:, uid: "0")
     state = LoopState.new
-    apply_option_environment(state, env)
+    apply_environment(state, env, uid, env["TMPDIR"].to_s)
     run_loop(argv, state, ld_on_path(argv))
     out = +""
     srcs = state.srcs
@@ -55,5 +55,5 @@ if __FILE__ == $PROGRAM_NAME
   i = ARGV.index("--")
   abort "usage: nfcxx-cu-records.rb ROOT TMP BASH_PID -- ARG..." unless i == 3
   $stdout.binmode
-  $stdout.write(NfcxxCuRecords.plan(ARGV[(i + 1)..], ENV, root: ARGV[0], tmp: ARGV[1], bash_pid: ARGV[2]))
+  $stdout.write(NfcxxCuRecords.plan(ARGV[(i + 1)..], ENV, root: ARGV[0], tmp: ARGV[1], bash_pid: ARGV[2], uid: Process.uid.to_s))
 end
