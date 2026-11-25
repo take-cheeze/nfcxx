@@ -13,42 +13,46 @@
 #                            cases/inline_loops.lua ends in a deep recursion (pcall of an infinite one) that the engine cuts at
 #                            State::max_depth = 1500 levels, a depth it sizes for about 1 KB of C++ stack per level: on Path B it needs
 #                            the stack of the frames of the SSA route (docs/notes/pathb-ssa-qbe.md, "Frames"), not gcc's
+#   - tests/ast/jit.cpp      the machine-code tier for loops (docs/notes/ast.md, "JIT") against the interpreter, with its counters;
+#                            the driver cases also run once with the tier on and NFCAST_JIT=1 (the seventh configuration)
 #   NFCAST_TIER_CACHE=dir   where the tier keeps the code it compiles (default: the library's, under $TMPDIR; a rerun reuses it)
 cd "$(dirname "$0")/../.."
 backends=${NFCXX_BACKEND:-"pathb gcc"}
-srcs=(lib/ast/nfcast_core.cpp lib/ast/nfcast_ops.cpp lib/ast/nfcast_parse.cpp lib/ast/nfcast_nodes.cpp lib/ast/nfcast_lib.cpp lib/ast/nfcast_tier.cpp)
+srcs=(lib/ast/nfcast_core.cpp lib/ast/nfcast_ops.cpp lib/ast/nfcast_parse.cpp lib/ast/nfcast_nodes.cpp lib/ast/nfcast_lib.cpp lib/ast/nfcast_tier.cpp lib/ast/nfcast_jit.cpp)
 unset NFCAST_TIER NFCAST_TIER_THRESHOLD NFCAST_TIER_DEBUG NFCAST_GC_STRESS NFCAST_INLINE NFCAST_INLINE_WARM
 export NFCXX="$PWD/nfcxx"   # the tier finds the driver itself, but the cases run from another directory
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for be in $backends; do
   out=$tmp/$be; mkdir -p "$out"; objs=(); pids=(); bad=0
-  for f in "${srcs[@]}" tests/ast/driver.cpp tests/ast/engine.cpp tests/ast/tier.cpp; do   # compile in parallel
+  for f in "${srcs[@]}" tests/ast/driver.cpp tests/ast/engine.cpp tests/ast/tier.cpp tests/ast/jit.cpp; do   # compile in parallel
     o=$out/$(basename "$f" .cpp).o; objs+=("$o")
     (NFCXX_BACKEND=$be ./nfcxx -c -O2 -I lib/ast "$f" -o "$o" > "$o.log" 2>&1) & pids+=($!)
   done
   for p in "${pids[@]}"; do wait "$p" || bad=1; done
   if [ $bad = 1 ]; then echo "FAIL $be ast (build)"; cat "$out"/*.log | grep -v prelinker | head -40; fail=1; continue; fi
-  eng=(); drv=(); tie=()
+  eng=(); drv=(); tie=(); jt=()
   for o in "${objs[@]}"; do
-    case $(basename "$o") in driver.o) drv+=("$o") ;; engine.o) eng+=("$o") ;; tier.o) tie+=("$o") ;; *) eng+=("$o"); drv+=("$o"); tie+=("$o") ;; esac
+    case $(basename "$o") in driver.o) drv+=("$o") ;; engine.o) eng+=("$o") ;; tier.o) tie+=("$o") ;; jit.o) jt+=("$o") ;; *) eng+=("$o"); drv+=("$o"); tie+=("$o"); jt+=("$o") ;; esac
   done
   : > "$out/link.log"
   if ! NFCXX_BACKEND=$be ./nfcxx "${eng[@]}" -o "$out/engine" >> "$out/link.log" 2>&1 ||
      ! NFCXX_BACKEND=$be ./nfcxx "${tie[@]}" -o "$out/tier" >> "$out/link.log" 2>&1 ||
+     ! NFCXX_BACKEND=$be ./nfcxx "${jt[@]}" -o "$out/jit" >> "$out/link.log" 2>&1 ||
      ! NFCXX_BACKEND=$be ./nfcxx "${drv[@]}" -o "$out/driver" >> "$out/link.log" 2>&1; then
     echo "FAIL $be ast (link)"; head -20 "$out/link.log"; fail=1; continue
   fi
   res=$("$out/engine" 2>&1) || { echo "FAIL $be ast engine"; echo "$res" | head -30; fail=1; continue; }
   tres=$(NFCXX_BACKEND=$be "$out/tier" 2>&1) || { echo "FAIL $be ast tier"; echo "$tres" | head -30; fail=1; continue; }
+  jres=$(NFCXX_BACKEND=$be "$out/jit" 2>&1) || { echo "FAIL $be ast jit"; echo "$jres" | head -40; fail=1; continue; }
   n=0
   for lua in tests/ast/cases/*.lua; do
     name=$(basename "$lua" .lua)
     for cfg in "0 NFCAST_INLINE=1 plain" "0 NFCAST_INLINE_WARM=1 inline-early" "0 NFCAST_INLINE=0 no-inline" \
                "sync NFCAST_INLINE=1 tier" "sync NFCAST_INLINE_WARM=1 tier+inline-early" \
-               "async NFCAST_INLINE=1 tier-async"; do
-      set -- $cfg; tier=$1; inl=$2; label=$3
+               "async NFCAST_INLINE=1 tier-async" "sync NFCAST_INLINE=1 tier+jit NFCAST_JIT=1"; do
+      set -- $cfg; tier=$1; inl=$2; label=$3; jit=${4:-NFCAST_JIT=0}
       tag=$name.$label
-      if ! (cd tests/ast/cases && env "$inl" NFCXX_BACKEND=$be NFCAST_TIER=$tier NFCAST_TIER_THRESHOLD=1 "$out/driver" "$name.lua" > "$out/$tag.out" 2> "$out/$tag.err") ||
+      if ! (cd tests/ast/cases && env "$inl" "$jit" NFCXX_BACKEND=$be NFCAST_TIER=$tier NFCAST_TIER_THRESHOLD=1 "$out/driver" "$name.lua" > "$out/$tag.out" 2> "$out/$tag.err") ||
          ! cmp -s "$out/$tag.out" "tests/ast/cases/$name.out"; then
         echo "FAIL $be ast case $name ($label)"; diff "tests/ast/cases/$name.out" "$out/$tag.out" | head -10; head -5 "$out/$tag.err"; fail=1
       fi
@@ -57,5 +61,6 @@ for be in $backends; do
   done
   echo "ok   $be ast: $(tail -1 <<<"$res"); $n programs equal to Lua 5.4 (with inlining on, early and off, with the tier at threshold 1 (also with early inlining), and with it compiling in the background)"
   echo "ok   $be ast tier: $(tail -1 <<<"$tres")"
+  echo "ok   $be ast jit: $(tail -1 <<<"$jres")"
 done
 exit $fail

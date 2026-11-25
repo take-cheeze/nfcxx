@@ -12,7 +12,7 @@ if [ -z "${NFCXX_BACKEND:-}" ] && [ "$(uname -s)" = Linux ]; then
 fi
 progs=("$@"); [ ${#progs[@]} -gt 0 ] || progs=(tests/ast/bench/*.lua)
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-srcs=(lib/ast/nfcast_core.cpp lib/ast/nfcast_ops.cpp lib/ast/nfcast_parse.cpp lib/ast/nfcast_nodes.cpp lib/ast/nfcast_lib.cpp lib/ast/nfcast_tier.cpp tests/ast/driver.cpp)
+srcs=(lib/ast/nfcast_core.cpp lib/ast/nfcast_ops.cpp lib/ast/nfcast_parse.cpp lib/ast/nfcast_nodes.cpp lib/ast/nfcast_lib.cpp lib/ast/nfcast_tier.cpp lib/ast/nfcast_jit.cpp tests/ast/driver.cpp)
 # t SECONDS-VAR COMMAND...: runs the command once, its output to $tmp/out, and sets the variable to the wall time
 t() { local var=$1; shift; local s=$(date +%s.%N); "$@" > "$tmp/out" 2>/dev/null; local e=$(date +%s.%N); printf -v "$var" '%.2f' "$(echo "$e - $s" | bc)"; }
 # best VAR COMMAND...: the least of three runs

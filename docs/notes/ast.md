@@ -553,6 +553,59 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
   NaN limit as Lua does), in the generated code as in the interpreter.
 - It needs POSIX (`fork`, `dlopen`), the nfcxx driver and the `lib/ast` directory next to it at run time.
 
+### JIT: machine code for loops (a first, narrow slice)
+
+`TierOptions::jit` (off by default; `NFCAST_JIT=1`, with the tier on, for the test drivers) takes a hot loop over with x86-64 machine
+code instead of the C tier. It uses the same hook as the C tier's on-stack replacement (`tier_loop` in `nfcast_tier.cpp`, the same
+takeover points at the top of an iteration, the same state handed over for a `for` loop), the same rule that an assumption checked at
+entry that fails leaves the loop to the interpreter, and the same reason that is sound: the code has no side effects and allocates
+nothing. A loop the JIT refuses goes on to the C tier as before, and with the JIT off nothing changes.
+
+Files: `lib/ast/nfcast_jit.hpp` (the interface, the `jit::Code` of a loop) and `lib/ast/nfcast_jit.cpp` (the encoder, the walk over the
+tier's view of the loop, and the mapping of the code). No dependency is added: `mmap` and `mprotect` from libc, the encoder by hand.
+The code is mapped read-write, filled, then made read and execute. `jit::available()` is true on x86-64 Linux only. On any other host
+the JIT is off: every loop is refused with the reason "not available on this host", and nothing fails to build.
+
+**The subset.** Only loops whose body is 64-bit integer arithmetic on locals:
+
+- loops: `while`; `repeat`; a numeric `for` with integer values (the loop that is taken over, and nested ones whose step is a constant
+  integer that is not zero); `break`.
+- values: integer constants; locals of the loop and the locals it reads or assigns from outside; `+`, `-`, `*` and unary `-`, which wrap
+  as the interpreter's integers do.
+- conditions: `<`, `<=`, `>`, `>=`, `==`, `~=` between integers; `and`, `or`, `not`; `if` / `elseif` / `else`. A constant or a number as a
+  condition is true or false as Lua says.
+- statements: `local` with one integer value for each name, and assignment (also several at once).
+
+**Refused at compile time** (the loop is left to the interpreter or the C tier, and `jit_refused` counts it once): `//`, `%`, `/`, `^`
+and the bitwise operators (a zero divisor is an error that the interpreter reports, and the JIT does not run the check); float constants;
+a comparison or a logical operator used as a value; calls; upvalues and globals; tables, strings and fields; a local captured by a
+closure; `return`; a numeric `for` with a non-constant step, or a float `for`; a local read before its declaration in the text (a slot
+that an outer local shares).
+
+**Entry guard.** Every live-in local (one the loop reads or assigns and does not declare) must hold an integer in the frame at every
+takeover: `jit_guard_misses` and `jit_bailouts` count a failure, the interpreter goes on, and the loop is not taken over again until it
+is entered anew. A float that the loop only adds to an integer (`s = s + f` with `f = 2.5`) is such a failure, which the test checks.
+
+**Deopt.** There is none in this slice, and the reason is the subset, not the code: integer `+ - *` wrap in the interpreter and in the
+machine code alike, so there is no overflow that the code cannot represent, and the operators that could fail at run time are refused at
+compile time. So `jit_bailouts` counts the guard misses only. A later slice that adds `//` or `%` has to return the state at the top of the
+iteration (the same state the takeover hands over) without writing the locals back, as the C tier's abandoned runs do.
+
+**Counters** (`State::stats`, all zero unless the JIT is on): `jit_compiled` (loops encoded), `jit_entries` (takeovers that ran the loop
+to its end), `jit_guard_misses`, `jit_bailouts` (times compiled code handed a loop back to the interpreter; equal to the guard misses in
+this slice), `jit_refused` (loops refused at compile time, counted once per loop).
+
+**The code.** One 64-bit word per local and per hidden variable of a `for` in an array whose address is in RBX; no register allocation;
+a binary operation keeps its left operand on the machine stack while the right one is computed. The code makes no calls. Its speed was
+not measured: this slice is about the encoder and the takeover, not about the loops it runs.
+
+**Verification.** `tests/ast/jit.cpp` runs a set of loops (the refusals, the guard miss, the wraparound, nested and re-entered loops,
+`break`, the conditions) and 300 generated loops with nested ifs, whiles and wrapping arithmetic; each must give the interpreter's
+result, the counters must say what the case expects, and the generated loops must all compile and be taken over. `tests/ast/run.sh`
+runs it, and it also runs every `tests/ast/cases/*.lua` program with the tier on and the JIT on (`NFCAST_JIT=1`), against the output of a
+real Lua 5.4. In the sandbox this was written in, `tests/ast/tier.cpp` fails two checks of "a host that ignores SIGCHLD" (lines 685 and 691
+of the file): the unmodified HEAD fails the same two, with the same output, so they are the environment's, not the JIT's.
+
 ## Verification
 
 - `tests/ast/cases/*.lua`: sixteen programs (arithmetic and number formatting, strings and patterns, tables, closures,

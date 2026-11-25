@@ -257,6 +257,13 @@ struct Stats {
   std::uint64_t tier_osr_bailouts = 0;    // times a loop that has compiled code went on in the interpreter: a local or a binding the code
                                           // did not assume, or a run abandoned half way (the interpreter then goes on from the same point)
   std::uint64_t tier_osr_ineligible = 0;  // loops that cannot be compiled (counted once per loop)
+  // The machine-code tier for loops (nfcast_jit.hpp, docs/notes/ast.md, "JIT"); all zero unless TierOptions::jit is set.
+  std::uint64_t jit_compiled = 0;      // loops encoded to machine code
+  std::uint64_t jit_entries = 0;       // takeovers: machine code ran the loop to its end
+  std::uint64_t jit_guard_misses = 0;  // takeovers refused by the entry guard (a live-in local was not an integer): the interpreter went on
+  std::uint64_t jit_bailouts = 0;      // times compiled code handed a loop back to the interpreter: the guard misses, and run-time deopts
+                                       // (none in this slice: integer + - * wrap, and the operators that could fail are refused)
+  std::uint64_t jit_refused = 0;       // loops the JIT refused at compile time (counted once per loop)
 };
 
 // Tiering is off unless a State is given options (or NFCAST_TIER is set in the environment, for the test drivers). A function
@@ -274,6 +281,7 @@ struct TierOptions {
   std::string rt_dir;               // the directory with nfcast_tier_rt.h; default: lib/ast next to the driver, or next to this source file
   unsigned timeout = 120;           // seconds one compile may take
   bool osr = true;                  // a hot loop is compiled and taken over in the middle of the call (NFCAST_TIER_OSR=0 turns it off)
+  bool jit = false;                 // a hot integer loop is compiled to x86-64 machine code (nfcast_jit.hpp; NFCAST_JIT=1, with the tier on)
   unsigned share = 0;               // 1: versions with the same Merkle hash of their lowered form share one shared object (NFCAST_TIER_SHARE=1;
                                     // docs/notes/astro.md, "lib/ast spike"); 2: the same, but every version is still generated and compared
 };
