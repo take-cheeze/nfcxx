@@ -42,11 +42,27 @@ cases="$work/cases.txt"
   echo "<$root/$work/ok.rec bogus"
 } > "$cases"
 
+# The sealed program runs its top level at load time, before the entry gets the arguments, so the script's own top level
+# (from `state = {}` to its final `exit 0`) moves into EarlyExitWorld.main(argv); its helper methods stay at top level.
+stripped="$work/stripped.rb"
+leaf_world "$stripped" scripts/nfcxx-early-exit.rb
 world="$work/world.rb"
-leaf_world "$world" scripts/nfcxx-early-exit.rb
-tail=$'exit 0\n'
+first=$(grep -n '^state = {}$' "$stripped" | cut -d: -f1)
+[ -n "$first" ] || { echo "FAIL bc2cpp nfcxx-early-exit: the script's state line moved"; exit 1; }
+{
+  sed -n "1,$((first - 1))p" "$stripped"
+  echo "module EarlyExitWorld"
+  echo "  def self.main(argv)"
+  sed -n "$first,\$p" "$stripped" | sed '$d' | sed 's/ARGV/argv/g' | sed 's/^/  /'
+  echo "    0"
+  echo "  end"
+  echo "end"
+  echo "rc = EarlyExitWorld.main(ARGV)"
+  echo "exit(rc) if rc != 0"
+} > "$world"
+tail=$'rc = EarlyExitWorld.main(ARGV)\nexit(rc) if rc != 0\n'
 
-if leaf_run nfcxx-early-exit "$world" "$tail" 0 "$cases"; then
+if leaf_run nfcxx-early-exit "$world" "$tail" EarlyExitWorld.main\(ARGV\) "$cases"; then
   echo "PASS bc2cpp nfcxx-early-exit"
 else
   echo "FAIL bc2cpp nfcxx-early-exit: the compiled and interpreted runs differ (build/bc2cpp/nfcxx-early-exit.log)"
