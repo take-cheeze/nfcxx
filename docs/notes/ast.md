@@ -111,6 +111,36 @@ cursor loops over the table when the iterator is the original `next` or the `ipa
 The parser folds constants like Lua's compiler does (`2^53`, `-1`, `1 << 62`; not a division by zero, and not a result that is NaN
 or a float zero), which also matters for the names in error messages.
 
+## Feedback
+
+An arithmetic or comparison node does not specialize on the first operands it sees; it records their types first. Each
+observation is classed:
+
+| Class | Operands | Specialized to |
+| --- | --- | --- |
+| int | two integers | the integer node (arithmetic other than `/` and `^`, bitwise ones included); the number node for `/` and `^`; the integer comparison |
+| float | two numbers with a float among them (arithmetic); two floats (comparison) | the number node (arithmetic, not bitwise); the float comparison |
+| other | anything else: strings, tables, a bitwise operator on floats, an integer and a float in a comparison | nothing: the generic node |
+
+The uninitialized node becomes a profile node (`ArithProfile`, `CmpProfile`) that counts `feedback_records`, keeps the classes seen
+and computes each result the way the specialized node would (integers and numbers do not count as `generic_ops`). After
+`State::feedback_warm` observations that agree (default 2; `NFCAST_FEEDBACK_WARM=n`), it installs the node for their class
+(`speculations_installed`) and records nothing more. Two kinds of operand, or an "other" observation, make the node give up for good:
+it becomes the generic node (`feedback_generic`). Nothing was speculated then, so that is not a deopt. Once a node has
+specialized, the guards and deopts of the table above apply as they did before: a failed guard is a `deopts`, after which the node
+goes to the number node or the generic node without recording again. `feedback_warm = 1` (or 0) specializes at the first operands,
+as the engine did before feedback: no profile nodes, no records, one speculation per node.
+
+The counters: `feedback_records` (observations taken by nodes that had not specialized), `speculations_installed` (integer, number
+and comparison nodes installed from recorded or first operand types; not the number node a deopt installs), `feedback_generic`
+(profile nodes that gave up). `tests/ast/engine.cpp` ("type feedback") checks an integer loop (two records, one speculation, no
+deopt), a float loop, mixed operands at one node (gives up, no deopt, correct sum), strings, an operand that turns float after
+the node speculated (exactly one deopt and the right sum), comparisons, and the threshold knob at 3 and at 1.
+
+Not done: no feedback for indexing, fields, calls, methods or assignments to them; they still specialize on the first observation.
+A node never goes back to profiling after a deopt or a give-up, and nothing counts the observations that a specialized node does
+not make. The tier compiles from the tree and does not read the feedback. Unary operators, `..` and `==` do not record.
+
 ## Inlining
 
 Milestone 3, at the AST level: a call of a small script function is replaced, at the call site, by a private copy of the
