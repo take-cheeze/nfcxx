@@ -42,6 +42,7 @@ ruby scripts/bc2cpp/installed_name_devirt_check.rb
 ruby scripts/bc2cpp/struct_class_decls_check.rb
 ruby scripts/bc2cpp/module_definer_includers_check.rb
 ruby scripts/bc2cpp/method_missing_arms_check.rb
+ruby scripts/bc2cpp/eval_string_forms_check.rb
 ruby scripts/bc2cpp/block_rest_mixed_check.rb
 ruby scripts/bc2cpp/hash_build_ops_check.rb
 ruby scripts/bc2cpp/kernel_loop_check.rb

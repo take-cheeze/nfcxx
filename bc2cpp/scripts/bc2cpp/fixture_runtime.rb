@@ -541,8 +541,12 @@ class Bc2cppStepCheck
     built, @output = Bc2cppFixtureRuntime.run(@dir, @err, @owners, body, build: build, full: true)
     check('the fixtures build and run', built)
     sections = Bc2cppFixtureRuntime.sections(@output)
-    interpreted = sections['interpreted']
-    compiled = sections['compiled']
+    # A section can hold more than one run of the driver: the interpreted VM loads the driver's bytecode and then runs
+    # the scenario, so its section prints the driver twice. Each run ends with the driver's own 'end', so the first
+    # complete run is the one compared.
+    first_run = ->(lines) { lines && (i = lines.index('end')) ? lines[0..i] : lines }
+    interpreted = first_run.call(sections['interpreted'])
+    compiled = first_run.call(sections['compiled'])
     check('both runs reach the end', interpreted&.last == 'end' && compiled&.last == 'end')
     check('interpreted and compiled runs print the same', interpreted == compiled) if same
     yield interpreted, compiled if block_given?
