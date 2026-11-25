@@ -15,6 +15,7 @@
 #       M->jmp and the frame stack as before and one arena root (the exception);
 #     - each call leaves the arena as mrb_funcall does: its result rooted, self not;
 #     - a registered method's exit with the arena grown (CFUNC_RESULT_ROOT) keeps no root to its result;
+#     - a host call with the arena grown gives the growth back (ENTRY_ARENA_TRIM);
 #       inside a protected region it propagates to that region instead;
 #     - a subclass receiver and a receiver with a singleton class take the by-name call;
 #   constructor entries (Owner.new/argc, BC2CPP_ENTRY_NEW)
@@ -206,6 +207,15 @@ Dir.mktmpdir('bc2cpp-entry-header') do |dir|
       std::printf("slow exit label=%s held=%d\\n", mrb_string_p(slow) ? RSTRING_PTR(slow) : "?", !mrb_nil_p(held));
       mrb_gc_arena_restore(M, ai_loop);
 
+      // ENTRY_ARENA_TRIM: a host call made with the arena grown gives the growth back.
+      for (int i = 0, n = M->gc.arena_capa + 8; i < n; i++) mrb_gc_protect(M, mrb_str_new_lit(M, "grow"));
+      mrb_gc_arena_restore(M, ai_loop);
+      int grown = M->gc.arena_capa > MRB_GC_ARENA_SIZE;
+      mrb_value trimmed = bc2cpp_entry_EntryGame_label(M, g);
+      std::printf("trim grown=%d floor=%d label=%s\\n", grown, M->gc.arena_capa == MRB_GC_ARENA_SIZE,
+                  mrb_string_p(trimmed) ? RSTRING_PTR(trimmed) : "?");
+      mrb_gc_arena_restore(M, ai_loop);
+
       dispatches = 0;
       ptrdiff_t ci0 = M->c->ci - M->c->cibase;
       int ai0 = mrb_gc_arena_save(M);
@@ -298,6 +308,8 @@ Dir.mktmpdir('bc2cpp-entry-header') do |dir|
              lines.include?('arena tick=0/0 label=50/50'))
   check.call('the grown-arena exit returns its result and keeps no global root to it',
              lines.include?('slow exit label=n106 held=0'))
+  check.call('a host call with the arena grown leaves it at its floor, the result kept',
+             lines.include?('trim grown=1 floor=1 label=n106'))
   check.call('a raise out of a cfunc frame pops that frame',
              lines.include?('bad_int state exc=ArgumentError jmp=0 ci_same=1'))
   check.call('inside a protected region the raise reaches that region',

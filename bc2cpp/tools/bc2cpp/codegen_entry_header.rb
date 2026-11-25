@@ -142,6 +142,22 @@ module EntryHeader
       }
       mrb_gc_arena_restore(M, ai);
       bc2cpp_entry_root(M, v);
+      // ENTRY_ARENA_TRIM: the arena only grows (gc_arena_keep), so what one call grew it to would stay allocated.
+      // The host's call leaves it as the host had it: back to half again that (or the floor) once it is over twice
+      // that, v rooted in the part kept. A failed shrink keeps it.
+    #ifndef MRB_GC_FIXED_ARENA
+      {
+        int keep = M->gc.arena_idx + M->gc.arena_idx / 2;
+        if (keep < MRB_GC_ARENA_SIZE) keep = MRB_GC_ARENA_SIZE;
+        if (M->gc.arena_capa > keep * 2) {
+          void* p = mrb_realloc_simple(M, M->gc.arena, sizeof(struct RBasic*) * keep);
+          if (p) {
+            M->gc.arena = (struct RBasic**)p;
+            M->gc.arena_capa = keep;
+          }
+        }
+      }
+    #endif
       // A by-name call leaves the exception in M->exc.
       if (error) M->exc = mrb_obj_ptr(v);
       return v;
