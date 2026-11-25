@@ -242,6 +242,12 @@ NODE_WEIGHT = Hash.new(1).merge(
   "call" => 4, "if" => 2, "switch" => 2, "loop" => 3, "break" => 1, "continue" => 1
 ).freeze
 
+# The cost of a callee, memoised by identity: the inliner asks for the same function at each call site.
+$fn_cost = IdentityMap.new
+def fn_cost(fn)
+  $fn_cost.fetch(fn) { $fn_cost[fn] = node_cost(fn) }
+end
+
 def node_cost(x)
   return 0 unless x.is_a?(Array)
   return node_count(x) if $inline_cost == :nodes
@@ -382,7 +388,7 @@ def without_eh_state(x)
 end
 
 def refusal(fn, name)
-  return "callee over --max-callee" if $inline_max_callee > 0 && node_cost(fn) > $inline_max_callee && !always_inline?(fn) && !$inline_once[name] && !asm_needs_constant?(fn)
+  return "callee over --max-callee" if $inline_max_callee > 0 && fn_cost(fn) > $inline_max_callee && !always_inline?(fn) && !$inline_once[name] && !asm_needs_constant?(fn)
   return "ctor/dtor" if fn.any? { |f| head(f) == "constructor" || head(f) == "destructor" }
   # Zero-cost exception tables (docs/notes/pathb-zero-cost-eh.md): a callee with landing pads is inlined with them
   # (eh_inline); a callee with a dynamic exception specification when spec_copyable? (spec_inlinable?: its filter is dropped).
@@ -553,18 +559,18 @@ def expand_call(s, fns, st)
   end
   # A caller that has taken in its limit inlines nothing more: one setup function (ggml_vk_load_shaders, 14 MB of IL) must not
   # absorb a module's worth of copies, since QBE's memory grows with the size of a function.
-  if $inline_max_caller > 0 && st[:caller_size] + node_cost(fn) > $inline_max_caller
+  if $inline_max_caller > 0 && st[:caller_size] + fn_cost(fn) > $inline_max_caller
     st[:refused]["caller over --max-caller"] = (st[:refused]["caller over --max-caller"] || 0) + 1
     return nil
   end
-  st[:caller_size] += node_cost(fn)
+  st[:caller_size] += fn_cost(fn)
   # Past the module's growth budget only a tiny callee is inlined (an accessor or wrapper: its call costs about what its body does).
-  if st[:over] && $inline_tiny > 0 && st[:tc].fetch(fn) { st[:tc][fn] = node_cost(fn) } > $inline_tiny && !always_inline?(fn) && !$inline_once[cname] && !asm_needs_constant?(fn)
+  if st[:over] && $inline_tiny > 0 && st[:tc].fetch(fn) { st[:tc][fn] = fn_cost(fn) } > $inline_tiny && !always_inline?(fn) && !$inline_once[cname] && !asm_needs_constant?(fn)
     st[:refused]["module over --max-growth"] = (st[:refused]["module over --max-growth"] || 0) + 1
     return nil
   end
   # A tier of the pass takes only callees up to its cap: the small ones are inlined everywhere before the budget goes to big ones.
-  return nil if st[:cap] && st[:tc].fetch(fn) { st[:tc][fn] = node_cost(fn) } > st[:cap]
+  return nil if st[:cap] && st[:tc].fetch(fn) { st[:tc][fn] = fn_cost(fn) } > st[:cap]
   info = st[:ic].fetch(cname) { st[:ic][cname] = callee_info(fn) }
   # (A copy with its own filter under a caller with a specification of its own (eh[:filtered]) is inlined too: the caller's
   # filter is the last of the chains of the copy's pads, and a pad that has no list of its own gets it from QBE.)
