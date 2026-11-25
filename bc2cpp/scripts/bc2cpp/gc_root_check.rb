@@ -179,6 +179,90 @@ SOURCE = <<~RUBY
       mapped.inspect
     end
 
+    # The same read in bodies compiled outside the method's own pass: a rescue's try body, a block that stays a
+    # function, a rescue inside such a block, a block inside a rescue, a nested rescue and an inlined loop body.
+    def rescue_clear_by_name
+      a = @cells
+      r = a[0]
+      a.send(:clear)
+      churn
+      r.inspect
+    rescue StandardError => e
+      e.message
+    end
+
+    def with_block = yield
+
+    def block_clear_by_name
+      with_block do
+        a = @cells
+        r = a[0]
+        a.send(:clear)
+        churn
+        r.inspect
+      end
+    end
+
+    def block_rescue_clear_by_name
+      with_block do
+        a = @cells
+        r = a[0]
+        a.send(:clear)
+        churn
+        r.inspect
+      rescue StandardError => e
+        e.message
+      end
+    end
+
+    def rescue_block_clear_by_name
+      with_block do
+        a = @cells
+        r = a[0]
+        a.send(:clear)
+        churn
+        r.inspect
+      end
+    rescue StandardError => e
+      e.message
+    end
+
+    def nested_rescue_clear_by_name
+      begin
+        a = @cells
+        r = a[0]
+        a.send(:clear)
+        churn
+        r.inspect
+      rescue ArgumentError => e
+        e.message
+      end
+    rescue StandardError => e
+      e.message
+    end
+
+    def ensure_clear_by_name
+      a = @cells
+      r = a[0]
+      a.send(:clear)
+      churn
+      r.inspect
+    ensure
+      @m1 = :done
+    end
+
+    def loop_body_clear_by_name
+      out = nil
+      [1].each do
+        a = @cells
+        r = a[0]
+        a.send(:clear)
+        churn
+        out = r.inspect
+      end
+      out
+    end
+
     def hash_store_by_name
       h = @table
       r = h[:a]
@@ -266,7 +350,8 @@ OWNERS = %w[GcRoot].freeze
 CASES = %w[ivar_return ivar_local gvar_overwrite ary_overwrite hash_overwrite ary_clear ary_replace
            attr_overwrite ary_clear_by_name ary_store_by_name hash_clear_by_name hash_store_by_name
            each_clear_by_name map_clear_by_name map_proc_clear arg_clear_by_name mixed_slot_overwrite
-           batch_overwrite callee_unlinks].freeze
+           batch_overwrite callee_unlinks rescue_clear_by_name block_clear_by_name block_rescue_clear_by_name
+           rescue_block_clear_by_name nested_rescue_clear_by_name ensure_clear_by_name loop_body_clear_by_name].freeze
 # Cases that need no root, so they match with the roots switched off too.
 UNROOTED_CASES = %w[pure_between imm_flag_overwrite clean_callee_between].freeze
 
@@ -325,6 +410,10 @@ Dir.mktmpdir('bc2cpp-gc-root') do |dir|
   suite.check('a read held only across clean direct calls is not rooted (ELEMENT_READ_SUMMARY)',
               body_of.call(code, 'clean_callee_between').include?('GcRoot_mark_all_impl(M, ') &&
               !body_of.call(code, 'clean_callee_between').include?('bc2cpp_keep(') && !code.include?('KEEP_SUMMARY'))
+  try_body = code[/GcRoot_rescue_clear_by_name_impl_rescue_try\(mrb_state\* M, void\* ud\) \{.*?\n\}\n/m].to_s
+  suite.check('a try body roots its element read, and the method around it does not',
+              try_body.match?(/bc2cpp_ary_entry\(M, r\d+, 0\);\n\s*bc2cpp_keep\(M, r\d+\);/) &&
+              !body_of.call(code, 'rescue_clear_by_name').include?('bc2cpp_keep('))
   batch_body = ->(text) { text[/GcRoot_batch_overwrite_impl\(mrb_state\* M, mrb_value self\) \{.*?\n\}\n/m].to_s }
   suite.check('a run of slot stores roots the values it replaces in one call (KEEP_OLD_BATCH)',
               batch_body.call(code).include?('bc2cpp_keep_olds2(((GcRoot_ivars*)DATA_PTR(self))->ivar_list, ' \
