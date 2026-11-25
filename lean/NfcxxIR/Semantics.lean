@@ -3,11 +3,13 @@ import NfcxxIR.Syntax
 /-!
 Executable semantics of a subset of the mid-level IR (docs/notes/pathb-stage2.md, sections 3, 4 and 6).
 
-The subset is what an integer-only function body needs: integer types, registers, constants, the wrapping,
-checked and bitwise arithmetic, comparisons, `iconv`, and the structured statements (`let`, `set`, `if`,
-`loop`, `block`, `break`, `continue`, `return`, `unreachable`, `trap`). Everything else is reported as
-`stuck` with the reason, never silently skipped: memory, slots, calls, floats, exceptions, `goto`, and
-`switch`. Those are the next steps.
+The subset is what an integer-only function body needs: integer types, registers, stack slots of integer type
+(`load` and `store` of a local `$"x"`), constants, the wrapping, checked and bitwise arithmetic, comparisons,
+the integer conversions `iconv` and same-width `bitcast`, `eval` of a value (its value is discarded), and the
+structured statements (`let`, `set`, `if`, `loop`, `block`, `switch` with its top-level `case` and `default`
+labels, `break`, `continue`, `return`, `unreachable`, `trap`). Everything else is reported as `stuck` with the
+reason, never silently skipped: pointers and memory beyond slots, calls, floats, exceptions, `goto`, and labels
+nested inside a switch arm. Those are the next steps.
 
 Values are mathematical integers, kept in the range of their type by `wrapTo` after every operation. A
 boolean is 0 or 1. The semantics is fuel-bounded: running out of fuel is `stuck`, so a result that is
@@ -46,6 +48,17 @@ def operandName : Operand → String
   | Operand.reg n => s!"%{n}" | Operand.localVar x => s!"$\"{x}\"" | Operand.global x => s!"@\"{x}\""
   | Operand.fnRef x => s!"&\"{x}\"" | Operand.constant .. => "constant" | Operand.null .. => "null"
   | Operand.wrapped w .. => w | Operand.ehTid _ => "eh-tid"
+
+/-- The name of a conversion, for the stuck messages. -/
+def ConvOp.name : ConvOp → String
+  | .iconv => "iconv"
+  | .bitcast => "bitcast"
+  | .i2p => "i2p"
+  | .p2i => "p2i"
+  | .cf2i => "cf2i"
+  | .i2f => "i2f"
+  | .u2f => "u2f"
+  | .fconv => "fconv"
 
 /-- Bit width and signedness of an integer type name. `bool` is one unsigned bit: its values are 0 and 1. -/
 def intInfo? : String → Option (Nat × Bool)
@@ -119,15 +132,26 @@ inductive Cell where
   | slot : String → Cell
   deriving BEq
 
-/-- The values of the cells, the newest first. A read is the first entry for its cell. -/
-abbrev Env := List (Cell × Int)
+/-- A value in the state: the integer, and the integer type it has (width and signedness) when its declared
+type is an integer type. The type is what `bitcast` and `switch` check. -/
+structure Entry where
+  val : Int
+  info : Option (Nat × Bool)
 
-def Env.get (e : Env) (c : Cell) : Option Int :=
+/-- The cells, the newest first. A read is the first entry for its cell. -/
+abbrev Env := List (Cell × Entry)
+
+def Env.lookup (e : Env) (c : Cell) : Option Entry :=
   match e.find? (fun p => p.1 == c) with
   | some p => some p.2
   | none => none
 
-def Env.set (e : Env) (c : Cell) (v : Int) : Env := (c, v) :: e
+def Env.get (e : Env) (c : Cell) : Option Int :=
+  match e.lookup c with
+  | some r => some r.val
+  | none => none
+
+def Env.set (e : Env) (c : Cell) (v : Int) (info : Option (Nat × Bool)) : Env := (c, ⟨v, info⟩) :: e
 
 /-- How a statement list ends: falling off the end, leaving a loop, continuing it, or returning. -/
 inductive Flow where
@@ -136,6 +160,15 @@ inductive Flow where
   | cont
   | ret : Option Int → Flow
   deriving Repr
+
+/-- The integer type of an operand, when the semantics knows it: a constant's type, or the declared type of a
+register. -/
+def operandInfo (env : Env) : Operand → Option (Nat × Bool)
+  | Operand.reg n => match env.lookup (.reg n) with
+    | some r => r.info
+    | none => none
+  | Operand.constant t _ => infoOf t
+  | _ => none
 
 def evalOperand (env : Env) : Operand → Except Outcome Int
   | Operand.reg n =>
@@ -229,7 +262,72 @@ def evalRValue (env : Env) : RValue → Except Outcome Int
     match infoOf t with
     | some (bits, signed) => return wrapTo bits signed (← evalOperand env a)
     | none => throw (.stuck s!"iconv to a non-integer type {tyText t}")
+  | RValue.conv ConvOp.bitcast t a => do
+    -- the same width: the bit pattern is the value modulo 2^bits, read with the new signedness
+    match infoOf t, operandInfo env a with
+    | some (bits, signed), some (srcBits, _) =>
+      if bits == srcBits then return wrapTo bits signed (← evalOperand env a)
+      else throw (.stuck s!"bitcast between integer types of different widths ({srcBits} and {bits} bits)")
+    | some _, none => throw (.stuck "bitcast of an operand that is not of an integer type")
+    | none, _ => throw (.stuck "bitcast to or from a non-integer type (a pointer or an aggregate) is not modelled")
+  | RValue.conv op _ _ => .error (.stuck s!"value form conv ({ConvOp.name op}) not modelled")
   | rv => .error (.stuck s!"value form {rvalueName rv} not modelled")
+
+/-! ### Switch
+
+The front end emits `(switch OP (body (block (case C) ... (default) ...)))`: the arms are the statements of
+the body's block. A block has no scope of its own (registers are numbered across the function), so the blocks
+at the top of a switch body are flattened into one list of arms. Labels are kept only at that top level: a label
+nested in an `if` or a loop (Duff's device) would need a jump into that statement, and is `stuck`. A nested
+`switch` owns its labels. -/
+
+/-- The statements of a list with its top-level blocks flattened, in order. -/
+def flattenBlocks : List Stmt → List Stmt
+  | [] => []
+  | Stmt.block ss :: rest => flattenBlocks ss ++ flattenBlocks rest
+  | s :: rest => s :: flattenBlocks rest
+
+mutual
+
+/-- Whether a statement contains a case or default label (not counting the labels of a nested switch). -/
+def hasLabel : Stmt → Bool
+  | Stmt.caseS _ => true
+  | Stmt.dflt => true
+  | Stmt.ifS _ th el => anyLabel th || (match el with
+    | none => false
+    | some es => anyLabel es)
+  | Stmt.loop body step => anyLabel body || anyLabel step
+  | Stmt.block ss => anyLabel ss
+  | _ => false
+
+def anyLabel : List Stmt → Bool
+  | [] => false
+  | s :: ss => hasLabel s || anyLabel ss
+
+end
+
+/-- Whether a switch body has a label nested inside one of its arms. The top-level labels are not counted. -/
+def nestedLabel : List Stmt → Bool
+  | [] => false
+  | Stmt.caseS _ :: rest => nestedLabel rest
+  | Stmt.dflt :: rest => nestedLabel rest
+  | s :: rest => hasLabel s || nestedLabel rest
+
+/-- The arms from the first `case` whose value (converted to the type of the condition) is `v`, the label
+itself included; none when no case matches. The case values are constants, read in order. -/
+def findCase (env : Env) (bits : Nat) (signed : Bool) (v : Int) : List Stmt → Except Outcome (Option (List Stmt))
+  | [] => return none
+  | s@(Stmt.caseS c) :: rest => do
+    let k ← evalOperand env c
+    if wrapTo bits signed k == v then return some (s :: rest)
+    else findCase env bits signed v rest
+  | _ :: rest => findCase env bits signed v rest
+
+/-- The arms from the `default` label, the label included; none when there is no default. -/
+def findDefault : List Stmt → Option (List Stmt)
+  | [] => none
+  | Stmt.dflt :: rest => some (Stmt.dflt :: rest)
+  | _ :: rest => findDefault rest
 
 -- Statements and statement lists with their fuel: each level of nesting uses one unit, and each loop
 -- iteration runs its body with the same fuel. Out of fuel is `stuck`.
@@ -239,17 +337,41 @@ def execStmt : Nat → Env → Stmt → Except Outcome (Env × Flow)
   | 0, _, _ => .error (.stuck "out of fuel")
   | n + 1, env, s =>
     match s with
-    | Stmt.letS r _ rv => do
+    | Stmt.letS r t rv => do
       let v ← evalRValue env rv
-      return (env.set (.reg r) v, .normal)
+      return (env.set (.reg r) v (infoOf t), .normal)
     | Stmt.setS r o => do
       let v ← evalOperand env o
-      return (env.set (.reg r) v, .normal)
+      -- a register keeps the type it was declared with
+      let info := match env.lookup (.reg r) with
+        | some reg => reg.info
+        | none => operandInfo env o
+      return (env.set (.reg r) v info, .normal)
     | Stmt.storeS _ t (Operand.localVar x) val => do
       let v ← evalOperand env val
       match infoOf t with
-      | some (bits, signed) => return (env.set (.slot x) (wrapTo bits signed v), .normal)
+      | some (bits, signed) => return (env.set (.slot x) (wrapTo bits signed v) (some (bits, signed)), .normal)
       | none => .error (.stuck s!"store of a non-integer type {tyText t}")
+    | Stmt.evalS rv => do
+      -- the value is discarded; a trap or a stuck form in it still happens
+      let _ ← evalRValue env rv
+      return (env, .normal)
+    | Stmt.switchS c body => do
+      let v ← evalOperand env c
+      let some (bits, signed) := operandInfo env c
+        | throw (.stuck "switch on an operand that is not of an integer type")
+      let arms := flattenBlocks body
+      if nestedLabel arms then
+        throw (.stuck "a case label nested inside a statement of a switch body is not modelled")
+      let start ← findCase env bits signed v arms
+      match start <|> findDefault arms with
+      | none => return (env, .normal)
+      | some l => do
+        let (env', fl) ← execSwitchList n env l
+        match fl with
+        | .brk => return (env', .normal)
+        | _ => return (env', fl)
+    | Stmt.caseS _ | Stmt.dflt => .error (.stuck "case or default label outside a switch body")
     | Stmt.ifS c th el => do
       let v ← evalOperand env c
       if v != 0 then execList n env th
@@ -277,6 +399,20 @@ def execList : Nat → Env → List Stmt → Except Outcome (Env × Flow)
     match fl with
     | .normal => execList n env' ss
     | _ => return (env', fl)
+
+/-- The arms of a switch from the chosen label on: control falls through them in order, and a label reached
+this way does nothing. `break` is handled by the switch; `continue` and `return` leave it. -/
+def execSwitchList : Nat → Env → List Stmt → Except Outcome (Env × Flow)
+  | 0, _, _ => .error (.stuck "out of fuel")
+  | _ + 1, env, [] => return (env, .normal)
+  | n + 1, env, s :: ss =>
+    match s with
+    | Stmt.caseS _ | Stmt.dflt => execSwitchList n env ss
+    | _ => do
+      let (env', fl) ← execStmt n env s
+      match fl with
+      | .normal => execSwitchList n env' ss
+      | _ => return (env', fl)
 
 /-- A loop: run the body; `break` leaves it; `continue` or the end of the body runs the step, then the body
 again. The first argument counts the iterations left, so the loop always ends. -/

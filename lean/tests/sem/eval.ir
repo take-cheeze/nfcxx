@@ -1,0 +1,7 @@
+(ir-module "eval.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "main"
+  (ret int)
+  (params)
+  (eval (wadd int (const int 2147483647) (const int 1)))
+  (eval (bitcast unsigned_int (const int -1)))
+  (return (const int 5)))

@@ -1,0 +1,50 @@
+(ir-module "switch.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "main"
+  (ret int)
+  (params)
+  (let %0 int (const int 0))
+  (let %1 int (const int 2))
+  (switch %1
+    (body
+      (block
+        (case (const int 1))
+        (let %2 int (wadd int %0 (const int 100)))
+        (set %0 %2)
+        (case (const int 2))
+        (let %3 int (wadd int %0 (const int 1)))
+        (set %0 %3)
+        (case (const int 3))
+        (let %4 int (wadd int %0 (const int 10)))
+        (set %0 %4)
+        (break)
+        (default)
+        (let %5 int (wadd int %0 (const int 1000)))
+        (set %0 %5))))
+  (let %6 int (const int 9))
+  (switch %6
+    (body
+      (block
+        (case (const int 1))
+        (let %7 int (wadd int %0 (const int 100)))
+        (set %0 %7)
+        (default)
+        (let %8 int (wadd int %0 (const int 1000)))
+        (set %0 %8))))
+  (switch %1
+    (body
+      (block
+        (case (const int 7))
+        (let %9 int (wadd int %0 (const int 5000)))
+        (set %0 %9))))
+  (switch %1
+    (body
+      (block
+        (case (const int 2))
+        (loop (body (break)) (step))
+        (let %10 int (wadd int %0 (const int 7)))
+        (set %0 %10)
+        (break)
+        (case (const int 5))
+        (let %11 int (wadd int %0 (const int 50000)))
+        (set %0 %11))))
+  (return %0))

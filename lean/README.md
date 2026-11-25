@@ -19,11 +19,13 @@ separately with a Python mirror of the lexer and parser: all 94 goldens in `test
 (11,786 top-level forms) parse with balanced parens and round-trip.
 
 `NfcxxIR/Semantics.lean` is the executable semantics of a subset of the IR: integer types, registers,
-constants, the wrapping, checked and bitwise integer operators, comparisons, `iconv`, and the structured
-statements (`let`, `set`, `if`, `loop`, `block`, `break`, `continue`, `return`, `unreachable`, `trap`). A form
-outside the subset gives `stuck` with its reason; it is never skipped. Memory, slots, calls, floats, exceptions,
-`goto` and `switch` are the next steps. Values are integers reduced into their type after each operation;
-the run is fuel-bounded.
+constants, the wrapping, checked and bitwise integer operators, comparisons, `iconv`, same-width `bitcast`,
+`eval` of a value, and the structured statements (`let`, `set`, `if`, `loop`, `block`, `switch` with its
+top-level `case` and `default` labels, `break`, `continue`, `return`, `unreachable`, `trap`). A form outside
+the subset gives `stuck` with its reason, naming the form; it is never skipped. Stack slots of integer type
+(`load` and `store` of a local) are modelled. Pointers and memory beyond slots, calls, floats, exceptions,
+`goto` and labels nested inside a switch arm are the next steps. Values are integers reduced into
+their type after each operation; the run is fuel-bounded.
 
     nfcxx_ir run FILE FUNCTION   # run a function without parameters: value, trap or stuck
     tests/lean/run.sh            # also runs the IR functions in lean/tests/sem with their known outcomes

@@ -1,0 +1,14 @@
+(ir-module "switch_nested.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "main"
+  (ret int)
+  (params)
+  (let %0 int (const int 1))
+  (switch %0
+    (body
+      (block
+        (if %0
+          (then
+            (case (const int 1))
+            (return (const int 3))))
+        (return (const int 4)))))
+  (return (const int 5)))
