@@ -1,9 +1,8 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Fails when the base section of sig/bc2cpp/declarations.rbs is not what the base generators write now: a native block
-# that differs from its regenerated body, or a Ruby declaration the generator no longer writes (or writes and the file
-# lacks). Host plus the closed build's headers, a few minutes (base_rbs_all.rb preprocesses every native gem).
+# Fails when the base section of sig/bc2cpp/declarations.rbs, or bc2cpp/sig/base_core.rbs, is not byte for byte what
+# the base generators write now (BaseSection.write_texts: the layout is canonical, so the order counts too). Host plus the closed build's headers, a few minutes (base_rbs_all.rb preprocesses every native gem).
 #
 #   ruby scripts/bc2cpp/base_section_check.rb [--output DIR] [--jobs N] CLOSED_BUILD_DIR [DECLARATIONS]
 #   ruby scripts/bc2cpp/base_section_check.rb --write CLOSED_BUILD_DIR [DECLARATIONS]
@@ -42,14 +41,13 @@ abort 'base_section_check: --jobs must be positive' if jobs && !jobs.positive?
 
 closed = File.expand_path(ARGV[0])
 declarations = File.expand_path(ARGV[1] || File.join(ROOT, 'sig/bc2cpp/declarations.rbs'))
-text = File.read(declarations)
+text = File.read(declarations, encoding: 'UTF-8')
 declared_section = BaseSection.section_of(text)
-committed = BaseSection.combined_section(declared_section)
 # A generated stub whose method the hand sections declare is not written (see BaseSection.generated_ruby_decls): the
 # hand sections are the world's declarations after the base section, and core.rbs beside it.
 hand_texts = [text[declared_section.length..]]
 core_rbs = File.join(File.dirname(declarations), 'core.rbs')
-hand_texts << File.read(core_rbs) if File.file?(core_rbs)
+hand_texts << File.read(core_rbs, encoding: 'UTF-8') if File.file?(core_rbs)
 hand = BaseSection.method_keys(hand_texts)
 
 failures = []
@@ -63,13 +61,13 @@ Dir.mktmpdir('base-section-check') do |temporary|
   $stderr.write(err)
   abort "base_section_check: base_rbs_all.rb failed (#{status})" unless status.success?
 
+  bodies = BaseSection.native_bodies(gen)
+  by_tag = BaseSection.generated_ruby_by_tag(gen, hand)
+  core_text, world_text = BaseSection.write_texts(text, bodies, by_tag)
   if write
-    bodies = BaseSection.native_bodies(gen)
-    by_tag = BaseSection.generated_ruby_by_tag(gen, hand)
-    core_text, world_text = BaseSection.write_texts(text, bodies, by_tag)
     # Only a file whose text changes is written, so a write over a current section touches nothing.
     written = [[BaseSection::CORE_FILE, core_text], [declarations, world_text]].filter_map do |path, body|
-      next if File.file?(path) && File.read(path) == body
+      next if File.file?(path) && File.read(path, encoding: 'UTF-8') == body
 
       File.write(path, body)
       path
@@ -78,23 +76,18 @@ Dir.mktmpdir('base-section-check') do |temporary|
     exit 0
   end
 
-  regenerated = BaseSection.regenerate_native(committed, gen)
-  committed_native = BaseSection.native_text(committed)
-  regenerated_native = BaseSection.native_text(regenerated)
-  if committed_native != regenerated_native
-    failures << "native blocks differ from the generator's output:\n" \
-                "#{BaseSection.first_differences(committed_native, regenerated_native).join("\n")}"
-  end
+  [[BaseSection::CORE_FILE, BaseSection.core_file_text, core_text], [declarations, text, world_text]].each do |path, now, want|
+    next if now == want
 
-  committed_ruby = BaseSection.ruby_decls(committed)
+    failures << "#{path} is not what the generators write:\n#{BaseSection.first_differences(now, want).join("\n")}"
+  end
+  # Which declarations differ, when the difference is more than their order.
+  committed_ruby = BaseSection.ruby_decls(BaseSection.core_file_text + declared_section)
   generated_ruby = BaseSection.generated_ruby_decls(gen, hand)
   missing = generated_ruby - committed_ruby
   stale = committed_ruby - generated_ruby
-  unless missing.empty? && stale.empty?
-    failures << "Ruby declarations differ: #{missing.size} missing from the file, #{stale.size} the generator no longer writes"
-    missing.first(3).each { |d| failures << "  missing: #{d.lines.first.strip}" }
-    stale.first(3).each { |d| failures << "  stale:   #{d.lines.first.strip}" }
-  end
+  missing.first(3).each { |d| failures << "  missing: #{d.lines.first.strip}" }
+  stale.first(3).each { |d| failures << "  stale:   #{d.lines.first.strip}" }
 end
 
 if failures.empty?

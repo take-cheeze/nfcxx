@@ -6,9 +6,9 @@
 #
 #   ruby scripts/bc2cpp/base_section_regen_check.rb
 #
-# Checks: a regenerated section passes the comparisons the base section check makes; the rest of the file is kept byte for
-# byte; a stale declaration goes and a missing one comes back under its marker; running it again changes nothing; and
-# the committed file regenerates from its own content with no diff.
+# Checks: the written section matches the generator (a stale declaration goes, a missing one and a missing native block
+# come back under their marker); the rest of the file is kept byte for byte; writing again changes nothing; the output
+# does not depend on the order or the markers the committed section had; and the committed files are canonical.
 
 require_relative '../../tools/bc2cpp/world_root'
 require 'set'
@@ -69,10 +69,6 @@ def write_gen(dir, natives: {}, ruby: {})
   end
 end
 
-def ruby_text(section)
-  BaseSection.ruby_decls(section).join
-end
-
 # Each declaration of the section's `# Base RBS` blocks with its marker's tag, for the round trip.
 def tagged_decls(section)
   lines = section.lines
@@ -85,59 +81,79 @@ def tagged_decls(section)
   end
 end
 
-def native_bodies_of(section)
-  lines = section.lines
-  starts = lines.each_index.select { |i| lines[i].match?(BaseSection::HEADER) }
-  starts.each_with_index.filter_map do |s, k|
-    block = lines[s...(starts[k + 1] || lines.size)]
-    next unless block.first.match?(BaseSection::NATIVE_HEADER)
-
-    tag = block.filter_map { |l| l[BaseSection::MARKER, 1] }.first
-    body = block.drop(1).reject { |l| l.match?(BaseSection::MARKER) }.join.rstrip + "\n"
-    [tag, body]
-  end
+# write_texts with the generator output read from +gen+, as base_section_check.rb --write calls it.
+def write_from(text, gen, core: '')
+  BaseSection.write_texts(text, BaseSection.native_bodies(gen), BaseSection.generated_ruby_by_tag(gen), core: core)
 end
 
-puts 'fixture: a stale declaration, a changed native body, a missing declaration, an unknown table'
+puts 'fixture: a stale declaration, a changed native body, a missing declaration and native block, an unknown table'
 Dir.mktmpdir('base-section-regen') do |gen|
   write_gen(gen,
-            natives: { 'mruby-math' => "module Math\n  def sqrt: (untyped) -> untyped\n  def cbrt: (untyped) -> untyped\nend\n" },
+            natives: { 'mruby-math' => "module Math\n  def sqrt: (untyped) -> untyped\n  def cbrt: (untyped) -> untyped\nend\n",
+                       'mruby-lcf' => "module LCF\n  def rom_keys: (untyped) -> untyped\nend\n" },
             ruby: { 'mruby-math' => "class Kept\n  def y: () -> untyped\nend\n\nclass Added\n  def z: () -> untyped\nend\n" })
-  once = BaseSection.regenerate(FIXTURE, gen)
-  twice = BaseSection.regenerate(once, gen)
-  section = BaseSection.section_of(once)
+  once_core, once = write_from(FIXTURE, gen)
+  twice = write_from(once, gen, core: once_core)
+  # base_math and base_fiber are core tags, so their blocks are in the core text.
+  section = once_core + BaseSection.section_of(once)
 
   check.call('the rest of the file after the base section is byte for byte the same',
-             once[section.length..] == FIXTURE[BaseSection.section_of(FIXTURE).length..])
-  check.call('the changed native body is written (cbrt present)', BaseSection.native_text(section).include?('def cbrt'))
-  check.call('a table with no generator body keeps its block', BaseSection.native_text(section).include?('class Fiber'))
+             once[BaseSection.section_of(once).length..] == FIXTURE[BaseSection.section_of(FIXTURE).length..])
+  check.call('the changed native body is written (cbrt present)', section.include?("  def cbrt: (untyped) -> untyped\n"))
+  check.call('a native block the section lacks is written under its tag', section.include?("# bc2cpp-native: base_lcf\nmodule LCF\n"))
+  check.call('a table with no generator body keeps its block', section.include?("# bc2cpp-native: base_fiber\nclass Fiber\n"))
   check.call('the stale declaration is removed', !section.include?('class Stale'))
-  check.call('the missing declaration is appended under its tag',
-             section.include?("# bc2cpp-native: base_math\nclass Added\n"))
+  check.call('the missing declaration is written under its tag', section.include?("# bc2cpp-native: base_math\nclass Added\n"))
   check.call('the kept declaration is not duplicated', section.scan('class Kept').size == 1)
   check.call('the Ruby declarations now match the generator',
              BaseSection.ruby_decls(section) == BaseSection.generated_ruby_decls(gen))
-  check.call('the native blocks now match the regenerated bodies',
-             BaseSection.native_text(section) == BaseSection.native_text(BaseSection.regenerate_native(section, gen)))
-  check.call('running it again changes nothing', twice == once)
-  check.call('a section that already matches is returned unchanged',
-             BaseSection.regenerate(once, gen) == once)
+  check.call('the tags are in byte order, each native block before its Ruby declarations',
+             section.scan(/^# bc2cpp-native: (\S+)$/).flatten.chunk_while { |x, y| x == y }.map(&:first) ==
+               %w[base_fiber base_math base_lcf])
+  check.call('running it again changes nothing', twice == [once_core, once])
 end
 
-puts 'fixture: a section whose Ruby declarations are all current, with an unknown gem'
+puts 'the output depends on the generator output only, not on the committed layout'
 Dir.mktmpdir('base-section-regen') do |gen|
-  write_gen(gen, ruby: { 'mruby-math' => "class Kept\n  def y: () -> untyped\nend\n" })
-  section = BaseSection.section_of(FIXTURE)
-  check.call('a Ruby declaration in the generator but not in the section is never dropped as stale',
-             BaseSection.ruby_decls(BaseSection.regenerate_ruby(section, gen)).include?("class Kept\n  def y: () -> untyped\nend\n"))
+  write_gen(gen, natives: { 'mruby-math' => "module Math\n  def sqrt: (untyped) -> untyped\nend\n" },
+                 ruby: { 'mruby-math' => "class Kept\n  def y: () -> untyped\nend\n",
+                         'mruby-rpg2k' => "class Game\n  def run: () -> untyped\nend\n" })
+  canonical = write_from(FIXTURE, gen)
+  # The same declarations, reordered, split over several blocks, under a stale tag and with no marker.
+  shuffled = +<<~RBS
+    # ---- base stubs (fixture)
+    # Base RBS (scripts/bc2cpp/base_rbs.rb): shapes from the AST, no types.
+    # bc2cpp-native: base_rpg2k
+    class Game
+      def run: () -> untyped
+    end
+    # Native base RBS (scripts/bc2cpp/base_rbs_native.rb): mrb_define_* registrations, arity untyped.
+    # bc2cpp-native: base_fiber
+    class Fiber
+      def resume: () -> untyped
+    end
+
+    # Base RBS (scripts/bc2cpp/base_rbs.rb): shapes from the AST, no types.
+    class Kept
+      def y: () -> untyped
+    end
+
+    # Native base RBS (scripts/bc2cpp/base_rbs_native.rb): mrb_define_* registrations, arity untyped.
+    # bc2cpp-native: base_math
+    module Math
+      def old: () -> untyped
+    end
+
+  RBS
+  shuffled += FIXTURE[BaseSection.section_of(FIXTURE).length..]
+  check.call('a reordered, re-tagged section writes the same bytes', write_from(shuffled, gen) == canonical)
+  check.call('so does the canonical output itself', write_from(canonical.last, gen, core: canonical.first) == canonical)
 end
 
-puts 'the --write split: core blocks move to the core file without leaving headers behind, and a second write is a no-op'
+puts 'the --write split: core tags go to the core file, the world keeps its preamble and the rest of the file'
 WORLD = <<~RBS
   # world preamble
   # Base RBS (scripts/bc2cpp/base_rbs.rb): shapes from the AST, no types.
-  # Base RBS (scripts/bc2cpp/base_rbs.rb): shapes from the AST, no types.
-  # ---- base stubs (fixture)
   # Base RBS (scripts/bc2cpp/base_rbs.rb): shapes from the AST, no types.
   # bc2cpp-native: base_rpg2k
   class Kept
@@ -151,44 +167,39 @@ WORLD = <<~RBS
 RBS
 CORE = <<~RBS
   # Base RBS (scripts/bc2cpp/base_rbs.rb): shapes from the AST, no types.
-  # bc2cpp-native: base_array
-  class Array
-    def bsearch: () -> untyped
-  end
-
-  # Base RBS (scripts/bc2cpp/base_rbs.rb): shapes from the AST, no types.
   # bc2cpp-native: base_enum
   module Enumerable
     def each_slice: (untyped) -> untyped
   end
 
 RBS
-write_by_tag = { 'base_rpg2k' => ["class Kept\n  def y: () -> untyped\nend\n"],
+write_by_tag = { 'base_rpg' => ["class Kept\n  def y: () -> untyped\nend\n"],
                  'base_array' => ["class Array\n  def bsearch: () -> untyped\nend\n"],
                  'base_enum' => ["module Enumerable\n  def each_slice: (untyped) -> untyped\nend\n"] }
 core1, world1 = BaseSection.write_texts(WORLD, {}, write_by_tag, core: CORE)
 core2, world2 = BaseSection.write_texts(world1, {}, write_by_tag, core: core1)
-header = "# Base RBS (scripts/bc2cpp/base_rbs.rb): shapes from the AST, no types.\n"
-check.call('no header without declarations is left in the world file (and old orphans go)',
-           BaseSection.section_of(world1).lines.each_cons(2).none? { |a, b| a == header && !b.start_with?('# bc2cpp-native:') })
-check.call('the core declarations stay in the core file, in their order',
+check.call('the core declarations are in the core file, in tag order, and not in the world',
            core1.index('class Array') && core1.index('module Enumerable') && core1.index('class Array') < core1.index('module Enumerable') &&
              !world1.include?('class Array'))
-check.call('the world keeps its preamble, its own declaration and the rest of the file',
-           world1.start_with?("# world preamble\n") && world1.include?("class Kept\n") &&
+check.call('the world keeps its preamble, its own declaration under its tag and the rest of the file',
+           world1.start_with?("# world preamble\n# Base RBS") && world1.include?("# bc2cpp-native: base_rpg\nclass Kept\n") &&
            world1.end_with?(WORLD[BaseSection.section_of(WORLD).length..]))
 check.call('a second write changes neither file', core2 == core1 && world2 == world1)
 
-puts 'committed file: regenerating from its own content is a no-op'
-committed = File.read(DECLARATIONS)
-bodies = native_bodies_of(BaseSection.section_of(committed)).group_by(&:first).transform_values { |rows| rows.map(&:last).join }
+puts 'committed files: written again from their own content, they are byte for byte the same (canonical)'
+committed = File.read(DECLARATIONS, encoding: 'UTF-8')
+committed_core = BaseSection.core_file_text
+combined = committed_core + BaseSection.section_of(committed)
+bodies = BaseSection.committed_native_bodies(combined)
 by_tag = Hash.new { |h, k| h[k] = [] }
-tagged_decls(BaseSection.section_of(committed)).each { |tag, decl| by_tag[tag] << decl }
-check.call('every Ruby declaration of the committed base section is an input to the round trip',
-             by_tag.values.flatten.size == BaseSection.ruby_decls(BaseSection.section_of(committed)).size)
-regenerated = BaseSection.regenerate_with(committed, bodies, by_tag)
-check.call('the regenerated file is identical to the committed one', regenerated == committed)
-BaseSection.first_differences(committed, regenerated).each { |line| warn line } unless regenerated == committed
+tagged_decls(combined).each { |tag, decl| by_tag[tag] << decl }
+check.call('every Ruby declaration of the committed base sections carries a tag',
+           !by_tag.key?(nil) && by_tag.values.flatten.size == BaseSection.ruby_decls(combined).size)
+core_again, world_again = by_tag.key?(nil) ? [nil, nil] : BaseSection.write_texts(committed, bodies, by_tag, core: committed_core)
+check.call('the world file is canonical', world_again == committed)
+check.call('the core file is canonical', core_again == committed_core)
+BaseSection.first_differences(committed, world_again).each { |line| warn line } if world_again && world_again != committed
+BaseSection.first_differences(committed_core, core_again).each { |line| warn line } if core_again && core_again != committed_core
 
 puts 'the comparison needs no tag; every gem with Ruby sources has one'
 Dir.mktmpdir('base-section-regen') do |gen|

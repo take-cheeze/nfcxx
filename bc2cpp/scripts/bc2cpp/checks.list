@@ -258,6 +258,7 @@ ruby scripts/bc2cpp/core_facts_rbs_check.rb --require-mruby
 ruby scripts/bc2cpp/trace_merge_check.rb
 ruby scripts/bc2cpp/ir_trace_evidence_check.rb
 ruby scripts/bc2cpp/base_section_regen_check.rb
+ruby scripts/bc2cpp/base_rbs_determinism_check.rb
 ruby scripts/bc2cpp/promote_candidates_check.rb
 ruby scripts/bc2cpp/native_core_direct_wired_check.rb
 ruby scripts/bc2cpp/ir_join_soundness_check.rb
