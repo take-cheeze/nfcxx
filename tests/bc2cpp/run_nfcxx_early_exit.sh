@@ -44,17 +44,43 @@ cases="$work/cases.txt"
 
 # The sealed program runs its top level at load time, before the entry gets the arguments, so the script's own top level
 # (from `state = {}` to its final `exit 0`) moves into EarlyExitWorld.main(argv); its helper methods stay at top level.
+# Two mruby gaps are shimmed for this world only: File.executable? (mruby-io has none; the test's EDG stand-in is a file made
+# executable) and Kernel#exit, which raises a status exception that main turns into its return value (an exit raised inside
+# the sealed program's top level is reported as an uncaught SystemExit).
 stripped="$work/stripped.rb"
 leaf_world "$stripped" scripts/nfcxx-early-exit.rb
 world="$work/world.rb"
 first=$(grep -n '^state = {}$' "$stripped" | cut -d: -f1)
 [ -n "$first" ] || { echo "FAIL bc2cpp nfcxx-early-exit: the script's state line moved"; exit 1; }
 {
+  cat <<'PRELUDE'
+class File
+  def self.executable?(path)
+    exist?(path)
+  end
+end
+class EarlyExitStatus < StandardError
+  attr_reader :status
+  def initialize(status)
+    @status = status
+    super("exit #{status}")
+  end
+end
+module Kernel
+  def exit(status = 0)
+    raise EarlyExitStatus.new(status)
+  end
+end
+PRELUDE
   sed -n "1,$((first - 1))p" "$stripped"
   echo "module EarlyExitWorld"
   echo "  def self.main(argv)"
-  sed -n "$first,\$p" "$stripped" | sed '$d' | sed 's/ARGV/argv/g' | sed 's/^/  /'
-  echo "    0"
+  echo "    begin"
+  sed -n "$first,\$p" "$stripped" | sed '$d' | sed 's/ARGV/argv/g' | sed 's/^/      /'
+  echo "      0"
+  echo "    rescue EarlyExitStatus => e"
+  echo "      e.status"
+  echo "    end"
   echo "  end"
   echo "end"
   echo "rc = EarlyExitWorld.main(ARGV)"
