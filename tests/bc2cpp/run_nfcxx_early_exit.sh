@@ -14,7 +14,7 @@ leaf_prepare; status=$?
 work=build/bc2cpp/nfcxx-early-exit
 mkdir -p "$work/edg"
 printf '#!/bin/sh\nexit 0\n' > "$work/edg/eccp" && chmod +x "$work/edg/eccp"
-# a state record file: each "NAME=VALUE" is one NUL-terminated record "sNAME=VALUE" (scripts/nfcxx-body.rb early_records)
+# a state record file: each "NAME=VALUE" is one NUL-terminated record "sNAME=VALUE" (the driver body, nfcxx-body.rb, early_records)
 state() { local f=$1; shift; : > "$f"; for kv in "$@"; do printf 's%s\0' "$kv" >> "$f"; done; }
 ok=(ncpp=1 nobj=0 cfiles_n=0 cu_n=0 stdin_src=0 emit_hip=0 compile_only=1 emit_c=0 xlang= depmode= dialect=g++ "edg=$root/$work/edg")
 state "$work/ok.rec" "${ok[@]}"

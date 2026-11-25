@@ -698,6 +698,9 @@ jobs:
             - "scripts/nfcxx-*"
             # a world compiles this Ruby script (bc2cpp base_rbs_native.rb runs it); scope_check.rb lists plain .rb paths
             - "scripts/nfcxx-cpp.rb"
+            # the bc2cpp leaf worlds (tests/bc2cpp/run_nfcxx_*.sh)
+            - "scripts/nfcxx-cache-plan.rb"
+            - "scripts/nfcxx-early-exit.rb"
             - "scripts/setup-libclang-edg.sh"
             # a glob, as the bash name was: this build step is not a bc2cpp world script
             - "scripts/build-libclang-edg.*"
