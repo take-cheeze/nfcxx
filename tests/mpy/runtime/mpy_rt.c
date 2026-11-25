@@ -70,6 +70,49 @@ static const MpyType *type_of(mpv v) { return *(const MpyType *const *)(uintptr_
 static int is_str(mpv v) { return is_heap(v) && type_of(v) == &mpy_type_str; }
 static const MpyStr *str_of(mpv v) { return (const MpyStr *)(uintptr_t)v; }
 
+/* Lists, tuples and iterators. A list owns its item array; a tuple holds its items in place; an iterator names its sequence
+ * and the next index. */
+static const MpyType mpy_type_list = {"list"};
+static const MpyType mpy_type_tuple = {"tuple"};
+static const MpyType mpy_type_iter = {"iterator"};
+
+typedef struct {
+  const MpyType *type;
+  size_t len, cap;
+  mpv *items;
+} MpyList;
+
+typedef struct {
+  const MpyType *type;
+  size_t len;
+  mpv items[]; /* C99 flexible array member */
+} MpyTuple;
+
+typedef struct {
+  const MpyType *type;
+  mpv seq;      /* the list or tuple being iterated */
+  size_t index; /* the next item to give */
+} MpyIter;
+
+static int is_list(mpv v) { return is_heap(v) && type_of(v) == &mpy_type_list; }
+static int is_tuple(mpv v) { return is_heap(v) && type_of(v) == &mpy_type_tuple; }
+static int is_iter(mpv v) { return is_heap(v) && type_of(v) == &mpy_type_iter; }
+
+/* The item count and items of a list or tuple; 0 when v is neither. */
+static int seq_items(mpv v, size_t *len, const mpv **items) {
+  if (is_list(v)) {
+    *len = ((const MpyList *)(uintptr_t)v)->len;
+    *items = ((const MpyList *)(uintptr_t)v)->items;
+    return 1;
+  }
+  if (is_tuple(v)) {
+    *len = ((const MpyTuple *)(uintptr_t)v)->len;
+    *items = ((const MpyTuple *)(uintptr_t)v)->items;
+    return 1;
+  }
+  return 0;
+}
+
 /* The name of a value's type, as MicroPython's error messages give it. Booleans are reported as 'int' in operator errors. */
 static const char *type_name(mpv v) {
   if (is_small(v) || is_bool(v)) return "int";
@@ -84,7 +127,13 @@ int mpy_truth(mpv v) {
   if (v == MPY_TRUE) return 1;
   if (is_small(v)) return small_value(v) != 0;
   if (is_str(v)) return str_of(v)->len != 0;
-  fail("truth of a value that is not a small int, bool, None or str is not implemented");
+  if (is_iter(v)) return 1;
+  {
+    size_t n;
+    const mpv *items;
+    if (seq_items(v, &n, &items)) return n != 0;
+  }
+  fail("truth of a value that is not a small int, bool, None, str, list or tuple is not implemented");
   return 0;
 }
 
@@ -363,6 +412,119 @@ mpv mpy_call(mpv fn, uint64_t nargs) {
   return ret;
 }
 
+/* Container operations. Each returns a value or fails with the message MicroPython gives. The lowering passes the operands
+ * on the value stack for the builders, and as arguments for the rest. */
+mpv mpy_build_list(uint64_t n) {
+  MpyList *l = (MpyList *)malloc(sizeof *l);
+  size_t base = vtop - n, i;
+  if (l == NULL) fail("out of memory");
+  l->type = &mpy_type_list;
+  l->len = n;
+  l->cap = n ? n : 1;
+  l->items = (mpv *)malloc(l->cap * sizeof(mpv));
+  if (l->items == NULL) fail("out of memory");
+  for (i = 0; i < n; ++i) l->items[i] = vstk[base + i];
+  vtop = base;
+  return (mpv)(uintptr_t)l;
+}
+
+mpv mpy_build_tuple(uint64_t n) {
+  MpyTuple *t = (MpyTuple *)malloc(sizeof *t + n * sizeof(mpv));
+  size_t base = vtop - n, i;
+  if (t == NULL) fail("out of memory");
+  t->type = &mpy_type_tuple;
+  t->len = n;
+  for (i = 0; i < n; ++i) t->items[i] = vstk[base + i];
+  vtop = base;
+  return (mpv)(uintptr_t)t;
+}
+
+/* An index into a sequence of len items: negative counts from the end. */
+static size_t checked_index(mpv seq, mpv idx, size_t len, const char *out_of_range) {
+  int64_t i;
+  char msg[160];
+  if (!is_small(idx) && !is_bool(idx)) {
+    snprintf(msg, sizeof msg, "TypeError: %s indices must be integers, not %s", type_name(seq), type_name(idx));
+    fail(msg);
+  }
+  i = need_int(idx);
+  if (i < 0) i += (int64_t)len;
+  if (i < 0 || i >= (int64_t)len) fail(out_of_range);
+  return (size_t)i;
+}
+
+mpv mpy_getitem(mpv obj, mpv idx) {
+  size_t len;
+  const mpv *items;
+  char msg[120];
+  if (!seq_items(obj, &len, &items)) {
+    snprintf(msg, sizeof msg, "TypeError: '%s' object isn't subscriptable", type_name(obj));
+    fail(msg);
+  }
+  return items[checked_index(obj, idx, len,
+                             is_list(obj) ? "IndexError: list index out of range" : "IndexError: tuple index out of range")];
+}
+
+void mpy_setitem(mpv obj, mpv idx, mpv value) {
+  MpyList *l;
+  char msg[120];
+  if (is_tuple(obj)) fail("TypeError: 'tuple' object doesn't support item assignment");
+  if (!is_list(obj)) {
+    snprintf(msg, sizeof msg, "TypeError: '%s' object doesn't support item assignment", type_name(obj));
+    fail(msg);
+  }
+  l = (MpyList *)(uintptr_t)obj;
+  l->items[checked_index(obj, idx, l->len, "IndexError: list index out of range")] = value;
+}
+
+/* The value that unpacking n items of seq gives to the i-th slot from the bottom: the first item is on top. */
+mpv mpy_unpack_get(mpv seq, uint64_t n, uint64_t i) {
+  size_t len;
+  const mpv *items;
+  char msg[120];
+  if (!seq_items(seq, &len, &items)) {
+    snprintf(msg, sizeof msg, "TypeError: cannot unpack non-iterable %s object", type_name(seq));
+    fail(msg);
+  }
+  if (len < n) {
+    snprintf(msg, sizeof msg, "ValueError: need more than %d values to unpack", (int)len);
+    fail(msg);
+  }
+  if (len > n) {
+    snprintf(msg, sizeof msg, "ValueError: too many values to unpack (expected %d)", (int)n);
+    fail(msg);
+  }
+  return items[n - 1 - i];
+}
+
+mpv mpy_get_iter(mpv obj) {
+  MpyIter *it;
+  size_t len;
+  const mpv *items;
+  char msg[120];
+  if (is_iter(obj)) return obj;
+  if (!seq_items(obj, &len, &items)) {
+    snprintf(msg, sizeof msg, "TypeError: '%s' object isn't iterable", type_name(obj));
+    fail(msg);
+  }
+  it = (MpyIter *)malloc(sizeof *it);
+  if (it == NULL) fail("out of memory");
+  it->type = &mpy_type_iter;
+  it->seq = obj;
+  it->index = 0;
+  return (mpv)(uintptr_t)it;
+}
+
+/* The next item, or 0 when the sequence is exhausted (0 is never a value). A list may grow while it is iterated. */
+mpv mpy_iter_next(mpv iter) {
+  MpyIter *it = (MpyIter *)(uintptr_t)iter;
+  size_t len;
+  const mpv *items;
+  seq_items(it->seq, &len, &items);
+  if (it->index >= len) return 0;
+  return items[it->index++];
+}
+
 /* Cells. A cell is a heap box holding one value; a closure and the function that owns the variable share it. The value 0
  * is unbound (the variable has not been assigned yet). Cells are never values a program can name: lowered code reaches them
  * only through its locals and the captured cells of a closure. */
@@ -387,15 +549,51 @@ void mpy_cell_set(mpv cell, mpv value) {
   ((MpyCell *)(uintptr_t)cell)->value = value;
 }
 
-/* Prints a value as the driver reports a result: small ints in decimal, booleans and None by name, a str as its text. */
-void mpy_print_value(mpv v) {
-  if (is_small(v)) printf("%lld\n", (long long)small_value(v));
-  else if (v == MPY_TRUE) printf("True\n");
-  else if (v == MPY_FALSE) printf("False\n");
-  else if (v == MPY_NONE) printf("None\n");
-  else if (is_str(v)) {   /* print(str) writes the text itself, no quotes; the bytes may hold NULs */
-    fwrite(str_of(v)->data, 1, str_of(v)->len, stdout);
-    printf("\n");
+/* repr of a str, as MicroPython writes it: single quotes unless the text has a single quote and no double quote. */
+static void print_str_repr(const MpyStr *s) {
+  int has_sq = memchr(s->data, '\'', s->len) != NULL;
+  int has_dq = memchr(s->data, '"', s->len) != NULL;
+  char q = (has_sq && !has_dq) ? '"' : '\'';
+  size_t i;
+  putchar(q);
+  for (i = 0; i < s->len; ++i) {
+    unsigned char c = (unsigned char)s->data[i];
+    if (c == (unsigned char)q || c == '\\') {
+      putchar('\\');
+      putchar(c);
+    } else if (c == '\n') fputs("\\n", stdout);
+    else if (c == '\r') fputs("\\r", stdout);
+    else if (c == '\t') fputs("\\t", stdout);
+    else if (c < 0x20 || c == 0x7f) printf("\\x%02x", c);
+    else putchar(c);
   }
-  else printf("(not printed: %llx)\n", (unsigned long long)v);
+  putchar(q);
+}
+
+/* repr of a value: numbers, bools and None by name, str quoted, and lists and tuples with their items' repr. */
+static void print_repr(mpv v) {
+  size_t n, i;
+  const mpv *items;
+  if (is_small(v)) printf("%lld", (long long)small_value(v));
+  else if (v == MPY_TRUE) fputs("True", stdout);
+  else if (v == MPY_FALSE) fputs("False", stdout);
+  else if (v == MPY_NONE) fputs("None", stdout);
+  else if (is_str(v)) print_str_repr(str_of(v));
+  else if (seq_items(v, &n, &items)) {
+    int is_l = is_list(v);
+    putchar(is_l ? '[' : '(');
+    for (i = 0; i < n; ++i) {
+      if (i) fputs(", ", stdout);
+      print_repr(items[i]);
+    }
+    if (!is_l && n == 1) putchar(',');
+    putchar(is_l ? ']' : ')');
+  } else fail("repr of this value is not lowered yet");
+}
+
+/* Prints a value as the driver reports the result of the module: a str as its text, anything else as repr. */
+void mpy_print_value(mpv v) {
+  if (is_str(v)) fwrite(str_of(v)->data, 1, str_of(v)->len, stdout);   /* the bytes may hold NULs */
+  else print_repr(v);
+  putchar('\n');
 }

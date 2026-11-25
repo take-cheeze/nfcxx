@@ -36,10 +36,23 @@ One 64-bit word per value, with the tagging of `MICROPY_OBJ_REPR_A` (the default
   signed on 64-bit hosts. A wider result is an error until big ints exist.
 - `x110` is an immediate: None `0x06`, False `0x0e`, True `0x16`.
 - A pointer (`xx00`, not zero) to a heap object whose first member is a pointer to its type. Heap types: str, function,
-  cell (see Strings and Closures below).
+  cell, list, tuple and iterator (see Strings, Closures and Containers below).
 
 The runtime is `tests/mpy/runtime/mpy_rt.c`. The in-place operators (`MP_BINARY_OP_INPLACE_*`, codes 9..21) are the
 binary operators plus 13, as in `py/runtime0.h`; on ints they give the same result.
+
+## Containers
+
+- A list is a heap record {type, len, cap, items}; a tuple holds its items in place; an iterator names its sequence and
+  the next index. The lowering pushes the items on the runtime value stack for `BUILD_LIST`/`BUILD_TUPLE`, as calls do.
+- `LOAD_SUBSCR`, `STORE_SUBSCR` and `UNPACK_SEQUENCE` (the first item ends on top, as MicroPython's `mp_unpack_sequence`
+  leaves it) go through `mpy_getitem`, `mpy_setitem` and `mpy_unpack_get`. Their error messages are MicroPython's.
+- A `for` loop's iterator takes `kIterSlots` (4, the `MP_OBJ_ITER_BUF_NSLOTS` of obj.h on both 32- and 64-bit hosts) stack
+  slots, with its object in the bottom one. `GET_ITER_STACK` makes it, `FOR_ITER` reads it there, and `break` pops all four.
+  The plain `GET_ITER`, which never feeds a `for` loop, is refused.
+- `FOR_ITER` gives 0 when the sequence is exhausted, which is never a value, so the lowering tests for 0.
+- repr: a list prints as `[...]`, a tuple as `(...)` with a trailing comma for one item, a str quoted as MicroPython quotes it.
+  A top-level str prints raw, as before.
 
 ## Lowering (first slice)
 
@@ -49,7 +62,8 @@ labels of their targets. It covers small-int and None/bool constants, names (`LO
 `STORE_GLOBAL`), locals (`LOAD_FAST`/`STORE_FAST`), `POP_TOP`, `DUP_TOP`, `ROT_TWO`, the binary and unary operators,
 `POP_JUMP_IF_FALSE`/`TRUE`, `JUMP`, the `JUMP_IF_*_OR_POP` pair (short-circuit `or`/`and`), `ROT_THREE` (chained
 comparisons), `LOAD_CONST_STRING` and `LOAD_CONST_OBJ` (str constants), `MAKE_FUNCTION`, `LOAD_DEREF`, `STORE_DEREF`,
-`MAKE_CLOSURE`, `CALL_FUNCTION` and `RETURN_VALUE`. Any other opcode is refused by name and no IR is written.
+`MAKE_CLOSURE`, `CALL_FUNCTION`, `BUILD_LIST`/`BUILD_TUPLE`, `LOAD_SUBSCR`/`STORE_SUBSCR`, `UNPACK_SEQUENCE`, `GET_ITER_STACK`
+and `FOR_ITER`, and `RETURN_VALUE`. Any other opcode is refused by name and no IR is written.
 
 Each code object is one IR function. The module body is `mpy_module`. A function is `mpy_fn_K(ret, args, nargs)`: it
 copies its arguments into its locals `loc.N` and stores its result through `ret`. The IR has no function-address value, so

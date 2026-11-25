@@ -147,6 +147,26 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
     } else if (o == opcode("JUMP_IF_FALSE_OR_POP")) {
       op.kind = "JUMP_IF_FALSE_OR_POP";
       op.arg = (long long)op.next + in.arg;
+    } else if (o == opcode("BUILD_LIST")) {
+      op.kind = "BUILD_LIST";
+      op.arg = in.arg;                     // the number of items, taken from the stack
+    } else if (o == opcode("BUILD_TUPLE")) {
+      op.kind = "BUILD_TUPLE";
+      op.arg = in.arg;
+    } else if (o == opcode("LOAD_SUBSCR")) {
+      op.kind = "LOAD_SUBSCR";
+    } else if (o == opcode("STORE_SUBSCR")) {
+      op.kind = "STORE_SUBSCR";
+    } else if (o == opcode("UNPACK_SEQUENCE")) {
+      op.kind = "UNPACK_SEQUENCE";
+      op.arg = in.arg;
+    } else if (o == opcode("GET_ITER_STACK")) {
+      op.kind = "GET_ITER";                // a for loop's iterator, which takes kIterSlots stack slots
+    } else if (o == opcode("GET_ITER")) {
+      refused("GET_ITER outside a for loop is not lowered yet");
+    } else if (o == opcode("FOR_ITER")) {
+      op.kind = "FOR_ITER";                // the fall-through takes the next value; the jump, taken when exhausted, drops the iterator
+      op.arg = (long long)op.next + in.arg;
     } else if (o == opcode("MAKE_FUNCTION")) {
       op.kind = "MAKE_FUNCTION";           // the argument is the index of the child code object
       op.arg = in.arg;
@@ -180,6 +200,10 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
   return out;
 }
 
+// A for loop's iterator takes MP_OBJ_ITER_BUF_NSLOTS stack slots (obj.h: 4 on 32- and 64-bit hosts); its object is in the
+// bottom one. break pops all of them.
+constexpr int kIterSlots = 4;
+
 // The stack effect of an instruction: how many values it adds to the stack (negative when it takes some).
 int effect(const Op &op) {
   const std::string &k = op.kind;
@@ -187,6 +211,12 @@ int effect(const Op &op) {
       k == "LOAD_LOCAL" || k == "LOAD_STR" || k == "LOAD_OBJ" || k == "LOAD_DEREF" || k == "DUP_TOP" ||
       k == "MAKE_FUNCTION")
     return 1;
+  if (k == "BUILD_LIST" || k == "BUILD_TUPLE") return 1 - (int)op.arg;   // the items go, the container comes
+  if (k == "UNPACK_SEQUENCE") return (int)op.arg - 1;
+  if (k == "LOAD_SUBSCR") return -1;
+  if (k == "STORE_SUBSCR") return -3;
+  if (k == "FOR_ITER") return 1;   // the fall-through; the exhausted jump is handled per successor
+  if (k == "GET_ITER") return kIterSlots - 1;   // the object goes, the iterator's slots come
   if (k == "CALL") return -(int)op.arg;   // the function and its arguments go, the result comes
   if (k == "MAKE_CLOSURE") return 1 - (int)op.extra;   // the captured cells go, the closure comes
   if (k == "STORE_NAME" || k == "STORE_LOCAL" || k == "STORE_DEREF" || k == "POP_TOP" || k == "BINARY" ||
@@ -327,6 +357,10 @@ class Lowerer {
         succ.push_back({(size_t)op.arg, after});
       } else if (op.kind == "JUMP_IF_FALSE" || op.kind == "JUMP_IF_TRUE") {
         succ.push_back({(size_t)op.arg, after});
+        succ.push_back({op.next, after});
+      } else if (op.kind == "FOR_ITER") {
+        // exhausted: the iterator's kIterSlots slots are dropped, so the target is that much shallower
+        succ.push_back({(size_t)op.arg, d - kIterSlots});
         succ.push_back({op.next, after});
       } else if (op.kind == "JUMP_IF_FALSE_OR_POP" || op.kind == "JUMP_IF_TRUE_OR_POP") {
         succ.push_back({(size_t)op.arg, d});
@@ -537,7 +571,47 @@ class Lowerer {
         } else {
           body << "  (if " << c << " (then (goto " << lbl((size_t)op.arg) << ")) (else))\n";
         }
-      } else if (k == "JUMP") {
+      } else if (k == "BUILD_LIST" || k == "BUILD_TUPLE") {
+        int n = (int)op.arg;
+        for (int i = 0; i < n; ++i) {
+          std::string v = load(d - n + i);
+          body << "  (eval (call void &\"mpy_push\" " << v << "))\n";
+        }
+        std::string r = fresh();
+        body << "  (let " << r << " unsigned_long (call unsigned_long &\""
+             << (k == "BUILD_LIST" ? "mpy_build_list" : "mpy_build_tuple") << "\" (const unsigned_long " << n << ")))\n";
+        push(d - n, r);
+      } else if (k == "LOAD_SUBSCR") {
+        std::string idx = pop(d), obj = pop(d - 1);
+        std::string r = fresh();
+        body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_getitem\" " << obj << " " << idx << "))\n";
+        push(d - 2, r);
+      } else if (k == "STORE_SUBSCR") {
+        // the index is on top, then the container, then the value
+        std::string idx = pop(d), base = pop(d - 1), val = pop(d - 2);
+        body << "  (eval (call void &\"mpy_setitem\" " << base << " " << idx << " " << val << "))\n";
+      } else if (k == "UNPACK_SEQUENCE") {
+        int n = (int)op.arg;
+        std::string seq = load(d - 1);   // read first: the item slots overlap it
+        for (int i = 0; i < n; ++i) {
+          std::string r = fresh();
+          body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_unpack_get\" " << seq
+               << " (const unsigned_long " << n << ") (const unsigned_long " << i << ")))\n";
+          push(d - 1 + i, r);
+        }
+      } else if (k == "GET_ITER") {
+        std::string obj = pop(d);
+        std::string r = fresh();
+        body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_get_iter\" " << obj << "))\n";
+        push(d - 1, r);
+      } else if (k == "FOR_ITER") {
+        std::string it = load(d - kIterSlots);
+        std::string r = fresh(), c = fresh();
+        body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_iter_next\" " << it << "))\n";
+        body << "  (let " << c << " bool (eq unsigned_long " << r << " (const unsigned_long 0)))\n";
+        body << "  (if " << c << " (then (goto " << lbl((size_t)op.arg) << ")) (else))\n";
+        push(d, r);
+            } else if (k == "JUMP") {
         body << "  (goto " << lbl((size_t)op.arg) << ")\n";
       } else if (k == "RETURN") {
         std::string v = pop(d);
