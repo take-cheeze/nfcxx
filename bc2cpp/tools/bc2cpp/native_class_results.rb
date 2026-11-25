@@ -31,6 +31,7 @@ module NativeClassResults
     '3rd/mruby/mrbgems/mruby-set/src/set.c' => 'c710f64f2a50650c0be29c01bb96f00fb61c01d1d3f1e0fa99816ecf29d06912',
     '3rd/mruby-stringio/src/stringio.c' => '624a40811e85cd00d92afaffc251a7b9c55f564c87eb71115e9e7d88cb68f716',
     '3rd/mruby/mrbgems/mruby-object-ext/src/object.c' => '4de3d5c2ca92e7ca4a5236140a330684dc29d8b7ef29cff178642b5fa43c79a1',
+    '3rd/mruby/mrbgems/mruby-io/src/io.c' => %w[a5acfe9c7071406389df5aaa036f9619de1cba65f78eeffeefd8786144d74e9b eb0952cb7bfc2ed0f82cd73c00b9daf8309dad5ce6c6b3b69996648d314cc6a5],
   }.freeze
   FILES = BASE_FILES.merge(WorldAuditPins.class_result_files).freeze
   ARRAY_TRANSFORMS = %w[compact flatten __uniq join].freeze
@@ -52,7 +53,7 @@ module NativeClassResults
     'bytesize' => [:integer, %w[3rd/mruby/src/string.c]],
     'to_i' => [:integer, %w[
       3rd/mruby/src/string.c 3rd/mruby/src/numeric.c 3rd/mruby/mrbgems/mruby-object-ext/src/object.c
-      3rd/mruby/mrbgems/mruby-time/src/time.c
+      3rd/mruby/mrbgems/mruby-time/src/time.c 3rd/mruby/mrbgems/mruby-io/src/io.c
     ]],
     'keys' => ['Array', %w[3rd/mruby/src/hash.c]],
     'values' => ['Array', %w[3rd/mruby/src/hash.c 3rd/mruby/mrbgems/mruby-struct/src/struct.c]],
