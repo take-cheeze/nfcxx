@@ -242,8 +242,11 @@ struct Stats {
   // Type feedback (docs/notes/ast.md, "Feedback"): arithmetic and comparison nodes record the types of their operands before they
   // specialize.
   std::uint64_t feedback_records = 0;        // observations recorded by nodes that had not specialized yet
-  std::uint64_t speculations_installed = 0;  // specialized nodes installed from the types of recorded operands (not after a deopt)
-  std::uint64_t feedback_generic = 0;        // nodes that gave up speculating (operands of two kinds, or not numbers) and stayed generic
+  std::uint64_t speculations_installed = 0;  // specialized nodes installed from the types of recorded operands (also after a re-profile)
+  std::uint64_t feedback_generic = 0;        // nodes that gave up speculating (operands of two kinds, or not numbers) and stayed generic;
+                                             // also a node past State::reprofile_max re-profiles, after a deopt
+  std::uint64_t reprofiles = 0;              // deopts on numbers that sent a specialized node back to recording its operands (at most
+                                             // State::reprofile_max per node; docs/notes/ast.md, "Feedback")
   // The tier (docs/notes/ast.md, "Tiering"); all zero while it is off.
   std::uint64_t tier_compiled = 0;    // versions of functions that became callable native code (compiled here or loaded from the cache)
   std::uint64_t tier_compiles = 0;    // runs of the nfcxx driver
@@ -346,6 +349,10 @@ struct State {
   // observations agree (docs/notes/ast.md, "Feedback"); operands of two kinds make it stay generic. 1 (or 0) specializes at the
   // first operands, as the engine did before feedback. Set in code before running scripts (no environment variable).
   unsigned feedback_warm = 2;
+  // A specialized arithmetic or comparison node whose guard fails on numbers goes back to recording its operands (a re-profile),
+  // and specializes to their new type after FEEDBACK_WARM agreeing observations. A node re-profiles at most this many times in its
+  // life; after that a further deopt leaves it generic for good (counted by feedback_generic). Set in code, not by environment.
+  unsigned reprofile_max = 2;
 
   // ---- errors ----
   [[noreturn]] void error(const Value& v);                // raise V as is
