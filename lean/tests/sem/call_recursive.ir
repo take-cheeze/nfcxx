@@ -1,0 +1,15 @@
+(ir-module "call_recursive.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "fact"
+  (ret int)
+  (params (param %0 "n" int))
+  (let %1 bool (le.s int %0 (const int 1)))
+  (if %1 (then (return (const int 1))) (else))
+  (let %2 int (wsub int %0 (const int 1)))
+  (let %3 int (call int &"fact" %2))
+  (let %4 int (wmul int %0 %3))
+  (return %4))
+(function "main"
+  (ret int)
+  (params)
+  (let %0 int (call int &"fact" (const int 5)))
+  (return %0))
