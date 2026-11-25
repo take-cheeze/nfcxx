@@ -38,6 +38,7 @@
 
 #include "../eval/nfceval_build.hpp"
 #include "nfcast_impl.hpp"
+#include "nfcast_jit.hpp"
 
 namespace nfcast {
 
@@ -239,6 +240,11 @@ struct TierLoop {
   bool counted = false;
   int line = 0;
   std::string reason;
+  // The machine-code tier (nfcast_jit.hpp): the code, once compiled; refused (the C tier looks at the loop); blocked by a guard that
+  // failed (not again until the loop is entered anew); and the iterations counted towards the compile.
+  std::unique_ptr<jit::Code> jit;
+  bool jit_refused = false, jit_blocked = false;
+  std::uint32_t jit_edges = 0;
 };
 
 struct TierProto {
@@ -2672,10 +2678,45 @@ void tier_backedge(Frame& f) {
   request(S, tp, f.cl, sig);
 }
 
+// The machine-code tier, at the same takeover point as the C tier: 1 when the compiled loop ran to its end, 0 when the loop is not
+// taken over (the interpreter goes on, and the C tier may still take the loop over). Its guard, like the C tier's, is checked at every
+// takeover, and a loop whose guard failed is left to the interpreter until it is entered anew.
+int jit_enter(State& S, Frame& f, TierLoop* tl, const TierLoopState& st) {
+  if (!jit::entry_ok(f, *tl->jit)) {
+    ++S.stats.jit_guard_misses;
+    ++S.stats.jit_bailouts;
+    tl->jit_blocked = true;
+    return 0;
+  }
+  ++S.stats.jit_entries;
+  jit::run(f, *tl->jit, st);
+  return 1;
+}
+
+int jit_take_over(State& S, Frame& f, Node* loop, TierLoop* tl, const TierLoopState& st, bool edge) {
+  TierState* T = S.tier;
+  if (!edge) tl->jit_blocked = false;  // a loop that is entered anew is tried again
+  if (tl->jit_blocked) return 0;
+  if (tl->jit) return jit_enter(S, f, tl, st);
+  if (tl->jit_refused || !edge) return 0;
+  if (++tl->jit_edges < T->opt.loop_threshold) return 0;
+  std::string why;
+  std::unique_ptr<jit::Code> c = jit::compile(loop, st.kind, why);
+  if (!c) {
+    tl->jit_refused = true;
+    ++S.stats.jit_refused;
+    note(T, "loop not compiled to machine code: %s", why);
+    return 0;
+  }
+  ++S.stats.jit_compiled;
+  tl->jit = std::move(c);
+  return jit_enter(S, f, tl, st);
+}
+
 int tier_loop(Frame& f, Node* loop, TierLoop*& hook, const TierLoopState& st, bool edge) {
   State& S = *f.S;
   TierState* T = S.tier;
-  if (T->opt.mode == TierOptions::Off || !T->opt.osr || f.inlined) return 0;
+  if (T->opt.mode == TierOptions::Off || (!T->opt.osr && !T->opt.jit) || f.inlined) return 0;
   TierLoop* tl = hook;
   if (!tl) {
     Proto* p = f.cl->proto;
@@ -2685,7 +2726,9 @@ int tier_loop(Frame& f, Node* loop, TierLoop*& hook, const TierLoopState& st, bo
     tl->next_try = T->opt.loop_threshold;
     tl->line = loop->line;
   }
-  if (tl->dead) return 0;
+  if (T->opt.jit)
+    if (int r = jit_take_over(S, f, loop, tl, st, edge)) return r;
+  if (!T->opt.osr || tl->dead) return 0;
   if (edge) {
     if (!T->pending.empty() && (++T->tick & 15) == 0) poll_pending(S);
     ++tl->edges;
@@ -2738,6 +2781,7 @@ void tier_init_from_env(State& S) {
     if (v > 0) o.threshold = o.loop_threshold = static_cast<unsigned>(v);
   }
   if (const char* r = std::getenv("NFCAST_TIER_OSR")) o.osr = !(r[0] == '0' && !r[1]);
+  if (const char* j = std::getenv("NFCAST_JIT")) o.jit = j[0] == '1' && !j[1];
   if (const char* sh = std::getenv("NFCAST_TIER_SHARE")) o.share = static_cast<unsigned>(std::atoi(sh));
   S.enable_tier(o);
 }
