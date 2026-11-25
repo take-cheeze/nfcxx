@@ -990,9 +990,9 @@ class CodeGen
       out << "    mrb_value bc2cpp_sym_acc_#{region[:sym_addr]} = mrb_ary_new(M);\n"
     when 'find'
       out << "    mrb_value bc2cpp_sym_acc_#{region[:sym_addr]} = mrb_nil_value();\n"
-    when 'any?', 'none?'
+    when 'any?'
       out << "    mrb_value bc2cpp_sym_acc_#{region[:sym_addr]} = mrb_false_value();\n"
-    when 'all?'
+    when 'all?', 'none?'
       out << "    mrb_value bc2cpp_sym_acc_#{region[:sym_addr]} = mrb_true_value();\n"
     when 'count'
       out << "    mrb_int bc2cpp_sym_acc_#{region[:sym_addr]} = 0;\n"
