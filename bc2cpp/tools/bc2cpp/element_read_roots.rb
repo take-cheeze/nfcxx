@@ -99,10 +99,12 @@ class ElementReadRoots < RegisterFlow
     ELEMENT_READ_OPS.include?(insn.op)
   end
 
-  # The texts with a bc2cpp_keep appended to each element read the liveness test selects.
-  def self.apply(irep, texts, captured, handlers: nil)
+  # The texts with a bc2cpp_keep appended to each element read the liveness test selects. +skip+: the indices whose
+  # reads another function compiles and roots (a try body's range).
+  def self.apply(irep, texts, captured, handlers: nil, skip: [])
     program = BytecodeIR.for(irep)
-    reads = (0...program.size).select { |i| element_read?(program.source_at(i)) }
+    skipped = skip.to_set
+    reads = (0...program.size).select { |i| !skipped.include?(i) && element_read?(program.source_at(i)) }
     return texts if reads.empty?
 
     flow = new(irep, texts, captured, handlers)

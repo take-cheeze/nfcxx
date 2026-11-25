@@ -686,7 +686,8 @@ class CodeGen
                shared_send
              else
                inline_prefix = guarded_inline[:at][insn.addr]
-               own = glue_at[insn.addr] || cold_compact(insn, guard_hoist_site(irep, idx, insn, compile_insn(insn, irep, d, idx)), d)
+               own = glue_at[insn.addr] ||
+                     cold_compact(insn, guard_hoist_site(irep, idx, insn, element_read_owned(insn) { compile_insn(insn, irep, d, idx) }), d)
                inline_prefix ? inline_prefix + own : own
              end
       # STEP_EXIT_JUMPS: an exit from an ensure region goes through the ensure body first.
@@ -694,7 +695,7 @@ class CodeGen
       # STEP_HANDLERS: the handler lookup reads the address of the instruction the step was last at.
       text = "  F->pc = #{insn.addr};\n" + text if @resumable&.handlers && !text.empty?
       # Without the flow pass there is no liveness to narrow the roots, so every element read is rooted.
-      text += ElementReadRoots.keep_text(insn) if !flow_bodies && ElementReadRoots.element_read?(insn)
+      text += ElementReadRoots.keep_text(insn) if !flow_bodies && !glue_at.key?(insn.addr) && ElementReadRoots.element_read?(insn)
       if arm_prune_drop && arm_prune.include?(idx)
         # A flow body keeps its '' slot until the decision below, so the pass never sees a dropped text.
         arm_texts[idx] = [jump_label, text]
@@ -733,7 +734,9 @@ class CodeGen
         flow_bodies = RegisterFlow.optimize(irep, flow_bodies, flow_captured, handlers: flow_handlers)
       end
       # Probe text is never executed; GC rooting cannot change an error-free eligibility answer.
-      flow_bodies = ElementReadRoots.apply(irep, flow_bodies, flow_captured, handlers: flow_handlers) unless eligibility_only && ENV['BC2CPP_PROBE_TEXT_CLEANUP'] != '0'
+      # A read inside a try range is the try body's, which roots it there (ElementReadRootsCompileInsn).
+      try_reads = rescue_regions.flat_map { |r| (irep.index_of_addr(r[:begin_addr])..irep.index_of_addr(r[:end_addr])).to_a }
+      flow_bodies = ElementReadRoots.apply(irep, flow_bodies, flow_captured, handlers: flow_handlers, skip: try_reads) unless eligibility_only && ENV['BC2CPP_PROBE_TEXT_CLEANUP'] != '0'
       flow_labels.each_with_index { |jump_label, idx| out << jump_label << flow_bodies[idx] }
     end
     @resumable.flat = false if @resumable
@@ -1331,3 +1334,25 @@ class CodeGen
     BytecodeIR.for(irep).branch_targets.dup
   end
 end
+
+# ELEMENT_READ_ROOTS: an element read compiled anywhere but compile_method's own pass (a rescue's try body, a block
+# that stays a function, an inlined loop or call body) has no liveness to narrow it, so it is always rooted.
+# compile_method's pass places its own roots (ElementReadRoots.apply) and claims its reads with element_read_owned.
+module ElementReadRootsCompileInsn
+  def compile_insn(insn, irep, owner_def, idx = nil, reg_offset = 0)
+    text = super
+    return text unless text.is_a?(String) && ElementReadRoots.element_read?(insn) && !@element_read_owner.equal?(insn)
+
+    text + ElementReadRoots.keep_text(insn)
+  end
+
+  def element_read_owned(insn)
+    saved = @element_read_owner
+    @element_read_owner = insn
+    yield
+  ensure
+    @element_read_owner = saved
+  end
+end
+
+CodeGen.prepend(ElementReadRootsCompileInsn)
