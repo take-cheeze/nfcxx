@@ -80,6 +80,10 @@ int main(int argc, char** argv) {
                    static_cast<unsigned long long>(st.tier_aborts));
       std::fprintf(stderr, "tier-osr: runs=%llu bailouts=%llu ineligible=%llu\n", static_cast<unsigned long long>(st.tier_osr_runs),
                    static_cast<unsigned long long>(st.tier_osr_bailouts), static_cast<unsigned long long>(st.tier_osr_ineligible));
+      std::fprintf(stderr, "jit: jit_compiled=%llu jit_entries=%llu jit_guard_misses=%llu jit_bailouts=%llu jit_refused=%llu\n",
+                   static_cast<unsigned long long>(st.jit_compiled), static_cast<unsigned long long>(st.jit_entries),
+                   static_cast<unsigned long long>(st.jit_guard_misses), static_cast<unsigned long long>(st.jit_bailouts),
+                   static_cast<unsigned long long>(st.jit_refused));
     }
   }
   return rc;
