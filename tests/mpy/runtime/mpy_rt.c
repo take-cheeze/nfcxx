@@ -3,7 +3,13 @@
  * A value is one 64-bit word, with the tagging of MicroPython's MICROPY_OBJ_REPR_A (py/obj.h):
  *   xxxx...xxx1  a small int; the value is the word shifted right by one
  *   xxxx...x110  an immediate object: None, False, True (value 0, 1, 2 in bits 3 and up)
- * Heap objects are not here yet, so a value that is neither is an error.
+ * A pointer (low two bits clear, not zero) is a heap object. Its first member is a pointer to its type (MpyType), as
+ * MicroPython's mp_obj_base_t has it. Two heap types exist: str (MpyStr) and function (MpyFunc). Other heap objects are
+ * not here yet, so a value of another kind is an error.
+ *
+ * Strings (docs/notes/mpy-pathb.md, "Strings"): a MpyStr is the type pointer, the byte length, and the bytes followed by a
+ * NUL. The bytes are immutable. A literal is allocated once, the first time its site runs, and kept (no GC yet); a
+ * concatenation allocates a new one and it is kept too.
  *
  * Integers wider than the small-int range would be big ints in MicroPython (MICROPY_LONGINT_IMPL). They are an error here
  * until the runtime has them, so a test program must stay in the small-int range. Names are looked up in one module
@@ -45,12 +51,40 @@ static mpv make_small(int64_t n) {
 
 static int is_bool(mpv v) { return v == MPY_FALSE || v == MPY_TRUE; }
 
-/* Truth, as mp_obj_is_true: None and False are false; zero is false; anything else is true. */
+/* Heap objects. The type is the first member of every heap record. */
+typedef struct MpyType {
+  const char *name;
+} MpyType;
+
+static const MpyType mpy_type_str = {"str"};
+static const MpyType mpy_type_function = {"function"};
+
+typedef struct {
+  const MpyType *type;
+  size_t len;
+  char data[];   /* len bytes and a NUL */
+} MpyStr;
+
+static int is_heap(mpv v) { return v != 0 && (v & 3) == 0; }
+static const MpyType *type_of(mpv v) { return *(const MpyType *const *)(uintptr_t)v; }
+static int is_str(mpv v) { return is_heap(v) && type_of(v) == &mpy_type_str; }
+static const MpyStr *str_of(mpv v) { return (const MpyStr *)(uintptr_t)v; }
+
+/* The name of a value's type, as MicroPython's error messages give it. Booleans are reported as 'int' in operator errors. */
+static const char *type_name(mpv v) {
+  if (is_small(v) || is_bool(v)) return "int";
+  if (v == MPY_NONE) return "NoneType";
+  if (is_heap(v)) return type_of(v)->name;
+  return "object";
+}
+
+/* Truth, as mp_obj_is_true: None and False are false; zero is false; an empty str is false; anything else is true. */
 int mpy_truth(mpv v) {
   if (v == MPY_NONE || v == MPY_FALSE) return 0;
   if (v == MPY_TRUE) return 1;
   if (is_small(v)) return small_value(v) != 0;
-  fail("truth of a value that is not a small int, bool or None is not implemented");
+  if (is_str(v)) return str_of(v)->len != 0;
+  fail("truth of a value that is not a small int, bool, None or str is not implemented");
   return 0;
 }
 
@@ -61,6 +95,50 @@ static int64_t need_int(mpv v) {
   return 0;
 }
 
+static MpyStr *alloc_str(size_t n) {
+  MpyStr *s = (MpyStr *)malloc(sizeof(MpyStr) + n + 1);
+  if (s == NULL) fail("out of memory");
+  s->type = &mpy_type_str;
+  s->len = n;
+  s->data[n] = '\0';
+  return s;
+}
+
+/* A str operator: == and != compare the bytes (a str never equals a non-str), + concatenates two strs. The other operators
+ * on a str are not lowered yet, and they fail here rather than give a wrong answer. */
+static mpv str_binop(int op, mpv a, mpv b) {
+  char msg[160];
+  if (op == MPY_OP_EQUAL || op == MPY_OP_NOT_EQUAL) {
+    int eq = 0;
+    if (is_str(a) && is_str(b)) {
+      const MpyStr *x = str_of(a), *y = str_of(b);
+      eq = x->len == y->len && memcmp(x->data, y->data, x->len) == 0;
+    }
+    return (eq == (op == MPY_OP_EQUAL)) ? MPY_TRUE : MPY_FALSE;
+  }
+  if (op == MPY_OP_ADD) {
+    if (!is_str(a) || !is_str(b)) {
+      snprintf(msg, sizeof msg, "TypeError: unsupported types for __add__: '%s', '%s'", type_name(a), type_name(b));
+      fail(msg);
+    }
+    {
+      const MpyStr *x = str_of(a), *y = str_of(b);
+      MpyStr *r;
+      if (x->len + y->len < x->len) fail("string too long");
+      r = alloc_str(x->len + y->len);
+      memcpy(r->data, x->data, x->len);
+      memcpy(r->data + x->len, y->data, y->len);
+      return (mpv)(uintptr_t)r;
+    }
+  }
+  if (op == MPY_OP_LESS || op == MPY_OP_MORE || op == MPY_OP_LESS_EQUAL || op == MPY_OP_MORE_EQUAL) {
+    fail("str ordering (<, >, <=, >=) is not lowered yet");
+  }
+  snprintf(msg, sizeof msg, "str operator (code %d) is not lowered yet", op);
+  fail(msg);
+  return MPY_NONE;
+}
+
 mpv mpy_small(int64_t n) { return make_small(n); }
 
 /* A binary operator (the MP_BINARY_OP_* codes). Booleans take part as 0 and 1, as in Python. */
@@ -69,6 +147,7 @@ mpv mpy_binop(int op, mpv a, mpv b) {
   /* The in-place forms (MP_BINARY_OP_INPLACE_OR = 9 .. INPLACE_POWER = 21) are the same operators on immutable ints:
    * INPLACE_X is X + 13 (runtime0.h). The in-place matrix multiply, true divide and power stay unsupported. */
   if (op >= 9 && op <= 21) op += 13;
+  if (is_str(a) || is_str(b)) return str_binop(op, a, b);
   x = need_int(a);
   y = need_int(b);
   switch (op) {
@@ -186,6 +265,7 @@ mpv mpy_get_global(const char *name, int *found) {
 /* Functions. A function object is a heap record: the number of its IR function (mpy_dispatch's K) and its positional
  * argument count. The pointer has its low two bits clear, so it is not a small int or an immediate. */
 typedef struct {
+  const MpyType *type;
   uint64_t index;
   uint64_t nargs;
 } MpyFunc;
@@ -196,9 +276,30 @@ void mpy_dispatch(uint64_t idx, mpv *ret, const mpv *args, uint64_t nargs);
 mpv mpy_make_function(uint64_t index, uint64_t nargs) {
   MpyFunc *f = (MpyFunc *)malloc(sizeof *f);
   if (f == NULL) fail("out of memory");
+  f->type = &mpy_type_function;
   f->index = index;
   f->nargs = nargs;
   return (mpv)(uintptr_t)f;
+}
+
+/* A str literal: the bytes at bytes (len of them, NUL-terminated in the data). id numbers the literal sites of the module,
+ * densely from 0, and the record of each one is allocated the first time its site runs. */
+mpv mpy_str_lit(const char *bytes, size_t len, uint64_t id) {
+  static mpv *lits = NULL;
+  static size_t n_lits = 0;
+  if (id >= n_lits) {
+    size_t n = (size_t)id + 1, k;
+    lits = (mpv *)realloc(lits, n * sizeof(mpv));
+    if (lits == NULL) fail("out of memory");
+    for (k = n_lits; k < n; ++k) lits[k] = 0;
+    n_lits = n;
+  }
+  if (lits[id] == 0) {
+    MpyStr *s = alloc_str(len);
+    memcpy(s->data, bytes, len);
+    lits[id] = (mpv)(uintptr_t)s;
+  }
+  return lits[id];
 }
 
 /* The value stack that calls take their arguments from: the lowered code pushes each argument, then calls. */
@@ -219,7 +320,7 @@ mpv mpy_call(mpv fn, uint64_t nargs) {
   MpyFunc *f;
   size_t base;
   mpv ret = MPY_NONE;
-  if (fn == 0 || (fn & 3) != 0) fail("TypeError: object is not callable");
+  if (!is_heap(fn) || type_of(fn) != &mpy_type_function) fail("TypeError: object is not callable");
   f = (MpyFunc *)(uintptr_t)fn;
   if (nargs != f->nargs) fail("TypeError: wrong number of arguments");
   base = vtop - nargs;
@@ -228,11 +329,15 @@ mpv mpy_call(mpv fn, uint64_t nargs) {
   return ret;
 }
 
-/* Prints a value as the driver reports a result: small ints in decimal, booleans and None by name. */
+/* Prints a value as the driver reports a result: small ints in decimal, booleans and None by name, a str as its text. */
 void mpy_print_value(mpv v) {
   if (is_small(v)) printf("%lld\n", (long long)small_value(v));
   else if (v == MPY_TRUE) printf("True\n");
   else if (v == MPY_FALSE) printf("False\n");
   else if (v == MPY_NONE) printf("None\n");
+  else if (is_str(v)) {   /* print(str) writes the text itself, no quotes; the bytes may hold NULs */
+    fwrite(str_of(v)->data, 1, str_of(v)->len, stdout);
+    printf("\n");
+  }
   else printf("(not printed: %llx)\n", (unsigned long long)v);
 }

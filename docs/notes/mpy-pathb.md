@@ -35,7 +35,8 @@ One 64-bit word per value, with the tagging of `MICROPY_OBJ_REPR_A` (the default
 - `xxx1` is a small int, the value in the bits above the tag. The range is the reference's small-int range, 62 bits
   signed on 64-bit hosts. A wider result is an error until big ints exist.
 - `x110` is an immediate: None `0x06`, False `0x0e`, True `0x16`.
-- A pointer (`xx00`) to a heap object whose first member is its type. Heap objects are not in the first slice.
+- A pointer (`xx00`, not zero) to a heap object whose first member is a pointer to its type. Two heap types exist: str and
+  function (see Strings below).
 
 The runtime is `tests/mpy/runtime/mpy_rt.c`. The in-place operators (`MP_BINARY_OP_INPLACE_*`, codes 9..21) are the
 binary operators plus 13, as in `py/runtime0.h`; on ints they give the same result.
@@ -47,14 +48,33 @@ each instruction is computed first, and a join must agree on it. Each instructio
 labels of their targets. It covers small-int and None/bool constants, names (`LOAD_NAME`, `STORE_NAME`, `LOAD_GLOBAL`,
 `STORE_GLOBAL`), locals (`LOAD_FAST`/`STORE_FAST`), `POP_TOP`, `DUP_TOP`, `ROT_TWO`, the binary and unary operators,
 `POP_JUMP_IF_FALSE`/`TRUE`, `JUMP`, the `JUMP_IF_*_OR_POP` pair (short-circuit `or`/`and`), `ROT_THREE` (chained
-comparisons), `MAKE_FUNCTION`, `CALL_FUNCTION` and `RETURN_VALUE`. Any other opcode is refused by
-name and no IR is written.
+comparisons), `LOAD_CONST_STRING` and `LOAD_CONST_OBJ` (str constants), `MAKE_FUNCTION`, `CALL_FUNCTION` and `RETURN_VALUE`.
+Any other opcode is refused by name and no IR is written.
 
 Each code object is one IR function. The module body is `mpy_module`. A function is `mpy_fn_K(ret, args, nargs)`: it
 copies its arguments into its locals `loc.N` and stores its result through `ret`. The IR has no function-address value, so
 `mpy_dispatch(K, ret, args, nargs)` routes a call to `mpy_fn_K`, and a function object is a runtime record holding K and the
 argument count. A call pushes each argument on the runtime value stack (`mpy_push`), then calls `mpy_call(fn, n)`, which
 checks the arity and dispatches. Functions with defaults, keyword arguments, closures or `*args` are refused.
+
+## Strings
+
+A str value is a pointer to a heap record, `MpyStr` in `tests/mpy/runtime/mpy_rt.c`:
+
+- word 0: the type pointer (the str type), so the runtime can tell a str from a function object;
+- word 1: the length in bytes (not characters; the bytes need not be UTF-8);
+- then the bytes, followed by a NUL so the text can be passed to C.
+
+The record is malloc'd and immutable, and it is never freed: this slice has no GC. A literal (`LOAD_CONST_STRING`, a qstr;
+or a str in the constant table through `LOAD_CONST_OBJ`) is allocated the first time its site runs, through
+`mpy_str_lit(bytes, len, id)`. `id` numbers the distinct texts of the module densely, so a site costs one allocation and
+later runs reuse it. A loop that builds strings with `+` allocates a record per step and keeps all of them.
+
+Operators on a str (`mpy_binop`): `==` and `!=` compare the bytes, and a str never equals a non-str (so `'1' == 1` is
+False, as in the reference). `+` concatenates two strs. A `+` with a non-str operand is a runtime error with the
+reference's message (`unsupported types for __add__: 'str', 'int'`; a bool is reported as `'int'`). The ordering operators
+and every other operator on a str are a runtime error saying they are not lowered yet. Truth: an empty str is false.
+`print` of a str writes its bytes and a newline, with no quotes.
 
 ## Checks
 
@@ -63,9 +83,13 @@ checks the arity and dispatches. Functions with defaults, keyword arguments, clo
   consumes every byte.
 - `tests/mpy/lower/run.sh` (needs `MPY_CROSS` and `MICROPY`): each `lower/*.py` runs through lowering, emitting, QBE and
   linking, and its printed `result` must equal the reference's `print(m.result)` for the same `.mpy`. Each
-  `lower/err/*.py` must be refused with exit 3.
+  `lower/err/*.py` must be refused with exit 3. Each `lower/rterr/*.py` must fail at run time with exit 1 and the
+  exception line that the reference raises for it.
 
 ## Not yet
 
-Closures (cells), defaults and keyword arguments, generators, containers, strings, classes, exceptions, `is`, big ints, and the rest of the opcodes. Also the `luac`-style opcode oracle is
+Closures (cells), defaults and keyword arguments, generators, containers, str methods and formatting, str ordering and
+repetition, classes, exceptions, `is`, big ints, and the rest of the opcodes. A str constant through `LOAD_CONST_OBJ` is
+lowered, but mpy-cross emits text literals as qstrs, so no test program reaches that path yet. Nothing is freed: a str lives until
+the process ends. Also the `luac`-style opcode oracle is
 still blocked, and string pattern matching is paused.

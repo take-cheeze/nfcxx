@@ -1,6 +1,6 @@
-// .mpy bytecode -> Path B IR (docs/notes/mpy-pathb.md). The subset: small ints, None/bool, names, locals, the operators,
-// jumps, calls of plain functions (positional arguments; no defaults, keywords, closures or *args), and return. Anything
-// else is refused by name, and no IR is produced for a refused module.
+// .mpy bytecode -> Path B IR (docs/notes/mpy-pathb.md). The subset: small ints, None/bool, str constants, names, locals, the
+// operators, jumps, calls of plain functions (positional arguments; no defaults, keywords, closures or *args), and return.
+// Anything else is refused by name, and no IR is produced for a refused module.
 //
 // Each code object becomes one IR function. The stack is slots stk.N (one per depth) and the locals are loc.N. The module
 // body is mpy_module(). A function is mpy_fn_K(ret, args, nargs): it copies its arguments into its locals and stores the
@@ -59,6 +59,14 @@ struct Op {
   long long arg = 0;    // a value, a qstr index, a local, an operator, a child index, a call's argument count, or a target
 };
 
+// The name of an opcode (bc0.h), for a refusal.
+std::string opname(unsigned o) {
+  for (const auto &e : kOpNames) {
+    if (e.value == o) return e.name;
+  }
+  return "?";
+}
+
 // The instructions of a code object, with the operand of each packed opcode taken from its opcode byte.
 std::vector<Op> normalize(const std::vector<Insn> &insns) {
   std::vector<Op> out;
@@ -85,6 +93,12 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
     } else if (o == opcode("LOAD_CONST_SMALL_INT")) {
       op.kind = "LOAD_SMALL";
       op.arg = in.arg;
+    } else if (o == opcode("LOAD_CONST_STRING")) {
+      op.kind = "LOAD_STR";
+      op.arg = in.arg;                     // a qstr index
+    } else if (o == opcode("LOAD_CONST_OBJ")) {
+      op.kind = "LOAD_OBJ";
+      op.arg = in.arg;                     // an index into the constant table; only a str is lowered
     } else if (o == opcode("LOAD_CONST_NONE")) {
       op.kind = "LOAD_NONE";
     } else if (o == opcode("LOAD_CONST_FALSE")) {
@@ -136,8 +150,8 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
     } else if (o == opcode("RETURN_VALUE")) {
       op.kind = "RETURN";
     } else {
-      char buf[96];
-      std::snprintf(buf, sizeof buf, "opcode 0x%02x is not lowered yet (offset %zu)", o, in.offset);
+      char buf[160];
+      std::snprintf(buf, sizeof buf, "opcode %s (0x%02x) is not lowered yet (offset %zu)", opname(o).c_str(), o, in.offset);
       refused(buf);
     }
     out.push_back(op);
@@ -149,7 +163,7 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
 int effect(const Op &op) {
   const std::string &k = op.kind;
   if (k == "LOAD_SMALL" || k == "LOAD_NONE" || k == "LOAD_FALSE" || k == "LOAD_TRUE" || k == "LOAD_NAME" ||
-      k == "LOAD_LOCAL" || k == "DUP_TOP" || k == "MAKE_FUNCTION")
+      k == "LOAD_LOCAL" || k == "LOAD_STR" || k == "LOAD_OBJ" || k == "DUP_TOP" || k == "MAKE_FUNCTION")
     return 1;
   if (k == "CALL") return -(int)op.arg;   // the function and its arguments go, the result comes
   if (k == "STORE_NAME" || k == "STORE_LOCAL" || k == "POP_TOP" || k == "BINARY" || k == "JUMP_IF_FALSE" ||
@@ -180,17 +194,31 @@ class Lowerer {
   }
 
  private:
-  // The name of a qstr as a data item, one per distinct name. The module's qstr table is what bytecode operands index.
-  std::string name_sym(size_t qidx) {
-    if (qidx >= m_.qstrs.size()) throw std::runtime_error("mpy: qstr index out of range");
-    const std::string &s = m_.qstrs[qidx];
+  // The bytes of a name or a str constant as a data item, one per distinct text (NUL-terminated). The module's qstr table
+  // is what bytecode operands index.
+  std::string text_sym(const std::string &s) {
     auto it = names_.find(s);
     if (it != names_.end()) return it->second;
-    std::string sym = "mpy.name." + std::to_string(names_.size());
+    std::string sym = "mpy.text." + std::to_string(names_.size());
     names_[s] = sym;
     data_ << "(data \"" << sym << "\" (const (array " << s.size() + 1 << " (const char))) (string \"" << ir_escape(s)
           << "\\000\"))\n";
     return sym;
+  }
+
+  // The name of a qstr as a data item.
+  std::string name_sym(size_t qidx) {
+    if (qidx >= m_.qstrs.size()) throw std::runtime_error("mpy: qstr index out of range");
+    return text_sym(m_.qstrs[qidx]);
+  }
+
+  // The runtime's id of a str literal (mpy_str_lit numbers the literal sites densely), one per distinct text.
+  size_t str_id(const std::string &s) {
+    auto it = str_ids_.find(s);
+    if (it != str_ids_.end()) return it->second;
+    size_t id = str_ids_.size();
+    str_ids_[s] = id;
+    return id;
   }
 
   // The function number of a child code object, lowering it on first use. nargs is its positional argument count.
@@ -333,6 +361,23 @@ class Lowerer {
         push(d, "(const unsigned_long 14)");
       } else if (k == "LOAD_TRUE") {
         push(d, "(const unsigned_long 22)");
+      } else if (k == "LOAD_STR" || k == "LOAD_OBJ") {
+        // A str literal: its bytes are a data item, and mpy_str_lit returns the record (allocated on first use).
+        std::string text;
+        if (k == "LOAD_STR") {
+          if ((size_t)op.arg >= m_.qstrs.size()) throw std::runtime_error("mpy: qstr index out of range");
+          text = m_.qstrs[(size_t)op.arg];
+        } else {
+          if ((size_t)op.arg >= m_.objs.size()) throw std::runtime_error("mpy: constant index out of range");
+          const Obj &o = m_.objs[(size_t)op.arg];
+          if (o.kind != Obj::Kind::Str) refused("a constant object that is not a str is not lowered yet");
+          text = o.text;
+        }
+        std::string sym = text_sym(text);
+        std::string r = fresh();
+        body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_str_lit\" @\"" << sym
+             << "\" (const unsigned_long " << text.size() << ") (const unsigned_long " << str_id(text) << ")))\n";
+        push(d, r);
       } else if (k == "LOAD_NAME") {
         std::string sym = name_sym((size_t)op.arg);
         size_t len = m_.qstrs[(size_t)op.arg].size();
@@ -446,6 +491,7 @@ class Lowerer {
   const Module &m_;
   std::ostringstream data_;
   std::map<std::string, std::string> names_;
+  std::map<std::string, size_t> str_ids_;   // the id of each str literal's text (mpy_str_lit)
   std::map<const RawCode *, size_t> ids_;
   std::vector<std::string> fns_;   // the IR of each child function, by number
   std::vector<size_t> nargs_;      // and each one's positional argument count
