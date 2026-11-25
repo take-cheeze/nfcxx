@@ -233,6 +233,7 @@ require_relative 'owner_call_proof_note' if ENV['BC2CPP_OWNER_CALL_PROOF_NOTE']
 require_relative 'codegen_stack_tuples'
 require_relative 'codegen_string_eq'
 require_relative 'codegen_chr_append'
+require_relative 'codegen_kwarg_no_hash'
 require_relative 'codegen_strcat_literal'
 require_relative 'codegen_call_inline'
 require_relative 'codegen_respond_to_fold'
