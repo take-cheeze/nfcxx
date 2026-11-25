@@ -283,6 +283,7 @@ ruby scripts/bc2cpp/exact_native_slot_check.rb
 ruby scripts/bc2cpp/super_frame_block_check.rb
 ruby scripts/bc2cpp/lambda_cells_check.rb
 ruby scripts/bc2cpp/rescue_multi_class_check.rb
+ruby scripts/bc2cpp/rescue_try_lean_check.rb
 ruby scripts/bc2cpp/ensure_body_block_check.rb
 ruby scripts/bc2cpp/ensure_yield_raise_check.rb
 # ci:parallel end
