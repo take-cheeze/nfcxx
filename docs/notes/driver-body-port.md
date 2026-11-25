@@ -1,8 +1,28 @@
 # Porting the driver body (`./nfcxx`) to Ruby
 
-Status: B8 done (the switch, #1402): `./nfcxx` is a shim that runs `scripts/nfcxx.rb`. The bash body is frozen at
-`tests/driver-body/nfcxx-oracle.sh`, and the Ruby driver runs it for every stage that is not yet ported. Follows
-docs/notes/driver-state-design.md (the helpers are done).
+## Current status
+
+The bash driver is gone. `./nfcxx` and `./nfcc` are Ruby launchers (`exec` of `scripts/nfcxx.rb` and `scripts/nfcc.rb`), and
+the driver body runs in Ruby in `scripts/nfcxx-body.rb`, in process, in the body's order. The frozen body
+(`tests/driver-body/nfcxx-oracle.sh`), its oracle runner (`scripts/nfcxx-oracle.rb`) and the frozen `nfcxx-bash` and
+`nfcc-bash` copies were removed (PR #1618).
+
+What the Ruby body covers: the argument loop (`scripts/nfcxx-loop.rb`, `loop_state`), the setup (`scripts/nfcxx-setup-state.rb`
+reads the planners' statements into Ruby values), the `.cu` and `.cpp2` preparation, the early exits, `-E`, the modules block,
+emit-C (through `scripts/nfcxx-emit-c.rb`), the hosted link options, the C inputs, the compile cache (`scripts/nfcxx-cache-check.rb`),
+the Path B compile and link (including `--cosmo`), the gcc route (eccp, the second pass, depmode), and the trace spans, end
+markers and pending spans. `--keep-intermediates` keeps the run's eccp directory, and a gcc fallback clears its Path B directories.
+
+Known open items:
+- `tests/driver-setup-rest2` cases 41 and 48 differ in trace counts (not yet diagnosed).
+- `tests/driver-wrap` `cuda-link`: the golden expects two `eccp` calls on the `--cuda-driver=libcuda` path; the port makes one.
+- The CUDA-dependent suites (`sycl`, `driver-sycl-dispatch`, `nfcxx-cuda-device`) need a CUDA toolkit and were not run here.
+- `tests/pathb-qbe/cases/ivsr_stride.cpp` aborts under `-fsafe-pointers` on some sandboxes (it reproduced with `origin/main`'s driver
+  there, so it may be environmental).
+- The cosmo link path is ported but was not run (`cosmocc` is not installed where it was checked).
+
+The sections below are the history of the port, kept as written. Where they name the frozen body, that file is gone; read
+`scripts/nfcxx-body.rb` instead.
 
 ## Latest status
 

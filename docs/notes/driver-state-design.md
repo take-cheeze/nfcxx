@@ -136,7 +136,7 @@ Test: tests/nfcxx-cuda-device (stubs) and a new case group in tests/nfcxx-driver
 
 **Slice 4: cu_rewrite's option list.** The `--cflag`, `--ir-opt`, `--promote-slots` and cache options are built in Ruby
 from the record input; Ruby returns `cuda_opts` and `preinc`. Depends on slice 2. Test: tests/nfcxx-cuda-device
-(run.sh, key.sh) against the frozen bash in tests/nfcxx-cuda-device/nfcxx-bash.
+(run.sh, key.sh); the frozen bash copy tests/nfcxx-cuda-device/nfcxx-bash it compared against was removed with the bash driver.
 
 **Slice 5: the .cu loop.** `cu_prepare` becomes: bash `mktemp -d` and the trap, then one Ruby call that runs slices 3 and
 4 and the `--execute` plan for each input in process, and returns the state. Depends on slices 3 and 4.

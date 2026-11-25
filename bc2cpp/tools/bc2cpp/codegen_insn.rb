@@ -269,12 +269,13 @@ class CodeGen
       klass = self_class(owner_def)
       code = ivar_get_code(klass, 'self', ivar, "#{RegName[d]}", self_of_klass: true, irep_label: irep&.label)
       type = embed_type(klass, ivar) if klass
+      verify = code ? declared_ivar_read_verify(klass, ivar, RegName[d]) : ''
       if code.nil?
         "  #error GETIV @#{ivar}: self's class is unknown here and some class embeds @#{ivar}\n"
       elsif type
-        "  // @#{ivar} embedded (#{type}) -- direct struct field read, no mrb_iv_get\n  #{code}\n#{ivar_trace_marker(klass, ivar, d)}"
+        "  // @#{ivar} embedded (#{type}) -- direct struct field read, no mrb_iv_get\n  #{code}\n#{verify}#{ivar_trace_marker(klass, ivar, d)}"
       else
-        "  #{code}\n#{ivar_trace_marker(klass, ivar, d)}"
+        "  #{code}\n#{verify}#{ivar_trace_marker(klass, ivar, d)}"
       end
     when :SETIV
       ivar = insn.ivar

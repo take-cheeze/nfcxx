@@ -696,9 +696,12 @@ BC2CPP_MAIN = lambda do
                                                                comment_class_args: sig_comment_class_args)
                                 else {}
                                 end
-    # DECLARED_IVAR_GUARD: an `@x: T` declaration of Integer, Float, Symbol or a program class is checked on every store.
+    # DECLARED_IVAR_GUARD: an `@x: T` declaration of Integer, Float, Symbol, a program or a native class is checked on
+    # every store.
     CodeGen.declared_ivars = if DeclaredReturns.guard?
-                               RbsParamCheck.closed_union_ivars(RbsParamCheck.ivar_guards(sig_loaded, superclass_of), closed_world)
+                               RbsParamCheck.closed_union_ivars(
+                                 RbsParamCheck.ivar_guards(sig_loaded, superclass_of, closed_world: closed_world), closed_world
+                               )
                              else {}
                              end
     CodeGen.declared_ivar_elements = DeclaredReturns.guard? ? CodeGen.declared_element_table(sig_applied) : {}

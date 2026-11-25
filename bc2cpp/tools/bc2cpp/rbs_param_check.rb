@@ -110,10 +110,11 @@ module RbsParamCheck
   CORE_IVAR_KINDS = { array: 'Array', hash: 'Hash', string: 'String' }.freeze
 
   # { [owner, name without @] => IvarGuard } of the instance-variable declarations (`@x: T`, `attr_reader x: T`) of a
-  # program class whose type is Integer, Float, Symbol or an exact program class, or the same with `?`. A program class
-  # with a subclass is left out (the guard is the exact-class test, and a subclass instance is a legal value), like a
-  # nilable class parameter; `bool` stays unchecked by design, as for parameters and returns.
-  def ivar_guards(loaded, superclass_of)
+  # program class whose type is Integer, Float, Symbol, an exact program class or a native class (native_ivar_kind), or
+  # the same with `?`. A program class with a subclass is left out (the guard is the exact-class test, and a subclass
+  # instance is a legal value), like a nilable class parameter; `bool` stays unchecked by design, as for parameters and
+  # returns.
+  def ivar_guards(loaded, superclass_of, closed_world: nil)
     classes = superclass_of.keys.to_set
     subclassed = superclass_of.values.grep(String).to_set
     loaded.ivars.each_value.with_object({}) do |iv, out|
@@ -128,6 +129,12 @@ module RbsParamCheck
       core = t.kind == :class && t.cls == 'String' ? :string : CORE_IVAR_KINDS.key?(t.kind) && t.kind
       kind, cls = core, CORE_IVAR_KINDS.fetch(core) if !kind && core
       unless kind
+        native = native_ivar_kind(t, closed_world)
+        next if native == :refused
+
+        kind, cls = native if native
+      end
+      unless kind
         union = union_classes(iv.type, classes, superclass_of)
         if union && union.first.size > 1
           cls, nilable = union
@@ -141,6 +148,24 @@ module RbsParamCheck
       name = iv.name.delete_prefix('@')
       out[[iv.owner, name]] = IvarGuard.new(iv.owner, name, cls, kind, nilable, "#{iv.owner}##{iv.name}", iv.type.text)
     end
+  end
+
+  # DECLARED_NATIVE: a declaration naming a native class (ClosedWorld#native_class?: RGSS::Bitmap, also where the program
+  # reopens it) is [:class, cls] when ClosedWorld#native_family is the class alone, else [:union, family], which the
+  # guard tests class by class. :refused when the family is unbounded or BC2CPP_DECLARED_NATIVE=0; nil for a
+  # non-native type.
+  def native_ivar_kind(type, closed_world)
+    return nil unless type.kind == :class && closed_world&.native_class?(type.cls)
+    return :refused unless native_declarations?
+
+    family = closed_world.native_family(type.cls)
+    return :refused unless family && family.size <= DECLARED_UNION_MAX
+
+    family.size == 1 ? [:class, type.cls] : [:union, family.freeze]
+  end
+
+  def native_declarations?
+    ENV['BC2CPP_DECLARED_NATIVE'] != '0'
   end
 
   # The tables every query reads: method owners (`self_of` only for def bodies, never blocks, whose self an
@@ -302,7 +327,10 @@ module RbsParamCheck
   def union_closed?(classes, closed_world)
     return false unless closed_world
 
-    classes.all? { |k| (subs = closed_world.known_subclasses(k)) && subs.all? { |sub| classes.include?(sub) } }
+    classes.all? do |k|
+      subs = closed_world.known_subclasses(k) || (native_declarations? && closed_world.native_family(k))
+      subs && subs.all? { |sub| classes.include?(sub) }
+    end
   end
 
   def closed_union_params(guards, closed_world)

@@ -51,7 +51,8 @@ sweep_one() {
   "$nfcxx" --backend=pathb $std "$f" -o "$tmp/$n.base" 2>/dev/null || { echo "skip $f (Path B does not build it)"; return 0; }
   if ! "$nfcxx" -fsafe-pointers $std "$f" -o "$tmp/$n.safe" 2>"$tmp/$n.err"; then echo "FAIL $f: compile: $(grep -v warning "$tmp/$n.err" | head -2 | tr '\n' ' ')"; return 0; fi
   (cd "$tmp" && timeout 20 "./$n.base" >"$n.bout" 2>/dev/null); local a=$?
-  (cd "$tmp" && timeout 120 "./$n.safe" >"$n.sout" 2>"$n.serr"); local b=$?
+  # pure_call_hoist.cpp's safe build runs about 115 s on a developer machine, so 120 s failed under CI load
+  (cd "$tmp" && timeout 300 "./$n.safe" >"$n.sout" 2>"$n.serr"); local b=$?
   if [ $a != $b ] || ! cmp -s "$tmp/$n.bout" "$tmp/$n.sout"; then echo "FAIL $f: exit $a without the flag, $b with it: $(head -c 200 "$tmp/$n.serr")"; else echo "ok   $f"; fi
   rm -f "$tmp/$n".*
 }

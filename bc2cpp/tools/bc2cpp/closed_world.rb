@@ -524,6 +524,31 @@ class ClosedWorld
     set.to_a.sort
   end
 
+  # DECLARED_NATIVE: a class a native defines, whose constant names that one class all run
+  # (native_class_constant_stable?), and which no program `class` statement defines on its own (a reopening is opaque).
+  def native_class?(klass)
+    klass.is_a?(String) && native_class_constant_stable?(klass) && (!@declared_classes.include?(klass) || opaque?(klass))
+  end
+
+  # DECLARED_NATIVE: a native_class? and every class below it, when the closed world sees each one: no native makes a
+  # subclass (native_unsubclassed?), no Class.new or outside Ruby names it as a superclass, and each program class that
+  # does (matched by last segment, so possibly more than needed) is bounded by known_subclasses. nil otherwise.
+  def native_family(klass)
+    return nil if @global_refusal || !@wild.empty? || !native_class?(klass) || !native_unsubclassed?(klass)
+
+    name = simple(klass)
+    return nil if @dynamic_subclassed.include?(name) || @outside_ruby_supers.include?(name)
+
+    @class_decls.each_with_object(Set[klass]) do |(k, decls), set|
+      next unless decls.any? { |d| d[:super].is_a?(String) && simple(d[:super]) == name }
+
+      subs = known_subclasses(k)
+      return nil unless subs
+
+      set.merge(subs)
+    end.to_a.sort
+  end
+
   # CORE_REDEFINED: may the program define +name+ on +owner+ itself? True when a program source outside the core
   # mrblib (a Ruby definition, a native or unknown definer, a refusal) may, so a core contract for it is not trusted.
   def program_may_define?(owner, name)
