@@ -10,7 +10,11 @@ BC2CPP_SOURCES_ENTRY = 'tools/bc2cpp/bc2cpp.rb'
 # Scripts the tools load by name rather than by require_relative: baked in with the entry, so that require finds them.
 BC2CPP_SOURCES_EXTRA = %w[scripts/rpg2k/closed_world_lint.rb
                          3rd/mruby/lib/mruby/presym.rb tools/rgss_tts_config.rb].freeze
-BC2CPP_SOURCES_EXTRA_PATHS = BC2CPP_SOURCES_EXTRA.map { |f| File.join(BC2CPP_WORLD_ROOT, f) }.freeze
+# Loaded only when the world has it (compiled_gems.rb, DEBUG_TOOLS).
+BC2CPP_SOURCES_OPTIONAL = %w[tools/rpg2k_debug_tools_config.rb].freeze
+BC2CPP_SOURCES_EXTRA_PATHS = (BC2CPP_SOURCES_EXTRA.map { |f| File.join(BC2CPP_WORLD_ROOT, f) } +
+                              BC2CPP_SOURCES_OPTIONAL.map { |f| File.join(BC2CPP_WORLD_ROOT, f) }
+                                                     .select { |f| File.file?(f) }).freeze
 
 MRuby::Gem::Specification.new('mruby-bc2cpp-sources') do |spec|
   spec.license = 'MIT'

@@ -160,6 +160,19 @@ end
 
 require 'prism'
 require File.join(BC2CPP_WORLD_ROOT, 'tools/rgss_tts_config')
+# DEBUG_TOOLS: the world's tools/rpg2k_debug_tools_config.rb, when it has one, names the builds that leave the RPG2k
+# developer tools out of their closed world, and the stand-in they compile instead (closed_world_mrblib_srcs).
+rpg2k_debug_tools_config = File.join(BC2CPP_WORLD_ROOT, 'tools/rpg2k_debug_tools_config.rb')
+require rpg2k_debug_tools_config if File.file?(rpg2k_debug_tools_config)
+
+def bc2cpp_debug_tools_kept?(build_name)
+  !defined?(Rpg2kDebugToolsConfig) || Rpg2kDebugToolsConfig.kept?(build_name)
+end
+
+def bc2cpp_absent_classes(build_name)
+  bc2cpp_debug_tools_kept?(build_name) ? [] : Rpg2kDebugToolsConfig::QUALIFIED_CLASSES
+end
+
 require_relative 'gem_owners'
 require_relative 'compiled_gems_config'
 require_relative 'compiled_gem_sources'
@@ -229,7 +242,8 @@ end
 # gem list is complete.
 def bc2cpp_closed_world_srcs(spec, gems_root)
   core_gems = spec.build.gems.map(&:name)
-  closed_world_mrblib_srcs(gems_root, core_gems: core_gems, tts: RgssTtsConfig.backend_possible?(spec.build.name))
+  closed_world_mrblib_srcs(gems_root, core_gems: core_gems, tts: RgssTtsConfig.backend_possible?(spec.build.name),
+                                      debug_tools: bc2cpp_debug_tools_kept?(spec.build.name))
 end
 
 # mruby-rgss's native sources as the build compiles them: tts.cxx only where a
@@ -249,7 +263,8 @@ end
 def bc2cpp_closed_world_prerequisites(gems_root)
   core = BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_GEMS
   (closed_world_mrblib_srcs(gems_root, core_gems: core, tts: true) +
-    closed_world_mrblib_srcs(gems_root, core_gems: core, tts: false) + bc2cpp_main_prerequisites).uniq
+    closed_world_mrblib_srcs(gems_root, core_gems: core, tts: false) +
+    closed_world_mrblib_srcs(gems_root, core_gems: core, tts: false, debug_tools: false) + bc2cpp_main_prerequisites).uniq
 end
 
 def bc2cpp_main_prerequisites
@@ -280,7 +295,10 @@ end
 # then mruby-rpg2k/mrblib_limited/map_tts_off.rb, which mruby-rpg2k/mrbgem.rake
 # also swaps in for that build, and no Ruby names RGSS::Tts. A desktop world
 # keeps scene/map_tts.rb.
-def closed_world_mrblib_srcs(gems_root, core_gems: :canonical, tts: false)
+#
+# `debug_tools`: false for a build that leaves the RPG2k developer tools out (DEBUG_TOOLS): their files are not
+# compiled, the stand-in is, and Rpg2kDebugToolsConfig.verify_world! stops the build if anything left names them.
+def closed_world_mrblib_srcs(gems_root, core_gems: :canonical, tts: false, debug_tools: true)
   # Sorted: Dir[] returns filesystem order (ext4 vs APFS disagree), and
   # bc2cpp's capped fixed-point sweeps converge order-dependently, so ARGV order
   # changes devirtualization. A canonical order makes every consumer agree; the
@@ -297,9 +315,16 @@ def closed_world_mrblib_srcs(gems_root, core_gems: :canonical, tts: false)
     # After every mrblib/ file, as mrbgem.rake appends it (the sort below keeps it there).
     rpg2k << "#{gems_root}/#{RgssTtsConfig::RPG2K_TTS_OFF_RB}"
   end
-  (core_compiled_mrblib_srcs(gems_root, core_gems) +
+  drop_debug_tools = !debug_tools && defined?(Rpg2kDebugToolsConfig)
+  if drop_debug_tools
+    rpg2k.reject! { |path| Rpg2kDebugToolsConfig::DROPPED_RBS.any? { |rel| path.end_with?("/#{rel}") } }
+    rpg2k << "#{gems_root}/#{Rpg2kDebugToolsConfig::OFF_RB}"
+  end
+  srcs = (core_compiled_mrblib_srcs(gems_root, core_gems) +
     (rpg2k + lcf_mrblib_srcs(gems_root) +
       Dir["#{gems_root}/mruby-rgss/mrblib/*.rb"]).sort).map { |path| File.expand_path(path) }
+  Rpg2kDebugToolsConfig.verify_world!(srcs) if drop_debug_tools
+  srcs
 end
 
 # mruby-lcf's mrblib for the compiled gem. BC2CPP_SKIP_LCF_SCHEMA_RB=1 leaves out schema.rb, whose LCF::Schema the wio
@@ -817,7 +842,9 @@ def bc2cpp_compiled_gem_job(spec, gems_root)
     # does not compile.
     'BC2CPP_VM_FREE' => spec.build.cc.defines.flatten.include?('MRB_VM_FREE') ? '1' : '0',
     # IMPLICIT_STATE (implicit_state.rb): a build whose C++ defines BC2CPP_IMPLICIT_STATE has one mrb_state.
-    'BC2CPP_IMPLICIT_STATE' => bc2cpp_implicit_state(spec) ? '1' : '0'
+    'BC2CPP_IMPLICIT_STATE' => bc2cpp_implicit_state(spec) ? '1' : '0',
+    # ABSENT_CLASSES (rbs_signatures.rb): the classes this build's world leaves out (DEBUG_TOOLS).
+    'BC2CPP_ABSENT_CLASSES' => bc2cpp_absent_classes(spec.build.name).join(' ')
   }.merge(bc2cpp_closed_world_env(spec, gems_root))
   mrbc = bc2cpp_optional_mrbc(spec)
   env['MRBC'] = mrbc if mrbc

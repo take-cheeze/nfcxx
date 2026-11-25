@@ -82,6 +82,14 @@ module RbsSignatures
     !name.nil? && CoreFactSigs::TABLES.include?(NativeSigs.table(name))
   end
 
+  # ABSENT_CLASSES: classes the build leaves out of its world (BC2CPP_ABSENT_CLASSES, from compiled_gems.rb). Their
+  # declarations describe no code of this program, so they are not loaded.
+  def absent_classes
+    @absent_classes ||= {}
+    value = ENV.fetch('BC2CPP_ABSENT_CLASSES', '')
+    @absent_classes[value] ||= value.split.to_set.freeze
+  end
+
   # The engine's own namespaces. Their declarations describe the RPG2000/2003 game, so a build without mruby-rpg2k
   # (its gem list from BC2CPP_BUILD_GEMS) does not load them: they are unrelated to that program.
   GAME_NAMESPACES = %w[Game RPG2k RPG2k3 LCF].freeze
@@ -156,6 +164,8 @@ module RbsSignatures
     case decl
     when RBS::AST::Declarations::Class, RBS::AST::Declarations::Module
       name = (scope + [decl.name.to_s.delete_prefix('::')]).join('::')
+      return if absent_classes.include?(name)
+
       chain = enclosing + [decl]
       if decl.is_a?(RBS::AST::Declarations::Class) && decl.super_class && out.supers && !fact_table?(decl, enclosing)
         out.supers << SuperDecl.new(name: name, super_name: decl.super_class.name.to_s, scope: name.split('::')[0...-1],
