@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # SDEF_CONST_OWNER: `def Const.name` inside a body is registered on the constant the lexical lookup finds, not always
 # on "<namespace>::Const". `class Enumerator; def Enumerator.produce` owns "Enumerator.singleton"; the nested spelling
@@ -8,7 +9,7 @@
 #
 # Usage: MRBC=path/to/mrbc ruby scripts/bc2cpp/singleton_const_owner_check.rb
 
-unless ENV['MRBC']
+unless MrbcRbDefault.from_env
   puts '  SKIP: set MRBC (a host mrbc built from the patched 3rd/mruby)'
   exit 0
 end

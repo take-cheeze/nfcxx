@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 require_relative 'type_check_fixture'
 require_relative '../../tools/bc2cpp/ir_native_expression_types'
@@ -169,7 +170,7 @@ check.call('later fixed bindings preserve earlier masks', binding.masks == [*arg
   check.call("fixed bindings reject keywords (root=#{root})", binding_engine.bind(nil, arguments, { 'x' => NumericFlow::INT }, root: root).nil?)
 end
 
-unless ENV['MRBC']
+unless MrbcRbDefault.from_env
   puts 'SKIP mrbc context fixtures (set MRBC)'
   exit
 end

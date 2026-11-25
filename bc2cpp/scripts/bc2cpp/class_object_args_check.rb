@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # Check CLASS_OBJECT_ARGS: the receiver of a `klass.new(...)` that is a parameter of a method (read
 # directly, or by a block through GETUPVAR) names the classes its callers pass, so one generic helper
@@ -261,7 +262,7 @@ RUBY
 OWNERS = %w[CoaRec CoaOne CoaTwo CoaVictim CoaHost CoaCaller].freeze
 runtime = Bc2cppFixtureRuntime
 
-if ENV['MRBC'] && runtime.compiler?
+if MrbcRbDefault.from_env && runtime.compiler?
   puts '== generated code'
   gen = lambda do |source, env = {}|
     Dir.mktmpdir('coa') do |dir|

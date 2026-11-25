@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # CORE_MIXINS: mruby's own Enumerable/Comparable as known
 # mixins, and the definer scan (CoreMixins.definers_in) the source checks use.
@@ -83,7 +84,7 @@ check.call('a singleton def is a different owner',
            CoreMixins.definers_in('x.rb', sample, 'positive?').map(&:owner).sort == ['Numeric', 'Numeric.singleton'])
 check.call('a longer name is not a definer of the shorter one', CoreMixins.definers_in('x.rb', sample, 'posi').empty?)
 
-if ENV['MRBC']
+if MrbcRbDefault.from_env
   require_relative '../../tools/bc2cpp/bc2cpp'
   require_relative 'fixture_runtime'
   runtime = Bc2cppFixtureRuntime

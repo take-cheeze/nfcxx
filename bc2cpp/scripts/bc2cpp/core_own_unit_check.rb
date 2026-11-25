@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # CORE_OWN_UNIT: with MRB_CORE_CLASS_UNITS the core's class bodies run only as units. (1) Another gem's reopening of a
 # core class (mruby-rgss's `class Array; def sort`) has no compiled method in the core run and refuses there; it must
@@ -43,7 +44,7 @@ units = lambda do |own_file|
       File.write(path, source)
       path
     end
-    ireps, root = compile_ireps(files, 'core_own_unit', directory, mrbc: ENV.fetch('MRBC'))
+    ireps, root = compile_ireps(files, 'core_own_unit', directory, mrbc: MrbcRbDefault.from_env)
     registry = build_registry(ireps, root)[0]
     gen = CodeGen.new(ireps, registry, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
     # The core run compiles the core def; the gem's def is compiled in the gem's own run.

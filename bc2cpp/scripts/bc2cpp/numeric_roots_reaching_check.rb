@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # NUMERIC_ROOTS: CodeGen#numeric_root_leaves takes the leaves of a register from the reaching
 # definitions (BytecodeIR.reaching_definitions), not from the textually nearest writer plus every later loop
@@ -97,7 +98,7 @@ check.call('a join of different writers has no label source',
 check.call('a parameter read is an entry label source',
            gen.numeric_label_source(irep_of([insn(0, :MOVE, "R5\tR2"), insn(1, :RETURN, 'R5')]), 0, 2) == :entry)
 
-if ENV['MRBC'] && !ENV['MRBC'].empty?
+if MrbcRbDefault.from_env && !MrbcRbDefault.from_env.empty?
   puts '-- compiled Ruby (MRBC)'
   SRC = <<~'RUBY'
     class NumRootsJoin
@@ -168,7 +169,7 @@ else
 end
 
 if failures.empty?
-  puts "numeric_roots_reaching_check: all checks passed#{ENV['MRBC'].to_s.empty? ? ' (compiled section skipped)' : ''}"
+  puts "numeric_roots_reaching_check: all checks passed#{MrbcRbDefault.from_env.to_s.empty? ? ' (compiled section skipped)' : ''}"
 else
   puts "numeric_roots_reaching_check: #{failures.size} failure(s)"
   exit 1

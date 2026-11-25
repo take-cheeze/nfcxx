@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # Checks the report-only "immediate ivars" fact (tools/bc2cpp/escape_immediate_ivars.rb, docs/bc2cpp-immediate-ivars.md)
 # on small fixtures compiled by bc2cpp:
@@ -16,7 +17,7 @@ require 'tmpdir'
 require_relative 'fixture_runtime'
 
 ENV['BC2CPP_SIG_DIRS'] ||= ''
-unless ENV['MRBC'] && system(ENV['MRBC'], '--version', out: File::NULL, err: File::NULL)
+unless MrbcRbDefault.from_env && system(MrbcRbDefault.from_env, '--version', out: File::NULL, err: File::NULL)
   puts '  SKIP: no host mrbc (set MRBC)'
   exit 0
 end

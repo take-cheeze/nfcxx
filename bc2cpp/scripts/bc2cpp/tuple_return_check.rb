@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # TUPLE_RETURN_FACTS: `a, b = pair(x)` reads the elements of the Array a call returned.
 # When every definition of `pair` ends in a literal `[e0, e1, ...]` of one length, that Array is fresh and
@@ -108,7 +109,7 @@ check.call('a path that returns nil is not',
            shape_of.call([insn(0, :JMPNOT, "R1\t9"), insn(4, :ARRAY, "R3\t2"), insn(7, :RETURN, 'R3'),
                           insn(9, :RETNIL, '')]).nil?)
 
-if ENV['MRBC']
+if MrbcRbDefault.from_env
   runtime = Bc2cppFixtureRuntime
 
   FIXTURE = <<~RUBY
@@ -446,13 +447,13 @@ if ENV['MRBC']
     # BC2CPP_MRUBY_FULL, or a full-core mruby built into BC2CPP_FULL_BUILD_DIR (the core-mrbtest shard shares it).
     full = runtime.full || (ENV['BC2CPP_FULL_BUILD_DIR'] ? runtime.full_or_build : nil)
     core = runtime.core
-    builds << ['mrb_int 64, full-core', full, ENV['MRBC'], '', true] if full
-    builds << ['mrb_int 64, core only', core, ENV['MRBC'], '', false] if core
+    builds << ['mrb_int 64, full-core', full, MrbcRbDefault.from_env, '', true] if full
+    builds << ['mrb_int 64, core only', core, MrbcRbDefault.from_env, '', false] if core
     if ENV['BC2CPP_MRUBY_FULL32'] && ENV['BC2CPP_MRBC32']
       builds << ['mrb_int 32 (MRB_INT32, 31-bit Fixnums)', ENV['BC2CPP_MRUBY_FULL32'], ENV['BC2CPP_MRBC32'],
                  '-DMRB_32BIT -DMRB_INT32 -no-pie', true]
     end
-    builds << ['no mruby-bigint (32-bit mrb_int, no heap Integers)', ENV['BC2CPP_MRUBY_NOBIGINT'], ENV['MRBC'], '', true] if ENV['BC2CPP_MRUBY_NOBIGINT']
+    builds << ['no mruby-bigint (32-bit mrb_int, no heap Integers)', ENV['BC2CPP_MRUBY_NOBIGINT'], MrbcRbDefault.from_env, '', true] if ENV['BC2CPP_MRUBY_NOBIGINT']
     if builds.empty? || !runtime.compiler?
       puts '  SKIP run: set BC2CPP_MRUBY_FULL / BC2CPP_MRUBY_CORE (libmruby*.a and include/, from the patched 3rd/mruby) and have g++'
     end
@@ -486,7 +487,7 @@ if ENV['MRBC']
           end
         end
       ensure
-        ENV['MRBC'], ENV['BC2CPP_CXXFLAGS'] = saved
+        MrbcRbDefault.from_env, ENV['BC2CPP_CXXFLAGS'] = saved
       end
     end
   end

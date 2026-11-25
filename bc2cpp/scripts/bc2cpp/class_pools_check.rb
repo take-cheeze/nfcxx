@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # Check CLASS_POOLS and NILABLE_RECEIVER: the exact-class flow reads
 # an ivar and an argument across methods through whole-program pools, and a receiver that is nil or
@@ -160,7 +161,7 @@ end
 
 # -- 1. generated code -----------------------------------------------------------------
 
-if ENV['MRBC']
+if MrbcRbDefault.from_env
   puts '== generated code'
   Dir.mktmpdir do |dir|
     code, err = generate.call(CLASSES + HOST, dir)
@@ -269,7 +270,7 @@ end
 
 build = runtime.full || runtime.core || runtime.full_or_build
 has_meta = !runtime.full.nil? && build == runtime.full
-if ENV['MRBC'] && build && runtime.compiler? && !ENV['PL_GENERATED_ONLY']
+if MrbcRbDefault.from_env && build && runtime.compiler? && !ENV['PL_GENERATED_ONLY']
   puts '== fixture on real mruby, interpreted and compiled'
   body = <<~'CPP'
     static void pl_call(mrb_state* M, const char* label, mrb_value obj, const char* meth, int argc = 0,

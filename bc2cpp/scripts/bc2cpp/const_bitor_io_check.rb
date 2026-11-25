@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # Constant typing for bit operators, an out-of-margin Integer and a bool from `==` (docs/bc2cpp-type-check.md).
 # Each fixture is compiled by the host mrbc. The exact-value proof (IntegerConstants) and the bignum-capable class proof
@@ -15,7 +16,7 @@ require 'set'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/bc2cpp'
 
-unless ENV['MRBC'] && File.executable?(ENV['MRBC'])
+unless MrbcRbDefault.from_env && File.executable?(MrbcRbDefault.from_env)
   puts 'SKIP const_bitor_io_check: MRBC is not set to a host mrbc'
   exit 0
 end
@@ -38,7 +39,7 @@ typed_rows = lambda do |source|
     rb = File.join(dir, 'fixture.rb')
     out = File.join(dir, 'facts.json')
     File.write(rb, source)
-    _stdout, stderr, status = Open3.capture3({ 'MRBC' => ENV['MRBC'] }, RbConfig.ruby, TYPE_CHECK,
+    _stdout, stderr, status = Open3.capture3({ 'MRBC' => MrbcRbDefault.from_env }, RbConfig.ruby, TYPE_CHECK,
                                              '--files', rb, '--no-sends', '--format', 'json', '--out', out, '-q')
     unless File.exist?(out)
       warn stderr

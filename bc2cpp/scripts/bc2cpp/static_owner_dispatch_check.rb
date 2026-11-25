@@ -35,7 +35,6 @@ check = lambda do |what, condition|
   puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
   failures << what unless condition
 end
-abort 'SKIP: set MRBC' unless ENV['MRBC']
 
 SOURCE = <<~RUBY
   class Bag

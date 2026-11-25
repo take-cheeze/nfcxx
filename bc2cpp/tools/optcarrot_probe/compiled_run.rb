@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../mrbc_rb/mrbc_default.rb'
 
 # Build an isolated mruby binary with bc2cpp's optcarrot methods installed,
 # then run the normal headless checksum benchmark. See README.md for limits.
@@ -18,7 +19,7 @@ require 'shellwords'
 require 'tmpdir'
 ROOT = BC2CPP_WORLD_ROOT
 MRUBY = File.join(ROOT, '3rd/mruby')
-PROBE_MRBC = ENV['MRBC'] || File.join(MRUBY, 'bin/mrbc')
+PROBE_MRBC = MrbcRbDefault.from_env
 # --shard-cold-opt=LEVEL and --shard-hot-owners=FILE (shard_output.rb): the shard tier, given to the compiled code's bc2cpp run.
 SHARD_TIER_ARGS = ARGV.select { |arg| arg.start_with?('--shard-') }
 ARGV.reject! { |arg| arg.start_with?('--shard-') }

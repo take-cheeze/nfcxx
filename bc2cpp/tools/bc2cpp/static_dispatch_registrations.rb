@@ -2255,7 +2255,7 @@ if $PROGRAM_NAME == __FILE__
     # Exit 0 when DIR holds the lists for this tree: the cheap test that lets a caller skip building a host mrbc.
     exit(StaticDispatchRegistrations.current?(repo_root, check_dir) ? 0 : 1)
   elsif emit_dir
-    lists = StaticDispatchRegistrations.emit(repo_root, ENV['MRBC'] || MrbcRbDefault.command, emit_dir)
+    lists = StaticDispatchRegistrations.emit(repo_root, MrbcRbDefault.from_env, emit_dir)
     warn "open #{lists.open.size}, closed #{lists.closed.size}, core ROM #{lists.core_excluded.size}, " \
          "core run-time #{lists.core_left_out.size}, engine ROM #{lists.engine_rom.size}"
   else

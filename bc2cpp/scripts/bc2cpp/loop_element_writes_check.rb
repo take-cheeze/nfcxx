@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # CodeGen#loop_flow_position (codegen_send.rb) refuses a receiver an inlined loop body reassigns from its element R1.
 # A nested block writes the body's locals only by SETUPVAR, which is not one of the body's own instructions, so the
@@ -89,7 +90,7 @@ hand_tree.each_value { |irep| irep.tree = hand_tree }
 bodies = { plain: [hand[:plain], 2], nested: [hand[:nested], 4], direct: [hand[:direct], 3], rescued: [hand[:rescued], 2] }
 expect_decisions(check, 'hand-built', CodeGen.allocate, bodies)
 
-if ENV['MRBC']
+if MrbcRbDefault.from_env
   puts '-- loop_flow_position on compiled bodies'
   source = <<~RUBY
     def plain(list)
@@ -140,7 +141,7 @@ if ENV['MRBC']
   end
 end
 
-if ENV['MRBC']
+if MrbcRbDefault.from_env
   # A Hash parameter written after an inlined block call: the back-edge write reaches the call, so the call's
   # captured container is no longer the host parameter (inline_hash_capture_hints).
   Dir.mktmpdir('hash-capture') do |directory|

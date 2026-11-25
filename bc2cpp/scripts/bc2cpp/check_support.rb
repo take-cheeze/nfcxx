@@ -16,7 +16,7 @@ class FixtureCheck
   end
 
   def require_mrbc!
-    configured = ENV['MRBC']
+    configured = MrbcRbDefault.from_env
     @mrbc = if configured
               configured
             else

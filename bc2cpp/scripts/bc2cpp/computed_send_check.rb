@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # COMPUTED_SEND_EXPANSION: a `__send__(name, ...)` whose name register provably holds one of a finite
 # set of Symbols becomes a chain of direct calls (codegen_computed_send.rb, computed_send_names.rb).
@@ -99,7 +100,7 @@ FIXTURE = <<~RUBY
   end
 RUBY
 
-MRBC_BIN = ENV['MRBC']
+MRBC_BIN = MrbcRbDefault.from_env
 puts '  SKIP generated fixture: set MRBC' if MRBC_BIN.nil?
 Dir.mktmpdir do |dir|
   src = File.join(dir, 'cs.rb')

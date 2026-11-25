@@ -46,7 +46,7 @@ require_relative '../../tools/bc2cpp/nomethod_reviewed_probe'
 require_relative '../../tools/bc2cpp/closed_world_env'
 
 BC2CPP = File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/bc2cpp.rb')
-MRBC = ENV['MRBC'] || MrbcRbDefault.command
+MRBC = MrbcRbDefault.from_env
 # Optional output path for callers that need to capture the report.
 REPORT_PATH = ENV['BC2CPP_COVERAGE_REPORT_PATH']
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # SYMBOL_CLASS: a frozen literal table whose elements are Symbols carries the 'Symbol' class bit
 # (the bit LOADSYM literals carry in the exact-class run) in its slot classes, so `TABLE[i]` is SYM where the index
@@ -68,7 +69,7 @@ check.call('the Symbol bit does not collide with a class bit below it or an obje
 
 # ---------------------------------------------------------------------------
 puts '-- generated code (host mrbc)'
-if ENV['MRBC']
+if MrbcRbDefault.from_env
   FIXTURE = <<~RUBY
     module SyTables
       NAMES = [:a, :b, :c].freeze

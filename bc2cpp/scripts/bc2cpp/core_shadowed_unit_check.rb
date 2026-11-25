@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # CORE_SHADOWED_UNIT: with MRB_CORE_CLASS_UNITS the closed build runs a core class body only as its class unit. A core
 # def a later definition replaces (mruby-enum-ext's Enumerable#all?) registers nothing in the unit, but must not refuse
@@ -52,7 +53,7 @@ units = lambda do |core_source|
       File.write(path, source)
       path
     end
-    ireps, root = compile_ireps(files, 'core_shadowed_unit', directory, mrbc: ENV.fetch('MRBC'))
+    ireps, root = compile_ireps(files, 'core_shadowed_unit', directory, mrbc: MrbcRbDefault.from_env)
     registry = build_registry(ireps, root)[0]
     shadowed_before = CodeGen.shadowed_labels
     CodeGen.shadowed_labels = CoreDefs.shadowed_labels(registry, ireps)

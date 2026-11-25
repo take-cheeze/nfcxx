@@ -67,7 +67,7 @@ DEFAULT_HARNESSES = [
 # reproduces the project-wide list. Parses `== annotation candidates ==`.
 # ---------------------------------------------------------------------------
 def live_candidates
-  mrbc = ENV['MRBC'] || MrbcRbDefault.command
+  mrbc = MrbcRbDefault.from_env
   closed_world = Dir[File.join(ROOT, 'mruby-rpg2k/mrblib/**/*.rb')] +
                  Dir[File.join(ROOT, 'mruby-lcf/mrblib/*.rb')] +
                  Dir[File.join(ROOT, 'mruby-rgss/mrblib/*.rb')]

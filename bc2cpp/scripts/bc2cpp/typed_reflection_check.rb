@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # Typed embedded ivars and reflection. A typed slot (mrb_int,
 # mrb_sym, mrb_bool, Integer-or-nil) is a raw C field of the RData payload.
@@ -51,7 +52,7 @@ check.call('the patch lays out the int-or-nil slot as the generator does',
              patch.include?('  mrb_int value;'))
 check.call('the pinned mruby tells the GC to skip typed slots', patch.include?('!= MRB_DATA_IVAR_VALUE) continue;'))
 
-if ENV['MRBC']
+if MrbcRbDefault.from_env
   require_relative 'fixture_runtime'
   runtime = Bc2cppFixtureRuntime
 

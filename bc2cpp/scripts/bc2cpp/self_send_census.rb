@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # Self-send census (docs/bc2cpp-self-send.md): every send whose receiver is `self` in the closed world's compiled
 # engine Ruby (mruby-rpg2k, mruby-lcf, mruby-rgss mrblib), and what the generated C++ does with it.
@@ -121,7 +122,7 @@ if $PROGRAM_NAME == __FILE__
     args.slice!(index, 2)
   end
   abort "usage: #{$PROGRAM_NAME} [--all] [--tsv FILE]" unless args.empty?
-  mrbc = ENV.fetch('MRBC') { abort 'set MRBC to a host mrbc (for example build-closed-bc2cpp/host/mrbc/bin/mrbc)' }
+  mrbc = MrbcRbDefault.from_env { abort 'set MRBC to a host mrbc (for example build-closed-bc2cpp/host/mrbc/bin/mrbc)' }
 
   srcs = closed_world_mrblib_srcs(ROOT)
   native_srcs = bc2cpp_rgss_native_srcs(ROOT, 'closed') + core_native_srcs("#{ROOT}/3rd/mruby") +

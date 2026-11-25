@@ -82,7 +82,7 @@ end
 LOAD_ONLY = %i[CLASS MODULE SCLASS EXEC TDEF SDEF DEF METHOD ALIAS UNDEF TCLASS OCLASS].freeze
 
 def bytecode_report(roots)
-  mrbc = ENV['MRBC'] || MrbcRbDefault.command
+  mrbc = MrbcRbDefault.from_env
   handled = handled_ops
   kinds = Hash.new { |h, k| h[k] = { ireps: 0, insns: 0, iseq: 0 } }
   load_ops = Hash.new(0)
@@ -171,7 +171,7 @@ rescue StandardError
 end
 
 def tag_report(roots, scans, omit)
-  mrbc = ENV['MRBC'] || MrbcRbDefault.command
+  mrbc = MrbcRbDefault.from_env
   handled = handled_ops
   world = ClassWorld.build(scans.values)
   consts = Hash.new(0)

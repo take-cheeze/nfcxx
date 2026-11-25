@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # A bare `module_function` makes every later def in the body a module function (this mruby's MODFUNC scope bit,
 # src/class.c): a private instance method plus a public singleton copy. The registry (tools/bc2cpp/registry.rb) must
@@ -31,7 +32,7 @@ FIXTURE = <<~RUBY
   end
 RUBY
 
-mrbc = ENV['MRBC']
+mrbc = MrbcRbDefault.from_env
 unless mrbc && File.executable?(mrbc)
   puts '  SKIP: no host mrbc (set MRBC)'
   exit 0

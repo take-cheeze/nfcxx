@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # The return candidate of a method whose `return` sits in a block. That `return` leaves the method through a
 # RETURN_BLK in the block's own body, not in the method's exit list, so a method whose own exits are only RETNIL must
@@ -20,7 +21,7 @@ check = lambda do |label, condition|
   failures << label unless condition
 end
 
-unless ENV['MRBC'] || ENV.fetch('PATH', '').split(File::PATH_SEPARATOR).any? { |dir| File.executable?(File.join(dir, 'mrbc')) }
+unless MrbcRbDefault.from_env || ENV.fetch('PATH', '').split(File::PATH_SEPARATOR).any? { |dir| File.executable?(File.join(dir, 'mrbc')) }
   puts 'SKIP nonlocal_return_candidate: set MRBC to a host mrbc'
   exit 0
 end

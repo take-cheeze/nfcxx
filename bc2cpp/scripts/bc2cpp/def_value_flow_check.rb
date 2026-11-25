@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 require_relative 'check_support'
 require_relative '../../tools/bc2cpp/irep'
@@ -54,7 +55,7 @@ suite.check('handler preserves the method value when every incoming path agrees'
             !unknown?(rescued, handlers: [handler]))
 rescued[2] = [:LOADNIL, 'R2 (nil)']
 suite.check('handler observes every possible prior writer', unknown?(rescued, handlers: [handler]))
-compiler_available = ENV['MRBC'] || ENV.fetch('PATH', '').split(File::PATH_SEPARATOR).any? do |directory|
+compiler_available = MrbcRbDefault.from_env || ENV.fetch('PATH', '').split(File::PATH_SEPARATOR).any? do |directory|
   File.executable?(File.join(directory, 'mrbc'))
 end
 if compiler_available

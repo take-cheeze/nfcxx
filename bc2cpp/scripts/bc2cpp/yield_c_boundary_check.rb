@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # YIELD_C_BOUNDARY: the yield analysis (tools/bc2cpp/yield_reach.rb) does not count a native's callback into Ruby as
 # a path a Fiber.yield suspends through, because mruby raises FiberError across that C-boundary frame; and a computed
@@ -70,7 +71,7 @@ if ARGV.first == '--probe'
     src = File.join(dir, 'fixture.rb')
     out = File.join(dir, 'fixture.mrb')
     File.write(src, FIXTURE)
-    system(ENV.fetch('MRBC'), '-g', '-o', out, src, exception: true)
+    system(MrbcRbDefault.from_env, '-g', '-o', out, src, exception: true)
     image = Struct.new(:bytes).new(File.binread(out))
     ireps = load_ireps(image, cache: nil).first
     # `native_m` is defined by native code, which may call back into `cb_target` or `cb_only`.
@@ -87,7 +88,7 @@ if ARGV.first == '--probe'
   exit 0
 end
 
-mrbc = ENV['MRBC']
+mrbc = MrbcRbDefault.from_env
 unless mrbc && File.executable?(mrbc)
   puts '  SKIP: no host mrbc (set MRBC)'
   exit 0

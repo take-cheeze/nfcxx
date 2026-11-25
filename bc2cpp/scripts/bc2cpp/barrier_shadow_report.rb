@@ -63,7 +63,7 @@ srcs = closed_world_mrblib_srcs(ROOT)
 native_srcs = Dir["#{ROOT}/mruby-rgss/src/*.cxx"] + core_native_srcs("#{ROOT}/3rd/mruby") +
               external_gem_native_srcs(ROOT)
 env = {
-  'MRBC' => ENV['MRBC'] || MrbcRbDefault.command,
+  'MRBC' => MrbcRbDefault.from_env,
   'OUT_SYMBOL' => 'barrier_shadow',
   'ONLY_OWNERS' => BC2CPP_COMPILED_GEMS.values.flat_map { |g| g[:owners] }.join(','),
   'NATIVE_SRCS' => Shellwords.join(native_srcs),

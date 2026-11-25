@@ -12,13 +12,18 @@ end of this note. This note says where the build uses `mrbc`, what nfcxx now off
 | `bc2cpp/tools/bc2cpp/compiled_gems.rb` `bc2cpp_compiled_gem_job`: `'MRBC' => spec.build.mrbcfile` | (b) | now passed only with `BC2CPP_USE_BUILD_MRBC=1`; an `MRBC` in the caller's environment reaches bc2cpp.rb as is |
 | `cmake/build-mruby.cmake` `rake host_mrbc` (target `mruby_host_mrbc`), `build_config.rb` `task host_mrbc` | (b) | builds the bootstrap mrbc for the CI check jobs (`MRBC=` of the fixture checks and `BC2CPP_MRBC_RB=verify`); not part of the product build |
 | `.github/workflows/build.yml` (`MRBC=` from `build-closed-*/host/**/bin/mrbc`, `MRBC:` in the sweep step) | (b) | the oracle for the fixture checks and the verify mode; keep |
-| `bc2cpp/scripts/bc2cpp/*_check.rb`, `tests/bc2cpp` | (b) | test fixtures: `SKIP: set MRBC` without it, they compile through `compile_ireps` so they also work with the emitter, but their gates say "needs MRBC"; left as they are |
+| `bc2cpp/scripts/bc2cpp/*_check.rb`, `bc2cpp/scripts/**`, `bc2cpp/tools/{bc2cpp,optcarrot_probe,script_world}` | (c) | now default to `mrbc_rb` through `MrbcRbDefault.from_env` (`MRBC` when set and non-empty, else `bin/mrbc_rb`); the `SKIP: set MRBC` gates are gone. Scripts are not run in CI here yet (bc2cpp does not load on this branch, see the note below) |
 | `bc2cpp/host-libs/mruby-bc2cpp-sources/mrbgem.rake` (`mrbc -g -B... -o out file`) | (c) | now runs `bin/mrbc_rb` first, real mrbc as `MRBC_FALLBACK` (`BC2CPP_MRBC_RB=0` runs mrbc itself) |
 | mruby's gem build: `lib/mruby/gem.rb` (every gem's mrblib: `mrbc -B<sym> -o- -S -s <files>`), `tasks/mrblib.rake` (core mrblib), `mrbgems/mruby-test/mrbgem.rake` (`-B -o- [-s]` for mrbtest) | (c) | `build.mrbcfile`; see below |
 
 ## The environment contract of bc2cpp
 
-* `MRBC=<mrbc>`: the fallback for an input the emitter does not cover. Unset: `mrbc` on PATH if there is one.
+* `MRBC=<mrbc>`: names the mrbc a tool runs. Unset or empty: the tool runs `bin/mrbc_rb` (the default, `MrbcRbDefault.from_env`
+  in `bc2cpp/tools/mrbc_rb/mrbc_default.rb`). The bc2cpp compile path (`irep.rb`) keeps its own rule: the emitter first,
+  and `MRBC`, else `mrbc` on PATH, only as the fallback for an input the emitter does not cover.
+* The oracles keep the real mrbc on purpose: the `mrbc_rb` self-tests (`bc2cpp/tools/mrbc_rb/*_test.rb`,
+  `snapshot.rb`), the CI jobs that set `MRBC=` from the built mruby, and `build_config.rb` (`conf.mrbcfile`), whose
+  output must be the runtime's own bytecode format.
 * No mrbc at all (unset, not executable, none on PATH): the emitter serves every input. An input it does not cover (Unsupported,
   a parse error, a crash) aborts the run with `bc2cpp: the Ruby emitter (mrbc_rb) cannot compile ... and no mrbc is available`,
   naming the files and the reason.

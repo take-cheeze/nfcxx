@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # The IO.open producer and the IO binding model (docs/bc2cpp-type-check.md, "IO.open"). Each fixture is compiled by the
 # host mrbc and analysed in process: the closed world is built over the fixture plus two synthetic native files that
@@ -14,7 +15,7 @@ require 'set'
 require_relative '../../tools/bc2cpp/bc2cpp'
 require_relative '../../tools/bc2cpp/type_facts'
 
-unless ENV['MRBC'] && File.executable?(ENV['MRBC'])
+unless MrbcRbDefault.from_env && File.executable?(MrbcRbDefault.from_env)
   puts 'SKIP io_open_check: MRBC is not set to a host mrbc'
   exit 0
 end

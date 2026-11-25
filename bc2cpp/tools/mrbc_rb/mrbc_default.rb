@@ -10,4 +10,10 @@ module MrbcRbDefault
   def self.command
     WRAPPER
   end
+
+  # MRBC when it names something (non-empty), otherwise the default command above.
+  def self.from_env
+    value = ENV['MRBC'].to_s
+    value.empty? ? command : value
+  end
 end

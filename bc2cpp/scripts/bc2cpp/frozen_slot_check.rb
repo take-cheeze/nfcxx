@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # FREEZE_SLOT: a slot of a frozen literal table whose value is `LITERAL.freeze` has the
 # container class of that literal (ARR for an Array, HSH for a Hash), not OTHER.
@@ -118,7 +119,7 @@ with_switch(nil) do
              outer_table(codegen(hash_freeze_safe: false), irep_of(HASH_OF_ARRAY)).nil?)
 end
 
-if ENV['MRBC']
+if MrbcRbDefault.from_env
   puts '-- compiled (MRBC): the same shapes from mrbc output'
   FIXTURES = {
     'T = [[1, 2].freeze, 3].freeze' => [ARR, INT],

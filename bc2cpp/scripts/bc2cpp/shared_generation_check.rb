@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # Check SHARED_GENERATION at fixture size, in seconds: `bc2cpp.rb
 # --units PLAN` runs one analysis and forks one generation per unit. Two units that differ only in
@@ -109,7 +110,7 @@ Dir.mktmpdir('bc2cpp-shared') do |tmp|
              File.read(File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/compiled_gems.rb'))
                  .include?('jobs.group_by { |env, srcs, _| [env.reject { |k, _| SharedGeneration::UNIT_KEYS.include?(k) }, srcs] }'))
 
-  mrbc = ENV.fetch('MRBC', nil)
+  mrbc = MrbcRbDefault.from_env
   if mrbc.nil? || mrbc.empty?
     puts '  SKIP the generator runs (no MRBC)'
   else

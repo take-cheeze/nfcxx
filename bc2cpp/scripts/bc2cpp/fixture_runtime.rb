@@ -41,7 +41,7 @@ module Bc2cppFixtureRuntime
   module_function
 
   def mrbc
-    ENV['MRBC'] || MrbcRbDefault.command
+    MrbcRbDefault.from_env
   end
 
   # A build dir holding `library` and include/, from `env` or nil.

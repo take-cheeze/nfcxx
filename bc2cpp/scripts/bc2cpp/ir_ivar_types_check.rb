@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 require_relative '../../tools/bc2cpp/world_root'
 require_relative 'type_check_fixture'
@@ -69,7 +70,7 @@ gen.instance_variable_set(:@numeric_ivar_disabled, false)
 gen.instance_variable_set(:@class_pools_on, false)
 check.call('disabled class pools refuse', IrIvarTypes.classes(gen, 'Example', 'slot').nil?)
 
-if ENV['MRBC']
+if MrbcRbDefault.from_env
   source = <<~RUBY
     class IrPoolField
       def initialize(flag)

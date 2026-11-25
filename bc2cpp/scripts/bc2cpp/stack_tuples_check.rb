@@ -28,7 +28,6 @@ check = lambda do |what, condition|
   puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
   failures << what unless condition
 end
-abort 'SKIP: set MRBC' unless ENV['MRBC']
 
 # Each method holds one placed literal (the placement count is in PLACED) or refuses for the reason in its comment.
 POSITIVE = <<~RUBY

@@ -34,7 +34,7 @@ require_relative 'sealed_build'
 require 'fileutils'
 
 BC2CPP = File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/bc2cpp.rb')
-MRBC = ENV['MRBC'] || MrbcRbDefault.command
+MRBC = MrbcRbDefault.from_env
 OPTCARROT_LIB = File.join(ROOT, '3rd/optcarrot/lib')
 MRUBY_DIR = File.join(ROOT, '3rd/mruby')
 

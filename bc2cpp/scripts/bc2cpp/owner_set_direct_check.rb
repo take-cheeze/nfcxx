@@ -33,7 +33,6 @@ check = lambda do |what, condition|
   puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
   failures << what unless condition
 end
-abort 'SKIP: set MRBC' unless ENV['MRBC']
 
 # A checked core receiver cannot borrow engine inference; its argument proof must stand alone.
 require_relative '../../tools/bc2cpp/bc2cpp'

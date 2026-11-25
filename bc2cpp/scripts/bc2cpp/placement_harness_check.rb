@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # The gate harness any stack or in-frame placement of objects must pass (docs/bc2cpp-placement-harness.md).
 # Placement itself is NOT implemented: tools/bc2cpp/inframe_placement.rb is a stub that refuses the experimental
@@ -25,12 +26,12 @@ require_relative 'fixture_runtime'
 require_relative '../../tools/bc2cpp/inframe_placement'
 
 ENV['BC2CPP_SIG_DIRS'] ||= ''
-unless ENV['MRBC']
+unless MrbcRbDefault.from_env
   puts '  SKIP: no host mrbc (set MRBC)'
   exit 0
 end
-unless system(ENV['MRBC'], '--version', out: File::NULL, err: File::NULL)
-  warn "placement_harness_check: MRBC=#{ENV['MRBC']} does not run"
+unless system(MrbcRbDefault.from_env, '--version', out: File::NULL, err: File::NULL)
+  warn "placement_harness_check: MRBC=#{MrbcRbDefault.from_env} does not run"
   exit 1
 end
 
