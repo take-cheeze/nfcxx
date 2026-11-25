@@ -67,6 +67,7 @@ class EarlyExitStatus < StandardError
   end
 end
 module Kernel
+  alias early_exit_real_exit exit
   def exit(status = 0)
     raise EarlyExitStatus.new(status)
   end
@@ -84,7 +85,7 @@ PRELUDE
   echo "  end"
   echo "end"
   echo "rc = EarlyExitWorld.main(ARGV)"
-  echo "exit(rc) if rc != 0"
+  echo "early_exit_real_exit(rc) if rc != 0"
 } > "$world"
 tail=$'rc = EarlyExitWorld.main(ARGV)\nexit(rc) if rc != 0\n'
 
