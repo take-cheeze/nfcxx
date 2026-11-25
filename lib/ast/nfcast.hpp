@@ -344,7 +344,7 @@ struct State {
   // ---- type feedback ----
   // An arithmetic or comparison node records the types of its operands and installs its specialized node once FEEDBACK_WARM
   // observations agree (docs/notes/ast.md, "Feedback"); operands of two kinds make it stay generic. 1 (or 0) specializes at the
-  // first operands, as the engine did before feedback. Set before running scripts; NFCAST_FEEDBACK_WARM=n sets the count.
+  // first operands, as the engine did before feedback. Set in code before running scripts (no environment variable).
   unsigned feedback_warm = 2;
 
   // ---- errors ----

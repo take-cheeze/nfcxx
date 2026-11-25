@@ -124,7 +124,7 @@ observation is classed:
 
 The uninitialized node becomes a profile node (`ArithProfile`, `CmpProfile`) that counts `feedback_records`, keeps the classes seen
 and computes each result the way the specialized node would (integers and numbers do not count as `generic_ops`). After
-`State::feedback_warm` observations that agree (default 2; `NFCAST_FEEDBACK_WARM=n`), it installs the node for their class
+`State::feedback_warm` observations that agree (default 2; set `State::feedback_warm` in code), it installs the node for their class
 (`speculations_installed`) and records nothing more. Two kinds of operand, or an "other" observation, make the node give up for good:
 it becomes the generic node (`feedback_generic`). Nothing was speculated then, so that is not a deopt. Once a node has
 specialized, the guards and deopts of the table above apply as they did before: a failed guard is a `deopts`, after which the node
