@@ -1998,14 +1998,22 @@ BC2CPP_MAIN = lambda do
       puts <<~'CPP'
         // ELEMENT_READ_ROOTS: the caller side. An element a compiled read keeps in a local, while a call may unlink it.
         static inline void bc2cpp_keep(mrb_state* M, mrb_value v) { bc2cpp_root(M, v); }
-        static inline void bc2cpp_keep_old(mrb_state* M, mrb_value old) { bc2cpp_root(M, old); }
+        // An immediate old value is never freed, so rooting it is a no-op (bc2cpp_root's own first test);
+        // testing here avoids the root call for the common immediate old value.
+        static inline void bc2cpp_keep_old(mrb_state* M, mrb_value old) {
+          if (!mrb_immediate_p(old)) bc2cpp_root(M, old);
+        }
       CPP
     else
       puts <<~'CPP'
         // ELEMENT_READ_ROOTS: the caller side. An element a compiled read keeps in a local, while a call may unlink it.
         [[gnu::noinline]] inline void bc2cpp_root_value_first(mrb_value v, mrb_state* M) { bc2cpp_root(M, v); }
         static inline void bc2cpp_keep(mrb_state* M, mrb_value v) { bc2cpp_root_value_first(v, M); }
-        static inline void bc2cpp_keep_old(mrb_state* M, mrb_value old) { bc2cpp_root_value_first(old, M); }
+        // An immediate old value is never freed, so rooting it is a no-op (bc2cpp_root's own first test);
+        // testing here avoids the noinline root call for the common immediate old value.
+        static inline void bc2cpp_keep_old(mrb_state* M, mrb_value old) {
+          if (!mrb_immediate_p(old)) bc2cpp_root_value_first(old, M);
+        }
       CPP
     end
     puts <<~'CPP'
