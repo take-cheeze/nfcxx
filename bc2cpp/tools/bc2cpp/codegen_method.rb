@@ -687,7 +687,7 @@ class CodeGen
              else
                inline_prefix = guarded_inline[:at][insn.addr]
                own = glue_at[insn.addr] ||
-                     cold_compact(insn, guard_hoist_site(irep, idx, insn, element_read_owned(insn) { compile_insn(insn, irep, d, idx) }), d)
+                     cold_compact(insn, guard_hoist_site(irep, idx, insn, element_read_owned(insn, irep) { compile_insn(insn, irep, d, idx) }), d)
                inline_prefix ? inline_prefix + own : own
              end
       # STEP_EXIT_JUMPS: an exit from an ensure region goes through the ensure body first.
@@ -1335,20 +1335,23 @@ class CodeGen
   end
 end
 
-# ELEMENT_READ_ROOTS: an element read compiled anywhere but compile_method's own pass (a rescue's try body, a block
-# that stays a function, an inlined loop or call body) has no liveness to narrow it, so it is always rooted.
-# compile_method's pass places its own roots (ElementReadRoots.apply) and claims its reads with element_read_owned.
+# ELEMENT_READ_ROOTS: an element read is rooted where it is compiled unless the pass emitting its instruction claims it
+# with element_read_owned and places the root itself: compile_method's own pass (ElementReadRoots.apply), and the bodies
+# ElementReadBodyRoots narrows (a block that stays a function, a rescue's try body, an inlined loop body). Any other
+# body (an ensure body, a class body, a resumable helper) has no liveness to narrow it, so its reads are always rooted.
+# The claim is the instruction's irep and address, so a body that compiles a shifted copy of it claims that copy too.
 module ElementReadRootsCompileInsn
   def compile_insn(insn, irep, owner_def, idx = nil, reg_offset = 0)
     text = super
-    return text unless text.is_a?(String) && ElementReadRoots.element_read?(insn) && !@element_read_owner.equal?(insn)
+    return text unless text.is_a?(String) && ElementReadRoots.element_read?(insn)
+    return text if @element_read_owner && @element_read_owner[0].equal?(irep) && @element_read_owner[1] == insn.addr
 
     text + ElementReadRoots.keep_text(insn)
   end
 
-  def element_read_owned(insn)
+  def element_read_owned(insn, irep)
     saved = @element_read_owner
-    @element_read_owner = insn
+    @element_read_owner = ElementReadRoots.element_read?(insn) ? [irep, insn.addr] : nil
     yield
   ensure
     @element_read_owner = saved

@@ -183,17 +183,24 @@ class CodeGen
     @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, "#{region[:block_addr]}#{region[:label_tag]}")
     body_targets = @inline_nested.targets(BytecodeIR.for(block_irep).branch_target_addrs)
     body = String.new
+    # ELEMENT_READ_BODIES: the texts are rooted together once the body is compiled (inline_body_element_roots).
+    pieces = []
+    slots = Array.new(BytecodeIR.for(block_irep).size, '')
+    claimed = []
     compile_all = lambda do
       BytecodeIR.for(block_irep).each_source do |insn, i|
         next if insn.op == :ENTER
 
-        body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
-        code = if elem_reg
-                 with_element_hint(block_irep, insn, i, elem_reg, region[:elem_class]) { compile_insn.call(insn, i) }
-               else
-                 compile_insn.call(insn, i)
-               end
-        body << '  ' << code
+        pieces << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
+        claimed << i if ElementReadRoots.element_read?(insn)
+        slots[i] = element_read_owned(insn, block_irep) do
+          if elem_reg
+            with_element_hint(block_irep, insn, i, elem_reg, region[:elem_class]) { compile_insn.call(insn, i) }
+          else
+            compile_insn.call(insn, i)
+          end
+        end
+        pieces << i
       end
     end
     saved_loop_elements = @declared_loop_elements
@@ -209,6 +216,8 @@ class CodeGen
     ensure
       @declared_loop_elements = saved_loop_elements
     end
+    slots = inline_body_element_roots(block_irep, offset, slots, claimed, [iter_label, break_label].compact, label_prefix)
+    pieces.each { |piece| piece.is_a?(Integer) ? body << '  ' << slots[piece] : body << piece }
     nested_pre = @inline_nested.pre
     @inline_nested = saved_nested
     @inline_loop_parent = saved_loop_parent
@@ -218,6 +227,20 @@ class CodeGen
 
     @inline_nested_pre << nested_pre
     body
+  end
+
+  # ELEMENT_READ_BODIES: an inlined loop body's texts with its claimed element reads rooted by the liveness test. The
+  # body runs inside the enclosing function, which may call after any way out while one of its own registers holds
+  # the element, and whose arena keeps a root to its end: so every way out (the next iteration, a break, a return
+  # out of the method) is LOUD, the enclosing function's registers (below +offset+) are live everywhere, and a value
+  # the leaving text stores (a `next` value, a break value) is rooted.
+  def inline_body_element_roots(block_irep, offset, slots, claimed, exit_labels, label_prefix)
+    captured = RegisterFlow.captured_registers(block_irep)
+    pinned = captured && ((0...offset).to_a + captured.map { |reg| reg + offset })
+    ElementReadBodyRoots.root(block_irep, slots, claimed,
+                              offset: offset, pinned: pinned, returns: :loud, loop_entry: 0,
+                              labels: exit_labels.to_h { |label| [label, :loud] },
+                              prefix: label_prefix)
   end
 
   # The declarations opening every iteration: block registers reset to nil, as

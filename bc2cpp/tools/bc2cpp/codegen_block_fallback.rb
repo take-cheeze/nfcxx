@@ -1271,26 +1271,38 @@ class CodeGen
     literal = literal_table_plan(block_irep, claimed: ->(addr, _idx) { claimed_addrs.include?(addr) })
     # GUARD_HOIST (codegen_guard_hoist.rb): a literal table only rewrites a straight run of literal builders, no send.
     hoist_eligible = nested_suppressed.empty? && nested_glue_at.empty? && prefix_at.empty?
+    # ELEMENT_READ_BODIES: each instruction's text is kept apart until the body is done, so the element reads it claims
+    # are rooted by the liveness test (ElementReadBodyRoots), as compile_method's are.
+    pieces = []
+    slots = Array.new(BytecodeIR.for(block_irep).size, '')
+    claimed = []
     guard_hoist_session(block_irep, hoist_eligible) do
     BytecodeIR.for(block_irep).each_source do |insn, idx|
       next if insn.op == :ENTER
 
-      body << prefix_at[insn.addr] if prefix_at.key?(insn.addr)
+      pieces << prefix_at[insn.addr] if prefix_at.key?(insn.addr)
       next if nested_suppressed.include?(insn.addr) && !nested_glue_at.key?(insn.addr)
       next if literal.skip.include?(idx)
 
-      body << "  L#{insn.addr}:;\n" if targets.include?(insn.addr)
+      pieces << "  L#{insn.addr}:;\n" if targets.include?(insn.addr)
       if nested_glue_at.key?(insn.addr)
-        body << nested_glue_at[insn.addr]
+        slots[idx] = nested_glue_at[insn.addr]
       elsif (glue = literal.glue[idx])
-        body << glue
+        slots[idx] = glue
       else
+        claimed << idx if ElementReadRoots.element_read?(insn)
         with_element_hints(block_irep, insn, idx, elem_hints) do
-          body << guard_hoist_site(block_irep, idx, insn, compile_insn(insn, block_irep, d, idx))
+          slots[idx] = guard_hoist_site(block_irep, idx, insn,
+                                        element_read_owned(insn, block_irep) { compile_insn(insn, block_irep, d, idx) })
         end
       end
+      pieces << idx
     end
     end
+    # A prefix (an ensure guard's lambda) runs its body where the scope closes, so its reads are not where its text is.
+    pinned = prefix_at.empty? ? RegisterFlow.captured_registers(block_irep) : nil
+    slots = ElementReadBodyRoots.root(block_irep, slots, claimed, pinned: pinned)
+    pieces.each { |piece| body << (piece.is_a?(Integer) ? slots[piece] : piece) }
     @declared_loop_elements = saved_loop_elements
     @tail_yield_block = saved_tail_yield_block
     @ensure_except_remaps = nil
