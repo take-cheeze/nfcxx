@@ -31,7 +31,8 @@
  *
  * Timing (--timing, --sms, --lat). A cycle model, not a clock-by-clock simulation. Each thread has a clock, and each
  * instruction it issues adds the latency of its class: alu, branch, local, global, atomic, barrier. The defaults are
- * 4, 4, 30, 400, 400 and 20 cycles, changed with --lat CLASS=CYCLES. Param loads and stores cost alu; a generic
+ * 2, 4, 40, 320, 31 and 24 cycles (measured on an RTX 5050, sm_120; branch is not measured), changed with --lat
+ * CLASS=CYCLES. Param loads and stores cost alu; a generic
  * ld/st costs global. A bar.sync generation completes at its latest arrival, and every thread that waited leaves at
  * that clock. A block takes the largest clock of its threads, since its warps run in parallel. The blocks of an SM run
  * one after another, and the kernel takes the slowest SM (--sms, default 1). The estimate ignores issue width,
@@ -966,7 +967,7 @@ static int noutcomes;
 /* The timing model (the header comment says what it is). */
 enum { LAT_ALU, LAT_BRANCH, LAT_LOCAL, LAT_GLOBAL, LAT_ATOMIC, LAT_BARRIER, LAT_N };
 static const char *lat_names[LAT_N] = {"alu", "branch", "local", "global", "atomic", "barrier"};
-static uint64_t lat[LAT_N] = {4, 4, 30, 400, 400, 20};
+static uint64_t lat[LAT_N] = {2, 4, 40, 320, 31, 24};
 static int sms = 1;
 static int timing_print;
 static uint64_t timing_min = UINT64_MAX, timing_max, timing_n; /* over the schedules run so far */
@@ -1559,7 +1560,7 @@ static void usage(void) {
           "           [--random N [--seed S]] [--explore [--max-schedules M]] [--max-steps S]\n"
           "           [--timing] [--sms N] [--lat CLASS=CYCLES]...\n"
           "  ARG: ptr:COUNT[:iota=START] | s32:VALUE | bytes:HEX\n"
-          "  CLASS: alu, branch, local, global, atomic, barrier (defaults 4 4 30 400 400 20)\n");
+          "  CLASS: alu, branch, local, global, atomic, barrier (defaults 2 4 40 320 31 24)\n");
   exit(EXIT_BAD);
 }
 
