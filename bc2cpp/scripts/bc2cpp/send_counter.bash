@@ -44,8 +44,13 @@ done
 echo "send_counter: wrapping ${#wrap_flags[@]} functions"
 
 # The closed target's defines (trace_host.bash); the layout-relevant ones must match libmruby.a.
+# The closed target's integer model: MRB_USE_BIGINT where the build has mruby-bigint, MRB_INT32 for the Wio model
+# (build_config.rb, BC2CPP_CLOSED_WIO_INT=1, which the build and this run must share).
+int_defs=()
+[ -d "$build_dir/closed/mrbgems/mruby-bigint" ] && int_defs+=(-DMRB_USE_BIGINT)
+[ "${BC2CPP_CLOSED_WIO_INT:-0}" = 1 ] && int_defs+=(-DMRB_INT32)
 "$cxx" -std=gnu++17 -O2 -g -Wall "${defs[@]}" \
-  -DMRB_ENABLE_CXX_EXCEPTION -DMRB_DEBUG -DMRB_USE_BIGINT \
+  -DMRB_ENABLE_CXX_EXCEPTION -DMRB_DEBUG "${int_defs[@]}" \
   -DMRB_STR_LENGTH_MAX=0 -DMRB_HEAP_PAGE_SIZE=256 -DKHASH_INITIAL_SIZE=16 \
   -I"$mruby_inc" -I"$root/3rd/mruby/include" \
   -c "$tree/scripts/bc2cpp/send_counter.cxx" -o "$host_dir/send_counter.o"

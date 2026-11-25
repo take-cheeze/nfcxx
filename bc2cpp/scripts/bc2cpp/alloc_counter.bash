@@ -26,9 +26,12 @@ for f in trace_host.o liblvgl.a libuni-algo.a; do
   [ -s "$host_dir/$f" ] || { echo "alloc_counter: $host_dir/$f is missing; see $host_dir.build.log" >&2; exit 1; }
 done
 
-# The closed target's defines (trace_host.bash); the layout-relevant ones must match libmruby.a.
+# The closed target's defines (trace_host.bash, int_defs there too); the layout-relevant ones must match libmruby.a.
+int_defs=()
+[ -d "$build_dir/closed/mrbgems/mruby-bigint" ] && int_defs+=(-DMRB_USE_BIGINT)
+[ "${BC2CPP_CLOSED_WIO_INT:-0}" = 1 ] && int_defs+=(-DMRB_INT32)
 "$cxx" -std=gnu++17 -O2 -g -Wall \
-  -DMRB_ENABLE_CXX_EXCEPTION -DMRB_DEBUG -DMRB_USE_BIGINT \
+  -DMRB_ENABLE_CXX_EXCEPTION -DMRB_DEBUG "${int_defs[@]}" \
   -DMRB_STR_LENGTH_MAX=0 -DMRB_HEAP_PAGE_SIZE=256 -DKHASH_INITIAL_SIZE=16 \
   -I"$mruby_inc" -I"$root/3rd/mruby/include" \
   -c "$tree/scripts/bc2cpp/alloc_counter.cxx" -o "$host_dir/alloc_counter.o"
