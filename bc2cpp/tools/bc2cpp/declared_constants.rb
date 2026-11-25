@@ -67,6 +67,8 @@ module DeclaredConstants
       case decl
       when RBS::AST::Declarations::Class, RBS::AST::Declarations::Module
         inner = scope + [decl.name.to_s.delete_prefix('::')]
+        next [] if RbsSignatures.absent_classes.include?(inner.join('::'))
+
         collect(decl.members.grep(RBS::AST::Declarations::Base), inner, rel, known_owners)
       when RBS::AST::Declarations::Constant
         name = (scope + [decl.name.to_s.delete_prefix('::')]).join('::')

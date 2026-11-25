@@ -190,6 +190,8 @@ module DeclaredReturns
         next unless decl.is_a?(RBS::AST::Declarations::Class) || decl.is_a?(RBS::AST::Declarations::Module)
 
         name = (scope + [decl.name.to_s.delete_prefix('::')]).join('::')
+        next if RbsSignatures.absent_classes.include?(name)
+
         decl.members.each do |m|
           next unless m.is_a?(RBS::AST::Members::MethodDefinition)
           next unless m.annotations.any? { |a| a.string.strip == HINT_ANNOTATION }
