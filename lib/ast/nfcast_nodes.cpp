@@ -422,15 +422,114 @@ ArithBase* make_nn(Frame& f, Node* self, int op, Node* l, Node* r) {
   }
 }
 
-// The first evaluation of an arithmetic operator: look at the operands and pick.
+// ---- type feedback (docs/notes/ast.md, "Feedback") ----------------------------------------------------------------------
+// The operands a node has seen are classed: both integers (FB_INT); both numbers with a float among them (FB_FLT, arithmetic
+// only: a comparison needs two floats, CmpFF, so an integer and a float there is FB_OTHER); anything else (FB_OTHER). A node
+// that has seen FB_INT and FB_FLT, or any FB_OTHER, stays generic for good.
+enum : std::uint8_t { FB_INT = 1, FB_FLT = 2, FB_OTHER = 4 };
+constexpr std::uint8_t kFbMixed = FB_INT | FB_FLT;
+
+inline std::uint8_t fb_arith_class(const Value& a, const Value& b) {
+  if (a.t == T_INT && b.t == T_INT) return FB_INT;
+  if (a.is_number() && b.is_number()) return FB_FLT;
+  return FB_OTHER;
+}
+
+inline std::uint8_t fb_cmp_class(const Value& a, const Value& b) {
+  if (a.t == T_INT && b.t == T_INT) return FB_INT;
+  if (a.t == T_FLT && b.t == T_FLT) return FB_FLT;
+  return FB_OTHER;
+}
+
+// The operator OP on two integers, with the runtime choice of the template ar_ii<OP> (the operands are checked by the caller).
+inline Value ar_ii_rt(State& S, int op, std::int64_t a, std::int64_t b) {
+  switch (op) {
+    case AR_ADD: return ar_ii<AR_ADD>(S, a, b);
+    case AR_SUB: return ar_ii<AR_SUB>(S, a, b);
+    case AR_MUL: return ar_ii<AR_MUL>(S, a, b);
+    case AR_MOD: return ar_ii<AR_MOD>(S, a, b);
+    case AR_IDIV: return ar_ii<AR_IDIV>(S, a, b);
+    case AR_BAND: return ar_ii<AR_BAND>(S, a, b);
+    case AR_BOR: return ar_ii<AR_BOR>(S, a, b);
+    case AR_BXOR: return ar_ii<AR_BXOR>(S, a, b);
+    case AR_SHL: return ar_ii<AR_SHL>(S, a, b);
+    case AR_SHR: return ar_ii<AR_SHR>(S, a, b);
+    default: return Value();
+  }
+}
+
+// The operator OP on two numbers, as ArithNN computes it (a float among them: the integer case is ar_ii_rt).
+inline Value ar_nn_rt(State& S, int op, const Value& a, const Value& b) {
+  switch (op) {
+    case AR_ADD: return ar_nn<AR_ADD>(S, a, b);
+    case AR_SUB: return ar_nn<AR_SUB>(S, a, b);
+    case AR_MUL: return ar_nn<AR_MUL>(S, a, b);
+    case AR_DIV: return ar_nn<AR_DIV>(S, a, b);
+    case AR_POW: return ar_nn<AR_POW>(S, a, b);
+    case AR_MOD: return ar_nn<AR_MOD>(S, a, b);
+    case AR_IDIV: return ar_nn<AR_IDIV>(S, a, b);
+    default: return Value();
+  }
+}
+
+// The result of an arithmetic operator on operands the node has not specialized for: computed the way the specialized nodes
+// compute it, so no slow path is counted. False when only the generic path can do it (a bitwise operator on a float).
+inline bool ar_profiled(Frame& f, int op, int line, const Value& a, const Value& b, Value& out) {
+  if (a.t == T_INT && b.t == T_INT && (is_int_op(op) || is_bit_op(op))) {
+    if (op == AR_MOD || op == AR_IDIV) f.line = line;
+    out = ar_ii_rt(*f.S, op, a.i, b.i);
+    return true;
+  }
+  if (a.is_number() && b.is_number() && !is_bit_op(op)) {
+    if (op == AR_MOD || op == AR_IDIV) f.line = line;
+    out = ar_nn_rt(*f.S, op, a, b);
+    return true;
+  }
+  return false;
+}
+
+// The node an arithmetic operator is specialized to for operands of class K (made in place of SELF). Counted as a speculation
+// when it is an integer or a number node; a bitwise operator on floats, and anything else, stays generic.
+ArithBase* arith_for(Frame& f, Node* self, int op, Node* l, Node* r, std::uint8_t k) {
+  if (k == FB_INT) {
+    ++f.S->stats.speculations_installed;
+    return (is_int_op(op) || is_bit_op(op)) ? make_ii(f, self, op, l, r) : make_nn(f, self, op, l, r);
+  }
+  if (k == FB_FLT && !is_bit_op(op)) {
+    ++f.S->stats.speculations_installed;
+    return make_nn(f, self, op, l, r);
+  }
+  return respec<ArithGen>(f, self, op, l, r);
+}
+
+// An arithmetic node that has recorded operands: it computes generically, records each operand class, and installs the node
+// for the class after FEEDBACK_WARM observations agree (or the generic node at once when they do not).
+struct ArithProfile : ArithBase {
+  using ArithBase::ArithBase;
+  std::uint8_t kinds = 0;  // the classes seen so far
+  unsigned seen = 0;       // observations recorded
+  Value compute(Frame& f, const Value& a, const Value& b) override {
+    std::uint8_t k = fb_arith_class(a, b);
+    ++f.S->stats.feedback_records;
+    if (k == FB_OTHER || (kinds | k) == kFbMixed) {
+      ++f.S->stats.feedback_generic;
+      return respec<ArithGen>(f, this, op, l_, r_)->compute(f, a, b);
+    }
+    kinds = static_cast<std::uint8_t>(kinds | k);
+    ++seen;
+    if (seen >= f.S->feedback_warm) return arith_for(f, this, op, l_, r_, kinds)->compute(f, a, b);
+    Value out;
+    if (ar_profiled(f, op, line, a, b, out)) return out;
+    return generic(f, a, b);  // a bitwise operator on floats
+  }
+};
+
+// The first evaluation of an arithmetic operator: it records the operands (feedback_warm > 1) or specializes at once.
 struct ArithUninit : ArithBase {
   using ArithBase::ArithBase;
   Value compute(Frame& f, const Value& a, const Value& b) override {
-    ArithBase* n;
-    if (a.t == T_INT && b.t == T_INT && (is_int_op(op) || is_bit_op(op))) n = make_ii(f, this, op, l_, r_);
-    else if (a.is_number() && b.is_number() && !is_bit_op(op)) n = make_nn(f, this, op, l_, r_);
-    else n = respec<ArithGen>(f, this, op, l_, r_);
-    return n->compute(f, a, b);
+    if (f.S->feedback_warm <= 1) return arith_for(f, this, op, l_, r_, fb_arith_class(a, b))->compute(f, a, b);
+    return respec<ArithProfile>(f, this, op, l_, r_)->compute(f, a, b);
   }
 };
 
@@ -630,10 +729,48 @@ CmpBase* make_cmp(Frame& f, Node* self, int op, Node* l, Node* r, bool ints, boo
   return respec<CmpGen>(f, self, op, l, r);
 }
 
+// The comparison node for operands of class K (made in place of SELF); a speculation when K is integers or floats.
+CmpBase* cmp_for(Frame& f, Node* self, int op, Node* l, Node* r, std::uint8_t k) {
+  if (k != FB_INT && k != FB_FLT) return make_cmp(f, self, op, l, r, false, false);
+  ++f.S->stats.speculations_installed;
+  return make_cmp(f, self, op, l, r, k == FB_INT, k == FB_FLT);
+}
+
+inline bool cmp_ff(int op, double a, double b) {
+  switch (op) {
+    case CMP_LT: return a < b;
+    case CMP_LE: return a <= b;
+    case CMP_GT: return a > b;
+    default: return a >= b;
+  }
+}
+
+// A comparison node that has recorded operands (see ArithProfile).
+struct CmpProfile : CmpBase {
+  using CmpBase::CmpBase;
+  std::uint8_t kinds = 0;
+  unsigned seen = 0;
+  Value compute(Frame& f, const Value& a, const Value& b) override {
+    std::uint8_t k = fb_cmp_class(a, b);
+    ++f.S->stats.feedback_records;
+    if (k == FB_OTHER || (kinds | k) == kFbMixed) {
+      ++f.S->stats.feedback_generic;
+      return respec<CmpGen>(f, this, op, l_, r_)->compute(f, a, b);
+    }
+    kinds = static_cast<std::uint8_t>(kinds | k);
+    ++seen;
+    if (seen >= f.S->feedback_warm) return cmp_for(f, this, op, l_, r_, kinds)->compute(f, a, b);
+    if (k == FB_INT) return Value::boolean(cmp_ii(op, a.i, b.i));
+    return Value::boolean(cmp_ff(op, a.d, b.d));
+  }
+};
+
+// The first evaluation of a comparison: it records the operands (feedback_warm > 1) or specializes at once.
 struct CmpUninit : CmpBase {
   using CmpBase::CmpBase;
   Value compute(Frame& f, const Value& a, const Value& b) override {
-    return make_cmp(f, this, op, l_, r_, a.t == T_INT && b.t == T_INT, a.t == T_FLT && b.t == T_FLT)->compute(f, a, b);
+    if (f.S->feedback_warm <= 1) return cmp_for(f, this, op, l_, r_, fb_cmp_class(a, b))->compute(f, a, b);
+    return respec<CmpProfile>(f, this, op, l_, r_)->compute(f, a, b);
   }
 };
 

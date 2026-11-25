@@ -848,8 +848,10 @@ static void ast_tests() {
   CHECK(S.stats.rewrites > s0.rewrites && S.stats.generic_ops == s0.generic_ops && S.stats.deopts == s0.deopts);
   ctx.eval_void("ast", "function addv(a, b) return a + b end");
   CHECK(ctx.eval<int>("ast", "addv(1, 2)") == 3);
+  // two agreeing integer observations specialize the node (feedback_warm = 2); only then can a float deopt it
+  CHECK(ctx.eval<int>("ast", "addv(3, 4)") == 7);
   auto s1 = S.stats;
-  CHECK(ctx.eval<double>("ast", "addv(1.5, 2)") == 3.5);  // a float reaches the integer node
+  CHECK(ctx.eval<double>("ast", "addv(1.5, 2)") == 3.5);  // a float reaches the specialized integer node
   CHECK(S.stats.deopts == s1.deopts + 1);
   // the members of a host object are cached by its class: reading them again takes no slow path
   auto s2 = S.stats;

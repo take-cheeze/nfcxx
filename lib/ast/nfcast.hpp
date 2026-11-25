@@ -239,6 +239,11 @@ struct Stats {
   std::uint64_t inlined_calls = 0;   // calls run as inlined bodies
   std::uint64_t inline_declined = 0; // call sites that were looked at and left as calls (callee too big, recursive, ...)
   std::uint64_t inline_substituted = 0;  // arguments of inlined sites that the clone reads where they are instead of from a slot
+  // Type feedback (docs/notes/ast.md, "Feedback"): arithmetic and comparison nodes record the types of their operands before they
+  // specialize.
+  std::uint64_t feedback_records = 0;        // observations recorded by nodes that had not specialized yet
+  std::uint64_t speculations_installed = 0;  // specialized nodes installed from the types of recorded operands (not after a deopt)
+  std::uint64_t feedback_generic = 0;        // nodes that gave up speculating (operands of two kinds, or not numbers) and stayed generic
   // The tier (docs/notes/ast.md, "Tiering"); all zero while it is off.
   std::uint64_t tier_compiled = 0;    // versions of functions that became callable native code (compiled here or loaded from the cache)
   std::uint64_t tier_compiles = 0;    // runs of the nfcxx driver
@@ -335,6 +340,12 @@ struct State {
   // NFCAST_INLINE_WARM=n sets the count.
   bool inlining = true;
   unsigned inline_warm = 2;
+
+  // ---- type feedback ----
+  // An arithmetic or comparison node records the types of its operands and installs its specialized node once FEEDBACK_WARM
+  // observations agree (docs/notes/ast.md, "Feedback"); operands of two kinds make it stay generic. 1 (or 0) specializes at the
+  // first operands, as the engine did before feedback. Set in code before running scripts (no environment variable).
+  unsigned feedback_warm = 2;
 
   // ---- errors ----
   [[noreturn]] void error(const Value& v);                // raise V as is

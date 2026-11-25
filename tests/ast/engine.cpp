@@ -132,6 +132,61 @@ int main() {
     CHECK(run_int(S, "local function g(x) return x.n end local a, b = {n = 1}, setmetatable({}, {__index = {n = 20}}) return g(a) + g(b) + g(a)") == 22);
   }
 
+  std::printf("-- type feedback\n");
+  {
+    // Integers: the + node records two operands (feedback_warm = 2), installs the integer node and records no more.
+    auto f0 = S.stats;
+    CHECK(run_int(S, "local s = 0 for i = 1, 1000 do s = s + i end return s") == 500500);
+    CHECK(S.stats.feedback_records == f0.feedback_records + 2);
+    CHECK(S.stats.speculations_installed == f0.speculations_installed + 1);
+    CHECK(S.stats.generic_ops == f0.generic_ops && S.stats.deopts == f0.deopts);
+    // Floats: the same, on a number node.
+    auto f1 = S.stats;
+    Value fv = run(S, "local s = 0.5 for i = 1, 100 do s = s + 0.25 end return s");
+    CHECK(fv.t == nfcast::T_FLT && fv.d == 25.5);
+    CHECK(S.stats.feedback_records == f1.feedback_records + 2);
+    CHECK(S.stats.speculations_installed == f1.speculations_installed + 1);
+    CHECK(S.stats.generic_ops == f1.generic_ops && S.stats.deopts == f1.deopts);
+    // Mixed: integers, then a float at the same node. The node gives up speculating and stays generic: no deopt, no speculation.
+    auto f2 = S.stats;
+    Value mv = run(S, "local flip, s = true, 0 for i = 1, 100 do flip = not flip local x = 1 if flip then x = 1.5 end s = s + x end return s");
+    CHECK(mv.t == nfcast::T_FLT && mv.d == 125.0);                 // 50 * 1 + 50 * 1.5
+    CHECK(S.stats.feedback_records == f2.feedback_records + 2);
+    CHECK(S.stats.feedback_generic == f2.feedback_generic + 1);
+    CHECK(S.stats.speculations_installed == f2.speculations_installed && S.stats.deopts == f2.deopts);
+    CHECK(S.stats.generic_ops > f2.generic_ops);                   // the generic node runs the rest of the loop
+    // Other operands: a string gives up at the first observation (it is coerced by the generic node).
+    auto f3 = S.stats;
+    CHECK(run_int(S, "local s = 0 for i = 1, 3 do s = s + '1' end return s") == 3);
+    CHECK(S.stats.feedback_generic == f3.feedback_generic + 1 && S.stats.speculations_installed == f3.speculations_installed);
+    // Operands that change after the node has specialized: exactly one deopt, then the float node, and the right result.
+    auto f4 = S.stats;
+    Value cv = run(S, "local x, s = 1, 0 for i = 1, 100 do if i == 60 then x = 1.5 end s = s + x end return s");
+    CHECK(cv.t == nfcast::T_FLT && cv.d == 120.5);                 // 59 * 1 + 41 * 1.5
+    CHECK(S.stats.speculations_installed == f4.speculations_installed + 1);
+    CHECK(S.stats.deopts == f4.deopts + 1);
+    CHECK(S.stats.feedback_generic == f4.feedback_generic);
+    // Comparisons take the same route: integers speculate; a float reaching the integer comparison deopts once.
+    auto c0 = S.stats;
+    CHECK(run_int(S, "local n = 0 for i = 1, 100 do if i < 50 then n = i end end return n") == 49);
+    CHECK(S.stats.feedback_records == c0.feedback_records + 2 && S.stats.speculations_installed == c0.speculations_installed + 1);
+    auto c1 = S.stats;
+    CHECK(run_int(S, "local n, x = 0, 1 for i = 1, 100 do if i == 60 then x = 1.5 end if x < 2 then n = n + 1 end end return n") == 100);
+    CHECK(S.stats.deopts == c1.deopts + 1);                         // the comparison, once; the sums never change type
+    CHECK(S.stats.speculations_installed == c1.speculations_installed + 2);   // the comparison and the sum
+    // The threshold is a knob: 3 observations before speculating, and 1 for the engine as it was before feedback.
+    State three;
+    three.open_libs();
+    three.feedback_warm = 3;
+    CHECK(run_int(three, "local s = 0 for i = 1, 100 do s = s + i end return s") == 5050);
+    CHECK(three.stats.feedback_records == 3 && three.stats.speculations_installed == 1 && three.stats.deopts == 0);
+    State one;
+    one.open_libs();
+    one.feedback_warm = 1;
+    CHECK(run_int(one, "local s = 0 for i = 1, 100 do s = s + i end return s") == 5050);
+    CHECK(one.stats.feedback_records == 0 && one.stats.speculations_installed == 1 && one.stats.deopts == 0);
+  }
+
   std::printf("-- the collector\n");
   {
     S.collect();
