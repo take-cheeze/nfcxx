@@ -94,6 +94,28 @@ def roundtripOne (path : String) : IO (Except String String) := do
     | none => return .ok s!"round trip ok: {total} functions"
     | some a => return .error s!"round trip differs in {bad} of {total} functions; first (original, reprinted): {a}"
 
+/-- Runs the function named `name` (no parameters) under the semantics of `NfcxxIR.Sem`, and reports its outcome. -/
+def runOne (path name : String) : IO (Except String String) := do
+  let src ← IO.FS.readFile path
+  match parseFile src with
+  | .error e => return .error e
+  | .ok forms =>
+    for f in forms do
+      match f with
+      | SExp.list (SExp.atom "function" :: _) =>
+        match decodeFunc f with
+        | .error e => return .error e
+        | .ok fn =>
+          if fn.linkage == name then
+            let line := match Nfcxx.IR.Sem.runFunc 1000000 fn with
+              | .value (some v) => s!"value {v}"
+              | .value none => "value none"
+              | .trap m => s!"trap: {m}"
+              | .stuck m => s!"stuck: {m}"
+            return .ok line
+      | _ => pure ()
+    return .error s!"no function {name}"
+
 def main (args : List String) : IO UInt32 := do
   match args with
   | "roundtrip" :: files =>
@@ -135,6 +157,12 @@ def main (args : List String) : IO UInt32 := do
     | .error e => do
       IO.eprintln s!"{f}: {e}"
       return 1
+  | ["run", f, name] => do
+    match ← runOne f name with
+    | .ok line => IO.println line; return 0
+    | .error e => do
+      IO.eprintln s!"{f}: {e}"
+      return 1
   | _ =>
-    IO.eprintln "usage: nfcxx_ir check FILE... | nfcxx_ir print FILE"
+    IO.eprintln "usage: nfcxx_ir check FILE... | nfcxx_ir print FILE | nfcxx_ir run FILE FUNCTION"
     return 2

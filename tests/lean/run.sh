@@ -24,4 +24,15 @@ for f in tests/bad/*.ir; do
   if "$exe" check "$f" 2>/dev/null; then echo "FAIL tests/lean: $f was accepted"; fail=1; fi
 done
 echo "ok: $(ls tests/bad/*.ir | wc -l) malformed inputs refused"
+# The semantics (NfcxxIR/Semantics.lean) on hand-written functions with known answers.
+expect() {
+  local file=$1 want=$2 got
+  got=$("$exe" run "$file" main 2>&1)
+  if [ "$got" != "$want" ]; then echo "FAIL tests/lean: $file: got '$got', want '$want'"; fail=1; fi
+}
+expect tests/sem/sum_loop.ir "value 55"
+expect tests/sem/wrap_add.ir "value -2147483648"
+expect tests/sem/div_zero.ir "trap: division by zero"
+expect tests/sem/float_add.ir "stuck: constant of type double is not an integer literal: 1.5"
+echo "ok: the semantics gives the expected outcome for 4 IR functions (tests/sem)"
 exit $fail
