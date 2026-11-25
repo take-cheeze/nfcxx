@@ -410,8 +410,18 @@ class CudaDevicePlan
     raise CudaStop.new(status)
   end
 
-  # the stages of --execute: the host copy, the device unit, then the device image (the bash's cu_rewrite)
+  # the stages of --execute: the host copy, the device unit, then the device image (the bash's cu_rewrite). The copy is
+  # written in place (prep truncates it, finish appends the images), so two compiles of one object, which share the copy's
+  # path, would interleave and append the images twice (a parallel build that repeats a unit). A lock beside the copy
+  # serializes the stages; the host compile that reads the copy afterwards is not under it.
   def execute_plan
+    File.open("#{@copy}.lock", File::RDWR | File::CREAT, 0o644) do |lock|
+      lock.flock(File::LOCK_EX)
+      execute_device_stages
+    end
+  end
+
+  def execute_device_stages
     prep
     kfile = "#{@dev}.kernels"
     return [] unless File.size?(kfile)   # the bash's [ -s "$dev.kernels" ] || return 0
