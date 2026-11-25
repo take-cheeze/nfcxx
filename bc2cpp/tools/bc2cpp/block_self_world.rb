@@ -374,7 +374,8 @@ module BlockSelfWorld
       # The reaching-definitions (bytecode_ir_dataflow.rb) reads these IR switches: their values are keyed. Named one by
       # one, since a prefix entry would list the whole environment, which a scan may not do.
       ScanCache.fetch("block_self_world.#{name}", inputs, cache_absent: false,
-                      env: %w[BC2CPP_IR_QUERY_KEYS BC2CPP_IR_SHARED_DEFINITIONS BC2CPP_IR_SCALAR_SEEN], &block)
+                      env: %w[BC2CPP_IR_QUERY_KEYS BC2CPP_IR_SHARED_DEFINITIONS BC2CPP_IR_SCALAR_SEEN
+                              BC2CPP_IR_DENSE_SEEN], &block)
     end
 
     # SCOPED_CONSTANT_WRITES: the world fact is now known. When it holds, no compiled block checks its self at entry,
