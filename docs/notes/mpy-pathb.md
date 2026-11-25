@@ -1,7 +1,9 @@
 # MicroPython .mpy to Path B IR
 
 Status, 2026-11-25: the `.mpy` reader (`tools/mpy/mpy_reader.{hpp,cpp}`) loads format 6 bytecode modules and decodes every
-function's prelude and instructions. Lowering to the Path B IR is not started.
+function's prelude and instructions. The first lowering slice (`tools/mpy/mpy_lower.{hpp,cpp}`) turns a module's top-level
+code into Path B IR, and `tests/mpy/lower/run.sh` checks it against the reference interpreter. Functions and everything
+else in the not-yet list below are refused by name.
 
 ## Reference
 
@@ -26,13 +28,37 @@ function's prelude and instructions. Lowering to the Path B IR is not started.
 byte: `LOAD_CONST_SMALL_INT_MULTI` (0x70..0xaf), `LOAD_FAST_MULTI` (0xb0), `STORE_FAST_MULTI` (0xc0), `UNARY_OP_MULTI`
 (0xd0..0xd6) and `BINARY_OP_MULTI` (0xd7 and up).
 
+## Values
+
+One 64-bit word per value, with the tagging of `MICROPY_OBJ_REPR_A` (the default in `py/obj.h`):
+
+- `xxx1` is a small int, the value in the bits above the tag. The range is the reference's small-int range, 62 bits
+  signed on 64-bit hosts. A wider result is an error until big ints exist.
+- `x110` is an immediate: None `0x06`, False `0x0e`, True `0x16`.
+- A pointer (`xx00`) to a heap object whose first member is its type. Heap objects are not in the first slice.
+
+The runtime is `tests/mpy/runtime/mpy_rt.c`. The in-place operators (`MP_BINARY_OP_INPLACE_*`, codes 9..21) are the
+binary operators plus 13, as in `py/runtime0.h`; on ints they give the same result.
+
+## Lowering (first slice)
+
+`tools/mpy/mpy_lower.cpp` lowers a module's top-level code. The stack becomes slots `stk.N`, one per depth. The depth before
+each instruction is computed first, and a join must agree on it. Each instruction gets a label, and jumps go to the
+labels of their targets. It covers small-int and None/bool constants, names (`LOAD_NAME`, `STORE_NAME`, `LOAD_GLOBAL`,
+`STORE_GLOBAL`), `POP_TOP`, `DUP_TOP`, `ROT_TWO`, the binary and unary operators, `POP_JUMP_IF_FALSE`/`TRUE`, `JUMP`
+and `RETURN_VALUE`. Any other opcode is refused by name and no IR is written.
+
 ## Checks
 
 - `tests/mpy/reader_run.sh` (needs `MPY_CROSS`): every corpus module in `tests/mpy/corpus` loads and decodes.
 - The reader refuses trailing bytes and an instruction that runs past the end of its function, so a passing decode
   consumes every byte.
+- `tests/mpy/lower/run.sh` (needs `MPY_CROSS` and `MICROPY`): each `lower/*.py` runs through lowering, emitting, QBE and
+  linking, and its printed `result` must equal the reference's `print(m.result)` for the same `.mpy`. Each
+  `lower/err/*.py` must be refused with exit 3.
 
 ## Not yet
 
-Lowering the bytecode to the Path B IR, a runtime for MicroPython values, and comparison against the reference
-interpreter. The stack-based bytecode becomes IR slots after a stack-depth pass, as the Lua lowering does with registers.
+Functions and closures (frames and calls), containers, strings, classes, exceptions, `or`/`and` short-circuits
+(`JUMP_IF_*_OR_POP`), chained comparisons, big ints, and the rest of the opcodes. Also the `luac`-style opcode oracle is
+still blocked, and string pattern matching is paused.
