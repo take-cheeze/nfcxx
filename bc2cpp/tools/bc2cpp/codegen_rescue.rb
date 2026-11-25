@@ -962,17 +962,24 @@ class CodeGen
                    (local_suppressed.to_a - local_glue_at.keys)
     saved_blk_param_name = @blk_param_name
     @blk_param_name = 'bc2cpp_blk' if extra_fields.any? { |f| f[:name] == 'bc2cpp_blk' }
+    # RESCUE_SHARED_HANDLER: a nested handler's logging run (rescue_shared_handler.rb).
+    shared_range = region[:begin_addr]...region[:end_addr]
+    shared_runs = RescueSharedRuns.new(rescue_shared_plan(irep, lambda { |addr|
+      local_suppressed.include?(addr) || local_glue_at.key?(addr)
+    }, range: shared_range), BytecodeIR.for(irep))
     insns_in_addr_range(irep, range).each do |insn|
       idx = irep.index_of_addr(insn.addr)
       next if local_suppressed.include?(insn.addr) && !local_glue_at.key?(insn.addr)
 
-      out << "  L#{insn.addr}:;\n" if body_targets.include?(insn.addr)
-      out << if insn.addr == region[:end_addr]
-                "  return r#{region[:connector_reg]};\n"
-              else
-                local_glue_at[insn.addr] || rescue_try_insn_text(insn, irep, d, idx)
-              end
+      label = body_targets.include?(insn.addr) ? "  L#{insn.addr}:;\n" : ''
+      text = if insn.addr == region[:end_addr]
+               "  return r#{region[:connector_reg]};\n"
+             else
+               local_glue_at[insn.addr] || rescue_try_insn_text(insn, irep, d, idx)
+             end
+      shared_runs.feed(idx, label, text).each { |_, l, t| out << l << t }
     end
+    raise 'RESCUE_SHARED_HANDLER: a run was left open' if shared_runs.pending?
     @blk_param_name = saved_blk_param_name
     out << fell_off_end(try_name)
     out << "}\n\n"
