@@ -81,6 +81,11 @@
 #   --cosmo: build with cosmocc (Cosmopolitan libc, APE output) as the C compiler. Implies --backend=gcc. cosmocc is
 #                  read from NFCXX_COSMOCC, else build/cosmocc/bin/cosmocc (scripts/setup-cosmo.sh). docs/notes/cosmo.md.
 
+# The driver starts about 30 Ruby helpers per compile, and each one loads RubyGems first: about 30 ms of its 40 ms startup.
+# The helpers use the standard library only, so the driver's children run with --disable=gems (the same outputs; a hello-world
+# compile drops from about 2.1 s to 1.0 s). Set before the first child starts; the driver itself is already running.
+ENV["RUBYOPT"] = [ENV["RUBYOPT"], "--disable=gems"].compact.reject(&:empty?).join(" ")
+
 require "tempfile"
 require "tmpdir"
 require "fileutils"
