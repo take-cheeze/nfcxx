@@ -16,7 +16,7 @@ cd "$(dirname "$0")/../.."
 root=$PWD; work=$root/build/realworld; here=$root/tests/realworld/optcarrot
 mruby_pin=831da26b9021de0369d17b71b5667e2941a1a32d    # mruby/mruby tag 4.0.0, as run_mruby.sh
 optcarrot_pin=c215378a27b2dce8d8e5d98a3ed75e0354c5a840 # mame/optcarrot, the pin of rpg-maker-clone's 3rd/optcarrot
-onig_pin=4962d7eb42de079f6b3faec4b40560eb2941eeec      # mattn/mruby-onig-regexp master
+onig_pin=c18c8d7a1a73d6ac9317c806392362a29726b015      # take-cheeze/mruby-onig-regexp, bundles Onigmo 6.2.0 (mrbgems tag mrbgems-2026-11-25)
 want=59662; frames=${OPTCARROT_FRAMES:-180}
 command -v ruby >/dev/null || { echo "SKIP optcarrot: ruby not installed"; exit 0; }
 if command -v rake >/dev/null; then rake=(rake)
@@ -37,7 +37,7 @@ fetch() {
 }
 for spec in "mruby https://github.com/mruby/mruby $mruby_pin" \
             "optcarrot https://github.com/mame/optcarrot $optcarrot_pin" \
-            "mruby-onig-regexp https://github.com/mattn/mruby-onig-regexp $onig_pin"; do
+            "mruby-onig-regexp https://github.com/take-cheeze/mruby-onig-regexp $onig_pin"; do
   fetch $spec; rc=$?
   [ $rc -eq 2 ] && exit 0
   [ $rc -eq 0 ] || { echo "FAIL optcarrot: checkout of $spec failed"; exit 1; }
@@ -48,7 +48,10 @@ patch -d "$src" -p1 -N -s < "$here/mruby-module-function-scope.patch" || { echo 
 
 # mruby-onig-regexp's rakefile uses process-wide Dir.chdir blocks, which clash between rake threads under -j.
 git -C "$work/mruby-onig-regexp" checkout -q -f "$onig_pin"
-patch -d "$work/mruby-onig-regexp" -p1 -N -s < "$here/mruby-onig-regexp-no-chdir.patch" || { echo "FAIL optcarrot: the onig-regexp no-chdir patch does not apply"; exit 1; }
+# The pin already contains the patch when it reverse-applies; apply it otherwise.
+if ! patch -d "$work/mruby-onig-regexp" -p1 -R --dry-run -s < "$here/mruby-onig-regexp-no-chdir.patch" >/dev/null 2>&1; then
+  patch -d "$work/mruby-onig-regexp" -p1 -N -s < "$here/mruby-onig-regexp-no-chdir.patch" || { echo "FAIL optcarrot: the onig-regexp no-chdir patch does not apply"; exit 1; }
+fi
 
 backends=${NFCXX_BACKEND:-"gcc pathb"}
 [ -z "${OPTCARROT_CONTROL:-}" ] || backends="control $backends"
