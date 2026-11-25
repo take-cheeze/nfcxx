@@ -450,7 +450,8 @@ class CodeGen
   # RESCUE_LIVE_OUT: the try body is its own function, so locals it
   # writes (any local for an unmodelled op) or that a block created outside the
   # range touches are passed by reference, not copied. Temporaries stay copies:
-  # only the connector is live across the region. Returns register numbers.
+  # only the connector is live across the region. RESCUE_LIVE_REFS keeps a write
+  # nothing outside the range reads a copy too (rescue_read_outside). Returns register numbers.
   def rescue_ref_regs(irep, region)
     nlocals = irep.nlocals.to_i
     b = region[:begin_addr]
@@ -476,7 +477,47 @@ class CodeGen
       all, child_written = upvar_refs_into(child)
       inside ? written.merge(child_written) : touched.merge(all)
     end
+    live = rescue_live_refs_enabled? ? rescue_read_outside(irep, region) : nil
+    written &= live if live
     (written | touched).map(&:to_i).select { |r| r.between?(1, nlocals - 1) && r.to_s != region[:connector_reg] }.sort
+  end
+
+  # RESCUE_LIVE_REFS kill switch: BC2CPP_RESCUE_LIVE_REFS=0 aliases every local the try body writes.
+  def rescue_live_refs_enabled?
+    ENV['BC2CPP_RESCUE_LIVE_REFS'] != '0'
+  end
+
+  # RESCUE_LIVE_REFS: only a write some instruction outside [begin, end] can read needs to reach the outer register;
+  # the others stay the try body's own locals. The handler and the code after the join are outside, so a local the
+  # handler reads after a partial body is still an alias. Returns the register numbers such an instruction may
+  # read, or nil (alias every write) when the range builds a closure (it may keep the try body's frame) or a jump from
+  # after the range runs it again (the next run reads the previous one's writes).
+  RESCUE_EXACT_READ_OPS = Set[:MOVE, :GETIDX0, :AREF].freeze
+
+  def rescue_read_outside(irep, region)
+    b = region[:begin_addr]
+    e = region[:end_addr]
+    program = BytecodeIR.for(irep)
+    return nil if program.branch_edges.any? { |edge| edge.src > e && edge.target <= b }
+
+    nregs = irep.nregs.to_i
+    reads = Set.new
+    program.each_source do |insn, _|
+      if (b..e).cover?(insn.addr)
+        return nil if %i[BLOCK LAMBDA METHOD].include?(insn.op)
+
+        next
+      end
+      # ARGARY (a bare `super`) reads the method's arguments, BLKPUSH a `&blk` register, without naming them.
+      return nil if %i[ARGARY BLKPUSH].include?(insn.op)
+
+      regs = insn.regs.map(&:to_i)
+      next if regs.empty?
+
+      # Every operand, and for anything but a plain copy the window from its lowest operand up.
+      reads.merge(RESCUE_EXACT_READ_OPS.include?(insn.op) ? regs : (regs.min...[nregs, regs.max + 1].max).to_a)
+    end
+    reads
   end
 
   # Registers (digits) of +irep+'s parent that +irep+ and its nested blocks touch through GETUPVAR/SETUPVAR:
@@ -929,7 +970,7 @@ class CodeGen
       out << if insn.addr == region[:end_addr]
                 "  return r#{region[:connector_reg]};\n"
               else
-                local_glue_at[insn.addr] || compile_insn(insn, irep, d, idx)
+                local_glue_at[insn.addr] || rescue_try_insn_text(insn, irep, d, idx)
               end
     end
     @blk_param_name = saved_blk_param_name
@@ -1028,6 +1069,18 @@ class CodeGen
   def rescue_ctx_field_kept?(try_name, index)
     kept = @rescue_ctx_kept&.[](try_name)
     kept.nil? || kept[index]
+  end
+
+  # RESCUE_TRY_COLD kill switch: BC2CPP_RESCUE_TRY_COLD=0 leaves a try body's instructions as compile_insn emits them.
+  def rescue_try_cold_enabled?
+    ENV['BC2CPP_RESCUE_TRY_COLD'] != '0'
+  end
+
+  # RESCUE_TRY_COLD: a try body's instruction goes through COLD_COMPACT as compile_method's own do: the outlined arms
+  # are the same code behind a call, so where it runs (inside bc2cpp_protect) is unchanged.
+  def rescue_try_insn_text(insn, irep, d, idx)
+    text = compile_insn(insn, irep, d, idx)
+    rescue_try_cold_enabled? ? cold_compact(insn, text, d) : text
   end
 
   # RESCUE_SUPPORT: glue at begin_addr replacing [begin_addr, end_addr]: run the
