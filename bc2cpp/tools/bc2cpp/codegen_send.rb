@@ -2404,6 +2404,11 @@ class CodeGen
     slot[:index]
   end
 
+  # The CONST_SITE_CACHE slots registered so far (CONST_PLAIN_LOAD reads their kind, name and scope).
+  def const_site_entries
+    (@const_site_cache || {}).values
+  end
+
   # Every binding of +name+ is made once and never changed (CONST_SITE_CACHE / CONST_BINDING_CACHE).
   def immutable_constant?(name)
     !!(self.class.const_bindings&.key?(name) || self.class.stable_value_constants&.include?(name) ||
@@ -2507,6 +2512,8 @@ class CodeGen
              "  return #{const_slot_full('bc2cpp_cconst_slots', 'bc2cpp_cconst_have', i)} ? bc2cpp_cconst_slots[#{i}] : bc2cpp_cconst_fill_#{i}(M);\n" \
              "}\n"
     end
+    # CONST_PLAIN_LOAD rewrites table sites only; the gem hooks still call the prefill.
+    out << "static void bc2cpp_cconst_prefill(mrb_state*) {}\n"
     out << emit_const_member_cache(used)
     out
   end

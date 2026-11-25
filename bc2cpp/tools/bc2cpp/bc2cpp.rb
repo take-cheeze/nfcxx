@@ -60,6 +60,7 @@ require_relative 'int_box_outline'
 require_relative 'symbol_cache'
 require_relative 'class_test_fuse'
 require_relative 'const_site_cache'
+require_relative 'const_plain_load'
 require_relative 'static_dispatch_lists'
 require_relative 'native_frame_use'
 require_relative 'unique_class_names'
@@ -1587,6 +1588,13 @@ BC2CPP_MAIN = lambda do
     main_reach.notes.each { |reason| warn "  retain named roots: #{reason}" }
     main_reach.dead_keys.sort.each { |key| warn "  unreachable: #{key}" }
   end
+  # CONST_PLAIN_LOAD (const_plain_load.rb): which bodies may run during gem init and what init binds, for every unit.
+  if ConstPlainLoad.enabled? && !type_check_only && native_paths
+    profile_call.call('ConstPlainLoad.analyze') do
+      ConstPlainLoad.analyze(ireps, root_label, CodeGen.block_self_bodies.merge(registry) { |_name, original, settled| (original + settled).uniq },
+                             native_paths, foreign_ruby_srcs, aliases: CodeGen.core_aliases || {})
+    end
+  end
   # SHARED_GENERATION: everything above is the same for every unit; each continues from here in its own fork.
   if shared_units
     SharedGeneration.fork_units(shared_units, shared_prefix, shared_stderr, [symbol, out_dir])
@@ -1676,6 +1684,8 @@ BC2CPP_MAIN = lambda do
   end
   # MULTI_RETURN: the callees a destructuring caller names get their `X_mr` (codegen_multi_return.rb).
   compiled = gen.multi_return_link!(compiled)
+  # CONST_PLAIN_LOAD: before any helper scan reads the sites, so each scan sees the plain helpers.
+  ConstPlainLoad.apply(compiled, gen, ireps, symbol) if ConstPlainLoad.result && symbol != 'core_compiled' && gen.static_constants?
 
   # CORE_INTERPRETED_REPORT: every core-source bytecode method this run leaves
   # interpreted, with the reason and the language features it uses.

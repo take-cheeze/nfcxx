@@ -141,7 +141,9 @@ class CodeGen
   # list in bc2cpp_cconst_tests: a count, then the binding paths of the name, each a bc2cpp_const_path_has of the
   # name, then the scope's own path (bc2cpp_const_scope_has), the generated fill's tests in its order.
   def emit_const_site_cache_table(used)
-    called = used && helper_calls(used, 'bc2cpp_cconst_')
+    # CONST_PLAIN_LOAD (const_plain_load.rb): a bc2cpp_cconstp_<N> site reads slot N with no test.
+    plain = used ? helper_calls(used, 'bc2cpp_cconstp_') : Set.new
+    called = used && (helper_calls(used, 'bc2cpp_cconst_') | plain)
     live = (@const_site_cache || {}).values.select { |slot| !called || called.include?(slot[:index]) }
                                    .sort_by { |slot| slot[:index] }
     member_live = (@const_member_sites || []).each_with_index.reject { |_, i| used && !helper_calls(used, 'bc2cpp_mcnst_').include?(i) }
@@ -253,9 +255,41 @@ class CodeGen
              "}\n"
       live.each_with_index do |slot, i|
         out << "static inline mrb_value bc2cpp_cconst_#{slot[:index]}(mrb_state* M) { return bc2cpp_cconst_get(M, #{i}); }\n"
+        out << "static inline mrb_value bc2cpp_cconstp_#{slot[:index]}() { return bc2cpp_cconst_slots[#{i}]; }\n" if plain.include?(slot[:index])
       end
     end
+    out << emit_const_prefill(live.each_index.select { |i| plain.include?(live[i][:index]) })
     out << emit_const_member_cache_table(member_live)
+    out
+  end
+
+  # CONST_PLAIN_LOAD: bc2cpp_gem_init's last step fills every slot a plain site reads (+slots+, dense indices). A slot
+  # still empty there (a binding no init before this one made, a nil value) stops the VM: a plain read of it would be nil.
+  def emit_const_prefill(slots)
+    out = +"static void bc2cpp_cconst_prefill([[maybe_unused]] mrb_state* M) {\n"
+    if slots.empty?
+      out << "}\n"
+      return out
+    end
+
+    full = const_slot_full('bc2cpp_cconst_slots', 'bc2cpp_cconst_have', 'i')
+    out.prepend("static const uint16_t bc2cpp_cconst_plain[] = {\n#{static_const_words(slots)}};\n" \
+                "[[gnu::cold, gnu::noinline]] static void bc2cpp_cconst_unbound(mrb_state* M, int i) {\n" \
+                "  static const char head[] = \"bc2cpp CONST_PLAIN_LOAD: \";\n" \
+                "  static const char tail[] = \" is unbound when its gem's init ends (BC2CPP_CONST_PLAIN_LOAD=0 keeps the checked reads)\";\n" \
+                "  const char* name = bc2cpp_const_strings + bc2cpp_cconst_rows[i].name;\n" \
+                "  char msg[sizeof head + sizeof tail + 64];\n" \
+                "  size_t n = strlen(name) < 64 ? strlen(name) : 64;\n" \
+                "  memcpy(msg, head, sizeof head - 1);\n" \
+                "  memcpy(msg + sizeof head - 1, name, n);\n" \
+                "  memcpy(msg + sizeof head - 1 + n, tail, sizeof tail);\n" \
+                "  mrb_bug(M, msg);\n" \
+                "}\n")
+    out << "  for (int i : bc2cpp_cconst_plain) {\n" \
+           "    if (!(#{full})) bc2cpp_cconst_fill(M, i);\n" \
+           "    if (!(#{full})) bc2cpp_cconst_unbound(M, i);\n" \
+           "  }\n" \
+           "}\n"
     out
   end
 

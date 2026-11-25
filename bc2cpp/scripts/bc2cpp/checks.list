@@ -55,6 +55,7 @@ ruby scripts/bc2cpp/static_dispatch_lists_check.rb
 ruby scripts/bc2cpp/gc_root_check.rb
 ruby scripts/bc2cpp/zsuper_lookup_check.rb
 ruby scripts/bc2cpp/const_bindings_check.rb
+ruby scripts/bc2cpp/const_plain_load_check.rb
 ruby scripts/bc2cpp/explicit_block_arg_direct_check.rb
 ruby scripts/bc2cpp/stack_block_check.rb
 ruby scripts/bc2cpp/block_abi_check.rb

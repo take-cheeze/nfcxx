@@ -824,6 +824,7 @@ class CodeGen
   # the gem's mrblib loaded. Final drops the ids, constants and class pointers cached for this VM, so a later VM
   # at a reused address never sees them. Init clears the constant and class slots too (VM_CACHE_LIFETIME): their
   # hit path has no mrb_state compare, and the game's deferred gem init never runs gem_final.
+  # CONST_PLAIN_LOAD: the prefill is last, once the class bodies have bound what a plain site reads.
   # CLASS_BODY_EMIT_GEM: `class_units` (compile_top_class_units) are the top-level class bodies the compiled gem runs
   # itself, after the owner-class slots are reset and before the registrations below.
   # CORE_CLASS_UNITS (mruby mrblib.rake, MRB_CORE_CLASS_UNITS): the function mrb_init_mrblib calls in place of the core
@@ -843,6 +844,7 @@ class CodeGen
         bc2cpp_register_owner_methods(M);
         bc2cpp_capture_direct_construct_classes(M);
         bc2cpp_frame_free_install(M);
+        bc2cpp_cconst_prefill(M);
       }
       [[maybe_unused]] static void bc2cpp_gem_final() {
         bc2cpp_reset_symbol_cache();
