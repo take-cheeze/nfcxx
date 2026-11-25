@@ -33,6 +33,8 @@ expect() {
 expect tests/sem/sum_loop.ir "value 55"
 expect tests/sem/wrap_add.ir "value -2147483648"
 expect tests/sem/div_zero.ir "trap: division by zero"
+expect tests/sem/slot_store.ir "value 42"
+expect tests/sem/slot_uninit.ir "stuck: slot \$\"x\" is read before it is written"
 expect tests/sem/float_add.ir "stuck: constant of type double is not an integer literal: 1.5"
-echo "ok: the semantics gives the expected outcome for 4 IR functions (tests/sem)"
+echo "ok: the semantics gives the expected outcome for the IR functions in tests/sem"
 exit $fail
