@@ -181,10 +181,19 @@ class ElementReadRoots < RegisterFlow
     kill ? held & ~(1 << kill) : held
   end
 
-  # The node's text without its comments.
+  # The node's text without its comments, trailing blanks and blank lines (a call's text leads with them).
   def effect_text(node)
     @effect_texts ||= {}
-    @effect_texts[node] ||= @texts[node].gsub(COMMENT_LINE, '').gsub(COMMENT_BLOCK, '')
+    @effect_texts[node] ||= @texts[node].gsub(COMMENT_LINE, '').gsub(COMMENT_BLOCK, '').gsub(/[ \t]+$/, '')
+                                        .gsub(/^\n/, '')
+  end
+
+  # Liveness (RegisterFlow#live_out_sets) takes a definition from the same text effect reads, so a call that writes
+  # its destination past its comments kills that register as the walk does.
+  def info_for(index)
+    kill, reads = effect(index)
+    all = mention_mask(@texts[index])
+    kill ? [kill, reads, all] : [nil, all, all]
   end
 
   # [the register the node cleanly defines or nil, the registers it reads], by RegisterFlow's definition shape.

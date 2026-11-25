@@ -263,6 +263,101 @@ SOURCE = <<~RUBY
       out
     end
 
+    # ELEMENT_READ_BODIES: reads the liveness test in those bodies must still root. The value outlives the call that
+    # unlinks it through a copy, an outer register the try body aliases, a register the enclosing method keeps, a
+    # break value, or the next iteration.
+    def rescue_alias_clear_by_name
+      r = nil
+      begin
+        a = @cells
+        r = a[0]
+        a.send(:clear)
+        churn
+      rescue StandardError => e
+        e.message
+      end
+      r.inspect
+    end
+
+    def block_copy_clear_by_name
+      with_block do
+        a = @cells
+        r = a[0]
+        s = r
+        a.send(:clear)
+        churn
+        s.inspect
+      end
+    end
+
+    def loop_inline_clear_by_name
+      out = nil
+      [1].each do |i|
+        a = @cells
+        r = a[0]
+        a.send(:clear)
+        churn
+        out = [i, r.inspect]
+      end
+      out
+    end
+
+    def loop_out_clear_by_name
+      out = nil
+      [1].each { |i| out = @cells[i - 1] }
+      @cells.send(:clear)
+      churn
+      out.inspect
+    end
+
+    def loop_break_clear_by_name
+      v = [1].each { |i| break @cells[i - 1] }
+      @cells.send(:clear)
+      churn
+      v.inspect
+    end
+
+    def loop_next_iter_clear_by_name
+      prev = nil
+      [1, 2].each do |i|
+        if i == 1
+          prev = @cells[0]
+        else
+          @cells.send(:clear)
+          churn
+        end
+      end
+      prev.inspect
+    end
+
+    # Reads whose value is dead before any call: the body's liveness test leaves them unrooted.
+    def rescue_dead_read
+      a = @cells
+      x = a[0] ? 1 : 2
+      churn
+      x
+    rescue StandardError => e
+      e.message
+    end
+
+    def block_dead_read
+      with_block do
+        a = @cells
+        x = a[0] ? 1 : 2
+        churn
+        x
+      end
+    end
+
+    def loop_dead_read
+      n = 0
+      [1].each do |i|
+        n += @cells[0] ? i : 2
+        churn
+      end
+      n
+    end
+
     def hash_store_by_name
       h = @table
       r = h[:a]
@@ -351,9 +446,12 @@ CASES = %w[ivar_return ivar_local gvar_overwrite ary_overwrite hash_overwrite ar
            attr_overwrite ary_clear_by_name ary_store_by_name hash_clear_by_name hash_store_by_name
            each_clear_by_name map_clear_by_name map_proc_clear arg_clear_by_name mixed_slot_overwrite
            batch_overwrite callee_unlinks rescue_clear_by_name block_clear_by_name block_rescue_clear_by_name
-           rescue_block_clear_by_name nested_rescue_clear_by_name ensure_clear_by_name loop_body_clear_by_name].freeze
+           rescue_block_clear_by_name nested_rescue_clear_by_name ensure_clear_by_name loop_body_clear_by_name
+           rescue_alias_clear_by_name block_copy_clear_by_name loop_inline_clear_by_name loop_out_clear_by_name loop_break_clear_by_name
+           loop_next_iter_clear_by_name].freeze
 # Cases that need no root, so they match with the roots switched off too.
-UNROOTED_CASES = %w[pure_between imm_flag_overwrite clean_callee_between].freeze
+UNROOTED_CASES = %w[pure_between imm_flag_overwrite clean_callee_between rescue_dead_read block_dead_read
+                    loop_dead_read].freeze
 
 SCENARIO = <<~CPP
   static int scenario(mrb_state* M) {
@@ -412,8 +510,34 @@ Dir.mktmpdir('bc2cpp-gc-root') do |dir|
               !body_of.call(code, 'clean_callee_between').include?('bc2cpp_keep(') && !code.include?('KEEP_SUMMARY'))
   try_body = code[/GcRoot_rescue_clear_by_name_impl_rescue_try\(mrb_state\* M, void\* ud\) \{.*?\n\}\n/m].to_s
   suite.check('a try body roots its element read, and the method around it does not',
-              try_body.match?(/bc2cpp_ary_entry\(M, r\d+, 0\);\n\s*bc2cpp_keep\(M, r\d+\);/) &&
+              try_body.match?(/bc2cpp_ary_entry\(M, r\d+, 0\);.*?bc2cpp_keep\(M, r\d+\);/m) &&
               !body_of.call(code, 'rescue_clear_by_name').include?('bc2cpp_keep('))
+  # ELEMENT_READ_BODIES: the read whose value only feeds a branch is not rooted in a try body, a block function or an
+  # inlined loop body; BC2CPP_ELEMENT_READ_BODIES=0 roots each again.
+  dead_bodies = lambda do |text|
+    try = text[/GcRoot_rescue_dead_read_impl_rescue_try\(mrb_state\* M, void\* ud\) \{.*?\n\}\n/m].to_s
+    block = text[/^static mrb_value GcRoot_block_dead_read_block_fallback_\d+_impl\(mrb_state\* M, mrb_value self\) \{.*?\n\}\n/m].to_s
+    loop = body_of.call(text, 'loop_dead_read')
+    [try, block, loop]
+  end
+  # The `@cells[0]` read's destination is never rooted (a loop's own element root is another register).
+  read_rooted = lambda do |body|
+    dest = body[/(r\d+) = bc2cpp_ary_entry\(M, r\d+, (?!bc2cpp_each_i)[^;]*\);/, 1]
+    dest && body.include?("bc2cpp_keep(M, #{dest});")
+  end
+  dead = dead_bodies.call(code)
+  suite.check('a dead read in a try body, a block function and a loop body is not rooted (ELEMENT_READ_BODIES)',
+              dead.all? { |body| body.include?('bc2cpp_ary_entry(M,') && !read_rooted.call(body) })
+  Dir.mktmpdir('bc2cpp-gc-root-bodies') do |bodies_dir|
+    ENV['BC2CPP_ELEMENT_READ_BODIES'] = '0'
+    begin
+      unnarrowed, = Bc2cppFixtureRuntime.generate(SOURCE, bodies_dir, core: true, only_owners: OWNERS)
+    ensure
+      ENV.delete('BC2CPP_ELEMENT_READ_BODIES')
+    end
+    suite.check('BC2CPP_ELEMENT_READ_BODIES=0 roots them again',
+                dead_bodies.call(unnarrowed).all? { |body| read_rooted.call(body) })
+  end
   batch_body = ->(text) { text[/GcRoot_batch_overwrite_impl\(mrb_state\* M, mrb_value self\) \{.*?\n\}\n/m].to_s }
   suite.check('a run of slot stores roots the values it replaces in one call (KEEP_OLD_BATCH)',
               batch_body.call(code).include?('bc2cpp_keep_olds2(((GcRoot_ivars*)DATA_PTR(self))->ivar_list, ' \

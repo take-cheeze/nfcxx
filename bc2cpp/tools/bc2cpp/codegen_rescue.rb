@@ -967,6 +967,9 @@ class CodeGen
     shared_runs = RescueSharedRuns.new(rescue_shared_plan(irep, lambda { |addr|
       local_suppressed.include?(addr) || local_glue_at.key?(addr)
     }, range: shared_range), BytecodeIR.for(irep))
+    # ELEMENT_READ_BODIES: the texts are rooted together once the range is compiled (rescue_try_element_roots).
+    entries = []
+    claimed = []
     insns_in_addr_range(irep, range).each do |insn|
       idx = irep.index_of_addr(insn.addr)
       next if local_suppressed.include?(insn.addr) && !local_glue_at.key?(insn.addr)
@@ -974,11 +977,16 @@ class CodeGen
       label = body_targets.include?(insn.addr) ? "  L#{insn.addr}:;\n" : ''
       text = if insn.addr == region[:end_addr]
                "  return r#{region[:connector_reg]};\n"
+             elsif local_glue_at.key?(insn.addr)
+               local_glue_at[insn.addr]
              else
-               local_glue_at[insn.addr] || rescue_try_insn_text(insn, irep, d, idx)
+               claimed << idx if ElementReadRoots.element_read?(insn)
+               element_read_owned(insn, irep) { rescue_try_insn_text(insn, irep, d, idx) }
              end
-      shared_runs.feed(idx, label, text).each { |_, l, t| out << l << t }
+      entries << [idx, label, text]
     end
+    rooted = rescue_try_element_roots(irep, region, range, entries, claimed, extra_fields)
+    entries.each { |idx, label, _| shared_runs.feed(idx, label, rooted[idx]).each { |_, l, t| out << l << t } }
     raise 'RESCUE_SHARED_HANDLER: a run was left open' if shared_runs.pending?
     @blk_param_name = saved_blk_param_name
     out << fell_off_end(try_name)
@@ -993,6 +1001,24 @@ class CodeGen
 
     field_names = ['self'] + arg_names + extra_fields.map { |f| f[:name] }
     prune_rescue_ctx(drop_dead_statements(drop_unused_registers(out)), try_name, field_names, arg_names.size)
+  end
+
+  # ELEMENT_READ_BODIES: a try body's texts with its claimed element reads rooted by the liveness test. The body
+  # returns into bc2cpp_protect, which restores the arena, roots the result again, and whose glue roots every alias
+  # register again (emit_rescue_glue), whether the body returned or raised; every other register is a by-value copy
+  # that dies there. So leaving by its last return or by a raise is QUIET with those registers live, and any other
+  # return or throw (a method return or break carried past the glue, which roots nothing) is LOUD.
+  def rescue_try_element_roots(irep, region, range, entries, claimed, extra_fields)
+    program = BytecodeIR.for(irep)
+    texts = Array.new(program.size, '')
+    entries.each { |idx, _, text| texts[idx] = text }
+    nodes = insns_in_addr_range(irep, range).map { |insn| irep.index_of_addr(insn.addr) }
+    refs = extra_fields.filter_map { |f| f[:name][/\Abc2cpp_ref_r(\d+)\z/, 1]&.to_i }
+    ElementReadBodyRoots.root(irep, texts, claimed,
+                              nodes: nodes, pinned: RegisterFlow.captured_registers(irep), returns: :loud,
+                              quiet_returns: [irep.index_of_addr(region[:end_addr])],
+                              quiet_live: refs + [region[:connector_reg].to_i], loud_live: refs,
+                              handler_exit: [region[:begin_addr], region[:end_addr]])
   end
 
   # RESCUE_CTX_PRUNE kill switch: BC2CPP_RESCUE_CTX_PRUNE=0 passes every Ctx field.
