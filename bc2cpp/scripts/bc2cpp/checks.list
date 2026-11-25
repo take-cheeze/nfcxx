@@ -123,6 +123,7 @@ ruby scripts/bc2cpp/array_literal_block_check.rb
 ruby scripts/bc2cpp/send_arg_facts_check.rb
 ruby scripts/bc2cpp/constant_typing_check.rb
 ruby scripts/bc2cpp/stack_tuples_check.rb
+ruby scripts/bc2cpp/stack_rect_check.rb
 ruby scripts/bc2cpp/static_owner_dispatch_check.rb
 ruby scripts/bc2cpp/core_owner_arms_check.rb
 ruby scripts/bc2cpp/sym_call_chain_check.rb
