@@ -773,7 +773,8 @@ class CodeGen
       # mrb_ary_ref. This is `x, y, w, h = some_call(...)` destructuring.
       d, s = insn.regs.first(2)
       c = insn.src_and_literal&.last
-      "  #{RegName[d]} = mrb_array_p(#{RegName[s]}) ? bc2cpp_ary_entry(M, #{RegName[s]}, #{c}) : (#{c} == 0 ? #{RegName[s]} : mrb_nil_value());\n"
+      fixed_tuple_aref(irep, idx, d, s, c, reg_offset) ||
+        "  #{RegName[d]} = mrb_array_p(#{RegName[s]}) ? bc2cpp_ary_entry(M, #{RegName[s]}, #{c}) : (#{c} == 0 ? #{RegName[s]} : mrb_nil_value());\n"
     when :GETIDX
       # "GETIDX R2 (R3)": R[a] = R[a][R[a+1]] with a register index (vm.c).
       # Mirrors vm.c's fast paths: Array with an Integer index (mrb_ary_ref), Hash
