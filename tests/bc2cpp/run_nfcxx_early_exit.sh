@@ -87,7 +87,7 @@ PRELUDE
   echo "rc = EarlyExitWorld.main(ARGV)"
   echo "early_exit_real_exit(rc) if rc != 0"
 } > "$world"
-tail=$'rc = EarlyExitWorld.main(ARGV)\nexit(rc) if rc != 0\n'
+tail=$'rc = EarlyExitWorld.main(ARGV)\nearly_exit_real_exit(rc) if rc != 0\n'
 
 if leaf_run nfcxx-early-exit "$world" "$tail" EarlyExitWorld.main\(ARGV\) "$cases"; then
   echo "PASS bc2cpp nfcxx-early-exit"
