@@ -118,6 +118,14 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
     } else if (o == opcode("JUMP")) {
       op.kind = "JUMP";
       op.arg = (long long)op.next + in.arg;
+    } else if (o == opcode("ROT_THREE")) {
+      op.kind = "ROT_THREE";
+    } else if (o == opcode("JUMP_IF_TRUE_OR_POP")) {
+      op.kind = "JUMP_IF_TRUE_OR_POP";     // a jump keeps the value; the fall-through drops it
+      op.arg = (long long)op.next + in.arg;
+    } else if (o == opcode("JUMP_IF_FALSE_OR_POP")) {
+      op.kind = "JUMP_IF_FALSE_OR_POP";
+      op.arg = (long long)op.next + in.arg;
     } else if (o == opcode("MAKE_FUNCTION")) {
       op.kind = "MAKE_FUNCTION";           // the argument is the index of the child code object
       op.arg = in.arg;
@@ -145,8 +153,8 @@ int effect(const Op &op) {
     return 1;
   if (k == "CALL") return -(int)op.arg;   // the function and its arguments go, the result comes
   if (k == "STORE_NAME" || k == "STORE_LOCAL" || k == "POP_TOP" || k == "BINARY" || k == "JUMP_IF_FALSE" ||
-      k == "JUMP_IF_TRUE" || k == "RETURN")
-    return -1;
+      k == "JUMP_IF_TRUE" || k == "JUMP_IF_TRUE_OR_POP" || k == "JUMP_IF_FALSE_OR_POP" || k == "RETURN")
+    return -1;   // for the or-pop jumps this is the fall-through; the jump itself keeps the value
   return 0;   // UNARY, ROT_TWO, JUMP
 }
 
@@ -249,24 +257,28 @@ class Lowerer {
       int d = depth[at];
       int after = d + effect(op);
       if (after < 0) throw std::runtime_error("mpy: stack underflow");
-      std::vector<size_t> succ;
+      // (successor, depth there). A jump-or-pop keeps its value when it jumps, so the target is at depth d.
+      std::vector<std::pair<size_t, int>> succ;
       if (op.kind == "RETURN") {
         // nothing follows
       } else if (op.kind == "JUMP") {
-        succ.push_back((size_t)op.arg);
+        succ.push_back({(size_t)op.arg, after});
       } else if (op.kind == "JUMP_IF_FALSE" || op.kind == "JUMP_IF_TRUE") {
-        succ.push_back((size_t)op.arg);
-        succ.push_back(op.next);
+        succ.push_back({(size_t)op.arg, after});
+        succ.push_back({op.next, after});
+      } else if (op.kind == "JUMP_IF_FALSE_OR_POP" || op.kind == "JUMP_IF_TRUE_OR_POP") {
+        succ.push_back({(size_t)op.arg, d});
+        succ.push_back({op.next, after});
       } else {
-        succ.push_back(op.next);
+        succ.push_back({op.next, after});
       }
-      for (size_t s : succ) {
+      for (const auto &[s, sd] : succ) {
         if (s >= code.size()) throw std::runtime_error("mpy: a jump leaves the code");
         auto it = depth.find(s);
         if (it == depth.end()) {
-          depth[s] = after;
+          depth[s] = sd;
           work.push_back(s);
-        } else if (it->second != after) {
+        } else if (it->second != sd) {
           throw std::runtime_error("mpy: stack depth differs at a join");
         }
       }
@@ -388,6 +400,22 @@ class Lowerer {
         body << "  (let " << t << " int (call int &\"mpy_truth\" " << v << "))\n";
         body << "  (let " << c << " bool (ne int " << t << " (const int 0)))\n";
         if (k == "JUMP_IF_FALSE") {
+          body << "  (if " << c << " (then) (else (goto " << lbl((size_t)op.arg) << ")))\n";
+        } else {
+          body << "  (if " << c << " (then (goto " << lbl((size_t)op.arg) << ")) (else))\n";
+        }
+      } else if (k == "ROT_THREE") {
+        // bottom to top s0 s1 s2 becomes s2 s0 s1
+        std::string s2 = load(d - 1), s1 = load(d - 2), s0 = load(d - 3);
+        push(d - 3, s2);
+        push(d - 2, s0);
+        push(d - 1, s1);
+      } else if (k == "JUMP_IF_FALSE_OR_POP" || k == "JUMP_IF_TRUE_OR_POP") {
+        std::string v = load(d - 1);   // the value stays for the jump; the fall-through drops it (depth only)
+        std::string t = fresh(), c = fresh();
+        body << "  (let " << t << " int (call int &\"mpy_truth\" " << v << "))\n";
+        body << "  (let " << c << " bool (ne int " << t << " (const int 0)))\n";
+        if (k == "JUMP_IF_FALSE_OR_POP") {
           body << "  (if " << c << " (then) (else (goto " << lbl((size_t)op.arg) << ")))\n";
         } else {
           body << "  (if " << c << " (then (goto " << lbl((size_t)op.arg) << ")) (else))\n";

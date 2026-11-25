@@ -46,7 +46,8 @@ binary operators plus 13, as in `py/runtime0.h`; on ints they give the same resu
 each instruction is computed first, and a join must agree on it. Each instruction gets a label, and jumps go to the
 labels of their targets. It covers small-int and None/bool constants, names (`LOAD_NAME`, `STORE_NAME`, `LOAD_GLOBAL`,
 `STORE_GLOBAL`), locals (`LOAD_FAST`/`STORE_FAST`), `POP_TOP`, `DUP_TOP`, `ROT_TWO`, the binary and unary operators,
-`POP_JUMP_IF_FALSE`/`TRUE`, `JUMP`, `MAKE_FUNCTION`, `CALL_FUNCTION` and `RETURN_VALUE`. Any other opcode is refused by
+`POP_JUMP_IF_FALSE`/`TRUE`, `JUMP`, the `JUMP_IF_*_OR_POP` pair (short-circuit `or`/`and`), `ROT_THREE` (chained
+comparisons), `MAKE_FUNCTION`, `CALL_FUNCTION` and `RETURN_VALUE`. Any other opcode is refused by
 name and no IR is written.
 
 Each code object is one IR function. The module body is `mpy_module`. A function is `mpy_fn_K(ret, args, nargs)`: it
@@ -66,6 +67,5 @@ checks the arity and dispatches. Functions with defaults, keyword arguments, clo
 
 ## Not yet
 
-Closures (cells), defaults and keyword arguments, containers, strings, classes, exceptions, `or`/`and` short-circuits
-(`JUMP_IF_*_OR_POP`), chained comparisons, big ints, and the rest of the opcodes. Also the `luac`-style opcode oracle is
+Closures (cells), defaults and keyword arguments, generators, containers, strings, classes, exceptions, `is`, big ints, and the rest of the opcodes. Also the `luac`-style opcode oracle is
 still blocked, and string pattern matching is paused.
