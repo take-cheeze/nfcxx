@@ -330,13 +330,48 @@ def findDefault : List Stmt → Option (List Stmt)
   | _ :: rest => findDefault rest
 
 -- Statements and statement lists with their fuel: each level of nesting uses one unit, and each loop
--- iteration runs its body with the same fuel. Out of fuel is `stuck`.
+-- iteration runs its body with the same fuel. Out of fuel is `stuck`. A call runs its callee with the fuel
+-- of the statement that makes it and one nested call less (`Ctx.depth`), so a recursion is bounded too.
+
+/-- What the statements run in: the functions of the module, for calls, and how many nested calls are still
+allowed. -/
+structure Ctx where
+  prog : List Func
+  depth : Nat
+
+/-- The nested calls a run allows; a recursion deeper than this is out of fuel. -/
+def callDepth : Nat := 1000
+
+/-- The kind of a parameter, for the stuck messages. -/
+def paramKind : Param → String
+  | Param.sret .. => "sret"
+  | Param.named .. => "named"
+  | Param.byval .. => "byval"
+  | Param.ellipsis => "ellipsis"
+
+/-- The environment of a callee: its parameters bound to the arguments, each reduced into the integer type of
+its parameter. The environment starts empty, so the callee's registers and slots are its own. -/
+def bindArgs : List Param → List Int → Except Outcome Env
+  | [], [] => .ok []
+  | [], _ :: _ | _ :: _, [] => .error (.stuck "argument count does not match the parameters")
+  | Param.named n nm t :: ps, v :: vs => do
+    match infoOf t with
+    | some (bits, signed) =>
+      let rest ← bindArgs ps vs
+      return rest.set (.reg n) (wrapTo bits signed v) (some (bits, signed))
+    | none => .error (.stuck s!"parameter {nm} of non-integer type {tyText t} is not modelled")
+  | p :: _, _ => .error (.stuck s!"a {paramKind p} parameter is not modelled")
+
 mutual
 
-def execStmt : Nat → Env → Stmt → Except Outcome (Env × Flow)
-  | 0, _, _ => .error (.stuck "out of fuel")
-  | n + 1, env, s =>
+def execStmt : Nat → Ctx → Env → Stmt → Except Outcome (Env × Flow)
+  | 0, _, _, _ => .error (.stuck "out of fuel")
+  | n + 1, ctx, env, s =>
     match s with
+    | Stmt.letS r t (RValue.call cty callee va args) => do
+      match ← callValue n ctx env cty callee va args with
+      | some v => return (env.set (.reg r) v (infoOf t), .normal)
+      | none => .error (.stuck s!"a call without a value is bound to %{r}")
     | Stmt.letS r t rv => do
       let v ← evalRValue env rv
       return (env.set (.reg r) v (infoOf t), .normal)
@@ -352,6 +387,10 @@ def execStmt : Nat → Env → Stmt → Except Outcome (Env × Flow)
       match infoOf t with
       | some (bits, signed) => return (env.set (.slot x) (wrapTo bits signed v) (some (bits, signed)), .normal)
       | none => .error (.stuck s!"store of a non-integer type {tyText t}")
+    | Stmt.evalS (RValue.call cty callee va args) => do
+      -- the value of a call is discarded; a trap or a stuck form in the call still happens
+      let _ ← callValue n ctx env cty callee va args
+      return (env, .normal)
     | Stmt.evalS rv => do
       -- the value is discarded; a trap or a stuck form in it still happens
       let _ ← evalRValue env rv
@@ -367,19 +406,19 @@ def execStmt : Nat → Env → Stmt → Except Outcome (Env × Flow)
       match start <|> findDefault arms with
       | none => return (env, .normal)
       | some l => do
-        let (env', fl) ← execSwitchList n env l
+        let (env', fl) ← execSwitchList n ctx env l
         match fl with
         | .brk => return (env', .normal)
         | _ => return (env', fl)
     | Stmt.caseS _ | Stmt.dflt => .error (.stuck "case or default label outside a switch body")
     | Stmt.ifS c th el => do
       let v ← evalOperand env c
-      if v != 0 then execList n env th
+      if v != 0 then execList n ctx env th
       else match el with
         | none => return (env, .normal)
-        | some es => execList n env es
-    | Stmt.loop body step => execLoop n n env body step
-    | Stmt.block ss => execList n env ss
+        | some es => execList n ctx env es
+    | Stmt.loop body step => execLoop n ctx env body step
+    | Stmt.block ss => execList n ctx env ss
     | Stmt.brk => return (env, .brk)
     | Stmt.cont => return (env, .cont)
     | Stmt.ret none => return (env, .ret none)
@@ -391,57 +430,101 @@ def execStmt : Nat → Env → Stmt → Except Outcome (Env × Flow)
     | Stmt.loc _ _ | Stmt.likely | Stmt.unlikely => return (env, .normal)
     | st => .error (.stuck s!"statement {stmtName st} not modelled")
 
-def execList : Nat → Env → List Stmt → Except Outcome (Env × Flow)
-  | 0, _, _ => .error (.stuck "out of fuel")
-  | _ + 1, env, [] => return (env, .normal)
-  | n + 1, env, s :: ss => do
-    let (env', fl) ← execStmt n env s
-    match fl with
-    | .normal => execList n env' ss
-    | _ => return (env', fl)
+/-- A call of a function of the module, found by its linkage name. The arguments are evaluated in the caller's
+environment; the callee runs in a fresh one, with one nested call less. Its return value, reduced into the
+integer type of the call, is the value of the call; a call of type void has no value. A callee outside the
+module, a variadic call, a count of arguments that differs from the parameters, and an indirect call are stuck. -/
+def callValue : Nat → Ctx → Env → Ty → Operand → Option Nat → List Operand → Except Outcome (Option Int)
+  | 0, _, _, _, _, _, _ => .error (.stuck "out of fuel")
+  | k + 1, ctx, env, ty, callee, variadic, args => do
+  let name ← match callee with
+    | Operand.fnRef x => pure x
+    | o => throw (.stuck s!"call through {operandName o} is not modelled")
+  if variadic.isSome then throw (.stuck s!"variadic call of {name} is not modelled")
+  let fn ← match ctx.prog.find? (fun f => f.linkage == name) with
+    | some f => pure f
+    | none => throw (.stuck s!"call of external function {name} is not modelled")
+  if fn.params.length != args.length then
+    throw (.stuck s!"call of {name} with {args.length} arguments, but it has {fn.params.length} parameter(s)")
+  let vals ← args.mapM (evalOperand env)
+  if ctx.depth == 0 then throw (.stuck "out of fuel: the calls are nested too deeply")
+  let frame ← bindArgs fn.params vals
+  let (_, fl) ← execList k { ctx with depth := ctx.depth - 1 } frame fn.body
+  let r : Option Int ← match fl with
+    | .ret v => pure v
+    | .normal => pure none
+    | _ => throw (.stuck "break or continue outside a loop")
+  if primName ty == some "void" then return none
+  match infoOf ty with
+  | none => throw (.stuck s!"call of {name} with a result of type {tyText ty} is not modelled")
+  | some (bits, signed) =>
+    match r with
+    | some v => return some (wrapTo bits signed v)
+    | none => throw (.stuck s!"call of {name} ends without a value")
 
 /-- The arms of a switch from the chosen label on: control falls through them in order, and a label reached
 this way does nothing. `break` is handled by the switch; `continue` and `return` leave it. -/
-def execSwitchList : Nat → Env → List Stmt → Except Outcome (Env × Flow)
-  | 0, _, _ => .error (.stuck "out of fuel")
-  | _ + 1, env, [] => return (env, .normal)
-  | n + 1, env, s :: ss =>
+def execSwitchList : Nat → Ctx → Env → List Stmt → Except Outcome (Env × Flow)
+  | 0, _, _, _ => .error (.stuck "out of fuel")
+  | _ + 1, _, env, [] => return (env, .normal)
+  | n + 1, ctx, env, s :: ss =>
     match s with
-    | Stmt.caseS _ | Stmt.dflt => execSwitchList n env ss
+    | Stmt.caseS _ | Stmt.dflt => execSwitchList n ctx env ss
     | _ => do
-      let (env', fl) ← execStmt n env s
+      let (env', fl) ← execStmt n ctx env s
       match fl with
-      | .normal => execSwitchList n env' ss
+      | .normal => execSwitchList n ctx env' ss
       | _ => return (env', fl)
 
+def execList : Nat → Ctx → Env → List Stmt → Except Outcome (Env × Flow)
+  | 0, _, _, _ => .error (.stuck "out of fuel")
+  | _ + 1, _, env, [] => return (env, .normal)
+  | n + 1, ctx, env, s :: ss => do
+    let (env', fl) ← execStmt n ctx env s
+    match fl with
+    | .normal => execList n ctx env' ss
+    | _ => return (env', fl)
+
 /-- A loop: run the body; `break` leaves it; `continue` or the end of the body runs the step, then the body
-again. The first argument counts the iterations left, so the loop always ends. -/
-def execLoop : Nat → Nat → Env → List Stmt → List Stmt → Except Outcome (Env × Flow)
+again. Each iteration uses one unit of fuel, and the body and the step run with the fuel that is left, so the
+loop always ends. -/
+def execLoop : Nat → Ctx → Env → List Stmt → List Stmt → Except Outcome (Env × Flow)
   | 0, _, _, _, _ => .error (.stuck "out of fuel")
-  | k + 1, n, env, body, step => do
-    let (env1, fl) ← execList n env body
+  | f + 1, ctx, env, body, step => do
+    let (env1, fl) ← execList f ctx env body
     match fl with
     | .brk => return (env1, .normal)
     | .ret v => return (env1, .ret v)
     | _ => do
-      let (env2, fl2) ← execList n env1 step
+      let (env2, fl2) ← execList f ctx env1 step
       match fl2 with
-      | .normal => execLoop k n env2 body step
+      | .normal => execLoop f ctx env2 body step
       | .brk => return (env2, .normal)
       | _ => return (env2, fl2)
 
 end
 
-/-- Runs a function without parameters: its body from the empty registers. Falling off the end gives
-`value none`. -/
+/-- Runs a function without parameters, from its body, with the functions `prog` available to its calls.
+Falling off the end gives `value none`. -/
+def runFn (fuel : Nat) (prog : List Func) (fn : Func) : Outcome :=
+  match execList fuel { prog := prog, depth := callDepth } [] fn.body with
+  | .error o => o
+  | .ok (_, .ret v) => .value v
+  | .ok (_, .normal) => .value none
+  | .ok (_, _) => .stuck "break or continue outside a loop"
+
+/-- Runs a function without parameters on its own: it has no module, so every call in it is stuck. -/
 def runFunc (fuel : Nat) (fn : Func) : Outcome :=
   if !fn.params.isEmpty then .stuck "functions with parameters are not modelled"
-  else
-    match execList fuel [] fn.body with
-    | .error o => o
-    | .ok (_, .ret v) => .value v
-    | .ok (_, .normal) => .value none
-    | .ok (_, _) => .stuck "break or continue outside a loop"
+  else runFn fuel [] fn
+
+/-- Runs the function named `name` of a module, without parameters; its calls reach the functions of `prog`. -/
+def runNamed (fuel : Nat) (prog : List Func) (name : String) : Outcome :=
+  match prog.find? (fun f => f.linkage == name) with
+  | none => .stuck s!"no function {name} in the module"
+  | some fn =>
+    if !fn.params.isEmpty then .stuck "functions with parameters are not modelled"
+    else runFn fuel prog fn
 
 /-! ### Lemmas -/
 
