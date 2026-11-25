@@ -1,0 +1,13 @@
+(ir-module "sum_loop.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "main"
+  (ret int)
+  (params)
+  (let %0 int (const int 0))
+  (let %1 int (const int 1))
+  (loop (body
+    (let %2 bool (lt.s int %1 (const int 11)))
+    (if %2 (then) (else (break)))
+    (let %3 int (wadd int %0 %1))
+    (set %0 %3))
+    (step (let %4 int (wadd int %1 (const int 1))) (set %1 %4)))
+  (return %0))

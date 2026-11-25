@@ -1,0 +1,6 @@
+(ir-module "float_add.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "main"
+  (ret double)
+  (params)
+  (let %0 double (fadd double (const double 1.5) (const double 2.0)))
+  (return %0))
