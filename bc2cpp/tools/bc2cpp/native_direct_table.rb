@@ -69,6 +69,9 @@ module NativeDirect
     "_midi_available" => {
       "RGSS::Audio.singleton" => ["midi_available_direct", []]
     },
+    "_pixel_bytes" => {
+      "RGSS::Bitmap.singleton" => ["bmp_s_pixel_bytes_direct", []]
+    },
     "_push" => {
       "RGSS::Input.singleton" => ["input_push_direct", [:int, :bool]]
     },
