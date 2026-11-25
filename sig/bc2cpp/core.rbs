@@ -1,0 +1,562 @@
+# Core RBS: declarations of the core mruby classes and modules (String, Array, Kernel, IO, ...). Game
+# declarations (RPG2k, Game, LCF, RGSS) stay in declarations.rbs. Read by the same loader as declarations.rbs.
+
+class Enumerable
+end
+
+class Integer
+  # Every return is provably bool (predicate gate: tools/bc2cpp/predicate_returns.rb).
+  def allbits?: (untyped) -> bool
+  # Every return is provably bool (predicate gate: tools/bc2cpp/predicate_returns.rb).
+  def anybits?: (untyped) -> bool
+  # Every return is provably bool (predicate gate: tools/bc2cpp/predicate_returns.rb).
+  def integer?: () -> bool
+  # Every return is provably bool (predicate gate: tools/bc2cpp/predicate_returns.rb).
+  def nobits?: (untyped) -> bool
+end
+
+# ---- native: core_block_returns
+# Block-return declarations of methods mruby's own Ruby defines. Each is checked
+# against the method's bytecode, compiled from the build's own source (an outside Ruby file is compiled for the check):
+# a plain yielder whose every yield passes the declared arguments, and whose every return path, with a block given,
+# returns a yield's value (`-> T`) or self (`-> self`). Array#each's `-> self` is in core_block_params.rbs.
+#
+# Verified against 3rd/mruby/mrbgems/mruby-object-ext/mrblib/object.rb:
+#   - Kernel#tap: `yield self; self` (BLKCALL with one argument, RETSELF);
+#   - Kernel#yield_self: `return to_enum(:yield_self) unless block; block.call(self)` (the to_enum path needs no block);
+#   - Kernel#then: `alias then yield_self`, unconditional in the module body.
+# Left out, as not one of the two shapes: Hash#fetch and Array#fetch with a block return the stored value when the key
+# is present (`V | T`), and Hash#each's block receives one [key, value] Array that core_block_params.rbs's (K, V)
+# shape destructures.
+# bc2cpp-native: core_block_returns
+module Kernel
+  def tap: () { (self) -> void } -> self
+  def yield_self: [T] () { (self) -> T } -> T
+  def then: [T] () { (self) -> T } -> T
+end
+
+# ---- native: core_class_tests
+# The classes mruby's own natives register each class-test name on, read by CoreFactSigs.class_test_owners
+# (codegen_class_narrowing.rb CLASS_TEST_NATIVE_OWNERS). CodeGen#class_test_native_owners? accepts a name only when
+# every native registration the build compiles lands on one of these owners. The positional parameters are the
+# registration's arity. scripts/bc2cpp/core_facts_rbs_check.rb scans 3rd/mruby's sources (the scan codegen uses,
+# NativeExpressionDevirt.scan_class_registrations) and requires each name's owners and arity to be exactly these:
+#   - Kernel: src/kernel.c kernel_rom_entries;
+#   - NilClass#nil?: src/object.c nil_rom_entries (mrb_true);
+#   - BasicObject#!: src/class.c bob_rom_entries (mrb_bob_not).
+# bc2cpp-native: core_class_tests
+module Kernel
+  def is_a?: (Module klass) -> bool
+  def kind_of?: (Module klass) -> bool
+  def instance_of?: (Module klass) -> bool
+  def nil?: () -> bool
+end
+
+# bc2cpp-native: core_class_tests
+class NilClass
+  def nil?: () -> true
+end
+
+# bc2cpp-native: core_class_tests
+class BasicObject
+  def !: () -> bool
+end
+
+# bc2cpp-native: core_class_tests
+module Kernel
+  def raise: (?untyped exception, ?String message) -> bot
+  def respond_to?: (Symbol name, ?bool include_all) -> bool
+  def class: () -> untyped
+end
+
+# ---- native: core_enumerators
+# Kernel methods that build an Enumerator over another method of the receiver, read by CoreFactSigs.enumerator_makers
+# (call_site_index.rb ENUM_SENDS, enumerator_model.rb NAMES): `to_enum(:meth, *args)` later runs `meth(*args)` on
+# the receiver, so a site naming one is a caller of `meth`. Each must return Enumerator. scripts/bc2cpp/
+# core_facts_rbs_check.rb checks them against mrbgems/mruby-enumerator/mrblib/enumerator.rb: `module Kernel` defines
+# `def to_enum(meth=:each, *args, **kwd)` as `Enumerator.new self, meth, *args, **kwd` and `alias enum_for to_enum`.
+# EnumeratorModel still proves the program's definitions are those before TO_ENUM_DIRECT trusts them.
+# bc2cpp-native: core_enumerators
+module Kernel
+  def to_enum: (?Symbol meth, *untyped args, **untyped kwd) -> Enumerator[untyped, untyped]
+  def enum_for: (?Symbol meth, *untyped args, **untyped kwd) -> Enumerator[untyped, untyped]
+end
+
+# ---- native: core_frame_readers
+# Kernel methods that read the CALLING frame, read by CoreFactSigs.frame_readers (tools/bc2cpp/core_fact_sigs.rb).
+# The return type says what is read: a bool answers whether the caller was passed a block
+# (codegen_arg_shapes.rb BLOCK_GIVEN_NAMES), a Binding captures the caller's whole frame (FRAME_READING_NAMES).
+# Any other return is rejected. scripts/bc2cpp/core_facts_rbs_check.rb checks each against 3rd/mruby:
+#   - block_given?/iterator?: src/kernel.c, kernel_rom_entries `MRB_MT_ENTRY(mrb_f_block_given_p_m, ...)`, no
+#     arguments, registered on Kernel only;
+#   - binding: mrbgems/mruby-binding/src/binding.c, `mrb_define_private_method_id(mrb, mrb->kernel_module,
+#     MRB_SYM(binding), mrb_f_binding, MRB_ARGS_NONE())`.
+# bc2cpp-native: core_frame_readers
+module Kernel
+  def block_given?: () -> bool
+  def iterator?: () -> bool
+  def binding: () -> Binding
+end
+
+# ---- native: core_hierarchy
+# The core class hierarchy mruby declares outside the program, read by tools/bc2cpp/core_hierarchy_sigs.rb
+# (call_facts.rb CORE_SUPER / CORE_MIXINS). A class with no superclass line is BasicObject only.
+# bc2cpp-native: core_hierarchy
+class BasicObject
+end
+
+# bc2cpp-native: core_hierarchy
+class Object < BasicObject
+  include Kernel
+end
+
+# bc2cpp-native: core_hierarchy
+class Module < Object
+end
+
+# bc2cpp-native: core_hierarchy
+class Class < Module
+end
+
+# bc2cpp-native: core_hierarchy
+class NilClass < Object
+end
+
+# bc2cpp-native: core_hierarchy
+class TrueClass < Object
+end
+
+# bc2cpp-native: core_hierarchy
+class FalseClass < Object
+end
+
+# bc2cpp-native: core_hierarchy
+class Fiber < Object
+end
+
+# bc2cpp-native: native_singletons
+class Fiber
+  # bc2cpp-c: bc2cpp_fiber_s_current
+  # Registered on Fiber's singleton by the fiber runtime (runtime/bc2cpp_fiber.hxx, bc2cpp_fiber_define).
+  # It answers the C++ fiber being resumed, else the root fiber.
+  def self.current: () -> Fiber
+end
+
+class Numeric < Object
+  def negative?: () -> untyped
+  # Every return is provably bool (predicate gate: tools/bc2cpp/predicate_returns.rb).
+  def integer?: () -> bool
+  # Every return is provably bool (predicate gate: tools/bc2cpp/predicate_returns.rb).
+  def positive?: () -> bool
+  # bc2cpp-native: core_hierarchy
+  include Comparable
+end
+
+# bc2cpp-native: core_hierarchy
+class Integer < Numeric
+end
+
+# bc2cpp-native: core_hierarchy
+class Float < Numeric
+end
+
+class String < Object
+  # bc2cpp-native: core_fresh_arrays
+  def split: (*untyped args) -> Array[String]
+  # bc2cpp-native: core_hierarchy
+  include Comparable
+  # bc2cpp-native: core_results
+  def bytes: () -> Array[Integer]
+  # bc2cpp-native: core_results
+  def size: () -> Integer
+  # bc2cpp-native: core_results
+  def length: () -> Integer
+  # bc2cpp-native: core_results
+  def to_s: () -> String
+end
+
+# bc2cpp-native: core_hierarchy
+class Symbol < Object
+  include Comparable
+end
+
+class Enumerator[unchecked out Elem, out Return] < Object
+end
+
+class Array[unchecked out Elem] < Object
+# ---- single-class traced types (trace_types.rb candidates over the 13 workloads, BC2CPP_TRACE_TYPES)
+# Only methods whose traced parameters and returns each name one class (no union), and that the sections above do not
+# already declare. Candidates stay reviewable; the loader applies them as the other trace-derived sections do.
+  def delete_if: () -> untyped
+  def each: () -> untyped
+  # bc2cpp-vetted: fresh-array
+  def sort: () -> untyped
+  def uniq: () -> untyped
+# Unified return types (trace candidates, scripts/bc2cpp/trace_types.rb candidates --hierarchy). Each is a
+# runtime-checked hint (%a{bc2cpp:hint}); a body that returns another class raises BC2cppDeclarationViolation.
+  # Every return is provably bool (predicate gate: tools/bc2cpp/predicate_returns.rb).
+  def include?: (untyped) -> bool
+# ---- native: core_block_params
+# Block parameter shapes of core Array and Hash iterators (CORE_BLOCK_ELEMENT_HINT), read by CoreBlockParamSigs
+# (tools/bc2cpp/core_block_param_sigs.rb) for CodeGen#block_fallback_element_hints. A block parameter typed `Elem`
+# (Array) or `V` (Hash) receives one element (value) of the receiver; `K` and `untyped` positions get no hint (no
+# key facts exist). The method's own positionals give the argument counts the shape holds for: required ones must
+# be passed, optional ones may be. Only the block's positional count is matched against the literal block, so a
+# block whose arity differs (`each { |a, b| }` destructures an element) gets nothing.
+#
+# Verified against 3rd/mruby:
+#   - Array#each, #sort (mrblib/array.rb), #index/#rindex (src/array.c, mrb_yield of each element);
+#   - Enumerable#collect/map, #detect/find, #find_all/select, #reject, #partition, #each_with_index, #inject/reduce
+#     (mrblib/enum.rb: `self.each {|*val| block.call(*val)}`, so each call gets the element itself; inject calls
+#     `block.call(result, val)`, each_with_index `block.call(val.__svalue, i)`);
+#   - Enumerable#count/any?/all?/none?/flat_map/group_by/min_by/max_by/sum/find_index/filter_map/each_with_object/
+#     take_while/drop_while/filter (mruby-enum-ext), Array#sort_by (mruby-enum-ext, `each_with_index {|e, i|
+#     block.call(e)}`);
+#   - Array#find/uniq/delete_if/reject!/keep_if/select!/reverse_each (mruby-array-ext);
+#   - Hash#each (mrblib/hash.rb, `block.call([keys[i], vals[i]])`, which a two-parameter block destructures),
+#     #each_pair (alias), #each_value (`block.call(v)`), #each_key, #select/#reject (`block.call([k, v])`),
+#     #filter (alias, mruby-hash-ext).
+# A program definition of the name on the receiver's lookup chain voids the shape (block_fallback_element_hints).
+# Array#each's `-> self` is a block-return declaration, checked against mrblib/array.rb's
+# body (`return to_enum(:each) unless block`, `yield self[idx]` in a loop, then `self`).
+  # bc2cpp-native: core_block_params
+  def each: () { (Elem) -> void } -> self
+  # bc2cpp-native: core_block_params
+  def reverse_each: () { (Elem) -> void } -> untyped
+  # bc2cpp-native: core_block_params
+  def map: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def collect: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def flat_map: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def filter_map: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def select: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def filter: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def find_all: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def reject: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def select!: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def reject!: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def keep_if: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def delete_if: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def partition: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def group_by: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def find: (?untyped ifnone) { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def detect: (?untyped ifnone) { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def find_index: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def index: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def rindex: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def any?: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def all?: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def none?: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def count: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def sum: (?untyped init) { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def sort_by: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def min_by: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def max_by: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def uniq: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def take_while: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def drop_while: () { (Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def sort: () { (Elem, Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def each_with_index: () { (Elem, Integer) -> void } -> untyped
+  # bc2cpp-native: core_block_params
+  def each_with_object: (untyped memo) { (Elem, untyped) -> void } -> untyped
+  # bc2cpp-native: core_block_params
+  def inject: (?untyped init) { (untyped, Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def reduce: (?untyped init) { (untyped, Elem) -> untyped } -> untyped
+  # bc2cpp-native: core_fresh_arrays
+  def compact: () -> Array[untyped]
+  # bc2cpp-native: core_fresh_arrays
+  def flatten: (?Integer depth) -> Array[untyped]
+  # bc2cpp-native: core_fresh_arrays
+  def uniq: () -> Array[untyped]
+  # bc2cpp-native: core_hierarchy
+  include Enumerable
+# ---- native: core_predicates
+# Built-in predicates, declared from the standard RBS core (rbs gem core/array.rbs, hash.rbs, enumerable.rbs). mruby
+# defines these in Ruby (3rd/mruby/mrblib/enum.rb and mruby-enum-ext), and both forms return only true or false.
+# Declarations only: the program does not define them, so rbs_signatures.rb gives them no hint and core_results.rbs
+# still holds the result kinds NativeCoreResultSigs reads.
+  # bc2cpp-native: core_predicates
+  def any?: () -> bool | (untyped) -> bool | () { (untyped) -> untyped } -> bool
+# ---- native: core_results
+# Result classes of built-in methods, read by tools/bc2cpp/native_core_result_sigs.rb (not by rbs_signatures.rb:
+# these methods are native, so the program does not define them). A return names the class a call on an exact
+# receiver of that class yields. Only Array and String are accepted. Each entry still needs the closed-world pins in
+# NativeClassResults.core_result_pinned? and codegen_native_results.rb before codegen trusts it.
+  # bc2cpp-native: core_results
+  def to_a: () -> Array[untyped]
+  # bc2cpp-native: core_results
+  def compact: () -> Array[untyped]
+  # bc2cpp-native: core_results
+  def join: (?String sep) -> String
+  # bc2cpp-native: core_results
+  def +: (Array[untyped] other) -> Array[untyped]
+  # bc2cpp-native: core_results
+  def -: (Array[untyped] other) -> Array[untyped]
+  # bc2cpp-native: core_results
+  def size: () -> Integer
+  # bc2cpp-native: core_results
+  def length: () -> Integer
+end
+
+class Hash[unchecked out K, unchecked out V] < Object
+  def select: () -> untyped
+  # bc2cpp-native: core_block_params
+  def each: () { (K, V) -> void } -> untyped
+  # bc2cpp-native: core_block_params
+  def each_pair: () { (K, V) -> void } -> untyped
+  # bc2cpp-native: core_block_params
+  def each_value: () { (V) -> void } -> untyped
+  # bc2cpp-native: core_block_params
+  def each_key: () { (K) -> void } -> untyped
+  # bc2cpp-native: core_block_params
+  def select: () { (K, V) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def filter: () { (K, V) -> untyped } -> untyped
+  # bc2cpp-native: core_block_params
+  def reject: () { (K, V) -> untyped } -> untyped
+# ---- native: core_fresh_arrays
+# Core methods that return a fresh Array whenever they return, read by NativeCoreResultSigs.fresh_array_names
+# (class_layout.rb CORE_ARRAY_RETURN_METHODS). Only the method names matter there: core_array_return? still requires
+# every definition of the name to be mruby core or a vetted override. Verified against 3rd/mruby:
+#   - keys/values: mrb_hash_keys/mrb_hash_values (src/hash.c);
+#   - compact: ary_compact (mruby-array-ext), a dup;
+#   - flatten: ary_flatten -> flatten_internal, a new Array;
+#   - split: String#split (src/string.c);
+#   - uniq: Array#uniq (dup / __uniq) and Enumerable#uniq (hash.values).
+# Not here: to_a/dup (receiver-dependent, see core_results.rbs), to_h (Hash), sort_by (an Enumerator without a block).
+  # bc2cpp-native: core_fresh_arrays
+  def keys: () -> Array[untyped]
+  # bc2cpp-native: core_fresh_arrays
+  def values: () -> Array[untyped]
+  # bc2cpp-native: core_hierarchy
+  include Enumerable
+  # bc2cpp-native: core_predicates
+  def any?: () -> bool | (untyped) -> bool | () { (untyped) -> untyped } -> bool
+end
+
+class Range < Object
+  # Every return is provably bool (predicate gate: tools/bc2cpp/predicate_returns.rb).
+  def overlap?: (untyped) -> bool
+  # bc2cpp-native: core_hierarchy
+  include Enumerable
+end
+
+# bc2cpp-native: core_hierarchy
+class Proc < Object
+end
+
+# bc2cpp-native: core_hierarchy
+class Exception < Object
+end
+
+# bc2cpp-native: core_hierarchy
+class StandardError < Exception
+end
+
+# bc2cpp-native: core_hierarchy
+class Struct < Object
+  include Enumerable
+end
+
+# Classes core C defines (mrb_define_class_id under Object) whose mixins only C adds, so no Ruby declaration shows
+# them: mruby-io io.c includes Enumerable into IO, mruby-time time.c Comparable into Time.
+# bc2cpp-native: core_hierarchy
+class IO < Object
+  include Enumerable
+end
+
+# bc2cpp-native: core_hierarchy
+# mruby-io file.c: `mrb_define_class(mrb, "File", io)`.
+class File < IO
+end
+
+# bc2cpp-native: core_hierarchy
+class Time < Object
+  include Comparable
+end
+
+# bc2cpp-native: core_hierarchy
+class Dir < Object
+end
+
+# mruby-onig-regexp's match data (mrb_define_class under Object).
+# bc2cpp-native: core_hierarchy
+class OnigMatchData < Object
+end
+
+# bc2cpp-native: core_predicates
+module Enumerable
+  def any?: () -> bool | (untyped) -> bool | () { (untyped) -> untyped } -> bool
+end
+
+# ---- native: core_block_iterators
+# The result class of a block iterator called with a literal block (a SENDB site), read by CoreBlockIteratorSigs
+# (tools/bc2cpp/core_block_iterator_sigs.rb) and checked by scripts/bc2cpp/core_facts_rbs_check.rb. Each returns a new
+# Array or Hash whatever the block returns: mrblib/enum.rb's collect, find_all, partition (`[ary_T, ary_F]`) and reject
+# and mruby-enum-ext's group_by build `ary = []` or `h = {}`; Enumerable#sort_by answers Array#sort_by (`self.to_a`),
+# and filter_map is mruby-enum-ext's `ary`. Enumerable#select is find_all's alias (enum.rb). Hash#reject and Hash#select
+# (mrblib/hash.rb) build `h = {}`, so every Enumerable entry Hash overrides is declared under Hash as well: the lookup
+# in class_layout.rb (block_result_array?) falls through to Enumerable otherwise. The bare call returns an
+# Enumerator and is not declared here (core_results).
+# bc2cpp-native: core_block_iterators
+module Enumerable
+  def map: [U] () { (untyped) -> U } -> Array[U]
+  def collect: [U] () { (untyped) -> U } -> Array[U]
+  def select: () { (untyped) -> untyped } -> Array[untyped]
+  def reject: () { (untyped) -> untyped } -> Array[untyped]
+  def find_all: () { (untyped) -> untyped } -> Array[untyped]
+  def partition: () { (untyped) -> untyped } -> Array[untyped]
+  def filter_map: [U] () { (untyped) -> U } -> Array[U]
+  def sort_by: () { (untyped) -> untyped } -> Array[untyped]
+  def group_by: () { (untyped) -> untyped } -> Hash[untyped, untyped]
+end
+
+# bc2cpp-native: core_block_iterators
+# Array's own declarations of the iterators whose elements are the receiver's (Enumerable's find_all, reject, select and
+# sort_by bodies push the elements `each` yields, unchanged). The block receives one element, so the element type is the
+# class's Elem: the RBS names the receiver element, not a block return.
+class Array[unchecked out Elem] < Object
+  def select: () { (Elem) -> untyped } -> Array[Elem]
+  def reject: () { (Elem) -> untyped } -> Array[Elem]
+  def find_all: () { (Elem) -> untyped } -> Array[Elem]
+  def sort_by: () { (Elem) -> untyped } -> Array[Elem]
+end
+
+# bc2cpp-native: core_block_iterators
+class Hash[unchecked out K, unchecked out V] < Object
+  def reject: () { (untyped) -> untyped } -> Hash[untyped, untyped]
+  def select: () { (untyped) -> untyped } -> Hash[untyped, untyped]
+end
+
+# ---- native: core_blockless_iterators
+# The result of a core block iterator called with and without a block, as the method-level union of its two forms. The
+# blockless overload (`-> Enumerator`) is what mruby returns when no block is given: Enumerable's iterators return
+# `to_enum(:name, *args)` (3rd/mruby/mrblib/enum.rb, mrbgems/mruby-enum-ext/mrblib/enum.rb; map is `alias map collect`,
+# select `alias select find_all`), and Array and Hash override some of them with the same to_enum (hash.rb select,
+# reject; mruby-array-ext find, reverse_each). Every member declares both forms; the blockless one's parameters are the
+# arity its call accepts (codegen refuses a site outside it). The block overload's result is the block form's class
+# where core_block_iterators declares it, else untyped. Read by CoreBlocklessIteratorSigs
+# (tools/bc2cpp/core_blockless_iterator_sigs.rb), which refuses a member that has only one form.
+# bc2cpp-native: core_blockless_iterators
+module Enumerable
+  # bc2cpp-native: core_blockless_iterators
+  def collect: () -> Enumerator[untyped, untyped] | () { (untyped) -> untyped } -> Array[untyped]
+  # bc2cpp-native: core_blockless_iterators
+  def map: () -> Enumerator[untyped, untyped] | () { (untyped) -> untyped } -> Array[untyped]
+  # bc2cpp-native: core_blockless_iterators
+  def find: (?untyped ifnone) -> Enumerator[untyped, untyped] | (?untyped ifnone) { (untyped) -> untyped } -> untyped
+  # bc2cpp-native: core_blockless_iterators
+  def detect: (?untyped ifnone) -> Enumerator[untyped, untyped] | (?untyped ifnone) { (untyped) -> untyped } -> untyped
+  # bc2cpp-native: core_blockless_iterators
+  def find_all: () -> Enumerator[untyped, untyped] | () { (untyped) -> untyped } -> Array[untyped]
+  # bc2cpp-native: core_blockless_iterators
+  def select: () -> Enumerator[untyped, untyped] | () { (untyped) -> untyped } -> Array[untyped]
+  # bc2cpp-native: core_blockless_iterators
+  def filter: () -> Enumerator[untyped, untyped] | () { (untyped) -> untyped } -> Array[untyped]
+  # bc2cpp-native: core_blockless_iterators
+  def partition: () -> Enumerator[untyped, untyped] | () { (untyped) -> untyped } -> Array[untyped]
+  # bc2cpp-native: core_blockless_iterators
+  def reject: () -> Enumerator[untyped, untyped] | () { (untyped) -> untyped } -> Array[untyped]
+  # bc2cpp-native: core_blockless_iterators
+  def each_with_index: () -> Enumerator[untyped, untyped] | () { (untyped) -> untyped } -> untyped
+  # bc2cpp-native: core_blockless_iterators
+  def each_with_object: (untyped obj) -> Enumerator[untyped, untyped] | (untyped obj) { (untyped) -> untyped } -> untyped
+  # bc2cpp-native: core_blockless_iterators
+  def each_slice: (Integer n) -> Enumerator[untyped, untyped] | (Integer n) { (untyped) -> untyped } -> untyped
+  # bc2cpp-native: core_blockless_iterators
+  def each_cons: (Integer n) -> Enumerator[untyped, untyped] | (Integer n) { (untyped) -> untyped } -> untyped
+  # bc2cpp-native: core_blockless_iterators
+  def drop_while: () -> Enumerator[untyped, untyped] | () { (untyped) -> untyped } -> untyped
+  # bc2cpp-native: core_blockless_iterators
+  def take_while: () -> Enumerator[untyped, untyped] | () { (untyped) -> untyped } -> untyped
+  # bc2cpp-native: core_blockless_iterators
+  def group_by: () -> Enumerator[untyped, untyped] | () { (untyped) -> untyped } -> Hash[untyped, untyped]
+  # bc2cpp-native: core_blockless_iterators
+  def sort_by: () -> Enumerator[untyped, untyped] | () { (untyped) -> untyped } -> Array[untyped]
+  # bc2cpp-native: core_blockless_iterators
+  def flat_map: () -> Enumerator[untyped, untyped] | () { (untyped) -> untyped } -> untyped
+  # bc2cpp-native: core_blockless_iterators
+  def collect_concat: () -> Enumerator[untyped, untyped] | () { (untyped) -> untyped } -> untyped
+  # bc2cpp-native: core_blockless_iterators
+  def filter_map: () -> Enumerator[untyped, untyped] | () { (untyped) -> untyped } -> Array[untyped]
+  # bc2cpp-native: core_blockless_iterators
+  def max_by: () -> Enumerator[untyped, untyped] | () { (untyped) -> untyped } -> untyped
+  # bc2cpp-native: core_blockless_iterators
+  def min_by: () -> Enumerator[untyped, untyped] | () { (untyped) -> untyped } -> untyped
+  # bc2cpp-native: core_blockless_iterators
+  def minmax_by: () -> Enumerator[untyped, untyped] | () { (untyped) -> untyped } -> untyped
+  # bc2cpp-native: core_blockless_iterators
+  def reverse_each: () -> Enumerator[untyped, untyped] | () { (untyped) -> untyped } -> untyped
+  # bc2cpp-native: core_blockless_iterators
+  def cycle: (?untyped nv) -> Enumerator[untyped, untyped] | (?untyped nv) { (untyped) -> untyped } -> untyped
+  # bc2cpp-native: core_blockless_iterators
+  def each_entry: (*untyped args) -> Enumerator[untyped, untyped] | (*untyped args) { (untyped) -> untyped } -> untyped
+end
+
+# ---- native: core_proc_calls
+# The Proc methods that run the proc with their arguments, read by CoreFactSigs.proc_call_names
+# (codegen_block_fallback.rb PROC_CALL_NAMES). Checked against 3rd/mruby (scripts/bc2cpp/core_facts_rbs_check.rb):
+#   - call/[]: src/proc.c, `mrb_define_method_raw(mrb, pc, MRB_SYM(call), m)` and `MRB_OPSYM(aref)`, both call_proc;
+#   - yield/===: mrbgems/mruby-proc-ext/mrblib/proc.rb, `def yield(*args)` / `def ===(*args)` with body `call(*args)`.
+# bc2cpp-native: core_proc_calls
+class Proc
+  def call: (*untyped args) -> untyped
+  def yield: (*untyped args) -> untyped
+  def []: (*untyped args) -> untyped
+  def ===: (*untyped args) -> untyped
+end
+
+# ---- predicate_returns.rbs (new block for Comparable)
+class Comparable
+  # Every return is provably bool (predicate gate: tools/bc2cpp/predicate_returns.rb).
+  def between?: (untyped, untyped) -> bool
+end
+
+# ---- predicate_returns.rbs (new block for StringIO)
+class StringIO
+  # Every return is provably bool (predicate gate: tools/bc2cpp/predicate_returns.rb).
+  def tty?: () -> bool
+end
+
+# ---- conversion_returns.rbs
+# Result classes of Integer conversions that have a direct-call entry (NativeCoreDirect::ENTRIES): the entry's C
+# expression is what codegen emits, so the return follows from it. Other owners wait for their own entries.
+class Integer
+  # bc2cpp-native: core_results
+  def to_s: (?Integer) -> String
+  # bc2cpp-native: core_results
+  def to_i: () -> Integer
+  # bc2cpp-native: core_results
+  def inspect: () -> String
+end

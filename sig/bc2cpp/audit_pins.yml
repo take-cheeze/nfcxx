@@ -1,0 +1,25 @@
+# Audit pins for the engine sources this repository owns. bc2cpp reads them through
+# 3rd/nfcxx/bc2cpp/tools/bc2cpp/world_audit_pins.rb. A digest is the SHA-256 of the file's bytes: an audit counts a
+# file only while its digest is listed. Re-check the claims before changing a digest;
+# scripts/bc2cpp/audit_pins_check.rb fails on a stale one.
+ivar_scopes:
+  mruby-rgss/src/lib.cxx: 8f283f0e1572f2a80dd982ffabe4d9b9a3f98f2ea25699638c119c3419b5f8f8
+  include/rgss_construct.hxx: cf7beb38b45c12271848a7660bf194b4e0e2e566a6a8dae6da0bff9c37005f7d
+  include/rgss_native_direct.hxx: 883796f30e0901f5c80095d7009a017b2ec17e440a4e950aac0af25447902538
+class_results:
+  files:
+    mruby-rgss/src/lib.cxx: 8f283f0e1572f2a80dd982ffabe4d9b9a3f98f2ea25699638c119c3419b5f8f8
+    # mruby-onig-regexp 355af1b changes only the internal character/byte offset conversions (identity on a single-byte
+    # string); the natives' result classes and argument handling the tree's pin audits are the same. Both digests stay
+    # listed, so the tree's pin of 2116496 and this one are each valid.
+    3rd/mruby-onig-regexp/src/mruby_onig_regexp.c:
+    - 4b00efbb0d4b26bb8310aff773b8e4d2abf05dca6a993ebd963f69fa9c6cf397
+    - 8ae3ba430ea97b5d9a220c0af2eaf0df52f23c863dc591d27457d77f2209ec87
+  # Added to the tree's facts: `kind` must match the tree's kind for a fact the tree already has.
+  facts:
+    to_s:
+      kind: String
+      paths: [mruby-rgss/src/lib.cxx]
+    snap_to_bitmap:
+      kind: [RGSS::Bitmap, null]
+      paths: [mruby-rgss/src/lib.cxx]
