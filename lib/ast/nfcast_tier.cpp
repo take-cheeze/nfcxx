@@ -2781,7 +2781,6 @@ void tier_init_from_env(State& S) {
     if (v > 0) o.threshold = o.loop_threshold = static_cast<unsigned>(v);
   }
   if (const char* r = std::getenv("NFCAST_TIER_OSR")) o.osr = !(r[0] == '0' && !r[1]);
-  if (const char* j = std::getenv("NFCAST_JIT")) o.jit = j[0] == '1' && !j[1];
   if (const char* sh = std::getenv("NFCAST_TIER_SHARE")) o.share = static_cast<unsigned>(std::atoi(sh));
   S.enable_tier(o);
 }
@@ -2795,6 +2794,13 @@ void tier_shutdown(State& S) {
   T->queued.clear();
   delete T;
   S.tier = nullptr;
+}
+
+TierOptions State::tier_options() const {
+  if (tier) return tier->opt;
+  TierOptions off;
+  off.mode = TierOptions::Off;
+  return off;
 }
 
 void State::enable_tier(const TierOptions& opt) {

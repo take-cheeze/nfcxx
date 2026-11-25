@@ -286,7 +286,7 @@ struct TierOptions {
   std::string rt_dir;               // the directory with nfcast_tier_rt.h; default: lib/ast next to the driver, or next to this source file
   unsigned timeout = 120;           // seconds one compile may take
   bool osr = true;                  // a hot loop is compiled and taken over in the middle of the call (NFCAST_TIER_OSR=0 turns it off)
-  bool jit = false;                 // a hot integer loop is compiled to x86-64 machine code (nfcast_jit.hpp; NFCAST_JIT=1, with the tier on)
+  bool jit = false;                 // a hot integer loop is compiled to x86-64 machine code (nfcast_jit.hpp; the driver takes --jit, with the tier on)
   unsigned share = 0;               // 1: versions with the same Merkle hash of their lowered form share one shared object (NFCAST_TIER_SHARE=1;
                                     // docs/notes/astro.md, "lib/ast spike"); 2: the same, but every version is still generated and compared
 };
@@ -369,6 +369,7 @@ struct State {
 
   // ---- tiering (nfcast_tier.cpp) ----
   void enable_tier(const TierOptions& opt);  // TierOptions::Off turns it off again; versions already compiled stay usable
+  TierOptions tier_options() const;          // the options the tier was last enabled with (mode Off when there is none)
   std::string tier_state(const Value& fn);   // what the tier made of a script function: "cold", "compiled ...", "ineligible: why", ...
   // The Merkle hashes of the lowered form of a script function called with arguments ARGS (their types are the signature): [0] is
   // the whole function, then every expression and statement in pre-order. Empty when it is not a kernel for these arguments.
