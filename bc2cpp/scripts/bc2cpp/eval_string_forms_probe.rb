@@ -10,7 +10,8 @@ require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 #
 # Behaviour on real mruby (needs a full-core libmruby: BC2CPP_MRUBY_FULL, or rake and g++ with 3rd/mruby).
 #
-# Usage: BC2CPP_MRUBY_FULL=dir ruby scripts/bc2cpp/eval_string_forms_check.rb
+# Usage: BC2CPP_MRUBY_FULL=dir ruby scripts/bc2cpp/eval_string_forms_probe.rb
+# A probe, not a registered check: the CI registry reads *_check.rb files and needs each one in the world's policy.
 
 ENV['BC2CPP_SIG_DIRS'] = ''
 require_relative 'fixture_runtime'
