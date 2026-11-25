@@ -2,7 +2,7 @@
  *
  * Usage: ptxi FILE.ptx KERNEL [--grid X[,Y[,Z]]] [--block X[,Y[,Z]]] ARG... [--dump K]...
  *                             [--random N [--seed S]] [--explore [--max-schedules M]] [--max-steps S]
- *                             [--timing] [--sms N] [--issue N] [--bw BYTES] [--lat CLASS=CYCLES]...
+ *                             [--timing] [--sms N] [--issue N] [--bw BYTES] [--lat CLASS=CYCLES]... [--l1 BYTES]
  *   ARG is one kernel parameter, in order:
  *     ptr:COUNT[:iota=START]   a global buffer of COUNT int32 (zeroed, or START+i in element i)
  *     s32:VALUE                a 32-bit scalar
@@ -29,19 +29,32 @@
  * that has exited no longer counts. A schedule in which every live thread waits and none can be released is a
  * deadlock (exit 4).
  *
- * Timing (--timing, --sms, --lat). A cycle model, not a clock-by-clock simulation. Each thread has a clock, and each
- * instruction it issues adds the latency of its class: alu, branch, local, global, atomic, barrier. The defaults are
- * 4, 4, 30, 400, 400 and 20 cycles, changed with --lat CLASS=CYCLES. Param loads and stores cost alu; a generic
- * ld/st costs global. A bar.sync generation completes at its latest arrival, and every thread that waited leaves at
- * that clock. A block takes the largest clock of its threads, since its warps run in parallel. The blocks of an SM run
- * one after another, and the kernel takes the slowest SM (--sms, default 1). A block takes the largest of three
- * bounds: the critical path of its slowest thread; its issue slots, where a warp needs as many as its busiest lane
- * executes instructions, at --issue warp instructions per cycle (default 4); and its global bytes at --bw bytes per
- * cycle (default 16), each lane's access counted at its own size. Divergent paths are not serialized, and caches are
- * not modelled. A thread's
- * clock follows its own path, so a kernel whose path depends on what other threads did (a spin on shared memory, say)
- * can take different paths in different schedules. Then --explore and --random report the range of estimates over the
- * schedules. The estimate goes to stderr with --timing, at exit.
+ * Timing (--timing, --sms, --issue, --bw, --lat, --l1). A cycle model, not a clock-by-clock simulation. Each thread has a
+ * clock, and each instruction it issues adds the latency of its class: alu, branch, local, global, atomic, barrier, l1.
+ * The defaults are 4, 4, 30, 400, 400, 20 and 30 cycles, changed with --lat CLASS=CYCLES. Param loads and stores cost
+ * alu; a generic ld/st costs global, except a global load that hits the L1 (below), which costs l1. A bar.sync generation
+ * completes at its latest arrival, and every thread that waited leaves at that clock. A block takes the largest of three
+ * bounds: the critical path of its slowest thread (the largest clock of its threads, since its warps run in parallel);
+ * its issue slots, where a warp needs as many as its busiest lane executes instructions, at --issue warp instructions per
+ * cycle (default 4); and its global bytes at --bw bytes per cycle (default 16), each lane's access counted at its own
+ * size, except that a load that hits the L1 moves no bytes. The blocks of an SM run one after another (--sms, default 1),
+ * and the kernel takes the slowest SM. Divergent paths are not serialized, and caches beyond the L1 are not modelled. A
+ * thread's clock follows its own path, so a kernel whose path depends on what other threads did (a spin on shared memory,
+ * say) can take different paths in different schedules. Then --explore and --random report the range of estimates over
+ * the schedules. The estimate goes to stderr with --timing, at exit.
+ *
+ * L1 (--l1 BYTES, a multiple of 128; default 0 = no cache). Each SM has a direct-mapped cache of 128-byte lines,
+ * BYTES/128 of them, empty at the start of every schedule. A line is identified by the absolute arena address of its
+ * first byte, so where a buffer starts decides which elements share a line (the first buffer starts at a line
+ * boundary). A global load (or generic load, which is charged as global) whose line is present costs l1; one whose
+ * line is absent costs global and fills the line, evicting whatever line had the same index. Stores and atomics write
+ * through without allocating: they cost what they did before, and neither hit nor fill. The SM of a thread is its
+ * block index mod --sms, and the blocks of one SM share its cache, so a later block hits on lines an earlier block
+ * loaded. Hit or miss is decided when the interpreter executes the load, so it follows the order the schedule runs
+ * the loads in, not the clocks. Two limits follow: a fill is immediate, so a second load of a line still in flight
+ * counts as a hit (no miss merging), and the estimate of a kernel whose hits depend on the order of its loads can
+ * differ between schedules, which --explore and --random report as a range. When each line is loaded by one thread,
+ * or by threads that always load in the same order, the hits are the same in every schedule and so is the estimate.
  *
  * Memory is one flat arena: the buffers from ARENA_BASE up, then one local frame per thread. An access of n bytes
  * must lie inside one buffer or inside the accessing thread's own frame; anything else is a fault, so a missing
@@ -969,15 +982,21 @@ static Outcome outcomes[MAXOUT];
 static int noutcomes;
 
 /* The timing model (the header comment says what it is). */
-enum { LAT_ALU, LAT_BRANCH, LAT_LOCAL, LAT_GLOBAL, LAT_ATOMIC, LAT_BARRIER, LAT_N };
-static const char *lat_names[LAT_N] = {"alu", "branch", "local", "global", "atomic", "barrier"};
-static uint64_t lat[LAT_N] = {4, 4, 30, 400, 400, 20};
+enum { LAT_ALU, LAT_BRANCH, LAT_LOCAL, LAT_GLOBAL, LAT_ATOMIC, LAT_BARRIER, LAT_L1, LAT_N };
+static const char *lat_names[LAT_N] = {"alu", "branch", "local", "global", "atomic", "barrier", "l1"};
+static uint64_t lat[LAT_N] = {4, 4, 30, 400, 400, 20, 30};
 static int sms = 1;
 static uint64_t issue_rate = 4; /* warp instructions per cycle per SM */
 static uint64_t mem_bw = 16;    /* global bytes per cycle per SM */
 static int timing_print;
 static uint64_t timing_min = UINT64_MAX, timing_max, timing_n; /* over the schedules run so far */
 static int timing_blocks; /* of the last schedule */
+
+/* The L1 (the header comment says how it works). l1_lines is per SM; 0 means no cache. */
+#define LINE_BYTES 128
+#define L1_MAX_BYTES (1ULL << 30)
+static uint64_t l1_bytes, l1_lines;
+static uint64_t *l1_tag; /* sms * l1_lines entries: the line each holds, or UINT64_MAX when empty */
 
 static int lat_class(const Inst *in) {
   switch (in->op) {
@@ -998,6 +1017,17 @@ static int lat_class(const Inst *in) {
     default:
       return LAT_ALU;
   }
+}
+
+/* A global load by thread t from addr: 1 if the line is in its SM's cache. A miss fills the line. Returns 0 with
+ * no cache, so the caller charges global. */
+static int l1_load(const Thread *t, uint64_t addr) {
+  if (!l1_lines) return 0;
+  uint64_t line = addr / LINE_BYTES;
+  uint64_t *slot = &l1_tag[(uint64_t)(t->block % sms) * l1_lines + line % l1_lines];
+  if (*slot == line) return 1;
+  *slot = line;
+  return 0;
 }
 
 /* --lat CLASS=CYCLES. */
@@ -1218,8 +1248,11 @@ static void step(Thread *t) {
       return;
     }
   }
-  t->cyc += lat[lat_class(in)];
-  if (lat_class(in) == LAT_GLOBAL || lat_class(in) == LAT_ATOMIC) t->gbytes += in->ty.bits ? in->ty.bits / 8 : 4;
+  int cls = lat_class(in);
+  /* A global load is charged l1 if its line is cached. Its address is an absolute arena address, as in the switch. */
+  if (cls == LAT_GLOBAL && in->op == OP_LD && l1_load(t, t->r[in->a[1].idx] + (uint64_t)in->a[1].imm)) cls = LAT_L1;
+  t->cyc += lat[cls];
+  if (cls == LAT_GLOBAL || cls == LAT_ATOMIC) t->gbytes += in->ty.bits ? in->ty.bits / 8 : 4;
   uint64_t *r = t->r;
   int next = t->pc + 1;
   uint64_t a = 0, b = 0, c = 0;
@@ -1473,6 +1506,7 @@ static void reset_threads(void) {
   }
   memset(arrived, 0, (size_t)nblocks * BARRIERS * sizeof *arrived);
   for (int b = 0; b < nblocks; b++) live[b] = tpb;
+  if (l1_lines) memset(l1_tag, 0xff, (size_t)sms * l1_lines * sizeof *l1_tag); /* every entry UINT64_MAX: empty */
   steps = 0;
 }
 
@@ -1582,9 +1616,9 @@ static void usage(void) {
   fprintf(stderr,
           "usage: ptxi FILE.ptx KERNEL [--grid X[,Y[,Z]]] [--block X[,Y[,Z]]] ARG... [--dump K]...\n"
           "           [--random N [--seed S]] [--explore [--max-schedules M]] [--max-steps S]\n"
-          "           [--timing] [--sms N] [--issue N] [--bw BYTES] [--lat CLASS=CYCLES]...\n"
+          "           [--timing] [--sms N] [--issue N] [--bw BYTES] [--lat CLASS=CYCLES]... [--l1 BYTES]\n"
           "  ARG: ptr:COUNT[:iota=START] | s32:VALUE | bytes:HEX\n"
-          "  CLASS: alu, branch, local, global, atomic, barrier (defaults 4 4 30 400 400 20)\n");
+          "  CLASS: alu, branch, local, global, atomic, barrier, l1 (defaults 4 4 30 400 400 20 30)\n");
   exit(EXIT_BAD);
 }
 
@@ -1639,6 +1673,11 @@ int main(int argc, char **argv) {
       if (mem_bw == 0) usage();
     } else if (!strcmp(argv[i], "--lat")) {
       if (i + 1 >= argc || !parse_lat(argv[++i])) usage();
+    } else if (!strcmp(argv[i], "--l1")) {
+      if (i + 1 >= argc) usage();
+      char *end;
+      l1_bytes = strtoull(argv[++i], &end, 10);
+      if (*end || argv[i][0] < '0' || argv[i][0] > '9' || l1_bytes % LINE_BYTES || l1_bytes > L1_MAX_BYTES) usage();
     } else if (!strncmp(argv[i], "--", 2)) {
       usage();
     } else {
@@ -1736,6 +1775,11 @@ int main(int argc, char **argv) {
     } else {
       L.params[i] = (uint64_t)A.aval[i];
     }
+  }
+  if (l1_bytes) {
+    l1_lines = l1_bytes / LINE_BYTES;
+    l1_tag = malloc((size_t)sms * l1_lines * sizeof *l1_tag);
+    if (!l1_tag) fail(EXIT_FAULT, "out of memory for the L1");
   }
   setup_threads(grid, block, frame, local_start);
   init_arena();

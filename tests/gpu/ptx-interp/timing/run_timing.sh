@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Checks of the timing model in ptxi (the header of ptxi.c describes it): --timing, --sms and --lat. CPU only.
+# Checks of the timing model in ptxi (the header of ptxi.c describes it): --timing, --sms, --lat and --l1. CPU only.
 # The estimates below are derived by hand from the model: each thread's clock adds the latency of each instruction it
 # issues, a barrier leaves every waiting thread at the latest arrival, a block takes its largest clock, and the blocks
 # of an SM run one after another.
@@ -87,4 +87,56 @@ echo "bandwidth: the critical path bounds a fast memory system ok ($b16)"
 status=0; "$out/ptxi" "$ex" "${exargs[@]}" --lat dram=5 > /dev/null 2>&1 || status=$?
 [ "$status" -eq 2 ] || { echo "--lat dram=5: expected exit 2, got $status" >&2; exit 1; }
 echo "unknown latency class refused (exit 2)"
+
+# 6. The L1. l1line.ptx: every thread loads a[tid.x] and stores it to b[tid.x]. Thirty-two threads read 128 bytes, one
+#    cache line. A thread's clock is the same on every path except its load: six ALU instructions (24), the store
+#    (global, 400) and ret (4), so 428 plus the load. A load that misses costs global (400), so a thread that misses
+#    reaches 828; a load that hits costs l1 (30), so a thread that hits reaches 458.
+#    One block of 32 threads: its slowest thread is the one that missed, so the estimate is 828 (the hits are hidden
+#    behind it). Two blocks on one SM: the first load of the line anywhere in the schedule is the only miss, so one
+#    block has a miss (828) and the other hits on all 32 loads (458), and the blocks run one after another: 1286.
+#    Without the cache both blocks miss: 2 x 828 = 1656. With --lat l1=100 the all-hit block takes 24 + 100 + 400 + 4 =
+#    528, so 828 + 528 = 1356.
+lf=l1line.ptx
+l1one=$(cycles "$lf" l1line --grid 1 --block 32 ptr:32 ptr:32 --l1 262144)
+expect_eq "L1, one block of 32 threads: the missing thread is the critical path" "$l1one" 828
+l1two=$(cycles "$lf" l1line --grid 2 --block 32 ptr:32 ptr:32 --l1 262144)
+expect_eq "L1, two blocks on one SM: one miss, then a block of hits: 828 + 458" "$l1two" 1286
+l1none=$(cycles "$lf" l1line --grid 2 --block 32 ptr:32 ptr:32)
+expect_eq "no L1 (default): both blocks miss: 2 x 828" "$l1none" 1656
+l1zero=$(cycles "$lf" l1line --grid 2 --block 32 ptr:32 ptr:32 --l1 0)
+expect_eq "--l1 0 is the same as no option" "$l1zero" 1656
+l1lat=$(cycles "$lf" l1line --grid 2 --block 32 ptr:32 ptr:32 --l1 262144 --lat l1=100)
+expect_eq "--lat l1=100: the hit block is 24 + 100 + 400 + 4 = 528" "$l1lat" 1356
+
+# Two blocks under 50 random schedules: each schedule has 64 loads of the line, one miss and 63 hits, so each gives 1286.
+rnd_stderr=$("$out/ptxi" "$lf" l1line --grid 2 --block 32 ptr:32 ptr:32 --l1 262144 --random 50 --seed 3 --timing 2>&1 >/dev/null)
+want="timing: 1286 cycles estimated (2 blocks on 1 SMs, 50 schedules)"
+[ "$rnd_stderr" = "$want" ] || { echo "L1, random schedules: got '$rnd_stderr', want '$want'" >&2; exit 1; }
+echo "L1, 50 random schedules: one estimate ok"
+
+# Each SM has its own cache. Three one-thread blocks on two SMs: blocks 0 and 2 share SM 0, block 1 is alone on SM 1. On
+# SM 0 the first load of the line misses (828) and the second hits (458), whichever block runs first: 1286. SM 1 is 828.
+# The estimate is the larger, 1286, over all 90 schedules (the interleavings of three threads with two loads each). A
+# cache shared by both SMs would give a range (916 to 1286), so this checks the per-SM keying.
+sm_stderr=$("$out/ptxi" "$lf" l1line --grid 3 --block 1 ptr:32 ptr:32 --sms 2 --l1 262144 --explore --timing 2>&1 >/dev/null)
+want="timing: 1286 cycles estimated (3 blocks on 2 SMs, 90 schedules)"
+[ "$sm_stderr" = "$want" ] || { echo "L1, per-SM caches: got '$sm_stderr', want '$want'" >&2; exit 1; }
+echo "L1, per-SM caches over every schedule: one estimate ok"
+
+# Eviction. evict.ptx: one thread loads a[0], a[32] (the next line), then a[0] again, so 4 + 400 + 400 + 400 + 4 = 1208
+# with no cache or with a one-line L1 (the second load evicts the first line). With two lines, a[0] and a[32] have
+# different indices, so the third load hits: 4 + 400 + 400 + 30 + 4 = 838.
+ev=evict.ptx
+ev_none=$(cycles "$ev" evict ptr:64)
+expect_eq "no L1: three loads at global latency" "$ev_none" 1208
+ev_one=$(cycles "$ev" evict ptr:64 --l1 128)
+expect_eq "one-line L1: the second load evicts the first, three misses" "$ev_one" 1208
+ev_two=$(cycles "$ev" evict ptr:64 --l1 256)
+expect_eq "two-line L1: the third load hits" "$ev_two" 838
+
+# A size that is not a multiple of the 128-byte line is refused (exit 2).
+status=0; "$out/ptxi" "$lf" l1line --grid 1 --block 32 ptr:32 ptr:32 --l1 100 > /dev/null 2>&1 || status=$?
+[ "$status" -eq 2 ] || { echo "--l1 100: expected exit 2, got $status" >&2; exit 1; }
+echo "--l1 100 refused (exit 2)"
 echo "timing model: ok"
