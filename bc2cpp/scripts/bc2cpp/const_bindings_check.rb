@@ -402,7 +402,7 @@ Dir.mktmpdir('bc2cpp-const-binding-drop') do |dir|
     FileUtils.mkdir_p(run_dir)
     # The full-core library the fixture links has no mruby-marshal, whose by-name class lookup is no reviewed read.
     Bc2cppFixtureRuntime.generate(DROP, run_dir, core: true, only_owners: %w[CdDrop CdDrop.singleton CdDrop::Inner CdKept],
-                                                 drop_native: %w[/3rd/mruby-marshal/], drop_gems: %w[mruby-marshal])
+                                                 drop_native: %w[/mruby-marshal/], drop_gems: %w[mruby-marshal])
   ensure
     saved.each { |k, v| ENV[k] = v }
   end
@@ -426,10 +426,10 @@ Dir.mktmpdir('bc2cpp-const-binding-drop') do |dir|
   ENV['BC2CPP_VM_FREE'] = '1'
   _, ruby_err = Bc2cppFixtureRuntime.generate("#{DROP}class CdDrop\n  def listed = CdDrop.constants\nend\n", reflect_dir,
                                               core: true, only_owners: %w[CdDrop CdDrop.singleton CdDrop::Inner CdKept],
-                                              drop_native: %w[/3rd/mruby-marshal/], drop_gems: %w[mruby-marshal])
+                                              drop_native: %w[/mruby-marshal/], drop_gems: %w[mruby-marshal])
   _, native_err = Bc2cppFixtureRuntime.generate(DROP, File.join(dir, 'reflect-native'), core: true,
                                                 only_owners: %w[CdDrop CdDrop.singleton CdDrop::Inner CdKept],
-                                                drop_native: %w[/3rd/mruby-marshal/], drop_gems: %w[mruby-marshal],
+                                                drop_native: %w[/mruby-marshal/], drop_gems: %w[mruby-marshal],
                                                 native: [['enum.c', "void f(mrb_state* M, mrb_value m) { mrb_mod_constants(M, m); }\n"]])
   ENV['BC2CPP_VM_FREE'] = saved
   suite.check('CONST_BINDING_DROP: a Ruby Module#constants refuses the drop',

@@ -37,7 +37,7 @@ module OutsideRubyIvarScopes
 
   # One file's [global names, [[name, classes]...]] as Arrays (nil when it cannot be read), kept in ScanCache: the walk
   # over the linked Prism and RBS sources was a fifth of a small self-compiled run. Arrays, not Sets, as a
-  # self-compiled bc2cpp's Marshal read a Set's links wrongly before 3rd/mruby-marshal's fix.
+  # self-compiled bc2cpp's Marshal read a Set's links wrongly before mruby-marshal's fix.
   def file_facts(path)
     ScanCache.fetch('outside_ruby_ivar_scopes', [path]) do
       src = SourceText.read(path, 'outside_ruby_ivar_scopes')

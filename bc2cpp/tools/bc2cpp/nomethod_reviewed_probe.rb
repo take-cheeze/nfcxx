@@ -30,7 +30,7 @@ module NomethodReviewedProbe
 
   def closed_gems(root)
     gems = core_gems.to_h { |g| [g, "#{root}/3rd/mruby/mrbgems/#{g}"] }
-    gems.merge!('mruby-stringio' => "#{root}/3rd/mruby-stringio", 'mruby-marshal' => "#{root}/3rd/mruby-marshal")
+    gems.merge!('mruby-stringio' => "#{root}/3rd/mruby-stringio", 'mruby-marshal' => marshal_gem_dir(root))
     %w[mruby-lcf mruby-rgss mruby-rpg2k].each { |g| gems[g] = "#{root}/#{g}" }
     BC2CPP_COMPILED_GEMS.each_key { |g| gems[g] = "#{root}/#{g}" }
     # LISTS_WORLD: the world's own gems outside 3rd/mruby (wio's HAL and Math stand-in).

@@ -34,7 +34,7 @@ module IrepCache
     (cache = ScanCache.directory) && File.join(cache, 'ireps')
   end
 
-  # A self-compiled bc2cpp's Marshal is 3rd/mruby-marshal's. Before it numbered a marshal_dump object (a Set) ahead of
+  # A self-compiled bc2cpp's Marshal is mruby-marshal's. Before it numbered a marshal_dump object (a Set) ahead of
   # its data and wrote an Integer past 31 bits (an object_id) as a bignum, a decoded tree did not load back, and its
   # dump took minutes; the same fixes made it fast. Without them the tree is decoded each run, as before.
   def marshal_round_trips?

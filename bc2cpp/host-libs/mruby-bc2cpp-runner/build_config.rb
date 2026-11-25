@@ -29,7 +29,7 @@ MRuby::Build.new(self_aot ? 'bc2cpp-self' : 'bc2cpp-runner') do |conf|
   else
     enable_debug
   end
-  # Marshal (3rd/mruby-marshal) is C++, and its try/catch-free code still needs mruby's C++ exception mode: the VM's
+  # Marshal (mruby-marshal) is C++, and its try/catch-free code still needs mruby's C++ exception mode: the VM's
   # exceptions are C++ throws, as in build_config.rb's closed build. Without it the first raise corrupts the VM.
   enable_cxx_exception
   # The probe in codegen nests calls a hundred deep through blocks; mruby's default call depth (512) raises SystemStackError
@@ -55,7 +55,7 @@ MRuby::Build.new(self_aot ? 'bc2cpp-self' : 'bc2cpp-runner') do |conf|
   conf.gem File.join(ROOT, '3rd/mruby-onig-regexp') do
     bundle_onigmo
   end
-  conf.gem File.join(ROOT, '3rd/mruby-marshal')
+  conf.gem [File.join(ROOT, 'mrbgems/mruby-marshal'), File.join(ROOT, '3rd/mruby-marshal')].find { |d| Dir.exist?(d) }
   %w[mruby-shellwords mruby-json mruby-digest mruby-fileutils mruby-tmpdir mruby-tempfile mruby-dir-glob
      mruby-strscan mruby-compare-by-identity mruby-yaml mruby-zlib].each { |g| conf.gem File.expand_path("../../ruby-libs/#{g}", __dir__) }
   conf.gem File.join(ROOT, '3rd/mruby-stringio')

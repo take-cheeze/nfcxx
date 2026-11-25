@@ -225,6 +225,13 @@ def core_native_srcs(mruby_root)
       .reject { |path| path =~ %r{/(test|tools|bench|examples?|demos?|samples?)/} }
 end
 
+# mruby-marshal's checkout. Embedded in rpg-maker-clone it is mrbgems/mruby-marshal; standalone nfcxx keeps its own
+# 3rd/mruby-marshal submodule. The mrbgems/ path wins when present, so the repo needs no 3rd/ symlink for bc2cpp.
+def marshal_gem_dir(root)
+  dir = File.join(root, 'mrbgems/mruby-marshal')
+  Dir.exist?(dir) ? dir : File.join(root, '3rd/mruby-marshal')
+end
+
 # The three external (non-`3rd/mruby/mrbgems`) mrbgems this project always
 # loads: `mruby-marshal`/`mruby-onig-regexp` (explicit top-level gems in
 # build_config.rb's `explicit_shared_names`) and `mruby-stringio` (a
@@ -232,7 +239,7 @@ end
 # own `3rd/` submodules, outside `mruby_root`, so `core_native_srcs` cannot
 # reach them. mruby-marshal's source is `.cpp`, not `.c`.
 def external_gem_native_srcs(gems_root)
-  Dir["#{gems_root}/3rd/mruby-marshal/src/*.cpp"] +
+  Dir["#{marshal_gem_dir(gems_root)}/src/*.cpp"] +
     Dir["#{gems_root}/3rd/mruby-onig-regexp/src/*.c"] +
     Dir["#{gems_root}/3rd/mruby-stringio/src/*.c"]
 end
@@ -377,7 +384,7 @@ def foreign_mrblib_srcs(gems_root)
       BC2CPP_PROGRAM_CORE_MRBLIB_GEMS.any? { |gem| path.include?("/mrbgems/#{gem}/mrblib/") } &&
         BC2CPP_CORE_MRBLIB_EXCLUDED.none? { |tail| path.end_with?("/3rd/mruby/#{tail}") }
     end +
-    Dir["#{gems_root}/3rd/mruby-marshal/mrblib/**/*.rb"] +
+    Dir["#{marshal_gem_dir(gems_root)}/mrblib/**/*.rb"] +
     Dir["#{gems_root}/3rd/mruby-onig-regexp/mrblib/**/*.rb"] +
     Dir["#{gems_root}/3rd/mruby-stringio/mrblib/**/*.rb"]
 end
