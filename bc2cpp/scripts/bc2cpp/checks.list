@@ -27,6 +27,7 @@ ruby scripts/bc2cpp/optcarrot_probe_scan_check.rb
 ruby scripts/bc2cpp/block_step_layout_check.rb
 ruby scripts/bc2cpp/step_closures_check.rb
 ruby scripts/bc2cpp/proc_spec_lazy_check.rb
+ruby scripts/bc2cpp/kwarg_no_hash_check.rb
 ruby scripts/bc2cpp/ssend_helper_check.rb
 ruby scripts/bc2cpp/enumerator_next_check.rb
 ruby scripts/bc2cpp/block_step_check.rb
@@ -123,6 +124,7 @@ ruby scripts/bc2cpp/array_literal_block_check.rb
 ruby scripts/bc2cpp/send_arg_facts_check.rb
 ruby scripts/bc2cpp/constant_typing_check.rb
 ruby scripts/bc2cpp/stack_tuples_check.rb
+ruby scripts/bc2cpp/fixed_tuple_check.rb
 ruby scripts/bc2cpp/stack_rect_check.rb
 ruby scripts/bc2cpp/static_owner_dispatch_check.rb
 ruby scripts/bc2cpp/core_owner_arms_check.rb
