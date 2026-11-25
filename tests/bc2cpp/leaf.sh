@@ -7,7 +7,7 @@
 #   leaf_world OUT SRC     write OUT: a prelude (mruby has no Kernel#warn), SRC without its `if $PROGRAM_NAME == __FILE__`
 #                          block, then the tail the runner appends; the tail is the script's final statements
 #   leaf_run NAME WORLD TAIL ENTRY CASES
-#                          run the harness; the log is build/bc2cpp/NAME.log
+#                          run the harness on the cases (no timing); the log is build/bc2cpp/NAME.log
 #
 # Returns 2 from leaf_prepare when the world cannot be fetched (a network fault, not a result), like the other worlds.
 
@@ -47,7 +47,7 @@ PRELUDE
 leaf_run() { # leaf_run NAME WORLD TAIL ENTRY CASES
   local name=$1 world=$2 tail=$3 entry=$4 cases=$5
   env -u LD timeout 3000 bundle exec ruby bc2cpp/tools/script_world/compiled_run.rb --script "$world" --tail "$tail" \
-    --entry "$entry" --cases "$cases" --repeat 1 --bench 'x' --chdir "$leaf_root" > "build/bc2cpp/$name.log" 2>&1
+    --entry "$entry" --cases "$cases" --chdir "$leaf_root" > "build/bc2cpp/$name.log" 2>&1
   local status=$?
   grep -v '^\s*from ' "build/bc2cpp/$name.log" | tail -n 12
   return $status
