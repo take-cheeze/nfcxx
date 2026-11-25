@@ -25,10 +25,13 @@ check = lambda do |what, condition|
   failures << what unless condition
 end
 
-# Two runs' surroundings. The second directory names hold a space and a non-ASCII byte, and sort apart from the first.
+# Two runs' surroundings. The second locale is ja_JP.UTF-8 where it is installed (an absent one runs as C), else C.UTF-8.
+# The second directory holds a space and sorts apart from the first; not a non-ASCII byte: nix's cc-wrapper mangles one
+# under a non-UTF-8 locale before clang sees the path.
+SECOND_LOCALE = (`locale -a 2>/dev/null`.lines.map(&:strip) & %w[ja_JP.utf8 ja_JP.UTF-8]).empty? ? 'C.UTF-8' : 'ja_JP.UTF-8'
 VARIANTS = [
   { dir: 'a', jobs: 1, env: { 'LC_ALL' => 'C', 'LANG' => 'C', 'TZ' => 'UTC' } },
-  { dir: "z run/ü", jobs: 3, env: { 'LC_ALL' => 'ja_JP.UTF-8', 'LANG' => 'ja_JP.UTF-8', 'TZ' => 'Asia/Tokyo' } }
+  { dir: 'z run/b c', jobs: 3, env: { 'LC_ALL' => SECOND_LOCALE, 'LANG' => SECOND_LOCALE, 'TZ' => 'Asia/Tokyo' } }
 ].freeze
 
 # { relative path => bytes } of every file under +dir+.
