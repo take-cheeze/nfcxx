@@ -2,7 +2,8 @@
  *
  * Usage: ptxi FILE.ptx KERNEL [--grid X[,Y[,Z]]] [--block X[,Y[,Z]]] ARG... [--dump K]...
  *                             [--random N [--seed S]] [--explore [--max-schedules M]] [--max-steps S]
- *                             [--timing] [--sms N] [--issue N] [--bw BYTES] [--lat CLASS=CYCLES]... [--l1 BYTES]
+ *                             [--timing] [--sms N] [--resident N] [--issue N] [--bw BYTES] [--lat CLASS=CYCLES]...
+ *                             [--l1 BYTES]
  *   ARG is one kernel parameter, in order:
  *     ptr:COUNT[:iota=START]   a global buffer of COUNT int32 (zeroed, or START+i in element i)
  *     s32:VALUE                a 32-bit scalar
@@ -45,8 +46,9 @@
  * all exited keeps its own time. A block takes the largest of three bounds: the largest warp time, since its warps run
  * in parallel; its issue slots, the sum over its warps of max(s), at --issue warp instructions per cycle (default 4);
  * and its global bytes at --bw bytes per cycle (default 16), each lane's access counted at its own size, except that a
- * load that hits the L1 moves no bytes. The blocks of an SM run one after another (--sms, default 1), and the kernel
- * takes the slowest SM. Caches beyond the L1 are not modelled. Memory for the counts (only with --timing): three 4-byte
+ * load that hits the L1 moves no bytes. The blocks of an SM run in waves of --resident blocks (default 1): a wave takes
+ * the largest of its blocks' times, or the summed issue slots or bytes of its blocks if more, since co-resident blocks
+ * share the SM. The kernel takes the slowest SM (--sms, default 1). Caches beyond the L1 are not modelled. Memory for the counts (only with --timing): three 4-byte
  * counters per thread per instruction, so nthreads x ninst x 12 bytes (about 400 MB for 4096 threads and 8192
  * instructions); the per-warp maxima are the same size per warp.
  * A kernel whose path depends on what other threads did (a spin on shared memory, say) can take different paths in
@@ -996,6 +998,7 @@ static const char *lat_names[LAT_N] = {"alu", "branch", "local", "global", "atom
 static uint64_t lat[LAT_N] = {4, 4, 30, 400, 400, 20, 30};
 static int sms = 1;
 static uint64_t issue_rate = 4; /* warp instructions per cycle per SM */
+static int resident = 1;        /* blocks an SM runs at a time (--resident) */
 static uint64_t mem_bw = 16;    /* global bytes per cycle per SM */
 static int timing_print;
 static uint64_t timing_min = UINT64_MAX, timing_max, timing_n; /* over the schedules run so far */
@@ -1138,30 +1141,52 @@ static void timing_epoch_end(int block) {
   }
 }
 
-/* The estimate of the schedule that has just completed: a block takes the largest of its warp times, its issue slots
- * and its global bytes; the blocks of each SM run one after another. */
+/* The estimate of the schedule that has just completed. A block takes the largest of its warp times, its issue slots
+ * and its global bytes. The blocks of an SM run in waves of --resident blocks at a time, in the order the SM receives
+ * them; a wave takes the largest block time in it, or the sum of the issue slots or of the bytes of its blocks if that
+ * is more, since the co-resident blocks share the SM's issue width and bandwidth. The blocks of each SM take their
+ * waves one after another, and the kernel takes the slowest SM. With --resident 1 a wave is one block. */
 static void timing_finish(void) {
   if (!timing_print) return;
   uint64_t *sm = calloc((size_t)sms, sizeof *sm);
-  if (!sm) fail(EXIT_FAULT, "out of memory");
+  uint64_t *bt_of = calloc((size_t)nblocks, sizeof *bt_of), *slots_of = calloc((size_t)nblocks, sizeof *slots_of);
+  uint64_t *bytes_of = calloc((size_t)nblocks, sizeof *bytes_of);
+  if (!sm || !bt_of || !slots_of || !bytes_of) fail(EXIT_FAULT, "out of memory");
   for (int b = 0; b < nblocks; b++) {
-    uint64_t crit = 0, slots = 0, bytes = 0;
+    uint64_t crit = 0;
     for (int k = 0; k < wpb; k++) {
       int w = warp_index(b, k);
       if (warp_end(w) > crit) crit = warp_end(w);
-      slots += warp_slots[w];
+      slots_of[b] += warp_slots[w];
     }
-    for (int g = b * tpb; g < (b + 1) * tpb; g++) bytes += threads[g].gbytes;
-    uint64_t issue = (slots + issue_rate - 1) / issue_rate, mem = (bytes + mem_bw - 1) / mem_bw;
-    uint64_t bt = crit;
-    if (issue > bt) bt = issue;
-    if (mem > bt) bt = mem;
-    sm[b % sms] += bt;
+    for (int g = b * tpb; g < (b + 1) * tpb; g++) bytes_of[b] += threads[g].gbytes;
+    bt_of[b] = crit;
+  }
+  for (int s = 0; s < sms; s++) {
+    /* The blocks this SM receives: s, s + sms, s + 2 sms, ... */
+    for (int first = s; first < nblocks;) {
+      uint64_t wcrit = 0, wslots = 0, wbytes = 0;
+      int n = 0;
+      for (int b = first; b < nblocks && n < resident; b += sms, n++) {
+        if (bt_of[b] > wcrit) wcrit = bt_of[b];
+        wslots += slots_of[b];
+        wbytes += bytes_of[b];
+      }
+      uint64_t issue = (wslots + issue_rate - 1) / issue_rate, mem = (wbytes + mem_bw - 1) / mem_bw;
+      uint64_t wt = wcrit;
+      if (issue > wt) wt = issue;
+      if (mem > wt) wt = mem;
+      sm[s] += wt;
+      first += sms * n;
+    }
   }
   uint64_t total = 0;
   for (int s = 0; s < sms; s++)
     if (sm[s] > total) total = sm[s];
   free(sm);
+  free(bt_of);
+  free(slots_of);
+  free(bytes_of);
   if (total < timing_min) timing_min = total;
   if (total > timing_max) timing_max = total;
   timing_n++;
@@ -1725,7 +1750,8 @@ static void usage(void) {
   fprintf(stderr,
           "usage: ptxi FILE.ptx KERNEL [--grid X[,Y[,Z]]] [--block X[,Y[,Z]]] ARG... [--dump K]...\n"
           "           [--random N [--seed S]] [--explore [--max-schedules M]] [--max-steps S]\n"
-          "           [--timing] [--sms N] [--issue N] [--bw BYTES] [--lat CLASS=CYCLES]... [--l1 BYTES]\n"
+          "           [--timing] [--sms N] [--resident N] [--issue N] [--bw BYTES] [--lat CLASS=CYCLES]...\n"
+          "           [--l1 BYTES]\n"
           "  ARG: ptr:COUNT[:iota=START] | s32:VALUE | bytes:HEX\n"
           "  CLASS: alu, branch, local, global, atomic, barrier, l1 (defaults 4 4 30 400 400 20 30)\n");
   exit(EXIT_BAD);
@@ -1778,6 +1804,10 @@ int main(int argc, char **argv) {
       if (i + 1 >= argc) usage();
       issue_rate = strtoull(argv[++i], NULL, 10);
       if (issue_rate == 0) usage();
+    } else if (!strcmp(argv[i], "--resident")) {
+      if (i + 1 >= argc) usage();
+      resident = atoi(argv[++i]);
+      if (resident < 1) usage();
     } else if (!strcmp(argv[i], "--bw")) {
       if (i + 1 >= argc) usage();
       mem_bw = strtoull(argv[++i], NULL, 10);

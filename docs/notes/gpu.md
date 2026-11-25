@@ -459,8 +459,9 @@ cost the `global` latency and the other issues cost `l1`. A `bar.sync` generatio
 the warps with live threads, and each of those warps leaves at that time. A block takes the largest of three bounds: the
 largest warp time; its issue slots, the sum over its warps of the busiest lane's step count, at `--issue N` warp
 instructions per cycle (default 4); and its global bytes at `--bw BYTES` per cycle (default 16), each lane's access
-counted at its own size, except that an L1 hit moves no bytes. The blocks of an SM run one after another (`--sms N`,
-default 1), and the kernel takes the slowest SM. The counts take three 4-byte counters per thread and instruction, so
+counted at its own size, except that an L1 hit moves no bytes. The blocks of an SM run in waves of `--resident N` blocks
+(default 1, one block at a time): a wave takes the largest of its blocks' times, or the summed issue slots or bytes of
+its blocks if that is more, since co-resident blocks share the SM. The kernel takes the slowest SM (`--sms N`, default 1). The counts take three 4-byte counters per thread and instruction, so
 `nthreads x ninst x 12` bytes (about 400 MB for 4096 threads and 8192 instructions, a few MB for a typical kernel); they
 are kept only with `--timing`.
 
@@ -483,6 +484,6 @@ cycles, two blocks on one SM 1286 (one miss, then a block of hits) against 1656 
 exact over every schedule of three blocks on two SMs, 1286; and `evict.ptx`: a one-line cache evicts, 1208 against 838
 for two lines), and the ranges above.
 
-Still not modelled: caches beyond the optional L1. Not measured against hardware yet: this machine has no GPU (`nvidia-smi` is missing), so the latencies are the
+Still not modelled: caches beyond the optional L1, and blocks that start at different times within a wave. Not measured against hardware yet: this machine has no GPU (`nvidia-smi` is missing), so the latencies are the
 defaults above, not calibrated values. Ranking real kernels is the check that matters, and it needs the RTX 2060 run
 of the same kernels.

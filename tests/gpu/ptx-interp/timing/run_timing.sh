@@ -96,7 +96,22 @@ expect_eq "bandwidth: 4096 bytes at 2 bytes per cycle" "$b2" 2048
 [ "$b16" -lt "$b2" ] || { echo "bandwidth: the critical path should bound a fast memory system, got $b16" >&2; exit 1; }
 echo "bandwidth: the critical path bounds a fast memory system ok ($b16)"
 
-# 7. Bad --lat is refused (exit 2) and an unknown class is not silently ignored.
+# 7. Resident blocks. Each block of the exchange kernel is crit-bound (its issue slots and bytes are far below its critical
+#    path), so co-resident blocks overlap completely: 8 blocks on one SM with --resident 8 take one block's time, the
+#    same as 8 blocks on 8 SMs, and waves of 2 take four block times.
+t_one=$(cycles "$ex" exchange --grid 8 --block 2 ptr:16 ptr:16 --sms 8)
+r8=$(cycles "$ex" exchange --grid 8 --block 2 ptr:16 ptr:16 --sms 1 --resident 8)
+r2=$(cycles "$ex" exchange --grid 8 --block 2 ptr:16 ptr:16 --sms 1 --resident 2)
+expect_eq "resident 8: 8 co-resident blocks take one block's time" "$r8" "$t_one"
+expect_eq "resident 2: four waves of two blocks" "$r2" "$((4 * t_one))"
+
+# 8. Issue width is shared by co-resident blocks, so overlap does not create throughput: two issue-bound blocks of the
+#    ALU chain take the same time with --resident 1 (two waves) and --resident 2 (one wave).
+a1=$(cycles alu_chain.ptx alu_chain --grid 2 --block 1024 --resident 1)
+a2=$(cycles alu_chain.ptx alu_chain --grid 2 --block 1024 --resident 2)
+expect_eq "issue-bound blocks gain nothing from overlap" "$a2" "$a1"
+
+# 9. Bad --lat is refused (exit 2) and an unknown class is not silently ignored.
 status=0; "$out/ptxi" "$ex" "${exargs[@]}" --lat dram=5 > /dev/null 2>&1 || status=$?
 [ "$status" -eq 2 ] || { echo "--lat dram=5: expected exit 2, got $status" >&2; exit 1; }
 echo "unknown latency class refused (exit 2)"
