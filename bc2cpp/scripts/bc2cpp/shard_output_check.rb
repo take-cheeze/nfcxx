@@ -637,7 +637,7 @@ else
 end
 
 puts '-- generated code'
-mrbc = ENV['MRBC'] || ENV.fetch('PATH', '').split(File::PATH_SEPARATOR).map { |d| File.join(d, 'mrbc') }.find { |p| File.executable?(p) } || MrbcRbDefault.command
+mrbc = MrbcRbDefault.from_env || ENV.fetch('PATH', '').split(File::PATH_SEPARATOR).map { |d| File.join(d, 'mrbc') }.find { |p| File.executable?(p) } || MrbcRbDefault.command
 if mrbc.nil?
   puts '  SKIP: no host mrbc (set MRBC)'
   suite.finish!

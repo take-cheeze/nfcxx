@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # KERNEL_LOOP_INLINE (tools/bc2cpp/codegen_kernel_loop.rb): `loop do ... end` is inlined as a `for (;;)` under its
 # own mrb_jmpbuf. The generated part checks which sites are inlined and that BC2CPP_KERNEL_LOOP=0 keeps the call;
@@ -164,7 +165,7 @@ RUBY
 # they run below as behaviour cases.
 INLINED = %w[read_ber break_value skip_odd early_return stop_raise stop_enum stop_result stop_custom].freeze
 
-if ENV['MRBC'].nil?
+if MrbcRbDefault.from_env.nil?
   puts '  SKIP kernel loop check: set MRBC'
   exit 0
 end

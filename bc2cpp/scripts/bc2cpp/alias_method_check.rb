@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # ALIAS_SITES: `alias_method :new, :old` / `alias new old` written straight in a class body,
 # with literal names, is a definition of `new` on that class: a copy of `old`'s body as the walk last saw it
@@ -20,7 +21,7 @@
 require 'set'
 require 'tmpdir'
 
-unless ENV['MRBC']
+unless MrbcRbDefault.from_env
   puts '  SKIP: set MRBC (a host mrbc built from the patched 3rd/mruby)'
   exit 0
 end

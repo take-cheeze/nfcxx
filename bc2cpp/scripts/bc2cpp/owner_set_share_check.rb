@@ -102,7 +102,6 @@ HARNESS = <<~'CPP'
   }
 CPP
 
-abort 'SKIP: set MRBC' unless ENV['MRBC']
 Dir.mktmpdir('owner-set-share') do |dir|
   ENV['BC2CPP_OWNER_SET_SHARE'] = '1'
   code, err = runtime.generate(SOURCE, dir, only_owners: OWNERS)

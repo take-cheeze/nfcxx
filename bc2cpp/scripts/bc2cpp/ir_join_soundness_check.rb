@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # Join soundness of the literal walks: a question asked of the textually last writer of a register
 # answers for one arm of a join only. Each case compiles a snippet by mrbc and asserts the answer for EVERY path
@@ -19,11 +20,11 @@ require_relative '../../tools/bc2cpp/codegen'
   require_relative "../../tools/bc2cpp/#{file}"
 end
 
-unless ENV['MRBC'] && system(ENV['MRBC'], '--version', out: File::NULL, err: File::NULL)
+unless MrbcRbDefault.from_env && system(MrbcRbDefault.from_env, '--version', out: File::NULL, err: File::NULL)
   puts '  SKIP: no host mrbc (set MRBC)'
   exit 0
 end
-MRBC_PATH = ENV.fetch('MRBC')
+MRBC_PATH = MrbcRbDefault.from_env
 
 failures = []
 check = lambda do |what, condition|

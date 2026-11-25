@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../mrbc_rb/mrbc_default.rb'
 
 # One mruby script as a bc2cpp closed world (the script-world build kind; docs/notes/bc2cpp-migration.md, "Adding a
 # world"): builds the script as an interpreted mruby program and as a sealed executable bc2cpp compiled to C++ on the
@@ -45,7 +46,7 @@ options[:tail] = options[:tail].gsub('\n', "\n")
 
 ROOT = BC2CPP_WORLD_ROOT
 MRUBY = File.join(ROOT, '3rd/mruby')
-MRBC = ENV['MRBC'] || File.join(MRUBY, 'bin/mrbc')
+MRBC = MrbcRbDefault.from_env
 abort "#{MRBC} is missing -- build the probe mrbc first" unless File.executable?(MRBC)
 GRAY_STACK_SIZE = 16_384
 

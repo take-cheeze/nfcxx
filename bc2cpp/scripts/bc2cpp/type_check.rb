@@ -83,7 +83,7 @@ abort 'type_check: --iterate runs the analysis, so it cannot be combined with --
 # One analysis under the given signature directories (nil: the default); returns [facts, rows].
 analyse = lambda do |sig_dirs|
   require 'type_check_run'
-  mrbc = ENV['MRBC'] || MrbcRbDefault.command
+  mrbc = MrbcRbDefault.from_env
   Dir.mktmpdir('bc2cpp_type_check') do |dir|
     work = opts[:keep] ? FileUtils.mkdir_p(opts[:keep]).first : dir
     begin

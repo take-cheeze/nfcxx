@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # BITOP_RESULTS: `Integer & | ^ Integer` is claimed INT only for
 # INT operands. `<<` and `>>` stay OTHER, and so does any operand of another class.
@@ -143,7 +144,7 @@ FIXTURE = <<~'RUBY'
   end
 RUBY
 
-if ENV['MRBC']
+if MrbcRbDefault.from_env
   require_relative 'fixture_runtime'
   require 'tmpdir'
 

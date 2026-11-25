@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 require_relative '../../tools/bc2cpp/world_root'
 require_relative 'type_check_fixture'
@@ -258,7 +259,7 @@ gen = FakeGen.new(assured: { ['Foo', 'x'] => true })
 check.call('an embedded type read only in an assured owner keeps its type',
            IvarCandidates.with_nil(real_index(read_first, gen), gen, 'Foo', 'x', 'Integer') == 'Integer')
 
-if ENV['MRBC']
+if MrbcRbDefault.from_env
   source = <<~RUBY
     class CandidateField
       def set_bar

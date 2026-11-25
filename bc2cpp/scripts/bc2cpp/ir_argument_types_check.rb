@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 require 'set'
 require_relative '../../tools/bc2cpp/ir_argument_types'
@@ -139,7 +140,7 @@ aliased = graph_definitions + [GraphDefinition.new('Other', 'alias_seed', 'seed'
 check.call('shared body identities are not graph seeds', IrCallGraphTypes.collect(graph_harness, aliased, graph_bodies).empty?)
 check.call('graph summary table and completed argument maps are immutable', graph_facts.frozen? && graph_facts['leaf'].frozen?)
 
-if ENV['MRBC']
+if MrbcRbDefault.from_env
   require_relative 'type_check_fixture'
   Dir.mktmpdir('ir-argument-fixture') do |dir|
     File.write(File.join(dir, 'fixture.rb'), <<~SOURCE)
@@ -529,7 +530,7 @@ end
 
 puts 'body consumes call-site joins (rest element, required keyword, Proc block) passed'
 
-if ENV['MRBC']
+if MrbcRbDefault.from_env
   require_relative '../../tools/bc2cpp/type_check_rbs'
   rest_block_source = <<~SOURCE
     class RkdRest

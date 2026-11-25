@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # ENUMERATOR_CLASS_UNIT: the closed build loads no mrblib bytecode, so `class Enumerator` exists only as the class unit
 # of mruby-enumerator's mrblib, and the compiled Enumerator methods register on it. A def of that file the compiler
@@ -33,7 +34,7 @@ units = lambda do |relative|
     path = File.join(directory, relative)
     FileUtils.mkdir_p(File.dirname(path))
     File.write(path, SOURCE)
-    ireps, root = compile_ireps([path], 'enumerator_class_unit', directory, mrbc: ENV.fetch('MRBC'))
+    ireps, root = compile_ireps([path], 'enumerator_class_unit', directory, mrbc: MrbcRbDefault.from_env)
     registry = build_registry(ireps, root)[0]
     CodeGen.new(ireps, registry, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new).compile_top_class_units(ireps.fetch(root))
   end

@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # PROBE_ONLY (tools/bc2cpp/dynamic_names.rb): a Symbol literal whose every use is the name argument of
 # `respond_to?` is not a dynamic name (a self send overwriting its register is no use); any other use, an escape into a container, a Ruby respond_to_missing? or
@@ -7,7 +8,7 @@
 #
 # Usage: MRBC=path/to/mrbc ruby scripts/bc2cpp/dynamic_names_probe_check.rb
 
-unless ENV['MRBC']
+unless MrbcRbDefault.from_env
   puts '  SKIP: set MRBC (a host mrbc built from the patched 3rd/mruby)'
   exit 0
 end

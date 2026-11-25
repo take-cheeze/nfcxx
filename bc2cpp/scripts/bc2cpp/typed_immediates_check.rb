@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 require_relative '../../tools/bc2cpp/irep'
 require_relative '../../tools/bc2cpp/integer_constants'
@@ -74,7 +75,7 @@ suite.check('inlined resumable yields subtract the numeric register offset',
 suite.check('an unrelated receiver does not become a Fiber yield',
             cg.resumable_intercept(shifted_yield, fiber_body, nil, 1, 0).nil?)
 
-if ENV['MRBC']
+if MrbcRbDefault.from_env
   suite.require_mrbc!
   suite.compile("class TypedImmediateProbe\n def plus(value); value + 17; end\n def minus(value); value - 17; end\n def negative; -32768; end\nend\n") do |ireps, _root, _dir|
     instructions = ireps.values.flat_map(&:instructions)

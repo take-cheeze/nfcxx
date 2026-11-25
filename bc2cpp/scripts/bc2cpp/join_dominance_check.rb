@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # JOIN_DOMINANCE: a backward register walk takes the textually
 # nearest writer, which a join can skip. `x = h[k] || []` reads the literal
@@ -403,7 +404,7 @@ zsuper = [insn(0, :ENTER, "0:0:0:0:0:0:1:0 (0x1)"), insn(4, :MOVE, "R2\tR1"), in
           insn(11, :SUPER, "R3\tn=*"), insn(14, :RETURN, 'R3')]
 check.call('`super` forwards the block (negative)', !yielder.call(zsuper).nil?)
 
-if ENV['MRBC']
+if MrbcRbDefault.from_env
   require_relative 'fixture_runtime'
   runtime = Bc2cppFixtureRuntime
   body_of = lambda do |code, fn|

@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 require_relative 'check_support'
 require_relative '../../tools/bc2cpp/irep'
@@ -101,7 +102,7 @@ suite.check('default target remains each with no arguments', enum_index(irep)['e
 irep = enum_fixture([[:LOADSYM, 'R2 :first'], [:SSEND, 'R1 :enum_for n=1|nk=1']])
 suite.check('keywords preserve target but refuse positional arity', enum_index(irep)['first'] == [[irep, 1, 2, nil]])
 
-compiler_available = ENV['MRBC'] || ENV.fetch('PATH', '').split(File::PATH_SEPARATOR).any? do |directory|
+compiler_available = MrbcRbDefault.from_env || ENV.fetch('PATH', '').split(File::PATH_SEPARATOR).any? do |directory|
   File.executable?(File.join(directory, 'mrbc'))
 end
 if compiler_available

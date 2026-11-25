@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # CLASS_BODY_LEFT_OPS: a guard on the class-body driver's coverage. It runs class_body_compile_list.rb over the closed
 # roots and asserts that (a) at least MIN_COMPILED of the class bodies compile, and (b) no op still refuses a body -- every
@@ -20,7 +21,7 @@ MIN_COMPILED = 250
 KNOWN_LEFT = %w[SDEF].freeze
 MADE_COMPILABLE = %w[BLOCK SENDB CLASS DEF METHOD TCLASS SSEND SSEND0 SEND SEND0 SCLASS LAMBDA ALIAS].freeze
 
-if ENV['MRBC'].to_s.empty? || ENV['BC2CPP_STATIC_DISPATCH_LISTS'].to_s.empty?
+if MrbcRbDefault.from_env.to_s.empty? || ENV['BC2CPP_STATIC_DISPATCH_LISTS'].to_s.empty?
   puts 'class_body_left_ops_check: SKIP (needs MRBC and BC2CPP_STATIC_DISPATCH_LISTS)'
   exit 0
 end

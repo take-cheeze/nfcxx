@@ -14,7 +14,7 @@ module TypeCheckFixture
                '--format', 'json', '--no-sends', *options, '--files', *files]
     command.concat(['--out', out]) if out
     environment = env.dup
-    environment['MRBC'] = File.expand_path(ENV.fetch('MRBC')) if ENV['MRBC'] && !environment.key?('MRBC')
+    environment['MRBC'] = File.expand_path(MrbcRbDefault.from_env) if MrbcRbDefault.from_env && !environment.key?('MRBC')
     stdout, stderr, status = Open3.capture3(environment, *command, chdir: directory)
     raise "#{label} failed (#{status.exitstatus}): #{stderr}\n#{stdout}" unless status.success?
 
@@ -32,7 +32,7 @@ module TypeCheckFixture
     root = BC2CPP_WORLD_ROOT
     directory = File.expand_path(directory)
     sources = files.map { |file| File.expand_path(file, directory) }
-    mrbc = ENV['MRBC'] ? File.expand_path(ENV['MRBC']) : MrbcRbDefault.command
+    mrbc = MrbcRbDefault.from_env ? File.expand_path(MrbcRbDefault.from_env) : MrbcRbDefault.command
     Dir.mktmpdir('type-check-fixture') do |work|
       result = Dir.chdir(directory) do
         TypeCheckRun.run(root: root, mrbc: mrbc, workdir: work, sources: sources, sends: false,
@@ -54,7 +54,7 @@ module TypeCheckFixture
     directory = File.expand_path(directory)
     root = BC2CPP_WORLD_ROOT
     sources = files.map { |file| File.expand_path(file, directory) }
-    mrbc = ENV['MRBC'] ? File.expand_path(ENV['MRBC']) : MrbcRbDefault.command
+    mrbc = MrbcRbDefault.from_env ? File.expand_path(MrbcRbDefault.from_env) : MrbcRbDefault.command
     Dir.mktmpdir('type-check-variants') do |work|
       common = TypeCheckRun.env(root: root, mrbc: mrbc, workdir: work, sources: sources, sends: false,
                                 display_root: directory).merge(env)

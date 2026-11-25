@@ -19,7 +19,7 @@ require_relative '../../tools/bc2cpp/class_world'
 require_relative '../../tools/bc2cpp/class_world_gate'
 
 ROOT = BC2CPP_WORLD_ROOT
-mrbc = ENV['MRBC'] || MrbcRbDefault.command
+mrbc = MrbcRbDefault.from_env
 only_refused = ARGV.include?('--refused')
 
 results = []

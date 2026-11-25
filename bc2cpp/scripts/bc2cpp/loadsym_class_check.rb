@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # LOADSYM_CLASS: a Symbol literal in a register carries the Symbol class bit in the numeric flow,
 # the bit a Symbol slot of a frozen table already carries, and a kind_of test against Symbol decides that
@@ -163,7 +164,7 @@ end
 
 # ---------------------------------------------------------------------------
 puts '-- generated code (host mrbc)'
-if ENV['MRBC']
+if MrbcRbDefault.from_env
   require_relative 'fixture_runtime'
   FIXTURE = <<~'RUBY'
     module LsTables

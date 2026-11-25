@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # The optcarrot probe (tools/optcarrot_probe) is in no benchmark job, so its bc2cpp scan of the sealed optcarrot world
 # is what keeps it building: a check that began to reject its bundle (CONST_RESOLVE on OptcarrotProbe or Regexp) failed
@@ -12,7 +13,7 @@ require 'open3'
 require 'rbconfig'
 
 ROOT = BC2CPP_WORLD_ROOT
-mrbc = ENV['MRBC'].to_s
+mrbc = MrbcRbDefault.from_env.to_s
 if mrbc.empty? || !File.file?(File.join(ROOT, '3rd/optcarrot/lib/optcarrot.rb'))
   puts 'optcarrot probe scan check: SKIP (set MRBC and check out 3rd/optcarrot)'
   exit 0

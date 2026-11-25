@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # The BLOCK_YIELD join (tools/bc2cpp/block_yielders.rb) on real bc2cpp output. Each case is a block body the codegen
 # emits from a SENDB; its BLOCK_YIELD row names the one method that yields to it (key and plain arity), or the reason
@@ -101,7 +102,7 @@ def join_rows(text)
   end
 end
 
-mrbc = ENV['MRBC']
+mrbc = MrbcRbDefault.from_env
 unless mrbc && File.executable?(mrbc)
   puts 'SKIP block yielder pipeline fixtures (set MRBC)'
   exit($failures.empty? ? 0 : 1)

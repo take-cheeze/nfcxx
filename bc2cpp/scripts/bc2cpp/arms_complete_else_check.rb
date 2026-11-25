@@ -25,7 +25,6 @@ check = lambda do |what, condition|
   puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
   failures << what unless condition
 end
-abort 'SKIP: set MRBC' unless ENV['MRBC']
 
 # 0. the chain reader.
 require_relative '../../tools/bc2cpp/nomethod_reviewed'

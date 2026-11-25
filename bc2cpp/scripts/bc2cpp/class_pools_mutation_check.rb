@@ -18,7 +18,6 @@ require 'tmpdir'
 require_relative 'mutant_pool'
 
 ROOT = BC2CPP_WORLD_ROOT
-abort 'SKIP: set MRBC' unless ENV['MRBC']
 
 # [name, file, pattern, replacement, check label that must FAIL, needs the run half]
 MUTANTS = [

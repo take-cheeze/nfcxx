@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 require_relative '../../tools/bc2cpp/irep'
 require_relative '../../tools/bc2cpp/bytecode_ir_operands'
@@ -59,7 +60,7 @@ before = GC.stat(:total_allocated_objects)
 allocated = GC.stat(:total_allocated_objects) - before
 suite.check('escape spans allocate only the returned pair', allocated.between?(10_000, 10_020))
 
-if ENV['MRBC']
+if MrbcRbDefault.from_env
   suite.require_mrbc!
   suite.compile(<<~SOURCE) do |ireps, _root|
     def typed_count_calls(receiver, values, keywords)

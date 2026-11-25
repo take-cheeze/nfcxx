@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # Constant typing: frozen containers, Hash merges, Array sums and integer arithmetic. Compatible positives share
 # one end-to-end type_check.rb run; positive inference variants share input setup in private forks.
@@ -13,7 +14,7 @@ require 'tmpdir'
 require_relative '../../tools/bc2cpp/bc2cpp'
 require_relative 'type_check_fixture'
 
-unless ENV['MRBC'] && File.executable?(ENV['MRBC'])
+unless MrbcRbDefault.from_env && File.executable?(MrbcRbDefault.from_env)
   puts 'SKIP constant_typing_check: MRBC is not set to a host mrbc'
   exit 0
 end

@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # NUMERIC_OPERAND_PROOF: guarded arithmetic and compare arms lose
 # their dynamic-send else when both operands are PROVEN Integer/Float, and keep it
@@ -251,7 +252,7 @@ check.call('SETIDX on a receiver that is not an exact Array may run a user #[]=:
 states = flow.call(idx_slot.call(:SETIDX, true), idx_oracle)
 check.call('SETIDX on an exact Array with an Integer index runs no Ruby: the slot keeps its class', states[7][6] == INT)
 
-if ENV['MRBC']
+if MrbcRbDefault.from_env
   require_relative 'fixture_runtime'
   runtime = Bc2cppFixtureRuntime
 

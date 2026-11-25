@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../../tools/mrbc_rb/mrbc_default.rb'
 
 require 'set'
 require_relative '../../../tools/bc2cpp/irep'
@@ -42,7 +43,7 @@ check('opaque effects in the block are refused',
       build.call(instruction(1, :SEND0, "R2\t:opaque"), invocation_safe: true).fact_at(3, 3).nil?)
 puts 'block capture checks passed'
 
-if ENV['MRBC']
+if MrbcRbDefault.from_env
   source = <<~SOURCE
     def stable
       captured = :held

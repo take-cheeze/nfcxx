@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # IR soundness for the linear walks that the bytecode IR answers (BytecodeIR): a question that read the
 # instructions in textual order (the nearest writer, the instructions between two points, the ops before an
@@ -23,7 +24,7 @@ bc = method(:insn)
 
 # -- 1. class objects (closed_world.rb class_object_register? / class_constant_target?), compiled -----------------
 puts '-- 1. class objects: every path into the SCLASS, not the textually nearest writer (MRBC)'
-mrbc = ENV['MRBC']
+mrbc = MrbcRbDefault.from_env
 if mrbc
   suite.require_mrbc!
   # The SCLASS of +ireps+ as [irep, index, insn] (each snippet below has one).

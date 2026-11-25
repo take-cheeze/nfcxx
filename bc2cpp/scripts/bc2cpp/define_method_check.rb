@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # DEFINE_METHOD_LOOPS: a `define_method` that runs while a class body is defined is an
 # ordinary method definition whose body is the block: `define_method(:x) { }` in the body (including one with a `return`), and `define_method(n) { }` in a class-body loop over a literal container, once per
@@ -20,7 +21,7 @@
 require 'set'
 require 'tmpdir'
 
-unless ENV['MRBC']
+unless MrbcRbDefault.from_env
   puts '  SKIP: set MRBC (a host mrbc built from the patched 3rd/mruby)'
   exit 0
 end

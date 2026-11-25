@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 require_relative '../../tools/bc2cpp/world_root'
 require 'json'
@@ -27,7 +28,7 @@ capture_analysis = BytecodeIR::Types.new(body, source_resolver: ->(_index, _reg)
 check.call('source Fact callbacks preserve capture declarations', capture_analysis.fact_at(2, 2)&.declared?)
 check.call('declared source Facts cannot become independent classes', capture_analysis.at(2, 2).nil?)
 
-unless ENV['MRBC']
+unless MrbcRbDefault.from_env
   puts 'SKIP mrbc block protocol integration fixtures (set MRBC)'
   exit
 end
@@ -72,7 +73,7 @@ Dir.mktmpdir('ir-block-protocols') do |dir|
     end
   RBS
   run = lambda do |extra = {}|
-    env = { 'MRBC' => File.expand_path(ENV.fetch('MRBC')), 'BC2CPP_STRICT_HINTS' => '0', 'BC2CPP_SIG_DIRS' => '' }.merge(extra)
+    env = { 'MRBC' => File.expand_path(MrbcRbDefault.from_env), 'BC2CPP_STRICT_HINTS' => '0', 'BC2CPP_SIG_DIRS' => '' }.merge(extra)
     output, error, status = Open3.capture3(env, RbConfig.ruby, File.join(BC2CPP_TREE_ROOT, 'scripts/bc2cpp/type_check.rb'),
                                          '--files', 'fixture.rb', '--sig', 'fixture.rbs', '--format', 'json', '--no-sends', chdir: dir)
     raise "block protocol check failed: #{error}\n#{output}" unless [0, 1].include?(status.exitstatus)

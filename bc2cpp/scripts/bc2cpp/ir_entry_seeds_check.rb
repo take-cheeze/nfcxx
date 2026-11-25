@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 require 'set'
 require_relative '../../tools/bc2cpp/ir_entry_seeds'
@@ -133,7 +134,7 @@ unseeded = IrCallGraphTypes.collect(EntryGraphHarness.new({ 'forward' => bodies[
 check.call('without the seed the entry makes no fact', unseeded.dig('ctor', 1).nil? && unseeded.dig('forward', 1).nil?)
 
 # -- the real compiler: a program of its own has no native entry, so a maker of that name is not seeded --------
-if ENV['MRBC']
+if MrbcRbDefault.from_env
   require_relative 'type_check_fixture'
   Dir.mktmpdir('entry-seeds-fixture') do |dir|
     File.write(File.join(dir, 'fixture.rb'), <<~SOURCE)

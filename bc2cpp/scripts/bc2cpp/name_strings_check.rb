@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 require 'digest'
 require 'tmpdir'
@@ -132,7 +133,7 @@ suite.check('exceeding a cache cap preserves fallback name generation',
             limited.struct_name('Beyond::Cap') == 'Beyond__Cap_ivars' && limited.type_var('Beyond::Cap') == 'Beyond__Cap_ivars_type' &&
             limited.lexical_scope_path('Beyond::Cap.singleton') == %w[Beyond Cap])
 
-if ENV['MRBC']
+if MrbcRbDefault.from_env
   suite.require_mrbc!
   suite.compile("class NameStringsProbe\n def work; shared_name; shared_name; end\nend\n") do |ireps, _root, _dir|
     calls = ireps.values.flat_map(&:instructions).select { |i| i.sym == 'shared_name' }

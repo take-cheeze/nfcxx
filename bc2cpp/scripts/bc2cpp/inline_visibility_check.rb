@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+require_relative '../../tools/mrbc_rb/mrbc_default.rb'
 
 # `public def x` / `private def x` pass the Symbol that the (T)DEF just before the send wrote into the argument
 # register, not a LOADSYM. The registry (tools/bc2cpp/registry.rb) must apply that visibility to x, or a compiled
@@ -28,7 +29,7 @@ FIXTURE = <<~RUBY
   end
 RUBY
 
-mrbc = ENV['MRBC']
+mrbc = MrbcRbDefault.from_env
 unless mrbc && File.executable?(mrbc)
   puts '  SKIP: no host mrbc (set MRBC)'
   exit 0
