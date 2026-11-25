@@ -66,7 +66,24 @@ want="timing: 2472 to 2476 cycles over 20 schedules (2 blocks on 1 SMs)"
 [ "$na_stderr" = "$want" ] || { echo "megakernel without the atomic: got '$na_stderr', want '$want'" >&2; exit 1; }
 echo "megakernel without the atomic: the range over the schedules ok"
 
-# 5. Bad --lat is refused (exit 2) and an unknown class is not silently ignored.
+# 5. Issue width. 1024 threads are 32 warps, and each runs the same 18 instructions (mov, 16 adds, ret). The issue slots (32 x 18) are the
+#    bound at --issue 4 and at --issue 8, and the critical path is shorter than both, so halving the rate doubles the
+#    estimate exactly.
+i4=$(cycles alu_chain.ptx alu_chain --grid 1 --block 1024 --issue 4)
+i8=$(cycles alu_chain.ptx alu_chain --grid 1 --block 1024 --issue 8)
+expect_eq "issue width: halving the rate doubles the estimate" "$i4" "$((2 * i8))"
+
+# 6. Bandwidth. Each of the 1024 threads stores 4 bytes: 4096 bytes in one block. At 1 byte per cycle that is 4096
+#    cycles, at 2 it is 2048, and the critical path (about 430 cycles) is shorter than both.
+b1=$(cycles store_all.ptx store_all --grid 1 --block 1024 ptr:1024 --bw 1)
+b2=$(cycles store_all.ptx store_all --grid 1 --block 1024 ptr:1024 --bw 2)
+b16=$(cycles store_all.ptx store_all --grid 1 --block 1024 ptr:1024 --bw 16)
+expect_eq "bandwidth: 4096 bytes at 1 byte per cycle" "$b1" 4096
+expect_eq "bandwidth: 4096 bytes at 2 bytes per cycle" "$b2" 2048
+[ "$b16" -lt "$b2" ] || { echo "bandwidth: the critical path should bound a fast memory system, got $b16" >&2; exit 1; }
+echo "bandwidth: the critical path bounds a fast memory system ok ($b16)"
+
+# 7. Bad --lat is refused (exit 2) and an unknown class is not silently ignored.
 status=0; "$out/ptxi" "$ex" "${exargs[@]}" --lat dram=5 > /dev/null 2>&1 || status=$?
 [ "$status" -eq 2 ] || { echo "--lat dram=5: expected exit 2, got $status" >&2; exit 1; }
 echo "unknown latency class refused (exit 2)"

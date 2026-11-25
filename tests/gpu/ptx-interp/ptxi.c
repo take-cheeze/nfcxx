@@ -2,7 +2,7 @@
  *
  * Usage: ptxi FILE.ptx KERNEL [--grid X[,Y[,Z]]] [--block X[,Y[,Z]]] ARG... [--dump K]...
  *                             [--random N [--seed S]] [--explore [--max-schedules M]] [--max-steps S]
- *                             [--timing] [--sms N] [--lat CLASS=CYCLES]...
+ *                             [--timing] [--sms N] [--issue N] [--bw BYTES] [--lat CLASS=CYCLES]...
  *   ARG is one kernel parameter, in order:
  *     ptr:COUNT[:iota=START]   a global buffer of COUNT int32 (zeroed, or START+i in element i)
  *     s32:VALUE                a 32-bit scalar
@@ -34,8 +34,11 @@
  * 4, 4, 30, 400, 400 and 20 cycles, changed with --lat CLASS=CYCLES. Param loads and stores cost alu; a generic
  * ld/st costs global. A bar.sync generation completes at its latest arrival, and every thread that waited leaves at
  * that clock. A block takes the largest clock of its threads, since its warps run in parallel. The blocks of an SM run
- * one after another, and the kernel takes the slowest SM (--sms, default 1). The estimate ignores issue width,
- * bandwidth, caches, and the serialization of divergent paths: a warp is charged for its slowest lane. A thread's
+ * one after another, and the kernel takes the slowest SM (--sms, default 1). A block takes the largest of three
+ * bounds: the critical path of its slowest thread; its issue slots, where a warp needs as many as its busiest lane
+ * executes instructions, at --issue warp instructions per cycle (default 4); and its global bytes at --bw bytes per
+ * cycle (default 16), each lane's access counted at its own size. Divergent paths are not serialized, and caches are
+ * not modelled. A thread's
  * clock follows its own path, so a kernel whose path depends on what other threads did (a spin on shared memory, say)
  * can take different paths in different schedules. Then --explore and --random report the range of estimates over the
  * schedules. The estimate goes to stderr with --timing, at exit.
@@ -927,7 +930,9 @@ typedef struct {
   int state;
   int bar;     /* while T_BLOCKED: the barrier ID it waits at */
   int depth;
-  uint64_t cyc; /* the thread's clock in the timing model */
+  uint64_t cyc;    /* the thread's clock in the timing model */
+  uint64_t ninst;  /* instructions issued, predicated-off ones included */
+  uint64_t gbytes; /* bytes of global and atomic accesses executed */
   Frame stack[MAXFUNC];
 } Thread;
 
@@ -968,6 +973,8 @@ enum { LAT_ALU, LAT_BRANCH, LAT_LOCAL, LAT_GLOBAL, LAT_ATOMIC, LAT_BARRIER, LAT_
 static const char *lat_names[LAT_N] = {"alu", "branch", "local", "global", "atomic", "barrier"};
 static uint64_t lat[LAT_N] = {4, 4, 30, 400, 400, 20};
 static int sms = 1;
+static uint64_t issue_rate = 4; /* warp instructions per cycle per SM */
+static uint64_t mem_bw = 16;    /* global bytes per cycle per SM */
 static int timing_print;
 static uint64_t timing_min = UINT64_MAX, timing_max, timing_n; /* over the schedules run so far */
 static int timing_blocks; /* of the last schedule */
@@ -1011,9 +1018,23 @@ static void timing_finish(void) {
   uint64_t *sm = calloc((size_t)sms, sizeof *sm);
   if (!sm) fail(EXIT_FAULT, "out of memory");
   for (int b = 0; b < nblocks; b++) {
-    uint64_t bt = 0;
-    for (int g = b * tpb; g < (b + 1) * tpb; g++)
-      if (threads[g].cyc > bt) bt = threads[g].cyc;
+    uint64_t crit = 0, bytes = 0, slots = 0;
+    for (int g = b * tpb; g < (b + 1) * tpb; g++) {
+      if (threads[g].cyc > crit) crit = threads[g].cyc;
+      bytes += threads[g].gbytes;
+    }
+    /* A warp is 32 consecutive threads of the block, and it issues as many instructions as its busiest lane. */
+    for (int w = 0; w * 32 < tpb; w++) {
+      int first = b * tpb + w * 32, last = first + 32 < (b + 1) * tpb ? first + 32 : (b + 1) * tpb;
+      uint64_t wi = 0;
+      for (int g = first; g < last; g++)
+        if (threads[g].ninst > wi) wi = threads[g].ninst;
+      slots += wi;
+    }
+    uint64_t bt = crit;
+    uint64_t issue = (slots + issue_rate - 1) / issue_rate, mem = (bytes + mem_bw - 1) / mem_bw;
+    if (issue > bt) bt = issue;
+    if (mem > bt) bt = mem;
     sm[b % sms] += bt;
   }
   uint64_t total = 0;
@@ -1186,6 +1207,7 @@ static void step(Thread *t) {
   }
   if (++steps > max_steps) fail(EXIT_FAULT, "step limit of %llu reached", (unsigned long long)max_steps);
   const Inst *in = &insts[t->pc];
+  t->ninst++;
   if (in->pred >= 0) {
     int v = t->r[in->pred] != 0;
     if (in->pred_neg) v = !v;
@@ -1197,6 +1219,7 @@ static void step(Thread *t) {
     }
   }
   t->cyc += lat[lat_class(in)];
+  if (lat_class(in) == LAT_GLOBAL || lat_class(in) == LAT_ATOMIC) t->gbytes += in->ty.bits ? in->ty.bits / 8 : 4;
   uint64_t *r = t->r;
   int next = t->pc + 1;
   uint64_t a = 0, b = 0, c = 0;
@@ -1445,6 +1468,8 @@ static void reset_threads(void) {
     t->state = T_RUN;
     t->bar = -1;
     t->cyc = 0;
+    t->ninst = 0;
+    t->gbytes = 0;
   }
   memset(arrived, 0, (size_t)nblocks * BARRIERS * sizeof *arrived);
   for (int b = 0; b < nblocks; b++) live[b] = tpb;
@@ -1557,7 +1582,7 @@ static void usage(void) {
   fprintf(stderr,
           "usage: ptxi FILE.ptx KERNEL [--grid X[,Y[,Z]]] [--block X[,Y[,Z]]] ARG... [--dump K]...\n"
           "           [--random N [--seed S]] [--explore [--max-schedules M]] [--max-steps S]\n"
-          "           [--timing] [--sms N] [--lat CLASS=CYCLES]...\n"
+          "           [--timing] [--sms N] [--issue N] [--bw BYTES] [--lat CLASS=CYCLES]...\n"
           "  ARG: ptr:COUNT[:iota=START] | s32:VALUE | bytes:HEX\n"
           "  CLASS: alu, branch, local, global, atomic, barrier (defaults 4 4 30 400 400 20)\n");
   exit(EXIT_BAD);
@@ -1604,6 +1629,14 @@ int main(int argc, char **argv) {
       if (i + 1 >= argc) usage();
       sms = atoi(argv[++i]);
       if (sms < 1) usage();
+    } else if (!strcmp(argv[i], "--issue")) {
+      if (i + 1 >= argc) usage();
+      issue_rate = strtoull(argv[++i], NULL, 10);
+      if (issue_rate == 0) usage();
+    } else if (!strcmp(argv[i], "--bw")) {
+      if (i + 1 >= argc) usage();
+      mem_bw = strtoull(argv[++i], NULL, 10);
+      if (mem_bw == 0) usage();
     } else if (!strcmp(argv[i], "--lat")) {
       if (i + 1 >= argc || !parse_lat(argv[++i])) usage();
     } else if (!strncmp(argv[i], "--", 2)) {
