@@ -45,8 +45,15 @@ binary operators plus 13, as in `py/runtime0.h`; on ints they give the same resu
 `tools/mpy/mpy_lower.cpp` lowers a module's top-level code. The stack becomes slots `stk.N`, one per depth. The depth before
 each instruction is computed first, and a join must agree on it. Each instruction gets a label, and jumps go to the
 labels of their targets. It covers small-int and None/bool constants, names (`LOAD_NAME`, `STORE_NAME`, `LOAD_GLOBAL`,
-`STORE_GLOBAL`), `POP_TOP`, `DUP_TOP`, `ROT_TWO`, the binary and unary operators, `POP_JUMP_IF_FALSE`/`TRUE`, `JUMP`
-and `RETURN_VALUE`. Any other opcode is refused by name and no IR is written.
+`STORE_GLOBAL`), locals (`LOAD_FAST`/`STORE_FAST`), `POP_TOP`, `DUP_TOP`, `ROT_TWO`, the binary and unary operators,
+`POP_JUMP_IF_FALSE`/`TRUE`, `JUMP`, `MAKE_FUNCTION`, `CALL_FUNCTION` and `RETURN_VALUE`. Any other opcode is refused by
+name and no IR is written.
+
+Each code object is one IR function. The module body is `mpy_module`. A function is `mpy_fn_K(ret, args, nargs)`: it
+copies its arguments into its locals `loc.N` and stores its result through `ret`. The IR has no function-address value, so
+`mpy_dispatch(K, ret, args, nargs)` routes a call to `mpy_fn_K`, and a function object is a runtime record holding K and the
+argument count. A call pushes each argument on the runtime value stack (`mpy_push`), then calls `mpy_call(fn, n)`, which
+checks the arity and dispatches. Functions with defaults, keyword arguments, closures or `*args` are refused.
 
 ## Checks
 
@@ -59,6 +66,6 @@ and `RETURN_VALUE`. Any other opcode is refused by name and no IR is written.
 
 ## Not yet
 
-Functions and closures (frames and calls), containers, strings, classes, exceptions, `or`/`and` short-circuits
+Closures (cells), defaults and keyword arguments, containers, strings, classes, exceptions, `or`/`and` short-circuits
 (`JUMP_IF_*_OR_POP`), chained comparisons, big ints, and the rest of the opcodes. Also the `luac`-style opcode oracle is
 still blocked, and string pattern matching is paused.
