@@ -2,6 +2,7 @@
  *
  * Usage: ptxi FILE.ptx KERNEL [--grid X[,Y[,Z]]] [--block X[,Y[,Z]]] ARG... [--dump K]...
  *                             [--random N [--seed S]] [--explore [--max-schedules M]] [--max-steps S]
+ *                             [--timing] [--sms N] [--lat CLASS=CYCLES]...
  *   ARG is one kernel parameter, in order:
  *     ptr:COUNT[:iota=START]   a global buffer of COUNT int32 (zeroed, or START+i in element i)
  *     s32:VALUE                a 32-bit scalar
@@ -27,6 +28,17 @@
  * full block only, no count) waits until every live thread of the block has arrived at the same ID; a thread
  * that has exited no longer counts. A schedule in which every live thread waits and none can be released is a
  * deadlock (exit 4).
+ *
+ * Timing (--timing, --sms, --lat). A cycle model, not a clock-by-clock simulation. Each thread has a clock, and each
+ * instruction it issues adds the latency of its class: alu, branch, local, global, atomic, barrier. The defaults are
+ * 4, 4, 30, 400, 400 and 20 cycles, changed with --lat CLASS=CYCLES. Param loads and stores cost alu; a generic
+ * ld/st costs global. A bar.sync generation completes at its latest arrival, and every thread that waited leaves at
+ * that clock. A block takes the largest clock of its threads, since its warps run in parallel. The blocks of an SM run
+ * one after another, and the kernel takes the slowest SM (--sms, default 1). The estimate ignores issue width,
+ * bandwidth, caches, and the serialization of divergent paths: a warp is charged for its slowest lane. A thread's
+ * clock follows its own path, so a kernel whose path depends on what other threads did (a spin on shared memory, say)
+ * can take different paths in different schedules. Then --explore and --random report the range of estimates over the
+ * schedules. The estimate goes to stderr with --timing, at exit.
  *
  * Memory is one flat arena: the buffers from ARENA_BASE up, then one local frame per thread. An access of n bytes
  * must lie inside one buffer or inside the accessing thread's own frame; anything else is a fault, so a missing
@@ -915,6 +927,7 @@ typedef struct {
   int state;
   int bar;     /* while T_BLOCKED: the barrier ID it waits at */
   int depth;
+  uint64_t cyc; /* the thread's clock in the timing model */
   Frame stack[MAXFUNC];
 } Thread;
 
@@ -949,6 +962,81 @@ static Choice *prefix; /* the choices to replay before the search goes on */
 static int prefix_len;
 static Outcome outcomes[MAXOUT];
 static int noutcomes;
+
+/* The timing model (the header comment says what it is). */
+enum { LAT_ALU, LAT_BRANCH, LAT_LOCAL, LAT_GLOBAL, LAT_ATOMIC, LAT_BARRIER, LAT_N };
+static const char *lat_names[LAT_N] = {"alu", "branch", "local", "global", "atomic", "barrier"};
+static uint64_t lat[LAT_N] = {4, 4, 30, 400, 400, 20};
+static int sms = 1;
+static int timing_print;
+static uint64_t timing_min = UINT64_MAX, timing_max, timing_n; /* over the schedules run so far */
+static int timing_blocks; /* of the last schedule */
+
+static int lat_class(const Inst *in) {
+  switch (in->op) {
+    case OP_BRA:
+    case OP_CALL:
+    case OP_RET:
+      return LAT_BRANCH;
+    case OP_LD:
+    case OP_ST:
+      if (in->space == SPACE_LOCAL) return LAT_LOCAL;
+      if (in->space == SPACE_GLOBAL || in->space == SPACE_NONE) return LAT_GLOBAL;
+      return LAT_ALU; /* a kernel parameter */
+    case OP_ATOM:
+    case OP_RED:
+      return LAT_ATOMIC;
+    case OP_BAR:
+      return LAT_BARRIER;
+    default:
+      return LAT_ALU;
+  }
+}
+
+/* --lat CLASS=CYCLES. */
+static int parse_lat(const char *s) {
+  const char *eq = strchr(s, '=');
+  if (!eq || eq[1] < '0' || eq[1] > '9') return 0;
+  size_t n = (size_t)(eq - s);
+  for (int c = 0; c < LAT_N; c++)
+    if (strlen(lat_names[c]) == n && !strncmp(s, lat_names[c], n)) {
+      lat[c] = strtoull(eq + 1, NULL, 10);
+      return 1;
+    }
+  return 0;
+}
+
+/* The estimate of the schedule that has just completed: the blocks of each SM run one after another. */
+static void timing_finish(void) {
+  uint64_t *sm = calloc((size_t)sms, sizeof *sm);
+  if (!sm) fail(EXIT_FAULT, "out of memory");
+  for (int b = 0; b < nblocks; b++) {
+    uint64_t bt = 0;
+    for (int g = b * tpb; g < (b + 1) * tpb; g++)
+      if (threads[g].cyc > bt) bt = threads[g].cyc;
+    sm[b % sms] += bt;
+  }
+  uint64_t total = 0;
+  for (int s = 0; s < sms; s++)
+    if (sm[s] > total) total = sm[s];
+  free(sm);
+  if (total < timing_min) timing_min = total;
+  if (total > timing_max) timing_max = total;
+  timing_n++;
+  timing_blocks = nblocks;
+}
+
+/* At exit with --timing: one estimate if every schedule agreed, otherwise the range. */
+static void timing_report(void) {
+  if (!timing_n) return;
+  if (timing_min == timing_max)
+    fprintf(stderr, "timing: %llu cycles estimated (%d blocks on %d SMs, %llu schedules)\n",
+            (unsigned long long)timing_min, timing_blocks, sms, (unsigned long long)timing_n);
+  else
+    fprintf(stderr, "timing: %llu to %llu cycles over %llu schedules (%d blocks on %d SMs)\n",
+            (unsigned long long)timing_min, (unsigned long long)timing_max, (unsigned long long)timing_n, timing_blocks,
+            sms);
+}
 
 static uint64_t special_value(const Launch *l, const uint64_t *tid, const uint64_t *ctaid, int sp) {
   if (sp < 3) return tid[sp];
@@ -1038,8 +1126,15 @@ static int choose(int n) {
 }
 
 static void release(int block, int id) {
+  /* The generation completes at its latest arrival: every thread that waited here leaves at that clock. */
+  uint64_t at = 0;
   for (int g = block * tpb; g < (block + 1) * tpb; g++)
-    if (threads[g].state == T_BLOCKED && threads[g].bar == id) threads[g].state = T_RUN;
+    if (threads[g].state == T_BLOCKED && threads[g].bar == id && threads[g].cyc > at) at = threads[g].cyc;
+  for (int g = block * tpb; g < (block + 1) * tpb; g++)
+    if (threads[g].state == T_BLOCKED && threads[g].bar == id) {
+      threads[g].state = T_RUN;
+      threads[g].cyc = at;
+    }
   arrived[block * BARRIERS + id] = 0;
 }
 
@@ -1095,10 +1190,13 @@ static void step(Thread *t) {
     int v = t->r[in->pred] != 0;
     if (in->pred_neg) v = !v;
     if (!v) {
+      /* A predicated-off instruction takes an issue slot but no memory latency. */
+      t->cyc += lat[LAT_ALU];
       t->pc++;
       return;
     }
   }
+  t->cyc += lat[lat_class(in)];
   uint64_t *r = t->r;
   int next = t->pc + 1;
   uint64_t a = 0, b = 0, c = 0;
@@ -1346,6 +1444,7 @@ static void reset_threads(void) {
     t->depth = 0;
     t->state = T_RUN;
     t->bar = -1;
+    t->cyc = 0;
   }
   memset(arrived, 0, (size_t)nblocks * BARRIERS * sizeof *arrived);
   for (int b = 0; b < nblocks; b++) live[b] = tpb;
@@ -1366,6 +1465,7 @@ static void run_schedule(void) {
       for (int g = 0; g < nthreads; g++)
         if (threads[g].state == T_BLOCKED)
           fail(EXIT_FAULT, "deadlock: thread %d waits at barrier %d, which no other thread can release", g, threads[g].bar);
+      timing_finish();
       return;
     }
     Thread *t = &threads[poised[np > 1 ? choose(np) : 0]];
@@ -1457,7 +1557,9 @@ static void usage(void) {
   fprintf(stderr,
           "usage: ptxi FILE.ptx KERNEL [--grid X[,Y[,Z]]] [--block X[,Y[,Z]]] ARG... [--dump K]...\n"
           "           [--random N [--seed S]] [--explore [--max-schedules M]] [--max-steps S]\n"
-          "  ARG: ptr:COUNT[:iota=START] | s32:VALUE | bytes:HEX\n");
+          "           [--timing] [--sms N] [--lat CLASS=CYCLES]...\n"
+          "  ARG: ptr:COUNT[:iota=START] | s32:VALUE | bytes:HEX\n"
+          "  CLASS: alu, branch, local, global, atomic, barrier (defaults 4 4 30 400 400 20)\n");
   exit(EXIT_BAD);
 }
 
@@ -1495,6 +1597,15 @@ int main(int argc, char **argv) {
       if (i + 1 >= argc) usage();
       max_steps = strtoull(argv[++i], NULL, 10);
       if (max_steps == 0) usage();
+    } else if (!strcmp(argv[i], "--timing")) {
+      if (!timing_print) atexit(timing_report);
+      timing_print = 1;
+    } else if (!strcmp(argv[i], "--sms")) {
+      if (i + 1 >= argc) usage();
+      sms = atoi(argv[++i]);
+      if (sms < 1) usage();
+    } else if (!strcmp(argv[i], "--lat")) {
+      if (i + 1 >= argc || !parse_lat(argv[++i])) usage();
     } else if (!strncmp(argv[i], "--", 2)) {
       usage();
     } else {

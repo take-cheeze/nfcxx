@@ -130,3 +130,5 @@ echo "struct mutant caught (interpreter exit $status)"
 
 # Scheduling and synchronization: every schedule of the paper's megakernel, barriers, deadlock, and the caps (ptx-interp/run_sched.sh).
 ptx-interp/run_sched.sh
+# The timing model: per-thread cycle estimates, barriers, --sms, --lat, and the range over schedules (ptx-interp/timing).
+ptx-interp/timing/run_timing.sh

@@ -1,0 +1,27 @@
+// Two threads of a block. Thread 1 loads a[1] before the barrier; thread 0 does not. After bar.sync 0 both threads load
+// a[tid], and thread 0 loads once more. Thread 0 therefore waits for thread 1's load and then does two loads, so the
+// block is slower with the barrier than without it (run_timing.sh checks the exact estimates).
+.version 8.0
+.target sm_75
+.address_size 64
+
+.visible .entry barwait(
+  .param .u64 a_param
+)
+{
+  .reg .b32 %r<4>;
+  .reg .b64 %rd<4>;
+  .reg .pred %p<2>;
+
+  ld.param.u64 %rd0, [a_param];
+  mov.u32 %r0, %tid.x;
+  mul.wide.u32 %rd1, %r0, 4;
+  add.s64 %rd2, %rd0, %rd1;
+  setp.eq.u32 %p0, %r0, 1;
+  setp.eq.u32 %p1, %r0, 0;
+  @%p0 ld.global.u32 %r1, [%rd2];
+  bar.sync 0;
+  ld.global.u32 %r2, [%rd2];
+  @%p1 ld.global.u32 %r3, [%rd2];
+  ret;
+}
