@@ -12,6 +12,9 @@
 // starts; BC2CPP_HOST_MT_HEAP=1 dumps the heap method-table entries the same
 // way.
 //
+// BC2CPP_HOST_CLASS_MUTATIONS=DIR records what the run changes in the boot's
+// classes (class_mutations.hxx).
+//
 // HOST_ARENA: the GC arena is restored after the boot and after every frame, as
 // a device host does. A main_loop call that leaves more in the arena than
 // mrb_funcall would (its result, if that is a heap object) fails the run.
@@ -35,6 +38,7 @@
 #include <mruby/variable.h>
 
 #include "bc2cpp_entry.hxx"
+#include "class_mutations.hxx"
 
 // mruby-rgss/src/lib.cxx: hands the display to the RGSS natives (Graphics.width
 // etc.).
@@ -391,6 +395,13 @@ int main(int argc, char** argv) {
   if (M->exc) {
     report_exception(M, "mrb_open (gem init)");
     return 2;
+  }
+  if (const char* const mut = getenv("BC2CPP_HOST_CLASS_MUTATIONS")) {
+    class_mutations::boot(M, mut);
+    if (atexit(class_mutations::report) != 0) {
+      fprintf(stderr, "TRACE_HOST cannot register class mutation report\n");
+      return 2;
+    }
   }
   // After the boot: the gem inits are the same in every run.
   if (const char* const stress = getenv("BC2CPP_HOST_GC_STRESS"))
