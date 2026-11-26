@@ -51,7 +51,7 @@ constexpr int kMToS = 0, kMSize = 1, kMLength = 2, kMNot = 3;
 
 // What a function lowers: the main program, a method body (its argv and blk parameters) or a block body (its argv, argc
 // and the frame it was made in).
-enum class Kind { Main, Method, Block };
+enum class Kind { Main, Method, Block, Class };
 
 std::string num(long long v) { return std::to_string(v); }
 
@@ -68,8 +68,12 @@ struct Shared {
   std::vector<const mrb::Irep *> methods;        // the method bodies by number
   std::map<const mrb::Irep *, int> block_ids;    // a block body -> its number (the function mrb_b<number>)
   std::vector<const mrb::Irep *> blocks;         // the block bodies by number
-  std::set<const mrb::Irep *> top_blocks;        // the block bodies whose home is the main program (a block of the top level)
+  std::vector<const mrb::Irep *> classes;        // the class bodies (the children an EXEC runs) by number (mrb_k<number>)
+  std::map<const mrb::Irep *, int> class_ids;    // a class body -> its number
+  std::set<const mrb::Irep *> top_blocks;        // the block bodies whose home is not a method (the main program or a class body)
   std::set<std::string> defined;                 // the names a TDEF of the program defines
+  std::set<std::string> in_class;                // the names a TDEF defines in a class body (a method of a class)
+  std::set<std::string> top;                     // the names a TDEF defines at the top level (methods of Object)
   std::string functions;                         // the function definitions, the main program first
   int serial = 0;                                // makes the names of the string data items unique
 };
@@ -84,12 +88,14 @@ struct Ctx {
   Shared &sh;
   const mrb::Irep &irep;
   Kind kind;
+  unsigned nregs;      // the frame's registers: the irep's, and any a TDEF writes past them (see lower_irep)
   std::size_t pc = 0;  // the instruction being lowered
   int next;            // the next fresh register number, past the frame's registers (set by the constructor)
   std::ostringstream body;
   std::vector<std::pair<std::string, std::size_t>> slots;
 
-  Ctx(Shared &s, const mrb::Irep &i, Kind k) : sh(s), irep(i), kind(k), next(kFirstReg + static_cast<int>(i.nregs)) {}
+  Ctx(Shared &s, const mrb::Irep &i, Kind k, unsigned frame_regs)
+      : sh(s), irep(i), kind(k), nregs(frame_regs), next(kFirstReg + static_cast<int>(frame_regs)) {}
 
   void add_slot(const std::string &name, std::size_t bytes) { slots.emplace_back(name, bytes); }
   std::string fresh() { return "%" + std::to_string(next++); }
@@ -98,9 +104,9 @@ struct Ctx {
   // The address of R(i): the frame's slot i, defined by the prologue as the register kFirstReg + i (the emitter names
   // registers by number only), checked against the irep's register count.
   std::string reg(unsigned i) const {
-    if (i >= irep.nregs) {
+    if (i >= nregs) {
       throw std::runtime_error("malformed: register R(" + std::to_string(i) + ") at pc " + std::to_string(pc) +
-                               " is past the irep's " + std::to_string(irep.nregs) + " registers");
+                               " is past the frame's " + std::to_string(nregs) + " registers");
     }
     return "%" + std::to_string(kFirstReg + static_cast<int>(i));
   }
@@ -424,9 +430,9 @@ const mrb::Irep &child_at(const mrb::Irep &irep, std::uint32_t i, std::size_t pc
 // `kind` is what irep lowers to, and `home_main` says that its home (the function a `return` from it leaves; for a block)
 // is the main program.
 void collect(Shared &sh, const mrb::Irep &irep, Kind kind, bool home_main) {
-  // what each child is: a method body (TDEF) or a block body (BLOCK), and for a block whether its home is the main program
-  // (the block is made by the main program or by a block of it)
-  const bool child_home_main = kind == Kind::Main || (kind == Kind::Block && home_main);
+  // what each child is: a method body (TDEF), a block body (BLOCK) or a class body (EXEC), and for a block whether its home
+  // is not a method (the block is made by the main program, a class body, or a block of one of those)
+  const bool child_home_main = kind == Kind::Main || kind == Kind::Class || (kind == Kind::Block && home_main);
   std::vector<std::pair<Kind, bool>> child_kind(irep.reps.size(), std::make_pair(Kind::Method, false));
   for (const mrb::Insn &in : mrb::decode_iseq(irep)) {
     if (in.op == mrb::OP_TDEF) {
@@ -435,7 +441,10 @@ void collect(Shared &sh, const mrb::Irep &irep, Kind kind, bool home_main) {
         sh.method_ids[body] = static_cast<int>(sh.methods.size());
         sh.methods.push_back(body);
       }
-      sh.defined.insert(sym_at(irep, in.args[1], in.pc));
+      const std::string name = sym_at(irep, in.args[1], in.pc);
+      sh.defined.insert(name);
+      if (kind == Kind::Class) sh.in_class.insert(name);
+      if (kind == Kind::Main) sh.top.insert(name);
       child_kind[in.args[2]] = std::make_pair(Kind::Method, false);
     } else if (in.op == mrb::OP_BLOCK) {
       const mrb::Irep *body = &child_at(irep, in.args[1], in.pc);
@@ -445,6 +454,13 @@ void collect(Shared &sh, const mrb::Irep &irep, Kind kind, bool home_main) {
       }
       if (child_home_main) sh.top_blocks.insert(body);
       child_kind[in.args[1]] = std::make_pair(Kind::Block, child_home_main);
+    } else if (in.op == mrb::OP_EXEC) {
+      const mrb::Irep *body = &child_at(irep, in.args[1], in.pc);
+      if (sh.class_ids.count(body) == 0) {
+        sh.class_ids[body] = static_cast<int>(sh.classes.size());
+        sh.classes.push_back(body);
+      }
+      child_kind[in.args[1]] = std::make_pair(Kind::Class, false);
     }
   }
   for (std::size_t i = 0; i < irep.reps.size(); ++i) {
@@ -461,18 +477,147 @@ void emit_unwind_check(Ctx &c) {
   c.line("(if " + p + " (then (eval (call void &\"mrbbc_unwind_take\" %0 $\"frame\")) (return)))");
 }
 
+// argv[i] = R[a+i] for i in 1..n (argv[0] is the caller's).
+void emit_args(Ctx &c, const std::string &argv, unsigned a, unsigned n) {
+  for (unsigned i = 1; i <= n; ++i) {
+    std::string p = c.fresh();
+    c.line("(let " + p + " (ptr unsigned_char) (offset $\"" + argv + "\" " + num(16 * i) + "))");
+    c.line("(copy 16 " + p + " " + c.reg(a + i) + ")");
+  }
+}
+
+// The argument vector of a call with a receiver: argv[0] is the receiver (self of the method), then the arguments.
+void emit_arg_vector(Ctx &c, const std::string &argv, const std::string &self, unsigned a, unsigned n) {
+  c.line("(copy 16 $\"" + argv + "\" " + self + ")");
+  emit_args(c, argv, a, n);
+}
+
+// The block of a call that has none: a slot of this frame holding nil, named `name`.
+std::string nil_block(Ctx &c, const std::string &name) {
+  c.add_slot(name, 16);
+  store_tag(c, "$\"" + name + "\"", kTagNil);
+  return "$\"" + name + "\"";
+}
+
+// One branch per method of the module: when id is N, the function of method N runs with (ret, argv, blk).
+void emit_method_branches(Ctx &c, const Shared &sh, const std::string &id, const std::string &ret, const std::string &argv,
+                          const std::string &blk) {
+  for (std::size_t m = 0; m < sh.methods.size(); ++m) {
+    std::string hit = c.fresh();
+    c.line("(let " + hit + " bool (eq int " + id + " (const int " + num(static_cast<long long>(m)) + ")))");
+    c.line("(if " + hit + " (then (eval (call void &\"mrb_m" + std::to_string(m) + "\" " + ret + " $\"" + argv + "\" " + blk +
+           "))))");
+  }
+}
+
+// After a call that passes a block (SENDB, SSENDB): a break out of the block makes the call return its value, to dst, and
+// the code goes on after the call. Any other pending exit passes through this frame as in emit_unwind_check.
+void emit_block_site(Ctx &c, const std::string &dst, std::size_t next_pc) {
+  std::string p = c.fresh(), b = c.fresh();
+  c.line("(let " + p + " bool (call bool &\"mrbbc_unwinding\"))");
+  c.line("(if " + p + " (then");
+  c.line("(let " + b + " bool (call bool &\"mrbbc_break_take\" " + dst + " $\"frame\"))");
+  c.line("(if " + b + " (then (goto " + lbl(next_pc) + ")))");
+  if (c.kind != Kind::Main) c.line("(eval (call void &\"mrbbc_unwind_take\" %0 $\"frame\"))");
+  c.line("(return)");
+  c.line("))");
+}
+
+// R[a] = R[a].new(R[a+1] .. R[a+n]) for a class: the instance is made (mrbbc_alloc, which raises for another receiver), its
+// initialize runs with the arguments (mrbbc_find_init: none when the class has no initialize, and then no argument is
+// allowed), and the instance is the value.
+void emit_new(Ctx &c, const Shared &sh, unsigned a, unsigned n, std::size_t pc) {
+  const std::string argv = "newargv" + std::to_string(pc);
+  c.add_slot(argv, 16 * (static_cast<std::size_t>(n) + 1));
+  c.line("(eval (call void &\"mrbbc_alloc\" $\"" + argv + "\" " + c.reg(a) + "))");
+  emit_args(c, argv, a, n);
+  std::string id = c.fresh();
+  c.line("(let " + id + " int (call int &\"mrbbc_find_init\" $\"" + argv + "\" (const long " + num(n) + ")))");
+  emit_method_branches(c, sh, id, c.reg(a), argv, nil_block(c, "newnil" + std::to_string(pc)));
+  emit_unwind_check(c);
+  c.line("(copy 16 " + c.reg(a) + " $\"" + argv + "\")");
+}
+
+// R[a] = R[a].name(R[a+1] .. R[a+n]) with an explicit receiver (SEND0, SEND, and SENDB with the block in R[a+n+1]). The
+// program's methods of the name are looked up on the receiver's class (mrbbc_find_send), one branch per method; when the
+// receiver has none of them, the builtin of the name runs (new, and the SEND0 and binary methods), or else NoMethodError.
+// A name that only a top-level def defines is refused: it is private, and that error is not reproduced here.
+void lower_send(Ctx &c, Shared &sh, const mrb::Insn &in, const std::string &name, unsigned a, unsigned n, bool has_blk) {
+  auto refuse = [&](const std::string &why) {
+    throw Refused("refused: " + std::string(in.name) + " of method '" + name + "' " + why + " (pc " +
+                  std::to_string(in.pc) + ")");
+  };
+  const bool dispatch = sh.in_class.count(name) != 0;
+  if (!dispatch && sh.top.count(name) != 0) refuse("is a method of the program (not lowered yet)");
+  int code = 0, op = 0;
+  const bool is_new = name == "new" && !has_blk;
+  const bool zero = !has_blk && n == 0 && zero_arg_method(name, code);
+  const bool binary = !has_blk && n == 1 && binary_method(name, op);
+  if (!dispatch && !is_new && !zero && !binary) refuse(has_blk ? "with a block is not lowered yet" : "is not lowered yet");
+
+  const std::string pc = std::to_string(in.pc);
+  if (dispatch) {
+    const std::string argv = "argv" + pc;
+    c.add_slot(argv, 16 * (static_cast<std::size_t>(n) + 1));
+    emit_arg_vector(c, argv, c.reg(a), a, n);
+    const std::string id = c.fresh();
+    c.line("(let " + id + " int (call int &\"mrbbc_find_send\" " + c.reg(a) + " @\"" + symbol_data(sh, name) +
+           "\" (const long " + num(n) + ")))");
+    const std::string blk = has_blk ? c.reg(a + n + 1) : nil_block(c, "nil" + pc);
+    emit_method_branches(c, sh, id, c.reg(a), argv, blk);
+    if (has_blk) {
+      emit_block_site(c, c.reg(a), in.pc + in.len);
+    } else {
+      emit_unwind_check(c);
+    }
+    const std::string neg = c.fresh();
+    c.line("(let " + neg + " bool (lt.s int " + id + " (const int 0)))");
+    c.line("(if " + neg + " (then");
+  }
+  if (is_new) {
+    emit_new(c, sh, a, n, in.pc);
+  } else if (zero) {
+    c.line("(eval (call void &\"mrbbc_send0\" " + c.reg(a) + " " + c.reg(a) + " (const int " + num(code) + ")))");
+  } else if (binary) {
+    call_binop(c, op, c.reg(a), c.reg(a), c.reg(a + 1));
+  } else {
+    c.line("(eval (call void &\"mrbbc_no_method\" " + c.reg(a) + " @\"" + symbol_data(sh, name) + "\"))");
+  }
+  if (dispatch) c.line("))");
+}
+
+// The operator method an opcode calls on its fast path, for the operators whose redefinition is refused (nullptr otherwise).
+const char *operator_method(int op) {
+  switch (op) {
+    case mrb::OP_ADD:
+    case mrb::OP_ADDI:
+    case mrb::OP_ADDILV: return "+";
+    case mrb::OP_SUB:
+    case mrb::OP_SUBI:
+    case mrb::OP_SUBILV: return "-";
+    case mrb::OP_MUL: return "*";
+    case mrb::OP_DIV: return "/";
+    case mrb::OP_EQ: return "==";
+    case mrb::OP_LT: return "<";
+    case mrb::OP_LE: return "<=";
+    case mrb::OP_GT: return ">";
+    case mrb::OP_GE: return ">=";
+    default: return nullptr;
+  }
+}
+
 // Lowers one irep to the function `fname` and appends it to sh.functions.
 void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kind kind) {
   if (!irep.catches.empty()) {
-    const char *what = kind == Kind::Main ? "the main program" : kind == Kind::Method ? "a method" : "a block";
+    const char *what = kind == Kind::Main ? "the main program" : kind == Kind::Method ? "a method" : kind == Kind::Class ? "a class body" : "a block";
     throw Refused(std::string("refused: ") + what + " has a catch table");
   }
-  // the required parameters of the body: a method takes any count of them; a block takes at most one (a block with two
-  // or more parameters splats an array argument, which is not lowered)
+  // the required parameters of the body: a method or a block takes any count of them (a block with two or more splats a
+  // single array argument, see the prologue); a class body takes none and has no ENTER
   long arity = 0;
-  if (kind != Kind::Main) {
+  if (kind == Kind::Method || kind == Kind::Block) {
     arity = required_arity(irep);
-    if (arity < 0 || (kind == Kind::Block && arity > 1)) {
+    if (arity < 0) {
       throw Refused("refused: " + fname + " has parameters other than required ones (not lowered yet)");
     }
   }
@@ -483,11 +628,18 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
   std::set<std::size_t> ends;  // a jump may go to the end of the iseq (a fall-off return)
   ends.insert(irep.iseq.size());
 
-  Ctx c(sh, irep, kind);
-  for (unsigned i = 0; i < irep.nregs; ++i) {
+  // The frame: the irep's registers, and the register a TDEF writes (mruby's VM has room past nregs for it, as the class
+  // bodies that define methods show, where TDEF writes R(1) with nregs 1).
+  unsigned frame_regs = irep.nregs;
+  for (const mrb::Insn &in : insns) {
+    if (in.op == mrb::OP_TDEF && in.args[0] + 1u > frame_regs) frame_regs = in.args[0] + 1u;
+  }
+
+  Ctx c(sh, irep, kind, frame_regs);
+  for (unsigned i = 0; i < frame_regs; ++i) {
     c.line("(let " + c.reg(i) + " (ptr unsigned_char) (offset $\"frame\" " + num(16 * i) + "))");
   }
-  if (kind == Kind::Method) {
+  if (kind == Kind::Method || kind == Kind::Class) {
     // R(0) is self and R(1..arity) the arguments, copied from the vector; the other registers start as nil
     c.line("(copy 16 " + c.reg(0) + " %1)");
     for (long i = 1; i <= arity; ++i) {
@@ -495,12 +647,25 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
       c.line("(let " + p + " (ptr unsigned_char) (offset %1 " + num(16 * i) + "))");
       c.line("(copy 16 " + c.reg(static_cast<unsigned>(i)) + " " + p + ")");
     }
-    for (long i = arity + 1; i < static_cast<long>(irep.nregs); ++i) {
+    for (long i = arity + 1; i < static_cast<long>(frame_regs); ++i) {
       store_tag(c, c.reg(static_cast<unsigned>(i)), kTagNil);
     }
   } else if (kind == Kind::Block) {
-    // R(0) is self; the one parameter is argv[1] when the yield gave an argument, else nil (a proc takes what it gets)
+    // R(0) is self. The parameters are argv[1..] for the arguments the yield gave, else nil (a proc takes what it gets). With
+    // two or more parameters, one array argument is splatted instead (mrbbc_splats: the elements, nil past their end).
     c.line("(copy 16 " + c.reg(0) + " %1)");
+    const bool splat = arity >= 2;
+    if (splat) {
+      const std::string sp = c.fresh(), first = c.fresh();
+      c.line("(let " + sp + " bool (call bool &\"mrbbc_splats\" %1 %2))");
+      c.line("(if " + sp + " (then");
+      c.line("(let " + first + " (ptr unsigned_char) (offset %1 16))");
+      for (long i = 1; i <= arity; ++i) {
+        c.line("(eval (call void &\"mrbbc_ary_elt\" " + c.reg(static_cast<unsigned>(i)) + " " + first + " (const long " +
+               num(i - 1) + ")))");
+      }
+      c.line(") (else");
+    }
     for (long i = 1; i <= arity; ++i) {
       std::string p = c.fresh(), given = c.fresh();
       c.line("(let " + p + " (ptr unsigned_char) (offset %1 " + num(16 * i) + "))");
@@ -509,7 +674,8 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
       store_tag(c, c.reg(static_cast<unsigned>(i)), kTagNil);
       c.line("))");
     }
-    for (long i = arity + 1; i < static_cast<long>(irep.nregs); ++i) {
+    if (splat) c.line("))");
+    for (long i = arity + 1; i < static_cast<long>(frame_regs); ++i) {
       store_tag(c, c.reg(static_cast<unsigned>(i)), kTagNil);
     }
   }
@@ -517,6 +683,13 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
     c.pc = in.pc;
     c.line("");
     c.body << "  (label " << lbl(in.pc) << ")\n";
+    // an operator the program defines in a class is a call the fast path cannot make: refused
+    if (const char *op_name = operator_method(in.op)) {
+      if (sh.in_class.count(op_name) != 0) {
+        throw Refused("refused: " + std::string(in.name) + " of the operator '" + op_name +
+                      "', which the program defines in a class, is not lowered yet (pc " + std::to_string(in.pc) + ")");
+      }
+    }
     if (in.ext != 0 || in.op == mrb::OP_EXT1 || in.op == mrb::OP_EXT2 || in.op == mrb::OP_EXT3) {
       throw Refused("refused: opcode " + std::string(in.name) + " (wide operands, EXT prefix) is not lowered yet (pc " +
                     std::to_string(in.pc) + ")");
@@ -589,7 +762,12 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         break;
       }
       case mrb::OP_STRCAT:
-        // str_cat(R[a], R[a+1]): R[a] is a string; the operand is appended as its to_s (mrb_obj_as_string)
+        // str_cat(R[a], R[a+1]): R[a] is a string; the operand is appended as its to_s (mrb_obj_as_string). A to_s the
+        // program defines in a class would have to be called for an instance, which is not lowered
+        if (sh.in_class.count("to_s") != 0) {
+          throw Refused("refused: STRCAT with a to_s the program defines in a class is not lowered yet (pc " +
+                        std::to_string(in.pc) + ")");
+        }
         c.line("(eval (call void &\"mrbbc_strcat\" " + c.reg(x[0]) + " " + c.reg(x[0] + 1) + "))");
         break;
       case mrb::OP_LOADNIL: store_tag(c, c.reg(x[0]), kTagNil); break;
@@ -656,11 +834,18 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         // only class a program of this subset defines methods on); the body is a function of its own (mrb_m<number>)
         const mrb::Irep &body = child_at(irep, x[2], in.pc);
         const std::string name = method_name(x[1]);
+        // a def goes to Object at the top level, and to the class body's own class (self) in a class body
+        if (kind != Kind::Main && kind != Kind::Class) refuse_method(name, "is defined in a method or a block (not lowered yet)");
         if (!plain_symbol(name)) refuse_method(name, "has a name that is not plain (not lowered yet)");
         const long body_arity = required_arity(body);
         if (body_arity < 0) refuse_method(name, "has parameters other than required ones (not lowered yet)");
-        c.line("(eval (call void &\"mrbbc_def\" @\"" + symbol_data(sh, name) + "\" (const int " +
-               num(number_of(sh.method_ids, body, "method")) + ") (const long " + num(body_arity) + ")))");
+        const std::string id = "(const int " + num(number_of(sh.method_ids, body, "method")) + ") (const long " +
+                               num(body_arity) + ")";
+        if (kind == Kind::Class) {
+          c.line("(eval (call void &\"mrbbc_def_in\" " + c.reg(0) + " @\"" + symbol_data(sh, name) + "\" " + id + "))");
+        } else {
+          c.line("(eval (call void &\"mrbbc_def\" @\"" + symbol_data(sh, name) + "\" " + id + "))");
+        }
         c.line("(eval (call void &\"mrbbc_sym\" " + c.reg(x[0]) + " @\"" + symbol_data(sh, name) + "\"))");
         break;
       }
@@ -728,7 +913,7 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
       case mrb::OP_SSENDB: {
         // R[a] = self.Syms[b](R[a+1] .. R[a+n]) with self = R[0] and c = n | k<<4 (SSEND0 has no arguments); SSENDB has
         // the block in R[a+n+1]. The arguments go to a vector of their own (self first), so the method's function reads
-        // them from one array.
+        // them from one array. The method is found on self's class, then on Object (mrbbc_find).
         const bool has_c = in.op != mrb::OP_SSEND0;
         const unsigned n = has_c ? (x[2] & 0x0f) : 0;
         const unsigned k = has_c ? (x[2] >> 4) : 0;
@@ -751,59 +936,94 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         if (object_method(name)) refuse_method(name, "is an Object method, which a self call is not lowered for");
         const std::string argv = "argv" + std::to_string(in.pc);
         c.add_slot(argv, 16 * (static_cast<std::size_t>(n) + 1));
-        c.line("(copy 16 $\"" + argv + "\" " + c.reg(0) + ")");
-        for (unsigned i = 1; i <= n; ++i) {
-          std::string p = c.fresh();
-          c.line("(let " + p + " (ptr unsigned_char) (offset $\"" + argv + "\" " + num(16 * i) + "))");
-          c.line("(copy 16 " + p + " " + c.reg(x[0] + i) + ")");
-        }
-        // the block: the one the instruction passes, or nil (a slot of this frame holding nil)
-        std::string blk;
-        if (in.op == mrb::OP_SSENDB) {
-          blk = c.reg(x[0] + n + 1);
-        } else {
-          const std::string nil = "nil" + std::to_string(in.pc);
-          c.add_slot(nil, 16);
-          store_tag(c, "$\"" + nil + "\"", kTagNil);
-          blk = "$\"" + nil + "\"";
-        }
+        emit_arg_vector(c, argv, c.reg(0), x[0], n);
+        // the block: the one the instruction passes, or nil
+        const std::string blk = in.op == mrb::OP_SSENDB ? c.reg(x[0] + n + 1) : nil_block(c, "nil" + std::to_string(in.pc));
         // the runtime checks the count and gives the method's number; the call is one branch per method of the program
-        std::string id = c.fresh();
-        c.line("(let " + id + " int (call int &\"mrbbc_find\" @\"" + symbol_data(sh, name) + "\" (const long " + num(n) +
-               ")))");
-        for (std::size_t m = 0; m < sh.methods.size(); ++m) {
-          std::string hit = c.fresh();
-          c.line("(let " + hit + " bool (eq int " + id + " (const int " + num(static_cast<long long>(m)) + ")))");
-          c.line("(if " + hit + " (then (eval (call void &\"mrb_m" + std::to_string(m) + "\" " + c.reg(x[0]) + " $\"" +
-                 argv + "\" " + blk + "))))");
+        const std::string id = c.fresh();
+        c.line("(let " + id + " int (call int &\"mrbbc_find\" " + c.reg(0) + " @\"" + symbol_data(sh, name) + "\" (const long " +
+               num(n) + ")))");
+        emit_method_branches(c, sh, id, c.reg(x[0]), argv, blk);
+        if (in.op == mrb::OP_SSENDB) {
+          emit_block_site(c, c.reg(x[0]), in.pc + in.len);
+        } else {
+          emit_unwind_check(c);
         }
-        emit_unwind_check(c);
         break;
       }
       case mrb::OP_SEND0:
-      case mrb::OP_SEND: {
-        // R[a] = R[a].send(Syms[b], R[a+1] .. R[a+n]) with c = n | k<<4 (k keyword arguments, refused)
-        const bool is_send = in.op == mrb::OP_SEND;
-        const unsigned n = is_send ? (x[2] & 0x0f) : 0;
-        const unsigned k = is_send ? (x[2] >> 4) : 0;
+      case mrb::OP_SEND:
+      case mrb::OP_SENDB: {
+        // R[a] = R[a].Syms[b](R[a+1] .. R[a+n]) with c = n | k<<4 (k keyword arguments, refused); SENDB has the block in
+        // R[a+n+1]. See lower_send.
+        const bool has_c = in.op != mrb::OP_SEND0;
+        const unsigned n = has_c ? (x[2] & 0x0f) : 0;
+        const unsigned k = has_c ? (x[2] >> 4) : 0;
         const std::string name = method_name(x[1]);
         if (k != 0) refuse_method(name, "with keyword arguments");
-        // a method of the program is found on Object, which a receiver other than self may not have: not lowered
-        if (sh.defined.count(name) != 0) refuse_method(name, "is a method of the program (not lowered yet)");
-        if (n == 0) {
-          int code = 0;
-          if (!zero_arg_method(name, code)) refuse_method(name, "is not lowered yet");
-          c.line("(eval (call void &\"mrbbc_send0\" " + c.reg(x[0]) + " " + c.reg(x[0]) + " (const int " + num(code) +
-                 ")))");
-        } else if (n == 1) {
-          int op = 0;
-          if (!binary_method(name, op)) refuse_method(name, "is not lowered yet");
-          call_binop(c, op, c.reg(x[0]), c.reg(x[0]), c.reg(x[0] + 1));
+        lower_send(c, sh, in, name, x[0], n, in.op == mrb::OP_SENDB);
+        break;
+      }
+      case mrb::OP_GETIV:
+      case mrb::OP_SETIV: {
+        // R[a] = self.@Syms[b] (GETIV), or self.@Syms[b] = R[a] (SETIV); self is R(0) in a method, a block or a class body
+        if (kind == Kind::Main) {
+          throw Refused("refused: an instance variable of the main program is not lowered yet (pc " + std::to_string(in.pc) + ")");
+        }
+        const std::string sym = "@\"" + symbol_data(sh, sym_at(irep, x[1], in.pc)) + "\"";
+        if (in.op == mrb::OP_GETIV) {
+          c.line("(eval (call void &\"mrbbc_getiv\" " + c.reg(x[0]) + " " + c.reg(0) + " " + sym + "))");
         } else {
-          refuse_method(name, "with " + std::to_string(n) + " arguments is not lowered yet");
+          c.line("(eval (call void &\"mrbbc_setiv\" " + c.reg(0) + " " + sym + " " + c.reg(x[0]) + "))");
         }
         break;
       }
+      case mrb::OP_GETCONST:
+        // R[a] = the class Syms[b] (a constant that names a class the program defines; mrbbc_getconst)
+        c.line("(eval (call void &\"mrbbc_getconst\" " + c.reg(x[0]) + " @\"" + symbol_data(sh, sym_at(irep, x[1], in.pc)) +
+               "\"))");
+        break;
+      case mrb::OP_CLASS: {
+        // R[a] = the class Syms[b] with superclass R[a+1] (nil: Object). It is defined under the class its cbase R[a] names,
+        // else under the class body's own class (self), else at the top level; an existing class of the name is reopened.
+        if (kind != Kind::Main && kind != Kind::Class) {
+          throw Refused("refused: CLASS in a method or a block is not lowered yet (pc " + std::to_string(in.pc) + ")");
+        }
+        const std::string target = kind == Kind::Class ? c.reg(0) : c.reg(x[0]);
+        c.line("(eval (call void &\"mrbbc_class\" " + c.reg(x[0]) + " " + c.reg(x[0]) + " " + c.reg(x[0] + 1) + " @\"" +
+               symbol_data(sh, sym_at(irep, x[1], in.pc)) + "\" " + target + "))");
+        break;
+      }
+      case mrb::OP_TCLASS:
+        // R[a] = the class a method definition goes to: Object at the top level, the class body's own class in a class body
+        if (kind == Kind::Main) {
+          c.line("(eval (call void &\"mrbbc_object_class\" " + c.reg(x[0]) + "))");
+        } else if (kind == Kind::Class) {
+          c.line("(copy 16 " + c.reg(x[0]) + " " + c.reg(0) + ")");
+        } else {
+          throw Refused("refused: TCLASS in a method or a block is not lowered yet (pc " + std::to_string(in.pc) + ")");
+        }
+        break;
+      case mrb::OP_EXEC: {
+        // R[a] = the class body Bx run with self R[a] (the function mrb_k<number>; its argument vector holds self)
+        const mrb::Irep &body = child_at(irep, x[1], in.pc);
+        const std::string argv = "argv" + std::to_string(in.pc);
+        c.add_slot(argv, 16);
+        c.line("(copy 16 $\"" + argv + "\" " + c.reg(x[0]) + ")");
+        const std::string nil = nil_block(c, "nil" + std::to_string(in.pc));
+        c.line("(eval (call void &\"mrb_k" + std::to_string(number_of(sh.class_ids, body, "class")) + "\" " + c.reg(x[0]) +
+               " $\"" + argv + "\" " + nil + "))");
+        break;
+      }
+      case mrb::OP_BREAK:
+        // a break out of a block: the call the block was passed to returns the value (mrbbc_break; home is the frame that
+        // made the block, which is where that call is). The block returns at once.
+        if (kind != Kind::Block) {
+          throw Refused("refused: BREAK outside a block is not lowered yet (pc " + std::to_string(in.pc) + ")");
+        }
+        c.line("(eval (call void &\"mrbbc_break\" " + c.reg(x[0]) + " %3))");
+        c.line("(return)");
+        break;
       case mrb::OP_JMP:
       case mrb::OP_JMPUW:  // unwinds to the same place when the irep has no catch table (checked above), as JMP
         c.line("(goto " + jump_to(jump_target(in, s16(x[0]))) + ")");
@@ -838,6 +1058,12 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         c.line("(eval (call void &\"mrbbc_return_block\" " + c.reg(x[0]) + " %4))");
         c.line("(return)");
         break;
+      case mrb::OP_RETSELF:
+        // self is R(0) in a method, a block or a class body; the top level's self is the main object, which is not modelled
+        if (kind == Kind::Main) throw Refused("refused: RETSELF of the main program is not lowered yet (pc " + std::to_string(in.pc) + ")");
+        c.line("(copy 16 %0 " + c.reg(0) + ")");
+        c.line("(return)");
+        break;
       case mrb::OP_RETNIL:
         store_tag(c, "%0", kTagNil);
         c.line("(return)");
@@ -866,14 +1092,14 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
 
   std::ostringstream fn;
   fn << "(function \"" << fname << "\" (ret void) (params (param %0 \"ret\" (ptr (struct \"MV\")))";
-  if (kind == Kind::Method) {
+  if (kind == Kind::Method || kind == Kind::Class) {
     fn << " (param %1 \"argv\" (ptr (struct \"MV\"))) (param %2 \"blk\" (ptr (struct \"MV\")))";
   } else if (kind == Kind::Block) {
     fn << " (param %1 \"argv\" (ptr (struct \"MV\"))) (param %2 \"argc\" long) (param %3 \"frame\" (ptr (struct \"MV\")))"
        << " (param %4 \"home\" (ptr (struct \"MV\")))";
   }
   fn << ")\n";
-  fn << "  (slot \"frame\" (struct \"MV\") " << 16 * static_cast<std::size_t>(irep.nregs) << " 8)\n";
+  fn << "  (slot \"frame\" (struct \"MV\") " << 16 * static_cast<std::size_t>(frame_regs) << " 8)\n";
   for (const auto &s : c.slots) fn << "  (slot \"" << s.first << "\" (struct \"MV\") " << s.second << " 8)\n";
   fn << c.body.str() << ")\n";
   sh.functions += fn.str();
@@ -888,6 +1114,9 @@ std::string lower_module(const mrb::Module &module, const std::string &source_na
   lower_irep(sh, root, "mrb_irep_0", Kind::Main);
   for (std::size_t m = 0; m < sh.methods.size(); ++m) {
     lower_irep(sh, *sh.methods[m], "mrb_m" + std::to_string(m), Kind::Method);
+  }
+  for (std::size_t k = 0; k < sh.classes.size(); ++k) {
+    lower_irep(sh, *sh.classes[k], "mrb_k" + std::to_string(k), Kind::Class);
   }
   for (std::size_t b = 0; b < sh.blocks.size(); ++b) {
     lower_irep(sh, *sh.blocks[b], "mrb_b" + std::to_string(b), Kind::Block);
