@@ -69,7 +69,7 @@ A register R(i) is a 16-byte slot `r<i>` of type `MV`: the tag byte at offset 0 
 the runtime's (`tests/mrbbc/runtime/mrbrt.h`): nil 0, false 1, true 2, integer 3, string 4, array 5, symbol 6. The
 int64 of a string, an array or a symbol is a pointer to the runtime's object: a string is a length and its bytes, an
 array a length, a capacity and its `MV` items, a symbol the NUL-terminated name in the module's data. The objects are
-malloc'd and never freed, since there is no collector. The main program becomes one IR function `mrb_irep_0(MV *ret)`.
+allocated by the runtime's collector (mark and sweep, mrbrt.c, "the collector"), and freed when they are unreachable. The main program becomes one IR function `mrb_irep_0(MV *ret)`.
 A `RETURN` copies R(a) into `*ret`, and the driver prints `*ret` the way `p` does.
 
 Integer operators have an inline fast path. When every operand has the integer tag, `+`, `-` and `*` are the IR's
@@ -410,8 +410,9 @@ whose message says so, never with a value.
 - **Nested class names.** A nested class (`class A; class B`) is found by its plain name from anywhere, as
   `GETCONST` does. mruby finds `B` only inside `A` (and `A::B` needs `GETMCNST`, which is refused), so a program that
   names `B` at the top level is an error in mruby and a value here. `inspect` of a nested class prints `A::B`, as mruby.
-- **No garbage collector.** Strings, arrays and symbols are never freed. A program that builds a lot of them uses memory
-  without bound; the test programs are small.
+- **Collector limits.** Strings, arrays, hashes, instances and argument vectors are collected (mark and sweep, see mrbrt.c).
+  Classes are never collected (the class table is a root), and neither are symbols (their names are static). The program's
+  frames are on the C stack and scanned conservatively, so a stale word can keep an object one cycle longer.
 - **Strings are bytes.** This build of mruby has no UTF-8 character handling: `size`, `length` and `[]` count bytes
   (`"é".size` is 2), and `inspect` escapes the bytes of a non-ASCII character as `\xHH`. The runtime does the same.
 - **Recursion.** An array that contains itself inspects as `[...]`, as mruby does. Comparing two such arrays with `==`
