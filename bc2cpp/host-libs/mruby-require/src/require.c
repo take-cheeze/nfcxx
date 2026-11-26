@@ -15,6 +15,11 @@
 #ifndef MRB_NO_STDIO
 #include <stdio.h>
 #endif
+/* Loading a file needs the compiler (mrb_load_file). A build without mruby-compiler gets MRB_REQUIRE_NO_FILES from
+   mrbgem.rake, and there require raises LoadError for anything that is not built in. */
+#if !defined(MRB_NO_STDIO) && !defined(MRB_REQUIRE_NO_FILES)
+#define MRB_REQUIRE_FILES
+#endif
 
 static mrb_value
 loaded_features(mrb_state *mrb)
@@ -51,7 +56,7 @@ mrb_require_provide(mrb_state *mrb, const char *name)
   }
 }
 
-#ifndef MRB_NO_STDIO
+#ifdef MRB_REQUIRE_FILES
 /* The file a name loads: a name that starts with '/', './' or '../' is itself; any other is searched in $LOAD_PATH.
    A name without a .rb extension gets one. Returns a new string, or nil when no file is found. */
 static mrb_value
@@ -126,7 +131,7 @@ rb_require(mrb_state *mrb, const char *name)
   if (is_loaded(mrb, list, name)) {
     return mrb_false_value();
   }
-#ifndef MRB_NO_STDIO
+#ifdef MRB_REQUIRE_FILES
   {
     mrb_value path = resolve_path(mrb, name);
     if (!mrb_nil_p(path)) {

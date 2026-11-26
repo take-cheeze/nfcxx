@@ -11,4 +11,9 @@ MRuby::Gem::Specification.new('mruby-require') do |spec|
   spec.license = 'MIT'
   spec.authors = 'take-cheeze'
   spec.summary = 'Kernel#require over the features the mrbgems, mrblibs, baked sources and files of this build provide'
+  # A file is compiled when it is loaded (mrb_load_file), so a build without mruby-compiler (the self-AOT runner) loads
+  # none. build_settings runs once the gem list is complete, dependencies included.
+  spec.build_settings do
+    cc.defines << 'MRB_REQUIRE_NO_FILES' unless build.gems.any? { |gem| gem.name == 'mruby-compiler' }
+  end
 end
