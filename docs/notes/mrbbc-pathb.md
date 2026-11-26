@@ -131,7 +131,10 @@ ENTER does (missing required ones are nil; the rest is an array of the middle ar
 for a block, one array argument is splatted when it takes two or more) and returns the count of optional parameters given,
 which the jumps choose the defaults by. A keyword hash given to a method without keyword parameters is a positional
 argument (vm.c's rule, also in the arity count). The arity error is `wrong number of arguments (given N, expected M)` with
-M = required + post (vm.c's `argnum_error(m1+m2)`), for any optional or rest parameters. A call with keyword arguments
+M = required + post (vm.c's `argnum_error(m1+m2)`). Its N follows vm.c's `argnum_error`, which reads `ci->n`: a body with
+required parameters only counts the positional arguments (the keyword hash only when there are none), a body with keyword
+parameters counts the positional arguments (the same exception), and any other body (optional, rest or post parameters)
+counts the keyword hash as a positional argument (`rterr/kw_positional_arity.rb`, `kw_kd_noargs.rb`, `kw_opt_count.rb`). A call with keyword arguments
 builds the hash from its pairs at R[a+n+1..] (`mrbbc_hash_new`, `mrbbc_hash_set`) and passes it as `argv[n+1]`. A
 missing keyword is `missing keyword: NAME` (ArgumentError, from KARG), and a keyword the method does not take is
 `unknown keyword: NAME` (from KEYEND, after the body's keywords are taken). A block with keyword parameters gets an empty

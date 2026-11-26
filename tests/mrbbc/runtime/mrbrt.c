@@ -176,9 +176,15 @@ static MDef *find_def(MDef *d, const char *name) {
  * argnum_error(m1+m2)), even when the method has optional parameters. The keyword hash of a call counts as a positional
  * argument when the method has no keyword parameters (vm.c's check_argument_count and ENTER). */
 static int check_arity(const MDef *d, long argc, long kw) {
-  long given = argc + (kw && !d->kd ? 1 : 0);
-  if (given < d->min || (d->max >= 0 && given > d->max)) {
+  long count = argc + (kw && !d->kd ? 1 : 0), given;
+  if (count < d->min || (d->max >= 0 && count > d->max)) {
     char msg[128];
+    /* the count mruby's message gives (vm.c's argnum_error reads ci->n): a body of required parameters only (the fast path of
+     * ENTER, where the count is checked before the keyword hash is counted) and a body with keyword parameters give the
+     * positional arguments, and a call of no positional arguments but keywords counts the hash as one; any other body
+     * (optional, rest or post parameters) gives the count with the keyword hash */
+    if (!d->kd && d->max != d->min) given = count;
+    else given = argc + (argc == 0 && kw ? 1 : 0);
     snprintf(msg, sizeof msg, "wrong number of arguments (given %ld, expected %ld)", given, d->min);
     mrbbc_raise("ArgumentError", msg);
   }
