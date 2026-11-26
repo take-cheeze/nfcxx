@@ -81,8 +81,8 @@ checked by tag. Anything else calls a helper, which performs the whole operation
 | RETURN | copy of the register (or null) into `*ret`, then `(return)` |
 | everything else (LOADROOT, INSTANCEOF, BITW, INC, FOREACH, ...) | refused: `refused: _OP_NAME is not lowered yet (pc N)`, exit 3 |
 
-A nested function with default parameters or a vararg is refused by name (the main prototype is always vararg, with
-`vargv` unused, and is lowered either way).
+A nested function with default parameters or a vararg is lowered (section 4b). The main prototype is always vararg, with
+`vargv` unused.
 
 Each module gets one `sq_fn_N(ret, base, clo)` per prototype (pre-order, main is 0; `clo` is the running closure, NULL for
 main) and a dispatcher `sq_dispatch(fn, ret, frame, clo)`, an IR function with one test per prototype, which the runtime
@@ -255,24 +255,38 @@ code is `sq_fn_N` over the same flat stack, so the call needs no new IR form. Th
   `attempt to call 'table'` for nargs 10 (probed with the callback's declared parameters 6, 7 and 9), so the runtime refuses
   them at the first item with a named message. No test: nothing it prints can match the reference.
 - No producer change: a CALL of `arr.map(f)` is the same PREPCALL and CALL as any other native method; the callbacks are
-  natives of the runtime, and a nested function with a default parameter or a vararg is still refused by the producer
-  (`lower/err/callback_default.nut`, `lower/err/callback_vararg.nut`).
+  natives of the runtime. A default-parameter or vararg callback is lowered as any closure (`lower/callback_default.nut`,
+  `lower/callback_vararg.nut`; section 4b).
 - Wrapping: `+ - *` and unary minus wrap, as the reference does on LP64 in practice. `INT64_MIN / -1` is undefined in the
   reference (its fast path has no check), and the runtime wraps. It is not tested.
 
+## 4b. Default parameters and varargs (StartCall, CLOSURE_OP)
+
+- Defaults. CLOSURE_OP copies the values of the default parameters' registers of the creating frame into the closure, before
+  the closure is stored in its own register (the register may be one of them). The producer stashes them first
+  (`sqbc_rt_default_stash`), and `sqbc_rt_closure` takes the stash. A call with fewer arguments than parameters fills the
+  missing ones from the last defaults, in order, when the missing count is at most the default count (StartCall); otherwise
+  `wrong number of parameters (N passed, M required)`. Tests `closure_default`, `closure_default_local` (the default is the
+  value of a local when the closure is made), `callback_default`, `rterr/default_few`.
+- Varargs. A vararg function's last parameter is its `vargv`. A call takes the fixed parameters (the ones before it),
+  and packs the arguments after them into a new array in that parameter; the reference nulls the packed arguments
+  (StartCall). Fewer arguments than the fixed ones is `wrong number of parameters (N passed, at least M required)`. Tests
+  `vararg_pack`, `callback_vararg` (a callback gets the item alone in `vargv`, as map passes the callback's parameter count),
+  `rterr/vararg_few`.
+
 ## 5. Tests
 
-- `tests/squirrelbc/run.sh`: the reader. 135 streams (`corpus/*.nut`, `lower/*.nut` and the synthetic stream of
+- `tests/squirrelbc/run.sh`: the reader. 140 streams (`corpus/*.nut`, `lower/*.nut` and the synthetic stream of
   `lower/synth.rb`) compile with `sq -c`, load in `sq_dump` (every instruction named, stream consumed), and run through
   `sqref` with the same result as their source. Also: the opcode table against the reference header; a golden dump
   (`reader/ints.dump`); and five malformed streams (truncated, trailing byte, bad tag, SQInteger size 4, corrupt TAIL),
   each refused with exit 1.
-- `tests/squirrelbc/lower/run.sh`: the end-to-end suite. 122 programs (`lower/*.nut`: integers, strings, tables, calls,
+- `tests/squirrelbc/lower/run.sh`: the end-to-end suite. 127 programs (`lower/*.nut`: integers, strings, tables, calls,
   closures, print, tostring, arrays, floats, classes and inheritance, number and string conversions, array methods
   (including extend and insert, and the callbacks sort, map, apply, reduce, filter: `sort_*`, `map_basic`, `reduce_basic`,
   `filter_basic`, `callback_*`), string methods (slice, find, tolower, toupper), class and instance delegates, class
-  attributes) match `sqref` on the printed result and the status; 87 runtime errors (`lower/rterr/`, the callback ones
-  included) match the message and status 1; 12 programs (`lower/err/`) are refused with exit 3; `lower/synth.rb` writes a stream with DLOAD, DMOVE, LINE and
+  attributes) match `sqref` on the printed result and the status; 89 runtime errors (`lower/rterr/`, the callback ones
+  included) match the message and status 1; 8 programs (`lower/err/`) are refused with exit 3; `lower/synth.rb` writes a stream with DLOAD, DMOVE, LINE and
   LOADNULLS. A string result is printed by `sqref` and by the driver alike (the text, one line).
 - The oracle is `tests/squirrelbc/oracle/sqref.c`: the reference VM, built against the reference tree's
   `libsquirrel_static.a`. It loads `.nut` (compile) and `.cnut` (`sq_readclosure`) and prints the result line.

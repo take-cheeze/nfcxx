@@ -371,6 +371,9 @@ typedef struct SqClosure {
   int nouters;
   SqOuter **outers;
   struct SqClass *base; /* the class of a method of a class with a base (GETBASE), or NULL */
+  int varparams;        /* the prototype's vararg flag: its last parameter is the array of the extra arguments */
+  int ndef;             /* the number of default parameters, the last ones of the parameter list */
+  SQV *defs;            /* the default values (CLOSURE_OP copies them when the closure is made), NDEF of them */
 } SqClosure;
 
 /* A native of the base library or a delegate: its operation (NAT_*), the parameter count sqvm.cpp's CallNative checks (`this`
@@ -857,13 +860,30 @@ void sqbc_rt_newtable(SQV *dst) {
   *dst = v;
 }
 
-void sqbc_rt_closure(SQV *dst, int fn, int nparams, int stacksize, const SQV *env, int nouters) {
+/* The default values of the closure being made, stashed by sqbc_rt_default_stash before sqbc_rt_closure takes them. */
+#define SQBC_MAX_DEFAULTS 64
+static SQV g_defs_stash[SQBC_MAX_DEFAULTS];
+
+void sqbc_rt_default_stash(int i, const SQV *val) {
+  if (i < 0 || i >= SQBC_MAX_DEFAULTS) rt_error("too many default parameters");
+  g_defs_stash[i] = *val;
+}
+
+void sqbc_rt_closure(SQV *dst, int fn, int nparams, int stacksize, const SQV *env, int nouters, int varparams, int ndef) {
   SqClosure *c = calloc(1, sizeof *c);
   if (!c) rt_error("out of memory");
   c->fn = fn;
   c->nparams = nparams;
   c->stacksize = stacksize;
   c->nouters = nouters;
+  c->varparams = varparams;
+  c->ndef = ndef;
+  if (ndef > 0) {
+    /* CLOSURE_OP: the defaults are the values of their registers when the closure is made (the stash). */
+    c->defs = calloc((size_t)ndef, sizeof *c->defs);
+    if (!c->defs) rt_error("out of memory");
+    for (int i = 0; i < ndef; i++) c->defs[i] = g_defs_stash[i];
+  }
   if (nouters > 0) {
     c->outers = calloc((size_t)nouters, sizeof(SqOuter *));
     if (!c->outers) rt_error("out of memory");
@@ -885,6 +905,7 @@ void sqbc_rt_closure(SQV *dst, int fn, int nparams, int stacksize, const SQV *en
 }
 
 static SqClosure *closure_of(const SQV *v) { return (SqClosure *)(intptr_t)v->i; }
+
 
 void sqbc_rt_outer_local(SQV *dst, int idx, SQV *slot) {
   closure_of(dst)->outers[idx] = find_outer(slot);
@@ -1495,10 +1516,32 @@ void sqbc_rt_call(const SQV *callee, SQV *ret, SQV *frame, int nargs) {
   if (!ret) ret = &scratch;
   if (clo.tag == SQBC_TAG_CLOSURE) {
     SqClosure *c = (SqClosure *)(intptr_t)clo.i;
-    if (nargs != c->nparams) {
-      char msg[128];
-      snprintf(msg, sizeof msg, "wrong number of parameters (%d passed, %d required)", nargs, c->nparams);
-      rt_error(msg);
+    /* StartCall (sqvm.cpp): a vararg function takes the parameters before its last one, and the extra arguments go into an
+     * array that is that last parameter (the reference nulls the arguments it packed). Otherwise the arguments must be the
+     * parameters, or the missing ones are the last default parameters, whose values the closure has. */
+    if (c->varparams) {
+      int fixed = c->nparams - 1;
+      if (nargs < fixed) {
+        char msg[128];
+        snprintf(msg, sizeof msg, "wrong number of parameters (%d passed, at least %d required)", nargs, fixed);
+        rt_error(msg);
+      }
+      if (frame + fixed + 1 > g_stack_end) rt_error("stack overflow");
+      SQV arr = make_array_val((size_t)(nargs - fixed));
+      for (int k = fixed; k < nargs; k++) {
+        sqbc_rt_append(&arr, &frame[k]);
+        frame[k] = make_null();
+      }
+      frame[fixed] = arr;
+    } else if (nargs != c->nparams) {
+      int diff = c->nparams - nargs;
+      if (!(nargs < c->nparams && c->ndef > 0 && diff <= c->ndef)) {
+        char msg[128];
+        snprintf(msg, sizeof msg, "wrong number of parameters (%d passed, %d required)", nargs, c->nparams);
+        rt_error(msg);
+      }
+      if (frame + c->nparams > g_stack_end) rt_error("stack overflow");
+      for (int k = 0; k < diff; k++) frame[nargs + k] = c->defs[c->ndef - diff + k];
     }
     if (frame + c->stacksize > g_stack_end) rt_error("stack overflow");
     if (c->has_env) frame[0] = c->env;

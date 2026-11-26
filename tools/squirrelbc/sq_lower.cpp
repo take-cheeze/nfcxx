@@ -194,11 +194,10 @@ class Fn {
  public:
   // `is_main`: the main prototype is always compiled with varparams (its `vargv` is never read by the driver), so only a
   // nested vararg function is refused: its arguments would be packed into an array.
+  // A vararg function and one with default parameters are lowered: the runtime packs the arguments (sqbc_rt_call, StartCall)
+  // and fills the missing ones from the closure's defaults (sqbc_rt_closure_default).
   Fn(const Proto &p, std::string name, Module &mod, bool is_main)
-      : p_(p), name_(std::move(name)), mod_(mod), next_(3), is_main_(is_main) {
-    if (p_.varparams != 0 && !is_main) throw Refused("refused: a vararg function (" + name_ + ")");
-    if (!p_.defaultparams.empty()) throw Refused("refused: default parameters (" + name_ + ")");
-  }
+      : p_(p), name_(std::move(name)), mod_(mod), next_(3), is_main_(is_main) {}
 
   std::string lower() {
     const std::vector<Instruction> &ins = p_.instructions;
@@ -716,10 +715,20 @@ class Fn {
         if (it == mod_.index.end()) throw std::runtime_error("prototype not in the module");
         std::string env = kNullSqvPtr;
         if (in.arg2 != kNoRegister) env = reg(in.arg2).obj;
+        // The default values are read from their registers of this frame before the closure is stored, since its own
+        // register may be one of them (CLOSURE_OP reads them before it sets TARGET).
+        for (std::size_t i = 0; i < child.defaultparams.size(); ++i) {
+          const std::int64_t spos = child.defaultparams[i];
+          if (spos < 0 || spos >= p_.stacksize) throw std::runtime_error("default parameter outside the frame");
+          line("(eval (call void &\"sqbc_rt_default_stash\" " + c_int(static_cast<std::int64_t>(i)) + " " +
+               reg(spos).obj + "))");
+        }
         Addr d = reg(in.arg0);
         line("(eval (call void &\"sqbc_rt_closure\" " + d.obj + " " + c_int(it->second) + " " +
              c_int(static_cast<std::int64_t>(child.parameters.size())) + " " + c_int(child.stacksize) + " " + env + " " +
-             c_int(static_cast<std::int64_t>(child.outers.size())) + "))");
+             c_int(static_cast<std::int64_t>(child.outers.size())) + " " +
+             c_int(child.varparams != 0 ? 1 : 0) + " " +
+             c_int(static_cast<std::int64_t>(child.defaultparams.size())) + "))");
         // Each outer variable is bound when the closure is made (FindOuter, or the running closure's own outer).
         for (std::size_t i = 0; i < child.outers.size(); ++i) {
           const OuterVar &ov = child.outers[i];
