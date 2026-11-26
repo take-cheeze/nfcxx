@@ -89,10 +89,15 @@ class Object
     end
 
     check = MRubyRequire::FEATURES[feature]
-    raise LoadError, "cannot load such file -- #{feature}" unless check && check.call
+    if check && check.call
+      MRubyRequire::LOADED[feature] = true
+      return true
+    end
 
-    MRubyRequire::LOADED[feature] = true
-    true
+    # Built features (the native loaded-feature list) and files: the native require raises LoadError for anything else.
+    loaded = __native_require(feature)
+    MRubyRequire::LOADED[feature] = true if loaded
+    loaded
   end
 end
 
