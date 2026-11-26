@@ -118,6 +118,8 @@ static const MpyType mpy_type_range = {"range", NULL, 0, 0, NULL};
 static const MpyType mpy_type_dict = {"dict", NULL, 0, 0, NULL};
 static const MpyType mpy_type_set = {"set", NULL, 0, 0, NULL};
 static const MpyType mpy_type_view = {"dict_view", NULL, 0, 0, NULL};   /* keys(), values() and items() */
+static const MpyType mpy_type_super = {"super", NULL, 0, 0, NULL};     /* super(cls, self): the bases of cls, for self */
+static const MpyType mpy_type_cell = {"cell", NULL, 0, 0, NULL};       /* a closure's box (only the class body returns one) */
 static const MpyType mpy_type_slice = {"slice", NULL, 0, 0, NULL};
 /* The builtin functions are called builtin_function_or_method; str and range are types, which are called too. */
 static const MpyType mpy_type_bfn = {"builtin_function_or_method", NULL, 0, 0, NULL};
@@ -187,7 +189,7 @@ typedef struct {
 /* BI_EXC + k is the builtin class of exception k (mpy_exc_info[k]). */
 enum {
   BI_LEN, BI_STR, BI_RANGE, BI_APPEND, BI_POP, BI_BUILD_CLASS,
-  BI_DICT_GET, BI_DICT_KEYS, BI_DICT_VALUES, BI_DICT_ITEMS, BI_DICT_POP, BI_DICT_UPDATE,
+  BI_DICT_GET, BI_DICT_KEYS, BI_DICT_VALUES, BI_DICT_ITEMS, BI_DICT_POP, BI_DICT_UPDATE, BI_SUPER, BI_INIT,
   BI_EXC, BI_COUNT = BI_EXC + EXC_COUNT
 };
 typedef struct {
@@ -199,6 +201,7 @@ static const MpyBuiltin mpy_builtins[BI_COUNT] = {
   {&mpy_type_bfn, BI_APPEND}, {&mpy_type_bfn, BI_POP}, {&mpy_type_bfn, BI_BUILD_CLASS},
   {&mpy_type_bfn, BI_DICT_GET}, {&mpy_type_bfn, BI_DICT_KEYS}, {&mpy_type_bfn, BI_DICT_VALUES},
   {&mpy_type_bfn, BI_DICT_ITEMS}, {&mpy_type_bfn, BI_DICT_POP}, {&mpy_type_bfn, BI_DICT_UPDATE},
+  {&mpy_type_type, BI_SUPER}, {&mpy_type_bfn, BI_INIT},
   {&mpy_type_type, BI_EXC + 0}, {&mpy_type_type, BI_EXC + 1}, {&mpy_type_type, BI_EXC + 2},
   {&mpy_type_type, BI_EXC + 3}, {&mpy_type_type, BI_EXC + 4}, {&mpy_type_type, BI_EXC + 5},
   {&mpy_type_type, BI_EXC + 6}, {&mpy_type_type, BI_EXC + 7}, {&mpy_type_type, BI_EXC + 8},
@@ -226,6 +229,13 @@ typedef struct {
   mpv self;
   mpv fn;
 } MpyBound;
+
+/* super(cls, self): cls is the class's info record, whose base is searched; self is the instance (or class) it was given. */
+typedef struct {
+  const MpyType *type;
+  const MpyType *cls;
+  mpv self;
+} MpySuper;
 
 static int is_class(mpv v) { return is_heap(v) && type_of(v) == &mpy_type_metaclass; }
 static int is_inst(mpv v) { return is_heap(v) && type_of(v)->inst; }
@@ -255,6 +265,7 @@ static int builtin_index(const char *name, size_t len) {
   if (len == 3 && memcmp(name, "len", 3) == 0) return BI_LEN;
   if (len == 3 && memcmp(name, "str", 3) == 0) return BI_STR;
   if (len == 5 && memcmp(name, "range", 5) == 0) return BI_RANGE;
+  if (len == 5 && memcmp(name, "super", 5) == 0) return BI_SUPER;
   for (k = 0; k < EXC_COUNT; ++k) {
     size_t n = strlen(mpy_exc_info[k].name);
     if (n == len && memcmp(name, mpy_exc_info[k].name, len) == 0) return BI_EXC + (int)k;
@@ -1246,6 +1257,50 @@ static void attr_error(mpv obj, const char *name, size_t len) {
   fail(msg);
 }
 
+/* super objects. super_find is super_attr (py/objtype.c): the value of name in the bases of the class, the class itself is not
+ * searched. __init__ is found in object and in an exception's base even though they have no dict here: it is BI_INIT, and
+ * method is set when the value takes the self (a function, or BI_INIT). */
+static int is_super(mpv v) { return is_heap(v) && type_of(v) == &mpy_type_super; }
+
+static int super_find(const MpySuper *s, const char *name, size_t len, mpv *v, int *method) {
+  mpv key = intern_name(name, len);
+  if (s->cls->base != NULL && class_find(s->cls->base, key, v)) {
+    *method = is_function(*v);
+    return 1;
+  }
+  if (len == 8 && memcmp(name, "__init__", 8) == 0) {
+    *v = builtin_obj(BI_INIT);
+    *method = 1;
+    return 1;
+  }
+  return 0;
+}
+
+static void super_error(const char *name, size_t len) {
+  char msg[200];
+  snprintf(msg, sizeof msg, "AttributeError: 'super' object has no attribute '%.*s'", (int)len, name);
+  fail(msg);
+}
+
+/* super(cls, self), the builtin: self is an instance of cls or of a class derived from it, or a class that is (checked as a
+ * type). A failed check is a TypeError with no text, as the reference raises it. */
+static mpv super_new(mpv clsv, mpv self) {
+  MpySuper *s;
+  const MpyType *st;
+  const MpyType *want;
+  if (!is_class(clsv)) fail("TypeError: ");
+  want = &class_of(clsv)->info;
+  st = is_class(self) ? &class_of(self)->info : (is_inst(self) ? type_of(self) : NULL);
+  while (st != NULL && st != want) st = st->base;
+  if (st == NULL) fail("TypeError: ");
+  s = (MpySuper *)malloc(sizeof *s);
+  if (s == NULL) fail("out of memory");
+  s->type = &mpy_type_super;
+  s->cls = want;
+  s->self = self;
+  return (mpv)(uintptr_t)s;
+}
+
 /* obj.name as a value (LOAD_ATTR). A function found in the class is bound to the instance. */
 mpv mpy_load_attr(mpv obj, const char *name, size_t len) {
   mpv key = intern_name(name, len), v;
@@ -1254,6 +1309,11 @@ mpv mpy_load_attr(mpv obj, const char *name, size_t len) {
     if (class_find(type_of(obj), key, &v)) return is_function(v) ? make_bound(obj, v) : v;
   } else if (is_class(obj)) {
     if (class_find(&class_of(obj)->info, key, &v)) return v;
+  } else if (is_super(obj)) {
+    const MpySuper *s = (const MpySuper *)(uintptr_t)obj;
+    int method = 0;
+    if (super_find(s, name, len, &v, &method)) return method ? make_bound(s->self, v) : v;
+    super_error(name, len);
   } else if (is_dict(obj) && dict_method_index(name, len) >= 0) {
     fail("a dict method read as a value (not called at once) is not lowered yet");
   } else if (is_set(obj)) {
@@ -1329,6 +1389,12 @@ mpv mpy_load_method(mpv obj, const char *name, size_t len) {
     return builtin_obj(dict_method_index(name, len));
   } else if (is_set(obj)) {
     fail("a method of a set is not lowered yet");
+  } else if (is_super(obj)) {
+    const MpySuper *s = (const MpySuper *)(uintptr_t)obj;
+    int method = 0;
+    if (!super_find(s, name, len, &v, &method)) super_error(name, len);
+    if (method) method_self = s->self;
+    return v;
   } else if (is_inst(obj)) {
     if (dict_find(((const MpyInst *)(uintptr_t)obj)->dict, key, &v)) return v;
     if (class_find(type_of(obj), key, &v)) {
@@ -1340,6 +1406,22 @@ mpv mpy_load_method(mpv obj, const char *name, size_t len) {
   }
   attr_error(obj, name, len);
   return MPY_NONE;
+}
+
+/* LOAD_SUPER_METHOD: the method name of super(cls, self), looked up as mp_load_super_method does, with the self it goes with
+ * (left in method_self, as mpy_load_method leaves it). cls is the class, self the instance. */
+mpv mpy_load_super_method(mpv clsv, mpv self, const char *name, size_t len) {
+  MpySuper s;
+  mpv v = 0;
+  int method = 0;
+  method_self = 0;
+  if (!is_class(clsv)) fail("TypeError: ");
+  s.type = &mpy_type_super;
+  s.cls = &class_of(clsv)->info;
+  s.self = self;
+  if (!super_find(&s, name, len, &v, &method)) super_error(name, len);
+  if (method) method_self = self;
+  return v;
 }
 
 /* The self that the last mpy_load_method left (0 for none). */
@@ -1783,12 +1865,14 @@ mpv mpy_iter_next(mpv iter) {
  * is unbound (the variable has not been assigned yet). Cells are never values a program can name: lowered code reaches them
  * only through its locals and the captured cells of a closure. */
 typedef struct {
+  const MpyType *type;
   mpv value;
 } MpyCell;
 
 mpv mpy_make_cell(mpv value) {
   MpyCell *c = (MpyCell *)malloc(sizeof *c);
   if (c == NULL) fail("out of memory");
+  c->type = &mpy_type_cell;
   c->value = value;
   return (mpv)(uintptr_t)c;
 }
@@ -1874,7 +1958,7 @@ static mpv builtin_call(int id, const mpv *args, uint64_t n) {
     case BI_BUILD_CLASS: {
       /* __build_class__(body, name[, base]): the body runs with a namespace on the stack, then the class is made of it. The
        * arguments are copied first: the body's call may move the value stack. */
-      mpv body, name_v, base_v = 0, ns, cv;
+      mpv body, name_v, base_v = 0, ns, cv, cell_v;
       MpyClass *c;
       const MpyType *base = NULL;
       size_t i;
@@ -1891,7 +1975,7 @@ static mpv builtin_call(int id, const mpv *args, uint64_t n) {
       }
       ns = mpy_build_map(0);
       ns_push(ns);
-      mpy_call(body, 0);
+      cell_v = mpy_call(body, 0);   /* the body returns the cell of __class__ when a method uses super(), else None */
       ns_n -= 1;
       c = (MpyClass *)malloc(sizeof *c);
       if (c == NULL) fail("out of memory");
@@ -1910,6 +1994,7 @@ static mpv builtin_call(int id, const mpv *args, uint64_t n) {
         c->info.name = nm;
       }
       cv = (mpv)(uintptr_t)c;
+      if (is_heap(cell_v) && type_of(cell_v) == &mpy_type_cell) ((MpyCell *)(uintptr_t)cell_v)->value = cv;
       return cv;
     }
     case BI_RANGE: {
@@ -1975,6 +2060,23 @@ static mpv builtin_call(int id, const mpv *args, uint64_t n) {
         fail(msg);
       }
       if (n == 2) dict_update(args[0], args[1]);
+      return MPY_NONE;
+    }
+    case BI_SUPER: {
+      /* super(cls, self), as the lowering calls it for a super() whose class and self it has loaded */
+      if (n != 2) fail("TypeError: function takes exactly 2 arguments");
+      return super_new(args[0], args[1]);
+    }
+    case BI_INIT: {
+      /* object.__init__ and the exception's __init__, reached by super().__init__(...): self is args[0]. An exception keeps its
+       * one argument; object takes none. */
+      if (n < 1) fail("TypeError: __init__ needs self");
+      if (n == 1) return MPY_NONE;
+      if (n == 2 && is_inst(args[0]) && type_of(args[0])->exc) {
+        ((MpyInst *)(uintptr_t)args[0])->arg = args[1];
+        return MPY_NONE;
+      }
+      fail("TypeError: object.__init__() takes exactly one argument (the instance to initialize)");
       return MPY_NONE;
     }
     case BI_POP: {

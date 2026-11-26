@@ -284,6 +284,10 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
     } else if (o == opcode("LOAD_METHOD")) {
       op.kind = "LOAD_METHOD";             // the argument is the attribute's qstr; only append and pop are lowered (below)
       op.arg = in.arg;
+    } else if (o == opcode("LOAD_SUPER_METHOD")) {
+      // super().name: the class and the self are on the stack (the super global below them is replaced by the method).
+      op.kind = "LOAD_SUPER_METHOD";
+      op.arg = in.arg;
     } else if (o == opcode("CALL_METHOD")) {
       if ((in.arg >> 8) != 0) refused("keyword arguments in a call are not lowered yet");
       op.kind = "CALL_METHOD";             // the positional argument count; the method and its self lie below the arguments
@@ -338,6 +342,7 @@ int effect(const Op &op) {
   if (k == "GET_ITER") return kIterSlots - 1;   // the object goes, the iterator's slots come
   if (k == "CALL") return -(int)op.arg;   // the function and its arguments go, the result comes
   if (k == "LOAD_METHOD") return 1;        // the object becomes the method, and stays as the self above it
+  if (k == "LOAD_SUPER_METHOD") return -1; // the class and self go, the method takes the super's slot and the self stays
   if (k == "CALL_METHOD") return -(int)op.arg - 1;   // the method, the self and the arguments go, the result comes
   if (k == "MAKE_CLOSURE") return 1 - (int)op.extra;   // the captured cells go, the closure comes
   if (k == "STORE_NAME" || k == "STORE_GLOBAL" || k == "STORE_LOCAL" || k == "STORE_DEREF" || k == "POP_TOP" ||
@@ -646,8 +651,6 @@ class Lowerer {
         }
         push(d, value);
       } else if (k == "LOAD_NAME" || k == "LOAD_GLOBAL") {
-        // super is a builtin of the reference that the runtime does not have (it needs the class of the method).
-        if ((size_t)op.arg < m_.qstrs.size() && m_.qstrs[(size_t)op.arg] == "super") refused("super is not lowered yet");
         std::string sym = name_sym((size_t)op.arg);
         size_t len = m_.qstrs[(size_t)op.arg].size();
         std::string r = fresh();
@@ -751,6 +754,15 @@ class Lowerer {
         body << "  (let " << self << " unsigned_long (call unsigned_long &\"mpy_method_self\"))\n";
         push(d - 1, meth);
         push(d, self);
+      } else if (k == "LOAD_SUPER_METHOD") {
+        // [super, cls, self] become [method, self]: vm.c writes the method over the super global's slot and leaves the self.
+        if ((size_t)op.arg >= m_.qstrs.size()) throw std::runtime_error("mpy: qstr index out of range");
+        std::string self = pop(d), cls = load(d - 2), sym = name_sym((size_t)op.arg), meth = fresh(), out = fresh();
+        body << "  (let " << meth << " unsigned_long (call unsigned_long &\"mpy_load_super_method\" " << cls << " " << self
+             << " @\"" << sym << "\" (const unsigned_long " << m_.qstrs[(size_t)op.arg].size() << ")))\n";
+        body << "  (let " << out << " unsigned_long (call unsigned_long &\"mpy_method_self\"))\n";
+        push(d - 3, meth);
+        push(d - 2, out);
       } else if (k == "CALL_METHOD") {
         // [method, self, args...]: the self (0 for none) and the arguments go on the value stack; mpy_call_method drops a
         // null self and calls.
