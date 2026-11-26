@@ -36,7 +36,8 @@ One 64-bit word per value, with the tagging of `MICROPY_OBJ_REPR_A` (the default
   signed on 64-bit hosts. A wider result is an error until big ints exist.
 - `x110` is an immediate: None `0x06`, False `0x0e`, True `0x16`.
 - A pointer (`xx00`, not zero) to a heap object whose first member is a pointer to its type. Heap types: str, function,
-  cell, list, tuple, iterator, range and builtin (see Strings, Closures, Containers and Builtins below).
+  cell, list, tuple, iterator, range, dict, slice and builtin (see Strings, Closures, Containers, Dicts, Slices and Builtins
+  below). The word 0 is never a value: it is the null that a `del` stores (see Dicts).
 
 The runtime is `tests/mpy/runtime/mpy_rt.c`. The in-place operators (`MP_BINARY_OP_INPLACE_*`, codes 9..21) are the
 binary operators plus 13, as in `py/runtime0.h`; on ints they give the same result.
@@ -62,6 +63,46 @@ binary operators plus 13, as in `py/runtime0.h`; on ints they give the same resu
   The items may be None, the bools, small ints, strs, and tuples of those. An int outside the runtime's 62-bit small range is
   refused, as big ints are.
 
+## Dicts
+
+MicroPython's dict is its `mp_map_t` (py/map.c), and the lowering copies that layout: `print` of a dict lists the items in
+table order, which is not insertion order. A `MpyDict` is {type, alloc, used, all_keys_are_qstrs, table}, and a table slot
+is {key, value}. An empty slot has key 0; a deleted one has the sentinel key 0x1e, which is never a value.
+
+- Hash (`mp_map_lookup`): a small int or a bool is its value (a negative value wraps, as `mp_uint_t` does); None is 6; a
+  str is `qstr_compute_hash` (djb2 with `^`), masked to 16 bits, and 0 becomes 1. The reference build's
+  MICROPY_QSTR_BYTES_IN_HASH is 2, which the probes confirm. Probing is linear from `hash % alloc`.
+- Growth: an insert that finds no empty or deleted slot rehashes into the next size of `hash_allocation_sizes`, adding the
+  live items in table order. A dict literal of n items starts with a table of n slots (`BUILD_MAP n`); `{}` starts with none.
+- A lookup (`in`, a load, a delete) on an empty table answers without hashing, and so does a lookup of a non-str key in a
+  table whose keys are all interned strs (a str literal of the module is interned, a str built at run time is not). Such a
+  key is a KeyError, not a TypeError, as in the reference: `d[[1]]` with `d = {'a': 1}` is `KeyError: [1]`. A store always
+  hashes, so `d[[1]] = 2` is `TypeError: unsupported type for __hash__: 'list'`.
+- A list, dict or slice is unhashable. A tuple or another kind of key is not lowered yet (it would need the tuple's hash and
+  equality).
+- The KeyError text is `KeyError: ` followed by the key as `str` gives it: a str as its text, anything else by repr.
+- Operations: `BUILD_MAP n` pushes an empty dict; `STORE_MAP` takes [dict, value, key] (key on top) and leaves the dict.
+  A load, a store and `in` go through `mpy_getitem`, `mpy_setitem` and `map_lookup`. `len` and truth count the live items.
+- `del d[k]`: `LOAD_NULL` pushes 0, and `STORE_SUBSCR` with 0 deletes (MicroPython 1.29 has no DELETE_SUBSCR: the compiler
+  emits LOAD_NULL, ROT_THREE, STORE_SUBSCR). A list item is deleted the same way.
+- A dict comprehension stores each item with `STORE_COMP` (kind 1).
+
+## Slices
+
+- `BUILD_SLICE n` (2 or 3 items: start, stop and step, with None for a missing bound) makes a slice record. It is consumed by
+  the `LOAD_SUBSCR` or `STORE_SUBSCR` that follows it.
+- The bounds are those of `mp_obj_slice_indices` and `mp_seq_get_fast_slice_indexes`: a negative bound counts from the end
+  and is clamped; a step of 0 is `ValueError: slice step can't be zero`; a bound that is not an int is `can't convert X to
+  int`.
+- A list takes any step to load. To store or delete, only a step of 1 is lowered; another step is `NotImplementedError`,
+  which the reference prints as `NotImplementedError: ` (with the trailing space). The value of a store must be a list or a
+  tuple (`object 'int' isn't a tuple or list`); it is copied first, so `xs[1:4] = xs` works.
+- A tuple takes a step of 1 only, as does a str (`NotImplementedError: only slices with step=1 (aka None) are supported`).
+  A str is indexed and sliced by character, so `s[i]` is a one-character str. A tuple or str store or delete is `'tuple'
+  object doesn't support item assignment` (or `deletion`).
+- A list comprehension stores each value with `STORE_COMP` (kind 0), the collection being `arg >> 2` slots below the top (the
+  offset of `vm.c`'s `sp[-(unum >> 2)]`). MicroPython 1.29 has no `LIST_APPEND` opcode; `STORE_COMP` does that job.
+
 ## Builtins
 
 - `LOAD_NAME` and `LOAD_GLOBAL` look the name up in the module globals first, then the builtins: `len`, `str` and `range`.
@@ -85,7 +126,8 @@ labels of their targets. It covers small-int and None/bool constants, names (`LO
 `STORE_GLOBAL`), locals (`LOAD_FAST`/`STORE_FAST`), `POP_TOP`, `DUP_TOP`, `ROT_TWO`, the binary and unary operators,
 `POP_JUMP_IF_FALSE`/`TRUE`, `JUMP`, the `JUMP_IF_*_OR_POP` pair (short-circuit `or`/`and`), `ROT_THREE` (chained
 comparisons), `LOAD_CONST_STRING` and `LOAD_CONST_OBJ` (str constants), `MAKE_FUNCTION`, `LOAD_DEREF`, `STORE_DEREF`,
-`MAKE_CLOSURE`, `CALL_FUNCTION`, `BUILD_LIST`/`BUILD_TUPLE`, `LOAD_SUBSCR`/`STORE_SUBSCR`, `UNPACK_SEQUENCE`, `GET_ITER_STACK`
+`MAKE_CLOSURE`, `CALL_FUNCTION`, `BUILD_LIST`/`BUILD_TUPLE`, `LOAD_SUBSCR`/`STORE_SUBSCR`, `BUILD_MAP`/`STORE_MAP`, `BUILD_SLICE`, `LOAD_NULL` (for `del`), `STORE_COMP` (list and dict
+comprehensions), `UNPACK_SEQUENCE`, `GET_ITER_STACK`
 and `FOR_ITER`, and `RETURN_VALUE`. Any other opcode is refused by name and no IR is written.
 
 Each code object is one IR function. The module body is `mpy_module`. A function is `mpy_fn_K(ret, args, nargs)`: it
@@ -153,8 +195,9 @@ and every other operator on a str are a runtime error saying they are not lowere
 ## Not yet
 
 Defaults and keyword arguments (`MAKE_FUNCTION_DEFARGS`, `MAKE_CLOSURE_DEFARGS`), `del` of a closure variable
-(`DELETE_DEREF`), generators, str methods and formatting, str ordering and repetition, classes, exceptions, big ints, dict,
-set, slicing, the list methods other than append and pop, and the rest of the opcodes. Equality of two different lists or
+(`DELETE_DEREF`), generators, str methods and formatting, str ordering and repetition, classes, exceptions, big ints, dict
+methods and iterating a dict (`for`, `keys`), a dict key that is a tuple or another kind of object, sets (`BUILD_SET`, the
+set comprehension), the list methods other than append and pop, subscripts of a range, and the rest of the opcodes. Equality of two different lists or
 tuples (and so `in` on a list of them), containment in a range, `list.pop` and `str` of a list or tuple are refused at
 run time until their repr and equality are built. Identity of strs: a str built at run time is a new object, but
 MicroPython interns short strs, so `'a' + 'b' is 'ab'` is True there and False here. Nothing is freed: a str lives until the
