@@ -42,7 +42,8 @@ S.call(nfcast::Value::function(chunk), nullptr, 0, out);   // out.first() is the
 
 Tests: `tests/ast/run.sh` (the engine, its tier and its inlining on their own, both back ends, in CI) and `tests/poly/run.sh`
 (the shared suite of every language, plus `ast_tests()` and the cross-language checks, with `POLY_LANGS=ast` to run only this
-one). The engine needs nothing built: the six `lib/ast/nfcast_*.cpp` files plus `-I lib/ast` (`nfcast_inline.inc` is included by
+one). The engine needs nothing built: the six `lib/ast/nfcast_*.cpp` files, `nfcast_bytecode.cpp` and
+`tools/lua54bc/lua54_chunk.cpp` (the reader of binary chunks) plus `-I lib/ast` (`nfcast_inline.inc` is included by
 `nfcast_nodes.cpp`; the tier needs the nfcxx driver only when it is switched on).
 
 ## Layout
@@ -57,6 +58,7 @@ one). The engine needs nothing built: the six `lib/ast/nfcast_*.cpp` files plus 
 | `nfcast_nodes.cpp` | the node classes and the specialization |
 | `nfcast_inline.inc` | inlining: the cloner, the inlined call nodes, the rules (included at the end of `nfcast_nodes.cpp`) |
 | `nfcast_lib.cpp` | `State::load` and the standard library |
+| `nfcast_bytecode.cpp` | Lua 5.4 binary chunks: the decoder into `Proto`s, the register machine (`BcBody`), the stack-access functions (section "Bytecode") |
 | `nfcast_tier.cpp` | the tier: lowering, types, source text, the compile and its cache, the entry guards, the hooks, the takeover of loops |
 | `nfcast_tier.hpp` | what the tier shares with the engine: the hooks (a call, a loop iteration, a loop's entry and edge) and `TierView` (a node as the tier sees it) |
 | `nfcast_tier_view.inc` | `#include`d by `nfcast_nodes.cpp`, where the node classes are: turns a node into a `TierView` |
@@ -687,6 +689,75 @@ and the generated loops must all compile and be taken over. `tests/ast/run.sh`
 runs it, and it also runs every `tests/ast/cases/*.lua` program with the tier on and the JIT on (`--jit`), against the output of a
 real Lua 5.4. In the sandbox this was written in, `tests/ast/tier.cpp` fails two checks of "a host that ignores SIGCHLD" (lines 685 and 691
 of the file): the unmodified HEAD fails the same two, with the same output, so they are the environment's, not the JIT's.
+
+## Bytecode
+
+A Lua 5.4 binary chunk (`string.dump`, `luac`) runs on the same stack. `State::load` takes a chunk that starts with `\x1bLua` as a
+binary chunk, so `ctx.eval` and the driver run a dump the way they run source. `tools/lua54bc/lua54_chunk.cpp` reads the chunk
+(the lundump.c format of Lua 5.4.9). Each function of the chunk becomes an nfcast `Proto` whose body is a `BcBody` (in
+`nfcast_bytecode.cpp`): a register machine over the frame that `call_closure` sets up for any script function. Calls, returns, tail
+calls, the collector's safe points, tracebacks, `pcall` and the host functions are the AST's own; so are the values, the tables, the
+closures and the slow paths of the operators (`arith_slow`, `index_slow`, `call_value`). It is one runtime, not a second.
+
+The frame: registers `R0 .. maxstacksize-1` are the frame's slots, starting at `base`; the varargs sit above them, as the AST keeps
+them.
+The C++ stack: a script call costs the frame of `BcBody::exec` (the dispatch loop, small) and the frame of the instruction group that
+makes the call (`op_call`); the groups are `__attribute__((noinline))` so that Path B, which inlines and gave the one big
+function a frame of 7 KB, does not put every case on the stack of every call (at 1200 levels of recursion that overflowed the 8 MB
+stack). `tests/ast/bytecode/` has the recursion checks that found it. A `CALL` or `VARARG` with several results leaves its end in a pointer that the next instruction reads (`mtop`); a call from
+a vararg frame runs above the varargs, and a multiple-results write that would reach them moves them up, so `...` stays intact.
+
+Captured registers: a register that a closure captures (`OP_CLOSURE`) holds a `Cell` in its slot (`T_CELL`), exactly as a captured
+local of the AST does; reads and writes of that register go through the cell, and every closure that captures it shares it.
+`OP_CLOSE`, and `RETURN` or `TAILCALL` with the k bit, give the value back to the register, so a loop iteration gets a fresh
+variable (`for` loops, `while` loops with `break`, and `goto` out of a block all close, as Lua's compiler emits the instructions).
+
+Arithmetic: the arithmetic instruction does the whole operation, metamethods included, and skips the `MMBIN` after it, which
+Lua uses only when the fast path fails. The forms with an immediate or a constant take the operator, the operand and the order of
+the metamethod's arguments from the `MMBINI` or `MMBINK` after them: Lua writes `a - 1` as `ADDI` with -1 and the `__sub` event, and
+`2 * a` as `MULK` on `a` with the operands swapped (the flip bit).
+
+Error messages name the variables as `ldebug.c` does (`getobjname`: a local from the debug information, a global, a field, an
+upvalue, a method, a constant string), and report the line of the instruction from `lineinfo`. A stripped chunk has no names and
+line -1, as in Lua.
+
+The subset: every opcode of Lua 5.4.9 except `TBC` (a to-be-closed variable, `local x <close>`). A chunk with a `TBC` is refused at
+load time with `refused: opcode TBC (a to-be-closed variable) is not supported by nfcast (chunk:line)`, before anything runs; the
+AST refuses `<close>` in source the same way. The tier and the inliner do not apply to these functions (the tier skips a function
+with a bytecode body; the inliner takes only the AST's block bodies), so a bytecode function is always run by the register machine.
+
+Not covered: the verifier (a chunk is trusted as luac output is: a malformed one can crash the interpreter, as with Lua); `string.dump`
+itself (the chunks come from the reference Lua; nfcast has no `string.dump`); the debug library; coroutines (the AST has none). The
+base library's `load` takes a binary string too: it calls `State::load`, as `ctx.eval` does.
+
+Tests: `tests/ast/run.sh` with `LUA` set dumps every program of `tests/ast/cases` and `tests/ast/bytecode/cases` with the reference
+Lua 5.4.9 and runs each dump, plain, with forced collection and with the tier at threshold 1; the output must equal the `.out` of the
+source. `tests/ast/bytecode/refuse.lua` checks the refusal, and `stack.lua` the stack access below.
+
+## Bytecode stack access
+
+A host function written in nfcast, or a script, can read and write the registers of the bytecode frame that called it, as a C
+function reads the stack of its caller with `lua_index`. Three functions, `NativeFn`s in `nfcast.hpp`:
+
+| Function | Meaning |
+| --- | --- |
+| `bc_stack_get(i)` | the value of register `i` (`stack_get(i)` when bound) |
+| `bc_stack_set(i, v)` | stores `v` in register `i`; a captured register is written through its cell, so the closures see it |
+| `bc_stack_top()` | the number of registers of the frame (its `maxstacksize`): the valid indices are `0 .. stack_top() - 1` |
+
+`bc_bind_stack_access(S)` sets them as the globals `stack_get`, `stack_set` and `stack_top`; a host may register the `bc_stack_*`
+natives under other names instead. The frame is the innermost script function (`State::cur`), which is the bytecode frame that
+made the call when the native is called from a script (a `pcall` of the native is the same frame). Registers are numbered from 0 as
+`luac -l` numbers them. The index is an integer (a float with an integer value too), checked against the frame: an index out of
+range, a non-number and a missing argument are argument errors (`bad argument #1 to 'stack_get' (...)`), with the position of the
+call when a script made it; a call from a function that is not a bytecode function (a source chunk, the host) is an error too.
+
+Not covered: the varargs (they are not registers: use `...`); upvalues (not registers: the code reads them through its closure);
+the caller's frames (only the innermost is reachable: the `lua_getlocal` of an outer frame is not provided); registers from the
+frame's `maxstacksize` on, and the Lua top of a multiple-results sequence (`stack_top` is the frame size, not the top); no check that
+a stored value fits what the code expects (there is no verifier, and the code is run as it is). Tests: `tests/ast/bytecode/stack.lua`
+(reads and writes of parameters, locals and a captured local; the errors) and `stack_source.lua` (the source chunk has no bytecode
+frame and gets the errors).
 
 ## Verification
 

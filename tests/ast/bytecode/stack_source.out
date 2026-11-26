@@ -1,0 +1,2 @@
+false	stack_get: the calling function is not a bytecode function
+false	stack_source.lua:3: stack_top: the calling function is not a bytecode function

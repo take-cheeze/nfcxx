@@ -2641,7 +2641,7 @@ bool want_compile(TierState* T, TierProto* tp, std::uint32_t count, std::uint32_
 bool tier_dispatch(State& S, Closure* cl, Value* args, int n, Rets& out) {
   TierState* T = S.tier;
   Proto* p = cl->proto;
-  if (p->vararg) return false;
+  if (p->vararg || p->bc) return false;  // a function from a binary chunk is not lowered (nfcast_bytecode.cpp)
   if (!T->pending.empty() && (++T->tick & 15) == 0) poll_pending(S);
   TierProto* tp = p->tier ? p->tier : new_tier_proto(S, p);
   if (tp->dead) return false;

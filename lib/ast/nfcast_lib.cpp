@@ -14,6 +14,7 @@
 namespace nfcast {
 
 Closure* State::load(std::string_view code, const std::string& chunkname, std::string* err) {
+  if (code.size() >= 4 && code.substr(0, 4) == "\x1bLua") return load_binary(*this, code, chunkname, err);
   Proto* p = parse_chunk(*this, code, chunkname, err);
   if (!p) return nullptr;
   Closure* cl = new_closure(*this, p, 0);
