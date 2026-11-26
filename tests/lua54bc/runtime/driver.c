@@ -31,6 +31,7 @@ typedef struct LString {
 void lua54_fn_0(LV *ret, LV *base, void *cl);
 void *lua54rt_make_main(void *fn, int nupvals);
 int lua54rt_run_main(void *cl, LV *out, int outsize);
+void lua54rt_close_state(void);
 
 /* The main chunk of luac has one upvalue, _ENV. */
 #define MAIN_UPVALUES 1
@@ -66,5 +67,6 @@ int main(void) {
     print_value(&out[k]);
   }
   printf("\n");
+  lua54rt_close_state();   /* lua.c's lua_close: the finalizers of the objects still alive run now */
   return 0;
 }
