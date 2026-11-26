@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # mruby 4.0 bytecode -> Path B IR (tools/mrbbc/mrb_lower.cpp), end to end, for the lowered subset.
 #
-# Each program is compiled by mrbc (the pinned mruby 4.0.0 build), lowered (mrbbc_lower), emitted to QBE IL by
+# Each program is compiled by mrbc_rb (bc2cpp/tools/mrbc_rb, the Ruby RITE emitter; it needs Prism 1.9.0), lowered
+# (mrbbc_lower), emitted to QBE IL by
 # scripts/pathb-qbe-emit.rb (run by scripts/mrb.rb), assembled by QBE, linked with the runtime in tests/mrbbc/runtime, and
 # run. Three kinds of program:
 #   lower/*.rb       the value the program returns (its last line is one expression) is printed the way mruby's p prints
@@ -20,7 +21,9 @@ root=$(cd "$(dirname "$0")/../../.." && pwd)
 src=$root/tools/mrbbc
 rt=$root/tests/mrbbc/runtime
 dir=$root/tests/mrbbc/lower
-MRBC=${MRBC:-$root/build/mruby-tool/out/host/mrbc/bin/mrbc}
+MRBC=${MRBC:-$root/bc2cpp/tools/mrbc_rb/bin/mrbc_rb}
+# No C mrbc fallback: a program that mrbc_rb cannot compile fails the suite, rather than being compiled by another tool.
+export MRBC_FALLBACK=${MRBC_FALLBACK:-/nonexistent}
 MRUBY=${MRUBY:-$root/build/mruby-tool/bin/mruby}
 QBE=${QBE:-$root/build/qbe/qbe}
 work=${TMPDIR:-/tmp}/mrbbc-lower.$$

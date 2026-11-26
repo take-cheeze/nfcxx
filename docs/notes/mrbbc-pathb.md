@@ -19,7 +19,7 @@ compiler is `build/mruby-tool/out/host/mrbc/bin/mrbc`, built by the same ninja r
 | `tools/mrbbc/mrbbc_dump.cpp` | Prints the ireps, pools, symbols, locals and instructions of a RITE file. |
 | `tools/mrbbc/mrb_lower.hpp`, `mrb_lower.cpp` | The lowering of the root irep to IR text. |
 | `tools/mrbbc/mrbbc_lower_main.cpp` | `mrbbc_lower program.rite > program.ir`. |
-| `tests/mrbbc/runtime/mrbrt.{h,c}`, `driver.c` | The runtime: the tagged value, integer operators, error exits, the program's entry point. |
+| `tests/mrbbc/runtime/mrbrt.{h,c}`, `driver.c` | The runtime: the tagged value, heap strings, arrays and symbols, the operators, indexing, the SEND0 methods, the inspect printer, error exits, the program's entry point. |
 | `tests/mrbbc/corpus/*.rb` | Programs for the reader suite. |
 | `tests/mrbbc/reader/run.sh` | The reader suite. |
 | `tests/mrbbc/lower/*.rb`, `lower/rterr/`, `lower/err/`, `lower/run.sh` | The end-to-end suite. |
@@ -66,12 +66,20 @@ DBG or LVAR section before IREP.
 ### Values and registers
 
 A register R(i) is a 16-byte slot `r<i>` of type `MV`: the tag byte at offset 0 and an int64 at offset 8. The tags are
-the runtime's (`tests/mrbbc/runtime/mrbrt.h`): nil 0, false 1, true 2, integer 3. The main program becomes one IR
-function `mrb_irep_0(MV *ret)`. A `RETURN` copies R(a) into `*ret`, and the driver prints `*ret`.
+the runtime's (`tests/mrbbc/runtime/mrbrt.h`): nil 0, false 1, true 2, integer 3, string 4, array 5, symbol 6. The
+int64 of a string, an array or a symbol is a pointer to the runtime's object: a string is a length and its bytes, an
+array a length, a capacity and its `MV` items, a symbol the NUL-terminated name in the module's data. The objects are
+malloc'd and never freed, since there is no collector. The main program becomes one IR function `mrb_irep_0(MV *ret)`.
+A `RETURN` copies R(a) into `*ret`, and the driver prints `*ret` the way `p` does.
 
 Integer operators have an inline fast path. When every operand has the integer tag, `+`, `-` and `*` are the IR's
 checked `cadd`, `csub` and `cmul` (they trap on overflow), and `<`, `<=`, `>`, `>=` are signed `lt.s` and `le.s` (the
-operands of `>` and `>=` are swapped). Everything else calls `mrbbc_binop`, which does the rest of mruby's rules.
+operands of `>` and `>=` are swapped). Everything else calls `mrbbc_binop`, which does the rest of mruby's rules for
+integers, strings, arrays and symbols (`==` compares contents: strings by bytes, arrays element by element).
+
+String literals and symbol names are data items of the IR module: `(data "mrbbc_strPC" (const (array N (const char)))
+(string "..."))` for a `STRING` at pc PC, and one `mrbbc_symK` per distinct symbol name. Temporaries that the array
+literals are built in are extra `MV` slots of the function.
 
 ### Opcodes
 
@@ -82,21 +90,38 @@ Lowered (`mrb_lower.cpp`):
 | No-op | `NOP` |
 | Moves and constants | `MOVE`, `LOADI__1`, `LOADI_0` ... `LOADI_7`, `LOADI8`, `LOADINEG`, `LOADI16`, `LOADI32`, `LOADL` (integer or bigint constants that fit in 64 bits), `LOADNIL`, `LOADTRUE`, `LOADFALSE` |
 | Integer arithmetic | `ADD`, `SUB`, `MUL`, `DIV` (floor division, as mruby), `ADDI`, `SUBI`, `ADDILV`, `SUBILV` (the last two add an 8-bit immediate; `ADDILV a b c` adds `c` to local `a`, as `i += 1` compiles to) |
-| Comparison | `EQ` (identity on nil, booleans and integers), `LT`, `LE`, `GT`, `GE` |
+| Comparison | `EQ` (identity on nil, booleans and integers; contents on strings and symbols; elementwise on arrays), `LT`, `LE`, `GT`, `GE` |
+| Strings and symbols | `STRING` (a new string of a pool entry), `STRCAT` (`R[a] << to_s(R[a+1])`, for `"#{x}"`), `LOADSYM` (a symbol with a plain name: an identifier, optionally ending in `?`, `!` or `=`) |
+| Arrays | `ARRAY`, `ARRAY2` (a new array of registers), `ARYPUSH` (push R[a+1..a+b] onto R[a]), `GETIDX`, `GETIDX0` (`R[a] = R[b][0]`), `SETIDX` (`R[a][R[a+1]] = R[a+2]`, and R[a] gets the value, as `vm.c` does) |
+| Methods | `SEND0` with `to_s`, `size`, `length` or `!`; `SEND` with one argument and an operator (`+ - * / == != < <= > >=`, which is the binop of the opcode); see the method table below |
 | Jumps | `JMP`, `JMPUW` (the same as JMP when the irep has no catch table, which is checked; mruby emits it for `break`), `JMPIF`, `JMPNOT`, `JMPNIL` |
 | Returns | `RETURN`, `RETNIL`, `RETFALSE`, `RETTRUE`, `STOP` (nil, as `vm.c` returns) |
 
+The method table. A `SEND0` or `SEND` (with `c` = n | k<<4, so n = 0 or 1 and k = 0) names its method by a symbol. A
+method outside the table is refused at lowering time with `refused: SEND0 of method 'NAME' is not lowered yet (pc N)`:
+
+| Method | Receiver and result |
+| --- | --- |
+| `to_s` | integer, nil, true, false, symbol, string (itself), array (its inspect) |
+| `size`, `length` | string and array (byte count and length); symbol (its name's length); `size` of an integer is 8, as `sizeof(mrb_int)` |
+| `!` | any value: true for nil and false |
+| `+ - * / == != < <= > >=` (one argument) | the binop helper, as the opcode |
+
 Refused by name (exit 3, `refused: opcode NAME is not lowered yet (pc N)`): every other opcode, the `EXT1`-`EXT3`
-prefixes and the instructions they widen, `LOADL` of a non-integer, and a main program with a catch table. In
-particular a method call (`SEND`), a string, an array, a float, a symbol, an instance or global variable, a block,
-a class or a method definition, and `ENTER` (parameters) are refused.
+prefixes and the instructions they widen, `LOADL` of a non-integer (`LOADL` never holds a string: mruby compiles a
+string literal to `STRING`), and a main program with a catch table. In particular a self call (`SSEND`, `puts`), a
+block call (`SENDB`), a method call with a keyword argument or with two or more arguments, any other method name,
+`AREF`/`ASET` (the destructuring of `a, b = x`), `APOST`, `ARYCAT`/`ARYSPLAT` (a splat), `SYMBOL` (a quoted symbol) and
+`LOADSYM` of a name that is not plain (`:"a b"`, `:+`), a float, an instance or global variable, a block, a class or a
+method definition, and `ENTER` (parameters) are refused.
 
 ### The printed result
 
 The value a program prints is the value its `RETURN` returns, which mruby compiles from the last expression of the
 top level. The reference is the pinned mruby on the same file with the last line replaced by `p(<that line>)`, so each
-value program ends in one expression on one line. The driver prints nil, true, false or the decimal integer, as `p`
-does.
+value program ends in one expression on one line. The driver prints the value the way `p` does: nil, true, false, the
+decimal integer, a string as its `inspect` (the named escapes, `\#` before `#{`, `#$` and `#@`, and `\xHH` for any other
+byte outside printable ASCII), a symbol as `:name`, and an array as `[e1, e2]` with the same rule for each element.
 
 ### Runtime errors
 
@@ -112,9 +137,28 @@ sources):
 | integer `+` or `-` with nil | `can't convert nil into Float` (TypeError) |
 | integer `+` or `-` with true or false | `true cannot be converted to Float` (TypeError) |
 | integer `*` or `/` with nil, true or false | `can't convert nil into Integer` (TypeError) |
-| integer `<` (and the other comparisons) with nil, true or false | `comparison of Integer with NilClass failed` (ArgumentError) |
+| integer `<` (and the other comparisons) with nil, true, false, a string, an array or a symbol | `comparison of Integer with NilClass failed` (ArgumentError); the class name, as `comparison of Integer with String failed` |
+| integer `+` or `-` with a string, an array or a symbol | `String cannot be converted to Float` (TypeError); the class name |
+| integer `*` or `/` with nil, true or false | `can't convert nil into Integer`, `can't convert true into Integer` (TypeError) |
+| integer `*` or `/` with a string, an array or a symbol | `can't convert String into Integer` (TypeError) |
+| string `+` with anything but a string | `Integer cannot be converted to String` (TypeError); nil, true and false by their names: `nil cannot be converted to String` |
+| string `*` with a negative integer | `negative argument` (ArgumentError) |
+| string `*` with a non-integer | `nil cannot be converted to Integer` (TypeError); a class name otherwise: `Array cannot be converted to Integer` |
+| string `<` (and the other comparisons) with anything but a string | `comparison of String with NilClass failed` (ArgumentError) |
+| string `-` and `/` | `undefined method '-' for String` (NoMethodError) |
+| array `+` with anything but an array | `nil cannot be converted to Array` (TypeError); `Integer cannot be converted to Array` |
+| array `/` and the comparisons | `undefined method '/' for Array` (NoMethodError) |
+| symbol `+` and the other arithmetic | `undefined method '+' for Symbol` (NoMethodError) |
+| symbol `<` (and the other comparisons) with a non-symbol | `comparison of Symbol with Integer failed` (ArgumentError) |
+| `[]` on nil, true, false or an integer | `undefined method '[]' for NilClass` (NoMethodError) |
+| `[]=` (SETIDX) with a negative index below the start of an array | `index -3 out of array` (IndexError) |
+| `size` or `length` on nil, true or false, and `length` on an integer | `undefined method 'size' for NilClass` (NoMethodError) |
 
 `==` never raises on these values.
+
+Messages the runtime does not reproduce as mruby does are not in the table: an integer overflow (see the deviations),
+`Array#-` and `Array#*`, indexing or assignment with a range, and `String#[]=`. Those exit with a `NotImplementedError`
+whose message says so, never with a value.
 
 ## Deviations from mruby
 
@@ -125,7 +169,13 @@ sources):
   narrower than 64 bits and larger values are heap objects. The producer uses 64-bit integers throughout. The corpus
   stays within the immediate range, so the comparison with mruby does not test that boundary.
 - **Refusals in place of silence.** Everything outside the subset is refused at lowering time, never compiled to a
-  wrong value.
+  wrong value. The runtime's own gaps (listed above) are loud: a `NotImplementedError`, not a value.
+- **No garbage collector.** Strings, arrays and symbols are never freed. A program that builds a lot of them uses memory
+  without bound; the test programs are small.
+- **Strings are bytes.** This build of mruby has no UTF-8 character handling: `size`, `length` and `[]` count bytes
+  (`"é".size` is 2), and `inspect` escapes the bytes of a non-ASCII character as `\xHH`. The runtime does the same.
+- **Recursion.** An array that contains itself inspects as `[...]`, as mruby does. Comparing two such arrays with `==`
+  is not guarded and can overflow the C stack.
 
 ## Tests
 
@@ -133,10 +183,17 @@ sources):
   each compiled four ways (default, `-g`, `--remove-lv`, `-g --remove-lv`): 28 files read by `mrbbc_dump` (every
   instruction decodes, no bytes after END) and run to status 0 by the pinned mruby. 15 malformed files (truncations,
   an extra byte, a wrong magic, format 03.00, an unknown section, an opcode out of range) are refused with status 1.
-- Lowering (`tests/mrbbc/lower/run.sh`): 13 value programs (one generated: 200 locals) match mruby's `p`; 9 runtime
-  errors match mruby's last stderr line and status 1; 12 programs in `err/` and a generated one with EXT1 prefixes
-  are refused with status 3, a `refused:` message and no stdout. `err/` is the refusal set, `rterr/` the runtime
-  errors; the brief's "err/ programs must be refused" is read as the first.
+- Lowering (`tests/mrbbc/lower/run.sh`): 41 value programs match mruby's `p` (two generated: 200 locals, and an
+  array literal of 130 elements, which mrbc builds with `ARYPUSH`); 22 runtime errors match mruby's last stderr line
+  and status 1 (9 from round 1, 13 added in round 2); 14 programs are refused with status 3, a
+  `refused:` message and no stdout: 13 in `err/` and a generated one with EXT1 prefixes. `err/` is the refusal set,
+  `rterr/` the runtime errors; the brief's "err/ programs must be refused" is read as the first.
+
+Round 2 (strings, arrays, SEND0 and SEND of the core methods) is in the tables above. Refused in round 2 and kept refused:
+user-defined methods (`def`, `TDEF`, `METHOD`, `SENDB` with a block), self calls (`SSEND`, so `puts`), keyword
+arguments, `AREF`/`ASET`, `APOST`, splats, and the quoted symbols. The strings and arrays in the subset are the ones
+the examples above name; `Array#-` and `Array#*`, `String#[]=`, ranges as indexes and the other methods of the core
+classes are not in it.
 
 ## Open questions
 
@@ -148,3 +205,9 @@ sources):
   runtime here defines the same one-line function rather than linking the shared runtime.
 - The reader's DBG section is read for its size and dropped; line information is not used yet, so runtime errors print
   the program name where mruby prints `file:line`.
+- The brief named `LOADL` and `LOADSYM` for strings. In mruby 4.0 a string literal is `STRING` (a pool string), and `LOADL`
+  holds only numbers; `LOADSYM` is the symbol literal. Round 2 lowers `STRING` and `LOADSYM` (plain names only).
+- `ARYDUP` is not an opcode of mruby 4.0 (`ops.h` has no such entry); array literals are `ARRAY`, `ARRAY2` and
+  `ARYPUSH`, and the brief's `ARYDUP` is not needed.
+- `AREF` and `ASET` (the destructuring of `a, b = x`) are refused; `GETIDX`, `GETIDX0` and `SETIDX` are the indexing
+  opcodes of mruby 4.0 (the brief's OP_GETIDX/OP_SETIDX).
