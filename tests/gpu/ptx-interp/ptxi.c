@@ -2,7 +2,8 @@
  *
  * Usage: ptxi FILE.ptx KERNEL [--grid X[,Y[,Z]]] [--block X[,Y[,Z]]] ARG... [--dump K]...
  *                             [--random N [--seed S]] [--explore [--max-schedules M]] [--max-steps S]
- *                             [--timing] [--sms N] [--issue N] [--bw BYTES] [--lat CLASS=CYCLES]... [--l1 BYTES]
+ *                             [--timing] [--sms N] [--resident N] [--issue N] [--bw BYTES] [--lat CLASS=CYCLES]...
+ *                             [--l1 BYTES]
  *   ARG is one kernel parameter, in order:
  *     ptr:COUNT[:iota=START]   a global buffer of COUNT int32 (zeroed, or START+i in element i)
  *     s32:VALUE                a 32-bit scalar
@@ -45,9 +46,10 @@
  * arrival among the warps with live threads, and each of those warps leaves at that clock; a warp whose threads have
  * all exited keeps its own time. A block takes the largest of three bounds: the largest warp time, since its warps run
  * in parallel; its issue slots, the sum over its warps of max(s), at --issue warp instructions per cycle (default 4);
- * and its global bytes at --bw bytes per cycle (default 16), each lane's access counted at its own size, except that a
- * load that hits the L1 moves no bytes. The blocks of an SM run one after another (--sms, default 1), and the kernel
- * takes the slowest SM. Caches beyond the L1 are not modelled. Memory for the counts (only with --timing): three 4-byte
+ * and its global bytes at --bw bytes per cycle (default 16): each warp issue counts the 32-byte sectors its active
+ * lanes touch (a sector once per issue), and a load that hits the L1 moves no bytes. The blocks of an SM run in waves of --resident blocks (default 1): a wave takes
+ * the largest of its blocks' times, or the summed issue slots or bytes of its blocks if more, since co-resident blocks
+ * share the SM. The kernel takes the slowest SM (--sms, default 1). Caches beyond the L1 are not modelled. Memory for the counts (only with --timing): three 4-byte
  * counters per thread per instruction, so nthreads x ninst x 12 bytes (about 400 MB for 4096 threads and 8192
  * instructions); the per-warp maxima are the same size per warp.
  * A kernel whose path depends on what other threads did (a spin on shared memory, say) can take different paths in
@@ -955,7 +957,6 @@ typedef struct {
   int state;
   int bar;     /* while T_BLOCKED: the barrier ID it waits at */
   int depth;
-  uint64_t gbytes; /* bytes of global and atomic accesses executed (an L1 hit moves none) */
   Frame stack[MAXFUNC];
 } Thread;
 
@@ -997,6 +998,7 @@ static const char *lat_names[LAT_N] = {"alu", "branch", "local", "global", "atom
 static uint64_t lat[LAT_N] = {2, 4, 40, 320, 31, 24, 30};
 static int sms = 1;
 static uint64_t issue_rate = 4; /* warp instructions per cycle per SM */
+static int resident = 1;        /* blocks an SM runs at a time (--resident) */
 static uint64_t mem_bw = 16;    /* global bytes per cycle per SM */
 static int timing_print;
 static uint64_t timing_min = UINT64_MAX, timing_max, timing_n; /* over the schedules run so far */
@@ -1015,6 +1017,8 @@ static uint64_t *l1_tag; /* sms * l1_lines entries: the line each holds, or UINT
 static uint32_t *lane_cnt;
 static uint32_t *warp_max;
 static uint64_t *warp_act, *warp_off, *warp_clk, *warp_slots; /* slots: issue slots, summed over the kernel */
+static uint64_t *warp_epoch; /* per warp: its barrier epochs so far (keys the sector table) */
+static uint64_t *warp_bytes; /* per warp: bytes of the global sectors its issues touched */
 static int wpb; /* warps per block */
 
 static int lat_class(const Inst *in) {
@@ -1084,13 +1088,68 @@ static uint64_t warp_cost(const Inst *in, uint32_t act, uint32_t miss) {
   return (uint64_t)act * lat[lat_class(in)];
 }
 
+/* Global memory traffic (--timing only). A warp issue of a global access moves one 32-byte sector for each sector its
+ * active lanes touch, counted once per issue: the key is the warp, its epoch, the instruction, the index of the issue
+ * within the epoch (the j-th active step of each lane is the warp's j-th issue of that instruction, as in warp_max),
+ * and the sector. An L1 hit moves nothing. */
+#define SECTOR_BYTES 32
+typedef struct {
+  uint64_t w, ep, sector;
+} SectorKey;
+static SectorKey *sect_tab; /* open addressing; an entry is empty when w is UINT64_MAX */
+static uint64_t sect_cap, sect_n;
+
+static uint64_t sect_hash(SectorKey k) {
+  uint64_t h = k.w * 0x9E3779B97F4A7C15ULL ^ k.ep * 0xC2B2AE3D27D4EB4FULL ^ k.sector * 0x165667B19E3779F9ULL;
+  return h ^ (h >> 31);
+}
+
+static void sect_place(SectorKey k) {
+  uint64_t i = sect_hash(k) & (sect_cap - 1);
+  while (sect_tab[i].w != UINT64_MAX) i = (i + 1) & (sect_cap - 1);
+  sect_tab[i] = k;
+}
+
+static void sect_grow(void) {
+  uint64_t old_cap = sect_cap;
+  SectorKey *old = sect_tab;
+  sect_cap = old_cap ? old_cap * 2 : (1u << 16);
+  sect_tab = malloc(sect_cap * sizeof *sect_tab);
+  if (!sect_tab) fail(EXIT_FAULT, "out of memory for the sector table");
+  for (uint64_t i = 0; i < sect_cap; i++) sect_tab[i].w = UINT64_MAX;
+  for (uint64_t i = 0; i < old_cap; i++)
+    if (old[i].w != UINT64_MAX) sect_place(old[i]);
+  free(old);
+}
+
+static void sect_clear(void) {
+  for (uint64_t i = 0; i < sect_cap; i++) sect_tab[i].w = UINT64_MAX;
+  sect_n = 0;
+}
+
+/* 1 if k was not present (and is now). */
+static int sect_insert(SectorKey k) {
+  if (2 * (sect_n + 1) > sect_cap) sect_grow();
+  uint64_t i = sect_hash(k) & (sect_cap - 1);
+  for (;;) {
+    SectorKey *e = &sect_tab[i];
+    if (e->w == UINT64_MAX) {
+      *e = k;
+      sect_n++;
+      return 1;
+    }
+    if (e->w == k.w && e->ep == k.ep && e->sector == k.sector) return 0;
+    i = (i + 1) & (sect_cap - 1);
+  }
+}
+
 /* One issue of instruction in by thread t: a step through it, with its predicate true (active) or false. miss says an
  * active step missed the L1 (only global loads can). The warp's maxima are kept as the lanes step: the warp issues the
  * instruction as often as its busiest lane steps through it, and the active issues of those pay warp_cost. Each unit of
  * (max steps - max active) is an alu issue, so warp_off counts it: a step that raises only the step maximum adds one,
  * one that raises only the active maximum removes one, and a step that raises both (or neither) changes nothing. Each
  * new max step is also one issue slot of the warp. */
-static void warp_issue(const Thread *t, const Inst *in, int active, int miss) {
+static void warp_issue(const Thread *t, const Inst *in, int active, int miss, int moves, uint64_t addr) {
   int g = (int)(t - threads);
   int pc = (int)(in - insts);
   int w = warp_index(t->block, (g - t->block * tpb) / 32);
@@ -1105,6 +1164,7 @@ static void warp_issue(const Thread *t, const Inst *in, int active, int miss) {
   }
   int dma = 0;
   if (active) {
+    uint32_t j = c[1];
     c[1]++;
     if (c[1] > m[1]) {
       m[1]++;
@@ -1113,6 +1173,10 @@ static void warp_issue(const Thread *t, const Inst *in, int active, int miss) {
     if (miss) {
       c[2]++;
       if (c[2] > m[2]) m[2]++;
+    }
+    if (moves) {
+      SectorKey key = {(uint64_t)w, (warp_epoch[w] << 45) | ((uint64_t)pc << 32) | j, addr / SECTOR_BYTES};
+      if (sect_insert(key)) warp_bytes[w] += SECTOR_BYTES;
     }
   }
   /* The warp's cost is the sum of warp_cost over its instructions, which only grows as the maxima do, so the
@@ -1133,36 +1197,59 @@ static void timing_epoch_end(int block) {
     warp_clk[w] = warp_live(block, k) ? at : warp_end(w);
     warp_act[w] = 0;
     warp_off[w] = 0;
+    warp_epoch[w]++;
     memset(&warp_max[(size_t)w * ninst * 3], 0, sizeof *warp_max * ninst * 3);
     for (int l = k * 32; l < (k + 1) * 32 && l < tpb; l++)
       memset(&lane_cnt[((size_t)(block * tpb + l)) * ninst * 3], 0, sizeof *lane_cnt * ninst * 3);
   }
 }
 
-/* The estimate of the schedule that has just completed: a block takes the largest of its warp times, its issue slots
- * and its global bytes; the blocks of each SM run one after another. */
+/* The estimate of the schedule that has just completed. A block takes the largest of its warp times, its issue slots
+ * and its global bytes. The blocks of an SM run in waves of --resident blocks at a time, in the order the SM receives
+ * them; a wave takes the largest block time in it, or the sum of the issue slots or of the bytes of its blocks if that
+ * is more, since the co-resident blocks share the SM's issue width and bandwidth. The blocks of each SM take their
+ * waves one after another, and the kernel takes the slowest SM. With --resident 1 a wave is one block. */
 static void timing_finish(void) {
   if (!timing_print) return;
   uint64_t *sm = calloc((size_t)sms, sizeof *sm);
-  if (!sm) fail(EXIT_FAULT, "out of memory");
+  uint64_t *bt_of = calloc((size_t)nblocks, sizeof *bt_of), *slots_of = calloc((size_t)nblocks, sizeof *slots_of);
+  uint64_t *bytes_of = calloc((size_t)nblocks, sizeof *bytes_of);
+  if (!sm || !bt_of || !slots_of || !bytes_of) fail(EXIT_FAULT, "out of memory");
   for (int b = 0; b < nblocks; b++) {
-    uint64_t crit = 0, slots = 0, bytes = 0;
+    uint64_t crit = 0;
     for (int k = 0; k < wpb; k++) {
       int w = warp_index(b, k);
       if (warp_end(w) > crit) crit = warp_end(w);
-      slots += warp_slots[w];
+      slots_of[b] += warp_slots[w];
     }
-    for (int g = b * tpb; g < (b + 1) * tpb; g++) bytes += threads[g].gbytes;
-    uint64_t issue = (slots + issue_rate - 1) / issue_rate, mem = (bytes + mem_bw - 1) / mem_bw;
-    uint64_t bt = crit;
-    if (issue > bt) bt = issue;
-    if (mem > bt) bt = mem;
-    sm[b % sms] += bt;
+    for (int k = 0; k < wpb; k++) bytes_of[b] += warp_bytes[warp_index(b, k)];
+    bt_of[b] = crit;
+  }
+  for (int s = 0; s < sms; s++) {
+    /* The blocks this SM receives: s, s + sms, s + 2 sms, ... */
+    for (int first = s; first < nblocks;) {
+      uint64_t wcrit = 0, wslots = 0, wbytes = 0;
+      int n = 0;
+      for (int b = first; b < nblocks && n < resident; b += sms, n++) {
+        if (bt_of[b] > wcrit) wcrit = bt_of[b];
+        wslots += slots_of[b];
+        wbytes += bytes_of[b];
+      }
+      uint64_t issue = (wslots + issue_rate - 1) / issue_rate, mem = (wbytes + mem_bw - 1) / mem_bw;
+      uint64_t wt = wcrit;
+      if (issue > wt) wt = issue;
+      if (mem > wt) wt = mem;
+      sm[s] += wt;
+      first += sms * n;
+    }
   }
   uint64_t total = 0;
   for (int s = 0; s < sms; s++)
     if (sm[s] > total) total = sm[s];
   free(sm);
+  free(bt_of);
+  free(slots_of);
+  free(bytes_of);
   if (total < timing_min) timing_min = total;
   if (total > timing_max) timing_max = total;
   timing_n++;
@@ -1329,22 +1416,30 @@ static void step(Thread *t) {
     if (in->pred_neg) v = !v;
     if (!v) {
       /* A predicated-off instruction takes an issue slot but no memory latency. */
-      if (timing_print) warp_issue(t, in, 0, 0);
+      if (timing_print) warp_issue(t, in, 0, 0, 0, 0);
       t->pc++;
       return;
     }
   }
-  /* A global load is charged l1 if its line is cached, decided here as the load executes; the address is an absolute
+  /* The address of a global access: a load's and an atomic's is operand 1, a store's and a reduction's operand 0. A
+   * global load is charged l1 if its line is cached, decided here as the load executes. The address is an absolute
    * arena address, as in the switch. */
-  int cls = lat_class(in), miss = 0;
+  int cls = lat_class(in), miss = 0, memref = 0;
+  uint64_t addr = 0;
+  if (in->op == OP_LD || in->op == OP_ST || in->op == OP_ATOM || in->op == OP_RED) {
+    int mi = (in->op == OP_LD || in->op == OP_ATOM) ? 1 : 0;
+    if (in->op == OP_ATOM || in->op == OP_RED || in->space == SPACE_GLOBAL || in->space == SPACE_NONE) {
+      memref = 1;
+      addr = t->r[in->a[mi].idx] + (uint64_t)in->a[mi].imm;
+    }
+  }
   if (cls == LAT_GLOBAL && in->op == OP_LD) {
-    if (l1_load(t, t->r[in->a[1].idx] + (uint64_t)in->a[1].imm))
+    if (l1_load(t, addr))
       cls = LAT_L1;
     else
       miss = 1;
   }
-  if (timing_print) warp_issue(t, in, 1, miss);
-  if (cls == LAT_GLOBAL || cls == LAT_ATOMIC) t->gbytes += in->ty.bits ? in->ty.bits / 8 : 4;
+  if (timing_print) warp_issue(t, in, 1, miss, memref && cls != LAT_L1, addr);
   uint64_t *r = t->r;
   int next = t->pc + 1;
   uint64_t a = 0, b = 0, c = 0;
@@ -1554,7 +1649,10 @@ static void setup_threads(const uint64_t grid[3], const uint64_t block[3], uint6
     warp_off = calloc(nw, sizeof *warp_off);
     warp_clk = calloc(nw, sizeof *warp_clk);
     warp_slots = calloc(nw, sizeof *warp_slots);
-    if (!lane_cnt || !warp_max || !warp_act || !warp_off || !warp_clk || !warp_slots) fail(EXIT_FAULT, "out of memory");
+    warp_epoch = calloc(nw, sizeof *warp_epoch);
+    warp_bytes = calloc(nw, sizeof *warp_bytes);
+    if (!lane_cnt || !warp_max || !warp_act || !warp_off || !warp_clk || !warp_slots || !warp_epoch || !warp_bytes)
+      fail(EXIT_FAULT, "out of memory");
   }
   nregs_alloc = nregs ? nregs : 1;
   /* Blocks in x-major order, threads within a block in x-major order: thread g is in block g / tpb. */
@@ -1603,7 +1701,6 @@ static void reset_threads(void) {
     t->depth = 0;
     t->state = T_RUN;
     t->bar = -1;
-    t->gbytes = 0;
   }
   if (timing_print) {
     size_t nw = (size_t)nblocks * (size_t)wpb;
@@ -1613,6 +1710,9 @@ static void reset_threads(void) {
     memset(warp_off, 0, nw * sizeof *warp_off);
     memset(warp_clk, 0, nw * sizeof *warp_clk);
     memset(warp_slots, 0, nw * sizeof *warp_slots);
+    memset(warp_epoch, 0, nw * sizeof *warp_epoch);
+    memset(warp_bytes, 0, nw * sizeof *warp_bytes);
+    sect_clear();
   }
   memset(arrived, 0, (size_t)nblocks * BARRIERS * sizeof *arrived);
   for (int b = 0; b < nblocks; b++) live[b] = tpb;
@@ -1726,7 +1826,8 @@ static void usage(void) {
   fprintf(stderr,
           "usage: ptxi FILE.ptx KERNEL [--grid X[,Y[,Z]]] [--block X[,Y[,Z]]] ARG... [--dump K]...\n"
           "           [--random N [--seed S]] [--explore [--max-schedules M]] [--max-steps S]\n"
-          "           [--timing] [--sms N] [--issue N] [--bw BYTES] [--lat CLASS=CYCLES]... [--l1 BYTES]\n"
+          "           [--timing] [--sms N] [--resident N] [--issue N] [--bw BYTES] [--lat CLASS=CYCLES]...\n"
+          "           [--l1 BYTES]\n"
           "  ARG: ptr:COUNT[:iota=START] | s32:VALUE | bytes:HEX\n"
           "  CLASS: alu, branch, local, global, atomic, barrier, l1 (defaults 2 4 40 320 31 24 30)\n");
   exit(EXIT_BAD);
@@ -1779,6 +1880,10 @@ int main(int argc, char **argv) {
       if (i + 1 >= argc) usage();
       issue_rate = strtoull(argv[++i], NULL, 10);
       if (issue_rate == 0) usage();
+    } else if (!strcmp(argv[i], "--resident")) {
+      if (i + 1 >= argc) usage();
+      resident = atoi(argv[++i]);
+      if (resident < 1) usage();
     } else if (!strcmp(argv[i], "--bw")) {
       if (i + 1 >= argc) usage();
       mem_bw = strtoull(argv[++i], NULL, 10);

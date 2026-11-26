@@ -1,0 +1,20 @@
+// Every thread stores one int32 to element 32 x tid: each lane of a warp hits its own 32-byte sector, so a warp issue of
+// this store moves 32 sectors (1024 bytes) where store_all.ptx moves 4 (128 bytes). run_timing.sh checks the exact values.
+.version 8.0
+.target sm_75
+.address_size 64
+
+.visible .entry store_stride(
+  .param .u64 a_param
+)
+{
+  .reg .b32 %r<2>;
+  .reg .b64 %rd<4>;
+
+  ld.param.u64 %rd0, [a_param];
+  mov.u32 %r0, %tid.x;
+  mul.wide.u32 %rd1, %r0, 128;
+  add.s64 %rd2, %rd0, %rd1;
+  st.global.u32 [%rd2], %r0;
+  ret;
+}
