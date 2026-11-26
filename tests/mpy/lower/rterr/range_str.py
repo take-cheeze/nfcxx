@@ -1,0 +1,1 @@
+result = range('a')
