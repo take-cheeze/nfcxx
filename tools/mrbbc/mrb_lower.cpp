@@ -5,8 +5,10 @@
 // tests/mrbbc/runtime/mrbrt.h); R(i) is the address %r<i>, the frame plus 16 i. The value the program returns is written
 // to *ret.
 //
-// A method (a child irep that a TDEF defines) is `mrb_m<N>(MV *ret, MV *argv, MV *blk)`: argv[0] is self and argv[1..m]
-// the m required arguments, which the prologue copies into R(0)..R(m); blk is the block the call gave (nil if none). A
+// A method (a child irep that a TDEF defines) is `mrb_m<N>(MV *ret, MV *argv, MV *blk, long argc)`: argv[0] is self and
+// argv[1..argc] the arguments the call gave, which the prologue copies into R(1)..R(n) (n = its required and optional
+// parameters; the ones not given are set by their defaults, entered at the jump OP_ENTER picks for argc). blk is the block
+// the call gave (nil if none). A
 // self call (SSEND, SSEND0, SSENDB) copies R(0) and the arguments into a vector of its own, asks the runtime for the
 // method's number (mrbbc_find: the latest definition of the name, and the count is checked there), and calls the
 // function of that number. The method table is filled when the TDEF runs (mrbbc_def), as mruby defines the method then.
@@ -93,6 +95,7 @@ struct Ctx {
   Kind kind;
   unsigned nregs;      // the frame's registers: the irep's, and any a TDEF writes past them (see lower_irep)
   std::size_t pc = 0;  // the instruction being lowered
+  std::string argc;    // the IR name of the count of arguments a method or a block was given (empty for the others)
   int next;            // the next fresh register number, past the frame's registers (set by the constructor)
   std::ostringstream body;
   std::vector<std::pair<std::string, std::size_t>> slots;
@@ -401,15 +404,25 @@ int number_of(const std::map<const mrb::Irep *, int> &ids, const mrb::Irep &body
   return it->second;
 }
 
-// The number of required parameters of a function body, from its ENTER: the body starts with ENTER and has no other
-// parameter (no optional, rest, post, keyword or block parameter), so its aspec is the required count in bits 18..22.
-// Returns -1 for any other body.
-long required_arity(const mrb::Irep &body) {
+// The parameters of a function body, from its ENTER (vm.c's MRB_ASPEC_*): the body starts with ENTER and has only required
+// and optional parameters, so its aspec has the required count in bits 18..22 and the optional count in bits 13..17, and
+// no rest, post, keyword or block parameter (bits 0..12) and no &nil (bit 23). Returns false for any other body.
+bool body_params(const mrb::Irep &body, long &req, long &opt) {
   std::vector<mrb::Insn> insns = mrb::decode_iseq(body);
-  if (insns.empty() || insns[0].pc != 0 || insns[0].op != mrb::OP_ENTER || insns[0].ext != 0) return -1;
+  if (insns.empty() || insns[0].pc != 0 || insns[0].op != mrb::OP_ENTER || insns[0].ext != 0) return false;
   const std::uint32_t aspec = insns[0].args[0];
-  if ((aspec & 0x3ffffu) != 0 || (aspec >> 23) != 0) return -1;
-  return static_cast<long>((aspec >> 18) & 0x1f);
+  if ((aspec & 0x1fffu) != 0 || (aspec >> 23) != 0) return false;
+  req = static_cast<long>((aspec >> 18) & 0x1f);
+  opt = static_cast<long>((aspec >> 13) & 0x1f);
+  return true;
+}
+
+// The number of parameters a method or block body has (required and optional): the registers 1..n that its arguments fill,
+// and the block slot is R(n+1). Throws when the body's parameters are not lowered (the caller has checked them already).
+long slot_count(const mrb::Irep &body) {
+  long req = 0, opt = 0;
+  if (!body_params(body, req, opt)) throw std::runtime_error("malformed: a function body with parameters that are not lowered");
+  return req + opt;
 }
 
 // The pool and symbol operands, checked against the irep.
@@ -520,14 +533,16 @@ std::string nil_block(Ctx &c, const std::string &name) {
   return "$\"" + name + "\"";
 }
 
-// One branch per method of the module: when id is N, the function of method N runs with (ret, argv, blk).
+// One branch per method of the module: when id is N, the function of method N runs with (ret, argv, blk, argc), where
+// argc is the count of arguments the call gives (an IR expression: the call site's count is known, and the callee's
+// optional parameters depend on it).
 void emit_method_branches(Ctx &c, const Shared &sh, const std::string &id, const std::string &ret, const std::string &argv,
-                          const std::string &blk) {
+                          const std::string &blk, const std::string &argc) {
   for (std::size_t m = 0; m < sh.methods.size(); ++m) {
     std::string hit = c.fresh();
     c.line("(let " + hit + " bool (eq int " + id + " (const int " + num(static_cast<long long>(m)) + ")))");
     c.line("(if " + hit + " (then (eval (call void &\"mrb_m" + std::to_string(m) + "\" " + ret + " $\"" + argv + "\" " + blk +
-           "))))");
+           " " + argc + "))))");
   }
 }
 
@@ -554,7 +569,7 @@ void emit_new(Ctx &c, const Shared &sh, unsigned a, unsigned n, std::size_t pc) 
   emit_args(c, argv, a, n);
   std::string id = c.fresh();
   c.line("(let " + id + " int (call int &\"mrbbc_find_init\" $\"" + argv + "\" (const long " + num(n) + ")))");
-  emit_method_branches(c, sh, id, c.reg(a), argv, nil_block(c, "newnil" + std::to_string(pc)));
+  emit_method_branches(c, sh, id, c.reg(a), argv, nil_block(c, "newnil" + std::to_string(pc)), "(const long " + num(n) + ")");
   emit_unwind_check(c);
   c.line("(copy 16 " + c.reg(a) + " $\"" + argv + "\")");
 }
@@ -585,7 +600,7 @@ void lower_send(Ctx &c, Shared &sh, const mrb::Insn &in, const std::string &name
     c.line("(let " + id + " int (call int &\"mrbbc_find_send\" " + c.reg(a) + " @\"" + symbol_data(sh, name) +
            "\" (const long " + num(n) + ")))");
     const std::string blk = has_blk ? c.reg(a + n + 1) : nil_block(c, "nil" + pc);
-    emit_method_branches(c, sh, id, c.reg(a), argv, blk);
+    emit_method_branches(c, sh, id, c.reg(a), argv, blk, "(const long " + num(n) + ")");
     if (has_blk) {
       emit_block_site(c, c.reg(a), in.pc + in.len);
     } else {
@@ -633,15 +648,15 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
     const char *what = kind == Kind::Main ? "the main program" : kind == Kind::Method ? "a method" : kind == Kind::Class ? "a class body" : "a block";
     throw Refused(std::string("refused: ") + what + " has a catch table");
   }
-  // the required parameters of the body: a method or a block takes any count of them (a block with two or more splats a
+  // the parameters of the body: a method or a block takes its required and optional ones (a block with two or more splats a
   // single array argument, see the prologue); a class body takes none and has no ENTER
-  long arity = 0;
+  long req = 0, opt = 0;
   if (kind == Kind::Method || kind == Kind::Block) {
-    arity = required_arity(irep);
-    if (arity < 0) {
-      throw Refused("refused: " + fname + " has parameters other than required ones (not lowered yet)");
+    if (!body_params(irep, req, opt)) {
+      throw Refused("refused: " + fname + " has parameters other than required and optional ones (not lowered yet)");
     }
   }
+  const long nslots = req + opt;  // the registers 1..nslots take the parameters; the block slot is R(nslots+1)
   std::vector<mrb::Insn> insns = mrb::decode_iseq(irep);
 
   std::set<std::size_t> starts;
@@ -655,55 +670,53 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
   for (const mrb::Insn &in : insns) {
     if (in.op == mrb::OP_TDEF && in.args[0] + 1u > frame_regs) frame_regs = in.args[0] + 1u;
   }
-  // a method keeps its block in R(arity+1), where the VM's caller leaves it (a zsuper or a super reads it from there)
-  if (kind == Kind::Method && frame_regs < static_cast<unsigned>(arity) + 2u) frame_regs = static_cast<unsigned>(arity) + 2u;
+  // a method keeps its block in R(nslots+1), where the VM's caller leaves it (a zsuper or a super reads it from there)
+  if (kind == Kind::Method && frame_regs < static_cast<unsigned>(nslots) + 2u) frame_regs = static_cast<unsigned>(nslots) + 2u;
 
   Ctx c(sh, irep, kind, frame_regs);
   for (unsigned i = 0; i < frame_regs; ++i) {
     c.line("(let " + c.reg(i) + " (ptr unsigned_char) (offset $\"frame\" " + num(16 * i) + "))");
   }
-  if (kind == Kind::Method || kind == Kind::Class) {
-    // R(0) is self and R(1..arity) the arguments, copied from the vector; the other registers start as nil
+  if (kind == Kind::Method) {
+    // R(0) is self and R(1..nslots) the arguments the call gave (argv[1..argc], %3); the others start as nil. The optional
+    // parameters that were not given stay nil here: the default code of each sets them (the ENTER jumps there).
+    c.argc = "%3";
     c.line("(copy 16 " + c.reg(0) + " %1)");
-    for (long i = 1; i <= arity; ++i) {
-      std::string p = c.fresh();
-      c.line("(let " + p + " (ptr unsigned_char) (offset %1 " + num(16 * i) + "))");
-      c.line("(copy 16 " + c.reg(static_cast<unsigned>(i)) + " " + p + ")");
-    }
-    for (long i = arity + 1; i < static_cast<long>(frame_regs); ++i) {
-      store_tag(c, c.reg(static_cast<unsigned>(i)), kTagNil);
-    }
-    if (kind == Kind::Method) c.line("(copy 16 " + c.reg(static_cast<unsigned>(arity + 1)) + " %2)");
-  } else if (kind == Kind::Block) {
-    // R(0) is self. The parameters are argv[1..] for the arguments the yield gave, else nil (a proc takes what it gets). With
-    // two or more parameters, one array argument is splatted instead (mrbbc_splats: the elements, nil past their end).
-    c.line("(copy 16 " + c.reg(0) + " %1)");
-    const bool splat = arity >= 2;
-    if (splat) {
-      const std::string sp = c.fresh(), first = c.fresh();
-      c.line("(let " + sp + " bool (call bool &\"mrbbc_splats\" %1 %2))");
-      c.line("(if " + sp + " (then");
-      c.line("(let " + first + " (ptr unsigned_char) (offset %1 16))");
-      for (long i = 1; i <= arity; ++i) {
-        c.line("(eval (call void &\"mrbbc_ary_elt\" " + c.reg(static_cast<unsigned>(i)) + " " + first + " (const long " +
-               num(i - 1) + ")))");
-      }
-      c.line(") (else");
-    }
-    for (long i = 1; i <= arity; ++i) {
+    for (long i = 1; i <= nslots; ++i) {
       std::string p = c.fresh(), given = c.fresh();
       c.line("(let " + p + " (ptr unsigned_char) (offset %1 " + num(16 * i) + "))");
-      c.line("(let " + given + " bool (le.s long (const long " + num(i) + ") %2))");
+      c.line("(let " + given + " bool (le.s long (const long " + num(i) + ") %3))");
       c.line("(if " + given + " (then (copy 16 " + c.reg(static_cast<unsigned>(i)) + " " + p + ")) (else");
       store_tag(c, c.reg(static_cast<unsigned>(i)), kTagNil);
       c.line("))");
     }
-    if (splat) c.line("))");
-    for (long i = arity + 1; i < static_cast<long>(frame_regs); ++i) {
+    for (long i = nslots + 1; i < static_cast<long>(frame_regs); ++i) {
+      store_tag(c, c.reg(static_cast<unsigned>(i)), kTagNil);
+    }
+    c.line("(copy 16 " + c.reg(static_cast<unsigned>(nslots + 1)) + " %2)");
+  } else if (kind == Kind::Class) {
+    // R(0) is self; a class body takes no parameters
+    c.line("(copy 16 " + c.reg(0) + " %1)");
+    for (long i = 1; i < static_cast<long>(frame_regs); ++i) {
+      store_tag(c, c.reg(static_cast<unsigned>(i)), kTagNil);
+    }
+  } else if (kind == Kind::Block) {
+    // R(0) is self. The parameters are the arguments the yield gave, nil past their count (mrbbc_block_arg); with two or more
+    // parameters one array argument is splatted instead (mrbbc_block_argc gives the count then). The count is kept in a
+    // register for the choice of the optional parameters' defaults (OP_ENTER).
+    c.line("(copy 16 " + c.reg(0) + " %1)");
+    c.argc = c.fresh();
+    c.line("(let " + c.argc + " long (call long &\"mrbbc_block_argc\" %1 %2 (const long " + num(nslots) + ")))");
+    for (long i = 1; i <= nslots; ++i) {
+      c.line("(eval (call void &\"mrbbc_block_arg\" " + c.reg(static_cast<unsigned>(i)) + " %1 %2 (const long " + num(nslots) +
+             ") (const long " + num(i) + ")))");
+    }
+    for (long i = nslots + 1; i < static_cast<long>(frame_regs); ++i) {
       store_tag(c, c.reg(static_cast<unsigned>(i)), kTagNil);
     }
   }
   std::size_t argary_end = static_cast<std::size_t>(-1);  // the pc after the last ARGARY (a zsuper's SUPER follows it)
+  unsigned argary_m1 = 0;                                 // the parameter count the last ARGARY gave (the zsuper's count)
   for (const mrb::Insn &in : insns) {
     c.pc = in.pc;
     c.line("");
@@ -738,8 +751,28 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
     switch (in.op) {
       case mrb::OP_NOP: break;
       case mrb::OP_ENTER:
-        // the required parameters of a method or block are copied by the prologue; any other parameter is refused
-        if (!(kind != Kind::Main && in.pc == 0) && x[0] != 0) {
+        if ((kind == Kind::Method || kind == Kind::Block) && in.pc == 0) {
+          // The prologue copied the parameters the call gave. With optional parameters, mruby's VM enters the body at the
+          // jump for the count of optional arguments given: after ENTER there are opt+1 JMPs, the one at index k for k
+          // given (k = argc - required, clamped to 0..opt), and the one at index opt jumps past all the defaults (vm.c's
+          // `ci->pc += ...`). The JMP at index k is lowered as any JMP: it goes to the default of optional k.
+          for (long j = 0; j < opt; ++j) {
+            if (insns.size() < 2u + static_cast<std::size_t>(opt) || insns[1 + j].op != mrb::OP_JMP) {
+              throw std::runtime_error("malformed: the optional parameters of " + fname + " are not followed by their jumps");
+            }
+          }
+          if (opt > 0) {
+            if (insns.size() < 2u + static_cast<std::size_t>(opt) || insns[1 + opt].op != mrb::OP_JMP) {
+              throw std::runtime_error("malformed: the optional parameters of " + fname + " are not followed by their jumps");
+            }
+            for (long j = 0; j < opt; ++j) {
+              const std::string taken = c.fresh();
+              c.line("(let " + taken + " bool (lt.s long " + c.argc + " (const long " + num(req + j + 1) + ")))");
+              c.line("(if " + taken + " (then (goto " + lbl(insns[1 + j].pc) + ")))");
+            }
+            c.line("(goto " + lbl(insns[1 + opt].pc) + ")");
+          }
+        } else if (!(kind != Kind::Main && in.pc == 0) && x[0] != 0) {
           throw Refused("refused: ENTER with parameters is not lowered yet (pc " + std::to_string(in.pc) + ")");
         }
         break;
@@ -865,10 +898,10 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         // a def goes to Object at the top level, and to the class body's own class (self) in a class body
         if (kind != Kind::Main && kind != Kind::Class) refuse_method(name, "is defined in a method or a block (not lowered yet)");
         if (!plain_symbol(name) && !operator_symbol(name)) refuse_method(name, "has a name that is not plain (not lowered yet)");
-        const long body_arity = required_arity(body);
-        if (body_arity < 0) refuse_method(name, "has parameters other than required ones (not lowered yet)");
-        const std::string id = "(const int " + num(number_of(sh.method_ids, body, "method")) + ") (const long " +
-                               num(body_arity) + ")";
+        long req = 0, opt = 0;
+        if (!body_params(body, req, opt)) refuse_method(name, "has parameters other than required and optional ones (not lowered yet)");
+        const std::string id = "(const int " + num(number_of(sh.method_ids, body, "method")) + ") (const long " + num(req) +
+                               ") (const long " + num(req + opt) + ")";
         if (kind == Kind::Class) {
           c.line("(eval (call void &\"mrbbc_def_in\" " + c.reg(0) + " @\"" + symbol_data(sh, name) + "\" " + id + "))");
         } else {
@@ -932,7 +965,7 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         // only for that register.
         if (kind == Kind::Block && x[2] == 1 && in.op == mrb::OP_GETUPVAR && sh.method_blocks.count(&irep) != 0) {
           const mrb::Irep *method = sh.block_method.at(&irep);
-          if (static_cast<long>(x[1]) == required_arity(*method) + 1) {
+          if (static_cast<long>(x[1]) == slot_count(*method) + 1) {
             store_tag(c, c.reg(x[0]), kTagNil);
             break;
           }
@@ -948,21 +981,34 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         break;
       }
       case mrb::OP_ARGARY: {
-        // ARGARY a b: the arguments of a zsuper (`super` in a method with parameters), as vm.c builds them: R[a] = the array
-        // of the parameters and R[a+1] = the block. Only the required parameters of a method at level 0 are lowered; the
-        // array holds R(1..m1) and the block is R(m1+1), where the caller leaves it.
+        // ARGARY a b: the arguments of a zsuper (`super` with no arguments), as vm.c builds them: R[a] = the array of the
+        // parameters and R[a+1] = the block. The count m1 is the method's parameters, required and optional (codegen puts
+        // both in it). The values are the parameters' current values: in a method, its registers 1..m1; in a block that a
+        // method makes directly (level 1, the method's frame is %3), the method's registers, which the block shares. The
+        // block is the method's R(m1+1), where its caller leaves it. Rest, post and keyword parameters are refused.
         const unsigned m1 = (x[1] >> 11) & 0x3f, r = (x[1] >> 10) & 1, m2 = (x[1] >> 5) & 0x1f, kd = (x[1] >> 4) & 1,
                        lv = x[1] & 0xf;
-        if (kind != Kind::Method || lv != 0 || r != 0 || m2 != 0 || kd != 0 || m1 != static_cast<unsigned>(arity)) {
-          throw Refused("refused: ARGARY other than the required parameters of a method is not lowered yet (pc " +
-                        std::to_string(in.pc) + ")");
+        const bool in_method = kind == Kind::Method && lv == 0;
+        const bool in_block = kind == Kind::Block && lv == 1 && sh.method_blocks.count(&irep) != 0;
+        if (!(in_method || in_block) || r != 0 || m2 != 0 || kd != 0 ||
+            static_cast<long>(m1) != slot_count(in_block ? *sh.block_method.at(&irep) : irep)) {
+          throw Refused("refused: ARGARY other than the parameters of a method (or of a block that a method makes) is not "
+                        "lowered yet (pc " + std::to_string(in.pc) + ")");
         }
+        // the register i of the method whose parameters are read
+        auto param = [&](unsigned i) -> std::string {
+          if (in_method) return c.reg(i);
+          std::string p = c.fresh();
+          c.line("(let " + p + " (ptr unsigned_char) (offset %3 " + num(16 * static_cast<long long>(i)) + "))");
+          return p;
+        };
         c.line("(eval (call void &\"mrbbc_ary_new\" " + c.reg(x[0]) + " (const long " + num(m1) + ")))");
         for (unsigned i = 1; i <= m1; ++i) {
-          c.line("(eval (call void &\"mrbbc_ary_push\" " + c.reg(x[0]) + " " + c.reg(i) + "))");
+          c.line("(eval (call void &\"mrbbc_ary_push\" " + c.reg(x[0]) + " " + param(i) + "))");
         }
-        c.line("(copy 16 " + c.reg(x[0] + 1) + " " + c.reg(m1 + 1) + ")");
+        c.line("(copy 16 " + c.reg(x[0] + 1) + " " + param(m1 + 1) + ")");
         argary_end = in.pc + in.len;
+        argary_m1 = m1;
         break;
       }
       case mrb::OP_SUPER: {
@@ -983,12 +1029,12 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         const unsigned n = x[1] & 0x0f, k = x[1] >> 4;
         if (k != 0) throw Refused("refused: SUPER with keyword arguments is not lowered yet (pc " + std::to_string(in.pc) + ")");
         // n = 15 is a splat (an array of any length) unless the ARGARY of a zsuper comes just before it: only that one has
-        // the method's arity many elements
+        // the method's parameter count many elements (ARGARY's m1)
         const bool zparams = n == 15;
-        if (zparams && (kind != Kind::Method || in.pc != argary_end)) {
+        if (zparams && in.pc != argary_end) {
           throw Refused("refused: SUPER with a splat of arguments is not lowered yet (pc " + std::to_string(in.pc) + ")");
         }
-        const unsigned nargs = zparams ? static_cast<unsigned>(arity) : n;
+        const unsigned nargs = zparams ? argary_m1 : n;
         const unsigned blk = zparams ? x[0] + 2 : x[0] + n + 1;
         const std::string name = sh.method_names.at(home);
         const std::string argv = "argv" + std::to_string(in.pc);
@@ -1008,7 +1054,7 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         c.line("(let " + id + " int (call int &\"mrbbc_find_super\" " + c.reg(0) + " (const int " +
                num(number_of(sh.method_ids, *home, "method")) + ") @\"" + symbol_data(sh, name) + "\" (const long " +
                num(nargs) + ")))");
-        emit_method_branches(c, sh, id, c.reg(x[0]), argv, c.reg(blk));
+        emit_method_branches(c, sh, id, c.reg(x[0]), argv, c.reg(blk), "(const long " + num(nargs) + ")");
         const std::string neg = c.fresh();
         c.line("(let " + neg + " bool (lt.s int " + id + " (const int 0)))");
         c.line("(if " + neg + " (then (eval (call void &\"mrbbc_super_nil\" " + c.reg(x[0]) + "))))");
@@ -1050,7 +1096,7 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         const std::string id = c.fresh();
         c.line("(let " + id + " int (call int &\"mrbbc_find\" " + c.reg(0) + " @\"" + symbol_data(sh, name) + "\" (const long " +
                num(n) + ")))");
-        emit_method_branches(c, sh, id, c.reg(x[0]), argv, blk);
+        emit_method_branches(c, sh, id, c.reg(x[0]), argv, blk, "(const long " + num(n) + ")");
         if (in.op == mrb::OP_SSENDB) {
           emit_block_site(c, c.reg(x[0]), in.pc + in.len);
         } else {
@@ -1199,7 +1245,9 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
 
   std::ostringstream fn;
   fn << "(function \"" << fname << "\" (ret void) (params (param %0 \"ret\" (ptr (struct \"MV\")))";
-  if (kind == Kind::Method || kind == Kind::Class) {
+  if (kind == Kind::Method) {
+    fn << " (param %1 \"argv\" (ptr (struct \"MV\"))) (param %2 \"blk\" (ptr (struct \"MV\"))) (param %3 \"argc\" long)";
+  } else if (kind == Kind::Class) {
     fn << " (param %1 \"argv\" (ptr (struct \"MV\"))) (param %2 \"blk\" (ptr (struct \"MV\")))";
   } else if (kind == Kind::Block) {
     fn << " (param %1 \"argv\" (ptr (struct \"MV\"))) (param %2 \"argc\" long) (param %3 \"frame\" (ptr (struct \"MV\")))"
@@ -1228,17 +1276,17 @@ std::string lower_module(const mrb::Module &module, const std::string &source_na
   for (std::size_t b = 0; b < sh.blocks.size(); ++b) {
     lower_irep(sh, *sh.blocks[b], "mrb_b" + std::to_string(b), Kind::Block);
   }
-  // mrbbc_user_call(id, ret, argv, blk): the runtime calls the program's method number id (an operator, to_s or inspect of
-  // an instance of a program class, found on the receiver's class by mrbbc_find_send's rule). One branch per method.
+  // mrbbc_user_call(id, ret, argv, blk, argc): the runtime calls the program's method number id (an operator, to_s or inspect
+  // of an instance of a program class, found on the receiver's class by mrbbc_find_send's rule). One branch per method.
   {
     std::ostringstream uc;
     uc << "(function \"mrbbc_user_call\" (ret void) (params (param %0 \"id\" int)"
        << " (param %1 \"ret\" (ptr (struct \"MV\"))) (param %2 \"argv\" (ptr (struct \"MV\")))"
-       << " (param %3 \"blk\" (ptr (struct \"MV\"))))\n";
+       << " (param %3 \"blk\" (ptr (struct \"MV\"))) (param %4 \"argc\" long))\n";
     for (std::size_t m = 0; m < sh.methods.size(); ++m) {
-      const std::string hit = "%" + std::to_string(4 + 2 * m);
+      const std::string hit = "%" + std::to_string(5 + 2 * m);
       uc << "  (let " << hit << " bool (eq int %0 (const int " << m << ")))\n";
-      uc << "  (if " << hit << " (then (eval (call void &\"mrb_m" << m << "\" %1 %2 %3))))\n";
+      uc << "  (if " << hit << " (then (eval (call void &\"mrb_m" << m << "\" %1 %2 %3 %4))))\n";
     }
     uc << "  (return))\n";
     sh.functions += uc.str();

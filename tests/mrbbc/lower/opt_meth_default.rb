@@ -1,4 +1,4 @@
 def f(a = 1)
   a
 end
-f
+[f, f(3)]
