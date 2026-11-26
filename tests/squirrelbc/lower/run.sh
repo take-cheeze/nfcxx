@@ -8,6 +8,8 @@
 #   lower/rterr/*.nut  a runtime error: the message line and the exit status (1) must equal the reference's.
 #   lower/err/*.nut    refused: sq_lower must exit 3 with "refused:" on stderr and nothing on stdout. An opcode outside
 #                      the subset (a call, a table, a string or float literal, a closure, a bitwise operator, ...).
+#   lower/refused/*.nut refused at run time with a named message (`// expect:` line 1): the status 1 and that line are
+#                      checked; the reference is not run, its result is not the same on every run.
 # The reference is the reference VM through tests/squirrelbc/oracle/sqref.c, built from the same tree as `sq`.
 # Also lowered: a synthetic stream with DMOVE and DLOAD, which the default compiler does not emit (synth.rb).
 #
@@ -85,6 +87,23 @@ for nut in "$dir"/lower/err/*.nut; do
   fi
 done
 
+# lower/refused/*.nut: lowered, then refused at run time with a named message, where the reference's result is not the
+# same on every run (it prints an address). The first line `// expect: TEXT` gives the message: our output's line must be
+# `error: TEXT` and the status 1. The reference is not run.
+nf=0
+for nut in "$dir"/lower/refused/*.nut; do
+  base=refused_$(basename "$nut" .nut)
+  want="error: $(sed -n '1s#^// expect: ##p' "$nut")"
+  "$sq" -c -o "$work/$base.cnut" "$nut" || { echo "FAIL $base: sq -c refused the source"; fail=1; continue; }
+  if ! msg=$(build "$work/$base.cnut" "$base"); then echo "FAIL $base: $msg"; fail=1; continue; fi
+  got=$("$work/$base"); gs=$?
+  nf=$((nf + 1))
+  if [ "$gs" -ne 1 ] || [ "$(printf '%s\n' "$got" | tail -n 1)" != "$want" ]; then
+    echo "FAIL $base: got [$got] (status $gs), expected last line [$want] with status 1"
+    fail=1
+  fi
+done
+
 # The synthetic stream: its oracle is the reference VM on the same stream (there is no source).
 if ! ruby "$dir/lower/synth.rb" "$work/synth.cnut"; then
   echo "FAIL synth: synth.rb did not write the stream"
@@ -105,4 +124,4 @@ if [ "$fail" -ne 0 ]; then
   echo "squirrelbc-lower: FAILED"
   exit 1
 fi
-echo "squirrelbc-lower: $n programs match the reference; $nr runtime errors match; $ne programs refused (exit 3); synthetic DLOAD/DMOVE/LOADNULLS stream matches"
+echo "squirrelbc-lower: $n programs match the reference; $nr runtime errors match; $ne programs refused (exit 3); $nf runtime refusals with their named message; synthetic DLOAD/DMOVE/LOADNULLS stream matches"
