@@ -201,10 +201,14 @@ copies its arguments into its locals `loc.N` and stores its result through `ret`
 `mpy_dispatch(K, ret, args, nargs)` routes a call to `mpy_fn_K`, and a function object is a runtime record holding K, its
 parameter count, its signature and its defaults. A call pushes each argument on the runtime value stack (`mpy_push`), the
 keyword pairs (the name, then the value) after the positional ones, then calls `mpy_call_kw(fn, n, k)`, which matches them
-to the parameters as `bc.c`'s `mp_setup_code_state` does and dispatches. `*args`, keyword-only parameters and `**kwargs` are refused.
+to the parameters as `bc.c`'s `mp_setup_code_state` does and dispatches. The parameters are laid out as in bc.c: the positional
+ones (the captured cells among them), then the keyword-only ones, then the `*args` tuple. `**kwargs` and generators are refused.
+`mpy_call_kw` puts the extra positional arguments in the `*args` tuple, when the function has one (`call_function`).
 
-Default arguments: `MAKE_FUNCTION_DEFARGS` and `MAKE_CLOSURE_DEFARGS` take the defaults tuple (the keyword defaults' null
-sentinel is below it, and is ignored). A function's signature is a data item `mpy.sig.K`: its name, then its parameter names,
+Default arguments: `MAKE_FUNCTION_DEFARGS` and `MAKE_CLOSURE_DEFARGS` take the defaults tuple, and the keyword-only defaults dict on top of it (or 0). The runtime keeps the dict (`mpy_make_func`
+takes it with the keyword-only count `nkw` and the `*args` flag `star`), and a keyword-only parameter that no argument gives
+takes its default from the dict by name. Without a dict, a call with no keyword argument at all is `function missing keyword-only
+argument`, and a missing one with a dict that lacks it is `function missing required keyword argument 'b'`. A function's signature is a data item `mpy.sig.K`: its name, then its parameter names,
 each NUL-terminated, from the code info. A missing argument takes the default of its parameter (the last ones have defaults).
 The argument errors are the reference's (`f() takes 2 positional arguments but 3 were given`, `unexpected keyword argument
 'd'`, `function got multiple values for argument 'a'`, `function missing required positional argument #N`, where N is the
@@ -277,7 +281,12 @@ counts and the errors are the reference's (`function takes 1 positional argument
 required positional arguments`, `function expected at most N arguments, got M`, `can't convert 'int' object to str
 implicitly`, `ValueError: empty separator`, `join expects a list of str/bytes objects consistent with self object`). A str
 bound below the start or end is clamped as the reference clamps it: `'hello'.find('', 9)` is 5, and `find` on an end before
-its start is -1. `format` is not lowered (refused by name).
+its start is -1. `center(width)` takes no fill character, as the reference's does (`str_center`: the width counts characters, the
+left pad is the padding over two, rounded down). `format` is lowered for the empty, numbered and named fields and the `{{` and
+`}}` escapes (`str_format`, with the reference's errors); a value is formatted as `str()` gives it (a small int, a bool, None,
+a str or an exception). A format spec or a conversion (`{:>3}`, `{!r}`) is refused at run time, and an attribute in a field
+(`{a.b}`) is the reference's NotImplementedError. `title` is not in MicroPython 1.29 (an AttributeError there), so it stays
+refused by name.
 
 ## Exceptions
 
@@ -326,11 +335,11 @@ a coroutine (vm.c's unwind_jump and END_FINALLY), and the lowering does the same
   goes on with the blocks the unwind has left (with blocks call their exit, as above), and ends in the target or a return.
 - A return's value is kept in a slot of its own (`rv.<offset>`) while a finally body runs, since that body reuses the stack
   slots from its own depth up.
-- A break out of a finally body in a loop over a range is refused by name. A range loop has no iterator on the stack, so the
-  compiler sends the break with no loop-drop bit, and the reference leaves the finally's pending value on the stack at the
-  loop's end, one deeper than the normal exit (its POP_TOP pops that value and the loop's counter stays). A static depth cannot
-  hold both, so the join is refused (err/finally_range_break.py). The same break in a loop over an iterator (the 0x80 bit) is
-  lowered, and so is a break from a try body in a range loop.
+- A break or a continue out of a finally body (the site is in the handler, so the finally is cancelled, not run) pops the
+  finally's pending value: `CANCEL_ACTIVE_FINALLY` (vm.c) drops it on the way. The walk's depth at the target is one less per
+  cancelled finally block. A range loop has no iterator on the stack, so its break has no loop-drop bit, and it lands on the
+  loop's POP_TOP at the normal exit depth. The same break in a loop over an iterator (the 0x80 bit) drops to the loop's base.
+  Both are lowered (tests finally_range_break.py, finally_range_continue.py and finally_range_nested.py).
 - `raise X from Y` (RAISE_FROM) is lowered as `mpy_raise_from`. MicroPython 1.29 does not set a cause: with a cause that is not
   None, it prints `Warning: exception chaining not supported` on stderr (`mp_warning`) and raises X, so the lowering does the
   same and the cause is dropped. `from None` prints nothing. The uncaught line is `Name: text`, as for `raise X`.
@@ -382,13 +391,12 @@ a coroutine (vm.c's unwind_jump and END_FINALLY), and the lowering does the same
 
 ## Not yet
 
-Generators, str formatting (`format`, `%`) and the str methods not listed above (`center`, `title`, `splitlines`, ...), str
-ordering and repetition,
-big ints, the list and str methods the lowering refuses by name (`kBuiltinMethods`: `format`, `center`, `title`, `splitlines`, ...), subscripts of a range, and the rest
+Generators, `**kwargs`, str formatting with a format spec or a conversion, `%`, and the str methods not listed above (`title`,
+which the reference does not have, `splitlines`, ...), str ordering and repetition,
+big ints, the list and str methods the lowering refuses by name (`kBuiltinMethods`: `title`, `splitlines`, ...), subscripts of a range, and the rest
 of the opcodes. Equality of two dicts, two ranges or two views, `str` of a list, tuple, set or view, and
 containment in a range are refused at run time until their repr and equality are built. Changing a dict's size during a
 `for` over it is not checked (see Dicts). Identity of strs: a str built at run time is a new object, but MicroPython interns
 short strs, so `'a' + 'b' is 'ab'` is True there and False here. Nothing is freed: a str lives until the process ends. Also
-the `luac`-style opcode oracle is still blocked, and string pattern matching is paused. A `break` out of a finally body in a loop
-over a range is refused (see Unwinding through finally). A `return` or `break` out of a `with` whose `__exit__` raises is not
+the `luac`-style opcode oracle is still blocked, and string pattern matching is paused. A `return` or `break` out of a `with` whose `__exit__` raises is not
 matched against the reference.
