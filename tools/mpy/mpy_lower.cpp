@@ -1,7 +1,8 @@
 // .mpy bytecode -> Path B IR (docs/notes/mpy-pathb.md). The subset: small ints, None/bool, str constants, names, locals,
 // the operators, jumps, calls of functions (positional arguments; no defaults, keywords or *args), closures (cell and free
-// variables, LOAD_DEREF, STORE_DEREF, MAKE_CLOSURE), lists, tuples, dicts (BUILD_MAP, STORE_MAP), slices, del of an item
-// (LOAD_NULL with STORE_SUBSCR), list and dict comprehensions (STORE_COMP), and return. Anything else is refused by name,
+// variables, LOAD_DEREF, STORE_DEREF, MAKE_CLOSURE), lists, tuples, dicts (BUILD_MAP, STORE_MAP, and the methods get, keys,
+// values, items, pop and update), sets (BUILD_SET), slices, del of an item (LOAD_NULL with STORE_SUBSCR), list, dict and set
+// comprehensions (STORE_COMP), and return. Anything else is refused by name,
 // and no IR is produced for a refused module.
 //
 // Each code object becomes one IR function. The stack is slots stk.N (one per depth) and the locals are loc.N. The module
@@ -232,10 +233,12 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
     } else if (o == opcode("BUILD_SLICE")) {
       op.kind = "BUILD_SLICE";
       op.arg = in.arg;                    // 2 or 3: the start, the stop and the step (none when absent)
+    } else if (o == opcode("BUILD_SET")) {
+      op.kind = "BUILD_SET";              // the number of items, taken from the stack (mp_obj_new_set)
+      op.arg = in.arg;
     } else if (o == opcode("STORE_COMP")) {
       // A comprehension's store: the argument is (the collection's offset below the top << 2) | its kind (0 list, 1 dict,
-      // 2 set). A set comprehension is refused.
-      if ((in.arg & 3) == 2) refused("a set comprehension is not lowered yet");
+      // 2 set).
       op.kind = "STORE_COMP";
       op.arg = in.arg >> 2;
       op.extra = in.arg & 3;
@@ -289,14 +292,16 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
   return out;
 }
 
-// The methods of the builtin types that the runtime does not have yet (str, list, dict, ...): a method call of one of these
-// names is refused. A class's method of such a name is refused too, which is the cost of not knowing the receiver's type.
+// The methods of the builtin types that the runtime does not have yet (str, list, dict, set, ...): a method call of one of
+// these names is refused. A class's method of such a name is refused too, which is the cost of not knowing the receiver's
+// type. The dict methods that are lowered (get, keys, values, items, pop, update) are not here.
 const std::set<std::string> kBuiltinMethods = {
-    "capitalize", "center", "clear", "copy", "count", "encode", "endswith", "extend", "find", "format", "get", "index",
-    "insert", "isalpha", "isdigit", "isspace", "items", "join", "keys", "ljust", "lower", "lstrip", "partition", "remove",
+    "capitalize", "center", "clear", "copy", "count", "encode", "endswith", "extend", "find", "format", "index",
+    "insert", "isalpha", "isdigit", "isspace", "join", "ljust", "lower", "lstrip", "partition", "remove",
     "replace", "reverse", "rfind", "rindex", "rjust", "rstrip", "rsplit", "setdefault", "sort", "split", "splitlines",
-    "startswith", "strip", "title", "update", "upper", "values", "zfill", "add", "discard", "popitem", "difference",
-    "union", "intersection"};
+    "startswith", "strip", "title", "upper", "zfill", "add", "discard", "popitem", "difference", "union", "intersection",
+    "fromkeys", "isdisjoint", "issubset", "issuperset", "symmetric_difference", "difference_update",
+    "intersection_update", "symmetric_difference_update"};
 
 // A for loop's iterator takes MP_OBJ_ITER_BUF_NSLOTS stack slots (obj.h: 4 on 32- and 64-bit hosts); its object is in the
 // bottom one. break pops all of them.
@@ -312,7 +317,7 @@ int effect(const Op &op) {
   if (k == "STORE_ATTR") return -2;      // the object and the value go
   if (k == "END_FINALLY" || k == "RAISE_OBJ") return -1;   // the value on top goes
   if (k == "DUP_TWO") return 2;
-  if (k == "BUILD_LIST" || k == "BUILD_TUPLE") return 1 - (int)op.arg;   // the items go, the container comes
+  if (k == "BUILD_LIST" || k == "BUILD_TUPLE" || k == "BUILD_SET") return 1 - (int)op.arg;   // the items go, the container comes
   if (k == "BUILD_SLICE") return 1 - (int)op.arg;                        // the start, stop (and step) go, the slice comes
   if (k == "STORE_MAP") return -2;                                       // the value and key go; the dict stays
   if (k == "STORE_COMP") return op.extra == 1 ? -2 : -1;                 // a dict takes its key and value, a list its item
@@ -824,7 +829,7 @@ class Lowerer {
         } else {
           body << "  (if " << c << " (then (goto " << lbl((size_t)op.arg) << ")) (else))\n";
         }
-      } else if (k == "BUILD_LIST" || k == "BUILD_TUPLE") {
+      } else if (k == "BUILD_LIST" || k == "BUILD_TUPLE" || k == "BUILD_SET") {
         int n = (int)op.arg;
         for (int i = 0; i < n; ++i) {
           std::string v = load(d - n + i);
@@ -832,7 +837,8 @@ class Lowerer {
         }
         std::string r = fresh();
         body << "  (let " << r << " unsigned_long (call unsigned_long &\""
-             << (k == "BUILD_LIST" ? "mpy_build_list" : "mpy_build_tuple") << "\" (const unsigned_long " << n << ")))\n";
+             << (k == "BUILD_LIST" ? "mpy_build_list" : (k == "BUILD_SET" ? "mpy_build_set" : "mpy_build_tuple"))
+             << "\" (const unsigned_long " << n << ")))\n";
         push(d - n, r);
       } else if (k == "LOAD_SUBSCR") {
         std::string idx = pop(d), obj = pop(d - 1);
@@ -878,6 +884,9 @@ class Lowerer {
         if (op.extra == 0) {
           std::string v = load(top), coll = load(top - (int)op.arg);
           body << "  (eval (call void &\"mpy_list_append\" " << coll << " " << v << "))\n";
+        } else if (op.extra == 2) {
+          std::string v = load(top), coll = load(top - (int)op.arg);
+          body << "  (eval (call void &\"mpy_set_store\" " << coll << " " << v << "))\n";
         } else {
           std::string key = load(top), v = load(top - 1), coll = load(top - (int)op.arg);
           body << "  (eval (call void &\"mpy_dict_store\" " << coll << " " << key << " " << v << "))\n";
