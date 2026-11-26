@@ -98,7 +98,7 @@ constexpr int kNotTable = 0;  // NEWOBJ's arg3 (sqopcodes.h NOT_TABLE)
 constexpr int kNotArray = 1;  // NEWOBJ's arg3 (sqopcodes.h NOT_ARRAY)
 constexpr int kNotClass = 2;  // NEWOBJ's arg3 (sqopcodes.h NOT_CLASS): arg1 is the base (-1: none), arg2 the attributes
 constexpr std::uint8_t kNoAttributes = 0xFF;  // MAX_FUNC_STACKSIZE: a class or a member without attributes
-constexpr std::uint8_t kNewSlotAttributes = 0x01;  // NEWSLOTA's arg0: NEW_SLOT_ATTRIBUTES_FLAG (refused)
+constexpr std::uint8_t kNewSlotAttributes = 0x01;  // NEWSLOTA's arg0: NEW_SLOT_ATTRIBUTES_FLAG
 constexpr std::uint8_t kNewSlotStatic = 0x02;      // NEWSLOTA's arg0: NEW_SLOT_STATIC_FLAG
 // APPENDARRAY's arg2 (sqopcodes.h AAT_*): the value is a register, a literal, an integer or a boolean, or a float.
 enum : int { kAatStack = 0, kAatLiteral = 1, kAatInt = 2, kAatFloat = 3, kAatBool = 4 };
@@ -641,11 +641,12 @@ class Fn {
         // NEWOBJ: a table (arg1 is its size hint), an array (arg1 its reserve) or a class (arg1 the base register or -1,
         // arg2 the attributes register or 0xFF), as sqvm.cpp _OP_NEWOBJ and CLASS_OP.
         if (in.arg3 == kNotClass) {
-          // arg1 is the base register (CLASS_OP's baseclass), -1 when there is none.
-          if (in.arg2 != kNoAttributes) refuse("_OP_NEWOBJ of a class with attributes");
+          // arg1 is the base register (CLASS_OP's baseclass), -1 when there is none; arg2 the attributes register, 0xFF when
+          // the class has none (its attributes are then null).
           Addr c = reg(in.arg0);
           std::string base = in.arg1 == -1 ? kNullSqvPtr : reg(in.arg1).obj;
-          line("(eval (call void &\"sqbc_rt_newclass\" " + c.obj + " " + base + "))");
+          std::string attrs = in.arg2 == kNoAttributes ? kNullSqvPtr : reg(in.arg2).obj;
+          line("(eval (call void &\"sqbc_rt_newclass\" " + c.obj + " " + base + " " + attrs + "))");
           break;
         }
         Addr d = reg(in.arg0);
@@ -664,13 +665,13 @@ class Fn {
       }
       case kOpNewSlotA: {
         // NEWSLOTA: STK(arg1)[STK(arg2)] := STK(arg3) on a class (sqvm.cpp NewSlotA), a static member when bit 1 of arg0 is
-        // set. No target. A member with attributes (bit 0) is refused.
-        if ((in.arg0 & kNewSlotAttributes) != 0) refuse("_OP_NEWSLOTA with member attributes");
+        // set. No target. With the attributes flag (bit 0) the attributes are the register before the key, STK(arg2-1).
         Addr self = reg(in.arg1);
         Addr key = reg(in.arg2);
         Addr val = reg(in.arg3);
+        std::string attrs = (in.arg0 & kNewSlotAttributes) != 0 ? reg(in.arg2 - 1).obj : kNullSqvPtr;
         line("(eval (call void &\"sqbc_rt_newslota\" " + self.obj + " " + key.obj + " " + val.obj + " " +
-             c_int((in.arg0 & kNewSlotStatic) != 0 ? 1 : 0) + "))");
+             c_int((in.arg0 & kNewSlotStatic) != 0 ? 1 : 0) + " " + attrs + "))");
         break;
       }
       case kOpAppendArray: {
