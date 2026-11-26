@@ -25,6 +25,7 @@ test ! -e "$out/cprog.noenv.prof"
 rm -f "$out/cprog.prof"
 NFCXX_PROFILE="$PWD/$out/cprog.prof" "$out/cprog" | grep -q "^55$"
 "$out/check_any" "$out/cprog.prof" | grep -q "sites=2 pairs=178 threads=1"
+"$out/check_any" "$out/cprog.prof" main >/dev/null # the global function is named in the string table
 
 # --profile with Path B is refused (the IR has no profiling calls yet)
 if ./nfcxx --backend=pathb --profile tests/prof/cprog.c -o "$out/cprog_pb" > "$out/pb.log" 2>&1; then

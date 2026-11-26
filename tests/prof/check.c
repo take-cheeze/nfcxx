@@ -52,6 +52,15 @@ int main(int argc, char **argv) {
   while (fread(&ch, sizeof ch, 1, f) == 1) {
     uint32_t j;
     int slot = -1;
+    if (ch.tid == 0) { /* the string table: count entries of { site, len, name } */
+      uint32_t e;
+      for (e = 0; e < ch.count; e++) {
+        uint32_t hdr[2];
+        if (fread(hdr, sizeof hdr[0], 2, f) != 2) return fail("truncated name table");
+        if (fseek(f, (long)hdr[1], SEEK_CUR) != 0) return fail("truncated name table");
+      }
+      continue;
+    }
     if (ch.count == 0 || ch.count > 4096) return fail("bad chunk size");
     if (fread(buf, sizeof(rec), ch.count, f) != ch.count) return fail("truncated chunk");
     for (k = 0; k < ntids; k++)

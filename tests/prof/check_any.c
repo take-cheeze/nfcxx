@@ -34,11 +34,14 @@ int main(int argc, char **argv) {
   int ntids = 0, nsites = 0, k, i;
   uint64_t last_ts[MAX_TIDS];
   long depth[MAX_TIDS];
-  long enters = 0, exits = 0;
+  long enters = 0, exits = 0, names = 0;
+  const char *want;
+  int found = 0;
   chunk ch;
   rec *buf;
 
-  if (argc != 2) return fail("usage: check_any PROFILE");
+  if (argc != 2 && argc != 3) return fail("usage: check_any PROFILE [NAME]");
+  want = argc == 3 ? argv[2] : NULL;
   f = fopen(argv[1], "rb");
   if (f == NULL) return fail("cannot open profile");
   if (fread(magic, 1, 8, f) != 8 || memcmp(magic, "NFCPROF1", 8) != 0) return fail("bad magic");
@@ -50,6 +53,22 @@ int main(int argc, char **argv) {
   while (fread(&ch, sizeof ch, 1, f) == 1) {
     uint32_t j;
     int slot = -1;
+    if (ch.tid == 0) { /* the string table: count entries of { site, len, name } */
+      uint32_t e;
+      for (e = 0; e < ch.count; e++) {
+        uint32_t hdr[2];
+        char *name;
+        if (fread(hdr, sizeof hdr[0], 2, f) != 2) return fail("truncated name table");
+        name = (char *)malloc(hdr[1] + 1);
+        if (name == NULL) return fail("out of memory");
+        if (fread(name, 1, hdr[1], f) != hdr[1]) return fail("truncated name table");
+        name[hdr[1]] = '\0';
+        names++;
+        if (want != NULL && strcmp(name, want) == 0) found = 1;
+        free(name);
+      }
+      continue;
+    }
     if (ch.count == 0 || ch.count > 4096) return fail("bad chunk size");
     if (fread(buf, sizeof(rec), ch.count, f) != ch.count) return fail("truncated chunk");
     for (k = 0; k < ntids; k++)
@@ -85,6 +104,7 @@ int main(int argc, char **argv) {
   if (enters != exits) return fail("enters and exits differ");
   for (i = 0; i < ntids; i++)
     if (depth[i] != 0) return fail("a thread ended inside a call");
-  printf("sites=%d pairs=%ld threads=%d\n", nsites, enters, ntids);
+  if (want != NULL && !found) return fail("the name is not in the name table");
+  printf("sites=%d pairs=%ld threads=%d names=%ld\n", nsites, enters, ntids, names);
   return 0;
 }

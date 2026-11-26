@@ -267,6 +267,7 @@ def run_loop(args, state, ld_available)
       state.backend = "gcc"
       state.backend_explicit = 1
       state.cflags << "-finstrument-functions" unless state.cflags.include?("-finstrument-functions")
+      state.rdynamic = 1 # the program's global functions go into the dynamic symbol table, so the profile can name them
       prof_dir = File.expand_path("../lib/prof", __dir__)
       [File.join(prof_dir, "nfcxx_prof.c"), File.join(prof_dir, "nfcxx_prof_cyg.c")].each do |src|
         state.files << src unless state.files.include?(src)

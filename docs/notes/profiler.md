@@ -24,7 +24,7 @@ Implemented so far (prototype, format version 1):
   Only C inputs are covered so far; the C++ path and the nfcast tier are not.
 
 Not yet done: the Path B IR does not emit the calls, the C++ path does not pass the flag through, the nfcast tier does not
-emit them, the file has no string table of site names, no IR hash, and no allocation or compute counts. Those are the next
+emit them, the file has no IR hash, and no allocation or compute counts. The string table of site names is done (below). Those are the next
 steps below.
 
 ## Switching on
@@ -65,6 +65,9 @@ benchmark has been run yet.
 
 ## Decisions taken in the prototype
 
+- String table: a chunk with tid 0 written at exit, one entry per site seen, `{ site, len, name }`. A name comes from
+  `dladdr` on the site's address (exported symbols only; `--profile` passes `-rdynamic` so global functions are named),
+  or `+0x<offset>` for a static function. The tests check that `main` is named.
 - The site identity is a 32-bit number chosen by the compiler (later: the string table index plus an ordinal, as in the
   format note). The prototype takes it as given.
 - Records are host byte order with a byte-order marker in the header, rather than the little-endian layout in the format
