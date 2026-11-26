@@ -56,9 +56,11 @@ binary operators plus 13, as in `py/runtime0.h`; on ints they give the same resu
   and a range as `range(a, b)` (or `range(a, b, step)` when the step is not 1). A top-level str prints raw, as before.
 - `range(...)` (one to three small-int arguments) is a MpyRange {start, stop, step, len}. `GET_ITER` on it makes an iterator
   whose index counts the items given; `len` and truth use `len`. Containment in a range is refused at run time.
-- `LOAD_METHOD` of `append` or `pop` gives the list's builtin method (`mpy_load_method`), and a value of another type fails
-  with MicroPython's AttributeError. The lowering refuses every other attribute name by name. `CALL_METHOD` pushes the self
-  and the arguments, then calls, so `xs.pop(i)` and `xs.append(x)` take one or two arguments. A keyword argument is refused.
+- `LOAD_METHOD` of `append` or `pop` on a list gives the list's builtin method, and of an instance or class the method of
+  its class (see Classes). A value with no such attribute fails with MicroPython's AttributeError. The lowering refuses the
+  builtin method names of the other types by name (`kBuiltinMethods` in `mpy_lower.cpp`). `CALL_METHOD` passes the self (0
+  for none) and the arguments to `mpy_call_method`, so `xs.pop(i)` and `xs.append(x)` take one or two arguments. A keyword
+  argument is refused.
 - A constant tuple is one object in the .mpy file (mpy-cross folds it), so `LOAD_CONST_OBJ` builds it on each run from its items.
   The items may be None, the bools, small ints, strs, and tuples of those. An int outside the runtime's 62-bit small range is
   refused, as big ints are.
@@ -128,7 +130,10 @@ labels of their targets. It covers small-int and None/bool constants, names (`LO
 comparisons), `LOAD_CONST_STRING` and `LOAD_CONST_OBJ` (str constants), `MAKE_FUNCTION`, `LOAD_DEREF`, `STORE_DEREF`,
 `MAKE_CLOSURE`, `CALL_FUNCTION`, `BUILD_LIST`/`BUILD_TUPLE`, `LOAD_SUBSCR`/`STORE_SUBSCR`, `BUILD_MAP`/`STORE_MAP`, `BUILD_SLICE`, `LOAD_NULL` (for `del`), `STORE_COMP` (list and dict
 comprehensions), `UNPACK_SEQUENCE`, `GET_ITER_STACK`
-and `FOR_ITER`, and `RETURN_VALUE`. Any other opcode is refused by name and no IR is written.
+and `FOR_ITER`, and `RETURN_VALUE`, and the exception and class opcodes (see Exceptions and Classes): `SETUP_EXCEPT`,
+`SETUP_FINALLY`, `POP_EXCEPT_JUMP`, `END_FINALLY`, `UNWIND_JUMP`, `RAISE_OBJ`, `RAISE_LAST`, `LOAD_BUILD_CLASS`, `LOAD_ATTR`,
+`STORE_ATTR`, `LOAD_METHOD`/`CALL_METHOD`, `DELETE_FAST`, `DELETE_NAME`, `DUP_TOP_TWO`, with `LOAD_NAME`/`STORE_NAME` for the
+class namespace and `LOAD_GLOBAL`/`STORE_GLOBAL` for the globals. Any other opcode is refused by name and no IR is written.
 
 Each code object is one IR function. The module body is `mpy_module`. A function is `mpy_fn_K(ret, args, nargs)`: it
 copies its arguments into its locals `loc.N` and stores its result through `ret`. The IR has no function-address value, so
@@ -182,6 +187,53 @@ reference's message (`unsupported types for __add__: 'str', 'int'`; a bool is re
 and every other operator on a str are a runtime error saying they are not lowered yet. Truth: an empty str is false.
 `print` of a str writes its bytes and a newline, with no quotes.
 
+## Exceptions
+
+MicroPython's exception stack (`py/vm.c`: SETUP_EXCEPT, SETUP_FINALLY, POP_EXCEPT_JUMP, END_FINALLY, UNWIND_JUMP, RAISE_OBJ,
+RAISE_LAST), as the lowering follows it:
+
+- A try block is a heap record `MpyBlock` {jmp_buf, the previous block, the value-stack height, the namespace depth, landed,
+  exc}, pushed on a block stack by `mpy_try_enter`. The lowered code calls `_setjmp` on it in its own frame. A raise
+  (`raise_value`) takes the innermost block that is not already running its handler, restores the value stack and the
+  namespace depth it saved, and `longjmp`s to it. The landing (a stub after the body) gives the exception to the handler at
+  the target, in the slot of the try's depth (the handler is entered one deeper than the try, as in the bytecode).
+- A landed block stays on the stack until its handler ends (POP_EXCEPT_JUMP, END_FINALLY pops it), as MicroPython keeps its
+  exception block. An exception raised by a handler therefore skips its own block. A bare `raise` re-raises the exception of
+  the innermost landed block (`mpy_reraise`).
+- `except C:` is the binary operator EXCEPTION_MATCH (8): C is a builtin exception class, a user class derived from one, or a
+  tuple of those. `as` binds the exception; the SETUP_FINALLY that wraps the handler body deletes the name at its end
+  (DELETE_FAST, or DELETE_NAME at module level), and an END_FINALLY with an exception on top raises it again.
+- Exception classes are builtin records (`BI_EXC + k`): BaseException, Exception, ArithmeticError, LookupError,
+  ZeroDivisionError, IndexError, KeyError, ValueError, TypeError, AttributeError, NameError, RuntimeError and
+  NotImplementedError, with MicroPython's bases. An instance is a `MpyInst` whose arg is its one argument (0 for none).
+  `str(e)` is the argument as `str` gives it; the uncaught line is `Name: text`, as the reference prints it.
+- The runtime's `fail()` messages that begin with an exception class name ("KeyError: ...", "IndexError: ...") raise that
+  class, so a try catches the runtime's own errors. Any other message is fatal, as before.
+- A break or continue out of a try (UNWIND_JUMP) pops the blocks it leaves (its count is the low 7 bits of the extra byte;
+  bit 0x80 is a break out of a for loop, which drops the iterator's slots in the depth). Leaving a block that is a finally
+  (a handler with `as`) would run its code, so that is refused by name. `raise ... from` is refused.
+
+## Classes
+
+- `LOAD_BUILD_CLASS` is the builtin `__build_class__`. It runs the class body (a function) with a fresh namespace dict pushed
+  on the namespace stack, then makes the class (a `MpyClass`: its `MpyType info`, which is also the type of its instances,
+  its base, and its namespace dict). The body's LOAD_NAME and STORE_NAME go to the namespace on top of that stack; LOAD_GLOBAL
+  and STORE_GLOBAL (a function's names) always go to the globals, so a method never sees the class's names. A class base must
+  be a class or a builtin exception class.
+- An instance is a `MpyInst` {type, dict, arg}. Its attributes are in the dict, keyed by interned name strs (so a dict
+  finds them by pointer). `obj.name` (LOAD_ATTR) looks in the instance, then its class and bases; a function found there is
+  bound (`MpyBound`). `obj.name = v` (STORE_ATTR) stores in the instance (or in a class).
+- `obj.name(args)` is LOAD_METHOD then CALL_METHOD. LOAD_METHOD leaves the method and the self (0 when the attribute is not a
+  function of the class, or is in the instance), and CALL_METHOD calls with the self dropped when it is 0.
+- `Cls(args)` makes the instance and runs `__init__` with it, if the class (or a base) has one. Without one, a class that
+  derives from an exception takes one argument as the exception's argument; any other class takes none.
+- A class body that raises, with the exception caught outside it, is not tested against the reference: the reference keeps
+  the class namespace as the module's name scope after that (`x` at module level then reads the class's `x`). This lowering
+  restores the module's scope, as CPython does.
+- `del obj.name` is LOAD_NULL then STORE_ATTR (no DELETE_ATTR in MicroPython 1.29), so a store of 0 removes the attribute.
+- Attribute names in the lowering that are builtin methods of the other types (`count`, `upper`, `keys`, ...) are refused
+  by name: the lowering does not know the receiver's type, so a class's method of such a name is refused too.
+
 ## Checks
 
 - `tests/mpy/reader_run.sh` (needs `MPY_CROSS`): every corpus module in `tests/mpy/corpus` loads and decodes.
@@ -195,7 +247,8 @@ and every other operator on a str are a runtime error saying they are not lowere
 ## Not yet
 
 Defaults and keyword arguments (`MAKE_FUNCTION_DEFARGS`, `MAKE_CLOSURE_DEFARGS`), `del` of a closure variable
-(`DELETE_DEREF`), generators, str methods and formatting, str ordering and repetition, classes, exceptions, big ints, dict
+(`DELETE_DEREF`), generators, str methods and formatting, str ordering and repetition, `raise ... from`, a `with`
+statement, big ints, dict
 methods and iterating a dict (`for`, `keys`), a dict key that is a tuple or another kind of object, sets (`BUILD_SET`, the
 set comprehension), the list methods other than append and pop, subscripts of a range, and the rest of the opcodes. Equality of two different lists or
 tuples (and so `in` on a list of them), containment in a range, `list.pop` and `str` of a list or tuple are refused at
