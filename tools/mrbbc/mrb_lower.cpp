@@ -11,13 +11,15 @@
 // method's number (mrbbc_find: the latest definition of the name, and the count is checked there), and calls the
 // function of that number. The method table is filled when the TDEF runs (mrbbc_def), as mruby defines the method then.
 //
-// A block (a child irep that a BLOCK names) is `mrb_b<N>(MV *ret, MV *argv, long argc, MV *frame)`: argv[0] is the self
-// the block was made in, argv[1..argc] the arguments the yield gave, and frame is the frame of the function that made the
-// block (its registers are the block's outer locals, GETUPVAR and SETUPVAR at level 0). BLOCK makes a closure in a slot
-// of the caller (block number, a copy of self, the frame), and the value is the closure's address with the BLK tag. A
-// yield (BLKPUSH to get the method's block, BLKCALL to call it) dispatches on the block number, as a self call does on the
-// method number. A closure is only used while its frame is alive: a block is passed to a method and yielded there, and
-// the program has no way to keep it (a block parameter is refused).
+// A block (a child irep that a BLOCK names) is `mrb_b<N>(MV *ret, MV *argv, long argc, MV *frame, MV *home)`: argv[0] is
+// the self the block was made in, argv[1..argc] the arguments the yield gave, frame is the frame of the function that made
+// the block (its registers are the block's outer locals, GETUPVAR and SETUPVAR at level 0), and home is the frame of the
+// method a `return` in the block leaves. BLOCK makes a closure in a slot of the caller (block number, a copy of self, the
+// frame, the home), and the value is the closure's address with the BLK tag. A yield (BLKPUSH to get the method's block,
+// BLKCALL to call it) dispatches on the block number, as a self call does on the method number. A closure is only used
+// while its frame is alive: a block is passed to a method and yielded there, and the program has no way to keep it (a
+// block parameter is refused). A RETURN_BLK sets the pending return of its home, and each call on the way passes it up
+// (emit_unwind_check) until the home's function takes it.
 //
 // Integer operators have an inline fast path: when both operands hold integers, the operation is one IR statement
 // (checked add, subtract and multiply, which trap on overflow, and a signed compare). Everything else calls a runtime
@@ -66,6 +68,7 @@ struct Shared {
   std::vector<const mrb::Irep *> methods;        // the method bodies by number
   std::map<const mrb::Irep *, int> block_ids;    // a block body -> its number (the function mrb_b<number>)
   std::vector<const mrb::Irep *> blocks;         // the block bodies by number
+  std::set<const mrb::Irep *> top_blocks;        // the block bodies whose home is the main program (a block of the top level)
   std::set<std::string> defined;                 // the names a TDEF of the program defines
   std::string functions;                         // the function definitions, the main program first
   int serial = 0;                                // makes the names of the string data items unique
@@ -73,7 +76,10 @@ struct Shared {
 
 // The state of one function's lowering: the fresh IR register numbers, the body, and the MV slots beyond the frame (their
 // names and sizes in bytes). %0 is the ret parameter; a method has %1 the argument vector and %2 the block; a block has
-// %1 the argument vector, %2 the argument count and %3 the frame it was made in.
+// %1 the argument vector, %2 the argument count, %3 the frame it was made in and %4 its home (the frame of the method a
+// `return` in it leaves). The registers are numbered from kFirstReg.
+constexpr int kFirstReg = 5;
+
 struct Ctx {
   Shared &sh;
   const mrb::Irep &irep;
@@ -83,20 +89,20 @@ struct Ctx {
   std::ostringstream body;
   std::vector<std::pair<std::string, std::size_t>> slots;
 
-  Ctx(Shared &s, const mrb::Irep &i, Kind k) : sh(s), irep(i), kind(k), next(4 + static_cast<int>(i.nregs)) {}
+  Ctx(Shared &s, const mrb::Irep &i, Kind k) : sh(s), irep(i), kind(k), next(kFirstReg + static_cast<int>(i.nregs)) {}
 
   void add_slot(const std::string &name, std::size_t bytes) { slots.emplace_back(name, bytes); }
   std::string fresh() { return "%" + std::to_string(next++); }
   void line(const std::string &s) { body << "  " << s << "\n"; }
 
-  // The address of R(i): the frame's slot i, defined by the prologue as the register 4 + i (the emitter names registers
-  // by number only), checked against the irep's register count.
+  // The address of R(i): the frame's slot i, defined by the prologue as the register kFirstReg + i (the emitter names
+  // registers by number only), checked against the irep's register count.
   std::string reg(unsigned i) const {
     if (i >= irep.nregs) {
       throw std::runtime_error("malformed: register R(" + std::to_string(i) + ") at pc " + std::to_string(pc) +
                                " is past the irep's " + std::to_string(irep.nregs) + " registers");
     }
-    return "%" + std::to_string(4 + i);
+    return "%" + std::to_string(kFirstReg + static_cast<int>(i));
   }
 };
 
@@ -415,7 +421,13 @@ const mrb::Irep &child_at(const mrb::Irep &irep, std::uint32_t i, std::size_t pc
 
 // Finds the functions of the module: every TDEF's body is a method and every BLOCK's body a block, each numbered in the
 // order found (the main program first, then the children in order), and the names the program defines are recorded.
-void collect(Shared &sh, const mrb::Irep &irep) {
+// `kind` is what irep lowers to, and `home_main` says that its home (the function a `return` from it leaves; for a block)
+// is the main program.
+void collect(Shared &sh, const mrb::Irep &irep, Kind kind, bool home_main) {
+  // what each child is: a method body (TDEF) or a block body (BLOCK), and for a block whether its home is the main program
+  // (the block is made by the main program or by a block of it)
+  const bool child_home_main = kind == Kind::Main || (kind == Kind::Block && home_main);
+  std::vector<std::pair<Kind, bool>> child_kind(irep.reps.size(), std::make_pair(Kind::Method, false));
   for (const mrb::Insn &in : mrb::decode_iseq(irep)) {
     if (in.op == mrb::OP_TDEF) {
       const mrb::Irep *body = &child_at(irep, in.args[2], in.pc);
@@ -424,15 +436,29 @@ void collect(Shared &sh, const mrb::Irep &irep) {
         sh.methods.push_back(body);
       }
       sh.defined.insert(sym_at(irep, in.args[1], in.pc));
+      child_kind[in.args[2]] = std::make_pair(Kind::Method, false);
     } else if (in.op == mrb::OP_BLOCK) {
       const mrb::Irep *body = &child_at(irep, in.args[1], in.pc);
       if (sh.block_ids.count(body) == 0) {
         sh.block_ids[body] = static_cast<int>(sh.blocks.size());
         sh.blocks.push_back(body);
       }
+      if (child_home_main) sh.top_blocks.insert(body);
+      child_kind[in.args[1]] = std::make_pair(Kind::Block, child_home_main);
     }
   }
-  for (const mrb::Irep &child : irep.reps) collect(sh, child);
+  for (std::size_t i = 0; i < irep.reps.size(); ++i) {
+    collect(sh, irep.reps[i], child_kind[i].first, child_kind[i].second);
+  }
+}
+
+// Whether the value of a call's result must be checked for a `return` leaving a block: the calls of a method or a block
+// may run a block that returns out of the method, and the check (mrbbc_unwinding) passes the pending return on.
+void emit_unwind_check(Ctx &c) {
+  if (c.kind == Kind::Main) return;  // a return out of a block always stops at a method on the stack (a home is never main)
+  std::string p = c.fresh();
+  c.line("(let " + p + " bool (call bool &\"mrbbc_unwinding\"))");
+  c.line("(if " + p + " (then (eval (call void &\"mrbbc_unwind_take\" %0 $\"frame\")) (return)))");
 }
 
 // Lowers one irep to the function `fname` and appends it to sh.functions.
@@ -643,9 +669,11 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         // a copy of R(0), and the frame), and the value is its address with the BLK tag
         const mrb::Irep &body = child_at(irep, x[1], in.pc);
         const std::string clo = "clo" + std::to_string(in.pc);
-        c.add_slot(clo, 32);
+        c.add_slot(clo, 40);  // the runtime's Clo: id, self, frame, home
+        // the home of the block: this frame for a method or the main program, the block's own home for a block
+        const std::string home = kind == Kind::Block ? "%4" : "$\"frame\"";
         c.line("(eval (call void &\"mrbbc_block\" " + c.reg(x[0]) + " $\"" + clo + "\" (const long " +
-               num(number_of(sh.block_ids, body, "block")) + ") " + c.reg(0) + " $\"frame\"))");
+               num(number_of(sh.block_ids, body, "block")) + ") " + c.reg(0) + " $\"frame\" " + home + "))");
         break;
       }
       case mrb::OP_BLKPUSH: {
@@ -668,15 +696,17 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
           c.line("(let " + p + " (ptr unsigned_char) (offset $\"" + argv + "\" " + num(16 * i) + "))");
           c.line("(copy 16 " + p + " " + c.reg(x[0] + i) + ")");
         }
-        std::string id = c.fresh(), fr = c.fresh();
+        std::string id = c.fresh(), fr = c.fresh(), hm = c.fresh();
         c.line("(let " + id + " long (call long &\"mrbbc_blk_id\" " + c.reg(x[0]) + "))");
         c.line("(let " + fr + " (ptr unsigned_char) (call (ptr unsigned_char) &\"mrbbc_blk_frame\" " + c.reg(x[0]) + "))");
+        c.line("(let " + hm + " (ptr unsigned_char) (call (ptr unsigned_char) &\"mrbbc_blk_home\" " + c.reg(x[0]) + "))");
         for (std::size_t m = 0; m < sh.blocks.size(); ++m) {
           std::string hit = c.fresh();
           c.line("(let " + hit + " bool (eq long " + id + " (const long " + num(static_cast<long long>(m)) + ")))");
           c.line("(if " + hit + " (then (eval (call void &\"mrb_b" + std::to_string(m) + "\" " + c.reg(x[0]) + " $\"" + argv +
-                 "\" (const long " + num(n) + ") " + fr + "))))");
+                 "\" (const long " + num(n) + ") " + fr + " " + hm + "))))");
         }
+        emit_unwind_check(c);
         break;
       }
       case mrb::OP_GETUPVAR:
@@ -747,6 +777,7 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
           c.line("(if " + hit + " (then (eval (call void &\"mrb_m" + std::to_string(m) + "\" " + c.reg(x[0]) + " $\"" +
                  argv + "\" " + blk + "))))");
         }
+        emit_unwind_check(c);
         break;
       }
       case mrb::OP_SEND0:
@@ -790,8 +821,21 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         break;
       }
       case mrb::OP_RETURN:
-        // a block's return is local to the block (next); a return from a block to its method is RETURN_BLK, refused
+        // a block's RETURN is local to the block (next); the return out of a block is RETURN_BLK
         c.line("(copy 16 %0 " + c.reg(x[0]) + ")");
+        c.line("(return)");
+        break;
+      case mrb::OP_RETURN_BLK:
+        // return from a block: the value becomes the pending return of the block's home (the method it was made in), and
+        // this block returns; each call on the way passes it on (emit_unwind_check) until the home takes it
+        if (kind != Kind::Block) {
+          throw Refused("refused: RETURN_BLK outside a block is not lowered yet (pc " + std::to_string(in.pc) + ")");
+        }
+        if (sh.top_blocks.count(&irep) != 0) {
+          throw Refused("refused: a return from a block of the top level is not lowered yet (pc " + std::to_string(in.pc) +
+                        ")");
+        }
+        c.line("(eval (call void &\"mrbbc_return_block\" " + c.reg(x[0]) + " %4))");
         c.line("(return)");
         break;
       case mrb::OP_RETNIL:
@@ -825,7 +869,8 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
   if (kind == Kind::Method) {
     fn << " (param %1 \"argv\" (ptr (struct \"MV\"))) (param %2 \"blk\" (ptr (struct \"MV\")))";
   } else if (kind == Kind::Block) {
-    fn << " (param %1 \"argv\" (ptr (struct \"MV\"))) (param %2 \"argc\" long) (param %3 \"frame\" (ptr (struct \"MV\")))";
+    fn << " (param %1 \"argv\" (ptr (struct \"MV\"))) (param %2 \"argc\" long) (param %3 \"frame\" (ptr (struct \"MV\")))"
+       << " (param %4 \"home\" (ptr (struct \"MV\")))";
   }
   fn << ")\n";
   fn << "  (slot \"frame\" (struct \"MV\") " << 16 * static_cast<std::size_t>(irep.nregs) << " 8)\n";
@@ -839,7 +884,7 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
 std::string lower_module(const mrb::Module &module, const std::string &source_name) {
   const mrb::Irep &root = module.root;
   Shared sh;
-  collect(sh, root);
+  collect(sh, root, Kind::Main, true);
   lower_irep(sh, root, "mrb_irep_0", Kind::Main);
   for (std::size_t m = 0; m < sh.methods.size(); ++m) {
     lower_irep(sh, *sh.methods[m], "mrb_m" + std::to_string(m), Kind::Method);

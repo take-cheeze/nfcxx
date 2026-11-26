@@ -127,22 +127,25 @@ int mrbbc_find(const char *name, long argc) {
   }
 }
 
-/* A block value (MRBBC_BLK): the int64 is the Clo that mrbbc_block fills. The layout is 32 bytes, as the producer
+/* A block value (MRBBC_BLK): the int64 is the Clo that mrbbc_block fills. The layout is 40 bytes, as the producer
  * reserves it (tools/mrbbc/mrb_lower.cpp, the BLOCK slot). A closure lives in its frame, which is alive while the block
- * can be yielded: a block is passed to a method and not kept (a block parameter is refused). */
+ * can be yielded: a block is passed to a method and not kept (a block parameter is refused). home is the frame of the
+ * method the block was made in (the frame a return out of the block leaves). */
 typedef struct Clo {
   long id;
   MV self;
   MV *frame;
+  MV *home;
 } Clo;
 
 static Clo *clo_of(const MV *v) { return (Clo *)(intptr_t)v->i; }
 
-void mrbbc_block(MV *dst, void *clo, long id, const MV *self, MV *frame) {
+void mrbbc_block(MV *dst, void *clo, long id, const MV *self, MV *frame, MV *home) {
   Clo *c = clo;
   c->id = id;
   c->self = *self;
   c->frame = frame;
+  c->home = home;
   set_obj(dst, MRBBC_BLK, c);
 }
 
@@ -154,6 +157,33 @@ long mrbbc_blk_id(const MV *blk) {
 MV *mrbbc_blk_frame(const MV *blk) {
   if (blk->tag != MRBBC_BLK) mrbbc_raise("LocalJumpError", "unexpected yield");
   return clo_of(blk)->frame;
+}
+
+MV *mrbbc_blk_home(const MV *blk) {
+  if (blk->tag != MRBBC_BLK) mrbbc_raise("LocalJumpError", "unexpected yield");
+  return clo_of(blk)->home;
+}
+
+/* A return out of a block. The value is pending for home: every call on the way returns at once (mrbbc_unwinding is
+ * checked after each call of a method or a block) until the function whose frame is home takes it (mrbbc_unwind_take),
+ * and that function returns the value. */
+static int unwind_pending = 0;
+static MV *unwind_home = NULL;
+static MV unwind_value;
+
+void mrbbc_return_block(const MV *value, MV *home) {
+  unwind_pending = 1;
+  unwind_home = home;
+  unwind_value = *value;
+}
+
+int mrbbc_unwinding(void) { return unwind_pending; }
+
+void mrbbc_unwind_take(MV *ret, MV *frame) {
+  if (unwind_pending && unwind_home == frame) {
+    *ret = unwind_value;
+    unwind_pending = 0;
+  }
 }
 
 void mrbbc_blk_args(MV *argv, const MV *blk) {

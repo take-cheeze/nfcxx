@@ -163,7 +163,17 @@ are the block's outer locals.
   is given). A block with two or more parameters is refused, because mruby splats a single array argument for those.
 - `GETUPVAR a b 0` and `SETUPVAR a b 0` read and write register b of the frame the block was made in. Level 0 only: a
   deeper level needs the frame's own link to its parent, which is not lowered.
-- `RETURN` in a block is a local return (`next`). `RETURN_BLK` (a `return` that leaves the block) is refused.
+- `RETURN` in a block is a local return (`next`).
+- `RETURN_BLK` (a `return` that leaves the block, to the method the block was made in) makes the value the pending return
+  of the block's home and returns the block. The home is a closure field: the frame of the method (or of the block's
+  creator, for a block in a block), passed to a block as its `%4` parameter. The runtime keeps one pending return
+  (`mrbbc_return_block`). After every method or block call in a method or a block, the function checks it
+  (`mrbbc_unwinding`) and, if one is pending, `mrbbc_unwind_take` gives the value to its own `ret` when its frame is the
+  home, and the function returns either way, so the return passes up the calls until the home takes it.
+- A `return` from a block made at the top level is refused. In mruby it ends the script without printing anything (the
+  value a value program prints would be the producer's, not mruby's), so it is not lowered.
+- A pending return that no frame takes is impossible in this subset: a block is only yielded during the call of the
+  method it is passed to, so its home is on the stack while the block runs.
 
 Lifetime: a closure is valid while its frame is alive. A block is passed to a method and yielded there, and the program
 has no way to keep it (a block parameter is refused), so no closure outlives its frame. This is the producer's reading,
@@ -172,7 +182,7 @@ and a program that kept a block would make the closure dangle.
 Refused by name (exit 3, `refused: opcode NAME is not lowered yet (pc N)`): every other opcode, the `EXT1`-`EXT3`
 prefixes and the instructions they widen, `LOADL` of a non-integer (`LOADL` never holds a string: mruby compiles a
 string literal to `STRING`), and a main program with a catch table. In particular `SENDB` (a block call with an
-explicit receiver), `RETURN_BLK`, `BREAK`, `GETUPVAR`/`SETUPVAR` at level 1 or more, `BLKPUSH` of a block other than
+explicit receiver), `RETURN_BLK` from a block of the top level, `BREAK`, `GETUPVAR`/`SETUPVAR` at level 1 or more, `BLKPUSH` of a block other than
 the method's own (a yield inside a block), a method call with a keyword argument, any other method name, `AREF`/`ASET`
 (the destructuring of `a, b = x`), `APOST`, `ARYCAT`/`ARYSPLAT` (a splat), `SYMBOL` (a quoted symbol) and `LOADSYM` of a
 name that is not plain (`:"a b"`, `:+`), a float, an instance or global variable, a class (`TCLASS`, `CLASS`), a method
@@ -247,11 +257,12 @@ whose message says so, never with a value.
   each compiled four ways (default, `-g`, `--remove-lv`, `-g --remove-lv`): 28 files read by `mrbbc_dump` (every
   instruction decodes, no bytes after END) and run to status 0 by the pinned mruby. 15 malformed files (truncations,
   an extra byte, a wrong magic, format 03.00, an unknown section, an opcode out of range) are refused with status 1.
-- Lowering (`tests/mrbbc/lower/run.sh`): 61 value programs match mruby's `p` (two generated: 200 locals, and an
+- Lowering (`tests/mrbbc/lower/run.sh`): 67 value programs match mruby's `p` (two generated: 200 locals, and an
   array literal of 130 elements, which mrbc builds with `ARYPUSH`; the `meth_*.rb` ones cover methods: zero and two
   arguments, self calls between methods, recursion, redefinition, a loop, `return`, and a `def` value; the `blk_*.rb`
   ones cover blocks: yield with and without arguments, a block that sets an outer local, `block_given?`, a loop of
-  yields, a block inside a block, and a block that calls a method); 26 runtime errors match mruby's last stderr line
+  yields, a block inside a block, a block that calls a method, and `return` out of a block through one or two
+  methods); 26 runtime errors match mruby's last stderr line
   and status 1 (9 from round 1, 13 from round 2, 4 in round 3: method arity, call before def, and yield without a
   block); 23 programs are refused with status 3, a `refused:` message and no stdout: 22 in `err/` and a generated one
   with EXT1 prefixes. `err/` is the refusal set, `rterr/` the runtime errors; the brief's "err/ programs must be
@@ -259,10 +270,10 @@ whose message says so, never with a value.
 
 Round 2 (strings, arrays, SEND0 and SEND of the core methods) is in the tables above. Round 3 lowers methods (see
 "Methods": `def` of a method with required parameters, self calls to the program's methods) and blocks (see "Blocks":
-`BLOCK`, `SSENDB`, `BLKPUSH`, `BLKCALL`, `GETUPVAR` and `SETUPVAR` at level 0, `block_given?`). Still refused:
-`RETURN_BLK` (a `return` out of a block), `BREAK`, yields and variables more than one level out, `SENDB` with an explicit
-receiver, blocks with two or more parameters, keyword arguments, optional or rest parameters, `AREF`/`ASET`, `APOST`,
-splats, and the quoted symbols. The strings and arrays in the
+`BLOCK`, `SSENDB`, `BLKPUSH`, `BLKCALL`, `GETUPVAR` and `SETUPVAR` at level 0, `block_given?`, and `RETURN_BLK` out of a
+block whose home is a method). Still refused: `RETURN_BLK` from a block of the top level, `BREAK`, yields and variables
+more than one level out, `SENDB` with an explicit receiver, blocks with two or more parameters, keyword arguments,
+optional or rest parameters, `AREF`/`ASET`, `APOST`, splats, and the quoted symbols. The strings and arrays in the
 subset are the ones the examples above name; `Array#-` and `Array#*`, `String#[]=`, ranges as indexes and the other
 methods of the core classes are not in it.
 
