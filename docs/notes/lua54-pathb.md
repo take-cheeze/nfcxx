@@ -1,6 +1,6 @@
 # Lua 5.4 bytecode to Path B IR
 
-Status: every opcode lowers. 77 programs match Lua 5.4.9 (`tests/lua54bc/lower/run.sh`), and 34 error programs print the
+Status: every opcode lowers. 83 programs match Lua 5.4.9 (`tests/lua54bc/lower/run.sh`), and 47 error programs print the
 same first line as lua.c, with its position, message and variable info. The runtime has numbers with coercion, strings
 with the string metatable, tables with metatables, closures and upvalues, multiple results, varargs, the metamethods
 listed below, to-be-closed variables, protected calls (`pcall` and `xpcall`, with `error` and its levels, and `assert`),
@@ -170,8 +170,8 @@ gives lstrlib's `attempt to add a 'string' with a 'number'`. Only tables have me
 
 - `tests/lua54bc/run.sh`: the reader loads real 5.4.9 chunks (dumped with `string.dump`); the opcode sequence matches
   `luac -l -l` when `LUAC` is set. The opcode check has not run: no `luac` is available here.
-- `tests/lua54bc/lower/run.sh`: 77 programs lower, emit, assemble, link (with `-lm`), run, and match
-  `print(dofile(...))` from Lua 5.4.9. 34 programs in `lower/err/` must give lua.c's first error line and status 1. Needs
+- `tests/lua54bc/lower/run.sh`: 83 programs lower, emit, assemble, link (with `-lm`), run, and match
+  `print(dofile(...))` from Lua 5.4.9. 47 programs in `lower/err/` must give lua.c's first error line and status 1. Needs
   `LUA` (a 5.4.9 interpreter). The suite also passes with `LUA54RT_GC_THRESHOLD=1`, which collects at nearly every
   allocation.
 
