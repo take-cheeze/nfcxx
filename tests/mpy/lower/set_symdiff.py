@@ -1,0 +1,16 @@
+# The symmetric difference: ^ builds a new set (a copy of the left set with each item of the right toggled), ^= changes the
+# left set, and an item that is in both is removed. s ^ s is empty, and s ^= s empties s.
+a = {1, 2, 3, 4}
+b = {3, 4, 5}
+x = a ^ b
+c = {1, 2}
+c ^= {2, 9}
+d = {7}
+d ^= d
+e = {1, 2, 3}
+e ^= e
+f = {1, 2, 3}
+g = f ^ f
+h = {1, 2}
+h = h ^ {3}
+result = (x, a, b, c, d, e, g, h, len(g), 2 in c, 9 in c, 3 in x)

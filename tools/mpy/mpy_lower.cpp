@@ -159,7 +159,7 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
       op.extra = o == opcode("SETUP_FINALLY") ? 1 : 0;   // the kind of block: 1 for a finally, 0 for an except
     } else if (o == opcode("SETUP_WITH")) {
       // A with statement: the context manager is on top. Its exit method goes below it, its __enter__ result on top, and the
-      // block is a finally (its exit runs on the way out, so an unwind through it is refused).
+      // block is a finally-like one for the reference (its exit runs on the way out, as the unwind of the with block does).
       op.kind = "SETUP_WITH";
       op.arg = (long long)op.next + in.arg;
       op.extra = 2;   // the block kind: 2 for a with (1 for a finally, 0 for an except; see the walk)
@@ -253,6 +253,9 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
     } else if (o == opcode("UNPACK_SEQUENCE")) {
       op.kind = "UNPACK_SEQUENCE";
       op.arg = in.arg;
+    } else if (o == opcode("UNPACK_EX")) {
+      op.kind = "UNPACK_EX";               // the values before the star (the low byte of the argument) and after it (the next byte)
+      op.arg = in.arg;
     } else if (o == opcode("GET_ITER_STACK")) {
       op.kind = "GET_ITER";                // a for loop's iterator, which takes kIterSlots stack slots
     } else if (o == opcode("GET_ITER")) {
@@ -276,7 +279,8 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
       op.kind = "STORE_DEREF";
       op.arg = in.arg;
     } else if (o == opcode("DELETE_DEREF")) {
-      refused("del of a closure variable (DELETE_DEREF) is not lowered yet");
+      op.kind = "DELETE_DEREF";            // del of a cell or free variable: the cell's value becomes unbound (0)
+      op.arg = in.arg;
     } else if (o == opcode("CALL_FUNCTION")) {
       if ((in.arg >> 8) != 0) refused("keyword arguments in a call are not lowered yet");
       op.kind = "CALL";
@@ -314,9 +318,7 @@ const std::set<std::string> kBuiltinMethods = {
     "capitalize", "center", "count", "encode", "endswith", "extend", "find", "format", "index",
     "insert", "isalpha", "isdigit", "isspace", "join", "ljust", "lower", "lstrip", "partition",
     "replace", "reverse", "rfind", "rindex", "rjust", "rstrip", "rsplit", "sort", "split", "splitlines",
-    "startswith", "strip", "title", "upper", "zfill",
-    "isdisjoint", "issubset", "issuperset", "symmetric_difference", "difference_update",
-    "intersection_update", "symmetric_difference_update"};
+    "startswith", "strip", "title", "upper", "zfill"};
 
 // A for loop's iterator takes MP_OBJ_ITER_BUF_NSLOTS stack slots (obj.h: 4 on 32- and 64-bit hosts); its object is in the
 // bottom one. break pops all of them.
@@ -340,6 +342,7 @@ int effect(const Op &op) {
   if (k == "STORE_MAP") return -2;                                       // the value and key go; the dict stays
   if (k == "STORE_COMP") return op.extra == 1 ? -2 : -1;                 // a dict takes its key and value, a list its item
   if (k == "UNPACK_SEQUENCE") return (int)op.arg - 1;
+  if (k == "UNPACK_EX") return (int)((op.arg & 0xff) + ((op.arg >> 8) & 0xff));   // the sequence goes, the star's values come
   if (k == "LOAD_SUBSCR") return -1;
   if (k == "STORE_SUBSCR") return -3;
   if (k == "FOR_ITER") return 1;   // the fall-through; the exhausted jump is handled per successor
@@ -359,9 +362,11 @@ int effect(const Op &op) {
 
 // An open block as the walk records it (see unit): 0 for an except, 1 for a finally, 2 for a with block and 3 for a for loop. A
 // with block's value also holds the stack slot of its exit method (the slot below its context manager, as SETUP_WITH leaves
-// it), and a for loop's holds the base slot of its iterator.
+// it), and a for loop's holds the base slot of its iterator. A finally block's value holds the offset of its SETUP, which
+// names the block (its handler is the SETUP's target).
 int kind_of(int block) { return block & 3; }
 int exit_slot_of(int block) { return block >> 2; }
+int setup_of(int block) { return block >> 2; }
 
 std::string lbl(size_t at) { return "\"pc" + std::to_string(at) + "\""; }
 
@@ -474,7 +479,7 @@ class Lowerer {
 
     // The depth before each instruction, from the stack effects. A jump target must agree on it.
     // The walk also keeps the try blocks open at each instruction (kind 1 for a finally, 0 for an except): a
-    // break or continue that leaves one is an UNWIND_JUMP, and leaving a finally would run its code, which is not lowered.
+    // break or continue that leaves one is an UNWIND_JUMP, and a return or unwind through a finally runs its body (see unwind).
     std::map<size_t, int> depth;
     std::map<size_t, std::vector<int>> blocks_at;
     std::map<size_t, size_t> index;
@@ -507,7 +512,8 @@ class Lowerer {
         // the handler is entered with the exception on top: the depth there is one more than at the try. A with statement's
         // stack at its handler is the exit method, the context manager and the exception, so it is two more than before.
         // A with block records its exit method's slot, which is the depth before it less one (SETUP_WITH's lowering).
-        int kind = op.kind == "SETUP_WITH" ? (2 | ((d - 1) << 2)) : op.extra;   // 1 for SETUP_FINALLY, 0 for SETUP_EXCEPT
+        // 1 for SETUP_FINALLY (named by its offset, see setup_of), 0 for SETUP_EXCEPT
+        int kind = op.kind == "SETUP_WITH" ? (2 | ((d - 1) << 2)) : (op.extra == 1 ? (1 | ((int)op.offset << 2)) : op.extra);
         std::vector<int> inner = open;
         inner.push_back(kind);
         succ.push_back({op.next, after, inner});
@@ -523,7 +529,6 @@ class Lowerer {
         std::vector<int> left(open.begin(), open.end() - (long)n);
         int target_depth = d;
         for (size_t i = open.size() - n; i < open.size(); ++i) {
-          if (kind_of(open[i]) == 1) refused("a break or continue out of a try block with a name (a finally) is not lowered yet");
           if (kind_of(open[i]) == 2 && exit_slot_of(open[i]) < target_depth) target_depth = exit_slot_of(open[i]);
         }
         if (op.extra & 0x80) {
@@ -571,6 +576,10 @@ class Lowerer {
           blocks_at[s.at] = s.blocks;
           work.push_back(s.at);
         } else if (it->second != s.depth || blocks_at[s.at] != s.blocks) {
+          // A break out of a finally body, in a loop over a range (no iterator on the stack, so no loop-drop bit), reaches the
+          // loop's end with the finally's pending value still on the stack, one deeper than the normal exit: the reference's
+          // POP_TOP there pops that value and leaves the loop's counter behind. A static depth cannot hold both, so it is refused.
+          if (op.kind == "UNWIND_JUMP") refused("a break out of a finally body in a loop over a range is not lowered yet");
           throw std::runtime_error("mpy: stack depth differs at a join");
         }
       }
@@ -657,20 +666,68 @@ class Lowerer {
       body << "  (store unsigned_long " << local((long long)c) << " " << cell << ")\n";
     }
 
-    // Leaves the n innermost blocks of open (a return or an unwinding jump), innermost first, as the reference does: a with block
-    // calls its __exit__ with None, None, None (WITH_CLEANUP's normal path), and an except block is dropped. The block is dropped
-    // before the exit is called, so an exception from the exit goes to the blocks that enclose the statement. A for loop's entry
-    // (kind 3) has no block to drop, so it is skipped.
-    auto leave_blocks = [&](const std::vector<int> &open, size_t n) {
-      for (size_t i = open.size(); i-- > open.size() - n;) {
-        if (kind_of(open[i]) == 3) continue;
-        body << "  (eval (call void &\"mpy_block_pop\"))\n";
-        if (kind_of(open[i]) == 2) {
-          std::string ex = load(exit_slot_of(open[i])), r = fresh();
-          body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_with_cleanup\" " << ex
-               << " (const unsigned_long 6)))\n";
+    // An unwind (a return, or a break or continue that leaves try blocks) runs each finally block it leaves whose handler is ahead
+    // of the unwind's site, as the VM does (vm.c's unwind_jump: exc_sp->handler >= ip). The block stays open, and its handler is
+    // entered with a pending code in its exception slot; the handler's END_FINALLY dispatches on the code and goes on with the
+    // rest of the unwind, which is the continuation of that code (in stubs). A finally whose handler is behind the site (the site
+    // is in the handler) is only dropped, as the VM cancels it. The pending codes of each finally block are collected first, so
+    // that its END_FINALLY can dispatch on them.
+    struct Pending {
+      long long code;
+      std::string cont;
+    };
+    std::map<size_t, std::vector<Pending>> pending_at;   // by the SETUP offset of the finally block the code enters
+    std::vector<std::string> rv_slots;                  // a return's value while a finally runs
+    auto runs_finally = [&](int block, size_t site) {
+      return kind_of(block) == 1 && site < (size_t)ops[index[(size_t)setup_of(block)]].arg;
+    };
+    auto pending_code = [](size_t site, long long i) { return (long long)site * 256 + i + 1; };
+    auto cont_label = [](size_t site, long long i) { return "unw_" + std::to_string(site) + "_" + std::to_string(i); };
+    for (const Op &op : ops) {
+      if (op.kind != "RETURN" && op.kind != "UNWIND_JUMP") continue;
+      auto bit = blocks_at.find(op.offset);
+      if (bit == blocks_at.end()) continue;
+      const std::vector<int> &open = bit->second;
+      long long top = (long long)open.size() - 1;
+      long long lo = op.kind == "RETURN" ? 0 : top + 1 - (long long)(op.extra & 0x7f);
+      for (long long i = top; i >= lo; --i) {
+        if (!runs_finally(open[(size_t)i], op.offset)) continue;
+        pending_at[(size_t)setup_of(open[(size_t)i])].push_back({pending_code(op.offset, i), cont_label(op.offset, i)});
+      }
+    }
+    // The unwind of the blocks open[lo..top] at the site (innermost first), then finish. A with block calls its __exit__ with
+    // None, None, None (WITH_CLEANUP's normal path), and an except block or a finally block that is dropped is popped before the
+    // exit is called, so an exception from the exit goes to the blocks that enclose the statement. A for loop's entry (kind 3)
+    // has no block to drop, so it is skipped.
+    std::function<void(std::ostringstream &, long long, long long, size_t, const std::function<void(std::ostringstream &)> &)>
+        unwind;
+    unwind = [&](std::ostringstream &out, long long top, long long lo, size_t site,
+                 const std::function<void(std::ostringstream &)> &finish) {
+      const std::vector<int> open = blocks_at[site];
+      for (long long i = top; i >= lo; --i) {
+        int b = open[(size_t)i];
+        if (kind_of(b) == 3) continue;
+        if (runs_finally(b, site)) {
+          size_t setup = (size_t)setup_of(b);
+          size_t handler = (size_t)ops[index[setup]].arg;
+          int exc_slot = depth[setup];
+          out << "  (eval (call void &\"mpy_block_land\"))\n";
+          out << "  (store unsigned_long " << slot("stk", exc_slot) << " (const unsigned_long "
+              << small_word(pending_code(site, i)) << "))\n";
+          out << "  (goto " << lbl(handler) << ")\n";
+          stubs << "  (label \"" << cont_label(site, i) << "\")\n";
+          unwind(stubs, i - 1, lo, site, finish);
+          return;
+        }
+        out << "  (eval (call void &\"mpy_block_pop\"))\n";
+        if (kind_of(b) == 2) {
+          std::string ex = fresh(), r = fresh();
+          out << "  (let " << ex << " unsigned_long (load unsigned_long " << slot("stk", exit_slot_of(b)) << "))\n";
+          out << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_with_cleanup\" " << ex
+              << " (const unsigned_long 6)))\n";
         }
       }
+      finish(out);
     };
 
     for (const Op &op : ops) {
@@ -755,6 +812,11 @@ class Lowerer {
         std::string v = pop(d), cell = fresh();
         body << "  (let " << cell << " unsigned_long (load unsigned_long " << local(op.arg) << "))\n";
         body << "  (eval (call void &\"mpy_cell_set\" " << cell << " " << v << "))\n";
+      } else if (k == "DELETE_DEREF") {
+        // del of a cell: the cell's value is 0 (unbound), so a read of it is a NameError, as mpy_cell_get gives it
+        std::string cell = fresh();
+        body << "  (let " << cell << " unsigned_long (load unsigned_long " << local(op.arg) << "))\n";
+        body << "  (eval (call void &\"mpy_cell_set\" " << cell << " (const unsigned_long 0)))\n";
       } else if (k == "MAKE_FUNCTION") {
         if ((size_t)op.arg >= rc.children.size()) throw std::runtime_error("mpy: child index out of range");
         size_t n = 0;
@@ -880,8 +942,9 @@ class Lowerer {
         // depth, which is static here.
         auto open_it = blocks_at.find(op.offset);
         if (open_it == blocks_at.end()) throw std::runtime_error("mpy: internal: an unwind at an unknown depth");
-        leave_blocks(open_it->second, (size_t)(op.extra & 0x7f));
-        body << "  (goto " << lbl((size_t)op.arg) << ")\n";
+        long long top = (long long)open_it->second.size() - 1;
+        long long lo = top + 1 - (long long)(op.extra & 0x7f);
+        unwind(body, top, lo, op.offset, [&](std::ostringstream &out) { out << "  (goto " << lbl((size_t)op.arg) << ")\n"; });
       } else if (k == "RAISE_FROM") {
         // [exception, cause] with the cause on top
         std::string cause = pop(d), exc = pop(d - 1);
@@ -889,6 +952,20 @@ class Lowerer {
       } else if (k == "END_FINALLY") {
         std::string v = pop(d);
         body << "  (eval (call void &\"mpy_end_finally\" " << v << "))\n";
+        // The block that ends is the innermost one. An unwind that entered it left its pending code here: the code's continuation
+        // goes on with the rest of that unwind. Otherwise (None, or an exception, which mpy_end_finally raised) the code falls through.
+        auto open_it = blocks_at.find(op.offset);
+        if (open_it != blocks_at.end() && !open_it->second.empty() && kind_of(open_it->second.back()) == 1) {
+          auto pit = pending_at.find((size_t)setup_of(open_it->second.back()));
+          if (pit != pending_at.end()) {
+            for (const Pending &p : pit->second) {
+              std::string c = fresh();
+              body << "  (let " << c << " bool (eq unsigned_long " << v << " (const unsigned_long " << small_word(p.code)
+                   << ")))\n";
+              body << "  (if " << c << " (then (goto \"" << p.cont << "\")) (else))\n";
+            }
+          }
+        }
       } else if (k == "RAISE_OBJ") {
         std::string v = pop(d);
         body << "  (eval (call void &\"mpy_raise_obj\" " << v << "))\n";
@@ -988,6 +1065,20 @@ class Lowerer {
           std::string key = load(top), v = load(top - 1), coll = load(top - (int)op.arg);
           body << "  (eval (call void &\"mpy_dict_store\" " << coll << " " << key << " " << v << "))\n";
         }
+      } else if (k == "UNPACK_EX") {
+        // The values of mp_unpack_ex, the first one on top: the runtime makes the list of them once (a generic iterable is read
+        // once), and value j is stored at stack slot j from the sequence's slot.
+        unsigned left = (unsigned)(op.arg & 0xff), right = (unsigned)((op.arg >> 8) & 0xff);
+        std::string seq = load(d - 1);   // read first: the item slots overlap it
+        std::string r = fresh();
+        body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_unpack_ex\" " << seq << " (const unsigned_long "
+             << left << ") (const unsigned_long " << right << ")))\n";
+        for (unsigned j = 0; j <= left + right; ++j) {
+          std::string item = fresh();
+          body << "  (let " << item << " unsigned_long (call unsigned_long &\"mpy_unpack_ex_item\" " << r
+               << " (const unsigned_long " << j << ")))\n";
+          push(d - 1 + (int)j, item);
+        }
       } else if (k == "UNPACK_SEQUENCE") {
         int n = (int)op.arg;
         std::string seq = load(d - 1);   // read first: the item slots overlap it
@@ -1012,13 +1103,31 @@ class Lowerer {
             } else if (k == "JUMP") {
         body << "  (goto " << lbl((size_t)op.arg) << ")\n";
       } else if (k == "RETURN") {
-        // A return leaves every block it is in (MicroPython's unwind_return): a with block calls its __exit__, and an except block
-        // is dropped.
-        auto open_it = blocks_at.find(op.offset);
-        if (open_it != blocks_at.end()) leave_blocks(open_it->second, open_it->second.size());
+        // A return leaves every block it is in (MicroPython's unwind_return): a with block calls its __exit__, an except block is
+        // dropped, and a finally block whose handler is ahead runs its body (see unwind). The value is kept in a slot for the
+        // continuations, since a finally body reuses the stack slots from its own depth up.
         std::string v = pop(d);
-        if (is_fn) body << "  (store unsigned_long %0 " << v << ")\n";
-        body << "  (return)\n";
+        auto open_it = blocks_at.find(op.offset);
+        std::vector<int> open = open_it == blocks_at.end() ? std::vector<int>{} : open_it->second;
+        bool runs = false;
+        for (int b : open) runs = runs || (kind_of(b) == 1 && runs_finally(b, op.offset));
+        long long top = (long long)open.size() - 1;
+        if (!runs) {
+          unwind(body, top, 0, op.offset, [&](std::ostringstream &out) {
+            if (is_fn) out << "  (store unsigned_long %0 " << v << ")\n";
+            out << "  (return)\n";
+          });
+        } else {
+          std::string rv = "rv." + std::to_string(op.offset);
+          rv_slots.push_back(rv);
+          body << "  (store unsigned_long $\"" << rv << "\" " << v << ")\n";
+          unwind(body, top, 0, op.offset, [&](std::ostringstream &out) {
+            std::string t = fresh();
+            out << "  (let " << t << " unsigned_long (load unsigned_long $\"" << rv << "\"))\n";
+            if (is_fn) out << "  (store unsigned_long %0 " << t << ")\n";
+            out << "  (return)\n";
+          });
+        }
       } else {
         throw std::runtime_error("mpy: internal: kind not handled: " + k);
       }
@@ -1033,6 +1142,7 @@ class Lowerer {
         << "\n";
     for (int d = 0; d <= max_depth; ++d) out << "  (slot \"stk." << d << "\" unsigned_long 8 8)\n";
     for (unsigned i = 0; i < pre.n_state; ++i) out << "  (slot \"loc." << i << "\" unsigned_long 8 8)\n";
+    for (const std::string &s : rv_slots) out << "  (slot \"" << s << "\" unsigned_long 8 8)\n";
     out << body.str() << ")\n";
     return out.str();
   }

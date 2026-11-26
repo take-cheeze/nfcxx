@@ -192,6 +192,8 @@ enum {
   BI_DICT_GET, BI_DICT_KEYS, BI_DICT_VALUES, BI_DICT_ITEMS, BI_DICT_POP, BI_DICT_UPDATE,
   BI_DICT_COPY, BI_DICT_CLEAR, BI_DICT_SETDEFAULT, BI_DICT_POPITEM, BI_DICT_FROMKEYS,
   BI_SET_ADD, BI_SET_DISCARD, BI_SET_REMOVE, BI_SET_UNION, BI_SET_INTERSECTION, BI_SET_DIFFERENCE,
+  BI_SET_POP, BI_SET_UPDATE, BI_SET_DIFFERENCE_UPDATE, BI_SET_INTERSECTION_UPDATE, BI_SET_SYMDIFF, BI_SET_SYMDIFF_UPDATE,
+  BI_SET_ISSUBSET, BI_SET_ISSUPERSET, BI_SET_ISDISJOINT,
   BI_SUPER, BI_INIT,
   BI_EXC, BI_COUNT = BI_EXC + EXC_COUNT
 };
@@ -208,6 +210,9 @@ static const MpyBuiltin mpy_builtins[BI_COUNT] = {
   {&mpy_type_bfn, BI_DICT_POPITEM}, {&mpy_type_bfn, BI_DICT_FROMKEYS},
   {&mpy_type_bfn, BI_SET_ADD}, {&mpy_type_bfn, BI_SET_DISCARD}, {&mpy_type_bfn, BI_SET_REMOVE},
   {&mpy_type_bfn, BI_SET_UNION}, {&mpy_type_bfn, BI_SET_INTERSECTION}, {&mpy_type_bfn, BI_SET_DIFFERENCE},
+  {&mpy_type_bfn, BI_SET_POP}, {&mpy_type_bfn, BI_SET_UPDATE}, {&mpy_type_bfn, BI_SET_DIFFERENCE_UPDATE},
+  {&mpy_type_bfn, BI_SET_INTERSECTION_UPDATE}, {&mpy_type_bfn, BI_SET_SYMDIFF}, {&mpy_type_bfn, BI_SET_SYMDIFF_UPDATE},
+  {&mpy_type_bfn, BI_SET_ISSUBSET}, {&mpy_type_bfn, BI_SET_ISSUPERSET}, {&mpy_type_bfn, BI_SET_ISDISJOINT},
   {&mpy_type_type, BI_SUPER}, {&mpy_type_bfn, BI_INIT},
   {&mpy_type_type, BI_EXC + 0}, {&mpy_type_type, BI_EXC + 1}, {&mpy_type_type, BI_EXC + 2},
   {&mpy_type_type, BI_EXC + 3}, {&mpy_type_type, BI_EXC + 4}, {&mpy_type_type, BI_EXC + 5},
@@ -298,7 +303,8 @@ static int dict_method_index(const char *name, size_t len) {
   return -1;
 }
 
-/* The builtin id of a set method (add, discard, remove, union, intersection, difference), or -1. */
+/* The builtin id of a set method (add, discard, remove, pop, the union, intersection and difference methods and their in-place
+ * forms, update, the symmetric difference methods, issubset, issuperset and isdisjoint), or -1. */
 static int set_method_index(const char *name, size_t len) {
   static const struct {
     const char *name;
@@ -306,6 +312,10 @@ static int set_method_index(const char *name, size_t len) {
   } methods[] = {
     {"add", BI_SET_ADD}, {"discard", BI_SET_DISCARD}, {"remove", BI_SET_REMOVE},
     {"union", BI_SET_UNION}, {"intersection", BI_SET_INTERSECTION}, {"difference", BI_SET_DIFFERENCE},
+    {"pop", BI_SET_POP}, {"update", BI_SET_UPDATE}, {"difference_update", BI_SET_DIFFERENCE_UPDATE},
+    {"intersection_update", BI_SET_INTERSECTION_UPDATE}, {"symmetric_difference", BI_SET_SYMDIFF},
+    {"symmetric_difference_update", BI_SET_SYMDIFF_UPDATE}, {"issubset", BI_SET_ISSUBSET},
+    {"issuperset", BI_SET_ISSUPERSET}, {"isdisjoint", BI_SET_ISDISJOINT},
   };
   size_t k;
   for (k = 0; k < sizeof methods / sizeof methods[0]; ++k) {
@@ -479,9 +489,12 @@ static int str_equal(mpv a, mpv b) {
   return x->len == y->len && memcmp(x->data, y->data, x->len) == 0;
 }
 
+static int set_equal_contents(mpv a, mpv b);
+
 /* Equality, as mp_obj_equal gives it (used by `in`, by dict and set keys, and inside lists and tuples): the same word, two strs
- * with the same bytes, two numbers (bools as 0 and 1) with the same value, and two lists or two tuples with equal items. Two
- * dicts, two sets or two ranges that are different objects are not compared yet, so that fails rather than answers. */
+ * with the same bytes, two numbers (bools as 0 and 1) with the same value, two lists or two tuples with equal items, and two
+ * sets with the same items. Two dicts or two ranges that are different objects are not compared yet, so that fails rather
+ * than answers. */
 static int obj_equal(mpv a, mpv b) {
   if (a == b) return 1;
   if (is_str(a) || is_str(b)) return is_str(a) && is_str(b) && str_equal(a, b);
@@ -497,8 +510,9 @@ static int obj_equal(mpv a, mpv b) {
     }
     return 1;
   }
-  if ((is_dict(a) && is_dict(b)) || (is_set(a) && is_set(b)) || (is_range(a) && is_range(b))) {
-    fail("TypeError: equality of dicts, sets and ranges that are different objects is not lowered yet");
+  if (is_set(a) && is_set(b)) return set_equal_contents(a, b);
+  if ((is_dict(a) && is_dict(b)) || (is_range(a) && is_range(b))) {
+    fail("TypeError: equality of dicts and ranges that are different objects is not lowered yet");
   }
   return 0;
 }
@@ -560,8 +574,9 @@ static size_t hash_alloc_greater_or_equal_to(size_t x) {
   return (x + x / 2) | 1;
 }
 
-/* A map lookup kind (map.c's mp_map_lookup_kind_t). */
-enum { MAP_LOOKUP, MAP_ADD, MAP_REMOVE };
+/* A map lookup kind (map.c's mp_map_lookup_kind_t). MAP_TOGGLE is a set's ADD_IF_NOT_FOUND_OR_REMOVE_IF_FOUND: it adds the key
+ * when it is not there and removes it when it is (symmetric difference). */
+enum { MAP_LOOKUP, MAP_ADD, MAP_REMOVE, MAP_TOGGLE };
 
 static void map_rehash_table(MpyDict *d);
 
@@ -572,6 +587,8 @@ static void map_rehash_table(MpyDict *d);
 static long map_lookup(MpyDict *d, mpv key, int kind) {
   /* A set has no such shortcut (mp_set_lookup compares with mp_obj_equal), so only a dict uses it. */
   int compare_only_ptrs = d->all_keys_are_qstrs && d->type == &mpy_type_dict;
+  int adds = kind == MAP_ADD || kind == MAP_TOGGLE;
+  int removes = kind == MAP_REMOVE || kind == MAP_TOGGLE;
   size_t hash, pos, start;
   long avail = -1;
   if (compare_only_ptrs) {
@@ -579,12 +596,12 @@ static long map_lookup(MpyDict *d, mpv key, int kind) {
       /* a pointer compare is enough */
     } else if (is_str(key)) {
       compare_only_ptrs = 0;
-    } else if (kind != MAP_ADD) {
+    } else if (!adds) {
       return -1;
     }
   }
   if (d->alloc == 0) {
-    if (kind != MAP_ADD) return -1;
+    if (!adds) return -1;
     map_rehash_table(d);
   }
   hash = key_hash(key);
@@ -594,7 +611,7 @@ static long map_lookup(MpyDict *d, mpv key, int kind) {
     MpyEntry *slot = &d->table[pos];
     if (slot->key == 0) {
       long at = avail >= 0 ? avail : (long)pos;
-      if (kind != MAP_ADD) return -1;
+      if (!adds) return -1;
       d->used += 1;
       d->table[at].key = key;
       d->table[at].value = 0;
@@ -603,7 +620,7 @@ static long map_lookup(MpyDict *d, mpv key, int kind) {
     } else if (slot->key == MPY_SENTINEL) {
       if (avail < 0) avail = (long)pos;
     } else if (slot->key == key || (!compare_only_ptrs && obj_equal(slot->key, key))) {
-      if (kind == MAP_REMOVE) {
+      if (removes) {
         d->used--;
         if (d->table[(pos + 1) % d->alloc].key == 0) slot->key = 0;
         else slot->key = MPY_SENTINEL;
@@ -612,7 +629,7 @@ static long map_lookup(MpyDict *d, mpv key, int kind) {
     }
     pos = (pos + 1) % d->alloc;
     if (pos == start) {
-      if (kind != MAP_ADD) return -1;
+      if (!adds) return -1;
       if (avail >= 0) {
         d->used += 1;
         d->table[avail].key = key;
@@ -906,17 +923,110 @@ static void set_intersect_inplace(mpv sv, mpv other) {
   s->used = o->used;
 }
 
-/* The set operators (set_binary_op): | & - and their in-place forms, with both operands sets. Other operands are a TypeError
- * that names the operator without the in-place prefix, as the reference reports it. */
+/* objset.c's set_issubset_internal for two sets: every item of a is in b. With proper, a must also be smaller than b (the used
+ * counts differ). The items are visited in a's table order, and only an item of a is hashed (none when a is empty). */
+static int set_is_subset(mpv a, mpv b, int proper) {
+  const MpyDict *s = dict_of(a);
+  size_t i;
+  if (proper && s->used == dict_of(b)->used) return 0;
+  for (i = 0; i < s->alloc; ++i) {
+    mpv k = s->table[i].key;
+    if (k == 0 || k == MPY_SENTINEL) continue;
+    if (map_lookup((MpyDict *)(uintptr_t)b, k, MAP_LOOKUP) < 0) return 0;
+  }
+  return 1;
+}
+
+/* set_equal: the same number of items, and a's items all in b. */
+static int set_equal_contents(mpv a, mpv b) {
+  if (dict_of(a)->used != dict_of(b)->used) return 0;
+  return set_is_subset(a, b, 0);
+}
+
+/* The argument of issubset and issuperset as a set: a set as it is, any other iterable as a new set of its items (set_make_new). */
+static mpv as_set(mpv v) {
+  mpv r;
+  if (is_set(v)) return v;
+  r = set_new(0);
+  set_add_items(r, v);
+  return r;
+}
+
+/* mp_set_remove_first: the first item in table order is removed and returned (0 when the set is empty). The slot is left empty
+ * when the next slot is empty, and as the sentinel otherwise. */
+static mpv set_pop_first(mpv sv) {
+  MpyDict *s = (MpyDict *)(uintptr_t)sv;
+  size_t pos;
+  for (pos = 0; pos < s->alloc; ++pos) {
+    mpv k = s->table[pos].key;
+    if (k == 0 || k == MPY_SENTINEL) continue;
+    s->used--;
+    s->table[pos].key = s->table[(pos + 1) % s->alloc].key == 0 ? 0 : MPY_SENTINEL;
+    return k;
+  }
+  return 0;
+}
+
+/* set_symmetric_difference_update: each item of other is added to sv when it is not there, and removed when it is. */
+static void set_symdiff_update_items(mpv sv, mpv other) {
+  mpv it = mpy_get_iter(other), item;
+  while ((item = mpy_iter_next(it)) != 0) map_lookup((MpyDict *)(uintptr_t)sv, item, MAP_TOGGLE);
+}
+
+/* set_symmetric_difference: a copy of sv (slot for slot), then the symmetric difference update with other. */
+static mpv set_symdiff_of(mpv sv, mpv other) {
+  mpv r = set_copy_of(sv);
+  set_symdiff_update_items(r, other);
+  return r;
+}
+
+/* The method a binary operator on a set falls back to, which the reference names in its TypeError for an operand that is not a
+ * set (mp_binary_op_method_name). NULL for an operator that is not named here. */
+static const char *set_op_name(int op) {
+  switch (op) {
+    case MPY_OP_LESS: return "__lt__";
+    case MPY_OP_MORE: return "__gt__";
+    case MPY_OP_LESS_EQUAL: return "__le__";
+    case MPY_OP_MORE_EQUAL: return "__ge__";
+    case MPY_OP_OR: return "__or__";
+    case MPY_OP_XOR: return "__xor__";
+    case MPY_OP_AND: return "__and__";
+    case MPY_OP_LSHIFT: return "__lshift__";
+    case MPY_OP_RSHIFT: return "__rshift__";
+    case MPY_OP_ADD: return "__add__";
+    case MPY_OP_SUBTRACT: return "__sub__";
+    case MPY_OP_MULTIPLY: return "__mul__";
+    case MPY_OP_FLOOR_DIVIDE: return "__floordiv__";
+    case MPY_OP_MODULO: return "__mod__";
+    default: return NULL;
+  }
+}
+
+/* The set operators (set_binary_op): | ^ & - and the comparisons, with their in-place forms, on two sets. An operator on a set that
+ * a set does not have, or an operand that is not a set, is a TypeError that names the operator without the in-place prefix. A
+ * == or != of a set and another value is identity, as the reference falls back to it (mp_obj_equal). */
 static mpv set_binop(int op, int inplace, mpv a, mpv b) {
-  const char *name = op == MPY_OP_OR ? "__or__" : (op == MPY_OP_AND ? "__and__" : "__sub__");
+  const char *name = set_op_name(op);
+  int both = is_set(a) && is_set(b);
   char msg[200];
-  if ((op != MPY_OP_OR && op != MPY_OP_AND && op != MPY_OP_SUBTRACT) || !is_set(a) || !is_set(b)) {
-    if (op == MPY_OP_OR || op == MPY_OP_AND || op == MPY_OP_SUBTRACT) {
-      snprintf(msg, sizeof msg, "TypeError: unsupported types for %s: '%s', '%s'", name, type_name(a), type_name(b));
-      fail(msg);
-    }
-    fail("an operator on a set (other than |, &, - and their in-place forms) is not lowered yet");
+  if (op == MPY_OP_EQUAL || op == MPY_OP_NOT_EQUAL) {
+    int eq = a == b || (both && set_equal_contents(a, b));
+    return (op == MPY_OP_EQUAL ? eq : !eq) ? MPY_TRUE : MPY_FALSE;
+  }
+  if (name == NULL) fail("an operator on a set is not lowered yet");
+  if (!both || (op != MPY_OP_OR && op != MPY_OP_XOR && op != MPY_OP_AND && op != MPY_OP_SUBTRACT && op != MPY_OP_LESS &&
+                op != MPY_OP_MORE && op != MPY_OP_LESS_EQUAL && op != MPY_OP_MORE_EQUAL)) {
+    snprintf(msg, sizeof msg, "TypeError: unsupported types for %s: '%s', '%s'", name, real_type_name(a), real_type_name(b));
+    fail(msg);
+  }
+  if (op == MPY_OP_LESS) return set_is_subset(a, b, 1) ? MPY_TRUE : MPY_FALSE;
+  if (op == MPY_OP_MORE) return set_is_subset(b, a, 1) ? MPY_TRUE : MPY_FALSE;
+  if (op == MPY_OP_LESS_EQUAL) return set_is_subset(a, b, 0) ? MPY_TRUE : MPY_FALSE;
+  if (op == MPY_OP_MORE_EQUAL) return set_is_subset(b, a, 0) ? MPY_TRUE : MPY_FALSE;
+  if (op == MPY_OP_XOR) {
+    if (!inplace) return set_symdiff_of(a, b);
+    set_symdiff_update_items(a, b);
+    return a;
   }
   if (op == MPY_OP_OR) {
     if (!inplace) {
@@ -1349,12 +1459,21 @@ void mpy_block_pop(void) {
   free(b);
 }
 
-/* END_FINALLY: the block ends; then None goes on, and an exception is raised again. */
+/* END_FINALLY: the block ends; then None goes on, and an exception is raised again. A small int is the pending code of an unwind
+ * (a break, a continue or a return) that entered this finally: the lowering dispatches on it after this call. */
 void mpy_end_finally(mpv v) {
   mpy_block_pop();
-  if (v == MPY_NONE) return;
+  if (v == MPY_NONE || is_small(v)) return;
   if (is_exc(v)) raise_value(v);
-  fail("internal: END_FINALLY with a return or an unwind is not lowered yet");
+  fail("internal: END_FINALLY with a value that is not lowered yet");
+}
+
+/* A finally block that an unwind enters (the lowering's unwind): the block is the innermost one, and it is marked as running its
+ * handler, so a raise in the body goes past it, as the handler of an exception would. It has no exception to re-raise. */
+void mpy_block_land(void) {
+  if (blocks == NULL) fail("internal: no try block to land");
+  blocks->landed = 1;
+  blocks->exc = 0;
 }
 
 /* RAISE_OBJ: raises a class (instantiated with no argument) or an exception instance. */
@@ -1377,7 +1496,7 @@ void mpy_raise_from(mpv v, mpv cause) {
 void mpy_reraise(void) {
   MpyBlock *b;
   for (b = blocks; b != NULL; b = b->prev) {
-    if (b->landed) raise_value(b->exc);
+    if (b->landed && b->exc != 0) raise_value(b->exc);   /* a finally run by an unwind has no exception */
   }
   fail("RuntimeError: no active exception to reraise");
 }
@@ -1970,6 +2089,58 @@ mpv mpy_unpack_get(mpv seq, uint64_t n, uint64_t i) {
   return items[n - 1 - i];
 }
 
+/* UNPACK_EX (mp_unpack_ex): seq is unpacked for left values before a star target and right values after it. The result is a list of
+ * the left + right + 1 values in stack order: value j goes to the stack slot j from the bottom, so the first value is the top one,
+ * and the star target is the list of the values in between. A list or a tuple is read in place; any other iterable is read once. */
+mpv mpy_unpack_ex(mpv seq, uint64_t left, uint64_t right) {
+  MpyList *out = list_new(left + right + 1), *star, *rest;
+  size_t len, k;
+  uint64_t i, n;
+  const mpv *items;
+  mpv it, item, *lefts;
+  char msg[120];
+  if (seq_items(seq, &len, &items)) {
+    if (len < left + right) {
+      snprintf(msg, sizeof msg, "ValueError: need more than %d values to unpack", (int)len);
+      fail(msg);
+    }
+    for (i = 0; i < right; ++i) list_append(out, items[len - 1 - i]);
+    star = list_new(len - left - right);
+    for (k = left; k + right < len; ++k) list_append(star, items[k]);
+    list_append(out, (mpv)(uintptr_t)star);
+    for (i = 0; i < left; ++i) list_append(out, items[left - 1 - i]);
+    return (mpv)(uintptr_t)out;
+  }
+  /* A generic iterable: the left values, then the rest in a list, of which the last right values are taken out. */
+  it = mpy_get_iter(seq);
+  lefts = (mpv *)malloc((left ? left : 1) * sizeof(mpv));
+  if (lefts == NULL) fail("out of memory");
+  for (n = 0; n < left; ++n) {
+    item = mpy_iter_next(it);
+    if (item == 0) {
+      snprintf(msg, sizeof msg, "ValueError: need more than %d values to unpack", (int)n);
+      fail(msg);
+    }
+    lefts[n] = item;
+  }
+  rest = list_new(0);
+  while ((item = mpy_iter_next(it)) != 0) list_append(rest, item);
+  if (rest->len < right) {
+    snprintf(msg, sizeof msg, "ValueError: need more than %d values to unpack", (int)left);
+    fail(msg);
+  }
+  for (i = 0; i < right; ++i) list_append(out, rest->items[rest->len - 1 - i]);
+  star = list_new(rest->len - right);
+  for (k = 0; k + right < rest->len; ++k) list_append(star, rest->items[k]);
+  list_append(out, (mpv)(uintptr_t)star);
+  for (i = 0; i < left; ++i) list_append(out, lefts[left - 1 - i]);
+  free(lefts);
+  return (mpv)(uintptr_t)out;
+}
+
+/* The value at stack slot j of an UNPACK_EX (see mpy_unpack_ex). */
+mpv mpy_unpack_ex_item(mpv r, uint64_t j) { return ((const MpyList *)(uintptr_t)r)->items[j]; }
+
 mpv mpy_get_iter(mpv obj) {
   MpyIter *it;
   size_t len;
@@ -2346,6 +2517,57 @@ static mpv builtin_call(int id, const mpv *args, uint64_t n) {
       r = set_copy_of(args[0]);
       for (k = 1; k < n; ++k) set_remove_items(r, args[k]);
       return r;
+    }
+    case BI_SET_POP: {
+      /* s.pop(): the first item in table order is removed and returned (objset.c's set_pop) */
+      mpv item;
+      if (n != 1) {
+        snprintf(msg, sizeof msg, "TypeError: function takes 1 positional arguments but %d were given", (int)n);
+        fail(msg);
+      }
+      item = set_pop_first(args[0]);
+      if (item == 0) fail("KeyError: pop from an empty set");
+      return item;
+    }
+    case BI_SET_UPDATE:
+    case BI_SET_DIFFERENCE_UPDATE: {
+      /* s.update(*others) adds the items of each other, and s.difference_update(*others) removes them: None either way */
+      uint64_t k;
+      for (k = 1; k < n; ++k) {
+        if (id == BI_SET_UPDATE) set_add_items(args[0], args[k]);
+        else set_remove_items(args[0], args[k]);
+      }
+      return MPY_NONE;
+    }
+    case BI_SET_INTERSECTION_UPDATE:
+    case BI_SET_SYMDIFF:
+    case BI_SET_SYMDIFF_UPDATE:
+    case BI_SET_ISSUBSET:
+    case BI_SET_ISSUPERSET:
+    case BI_SET_ISDISJOINT: {
+      /* two arguments: the set and the other one (an iterable, or a set for the subset tests, where any other iterable is made
+       * into a set first) */
+      mpv it, item;
+      if (n != 2) {
+        snprintf(msg, sizeof msg, "TypeError: function takes 2 positional arguments but %d were given", (int)n);
+        fail(msg);
+      }
+      if (id == BI_SET_INTERSECTION_UPDATE) {
+        set_intersect_inplace(args[0], args[1]);
+        return MPY_NONE;
+      }
+      if (id == BI_SET_SYMDIFF) return set_symdiff_of(args[0], args[1]);
+      if (id == BI_SET_SYMDIFF_UPDATE) {
+        set_symdiff_update_items(args[0], args[1]);
+        return MPY_NONE;
+      }
+      if (id == BI_SET_ISSUBSET) return set_is_subset(args[0], as_set(args[1]), 0) ? MPY_TRUE : MPY_FALSE;
+      if (id == BI_SET_ISSUPERSET) return set_is_subset(as_set(args[1]), args[0], 0) ? MPY_TRUE : MPY_FALSE;
+      it = mpy_get_iter(args[1]);   /* isdisjoint: false at the first item that is in s */
+      while ((item = mpy_iter_next(it)) != 0) {
+        if (map_lookup((MpyDict *)(uintptr_t)args[0], item, MAP_LOOKUP) >= 0) return MPY_FALSE;
+      }
+      return MPY_TRUE;
     }
     case BI_SUPER: {
       /* super(cls, self), as the lowering calls it for a super() whose class and self it has loaded */
