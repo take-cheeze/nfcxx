@@ -40,6 +40,20 @@
 #include "bc2cpp_entry.hxx"
 #include "class_mutations.hxx"
 
+// ROM_GRAPH: BC2CPP_HOST_ROM_GRAPH_DUMP=FILE writes the class graph the boot
+// leaves as C (mruby's mrb_rom_graph_dump); trace_host.bash links it back in
+// for BC2CPP_HOST_ROM_GRAPH=1. The classes whose tables change after the boot
+// (rom_graph_ram_classes.h, beside the game's other headers) keep them in RAM.
+#if __has_include(<mruby/rom_graph.h>)
+#include <mruby/rom_graph.h>
+#include "rom_graph_ram_classes.h"
+#define TRACE_HOST_ROM_GRAPH 1
+static void rom_graph_line(void* ud, const char* line) {
+  fputs(line, static_cast<FILE*>(ud));
+  fputc('\n', static_cast<FILE*>(ud));
+}
+#endif
+
 // mruby-rgss/src/lib.cxx: hands the display to the RGSS natives (Graphics.width
 // etc.).
 extern "C" void rgss_set_display(mrb_state* M, lv_display_t* display);
@@ -395,6 +409,25 @@ int main(int argc, char** argv) {
   if (M->exc) {
     report_exception(M, "mrb_open (gem init)");
     return 2;
+  }
+  if (const char* const graph = getenv("BC2CPP_HOST_ROM_GRAPH_DUMP")) {
+#ifdef TRACE_HOST_ROM_GRAPH
+    static const char* const ram_classes[] = {ROM_GRAPH_RAM_CLASSES, nullptr};
+    FILE* const f = fopen(graph, "w");
+    if (!f) {
+      perror("TRACE_HOST rom graph dump");
+      return 2;
+    }
+    mrb_rom_graph_dump(M, rom_graph_line, f, ram_classes);
+    fclose(f);
+    fprintf(stdout, "TRACE_HOST rom graph %s (%s)\n", graph,
+            mrb_rom_graph_active(M) ? "on the graph" : "heap classes");
+    if (getenv("BC2CPP_HOST_ROM_GRAPH_DUMP_ONLY"))
+      return 0;
+#else
+    fprintf(stderr, "TRACE_HOST this mruby has no mruby/rom_graph.h\n");
+    return 2;
+#endif
   }
   if (const char* const mut = getenv("BC2CPP_HOST_CLASS_MUTATIONS")) {
     class_mutations::boot(M, mut);
