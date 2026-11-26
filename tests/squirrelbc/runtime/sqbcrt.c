@@ -9,8 +9,9 @@
  * and `tointeger` of a string), `append`, `push`, `pop`, `reverse`, `slice`, `find`, `extend` and `insert` of an array,
  * `slice`, `find`, `tolower` and `toupper` of a string, `rawget`, `rawset`,
  * `rawin` of a class or an instance, `getbase` and `instance` of a class, `getclass` of an instance, and `print` in the root
- * table. Any other method of a string, an array, a class or an instance is `unsupported ... method`; a table's is "the index
- * does not exist". */
+ * table. `sort`, `map`, `apply`, `reduce` and `filter` of an array call a closure from inside the runtime (see
+ * call_from_native). Any other method of a string, an array, a class or an instance is `unsupported ... method`; a table's
+ * is "the index does not exist". */
 #include "sqbcrt.h"
 
 #include <ctype.h>
@@ -367,7 +368,12 @@ enum {
   NAT_CLS_INSTANCE,
   NAT_INST_GETCLASS,  /* instance delegate: getclass */
   NAT_CLS_GETATTRIBUTES,
-  NAT_CLS_SETATTRIBUTES
+  NAT_CLS_SETATTRIBUTES,
+  NAT_ARR_SORT,       /* array delegate: the callback methods (sqbaselib.cpp) */
+  NAT_ARR_MAP,
+  NAT_ARR_APPLY,
+  NAT_ARR_REDUCE,
+  NAT_ARR_FILTER
 };
 
 static SqNative g_nat_print = {NAT_PRINT, 2, NULL};          /* sqbaselib.cpp base_print: print(value) */
@@ -398,6 +404,11 @@ static SqNative g_nat_cls_instance = {NAT_CLS_INSTANCE, 1, NULL};
 static SqNative g_nat_inst_getclass = {NAT_INST_GETCLASS, 1, NULL};
 static SqNative g_nat_cls_getattributes = {NAT_CLS_GETATTRIBUTES, 2, "y."};
 static SqNative g_nat_cls_setattributes = {NAT_CLS_SETATTRIBUTES, 3, "y.."};
+static SqNative g_nat_arr_sort = {NAT_ARR_SORT, -1, "ac"};      /* sqbaselib.cpp array_sort */
+static SqNative g_nat_arr_map = {NAT_ARR_MAP, 2, "ac"};         /* array_map */
+static SqNative g_nat_arr_apply = {NAT_ARR_APPLY, 2, "ac"};     /* array_apply */
+static SqNative g_nat_arr_reduce = {NAT_ARR_REDUCE, -2, "ac."}; /* array_reduce */
+static SqNative g_nat_arr_filter = {NAT_ARR_FILTER, 2, "ac"};   /* array_filter */
 
 static SQV make_native(const SqNative *n) {
   SQV v;
@@ -415,11 +426,13 @@ static int tag_has_type(uint32_t tag, char l) {
     case 's': return tag == SQBC_TAG_STRING;
     case 'x': return tag == SQBC_TAG_INSTANCE;
     case 'y': return tag == SQBC_TAG_CLASS;
+    case 'c': return tag == SQBC_TAG_CLOSURE || tag == SQBC_TAG_NATIVE;
     default: return 1;
   }
 }
 
-/* The type text of the letter L in the parameter type error (sqdebug.cpp Raise_ParamTypeError, IdType2Name). */
+/* The type text of the letter L in the parameter type error (sqdebug.cpp Raise_ParamTypeError, IdType2Name). A closure and
+ * a native closure are both "function", so the reference's text for 'c' repeats it. */
 static const char *expected_type(char l) {
   switch (l) {
     case 'n': return "integer|float";
@@ -427,6 +440,7 @@ static const char *expected_type(char l) {
     case 's': return "string";
     case 'x': return "instance";
     case 'y': return "class";
+    case 'c': return "function|function";
     default: return "any";
   }
 }
@@ -456,6 +470,11 @@ static int delegate_native(const SQV *self, const SQV *key, SQV *out) {
       else if (strcmp(name, "find") == 0) n = &g_nat_arr_find;
       else if (strcmp(name, "extend") == 0) n = &g_nat_arr_extend;
       else if (strcmp(name, "insert") == 0) n = &g_nat_arr_insert;
+      else if (strcmp(name, "sort") == 0) n = &g_nat_arr_sort;
+      else if (strcmp(name, "map") == 0) n = &g_nat_arr_map;
+      else if (strcmp(name, "apply") == 0) n = &g_nat_arr_apply;
+      else if (strcmp(name, "reduce") == 0) n = &g_nat_arr_reduce;
+      else if (strcmp(name, "filter") == 0) n = &g_nat_arr_filter;
       else if (strcmp(name, "tostring") == 0) n = &g_nat_tostring;
       break;
     case SQBC_TAG_INTEGER:
@@ -508,8 +527,7 @@ static int is_instance_method(const char *name) {
 }
 
 static int is_array_method(const char *name) {
-  static const char *const names[] = {"top",   "remove", "resize", "sort",  "weakref", "clear",
-                                      "map",   "apply",  "reduce", "filter"};
+  static const char *const names[] = {"top", "remove", "resize", "weakref", "clear"};
   for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
     if (strcmp(name, names[i]) == 0) return 1;
   return 0;
@@ -727,9 +745,13 @@ void sqbc_rt_newslota(const SQV *self, const SQV *key, const SQV *val, int bstat
 
 static SQV *g_stack_end;
 static SQV g_root;
+/* The first value above the running frame: the frame of a closure ends at its stacksize, and a native's frame ends after its
+ * arguments (sqbc_rt_call sets it and restores it). A native that calls a closure builds the callee's frame here. */
+static SQV *g_top;
 
 void sqbc_rt_init(SQV *base, size_t nslots) {
   g_stack_end = base + nslots;
+  g_top = base;
   g_root = make_table_val();
   /* The base library in the root table: print only (sqbaselib.cpp). */
   SQV key = make_string("print", 5);
@@ -1125,6 +1147,209 @@ static void raw_set_member(const SQV *self, const SQV *key, const SQV *val) {
   inst_of(self)->values[m->idx] = *val;
 }
 
+/* ---- ObjCmp, and the array methods that call a closure -------------------------------------------------------------- */
+
+/* ObjCmp (sqvm.cpp): -1 when X orders before Y, 0 when they are the same value and 1 otherwise. Two values of one type
+ * compare by their raw value first (so equal bits are 0, and -0.0 is not equal to 0.0), then by value; an integer and a
+ * float compare as floats; null is before anything else. Any other pair raises the comparison error. */
+static int obj_cmp(const SQV *x, const SQV *y) {
+  if (x->tag == y->tag) {
+    if (x->i == y->i) return 0;
+    switch (x->tag) {
+      case SQBC_TAG_STRING: {
+        /* scstrcmp: the bytes in order, a proper prefix first. */
+        SqStr *s1 = str_of(x), *s2 = str_of(y);
+        size_t m = s1->len < s2->len ? s1->len : s2->len;
+        int c = memcmp(s1->chars, s2->chars, m);
+        if (c != 0) return c < 0 ? -1 : 1;
+        return s1->len < s2->len ? -1 : (s1->len > s2->len ? 1 : 0);
+      }
+      case SQBC_TAG_INTEGER: return x->i < y->i ? -1 : 1;
+      case SQBC_TAG_FLOAT: return float_of(x) < float_of(y) ? -1 : 1;
+      default:
+        /* Booleans, and the reference's default branch: the raw values (a pointer or a boolean) compare. */
+        return (uint64_t)x->i < (uint64_t)y->i ? -1 : 1;
+    }
+  }
+  if (is_number(x) && is_number(y)) {
+    /* An integer and a float: both as floats. */
+    float f1 = number_as_float(x), f2 = number_as_float(y);
+    return f1 == f2 ? 0 : (f1 < f2 ? -1 : 1);
+  }
+  if (x->tag == SQBC_TAG_NULL) return -1;
+  if (y->tag == SQBC_TAG_NULL) return 1;
+  char s1[64], s2[64], msg[160];
+  const char *t1 = print_obj(x, s1, sizeof s1);
+  const char *t2 = print_obj(y, s2, sizeof s2);
+  snprintf(msg, sizeof msg, "comparison between '%.50s' and '%.50s'", t1, t2);
+  rt_error(msg);
+  return 0;
+}
+
+/* Calls CALLEE with the N values of ARGS (`this` first) in a frame built above the running one, at g_top: the callee's
+ * registers cannot overlap the registers of a frame that is still running (the caller's registers above its call are
+ * dead, as the reference's StartCall makes them). RET takes the result. The callee's frame and its closed outers are
+ * handled by sqbc_rt_call, as for a call from the lowered code, and g_top is the same again when this returns. */
+static void call_from_native(const SQV *callee, SQV *ret, const SQV *args, int n) {
+  SQV *frame = g_top;
+  if (frame + n > g_stack_end) rt_error("stack overflow");
+  for (int i = 0; i < n; i++) frame[i] = args[i];
+  sqbc_rt_call(callee, ret, frame, n);
+}
+
+/* The number of values __map_array (sqbaselib.cpp) pushes for FN: the parameter count of a closure, or of a native that
+ * checks one, else 4. */
+static int callback_nargs(const SQV *fn) {
+  if (fn->tag == SQBC_TAG_CLOSURE) return ((const SqClosure *)(intptr_t)fn->i)->nparams;
+  const SqNative *n = (const SqNative *)(intptr_t)fn->i;
+  return n->nparams > 0 ? n->nparams : 4;
+}
+
+/* IsFalse (sqvm.cpp): a float is false when it is zero, anything else when its payload is 0. */
+static int is_false(const SQV *v) { return v->tag == SQBC_TAG_FLOAT ? sqbc_rt_float_zero(v) : v->i == 0; }
+
+/* __map_array: FN is called on each item of SRC with the values the reference pushes: `this` (the array), the item, the
+ * index when FN takes three, and the array when it takes four. The result is stored at DST[n] (a store past the end of DST
+ * is dropped, as SQArray::Set does). Past the end of SRC the item is the last one read: the reference keeps its
+ * temporary. A callee that takes one parameter is called with the array below the item (the reference reads the callee
+ * from there, and raises "attempt to call 'array'"). */
+static void map_items(const SQV *src, const SQV *fn, SqArray *dst) {
+  size_t size = array_of(src)->count;
+  int nargs = callback_nargs(fn);
+  if (nargs > 4) rt_error("callback with more than 4 parameters is not lowered");
+  SQV temp = make_null();
+  for (size_t n = 0; n < size; n++) {
+    SqArray *a = array_of(src);
+    if (n < a->count) temp = a->items[n];
+    SQV pushed[5];
+    int np = 0;
+    pushed[np++] = *fn;
+    pushed[np++] = *src;
+    pushed[np++] = temp;
+    if (nargs >= 3) pushed[np++] = make_int((int64_t)n);
+    if (nargs >= 4) pushed[np++] = *src;
+    /* sq_call(nargs): the callee is the value below the nargs values pushed last. */
+    int at = np - nargs - 1;
+    SQV res;
+    call_from_native(&pushed[at], &res, pushed + at + 1, nargs);
+    if (n < dst->count) dst->items[n] = res;
+  }
+}
+
+/* array.map (array_map): a new array of the results. */
+static SQV array_map_of(const SQV *self, const SQV *fn) {
+  size_t size = array_of(self)->count;
+  SQV dst = make_array_val(size);
+  for (size_t i = 0; i < size; i++) {
+    SQV nul = make_null();
+    sqbc_rt_append(&dst, &nul);
+  }
+  map_items(self, fn, array_of(&dst));
+  return dst;
+}
+
+/* array.reduce (array_reduce): the initial value (or the first item) folded with the callback, which takes three values:
+ * `this`, the accumulated value, the item. An empty array without an initial value is null. */
+static SQV array_reduce_of(const SQV *self, const SQV *fn, int nargs, const SQV *init) {
+  SqArray *a = array_of(self);
+  size_t size = a->count;
+  SQV res = make_null();
+  size_t start;
+  if (nargs > 2) {
+    res = *init;
+    start = 0;
+  } else if (size == 0) {
+    return make_null();
+  } else {
+    res = a->items[0];
+    start = 1;
+  }
+  SQV other = make_null();
+  for (size_t n = start; n < size; n++) {
+    if (n < a->count) other = a->items[n];
+    SQV args[3] = {*self, res, other};
+    SQV next;
+    call_from_native(fn, &next, args, 3);
+    res = next;
+  }
+  return res;
+}
+
+/* array.filter (array_filter): a new array of the items for which the callback, given `this`, the index and the item,
+ * is not false. */
+static SQV array_filter_of(const SQV *self, const SQV *fn) {
+  SqArray *a = array_of(self);
+  size_t size = a->count;
+  SQV ret = make_array_val(0);
+  SQV val = make_null();
+  for (size_t n = 0; n < size; n++) {
+    if (n < a->count) val = a->items[n];
+    SQV args[3] = {*self, make_int((int64_t)n), val};
+    SQV keep;
+    call_from_native(fn, &keep, args, 3);
+    if (!is_false(&keep)) sqbc_rt_append(&ret, &val);
+  }
+  return ret;
+}
+
+/* One comparison of the sort: ObjCmp of items I and J (FN NULL), or the callback's result, which is an integer, a float
+ * (truncated, as sq_getinteger does) or a boolean. The array must keep its size and its buffer while the callback runs. */
+static int64_t sort_compare(SqArray *a, int64_t i, int64_t j, const SQV *fn) {
+  if (!fn) return obj_cmp(&a->items[i], &a->items[j]);
+  SQV args[3] = {g_root, a->items[i], a->items[j]};
+  SQV res;
+  size_t count = a->count;
+  SQV *items = a->items;
+  call_from_native(fn, &res, args, 3);
+  int64_t r;
+  if (res.tag == SQBC_TAG_INTEGER || res.tag == SQBC_TAG_BOOL) {
+    r = res.i;
+  } else if (res.tag == SQBC_TAG_FLOAT) {
+    r = (int64_t)float_of(&res);
+  } else {
+    rt_error("numeric value expected as return value of the compare function");
+    r = 0;
+  }
+  if (a->count != count || a->items != items) rt_error("array resized during sort operation");
+  return r;
+}
+
+/* _hsort_sift_down (sqbaselib.cpp): a heap of items ROOT..BOTTOM, sifted down from ROOT. */
+static void sort_sift_down(SqArray *a, int64_t root, int64_t bottom, const SQV *fn) {
+  while (root * 2 <= bottom) {
+    int64_t root2 = root * 2;
+    int64_t maxChild;
+    if (root2 == bottom) {
+      maxChild = root2;
+    } else {
+      maxChild = sort_compare(a, root2, root2 + 1, fn) > 0 ? root2 : root2 + 1;
+    }
+    if (sort_compare(a, root, maxChild, fn) < 0) {
+      if (root == maxChild) rt_error("inconsistent compare function");
+      SQV t = a->items[root];
+      a->items[root] = a->items[maxChild];
+      a->items[maxChild] = t;
+      root = maxChild;
+    } else {
+      break;
+    }
+  }
+}
+
+/* array.sort (array_sort, _hsort): a heapsort, in place, so equal items are not kept in order. FN is the comparison
+ * function, or NULL for ObjCmp. */
+static void array_sort_items(SqArray *a, const SQV *fn) {
+  int64_t size = (int64_t)a->count;
+  if (size <= 1) return;
+  for (int64_t i = size / 2; i >= 0; i--) sort_sift_down(a, i, size - 1, fn);
+  for (int64_t i = size - 1; i >= 1; i--) {
+    SQV t = a->items[0];
+    a->items[0] = a->items[i];
+    a->items[i] = t;
+    sort_sift_down(a, 0, i - 1, fn);
+  }
+}
+
 void sqbc_rt_call(const SQV *callee, SQV *ret, SQV *frame, int nargs) {
   SQV clo = *callee;
   SQV scratch;
@@ -1140,7 +1365,10 @@ void sqbc_rt_call(const SQV *callee, SQV *ret, SQV *frame, int nargs) {
     if (c->has_env) frame[0] = c->env;
     /* The callee's closure value is copied: the caller's register may not hold it for the whole call. */
     SQV running = clo;
+    SQV *outer_top = g_top;
+    g_top = frame + c->stacksize;
     sq_dispatch(c->fn, ret, frame, &running);
+    g_top = outer_top;
     /* LeaveFrame: the outer variables of the frame are closed (sqvm.cpp). */
     close_outers(frame);
     return;
@@ -1176,6 +1404,9 @@ void sqbc_rt_call(const SQV *callee, SQV *ret, SQV *frame, int nargs) {
     char buf[32];
     const char *text;
     SQV r = make_null();
+    /* A native that calls a closure builds its frame after the arguments (call_from_native). */
+    SQV *outer_top = g_top;
+    g_top = frame + nargs;
     switch (nat->id) {
       case NAT_PRINT:
         /* sqbaselib.cpp base_print: the text of the value, through the print function, with no newline of its own. */
@@ -1276,8 +1507,22 @@ void sqbc_rt_call(const SQV *callee, SQV *ret, SQV *frame, int nargs) {
         if (nat->id == NAT_CLS_SETATTRIBUTES) *slot = frame[2];
         break;
       }
+      case NAT_ARR_SORT:
+        /* sqbaselib.cpp array_sort: a comparison function only when there is one argument besides `this`. */
+        array_sort_items(array_of(frame), nargs == 2 ? frame + 1 : NULL);
+        r = frame[0];
+        break;
+      case NAT_ARR_MAP: r = array_map_of(frame, frame + 1); break;
+      case NAT_ARR_APPLY:
+        /* array_apply: the items are replaced by the results, in place; the result is the array. */
+        map_items(frame, frame + 1, array_of(frame));
+        r = frame[0];
+        break;
+      case NAT_ARR_REDUCE: r = array_reduce_of(frame, frame + 1, nargs, frame + 2); break;
+      case NAT_ARR_FILTER: r = array_filter_of(frame, frame + 1); break;
       default: rt_error("internal: bad native");
     }
+    g_top = outer_top;
     *ret = r;
     return;
   }
@@ -1394,43 +1639,7 @@ void sqbc_rt_neg(SQV *dst, SQV *a) {
 
 /* ObjCmp (sqvm.cpp), then CMP_OP's operator on its result. */
 int sqbc_rt_compare(int op, SQV *a, SQV *b) {
-  SQV x = *a, y = *b;
-  int64_t r;
-  if (x.tag == SQBC_TAG_FLOAT && y.tag == SQBC_TAG_FLOAT) {
-    /* ObjCmp: equal values are 0, else -1 when the first is less, and 1 otherwise. */
-    float f1 = float_of(&x), f2 = float_of(&y);
-    r = f1 == f2 ? 0 : (f1 < f2 ? -1 : 1);
-  } else if (is_number(&x) && is_number(&y) && x.tag != y.tag) {
-    /* An integer and a float: both as floats. */
-    float f1 = number_as_float(&x), f2 = number_as_float(&y);
-    r = f1 == f2 ? 0 : (f1 < f2 ? -1 : 1);
-  } else if (x.tag == y.tag) {
-    if (x.i == y.i) {
-      r = 0;
-    } else if (x.tag == SQBC_TAG_STRING) {
-      /* scstrcmp: the bytes in order, a proper prefix first. */
-      SqStr *s1 = str_of(&x), *s2 = str_of(&y);
-      size_t m = s1->len < s2->len ? s1->len : s2->len;
-      int c = memcmp(s1->chars, s2->chars, m);
-      r = c != 0 ? c : (s1->len < s2->len ? -1 : (s1->len > s2->len ? 1 : 0));
-    } else if (x.tag == SQBC_TAG_INTEGER) {
-      r = x.i < y.i ? -1 : 1;
-    } else {
-      /* Booleans: the default branch compares the raw values. */
-      r = (uint64_t)x.i < (uint64_t)y.i ? -1 : 1;
-    }
-  } else if (x.tag == SQBC_TAG_NULL) {
-    r = -1;
-  } else if (y.tag == SQBC_TAG_NULL) {
-    r = 1;
-  } else {
-    char s1[64], s2[64], msg[160];
-    const char *t1 = print_obj(&x, s1, sizeof s1);
-    const char *t2 = print_obj(&y, s2, sizeof s2);
-    snprintf(msg, sizeof msg, "comparison between '%.50s' and '%.50s'", t1, t2);
-    rt_error(msg);
-    r = 0;
-  }
+  int r = obj_cmp(a, b);
   switch (op) {
     case SQBC_CMP_G: return r > 0;
     case SQBC_CMP_GE: return r >= 0;
