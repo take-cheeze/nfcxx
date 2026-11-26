@@ -21,6 +21,7 @@ typedef struct SQV {
 #define SQBC_TAG_BOOL 0x01000008u
 #define SQBC_TAG_STRING 0x08000010u
 #define SQBC_TAG_TABLE 0x0A000020u
+#define SQBC_TAG_ARRAY 0x08000040u
 #define SQBC_TAG_CLOSURE 0x08000100u
 #define SQBC_TAG_NATIVE 0x08000200u
 
@@ -51,6 +52,9 @@ void sqbc_rt_neg(SQV *dst, SQV *a);
 int sqbc_rt_compare(int op, SQV *a, SQV *b);
 void sqbc_rt_loadstr(SQV *dst, const char *s, int64_t len);
 void sqbc_rt_newtable(SQV *dst);
+/* NEWOBJ of an array: an empty array with room for RESERVE values. APPENDARRAY: VAL is appended to ARR. */
+void sqbc_rt_newarray(SQV *dst, int reserve);
+void sqbc_rt_append(const SQV *arr, const SQV *val);
 void sqbc_rt_closure(SQV *dst, int fn, int nparams, int stacksize, const SQV *env, int nouters);
 /* Binds outer variable IDX of the closure at dst: a local (the stack value SLOT of the creating frame), or the outer
  * variable SRC of the running closure CUR (the closure that creates it). */
