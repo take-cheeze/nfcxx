@@ -13,7 +13,9 @@
 #   3. run on a full-core mruby against interpreted: the calls answer as interpreted, and a wrong given argument raises
 #      BC2cppDeclarationViolation;
 #   4. DECLARED_NUMERIC_ENTRY: a required Integer (Float) parameter is an Integer (numeric) operand past its guard, and
-#      BC2CPP_DECLARED_NUMERIC_ENTRY=0 takes that back.
+#      BC2CPP_DECLARED_NUMERIC_ENTRY=0 takes that back;
+#   5. a singleton method's declaration (`def self.x`, a `class << self` def, a module's `def self.x`) is guarded and
+#      seeds its body the same way, and a wrong argument raises the violation.
 #
 # Usage: MRBC=path/to/host/mrbc [BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/declared_optional_param_check.rb
 
@@ -111,6 +113,41 @@ SOURCE = <<~RUBY
     def wrong_add
       add(Foo.new, 'y')
     end
+
+    def self.cpick(a, b = nil)
+      return a.size2 if b.nil?
+
+      b.size2
+    end
+
+    class << self
+      def epick(a)
+        a.size2 + a.size2
+      end
+    end
+  end
+
+  module Tools
+    def self.mpick(a)
+      a.size2 + a.size2
+    end
+
+    def self.run
+      f = Foo.new
+      Menu.cpick(f) + Menu.cpick(f, f) + Menu.epick(f) + mpick(f)
+    end
+
+    def self.wrong
+      Menu.cpick(Foo.new, 'x')
+    end
+
+    def self.wrong_e
+      Menu.epick('x')
+    end
+
+    def self.wrong_m
+      mpick(1)
+    end
   end
 RUBY
 
@@ -129,9 +166,14 @@ SIGNATURES = <<~RBS
     def shout: (String s) -> String
     def scale: (Integer n) -> Integer
     def halve: (Float x) -> Float
+    def self.cpick: (Foo a, ?Foo? b) -> Integer
+    def self.epick: (Foo a) -> Integer
+  end
+  module Tools
+    def self.mpick: (Foo a) -> Integer
   end
 RBS
-OWNERS = %w[Foo Menu].freeze
+OWNERS = %w[Foo Menu Menu.singleton Tools Tools.singleton].freeze
 
 HARNESS = <<~'CPP'
   static int scenario(mrb_state* M) {
@@ -143,6 +185,11 @@ HARNESS = <<~'CPP'
     call(M, "wrong add", menu, "wrong_add");
     call(M, "wrong sorted", menu, "wrong_sorted");
     call(M, "wrong scale", menu, "wrong_scale");
+    mrb_value tools = mrb_obj_value(mrb_module_get(M, "Tools"));
+    call(M, "singleton run", tools, "run");
+    call(M, "wrong singleton", tools, "wrong");
+    call(M, "wrong eigenclass", tools, "wrong_e");
+    call(M, "wrong module", tools, "wrong_m");
     return 0;
   }
 CPP
@@ -155,12 +202,14 @@ generate = lambda do |dir, env = {}|
   File.write(File.join(sigs, 'menu.rbs'), SIGNATURES)
   ENV['BC2CPP_SIG_DIRS'] = sigs
   code, err = runtime.generate(SOURCE, dir, only_owners: OWNERS)
-  [code, err, code.split(%r{^(?=// \w+#)}).to_h { |part| [part[%r{\A// (\S+)}, 1], part] }]
+  [code, err, code.split(%r{^(?=// [\w.]+#)}).to_h { |part| [part[%r{\A// (\S+)}, 1], part] }]
 ensure
   ENV.delete('BC2CPP_SIG_DIRS')
   saved&.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
 end
-guard = ->(body, name, arg) { body.to_s.include?("/* DECLARED_PARAM_GUARD Menu##{name} arg #{arg} */") }
+guard = lambda do |body, name, arg, owner = 'Menu'|
+  body.to_s.include?("/* DECLARED_PARAM_GUARD #{owner}##{name} arg #{arg} */")
+end
 direct = ->(body) { body.to_s.include?('MONO_EXACT_FLOW :size2 -> Foo#size2') && !body.to_s.include?('CLOSED_WORLD nomethod: recv.size2') }
 
 Dir.mktmpdir('declared-optional-param') do |dir|
@@ -199,6 +248,14 @@ Dir.mktmpdir('declared-optional-param') do |dir|
                  !off['Menu#halve'].to_s.include?('NUMERIC_OPERAND_PROOF'))
   end
 
+  cpick = by['Menu.singleton#cpick'].to_s
+  check.call('a `def self.x` declaration is guarded and seeds the body like an instance one',
+             guard.call(cpick, 'cpick', 1, 'Menu.singleton') && direct.call(cpick) &&
+               cpick.include?('bc2cpp_given_opt <= 0 || (mrb_nil_p(b) || (bc2cpp_class_is(M, b,'))
+  singleton = ->(owner, name) { (b = by["#{owner}##{name}"]) && guard.call(b, name, 1, owner) && direct.call(b) }
+  check.call('a `class << self` def and a module `def self.x` are guarded and seeded too',
+             singleton.call('Menu.singleton', 'epick') && singleton.call('Tools.singleton', 'mpick'))
+
   params = { 'x' => [[1, 'Foo', 'Menu#pick', 'Foo?', :class, true, 0]] }
   check.call('the contract refuses a compiled body without its optional guard',
              DeclaredReturns.optional_param_guard_failures(params, [{ label: 'x', code: 'mrb_value f() {}' }]).size == 1 &&
@@ -222,7 +279,10 @@ Dir.mktmpdir('declared-optional-param') do |dir|
                wrong.call(compiled) == ['wrong pick => raised BC2cppDeclarationViolation',
                                         'wrong add => raised BC2cppDeclarationViolation',
                                         'wrong sorted => raised BC2cppDeclarationViolation',
-                                        'wrong scale => raised BC2cppDeclarationViolation'])
+                                        'wrong scale => raised BC2cppDeclarationViolation',
+                                        'wrong singleton => raised BC2cppDeclarationViolation',
+                                        'wrong eigenclass => raised BC2cppDeclarationViolation',
+                                        'wrong module => raised BC2cppDeclarationViolation'])
     warn output unless built && compiled.size == interpreted.size
   else
     puts '  SKIP run: no full-core mruby build'
