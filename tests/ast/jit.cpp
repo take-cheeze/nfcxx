@@ -28,6 +28,15 @@ static int failures = 0, checks = 0;
     }                                                                  \
   } while (0)
 
+// The printed results with the sign of a nan dropped. The sign of a nan made from two nan operands is not the language's: C and IEEE 754
+// leave the propagation of a nan's sign to the implementation, and the interpreter's own result depends on the operand order its C
+// compiler chooses, which differs between the back ends (the JIT takes the left operand's nan, as SSE does). The mixed batch compares
+// with it dropped; every other value, and every explicit case, is compared exactly.
+static std::string without_nan_sign(std::string s) {
+  for (std::size_t p = s.find("-nan"); p != std::string::npos; p = s.find("-nan", p)) s.erase(p, 1);
+  return s;
+}
+
 // Runs CODE as a chunk and returns its results as text ("1,2.5,true"), or "ERR:" and the message.
 static std::string eval(State& S, const std::string& code) {
   std::string err;
@@ -217,11 +226,11 @@ static const Case cases[] = {
      "for i = 1, 10 do t[i] = i end\n"
      "return #t",
      REFUSED},
-    {"a float for loop is refused",
+    {"a float for loop runs compiled",
      "local s = 0\n"
      "for x = 0.5, 3 do s = s + 1 end\n"
      "return s",
-     REFUSED},
+     COMPILED},
     {"a for loop with a float limit runs as an integer loop",
      "local s = 0\n"
      "for i = 1, 10.5 do s = s + i end\n"
@@ -458,19 +467,112 @@ static const Case cases[] = {
      "end\n"
      "return h, w",
      COMPILED},
-    {"a comparison of an integer with a float (the exact comparison is not encoded): refused",
+    {"a comparison of an integer with a float, exact as the interpreter's: compiled",
      "local c = 0\n"
      "for i = 1, 10 do if i < 2.5 then c = c + 1 end end\n"
      "return c",
-     REFUSED},
-    {"a float floor division (not encoded): refused",
+     COMPILED},
+    {"a float floor division: the floor of the quotient, as the interpreter's, compiled",
      "local c = 0.0\n"
      "for i = 1, 10 do c = c + (c + i) // 2.0 end\n"
      "return c",
-     REFUSED},
-    {"a while around an inner for whose limit is a float: the while is refused, the inner for is taken over on its own",
+     COMPILED},
+    {"a while around an inner for whose limit is a float: the inner for runs compiled too",
      "local s, n, i = 0, 7.5, 0\n"
      "while i < 3 do i = i + 1 for j = 1, n / 2 do s = s + j end end\n"
+     "return s",
+     COMPILED},
+    {"float for loops: a float start with the default step, a negative float step, an integer step with a float start, and a break",
+     "local s, t, u, n = 0.0, 0.0, 0.0, 0\n"
+     "for x = 0.5, 3 do s = s + x n = n + 1 end\n"
+     "for x = 3.0, -1.0, -0.5 do t = t + x end\n"
+     "for x = 0.25, 2.5, 1 do u = u + x * x if x > 1.9 then break end end\n"
+     "return s, t, u, n",
+     COMPILED},
+    {"a float loop inside an integer loop, with a float limit from a local and a step of 0.1 (inexact sums)",
+     "local lim, acc = 2.0, 0.0\n"
+     "for i = 1, 40 do\n"
+     "  for x = i * 0.25, lim + i / 8, 0.1 do acc = acc + x * i end\n"
+     "  lim = lim + 0.05\n"
+     "end\n"
+     "return acc, lim",
+     COMPILED},
+    {"float loops with a nan start or limit: the first test of the interpreter runs the body once, the next test ends the loop",
+     "local nan = 0.0 / 0.0\n"
+     "local s, t, u = 0, 0, 0\n"
+     "for i = 1, 30 do\n"
+     "  for x = nan, 2.0 do s = s + 1 end\n"
+     "  for x = 1.0, nan do t = t + 1 end\n"
+     "  for x = nan, 2.0, -0.5 do u = u + 1 end\n"
+     "end\n"
+     "return s, t, u",
+     COMPILED},
+    {"integer loops with float limits: clipped to the integers, a nan limit or one on the wrong side does not run, huge limits break out",
+     "local s, n = 0, 0\n"
+     "for k = 1, 4 do\n"
+     "  for j = 1, 2.5 do s = s + j end\n"
+     "  for j = 10, 1.5 do s = s + 100 end\n"
+     "  for j = 1, 1e300 do if j > 6 then break end s = s + j end\n"
+     "  for j = 5, -1e300, -1 do if j < 2 then break end s = s + 1000 end\n"
+     "  for j = 1, 0.0 / 0.0 do s = s + 10000 end\n"
+     "  for j = 1, 1e300 do n = n + 1 if j == k then break end end\n"
+     "end\n"
+     "return s, n",
+     COMPILED},
+    {"an integer and a float compared exactly beyond 2^53 and 2^63, with nan, inf and -0.0 on either side",
+     "local big, f53 = 9007199254740993, 9007199254740992.0\n"
+     "local mx, f63 = 9223372036854775807, 9223372036854775808.0\n"
+     "local mn = -9223372036854775807 - 1\n"
+     "local nan, inf, z, c = 0.0 / 0.0, 1.0 / 0.0, 0, 0\n"
+     "for i = 1, 20 do\n"
+     "  local k = big + i - 20\n"
+     "  if k < f53 then c = c + 1 end\n"
+     "  if k <= f53 then c = c + 2 end\n"
+     "  if k > f53 then c = c + 4 end\n"
+     "  if k >= f53 then c = c + 8 end\n"
+     "  if k == f53 then c = c + 16 end\n"
+     "  if k ~= f53 then c = c + 32 end\n"
+     "  if f53 < k then c = c + 64 end\n"
+     "  if nan < k or k < nan or nan == k or nan >= k or k <= nan then c = c + 128 end\n"
+     "  if inf > k and -inf < k and k ~= inf then c = c + 256 end\n"
+     "  if mx < f63 and mn == -f63 and mx ~= f63 then c = c + 512 end\n"
+     "  if mx >= f63 or mn > -f63 then c = c + 1024 end\n"
+     "  if z == -0.0 and -0.0 == z then c = c + 2048 end\n"
+     "  if (i - 10.5) < k then c = c + 4096 end\n"
+     "end\n"
+     "return c",
+     COMPILED},
+    {"mixed comparisons with the operators > >= ~= and the operands on both sides, in a while",
+     "local a, t, n = 3, 0.0, 0\n"
+     "while t < 5.5 do\n"
+     "  t = t + 0.75\n"
+     "  n = n + 1\n"
+     "  if a > t and a >= t and not (a == t) and a ~= t and 2.5 < a + 0.0 then a = a + 1 end\n"
+     "end\n"
+     "return a, t, n",
+     COMPILED},
+    {"floor division and modulo of floats and of mixed operands, with negative, zero, nan and inf divisors, as the interpreter's",
+     "local q, r, n1, n2 = 0.0, 0.0, 0.0, 0.0\n"
+     "for i = 1, 40 do\n"
+     "  local x = i * 0.7 - 9.0\n"
+     "  q = q + x // 2 + x // -0.5 + i // 0.0 + (-x) // 3\n"
+     "  r = r + x % 2 + x % -0.75 + (-x) % 3 + i % 0.0 + (3 - i) % 2.5\n"
+     "  n1 = (-0.0) // 1.0 + n1 * 0.0\n"
+     "  n2 = (-0.0) % 1.0 + n2 * 0.0\n"
+     "end\n"
+     "return q, r, n1, n2",
+     COMPILED},
+    {"a float loop that divides an integer by zero: the deopt of the statement, with the float accumulator written back",
+     "local d, s = 4, 0.0\n"
+     "for x = 1.0, 9.0 do d = d - 1 s = s + 100 // d end\n"
+     "return s",
+     DEOPT},
+    {"a numeric for whose start is an integer on some entries and a float on others: code of one kind is not entered with the other",
+     "local s = 0\n"
+     "for k = 1, 6 do\n"
+     "  local a = (k < 4) and 0.5 or 1\n"
+     "  for x = a, 3 do s = s + x end\n"
+     "end\n"
      "return s",
      ANY},
 };
@@ -650,6 +752,130 @@ static std::string gen_float_program(Rng& r) {
          loop + "return x, y, z, n";
 }
 
+// The batch of mixed programs (gen_mixed_program): integer and float locals in one loop, the comparisons and the arithmetic of an
+// integer with a float (also // and %), float loops with constant steps whose starts and limits are bounded or nan, and integer loops
+// with float limits. Every one is in the subset: no bitwise operator on a float, and no integer division by a constant that is zero.
+static bool gen_mixed = false;
+static bool mixed_in_float = false;  // generating the body of a float loop, whose variable t is in scope
+
+static std::string gen_mint(Rng& r, int depth) {
+  static const char* leaves[] = {"a", "b", "i"};
+  if (depth <= 0 || r.pick(3) == 0) {
+    switch (r.pick(3)) {
+      case 0: return leaves[r.pick(3)];
+      case 1: return std::to_string(r.pick(20) - 10);
+      default: return "9007199254740993";
+    }
+  }
+  static const char* ops[] = {" + ", " - ", " * "};
+  switch (r.pick(4)) {
+    case 0:
+    case 1: {
+      std::string l = gen_mint(r, depth - 1);
+      std::string op = ops[r.pick(3)];
+      return "(" + l + op + gen_mint(r, depth - 1) + ")";
+    }
+    case 2: {
+      std::string l = gen_mint(r, depth - 1);
+      std::string op = r.pick(2) ? " // " : " % ";
+      return "(" + l + op + (r.pick(2) ? "-3" : "7") + ")";
+    }
+    default: return "(-(" + gen_mint(r, depth - 1) + "))";
+  }
+}
+
+static std::string gen_mflt(Rng& r, int depth) {
+  static const char* leaves[] = {"x", "y", "0.5", "-2.25", "3.0", "-0.0", "1e300", "7.75", "nan", "inf"};
+  static const char* ops[] = {" + ", " - ", " * ", " / ", " // ", " % ", " ^ "};
+  if (depth <= 0 || r.pick(3) == 0) {
+    if (mixed_in_float && r.pick(4) == 0) return "t";
+    return leaves[r.pick(10)];
+  }
+  switch (r.pick(4)) {
+    case 0:
+    case 1: {
+      std::string l = gen_mflt(r, depth - 1);
+      std::string op = ops[r.pick(7)];
+      return "(" + l + op + gen_mflt(r, depth - 1) + ")";
+    }
+    case 2: {  // an integer and a float
+      std::string l = gen_mint(r, 2);
+      std::string op = ops[r.pick(7)];
+      return "(" + l + op + gen_mflt(r, depth - 1) + ")";
+    }
+    default: return "(-(" + gen_mflt(r, depth - 1) + "))";
+  }
+}
+
+static std::string gen_mcond(Rng& r) {
+  static const char* ops[] = {"<", "<=", ">", ">=", "==", "~="};
+  std::string l = r.pick(2) ? gen_mint(r, 2) : gen_mflt(r, 2);
+  std::string op = ops[r.pick(6)];
+  std::string rhs = r.pick(2) ? gen_mint(r, 2) : gen_mflt(r, 2);
+  return l + " " + op + " " + rhs;
+}
+
+static std::string gen_mstmt(Rng& r, int depth, int& wcount) {
+  switch (depth > 0 ? r.pick(8) : r.pick(3)) {
+    case 0: return "a = " + gen_mint(r, 3) + "\n";
+    case 1: return "x = " + gen_mflt(r, 3) + "\n";
+    case 2: {
+      std::string bi = gen_mint(r, 2);
+      std::string yf = gen_mflt(r, 2);
+      return "b = b + " + bi + " y = y + " + yf + "\n";
+    }
+    case 3: {
+      std::string c = gen_mcond(r);
+      std::string th = gen_mstmt(r, depth - 1, wcount);
+      std::string el = gen_mstmt(r, depth - 1, wcount);
+      return "if " + c + " then " + th + " else " + el + " end\n";
+    }
+    case 4: {  // a float local of a block, added to y
+      std::string w = "w" + std::to_string(wcount++);
+      return "do local " + w + " = " + gen_mflt(r, 2) + " y = y + " + w + " end\n";
+    }
+    case 5: {  // an integer loop with a float limit (nan, or a small number of iterations)
+      std::string j = "j" + std::to_string(wcount++);
+      std::string bound = gen_mflt(r, 2);
+      std::string body = gen_mstmt(r, depth - 1, wcount);
+      return "for " + j + " = 1, (" + bound + ") * 0.0 + " + std::to_string(1 + r.pick(3)) + ".0 do " + body + "end\n";
+    }
+    case 6: {  // a float loop with a constant step; its start and limit are bounded (or nan), its body is the same kind of statements
+      if (mixed_in_float) return "x = " + gen_mflt(r, 3) + "\n";
+      static const char* steps[] = {"0.5", "-0.25", "1", "-1", "2.0"};
+      static const char* starts[] = {"0.5", "-1.0", "2.0"};
+      static const char* limits[] = {"3.0", "-2.0", "0.5"};
+      mixed_in_float = false;
+      std::string lo = "(" + gen_mflt(r, 1) + ") * 0.0 + " + starts[r.pick(3)];
+      std::string hi = "(" + gen_mflt(r, 1) + ") * 0.0 + " + limits[r.pick(3)];
+      mixed_in_float = true;
+      std::string body = gen_mstmt(r, depth - 1, wcount);
+      mixed_in_float = false;
+      return "for t = " + lo + ", " + hi + ", " + steps[r.pick(5)] + " do\n" + body + "end\n";
+    }
+    default: {  // a while with an integer counter
+      std::string w = "w" + std::to_string(wcount++);
+      std::string bound = std::to_string(1 + r.pick(4));
+      return "do local " + w + " = 0 while " + w + " < " + bound + " do " + w + " = " + w + " + 1 " +
+             gen_mstmt(r, depth - 1, wcount) + " end end\n";
+    }
+  }
+}
+
+static std::string gen_mixed_program(Rng& r) {
+  static const char* ints[] = {"0", "7", "-3"};
+  static const char* flts[] = {"0.5", "-0.0", "2.25", "-3.0", "0.0", "1e300"};
+  int wcount = 0;
+  std::string body;
+  int n = 2 + r.pick(3);
+  for (int k = 0; k < n; ++k) body += gen_mstmt(r, 2, wcount);
+  std::string upper = std::to_string(3 + r.pick(20));
+  std::string loop = "for i = 1, " + upper + " do\n" + body + "end\n";
+  std::string a0 = ints[r.pick(3)], b0 = ints[r.pick(3)], x0 = flts[r.pick(6)], y0 = flts[r.pick(6)];
+  return "local a, b = " + a0 + ", " + b0 + "\n" + "local x, y = " + x0 + ", " + y0 + "\n" + "local nan, inf = 0.0 / 0.0, 1.0 / 0.0\n" +
+         loop + "return a, b, x, y";
+}
+
 int main() {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   // The default is off: no tier, no counters.
@@ -744,20 +970,25 @@ int main() {
   }
 
   // Generated loops: each must agree with the interpreter, and (on this host) compile without a refusal. The second batch has
-  // the bitwise operators and the shifts; the third has floats (gen_float_program); the first is the same as before them.
+  // the bitwise operators and the shifts; the third has floats (gen_float_program); the fourth has integers and floats mixed, float
+  // loops and integer loops with float limits (gen_mixed_program); the first is the same as before them.
   std::printf("-- generated loops\n");
   unsigned long long entries = 0, compiled = 0;
   int gen_fail = 0;
   const int kPrograms = 300;
-  static const char* batch_names[] = {"arithmetic", "bitwise", "float"};
-  for (int batch = 0; batch < 3; ++batch) {
+  static const char* batch_names[] = {"arithmetic", "bitwise", "float", "mixed"};
+  for (int batch = 0; batch < 4; ++batch) {
     gen_bits = batch == 1;
     gen_float = batch == 2;
-    Rng r = batch == 0 ? Rng{0x9E3779B97F4A7C15ULL} : batch == 1 ? Rng{0x2545F4914F6CDD1DULL} : Rng{0x51AF2C8E0B3D96A7ULL};
+    gen_mixed = batch == 3;
+    Rng r = batch == 0   ? Rng{0x9E3779B97F4A7C15ULL}
+            : batch == 1 ? Rng{0x2545F4914F6CDD1DULL}
+            : batch == 2 ? Rng{0x51AF2C8E0B3D96A7ULL}
+                         : Rng{0x7A3C5E91D2B4F687ULL};
     unsigned long long b_entries = 0, b_compiled = 0;
     int b_fail = 0;
     for (int k = 0; k < kPrograms; ++k) {
-      std::string code = gen_float ? gen_float_program(r) : gen_program(r);
+      std::string code = gen_mixed ? gen_mixed_program(r) : gen_float ? gen_float_program(r) : gen_program(r);
       State P;
       P.open_libs();
       TierOptions off;
@@ -770,7 +1001,8 @@ int main() {
       std::string got = eval(S, code);
       b_entries += S.stats.jit_entries;
       b_compiled += S.stats.jit_compiled;
-      bool ok = got == want && S.stats.jit_bailouts == S.stats.jit_guard_misses;
+      bool same = gen_mixed ? without_nan_sign(got) == without_nan_sign(want) : got == want;
+      bool ok = same && S.stats.jit_bailouts == S.stats.jit_guard_misses;
       if (avail) ok = ok && S.stats.jit_refused == 0;
       if (!ok) {
         ++b_fail;
@@ -787,6 +1019,7 @@ int main() {
   }
   gen_bits = false;
   gen_float = false;
+  gen_mixed = false;
   CHECK(gen_fail == 0);
 
   if (failures) std::printf("%d of %d check(s) failed\n", failures, checks);

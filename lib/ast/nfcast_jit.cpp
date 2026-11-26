@@ -1,10 +1,10 @@
 // nfcast JIT: x86-64 machine code for the loops of the AST interpreter (docs/notes/ast.md, "JIT"). The loop is read through the
 // tier's view of its nodes (tier_view), the same one the C tier lowers from, and only the subset listed in the notes is encoded:
-// integers and floats (the float operators + - * / ^ and unary minus, the comparisons of two floats, and the mixed arithmetic of an
-// integer and a float as the interpreter does it), integer `//` and `%` (floor division and modulo, as the interpreter's), the
-// bitwise operators & | ~ (binary xor), << and >> and unary ~ on integers, comparisons of two integers, and/or/not in conditions, if,
-// while, repeat, numeric for loops with an integer step that is a constant (except the one that takes over the loop, whose step is
-// run-time), break, and locals. Integer arithmetic wraps as the interpreter's does, and the bitwise operators never fail. The one
+// integers and floats (the float operators + - * / // % ^ and unary minus, the comparisons of two floats and of an integer with a float
+// as the interpreter does them, and the mixed arithmetic of an integer and a float), integer `//` and `%` (floor division and modulo,
+// as the interpreter's), the bitwise operators & | ~ (binary xor), << and >> and unary ~ on integers, comparisons of two integers,
+// and/or/not in conditions, if, while, repeat, numeric for loops with a constant step (integer or float, not zero; an integer loop
+// takes a float limit as the interpreter clips it, and a loop with a float start or step is a float loop), break, and locals. Integer arithmetic wraps as the interpreter's does, and the bitwise operators never fail. The one
 // operation that can fail is integer `//` or `%` by zero: the code then stops, writes its locals back, and the interpreter raises the
 // error (the deopt, see run() and resume()). Everything else outside the subset makes compile() refuse the loop.
 //
@@ -16,9 +16,10 @@
 // Registers. The machine code has one 64-bit word per local (and per hidden variable of a for loop) in an array REGS, whose address
 // is in RBX (callee-saved, pushed at the entry). RAX, RCX and RDX are scratch; a binary operation of two compound operands evaluates
 // its left operand, pushes it, evaluates the right one, and pops the left one into RAX (a constant or a local operand is read directly,
-// with no push). There is no memory but REGS, and no allocation. The one call is to pow (for `^`), through the address of jit_pow
-// below, which is the interpreter's own flt_pow: the code keeps no value in a caller-saved register across it, and the stack is
-// aligned for it. Otherwise the code has no side effects: whatever the entry guard does not cover cannot be observed before the loop ends.
+// with no push). There is no memory but REGS, and no allocation. The calls are to the interpreter's own functions, through the
+// addresses of the wrappers below (jit_pow, jit_fmod, jit_fidiv, the comparisons of an integer with a float, jit_eq, jit_forlimit):
+// the code keeps no value in a caller-saved register across them, and the stack is aligned for each. Otherwise the code has no side
+// effects: whatever the entry guard does not cover cannot be observed before the loop ends.
 //
 // Register allocation. The four most referenced words (weighted by loop depth) live in R12-R15 for the whole loop instead of in
 // REGS. They are loaded from REGS at the entry (after the guard, which reads only the frame) and every exit of the loop goes through
@@ -91,6 +92,10 @@ int run(Frame& f, const Code& c, const TierLoopState& st) {
     R[c.state_regs[0]] = st.i;
     R[c.state_regs[1]] = static_cast<std::int64_t>(st.count);
     R[c.state_regs[2]] = st.step;
+  } else if (c.kind == TierLoopState::FOR_FLT) {
+    R[c.state_regs[0]] = value_word(Value::number(st.d));
+    R[c.state_regs[1]] = value_word(Value::number(st.limit));
+    R[c.state_regs[2]] = value_word(Value::number(st.dstep));
   }
   int site = c.fn(R);
   if (site != 0) {  // a deopt: the locals of the site go back to the frame, as they are at the operation
@@ -122,16 +127,37 @@ void resume(Frame& f, const Code& c, int k) {
 namespace {
 
 // ---- the encoder --------------------------------------------------------------------------------------------------------------
-enum { RAX = 0, RCX = 1, RDX = 2 };
+enum { RAX = 0, RCX = 1, RDX = 2, RDI = 7 };
 // The condition codes of Jcc (0F 80+cc) and SETcc. Negating a condition flips the low bit: E/NE, L/GE, LE/G.
 enum Cc {
   CC_B = 0x2, CC_AE = 0x3, CC_E = 0x4, CC_NE = 0x5, CC_BE = 0x6, CC_A = 0x7, CC_S = 0x8, CC_NS = 0x9, CC_P = 0xA,
   CC_L = 0xC, CC_GE = 0xD, CC_LE = 0xE, CC_G = 0xF
 };
 
-// The one call the code makes: pow, as the interpreter computes `^` (flt_pow, the same function). The code calls it with the operands
-// in xmm0 and xmm1 and takes the result from xmm0.
+// The calls the code makes: each is a function of the interpreter, the one it computes the operation with, so the results are its
+// results bit for bit. The double functions take their operands in xmm0 and xmm1 and return in xmm0.
 double jit_pow(double x, double y) { return flt_pow(x, y); }
+// The float `%` and `//` (flt_mod, and the floor of the quotient as arith_numbers computes it).
+double jit_fmod(double x, double y) { return flt_mod(x, y); }
+double jit_fidiv(double x, double y) { return std::floor(x / y); }
+// The comparisons of an integer with a float, the interpreter's own (nfcast_tier_rt.h): the integer is the first argument (RDI), the
+// float the second (XMM0), whichever side of the operator each of them is on. Results are 0 or 1.
+std::int64_t jit_lt_if(std::int64_t i, double f) { return nfcr_lt_if(i, f); }  // i < f
+std::int64_t jit_lt_fi(std::int64_t i, double f) { return nfcr_lt_fi(f, i); }  // f < i
+std::int64_t jit_le_if(std::int64_t i, double f) { return nfcr_le_if(i, f); }  // i <= f
+std::int64_t jit_le_fi(std::int64_t i, double f) { return nfcr_le_fi(f, i); }  // f <= i
+std::int64_t jit_eq(std::int64_t i, double f) { return raw_equal(Value::integer(i), Value::number(f)) ? 1 : 0; }
+// The limit of an integer numeric for loop with a float limit (nfcr_forlimit, as the interpreter's loop clips it): the limit, and RUNS
+// = 0 when the loop does not run at all (the limit is beyond the range on the side the step moves away from).
+struct JitLimit {
+  std::int64_t limit;
+  std::int64_t runs;
+};
+JitLimit jit_forlimit(double fl, std::int64_t step) {
+  JitLimit r{0, 0};
+  r.runs = nfcr_forlimit(fl, step, &r.limit);
+  return r;
+}
 
 std::int64_t bits_of(double d) {
   std::int64_t w;
@@ -276,6 +302,8 @@ class Asm {
     mov_imm(RAX, static_cast<std::int64_t>(fn));
     bytes({0xFF, 0xD0});  // call rax
   }
+  void mov_rr_pub(int dst, int src) { mov_rr(dst, src); }  // mov DST, SRC (64-bit)
+  void zero_x(int x) { bytes({0x0F, 0x57, modrm(3, x, x)}); }  // xorps xmmX, xmmX: +0.0 in xmmX
   void sub_rsp_8() { bytes({0x48, 0x83, 0xEC, 0x08}); }
   void add_rsp_8() { bytes({0x48, 0x83, 0xC4, 0x08}); }
   void prologue() {  // push rbx; mov rbx, rdi; push the registers in use; load every allocated word into its register
@@ -538,7 +566,7 @@ struct Gen {
         return TY_FLT;
       case AR_POW:  // x ^ y: the call of pow (the interpreter's flt_pow)
         to_xmm(tl, tr);
-        call_pow();
+        call_dbl2(reinterpret_cast<std::uintptr_t>(&jit_pow));
         return TY_FLT;
       case AR_ADD: case AR_SUB: case AR_MUL:
         if (!ints) {
@@ -552,7 +580,11 @@ struct Gen {
         else a.imul_rax_rcx();
         return TY_INT;
       case AR_IDIV: case AR_MOD:
-        if (!ints) return failt("a floor division or a modulo of a float (not encoded)");
+        if (!ints) {  // a float floor division or modulo: the interpreter's functions (no error for a zero divisor)
+          to_xmm(tl, tr);
+          call_dbl2(reinterpret_cast<std::uintptr_t>(v.op == AR_MOD ? &jit_fmod : &jit_fidiv));
+          return TY_FLT;
+        }
         floordiv(v.op == AR_MOD);
         return TY_INT;
       default:  // the bitwise operators: integers only (a float with an integer value is refused as well)
@@ -573,13 +605,18 @@ struct Gen {
     else a.movq_x_r(1, RCX);
   }
 
-  // RAX = pow(xmm0, xmm1), with the stack aligned for the call. Nothing is kept in a caller-saved register across it: the operands
-  // are in xmm0 and xmm1, the pushed values are in memory, and RBX and R12-R15 are callee-saved.
-  void call_pow() {
+  // A call of the interpreter's function FN with the stack aligned for it. The arguments are in the registers the C ABI takes them
+  // from (RDI, XMM0, XMM1), and nothing is kept in a caller-saved register across it: the pushed values are in memory, and RBX and
+  // R12-R15 are callee-saved. The result is in RAX or XMM0, as the function returns it.
+  void call_c(std::uintptr_t fn) {
     bool odd = (a.saved_count() + a.pushes()) % 2 == 1;  // rsp is 16-aligned at the call when the pushes that are live sum to even
     if (odd) a.sub_rsp_8();
-    a.call_abs(reinterpret_cast<std::uintptr_t>(&jit_pow));
+    a.call_abs(fn);
     if (odd) a.add_rsp_8();
+  }
+  // A double function of two operands (xmm0, xmm1): RAX = its result, as bits.
+  void call_dbl2(std::uintptr_t fn) {
+    call_c(fn);
     a.movq_r_x(RAX, 0);
   }
 
@@ -701,14 +738,12 @@ struct Gen {
     return r;
   }
 
-  // A numeric expression that is a unit of its own (the start and the limit of a for loop): an integer, or the loop is refused.
-  bool int_unit(Node* n) {
+  // A numeric expression that is a unit of its own (the start and the limit of a for loop): its value is in RAX, its type is returned.
+  int num_unit(Node* n) {
     units.push_back(unit(n, false));
     int t = expr(n);
     units.pop_back();
-    if (t == TY_INT) return true;
-    if (t == TY_NONE) return false;
-    return fail("a for loop whose start or limit is a float (not encoded)");
+    return t;
   }
 
   bool branch_(Node* n, bool jump_if, int target) {
@@ -756,12 +791,42 @@ struct Gen {
 
   // A comparison of two operands, OP being the CMP_* index (CMP_EQ, CMP_NE, CMP_LT, CMP_LE, CMP_GT, CMP_GE). Two integers compare as
   // the integers do; two floats compare with ucomisd, where an unordered pair (a nan) makes every comparison false except ~=.
-  // An integer against a float is refused: the interpreter compares those exactly (nfcr_lt_if and its kin), which the code does not do.
+  // The comparison of an integer with a float (the operands in RAX and RCX, the left one of type TL). The interpreter compares those
+  // exactly, not by converting the integer (nfcr_lt_if and its kin, and raw_equal for ==), so the code calls those functions: the
+  // integer in RDI, the float in XMM0, and the result (0 or 1) in RAX. `>` and `>=` are the `<` and `<=` of the operands swapped, as
+  // the interpreter has them. A `~=` is the negated `==`.
+  bool mixed_compare(int tl, int op, bool jump_if, int target) {
+    bool lhs_int = tl == TY_INT;
+    a.mov_rr_pub(RDI, lhs_int ? RAX : RCX);
+    a.movq_x_r(0, lhs_int ? RCX : RAX);
+    bool neg = false;
+    std::uintptr_t fn = 0;
+    switch (op) {
+      case CMP_EQ: fn = reinterpret_cast<std::uintptr_t>(&jit_eq); break;
+      case CMP_NE: fn = reinterpret_cast<std::uintptr_t>(&jit_eq); neg = true; break;
+      case CMP_LT: case CMP_GT: {  // the left operand of the `<` is the one that is first in the comparison
+        bool lo_int = op == CMP_LT ? lhs_int : !lhs_int;
+        fn = reinterpret_cast<std::uintptr_t>(lo_int ? &jit_lt_if : &jit_lt_fi);
+        break;
+      }
+      default: {  // CMP_LE, CMP_GE
+        bool lo_int = op == CMP_LE ? lhs_int : !lhs_int;
+        fn = reinterpret_cast<std::uintptr_t>(lo_int ? &jit_le_if : &jit_le_fi);
+        break;
+      }
+    }
+    call_c(fn);
+    a.test_rax_rax();
+    bool when_nonzero = jump_if != neg;  // the jump is taken when the result is nonzero (else when it is zero)
+    a.jcc(when_nonzero ? CC_NE : CC_E, target);
+    return true;
+  }
+
   bool compare(const std::vector<Node*>& kids, int op, bool jump_if, int target) {
     if (kids.size() != 2) return fail("a comparison without two operands");
     int tl = TY_NONE, tr = TY_NONE;
     if (!binary(kids[0], kids[1], tl, tr)) return false;
-    if (tl != tr) return fail("a comparison of an integer with a float (the exact comparison is not encoded)");
+    if (tl != tr) return mixed_compare(tl, op, jump_if, target);
     if (tl == TY_INT) {
       static const int cc[] = {CC_E, CC_NE, CC_L, CC_LE, CC_G, CC_GE};
       a.cmp_rax_rcx();
@@ -973,24 +1038,48 @@ struct Gen {
     a.jmp(top);
   }
 
-  // A numeric `for` inside the loop: the start and the limit are evaluated once; the step is a constant (not zero). The start and the
-  // limit are integers (a float one is refused, see int_unit).
+  // A numeric `for` inside the loop. The step is a numeric constant, not zero (the interpreter's NumForNode decides the kind of the
+  // loop from its start and step: an integer loop when both are integers, a float loop otherwise, see float_for).
   bool for_loop(const TierView& v) {
     if (v.captured) return fail("a loop variable captured by a closure");
+    bool step_flt = false;
     std::int64_t step = 1;
+    double dstep = 1.0;
     if (v.kids.size() == 3 && v.kids[2]) {
       TierView sv;
       tier_view(v.kids[2], sv);
-      if (sv.kind != TierView::K_CONST || sv.k.t != T_INT) return fail("a for loop whose step is not an integer constant");
-      step = sv.k.i;
-      if (step == 0) return fail("a for loop with a step of zero (an error the interpreter reports)");
+      if (sv.kind != TierView::K_CONST || (sv.k.t != T_INT && sv.k.t != T_FLT)) return fail("a for loop whose step is not a numeric constant");
+      if (sv.k.t == T_INT) {
+        step = sv.k.i;
+        dstep = static_cast<double>(step);
+      } else {
+        step_flt = true;
+        dstep = sv.k.d;
+      }
+      if (step_flt ? dstep == 0 : step == 0) return fail("a for loop with a step of zero (an error the interpreter reports)");
     }
-    int hi = new_reg(false), hl = new_reg(false), hc = new_reg(false);
-    if (!int_unit(v.kids[0])) return false;
-    a.store(hi, RAX);
-    if (!int_unit(v.kids[1])) return false;
-    a.store(hl, RAX);
+    int ty = num_unit(v.kids[0]);  // the start, in RAX
+    if (ty == TY_NONE) return false;
+    if (ty == TY_INT && !step_flt) return int_for(v, step);
+    return float_for(v, ty, dstep);
+  }
+
+  // An integer loop (the start in RAX). Its limit is an integer, or a float that nfcr_forlimit clips (a loop it does not run is skipped).
+  bool int_for(const TierView& v, std::int64_t step) {
     int done = a.label(), top = a.label();
+    int hi = new_reg(false);
+    a.store(hi, RAX);
+    int tl = num_unit(v.kids[1]);
+    if (tl == TY_NONE) return false;
+    int hl = new_reg(false), hc = new_reg(false);
+    if (tl == TY_FLT) {  // RAX is the float limit: the call clips it (JitLimit: RAX the limit, RDX whether the loop runs)
+      a.movq_x_r(0, RAX);
+      a.mov_imm(RDI, step);
+      call_c(reinterpret_cast<std::uintptr_t>(&jit_forlimit));
+      a.test_rdx_rdx();
+      a.jcc(CC_E, done);
+    }
+    a.store(hl, RAX);
     a.load(RAX, hi);
     a.load(RCX, hl);
     a.cmp_rax_rcx();
@@ -1028,6 +1117,97 @@ struct Gen {
     a.leave_loop();
     return true;
   }
+
+  // A float loop (the start in RAX, of type TY; the step is DSTEP, a constant). Its values are doubles: the start, the limit and the
+  // step are converted to them, as the interpreter does (num_d), and the variable is a float.
+  bool float_for(const TierView& v, int ty, double dstep) {
+    int hi = new_reg(true), hl = new_reg(true), hs = new_reg(true);
+    to_flt_rax(ty);
+    a.store(hi, RAX);
+    int tl = num_unit(v.kids[1]);
+    if (tl == TY_NONE) return false;
+    to_flt_rax(tl);
+    a.store(hl, RAX);
+    a.mov_imm(RAX, bits_of(dstep));
+    a.store(hs, RAX);
+    int var = declare_reg(v.slots[0], TY_FLT);
+    if (var < 0) return false;
+    seen.insert(v.slots[0]);
+    int done = a.label(), top = a.label();
+    a.enter_loop();
+    first_skip(hi, hl, hs, done);
+    a.bind(top);
+    a.load(RAX, hi);
+    a.store(var, RAX);
+    breaks.push_back(done);
+    if (!stmt(v.blocks[0])) return false;
+    breaks.pop_back();
+    fincrement(hi, hs);
+    next_continue(hi, hl, hs, top);
+    a.bind(done);
+    a.leave_loop();
+    return true;
+  }
+
+  // RAX = the float value of RAX when its type is an integer (converted as the interpreter's num_d does).
+  void to_flt_rax(int ty) {
+    if (ty != TY_INT) return;
+    a.cvtsi2sd(0, RAX);
+    a.movq_r_x(RAX, 0);
+  }
+  // xmmX = the float word W (through RAX).
+  void fload(int x, int w) {
+    a.load(RAX, w);
+    a.movq_x_r(x, RAX);
+  }
+  // idx += step (the word HI).
+  void fincrement(int hi, int hs) {
+    fload(0, hi);
+    fload(1, hs);
+    a.sd_op(0x58, 0, 1);  // addsd
+    a.movq_r_x(RAX, 0);
+    a.store(hi, RAX);
+  }
+  // The first iteration of a float loop does not run when (0 < step ? limit < idx : idx < limit) (the interpreter's test, which a nan
+  // does not satisfy: the body runs once for it). Jumps to DONE then.
+  void first_skip(int hi, int hl, int hs, int done) {
+    int neg = a.label(), run = a.label();
+    fload(0, hs);
+    a.zero_x(2);
+    a.ucomisd(0, 2);
+    a.jcc(CC_BE, neg);  // not 0 < step (a nan step too)
+    fload(0, hi);
+    fload(1, hl);
+    a.ucomisd(0, 1);
+    a.jcc(CC_A, done);  // idx > limit
+    a.jmp(run);
+    a.bind(neg);
+    fload(0, hl);
+    fload(1, hi);
+    a.ucomisd(0, 1);
+    a.jcc(CC_A, done);  // limit > idx
+    a.bind(run);
+  }
+  // After an iteration the loop goes on at TOP while (0 < step ? idx <= limit : limit <= idx) holds, and falls through otherwise (the
+  // interpreter's condition; a nan makes it false).
+  void next_continue(int hi, int hl, int hs, int top) {
+    int neg = a.label(), end = a.label();
+    fload(0, hs);
+    a.zero_x(2);
+    a.ucomisd(0, 2);
+    a.jcc(CC_BE, neg);
+    fload(0, hl);
+    fload(1, hi);
+    a.ucomisd(0, 1);
+    a.jcc(CC_AE, top);  // limit >= idx
+    a.jmp(end);
+    a.bind(neg);
+    fload(0, hi);
+    fload(1, hl);
+    a.ucomisd(0, 1);
+    a.jcc(CC_AE, top);  // idx >= limit
+    a.bind(end);
+  }
 };
 
 // The loop itself: a `while`, a `repeat`, or the numeric `for` the takeover starts in (its state comes in the registers).
@@ -1055,6 +1235,33 @@ bool top_level(Gen& g, Node* loop, int kind, Code& code) {
     if (!g.stmt(v.blocks[0])) return false;
     g.breaks.pop_back();
     g.loop_tail(hi, hc, hs, 0, top, done);
+    g.a.bind(done);
+    g.a.leave_loop();
+  } else if (kind == TierLoopState::FOR_FLT) {
+    if (v.kind != TierView::K_FOR) return g.fail("a loop that is not a numeric for");
+    if (v.captured) return g.fail("a loop variable captured by a closure");
+    // The state of a float loop at the top of an iteration: the next value, the limit and the step, all doubles. The entry (from the
+    // start, as the interpreter's test passed, or after an iteration) takes the plain condition: the takeover never has a nan start or
+    // limit, and for numbers that are not nan the plain condition is the interpreter's first test.
+    int hi = g.new_reg(true), hl = g.new_reg(true), hs = g.new_reg(true);
+    code.state_regs[0] = hi;
+    code.state_regs[1] = hl;
+    code.state_regs[2] = hs;
+    int var = g.declare_reg(v.slots[0], TY_FLT);
+    if (var < 0) return false;
+    g.seen.insert(v.slots[0]);
+    int done = g.a.label(), top = g.a.label(), check = g.a.label();
+    g.a.enter_loop();
+    g.a.jmp(check);
+    g.a.bind(top);
+    g.a.load(RAX, hi);
+    g.a.store(var, RAX);
+    g.breaks.push_back(done);
+    if (!g.stmt(v.blocks[0])) return false;
+    g.breaks.pop_back();
+    g.fincrement(hi, hs);
+    g.a.bind(check);
+    g.next_continue(hi, hl, hs, top);
     g.a.bind(done);
     g.a.leave_loop();
   } else if (kind == TierLoopState::WHILE && v.kind == TierView::K_WHILE) {
@@ -1088,10 +1295,6 @@ bool top_level(Gen& g, Node* loop, int kind, Code& code) {
 
 std::unique_ptr<Code> compile(Node* loop, int kind, const Frame& f, std::string& why) {
 #if NFCAST_JIT_X64
-  if (kind == TierLoopState::FOR_FLT) {
-    why = "a float for loop (the JIT compiles integer loops only)";
-    return nullptr;
-  }
   // Register allocation: the first pass generates the loop with every word in memory and counts the references to each word (weighted
   // by loop depth, so the control variables, referenced on every iteration, rank first). The four most referenced words get R12-R15
   // (callee-saved) and the second pass generates the code with them. The allocation does not change what is in the subset, so the

@@ -37,7 +37,8 @@ struct Code {
   // when it ends.
   std::vector<int> in_slots, in_regs;
   std::vector<int> out_slots, out_regs;
-  int state_regs[3] = {-1, -1, -1};  // FOR_INT: the registers of the next value of the variable, the count, and the step
+  int state_regs[3] = {-1, -1, -1};  // FOR_INT: the registers of the next value of the variable, the count, and the step; FOR_FLT: the
+                                     // registers of the next value, the limit and the step (doubles)
   // Deopt (docs/notes/ast.md, "JIT"). When the code stops at an operation it cannot finish, the locals of the site are written back to
   // the frame (Site::bail_slots and bail_regs). Site k (1-based, the value run() returns) is the statement or condition the operation
   // is in: the interpreter runs that unit, which raises the error the operation raises.
