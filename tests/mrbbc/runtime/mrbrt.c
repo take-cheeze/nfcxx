@@ -264,6 +264,9 @@ int mrbbc_find_super(const MV *self, int method, const char *name, long argc) {
   }
 }
 
+/* SUPER and ARGARY outside a method (the main program, a class body, or a block of one): vm.c raises NoMethodError. */
+void mrbbc_no_super(void) { mrbbc_raise("NoMethodError", "super called outside of method"); }
+
 void mrbbc_super_nil(MV *dst) {
   dst->tag = MRBBC_NIL;
   dst->i = 0;

@@ -76,6 +76,9 @@ struct Shared {
   std::set<const mrb::Irep *> top_blocks;        // the block bodies whose home is not a method (the main program or a class body)
   std::map<const mrb::Irep *, const mrb::Irep *> block_method;  // a block body -> the method body it is made in (at any depth)
   std::set<const mrb::Irep *> method_blocks;     // the block bodies a method makes directly (their creator is the method)
+  std::map<const mrb::Irep *, int> depth;        // a block body -> the number of blocks it is in (1: made by a non-block)
+  std::map<const mrb::Irep *, const mrb::Irep *> frame_owner;  // a block body -> the body whose frame is its %4 (the home: the
+                                                 // method, main program or class body its chain of blocks starts in)
   std::set<std::string> defined;                 // the names a TDEF of the program defines
   std::set<std::string> in_class;                // the names a TDEF defines in a class body (a method of a class)
   std::set<std::string> top;                     // the names a TDEF defines at the top level (methods of Object)
@@ -88,6 +91,8 @@ struct Shared {
 // %1 the argument vector, %2 the argument count, %3 the frame it was made in and %4 its home (the frame of the method a
 // `return` in it leaves). The registers are numbered from kFirstReg.
 constexpr int kFirstReg = 5;
+// The registers past an irep's nregs that a frame keeps (see lower_irep).
+constexpr unsigned kRegSlack = 3;
 
 struct Ctx {
   Shared &sh;
@@ -485,6 +490,10 @@ void collect(Shared &sh, const mrb::Irep &irep, Kind kind, bool home_main, const
       if (child_home_main) sh.top_blocks.insert(body);
       if (own != nullptr) sh.block_method[body] = own;
       if (kind == Kind::Method) sh.method_blocks.insert(body);
+      // a block made by a block takes the frame of its creator's home (BLOCK passes %4 on), so its depth and that frame
+      // are the creator's: the frame of the body the chain starts in
+      sh.depth[body] = kind == Kind::Block ? sh.depth.at(&irep) + 1 : 1;
+      sh.frame_owner[body] = kind == Kind::Block ? sh.frame_owner.at(&irep) : &irep;
       child_kind[in.args[1]] = std::make_pair(Kind::Block, child_home_main);
     } else if (in.op == mrb::OP_EXEC) {
       const mrb::Irep *body = &child_at(irep, in.args[1], in.pc);
@@ -666,7 +675,9 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
 
   // The frame: the irep's registers, and the register a TDEF writes (mruby's VM has room past nregs for it, as the class
   // bodies that define methods show, where TDEF writes R(1) with nregs 1).
-  unsigned frame_regs = irep.nregs;
+  // mruby's codegen does not count every register a call names: a zsuper in a class body is `LOADNIL 2` and `SUPER 1 0` with
+  // nregs 2 (vm.c's stack has room past nregs), so the frame has a few registers past the irep's count.
+  unsigned frame_regs = irep.nregs + kRegSlack;
   for (const mrb::Insn &in : insns) {
     if (in.op == mrb::OP_TDEF && in.args[0] + 1u > frame_regs) frame_regs = in.args[0] + 1u;
   }
@@ -970,6 +981,26 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
             break;
           }
         }
+        // In a block that a block makes (depth 2), level 1 is the frame the chain starts in (%4, the BLOCK passes it on), and
+        // level 2 is past the method's env: the implicit block of a super there is nil, as mruby's level-2 upvar is (the
+        // method's proc has no environment above it). Only the frame's own registers (its locals) are read.
+        if (kind == Kind::Block && sh.depth.at(&irep) == 2 && x[2] == 2 && in.op == mrb::OP_GETUPVAR &&
+            sh.block_method.count(&irep) != 0 && static_cast<long>(x[1]) == slot_count(*sh.block_method.at(&irep)) + 1) {
+          store_tag(c, c.reg(x[0]), kTagNil);
+          break;
+        }
+        if (kind == Kind::Block && sh.depth.at(&irep) == 2 && x[2] == 1) {
+          const mrb::Irep *owner = sh.frame_owner.at(&irep);
+          if (x[1] >= owner->nlocals) {
+            throw Refused("refused: " + std::string(in.name) + " of a register past the locals of the frame it reads is not lowered yet (pc " +
+                          std::to_string(in.pc) + ")");
+          }
+          std::string p = c.fresh();
+          c.line("(let " + p + " (ptr unsigned_char) (offset %4 " + num(16 * static_cast<long long>(x[1])) + "))");
+          if (in.op == mrb::OP_GETUPVAR) c.line("(copy 16 " + c.reg(x[0]) + " " + p + ")");
+          else c.line("(copy 16 " + p + " " + c.reg(x[0]) + ")");
+          break;
+        }
         if (kind != Kind::Block || x[2] != 0) {
           throw Refused("refused: " + std::string(in.name) + " of a level other than the block's own frame is not lowered yet (pc " +
                         std::to_string(in.pc) + ")");
@@ -988,10 +1019,18 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         // block is the method's R(m1+1), where its caller leaves it. Rest, post and keyword parameters are refused.
         const unsigned m1 = (x[1] >> 11) & 0x3f, r = (x[1] >> 10) & 1, m2 = (x[1] >> 5) & 0x1f, kd = (x[1] >> 4) & 1,
                        lv = x[1] & 0xf;
+        // The method is read at level 1 from a block that a method makes (its frame is %3) and at level 2 from a block that a
+        // block of a method makes (its frame is %4, the home): vm.c's uvenv(lv-1) is the method's env in both.
+        if (kind != Kind::Method && (kind != Kind::Block || sh.block_method.count(&irep) == 0)) {
+          // outside a method: vm.c's ARGARY raises like SUPER does, at run time
+          c.line("(eval (call void &\"mrbbc_no_super\"))");
+          break;
+        }
         const bool in_method = kind == Kind::Method && lv == 0;
-        const bool in_block = kind == Kind::Block && lv == 1 && sh.method_blocks.count(&irep) != 0;
-        if (!(in_method || in_block) || r != 0 || m2 != 0 || kd != 0 ||
-            static_cast<long>(m1) != slot_count(in_block ? *sh.block_method.at(&irep) : irep)) {
+        const bool in_block = kind == Kind::Block && lv == 1 && sh.depth.at(&irep) == 1 && sh.method_blocks.count(&irep) != 0;
+        const bool in_block2 = kind == Kind::Block && lv == 2 && sh.depth.at(&irep) == 2 && sh.block_method.count(&irep) != 0;
+        if (!(in_method || in_block || in_block2) || r != 0 || m2 != 0 || kd != 0 ||
+            static_cast<long>(m1) != slot_count(in_method ? irep : *sh.block_method.at(&irep))) {
           throw Refused("refused: ARGARY other than the parameters of a method (or of a block that a method makes) is not "
                         "lowered yet (pc " + std::to_string(in.pc) + ")");
         }
@@ -999,7 +1038,8 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         auto param = [&](unsigned i) -> std::string {
           if (in_method) return c.reg(i);
           std::string p = c.fresh();
-          c.line("(let " + p + " (ptr unsigned_char) (offset %3 " + num(16 * static_cast<long long>(i)) + "))");
+          c.line("(let " + p + " (ptr unsigned_char) (offset " + (in_block ? "%3" : "%4") + " " +
+                 num(16 * static_cast<long long>(i)) + "))");
           return p;
         };
         c.line("(eval (call void &\"mrbbc_ary_new\" " + c.reg(x[0]) + " (const long " + num(m1) + ")))");
@@ -1024,7 +1064,9 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
           if (it != sh.block_method.end()) home = it->second;
         }
         if (home == nullptr) {
-          throw Refused("refused: SUPER outside a method is not lowered yet (pc " + std::to_string(in.pc) + ")");
+          // outside a method (the main program, a class body, or a block of one) mruby's SUPER raises at run time
+          c.line("(eval (call void &\"mrbbc_no_super\"))");
+          break;
         }
         const unsigned n = x[1] & 0x0f, k = x[1] >> 4;
         if (k != 0) throw Refused("refused: SUPER with keyword arguments is not lowered yet (pc " + std::to_string(in.pc) + ")");

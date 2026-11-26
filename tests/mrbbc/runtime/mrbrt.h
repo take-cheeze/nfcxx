@@ -49,6 +49,7 @@ int mrbbc_find_init(const MV *obj, long argc);
  * the one the TDEF gave). It returns -1 for the builtin initialize, which mrbbc_super_nil answers with nil. */
 int mrbbc_find_super(const MV *self, int method, const char *name, long argc);
 void mrbbc_super_nil(MV *dst);
+void mrbbc_no_super(void) __attribute__((noreturn));
 
 /* A call of the program's method number id from the runtime (the operators, to_s and inspect of an instance of a program
  * class), with argc arguments in argv[1..argc]. The lowered module defines it: one branch per method, as a self call has. */

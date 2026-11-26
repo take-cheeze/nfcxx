@@ -210,9 +210,10 @@ R[a+1..a+n] (b = n) and the block R[a+n+1], as `vm.c` takes them: a block of `su
   (NoMethodError).
 - A `super` in a block is lowered with its arguments and an explicit block (or none). The owner is the method the block is
   made in (`block_method`, at any depth), so `super` in a block of a block finds the same superclass method. Two limits:
-  the zsuper of a block made by a method is lowered (see above); a zsuper in a block that another block makes (ARGARY at
-  level 2) is refused, and so is a super with no explicit block in a block that another block makes (its implicit block
-  is an upvar of level 2, see "Blocks").
+  the zsuper of a block made by a method is lowered (see above), and so is the zsuper of a block that a block of a method
+  makes (ARGARY at level 2, which reads the method's parameters and block from the home frame: a block of the method's
+  block passes the real block, as mruby does). A super with no explicit block in such a block passes nil: its implicit
+  block is an upvar of level 2 past the method, which mruby reads as nil (see "Blocks"). Deeper blocks are refused.
 - A `super` with a splat (`super(*a)`), or a keyword argument is refused.
 
 ### Operators, to_s and inspect
@@ -265,8 +266,14 @@ are the block's outer locals.
   and the code goes on after the call (`emit_block_site`). Calls on the way (the yielding method, the blocks between)
   return at once, as for a return, since their home is not the break's. A break from a block of the top level is the same
   mechanism (the main program's frame is the home).
-- `GETUPVAR a b 0` and `SETUPVAR a b 0` read and write register b of the frame the block was made in. Level 0 only: a
-  deeper level needs the frame's own link to its parent, which is not lowered.
+- `GETUPVAR a b 0` and `SETUPVAR a b 0` read and write register b of the frame the block was made in. Level 0 only for a
+  block made by a method, the main program or a class body (depth 1). A block made by a block (depth 2) reaches the frame
+  its chain starts in at level 1: the home, `%4`, which BLOCK passes on (`frame_owner`). So `GETUPVAR a b 1` in such a
+  block reads the method's, the main program's or the class body's register b, as vm.c's uvenv does (checked against the
+  reference: a method's local, and a top-level local, set from a block in a block). The home's register must be one of its
+  locals (below its `nlocals`), else refused. Level 2 from a depth-2 block is past that frame, nil for the block slot (see
+  the next bullet); any other level 2 read, and any read in a block of depth 3 or more, is refused. A block made by a method
+  reads level 1 as nil: the method's proc has no environment above it.
 - `GETUPVAR a b 1` in a block that a method makes directly, with b = the method's parameters + 1 (its block slot R(n+1)), is nil. The
   compiler emits it for the implicit block of a `super` in the block (gen_blkmove), and mruby 4.0.0 reads nil there: the
   method's proc has no environment, so the upvar of level 1 is nil. Checked against the reference (`sup_blk_noblock.rb`:
@@ -292,15 +299,16 @@ Refused by name (exit 3, `refused: opcode NAME is not lowered yet (pc N)`): ever
 prefixes and the instructions they widen, `LOADL` of a non-integer (`LOADL` never holds a string: mruby compiles a
 string literal to `STRING`), and a main program with a catch table. In particular `SENDB` of a name the program does not
 define in a class (a block call to a builtin), `RETURN_BLK` from a block of the top level (see below), `BREAK` outside a
-block, `GETUPVAR`/`SETUPVAR` at level 1 or more, `BLKPUSH` of a block other than the method's own (a yield inside a
+block, `GETUPVAR`/`SETUPVAR` at level 1 or more outside the depth-2 cases above, `BLKPUSH` of a block other than the method's own (a yield inside a
 block), a method call with a keyword argument, any other method name, `ASET`,
 `APOST`, `ARYCAT`/`ARYSPLAT` (a splat), `SYMBOL` (a quoted symbol) and `LOADSYM` of a name that is not plain (`:"a b"`,
 `:+`), a float, a global variable, an instance variable of the main program, `RETSELF` of the main program, `TCLASS` and
 `CLASS` in a method or a block, a method or block with parameters other than required and optional ones (rest, post, keyword
 or block parameters), a method definition whose name is not plain and not an operator, a `def` inside a method or a block,
-an operator the program defines at the top level, `SUPER` outside a method and a block of one, a `super` with a splat or a
-keyword argument, `ARGARY` other than the parameters of a method (or of a block a method makes, at level 1), and `ENTER` with
-such parameters are refused.
+an operator the program defines at the top level, a `super` with a splat or a keyword argument, `ARGARY` other than the
+parameters of a method (or of a block a method makes, at level 1 or 2), and `ENTER` with such parameters are refused.
+`SUPER` and `ARGARY` outside a method (the main program, a class body, or a block of one) are not refused: vm.c raises
+NoMethodError `super called outside of method` when they run, and so does the lowered code (`mrbbc_no_super`).
 
 ### The printed result
 
@@ -373,7 +381,7 @@ whose message says so, never with a value.
   each compiled four ways (default, `-g`, `--remove-lv`, `-g --remove-lv`): 28 files read by `mrbbc_dump` (every
   instruction decodes, no bytes after END) and run to status 0 by the pinned mruby. 15 malformed files (truncations,
   an extra byte, a wrong magic, format 03.00, an unknown section, an opcode out of range) are refused with status 1.
-- Lowering (`tests/mrbbc/lower/run.sh`): 146 value programs match mruby's `p` (two generated: 200 locals, and an
+- Lowering (`tests/mrbbc/lower/run.sh`): 153 value programs match mruby's `p` (two generated: 200 locals, and an
   array literal of 130 elements, which mrbc builds with `ARYPUSH`; the `meth_*.rb` ones cover methods: zero and two
   arguments, self calls between methods, recursion, redefinition, a loop, `return`, and a `def` value; the `blk_*.rb`
   ones cover blocks: yield with and without arguments, a block that sets an outer local, `block_given?`, a loop of
@@ -392,17 +400,18 @@ whose message says so, never with a value.
   and a false default, a method with only optional parameters, recursion, `new` and an operator with an optional parameter,
   and yields to a block with optional parameters, with splats and with more arguments than parameters) and `sup_z*.rb` (a
   zsuper in a block: the arguments, their live values, the block, no parameters, a block parameter, and a zsuper with
-  optional parameters). 45 runtime errors match mruby's last stderr line and status 1 (9 from round 1, 13 from round 2, 4
+  optional parameters). 50 runtime errors match mruby's last stderr line and status 1 (9 from round 1, 13 from round 2, 4
   in round 3: method arity, call before def, and yield without a block; 5 in round 4: an instance's method arity, an
   undefined method of a class, `new` with an argument and no `initialize`, an undefined constant, and a method called
   before its `def` runs; 8 in round 5: six for superclasses (no superclass method, arity of an inherited method, a superclass
   that is not a class, a superclass mismatch, `initialize` with an argument through `super`) and two for operators (an
   undefined operator of an instance, and an operator's arity), and 2 in round 6 (a super in a block with no superclass
   method, and with an arity error), and 4 in round 7 (an optional parameter's arity error, too few and too many, `new` with
-  too many arguments for an optional `initialize`, and a zsuper in a block with no superclass method)); 30 programs are
-  refused with status 3, a `refused:` message and no stdout: 29 in `err/` (rest, post, block and keyword parameters, a
-  zsuper in a block of a block, a zsuper in a block with a splat and with a keyword argument, and an operator the program
-  defines at the top level) and a generated one with EXT1 prefixes. `err/` is the refusal set, `rterr/` the runtime errors; the brief's "err/ programs must be
+  too many arguments for an optional `initialize`, and a zsuper in a block with no superclass method), and 5 more in round
+  7 (`super` and `super(1)` at the top level, a zsuper at the top level, a `super` in a top-level block, a `super` in a class
+  body, each a NoMethodError); 29 programs are refused with status 3, a `refused:` message and no stdout: 28 in `err/`
+  (rest, post, block and keyword parameters, a zsuper in a block of a block of a block, a zsuper in a block with a splat and
+  with a keyword argument, and an operator the program defines at the top level) and a generated one with EXT1 prefixes. `err/` is the refusal set, `rterr/` the runtime errors; the brief's "err/ programs must be
   refused" is read as the first.
 
 Round 2 (strings, arrays, SEND0 and SEND of the core methods) is in the tables above. Round 3 lowers methods (see
@@ -412,10 +421,11 @@ block whose home is a method). Round 4 lowers classes (see "Classes") and `BREAK
 explicit receiver of a program-defined method, and blocks with two or more parameters. Round 5 lowers superclasses and
 `SUPER` (see "Classes" and "Super"), the operators, `to_s` and `inspect` that a program defines in a class (see
 "Operators, to_s and inspect"). Round 7 lowers optional parameters of methods and blocks (see "Methods" and "Blocks") and
-the zsuper of a block that a method makes (see "Super"). Still refused: `RETURN_BLK` from a block of the top level, yields and variables more than
-one level out (a block's upvar of level 2 or more, and the implicit block of a super in a nested block), `SENDB` of a
-builtin method, keyword arguments, rest and post parameters, `ASET`, `APOST`, splats, the quoted symbols, a zsuper in a
-block of a block, the instance variables of the top level, and a core class as a superclass
+the zsuper of a block that a method makes, the variables and the implicit block of a block that a block makes (depth 2),
+and `SUPER` outside a method (a NoMethodError at run time; see "Super" and "Blocks"). Still refused: `RETURN_BLK` from a block
+of the top level, yields and variables more than two levels out (a block in a block in a block), `SENDB` of a builtin method,
+keyword arguments, rest and post parameters, `ASET`, `APOST`, splats, the quoted symbols, a zsuper in a block of depth 3,
+the instance variables of the top level, and a core class as a superclass
 (a run-time NotImplementedError: `class E < StandardError`). The strings and arrays in the
 subset are the ones the examples above name; `Array#-` and `Array#*`, `String#[]=`, ranges as indexes and the other
 methods of the core classes are not in it.
