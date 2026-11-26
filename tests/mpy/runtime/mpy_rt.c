@@ -1366,6 +1366,13 @@ void mpy_raise_obj(mpv v) {
   raise_value(v);
 }
 
+/* RAISE_FROM: raise v from cause. MicroPython 1.29 does not set a cause: when there is one it warns (on stderr, as mp_warning
+ * prints it) and raises v as RAISE_OBJ does. */
+void mpy_raise_from(mpv v, mpv cause) {
+  if (cause != MPY_NONE) fprintf(stderr, "Warning: exception chaining not supported\n");
+  mpy_raise_obj(v);
+}
+
 /* RAISE_LAST: a bare raise re-raises the exception of the innermost handler that runs. */
 void mpy_reraise(void) {
   MpyBlock *b;
@@ -1969,8 +1976,7 @@ mpv mpy_get_iter(mpv obj) {
   const mpv *items;
   char msg[120];
   if (is_iter(obj)) return obj;
-  if (is_str(obj)) fail("iterating a str is not lowered yet");
-  if (!is_range(obj) && !is_dict(obj) && !is_set(obj) && !is_view(obj) && !seq_items(obj, &len, &items)) {
+  if (!is_range(obj) && !is_str(obj) && !is_dict(obj) && !is_set(obj) && !is_view(obj) && !seq_items(obj, &len, &items)) {
     snprintf(msg, sizeof msg, "TypeError: '%s' object isn't iterable", real_type_name(obj));
     fail(msg);
   }
@@ -2007,6 +2013,15 @@ mpv mpy_iter_next(mpv iter) {
       return e->key;
     }
     return 0;
+  }
+  if (is_str(it->seq)) {
+    /* One character: the index is a byte offset, and the character runs to the next byte that does not continue it. */
+    const MpyStr *s = str_of(it->seq);
+    size_t i = it->index, j = i + 1;
+    if (i >= s->len) return 0;
+    while (j < s->len && (((unsigned char)s->data[j]) & 0xc0) == 0x80) ++j;
+    it->index = j;
+    return new_str(s->data + i, j - i);
   }
   seq_items(it->seq, &len, &items);
   if (it->index >= len) return 0;

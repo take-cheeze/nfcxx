@@ -187,7 +187,7 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
     } else if (o == opcode("RAISE_LAST")) {
       op.kind = "RAISE_LAST";              // a bare raise
     } else if (o == opcode("RAISE_FROM")) {
-      refused("raise ... from is not lowered yet");
+      op.kind = "RAISE_FROM";              // the cause is on top of the exception (the reference drops it, see mpy_raise_from)
     } else if (o == opcode("LOAD_BUILD_CLASS")) {
       op.kind = "BUILD_CLASS";             // the builtin __build_class__, which the class statement calls
     } else if (o == opcode("LOAD_ATTR")) {
@@ -333,6 +333,7 @@ int effect(const Op &op) {
   if (k == "SETUP_WITH") return 2;       // the exit method goes under the context manager, and __enter__'s value comes on top
   if (k == "WITH_CLEANUP") return -2;    // the top and the context manager go; the result takes the exit method's place
   if (k == "END_FINALLY" || k == "RAISE_OBJ") return -1;   // the value on top goes
+  if (k == "RAISE_FROM") return -2;      // the exception and its cause go
   if (k == "DUP_TWO") return 2;
   if (k == "BUILD_LIST" || k == "BUILD_TUPLE" || k == "BUILD_SET") return 1 - (int)op.arg;   // the items go, the container comes
   if (k == "BUILD_SLICE") return 1 - (int)op.arg;                        // the start, stop (and step) go, the slice comes
@@ -355,6 +356,12 @@ int effect(const Op &op) {
   // UNARY, ROT_TWO, JUMP, LOAD_ATTR (the object becomes the attribute), SETUP, POP_EXCEPT_JUMP, RAISE_LAST: no change
   return 0;
 }
+
+// An open block as the walk records it (see unit): 0 for an except, 1 for a finally, 2 for a with block and 3 for a for loop. A
+// with block's value also holds the stack slot of its exit method (the slot below its context manager, as SETUP_WITH leaves
+// it), and a for loop's holds the base slot of its iterator.
+int kind_of(int block) { return block & 3; }
+int exit_slot_of(int block) { return block >> 2; }
 
 std::string lbl(size_t at) { return "\"pc" + std::to_string(at) + "\""; }
 
@@ -494,12 +501,13 @@ class Lowerer {
       std::vector<Succ> succ;
       std::vector<int> popped = open;
       if (!popped.empty() && (op.kind == "POP_EXCEPT_JUMP" || op.kind == "END_FINALLY")) popped.pop_back();
-      if (op.kind == "RETURN" || op.kind == "RAISE_OBJ" || op.kind == "RAISE_LAST") {
+      if (op.kind == "RETURN" || op.kind == "RAISE_OBJ" || op.kind == "RAISE_LAST" || op.kind == "RAISE_FROM") {
         // nothing follows (a raise never returns)
       } else if (op.kind == "SETUP" || op.kind == "SETUP_WITH") {
         // the handler is entered with the exception on top: the depth there is one more than at the try. A with statement's
         // stack at its handler is the exit method, the context manager and the exception, so it is two more than before.
-        int kind = op.extra;   // 2 for SETUP_WITH, 1 for SETUP_FINALLY, 0 for SETUP_EXCEPT
+        // A with block records its exit method's slot, which is the depth before it less one (SETUP_WITH's lowering).
+        int kind = op.kind == "SETUP_WITH" ? (2 | ((d - 1) << 2)) : op.extra;   // 1 for SETUP_FINALLY, 0 for SETUP_EXCEPT
         std::vector<int> inner = open;
         inner.push_back(kind);
         succ.push_back({op.next, after, inner});
@@ -507,24 +515,45 @@ class Lowerer {
       } else if (op.kind == "POP_EXCEPT_JUMP") {
         succ.push_back({(size_t)op.arg, after, popped});
       } else if (op.kind == "UNWIND_JUMP") {
-        // Pops the try blocks it leaves (extra & 0x7f of them), then drops a for loop's iterator when bit 0x80 is set.
+        // Pops the blocks it leaves (extra & 0x7f of them), then, when bit 0x80 is set, the for loop it breaks out of. The stack
+        // at the target is the one the loop body had at its start: a with block's exit method and context manager are dropped with
+        // it (WITH_CLEANUP removes them), so the target is the lowest such slot; a break also drops the iterator.
         size_t n = (size_t)(op.extra & 0x7f);
         if (n > open.size()) throw std::runtime_error("mpy: an unwind leaves more blocks than are open");
         std::vector<int> left(open.begin(), open.end() - (long)n);
+        int target_depth = d;
         for (size_t i = open.size() - n; i < open.size(); ++i) {
-          if (open[i] == 2) refused("a break or continue out of a with statement is not lowered yet");
-          if (open[i] == 1) refused("a break or continue out of a try block with a name (a finally) is not lowered yet");
+          if (kind_of(open[i]) == 1) refused("a break or continue out of a try block with a name (a finally) is not lowered yet");
+          if (kind_of(open[i]) == 2 && exit_slot_of(open[i]) < target_depth) target_depth = exit_slot_of(open[i]);
         }
-        int target_depth = d - ((op.extra & 0x80) ? kIterSlots : 0);
+        if (op.extra & 0x80) {
+          // the loop's entry is the next block out: it goes, and the target is the loop's base
+          if (left.empty() || kind_of(left.back()) != 3) throw std::runtime_error("mpy: internal: a break without its loop");
+          target_depth = exit_slot_of(left.back());
+          left.pop_back();
+        }
         succ.push_back({(size_t)op.arg, target_depth, left});
+      } else if (op.kind == "GET_ITER") {
+        // A for loop's iterator: its kIterSlots slots start at the slot below the object. The loop is an entry (kind 3) in the
+        // open blocks until it is exhausted, so a break or continue out of the body can find its base.
+        std::vector<int> inner = open;
+        inner.push_back(3 | ((d - 1) << 2));
+        succ.push_back({op.next, after, inner});
       } else if (op.kind == "JUMP") {
-        succ.push_back({(size_t)op.arg, after, open});
+        // A break with no block to leave is four POP_TOPs (the iterator) and a JUMP (mp_emit_bc_unwind_jump): the JUMP at the
+        // loop's base leaves the loop, so its entry goes. Any other jump in a loop body is above the base.
+        std::vector<int> leaving = open;
+        if (!leaving.empty() && kind_of(leaving.back()) == 3 && d == exit_slot_of(leaving.back())) leaving.pop_back();
+        succ.push_back({(size_t)op.arg, after, leaving});
       } else if (op.kind == "JUMP_IF_FALSE" || op.kind == "JUMP_IF_TRUE") {
         succ.push_back({(size_t)op.arg, after, open});
         succ.push_back({op.next, after, open});
       } else if (op.kind == "FOR_ITER") {
-        // exhausted: the iterator's kIterSlots slots are dropped, so the target is that much shallower
-        succ.push_back({(size_t)op.arg, d - kIterSlots, open});
+        // exhausted: the iterator's kIterSlots slots are dropped, so the target is that much shallower, and the loop's entry ends
+        std::vector<int> done = open;
+        if (done.empty() || kind_of(done.back()) != 3) throw std::runtime_error("mpy: internal: a for loop without its entry");
+        done.pop_back();
+        succ.push_back({(size_t)op.arg, d - kIterSlots, done});
         succ.push_back({op.next, after, open});
       } else if (op.kind == "JUMP_IF_FALSE_OR_POP" || op.kind == "JUMP_IF_TRUE_OR_POP") {
         succ.push_back({(size_t)op.arg, d, open});
@@ -627,6 +656,22 @@ class Lowerer {
       body << "  (let " << cell << " unsigned_long (call unsigned_long &\"mpy_make_cell\" " << v << "))\n";
       body << "  (store unsigned_long " << local((long long)c) << " " << cell << ")\n";
     }
+
+    // Leaves the n innermost blocks of open (a return or an unwinding jump), innermost first, as the reference does: a with block
+    // calls its __exit__ with None, None, None (WITH_CLEANUP's normal path), and an except block is dropped. The block is dropped
+    // before the exit is called, so an exception from the exit goes to the blocks that enclose the statement. A for loop's entry
+    // (kind 3) has no block to drop, so it is skipped.
+    auto leave_blocks = [&](const std::vector<int> &open, size_t n) {
+      for (size_t i = open.size(); i-- > open.size() - n;) {
+        if (kind_of(open[i]) == 3) continue;
+        body << "  (eval (call void &\"mpy_block_pop\"))\n";
+        if (kind_of(open[i]) == 2) {
+          std::string ex = load(exit_slot_of(open[i])), r = fresh();
+          body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_with_cleanup\" " << ex
+               << " (const unsigned_long 6)))\n";
+        }
+      }
+    };
 
     for (const Op &op : ops) {
       auto dit = depth.find(op.offset);
@@ -831,9 +876,16 @@ class Lowerer {
         body << "  (eval (call void &\"mpy_block_pop\"))\n";
         body << "  (goto " << lbl((size_t)op.arg) << ")\n";
       } else if (k == "UNWIND_JUMP") {
-        // Leaves (extra & 0x7f) try blocks; a for loop's iterator (bit 0x80) is dropped by the depth, which is static here.
-        for (long long i = 0; i < (op.extra & 0x7f); ++i) body << "  (eval (call void &\"mpy_block_pop\"))\n";
+        // Leaves (extra & 0x7f) blocks, running the exit of each with block; a for loop's iterator (bit 0x80) is dropped by the
+        // depth, which is static here.
+        auto open_it = blocks_at.find(op.offset);
+        if (open_it == blocks_at.end()) throw std::runtime_error("mpy: internal: an unwind at an unknown depth");
+        leave_blocks(open_it->second, (size_t)(op.extra & 0x7f));
         body << "  (goto " << lbl((size_t)op.arg) << ")\n";
+      } else if (k == "RAISE_FROM") {
+        // [exception, cause] with the cause on top
+        std::string cause = pop(d), exc = pop(d - 1);
+        body << "  (eval (call void &\"mpy_raise_from\" " << exc << " " << cause << "))\n";
       } else if (k == "END_FINALLY") {
         std::string v = pop(d);
         body << "  (eval (call void &\"mpy_end_finally\" " << v << "))\n";
@@ -960,15 +1012,10 @@ class Lowerer {
             } else if (k == "JUMP") {
         body << "  (goto " << lbl((size_t)op.arg) << ")\n";
       } else if (k == "RETURN") {
-        // A return leaves every try block it is in: MicroPython's unwind_return drops the except blocks. A finally or a with
-        // block would run its code on the way out, which is not lowered, so it is refused.
+        // A return leaves every block it is in (MicroPython's unwind_return): a with block calls its __exit__, and an except block
+        // is dropped.
         auto open_it = blocks_at.find(op.offset);
-        if (open_it != blocks_at.end()) {
-          for (int kind : open_it->second) {
-            if (kind == 2) refused("a return out of a with statement is not lowered yet");
-          }
-          for (size_t i = 0; i < open_it->second.size(); ++i) body << "  (eval (call void &\"mpy_block_pop\"))\n";
-        }
+        if (open_it != blocks_at.end()) leave_blocks(open_it->second, open_it->second.size());
         std::string v = pop(d);
         if (is_fn) body << "  (store unsigned_long %0 " << v << ")\n";
         body << "  (return)\n";
