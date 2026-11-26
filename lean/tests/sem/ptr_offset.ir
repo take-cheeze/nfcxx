@@ -1,0 +1,13 @@
+(ir-module "ptr.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "main"
+  (ret int)
+  (params)
+  (slot "arr" (array 4 int) 16 4)
+  (let %0 (ptr int) (offset $"arr" 4))
+  (store int %0 (const int 7))
+  (let %1 (ptr int) (offset $"arr" 8))
+  (store int %1 (const int 42))
+  (let %2 int (load int %0))
+  (let %3 int (load int %1))
+  (let %4 int (wadd int %2 %3))
+  (return %4))

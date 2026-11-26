@@ -50,5 +50,15 @@ expect tests/sem/call_recursive.ir "value 120"
 expect tests/sem/call_external.ir "stuck: call of external function missing_fn is not modelled"
 expect tests/sem/call_arity.ir "stuck: call of one with 2 arguments, but it has 1 parameter(s)"
 expect tests/sem/call_unbounded.ir "stuck: out of fuel: the calls are nested too deeply"
+# block pointers into slots: offset, load and store through them (4 + 42 + 3 = 49 for the array), the byte order
+# (the byte at offset 1 of 0x01020304 is 3), and the traps: null, and reaching past the end of the block
+# (an offset to one past the end is allowed, a load there is not); a global and a pointer stored as a value are stuck
+expect tests/sem/ptr_offset.ir "value 49"
+expect tests/sem/ptr_bytes.ir "value 3"
+expect tests/sem/ptr_null.ir "trap: null dereference"
+expect tests/sem/ptr_oob.ir "trap: pointer out of bounds"
+expect tests/sem/ptr_load_oob.ir "trap: pointer out of bounds"
+expect tests/sem/ptr_global.ir "stuck: the address of the global @\"g\" is not modelled (only slots are blocks)"
+expect tests/sem/ptr_store_value.ir "stuck: store of a pointer value is not modelled"
 echo "ok: the semantics gives the expected outcome for the IR functions in tests/sem"
 exit $fail

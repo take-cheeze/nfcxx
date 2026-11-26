@@ -4,16 +4,18 @@ import NfcxxIR.Syntax
 Executable semantics of a subset of the mid-level IR (docs/notes/pathb-stage2.md, sections 3, 4 and 6).
 
 The subset is what an integer-only function body needs: integer types, registers, stack slots of integer type
-(`load` and `store` of a local `$"x"`), constants, the wrapping, checked and bitwise arithmetic, comparisons,
-the integer conversions `iconv` and same-width `bitcast`, `eval` of a value (its value is discarded), and the
-structured statements (`let`, `set`, `if`, `loop`, `block`, `switch` with its top-level `case` and `default`
-labels, `break`, `continue`, `return`, `unreachable`, `trap`). Everything else is reported as `stuck` with the
-reason, never silently skipped: pointers and memory beyond slots, calls, floats, exceptions, `goto`, and labels
-nested inside a switch arm. Those are the next steps.
+(`load` and `store` through a local `$"x"`), block pointers into the slots (`offset`, and `load` and `store`
+through a pointer, with the null and bounds traps of the memory section below), constants, the wrapping,
+checked and bitwise arithmetic, comparisons, the integer conversions `iconv` and same-width `bitcast`, `eval` of
+a value (its value is discarded), and the structured statements (`let`, `set`, `if`, `loop`, `block`, `switch`
+with its top-level `case` and `default` labels, `break`, `continue`, `return`, `unreachable`, `trap`). Everything
+else is reported as `stuck` with the reason, never silently skipped: pointers into anything but a slot, pointers
+stored in memory, calls outside the module, floats, exceptions, `goto`, and labels nested inside a switch arm.
+Those are the next steps.
 
-Values are mathematical integers, kept in the range of their type by `wrapTo` after every operation. A
-boolean is 0 or 1. The semantics is fuel-bounded: running out of fuel is `stuck`, so a result that is
-`value` or `trap` is always a real outcome of the program.
+Values are mathematical integers, kept in the range of their type by `wrapTo` after every operation, or pointers
+(see the memory section). A boolean is 0 or 1. The semantics is fuel-bounded: running out of fuel is `stuck`, so
+a result that is `value` or `trap` is always a real outcome of the program.
 
 The definitions are plain functions on `Except` and `Nat` fuel, so the examples and lemmas below can be
 checked by kernel reduction (`decide`) and the executable `nfcxx_ir run` gives the same answers on real
@@ -126,16 +128,38 @@ inductive Outcome where
   | stuck : String → Outcome
   deriving Repr
 
-/-- A cell of the state: a register, or a stack slot named as in the text form (`$"x"`). -/
+/-! ### State
+
+A block is the storage a pointer points into: a slot (a named local, `$"x"`) of the function. Its byte size is the
+one its `(slot ...)` declaration gives (see the memory section). -/
+inductive Block where
+  | slot : String → Block
+
+/-- A value in the state: an integer; a pointer, as the block and the byte offset from the block's first byte; or
+the null pointer. -/
+inductive Val where
+  | int : Int → Val
+  | ptr : Block → Int → Val
+  | null : Val
+
+def Val.isInt : Val → Bool
+  | Val.int _ => true
+  | _ => false
+
+/-- A cell of the state: a register; one byte of a slot (the slot's name, and the index of the byte from the
+slot's first byte, little-endian); or a declaration of the frame: the byte size of a slot, or a marker that the
+name is declared more than once in the function (scopes are not modelled, so that block is stuck). -/
 inductive Cell where
   | reg : Nat → Cell
-  | slot : String → Cell
+  | byte : String → Nat → Cell
+  | size : String → Cell
+  | dup : String → Cell
   deriving BEq
 
-/-- A value in the state: the integer, and the integer type it has (width and signedness) when its declared
-type is an integer type. The type is what `bitcast` and `switch` check. -/
+/-- A value in the state: the value, and the integer type it has (width and signedness) when its declared type is
+an integer type. The type is what `bitcast` and `switch` check. -/
 structure Entry where
-  val : Int
+  val : Val
   info : Option (Nat × Bool)
 
 /-- The cells, the newest first. A read is the first entry for its cell. -/
@@ -146,12 +170,14 @@ def Env.lookup (e : Env) (c : Cell) : Option Entry :=
   | some p => some p.2
   | none => none
 
-def Env.get (e : Env) (c : Cell) : Option Int :=
+def Env.get (e : Env) (c : Cell) : Option Val :=
   match e.lookup c with
   | some r => some r.val
   | none => none
 
-def Env.set (e : Env) (c : Cell) (v : Int) (info : Option (Nat × Bool)) : Env := (c, ⟨v, info⟩) :: e
+/-- Sets a cell. The older entry for the cell is dropped, so the environment keeps one entry per cell. -/
+def Env.set (e : Env) (c : Cell) (v : Val) (info : Option (Nat × Bool)) : Env :=
+  (c, ⟨v, info⟩) :: e.filter (fun p => !(p.1 == c))
 
 /-- How a statement list ends: falling off the end, leaving a loop, continuing it, or returning. -/
 inductive Flow where
@@ -170,17 +196,30 @@ def operandInfo (env : Env) : Operand → Option (Nat × Bool)
   | Operand.constant t _ => infoOf t
   | _ => none
 
-def evalOperand (env : Env) : Operand → Except Outcome Int
+/-- An operand as a value: a register, a constant, the address of a slot (`$"x"`, the pointer to its first byte),
+or the null pointer. Other operands are stuck. -/
+def evalVal (env : Env) : Operand → Except Outcome Val
   | Operand.reg n =>
     match env.get (.reg n) with
     | some v => .ok v
     | none => .error (.stuck s!"register %{n} is read before it is set")
   | Operand.constant t v =>
     match infoOf t, parseIntLit v with
-    | some (b, s), some k => .ok (wrapTo b s k)
+    | some (b, s), some k => .ok (Val.int (wrapTo b s k))
     | _, _ => .error (.stuck s!"constant of type {tyText t} is not an integer literal: {v}")
-  | Operand.localVar x => .error (.stuck s!"the address of $\"{x}\" is used as a value; only loads and stores of it are modelled")
+  | Operand.localVar x => .ok (Val.ptr (Block.slot x) 0)
+  | Operand.null _ => .ok Val.null
+  | Operand.global x => .error (.stuck s!"the address of the global @\"{x}\" is not modelled (only slots are blocks)")
+  | Operand.fnRef x => .error (.stuck s!"the address of the function &\"{x}\" is not modelled")
   | o => .error (.stuck s!"operand {operandName o} not modelled")
+
+/-- An operand where an integer is needed: a pointer there is stuck (pointer comparison, cast and arithmetic are
+not modelled). -/
+def evalOperand (env : Env) (o : Operand) : Except Outcome Int :=
+  match evalVal env o with
+  | .ok (Val.int k) => .ok k
+  | .ok _ => .error (.stuck "a pointer value is used where an integer is needed (pointer comparison, cast and arithmetic are not modelled)")
+  | .error e => .error e
 
 /-- The integer binary operators on a type. Checked forms trap; wrapping forms reduce into the type. -/
 def evalBin (op : BinOp) (t : Ty) (a b : Int) : Except Outcome Int :=
@@ -244,14 +283,90 @@ def evalCmp (op : CmpOp) (a b : Int) : Except Outcome Int :=
   | .les | .leu => .ok (bool01 (decide (a ≤ b)))
   | .ltf | .lef => .error (.stuck "floating-point comparison is not modelled")
 
-/-- A value-producing form, in the subset. -/
-def evalRValue (env : Env) : RValue → Except Outcome Int
-  | RValue.operand o => evalOperand env o
-  | RValue.load _ t (Operand.localVar x) => do
-    match infoOf t, env.get (.slot x) with
-    | some _, some v => .ok v
-    | some _, none => .error (.stuck s!"slot $\"{x}\" is read before it is written")
-    | none, _ => .error (.stuck s!"load of a non-integer type {tyText t}")
+/-! ### Memory: block pointers
+
+A slot's byte size is declared by its `(slot "x" TYPE BYTES ALIGN)`. The frame declares it when the function
+starts (`slotDecls`), as a cell of the environment, and a name declared twice in one function is a marker that
+makes the block stuck. The bytes of a slot are cells too: a byte that is not written has no cell, and reading it
+is stuck with "slot ... is read before it is written". An integer of `bits` bits takes `byteWidth bits` bytes,
+little-endian (a bool takes one byte, and reads back as its low bit).
+
+A load or store takes its width from its own type, not from the declared type of the slot: the bytes at its
+offset are read or written as they are, so a store of one width can be read back with another. That is the
+bit pattern reading of `bitcast`, not C++'s aliasing rules, which this slice does not check.
+
+A pointer value is a block and a byte offset `0 ≤ off ≤ size`. The operand `$"x"` is the pointer to the first byte
+of the slot, and `(null T)` is the null pointer. The rules, where C++ makes an operation undefined:
+- `offset` past the end of the block is the trap "pointer out of bounds".
+- `offset` of the null pointer by zero is the null pointer; by any other count it is the trap "offset of a null
+  pointer".
+- A load or store through the null pointer is the trap "null dereference".
+- A load or store that reaches past the end of its block is the trap "pointer out of bounds".
+
+Stuck, with the reason: a load or store of a pointer type, a pointer as the value of a store, `ret` of a pointer, a
+pointer where an integer is needed (arithmetic, comparison, conditions, casts, call arguments), an integer used as
+an address, a pointer bound to an integer register, a global or a function address, `index`, `pdiff`, `copy`,
+`bfstore`, and a slot the function does not declare. -/
+
+/-- The bytes an integer of `bits` bits takes in memory. -/
+def byteWidth (bits : Nat) : Nat := (bits + 7) / 8
+
+/-- The frame's declarations of the slots of a function: the byte size of each slot, or the marker of a name that is
+declared more than once. -/
+def slotDecls (slots : List Slot) : Env :=
+  slots.map (fun s =>
+    if (slots.filter (fun t => t.name == s.name)).length > 1 then (Cell.dup s.name, ⟨Val.int 0, none⟩)
+    else (Cell.size s.name, ⟨Val.int s.bytes, none⟩))
+
+/-- The byte size of a block. -/
+def blockSize (env : Env) : Block → Except Outcome Int
+  | Block.slot x =>
+    match env.lookup (.dup x) with
+    | some _ => .error (.stuck s!"slot $\"{x}\" is declared more than once in the function; scopes are not modelled")
+    | none =>
+      match env.get (.size x) with
+      | some (Val.int n) => .ok n
+      | _ => .error (.stuck s!"slot $\"{x}\" is not declared in the function")
+
+/-- The integer at byte `off` of a slot, of `w` bytes: the bytes read from the most significant down (the
+Horner form of the little-endian value). -/
+def readBytes (env : Env) (x : String) (off : Nat) : Nat → Int → Except Outcome Int
+  | 0, acc => .ok acc
+  | k + 1, acc =>
+    match env.get (.byte x (off + k)) with
+    | some (Val.int b) => readBytes env x off k (acc * 256 + b)
+    | _ => .error (.stuck s!"slot $\"{x}\" is read before it is written")
+
+/-- Writes an integer of `w` bytes at byte `off` of a slot, little-endian. -/
+def writeBytes (env : Env) (x : String) (off w : Nat) (v : Int) : Env :=
+  (List.range w).foldl (fun e i =>
+    e.set (.byte x (off + i)) (Val.int ((v % 2 ^ (8 * w)) / 256 ^ i % 256)) none) env
+
+/-- The name of a memory access on a type, for the stuck messages. -/
+def memKind (verb : String) (t : Ty) : String :=
+  match t with
+  | Ty.ptr _ => s!"{verb} of a pointer type is not modelled"
+  | _ => s!"{verb} of a non-integer type {tyText t}"
+
+/-- The block and offset an address operand denotes for an access of `w` bytes, after the null and bounds checks. -/
+def derefAddr (env : Env) (o : Operand) (w : Nat) : Except Outcome (Block × Int) := do
+  match ← evalVal env o with
+  | Val.null => throw (.trap "null dereference")
+  | Val.int _ => throw (.stuck "an integer is used as an address")
+  | Val.ptr b off =>
+    let size ← blockSize env b
+    if off < 0 ∨ size < off + (w : Int) then throw (.trap "pointer out of bounds")
+    return (b, off)
+
+/-- The integer a load of `bits` bits and signedness `signed` reads at `off` of a block. -/
+def loadInt (env : Env) (b : Block) (off : Int) (bits : Nat) (signed : Bool) : Except Outcome Val :=
+  match b with
+  | Block.slot x => do
+    let acc ← readBytes env x off.toNat (byteWidth bits) 0
+    return Val.int (wrapTo bits signed acc)
+
+/-- A value-producing form of integer type, in the subset. -/
+def evalIntRValue (env : Env) : RValue → Except Outcome Int
   | RValue.binop op t a b => do
     evalBin op t (← evalOperand env a) (← evalOperand env b)
   | RValue.unop op t a => do
@@ -272,6 +387,27 @@ def evalRValue (env : Env) : RValue → Except Outcome Int
     | none, _ => throw (.stuck "bitcast to or from a non-integer type (a pointer or an aggregate) is not modelled")
   | RValue.conv op _ _ => .error (.stuck s!"value form conv ({ConvOp.name op}) not modelled")
   | rv => .error (.stuck s!"value form {rvalueName rv} not modelled")
+
+/-- A value-producing form: an operand, a load or an offset (the pointer forms), or an integer form. -/
+def evalRValue (env : Env) : RValue → Except Outcome Val
+  | RValue.operand o => evalVal env o
+  | RValue.load _ t a => do
+    let some (bits, signed) := infoOf t
+      | throw (.stuck (memKind "load" t))
+    let (b, off) ← derefAddr env a (byteWidth bits)
+    loadInt env b off bits signed
+  | RValue.offset a n => do
+    match ← evalVal env a with
+    | Val.ptr b off =>
+      let size ← blockSize env b
+      let r := off + (n : Int)
+      if size < r then throw (.trap "pointer out of bounds")
+      return Val.ptr b r
+    | Val.null =>
+      if n == 0 then return Val.null
+      else throw (.trap "offset of a null pointer")
+    | Val.int _ => throw (.stuck "offset of an integer")
+  | rv => Val.int <$> evalIntRValue env rv
 
 /-! ### Switch
 
@@ -358,7 +494,7 @@ def bindArgs : List Param → List Int → Except Outcome Env
     match infoOf t with
     | some (bits, signed) =>
       let rest ← bindArgs ps vs
-      return rest.set (.reg n) (wrapTo bits signed v) (some (bits, signed))
+      return rest.set (.reg n) (Val.int (wrapTo bits signed v)) (some (bits, signed))
     | none => .error (.stuck s!"parameter {nm} of non-integer type {tyText t} is not modelled")
   | p :: _, _ => .error (.stuck s!"a {paramKind p} parameter is not modelled")
 
@@ -370,23 +506,31 @@ def execStmt : Nat → Ctx → Env → Stmt → Except Outcome (Env × Flow)
     match s with
     | Stmt.letS r t (RValue.call cty callee va args) => do
       match ← callValue n ctx env cty callee va args with
-      | some v => return (env.set (.reg r) v (infoOf t), .normal)
+      | some v => return (env.set (.reg r) (Val.int v) (infoOf t), .normal)
       | none => .error (.stuck s!"a call without a value is bound to %{r}")
     | Stmt.letS r t rv => do
       let v ← evalRValue env rv
+      -- an integer register holds an integer
+      if (infoOf t).isSome && !v.isInt then throw (.stuck s!"a pointer value is bound to %{r}, which has an integer type")
       return (env.set (.reg r) v (infoOf t), .normal)
     | Stmt.setS r o => do
-      let v ← evalOperand env o
+      let v ← evalVal env o
       -- a register keeps the type it was declared with
       let info := match env.lookup (.reg r) with
         | some reg => reg.info
         | none => operandInfo env o
+      if info.isSome && !v.isInt then throw (.stuck s!"a pointer value is assigned to %{r}, which has an integer type")
       return (env.set (.reg r) v info, .normal)
-    | Stmt.storeS _ t (Operand.localVar x) val => do
-      let v ← evalOperand env val
-      match infoOf t with
-      | some (bits, signed) => return (env.set (.slot x) (wrapTo bits signed v) (some (bits, signed)), .normal)
-      | none => .error (.stuck s!"store of a non-integer type {tyText t}")
+    | Stmt.storeS _ t a val => do
+      let some (bits, signed) := infoOf t
+        | throw (.stuck (memKind "store" t))
+      let (b, off) ← derefAddr env a (byteWidth bits)
+      let k ← match (← evalVal env val) with
+        | Val.int k => pure k
+        | _ => throw (.stuck "store of a pointer value is not modelled")
+      match b with
+      | Block.slot x =>
+        return (writeBytes env x off.toNat (byteWidth bits) (wrapTo bits signed k), .normal)
     | Stmt.evalS (RValue.call cty callee va args) => do
       -- the value of a call is discarded; a trap or a stuck form in the call still happens
       let _ ← callValue n ctx env cty callee va args
@@ -423,8 +567,9 @@ def execStmt : Nat → Ctx → Env → Stmt → Except Outcome (Env × Flow)
     | Stmt.cont => return (env, .cont)
     | Stmt.ret none => return (env, .ret none)
     | Stmt.ret (some o) => do
-      let v ← evalOperand env o
-      return (env, .ret (some v))
+      match ← evalVal env o with
+      | Val.int v => return (env, .ret (some v))
+      | _ => throw (.stuck "returning a pointer is not modelled")
     | Stmt.unreachable => .error (.trap "unreachable")
     | Stmt.trap => .error (.trap "trap")
     | Stmt.loc _ _ | Stmt.likely | Stmt.unlikely => return (env, .normal)
@@ -449,7 +594,7 @@ def callValue : Nat → Ctx → Env → Ty → Operand → Option Nat → List O
   let vals ← args.mapM (evalOperand env)
   if ctx.depth == 0 then throw (.stuck "out of fuel: the calls are nested too deeply")
   let frame ← bindArgs fn.params vals
-  let (_, fl) ← execList k { ctx with depth := ctx.depth - 1 } frame fn.body
+  let (_, fl) ← execList k { ctx with depth := ctx.depth - 1 } (slotDecls fn.slots ++ frame) fn.body
   let r : Option Int ← match fl with
     | .ret v => pure v
     | .normal => pure none
@@ -507,7 +652,7 @@ end
 /-- Runs a function without parameters, from its body, with the functions `prog` available to its calls.
 Falling off the end gives `value none`. -/
 def runFn (fuel : Nat) (prog : List Func) (fn : Func) : Outcome :=
-  match execList fuel { prog := prog, depth := callDepth } [] fn.body with
+  match execList fuel { prog := prog, depth := callDepth } (slotDecls fn.slots) fn.body with
   | .error o => o
   | .ok (_, .ret v) => .value v
   | .ok (_, .normal) => .value none
