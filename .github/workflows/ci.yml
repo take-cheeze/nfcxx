@@ -570,7 +570,7 @@ jobs:
   build-and-test:
     if: always() && github.event_name != 'schedule'
     needs: [build, test, arm-build, arm-test, macos-suites, pathb-changes, pathb-build, pathb-test,
-      bc2cpp-changes, world, mrbc-rb, mrbc-snapshot, checks, nfcxx-clang-parity]
+      bc2cpp-changes, world, mrbc-rb, mrbc-snapshot, checks, nfcxx-clang-parity, self-aot]
     runs-on: ubuntu-24.04
     permissions:
       actions: read

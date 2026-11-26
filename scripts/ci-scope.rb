@@ -20,6 +20,8 @@ module CiScope
   PATHB_JOBS = %w[pathb-build pathb-test].freeze
   # The bc2cpp jobs of ci.yml: required whenever bc2cpp-changes reports a change to one of their paths (or on a manual run).
   BC2CPP_JOBS = %w[world mrbc-rb mrbc-snapshot checks nfcxx-clang-parity].freeze
+  # The bc2cpp self build: selected like BC2CPP_JOBS, except that a manual run starts it only with its self_aot input.
+  SELF_AOT_JOB = 'self-aot'
 
   # The entries of the `test` job's matrix (ci.yml), one job each. An entry with `gcc_only: true` runs the gcc backend only, which
   # is for pushes to main (GCC_BACKEND in ci.yml): without gcc it is left out, so that leg never starts. The flag itself is not
@@ -58,7 +60,7 @@ module CiScope
     output.split("\0")
   end
 
-  def validate(needs, jobs = nil)
+  def validate(needs, jobs = nil, event = nil)
     selection = needs.fetch('pathb-changes', {})
     raise ArgumentError, 'CI selection did not succeed' unless selection['result'] == 'success'
 
@@ -85,6 +87,14 @@ module CiScope
         actual = needs.fetch(name, {})['result']
         raise ArgumentError, "#{name}: expected #{expected}, got #{actual.inspect}" unless actual == expected
       end
+    end
+    self_aot = if bc2cpp_changed == 'false' then %w[skipped]
+               elsif event == 'workflow_dispatch' then %w[success skipped]
+               else %w[success]
+               end
+    actual = needs.fetch(SELF_AOT_JOB, {})['result']
+    unless self_aot.include?(actual)
+      raise ArgumentError, "#{SELF_AOT_JOB}: expected #{self_aot.join(' or ')}, got #{actual.inspect}"
     end
     return unless full == 'true'
 
@@ -126,7 +136,7 @@ module CiScope
       needs = JSON.parse(env.fetch('NEEDS_JSON'))
       file = env.fetch('JOBS_FILE', '')
       jobs = file.empty? ? nil : JSON.parse(File.read(file))
-      validate(needs, jobs)
+      validate(needs, jobs, env.fetch('GITHUB_EVENT_NAME', ''))
       # With general coverage selected the legs are checked, so a run without its job list cannot pass (it fails closed).
       if jobs.nil? && needs.dig('pathb-changes', 'outputs', 'full_ci') == 'true'
         raise ArgumentError, 'the job list of this run (JOBS_FILE) is missing'

@@ -113,8 +113,17 @@ def outcomes(full, pathb, bc2cpp = false)
   [[CiScope::FULL_JOBS, full], [CiScope::PATHB_JOBS, pathb], [CiScope::BC2CPP_JOBS, bc2cpp]].each do |names, enabled|
     names.each { |name| needs[name] = { 'result' => enabled ? 'success' : 'skipped' } }
   end
+  needs[CiScope::SELF_AOT_JOB] = { 'result' => bc2cpp ? 'success' : 'skipped' }
   needs
 end
+
+# self-aot: a manual run starts it only with its self_aot input, so there it may be skipped even with bc2cpp selected.
+dispatch = outcomes(false, false, true)
+dispatch[CiScope::SELF_AOT_JOB]['result'] = 'skipped'
+check.call('manual run: self-aot may be skipped') { CiScope.validate(dispatch, nil, 'workflow_dispatch'); true }
+rejects.call('pull request: self-aot skipped with bc2cpp selected') { CiScope.validate(dispatch, nil, 'pull_request') }
+dispatch[CiScope::SELF_AOT_JOB]['result'] = 'failure'
+rejects.call('manual run: self-aot failure') { CiScope.validate(dispatch, nil, 'workflow_dispatch') }
 
 # The third value is bc2cpp-changes: false + true is a change to bc2cpp/ alone, where only the bc2cpp jobs are selected.
 [[true, true, true], [true, true, false], [true, false, true], [true, false, false], [false, false, true], [false, false, false]]
