@@ -233,6 +233,7 @@ def run_loop(args, state, ld_available)
     if a == "--emit-c" then state.emit_c = 1
     elsif a == "--emit-hip" then state.emit_hip = 1
     elsif starts_with?(a, "--backend=")
+      raise NfcxxExit.new("nfcxx: --backend=pathb cannot be combined with --profile (docs/notes/profiler.md)", 2) if a == "--backend=pathb" && state.cflags.include?("-finstrument-functions")
       state.backend = a[10..]
       state.backend_explicit = 1
       state.path_b = 1 if state.backend == "pathb"
@@ -259,6 +260,17 @@ def run_loop(args, state, ld_available)
         state.files << a
       end
     elsif a == "--obfuscate-kernels" then state.obfuscate = 1
+    elsif a == "--profile"
+      # docs/notes/profiler.md: -finstrument-functions on the C compiles (gcc backend only), with the profiler runtime linked in.
+      # The profile is written at run time when NFCXX_PROFILE names a file.
+      raise NfcxxExit.new("nfcxx: --profile needs the gcc backend; it cannot be used with --backend=pathb (docs/notes/profiler.md)", 2) if state.backend == "pathb"
+      state.backend = "gcc"
+      state.backend_explicit = 1
+      state.cflags << "-finstrument-functions" unless state.cflags.include?("-finstrument-functions")
+      prof_dir = File.expand_path("../lib/prof", __dir__)
+      [File.join(prof_dir, "nfcxx_prof.c"), File.join(prof_dir, "nfcxx_prof_cyg.c")].each do |src|
+        state.files << src unless state.files.include?(src)
+      end
     elsif a == "-fsanitize=address" then state.asan = 1
     elsif a == "-fsafe-pointers" then state.safeptr = 1
     elsif a == "-fno-safe-pointers" then state.safeptr = 0

@@ -17,9 +17,15 @@ Implemented so far (prototype, format version 1):
   with it the file holds the expected pairs at two sites over three threads, with enters and exits alternating per thread
   and timestamps not going backwards.
 
-Not yet done: the compiler does not emit the calls (no `--profile` flag, no IR pass, no `-finstrument-functions` path), the
-nfcast tier does not emit them, the file has no string table of site names, no IR hash, and no allocation or compute
-counts. Those are the next steps below.
+- `--profile` in the driver (`scripts/nfcxx-loop.rb`): adds `-finstrument-functions` to the C compiles and links
+  `lib/prof/nfcxx_prof.c` and `lib/prof/nfcxx_prof_cyg.c`, which map gcc's `__cyg_profile_func_enter/exit` onto the
+  runtime. It implies the gcc backend and is refused with `--backend=pathb`. The site of a function is its address for now.
+  `tests/prof/run.sh` builds `cprog.c` with it and checks the profile (`check_any.c`): fib(10) gives 178 pairs at 2 sites.
+  Only C inputs are covered so far; the C++ path and the nfcast tier are not.
+
+Not yet done: the Path B IR does not emit the calls, the C++ path does not pass the flag through, the nfcast tier does not
+emit them, the file has no string table of site names, no IR hash, and no allocation or compute counts. Those are the next
+steps below.
 
 ## Switching on
 
