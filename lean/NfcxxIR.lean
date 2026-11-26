@@ -6,3 +6,4 @@ import NfcxxIR.Encode
 import NfcxxIR.Semantics
 import NfcxxIR.Speculation
 import NfcxxIR.JitInt
+import NfcxxIR.JitTyped
