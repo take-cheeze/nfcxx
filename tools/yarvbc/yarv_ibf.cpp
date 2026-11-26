@@ -35,6 +35,8 @@ constexpr OpSpec kSpecs[] = {
     {"nop", ""},
     {"getlocal_WC_0", "n"},
     {"setlocal_WC_0", "n"},
+    {"getlocal_WC_1", "n"},
+    {"setlocal_WC_1", "n"},
     {"putnil", ""},
     {"putself", ""},
     {"putobject", "v"},
@@ -60,6 +62,7 @@ constexpr OpSpec kSpecs[] = {
     {"leave", ""},
     {"send", "cI"},
     {"opt_send_without_block", "c"},
+    {"invokeblock", "c"},
     {"definemethod", "iI"},
 };
 
