@@ -16,6 +16,8 @@
 #
 #   tests/mrbbc/lower/run.sh
 # MRBBC_VALUE selects the value layout (8, the default; 4 or 16): the lowering's --value and the runtime's MRBBC_VALUE.
+# MRBBC_GC_THRESHOLD=1 collects before every allocation (GC stress); RT_CFLAGS goes to the runtime's compile and the link
+# (for example -DMRBBC_GC_CONSERVATIVE=1, or -fsanitize=address).
 # Exit 77 (skip) when mrbc, the mruby interpreter or QBE is missing.
 set -u
 root=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -28,6 +30,7 @@ export MRBC_FALLBACK=${MRBC_FALLBACK:-/nonexistent}
 MRUBY=${MRUBY:-$root/build/mruby-tool/bin/mruby}
 QBE=${QBE:-$root/build/qbe/qbe}
 VALUE=${MRBBC_VALUE:-8}
+RT_CFLAGS=${RT_CFLAGS:-}
 work=${TMPDIR:-/tmp}/mrbbc-lower.$$
 mkdir -p "$work"
 trap 'rm -rf "$work"' EXIT
@@ -39,8 +42,10 @@ fi
 
 c++ -std=c++17 -O1 -Wall -Wextra -Werror -I"$src" -o "$work/lower" "$src/mrb_rite.cpp" "$src/mrb_lower.cpp" \
   "$src/mrbbc_lower_main.cpp" || exit 1
-cc -std=c99 -Wall -Wextra -Werror -DMRBBC_VALUE="$VALUE" -c -o "$work/mrbrt.o" "$rt/mrbrt.c" || exit 1
-cc -std=c99 -Wall -Wextra -Werror -DMRBBC_VALUE="$VALUE" -c -o "$work/driver.o" "$rt/driver.c" || exit 1
+# shellcheck disable=SC2086
+cc -std=c99 -Wall -Wextra -Werror -DMRBBC_VALUE="$VALUE" $RT_CFLAGS -c -o "$work/mrbrt.o" "$rt/mrbrt.c" || exit 1
+# shellcheck disable=SC2086
+cc -std=c99 -Wall -Wextra -Werror -DMRBBC_VALUE="$VALUE" $RT_CFLAGS -c -o "$work/driver.o" "$rt/driver.c" || exit 1
 
 # build SRC NAME: the program binary in $work/NAME, or the failing step's message on stdout (status 1).
 build() {
@@ -51,7 +56,8 @@ build() {
   "$root/scripts/mrb.rb" "$root/scripts/pathb-qbe-emit.rb" "$work/$base.ir" > "$work/$base.ssa" 2> "$work/$base.err" \
     || { echo "emitter: $(cat "$work/$base.err")"; return 1; }
   "$QBE" "$work/$base.ssa" > "$work/$base.s" 2> "$work/$base.err" || { echo "qbe: $(cat "$work/$base.err")"; return 1; }
-  cc -o "$work/$base" "$work/$base.s" "$work/mrbrt.o" "$work/driver.o" || { echo "link"; return 1; }
+  # shellcheck disable=SC2086
+  cc $RT_CFLAGS -o "$work/$base" "$work/$base.s" "$work/mrbrt.o" "$work/driver.o" || { echo "link"; return 1; }
 }
 
 # value_ref SRC OUT: SRC with its last line replaced by p(LAST), the reference program.

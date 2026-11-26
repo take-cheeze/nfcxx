@@ -99,6 +99,8 @@ constexpr int kFirstReg = 6;
 // function has %5 the disp array of its closure (the frames of its creators past the first, see mrbbc_block_nested).
 constexpr long kMaxDepth = 8;
 // The slot a BLOCK passes as its closure: unused, the runtime makes the closure on the heap (mrbbc_block).
+// The size of the collector's record of a frame (mrbrt.h, MrbbcGCFrame: four pointers).
+constexpr std::size_t kGcFrameBytes = 32;
 // The registers past an irep's nregs that a frame keeps (see lower_irep).
 constexpr unsigned kRegSlack = 3;
 
@@ -957,6 +959,49 @@ std::string expand_copies(Ctx &c, const std::string &body) {
   return out.str();
 }
 
+// The values of a function's slots (argument vectors, temporaries; every slot holds values).
+std::size_t slot_values(const Ctx &c) {
+  std::size_t n = 0;
+  for (const auto &s : c.slots) n += s.second / kV();
+  return n;
+}
+
+// The collector's roots (mrbrt.h, mrbbc_gc_enter): the slots of the function are placed in its frame after the registers,
+// so the frame is every value the function holds, and the function registers it on entry (the runtime sets it to nil) and
+// takes it off before it returns. A use of a slot `$"name"` in the body becomes an address in the frame; every `(return)`
+// jumps to the one exit, which calls mrbbc_gc_leave. The register record is the slot "gcf" (kGcFrameBytes).
+std::string root_frame(Ctx &c, unsigned frame_regs, const std::string &body) {
+  std::map<std::string, std::size_t> where;  // a slot's name, as the body names it ($"name"), and its offset in the frame
+  std::size_t off = kV() * frame_regs;
+  for (const auto &s : c.slots) {
+    where["$\"" + s.first + "\""] = off;
+    off += s.second;
+  }
+  std::ostringstream out;
+  out << "  (eval (call void &\"mrbbc_gc_enter\" $\"gcf\" $\"frame\" (const long " << frame_regs + slot_values(c) << ")))\n";
+  std::istringstream in(body);
+  std::string line;
+  const std::string ret = "(return)", leave = "(goto \"gc_leave\")";
+  while (std::getline(in, line)) {
+    // each use of a slot gets its address just before the line (a register per use keeps no pointer live across the body)
+    for (std::size_t at = line.find("$\""); at != std::string::npos; at = line.find("$\"", at + 1)) {
+      const std::size_t end = line.find('"', at + 2);
+      if (end == std::string::npos) break;
+      auto it = where.find(line.substr(at, end + 1 - at));
+      if (it == where.end()) continue;
+      const std::string r = c.fresh();
+      out << "  (let " << r << " (ptr unsigned_char) (offset $\"frame\" " << it->second << "))\n";
+      line.replace(at, it->first.size(), r);
+    }
+    for (std::size_t at = line.find(ret); at != std::string::npos; at = line.find(ret, at + leave.size())) {
+      line.replace(at, ret.size(), leave);
+    }
+    out << line << "\n";
+  }
+  out << "  (label \"gc_leave\")\n  (eval (call void &\"mrbbc_gc_leave\" $\"gcf\"))\n  (return)\n";
+  return out.str();
+}
+
 // Lowers one irep to the function `fname` and appends it to sh.functions.
 void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kind kind) {
   if (!irep.catches.empty()) {
@@ -1000,10 +1045,6 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
   Ctx c(sh, irep, kind, frame_regs);
   for (unsigned i = 0; i < frame_regs; ++i) {
     c.line("(let " + c.reg(i) + " (ptr unsigned_char) (offset $\"frame\" " + num(kV() * i) + "))");
-  }
-  // the main program's frame starts as nil (R(0), the main object, is not modelled: a word layout reads its tag from it)
-  if (kind == Kind::Main) {
-    c.line("(eval (call void &\"mrbbc_frame_init\" $\"frame\" (const long " + num(static_cast<long long>(frame_regs)) + ")))");
   }
   if (pr.kd != 0) c.kdict = static_cast<unsigned>(len + 1);
   if (kind == Kind::Method || kind == Kind::Block) {
@@ -1660,7 +1701,8 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
   c.body << "  (label " << lbl(irep.iseq.size()) << ")\n";
   c.line("(return)");
 
-  const std::string body = expand_copies(c, c.body.str());
+  const std::size_t frame_values = static_cast<std::size_t>(frame_regs) + slot_values(c);
+  const std::string body = expand_copies(c, root_frame(c, frame_regs, c.body.str()));
   std::ostringstream fn;
   fn << "(function \"" << fname << "\" (ret void) (params (param %0 \"ret\" (ptr (struct \"MV\")))";
   if (kind == Kind::Method) {
@@ -1673,8 +1715,8 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
        << " (param %4 \"home\" (ptr (struct \"MV\"))) (param %5 \"disp\" (ptr (struct \"MV\")))";
   }
   fn << ")\n";
-  fn << "  (slot \"frame\" (struct \"MV\") " << kV() * static_cast<std::size_t>(frame_regs) << " " << kAlign() << ")\n";
-  for (const auto &s : c.slots) fn << "  (slot \"" << s.first << "\" (struct \"MV\") " << s.second << " " << kAlign() << ")\n";
+  fn << "  (slot \"frame\" (struct \"MV\") " << kV() * frame_values << " " << kAlign() << ")\n";
+  fn << "  (slot \"gcf\" (struct \"MV\") " << kGcFrameBytes << " 8)\n";
   fn << body << ")\n";
   sh.functions += fn.str();
 }
