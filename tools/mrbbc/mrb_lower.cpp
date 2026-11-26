@@ -14,10 +14,11 @@
 // method's number (mrbbc_find: the latest definition of the name, and the count is checked there), and calls the
 // function of that number. The method table is filled when the TDEF runs (mrbbc_def), as mruby defines the method then.
 //
-// A block (a child irep that a BLOCK names) is `mrb_b<N>(MV *ret, MV *argv, long argc, MV *frame, MV *home)`: argv[0] is
-// the self the block was made in, argv[1..argc] the arguments the yield gave, frame is the frame of the function that made
-// the block (its registers are the block's outer locals, GETUPVAR and SETUPVAR at level 0), and home is the frame of the
-// method a `return` in the block leaves. BLOCK makes a closure in a slot of the caller (block number, a copy of self, the
+// A block (a child irep that a BLOCK names) is `mrb_b<N>(MV *ret, MV *argv, long argc, MV *frame, MV *home, MV *disp)`: argv[0]
+// is the self the block was made in, argv[1..argc] the arguments the yield gave, frame is the frame of the function that
+// made the block (its registers are the block's outer locals, GETUPVAR and SETUPVAR at level 0), home is the frame of the
+// method a `return` in the block leaves, and disp the frames of the creators past frame (level L >= 1 is disp[L-1]; for a
+// block nested three or more deep, see mrbbc_block_nested). BLOCK makes a closure in a slot of the caller (block number, a copy of self, the
 // frame, the home), and the value is the closure's address with the BLK tag. A yield (BLKPUSH to get the method's block,
 // BLKCALL to call it) dispatches on the block number, as a self call does on the method number. A closure is only used
 // while its frame is alive: a block is passed to a method and yielded there, and the program has no way to keep it (a
@@ -78,6 +79,7 @@ struct Shared {
   std::map<const mrb::Irep *, const mrb::Irep *> block_method;  // a block body -> the method body it is made in (at any depth)
   std::set<const mrb::Irep *> method_blocks;     // the block bodies a method makes directly (their creator is the method)
   std::map<const mrb::Irep *, int> depth;        // a block body -> the number of blocks it is in (1: made by a non-block)
+  std::map<const mrb::Irep *, const mrb::Irep *> creator;  // a block body -> the body whose BLOCK made it (its level-0 frame)
   std::map<const mrb::Irep *, const mrb::Irep *> frame_owner;  // a block body -> the body whose frame is its %4 (the home: the
                                                  // method, main program or class body its chain of blocks starts in)
   std::set<std::string> defined;                 // the names a TDEF of the program defines
@@ -92,7 +94,11 @@ struct Shared {
 // %1 the argument vector, %2 the argument count, %3 the frame it was made in and %4 its home (the frame of the method a
 // `return` in it leaves), and a method has %4 the keyword flag (1 when the call gave keyword arguments). The registers are
 // numbered from kFirstReg.
-constexpr int kFirstReg = 5;
+constexpr int kFirstReg = 6;
+// The deepest block the lowering takes (the runtime's MRBBC_MAX_DEPTH: a closure keeps that many frames), and a block's
+// function has %5 the disp array of its closure (the frames of its creators past the first, see mrbbc_block_nested).
+constexpr long kMaxDepth = 8;
+constexpr std::size_t kCloBytes = 192;  // the closure slot of a BLOCK (the runtime's MRBBC_CLO_BYTES)
 // The registers past an irep's nregs that a frame keeps (see lower_irep).
 constexpr unsigned kRegSlack = 3;
 
@@ -506,6 +512,7 @@ void collect(Shared &sh, const mrb::Irep &irep, Kind kind, bool home_main, const
       // a block made by a block takes the frame of its creator's home (BLOCK passes %4 on), so its depth and that frame
       // are the creator's: the frame of the body the chain starts in
       sh.depth[body] = kind == Kind::Block ? sh.depth.at(&irep) + 1 : 1;
+      sh.creator[body] = &irep;
       sh.frame_owner[body] = kind == Kind::Block ? sh.frame_owner.at(&irep) : &irep;
       child_kind[in.args[1]] = std::make_pair(Kind::Block, child_home_main);
     } else if (in.op == mrb::OP_EXEC) {
@@ -522,6 +529,18 @@ void collect(Shared &sh, const mrb::Irep &irep, Kind kind, bool home_main, const
     const mrb::Irep *cm = ck == Kind::Method ? &irep.reps[i] : ck == Kind::Block ? own : nullptr;
     collect(sh, irep.reps[i], ck, child_kind[i].second, cm);
   }
+}
+
+// The body an upvar of `level` in the block `irep` reads: level 0 is the body that made the block (its creator), level 1 the
+// creator's creator, and so on up to the method or the main program that starts the chain.
+const mrb::Irep *upvar_body(const Shared &sh, const mrb::Irep &irep, unsigned level) {
+  const mrb::Irep *b = &irep;
+  for (unsigned i = 0; i <= level; ++i) {
+    auto it = sh.creator.find(b);
+    if (it == sh.creator.end()) throw std::runtime_error("malformed: an upvar level past the outermost body");
+    b = it->second;
+  }
+  return b;
 }
 
 // Whether the value of a call's result must be checked for a `return` leaving a block: the calls of a method or a block
@@ -1004,11 +1023,24 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         // a copy of R(0), and the frame), and the value is its address with the BLK tag
         const mrb::Irep &body = child_at(irep, x[1], in.pc);
         const std::string clo = "clo" + std::to_string(in.pc);
-        c.add_slot(clo, 40);  // the runtime's Clo: id, self, frame, home
+        c.add_slot(clo, kCloBytes);  // the runtime's Clo (MRBBC_CLO_BYTES): id, self, frame, home, and the frames of the creators
+        if (sh.depth.at(&body) > kMaxDepth) {
+          throw Refused("refused: a block nested more than " + std::to_string(kMaxDepth) + " levels is not lowered yet (pc " +
+                        std::to_string(in.pc) + ")");
+        }
         // the home of the block: this frame for a method or the main program, the block's own home for a block
         const std::string home = kind == Kind::Block ? "%4" : "$\"frame\"";
-        c.line("(eval (call void &\"mrbbc_block\" " + c.reg(x[0]) + " $\"" + clo + "\" (const long " +
-               num(number_of(sh.block_ids, body, "block")) + ") " + c.reg(0) + " $\"frame\" " + home + "))");
+        const std::string self_op = c.reg(0);
+        if (kind == Kind::Block) {
+          // a block made by a block: the new block's level 1 is this block's creator (%3), and its disp is that and this
+          // block's disp (%5, of depth-1 entries; see mrbbc_block_nested)
+          c.line("(eval (call void &\"mrbbc_block_nested\" " + c.reg(x[0]) + " $\"" + clo + "\" (const long " +
+                 num(number_of(sh.block_ids, body, "block")) + ") " + self_op + " $\"frame\" " + home + " %3 %5 (const long " +
+                 num(sh.depth.at(&irep) - 1) + ")))");
+        } else {
+          c.line("(eval (call void &\"mrbbc_block\" " + c.reg(x[0]) + " $\"" + clo + "\" (const long " +
+                 num(number_of(sh.block_ids, body, "block")) + ") " + self_op + " $\"frame\" " + home + "))");
+        }
         break;
       }
       case mrb::OP_HASH: {
@@ -1062,11 +1094,13 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         c.line("(let " + id + " long (call long &\"mrbbc_blk_id\" " + c.reg(x[0]) + "))");
         c.line("(let " + fr + " (ptr unsigned_char) (call (ptr unsigned_char) &\"mrbbc_blk_frame\" " + c.reg(x[0]) + "))");
         c.line("(let " + hm + " (ptr unsigned_char) (call (ptr unsigned_char) &\"mrbbc_blk_home\" " + c.reg(x[0]) + "))");
+        const std::string dp = c.fresh();
+        c.line("(let " + dp + " (ptr unsigned_char) (call (ptr unsigned_char) &\"mrbbc_blk_disp\" " + c.reg(x[0]) + "))");
         for (std::size_t m = 0; m < sh.blocks.size(); ++m) {
           std::string hit = c.fresh();
           c.line("(let " + hit + " bool (eq long " + id + " (const long " + num(static_cast<long long>(m)) + ")))");
           c.line("(if " + hit + " (then (eval (call void &\"mrb_b" + std::to_string(m) + "\" " + c.reg(x[0]) + " $\"" + argv +
-                 "\" (const long " + num(n) + ") " + fr + " " + hm + "))))");
+                 "\" (const long " + num(n) + ") " + fr + " " + hm + " " + dp + "))))");
         }
         emit_unwind_check(c);
         break;
@@ -1102,6 +1136,25 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
           }
           std::string p = c.fresh();
           c.line("(let " + p + " (ptr unsigned_char) (offset %4 " + num(16 * static_cast<long long>(x[1])) + "))");
+          if (in.op == mrb::OP_GETUPVAR) c.line("(copy 16 " + c.reg(x[0]) + " " + p + ")");
+          else c.line("(copy 16 " + p + " " + c.reg(x[0]) + ")");
+          break;
+        }
+        // A block nested three or more deep reads level L >= 1 from its closure's frames: disp[L-1] is the frame of the L-th
+        // scope out (mrbbc_upframe, see mrbbc_block_nested). The register must be one of that body's locals.
+        if (kind == Kind::Block && sh.depth.at(&irep) >= 3 && x[2] >= 1) {
+          if (x[2] > static_cast<unsigned>(sh.depth.at(&irep)) - 1u) {
+            throw std::runtime_error("malformed: " + std::string(in.name) + " at pc " + std::to_string(in.pc) + " past the outermost scope");
+          }
+          const mrb::Irep *owner = upvar_body(sh, irep, x[2]);
+          if (x[1] >= owner->nlocals) {
+            throw Refused("refused: " + std::string(in.name) + " of a register past the locals of the frame it reads is not lowered yet (pc " +
+                          std::to_string(in.pc) + ")");
+          }
+          const std::string fp = c.fresh(), p = c.fresh();
+          c.line("(let " + fp + " (ptr unsigned_char) (call (ptr unsigned_char) &\"mrbbc_upframe\" %5 (const long " +
+                 num(static_cast<long long>(x[2]) - 1) + ")))");
+          c.line("(let " + p + " (ptr unsigned_char) (offset " + fp + " " + num(16 * static_cast<long long>(x[1])) + "))");
           if (in.op == mrb::OP_GETUPVAR) c.line("(copy 16 " + c.reg(x[0]) + " " + p + ")");
           else c.line("(copy 16 " + p + " " + c.reg(x[0]) + ")");
           break;
@@ -1385,7 +1438,7 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
     fn << " (param %1 \"argv\" (ptr (struct \"MV\"))) (param %2 \"blk\" (ptr (struct \"MV\")))";
   } else if (kind == Kind::Block) {
     fn << " (param %1 \"argv\" (ptr (struct \"MV\"))) (param %2 \"argc\" long) (param %3 \"frame\" (ptr (struct \"MV\")))"
-       << " (param %4 \"home\" (ptr (struct \"MV\")))";
+       << " (param %4 \"home\" (ptr (struct \"MV\"))) (param %5 \"disp\" (ptr (struct \"MV\")))";
   }
   fn << ")\n";
   fn << "  (slot \"frame\" (struct \"MV\") " << 16 * static_cast<std::size_t>(frame_regs) << " 8)\n";

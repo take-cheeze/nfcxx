@@ -290,8 +290,17 @@ are the block's outer locals.
   block reads the method's, the main program's or the class body's register b, as vm.c's uvenv does (checked against the
   reference: a method's local, and a top-level local, set from a block in a block). The home's register must be one of its
   locals (below its `nlocals`), else refused. Level 2 from a depth-2 block is past that frame, nil for the block slot (see
-  the next bullet); any other level 2 read, and any read in a block of depth 3 or more, is refused. A block made by a method
+  the next bullet); any other level 2 read of a depth-2 block is refused. A block made by a method
   reads level 1 as nil: the method's proc has no environment above it.
+- Blocks nested three or more deep (round 8). The level counts the scopes out from the creator: level 0 is the frame the
+  block was made in (`%3`), level 1 the creator's own creator, and so on up to the method or the main program (checked
+  against the reference, `blk3_locals.rb`, `blk4_upvar.rb`). The closure keeps those frames in its `disp` array (`Clo`,
+  `MRBBC_MAX_DEPTH` = 8): a block made by a block gets its creator's `%3` first and the creator's own `disp` after it
+  (`mrbbc_block_nested`), and a block function takes its closure's `disp` as its `%5` parameter (`mrbbc_blk_disp` at the
+  call). `GETUPVAR` and `SETUPVAR` at level L >= 1 of a block of depth 3 or more read the frame `disp[L-1]`
+  (`mrbbc_upframe`), and the register must be a local of the body at that level (`upvar_body` walks the creators). A
+  return out of such a block and a break from it use the home and the call frame as before (`blk3_return.rb`,
+  `blk3_break.rb`). A block nested more than 8 deep is refused.
 - `GETUPVAR a b 1` in a block that a method makes directly, with b = the method's parameters + 1 (its block slot R(n+1)), is nil. The
   compiler emits it for the implicit block of a `super` in the block (gen_blkmove), and mruby 4.0.0 reads nil there: the
   method's proc has no environment, so the upvar of level 1 is nil. Checked against the reference (`sup_blk_noblock.rb`:
@@ -445,7 +454,8 @@ and `SUPER` outside a method (a NoMethodError at run time; see "Super" and "Bloc
 parameters of methods and blocks (see "Parameters"), keyword arguments of calls (`SEND`, `SSEND`, `SENDB`, `SSENDB`, `SUPER`,
 `new`), splats of arguments (`f(*a)`, `super(*a)`, `[*a]`, `ARYCAT`, `ARYSPLAT`), and `HASH`. Still refused: `RETURN_BLK` from a
 block of the top level, yields and variables more than two levels out (a block in a block in a block), `SENDB` of a builtin
-method, `ASET`, `APOST`, the quoted symbols, a zsuper in a block of depth 3, the block parameter `&b` (a closure would outlive
+method, `ASET`, `APOST`, the quoted symbols, a zsuper in a block of depth 3, a block nested more than 8 deep, `yield` in a block
+of depth 2 or more (`BLKPUSH` of a block that is not the method's own), the block parameter `&b` (a closure would outlive
 its frame if the block were returned or stored; the lowering has no escape analysis), `**` parameters, `&nil`, the
 instance variables of the top level, and a core class as a superclass
 (a run-time NotImplementedError: `class E < StandardError`). The strings and arrays in the

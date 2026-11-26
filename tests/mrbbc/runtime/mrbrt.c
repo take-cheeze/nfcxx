@@ -436,7 +436,14 @@ typedef struct Clo {
   MV self;
   MV *frame;
   MV *home;
+  /* The frames of the enclosing scopes past the creator: disp[L-1] is the frame at upvar level L >= 1 (level 0 is frame, the
+   * frame the block was made in). A block made by a method or the main program has none. A block made by a block takes its
+   * creator's own creator frame (the creator's %3) first, then the creator's disp (see mrbbc_block_nested). */
+  MV disp[MRBBC_MAX_DEPTH];
 } Clo;
+
+/* The closure is a slot of its creator's frame (MRBBC_CLO_BYTES), so the lowering's slot is large enough. */
+typedef char mrbbc_clo_fits[sizeof(Clo) <= MRBBC_CLO_BYTES ? 1 : -1];
 
 static Clo *clo_of(const MV *v) { return (Clo *)(intptr_t)v->i; }
 
@@ -448,6 +455,28 @@ void mrbbc_block(MV *dst, void *clo, long id, const MV *self, MV *frame, MV *hom
   c->home = home;
   set_obj(dst, MRBBC_BLK, c);
 }
+
+/* A block made by a block: outer is the creator's %3 (the frame the creator was made in, the level 1 frame of the new block)
+ * and pdisp is the creator's disp, of nd entries (its depth minus one): the new block's disp is outer, then pdisp. */
+void mrbbc_block_nested(MV *dst, void *clo, long id, const MV *self, MV *frame, MV *home, MV *outer, const MV *pdisp,
+                        long nd) {
+  Clo *c = clo;
+  long k;
+  if (nd + 1 > MRBBC_MAX_DEPTH) mrbbc_raise("NotImplementedError", "a block nested too deep is not lowered yet");
+  mrbbc_block(dst, clo, id, self, frame, home);
+  c->disp[0].tag = MRBBC_NIL;
+  c->disp[0].i = (int64_t)(intptr_t)outer;
+  for (k = 0; k < nd; k++) c->disp[k + 1] = pdisp[k];
+}
+
+/* The disp array of a block value (its frames past the creator), for the block's function. */
+MV *mrbbc_blk_disp(const MV *blk) {
+  if (blk->tag != MRBBC_BLK) mrbbc_raise("LocalJumpError", "unexpected yield");
+  return clo_of(blk)->disp;
+}
+
+/* The frame at upvar level k+1 of a block whose disp is disp (see Clo). */
+MV *mrbbc_upframe(const MV *disp, long k) { return (MV *)(intptr_t)disp[k].i; }
 
 long mrbbc_blk_id(const MV *blk) {
   if (blk->tag != MRBBC_BLK) mrbbc_raise("LocalJumpError", "unexpected yield");

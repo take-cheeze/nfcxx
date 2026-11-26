@@ -102,7 +102,17 @@ void mrbbc_aref(MV *dst, const MV *v, long i);
  * frame, the layout of Clo in mrbrt.c). The helpers read a block value: its number, its frame, its home, and argv[0] =
  * its self; mrbbc_blk_load copies the method's block (a nil one raises "unexpected yield"); mrbbc_blk_given writes true
  * or false for block_given?. A return out of a block is pending (mrbbc_return_block) until its home takes it. */
+/* Blocks nested deeper than MRBBC_MAX_DEPTH are not lowered (their closure keeps that many frames). MRBBC_CLO_BYTES is the
+ * size of the closure slot the lowering reserves for a BLOCK. A block made by a block (mrbbc_block_nested) gets the frames of
+ * its creators: outer is the creator's %3 and pdisp its disp, of nd entries; mrbbc_blk_disp is a block's disp array, and
+ * mrbbc_upframe(disp, k) the frame at upvar level k+1 of a block with that disp. */
+#define MRBBC_MAX_DEPTH 8
+#define MRBBC_CLO_BYTES 192
 void mrbbc_block(MV *dst, void *clo, long id, const MV *self, MV *frame, MV *home);
+void mrbbc_block_nested(MV *dst, void *clo, long id, const MV *self, MV *frame, MV *home, MV *outer, const MV *pdisp,
+                        long nd);
+MV *mrbbc_blk_disp(const MV *blk);
+MV *mrbbc_upframe(const MV *disp, long k);
 long mrbbc_blk_id(const MV *blk);
 MV *mrbbc_blk_frame(const MV *blk);
 MV *mrbbc_blk_home(const MV *blk);
