@@ -35,6 +35,14 @@ call_scans.each do |body|
 end
 suite.check("the call-name scanner preserves #{call_scans.size} lexical cases", true)
 
+# LOOP_ARENA: a numeric op's scoped temporary does not refuse the method's loops; any other mrb_value local does.
+require_relative '../../tools/bc2cpp/loop_arena'
+scoped = "{ mrb_value bc2cpp_nt;\nif (!mrb_undef_p(bc2cpp_nt = bc2cpp_num_add_float(M, r3, r4))) {\n  r3 = bc2cpp_nt;\n}\n}\n"
+suite.check("a loop's numeric temporary is scoped to its instruction (LOOP_ARENA)",
+            !LoopArena.foreign_locals?(scoped, []) &&
+            LoopArena.foreign_locals?("mrb_value bc2cpp_nt;\nr3 = bc2cpp_nt;\n", []) &&
+            LoopArena.foreign_locals?("{ mrb_value bc2cpp_tmp;\n}\n", []))
+
 SOURCE = <<~RUBY
   class GcRoot
     KEEP = []
