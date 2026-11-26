@@ -250,10 +250,14 @@ code is `sq_fn_N` over the same flat stack, so the call needs no new IR form. Th
   item, whose call consumes the callback's copy; the second item then reads the array as its callee
   (`attempt to call 'array'`). Five declared (nargs 6) is `attempt to call 'array'` on the first item. Tests
   `callback_four`, `callback_four_apply`, `callback_five_empty`, `rterr/callback_four_items`, `rterr/callback_five`,
-  `rterr/callback_five_apply`. Six declared or more (nargs 7 and up) read below the map's own frame, which is the
-  caller's stack: the reference gives `wrong number of parameters` for nargs 7, `attempt to call 'array'` for nargs 8 and
-  `attempt to call 'table'` for nargs 10 (probed with the callback's declared parameters 6, 7 and 9), so the runtime refuses
-  them at the first item with a named message. No test: nothing it prints can match the reference.
+  `rterr/callback_five_apply`. Six declared or more (nargs 7 and up) read the callee and some arguments below the map's own
+  frame, which is the caller's stack. The reference's result there is deterministic (a program's registers, not addresses),
+  so the runtime reads the same caller registers (`src[i]` for i < 0, the frame of the native) and calls through the same
+  `call_from_native` path. The tests `rterr/callback_six`, `callback_seven`, `callback_nine_nested`, `callback_six_apply`,
+  `callback_six_int`, `callback_eight_string`, `callback_six_nested_null` pin the reference's messages (each with a different
+  value in the slot below). Still refused by name: a read below the stack base (`... reads below the stack base`), since the
+  reference reads its own stack head there; and a callback of nargs 7 or more that returns a value, since the reference then
+  writes the result into the caller's register, which is not modelled (`... returned a value`).
 - No producer change: a CALL of `arr.map(f)` is the same PREPCALL and CALL as any other native method; the callbacks are
   natives of the runtime. A default-parameter or vararg callback is lowered as any closure (`lower/callback_default.nut`,
   `lower/callback_vararg.nut`; section 4b).
@@ -285,8 +289,10 @@ code is `sq_fn_N` over the same flat stack, so the call needs no new IR form. Th
   closures, print, tostring, arrays, floats, classes and inheritance, number and string conversions, array methods
   (including extend and insert, and the callbacks sort, map, apply, reduce, filter: `sort_*`, `map_basic`, `reduce_basic`,
   `filter_basic`, `callback_*`), string methods (slice, find, tolower, toupper), class and instance delegates, class
-  attributes) match `sqref` on the printed result and the status; 89 runtime errors (`lower/rterr/`, the callback ones
-  included) match the message and status 1; 8 programs (`lower/err/`) are refused with exit 3; `lower/synth.rb` writes a stream with DLOAD, DMOVE, LINE and
+  attributes) match `sqref` on the printed result and the status; 96 runtime errors (`lower/rterr/`, the callback ones
+  included) match the message and status 1; 8 programs (`lower/err/`) are refused with exit 3; 2 programs
+  (`lower/refused/`: the `tostring` of a class and of an instance without `_tostring`, which print an address) are refused
+  at run time with their named message and status 1, checked against the `// expect:` line, not against the reference; `lower/synth.rb` writes a stream with DLOAD, DMOVE, LINE and
   LOADNULLS. A string result is printed by `sqref` and by the driver alike (the text, one line).
 - The oracle is `tests/squirrelbc/oracle/sqref.c`: the reference VM, built against the reference tree's
   `libsquirrel_static.a`. It loads `.nut` (compile) and `.cnut` (`sq_readclosure`) and prints the result line.
