@@ -26,10 +26,10 @@ ex=../sched/exchange.ptx
 exargs=(exchange --grid 1 --block 2 ptr:2 ptr:2 --dump 1)
 
 # 1. Latency is charged per instruction: each thread of the exchange kernel issues three global accesses (a store, a
-#    load and a store), so the default 400-cycle global latency raised to 500 adds exactly 3 x 100.
+#    load and a store), so the default 320-cycle global latency raised to 500 adds exactly 3 x 180.
 base=$(cycles "$ex" "${exargs[@]}")
 slow=$(cycles "$ex" "${exargs[@]}" --lat global=500)
-expect_eq "exchange: 3 global accesses on the path" "$((slow - base))" 300
+expect_eq "exchange: 3 global accesses on the path" "$((slow - base))" 540
 
 # 2. Blocks are independent: with one SM the 8 identical blocks run one after another, with 8 SMs they run side by side.
 one=$(cycles "$ex" exchange --grid 8 --block 2 ptr:16 ptr:16 --sms 1)
@@ -37,14 +37,14 @@ eight=$(cycles "$ex" exchange --grid 8 --block 2 ptr:16 ptr:16 --sms 8)
 expect_eq "8 blocks on 1 SM is 8 times one block" "$one" "$((8 * eight))"
 
 # 3. The barrier makes a thread wait for the latest arrival. Thread 0 arrives at 48 cycles, thread 1 at 444 (its load
-#    is 400 cycles). With the barrier thread 0 leaves at 444 and then does two loads: 444 + 800 + 4 (ret) = 1248. Without
-#    it, each thread does its own two loads: 832 for both. The block estimate is the maximum over the threads.
+#    is 320 cycles). With the barrier thread 0 leaves at 356 and then does two loads: 356 + 640 + 4 (ret) = 1000. Without
+#    it, each thread does its own two loads: 658 for both. The block estimate is the maximum over the threads.
 bw=barwait.ptx
 with=$(cycles "$bw" barwait --grid 1 --block 2 ptr:2)
 sed '/bar.sync 0;/d' "$bw" > "$out/barwait_nobarrier.ptx"
 without=$(cycles "$out/barwait_nobarrier.ptx" barwait --grid 1 --block 2 ptr:2)
-expect_eq "barrier: the waiting thread pays for the slow arrival" "$with" 1248
-expect_eq "no barrier: each thread pays only its own loads" "$without" 832
+expect_eq "barrier: the waiting thread pays for the slow arrival" "$with" 1000
+expect_eq "no barrier: each thread pays only its own loads" "$without" 658
 
 # 4. Schedules. A kernel whose path does not depend on the schedule gives one estimate over every schedule: the barrier
 #    exchange, the barrier kernel, and the atomic megakernel of run_sched.sh. The megakernel without its atomic takes
@@ -61,7 +61,10 @@ case "$mg_stderr" in *" to "*) echo "megakernel: estimate varies: $mg_stderr" >&
 echo "megakernel with the atomic, every schedule: one estimate ok"
 sed 's/atom\.global\.relaxed\.gpu\.add\.u32 %r0, \[%rd0\], 1;/ld.global.u32 %r0, [%rd0]; add.u32 %r2, %r0, 1; st.global.u32 [%rd0], %r2;/' \
   ../sched/megakernel.ptx > "$out/megakernel_nonatomic.ptx"
-na_stderr=$("$out/ptxi" "$out/megakernel_nonatomic.ptx" "${mega[@]}" --explore --timing 2>&1 >/dev/null)
+# The range is checked with the former defaults (alu 4, branch 4, local 30, global 400, atomic 400, barrier 20): two
+# schedules' paths differ by two alu charges and one branch, which is 4 cycles at alu 4 and cancels at the calibrated alu 2.
+na_stderr=$("$out/ptxi" "$out/megakernel_nonatomic.ptx" "${mega[@]}" --explore --timing --lat alu=4 --lat branch=4 \
+  --lat local=30 --lat global=400 --lat atomic=400 --lat barrier=20 2>&1 >/dev/null)
 want="timing: 2472 to 2476 cycles over 20 schedules (2 blocks on 1 SMs)"
 [ "$na_stderr" = "$want" ] || { echo "megakernel without the atomic: got '$na_stderr', want '$want'" >&2; exit 1; }
 echo "megakernel without the atomic: the range over the schedules ok"
