@@ -677,8 +677,9 @@ benchmark in 0.050 s and the 10M one in 0.013 s, so the JIT is about 2.3 times s
 deopt), the 100M benchmark was no slower: six interleaved runs of each build gave medians of 121 ms before and 124 ms after (process
 start included; the noise is the same +-10%). The loop has no division: its body is unchanged, and only the exit path differs (the
 same instructions, reordered). A binary operation whose
-two operands are both compound (`(a + b) * (c + d)`) still keeps its left value on the machine stack; the speed of such loops was not
-measured.
+two operands are both compound (`(a + b) * (c + d)`) still keeps its left value on the machine stack. Measured on the same build with
+`local s = 0 for i = 1, 100000000 do s = (s + i) * (i + 2) end`: 0.161-0.171 s with the JIT, 0.152-0.157 s with the C tier (JIT off, three
+runs each), against 0.103-0.124 s for `s = s + i` with the JIT. The stack costs nothing measurable here, so this is not worth a change.
 
 **Verification.** `tests/ast/jit.cpp` runs a set of loops (the refusals, the guard miss, the wraparound, nested and re-entered loops,
 `break`, the conditions, `//` and `%` on positive and negative operands, the smallest integer divided by -1, and the deopts: a zero
