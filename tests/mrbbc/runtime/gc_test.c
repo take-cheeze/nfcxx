@@ -32,11 +32,26 @@ void mrbbc_user_call(int id, MV *ret, MV *argv, MV *blk, long argc) {
   mrbbc_raise("NotImplementedError", "gc_test has no program methods");
 }
 
+/* The test's values are the registers of a frame of its own, registered with the collector as a lowered function's are
+ * (precise roots, mrbrt.h; the conservative scan finds them too). */
+#define s fr[0]
+#define a fr[1]
+#define t fr[2]
+#define h fr[3]
+#define k fr[4]
+#define v fr[5]
+#define got fr[6]
+#define eq fr[7]
+#define cls fr[8]
+#define o fr[9]
+
 static void body(MV *ret) {
-  MV s, a, t, h, k, v, got, eq, cls, o;
+  MV fr[10];
+  MrbbcGCFrame gf;
   long i, before, after, peak = 0;
 
   (void)ret;
+  mrbbc_gc_enter(&gf, fr, 10);
   /* 1. The garbage of a loop is counted until a collection, and the collection sweeps it. The last string and array stay
    * reachable from the locals. */
   mrbbc_gc_set_threshold(1L << 30);
@@ -97,6 +112,7 @@ static void body(MV *ret) {
   check(mrbbc_tag(&eq) == MRBBC_TRUE, "the instance variable survived", 0);
 
   mrbbc_gc_set_threshold(0);
+  mrbbc_gc_leave(&gf);
 }
 
 int main(void) {

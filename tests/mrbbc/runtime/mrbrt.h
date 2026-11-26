@@ -70,8 +70,22 @@ void mrbbc_int_new(MV *dst, long long i);
 /* The tag of a value (enum mrbbc_tag), for code outside the runtime that tests a value (a boxed integer's is MRBBC_INT). */
 int mrbbc_tag(const MV *v);
 
-/* The n registers of a frame set to nil (the main program's prologue). */
-void mrbbc_frame_init(MV *frame, long n);
+/* The collector's roots (precise, the default; -DMRBBC_GC_CONSERVATIVE=1 scans the C stack instead). Every lowered function
+ * registers its frame, the n values that are its registers and its slots, on entry (mrbbc_gc_enter sets them to nil) and
+ * takes it off before it returns (mrbbc_gc_leave). The record is a slot of the function (MRBBC_GCFRAME_BYTES, the
+ * lowering's kGcFrameBytes); pin is the argument vector of the frame's last splat call. Code outside the lowering that holds
+ * values across an allocation registers them the same way (runtime/gc_test.c). */
+#ifndef MRBBC_GC_CONSERVATIVE
+#define MRBBC_GC_CONSERVATIVE 0
+#endif
+typedef struct MrbbcGCFrame {
+  struct MrbbcGCFrame *prev;
+  MV *base;
+  long n;
+  void *pin;
+} MrbbcGCFrame;
+void mrbbc_gc_enter(MrbbcGCFrame *f, MV *frame, long n);
+void mrbbc_gc_leave(MrbbcGCFrame *f);
 
 /* The program's methods (TDEF). mrbbc_def adds a top-level method (on Object) with the lowered body's number, its counts
  * of arguments, min (the required and post parameters) to max (the ones before the rest parameter and the optional ones;

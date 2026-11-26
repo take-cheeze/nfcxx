@@ -90,6 +90,13 @@ IR's checked `cadd`, `csub` and `cmul` (they trap on overflow). Everything else 
 mruby's rules for integers, strings, arrays and symbols (`==` compares contents: strings by bytes, arrays element by
 element).
 
+The collector's roots are precise. Each function's slots (argument vectors, temporaries) are placed in its frame after the
+registers, and the function registers the whole frame on entry (`mrbbc_gc_enter`, which sets it to nil) and takes it off
+before each `(return)` (`mrbbc_gc_leave`); the record is a 32-byte slot `gcf`. The argument vector of a splat call, held
+only in an IR register, is pinned to the caller's frame until its next splat call or its return. A runtime helper that
+holds a new value in a C local across an allocation protects it (`gc_protect`). `-DMRBBC_GC_CONSERVATIVE=1` scans the C
+stack instead (and keeps a set of object addresses to check its words against).
+
 String literals and symbol names are data items of the IR module: `(data "mrbbc_strPC" (const (array N (const char)))
 (string "..."))` for a `STRING` at pc PC, and one `mrbbc_symK` per distinct symbol name. Temporaries that the array
 literals are built in are extra `MV` slots of the function.
@@ -422,8 +429,7 @@ whose message says so, never with a value.
   `GETCONST` does. mruby finds `B` only inside `A` (and `A::B` needs `GETMCNST`, which is refused), so a program that
   names `B` at the top level is an error in mruby and a value here. `inspect` of a nested class prints `A::B`, as mruby.
 - **Collector limits.** Strings, arrays, hashes, instances and argument vectors are collected (mark and sweep, see mrbrt.c).
-  Classes are never collected (the class table is a root), and neither are symbols (their names are static). The program's
-  frames are on the C stack and scanned conservatively, so a stale word can keep an object one cycle longer.
+  Classes are never collected (the class table is a root), and neither are symbols (their names are static).
 - **Strings are bytes.** This build of mruby has no UTF-8 character handling: `size`, `length` and `[]` count bytes
   (`"é".size` is 2), and `inspect` escapes the bytes of a non-ASCII character as `\xHH`. The runtime does the same.
 - **Recursion.** An array that contains itself inspects as `[...]`, as mruby does. Comparing two such arrays with `==`

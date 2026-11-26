@@ -26,15 +26,27 @@ int __nfcxx_smul64_ovf(long a, long b) {
  * payload and the buffers it owns, which grow with them (gc_grow). See "the collector" below. */
 typedef struct GCHdr {
   struct GCHdr *next;  /* every object, newest first */
-  size_t size;
+  uint32_t size;
   uint8_t kind;
   uint8_t marked;
-  uint32_t bytes; /* the block's size, header included (raw_free) */
+  uint16_t block; /* the arena's size class of the block (raw_free) */
 } GCHdr;
 
 enum { GC_STR = 1, GC_ARY, GC_HASH, GC_VEC, GC_OBJ, GC_IVAR, GC_DEF, GC_CLS, GC_INT, GC_CLO };
 
 static void *gc_alloc(uint8_t kind, size_t size);
+/* The innermost frame the lowered code registered (mrbbc_gc_enter), and the values a helper protects while it allocates:
+ * precise roots (MRBBC_GC_CONSERVATIVE 0, the default), see "the collector". */
+static MrbbcGCFrame *gc_top = NULL;
+#define PROTECT_MAX 64
+static const MV *protected[PROTECT_MAX];
+static int protect_n = 0;
+static int gc_protect(const MV *v) {
+  if (protect_n == PROTECT_MAX) mrbbc_raise("RuntimeError", "too many values protected from the collector");
+  protected[protect_n++] = v;
+  return protect_n - 1;
+}
+static void gc_unprotect(int mark) { protect_n = mark; }
 static void gc_grow(const void *p, size_t n);
 static void gc_collect(void);
 
@@ -160,11 +172,12 @@ static size_t arena_class(size_t n, int *big) {
   return k;
 }
 
-static void *raw_alloc(size_t n) {
+static void *raw_alloc(size_t n, unsigned *block) {
   int big;
   size_t k = arena_class(n, &big), sz = big ? (size_t)1 << k : k * 16;
   void **list = big ? &arena_free_big[k] : &arena_free_small[k];
   void *p;
+  *block = (unsigned)(big ? 256 + k : k);
   if (*list != NULL) {
     p = *list;
     *list = *(void **)p;
@@ -187,17 +200,18 @@ static void *raw_alloc(size_t n) {
   return p;
 }
 
-static void raw_free(void *p, size_t n) {
-  int big;
-  size_t k = arena_class(n, &big);
-  void **list = big ? &arena_free_big[k] : &arena_free_small[k];
+static void raw_free(void *p, unsigned block) {
+  void **list = block >= 256 ? &arena_free_big[block - 256] : &arena_free_small[block];
   *(void **)p = *list;
   *list = p;
 }
 #else
-static void *raw_alloc(size_t n) { return malloc(n); }
-static void raw_free(void *p, size_t n) {
-  (void)n;
+static void *raw_alloc(size_t n, unsigned *block) {
+  *block = 0;
+  return malloc(n);
+}
+static void raw_free(void *p, unsigned block) {
+  (void)block;
   free(p);
 }
 #endif
@@ -355,11 +369,6 @@ void mrbbc_str_new(MV *dst, const char *p, long n) {
 }
 
 void mrbbc_sym(MV *dst, const char *name) { *dst = sym_value(intern(name)); }
-
-void mrbbc_frame_init(MV *frame, long n) {
-  long k;
-  for (k = 0; k < n; k++) frame[k] = nil_value();
-}
 
 /* Object, the root class: made on first use (a root of the collector), so that under the 4-byte layout its address is the
  * arena's. */
@@ -964,10 +973,13 @@ static void inspect_value(Buf *b, const MV *v) {
       /* the program's inspect, as the p of an instance calls it; the default one prints an address, which is not lowered */
       MV r;
       MV s;
+      int pm;
       int id = user_method(v, "inspect", 0);
       if (id < 0) mrbbc_raise("NotImplementedError", "inspect of an instance is not lowered yet");
       call_user(&r, id, v, NULL);
+      pm = gc_protect(&r); /* to_s_string may allocate */
       s = to_s_string(&r);
+      gc_unprotect(pm);
       buf_put(b, str_of(&s)->p, (size_t)str_of(&s)->len);
       break;
     }
@@ -1131,9 +1143,12 @@ void mrbbc_splat(MV *dst, const MV *v) {
     out = new_ary_value(0);
   } else if (id >= 0) {
     MV r;
+    int pm;
     call_user(&r, id, &src, NULL);
     if (tag_of(&r) != MRBBC_ARY) mrbbc_raise("TypeError", "can't convert to Array");
+    pm = gc_protect(&r); /* the array the new one copies */
     out = new_ary_value(ary_of(&r)->len);
+    gc_unprotect(pm);
     for (k = 0; k < ary_of(&r)->len; k++) mrbbc_ary_push(&out, &ary_of(&r)->items[k]);
   } else {
     out = new_ary_value(1);
@@ -1167,6 +1182,9 @@ MV *mrbbc_splat_argv(const MV *self, const MV *ary) {
   argv = gc_alloc(GC_VEC, (size_t)(n + 1) * sizeof(MV));
   argv[0] = *self;
   for (k = 0; k < n; k++) argv[k + 1] = a->items[k];
+  /* the caller holds the vector only in a register: it is a root of the caller's frame until the frame's next splat call
+   * (a frame makes one call at a time) or its return */
+  if (gc_top != NULL) gc_top->pin = argv;
   return argv;
 }
 
@@ -1701,24 +1719,25 @@ static MV to_s_string(const MV *v) {
 
 /* ---- the collector: mark and sweep (the design of lua54rt.c's collector) ----
  * Every heap object is allocated by gc_alloc (strings, arrays, hashes, argument vectors, instances, classes, method and
- * instance-variable records) with a GCHdr, linked into one list and into a set of addresses. A collection marks from the
+ * instance-variable records, boxed integers, closures) with a GCHdr, linked into one list. A collection marks from the
  * roots and then frees the unmarked objects together with the buffers they own (an array's items, a hash's keys and values,
  * a class's full name). The roots are:
- *   - the C stack, from the collector's frame up to stack_base (the frame of mrbbc_run, under which the program runs). The
- *     lowered code keeps every frame on the C stack, and the helpers keep their values in locals. The callee-saved registers
- *     are spilled first. A stack word counts only when it is the address of an object in the set (a stale word can only keep
- *     an object one cycle longer);
+ *   - precise (the default): the frames the lowered functions registered (mrbbc_gc_enter: every register and slot of the
+ *     function), with each frame's pinned splat vector, and the values the helpers protect (gc_protect) while they hold a
+ *     new value in a local across an allocation;
+ *   - or, under MRBBC_GC_CONSERVATIVE, the C stack, from the collector's frame up to stack_base (the frame of mrbbc_run,
+ *     under which the program runs), with the callee-saved registers spilled first. A stack word counts only when it is the
+ *     address of an object in a set of the objects' addresses (a stale word can only keep an object one cycle longer);
  *   - class_registry: every class the program defines (a class is never garbage: the class table holds it), with its
  *     methods, instance variables and superclass;
- *   - object_class (static, not in the set): Object's methods and its class instance variables;
+ *   - Object (object_cls): Object's methods and its class instance variables;
  *   - owners: the class of each method number (its classes are in the registry; marked again for the record);
  *   - unwind_value: a pending return or break value, held until its home takes it;
  *   - inspecting: the arrays being inspected;
  *   - entry_ret: the result slot of the entry, which the program writes when it returns.
  * The traversal follows each kind's fields: an array's items, a hash's keys and values, an argument vector's items, an
  * object's class and instance variables, an instance variable's value and next, a method's next, a class's methods,
- * instance variables, superclass and next. A block value (BLK) is a closure in its creator's frame, not a collected object:
- * its self is what it keeps alive. Symbols name static strings and immediates hold no pointer.
+ * instance variables, superclass and next; a closure's self. Symbols are interned names and immediates hold no pointer.
  * The threshold: a collection runs before an allocation once the bytes allocated since the last one would pass it. By default
  * it is max(2 * live, 4 MiB). MRBBC_GC_THRESHOLD=N in the environment forces it to N bytes, so 1 collects before every
  * allocation (the tests use it); mrbbc_gc_set_threshold does the same from the program. The collector is off until mrbbc_run
@@ -1740,6 +1759,19 @@ static int gc_busy = 0;               /* a collection is running */
 static void *stack_base = NULL;       /* the frame of mrbbc_run: the top of the C stack that the collector scans */
 static MV *entry_ret = NULL;          /* the result slot of the entry, while the entry runs */
 
+void mrbbc_gc_enter(MrbbcGCFrame *f, MV *frame, long n) {
+  long k;
+  for (k = 0; k < n; k++) frame[k] = nil_value();
+  f->prev = gc_top;
+  f->base = frame;
+  f->n = n;
+  f->pin = NULL;
+  gc_top = f;
+}
+
+void mrbbc_gc_leave(MrbbcGCFrame *f) { gc_top = f->prev; }
+
+#if MRBBC_GC_CONSERVATIVE
 /* The set of object addresses (the payloads): linear probing; a removed slot holds GC_TOMB. obj_used counts the slots that
  * are not NULL, removed ones included, and a rehash to a size for the live objects clears the removed ones. */
 static void **obj_set = NULL;
@@ -1801,21 +1833,27 @@ static void set_remove(const void *p) {
   }
 }
 
+#endif
+
 /* Allocates an object of kind with size bytes, zeroed. A collection runs first when the threshold is passed. The object
  * is in the set before the caller fills it: the caller fills it before any other allocation. */
 static void *gc_alloc(uint8_t kind, size_t size) {
   size_t need = sizeof(GCHdr) + size;
+  unsigned block;
   GCHdr *h;
   if (stack_base != NULL && !gc_busy && gc_allocated + need > gc_threshold) gc_collect();
-  h = raw_alloc(need);
+  if (need > UINT32_MAX) mrbbc_raise("NoMemoryError", "failed to allocate memory");
+  h = raw_alloc(need, &block);
   if (h == NULL) mrbbc_raise("NoMemoryError", "failed to allocate memory");
   memset(h, 0, need);
-  h->bytes = (uint32_t)need;
+  h->block = (uint16_t)block;
   h->kind = kind;
-  h->size = size;
+  h->size = (uint32_t)size;
   h->next = all_objects;
   all_objects = h;
+#if MRBBC_GC_CONSERVATIVE
   set_insert(h + 1);
+#endif
   gc_count++;
   gc_allocated += need;
   gc_total += need;
@@ -1825,7 +1863,7 @@ static void *gc_alloc(uint8_t kind, size_t size) {
 
 /* A buffer that an object owns grew by n bytes: the object counts for them (and they count for the threshold). */
 static void gc_grow(const void *p, size_t n) {
-  HDR(p)->size += n;
+  HDR(p)->size += (uint32_t)n;
   gc_allocated += n;
   gc_total += n;
   if (gc_live + gc_allocated > gc_peak) gc_peak = gc_live + gc_allocated;
@@ -1835,7 +1873,11 @@ static void **gray = NULL;     /* the marked objects not yet traversed */
 static size_t gray_n = 0, gray_cap = 0;
 
 static void mark_obj(const void *p) {
+#if MRBBC_GC_CONSERVATIVE
   if (p == NULL || !set_has(p) || HDR(p)->marked) return;
+#else
+  if (p == NULL || HDR(p)->marked) return;
+#endif
   HDR(p)->marked = 1;
   if (gray_n == gray_cap) {
     gray_cap = gray_cap == 0 ? 256 : gray_cap * 2;
@@ -1916,6 +1958,7 @@ static void propagate(void) {
   while (gray_n > 0) traverse(gray[--gray_n]);
 }
 
+#if MRBBC_GC_CONSERVATIVE
 /* The scan reads every word of the stack, the padding between locals included: AddressSanitizer would flag those reads, so
  * the scan is not instrumented. Run under ASan with detect_stack_use_after_return=0: that mode moves the address-taken locals
  * of a frame off the C stack, where this scan cannot see them. */
@@ -1950,6 +1993,21 @@ MRBBC_NO_ASAN static void scan_c_stack(void) {
   (void)here;
 }
 
+#else
+/* The frames the lowered functions registered (mrbbc_gc_enter), each with the argument vector of its last splat call, and
+ * the values the helpers protect while they allocate (gc_protect). */
+static void scan_frames(void) {
+  const MrbbcGCFrame *f;
+  int i;
+  for (f = gc_top; f != NULL; f = f->prev) {
+    long k;
+    for (k = 0; k < f->n; k++) mark_value(&f->base[k]);
+    if (f->pin != NULL) mark_obj(f->pin);
+  }
+  for (i = 0; i < protect_n; i++) mark_value(protected[i]);
+}
+#endif
+
 static void mark_roots(void) {
   size_t i;
   mark_obj(object_cls());
@@ -1960,14 +2018,20 @@ static void mark_roots(void) {
   mark_value(&unwind_value);
   for (i = 0; i < (size_t)inspect_depth; i++) mark_obj(inspecting[i]);
   if (entry_ret != NULL) mark_value(entry_ret);
+#if MRBBC_GC_CONSERVATIVE
   scan_c_stack();
+#else
+  scan_frames();
+#endif
   propagate();
 }
 
 /* Frees an unmarked object and the buffers it owns. */
 static void free_object(GCHdr *h) {
   void *p = h + 1;
+#if MRBBC_GC_CONSERVATIVE
   set_remove(p);
+#endif
   switch (h->kind) {
     case GC_ARY: free(((MAry *)p)->items); break;
     case GC_HASH:
@@ -1978,7 +2042,7 @@ static void free_object(GCHdr *h) {
     default: break;
   }
   gc_count--;
-  raw_free(h, h->bytes);
+  raw_free(h, h->block);
 }
 
 static void sweep(void) {
