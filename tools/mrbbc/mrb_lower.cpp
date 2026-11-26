@@ -72,6 +72,8 @@ struct Shared {
   std::vector<const mrb::Irep *> classes;        // the class bodies (the children an EXEC runs) by number (mrb_k<number>)
   std::map<const mrb::Irep *, int> class_ids;    // a class body -> its number
   std::set<const mrb::Irep *> top_blocks;        // the block bodies whose home is not a method (the main program or a class body)
+  std::map<const mrb::Irep *, const mrb::Irep *> block_method;  // a block body -> the method body it is made in (at any depth)
+  std::set<const mrb::Irep *> method_blocks;     // the block bodies a method makes directly (their creator is the method)
   std::set<std::string> defined;                 // the names a TDEF of the program defines
   std::set<std::string> in_class;                // the names a TDEF defines in a class body (a method of a class)
   std::set<std::string> top;                     // the names a TDEF defines at the top level (methods of Object)
@@ -440,10 +442,13 @@ const mrb::Irep &child_at(const mrb::Irep &irep, std::uint32_t i, std::size_t pc
 // order found (the main program first, then the children in order), and the names the program defines are recorded.
 // `kind` is what irep lowers to, and `home_main` says that its home (the function a `return` from it leaves; for a block)
 // is the main program.
-void collect(Shared &sh, const mrb::Irep &irep, Kind kind, bool home_main) {
+// `method` is the method body that this irep is made in (for a block: the method its chain of blocks starts in; nullptr
+// for the main program and a class body). A block child records it, so that a SUPER in the block finds the method's owner.
+void collect(Shared &sh, const mrb::Irep &irep, Kind kind, bool home_main, const mrb::Irep *method) {
   // what each child is: a method body (TDEF), a block body (BLOCK) or a class body (EXEC), and for a block whether its home
   // is not a method (the block is made by the main program, a class body, or a block of one of those)
   const bool child_home_main = kind == Kind::Main || kind == Kind::Class || (kind == Kind::Block && home_main);
+  const mrb::Irep *own = kind == Kind::Method ? &irep : method;  // the method the blocks of this irep are made in
   std::vector<std::pair<Kind, bool>> child_kind(irep.reps.size(), std::make_pair(Kind::Method, false));
   for (const mrb::Insn &in : mrb::decode_iseq(irep)) {
     if (in.op == mrb::OP_TDEF) {
@@ -465,6 +470,8 @@ void collect(Shared &sh, const mrb::Irep &irep, Kind kind, bool home_main) {
         sh.blocks.push_back(body);
       }
       if (child_home_main) sh.top_blocks.insert(body);
+      if (own != nullptr) sh.block_method[body] = own;
+      if (kind == Kind::Method) sh.method_blocks.insert(body);
       child_kind[in.args[1]] = std::make_pair(Kind::Block, child_home_main);
     } else if (in.op == mrb::OP_EXEC) {
       const mrb::Irep *body = &child_at(irep, in.args[1], in.pc);
@@ -476,7 +483,9 @@ void collect(Shared &sh, const mrb::Irep &irep, Kind kind, bool home_main) {
     }
   }
   for (std::size_t i = 0; i < irep.reps.size(); ++i) {
-    collect(sh, irep.reps[i], child_kind[i].first, child_kind[i].second);
+    const Kind ck = child_kind[i].first;
+    const mrb::Irep *cm = ck == Kind::Method ? &irep.reps[i] : ck == Kind::Block ? own : nullptr;
+    collect(sh, irep.reps[i], ck, child_kind[i].second, cm);
   }
 }
 
@@ -829,6 +838,11 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
           c.line("(eval (call void &\"mrbbc_ary_push\" " + c.reg(x[0]) + " " + c.reg(x[0] + 1 + i) + "))");
         }
         break;
+      case mrb::OP_AREF:
+        // R[a] = R[b][c] as vm.c gives it (the destructuring `a, b = x`): an array's element c, and for a value that is not
+        // an array, the value itself at c = 0 and nil otherwise
+        c.line("(eval (call void &\"mrbbc_aref\" " + c.reg(x[0]) + " " + c.reg(x[1]) + " (const long " + num(x[2]) + ")))");
+        break;
       case mrb::OP_GETIDX:
         // R[a] = R[a][R[a+1]]
         c.line("(eval (call void &\"mrbbc_getidx\" " + c.reg(x[0]) + " " + c.reg(x[0]) + " " + c.reg(x[0] + 1) + "))");
@@ -911,7 +925,18 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
       case mrb::OP_GETUPVAR:
       case mrb::OP_SETUPVAR: {
         // GETUPVAR a b c: R[a] = the register b of the frame c levels out; SETUPVAR: the other way. Level 0 is the frame
-        // the block was made in (%3); a deeper level would need the frame's own link, which is not lowered yet
+        // the block was made in (%3); a deeper level would need the frame's own link, which is not lowered yet.
+        // Level 1 from a block that a method makes directly is the method's own block slot (R(arity+1)), which mruby's
+        // `super` reads when it passes the method's block to a call in the block (gen_blkmove). That read is nil in mruby
+        // 4.0.0 (the method's proc has no environment, so the upvar of its level is nil): this is lowered as nil, and
+        // only for that register.
+        if (kind == Kind::Block && x[2] == 1 && in.op == mrb::OP_GETUPVAR && sh.method_blocks.count(&irep) != 0) {
+          const mrb::Irep *method = sh.block_method.at(&irep);
+          if (static_cast<long>(x[1]) == required_arity(*method) + 1) {
+            store_tag(c, c.reg(x[0]), kTagNil);
+            break;
+          }
+        }
         if (kind != Kind::Block || x[2] != 0) {
           throw Refused("refused: " + std::string(in.name) + " of a level other than the block's own frame is not lowered yet (pc " +
                         std::to_string(in.pc) + ")");
@@ -945,7 +970,14 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         // called on self R(0). b = n | k<<4: the arguments are R[a+1..a+n] and the block R[a+n+1] (nil or the block; the
         // SUPER takes the block from that register, as vm.c does). n = 15 is the zsuper of a method with parameters: the
         // array of ARGARY is in R[a+1] (its elements are the method's arity many) and the block in R[a+2].
-        if (kind != Kind::Method) {
+        // in a block, the method is the one the block is made in (its owner is the superclass's start); a block of the main
+        // program or a class body has no method
+        const mrb::Irep *home = kind == Kind::Method ? &irep : nullptr;
+        if (kind == Kind::Block) {
+          auto it = sh.block_method.find(&irep);
+          if (it != sh.block_method.end()) home = it->second;
+        }
+        if (home == nullptr) {
           throw Refused("refused: SUPER outside a method is not lowered yet (pc " + std::to_string(in.pc) + ")");
         }
         const unsigned n = x[1] & 0x0f, k = x[1] >> 4;
@@ -953,12 +985,12 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         // n = 15 is a splat (an array of any length) unless the ARGARY of a zsuper comes just before it: only that one has
         // the method's arity many elements
         const bool zparams = n == 15;
-        if (zparams && in.pc != argary_end) {
+        if (zparams && (kind != Kind::Method || in.pc != argary_end)) {
           throw Refused("refused: SUPER with a splat of arguments is not lowered yet (pc " + std::to_string(in.pc) + ")");
         }
         const unsigned nargs = zparams ? static_cast<unsigned>(arity) : n;
         const unsigned blk = zparams ? x[0] + 2 : x[0] + n + 1;
-        const std::string name = sh.method_names.at(&irep);
+        const std::string name = sh.method_names.at(home);
         const std::string argv = "argv" + std::to_string(in.pc);
         c.add_slot(argv, 16 * (static_cast<std::size_t>(nargs) + 1));
         c.line("(copy 16 $\"" + argv + "\" " + c.reg(0) + ")");
@@ -974,7 +1006,7 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         // the superclass method's number, or -1 for the builtin initialize (BasicObject#initialize, which gives nil)
         const std::string id = c.fresh();
         c.line("(let " + id + " int (call int &\"mrbbc_find_super\" " + c.reg(0) + " (const int " +
-               num(number_of(sh.method_ids, irep, "method")) + ") @\"" + symbol_data(sh, name) + "\" (const long " +
+               num(number_of(sh.method_ids, *home, "method")) + ") @\"" + symbol_data(sh, name) + "\" (const long " +
                num(nargs) + ")))");
         emit_method_branches(c, sh, id, c.reg(x[0]), argv, c.reg(blk));
         const std::string neg = c.fresh();
@@ -1185,7 +1217,7 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
 std::string lower_module(const mrb::Module &module, const std::string &source_name) {
   const mrb::Irep &root = module.root;
   Shared sh;
-  collect(sh, root, Kind::Main, true);
+  collect(sh, root, Kind::Main, true, nullptr);
   lower_irep(sh, root, "mrb_irep_0", Kind::Main);
   for (std::size_t m = 0; m < sh.methods.size(); ++m) {
     lower_irep(sh, *sh.methods[m], "mrb_m" + std::to_string(m), Kind::Method);

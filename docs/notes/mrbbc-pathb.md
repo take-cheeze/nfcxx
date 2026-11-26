@@ -197,7 +197,11 @@ R[a+1..a+n] (b = n) and the block R[a+n+1], as `vm.c` takes them: a block of `su
   takes no argument (ArgumentError otherwise) and gives nil; a builtin name of Object (`to_s`, `inspect`, `==`, ...) is a
   NotImplementedError (the builtin is not lowered); any other name is `super: no superclass method 'NAME' for CLASS`
   (NoMethodError).
-- A `super` in a block, a splat (`super(*a)`), or a keyword argument is refused.
+- A `super` in a block is lowered with its arguments and an explicit block (or none). The owner is the method the block is
+  made in (`block_method`, at any depth), so `super` in a block of a block finds the same superclass method. Two limits:
+  the zsuper of a block (`super` with no arguments, an ARGARY in a block) is refused, and so is a super with no explicit
+  block in a block that another block makes (its implicit block is an upvar of level 2, see "Blocks").
+- A `super` with a splat (`super(*a)`), or a keyword argument is refused.
 
 ### Operators, to_s and inspect
 
@@ -249,6 +253,11 @@ are the block's outer locals.
   mechanism (the main program's frame is the home).
 - `GETUPVAR a b 0` and `SETUPVAR a b 0` read and write register b of the frame the block was made in. Level 0 only: a
   deeper level needs the frame's own link to its parent, which is not lowered.
+- `GETUPVAR a b 1` in a block that a method makes directly, with b = the method's arity + 1 (its block slot), is nil. The
+  compiler emits it for the implicit block of a `super` in the block (gen_blkmove), and mruby 4.0.0 reads nil there: the
+  method's proc has no environment, so the upvar of level 1 is nil. Checked against the reference (`sup_blk_noblock.rb`:
+  the method's block is not passed on, and `block_given?` of the superclass method is false). Any other level-1 read is
+  refused.
 - `RETURN` in a block is a local return (`next`).
 - `RETURN_BLK` (a `return` that leaves the block, to the method the block was made in) makes the value the pending return
   of the block's home and returns the block. The home is a closure field: the frame of the method (or of the block's
@@ -270,12 +279,12 @@ prefixes and the instructions they widen, `LOADL` of a non-integer (`LOADL` neve
 string literal to `STRING`), and a main program with a catch table. In particular `SENDB` of a name the program does not
 define in a class (a block call to a builtin), `RETURN_BLK` from a block of the top level (see below), `BREAK` outside a
 block, `GETUPVAR`/`SETUPVAR` at level 1 or more, `BLKPUSH` of a block other than the method's own (a yield inside a
-block), a method call with a keyword argument, any other method name, `AREF`/`ASET` (the destructuring of `a, b = x`),
+block), a method call with a keyword argument, any other method name, `ASET`,
 `APOST`, `ARYCAT`/`ARYSPLAT` (a splat), `SYMBOL` (a quoted symbol) and `LOADSYM` of a name that is not plain (`:"a b"`,
 `:+`), a float, a global variable, an instance variable of the main program, `RETSELF` of the main program, `TCLASS` and
 `CLASS` in a method or a block, a method or block with parameters other than required ones, a method definition whose
 name is not plain and not an operator, a `def` inside a method or a block, an operator the program defines at the top
-level, `SUPER` outside a method, a `super` with a splat or a keyword argument, `ARGARY` other than the required
+level, `SUPER` outside a method and a block of one, a `super` with a splat or a keyword argument, `ARGARY` other than the required
 parameters of a method, and `ENTER` with such parameters are refused.
 
 ### The printed result
@@ -349,7 +358,7 @@ whose message says so, never with a value.
   each compiled four ways (default, `-g`, `--remove-lv`, `-g --remove-lv`): 28 files read by `mrbbc_dump` (every
   instruction decodes, no bytes after END) and run to status 0 by the pinned mruby. 15 malformed files (truncations,
   an extra byte, a wrong magic, format 03.00, an unknown section, an opcode out of range) are refused with status 1.
-- Lowering (`tests/mrbbc/lower/run.sh`): 116 value programs match mruby's `p` (two generated: 200 locals, and an
+- Lowering (`tests/mrbbc/lower/run.sh`): 125 value programs match mruby's `p` (two generated: 200 locals, and an
   array literal of 130 elements, which mrbc builds with `ARYPUSH`; the `meth_*.rb` ones cover methods: zero and two
   arguments, self calls between methods, recursion, redefinition, a loop, `return`, and a `def` value; the `blk_*.rb`
   ones cover blocks: yield with and without arguments, a block that sets an outer local, `block_given?`, a loop of
@@ -362,13 +371,16 @@ whose message says so, never with a value.
   zsuper with and without parameters, `initialize` through `super`, `super` with a block, a reopened class with its
   superclass, a nested `super`), `op_*.rb` and `ins_*.rb` (an operator, `==`, `!=`, `<` and the other comparisons, `+` by
   SEND, the operators and `to_s` of an inherited method, the `to_s` and `inspect` of an instance in a string, an array and
-  the printed value). 39 runtime errors match mruby's last stderr line and status 1 (9 from round 1, 13 from round 2, 4
+  the printed value). Round 6 adds `sup_blk*.rb` (a super in a block, nested, with a yield and with the implicit block, which
+  is nil), and `aref*.rb` (the destructuring of an array, a value that is not an array, nil, and more targets than
+  elements). 41 runtime errors match mruby's last stderr line and status 1 (9 from round 1, 13 from round 2, 4
   in round 3: method arity, call before def, and yield without a block; 5 in round 4: an instance's method arity, an
   undefined method of a class, `new` with an argument and no `initialize`, an undefined constant, and a method called
   before its `def` runs; 8 in round 5: six for superclasses (no superclass method, arity of an inherited method, a superclass
   that is not a class, a superclass mismatch, `initialize` with an argument through `super`) and two for operators (an
-  undefined operator of an instance, and an operator's arity)); 26 programs are refused with status 3, a `refused:`
-  message and no stdout: 25 in `err/` (`super` in a block, with a splat and with a keyword argument, and an operator the
+  undefined operator of an instance, and an operator's arity), and 2 in round 6 (a super in a block with no superclass
+  method, and with an arity error)); 25 programs are refused with status 3, a `refused:`
+  message and no stdout: 24 in `err/` (a zsuper in a block, with a splat and with a keyword argument, and an operator the
   program defines at the top level) and a generated one with EXT1 prefixes. `err/` is the refusal set, `rterr/` the runtime errors; the brief's "err/ programs must be
   refused" is read as the first.
 
@@ -379,8 +391,9 @@ block whose home is a method). Round 4 lowers classes (see "Classes") and `BREAK
 explicit receiver of a program-defined method, and blocks with two or more parameters. Round 5 lowers superclasses and
 `SUPER` (see "Classes" and "Super"), the operators, `to_s` and `inspect` that a program defines in a class (see
 "Operators, to_s and inspect"). Still refused: `RETURN_BLK` from a block of the top level, yields and variables more than
-one level out, `SENDB` of a builtin method, keyword arguments, optional or rest parameters, `AREF`/`ASET`, `APOST`,
-splats, the quoted symbols, `super` in a block, the instance variables of the top level, and a core class as a superclass
+one level out (a block's upvar of level 2 or more, and the implicit block of a super in a nested block), `SENDB` of a
+builtin method, keyword arguments, optional or rest parameters, `ASET`, `APOST`, splats, the quoted symbols, the zsuper
+of a block, the instance variables of the top level, and a core class as a superclass
 (a run-time NotImplementedError: `class E < StandardError`). The strings and arrays in the
 subset are the ones the examples above name; `Array#-` and `Array#*`, `String#[]=`, ranges as indexes and the other
 methods of the core classes are not in it.
@@ -399,5 +412,6 @@ methods of the core classes are not in it.
   holds only numbers; `LOADSYM` is the symbol literal. Round 2 lowers `STRING` and `LOADSYM` (plain names only).
 - `ARYDUP` is not an opcode of mruby 4.0 (`ops.h` has no such entry); array literals are `ARRAY`, `ARRAY2` and
   `ARYPUSH`, and the brief's `ARYDUP` is not needed.
-- `AREF` and `ASET` (the destructuring of `a, b = x`) are refused; `GETIDX`, `GETIDX0` and `SETIDX` are the indexing
-  opcodes of mruby 4.0 (the brief's OP_GETIDX/OP_SETIDX).
+- `AREF` (the destructuring of `a, b = x`) is lowered as vm.c gives it (`mrbbc_aref`: an array's element, else the value
+  at 0 and nil). `ASET` is refused; `GETIDX`, `GETIDX0` and `SETIDX` are the indexing opcodes of mruby 4.0 (the brief's
+  OP_GETIDX/OP_SETIDX).

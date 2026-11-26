@@ -500,6 +500,21 @@ void mrbbc_ary_elt(MV *dst, const MV *ary, long i) {
   *dst = out;
 }
 
+/* OP_AREF as vm.c does it: an array gives its element i (nil past its end); any other value is itself at i = 0 and nil
+ * otherwise (the destructuring `a, b = x` of a value that is not an array). */
+void mrbbc_aref(MV *dst, const MV *v, long i) {
+  MV src = *v;
+  if (src.tag == MRBBC_ARY) {
+    mrbbc_ary_elt(dst, &src, i);
+    return;
+  }
+  if (i == 0) *dst = src;
+  else {
+    dst->tag = MRBBC_NIL;
+    dst->i = 0;
+  }
+}
+
 void mrbbc_blk_args(MV *argv, const MV *blk) {
   if (blk->tag != MRBBC_BLK) mrbbc_raise("LocalJumpError", "unexpected yield");
   argv[0] = clo_of(blk)->self;
