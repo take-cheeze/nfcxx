@@ -447,30 +447,42 @@ that each one ran the body. The vector add is verified; the small kernel is not.
 
 The interpreter also estimates how many cycles a kernel takes, in the style of the Theoric note on virtual hardware
 (a deterministic model that ranks kernels; it is not a clock-by-clock simulator). Each instruction costs the latency of
-its class: `alu`, `branch`, `local`, `global`, `atomic`, `barrier`, `l1` (defaults 2, 4, 40, 320, 31, 24, 30, the first six measured on an RTX 5050, sm_120, and branch and l1 not measured;
+its class: `alu`, `branch`, `local`, `global`, `atomic`, `barrier`, `l1`, `l2` (defaults 2, 4, 40, 320, 31, 24, 30, 120; the
+first six measured on an RTX 5050, sm_120, and branch, l1 and l2 not measured;
 `--lat CLASS=CYCLES` changes one). A predicated-off instruction costs an ALU issue.
 
 A warp is 32 consecutive threads of a block, and it issues each instruction once for all its lanes. With `--timing`,
-each lane counts its steps through each instruction, the steps where its predicate was true, and the true steps that
-missed the L1. The warp issues the instruction as often as its busiest lane steps through it: the issues where some lane
+each lane counts its steps through each instruction, the steps where its predicate was true, the true global loads that
+missed the L1, and those that also missed the L2. The warp issues the instruction as often as its busiest lane steps through it: the issues where some lane
 ran it cost the class latency (the busiest lane's true-predicate count), and the rest cost an ALU issue. So both sides of
-a divergent branch are paid, each once per issue. A global load waits for its slowest lane: the busiest lane's misses
-cost the `global` latency and the other issues cost `l1`. A `bar.sync` generation completes at the latest arrival among
+a divergent branch are paid, each once per issue. A global load waits for its slowest lane: the busiest lane's L2 misses
+cost the `global` latency, the busiest lane's other L1 misses cost `l2`, and the other issues cost `l1`. A `bar.sync` generation completes at the latest arrival among
 the warps with live threads, and each of those warps leaves at that time. A block takes the largest of three bounds: the
 largest warp time; its issue slots, the sum over its warps of the busiest lane's step count, at `--issue N` warp
 instructions per cycle (default 4); and its global bytes at `--bw BYTES` per cycle (default 16), each warp issue
-counting the 32-byte sectors its active lanes touch (a sector once per issue), except that an L1 hit moves no bytes. The blocks of an SM run in waves of `--resident N` blocks
+counting the 32-byte sectors its active lanes touch (a sector once per issue), except that an L1 or L2 hit moves no bytes. The blocks of an SM run in waves of `--resident N` blocks
 (default 1, one block at a time; `--warps-per-sm N` derives the number from the SM's warp slots instead, N / warps per block): a wave takes the largest of its blocks' times, or the summed issue slots or bytes of
-its blocks if that is more, since co-resident blocks share the SM. The kernel takes the slowest SM (`--sms N`, default 1). The counts take three 4-byte counters per thread and instruction, so
-`nthreads x ninst x 12` bytes (about 400 MB for 4096 threads and 8192 instructions, a few MB for a typical kernel); they
+its blocks if that is more, since co-resident blocks share the SM. The kernel takes the slowest SM (`--sms N`, default 1). The counts take four 4-byte counters per thread and instruction, so
+`nthreads x ninst x 16` bytes (about 540 MB for 4096 threads and 8192 instructions, a few MB for a typical kernel); they
 are kept only with `--timing`.
 
 Caches: `--l1 BYTES` (a multiple of 128; default 0, no cache) gives each SM a direct-mapped L1 of 128-byte lines,
-empty at the start of each schedule. A global load whose line is present costs `l1`; a miss costs `global` and fills
-the line. Stores and atomics write through without allocating, so they cost what they did and neither hit nor fill.
+empty at the start of each schedule. A global load whose line is present costs `l1`; a miss fills the line and goes to
+the L2. Stores and atomics write through without allocating, so they cost what they did and neither hit nor fill.
 An SM's cache is shared by the blocks that run on it (block index mod `--sms`), in the order the schedule executes
 their loads. Two limits: a fill is immediate, so a load of a line still in flight counts as a hit, and when the hits
 depend on the order of the loads, `--explore` and `--random` report a range. The header of `ptxi.c` has the details.
+
+`--l2 BYTES` (a multiple of 128; default 0, no cache) adds one direct-mapped cache of 128-byte lines for the whole
+device, shared by every SM and empty at the start of each schedule. It is consulted only by a global load that missed
+its SM's L1: a hit costs `l2` (default 120) and moves no DRAM bytes; a miss costs `global`, moves its sectors and fills
+the L2 line (the L1 line was filled on the L1 miss). An L1 hit does not touch the L2, and an L2 line evicted by another line
+is not restored into an L1 that still holds it, so inclusion is not enforced. Stores and atomics write through without
+allocating: they cost `global` and move bytes as before, and neither look up nor fill the L2. Hit or miss is decided
+as the load executes, as for the L1, so a line loaded by one SM is an L2 hit on every other SM. Per lane, the decision
+is simplest and matches the L1, with one consequence: when one lane of a warp fills a cold line, the lanes of that warp
+that read the same line hit it and add no sectors, so a coalesced cold load counts one sector, not four. The L1 has the
+same undercount. The critical-path bound is unaffected, but the bytes of coalesced cold loads are low when a cache is on.
 
 `--timing` prints the estimate to stderr at exit. With `--explore` or `--random` it gives one estimate when every
 schedule agrees, and the range otherwise: the megakernel's atomic version agrees, the version without its atomic does
@@ -482,8 +494,13 @@ issue-width and bandwidth bounds (exact values: 4096 cycles at 1 byte per cycle 
 `--issue` doubles an ALU-bound block), the L1 (`l1line.ptx`: 32 threads reading one 128-byte line; one block gives 656
 cycles, two blocks on one SM 1022 (one miss, then a block of hits) against 1312 without the cache; the per-SM keying is
 exact over every schedule of three blocks on two SMs, 1022; and `evict.ptx`: a one-line cache evicts, 966 against 676
-for two lines), and the ranges above.
+for two lines), the L2 (`l1line.ptx` with `--l1 0 --l2`: two blocks on one SM 1112, a miss of 656 and a hit of 456,
+against 1312; `--lat l2=200` gives 1192; two blocks on two SMs 656, over every schedule too; three one-thread blocks on
+two SMs, device-wide, give the range 912 to 1112 over 90 schedules; an L1 hit beside an L2 gives 1022; `l2store.ptx`:
+a store does not fill the L2, so its later load costs 648 rather than 448; and `l2stride.ptx`, one line per lane, moves
+1152 bytes for the missing block and none for the hit, 1610 cycles at `--bw 1` against 2304 without the L2), and the
+ranges above.
 
-Still not modelled: caches beyond the optional L1, and blocks that start at different times within a wave. Not measured against hardware yet: this machine has no GPU (`nvidia-smi` is missing), so the latencies are the
+Still not modelled: caches beyond the L2, miss merging, DRAM row buffers and banks, and blocks that start at different times within a wave. Not measured against hardware yet: this machine has no GPU (`nvidia-smi` is missing), so the latencies are the
 defaults above, not calibrated values. Ranking real kernels is the check that matters, and it needs the RTX 2060 run
 of the same kernels.

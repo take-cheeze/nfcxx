@@ -1,0 +1,27 @@
+// Each thread loads a[32 * tid.x], so the 32 lanes of a warp read 32 different 128-byte lines, one sector each (a is 1024
+// ints, 4 KB). Each thread then stores its value to b[tid.x], so the store is coalesced: 4 sectors per warp. The
+// loads of a block are not shared within a warp issue, so each lane's miss or hit is its own sector. run_timing.sh
+// derives the estimates for this kernel by hand from the model.
+.version 8.0
+.target sm_75
+.address_size 64
+
+.visible .entry l2stride(
+  .param .u64 a_param,
+  .param .u64 b_param
+)
+{
+  .reg .b32 %r<2>;
+  .reg .b64 %rd<6>;
+
+  ld.param.u64 %rd0, [a_param];
+  ld.param.u64 %rd1, [b_param];
+  mov.u32 %r0, %tid.x;
+  mul.wide.u32 %rd2, %r0, 128;
+  add.s64 %rd3, %rd0, %rd2;
+  ld.global.u32 %r1, [%rd3];
+  mul.wide.u32 %rd4, %r0, 4;
+  add.s64 %rd5, %rd1, %rd4;
+  st.global.u32 [%rd5], %r1;
+  ret;
+}

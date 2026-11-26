@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Checks of the timing model in ptxi (the header of ptxi.c describes it): --timing, --sms, --issue, --bw, --lat and
-# --l1. CPU only. The estimates below are derived by hand from the model: a warp (32 threads) issues each instruction as
+# Checks of the timing model in ptxi (the header of ptxi.c describes it): --timing, --sms, --issue, --bw, --lat, --l1
+# and --l2. CPU only. The estimates below are derived by hand from the model: a warp (32 threads) issues each instruction as
 # often as its busiest lane steps through it, a barrier leaves every waiting warp at the latest arrival, a block takes
 # the largest of its warp times, issue slots and bytes, and the blocks of an SM run one after another.
 set -euo pipefail
@@ -193,4 +193,63 @@ expect_eq "two-line L1: the third load hits" "$ev_two" 676
 status=0; "$out/ptxi" "$lf" l1line --grid 1 --block 32 ptr:32 ptr:32 --l1 100 > /dev/null 2>&1 || status=$?
 [ "$status" -eq 2 ] || { echo "--l1 100: expected exit 2, got $status" >&2; exit 1; }
 echo "--l1 100 refused (exit 2)"
+
+# 12. The L2. --l2 BYTES adds one device-wide cache behind the L1. Only a global load that missed its SM's L1 consults it:
+#     a hit costs l2 (default 120) and moves no bytes; a miss costs global, fills the L2 and moves its bytes. With --l1 0
+#     every load reaches the L2. l1line.ptx: a thread's clock is 6 alu (12), its load, its store (320) and ret (4). A block
+#     whose load goes to DRAM takes 12 + 320 + 320 + 4 = 656; one whose load hits the L2 takes 12 + 120 + 320 + 4 = 456.
+#     Two blocks on one SM run one after another. The first loads the line (656) and the second hits (456): 1112.
+l2_off=$(cycles "$lf" l1line --grid 2 --block 32 --sms 1 --l1 0 ptr:32 ptr:32)
+expect_eq "no L2 (default): both blocks miss: 2 x 656" "$l2_off" 1312
+l2_zero=$(cycles "$lf" l1line --grid 2 --block 32 --sms 1 --l1 0 --l2 0 ptr:32 ptr:32)
+expect_eq "--l2 0 is the same as no option" "$l2_zero" 1312
+l2_one=$(cycles "$lf" l1line --grid 2 --block 32 --sms 1 --l1 0 --l2 262144 ptr:32 ptr:32)
+expect_eq "L2, two blocks on one SM: 656 + 456" "$l2_one" 1112
+l2_lat=$(cycles "$lf" l1line --grid 2 --block 32 --sms 1 --l1 0 --l2 262144 --lat l2=200 ptr:32 ptr:32)
+expect_eq "--lat l2=200: the hit block is 12 + 200 + 320 + 4 = 536, so 656 + 536" "$l2_lat" 1192
+
+# Two blocks on two SMs: the block that loads first misses (656) on its SM and the other hits (456) on the other SM. The
+# kernel takes the slower SM, so the estimate is 656 whichever block misses (the explorer below checks all 6 schedules).
+l2_two=$(cycles "$lf" l1line --grid 2 --block 32 --sms 2 --l1 0 --l2 262144 ptr:32 ptr:32)
+expect_eq "L2, two blocks on two SMs: the slower SM is the miss, 656" "$l2_two" 656
+l2_two_sched=$("$out/ptxi" "$lf" l1line --grid 2 --block 1 --sms 2 --l1 0 --l2 262144 ptr:32 ptr:32 --explore --timing 2>&1 >/dev/null)
+want="timing: 656 cycles estimated (2 blocks on 2 SMs, 6 schedules)"
+[ "$l2_two_sched" = "$want" ] || { echo "L2, two SMs over every schedule: got '$l2_two_sched', want '$want'" >&2; exit 1; }
+echo "L2, two blocks on two SMs over every schedule: one estimate ok"
+
+# The L2 is device-wide: three one-thread blocks on two SMs (blocks 0 and 2 on SM 0, block 1 on SM 1). Whichever block
+# loads first misses and fills the L2; the other two hit. If block 1 (alone on SM 1) misses, SM 0 has two hits: 456 + 456
+# = 912, and SM 1 is 656, so 912. If block 0 or 2 misses, SM 0 is 656 + 456 = 1112 and SM 1 is 456, so 1112. The range
+# is 912 to 1112 over the 90 schedules. Without the L2 every block misses: SM 0 is 1312.
+l2_dev=$("$out/ptxi" "$lf" l1line --grid 3 --block 1 --sms 2 --l1 0 --l2 262144 ptr:32 ptr:32 --explore --timing 2>&1 >/dev/null)
+want="timing: 912 to 1112 cycles over 90 schedules (3 blocks on 2 SMs)"
+[ "$l2_dev" = "$want" ] || { echo "L2, device-wide over every schedule: got '$l2_dev', want '$want'" >&2; exit 1; }
+echo "L2, device-wide over every schedule: the range ok"
+l2_dev_def=$(cycles "$lf" l1line --grid 3 --block 1 --sms 2 --l1 0 --l2 262144 ptr:32 ptr:32)
+expect_eq "L2, device-wide, default order: block 0 misses, so SM 0 is 656 + 456" "$l2_dev_def" 1112
+
+# The L1 comes first: a block whose loads hit the L1 never reaches the L2. Block 0 misses both (656), block 1 hits the L1
+# (12 + 30 + 320 + 4 = 366): 1022, as without the L2.
+l2_l1=$(cycles "$lf" l1line --grid 2 --block 32 --sms 1 --l1 262144 --l2 262144 ptr:32 ptr:32)
+expect_eq "L1 and L2: an L1 hit does not consult the L2: 656 + 366" "$l2_l1" 1022
+
+# A store does not allocate in the L2. l2store.ptx stores a[0] and then loads it: 2 (ld.param) + 2 (mov) + 320 (store) +
+# 320 (load, which misses the L2 because the store did not fill it) + 4 (ret) = 648. If the store had filled the L2 the
+# load would hit: 448.
+l2_st=$(cycles l2store.ptx l2store --l1 0 --l2 262144 ptr:1)
+expect_eq "store does not allocate in the L2: its later load misses, 648" "$l2_st" 648
+
+# An L2 hit moves no DRAM bytes. l2stride.ptx: each lane loads its own line (32 sectors = 1024 bytes) and stores 4 sectors
+# (128 bytes). Block 0 loads from DRAM: 1152 bytes, which at --bw 1 is 1152 cycles, more than its critical path
+# (14 + 320 + 320 + 4 = 658). Block 1's loads hit the L2 and move nothing, so it moves 128 bytes, and its critical path
+# is 14 + 120 + 320 + 4 = 458. Serially on one SM: 1152 + 458 = 1610. Without the L2 both blocks move 1152: 2304.
+s_l2=$(cycles l2stride.ptx l2stride --grid 2 --block 32 --sms 1 --bw 1 --l1 0 --l2 262144 ptr:1024 ptr:32)
+s_none=$(cycles l2stride.ptx l2stride --grid 2 --block 32 --sms 1 --bw 1 --l1 0 ptr:1024 ptr:32)
+expect_eq "L2 hits move no bytes: 1152 + 458" "$s_l2" 1610
+expect_eq "no L2: both blocks move 1152 bytes" "$s_none" 2304
+
+# A size that is not a multiple of the line is refused (exit 2).
+status=0; "$out/ptxi" "$lf" l1line --grid 1 --block 32 ptr:32 ptr:32 --l2 100 > /dev/null 2>&1 || status=$?
+[ "$status" -eq 2 ] || { echo "--l2 100: expected exit 2, got $status" >&2; exit 1; }
+echo "--l2 100 refused (exit 2)"
 echo "timing model: ok"
