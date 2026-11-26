@@ -4,8 +4,9 @@
  *   xxxx...xxx1  a small int; the value is the word shifted right by one
  *   xxxx...x110  an immediate object: None, False, True (value 0, 1, 2 in bits 3 and up)
  * A pointer (low two bits clear, not zero) is a heap object. Its first member is a pointer to its type (MpyType), as
- * MicroPython's mp_obj_base_t has it. Two heap types exist: str (MpyStr) and function (MpyFunc). Other heap objects are
- * not here yet, so a value of another kind is an error.
+ * MicroPython's mp_obj_base_t has it. The heap types are str (MpyStr), function (MpyFunc), cell, list, tuple, iterator,
+ * range (MpyRange) and builtin (MpyBuiltin: len, str, range, and the list methods append and pop). A value of another
+ * kind is an error.
  *
  * Strings (docs/notes/mpy-pathb.md, "Strings"): a MpyStr is the type pointer, the byte length, and the bytes followed by a
  * NUL. The bytes are immutable. A literal is allocated once, the first time its site runs, and kept (no GC yet); a
@@ -28,6 +29,7 @@ typedef uint64_t mpv;
 /* MP_BINARY_OP_* and MP_UNARY_OP_* (py/runtime0.h), as the bytecode carries them. */
 enum {
   MPY_OP_LESS = 0, MPY_OP_MORE = 1, MPY_OP_EQUAL = 2, MPY_OP_LESS_EQUAL = 3, MPY_OP_MORE_EQUAL = 4, MPY_OP_NOT_EQUAL = 5,
+  MPY_OP_IN = 6, MPY_OP_IS = 7,
   MPY_OP_OR = 22, MPY_OP_XOR = 23, MPY_OP_AND = 24, MPY_OP_LSHIFT = 25, MPY_OP_RSHIFT = 26, MPY_OP_ADD = 27,
   MPY_OP_SUBTRACT = 28, MPY_OP_MULTIPLY = 29, MPY_OP_FLOOR_DIVIDE = 31, MPY_OP_MODULO = 33
 };
@@ -75,6 +77,10 @@ static const MpyStr *str_of(mpv v) { return (const MpyStr *)(uintptr_t)v; }
 static const MpyType mpy_type_list = {"list"};
 static const MpyType mpy_type_tuple = {"tuple"};
 static const MpyType mpy_type_iter = {"iterator"};
+static const MpyType mpy_type_range = {"range"};
+/* The builtin functions are called builtin_function_or_method; str and range are types, which are called too. */
+static const MpyType mpy_type_bfn = {"builtin_function_or_method"};
+static const MpyType mpy_type_type = {"type"};
 
 typedef struct {
   const MpyType *type;
@@ -90,13 +96,44 @@ typedef struct {
 
 typedef struct {
   const MpyType *type;
-  mpv seq;      /* the list or tuple being iterated */
-  size_t index; /* the next item to give */
+  mpv seq;      /* the list, tuple or range being iterated */
+  size_t index; /* the next item to give (for a range, the number of items given) */
 } MpyIter;
+
+/* A range: its start, stop and step, and the number of items it gives. */
+typedef struct {
+  const MpyType *type;
+  int64_t start, stop, step;
+  size_t len;
+} MpyRange;
+
+/* The builtins: len, str and range (str and range are types, called as functions), and the list methods append and pop
+ * that LOAD_METHOD gives. A builtin is a static record {type, id}; the id is the index in mpy_builtins. */
+enum { BI_LEN, BI_STR, BI_RANGE, BI_APPEND, BI_POP };
+typedef struct {
+  const MpyType *type;
+  int id;
+} MpyBuiltin;
+static const MpyBuiltin mpy_builtins[] = {
+  {&mpy_type_bfn, BI_LEN}, {&mpy_type_type, BI_STR}, {&mpy_type_type, BI_RANGE},
+  {&mpy_type_bfn, BI_APPEND}, {&mpy_type_bfn, BI_POP},
+};
 
 static int is_list(mpv v) { return is_heap(v) && type_of(v) == &mpy_type_list; }
 static int is_tuple(mpv v) { return is_heap(v) && type_of(v) == &mpy_type_tuple; }
 static int is_iter(mpv v) { return is_heap(v) && type_of(v) == &mpy_type_iter; }
+static int is_range(mpv v) { return is_heap(v) && type_of(v) == &mpy_type_range; }
+static int is_builtin(mpv v) { return is_heap(v) && (type_of(v) == &mpy_type_bfn || type_of(v) == &mpy_type_type); }
+static const MpyRange *range_of(mpv v) { return (const MpyRange *)(uintptr_t)v; }
+static mpv builtin_obj(int id) { return (mpv)(uintptr_t)&mpy_builtins[id]; }
+
+/* The builtin with this name, or -1. The module's globals are searched first, so a program can shadow these. */
+static int builtin_index(const char *name, size_t len) {
+  if (len == 3 && memcmp(name, "len", 3) == 0) return BI_LEN;
+  if (len == 3 && memcmp(name, "str", 3) == 0) return BI_STR;
+  if (len == 5 && memcmp(name, "range", 5) == 0) return BI_RANGE;
+  return -1;
+}
 
 /* The item count and items of a list or tuple; 0 when v is neither. */
 static int seq_items(mpv v, size_t *len, const mpv **items) {
@@ -121,6 +158,12 @@ static const char *type_name(mpv v) {
   return "object";
 }
 
+/* The name of a value's type as its own error messages give it (a bool is 'bool'). */
+static const char *real_type_name(mpv v) {
+  if (is_bool(v)) return "bool";
+  return type_name(v);
+}
+
 /* Truth, as mp_obj_is_true: None and False are false; zero is false; an empty str is false; anything else is true. */
 int mpy_truth(mpv v) {
   if (v == MPY_NONE || v == MPY_FALSE) return 0;
@@ -128,6 +171,7 @@ int mpy_truth(mpv v) {
   if (is_small(v)) return small_value(v) != 0;
   if (is_str(v)) return str_of(v)->len != 0;
   if (is_iter(v)) return 1;
+  if (is_range(v)) return range_of(v)->len != 0;
   {
     size_t n;
     const mpv *items;
@@ -151,6 +195,58 @@ static MpyStr *alloc_str(size_t n) {
   s->len = n;
   s->data[n] = '\0';
   return s;
+}
+
+/* Equality for `in`: the same word (one object, or one immediate or small int), two strs with the same bytes, two numbers
+ * (bools as 0 and 1) with the same value. Two lists or tuples that are different objects are not compared yet, so that
+ * fails rather than answers. */
+static int str_equal(mpv a, mpv b) {
+  const MpyStr *x = str_of(a), *y = str_of(b);
+  return x->len == y->len && memcmp(x->data, y->data, x->len) == 0;
+}
+
+static int values_equal(mpv a, mpv b) {
+  if (a == b) return 1;
+  if (is_str(a) || is_str(b)) return is_str(a) && is_str(b) && str_equal(a, b);
+  if ((is_small(a) || is_bool(a)) && (is_small(b) || is_bool(b))) return need_int(a) == need_int(b);
+  if ((is_list(a) || is_tuple(a)) && (is_list(b) || is_tuple(b))) {
+    fail("TypeError: equality of lists and tuples is not lowered yet");
+  }
+  return 0;
+}
+
+/* `x in c` is contains(c, x): a str holds a substring, a list or tuple an equal item. */
+static int contains(mpv c, mpv x) {
+  char msg[160];
+  size_t n, i;
+  const mpv *items;
+  if (is_str(c)) {
+    const MpyStr *hay, *needle;
+    if (!is_str(x)) {
+      snprintf(msg, sizeof msg, "TypeError: can't convert '%s' object to str implicitly", real_type_name(x));
+      fail(msg);
+    }
+    hay = str_of(c);
+    needle = str_of(x);
+    for (i = 0; i + needle->len <= hay->len; ++i) {
+      if (memcmp(hay->data + i, needle->data, needle->len) == 0) return 1;
+    }
+    return 0;
+  }
+  if (seq_items(c, &n, &items)) {
+    for (i = 0; i < n; ++i) {
+      if (values_equal(items[i], x)) return 1;
+    }
+    return 0;
+  }
+  if (is_small(c) || is_bool(c)) {
+    snprintf(msg, sizeof msg, "TypeError: unsupported types for : '%s', '%s'", type_name(x), type_name(c));
+    fail(msg);
+  }
+  if (is_range(c) || is_iter(c)) fail("TypeError: containment in a range or an iterator is not lowered yet");
+  snprintf(msg, sizeof msg, "TypeError: '%s' object isn't iterable", real_type_name(c));
+  fail(msg);
+  return 0;
 }
 
 /* A str operator: == and != compare the bytes (a str never equals a non-str), + concatenates two strs. The other operators
@@ -196,6 +292,8 @@ mpv mpy_binop(int op, mpv a, mpv b) {
   /* The in-place forms (MP_BINARY_OP_INPLACE_OR = 9 .. INPLACE_POWER = 21) are the same operators on immutable ints:
    * INPLACE_X is X + 13 (runtime0.h). The in-place matrix multiply, true divide and power stay unsupported. */
   if (op >= 9 && op <= 21) op += 13;
+  if (op == MPY_OP_IN) return contains(b, a) ? MPY_TRUE : MPY_FALSE;   /* a in b: the right operand is the container */
+  if (op == MPY_OP_IS) return a == b ? MPY_TRUE : MPY_FALSE;           /* the same word: one immediate or one object */
   if (is_str(a) || is_str(b)) return str_binop(op, a, b);
   x = need_int(a);
   y = need_int(b);
@@ -300,8 +398,11 @@ void mpy_store_name(const char *name, size_t len, mpv value) {
 
 mpv mpy_load_name(const char *name, size_t len) {
   Global *g = find_global(name, len);
-  if (g == NULL) fail("NameError: name is not defined");
-  return g->value;
+  int b;
+  if (g != NULL) return g->value;
+  b = builtin_index(name, len);
+  if (b < 0) fail("NameError: name is not defined");
+  return builtin_obj(b);
 }
 
 /* For the driver: the value of a global, or MPY_NONE and 0 when there is none. */
@@ -392,10 +493,19 @@ mpv mpy_make_closure(uint64_t index, uint64_t nargs, uint64_t n) {
 
 /* Calls fn with the nargs values on top of the value stack, which they leave. A closure's captured cells go in front of
  * the arguments, as MicroPython's closure_call puts them, so the function sees its free variables as its first locals. */
+static mpv builtin_call(int id, const mpv *args, uint64_t n);
+
 mpv mpy_call(mpv fn, uint64_t nargs) {
   MpyFunc *f;
   size_t base, k;
   mpv ret = MPY_NONE;
+  if (is_builtin(fn)) {
+    if (nargs > vtop) fail("mpy_call: the arguments are not on the value stack");
+    base = vtop - nargs;
+    ret = builtin_call(((const MpyBuiltin *)(uintptr_t)fn)->id, nargs ? vstk + base : NULL, nargs);
+    vtop = base;
+    return ret;
+  }
   if (!is_heap(fn) || type_of(fn) != &mpy_type_function) fail("TypeError: object is not callable");
   f = (MpyFunc *)(uintptr_t)fn;
   if (nargs != f->nargs) fail("TypeError: wrong number of arguments");
@@ -503,7 +613,7 @@ mpv mpy_get_iter(mpv obj) {
   const mpv *items;
   char msg[120];
   if (is_iter(obj)) return obj;
-  if (!seq_items(obj, &len, &items)) {
+  if (!is_range(obj) && !seq_items(obj, &len, &items)) {
     snprintf(msg, sizeof msg, "TypeError: '%s' object isn't iterable", type_name(obj));
     fail(msg);
   }
@@ -520,6 +630,14 @@ mpv mpy_iter_next(mpv iter) {
   MpyIter *it = (MpyIter *)(uintptr_t)iter;
   size_t len;
   const mpv *items;
+  if (is_range(it->seq)) {
+    const MpyRange *r = range_of(it->seq);
+    int64_t v;
+    if (it->index >= r->len) return 0;
+    v = r->start + (int64_t)it->index * r->step;
+    it->index++;
+    return make_small(v);
+  }
   seq_items(it->seq, &len, &items);
   if (it->index >= len) return 0;
   return items[it->index++];
@@ -547,6 +665,130 @@ mpv mpy_cell_get(mpv cell) {
 
 void mpy_cell_set(mpv cell, mpv value) {
   ((MpyCell *)(uintptr_t)cell)->value = value;
+}
+
+/* Builtins. A builtin's arguments are args[0..n-1] on the value stack (mpy_call leaves them there until it returns). */
+static mpv new_str(const char *bytes, size_t n) {
+  MpyStr *s = alloc_str(n);
+  memcpy(s->data, bytes, n);
+  return (mpv)(uintptr_t)s;
+}
+
+/* range(start, stop, step): the number of items is that of the arithmetic sequence. */
+static mpv new_range(int64_t start, int64_t stop, int64_t step) {
+  MpyRange *r;
+  if (step == 0) fail("ValueError: zero step");
+  r = (MpyRange *)malloc(sizeof *r);
+  if (r == NULL) fail("out of memory");
+  r->type = &mpy_type_range;
+  r->start = start;
+  r->stop = stop;
+  r->step = step;
+  if (step > 0) r->len = start < stop ? (size_t)((stop - start - 1) / step + 1) : 0;
+  else r->len = start > stop ? (size_t)((start - stop - 1) / -step + 1) : 0;
+  return (mpv)(uintptr_t)r;
+}
+
+static void list_append(MpyList *l, mpv v) {
+  if (l->len == l->cap) {   /* cap is at least 1 (mpy_build_list) */
+    size_t cap = l->cap * 2;
+    mpv *items = (mpv *)realloc(l->items, cap * sizeof(mpv));
+    if (items == NULL) fail("out of memory");
+    l->items = items;
+    l->cap = cap;
+  }
+  l->items[l->len++] = v;
+}
+
+/* The characters of a str: its bytes that do not continue a UTF-8 sequence (the same count for valid UTF-8). */
+static size_t str_chars(const MpyStr *s) {
+  size_t i, n = 0;
+  for (i = 0; i < s->len; ++i) {
+    if ((s->data[i] & 0xc0) != 0x80) ++n;
+  }
+  return n;
+}
+
+static mpv builtin_call(int id, const mpv *args, uint64_t n) {
+  char msg[160];
+  switch (id) {
+    case BI_LEN: {
+      size_t len;
+      const mpv *items;
+      if (n != 1) fail("TypeError: len() takes exactly one argument");
+      if (is_str(args[0])) return make_small((int64_t)str_chars(str_of(args[0])));
+      if (seq_items(args[0], &len, &items)) return make_small((int64_t)len);
+      if (is_range(args[0])) return make_small((int64_t)range_of(args[0])->len);
+      snprintf(msg, sizeof msg, "TypeError: object of type '%s' has no len()", real_type_name(args[0]));
+      fail(msg);
+      return MPY_NONE;
+    }
+    case BI_STR: {
+      char buf[32];
+      int k;
+      if (n == 0) return new_str("", 0);
+      if (n != 1) fail("TypeError: str() takes at most 1 argument");
+      if (is_str(args[0])) return args[0];   /* str(s) is s, as in MicroPython */
+      if (args[0] == MPY_NONE) return new_str("None", 4);
+      if (args[0] == MPY_TRUE) return new_str("True", 4);
+      if (args[0] == MPY_FALSE) return new_str("False", 5);
+      if (is_small(args[0])) {
+        k = snprintf(buf, sizeof buf, "%lld", (long long)small_value(args[0]));
+        return new_str(buf, (size_t)k);
+      }
+      fail("str() of this value is not lowered yet");
+      return MPY_NONE;
+    }
+    case BI_RANGE: {
+      uint64_t i;
+      if (n < 1 || n > 3) fail("TypeError: range expected 1 to 3 arguments");
+      for (i = 0; i < n; ++i) {
+        if (!is_small(args[i]) && !is_bool(args[i])) {
+          snprintf(msg, sizeof msg, "TypeError: can't convert %s to int", real_type_name(args[i]));
+          fail(msg);
+        }
+      }
+      if (n == 1) return new_range(0, need_int(args[0]), 1);
+      if (n == 2) return new_range(need_int(args[0]), need_int(args[1]), 1);
+      return new_range(need_int(args[0]), need_int(args[1]), need_int(args[2]));
+    }
+    case BI_APPEND: {
+      if (n != 2) fail("TypeError: append() takes exactly one argument");
+      if (!is_list(args[0])) fail("TypeError: append() needs a list");
+      list_append((MpyList *)(uintptr_t)args[0], args[1]);
+      return MPY_NONE;
+    }
+    case BI_POP: {
+      MpyList *l;
+      size_t i;
+      mpv v;
+      if (n < 1 || n > 2) fail("TypeError: pop() takes at most 1 argument");
+      if (!is_list(args[0])) fail("TypeError: pop() needs a list");
+      l = (MpyList *)(uintptr_t)args[0];
+      if (l->len == 0) fail("IndexError: pop from empty list");
+      i = n == 2 ? checked_index(args[0], args[1], l->len, "IndexError: list index out of range") : l->len - 1;
+      v = l->items[i];
+      memmove(l->items + i, l->items + i + 1, (l->len - i - 1) * sizeof(mpv));
+      l->len -= 1;
+      return v;
+    }
+    default:
+      fail("internal: unknown builtin");
+  }
+  return MPY_NONE;
+}
+
+/* LOAD_METHOD: the method of obj named name. The lowering passes only append and pop. A list has them; any other value
+ * fails with MicroPython's attribute error. */
+mpv mpy_load_method(mpv obj, const char *name, size_t len) {
+  char msg[160];
+  if (is_list(obj)) {
+    if (len == 6 && memcmp(name, "append", 6) == 0) return builtin_obj(BI_APPEND);
+    if (len == 3 && memcmp(name, "pop", 3) == 0) return builtin_obj(BI_POP);
+  }
+  snprintf(msg, sizeof msg, "AttributeError: '%s' object has no attribute '%.*s'", real_type_name(obj), (int)len, name);
+  fail(msg);
+  return MPY_NONE;
 }
 
 /* repr of a str, as MicroPython writes it: single quotes unless the text has a single quote and no double quote. */
@@ -579,6 +821,11 @@ static void print_repr(mpv v) {
   else if (v == MPY_FALSE) fputs("False", stdout);
   else if (v == MPY_NONE) fputs("None", stdout);
   else if (is_str(v)) print_str_repr(str_of(v));
+  else if (is_range(v)) {
+    const MpyRange *r = range_of(v);
+    if (r->step == 1) printf("range(%lld, %lld)", (long long)r->start, (long long)r->stop);
+    else printf("range(%lld, %lld, %lld)", (long long)r->start, (long long)r->stop, (long long)r->step);
+  }
   else if (seq_items(v, &n, &items)) {
     int is_l = is_list(v);
     putchar(is_l ? '[' : '(');

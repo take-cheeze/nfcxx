@@ -36,7 +36,7 @@ One 64-bit word per value, with the tagging of `MICROPY_OBJ_REPR_A` (the default
   signed on 64-bit hosts. A wider result is an error until big ints exist.
 - `x110` is an immediate: None `0x06`, False `0x0e`, True `0x16`.
 - A pointer (`xx00`, not zero) to a heap object whose first member is a pointer to its type. Heap types: str, function,
-  cell, list, tuple and iterator (see Strings, Closures and Containers below).
+  cell, list, tuple, iterator, range and builtin (see Strings, Closures, Containers and Builtins below).
 
 The runtime is `tests/mpy/runtime/mpy_rt.c`. The in-place operators (`MP_BINARY_OP_INPLACE_*`, codes 9..21) are the
 binary operators plus 13, as in `py/runtime0.h`; on ints they give the same result.
@@ -51,8 +51,31 @@ binary operators plus 13, as in `py/runtime0.h`; on ints they give the same resu
   slots, with its object in the bottom one. `GET_ITER_STACK` makes it, `FOR_ITER` reads it there, and `break` pops all four.
   The plain `GET_ITER`, which never feeds a `for` loop, is refused.
 - `FOR_ITER` gives 0 when the sequence is exhausted, which is never a value, so the lowering tests for 0.
-- repr: a list prints as `[...]`, a tuple as `(...)` with a trailing comma for one item, a str quoted as MicroPython quotes it.
-  A top-level str prints raw, as before.
+- repr: a list prints as `[...]`, a tuple as `(...)` with a trailing comma for one item, a str quoted as MicroPython quotes it,
+  and a range as `range(a, b)` (or `range(a, b, step)` when the step is not 1). A top-level str prints raw, as before.
+- `range(...)` (one to three small-int arguments) is a MpyRange {start, stop, step, len}. `GET_ITER` on it makes an iterator
+  whose index counts the items given; `len` and truth use `len`. Containment in a range is refused at run time.
+- `LOAD_METHOD` of `append` or `pop` gives the list's builtin method (`mpy_load_method`), and a value of another type fails
+  with MicroPython's AttributeError. The lowering refuses every other attribute name by name. `CALL_METHOD` pushes the self
+  and the arguments, then calls, so `xs.pop(i)` and `xs.append(x)` take one or two arguments. A keyword argument is refused.
+- A constant tuple is one object in the .mpy file (mpy-cross folds it), so `LOAD_CONST_OBJ` builds it on each run from its items.
+  The items may be None, the bools, small ints, strs, and tuples of those. An int outside the runtime's 62-bit small range is
+  refused, as big ints are.
+
+## Builtins
+
+- `LOAD_NAME` and `LOAD_GLOBAL` look the name up in the module globals first, then the builtins: `len`, `str` and `range`.
+  Both are the same runtime lookup (`mpy_load_name`), so a global of the same name shadows a builtin.
+- `len(x)` for a str (the number of UTF-8 characters: the bytes that do not continue a sequence), a list, a tuple and a range.
+  Any other value is a TypeError with MicroPython's message.
+- `str(x)` for a small int, a bool, None and a str (a str is the same object). `str()` is the empty str. Other values are
+  refused at run time, since their repr is not built yet.
+- `range(n)`, `range(a, b)` and `range(a, b, step)`: the arguments are small ints or bools (other types are a TypeError), and a
+  zero step is a ValueError.
+- Operators: `in` on a str is a substring test; on a list or tuple it is an equality test against each item. Equality is by
+  value for strs, numbers and bools, and by identity otherwise; a comparison of two different lists or tuples fails, since
+  their equality is not built yet. `not in` is `in` with a `not`, as mpy-cross emits it. `is` compares the word: an immediate
+  (None, a bool, a small int) or the same heap object. `is not` is `is` with a `not`.
 
 ## Lowering (first slice)
 
@@ -130,8 +153,9 @@ and every other operator on a str are a runtime error saying they are not lowere
 ## Not yet
 
 Defaults and keyword arguments (`MAKE_FUNCTION_DEFARGS`, `MAKE_CLOSURE_DEFARGS`), `del` of a closure variable
-(`DELETE_DEREF`), generators, containers, str methods and formatting, str ordering and repetition, classes, exceptions,
-`is`, big ints, and the rest of the opcodes. A str constant through `LOAD_CONST_OBJ` is lowered, but mpy-cross emits text
-literals as qstrs, so no test program reaches that path yet. Nothing is freed: a str lives until the process ends. Also the
-`luac`-style opcode oracle is still blocked, and string pattern matching is paused.
-still blocked, and string pattern matching is paused.
+(`DELETE_DEREF`), generators, str methods and formatting, str ordering and repetition, classes, exceptions, big ints, dict,
+set, slicing, the list methods other than append and pop, and the rest of the opcodes. Equality of two different lists or
+tuples (and so `in` on a list of them), containment in a range, `list.pop` and `str` of a list or tuple are refused at
+run time until their repr and equality are built. Identity of strs: a str built at run time is a new object, but
+MicroPython interns short strs, so `'a' + 'b' is 'ab'` is True there and False here. Nothing is freed: a str lives until the
+process ends. Also the `luac`-style opcode oracle is still blocked, and string pattern matching is paused.

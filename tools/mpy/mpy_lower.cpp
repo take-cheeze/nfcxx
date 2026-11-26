@@ -15,6 +15,7 @@
 #include "mpy_lower.hpp"
 
 #include <cstdio>
+#include <functional>
 #include <map>
 #include <sstream>
 #include <stdexcept>
@@ -37,6 +38,24 @@ unsigned opcode(const char *name) {
 
 // The tagged word of a small int (MICROPY_OBJ_REPR_A): (v << 1) | 1.
 unsigned long long small_word(long long v) { return ((unsigned long long)v << 1) | 1ULL; }
+
+[[noreturn]] void refused(const std::string &what);
+
+// The value of an int constant, which the .mpy file gives as decimal digits. The runtime holds a small int of 62 bits
+// (mpy_rt.c), so a constant outside that range is refused, as big ints are.
+long long int_constant(const std::string &digits) {
+  size_t used = 0;
+  long long v = 0;
+  try {
+    v = std::stoll(digits, &used);
+  } catch (const std::exception &) {
+    refused("an int constant out of the small-int range is not lowered yet");
+  }
+  if (used != digits.size() || v > (1LL << 62) - 1 || v < -(1LL << 62)) {
+    refused("an int constant out of the small-int range is not lowered yet");
+  }
+  return v;
+}
 
 std::string ir_escape(const std::string &s) {
   std::string out;
@@ -188,6 +207,13 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
       if ((in.arg >> 8) != 0) refused("keyword arguments in a call are not lowered yet");
       op.kind = "CALL";
       op.arg = in.arg;                     // the positional argument count
+    } else if (o == opcode("LOAD_METHOD")) {
+      op.kind = "LOAD_METHOD";             // the argument is the attribute's qstr; only append and pop are lowered (below)
+      op.arg = in.arg;
+    } else if (o == opcode("CALL_METHOD")) {
+      if ((in.arg >> 8) != 0) refused("keyword arguments in a call are not lowered yet");
+      op.kind = "CALL_METHOD";             // the positional argument count; the method and its self lie below the arguments
+      op.arg = in.arg;
     } else if (o == opcode("RETURN_VALUE")) {
       op.kind = "RETURN";
     } else {
@@ -218,6 +244,8 @@ int effect(const Op &op) {
   if (k == "FOR_ITER") return 1;   // the fall-through; the exhausted jump is handled per successor
   if (k == "GET_ITER") return kIterSlots - 1;   // the object goes, the iterator's slots come
   if (k == "CALL") return -(int)op.arg;   // the function and its arguments go, the result comes
+  if (k == "LOAD_METHOD") return 1;        // the object becomes the method, and stays as the self above it
+  if (k == "CALL_METHOD") return -(int)op.arg - 1;   // the method, the self and the arguments go, the result comes
   if (k == "MAKE_CLOSURE") return 1 - (int)op.extra;   // the captured cells go, the closure comes
   if (k == "STORE_NAME" || k == "STORE_LOCAL" || k == "STORE_DEREF" || k == "POP_TOP" || k == "BINARY" ||
       k == "JUMP_IF_FALSE" || k == "JUMP_IF_TRUE" || k == "JUMP_IF_TRUE_OR_POP" || k == "JUMP_IF_FALSE_OR_POP" ||
@@ -406,6 +434,38 @@ class Lowerer {
       return slot("loc", (int)i);
     };
 
+    // A str literal: its bytes are a data item, and mpy_str_lit returns the record (allocated on first use). Returns the value.
+    std::function<std::string(const std::string &)> str_value = [&](const std::string &text) {
+      std::string sym = text_sym(text), r = fresh();
+      body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_str_lit\" @\"" << sym << "\" (const unsigned_long "
+           << text.size() << ") (const unsigned_long " << str_id(text) << ")))\n";
+      return r;
+    };
+
+    // A constant object, as mpy-cross writes it: None, a bool, an int of the small range, a str, or a tuple of those (mpy-cross
+    // folds a tuple of constants into one object). A tuple is built on each run, from its items pushed on the value stack.
+    std::function<std::string(const Obj &)> constant = [&](const Obj &o) -> std::string {
+      std::string word;
+      if (o.kind == Obj::Kind::Str) return str_value(o.text);
+      if (o.kind == Obj::Kind::Tuple) {
+        std::vector<std::string> vals;
+        for (const Obj &item : o.items) vals.push_back(constant(item));
+        for (const std::string &v : vals) body << "  (eval (call void &\"mpy_push\" " << v << "))\n";
+        std::string r = fresh();
+        body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_build_tuple\" (const unsigned_long " << o.items.size()
+             << ")))\n";
+        return r;
+      }
+      if (o.kind == Obj::Kind::None) word = std::to_string(6ULL);
+      else if (o.kind == Obj::Kind::False) word = std::to_string(14ULL);
+      else if (o.kind == Obj::Kind::True) word = std::to_string(22ULL);
+      else if (o.kind == Obj::Kind::Int) word = std::to_string(small_word(int_constant(o.text)));
+      else refused("a constant object of this kind is not lowered yet");
+      std::string r = fresh();
+      body << "  (let " << r << " unsigned_long (const unsigned_long " << word << "))\n";
+      return r;
+    };
+
     if (is_fn) {
       for (unsigned i = 0; i < pre.n_pos_args; ++i) {
         std::string p = fresh(), v = fresh();
@@ -443,22 +503,16 @@ class Lowerer {
       } else if (k == "LOAD_TRUE") {
         push(d, "(const unsigned_long 22)");
       } else if (k == "LOAD_STR" || k == "LOAD_OBJ") {
-        // A str literal: its bytes are a data item, and mpy_str_lit returns the record (allocated on first use).
-        std::string text;
+        // A str literal, or a constant object (see str_value and constant above).
+        std::string value;
         if (k == "LOAD_STR") {
           if ((size_t)op.arg >= m_.qstrs.size()) throw std::runtime_error("mpy: qstr index out of range");
-          text = m_.qstrs[(size_t)op.arg];
+          value = str_value(m_.qstrs[(size_t)op.arg]);
         } else {
           if ((size_t)op.arg >= m_.objs.size()) throw std::runtime_error("mpy: constant index out of range");
-          const Obj &o = m_.objs[(size_t)op.arg];
-          if (o.kind != Obj::Kind::Str) refused("a constant object that is not a str is not lowered yet");
-          text = o.text;
+          value = constant(m_.objs[(size_t)op.arg]);
         }
-        std::string sym = text_sym(text);
-        std::string r = fresh();
-        body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_str_lit\" @\"" << sym
-             << "\" (const unsigned_long " << text.size() << ") (const unsigned_long " << str_id(text) << ")))\n";
-        push(d, r);
+        push(d, value);
       } else if (k == "LOAD_NAME") {
         std::string sym = name_sym((size_t)op.arg);
         size_t len = m_.qstrs[(size_t)op.arg].size();
@@ -545,6 +599,29 @@ class Lowerer {
         body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_call\" " << f << " (const unsigned_long " << n
              << ")))\n";
         push(d - n - 1, r);
+      } else if (k == "LOAD_METHOD") {
+        // obj.name, for the list methods the runtime has. The method comes from mpy_load_method (which fails for any other
+        // value); obj stays on the stack as the self. Any other name is refused: its method is not in the runtime yet.
+        if ((size_t)op.arg >= m_.qstrs.size()) throw std::runtime_error("mpy: qstr index out of range");
+        const std::string name = m_.qstrs[(size_t)op.arg];
+        if (name != "append" && name != "pop") refused("method " + name + " is not lowered yet");
+        std::string obj = pop(d), sym = name_sym((size_t)op.arg), meth = fresh();
+        body << "  (let " << meth << " unsigned_long (call unsigned_long &\"mpy_load_method\" " << obj << " @\"" << sym
+             << "\" (const unsigned_long " << name.size() << ")))\n";
+        push(d - 1, meth);
+        push(d, obj);
+      } else if (k == "CALL_METHOD") {
+        // [method, self, args...]: the self and the arguments go on the value stack, and mpy_call takes them all.
+        int n = (int)op.arg;
+        for (int i = 0; i <= n; ++i) {
+          std::string v = load(d - n - 1 + i);
+          body << "  (eval (call void &\"mpy_push\" " << v << "))\n";
+        }
+        std::string f = load(d - n - 2);
+        std::string r = fresh();
+        body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_call\" " << f << " (const unsigned_long " << n + 1
+             << ")))\n";
+        push(d - n - 2, r);
       } else if (k == "JUMP_IF_FALSE" || k == "JUMP_IF_TRUE") {
         std::string v = pop(d);
         std::string t = fresh(), c = fresh();
