@@ -1,7 +1,8 @@
 // .mpy bytecode -> Path B IR (docs/notes/mpy-pathb.md). The subset: small ints, None/bool, str constants, names, locals,
 // the operators, jumps, calls of functions (positional arguments; no defaults, keywords or *args), closures (cell and free
-// variables, LOAD_DEREF, STORE_DEREF, MAKE_CLOSURE), lists, tuples, dicts (BUILD_MAP, STORE_MAP), slices, del of an item
-// (LOAD_NULL with STORE_SUBSCR), list and dict comprehensions (STORE_COMP), and return. Anything else is refused by name,
+// variables, LOAD_DEREF, STORE_DEREF, MAKE_CLOSURE), lists, tuples, dicts (BUILD_MAP, STORE_MAP, and the methods get, keys,
+// values, items, pop and update), sets (BUILD_SET), slices, del of an item (LOAD_NULL with STORE_SUBSCR), list, dict and set
+// comprehensions (STORE_COMP), and return. Anything else is refused by name,
 // and no IR is produced for a refused module.
 //
 // Each code object becomes one IR function. The stack is slots stk.N (one per depth) and the locals are loc.N. The module
@@ -156,6 +157,14 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
       op.kind = "SETUP";
       op.arg = (long long)op.next + in.arg;
       op.extra = o == opcode("SETUP_FINALLY") ? 1 : 0;   // the kind of block: 1 for a finally, 0 for an except
+    } else if (o == opcode("SETUP_WITH")) {
+      // A with statement: the context manager is on top. Its exit method goes below it, its __enter__ result on top, and the
+      // block is a finally (its exit runs on the way out, so an unwind through it is refused).
+      op.kind = "SETUP_WITH";
+      op.arg = (long long)op.next + in.arg;
+      op.extra = 2;   // the block kind: 2 for a with (1 for a finally, 0 for an except; see the walk)
+    } else if (o == opcode("WITH_CLEANUP")) {
+      op.kind = "WITH_CLEANUP";           // the exit method and the context manager below the top (None or an exception)
     } else if (o == opcode("UNWIND_JUMP")) {
       // A break or continue that leaves try blocks: the target is relative to the byte after the offset, which is the extra
       // byte (the number of blocks to leave, and bit 0x80 for a break out of a for loop).
@@ -232,10 +241,12 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
     } else if (o == opcode("BUILD_SLICE")) {
       op.kind = "BUILD_SLICE";
       op.arg = in.arg;                    // 2 or 3: the start, the stop and the step (none when absent)
+    } else if (o == opcode("BUILD_SET")) {
+      op.kind = "BUILD_SET";              // the number of items, taken from the stack (mp_obj_new_set)
+      op.arg = in.arg;
     } else if (o == opcode("STORE_COMP")) {
       // A comprehension's store: the argument is (the collection's offset below the top << 2) | its kind (0 list, 1 dict,
-      // 2 set). A set comprehension is refused.
-      if ((in.arg & 3) == 2) refused("a set comprehension is not lowered yet");
+      // 2 set).
       op.kind = "STORE_COMP";
       op.arg = in.arg >> 2;
       op.extra = in.arg & 3;
@@ -289,14 +300,16 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
   return out;
 }
 
-// The methods of the builtin types that the runtime does not have yet (str, list, dict, ...): a method call of one of these
-// names is refused. A class's method of such a name is refused too, which is the cost of not knowing the receiver's type.
+// The methods of the builtin types that the runtime does not have yet (str, list, dict, set, ...): a method call of one of
+// these names is refused. A class's method of such a name is refused too, which is the cost of not knowing the receiver's
+// type. The dict methods that are lowered (get, keys, values, items, pop, update) are not here.
 const std::set<std::string> kBuiltinMethods = {
-    "capitalize", "center", "clear", "copy", "count", "encode", "endswith", "extend", "find", "format", "get", "index",
-    "insert", "isalpha", "isdigit", "isspace", "items", "join", "keys", "ljust", "lower", "lstrip", "partition", "remove",
+    "capitalize", "center", "clear", "copy", "count", "encode", "endswith", "extend", "find", "format", "index",
+    "insert", "isalpha", "isdigit", "isspace", "join", "ljust", "lower", "lstrip", "partition", "remove",
     "replace", "reverse", "rfind", "rindex", "rjust", "rstrip", "rsplit", "setdefault", "sort", "split", "splitlines",
-    "startswith", "strip", "title", "update", "upper", "values", "zfill", "add", "discard", "popitem", "difference",
-    "union", "intersection"};
+    "startswith", "strip", "title", "upper", "zfill", "add", "discard", "popitem", "difference", "union", "intersection",
+    "fromkeys", "isdisjoint", "issubset", "issuperset", "symmetric_difference", "difference_update",
+    "intersection_update", "symmetric_difference_update"};
 
 // A for loop's iterator takes MP_OBJ_ITER_BUF_NSLOTS stack slots (obj.h: 4 on 32- and 64-bit hosts); its object is in the
 // bottom one. break pops all of them.
@@ -310,9 +323,11 @@ int effect(const Op &op) {
       k == "MAKE_FUNCTION" || k == "LOAD_NULL" || k == "BUILD_MAP" || k == "LOAD_GLOBAL" || k == "BUILD_CLASS")
     return 1;
   if (k == "STORE_ATTR") return -2;      // the object and the value go
+  if (k == "SETUP_WITH") return 2;       // the exit method goes under the context manager, and __enter__'s value comes on top
+  if (k == "WITH_CLEANUP") return -2;    // the top and the context manager go; the result takes the exit method's place
   if (k == "END_FINALLY" || k == "RAISE_OBJ") return -1;   // the value on top goes
   if (k == "DUP_TWO") return 2;
-  if (k == "BUILD_LIST" || k == "BUILD_TUPLE") return 1 - (int)op.arg;   // the items go, the container comes
+  if (k == "BUILD_LIST" || k == "BUILD_TUPLE" || k == "BUILD_SET") return 1 - (int)op.arg;   // the items go, the container comes
   if (k == "BUILD_SLICE") return 1 - (int)op.arg;                        // the start, stop (and step) go, the slice comes
   if (k == "STORE_MAP") return -2;                                       // the value and key go; the dict stays
   if (k == "STORE_COMP") return op.extra == 1 ? -2 : -1;                 // a dict takes its key and value, a list its item
@@ -473,13 +488,14 @@ class Lowerer {
       if (!popped.empty() && (op.kind == "POP_EXCEPT_JUMP" || op.kind == "END_FINALLY")) popped.pop_back();
       if (op.kind == "RETURN" || op.kind == "RAISE_OBJ" || op.kind == "RAISE_LAST") {
         // nothing follows (a raise never returns)
-      } else if (op.kind == "SETUP") {
-        // the handler is entered with the exception on top: the depth there is one more than at the try
-        int kind = op.extra;   // set below: 1 for SETUP_FINALLY, 0 for SETUP_EXCEPT
+      } else if (op.kind == "SETUP" || op.kind == "SETUP_WITH") {
+        // the handler is entered with the exception on top: the depth there is one more than at the try. A with statement's
+        // stack at its handler is the exit method, the context manager and the exception, so it is two more than before.
+        int kind = op.extra;   // 2 for SETUP_WITH, 1 for SETUP_FINALLY, 0 for SETUP_EXCEPT
         std::vector<int> inner = open;
         inner.push_back(kind);
         succ.push_back({op.next, after, inner});
-        succ.push_back({(size_t)op.arg, d + 1, inner});
+        succ.push_back({(size_t)op.arg, op.kind == "SETUP_WITH" ? d + 2 : d + 1, inner});
       } else if (op.kind == "POP_EXCEPT_JUMP") {
         succ.push_back({(size_t)op.arg, after, popped});
       } else if (op.kind == "UNWIND_JUMP") {
@@ -488,6 +504,7 @@ class Lowerer {
         if (n > open.size()) throw std::runtime_error("mpy: an unwind leaves more blocks than are open");
         std::vector<int> left(open.begin(), open.end() - (long)n);
         for (size_t i = open.size() - n; i < open.size(); ++i) {
+          if (open[i] == 2) refused("a break or continue out of a with statement is not lowered yet");
           if (open[i] == 1) refused("a break or continue out of a try block with a name (a finally) is not lowered yet");
         }
         int target_depth = d - ((op.extra & 0x80) ? kIterSlots : 0);
@@ -763,10 +780,22 @@ class Lowerer {
         std::string r = fresh();
         body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_build_class_fn\"))\n";
         push(d, r);
-      } else if (k == "SETUP") {
-        // A try block (SETUP_EXCEPT, SETUP_FINALLY): the block is pushed, and _setjmp is called on it in this frame. It returns 0
-        // here; when a raise longjmps back, it returns 1, and the landing stub (after the body) hands the exception to the
-        // handler at the target, in the slot of this depth.
+      } else if (k == "SETUP" || k == "SETUP_WITH") {
+        // A try block (SETUP_EXCEPT, SETUP_FINALLY, SETUP_WITH): the block is pushed, and _setjmp is called on it in this frame. It
+        // returns 0 here; when a raise longjmps back, it returns 1, and the landing stub (after the body) hands the exception to
+        // the handler at the target, in the slot of this depth (the slot above the context manager for a with statement).
+        int exc_slot = d;
+        if (k == "SETUP_WITH") {
+          // __exit__ is looked up and __enter__ called before the block, so an exception from __enter__ is not this with's.
+          // The exit method goes below the context manager (slot d-1 is the manager's, moved to d), and __enter__'s value on top.
+          std::string ctx = load(d - 1), ex = fresh(), en = fresh();
+          body << "  (let " << ex << " unsigned_long (call unsigned_long &\"mpy_with_exit\" " << ctx << "))\n";
+          body << "  (let " << en << " unsigned_long (call unsigned_long &\"mpy_with_enter\" " << ctx << "))\n";
+          push(d - 1, ex);
+          push(d, ctx);
+          push(d + 1, en);
+          exc_slot = d + 1;
+        }
         std::string landing = "land" + std::to_string(op.offset);
         std::string jb = fresh(), rc = fresh(), c = fresh(), e = fresh();
         body << "  (let " << jb << " unsigned_long (call unsigned_long &\"mpy_try_enter\"))\n";
@@ -775,8 +804,14 @@ class Lowerer {
         body << "  (if " << c << " (then (goto \"" << landing << "\")) (else))\n";
         stubs << "  (label \"" << landing << "\")\n";
         stubs << "  (let " << e << " unsigned_long (call unsigned_long &\"mpy_take_exc\"))\n";
-        stubs << "  (store unsigned_long " << slot("stk", d) << " " << e << ")\n";
+        stubs << "  (store unsigned_long " << slot("stk", exc_slot) << " " << e << ")\n";
         stubs << "  (goto " << lbl((size_t)op.arg) << ")\n";
+      } else if (k == "WITH_CLEANUP") {
+        // The stack is [exit method, context manager, top] (slots d-3, d-2, d-1): the top is None when the body ended, or the
+        // exception that is raised. The result takes the exit method's slot, and END_FINALLY checks it.
+        std::string top = load(d - 1), ex = load(d - 3), r = fresh();
+        body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_with_cleanup\" " << ex << " " << top << "))\n";
+        push(d - 3, r);
       } else if (k == "POP_EXCEPT_JUMP") {
         body << "  (eval (call void &\"mpy_block_pop\"))\n";
         body << "  (goto " << lbl((size_t)op.arg) << ")\n";
@@ -824,7 +859,7 @@ class Lowerer {
         } else {
           body << "  (if " << c << " (then (goto " << lbl((size_t)op.arg) << ")) (else))\n";
         }
-      } else if (k == "BUILD_LIST" || k == "BUILD_TUPLE") {
+      } else if (k == "BUILD_LIST" || k == "BUILD_TUPLE" || k == "BUILD_SET") {
         int n = (int)op.arg;
         for (int i = 0; i < n; ++i) {
           std::string v = load(d - n + i);
@@ -832,7 +867,8 @@ class Lowerer {
         }
         std::string r = fresh();
         body << "  (let " << r << " unsigned_long (call unsigned_long &\""
-             << (k == "BUILD_LIST" ? "mpy_build_list" : "mpy_build_tuple") << "\" (const unsigned_long " << n << ")))\n";
+             << (k == "BUILD_LIST" ? "mpy_build_list" : (k == "BUILD_SET" ? "mpy_build_set" : "mpy_build_tuple"))
+             << "\" (const unsigned_long " << n << ")))\n";
         push(d - n, r);
       } else if (k == "LOAD_SUBSCR") {
         std::string idx = pop(d), obj = pop(d - 1);
@@ -878,6 +914,9 @@ class Lowerer {
         if (op.extra == 0) {
           std::string v = load(top), coll = load(top - (int)op.arg);
           body << "  (eval (call void &\"mpy_list_append\" " << coll << " " << v << "))\n";
+        } else if (op.extra == 2) {
+          std::string v = load(top), coll = load(top - (int)op.arg);
+          body << "  (eval (call void &\"mpy_set_store\" " << coll << " " << v << "))\n";
         } else {
           std::string key = load(top), v = load(top - 1), coll = load(top - (int)op.arg);
           body << "  (eval (call void &\"mpy_dict_store\" " << coll << " " << key << " " << v << "))\n";
@@ -906,6 +945,15 @@ class Lowerer {
             } else if (k == "JUMP") {
         body << "  (goto " << lbl((size_t)op.arg) << ")\n";
       } else if (k == "RETURN") {
+        // A return leaves every try block it is in: MicroPython's unwind_return drops the except blocks. A finally or a with
+        // block would run its code on the way out, which is not lowered, so it is refused.
+        auto open_it = blocks_at.find(op.offset);
+        if (open_it != blocks_at.end()) {
+          for (int kind : open_it->second) {
+            if (kind == 2) refused("a return out of a with statement is not lowered yet");
+          }
+          for (size_t i = 0; i < open_it->second.size(); ++i) body << "  (eval (call void &\"mpy_block_pop\"))\n";
+        }
         std::string v = pop(d);
         if (is_fn) body << "  (store unsigned_long %0 " << v << ")\n";
         body << "  (return)\n";

@@ -116,6 +116,8 @@ static const MpyType mpy_type_tuple = {"tuple", NULL, 0, 0, NULL};
 static const MpyType mpy_type_iter = {"iterator", NULL, 0, 0, NULL};
 static const MpyType mpy_type_range = {"range", NULL, 0, 0, NULL};
 static const MpyType mpy_type_dict = {"dict", NULL, 0, 0, NULL};
+static const MpyType mpy_type_set = {"set", NULL, 0, 0, NULL};
+static const MpyType mpy_type_view = {"dict_view", NULL, 0, 0, NULL};   /* keys(), values() and items() */
 static const MpyType mpy_type_slice = {"slice", NULL, 0, 0, NULL};
 /* The builtin functions are called builtin_function_or_method; str and range are types, which are called too. */
 static const MpyType mpy_type_bfn = {"builtin_function_or_method", NULL, 0, 0, NULL};
@@ -164,6 +166,16 @@ typedef struct {
 /* The key of a deleted slot. It is never a value (the immediates are None, False and True only). */
 #define MPY_SENTINEL ((mpv)0x1e)
 
+/* A set (docs/notes/mpy-pathb.md, "Sets") is an MpyDict record with type mpy_type_set and no values: MicroPython's mp_set_t
+ * has the same table, probing and growth (py/objset.c, py/map.c's mp_set_lookup). A dict view is the live keys(), values()
+ * or items() of a dict. */
+enum { VIEW_KEYS, VIEW_VALUES, VIEW_ITEMS };
+typedef struct {
+  const MpyType *type;
+  mpv dict;   /* the MpyDict the view reads */
+  int kind;   /* VIEW_KEYS, VIEW_VALUES or VIEW_ITEMS */
+} MpyView;
+
 /* A slice: its start, stop and step, each an int or None. */
 typedef struct {
   const MpyType *type;
@@ -173,7 +185,11 @@ typedef struct {
 /* The builtins: len, str and range (str and range are types, called as functions), and the list methods append and pop
  * that LOAD_METHOD gives. A builtin is a static record {type, id}; the id is the index in mpy_builtins. */
 /* BI_EXC + k is the builtin class of exception k (mpy_exc_info[k]). */
-enum { BI_LEN, BI_STR, BI_RANGE, BI_APPEND, BI_POP, BI_BUILD_CLASS, BI_EXC, BI_COUNT = BI_EXC + EXC_COUNT };
+enum {
+  BI_LEN, BI_STR, BI_RANGE, BI_APPEND, BI_POP, BI_BUILD_CLASS,
+  BI_DICT_GET, BI_DICT_KEYS, BI_DICT_VALUES, BI_DICT_ITEMS, BI_DICT_POP, BI_DICT_UPDATE,
+  BI_EXC, BI_COUNT = BI_EXC + EXC_COUNT
+};
 typedef struct {
   const MpyType *type;
   int id;
@@ -181,6 +197,8 @@ typedef struct {
 static const MpyBuiltin mpy_builtins[BI_COUNT] = {
   {&mpy_type_bfn, BI_LEN}, {&mpy_type_type, BI_STR}, {&mpy_type_type, BI_RANGE},
   {&mpy_type_bfn, BI_APPEND}, {&mpy_type_bfn, BI_POP}, {&mpy_type_bfn, BI_BUILD_CLASS},
+  {&mpy_type_bfn, BI_DICT_GET}, {&mpy_type_bfn, BI_DICT_KEYS}, {&mpy_type_bfn, BI_DICT_VALUES},
+  {&mpy_type_bfn, BI_DICT_ITEMS}, {&mpy_type_bfn, BI_DICT_POP}, {&mpy_type_bfn, BI_DICT_UPDATE},
   {&mpy_type_type, BI_EXC + 0}, {&mpy_type_type, BI_EXC + 1}, {&mpy_type_type, BI_EXC + 2},
   {&mpy_type_type, BI_EXC + 3}, {&mpy_type_type, BI_EXC + 4}, {&mpy_type_type, BI_EXC + 5},
   {&mpy_type_type, BI_EXC + 6}, {&mpy_type_type, BI_EXC + 7}, {&mpy_type_type, BI_EXC + 8},
@@ -221,6 +239,9 @@ static int is_tuple(mpv v) { return is_heap(v) && type_of(v) == &mpy_type_tuple;
 static int is_iter(mpv v) { return is_heap(v) && type_of(v) == &mpy_type_iter; }
 static int is_range(mpv v) { return is_heap(v) && type_of(v) == &mpy_type_range; }
 static int is_dict(mpv v) { return is_heap(v) && type_of(v) == &mpy_type_dict; }
+static int is_set(mpv v) { return is_heap(v) && type_of(v) == &mpy_type_set; }
+static int is_view(mpv v) { return is_heap(v) && type_of(v) == &mpy_type_view; }
+static const MpyView *view_of(mpv v) { return (const MpyView *)(uintptr_t)v; }
 static int is_slice(mpv v) { return is_heap(v) && type_of(v) == &mpy_type_slice; }
 static int is_builtin(mpv v) { return is_heap(v) && (type_of(v) == &mpy_type_bfn || type_of(v) == &mpy_type_type); }
 static const MpyRange *range_of(mpv v) { return (const MpyRange *)(uintptr_t)v; }
@@ -237,6 +258,22 @@ static int builtin_index(const char *name, size_t len) {
   for (k = 0; k < EXC_COUNT; ++k) {
     size_t n = strlen(mpy_exc_info[k].name);
     if (n == len && memcmp(name, mpy_exc_info[k].name, len) == 0) return BI_EXC + (int)k;
+  }
+  return -1;
+}
+
+/* The builtin id of a dict method (get, keys, values, items, pop, update), or -1. */
+static int dict_method_index(const char *name, size_t len) {
+  static const struct {
+    const char *name;
+    int id;
+  } methods[] = {
+    {"get", BI_DICT_GET}, {"keys", BI_DICT_KEYS}, {"values", BI_DICT_VALUES},
+    {"items", BI_DICT_ITEMS}, {"pop", BI_DICT_POP}, {"update", BI_DICT_UPDATE},
+  };
+  size_t k;
+  for (k = 0; k < sizeof methods / sizeof methods[0]; ++k) {
+    if (strlen(methods[k].name) == len && memcmp(name, methods[k].name, len) == 0) return methods[k].id;
   }
   return -1;
 }
@@ -309,7 +346,8 @@ int mpy_truth(mpv v) {
   if (is_str(v)) return str_of(v)->len != 0;
   if (is_iter(v)) return 1;
   if (is_range(v)) return range_of(v)->len != 0;
-  if (is_dict(v)) return dict_of(v)->used != 0;
+  if (is_dict(v) || is_set(v)) return dict_of(v)->used != 0;
+  if (is_view(v)) return dict_of(view_of(v)->dict)->used != 0;
   if (is_inst(v) || is_class(v) || is_bound(v)) return 1;   /* no __bool__ or __len__ yet: an object is true */
   {
     size_t n;
@@ -387,29 +425,32 @@ static void list_append(MpyList *l, mpv v) {
   l->items[l->len++] = v;
 }
 
-/* Equality for `in`: the same word (one object, or one immediate or small int), two strs with the same bytes, two numbers
- * (bools as 0 and 1) with the same value. Two lists or tuples that are different objects are not compared yet, so that
- * fails rather than answers. */
 static int str_equal(mpv a, mpv b) {
   const MpyStr *x = str_of(a), *y = str_of(b);
   return x->len == y->len && memcmp(x->data, y->data, x->len) == 0;
 }
 
-static int values_equal(mpv a, mpv b) {
+/* Equality, as mp_obj_equal gives it (used by `in`, by dict and set keys, and inside lists and tuples): the same word, two strs
+ * with the same bytes, two numbers (bools as 0 and 1) with the same value, and two lists or two tuples with equal items. Two
+ * dicts, two sets or two ranges that are different objects are not compared yet, so that fails rather than answers. */
+static int obj_equal(mpv a, mpv b) {
   if (a == b) return 1;
   if (is_str(a) || is_str(b)) return is_str(a) && is_str(b) && str_equal(a, b);
   if ((is_small(a) || is_bool(a)) && (is_small(b) || is_bool(b))) return need_int(a) == need_int(b);
-  if ((is_list(a) || is_tuple(a)) && (is_list(b) || is_tuple(b))) {
-    fail("TypeError: equality of lists and tuples is not lowered yet");
+  if ((is_list(a) && is_list(b)) || (is_tuple(a) && is_tuple(b))) {
+    size_t na, nb, i;
+    const mpv *ia, *ib;
+    seq_items(a, &na, &ia);
+    seq_items(b, &nb, &ib);
+    if (na != nb) return 0;
+    for (i = 0; i < na; ++i) {
+      if (!obj_equal(ia[i], ib[i])) return 0;
+    }
+    return 1;
   }
-  return 0;
-}
-
-/* Keys: the same word, two strs with the same bytes, or two numbers (bools as 0 and 1) with the same value. */
-static int key_equal(mpv a, mpv b) {
-  if (a == b) return 1;
-  if (is_str(a) && is_str(b)) return str_equal(a, b);
-  if ((is_small(a) || is_bool(a)) && (is_small(b) || is_bool(b))) return need_int(a) == need_int(b);
+  if ((is_dict(a) && is_dict(b)) || (is_set(a) && is_set(b)) || (is_range(a) && is_range(b))) {
+    fail("TypeError: equality of dicts, sets and ranges that are different objects is not lowered yet");
+  }
   return 0;
 }
 
@@ -417,6 +458,12 @@ static int key_equal(mpv a, mpv b) {
  * wraps, as mp_uint_t does), None is its word (6), and a str is qstr_compute_hash with the hash masked to 16 bits
  * (MICROPY_QSTR_BYTES_IN_HASH is 1 at the unix port's default ROM level). A list, dict or slice is unhashable. Any other
  * kind of key is not lowered yet. */
+/* The hash of a tuple starts from the address of MicroPython's mp_const_empty_tuple_obj (mp_obj_tuple_unary_op). In the
+ * reference build that address is 16-aligned (hash(()) is a multiple of 16), so tables of up to 16 slots take the same order
+ * here, whatever the address is. Larger tables depend on that address in the reference, so their order is not fixed there. */
+static const unsigned char mpy_hash_anchor[32];
+static uint64_t tuple_hash_base(void) { return ((uint64_t)(uintptr_t)mpy_hash_anchor + 15) & ~(uint64_t)15; }
+
 static size_t key_hash(mpv k) {
   char msg[120];
   if (is_small(k)) return (size_t)small_value(k);
@@ -429,10 +476,21 @@ static size_t key_hash(mpv k) {
     h &= 0xffff;   /* MICROPY_QSTR_BYTES_IN_HASH is 2 in the reference build */
     return h == 0 ? 1 : h;
   }
-  if (is_list(k) || is_dict(k) || is_slice(k)) {
+  if (is_tuple(k)) {
+    /* The sum of the items' hashes (the same for an int item, whose hash is its value, as mp_int_t adds it). The result is a
+     * small int, so it keeps 63 bits and reads back sign-extended, as MP_OBJ_NEW_SMALL_INT and its value do. */
+    const MpyTuple *t = (const MpyTuple *)(uintptr_t)k;
+    uint64_t h = tuple_hash_base();
+    size_t i;
+    for (i = 0; i < t->len; ++i) h += (uint64_t)key_hash(t->items[i]);
+    return (size_t)((int64_t)((h << 1) | 1) >> 1);
+  }
+  if (is_list(k) || is_dict(k) || is_set(k) || is_view(k) || is_range(k) || is_slice(k)) {
     snprintf(msg, sizeof msg, "TypeError: unsupported type for __hash__: '%s'", type_of(k)->name);
     fail(msg);
   }
+  /* A function, a class or an instance hashes by its address, as MicroPython does for an object without a hash. */
+  if (is_heap(k)) return (size_t)k;
   fail("TypeError: a key of this type is not lowered yet");
   return 0;
 }
@@ -463,7 +521,8 @@ static void map_rehash_table(MpyDict *d);
  * the next slot is empty). An empty table, and a key that cannot be in a table of interned strs, are answered without a
  * hash, so a load of an unhashable key from such a table is a KeyError, as in MicroPython. */
 static long map_lookup(MpyDict *d, mpv key, int kind) {
-  int compare_only_ptrs = d->all_keys_are_qstrs;
+  /* A set has no such shortcut (mp_set_lookup compares with mp_obj_equal), so only a dict uses it. */
+  int compare_only_ptrs = d->all_keys_are_qstrs && d->type == &mpy_type_dict;
   size_t hash, pos, start;
   long avail = -1;
   if (compare_only_ptrs) {
@@ -494,7 +553,7 @@ static long map_lookup(MpyDict *d, mpv key, int kind) {
       return at;
     } else if (slot->key == MPY_SENTINEL) {
       if (avail < 0) avail = (long)pos;
-    } else if (slot->key == key || (!compare_only_ptrs && key_equal(slot->key, key))) {
+    } else if (slot->key == key || (!compare_only_ptrs && obj_equal(slot->key, key))) {
       if (kind == MAP_REMOVE) {
         d->used--;
         if (d->table[(pos + 1) % d->alloc].key == 0) slot->key = 0;
@@ -586,11 +645,51 @@ mpv mpy_build_map(uint64_t n) {
 /* STORE_MAP: dict[key] = value. */
 void mpy_dict_store(mpv dv, mpv key, mpv value) { dict_store(dv, key, value); }
 
-/* `x in c` is contains(c, x): a str holds a substring, a list or tuple an equal item, a dict a key. */
+/* A set comprehension's store (STORE_COMP with kind 2): adds the item to the set (mp_obj_set_store). */
+void mpy_set_store(mpv sv, mpv item) { map_lookup((MpyDict *)(uintptr_t)sv, item, MAP_ADD); }
+
+/* The value of a dict view's item: keys, values, or (key, value) pairs. */
+static mpv view_item_tuple(mpv key, mpv value) {
+  MpyTuple *t = (MpyTuple *)malloc(sizeof *t + 2 * sizeof(mpv));
+  if (t == NULL) fail("out of memory");
+  t->type = &mpy_type_tuple;
+  t->len = 2;
+  t->items[0] = key;
+  t->items[1] = value;
+  return (mpv)(uintptr_t)t;
+}
+
+/* `x in v` for a dict view: a key of keys(), a value of values(), and a (key, value) pair of items(). */
+static int view_contains(const MpyView *v, mpv x) {
+  MpyDict *d = (MpyDict *)(uintptr_t)v->dict;
+  size_t i;
+  if (v->kind == VIEW_KEYS) return map_lookup(d, x, MAP_LOOKUP) >= 0;
+  if (v->kind == VIEW_VALUES) {
+    for (i = 0; i < d->alloc; ++i) {
+      if (d->table[i].key != 0 && d->table[i].key != MPY_SENTINEL && obj_equal(d->table[i].value, x)) return 1;
+    }
+    return 0;
+  }
+  {
+    size_t n;
+    const mpv *items;
+    long at;
+    if (!is_tuple(x)) return 0;
+    seq_items(x, &n, &items);
+    if (n != 2) return 0;
+    at = map_lookup(d, items[0], MAP_LOOKUP);
+    return at >= 0 && obj_equal(d->table[at].value, items[1]);
+  }
+}
+
+/* `x in c` is contains(c, x): a str holds a substring, a list or tuple an equal item, a dict or a set a key, and a view its
+ * keys, values or items. */
 static int contains(mpv c, mpv x) {
   char msg[160];
   size_t n, i;
   const mpv *items;
+  if (is_set(c)) return map_lookup((MpyDict *)(uintptr_t)c, x, MAP_LOOKUP) >= 0;
+  if (is_view(c)) return view_contains(view_of(c), x);
   if (is_str(c)) {
     const MpyStr *hay, *needle;
     if (!is_str(x)) {
@@ -607,7 +706,7 @@ static int contains(mpv c, mpv x) {
   if (is_dict(c)) return map_lookup((MpyDict *)(uintptr_t)c, x, MAP_LOOKUP) >= 0;
   if (seq_items(c, &n, &items)) {
     for (i = 0; i < n; ++i) {
-      if (values_equal(items[i], x)) return 1;
+      if (obj_equal(items[i], x)) return 1;
     }
     return 0;
   }
@@ -698,6 +797,9 @@ mpv mpy_binop(int op, mpv a, mpv b) {
   if (op == MPY_OP_IN) return contains(b, a) ? MPY_TRUE : MPY_FALSE;   /* a in b: the right operand is the container */
   if (op == MPY_OP_IS) return a == b ? MPY_TRUE : MPY_FALSE;           /* the same word: one immediate or one object */
   if (is_str(a) || is_str(b)) return str_binop(op, a, b);
+  if (is_set(a) || is_set(b) || is_view(a) || is_view(b)) {
+    fail("an operator on a set or a dict view (other than in and is) is not lowered yet");
+  }
   x = need_int(a);
   y = need_int(b);
   switch (op) {
@@ -1152,6 +1254,10 @@ mpv mpy_load_attr(mpv obj, const char *name, size_t len) {
     if (class_find(type_of(obj), key, &v)) return is_function(v) ? make_bound(obj, v) : v;
   } else if (is_class(obj)) {
     if (class_find(&class_of(obj)->info, key, &v)) return v;
+  } else if (is_dict(obj) && dict_method_index(name, len) >= 0) {
+    fail("a dict method read as a value (not called at once) is not lowered yet");
+  } else if (is_set(obj)) {
+    fail("an attribute of a set is not lowered yet");
   }
   attr_error(obj, name, len);
   return MPY_NONE;
@@ -1172,6 +1278,42 @@ void mpy_store_attr(mpv obj, const char *name, size_t len, mpv value) {
   if (map_lookup((MpyDict *)(uintptr_t)dict, key, MAP_REMOVE) < 0) attr_error(obj, name, len);
 }
 
+/* The with statement (SETUP_WITH and WITH_CLEANUP, py/vm.c). __exit__ is looked up before __enter__, as mp_load_method does, and
+ * the exit method is bound to the context manager; the value of __enter__ is the statement's `as` value. */
+mpv mpy_with_exit(mpv ctx) { return mpy_load_attr(ctx, "__exit__", 8); }
+
+mpv mpy_with_enter(mpv ctx) {
+  mpv enter = mpy_load_attr(ctx, "__enter__", 9);
+  return mpy_call(enter, 0);
+}
+
+/* The class of an exception instance, as its __exit__ gets it: a user class, or the builtin class of a builtin exception. */
+static mpv exc_class_value(mpv exc) {
+  const MpyType *t = type_of(exc);
+  if (t->cls != NULL) return (mpv)(uintptr_t)t->cls;
+  return builtin_obj(BI_EXC + (int)(t - mpy_exc_info));
+}
+
+/* WITH_CLEANUP: when the body ended normally (top is None), __exit__(None, None, None) is called. When it raised (top is the
+ * exception), __exit__(class, exception, None) is called, and the exception is suppressed when that is true, else it stays
+ * on top for END_FINALLY to raise again. The result takes the place of the exit method. */
+mpv mpy_with_cleanup(mpv exit, mpv top) {
+  mpv r;
+  if (top == MPY_NONE) {
+    mpy_push(MPY_NONE);
+    mpy_push(MPY_NONE);
+    mpy_push(MPY_NONE);
+    mpy_call(exit, 3);
+    return MPY_NONE;
+  }
+  if (!is_exc(top)) fail("unwinding a with statement (a return or a break in its body) is not lowered yet");
+  mpy_push(exc_class_value(top));
+  mpy_push(top);
+  mpy_push(MPY_NONE);
+  r = mpy_call(exit, 3);
+  return mpy_truth(r) ? MPY_NONE : top;
+}
+
 /* LOAD_METHOD: the method of obj named name. The self it goes with is left in method_self (0 when the attribute is not a
  * method of the class, so the call takes no self). A list has append and pop. */
 mpv mpy_load_method(mpv obj, const char *name, size_t len) {
@@ -1182,6 +1324,11 @@ mpv mpy_load_method(mpv obj, const char *name, size_t len) {
     if (len == 6 && memcmp(name, "append", 6) == 0) return builtin_obj(BI_APPEND);
     if (len == 3 && memcmp(name, "pop", 3) == 0) return builtin_obj(BI_POP);
     method_self = 0;
+  } else if (is_dict(obj) && dict_method_index(name, len) >= 0) {
+    method_self = obj;
+    return builtin_obj(dict_method_index(name, len));
+  } else if (is_set(obj)) {
+    fail("a method of a set is not lowered yet");
   } else if (is_inst(obj)) {
     if (dict_find(((const MpyInst *)(uintptr_t)obj)->dict, key, &v)) return v;
     if (class_find(type_of(obj), key, &v)) {
@@ -1302,6 +1449,24 @@ mpv mpy_build_tuple(uint64_t n) {
   for (i = 0; i < n; ++i) t->items[i] = vstk[base + i];
   vtop = base;
   return (mpv)(uintptr_t)t;
+}
+
+/* A new set with a table of n slots, filled with the n values on the value stack (BUILD_SET; mp_obj_new_set(n, items)). */
+mpv mpy_build_set(uint64_t n) {
+  MpyDict *s = (MpyDict *)malloc(sizeof *s);
+  size_t base, i;
+  if (s == NULL) fail("out of memory");
+  if (n > vtop) fail("mpy_build_set: the items are not on the value stack");
+  base = vtop - n;
+  s->type = &mpy_type_set;
+  s->alloc = (size_t)n;
+  s->used = 0;
+  s->all_keys_are_qstrs = 0;
+  s->table = n ? (MpyEntry *)calloc((size_t)n, sizeof(MpyEntry)) : NULL;
+  if (n && s->table == NULL) fail("out of memory");
+  for (i = 0; i < n; ++i) map_lookup(s, vstk[base + i], MAP_ADD);
+  vtop = base;
+  return (mpv)(uintptr_t)s;
 }
 
 /* LIST_APPEND of a list comprehension (STORE_COMP with kind 0): appends to the list. */
@@ -1570,8 +1735,9 @@ mpv mpy_get_iter(mpv obj) {
   const mpv *items;
   char msg[120];
   if (is_iter(obj)) return obj;
-  if (!is_range(obj) && !seq_items(obj, &len, &items)) {
-    snprintf(msg, sizeof msg, "TypeError: '%s' object isn't iterable", type_name(obj));
+  if (is_str(obj)) fail("iterating a str is not lowered yet");
+  if (!is_range(obj) && !is_dict(obj) && !is_set(obj) && !is_view(obj) && !seq_items(obj, &len, &items)) {
+    snprintf(msg, sizeof msg, "TypeError: '%s' object isn't iterable", real_type_name(obj));
     fail(msg);
   }
   it = (MpyIter *)malloc(sizeof *it);
@@ -1594,6 +1760,19 @@ mpv mpy_iter_next(mpv iter) {
     v = r->start + (int64_t)it->index * r->step;
     it->index++;
     return make_small(v);
+  }
+  if (is_dict(it->seq) || is_set(it->seq) || is_view(it->seq)) {
+    /* The table in order, from the next slot: a dict or a set gives its keys, a view what it shows. */
+    int kind = is_view(it->seq) ? view_of(it->seq)->kind : VIEW_KEYS;
+    const MpyDict *d = dict_of(is_view(it->seq) ? view_of(it->seq)->dict : it->seq);
+    while (it->index < d->alloc) {
+      const MpyEntry *e = &d->table[it->index++];
+      if (e->key == 0 || e->key == MPY_SENTINEL) continue;
+      if (kind == VIEW_VALUES) return e->value;
+      if (kind == VIEW_ITEMS) return view_item_tuple(e->key, e->value);
+      return e->key;
+    }
+    return 0;
   }
   seq_items(it->seq, &len, &items);
   if (it->index >= len) return 0;
@@ -1622,6 +1801,32 @@ mpv mpy_cell_get(mpv cell) {
 
 void mpy_cell_set(mpv cell, mpv value) {
   ((MpyCell *)(uintptr_t)cell)->value = value;
+}
+
+/* d.update(other) (dict_update in py/objdict.c): the items of another dict, or the (key, value) pairs that an iterable gives. A
+ * pair is a list or a tuple of two items; a non-iterable item is a TypeError, and another iterable item is not lowered. */
+static void dict_update(mpv dv, mpv other) {
+  if (is_dict(other)) {
+    const MpyDict *s = dict_of(other);
+    size_t e;
+    for (e = 0; e < s->alloc; ++e) {
+      if (s->table[e].key != 0 && s->table[e].key != MPY_SENTINEL) dict_store(dv, s->table[e].key, s->table[e].value);
+    }
+    return;
+  }
+  {
+    mpv it = mpy_get_iter(other), item;
+    while ((item = mpy_iter_next(it)) != 0) {
+      size_t n;
+      const mpv *items;
+      if (!seq_items(item, &n, &items)) {
+        mpy_get_iter(item);   /* a non-iterable item is a TypeError from here */
+        fail("an item of dict.update that is not a list or a tuple is not lowered yet");
+      }
+      if (n != 2) fail("ValueError: dict update sequence has wrong length");
+      dict_store(dv, items[0], items[1]);
+    }
+  }
 }
 
 /* Builtins. A builtin's arguments are args[0..n-1] on the value stack (mpy_call leaves them there until it returns). */
@@ -1655,7 +1860,8 @@ static mpv builtin_call(int id, const mpv *args, uint64_t n) {
       if (is_str(args[0])) return make_small((int64_t)str_chars(str_of(args[0])));
       if (seq_items(args[0], &len, &items)) return make_small((int64_t)len);
       if (is_range(args[0])) return make_small((int64_t)range_of(args[0])->len);
-      if (is_dict(args[0])) return make_small((int64_t)dict_of(args[0])->used);
+      if (is_dict(args[0]) || is_set(args[0])) return make_small((int64_t)dict_of(args[0])->used);
+      if (is_view(args[0])) return make_small((int64_t)dict_of(view_of(args[0])->dict)->used);
       snprintf(msg, sizeof msg, "TypeError: object of type '%s' has no len()", real_type_name(args[0]));
       fail(msg);
       return MPY_NONE;
@@ -1725,6 +1931,52 @@ static mpv builtin_call(int id, const mpv *args, uint64_t n) {
       list_append((MpyList *)(uintptr_t)args[0], args[1]);
       return MPY_NONE;
     }
+    case BI_DICT_GET:
+    case BI_DICT_POP: {
+      /* d.get(key[, default]) and d.pop(key[, default]): args[0] is the dict. The count includes it. */
+      MpyDict *d = (MpyDict *)(uintptr_t)args[0];
+      long at;
+      if (n < 2) fail("TypeError: function missing 1 required positional arguments");
+      if (n > 3) {
+        snprintf(msg, sizeof msg, "TypeError: function expected at most 3 arguments, got %d", (int)n);
+        fail(msg);
+      }
+      if (id == BI_DICT_GET) {
+        at = map_lookup(d, args[1], MAP_LOOKUP);
+        if (at >= 0) return d->table[at].value;
+      } else {
+        at = map_lookup(d, args[1], MAP_REMOVE);   /* the value stays in the slot the removal leaves */
+        if (at >= 0) return d->table[at].value;
+      }
+      if (n == 3) return args[2];
+      if (id == BI_DICT_GET) return MPY_NONE;
+      key_error(args[1]);
+      return MPY_NONE;
+    }
+    case BI_DICT_KEYS:
+    case BI_DICT_VALUES:
+    case BI_DICT_ITEMS: {
+      MpyView *v;
+      if (n != 1) {
+        snprintf(msg, sizeof msg, "TypeError: function takes 1 positional arguments but %d were given", (int)n);
+        fail(msg);
+      }
+      v = (MpyView *)malloc(sizeof *v);
+      if (v == NULL) fail("out of memory");
+      v->type = &mpy_type_view;
+      v->dict = args[0];
+      v->kind = id == BI_DICT_KEYS ? VIEW_KEYS : (id == BI_DICT_VALUES ? VIEW_VALUES : VIEW_ITEMS);
+      return (mpv)(uintptr_t)v;
+    }
+    case BI_DICT_UPDATE: {
+      /* d.update([other]): another dict, or an iterable of (key, value) pairs. Returns None. */
+      if (n > 2) {
+        snprintf(msg, sizeof msg, "TypeError: function expected at most 2 arguments, got %d", (int)n);
+        fail(msg);
+      }
+      if (n == 2) dict_update(args[0], args[1]);
+      return MPY_NONE;
+    }
     case BI_POP: {
       MpyList *l;
       size_t i;
@@ -1786,6 +2038,45 @@ static void repr_into(Buf *b, mpv v) {
     if (r->step == 1) k = snprintf(t, sizeof t, "range(%lld, %lld)", (long long)r->start, (long long)r->stop);
     else k = snprintf(t, sizeof t, "range(%lld, %lld, %lld)", (long long)r->start, (long long)r->stop, (long long)r->step);
     buf_put(b, t, (size_t)k);
+  } else if (is_set(v)) {
+    /* MicroPython prints a set's items in table order, and an empty set as set() */
+    const MpyDict *s = dict_of(v);
+    size_t e;
+    int first = 1;
+    if (s->used == 0) {
+      buf_str(b, "set()");
+      return;
+    }
+    buf_put(b, "{", 1);
+    for (e = 0; e < s->alloc; ++e) {
+      if (s->table[e].key == 0 || s->table[e].key == MPY_SENTINEL) continue;
+      if (!first) buf_str(b, ", ");
+      first = 0;
+      repr_into(b, s->table[e].key);
+    }
+    buf_put(b, "}", 1);
+  } else if (is_view(v)) {
+    /* dict_keys([...]), dict_values([...]) or dict_items([(key, value), ...]), in table order */
+    const MpyView *view = view_of(v);
+    const MpyDict *d = dict_of(view->dict);
+    size_t e;
+    int first = 1;
+    buf_str(b, view->kind == VIEW_KEYS ? "dict_keys([" : (view->kind == VIEW_VALUES ? "dict_values([" : "dict_items(["));
+    for (e = 0; e < d->alloc; ++e) {
+      if (d->table[e].key == 0 || d->table[e].key == MPY_SENTINEL) continue;
+      if (!first) buf_str(b, ", ");
+      first = 0;
+      if (view->kind == VIEW_ITEMS) {
+        buf_put(b, "(", 1);
+        repr_into(b, d->table[e].key);
+        buf_str(b, ", ");
+        repr_into(b, d->table[e].value);
+        buf_put(b, ")", 1);
+      } else {
+        repr_into(b, view->kind == VIEW_KEYS ? d->table[e].key : d->table[e].value);
+      }
+    }
+    buf_str(b, "])");
   } else if (is_dict(v)) {
     const MpyDict *d = dict_of(v);
     size_t e;

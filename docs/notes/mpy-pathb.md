@@ -55,10 +55,12 @@ binary operators plus 13, as in `py/runtime0.h`; on ints they give the same resu
 - repr: a list prints as `[...]`, a tuple as `(...)` with a trailing comma for one item, a str quoted as MicroPython quotes it,
   and a range as `range(a, b)` (or `range(a, b, step)` when the step is not 1). A top-level str prints raw, as before.
 - `range(...)` (one to three small-int arguments) is a MpyRange {start, stop, step, len}. `GET_ITER` on it makes an iterator
-  whose index counts the items given; `len` and truth use `len`. Containment in a range is refused at run time.
-- `LOAD_METHOD` of `append` or `pop` on a list gives the list's builtin method, and of an instance or class the method of
-  its class (see Classes). A value with no such attribute fails with MicroPython's AttributeError. The lowering refuses the
-  builtin method names of the other types by name (`kBuiltinMethods` in `mpy_lower.cpp`). `CALL_METHOD` passes the self (0
+  whose index counts the items given; `len` and truth use `len`. Containment in a range is refused at run time, and so is a
+  range as a dict key or in equality.
+- `LOAD_METHOD` of `append` or `pop` on a list, or of the dict methods (see Dicts), gives the builtin method, and of an
+  instance or class the method of its class (see Classes). A value with no such attribute fails with MicroPython's
+  AttributeError. The lowering refuses the builtin method names it does not lower, by name (`kBuiltinMethods` in
+  `mpy_lower.cpp`). `CALL_METHOD` passes the self (0
   for none) and the arguments to `mpy_call_method`, so `xs.pop(i)` and `xs.append(x)` take one or two arguments. A keyword
   argument is refused.
 - A constant tuple is one object in the .mpy file (mpy-cross folds it), so `LOAD_CONST_OBJ` builds it on each run from its items.
@@ -80,14 +82,43 @@ is {key, value}. An empty slot has key 0; a deleted one has the sentinel key 0x1
   table whose keys are all interned strs (a str literal of the module is interned, a str built at run time is not). Such a
   key is a KeyError, not a TypeError, as in the reference: `d[[1]]` with `d = {'a': 1}` is `KeyError: [1]`. A store always
   hashes, so `d[[1]] = 2` is `TypeError: unsupported type for __hash__: 'list'`.
-- A list, dict or slice is unhashable. A tuple or another kind of key is not lowered yet (it would need the tuple's hash and
-  equality).
+- A tuple's hash is `mp_obj_tuple_unary_op`'s: the address of MicroPython's empty tuple plus the sum of the items' hashes,
+  kept as a 63-bit small int. The reference's address is 16-aligned (`hash(())` is a multiple of 16), so the runtime starts
+  from a 16-aligned address too, and tables of up to 16 slots take the same order. Bigger tables depend on that address in
+  the reference, and it varies from run to run, so a test does not print one. A tuple key is unhashable when an item is.
+- A list, dict, set, view, range or slice is unhashable (`unsupported type for __hash__: 'X'`). A function, class or instance
+  hashes by its address.
+- Equality of keys (`mp_obj_equal`): the same word, equal strs, equal numbers and bools, and lists or tuples with equal
+  items (`obj_equal`). Two different dicts, sets or ranges are not compared yet, so that fails.
 - The KeyError text is `KeyError: ` followed by the key as `str` gives it: a str as its text, anything else by repr.
 - Operations: `BUILD_MAP n` pushes an empty dict; `STORE_MAP` takes [dict, value, key] (key on top) and leaves the dict.
   A load, a store and `in` go through `mpy_getitem`, `mpy_setitem` and `map_lookup`. `len` and truth count the live items.
 - `del d[k]`: `LOAD_NULL` pushes 0, and `STORE_SUBSCR` with 0 deletes (MicroPython 1.29 has no DELETE_SUBSCR: the compiler
   emits LOAD_NULL, ROT_THREE, STORE_SUBSCR). A list item is deleted the same way.
 - A dict comprehension stores each item with `STORE_COMP` (kind 1).
+- Methods (`LOAD_METHOD`, called by `CALL_METHOD`, with the dict as the self): `get(key[, default])` (None when missing),
+  `pop(key[, default])` (a missing key with no default is a KeyError, the value stays in the slot the removal leaves),
+  `keys()`, `values()` and `items()` (views, below) and `update([other])` (a dict, or an iterable of two-item lists or
+  tuples; a non-iterable is `'X' object isn't iterable`, a pair of another length `ValueError: dict update sequence has
+  wrong length`). Their argument-count errors are the reference's (`function missing 1 required positional arguments`,
+  `function expected at most 3 arguments, got N`, ...). A method the runtime lacks (copy, clear, setdefault, popitem,
+  fromkeys) is refused by name, and read as a value (`f = d.get`) it fails at run time.
+- A view is {type, dict, kind}, live: it reads the dict's table. `repr` is `dict_keys([...])`, `dict_values([...])` or
+  `dict_items([(k, v), ...])`, in table order. `len`, truth, `in` (a key, a value by equality, a (key, value) pair) and
+  iteration are lowered. A view has no hash and no equality (`==` fails here; the reference compares identities).
+- Iteration (`for`, `GET_ITER_STACK`) of a dict, a set or a view is the table in order from the next slot. The reference
+  raises if the dict changes size during the loop; this does not check, so a loop that inserts is not matched.
+
+## Sets
+
+- A set is an `MpyDict` record with type `mpy_type_set` and no values, so the table, the probing and the growth are the map's.
+  The lookup differs from a dict's in one way, which `map_lookup` follows: a set always compares with `mp_obj_equal` (no
+  qstr shortcut). `BUILD_SET n` makes a set with n slots (`mp_obj_new_set(n, items)`) and adds the items in order.
+- A set comprehension stores each item with `STORE_COMP` (kind 2) into the set its code builds before the loop.
+- Operations: `in` (a lookup, which answers without hashing for an empty set, as `mp_set_lookup` does), `len`, truth, `for`,
+  and the repr: `{a, b}` in table order, and `set()` when empty. Its hash is refused (a set is unhashable).
+- Methods of a set (`add`, `pop`, `union`, ...) are refused: `kBuiltinMethods` covers the names the lowering knows, and any
+  other method name fails at run time. Equality of two sets fails (it is not built yet).
 
 ## Slices
 
@@ -128,10 +159,10 @@ labels of their targets. It covers small-int and None/bool constants, names (`LO
 `STORE_GLOBAL`), locals (`LOAD_FAST`/`STORE_FAST`), `POP_TOP`, `DUP_TOP`, `ROT_TWO`, the binary and unary operators,
 `POP_JUMP_IF_FALSE`/`TRUE`, `JUMP`, the `JUMP_IF_*_OR_POP` pair (short-circuit `or`/`and`), `ROT_THREE` (chained
 comparisons), `LOAD_CONST_STRING` and `LOAD_CONST_OBJ` (str constants), `MAKE_FUNCTION`, `LOAD_DEREF`, `STORE_DEREF`,
-`MAKE_CLOSURE`, `CALL_FUNCTION`, `BUILD_LIST`/`BUILD_TUPLE`, `LOAD_SUBSCR`/`STORE_SUBSCR`, `BUILD_MAP`/`STORE_MAP`, `BUILD_SLICE`, `LOAD_NULL` (for `del`), `STORE_COMP` (list and dict
+`MAKE_CLOSURE`, `CALL_FUNCTION`, `BUILD_LIST`/`BUILD_TUPLE`/`BUILD_SET`, `LOAD_SUBSCR`/`STORE_SUBSCR`, `BUILD_MAP`/`STORE_MAP`, `BUILD_SLICE`, `LOAD_NULL` (for `del`), `STORE_COMP` (list, dict and set
 comprehensions), `UNPACK_SEQUENCE`, `GET_ITER_STACK`
 and `FOR_ITER`, and `RETURN_VALUE`, and the exception and class opcodes (see Exceptions and Classes): `SETUP_EXCEPT`,
-`SETUP_FINALLY`, `POP_EXCEPT_JUMP`, `END_FINALLY`, `UNWIND_JUMP`, `RAISE_OBJ`, `RAISE_LAST`, `LOAD_BUILD_CLASS`, `LOAD_ATTR`,
+`SETUP_FINALLY`, `SETUP_WITH`, `WITH_CLEANUP`, `POP_EXCEPT_JUMP`, `END_FINALLY`, `UNWIND_JUMP`, `RAISE_OBJ`, `RAISE_LAST`, `LOAD_BUILD_CLASS`, `LOAD_ATTR`,
 `STORE_ATTR`, `LOAD_METHOD`/`CALL_METHOD`, `DELETE_FAST`, `DELETE_NAME`, `DUP_TOP_TWO`, with `LOAD_NAME`/`STORE_NAME` for the
 class namespace and `LOAD_GLOBAL`/`STORE_GLOBAL` for the globals. Any other opcode is refused by name and no IR is written.
 
@@ -210,8 +241,18 @@ RAISE_LAST), as the lowering follows it:
 - The runtime's `fail()` messages that begin with an exception class name ("KeyError: ...", "IndexError: ...") raise that
   class, so a try catches the runtime's own errors. Any other message is fatal, as before.
 - A break or continue out of a try (UNWIND_JUMP) pops the blocks it leaves (its count is the low 7 bits of the extra byte;
-  bit 0x80 is a break out of a for loop, which drops the iterator's slots in the depth). Leaving a block that is a finally
-  (a handler with `as`) would run its code, so that is refused by name. `raise ... from` is refused.
+  bit 0x80 is a break out of a for loop, which drops the iterator's slots in the depth). Leaving a with block is refused by
+  name, and so is leaving a finally that is not the name-deleting one of an `except ... as` (a finally would run its code).
+  `raise ... from` is refused.
+- A return (RETURN_VALUE) pops every block it is in, as MicroPython's unwind_return drops the except blocks. A `return`
+  out of a with statement is refused, since the reference runs its `__exit__` there. Before this, a return left its block on the
+  runtime's block stack, so a later raise could longjmp into the returned frame.
+- A with statement (`SETUP_WITH`, `WITH_CLEANUP`, `mpy_with_exit`, `mpy_with_enter`, `mpy_with_cleanup`): SETUP_WITH looks up
+  `__exit__` and calls `__enter__` before its block is set up (so an exception from `__enter__` is not caught by it), and
+  leaves [exit, context manager, as-value] on the stack. The block is kind 2, a handler entered with [exit, manager, exception].
+  The normal path is body, LOAD_CONST_NONE, WITH_CLEANUP, END_FINALLY; the exception path lands on WITH_CLEANUP. WITH_CLEANUP
+  calls __exit__(None, None, None) for the normal path, and __exit__(class, exception, None) for the other. A true result
+  suppresses the exception (END_FINALLY then continues), else END_FINALLY raises it again.
 
 ## Classes
 
@@ -247,11 +288,11 @@ RAISE_LAST), as the lowering follows it:
 ## Not yet
 
 Defaults and keyword arguments (`MAKE_FUNCTION_DEFARGS`, `MAKE_CLOSURE_DEFARGS`), `del` of a closure variable
-(`DELETE_DEREF`), generators, str methods and formatting, str ordering and repetition, `raise ... from`, a `with`
-statement, big ints, dict
-methods and iterating a dict (`for`, `keys`), a dict key that is a tuple or another kind of object, sets (`BUILD_SET`, the
-set comprehension), the list methods other than append and pop, subscripts of a range, and the rest of the opcodes. Equality of two different lists or
-tuples (and so `in` on a list of them), containment in a range, `list.pop` and `str` of a list or tuple are refused at
-run time until their repr and equality are built. Identity of strs: a str built at run time is a new object, but
-MicroPython interns short strs, so `'a' + 'b' is 'ab'` is True there and False here. Nothing is freed: a str lives until the
-process ends. Also the `luac`-style opcode oracle is still blocked, and string pattern matching is paused.
+(`DELETE_DEREF`), generators, str methods and formatting, str ordering and repetition, `raise ... from`, `super()`,
+big ints, the dict methods `copy`, `clear`, `setdefault`, `popitem` and `fromkeys`, the set methods
+and operators (`add`, `|`, `==`, and so on), the list methods other than append and pop, subscripts of a range, and the rest
+of the opcodes. Equality of two dicts, two sets, two ranges or two views, `str` of a list, tuple, set or view, and
+containment in a range are refused at run time until their repr and equality are built. Changing a dict's size during a
+`for` over it is not checked (see Dicts). Identity of strs: a str built at run time is a new object, but MicroPython interns
+short strs, so `'a' + 'b' is 'ab'` is True there and False here. Nothing is freed: a str lives until the process ends. Also
+the `luac`-style opcode oracle is still blocked, and string pattern matching is paused.
