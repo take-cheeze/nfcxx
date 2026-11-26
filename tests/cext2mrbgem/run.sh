@@ -674,12 +674,12 @@ check grep -q '  rb_lnr_proto  no entry in api_map.json' "$work/local_names_refu
 check test "$(grep -c '  LNR_CALL  ' "$work/local_names_refused/REFUSALS.txt")" -eq 0
 
 # 2q. includes come from api_map.json ("includes"): ruby/ruby.h maps to its mruby headers, ruby/re.h to the fork's mruby/onigmo.h
-# (the Onigmo API on the system oniguruma library), and ruby/encoding.h to the fork's mruby/encoding.h
+# (the Onigmo API on the system oniguruma library); ruby/encoding.h is dropped (the fork has no encoding header; the prelude placeholder covers rb_encoding)
 rc=0; "$rb" "$conv" --scanner "$scanner" --name includes_map tools/cext2mrbgem/fixtures/includes_map/ext/includes_map "$work/includes_map" > "$work/includes_map.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF '#include <mruby/onigmo.h>' "$work/includes_map/src/includes_map.c"
 check grep -qF '#include <mruby/numeric.h>' "$work/includes_map/src/includes_map.c"
-check grep -qF '#include <mruby/encoding.h>' "$work/includes_map/src/includes_map.c"
+check test "$(grep -c 'mruby/encoding.h' "$work/includes_map/src/includes_map.c")" -eq 0
 
 # 2r. exception classes rb_eIndexError and rb_eRangeError (api_map.json batch D1): the class argument of rb_raise
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_exc_index tools/cext2mrbgem/fixtures/api_exc_index/ext/api_exc_index "$work/api_exc_index" > "$work/api_exc_index.log" 2>&1 || rc=$?

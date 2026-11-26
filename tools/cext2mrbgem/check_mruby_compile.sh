@@ -12,6 +12,8 @@ ROOT=${1:?usage: check_mruby_compile.sh CONVERTED_DIR GEM...}; shift
 rc=0
 for N in "$@"; do
   G="$ROOT/$N"
+  # a gem with no converted directory is a failure, not an empty pass
+  if [ ! -d "$G" ]; then echo "== $N: no converted gem at $G"; rc=1; continue; fi
   W=$(mktemp -d)
   DEFS=$(python3 -I "$HERE/corpus_defs.py" "$HERE/corpus_flags.json" "$N")
   INC="-I $G/include -I $MR/include -I $MR/build/host/include -I $UV/fork/src -I $UV/fork/include"
