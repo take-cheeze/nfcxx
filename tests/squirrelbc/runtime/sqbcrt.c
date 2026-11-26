@@ -1346,22 +1346,31 @@ static int is_false(const SQV *v) { return v->tag == SQBC_TAG_FLOAT ? sqbc_rt_fl
 static void map_items(const SQV *src, const SQV *fn, SqArray *dst) {
   size_t size = array_of(src)->count;
   int nargs = callback_nargs(fn);
-  if (nargs > 4) rt_error("callback with more than 4 parameters is not lowered");
+  /* The reference's stack for the call, as sqbaselib.cpp __map_array builds it: S[0] is the map's `this` (the array), S[1]
+   * its argument (the callback), then the callback pushed once more, and then per item the array, the item, the index
+   * (nargs >= 3) and the array (nargs >= 4). sq_call(nargs) takes the callee from the value below the nargs values on top,
+   * pops the arguments, pushes the result and __map_array pops it. So the callback's own copy is consumed by a call whose
+   * callee is S[1] (nargs 5): the next item then finds the array below, and fails. The values below S[0] are the caller's
+   * stack, which is not modelled: a callee read there (nargs 7 and more) is refused. */
+  SQV stk[8];
+  int top = 0;
+  stk[top++] = *src;
+  stk[top++] = *fn;
+  stk[top++] = *fn;
   SQV temp = make_null();
   for (size_t n = 0; n < size; n++) {
     SqArray *a = array_of(src);
     if (n < a->count) temp = a->items[n];
-    SQV pushed[5];
-    int np = 0;
-    pushed[np++] = *fn;
-    pushed[np++] = *src;
-    pushed[np++] = temp;
-    if (nargs >= 3) pushed[np++] = make_int((int64_t)n);
-    if (nargs >= 4) pushed[np++] = *src;
-    /* sq_call(nargs): the callee is the value below the nargs values pushed last. */
-    int at = np - nargs - 1;
+    stk[top++] = *src;
+    stk[top++] = temp;
+    if (nargs >= 3) stk[top++] = make_int((int64_t)n);
+    if (nargs >= 4) stk[top++] = *src;
+    int callee = top - nargs - 1;
+    if (callee < 0)
+      rt_error("callback with 6 or more parameters is not lowered (sq_call reads its callee below the map's frame)");
     SQV res;
-    call_from_native(&pushed[at], &res, pushed + at + 1, nargs);
+    call_from_native(&stk[callee], &res, &stk[callee + 1], nargs);
+    top -= nargs;
     if (n < dst->count) dst->items[n] = res;
   }
 }

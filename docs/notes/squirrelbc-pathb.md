@@ -242,8 +242,18 @@ code is `sq_fn_N` over the same flat stack, so the call needs no new IR form. Th
   The array is checked after each call: a change of the item count or of the item buffer is `array resized during sort
   operation`. The buffer check compares our buffer; the reference compares its vector's, so a resize that the two
   allocate differently is not modelled (no test does one).
-- Not modelled: a callback with more than four parameters. The reference reads stack values that were not pushed
-  there; the runtime refuses it with `callback with more than 4 parameters is not lowered`. No test.
+- Callbacks with more than four parameters (`map` and `apply` only: `reduce`, `filter` and `sort` always call with three
+  values, so a longer callback is `wrong number of parameters` there, as `lower/rterr/reduce_arity`, `sort_cmp_arity`).
+  `map`/`apply` builds the reference's stack exactly (`map_items`): the array and the callback below, the callback pushed
+  once, then per item the array, the item, the index (three or more) and the array (four or more), and `sq_call` takes
+  the callee from `nargs + 1` below the top. So a callback of four declared parameters (nargs 5) is called for the first
+  item, whose call consumes the callback's copy; the second item then reads the array as its callee
+  (`attempt to call 'array'`). Five declared (nargs 6) is `attempt to call 'array'` on the first item. Tests
+  `callback_four`, `callback_four_apply`, `callback_five_empty`, `rterr/callback_four_items`, `rterr/callback_five`,
+  `rterr/callback_five_apply`. Six declared or more (nargs 7 and up) read below the map's own frame, which is the
+  caller's stack: the reference gives `wrong number of parameters` for nargs 7, `attempt to call 'array'` for nargs 8 and
+  `attempt to call 'table'` for nargs 10 (probed with the callback's declared parameters 6, 7 and 9), so the runtime refuses
+  them at the first item with a named message. No test: nothing it prints can match the reference.
 - No producer change: a CALL of `arr.map(f)` is the same PREPCALL and CALL as any other native method; the callbacks are
   natives of the runtime, and a nested function with a default parameter or a vararg is still refused by the producer
   (`lower/err/callback_default.nut`, `lower/err/callback_vararg.nut`).
@@ -252,16 +262,16 @@ code is `sq_fn_N` over the same flat stack, so the call needs no new IR form. Th
 
 ## 5. Tests
 
-- `tests/squirrelbc/run.sh`: the reader. 132 streams (`corpus/*.nut`, `lower/*.nut` and the synthetic stream of
+- `tests/squirrelbc/run.sh`: the reader. 135 streams (`corpus/*.nut`, `lower/*.nut` and the synthetic stream of
   `lower/synth.rb`) compile with `sq -c`, load in `sq_dump` (every instruction named, stream consumed), and run through
   `sqref` with the same result as their source. Also: the opcode table against the reference header; a golden dump
   (`reader/ints.dump`); and five malformed streams (truncated, trailing byte, bad tag, SQInteger size 4, corrupt TAIL),
   each refused with exit 1.
-- `tests/squirrelbc/lower/run.sh`: the end-to-end suite. 119 programs (`lower/*.nut`: integers, strings, tables, calls,
+- `tests/squirrelbc/lower/run.sh`: the end-to-end suite. 122 programs (`lower/*.nut`: integers, strings, tables, calls,
   closures, print, tostring, arrays, floats, classes and inheritance, number and string conversions, array methods
   (including extend and insert, and the callbacks sort, map, apply, reduce, filter: `sort_*`, `map_basic`, `reduce_basic`,
   `filter_basic`, `callback_*`), string methods (slice, find, tolower, toupper), class and instance delegates, class
-  attributes) match `sqref` on the printed result and the status; 84 runtime errors (`lower/rterr/`, the callback ones
+  attributes) match `sqref` on the printed result and the status; 87 runtime errors (`lower/rterr/`, the callback ones
   included) match the message and status 1; 12 programs (`lower/err/`) are refused with exit 3; `lower/synth.rb` writes a stream with DLOAD, DMOVE, LINE and
   LOADNULLS. A string result is printed by `sqref` and by the driver alike (the text, one line).
 - The oracle is `tests/squirrelbc/oracle/sqref.c`: the reference VM, built against the reference tree's
