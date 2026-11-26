@@ -124,7 +124,19 @@ struct Child {
   bool killed = false;  // the timeout expired and the group was killed
   int status = 0;       // once finished: the exit code, -1 killed by the timeout, -2 could not be spawned
   bool finished = false;
+  int status_fd = -1;   // the read end of the pipe the child writes the driver's exit code to (see spawn)
 };
+
+// Takes the exit code the child wrote to its pipe, when there is one and the child was not killed: the status the child saw with its
+// own waitpid. It is the only status there is when the host ignores SIGCHLD (the kernel reaps the child, and waitpid gives ECHILD).
+inline void take_status(Child& c) {
+  if (c.status_fd < 0) return;
+  int code = 0;
+  ssize_t n = ::read(c.status_fd, &code, sizeof code);
+  if (n == (ssize_t)sizeof code && !c.killed) c.status = code;
+  ::close(c.status_fd);
+  c.status_fd = -1;
+}
 
 inline bool spawn(Child& c, const std::vector<std::string>& args, const std::string& logfile) {
   std::vector<char*> argv;
@@ -132,13 +144,18 @@ inline bool spawn(Child& c, const std::vector<std::string>& args, const std::str
   argv.push_back(nullptr);
   c = Child();
   c.started_ms = now_ms();
+  int sp[2] = {-1, -1};
+  if (::pipe2(sp, O_CLOEXEC) != 0) sp[0] = sp[1] = -1;  // without it the status is what waitpid gives (see take_status)
   pid_t pid = ::fork();
   if (pid < 0) {
+    if (sp[0] >= 0) ::close(sp[0]);
+    if (sp[1] >= 0) ::close(sp[1]);
     c.status = -2;
     c.finished = true;
     return false;
   }
   if (pid == 0) {
+    if (sp[0] >= 0) ::close(sp[0]);
     ::setpgid(0, 0);
     // The log, or /dev/null when it cannot be opened: the child must not write to the parent's stdout.
     int fd = ::open(logfile.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
@@ -152,9 +169,31 @@ inline bool spawn(Child& c, const std::vector<std::string>& args, const std::str
     // A host that ignores SIGCHLD passes SIG_IGN across exec, and then the driver's own children are reaped on their own: their exit
     // status is lost. The driver gets the default disposition.
     ::signal(SIGCHLD, SIG_DFL);
-    ::execvp(argv[0], argv.data());
-    std::fprintf(stderr, "nfceval: cannot run %s: %s\n", argv[0], std::strerror(errno));
-    ::_exit(127);
+    // The driver runs in a grandchild, so that this process can wait for it and pass its exit code on through the pipe, whatever
+    // the host did with SIGCHLD. This process is in the same process group, so a timeout kills it and the driver together.
+    pid_t gc = ::fork();
+    if (gc == 0) {
+      ::execvp(argv[0], argv.data());
+      std::fprintf(stderr, "nfceval: cannot run %s: %s\n", argv[0], std::strerror(errno));
+      ::_exit(127);
+    }
+    int code = 127;
+    if (gc > 0) {
+      int ws = 0;
+      while (::waitpid(gc, &ws, 0) < 0 && errno == EINTR) {
+      }
+      code = WIFEXITED(ws) ? WEXITSTATUS(ws) : 128 + (WIFSIGNALED(ws) ? WTERMSIG(ws) : 0);
+    }
+    if (sp[1] >= 0) {
+      ssize_t w = ::write(sp[1], &code, sizeof code);
+      (void)w;
+    }
+    ::_exit(code);
+  }
+  if (sp[1] >= 0) ::close(sp[1]);
+  if (sp[0] >= 0) {
+    ::fcntl(sp[0], F_SETFL, ::fcntl(sp[0], F_GETFL) | O_NONBLOCK);
+    c.status_fd = sp[0];
   }
   ::setpgid(pid, pid);
   c.pid = pid;
@@ -169,16 +208,18 @@ inline bool wait(Child& c, bool block, unsigned timeout_s) {
     pid_t r = ::waitpid(c.pid, &ws, WNOHANG);
     if (r == c.pid) {
       c.status = c.killed ? -1 : WIFEXITED(ws) ? WEXITSTATUS(ws) : 128 + (WIFSIGNALED(ws) ? WTERMSIG(ws) : 0);
+      take_status(c);
       c.finished = true;
       return true;
     }
     if (r < 0 && errno != EINTR) {
-      // Not ours to wait for any more (the program ignores SIGCHLD, so the child is reaped on its own): it has ended when the process
-      // is gone, and its exit status is not known (the caller looks at what it was to make).
+      // Not ours to wait for any more (the host ignores SIGCHLD, so the child is reaped on its own): it has ended when the process is
+      // gone. Its exit status is the one it wrote to the pipe, if it wrote one (take_status); otherwise 0.
       if (errno == ECHILD && (::kill(c.pid, 0) == 0 || errno == EPERM)) {
         if (!block) return false;
       } else {
         c.status = c.killed ? -1 : 0;
+        take_status(c);
         c.finished = true;
         return true;
       }
@@ -200,6 +241,7 @@ inline void abandon(Child& c) {
   int ws = 0;
   while (::waitpid(c.pid, &ws, 0) < 0 && errno == EINTR) {
   }
+  take_status(c);
   c.finished = true;
   c.status = -1;
 }
