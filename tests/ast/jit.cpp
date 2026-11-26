@@ -183,6 +183,52 @@ static const Case cases[] = {
      "for i = 1, 5 do s = s + i if s > 3 then return s end end\n"
      "return -1",
      REFUSED},
+    {"six live integer locals, more than the registers: each written back at the end",
+     "local a, b, c, d, e, f = 1, 2, 3, 4, 5, 6\n"
+     "for i = 1, 1000 do\n"
+     "  a = a + i\n"
+     "  b = b + a\n"
+     "  c = c + b * 3\n"
+     "  d = d - c\n"
+     "  e = e + d\n"
+     "  f = f + i * 6364136223846793005\n"
+     "end\n"
+     "return a, b, c, d, e, f, a + b + c + d + e + f",
+     COMPILED},
+    {"more live locals than registers, read-only and assigned, with two exits (a condition and a break)",
+     "local k1, k2, k3, k4, k5 = 7, 11, 13, 17, 19\n"
+     "local s, t, u = 0, 0, 0\n"
+     "local n = 0\n"
+     "while n < 700 do\n"
+     "  n = n + 1\n"
+     "  s = s + k1 * n + k2\n"
+     "  t = t + k3 - s\n"
+     "  u = u + k4 * k5\n"
+     "  if t > 100000000000 then break end\n"
+     "end\n"
+     "return s, t, u, n, k1, k2, k3, k4, k5",
+     COMPILED},
+    {"nested for loops with a break from the inner one, and five locals updated in the outer one",
+     "local x, y, z, w, v = 0, 1, 2, 3, 4\n"
+     "for i = 1, 40 do\n"
+     "  for j = 1, 30 do\n"
+     "    x = x + i * j\n"
+     "    if x > 50000 then break end\n"
+     "    y = y + z\n"
+     "  end\n"
+     "  z = z + w - v\n"
+     "  w = w + 1\n"
+     "  v = v * 2 - w\n"
+     "end\n"
+     "return x, y, z, w, v",
+     COMPILED},
+    {"a float among six locals: the guard fails, and the interpreter runs the loop",
+     "local f = 0.5\n"
+     "local a, b, c, d, e, g = 1, 2, 3, 4, 5, 6\n"
+     "local s = 0\n"
+     "for i = 1, 10 do a = a + i b = b + a c = c + f s = s + e + g end\n"
+     "return a, b, c, d, e, g, s",
+     GUARD},
 };
 
 // The generated loops: integer statements and expressions over three locals and the loop variable, with wraparound, nested ifs and
