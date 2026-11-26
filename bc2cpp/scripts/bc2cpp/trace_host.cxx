@@ -515,6 +515,10 @@ int main(int argc, char** argv) {
   }
   mrb_gc_register(M, game);
   mrb_gc_arena_restore(M, boot_ai);
+#ifdef MRB_CLASS_SHRINK
+  // As the Wio main does once the game's constants are set.
+  mrb_class_shrink(M);
+#endif
   fprintf(stdout, "TRACE_HOST game=RPG2k dir=%s frames=%ld\n", game_dir,
           frames);
   // BC2CPP_ENTRY (include/bc2cpp_entry.hxx): whether new, main_loop and
