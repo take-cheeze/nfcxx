@@ -2709,7 +2709,9 @@ int jit_take_over(State& S, Frame& f, Node* loop, TierLoop* tl, const TierLoopSt
   TierState* T = S.tier;
   if (!edge) tl->jit_blocked = false;  // a loop that is entered anew is tried again
   if (tl->jit_blocked) return 0;
-  if (tl->jit) return jit_enter(S, f, tl, st);
+  // A loop node is an integer loop or a float loop, by the values its start and step have (NumForNode): code compiled for the other
+  // kind does not run this entry, which the interpreter goes on with.
+  if (tl->jit) return tl->jit->kind == st.kind ? jit_enter(S, f, tl, st) : 0;
   if (tl->jit_refused || !edge) return 0;
   if (++tl->jit_edges < T->opt.loop_threshold) return 0;
   std::string why;

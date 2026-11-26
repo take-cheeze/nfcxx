@@ -623,8 +623,14 @@ the JIT is off: every loop is refused with the reason "not available on this hos
 
 **The subset.** Only loops whose body is arithmetic on locals, integers and floats:
 
-- loops: `while`; `repeat`; a numeric `for` with integer values (the loop that is taken over, and nested ones whose step is a constant
-  integer that is not zero); `break`.
+- loops: `while`; `repeat`; a numeric `for` (the loop that is taken over, and nested ones) whose step is a numeric constant that is not
+  zero. The kind of the loop is the interpreter's (NumForNode): an integer loop when the start and the step are integers, a float loop
+  otherwise. An integer loop takes a float limit as the interpreter clips it (`nfcr_forlimit`: a limit beyond the range, or a nan, runs
+  as the interpreter's does, and a loop it does not run is skipped). A float loop converts its start, limit and step to doubles and runs
+  with the interpreter's first test (`0 < step ? limit < idx : idx < limit` skips the body; a nan start or limit does not skip) and its
+  test after each iteration (`0 < step ? idx <= limit : limit <= idx`). The loop variable of a float loop is a float. The loop that is
+  taken over may be either kind; a loop node entered with the other kind than its code was compiled for is left to the interpreter (the
+  kind is checked in `jit_take_over`). `break`.
 - types: every local of the loop (and every hidden variable of a `for`) has one type for the whole loop, an integer or a float. The
   type of a live-in is the type of its value when the loop is compiled, and the entry guard checks it at every takeover. A local the
   loop declares takes the type of its value; an assignment that would give a local the other type is refused. A float is its IEEE
@@ -632,25 +638,29 @@ the JIT is off: every loop is refused with the reason "not available on this hos
 - values: integer and float constants; locals of the loop and the locals it reads or assigns from outside; `+`, `-`, `*` and unary `-`,
   which wrap as the interpreter's integers do, and the same on floats (the unary minus flips the sign bit: the interpreter's `-x`);
   `/` (always a float: both operands are converted to doubles and divided, so `1 / 0` is `inf`, `0 / 0` is `nan` and no error is raised,
-  as the interpreter's `arith_numbers`); `^` (always a float: `flt_pow`, the interpreter's own function, see "The code"); an integer
-  operand of a float operation is converted to a double first, as the interpreter does. `//` and `%` on integers, floor division and modulo with the sign of the divisor as the
+  as the interpreter's `arith_numbers`); `^` (always a float: `flt_pow`, the interpreter's own function, see "The calls"); an integer
+  operand of a float operation is converted to a double first, as the interpreter does. `//` and `%` on floats: `floor(x / y)` and
+  `flt_mod` (the interpreter's own `fmod` with the sign of the divisor), no error for a zero divisor (`inf`, `nan`). `//` and `%` on
+  integers, floor division and modulo with the sign of the divisor as the
   interpreter's helpers (`nfcr_idiv`, `nfcr_imod`) compute them, and a divisor of -1 as they do (`-a` and `0`, which wrap); the
   bitwise operators `&`, `|`, `~` (binary xor), `<<`, `>>` and unary `~` on integers. The shifts follow the interpreter's `nfcr_shl`:
   a count of 64 or more, or of -64 or less, gives 0, a negative count shifts the other way, both logically (the code tests the count
   and shifts with `shl`/`shr` by its absolute value, so no count is masked).
-- conditions: `<`, `<=`, `>`, `>=`, `==`, `~=` between two integers, or between two floats (`ucomisd`: a nan makes every
-  comparison false except `~=`, as the interpreter's `<` and `==` do); `and`, `or`, `not`; `if` / `elseif` / `else`. A constant or a number as a
-  condition is true or false as Lua says.
+- conditions: `<`, `<=`, `>`, `>=`, `==`, `~=` between two integers, between two floats (`ucomisd`: a nan makes every
+  comparison false except `~=`, as the interpreter's `<` and `==` do), or between an integer and a float. The last one is exact, as the
+  interpreter's: the code calls the interpreter's own `nfcr_lt_if`, `nfcr_lt_fi`, `nfcr_le_if` and `nfcr_le_fi` (`nfcast_tier_rt.h`,
+  which compare an integer beyond 2^53 with a float without rounding the integer) and `raw_equal` for `==` (see "The calls"); `>` and
+  `>=` are the `<` and `<=` of the operands swapped, as the interpreter has them. `and`, `or`, `not`; `if` / `elseif` / `else`. A constant
+  or a number as a condition is true or false as Lua says.
 - statements: `local` with one value for each name, and assignment (also several at once).
 
 
-**Refused at compile time** (the loop is left to the interpreter or the C tier, and `jit_refused` counts it once): a comparison of an
-integer with a float, `==` included (the interpreter compares those exactly, with `floor` and range checks the code does not encode);
-a float `//` or `%` (they need `floor` or `fmod`, which the code does not call); a bitwise operator on a float, even one with an integer
-value; a numeric `for` whose start or limit is a float (the step must be an integer constant, as before); a local that takes the other
-type in an assignment (an integer in a float local, a float in an integer one); a comparison or a logical operator used as a value;
-calls; upvalues and globals; tables, strings and fields; a local captured by a closure; `return`; a numeric `for` with a non-constant
-step, or a float `for`; a local read before its declaration in the text (a slot that an outer local shares).
+**Refused at compile time** (the loop is left to the interpreter or the C tier, and `jit_refused` counts it once): a bitwise operator on
+a float, even one with an integer value (the interpreter raises "has no integer representation" for a float without one, and the code
+does not encode that error); a local that takes the other type in an assignment (an integer in a float local, a float in an integer
+one); a comparison or a logical operator used as a value; calls; upvalues and globals; tables, strings and fields; a local captured by a
+closure; `return`; a numeric `for` whose step is not a numeric constant, or is zero (the interpreter reports a zero step); a local read
+before its declaration in the text (a slot that an outer local shares).
 
 **Entry guard.** Every live-in local (one the loop reads or assigns and does not declare) must hold a value of its type in the frame at
 every takeover: an integer, or a float for a float local (a live-in that is not a number when the loop is compiled is an integer local,
@@ -690,14 +700,27 @@ are loaded at the entry, after the guard, and stored back in the epilogue, which
 exit). A binary operation with a constant or a local operand reads it directly; only two compound operands keep the left value on the
 machine stack. A single assignment or declaration stores its value straight to its word.
 
-**The one call.** The code makes no calls except one: `^` calls `jit_pow`, a function in `nfcast_jit.cpp` that returns the interpreter's
-`flt_pow` of its two arguments (so the special case of an exponent of 2, `a * a`, and the libm `pow` are the interpreter's own, bit for
-bit). The address of `jit_pow` is embedded in the code (`mov rax, imm64; call rax`); the operands are in xmm0 and xmm1, the result comes
-back in xmm0. Before the call the stack is 16-byte aligned (an extra `sub rsp, 8` when the pushed values and the saved registers sum to
-an odd count). Nothing is kept in a caller-saved register across it: RAX, RCX, RDX and the xmm registers are dead at the call, the values
-pushed for a compound operand are in memory, and RBX and R12-R15 are callee-saved. No other operation is a call, and the code has no
-other side effects, so the exception does not change the reasoning above (whatever the entry guard does not cover cannot be observed
-before the loop ends).
+**The calls.** The code calls the interpreter's own functions, each through a wrapper in `nfcast_jit.cpp` whose address is embedded in the
+code (`mov rax, imm64; call rax`), so the results are the interpreter's bit for bit:
+- `^`: `jit_pow` (`flt_pow`, so an exponent of 2 is `a * a` and the libm `pow` is the one the interpreter calls). The operands are in xmm0
+  and xmm1, the result comes back in xmm0.
+- float `//`: `jit_fidiv` (`floor(x / y)`, as `arith_numbers`), and float `%`: `jit_fmod` (`flt_mod`). Both take xmm0 and xmm1.
+- an integer against a float, `<`, `<=`, `>`, `>=`: `jit_lt_if`, `jit_lt_fi`, `jit_le_if`, `jit_le_fi` (`nfcr_lt_if` and its kin). The
+  integer is passed in RDI and the float in xmm0 whichever side they are on; the result (0 or 1) is in RAX.
+- an integer against a float, `==` and `~=`: `jit_eq` (`raw_equal` on the two values); `~=` negates the result.
+- a numeric `for` loop of integers whose limit is a float: `jit_forlimit` (`nfcr_forlimit`), the limit in xmm0 and the step in RDI.
+  It returns a pair (RAX the limit, RDX whether the loop runs), which the code tests.
+Before each call the stack is 16-byte aligned (an extra `sub rsp, 8` when the pushed values and the saved registers sum to an odd
+count). Nothing is kept in a caller-saved register across a call: RAX, RCX, RDX and the xmm registers are dead at the call, the values
+pushed for a compound operand are in memory, and RBX and R12-R15 are callee-saved. None of these functions can fail, so no operation
+of a call is a deopt site; the code has no other side effects, so the exception does not change the reasoning above (whatever the entry
+guard does not cover cannot be observed before the loop ends).
+
+**NaN signs.** A nan made from two nan operands (`nan + p` with both nan) takes the sign of one of them: SSE takes the first source
+operand's, but the C code of the interpreter takes whichever operand its compiler puts first, which differs between the back ends and
+the operands' order. The JIT's results for every operation with one nan operand are the interpreter's, and for two nan operands they
+agree in value and differ at most in the sign of the nan. The C standard leaves that sign to the implementation. The explicit cases of
+`tests/ast/jit.cpp` compare the printed results exactly; the generated mixed batch compares them with the sign of a nan dropped.
 
 The code is generated twice, first with every word in memory to count the references, then with the allocation.
 
@@ -716,13 +739,19 @@ runs each), against 0.103-0.124 s for `s = s + i` with the JIT. The stack costs 
 
 **Verification.** `tests/ast/jit.cpp` runs a set of loops (the refusals, the guard miss, the wraparound, nested and re-entered loops,
 `break`, the conditions, `//` and `%` on positive and negative operands, the smallest integer divided by -1, the deopts: a zero
-divisor in an assignment, a condition of a `while` or `repeat`, the limit of an inner `for`, and a compound operand with a value pushed;
-the bitwise operators on positive, negative and large operands, shifts by 0, 63, 64, 65 and negative counts, and a division and a modulo
-by zero under `pcall`, which the interpreter raises with the same message with the JIT on or off), and 900 generated loops (300 with
+divisor in an assignment, a condition of a `while` or `repeat`, the limit of an inner `for`, a compound operand with a value pushed, and
+a float loop that divides an integer by zero; the bitwise operators on positive, negative and large operands, shifts by 0, 63, 64, 65 and
+negative counts, and a division and a modulo by zero under `pcall`, which the interpreter raises with the same message with the JIT on or
+off; the float for loops with a float start, a negative float step, nan starts and limits, the integer loops with float limits (clipped,
+nan, a loop on the wrong side, huge limits), the integer-float comparisons beyond 2^53 and 2^63 with nan, inf and -0.0, float `//` and
+`%` with zero, nan and inf divisors, and a numeric for whose start changes kind between entries), and 1200 generated loops (300 with
 arithmetic, `//` and `%` by nonzero constants, 300 with the bitwise operators, 300 with floats: `+ - * / ^`, unary minus, the float
-comparisons, and integers mixed in) with nested ifs, whiles and wrapping arithmetic; each
-must give the interpreter's result, the counters must say what the case expects (a deopt is one `jit_bailouts`, and the error is the
-interpreter's), and the generated loops must all compile and be taken over. Checks on the verification run (both back ends, `tests/ast/run.sh`): engine 252, tier 372, jit 151.
+comparisons, and integers mixed in, and 300 mixed: integers and floats in one loop, comparisons and `//` and `%` of an integer with a
+float, float loops with constant steps and nan-or-bounded starts and limits, and integer loops with float limits) with nested ifs,
+whiles and wrapping arithmetic; each must give the interpreter's result (the mixed batch with the sign of a nan dropped, see "NaN signs"),
+the counters must say what the case expects (a deopt is one `jit_bailouts`, and the error is the interpreter's), and the generated
+loops must all compile and be taken over. Checks on the verification run (`tests/ast/run.sh`, both back ends, the same counts on each, `LUA` unset so the bytecode part is
+skipped): engine 252, tier 384, jit 179 (before this change: 252, tier 372 on the base it was measured on, jit 151).
 `tests/ast/run.sh`
 runs it, and it also runs every `tests/ast/cases/*.lua` program with the tier on and the JIT on (`--jit`), against the output of a
 real Lua 5.4. In the sandbox this was written in, `tests/ast/tier.cpp` fails two checks of "a host that ignores SIGCHLD" (lines 685 and 691
