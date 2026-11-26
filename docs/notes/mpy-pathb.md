@@ -101,8 +101,13 @@ is {key, value}. An empty slot has key 0; a deleted one has the sentinel key 0x1
   `keys()`, `values()` and `items()` (views, below) and `update([other])` (a dict, or an iterable of two-item lists or
   tuples; a non-iterable is `'X' object isn't iterable`, a pair of another length `ValueError: dict update sequence has
   wrong length`). Their argument-count errors are the reference's (`function missing 1 required positional arguments`,
-  `function expected at most 3 arguments, got N`, ...). A method the runtime lacks (copy, clear, setdefault, popitem,
-  fromkeys) is refused by name, and read as a value (`f = d.get`) it fails at run time.
+  `function expected at most 3 arguments, got N`, ...). `copy()` copies the table slot for slot (deleted slots too), `clear()`
+  drops the table, `setdefault(k[, v])` hashes k and adds it with v (None), `popitem()` removes and returns the first live slot
+  (`KeyError: popitem(): dictionary is empty`), and `fromkeys(iterable[, v])` is the classmethod: `d.fromkeys(...)` is called with
+  no self, and its table is sized by the iterable's length. Iterating a str (which `fromkeys` needs) is still refused. The
+  lowering does not refuse `copy`, `clear`, `setdefault`, `popitem` or `fromkeys` by name, since the receiver's type is not
+  known there: on a list, str or other value that is not a dict the runtime fails at run time ("a method copy of a 'list' is
+  not lowered yet"). Read as a value (`f = d.get`) a dict method fails at run time.
 - A view is {type, dict, kind}, live: it reads the dict's table. `repr` is `dict_keys([...])`, `dict_values([...])` or
   `dict_items([(k, v), ...])`, in table order. `len`, truth, `in` (a key, a value by equality, a (key, value) pair) and
   iteration are lowered. A view has no hash and no equality (`==` fails here; the reference compares identities).
@@ -297,7 +302,7 @@ RAISE_LAST), as the lowering follows it:
 
 Defaults and keyword arguments (`MAKE_FUNCTION_DEFARGS`, `MAKE_CLOSURE_DEFARGS`), `del` of a closure variable
 (`DELETE_DEREF`), generators, str methods and formatting, str ordering and repetition, `raise ... from`,
-big ints, the dict methods `copy`, `clear`, `setdefault`, `popitem` and `fromkeys`, the set methods
+big ints, the set methods
 and operators (`add`, `|`, `==`, and so on), the list methods other than append and pop, subscripts of a range, and the rest
 of the opcodes. Equality of two dicts, two sets, two ranges or two views, `str` of a list, tuple, set or view, and
 containment in a range are refused at run time until their repr and equality are built. Changing a dict's size during a
