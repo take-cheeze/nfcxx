@@ -36,15 +36,17 @@ typedef struct MV {
 
 /* The program's methods (TDEF). mrbbc_def adds a top-level method (on Object) with the lowered body's number, its counts
  * of arguments, min (the required and post parameters) to max (the ones before the rest parameter and the optional ones;
- * -1 with a rest parameter), and kd (1 when it has keyword parameters); mrbbc_def_in adds one to the class cls (the self
- * of a class body). A call's count argc is its positional arguments; kw is 1 when the call gave keyword arguments, whose
- * hash is the call's last argument (a method without keyword parameters takes it as a positional one, as vm.c does).
+ * -1 with a rest parameter), and flags (bit 0: it has keyword parameters; bit 1: it has only required parameters, the fast
+ * path of vm.c's ENTER); mrbbc_def_in adds one to the class cls (the self of a class body). A call's count argc is its
+ * positional arguments; kw is 1 when the call gave keyword arguments, whose hash is the call's last argument (a method
+ * without keyword parameters takes it as a positional one, as vm.c does), and 2 for an empty `**h` splat (positional only
+ * on the fast path, see mrbbc_kw_flag).
  * mrbbc_find returns the number of the body a self call of self runs, or raises ArgumentError (wrong count) or
  * NoMethodError (no such method). mrbbc_find_send is an explicit receiver's call: it returns -1 when the method is not
  * the receiver's class's (the builtin path then runs), and raises NoMethodError for a top-level method, which is private.
  * mrbbc_find_init is the initialize of a new object (-1 when there is none and no argument was given). */
-void mrbbc_def(const char *name, int id, long min, long max, int kd);
-void mrbbc_def_in(const MV *cls, const char *name, int id, long min, long max, int kd);
+void mrbbc_def(const char *name, int id, long min, long max, int flags);
+void mrbbc_def_in(const MV *cls, const char *name, int id, long min, long max, int flags);
 int mrbbc_find(const MV *self, const char *name, long argc, long kw);
 int mrbbc_find_send(const MV *recv, const char *name, long argc, long kw);
 int mrbbc_find_init(const MV *obj, long argc, long kw);
@@ -81,7 +83,7 @@ void mrbbc_no_method(const MV *recv, const char *name) __attribute__((noreturn))
  * block of two or more parameters takes one array argument splatted (not strict). Returns the number of optional
  * parameters the call gave, which the body's jumps choose the defaults by. Nothing is checked here: the count is checked by
  * mrbbc_find. */
-long mrbbc_bind(MV *r1, const MV *argv, long argc, long kw, long m1, long o, long r, long m2, long kd, long strict);
+long mrbbc_bind(MV *r1, const MV *argv, long argc, long kw, long m1, long o, long r, long m2, long kd, long strict, long fast);
 void mrbbc_ary_elt(MV *dst, const MV *ary, long i);
 
 /* Keyword parameters (vm.c's KEY_P, KARG and KEYEND) on the kdict of a method: whether it has the key, its value (the key is
@@ -94,6 +96,10 @@ void mrbbc_keyend(const MV *kdict);
  * value). Keys are compared by their value for symbols, integers and strings, and by identity otherwise. */
 void mrbbc_hash_new(MV *dst, long cap);
 void mrbbc_hash_set(MV *hash, const MV *key, const MV *value);
+/* HASHCAT (`**h`): the pairs of a hash set into hash; any other value is a TypeError. mrbbc_kw_flag is the keyword flag of a
+ * `**h` call: 1 when the hash has a key, 2 when it is empty. */
+void mrbbc_hash_cat(MV *hash, const MV *src);
+long mrbbc_kw_flag(const MV *h);
 /* OP_AREF (`a, b = x`): an array's element i, or for a value that is not an array, the value at 0 and nil otherwise. */
 void mrbbc_aref(MV *dst, const MV *v, long i);
 
@@ -119,6 +125,8 @@ MV *mrbbc_blk_home(const MV *blk);
 void mrbbc_blk_args(MV *argv, const MV *blk);
 void mrbbc_blk_load(MV *dst, const MV *blk);
 void mrbbc_blk_given(MV *dst, const MV *blk);
+/* `&nil` in a parameter list: a block given to the method raises ArgumentError "no block accepted". */
+void mrbbc_noblock(const MV *blk);
 void mrbbc_return_block(const MV *value, MV *home);
 void mrbbc_break(const MV *value, MV *home);
 int mrbbc_unwinding(void);
