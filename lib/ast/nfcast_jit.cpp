@@ -1,10 +1,11 @@
 // nfcast JIT: x86-64 machine code for the loops of the AST interpreter (docs/notes/ast.md, "JIT"). The loop is read through the
 // tier's view of its nodes (tier_view), the same one the C tier lowers from, and only the subset listed in the notes is encoded:
-// integers, + - * and unary minus, `//` and `%` (floor division and modulo, as the interpreter's), comparisons, and/or/not in
-// conditions, if, while, repeat, numeric for loops with an integer step that is a constant (except the one that takes over the loop,
-// whose step is run-time), break, and locals. Integer arithmetic wraps as the interpreter's does. The one operation that can fail is
-// `//` or `%` by zero: the code then stops, writes its locals back, and the interpreter raises the error (the deopt, see run() and
-// resume()). A `/`, `^` or bitwise operator, or anything else outside the subset, makes compile() refuse the loop.
+// integers, + - * and unary minus, `//` and `%` (floor division and modulo, as the interpreter's), the bitwise operators & | ~ (binary
+// xor), << and >> and unary ~ on integers, comparisons, and/or/not in conditions, if, while, repeat, numeric for loops with an integer
+// step that is a constant (except the one that takes over the loop, whose step is run-time), break, and locals. Integer arithmetic wraps
+// as the interpreter's does, and the bitwise operators never fail. The one operation that can fail is `//` or `%` by zero: the code then
+// stops, writes its locals back, and the interpreter raises the error (the deopt, see run() and resume()). A `/`, `^`, or anything else
+// outside the subset, makes compile() refuse the loop.
 //
 // Registers. The machine code has one 64-bit word per local (and per hidden variable of a for loop) in an array REGS, whose address
 // is in RBX (callee-saved, pushed at the entry). RAX, RCX and RDX are scratch; a binary operation of two compound operands evaluates
@@ -172,6 +173,33 @@ class Asm {
   void cmp_rax_rcx() { op_rr(0x39, 0xC8); }    // cmp rax, rcx (flags of rax - rcx)
   void cmp_rax_0() { bytes({0x48, 0x83, 0xF8, 0x00}); }
   void sub_rax_1() { bytes({0x48, 0x83, 0xE8, 0x01}); }
+  void and_rax_rcx() { op_rr(0x21, 0xC8); }   // and rax, rcx
+  void or_rax_rcx() { op_rr(0x09, 0xC8); }    // or rax, rcx
+  void xor_rax_rcx() { op_rr(0x31, 0xC8); }   // xor rax, rcx
+  void not_rax() { bytes({0x48, 0xF7, 0xD0}); }  // not rax (the bitwise ~)
+  // RAX = RAX shifted by the count in RCX, as the interpreter's shift_left (nfcr_shl): a count of 64 or more, or of -64 or less,
+  // gives 0, a positive count shifts left, a negative one shifts right logically. RIGHT: the count is negated first (a >> b is
+  // a << -b, with the negation wrapping as the interpreter's 0 - b does). Uses RAX and RCX only.
+  void shift_rax_rcx(bool right) {
+    int zero = label(), neg = label(), done = label();
+    if (right) neg_rcx();
+    bytes({0x48, 0x83, 0xF9, 0x40});  // cmp rcx, 64
+    jcc(CC_GE, zero);
+    bytes({0x48, 0x83, 0xF9, 0xC0});  // cmp rcx, -64
+    jcc(CC_LE, zero);
+    bytes({0x48, 0x85, 0xC9});        // test rcx, rcx
+    jcc(CC_S, neg);
+    bytes({0x48, 0xD3, 0xE0});        // shl rax, cl
+    jmp(done);
+    bind(neg);
+    neg_rcx();
+    bytes({0x48, 0xD3, 0xE8});        // shr rax, cl
+    jmp(done);
+    bind(zero);
+    bytes({0x31, 0xC0});              // xor eax, eax
+    bind(done);
+  }
+  void neg_rcx() { bytes({0x48, 0xF7, 0xD9}); }  // neg rcx
   void xor_edx_edx() { bytes({0x31, 0xD2}); }
   void div_rcx() { bytes({0x48, 0xF7, 0xF1}); }  // unsigned rdx:rax / rcx, quotient in rax
   // Floor division and modulo (Gen::floordiv): the signed forms and the tests they use.
@@ -370,17 +398,27 @@ struct Gen {
         return true;
       }
       case TierView::K_ARITH: {
-        if (v.op != AR_ADD && v.op != AR_SUB && v.op != AR_MUL && v.op != AR_IDIV && v.op != AR_MOD)
-          return fail("an operator outside the subset (a float division, power or a bitwise operator)");
+        if (v.op != AR_ADD && v.op != AR_SUB && v.op != AR_MUL && v.op != AR_IDIV && v.op != AR_MOD && v.op != AR_BAND &&
+            v.op != AR_BOR && v.op != AR_BXOR && v.op != AR_SHL && v.op != AR_SHR)
+          return fail("an operator outside the subset (a float division or power)");
         if (!binary(v.kids[0], v.kids[1])) return false;
         if (v.op == AR_ADD) a.add_rax_rcx();
         else if (v.op == AR_SUB) a.sub_rax_rcx();
         else if (v.op == AR_MUL) a.imul_rax_rcx();
+        else if (v.op == AR_BAND) a.and_rax_rcx();
+        else if (v.op == AR_BOR) a.or_rax_rcx();
+        else if (v.op == AR_BXOR) a.xor_rax_rcx();
+        else if (v.op == AR_SHL || v.op == AR_SHR) a.shift_rax_rcx(v.op == AR_SHR);
         else floordiv(v.op == AR_MOD);
         return true;
       }
       case TierView::K_UNARY:
-        if (v.op != AR_UNM) return fail("an operator outside the subset (not, length, bitwise not)");
+        if (v.op == AR_BNOT) {
+          if (!expr(v.kids[0])) return false;
+          a.not_rax();
+          return true;
+        }
+        if (v.op != AR_UNM) return fail("an operator outside the subset (not, length)");
         if (!expr(v.kids[0])) return false;
         a.neg_rax();
         return true;
