@@ -127,6 +127,50 @@ int mrbbc_find(const char *name, long argc) {
   }
 }
 
+/* A block value (MRBBC_BLK): the int64 is the Clo that mrbbc_block fills. The layout is 32 bytes, as the producer
+ * reserves it (tools/mrbbc/mrb_lower.cpp, the BLOCK slot). A closure lives in its frame, which is alive while the block
+ * can be yielded: a block is passed to a method and not kept (a block parameter is refused). */
+typedef struct Clo {
+  long id;
+  MV self;
+  MV *frame;
+} Clo;
+
+static Clo *clo_of(const MV *v) { return (Clo *)(intptr_t)v->i; }
+
+void mrbbc_block(MV *dst, void *clo, long id, const MV *self, MV *frame) {
+  Clo *c = clo;
+  c->id = id;
+  c->self = *self;
+  c->frame = frame;
+  set_obj(dst, MRBBC_BLK, c);
+}
+
+long mrbbc_blk_id(const MV *blk) {
+  if (blk->tag != MRBBC_BLK) mrbbc_raise("LocalJumpError", "unexpected yield");
+  return clo_of(blk)->id;
+}
+
+MV *mrbbc_blk_frame(const MV *blk) {
+  if (blk->tag != MRBBC_BLK) mrbbc_raise("LocalJumpError", "unexpected yield");
+  return clo_of(blk)->frame;
+}
+
+void mrbbc_blk_args(MV *argv, const MV *blk) {
+  if (blk->tag != MRBBC_BLK) mrbbc_raise("LocalJumpError", "unexpected yield");
+  argv[0] = clo_of(blk)->self;
+}
+
+void mrbbc_blk_load(MV *dst, const MV *blk) {
+  if (blk->tag == MRBBC_NIL) mrbbc_raise("LocalJumpError", "unexpected yield");
+  *dst = *blk;
+}
+
+void mrbbc_blk_given(MV *dst, const MV *blk) {
+  dst->tag = blk->tag == MRBBC_NIL ? MRBBC_FALSE : MRBBC_TRUE;
+  dst->i = 0;
+}
+
 /* The class of a value, as NoMethodError and ArgumentError name it. */
 static const char *class_name(const MV *v) {
   switch (v->tag) {

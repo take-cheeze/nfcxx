@@ -96,8 +96,9 @@ Lowered (`mrb_lower.cpp`):
 | Methods | `SEND0` with `to_s`, `size`, `length` or `!`; `SEND` with one argument and an operator (`+ - * / == != < <= > >=`, which is the binop of the opcode); see the method table below |
 | Jumps | `JMP`, `JMPUW` (the same as JMP when the irep has no catch table, which is checked; mruby emits it for `break`), `JMPIF`, `JMPNOT`, `JMPNIL` |
 | Returns | `RETURN`, `RETNIL`, `RETFALSE`, `RETTRUE`, `STOP` (nil, as `vm.c` returns) |
-| Methods of the program | `TDEF` (defines the body of child c as the method `Syms[b]` on Object, and R[a] becomes the symbol, as `vm.c` sets it), `SSEND0` and `SSEND` (a self call, R[a] = self's method, with up to 15 positional arguments); see "Methods" |
-| Parameters | `ENTER` with required parameters only (in a method, at pc 0; the prologue copies them) |
+| Methods of the program | `TDEF` (defines the body of child c as the method `Syms[b]` on Object, and R[a] becomes the symbol, as `vm.c` sets it), `SSEND0`, `SSEND` and `SSENDB` (a self call, R[a] = self's method, with up to 15 positional arguments and, for SSENDB, a block in R[a+n+1]); see "Methods" |
+| Blocks | `BLOCK` (a block made from child b, closed over this frame), `BLKPUSH` (the method's own block, in a method), `BLKCALL` (yield), `GETUPVAR` and `SETUPVAR` at level 0 (the frame the block was made in); see "Blocks" |
+| Parameters | `ENTER` with required parameters only (in a method or block, at pc 0; the prologue copies them) |
 
 The method table. A `SEND0` or `SEND` (with `c` = n | k<<4, so n = 0 or 1 and k = 0) names its method by a symbol. A
 method outside the table is refused at lowering time with `refused: SEND0 of method 'NAME' is not lowered yet (pc N)`:
@@ -111,18 +112,24 @@ method outside the table is refused at lowering time with `refused: SEND0 of met
 
 ### Methods
 
-A method is a child irep that a `TDEF` names. Each such body is a function of its own, `mrb_m<N>(MV *ret, MV *argv)`,
-numbered over the module in the order the TDEFs are found (the main program is `mrb_irep_0`, as before). `argv[0]` is
-self and `argv[1..m]` are the m required arguments: the prologue copies them into R(0)..R(m) and sets the other
-registers to nil. A method's ENTER must be its first instruction and have only required parameters (aspec bits 0..17
-zero, bit 23 zero); any other parameter is refused.
+A method is a child irep that a `TDEF` names. Each such body is a function of its own,
+`mrb_m<N>(MV *ret, MV *argv, MV *blk)`, numbered over the module in the order the TDEFs are found (the main program is
+`mrb_irep_0`, as before). `argv[0]` is self and `argv[1..m]` are the m required arguments: the prologue copies them into
+R(0)..R(m) and sets the other registers to nil. `blk` is the block the call gave, or a nil value. A method's ENTER must
+be its first instruction and have only required parameters (aspec bits 0..17 zero, bit 23 zero); any other parameter is
+refused.
+
+Frames: every function keeps its registers in one contiguous slot, `frame`, of 16 bytes per register, and R(i) is the
+register number 4 + i of the IR (the emitter names registers by digits only). The frame's address is what a BLOCK stores
+for its closure.
 
 - `TDEF a b c` calls `mrbbc_def(name, N, m)`, which adds the method to the runtime's table (Object, the only class
   a program of this subset defines methods on), then R[a] = the symbol, as `vm.c` sets it. A redefinition wins.
-- `SSEND0 a b` and `SSEND a b c` (self's method, with `n` = c arguments): R[a] = R[0] and the arguments R[a+1..a+n]
-  are copied into a vector of their own (self first). `mrbbc_find(name, n)` returns the number of the latest definition
-  of the name, or raises. The call is then one branch per method of the module: `if id == N then mrb_m<N>(&R[a], argv)`.
-  A method's return writes R[a] through `ret`, so the caller's register gets the result as `RETURN` gives it.
+- `SSEND0 a b`, `SSEND a b c` and `SSENDB a b c` (self's method, with `n` = c arguments): the arguments R[a+1..a+n] are
+  copied into a vector of their own, self first. `mrbbc_find(name, n)` returns the number of the latest definition of
+  the name, or raises. The call is then one branch per method of the module: `if id == N then mrb_m<N>(&R[a], argv,
+  blk)`, where blk is R[a+n+1] for SSENDB and a nil slot otherwise. A method's return writes R[a] through `ret`, so the
+  caller's register gets the result as `RETURN` gives it.
 - Only names the program defines are lowered for a self call (`sh.defined`). A self call to a name the program does not
   define is refused, so `foo` with no `def foo` is not in the lowered set, and the `NoMethodError` of an undefined
   method comes only from a name the program defines later (the call runs before its TDEF).
@@ -137,13 +144,40 @@ Deviation: a self call to an Object or Kernel method that the program also defin
 refused, because before the TDEF runs mruby calls the inherited one. The list of those names is `object_method` in
 `mrb_lower.cpp`; a name missing from it would be a miscompile, so the list is conservative.
 
+### Blocks
+
+A block is a child irep that a `BLOCK` names. Its body is a function `mrb_b<N>(MV *ret, MV *argv, long argc, MV *frame)`
+(numbered over the module like the methods). `frame` is the frame of the function that executed the BLOCK: its registers
+are the block's outer locals.
+
+- `BLOCK a b` fills a 32-byte closure in a slot of the caller's frame (`mrbbc_block`: the block number, a copy of R(0)
+  as self, the frame), and R[a] is the closure's address with the BLK tag (7).
+- `SSENDB a b c` is a self call with the block R[a+n+1] (see "Methods"; `blk` is that register, or nil for SSEND).
+- `BLKPUSH a b` in a method copies the method's block into R[a] (`mrbbc_blk_load`: a nil block raises
+  `unexpected yield (LocalJumpError)`, as vm.c does). `block_given?`, a self call to the Kernel method with no arguments
+  that the program does not define, is `false` at the top level, `block_given?` of the method's own block in a method,
+  and refused in a block.
+- `BLKCALL a b` (yield with b arguments in R[a+1..a+b]): argv[0] is the closure's self and the arguments follow; the
+  block number picks the function, as the method number does for a self call.
+- The block's prologue copies its one required parameter from argv[1] when argc gives it, else nil (a proc takes what it
+  is given). A block with two or more parameters is refused, because mruby splats a single array argument for those.
+- `GETUPVAR a b 0` and `SETUPVAR a b 0` read and write register b of the frame the block was made in. Level 0 only: a
+  deeper level needs the frame's own link to its parent, which is not lowered.
+- `RETURN` in a block is a local return (`next`). `RETURN_BLK` (a `return` that leaves the block) is refused.
+
+Lifetime: a closure is valid while its frame is alive. A block is passed to a method and yielded there, and the program
+has no way to keep it (a block parameter is refused), so no closure outlives its frame. This is the producer's reading,
+and a program that kept a block would make the closure dangle.
+
 Refused by name (exit 3, `refused: opcode NAME is not lowered yet (pc N)`): every other opcode, the `EXT1`-`EXT3`
 prefixes and the instructions they widen, `LOADL` of a non-integer (`LOADL` never holds a string: mruby compiles a
-string literal to `STRING`), and a main program with a catch table. In particular a block call (`SENDB`, `SSENDB`),
-`YIELD`, `BLOCK`, a method call with a keyword argument, any other method name, `AREF`/`ASET` (the destructuring of
-`a, b = x`), `APOST`, `ARYCAT`/`ARYSPLAT` (a splat), `SYMBOL` (a quoted symbol) and `LOADSYM` of a name that is not plain
-(`:"a b"`, `:+`), a float, an instance or global variable, a class (`TCLASS`, `CLASS`), a method definition whose name
-is not plain or whose ENTER has parameters other than required ones, and `ENTER` with such parameters are refused.
+string literal to `STRING`), and a main program with a catch table. In particular `SENDB` (a block call with an
+explicit receiver), `RETURN_BLK`, `BREAK`, `GETUPVAR`/`SETUPVAR` at level 1 or more, `BLKPUSH` of a block other than
+the method's own (a yield inside a block), a method call with a keyword argument, any other method name, `AREF`/`ASET`
+(the destructuring of `a, b = x`), `APOST`, `ARYCAT`/`ARYSPLAT` (a splat), `SYMBOL` (a quoted symbol) and `LOADSYM` of a
+name that is not plain (`:"a b"`, `:+`), a float, an instance or global variable, a class (`TCLASS`, `CLASS`), a method
+or block with parameters other than required ones (a block with two or more), a method definition whose name is not
+plain, and `ENTER` with such parameters are refused.
 
 ### The printed result
 
@@ -213,18 +247,22 @@ whose message says so, never with a value.
   each compiled four ways (default, `-g`, `--remove-lv`, `-g --remove-lv`): 28 files read by `mrbbc_dump` (every
   instruction decodes, no bytes after END) and run to status 0 by the pinned mruby. 15 malformed files (truncations,
   an extra byte, a wrong magic, format 03.00, an unknown section, an opcode out of range) are refused with status 1.
-- Lowering (`tests/mrbbc/lower/run.sh`): 51 value programs match mruby's `p` (two generated: 200 locals, and an
+- Lowering (`tests/mrbbc/lower/run.sh`): 61 value programs match mruby's `p` (two generated: 200 locals, and an
   array literal of 130 elements, which mrbc builds with `ARYPUSH`; the `meth_*.rb` ones cover methods: zero and two
-  arguments, self calls between methods, recursion, redefinition, a loop, `return`, and a `def` value); 25 runtime errors
-  match mruby's last stderr line and status 1 (9 from round 1, 13 from round 2, 3 method arity and call-before-def
-  errors in round 3); 19 programs are refused with status 3, a `refused:` message and no stdout: 18 in `err/` and a
-  generated one with EXT1 prefixes. `err/` is the refusal set, `rterr/` the runtime errors; the brief's "err/ programs
-  must be refused" is read as the first.
+  arguments, self calls between methods, recursion, redefinition, a loop, `return`, and a `def` value; the `blk_*.rb`
+  ones cover blocks: yield with and without arguments, a block that sets an outer local, `block_given?`, a loop of
+  yields, a block inside a block, and a block that calls a method); 26 runtime errors match mruby's last stderr line
+  and status 1 (9 from round 1, 13 from round 2, 4 in round 3: method arity, call before def, and yield without a
+  block); 23 programs are refused with status 3, a `refused:` message and no stdout: 22 in `err/` and a generated one
+  with EXT1 prefixes. `err/` is the refusal set, `rterr/` the runtime errors; the brief's "err/ programs must be
+  refused" is read as the first.
 
-Round 2 (strings, arrays, SEND0 and SEND of the core methods) is in the tables above. Round 3 (methods, see "Methods")
-lowers `def` of a method with required parameters, self calls to the program's methods (`SSEND0`, `SSEND`), and the
-`ENTER` that opens a method. Still refused: blocks (`BLOCK`, `SENDB`, `YIELD`, `block_given?`), keyword arguments,
-optional or rest parameters, `AREF`/`ASET`, `APOST`, splats, and the quoted symbols. The strings and arrays in the
+Round 2 (strings, arrays, SEND0 and SEND of the core methods) is in the tables above. Round 3 lowers methods (see
+"Methods": `def` of a method with required parameters, self calls to the program's methods) and blocks (see "Blocks":
+`BLOCK`, `SSENDB`, `BLKPUSH`, `BLKCALL`, `GETUPVAR` and `SETUPVAR` at level 0, `block_given?`). Still refused:
+`RETURN_BLK` (a `return` out of a block), `BREAK`, yields and variables more than one level out, `SENDB` with an explicit
+receiver, blocks with two or more parameters, keyword arguments, optional or rest parameters, `AREF`/`ASET`, `APOST`,
+splats, and the quoted symbols. The strings and arrays in the
 subset are the ones the examples above name; `Array#-` and `Array#*`, `String#[]=`, ranges as indexes and the other
 methods of the core classes are not in it.
 
