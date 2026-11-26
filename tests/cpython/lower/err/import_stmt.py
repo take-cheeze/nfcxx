@@ -1,0 +1,3 @@
+import math
+
+result = 1
