@@ -185,7 +185,7 @@ comparisons), `LOAD_CONST_STRING` and `LOAD_CONST_OBJ` (str constants), `MAKE_FU
 comprehensions), `UNPACK_SEQUENCE`, `GET_ITER_STACK`
 and `FOR_ITER`, and `RETURN_VALUE`, and the exception and class opcodes (see Exceptions and Classes): `SETUP_EXCEPT`,
 `SETUP_FINALLY`, `SETUP_WITH`, `WITH_CLEANUP`, `POP_EXCEPT_JUMP`, `END_FINALLY`, `UNWIND_JUMP`, `RAISE_OBJ`, `RAISE_LAST`, `LOAD_BUILD_CLASS`, `LOAD_ATTR`,
-`STORE_ATTR`, `LOAD_METHOD`/`CALL_METHOD`, `DELETE_FAST`, `DELETE_NAME`, `DUP_TOP_TWO`, with `LOAD_NAME`/`STORE_NAME` for the
+`STORE_ATTR`, `LOAD_METHOD`/`CALL_METHOD`, `DELETE_FAST`, `DELETE_NAME`, `DELETE_DEREF`, `DUP_TOP_TWO`, with `LOAD_NAME`/`STORE_NAME` for the
 class namespace and `LOAD_GLOBAL`/`STORE_GLOBAL` for the globals. Any other opcode is refused by name and no IR is written.
 
 Each code object is one IR function. The module body is `mpy_module`. A function is `mpy_fn_K(ret, args, nargs)`: it
@@ -218,8 +218,9 @@ Representation and calling convention (`tests/mpy/runtime/mpy_rt.c`):
   arguments. So `mpy_fn_K` copies all of its arguments, the cells included, into its locals with no special case, and
   `LOAD_DEREF` and `STORE_DEREF` read and write through the cell in the local.
 
-A nested def that has default arguments (`MAKE_CLOSURE_DEFARGS`) and a `del` of a closure variable (`DELETE_DEREF`) are
-refused by name.
+A nested def that has default arguments (`MAKE_CLOSURE_DEFARGS`) is refused by name. A `del` of a cell or free variable
+(`DELETE_DEREF`) stores 0 in the cell, which is unbound, so a read of it is `NameError: local variable referenced before
+assignment` (the reference's text).
 
 ## Strings
 
@@ -263,8 +264,8 @@ RAISE_LAST), as the lowering follows it:
 - The runtime's `fail()` messages that begin with an exception class name ("KeyError: ...", "IndexError: ...") raise that
   class, so a try catches the runtime's own errors. Any other message is fatal, as before.
 - A break or continue out of a try (UNWIND_JUMP) pops the blocks it leaves (its count is the low 7 bits of the extra byte;
-  bit 0x80 is a break out of a for loop, which drops the iterator's slots in the depth). Leaving a finally that is not the
-  name-deleting one of an `except ... as` is refused by name (a finally would run its code).
+  bit 0x80 is a break out of a for loop, which drops the iterator's slots in the depth). Leaving a finally runs its body
+  (see Unwinding through finally below).
 - Leaving a with block (a break, a continue or a return out of its body) calls its `__exit__(None, None, None)` as WITH_CLEANUP's
   normal path does, innermost block first. The block is dropped before the exit is called, so an exception from the exit goes to
   the blocks around the statement (the reference may differ there; this is not checked). The walk records each with block with
@@ -273,7 +274,25 @@ RAISE_LAST), as the lowering follows it:
   POP_TOPs and a JUMP, as mp_emit_bc_unwind_jump emits it; the JUMP at the loop's base ends the loop's entry.
 - A return (RETURN_VALUE) leaves every block it is in, as MicroPython's unwind_return does, the with blocks included.
   Before this, a return left its block on the runtime's block stack, so a later raise could longjmp into the returned frame.
-  A return out of a real `finally` still does not run the finally code: it is popped silently, as before (a gap, see Not yet).
+
+Unwinding through finally (a return, a break or a continue that leaves a `try ... finally`). The VM runs the finally body as
+a coroutine (vm.c's unwind_jump and END_FINALLY), and the lowering does the same:
+
+- Which finally blocks run is the VM's test, `handler >= ip`: a block whose handler is ahead of the site is run, and a block
+  whose handler is behind it (the site is in that handler's body) is only dropped. The walk names a finally block by its SETUP's
+  offset (`setup_of`), so the handler is known; the handler's offset is behind the site exactly when the site is in its body.
+- A run block stays open. The unwind calls `mpy_block_land` (the block is marked as running its handler, so a raise in the body
+  goes past it), stores a pending code in the handler's exception slot (`small_word` of a code unique to the site and the
+  block), and jumps to the handler. The handler's END_FINALLY calls `mpy_end_finally`, which pops the block and returns for a
+  small int, and then compares the slot with each pending code of that block and jumps to its continuation. The continuation
+  goes on with the blocks the unwind has left (with blocks call their exit, as above), and ends in the target or a return.
+- A return's value is kept in a slot of its own (`rv.<offset>`) while a finally body runs, since that body reuses the stack
+  slots from its own depth up.
+- A break out of a finally body in a loop over a range is refused by name. A range loop has no iterator on the stack, so the
+  compiler sends the break with no loop-drop bit, and the reference leaves the finally's pending value on the stack at the
+  loop's end, one deeper than the normal exit (its POP_TOP pops that value and the loop's counter stays). A static depth cannot
+  hold both, so the join is refused (err/finally_range_break.py). The same break in a loop over an iterator (the 0x80 bit) is
+  lowered, and so is a break from a try body in a range loop.
 - `raise X from Y` (RAISE_FROM) is lowered as `mpy_raise_from`. MicroPython 1.29 does not set a cause: with a cause that is not
   None, it prints `Warning: exception chaining not supported` on stderr (`mp_warning`) and raises X, so the lowering does the
   same and the cause is dropped. `from None` prints nothing. The uncaught line is `Name: text`, as for `raise X`.
@@ -325,13 +344,13 @@ RAISE_LAST), as the lowering follows it:
 
 ## Not yet
 
-Defaults and keyword arguments (`MAKE_FUNCTION_DEFARGS`, `MAKE_CLOSURE_DEFARGS`), `del` of a closure variable
-(`DELETE_DEREF`), generators, str methods and formatting, str ordering and repetition,
+Defaults and keyword arguments (`MAKE_FUNCTION_DEFARGS`, `MAKE_CLOSURE_DEFARGS`), generators, str methods and formatting, str
+ordering and repetition,
 big ints, the set methods `copy` and `clear`, the list methods other than append and pop, subscripts of a range, and the rest
 of the opcodes. Equality of two dicts, two ranges or two views, `str` of a list, tuple, set or view, and
 containment in a range are refused at run time until their repr and equality are built. Changing a dict's size during a
 `for` over it is not checked (see Dicts). Identity of strs: a str built at run time is a new object, but MicroPython interns
 short strs, so `'a' + 'b' is 'ab'` is True there and False here. Nothing is freed: a str lives until the process ends. Also
-the `luac`-style opcode oracle is still blocked, and string pattern matching is paused. A return out of a `try ... finally` does
-not run the finally code (it is popped silently; a break out of one is refused). A `return` or `break` out of a `with` whose
-`__exit__` raises is not matched against the reference.
+the `luac`-style opcode oracle is still blocked, and string pattern matching is paused. A `break` out of a finally body in a loop
+over a range is refused (see Unwinding through finally). A `return` or `break` out of a `with` whose `__exit__` raises is not
+matched against the reference.

@@ -1459,12 +1459,21 @@ void mpy_block_pop(void) {
   free(b);
 }
 
-/* END_FINALLY: the block ends; then None goes on, and an exception is raised again. */
+/* END_FINALLY: the block ends; then None goes on, and an exception is raised again. A small int is the pending code of an unwind
+ * (a break, a continue or a return) that entered this finally: the lowering dispatches on it after this call. */
 void mpy_end_finally(mpv v) {
   mpy_block_pop();
-  if (v == MPY_NONE) return;
+  if (v == MPY_NONE || is_small(v)) return;
   if (is_exc(v)) raise_value(v);
-  fail("internal: END_FINALLY with a return or an unwind is not lowered yet");
+  fail("internal: END_FINALLY with a value that is not lowered yet");
+}
+
+/* A finally block that an unwind enters (the lowering's unwind): the block is the innermost one, and it is marked as running its
+ * handler, so a raise in the body goes past it, as the handler of an exception would. It has no exception to re-raise. */
+void mpy_block_land(void) {
+  if (blocks == NULL) fail("internal: no try block to land");
+  blocks->landed = 1;
+  blocks->exc = 0;
 }
 
 /* RAISE_OBJ: raises a class (instantiated with no argument) or an exception instance. */
@@ -1487,7 +1496,7 @@ void mpy_raise_from(mpv v, mpv cause) {
 void mpy_reraise(void) {
   MpyBlock *b;
   for (b = blocks; b != NULL; b = b->prev) {
-    if (b->landed) raise_value(b->exc);
+    if (b->landed && b->exc != 0) raise_value(b->exc);   /* a finally run by an unwind has no exception */
   }
   fail("RuntimeError: no active exception to reraise");
 }
