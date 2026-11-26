@@ -21,6 +21,15 @@ typedef struct MStr {
   char p[];
 } MStr;
 
+/* A growable byte buffer for inspect and to_s. */
+typedef struct Buf {
+  char *p;
+  size_t n, cap;
+} Buf;
+
+static void inspect_value(Buf *b, const MV *v);
+static MV to_s_string(const MV *v);
+
 typedef struct MAry {
   long len, cap;
   MV *items;
@@ -47,6 +56,7 @@ typedef struct MClass {
   const char *key, *name;
   MDef *defs;
   MIvar *ivars;
+  struct MClass *super; /* the superclass: Object for a class made without one, NULL for Object itself */
   struct MClass *next;
 } MClass;
 
@@ -55,8 +65,25 @@ typedef struct MObj {
   MIvar *ivars;
 } MObj;
 
-static MClass object_class = {"Object", "Object", NULL, NULL, NULL};
+static MClass object_class = {"Object", "Object", NULL, NULL, NULL, NULL};
 static MClass *class_registry = NULL;
+
+/* The class each method body is defined on, by the method's number (the TDEF's class; Object for a top-level def). A SUPER
+ * looks from the superclass of that class. */
+static MClass **owners = NULL;
+static int owners_n = 0;
+
+static void set_owner(int id, MClass *c) {
+  int k;
+  if (id >= owners_n) {
+    MClass **p = realloc(owners, (size_t)(id + 1) * sizeof *p);
+    if (p == NULL) mrbbc_raise("NoMemoryError", "failed to allocate memory");
+    owners = p;
+    for (k = owners_n; k <= id; k++) owners[k] = NULL;
+    owners_n = id + 1;
+  }
+  owners[id] = c;
+}
 
 void mrbbc_raise(const char *cls, const char *message) {
   fflush(stdout);
@@ -146,17 +173,32 @@ static int check_arity(const MDef *d, long argc) {
 static MClass *cls_of(const MV *v) { return (MClass *)(intptr_t)v->i; }
 static MObj *obj_of(const MV *v) { return (MObj *)(intptr_t)v->i; }
 
-void mrbbc_def(const char *name, int id, long arity) { add_def(&object_class.defs, name, id, arity); }
+/* The first method of the name on c or its superclasses (every chain ends at Object). where gets the class it is found in. */
+static MDef *find_chain(MClass *c, const char *name, MClass **where) {
+  for (; c != NULL; c = c->super) {
+    MDef *d = find_def(c->defs, name);
+    if (d != NULL) {
+      if (where != NULL) *where = c;
+      return d;
+    }
+  }
+  return NULL;
+}
+
+void mrbbc_def(const char *name, int id, long arity) {
+  add_def(&object_class.defs, name, id, arity);
+  set_owner(id, &object_class);
+}
 
 void mrbbc_def_in(const MV *cls, const char *name, int id, long arity) {
   if (cls->tag != MRBBC_CLS) mrbbc_raise("TypeError", "a method is defined on a class");
   add_def(&cls_of(cls)->defs, name, id, arity);
+  set_owner(id, cls_of(cls));
 }
 
 int mrbbc_find(const MV *self, const char *name, long argc) {
-  MDef *d = NULL;
-  if (self->tag == MRBBC_OBJ) d = find_def(obj_of(self)->cls->defs, name);
-  if (d == NULL) d = find_def(object_class.defs, name);
+  MClass *start = self->tag == MRBBC_OBJ ? obj_of(self)->cls : &object_class;
+  MDef *d = find_chain(start, name, NULL);
   if (d != NULL) return check_arity(d, argc);
   {
     char msg[256];
@@ -166,21 +208,65 @@ int mrbbc_find(const MV *self, const char *name, long argc) {
   }
 }
 
+static void private_error(const MV *recv, const char *name) __attribute__((noreturn));
+
+static void private_error(const MV *recv, const char *name) {
+  char msg[256];
+  snprintf(msg, sizeof msg, "private method '%s' called for %s", name, class_name(recv));
+  mrbbc_raise("NoMethodError", msg);
+}
+
 int mrbbc_find_send(const MV *recv, const char *name, long argc) {
   if (recv->tag == MRBBC_OBJ) {
-    MDef *d = find_def(obj_of(recv)->cls->defs, name);
-    if (d != NULL) return check_arity(d, argc);
+    MClass *where = NULL;
+    MDef *d = find_chain(obj_of(recv)->cls, name, &where);
+    if (d == NULL) return -1;
+    if (where == &object_class) private_error(recv, name);  /* a top-level def is a private method of Object */
+    return check_arity(d, argc);
   }
-  if ((recv->tag == MRBBC_OBJ || recv->tag == MRBBC_CLS) && find_def(object_class.defs, name) != NULL) {
-    char msg[256];
-    snprintf(msg, sizeof msg, "private method '%s' called for %s", name, class_name(recv));
-    mrbbc_raise("NoMethodError", msg);
-  }
+  if (recv->tag == MRBBC_CLS && find_def(object_class.defs, name) != NULL) private_error(recv, name);
   return -1;
 }
 
+int mrbbc_find_super(const MV *self, int method, const char *name, long argc) {
+  MClass *owner = method >= 0 && method < owners_n ? owners[method] : NULL;
+  MDef *d = owner != NULL ? find_chain(owner->super, name, NULL) : NULL;
+  if (d != NULL) return check_arity(d, argc);
+  if (strcmp(name, "initialize") == 0) {
+    if (argc != 0) {
+      char msg[128];
+      snprintf(msg, sizeof msg, "wrong number of arguments (given %ld, expected 0)", argc);
+      mrbbc_raise("ArgumentError", msg);
+    }
+    return -1;
+  }
+  {
+    /* the methods of Object, Kernel and Comparable that mruby has builtin: not lowered, so not a NoMethodError */
+    static const char *const builtins[] = {
+        "to_s", "inspect", "==", "!=", "!", "equal?", "eql?", "hash", "class", "nil?", "is_a?", "kind_of?", "instance_of?",
+        "respond_to?", "send", "method", "methods", "freeze", "frozen?", "dup", "clone", "object_id", "p", "puts", "print",
+        "raise", "loop", "format", "sprintf", "lambda", "proc", "block_given?", "require"};
+    char msg[256];
+    const char *cname = self->tag == MRBBC_OBJ ? obj_of(self)->cls->name : "Object";
+    size_t k;
+    for (k = 0; k < sizeof builtins / sizeof builtins[0]; k++) {
+      if (strcmp(builtins[k], name) == 0) {
+        snprintf(msg, sizeof msg, "super of the builtin method '%s' is not lowered yet", name);
+        mrbbc_raise("NotImplementedError", msg);
+      }
+    }
+    snprintf(msg, sizeof msg, "super: no superclass method '%s' for %s", name, cname);
+    mrbbc_raise("NoMethodError", msg);
+  }
+}
+
+void mrbbc_super_nil(MV *dst) {
+  dst->tag = MRBBC_NIL;
+  dst->i = 0;
+}
+
 int mrbbc_find_init(const MV *obj, long argc) {
-  MDef *d = find_def(obj_of(obj)->cls->defs, "initialize");
+  MDef *d = find_chain(obj_of(obj)->cls, "initialize", NULL);
   if (d != NULL) return check_arity(d, argc);
   if (argc != 0) {
     char msg[128];
@@ -214,8 +300,19 @@ static int core_name(const char *name) {
 }
 
 void mrbbc_class(MV *dst, const MV *cbase, const MV *super, const char *name, const MV *target) {
-  MClass *outer = &object_class, *c;
-  if (super->tag != MRBBC_NIL) mrbbc_raise("NotImplementedError", "a class with a superclass is not lowered yet");
+  MClass *outer = &object_class, *c, *sup = NULL;
+  if (super->tag != MRBBC_NIL) {
+    char msg[160];
+    if (super->tag != MRBBC_CLS) {
+      Buf b = {NULL, 0, 0};
+      if (super->tag == MRBBC_OBJ) mrbbc_raise("NotImplementedError", "a superclass that is an instance is not lowered yet");
+      inspect_value(&b, super);
+      snprintf(msg, sizeof msg, "superclass must be a Class (%s given)", b.p);
+      free(b.p);
+      mrbbc_raise("TypeError", msg);
+    }
+    sup = cls_of(super);
+  }
   if (cbase->tag == MRBBC_CLS) {
     outer = cls_of(cbase);
   } else if (target->tag == MRBBC_CLS) {
@@ -236,8 +333,13 @@ void mrbbc_class(MV *dst, const MV *cbase, const MV *super, const char *name, co
     }
     c->defs = NULL;
     c->ivars = NULL;
+    c->super = sup != NULL ? sup : &object_class;
     c->next = class_registry;
     class_registry = c;
+  } else if (sup != NULL && c->super != sup) {
+    char msg[256];
+    snprintf(msg, sizeof msg, "superclass mismatch for %s", c->name);
+    mrbbc_raise("TypeError", msg);
   }
   set_obj(dst, MRBBC_CLS, c);
 }
@@ -246,6 +348,7 @@ void mrbbc_object_class(MV *dst) { set_obj(dst, MRBBC_CLS, &object_class); }
 
 void mrbbc_getconst(MV *dst, const char *name) {
   MClass *c = find_class(name);
+  if (c == NULL && strcmp(name, "Object") == 0) c = &object_class;
   if (c != NULL) {
     set_obj(dst, MRBBC_CLS, c);
     return;
@@ -463,11 +566,25 @@ static void no_method(const char *name, const MV *recv) {
 
 void mrbbc_no_method(const MV *recv, const char *name) { no_method(name, recv); }
 
-/* A growable byte buffer for inspect and to_s. */
-typedef struct Buf {
-  char *p;
-  size_t n, cap;
-} Buf;
+/* The program's method of the name for an instance, found on its class and the superclasses (-1 when there is none, and
+ * for any other value: only an instance of a program class has methods of the program). A wrong count is an ArgumentError. */
+static int user_method(const MV *recv, const char *name, long argc) {
+  MDef *d;
+  if (recv->tag != MRBBC_OBJ) return -1;
+  d = find_chain(obj_of(recv)->cls, name, NULL);
+  return d == NULL ? -1 : check_arity(d, argc);
+}
+
+/* Calls the program's method id on recv, with the argument arg (none when arg is NULL). The result goes to ret, which may
+ * be recv's own slot: the arguments are copied first. */
+static void call_user(MV *ret, int id, const MV *recv, const MV *arg) {
+  MV argv[2], blk;
+  argv[0] = *recv;
+  argv[1] = arg != NULL ? *arg : *recv;
+  blk.tag = MRBBC_NIL;
+  blk.i = 0;
+  mrbbc_user_call(id, ret, argv, &blk);
+}
 
 static void buf_put(Buf *b, const char *s, size_t n) {
   if (b->n + n + 1 > b->cap) {
@@ -546,7 +663,17 @@ static void inspect_value(Buf *b, const MV *v) {
       buf_str(b, sym_of(v));
       break;
     case MRBBC_CLS: buf_str(b, cls_of(v)->name); break;
-    case MRBBC_OBJ: mrbbc_raise("NotImplementedError", "inspect of an instance is not lowered yet");
+    case MRBBC_OBJ: {
+      /* the program's inspect, as the p of an instance calls it; the default one prints an address, which is not lowered */
+      MV r;
+      MV s;
+      int id = user_method(v, "inspect", 0);
+      if (id < 0) mrbbc_raise("NotImplementedError", "inspect of an instance is not lowered yet");
+      call_user(&r, id, v, NULL);
+      s = to_s_string(&r);
+      buf_put(b, str_of(&s)->p, (size_t)str_of(&s)->len);
+      break;
+    }
     case MRBBC_ARY: {
       const MAry *a = ary_of(v);
       long k;
@@ -581,14 +708,23 @@ void mrbbc_print(const MV *v) {
   free(b.p);
 }
 
-/* a == b (mruby's ==, for these values). Arrays compare element by element. */
+/* a == b (mruby's ==, for these values). Arrays compare element by element. An instance is equal to itself (rb_equal checks
+ * identity first), and otherwise its class's == decides when the program defines one (a truthy result is equal). */
 static int value_eq(const MV *a, const MV *b) {
+  if (a->tag == MRBBC_OBJ) {
+    MV r;
+    int id;
+    if (a->tag == b->tag && a->i == b->i) return 1;
+    id = user_method(a, "==", 1);
+    if (id < 0) return 0;
+    call_user(&r, id, a, b);
+    return r.tag != MRBBC_NIL && r.tag != MRBBC_FALSE;
+  }
   if (a->tag != b->tag) return 0;
   switch (a->tag) {
     case MRBBC_INT: return a->i == b->i;
     case MRBBC_STR: return str_of(a)->len == str_of(b)->len && memcmp(str_of(a)->p, str_of(b)->p, (size_t)str_of(a)->len) == 0;
     case MRBBC_SYM: return strcmp(sym_of(a), sym_of(b)) == 0;
-    case MRBBC_OBJ:
     case MRBBC_CLS: return a->i == b->i;  /* identity */
     case MRBBC_ARY: {
       const MAry *x = ary_of(a), *y = ary_of(b);
@@ -807,7 +943,28 @@ static void sym_op(int op, MV *dst, const MV *a, const MV *b) {
   no_method(op_method(op), a);
 }
 
+/* An operator on an instance: the program's method of the operator's name (its result is the operator's, as mruby's
+ * dispatch gives it). Without one, == and != are identity (and != negates a == the program defines), and the rest is a
+ * NoMethodError. */
+static void obj_op(int op, MV *dst, const MV *a, const MV *b) {
+  int id = user_method(a, op_method(op), 1);
+  if (id >= 0) {
+    call_user(dst, id, a, b);
+    return;
+  }
+  if (op == MRBBC_OP_EQ || op == MRBBC_OP_NEQ) {
+    int eq = value_eq(a, b);
+    *dst = bool_value(op == MRBBC_OP_EQ ? eq : !eq);
+    return;
+  }
+  no_method(op_method(op), a);
+}
+
 void mrbbc_binop(int op, MV *dst, const MV *a, const MV *b) {
+  if (a->tag == MRBBC_OBJ) {
+    obj_op(op, dst, a, b);
+    return;
+  }
   if (op == MRBBC_OP_EQ || op == MRBBC_OP_NEQ) {
     int eq = value_eq(a, b);
     *dst = bool_value(op == MRBBC_OP_EQ ? eq : !eq);
@@ -899,13 +1056,7 @@ void mrbbc_strcat(MV *dst, const MV *src) {
   if (dst->tag != MRBBC_STR) mrbbc_raise("TypeError", "expected String");
   s = str_of(dst);
   /* the operand as a string: itself, or its to_s (mrb_obj_as_string) */
-  MV piece;
-  if (src->tag == MRBBC_STR) {
-    piece = *src;
-  } else {
-    MV tmp = *src;
-    mrbbc_send0(&piece, &tmp, MRBBC_M_TO_S);
-  }
+  MV piece = to_s_string(src);
   buf_put(&b, s->p, (size_t)s->len);
   buf_put(&b, str_of(&piece)->p, (size_t)str_of(&piece)->len);
   out = new_str_value(b.p ? b.p : "", (long)b.n);
@@ -924,7 +1075,15 @@ void mrbbc_send0(MV *dst, const MV *recv, int m) {
         case MRBBC_FALSE: r = new_str_value("false", 5); break;
         case MRBBC_SYM: r = new_str_value(sym_of(recv), (long)strlen(sym_of(recv))); break;
         case MRBBC_CLS: r = new_str_value(cls_of(recv)->name, (long)strlen(cls_of(recv)->name)); break;
-        case MRBBC_OBJ: mrbbc_raise("NotImplementedError", "to_s of an instance is not lowered yet");
+        case MRBBC_OBJ: {
+          /* the program's to_s; the default one prints an address, which is not lowered */
+          int id = user_method(recv, "to_s", 0);
+          MV out;
+          if (id < 0) mrbbc_raise("NotImplementedError", "to_s of an instance is not lowered yet");
+          call_user(&out, id, recv, NULL);
+          r = out;
+          break;
+        }
         case MRBBC_INT: {
           char h[32];
           int n = snprintf(h, sizeof h, "%lld", (long long)recv->i);
@@ -951,7 +1110,24 @@ void mrbbc_send0(MV *dst, const MV *recv, int m) {
     case MRBBC_M_NOT:
       r = bool_value(recv->tag == MRBBC_NIL || recv->tag == MRBBC_FALSE);
       break;
+    case MRBBC_M_INSPECT: {
+      Buf b = {NULL, 0, 0};
+      inspect_value(&b, recv);
+      r = new_str_value(b.p ? b.p : "", (long)b.n);
+      free(b.p);
+      break;
+    }
     default: mrbbc_raise("RuntimeError", "unknown method code");
   }
   *dst = r;
+}
+
+/* The string of a value as mrb_obj_as_string gives it (an interpolation, a p of a value): a string itself, else its to_s.
+ * A to_s that gives no string falls back to mruby's default one, which prints an address: not lowered. */
+static MV to_s_string(const MV *v) {
+  MV r;
+  if (v->tag == MRBBC_STR) return *v;
+  mrbbc_send0(&r, v, MRBBC_M_TO_S);
+  if (r.tag != MRBBC_STR) mrbbc_raise("NotImplementedError", "to_s of an instance that gives no string is not lowered yet");
+  return r;
 }
