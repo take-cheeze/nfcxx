@@ -1,0 +1,21 @@
+module ActionController
+  module AllowBrowser
+    extend ActiveSupport::Concern
+
+    module ClassMethods
+      def allow_browser: (versions: :modern | Hash[untyped, false | _ToS], ?block: ^() [self: Base] -> void, **untyped options) -> void
+    end
+  end
+end
+
+module ActionController
+  class Parameters
+    # Returns true if another `Parameters` object contains the same content and
+    # permitted flag.
+    def ==: (untyped other) -> bool
+
+    def eql?: (untyped other) -> bool
+
+    def hash: () -> Integer
+  end
+end
