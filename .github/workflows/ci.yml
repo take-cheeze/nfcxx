@@ -67,10 +67,6 @@ jobs:
       - name: Native upstream harness self-test
         run: python3 tests/upstream/nightly-self-test.py
 
-      # The cext2mrbgem converter: its regression suite (fixtures under tools/cext2mrbgem/fixtures); Ruby only.
-      - name: cext2mrbgem converter suite
-        run: bash tests/cext2mrbgem/run.sh
-
       - name: sccache stats
         if: always()
         run: sccache --show-stats
@@ -570,7 +566,8 @@ jobs:
   build-and-test:
     if: always() && github.event_name != 'schedule'
     needs: [build, test, arm-build, arm-test, macos-suites, pathb-changes, pathb-build, pathb-test,
-      bc2cpp-changes, world, mrbc-rb, mrbc-snapshot, checks, nfcxx-clang-parity, self-aot]
+      bc2cpp-changes, world, mrbc-rb, mrbc-snapshot, checks, nfcxx-clang-parity, self-aot,
+      cext2mrbgem-changes, cext2mrbgem]
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -641,6 +638,45 @@ jobs:
         # floats passes on macOS. gaps_float and gaps_sort need libc++'s type-trait builtins (__is_reference, ...), which
         # EDG does not provide yet: add them back when that lands.
         run: PATHB_QBE_ONLY='cases/floats' tests/pathb-qbe/run.sh --trace off
+
+  # The cext2mrbgem converter suite (tools/cext2mrbgem, its fixtures under tests/cext2mrbgem): it runs when those paths change, or
+  # on a manual run, and not with every build. The schedule does not run it: the weekly run is mrbc-snapshot alone.
+  cext2mrbgem-changes:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      changed: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.paths.outputs.cext2mrbgem == 'true' }}
+    steps:
+      # dorny/paths-filter diffs against the checked-out repository; without this step its git calls fail outside a checkout.
+      - uses: actions/checkout@v7
+
+      - uses: dorny/paths-filter@v4
+        id: paths
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        with:
+          filters: |
+            cext2mrbgem:
+            - "tools/cext2mrbgem/**"
+            - "tests/cext2mrbgem/**"
+            - ".github/workflows/ci.yml"
+
+  cext2mrbgem:
+    needs: cext2mrbgem-changes
+    if: needs.cext2mrbgem-changes.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      # The suite is Ruby and bash; the runner image has both. Its libclang leg prints SKIP without a libclang-edg build.
+      - name: Ruby version
+        run: ruby --version
+
+      - name: cext2mrbgem converter suite
+        run: bash tests/cext2mrbgem/run.sh
 
   # The bc2cpp jobs below run when a path they build from changes, as the bc2cpp workflow's own path filter did, and on a manual
   # run; the weekly run is mrbc-snapshot alone. `changed` is true on the schedule and dispatch events, and on a push or pull
