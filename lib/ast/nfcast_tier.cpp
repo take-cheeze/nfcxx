@@ -2695,16 +2695,12 @@ int jit_enter(State& S, Frame& f, TierLoop* tl, TierLoopState& st) {
     tl->jit_blocked = true;
     return 0;
   }
-  int r = jit::run(f, *tl->jit, st);
-  if (r > 0) {
-    // A deopt: the code stopped at a zero divisor and wrote the loop's locals back. The interpreter runs the statement it stopped in,
-    // which raises the error the interpreter raises there; the loop does not go on.
-    ++S.stats.jit_bailouts;
-    jit::resume(f, *tl->jit, r);
-  }
-  if (r == jit::kRunGo || r == jit::kRunStop) {  // a call's result was not the kind expected: the interpreter finished the iteration
-    return r == jit::kRunGo ? 3 : 1;
-  }
+  // The code runs the loop to its end; each deopt (a zero divisor, a table element outside the array part, ...) runs the unit it stopped in
+  // in the interpreter and goes on in the code (jit::run). A zero divisor raises the error from there. A call whose result was not the
+  // kind the code expected, or whose callee raised an error, leaves the code: the interpreter finishes that iteration (kRunGo: the loop
+  // goes on in the interpreter from ST, which run() sets; kRunStop: it ended there), and the callee's error is raised by run().
+  int r = jit::run(f, *tl->jit, st, S.stats.jit_bailouts);
+  if (r == jit::kRunGo || r == jit::kRunStop) return r == jit::kRunGo ? 3 : 1;
   ++S.stats.jit_entries;
   return 1;
 }

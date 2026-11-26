@@ -43,7 +43,11 @@ struct TierView {
     K_REPEAT,  // cond, blocks = {body}
     K_FOR,     // slots = {loop variable}, kids = {start, limit, step or null}, blocks = {body}, captured
     K_RETURN,  // kids = values, multi_last
-    K_BREAK
+    K_BREAK,
+    // table elements, only the specialized array-part nodes (IndexArr, SetIndexArr): an element read, kids = {table, key}; a store
+    // (a statement), kids = {table, key, value}. The JIT reads and writes the array part directly (docs/notes/ast.md, "JIT").
+    K_INDEX,
+    K_SETINDEX
   };
   Kind kind = K_NONE;
   int line = 0;

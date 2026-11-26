@@ -567,7 +567,7 @@ jobs:
     if: always() && github.event_name != 'schedule'
     needs: [build, test, arm-build, arm-test, macos-suites, pathb-changes, pathb-build, pathb-test,
       bc2cpp-changes, world, mrbc-rb, mrbc-snapshot, checks, nfcxx-clang-parity, self-aot,
-      cext2mrbgem-changes, cext2mrbgem]
+      cext2mrbgem-changes, cext2mrbgem, mrbbc-changes, mrbbc]
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -677,6 +677,115 @@ jobs:
 
       - name: cext2mrbgem converter suite
         run: bash tests/cext2mrbgem/run.sh
+
+  # The mrbbc producer (tools/mrbbc: mruby 4.0 bytecode -> Path B IR, docs/notes/mrbbc-pathb.md) and its runtime
+  # (tests/mrbbc/runtime): it runs when a path the suites build from changes, or on a manual run. The filter is the producer,
+  # its tests, the tools the suites run (mrbc_rb, the mruby tool and its mrbc, scripts/pathb-qbe-emit.rb, QBE) and their setup.
+  # tests/ci/scope_check.rb keeps the filter in step with the run scripts.
+  mrbbc-changes:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      changed: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.mrbbc == 'true' }}
+    steps:
+      # dorny/paths-filter diffs against the checked-out repository; without this step its git calls fail outside a checkout.
+      - uses: actions/checkout@v7
+
+      - uses: dorny/paths-filter@v4
+        id: paths
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        with:
+          filters: |
+            mrbbc:
+            - "tools/mrbbc/**"
+            - "tests/mrbbc/**"
+            - "bc2cpp/tools/mrbc_rb/**"
+            - "Gemfile"
+            - "Gemfile.lock"
+            - "scripts/pathb-qbe-emit.rb"
+            - "scripts/mrb.rb"
+            - "scripts/tool-ensure.rb"
+            - "scripts/setup-mruby.sh"
+            - "scripts/mruby-tool-config.rb"
+            - "scripts/mruby-ninja.rb"
+            - "3rd/mruby-onig-regexp"
+            - "3rd/mruby-json"
+            - "scripts/setup-qbe.sh"
+            - "3rd/qbe"
+            - "scripts/ci-scope.rb"
+            - "tests/ci/scope_check.rb"
+            - ".github/workflows/ci.yml"
+
+  # One leg per value layout (MRBBC_VALUE 8, the default, then 4 and 16), and the default layout once more with GC stress
+  # (MRBBC_GC_THRESHOLD=1: a collection before every allocation). The suites exit 77 when mrbc, the mruby interpreter or QBE is
+  # missing; this job provides all three, so a 77 is a failure of the step like any other non-zero status. Each suite's last
+  # line (the counts of programs it ran) goes to the job summary.
+  mrbbc:
+    needs: mrbbc-changes
+    if: github.event_name != 'schedule' && needs.mrbbc-changes.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: reader, runtime and lowering (value 8)
+            run: |
+              tests/mrbbc/reader/run.sh
+              tests/mrbbc/runtime/run.sh
+              bundle exec tests/mrbbc/lower/run.sh
+          - name: lowering under GC stress (value 8)
+            run: MRBBC_GC_THRESHOLD=1 bundle exec tests/mrbbc/lower/run.sh
+          - name: runtime and lowering (value 4)
+            run: |
+              MRBBC_VALUE=4 tests/mrbbc/runtime/run.sh
+              MRBBC_VALUE=4 bundle exec tests/mrbbc/lower/run.sh
+          - name: runtime and lowering (value 16)
+            run: |
+              MRBBC_VALUE=16 tests/mrbbc/runtime/run.sh
+              MRBBC_VALUE=16 bundle exec tests/mrbbc/lower/run.sh
+    name: mrbbc ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Submodules (QBE and the mruby tool's gems)
+        run: git submodule update --init --depth 1 3rd/qbe 3rd/mruby-onig-regexp 3rd/mruby-json
+
+      # mrbc_rb (tests/mrbbc/lower/run.sh's compiler) needs the root Gemfile's Prism 1.9.0, so the suite runs under bundle exec.
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+
+      # The whole build/mruby-tool, as the pathb-build job caches it (same key): the reader needs its mrbc as well as bin/mruby.
+      - name: Restore the mruby tool
+        id: mruby
+        uses: actions/cache@v6
+        with:
+          path: build/mruby-tool
+          key: mruby-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb.rb') }}
+
+      - name: Build the mruby tool
+        if: steps.mruby.outputs.cache-hit != 'true'
+        run: |
+          command -v ninja || { sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build; }
+          scripts/setup-mruby.sh
+
+      - name: Build QBE
+        run: scripts/setup-qbe.sh
+
+      - name: mrbbc ${{ matrix.name }}
+        run: |
+          set -o pipefail
+          {
+          ${{ matrix.run }}
+          } 2>&1 | tee "$RUNNER_TEMP/mrbbc.log"
+
+      - name: Summary
+        if: always()
+        run: grep -E '^(mrbbc-[a-z]+|gc_test)' "$RUNNER_TEMP/mrbbc.log" | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY"
 
   # The bc2cpp jobs below run when a path they build from changes, as the bc2cpp workflow's own path filter did, and on a manual
   # run; the weekly run is mrbc-snapshot alone. `changed` is true on the schedule and dispatch events, and on a push or pull
@@ -839,6 +948,12 @@ jobs:
 
       - name: Self compilation artifacts and registration
         run: bundle exec ruby tests/bc2cpp/self_compile.rb
+
+      - name: mrbbc backend lowering and runtime
+        run: |
+          scripts/setup-mrbbc.sh
+          scripts/setup-qbe.sh
+          bundle exec ruby tests/bc2cpp/mrbbc_backend.rb
 
       - name: Golden, CLI and integration tests against the fork's mrbc
         run: tests/bc2cpp/run_mrbc_rb.sh

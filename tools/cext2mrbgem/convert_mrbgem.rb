@@ -1670,6 +1670,18 @@ def dtype_parse(rel, m)
     'mark_pos' => nested[0][0], 'free_pos' => nested[1][0] }
 end
 
+  # A macro call that is a compaction member of a data type's .function, such as ffi's ffi_compact_callback(f): every #define
+  # of the macro in the input is empty or a .dcompact designator (mruby never compacts). Such a call is dropped.
+  def compaction_macro_call?(t)
+    nm = t[/\A([A-Za-z_]\w*)\s*\(/, 1]
+    return false unless nm
+    bodies = []
+    @files.each_value do |f|
+      f['text'].scan(/^[ \t]*#[ \t]*define[ \t]+#{Regexp.escape(nm)}\([^)\n]*\)[ \t]*(.*)$/) { bodies << $1.strip }
+    end
+    !bodies.empty? && bodies.all? { |body| body.empty? || body.start_with?('.dcompact') }
+  end
+
   # A designated initializer: .wrap_struct_name, .function = {.dmark, .dfree, .dsize}, .parent, .data, .flags (fields in
   # any order; a field may be left out). The same result as the positional form.
   def dtype_designated(rel, m, open, close, els)
@@ -1696,6 +1708,8 @@ end
     sf = {}
     sub.each do |a, b, t|
       mm = t.match(/\A\.\s*([A-Za-z_]\w*)\s*=\s*(.*)\z/m)
+      # a compaction member written as a macro call (ffi's ffi_compact_callback(f)) is dropped, as the positional form drops dcompact
+      next if mm.nil? && compaction_macro_call?(t)
       return { 'error' => '.function holds a non-designated element' } unless mm
       # the position of the value's first character (after the '=' and its spaces): the identifier's own position
       eq = t.index('=')
@@ -5314,6 +5328,13 @@ use_problem = lambda do |name, use|
     finditer(INC_RE, text).each do |m|
       next if masked[m.begin(0)] != '#'
       inc = m[1]
+      # a directive that is rewritten here replaces its whole text. An edit already inside that text is dropped, since the
+      # rewrite covers it: check_refs marks an identifier of the header name (ruby/encoding.h has the name encoding) as a
+      # direct use of a registered method called encoding, and that marker would otherwise overlap this rewrite (apply
+      # raises on any overlap, so only inputs that already failed are changed)
+      if @includes.key?(inc) || DROP_INCLUDES.key?(inc) || inc == 'ruby/encoding.h'
+        ed.drop(ed.overlapping(m.begin(0), m.end(0)))
+      end
       if @includes.key?(inc)
         map_include(rel, m, @includes[inc], masked, ed)
       elsif DROP_INCLUDES.key?(inc)
@@ -5475,8 +5496,17 @@ end
     # inside it are not converted again (the identifier pass skips overlapping ranges). The mark and free functions must
     # be threaded (they take (mrb, data)); the flags are dropped (RUBY_TYPED_* are 0 in mruby, with a caveat).
     dtype_decls.select { |drel, _dm, _di| drel == rel }.each do |drel, m, info|
+      # a refused initializer keeps CRuby's members, which mruby's struct does not have, so each one fails the compile check
+      # again. It is replaced by a stub that keeps the name and has NULL callbacks; the refusal given is the reason.
+      stub = lambda do |why|
+        refuse(rel, m.begin(0), 'rb_data_type_t', why)
+        open = m.end(0) - 1
+        close = match_close(@files[rel]['masked'], open)
+        lit = @files[rel]['text'][open..close][/"(?:[^"\\\n]|\\.)*"/]
+        ed.add(open, close + 1, "{ #{lit || 'NULL'}, NULL, NULL }")
+      end
       if info['error']
-        refuse(rel, m.begin(0), 'rb_data_type_t', info['error'])
+        stub.call(info['error'])
         next
       end
       # mrb_free is mruby's library free, already (mrb, data): it needs no threading
@@ -5484,9 +5514,9 @@ end
       unless cbs.all? { |n| @threaded_cands.include?(n) }
         unthreaded = cbs.reject { |n| @threaded_cands.include?(n) }
         if unthreaded.all? { |n| openssl_guarded_definition?(n) }
-          refuse(rel, m.begin(0), 'rb_data_type_t', "stuck point (OpenSSL): the mark or free function #{unthreaded.join(', ')} is compiled only with OpenSSL, which mruby has no binding for (accepted stuck point)")
+          stub.call("stuck point (OpenSSL): the mark or free function #{unthreaded.join(', ')} is compiled only with OpenSSL, which mruby has no binding for (accepted stuck point)")
         else
-          refuse(rel, m.begin(0), 'rb_data_type_t', "the mark or free function #{unthreaded.join(', ')} is not threaded (it does not take the mruby state; see that function's own refusal)")
+          stub.call("the mark or free function #{unthreaded.join(', ')} is not threaded (it does not take the mruby state; see that function's own refusal)")
         end
         next
       end

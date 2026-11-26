@@ -36,7 +36,7 @@ if [ ! -x "$QBE" ]; then
 fi
 
 c++ -std=c++17 -O1 -Wall -Wextra -Werror -I"$src" -o "$work/lower" "$src/yarv_ibf.cpp" "$src/yarv_lower.cpp" \
-  "$src/yarvbc_lower_main.cpp" || exit 1
+  "$root/tools/common/stack_slots.cpp" "$src/yarvbc_lower_main.cpp" || exit 1
 cc -std=c99 -Wall -Wextra -Werror -c -o "$work/mrbrt.o" "$rt/mrbrt.c" || exit 1
 cc -std=c99 -Wall -Wextra -Werror -c -o "$work/driver.o" "$rt/driver.c" || exit 1
 

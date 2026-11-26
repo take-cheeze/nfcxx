@@ -24,3 +24,6 @@
 [submodule "3rd/mruby-marshal"]
 	path = 3rd/mruby-marshal
 	url = https://github.com/take-cheeze/mruby-marshal
+[submodule "3rd/quickjs"]
+	path = 3rd/quickjs
+	url = https://github.com/bellard/quickjs

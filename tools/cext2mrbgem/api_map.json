@@ -291,6 +291,13 @@
       "template": "((int)RSTRING_LEN($0))",
       "caveat": "CRuby's int-typed byte length of a String; the length is truncated to int as CRuby's RSTRING_LENINT does"
     },
+    "RB_NUM2INT": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "((int)mrb_int($m, $0))",
+      "caveat": "RB_NUM2INT is the ruby/internal name of NUM2INT; the same conversion (see NUM2INT)"
+    },
     "NUM2INT": {
       "kind": "template",
       "arity": 1,
@@ -484,6 +491,13 @@
       "mruby": "mrb_str_new_cstr",
       "inject_mrb": true,
       "needs_mrb": true
+    },
+    "rb_obj_dup": {
+      "kind": "call",
+      "mruby": "mrb_obj_dup",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "copies the object (its class and ivars, then initialize_copy), as CRuby's rb_obj_dup; a singleton class is not copied in either"
     },
     "rb_str_new_frozen": {
       "kind": "call",
@@ -1265,6 +1279,19 @@
       "inject_mrb": true,
       "needs_mrb": true,
       "caveat": "no encoding compatibility check (mruby has no encodings); CRuby raises Encoding::CompatibilityError for incompatible encodings"
+    },
+    "rb_str_modify": {
+      "kind": "call",
+      "mruby": "mrb_str_modify",
+      "inject_mrb": false,
+      "wrap_mrb": true,
+      "needs_mrb": true,
+      "wrap_arg": {
+                "index": 0,
+                "prefix": "mrb_str_ptr(",
+                "suffix": ")"
+          },
+      "caveat": "the String VALUE is converted with mrb_str_ptr; a frozen String raises FrozenError and the buffer is made private (mrb_check_frozen, then the shared-buffer copy), as CRuby's rb_str_modify"
     },
     "rb_str_resize": {
       "kind": "call",
@@ -2285,6 +2312,26 @@
       "append_arity": 2,
       "caveat": "returns nil when the key is missing (mrb_hash_fetch with a nil default), as CRuby does; the hash must be a Hash VALUE"
     },
+    "rb_sym_to_s": {
+      "kind": "call",
+      "mruby": "mrb_sym_str",
+      "inject_mrb": false,
+      "wrap_mrb": true,
+      "needs_mrb": true,
+      "wrap_arg": {
+                "index": 0,
+                "prefix": "mrb_symbol(",
+                "suffix": ")"
+          },
+      "caveat": "the Symbol VALUE is converted with mrb_symbol; returns a String of the name, as CRuby's rb_sym_to_s; mruby does not promise a frozen result"
+    },
+    "rb_vsprintf": {
+      "kind": "call",
+      "mruby": "mrb_vformat",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "mruby's mrb_vformat: the formats used with rb_vsprintf take the same arguments as in CRuby (%s, %d and the other specifiers the fork's mrb_vformat supports); PRIsVALUE is not supported in this position"
+    },
     "rb_sym2str": {
       "kind": "call",
       "mruby": "mrb_sym_str",
@@ -2529,6 +2576,19 @@
       "mruby": "mrb_class_get(mrb, \"Integer\")",
       "needs_mrb": true,
       "caveat": "mruby has one Integer class; CRuby Fixnum and Bignum are both Integer here"
+    },
+    "rb_mod_ancestors": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_funcall($m, $0, \"ancestors\", 0)",
+      "caveat": "calls the receiver's ancestors method (Module#ancestors), which is what CRuby's rb_mod_ancestors returns; the receiver must be a Module"
+    },
+    "rb_cIO": {
+      "kind": "expr",
+      "mruby": "mrb_class_get(mrb, \"IO\")",
+      "needs_mrb": true,
+      "caveat": "IO is defined by the mruby-io gem"
     },
     "rb_cFile": {
       "kind": "expr",
@@ -2853,6 +2913,13 @@
       "needs_mrb": true,
       "format_arg": 0,
       "caveat": "returns a String built by mruby's formatter (see rb_bug for the format); PRIsVALUE in the format becomes %S (%!S for the + flag)"
+    },
+    "rb_ary_new4": {
+      "kind": "call",
+      "mruby": "mrb_ary_new_from_values",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "rb_ary_new4 is CRuby's alias of rb_ary_new_from_values (ruby/internal/intern/array.h); copies the n values into a new Array"
     },
     "rb_ary_new_from_values": {
       "kind": "call",

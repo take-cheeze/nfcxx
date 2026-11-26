@@ -49,6 +49,13 @@ check grep -qF 'static mrb_value dump_it(mrb_state *mrb, mrb_value obj, mrb_valu
 check grep -qF 'if (mrb_nil_p(klass))' "$work/shadow_param/src/shadow_param.c"
 check grep -qF 'static struct RClass *klass;' "$work/shadow_param/src/shadow_param.c"
 
+# 2c'. a registered method named like the header it includes (ruby/encoding.h): its identifier in the include path is not a
+# use, so no refusal marker overlaps the include rewrite (used to raise "overlapping edits")
+rc=0; "$rb" "$conv" --scanner "$scanner" --name include_name_overlap tools/cext2mrbgem/fixtures/include_name_overlap/ext/include_name_overlap "$work/include_name_overlap" > "$work/include_name_overlap.log" 2>&1 || rc=$?
+check ok_rc "$rc"
+check sh -c "! grep -q 'overlapping edits\\|Traceback' '$work/include_name_overlap.log'"
+check grep -qx '#include <mruby/encoding.h>' "$work/include_name_overlap/src/include_name_overlap.c"
+
 # 2d. definitions whose return type or name is on another line are found (no false "no definition" refusal)
 rc=0; "$rb" "$conv" --scanner "$scanner" --name split_return tools/cext2mrbgem/fixtures/split_return/ext/split_return "$work/split_return" > "$work/split_return.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
@@ -849,6 +856,18 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dtype_refused tools/cext2mrb
 check test "$rc" -eq 2
 check test -e "$work/api_dtype_refused/NOT_BUILDABLE"
 check grep -q "  TypedData_Get_Type  no entry in api_map.json" "$work/api_dtype_refused/REFUSALS.txt"
+
+# 2zp2. a rb_data_type_t .function holding a compaction macro call (ffi's ffi_compact_callback(f)) drops the call and converts;
+# a data type with a parent is refused, and its initializer is stubbed with the name kept (no CRuby members left to fail the check)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dtype_compact tools/cext2mrbgem/fixtures/api_dtype_compact/ext/api_dtype_compact "$work/api_dtype_compact" > "$work/api_dtype_compact.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_dtype_compact/NOT_BUILDABLE"
+check grep -qF 'static const mrb_data_type cm_type = { "CmBox", cm_free, cm_mark };' "$work/api_dtype_compact/src/api_dtype_compact.c"
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dtype_parent tools/cext2mrbgem/fixtures/api_dtype_parent/ext/api_dtype_parent "$work/api_dtype_parent" > "$work/api_dtype_parent.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test -e "$work/api_dtype_parent/NOT_BUILDABLE"
+check grep -qF 'struct mrb_data_type pa_child = { "PaChild", NULL, NULL };' "$work/api_dtype_parent/src/api_dtype_parent.c"
+check grep -q "  rb_data_type_t  the parent or the data slot is not 0/NULL" "$work/api_dtype_parent/REFUSALS.txt"
 
 # 2zq. TypedData_Make_Struct and TypedData_Wrap_Struct map to mrb_data_object_alloc; the struct is allocated with mrb_calloc
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_typed_alloc tools/cext2mrbgem/fixtures/api_typed_alloc/ext/api_typed_alloc "$work/api_typed_alloc" > "$work/api_typed_alloc.log" 2>&1 || rc=$?
