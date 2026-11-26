@@ -307,12 +307,14 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
 // The methods of the builtin types that the runtime does not have yet (str, list, dict, set, ...): a method call of one of
 // these names is refused. A class's method of such a name is refused too, which is the cost of not knowing the receiver's
 // type. The dict methods that are lowered (get, keys, values, items, pop, update) are not here.
+// The names copy, clear, setdefault, popitem and fromkeys are dict methods too: they are not refused here, and the runtime
+// refuses them on a value that is not a dict (mpy_load_method, refused_method_name).
 const std::set<std::string> kBuiltinMethods = {
-    "capitalize", "center", "clear", "copy", "count", "encode", "endswith", "extend", "find", "format", "index",
+    "capitalize", "center", "count", "encode", "endswith", "extend", "find", "format", "index",
     "insert", "isalpha", "isdigit", "isspace", "join", "ljust", "lower", "lstrip", "partition", "remove",
-    "replace", "reverse", "rfind", "rindex", "rjust", "rstrip", "rsplit", "setdefault", "sort", "split", "splitlines",
-    "startswith", "strip", "title", "upper", "zfill", "add", "discard", "popitem", "difference", "union", "intersection",
-    "fromkeys", "isdisjoint", "issubset", "issuperset", "symmetric_difference", "difference_update",
+    "replace", "reverse", "rfind", "rindex", "rjust", "rstrip", "rsplit", "sort", "split", "splitlines",
+    "startswith", "strip", "title", "upper", "zfill", "add", "discard", "difference", "union", "intersection",
+    "isdisjoint", "issubset", "issuperset", "symmetric_difference", "difference_update",
     "intersection_update", "symmetric_difference_update"};
 
 // A for loop's iterator takes MP_OBJ_ITER_BUF_NSLOTS stack slots (obj.h: 4 on 32- and 64-bit hosts); its object is in the

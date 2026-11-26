@@ -189,7 +189,8 @@ typedef struct {
 /* BI_EXC + k is the builtin class of exception k (mpy_exc_info[k]). */
 enum {
   BI_LEN, BI_STR, BI_RANGE, BI_APPEND, BI_POP, BI_BUILD_CLASS,
-  BI_DICT_GET, BI_DICT_KEYS, BI_DICT_VALUES, BI_DICT_ITEMS, BI_DICT_POP, BI_DICT_UPDATE, BI_SUPER, BI_INIT,
+  BI_DICT_GET, BI_DICT_KEYS, BI_DICT_VALUES, BI_DICT_ITEMS, BI_DICT_POP, BI_DICT_UPDATE,
+  BI_DICT_COPY, BI_DICT_CLEAR, BI_DICT_SETDEFAULT, BI_DICT_POPITEM, BI_DICT_FROMKEYS, BI_SUPER, BI_INIT,
   BI_EXC, BI_COUNT = BI_EXC + EXC_COUNT
 };
 typedef struct {
@@ -201,6 +202,8 @@ static const MpyBuiltin mpy_builtins[BI_COUNT] = {
   {&mpy_type_bfn, BI_APPEND}, {&mpy_type_bfn, BI_POP}, {&mpy_type_bfn, BI_BUILD_CLASS},
   {&mpy_type_bfn, BI_DICT_GET}, {&mpy_type_bfn, BI_DICT_KEYS}, {&mpy_type_bfn, BI_DICT_VALUES},
   {&mpy_type_bfn, BI_DICT_ITEMS}, {&mpy_type_bfn, BI_DICT_POP}, {&mpy_type_bfn, BI_DICT_UPDATE},
+  {&mpy_type_bfn, BI_DICT_COPY}, {&mpy_type_bfn, BI_DICT_CLEAR}, {&mpy_type_bfn, BI_DICT_SETDEFAULT},
+  {&mpy_type_bfn, BI_DICT_POPITEM}, {&mpy_type_bfn, BI_DICT_FROMKEYS},
   {&mpy_type_type, BI_SUPER}, {&mpy_type_bfn, BI_INIT},
   {&mpy_type_type, BI_EXC + 0}, {&mpy_type_type, BI_EXC + 1}, {&mpy_type_type, BI_EXC + 2},
   {&mpy_type_type, BI_EXC + 3}, {&mpy_type_type, BI_EXC + 4}, {&mpy_type_type, BI_EXC + 5},
@@ -273,7 +276,7 @@ static int builtin_index(const char *name, size_t len) {
   return -1;
 }
 
-/* The builtin id of a dict method (get, keys, values, items, pop, update), or -1. */
+/* The builtin id of a dict method (get, keys, values, items, pop, update, copy, clear, setdefault, popitem, fromkeys), or -1. */
 static int dict_method_index(const char *name, size_t len) {
   static const struct {
     const char *name;
@@ -281,12 +284,25 @@ static int dict_method_index(const char *name, size_t len) {
   } methods[] = {
     {"get", BI_DICT_GET}, {"keys", BI_DICT_KEYS}, {"values", BI_DICT_VALUES},
     {"items", BI_DICT_ITEMS}, {"pop", BI_DICT_POP}, {"update", BI_DICT_UPDATE},
+    {"copy", BI_DICT_COPY}, {"clear", BI_DICT_CLEAR}, {"setdefault", BI_DICT_SETDEFAULT},
+    {"popitem", BI_DICT_POPITEM}, {"fromkeys", BI_DICT_FROMKEYS},
   };
   size_t k;
   for (k = 0; k < sizeof methods / sizeof methods[0]; ++k) {
     if (strlen(methods[k].name) == len && memcmp(name, methods[k].name, len) == 0) return methods[k].id;
   }
   return -1;
+}
+
+/* The method names of the builtin types that the runtime does not have for every receiver: a method call of one of these on a
+ * value that is not a dict fails as not lowered (the lowering does not know the receiver's type, so it cannot refuse it). */
+static int refused_method_name(const char *name, size_t len) {
+  static const char *const names[] = {"copy", "clear", "setdefault", "popitem", "fromkeys"};
+  size_t k;
+  for (k = 0; k < sizeof names / sizeof names[0]; ++k) {
+    if (strlen(names[k]) == len && memcmp(name, names[k], len) == 0) return 1;
+  }
+  return 0;
 }
 
 /* The item count and items of a list or tuple; 0 when v is neither. */
@@ -1385,7 +1401,8 @@ mpv mpy_load_method(mpv obj, const char *name, size_t len) {
     if (len == 3 && memcmp(name, "pop", 3) == 0) return builtin_obj(BI_POP);
     method_self = 0;
   } else if (is_dict(obj) && dict_method_index(name, len) >= 0) {
-    method_self = obj;
+    /* fromkeys is a classmethod: it is called with no self */
+    if (dict_method_index(name, len) != BI_DICT_FROMKEYS) method_self = obj;
     return builtin_obj(dict_method_index(name, len));
   } else if (is_set(obj)) {
     fail("a method of a set is not lowered yet");
@@ -1403,6 +1420,11 @@ mpv mpy_load_method(mpv obj, const char *name, size_t len) {
     }
   } else if (is_class(obj)) {
     if (class_find(&class_of(obj)->info, key, &v)) return v;
+  }
+  if (!is_inst(obj) && !is_class(obj) && refused_method_name(name, len)) {
+    char msg[200];
+    snprintf(msg, sizeof msg, "a method %.*s of a '%s' is not lowered yet", (int)len, name, type_name(obj));
+    fail(msg);
   }
   attr_error(obj, name, len);
   return MPY_NONE;
@@ -2061,6 +2083,84 @@ static mpv builtin_call(int id, const mpv *args, uint64_t n) {
       }
       if (n == 2) dict_update(args[0], args[1]);
       return MPY_NONE;
+    }
+    case BI_DICT_COPY:
+    case BI_DICT_CLEAR:
+    case BI_DICT_POPITEM: {
+      /* d.copy(), d.clear() and d.popitem(): args[0] is the dict, and the count includes it (objdict.c). */
+      MpyDict *s;
+      if (n != 1) {
+        snprintf(msg, sizeof msg, "TypeError: function takes 1 positional arguments but %d were given", (int)n);
+        fail(msg);
+      }
+      s = (MpyDict *)(uintptr_t)args[0];
+      if (id == BI_DICT_COPY) {
+        /* the same table, slot for slot, deleted slots included (mp_obj_dict_copy copies the table) */
+        MpyDict *c = (MpyDict *)(uintptr_t)mpy_build_map(s->alloc);
+        if (s->alloc) memcpy(c->table, s->table, s->alloc * sizeof(MpyEntry));
+        c->used = s->used;
+        c->all_keys_are_qstrs = s->all_keys_are_qstrs;
+        return (mpv)(uintptr_t)c;
+      }
+      if (id == BI_DICT_CLEAR) {
+        /* mp_map_clear: no table, and the keys are all strs again */
+        free(s->table);
+        s->table = NULL;
+        s->alloc = 0;
+        s->used = 0;
+        s->all_keys_are_qstrs = 1;
+        return MPY_NONE;
+      }
+      /* popitem: the first live slot in table order, which is removed (its key becomes the sentinel) */
+      if (s->used == 0) fail("KeyError: popitem(): dictionary is empty");
+      {
+        size_t e;
+        mpv k, v;
+        for (e = 0; e < s->alloc; ++e) {
+          if (s->table[e].key != 0 && s->table[e].key != MPY_SENTINEL) break;
+        }
+        k = s->table[e].key;
+        v = s->table[e].value;
+        s->used -= 1;
+        s->table[e].key = MPY_SENTINEL;
+        s->table[e].value = 0;
+        return view_item_tuple(k, v);
+      }
+    }
+    case BI_DICT_SETDEFAULT: {
+      /* d.setdefault(key[, default]): the value of key, which is added with default (None) when it is not there */
+      MpyDict *s;
+      long at;
+      if (n < 2) fail("TypeError: function missing 1 required positional arguments");
+      if (n > 3) {
+        snprintf(msg, sizeof msg, "TypeError: function expected at most 3 arguments, got %d", (int)n);
+        fail(msg);
+      }
+      s = (MpyDict *)(uintptr_t)args[0];
+      at = map_lookup(s, args[1], MAP_ADD);   /* the key is hashed here, as MicroPython's ADD lookup does */
+      if (s->table[at].value == 0) s->table[at].value = n == 3 ? args[2] : MPY_NONE;
+      return s->table[at].value;
+    }
+    case BI_DICT_FROMKEYS: {
+      /* dict.fromkeys(iterable[, value]): no self, so the arguments are the iterable and the value. The table is sized by the
+       * iterable's length when it has one (mp_obj_len_maybe), else it starts empty. The count in a message includes the class. */
+      mpv it, item, r, value = MPY_NONE;
+      size_t len = 0, items;
+      const mpv *elems;
+      if (n < 1) fail("TypeError: function missing 1 required positional arguments");
+      if (n > 2) {
+        snprintf(msg, sizeof msg, "TypeError: function expected at most 3 arguments, got %d", (int)n + 1);
+        fail(msg);
+      }
+      if (n == 2) value = args[1];
+      it = mpy_get_iter(args[0]);
+      if (is_dict(args[0]) || is_set(args[0])) len = dict_of(args[0])->used;
+      else if (is_view(args[0])) len = dict_of(view_of(args[0])->dict)->used;
+      else if (is_range(args[0])) len = range_of(args[0])->len;
+      else if (seq_items(args[0], &items, &elems)) len = items;
+      r = mpy_build_map(len);
+      while ((item = mpy_iter_next(it)) != 0) dict_store(r, item, value);
+      return r;
     }
     case BI_SUPER: {
       /* super(cls, self), as the lowering calls it for a super() whose class and self it has loaded */
