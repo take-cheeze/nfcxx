@@ -239,14 +239,19 @@ struct Stats {
   std::uint64_t inlined_calls = 0;   // calls run as inlined bodies
   std::uint64_t inline_declined = 0; // call sites that were looked at and left as calls (callee too big, recursive, ...)
   std::uint64_t inline_substituted = 0;  // arguments of inlined sites that the clone reads where they are instead of from a slot
-  // Type feedback (docs/notes/ast.md, "Feedback"): arithmetic and comparison nodes record the types of their operands before they
-  // specialize.
+  // Type feedback (docs/notes/ast.md, "Feedback"): arithmetic, comparison, index and field nodes record the types of their operands
+  // (keys, receivers) before they specialize.
   std::uint64_t feedback_records = 0;        // observations recorded by nodes that had not specialized yet
-  std::uint64_t speculations_installed = 0;  // specialized nodes installed from the types of recorded operands (also after a re-profile)
+  std::uint64_t speculations_installed = 0;  // specialized nodes installed from the types of recorded operands (also after a re-profile;
+                                             // index and field nodes too: an integer or string key, a table or host receiver)
   std::uint64_t feedback_generic = 0;        // nodes that gave up speculating (operands of two kinds, or not numbers) and stayed generic;
                                              // also a node past State::reprofile_max re-profiles, after a deopt
-  std::uint64_t reprofiles = 0;              // deopts on numbers that sent a specialized node back to recording its operands (at most
-                                             // State::reprofile_max per node; docs/notes/ast.md, "Feedback")
+  std::uint64_t reprofiles = 0;              // deopts on numbers (or on the other key kind of an index, the other receiver kind of a
+                                             // field) that sent a specialized node back to recording (at most State::reprofile_max per
+                                             // node; docs/notes/ast.md, "Feedback")
+  std::uint64_t generic_reads = 0;           // reads of t[k] and t.name made by the generic nodes (IndexGen, FieldGen): the table lookups
+                                             // the feedback did not specialize. Index and field profile nodes read as the specialized
+                                             // nodes do and count nothing here (docs/notes/ast.md, "Feedback")
   // The tier (docs/notes/ast.md, "Tiering"); all zero while it is off.
   std::uint64_t tier_compiled = 0;    // versions of functions that became callable native code (compiled here or loaded from the cache)
   std::uint64_t tier_compiles = 0;    // runs of the nfcxx driver
@@ -345,11 +350,12 @@ struct State {
   unsigned inline_warm = 2;
 
   // ---- type feedback ----
-  // An arithmetic or comparison node records the types of its operands and installs its specialized node once FEEDBACK_WARM
-  // observations agree (docs/notes/ast.md, "Feedback"); operands of two kinds make it stay generic. 1 (or 0) specializes at the
-  // first operands, as the engine did before feedback. Set in code before running scripts (no environment variable).
+  // An arithmetic, comparison, index or field node records the types of its operands (keys, receivers) and installs its specialized
+  // node once FEEDBACK_WARM observations agree (docs/notes/ast.md, "Feedback"); operands of two kinds make it stay generic. 1 (or 0)
+  // specializes at the first operands, as the engine did before feedback. Set in code before running scripts (no environment variable).
   unsigned feedback_warm = 2;
-  // A specialized arithmetic or comparison node whose guard fails on numbers goes back to recording its operands (a re-profile),
+  // A specialized arithmetic or comparison node whose guard fails on numbers (an index or field node on the other key or receiver
+  // kind) goes back to recording its operands (a re-profile),
   // and specializes to their new type after FEEDBACK_WARM agreeing observations. A node re-profiles at most this many times in its
   // life; after that a further deopt leaves it generic for good (counted by feedback_generic). Set in code, not by environment.
   unsigned reprofile_max = 2;

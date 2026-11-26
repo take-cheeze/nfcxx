@@ -212,6 +212,36 @@ int main() {
     one.feedback_warm = 1;
     CHECK(run_int(one, "local s = 0 for i = 1, 100 do s = s + i end return s") == 5050);
     CHECK(one.stats.feedback_records == 0 && one.stats.speculations_installed == 1 && one.stats.deopts == 0);
+    // Indexing and field reads (docs/notes/ast.md, "Feedback"): the key kind (an integer or a string) and the receiver kind are recorded
+    // like the operands of an arithmetic node. An integer-keyed loop over a table records two keys, installs the array-part node
+    // and makes no generic read; the table is built before, so the loop is only reads.
+    run(S, "fb_t = {} for i = 1, 100 do fb_t[i] = i * 2 end");
+    auto i0 = S.stats;
+    CHECK(run_int(S, "local last = 0 for i = 1, 100 do last = fb_t[i] end return last") == 200);
+    CHECK(S.stats.feedback_records == i0.feedback_records + 2);
+    CHECK(S.stats.speculations_installed == i0.speculations_installed + 1);
+    CHECK(S.stats.generic_reads == i0.generic_reads && S.stats.generic_ops == i0.generic_ops && S.stats.deopts == i0.deopts);
+    // A field read in a loop: two receivers recorded, the table node installed, no generic read after that.
+    run(S, "fb_obj = {x = 3, y = 4}");
+    auto p0 = S.stats;
+    CHECK(run_int(S, "local v = 0 for i = 1, 100 do v = fb_obj.x end return v") == 3);
+    CHECK(S.stats.feedback_records == p0.feedback_records + 2);
+    CHECK(S.stats.speculations_installed == p0.speculations_installed + 1);
+    CHECK(S.stats.generic_reads == p0.generic_reads && S.stats.generic_ops == p0.generic_ops && S.stats.deopts == p0.deopts);
+    // The key kind changes once, at iteration 61: an integer node deopts exactly once, re-profiles once (the string key is recorded
+    // twice), installs the string node and goes on with no generic read. The sum is 60 * 5 + 40 * 7.
+    auto k0 = S.stats;
+    CHECK(run_int(S, "local t = {5, x = 7} local s = 0 for i = 1, 100 do local k = 1 if i > 60 then k = 'x' end s = s + t[k] end return s") == 580);
+    CHECK(S.stats.deopts == k0.deopts + 1);
+    CHECK(S.stats.reprofiles == k0.reprofiles + 1);
+    CHECK(S.stats.generic_reads == k0.generic_reads && S.stats.feedback_generic == k0.feedback_generic);
+    // The key kind changes every 20 iterations: three deopts, two re-profiles, then the node gives up (generic for the last 140 reads).
+    auto k1 = S.stats;
+    CHECK(run_int(S, "local t = {5, x = 7} local s = 0 for i = 1, 200 do local k = 1 if ((i - 1) // 20) % 2 == 1 then k = 'x' end s = s + t[k] end return s") == 1200);
+    CHECK(S.stats.deopts == k1.deopts + 3);
+    CHECK(S.stats.reprofiles == k1.reprofiles + 2);
+    CHECK(S.stats.feedback_generic == k1.feedback_generic + 1);
+    CHECK(S.stats.generic_reads == k1.generic_reads + 140);
   }
 
   std::printf("-- the collector\n");
