@@ -55,14 +55,30 @@ expect tests/sem/call_arity.ir "stuck: call of one with 2 arguments, but it has 
 expect tests/sem/call_unbounded.ir "stuck: out of fuel: the calls are nested too deeply"
 # block pointers into slots: offset, load and store through them (4 + 42 + 3 = 49 for the array), the byte order
 # (the byte at offset 1 of 0x01020304 is 3), and the traps: null, and reaching past the end of the block
-# (an offset to one past the end is allowed, a load there is not); a global and a pointer stored as a value are stuck
+# (an offset to one past the end is allowed, a load there is not); a pointer stored as a value is stuck, and so is a
+# global the module does not declare (ptr_global.ir declares none)
 expect tests/sem/ptr_offset.ir "value 49"
 expect tests/sem/ptr_bytes.ir "value 3"
 expect tests/sem/ptr_null.ir "trap: null dereference"
 expect tests/sem/ptr_oob.ir "trap: pointer out of bounds"
 expect tests/sem/ptr_load_oob.ir "trap: pointer out of bounds"
-expect tests/sem/ptr_global.ir "stuck: the address of the global @\"g\" is not modelled (only slots are blocks)"
+expect tests/sem/ptr_global.ir "stuck: global @\"g\" has no (global ...) form in the module: (data ...) forms are not modelled"
 expect tests/sem/ptr_store_value.ir "stuck: store of a pointer value is not modelled"
+# globals as blocks: a global with an initializer reads back its initial value (42); a store to it then a load (40 + 2);
+# a pointer to it stored in a slot and loaded back reads it (42); a store in a callee is seen by its caller (7); an extern
+# global (no definition in the module) is stuck on its address; a global whose initializer writes no integer bytes
+# is read before it is written; a pointer to a slot may not be stored in a global
+expect tests/sem/global_value.ir "value 42"
+expect tests/sem/global_store.ir "value 42"
+expect tests/sem/global_ptr_slot.ir "value 42"
+expect tests/sem/global_call.ir "value 7"
+expect tests/sem/global_extern.ir "stuck: global @\"e\" is extern: its contents are not in the module, so it is not modelled"
+expect tests/sem/global_uninit.ir "stuck: global @\"b\" is read before it is written"
+expect tests/sem/global_slot_ptr.ir "stuck: a pointer to a slot stored in a global is not modelled (a slot is local to its frame)"
+# an offset into a global, and a memmove copy inside it: the array (5, 6) becomes (6, 6), so 6 + 6 = 12; a copy of an
+# unwritten slot over an initialised global makes the global's bytes unwritten again (not back to their initial value)
+expect tests/sem/global_copy.ir "value 12"
+expect tests/sem/global_copy_unwritten.ir "stuck: global @\"u\" is read before it is written"
 # pointers stored in memory (8 bytes, the module's pointer size): a pointer to x stored in p and loaded back through
 # p reads x (42); a null pointer round-trips (its load through p is the null trap); an integer store over a stored
 # pointer's byte invalidates it, so loading the pointer is stuck; a load of 8 integer bytes over a stored pointer is stuck

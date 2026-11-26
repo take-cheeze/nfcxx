@@ -1,0 +1,11 @@
+(ir-module "global_copy.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "a" (array 2 int) 8 4 (static) (init (scalar 0 int (const int 5)) (scalar 4 int (const int 6))))
+(function "main"
+  (ret int)
+  (params)
+  (let %0 (ptr int) (offset @"a" 4))
+  (copy 4 @"a" %0)
+  (let %1 int (load int @"a"))
+  (let %2 int (load int %0))
+  (let %3 int (wadd int %1 %2))
+  (return %3))

@@ -10,9 +10,13 @@ traps of the memory section below), constants, the wrapping,
 checked and bitwise arithmetic, comparisons, the integer conversions `iconv` and same-width `bitcast`, `eval` of
 a value (its value is discarded), and the structured statements (`let`, `set`, `if`, `loop`, `block`, `switch`
 with its top-level `case` and `default` labels, `break`, `continue`, `return`, `unreachable`, `trap`). Everything
-else is reported as `stuck` with the reason, never silently skipped: pointers into anything but a slot, pointers
+else is reported as `stuck` with the reason, never silently skipped: pointers into anything but a slot or a global, pointers
 stored in memory outside the slot model (see the memory section), calls outside the module, floats, exceptions,
 `goto`, and labels nested inside a switch arm. Those are the next steps.
+
+Pointers into the globals of the module (`@"x"`) are blocks too, with the size of their declaration: a global is a
+block of the module's state, so a store through it is seen by the caller of a function that made it (see the
+memory section). An extern global (no definition in the module) and a function address are stuck.
 
 Values are mathematical integers, kept in the range of their type by `wrapTo` after every operation, or pointers
 (see the memory section). A boolean is 0 or 1. The semantics is fuel-bounded: running out of fuel is `stuck`, so
@@ -131,10 +135,17 @@ inductive Outcome where
 
 /-! ### State
 
-A block is the storage a pointer points into: a slot (a named local, `$"x"`) of the function. Its byte size is the
-one its `(slot ...)` declaration gives (see the memory section). -/
+A block is the storage a pointer points into: a slot (a named local, `$"x"`) of the function, or a global (a
+module-level variable, `@"x"`). Its byte size is the one its declaration gives (see the memory section). -/
 inductive Block where
   | slot : String → Block
+  | global : String → Block
+  deriving BEq
+
+/-- How a block is named in the messages: a slot by `$"x"`, a global by `@"x"`. -/
+def Block.describe : Block → String
+  | Block.slot x => s!"slot $\"{x}\""
+  | Block.global x => s!"global @\"{x}\""
 
 /-- A value in the state: an integer; a pointer, as the block and the byte offset from the block's first byte; or
 the null pointer. -/
@@ -147,18 +158,27 @@ def Val.isInt : Val → Bool
   | Val.int _ => true
   | _ => false
 
-/-- A cell of the state: a register; one byte of a slot (the slot's name, and the index of the byte from the
-slot's first byte, little-endian); or a declaration of the frame: the byte size of a slot, or a marker that the
-name is declared more than once in the function (scopes are not modelled, so that block is stuck). -/
+/-- A cell of the state: a register; one byte of a block (the block, and the index of the byte from the block's
+first byte, little-endian); or a declaration of a block: its byte size, or a marker that its name is declared more
+than once (scopes are not modelled, so that block is stuck). A global that has no definition in the module has the
+marker `ext`, which makes its address stuck. -/
 inductive Cell where
   | reg : Nat → Cell
-  | byte : String → Nat → Cell
+  | byte : Block → Nat → Cell
   /-- The side table of stored pointers: the pointer (a block and offset, or null) stored over the bytes
-  `[i, i + ptrBytes)` of slot `x`, keyed by the slot name and the index `i` of its first byte. -/
-  | ptr : String → Nat → Cell
-  | size : String → Cell
-  | dup : String → Cell
+  `[i, i + ptrBytes)` of a block, keyed by the block and the index `i` of its first byte. -/
+  | ptr : Block → Nat → Cell
+  | size : Block → Cell
+  | dup : Block → Cell
+  | ext : Block → Cell
   deriving BEq
+
+/-- The cells of the globals of the module. A call gives its callee the global cells of its caller, and takes them
+back when it returns, so the globals are one state for the whole run. -/
+def Cell.isGlobal : Cell → Bool
+  | Cell.byte (Block.global _) _ | Cell.ptr (Block.global _) _ | Cell.size (Block.global _)
+  | Cell.dup (Block.global _) | Cell.ext (Block.global _) => true
+  | _ => false
 
 /-- A value in the state: the value, and the integer type it has (width and signedness) when its declared type is
 an integer type. The type is what `bitcast` and `switch` check. -/
@@ -166,13 +186,56 @@ structure Entry where
   val : Val
   info : Option (Nat × Bool)
 
-/-- The cells, the newest first. A read is the first entry for its cell. -/
-abbrev Env := List (Cell × Entry)
+/-- The bytes an integer of `bits` bits takes in memory. -/
+def byteWidth (bits : Nat) : Nat := (bits + 7) / 8
 
-def Env.lookup (e : Env) (c : Cell) : Option Entry :=
-  match e.find? (fun p => p.1 == c) with
-  | some p => some p.2
+/-- The byte `j` of the little-endian `w`-byte pattern of `v`. -/
+def intByte (v : Int) (w j : Nat) : Int := (v % 2 ^ (8 * w)) / 256 ^ j % 256
+
+/-- The marker of a byte of a global that a copy made unwritten: its initializer must not give it a value again. -/
+def unwrittenByte : Int := 258
+
+/-- The initial value of byte `i` of global `g`: that of the last item of its initializer which writes it. None when
+no item writes it. -/
+def initByte (gs : List Global) (g : String) (i : Nat) : Option Int :=
+  match gs.find? (fun h => h.name == g) with
   | none => none
+  | some h =>
+    (h.initItems.getD []).foldl (fun acc it =>
+      match it with
+      | InitItem.scalar off t v =>
+        match infoOf t, parseIntLit v with
+        | some (bits, signed), some k =>
+          let w := byteWidth bits
+          if off ≤ i && i < off + w then some (intByte (wrapTo bits signed k) w (i - off)) else acc
+        | _, _ => acc
+      | InitItem.zero off n => if off ≤ i && i < off + n then some 0 else acc) none
+
+/-- The entry a global cell has when no cell of the state holds it: the byte size of the global, the marker `ext` of
+an extern one, the marker `dup` of a name declared more than once, and the initial value of a byte. Other cells have
+no default. -/
+def globalDefault (gs : List Global) : Cell → Option Entry
+  | Cell.byte (Block.global g) i => (initByte gs g i).map (fun v => ⟨Val.int v, none⟩)
+  | Cell.size (Block.global g) => (gs.find? (fun h => h.name == g)).map (fun h => ⟨Val.int h.size, none⟩)
+  | Cell.dup (Block.global g) =>
+    if (gs.filter (fun h => h.name == g)).length > 1 then some ⟨Val.int 0, none⟩ else none
+  | Cell.ext (Block.global g) =>
+    match gs.find? (fun h => h.name == g) with
+    | some h => if h.isExtern then some ⟨Val.int 0, none⟩ else none
+    | none => none
+  | _ => none
+
+/-- The state of a run: the cells that have been set, the newest first, and the globals of the module. A cell that no
+entry holds has its default (`globalDefault`), so the globals take their initial bytes without a cell for each. -/
+structure Env where
+  cells : List (Cell × Entry)
+  globals : List Global
+
+/-- The entry of a cell: the first one for it, else its default. -/
+def Env.lookup (e : Env) (c : Cell) : Option Entry :=
+  match e.cells.find? (fun p => p.1 == c) with
+  | some p => some p.2
+  | none => globalDefault e.globals c
 
 def Env.get (e : Env) (c : Cell) : Option Val :=
   match e.lookup c with
@@ -181,11 +244,14 @@ def Env.get (e : Env) (c : Cell) : Option Val :=
 
 /-- Sets a cell. The older entry for the cell is dropped, so the environment keeps one entry per cell. -/
 def Env.set (e : Env) (c : Cell) (v : Val) (info : Option (Nat × Bool)) : Env :=
-  (c, ⟨v, info⟩) :: e.filter (fun p => !(p.1 == c))
+  { e with cells := (c, ⟨v, info⟩) :: e.cells.filter (fun p => !(p.1 == c)) }
 
-/-- Removes a cell: it is unwritten again. -/
+/-- Removes a cell: it is unwritten again. A byte of a global cannot simply be removed, since its default is its
+initial value: it is marked unwritten instead. -/
 def Env.clear (e : Env) (c : Cell) : Env :=
-  e.filter (fun p => !(p.1 == c))
+  match c with
+  | Cell.byte (Block.global _) _ => e.set c (Val.int unwrittenByte) none
+  | _ => { e with cells := e.cells.filter (fun p => !(p.1 == c)) }
 
 /-- How a statement list ends: falling off the end, leaving a loop, continuing it, or returning. -/
 inductive Flow where
@@ -204,8 +270,19 @@ def operandInfo (env : Env) : Operand → Option (Nat × Bool)
   | Operand.constant t _ => infoOf t
   | _ => none
 
+/-- The address of a global `@"x"`: the pointer to its first byte. An extern global has no contents in the module,
+and a name that is not declared, or declared twice, is not a block, so each of these is stuck with its reason. -/
+def globalAddr (env : Env) (x : String) : Except Outcome Val :=
+  let b := Block.global x
+  if (env.lookup (.dup b)).isSome then
+    .error (.stuck s!"global @\"{x}\" is declared more than once in the module")
+  else if (env.lookup (.ext b)).isSome then
+    .error (.stuck s!"global @\"{x}\" is extern: its contents are not in the module, so it is not modelled")
+  else if (env.lookup (.size b)).isSome then .ok (Val.ptr b 0)
+  else .error (.stuck s!"global @\"{x}\" has no (global ...) form in the module: (data ...) forms are not modelled")
+
 /-- An operand as a value: a register, a constant, the address of a slot (`$"x"`, the pointer to its first byte),
-or the null pointer. Other operands are stuck. -/
+the address of a global (`@"x"`, see `globalAddr`), or the null pointer. Other operands are stuck. -/
 def evalVal (env : Env) : Operand → Except Outcome Val
   | Operand.reg n =>
     match env.get (.reg n) with
@@ -217,7 +294,7 @@ def evalVal (env : Env) : Operand → Except Outcome Val
     | _, _ => .error (.stuck s!"constant of type {tyText t} is not an integer literal: {v}")
   | Operand.localVar x => .ok (Val.ptr (Block.slot x) 0)
   | Operand.null _ => .ok Val.null
-  | Operand.global x => .error (.stuck s!"the address of the global @\"{x}\" is not modelled (only slots are blocks)")
+  | Operand.global x => globalAddr env x
   | Operand.fnRef x => .error (.stuck s!"the address of the function &\"{x}\" is not modelled")
   | o => .error (.stuck s!"operand {operandName o} not modelled")
 
@@ -299,6 +376,15 @@ makes the block stuck. The bytes of a slot are cells too: a byte that is not wri
 is stuck with "slot ... is read before it is written". An integer of `bits` bits takes `byteWidth bits` bytes,
 little-endian (a bool takes one byte, and reads back as its low bit).
 
+A global `@"x"` is a block of the byte size its `(global ...)` declaration gives, and its bytes are cells like a slot's.
+A byte that no write has set takes its default (`globalDefault`): its initial value when its initializer writes it
+(the integer scalars and the zero runs, the `InitItem`s), and otherwise it is unwritten, so reading it is stuck. A
+copy of an unwritten byte over a global byte marks it unwritten (`Env.clear`), so that the initial value does not come
+back. The size and the markers of a global are its defaults too. An extern global (a declaration with no definition
+in the module) is stuck on its address (`globalAddr`). The state of the globals is kept across calls (see `callValue`):
+a store in a callee is seen by the caller. A pointer to a slot is not stored in a global (`slotInGlobalMsg`), because
+a slot belongs to its frame; a pointer to a global can be stored anywhere, as a pointer to a slot can.
+
 A load or store takes its width from its own type, not from the declared type of the slot: the bytes at its
 offset are read or written as they are, so a store of one width can be read back with another. That is the
 bit pattern reading of `bitcast`, not C++'s aliasing rules, which this slice does not check.
@@ -332,12 +418,14 @@ that it does not overwrite as `ptrStale`. The rules for the bytes:
   overwrote part of it, the reason says so; otherwise the bytes hold no stored pointer.
 - An integer load that reads a marker byte, of any width or offset, is stuck with "pointer bytes read at a
   different width are not modelled" (a stale byte says it was overwritten in part).
-- A pointer load or store through a global, or of a pointer as an integer, is stuck as before. Storing an integer
-  through a pointer type, or storing a pointer through an integer type, is stuck.
+- A pointer load or store through a global is modelled as through a slot. Storing a pointer to a slot into a global is
+  stuck (`slotInGlobalMsg`), and so is a copy of such a pointer into a global. Storing an integer through a pointer
+  type, or storing a pointer through an integer type, is stuck.
 
 Stuck, with the reason: a pointer where an integer is needed (arithmetic, conditions, casts, call arguments, a
 comparison with an integer), an integer used as an address, a pointer bound to an integer register, `ret` of a
-pointer, a global or a function address, `index`, `pdiff`, `bfstore`, and a slot the function does not declare. -/
+pointer, an extern global, a global the module does not declare, a function address, `index`, `pdiff`, `bfstore`, a
+slot the function does not declare, and a pointer to a slot stored in a global. -/
 
 /-- The size of a pointer in bytes: the `(pointer 8)` of the module layout that the tests use. The semantics does
 not read the layout, so a module with another pointer size needs this to follow it. -/
@@ -353,73 +441,71 @@ def ptrStale : Int := 257
 def ptrPartialMsg : String := "pointer bytes read at a different width are not modelled"
 def ptrStaleMsg : String := "a stored pointer was overwritten in part by an integer, so these bytes no longer hold it"
 
-/-- The bytes an integer of `bits` bits takes in memory. -/
-def byteWidth (bits : Nat) : Nat := (bits + 7) / 8
-
 /-- The frame's declarations of the slots of a function: the byte size of each slot, or the marker of a name that is
 declared more than once. -/
-def slotDecls (slots : List Slot) : Env :=
+def slotDecls (slots : List Slot) : List (Cell × Entry) :=
   slots.map (fun s =>
-    if (slots.filter (fun t => t.name == s.name)).length > 1 then (Cell.dup s.name, ⟨Val.int 0, none⟩)
-    else (Cell.size s.name, ⟨Val.int s.bytes, none⟩))
+    if (slots.filter (fun t => t.name == s.name)).length > 1 then (Cell.dup (Block.slot s.name), ⟨Val.int 0, none⟩)
+    else (Cell.size (Block.slot s.name), ⟨Val.int s.bytes, none⟩))
 
 /-- The byte size of a block. -/
-def blockSize (env : Env) : Block → Except Outcome Int
-  | Block.slot x =>
-    match env.lookup (.dup x) with
-    | some _ => .error (.stuck s!"slot $\"{x}\" is declared more than once in the function; scopes are not modelled")
-    | none =>
-      match env.get (.size x) with
-      | some (Val.int n) => .ok n
-      | _ => .error (.stuck s!"slot $\"{x}\" is not declared in the function")
+def blockSize (env : Env) (b : Block) : Except Outcome Int :=
+  match env.lookup (.dup b) with
+  | some _ => .error (.stuck s!"{b.describe} is declared more than once in the function; scopes are not modelled")
+  | none =>
+    match env.get (.size b) with
+    | some (Val.int n) => .ok n
+    | _ => .error (.stuck s!"{b.describe} is not declared in the function")
 
-/-- The integer at byte `off` of a slot, of `w` bytes: the bytes read from the most significant down (the
+/-- The integer at byte `off` of a block, of `w` bytes: the bytes read from the most significant down (the
 Horner form of the little-endian value). -/
-def readBytes (env : Env) (x : String) (off : Nat) : Nat → Int → Except Outcome Int
+def readBytes (env : Env) (b : Block) (off : Nat) : Nat → Int → Except Outcome Int
   | 0, acc => .ok acc
   | k + 1, acc =>
-    match env.get (.byte x (off + k)) with
-    | some (Val.int b) =>
-      if b == ptrByte then .error (.stuck ptrPartialMsg)
-      else if b == ptrStale then .error (.stuck ptrStaleMsg)
-      else readBytes env x off k (acc * 256 + b)
-    | _ => .error (.stuck s!"slot $\"{x}\" is read before it is written")
+    match env.get (.byte b (off + k)) with
+    | some (Val.int v) =>
+      if v == ptrByte then .error (.stuck ptrPartialMsg)
+      else if v == ptrStale then .error (.stuck ptrStaleMsg)
+      else if v == unwrittenByte then .error (.stuck s!"{b.describe} is read before it is written")
+      else readBytes env b off k (acc * 256 + v)
+    | _ => .error (.stuck s!"{b.describe} is read before it is written")
 
-/-- Whether a byte of a slot holds the marker `t`. -/
-def byteIs (env : Env) (x : String) (i : Nat) (t : Int) : Bool :=
-  match env.get (.byte x i) with
-  | some (Val.int b) => b == t
+/-- Whether a byte of a block holds the marker `t`. -/
+def byteIs (env : Env) (b : Block) (i : Nat) (t : Int) : Bool :=
+  match env.get (.byte b i) with
+  | some (Val.int v) => v == t
   | _ => false
 
-/-- Whether a stored pointer (its side table entry, starting at `j`) overlaps the bytes `[off, off + w)`. -/
-def overlapsPtr (x : String) (off w : Nat) : Cell → Bool
-  | Cell.ptr y j => y == x && decide (j < off + w) && decide (off < j + ptrBytes)
+/-- Whether a stored pointer (its side table entry, starting at `j`) overlaps the bytes `[off, off + w)` of a block. -/
+def overlapsPtr (b : Block) (off w : Nat) : Cell → Bool
+  | Cell.ptr c j => c == b && decide (j < off + w) && decide (off < j + ptrBytes)
   | _ => false
 
-/-- Drops the stored pointers that overlap the bytes `[off, off + w)` of a slot. The bytes of a dropped pointer that
+/-- Drops the stored pointers that overlap the bytes `[off, off + w)` of a block. The bytes of a dropped pointer that
 are still markers become stale, so reading them is stuck. The caller then writes the bytes `[off, off + w)`. -/
-def invalidatePtrs (env : Env) (x : String) (off w : Nat) : Env :=
-  let hit := env.filter (fun p => overlapsPtr x off w p.1)
-  let kept := env.filter (fun p => !overlapsPtr x off w p.1)
+def invalidatePtrs (env : Env) (b : Block) (off w : Nat) : Env :=
+  let hit := env.cells.filter (fun p => overlapsPtr b off w p.1)
+  let kept : Env := { env with cells := env.cells.filter (fun p => !overlapsPtr b off w p.1) }
   hit.foldl (fun e p =>
     match p.1 with
     | Cell.ptr _ j =>
       (List.range ptrBytes).foldl (fun e2 k =>
-        if byteIs e2 x (j + k) ptrByte then e2.set (.byte x (j + k)) (Val.int ptrStale) none else e2) e
+        if byteIs e2 b (j + k) ptrByte then e2.set (.byte b (j + k)) (Val.int ptrStale) none else e2) e
     | _ => e) kept
 
-/-- Writes an integer of `w` bytes at byte `off` of a slot, little-endian. A stored pointer that the bytes overlap
+/-- Writes an integer of `w` bytes at byte `off` of a block, little-endian. A stored pointer that the bytes overlap
 is dropped. -/
-def writeBytes (env : Env) (x : String) (off w : Nat) (v : Int) : Env :=
+def writeBytes (env : Env) (b : Block) (off w : Nat) (v : Int) : Env :=
   (List.range w).foldl (fun e i =>
-    e.set (.byte x (off + i)) (Val.int ((v % 2 ^ (8 * w)) / 256 ^ i % 256)) none) (invalidatePtrs env x off w)
+    e.set (.byte b (off + i)) (Val.int ((v % 2 ^ (8 * w)) / 256 ^ i % 256)) none) (invalidatePtrs env b off w)
 
-/-- Writes a pointer (or null) at byte `off` of a slot: the markers over its `ptrBytes` bytes, and the side table
+/-- Writes a pointer (or null) at byte `off` of a block: the markers over its `ptrBytes` bytes, and the side table
 entry. A stored pointer that the bytes overlap is dropped first. -/
-def writePtr (env : Env) (x : String) (off : Nat) (v : Val) : Env :=
-  let e := invalidatePtrs env x off ptrBytes
-  let e := (List.range ptrBytes).foldl (fun e i => e.set (.byte x (off + i)) (Val.int ptrByte) none) e
-  e.set (.ptr x off) v none
+def writePtr (env : Env) (b : Block) (off : Nat) (v : Val) : Env :=
+  let e := invalidatePtrs env b off ptrBytes
+  let e := (List.range ptrBytes).foldl (fun e i => e.set (.byte b (off + i)) (Val.int ptrByte) none) e
+  e.set (.ptr b off) v none
+
 
 /-- The name of a memory access on a non-integer type, for the stuck messages. -/
 def memKind (verb : String) (t : Ty) : String :=
@@ -436,24 +522,20 @@ def derefAddr (env : Env) (o : Operand) (w : Nat) : Except Outcome (Block × Int
     return (b, off)
 
 /-- The integer a load of `bits` bits and signedness `signed` reads at `off` of a block. -/
-def loadInt (env : Env) (b : Block) (off : Int) (bits : Nat) (signed : Bool) : Except Outcome Val :=
-  match b with
-  | Block.slot x => do
-    let acc ← readBytes env x off.toNat (byteWidth bits) 0
-    return Val.int (wrapTo bits signed acc)
+def loadInt (env : Env) (b : Block) (off : Int) (bits : Nat) (signed : Bool) : Except Outcome Val := do
+  let acc ← readBytes env b off.toNat (byteWidth bits) 0
+  return Val.int (wrapTo bits signed acc)
 
 /-- The pointer a load of a pointer type reads at `off` of a block: the side table entry there. The bytes at the
 offset are not a stored pointer otherwise, and the reason says which way. -/
 def loadPtr (env : Env) (b : Block) (off : Int) : Except Outcome Val :=
-  match b with
-  | Block.slot x =>
-    let o := off.toNat
-    match env.get (.ptr x o) with
-    | some v => .ok v
-    | none =>
-      if (List.range ptrBytes).any (fun k => byteIs env x (o + k) ptrByte) then .error (.stuck ptrPartialMsg)
-      else if (List.range ptrBytes).any (fun k => byteIs env x (o + k) ptrStale) then .error (.stuck ptrStaleMsg)
-      else .error (.stuck "a pointer load from bytes that hold no stored pointer is not modelled")
+  let o := off.toNat
+  match env.get (.ptr b o) with
+  | some v => .ok v
+  | none =>
+    if (List.range ptrBytes).any (fun k => byteIs env b (o + k) ptrByte) then .error (.stuck ptrPartialMsg)
+    else if (List.range ptrBytes).any (fun k => byteIs env b (o + k) ptrStale) then .error (.stuck ptrStaleMsg)
+    else .error (.stuck "a pointer load from bytes that hold no stored pointer is not modelled")
 
 /-- The byte count of a copy: a number, or the value of a register, which must not be negative. -/
 def copySize (env : Env) : SizeArg → Except Outcome Nat
@@ -471,20 +553,37 @@ cell is read before any destination cell is written, so overlapping ranges in on
 A byte that is unwritten in the source is unwritten in the destination. The markers of stored pointers are bytes,
 so they are copied too; the side table entries that lie wholly in the source range move with them. A stored pointer
 that the range cuts is not moved: its marker bytes arrive without an entry, and loading a pointer there is stuck. -/
-def copyBytes (env : Env) (dx : String) (doff : Nat) (sx : String) (soff n : Nat) : Env :=
+def copyBytes (env : Env) (db : Block) (doff : Nat) (sb : Block) (soff n : Nat) : Env :=
   let srcBytes : List (Nat × Option Val) :=
-    (List.range n).map (fun i => (i, env.get (.byte sx (soff + i))))
-  let srcPtrs : List (Nat × Val) := env.filterMap (fun p =>
+    (List.range n).map (fun i => (i, env.get (.byte sb (soff + i))))
+  let srcPtrs : List (Nat × Val) := env.cells.filterMap (fun p =>
     match p.1 with
-    | Cell.ptr y j =>
-      if y == sx && decide (soff ≤ j) && decide (j + ptrBytes ≤ soff + n) then some (j - soff, p.2.val) else none
+    | Cell.ptr c j =>
+      if c == sb && decide (soff ≤ j) && decide (j + ptrBytes ≤ soff + n) then some (j - soff, p.2.val) else none
     | _ => none)
-  let e := invalidatePtrs env dx doff n
+  let e := invalidatePtrs env db doff n
   let e := srcBytes.foldl (fun e (i, v) =>
     match v with
-    | some x => e.set (.byte dx (doff + i)) x none
-    | none => e.clear (.byte dx (doff + i))) e
-  srcPtrs.foldl (fun e (k, v) => e.set (.ptr dx (doff + k)) v none) e
+    | some x => e.set (.byte db (doff + i)) x none
+    | none => e.clear (.byte db (doff + i))) e
+  srcPtrs.foldl (fun e (k, v) => e.set (.ptr db (doff + k)) v none) e
+
+/-- The message for a pointer to a slot that would be stored in a global. -/
+def slotInGlobalMsg : String :=
+  "a pointer to a slot stored in a global is not modelled (a slot is local to its frame)"
+
+/-- Whether a store of a pointer `v` into block `b` puts a pointer to a slot into a global. -/
+def storesSlotInGlobal : Block → Val → Bool
+  | Block.global _, Val.ptr (Block.slot _) _ => true
+  | _, _ => false
+
+/-- Whether a stored pointer to a slot, in block `sb`, overlaps the bytes `[soff, soff + n)` that a copy reads. -/
+def slotPtrOverlaps (env : Env) (sb : Block) (soff : Int) (n : Nat) : Bool :=
+  env.cells.any (fun p =>
+    match p.1, p.2.val with
+    | Cell.ptr c j, Val.ptr (Block.slot _) _ =>
+      c == sb && decide ((j : Int) < soff + n) && decide (soff < (j : Int) + ptrBytes)
+    | _, _ => false)
 
 /-- The integer 1 for true and 0 for false. -/
 def boolInt (p : Bool) : Int := if p then 1 else 0
@@ -496,11 +595,11 @@ def ptrEq (env : Env) : Val → Val → Except Outcome Bool
   | Val.null, Val.null => .ok true
   | Val.null, Val.ptr _ _ => .ok false
   | Val.ptr _ _, Val.null => .ok false
-  | Val.ptr (Block.slot x) o1, Val.ptr (Block.slot y) o2 =>
-    if x == y then .ok (o1 == o2)
+  | Val.ptr b1 o1, Val.ptr b2 o2 =>
+    if b1 == b2 then .ok (o1 == o2)
     else do
-      let s1 ← blockSize env (Block.slot x)
-      let s2 ← blockSize env (Block.slot y)
+      let s1 ← blockSize env b1
+      let s2 ← blockSize env b2
       if decide (o1 < s1) && decide (o2 < s2) then .ok false
       else .error (.stuck "equality of a pointer one past the end of its block with a pointer into another block is unspecified")
   | _, _ => .error (.stuck "a pointer value is compared with an integer, which is not modelled")
@@ -521,8 +620,8 @@ def evalCmpVal (env : Env) (op : CmpOp) (a b : Operand) : Except Outcome Val := 
     | .ne => return Val.int (boolInt (!(← ptrEq env va vb)))
     | .lts | .ltu | .les | .leu =>
       match va, vb with
-      | Val.ptr (Block.slot x) o1, Val.ptr (Block.slot y) o2 =>
-        if x == y then return Val.int (← evalCmp op o1 o2)
+      | Val.ptr b1 o1, Val.ptr b2 o2 =>
+        if b1 == b2 then return Val.int (← evalCmp op o1 o2)
         else throw (.stuck "relational comparison of pointers into different blocks is unspecified")
       | _, _ => throw (.stuck "relational comparison of a null pointer, or of a pointer with null, is unspecified")
     | .ltf | .lef => throw (.stuck "floating-point comparison is not modelled")
@@ -652,7 +751,7 @@ def paramKind : Param → String
 /-- The environment of a callee: its parameters bound to the arguments, each reduced into the integer type of
 its parameter. The environment starts empty, so the callee's registers and slots are its own. -/
 def bindArgs : List Param → List Int → Except Outcome Env
-  | [], [] => .ok []
+  | [], [] => .ok { cells := [], globals := [] }
   | [], _ :: _ | _ :: _, [] => .error (.stuck "argument count does not match the parameters")
   | Param.named n nm t :: ps, v :: vs => do
     match infoOf t with
@@ -670,8 +769,8 @@ def execStmt : Nat → Ctx → Env → Stmt → Except Outcome (Env × Flow)
     match s with
     | Stmt.letS r t (RValue.call cty callee va args) => do
       match ← callValue n ctx env cty callee va args with
-      | some v => return (env.set (.reg r) (Val.int v) (infoOf t), .normal)
-      | none => .error (.stuck s!"a call without a value is bound to %{r}")
+      | (some v, env1) => return (env1.set (.reg r) (Val.int v) (infoOf t), .normal)
+      | (none, _) => .error (.stuck s!"a call without a value is bound to %{r}")
     | Stmt.letS r t rv => do
       let v ← evalRValue env rv
       -- an integer register holds an integer
@@ -689,9 +788,8 @@ def execStmt : Nat → Ctx → Env → Stmt → Except Outcome (Env × Flow)
       let (b, off) ← derefAddr env a ptrBytes
       let v ← evalVal env val
       if v.isInt then throw (.stuck "store of an integer into a pointer type is not modelled")
-      match b with
-      | Block.slot x =>
-        return (writePtr env x off.toNat v, .normal)
+      if storesSlotInGlobal b v then throw (.stuck slotInGlobalMsg)
+      return (writePtr env b off.toNat v, .normal)
     | Stmt.storeS _ t a val => do
       let some (bits, signed) := infoOf t
         | throw (.stuck (memKind "store" t))
@@ -699,21 +797,18 @@ def execStmt : Nat → Ctx → Env → Stmt → Except Outcome (Env × Flow)
       let k ← match (← evalVal env val) with
         | Val.int k => pure k
         | _ => throw (.stuck "store of a pointer value is not modelled")
-      match b with
-      | Block.slot x =>
-        return (writeBytes env x off.toNat (byteWidth bits) (wrapTo bits signed k), .normal)
+      return (writeBytes env b off.toNat (byteWidth bits) (wrapTo bits signed k), .normal)
     | Stmt.copyS sz dst src => do
       -- both addresses are checked for null and bounds before any byte moves; the copy is memmove (copyBytes)
       let n ← copySize env sz
       let (db, doff) ← derefAddr env dst n
       let (sb, soff) ← derefAddr env src n
-      match db, sb with
-      | Block.slot dx, Block.slot sx =>
-        return (copyBytes env dx doff.toNat sx soff.toNat n, .normal)
+      if (db matches Block.global _) && slotPtrOverlaps env sb soff n then throw (.stuck slotInGlobalMsg)
+      return (copyBytes env db doff.toNat sb soff.toNat n, .normal)
     | Stmt.evalS (RValue.call cty callee va args) => do
       -- the value of a call is discarded; a trap or a stuck form in the call still happens
-      let _ ← callValue n ctx env cty callee va args
-      return (env, .normal)
+      let (_, env1) ← callValue n ctx env cty callee va args
+      return (env1, .normal)
     | Stmt.evalS rv => do
       -- the value is discarded; a trap or a stuck form in it still happens
       let _ ← evalRValue env rv
@@ -758,7 +853,7 @@ def execStmt : Nat → Ctx → Env → Stmt → Except Outcome (Env × Flow)
 environment; the callee runs in a fresh one, with one nested call less. Its return value, reduced into the
 integer type of the call, is the value of the call; a call of type void has no value. A callee outside the
 module, a variadic call, a count of arguments that differs from the parameters, and an indirect call are stuck. -/
-def callValue : Nat → Ctx → Env → Ty → Operand → Option Nat → List Operand → Except Outcome (Option Int)
+def callValue : Nat → Ctx → Env → Ty → Operand → Option Nat → List Operand → Except Outcome (Option Int × Env)
   | 0, _, _, _, _, _, _ => .error (.stuck "out of fuel")
   | k + 1, ctx, env, ty, callee, variadic, args => do
   let name ← match callee with
@@ -773,17 +868,24 @@ def callValue : Nat → Ctx → Env → Ty → Operand → Option Nat → List O
   let vals ← args.mapM (evalOperand env)
   if ctx.depth == 0 then throw (.stuck "out of fuel: the calls are nested too deeply")
   let frame ← bindArgs fn.params vals
-  let (_, fl) ← execList k { ctx with depth := ctx.depth - 1 } (slotDecls fn.slots ++ frame) fn.body
+  -- the callee starts with the globals of its caller: they are one state for the run, so a store in the callee
+  -- is seen by the caller when the callee returns (its slots, registers and parameters are its own)
+  let calleeStart : Env :=
+    { cells := slotDecls fn.slots ++ frame.cells ++ env.cells.filter (fun p => p.1.isGlobal), globals := env.globals }
+  let (calleeEnv, fl) ← execList k { ctx with depth := ctx.depth - 1 } calleeStart fn.body
+  let env' : Env :=
+    { cells := calleeEnv.cells.filter (fun p => p.1.isGlobal) ++ env.cells.filter (fun p => !p.1.isGlobal),
+      globals := env.globals }
   let r : Option Int ← match fl with
     | .ret v => pure v
     | .normal => pure none
     | _ => throw (.stuck "break or continue outside a loop")
-  if primName ty == some "void" then return none
+  if primName ty == some "void" then return (none, env')
   match infoOf ty with
   | none => throw (.stuck s!"call of {name} with a result of type {tyText ty} is not modelled")
   | some (bits, signed) =>
     match r with
-    | some v => return some (wrapTo bits signed v)
+    | some v => return (some (wrapTo bits signed v), env')
     | none => throw (.stuck s!"call of {name} ends without a value")
 
 /-- The arms of a switch from the chosen label on: control falls through them in order, and a label reached
@@ -830,8 +932,8 @@ end
 
 /-- Runs a function without parameters, from its body, with the functions `prog` available to its calls.
 Falling off the end gives `value none`. -/
-def runFn (fuel : Nat) (prog : List Func) (fn : Func) : Outcome :=
-  match execList fuel { prog := prog, depth := callDepth } (slotDecls fn.slots) fn.body with
+def runFn (fuel : Nat) (prog : List Func) (globals : List Global) (fn : Func) : Outcome :=
+  match execList fuel { prog := prog, depth := callDepth } { cells := slotDecls fn.slots, globals := globals } fn.body with
   | .error o => o
   | .ok (_, .ret v) => .value v
   | .ok (_, .normal) => .value none
@@ -840,15 +942,16 @@ def runFn (fuel : Nat) (prog : List Func) (fn : Func) : Outcome :=
 /-- Runs a function without parameters on its own: it has no module, so every call in it is stuck. -/
 def runFunc (fuel : Nat) (fn : Func) : Outcome :=
   if !fn.params.isEmpty then .stuck "functions with parameters are not modelled"
-  else runFn fuel [] fn
+  else runFn fuel [] [] fn
 
-/-- Runs the function named `name` of a module, without parameters; its calls reach the functions of `prog`. -/
-def runNamed (fuel : Nat) (prog : List Func) (name : String) : Outcome :=
+/-- Runs the function named `name` of a module, without parameters; its calls reach the functions of `prog`, and its
+globals are the `globals` of the module. -/
+def runNamed (fuel : Nat) (prog : List Func) (globals : List Global) (name : String) : Outcome :=
   match prog.find? (fun f => f.linkage == name) with
   | none => .stuck s!"no function {name} in the module"
   | some fn =>
     if !fn.params.isEmpty then .stuck "functions with parameters are not modelled"
-    else runFn fuel prog fn
+    else runFn fuel prog globals fn
 
 /-! ### Lemmas -/
 

@@ -102,16 +102,21 @@ def runOne (path name : String) : IO (Except String String) := do
   | .error e => return .error e
   | .ok forms =>
     let mut prog : List Func := []
+    let mut globals : List Global := []
     for f in forms do
       match f with
       | SExp.list (SExp.atom "function" :: _) =>
         match decodeFunc f with
         | .error e => return .error e
         | .ok fn => prog := prog ++ [fn]
+      | SExp.list (SExp.atom "global" :: _) =>
+        match decodeGlobal f with
+        | .error e => return .error e
+        | .ok g => globals := globals ++ [g]
       | _ => pure ()
     if !prog.any (fun fn => fn.linkage == name) then
       return .error s!"no function {name}"
-    let line := match Nfcxx.IR.Sem.runNamed 1000000 prog name with
+    let line := match Nfcxx.IR.Sem.runNamed 1000000 prog globals name with
       | .value (some v) => s!"value {v}"
       | .value none => "value none"
       | .trap m => s!"trap: {m}"

@@ -29,9 +29,12 @@ block of the byte size its declaration gives; its bytes are
 little-endian, and a load or store reads or writes the bytes at its offset with its own width. A null
 dereference and an access past the end of a block are traps ("null dereference", "pointer out of bounds");
 the operations that are undefined in C++ trap, and the rest of what is not modelled is stuck, with the reason.
-Calls of functions of the same module are modelled: the arguments are bound to the parameters of a fresh
-environment, and the callee's return value is the value of the call. Calls of functions outside the module,
-pointers into anything but a slot, pointers stored in memory, floats, exceptions, `goto` and labels nested
+Globals (`@"x"`) are blocks too, of the size of their `(global ...)` declaration: a byte that no write has set takes
+the initial value of the initializer (its integer scalars and zero runs), and otherwise is unwritten. Their state is
+kept across calls, so a store in a callee is seen by its caller. An extern global (no definition in the module) and a
+pointer to a slot stored in a global are stuck. Calls of functions of the same module are modelled: the arguments are
+bound to the parameters of a fresh environment, and the callee's return value is the value of the call. Calls of
+functions outside the module, function addresses, `(data ...)` symbols, floats, exceptions, `goto` and labels nested
 inside a switch arm are the next steps. Values are integers reduced into their type after each operation; the
 run is fuel-bounded, and so is the nesting of calls.
 

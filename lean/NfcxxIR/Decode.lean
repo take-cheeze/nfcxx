@@ -253,6 +253,30 @@ def decodeParam : SExp → Except String Param
   | SExp.list [SExp.atom "ellipsis"] => .ok Param.ellipsis
   | e => .error s!"unknown parameter {e.render}"
 
+/-- An item of a global's initializer that the semantics writes; none for the others (see `InitItem`). -/
+def decodeInitItem : SExp → Option InitItem
+  | SExp.list [SExp.atom "scalar", o, t, SExp.list [SExp.atom "const", _, SExp.atom v]] => do
+      let off ← (natAtom o).toOption
+      let ty ← (decodeTy t).toOption
+      return InitItem.scalar off ty v
+  | SExp.list [SExp.atom "zero", o, n] => do
+      return InitItem.zero (← (natAtom o).toOption) (← (natAtom n).toOption)
+  | _ => none
+
+/-- A `(global "NAME" TYPE SIZE ALIGN ATTRS...)` form (see `Global`). Its type is not read. -/
+def decodeGlobal : SExp → Except String Global
+  | SExp.list (SExp.atom "global" :: n :: _ :: sz :: _ :: attrs) => do
+      let name ← quoted n
+      let size ← natAtom sz
+      let isExtern := attrs.any (fun a => match a with
+        | SExp.list (SExp.atom "extern" :: _) => true
+        | _ => false)
+      let initItems := attrs.findSome? (fun a => match a with
+        | SExp.list (SExp.atom "init" :: items) => some (items.filterMap decodeInitItem)
+        | _ => none)
+      .ok { name, size, isExtern, initItems }
+  | e => .error s!"not a global: {e.render}"
+
 /-- The forms that come between the signature and the body and are not statements. -/
 def isAttrHead (h : String) : Bool :=
   h == "static" || h == "weak" || h == "constructor" || h == "destructor" || h == "eh-noexcept" || h == "eh-types"

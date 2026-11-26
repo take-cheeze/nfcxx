@@ -1,0 +1,13 @@
+(ir-module "global_call.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "g" int 4 4 (static) (init (scalar 0 int (const int 1))))
+(function "set"
+  (ret void)
+  (params)
+  (store int @"g" (const int 7))
+  (return))
+(function "main"
+  (ret int)
+  (params)
+  (eval (call void &"set"))
+  (let %0 int (load int @"g"))
+  (return %0))

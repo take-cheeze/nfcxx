@@ -1,0 +1,10 @@
+(ir-module "global_slot_ptr.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "g" (ptr int) 8 8 (static) (init (zero 0 8)))
+(function "main"
+  (ret int)
+  (params)
+  (slot "x" int 4 4)
+  (store int $"x" (const int 1))
+  (store (ptr int) @"g" $"x")
+  (let %0 int (const int 0))
+  (return %0))
