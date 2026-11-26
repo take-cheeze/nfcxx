@@ -16,9 +16,13 @@
 #   - tests/ast/jit.cpp      the machine-code tier for loops (docs/notes/ast.md, "JIT") against the interpreter, with its counters;
 #                            the driver cases also run once with the tier on and --jit (the seventh configuration)
 #   NFCAST_TIER_CACHE=dir   where the tier keeps the code it compiles (default: the library's, under $TMPDIR; a rerun reuses it)
+#   LUA   a Lua 5.4.9 interpreter (optional). When set, the programs of tests/ast/cases and tests/ast/bytecode/cases are dumped with
+#         string.dump and each dump is run (plain, with forced collection, and with the tier at threshold 1); the dump must print what
+#         the .out next to the source says. tests/ast/bytecode/stack.lua checks the stack functions of a bytecode frame, and
+#         refuse.lua (a to-be-closed variable) must be refused at load time (docs/notes/ast.md, "Bytecode"). Without LUA this is skipped
 cd "$(dirname "$0")/../.."
 backends=${NFCXX_BACKEND:-"pathb gcc"}
-srcs=(lib/ast/nfcast_core.cpp lib/ast/nfcast_ops.cpp lib/ast/nfcast_parse.cpp lib/ast/nfcast_nodes.cpp lib/ast/nfcast_lib.cpp lib/ast/nfcast_tier.cpp lib/ast/nfcast_jit.cpp)
+srcs=(lib/ast/nfcast_core.cpp lib/ast/nfcast_ops.cpp lib/ast/nfcast_parse.cpp lib/ast/nfcast_nodes.cpp lib/ast/nfcast_lib.cpp lib/ast/nfcast_tier.cpp lib/ast/nfcast_jit.cpp lib/ast/nfcast_bytecode.cpp tools/lua54bc/lua54_chunk.cpp)
 unset NFCAST_TIER NFCAST_TIER_THRESHOLD NFCAST_TIER_DEBUG NFCAST_GC_STRESS NFCAST_INLINE NFCAST_INLINE_WARM
 export NFCXX="$PWD/nfcxx"   # the tier finds the driver itself, but the cases run from another directory
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
@@ -62,5 +66,41 @@ for be in $backends; do
   echo "ok   $be ast: $(tail -1 <<<"$res"); $n programs equal to Lua 5.4 (with inlining on, early and off, with the tier at threshold 1 (also with early inlining), and with it compiling in the background)"
   echo "ok   $be ast tier: $(tail -1 <<<"$tres")"
   echo "ok   $be ast jit: $(tail -1 <<<"$jres")"
+  # Lua 5.4 binary chunks (docs/notes/ast.md, "Bytecode"): the reference Lua dumps each program, and the driver runs the dump.
+  if [ -z "${LUA:-}" ] || ! "$LUA" -v 2>&1 | grep -q '^Lua 5\.4\.9\b'; then
+    echo "skip $be ast bytecode: set LUA to a Lua 5.4.9 interpreter"
+    continue
+  fi
+  repo=$PWD; bcdir=$out/bc; mkdir -p "$bcdir"; bn=0; bfail=0
+  for lua in tests/ast/cases/*.lua tests/ast/bytecode/cases/*.lua; do
+    name=$(basename "$lua" .lua); dir=$(dirname "$lua"); chunk=$bcdir/$name.luac
+    if ! (cd "$dir" && "$LUA" "$repo/tests/lua54bc/dump.lua" "$name.lua" "$chunk" full); then
+      echo "FAIL $be ast bytecode: string.dump of $name"; fail=1; bfail=1; continue
+    fi
+    for cfg in "" "NFCAST_GC_STRESS=1" "NFCAST_TIER=sync NFCAST_TIER_THRESHOLD=1"; do
+      if ! (cd "$dir" && env $cfg NFCXX_BACKEND=$be "$out/driver" "$chunk" > "$bcdir/$name.out" 2> "$bcdir/$name.err") ||
+         ! cmp -s "$bcdir/$name.out" "$dir/$name.out"; then
+        echo "FAIL $be ast bytecode $name ${cfg:-plain}"; diff "$dir/$name.out" "$bcdir/$name.out" | head -10; head -5 "$bcdir/$name.err"; fail=1; bfail=1
+      fi
+    done
+    bn=$((bn + 1))
+  done
+  # The stack functions in a bytecode frame, and in a source chunk (which has none).
+  if (cd tests/ast/bytecode && "$LUA" "$repo/tests/lua54bc/dump.lua" stack.lua "$bcdir/stack.luac" full) &&
+     NFCXX_BACKEND=$be "$out/driver" "$bcdir/stack.luac" > "$bcdir/stack.out" 2> "$bcdir/stack.err" &&
+     cmp -s "$bcdir/stack.out" tests/ast/bytecode/stack.out; then :; else
+    echo "FAIL $be ast bytecode stack"; diff tests/ast/bytecode/stack.out "$bcdir/stack.out" | head -10; head -5 "$bcdir/stack.err"; fail=1; bfail=1
+  fi
+  if (cd tests/ast/bytecode && NFCXX_BACKEND=$be "$out/driver" stack_source.lua > "$bcdir/stack_source.out" 2> "$bcdir/stack_source.err") &&
+     cmp -s "$bcdir/stack_source.out" tests/ast/bytecode/stack_source.out; then :; else
+    echo "FAIL $be ast stack_source"; diff tests/ast/bytecode/stack_source.out "$bcdir/stack_source.out" | head -10; fail=1; bfail=1
+  fi
+  # The refusal: an opcode outside the subset (TBC) fails the load with its name, before anything runs.
+  if (cd tests/ast/bytecode && "$LUA" "$repo/tests/lua54bc/dump.lua" refuse.lua "$bcdir/refuse.luac" full) &&
+     ! NFCXX_BACKEND=$be "$out/driver" "$bcdir/refuse.luac" > "$bcdir/refuse.out" 2> "$bcdir/refuse.err" &&
+     grep -q "refused: opcode TBC" "$bcdir/refuse.err"; then :; else
+    echo "FAIL $be ast bytecode refusal"; head -3 "$bcdir/refuse.err"; fail=1; bfail=1
+  fi
+  [ $bfail = 0 ] && echo "ok   $be ast bytecode: $bn chunks equal to Lua 5.4.9 (plain, with forced collection, and with the tier at threshold 1); stack access and the refusal checked"
 done
 exit $fail

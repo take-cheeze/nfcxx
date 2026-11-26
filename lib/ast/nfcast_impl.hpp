@@ -63,6 +63,8 @@ struct UpvalDesc {
   bool is_const = false;  // declared <const> (an assignment is a compile-time error)
 };
 
+struct BcBody;  // the body of a function decoded from a Lua 5.4 binary chunk (nfcast_bytecode.cpp)
+
 struct Proto {
   int refs = 1;
   std::uint64_t uid;  // never reused, unlike the address: an inlined call site is guarded by it (nfcast_inline.inc)
@@ -82,6 +84,7 @@ struct Proto {
   std::vector<Proto*> children;
   std::uint32_t mark_epoch = 0;
   TierProto* tier = nullptr;  // the tier's counters and compiled versions of this function (nfcast_tier.cpp); null until it is called
+  BcBody* bc = nullptr;       // set when the function came from a binary chunk: its body is a register machine, not nodes
 
   Proto();
   ~Proto();
@@ -293,5 +296,8 @@ inline void invoke_native(State& S, Native* nat, Value* args, int n, Rets& out, 
 
 // Parses CODE into a main-chunk Proto (retained once); null with ERR set on a syntax error.
 Proto* parse_chunk(State& S, std::string_view code, const std::string& chunkname, std::string* err);
+// A Lua 5.4 binary chunk (string.dump, luac) as a closure whose first upvalue is _ENV (nfcast_bytecode.cpp); null with ERR set
+// on a bad chunk or on an opcode outside the subset (State::load calls it for a chunk that starts with "\x1bLua").
+Closure* load_binary(State& S, std::string_view code, const std::string& chunkname, std::string* err);
 
 }  // namespace nfcast

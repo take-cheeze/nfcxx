@@ -320,12 +320,17 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
 // difference) are not refused here: the lowering does not know the receiver's type, so the runtime refuses them on a value
 // that is neither a dict nor a set (mpy_load_method, refused_method_name).
 const std::set<std::string> kBuiltinMethods = {
-    "capitalize", "center", "encode", "format", "isalpha", "isdigit", "isspace", "ljust", "partition", "rfind", "rindex",
-    "rjust", "rsplit", "splitlines", "title", "zfill"};
+    "capitalize", "encode", "isalpha", "isdigit", "isspace", "ljust", "partition", "rfind", "rindex", "rjust", "rsplit",
+    "splitlines", "title", "zfill"};
 
 // A for loop's iterator takes MP_OBJ_ITER_BUF_NSLOTS stack slots (obj.h: 4 on 32- and 64-bit hosts); its object is in the
 // bottom one. break pops all of them.
 constexpr int kIterSlots = 4;
+
+// The scope flags of a prelude (py/runtime0.h's MP_SCOPE_FLAG_*).
+constexpr unsigned kGenerator = 0x01;
+constexpr unsigned kVarKeywords = 0x02;
+constexpr unsigned kVarArgs = 0x04;
 
 // The stack effect of an instruction: how many values it adds to the stack (negative when it takes some).
 int effect(const Op &op) {
@@ -444,7 +449,7 @@ class Lowerer {
     };
     std::string out = qstr_text();
     out.push_back('\0');
-    for (unsigned i = 0; i < pre.n_pos_args; ++i) {
+    for (unsigned i = 0; i < pre.n_pos_args + pre.n_kwonly_args; ++i) {
       out += qstr_text();
       out.push_back('\0');
     }
@@ -464,7 +469,7 @@ class Lowerer {
     std::string sig = signature(rc, pre);
     data_ << "(data \"mpy.sig." << id << "\" (const (array " << sig.size() << " (const char))) (string \"" << ir_escape(sig)
           << "\"))\n";
-    infos_[id] = ChildInfo{pre.n_pos_args, pre.n_def_pos_args, sig.size()};
+    infos_[id] = ChildInfo{pre.n_pos_args, pre.n_def_pos_args, sig.size(), pre.n_kwonly_args, (pre.scope_flags & kVarArgs) ? 1u : 0u};
     fns_[id] = unit(rc, true, "mpy_fn_" + std::to_string(id), n_free);
     return id;
   }
@@ -494,9 +499,11 @@ class Lowerer {
   std::string unit(const RawCode &rc, bool is_fn, const std::string &fname, size_t n_free) {
     Prelude pre = read_prelude(rc.data);
     if (!is_fn && pre.n_pos_args) refused("module code with arguments");
-    if (pre.n_kwonly_args) refused("keyword-only arguments are not lowered yet");
-    if (pre.scope_flags) refused("a generator, *args or **kwargs function is not lowered yet");
-    if (pre.n_pos_args > pre.n_state) refused("a function with more arguments than locals");
+    if (pre.scope_flags & kGenerator) refused("a generator function is not lowered yet");
+    if (pre.scope_flags & kVarKeywords) refused("a function with **kwargs is not lowered yet");
+    // The parameters, in the locals' order: the positional ones (the captured cells among them), the keyword-only ones, then *args.
+    size_t n_params = pre.n_pos_args + pre.n_kwonly_args + ((pre.scope_flags & kVarArgs) ? 1 : 0);
+    if (n_params > pre.n_state) refused("a function with more arguments than locals");
     if (n_free > pre.n_pos_args) refused("a closure with more captured cells than arguments");
     // The cell variables this function owns: the local index of each (the prelude's cell list).
     std::vector<size_t> cells;
@@ -560,6 +567,9 @@ class Lowerer {
         std::vector<int> left(open.begin(), open.end() - (long)n);
         int target_depth = d;
         for (size_t i = open.size() - n; i < open.size(); ++i) {
+          // A finally block whose handler is behind the site (the site is in its handler body) is cancelled, not run: the VM
+          // pops its pending value on the way (CANCEL_ACTIVE_FINALLY in vm.c), so the target is one shallower for each.
+          if (kind_of(open[i]) == 1 && op.offset >= (size_t)ops[index[(size_t)setup_of(open[i])]].arg) --target_depth;
           if (kind_of(open[i]) == 2 && exit_slot_of(open[i]) < target_depth) target_depth = exit_slot_of(open[i]);
         }
         if (op.extra & 0x80) {
@@ -645,12 +655,13 @@ class Lowerer {
 
     // A function object (MAKE_FUNCTION and MAKE_CLOSURE, with or without defaults): mpy_make_func takes the ncells captured cells
     // from the value stack and the defaults tuple (0 for none), and its signature is the child's data item. Returns the value.
-    auto make_function = [&](size_t id, size_t ncells, const std::string &defaults) {
+    auto make_function = [&](size_t id, size_t ncells, const std::string &defaults, const std::string &kwdefaults) {
       const ChildInfo &ci = infos_[id];
       std::string r = fresh();
       body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_make_func\" (const unsigned_long " << id
            << ") (const unsigned_long " << ci.npos << ") (const unsigned_long " << ncells << ") (const unsigned_long " << ci.ndef
-           << ") @\"mpy.sig." << id << "\" (const unsigned_long " << ci.sig_len << ") " << defaults << "))\n";
+           << ") @\"mpy.sig." << id << "\" (const unsigned_long " << ci.sig_len << ") " << defaults
+           << " (const unsigned_long " << ci.nkw << ") (const unsigned_long " << ci.star << ") " << kwdefaults << "))\n";
       return r;
     };
 
@@ -687,7 +698,7 @@ class Lowerer {
     };
 
     if (is_fn) {
-      for (unsigned i = 0; i < pre.n_pos_args; ++i) {
+      for (size_t i = 0; i < n_params; ++i) {
         std::string p = fresh(), v = fresh();
         body << "  (let " << p << " (ptr unsigned_long) (offset %1 " << i * 8 << "))\n";
         body << "  (let " << v << " unsigned_long (load unsigned_long " << p << "))\n";
@@ -699,7 +710,7 @@ class Lowerer {
     // argument keeps its value in the cell; any other local starts unbound (0), which a read reports.
     for (size_t c : cells) {
       std::string v = fresh(), cell = fresh();
-      if (c < pre.n_pos_args) {
+      if (c < n_params) {
         body << "  (let " << v << " unsigned_long (load unsigned_long " << local((long long)c) << "))\n";
       } else {
         body << "  (let " << v << " unsigned_long (const unsigned_long 0))\n";
@@ -860,13 +871,14 @@ class Lowerer {
         body << "  (let " << cell << " unsigned_long (load unsigned_long " << local(op.arg) << "))\n";
         body << "  (eval (call void &\"mpy_cell_set\" " << cell << " (const unsigned_long 0)))\n";
       } else if (k == "MAKE_FUNCTION" || k == "MAKE_FUNCTION_DEFARGS") {
-        // A function with no captured cells. With defaults, the defaults tuple is below the keyword defaults' null, and the
-        // function takes their place (the stack effect of MAKE_FUNCTION_DEFARGS is -1).
+        // A function with no captured cells. With defaults, the defaults tuple and the keyword-only defaults dict (or 0) are
+        // below the top, and the function takes their place (the stack effect of MAKE_FUNCTION_DEFARGS is -1).
         if ((size_t)op.arg >= rc.children.size()) throw std::runtime_error("mpy: child index out of range");
         bool defargs = k == "MAKE_FUNCTION_DEFARGS";
         size_t id = child(rc.children[(size_t)op.arg], 0);
         std::string defaults = defargs ? load(d - 2) : "(const unsigned_long 0)";
-        std::string r = make_function(id, 0, defaults);
+        std::string kwdefaults = defargs ? load(d - 1) : "(const unsigned_long 0)";
+        std::string r = make_function(id, 0, defaults, kwdefaults);
         push(defargs ? d - 2 : d, r);
       } else if (k == "MAKE_CLOSURE" || k == "MAKE_CLOSURE_DEFARGS") {
         // The captured cells are the raw slots LOAD_FAST pushed (below the closure's stack position). They go on the runtime
@@ -877,11 +889,12 @@ class Lowerer {
         int nc = (int)op.extra;
         size_t id = child(rc.children[(size_t)op.arg], (size_t)nc);
         std::string defaults = defargs ? load(d - nc - 2) : "(const unsigned_long 0)";
+        std::string kwdefaults = defargs ? load(d - nc - 1) : "(const unsigned_long 0)";
         for (int i = 0; i < nc; ++i) {
           std::string v = load(d - nc + i);
           body << "  (eval (call void &\"mpy_push\" " << v << "))\n";
         }
-        std::string r = make_function(id, (size_t)nc, defaults);
+        std::string r = make_function(id, (size_t)nc, defaults, kwdefaults);
         push(defargs ? d - nc - 2 : d - nc, r);
       } else if (k == "CALL") {
         // The positional arguments, then the keyword pairs (the name, then the value), go on the value stack; the function
@@ -1201,6 +1214,8 @@ class Lowerer {
     size_t npos = 0;      // the positional parameters (the captured cells included)
     size_t ndef = 0;      // the last ndef of them have defaults
     size_t sig_len = 0;   // the length of its signature data item (mpy.sig.K)
+    size_t nkw = 0;       // the keyword-only parameters, after the positional ones
+    size_t star = 0;      // 1 when it takes *args, the parameter after the keyword-only ones
   };
   std::vector<std::string> fns_;   // the IR of each child function, by number
   std::vector<ChildInfo> infos_;   // and each one's counts, for MAKE_FUNCTION and MAKE_CLOSURE

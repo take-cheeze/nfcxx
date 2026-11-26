@@ -196,7 +196,7 @@ enum {
   BI_SET_ISSUBSET, BI_SET_ISSUPERSET, BI_SET_ISDISJOINT,
   BI_SUPER, BI_INIT,
   BI_STR_UPPER, BI_STR_LOWER, BI_STR_STRIP, BI_STR_LSTRIP, BI_STR_RSTRIP, BI_STR_SPLIT, BI_STR_JOIN, BI_STR_REPLACE,
-  BI_STR_STARTSWITH, BI_STR_ENDSWITH, BI_STR_FIND, BI_STR_COUNT,
+  BI_STR_STARTSWITH, BI_STR_ENDSWITH, BI_STR_FIND, BI_STR_COUNT, BI_STR_CENTER, BI_STR_FORMAT,
   BI_LIST_INSERT, BI_LIST_EXTEND, BI_LIST_REMOVE, BI_LIST_INDEX, BI_LIST_COUNT, BI_LIST_REVERSE, BI_LIST_SORT, BI_LIST_COPY,
   BI_LIST_CLEAR, BI_SET_COPY, BI_SET_CLEAR,
   BI_EXC, BI_COUNT = BI_EXC + EXC_COUNT
@@ -221,6 +221,7 @@ static const MpyBuiltin mpy_builtins[BI_COUNT] = {
   {&mpy_type_bfn, BI_STR_UPPER}, {&mpy_type_bfn, BI_STR_LOWER}, {&mpy_type_bfn, BI_STR_STRIP}, {&mpy_type_bfn, BI_STR_LSTRIP},
   {&mpy_type_bfn, BI_STR_RSTRIP}, {&mpy_type_bfn, BI_STR_SPLIT}, {&mpy_type_bfn, BI_STR_JOIN}, {&mpy_type_bfn, BI_STR_REPLACE},
   {&mpy_type_bfn, BI_STR_STARTSWITH}, {&mpy_type_bfn, BI_STR_ENDSWITH}, {&mpy_type_bfn, BI_STR_FIND}, {&mpy_type_bfn, BI_STR_COUNT},
+  {&mpy_type_bfn, BI_STR_CENTER}, {&mpy_type_bfn, BI_STR_FORMAT},
   {&mpy_type_bfn, BI_LIST_INSERT}, {&mpy_type_bfn, BI_LIST_EXTEND}, {&mpy_type_bfn, BI_LIST_REMOVE}, {&mpy_type_bfn, BI_LIST_INDEX},
   {&mpy_type_bfn, BI_LIST_COUNT}, {&mpy_type_bfn, BI_LIST_REVERSE}, {&mpy_type_bfn, BI_LIST_SORT}, {&mpy_type_bfn, BI_LIST_COPY},
   {&mpy_type_bfn, BI_LIST_CLEAR}, {&mpy_type_bfn, BI_SET_COPY}, {&mpy_type_bfn, BI_SET_CLEAR},
@@ -334,7 +335,8 @@ static int set_method_index(const char *name, size_t len) {
   return -1;
 }
 
-/* The builtin id of a str method (upper, lower, strip, lstrip, rstrip, split, join, replace, startswith, endswith, find, count), or -1. */
+/* The builtin id of a str method (upper, lower, strip, lstrip, rstrip, split, join, replace, startswith, endswith, find, count,
+ * center, format), or -1. */
 static int str_method_index(const char *name, size_t len) {
   static const struct {
     const char *name;
@@ -343,6 +345,7 @@ static int str_method_index(const char *name, size_t len) {
     {"upper", BI_STR_UPPER}, {"lower", BI_STR_LOWER}, {"strip", BI_STR_STRIP}, {"lstrip", BI_STR_LSTRIP},
     {"rstrip", BI_STR_RSTRIP}, {"split", BI_STR_SPLIT}, {"join", BI_STR_JOIN}, {"replace", BI_STR_REPLACE},
     {"startswith", BI_STR_STARTSWITH}, {"endswith", BI_STR_ENDSWITH}, {"find", BI_STR_FIND}, {"count", BI_STR_COUNT},
+    {"center", BI_STR_CENTER}, {"format", BI_STR_FORMAT},
   };
   size_t k;
   for (k = 0; k < sizeof methods / sizeof methods[0]; ++k) {
@@ -1337,6 +1340,9 @@ typedef struct {
   const char *sig;   /* the signature: NUL-terminated strings, the function's name first */
   uint64_t sig_len;  /* its length, the NULs included */
   mpv defaults;      /* the tuple of the defaults of the last n_def parameters, or 0 */
+  uint64_t nkw;      /* the keyword-only parameters, after the npos positional ones (and before *args) */
+  uint64_t star;     /* 1 when the function takes *args, the parameter after the keyword-only ones */
+  mpv kwdefs;        /* the dict of the keyword-only parameters' defaults, or 0 */
   mpv closed[];      /* C99 flexible array member: the captured cells, the first parameters of the function */
 } MpyFunc;
 
@@ -1345,7 +1351,8 @@ void mpy_dispatch(uint64_t idx, mpv *ret, const mpv *args, uint64_t nargs);
 
 /* MAKE_FUNCTION and MAKE_CLOSURE, with or without defaults. The n captured cells are the top n values of the value stack,
  * which they leave (MAKE_CLOSURE pops them). */
-mpv mpy_make_func(uint64_t index, uint64_t npos, uint64_t n, uint64_t n_def, const char *sig, uint64_t sig_len, mpv defaults) {
+mpv mpy_make_func(uint64_t index, uint64_t npos, uint64_t n, uint64_t n_def, const char *sig, uint64_t sig_len, mpv defaults,
+                  uint64_t nkw, uint64_t star, mpv kwdefs) {
   MpyFunc *f;
   if (n > vtop) fail("mpy_make_func: the captured cells are not on the value stack");
   f = (MpyFunc *)malloc(sizeof *f + n * sizeof(mpv));
@@ -1358,6 +1365,9 @@ mpv mpy_make_func(uint64_t index, uint64_t npos, uint64_t n, uint64_t n_def, con
   f->sig = sig;
   f->sig_len = sig_len;
   f->defaults = defaults;
+  f->nkw = nkw;
+  f->star = star;
+  f->kwdefs = kwdefs;
   if (n) memcpy(f->closed, vstk + (vtop - n), n * sizeof(mpv));
   vtop -= n;
   return (mpv)(uintptr_t)f;
@@ -1400,11 +1410,12 @@ static const char *sig_part(const MpyFunc *f, uint64_t i, size_t *len) {
   return p;
 }
 
-/* The index of the parameter that a keyword argument's name (a str) names, or -1. */
+/* The index of the parameter that a keyword argument's name (a str) names, or -1. The positional and keyword-only parameters
+ * can be named by keyword. */
 static int find_param(const MpyFunc *f, mpv name) {
   uint64_t p;
   if (!is_str(name)) return -1;
-  for (p = 0; p < f->npos; ++p) {
+  for (p = 0; p < f->npos + f->nkw; ++p) {
     size_t len = 0;
     const char *pn = sig_part(f, p + 1, &len);
     if (pn != NULL && len == str_of(name)->len && memcmp(pn, str_of(name)->data, len) == 0) return (int)p;
@@ -1432,23 +1443,52 @@ static void keyword_error(const char *what, mpv name) {
   fail(msg);
 }
 
+/* A new tuple of the n values at items (a copy). */
+static mpv make_tuple(const mpv *items, size_t n) {
+  MpyTuple *t = (MpyTuple *)malloc(sizeof *t + n * sizeof(mpv));
+  size_t i;
+  if (t == NULL) fail("out of memory");
+  t->type = &mpy_type_tuple;
+  t->len = n;
+  for (i = 0; i < n; ++i) t->items[i] = items[i];
+  return (mpv)(uintptr_t)t;
+}
+
+/* The default of the keyword-only parameter p of f (its name is the signature's part p + 1), from the defaults dict, or 0 when
+ * the dict has none. */
+static mpv kwonly_default(const MpyFunc *f, uint64_t p) {
+  size_t len = 0;
+  const char *name = sig_part(f, p + 1, &len);
+  MpyDict *d = (MpyDict *)(uintptr_t)f->kwdefs;
+  long s;
+  if (name == NULL || f->kwdefs == 0) return 0;
+  s = map_lookup(d, new_str(name, len), MAP_LOOKUP);
+  return s < 0 ? 0 : d->table[s].value;
+}
+
 /* Calls the function fnv with its arguments on the value stack from base: n_pos positional ones, then n_kw keyword pairs (the
- * name, then the value). They are matched to the parameters as bc.c's mp_setup_code_state does: the captured cells come
- * first, the positional arguments next, then the keyword arguments by name, and the defaults fill the parameters still
- * unset. The arguments are left on the stack for the caller to drop. */
+ * name, then the value). They are matched to the parameters as bc.c's mp_setup_code_state does. The parameters are the captured
+ * cells, the positional ones, the keyword-only ones and then *args (when the function has it, a tuple of the positional
+ * arguments that no positional parameter takes). The keyword arguments are matched by name, and the defaults fill the
+ * parameters still unset (the positional ones from the defaults tuple, the keyword-only ones from the defaults dict). The
+ * arguments are left on the stack for the caller to drop. */
 static mpv call_function(mpv fnv, size_t base, uint64_t n_pos, uint64_t n_kw) {
   const MpyFunc *f = (const MpyFunc *)(uintptr_t)fnv;
-  uint64_t k = f->n_closed, req = f->npos - f->n_def, i, j, p;
+  uint64_t k = f->n_closed, req = f->npos - f->n_def, fit = f->npos - k, total = f->npos + f->nkw + f->star, i, j, p;
   size_t top;
   mpv ret = MPY_NONE;
-  if (k + n_pos > f->npos) pos_args_mismatch(f, f->npos, k + n_pos);
+  if (!f->star && k + n_pos > f->npos) pos_args_mismatch(f, f->npos, k + n_pos);
   if (n_kw == 0 && k + n_pos < req) pos_args_mismatch(f, req, k + n_pos);
   top = vtop;
-  vstk_reserve(top + (size_t)f->npos);
-  vtop = top + (size_t)f->npos;
-  for (p = 0; p < f->npos; ++p) vstk[top + p] = 0;
+  vstk_reserve(top + (size_t)total);
+  vtop = top + (size_t)total;
+  for (p = 0; p < total; ++p) vstk[top + p] = 0;
   for (i = 0; i < k; ++i) vstk[top + i] = f->closed[i];
-  for (i = 0; i < n_pos; ++i) vstk[top + k + i] = vstk[base + i];
+  for (i = 0; i < n_pos && i < fit; ++i) vstk[top + k + i] = vstk[base + i];
+  if (f->star) {
+    size_t extra = n_pos > fit ? (size_t)(n_pos - fit) : 0;
+    vstk[top + f->npos + f->nkw] = make_tuple(vstk + base + (n_pos > fit ? fit : n_pos), extra);
+  }
   for (j = 0; j < n_kw; ++j) {
     mpv name = vstk[base + n_pos + 2 * j], value = vstk[base + n_pos + 2 * j + 1];
     int q = find_param(f, name);
@@ -1471,7 +1511,23 @@ static mpv call_function(mpv fnv, size_t base, uint64_t n_pos, uint64_t n_kw) {
       fail(msg);
     }
   }
-  mpy_dispatch(f->index, &ret, f->npos ? vstk + top : NULL, f->npos);
+  /* Keyword-only parameters: without any keyword argument and without a defaults dict, none can be set. */
+  if (f->nkw && n_kw == 0 && f->kwdefs == 0) fail("TypeError: function missing keyword-only argument");
+  for (p = f->npos; p < f->npos + f->nkw; ++p) {
+    if (vstk[top + p] == 0) {
+      mpv dv = kwonly_default(f, p);
+      if (dv == 0) {
+        size_t len = 0;
+        const char *name = sig_part(f, p + 1, &len);
+        char msg[200];
+        snprintf(msg, sizeof msg, "TypeError: function missing required keyword argument '%.*s'", (int)len,
+                 name ? name : "");
+        fail(msg);
+      }
+      vstk[top + p] = dv;
+    }
+  }
+  mpy_dispatch(f->index, &ret, total ? vstk + top : NULL, total);
   vtop = base;
   return ret;
 }
@@ -2640,11 +2696,116 @@ static int affix_match(const MpyStr *s, size_t bs, size_t be, mpv affix, int at_
   return memcmp(at_end ? s->data + be - p->len : s->data + bs, p->data, p->len) == 0;
 }
 
-/* The str methods: id is one of BI_STR_UPPER .. BI_STR_COUNT. */
-static mpv str_method(int id, const mpv *args, uint64_t n) {
+/* str.center(width) (py/objstr.c str_center): the width counts characters, the left pad is half of the padding (rounded down),
+ * and a str that is already that wide is the same object. */
+static mpv str_center(const MpyStr *s, mpv self, mpv width_v) {
+  int64_t width = need_int(width_v);
+  size_t cl = chars_before(s, s->len), pad, left, total;
+  char *buf;
+  mpv r;
+  if (width < 0) fail("center with a negative width is not lowered yet");
+  if ((uint64_t)width <= cl) return self;
+  pad = (size_t)width - cl;
+  left = pad / 2;
+  total = pad + s->len;
+  buf = (char *)malloc(total);
+  if (buf == NULL) fail("out of memory");
+  memset(buf, ' ', total);
+  memcpy(buf + left, s->data, s->len);
+  r = new_str(buf, total);
+  free(buf);
+  return r;
+}
+
+/* str.format (py/objstr.c mp_obj_str_format_helper), for the fields without a format spec or a conversion: the empty, numbered
+ * and named fields, with the {{ and }} escapes. args[0] is the str and the n - 1 positional arguments follow it; the keyword
+ * pairs (name, value) come at args[n]. A value is formatted as str() gives it. The errors are the reference's. A field with an
+ * attribute is refused, as the reference refuses it. */
+static mpv str_format(const MpyStr *fmt, const mpv *args, uint64_t n, uint64_t nkw) {
+  Buf b = {NULL, 0, 0};
+  size_t i = 0, len = fmt->len, npos = (size_t)(n - 1);
+  int64_t arg_i = 0;   /* the automatic fields so far, or -1 once a numbered field has been used */
+  mpv r;
+  while (i < len) {
+    char ch = (char)fmt->data[i];
+    size_t fstart, fend, j;
+    mpv value = MPY_NONE;
+    if (ch == '}') {
+      if (i + 1 < len && fmt->data[i + 1] == '}') {
+        buf_put(&b, "}", 1);
+        i += 2;
+        continue;
+      }
+      fail("ValueError: single '}' encountered in format string");
+    }
+    if (ch != '{') {
+      buf_put(&b, &ch, 1);
+      i++;
+      continue;
+    }
+    i++;
+    if (i < len && fmt->data[i] == '{') {
+      buf_put(&b, "{", 1);
+      i++;
+      continue;
+    }
+    fstart = i;
+    while (i < len && fmt->data[i] != '}' && fmt->data[i] != '!' && fmt->data[i] != ':') i++;
+    fend = i;
+    if (i >= len) fail("ValueError: unmatched '{' in format");
+    if (fmt->data[i] != '}') fail("a str format with a conversion or a format spec is not lowered yet");
+    i++;
+    if (fstart == fend) {   /* an automatic field */
+      if (arg_i < 0) fail("ValueError: can't switch from manual field specification to automatic field numbering");
+      if ((size_t)arg_i >= npos) fail("IndexError: tuple index out of range");
+      value = args[1 + (size_t)arg_i];
+      arg_i++;
+    } else if (fmt->data[fstart] >= '0' && fmt->data[fstart] <= '9') {   /* a numbered field */
+      size_t idx = 0;
+      if (arg_i > 0) fail("ValueError: can't switch from automatic field numbering to manual field specification");
+      for (j = fstart; j < fend && fmt->data[j] >= '0' && fmt->data[j] <= '9'; ++j) idx = idx * 10 + (size_t)(fmt->data[j] - '0');
+      if (idx >= npos) fail("IndexError: tuple index out of range");
+      if (j < fend) fail("NotImplementedError: attributes not supported");
+      value = args[1 + idx];
+      arg_i = -1;
+    } else {   /* a named field: a keyword argument of the call */
+      mpv key;
+      int found = 0;
+      size_t k;
+      for (j = fstart; j < fend && fmt->data[j] != '.' && fmt->data[j] != '['; ++j) {
+      }
+      key = new_str(fmt->data + fstart, j - fstart);
+      for (k = 0; k < nkw && !found; ++k) {
+        mpv name = args[n + 2 * k];
+        if (is_str(name) && str_of(name)->len == j - fstart && memcmp(str_of(name)->data, fmt->data + fstart, j - fstart) == 0) {
+          value = args[n + 2 * k + 1];
+          found = 1;
+        }
+      }
+      if (!found) key_error(key);
+      if (j < fend) fail("NotImplementedError: attributes not supported");
+    }
+    {
+      const MpyStr *text = str_arg(str_of_value(value));
+      buf_put(&b, text->data, text->len);
+    }
+  }
+  r = new_str(b.p ? b.p : "", b.n);
+  free(b.p);
+  return r;
+}
+
+/* The str methods: id is one of BI_STR_UPPER .. BI_STR_FORMAT. nkw counts the keyword pairs after the n positional arguments
+ * (only format takes them). */
+static mpv str_method(int id, const mpv *args, uint64_t n, uint64_t nkw) {
   const MpyStr *s = str_arg(args[0]);
   size_t bs = 0, be = 0;
   switch (id) {
+    case BI_STR_CENTER:
+      method_arity(n, 2, 2);
+      return str_center(s, args[0], args[1]);
+    case BI_STR_FORMAT:
+      return str_format(s, args, n, nkw);
     case BI_STR_UPPER:
     case BI_STR_LOWER:
       method_arity(n, 1, 1);
@@ -2919,8 +3080,8 @@ static mpv set_copy_clear(int id, const mpv *args, uint64_t n) {
 
 static mpv builtin_call(int id, const mpv *args, uint64_t n, uint64_t nkw) {
   char msg[160];
-  if (nkw && id != BI_LIST_SORT) fail("TypeError: function doesn't take keyword arguments");   /* the builtins take none, as the reference's do */
-  if (id >= BI_STR_UPPER && id <= BI_STR_COUNT) return str_method(id, args, n);
+  if (nkw && id != BI_LIST_SORT && id != BI_STR_FORMAT) fail("TypeError: function doesn't take keyword arguments");   /* the builtins take none, as the reference's do */
+  if (id >= BI_STR_UPPER && id <= BI_STR_FORMAT) return str_method(id, args, n, nkw);
   if (id >= BI_LIST_INSERT && id <= BI_LIST_CLEAR) return list_method(id, args, n, nkw);
   if (id == BI_SET_COPY || id == BI_SET_CLEAR) return set_copy_clear(id, args, n);
   if (id >= BI_EXC) {   /* an exception class: its instance, with the one argument it may take */

@@ -170,7 +170,7 @@ static size_t text_of(const SQV *v, char *buf, size_t bufsz, const char **out) {
        * result makes the reference print the instance's address, which is not the same on every run. */
       const SQV *m = inst_mm(v, MT_TOSTRING);
       SQV self = *v, r;
-      if (!m) break;
+      if (!m) rt_error("tostring of an instance without _tostring is not lowered (the reference prints its address)");
       SQV f = *m;
       call_from_native(&f, &r, &self, 1);
       if (r.tag != SQBC_TAG_STRING)
@@ -178,9 +178,10 @@ static size_t text_of(const SQV *v, char *buf, size_t bufsz, const char **out) {
       *out = str_of(&r)->chars;
       return str_of(&r)->len;
     }
+    case SQBC_TAG_CLASS: rt_error("tostring of a class is not lowered (the reference prints its address)");
     default: break;
   }
-  rt_error("tostring of an array, a table, a class, an instance or a function is not lowered");
+  rt_error("tostring of an array, a table or a function is not lowered (the reference prints its address)");
   return 0;
 }
 
@@ -832,6 +833,7 @@ void sqbc_rt_newslota(const SQV *self, const SQV *key, const SQV *val, int bstat
 /* ---- the stack and the root table ----------------------------------------------------------------------------------- */
 
 static SQV *g_stack_end;
+static SQV *g_stack_base;
 static SQV g_root;
 /* The first value above the running frame: the frame of a closure ends at its stacksize, and a native's frame ends after its
  * arguments (sqbc_rt_call sets it and restores it). A native that calls a closure builds the callee's frame here. */
@@ -845,6 +847,7 @@ void sqbc_rt_enter(SQV *base, int stacksize) {
 }
 
 void sqbc_rt_init(SQV *base, size_t nslots) {
+  g_stack_base = base;
   g_stack_end = base + nslots;
   g_top = base;
   g_root = make_table_val();
@@ -1364,6 +1367,8 @@ static int is_false(const SQV *v) { return v->tag == SQBC_TAG_FLOAT ? sqbc_rt_fl
  * is dropped, as SQArray::Set does). Past the end of SRC the item is the last one read: the reference keeps its
  * temporary. A callee that takes one parameter is called with the array below the item (the reference reads the callee
  * from there, and raises "attempt to call 'array'"). */
+#define MAX_CALLBACK_VALUES 64
+
 static void map_items(const SQV *src, const SQV *fn, SqArray *dst) {
   size_t size = array_of(src)->count;
   int nargs = callback_nargs(fn);
@@ -1372,7 +1377,7 @@ static void map_items(const SQV *src, const SQV *fn, SqArray *dst) {
    * (nargs >= 3) and the array (nargs >= 4). sq_call(nargs) takes the callee from the value below the nargs values on top,
    * pops the arguments, pushes the result and __map_array pops it. So the callback's own copy is consumed by a call whose
    * callee is S[1] (nargs 5): the next item then finds the array below, and fails. The values below S[0] are the caller's
-   * stack, which is not modelled: a callee read there (nargs 7 and more) is refused. */
+   * stack is read from the caller's registers (src is the map's frame), as the reference reads them. */
   SQV stk[8];
   int top = 0;
   stk[top++] = *src;
@@ -1387,10 +1392,18 @@ static void map_items(const SQV *src, const SQV *fn, SqArray *dst) {
     if (nargs >= 3) stk[top++] = make_int((int64_t)n);
     if (nargs >= 4) stk[top++] = *src;
     int callee = top - nargs - 1;
-    if (callee < 0)
-      rt_error("callback with 6 or more parameters is not lowered (sq_call reads its callee below the map's frame)");
+    /* A callee below the map's frame is the caller's register below `this` (src is the map's frame): the reference reads
+     * it there too. Below the stack base the reference reads its own stack's head, which is not modelled. */
+    if (callee < 0 && src + callee < g_stack_base)
+      rt_error("callback with 6 or more parameters reads below the stack base (not lowered)");
+    if (nargs + 1 > MAX_CALLBACK_VALUES)
+      rt_error("callback with more than 63 parameters is not lowered");
+    SQV win[MAX_CALLBACK_VALUES];
+    for (int k = 0; k <= nargs; k++) win[k] = callee + k < 0 ? src[callee + k] : stk[callee + k];
     SQV res;
-    call_from_native(&stk[callee], &res, &stk[callee + 1], nargs);
+    call_from_native(&win[0], &res, &win[1], nargs);
+    /* The reference then writes the result over the callee below the frame, which is not modelled: refused here. */
+    if (callee < 0) rt_error("callback with 6 or more parameters returned a value (the caller's stack is not modelled)");
     top -= nargs;
     if (n < dst->count) dst->items[n] = res;
   }

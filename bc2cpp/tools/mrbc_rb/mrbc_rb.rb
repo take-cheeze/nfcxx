@@ -3098,9 +3098,12 @@ module MrbcRb
       @sp = sp
       @nregs = [@nregs, sp + 1].max
       if blk
-        raise Unsupported, 'block argument nil beside a &nil parameter' if blk.expression.respond_to?(:name) && blk.expression.name == NIL_BLOCK_NAME.to_sym
-
-        operand_into(blk.expression ? unparen(blk.expression) : anonymous_local(:&, blk), sp)
+        if blk.expression.respond_to?(:name) && blk.expression.name == NIL_BLOCK_NAME.to_sym
+          # `&nil` at a call site in a file that also has a `&nil` parameter: the marker of NIL_BLOCK_NAME stands for the nil
+          emit(:LOADNIL, sp)
+        else
+          operand_into(blk.expression ? unparen(blk.expression) : anonymous_local(:&, blk), sp)
+        end
       end
       [n | (nk << 4), !blk.nil?]
     end

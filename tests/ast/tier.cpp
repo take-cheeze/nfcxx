@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "nfcast.hpp"
+#include "../../lib/eval/nfceval_build.hpp"
 
 using nfcast::Rets;
 using nfcast::State;
@@ -690,6 +691,23 @@ int main() {
     T.tier_wait();
     CHECK(T.stats.tier_compiled == 1 && T.stats.tier_failed == 0);
     signal(SIGCHLD, old);
+  }
+
+  std::printf("-- the exit status of a driver run: seen whatever the host does with SIGCHLD\n");
+  {
+    for (int ignore = 0; ignore < 2; ++ignore) {
+      void (*old)(int) = signal(SIGCHLD, ignore ? SIG_IGN : SIG_DFL);
+      const char* codes[] = {"exit 3", "exit 0", "exit 127"};
+      const int want[] = {3, 0, 127};
+      for (int k = 0; k < 3; ++k) {
+        nfceval::build::Child c;
+        std::vector<std::string> args = {"/bin/sh", "-c", codes[k]};
+        CHECK(nfceval::build::spawn(c, args, "/dev/null"));
+        nfceval::build::wait(c, true, 0);
+        CHECK(c.finished && c.status == want[k]);
+      }
+      signal(SIGCHLD, old);
+    }
   }
 
   std::printf("-- on-stack replacement: a loop is taken over in the middle of a call\n");

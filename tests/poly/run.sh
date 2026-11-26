@@ -37,7 +37,7 @@ for be in $backends; do
           echo "SKIP $be poly python: python3-config or Python.h not found (apt-get install python3-dev)"
         fi ;;
       ast)
-        defs+=(-DTEST_AST); incs+=(-I lib/ast); srcs+=(lib/poly/nfcpoly_ast.cpp lib/ast/nfcast_core.cpp lib/ast/nfcast_ops.cpp lib/ast/nfcast_parse.cpp lib/ast/nfcast_nodes.cpp lib/ast/nfcast_lib.cpp lib/ast/nfcast_tier.cpp lib/ast/nfcast_jit.cpp); built+=(ast) ;;
+        defs+=(-DTEST_AST); incs+=(-I lib/ast); srcs+=(lib/poly/nfcpoly_ast.cpp lib/ast/nfcast_core.cpp lib/ast/nfcast_ops.cpp lib/ast/nfcast_parse.cpp lib/ast/nfcast_nodes.cpp lib/ast/nfcast_lib.cpp lib/ast/nfcast_tier.cpp lib/ast/nfcast_jit.cpp lib/ast/nfcast_bytecode.cpp tools/lua54bc/lua54_chunk.cpp); built+=(ast) ;;
       astro)
         out=$(NFCXX_BACKEND=$be scripts/setup-poly-astro.sh 2>&1); rc=$?
         if [ $rc = 3 ]; then echo "SKIP $be poly astro: $(tail -1 <<<"$out" | sed 's/^setup-poly-astro: //')"; continue
