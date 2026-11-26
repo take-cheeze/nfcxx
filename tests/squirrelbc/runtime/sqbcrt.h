@@ -48,6 +48,8 @@ void sq_dispatch(int fn, SQV *ret, SQV *frame, const SQV *clo);
 
 /* Sets up the stack of NSLOTS values at BASE and the root table, which is the `this` of the main function (base[0]). */
 void sqbc_rt_init(SQV *base, size_t nslots);
+/* The main function starts: its frame at BASE has STACKSIZE values, and the callbacks it calls are built above them. */
+void sqbc_rt_enter(SQV *base, int stacksize);
 
 /* The helpers the IR calls. A runtime error prints `error: MESSAGE` on stdout and exits with status 1. */
 void sqbc_rt_arith(int op, SQV *dst, SQV *a, SQV *b);
