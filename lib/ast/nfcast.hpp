@@ -421,6 +421,19 @@ inline HostObject* Value::hostobj() const { return static_cast<HostObject*>(o); 
 inline bool Value::is_closure() const { return t == T_FUN && o->gctype == G_CLOSURE; }
 inline bool Value::is_native() const { return t == T_FUN && o->gctype == G_NATIVE; }
 
+// ---- bytecode stack access (nfcast_bytecode.cpp; docs/notes/ast.md, "Bytecode stack access") ----
+// The registers of the running frame when it is a function of a Lua 5.4 binary chunk: the innermost script function, which is the
+// one that called the native. Registers are numbered from 0 as luac -l numbers them (R0 is the first parameter or local).
+//   bc_stack_get(i)     the value of register i
+//   bc_stack_set(i, v)  stores v in register i (through the Cell of a captured register)
+//   bc_stack_top()      the number of registers of the frame (its maxstacksize): valid indices are 0 .. bc_stack_top() - 1
+// Each one raises an error when the calling function is not a bytecode function, or when the index is not an integer in range.
+void bc_stack_get(State& S, Args a, Rets& r, Native& self);
+void bc_stack_set(State& S, Args a, Rets& r, Native& self);
+void bc_stack_top(State& S, Args a, Rets& r, Native& self);
+// Binds the three as the globals stack_get, stack_set and stack_top (a host may also register bc_stack_* under other names).
+void bc_bind_stack_access(State& S);
+
 // Number formatting and parsing exactly as Lua does it ("%.14g", integral floats print with ".0").
 std::string number_to_string(const Value& v);
 // A string as a number (decimal, hex, exponent, surrounding spaces); false when it is not one.

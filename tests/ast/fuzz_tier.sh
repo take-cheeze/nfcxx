@@ -23,7 +23,7 @@ fi
 be=${NFCXX_BACKEND:-gcc}
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 NFCXX_BACKEND=$be ./nfcxx -O2 -I lib/ast tests/ast/driver.cpp lib/ast/nfcast_core.cpp lib/ast/nfcast_ops.cpp lib/ast/nfcast_parse.cpp \
-  lib/ast/nfcast_nodes.cpp lib/ast/nfcast_lib.cpp lib/ast/nfcast_tier.cpp lib/ast/nfcast_jit.cpp -o "$tmp/driver" || exit 1
+  lib/ast/nfcast_nodes.cpp lib/ast/nfcast_lib.cpp lib/ast/nfcast_tier.cpp lib/ast/nfcast_jit.cpp lib/ast/nfcast_bytecode.cpp tools/lua54bc/lua54_chunk.cpp -o "$tmp/driver" || exit 1
 norm() { sed -E 's/0x[0-9a-f]{6,}/ADDR/g; s/-nan/nan/g' "$1"; }   # the sign of a NaN is not something the tier promises
 export NFCXX="$PWD/nfcxx" NFCXX_BACKEND=$be
 bad=0; compiled=0; calls=0; osr=0

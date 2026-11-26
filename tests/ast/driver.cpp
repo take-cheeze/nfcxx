@@ -32,6 +32,7 @@ int main(int argc, char** argv) {
   if (code.size() >= 2 && code[0] == '#') code = "--" + code;  // a shebang line
   nfcast::State S;
   S.open_libs();
+  nfcast::bc_bind_stack_access(S);  // stack_get, stack_set, stack_top (for a binary chunk, tests/ast/bytecode/stack.lua)
   if (jit) {  // the machine-code tier for loops: needs the tier on (NFCAST_TIER=sync or async)
     nfcast::TierOptions o = S.tier_options();
     if (o.mode == nfcast::TierOptions::Off) {
