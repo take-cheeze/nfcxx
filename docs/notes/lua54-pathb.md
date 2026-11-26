@@ -1,9 +1,9 @@
 # Lua 5.4 bytecode to Path B IR
 
-Status: every opcode lowers. 89 programs match Lua 5.4.9 (`tests/lua54bc/lower/run.sh`), and 52 error programs print the
+Status: every opcode lowers. 106 programs match Lua 5.4.9 (`tests/lua54bc/lower/run.sh`), and 54 error programs print the
 same first line as lua.c, with its position, message and variable info. The runtime has numbers with coercion, strings
 with the string metatable, tables with metatables, closures and upvalues, multiple results, varargs, the metamethods
-listed below, to-be-closed variables, protected calls (`pcall` and `xpcall`, with `error` and its levels, and `assert`),
+listed below, weak tables and `__gc` finalizers, to-be-closed variables, protected calls (`pcall` and `xpcall`, with `error` and its levels, and `assert`),
 and the libraries: base (`print`, `type`, `tostring`, `tonumber`, `pairs`, `next`, `ipairs`, `select` with negative
 indices, `setmetatable`, `getmetatable`, `rawget`, `rawset`, `rawequal`, `rawlen`, `_G`, `_VERSION`), `table` (`insert`,
 `remove`, `concat`, `unpack`, `pack`, `move`, `sort`), `math` (`floor`, `ceil`, `abs`, `max`, `min`, `sqrt`, `tointeger`,
@@ -150,12 +150,34 @@ varargs) starts with a header and is linked into one list and into a set of addr
 
 The sweep frees the unmarked objects. A collection runs when the bytes allocated since the last one exceed a threshold
 of at least 4 MB, or twice the live bytes. The collector is off until the main function starts, since the stack top is
-recorded then. `collectgarbage` supports `collect`, `step`, `count` (KB), `isrunning`, `stop` and `restart`.
+recorded then. `collectgarbage` supports `collect`, `step`, `count` (KB), `isrunning`, `stop` and `restart`; `stop` also
+stops the automatic collections, and an explicit `collect` or `step` still runs.
 
-The suite runs twice: normally, and with `LUA54RT_GC_THRESHOLD=1`, which collects at nearly every allocation. Both pass.
-On the garbage-heavy program (`gc_garbage.lua`) the peak resident size is 19 MB with collection, against 90 MB without.
+A collection marks the roots, then the atomic phase of lgc.c runs (`gc_collect`): the weak values are cleared, the tables
+with finalizers that are unmarked are resurrected (`separate_tobefnz`, newest first), and the weak keys are cleared, so
+a key of a finalized object stays until the next collection. Ephemerons (weak keys only) mark a value only while its key
+is alive (`converge_ephemerons`). A string is never cleared from a weak table, and a dead weak key becomes `TAG_DEADKEY`,
+which matches no key. Only an explicit `collectgarbage` marks the Lua stack up to the end of its arguments: a call is
+made into a fresh register, so the registers above it are dead, as lgc.c's top is. A call to `collectgarbage` first
+zeroes the stack below its caller (`scrub_stack`), and the host-call results are zeroed, so that no stale address
+left by an earlier call keeps an object alive through the conservative scan.
 
-Not done: weak tables (`__mode`), finalizers (`__gc`), and incremental or generational collection.
+Finalizers (`__gc`): `setmetatable` marks a table whose metatable has a `__gc` field (once, as luaC_checkfinalizer does;
+no marks while the state closes). A due finalizer runs from `run_finalizers` after an explicit collection, newest first,
+with the object as its argument; its errors are dropped (lua.c's warnings are off), and `collectgarbage` inside one
+gives nil. An automatic collection only makes finalizers due: they run at the next explicit collection or at exit.
+`lua54rt_close_state` (the driver after the results are printed, after an uncaught error's report, and `os.exit(code,
+true)`) runs the due ones and then all the marked objects, newest first, as `lua_close` does. The objects that are
+finalized are freed by a later collection if nothing refers to them.
+
+The suite runs three times: normally, with `LUA54RT_GC_THRESHOLD=1` (collection at nearly every allocation) and with
+`LUA54RT_GC_THRESHOLD=64`. All pass. On the garbage-heavy program (`gc_garbage.lua`) the peak resident size is 19 MB with
+collection, against 90 MB without.
+
+Not done: incremental or generational collection, so the timing of the automatic collections is not the reference's.
+The finalizer order and the weak results are those of the reference only after an explicit `collectgarbage` (the tests
+that depend on finalizer order use `collectgarbage("stop")` for the same reason). Userdata and `__gc` on anything but
+tables are not here (there are no userdata).
 
 ## Tables
 
@@ -202,11 +224,11 @@ gives lstrlib's `attempt to add a 'string' with a 'number'`. Only tables have me
 
 - `tests/lua54bc/run.sh`: the reader loads real 5.4.9 chunks (dumped with `string.dump`); the opcode sequence matches
   `luac -l -l` when `LUAC` is set. The opcode check has not run: no `luac` is available here.
-- `tests/lua54bc/lower/run.sh`: 89 programs lower, emit, assemble, link (with `-lm`), run, and match
-  `print(dofile(...))` from Lua 5.4.9. 52 programs in `lower/err/` must give lua.c's first error line and status 1, and 13
+- `tests/lua54bc/lower/run.sh`: 106 programs lower, emit, assemble, link (with `-lm`), run, and match
+  `print(dofile(...))` from Lua 5.4.9. 54 programs in `lower/err/` must give lua.c's first error line and status 1, and 13
   in `lower/tb/` must give lua.c's whole stderr (the traceback) and status 1. Needs
   `LUA` (a 5.4.9 interpreter). The suite also passes with `LUA54RT_GC_THRESHOLD=1`, which collects at nearly every
-  allocation.
+  allocation, and with `LUA54RT_GC_THRESHOLD=64`.
 
 ## String patterns
 
@@ -238,5 +260,6 @@ in the replacement function) leaks that buffer. The matcher's recursion is on th
   and `io` (`read`, files). Each is a host function in the runtime.
 - **Library names in messages**: a `pcall` that calls a library function directly gives `'rep'` where Lua gives
   `'string.rep'`, and `math.random(2, 1)` called through `pcall` is `'random'` here. Calls from Lua code are the same.
-- **`__gc`, `__mode`**.
+- **Incremental and generational collection**, so the timing of automatic collections (and of finalizers they make due)
+  differs from the reference; see "Garbage collection".
 - **`LOADKX` with more than 2^17 constants** is lowered but untested.

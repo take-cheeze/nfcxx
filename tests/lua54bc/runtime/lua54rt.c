@@ -26,7 +26,8 @@ typedef struct LV {
 /* lobject.h variants: type | variant << 4. */
 enum {
   TAG_NIL = 0x00, TAG_FALSE = 0x01, TAG_TRUE = 0x11, TAG_INT = 0x03, TAG_FLOAT = 0x13,
-  TAG_STR = 0x04, TAG_TABLE = 0x05, TAG_LCL = 0x06, TAG_LCF = 0x16
+  TAG_STR = 0x04, TAG_TABLE = 0x05, TAG_LCL = 0x06, TAG_LCF = 0x16,
+  TAG_DEADKEY = 0x7f   /* a key of a weak table whose object was collected: it matches no key (lgc.c's dead keys) */
 };
 
 /* lopcodes.h opcode numbers of the binary ops (the helper takes the base op, not the K or I form). */
@@ -46,6 +47,8 @@ typedef struct GCObj {
 enum { GC_STR = 1, GC_TABLE, GC_LCL, GC_UPVAL, GC_LCF, GC_VARARGS };
 static void *gc_alloc(uint8_t kind, size_t size);
 static int host_collectgarbage(LV *out, LV *args, int nargs);
+void lua54rt_close_state(void);
+static void scrub_stack(void);
 
 typedef struct LString {
   GCObj gc;
@@ -125,6 +128,7 @@ static void raise_value(LV err) {
   close_to(NULL, &err);   /* lua.c's protected call closes the to-be-closed variables before it reports the error */
   fprintf(stderr, "lua: %s\n", report);
   free(report);
+  lua54rt_close_state();  /* lua.c's lua_close runs the finalizers after the report */
   exit(1);
 }
 
@@ -345,7 +349,7 @@ static int to_number(const LV *x, LV *out) {
  * next/pairs and the moment of a rehash are Lua's for integer, float and boolean keys. The hash of a string or a pointer
  * differs from Lua's (Lua seeds its string hash randomly), so their positions do too. ---- */
 typedef struct Node {
-  LV key;     /* TAG_NIL: a node whose key was never set */
+  LV key;     /* TAG_NIL: a node whose key was never set; TAG_DEADKEY: a weak key that was collected */
   LV val;     /* TAG_NIL: an empty entry; its key stays until the next resize */
   int next;   /* offset to the next node of the chain, 0 at the end */
 } Node;
@@ -355,6 +359,7 @@ typedef struct Table {
   LV *array;                  /* the array part: realasize entries */
   unsigned int alimit;        /* ltable.c's alimit: the array size, or a hint for '#' when norealasize is set */
   unsigned char norealasize;  /* ltable.c's BITRAS: alimit is not the real size of the array */
+  unsigned char tofin;        /* marked for finalization (lgc.c's FINALIZEDBIT): in fin_objs or tbf */
   Node *node;                 /* the hash part: 2^lsizenode nodes; &dummy_node when it is empty */
   unsigned char lsizenode;
   Node *lastfree;             /* the search for a free node goes down from here; NULL when the hash part is dummy_node */
@@ -1100,12 +1105,15 @@ void lua54rt_call(LV *fn, int nargs, LV *args, LV *ret, int wanted, int a) {
   call_mm_event = NULL;
   if (fn->tag == TAG_LCF) {
     LV out[64];
+    /* zeroed: the collector scans the C stack, and a stale address left here by an earlier call would keep its object */
+    memset(out, 0, sizeof out);
     const char *saved = site;
     HostFn *saved_host = cur_host;
     int saved_tfor = host_from_tfor;
     push_callsite(caller_site(), fn, 0, mm);
     cur_host = (HostFn *)fn->v.p;
     host_from_tfor = from_tfor;
+    if (cur_host->fn == host_collectgarbage) scrub_stack();
     int n = cur_host->fn(out, args, nargs);
     host_from_tfor = saved_tfor;
     cur_host = saved_host;
@@ -1840,6 +1848,8 @@ static int host_select(LV *out, LV *args, int nargs) {
   return produced;
 }
 
+static void gc_check_finalizer(Table *t);
+
 /* lbaselib.c's luaB_setmetatable: a metatable with a __metatable field cannot be changed. */
 static int host_setmetatable(LV *out, LV *args, int nargs) {
   Table *t = arg_table(args, nargs, 1, "setmetatable");
@@ -1848,6 +1858,7 @@ static int host_setmetatable(LV *out, LV *args, int nargs) {
   LV protected_field;
   if (get_mt(&args[0], "__metatable", &protected_field)) rt_fail("cannot change a protected metatable", -1);
   t->meta = args[1].tag == TAG_TABLE ? (Table *)args[1].v.p : NULL;
+  if (t->meta != NULL) gc_check_finalizer(t);
   out[0] = args[0];
   return 1;
 }
@@ -2013,7 +2024,7 @@ static char *traceback_text(void) {
   char **items = (char **)malloc(sizeof(char *) * (size_t)(depth + 2));
   if (items == NULL) die("out of memory");
   int n = 0;
-  char line[512], desc[300], item[900];
+  char line[512], desc[512], item[1100];
   for (int k = depth - 1; k >= 0; --k) {
     if (k + 1 < depth && callrec[k + 1].tail) continue;   /* this frame made a tail call: it is gone */
     if (callrec[k].callee.tag == TAG_LCF) {
@@ -3763,6 +3774,7 @@ static int host_oexit(LV *out, LV *args, int nargs) {
   int code = 0;
   if (nargs >= 1 && args[0].tag == TAG_FALSE) code = 1;
   else if (nargs >= 1 && args[0].tag == TAG_INT) code = (int)args[0].v.i;
+  if (nargs >= 2 && truthy(&args[1])) lua54rt_close_state();   /* os.exit(code, true) closes the state, as lua.c's does */
   fflush(stdout);
   exit(code);
 }
@@ -4006,9 +4018,13 @@ static void set_remove(void *p) {
 
 static void gc_collect(void);
 
+static int gc_busy = 0;      /* a collection is running */
+static int gc_in_fin = 0;    /* finalizers are running: no collection, and collectgarbage gives nil (as lbaselib's) */
+static int gc_stopped = 0;   /* collectgarbage("stop"): no automatic collection; an explicit one still runs */
+
 /* Allocates an object of kind with size bytes, zeroed. A collection runs first when enough has been allocated. */
 static void *gc_alloc(uint8_t kind, size_t size) {
-  if (stack_base != NULL && gc_allocated >= gc_threshold) gc_collect();
+  if (stack_base != NULL && !gc_busy && !gc_in_fin && !gc_stopped && gc_allocated >= gc_threshold) gc_collect();
   GCObj *o = (GCObj *)calloc(1, size);
   if (o == NULL) die("out of memory");
   o->kind = kind;
@@ -4041,19 +4057,125 @@ static void mark_value(const LV *v) {
   if (v->tag == TAG_STR || v->tag == TAG_TABLE || v->tag == TAG_LCL || v->tag == TAG_LCF) mark_obj(v->v.p);
 }
 
+/* ---- weak tables and finalizers (lgc.c). A table whose metatable has __mode is weak: its keys (k), its values (v) or
+ * both (kv) are not marked by traverse(). Its ephemeron form (k only) marks a value when its key is alive. After the
+ * roots, the atomic phase (gc_collect) clears the weak values, resurrects the objects that have finalizers and
+ * clears the weak keys, as lgc.c's atomic does. ---- */
+#define WEAK_K 1
+#define WEAK_V 2
+
+typedef struct WeakTab {
+  Table *t;
+  int mode;
+} WeakTab;
+static WeakTab *weak_tabs = NULL;
+static size_t weak_n = 0, weak_cap = 0;
+
+/* fin_objs: the tables marked for finalization (lgc.c's finobj), oldest first. tbf: the objects whose finalizers are due
+ * (lgc.c's tobefnz), newest first, from tbf_head. */
+static Table **fin_objs = NULL;
+static size_t fin_n = 0, fin_cap = 0;
+static Table **tbf = NULL;
+static size_t tbf_n = 0, tbf_cap = 0, tbf_head = 0;
+
+static int gc_closing = 0;   /* the state is closing: no object gets a finalizer any more (GCSTPCLS) */
+/* The Lua stack is a root up to this index. A collectgarbage call marks it up to the end of its arguments: the registers
+ * above a call are dead (a call is made into a fresh register), as lgc.c marks up to the top of the running function. */
+static size_t gc_root_top = LUA54RT_STACK;
+
+/* Strings with the names the collector looks up, in static memory (no allocation during a collection). */
+typedef struct StaticStr {
+  GCObj gc;
+  size_t len;
+  char bytes[8];
+} StaticStr;
+static StaticStr str_mode_key = {{NULL, 0, 0, 0}, 6, "__mode"};
+static StaticStr str_gc_key = {{NULL, 0, 0, 0}, 4, "__gc"};
+
+static LV static_key(StaticStr *s) {
+  LV v;
+  v.tag = TAG_STR;
+  v.v.p = s;
+  return v;
+}
+
+static int iscollectable(const LV *v) { return v->tag == TAG_TABLE || v->tag == TAG_LCL || v->tag == TAG_LCF; }
+
+/* A string or an object that is not marked yet (a string is always an object here, never cleared). */
+static int unmarked_obj(const LV *v) {
+  return (v->tag == TAG_STR || iscollectable(v)) && !((GCObj *)v->v.p)->marked;
+}
+
+/* lgc.c's iscleared: a string is kept (it is marked); an object is cleared when it is not marked. */
+static int iscleared(const LV *v) {
+  if (v->tag == TAG_STR) {
+    mark_obj(v->v.p);
+    return 0;
+  }
+  if (!iscollectable(v)) return 0;
+  return !((GCObj *)v->v.p)->marked;
+}
+
+static void set_nil(LV *v) { v->tag = TAG_NIL; }
+
+/* The __mode of t's metatable: WEAK_K and WEAK_V bits, 0 for a strong table. */
+static int table_weakmode(Table *t) {
+  if (t->meta == NULL) return 0;
+  LV key = static_key(&str_mode_key);
+  LV v = raw_get(t->meta, &key);
+  if (v.tag != TAG_STR) return 0;
+  const LString *s = (const LString *)v.v.p;
+  int mode = 0;
+  if (memchr(s->bytes, 'k', s->len) != NULL) mode |= WEAK_K;
+  if (memchr(s->bytes, 'v', s->len) != NULL) mode |= WEAK_V;
+  return mode;
+}
+
+static void push_weak(Table *t, int mode) {
+  if (weak_n == weak_cap) {
+    weak_cap = weak_cap == 0 ? 64 : weak_cap * 2;
+    weak_tabs = (WeakTab *)realloc(weak_tabs, weak_cap * sizeof(WeakTab));
+    if (weak_tabs == NULL) die("out of memory");
+  }
+  weak_tabs[weak_n].t = t;
+  weak_tabs[weak_n].mode = mode;
+  weak_n++;
+}
+
+static void push_tbf(Table *t) {
+  if (tbf_n == tbf_cap) {
+    tbf_cap = tbf_cap == 0 ? 16 : tbf_cap * 2;
+    tbf = (Table **)realloc(tbf, tbf_cap * sizeof(Table *));
+    if (tbf == NULL) die("out of memory");
+  }
+  tbf[tbf_n++] = t;
+}
+
 static void traverse(GCObj *o) {
   switch (o->kind) {
     case GC_TABLE: {
       Table *t = (Table *)o;
+      int mode = table_weakmode(t);
       unsigned int asize = realasize(t);
-      for (unsigned int i = 0; i < asize; ++i) mark_value(&t->array[i]);
+      if (mode != 0) push_weak(t, mode);
+      if (!(mode & WEAK_V)) {   /* the array part's keys are integers: its values are strong unless they are weak */
+        for (unsigned int i = 0; i < asize; ++i) mark_value(&t->array[i]);
+      }
       if (!table_isdummy(t)) {
-        /* the keys of empty entries are marked too: a key that is freed could be reused and match a lookup */
         for (size_t i = 0; i < node_count(t); ++i) {
-          if (t->node[i].key.tag != TAG_NIL) {
-            mark_value(&t->node[i].key);
-            mark_value(&t->node[i].val);
+          Node *n = &t->node[i];
+          if (mode == 0) {
+            /* the keys of empty entries are marked too: a key that is freed could be reused and match a lookup */
+            if (n->key.tag != TAG_NIL) {
+              mark_value(&n->key);
+              mark_value(&n->val);
+            }
+            continue;
           }
+          /* an empty entry marks nothing: its key is cleared (clear_weak_keys) */
+          if (n->val.tag == TAG_NIL) continue;
+          if (!(mode & WEAK_K)) mark_value(&n->key);
+          if (!(mode & (WEAK_K | WEAK_V))) mark_value(&n->val);
         }
       }
       mark_obj(t->meta);
@@ -4088,6 +4210,108 @@ static void propagate(void) {
     GCObj *o = gray[--gray_n];
     traverse(o);
   }
+}
+
+/* An ephemeron key is alive when it is not an object, or it is marked. A string key is alive and marked. */
+static int key_alive(const LV *k) {
+  if (k->tag == TAG_STR) {
+    mark_obj(k->v.p);
+    return 1;
+  }
+  if (!iscollectable(k)) return 1;
+  return ((GCObj *)k->v.p)->marked;
+}
+
+/* lgc.c's convergeephemerons: a value of a weak-key table is marked when its key is alive, until nothing changes. */
+static void converge_ephemerons(void) {
+  int changed;
+  do {
+    changed = 0;
+    for (size_t w = 0; w < weak_n; ++w) {   /* weak_n may grow as propagate finds more tables */
+      if (weak_tabs[w].mode != WEAK_K) continue;
+      Table *t = weak_tabs[w].t;
+      if (table_isdummy(t)) continue;
+      for (size_t i = 0; i < node_count(t); ++i) {
+        Node *n = &t->node[i];
+        if (n->val.tag == TAG_NIL || !key_alive(&n->key)) continue;
+        if (unmarked_obj(&n->val)) {
+          mark_value(&n->val);
+          propagate();
+          changed = 1;
+        }
+      }
+    }
+  } while (changed);
+}
+
+/* Weak values are cleared: an array or hash value that is not marked goes (a string is kept). */
+static void clear_weak_values(void) {
+  for (size_t w = 0; w < weak_n; ++w) {
+    if (!(weak_tabs[w].mode & WEAK_V)) continue;
+    Table *t = weak_tabs[w].t;
+    unsigned int asize = realasize(t);
+    for (unsigned int i = 0; i < asize; ++i) {
+      if (iscleared(&t->array[i])) set_nil(&t->array[i]);
+    }
+    if (table_isdummy(t)) continue;
+    for (size_t i = 0; i < node_count(t); ++i) {
+      Node *n = &t->node[i];
+      if (n->val.tag != TAG_NIL && iscleared(&n->val)) set_nil(&n->val);
+    }
+  }
+}
+
+/* Weak keys are cleared: an entry whose key is not marked goes, and its key becomes dead (it matches no key again). A
+ * string key with a value is kept; a string key without one is dead when it is not marked. */
+static void clear_weak_keys(void) {
+  for (size_t w = 0; w < weak_n; ++w) {
+    Table *t = weak_tabs[w].t;
+    if (table_isdummy(t)) continue;
+    for (size_t i = 0; i < node_count(t); ++i) {
+      Node *n = &t->node[i];
+      if (n->key.tag == TAG_NIL || n->key.tag == TAG_DEADKEY) continue;
+      if (n->key.tag == TAG_STR && n->val.tag != TAG_NIL) mark_obj(n->key.v.p);
+      if (unmarked_obj(&n->key)) {
+        set_nil(&n->val);
+        n->key.tag = TAG_DEADKEY;
+      }
+    }
+  }
+}
+
+/* lgc.c's separatetobefnz: the unmarked objects with finalizers are due, newest first; the marked ones stay in fin_objs. */
+static void separate_tobefnz(void) {
+  for (size_t i = fin_n; i-- > 0;) {
+    if (!fin_objs[i]->gc.marked) push_tbf(fin_objs[i]);
+  }
+  size_t keep = 0;
+  for (size_t i = 0; i < fin_n; ++i) {
+    if (fin_objs[i]->gc.marked) fin_objs[keep++] = fin_objs[i];
+  }
+  fin_n = keep;
+}
+
+/* lbaselib's setmetatable and lgc.c's luaC_checkfinalizer: a table whose new metatable has a __gc field is marked for
+ * finalization, once. A table marked by an earlier metatable keeps its mark. */
+static void gc_check_finalizer(Table *t) {
+  if (t->tofin || gc_closing || t->meta == NULL) return;
+  LV key = static_key(&str_gc_key);
+  if (raw_get(t->meta, &key).tag == TAG_NIL) return;
+  t->tofin = 1;
+  if (fin_n == fin_cap) {
+    fin_cap = fin_cap == 0 ? 16 : fin_cap * 2;
+    fin_objs = (Table **)realloc(fin_objs, fin_cap * sizeof(Table *));
+    if (fin_objs == NULL) die("out of memory");
+  }
+  fin_objs[fin_n++] = t;
+}
+
+/* Zeroes the stack below the caller's frame. Called just before collectgarbage, so that the frames of the collection are
+ * made on zeroed memory: an uninitialized slot of such a frame would otherwise hold the address of an object that an
+ * earlier call (setmetatable, say) left there, and the conservative scan would keep the object alive. */
+static void __attribute__((noinline)) scrub_stack(void) {
+  volatile unsigned char buf[32768];
+  for (size_t i = 0; i < sizeof buf; ++i) buf[i] = 0;
 }
 
 /* The C stack, from here up to the main function's frame: the registers are spilled into a jmp_buf first. */
@@ -4139,38 +4363,124 @@ static void sweep(void) {
   gc_live = live;
 }
 
+/* lgc.c's atomic phase, after the roots: weak values, then the objects with finalizers are resurrected (they are due),
+ * then the weak keys are cleared, so a key of a resurrected object stays until the next collection. */
 static void gc_collect(void) {
-  if (stack_base == NULL) return;
+  if (stack_base == NULL || gc_busy || gc_in_fin) return;
+  gc_busy = 1;
   gray_n = 0;
-  for (size_t i = 0; i < LUA54RT_STACK; ++i) mark_value(&lua_stack[i]);
+  weak_n = 0;
+  for (size_t i = 0; i < gc_root_top; ++i) mark_value(&lua_stack[i]);
   scan_c_stack();
   for (UpVal *u = open_upvals; u != NULL; u = u->open_next) mark_obj(u);
   mark_obj(string_meta);
   mark_value(&next_fn);
   mark_value(&ipairs_iter_fn);
   mark_obj(running_main);
+  for (size_t i = tbf_head; i < tbf_n; ++i) mark_obj(tbf[i]);
   propagate();
+  converge_ephemerons();
+  clear_weak_values();
+  separate_tobefnz();
+  for (size_t i = tbf_head; i < tbf_n; ++i) mark_obj(tbf[i]);
+  propagate();
+  converge_ephemerons();
+  clear_weak_values();
+  clear_weak_keys();
   sweep();
   gc_threshold = gc_live * 2 > gc_min_threshold ? gc_live * 2 : gc_min_threshold;
   gc_allocated = 0;
+  gc_busy = 0;
 }
 
-/* collectgarbage(opt): "collect" (the default), "step", "count" (in KB), "isrunning", "stop", "restart". */
+/* The finalizer of t, called as lgc.c's GCTM does: with t as its argument, and an error in it is dropped (a warning in
+ * Lua, which lua.c leaves off). The call is protected like a pcall. */
+static void call_finalizer(Table *t) {
+  LV obj, fn;
+  LV frame[1024], ret[64];
+  PCall p;
+  if (t->meta == NULL) return;
+  LV key = static_key(&str_gc_key);
+  fn = raw_get(t->meta, &key);
+  if (fn.tag == TAG_NIL) return;
+  obj.tag = TAG_TABLE;
+  obj.v.p = t;
+  const char *saved_site = site;
+  int saved_depth = call_depth;
+  p.prev = pcall_top;
+  p.base = frame;
+  pcall_top = &p;
+  if (setjmp(p.jb) == 0) {
+    frame[0] = obj;
+    lua54rt_call(&fn, 1, frame, ret, 0, 0);
+    pcall_top = p.prev;
+    site = saved_site;
+  } else {
+    site = saved_site;
+    call_depth = saved_depth;
+    pcall_top = p.prev;
+    close_to(p.base, &p.err);
+  }
+}
+
+/* GCTM for each due object, newest first. The object is normal again once it is taken (lgc.c's udata2finalize), so a
+ * finalizer may give it a finalizer again. */
+static void run_finalizers(void) {
+  if (gc_in_fin) return;
+  gc_in_fin = 1;
+  while (tbf_head < tbf_n) {
+    Table *t = tbf[tbf_head++];
+    t->tofin = 0;
+    call_finalizer(t);
+  }
+  tbf_head = tbf_n = 0;
+  gc_in_fin = 0;
+}
+
+/* lua_close (luaC_freeallobjects): every object with a finalizer is due, newest first, after the ones already due; no
+ * object gets a finalizer from now on. */
+void lua54rt_close_state(void) {
+  if (stack_base == NULL) return;
+  gc_closing = 1;
+  for (size_t i = fin_n; i-- > 0;) push_tbf(fin_objs[i]);
+  fin_n = 0;
+  run_finalizers();
+}
+
+/* The index of the Lua stack at the end of a call's arguments (the top of the registers that are live), or the whole
+ * stack when the arguments are not on it (a call from a metamethod or a library function). */
+static size_t lua_top_index(const LV *args, int nargs) {
+  uintptr_t lo = (uintptr_t)lua_stack, hi = (uintptr_t)(lua_stack + LUA54RT_STACK), a = (uintptr_t)args;
+  if (a < lo || a >= hi) return LUA54RT_STACK;
+  size_t top = (size_t)(args - lua_stack) + (size_t)nargs;
+  return top < LUA54RT_STACK ? top : LUA54RT_STACK;
+}
+
+/* collectgarbage(opt): "collect" (the default), "step", "count" (in KB), "isrunning", "stop", "restart". A collection
+ * calls the finalizers that are due after it, as Lua's full collection does. */
 static int host_collectgarbage(LV *out, LV *args, int nargs) {
   const char *opt = "collect";
   if (nargs >= 1 && args[0].tag != TAG_NIL) {
     if (args[0].tag != TAG_STR) lib_arg_error(1, "collectgarbage", "string", arg_typename(args, nargs, 1));
     opt = ((LString *)args[0].v.p)->bytes;
   }
-  if (strcmp(opt, "collect") == 0) {
-    gc_collect();
-    out[0].tag = TAG_INT;
-    out[0].v.i = 0;
+  int known = strcmp(opt, "collect") == 0 || strcmp(opt, "step") == 0 || strcmp(opt, "count") == 0 ||
+              strcmp(opt, "isrunning") == 0 || strcmp(opt, "stop") == 0 || strcmp(opt, "restart") == 0;
+  if (known && gc_in_fin) {   /* inside a finalizer lua_gc gives -1, and lbaselib pushes a fail */
+    out[0].tag = TAG_NIL;
     return 1;
   }
-  if (strcmp(opt, "step") == 0) {
+  if (strcmp(opt, "collect") == 0 || strcmp(opt, "step") == 0) {
+    gc_root_top = lua_top_index(args, nargs);
     gc_collect();
-    out[0].tag = TAG_TRUE;
+    gc_root_top = LUA54RT_STACK;
+    run_finalizers();
+    if (opt[0] == 's') {
+      out[0].tag = TAG_TRUE;
+    } else {
+      out[0].tag = TAG_INT;
+      out[0].v.i = 0;
+    }
     return 1;
   }
   if (strcmp(opt, "count") == 0) {
@@ -4179,10 +4489,11 @@ static int host_collectgarbage(LV *out, LV *args, int nargs) {
     return 1;
   }
   if (strcmp(opt, "isrunning") == 0) {
-    out[0].tag = TAG_TRUE;
+    out[0].tag = gc_stopped ? TAG_FALSE : TAG_TRUE;
     return 1;
   }
   if (strcmp(opt, "stop") == 0 || strcmp(opt, "restart") == 0) {
+    gc_stopped = opt[0] == 's';
     out[0].tag = TAG_INT;
     out[0].v.i = 0;
     return 1;
