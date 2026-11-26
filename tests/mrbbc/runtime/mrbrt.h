@@ -4,7 +4,7 @@
  * Immediates are nil, false, true and integers. The heap values are a string (tag STR: the int64 is the MStr pointer),
  * an array (ARY: the MAry pointer) and a symbol (SYM: the pointer to its NUL-terminated name, a static string of the
  * module, so two symbols of one name are equal when their pointers are; the EQ helper compares names anyway).
- * Heap objects are malloc'd and never freed: the runtime has no collector (docs/notes/mrbbc-pathb.md).
+ * Heap objects are collected by a mark-and-sweep collector (mrbrt.c, "the collector"): the program runs under mrbbc_run.
  *
  * The helpers do what the VM does for the cases the producer does not inline: integer, string, array and symbol
  * operators with mruby's rules, indexing, the methods of SEND0, and the error exits. Strings are byte strings (this
@@ -201,5 +201,15 @@ void mrbbc_raise(const char *cls, const char *message) __attribute__((noreturn))
 
 /* The program name for the messages (set by the driver). */
 extern const char *mrbbc_progname;
+
+/* Runs the program's entry (the lowered mrb_irep_0) under the collector: it records the C stack, calls entry with ret (its
+ * result slot, a root while it runs), and turns the collector off when it returns. MRBBC_GC_THRESHOLD=N in the environment
+ * forces a collection every N bytes of allocation (1: before every allocation). The collector is off outside mrbbc_run.
+ * mrbbc_gc_collect collects now (a no-op outside mrbbc_run), mrbbc_gc_count is the number of objects allocated and not yet
+ * swept, and mrbbc_gc_set_threshold forces the threshold to bytes (0 gives it back to the automatic one). */
+void mrbbc_run(void (*entry)(MV *ret), MV *ret);
+void mrbbc_gc_collect(void);
+long mrbbc_gc_count(void);
+void mrbbc_gc_set_threshold(long bytes);
 
 #endif /* MRBBC_MRBRT_H */
