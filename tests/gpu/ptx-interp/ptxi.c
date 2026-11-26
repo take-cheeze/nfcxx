@@ -2,7 +2,8 @@
  *
  * Usage: ptxi FILE.ptx KERNEL [--grid X[,Y[,Z]]] [--block X[,Y[,Z]]] ARG... [--dump K]...
  *                             [--random N [--seed S]] [--explore [--max-schedules M]] [--max-steps S]
- *                             [--timing] [--sms N] [--resident N] [--issue N] [--bw BYTES] [--lat CLASS=CYCLES]...
+ *                             [--timing] [--sms N] [--resident N | --warps-per-sm N] [--issue N] [--bw BYTES]
+ *                             [--lat CLASS=CYCLES]...
  *                             [--l1 BYTES]
  *   ARG is one kernel parameter, in order:
  *     ptr:COUNT[:iota=START]   a global buffer of COUNT int32 (zeroed, or START+i in element i)
@@ -999,6 +1000,7 @@ static uint64_t lat[LAT_N] = {2, 4, 40, 320, 31, 24, 30};
 static int sms = 1;
 static uint64_t issue_rate = 4; /* warp instructions per cycle per SM */
 static int resident = 1;        /* blocks an SM runs at a time (--resident) */
+static int warps_per_sm;        /* warp slots of an SM (--warps-per-sm); 0 = use --resident */
 static uint64_t mem_bw = 16;    /* global bytes per cycle per SM */
 static int timing_print;
 static uint64_t timing_min = UINT64_MAX, timing_max, timing_n; /* over the schedules run so far */
@@ -1230,7 +1232,8 @@ static void timing_finish(void) {
     for (int first = s; first < nblocks;) {
       uint64_t wcrit = 0, wslots = 0, wbytes = 0;
       int n = 0;
-      for (int b = first; b < nblocks && n < resident; b += sms, n++) {
+      int slots = warps_per_sm ? (warps_per_sm / wpb > 0 ? warps_per_sm / wpb : 1) : resident;
+      for (int b = first; b < nblocks && n < slots; b += sms, n++) {
         if (bt_of[b] > wcrit) wcrit = bt_of[b];
         wslots += slots_of[b];
         wbytes += bytes_of[b];
@@ -1826,7 +1829,8 @@ static void usage(void) {
   fprintf(stderr,
           "usage: ptxi FILE.ptx KERNEL [--grid X[,Y[,Z]]] [--block X[,Y[,Z]]] ARG... [--dump K]...\n"
           "           [--random N [--seed S]] [--explore [--max-schedules M]] [--max-steps S]\n"
-          "           [--timing] [--sms N] [--resident N] [--issue N] [--bw BYTES] [--lat CLASS=CYCLES]...\n"
+          "           [--timing] [--sms N] [--resident N | --warps-per-sm N] [--issue N] [--bw BYTES]\n"
+          "           [--lat CLASS=CYCLES]...\n"
           "           [--l1 BYTES]\n"
           "  ARG: ptr:COUNT[:iota=START] | s32:VALUE | bytes:HEX\n"
           "  CLASS: alu, branch, local, global, atomic, barrier, l1 (defaults 2 4 40 320 31 24 30)\n");
@@ -1880,6 +1884,10 @@ int main(int argc, char **argv) {
       if (i + 1 >= argc) usage();
       issue_rate = strtoull(argv[++i], NULL, 10);
       if (issue_rate == 0) usage();
+    } else if (!strcmp(argv[i], "--warps-per-sm")) {
+      if (i + 1 >= argc) usage();
+      warps_per_sm = atoi(argv[++i]);
+      if (warps_per_sm < 1) usage();
     } else if (!strcmp(argv[i], "--resident")) {
       if (i + 1 >= argc) usage();
       resident = atoi(argv[++i]);

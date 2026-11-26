@@ -120,6 +120,22 @@ a1=$(cycles alu_chain.ptx alu_chain --grid 2 --block 1024 --resident 1)
 a2=$(cycles alu_chain.ptx alu_chain --grid 2 --block 1024 --resident 2)
 expect_eq "issue-bound blocks gain nothing from overlap" "$a2" "$a1"
 
+# 10. Latency hiding across warps. A block's warps run in parallel: store_all's 32-thread block (one warp) and its 64-thread
+#     block (two identical warps) take the same time, since the block takes its slowest warp, not the sum of the warps.
+w1=$(cycles store_all.ptx store_all --grid 1 --block 32 ptr:64)
+w2=$(cycles store_all.ptx store_all --grid 1 --block 64 ptr:64)
+expect_eq "warps of a block overlap: two warps take one warp's time" "$w2" "$w1"
+
+# 11. Residency from warp slots. store_all's 64-thread blocks are two warps each. Eight of them on one SM take one block's
+#     time per wave: with 4 warp slots, two blocks are resident, so four waves; with 16 warp slots, eight blocks, one wave.
+#     Each wave moves 8 blocks x 2 warps x 4 sectors x 32 bytes = 2048 bytes, 128 cycles at --bw 16, far below the critical
+#     path, so the waves are critical-path bound.
+t64=$(cycles store_all.ptx store_all --grid 8 --block 64 ptr:64 --sms 8)
+ws4=$(cycles store_all.ptx store_all --grid 8 --block 64 ptr:64 --sms 1 --warps-per-sm 4)
+ws16=$(cycles store_all.ptx store_all --grid 8 --block 64 ptr:64 --sms 1 --warps-per-sm 16)
+expect_eq "warp slots 4: two blocks resident, four waves" "$ws4" "$((4 * t64))"
+expect_eq "warp slots 16: eight blocks resident, one wave" "$ws16" "$t64"
+
 # 9. Bad --lat is refused (exit 2) and an unknown class is not silently ignored.
 status=0; "$out/ptxi" "$ex" "${exargs[@]}" --lat dram=5 > /dev/null 2>&1 || status=$?
 [ "$status" -eq 2 ] || { echo "--lat dram=5: expected exit 2, got $status" >&2; exit 1; }
