@@ -2688,7 +2688,7 @@ void tier_backedge(Frame& f) {
 // The machine-code tier, at the same takeover point as the C tier: 1 when the compiled loop ran to its end, 0 when the loop is not
 // taken over (the interpreter goes on, and the C tier may still take the loop over). Its guard, like the C tier's, is checked at every
 // takeover, and a loop whose guard failed is left to the interpreter until it is entered anew.
-int jit_enter(State& S, Frame& f, TierLoop* tl, const TierLoopState& st) {
+int jit_enter(State& S, Frame& f, TierLoop* tl, TierLoopState& st) {
   if (!jit::entry_ok(f, *tl->jit)) {
     ++S.stats.jit_guard_misses;
     ++S.stats.jit_bailouts;
@@ -2696,13 +2696,16 @@ int jit_enter(State& S, Frame& f, TierLoop* tl, const TierLoopState& st) {
     return 0;
   }
   // The code runs the loop to its end; each deopt (a zero divisor, a table element outside the array part, ...) runs the unit it stopped in
-  // in the interpreter and goes on in the code (jit::run). A zero divisor raises the error from there.
-  jit::run(f, *tl->jit, st, S.stats.jit_bailouts);
+  // in the interpreter and goes on in the code (jit::run). A zero divisor raises the error from there. A call whose result was not the
+  // kind the code expected, or whose callee raised an error, leaves the code: the interpreter finishes that iteration (kRunGo: the loop
+  // goes on in the interpreter from ST, which run() sets; kRunStop: it ended there), and the callee's error is raised by run().
+  int r = jit::run(f, *tl->jit, st, S.stats.jit_bailouts);
+  if (r == jit::kRunGo || r == jit::kRunStop) return r == jit::kRunGo ? 3 : 1;
   ++S.stats.jit_entries;
   return 1;
 }
 
-int jit_take_over(State& S, Frame& f, Node* loop, TierLoop* tl, const TierLoopState& st, bool edge) {
+int jit_take_over(State& S, Frame& f, Node* loop, TierLoop* tl, TierLoopState& st, bool edge) {
   TierState* T = S.tier;
   if (!edge) tl->jit_blocked = false;  // a loop that is entered anew is tried again
   if (tl->jit_blocked) return 0;
@@ -2724,7 +2727,7 @@ int jit_take_over(State& S, Frame& f, Node* loop, TierLoop* tl, const TierLoopSt
   return jit_enter(S, f, tl, st);
 }
 
-int tier_loop(Frame& f, Node* loop, TierLoop*& hook, const TierLoopState& st, bool edge) {
+int tier_loop(Frame& f, Node* loop, TierLoop*& hook, TierLoopState& st, bool edge) {
   State& S = *f.S;
   TierState* T = S.tier;
   if (T->opt.mode == TierOptions::Off || (!T->opt.osr && !T->opt.jit) || f.inlined) return 0;

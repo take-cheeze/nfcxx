@@ -871,6 +871,39 @@ static std::string gen_mixed_program(Rng& r) {
          loop + "return a, b, x, y";
 }
 
+// The batch of programs with calls (gen_call_program): a loop in a function that calls global functions (integers, floats, nil, and a
+// function that replaces another global), local functions of the chunk, in statements of several shapes. The interpreter's result.
+static bool gen_call = false;
+
+static std::string gen_call_program(Rng& r) {
+  static const char* stmts[] = {
+      "a = a + f1(i)",          "b = f2(i) + b",        "c = c + f2(i)",         "a = f1(b) - a",
+      "local t = f2(i) b = t + b", "f1(i)",             "if f1(i) > 20 then a = a + 1 end",
+      "c = f2(a) * 0.5 + c",    "b = f3(i)",            "a = a + f3(i) * 2",     "a = a + g1(i) + i",
+      "c = c + g2(c)",          "b = b + f4(i)",        "a = a + f4(a) - b",     "c = c * 0.5 + f2(b)",
+      "a = a + math.abs(f1(i))", "a = g1(a) + a"};
+  int nst = 1 + r.pick(3);
+  std::string body;
+  for (int k = 0; k < nst; ++k) body += "    " + std::string(stmts[r.pick(static_cast<int>(sizeof stmts / sizeof stmts[0]))]) + "\n";
+  std::string code =
+      "calls = 0\n"
+      "function f1(x) calls = calls + 1 return x * 3 - 1 end\n"
+      "function f2(x) calls = calls + 1 if x % 3 == 0 then return x * 0.5 end return x + 1 end\n"
+      "function f3(x) calls = calls + 1 if x > 7 then return nil end return x end\n"
+      "function f4(x) if x == 6 then f1 = function(y) return y + 100 end end return x end\n"
+      "local function g1(x) return x % 4 end\n"
+      "local g2 = function(y) return y * 0.25 end\n"
+      "local function run()\n"
+      "  local a, b, c = " + std::to_string(r.pick(5)) + ", " + std::to_string(r.pick(5)) + ", 0.5\n"
+      "  for i = 1, " + std::to_string(5 + r.pick(36)) + " do\n" + body +
+      "  end\n"
+      "  return a, b, c\n"
+      "end\n"
+      "local ok, x, y, z = pcall(run)\n"
+      "return ok, x, y, z, calls";
+  return code;
+}
+
 // ---- table elements (docs/notes/ast.md, "JIT"): the array part -----------------------------------------------------------------------
 // The JIT on for the table cases: as jit_on, and an index node specializes at its first evaluation (feedback_warm 1), so the loop it is
 // in, compiled at its first edge, has the nodes it reads and writes. The default (2) leaves such a loop refused, as the node is not
@@ -1237,6 +1270,162 @@ int main() {
     if (avail) CHECK(S.stats.jit_compiled >= 2 && S.stats.jit_refused == 0);
   }
 
+  // Calls (docs/notes/ast.md, "The calls"): a loop that calls a function. Each program must give the interpreter's result with the JIT
+  // on and off (the callees count their calls in a global, which the results include); the counters say what the JIT did: the loop was
+  // compiled (COMPILED) or refused (REFUSED), it stopped at a zero divisor (DEOPT), or a call's result was not the kind the loop
+  // expected (mismatch: the interpreter finished that iteration and the loop went on from there).
+  std::printf("-- calls\n");
+  struct CallCase {
+    const char* name;
+    const char* code;
+    Expect want;
+    bool mismatch;
+  };
+  static const CallCase call_cases[] = {
+      {"a global function with integer results, its calls counted",
+       "calls = 0\nfunction g(x) calls = calls + 1 return x * 2 + 1 end\nlocal function run()\n  local s = 0\n"
+       "  for i = 1, 300 do s = s + g(i) end\n  return s\nend\nreturn run(), calls",
+       COMPILED, false},
+      {"a global function with float results",
+       "calls = 0\nfunction h(x) calls = calls + 1 return x * 0.5 + 0.25 end\nlocal function run()\n  local s = 0.0\n"
+       "  for i = 1, 300 do s = s + h(i) end\n  return s\nend\nreturn run(), calls",
+       COMPILED, false},
+      {"a local function of the chunk, read by the loop in the chunk",
+       "local function g(x) return x * 2 + 1 end\nlocal s = 0\nfor i = 1, 200 do s = s + g(i) end\nreturn s", COMPILED, false},
+      {"a local function as an upvalue of the loop's function",
+       "local function g(x) return x % 7 end\nlocal function run()\n  local s = 0\n  for i = 1, 200 do s = s + g(i) end\n  return s\nend\n"
+       "return run()",
+       COMPILED, false},
+      {"a global native function (a library function, copied to a global)",
+       "myabs = math.abs\nlocal function run()\n  local s = 0\n  for i = 1, 200 do s = s + myabs(i - 100) end\n  return s\nend\n"
+       "return run()",
+       COMPILED, false},
+      {"a library function as a field: refused (the callee is not a name)",
+       "local function run()\n  local s = 0\n  for i = 1, 200 do s = s + math.abs(i - 100) end\n  return s\nend\nreturn run()", REFUSED,
+       false},
+      {"a callee that raises an error: the error and the calls before it, under pcall",
+       "calls = 0\nfunction g(x) calls = calls + 1 if x == 50 then error('boom ' .. x) end return x end\n"
+       "local function run()\n  local s = 0\n  for i = 1, 100 do s = s + g(i) end\n  return s\nend\n"
+       "local ok, e = pcall(run)\nreturn ok, e, calls",
+       COMPILED, false},
+      {"a callee that fails at a runtime operation (indexing a nil upvalue)",
+       "local t = nil\nfunction g(x) if x == 30 then return t.x end return x end\nlocal function run()\n  local s = 0\n"
+       "  for i = 1, 100 do s = s + g(i) end\n  return s\nend\nreturn pcall(run)",
+       COMPILED, false},
+      {"discarded results: the callee runs once per iteration",
+       "calls = 0\nfunction g(x) calls = calls + 1 return x end\nlocal function run()\n  local s = 0\n"
+       "  for i = 1, 100 do g(i) s = s + i end\n  return s\nend\nreturn run(), calls",
+       COMPILED, false},
+      {"a callee that changes a global, which the loop sees through its result",
+       "k = 0\nfunction g() k = k + 1 return k end\nlocal function run()\n  local s = 0\n  for i = 1, 100 do local v = g() s = s + v end\n"
+       "  return s, k\nend\nreturn run()",
+       COMPILED, false},
+      {"the loop reads an upvalue that the callee changes: refused, the interpreter runs it",
+       "local u = 0\nlocal function bump() u = u + 1 return 1 end\nlocal function run()\n  local s = 0\n"
+       "  for i = 1, 50 do s = s + bump() + u end\n  return s, u\nend\nreturn run()",
+       REFUSED, false},
+      {"a callee that replaces the global the loop calls",
+       "function g(x) if x == 5 then g = function(y) return y * 100 end end return x end\nlocal function run()\n  local s = 0\n"
+       "  for i = 1, 20 do s = s + g(i) end\n  return s\nend\nreturn run()",
+       COMPILED, false},
+      {"an integer local with float results: the interpreter finishes the odd iterations",
+       "function g(x) if x % 2 == 0 then return x end return x + 0.5 end\nlocal function run()\n  local s = 0\n"
+       "  for i = 1, 40 do s = s + g(i) end\n  return s\nend\nreturn run()",
+       ANY, true},
+      {"an assignment of float results to an integer local",
+       "function g(x) if x > 3 then return x / 2 end return x end\nlocal function run()\n  local s = 0\n"
+       "  for i = 1, 20 do s = g(i) end\n  return s\nend\nreturn run()",
+       ANY, true},
+      {"a float local with integer results",
+       "function g(x) return x end\nlocal function run()\n  local s = 0.5\n  for i = 1, 30 do s = s + g(i) end\n  return s\nend\n"
+       "return run()",
+       ANY, true},
+      {"nil as an operand: the arithmetic error of the interpreter, under pcall",
+       "local function g(x) if x > 10 then return nil end return x end\nlocal function run()\n  local s = 0\n"
+       "  for i = 1, 20 do s = s + g(i) end\n  return s\nend\nreturn pcall(run)",
+       ANY, true},
+      {"a table as an operand: the arithmetic error of the interpreter, under pcall",
+       "local function g(x) if x > 10 then return {x} end return x end\nlocal function run()\n  local s = 0\n  for i = 1, 20 do s = s + g(i) end\n  return s\nend\n"
+       "return pcall(run)",
+       ANY, true},
+      {"a string result that the arithmetic converts",
+       "local function g(x) return tostring(x) end\nlocal function run()\n  local s = 0\n  for i = 1, 20 do s = s + g(i) end\n  return s\nend\n"
+       "return run()",
+       ANY, true},
+      {"a call as an operand of a comparison in an if (the if is finished by the interpreter)",
+       "function g(x) if x % 5 == 0 then return x + 0.5 end return x end\nlocal function run()\n  local n = 0\n"
+       "  for i = 1, 40 do if g(i) > 20 then n = n + 1 end end\n  return n\nend\nreturn run()",
+       ANY, true},
+      {"no value returned (nil) as an operand: under pcall",
+       "local function g(x) if x == 15 then return end return x end\nlocal function run()\n  local s = 0\n"
+       "  for i = 1, 20 do s = s + g(i) end\n  return s\nend\nreturn pcall(run)",
+       ANY, true},
+      {"several values returned: the first one is kept",
+       "function g(x) return x, x * 2 end\nlocal function run()\n  local s = 0\n  for i = 1, 30 do s = s + g(i) end\n  return s\nend\n"
+       "return run()",
+       COMPILED, false},
+      {"a call of a float argument and an integer argument",
+       "function g(x, y) return x + y * 2 end\nlocal function run()\n  local s = 0.5\n  local k = 3\n"
+       "  for i = 1, 50 do s = s * 0.5 + g(s, k) end\n  return s\nend\nreturn run()",
+       COMPILED, false},
+      {"a call with six arguments",
+       "function g(a, b, c, d, e, f) return a + b * c - d + e * f end\nlocal function run()\n  local s = 0\n"
+       "  for i = 1, 50 do s = s + g(i, 2, 3, 4, i, 5) end\n  return s\nend\nreturn run()",
+       COMPILED, false},
+      {"a division by zero before a call in the same statement: the deopt, the calls before it counted",
+       "calls = 0\nfunction g(x) calls = calls + 1 return x end\nlocal function run()\n  local s = 0\n"
+       "  for i = 1, 20 do s = i // (i - 7) + g(i) end\n  return s\nend\nreturn pcall(run)",
+       DEOPT, false},
+      {"a division after a call in the same statement: refused",
+       "local function g(x) return x end\nlocal function run()\n  local s = 0\n  for i = 1, 20 do s = (g(i) * 2) + i // (i % 3) end\n"
+       "  return s\nend\nreturn pcall(run)",
+       REFUSED, false},
+      {"two calls in one statement: refused",
+       "function g(x) return x end\nlocal function run()\n  local s = 0\n  for i = 1, 20 do s = g(i) + g(i + 1) end\n  return s\nend\n"
+       "return run()",
+       REFUSED, false},
+      {"a call in an inner loop: the outer loop is refused, the inner loop is a loop of its own",
+       "function g(x) return x end\nlocal function run()\n  local s = 0\n  for i = 1, 10 do for j = 1, 3 do s = s + g(j) end end\n"
+       "  return s\nend\nreturn run()",
+       ANY, false},
+      {"a recursive function whose loop calls itself",
+       "local depth = 0\nlocal function rec(n)\n  depth = depth + 1\n  if n == 0 then return 0 end\n  local s = 0\n"
+       "  for i = 1, 3 do s = s + rec(n - 1) + i end\n  return s\nend\nreturn rec(4), depth",
+       COMPILED, false},
+  };
+  for (const CallCase& c : call_cases) {
+    State P;
+    P.open_libs();
+    TierOptions off;
+    off.mode = TierOptions::Off;
+    P.enable_tier(off);
+    std::string want = eval(P, c.code);
+    State S;
+    S.open_libs();
+    jit_on(S);
+    std::string got = eval(S, c.code);
+    const nfcast::Stats& st = S.stats;
+    bool same = got == want;
+    CHECK(same);
+    if (!same) std::printf("  %s: got %s, want %s\n", c.name, got.c_str(), want.c_str());
+    if (!avail) {
+      CHECK(st.jit_compiled == 0 && st.jit_entries == 0 && st.jit_call_mismatches == 0);
+    } else {
+      switch (c.want) {
+        case COMPILED: CHECK(st.jit_compiled >= 1 && st.jit_refused == 0); break;
+        case REFUSED: CHECK(st.jit_refused >= 1); break;
+        case DEOPT: CHECK(st.jit_compiled >= 1 && st.jit_bailouts == 1); break;
+        default: break;
+      }
+      if (c.mismatch) CHECK(st.jit_call_mismatches >= 1 && st.jit_compiled >= 1);
+      else CHECK(st.jit_call_mismatches == 0);
+    }
+    // A deopt is the only bailout, and the mismatches are not bailouts.
+    CHECK(st.jit_bailouts == st.jit_guard_misses + (avail && c.want == DEOPT ? 1 : 0));
+    std::printf("%s  %-62s %s  (compiled %llu, entries %llu, refused %llu, mismatches %llu)\n", same ? "ok  " : "FAIL", c.name,
+                got.c_str(), static_cast<unsigned long long>(st.jit_compiled), static_cast<unsigned long long>(st.jit_entries),
+                static_cast<unsigned long long>(st.jit_refused), static_cast<unsigned long long>(st.jit_call_mismatches));
+  }
   // The table cases, and the generated table programs (see table_cases_section and generated_table_section).
   std::printf("-- table elements\n");
   table_cases_section(avail);
@@ -1249,19 +1438,22 @@ int main() {
   unsigned long long entries = 0, compiled = 0;
   int gen_fail = 0;
   const int kPrograms = 300;
-  static const char* batch_names[] = {"arithmetic", "bitwise", "float", "mixed"};
-  for (int batch = 0; batch < 4; ++batch) {
+  static const char* batch_names[] = {"arithmetic", "bitwise", "float", "mixed", "calls"};
+  unsigned long long mismatches = 0;
+  for (int batch = 0; batch < 5; ++batch) {
     gen_bits = batch == 1;
     gen_float = batch == 2;
     gen_mixed = batch == 3;
+    gen_call = batch == 4;
     Rng r = batch == 0   ? Rng{0x9E3779B97F4A7C15ULL}
             : batch == 1 ? Rng{0x2545F4914F6CDD1DULL}
             : batch == 2 ? Rng{0x51AF2C8E0B3D96A7ULL}
-                         : Rng{0x7A3C5E91D2B4F687ULL};
-    unsigned long long b_entries = 0, b_compiled = 0;
+            : batch == 3 ? Rng{0x7A3C5E91D2B4F687ULL}
+                         : Rng{0x6C8E9CF570932BD5ULL};
+    unsigned long long b_entries = 0, b_compiled = 0, b_mismatch = 0;
     int b_fail = 0;
     for (int k = 0; k < kPrograms; ++k) {
-      std::string code = gen_mixed ? gen_mixed_program(r) : gen_float ? gen_float_program(r) : gen_program(r);
+      std::string code = gen_call ? gen_call_program(r) : gen_mixed ? gen_mixed_program(r) : gen_float ? gen_float_program(r) : gen_program(r);
       State P;
       P.open_libs();
       TierOptions off;
@@ -1274,9 +1466,10 @@ int main() {
       std::string got = eval(S, code);
       b_entries += S.stats.jit_entries;
       b_compiled += S.stats.jit_compiled;
+      b_mismatch += S.stats.jit_call_mismatches;
       bool same = gen_mixed ? without_nan_sign(got) == without_nan_sign(want) : got == want;
       bool ok = same && S.stats.jit_bailouts == S.stats.jit_guard_misses;
-      if (avail) ok = ok && S.stats.jit_refused == 0;
+      if (avail && !gen_call) ok = ok && S.stats.jit_refused == 0;  // the calls batch has refused calls on purpose (a library function)
       if (!ok) {
         ++b_fail;
         std::printf("FAIL generated program %d (%s):\n%s\n  got %s\n  want %s\n", k, batch_names[batch],
@@ -1286,13 +1479,16 @@ int main() {
     gen_fail += b_fail;
     entries += b_entries;
     compiled += b_compiled;
-    if (avail) CHECK(b_compiled >= static_cast<unsigned long long>(kPrograms) && b_entries >= static_cast<unsigned long long>(kPrograms));
-    std::printf("ok   %d %s generated programs: %llu loops compiled, %llu takeovers%s\n", kPrograms, batch_names[batch], b_compiled,
-                b_entries, b_fail ? " (FAILURES)" : "");
+    mismatches += b_mismatch;
+    if (avail && batch < 4) CHECK(b_compiled >= static_cast<unsigned long long>(kPrograms) && b_entries >= static_cast<unsigned long long>(kPrograms));
+    if (avail && batch == 4) CHECK(b_compiled >= static_cast<unsigned long long>(kPrograms / 2) && b_mismatch >= 1);
+    std::printf("ok   %d %s generated programs: %llu loops compiled, %llu takeovers, %llu call mismatches%s\n", kPrograms,
+                batch_names[batch], b_compiled, b_entries, b_mismatch, b_fail ? " (FAILURES)" : "");
   }
   gen_bits = false;
   gen_float = false;
   gen_mixed = false;
+  gen_call = false;
   CHECK(gen_fail == 0);
 
   if (failures) std::printf("%d of %d check(s) failed\n", failures, checks);

@@ -165,6 +165,20 @@ struct Node {
   }
 };
 
+// The value a call returns while the machine-code tier finishes the statement it was in (nfcast_jit.cpp, "The calls"): set on the call
+// node for the duration of the replay, and only in frame F.
+struct CallReplay {
+  Frame* f;
+  Value v;
+};
+// The machine-code tier's calls (nfcast_nodes.cpp). JIT_CALL_VALUE calls the function of the call node CALL with the N arguments given,
+// as the node does (the function is evaluated first, the arguments are the values, the line of the call is set), and returns its first
+// value. JIT_CURRENT is the node that stands now where N stands (a respecialization replaces a node in its parent). JIT_SET_REPLAY
+// makes the call node CALL return the value of R while R is set, in R's frame (null to clear it).
+Value jit_call_value(Frame& f, Node* call, const Value* args, int n);
+Node* jit_current(Node* n);
+void jit_set_replay(Node* call, CallReplay* r);
+
 // A local variable at parse time; nodes copy `captured` when the function is complete.
 struct VarInfo {
   std::string name;

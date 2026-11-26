@@ -1,6 +1,9 @@
 // nfcast JIT, the machine-code tier for loops (docs/notes/ast.md, "JIT"). A hot `while`, `repeat` or integer `for` loop whose body is
 // arithmetic on locals, integers and floats, is encoded to x86-64 in memory and taken over at the same points as the C tier's loops
 // (tier_loop in nfcast_tier.cpp). Everything else is refused at compile time and stays with the interpreter (or the C tier).
+// Calls (docs/notes/ast.md, "The calls"): a call of a global, an upvalue or a local of the loop's function, as a statement or as a
+// number the code uses, is made by the interpreter's own call path through a helper; the callee's error leaves the loop as the
+// interpreter's does, and a result of another kind than the code expects finishes the statement in the interpreter.
 // Off unless TierOptions::jit is set (the test driver takes --jit); off altogether on any host but x86-64 Linux.
 #pragma once
 #include <cstddef>
@@ -42,6 +45,8 @@ struct Code {
   std::vector<int> out_slots, out_regs;
   int state_regs[3] = {-1, -1, -1};  // FOR_INT: the registers of the next value of the variable, the count, and the step; FOR_FLT: the
                                      // registers of the next value, the limit and the step (doubles)
+  int ctx_reg = -1;       // the word that holds the address of the run's context (run() stores it; the calls use it), or -1
+  Node* until = nullptr;  // REPEAT: its condition, evaluated by the interpreter when a call finishes an iteration (see Site, CALL)
   // Deopt (docs/notes/ast.md, "JIT"). When the code stops at an operation it cannot finish, the locals of the site are written back to
   // the frame (Site::bail_slots and bail_regs) and the code returns the site's number k (1-based). Then the interpreter runs the unit the
   // site is in on the frame (the statement or condition the operation is in), and:
@@ -50,12 +55,18 @@ struct Code {
   //    on at Site::entry, the statement after the unit;
   //  - COND: the unit is a condition; the loop goes on at Site::entry when it is true, at Site::entry_false when it is false.
   // Entries are numbered from 1 (Site::entry and entry_false are such numbers); run() re-enters the code with them.
+  //  - CALL: the code stopped at a call (node) whose result was not the kind the code expected, or whose callee raised an error. The
+  //    error is raised by run() once the code has left (the interpreter's own). The other kind of result finishes the statements of
+  //    CHAIN in the interpreter, the call returning that value there (the statement the call is in first, then the rest of its block and
+  //    of each enclosing block up to the loop's body), and the loop goes on in the interpreter from the next iteration (run() returns
+  //    kRunGo, or kRunStop when the loop ended there). The loop's code is not re-entered: a statement may assign a local a value of another kind than the code has it as.
   struct Site {
-    enum Kind { RAISE = 0, STMT = 1, COND = 2 };
-    Node* node = nullptr;
+    enum Kind { RAISE = 0, STMT = 1, COND = 2, CALL = 3 };
+    Node* node = nullptr;  // RAISE, STMT, COND: the unit; CALL: the call node
     int kind = RAISE;
     bool stmt = false;  // RAISE: the unit is a statement (exec), else an expression or condition (eval)
     int entry = 0, entry_false = 0;
+    std::vector<Node*> chain;  // CALL: the statements the interpreter runs after the code stopped at the call, in order (see above)
     // The locals written back when the code stops here: every frame slot of the loop with its register, as the slot is at this point
     // of the loop (a slot the loop reuses in two blocks has one register per declaration; the live-ins are in every site). Table
     // registers are not written back: the frame holds the table.
@@ -73,11 +84,18 @@ std::unique_ptr<Code> compile(Node* loop, int kind, const Frame& f, std::string&
 // unless it holds.
 bool entry_ok(const Frame& f, const Code& c);
 
-// Runs the code from the state ST (the state of a FOR_INT loop at the top of an iteration, see TierLoopState) with the guard holding,
-// until the loop ends. Writes the live-ins that the loop assigns back to the frame: the interpreter goes on after the loop. Each deopt
-// (see Code::Site) adds one to BAILOUTS, runs the unit of its site in the interpreter and goes on in the code. An error the interpreter
-// raises in a unit (a zero divisor) leaves run() by the exception, as the interpreter's own would.
-void run(Frame& f, const Code& c, const TierLoopState& st, std::uint64_t& bailouts);
+// What run() returns when a call's result was not the kind the code expected, or the callee raised no error but the loop ended in the
+// interpreter: the loop goes on in the interpreter from the state ST it was given and updated (kRunGo: the state of the next iteration;
+// kRunStop: the loop ended there, a break or the end of a repeat). A callee's error is raised from run() by the exception.
+constexpr int kRunGo = -1;
+constexpr int kRunStop = -2;
+
+// Runs the code from the state ST (the state of a FOR_INT loop at the top of an iteration, see TierLoopState) with the guard holding.
+// Returns 0 when the loop ran to its end, and writes the live-ins that the loop assigns back to the frame: the interpreter goes on
+// after the loop. Each deopt (see Code::Site) adds one to BAILOUTS, runs the unit of its site in the interpreter and goes on in the
+// code. An error the interpreter raises in a unit (a zero divisor) leaves run() by the exception, as the interpreter's own would.
+// A call that stops the code is finished by the interpreter, and run() returns kRunGo or kRunStop (see Code::Site, CALL).
+int run(Frame& f, const Code& c, TierLoopState& st, std::uint64_t& bailouts);
 
 }  // namespace jit
 }  // namespace nfcast
