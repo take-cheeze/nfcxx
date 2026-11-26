@@ -37,8 +37,12 @@ fi
 
 c++ -std=c++17 -O1 -Wall -Wextra -Werror -I"$src" -o "$work/lower" "$src/yarv_ibf.cpp" "$src/yarv_lower.cpp" \
   "$root/tools/common/stack_slots.cpp" "$src/yarvbc_lower_main.cpp" || exit 1
-cc -std=c99 -Wall -Wextra -Werror -c -o "$work/mrbrt.o" "$rt/mrbrt.c" || exit 1
-cc -std=c99 -Wall -Wextra -Werror -c -o "$work/driver.o" "$rt/driver.c" || exit 1
+# The runtime is built with MRBBC_VALUE=16 (a register is a tag byte at offset 0 and an int64 at offset 8, 16 bytes): this
+# producer's lowering (yarv_lower.cpp: the 16-byte copies, the slot strides, the tag tests) is written for that layout. The
+# runtime's default is the 8-byte word since f83174e3c, which the mrbbc producer lowers; porting this one to the word layout
+# is separate work. A mismatch overruns the frames (stack smashing), so the layout is pinned here, not left to the default.
+cc -std=c99 -DMRBBC_VALUE=16 -Wall -Wextra -Werror -c -o "$work/mrbrt.o" "$rt/mrbrt.c" || exit 1
+cc -std=c99 -DMRBBC_VALUE=16 -Wall -Wextra -Werror -c -o "$work/driver.o" "$rt/driver.c" || exit 1
 
 # compile SRC OUT: the binary iseq of the program (ruby 3.3's to_binary).
 compile() {
