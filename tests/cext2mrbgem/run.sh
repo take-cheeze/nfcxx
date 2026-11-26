@@ -837,6 +837,11 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_dtype/NOT_BUILDABLE"
 check grep -qF 'static void holder_mark(mrb_state *mrb, void *p) {' "$work/api_dtype/src/api_dtype.c"
 check grep -qF 'static const mrb_data_type holder_type = { "holder", holder_free, holder_mark };' "$work/api_dtype/src/api_dtype.c"
+
+# a data type whose mark is (RUBY_DATA_FUNC) NULL and whose free is RUBY_TYPED_DEFAULT_FREE (pg's coder types): no refusal
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dtype_cast_null tools/cext2mrbgem/fixtures/api_dtype_cast_null/ext/api_dtype_cast_null "$work/api_dtype_cast_null" > "$work/api_dtype_cast_null.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_dtype_cast_null/NOT_BUILDABLE"
 check grep -qF 'mrb_gc_mark_value(mrb, ((holder *)p)->held);' "$work/api_dtype/src/api_dtype.c"
 
 # 2zp. TypedData_ and Data_ macros are unknown names (refused), not silent pass-throughs
