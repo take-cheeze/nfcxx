@@ -1,0 +1,20 @@
+stream: SQChar 1 SQInteger 8 SQFloat 4, consumed
+function "main" stacksize 8 params 2 literals 0 outers 0 locals 7 lines 9 instructions 18 functions 0
+     0 _OP_LOADINT    2 7 0 0
+     1 _OP_LOADINT    3 3 0 0
+     2 _OP_ADD        4 3 2 0
+     3 _OP_LOADINT    5 2 0 0
+     4 _OP_MUL        5 5 4 0
+     5 _OP_SUB        5 2 5 0
+     6 _OP_LOADINT    6 1 0 0
+     7 _OP_ADD        6 6 5 0
+     8 _OP_JCMP       3 2 2 3
+     9 _OP_LOADINT    7 100 0 0
+    10 _OP_ADD        6 7 6 0
+    11 _OP_LOADINT    7 10 0 0
+    12 _OP_EQ         7 7 6 0
+    13 _OP_JZ         7 2 0 0
+    14 _OP_LOADINT    7 1 0 0
+    15 _OP_ADD        6 7 6 0
+    16 _OP_RETURN     1 6 7 0
+    17 _OP_RETURN     255 0 0 0
