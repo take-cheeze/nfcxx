@@ -16,7 +16,6 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
-#include <deque>
 #include <map>
 #include <set>
 #include <sstream>
@@ -25,6 +24,7 @@
 #include <utility>
 #include <vector>
 
+#include "../common/stack_slots.hpp"
 #include "cpy_opcodes.inc"   // kCpyOps: 3.13's opcode numbers, names, inline cache sizes and relative jumps
 
 namespace cpy {
@@ -207,18 +207,15 @@ class FnLower {
   FnLower(Module &m, int k) : m_(m), k_(k), code_(*m.fns[static_cast<std::size_t>(k)]) {}
 
   std::string lower() {
-    in_[0] = Stack{};
-    work_.push_back(0);
-    while (!work_.empty()) {
-      std::size_t s = work_.front();
-      work_.pop_front();
-      process(s);
-    }
+    // The walk is the shared one (tools/common): each instruction is lowered once, from the stack it is entered with.
+    stack_slots::Flow flow = stack_slots::analyze(
+        0, [this](std::size_t s, const stack_slots::State &in) { return process(s, in); }, stack_slots::Order::Fifo);
+    if (flow.join) refuse("stack shape differs where two paths join (offset " + std::to_string(flow.join->pc) + ")");
     // The frame and the prologue: the stack and locals are slots, the locals are zeroed (UNBOUND), and the arguments are
     // copied into the first locals. The prologue's registers are numbered after the body's.
     std::ostringstream out;
     std::size_t nloc = code_.localsplusnames.size();
-    std::size_t stkbytes = (maxdepth_ + 1) * kPvBytes;
+    std::size_t stkbytes = (flow.max_depth + 1) * kPvBytes;
     out << "(function \"pyf_" << k_ << "\" (ret void) (params (param %0 \"ret\" (ptr (struct \"PV\"))) (param %1 \"args\" (ptr (struct \"PV\"))))\n";
     out << "  (slot \"loc\" (struct \"PV\") " << std::max<std::size_t>(nloc, 1) * kPvBytes << " 8)\n";
     out << "  (slot \"stk\" (struct \"PV\") " << stkbytes << " 8)\n";
@@ -244,11 +241,8 @@ class FnLower {
   int k_;
   const Code &code_;
   std::map<std::size_t, std::string> blocks_;   // offset -> label and body
-  std::map<std::size_t, Stack> in_;             // offset -> the stack when the instruction starts
-  std::deque<std::size_t> work_;
   std::string cur_;                             // the body of the instruction being lowered
   int next_reg_ = 5;
-  std::size_t maxdepth_ = 0;                    // the deepest stack seen, in entries
   std::size_t at_ = 0;                          // the offset being lowered, for messages
 
   std::string where() const {
@@ -260,7 +254,7 @@ class FnLower {
   void line(const std::string &s) { cur_ += "    " + s + "\n"; }
   std::string stkp(std::size_t d) {
     std::string r = reg();
-    line("(let " + r + " (ptr (struct \"PV\")) (offset %2 " + std::to_string(d * kPvBytes) + "))");
+    line("(let " + r + " (ptr (struct \"PV\")) (offset %2 " + std::to_string(stack_slots::slot(0, d) * kPvBytes) + "))");
     return r;
   }
   std::string locp(int i) {
@@ -315,32 +309,45 @@ class FnLower {
     fail("constant of an unknown kind");
   }
 
-  // Lowers one instruction at `s` with the stack `st` (updated in place to the fall-through stack). Jump successors go to
-  // `jump_to` with `jump_st`; `falls` says the next instruction is a successor.
-  void process(std::size_t s) {
+  // The stack's kinds as the shared walk keeps them: each entry is its kind and index (the depth is the entry count).
+  static stack_slots::State state_of(const Stack &st) {
+    stack_slots::State s;
+    s.depth = st.size();
+    for (const Kind &k : st) {
+      s.ctx.push_back(k.k);
+      s.ctx.push_back(k.idx);
+    }
+    return s;
+  }
+  static Stack stack_of(const stack_slots::State &s) {
+    Stack st;
+    for (std::size_t i = 0; i + 1 < s.ctx.size(); i += 2) st.push_back(Kind{static_cast<Kind::K>(s.ctx[i]), static_cast<int>(s.ctx[i + 1])});
+    return st;
+  }
+
+  // Lowers the instruction at `s`, entered with `in`, and returns its successors: the jump target first, then the
+  // fall-through. The fall-through stack is the one step leaves in its place; a jump takes the stack it left.
+  stack_slots::Step process(std::size_t s, const stack_slots::State &in_state) {
     Insn in = decode(code_, s);
     at_ = s;
-    Stack st = in_.at(s);
+    Stack st = stack_of(in_state);
     cur_.clear();
     std::size_t jump_to = 0;
     Stack jump_st;
     bool has_jump = false, falls = true;
     step(in, st, jump_to, jump_st, has_jump, falls);
     blocks_[s] = "  (label \"o" + std::to_string(s) + "\")\n" + cur_;
-    if (has_jump) edge(jump_to, jump_st);
-    if (falls) edge(in.next, st);
-  }
-
-  void edge(std::size_t t, const Stack &st) {
-    if (t >= code_.code.size()) fail("a jump leaves the code");
-    auto it = in_.find(t);
-    if (it == in_.end()) {
-      in_[t] = st;
-      if (st.size() > maxdepth_) maxdepth_ = st.size();
-      work_.push_back(t);
-      return;
+    stack_slots::Step out;
+    out.high = in_state.depth;
+    if (has_jump) {
+      if (jump_to >= code_.code.size()) fail("a jump leaves the code");
+      out.succ.push_back({jump_to, state_of(jump_st)});
     }
-    if (it->second != st) refuse("stack shape differs where two paths join (offset " + std::to_string(t) + ")");
+    if (falls) {
+      if (in.next >= code_.code.size()) fail("a jump leaves the code");
+      out.succ.push_back({in.next, state_of(st)});
+    }
+    return out;
   }
 
   Kind pop(Stack &st) {

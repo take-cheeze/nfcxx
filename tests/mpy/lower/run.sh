@@ -20,7 +20,7 @@ if [ -z "${MPY_CROSS:-}" ] || [ ! -x "$MPY_CROSS" ] || [ -z "${MICROPY:-}" ] || 
   exit 77
 fi
 c++ -std=c++17 -Wall -Wextra -o "$work/lower" "$root/tools/mpy/mpy_reader.cpp" "$root/tools/mpy/mpy_lower.cpp" \
-  "$root/tools/mpy/mpy_lower_main.cpp" || exit 1
+  "$root/tools/common/stack_slots.cpp" "$root/tools/mpy/mpy_lower_main.cpp" || exit 1
 cc -std=c99 -Wall -Wextra -c -o "$work/rt.o" "$dir/runtime/mpy_rt.c" || exit 1
 cc -std=c99 -Wall -Wextra -c -o "$work/driver.o" "$dir/runtime/driver.c" || exit 1
 

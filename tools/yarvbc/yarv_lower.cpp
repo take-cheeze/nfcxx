@@ -37,6 +37,7 @@
 // and raises the errors. An integer overflow traps instead of becoming a Bignum, as in the mruby producer, so a program
 // whose integers leave 64 bits is not lowered faithfully. `%` is the floor modulo of the quotient the runtime divides (q =
 // a / b by mrbbc_binop, then a - q * b), so it has no helper of its own.
+#include "../common/stack_slots.hpp"
 #include "yarv_lower.hpp"
 
 #include <cstdint>
@@ -145,7 +146,7 @@ struct Fn {
   // The register of frame slot k (a pointer to its MV).
   std::string slot(std::size_t k) const { return "%" + std::to_string(kFirstReg + static_cast<int>(k)); }
   // The register of operand stack position d (0 is the bottom) at the instruction's entry.
-  std::string stack(std::size_t d) const { return slot(nlocals + d); }
+  std::string stack(std::size_t d) const { return slot(stack_slots::slot(nlocals, d)); }
   void add_slot(const std::string &name, std::size_t bytes) { slots.emplace_back(name, bytes); }
   std::string named(const std::string &name) const { return "$\"" + name + "\""; }
 };
@@ -277,11 +278,18 @@ struct Symbols {
   }
 };
 
-// A stack-state entry per reachable instruction, found by analyze.
-struct Flow {
-  bool reached = false;
-  Stack stack;
-};
+// A stack's entries as the shared walk keeps them: the depth, and each entry's origin as its ctx.
+stack_slots::State state_of(const Stack &st) {
+  stack_slots::State s;
+  s.depth = st.size();
+  for (Origin o : st) s.ctx.push_back(static_cast<std::int64_t>(o));
+  return s;
+}
+Stack stack_of(const stack_slots::State &s) {
+  Stack st;
+  for (std::int64_t v : s.ctx) st.push_back(static_cast<Origin>(v));
+  return st;
+}
 
 class Lowerer {
  public:
@@ -326,7 +334,7 @@ class Lowerer {
 
   // The stack after one instruction, and the pcs it may go to next. Refuses what the producer does not lower.
   std::vector<std::size_t> step(const Iseq &is, const Insn &in, Stack &st) const;
-  std::vector<Flow> analyze(const Iseq &is) const;
+  stack_slots::Flow analyze(const Iseq &is) const;
   void call_checks(const Insn &in, const CallInfo &ci) const;
 
   void lower_function(const Iseq &is, const std::string &name, Kind kind);
@@ -355,38 +363,34 @@ void Lowerer::collect_blocks(const Iseq &is) {
 }
 
 // Each stack state must be a single Origin shape where paths meet: a value and self may not meet at one slot.
-std::vector<Flow> Lowerer::analyze(const Iseq &is) const {
+stack_slots::Flow Lowerer::analyze(const Iseq &is) const {
   const std::vector<Insn> &insns = is.insns;
   std::map<std::size_t, std::size_t> index;  // pc -> instruction index
   for (std::size_t i = 0; i < insns.size(); ++i) index[insns[i].pc] = i;
-  std::vector<Flow> flows(insns.size());
-  if (insns.empty()) return flows;
-  flows[0].reached = true;
-  std::vector<std::size_t> work{0};
-  while (!work.empty()) {
-    const std::size_t i = work.back();
-    work.pop_back();
-    Stack st = flows[i].stack;
-    for (std::size_t pc : step(is, insns[i], st)) {
-      auto it = index.find(pc);
-      if (it == index.end()) {
-        throw ReadError("malformed: the jump at pc " + std::to_string(insns[i].pc) + " goes to pc " + std::to_string(pc) +
+  if (insns.empty()) return {};
+  // The successors of one instruction on a path: the same stack goes to each (step has pushed or popped already).
+  auto transfer = [&](std::size_t pc, const stack_slots::State &in) {
+    const Insn &insn = insns[index.at(pc)];
+    Stack st = stack_of(in);
+    stack_slots::Step out;
+    out.high = in.depth;
+    for (std::size_t target : step(is, insn, st)) {
+      if (index.find(target) == index.end()) {
+        throw ReadError("malformed: the jump at pc " + std::to_string(insn.pc) + " goes to pc " + std::to_string(target) +
                         ", which is not an instruction");
       }
-      Flow &to = flows[it->second];
-      if (!to.reached) {
-        to.reached = true;
-        to.stack = st;
-        work.push_back(it->second);
-      } else if (to.stack != st) {
-        if (to.stack.size() != st.size()) {
-          throw ReadError("malformed: the stack depth at pc " + std::to_string(pc) + " differs between two paths");
-        }
-        refuse("a value and self meet on the stack (not lowered yet)", insns[i]);
-      }
+      out.succ.push_back({target, state_of(st)});
     }
+    return out;
+  };
+  stack_slots::Flow flow = stack_slots::analyze(insns[0].pc, transfer);
+  if (flow.join) {
+    if (flow.join->depth_differs) {
+      throw ReadError("malformed: the stack depth at pc " + std::to_string(flow.join->pc) + " differs between two paths");
+    }
+    refuse("a value and self meet on the stack (not lowered yet)", insns[index.at(flow.join->from)]);
   }
-  return flows;
+  return flow;
 }
 
 // The checks of a call's call info that every call instruction shares: no bits of splat, block argument, keywords, super or
@@ -791,11 +795,8 @@ void Lowerer::lower_function(const Iseq &is, const std::string &name, Kind kind)
       if (is.insns[i].name == "leave") refuse("a block that returns before its end (next) is not lowered yet", is.insns[i]);
     }
   }
-  const std::vector<Flow> flows = analyze(is);
-  std::size_t deepest = 0;
-  for (const Flow &fl : flows) {
-    if (fl.reached && fl.stack.size() + 1 > deepest) deepest = fl.stack.size() + 1;
-  }
+  const stack_slots::Flow flow = analyze(is);
+  const std::size_t deepest = is.insns.empty() ? 0 : flow.max_depth + 1;
   const std::size_t nl = is.locals.size();
   Fn f(nl, nl + (deepest == 0 ? 1 : deepest), kind != Kind::Top);
 
@@ -826,12 +827,12 @@ void Lowerer::lower_function(const Iseq &is, const std::string &name, Kind kind)
   }
   for (std::size_t i = lead; i < nl; ++i) store_tag(f, f.slot(i), kTagNil);
 
-  for (std::size_t i = 0; i < is.insns.size(); ++i) {
-    if (!flows[i].reached) continue;  // dead code: nothing reaches it
-    const Insn &in = is.insns[i];
+  for (const Insn &in : is.insns) {
+    const auto reached = flow.at.find(in.pc);
+    if (reached == flow.at.end()) continue;  // dead code: nothing reaches it
     f.line("");
     f.body << "  (label " << lbl(in.pc) << ")\n";
-    emit(f, is, in, flows[i].stack.size());
+    emit(f, is, in, reached->second.depth);
   }
   f.line("");
   f.body << "  (label " << lbl(is.words) << ")\n";

@@ -17,6 +17,9 @@
 // function owns is listed in the prelude; the prologue boxes it in a heap cell (mpy_make_cell).
 #include "mpy_lower.hpp"
 
+#include "../common/stack_slots.hpp"
+
+#include <cstdint>
 #include <cstdio>
 #include <functional>
 #include <map>
@@ -536,23 +539,20 @@ class Lowerer {
     std::vector<uint8_t> code(rc.data.begin() + (long)pre.code_offset, rc.data.end());
     std::vector<Op> ops = normalize(decode_code(code.data(), code.size()));
 
-    // The depth before each instruction, from the stack effects. A jump target must agree on it.
-    // The walk also keeps the try blocks open at each instruction (kind 1 for a finally, 0 for an except): a
-    // break or continue that leaves one is an UNWIND_JUMP, and a return or unwind through a finally runs its body (see unwind).
+    // The depth before each instruction, from the stack effects, and the try blocks open there (kind 1 for a finally, 0 for
+    // an except, 2 for a with, 3 for a for loop: see SETUP and GET_ITER). The walk is the shared one (tools/common): a jump
+    // target must agree on both, and a join that does not is refused or thrown below. A break or continue that leaves a try
+    // block is an UNWIND_JUMP, and a return or unwind through a finally runs its body (see unwind).
     std::map<size_t, int> depth;
     std::map<size_t, std::vector<int>> blocks_at;
     std::map<size_t, size_t> index;
     for (size_t i = 0; i < ops.size(); ++i) index[ops[i].offset] = i;
-    std::vector<size_t> work{0};
-    depth[0] = 0;
-    blocks_at[0] = {};
-    while (!work.empty()) {
-      size_t at = work.back();
-      work.pop_back();
+    auto transfer = [&](size_t at, const stack_slots::State &in) {
       if (!index.count(at)) throw std::runtime_error("mpy: a jump lands between instructions");
       const Op &op = ops[index[at]];
-      int d = depth[at];
-      const std::vector<int> open = blocks_at[at];
+      int d = (int)in.depth;
+      std::vector<int> open;
+      for (std::int64_t v : in.ctx) open.push_back((int)v);
       int after = d + effect(op);
       if (after < 0) throw std::runtime_error("mpy: stack underflow");
       // (successor, depth there, the try blocks open there). A jump-or-pop keeps its value when it jumps, so the target is at
@@ -630,30 +630,34 @@ class Lowerer {
       } else {
         succ.push_back({op.next, after, open});
       }
+      stack_slots::Step out;
+      // the deepest the stack gets inside this instruction: its depth on entry, or the push it makes
+      out.high = (size_t)(d + (effect(op) > 0 ? effect(op) : 0));
       for (const Succ &s : succ) {
         if (s.at >= code.size()) throw std::runtime_error("mpy: a jump leaves the code");
-        auto it = depth.find(s.at);
-        if (it == depth.end()) {
-          depth[s.at] = s.depth;
-          blocks_at[s.at] = s.blocks;
-          work.push_back(s.at);
-        } else if (it->second != s.depth || blocks_at[s.at] != s.blocks) {
-          // A break out of a finally body, in a loop over a range (no iterator on the stack, so no loop-drop bit), reaches the
-          // loop's end with the finally's pending value still on the stack, one deeper than the normal exit: the reference's
-          // POP_TOP there pops that value and leaves the loop's counter behind. A static depth cannot hold both, so it is refused.
-          if (op.kind == "UNWIND_JUMP") refused("a break out of a finally body in a loop over a range is not lowered yet");
-          throw std::runtime_error("mpy: stack depth differs at a join");
-        }
+        if (s.depth < 0) throw std::runtime_error("mpy: stack underflow");
+        stack_slots::State to;
+        to.depth = (size_t)s.depth;
+        for (int b : s.blocks) to.ctx.push_back(b);
+        out.succ.push_back({s.at, to});
       }
+      return out;
+    };
+    const stack_slots::Flow flow = stack_slots::analyze(0, transfer);
+    if (flow.join) {
+      // A break out of a finally body, in a loop over a range (no iterator on the stack, so no loop-drop bit), reaches the
+      // loop's end with the finally's pending value still on the stack, one deeper than the normal exit: the reference's
+      // POP_TOP there pops that value and leaves the loop's counter behind. A static depth cannot hold both, so it is refused.
+      if (ops[index[flow.join->from]].kind == "UNWIND_JUMP") refused("a break out of a finally body in a loop over a range is not lowered yet");
+      throw std::runtime_error("mpy: stack depth differs at a join");
     }
-    int max_depth = 0;
-    for (const Op &op : ops) {
-      auto it = depth.find(op.offset);
-      if (it != depth.end()) {
-        int hi = it->second + (effect(op) > 0 ? effect(op) : 0);
-        if (hi > max_depth) max_depth = hi;
-      }
+    for (const auto &[at, st] : flow.at) {
+      depth[at] = (int)st.depth;
+      std::vector<int> open;
+      for (std::int64_t v : st.ctx) open.push_back((int)v);
+      blocks_at[at] = open;
     }
+    const int max_depth = (int)flow.max_depth;
 
     int next = is_fn ? 3 : 0;   // %0..%2 are the parameters of a function
     std::ostringstream body;

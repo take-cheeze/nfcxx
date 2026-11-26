@@ -27,7 +27,8 @@ if ! "$PY" -c 'import sys; sys.exit(0 if sys.version_info[:2] == (3, 13) else 1)
   echo "cpython-lower: skipped (PYTHON must be CPython 3.13)"
   exit 77
 fi
-c++ -std=c++17 -Wall -Wextra -o "$work/lower" "$src/cpy_marshal.cpp" "$src/cpy_lower.cpp" "$src/cpy_lower_main.cpp" || exit 1
+c++ -std=c++17 -Wall -Wextra -o "$work/lower" "$src/cpy_marshal.cpp" "$src/cpy_lower.cpp" "$root/tools/common/stack_slots.cpp" \
+  "$src/cpy_lower_main.cpp" || exit 1
 cc -std=c99 -Wall -Wextra -c -o "$work/pyrt.o" "$dir/runtime/pyrt.c" || exit 1
 cc -std=c99 -Wall -Wextra -c -o "$work/driver.o" "$dir/runtime/driver.c" || exit 1
 
