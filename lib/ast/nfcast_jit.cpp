@@ -6,8 +6,9 @@
 // anything else outside the subset, makes compile() refuse the loop.
 //
 // Registers. The machine code has one 64-bit word per local (and per hidden variable of a for loop) in an array REGS, whose address
-// is in RBX (callee-saved, pushed at the entry). RAX, RCX and RDX are scratch; a binary operation evaluates its left operand, pushes
-// it, evaluates the right one, and pops the left one into RAX. There are no calls, no memory but REGS, and no allocation, so the
+// is in RBX (callee-saved, pushed at the entry). RAX, RCX and RDX are scratch; a binary operation of two compound operands evaluates
+// its left operand, pushes it, evaluates the right one, and pops the left one into RAX (a constant or a local operand is read directly,
+// with no push). There are no calls, no memory but REGS, and no allocation, so the
 // code has no side effects: whatever the entry guard does not cover cannot be observed before the loop ends.
 //
 // Register allocation. The four most referenced words (weighted by loop depth) live in R12-R15 for the whole loop instead of in
@@ -337,8 +338,40 @@ struct Gen {
     }
   }
 
-  // RAX = left, RCX = right (left is evaluated first; its value is kept on the machine stack meanwhile).
+  // A leaf is an integer constant or a local that is not captured: reading it runs no code that can change anything or fail, so its
+  // read may come before or after the other operand's evaluation (the expressions of the subset assign nothing).
+  bool leaf(Node* n) {
+    TierView v;
+    tier_view(n, v);
+    return (v.kind == TierView::K_CONST && v.k.t == T_INT) || (v.kind == TierView::K_LOCAL && !v.flag);
+  }
+  // Loads the leaf N into REG (RAX or RCX).
+  bool leaf_into(Node* n, int reg) {
+    TierView v;
+    tier_view(n, v);
+    if (v.kind == TierView::K_CONST) {
+      a.mov_imm(reg, v.k.i);
+      return true;
+    }
+    int r = slot_reg(v.slot, false);
+    if (r < 0) return false;
+    a.load(reg, r);
+    return true;
+  }
+
+  // RAX = left, RCX = right. A leaf on either side needs no push: a leaf on the right is loaded into RCX after the left is evaluated,
+  // and a leaf on the left is loaded into RAX after the right is evaluated (its value moved to RCX first). Only two compound operands
+  // keep the left value on the machine stack while the right one is computed.
   bool binary(Node* l, Node* r) {
+    if (leaf(r)) {
+      if (!expr(l)) return false;
+      return leaf_into(r, RCX);
+    }
+    if (leaf(l)) {
+      if (!expr(r)) return false;
+      a.mov_rcx_rax();
+      return leaf_into(l, RAX);
+    }
     if (!expr(l)) return false;
     a.push_rax();
     if (!expr(r)) return false;
@@ -438,6 +471,12 @@ struct Gen {
   bool decl(const TierView& v) {
     if (v.captured) return fail("a local captured by a closure");
     if (v.multi_last || v.kids.size() != v.slots.size()) return fail("a local declared without one integer value");
+    if (v.slots.size() == 1) {  // one local: its value goes straight to its register
+      if (!expr(v.kids[0])) return false;
+      a.store(declare_reg(v.slots[0]), RAX);
+      seen.insert(v.slots[0]);
+      return true;
+    }
     for (Node* k : v.kids) {
       if (!expr(k)) return false;
       a.push_rax();
@@ -455,6 +494,13 @@ struct Gen {
     for (int t : v.tkinds)
       if (t != TierView::T_LOCAL) return fail("an assignment to a captured local, an upvalue, a global or a field");
     if (v.multi_last || v.kids.size() != v.slots.size()) return fail("an assignment of other than one value per target");
+    if (v.slots.size() == 1) {  // one target: its value goes straight to its word
+      if (!expr(v.kids[0])) return false;
+      int r = slot_reg(v.slots[0], true);
+      if (r < 0) return false;
+      a.store(r, RAX);
+      return true;
+    }
     for (Node* k : v.kids) {
       if (!expr(k)) return false;
       a.push_rax();
