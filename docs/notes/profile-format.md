@@ -43,6 +43,32 @@ Decision for how profiles are stored, exchanged and read, for the profiling work
      counters already give. Revisit only if sampling on real hardware is needed.
    - Chrome trace stays a view, produced from the binary file on request.
 
+## Timeline records and the critical path
+
+The per-run profile also keeps a timeline: one record per timed event (a call of a function, a tier compile, a loop run).
+A record has these fields:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `id` | u32 | unique within the run |
+| `parent` | u32 | enclosing event on the same thread, 0 for none |
+| `tid` | u32 | thread that ran the event |
+| `ts` | u64 | start time, in nanoseconds from the run's start |
+| `dur` | u64 | duration, in nanoseconds |
+| `site` | u32 | the site key (string table index of the function plus its ordinal, as above) |
+| `waits_for` | u32 | id of the event whose completion released this one, 0 for none |
+
+Nesting on one thread already gives the parent relation, so `parent` is enough there. `waits_for` is the field that
+crosses threads: a call that waited for an asynchronous tier compile points at the compile's `id`. Without it, two
+overlapping spans cannot be told apart as dependent or independent.
+
+The critical path is then the longest weighted path through these records. Each event finishes at
+`ts + dur`, and a waiting event starts after the finish of the event named in `waits_for`. Walk back from the event that
+finishes last, following `waits_for` where set and `parent` otherwise.
+
+In Chrome trace output, `waits_for` becomes a flow event (`ph: "s"` on the releasing event, `ph: "f"` on the waiting one).
+In the binary profile, it is the `u32` field above.
+
 ## Protobuf: making it cheaper
 
 Protobuf is only needed at the interchange boundary (decision 2), so the cheap options are about keeping it out of the hot
