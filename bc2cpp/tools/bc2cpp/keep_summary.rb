@@ -94,11 +94,36 @@ module KeepSummary
               'bc2cpp_hint_violation_named' => %w[bc2cpp_hint_violation],
               'bc2cpp_nil_receiver_named' => %w[bc2cpp_nil_receiver bc2cpp_nil_receiver_id] }.freeze
   NAME = /(?<![\w$])([A-Za-z_][\w$]*)\s*\(/
+  NAME_BYTES = Array.new(256) do |ch|
+    ch == 36 || ch == 95 || (ch >= 48 && ch <= 57) || (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122)
+  end.freeze
+  SPACE_BYTES = Array.new(256) { |ch| ch == 32 || (ch >= 9 && ch <= 13) }.freeze
   # `Type name{...}` / `Type{...}`: an object whose constructor and destructor the scan cannot see.
   BRACE_INIT = /(?<![\w$])([A-Za-z_][\w$:<>]*)\s+[A-Za-z_]\w*\s*\{|
                 (?<![\w$])(?!(?:else|do|try)\b)([A-Za-z_][\w$:<>]*)\s*\{/x
 
   module_function
+
+  # NAME over the binary, comment/literal-blanked body. Locate each '(' in C, then walk back over its whitespace and
+  # identifier. Reading the whole token also enforces NAME's left boundary: neither a digit nor '$' may start it.
+  # Unlike scan with a capture, this allocates only the name, without a capture Array or regexp match at every call.
+  def each_call_name(body)
+    pos = 0
+    while (at = body.index('(', pos))
+      pos = at + 1
+      last = at - 1
+      last -= 1 while last >= 0 && SPACE_BYTES[body.getbyte(last)]
+      first = last
+      first -= 1 while first >= 0 && NAME_BYTES[body.getbyte(first)]
+      first += 1
+      next if first > last
+
+      ch = body.getbyte(first)
+      next unless ch == 95 || (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122)
+
+      yield body.byteslice(first, last - first + 1)
+    end
+  end
 
   def marker(callees, handler)
     "/* #{MARK}#{handler ? 'H' : ''} #{callees.to_a.sort.join(' ')} */"
@@ -250,7 +275,7 @@ module KeepSummary
         s[:unknown] = true
         s[:blocker] ||= why
       end
-      body.scan(NAME) do |(called)|
+      KeepSummary.each_call_name(body) do |called|
         next if KEYWORDS.include?(called)
 
         if STORES.include?(called)

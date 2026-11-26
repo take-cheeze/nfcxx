@@ -457,3 +457,48 @@ Local ignored artifacts, input hashes, profiling drivers and reports are under
 `build/bench/profile-1757` and `build/bench/profile-1757-*.rb`. The CPU and allocation dumps,
 native per-unit results and timing log, perf capture, artifact comparison, and runner log are
 retained there; no Python was used.
+
+## Locate KeepSummary call names from opening parentheses
+
+`KeepSummary::Unit#own_effects` now locates each opening parenthesis with `String#index` and walks
+backward over ASCII whitespace and identifier bytes. Its input is already binary C++ text with
+comments and literals blanked. Reading the whole preceding token preserves the old `NAME` regex's
+boundary rule: a digit or `$` cannot start the token. Frozen byte-class tables avoid a regex match
+and capture array per call; the callee classification and conservative store/raise scans are unchanged.
+
+The comparison corpus combines all 16 generated units from the 395-input self build: 36,183
+function bodies, 74,724,114 body bytes and 1,243,993 call names. Every name, own-effects hash and
+final summary (including blocker messages) matches the original implementation. Alternating
+complete summary-computation runs on CRuby 4/YJIT measured:
+
+| | Baseline | Updated |
+| --- | ---: | ---: |
+| CPU, first / second run | 7.723 / 7.449 s | 6.188 / 6.216 s |
+| Allocations, first / second run | 14.894 / 14.892M | 13.506 / 13.505M |
+
+This is approximately 18% less CPU and 9.3% fewer allocations in summary computation. A separate
+full CPU-profiled replay on the same frozen self inputs preserves all 20 C++, header and bytecode
+artifacts. `own_effects` falls from 6.282 to 4.939 s inclusive sampled CPU; the whole summary rewrite
+falls from 12.984 to 11.887 s. Total allocations fall from 261.449M to 260.064M. Whole generation
+wall time varies from 190.06 to 193.18 s and GC from 49.28 to 51.68 s, so this pair does not
+establish an end-to-end throughput improvement.
+
+The existing GC-root check now includes 706 lexical cases covering invalid identifier starts,
+`$` inside a name, long names, nesting, every ASCII whitespace byte, nulls and non-ASCII bytes.
+All 66 checks pass, including interpreted/compiled runtime parity and the kill-switch cases
+that prove the overwritten values need their roots. The lexical comparison also passes under
+mruby with Oniguruma. The updated compiler file and check match native mrbc byte for byte;
+their oracle snapshots are recorded and snapshot verification has no differences or missing entries.
+
+A fresh 395-input self build succeeds with 6,396 translated methods. A direct test after compiled
+registration confirms `each_call_name` is a native method, executes translated calls and matches
+all 706 lexical cases. On the same 1,243,993-call corpus, alternating instrumented compiled-runtime
+runs take 2.797 / 2.803 s wall with the original regex versus 2.799 / 2.804 s with the scanner:
+effectively unchanged in this check, while the CRuby generation pass improves. Each byte scan
+executes 2,656,465 translated-method calls, including its callees. A fresh `runner_generation.rb`
+also passes native-oracle verification, C++/bytecode parity and linked runtime behavior.
+
+Local measurements and differential drivers are `build/bench/keep-summary-comparison.{rb,json,log}`;
+the frozen-input CPU replay and artifact hashes are under `build/bench/keep-summary-full`. The AOT
+lexical check and corpus benchmark are `build/bench/keep-summary-aot-{check,bench}.{rb,log}`;
+the rebuild and runner logs are under `build/bench/keep-summary-build`.

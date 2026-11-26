@@ -16,9 +16,24 @@ ENV['BC2CPP_SIG_DIRS'] = ''
 require 'tmpdir'
 require_relative 'check_support'
 require_relative 'fixture_runtime'
+require_relative '../../tools/bc2cpp/keep_summary'
 
 suite = FixtureCheck.new('gc_root_check')
 suite.require_mrbc!
+
+# The call-name scan decides which callees may unlink a live element. Match the original NAME rule at identifier
+# boundaries, through every ASCII whitespace byte, and next to arbitrary bytes in the binary generated text.
+prefixes = ['', '1', '$', 'prefix', '_', '::', '.', '->', "\xff".b, '日本語'.b]
+names = ['callee', '_callee', 'callee$part', 'callee2', '1callee', '$callee', 'a' * 512]
+spaces = ['', ' ', "\t", "\n", "\r", "\v", "\f", " \t\n", "\0", "\xa0".b]
+call_scans = prefixes.product(names, spaces).map { |prefix, name, space| "#{prefix}#{name}#{space}(nested());".b }
+call_scans.concat(['(', '()()', 'outer(inner(a), b)', 'x ( y ( z (', 'f/* gap */(', 'f $ ('].map(&:b))
+call_scans.each do |body|
+  actual = []
+  KeepSummary.each_call_name(body) { |name| actual << name }
+  raise "call-name scan differs for #{body.inspect}" unless actual == body.scan(KeepSummary::NAME).flatten
+end
+suite.check("the call-name scanner preserves #{call_scans.size} lexical cases", true)
 
 SOURCE = <<~RUBY
   class GcRoot
