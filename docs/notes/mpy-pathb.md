@@ -61,12 +61,15 @@ binary operators plus 13, as in `py/runtime0.h`; on ints they give the same resu
 - `range(...)` (one to three small-int arguments) is a MpyRange {start, stop, step, len}. `GET_ITER` on it makes an iterator
   whose index counts the items given; `len` and truth use `len`. Containment in a range is refused at run time, and so is a
   range as a dict key or in equality.
-- `LOAD_METHOD` of `append` or `pop` on a list, or of the dict methods (see Dicts), gives the builtin method, and of an
+- `LOAD_METHOD` of a list method (`append`, `pop`, `insert`, `extend`, `remove`, `index`, `count`, `reverse`, `sort`, `copy`,
+  `clear`) or a tuple method (`index`, `count`), of a str method (see Strings), or of the dict methods (see Dicts), gives the
+  builtin method, and of an
   instance or class the method of its class (see Classes). A value with no such attribute fails with MicroPython's
-  AttributeError. The lowering refuses the builtin method names it does not lower, by name (`kBuiltinMethods` in
-  `mpy_lower.cpp`). `CALL_METHOD` passes the self (0
+  AttributeError. The lowering refuses the builtin method names that no builtin type has yet, by name (`kBuiltinMethods` in
+  `mpy_lower.cpp`); a name that some builtin type has is dispatched on the receiver at run time, and a receiver whose type
+  lacks it fails there. `CALL_METHOD` passes the self (0
   for none) and the arguments to `mpy_call_method`, so `xs.pop(i)` and `xs.append(x)` take one or two arguments. A keyword
-  argument is refused.
+  argument to a builtin method fails at run time (`function doesn't take keyword arguments`).
 - A constant tuple is one object in the .mpy file (mpy-cross folds it), so `LOAD_CONST_OBJ` builds it on each run from its items.
   The items may be None, the bools, small ints, strs, and tuples of those. An int outside the runtime's 62-bit small range is
   refused, as big ints are.
@@ -110,9 +113,10 @@ is {key, value}. An empty slot has key 0; a deleted one has the sentinel key 0x1
   drops the table, `setdefault(k[, v])` hashes k and adds it with v (None), `popitem()` removes and returns the first live slot
   (`KeyError: popitem(): dictionary is empty`), and `fromkeys(iterable[, v])` is the classmethod: `d.fromkeys(...)` is called with
   no self, and its table is sized by the iterable's length. Iterating a str is lowered (see Strings), so `fromkeys` takes a str. The
-  lowering does not refuse `copy`, `clear`, `setdefault`, `popitem` or `fromkeys` by name, since the receiver's type is not
-  known there: on a list, str or other value that is not a dict the runtime fails at run time ("a method copy of a 'list' is
-  not lowered yet"). Read as a value (`f = d.get`) a dict method fails at run time.
+  lowering does not refuse `setdefault`, `popitem` or `fromkeys` by name, since the receiver's type is not known there: on a
+  value that is not a dict (and has no such method) the runtime fails at run time ("a method popitem of a 'list' is not
+  lowered yet", or the AttributeError the reference gives for a value with no such attribute). Read as a value (`f = d.get`)
+  a dict method fails at run time.
 - A view is {type, dict, kind}, live: it reads the dict's table. `repr` is `dict_keys([...])`, `dict_values([...])` or
   `dict_items([(k, v), ...])`, in table order. `len`, truth, `in` (a key, a value by equality, a (key, value) pair) and
   iteration are lowered. A view has no hash and no equality (`==` fails here; the reference compares identities).
@@ -133,8 +137,8 @@ is {key, value}. An empty slot has key 0; a deleted one has the sentinel key 0x1
   `update(*others)`, `difference_update(*others)`, `intersection_update(other)`, `symmetric_difference(other)`,
   `symmetric_difference_update(other)`, `issubset(other)`, `issuperset(other)` and `isdisjoint(other)`. Each argument may be any
   iterable; `issubset` and `issuperset` make a set of a non-set argument first, so an unhashable item is the hash TypeError.
-  The argument counts and the TypeErrors are the reference's. A set method not listed (`copy`, `clear`, ...) fails at run
-  time, as "not lowered yet" (`kBuiltinMethods` refuses the names only the set and list have).
+  The argument counts and the TypeErrors are the reference's. `copy()` and `clear()` are the set's too (`copy` is the table
+  slot for slot, as the reference's `set_copy`; `clear` frees the table).
 - Operators: `|`, `&` and `-` on two sets build a new set (`|` is a copy of the left set with the right's items added; `&` is a
   new set of the items of the right that are in the left, in the right's order; `-` removes the right's items from a copy).
   `^` is the symmetric difference: a copy of the left set with each item of the right added when it is not there and removed
@@ -194,9 +198,19 @@ class namespace and `LOAD_GLOBAL`/`STORE_GLOBAL` for the globals. Any other opco
 
 Each code object is one IR function. The module body is `mpy_module`. A function is `mpy_fn_K(ret, args, nargs)`: it
 copies its arguments into its locals `loc.N` and stores its result through `ret`. The IR has no function-address value, so
-`mpy_dispatch(K, ret, args, nargs)` routes a call to `mpy_fn_K`, and a function object is a runtime record holding K and the
-argument count. A call pushes each argument on the runtime value stack (`mpy_push`), then calls `mpy_call(fn, n)`, which
-checks the arity and dispatches. Functions with defaults, keyword arguments or `*args` are refused.
+`mpy_dispatch(K, ret, args, nargs)` routes a call to `mpy_fn_K`, and a function object is a runtime record holding K, its
+parameter count, its signature and its defaults. A call pushes each argument on the runtime value stack (`mpy_push`), the
+keyword pairs (the name, then the value) after the positional ones, then calls `mpy_call_kw(fn, n, k)`, which matches them
+to the parameters as `bc.c`'s `mp_setup_code_state` does and dispatches. `*args`, keyword-only parameters and `**kwargs` are refused.
+
+Default arguments: `MAKE_FUNCTION_DEFARGS` and `MAKE_CLOSURE_DEFARGS` take the defaults tuple (the keyword defaults' null
+sentinel is below it, and is ignored). A function's signature is a data item `mpy.sig.K`: its name, then its parameter names,
+each NUL-terminated, from the code info. A missing argument takes the default of its parameter (the last ones have defaults).
+The argument errors are the reference's (`f() takes 2 positional arguments but 3 were given`, `unexpected keyword argument
+'d'`, `function got multiple values for argument 'a'`, `function missing required positional argument #N`, where N is the
+index of the highest-numbered missing parameter without a default, as `bc.c` reports it). A closure counts its captured
+cells among the positional arguments, as the reference does. A keyword argument to a builtin function or method is
+`function doesn't take keyword arguments`, as the reference's builtins say.
 
 ## Closures
 
@@ -222,9 +236,18 @@ Representation and calling convention (`tests/mpy/runtime/mpy_rt.c`):
   arguments. So `mpy_fn_K` copies all of its arguments, the cells included, into its locals with no special case, and
   `LOAD_DEREF` and `STORE_DEREF` read and write through the cell in the local.
 
-A nested def that has default arguments (`MAKE_CLOSURE_DEFARGS`) is refused by name. A `del` of a cell or free variable
+A nested def with default arguments is a closure with its defaults (`MAKE_CLOSURE_DEFARGS`). A `del` of a cell or free variable
 (`DELETE_DEREF`) stores 0 in the cell, which is unbound, so a read of it is `NameError: local variable referenced before
 assignment` (the reference's text).
+
+List methods (`list_method` in the runtime): `insert` clamps its index as `list_insert` does; `extend` takes any iterable (a
+list is extended by its own items when it is itself); `remove`, `index` and `count` compare by `mp_obj_equal` and fail with
+`ValueError: object not in sequence`; `index` and `count` take a tuple too, and `index`'s start and end clamp as
+`mp_get_index` does. `reverse` is in place. `copy` is a new list; `clear` empties the list. `sort(key=None, reverse=False)`
+is MicroPython's `mp_quicksort` (objlist.c), ported with the same comparisons in the same order, so it is not stable and an
+equal key moves as the reference's does; the key is called on each comparison, as the reference calls it. Its comparisons
+are for ints (bools too) and strs, and any other pair is `TypeError: unsupported types for __lt__: 'X', 'Y'`. Keyword
+arguments reach a builtin only through `sort`; a keyword to any other builtin is `function doesn't take keyword arguments`.
 
 ## Strings
 
@@ -244,6 +267,17 @@ False, as in the reference). `+` concatenates two strs. A `+` with a non-str ope
 reference's message (`unsupported types for __add__: 'str', 'int'`; a bool is reported as `'int'`). The ordering operators
 and every other operator on a str are a runtime error saying they are not lowered yet. Truth: an empty str is false.
 `print` of a str writes its bytes and a newline, with no quotes.
+
+Methods on a str (`LOAD_METHOD` finds them in `str_method_index`, and `str_method` runs them): `upper`, `lower`, `strip`,
+`lstrip`, `rstrip` (with an optional set of characters, or the whitespace), `split` (a sep, or the whitespace runs, and
+maxsplit), `join` (any iterable of strs, with the str between them), `replace` (a count, and an empty old goes before
+each character and at the end), `startswith` and `endswith` (a str or a tuple of strs, with start and end), and `find` and
+`count` (with start and end). The positions are UTF-8 characters; upper and lower map ASCII letters only. The argument
+counts and the errors are the reference's (`function takes 1 positional arguments but 2 were given`, `function missing 1
+required positional arguments`, `function expected at most N arguments, got M`, `can't convert 'int' object to str
+implicitly`, `ValueError: empty separator`, `join expects a list of str/bytes objects consistent with self object`). A str
+bound below the start or end is clamped as the reference clamps it: `'hello'.find('', 9)` is 5, and `find` on an end before
+its start is -1. `format` is not lowered (refused by name).
 
 ## Exceptions
 
@@ -348,9 +382,9 @@ a coroutine (vm.c's unwind_jump and END_FINALLY), and the lowering does the same
 
 ## Not yet
 
-Defaults and keyword arguments (`MAKE_FUNCTION_DEFARGS`, `MAKE_CLOSURE_DEFARGS`), generators, str methods and formatting, str
+Generators, str formatting (`format`, `%`) and the str methods not listed above (`center`, `title`, `splitlines`, ...), str
 ordering and repetition,
-big ints, the set methods `copy` and `clear`, the list methods other than append and pop, subscripts of a range, and the rest
+big ints, the list and str methods the lowering refuses by name (`kBuiltinMethods`: `format`, `center`, `title`, `splitlines`, ...), subscripts of a range, and the rest
 of the opcodes. Equality of two dicts, two ranges or two views, `str` of a list, tuple, set or view, and
 containment in a range are refused at run time until their repr and equality are built. Changing a dict's size during a
 `for` over it is not checked (see Dicts). Identity of strs: a str built at run time is a new object, but MicroPython interns

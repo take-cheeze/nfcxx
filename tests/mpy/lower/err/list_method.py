@@ -1,2 +1,2 @@
 xs = [1, 2]
-result = xs.index(2)
+result = xs.title()
