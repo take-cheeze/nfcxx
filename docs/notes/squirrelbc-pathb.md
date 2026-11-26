@@ -67,19 +67,21 @@ checked by tag. Anything else calls a helper, which performs the whole operation
 | SET, NEWSLOT | `sqbc_rt_set` / `sqbc_rt_newslot`; the value copied to arg0 when arg0 is a register |
 | NEWOBJ (a table) | `sqbc_rt_newtable`; an array or a class is refused |
 | CALL | `sqbc_rt_call(callee, ret, frame, nargs)`: the frame starts at the `this` register (arg2); see section 4 |
-| CLOSURE (no outer variables) | `sqbc_rt_closure` with the prototype's index, its parameters and frame size; a bound register (arg2) is the environment |
+| CLOSURE | `sqbc_rt_closure` with the prototype's index, its parameters, frame size and outer count; a bound register (arg2) is the environment; each outer is bound by `sqbc_rt_outer_local` (a register of this frame: a local of the enclosing function) or `sqbc_rt_outer_outer` (an outer of the running closure) |
+| GETOUTER, SETOUTER | `sqbc_rt_getouter` / `sqbc_rt_setouter` on the running closure (the third parameter of `sq_fn_N`) |
+| CLOSE | `sqbc_rt_close` on the register arg1: the outers of the stack from there on move into their objects |
 | AND, OR | copy of the operand and jump when it decides the result |
 | JMP, JZ | goto; JZ jumps when payload == 0 |
 | JCMP | the fused CMP and JZ of the compiler's peephole: jump when the comparison is false |
 | RETURN | copy of the register (or null) into `*ret`, then `(return)` |
-| everything else (GETOUTER, SETOUTER, CLOSE, LOADROOT, CLOSURE with outer variables, NEWOBJ of an array, BITW, INC, FOREACH, ...) | refused: `refused: _OP_NAME is not lowered yet (pc N)`, exit 3 |
+| everything else (LOADROOT, NEWOBJ of an array, BITW, INC, FOREACH, ...) | refused: `refused: _OP_NAME is not lowered yet (pc N)`, exit 3 |
 
-A function with default parameters or a vararg (the main prototype is always vararg, with `vargv` unused) is refused by
-name when it is nested; the main prototype is lowered either way.
+A nested function with default parameters or a vararg is refused by name (the main prototype is always vararg, with
+`vargv` unused, and is lowered either way).
 
-Each module gets one `sq_fn_N` per prototype (pre-order, main is 0) and a dispatcher `sq_dispatch(fn, ret, frame)`, an IR
-function with one test per prototype, which the runtime calls for a closure. A string literal is a `(data)` item
-(`sqs_N`), one per distinct text.
+Each module gets one `sq_fn_N(ret, base, clo)` per prototype (pre-order, main is 0; `clo` is the running closure, NULL for
+main) and a dispatcher `sq_dispatch(fn, ret, frame, clo)`, an IR function with one test per prototype, which the runtime
+calls for a closure. A string literal is a `(data)` item (`sqs_N`), one per distinct text.
 
 The helper's messages are the reference's (sqvm.cpp, sqdebug.cpp): `division by zero`, `arith op + on between 'integer'
 and 'null'`, `attempt to negate a bool`, `comparison between '1' and 'bool'`. The runtime prints `error: MESSAGE` and
@@ -112,14 +114,14 @@ exits 1, as `sqref` does.
 
 ## 5. Tests
 
-- `tests/squirrelbc/run.sh`: the reader. 61 streams (`corpus/*.nut`, `lower/*.nut` and the synthetic stream of
+- `tests/squirrelbc/run.sh`: the reader. 67 streams (`corpus/*.nut`, `lower/*.nut` and the synthetic stream of
   `lower/synth.rb`) compile with `sq -c`, load in `sq_dump` (every instruction named, stream consumed), and run through
   `sqref` with the same result as their source. Also: the opcode table against the reference header; a golden dump
   (`reader/ints.dump`); and five malformed streams (truncated, trailing byte, bad tag, SQInteger size 4, corrupt TAIL),
   each refused with exit 1.
-- `tests/squirrelbc/lower/run.sh`: the end-to-end suite. 48 programs (`lower/*.nut`: integers, strings, tables, calls)
-  match `sqref` on the printed result and the status; 19 runtime errors (`lower/rterr/`) match the message and status 1;
-  9 programs (`lower/err/`) are refused with exit 3; `lower/synth.rb` writes a stream with DLOAD, DMOVE, LINE and
+- `tests/squirrelbc/lower/run.sh`: the end-to-end suite. 54 programs (`lower/*.nut`: integers, strings, tables, calls,
+  closures) match `sqref` on the printed result and the status; 19 runtime errors (`lower/rterr/`) match the message and
+  status 1; 8 programs (`lower/err/`) are refused with exit 3; `lower/synth.rb` writes a stream with DLOAD, DMOVE, LINE and
   LOADNULLS. A string result is printed by `sqref` and by the driver alike (the text, one line).
 - The oracle is `tests/squirrelbc/oracle/sqref.c`: the reference VM, built against the reference tree's
   `libsquirrel_static.a`. It loads `.nut` (compile) and `.cnut` (`sq_readclosure`) and prints the result line.
@@ -145,3 +147,6 @@ source tree). Without them they exit 77 (skip). The lowering suite also needs `b
 - Objects (strings, tables, closures) are never freed: the runtime is a test harness with no collector, so a long loop
   that builds strings or tables uses memory without a bound.
 - A `tostring` of a table or a function (in a concatenation) is refused at run time: the reference prints an address.
+- LOADROOT (the reference's root-table fast path) is refused; the lowering reaches the root through GET on register 0.
+- The outer objects are kept as the reference keeps them (an open list by descending stack address, closed by CLOSE and by
+  the return of the frame). A closure called after its creating frame has returned reads the closed value.

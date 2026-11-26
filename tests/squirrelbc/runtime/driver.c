@@ -17,7 +17,7 @@ int main(void) {
   ret.tag = SQBC_TAG_NULL;
   ret.pad = 0;
   ret.i = 0;
-  sq_fn_0(&ret, base);
+  sq_fn_0(&ret, base, NULL);
   switch (ret.tag) {
     case SQBC_TAG_INTEGER: printf("%" PRId64 "\n", ret.i); break;
     case SQBC_TAG_BOOL: printf("%s\n", ret.i ? "true" : "false"); break;

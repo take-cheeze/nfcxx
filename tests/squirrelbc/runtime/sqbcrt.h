@@ -35,11 +35,12 @@ typedef struct SQV {
 #define SQBC_CMP_L 3
 #define SQBC_CMP_LE 4
 
-/* The lowered program's entry point (sq_fn_0 of the main prototype). */
-void sq_fn_0(SQV *ret, SQV *base);
+/* The lowered program's entry point (sq_fn_0 of the main prototype; no closure). Every other prototype takes the closure
+ * it runs for (its outer variables are read through it). */
+void sq_fn_0(SQV *ret, SQV *base, const SQV *clo);
 
 /* The dispatcher the IR defines: runs prototype FN (the index of the module's prototypes, main first) on the frame. */
-void sq_dispatch(int fn, SQV *ret, SQV *frame);
+void sq_dispatch(int fn, SQV *ret, SQV *frame, const SQV *clo);
 
 /* Sets up the stack of NSLOTS values at BASE and the root table, which is the `this` of the main function (base[0]). */
 void sqbc_rt_init(SQV *base, size_t nslots);
@@ -50,7 +51,15 @@ void sqbc_rt_neg(SQV *dst, SQV *a);
 int sqbc_rt_compare(int op, SQV *a, SQV *b);
 void sqbc_rt_loadstr(SQV *dst, const char *s, int64_t len);
 void sqbc_rt_newtable(SQV *dst);
-void sqbc_rt_closure(SQV *dst, int fn, int nparams, int stacksize, const SQV *env);
+void sqbc_rt_closure(SQV *dst, int fn, int nparams, int stacksize, const SQV *env, int nouters);
+/* Binds outer variable IDX of the closure at dst: a local (the stack value SLOT of the creating frame), or the outer
+ * variable SRC of the running closure CUR (the closure that creates it). */
+void sqbc_rt_outer_local(SQV *dst, int idx, SQV *slot);
+void sqbc_rt_outer_outer(SQV *dst, int idx, const SQV *cur, int src);
+void sqbc_rt_getouter(SQV *dst, const SQV *clo, int idx);
+void sqbc_rt_setouter(const SQV *clo, int idx, const SQV *val);
+/* CLOSE: the outer variables of the stack from FROM on are closed (their values move into the outer objects). */
+void sqbc_rt_close(SQV *from);
 void sqbc_rt_get(SQV *dst, const SQV *self, const SQV *key, int root_fallback);
 void sqbc_rt_set(const SQV *self, const SQV *key, const SQV *val, int root_fallback);
 void sqbc_rt_newslot(const SQV *self, const SQV *key, const SQV *val);

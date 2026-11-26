@@ -194,12 +194,50 @@ static void table_newslot(SqTable *t, const SQV *k, const SQV *v) {
 
 /* ---- closures and natives ------------------------------------------------------------------------------------------- */
 
+/* An outer variable (sqobject.h SQOuter). While its local is live, valptr points into the stack; once closed (CLOSE, or the
+ * return of the frame), the value moves into `value` and valptr points there. The open ones form a list by descending
+ * valptr, as in the reference (FindOuter, CloseOuters). */
+typedef struct SqOuter {
+  SQV *valptr;
+  SQV value;
+  struct SqOuter *next;
+} SqOuter;
+
+static SqOuter *g_open_outers;
+
+static SqOuter *find_outer(SQV *slot) {
+  SqOuter **pp = &g_open_outers;
+  SqOuter *p;
+  while ((p = *pp) != NULL && p->valptr >= slot) {
+    if (p->valptr == slot) return p;
+    pp = &p->next;
+  }
+  p = calloc(1, sizeof *p);
+  if (!p) rt_error("out of memory");
+  p->valptr = slot;
+  p->next = *pp;
+  *pp = p;
+  return p;
+}
+
+static void close_outers(SQV *from) {
+  SqOuter *p;
+  while ((p = g_open_outers) != NULL && p->valptr >= from) {
+    p->value = *p->valptr;
+    p->valptr = &p->value;
+    g_open_outers = p->next;
+    p->next = NULL;
+  }
+}
+
 typedef struct SqClosure {
   int fn;        /* the module's prototype index (sq_dispatch) */
   int nparams;   /* the prototype's parameters, `this` included */
   int stacksize; /* the prototype's frame size */
   int has_env;   /* CLOSURE with a bound register: the callee's `this` is env */
   SQV env;
+  int nouters;
+  SqOuter **outers;
 } SqClosure;
 
 typedef struct SqNative {
@@ -225,12 +263,17 @@ void sqbc_rt_newtable(SQV *dst) {
   *dst = v;
 }
 
-void sqbc_rt_closure(SQV *dst, int fn, int nparams, int stacksize, const SQV *env) {
+void sqbc_rt_closure(SQV *dst, int fn, int nparams, int stacksize, const SQV *env, int nouters) {
   SqClosure *c = calloc(1, sizeof *c);
   if (!c) rt_error("out of memory");
   c->fn = fn;
   c->nparams = nparams;
   c->stacksize = stacksize;
+  c->nouters = nouters;
+  if (nouters > 0) {
+    c->outers = calloc((size_t)nouters, sizeof(SqOuter *));
+    if (!c->outers) rt_error("out of memory");
+  }
   if (env) {
     if (env->tag != SQBC_TAG_TABLE) {
       char msg[128];
@@ -246,6 +289,28 @@ void sqbc_rt_closure(SQV *dst, int fn, int nparams, int stacksize, const SQV *en
   v.i = (int64_t)(intptr_t)c;
   *dst = v;
 }
+
+static SqClosure *closure_of(const SQV *v) { return (SqClosure *)(intptr_t)v->i; }
+
+void sqbc_rt_outer_local(SQV *dst, int idx, SQV *slot) {
+  closure_of(dst)->outers[idx] = find_outer(slot);
+}
+
+void sqbc_rt_outer_outer(SQV *dst, int idx, const SQV *cur, int src) {
+  closure_of(dst)->outers[idx] = closure_of(cur)->outers[src];
+}
+
+void sqbc_rt_getouter(SQV *dst, const SQV *clo, int idx) {
+  SQV v = *closure_of(clo)->outers[idx]->valptr;
+  *dst = v;
+}
+
+void sqbc_rt_setouter(const SQV *clo, int idx, const SQV *val) {
+  SQV v = *val;
+  *closure_of(clo)->outers[idx]->valptr = v;
+}
+
+void sqbc_rt_close(SQV *from) { close_outers(from); }
 
 /* ---- Get, Set, NewSlot ---------------------------------------------------------------------------------------------- */
 
@@ -357,7 +422,11 @@ void sqbc_rt_call(const SQV *callee, SQV *ret, SQV *frame, int nargs) {
     }
     if (frame + c->stacksize > g_stack_end) rt_error("stack overflow");
     if (c->has_env) frame[0] = c->env;
-    sq_dispatch(c->fn, ret, frame);
+    /* The callee's closure value is copied: the caller's register may not hold it for the whole call. */
+    SQV running = clo;
+    sq_dispatch(c->fn, ret, frame, &running);
+    /* LeaveFrame: the outer variables of the frame are closed (sqvm.cpp). */
+    close_outers(frame);
     return;
   }
   if (clo.tag == SQBC_TAG_NATIVE) {

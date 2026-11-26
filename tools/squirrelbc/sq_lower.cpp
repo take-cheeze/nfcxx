@@ -15,10 +15,15 @@
 // its parameters are the caller's registers above it, as in the reference (StartCall). A closure runs through
 // `sq_dispatch(N, ret, frame)`, the IR function this module defines with one test per prototype.
 //
+// A closure runs with its own closure value (the third parameter of sq_fn_N). Its outer variables are SQOuter objects of the
+// runtime: a local of the creating frame is bound to its stack value while that frame lives, and CLOSE or the return of the
+// frame moves the value into the object (sqvm.cpp FindOuter, CloseOuters). GETOUTER and SETOUTER go through the running
+// closure.
+//
 // Subset: LOAD (integer, boolean, null and string literals), LOADINT, LOADBOOL, LOADNULLS, MOVE, DMOVE, DLOAD, ADD, SUB, MUL,
 // DIV, MOD, NEG, NOT, CMP (>, >=, <, <=), EQ, NE, AND, OR, JMP, JZ, JCMP, RETURN, GET, GETK, SET, NEWSLOT, NEWOBJ (a table),
-// PREPCALL, PREPCALLK, CALL, CLOSURE (a prototype without outer variables or default parameters). Anything else is
-// refused by name.
+// PREPCALL, PREPCALLK, CALL, CLOSURE, GETOUTER, SETOUTER, CLOSE. A nested prototype with default parameters or varargs is
+// refused, and so is anything else by name.
 #include "sq_lower.hpp"
 
 #include <cstdint>
@@ -61,7 +66,10 @@ enum : std::uint8_t {
   kOpJmp = 0x1C,
   kOpJCmp = 0x1D,
   kOpJz = 0x1E,
+  kOpSetOuter = 0x1F,
+  kOpGetOuter = 0x20,
   kOpNewObj = 0x21,
+  kOpClose = 0x3C,
   kOpClosure = 0x30,
   kOpCmp = 0x28,
   kOpAnd = 0x2B,
@@ -78,6 +86,8 @@ constexpr std::uint8_t kNoValue = 0xFF;  // RETURN with arg0 0xFF has no value (
 constexpr std::uint8_t kNoRegister = 0xFF;  // the bound register of a CLOSURE without an environment; so has a NEWSLOT
 constexpr int kSlotBytes = 16;
 constexpr int kNotTable = 0;  // NEWOBJ's arg3 (sqopcodes.h NOT_TABLE)
+constexpr std::uint64_t kOtLocal = 0;  // SQOuterType: an outer variable of the enclosing frame (src is its register)
+constexpr std::uint64_t kOtOuter = 1;  // an outer variable of the enclosing closure (src is its outer index)
 
 std::string num(std::int64_t v) { return std::to_string(v); }
 std::string c_long(std::int64_t v) { return "(const long " + num(v) + ")"; }
@@ -130,15 +140,15 @@ class Module {
 
   std::string data_text() const { return data_.str(); }
 
-  // sq_dispatch(fn, ret, frame): runs prototype `fn` (the index of the function sq_fn_fn).
+  // sq_dispatch(fn, ret, frame, clo): runs prototype `fn` (the index of the function sq_fn_fn) on the frame, for the closure.
   std::string dispatch_text(std::size_t count) const {
     std::ostringstream out;
     out << "(function \"sq_dispatch\" (ret void) (params (param %0 \"fn\" int) (param %1 \"ret\" (ptr (struct \"SQV\")))"
-        << " (param %2 \"frame\" (ptr (struct \"SQV\"))))\n";
+        << " (param %2 \"frame\" (ptr (struct \"SQV\"))) (param %3 \"clo\" (ptr (struct \"SQV\"))))\n";
     for (std::size_t k = 0; k < count; ++k) {
-      std::string c = "%" + std::to_string(3 + k);
+      std::string c = "%" + std::to_string(4 + k);
       out << "  (let " << c << " bool (eq int %0 (const int " << k << ")))\n";
-      out << "  (if " << c << " (then (eval (call void &\"sq_fn_" << k << "\" %1 %2))))\n";
+      out << "  (if " << c << " (then (eval (call void &\"sq_fn_" << k << "\" %1 %2 %3))))\n";
     }
     out << "  (return))\n";
     return out.str();
@@ -153,7 +163,8 @@ class Fn {
  public:
   // `is_main`: the main prototype is always compiled with varparams (its `vargv` is never read by the driver), so only a
   // nested vararg function is refused: its arguments would be packed into an array.
-  Fn(const Proto &p, std::string name, Module &mod, bool is_main) : p_(p), name_(std::move(name)), mod_(mod) {
+  Fn(const Proto &p, std::string name, Module &mod, bool is_main)
+      : p_(p), name_(std::move(name)), mod_(mod), next_(3) {
     if (p_.varparams != 0 && !is_main) throw Refused("refused: a vararg function (" + name_ + ")");
     if (!p_.defaultparams.empty()) throw Refused("refused: default parameters (" + name_ + ")");
   }
@@ -167,7 +178,7 @@ class Fn {
     }
     std::ostringstream out;
     out << "(function \"" << name_ << "\" (ret void) (params (param %0 \"ret\" (ptr (struct \"SQV\")))"
-        << " (param %1 \"base\" (ptr (struct \"SQV\"))))\n";
+        << " (param %1 \"base\" (ptr (struct \"SQV\"))) (param %2 \"clo\" (ptr (struct \"SQV\"))))\n";
     // The scratch values of the helpers: a literal key (kv) and the result of a Get (rv).
     out << "  (slot \"kv\" (struct \"SQV\") 16 8)\n";
     out << "  (slot \"rv\" (struct \"SQV\") 16 8)\n";
@@ -180,7 +191,7 @@ class Fn {
   std::string name_;
   Module &mod_;
   std::ostringstream body_;
-  int next_ = 2;  // %0 is ret, %1 is base
+  int next_;  // %0 is ret, %1 is base, %2 is the running closure
   std::size_t pc_ = 0;
 
   void line(const std::string &s) { body_ << "  " << s << "\n"; }
@@ -590,14 +601,52 @@ class Fn {
         if (in.arg1 < 0 || static_cast<std::size_t>(in.arg1) >= p_.functions.size())
           throw std::runtime_error("prototype index outside the function (pc " + std::to_string(pc_) + ")");
         const Proto &child = p_.functions[static_cast<std::size_t>(in.arg1)];
-        if (!child.outers.empty()) refuse("_OP_CLOSURE of a function with outer variables");
         auto it = mod_.index.find(&child);
         if (it == mod_.index.end()) throw std::runtime_error("prototype not in the module");
         std::string env = kNullSqvPtr;
         if (in.arg2 != kNoRegister) env = reg(in.arg2).obj;
         Addr d = reg(in.arg0);
         line("(eval (call void &\"sqbc_rt_closure\" " + d.obj + " " + c_int(it->second) + " " +
-             c_int(static_cast<std::int64_t>(child.parameters.size())) + " " + c_int(child.stacksize) + " " + env + "))");
+             c_int(static_cast<std::int64_t>(child.parameters.size())) + " " + c_int(child.stacksize) + " " + env + " " +
+             c_int(static_cast<std::int64_t>(child.outers.size())) + "))");
+        // Each outer variable is bound when the closure is made (FindOuter, or the running closure's own outer).
+        for (std::size_t i = 0; i < child.outers.size(); ++i) {
+          const OuterVar &ov = child.outers[i];
+          if (ov.src.type != kOtInteger) throw std::runtime_error("outer variable source is not an integer");
+          const std::int64_t src = ov.src.integer;
+          if (ov.type == kOtLocal) {
+            Addr slot = reg(src);
+            line("(eval (call void &\"sqbc_rt_outer_local\" " + d.obj + " " + c_int(static_cast<std::int64_t>(i)) +
+                 " " + slot.obj + "))");
+          } else if (ov.type == kOtOuter) {
+            line("(eval (call void &\"sqbc_rt_outer_outer\" " + d.obj + " " + c_int(static_cast<std::int64_t>(i)) +
+                 " %2 " + c_int(src) + "))");
+          } else {
+            throw std::runtime_error("outer variable of an unknown type");
+          }
+        }
+        break;
+      }
+      case kOpGetOuter: {
+        // GETOUTER: TARGET = the value of outer variable arg1 of the running closure.
+        Addr d = reg(in.arg0);
+        line("(eval (call void &\"sqbc_rt_getouter\" " + d.obj + " %2 " + c_int(in.arg1) + "))");
+        break;
+      }
+      case kOpSetOuter: {
+        // SETOUTER: outer variable arg1 = STK(arg2); TARGET = STK(arg2) when arg0 is a register.
+        Addr val = reg(in.arg2);
+        line("(eval (call void &\"sqbc_rt_setouter\" %2 " + c_int(in.arg1) + " " + val.obj + "))");
+        if (in.arg0 != kNoRegister) {
+          Addr d = reg(in.arg0);
+          store_val(d, load(val));
+        }
+        break;
+      }
+      case kOpClose: {
+        // CLOSE: the outer variables of the registers from arg1 on are closed.
+        Addr from = reg(in.arg1);
+        line("(eval (call void &\"sqbc_rt_close\" " + from.obj + "))");
         break;
       }
       case kOpCall: {
