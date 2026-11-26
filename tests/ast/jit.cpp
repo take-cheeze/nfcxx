@@ -284,6 +284,77 @@ static const Case cases[] = {
      "end\n"
      "return x, y, z, w, v",
      COMPILED},
+    {"bitwise and, or, xor and not on positive, negative and large operands",
+     "local s, t, u = 0, 0, 0\n"
+     "local big = 9223372036854775807\n"
+     "local lo = -9223372036854775807 - 1\n"
+     "for i = 1, 200 do\n"
+     "  local p = i * 1234567\n"
+     "  local n = -i * 7654321\n"
+     "  s = s + (p & n) + (p | n) + (p ~ n) + (~p)\n"
+     "  t = t ~ (n & big) ~ (p | lo) ~ (lo & n)\n"
+     "  u = u + ((n | big) & ~n) - ((p ~ big) | i)\n"
+     "end\n"
+     "return s, t, u",
+     COMPILED},
+    {"xorshift-style bitwise operators in a while loop",
+     "local x, y, n = 88172645463325252, 362436069, 0\n"
+     "while n < 500 do\n"
+     "  x = x ~ (x << 13)\n"
+     "  x = x ~ (x >> 7)\n"
+     "  x = x ~ (x << 17)\n"
+     "  y = (y & 0xFFFF) | (x & ~0xFFFF)\n"
+     "  n = n + 1\n"
+     "end\n"
+     "return x, y, n",
+     COMPILED},
+    {"shifts with counts 0, 63, 64, 65, negative counts and the most negative integer",
+     "local r = 0\n"
+     "for i = 1, 40 do\n"
+     "  r = r + (i << 0) + (i >> 0) + (i << 63) + (i >> 63) + (i << 64) + (i >> 64)\n"
+     "  r = r + (i << -1) + (i >> -1) + (i << -63) + (i >> -63) + (i << -64) + (i >> -64)\n"
+     "  r = r + (i << 65) + (i >> -65) + (-1 >> 1) + (-1 << 63) + (-1 >> 64)\n"
+     "end\n"
+     "local m = -9223372036854775807 - 1\n"
+     "local v = -1234567\n"
+     "r = r ~ (v << m) ~ (v >> m) ~ (v >> 9223372036854775807)\n"
+     "return r",
+     COMPILED},
+    {"shift counts from -149 to 149 taken from the loop, and a shift count that is a local",
+     "local acc = 0\n"
+     "local c = -70\n"
+     "for i = 1, 300 do\n"
+     "  local k = i - 150\n"
+     "  acc = acc ~ (-7 << k) ~ (-7 >> k) ~ (i << k) ~ (i >> k)\n"
+     "  acc = acc ~ (acc << c) ~ (acc >> c)\n"
+     "  c = c + 1\n"
+     "  if c > 70 then c = -70 end\n"
+     "end\n"
+     "return acc, c",
+     COMPILED},
+    {"shifts and bitwise operators in conditions, and a bitwise operator on a loop variable inside a while",
+     "local hits, j = 0, 0\n"
+     "while j < 300 do\n"
+     "  j = j + 1\n"
+     "  if (j & 4) ~= 0 and (j >> 1) < 100 then hits = hits + 1 end\n"
+     "  if ~j == -j - 1 and (j << 2) > 1000 then hits = hits + 1000 end\n"
+     "end\n"
+     "return hits, j",
+     COMPILED},
+    {"bitwise operators mixed with a refused operator: the loop falls back and gives the interpreter's result",
+     "local s, t = 0, 0\n"
+     "for i = 1, 50 do\n"
+     "  s = (s ~ i) & 0xFFFF\n"
+     "  t = t + (i ^ 2)\n"
+     "end\n"
+     "return s, t",
+     REFUSED},
+    {"a bitwise operator on a float with an integer value: the guard fails, the interpreter runs the loop",
+     "local f = 2.0\n"
+     "local s = 0\n"
+     "for i = 1, 10 do s = s + (i | f) end\n"
+     "return s",
+     GUARD},
     {"a float among six locals: the guard fails, and the interpreter runs the loop",
      "local f = 0.5\n"
      "local a, b, c, d, e, g = 1, 2, 3, 4, 5, 6\n"
@@ -304,6 +375,9 @@ struct Rng {
   int pick(int n) { return static_cast<int>(next() % static_cast<unsigned>(n)); }
 };
 
+// Set for the batch of programs with the bitwise operators (the other batch is generated as before, the same programs).
+static bool gen_bits = false;
+
 static std::string gen_expr(Rng& r, int depth) {
   static const char* vars[] = {"a", "b", "c", "i"};
   if (depth <= 0 || r.pick(3) == 0) {
@@ -314,16 +388,24 @@ static std::string gen_expr(Rng& r, int depth) {
       default: return std::to_string(r.next() % 100000u);
     }
   }
-  switch (r.pick(6)) {
+  switch (gen_bits ? r.pick(12) : r.pick(6)) {
     case 0: return "(" + gen_expr(r, depth - 1) + " + " + gen_expr(r, depth - 1) + ")";
     case 1: return "(" + gen_expr(r, depth - 1) + " - " + gen_expr(r, depth - 1) + ")";
     case 2: return "(" + gen_expr(r, depth - 1) + " * " + gen_expr(r, depth - 1) + ")";
     case 3: return "(-" + gen_expr(r, depth - 1) + ")";
     case 4: return "(" + gen_expr(r, depth - 1) + " * 6364136223846793005)";
-    default: {  // floor division and modulo by a constant that is not zero (-1 included): no zero divisor, so no deopt
+    case 5: {  // floor division and modulo by a constant that is not zero (-1 included): no zero divisor, so no deopt
       static const char* divisors[] = {"-1", "2", "-3", "7", "-7", "1", "-2", "9223372036854775807"};
       return "(" + gen_expr(r, depth - 1) + (r.pick(2) ? " // " : " % ") + divisors[r.pick(8)] + ")";
     }
+    case 6: return "(" + gen_expr(r, depth - 1) + " & " + gen_expr(r, depth - 1) + ")";
+    case 7: return "(" + gen_expr(r, depth - 1) + " | " + gen_expr(r, depth - 1) + ")";
+    case 8: return "(" + gen_expr(r, depth - 1) + " ~ " + gen_expr(r, depth - 1) + ")";
+    case 9:  // a shift by a constant count from -70 to 70, or by a generated one (which is often 64 or more, or negative)
+      return "(" + gen_expr(r, depth - 1) + " << " + (r.pick(2) ? "(" + std::to_string(r.pick(141) - 70) + ")" : gen_expr(r, 1)) + ")";
+    case 10:
+      return "(" + gen_expr(r, depth - 1) + " >> " + (r.pick(2) ? "(" + std::to_string(r.pick(141) - 70) + ")" : gen_expr(r, 1)) + ")";
+    default: return "(~" + gen_expr(r, depth - 1) + ")";
   }
 }
 
@@ -427,14 +509,27 @@ int main() {
                 static_cast<unsigned long long>(st.jit_refused), static_cast<unsigned long long>(st.jit_guard_misses));
   }
 
-  // Generated loops: each must agree with the interpreter, and (on this host) compile without a refusal.
-  std::printf("-- generated loops\n");
-  Rng r{0x9E3779B97F4A7C15ULL};
-  unsigned long long entries = 0, compiled = 0;
-  int gen_fail = 0;
-  const int kPrograms = 300;
-  for (int k = 0; k < kPrograms; ++k) {
-    std::string code = gen_program(r);
+  // A division by zero inside a function called under pcall: the loop of the function is compiled, the zero divisor is a deopt (the
+  // interpreter raises the error from the statement, with the same message), and pcall catches it, with the JIT on or off. The
+  // third call has no zero divisor and runs to its end (in the machine code, or as native code of the C tier once the tier has
+  // compiled the function: the counters do not say which, so only the results are checked).
+  std::printf("-- errors under pcall\n");
+  {
+    const char* code =
+        "local function f(n)\n"
+        "  local s = 0\n"
+        "  for i = 1, n do s = s + 100 // (i - 5) end\n"
+        "  return s\n"
+        "end\n"
+        "local function g(n)\n"
+        "  local s = 0\n"
+        "  for i = 1, n do s = s + (i & 7) + (100 % (i - 3)) end\n"
+        "  return s\n"
+        "end\n"
+        "local ok1, e1 = pcall(f, 10)\n"
+        "local ok2, e2 = pcall(g, 10)\n"
+        "local ok3, e3 = pcall(f, 4)\n"
+        "return ok1, e1, ok2, e2, ok3, e3";
     State P;
     P.open_libs();
     TierOptions off;
@@ -445,18 +540,57 @@ int main() {
     S.open_libs();
     jit_on(S);
     std::string got = eval(S, code);
-    entries += S.stats.jit_entries;
-    compiled += S.stats.jit_compiled;
-    bool ok = got == want && S.stats.jit_bailouts == S.stats.jit_guard_misses;
-    if (avail) ok = ok && S.stats.jit_refused == 0;
-    if (!ok) {
-      ++gen_fail;
-      std::printf("FAIL generated program %d:\n%s\n  got %s\n  want %s\n", k, code.c_str(), got.c_str(), want.c_str());
-    }
+    std::printf("  interpreter: %s\n  jit on:      %s\n", want.c_str(), got.c_str());
+    CHECK(got == want);
+    CHECK(want.rfind("false,", 0) == 0);  // the first error is caught by pcall, not raised out of the chunk
+    CHECK(want.find("divide by zero") != std::string::npos);
+    CHECK(want.find("'n%0'") != std::string::npos);  // the modulo error, from the second function
+    CHECK(S.stats.jit_bailouts == S.stats.jit_guard_misses + (avail ? 2 : 0));  // the two zero divisors, the deopts
+    if (avail) CHECK(S.stats.jit_compiled >= 2 && S.stats.jit_refused == 0);
   }
+
+  // Generated loops: each must agree with the interpreter, and (on this host) compile without a refusal. The second batch has
+  // the bitwise operators and the shifts; the first is the same as before them.
+  std::printf("-- generated loops\n");
+  unsigned long long entries = 0, compiled = 0;
+  int gen_fail = 0;
+  const int kPrograms = 300;
+  for (int batch = 0; batch < 2; ++batch) {
+    gen_bits = batch == 1;
+    Rng r = batch == 0 ? Rng{0x9E3779B97F4A7C15ULL} : Rng{0x2545F4914F6CDD1DULL};
+    unsigned long long b_entries = 0, b_compiled = 0;
+    int b_fail = 0;
+    for (int k = 0; k < kPrograms; ++k) {
+      std::string code = gen_program(r);
+      State P;
+      P.open_libs();
+      TierOptions off;
+      off.mode = TierOptions::Off;
+      P.enable_tier(off);
+      std::string want = eval(P, code);
+      State S;
+      S.open_libs();
+      jit_on(S);
+      std::string got = eval(S, code);
+      b_entries += S.stats.jit_entries;
+      b_compiled += S.stats.jit_compiled;
+      bool ok = got == want && S.stats.jit_bailouts == S.stats.jit_guard_misses;
+      if (avail) ok = ok && S.stats.jit_refused == 0;
+      if (!ok) {
+        ++b_fail;
+        std::printf("FAIL generated program %d (%s):\n%s\n  got %s\n  want %s\n", k, batch ? "bitwise" : "arithmetic",
+                    code.c_str(), got.c_str(), want.c_str());
+      }
+    }
+    gen_fail += b_fail;
+    entries += b_entries;
+    compiled += b_compiled;
+    if (avail) CHECK(b_compiled >= static_cast<unsigned long long>(kPrograms) && b_entries >= static_cast<unsigned long long>(kPrograms));
+    std::printf("ok   %d %s generated programs: %llu loops compiled, %llu takeovers%s\n", kPrograms,
+                batch ? "bitwise" : "arithmetic", b_compiled, b_entries, b_fail ? " (FAILURES)" : "");
+  }
+  gen_bits = false;
   CHECK(gen_fail == 0);
-  if (avail) CHECK(compiled >= static_cast<unsigned long long>(kPrograms) && entries >= static_cast<unsigned long long>(kPrograms));
-  std::printf("ok   %d generated programs: %llu loops compiled, %llu takeovers\n", kPrograms, compiled, entries);
 
   if (failures) std::printf("%d of %d check(s) failed\n", failures, checks);
   else std::printf("all %d checks passed\n", checks);

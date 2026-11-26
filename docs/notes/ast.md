@@ -625,13 +625,16 @@ the JIT is off: every loop is refused with the reason "not available on this hos
   integer that is not zero); `break`.
 - values: integer constants; locals of the loop and the locals it reads or assigns from outside; `+`, `-`, `*` and unary `-`, which wrap
   as the interpreter's integers do; `//` and `%` on integers, floor division and modulo with the sign of the divisor as the
-  interpreter's helpers (`nfcr_idiv`, `nfcr_imod`) compute them, and a divisor of -1 as they do (`-a` and `0`, which wrap).
+  interpreter's helpers (`nfcr_idiv`, `nfcr_imod`) compute them, and a divisor of -1 as they do (`-a` and `0`, which wrap); the
+  bitwise operators `&`, `|`, `~` (binary xor), `<<`, `>>` and unary `~` on integers. The shifts follow the interpreter's `nfcr_shl`:
+  a count of 64 or more, or of -64 or less, gives 0, a negative count shifts the other way, both logically (the code tests the count
+  and shifts with `shl`/`shr` by its absolute value, so no count is masked).
 - conditions: `<`, `<=`, `>`, `>=`, `==`, `~=` between integers; `and`, `or`, `not`; `if` / `elseif` / `else`. A constant or a number as a
   condition is true or false as Lua says.
 - statements: `local` with one integer value for each name, and assignment (also several at once).
 
-**Refused at compile time** (the loop is left to the interpreter or the C tier, and `jit_refused` counts it once): `/`, `^` and the
-bitwise operators (`/` and `^` give floats, and the bitwise ones are not encoded); float constants;
+**Refused at compile time** (the loop is left to the interpreter or the C tier, and `jit_refused` counts it once): `/` and `^`
+(they give floats); float constants;
 a comparison or a logical operator used as a value; calls; upvalues and globals; tables, strings and fields; a local captured by a
 closure; `return`; a numeric `for` with a non-constant step, or a float `for`; a local read before its declaration in the text (a slot
 that an outer local shares).
@@ -654,6 +657,9 @@ one stub, which writes the locals back and returns; the normal exit writes back 
 without a deopt; the machine's `idiv` traps on that operand pair, which is why the divisor -1 is a separate case.
 
 The guard still makes the entry safe: the deopt is only ever reached with the guard holding, so the frame has integers in its live-ins.
+
+The bitwise operators do not fail on integers, so they add no deopt and no site.
+
 
 **Counters** (`State::stats`, all zero unless the JIT is on): `jit_compiled` (loops encoded), `jit_entries` (takeovers that ran the loop
 to its end), `jit_guard_misses`, `jit_bailouts` (times compiled code handed a loop back to the interpreter: a guard miss, or a deopt, which
@@ -679,11 +685,13 @@ two operands are both compound (`(a + b) * (c + d)`) still keeps its left value 
 measured.
 
 **Verification.** `tests/ast/jit.cpp` runs a set of loops (the refusals, the guard miss, the wraparound, nested and re-entered loops,
-`break`, the conditions, `//` and `%` on positive and negative operands, the smallest integer divided by -1, and the deopts: a zero
-divisor in an assignment, a condition of a `while` or `repeat`, the limit of an inner `for`, and a compound operand with a value pushed)
-and 300 generated loops with nested ifs, whiles, wrapping arithmetic and `//` or `%` by nonzero constants; each must give the
-interpreter's result, the counters must say what the case expects (a deopt is one `jit_bailouts`, and the error is the interpreter's),
-and the generated loops must all compile and be taken over. `tests/ast/run.sh`
+`break`, the conditions, `//` and `%` on positive and negative operands, the smallest integer divided by -1, the deopts: a zero
+divisor in an assignment, a condition of a `while` or `repeat`, the limit of an inner `for`, and a compound operand with a value pushed;
+the bitwise operators on positive, negative and large operands, shifts by 0, 63, 64, 65 and negative counts, and a division and a modulo
+by zero under `pcall`, which the interpreter raises with the same message with the JIT on or off), and 600 generated loops (300 with
+arithmetic, `//` and `%` by nonzero constants, 300 with the bitwise operators) with nested ifs, whiles and wrapping arithmetic; each
+must give the interpreter's result, the counters must say what the case expects (a deopt is one `jit_bailouts`, and the error is the
+interpreter's), and the generated loops must all compile and be taken over. `tests/ast/run.sh`
 runs it, and it also runs every `tests/ast/cases/*.lua` program with the tier on and the JIT on (`--jit`), against the output of a
 real Lua 5.4. In the sandbox this was written in, `tests/ast/tier.cpp` fails two checks of "a host that ignores SIGCHLD" (lines 685 and 691
 of the file): the unmodified HEAD fails the same two, with the same output, so they are the environment's, not the JIT's.
