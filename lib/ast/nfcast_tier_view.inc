@@ -122,5 +122,11 @@ void tier_view(Node* n, TierView& v) {
     v.tail = ret->exprs_.size() == 1 && ret->exprs_[0]->is_call();  // the interpreter's own test (ReturnNode's constructor)
   } else if (dynamic_cast<BreakNode*>(n)) {
     v.kind = TV::K_BREAK;
+  } else if (IndexArr* ia = dynamic_cast<IndexArr*>(n)) {  // only the class a table read with integer keys has settled into
+    v.kind = TV::K_INDEX;
+    v.kids = {ia->obj_, ia->key_};
+  } else if (SetIndexArr* sa = dynamic_cast<SetIndexArr*>(n)) {
+    v.kind = TV::K_SETINDEX;
+    v.kids = {sa->obj_, sa->key_, sa->val_};
   }
 }

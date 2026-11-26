@@ -608,7 +608,7 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
   NaN limit as Lua does), in the generated code as in the interpreter.
 - It needs POSIX (`fork`, `dlopen`), the nfcxx driver and the `lib/ast` directory next to it at run time.
 
-### JIT: machine code for loops (integers and floats)
+### JIT: machine code for loops (integers, floats and table elements)
 
 `TierOptions::jit` (off by default; the test driver takes `--jit`, with the tier on) takes a hot loop over with x86-64 machine
 code instead of the C tier. It uses the same hook as the C tier's on-stack replacement (`tier_loop` in `nfcast_tier.cpp`, the same
@@ -652,37 +652,79 @@ the JIT is off: every loop is refused with the reason "not available on this hos
   which compare an integer beyond 2^53 with a float without rounding the integer) and `raw_equal` for `==` (see "The calls"); `>` and
   `>=` are the `<` and `<=` of the operands swapped, as the interpreter has them. `and`, `or`, `not`; `if` / `elseif` / `else`. A constant
   or a number as a condition is true or false as Lua says.
-- statements: `local` with one value for each name, and assignment (also several at once).
+- statements: `local` with one value for each name, and assignment (also several at once), and the stores of table elements (below).
+- table elements (below): `a[k]` in a condition, and `a[k] = v`, for a table live-in.
 
 
 **Refused at compile time** (the loop is left to the interpreter or the C tier, and `jit_refused` counts it once): a bitwise operator on
 a float, even one with an integer value (the interpreter raises "has no integer representation" for a float without one, and the code
 does not encode that error); a local that takes the other type in an assignment (an integer in a float local, a float in an integer
-one); a comparison or a logical operator used as a value; calls; upvalues and globals; tables, strings and fields; a local captured by a
-closure; `return`; a numeric `for` whose step is not a numeric constant, or is zero (the interpreter reports a zero step); a local read
-before its declaration in the text (a slot that an outer local shares).
+one); a comparison or a logical operator used as a value; calls; upvalues and globals; strings and fields; a table other than a live-in
+one (a table built in the loop, a field, a table as a number or a value); a table element read into a local, or in a value that is not a
+condition or a store to a table (see "Table elements"); an element at a key that is not an integer expression, or of a table node that
+is not specialized to the array part yet; a local captured by a closure; `return`; a numeric `for` whose step is not a numeric constant,
+or is zero (the interpreter reports a zero step), and a table element in its start or limit; a local read before its declaration in the
+text (a slot that an outer local shares). A loop whose layout check fails (`value_layout_ok`) is refused with that reason.
 
 **Entry guard.** Every live-in local (one the loop reads or assigns and does not declare) must hold a value of its type in the frame at
-every takeover: an integer, or a float for a float local (a live-in that is not a number when the loop is compiled is an integer local,
-as before). `jit_guard_misses` and `jit_bailouts` count a failure, the interpreter goes on, and the loop is not taken over again until it
+every takeover: an integer, a float for a float local, or a table for a table the loop indexes (a live-in that is not a number or a table
+when the loop is compiled is an integer local, as before, and the guard then refuses it). `jit_guard_misses` and `jit_bailouts` count a failure, the interpreter goes on, and the loop is not taken over again until it
 is entered anew. A float local compiled as a float that is entered with an integer is such a failure (the test checks it), and so is
 an integer local that holds a float. A float that the loop adds to an integer local (`s = s + f` with `f = 2.5` and `s = 0`) is no
 longer a guard failure: the assignment would change the type of `s`, so the loop is refused at compile time.
 
-**Deopt.** A `//` or `%` by zero is the one operation the code cannot finish. The interpreter raises "attempt to divide by zero" for `//`
-and "attempt to perform 'n%0'" for `%`, at the line of the operation, and so does the code's deopt. The code tests the divisor first;
-on a zero it drops the values it has pushed, writes the locals of its site back to the frame (each live-in, and each local the loop
+**Deopt.** The code stops at an operation it cannot finish, and goes back to the interpreter for the unit that holds it. Two kinds of
+operation do: a `//` or `%` by zero, and a table operation that is not in the array part or not of the kind it reads (below). The code
+drops the values it has pushed, writes the locals of its site back to the frame (each live-in except a table, and each local the loop
 declares that is in scope at the operation, from its register or from REGS; a frame slot that the parser shares between two blocks of
-the loop has a register per declaration, and the site names the one in scope), and returns a site number (`jit::run`, `jit::resume`).
-Each site has its own stub for this. The site is the innermost statement or condition the
-operation is in: an assignment or declaration, a condition of an `if`, `while` or `repeat`, or the start or limit of an inner `for`.
-`jit::resume` then runs that unit in the interpreter, which raises the error. This is sound because a unit is pure until its stores,
-which come after all its operands: the unit's first zero divisor is the one the code stopped at, and the locals are the frame's, as the
-interpreter would have them at that statement. The unit is run with `exec` (a statement) or `eval` (an expression), so the error
-message and the line come from the interpreter's own operation. The loop is not resumed: the error leaves it. Every division site jumps to
-one stub, which writes the locals back and returns; the normal exit writes back only the live-ins the loop assigns, as before.
-`INT_MIN // -1` and `INT_MIN % -1` do not fail in the interpreter (the helpers wrap, `-a` and `0`), so the code gives the same result
-without a deopt; the machine's `idiv` traps on that operand pair, which is why the divisor -1 is a separate case.
+the loop has a register per declaration, and the site names the one in scope), stores every allocated register to REGS, and returns the
+site's number. Each site has its own stub. The site is the innermost unit the operation is in: an assignment or declaration, a table
+store, a condition of an `if`, `while` or `repeat`, or the start or limit of an inner `for`. `jit::run` then runs that unit in the
+interpreter on the frame, and the loop goes on by one of three kinds of site:
+- RAISE (a zero divisor): the unit raises the error the interpreter raises there (`exec` for a statement, `eval` otherwise), with the same
+  message at the same line, and the error leaves the loop. The unit is pure until its stores, which come after its operands, so the
+  interpreter reaches the same zero divisor. `INT_MIN // -1` and `INT_MIN % -1` do not fail in the interpreter (the helpers wrap, `-a`
+  and `0`), so the code gives the same result without a deopt; the machine's `idiv` traps on that operand pair, which is why the
+  divisor -1 is a separate case.
+- STMT (a table store): the unit completes, and the code goes on at the statement after it. A table store assigns no local (see
+  "Table elements"), so the registers of the locals are still right, and REGS holds the rest of the loop's state (the `for` counters), so
+  `jit::run` enters the code again at the site's entry, which reloads the registers from REGS.
+- COND (a table read in a condition): the unit is evaluated, and the code goes on at the entry of the condition's truth: the branch's
+  target when the truth is the one the branch jumps on, else the code after the condition.
+Only the first two are the interpreter's own operation: the unit is run as the interpreter runs it, so a metamethod, an error, a
+hash-part lookup or a grow is what the interpreter does. The locals the code writes back are the frame's, as the interpreter has them at
+that statement. The normal exit writes back only the live-ins the loop assigns, as before.
+
+**Table elements.** `a[k]` and `a[k] = v` for a live-in table `a` (a local the loop reads through and does not declare; the entry guard
+checks it holds a table) use the array part of the interpreter's table (`Table` in nfcast.hpp): key `k` is `arr[k-1]` for `1 <= k <=
+asize`, and an element is a 16-byte `Value`, its tag (a byte: nil 0, false 1, true 2, integer 3, float 4) at offset 0 and its payload at
+8. The offsets of `arr`, `asize`, `meta` and `absent` are taken from the addresses of the fields in a probe object at the start of the
+process (`table_offsets`), and the layout of a value is checked at each compile (`value_layout_ok`). Nothing is cached: the array moves
+when the table grows, so `arr` and `asize` are read at each access.
+
+What the code does, and where it deopts:
+- a read as a number takes the element as an integer, or as a float when its other operand is a float (`a[k] < 2.5`, `a[k] + x` with
+  `x` a float). An element of another tag (a nil, a boolean, a string, a table), or a key outside `1..asize`, is a deopt (COND or STMT, the
+  unit is the one with the read); the interpreter then gives the value, which is what the interpreter does for a hole or a hash-part key.
+- a read as a condition takes its truth from the tag: a boolean false or a nil is false, anything else true (the interpreter's truth, as
+  `Value::truthy`). A nil is a deopt, since a metatable's `__index` could answer it; a key outside the array part is a deopt.
+- a store `a[k] = v`: `v` is an integer or float (its static type), `nil`, `true`, `false`, or a copy of another table's element (the tag and
+  payload are copied; a nil there is a deopt). The table must have no metatable (`meta` is null), else `__newindex` may apply; the key must be
+  in `1..asize`, else the store goes to the hash part or grows the array, and that is a deopt. A stored element takes the value's tag and
+  payload, and `absent` is cleared, as the interpreter's `set_int` clears it.
+- the key of a table operation is an integer expression, which may itself read a table element (`a[a[k]]`).
+- counters: an index node is compiled only once it has specialized to the array-part node (`IndexArr`, `SetIndexArr`, the only classes
+  `tier_view` maps to `K_INDEX` and `K_SETINDEX`), and its success path counts nothing, as the interpreter's does. A node that is still
+  collecting feedback, or is generic, makes the loop refused, so no feedback record or generic read is skipped. A deopt counts in
+  `jit_bailouts`, and the interpreter's own counters (`deopts`, the metamethod lookups) are updated by the unit it runs.
+- a table element read into a local (`s = s + a[k]`, `local x = a[k]`) is refused. The element's kind is not known to the code, and a deopt
+  there has the interpreter assign the local a value of another kind (a float where an integer is kept, a nil), which the code cannot
+  continue past: the code cannot resume the loop in the interpreter in the middle of its body, and only units that assign no local can be
+  completed by the interpreter. So the sieve and the counting loops (`if a[k] then c = c + 1 end`) are compiled, and a sum of elements is not.
+
+The element kind is checked at each access, not at entry: a table whose elements change kind between two takeovers runs the code with
+the deopts the new kinds need, and gives the interpreter's result (a test in `tests/ast/jit.cpp` changes the elements between entries of
+a loop). An entry scan of the array part was not used: it would cost a pass over the table at each takeover.
 
 The guard still makes the entry safe: the deopt is only ever reached with the guard holding, so the frame has integers in its live-ins.
 
@@ -691,8 +733,9 @@ The bitwise operators do not fail on integers, so they add no deopt and no site.
 
 
 **Counters** (`State::stats`, all zero unless the JIT is on): `jit_compiled` (loops encoded), `jit_entries` (takeovers that ran the loop
-to its end), `jit_guard_misses`, `jit_bailouts` (times compiled code handed a loop back to the interpreter: a guard miss, or a deopt, which
-is the one that raises the error), `jit_refused` (loops refused at compile time, counted once per loop).
+to its end), `jit_guard_misses`, `jit_bailouts` (times compiled code handed a unit back to the interpreter: a guard miss, or a deopt, which
+for a zero divisor raises the error and for a table operation goes on), `jit_refused` (loops refused at compile time, counted once per
+loop).
 
 **The code.** One 64-bit word per local and per hidden variable of a `for` in an array whose address is in RBX. The four words with the
 most references (weighted by loop depth, so the loop's control variables come first) live in R12-R15 for the whole loop instead: they
@@ -737,6 +780,24 @@ two operands are both compound (`(a + b) * (c + d)`) still keeps its left value 
 `local s = 0 for i = 1, 100000000 do s = (s + i) * (i + 2) end`: 0.161-0.171 s with the JIT, 0.152-0.157 s with the C tier (JIT off, three
 runs each), against 0.103-0.124 s for `s = s + i` with the JIT. The stack costs nothing measurable here, so this is not worth a change.
 
+**Table elements in the tests.** `tests/ast/jit.cpp` has a table section: fifteen cases with their expected counters (compiled and
+entered with a deopt; refused), each compared with the interpreter. They cover booleans, integers and floats in the array part; the
+benchmark's sieve (with n = 2000, whose keys start at 2 and so sit in the hash part); reads past the array part and in the hash part; a
+hole read as false and in a comparison (the interpreter's error); a metatable's `__index` and `__newindex`; a table written in a loop
+whose stores grow it; keys zero and negative; an element that changes kind between the takeovers of one loop; and the refusals (a read
+into a local, a float key, a number indexed, a table built in the loop). The generated table batch is 300 programs over a table of
+integers, floats and booleans with a hole, stores and conditions at keys that run past the end, copies of elements and arithmetic on
+them; each agrees with the interpreter, JIT on or off.
+
+**The sieve.** `sieve(200000)` of the benchmark (`bench4/sieve.lua`: ten calls, a store loop from 2 to n, the sieve, a count) prints
+179840 with the JIT on and off. It stores from index 2, and key 1 is never stored, so the table's keys all sit in the hash part, the
+array part stays empty (`Table::absorb` moves only the key asize+1), and every access is a deopt: about 7.8 million in one run. Its time
+with `NFCAST_TIER=sync` is 1.41 s with the JIT off and 1.27 s with `--jit` (medians of five runs, the same machine, wall time). The same
+kernel with the store loop from 1 (`a[i] = true` for `i = 1, n`) keeps the keys in the array part: its deopts are the 200000 appends of the
+store loop per call (`asize + 1` grows the array, which is a deopt), and the rest of the kernel runs in the machine code. Its time is 0.62 s
+with the JIT off and 0.16 s with it, the same result. The benchmark's sieve needs its keys in the array part to gain from the JIT, so as the benchmark is written this JIT gains
+nothing on it (the speed-up above is the deopt path, not compiled array access); the interpreter's table is not changed here.
+
 **Verification.** `tests/ast/jit.cpp` runs a set of loops (the refusals, the guard miss, the wraparound, nested and re-entered loops,
 `break`, the conditions, `//` and `%` on positive and negative operands, the smallest integer divided by -1, the deopts: a zero
 divisor in an assignment, a condition of a `while` or `repeat`, the limit of an inner `for`, a compound operand with a value pushed, and
@@ -751,7 +812,7 @@ float, float loops with constant steps and nan-or-bounded starts and limits, and
 whiles and wrapping arithmetic; each must give the interpreter's result (the mixed batch with the sign of a nan dropped, see "NaN signs"),
 the counters must say what the case expects (a deopt is one `jit_bailouts`, and the error is the interpreter's), and the generated
 loops must all compile and be taken over. Checks on the verification run (`tests/ast/run.sh`, both back ends, the same counts on each, `LUA` unset so the bytecode part is
-skipped): engine 252, tier 384, jit 179 (before this change: 252, tier 372 on the base it was measured on, jit 151).
+skipped): engine 252, tier 384, jit 208 (before the table elements: jit 179; the tier and engine counts are unchanged).
 `tests/ast/run.sh`
 runs it, and it also runs every `tests/ast/cases/*.lua` program with the tier on and the JIT on (`--jit`), against the output of a
 real Lua 5.4. In the sandbox this was written in, `tests/ast/tier.cpp` fails two checks of "a host that ignores SIGCHLD" (lines 685 and 691

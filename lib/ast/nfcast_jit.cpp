@@ -5,8 +5,10 @@
 // as the interpreter's), the bitwise operators & | ~ (binary xor), << and >> and unary ~ on integers, comparisons of two integers,
 // and/or/not in conditions, if, while, repeat, numeric for loops with a constant step (integer or float, not zero; an integer loop
 // takes a float limit as the interpreter clips it, and a loop with a float start or step is a float loop), break, and locals. Integer arithmetic wraps as the interpreter's does, and the bitwise operators never fail. The one
-// operation that can fail is integer `//` or `%` by zero: the code then stops, writes its locals back, and the interpreter raises the
-// error (the deopt, see run() and resume()). Everything else outside the subset makes compile() refuse the loop.
+// operation that can fail is integer `//` or `%` by zero, and the table operations of the array part (table elements, see "Table
+// elements" in the notes): the code then stops, writes its locals back, and the interpreter runs the unit the operation is in (the
+// deopt, see run()); a zero divisor raises its error there, a table operation goes on. Everything else outside the subset makes
+// compile() refuse the loop.
 //
 // Types. Every local (and every hidden variable of a for loop) has one static type for the whole loop: an integer or a float. The
 // type of a live-in is the type of its value when the loop is compiled (compile() reads the frame), and the entry guard checks it at
@@ -26,9 +28,15 @@
 // the epilogue, which stores back the live-ins the loop assigns before the callee-saved registers are restored. The loop has no
 // other exit: no operation can fail except the zero divisor, which deopts. So the frame sees the words only at entry and at that write-back.
 // The code is generated twice: once with every word in memory to count the references, then with the allocation.
+//
+// Tables. A live-in table (a local the loop indexes) is a register with its Table* word. A table element is read or written in the array
+// part, at offsets of the Table and its Values taken from the interpreter's own layout (table_offsets, value_layout_ok); every other
+// access is a deopt, and the interpreter goes on with the unit it is in (see run()). The code keeps no table field in a register: it reads
+// arr and asize at each access.
 #include "nfcast_jit.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <initializer_list>
 #include <map>
@@ -73,13 +81,14 @@ static std::int64_t value_word(const Value& v) {
 
 bool entry_ok(const Frame& f, const Code& c) {
   for (std::size_t k = 0; k < c.in_slots.size(); ++k) {
-    auto want = c.reg_float[static_cast<std::size_t>(c.in_regs[k])] ? T_FLT : T_INT;
+    std::size_t r = static_cast<std::size_t>(c.in_regs[k]);
+    auto want = c.reg_tab[r] ? T_TAB : c.reg_float[r] ? T_FLT : T_INT;
     if (f.base[c.in_slots[k]].t != want) return false;
   }
   return true;
 }
 
-int run(Frame& f, const Code& c, const TierLoopState& st) {
+void run(Frame& f, const Code& c, const TierLoopState& st, std::uint64_t& bailouts) {
   std::int64_t small[64] = {0};
   std::vector<std::int64_t> big;
   std::int64_t* R = small;
@@ -97,37 +106,42 @@ int run(Frame& f, const Code& c, const TierLoopState& st) {
     R[c.state_regs[1]] = value_word(Value::number(st.limit));
     R[c.state_regs[2]] = value_word(Value::number(st.dstep));
   }
-  int site = c.fn(R);
-  if (site != 0) {  // a deopt: the locals of the site go back to the frame, as they are at the operation
+  // The registers are the loop's state between the deopts: the interpreter's unit writes table elements and nothing else of the loop,
+  // so REGS is still right after it, and the code goes on from the continuation with the words it had (the registers are reloaded from
+  // REGS at every entry).
+  int entry = 0;
+  for (;;) {
+    int site = c.fn(R, entry);
+    if (site == 0) break;
     const Code::Site& s = c.sites[static_cast<std::size_t>(site - 1)];
-    for (std::size_t k = 0; k < s.bail_slots.size(); ++k) {
+    ++bailouts;
+    for (std::size_t k = 0; k < s.bail_slots.size(); ++k) {  // the locals of the site go back to the frame, as they are at the operation
       std::size_t r = static_cast<std::size_t>(s.bail_regs[k]);
       f.base[s.bail_slots[k]] = word_value(c.reg_float[r] != 0, R[s.bail_regs[k]]);
     }
-    return site;
+    if (s.kind == Code::Site::STMT) {
+      s.node->exec(f);
+      entry = s.entry;
+    } else if (s.kind == Code::Site::COND) {
+      entry = s.node->eval(f).truthy() ? s.entry : s.entry_false;
+    } else {
+      // The unit raises the error of its operation (the same message, at the same line: the operation sets the line before it raises).
+      if (s.stmt) s.node->exec(f);
+      else s.node->eval(f);
+      f.S->rt_error("internal: the machine code stopped at an operation that did not raise its error");
+    }
   }
   for (std::size_t k = 0; k < c.out_slots.size(); ++k) {
     std::size_t r = static_cast<std::size_t>(c.out_regs[k]);
     f.base[c.out_slots[k]] = word_value(c.reg_float[r] != 0, R[c.out_regs[k]]);
   }
-  return 0;
-}
-
-void resume(Frame& f, const Code& c, int k) {
-  const Code::Site& s = c.sites[static_cast<std::size_t>(k - 1)];
-  // The unit is pure up to the operation that stopped the code (an expression, or a statement whose stores come after all its
-  // operands), so the interpreter's evaluation of it from the written-back state reaches the same zero divisor and raises the same
-  // error, with the same line (the operation sets the line before it raises).
-  if (s.stmt) s.node->exec(f);
-  else s.node->eval(f);
-  f.S->rt_error("internal: the machine code stopped at an operation that did not raise its error");
 }
 
 #if NFCAST_JIT_X64
 namespace {
 
 // ---- the encoder --------------------------------------------------------------------------------------------------------------
-enum { RAX = 0, RCX = 1, RDX = 2, RDI = 7 };
+enum { RAX = 0, RCX = 1, RDX = 2, RDI = 7, R8 = 8, R9 = 9, R10 = 10 };
 // The condition codes of Jcc (0F 80+cc) and SETcc. Negating a condition flips the low bit: E/NE, L/GE, LE/G.
 enum Cc {
   CC_B = 0x2, CC_AE = 0x3, CC_E = 0x4, CC_NE = 0x5, CC_BE = 0x6, CC_A = 0x7, CC_S = 0x8, CC_NS = 0x9, CC_P = 0xA,
@@ -227,16 +241,66 @@ class Asm {
   const std::vector<long>& refs() const { return refs_; }
   // mov REG, V: the sign-extended imm32 form when V fits, else the imm64 one.
   void mov_imm(int reg, std::int64_t v) {
+    std::uint8_t rex = static_cast<std::uint8_t>(0x48 | (reg >> 3));  // REX.W, and REX.B for R8-R15
     if (v >= INT32_MIN && v <= INT32_MAX) {
-      b.push_back(0x48);
+      b.push_back(rex);
       b.push_back(0xC7);
-      b.push_back(static_cast<std::uint8_t>(0xC0 | reg));
+      b.push_back(static_cast<std::uint8_t>(0xC0 | (reg & 7)));
       u32(static_cast<std::uint32_t>(v));
     } else {
-      b.push_back(0x48);
-      b.push_back(static_cast<std::uint8_t>(0xB8 | reg));
+      b.push_back(rex);
+      b.push_back(static_cast<std::uint8_t>(0xB8 | (reg & 7)));
       u64(static_cast<std::uint64_t>(v));
     }
+  }
+  // ---- table elements (the Table of nfcast.hpp): their memory is read and written at the interpreter's offsets. The bases are RDX and
+  // RCX, and R8-R10 hold the values in between; no call is made while they hold anything.
+  void load32_mem(int reg, int base, std::int32_t disp) { mem_ext(false, 0x8B, reg, base, disp); }   // mov r32, [base+disp]
+  void load64_mem(int reg, int base, std::int32_t disp) { mem_ext(true, 0x8B, reg, base, disp); }    // mov r64, [base+disp]
+  void store64_mem(int base, std::int32_t disp, int reg) { mem_ext(true, 0x89, reg, base, disp); }   // mov [base+disp], r64
+  void store8_mem(int base, std::int32_t disp, int reg) { mem_ext(false, 0x88, reg, base, disp); }   // mov byte [base+disp], r8
+  void store8_imm_mem(int base, std::int32_t disp, std::uint8_t v) {  // mov byte [base+disp], imm8
+    mem_ext(false, 0xC6, 0, base, disp);
+    b.push_back(v);
+  }
+  void cmp64_mem_imm0(int base, std::int32_t disp) {  // cmp qword [base+disp], 0
+    mem_ext(true, 0x83, 7, base, disp);
+    b.push_back(0);
+  }
+  void movzx_eax_mem8(int base) {  // movzx eax, byte [base] (base RCX or RDX)
+    b.push_back(0x0F);
+    b.push_back(0xB6);
+    b.push_back(modrm(0, RAX, base));
+  }
+  void cmp_eax_imm8(std::uint8_t v) {
+    bytes({0x83, 0xF8, v});
+  }
+  void test_eax_eax() { bytes({0x85, 0xC0}); }
+  void cmp_rr(int x, int y) {  // flags of X - Y (64-bit)
+    b.push_back(static_cast<std::uint8_t>(0x48 | ((y >> 3) << 2) | (x >> 3)));
+    b.push_back(0x39);
+    b.push_back(modrm(3, y, x));
+  }
+  void add_rr(int dst, int src) {  // dst += src (64-bit)
+    b.push_back(static_cast<std::uint8_t>(0x48 | ((src >> 3) << 2) | (dst >> 3)));
+    b.push_back(0x01);
+    b.push_back(modrm(3, src, dst));
+  }
+  void sub_r_imm8(int r, std::uint8_t v) {  // r -= imm8 (64-bit)
+    b.push_back(static_cast<std::uint8_t>(0x48 | (r >> 3)));
+    b.push_back(0x83);
+    b.push_back(modrm(3, 5, r));
+    b.push_back(v);
+  }
+  void shl_r_imm8(int r, std::uint8_t v) {  // r <<= imm8 (64-bit)
+    b.push_back(static_cast<std::uint8_t>(0x48 | (r >> 3)));
+    b.push_back(0xC1);
+    b.push_back(modrm(3, 4, r));
+    b.push_back(v);
+  }
+  void cmp_esi_imm32(std::uint32_t v) {  // the entry number the code is entered with (the second argument, ESI)
+    bytes({0x81, 0xFE});
+    u32(v);
   }
   void add_rax_rcx() { op_rr(0x01, 0xC8); }   // add rax, rcx
   void sub_rax_rcx() { op_rr(0x29, 0xC8); }   // sub rax, rcx
@@ -383,6 +447,14 @@ class Asm {
   }
   // OPC with REG (RAX..R15) and [rbx + 8 * k]: REX.W (and REX.R for R8-R15), the opcode, then ModRM (mod 10, rm 011 = rbx) and the
   // displacement. OPC 8B is a load into REG, 89 a store from REG.
+  // OPC with REG and [BASE + DISP32] (BASE is not RSP or R12, nor RBP or R13 for a disp-less form: every operand here has one). W: REX.W.
+  void mem_ext(bool w, std::uint8_t opc, int reg, int base, std::int32_t disp) {
+    int rex = 0x40 | (w ? 8 : 0) | ((reg >> 3) << 2) | (base >> 3);
+    if (rex != 0x40) b.push_back(static_cast<std::uint8_t>(rex));
+    b.push_back(opc);
+    b.push_back(static_cast<std::uint8_t>(0x80 | ((reg & 7) << 3) | (base & 7)));
+    u32(static_cast<std::uint32_t>(disp));
+  }
   void mem_op(std::uint8_t opc, int reg, int k) {
     b.push_back(static_cast<std::uint8_t>(0x48 | ((reg >> 3) << 2)));
     b.push_back(opc);
@@ -390,6 +462,32 @@ class Asm {
     u32(static_cast<std::uint32_t>(8 * k));
   }
 };
+
+// The fields of a Table the code reads and writes (nfcast.hpp): the array part, its size, the metatable, and the cache of absent metamethods.
+// (Table derives from GCObject and both hold fields, so it is not standard layout: its offsets are taken from the address of each field
+// in a table's memory, which is only named here, never read.)
+struct TableOffsets {
+  std::int32_t arr, asize, meta, absent;
+};
+static TableOffsets table_offsets() {
+  alignas(Table) static unsigned char mem[sizeof(Table)];
+  Table* t = reinterpret_cast<Table*>(mem);
+  const unsigned char* base = mem;
+  auto at = [base](const void* p) { return static_cast<std::int32_t>(static_cast<const unsigned char*>(p) - base); };
+  return TableOffsets{at(&t->arr), at(&t->asize), at(&t->meta), at(&t->absent)};
+}
+static const TableOffsets kTableOff = table_offsets();
+
+// The layout of a Value the code reads and writes: 16 bytes, the tag (one byte) at 0 and the payload at 8. Checked, so that the code is
+// refused rather than wrong on a build that lays a Value out otherwise.
+static bool value_layout_ok() {
+  alignas(Value) static unsigned char mem[sizeof(Value)];
+  Value* v = reinterpret_cast<Value*>(mem);
+  const unsigned char* base = mem;
+  const unsigned char* tag = reinterpret_cast<const unsigned char*>(&v->t);
+  const unsigned char* pay = reinterpret_cast<const unsigned char*>(&v->i);
+  return sizeof(Value) == 16 && tag == base && pay == base + 8 && sizeof(Tag) == 1;
+}
 
 // The type of a register or a value: an integer, or a float (the bits in the word).
 enum { TY_INT = 0, TY_FLT = 1, TY_NONE = -1 };
@@ -410,18 +508,36 @@ struct Gen {
   std::vector<int> in_slots, in_regs;  // the live-ins, in the order they were first used
   std::set<int> written;        // the live-ins the loop assigns
   std::vector<int> breaks;      // the exits of the enclosing loops
-  // The deopt (see Code::Site). Each zero divisor jumps to the stub of its site, bound at the end of top_level, which writes the
-  // site's locals back and returns the site. UNITS are the statements and conditions being generated, innermost last; SITES[k - 1] is
-  // the unit of the operation that leaves with k in EAX, and STUBS[k - 1] the label of its stub.
-  std::vector<Code::Site> units;
-  std::vector<Code::Site> sites;
-  std::vector<int> stubs;
+  std::vector<char> tab;        // per register: 1 when it holds a live-in table (see Code::reg_tab)
+  // The units being generated, innermost last: a statement, a condition or an expression that the interpreter runs when its operation
+  // leaves the code (see Code::Site). A statement unit continues at CONT, the label after it; a condition unit at ENTRY_T or ENTRY_F
+  // (the entries of its two truth values, made when a site needs them: their stubs jump to TARGET or FALL, the branch's jump and the
+  // code after it).
+  enum { U_EXPR = 0, U_STMT = 1, U_COND = 2 };
+  struct Unit {
+    Node* node = nullptr;
+    int kind = U_EXPR;
+    int cont = -1;
+    int entry = 0;                // U_STMT: the entry number of CONT, 0 until a site needs it
+    int target = -1, fall = -1;   // U_COND: the branch's jump target and the label after its code
+    int jump_if = 0;              // U_COND: the truth value that jumps to TARGET
+    int entry_t = 0, entry_f = 0; // U_COND: the entry numbers, 0 until a site needs them
+  };
+  std::vector<Unit> units;
+  std::vector<Code::Site> sites;  // SITES[k - 1] is the site numbered k (the value the code leaves with in EAX)
+  std::vector<int> stubs;         // STUBS[k - 1] the label of its stub, bound at the end of top_level
+  std::vector<int> entries;       // ENTRIES[e - 1] the label the code continues at when it is entered with e (see Code::Site)
+  struct CondStub {
+    int label, target;
+  };
+  std::vector<CondStub> cond_stubs;  // the stubs of the entries of the condition units: a jump to TARGET
+  bool tab_ok = false;          // a table element may be read here: in a condition, or in a store to a table (see index_value)
 
-  static Code::Site unit(Node* n, bool stmt) {
-    Code::Site s;
-    s.node = n;
-    s.stmt = stmt;
-    return s;
+  static Unit make_unit(Node* n, int kind) {
+    Unit u;
+    u.node = n;
+    u.kind = kind;
+    return u;
   }
 
   bool fail(const std::string& m) {
@@ -438,8 +554,21 @@ struct Gen {
 
   int new_reg(bool is_float) {
     flt.push_back(is_float ? 1 : 0);
+    tab.push_back(0);
     return nregs++;
   }
+  // A register of a live-in of the kind of its value in the frame: 0 an integer, 1 a float, 2 a table.
+  int new_reg_of_kind(int kind) {
+    int r = new_reg(kind == 1);
+    tab[static_cast<std::size_t>(r)] = kind == 2 ? 1 : 0;
+    return r;
+  }
+  int entry_kind(int slot) const {
+    if (!fr) return 0;
+    Tag t = fr->base[slot].t;
+    return t == T_TAB ? 2 : t == T_FLT ? 1 : 0;
+  }
+  bool is_tab(int r) const { return tab[static_cast<std::size_t>(r)] != 0; }
 
   // The register of a local the loop declares, of type TY (declared just now). The frame slot of a local may be shared with another
   // local of the loop in a block that does not overlap (the parser reuses slots), so a declaration of the other type gets a register of
@@ -453,7 +582,6 @@ struct Gen {
   }
 
   // The type of a live-in: the type of its value in the frame when the loop is compiled (an integer for anything but a float).
-  bool entry_float(int slot) const { return fr && fr->base[slot].t == T_FLT; }
 
   // The register of a frame slot the loop uses: a local of the loop (its declaration must have been passed in the text, so that the
   // slot is not one that an outer local shares) or a live-in (loaded at entry, and written back when assigned).
@@ -467,7 +595,7 @@ struct Gen {
     }
     auto it = reg_of.find(slot);
     if (it == reg_of.end()) {
-      int r = new_reg(entry_float(slot));
+      int r = new_reg_of_kind(entry_kind(slot));
       reg_of[slot] = r;
       in_slots.push_back(slot);
       in_regs.push_back(r);
@@ -512,9 +640,12 @@ struct Gen {
         if (v.flag) return failt("a local captured by a closure");
         int r = slot_reg(v.slot, false);
         if (r < 0) return TY_NONE;
+        if (is_tab(r)) return failt("a table used as a number");
         a.load(RAX, r);
         return is_flt(r) ? TY_FLT : TY_INT;
       }
+      case TierView::K_INDEX:
+        return index_value(n, false);
       case TierView::K_ARITH:
         return arith(v);
       case TierView::K_UNARY: {
@@ -543,6 +674,130 @@ struct Gen {
       default:
         return failt("an expression outside the subset");
     }
+  }
+
+  // ---- table elements (Table, nfcast.hpp) ----------------------------------------------------------------------------------------------
+  // A table element is read or written in the array part only: a key in 1..asize, in a table with no metatable (a store). Every other
+  // case is a deopt (a site of the unit, see new_site): the interpreter runs the unit, which does what it does (the hash part, a grow, a
+  // metamethod, an error), and the code goes on after it. The element's kind is not a static type: a read is taken as the integer (or
+  // float) the operation needs, and an element of another kind is a deopt. So a value read from a table is never assigned to a local
+  // (the interpreter's own result could be of another kind than the local, which the code cannot resume past); it is read in a condition
+  // (whose truth the interpreter gives back) or stored into a table (whose element takes the tag and payload of the value).
+
+  // The register of the table that the expression N names: a live-in local of the loop (the guard checks it is a table at entry).
+  int table_of(Node* n) {
+    TierView v;
+    tier_view(n, v);
+    if (v.kind != TierView::K_LOCAL || v.flag) return fail_r("an indexed value that is not a table local (a field, a call, an upvalue)");
+    if (declared.count(v.slot)) return fail_r("a table declared in the loop");
+    int r = slot_reg(v.slot, false);
+    if (r < 0) return -1;
+    if (!is_tab(r)) return fail_r("an indexed value that is not a table");
+    return r;
+  }
+  int fail_r(const std::string& m) {
+    fail(m);
+    return -1;
+  }
+  // A deopt at a table operation (see new_site): true when the site is made.
+  bool tdeopt(int cc) {
+    int k = new_site(true);
+    if (!k) return false;
+    deopt_jump(cc, k);
+    return true;
+  }
+  // RCX = the address of the element at the key in RAX (an integer) of the table in the register TR, when the key is in 1..asize (RDX holds
+  // the table, R10 the key less one). Any other key is a deopt. Reads the table's fields each time: the array can move when it grows.
+  bool elem_addr(int tr) {
+    a.mov_rr_pub(R10, RAX);
+    a.sub_r_imm8(R10, 1);
+    a.load(RDX, tr);
+    a.load32_mem(RCX, RDX, kTableOff.asize);
+    a.cmp_rr(R10, RCX);
+    if (!tdeopt(CC_AE)) return false;  // unsigned: key-1 >= asize (the key is outside the array part)
+    a.load64_mem(RCX, RDX, kTableOff.arr);
+    a.shl_r_imm8(R10, 4);
+    a.add_rr(RCX, R10);
+    return true;
+  }
+  // A table element read as a number, into RAX: an integer, or a float when FLT. Any other element is a deopt.
+  int index_value(Node* n, bool flt) {
+    TierView v;
+    tier_view(n, v);
+    if (!tab_ok) return failt("a table element read into a local, or in an expression outside a condition or a table store");
+    int tr = table_of(v.kids[0]);
+    if (tr < 0) return TY_NONE;
+    if (expr(v.kids[1]) != TY_INT) return failt("a table read at a key that is not an integer expression");
+    if (!elem_addr(tr)) return TY_NONE;
+    a.movzx_eax_mem8(RCX);
+    a.cmp_eax_imm8(static_cast<std::uint8_t>(flt ? T_FLT : T_INT));
+    if (!tdeopt(CC_NE)) return TY_NONE;
+    a.load64_mem(RAX, RCX, 8);
+    return flt ? TY_FLT : TY_INT;
+  }
+  // The value of N as a number of the kind a table element is read as: a table read takes the float kind when its other operand is a float.
+  int expr_hint(Node* n, bool flt) {
+    TierView v;
+    tier_view(n, v);
+    if (v.kind == TierView::K_INDEX) return index_value(n, flt);
+    return expr(n);
+  }
+  // A constant float, or a local of the loop or a live-in that holds a float (the kind a table read beside it is taken as).
+  bool is_float_leaf(Node* n) {
+    TierView v;
+    tier_view(n, v);
+    if (v.kind == TierView::K_CONST) return v.k.t == T_FLT;
+    if (v.kind != TierView::K_LOCAL || v.flag) return false;
+    auto it = reg_of.find(v.slot);
+    if (it != reg_of.end()) return is_flt(it->second);
+    return !declared.count(v.slot) && entry_kind(v.slot) == 1;
+  }
+  // `t[k] = v`, the interpreter's store into a table at an integer key (SetIndexArr). The key, then the value: an integer or a float, a nil or
+  // a boolean constant, or a copy of another table's element (a nil there is a deopt). The store needs the table to have no metatable and
+  // the key in 1..asize; the element takes the value's tag and payload, and the table's cache of absent metamethods is cleared, as the
+  // interpreter's set_int clears it. A store that grows the table, or into the hash part, is a deopt.
+  bool setindex(const TierView& v) {
+    int td = table_of(v.kids[0]);
+    if (td < 0) return false;
+    if (expr(v.kids[1]) != TY_INT) return fail("a store at a key that is not an integer expression");
+    a.push_rax();
+    TierView vv;
+    tier_view(v.kids[2], vv);
+    if (vv.kind == TierView::K_INDEX) {
+      int ts = table_of(vv.kids[0]);
+      if (ts < 0) return false;
+      if (expr(vv.kids[1]) != TY_INT) return fail("a table read at a key that is not an integer expression");
+      if (!elem_addr(ts)) return false;
+      a.movzx_eax_mem8(RCX);
+      a.test_eax_eax();
+      if (!tdeopt(CC_E)) return false;  // a nil: a hole, or a lookup that a metatable could answer
+      a.mov_rr_pub(R8, RAX);
+      a.load64_mem(R9, RCX, 8);
+    } else if (vv.kind == TierView::K_CONST && (vv.k.t == T_NIL || vv.k.t == T_TRUE || vv.k.t == T_FALSE)) {
+      a.mov_imm(R8, vv.k.t == T_NIL ? 0 : vv.k.t == T_TRUE ? 2 : 1);  // the tags: nil 0, false 1, true 2
+      a.mov_imm(R9, 0);
+    } else {
+      int tv = expr(v.kids[2]);
+      if (tv == TY_NONE) return false;
+      a.mov_rr_pub(R9, RAX);
+      a.mov_imm(R8, tv == TY_FLT ? T_FLT : T_INT);
+    }
+    a.pop_rax();  // the key
+    a.load(RDX, td);
+    a.cmp64_mem_imm0(RDX, kTableOff.meta);
+    if (!tdeopt(CC_NE)) return false;  // a metatable: __newindex may apply
+    a.mov_rr_pub(R10, RAX);
+    a.sub_r_imm8(R10, 1);
+    a.load32_mem(RCX, RDX, kTableOff.asize);
+    a.cmp_rr(R10, RCX);
+    if (!tdeopt(CC_AE)) return false;  // outside 1..asize: the hash part, or a grow
+    a.load64_mem(RCX, RDX, kTableOff.arr);
+    a.shl_r_imm8(R10, 4);
+    a.add_rr(RCX, R10);
+    a.store8_mem(RCX, 0, R8);
+    a.store64_mem(RCX, 8, R9);
+    a.store8_imm_mem(RDX, kTableOff.absent, 0);
+    return true;
   }
 
   // An arithmetic operation. The operands are numbers (integers or floats); an integer operand of a float operation is converted to
@@ -641,6 +896,7 @@ struct Gen {
     }
     int r = slot_reg(v.slot, false);
     if (r < 0) return TY_NONE;
+    if (is_tab(r)) return failt("a table used as a number");
     a.load(reg, r);
     return is_flt(r) ? TY_FLT : TY_INT;
   }
@@ -650,50 +906,95 @@ struct Gen {
   // first). Only two compound operands keep the left value on the machine stack while the right one is computed.
   bool binary(Node* l, Node* r, int& tl, int& tr) {
     if (leaf(r)) {
-      tl = expr(l);
+      tl = expr_hint(l, is_float_leaf(r));
       if (tl == TY_NONE) return false;
       tr = leaf_into(r, RCX);
       return tr != TY_NONE;
     }
     if (leaf(l)) {
-      tr = expr(r);
+      tr = expr_hint(r, is_float_leaf(l));
       if (tr == TY_NONE) return false;
       a.mov_rcx_rax();
       tl = leaf_into(l, RAX);
       return tl != TY_NONE;
     }
-    tl = expr(l);
+    tl = expr_hint(l, is_float_leaf(r));
     if (tl == TY_NONE) return false;
     a.push_rax();
-    tr = expr(r);
+    tr = expr_hint(r, is_float_leaf(l));
     if (tr == TY_NONE) return false;
     a.mov_rcx_rax();
     a.pop_rax();
     return true;
   }
 
-  // The deopt sites. A zero divisor in RCX leaves the code: it drops the values pushed so far, and jumps to the stub with the number of
-  // the site (the unit being generated) in EAX. The site is recorded here, so the interpreter can run that unit to raise the error.
-  void zero_check() {
-    int ok = a.label();
-    if (units.empty()) {  // not reached: every operation is inside a unit (a statement, a condition or a for loop's expression)
+  // The deopt sites (see Code::Site). A site is made for the innermost unit at the operation being generated; its number is returned
+  // (0 with the failure recorded). TABLE: the site is one of a table operation, which the interpreter completes (a statement or a
+  // condition continues); else the operation raises its error in the interpreter (a zero divisor). The locals written back are those of
+  // reg_of now (the live-ins seen so far; the rest are added at the end), except the tables, which the frame holds.
+  int new_site(bool table) {
+    if (units.empty()) {  // not reached: every operation is inside a unit
       fail("internal: an operation outside a unit");
-      return;
+      return 0;
     }
-    Code::Site s = units.back();
-    for (const auto& kv : reg_of) {  // the locals as they are here (the live-ins seen so far; the rest are added at the end)
+    Code::Site s;
+    Unit& u = units.back();
+    s.node = u.node;
+    if (!table || u.kind == U_EXPR) {
+      if (table) {
+        fail("internal: a table operation in an expression that is a unit of its own");
+        return 0;
+      }
+      s.kind = Code::Site::RAISE;
+      s.stmt = u.kind == U_STMT;
+    } else if (u.kind == U_STMT) {
+      if (u.entry == 0) {
+        entries.push_back(u.cont);
+        u.entry = static_cast<int>(entries.size());
+      }
+      s.kind = Code::Site::STMT;
+      s.entry = u.entry;
+    } else {
+      if (u.entry_t == 0) {
+        int st = a.label(), sf = a.label();
+        cond_stubs.push_back(CondStub{st, u.jump_if ? u.target : u.fall});
+        cond_stubs.push_back(CondStub{sf, u.jump_if ? u.fall : u.target});
+        entries.push_back(st);
+        u.entry_t = static_cast<int>(entries.size());
+        entries.push_back(sf);
+        u.entry_f = static_cast<int>(entries.size());
+      }
+      s.kind = Code::Site::COND;
+      s.entry = u.entry_t;
+      s.entry_false = u.entry_f;
+    }
+    for (const auto& kv : reg_of) {
+      if (is_tab(kv.second)) continue;
       s.bail_slots.push_back(kv.first);
       s.bail_regs.push_back(kv.second);
     }
     sites.push_back(s);
-    int stub = a.label();
-    stubs.push_back(stub);
-    a.test_rcx_rcx();
-    a.jcc(CC_NE, ok);
+    stubs.push_back(a.label());
+    return static_cast<int>(sites.size());
+  }
+
+  // Leaves the code at site K when the flags satisfy CC (CC < 0: always): the values pushed so far are dropped, EAX = K, and the code goes
+  // to the stub of the site, which writes the registers back.
+  void deopt_jump(int cc, int k) {
+    int ok = a.label();
+    if (cc >= 0) a.jcc(cc ^ 1, ok);
     if (a.pushes() > 0) a.add_rsp(a.pushes());
-    a.mov_eax_imm(static_cast<std::uint32_t>(sites.size()));
-    a.jmp(stub);
+    a.mov_eax_imm(static_cast<std::uint32_t>(k));
+    a.jmp(stubs[static_cast<std::size_t>(k - 1)]);
     a.bind(ok);
+  }
+
+  // A zero divisor in RCX leaves the code (the operation raises in the interpreter).
+  void zero_check() {
+    int k = new_site(false);
+    if (!k) return;
+    a.test_rcx_rcx();
+    deopt_jump(CC_E, k);
   }
 
   // RAX = RAX // RCX (MOD false) or RAX % RCX (MOD true), for integers, as the interpreter's helpers (nfcr_idiv, nfcr_imod) compute
@@ -732,16 +1033,29 @@ struct Gen {
 
   // Jumps to TARGET when the condition N has the truth value JUMP_IF (Lua's: nil and false are false, everything else true).
   bool branch(Node* n, bool jump_if, int target) {
-    units.push_back(unit(n, false));
+    Unit u = make_unit(n, U_COND);
+    u.jump_if = jump_if ? 1 : 0;
+    u.target = target;
+    u.fall = a.label();
+    int fall = u.fall;
+    units.push_back(u);
+    bool saved = tab_ok;
+    tab_ok = true;
     bool r = branch_(n, jump_if, target);
+    tab_ok = saved;
     units.pop_back();
+    a.bind(fall);  // the code after the condition: where a false condition (a true one, for jump_if false) goes on
     return r;
   }
 
   // A numeric expression that is a unit of its own (the start and the limit of a for loop): its value is in RAX, its type is returned.
+  // It raises its errors and reads no table element (a table element read is a deopt that goes on, which this unit cannot).
   int num_unit(Node* n) {
-    units.push_back(unit(n, false));
+    units.push_back(make_unit(n, U_EXPR));
+    bool saved = tab_ok;
+    tab_ok = false;
     int t = expr(n);
+    tab_ok = saved;
     units.pop_back();
     return t;
   }
@@ -778,6 +1092,26 @@ struct Gen {
       case TierView::K_CONST: {
         bool truthy = !(v.k.t == T_NIL || v.k.t == T_FALSE);
         if (truthy == jump_if) a.jmp(target);
+        return true;
+      }
+      case TierView::K_INDEX: {  // a table element: its truth. A nil (a hole, or a lookup that a metatable could answer) leaves the code
+        int tr = table_of(v.kids[0]);
+        if (tr < 0) return false;
+        if (expr(v.kids[1]) != TY_INT) return fail("a table read at a key that is not an integer expression");
+        if (!elem_addr(tr)) return false;
+        a.movzx_eax_mem8(RCX);
+        int true_l = a.label(), false_l = a.label(), end = a.label();
+        a.cmp_eax_imm8(T_TRUE);
+        a.jcc(CC_AE, true_l);  // a tag of true, a number, a string, ...: a true value
+        a.cmp_eax_imm8(T_FALSE);
+        a.jcc(CC_E, false_l);
+        if (!tdeopt(-1)) return false;  // nil
+        a.bind(true_l);
+        if (jump_if) a.jmp(target);
+        else a.jmp(end);
+        a.bind(false_l);
+        if (!jump_if) a.jmp(target);
+        a.bind(end);
         return true;
       }
       default:
@@ -891,9 +1225,27 @@ struct Gen {
         return true;
       case TierView::K_DECL:
       case TierView::K_ASSIGN: {  // a unit of its own: its stores come after all its operands (a deopt runs the statement again)
-        units.push_back(unit(n, true));
+        units.push_back(make_unit(n, U_STMT));
+        units.back().cont = a.label();
+        bool saved = tab_ok;
+        tab_ok = false;  // a table element read into a local is refused (see index_value)
         bool r = v.kind == TierView::K_DECL ? decl(v) : assign(v);
+        tab_ok = saved;
+        int cont = units.back().cont;
         units.pop_back();
+        a.bind(cont);
+        return r;
+      }
+      case TierView::K_SETINDEX: {  // a table store: a unit of its own, and a deopt of it goes on after it (see setindex)
+        units.push_back(make_unit(n, U_STMT));
+        units.back().cont = a.label();
+        bool saved = tab_ok;
+        tab_ok = true;
+        bool r = setindex(v);
+        tab_ok = saved;
+        int cont = units.back().cont;
+        units.pop_back();
+        a.bind(cont);
         return r;
       }
       case TierView::K_IF:
@@ -948,6 +1300,7 @@ struct Gen {
 
   // Stores RAX (of type T) into the local of word R: its type must be the local's.
   bool store_typed(int r, int t) {
+    if (is_tab(r)) return fail("an assignment to a table local");
     if ((t == TY_FLT) != is_flt(r)) return fail("an assignment that changes the type of a local (an integer and a float)");
     a.store(r, RAX);
     return true;
@@ -1216,6 +1569,11 @@ bool top_level(Gen& g, Node* loop, int kind, Code& code) {
   tier_view(loop, v);
   g.collect(loop);
   g.a.prologue();
+  // The entries (see Code::Site): the prologue jumps to the dispatch at the end of the code, which goes to the top of the loop (entry 0)
+  // or to the continuation of the entry ESI holds.
+  int dispatch = g.a.label(), top0 = g.a.label();
+  g.a.jmp(dispatch);
+  g.a.bind(top0);
   if (kind == TierLoopState::FOR_INT) {
     if (v.kind != TierView::K_FOR) return g.fail("a loop that is not a numeric for");
     if (v.captured) return g.fail("a loop variable captured by a closure");
@@ -1280,13 +1638,22 @@ bool top_level(Gen& g, Node* loop, int kind, Code& code) {
   // go back to REGS (an allocated one from its register; the others are in memory already), then the registers are restored and the
   // code returns the site. Nothing else is written: the statement the site names is run by the interpreter from this state.
   // The live-ins are all in the stubs: one first used after a site in the text can be assigned before the site is reached again.
+  // Every allocated word goes back to REGS, so that the code can be entered again from any site (the entries reload them).
   for (std::size_t k = 0; k < g.sites.size(); ++k) {
     g.a.bind(g.stubs[k]);
-    for (int r : g.sites[k].bail_regs) g.a.spill(r);
-    for (int r : g.in_regs)
-      if (std::find(g.sites[k].bail_regs.begin(), g.sites[k].bail_regs.end(), r) == g.sites[k].bail_regs.end()) g.a.spill(r);
+    for (int w = 0; w < g.nregs; ++w) g.a.spill(w);
     g.a.restore_ret();
   }
+  for (const Gen::CondStub& cs : g.cond_stubs) {
+    g.a.bind(cs.label);
+    g.a.jmp(cs.target);
+  }
+  g.a.bind(dispatch);
+  for (std::size_t e = 0; e < g.entries.size(); ++e) {
+    g.a.cmp_esi_imm32(static_cast<std::uint32_t>(e + 1));
+    g.a.jcc(CC_E, g.entries[e]);
+  }
+  g.a.jmp(top0);
   return g.ok;
 }
 
@@ -1295,6 +1662,10 @@ bool top_level(Gen& g, Node* loop, int kind, Code& code) {
 
 std::unique_ptr<Code> compile(Node* loop, int kind, const Frame& f, std::string& why) {
 #if NFCAST_JIT_X64
+  if (!value_layout_ok()) {
+    why = "the layout of a value is not the one the JIT reads (a tag byte, then the payload at 8)";
+    return nullptr;
+  }
   // Register allocation: the first pass generates the loop with every word in memory and counts the references to each word (weighted
   // by loop depth, so the control variables, referenced on every iteration, rank first). The four most referenced words get R12-R15
   // (callee-saved) and the second pass generates the code with them. The allocation does not change what is in the subset, so the
@@ -1339,9 +1710,11 @@ std::unique_ptr<Code> compile(Node* loop, int kind, const Frame& f, std::string&
   }
   code->nregs = g.nregs;
   code->reg_float = g.flt;
+  code->reg_tab = g.tab;
   code->sites = g.sites;
   for (Code::Site& s : code->sites) {  // the live-ins are written back at every site, whether they were seen before it or not
     for (std::size_t k = 0; k < g.in_slots.size(); ++k) {
+      if (g.tab[static_cast<std::size_t>(g.in_regs[k])]) continue;  // a table: the frame holds it
       if (std::find(s.bail_slots.begin(), s.bail_slots.end(), g.in_slots[k]) != s.bail_slots.end()) continue;
       s.bail_slots.push_back(g.in_slots[k]);
       s.bail_regs.push_back(g.in_regs[k]);
@@ -1364,7 +1737,7 @@ std::unique_ptr<Code> compile(Node* loop, int kind, const Frame& f, std::string&
   }
   code->mem = mem;
   code->size = size;
-  code->fn = reinterpret_cast<int (*)(std::int64_t*)>(reinterpret_cast<std::uintptr_t>(mem));
+  code->fn = reinterpret_cast<int (*)(std::int64_t*, int)>(reinterpret_cast<std::uintptr_t>(mem));
   return code;
 #else
   (void)loop;

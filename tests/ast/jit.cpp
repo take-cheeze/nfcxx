@@ -221,11 +221,6 @@ static const Case cases[] = {
      "repeat n = n + 1 until 7 % (3 - n) < 0\n"
      "return n",
      DEOPT},
-    {"a table in the loop is refused",
-     "local t = {}\n"
-     "for i = 1, 10 do t[i] = i end\n"
-     "return #t",
-     REFUSED},
     {"a float for loop runs compiled",
      "local s = 0\n"
      "for x = 0.5, 3 do s = s + 1 end\n"
@@ -260,7 +255,7 @@ static const Case cases[] = {
      "local t = {}\n"
      "local total = 0\n"
      "for k = 1, 6 do\n"
-     "  t[k] = k\n"
+     "  t.x = k\n"
      "  local x = 0\n"
      "  while x < k * 10 do x = x + 3 total = total + 1 end\n"
      "end\n"
@@ -876,6 +871,279 @@ static std::string gen_mixed_program(Rng& r) {
          loop + "return a, b, x, y";
 }
 
+// ---- table elements (docs/notes/ast.md, "JIT"): the array part -----------------------------------------------------------------------
+// The JIT on for the table cases: as jit_on, and an index node specializes at its first evaluation (feedback_warm 1), so the loop it is
+// in, compiled at its first edge, has the nodes it reads and writes. The default (2) leaves such a loop refused, as the node is not
+// specialized yet, which the refusal counts; the driver's configurations run with that default.
+static void jit_on_tables(State& S) {
+  jit_on(S);
+  S.feedback_warm = 1;
+}
+
+// What the counters must say about a table case: TOK, compiled and entered, with no refusal; TDEOPT, the same and with a deopt (an
+// element outside the array part, a hole, a metatable, a kind other than the one read, or a store that grows the table); TREF, refused
+// (a table element read into a local, a key that is not an integer, a table built in the loop, a number indexed). Each agrees with the
+// interpreter.
+enum TabExpect { TOK, TDEOPT, TREF };
+struct TabCase {
+  const char* name;
+  const char* code;
+  TabExpect want;
+};
+
+static const TabCase tab_cases[] = {
+    {"booleans: a store loop that grows the table, then the sieve over it, and a count",
+     "local a = {}\n"
+     "for i = 1, 200 do a[i] = true end\n"
+     "local i = 2\n"
+     "while i * i <= 200 do\n"
+     "  if a[i] then\n"
+     "    local j = i * i\n"
+     "    while j <= 200 do a[j] = false j = j + i end\n"
+     "  end\n"
+     "  i = i + 1\n"
+     "end\n"
+     "local c = 0\n"
+     "for k = 2, 200 do if a[k] then c = c + 1 end end\n"
+     "return c",
+     TDEOPT},
+    {"the benchmark's sieve with n = 2000 (its keys start at 2, so they sit in the hash part and every access is a deopt)",
+     "local function sieve(n)\n"
+     "  local a = {}\n"
+     "  for i = 2, n do a[i] = true end\n"
+     "  local i = 2\n"
+     "  while i * i <= n do\n"
+     "    if a[i] then\n"
+     "      local j = i * i\n"
+     "      while j <= n do\n"
+     "        a[j] = false\n"
+     "        j = j + i\n"
+     "      end\n"
+     "    end\n"
+     "    i = i + 1\n"
+     "  end\n"
+     "  local c = 0\n"
+     "  for k = 2, n do\n"
+     "    if a[k] then c = c + 1 end\n"
+     "  end\n"
+     "  return c\n"
+     "end\n"
+     "return sieve(2000)",
+     TDEOPT},
+    {"floats: an element compared with a float constant",
+     "local a = {}\n"
+     "for i = 1, 50 do a[i] = i * 0.5 end\n"
+     "local c = 0\n"
+     "for i = 1, 50 do if a[i] < 10.0 then c = c + 1 end end\n"
+     "return c",
+     TDEOPT},
+    {"booleans: stores of constants, a copy of an element, and a hole read as false",
+     "local a = {}\n"
+     "for i = 1, 6 do a[i] = false end\n"
+     "for i = 2, 6, 2 do a[i] = true end\n"
+     "a[3] = nil\n"
+     "local c = 0\n"
+     "for i = 1, 6 do if a[i] then c = c + 1 end end\n"
+     "for i = 2, 6 do a[i] = a[i - 1] end\n"
+     "local d = 0\n"
+     "for i = 1, 6 do if a[i] then d = d + 1 end end\n"
+     "return c, d",
+     TDEOPT},
+    {"reads past the array part, and a key in the hash part",
+     "local a = {}\n"
+     "for i = 1, 5 do a[i] = true end\n"
+     "a[8] = true\n"
+     "local c = 0\n"
+     "for i = 1, 10 do if a[i] then c = c + 1 end end\n"
+     "return c",
+     TDEOPT},
+    {"a metatable's __index answers the reads the table does not hold",
+     "local a = setmetatable({}, {__index = function(t, k) return k % 2 == 0 end})\n"
+     "local c = 0\n"
+     "for i = 1, 10 do if a[i] then c = c + 1 end end\n"
+     "return c",
+     TDEOPT},
+    {"a store into a table with a metatable goes through __newindex (which stores nothing): the store node is generic, the loop refused",
+     "local a = setmetatable({}, {__newindex = function(t, k, v) end})\n"
+     "for i = 1, 5 do a[i] = true end\n"
+     "local c = 0\n"
+     "for i = 1, 5 do if a[i] then c = c + 1 end c = c + 0 end\n"
+     "return c",
+     TREF},
+    {"an element of another kind than the comparison reads it as (floats stored between the entries of the loop)",
+     "local a = {}\n"
+     "for i = 1, 10 do a[i] = i end\n"
+     "local c = 0\n"
+     "for r = 1, 3 do\n"
+     "  for i = 1, 10 do if a[i] < 5 then c = c + 1 end end\n"
+     "  for i = 1, 10 do a[i] = i + 0.5 end\n"
+     "end\n"
+     "return c",
+     TDEOPT},
+    {"a read into a local is refused: the element's kind would change the local's type",
+     "local a = {}\n"
+     "for i = 1, 10 do a[i] = i end\n"
+     "local s = 0\n"
+     "for i = 1, 10 do s = s + a[i] end\n"
+     "return s",
+     TREF},
+    {"a table element at a float key is refused",
+     "local a = {}\n"
+     "for i = 1, 8 do a[i] = true end\n"
+     "local c = 0\n"
+     "for i = 1, 4 do if a[i * 0.5] then c = c + 1 end end\n"
+     "return c",
+     TREF},
+    {"a number indexed in a loop (after its first iteration): refused, and the interpreter raises the error",
+     "local n = 5\n"
+     "local c = 0\n"
+     "for i = 1, 3 do if i > 1 and n[i] then c = c + 1 end end\n"
+     "return c",
+     TREF},
+    {"a table built in the loop is refused",
+     "local c = 0\n"
+     "for i = 1, 3 do local t = {} t[i] = i if t[i] then c = c + 1 end end\n"
+     "return c",
+     TREF},
+    {"a hole read in a comparison: the interpreter raises the error from the statement",
+     "local a = {}\n"
+     "for i = 1, 5 do a[i] = i end\n"
+     "a[3] = nil\n"
+     "local c = 0\n"
+     "for i = 1, 5 do if a[i] < 4 then c = c + 1 end end\n"
+     "return c",
+     TDEOPT},
+    {"a table written in a loop: each store grows the array (a deopt), and the length after the loop",
+     "local t = {}\n"
+     "for i = 1, 10 do t[i] = i end\n"
+     "return #t",
+     TDEOPT},
+    {"keys outside the array part (zero and negative) are stored into the hash part",
+     "local a = {}\n"
+     "for i = 1, 3 do a[i] = true end\n"
+     "for i = -1, 2 do a[i] = false end\n"
+     "local c = 0\n"
+     "for i = -1, 3 do if a[i] then c = c + 1 end end\n"
+     "return c",
+     TDEOPT},
+};
+
+// The table cases: each agrees with the interpreter, and its counters say what the JIT did (see TabExpect).
+static void table_cases_section(bool avail) {
+  for (const TabCase& c : tab_cases) {
+    State P;
+    P.open_libs();
+    TierOptions off;
+    off.mode = TierOptions::Off;
+    P.enable_tier(off);
+    std::string want = eval(P, c.code);
+    State S;
+    S.open_libs();
+    jit_on_tables(S);
+    std::string got = eval(S, c.code);
+    const nfcast::Stats& st = S.stats;
+    bool same = got == want;
+    CHECK(same);
+    if (!same) std::printf("  %s: got %s, want %s\n", c.name, got.c_str(), want.c_str());
+    if (!avail) {
+      CHECK(st.jit_compiled == 0 && st.jit_entries == 0 && st.jit_refused >= 1);
+    } else {
+      switch (c.want) {
+        case TOK: CHECK(st.jit_compiled >= 1 && st.jit_entries >= 1 && st.jit_refused == 0); break;
+        case TDEOPT: CHECK(st.jit_compiled >= 1 && st.jit_entries >= 1 && st.jit_refused == 0 && st.jit_bailouts > st.jit_guard_misses); break;
+        case TREF: CHECK(st.jit_refused >= 1); break;
+      }
+    }
+    std::printf("%s  %-70.70s %s  (compiled %llu, entries %llu, refused %llu, bailouts %llu)\n", same ? "ok  " : "FAIL", c.name,
+                got.size() > 60 ? (got.substr(0, 57) + "...").c_str() : got.c_str(), static_cast<unsigned long long>(st.jit_compiled),
+                static_cast<unsigned long long>(st.jit_entries), static_cast<unsigned long long>(st.jit_refused),
+                static_cast<unsigned long long>(st.jit_bailouts));
+  }
+}
+
+// The generated table programs: a table a of integers, floats and booleans (filled by a loop, with a hole in some), and a loop over
+// statements that read its elements in conditions and write them, at keys that run past it (0 and the keys beyond the end among them),
+// with copies of elements and arithmetic on them. Each program must agree with the interpreter, JIT on or off, whether its loop is
+// compiled, refused, or deopts (a comparison of a hole is an error both raise).
+static std::string gen_tkey(Rng& r) {
+  static const char* ks[] = {"k", "k + 1", "k - 1", "k * 2", "7 - k", "(k * 3) % 11", "0", "k + 5"};
+  return ks[r.pick(8)];
+}
+static std::string gen_tval(Rng& r) {
+  switch (r.pick(6)) {
+    case 0: return "true";
+    case 1: return "false";
+    case 2: return std::to_string(r.pick(9) - 4);
+    case 3: return "k * 0.5";
+    case 4: return "a[" + gen_tkey(r) + "]";
+    default: return "nil";
+  }
+}
+static std::string gen_tcond(Rng& r) {
+  switch (r.pick(4)) {
+    case 0: return "a[" + gen_tkey(r) + "]";
+    case 1: return "a[" + gen_tkey(r) + "] < " + std::to_string(r.pick(10) - 3);
+    case 2: return "a[" + gen_tkey(r) + "] == " + std::to_string(r.pick(4));
+    default: return "a[" + gen_tkey(r) + "] < " + std::to_string(r.pick(10)) + ".5";
+  }
+}
+static std::string gen_tstmt(Rng& r, int depth) {
+  switch (r.pick(depth > 0 ? 5 : 3)) {
+    case 0: return "a[" + gen_tkey(r) + "] = " + gen_tval(r) + "\n";
+    case 1: return "if " + gen_tcond(r) + " then c = c + 1 end\n";
+    case 2: return "c = c + " + std::to_string(r.pick(5)) + "\n";
+    case 3: return "if " + gen_tcond(r) + " then\n" + gen_tstmt(r, depth - 1) + "else\n" + gen_tstmt(r, depth - 1) + "end\n";
+    default: return "a[" + gen_tkey(r) + "] = a[" + gen_tkey(r) + "] + 1\n";
+  }
+}
+static std::string gen_table_program(Rng& r) {
+  int n = 4 + r.pick(8);
+  std::string fill = "local a = {}\n";
+  fill += "for i = 1, " + std::to_string(n) + " do\n";
+  fill += r.pick(2) ? "  if i % 3 == 0 then a[i] = true else a[i] = i end\n" : "  if i % 3 == 0 then a[i] = i * 0.5 else a[i] = i end\n";
+  fill += "end\n";
+  if (r.pick(2)) fill += "a[" + std::to_string(1 + r.pick(n)) + "] = nil\n";
+  if (r.pick(2)) fill += "a[" + std::to_string(n + 2) + "] = true\n";
+  std::string body;
+  int count = 2 + r.pick(3);
+  for (int k = 0; k < count; ++k) body += gen_tstmt(r, 2);
+  std::string loop = "local c = 0\nfor k = 0, " + std::to_string(n + 3) + " do\n" + body + "end\n";
+  if (r.pick(2)) loop = "local c = 0\nlocal k = 1\nwhile k <= " + std::to_string(n) + " do\n" + body + "k = k + 1\nend\n";
+  return fill + loop + "return c, a[1], a[2]";
+}
+
+static void generated_table_section(bool avail) {
+  const int kPrograms = 300;
+  Rng r{0x3C6EF372FE94F82BULL};
+  unsigned long long compiled = 0, entries = 0, refused = 0, bailouts = 0;
+  int fails = 0;
+  for (int k = 0; k < kPrograms; ++k) {
+    std::string code = gen_table_program(r);
+    State P;
+    P.open_libs();
+    TierOptions off;
+    off.mode = TierOptions::Off;
+    P.enable_tier(off);
+    std::string want = eval(P, code);
+    State S;
+    S.open_libs();
+    jit_on_tables(S);
+    std::string got = eval(S, code);
+    compiled += S.stats.jit_compiled;
+    entries += S.stats.jit_entries;
+    refused += S.stats.jit_refused;
+    bailouts += S.stats.jit_bailouts;
+    if (got != want) {
+      ++fails;
+      std::printf("FAIL generated table program %d:\n%s\n  got %s\n  want %s\n", k, code.c_str(), got.c_str(), want.c_str());
+    }
+  }
+  CHECK(fails == 0);
+  if (avail) CHECK(compiled >= 1 && entries >= 1);
+  std::printf("%s %d generated table programs: %llu loops compiled, %llu takeovers, %llu refused, %llu bailouts%s\n",
+              fails ? "FAIL" : "ok  ", kPrograms, compiled, entries, refused, bailouts, fails ? " (FAILURES)" : "");
+}
+
 int main() {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   // The default is off: no tier, no counters.
@@ -968,6 +1236,11 @@ int main() {
     CHECK(S.stats.jit_bailouts == S.stats.jit_guard_misses + (avail ? 2 : 0));  // the two zero divisors, the deopts
     if (avail) CHECK(S.stats.jit_compiled >= 2 && S.stats.jit_refused == 0);
   }
+
+  // The table cases, and the generated table programs (see table_cases_section and generated_table_section).
+  std::printf("-- table elements\n");
+  table_cases_section(avail);
+  generated_table_section(avail);
 
   // Generated loops: each must agree with the interpreter, and (on this host) compile without a refusal. The second batch has
   // the bitwise operators and the shifts; the third has floats (gen_float_program); the fourth has integers and floats mixed, float

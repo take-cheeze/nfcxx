@@ -2695,12 +2695,9 @@ int jit_enter(State& S, Frame& f, TierLoop* tl, const TierLoopState& st) {
     tl->jit_blocked = true;
     return 0;
   }
-  if (int site = jit::run(f, *tl->jit, st)) {
-    // A deopt: the code stopped at a zero divisor and wrote the loop's locals back. The interpreter runs the statement it stopped in,
-    // which raises the error the interpreter raises there; the loop does not go on.
-    ++S.stats.jit_bailouts;
-    jit::resume(f, *tl->jit, site);
-  }
+  // The code runs the loop to its end; each deopt (a zero divisor, a table element outside the array part, ...) runs the unit it stopped in
+  // in the interpreter and goes on in the code (jit::run). A zero divisor raises the error from there.
+  jit::run(f, *tl->jit, st, S.stats.jit_bailouts);
   ++S.stats.jit_entries;
   return 1;
 }
