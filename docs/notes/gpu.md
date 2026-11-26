@@ -447,7 +447,7 @@ that each one ran the body. The vector add is verified; the small kernel is not.
 
 The interpreter also estimates how many cycles a kernel takes, in the style of the Theoric note on virtual hardware
 (a deterministic model that ranks kernels; it is not a clock-by-clock simulator). Each instruction costs the latency of
-its class: `alu`, `branch`, `local`, `global`, `atomic`, `barrier`, `l1` (defaults 4, 4, 30, 400, 400, 20, 30;
+its class: `alu`, `branch`, `local`, `global`, `atomic`, `barrier`, `l1` (defaults 2, 4, 40, 320, 31, 24, 30, the first six measured on an RTX 5050, sm_120, and branch and l1 not measured;
 `--lat CLASS=CYCLES` changes one). A predicated-off instruction costs an ALU issue.
 
 A warp is 32 consecutive threads of a block, and it issues each instruction once for all its lanes. With `--timing`,
@@ -474,14 +474,14 @@ depend on the order of the loads, `--explore` and `--random` report a range. The
 
 `--timing` prints the estimate to stderr at exit. With `--explore` or `--random` it gives one estimate when every
 schedule agrees, and the range otherwise: the megakernel's atomic version agrees, the version without its atomic does
-not (its loop runs a different number of times in different schedules, 2472 to 2476 cycles over 20 schedules).
-`tests/gpu/ptx-interp/timing/run_timing.sh` checks the per-instruction charges, the barrier wait (1248 cycles with the
-barrier, 832 without, now 1228: the warp pays for both sides of the predicated loads), the warp cost of a divergent
-if/else (`timing/divergent.ptx`: 1228 cycles, where the per-thread model gave 832), the scaling with `--sms`, the
+not (its loop runs a different number of times in different schedules, 2472 to 2476 cycles over 20 schedules with the former defaults; run_timing.sh pins those values, since at the calibrated alu the two paths tie).
+`tests/gpu/ptx-interp/timing/run_timing.sh` checks the per-instruction charges, the barrier wait (1000 cycles with the
+barrier, 976 without: the warp pays for both sides of the predicated loads), the warp cost of a divergent
+if/else (`timing/divergent.ptx`: 976 cycles), the scaling with `--sms`, the
 issue-width and bandwidth bounds (exact values: 4096 cycles at 1 byte per cycle for 4096 bytes, 2048 at 2, and halving
-`--issue` doubles an ALU-bound block), the L1 (`l1line.ptx`: 32 threads reading one 128-byte line; one block gives 828
-cycles, two blocks on one SM 1286 (one miss, then a block of hits) against 1656 without the cache; the per-SM keying is
-exact over every schedule of three blocks on two SMs, 1286; and `evict.ptx`: a one-line cache evicts, 1208 against 838
+`--issue` doubles an ALU-bound block), the L1 (`l1line.ptx`: 32 threads reading one 128-byte line; one block gives 656
+cycles, two blocks on one SM 1022 (one miss, then a block of hits) against 1312 without the cache; the per-SM keying is
+exact over every schedule of three blocks on two SMs, 1022; and `evict.ptx`: a one-line cache evicts, 966 against 676
 for two lines), and the ranges above.
 
 Still not modelled: caches beyond the optional L1, and blocks that start at different times within a wave. Not measured against hardware yet: this machine has no GPU (`nvidia-smi` is missing), so the latencies are the

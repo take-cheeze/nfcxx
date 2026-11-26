@@ -13,19 +13,21 @@ Build and test (Lean 4 via elan; the toolchain is pinned in `lean-toolchain`):
     cd lean && lake build nfcxx_ir
     ../tests/lean/run.sh   # skips with a message when lake is not installed
 
-Status: written but not yet compiled. The toolchain could not be installed in the session that
-wrote it, so the first step is `lake build` and fixing whatever it reports. The grammar was checked
-separately with a Python mirror of the lexer and parser: all 94 goldens in `tests/pathb-ir`
-(11,786 top-level forms) parse with balanced parens and round-trip.
+Status: builds with Lean 4.14.0 (lake 5.0.0) and passes `tests/lean/run.sh`: the 94 goldens in `tests/pathb-ir`
+(11,786 top-level forms) parse, round-trip, and decode to the typed AST; the 4 malformed inputs in `lean/tests/bad` are
+refused; and the functions in `lean/tests/sem` give their expected outcomes.
 
 `NfcxxIR/Semantics.lean` is the executable semantics of a subset of the IR: integer types, registers,
 constants, the wrapping, checked and bitwise integer operators, comparisons, `iconv`, same-width `bitcast`,
 `eval` of a value, and the structured statements (`let`, `set`, `if`, `loop`, `block`, `switch` with its
 top-level `case` and `default` labels, `break`, `continue`, `return`, `unreachable`, `trap`). A form outside
 the subset gives `stuck` with its reason, naming the form; it is never skipped. Stack slots of integer type
-(`load` and `store` of a local) are modelled. Pointers and memory beyond slots, calls, floats, exceptions,
+(`load` and `store` of a local) are modelled. Calls of functions of the same module are modelled: the
+arguments are bound to the parameters of a fresh environment, and the callee's return value is the value of
+the call. Calls of functions outside the module, pointers and memory beyond slots, floats, exceptions,
 `goto` and labels nested inside a switch arm are the next steps. Values are integers reduced into
-their type after each operation; the run is fuel-bounded.
+their type after each operation; the run is fuel-bounded, and so is the nesting of calls.
 
     nfcxx_ir run FILE FUNCTION   # run a function without parameters: value, trap or stuck
+                                 # (FUNCTION may be main; the functions of FILE are available to its calls)
     tests/lean/run.sh            # also runs the IR functions in lean/tests/sem with their known outcomes

@@ -792,9 +792,15 @@ if MrbcRbDefault.from_env
              %w[NqAnyLen#nq_glob_len NqAnyLen#nq_glob_bytes NqAnyLen#nq_glob_to_i].all? do |m|
                chunk_of.call(native_off, m).match?(retained_tag)
              end)
+  # CMP_NUM_OUTLINE moves a compare's Float arms into the shared bc2cpp_cmp_num_lt helper; either form keeps them.
+  float_lt = lambda do |chunk|
+    chunk.include?('mrb_float(') ||
+      (chunk.include?('bc2cpp_cmp_num_lt(M,') &&
+        off_code.match?(/bc2cpp_cmp_num_lt\(mrb_state\* M, mrb_value d, mrb_value s\) \{.*?mrb_float_p\(d\) && mrb_float_p\(s\).*?^\}/m))
+  end
   check.call('BC2CPP_INTEGER_OPERAND_PROOF=0 keeps the numeric proof\'s guarded arms at the same sites',
              !off_code.include?('INTEGER_OPERAND_PROOF') && chunk_of.call(off_code, 'NqBox#nq_area').include?('NUMERIC_OPERAND_PROOF') &&
-               chunk_of.call(off_code, 'NqBox#nq_less').include?('mrb_float('))
+               float_lt.call(chunk_of.call(off_code, 'NqBox#nq_less')))
   facts = err.lines.grep(/NUM(ARG|IVAR|RET|CONST) /).join
   check.call('the diagnostic lists the proven ivar classes', facts.include?('NUMIVAR NqBox#@nq_f (FLT)') &&
                                                           facts.include?('NUMIVAR NqBox#@nq_list (ARR)'))

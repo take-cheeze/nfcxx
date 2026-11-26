@@ -297,6 +297,7 @@ struct ArithBase : Node {
   int op;
   Node *l_, *r_;
   Opnd lo_, ro_;  // the operands as bind_operand sees them (set by a specialized node's constructor)
+  unsigned reprofiles = 0;  // deopts on numbers this node has re-profiled after (State::reprofile_max bounds it; docs, "Feedback")
   ArithBase(int o, Node* l, Node* r) : op(o), l_(l), r_(r) {
     adopt(l_);
     adopt(r_);
@@ -347,6 +348,8 @@ B* respec_shape(Frame& f, Node* self, Node* l, Node* r) {
   }
 }
 
+ArithBase* arith_deopt(Frame& f, ArithBase* self, const Value& a, const Value& b);  // below, with the feedback nodes
+
 // The operator node for two integers: calc takes any other operands to the number node or the generic one (a deopt).
 template <int OP, int LK, int RK>
 struct ArithII : ArithBase {
@@ -363,9 +366,7 @@ struct ArithII : ArithBase {
       return ar_ii<OP>(*f.S, a.i, b.i);
     }
     ++f.S->stats.deopts;
-    ArithBase* n = (!is_bit_op(OP) && a.is_number() && b.is_number()) ? make_nn(f, this, op, l_, r_)
-                                                                      : respec<ArithGen>(f, this, op, l_, r_);
-    return n->compute(f, a, b);
+    return arith_deopt(f, this, a, b)->compute(f, a, b);
   }
 };
 
@@ -490,14 +491,19 @@ inline bool ar_profiled(Frame& f, int op, int line, const Value& a, const Value&
 
 // The node an arithmetic operator is specialized to for operands of class K (made in place of SELF). Counted as a speculation
 // when it is an integer or a number node; a bitwise operator on floats, and anything else, stays generic.
-ArithBase* arith_for(Frame& f, Node* self, int op, Node* l, Node* r, std::uint8_t k) {
+ArithBase* arith_for(Frame& f, ArithBase* self, int op, Node* l, Node* r, std::uint8_t k) {
+  unsigned rp = self->reprofiles;  // read before SELF is replaced: the specialized node keeps the count of its re-profiles
   if (k == FB_INT) {
     ++f.S->stats.speculations_installed;
-    return (is_int_op(op) || is_bit_op(op)) ? make_ii(f, self, op, l, r) : make_nn(f, self, op, l, r);
+    ArithBase* n = (is_int_op(op) || is_bit_op(op)) ? make_ii(f, self, op, l, r) : make_nn(f, self, op, l, r);
+    n->reprofiles = rp;
+    return n;
   }
   if (k == FB_FLT && !is_bit_op(op)) {
     ++f.S->stats.speculations_installed;
-    return make_nn(f, self, op, l, r);
+    ArithBase* n = make_nn(f, self, op, l, r);
+    n->reprofiles = rp;
+    return n;
   }
   return respec<ArithGen>(f, self, op, l, r);
 }
@@ -532,6 +538,29 @@ struct ArithUninit : ArithBase {
     return respec<ArithProfile>(f, this, op, l_, r_)->compute(f, a, b);
   }
 };
+
+// The node that takes over from SELF, a specialized arithmetic node whose guard failed on operands A and B (the caller counts the
+// deopt). Numbers re-profile: a profile node records the operands again and specializes to their new type (docs/notes/ast.md,
+// "Feedback"). That happens at most State::reprofile_max times per node; then the node stays generic (feedback_generic). Other
+// operands (a string, a table, a bitwise operator on floats) stay generic at once, as before. With feedback_warm <= 1 there is no
+// profile, and a numeric deopt installs the number node directly, as the engine did before feedback.
+ArithBase* arith_deopt(Frame& f, ArithBase* self, const Value& a, const Value& b) {
+  int op = self->op;
+  Node* l = self->l_;
+  Node* r = self->r_;
+  std::uint8_t k = fb_arith_class(a, b);
+  if (k == FB_OTHER || (is_bit_op(op) && k == FB_FLT)) return respec<ArithGen>(f, self, op, l, r);
+  if (f.S->feedback_warm <= 1) return make_nn(f, self, op, l, r);
+  if (self->reprofiles >= f.S->reprofile_max) {
+    ++f.S->stats.feedback_generic;  // the bound is reached: the node stays generic for good
+    return respec<ArithGen>(f, self, op, l, r);
+  }
+  unsigned n = self->reprofiles + 1;
+  ++f.S->stats.reprofiles;
+  ArithProfile* p = respec<ArithProfile>(f, self, op, l, r);
+  p->reprofiles = n;
+  return p;
+}
 
 struct UnaryNode : Node {
   int op;
@@ -635,6 +664,7 @@ struct CmpBase : Node {
   int op;
   Node *l_, *r_;
   Opnd lo_, ro_;  // the operands as bind_operand sees them (set by a specialized node's constructor, see ArithBase)
+  unsigned reprofiles = 0;  // deopts on numbers this node has re-profiled after (see ArithBase, and cmp_deopt)
   CmpBase(int o, Node* l, Node* r) : op(o), l_(l), r_(r) {
     adopt(l_);
     adopt(r_);
@@ -670,6 +700,8 @@ struct CmpGen : CmpBase {
   Value compute(Frame& f, const Value& a, const Value& b) override { return generic(f, a, b); }
 };
 
+CmpBase* cmp_deopt(Frame& f, CmpBase* self, const Value& a, const Value& b);  // below, with the feedback nodes
+
 template <int OP, int LK, int RK>
 struct CmpII : CmpBase {
   CmpII(Node* l, Node* r) : CmpBase(OP, l, r) { bind(); }
@@ -682,7 +714,7 @@ struct CmpII : CmpBase {
   Value calc(Frame& f, const Value& a, const Value& b) {
     if (a.t == T_INT && b.t == T_INT) return Value::boolean(cmp_ii(OP, a.i, b.i));
     ++f.S->stats.deopts;
-    return respec<CmpGen>(f, this, op, l_, r_)->compute(f, a, b);
+    return cmp_deopt(f, this, a, b)->compute(f, a, b);
   }
 };
 
@@ -705,7 +737,7 @@ struct CmpFF : CmpBase {  // both floats
       }
     }
     ++f.S->stats.deopts;
-    return respec<CmpGen>(f, this, op, l_, r_)->compute(f, a, b);
+    return cmp_deopt(f, this, a, b)->compute(f, a, b);
   }
 };
 
@@ -730,10 +762,13 @@ CmpBase* make_cmp(Frame& f, Node* self, int op, Node* l, Node* r, bool ints, boo
 }
 
 // The comparison node for operands of class K (made in place of SELF); a speculation when K is integers or floats.
-CmpBase* cmp_for(Frame& f, Node* self, int op, Node* l, Node* r, std::uint8_t k) {
+CmpBase* cmp_for(Frame& f, CmpBase* self, int op, Node* l, Node* r, std::uint8_t k) {
+  unsigned rp = self->reprofiles;  // read before SELF is replaced (see arith_for)
   if (k != FB_INT && k != FB_FLT) return make_cmp(f, self, op, l, r, false, false);
   ++f.S->stats.speculations_installed;
-  return make_cmp(f, self, op, l, r, k == FB_INT, k == FB_FLT);
+  CmpBase* n = make_cmp(f, self, op, l, r, k == FB_INT, k == FB_FLT);
+  n->reprofiles = rp;
+  return n;
 }
 
 inline bool cmp_ff(int op, double a, double b) {
@@ -764,6 +799,25 @@ struct CmpProfile : CmpBase {
     return Value::boolean(cmp_ff(op, a.d, b.d));
   }
 };
+
+// The node that takes over from SELF, a specialized comparison whose guard failed on operands A and B (the caller counts the
+// deopt): the same policy as arith_deopt. Operands of different kinds (an integer and a float) are "other" and stay generic.
+CmpBase* cmp_deopt(Frame& f, CmpBase* self, const Value& a, const Value& b) {
+  int op = self->op;
+  Node* l = self->l_;
+  Node* r = self->r_;
+  std::uint8_t k = fb_cmp_class(a, b);
+  if (k == FB_OTHER || f.S->feedback_warm <= 1) return respec<CmpGen>(f, self, op, l, r);
+  if (self->reprofiles >= f.S->reprofile_max) {
+    ++f.S->stats.feedback_generic;  // the bound is reached: the node stays generic for good
+    return respec<CmpGen>(f, self, op, l, r);
+  }
+  unsigned n = self->reprofiles + 1;
+  ++f.S->stats.reprofiles;
+  CmpProfile* p = respec<CmpProfile>(f, self, op, l, r);
+  p->reprofiles = n;
+  return p;
+}
 
 // The first evaluation of a comparison: it records the operands (feedback_warm > 1) or specializes at once.
 struct CmpUninit : CmpBase {

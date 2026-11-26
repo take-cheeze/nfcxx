@@ -127,19 +127,29 @@ and computes each result the way the specialized node would (integers and number
 `State::feedback_warm` observations that agree (default 2; set `State::feedback_warm` in code), it installs the node for their class
 (`speculations_installed`) and records nothing more. Two kinds of operand, or an "other" observation, make the node give up for good:
 it becomes the generic node (`feedback_generic`). Nothing was speculated then, so that is not a deopt. Once a node has
-specialized, the guards and deopts of the table above apply as they did before: a failed guard is a `deopts`, after which the node
-goes to the number node or the generic node without recording again. `feedback_warm = 1` (or 0) specializes at the first operands,
-as the engine did before feedback: no profile nodes, no records, one speculation per node.
+specialized, the guards and deopts of the table above apply: a failed guard is a `deopts`. When the operands that failed are
+numbers of the other kind (a float at an integer arithmetic node, or two integers or two floats at the comparison that had the
+other kind), the node re-profiles: it
+becomes a profile node again, records the operands, and specializes to their new type after `feedback_warm` agreeing observations
+(`reprofiles`, then `speculations_installed` for the new node). A node re-profiles at most `State::reprofile_max` times (2, set in
+code); a further numeric deopt leaves it generic for good (`feedback_generic`). Operands that are not numbers (a string, a table,
+a bitwise operator on floats) and mixed observations during a re-profile give up as before: the generic node, no re-profile.
+`feedback_warm = 1` (or 0) specializes at the first operands, as the engine did before feedback: no profile nodes, no records, one
+speculation per node, and a numeric deopt goes straight to the number node with no re-profile.
 
-The counters: `feedback_records` (observations taken by nodes that had not specialized), `speculations_installed` (integer, number
-and comparison nodes installed from recorded or first operand types; not the number node a deopt installs), `feedback_generic`
-(profile nodes that gave up). `tests/ast/engine.cpp` ("type feedback") checks an integer loop (two records, one speculation, no
-deopt), a float loop, mixed operands at one node (gives up, no deopt, correct sum), strings, an operand that turns float after
-the node speculated (exactly one deopt and the right sum), comparisons, and the threshold knob at 3 and at 1.
+The counters: `feedback_records` (observations taken by nodes that had not specialized, re-profiles included), `speculations_installed`
+(integer, number and comparison nodes installed from recorded operand types, after a re-profile too; not the number node of a
+deopt with `feedback_warm = 1`), `feedback_generic` (profile nodes that gave up, and nodes past the re-profile bound), `reprofiles`
+(deopts on numbers that sent a node back to recording). `tests/ast/engine.cpp` ("type feedback") checks an integer loop (two records,
+one speculation, no deopt), a float loop, mixed operands at one node (gives up, no deopt, correct sum), strings, an operand that
+turns float after the node speculated (exactly one deopt, one re-profile, the number node after it, and the right sum), an integer
+loop that turns float for the last 40 iterations (one deopt, one re-profile, no slow path), the same with `feedback_warm = 1` (one
+deopt, no re-profile), comparisons, a comparison whose operands change type every 20 iterations (three deopts, two re-profiles, a
+give-up, and the right count), and the threshold knob at 3 and at 1.
 
 Not done: no feedback for indexing, fields, calls, methods or assignments to them; they still specialize on the first observation.
-A node never goes back to profiling after a deopt or a give-up, and nothing counts the observations that a specialized node does
-not make. The tier compiles from the tree and does not read the feedback. Unary operators, `..` and `==` do not record.
+Nothing counts the observations that a specialized node does not make, so a node that re-profiles sees only the operands of the
+observations it records. The tier compiles from the tree and does not read the feedback. Unary operators, `..` and `==` do not record.
 
 ## Inlining
 
@@ -585,7 +595,7 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
 
 ### JIT: machine code for loops (a first, narrow slice)
 
-`TierOptions::jit` (off by default; `NFCAST_JIT=1`, with the tier on, for the test drivers) takes a hot loop over with x86-64 machine
+`TierOptions::jit` (off by default; the test driver takes `--jit`, with the tier on) takes a hot loop over with x86-64 machine
 code instead of the C tier. It uses the same hook as the C tier's on-stack replacement (`tier_loop` in `nfcast_tier.cpp`, the same
 takeover points at the top of an iteration, the same state handed over for a `for` loop), the same rule that an assumption checked at
 entry that fails leaves the loop to the interpreter, and the same reason that is sound: the code has no side effects and allocates
@@ -632,7 +642,7 @@ not measured: this slice is about the encoder and the takeover, not about the lo
 **Verification.** `tests/ast/jit.cpp` runs a set of loops (the refusals, the guard miss, the wraparound, nested and re-entered loops,
 `break`, the conditions) and 300 generated loops with nested ifs, whiles and wrapping arithmetic; each must give the interpreter's
 result, the counters must say what the case expects, and the generated loops must all compile and be taken over. `tests/ast/run.sh`
-runs it, and it also runs every `tests/ast/cases/*.lua` program with the tier on and the JIT on (`NFCAST_JIT=1`), against the output of a
+runs it, and it also runs every `tests/ast/cases/*.lua` program with the tier on and the JIT on (`--jit`), against the output of a
 real Lua 5.4. In the sandbox this was written in, `tests/ast/tier.cpp` fails two checks of "a host that ignores SIGCHLD" (lines 685 and 691
 of the file): the unmodified HEAD fails the same two, with the same output, so they are the environment's, not the JIT's.
 

@@ -163,9 +163,36 @@ int main() {
     auto f4 = S.stats;
     Value cv = run(S, "local x, s = 1, 0 for i = 1, 100 do if i == 60 then x = 1.5 end s = s + x end return s");
     CHECK(cv.t == nfcast::T_FLT && cv.d == 120.5);                 // 59 * 1 + 41 * 1.5
-    CHECK(S.stats.speculations_installed == f4.speculations_installed + 1);
+    CHECK(S.stats.speculations_installed == f4.speculations_installed + 2);   // the integer node, then the number node after the re-profile
     CHECK(S.stats.deopts == f4.deopts + 1);
+    CHECK(S.stats.reprofiles == f4.reprofiles + 1);
     CHECK(S.stats.feedback_generic == f4.feedback_generic);
+    // Re-profiling after a deopt (docs/notes/ast.md, "Feedback"): integers for 60 iterations, then floats for the rest. The integer
+    // node deopts once, records two float operands and installs the number node: no more deopts, no slow path.
+    auto r0 = S.stats;
+    Value rv = run(S, "local s, x = 0, 1 for i = 1, 100 do if i > 60 then x = 1.5 end s = s + x end return s");
+    CHECK(rv.t == nfcast::T_FLT && rv.d == 120.0);                 // 60 * 1 + 40 * 1.5
+    CHECK(S.stats.deopts == r0.deopts + 1);
+    CHECK(S.stats.reprofiles == r0.reprofiles + 1);
+    CHECK(S.stats.generic_ops == r0.generic_ops && S.stats.feedback_generic == r0.feedback_generic);
+    CHECK(S.stats.speculations_installed == r0.speculations_installed + 3);   // i > 60 (integers), the integer sum, the number sum
+    // The same program with feedback_warm = 1 (as before feedback): the sum deopts once to the number node, and does not re-profile.
+    State rw;
+    rw.open_libs();
+    rw.feedback_warm = 1;
+    Value rwv = run(rw, "local s, x = 0, 1 for i = 1, 100 do if i > 60 then x = 1.5 end s = s + x end return s");
+    CHECK(rwv.t == nfcast::T_FLT && rwv.d == 120.0);
+    CHECK(rw.stats.deopts == 1 && rw.stats.reprofiles == 0 && rw.stats.feedback_records == 0);
+    // Thrash: the operands of one comparison change type every 20 iterations (integers, floats, integers, ...). Each change deopts;
+    // the node re-profiles reprofile_max = 2 times and then stays generic. Three deopts, two re-profiles, one give-up, and the
+    // comparison stays right: it is true for the 100 iterations with integers and false for the 100 with floats.
+    CHECK(S.reprofile_max == 2);
+    auto t0 = S.stats;
+    Value tv = run(S, "local n = 0 for i = 1, 200 do local ph = (i - 1) // 20 local x, y = 1, 2 if ph % 2 == 1 then x, y = 2.0, 1.0 end if x < y then n = n + 1 end end return n");
+    CHECK(tv.t == nfcast::T_INT && tv.i == 100);
+    CHECK(S.stats.deopts == t0.deopts + 3);
+    CHECK(S.stats.reprofiles == t0.reprofiles + 2);
+    CHECK(S.stats.feedback_generic == t0.feedback_generic + 1);
     // Comparisons take the same route: integers speculate; a float reaching the integer comparison deopts once.
     auto c0 = S.stats;
     CHECK(run_int(S, "local n = 0 for i = 1, 100 do if i < 50 then n = i end end return n") == 49);

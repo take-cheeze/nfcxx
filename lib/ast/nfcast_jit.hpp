@@ -1,7 +1,7 @@
 // nfcast JIT, the machine-code tier for loops (docs/notes/ast.md, "JIT"). A hot `while`, `repeat` or integer `for` loop whose body is
 // 64-bit integer arithmetic on locals is encoded to x86-64 in memory and taken over at the same points as the C tier's loops
 // (tier_loop in nfcast_tier.cpp). Everything else is refused at compile time and stays with the interpreter (or the C tier).
-// Off unless TierOptions::jit is set (NFCAST_JIT=1 for the test drivers); off altogether on any host but x86-64 Linux.
+// Off unless TierOptions::jit is set (the test driver takes --jit); off altogether on any host but x86-64 Linux.
 #pragma once
 #include <cstddef>
 #include <cstdint>

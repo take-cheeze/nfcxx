@@ -43,6 +43,12 @@ expect tests/sem/bitcast.ir "value 4294967295"
 expect tests/sem/bitcast_width.ir "stuck: bitcast between integer types of different widths (64 and 32 bits)"
 expect tests/sem/eval.ir "value 5"
 expect tests/sem/eval_trap.ir "trap: division by zero"
-expect tests/sem/eval_call.ir "stuck: value form call not modelled"
+expect tests/sem/eval_call.ir "stuck: call of external function f is not modelled"
+# calls within the module: arguments bound to the parameters, a fresh environment per callee, recursion (5! = 120)
+expect tests/sem/call_double.ir "value 15"
+expect tests/sem/call_recursive.ir "value 120"
+expect tests/sem/call_external.ir "stuck: call of external function missing_fn is not modelled"
+expect tests/sem/call_arity.ir "stuck: call of one with 2 arguments, but it has 1 parameter(s)"
+expect tests/sem/call_unbounded.ir "stuck: out of fuel: the calls are nested too deeply"
 echo "ok: the semantics gives the expected outcome for the IR functions in tests/sem"
 exit $fail
