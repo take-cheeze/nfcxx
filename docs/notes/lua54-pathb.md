@@ -110,13 +110,26 @@ The info is computed here with ldebug.c's rules (`namespace dbg` in `lua54_lower
 `upvalue 'x'`, `constant 'x'` and `for iterator 'for iterator'` as lua.c does. The source name keeps luaO_chunkid's
 truncation (the last 56 characters after `...`).
 
-An error goes to stderr as `lua: <site line> <message><info>` and the process stops with status 1, as lua.c does. Only
-the first line is printed: the traceback is not. The run checks that first line, after the progname, against `lua`.
+An error goes to stderr as `lua: <site line> <message><info>` and the process stops with status 1, as lua.c does. The
+run checks that first line, after the progname, against `lua`, and the whole of stderr for the programs in `lower/tb/`.
+
+The traceback is lua.c's `msghandler` and `luaL_traceback`, computed at the error before the to-be-closed variables close.
+The call records (`callrec`, one per call: its site, its callee, whether it was a tail call, its metamethod event) give
+the frames, innermost first: a Lua frame's line is the site of the call it makes (the current site for the innermost),
+a host function is `[C]`, and the main chunk is the caller of the first record. A frame that made a tail call is gone,
+and a frame entered by one is followed by `(...tail calls...)`. A name is `function 'g'` when the callee is a global or
+a field of a library (`pushglobalfuncname`, searched in `_G` and the library tables), else `metamethod 'index'` for a
+metamethod, else the kind and name in the call's variable info (`local 'f'`, `method 'm'`, `for iterator ...`), else
+`function <source:linedefined>` (the closure keeps that text, from the lowering). A call made by a host function has no
+position, so a function called from `table.sort` is `function <...>`. The levels are cut as lauxlib's are: more than 22,
+the first 10 and the last 11 with the count of lauxlib's message. A table error object with a `__tostring` that gives a
+string is printed without a traceback, as lua.c does.
 
 `error(msg, level)` finds the position of its level in a call stack that the runtime keeps: each call pushes the position
 of its caller (NULL when the caller is not a Lua function, as for a call from `pcall`), so a host function is a level with
-no position, as in Lua. `pcall` and `xpcall` restore the depth when an error comes back to them. A tail call does not
-drop its frame here, so the level of an error in a tail-called function is one more than Lua's.
+no position, as in Lua. `pcall` and `xpcall` restore the depth when an error comes back to them. The levels do not
+drop the frame of a tail call (the traceback does), so the level of an error in a tail-called function is one more than
+Lua's.
 
 To-be-closed variables: `TBC` registers the variable's slot, and `CLOSE`, `RETURN` with `k`, and the end of a `pcall`
 that caught an error close the slots at or above the given one, last registered first. Each `__close` gets the value and
@@ -190,7 +203,8 @@ gives lstrlib's `attempt to add a 'string' with a 'number'`. Only tables have me
 - `tests/lua54bc/run.sh`: the reader loads real 5.4.9 chunks (dumped with `string.dump`); the opcode sequence matches
   `luac -l -l` when `LUAC` is set. The opcode check has not run: no `luac` is available here.
 - `tests/lua54bc/lower/run.sh`: 89 programs lower, emit, assemble, link (with `-lm`), run, and match
-  `print(dofile(...))` from Lua 5.4.9. 52 programs in `lower/err/` must give lua.c's first error line and status 1. Needs
+  `print(dofile(...))` from Lua 5.4.9. 52 programs in `lower/err/` must give lua.c's first error line and status 1, and 13
+  in `lower/tb/` must give lua.c's whole stderr (the traceback) and status 1. Needs
   `LUA` (a 5.4.9 interpreter). The suite also passes with `LUA54RT_GC_THRESHOLD=1`, which collects at nearly every
   allocation.
 
@@ -224,6 +238,5 @@ in the replacement function) leaks that buffer. The matcher's recursion is on th
   and `io` (`read`, files). Each is a host function in the runtime.
 - **Library names in messages**: a `pcall` that calls a library function directly gives `'rep'` where Lua gives
   `'string.rep'`, and `math.random(2, 1)` called through `pcall` is `'random'` here. Calls from Lua code are the same.
-- **Full tracebacks**: lua.c prints `stack traceback:` lines after the message; only the message is printed.
 - **`__gc`, `__mode`**.
 - **`LOADKX` with more than 2^17 constants** is lowered but untested.

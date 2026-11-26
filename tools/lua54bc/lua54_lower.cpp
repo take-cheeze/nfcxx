@@ -805,8 +805,11 @@ void lower_closure(Ctx &c, const Insn &i) {
   const Proto &child = *c.p.p.at(i.Bx());
   std::size_t fn = c.m.index.at(&child);
   std::string dst = reg(c, i.A());
+  // The function's "source:linedefined", for a traceback's "in function <source:line>".
+  std::string where = c.m.chunkname + ":" + std::to_string(child.linedefined);
   c.line("(eval (call void &\"lua54rt_closure\" " + dst + " &\"lua54_fn_" + std::to_string(fn) + "\" (const int " +
-         std::to_string(child.numparams) + ") (const int " + std::to_string(child.upvalues.size()) + ")))");
+         std::to_string(child.numparams) + ") (const int " + std::to_string(child.upvalues.size()) + ") @\"" +
+         text_item(c, where) + "\"))");
   for (std::size_t k = 0; k < child.upvalues.size(); ++k) {
     const UpvalDesc &u = child.upvalues[k];
     c.line("(eval (call void &\"lua54rt_capture\" " + dst + " (const int " + std::to_string(k) + ") (const int " +
@@ -839,7 +842,7 @@ void lower_call(Ctx &c, const Insn &i) {
 void lower_tailcall(Ctx &c, const Insn &i) {
   if (i.k()) c.line("(eval (call void &\"lua54rt_close\" %1))");
   std::string nargs = i.B() == 0 ? values_to_top(c, i.A() + 1) : "(const int " + std::to_string(i.B() - 1) + ")";
-  emit_call(c, i.A(), nargs, -1, c.reg_info(i.A()));
+  emit_call(c, i.A(), nargs, -1, c.reg_info(i.A()), "lua54rt_tailcall");
   emit_return_values(c, reg(c, i.A()), values_to_top(c, i.A()));
 }
 

@@ -68,6 +68,15 @@ static void die(const char *what) {
   exit(4);
 }
 
+/* A copy of a string, malloc'ed (the report of an error is built in such strings). */
+static char *dupstr(const char *s) {
+  size_t n = strlen(s) + 1;
+  char *p = (char *)malloc(n);
+  if (p == NULL) die("out of memory");
+  memcpy(p, s, n);
+  return p;
+}
+
 /* ---- errors (ldebug.c) ----
  * The site is set by the IR before each operation that can fail: its first line is "source:line:", and each further line
  * is the variable info of one operand, " (local 'x')" or "" (the kinds of getobjname). An error is reported as lua.c
@@ -104,14 +113,18 @@ static PCall *pcall_top = NULL;
 
 static void close_to(LV *level, const LV *err);
 
+static char *uncaught_message(const LV *err);
+
 static void raise_value(LV err) {
   if (pcall_top != NULL) {
     pcall_top->err = err;
     longjmp(pcall_top->jb, 1);
   }
+  /* lua.c's msghandler runs before the unwinding, so the traceback is that of the error's frames */
+  char *report = uncaught_message(&err);
   close_to(NULL, &err);   /* lua.c's protected call closes the to-be-closed variables before it reports the error */
-  if (err.tag == TAG_STR) fprintf(stderr, "lua: %s\n", ((LString *)err.v.p)->bytes);
-  else fprintf(stderr, "lua: (error object is a %s value)\n", type_name(err.tag));
+  fprintf(stderr, "lua: %s\n", report);
+  free(report);
   exit(1);
 }
 
@@ -861,16 +874,21 @@ void lua54rt_call(LV *fn, int nargs, LV *args, LV *ret, int wanted, int a);
 
 /* A generic 'for' calls its iterator through lua54rt_tforcall, so the iterator's argument errors name it "for iterator"
  * as luaL_argerror does. host_from_tfor is set while such a host function runs. */
+static LV global_env;   /* the table of the globals: pushglobalfuncname looks function names up in it */
 static int call_is_tfor = 0;
+static int call_is_tail = 0;   /* set by lua54rt_tailcall for the next call, as call_is_tfor is */
 static int host_from_tfor = 0;
 static const char *host_name(const char *name) { return host_from_tfor ? "for iterator" : name; }
 static void install_more(LV *env);
 void lua54rt_install_library(LV *env);
 
-/* Calls a metamethod with nargs values and returns its first result (luaT_callTMres). */
-static LV call_mmv(const LV *fn, const LV *args, int nargs) {
-  LV frame[1024], ret[4];
+/* Calls a metamethod with nargs values and returns its first result (luaT_callTMres). event is the name of the event
+ * without its underscores ("index"), which the traceback gives the frame: "in metamethod 'index'". */
+static const char *call_mm_event = NULL;   /* set for the next call, by call_mmv */
+static LV call_mmv(const LV *fn, const LV *args, int nargs, const char *event) {
+  LV frame[1024], ret[64];
   for (int k = 0; k < nargs; ++k) frame[k] = args[k];
+  call_mm_event = event;
   lua54rt_call((LV *)fn, nargs, frame, ret, 1, 0);
   return ret[0];
 }
@@ -893,18 +911,20 @@ typedef struct LClosure {
   lua_fn fn;
   int numparams;
   int nupvals;
+  const char *where;  /* "source:linedefined", for a traceback's "in function <source:line>" */
   UpVal *upvals[1];   /* nupvals entries; the closure is allocated with room for them */
 } LClosure;
 
 static UpVal *open_upvals = NULL;
 
-void lua54rt_closure(LV *dst, void *fn, int numparams, int nupvals) {
+void lua54rt_closure(LV *dst, void *fn, int numparams, int nupvals, const char *where) {
   size_t size = sizeof(LClosure) + sizeof(UpVal *) * (size_t)(nupvals > 0 ? nupvals - 1 : 0);
   LClosure *c = (LClosure *)gc_alloc(GC_LCL, size);
   if (c == NULL) die("out of memory");
   c->fn = (lua_fn)fn;
   c->numparams = numparams;
   c->nupvals = nupvals;
+  c->where = where;
   for (int k = 0; k < nupvals; ++k) c->upvals[k] = NULL;
   dst->tag = TAG_LCL;
   dst->v.p = c;
@@ -1025,16 +1045,35 @@ static void make_host_nup(LV *dst, lua_cfn fn, int nup) {
 
 static void make_host(LV *dst, lua_cfn fn) { make_host_nup(dst, fn, 0); }
 
-/* The call stack for error levels: one entry per call, the position of the caller at the time of the call (NULL when the
- * caller is not a Lua function, e.g. pcall). The top entry is the call of the running function, so level 1 (the caller of
- * error) is the top, and level 2 is the entry below it. Entries past CALLSTACK_MAX are not kept. */
+/* The call stack: one record per call, with the site of the call (its position in the caller and the variable info of
+ * the callee, NULL when the caller is not a Lua function, e.g. pcall), the callee and whether it was a tail call. The top
+ * record is the call of the running function, so level 1 (the caller of error) is the top, and level 2 is the record
+ * below it. It serves error levels and the traceback of an uncaught error. Records past CALLSTACK_MAX are not kept. */
 #define CALLSTACK_MAX 4096
-static const char *callsite[CALLSTACK_MAX];
+typedef struct CallRec {
+  const char *site;
+  LV callee;
+  int tail;          /* a Lua function entered by a tail call: its caller's frame is gone, as in Lua */
+  const char *mm;    /* a metamethod: its event, as "index" */
+} CallRec;
+static CallRec callrec[CALLSTACK_MAX];
 static int call_depth = 0;
 
-static void push_callsite(const char *s) {
-  if (call_depth < CALLSTACK_MAX) callsite[call_depth] = s;
+static void push_callsite(const char *s, const LV *callee, int tail, const char *mm) {
+  if (call_depth < CALLSTACK_MAX) {
+    callrec[call_depth].site = s;
+    callrec[call_depth].callee = *callee;
+    callrec[call_depth].tail = tail;
+    callrec[call_depth].mm = mm;
+  }
   call_depth++;
+}
+
+/* The position of the caller of a call made now: NULL when the caller is a host function, whose calls have no position
+ * (as in Lua, where the caller is a C function). */
+static const char *caller_site(void) {
+  if (call_depth > 0 && call_depth <= CALLSTACK_MAX && callrec[call_depth - 1].callee.tag == TAG_LCF) return NULL;
+  return site;
 }
 
 static void pop_callsite(void) { call_depth--; }
@@ -1055,12 +1094,16 @@ static void finish_call(LV *ret, int wanted, int a) {
 void lua54rt_call(LV *fn, int nargs, LV *args, LV *ret, int wanted, int a) {
   int from_tfor = call_is_tfor;   /* this call is the iterator of a generic 'for' (lua54rt_tforcall) */
   call_is_tfor = 0;
+  int from_tail = call_is_tail && fn->tag == TAG_LCL;   /* a Lua function called by a return (lua54rt_tailcall) */
+  call_is_tail = 0;
+  const char *mm = call_mm_event;   /* a metamethod call (call_mmv) */
+  call_mm_event = NULL;
   if (fn->tag == TAG_LCF) {
     LV out[64];
     const char *saved = site;
     HostFn *saved_host = cur_host;
     int saved_tfor = host_from_tfor;
-    push_callsite(saved);
+    push_callsite(caller_site(), fn, 0, mm);
     cur_host = (HostFn *)fn->v.p;
     host_from_tfor = from_tfor;
     int n = cur_host->fn(out, args, nargs);
@@ -1079,7 +1122,7 @@ void lua54rt_call(LV *fn, int nargs, LV *args, LV *ret, int wanted, int a) {
     lua54rt_nargs = nargs;
     lua54rt_nret = 0;
     const char *saved = site;
-    push_callsite(saved);
+    push_callsite(caller_site(), fn, from_tail, mm);
     c->fn(ret, args, c);
     pop_callsite();
     site = saved;
@@ -1096,6 +1139,12 @@ void lua54rt_call(LV *fn, int nargs, LV *args, LV *ret, int wanted, int a) {
 /* TFORCALL: the iterator call of a generic 'for'. */
 void lua54rt_tforcall(LV *fn, int nargs, LV *args, LV *ret, int wanted, int a) {
   call_is_tfor = 1;
+  lua54rt_call(fn, nargs, args, ret, wanted, a);
+}
+
+/* TAILCALL: `return f(...)`. A Lua function called this way replaces the caller's frame. */
+void lua54rt_tailcall(LV *fn, int nargs, LV *args, LV *ret, int wanted, int a) {
+  call_is_tail = 1;
   lua54rt_call(fn, nargs, args, ret, wanted, a);
 }
 
@@ -1317,19 +1366,19 @@ void lua54rt_arith(int op, LV *dst, LV *a, LV *b) {
     /* the string library's metamethod takes the operation: a table operand with the event runs it instead */
     if (x.tag != TAG_STR && get_mt(&x, ev, &h)) {
       LV args[2] = {x, y};
-      *dst = call_mmv(&h, args, 2);
+      *dst = call_mmv(&h, args, 2, ev + 2);
       return;
     }
     if (y.tag != TAG_STR && get_mt(&y, ev, &h)) {
       LV args[2] = {x, y};
-      *dst = call_mmv(&h, args, 2);
+      *dst = call_mmv(&h, args, 2, ev + 2);
       return;
     }
     string_arith_fail(ev, &x, &y);
   }
   if (get_mt(&x, ev, &h) || get_mt(&y, ev, &h)) {
     LV args[2] = {x, y};
-    *dst = call_mmv(&h, args, 2);
+    *dst = call_mmv(&h, args, 2, ev + 2);
     return;
   }
   if (bitwise) {
@@ -1357,7 +1406,7 @@ void lua54rt_unary(int op, LV *dst, LV *a) {
     if (x.tag == TAG_STR) string_arith_fail("__unm", &x, &x);
     if (get_mt(&x, "__unm", &h)) {
       LV args[2] = {x, x};
-      *dst = call_mmv(&h, args, 2);
+      *dst = call_mmv(&h, args, 2, "unm");
       return;
     }
     type_fail("perform arithmetic on", &x, 0);
@@ -1372,7 +1421,7 @@ void lua54rt_unary(int op, LV *dst, LV *a) {
   }
   if (get_mt(&x, "__bnot", &h)) {
     LV args[2] = {x, x};
-    *dst = call_mmv(&h, args, 2);
+    *dst = call_mmv(&h, args, 2, "bnot");
     return;
   }
   type_fail("perform bitwise operation on", &x, 0);
@@ -1403,7 +1452,7 @@ int lua54rt_cmp(int kind, LV *a, LV *b) {
     LV h;
     if (a->tag == TAG_TABLE && b->tag == TAG_TABLE && (get_mt(a, "__eq", &h) || get_mt(b, "__eq", &h))) {
       LV args[2] = {*a, *b};
-      LV r = call_mmv(&h, args, 2);
+      LV r = call_mmv(&h, args, 2, "eq");
       return truthy(&r);
     }
     return 0;
@@ -1428,7 +1477,7 @@ int lua54rt_cmp(int kind, LV *a, LV *b) {
   const char *ev = kind == 0 ? "__lt" : "__le";
   if (get_mt(a, ev, &h) || get_mt(b, ev, &h)) {
     LV args[2] = {*a, *b};
-    LV r = call_mmv(&h, args, 2);
+    LV r = call_mmv(&h, args, 2, ev + 2);
     return truthy(&r);
   }
   order_fail(a, b);
@@ -1444,7 +1493,7 @@ void lua54rt_len(LV *dst, LV *src) {
   } else if (x.tag == TAG_TABLE) {
     if (get_mt(&x, "__len", &h)) {
       LV args[2] = {x, x};
-      *dst = call_mmv(&h, args, 2);
+      *dst = call_mmv(&h, args, 2, "len");
       return;
     }
     n = table_border((Table *)x.v.p);
@@ -1511,7 +1560,7 @@ void lua54rt_concat(LV *dst, LV *base, int n) {
     LV h;
     if (get_mt(&l, "__concat", &h) || get_mt(&acc, "__concat", &h)) {
       LV args[2] = {l, acc};
-      acc = call_mmv(&h, args, 2);
+      acc = call_mmv(&h, args, 2, "concat");
       continue;
     }
     /* the culprit: l, unless l is fine; then acc, which is operand i+1 only while it is still the original value */
@@ -1543,7 +1592,7 @@ void lua54rt_gettable(LV *dst, LV *t, LV *key) {
     }
     if (h.tag == TAG_LCL || h.tag == TAG_LCF) {
       LV args[2] = {obj, k};
-      *dst = call_mmv(&h, args, 2);
+      *dst = call_mmv(&h, args, 2, "index");
       return;
     }
     obj = h;
@@ -1568,7 +1617,7 @@ void lua54rt_settable(LV *t, LV *key, LV *val) {
     }
     if (h.tag == TAG_LCL || h.tag == TAG_LCF) {
       LV args[3] = {obj, k, v};
-      call_mmv(&h, args, 3);
+      call_mmv(&h, args, 3, "newindex");
       return;
     }
     obj = h;
@@ -1594,7 +1643,7 @@ static void set_global(LV *env, const char *name, LV *value) {
 
 void *lua54rt_make_main(void *fn, int nupvals) {
   LV cl;
-  lua54rt_closure(&cl, fn, 0, nupvals);
+  lua54rt_closure(&cl, fn, 0, nupvals, NULL);
   LClosure *c = (LClosure *)cl.v.p;
   for (int k = 0; k < nupvals; ++k) {
     UpVal *uv = (UpVal *)gc_alloc(GC_UPVAL, sizeof *uv);
@@ -1663,7 +1712,7 @@ static int tostring_mm(const LV *v, LV *out) {
   LV h;
   if (!get_mt(v, "__tostring", &h)) return 0;
   LV args[1] = {*v};
-  LV r = call_mmv(&h, args, 1);
+  LV r = call_mmv(&h, args, 1, NULL);
   if (r.tag != TAG_STR) rt_fail("'__tostring' must return a string", -1);
   *out = r;
   return 1;
@@ -1823,6 +1872,7 @@ static int host_getmetatable(LV *out, LV *args, int nargs) {
 }
 
 void lua54rt_install_library(LV *env) {
+  global_env = *env;
   make_host(&next_fn, host_next);
   make_host(&ipairs_iter_fn, host_ipairs_iter);
   LV f;
@@ -1869,7 +1919,170 @@ static void level_where(int64_t level, char *buf, size_t size) {
     buf[0] = '\0';
     return;
   }
-  first_line(callsite[idx], buf, size);
+  first_line(callrec[idx].site, buf, size);
+}
+
+/* ---- the traceback of an uncaught error: lua.c's msghandler and luaL_traceback (lauxlib.c) ----
+ * The frames are the call records, innermost first: a Lua frame's line is the site of the call it makes (or the current
+ * site, for the innermost), a host function is "[C]", and the main chunk is the caller of the first record. A frame whose
+ * function made a tail call is gone, as in Lua, and a frame entered by a tail call is followed by "(...tail calls...)". */
+static int same_function(const LV *a, const LV *b) { return a->tag == b->tag && a->v.p == b->v.p; }
+
+static int is_library_name(const char *s) {
+  static const char *libs[] = {"string", "table", "math", "os", "io", "coroutine", "utf8", "debug", "package"};
+  for (size_t k = 0; k < sizeof libs / sizeof libs[0]; ++k)
+    if (strcmp(s, libs[k]) == 0) return 1;
+  return 0;
+}
+
+/* lauxlib.c's pushglobalfuncname: fn as a global ("print") or a field of a library table ("string.rep"). */
+static int global_func_name(const LV *fn, char *buf, size_t size) {
+  if (global_env.tag != TAG_TABLE) return 0;
+  Table *g = (Table *)global_env.v.p;
+  LV key, k, v;
+  key.tag = TAG_NIL;
+  while (table_next(g, &key, &k, &v)) {
+    if (k.tag == TAG_STR && same_function(&v, fn)) {
+      snprintf(buf, size, "%s", ((LString *)k.v.p)->bytes);
+      return 1;
+    }
+    key = k;
+  }
+  key.tag = TAG_NIL;
+  while (table_next(g, &key, &k, &v)) {
+    if (k.tag == TAG_STR && v.tag == TAG_TABLE && is_library_name(((LString *)k.v.p)->bytes)) {
+      LV ikey, ik, iv;
+      ikey.tag = TAG_NIL;
+      while (table_next((Table *)v.v.p, &ikey, &ik, &iv)) {
+        if (ik.tag == TAG_STR && same_function(&iv, fn)) {
+          snprintf(buf, size, "%s.%s", ((LString *)k.v.p)->bytes, ((LString *)ik.v.p)->bytes);
+          return 1;
+        }
+        ikey = ik;
+      }
+    }
+    key = k;
+  }
+  return 0;
+}
+
+/* The namewhat and name of a call from its site's variable info, " (local 'f')" on the line after the position. */
+static int site_callee_name(const char *site, char *kind, size_t kcap, char *name, size_t ncap) {
+  if (site == NULL) return 0;
+  const char *nl = strchr(site, '\n');
+  if (nl == NULL) return 0;
+  const char *open = strchr(nl, '(');
+  if (open == NULL) return 0;
+  open++;
+  const char *q = strstr(open, " '");
+  if (q == NULL) return 0;
+  size_t kl = (size_t)(q - open);
+  if (kl >= kcap) return 0;
+  memcpy(kind, open, kl);
+  kind[kl] = '\0';
+  q += 2;
+  const char *end = strrchr(q, '\'');
+  if (end == NULL || end < q) return 0;
+  size_t nl2 = (size_t)(end - q);
+  if (nl2 >= ncap) return 0;
+  memcpy(name, q, nl2);
+  name[nl2] = '\0';
+  return 1;
+}
+
+/* pushfuncname for the function called by record k. */
+static void callee_description(int k, char *buf, size_t size) {
+  const CallRec *r = &callrec[k];
+  char nm[256], kind[64];
+  if (global_func_name(&r->callee, nm, sizeof nm)) {
+    snprintf(buf, size, "function '%s'", nm);
+  } else if (r->mm != NULL) {
+    snprintf(buf, size, "metamethod '%s'", r->mm);
+  } else if (!r->tail && site_callee_name(r->site, kind, sizeof kind, nm, sizeof nm)) {
+    snprintf(buf, size, "%s '%s'", kind, nm);
+  } else if (r->callee.tag == TAG_LCL && ((LClosure *)r->callee.v.p)->where != NULL) {
+    snprintf(buf, size, "function <%s>", ((LClosure *)r->callee.v.p)->where);
+  } else {
+    snprintf(buf, size, "?");
+  }
+}
+
+/* luaL_traceback(L, L, msg, 1) for the running frames, with lauxlib.c's LEVELS1 and LEVELS2 cut. */
+static char *traceback_text(void) {
+  int depth = call_depth < CALLSTACK_MAX ? call_depth : CALLSTACK_MAX;
+  char **items = (char **)malloc(sizeof(char *) * (size_t)(depth + 2));
+  if (items == NULL) die("out of memory");
+  int n = 0;
+  char line[512], desc[300], item[900];
+  for (int k = depth - 1; k >= 0; --k) {
+    if (k + 1 < depth && callrec[k + 1].tail) continue;   /* this frame made a tail call: it is gone */
+    if (callrec[k].callee.tag == TAG_LCF) {
+      snprintf(line, sizeof line, "[C]:");
+    } else {
+      const char *cur = k + 1 < depth ? callrec[k + 1].site : site;
+      first_line(cur, line, sizeof line);
+      if (line[0] == '\0') snprintf(line, sizeof line, "?:");
+    }
+    callee_description(k, desc, sizeof desc);
+    snprintf(item, sizeof item, "\n\t%s in %s%s", line, desc, callrec[k].tail ? "\n\t(...tail calls...)" : "");
+    items[n++] = dupstr(item);
+  }
+  if (!(depth > 0 && callrec[0].tail)) {   /* the main chunk, unless it made the tail call */
+    first_line(depth > 0 ? callrec[0].site : site, line, sizeof line);
+    if (line[0] == '\0') snprintf(line, sizeof line, "?:");
+    snprintf(item, sizeof item, "\n\t%s in main chunk", line);
+    items[n++] = dupstr(item);
+  }
+  items[n++] = dupstr("\n\t[C]: in ?");
+  size_t total = 32;
+  for (int i = 0; i < n; ++i) total += strlen(items[i]) + 40;
+  char *out = (char *)malloc(total);
+  if (out == NULL) die("out of memory");
+  strcpy(out, "stack traceback:");
+  for (int i = 0; i < n; ++i) {
+    /* levels 1..n: with more than 22, the first 10 and the last 11 are shown, with the skip count of lauxlib.c */
+    if (n > 22 && i == 10) {
+      char skip[80];
+      snprintf(skip, sizeof skip, "\n\t...\t(skipping %d levels)", n - 22);
+      strcat(out, skip);
+      i = n - 11 - 1;
+      continue;
+    }
+    strcat(out, items[i]);
+  }
+  for (int i = 0; i < n; ++i) free(items[i]);
+  free(items);
+  return out;
+}
+
+/* lua.c's msghandler: the message of an uncaught error, with the traceback, except that an error object whose __tostring
+ * gives a string is the message by itself. */
+static char *uncaught_message(const LV *err) {
+  char numbuf[64], other[80];
+  const char *text;
+  if (err->tag == TAG_STR) {
+    text = ((LString *)err->v.p)->bytes;
+  } else if (err->tag == TAG_INT || err->tag == TAG_FLOAT) {
+    number_text(err, numbuf, sizeof numbuf);
+    text = numbuf;
+  } else {
+    LV h;
+    if (get_mt(err, "__tostring", &h)) {
+      LV args[1];
+      args[0] = *err;
+      LV r = call_mmv(&h, args, 1, NULL);
+      if (r.tag == TAG_STR) return dupstr(((LString *)r.v.p)->bytes);
+    }
+    snprintf(other, sizeof other, "(error object is a %s value)", type_name(err->tag));
+    text = other;
+  }
+  char *tb = traceback_text();
+  size_t n = strlen(text) + strlen(tb) + 2;
+  char *out = (char *)malloc(n);
+  if (out == NULL) die("out of memory");
+  snprintf(out, n, "%s\n%s", text, tb);
+  free(tb);
+  return out;
 }
 
 /* error(msg [, level]): a string message gets the position of the level, as luaB_error does. */
