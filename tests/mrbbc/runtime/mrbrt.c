@@ -80,6 +80,53 @@ void mrbbc_str_new(MV *dst, const char *p, long n) {
 
 void mrbbc_sym(MV *dst, const char *name) { set_obj(dst, MRBBC_SYM, name); }
 
+/* The methods of the program: each TDEF (mrbbc_def) adds one entry, the name, the number of the lowered body and its
+ * arity. Every method is defined on Object (the target class of a top-level def). mrbbc_find returns the body of the
+ * latest definition of a name, as a self call finds it; a call with the wrong number of arguments and a name nothing
+ * defined are the errors mruby raises. */
+typedef struct MDef {
+  const char *name;
+  int id;
+  long arity;
+} MDef;
+
+static MDef *mdefs = NULL;
+static size_t nmdefs = 0, capmdefs = 0;
+
+void mrbbc_def(const char *name, int id, long arity) {
+  MDef *d;
+  if (nmdefs == capmdefs) {
+    size_t cap = capmdefs ? 2 * capmdefs : 8;
+    MDef *p = realloc(mdefs, cap * sizeof *p);
+    if (p == NULL) mrbbc_raise("NoMemoryError", "failed to allocate memory");
+    mdefs = p;
+    capmdefs = cap;
+  }
+  d = &mdefs[nmdefs++];
+  d->name = name;
+  d->id = id;
+  d->arity = arity;
+}
+
+int mrbbc_find(const char *name, long argc) {
+  size_t i = nmdefs;
+  while (i-- > 0) {
+    if (strcmp(mdefs[i].name, name) == 0) {
+      if (mdefs[i].arity != argc) {
+        char msg[128];
+        snprintf(msg, sizeof msg, "wrong number of arguments (given %ld, expected %ld)", argc, mdefs[i].arity);
+        mrbbc_raise("ArgumentError", msg);
+      }
+      return mdefs[i].id;
+    }
+  }
+  {
+    char msg[256];
+    snprintf(msg, sizeof msg, "undefined method '%s' for Object", name);
+    mrbbc_raise("NoMethodError", msg);
+  }
+}
+
 /* The class of a value, as NoMethodError and ArgumentError name it. */
 static const char *class_name(const MV *v) {
   switch (v->tag) {

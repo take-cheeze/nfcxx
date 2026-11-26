@@ -30,6 +30,11 @@ typedef struct MV {
   int64_t i;
 } MV;
 
+/* The program's methods (TDEF): mrbbc_def adds the name, the lowered body's number and the arity; mrbbc_find returns the
+ * number of the body a self call runs, or raises ArgumentError (wrong count) or NoMethodError (no such method). */
+void mrbbc_def(const char *name, int id, long arity);
+int mrbbc_find(const char *name, long argc);
+
 /* The operators the binop helper takes (the opcode names of mruby's ops.h; NEQ is the SEND of "!="). */
 enum mrbbc_op {
   MRBBC_OP_ADD,

@@ -96,6 +96,8 @@ Lowered (`mrb_lower.cpp`):
 | Methods | `SEND0` with `to_s`, `size`, `length` or `!`; `SEND` with one argument and an operator (`+ - * / == != < <= > >=`, which is the binop of the opcode); see the method table below |
 | Jumps | `JMP`, `JMPUW` (the same as JMP when the irep has no catch table, which is checked; mruby emits it for `break`), `JMPIF`, `JMPNOT`, `JMPNIL` |
 | Returns | `RETURN`, `RETNIL`, `RETFALSE`, `RETTRUE`, `STOP` (nil, as `vm.c` returns) |
+| Methods of the program | `TDEF` (defines the body of child c as the method `Syms[b]` on Object, and R[a] becomes the symbol, as `vm.c` sets it), `SSEND0` and `SSEND` (a self call, R[a] = self's method, with up to 15 positional arguments); see "Methods" |
+| Parameters | `ENTER` with required parameters only (in a method, at pc 0; the prologue copies them) |
 
 The method table. A `SEND0` or `SEND` (with `c` = n | k<<4, so n = 0 or 1 and k = 0) names its method by a symbol. A
 method outside the table is refused at lowering time with `refused: SEND0 of method 'NAME' is not lowered yet (pc N)`:
@@ -107,13 +109,41 @@ method outside the table is refused at lowering time with `refused: SEND0 of met
 | `!` | any value: true for nil and false |
 | `+ - * / == != < <= > >=` (one argument) | the binop helper, as the opcode |
 
+### Methods
+
+A method is a child irep that a `TDEF` names. Each such body is a function of its own, `mrb_m<N>(MV *ret, MV *argv)`,
+numbered over the module in the order the TDEFs are found (the main program is `mrb_irep_0`, as before). `argv[0]` is
+self and `argv[1..m]` are the m required arguments: the prologue copies them into R(0)..R(m) and sets the other
+registers to nil. A method's ENTER must be its first instruction and have only required parameters (aspec bits 0..17
+zero, bit 23 zero); any other parameter is refused.
+
+- `TDEF a b c` calls `mrbbc_def(name, N, m)`, which adds the method to the runtime's table (Object, the only class
+  a program of this subset defines methods on), then R[a] = the symbol, as `vm.c` sets it. A redefinition wins.
+- `SSEND0 a b` and `SSEND a b c` (self's method, with `n` = c arguments): R[a] = R[0] and the arguments R[a+1..a+n]
+  are copied into a vector of their own (self first). `mrbbc_find(name, n)` returns the number of the latest definition
+  of the name, or raises. The call is then one branch per method of the module: `if id == N then mrb_m<N>(&R[a], argv)`.
+  A method's return writes R[a] through `ret`, so the caller's register gets the result as `RETURN` gives it.
+- Only names the program defines are lowered for a self call (`sh.defined`). A self call to a name the program does not
+  define is refused, so `foo` with no `def foo` is not in the lowered set, and the `NoMethodError` of an undefined
+  method comes only from a name the program defines later (the call runs before its TDEF).
+- `SEND` and `SEND0` (an explicit receiver) of a name the program defines are refused: a method of Object is private
+  there and is reached only by a self call.
+
+Messages (checked against mruby 4.0.0 by the `rterr/` programs): a self call before its TDEF runs gives
+`undefined method 'NAME' for Object` (NoMethodError); a call with the wrong count gives
+`wrong number of arguments (given N, expected M)` (ArgumentError). Both are raised by the runtime.
+
+Deviation: a self call to an Object or Kernel method that the program also defines (`to_s`, `inspect`, `p`, ...) is
+refused, because before the TDEF runs mruby calls the inherited one. The list of those names is `object_method` in
+`mrb_lower.cpp`; a name missing from it would be a miscompile, so the list is conservative.
+
 Refused by name (exit 3, `refused: opcode NAME is not lowered yet (pc N)`): every other opcode, the `EXT1`-`EXT3`
 prefixes and the instructions they widen, `LOADL` of a non-integer (`LOADL` never holds a string: mruby compiles a
-string literal to `STRING`), and a main program with a catch table. In particular a self call (`SSEND`, `puts`), a
-block call (`SENDB`), a method call with a keyword argument or with two or more arguments, any other method name,
-`AREF`/`ASET` (the destructuring of `a, b = x`), `APOST`, `ARYCAT`/`ARYSPLAT` (a splat), `SYMBOL` (a quoted symbol) and
-`LOADSYM` of a name that is not plain (`:"a b"`, `:+`), a float, an instance or global variable, a block, a class or a
-method definition, and `ENTER` (parameters) are refused.
+string literal to `STRING`), and a main program with a catch table. In particular a block call (`SENDB`, `SSENDB`),
+`YIELD`, `BLOCK`, a method call with a keyword argument, any other method name, `AREF`/`ASET` (the destructuring of
+`a, b = x`), `APOST`, `ARYCAT`/`ARYSPLAT` (a splat), `SYMBOL` (a quoted symbol) and `LOADSYM` of a name that is not plain
+(`:"a b"`, `:+`), a float, an instance or global variable, a class (`TCLASS`, `CLASS`), a method definition whose name
+is not plain or whose ENTER has parameters other than required ones, and `ENTER` with such parameters are refused.
 
 ### The printed result
 
@@ -183,17 +213,20 @@ whose message says so, never with a value.
   each compiled four ways (default, `-g`, `--remove-lv`, `-g --remove-lv`): 28 files read by `mrbbc_dump` (every
   instruction decodes, no bytes after END) and run to status 0 by the pinned mruby. 15 malformed files (truncations,
   an extra byte, a wrong magic, format 03.00, an unknown section, an opcode out of range) are refused with status 1.
-- Lowering (`tests/mrbbc/lower/run.sh`): 41 value programs match mruby's `p` (two generated: 200 locals, and an
-  array literal of 130 elements, which mrbc builds with `ARYPUSH`); 22 runtime errors match mruby's last stderr line
-  and status 1 (9 from round 1, 13 added in round 2); 14 programs are refused with status 3, a
-  `refused:` message and no stdout: 13 in `err/` and a generated one with EXT1 prefixes. `err/` is the refusal set,
-  `rterr/` the runtime errors; the brief's "err/ programs must be refused" is read as the first.
+- Lowering (`tests/mrbbc/lower/run.sh`): 51 value programs match mruby's `p` (two generated: 200 locals, and an
+  array literal of 130 elements, which mrbc builds with `ARYPUSH`; the `meth_*.rb` ones cover methods: zero and two
+  arguments, self calls between methods, recursion, redefinition, a loop, `return`, and a `def` value); 25 runtime errors
+  match mruby's last stderr line and status 1 (9 from round 1, 13 from round 2, 3 method arity and call-before-def
+  errors in round 3); 19 programs are refused with status 3, a `refused:` message and no stdout: 18 in `err/` and a
+  generated one with EXT1 prefixes. `err/` is the refusal set, `rterr/` the runtime errors; the brief's "err/ programs
+  must be refused" is read as the first.
 
-Round 2 (strings, arrays, SEND0 and SEND of the core methods) is in the tables above. Refused in round 2 and kept refused:
-user-defined methods (`def`, `TDEF`, `METHOD`, `SENDB` with a block), self calls (`SSEND`, so `puts`), keyword
-arguments, `AREF`/`ASET`, `APOST`, splats, and the quoted symbols. The strings and arrays in the subset are the ones
-the examples above name; `Array#-` and `Array#*`, `String#[]=`, ranges as indexes and the other methods of the core
-classes are not in it.
+Round 2 (strings, arrays, SEND0 and SEND of the core methods) is in the tables above. Round 3 (methods, see "Methods")
+lowers `def` of a method with required parameters, self calls to the program's methods (`SSEND0`, `SSEND`), and the
+`ENTER` that opens a method. Still refused: blocks (`BLOCK`, `SENDB`, `YIELD`, `block_given?`), keyword arguments,
+optional or rest parameters, `AREF`/`ASET`, `APOST`, splats, and the quoted symbols. The strings and arrays in the
+subset are the ones the examples above name; `Array#-` and `Array#*`, `String#[]=`, ranges as indexes and the other
+methods of the core classes are not in it.
 
 ## Open questions
 
