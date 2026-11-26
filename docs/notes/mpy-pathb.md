@@ -122,8 +122,15 @@ is {key, value}. An empty slot has key 0; a deleted one has the sentinel key 0x1
 - A set comprehension stores each item with `STORE_COMP` (kind 2) into the set its code builds before the loop.
 - Operations: `in` (a lookup, which answers without hashing for an empty set, as `mp_set_lookup` does), `len`, truth, `for`,
   and the repr: `{a, b}` in table order, and `set()` when empty. Its hash is refused (a set is unhashable).
-- Methods of a set (`add`, `pop`, `union`, ...) are refused: `kBuiltinMethods` covers the names the lowering knows, and any
-  other method name fails at run time. Equality of two sets fails (it is not built yet).
+- Methods (`LOAD_METHOD`, called by `CALL_METHOD`): `add(x)`, `discard(x)`, `remove(x)` (a missing item is `KeyError` with the
+  item), and `union(other)`, `intersection(other)` and `difference(*others)`, whose argument may be any iterable, as objset.c
+  takes it. A set method not listed (`pop`, `update`, `issubset`, ...) fails at run time (`kBuiltinMethods` refuses the names
+  only the set and list have, and the rest fails as "not lowered yet").
+- Operators: `|`, `&` and `-` on two sets build a new set (`|` is a copy of the left set with the right's items added; `&` is a
+  new set of the items of the right that are in the left, in the right's order; `-` removes the right's items from a copy).
+  The in-place `|=`, `&=` and `-=` change the left set (`s -= s` clears it). With a non-set operand the TypeError names the
+  operator without the in-place prefix (`unsupported types for __or__: 'set', 'list'`), as the reference does. `^`, the
+  comparisons and `==` on sets are not lowered yet. Equality of two sets fails (it is not built yet).
 
 ## Slices
 
@@ -303,7 +310,7 @@ RAISE_LAST), as the lowering follows it:
 Defaults and keyword arguments (`MAKE_FUNCTION_DEFARGS`, `MAKE_CLOSURE_DEFARGS`), `del` of a closure variable
 (`DELETE_DEREF`), generators, str methods and formatting, str ordering and repetition, `raise ... from`,
 big ints, the set methods
-and operators (`add`, `|`, `==`, and so on), the list methods other than append and pop, subscripts of a range, and the rest
+`pop`, `update`, `issubset` and the rest, `^` and the set comparisons, the list methods other than append and pop, subscripts of a range, and the rest
 of the opcodes. Equality of two dicts, two sets, two ranges or two views, `str` of a list, tuple, set or view, and
 containment in a range are refused at run time until their repr and equality are built. Changing a dict's size during a
 `for` over it is not checked (see Dicts). Identity of strs: a str built at run time is a new object, but MicroPython interns

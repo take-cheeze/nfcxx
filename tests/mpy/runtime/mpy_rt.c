@@ -190,7 +190,9 @@ typedef struct {
 enum {
   BI_LEN, BI_STR, BI_RANGE, BI_APPEND, BI_POP, BI_BUILD_CLASS,
   BI_DICT_GET, BI_DICT_KEYS, BI_DICT_VALUES, BI_DICT_ITEMS, BI_DICT_POP, BI_DICT_UPDATE,
-  BI_DICT_COPY, BI_DICT_CLEAR, BI_DICT_SETDEFAULT, BI_DICT_POPITEM, BI_DICT_FROMKEYS, BI_SUPER, BI_INIT,
+  BI_DICT_COPY, BI_DICT_CLEAR, BI_DICT_SETDEFAULT, BI_DICT_POPITEM, BI_DICT_FROMKEYS,
+  BI_SET_ADD, BI_SET_DISCARD, BI_SET_REMOVE, BI_SET_UNION, BI_SET_INTERSECTION, BI_SET_DIFFERENCE,
+  BI_SUPER, BI_INIT,
   BI_EXC, BI_COUNT = BI_EXC + EXC_COUNT
 };
 typedef struct {
@@ -204,6 +206,8 @@ static const MpyBuiltin mpy_builtins[BI_COUNT] = {
   {&mpy_type_bfn, BI_DICT_ITEMS}, {&mpy_type_bfn, BI_DICT_POP}, {&mpy_type_bfn, BI_DICT_UPDATE},
   {&mpy_type_bfn, BI_DICT_COPY}, {&mpy_type_bfn, BI_DICT_CLEAR}, {&mpy_type_bfn, BI_DICT_SETDEFAULT},
   {&mpy_type_bfn, BI_DICT_POPITEM}, {&mpy_type_bfn, BI_DICT_FROMKEYS},
+  {&mpy_type_bfn, BI_SET_ADD}, {&mpy_type_bfn, BI_SET_DISCARD}, {&mpy_type_bfn, BI_SET_REMOVE},
+  {&mpy_type_bfn, BI_SET_UNION}, {&mpy_type_bfn, BI_SET_INTERSECTION}, {&mpy_type_bfn, BI_SET_DIFFERENCE},
   {&mpy_type_type, BI_SUPER}, {&mpy_type_bfn, BI_INIT},
   {&mpy_type_type, BI_EXC + 0}, {&mpy_type_type, BI_EXC + 1}, {&mpy_type_type, BI_EXC + 2},
   {&mpy_type_type, BI_EXC + 3}, {&mpy_type_type, BI_EXC + 4}, {&mpy_type_type, BI_EXC + 5},
@@ -294,10 +298,28 @@ static int dict_method_index(const char *name, size_t len) {
   return -1;
 }
 
-/* The method names of the builtin types that the runtime does not have for every receiver: a method call of one of these on a
- * value that is not a dict fails as not lowered (the lowering does not know the receiver's type, so it cannot refuse it). */
+/* The builtin id of a set method (add, discard, remove, union, intersection, difference), or -1. */
+static int set_method_index(const char *name, size_t len) {
+  static const struct {
+    const char *name;
+    int id;
+  } methods[] = {
+    {"add", BI_SET_ADD}, {"discard", BI_SET_DISCARD}, {"remove", BI_SET_REMOVE},
+    {"union", BI_SET_UNION}, {"intersection", BI_SET_INTERSECTION}, {"difference", BI_SET_DIFFERENCE},
+  };
+  size_t k;
+  for (k = 0; k < sizeof methods / sizeof methods[0]; ++k) {
+    if (strlen(methods[k].name) == len && memcmp(name, methods[k].name, len) == 0) return methods[k].id;
+  }
+  return -1;
+}
+
+/* The method names that a dict or a set has and the runtime does not have for the other types: a method call of one of these on
+ * a value that is not a dict or a set fails as not lowered (the lowering does not know the receiver's type, so it cannot refuse
+ * them). */
 static int refused_method_name(const char *name, size_t len) {
-  static const char *const names[] = {"copy", "clear", "setdefault", "popitem", "fromkeys"};
+  static const char *const names[] = {"copy", "clear", "setdefault", "popitem", "fromkeys", "add", "discard", "remove",
+                                      "union", "intersection", "difference"};
   size_t k;
   for (k = 0; k < sizeof names / sizeof names[0]; ++k) {
     if (strlen(names[k]) == len && memcmp(name, names[k], len) == 0) return 1;
@@ -815,17 +837,123 @@ static mpv exc_match(mpv exc, mpv cls) {
   return MPY_FALSE;
 }
 
+mpv mpy_get_iter(mpv obj);
+mpv mpy_iter_next(mpv iter);
+
+/* Sets (docs/notes/mpy-pathb.md, "Sets"): the table of a new set, and the copies and updates of objset.c. A new set has alloc slots
+ * (mp_obj_new_set(n, NULL) for 0). */
+static mpv set_new(size_t alloc) {
+  mpv r = mpy_build_map((uint64_t)alloc);
+  ((MpyDict *)(uintptr_t)r)->type = &mpy_type_set;
+  return r;
+}
+
+/* set_copy: the same table, slot for slot. */
+static mpv set_copy_of(mpv sv) {
+  const MpyDict *s = dict_of(sv);
+  mpv r = set_new(s->alloc);
+  MpyDict *c = (MpyDict *)(uintptr_t)r;
+  if (s->alloc) memcpy(c->table, s->table, s->alloc * sizeof(MpyEntry));
+  c->used = s->used;
+  c->all_keys_are_qstrs = s->all_keys_are_qstrs;
+  return r;
+}
+
+/* set_update_int: the items of other (any iterable) are added to s. */
+static void set_add_items(mpv sv, mpv other) {
+  mpv it = mpy_get_iter(other), item;
+  while ((item = mpy_iter_next(it)) != 0) map_lookup((MpyDict *)(uintptr_t)sv, item, MAP_ADD);
+}
+
+/* The items of other are removed from s (set_diff_int). When other is s itself, s is cleared. */
+static void set_remove_items(mpv sv, mpv other) {
+  MpyDict *s = (MpyDict *)(uintptr_t)sv;
+  mpv it, item;
+  if (sv == other) {
+    free(s->table);
+    s->table = NULL;
+    s->alloc = 0;
+    s->used = 0;
+    return;
+  }
+  it = mpy_get_iter(other);
+  while ((item = mpy_iter_next(it)) != 0) map_lookup(s, item, MAP_REMOVE);
+}
+
+/* set_intersect_int, not in place: a new set of the items of other that are in s, added in other's order. */
+static mpv set_intersect_of(mpv sv, mpv other) {
+  mpv out, it, item;
+  if (sv == other) return set_copy_of(sv);
+  out = set_new(0);
+  it = mpy_get_iter(other);
+  while ((item = mpy_iter_next(it)) != 0) {
+    if (map_lookup((MpyDict *)(uintptr_t)sv, item, MAP_LOOKUP) >= 0) map_lookup((MpyDict *)(uintptr_t)out, item, MAP_ADD);
+  }
+  return out;
+}
+
+/* set_intersect_int, in place: s takes the table of the intersection (none when other is s itself). */
+static void set_intersect_inplace(mpv sv, mpv other) {
+  MpyDict *s, *o;
+  mpv out;
+  if (sv == other) return;
+  out = set_intersect_of(sv, other);
+  s = (MpyDict *)(uintptr_t)sv;
+  o = (MpyDict *)(uintptr_t)out;
+  free(s->table);
+  s->table = o->table;
+  s->alloc = o->alloc;
+  s->used = o->used;
+}
+
+/* The set operators (set_binary_op): | & - and their in-place forms, with both operands sets. Other operands are a TypeError
+ * that names the operator without the in-place prefix, as the reference reports it. */
+static mpv set_binop(int op, int inplace, mpv a, mpv b) {
+  const char *name = op == MPY_OP_OR ? "__or__" : (op == MPY_OP_AND ? "__and__" : "__sub__");
+  char msg[200];
+  if ((op != MPY_OP_OR && op != MPY_OP_AND && op != MPY_OP_SUBTRACT) || !is_set(a) || !is_set(b)) {
+    if (op == MPY_OP_OR || op == MPY_OP_AND || op == MPY_OP_SUBTRACT) {
+      snprintf(msg, sizeof msg, "TypeError: unsupported types for %s: '%s', '%s'", name, type_name(a), type_name(b));
+      fail(msg);
+    }
+    fail("an operator on a set (other than |, &, - and their in-place forms) is not lowered yet");
+  }
+  if (op == MPY_OP_OR) {
+    if (!inplace) {
+      mpv r = set_copy_of(a);
+      set_add_items(r, b);
+      return r;
+    }
+    set_add_items(a, b);
+    return a;
+  }
+  if (op == MPY_OP_AND) {
+    if (!inplace) return set_intersect_of(a, b);
+    set_intersect_inplace(a, b);
+    return a;
+  }
+  if (!inplace) {
+    mpv r = set_copy_of(a);
+    set_remove_items(r, b);
+    return r;
+  }
+  set_remove_items(a, b);
+  return a;
+}
+
 mpv mpy_binop(int op, mpv a, mpv b) {
   int64_t x, y, r = 0;
   /* The in-place forms (MP_BINARY_OP_INPLACE_OR = 9 .. INPLACE_POWER = 21) are the same operators on immutable ints:
    * INPLACE_X is X + 13 (runtime0.h). The in-place matrix multiply, true divide and power stay unsupported. */
+  int inplace = op >= 9 && op <= 21;
   if (op == MPY_OP_EXCEPTION_MATCH) return exc_match(a, b);   /* the except clause: a is the exception, b the class */
-  if (op >= 9 && op <= 21) op += 13;
+  if (inplace) op += 13;
   if (op == MPY_OP_IN) return contains(b, a) ? MPY_TRUE : MPY_FALSE;   /* a in b: the right operand is the container */
   if (op == MPY_OP_IS) return a == b ? MPY_TRUE : MPY_FALSE;           /* the same word: one immediate or one object */
   if (is_str(a) || is_str(b)) return str_binop(op, a, b);
-  if (is_set(a) || is_set(b) || is_view(a) || is_view(b)) {
-    fail("an operator on a set or a dict view (other than in and is) is not lowered yet");
+  if (is_set(a) || is_set(b)) return set_binop(op, inplace, a, b);
+  if (is_view(a) || is_view(b)) {
+    fail("an operator on a dict view (other than in and is) is not lowered yet");
   }
   x = need_int(a);
   y = need_int(b);
@@ -1405,7 +1533,9 @@ mpv mpy_load_method(mpv obj, const char *name, size_t len) {
     if (dict_method_index(name, len) != BI_DICT_FROMKEYS) method_self = obj;
     return builtin_obj(dict_method_index(name, len));
   } else if (is_set(obj)) {
-    fail("a method of a set is not lowered yet");
+    if (set_method_index(name, len) < 0) fail("a method of a set is not lowered yet");
+    method_self = obj;
+    return builtin_obj(set_method_index(name, len));
   } else if (is_super(obj)) {
     const MpySuper *s = (const MpySuper *)(uintptr_t)obj;
     int method = 0;
@@ -2160,6 +2290,46 @@ static mpv builtin_call(int id, const mpv *args, uint64_t n) {
       else if (seq_items(args[0], &items, &elems)) len = items;
       r = mpy_build_map(len);
       while ((item = mpy_iter_next(it)) != 0) dict_store(r, item, value);
+      return r;
+    }
+    case BI_SET_ADD:
+    case BI_SET_DISCARD:
+    case BI_SET_REMOVE: {
+      /* s.add(item), s.discard(item) and s.remove(item) (objset.c): None, and remove raises KeyError for a missing item */
+      long at;
+      if (n != 2) {
+        snprintf(msg, sizeof msg, "TypeError: function takes 2 positional arguments but %d were given", (int)n);
+        fail(msg);
+      }
+      if (id == BI_SET_ADD) {
+        map_lookup((MpyDict *)(uintptr_t)args[0], args[1], MAP_ADD);
+        return MPY_NONE;
+      }
+      at = map_lookup((MpyDict *)(uintptr_t)args[0], args[1], MAP_REMOVE);
+      if (at < 0 && id == BI_SET_REMOVE) key_error(args[1]);
+      return MPY_NONE;
+    }
+    case BI_SET_UNION:
+    case BI_SET_INTERSECTION: {
+      /* s.union(other) and s.intersection(other): other is any iterable */
+      if (n != 2) {
+        snprintf(msg, sizeof msg, "TypeError: function takes 2 positional arguments but %d were given", (int)n);
+        fail(msg);
+      }
+      if (id == BI_SET_UNION) {
+        mpv r = set_copy_of(args[0]);
+        set_add_items(r, args[1]);
+        return r;
+      }
+      return set_intersect_of(args[0], args[1]);
+    }
+    case BI_SET_DIFFERENCE: {
+      /* s.difference(*others): a copy of s from which the items of each other are removed */
+      mpv r;
+      uint64_t k;
+      if (n < 1) fail("TypeError: function takes at least 1 positional arguments");
+      r = set_copy_of(args[0]);
+      for (k = 1; k < n; ++k) set_remove_items(r, args[k]);
       return r;
     }
     case BI_SUPER: {
