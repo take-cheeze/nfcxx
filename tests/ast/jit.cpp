@@ -59,8 +59,9 @@ static void jit_on(State& S) {
   S.enable_tier(o);
 }
 
-// What the counters must say about a program's loops (ENTERED: compiled, and taken over at least twice).
-enum Expect { ANY, COMPILED, ENTERED, REFUSED, GUARD };
+// What the counters must say about a program's loops (ENTERED: compiled, and taken over at least twice; DEOPT: compiled, and the
+// code stopped at a zero divisor once, which the error of the program shows).
+enum Expect { ANY, COMPILED, ENTERED, REFUSED, GUARD, DEOPT };
 
 struct Case {
   const char* name;
@@ -114,11 +115,72 @@ static const Case cases[] = {
      "while i < 10 do s = s + f i = i + 1 end\n"
      "return s",
      GUARD},
-    {"integer division is refused (it needs a check for zero)",
+    {"float division is refused (the result is a float, outside the subset)",
      "local q = 0\n"
-     "for i = 1, 20 do q = q + i // 3 end\n"
+     "for i = 1, 20 do q = q + i / 3 end\n"
      "return q",
      REFUSED},
+    {"a power is refused",
+     "local q = 0\n"
+     "for i = 1, 20 do q = q + i ^ 2 end\n"
+     "return q",
+     REFUSED},
+    {"floor division and modulo on positive and negative operands, constant and compound, as the interpreter's",
+     "local q, r = 0, 0\n"
+     "for a = -20, 20 do\n"
+     "  for b = -5, 5 do\n"
+     "    if b ~= 0 then\n"
+     "      q = q * 31 + a // b + (a * 3 - 1) // (b * 2 - 1)\n"
+     "      r = r * 37 + a % b + (a * 5 + 2) % (b + 7) + a % 4 - a // 3\n"
+     "    end\n"
+     "  end\n"
+     "end\n"
+     "return q, r",
+     COMPILED},
+    {"floor division by -1 and modulo by -1 at the smallest integer: the wraparound, no error",
+     "local m = -9223372036854775807 - 1\n"
+     "local q, r, n = 0, 0, 0\n"
+     "for i = 1, 4 do\n"
+     "  q = q + m // -1\n"
+     "  r = r + m % -1 + (m + i) % -1\n"
+     "  n = n + (m + i) // -1\n"
+     "end\n"
+     "return m // -1, m % -1, q, r, n",
+     COMPILED},
+    {"a zero divisor on the seventh iteration: the interpreter's error, at the same line, with the loop's state",
+     "local s = 0\n"
+     "for i = 1, 9 do\n"
+     "  s = s + 100 // (7 - i)\n"
+     "end\n"
+     "return s",
+     DEOPT},
+    {"a floor division by zero in a while condition, after the divisions that are fine",
+     "local z, n = 4, 0\n"
+     "while 100 // z > 0 do\n"
+     "  z = z - 1\n"
+     "  n = n + 1\n"
+     "end\n"
+     "return n",
+     DEOPT},
+    {"a zero divisor in a compound operand, with a value pushed for the left one",
+     "local s = 0\n"
+     "for i = 1, 9 do\n"
+     "  s = s + ((i * 2) + ((i * 3) // (5 - i)))\n"
+     "end\n"
+     "return s",
+     DEOPT},
+    {"a floor division by zero in the limit of an inner for loop",
+     "local s = 0\n"
+     "for i = 1, 5 do\n"
+     "  for j = 1, 10 // (3 - i) do s = s + j end\n"
+     "end\n"
+     "return s",
+     DEOPT},
+    {"a modulo by zero in a repeat's condition, the divisor a live local that the loop counts",
+     "local n = 0\n"
+     "repeat n = n + 1 until 7 % (3 - n) < 0\n"
+     "return n",
+     DEOPT},
     {"a table in the loop is refused",
      "local t = {}\n"
      "for i = 1, 10 do t[i] = i end\n"
@@ -252,12 +314,16 @@ static std::string gen_expr(Rng& r, int depth) {
       default: return std::to_string(r.next() % 100000u);
     }
   }
-  switch (r.pick(5)) {
+  switch (r.pick(6)) {
     case 0: return "(" + gen_expr(r, depth - 1) + " + " + gen_expr(r, depth - 1) + ")";
     case 1: return "(" + gen_expr(r, depth - 1) + " - " + gen_expr(r, depth - 1) + ")";
     case 2: return "(" + gen_expr(r, depth - 1) + " * " + gen_expr(r, depth - 1) + ")";
     case 3: return "(-" + gen_expr(r, depth - 1) + ")";
-    default: return "(" + gen_expr(r, depth - 1) + " * 6364136223846793005)";
+    case 4: return "(" + gen_expr(r, depth - 1) + " * 6364136223846793005)";
+    default: {  // floor division and modulo by a constant that is not zero (-1 included): no zero divisor, so no deopt
+      static const char* divisors[] = {"-1", "2", "-3", "7", "-7", "1", "-2", "9223372036854775807"};
+      return "(" + gen_expr(r, depth - 1) + (r.pick(2) ? " // " : " % ") + divisors[r.pick(8)] + ")";
+    }
   }
 }
 
@@ -340,7 +406,8 @@ int main() {
     const nfcast::Stats& st = S.stats;
     bool same = got == want;
     CHECK(same);
-    CHECK(st.jit_bailouts == st.jit_guard_misses);  // no run-time deopts in this slice
+    // A deopt (a zero divisor) is counted in jit_bailouts too: one for the DEOPT cases, none for the others.
+    CHECK(st.jit_bailouts == st.jit_guard_misses + (avail && c.want == DEOPT ? 1 : 0));
     if (!same) std::printf("  %s: got %s, want %s\n", c.name, got.c_str(), want.c_str());
     if (!avail) {
       CHECK(st.jit_compiled == 0 && st.jit_entries == 0);
@@ -351,6 +418,7 @@ int main() {
         case ENTERED: CHECK(st.jit_compiled >= 1 && st.jit_entries >= 2 && st.jit_guard_misses == 0); break;
         case REFUSED: CHECK(st.jit_refused >= 1 && st.jit_entries == 0); break;
         case GUARD: CHECK(st.jit_guard_misses >= 1 && st.jit_entries == 0); break;
+        case DEOPT: CHECK(st.jit_compiled >= 1 && st.jit_bailouts == 1 && st.jit_guard_misses == 0 && st.jit_refused == 0); break;
         case ANY: break;
       }
     }

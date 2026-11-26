@@ -36,6 +36,15 @@ struct Code {
   std::vector<int> in_slots, in_regs;
   std::vector<int> out_slots, out_regs;
   int state_regs[3] = {-1, -1, -1};  // FOR_INT: the registers of the next value of the variable, the count, and the step
+  // Deopt (docs/notes/ast.md, "JIT"). Every local of the loop (a live-in or one it declares) is in bail_slots / bail_regs: when the
+  // code stops at an operation it cannot finish, these are written back to the frame. Site k (1-based, the value run() returns) is the
+  // statement or condition the operation is in: the interpreter runs that unit, which raises the error the operation raises.
+  struct Site {
+    Node* node = nullptr;
+    bool stmt = false;  // a statement (exec), else an expression (eval)
+  };
+  std::vector<int> bail_slots, bail_regs;
+  std::vector<Site> sites;
 };
 
 // The code of the loop LOOP, which is a `while`, `repeat` or numeric `for` (KIND: the TierLoopState::Kind it is entered with).
@@ -45,9 +54,15 @@ std::unique_ptr<Code> compile(Node* loop, int kind, std::string& why);
 // The entry guard: every live-in holds an integer. Checked at every takeover; nothing runs unless it holds.
 bool entry_ok(const Frame& f, const Code& c);
 
-// Runs the code from the state ST (the state of a FOR_INT loop at the top of an iteration, see TierLoopState) with the guard holding,
-// and writes the live-ins that the loop assigns back to the frame. The loop has ended when it returns: the interpreter goes on after it.
-void run(Frame& f, const Code& c, const TierLoopState& st);
+// Runs the code from the state ST (the state of a FOR_INT loop at the top of an iteration, see TierLoopState) with the guard holding.
+// Returns 0 when the loop ran to its end, and writes the live-ins that the loop assigns back to the frame: the interpreter goes on
+// after the loop. Returns k > 0 when the code stopped at an operation it cannot finish (site k, a zero divisor): every local of the
+// loop is written back, and the caller must call resume() with k.
+int run(Frame& f, const Code& c, const TierLoopState& st);
+
+// Deopt: the interpreter runs the unit of site K, the statement or condition the code stopped in, on the frame. That unit raises the
+// error its operation raises (the same message, at the same line); it is an error if the unit returns, and then this raises one too.
+void resume(Frame& f, const Code& c, int k);
 
 }  // namespace jit
 }  // namespace nfcast

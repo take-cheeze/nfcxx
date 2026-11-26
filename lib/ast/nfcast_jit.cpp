@@ -1,9 +1,10 @@
 // nfcast JIT: x86-64 machine code for the loops of the AST interpreter (docs/notes/ast.md, "JIT"). The loop is read through the
 // tier's view of its nodes (tier_view), the same one the C tier lowers from, and only the subset listed in the notes is encoded:
-// integers, + - * and unary minus, comparisons, and/or/not in conditions, if, while, repeat, numeric for loops with an integer step
-// that is a constant (except the one that takes over the loop, whose step is run-time), break, and locals. Integer arithmetic wraps
-// as the interpreter's does, so no operation can fail, and no run needs a bail-out: a `//`, `%`, `/`, `^` or bitwise operator, or
-// anything else outside the subset, makes compile() refuse the loop.
+// integers, + - * and unary minus, `//` and `%` (floor division and modulo, as the interpreter's), comparisons, and/or/not in
+// conditions, if, while, repeat, numeric for loops with an integer step that is a constant (except the one that takes over the loop,
+// whose step is run-time), break, and locals. Integer arithmetic wraps as the interpreter's does. The one operation that can fail is
+// `//` or `%` by zero: the code then stops, writes its locals back, and the interpreter raises the error (the deopt, see run() and
+// resume()). A `/`, `^` or bitwise operator, or anything else outside the subset, makes compile() refuse the loop.
 //
 // Registers. The machine code has one 64-bit word per local (and per hidden variable of a for loop) in an array REGS, whose address
 // is in RBX (callee-saved, pushed at the entry). RAX, RCX and RDX are scratch; a binary operation of two compound operands evaluates
@@ -51,7 +52,7 @@ bool entry_ok(const Frame& f, const Code& c) {
   return true;
 }
 
-void run(Frame& f, const Code& c, const TierLoopState& st) {
+int run(Frame& f, const Code& c, const TierLoopState& st) {
   std::int64_t small[64] = {0};
   std::vector<std::int64_t> big;
   std::int64_t* R = small;
@@ -65,8 +66,23 @@ void run(Frame& f, const Code& c, const TierLoopState& st) {
     R[c.state_regs[1]] = static_cast<std::int64_t>(st.count);
     R[c.state_regs[2]] = st.step;
   }
-  c.fn(R);
+  int site = c.fn(R);
+  if (site != 0) {  // a deopt: every local of the loop goes back to the frame, as it is at the operation
+    for (std::size_t k = 0; k < c.bail_slots.size(); ++k) f.base[c.bail_slots[k]] = Value::integer(R[c.bail_regs[k]]);
+    return site;
+  }
   for (std::size_t k = 0; k < c.out_slots.size(); ++k) f.base[c.out_slots[k]] = Value::integer(R[c.out_regs[k]]);
+  return 0;
+}
+
+void resume(Frame& f, const Code& c, int k) {
+  const Code::Site& s = c.sites[static_cast<std::size_t>(k - 1)];
+  // The unit is pure up to the operation that stopped the code (an expression, or a statement whose stores come after all its
+  // operands), so the interpreter's evaluation of it from the written-back state reaches the same zero divisor and raises the same
+  // error, with the same line (the operation sets the line before it raises).
+  if (s.stmt) s.node->exec(f);
+  else s.node->eval(f);
+  f.S->rt_error("internal: the machine code stopped at an operation that did not raise its error");
 }
 
 #if NFCAST_JIT_X64
@@ -75,7 +91,7 @@ namespace {
 // ---- the encoder --------------------------------------------------------------------------------------------------------------------
 enum { RAX = 0, RCX = 1, RDX = 2 };
 // The condition codes of Jcc (0F 80+cc) and SETcc. Negating a condition flips the low bit: E/NE, L/GE, LE/G.
-enum Cc { CC_E = 0x4, CC_NE = 0x5, CC_L = 0xC, CC_GE = 0xD, CC_LE = 0xE, CC_G = 0xF };
+enum Cc { CC_E = 0x4, CC_NE = 0x5, CC_S = 0x8, CC_NS = 0x9, CC_L = 0xC, CC_GE = 0xD, CC_LE = 0xE, CC_G = 0xF };
 
 class Asm {
  public:
@@ -95,8 +111,20 @@ class Asm {
     b.push_back(static_cast<std::uint8_t>(0x80 | cc));
     rel32(l);
   }
-  void push_rax() { b.push_back(0x50); }
-  void pop_rax() { b.push_back(0x58); }
+  void push_rax() {
+    b.push_back(0x50);
+    ++pushes_;
+  }
+  void pop_rax() {
+    b.push_back(0x58);
+    --pushes_;
+  }
+  // The values pushed by the code emitted so far and not yet popped: a deopt drops them before it leaves the loop.
+  int pushes() const { return pushes_; }
+  void add_rsp(int n) {  // add rsp, 8 * n
+    bytes({0x48, 0x81, 0xC4});
+    u32(static_cast<std::uint32_t>(8 * n));
+  }
   // REG = word K and word K = REG (REG is RAX, RCX or RDX): a memory access in REGS, or a register move when K is allocated.
   void load(int reg, int k) {
     note(k);
@@ -146,6 +174,21 @@ class Asm {
   void sub_rax_1() { bytes({0x48, 0x83, 0xE8, 0x01}); }
   void xor_edx_edx() { bytes({0x31, 0xD2}); }
   void div_rcx() { bytes({0x48, 0xF7, 0xF1}); }  // unsigned rdx:rax / rcx, quotient in rax
+  // Floor division and modulo (Gen::floordiv): the signed forms and the tests they use.
+  void test_rcx_rcx() { bytes({0x48, 0x85, 0xC9}); }
+  void test_rax_rax() { bytes({0x48, 0x85, 0xC0}); }
+  void test_rdx_rdx() { bytes({0x48, 0x85, 0xD2}); }
+  void cmp_rcx_m1() { bytes({0x48, 0x83, 0xF9, 0xFF}); }  // cmp rcx, -1
+  void xor_eax_eax() { bytes({0x31, 0xC0}); }
+  void cqo() { bytes({0x48, 0x99}); }                      // rdx = the sign of rax
+  void idiv_rcx() { bytes({0x48, 0xF7, 0xF9}); }           // signed rdx:rax / rcx: quotient in rax, remainder in rdx
+  void xor_rdx_rcx() { bytes({0x48, 0x31, 0xCA}); }
+  void mov_rdx_rax() { bytes({0x48, 0x89, 0xC2}); }
+  void mov_rax_rdx() { bytes({0x48, 0x89, 0xD0}); }
+  void mov_eax_imm(std::uint32_t v) {  // mov eax, imm32 (zero-extends)
+    b.push_back(0xB8);
+    u32(v);
+  }
   void prologue() {  // push rbx; mov rbx, rdi; push the registers in use; load every allocated word into its register
     bytes({0x53, 0x48, 0x89, 0xFB});
     for (int r : saved_) push_r(r);
@@ -157,9 +200,13 @@ class Asm {
     int p = phys_of(k);
     if (p >= 0) mem_op(0x89, p, k);
   }
-  void epilogue() {  // pop the registers in use; pop rbx; xor eax, eax; ret
+  void epilogue() {  // a normal exit: eax = 0 (no deopt), then the restore below
+    xor_eax_eax();
+    restore_ret();
+  }
+  void restore_ret() {  // pop the registers in use; pop rbx; ret (EAX is the result: 0, or the deopt site)
     for (std::size_t i = saved_.size(); i-- > 0;) pop_r(saved_[i]);
-    bytes({0x5B, 0x31, 0xC0, 0xC3});
+    bytes({0x5B, 0xC3});
   }
 
   // Patches the rel32 fields; false when a label was used and never bound.
@@ -184,6 +231,7 @@ class Asm {
   std::vector<int> saved_;      // the registers in use, ascending: saved at the entry, restored at the exit
   std::vector<long> refs_;      // word -> references (weighted by the loop depth) in the code emitted so far
   int depth_ = 0;
+  int pushes_ = 0;              // see pushes()
 
   void note(int k) {
     if (static_cast<std::size_t>(k) >= refs_.size()) refs_.resize(static_cast<std::size_t>(k) + 1, 0);
@@ -239,6 +287,18 @@ struct Gen {
   std::vector<int> in_slots, in_regs;  // the live-ins, in the order they were first used
   std::set<int> written;        // the live-ins the loop assigns
   std::vector<int> breaks;      // the exits of the enclosing loops
+  // The deopt (see Code::Site). The stub that every zero divisor jumps to is bound at the end of top_level. UNITS are the statements
+  // and conditions being generated, innermost last; SITES[k - 1] is the unit of the operation that leaves with k in EAX.
+  int bail = -1;
+  std::vector<Code::Site> units;
+  std::vector<Code::Site> sites;
+
+  static Code::Site unit(Node* n, bool stmt) {
+    Code::Site s;
+    s.node = n;
+    s.stmt = stmt;
+    return s;
+  }
 
   bool fail(const std::string& m) {
     if (ok) {
@@ -310,12 +370,13 @@ struct Gen {
         return true;
       }
       case TierView::K_ARITH: {
-        if (v.op != AR_ADD && v.op != AR_SUB && v.op != AR_MUL)
-          return fail("an operator outside the subset (division, modulo, power or a bitwise operator needs a run-time check)");
+        if (v.op != AR_ADD && v.op != AR_SUB && v.op != AR_MUL && v.op != AR_IDIV && v.op != AR_MOD)
+          return fail("an operator outside the subset (a float division, power or a bitwise operator)");
         if (!binary(v.kids[0], v.kids[1])) return false;
         if (v.op == AR_ADD) a.add_rax_rcx();
         else if (v.op == AR_SUB) a.sub_rax_rcx();
-        else a.imul_rax_rcx();
+        else if (v.op == AR_MUL) a.imul_rax_rcx();
+        else floordiv(v.op == AR_MOD);
         return true;
       }
       case TierView::K_UNARY:
@@ -380,8 +441,74 @@ struct Gen {
     return true;
   }
 
+  // The deopt sites. A zero divisor in RCX leaves the code: it drops the values pushed so far, and jumps to the stub with the number of
+  // the site (the unit being generated) in EAX. The site is recorded here, so the interpreter can run that unit to raise the error.
+  void zero_check() {
+    int ok = a.label();
+    if (units.empty()) {  // not reached: every operation is inside a unit (a statement, a condition or a for loop's expression)
+      fail("internal: an operation outside a unit");
+      return;
+    }
+    sites.push_back(units.back());
+    a.test_rcx_rcx();
+    a.jcc(CC_NE, ok);
+    if (a.pushes() > 0) a.add_rsp(a.pushes());
+    a.mov_eax_imm(static_cast<std::uint32_t>(sites.size()));
+    a.jmp(bail);
+    a.bind(ok);
+  }
+
+  // RAX = RAX // RCX (MOD false) or RAX % RCX (MOD true), for integers, as the interpreter's helpers (nfcr_idiv, nfcr_imod) compute
+  // them. The divisor is checked first (zero_check). The x86 idiv traps on INT_MIN / -1, so a divisor of -1 is special-cased: the
+  // quotient is -a, the remainder 0 (what the interpreter's helpers give, with the wraparound). Otherwise idiv gives the quotient
+  // rounded towards zero and the remainder with the sign of the dividend, and the floor values are one less (quotient) or the divisor
+  // added (remainder) when the remainder is not zero and its sign differs from the divisor's.
+  void floordiv(bool mod) {
+    zero_check();
+    int norm = a.label(), done = a.label();
+    a.cmp_rcx_m1();
+    a.jcc(CC_NE, norm);
+    if (mod) a.xor_eax_eax();
+    else a.neg_rax();
+    a.jmp(done);
+    a.bind(norm);
+    a.cqo();
+    a.idiv_rcx();
+    if (!mod) {  // RAX = quotient, RDX = remainder
+      a.test_rdx_rdx();
+      a.jcc(CC_E, done);
+      a.xor_rdx_rcx();  // the sign of remainder ^ divisor
+      a.jcc(CC_NS, done);
+      a.sub_rax_1();
+    } else {  // RDX = remainder
+      a.mov_rax_rdx();
+      a.test_rax_rax();
+      a.jcc(CC_E, done);
+      a.mov_rdx_rax();
+      a.xor_rdx_rcx();
+      a.jcc(CC_NS, done);
+      a.add_rax_rcx();
+    }
+    a.bind(done);
+  }
+
   // Jumps to TARGET when the condition N has the truth value JUMP_IF (Lua's: nil and false are false, everything else true).
   bool branch(Node* n, bool jump_if, int target) {
+    units.push_back(unit(n, false));
+    bool r = branch_(n, jump_if, target);
+    units.pop_back();
+    return r;
+  }
+
+  // An expression that is a unit of its own (the start and the limit of a for loop).
+  bool expr_unit(Node* n) {
+    units.push_back(unit(n, false));
+    bool r = expr(n);
+    units.pop_back();
+    return r;
+  }
+
+  bool branch_(Node* n, bool jump_if, int target) {
     if (!n) return fail("a condition that is missing");
     TierView v;
     tier_view(n, v);
@@ -444,9 +571,12 @@ struct Gen {
           if (!stmt(k)) return false;
         return true;
       case TierView::K_DECL:
-        return decl(v);
-      case TierView::K_ASSIGN:
-        return assign(v);
+      case TierView::K_ASSIGN: {  // a unit of its own: its stores come after all its operands (a deopt runs the statement again)
+        units.push_back(unit(n, true));
+        bool r = v.kind == TierView::K_DECL ? decl(v) : assign(v);
+        units.pop_back();
+        return r;
+      }
       case TierView::K_IF:
         return conditional(v);
       case TierView::K_WHILE:
@@ -583,9 +713,9 @@ struct Gen {
       if (step == 0) return fail("a for loop with a step of zero (an error the interpreter reports)");
     }
     int hi = nregs++, hl = nregs++, hc = nregs++;
-    if (!expr(v.kids[0])) return false;
+    if (!expr_unit(v.kids[0])) return false;
     a.store(hi, RAX);
-    if (!expr(v.kids[1])) return false;
+    if (!expr_unit(v.kids[1])) return false;
     a.store(hl, RAX);
     int done = a.label(), top = a.label();
     a.load(RAX, hi);
@@ -631,6 +761,7 @@ bool top_level(Gen& g, Node* loop, int kind, Code& code) {
   TierView v;
   tier_view(loop, v);
   g.collect(loop);
+  g.bail = g.a.label();
   g.a.prologue();
   if (kind == TierLoopState::FOR_INT) {
     if (v.kind != TierView::K_FOR) return g.fail("a loop that is not a numeric for");
@@ -664,6 +795,12 @@ bool top_level(Gen& g, Node* loop, int kind, Code& code) {
   for (std::size_t k = 0; k < g.in_slots.size(); ++k)
     if (g.written.count(g.in_slots[k])) g.a.spill(g.in_regs[k]);
   g.a.epilogue();
+  // The deopt stub (every zero divisor jumps here, with its site in EAX and its pushes dropped): every local of the loop goes back to
+  // REGS (an allocated one from its register; the others are in memory already), then the registers are restored and the code returns
+  // the site. Nothing else is written: the statement the site names is run by the interpreter from this state.
+  g.a.bind(g.bail);
+  for (const auto& kv : g.reg_of) g.a.spill(kv.second);
+  g.a.restore_ret();
   return g.ok;
 }
 
@@ -717,6 +854,11 @@ std::unique_ptr<Code> compile(Node* loop, int kind, std::string& why) {
     }
   }
   code->nregs = g.nregs;
+  code->sites = g.sites;
+  for (const auto& kv : g.reg_of) {  // every local of the loop: written back when the code deopts
+    code->bail_slots.push_back(kv.first);
+    code->bail_regs.push_back(kv.second);
+  }
   long page = sysconf(_SC_PAGESIZE);
   if (page <= 0) page = 4096;
   std::size_t bytes = g.a.b.size();

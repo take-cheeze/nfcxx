@@ -624,13 +624,14 @@ the JIT is off: every loop is refused with the reason "not available on this hos
 - loops: `while`; `repeat`; a numeric `for` with integer values (the loop that is taken over, and nested ones whose step is a constant
   integer that is not zero); `break`.
 - values: integer constants; locals of the loop and the locals it reads or assigns from outside; `+`, `-`, `*` and unary `-`, which wrap
-  as the interpreter's integers do.
+  as the interpreter's integers do; `//` and `%` on integers, floor division and modulo with the sign of the divisor as the
+  interpreter's helpers (`nfcr_idiv`, `nfcr_imod`) compute them, and a divisor of -1 as they do (`-a` and `0`, which wrap).
 - conditions: `<`, `<=`, `>`, `>=`, `==`, `~=` between integers; `and`, `or`, `not`; `if` / `elseif` / `else`. A constant or a number as a
   condition is true or false as Lua says.
 - statements: `local` with one integer value for each name, and assignment (also several at once).
 
-**Refused at compile time** (the loop is left to the interpreter or the C tier, and `jit_refused` counts it once): `//`, `%`, `/`, `^`
-and the bitwise operators (a zero divisor is an error that the interpreter reports, and the JIT does not run the check); float constants;
+**Refused at compile time** (the loop is left to the interpreter or the C tier, and `jit_refused` counts it once): `/`, `^` and the
+bitwise operators (`/` and `^` give floats, and the bitwise ones are not encoded); float constants;
 a comparison or a logical operator used as a value; calls; upvalues and globals; tables, strings and fields; a local captured by a
 closure; `return`; a numeric `for` with a non-constant step, or a float `for`; a local read before its declaration in the text (a slot
 that an outer local shares).
@@ -639,14 +640,24 @@ that an outer local shares).
 takeover: `jit_guard_misses` and `jit_bailouts` count a failure, the interpreter goes on, and the loop is not taken over again until it
 is entered anew. A float that the loop only adds to an integer (`s = s + f` with `f = 2.5`) is such a failure, which the test checks.
 
-**Deopt.** There is none in this slice, and the reason is the subset, not the code: integer `+ - *` wrap in the interpreter and in the
-machine code alike, so there is no overflow that the code cannot represent, and the operators that could fail at run time are refused at
-compile time. So `jit_bailouts` counts the guard misses only. A later slice that adds `//` or `%` has to return the state at the top of the
-iteration (the same state the takeover hands over) without writing the locals back, as the C tier's abandoned runs do.
+**Deopt.** A `//` or `%` by zero is the one operation the code cannot finish. The interpreter raises "attempt to divide by zero" for `//`
+and "attempt to perform 'n%0'" for `%`, at the line of the operation, and so does the code's deopt. The code tests the divisor first;
+on a zero it drops the values it has pushed, writes every local of the loop back to the frame (a live-in, or one the loop declares, in
+its register or in REGS), and returns a site number (`jit::run`, `jit::resume`). The site is the innermost statement or condition the
+operation is in: an assignment or declaration, a condition of an `if`, `while` or `repeat`, or the start or limit of an inner `for`.
+`jit::resume` then runs that unit in the interpreter, which raises the error. This is sound because a unit is pure until its stores,
+which come after all its operands: the unit's first zero divisor is the one the code stopped at, and the locals are the frame's, as the
+interpreter would have them at that statement. The unit is run with `exec` (a statement) or `eval` (an expression), so the error
+message and the line come from the interpreter's own operation. The loop is not resumed: the error leaves it. Every division site jumps to
+one stub, which writes the locals back and returns; the normal exit writes back only the live-ins the loop assigns, as before.
+`INT_MIN // -1` and `INT_MIN % -1` do not fail in the interpreter (the helpers wrap, `-a` and `0`), so the code gives the same result
+without a deopt; the machine's `idiv` traps on that operand pair, which is why the divisor -1 is a separate case.
+
+The guard still makes the entry safe: the deopt is only ever reached with the guard holding, so the frame has integers in its live-ins.
 
 **Counters** (`State::stats`, all zero unless the JIT is on): `jit_compiled` (loops encoded), `jit_entries` (takeovers that ran the loop
-to its end), `jit_guard_misses`, `jit_bailouts` (times compiled code handed a loop back to the interpreter; equal to the guard misses in
-this slice), `jit_refused` (loops refused at compile time, counted once per loop).
+to its end), `jit_guard_misses`, `jit_bailouts` (times compiled code handed a loop back to the interpreter: a guard miss, or a deopt, which
+is the one that raises the error), `jit_refused` (loops refused at compile time, counted once per loop).
 
 **The code.** One 64-bit word per local and per hidden variable of a `for` in an array whose address is in RBX. The four words with the
 most references (weighted by loop depth, so the loop's control variables come first) live in R12-R15 for the whole loop instead: they
@@ -660,13 +671,19 @@ Speed, the pathb build, `NFCAST_TIER=sync NFCAST_JIT=1 driver --jit`, wall time 
 operand on the stack), 0.164 s with the register allocation, and 0.117-0.120 s with the leaf operands (10 interleaved runs each, two
 batches). `s = s + i` (100M) went 0.143 s, then 0.178 s with the register allocation alone, then 0.099 s with the leaf operands. The
 10M version of the first benchmark went from 0.025 s to 0.020 s. The C tier (`NFCAST_TIER=sync`, the JIT off) runs the same 100M
-benchmark in 0.050 s and the 10M one in 0.013 s, so the JIT is about 2.3 times slower on this loop. A binary operation whose
+benchmark in 0.050 s and the 10M one in 0.013 s, so the JIT is about 2.3 times slower on this loop. With the `//` and `%` slice (the
+deopt), the 100M benchmark was no slower: six interleaved runs of each build gave medians of 121 ms before and 124 ms after (process
+start included; the noise is the same +-10%). The loop has no division: its body is unchanged, and only the exit path differs (the
+same instructions, reordered). A binary operation whose
 two operands are both compound (`(a + b) * (c + d)`) still keeps its left value on the machine stack; the speed of such loops was not
 measured.
 
 **Verification.** `tests/ast/jit.cpp` runs a set of loops (the refusals, the guard miss, the wraparound, nested and re-entered loops,
-`break`, the conditions) and 300 generated loops with nested ifs, whiles and wrapping arithmetic; each must give the interpreter's
-result, the counters must say what the case expects, and the generated loops must all compile and be taken over. `tests/ast/run.sh`
+`break`, the conditions, `//` and `%` on positive and negative operands, the smallest integer divided by -1, and the deopts: a zero
+divisor in an assignment, a condition of a `while` or `repeat`, the limit of an inner `for`, and a compound operand with a value pushed)
+and 300 generated loops with nested ifs, whiles, wrapping arithmetic and `//` or `%` by nonzero constants; each must give the
+interpreter's result, the counters must say what the case expects (a deopt is one `jit_bailouts`, and the error is the interpreter's),
+and the generated loops must all compile and be taken over. `tests/ast/run.sh`
 runs it, and it also runs every `tests/ast/cases/*.lua` program with the tier on and the JIT on (`--jit`), against the output of a
 real Lua 5.4. In the sandbox this was written in, `tests/ast/tier.cpp` fails two checks of "a host that ignores SIGCHLD" (lines 685 and 691
 of the file): the unmodified HEAD fails the same two, with the same output, so they are the environment's, not the JIT's.
