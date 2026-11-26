@@ -31,10 +31,11 @@ module BaseRbsNative
   METHOD_CALL = /\bmrb_define_(method|class_method|singleton_method|module_function|private_method)(?:_id)?\s*\(/.freeze
   # ROM method tables, as the preprocessed sources spell them: `mrb_mt_entry NAME[] = { { { .func = (fn) }, (SYM), aspec },
   # ... };` (MRB_MT_ENTRY expanded; an entry MRB_MT_EXCLUDE_HEADER drops is already gone), installed by
-  # `mrb_mt_init_rom(mrb, OWNER, NAME, count)`, on `mrb_singleton_class_ptr(mrb, mrb_obj_value(OWNER))` for class methods.
+  # `mrb_mt_init_rom(mrb, OWNER, NAME, count)` or, with a const layer, `mrb_mt_init_rom_layer(mrb, OWNER, NAME, &layer)`,
+  # on `mrb_singleton_class_ptr(mrb, mrb_obj_value(OWNER))` for class methods.
   ROM_TABLE = /\bmrb_mt_entry\s+(\w+)\s*\[\s*\]\s*=\s*\{(.*?)\n\s*\}\s*;/m.freeze
   ROM_ENTRY = /\{\s*\{\s*\.func\s*=\s*\(\s*(\w+)\s*\)\s*\}\s*,\s*\(([^()]*)\)\s*,\s*(.*?)\s*\}\s*,?\s*$/.freeze
-  ROM_INSTALL = /\bmrb_mt_init_rom\s*\(/.freeze
+  ROM_INSTALL = /\bmrb_mt_init_rom(?:_layer)?\s*\(/.freeze
   ROM_SINGLETON = /\Amrb_singleton_class_ptr\s*\(\s*\w+\s*,\s*mrb_obj_value\s*\(\s*(.+?)\s*\)\s*\)\z/.freeze
   NAME_TOKEN = /\A[A-Z]\w*(?:::[A-Z]\w*)*\z/.freeze
 

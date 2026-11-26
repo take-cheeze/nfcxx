@@ -489,7 +489,7 @@ module NativeOwnerMap
       tables << [match[1], match.begin(0), body.scan(ROM_ENTRY_FN_RE).map { |fn, macro, tok| [fn, resolve_mrb_sym_token(macro, tok)] }] if body
     end
     out = []
-    text.scan(/\b(?:MRB_MT_INIT_ROM|mrb_mt_init_rom)\s*\(/) do
+    text.scan(/\b(?:MRB_MT_INIT_ROM|mrb_mt_init_rom(?:_layer)?)\s*\(/) do
       match = Regexp.last_match
       args, = call_args(text, match.end(0) - 1)
       # A table name may be defined once per preprocessor branch: the install reads the nearest definition above it.
@@ -510,7 +510,7 @@ module NativeOwnerMap
     # Tables installed on a singleton class (a class object's, or the main object's): never on an instance's lookup
     # path, as for the define_class_method / define_singleton_method families.
     singleton = Set.new
-    text.scan(/\b(?:MRB_MT_INIT_ROM|mrb_mt_init_rom)\s*\(/) do
+    text.scan(/\b(?:MRB_MT_INIT_ROM|mrb_mt_init_rom(?:_layer)?)\s*\(/) do
       match = Regexp.last_match
       args, = call_args(text, match.end(0) - 1)
       next unless args && args.size >= 3
