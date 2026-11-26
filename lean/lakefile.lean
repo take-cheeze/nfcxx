@@ -10,3 +10,7 @@ lean_lib NfcxxIR where
 
 lean_exe nfcxx_ir where
   root := `Main
+
+-- The Y1-SIMT toy GPU of the Theoric note (Y1.lean): its checks are evaluated when this library builds.
+lean_lib Y1 where
+  roots := #[`Y1]

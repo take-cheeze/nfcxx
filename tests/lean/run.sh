@@ -8,6 +8,9 @@ if ! command -v lake >/dev/null 2>&1; then
   exit 0
 fi
 lake build nfcxx_ir || { echo "FAIL tests/lean: build"; exit 1; }
+# The Y1-SIMT model (lean/Y1.lean): its checks (the 4x4 matmul, a mutant, out-of-range access) are evaluated by the build.
+lake build Y1 || { echo "FAIL tests/lean: Y1 checks"; exit 1; }
+echo "ok: Y1-SIMT model and its matmul checks"
 exe=.lake/build/bin/nfcxx_ir
 fail=0
 if ! "$exe" check ../tests/pathb-ir/*.ir > /dev/null; then

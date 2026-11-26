@@ -31,3 +31,15 @@ their type after each operation; the run is fuel-bounded, and so is the nesting 
     nfcxx_ir run FILE FUNCTION   # run a function without parameters: value, trap or stuck
                                  # (FUNCTION may be main; the functions of FILE are available to its calls)
     tests/lean/run.sh            # also runs the IR functions in lean/tests/sem with their known outcomes
+
+## Y1.lean: the Y1-SIMT toy GPU
+
+`Y1.lean` is the toy GPU of the Theoric note "Building Virtual Hardware for Real Performance", as a Lean model: four lanes
+in lockstep, 64 vector registers, flat VRAM, and three instructions (`load4`, `write4`, `fdot4`). A register index is a
+`Fin 64`, so an out-of-range register is a compile error. Values are `Int`, not FP32, so the results are exact.
+
+The 4x4 matrix multiply of the note runs as a 16-instruction program and its result is checked against the product, a
+mutant with a wrong accumulator is shown to differ, and out-of-range loads and stores are shown to be errors. The checks
+are `example`s, evaluated when `lake build Y1` runs (also in `tests/lean/run.sh`).
+
+Not modelled: floating point and rounding, the virtual profiler, and any program beyond the 4x4 demo.
