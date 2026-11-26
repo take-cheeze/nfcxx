@@ -1921,6 +1921,56 @@ static int host_schar(LV *out, LV *args, int nargs) {
 }
 
 /* string.format: %d %i %u %c %x %X %o %e %E %f %g %G %s %q %% with flags, width and precision as printf. */
+/* %q (lstrlib.c's addliteral): a literal that reads back as the same value. Strings are quoted with the escapes of
+ * addquoted; integers are decimal (the minimum as hex); floats are hexadecimal, or 1e9999, -1e9999 and (0/0). */
+static LV literal_of(const LV *v, int argno) {
+  char buf[64];
+  switch (v->tag) {
+    case TAG_STR: {
+      const LString *s = (const LString *)v->v.p;
+      char *out = (char *)malloc(s->len * 4 + 3);
+      if (out == NULL) die("out of memory");
+      size_t n = 0;
+      out[n++] = '"';
+      for (size_t k = 0; k < s->len; ++k) {
+        unsigned char c = (unsigned char)s->bytes[k];
+        if (c == '"' || c == '\\' || c == '\n') {
+          out[n++] = '\\';
+          out[n++] = (char)c;
+        } else if (iscntrl(c)) {
+          int next = k + 1 < s->len ? (unsigned char)s->bytes[k + 1] : 0;
+          n += (size_t)sprintf(out + n, isdigit(next) ? "\\%03d" : "\\%d", (int)c);
+        } else {
+          out[n++] = (char)c;
+        }
+      }
+      out[n++] = '"';
+      LV r = make_str(out, n);
+      free(out);
+      return r;
+    }
+    case TAG_INT:
+      if (v->v.i == INT64_MIN) snprintf(buf, sizeof buf, "0x%llx", (unsigned long long)v->v.i);
+      else snprintf(buf, sizeof buf, "%lld", (long long)v->v.i);
+      return make_str(buf, strlen(buf));
+    case TAG_FLOAT: {
+      double n = v->v.n;
+      const char *s = buf;
+      if (n == HUGE_VAL) s = "1e9999";
+      else if (n == -HUGE_VAL) s = "-1e9999";
+      else if (n != n) s = "(0/0)";
+      else snprintf(buf, sizeof buf, "%a", n);
+      return make_str(s, strlen(s));
+    }
+    case TAG_NIL: return make_str("nil", 3);
+    case TAG_FALSE: return make_str("false", 5);
+    case TAG_TRUE: return make_str("true", 4);
+    default: break;
+  }
+  arg_fail(argno, "format", "value has no literal form");
+  return make_str("", 0);
+}
+
 static int host_sformat(LV *out, LV *args, int nargs) {
   LV fmt = arg_str(args, nargs, 1, "format");
   const LString *f = (const LString *)fmt.v.p;
@@ -1954,6 +2004,7 @@ static int host_sformat(LV *out, LV *args, int nargs) {
     memcpy(spec, f->bytes + start, sl);
     spec[sl] = '\0';
     arg++;
+    if (arg > nargs) arg_fail(arg, "format", "no value");
     char piece[512];
     int pl = 0;
     switch (conv) {
@@ -1980,6 +2031,21 @@ static int host_sformat(LV *out, LV *args, int nargs) {
         pl = snprintf(piece, sizeof piece, spec, (int)v);
         break;
       }
+      case 'q': {
+        if (sl != 1) rt_fail("specifier '%q' cannot have modifiers", -1);
+        LV lit = literal_of(&args[arg - 1], arg);
+        const LString *ls = (const LString *)lit.v.p;
+        if (len + ls->len + 1 >= cap) {
+          while (len + ls->len + 1 >= cap) cap *= 2;
+          buf = (char *)realloc(buf, cap);
+        }
+        memcpy(buf + len, ls->bytes, ls->len);
+        len += ls->len;
+        pl = 0;
+        break;
+      }
+      case 'a':
+      case 'A':
       case 'e':
       case 'E':
       case 'f':
