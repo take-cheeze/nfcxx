@@ -1,7 +1,18 @@
 // Ruby 3.3 YARV bytecode -> Path B IR text (tools/yarvbc/yarv_lower.hpp). The first subset: integers, nil, true and false,
 // local variables of the top level and of a method, the integer operators and comparisons, branches and while loops, and
-// calls of the methods the program defines at the top level with def (positional arguments, recursion). Everything else is
-// refused with a named message (yarv::Refused).
+// calls of the methods the program defines at the top level with def (positional arguments, recursion). The second: a
+// block literal (a `send` with a block iseq) passed to a method the program defines, which yields to it (`yield` with
+// arguments, `block_given?`), and `Integer#times` with a block. A block reads and writes the locals of the frame it is made
+// in (level 1). Everything else is refused with a named message (yarv::Refused).
+//
+// Blocks: a block is the function mrb_b<N>(ret, argv, argc, outer): argv[0..argc-1] are the arguments, outer is the frame of
+// the function the block literal is in (its locals are the level-1 locals). `Integer#times` calls the block's function
+// directly in a loop with the receiver's count. A block passed to a method is a closure (mrbbc_block, the runtime's Clo of
+// tests/mrbbc/runtime, in a slot of the creator's frame) whose id is the block's number; `yield` in the method calls
+// the function of that number (mrbbc_blk_id, mrbbc_blk_frame). A block is only ever called while its creator's frame is
+// alive (it cannot be stored: &blk, proc and lambda are refused). A block that leaves early (`next` with or without a
+// value, which compiles to a `leave` before the block's end) is refused, and so are a block in a block, `yield` and
+// `block_given?` in a block, `break` (a throw) and the redo/next catch table.
 //
 // The shape of the IR is the one tools/mrbbc lowers mruby bytecode to (docs/notes/mrbbc-pathb.md), and the same runtime runs
 // it (tests/mrbbc/runtime: the MV tags, the integer helpers mrbbc_binop, mrbbc_find for the arity and the method number,
@@ -34,6 +45,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace yarvbc {
@@ -50,7 +62,9 @@ using yarv::Refused;
 using yarv::Value;
 
 // The tags and operator numbers of the runtime (tests/mrbbc/runtime/mrbrt.h).
-constexpr int kTagNil = 0, kTagFalse = 1, kTagTrue = 2, kTagInt = 3;
+constexpr int kTagNil = 0, kTagFalse = 1, kTagTrue = 2, kTagInt = 3, kTagBlk = 7;
+// The closure slot of a block value (the runtime's MRBBC_CLO_BYTES: a Clo of tests/mrbbc/runtime/mrbrt.c).
+constexpr std::size_t kCloBytes = 192;
 constexpr int kOpAdd = 0, kOpSub = 1, kOpMul = 2, kOpDiv = 3, kOpLt = 4, kOpLe = 5, kOpGt = 6, kOpGe = 7, kOpEq = 8,
               kOpNeq = 9;
 
@@ -65,9 +79,15 @@ constexpr std::uint64_t kCallKnown = kCallFcall | kCallVcall | kCallArgsSimple |
 
 // The iseq's param flags (compile.c's ibf_dump_iseq_each): bit 0 is has_lead, the only parameter kind lowered.
 constexpr std::uint64_t kParamHasLead = 1;
+// bit 7 (ambiguous_param0): a block with one required parameter and no comma (`|x|`), which only stops an array argument
+// from being splatted; nothing here is an array, so a block takes it as lowered
+constexpr std::uint64_t kParamAmbiguous0 = 1u << 7;
 
 enum class Origin : std::uint8_t { Value, Self };
 using Stack = std::vector<Origin>;
+
+// What a function is: the top level, a method (with a block parameter) or a block (argv and an outer frame).
+enum class Kind : std::uint8_t { Top, Method, Block };
 
 [[noreturn]] void refuse(const std::string &what, const Insn &in) {
   throw Refused("refused: " + what + " (" + in.name + " at pc " + std::to_string(in.pc) + ")");
@@ -274,6 +294,9 @@ class Lowerer {
   std::set<std::string> defined_;              // the names the program defines with def (definemethod, at the top level)
   std::vector<std::size_t> methods_;           // the method iseqs by number
   std::map<std::size_t, int> method_no_;       // a method iseq -> its number
+  std::vector<std::size_t> blocks_;            // the block iseqs by number (the functions mrb_b<N>)
+  std::map<const Iseq *, int> block_no_;       // a block iseq -> its number
+  std::map<const Iseq *, std::size_t> outer_locals_;  // a block iseq -> the local count of the iseq it is made in
   Symbols syms_;
   std::ostringstream functions_;
 
@@ -283,17 +306,53 @@ class Lowerer {
     return v.s;
   }
 
+  // The block literal of a send (its block iseq), or none.
+  static bool has_block(const Insn &in) { return in.name == "send" && in.operands[1] != ~0ull; }
+  // `Integer#times` with a block, on an explicit receiver the program does not define times for (lowered as a loop).
+  bool is_times(const Insn &in, const CallInfo &ci) const {
+    return has_block(in) && ci.mid == "times" && ci.argc == 0 && (ci.flag & (kCallFcall | kCallVcall)) == 0 &&
+           defined_.count("times") == 0;
+  }
+  // `block_given?`, a self call with no arguments that the program does not define.
+  bool is_block_given(const Insn &in, const CallInfo &ci) const {
+    return in.name == "opt_send_without_block" && ci.mid == "block_given?" && ci.argc == 0 && (ci.flag & kCallFcall) != 0 &&
+           defined_.count("block_given?") == 0;
+  }
+  // The block number of a send's block literal.
+  int block_number(const Insn &in) const { return block_no_.at(&mod_.iseqs[static_cast<std::size_t>(in.operands[1])]); }
+
+  // Numbers the block literals of a function (its sends with a block iseq).
+  void collect_blocks(const Iseq &is);
+
   // The stack after one instruction, and the pcs it may go to next. Refuses what the producer does not lower.
   std::vector<std::size_t> step(const Iseq &is, const Insn &in, Stack &st) const;
   std::vector<Flow> analyze(const Iseq &is) const;
   void call_checks(const Insn &in, const CallInfo &ci) const;
 
-  void lower_function(const Iseq &is, const std::string &name, bool method);
+  void lower_function(const Iseq &is, const std::string &name, Kind kind);
   void emit(Fn &f, const Iseq &is, const Insn &in, std::size_t depth);
   void emit_send(Fn &f, const Insn &in, std::size_t depth, const CallInfo &ci);
+  void emit_times(Fn &f, const Insn &in, std::size_t depth);
+  void emit_yield(Fn &f, const Insn &in, std::size_t depth, const CallInfo &ci);
   std::string user_call() const;
-  void check_params(const Iseq &is, bool method) const;
+  void check_params(const Iseq &is, Kind kind) const;
 };
+
+void Lowerer::collect_blocks(const Iseq &is) {
+  for (const Insn &in : is.insns) {
+    if (!has_block(in)) continue;
+    const std::size_t child = static_cast<std::size_t>(in.operands[1]);
+    if (child >= mod_.iseqs.size() || mod_.iseqs[child].type != IseqType::Block) {
+      throw ReadError("malformed: the block of a send at pc " + std::to_string(in.pc) + " is not a block");
+    }
+    const Iseq *b = &mod_.iseqs[child];
+    if (block_no_.count(b) == 0) {
+      block_no_[b] = static_cast<int>(blocks_.size());
+      blocks_.push_back(child);
+      outer_locals_[b] = is.locals.size();
+    }
+  }
+}
 
 // Each stack state must be a single Origin shape where paths meet: a value and self may not meet at one slot.
 std::vector<Flow> Lowerer::analyze(const Iseq &is) const {
@@ -367,15 +426,36 @@ std::vector<std::size_t> Lowerer::step(const Iseq &is, const Insn &in, Stack &st
     }
     return {next};
   }
-  if (n == "getlocal_WC_0" || n == "setlocal_WC_0") {
+  if (n == "getlocal_WC_0" || n == "setlocal_WC_0" || n == "getlocal_WC_1" || n == "setlocal_WC_1") {
     // the operand is the local's offset from the environment pointer: table index = locals + 2 - operand (vm_core.h's
-    // VM_ENV_DATA_SIZE is 3), so the operand is in 3..locals+2
+    // VM_ENV_DATA_SIZE is 3), so the operand is in 3..locals+2; level 1 is the iseq the block is made in
+    const bool level1 = n == "getlocal_WC_1" || n == "setlocal_WC_1";
+    std::size_t outer = is.locals.size();
+    if (level1) {
+      auto it = outer_locals_.find(&is);
+      if (it == outer_locals_.end()) throw ReadError("malformed: a level-1 local at pc " + std::to_string(in.pc) + " is not in a block");
+      outer = it->second;
+    }
     const std::uint64_t raw = in.operands[0];
-    if (raw < 3 || raw > is.locals.size() + 2) {
+    if (raw < 3 || raw > outer + 2) {
       throw ReadError("malformed: local operand " + std::to_string(raw) + " at pc " + std::to_string(in.pc));
     }
-    if (n == "setlocal_WC_0") pop_value();
+    if (n == "setlocal_WC_0" || n == "setlocal_WC_1") pop_value();
     else push_value();
+    return {next};
+  }
+  if (n == "invokeblock") {
+    // yield: the arguments are popped and the block's value pushed. A yield in a block, or at the top level, is refused.
+    if (is.type != IseqType::Method) refuse("yield in a block (or outside a method) is not lowered yet", in);
+    const CallInfo &ci = is.calls[in.operands[0]];
+    call_checks(in, ci);
+    const std::size_t argc = static_cast<std::size_t>(ci.argc);
+    need(argc);
+    for (std::size_t k = 0; k < argc; ++k) {
+      if (st[st.size() - argc + k] != Origin::Value) refuse("self is used as an argument", in);
+    }
+    st.resize(st.size() - argc);
+    push_value();
     return {next};
   }
   if (n == "putnil" || n == "putobject_INT2FIX_0_" || n == "putobject_INT2FIX_1_") {
@@ -438,13 +518,26 @@ std::vector<std::size_t> Lowerer::step(const Iseq &is, const Insn &in, Stack &st
   }
   if (n == "send" || n == "opt_send_without_block") {
     const CallInfo &ci = is.calls[in.operands[0]];
-    if (n == "send" && in.operands[1] != ~0ull) refuse("a call with a block (e.g. Integer#times) is not lowered yet", in);
     call_checks(in, ci);
+    const std::size_t argc = static_cast<std::size_t>(ci.argc);
+    if (is_block_given(in, ci)) {
+      if (is.type == IseqType::Block) refuse("block_given? in a block is not lowered yet", in);
+      need(1);
+      if (st.back() != Origin::Self) refuse("block_given? with a receiver is not lowered yet", in);
+      st.pop_back();
+      push_value();
+      return {next};
+    }
+    if (has_block(in) && is.type == IseqType::Block) refuse("a block in a block is not lowered yet", in);
+    if (is_times(in, ci)) {
+      pop_value();  // the receiver is a value (self is refused); the result is the receiver itself
+      push_value();
+      return {next};
+    }
     if ((ci.flag & (kCallFcall | kCallVcall)) == 0) refuse("a call with an explicit receiver is not lowered yet", in);
     if (defined_.count(ci.mid) == 0) {
       refuse("a call of '" + ci.mid + "', which the program does not define, is not lowered yet", in);
     }
-    const std::size_t argc = static_cast<std::size_t>(ci.argc);
     need(argc + 1);
     if (st[st.size() - argc - 1] != Origin::Self) refuse("a self call's receiver is not self", in);
     for (std::size_t k = 0; k < argc; ++k) {
@@ -458,9 +551,18 @@ std::vector<std::size_t> Lowerer::step(const Iseq &is, const Insn &in, Stack &st
 }
 
 // The parameters a function is lowered with: only required ones (the top level takes none).
-void Lowerer::check_params(const Iseq &is, bool method) const {
+void Lowerer::check_params(const Iseq &is, Kind kind) const {
+  if (kind == Kind::Block) {
+    // a block's catch table is next or redo (break is a throw, refused by the reader)
+    if (is.catch_count != 0) throw Refused("refused: next and redo (a catch table in a block) are not lowered yet");
+    if ((is.param_flags & ~(kParamHasLead | kParamAmbiguous0)) != 0) {
+      throw Refused("refused: optional, rest, post, keyword and block parameters of a block are not lowered yet");
+    }
+    if (is.lead_num > is.locals.size()) throw ReadError("malformed: a block has more parameters than locals");
+    return;
+  }
   if (is.catch_count != 0) throw Refused("refused: rescue and ensure (a catch table) are not lowered yet");
-  if (method) {
+  if (kind == Kind::Method) {
     if ((is.param_flags & ~kParamHasLead) != 0) {
       throw Refused("refused: optional, rest, post, keyword and block parameters are not lowered yet");
     }
@@ -480,6 +582,19 @@ void Lowerer::emit_send(Fn &f, const Insn &in, std::size_t depth, const CallInfo
   f.add_slot(argv, 16 * (argc + 1));
   f.add_slot(nilb, 16);
   store_tag(f, f.named(nilb), kTagNil);
+  // the block the call gives: a closure of this frame (mrbbc_block: the block's number, a nil self, this frame as the
+  // frame the block reads its level-1 locals from); the method's blk parameter is its address
+  std::string blk = f.named(nilb);
+  if (has_block(in)) {
+    const std::string clo = "clo" + tag, blkmv = "blkmv" + tag, selfnil = "selfnil" + tag;
+    f.add_slot(clo, kCloBytes);
+    f.add_slot(blkmv, 16);
+    f.add_slot(selfnil, 16);
+    store_tag(f, f.named(selfnil), kTagNil);
+    f.line("(eval (call void &\"mrbbc_block\" " + f.named(blkmv) + " " + f.named(clo) + " (const long " +
+           num(block_number(in)) + ") " + f.named(selfnil) + " " + f.named("frame") + " " + f.named("frame") + "))");
+    blk = f.named(blkmv);
+  }
   copy16(f, f.named(argv), f.stack(recv));
   for (std::size_t i = 1; i <= argc; ++i) {
     const std::string p = f.fresh();
@@ -493,7 +608,74 @@ void Lowerer::emit_send(Fn &f, const Insn &in, std::size_t depth, const CallInfo
     const std::string hit = f.fresh();
     f.line("(let " + hit + " bool (eq int " + id + " (const int " + num(static_cast<long long>(m)) + ")))");
     f.line("(if " + hit + " (then (eval (call void &\"mrb_m" + std::to_string(m) + "\" " + f.stack(recv) + " " + f.named(argv) +
-           " " + f.named(nilb) + " (const long " + num(static_cast<long long>(argc)) + ") (const long 0)))))");
+           " " + blk + " (const long " + num(static_cast<long long>(argc)) + ") (const long 0)))))");
+  }
+}
+
+// Integer#times with a block: a loop that calls the block's function with the count 0 .. n-1 (n is the receiver's value, in
+// the receiver's slot, which the result is too: times returns its receiver). A receiver that is not an Integer has no times:
+// NoMethodError, as mrbbc_no_method raises it.
+void Lowerer::emit_times(Fn &f, const Insn &in, std::size_t depth) {
+  const std::string tag = std::to_string(in.pc);
+  const std::string recv = f.stack(depth - 1);
+  const std::string argv = "tv" + tag, ret = "tret" + tag;
+  f.add_slot(argv, 16);
+  f.add_slot(ret, 16);
+  const std::string tg = load_tag(f, recv);
+  const std::string isint = tag_is(f, tg, kTagInt);
+  const std::string ok = "tint" + tag, top = "tl" + tag, end = "te" + tag;
+  f.line("(if " + isint + " (then (goto \"" + ok + "\")))");
+  // the message of ruby 3.3 for the receivers that are not integers (nil, true, false: the only other values here)
+  const std::pair<int, const char *> others[] = {{kTagNil, "nil"}, {kTagTrue, "true"}, {kTagFalse, "false"}};
+  for (const auto &o : others) {
+    const std::string hit = tag_is(f, tg, o.first);
+    f.line("(if " + hit + " (then (eval (call void &\"mrbbc_raise\" @\"" + syms_.item("NoMethodError") + "\" @\"" +
+           syms_.item(std::string("undefined method `times' for ") + o.second) + "\"))))");
+  }
+  f.line("(eval (call void &\"mrbbc_no_method\" " + recv + " @\"" + syms_.item("times") + "\"))");
+  f.line("(label \"" + ok + "\")");
+  const std::string n = load_int(f, recv), i = f.fresh();
+  f.line("(let " + i + " long (const long 0))");
+  f.line("(label \"" + top + "\")");
+  const std::string done = f.fresh();
+  f.line("(let " + done + " bool (le.s long " + n + " " + i + "))");
+  f.line("(if " + done + " (then (goto \"" + end + "\")))");
+  store_int(f, f.named(argv), i);
+  f.line("(eval (call void &\"mrb_b" + num(block_number(in)) + "\" " + f.named(ret) + " " + f.named(argv) + " (const long 1) " +
+         f.named("frame") + "))");
+  const std::string next = f.fresh();
+  f.line("(let " + next + " long (cadd long " + i + " (const long 1)))");
+  f.line("(set " + i + " " + next + ")");
+  f.line("(goto \"" + top + "\")");
+  f.line("(label \"" + end + "\")");
+}
+
+// yield: the arguments go to a vector, the method's block (blk, the %2 parameter) must be a block (LocalJumpError as vm.c
+// raises it, when it is not), and the block's number picks the function, as a self call's method does.
+void Lowerer::emit_yield(Fn &f, const Insn &in, std::size_t depth, const CallInfo &ci) {
+  const std::string tag = std::to_string(in.pc);
+  const std::size_t argc = static_cast<std::size_t>(ci.argc);
+  const std::size_t base = depth - argc;  // the first argument's position, which the result takes
+  const std::string argv = "yargv" + tag;
+  f.add_slot(argv, 16 * (argc == 0 ? 1 : argc));
+  for (std::size_t i = 0; i < argc; ++i) {
+    const std::string p = f.fresh();
+    f.line("(let " + p + " (ptr unsigned_char) (offset " + f.named(argv) + " " + num(static_cast<long long>(16 * i)) + "))");
+    copy16(f, p, f.stack(base + i));
+  }
+  const std::string isblk = tag_is(f, load_tag(f, "%2"), kTagBlk), ok = "yok" + tag;
+  f.line("(if " + isblk + " (then (goto \"" + ok + "\")))");
+  f.line("(eval (call void &\"mrbbc_raise\" @\"" + syms_.item("LocalJumpError") + "\" @\"" + syms_.item("no block given (yield)") +
+         "\"))");
+  f.line("(label \"" + ok + "\")");
+  const std::string id = f.fresh(), fr = f.fresh();
+  f.line("(let " + id + " long (call long &\"mrbbc_blk_id\" %2))");
+  f.line("(let " + fr + " (ptr unsigned_char) (call (ptr unsigned_char) &\"mrbbc_blk_frame\" %2))");
+  for (std::size_t m = 0; m < blocks_.size(); ++m) {
+    const std::string hit = f.fresh();
+    f.line("(let " + hit + " bool (eq long " + id + " (const long " + num(static_cast<long long>(m)) + ")))");
+    f.line("(if " + hit + " (then (eval (call void &\"mrb_b" + std::to_string(m) + "\" " + f.stack(base) + " " + f.named(argv) +
+           " (const long " + num(static_cast<long long>(argc)) + ") " + fr + "))))");
   }
 }
 
@@ -509,6 +691,15 @@ void Lowerer::emit(Fn &f, const Iseq &is, const Insn &in, std::size_t depth) {
     copy16(f, f.stack(depth), f.slot(local_index(in)));
   } else if (n == "setlocal_WC_0") {
     copy16(f, f.slot(local_index(in)), f.stack(depth - 1));
+  } else if (n == "getlocal_WC_1" || n == "setlocal_WC_1") {
+    // the block's level-1 local: a slot of the frame the block was made in (%3, the outer parameter)
+    const std::size_t k = outer_locals_.at(&is) + 2 - static_cast<std::size_t>(in.operands[0]);
+    const std::string p = f.fresh();
+    f.line("(let " + p + " (ptr unsigned_char) (offset %3 " + num(static_cast<long long>(16 * k)) + "))");
+    if (n == "getlocal_WC_1") copy16(f, f.stack(depth), p);
+    else copy16(f, p, f.stack(depth - 1));
+  } else if (n == "invokeblock") {
+    emit_yield(f, in, depth, is.calls[in.operands[0]]);
   } else if (n == "putnil") {
     store_tag(f, f.stack(depth), kTagNil);
   } else if (n == "putself") {
@@ -566,7 +757,16 @@ void Lowerer::emit(Fn &f, const Iseq &is, const Insn &in, std::size_t depth) {
     copy16(f, "%0", f.stack(depth - 1));
     f.line("(return)");
   } else if (n == "send" || n == "opt_send_without_block") {
-    emit_send(f, in, depth, is.calls[in.operands[0]]);
+    const CallInfo &ci = is.calls[in.operands[0]];
+    if (is_block_given(in, ci)) {
+      // the method's own block (its blk parameter, %2) in a method; false at the top level (the step refused a block)
+      if (is.type == IseqType::Method) f.line("(eval (call void &\"mrbbc_blk_given\" " + f.stack(depth - 1) + " %2))");
+      else store_tag(f, f.stack(depth - 1), kTagFalse);
+    } else if (is_times(in, ci)) {
+      emit_times(f, in, depth);
+    } else {
+      emit_send(f, in, depth, ci);
+    }
   } else if (n == "definemethod") {
     const std::size_t child = static_cast<std::size_t>(in.operands[1]);
     auto it = method_no_.find(child);
@@ -580,26 +780,49 @@ void Lowerer::emit(Fn &f, const Iseq &is, const Insn &in, std::size_t depth) {
   }
 }
 
-void Lowerer::lower_function(const Iseq &is, const std::string &name, bool method) {
-  if (method && is.type != IseqType::Method) throw Refused("refused: a block or class body is not lowered yet");
-  check_params(is, method);
+void Lowerer::lower_function(const Iseq &is, const std::string &name, Kind kind) {
+  if (kind == Kind::Method && is.type != IseqType::Method) throw Refused("refused: a class body is not lowered yet");
+  if (kind == Kind::Block && is.type != IseqType::Block) throw ReadError("malformed: a block's iseq is not a block");
+  check_params(is, kind);
+  if (kind == Kind::Block) {
+    // next (with or without a value) compiles to a leave before the block's end, as the block's own value does at the end:
+    // an early leave is not told apart from the value, so such a block is refused
+    for (std::size_t i = 0; i + 1 < is.insns.size(); ++i) {
+      if (is.insns[i].name == "leave") refuse("a block that returns before its end (next) is not lowered yet", is.insns[i]);
+    }
+  }
   const std::vector<Flow> flows = analyze(is);
   std::size_t deepest = 0;
   for (const Flow &fl : flows) {
     if (fl.reached && fl.stack.size() + 1 > deepest) deepest = fl.stack.size() + 1;
   }
   const std::size_t nl = is.locals.size();
-  Fn f(nl, nl + (deepest == 0 ? 1 : deepest), method);
+  Fn f(nl, nl + (deepest == 0 ? 1 : deepest), kind != Kind::Top);
 
-  // a method's parameters are the first locals: argv[1..lead] (mrbbc_find has checked the count); the rest are nil
+  // a method's parameters are the first locals: argv[1..lead] (mrbbc_find has checked the count); a block's are argv[0..]
+  // (the ones the yield gave; the rest are nil). The rest of the locals are nil.
   for (std::size_t i = 0; i < f.frame_slots; ++i) {
     f.line("(let " + f.slot(i) + " (ptr unsigned_char) (offset $\"frame\" " + num(static_cast<long long>(16 * i)) + "))");
   }
-  const std::size_t lead = method ? static_cast<std::size_t>(is.lead_num) : 0;
-  for (std::size_t i = 0; i < lead; ++i) {
-    const std::string p = f.fresh();
-    f.line("(let " + p + " (ptr unsigned_char) (offset %1 " + num(static_cast<long long>(16 * (i + 1))) + "))");
-    copy16(f, f.slot(i), p);
+  const std::size_t lead = kind == Kind::Top ? 0 : static_cast<std::size_t>(is.lead_num);
+  if (kind == Kind::Method) {
+    for (std::size_t i = 0; i < lead; ++i) {
+      const std::string p = f.fresh();
+      f.line("(let " + p + " (ptr unsigned_char) (offset %1 " + num(static_cast<long long>(16 * (i + 1))) + "))");
+      copy16(f, f.slot(i), p);
+    }
+  } else if (kind == Kind::Block) {
+    for (std::size_t i = 0; i < lead; ++i) {
+      // a parameter the yield gave (i < argc) takes its argument; the others are nil (no array is splatted: there are none)
+      const std::string given = f.fresh(), p = f.fresh();
+      f.line("(let " + given + " bool (lt.s long (const long " + num(static_cast<long long>(i)) + ") %2))");
+      f.line("(if " + given + " (then");
+      f.line("(let " + p + " (ptr unsigned_char) (offset %1 " + num(static_cast<long long>(16 * i)) + "))");
+      copy16(f, f.slot(i), p);
+      f.line(") (else");
+      store_tag(f, f.slot(i), kTagNil);
+      f.line("))");
+    }
   }
   for (std::size_t i = lead; i < nl; ++i) store_tag(f, f.slot(i), kTagNil);
 
@@ -616,9 +839,11 @@ void Lowerer::lower_function(const Iseq &is, const std::string &name, bool metho
 
   std::ostringstream fn;
   fn << "(function \"" << name << "\" (ret void) (params (param %0 \"ret\" (ptr (struct \"MV\")))";
-  if (method) {
+  if (kind == Kind::Method) {
     fn << " (param %1 \"argv\" (ptr (struct \"MV\"))) (param %2 \"blk\" (ptr (struct \"MV\"))) (param %3 \"argc\" long)"
        << " (param %4 \"kw\" long)";
+  } else if (kind == Kind::Block) {
+    fn << " (param %1 \"argv\" (ptr (struct \"MV\"))) (param %2 \"argc\" long) (param %3 \"outer\" (ptr (struct \"MV\")))";
   }
   fn << ")\n";
   fn << "  (slot \"frame\" (struct \"MV\") " << 16 * f.frame_slots << " 8)\n";
@@ -659,9 +884,15 @@ std::string Lowerer::run(const std::string &source_name) {
       methods_.push_back(child);
     }
   }
-  lower_function(root, "mrb_irep_0", false);
+  // the blocks: the block literals of the top level and of the methods, numbered in order
+  collect_blocks(root);
+  for (std::size_t m = 0; m < methods_.size(); ++m) collect_blocks(mod_.iseqs[methods_[m]]);
+  lower_function(root, "mrb_irep_0", Kind::Top);
   for (std::size_t m = 0; m < methods_.size(); ++m) {
-    lower_function(mod_.iseqs[methods_[m]], "mrb_m" + std::to_string(m), true);
+    lower_function(mod_.iseqs[methods_[m]], "mrb_m" + std::to_string(m), Kind::Method);
+  }
+  for (std::size_t b = 0; b < blocks_.size(); ++b) {
+    lower_function(mod_.iseqs[blocks_[b]], "mrb_b" + std::to_string(b), Kind::Block);
   }
   functions_ << user_call();
 
