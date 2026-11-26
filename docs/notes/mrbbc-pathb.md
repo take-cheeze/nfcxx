@@ -456,6 +456,11 @@ whose message says so, never with a value.
   with a keyword argument, and an operator the program defines at the top level) and a generated one with EXT1 prefixes. `err/` is the refusal set, `rterr/` the runtime errors; the brief's "err/ programs must be
   refused" is read as the first.
 
+- Measurement (`tests/mrbbc/lower/measure.sh`): one row per value program with the IR bytes, the `.text` bytes of the
+  program's object, the peak RSS and the runtime's malloc bytes (total and peak, `runtime/count_alloc.c`, linked with
+  `--wrap`). `LOWER_FLAGS` and `RT_FLAGS` select a variant. The `gc_*.rb` programs allocate in loops (string building,
+  array churn, objects, blocks) and `int_big.rb` crosses the small-integer ranges of the word layouts.
+
 Round 2 (strings, arrays, SEND0 and SEND of the core methods) is in the tables above. Round 3 lowers methods (see
 "Methods": `def` of a method with required parameters, self calls to the program's methods) and blocks (see "Blocks":
 `BLOCK`, `SSENDB`, `BLKPUSH`, `BLKCALL`, `GETUPVAR` and `SETUPVAR` at level 0, `block_given?`, and `RETURN_BLK` out of a
