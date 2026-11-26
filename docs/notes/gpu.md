@@ -461,7 +461,14 @@ largest warp time; its issue slots, the sum over its warps of the busiest lane's
 instructions per cycle (default 4); and its global bytes at `--bw BYTES` per cycle (default 16), each warp issue
 counting the 32-byte sectors its active lanes touch (a sector once per issue), except that an L1 hit moves no bytes. The blocks of an SM run in waves of `--resident N` blocks
 (default 1, one block at a time; `--warps-per-sm N` derives the number from the SM's warp slots instead, N / warps per block): a wave takes the largest of its blocks' times, or the summed issue slots or bytes of
-its blocks if that is more, since co-resident blocks share the SM. The kernel takes the slowest SM (`--sms N`, default 1). The counts take three 4-byte counters per thread and instruction, so
+its blocks if that is more, since co-resident blocks share the SM. The kernel takes the slowest SM (`--sms N`, default 1).
+The per-SM bytes bound stays, since `--bw` is one SM's load/store path. Two options extend the model, both off by default:
+`--gpu-bw BYTES` (default 0) shares one memory system across the GPU: the kernel also takes at least the total bytes of all
+its blocks at that rate, so the kernel takes `max(slowest SM, ceil(total bytes / BYTES))`. The bounds combine by `max`, not
+`sum`, because both are lower bounds on the same bytes. `--blocks-per-sm N` (default 0, no cap) caps the residency: a wave
+has `R = min(W, N)` blocks, where `W` is `--resident N` or, with `--warps-per-sm N`, the warp slots N / (warps per block), at
+least 1. So `--warps-per-sm` replaces `--resident` when both are given, and the cap can only lower `R`; `--resident 8
+--blocks-per-sm 2` is two-block waves. The counts take three 4-byte counters per thread and instruction, so
 `nthreads x ninst x 12` bytes (about 400 MB for 4096 threads and 8192 instructions, a few MB for a typical kernel); they
 are kept only with `--timing`.
 
@@ -482,8 +489,14 @@ issue-width and bandwidth bounds (exact values: 4096 cycles at 1 byte per cycle 
 `--issue` doubles an ALU-bound block), the L1 (`l1line.ptx`: 32 threads reading one 128-byte line; one block gives 656
 cycles, two blocks on one SM 1022 (one miss, then a block of hits) against 1312 without the cache; the per-SM keying is
 exact over every schedule of three blocks on two SMs, 1022; and `evict.ptx`: a one-line cache evicts, 966 against 676
-for two lines), and the ranges above.
+for two lines), and the ranges above. The GPU-wide options (`timing/store_all.ptx`, 8 blocks of 1024 threads, 32768
+bytes in all, 4096 per block): with `--sms 8 --bw 1` the answer is 4096; `--gpu-bw 1` gives 32768, `--gpu-bw 2` 16384,
+`--gpu-bw 3` 10923 (rounded up), and a large `--gpu-bw` leaves 4096. The residency cap uses `exchange.ptx` (1008 cycles a
+block, critical-path bound): 8 blocks on one SM are 8064 cycles with `--blocks-per-sm 1`, and `--resident 8
+--blocks-per-sm 2` gives four waves, 4032.
 
-Still not modelled: caches beyond the optional L1, and blocks that start at different times within a wave. Not measured against hardware yet: this machine has no GPU (`nvidia-smi` is missing), so the latencies are the
+Still not modelled: caches beyond the optional L1, blocks that start at different times within a wave, and the queueing of
+memory traffic: `--gpu-bw` is a lower bound on the kernel's time (the total bytes at the GPU's rate), not a schedule of the
+bytes, so an imbalanced GPU can take longer than the bound. Not measured against hardware yet: this machine has no GPU (`nvidia-smi` is missing), so the latencies are the
 defaults above, not calibrated values. Ranking real kernels is the check that matters, and it needs the RTX 2060 run
 of the same kernels.

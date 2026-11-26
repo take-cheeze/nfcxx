@@ -193,4 +193,58 @@ expect_eq "two-line L1: the third load hits" "$ev_two" 676
 status=0; "$out/ptxi" "$lf" l1line --grid 1 --block 32 ptr:32 ptr:32 --l1 100 > /dev/null 2>&1 || status=$?
 [ "$status" -eq 2 ] || { echo "--l1 100: expected exit 2, got $status" >&2; exit 1; }
 echo "--l1 100 refused (exit 2)"
+
+# 12. GPU-wide bandwidth (--gpu-bw). store_all.ptx, 8 blocks of 1024 threads: each warp stores 128 contiguous bytes, 4
+#     sectors, so a block moves 32 warps x 4 x 32 = 4096 bytes and the launch 8 x 4096 = 32768 bytes. On 8 SMs at --bw 1 each
+#     SM moves its one block in 4096 cycles (the critical path, 332, is far below), so the per-SM answer is 4096. With
+#     --gpu-bw G the whole GPU moves 32768 bytes at G per cycle: ceil(32768 / G) cycles, and the kernel takes the larger.
+g_base=$(cycles store_all.ptx store_all --grid 8 --block 1024 ptr:1024 --sms 8 --bw 1)
+expect_eq "per-SM bandwidth only (no --gpu-bw): one block per SM, 4096" "$g_base" 4096
+g1=$(cycles store_all.ptx store_all --grid 8 --block 1024 ptr:1024 --sms 8 --bw 1 --gpu-bw 1)
+expect_eq "gpu-bw 1: 8 blocks x 4096 bytes = 32768 cycles, above the per-SM 4096" "$g1" 32768
+g2=$(cycles store_all.ptx store_all --grid 8 --block 1024 ptr:1024 --sms 8 --bw 1 --gpu-bw 2)
+expect_eq "gpu-bw 2: 32768 / 2 = 16384" "$g2" 16384
+g3=$(cycles store_all.ptx store_all --grid 8 --block 1024 ptr:1024 --sms 8 --bw 1 --gpu-bw 3)
+expect_eq "gpu-bw 3: ceil(32768 / 3) = 10923 (rounded up)" "$g3" 10923
+gbig=$(cycles store_all.ptx store_all --grid 8 --block 1024 ptr:1024 --sms 8 --bw 1 --gpu-bw 1000000)
+expect_eq "gpu-bw 1000000: the GPU bound (1) is below the per-SM 4096" "$gbig" 4096
+g0=$(cycles store_all.ptx store_all --grid 8 --block 1024 ptr:1024 --sms 8 --bw 1 --gpu-bw 0)
+expect_eq "gpu-bw 0 is off" "$g0" 4096
+# Default per-SM bandwidth (16) on 8 SMs: one block's bytes take 4096 / 16 = 256 cycles, under its critical path (332),
+# so the per-SM answer is 332. The GPU moves 32768 bytes at 16 per cycle: 2048, which is the answer.
+g16=$(cycles store_all.ptx store_all --grid 8 --block 1024 ptr:1024 --sms 8 --gpu-bw 16)
+expect_eq "gpu-bw 16 with the default per-SM bandwidth: 32768 / 16 = 2048 beats the per-SM 332" "$g16" 2048
+# One SM runs the 8 blocks in 8 waves of 4096 (32768 cycles at --bw 1), which already exceeds the GPU bound 32768 / 2:
+# the GPU bound does not lower a per-SM time.
+g_one=$(cycles store_all.ptx store_all --grid 8 --block 1024 ptr:1024 --sms 1 --bw 1 --gpu-bw 2)
+expect_eq "one SM: its own serial 32768 is above the GPU bound 16384" "$g_one" 32768
+status=0; "$out/ptxi" store_all.ptx store_all --grid 8 --block 1024 ptr:1024 --gpu-bw 2x > /dev/null 2>&1 || status=$?
+[ "$status" -eq 2 ] || { echo "--gpu-bw 2x: expected exit 2, got $status" >&2; exit 1; }
+echo "--gpu-bw 2x refused (exit 2)"
+
+# 13. Block residency cap (--blocks-per-sm). exchange.ptx's blocks are critical-path bound. Its one warp pays 12 for the six
+#     alu before the store (two param loads, mov, add, mul.wide, add.s64), 320 for the store, 24 for the barrier, 6 for the
+#     three alu after it (sub, mul.wide, add.s64), 320 for the load, 2 for the add, 320 for the second store and 4 for ret:
+#     12 + 320 + 24 + 6 + 320 + 2 + 320 + 4 = 1008. A block moves 3 sectors (96 bytes) and issues about 15 slots, far below
+#     that, so a wave of up to 8 such blocks takes 1008. Eight blocks on one SM then take ceil(8 / R) waves of 1008, where
+#     R = min(W, --blocks-per-sm) and W = --resident (default 1), or the warp slots when --warps-per-sm is given.
+ex_one=$(cycles "$ex" exchange --grid 8 --block 2 ptr:16 ptr:16 --sms 8)
+expect_eq "exchange block: 1008 cycles (critical path)" "$ex_one" 1008
+cap_def=$(cycles "$ex" exchange --grid 8 --block 2 ptr:16 ptr:16 --sms 1)
+expect_eq "one SM, default residency 1: 8 waves of 1008" "$cap_def" "$((8 * ex_one))"
+cap1=$(cycles "$ex" exchange --grid 8 --block 2 ptr:16 ptr:16 --sms 1 --blocks-per-sm 1)
+expect_eq "--blocks-per-sm 1 with 8 blocks on 1 SM: 8 waves exactly" "$cap1" "$((8 * ex_one))"
+cap1r=$(cycles "$ex" exchange --grid 8 --block 2 ptr:16 ptr:16 --sms 1 --resident 8 --blocks-per-sm 1)
+expect_eq "--resident 8 capped to 1 by --blocks-per-sm: 8 waves" "$cap1r" "$((8 * ex_one))"
+cap2=$(cycles "$ex" exchange --grid 8 --block 2 ptr:16 ptr:16 --sms 1 --resident 8 --blocks-per-sm 2)
+expect_eq "--resident 8 capped to 2: min(8, 2) = 2, four waves" "$cap2" "$((4 * ex_one))"
+cap8=$(cycles "$ex" exchange --grid 8 --block 2 ptr:16 ptr:16 --sms 1 --resident 8)
+expect_eq "--resident 8 without a cap: one wave" "$cap8" "$ex_one"
+capw=$(cycles "$ex" exchange --grid 8 --block 2 ptr:16 ptr:16 --sms 1 --warps-per-sm 16 --blocks-per-sm 2)
+expect_eq "--warps-per-sm 16 (16 slots of one-warp blocks) capped to 2: four waves" "$capw" "$((4 * ex_one))"
+capn=$(cycles "$ex" exchange --grid 8 --block 2 ptr:16 ptr:16 --sms 1 --blocks-per-sm 4)
+expect_eq "--blocks-per-sm only lowers residency: resident 1 stays 8 waves" "$capn" "$((8 * ex_one))"
+status=0; "$out/ptxi" "$ex" exchange --grid 8 --block 2 ptr:16 ptr:16 --blocks-per-sm 0 > /dev/null 2>&1 || status=$?
+[ "$status" -eq 2 ] || { echo "--blocks-per-sm 0: expected exit 2, got $status" >&2; exit 1; }
+echo "--blocks-per-sm 0 refused (exit 2)"
 echo "timing model: ok"

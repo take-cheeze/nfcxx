@@ -4,7 +4,7 @@
  *                             [--random N [--seed S]] [--explore [--max-schedules M]] [--max-steps S]
  *                             [--timing] [--sms N] [--resident N | --warps-per-sm N] [--issue N] [--bw BYTES]
  *                             [--lat CLASS=CYCLES]...
- *                             [--l1 BYTES]
+ *                             [--l1 BYTES] [--gpu-bw BYTES] [--blocks-per-sm N]
  *   ARG is one kernel parameter, in order:
  *     ptr:COUNT[:iota=START]   a global buffer of COUNT int32 (zeroed, or START+i in element i)
  *     s32:VALUE                a 32-bit scalar
@@ -31,7 +31,7 @@
  * that has exited no longer counts. A schedule in which every live thread waits and none can be released is a
  * deadlock (exit 4).
  *
- * Timing (--timing, --sms, --issue, --bw, --lat, --l1). A cycle model, not a clock-by-clock simulation. Each
+ * Timing (--timing, --sms, --issue, --bw, --gpu-bw, --resident, --warps-per-sm, --blocks-per-sm, --lat, --l1). A cycle model, not a clock-by-clock simulation. Each
  * instruction has the latency of its class: alu, branch, local, global, atomic, barrier, l1. The defaults are 2, 4, 40,
  * 320, 31, 24 and 30 cycles (alu, branch, local, global, atomic, barrier and l1; measured on an RTX 5050, sm_120, except
  * branch and l1, which are not measured), changed with --lat CLASS=CYCLES. Param loads and stores cost alu; a generic ld/st costs
@@ -48,9 +48,17 @@
  * all exited keeps its own time. A block takes the largest of three bounds: the largest warp time, since its warps run
  * in parallel; its issue slots, the sum over its warps of max(s), at --issue warp instructions per cycle (default 4);
  * and its global bytes at --bw bytes per cycle (default 16): each warp issue counts the 32-byte sectors its active
- * lanes touch (a sector once per issue), and a load that hits the L1 moves no bytes. The blocks of an SM run in waves of --resident blocks (default 1): a wave takes
- * the largest of its blocks' times, or the summed issue slots or bytes of its blocks if more, since co-resident blocks
- * share the SM. The kernel takes the slowest SM (--sms, default 1). Caches beyond the L1 are not modelled. Memory for the counts (only with --timing): three 4-byte
+ * lanes touch (a sector once per issue), and a load that hits the L1 moves no bytes.
+ * Residency. The blocks of an SM run in waves of R blocks, where R = min(W, --blocks-per-sm), W being the warp-slot
+ * residency N / (warps per block), at least 1, when --warps-per-sm N is given, and --resident N (default 1) otherwise.
+ * So --warps-per-sm replaces --resident when both are given, and --blocks-per-sm (default 0, no cap) can only lower R:
+ * to have more blocks resident than --resident, raise --resident or give --warps-per-sm.
+ * A wave takes the largest of its blocks' times, or the summed issue slots or bytes of its blocks if more, since
+ * co-resident blocks share the SM. The waves of an SM take their times one after another, and the SM's time is their
+ * sum. The per-SM bytes bound stays: --bw is the load/store path of one SM. The kernel takes the slowest SM (--sms,
+ * default 1), and with --gpu-bw BYTES (default 0, off) the whole GPU shares one memory system, so the kernel takes
+ * max(slowest SM, ceil(total bytes of all blocks / BYTES)). The two bounds are combined by max, not sum, since both are
+ * lower bounds on the same bytes; the total does not depend on --sms. Caches beyond the L1 are not modelled. Memory for the counts (only with --timing): three 4-byte
  * counters per thread per instruction, so nthreads x ninst x 12 bytes (about 400 MB for 4096 threads and 8192
  * instructions); the per-warp maxima are the same size per warp.
  * A kernel whose path depends on what other threads did (a spin on shared memory, say) can take different paths in
@@ -1002,6 +1010,8 @@ static uint64_t issue_rate = 4; /* warp instructions per cycle per SM */
 static int resident = 1;        /* blocks an SM runs at a time (--resident) */
 static int warps_per_sm;        /* warp slots of an SM (--warps-per-sm); 0 = use --resident */
 static uint64_t mem_bw = 16;    /* global bytes per cycle per SM */
+static uint64_t gpu_bw;         /* global bytes per cycle for the whole GPU (--gpu-bw); 0 = not shared */
+static int blocks_per_sm;       /* cap on blocks resident per SM (--blocks-per-sm); 0 = no cap */
 static int timing_print;
 static uint64_t timing_min = UINT64_MAX, timing_max, timing_n; /* over the schedules run so far */
 static int timing_blocks; /* of the last schedule */
@@ -1210,7 +1220,11 @@ static void timing_epoch_end(int block) {
  * and its global bytes. The blocks of an SM run in waves of --resident blocks at a time, in the order the SM receives
  * them; a wave takes the largest block time in it, or the sum of the issue slots or of the bytes of its blocks if that
  * is more, since the co-resident blocks share the SM's issue width and bandwidth. The blocks of each SM take their
- * waves one after another, and the kernel takes the slowest SM. With --resident 1 a wave is one block. */
+ * waves one after another, and the kernel takes the slowest SM. With --resident 1 a wave is one block.
+ * The residency R of a wave is min(W, --blocks-per-sm), where W is --resident, or the warp slots N / (warps per block)
+ * (at least 1) when --warps-per-sm N is given. With --gpu-bw the kernel also takes the total bytes of all its blocks
+ * over that rate, max(slowest SM, ceil(total / gpu_bw)): the per-SM bytes stay in the waves, and the two bounds are
+ * combined by max because both are lower bounds on the same bytes. */
 static void timing_finish(void) {
   if (!timing_print) return;
   uint64_t *sm = calloc((size_t)sms, sizeof *sm);
@@ -1233,6 +1247,7 @@ static void timing_finish(void) {
       uint64_t wcrit = 0, wslots = 0, wbytes = 0;
       int n = 0;
       int slots = warps_per_sm ? (warps_per_sm / wpb > 0 ? warps_per_sm / wpb : 1) : resident;
+      if (blocks_per_sm && slots > blocks_per_sm) slots = blocks_per_sm;
       for (int b = first; b < nblocks && n < slots; b += sms, n++) {
         if (bt_of[b] > wcrit) wcrit = bt_of[b];
         wslots += slots_of[b];
@@ -1249,6 +1264,12 @@ static void timing_finish(void) {
   uint64_t total = 0;
   for (int s = 0; s < sms; s++)
     if (sm[s] > total) total = sm[s];
+  if (gpu_bw) {
+    uint64_t all_bytes = 0;
+    for (int b = 0; b < nblocks; b++) all_bytes += bytes_of[b];
+    uint64_t shared = (all_bytes + gpu_bw - 1) / gpu_bw;
+    if (shared > total) total = shared;
+  }
   free(sm);
   free(bt_of);
   free(slots_of);
@@ -1831,7 +1852,7 @@ static void usage(void) {
           "           [--random N [--seed S]] [--explore [--max-schedules M]] [--max-steps S]\n"
           "           [--timing] [--sms N] [--resident N | --warps-per-sm N] [--issue N] [--bw BYTES]\n"
           "           [--lat CLASS=CYCLES]...\n"
-          "           [--l1 BYTES]\n"
+          "           [--l1 BYTES] [--gpu-bw BYTES] [--blocks-per-sm N]\n"
           "  ARG: ptr:COUNT[:iota=START] | s32:VALUE | bytes:HEX\n"
           "  CLASS: alu, branch, local, global, atomic, barrier, l1 (defaults 2 4 40 320 31 24 30)\n");
   exit(EXIT_BAD);
@@ -1896,6 +1917,15 @@ int main(int argc, char **argv) {
       if (i + 1 >= argc) usage();
       mem_bw = strtoull(argv[++i], NULL, 10);
       if (mem_bw == 0) usage();
+    } else if (!strcmp(argv[i], "--gpu-bw")) {
+      char *end;
+      if (i + 1 >= argc || !isdigit((unsigned char)argv[i + 1][0])) usage();
+      gpu_bw = strtoull(argv[++i], &end, 10); /* 0 is off, the default */
+      if (*end) usage();
+    } else if (!strcmp(argv[i], "--blocks-per-sm")) {
+      if (i + 1 >= argc) usage();
+      blocks_per_sm = atoi(argv[++i]);
+      if (blocks_per_sm < 1) usage();
     } else if (!strcmp(argv[i], "--l1")) {
       if (i + 1 >= argc) usage();
       char *end;
