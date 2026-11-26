@@ -82,6 +82,12 @@ int main(int argc, char **argv) {
     case OT_NULL:
       printf("null\n");
       break;
+    case OT_STRING: {
+      const SQChar *s = NULL;
+      sq_getstring(v, -1, &s);
+      printf("%s\n", s);
+      break;
+    }
     default:
       printf("(not printed: type %d)\n", (int)sq_gettype(v, -1));
       break;
