@@ -50,6 +50,7 @@ enum : std::uint8_t {
   kOpLoadFloat = 0x03,
   kOpDLoad = 0x04,
   kOpCall = 0x06,
+  kOpTailCall = 0x05,
   kOpPrepCall = 0x07,
   kOpPrepCallK = 0x08,
   kOpGetK = 0x09,
@@ -75,6 +76,7 @@ enum : std::uint8_t {
   kOpGetOuter = 0x20,
   kOpNewObj = 0x21,
   kOpAppendArray = 0x22,
+  kOpNewSlotA = 0x3A,
   kOpClose = 0x3C,
   kOpClosure = 0x30,
   kOpCmp = 0x28,
@@ -93,7 +95,10 @@ constexpr std::uint8_t kNoRegister = 0xFF;  // the bound register of a CLOSURE w
 constexpr int kSlotBytes = 16;
 constexpr int kNotTable = 0;  // NEWOBJ's arg3 (sqopcodes.h NOT_TABLE)
 constexpr int kNotArray = 1;  // NEWOBJ's arg3 (sqopcodes.h NOT_ARRAY)
-constexpr int kNotClass = 2;  // NEWOBJ's arg3 (sqopcodes.h NOT_CLASS): refused
+constexpr int kNotClass = 2;  // NEWOBJ's arg3 (sqopcodes.h NOT_CLASS): arg1 is the base (-1: none), arg2 the attributes
+constexpr std::uint8_t kNoAttributes = 0xFF;  // MAX_FUNC_STACKSIZE: a class or a member without attributes
+constexpr std::uint8_t kNewSlotAttributes = 0x01;  // NEWSLOTA's arg0: NEW_SLOT_ATTRIBUTES_FLAG (refused)
+constexpr std::uint8_t kNewSlotStatic = 0x02;      // NEWSLOTA's arg0: NEW_SLOT_STATIC_FLAG
 // APPENDARRAY's arg2 (sqopcodes.h AAT_*): the value is a register, a literal, an integer or a boolean, or a float.
 enum : int { kAatStack = 0, kAatLiteral = 1, kAatInt = 2, kAatFloat = 3, kAatBool = 4 };
 constexpr std::uint64_t kOtLocal = 0;  // SQOuterType: an outer variable of the enclosing frame (src is its register)
@@ -632,14 +637,32 @@ class Fn {
         break;
       }
       case kOpNewObj: {
-        // NEWOBJ: a table (arg1 is its size hint) or an array (arg1 its reserve), as sqvm.cpp _OP_NEWOBJ.
-        if (in.arg3 == kNotClass) refuse("_OP_NEWOBJ of a class");
+        // NEWOBJ: a table (arg1 is its size hint), an array (arg1 its reserve) or a class (arg1 the base register or -1,
+        // arg2 the attributes register or 0xFF), as sqvm.cpp _OP_NEWOBJ and CLASS_OP.
+        if (in.arg3 == kNotClass) {
+          if (in.arg1 != -1) refuse("_OP_NEWOBJ of a class with a base");
+          if (in.arg2 != kNoAttributes) refuse("_OP_NEWOBJ of a class with attributes");
+          Addr c = reg(in.arg0);
+          line("(eval (call void &\"sqbc_rt_newclass\" " + c.obj + "))");
+          break;
+        }
         Addr d = reg(in.arg0);
         if (in.arg3 == kNotArray) {
           line("(eval (call void &\"sqbc_rt_newarray\" " + d.obj + " " + c_int(in.arg1) + "))");
         } else {
           line("(eval (call void &\"sqbc_rt_newtable\" " + d.obj + "))");
         }
+        break;
+      }
+      case kOpNewSlotA: {
+        // NEWSLOTA: STK(arg1)[STK(arg2)] := STK(arg3) on a class (sqvm.cpp NewSlotA), a static member when bit 1 of arg0 is
+        // set. No target. A member with attributes (bit 0) is refused.
+        if ((in.arg0 & kNewSlotAttributes) != 0) refuse("_OP_NEWSLOTA with member attributes");
+        Addr self = reg(in.arg1);
+        Addr key = reg(in.arg2);
+        Addr val = reg(in.arg3);
+        line("(eval (call void &\"sqbc_rt_newslota\" " + self.obj + " " + key.obj + " " + val.obj + " " +
+             c_int((in.arg0 & kNewSlotStatic) != 0 ? 1 : 0) + "))");
         break;
       }
       case kOpAppendArray: {
@@ -724,9 +747,12 @@ class Fn {
         line("(eval (call void &\"sqbc_rt_close\" " + from.obj + "))");
         break;
       }
+      case kOpTailCall:
       case kOpCall: {
         // CALL: the callee is STK(arg1), its frame starts at STK(arg2) (this, then the arguments), arg3 values in all; the
-        // result goes to STK(arg0) when arg0 is a register.
+        // result goes to STK(arg0) when arg0 is a register. TAILCALL has the same operands, and the compiler follows it with
+        // the RETURN of STK(arg0): a call here, so the result is the same (the reference reuses the frame of a closure, so
+        // a tail recursion that is deep in the reference is deep here).
         Addr clo = reg(in.arg1);
         Addr frame = reg(in.arg2);
         std::string res = kNullSqvPtr;
