@@ -42,7 +42,8 @@ typedef struct MAry {
 typedef struct MDef {
   const char *name;
   int id;
-  long arity;
+  long min;  /* the required parameters: the fewest arguments */
+  long max;  /* the most arguments: the required and the optional parameters */
   struct MDef *next;
 } MDef;
 
@@ -145,11 +146,12 @@ static const char *class_name(const MV *v);
  * object, then in Object. An explicit receiver's call (mrbbc_find_send) looks in the receiver's class only: a top-level
  * method is private, so reaching one of those with an explicit receiver is a NoMethodError. A wrong argument count is an
  * ArgumentError and a name nothing defines a NoMethodError. */
-static void add_def(MDef **head, const char *name, int id, long arity) {
+static void add_def(MDef **head, const char *name, int id, long min, long max) {
   MDef *d = alloc(sizeof *d);
   d->name = name;
   d->id = id;
-  d->arity = arity;
+  d->min = min;
+  d->max = max;
   d->next = *head;
   *head = d;
 }
@@ -161,10 +163,12 @@ static MDef *find_def(MDef *d, const char *name) {
   return NULL;
 }
 
+/* A count outside min..max is mruby's ArgumentError, whose message names the required count only (vm.c's ENTER gives
+ * argnum_error(m1+m2)), even when the method has optional parameters. */
 static int check_arity(const MDef *d, long argc) {
-  if (d->arity != argc) {
+  if (argc < d->min || argc > d->max) {
     char msg[128];
-    snprintf(msg, sizeof msg, "wrong number of arguments (given %ld, expected %ld)", argc, d->arity);
+    snprintf(msg, sizeof msg, "wrong number of arguments (given %ld, expected %ld)", argc, d->min);
     mrbbc_raise("ArgumentError", msg);
   }
   return d->id;
@@ -185,14 +189,14 @@ static MDef *find_chain(MClass *c, const char *name, MClass **where) {
   return NULL;
 }
 
-void mrbbc_def(const char *name, int id, long arity) {
-  add_def(&object_class.defs, name, id, arity);
+void mrbbc_def(const char *name, int id, long min, long max) {
+  add_def(&object_class.defs, name, id, min, max);
   set_owner(id, &object_class);
 }
 
-void mrbbc_def_in(const MV *cls, const char *name, int id, long arity) {
+void mrbbc_def_in(const MV *cls, const char *name, int id, long min, long max) {
   if (cls->tag != MRBBC_CLS) mrbbc_raise("TypeError", "a method is defined on a class");
-  add_def(&cls_of(cls)->defs, name, id, arity);
+  add_def(&cls_of(cls)->defs, name, id, min, max);
   set_owner(id, cls_of(cls));
 }
 
@@ -259,6 +263,9 @@ int mrbbc_find_super(const MV *self, int method, const char *name, long argc) {
     mrbbc_raise("NoMethodError", msg);
   }
 }
+
+/* SUPER and ARGARY outside a method (the main program, a class body, or a block of one): vm.c raises NoMethodError. */
+void mrbbc_no_super(void) { mrbbc_raise("NoMethodError", "super called outside of method"); }
 
 void mrbbc_super_nil(MV *dst) {
   dst->tag = MRBBC_NIL;
@@ -489,7 +496,28 @@ int mrbbc_break_take(MV *dst, MV *frame) {
   return 0;
 }
 
-int mrbbc_splats(const MV *argv, long argc) { return argc == 1 && argv[1].tag == MRBBC_ARY; }
+/* The arguments of a block as mruby's non-strict parameters take them: with two or more parameters, one array argument is
+ * splatted (its elements are the arguments, and its length the count). */
+static int block_splat(const MV *argv, long argc, long nslots) {
+  return nslots >= 2 && argc == 1 && argv[1].tag == MRBBC_ARY;
+}
+
+long mrbbc_block_argc(const MV *argv, long argc, long nslots) {
+  return block_splat(argv, argc, nslots) ? ary_of(&argv[1])->len : argc;
+}
+
+void mrbbc_block_arg(MV *dst, const MV *argv, long argc, long nslots, long i) {
+  if (block_splat(argv, argc, nslots)) {
+    mrbbc_ary_elt(dst, &argv[1], i - 1);
+    return;
+  }
+  if (i <= argc) {
+    *dst = argv[i];
+  } else {
+    dst->tag = MRBBC_NIL;
+    dst->i = 0;
+  }
+}
 
 void mrbbc_ary_elt(MV *dst, const MV *ary, long i) {
   const MAry *a = ary_of(ary);
@@ -598,7 +626,7 @@ static void call_user(MV *ret, int id, const MV *recv, const MV *arg) {
   argv[1] = arg != NULL ? *arg : *recv;
   blk.tag = MRBBC_NIL;
   blk.i = 0;
-  mrbbc_user_call(id, ret, argv, &blk);
+  mrbbc_user_call(id, ret, argv, &blk, arg != NULL ? 1 : 0);
 }
 
 static void buf_put(Buf *b, const char *s, size_t n) {

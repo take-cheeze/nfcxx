@@ -1,0 +1,4 @@
+def f(a, *b)
+  a
+end
+f(1)

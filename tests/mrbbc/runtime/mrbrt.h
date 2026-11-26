@@ -33,14 +33,15 @@ typedef struct MV {
   int64_t i;
 } MV;
 
-/* The program's methods (TDEF). mrbbc_def adds a top-level method (on Object) with the lowered body's number and the
- * arity; mrbbc_def_in adds one to the class cls (the self of a class body). mrbbc_find returns the number of the body a
- * self call of self runs, or raises ArgumentError (wrong count) or NoMethodError (no such method). mrbbc_find_send is an
+/* The program's methods (TDEF). mrbbc_def adds a top-level method (on Object) with the lowered body's number and its counts
+ * of arguments, min (the required parameters) to max (the required and the optional ones); mrbbc_def_in adds one to the
+ * class cls (the self of a class body). mrbbc_find returns the number of the body a self call of self runs, or raises
+ * ArgumentError (wrong count) or NoMethodError (no such method). mrbbc_find_send is an
  * explicit receiver's call: it returns -1 when the method is not the receiver's class's (the builtin path then runs), and
  * raises NoMethodError for a top-level method, which is private. mrbbc_find_init is the initialize of a new object (-1
  * when there is none and no argument was given). */
-void mrbbc_def(const char *name, int id, long arity);
-void mrbbc_def_in(const MV *cls, const char *name, int id, long arity);
+void mrbbc_def(const char *name, int id, long min, long max);
+void mrbbc_def_in(const MV *cls, const char *name, int id, long min, long max);
 int mrbbc_find(const MV *self, const char *name, long argc);
 int mrbbc_find_send(const MV *recv, const char *name, long argc);
 int mrbbc_find_init(const MV *obj, long argc);
@@ -48,10 +49,11 @@ int mrbbc_find_init(const MV *obj, long argc);
  * the one the TDEF gave). It returns -1 for the builtin initialize, which mrbbc_super_nil answers with nil. */
 int mrbbc_find_super(const MV *self, int method, const char *name, long argc);
 void mrbbc_super_nil(MV *dst);
+void mrbbc_no_super(void) __attribute__((noreturn));
 
 /* A call of the program's method number id from the runtime (the operators, to_s and inspect of an instance of a program
- * class). The lowered module defines it: one branch per method, as a self call has. */
-void mrbbc_user_call(int id, MV *ret, MV *argv, MV *blk);
+ * class), with argc arguments in argv[1..argc]. The lowered module defines it: one branch per method, as a self call has. */
+void mrbbc_user_call(int id, MV *ret, MV *argv, MV *blk, long argc);
 
 /* Classes (CLASS, EXEC's class body, TCLASS, GETCONST) and objects. mrbbc_class defines the class name (a nil superclass
  * only) under cbase when it is a class, else under target when that is a class, else Object; an existing class of the
@@ -69,9 +71,12 @@ void mrbbc_setiv(const MV *self, const char *name, const MV *v);
 /* NoMethodError for a name the receiver does not have (the builtin path of a call the program also defines). */
 void mrbbc_no_method(const MV *recv, const char *name) __attribute__((noreturn));
 
-/* Block parameters: mrbbc_splats is true when a yield gave one array (argc 1, argv[1] an array), which a block with two
- * or more parameters splats; mrbbc_ary_elt writes element i of the array, or nil past its end. */
-int mrbbc_splats(const MV *argv, long argc);
+/* Block parameters, for a block of nslots (required and optional) parameters. mrbbc_block_argc is the count of arguments the
+ * parameters take: a yield of one array to a block with two or more parameters is splatted (the count is the array's
+ * length). mrbbc_block_arg writes parameter i (1-based) of the arguments, or nil past the count. mrbbc_ary_elt writes
+ * element i of an array, or nil past its end. */
+long mrbbc_block_argc(const MV *argv, long argc, long nslots);
+void mrbbc_block_arg(MV *dst, const MV *argv, long argc, long nslots, long i);
 void mrbbc_ary_elt(MV *dst, const MV *ary, long i);
 /* OP_AREF (`a, b = x`): an array's element i, or for a value that is not an array, the value at 0 and nil otherwise. */
 void mrbbc_aref(MV *dst, const MV *v, long i);
