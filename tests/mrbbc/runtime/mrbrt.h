@@ -73,6 +73,8 @@ void mrbbc_no_method(const MV *recv, const char *name) __attribute__((noreturn))
  * or more parameters splats; mrbbc_ary_elt writes element i of the array, or nil past its end. */
 int mrbbc_splats(const MV *argv, long argc);
 void mrbbc_ary_elt(MV *dst, const MV *ary, long i);
+/* OP_AREF (`a, b = x`): an array's element i, or for a value that is not an array, the value at 0 and nil otherwise. */
+void mrbbc_aref(MV *dst, const MV *v, long i);
 
 /* Blocks. mrbbc_block makes the closure of a BLOCK at dst: it stores the block's number, a copy of self, the frame the
  * block was made in and its home (the frame of the method a return leaves), in clo (a 40-byte slot of the caller's
