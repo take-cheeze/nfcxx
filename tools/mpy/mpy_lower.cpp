@@ -1,7 +1,8 @@
 // .mpy bytecode -> Path B IR (docs/notes/mpy-pathb.md). The subset: small ints, None/bool, str constants, names, locals,
 // the operators, jumps, calls of functions (positional arguments; no defaults, keywords or *args), closures (cell and free
-// variables, LOAD_DEREF, STORE_DEREF, MAKE_CLOSURE), and return. Anything else is refused by name, and no IR is produced
-// for a refused module.
+// variables, LOAD_DEREF, STORE_DEREF, MAKE_CLOSURE), lists, tuples, dicts (BUILD_MAP, STORE_MAP), slices, del of an item
+// (LOAD_NULL with STORE_SUBSCR), list and dict comprehensions (STORE_COMP), and return. Anything else is refused by name,
+// and no IR is produced for a refused module.
 //
 // Each code object becomes one IR function. The stack is slots stk.N (one per depth) and the locals are loc.N. The module
 // body is mpy_module(). A function is mpy_fn_K(ret, args, nargs): it copies its arguments into its locals and stores the
@@ -175,7 +176,24 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
     } else if (o == opcode("LOAD_SUBSCR")) {
       op.kind = "LOAD_SUBSCR";
     } else if (o == opcode("STORE_SUBSCR")) {
-      op.kind = "STORE_SUBSCR";
+      op.kind = "STORE_SUBSCR";           // with a null value (LOAD_NULL) it is a del
+    } else if (o == opcode("LOAD_NULL")) {
+      op.kind = "LOAD_NULL";              // the null a del stores: DELETE_SUBSCR is LOAD_NULL, ROT_THREE, STORE_SUBSCR
+    } else if (o == opcode("BUILD_MAP")) {
+      op.kind = "BUILD_MAP";              // the operand is the number of items: the table's size (map.c's alloc)
+      op.arg = in.arg;
+    } else if (o == opcode("STORE_MAP")) {
+      op.kind = "STORE_MAP";              // the stack is dict, value, key (key on top); the dict stays
+    } else if (o == opcode("BUILD_SLICE")) {
+      op.kind = "BUILD_SLICE";
+      op.arg = in.arg;                    // 2 or 3: the start, the stop and the step (none when absent)
+    } else if (o == opcode("STORE_COMP")) {
+      // A comprehension's store: the argument is (the collection's offset below the top << 2) | its kind (0 list, 1 dict,
+      // 2 set). A set comprehension is refused.
+      if ((in.arg & 3) == 2) refused("a set comprehension is not lowered yet");
+      op.kind = "STORE_COMP";
+      op.arg = in.arg >> 2;
+      op.extra = in.arg & 3;
     } else if (o == opcode("UNPACK_SEQUENCE")) {
       op.kind = "UNPACK_SEQUENCE";
       op.arg = in.arg;
@@ -235,9 +253,12 @@ int effect(const Op &op) {
   const std::string &k = op.kind;
   if (k == "LOAD_SMALL" || k == "LOAD_NONE" || k == "LOAD_FALSE" || k == "LOAD_TRUE" || k == "LOAD_NAME" ||
       k == "LOAD_LOCAL" || k == "LOAD_STR" || k == "LOAD_OBJ" || k == "LOAD_DEREF" || k == "DUP_TOP" ||
-      k == "MAKE_FUNCTION")
+      k == "MAKE_FUNCTION" || k == "LOAD_NULL" || k == "BUILD_MAP")
     return 1;
   if (k == "BUILD_LIST" || k == "BUILD_TUPLE") return 1 - (int)op.arg;   // the items go, the container comes
+  if (k == "BUILD_SLICE") return 1 - (int)op.arg;                        // the start, stop (and step) go, the slice comes
+  if (k == "STORE_MAP") return -2;                                       // the value and key go; the dict stays
+  if (k == "STORE_COMP") return op.extra == 1 ? -2 : -1;                 // a dict takes its key and value, a list its item
   if (k == "UNPACK_SEQUENCE") return (int)op.arg - 1;
   if (k == "LOAD_SUBSCR") return -1;
   if (k == "STORE_SUBSCR") return -3;
@@ -667,6 +688,45 @@ class Lowerer {
         // the index is on top, then the container, then the value
         std::string idx = pop(d), base = pop(d - 1), val = pop(d - 2);
         body << "  (eval (call void &\"mpy_setitem\" " << base << " " << idx << " " << val << "))\n";
+      } else if (k == "LOAD_NULL") {
+        push(d, "(const unsigned_long 0)");   // MP_OBJ_NULL: a del's value
+      } else if (k == "BUILD_MAP") {
+        std::string r = fresh();
+        body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_build_map\" (const unsigned_long " << op.arg
+             << ")))\n";
+        push(d, r);
+      } else if (k == "STORE_MAP") {
+        // [dict, value, key]: the pair is stored, and the dict stays below it
+        std::string key = pop(d), val = pop(d - 1), dict = load(d - 3);
+        body << "  (eval (call void &\"mpy_dict_store\" " << dict << " " << key << " " << val << "))\n";
+      } else if (k == "BUILD_SLICE") {
+        // [start, stop] or [start, stop, step]; a missing step is None
+        int n = (int)op.arg;
+        std::string start, stop, step;
+        if (n == 2) {
+          stop = load(d - 1);
+          start = load(d - 2);
+          step = "(const unsigned_long 6)";
+        } else {
+          step = load(d - 1);
+          stop = load(d - 2);
+          start = load(d - 3);
+        }
+        std::string r = fresh();
+        body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_make_slice\" " << start << " " << stop << " "
+             << step << "))\n";
+        push(d - n, r);
+      } else if (k == "STORE_COMP") {
+        // The collection is op.arg slots below the top, as vm.c's sp[-(unum >> 2)] (the top is the value, or the key). A list
+        // takes the value; a dict takes the key on top and the value below it.
+        int top = d - 1;
+        if (op.extra == 0) {
+          std::string v = load(top), coll = load(top - (int)op.arg);
+          body << "  (eval (call void &\"mpy_list_append\" " << coll << " " << v << "))\n";
+        } else {
+          std::string key = load(top), v = load(top - 1), coll = load(top - (int)op.arg);
+          body << "  (eval (call void &\"mpy_dict_store\" " << coll << " " << key << " " << v << "))\n";
+        }
       } else if (k == "UNPACK_SEQUENCE") {
         int n = (int)op.arg;
         std::string seq = load(d - 1);   // read first: the item slots overlap it
