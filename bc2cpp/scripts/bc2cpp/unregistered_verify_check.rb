@@ -290,7 +290,7 @@ else
       main = rename.call(main)
       main = main.sub(/^ *mrb_value n = mrb_obj_new\(M, vnat.*?"alias_source", 0\)\)\);\n/m, '') unless natives
       File.write(File.join(dir, 'main.cpp'), main)
-      rom = generated.include?('bc2cpp_mt_install(') ? %w[-DFIX_ROM -DBC2CPP_ROM_METHOD_TABLES] : []
+      rom = generated.match?(/bc2cpp_mt_(?:install|chain)\(/) ? %w[-DFIX_ROM -DBC2CPP_ROM_METHOD_TABLES] : []
       build = lambda do |defines, exe|
         cmd = ['g++', '-std=gnu++17', *rom, *defines, "-I#{full}/include", '-o', exe, File.join(dir, 'main.cpp'),
                "#{full}/lib/libmruby.a", '-lm']

@@ -85,8 +85,8 @@ suite.compile(ROUTER) do |ireps, root|
   suite.check('a resolved unit has no site marker left', !resolved.include?('@@ROM_DEF'))
   suite.check('a resolved unit registers no method of its table', !resolved.match?(/mrb_define_(?:private_)?method\(/))
   suite.check('the unit installs its owner\'s table once',
-              resolved.scan("bc2cpp_mt_install(M, mrb_class_ptr(self), #{table}, ").size == 1)
-  install = resolved.index('bc2cpp_mt_install(')
+              resolved.scan("bc2cpp_mt_chain(M, mrb_class_ptr(self), #{table}, ").size == 1)
+  install = resolved.index('bc2cpp_mt_chain(')
   suite.check('the install sits where the first def registered', install && install < resolved.index('Router#each'))
   suite.check('a verify build checks each def against the install, with its visibility',
               resolved.scan(/^#ifdef BC2CPP_UNREGISTERED_VERIFY\n  bc2cpp_rom_def_check\(M, mrb_class_ptr\(self\), false, "[^"]+", Router_\w+, (true|false)\);\n#endif\n/)
@@ -95,7 +95,7 @@ suite.compile(ROUTER) do |ireps, root|
   _, kept, = router_texts(ireps, root, drop: 'size')
   suite.check('a def whose row the table lacks keeps its registration call',
               kept.match?(/^  mrb_define_method\(M, mrb_class_ptr\(self\), "[^"]+", Router_size, /) &&
-              kept.include?('bc2cpp_mt_install('))
+              kept.include?('bc2cpp_mt_chain('))
 
   ENV['BC2CPP_ROM_CLASS_BODY_DEFS'] = '0'
   off, off_resolved, = router_texts(ireps, root)
@@ -122,7 +122,7 @@ suite.compile(ATTRS) do |ireps, root|
   resolved = gen.rom_class_body_defs(unit)
   calls = resolved.scan(/bc2cpp_mod_attr\(M, self, true, false, \{(.*?)\}\)/).flatten
   suite.check('an attr_reader pass defines only the accessors the table lacks', calls.size == 1 && !calls[0].include?(','))
-  suite.check('an attr whose accessor is a row installs the table', resolved.include?('bc2cpp_mt_install(M, mrb_class_ptr(self), bc2cpp_mt_program_Router, '))
+  suite.check('an attr whose accessor is a row installs the table', resolved.include?('bc2cpp_mt_chain(M, mrb_class_ptr(self), bc2cpp_mt_program_Router, '))
   suite.check('an attr_* send with no names makes no call', resolved.scan('bc2cpp_mod_attr(').size == 1)
 ensure
   ENV.delete('BC2CPP_ROM_METHOD_TABLES')

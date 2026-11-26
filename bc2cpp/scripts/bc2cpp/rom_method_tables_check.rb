@@ -6,6 +6,7 @@
 #   static: no owner registration in the generated sources defines a presym-spellable name through mrb_define_*method,
 #     or leaves one out through a bc2cpp_left_out call instead of a walked LEFT_OUT_TABLE stream,
 #     each file installs the fiber runtime's tables, and every bc2cpp_mt_install names a table the file defines;
+#     ROM_TBL: every table has its const layer (MRB_MT_ROM_TBL) and is installed with it;
 #     ROM_CLASS_BODY_DEFS: no class unit registers through mrb_define_*method an entry a ROM table holds;
 #     CONST_PATH_WALK: no registration or direct-construct capture chains mrb_const_get, and each path it walks is a
 #     row its own function defines;
@@ -45,6 +46,13 @@ sources.each do |path|
   streams = src.scan(/^(?:static|inline) constexpr uint16_t (bc2cpp_left_out_\w+)\[\] = \{$/).flatten.to_set
   walked += streams.size
   tables += defined.size
+  # ROM_TBL: each table has its const layer, and an install names it.
+  defined.each do |table|
+    failures << "#{name}: #{table} has no MRB_MT_ROM_TBL layer" unless src.include?("const mrb_mt_tbl #{table}_tbl = MRB_MT_ROM_TBL(#{table});")
+  end
+  src.scan(/bc2cpp_mt_chain\(M, .*?, (\w+), \(int\).*?, BC2CPP_MT_TBL\((\w+)\), /).each do |table, layer|
+    failures << "#{name}: #{table} is installed with #{layer}'s layer" unless table == layer
+  end
   if ENV['BC2CPP_ROM_CLASS_BODY_DEFS'] != '0'
     rows = src.scan(ROW_ENTRY).flatten.to_set
     src.scan(UNIT_DEFINE).flatten.uniq.each do |entry|
@@ -75,7 +83,7 @@ sources.each do |path|
     body.scan(/bc2cpp_left_out_walk\(M, (\w+)\);/).flatten.each do |stream|
       failures << "#{name}: #{stream} is walked but not defined" unless streams.include?(stream)
     end
-    body.scan(/bc2cpp_mt_install\(M, \w+, (\w+),/).flatten.each do |table|
+    body.scan(/bc2cpp_mt_(?:install|chain)\(M, \w+, (\w+),/).flatten.each do |table|
       failures << "#{name}: #{table} is installed but not defined" unless defined.include?(table)
     end
   end
