@@ -89,10 +89,19 @@ class Object
     end
 
     check = MRubyRequire::FEATURES[feature]
-    raise LoadError, "cannot load such file -- #{feature}" unless check && check.call
+    if check && check.call
+      MRubyRequire::LOADED[feature] = true
+      return true
+    end
 
-    MRubyRequire::LOADED[feature] = true
-    true
+    # Built features (the native loaded-feature list) and files. Where the native half is not built (CRuby, which loads
+    # this file in its own checks), an unknown name raises LoadError here.
+    if respond_to?(:__native_require, true)
+      loaded = __native_require(feature)
+      MRubyRequire::LOADED[feature] = true if loaded
+      return loaded
+    end
+    raise LoadError, "cannot load such file -- #{feature}"
   end
 end
 
