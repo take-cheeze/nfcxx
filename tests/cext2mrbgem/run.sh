@@ -674,12 +674,12 @@ check grep -q '  rb_lnr_proto  no entry in api_map.json' "$work/local_names_refu
 check test "$(grep -c '  LNR_CALL  ' "$work/local_names_refused/REFUSALS.txt")" -eq 0
 
 # 2q. includes come from api_map.json ("includes"): ruby/ruby.h maps to its mruby headers, ruby/re.h to the fork's mruby/onigmo.h
-# (the Onigmo API on the system oniguruma library); ruby/encoding.h is dropped (the fork has no encoding header; the prelude placeholder covers rb_encoding)
+# (the Onigmo API on the system oniguruma library), and ruby/encoding.h to the fork's mruby/encoding.h (the pinned fork has it)
 rc=0; "$rb" "$conv" --scanner "$scanner" --name includes_map tools/cext2mrbgem/fixtures/includes_map/ext/includes_map "$work/includes_map" > "$work/includes_map.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF '#include <mruby/onigmo.h>' "$work/includes_map/src/includes_map.c"
 check grep -qF '#include <mruby/numeric.h>' "$work/includes_map/src/includes_map.c"
-check test "$(grep -c 'mruby/encoding.h' "$work/includes_map/src/includes_map.c")" -eq 0
+check grep -qF '#include <mruby/encoding.h>' "$work/includes_map/src/includes_map.c"
 
 # 2r. exception classes rb_eIndexError and rb_eRangeError (api_map.json batch D1): the class argument of rb_raise
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_exc_index tools/cext2mrbgem/fixtures/api_exc_index/ext/api_exc_index "$work/api_exc_index" > "$work/api_exc_index.log" 2>&1 || rc=$?
@@ -1944,6 +1944,11 @@ check grep -qF 'Holder *h = (Holder *)mrb_cptr(x);' "$work/api_cptr_value/src/ap
 check test "$(grep -c 'stuck point (Struct)' "$work/api_struct_va/REFUSALS.txt")" -eq 0
 # 2zzz155. a struct field of CRuby's rb_encoding * type: the Encoding placeholder type is in the prelude (the declaration compiles),
 # and the include of ruby/encoding.h is not a blocking refusal (the placeholder covers it).
+# 2zzz162. the <string.h> names (memcpy) come with CRuby's ruby.h: the converted source includes <string.h>
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_string_h tools/cext2mrbgem/fixtures/api_string_h/ext/api_string_h "$work/api_string_h" > "$work/api_string_h.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF '#include <string.h>' "$work/api_string_h/src/api_string_h.c"
+
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rb_encoding_field tools/cext2mrbgem/fixtures/api_rb_encoding_field/ext/api_rb_encoding_field "$work/api_rb_encoding_field" > "$work/api_rb_encoding_field.log" 2>&1 || rc=$?
 check grep -qF 'no refusals' "$work/api_rb_encoding_field/REFUSALS.txt"
 check test "$(grep -c '#error' "$work/api_rb_encoding_field/src/gem_init.c")" -eq 0

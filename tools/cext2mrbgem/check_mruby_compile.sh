@@ -31,7 +31,8 @@ for N in "$@"; do
       *.cc) cc="g++ -std=gnu++17"; have_cxx=1 ;;
       *) cc="gcc -std=gnu99" ;;
     esac
-    if ! $cc -c -w -fPIC $DEFS $INC "$c" -o "$o" 2> "$W/$b.err"; then
+    # warnings are not errors here, but an implicit declaration is one (the gem build compiles with -Werror on it, and -w would hide it)
+    if ! $cc -c -Werror=implicit-function-declaration -fPIC $DEFS $INC "$c" -o "$o" 2> "$W/$b.err"; then
       n=$(grep -c " error" "$W/$b.err"); errs=$((errs + n))
       grep " error" "$W/$b.err" | sed "s|^|$b: |" | cut -c1-200
     fi

@@ -97,7 +97,6 @@ DROP_INCLUDES = {
   'ruby/internal/has/builtin.h' => 'CRuby internal feature tests (__has_builtin); the code that uses them is in branches the build undefines (corpus flags: RBIMPL_STATIC_ASSERT, RUBY_ATOMIC_PTR_CAS)',
   'ruby/internal/static_assert.h' => 'CRuby internal static assertions (RBIMPL_STATIC_ASSERT); the build undefines it (corpus flags), so its uses are not compiled',
   'ruby/atomic.h' => 'CRuby internal atomics (RUBY_ATOMIC_PTR_CAS); the build undefines it (corpus flags), so its uses are not compiled',
-  'ruby/encoding.h' => 'the fork has no C encoding header (mrbgems/mruby-encoding ships only src/encoding.c); rb_encoding is declared by the prelude placeholder, so the include is dropped',
   'ruby/version.h' => 'the CRuby version the gem emulates is a build define (RUBY_API_VERSION_CODE, set by --define in the corpus flags); the header only declares it',
 }
 
@@ -8275,6 +8274,14 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       next if outputs[rel].to_s.match?(/#\s*include\s*[<"]math\.h[>"]/)
       next unless outputs[rel].to_s.match?(math_names)
       outputs[rel] = "#include <math.h>\n" + outputs[rel]
+    end
+    # <string.h> came with CRuby's ruby.h too (memcpy, strlen, ...): a source that uses its names includes it
+    string_names = /(?<![\w$])(?:memcpy|memmove|memset|memcmp|memchr|strlen|strnlen|strcmp|strncmp|strcpy|strncpy|strchr|strrchr|strstr|strdup|strndup)(?![\w$])/
+    @files.each do |rel, f|
+      next unless f['kind'] == 'src'
+      next if outputs[rel].to_s.match?(/#\s*include\s*[<"]string\.h[>"]/)
+      next unless outputs[rel].to_s.match?(string_names)
+      outputs[rel] = "#include <string.h>\n" + outputs[rel]
     end
     @files.each do |rel, f|
       next unless f['kind'] == 'src'
