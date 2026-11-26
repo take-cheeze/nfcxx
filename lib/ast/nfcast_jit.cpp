@@ -6,11 +6,19 @@
 // anything else outside the subset, makes compile() refuse the loop.
 //
 // Registers. The machine code has one 64-bit word per local (and per hidden variable of a for loop) in an array REGS, whose address
-// is in RBX (callee-saved, pushed at the entry). RAX, RCX and RDX are scratch; a binary operation evaluates its left operand, pushes
-// it, evaluates the right one, and pops the left one into RAX. There are no calls, no memory but REGS, and no allocation, so the
+// is in RBX (callee-saved, pushed at the entry). RAX, RCX and RDX are scratch; a binary operation of two compound operands evaluates
+// its left operand, pushes it, evaluates the right one, and pops the left one into RAX (a constant or a local operand is read directly,
+// with no push). There are no calls, no memory but REGS, and no allocation, so the
 // code has no side effects: whatever the entry guard does not cover cannot be observed before the loop ends.
+//
+// Register allocation. The four most referenced words (weighted by loop depth) live in R12-R15 for the whole loop instead of in
+// REGS. They are loaded from REGS at the entry (after the guard, which reads only the frame) and every exit of the loop goes through
+// the epilogue, which stores back the live-ins the loop assigns before the callee-saved registers are restored. The loop has no
+// other exit: no call, no bail-out, and no operation can fail. So the frame sees the words only at entry and at that write-back.
+// The code is generated twice: once with every word in memory to count the references, then with the allocation.
 #include "nfcast_jit.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <initializer_list>
 #include <map>
@@ -89,17 +97,32 @@ class Asm {
   }
   void push_rax() { b.push_back(0x50); }
   void pop_rax() { b.push_back(0x58); }
-  // mov REG, [rbx + 8 * k] and mov [rbx + 8 * k], REG (REG is RAX, RCX or RDX)
+  // REG = word K and word K = REG (REG is RAX, RCX or RDX): a memory access in REGS, or a register move when K is allocated.
   void load(int reg, int k) {
-    b.push_back(0x48);
-    b.push_back(0x8B);
-    rbx_disp(reg, k);
+    note(k);
+    int p = phys_of(k);
+    if (p >= 0) mov_rr(reg, p);
+    else mem_op(0x8B, reg, k);
   }
   void store(int k, int reg) {
-    b.push_back(0x48);
-    b.push_back(0x89);
-    rbx_disp(reg, k);
+    note(k);
+    int p = phys_of(k);
+    if (p >= 0) mov_rr(p, reg);
+    else mem_op(0x89, reg, k);
   }
+  // The allocation: PHYS[k] is the register (R12-R15) word k lives in, or -1 for memory. The registers in use are saved at the entry.
+  void set_phys(const std::vector<int>& phys) {
+    phys_ = phys;
+    saved_.clear();
+    for (int p : phys)
+      if (p >= 0 && std::find(saved_.begin(), saved_.end(), p) == saved_.end()) saved_.push_back(p);
+    std::sort(saved_.begin(), saved_.end());
+  }
+  int phys_of(int k) const { return k >= 0 && k < static_cast<int>(phys_.size()) ? phys_[static_cast<std::size_t>(k)] : -1; }
+  // The loop nesting of the code being emitted, and the references to each word weighted by it (the allocation's priorities).
+  void enter_loop() { ++depth_; }
+  void leave_loop() { --depth_; }
+  const std::vector<long>& refs() const { return refs_; }
   // mov REG, V: the sign-extended imm32 form when V fits, else the imm64 one.
   void mov_imm(int reg, std::int64_t v) {
     if (v >= INT32_MIN && v <= INT32_MAX) {
@@ -123,10 +146,19 @@ class Asm {
   void sub_rax_1() { bytes({0x48, 0x83, 0xE8, 0x01}); }
   void xor_edx_edx() { bytes({0x31, 0xD2}); }
   void div_rcx() { bytes({0x48, 0xF7, 0xF1}); }  // unsigned rdx:rax / rcx, quotient in rax
-  void prologue() {  // push rbx; mov rbx, rdi
+  void prologue() {  // push rbx; mov rbx, rdi; push the registers in use; load every allocated word into its register
     bytes({0x53, 0x48, 0x89, 0xFB});
+    for (int r : saved_) push_r(r);
+    for (std::size_t k = 0; k < phys_.size(); ++k)
+      if (phys_[k] >= 0) mem_op(0x8B, phys_[k], static_cast<int>(k));
   }
-  void epilogue() {  // pop rbx; xor eax, eax; ret
+  // The write-back of an allocated word K to REGS (a word in memory is already there). The loop's exits call this, then epilogue().
+  void spill(int k) {
+    int p = phys_of(k);
+    if (p >= 0) mem_op(0x89, p, k);
+  }
+  void epilogue() {  // pop the registers in use; pop rbx; xor eax, eax; ret
+    for (std::size_t i = saved_.size(); i-- > 0;) pop_r(saved_[i]);
     bytes({0x5B, 0x31, 0xC0, 0xC3});
   }
 
@@ -148,7 +180,29 @@ class Asm {
   };
   std::vector<long> labels_;
   std::vector<Fix> fixes_;
+  std::vector<int> phys_;       // word -> register, see set_phys
+  std::vector<int> saved_;      // the registers in use, ascending: saved at the entry, restored at the exit
+  std::vector<long> refs_;      // word -> references (weighted by the loop depth) in the code emitted so far
+  int depth_ = 0;
 
+  void note(int k) {
+    if (static_cast<std::size_t>(k) >= refs_.size()) refs_.resize(static_cast<std::size_t>(k) + 1, 0);
+    refs_[static_cast<std::size_t>(k)] += 1L << (3 * depth_ < 40 ? 3 * depth_ : 40);
+  }
+  void push_r(int r) {
+    if (r >= 8) b.push_back(0x41);
+    b.push_back(static_cast<std::uint8_t>(0x50 | (r & 7)));
+  }
+  void pop_r(int r) {
+    if (r >= 8) b.push_back(0x41);
+    b.push_back(static_cast<std::uint8_t>(0x58 | (r & 7)));
+  }
+  // mov DST, SRC (64-bit, both registers; DST is RAX, RCX, RDX or R12-R15).
+  void mov_rr(int dst, int src) {
+    b.push_back(static_cast<std::uint8_t>(0x48 | ((src >> 3) << 2) | (dst >> 3)));
+    b.push_back(0x89);
+    b.push_back(static_cast<std::uint8_t>(0xC0 | ((src & 7) << 3) | (dst & 7)));
+  }
   void bytes(std::initializer_list<std::uint8_t> xs) { b.insert(b.end(), xs.begin(), xs.end()); }
   void op_rr(std::uint8_t opc, std::uint8_t modrm) { bytes({0x48, opc, modrm}); }
   void u32(std::uint32_t x) {
@@ -161,9 +215,12 @@ class Asm {
     fixes_.push_back(Fix{b.size(), l});
     u32(0);
   }
-  // ModRM of [rbx + disp32] with REG in the reg field, then the displacement (mod 10, rm 011 = rbx).
-  void rbx_disp(int reg, int k) {
-    b.push_back(static_cast<std::uint8_t>(0x80 | (reg << 3) | 0x03));
+  // OPC with REG (RAX..R15) and [rbx + 8 * k]: REX.W (and REX.R for R8-R15), the opcode, then ModRM (mod 10, rm 011 = rbx) and the
+  // displacement. OPC 8B is a load into REG, 89 a store from REG.
+  void mem_op(std::uint8_t opc, int reg, int k) {
+    b.push_back(static_cast<std::uint8_t>(0x48 | ((reg >> 3) << 2)));
+    b.push_back(opc);
+    b.push_back(static_cast<std::uint8_t>(0x80 | ((reg & 7) << 3) | 0x03));
     u32(static_cast<std::uint32_t>(8 * k));
   }
 };
@@ -281,8 +338,40 @@ struct Gen {
     }
   }
 
-  // RAX = left, RCX = right (left is evaluated first; its value is kept on the machine stack meanwhile).
+  // A leaf is an integer constant or a local that is not captured: reading it runs no code that can change anything or fail, so its
+  // read may come before or after the other operand's evaluation (the expressions of the subset assign nothing).
+  bool leaf(Node* n) {
+    TierView v;
+    tier_view(n, v);
+    return (v.kind == TierView::K_CONST && v.k.t == T_INT) || (v.kind == TierView::K_LOCAL && !v.flag);
+  }
+  // Loads the leaf N into REG (RAX or RCX).
+  bool leaf_into(Node* n, int reg) {
+    TierView v;
+    tier_view(n, v);
+    if (v.kind == TierView::K_CONST) {
+      a.mov_imm(reg, v.k.i);
+      return true;
+    }
+    int r = slot_reg(v.slot, false);
+    if (r < 0) return false;
+    a.load(reg, r);
+    return true;
+  }
+
+  // RAX = left, RCX = right. A leaf on either side needs no push: a leaf on the right is loaded into RCX after the left is evaluated,
+  // and a leaf on the left is loaded into RAX after the right is evaluated (its value moved to RCX first). Only two compound operands
+  // keep the left value on the machine stack while the right one is computed.
   bool binary(Node* l, Node* r) {
+    if (leaf(r)) {
+      if (!expr(l)) return false;
+      return leaf_into(r, RCX);
+    }
+    if (leaf(l)) {
+      if (!expr(r)) return false;
+      a.mov_rcx_rax();
+      return leaf_into(l, RAX);
+    }
     if (!expr(l)) return false;
     a.push_rax();
     if (!expr(r)) return false;
@@ -382,6 +471,12 @@ struct Gen {
   bool decl(const TierView& v) {
     if (v.captured) return fail("a local captured by a closure");
     if (v.multi_last || v.kids.size() != v.slots.size()) return fail("a local declared without one integer value");
+    if (v.slots.size() == 1) {  // one local: its value goes straight to its register
+      if (!expr(v.kids[0])) return false;
+      a.store(declare_reg(v.slots[0]), RAX);
+      seen.insert(v.slots[0]);
+      return true;
+    }
     for (Node* k : v.kids) {
       if (!expr(k)) return false;
       a.push_rax();
@@ -399,6 +494,13 @@ struct Gen {
     for (int t : v.tkinds)
       if (t != TierView::T_LOCAL) return fail("an assignment to a captured local, an upvalue, a global or a field");
     if (v.multi_last || v.kids.size() != v.slots.size()) return fail("an assignment of other than one value per target");
+    if (v.slots.size() == 1) {  // one target: its value goes straight to its word
+      if (!expr(v.kids[0])) return false;
+      int r = slot_reg(v.slots[0], true);
+      if (r < 0) return false;
+      a.store(r, RAX);
+      return true;
+    }
     for (Node* k : v.kids) {
       if (!expr(k)) return false;
       a.push_rax();
@@ -427,6 +529,7 @@ struct Gen {
 
   bool while_loop(const TierView& v) {
     int top = a.label(), exit = a.label();
+    a.enter_loop();
     a.bind(top);
     if (!branch(v.cond, false, exit)) return false;
     breaks.push_back(exit);
@@ -434,11 +537,13 @@ struct Gen {
     breaks.pop_back();
     a.jmp(top);
     a.bind(exit);
+    a.leave_loop();
     return true;
   }
 
   bool repeat_loop(const TierView& v) {
     int top = a.label(), exit = a.label();
+    a.enter_loop();
     a.bind(top);
     breaks.push_back(exit);
     if (!stmt(v.blocks[0])) return false;
@@ -446,6 +551,7 @@ struct Gen {
     if (!branch(v.cond, true, exit)) return false;
     a.jmp(top);
     a.bind(exit);
+    a.leave_loop();
     return true;
   }
 
@@ -506,6 +612,7 @@ struct Gen {
     a.store(hc, RAX);
     int var = declare_reg(v.slots[0]);
     seen.insert(v.slots[0]);
+    a.enter_loop();
     a.bind(top);
     a.load(RAX, hi);
     a.store(var, RAX);
@@ -514,6 +621,7 @@ struct Gen {
     breaks.pop_back();
     loop_tail(hi, hc, -1, step, top, done);
     a.bind(done);
+    a.leave_loop();
     return true;
   }
 };
@@ -534,6 +642,7 @@ bool top_level(Gen& g, Node* loop, int kind, Code& code) {
     int var = g.declare_reg(v.slots[0]);
     g.seen.insert(v.slots[0]);
     int done = g.a.label(), top = g.a.label();
+    g.a.enter_loop();
     g.a.bind(top);
     g.a.load(RAX, hi);
     g.a.store(var, RAX);
@@ -542,6 +651,7 @@ bool top_level(Gen& g, Node* loop, int kind, Code& code) {
     g.breaks.pop_back();
     g.loop_tail(hi, hc, hs, 0, top, done);
     g.a.bind(done);
+    g.a.leave_loop();
   } else if (kind == TierLoopState::WHILE && v.kind == TierView::K_WHILE) {
     if (!g.while_loop(v)) return false;
   } else if (kind == TierLoopState::REPEAT && v.kind == TierView::K_REPEAT) {
@@ -549,6 +659,10 @@ bool top_level(Gen& g, Node* loop, int kind, Code& code) {
   } else {
     return g.fail("a loop kind the JIT does not take over");
   }
+  // The write-back: every exit of the loop (the end of the loop, its breaks) comes here, and the live-ins it assigns go back to REGS
+  // (run() copies them to the frame). A word in memory is already there; an allocated one is stored from its register.
+  for (std::size_t k = 0; k < g.in_slots.size(); ++k)
+    if (g.written.count(g.in_slots[k])) g.a.spill(g.in_regs[k]);
   g.a.epilogue();
   return g.ok;
 }
@@ -562,7 +676,32 @@ std::unique_ptr<Code> compile(Node* loop, int kind, std::string& why) {
     why = "a float for loop (the JIT compiles integer loops only)";
     return nullptr;
   }
+  // Register allocation: the first pass generates the loop with every word in memory and counts the references to each word (weighted
+  // by loop depth, so the control variables, referenced on every iteration, rank first). The four most referenced words get R12-R15
+  // (callee-saved) and the second pass generates the code with them. The allocation does not change what is in the subset, so the
+  // second pass accepts the loop when the first did.
+  const int kFirstAllocReg = 12, kAllocRegs = 4;  // R12..R15
+  Gen g1;
+  Code c1;
+  c1.kind = kind;
+  if (!top_level(g1, loop, kind, c1) || !g1.a.finish()) {
+    why = g1.ok ? "internal: an unbound label" : g1.why;
+    return nullptr;
+  }
+  std::vector<long> refs = g1.a.refs();
+  refs.resize(static_cast<std::size_t>(g1.nregs), 0);
+  std::vector<int> order(static_cast<std::size_t>(g1.nregs));
+  for (std::size_t k = 0; k < order.size(); ++k) order[k] = static_cast<int>(k);
+  std::stable_sort(order.begin(), order.end(), [&refs](int x, int y) { return refs[static_cast<std::size_t>(x)] > refs[static_cast<std::size_t>(y)]; });
+  std::vector<int> phys(static_cast<std::size_t>(g1.nregs), -1);
+  int next = 0;
+  for (int k : order) {
+    if (next == kAllocRegs || refs[static_cast<std::size_t>(k)] == 0) break;
+    phys[static_cast<std::size_t>(k)] = kFirstAllocReg + next++;
+  }
+
   Gen g;
+  g.a.set_phys(phys);
   std::unique_ptr<Code> code(new Code());
   code->kind = kind;
   if (!top_level(g, loop, kind, *code) || !g.a.finish()) {

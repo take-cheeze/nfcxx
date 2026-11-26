@@ -635,9 +635,21 @@ iteration (the same state the takeover hands over) without writing the locals ba
 to its end), `jit_guard_misses`, `jit_bailouts` (times compiled code handed a loop back to the interpreter; equal to the guard misses in
 this slice), `jit_refused` (loops refused at compile time, counted once per loop).
 
-**The code.** One 64-bit word per local and per hidden variable of a `for` in an array whose address is in RBX; no register allocation;
-a binary operation keeps its left operand on the machine stack while the right one is computed. The code makes no calls. Its speed was
-not measured: this slice is about the encoder and the takeover, not about the loops it runs.
+**The code.** One 64-bit word per local and per hidden variable of a `for` in an array whose address is in RBX. The four words with the
+most references (weighted by loop depth, so the loop's control variables come first) live in R12-R15 for the whole loop instead: they
+are loaded at the entry, after the guard, and stored back in the epilogue, which every exit of the loop reaches (the loop has no other
+exit). A binary operation with a constant or a local operand reads it directly; only two compound operands keep the left value on the
+machine stack. A single assignment or declaration stores its value straight to its word. The code makes no calls. The code is generated
+twice, first with every word in memory to count the references, then with the allocation.
+
+Speed, the pathb build, `NFCAST_TIER=sync NFCAST_JIT=1 driver --jit`, wall time on a shared 4-core machine (about +-10%), medians:
+`local s = 0 for i = 1, 100000000 do s = s + i * i end` took about 0.18 s with the JIT as of 4e2b26a6b (every word in memory, the left
+operand on the stack), 0.164 s with the register allocation, and 0.117-0.120 s with the leaf operands (10 interleaved runs each, two
+batches). `s = s + i` (100M) went 0.143 s, then 0.178 s with the register allocation alone, then 0.099 s with the leaf operands. The
+10M version of the first benchmark went from 0.025 s to 0.020 s. The C tier (`NFCAST_TIER=sync`, the JIT off) runs the same 100M
+benchmark in 0.050 s and the 10M one in 0.013 s, so the JIT is about 2.3 times slower on this loop. A binary operation whose
+two operands are both compound (`(a + b) * (c + d)`) still keeps its left value on the machine stack; the speed of such loops was not
+measured.
 
 **Verification.** `tests/ast/jit.cpp` runs a set of loops (the refusals, the guard miss, the wraparound, nested and re-entered loops,
 `break`, the conditions) and 300 generated loops with nested ifs, whiles and wrapping arithmetic; each must give the interpreter's
