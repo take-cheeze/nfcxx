@@ -1,9 +1,9 @@
 // mruby 4.0 RITE -> Path B IR (docs/notes/mrbbc-pathb.md, section "The lowering").
 //
 // The main program becomes one IR function `mrb_irep_0(MV *ret)`. A function keeps its registers in one frame, a
-// contiguous array of MV (16-byte slots: a tag byte at offset 0 and an int64 at offset 8; the tags are the runtime's,
-// tests/mrbbc/runtime/mrbrt.h); R(i) is the address %r<i>, the frame plus 16 i. The value the program returns is written
-// to *ret.
+// contiguous array of MV (a tagged word of 8 or 4 bytes, or a 16-byte tag and int64: LowerOptions::value_bytes, see the
+// value layout helpers below and tests/mrbbc/runtime/mrbrt.h); R(i) is the address %r<i>, the frame plus kV() i. The value
+// the program returns is written to *ret.
 //
 // A method (a child irep that a TDEF defines) is `mrb_m<N>(MV *ret, MV *argv, MV *blk, long argc, long kw)`: argv[0] is self
 // and argv[1..argc] the positional arguments the call gave; kw is 1 when the call gave keyword arguments, whose hash is
@@ -25,8 +25,8 @@
 // block parameter is refused). A RETURN_BLK sets the pending return of its home, and each call on the way passes it up
 // (emit_unwind_check) until the home's function takes it.
 //
-// Integer operators have an inline fast path: when both operands hold integers, the operation is one IR statement
-// (checked add, subtract and multiply, which trap on overflow, and a signed compare). Everything else calls a runtime
+// Integer operators have an inline fast path when both operands hold (small) integers: a signed compare, and an add,
+// subtract or multiply whose result is stored when the layout holds it (emit_int_op). Everything else calls a runtime
 // helper (mrbbc_binop for operators, mrbbc_getidx and friends for indexing, mrbbc_send0 for the methods of SEND0),
 // which does the rest of mruby's rules. Strings and symbols are data items of the IR module; arrays are built by the
 // runtime. The opcodes not handled here are refused by name, as the other producers refuse them.
@@ -98,7 +98,7 @@ constexpr int kFirstReg = 6;
 // The deepest block the lowering takes (the runtime's MRBBC_MAX_DEPTH: a closure keeps that many frames), and a block's
 // function has %5 the disp array of its closure (the frames of its creators past the first, see mrbbc_block_nested).
 constexpr long kMaxDepth = 8;
-constexpr std::size_t kCloBytes = 192;  // the closure slot of a BLOCK (the runtime's MRBBC_CLO_BYTES)
+// The slot a BLOCK passes as its closure: unused, the runtime makes the closure on the heap (mrbbc_block).
 // The registers past an irep's nregs that a frame keeps (see lower_irep).
 constexpr unsigned kRegSlack = 3;
 
@@ -132,7 +132,32 @@ struct Ctx {
   }
 };
 
-// The tag byte of an address, loaded into a fresh register.
+// The value layout (LowerOptions::value_bytes, the runtime's MRBBC_VALUE; see mrbrt.h). 16: the tag byte at offset 0 and
+// an int64 at offset 8. 8 or 4: a word, with small integers as (i << 1) | 1, nil, false and true as 0, 4 and 12, and the
+// other values (a symbol, an address) left to the runtime. Every access to a value's bits in the lowering goes through
+// the helpers below.
+int g_value_bytes = 8;
+std::size_t kV() { return static_cast<std::size_t>(g_value_bytes); }
+std::string vsize() { return std::to_string(g_value_bytes); }
+int kAlign() { return g_value_bytes == 4 ? 4 : 8; }
+bool word_layout() { return g_value_bytes != 16; }
+// The IR type of a word, and the small integers' range (the runtime's SMALL_MIN and SMALL_MAX).
+std::string wty() { return g_value_bytes == 4 ? "int" : "long"; }
+long long small_max() { return (1LL << (g_value_bytes * 8 - 2)) - 1; }
+long long small_min() { return -(1LL << (g_value_bytes * 8 - 2)); }
+// The word of nil, false and true.
+long long word_of_tag(int tag) { return tag == kTagNil ? 0 : tag == kTagFalse ? 4 : 12; }
+std::string wconst(long long v) { return "(const " + wty() + " " + num(v) + ")"; }
+
+// The word of a value, loaded into a fresh register (word layouts).
+std::string load_word(Ctx &c, const std::string &addr) {
+  std::string p = c.fresh(), w = c.fresh();
+  c.line("(let " + p + " (ptr " + wty() + ") (offset " + addr + " 0))");
+  c.line("(let " + w + " " + wty() + " (load " + wty() + " " + p + "))");
+  return w;
+}
+
+// The tag byte of an address, loaded into a fresh register (the 16-byte layout).
 std::string load_tag(Ctx &c, const std::string &addr) {
   std::string p = c.fresh(), t = c.fresh();
   c.line("(let " + p + " (ptr unsigned_char) (offset " + addr + " 0))");
@@ -147,27 +172,63 @@ std::string tag_is(Ctx &c, const std::string &tag_reg, int tag) {
   return b;
 }
 
-// A bool register that is true when the value is falsy (nil or false: tags 0 and 1).
+// A bool register that is true when the word register w is a small integer (its low bit is set).
+std::string word_is_int(Ctx &c, const std::string &w) {
+  std::string m = c.fresh(), b = c.fresh();
+  c.line("(let " + m + " " + wty() + " (and " + wty() + " " + w + " " + wconst(1) + "))");
+  c.line("(let " + b + " bool (eq " + wty() + " " + m + " " + wconst(1) + "))");
+  return b;
+}
+
+// A bool register that is true when the value is nil.
+std::string is_nil(Ctx &c, const std::string &addr) {
+  if (!word_layout()) return tag_is(c, load_tag(c, addr), kTagNil);
+  std::string w = load_word(c, addr), b = c.fresh();
+  c.line("(let " + b + " bool (eq " + wty() + " " + w + " " + wconst(0) + "))");
+  return b;
+}
+
+// A bool register that is true when the value is falsy (nil or false: tags 0 and 1, the words 0 and 4).
 std::string falsy(Ctx &c, const std::string &addr) {
-  std::string t = load_tag(c, addr), f = c.fresh();
+  std::string f = c.fresh();
+  if (word_layout()) {
+    std::string w = load_word(c, addr), m = c.fresh();
+    c.line("(let " + m + " " + wty() + " (and " + wty() + " " + w + " " + wconst(-5) + "))");
+    c.line("(let " + f + " bool (eq " + wty() + " " + m + " " + wconst(0) + "))");
+    return f;
+  }
+  std::string t = load_tag(c, addr);
   c.line("(let " + f + " bool (lt.u unsigned_char " + t + " (const unsigned_char 2)))");
   return f;
 }
 
-// A bool register that is true when the value is truthy (every other tag).
+// A bool register that is true when the value is truthy (every other value).
 std::string truthy(Ctx &c, const std::string &addr) {
-  std::string t = load_tag(c, addr), f = c.fresh();
+  std::string f = c.fresh();
+  if (word_layout()) {
+    std::string w = load_word(c, addr), m = c.fresh();
+    c.line("(let " + m + " " + wty() + " (and " + wty() + " " + w + " " + wconst(-5) + "))");
+    c.line("(let " + f + " bool (ne " + wty() + " " + m + " " + wconst(0) + "))");
+    return f;
+  }
+  std::string t = load_tag(c, addr);
   c.line("(let " + f + " bool (le.u unsigned_char (const unsigned_char 2) " + t + "))");
   return f;
 }
 
+// dst = nil, false or true (the tag kTagNil, kTagFalse or kTagTrue).
 void store_tag(Ctx &c, const std::string &dst, int tag) {
   std::string p = c.fresh();
+  if (word_layout()) {
+    c.line("(let " + p + " (ptr " + wty() + ") (offset " + dst + " 0))");
+    c.line("(store " + wty() + " " + p + " " + wconst(word_of_tag(tag)) + ")");
+    return;
+  }
   c.line("(let " + p + " (ptr unsigned_char) (offset " + dst + " 0))");
   c.line("(store unsigned_char " + p + " (const unsigned_char " + num(tag) + "))");
 }
 
-// The int64 of a value: its address plus 8, loaded.
+// The int64 of a value: its address plus 8, loaded (the 16-byte layout).
 std::string load_int(Ctx &c, const std::string &addr) {
   std::string p = c.fresh(), v = c.fresh();
   c.line("(let " + p + " (ptr long) (offset " + addr + " 8))");
@@ -175,6 +236,7 @@ std::string load_int(Ctx &c, const std::string &addr) {
   return v;
 }
 
+// dst = the integer register `value` (a long; the 16-byte layout).
 void store_int(Ctx &c, const std::string &dst, const std::string &value) {
   store_tag(c, dst, kTagInt);
   std::string p = c.fresh();
@@ -182,16 +244,118 @@ void store_int(Ctx &c, const std::string &dst, const std::string &value) {
   c.line("(store long " + p + " " + value + ")");
 }
 
+// dst = the small integer in the word register r (word layouts; r is in the small range).
+void store_small(Ctx &c, const std::string &dst, const std::string &r) {
+  std::string t = c.fresh(), w = c.fresh(), p = c.fresh();
+  c.line("(let " + t + " " + wty() + " (wshl " + wty() + " " + r + " " + wconst(1) + "))");
+  c.line("(let " + w + " " + wty() + " (or " + wty() + " " + t + " " + wconst(1) + "))");
+  c.line("(let " + p + " (ptr " + wty() + ") (offset " + dst + " 0))");
+  c.line("(store " + wty() + " " + p + " " + w + ")");
+}
+
+// dst = the integer constant v: inline when the layout holds it, else a boxed integer made by the runtime.
+void store_int_const(Ctx &c, const std::string &dst, long long v) {
+  if (!word_layout()) {
+    store_int(c, dst, "(const long " + num(v) + ")");
+    return;
+  }
+  if (v < small_min() || v > small_max()) {
+    c.line("(eval (call void &\"mrbbc_int_new\" " + dst + " (const long_long " + num(v) + ")))");
+    return;
+  }
+  std::string p = c.fresh();
+  c.line("(let " + p + " (ptr " + wty() + ") (offset " + dst + " 0))");
+  c.line("(store " + wty() + " " + p + " " + wconst(static_cast<long long>(static_cast<unsigned long long>(v) << 1) | 1) + ")");
+}
+
 // The slow path: the runtime does the whole operation.
 void call_binop(Ctx &c, int op, const std::string &dst, const std::string &lhs, const std::string &rhs) {
   c.line("(eval (call void &\"mrbbc_binop\" (const int " + num(op) + ") " + dst + " " + lhs + " " + rhs + "))");
 }
 
+// The fast path of emit_int_op in a word layout. Both operands are small integers (low bit set): a comparison compares
+// the words (the tagging keeps the order); + - * take the integers out (an arithmetic shift), and the result is stored
+// when it is in the small range, else `done` stays false and the runtime computes it (a boxed integer, or the overflow
+// error past 64 bits). * is inline only for factors of at most half the word's bits, whose product cannot wrap.
+void emit_word_op(Ctx &c, int op, const std::string &dst, const std::string &lhs, const std::string &rhs_reg, long long imm,
+                  const std::string &done) {
+  const bool is_imm = rhs_reg.empty();
+  const std::string va = load_word(c, lhs);
+  const std::string vb = is_imm ? std::string() : load_word(c, rhs_reg);
+  std::string ok = word_is_int(c, va);
+  if (!is_imm) {
+    std::string both = c.fresh();
+    c.line("(let " + both + " bool (const bool 0))");
+    c.line("(if " + ok + " (then (set " + both + " " + word_is_int(c, vb) + ")))");
+    ok = both;
+  }
+  c.line("(if " + ok + " (then");
+  if (op == kOpAdd || op == kOpSub || op == kOpMul) {
+    std::string x = c.fresh(), y = is_imm ? wconst(imm) : c.fresh(), r = c.fresh();
+    c.line("(let " + x + " " + wty() + " (cshr " + wty() + " " + va + " " + wconst(1) + "))");
+    if (!is_imm) c.line("(let " + y + " " + wty() + " (cshr " + wty() + " " + vb + " " + wconst(1) + "))");
+    std::string go = "(const bool 1)";
+    if (op == kOpMul) {
+      const long long half = 1LL << (g_value_bytes * 4 - 1);
+      go = c.fresh();
+      std::string g1 = c.fresh(), g2 = c.fresh(), g3 = c.fresh();
+      c.line("(let " + g1 + " bool (le.s " + wty() + " " + wconst(-half) + " " + x + "))");
+      c.line("(let " + g2 + " bool (le.s " + wty() + " " + x + " " + wconst(half) + "))");
+      c.line("(let " + g3 + " bool (le.s " + wty() + " " + wconst(-half) + " " + y + "))");
+      c.line("(let " + go + " bool (le.s " + wty() + " " + y + " " + wconst(half) + "))");
+      c.line("(if " + g1 + " (then) (else (set " + go + " (const bool 0))))");
+      c.line("(if " + g2 + " (then) (else (set " + go + " (const bool 0))))");
+      c.line("(if " + g3 + " (then) (else (set " + go + " (const bool 0))))");
+    }
+    c.line("(if " + go + " (then");
+    const char *wop = op == kOpAdd ? "wadd" : op == kOpSub ? "wsub" : "wmul";
+    c.line("(let " + r + " " + wty() + " (" + wop + " " + wty() + " " + x + " " + y + "))");
+    std::string lo = c.fresh(), hi = c.fresh();
+    c.line("(let " + lo + " bool (le.s " + wty() + " " + wconst(small_min()) + " " + r + "))");
+    c.line("(let " + hi + " bool (le.s " + wty() + " " + r + " " + wconst(small_max()) + "))");
+    c.line("(if " + lo + " (then (if " + hi + " (then");
+    store_small(c, dst, r);
+    c.line("(set " + done + " (const bool 1))))))");
+    c.line("))");
+  } else {
+    // comparisons: GT and GE swap the operands of LT and LE (the emitter has signed lt.s and le.s only)
+    const std::string y = is_imm ? wconst(static_cast<long long>(static_cast<unsigned long long>(imm) << 1) | 1) : vb;
+    const bool swap = op == kOpGt || op == kOpGe;
+    const char *cop = (op == kOpLt || op == kOpGt) ? "lt.s" : "le.s";
+    std::string r = c.fresh();
+    c.line("(let " + r + " bool (" + cop + " " + wty() + " " + (swap ? y : va) + " " + (swap ? va : y) + "))");
+    c.line("(if " + r + " (then");
+    store_tag(c, dst, kTagTrue);
+    c.line(") (else");
+    store_tag(c, dst, kTagFalse);
+    c.line("))");
+    c.line("(set " + done + " (const bool 1))");
+  }
+  c.line("))");
+}
+
 // The integer fast path of a binary operator on R[a] and an operand. `rhs_reg` is the address of the right operand
-// (empty for an immediate). The fast path runs when every operand holds an integer.
+// (empty for an immediate). The fast path runs when every operand holds an integer (a small one, in a word layout).
 void emit_int_op(Ctx &c, int op, const std::string &dst, const std::string &lhs, const std::string &rhs_reg,
                  long long imm) {
   const bool is_imm = rhs_reg.empty();
+  std::string rhs_addr = rhs_reg;
+  std::string imm_slot;
+  if (is_imm) {
+    imm_slot = "$\"imm" + std::to_string(c.pc) + "\"";
+    c.add_slot("imm" + std::to_string(c.pc), kV());
+    rhs_addr = imm_slot;
+  }
+  if (word_layout()) {
+    std::string done = c.fresh();
+    c.line("(let " + done + " bool (const bool 0))");
+    emit_word_op(c, op, dst, lhs, rhs_reg, imm, done);
+    c.line("(if " + done + " (then) (else");
+    if (is_imm) store_int_const(c, imm_slot, imm);  // the slow path needs the immediate as a value
+    call_binop(c, op, dst, lhs, rhs_addr);
+    c.line("))");
+    return;
+  }
   std::string ok;
   if (is_imm) {
     ok = tag_is(c, load_tag(c, lhs), kTagInt);
@@ -201,13 +365,6 @@ void emit_int_op(Ctx &c, int op, const std::string &dst, const std::string &lhs,
     ok = c.fresh();
     c.line("(let " + ok + " bool (const bool 0))");
     c.line("(if " + ba + " (then (set " + ok + " " + bb + ")))");
-  }
-  std::string rhs_addr = rhs_reg;
-  std::string imm_slot;
-  if (is_imm) {
-    imm_slot = "$\"imm" + std::to_string(c.pc) + "\"";
-    c.add_slot("imm" + std::to_string(c.pc), 16);
-    rhs_addr = imm_slot;
   }
 
   // fast: x OP y on the integers; the result goes to dst (for comparisons, as a bool tag)
@@ -234,15 +391,7 @@ void emit_int_op(Ctx &c, int op, const std::string &dst, const std::string &lhs,
     }
   }
   c.line(") (else");
-  if (is_imm) {
-    // the slow path needs the immediate as a value: an integer slot
-    std::string p = c.fresh();
-    c.line("(let " + p + " (ptr unsigned_char) (offset " + imm_slot + " 0))");
-    c.line("(store unsigned_char " + p + " (const unsigned_char " + num(kTagInt) + "))");
-    std::string q = c.fresh();
-    c.line("(let " + q + " (ptr long) (offset " + imm_slot + " 8))");
-    c.line("(store long " + q + " (const long " + num(imm) + "))");
-  }
+  if (is_imm) store_int_const(c, imm_slot, imm);  // the slow path needs the immediate as a value: an integer slot
   call_binop(c, op, dst, lhs, rhs_addr);
   c.line("))");
 }
@@ -403,12 +552,12 @@ bool object_method(const std::string &name) {
 // element may be R[a] itself.
 void lower_array(Ctx &c, unsigned dst, unsigned src, unsigned n) {
   const std::string tmp = "tmp" + std::to_string(c.pc);
-  c.add_slot(tmp, 16);
+  c.add_slot(tmp, kV());
   c.line("(eval (call void &\"mrbbc_ary_new\" $\"" + tmp + "\" (const long " + num(n) + ")))");
   for (unsigned i = 0; i < n; ++i) {
     c.line("(eval (call void &\"mrbbc_ary_push\" $\"" + tmp + "\" " + c.reg(src + i) + "))");
   }
-  c.line("(copy 16 " + c.reg(dst) + " $\"" + tmp + "\")");
+  c.line("(copy " + vsize() + " " + c.reg(dst) + " $\"" + tmp + "\")");
 }
 
 // The number of a method body or a block body (the TDEF or BLOCK that names it has been collected).
@@ -566,20 +715,20 @@ void emit_unwind_check(Ctx &c) {
 void emit_args(Ctx &c, const std::string &argv, unsigned a, unsigned n) {
   for (unsigned i = 1; i <= n; ++i) {
     std::string p = c.fresh();
-    c.line("(let " + p + " (ptr unsigned_char) (offset $\"" + argv + "\" " + num(16 * i) + "))");
-    c.line("(copy 16 " + p + " " + c.reg(a + i) + ")");
+    c.line("(let " + p + " (ptr unsigned_char) (offset $\"" + argv + "\" " + num(kV() * i) + "))");
+    c.line("(copy " + vsize() + " " + p + " " + c.reg(a + i) + ")");
   }
 }
 
 // The argument vector of a call with a receiver: argv[0] is the receiver (self of the method), then the arguments.
 void emit_arg_vector(Ctx &c, const std::string &argv, const std::string &self, unsigned a, unsigned n) {
-  c.line("(copy 16 $\"" + argv + "\" " + self + ")");
+  c.line("(copy " + vsize() + " $\"" + argv + "\" " + self + ")");
   emit_args(c, argv, a, n);
 }
 
 // The block of a call that has none: a slot of this frame holding nil, named `name`.
 std::string nil_block(Ctx &c, const std::string &name) {
-  c.add_slot(name, 16);
+  c.add_slot(name, kV());
   store_tag(c, "$\"" + name + "\"", kTagNil);
   return "$\"" + name + "\"";
 }
@@ -606,19 +755,19 @@ std::size_t argv_slots(unsigned n, unsigned k) { return static_cast<std::size_t>
 void emit_kwargs(Ctx &c, const std::string &argv, unsigned n, unsigned kidx, unsigned k) {
   if (k == 15) {
     std::string p = c.fresh();
-    c.line("(let " + p + " (ptr unsigned_char) (offset $\"" + argv + "\" " + num(16 * (static_cast<long long>(n) + 1)) + "))");
-    c.line("(copy 16 " + p + " " + c.reg(kidx) + ")");
+    c.line("(let " + p + " (ptr unsigned_char) (offset $\"" + argv + "\" " + num(kV() * (static_cast<long long>(n) + 1)) + "))");
+    c.line("(copy " + vsize() + " " + p + " " + c.reg(kidx) + ")");
     return;
   }
   const std::string h = "kwhash" + std::to_string(c.pc);
-  c.add_slot(h, 16);
+  c.add_slot(h, kV());
   c.line("(eval (call void &\"mrbbc_hash_new\" $\"" + h + "\" (const long " + num(k) + ")))");
   for (unsigned i = 0; i < k; ++i) {
     c.line("(eval (call void &\"mrbbc_hash_set\" $\"" + h + "\" " + c.reg(kidx + 2 * i) + " " + c.reg(kidx + 2 * i + 1) + "))");
   }
   std::string p = c.fresh();
-  c.line("(let " + p + " (ptr unsigned_char) (offset $\"" + argv + "\" " + num(16 * (static_cast<long long>(n) + 1)) + "))");
-  c.line("(copy 16 " + p + " $\"" + h + "\")");
+  c.line("(let " + p + " (ptr unsigned_char) (offset $\"" + argv + "\" " + num(kV() * (static_cast<long long>(n) + 1)) + "))");
+  c.line("(copy " + vsize() + " " + p + " $\"" + h + "\")");
 }
 
 // One branch per method of the module: when id is N, the function of method N runs with (ret, argv, blk, argc, kw). The
@@ -655,7 +804,7 @@ CallArgs emit_call_args(Ctx &c, const std::string &key, const std::string &self,
     c.line("(let " + r.argc + " long (call long &\"mrbbc_ary_len\" " + c.reg(a + 1) + "))");
     return r;
   }
-  c.add_slot(key, 16 * argv_slots(n, k));
+  c.add_slot(key, kV() * argv_slots(n, k));
   emit_arg_vector(c, key, self, a, n);
   if (k != 0) emit_kwargs(c, key, n, a + n + 1, k);
   r.kw = kw_flag(c, k, a + n + 1);
@@ -688,7 +837,7 @@ void emit_block_site(Ctx &c, const std::string &dst, std::size_t next_pc) {
 // allowed), and the instance is the value.
 void emit_new(Ctx &c, const Shared &sh, unsigned a, unsigned n, unsigned k, std::size_t pc) {
   const std::string argv = "newargv" + std::to_string(pc);
-  c.add_slot(argv, 16 * argv_slots(n, k));
+  c.add_slot(argv, kV() * argv_slots(n, k));
   c.line("(eval (call void &\"mrbbc_alloc\" $\"" + argv + "\" " + c.reg(a) + "))");
   emit_args(c, argv, a, n);
   if (k != 0) emit_kwargs(c, argv, n, a + n + 1, k);
@@ -698,7 +847,7 @@ void emit_new(Ctx &c, const Shared &sh, unsigned a, unsigned n, unsigned k, std:
   emit_method_branches(c, sh, id, c.reg(a), "$\"" + argv + "\"", nil_block(c, "newnil" + std::to_string(pc)),
                        "(const long " + num(n) + ")", kw);
   emit_unwind_check(c);
-  c.line("(copy 16 " + c.reg(a) + " $\"" + argv + "\")");
+  c.line("(copy " + vsize() + " " + c.reg(a) + " $\"" + argv + "\")");
 }
 
 // R[a] = R[a].name(R[a+1] .. R[a+n]) with an explicit receiver (SEND0, SEND, and SENDB with the block in R[a+n+1]). The
@@ -774,6 +923,40 @@ const char *operator_method(int op) {
   }
 }
 
+// A copy of one value, `(copy N DST SRC)` on a line of its own, becomes loads and stores of its words: the emitter makes a
+// memmove call of a copy, and a value is one word (two for the 16-byte layout).
+std::string expand_copies(Ctx &c, const std::string &body) {
+  std::istringstream in(body);
+  std::ostringstream out;
+  std::string line;
+  const std::string head = "  (copy " + vsize() + " ";
+  const int words = word_layout() ? 1 : 2;
+  const std::string ty = word_layout() ? wty() : "long";
+  while (std::getline(in, line)) {
+    std::size_t sp = line.find(' ', head.size());
+    if (line.compare(0, head.size(), head) != 0 || line.empty() || line.back() != ')' || sp == std::string::npos ||
+        line.find(' ', sp + 1) != std::string::npos) {
+      out << line << "\n";
+      continue;
+    }
+    const std::string dst = line.substr(head.size(), sp - head.size());
+    const std::string src = line.substr(sp + 1, line.size() - sp - 2);
+    std::vector<std::string> vals;
+    for (int k = 0; k < words; ++k) {
+      std::string p = c.fresh(), v = c.fresh();
+      out << "  (let " << p << " (ptr " << ty << ") (offset " << src << " " << 8 * k << "))\n";
+      out << "  (let " << v << " " << ty << " (load " << ty << " " << p << "))\n";
+      vals.push_back(v);
+    }
+    for (int k = 0; k < words; ++k) {
+      std::string p = c.fresh();
+      out << "  (let " << p << " (ptr " << ty << ") (offset " << dst << " " << 8 * k << "))\n";
+      out << "  (store " << ty << " " << p << " " << vals[static_cast<std::size_t>(k)] << ")\n";
+    }
+  }
+  return out.str();
+}
+
 // Lowers one irep to the function `fname` and appends it to sh.functions.
 void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kind kind) {
   if (!irep.catches.empty()) {
@@ -816,7 +999,11 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
 
   Ctx c(sh, irep, kind, frame_regs);
   for (unsigned i = 0; i < frame_regs; ++i) {
-    c.line("(let " + c.reg(i) + " (ptr unsigned_char) (offset $\"frame\" " + num(16 * i) + "))");
+    c.line("(let " + c.reg(i) + " (ptr unsigned_char) (offset $\"frame\" " + num(kV() * i) + "))");
+  }
+  // the main program's frame starts as nil (R(0), the main object, is not modelled: a word layout reads its tag from it)
+  if (kind == Kind::Main) {
+    c.line("(eval (call void &\"mrbbc_frame_init\" $\"frame\" (const long " + num(static_cast<long long>(frame_regs)) + ")))");
   }
   if (pr.kd != 0) c.kdict = static_cast<unsigned>(len + 1);
   if (kind == Kind::Method || kind == Kind::Block) {
@@ -825,7 +1012,7 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
     // It returns the count of optional parameters given, which the ENTER jumps choose the defaults by. A method's arguments are
     // checked by the runtime (mrbbc_find); a block's are not (non-strict, and a splatted array argument is one of them).
     const bool method = kind == Kind::Method;
-    c.line("(copy 16 " + c.reg(0) + " %1)");
+    c.line("(copy " + vsize() + " " + c.reg(0) + " %1)");
     // vm.c's ENTER for a `&nil` parameter: a block given to the method is an ArgumentError (before the parameters are bound)
     if (pr.noblock) c.line("(eval (call void &\"mrbbc_noblock\" %2))");
     c.given = c.fresh();
@@ -836,11 +1023,11 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
     for (long i = bslot; i < static_cast<long>(frame_regs); ++i) {
       store_tag(c, c.reg(static_cast<unsigned>(i)), kTagNil);
     }
-    if (method) c.line("(copy 16 " + c.reg(static_cast<unsigned>(bslot)) + " %2)");
+    if (method) c.line("(copy " + vsize() + " " + c.reg(static_cast<unsigned>(bslot)) + " %2)");
   }
   if (kind == Kind::Class) {
     // R(0) is self; a class body takes no parameters
-    c.line("(copy 16 " + c.reg(0) + " %1)");
+    c.line("(copy " + vsize() + " " + c.reg(0) + " %1)");
     for (long i = 1; i < static_cast<long>(frame_regs); ++i) {
       store_tag(c, c.reg(static_cast<unsigned>(i)), kTagNil);
     }
@@ -905,9 +1092,9 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         }
         break;
       case mrb::OP_MOVE:
-        c.line("(copy 16 " + c.reg(x[0]) + " " + c.reg(x[1]) + ")");
+        c.line("(copy " + vsize() + " " + c.reg(x[0]) + " " + c.reg(x[1]) + ")");
         break;
-      case mrb::OP_LOADI__1: store_int(c, c.reg(x[0]), "(const long -1)"); break;
+      case mrb::OP_LOADI__1: store_int_const(c, c.reg(x[0]), -1); break;
       case mrb::OP_LOADI_0:
       case mrb::OP_LOADI_1:
       case mrb::OP_LOADI_2:
@@ -916,15 +1103,15 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
       case mrb::OP_LOADI_5:
       case mrb::OP_LOADI_6:
       case mrb::OP_LOADI_7:
-        store_int(c, c.reg(x[0]), "(const long " + num(in.op - mrb::OP_LOADI_0) + ")");
+        store_int_const(c, c.reg(x[0]), in.op - mrb::OP_LOADI_0);
         break;
-      case mrb::OP_LOADI8: store_int(c, c.reg(x[0]), "(const long " + num(x[1]) + ")"); break;
-      case mrb::OP_LOADINEG: store_int(c, c.reg(x[0]), "(const long " + num(-static_cast<long long>(x[1])) + ")"); break;
-      case mrb::OP_LOADI16: store_int(c, c.reg(x[0]), "(const long " + num(s16(x[1])) + ")"); break;
+      case mrb::OP_LOADI8: store_int_const(c, c.reg(x[0]), x[1]); break;
+      case mrb::OP_LOADINEG: store_int_const(c, c.reg(x[0]), -static_cast<long long>(x[1])); break;
+      case mrb::OP_LOADI16: store_int_const(c, c.reg(x[0]), s16(x[1])); break;
       case mrb::OP_LOADI32: {
         // (int32_t)(((uint32_t)b << 16) + c), as vm.c computes it
         std::uint32_t v = (x[1] << 16) + x[2];
-        store_int(c, c.reg(x[0]), "(const long " + num(static_cast<std::int32_t>(v)) + ")");
+        store_int_const(c, c.reg(x[0]), static_cast<std::int32_t>(v));
         break;
       }
       case mrb::OP_LOADSYM: {
@@ -988,7 +1175,7 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
           throw Refused("refused: LOADL of a non-integer constant is not lowered yet (pc " + std::to_string(in.pc) +
                         ")");
         }
-        store_int(c, c.reg(x[0]), "(const long " + num(value) + ")");
+        store_int_const(c, c.reg(x[0]), value);
         break;
       }
       case mrb::OP_ARRAY: lower_array(c, x[0], x[0], x[1]); break;   // R[a] = [R[a] .. R[a+b-1]]
@@ -1024,7 +1211,7 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         // R[a][R[a+1]] = R[a+2]; the value of the assignment is left in R[a] (vm.c)
         c.line("(eval (call void &\"mrbbc_setidx\" " + c.reg(x[0]) + " " + c.reg(x[0] + 1) + " " + c.reg(x[0] + 2) +
                "))");
-        c.line("(copy 16 " + c.reg(x[0]) + " " + c.reg(x[0] + 2) + ")");
+        c.line("(copy " + vsize() + " " + c.reg(x[0]) + " " + c.reg(x[0] + 2) + ")");
         break;
       case mrb::OP_TDEF: {
         // R[a] = the symbol of the method Syms[b], defined as the body of child c on the target class (Object here, the
@@ -1056,7 +1243,7 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         // a copy of R(0), and the frame), and the value is its address with the BLK tag
         const mrb::Irep &body = child_at(irep, x[1], in.pc);
         const std::string clo = "clo" + std::to_string(in.pc);
-        c.add_slot(clo, kCloBytes);  // the runtime's Clo (MRBBC_CLO_BYTES): id, self, frame, home, and the frames of the creators
+        c.add_slot(clo, kV());  // unused by the runtime, which makes the closure (Clo) on the heap
         if (sh.depth.at(&body) > kMaxDepth) {
           throw Refused("refused: a block nested more than " + std::to_string(kMaxDepth) + " levels is not lowered yet (pc " +
                         std::to_string(in.pc) + ")");
@@ -1079,13 +1266,13 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
       case mrb::OP_HASH: {
         // R[a] = a new hash of the b pairs R[a], R[a+1], ... (key, value); built in a slot first, as R[a] is the first key
         const std::string h = "hash" + std::to_string(in.pc);
-        c.add_slot(h, 16);
+        c.add_slot(h, kV());
         c.line("(eval (call void &\"mrbbc_hash_new\" $\"" + h + "\" (const long " + num(x[1]) + ")))");
         for (unsigned i = 0; i < x[1]; ++i) {
           c.line("(eval (call void &\"mrbbc_hash_set\" $\"" + h + "\" " + c.reg(x[0] + 2 * i) + " " + c.reg(x[0] + 2 * i + 1) +
                  "))");
         }
-        c.line("(copy 16 " + c.reg(x[0]) + " $\"" + h + "\")");
+        c.line("(copy " + vsize() + " " + c.reg(x[0]) + " $\"" + h + "\")");
         break;
       }
       case mrb::OP_HASHADD:
@@ -1131,12 +1318,12 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         // R[a] = R[a].call(R[a+1] .. R[a+b]): the block's number picks the function, as a self call's method does
         const unsigned n = x[1];
         const std::string argv = "argv" + std::to_string(in.pc);
-        c.add_slot(argv, 16 * (static_cast<std::size_t>(n) + 1));
+        c.add_slot(argv, kV() * (static_cast<std::size_t>(n) + 1));
         c.line("(eval (call void &\"mrbbc_blk_args\" $\"" + argv + "\" " + c.reg(x[0]) + "))");
         for (unsigned i = 1; i <= n; ++i) {
           std::string p = c.fresh();
-          c.line("(let " + p + " (ptr unsigned_char) (offset $\"" + argv + "\" " + num(16 * i) + "))");
-          c.line("(copy 16 " + p + " " + c.reg(x[0] + i) + ")");
+          c.line("(let " + p + " (ptr unsigned_char) (offset $\"" + argv + "\" " + num(kV() * i) + "))");
+          c.line("(copy " + vsize() + " " + p + " " + c.reg(x[0] + i) + ")");
         }
         std::string id = c.fresh(), fr = c.fresh(), hm = c.fresh();
         c.line("(let " + id + " long (call long &\"mrbbc_blk_id\" " + c.reg(x[0]) + "))");
@@ -1183,9 +1370,9 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
                           std::to_string(in.pc) + ")");
           }
           std::string p = c.fresh();
-          c.line("(let " + p + " (ptr unsigned_char) (offset %4 " + num(16 * static_cast<long long>(x[1])) + "))");
-          if (in.op == mrb::OP_GETUPVAR) c.line("(copy 16 " + c.reg(x[0]) + " " + p + ")");
-          else c.line("(copy 16 " + p + " " + c.reg(x[0]) + ")");
+          c.line("(let " + p + " (ptr unsigned_char) (offset %4 " + num(kV() * static_cast<long long>(x[1])) + "))");
+          if (in.op == mrb::OP_GETUPVAR) c.line("(copy " + vsize() + " " + c.reg(x[0]) + " " + p + ")");
+          else c.line("(copy " + vsize() + " " + p + " " + c.reg(x[0]) + ")");
           break;
         }
         // A block nested three or more deep reads level L >= 1 from its closure's frames: disp[L-1] is the frame of the L-th
@@ -1202,9 +1389,9 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
           const std::string fp = c.fresh(), p = c.fresh();
           c.line("(let " + fp + " (ptr unsigned_char) (call (ptr unsigned_char) &\"mrbbc_upframe\" %5 (const long " +
                  num(static_cast<long long>(x[2]) - 1) + ")))");
-          c.line("(let " + p + " (ptr unsigned_char) (offset " + fp + " " + num(16 * static_cast<long long>(x[1])) + "))");
-          if (in.op == mrb::OP_GETUPVAR) c.line("(copy 16 " + c.reg(x[0]) + " " + p + ")");
-          else c.line("(copy 16 " + p + " " + c.reg(x[0]) + ")");
+          c.line("(let " + p + " (ptr unsigned_char) (offset " + fp + " " + num(kV() * static_cast<long long>(x[1])) + "))");
+          if (in.op == mrb::OP_GETUPVAR) c.line("(copy " + vsize() + " " + c.reg(x[0]) + " " + p + ")");
+          else c.line("(copy " + vsize() + " " + p + " " + c.reg(x[0]) + ")");
           break;
         }
         if (kind != Kind::Block || x[2] != 0) {
@@ -1212,9 +1399,9 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
                         std::to_string(in.pc) + ")");
         }
         std::string p = c.fresh();
-        c.line("(let " + p + " (ptr unsigned_char) (offset %3 " + num(16 * static_cast<long long>(x[1])) + "))");
-        if (in.op == mrb::OP_GETUPVAR) c.line("(copy 16 " + c.reg(x[0]) + " " + p + ")");
-        else c.line("(copy 16 " + p + " " + c.reg(x[0]) + ")");
+        c.line("(let " + p + " (ptr unsigned_char) (offset %3 " + num(kV() * static_cast<long long>(x[1])) + "))");
+        if (in.op == mrb::OP_GETUPVAR) c.line("(copy " + vsize() + " " + c.reg(x[0]) + " " + p + ")");
+        else c.line("(copy " + vsize() + " " + p + " " + c.reg(x[0]) + ")");
         break;
       }
       case mrb::OP_ARGARY: {
@@ -1248,14 +1435,14 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
           if (in_method) return c.reg(i);
           std::string p = c.fresh();
           c.line("(let " + p + " (ptr unsigned_char) (offset " + (in_block ? "%3" : "%4") + " " +
-                 num(16 * static_cast<long long>(i)) + "))");
+                 num(kV() * static_cast<long long>(i)) + "))");
           return p;
         };
         c.line("(eval (call void &\"mrbbc_ary_new\" " + c.reg(x[0]) + " (const long " + num(m1) + ")))");
         for (unsigned i = 1; i <= m1; ++i) {
           c.line("(eval (call void &\"mrbbc_ary_push\" " + c.reg(x[0]) + " " + param(i) + "))");
         }
-        c.line("(copy 16 " + c.reg(x[0] + 1) + " " + param(m1 + 1) + ")");
+        c.line("(copy " + vsize() + " " + c.reg(x[0] + 1) + " " + param(m1 + 1) + ")");
         break;
       }
       case mrb::OP_SUPER: {
@@ -1383,7 +1570,7 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         if (kind == Kind::Main) {
           c.line("(eval (call void &\"mrbbc_object_class\" " + c.reg(x[0]) + "))");
         } else if (kind == Kind::Class) {
-          c.line("(copy 16 " + c.reg(x[0]) + " " + c.reg(0) + ")");
+          c.line("(copy " + vsize() + " " + c.reg(x[0]) + " " + c.reg(0) + ")");
         } else {
           throw Refused("refused: TCLASS in a method or a block is not lowered yet (pc " + std::to_string(in.pc) + ")");
         }
@@ -1392,8 +1579,8 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         // R[a] = the class body Bx run with self R[a] (the function mrb_k<number>; its argument vector holds self)
         const mrb::Irep &body = child_at(irep, x[1], in.pc);
         const std::string argv = "argv" + std::to_string(in.pc);
-        c.add_slot(argv, 16);
-        c.line("(copy 16 $\"" + argv + "\" " + c.reg(x[0]) + ")");
+        c.add_slot(argv, kV());
+        c.line("(copy " + vsize() + " $\"" + argv + "\" " + c.reg(x[0]) + ")");
         const std::string nil = nil_block(c, "nil" + std::to_string(in.pc));
         c.line("(eval (call void &\"mrb_k" + std::to_string(number_of(sh.class_ids, body, "class")) + "\" " + c.reg(x[0]) +
                " $\"" + argv + "\" " + nil + "))");
@@ -1419,14 +1606,13 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         c.line("(if " + falsy(c, c.reg(x[0])) + " (then (goto " + jump_to(jump_target(in, s16(x[1]))) + ")))");
         break;
       case mrb::OP_JMPNIL: {
-        std::string t = load_tag(c, c.reg(x[0]));
-        std::string isnil = tag_is(c, t, kTagNil);
+        std::string isnil = is_nil(c, c.reg(x[0]));
         c.line("(if " + isnil + " (then (goto " + jump_to(jump_target(in, s16(x[1]))) + ")))");
         break;
       }
       case mrb::OP_RETURN:
         // a block's RETURN is local to the block (next); the return out of a block is RETURN_BLK
-        c.line("(copy 16 %0 " + c.reg(x[0]) + ")");
+        c.line("(copy " + vsize() + " %0 " + c.reg(x[0]) + ")");
         c.line("(return)");
         break;
       case mrb::OP_RETURN_BLK:
@@ -1445,7 +1631,7 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
       case mrb::OP_RETSELF:
         // self is R(0) in a method, a block or a class body; the top level's self is the main object, which is not modelled
         if (kind == Kind::Main) throw Refused("refused: RETSELF of the main program is not lowered yet (pc " + std::to_string(in.pc) + ")");
-        c.line("(copy 16 %0 " + c.reg(0) + ")");
+        c.line("(copy " + vsize() + " %0 " + c.reg(0) + ")");
         c.line("(return)");
         break;
       case mrb::OP_RETNIL:
@@ -1474,6 +1660,7 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
   c.body << "  (label " << lbl(irep.iseq.size()) << ")\n";
   c.line("(return)");
 
+  const std::string body = expand_copies(c, c.body.str());
   std::ostringstream fn;
   fn << "(function \"" << fname << "\" (ret void) (params (param %0 \"ret\" (ptr (struct \"MV\")))";
   if (kind == Kind::Method) {
@@ -1486,15 +1673,19 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
        << " (param %4 \"home\" (ptr (struct \"MV\"))) (param %5 \"disp\" (ptr (struct \"MV\")))";
   }
   fn << ")\n";
-  fn << "  (slot \"frame\" (struct \"MV\") " << 16 * static_cast<std::size_t>(frame_regs) << " 8)\n";
-  for (const auto &s : c.slots) fn << "  (slot \"" << s.first << "\" (struct \"MV\") " << s.second << " 8)\n";
-  fn << c.body.str() << ")\n";
+  fn << "  (slot \"frame\" (struct \"MV\") " << kV() * static_cast<std::size_t>(frame_regs) << " " << kAlign() << ")\n";
+  for (const auto &s : c.slots) fn << "  (slot \"" << s.first << "\" (struct \"MV\") " << s.second << " " << kAlign() << ")\n";
+  fn << body << ")\n";
   sh.functions += fn.str();
 }
 
 }  // namespace
 
-std::string lower_module(const mrb::Module &module, const std::string &source_name) {
+std::string lower_module(const mrb::Module &module, const std::string &source_name, const LowerOptions &options) {
+  if (options.value_bytes != 16 && options.value_bytes != 8 && options.value_bytes != 4) {
+    throw std::runtime_error("the value layout is 16, 8 or 4 bytes");
+  }
+  g_value_bytes = options.value_bytes;
   const mrb::Irep &root = module.root;
   Shared sh;
   collect(sh, root, Kind::Main, true, nullptr);
@@ -1528,7 +1719,7 @@ std::string lower_module(const mrb::Module &module, const std::string &source_na
   out << "(ir-module \"" << source_name
       << "\" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))\n";
   out << "(producer \"mruby-4.0\")\n";
-  out << "(abi-type \"MV\" 16 8 (memory))\n";
+  out << "(abi-type \"MV\" " << kV() << " " << kAlign() << " (memory))\n";
   out << sh.data.str();
   out << sh.functions;
   return out.str();

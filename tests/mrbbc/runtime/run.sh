@@ -11,8 +11,8 @@ work=${TMPDIR:-/tmp}/mrbbc-runtime.$$
 mkdir -p "$work"
 trap 'rm -rf "$work"' EXIT
 
-cc -std=c99 -Wall -Wextra -Werror -c -o "$work/mrbrt.o" "$rt/mrbrt.c" || exit 1
-cc -std=c99 -Wall -Wextra -Werror -o "$work/gc_test" "$rt/gc_test.c" "$work/mrbrt.o" || exit 1
+cc -std=c99 -Wall -Wextra -Werror -DMRBBC_VALUE="${MRBBC_VALUE:-8}" -c -o "$work/mrbrt.o" "$rt/mrbrt.c" || exit 1
+cc -std=c99 -Wall -Wextra -Werror -DMRBBC_VALUE="${MRBBC_VALUE:-8}" -o "$work/gc_test" "$rt/gc_test.c" "$work/mrbrt.o" || exit 1
 
 fail=0
 for th in "" 1; do

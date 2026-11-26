@@ -84,23 +84,23 @@ static void body(MV *ret) {
     mrbbc_ary_elt(&got, &a, i);
     item_str(&t, i);
     mrbbc_binop(MRBBC_OP_EQ, &eq, &got, &t);
-    check(eq.tag == MRBBC_TRUE, "an element of the array survived", i);
+    check(mrbbc_tag(&eq) == MRBBC_TRUE, "an element of the array survived", i);
   }
   mrbbc_karg(&got, &h, "name");
   item_str(&t, 999);
   mrbbc_binop(MRBBC_OP_EQ, &eq, &got, &t);
-  check(eq.tag == MRBBC_TRUE, "the hash value survived", 0);
+  check(mrbbc_tag(&eq) == MRBBC_TRUE, "the hash value survived", 0);
   check(mrbbc_kw_flag(&h) == 2, "the hash lost its key", 0);
   mrbbc_getiv(&got, &o, "@v");
   item_str(&t, 7);
   mrbbc_binop(MRBBC_OP_EQ, &eq, &got, &t);
-  check(eq.tag == MRBBC_TRUE, "the instance variable survived", 0);
+  check(mrbbc_tag(&eq) == MRBBC_TRUE, "the instance variable survived", 0);
 
   mrbbc_gc_set_threshold(0);
 }
 
 int main(void) {
-  MV ret = {MRBBC_NIL, 0};
+  MV ret = {0}; /* nil in every layout */
   mrbbc_progname = "gc_test";
   mrbbc_run(body, &ret);
   if (failures != 0) return 1;

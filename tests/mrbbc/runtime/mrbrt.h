@@ -1,15 +1,22 @@
-/* mrbrt: the runtime of the mruby bytecode producer (tools/mrbbc). A value is 16 bytes: a tag byte at offset 0 and an
- * int64 at offset 8. The tags are the producer's own (they are not mruby's), so a register is an MV in a stack slot.
+/* mrbrt: the runtime of the mruby bytecode producer (tools/mrbbc). A register is an MV, in one of three layouts that the
+ * lowering and this runtime agree on (mrbbc_lower --value=..., MRBBC_VALUE here; docs/notes/mrbbc-pathb.md, "Values"):
+ *   MRBBC_VALUE 8 (the default): a 64-bit word. An integer of the small range (63 bits) is (i << 1) | 1, a symbol is
+ *     (index << 2) | 2, nil, false and true are the words 0, 4 and 12, and any other value is the address of an object,
+ *     whose header holds its tag. An integer outside the small range is a boxed object of tag MRBBC_INT.
+ *   MRBBC_VALUE 4: the same with a 32-bit word (31-bit small integers). On a 64-bit host the objects are in an arena below
+ *     2 GB, so their addresses fit.
+ *   MRBBC_VALUE 16: the tag byte at offset 0 and an int64 (or a pointer) at offset 8.
+ * Integers are exact to 64 bits in every layout. The rest of the runtime reads and makes values only through the accessors
+ * at the top of mrbrt.c (tag_of, int_of, ptr_of, int_value, ...); never through the fields of MV.
  *
- * Immediates are nil, false, true and integers. The heap values are a string (tag STR: the int64 is the MStr pointer),
- * an array (ARY: the MAry pointer) and a symbol (SYM: the pointer to its NUL-terminated name, a static string of the
- * module, so two symbols of one name are equal when their pointers are; the EQ helper compares names anyway).
- * Heap objects are collected by a mark-and-sweep collector (mrbrt.c, "the collector"): the program runs under mrbbc_run.
+ * The heap values are strings, arrays, hashes, objects, classes, closures and boxed integers. A symbol is the index of its
+ * interned name (a static string of the module). Heap objects are collected by a mark-and-sweep collector (mrbrt.c, "the
+ * collector"): the program runs under mrbbc_run.
  *
  * The helpers do what the VM does for the cases the producer does not inline: integer, string, array and symbol
  * operators with mruby's rules, indexing, the methods of SEND0, and the error exits. Strings are byte strings (this
- * build of mruby has no UTF-8 character handling, so size and [] count bytes). Integer overflow is not promoted to a
- * Bignum: it traps (the IR's checked add, sub and mul abort), see docs/notes/mrbbc-pathb.md. */
+ * build of mruby has no UTF-8 character handling, so size and [] count bytes). An integer past 64 bits is not promoted to
+ * a Bignum: it raises NotImplementedError, see docs/notes/mrbbc-pathb.md. */
 #ifndef MRBBC_MRBRT_H
 #define MRBBC_MRBRT_H
 
@@ -29,10 +36,42 @@ enum mrbbc_tag {
   MRBBC_HASH = 10 /* a hash: the keyword arguments of a call, and the kdict of a method with keyword parameters */
 };
 
+#ifndef MRBBC_VALUE
+#define MRBBC_VALUE 8
+#endif
+#if MRBBC_VALUE == 16
 typedef struct MV {
   uint8_t tag;
   int64_t i;
 } MV;
+#elif MRBBC_VALUE == 8 || MRBBC_VALUE == 4
+#if MRBBC_VALUE == 8
+#define MRBBC_WORD uint64_t
+#define MRBBC_SWORD int64_t
+#else
+#define MRBBC_WORD uint32_t
+#define MRBBC_SWORD int32_t
+#endif
+typedef struct MV {
+  MRBBC_WORD w;
+} MV;
+#define MRBBC_W_NIL 0u
+#define MRBBC_W_FALSE 4u
+#define MRBBC_W_TRUE 12u
+#else
+#error "MRBBC_VALUE is 16, 8 or 4"
+#endif
+typedef char mrbbc_mv_size[sizeof(MV) == MRBBC_VALUE ? 1 : -1];
+
+/* dst = the integer i: a boxed one when i is outside the small range of the layout (the lowering calls it for a constant
+ * or a result past that range). */
+void mrbbc_int_new(MV *dst, long long i);
+
+/* The tag of a value (enum mrbbc_tag), for code outside the runtime that tests a value (a boxed integer's is MRBBC_INT). */
+int mrbbc_tag(const MV *v);
+
+/* The n registers of a frame set to nil (the main program's prologue). */
+void mrbbc_frame_init(MV *frame, long n);
 
 /* The program's methods (TDEF). mrbbc_def adds a top-level method (on Object) with the lowered body's number, its counts
  * of arguments, min (the required and post parameters) to max (the ones before the rest parameter and the optional ones;
@@ -104,16 +143,14 @@ long mrbbc_kw_flag(const MV *h);
 void mrbbc_aref(MV *dst, const MV *v, long i);
 
 /* Blocks. mrbbc_block makes the closure of a BLOCK at dst: it stores the block's number, a copy of self, the frame the
- * block was made in and its home (the frame of the method a return leaves), in clo (a 40-byte slot of the caller's
- * frame, the layout of Clo in mrbrt.c). The helpers read a block value: its number, its frame, its home, and argv[0] =
+ * block was made in and its home (the frame of the method a return leaves) (the layout of Clo in mrbrt.c). The helpers read a block value: its number, its frame, its home, and argv[0] =
  * its self; mrbbc_blk_load copies the method's block (a nil one raises "unexpected yield"); mrbbc_blk_given writes true
  * or false for block_given?. A return out of a block is pending (mrbbc_return_block) until its home takes it. */
-/* Blocks nested deeper than MRBBC_MAX_DEPTH are not lowered (their closure keeps that many frames). MRBBC_CLO_BYTES is the
- * size of the closure slot the lowering reserves for a BLOCK. A block made by a block (mrbbc_block_nested) gets the frames of
+/* Blocks nested deeper than MRBBC_MAX_DEPTH are not lowered (their closure keeps that many frames). The closure is an object
+ * of the heap; the slot clo that the lowering passes is not used. A block made by a block (mrbbc_block_nested) gets the frames of
  * its creators: outer is the creator's %3 and pdisp its disp, of nd entries; mrbbc_blk_disp is a block's disp array, and
  * mrbbc_upframe(disp, k) the frame at upvar level k+1 of a block with that disp. */
 #define MRBBC_MAX_DEPTH 8
-#define MRBBC_CLO_BYTES 192
 void mrbbc_block(MV *dst, void *clo, long id, const MV *self, MV *frame, MV *home);
 void mrbbc_block_nested(MV *dst, void *clo, long id, const MV *self, MV *frame, MV *home, MV *outer, const MV *pdisp,
                         long nd);

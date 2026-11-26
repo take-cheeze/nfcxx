@@ -7,7 +7,7 @@
 extern void mrb_irep_0(MV *ret);
 
 int main(int argc, char **argv) {
-  MV ret = {MRBBC_NIL, 0};
+  MV ret = {0}; /* nil in every layout */
   if (argc < 1) return 2;
   mrbbc_progname = argv[0];
   mrbbc_run(mrb_irep_0, &ret);

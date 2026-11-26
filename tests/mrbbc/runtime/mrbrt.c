@@ -1,5 +1,9 @@
 /* mrbrt: the runtime of the mruby bytecode producer (mrbrt.h). C99, -Wall -Wextra clean. The messages are the ones of the
  * pinned mruby 4.0.0 (probed with build/mruby-tool/bin/mruby; docs/notes/mrbbc-pathb.md, "Runtime errors"). */
+#if MRBBC_VALUE == 4 && defined(__x86_64__)
+#define _GNU_SOURCE /* MAP_32BIT, see raw_alloc */
+#include <sys/mman.h>
+#endif
 #include "mrbrt.h"
 
 #include <setjmp.h>
@@ -25,9 +29,10 @@ typedef struct GCHdr {
   size_t size;
   uint8_t kind;
   uint8_t marked;
+  uint32_t bytes; /* the block's size, header included (raw_free) */
 } GCHdr;
 
-enum { GC_STR = 1, GC_ARY, GC_HASH, GC_VEC, GC_OBJ, GC_IVAR, GC_DEF, GC_CLS };
+enum { GC_STR = 1, GC_ARY, GC_HASH, GC_VEC, GC_OBJ, GC_IVAR, GC_DEF, GC_CLS, GC_INT, GC_CLO };
 
 static void *gc_alloc(uint8_t kind, size_t size);
 static void gc_grow(const void *p, size_t n);
@@ -94,7 +99,7 @@ typedef struct MObj {
   MIvar *ivars;
 } MObj;
 
-static MClass object_class = {"Object", "Object", NULL, NULL, NULL, NULL, NULL};
+static MClass *object_cls(void);
 static MClass *class_registry = NULL;
 
 /* The class each method body is defined on, by the method's number (the TDEF's class; Object for a top-level def). A SUPER
@@ -132,14 +137,205 @@ static void *alloc(size_t n) {
  * Passing the base here keeps it live until this point, so a collection in between cannot free what the derived one reads. */
 static void keep_alive(const void *p) { __asm__ volatile("" : : "g"(p) : "memory"); }
 
-static MStr *str_of(const MV *v) { return (MStr *)(intptr_t)v->i; }
-static MAry *ary_of(const MV *v) { return (MAry *)(intptr_t)v->i; }
-static const char *sym_of(const MV *v) { return (const char *)(intptr_t)v->i; }
+/* Memory for the objects. Under the 4-byte layout on a 64-bit host (MRBBC_VALUE 4 on x86-64), a value holds a 32-bit
+ * address, so the objects come from an arena mapped below 2 GB (MAP_32BIT), with free lists by size class; everywhere else
+ * they come from malloc. gc_alloc and free_object call these. */
+#if MRBBC_VALUE == 4 && UINTPTR_MAX > 0xffffffffu
+#if !defined(__x86_64__)
+#error "MRBBC_VALUE 4 on a 64-bit host needs MAP_32BIT (x86-64 Linux)"
+#endif
+#define ARENA_SMALL 2048 /* classes of 16 bytes up to this size, then powers of two */
+static char *arena_next, *arena_end;
+static void *arena_free_small[ARENA_SMALL / 16 + 1];
+static void *arena_free_big[33];
 
-static void set_obj(MV *dst, int tag, const void *p) {
-  dst->tag = (uint8_t)tag;
-  dst->i = (int64_t)(intptr_t)p;
+static size_t arena_class(size_t n, int *big) {
+  size_t k = 12;
+  if (n <= ARENA_SMALL) {
+    *big = 0;
+    return (n + 15) / 16;
+  }
+  *big = 1;
+  while (((size_t)1 << k) < n) k++;
+  return k;
 }
+
+static void *raw_alloc(size_t n) {
+  int big;
+  size_t k = arena_class(n, &big), sz = big ? (size_t)1 << k : k * 16;
+  void **list = big ? &arena_free_big[k] : &arena_free_small[k];
+  void *p;
+  if (*list != NULL) {
+    p = *list;
+    *list = *(void **)p;
+    return p;
+  }
+  if (arena_next == NULL) {
+    size_t len = (size_t)1 << 30;
+    void *m = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT | MAP_NORESERVE, -1, 0);
+    while (m == MAP_FAILED && len > ((size_t)1 << 24)) {
+      len >>= 1;
+      m = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT | MAP_NORESERVE, -1, 0);
+    }
+    if (m == MAP_FAILED) return NULL;
+    arena_next = m;
+    arena_end = arena_next + len;
+  }
+  if ((size_t)(arena_end - arena_next) < sz) return NULL;
+  p = arena_next;
+  arena_next += sz;
+  return p;
+}
+
+static void raw_free(void *p, size_t n) {
+  int big;
+  size_t k = arena_class(n, &big);
+  void **list = big ? &arena_free_big[k] : &arena_free_small[k];
+  *(void **)p = *list;
+  *list = p;
+}
+#else
+static void *raw_alloc(size_t n) { return malloc(n); }
+static void raw_free(void *p, size_t n) {
+  (void)n;
+  free(p);
+}
+#endif
+
+#if MRBBC_VALUE != 16
+/* The tag of the values that point to an object of a kind (only these kinds are values). */
+static int kind_tag(int kind) {
+  switch (kind) {
+    case GC_STR: return MRBBC_STR;
+    case GC_ARY: return MRBBC_ARY;
+    case GC_HASH: return MRBBC_HASH;
+    case GC_OBJ: return MRBBC_OBJ;
+    case GC_CLS: return MRBBC_CLS;
+    case GC_CLO: return MRBBC_BLK;
+    default: return MRBBC_INT;
+  }
+}
+#endif
+
+/* The value representation (mrbrt.h, MRBBC_VALUE). The rest of the runtime reads and makes values only through these. */
+#if MRBBC_VALUE == 16
+static int tag_of(const MV *v) { return v->tag; }
+static int64_t int_of(const MV *v) { return v->i; }
+static void *ptr_of(const MV *v) { return (void *)(intptr_t)v->i; }
+static int same_value(const MV *a, const MV *b) { return a->tag == b->tag && a->i == b->i; }
+static MV make_value(int tag, int64_t i) {
+  MV v;
+  v.tag = (uint8_t)tag;
+  v.i = i;
+  return v;
+}
+static MV nil_value(void) { return make_value(MRBBC_NIL, 0); }
+static MV bool_value(int truth) { return make_value(truth ? MRBBC_TRUE : MRBBC_FALSE, 0); }
+static MV int_value(int64_t i) { return make_value(MRBBC_INT, i); }
+static MV ptr_value(int tag, const void *p) { return make_value(tag, (int64_t)(intptr_t)p); }
+static MV sym_value(long index) { return make_value(MRBBC_SYM, index); }
+static long sym_index(const MV *v) { return (long)v->i; }
+#else
+/* A word: an integer in the small range is (i << 1) | 1, a symbol (index << 2) | 2, nil, false and true the constants of
+ * mrbrt.h, and anything else the address of an object (8-aligned), whose header has its tag. An integer outside the small
+ * range is a boxed one (an object of tag MRBBC_INT), so the integers are exact to 64 bits in every layout. */
+typedef MRBBC_SWORD SWord;
+#define SMALL_BITS (MRBBC_VALUE * 8 - 1)
+#define SMALL_MAX (((int64_t)1 << (SMALL_BITS - 1)) - 1)
+#define SMALL_MIN (-((int64_t)1 << (SMALL_BITS - 1)))
+static int tag_of(const MV *v) {
+  MRBBC_WORD w = v->w;
+  if (w & 1) return MRBBC_INT;
+  if ((w & 3) == 2) return MRBBC_SYM;
+  if (w == MRBBC_W_NIL) return MRBBC_NIL;
+  if (w == MRBBC_W_FALSE) return MRBBC_FALSE;
+  if (w == MRBBC_W_TRUE) return MRBBC_TRUE;
+  return kind_tag(((const GCHdr *)(uintptr_t)w - 1)->kind);
+}
+static int64_t int_of(const MV *v) {
+  if (v->w & 1) return (int64_t)((SWord)v->w >> 1);
+  return *(const int64_t *)(uintptr_t)v->w;
+}
+static void *ptr_of(const MV *v) { return (void *)(uintptr_t)v->w; }
+static int same_value(const MV *a, const MV *b) { return a->w == b->w; }
+static MV word_value(MRBBC_WORD w) {
+  MV v;
+  v.w = w;
+  return v;
+}
+static MV nil_value(void) { return word_value(MRBBC_W_NIL); }
+static MV bool_value(int truth) { return word_value(truth ? MRBBC_W_TRUE : MRBBC_W_FALSE); }
+static MV ptr_value(int tag, const void *p) {
+  (void)tag; /* the object's header has it */
+  return word_value((MRBBC_WORD)(uintptr_t)p);
+}
+static MV int_value(int64_t i) {
+  int64_t *b;
+  if (i >= SMALL_MIN && i <= SMALL_MAX) return word_value(((MRBBC_WORD)i << 1) | 1);
+  b = gc_alloc(GC_INT, sizeof *b); /* a boxed integer */
+  *b = i;
+  return ptr_value(MRBBC_INT, b);
+}
+static MV sym_value(long index) { return word_value(((MRBBC_WORD)index << 2) | 2); }
+static long sym_index(const MV *v) { return (long)(v->w >> 2); }
+#endif
+
+void mrbbc_int_new(MV *dst, long long i) { *dst = int_value((int64_t)i); }
+
+int mrbbc_tag(const MV *v) { return tag_of(v); }
+
+/* Symbols are interned by name: a value holds the index, and the names are the module's static strings. */
+static const char **sym_names;
+static long sym_count, sym_cap;
+static long *sym_table; /* open addressing: index + 1, or 0 for an empty entry */
+static long sym_table_cap;
+
+static unsigned long name_hash(const char *s) {
+  unsigned long h = 2166136261u;
+  for (; *s; s++) h = (h ^ (unsigned char)*s) * 16777619u;
+  return h;
+}
+
+static void sym_rehash(void) {
+  long cap = sym_table_cap ? sym_table_cap * 2 : 64, k;
+  long *t = calloc((size_t)cap, sizeof *t);
+  if (t == NULL) mrbbc_raise("NoMemoryError", "failed to allocate memory");
+  for (k = 0; k < sym_count; k++) {
+    unsigned long i = name_hash(sym_names[k]) & (unsigned long)(cap - 1);
+    while (t[i]) i = (i + 1) & (unsigned long)(cap - 1);
+    t[i] = k + 1;
+  }
+  free(sym_table);
+  sym_table = t;
+  sym_table_cap = cap;
+}
+
+static long intern(const char *name) {
+  unsigned long i;
+  if (2 * (sym_count + 1) > sym_table_cap) sym_rehash();
+  i = name_hash(name) & (unsigned long)(sym_table_cap - 1);
+  for (; sym_table[i]; i = (i + 1) & (unsigned long)(sym_table_cap - 1)) {
+    const char *n = sym_names[sym_table[i] - 1];
+    if (n == name || strcmp(n, name) == 0) return sym_table[i] - 1;
+  }
+  if (sym_count == sym_cap) {
+    long cap = sym_cap ? sym_cap * 2 : 32;
+    const char **p = realloc(sym_names, (size_t)cap * sizeof *p);
+    if (p == NULL) mrbbc_raise("NoMemoryError", "failed to allocate memory");
+    sym_names = p;
+    sym_cap = cap;
+  }
+  sym_names[sym_count] = name;
+  sym_table[i] = sym_count + 1;
+  return sym_count++;
+}
+
+static const char *sym_of(const MV *v) { return sym_names[sym_index(v)]; }
+
+static MStr *str_of(const MV *v) { return (MStr *)ptr_of(v); }
+static MAry *ary_of(const MV *v) { return (MAry *)ptr_of(v); }
+
+static void set_obj(MV *dst, int tag, const void *p) { *dst = ptr_value(tag, p); }
 
 static MV new_str_value(const char *p, long n) {
   MStr *s = gc_alloc(GC_STR, sizeof(MStr) + (size_t)n + 1);
@@ -151,20 +347,6 @@ static MV new_str_value(const char *p, long n) {
   return v;
 }
 
-static MV int_value(int64_t i) {
-  MV v;
-  v.tag = MRBBC_INT;
-  v.i = i;
-  return v;
-}
-
-static MV bool_value(int truth) {
-  MV v;
-  v.tag = truth ? MRBBC_TRUE : MRBBC_FALSE;
-  v.i = 0;
-  return v;
-}
-
 void mrbbc_set_bool(MV *dst, int truth) { *dst = bool_value(truth); }
 
 void mrbbc_str_new(MV *dst, const char *p, long n) {
@@ -172,7 +354,24 @@ void mrbbc_str_new(MV *dst, const char *p, long n) {
   *dst = v;
 }
 
-void mrbbc_sym(MV *dst, const char *name) { set_obj(dst, MRBBC_SYM, name); }
+void mrbbc_sym(MV *dst, const char *name) { *dst = sym_value(intern(name)); }
+
+void mrbbc_frame_init(MV *frame, long n) {
+  long k;
+  for (k = 0; k < n; k++) frame[k] = nil_value();
+}
+
+/* Object, the root class: made on first use (a root of the collector), so that under the 4-byte layout its address is the
+ * arena's. */
+static MClass *object_cls(void) {
+  static MClass *object;
+  if (object == NULL) {
+    object = gc_alloc(GC_CLS, sizeof *object);
+    object->key = object->name = "Object";
+  }
+  return object;
+}
+
 static const char *class_name(const MV *v);
 
 /* The methods and classes of the program (see MDef and MClass above). mrbbc_def and mrbbc_def_in add an entry to the list
@@ -228,8 +427,8 @@ static int check_arity(const MDef *d, long argc, long kw) {
   return d->id;
 }
 
-static MClass *cls_of(const MV *v) { return (MClass *)(intptr_t)v->i; }
-static MObj *obj_of(const MV *v) { return (MObj *)(intptr_t)v->i; }
+static MClass *cls_of(const MV *v) { return (MClass *)ptr_of(v); }
+static MObj *obj_of(const MV *v) { return (MObj *)ptr_of(v); }
 
 /* The first method of the name on c or its superclasses (every chain ends at Object). where gets the class it is found in. */
 static MDef *find_chain(MClass *c, const char *name, MClass **where) {
@@ -244,23 +443,23 @@ static MDef *find_chain(MClass *c, const char *name, MClass **where) {
 }
 
 void mrbbc_def(const char *name, int id, long min, long max, int flags) {
-  add_def(&object_class.defs, name, id, min, max, flags);
-  set_owner(id, &object_class);
+  add_def(&object_cls()->defs, name, id, min, max, flags);
+  set_owner(id, object_cls());
 }
 
 void mrbbc_def_in(const MV *cls, const char *name, int id, long min, long max, int flags) {
-  if (cls->tag != MRBBC_CLS) mrbbc_raise("TypeError", "a method is defined on a class");
+  if (tag_of(cls) != MRBBC_CLS) mrbbc_raise("TypeError", "a method is defined on a class");
   add_def(&cls_of(cls)->defs, name, id, min, max, flags);
   set_owner(id, cls_of(cls));
 }
 
 int mrbbc_find(const MV *self, const char *name, long argc, long kw) {
-  MClass *start = self->tag == MRBBC_OBJ ? obj_of(self)->cls : &object_class;
+  MClass *start = tag_of(self) == MRBBC_OBJ ? obj_of(self)->cls : object_cls();
   MDef *d = find_chain(start, name, NULL);
   if (d != NULL) return check_arity(d, argc, kw);
   {
     char msg[256];
-    const char *cname = self->tag == MRBBC_OBJ ? obj_of(self)->cls->name : "Object";
+    const char *cname = tag_of(self) == MRBBC_OBJ ? obj_of(self)->cls->name : "Object";
     snprintf(msg, sizeof msg, "undefined method '%s' for %s", name, cname);
     mrbbc_raise("NoMethodError", msg);
   }
@@ -275,14 +474,14 @@ static void private_error(const MV *recv, const char *name) {
 }
 
 int mrbbc_find_send(const MV *recv, const char *name, long argc, long kw) {
-  if (recv->tag == MRBBC_OBJ) {
+  if (tag_of(recv) == MRBBC_OBJ) {
     MClass *where = NULL;
     MDef *d = find_chain(obj_of(recv)->cls, name, &where);
     if (d == NULL) return -1;
-    if (where == &object_class) private_error(recv, name);  /* a top-level def is a private method of Object */
+    if (where == object_cls()) private_error(recv, name);  /* a top-level def is a private method of Object */
     return check_arity(d, argc, kw);
   }
-  if (recv->tag == MRBBC_CLS && find_def(object_class.defs, name) != NULL) private_error(recv, name);
+  if (tag_of(recv) == MRBBC_CLS && find_def(object_cls()->defs, name) != NULL) private_error(recv, name);
   return -1;
 }
 
@@ -305,7 +504,7 @@ int mrbbc_find_super(const MV *self, int method, const char *name, long argc, lo
         "respond_to?", "send", "method", "methods", "freeze", "frozen?", "dup", "clone", "object_id", "p", "puts", "print",
         "raise", "loop", "format", "sprintf", "lambda", "proc", "block_given?", "require"};
     char msg[256];
-    const char *cname = self->tag == MRBBC_OBJ ? obj_of(self)->cls->name : "Object";
+    const char *cname = tag_of(self) == MRBBC_OBJ ? obj_of(self)->cls->name : "Object";
     size_t k;
     for (k = 0; k < sizeof builtins / sizeof builtins[0]; k++) {
       if (strcmp(builtins[k], name) == 0) {
@@ -322,8 +521,7 @@ int mrbbc_find_super(const MV *self, int method, const char *name, long argc, lo
 void mrbbc_no_super(void) { mrbbc_raise("NoMethodError", "super called outside of method"); }
 
 void mrbbc_super_nil(MV *dst) {
-  dst->tag = MRBBC_NIL;
-  dst->i = 0;
+  *dst = nil_value();
 }
 
 int mrbbc_find_init(const MV *obj, long argc, long kw) {
@@ -361,12 +559,12 @@ static int core_name(const char *name) {
 }
 
 void mrbbc_class(MV *dst, const MV *cbase, const MV *super, const char *name, const MV *target) {
-  MClass *outer = &object_class, *c, *sup = NULL;
-  if (super->tag != MRBBC_NIL) {
+  MClass *outer = object_cls(), *c, *sup = NULL;
+  if (tag_of(super) != MRBBC_NIL) {
     char msg[160];
-    if (super->tag != MRBBC_CLS) {
+    if (tag_of(super) != MRBBC_CLS) {
       Buf b = {NULL, 0, 0};
-      if (super->tag == MRBBC_OBJ) mrbbc_raise("NotImplementedError", "a superclass that is an instance is not lowered yet");
+      if (tag_of(super) == MRBBC_OBJ) mrbbc_raise("NotImplementedError", "a superclass that is an instance is not lowered yet");
       inspect_value(&b, super);
       snprintf(msg, sizeof msg, "superclass must be a Class (%s given)", b.p);
       free(b.p);
@@ -374,9 +572,9 @@ void mrbbc_class(MV *dst, const MV *cbase, const MV *super, const char *name, co
     }
     sup = cls_of(super);
   }
-  if (cbase->tag == MRBBC_CLS) {
+  if (tag_of(cbase) == MRBBC_CLS) {
     outer = cls_of(cbase);
-  } else if (target->tag == MRBBC_CLS) {
+  } else if (tag_of(target) == MRBBC_CLS) {
     outer = cls_of(target);
   }
   c = find_class(name);
@@ -384,7 +582,7 @@ void mrbbc_class(MV *dst, const MV *cbase, const MV *super, const char *name, co
     if (core_name(name)) mrbbc_raise("NotImplementedError", "reopening a core class is not lowered yet");
     c = gc_alloc(GC_CLS, sizeof *c);
     c->key = name;
-    if (outer == &object_class) {
+    if (outer == object_cls()) {
       c->name = name;
     } else {
       size_t n = strlen(outer->name) + 2 + strlen(name) + 1;
@@ -396,7 +594,7 @@ void mrbbc_class(MV *dst, const MV *cbase, const MV *super, const char *name, co
     }
     c->defs = NULL;
     c->ivars = NULL;
-    c->super = sup != NULL ? sup : &object_class;
+    c->super = sup != NULL ? sup : object_cls();
     c->next = class_registry;
     class_registry = c;
   } else if (sup != NULL && c->super != sup) {
@@ -407,11 +605,11 @@ void mrbbc_class(MV *dst, const MV *cbase, const MV *super, const char *name, co
   set_obj(dst, MRBBC_CLS, c);
 }
 
-void mrbbc_object_class(MV *dst) { set_obj(dst, MRBBC_CLS, &object_class); }
+void mrbbc_object_class(MV *dst) { set_obj(dst, MRBBC_CLS, object_cls()); }
 
 void mrbbc_getconst(MV *dst, const char *name) {
   MClass *c = find_class(name);
-  if (c == NULL && strcmp(name, "Object") == 0) c = &object_class;
+  if (c == NULL && strcmp(name, "Object") == 0) c = object_cls();
   if (c != NULL) {
     set_obj(dst, MRBBC_CLS, c);
     return;
@@ -426,7 +624,7 @@ void mrbbc_getconst(MV *dst, const char *name) {
 
 void mrbbc_alloc(MV *dst, const MV *cls) {
   MObj *o;
-  if (cls->tag != MRBBC_CLS) mrbbc_no_method(cls, "new");
+  if (tag_of(cls) != MRBBC_CLS) mrbbc_no_method(cls, "new");
   o = gc_alloc(GC_OBJ, sizeof *o);
   o->cls = cls_of(cls);
   o->ivars = NULL;
@@ -434,16 +632,15 @@ void mrbbc_alloc(MV *dst, const MV *cls) {
 }
 
 static MIvar **ivars_of(const MV *self) {
-  if (self->tag == MRBBC_OBJ) return &obj_of(self)->ivars;
-  if (self->tag == MRBBC_CLS) return &cls_of(self)->ivars;
+  if (tag_of(self) == MRBBC_OBJ) return &obj_of(self)->ivars;
+  if (tag_of(self) == MRBBC_CLS) return &cls_of(self)->ivars;
   return NULL;
 }
 
 void mrbbc_getiv(MV *dst, const MV *self, const char *name) {
   MIvar **head = ivars_of(self), *v;
   MV out;
-  out.tag = MRBBC_NIL;
-  out.i = 0;
+  out = nil_value();
   if (head != NULL) {
     for (v = *head; v != NULL; v = v->next) {
       if (strcmp(v->name, name) == 0) {
@@ -472,10 +669,10 @@ void mrbbc_setiv(const MV *self, const char *name, const MV *val) {
 }
 
 
-/* A block value (MRBBC_BLK): the int64 is the Clo that mrbbc_block fills. The layout is 40 bytes, as the producer
- * reserves it (tools/mrbbc/mrb_lower.cpp, the BLOCK slot). A closure lives in its frame, which is alive while the block
- * can be yielded: a block is passed to a method and not kept (a block parameter is refused). home is the frame of the
- * method the block was made in (the frame a return out of the block leaves). */
+/* A block value (MRBBC_BLK) points to the Clo that mrbbc_block makes, a collected object (the clo argument, the slot the
+ * lowering reserves, is not used). A closure is yielded while its frame is alive: a block is passed to a method and not
+ * kept (a block parameter is refused). home is the frame of the method the block was made in (the frame a return out of
+ * the block leaves). */
 typedef struct Clo {
   long id;
   MV self;
@@ -484,16 +681,14 @@ typedef struct Clo {
   /* The frames of the enclosing scopes past the creator: disp[L-1] is the frame at upvar level L >= 1 (level 0 is frame, the
    * frame the block was made in). A block made by a method or the main program has none. A block made by a block takes its
    * creator's own creator frame (the creator's %3) first, then the creator's disp (see mrbbc_block_nested). */
-  MV disp[MRBBC_MAX_DEPTH];
+  MV *disp[MRBBC_MAX_DEPTH];
 } Clo;
 
-/* The closure is a slot of its creator's frame (MRBBC_CLO_BYTES), so the lowering's slot is large enough. */
-typedef char mrbbc_clo_fits[sizeof(Clo) <= MRBBC_CLO_BYTES ? 1 : -1];
-
-static Clo *clo_of(const MV *v) { return (Clo *)(intptr_t)v->i; }
+static Clo *clo_of(const MV *v) { return (Clo *)ptr_of(v); }
 
 void mrbbc_block(MV *dst, void *clo, long id, const MV *self, MV *frame, MV *home) {
-  Clo *c = clo;
+  Clo *c = gc_alloc(GC_CLO, sizeof(Clo));
+  (void)clo;
   c->id = id;
   c->self = *self;
   c->frame = frame;
@@ -505,36 +700,36 @@ void mrbbc_block(MV *dst, void *clo, long id, const MV *self, MV *frame, MV *hom
  * and pdisp is the creator's disp, of nd entries (its depth minus one): the new block's disp is outer, then pdisp. */
 void mrbbc_block_nested(MV *dst, void *clo, long id, const MV *self, MV *frame, MV *home, MV *outer, const MV *pdisp,
                         long nd) {
-  Clo *c = clo;
+  Clo *c;
   long k;
   if (nd + 1 > MRBBC_MAX_DEPTH) mrbbc_raise("NotImplementedError", "a block nested too deep is not lowered yet");
   mrbbc_block(dst, clo, id, self, frame, home);
-  c->disp[0].tag = MRBBC_NIL;
-  c->disp[0].i = (int64_t)(intptr_t)outer;
-  for (k = 0; k < nd; k++) c->disp[k + 1] = pdisp[k];
+  c = clo_of(dst);
+  c->disp[0] = outer;
+  for (k = 0; k < nd; k++) c->disp[k + 1] = ((MV *const *)pdisp)[k];
 }
 
 /* The disp array of a block value (its frames past the creator), for the block's function. */
 MV *mrbbc_blk_disp(const MV *blk) {
-  if (blk->tag != MRBBC_BLK) mrbbc_raise("LocalJumpError", "unexpected yield");
-  return clo_of(blk)->disp;
+  if (tag_of(blk) != MRBBC_BLK) mrbbc_raise("LocalJumpError", "unexpected yield");
+  return (MV *)clo_of(blk)->disp;
 }
 
 /* The frame at upvar level k+1 of a block whose disp is disp (see Clo). */
-MV *mrbbc_upframe(const MV *disp, long k) { return (MV *)(intptr_t)disp[k].i; }
+MV *mrbbc_upframe(const MV *disp, long k) { return ((MV *const *)disp)[k]; }
 
 long mrbbc_blk_id(const MV *blk) {
-  if (blk->tag != MRBBC_BLK) mrbbc_raise("LocalJumpError", "unexpected yield");
+  if (tag_of(blk) != MRBBC_BLK) mrbbc_raise("LocalJumpError", "unexpected yield");
   return clo_of(blk)->id;
 }
 
 MV *mrbbc_blk_frame(const MV *blk) {
-  if (blk->tag != MRBBC_BLK) mrbbc_raise("LocalJumpError", "unexpected yield");
+  if (tag_of(blk) != MRBBC_BLK) mrbbc_raise("LocalJumpError", "unexpected yield");
   return clo_of(blk)->frame;
 }
 
 MV *mrbbc_blk_home(const MV *blk) {
-  if (blk->tag != MRBBC_BLK) mrbbc_raise("LocalJumpError", "unexpected yield");
+  if (tag_of(blk) != MRBBC_BLK) mrbbc_raise("LocalJumpError", "unexpected yield");
   return clo_of(blk)->home;
 }
 
@@ -584,8 +779,7 @@ int mrbbc_break_take(MV *dst, MV *frame) {
 void mrbbc_ary_elt(MV *dst, const MV *ary, long i) {
   const MAry *a = ary_of(ary);
   MV out;
-  out.tag = MRBBC_NIL;
-  out.i = 0;
+  out = nil_value();
   if (i < a->len) out = a->items[i];
   *dst = out;
 }
@@ -594,35 +788,33 @@ void mrbbc_ary_elt(MV *dst, const MV *ary, long i) {
  * otherwise (the destructuring `a, b = x` of a value that is not an array). */
 void mrbbc_aref(MV *dst, const MV *v, long i) {
   MV src = *v;
-  if (src.tag == MRBBC_ARY) {
+  if (tag_of(&src) == MRBBC_ARY) {
     mrbbc_ary_elt(dst, &src, i);
     return;
   }
   if (i == 0) *dst = src;
   else {
-    dst->tag = MRBBC_NIL;
-    dst->i = 0;
+    *dst = nil_value();
   }
 }
 
 void mrbbc_blk_args(MV *argv, const MV *blk) {
-  if (blk->tag != MRBBC_BLK) mrbbc_raise("LocalJumpError", "unexpected yield");
+  if (tag_of(blk) != MRBBC_BLK) mrbbc_raise("LocalJumpError", "unexpected yield");
   argv[0] = clo_of(blk)->self;
 }
 
 void mrbbc_blk_load(MV *dst, const MV *blk) {
-  if (blk->tag == MRBBC_NIL) mrbbc_raise("LocalJumpError", "unexpected yield");
+  if (tag_of(blk) == MRBBC_NIL) mrbbc_raise("LocalJumpError", "unexpected yield");
   *dst = *blk;
 }
 
 void mrbbc_blk_given(MV *dst, const MV *blk) {
-  dst->tag = blk->tag == MRBBC_NIL ? MRBBC_FALSE : MRBBC_TRUE;
-  dst->i = 0;
+  *dst = bool_value(tag_of(blk) != MRBBC_NIL);
 }
 
 /* The class of a value, as NoMethodError and ArgumentError name it. */
 static const char *class_name(const MV *v) {
-  switch (v->tag) {
+  switch (tag_of(v)) {
     case MRBBC_NIL: return "NilClass";
     case MRBBC_TRUE: return "TrueClass";
     case MRBBC_FALSE: return "FalseClass";
@@ -639,7 +831,7 @@ static const char *class_name(const MV *v) {
 
 /* What a TypeError shows for an operand: nil, true and false by their names, anything else by its class. */
 static const char *type_text(const MV *v) {
-  switch (v->tag) {
+  switch (tag_of(v)) {
     case MRBBC_NIL: return "nil";
     case MRBBC_TRUE: return "true";
     case MRBBC_FALSE: return "false";
@@ -676,7 +868,7 @@ void mrbbc_no_method(const MV *recv, const char *name) { no_method(name, recv); 
  * for any other value: only an instance of a program class has methods of the program). A wrong count is an ArgumentError. */
 static int user_method(const MV *recv, const char *name, long argc) {
   MDef *d;
-  if (recv->tag != MRBBC_OBJ) return -1;
+  if (tag_of(recv) != MRBBC_OBJ) return -1;
   d = find_chain(obj_of(recv)->cls, name, NULL);
   return d == NULL ? -1 : check_arity(d, argc, 0);
 }
@@ -687,8 +879,7 @@ static void call_user(MV *ret, int id, const MV *recv, const MV *arg) {
   MV argv[2], blk;
   argv[0] = *recv;
   argv[1] = arg != NULL ? *arg : *recv;
-  blk.tag = MRBBC_NIL;
-  blk.i = 0;
+  blk = nil_value();
   mrbbc_user_call(id, ret, argv, &blk, arg != NULL ? 1 : 0);
 }
 
@@ -753,13 +944,13 @@ static const MAry *inspecting[INSPECT_DEPTH];
 static int inspect_depth;
 
 static void inspect_value(Buf *b, const MV *v) {
-  switch (v->tag) {
+  switch (tag_of(v)) {
     case MRBBC_NIL: buf_str(b, "nil"); break;
     case MRBBC_TRUE: buf_str(b, "true"); break;
     case MRBBC_FALSE: buf_str(b, "false"); break;
     case MRBBC_INT: {
       char h[32];
-      snprintf(h, sizeof h, "%lld", (long long)v->i);
+      snprintf(h, sizeof h, "%lld", (long long)int_of(v));
       buf_str(b, h);
       break;
     }
@@ -813,7 +1004,7 @@ static void inspect_value(Buf *b, const MV *v) {
       buf_char(b, '{');
       for (k = 0; k < h->len; k++) {
         if (k) buf_str(b, ", ");
-        if (h->keys[k].tag == MRBBC_SYM) {
+        if (tag_of(&h->keys[k]) == MRBBC_SYM) {
           buf_str(b, sym_of(&h->keys[k]));
           buf_str(b, ": ");
         } else {
@@ -840,22 +1031,22 @@ void mrbbc_print(const MV *v) {
 /* a == b (mruby's ==, for these values). Arrays compare element by element. An instance is equal to itself (rb_equal checks
  * identity first), and otherwise its class's == decides when the program defines one (a truthy result is equal). */
 static int value_eq(const MV *a, const MV *b) {
-  if (a->tag == MRBBC_OBJ) {
+  if (tag_of(a) == MRBBC_OBJ) {
     MV r;
     int id;
-    if (a->tag == b->tag && a->i == b->i) return 1;
+    if (same_value(a, b)) return 1;
     id = user_method(a, "==", 1);
     if (id < 0) return 0;
     call_user(&r, id, a, b);
-    return r.tag != MRBBC_NIL && r.tag != MRBBC_FALSE;
+    return tag_of(&r) != MRBBC_NIL && tag_of(&r) != MRBBC_FALSE;
   }
-  if (a->tag != b->tag) return 0;
-  switch (a->tag) {
+  if (tag_of(a) != tag_of(b)) return 0;
+  switch (tag_of(a)) {
     case MRBBC_HASH: mrbbc_raise("NotImplementedError", "== of a Hash is not lowered yet");
-    case MRBBC_INT: return a->i == b->i;
+    case MRBBC_INT: return int_of(a) == int_of(b);
     case MRBBC_STR: return str_of(a)->len == str_of(b)->len && memcmp(str_of(a)->p, str_of(b)->p, (size_t)str_of(a)->len) == 0;
     case MRBBC_SYM: return strcmp(sym_of(a), sym_of(b)) == 0;
-    case MRBBC_CLS: return a->i == b->i;  /* identity */
+    case MRBBC_CLS: return same_value(a, b);  /* identity */
     case MRBBC_ARY: {
       const MAry *x = ary_of(a), *y = ary_of(b);
       long k;
@@ -919,35 +1110,29 @@ void mrbbc_ary_new(MV *dst, long cap) {
 void mrbbc_ary_push(MV *ary, const MV *v) {
   MAry *a;
   MV item = *v;
-  if (ary->tag != MRBBC_ARY) mrbbc_raise("TypeError", "expected Array");
+  if (tag_of(ary) != MRBBC_ARY) mrbbc_raise("TypeError", "expected Array");
   a = ary_of(ary);
   ary_reserve(a, a->len + 1);
   a->items[a->len++] = item;
 }
 
-static MV nil_value(void) {
-  MV v;
-  v.tag = MRBBC_NIL;
-  v.i = 0;
-  return v;
-}
 
 /* A splat (vm.c's mrb_ary_splat): an array is copied, nil is the empty array, and any other value is the array of itself,
  * except that an instance of a program class with a to_a of its own gives that. dst may be v. */
 void mrbbc_splat(MV *dst, const MV *v) {
   MV src = *v, out;
-  int id = src.tag == MRBBC_OBJ ? user_method(&src, "to_a", 0) : -1;
+  int id = tag_of(&src) == MRBBC_OBJ ? user_method(&src, "to_a", 0) : -1;
   long k;
-  if (src.tag == MRBBC_ARY) {
+  if (tag_of(&src) == MRBBC_ARY) {
     const MAry *a = ary_of(&src);
     out = new_ary_value(a->len);
     for (k = 0; k < a->len; k++) mrbbc_ary_push(&out, &a->items[k]);
-  } else if (src.tag == MRBBC_NIL) {
+  } else if (tag_of(&src) == MRBBC_NIL) {
     out = new_ary_value(0);
   } else if (id >= 0) {
     MV r;
     call_user(&r, id, &src, NULL);
-    if (r.tag != MRBBC_ARY) mrbbc_raise("TypeError", "can't convert to Array");
+    if (tag_of(&r) != MRBBC_ARY) mrbbc_raise("TypeError", "can't convert to Array");
     out = new_ary_value(ary_of(&r)->len);
     for (k = 0; k < ary_of(&r)->len; k++) mrbbc_ary_push(&out, &ary_of(&r)->items[k]);
   } else {
@@ -962,11 +1147,11 @@ void mrbbc_ary_cat(MV *dst, const MV *src) {
   MV s;
   long k;
   mrbbc_splat(&s, src);
-  if (dst->tag == MRBBC_NIL) {
+  if (tag_of(dst) == MRBBC_NIL) {
     *dst = s;
     return;
   }
-  if (dst->tag != MRBBC_ARY) mrbbc_raise("TypeError", "expected Array");
+  if (tag_of(dst) != MRBBC_ARY) mrbbc_raise("TypeError", "expected Array");
   for (k = 0; k < ary_of(&s)->len; k++) mrbbc_ary_push(dst, &ary_of(&s)->items[k]);
 }
 
@@ -976,7 +1161,7 @@ MV *mrbbc_splat_argv(const MV *self, const MV *ary) {
   const MAry *a;
   MV *argv;
   long k, n;
-  if (ary->tag != MRBBC_ARY) mrbbc_raise("TypeError", "expected Array");
+  if (tag_of(ary) != MRBBC_ARY) mrbbc_raise("TypeError", "expected Array");
   a = ary_of(ary);
   n = a->len;
   argv = gc_alloc(GC_VEC, (size_t)(n + 1) * sizeof(MV));
@@ -986,7 +1171,7 @@ MV *mrbbc_splat_argv(const MV *self, const MV *ary) {
 }
 
 long mrbbc_ary_len(const MV *ary) {
-  if (ary->tag != MRBBC_ARY) mrbbc_raise("TypeError", "expected Array");
+  if (tag_of(ary) != MRBBC_ARY) mrbbc_raise("TypeError", "expected Array");
   return ary_of(ary)->len;
 }
 
@@ -999,7 +1184,7 @@ long mrbbc_bind(MV *r1, const MV *argv, long argc, long kw, long m1, long o, lon
   const long len = m1 + o + r + m2;
   const MV *src = argv + 1;
   long n = argc, k, mlen, g;
-  if (!strict && len >= 2 && argc == 1 && argv[1].tag == MRBBC_ARY) {
+  if (!strict && len >= 2 && argc == 1 && tag_of(&argv[1]) == MRBBC_ARY) {
     src = ary_of(&argv[1])->items;
     n = ary_of(&argv[1])->len;
   } else if (!kd && (kw == 1 || (kw == 2 && fast))) {
@@ -1041,20 +1226,20 @@ long mrbbc_bind(MV *r1, const MV *argv, long argc, long kw, long m1, long o, lon
 }
 
 /* KEY_P, KARG and KEYEND on the kdict, a hash of symbols by their names. */
-static MHash *hash_of(const MV *v) { return (MHash *)(intptr_t)v->i; }
+static MHash *hash_of(const MV *v) { return (MHash *)ptr_of(v); }
 
 
 static long hash_index(const MHash *h, const MV *key) {
   long k;
   for (k = 0; k < h->len; k++) {
     const MV *x = &h->keys[k];
-    if (x->tag != key->tag) continue;
-    switch (key->tag) {
+    if (tag_of(x) != tag_of(key)) continue;
+    switch (tag_of(key)) {
       case MRBBC_SYM:
         if (strcmp(sym_of(x), sym_of(key)) == 0) return k;
         break;
       case MRBBC_INT:
-        if (x->i == key->i) return k;
+        if (int_of(x) == int_of(key)) return k;
         break;
       case MRBBC_STR:
         if (str_of(x)->len == str_of(key)->len && memcmp(str_of(x)->p, str_of(key)->p, (size_t)str_of(key)->len) == 0) return k;
@@ -1063,7 +1248,7 @@ static long hash_index(const MHash *h, const MV *key) {
       case MRBBC_TRUE:
       case MRBBC_FALSE: return k;
       default:
-        if (x->i == key->i) return k;
+        if (same_value(x, key)) return k;
         break;
     }
   }
@@ -1071,7 +1256,7 @@ static long hash_index(const MHash *h, const MV *key) {
 }
 
 static void hash_check(const MV *v) {
-  if (v->tag != MRBBC_HASH) mrbbc_raise("TypeError", "a keyword argument hash is expected");
+  if (tag_of(v) != MRBBC_HASH) mrbbc_raise("TypeError", "a keyword argument hash is expected");
 }
 
 void mrbbc_key_p(MV *dst, const MV *kdict, const char *name) {
@@ -1107,7 +1292,7 @@ void mrbbc_keyend(const MV *kdict) {
   h = hash_of(kdict);
   if (h->len == 0) return;
   /* vm.c's KEYEND formats the first key with %v (its to_s): a symbol's name */
-  if (h->keys[0].tag == MRBBC_SYM) snprintf(msg, sizeof msg, "unknown keyword: %s", sym_of(&h->keys[0]));
+  if (tag_of(&h->keys[0]) == MRBBC_SYM) snprintf(msg, sizeof msg, "unknown keyword: %s", sym_of(&h->keys[0]));
   else snprintf(msg, sizeof msg, "unknown keyword");
   mrbbc_raise("ArgumentError", msg);
 }
@@ -1157,7 +1342,7 @@ void mrbbc_hash_cat(MV *hash, const MV *src) {
   const MHash *from;
   long k;
   hash_check(hash);
-  if (src->tag != MRBBC_HASH) {
+  if (tag_of(src) != MRBBC_HASH) {
     char msg[160];
     snprintf(msg, sizeof msg, "%s cannot be converted to Hash", type_text(src));
     mrbbc_raise("TypeError", msg);
@@ -1175,7 +1360,7 @@ long mrbbc_kw_flag(const MV *h) {
 
 /* `&nil` in a parameter list (vm.c's ENTER): a block given to the method is an ArgumentError. */
 void mrbbc_noblock(const MV *blk) {
-  if (blk->tag != MRBBC_NIL) mrbbc_raise("ArgumentError", "no block accepted");
+  if (tag_of(blk) != MRBBC_NIL) mrbbc_raise("ArgumentError", "no block accepted");
 }
 
 static int64_t floor_div(int64_t x, int64_t y) {
@@ -1190,13 +1375,13 @@ static void int_op(int op, MV *dst, const MV *a, const MV *b) {
   int64_t r = 0;
   MV out;
 
-  if (b->tag != MRBBC_INT) {
+  if (tag_of(b) != MRBBC_INT) {
     if (op >= MRBBC_OP_LT) {
       snprintf(msg, sizeof msg, "comparison of Integer with %s failed", class_name(b));
       mrbbc_raise("ArgumentError", msg);
     }
     if (op == MRBBC_OP_ADD || op == MRBBC_OP_SUB) {
-      if (b->tag == MRBBC_NIL) mrbbc_raise("TypeError", "can't convert nil into Float");
+      if (tag_of(b) == MRBBC_NIL) mrbbc_raise("TypeError", "can't convert nil into Float");
       snprintf(msg, sizeof msg, "%s cannot be converted to Float", type_text(b));
       mrbbc_raise("TypeError", msg);
     }
@@ -1206,24 +1391,24 @@ static void int_op(int op, MV *dst, const MV *a, const MV *b) {
 
   switch (op) {
     case MRBBC_OP_ADD:
-      if (__builtin_add_overflow(a->i, b->i, &r)) break;
+      if (__builtin_add_overflow(int_of(a), int_of(b), &r)) break;
       *dst = int_value(r);
       return;
     case MRBBC_OP_SUB:
-      if (__builtin_sub_overflow(a->i, b->i, &r)) break;
+      if (__builtin_sub_overflow(int_of(a), int_of(b), &r)) break;
       *dst = int_value(r);
       return;
     case MRBBC_OP_MUL:
-      if (__builtin_mul_overflow(a->i, b->i, &r)) break;
+      if (__builtin_mul_overflow(int_of(a), int_of(b), &r)) break;
       *dst = int_value(r);
       return;
     case MRBBC_OP_DIV:
-      if (b->i == 0) mrbbc_raise("ZeroDivisionError", "divided by 0");
-      if (a->i == INT64_MIN && b->i == -1) break;
-      *dst = int_value(floor_div(a->i, b->i));
+      if (int_of(b) == 0) mrbbc_raise("ZeroDivisionError", "divided by 0");
+      if (int_of(a) == INT64_MIN && int_of(b) == -1) break;
+      *dst = int_value(floor_div(int_of(a), int_of(b)));
       return;
     default:
-      out = bool_value(compare_result(op, a->i < b->i ? -1 : a->i > b->i));
+      out = bool_value(compare_result(op, int_of(a) < int_of(b) ? -1 : int_of(a) > int_of(b)));
       *dst = out;
       return;
   }
@@ -1238,7 +1423,7 @@ static void str_op(int op, MV *dst, const MV *a, const MV *b) {
   if (op == MRBBC_OP_ADD) {
     long la, lb;
     MStr *t;
-    if (b->tag != MRBBC_STR) {
+    if (tag_of(b) != MRBBC_STR) {
       snprintf(msg, sizeof msg, "%s cannot be converted to String", type_text(b));
       mrbbc_raise("TypeError", msg);
     }
@@ -1256,12 +1441,12 @@ static void str_op(int op, MV *dst, const MV *a, const MV *b) {
   if (op == MRBBC_OP_MUL) {
     long n, len, k;
     MStr *t;
-    if (b->tag != MRBBC_INT) {
+    if (tag_of(b) != MRBBC_INT) {
       snprintf(msg, sizeof msg, "%s cannot be converted to Integer", type_text(b));
       mrbbc_raise("TypeError", msg);
     }
-    if (b->i < 0) mrbbc_raise("ArgumentError", "negative argument");
-    n = (long)b->i;
+    if (int_of(b) < 0) mrbbc_raise("ArgumentError", "negative argument");
+    n = (long)int_of(b);
     len = str_of(a)->len;
     if (n != 0 && len > (long)(((size_t)-1 >> 1) / (size_t)n)) mrbbc_raise("ArgumentError", "argument too big");
     t = gc_alloc(GC_STR, sizeof(MStr) + (size_t)(len * n) + 1);
@@ -1273,7 +1458,7 @@ static void str_op(int op, MV *dst, const MV *a, const MV *b) {
     return;
   }
   if (op >= MRBBC_OP_LT) {
-    if (b->tag != MRBBC_STR) {
+    if (tag_of(b) != MRBBC_STR) {
       snprintf(msg, sizeof msg, "comparison of String with %s failed", class_name(b));
       mrbbc_raise("ArgumentError", msg);
     }
@@ -1291,7 +1476,7 @@ static void ary_op(int op, MV *dst, const MV *a, const MV *b) {
     MV r;
     MAry *x, *y, *z;
     long k;
-    if (b->tag != MRBBC_ARY) {
+    if (tag_of(b) != MRBBC_ARY) {
       snprintf(msg, sizeof msg, "%s cannot be converted to Array", type_text(b));
       mrbbc_raise("TypeError", msg);
     }
@@ -1316,7 +1501,7 @@ static void sym_op(int op, MV *dst, const MV *a, const MV *b) {
   char msg[160];
   if (op >= MRBBC_OP_LT) {
     int c;
-    if (b->tag != MRBBC_SYM) {
+    if (tag_of(b) != MRBBC_SYM) {
       snprintf(msg, sizeof msg, "comparison of Symbol with %s failed", class_name(b));
       mrbbc_raise("ArgumentError", msg);
     }
@@ -1345,7 +1530,7 @@ static void obj_op(int op, MV *dst, const MV *a, const MV *b) {
 }
 
 void mrbbc_binop(int op, MV *dst, const MV *a, const MV *b) {
-  if (a->tag == MRBBC_OBJ) {
+  if (tag_of(a) == MRBBC_OBJ) {
     obj_op(op, dst, a, b);
     return;
   }
@@ -1354,7 +1539,7 @@ void mrbbc_binop(int op, MV *dst, const MV *a, const MV *b) {
     *dst = bool_value(op == MRBBC_OP_EQ ? eq : !eq);
     return;
   }
-  switch (a->tag) {
+  switch (tag_of(a)) {
     case MRBBC_INT: int_op(op, dst, a, b); return;
     case MRBBC_STR: str_op(op, dst, a, b); return;
     case MRBBC_ARY: ary_op(op, dst, a, b); return;
@@ -1374,24 +1559,23 @@ static int ary_index(const MAry *a, long idx, long *out) {
 
 void mrbbc_getidx(MV *dst, const MV *recv, const MV *idx) {
   MV r;
-  r.tag = MRBBC_NIL;
-  r.i = 0;
-  if (recv->tag == MRBBC_ARY && idx->tag == MRBBC_INT) {
+  r = nil_value();
+  if (tag_of(recv) == MRBBC_ARY && tag_of(idx) == MRBBC_INT) {
     const MAry *a = ary_of(recv);
     long i;
-    if (ary_index(a, (long)idx->i, &i) && i < a->len) r = a->items[i];
+    if (ary_index(a, (long)int_of(idx), &i) && i < a->len) r = a->items[i];
     *dst = r;
     return;
   }
-  if (recv->tag == MRBBC_STR && idx->tag == MRBBC_INT) {
+  if (tag_of(recv) == MRBBC_STR && tag_of(idx) == MRBBC_INT) {
     const MStr *s = str_of(recv);
-    long i = (long)idx->i;
+    long i = (long)int_of(idx);
     if (i < 0) i += s->len;
     if (i >= 0 && i < s->len) r = new_str_value(s->p + i, 1);
     *dst = r;
     return;
   }
-  if (recv->tag == MRBBC_ARY || recv->tag == MRBBC_STR) {
+  if (tag_of(recv) == MRBBC_ARY || tag_of(recv) == MRBBC_STR) {
     mrbbc_raise("NotImplementedError", "[] with a non-integer index is not implemented by mrbbc");
   }
   no_method("[]", recv);
@@ -1406,13 +1590,13 @@ void mrbbc_setidx(const MV *recv, const MV *idx, const MV *v) {
   MAry *a;
   long i;
   MV item = *v;
-  if (recv->tag != MRBBC_ARY) {
-    if (recv->tag == MRBBC_STR) mrbbc_raise("NotImplementedError", "String#[]= is not implemented by mrbbc");
+  if (tag_of(recv) != MRBBC_ARY) {
+    if (tag_of(recv) == MRBBC_STR) mrbbc_raise("NotImplementedError", "String#[]= is not implemented by mrbbc");
     no_method("[]=", recv);
   }
-  if (idx->tag != MRBBC_INT) mrbbc_raise("NotImplementedError", "[]= with a non-integer index is not implemented by mrbbc");
+  if (tag_of(idx) != MRBBC_INT) mrbbc_raise("NotImplementedError", "[]= with a non-integer index is not implemented by mrbbc");
   a = ary_of(recv);
-  i = (long)idx->i;
+  i = (long)int_of(idx);
   if (i < 0) {
     char msg[96];
     if (i + a->len < 0) {
@@ -1425,8 +1609,7 @@ void mrbbc_setidx(const MV *recv, const MV *idx, const MV *v) {
     long k;
     ary_reserve(a, i + 1);
     for (k = a->len; k <= i; k++) {
-      a->items[k].tag = MRBBC_NIL;
-      a->items[k].i = 0;
+      a->items[k] = nil_value();
     }
     a->len = i + 1;
   }
@@ -1437,7 +1620,7 @@ void mrbbc_strcat(MV *dst, const MV *src) {
   Buf b = {NULL, 0, 0};
   MV out;
   const MStr *s;
-  if (dst->tag != MRBBC_STR) mrbbc_raise("TypeError", "expected String");
+  if (tag_of(dst) != MRBBC_STR) mrbbc_raise("TypeError", "expected String");
   s = str_of(dst);
   /* the operand as a string: itself, or its to_s (mrb_obj_as_string) */
   MV piece = to_s_string(src);
@@ -1452,7 +1635,7 @@ void mrbbc_send0(MV *dst, const MV *recv, int m) {
   MV r;
   switch (m) {
     case MRBBC_M_TO_S:
-      switch (recv->tag) {
+      switch (tag_of(recv)) {
         case MRBBC_STR: r = *recv; break;
         case MRBBC_NIL: r = new_str_value("", 0); break;
         case MRBBC_TRUE: r = new_str_value("true", 4); break;
@@ -1470,7 +1653,7 @@ void mrbbc_send0(MV *dst, const MV *recv, int m) {
         }
         case MRBBC_INT: {
           char h[32];
-          int n = snprintf(h, sizeof h, "%lld", (long long)recv->i);
+          int n = snprintf(h, sizeof h, "%lld", (long long)int_of(recv));
           r = new_str_value(h, n);
           break;
         }
@@ -1485,14 +1668,14 @@ void mrbbc_send0(MV *dst, const MV *recv, int m) {
       break;
     case MRBBC_M_SIZE:
     case MRBBC_M_LENGTH:
-      if (recv->tag == MRBBC_STR) r = int_value(str_of(recv)->len);
-      else if (recv->tag == MRBBC_ARY) r = int_value(ary_of(recv)->len);
-      else if (recv->tag == MRBBC_SYM) r = int_value((int64_t)strlen(sym_of(recv)));
-      else if (m == MRBBC_M_SIZE && recv->tag == MRBBC_INT) r = int_value(8);  /* sizeof(mrb_int) */
+      if (tag_of(recv) == MRBBC_STR) r = int_value(str_of(recv)->len);
+      else if (tag_of(recv) == MRBBC_ARY) r = int_value(ary_of(recv)->len);
+      else if (tag_of(recv) == MRBBC_SYM) r = int_value((int64_t)strlen(sym_of(recv)));
+      else if (m == MRBBC_M_SIZE && tag_of(recv) == MRBBC_INT) r = int_value(8);  /* sizeof(mrb_int) */
       else no_method(m == MRBBC_M_SIZE ? "size" : "length", recv);
       break;
     case MRBBC_M_NOT:
-      r = bool_value(recv->tag == MRBBC_NIL || recv->tag == MRBBC_FALSE);
+      r = bool_value(tag_of(recv) == MRBBC_NIL || tag_of(recv) == MRBBC_FALSE);
       break;
     case MRBBC_M_INSPECT: {
       Buf b = {NULL, 0, 0};
@@ -1510,9 +1693,9 @@ void mrbbc_send0(MV *dst, const MV *recv, int m) {
  * A to_s that gives no string falls back to mruby's default one, which prints an address: not lowered. */
 static MV to_s_string(const MV *v) {
   MV r;
-  if (v->tag == MRBBC_STR) return *v;
+  if (tag_of(v) == MRBBC_STR) return *v;
   mrbbc_send0(&r, v, MRBBC_M_TO_S);
-  if (r.tag != MRBBC_STR) mrbbc_raise("NotImplementedError", "to_s of an instance that gives no string is not lowered yet");
+  if (tag_of(&r) != MRBBC_STR) mrbbc_raise("NotImplementedError", "to_s of an instance that gives no string is not lowered yet");
   return r;
 }
 
@@ -1548,6 +1731,9 @@ static GCHdr *all_objects = NULL;
 static long gc_count = 0;             /* the objects allocated and not yet swept */
 static size_t gc_allocated = 0;       /* bytes allocated since the last collection */
 static size_t gc_live = 0;            /* bytes that survived the last collection */
+static size_t gc_peak = 0;            /* the most bytes of objects at once (MRBBC_GC_STATS) */
+static size_t gc_total = 0;           /* every byte allocated (MRBBC_GC_STATS) */
+static long gc_runs = 0;              /* the collections (MRBBC_GC_STATS) */
 static size_t gc_threshold = GC_MIN_THRESHOLD;
 static int gc_forced = 0;             /* the threshold is forced (MRBBC_GC_THRESHOLD, mrbbc_gc_set_threshold) */
 static int gc_busy = 0;               /* a collection is running */
@@ -1621,8 +1807,10 @@ static void *gc_alloc(uint8_t kind, size_t size) {
   size_t need = sizeof(GCHdr) + size;
   GCHdr *h;
   if (stack_base != NULL && !gc_busy && gc_allocated + need > gc_threshold) gc_collect();
-  h = calloc(1, need);
+  h = raw_alloc(need);
   if (h == NULL) mrbbc_raise("NoMemoryError", "failed to allocate memory");
+  memset(h, 0, need);
+  h->bytes = (uint32_t)need;
   h->kind = kind;
   h->size = size;
   h->next = all_objects;
@@ -1630,6 +1818,8 @@ static void *gc_alloc(uint8_t kind, size_t size) {
   set_insert(h + 1);
   gc_count++;
   gc_allocated += need;
+  gc_total += need;
+  if (gc_live + gc_allocated > gc_peak) gc_peak = gc_live + gc_allocated;
   return h + 1;
 }
 
@@ -1637,6 +1827,8 @@ static void *gc_alloc(uint8_t kind, size_t size) {
 static void gc_grow(const void *p, size_t n) {
   HDR(p)->size += n;
   gc_allocated += n;
+  gc_total += n;
+  if (gc_live + gc_allocated > gc_peak) gc_peak = gc_live + gc_allocated;
 }
 
 static void **gray = NULL;     /* the marked objects not yet traversed */
@@ -1654,17 +1846,19 @@ static void mark_obj(const void *p) {
 }
 
 static void mark_value(const MV *v) {
-  switch (v->tag) {
+  switch (tag_of(v)) {
     case MRBBC_STR:
     case MRBBC_ARY:
     case MRBBC_HASH:
     case MRBBC_OBJ:
-    case MRBBC_CLS: mark_obj((const void *)(intptr_t)v->i); break;
-    case MRBBC_BLK:
-      /* a closure lives in its creator's frame: what it keeps alive is its self */
-      if (v->i != 0) mark_value(&clo_of(v)->self);
+    case MRBBC_CLS:
+    case MRBBC_BLK: mark_obj(ptr_of(v)); break;
+#if MRBBC_VALUE != 16
+    case MRBBC_INT:
+      if (!(v->w & 1)) mark_obj(ptr_of(v)); /* a boxed integer */
       break;
-    default: break;  /* nil, booleans, integers, and symbols (their names are static) */
+#endif
+    default: break;  /* nil, booleans, small integers, and symbols (their names are static) */
   }
 }
 
@@ -1713,7 +1907,8 @@ static void traverse(const void *p) {
       mark_obj(c->next);
       break;
     }
-    default: break;  /* a string: its bytes are all of it */
+    case GC_CLO: mark_value(&((const Clo *)p)->self); break;
+    default: break;  /* a string or a boxed integer: its bytes are all of it */
   }
 }
 
@@ -1733,6 +1928,10 @@ static void propagate(void) {
 #define MRBBC_NO_ASAN
 #endif
 
+/* A value of the 4-byte layout is a 4-byte word of the frame, so the scan reads every 4 bytes (the low half of a pointer in a
+ * helper's local, under the arena below 2 GB, is its address too). */
+#define SCAN_STEP (MRBBC_VALUE == 4 ? 4 : sizeof(uintptr_t))
+
 /* The C stack, from here up to stack_base: the callee-saved registers are spilled to the stack first (__builtin_unwind_init
  * and setjmp), so a pointer that lives only in a register is found too. */
 MRBBC_NO_ASAN static void scan_c_stack(void) {
@@ -1744,8 +1943,8 @@ MRBBC_NO_ASAN static void scan_c_stack(void) {
   lo = (uintptr_t)&here;
   if ((uintptr_t)&regs < lo) lo = (uintptr_t)&regs;
   hi = (uintptr_t)stack_base;
-  for (p = lo & ~(uintptr_t)(sizeof(uintptr_t) - 1); p + sizeof(uintptr_t) <= hi; p += sizeof(uintptr_t)) {
-    uintptr_t w = *(volatile uintptr_t *)p;
+  for (p = lo & ~(uintptr_t)(SCAN_STEP - 1); p + SCAN_STEP <= hi; p += SCAN_STEP) {
+    uintptr_t w = SCAN_STEP == 4 ? *(volatile uint32_t *)p : *(volatile uintptr_t *)p;
     if (w != 0 && set_has((const void *)w)) mark_obj((const void *)w);
   }
   (void)here;
@@ -1753,9 +1952,10 @@ MRBBC_NO_ASAN static void scan_c_stack(void) {
 
 static void mark_roots(void) {
   size_t i;
+  mark_obj(object_cls());
   mark_obj(class_registry);
-  mark_obj(object_class.defs);
-  mark_obj(object_class.ivars);
+  mark_obj(object_cls()->defs);
+  mark_obj(object_cls()->ivars);
   for (i = 0; i < (size_t)owners_n; i++) mark_obj(owners[i]);
   mark_value(&unwind_value);
   for (i = 0; i < (size_t)inspect_depth; i++) mark_obj(inspecting[i]);
@@ -1778,7 +1978,7 @@ static void free_object(GCHdr *h) {
     default: break;
   }
   gc_count--;
-  free(h);
+  raw_free(h, h->bytes);
 }
 
 static void sweep(void) {
@@ -1803,6 +2003,7 @@ static size_t auto_threshold(void) { return gc_live * 2 > GC_MIN_THRESHOLD ? gc_
 static void gc_collect(void) {
   if (stack_base == NULL || gc_busy) return;
   gc_busy = 1;
+  gc_runs++;
   gray_n = 0;
   mark_roots();
   sweep();
@@ -1822,10 +2023,19 @@ void mrbbc_gc_set_threshold(long bytes) {
 
 /* The program's entry, under the collector. MRBBC_GC_THRESHOLD forces the threshold (see above). The result slot is a root
  * while the entry runs; the collector is off once it returns. */
+/* MRBBC_GC_STATS=1: at exit, the heap's numbers on stderr (tests/mrbbc/lower/measure.sh reads them):
+ *   mrbbc-gc: total BYTES peak BYTES collections N
+ * total is every byte the objects took, peak the most at once (headers and owned buffers included). */
+static void gc_report(void) {
+  fprintf(stderr, "mrbbc-gc: total %lu peak %lu collections %ld\n", (unsigned long)gc_total, (unsigned long)gc_peak, gc_runs);
+}
+
 void mrbbc_run(void (*entry)(MV *ret), MV *ret) {
   const char *env = getenv("MRBBC_GC_THRESHOLD");
+  const char *stats = getenv("MRBBC_GC_STATS");
   long n;
   if (env != NULL && (n = strtol(env, NULL, 10)) > 0) mrbbc_gc_set_threshold(n);
+  if (stats != NULL && *stats != '\0' && *stats != '0') atexit(gc_report);
   stack_base = __builtin_frame_address(0);
   entry_ret = ret;
   entry(ret);
