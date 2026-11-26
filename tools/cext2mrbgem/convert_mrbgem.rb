@@ -8268,7 +8268,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     mrb_header_names = @files.keys.select { |r| @files[r]['kind'] != 'src' && outputs[r].to_s.match?(/\bmrb_|\bmrb_state\b/) }
                              .map { |r| File.basename(r) }
     # <math.h> came with CRuby's ruby.h (signbit, isnan, INFINITY, ...): a source that uses its names includes it
-    math_names = /(?<![\w$])(?:signbit|isnan|isinf|isfinite|fabs|floor|ceil|pow|sqrt|NAN|INFINITY|HUGE_VAL)(?![\w$])/
+    # the l and f suffixes are the long double and float variants (powl, sqrtf, ...)
+    math_names = /(?<![\w$])(?:signbit|isnan|isinf|isfinite|fabs|floor|ceil|pow|sqrt|NAN|INFINITY|HUGE_VAL)[fl]?(?![\w$])/
     @files.each do |rel, f|
       next unless f['kind'] == 'src'
       next if outputs[rel].to_s.match?(/#\s*include\s*[<"]math\.h[>"]/)
@@ -8282,6 +8283,27 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       next if outputs[rel].to_s.match?(/#\s*include\s*[<"]string\.h[>"]/)
       next unless outputs[rel].to_s.match?(string_names)
       outputs[rel] = "#include <string.h>\n" + outputs[rel]
+    end
+    # CRuby's ruby.h included <unistd.h> (read, write, close, ...): a source that calls one of those includes it. The call
+    # pattern needs the open parenthesis, so a variable named read is not a match.
+    posix_calls = /(?<![\w$.>])(?:read|write|close|lseek|dup2?|getpid|isatty|unlink|sleep|usleep|getcwd|access)\s*\(/
+    @files.each do |rel, f|
+      next if outputs[rel].to_s.match?(/#\s*include\s*[<"]unistd\.h[>"]/)
+      next unless outputs[rel].to_s.match?(posix_calls)
+      outputs[rel] = "#include <unistd.h>\n" + outputs[rel]
+    end
+    # <stdlib.h> came with CRuby's ruby.h too (abort, strtoul, malloc, ...): a source that calls one of those includes it
+    stdlib_calls = /(?<![\w$.>])(?:abort|exit|malloc|calloc|realloc|free|atoi|atol|strtol|strtoul|strtod|strtoll|strtoull|getenv|qsort|bsearch|rand|srand|abs|labs)\s*\(/
+    @files.each do |rel, f|
+      next if outputs[rel].to_s.match?(/#\s*include\s*[<"]stdlib\.h[>"]/)
+      next unless outputs[rel].to_s.match?(stdlib_calls)
+      outputs[rel] = "#include <stdlib.h>\n" + outputs[rel]
+    end
+    # rb_require is the mruby-require API (mruby/require.h): a source that calls it includes that header
+    @files.each do |rel, f|
+      next if outputs[rel].to_s.match?(/#\s*include\s*[<"]mruby\/require\.h[>"]/)
+      next unless outputs[rel].to_s.match?(/(?<![\w$])rb_require\s*\(/)
+      outputs[rel] = "#include <mruby/require.h>\n" + outputs[rel]
     end
     # the encoding API (rb_encoding, rb_enc_*, rb_str_conv_enc, rb_usascii_encoding, ...) is declared by the fork's mruby/encoding.h:
     # a source or header that uses its names includes it, and needs mruby-encoding on the build path. Without the declaration C takes the call
