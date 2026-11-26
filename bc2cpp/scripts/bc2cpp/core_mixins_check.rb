@@ -245,7 +245,10 @@ if MrbcRbDefault.from_env
           out
         end
       RUBY
-      _code, err = runtime.generate(source, dir, only_owners: %w[CmProbe CmMod CmMod.singleton CmCaller])
+      # The full-core library links Rational's native predicates; the canonical world's native list does not.
+      rational = File.join(runtime::ROOT, '3rd/mruby/mrbgems/mruby-rational/src/rational.c')
+      _code, err = runtime.generate(source, dir, only_owners: %w[CmProbe CmMod CmMod.singleton CmCaller],
+                                   native: [['rational.c', File.read(rational)]])
       body = <<~CPP
         static int scenario(mrb_state* M) {
           call(M, "drive", mrb_top_self(M), "cm_drive");

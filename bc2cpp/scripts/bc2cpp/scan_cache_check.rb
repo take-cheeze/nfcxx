@@ -19,6 +19,8 @@ require_relative '../../tools/bc2cpp/irep_cache'
 require_relative '../../tools/bc2cpp/insn_decoder'
 require_relative '../../tools/bc2cpp/toolchain'
 require_relative '../../tools/self_compile/artifacts'
+require_relative '../../tools/bc2cpp/irep'
+require_relative '../../tools/bc2cpp/block_self_world'
 
 failures = []
 check = lambda do |what, condition|
@@ -130,6 +132,30 @@ Dir.mktmpdir do |tmp|
   check.call('that variable\'s value is in the key: another value is computed again', named.call == 'two')
   check.call('each value is stored on its own', Dir[File.join(cache, 'named_env-*')].size == 2)
   ENV.delete('BC2CPP_SCAN_CHECK_VAR')
+  flag = 'BC2CPP_IR_DENSE_SEEN'
+  saved_dense = ENV[flag]
+  begin
+    body = Irep.new(label: 'cached-dense-query', file: one, nregs: 2, nlocals: 1, catch_handlers: [],
+                    instructions: [Insn.new(addr: 0, op: :LOADI_1, args: 'R1 (1)'),
+                                   Insn.new(addr: 1, op: :RETURN, args: 'R1')])
+    world = BlockSelfWorld::World.allocate
+    world.instance_variable_set(:@ireps, { body.label => body })
+    world.instance_variable_set(:@outside, {})
+    world.instance_variable_set(:@native_paths, [])
+    computations = 0
+    answers = %w[0 1 0].map do |mode|
+      ENV[flag] = mode
+      world.send(:cached_world_scan, 'dense_seen_check') do
+        computations += 1
+        defs = BytecodeIR.for(body).reaching_definitions(1, 1, refusal: {})
+        [ENV[flag], defs&.map { |d| [d.index, d.reg] }]
+      end
+    end
+    check.call('world scans permit and key dense/hash traversal modes without changing definitions',
+               answers == [['0', [[0, 1]]], ['1', [[0, 1]]], ['0', [[0, 1]]]] && computations == 2)
+  ensure
+    saved_dense ? ENV[flag] = saved_dense : ENV.delete(flag)
+  end
   ENV['BC2CPP_SCAN_PREFIX_A'] = 'a'
   prefixed = -> { ScanCache.fetch('prefix_env', [one], env: %w[BC2CPP_SCAN_PREFIX_*]) { ENV['BC2CPP_SCAN_PREFIX_A'].dup } }
   check.call('a `PREFIX*` entry allows the variables with that prefix', prefixed.call == 'a')

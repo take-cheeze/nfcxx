@@ -3378,7 +3378,7 @@ module MrbcRb
     # Whether +node+ may be a call's receiver or argument: a leaf, an array of leaves, or a call (checked when generated).
     def operand?(node)
       node = unparen(node)
-      SIMPLE_VALUES.include?(node.class) || node.is_a?(Prism::CallNode) || node.is_a?(Prism::ItLocalVariableReadNode) || node.is_a?(Prism::YieldNode) || node.is_a?(Prism::SuperNode) || node.is_a?(Prism::ForwardingSuperNode) || node.is_a?(Prism::ConstantPathNode) || node.is_a?(Prism::LambdaNode) || BUILT_VALUES.include?(node.class) ||
+      SIMPLE_VALUES.include?(node.class) || node.is_a?(Prism::KeywordHashNode) || node.is_a?(Prism::CallNode) || node.is_a?(Prism::ItLocalVariableReadNode) || node.is_a?(Prism::YieldNode) || node.is_a?(Prism::SuperNode) || node.is_a?(Prism::ForwardingSuperNode) || node.is_a?(Prism::ConstantPathNode) || node.is_a?(Prism::LambdaNode) || BUILT_VALUES.include?(node.class) ||
         node.is_a?(Prism::AndNode) || node.is_a?(Prism::OrNode) || node.is_a?(Prism::IfNode) || node.is_a?(Prism::UnlessNode) ||
         node.is_a?(Prism::SingletonClassNode) || node.is_a?(Prism::ClassNode) || node.is_a?(Prism::ModuleNode) || node.is_a?(Prism::WhileNode) || node.is_a?(Prism::UntilNode) || node.is_a?(Prism::DefNode) || node.is_a?(Prism::ParenthesesNode) || node.is_a?(Prism::CaseNode) || node.is_a?(Prism::MatchRequiredNode) || node.is_a?(Prism::MatchPredicateNode) || node.is_a?(Prism::CaseMatchNode) || node.is_a?(Prism::BeginNode) || node.is_a?(Prism::MultiWriteNode) || node.is_a?(Prism::RescueModifierNode) || VALUE_WRITES.include?(node.class) || ((node.is_a?(Prism::RangeNode) || node.is_a?(Prism::FlipFlopNode)) && [node.left, node.right].all? { |e| e.nil? || operand?(e) }) ||
         (node.is_a?(Prism::ArrayNode) && (symbol_list?(node) || node.elements.all? { |e| operand?(e) || array_splat?(e) })) || node.is_a?(Prism::SourceEncodingNode)
@@ -3561,7 +3561,7 @@ module MrbcRb
       when Prism::InterpolatedStringNode then dstr_into(node, dst)
       when Prism::XStringNode, Prism::InterpolatedXStringNode, Prism::InterpolatedSymbolNode then built_into(dst) { |base| small_node_at(node, base) }
       when Prism::RegularExpressionNode, Prism::InterpolatedRegularExpressionNode, Prism::MatchLastLineNode, Prism::InterpolatedMatchLastLineNode then built_into(dst) { |base| regex_at(node, base) }
-      when Prism::HashNode then built_into(dst) { |base| hash_at(node, base) }
+      when Prism::HashNode, Prism::KeywordHashNode then built_into(dst) { |base| hash_at(node, base) }
       when Prism::SourceEncodingNode then built_into(dst) { |base| source_into(node, base) }
       when Prism::CallNode
         result = call(node)
@@ -4228,7 +4228,8 @@ module MrbcRb
     # A hash literal of leaf keys and values: key and value pairs are loaded from the base register on, and HASH takes the
     # base register and the pair count (codegen_hash).
     def hash_at(node, base)
-      hash_elements_at(node.elements, base, node.closing_loc.start_line)
+      close_line = node.is_a?(Prism::HashNode) ? node.closing_loc.start_line : node.location.end_line
+      hash_elements_at(node.elements, base, close_line)
     end
 
     # codegen_hash (value used): key and value registers are pushed pair by pair; a `**splat` flushes the pairs before it into

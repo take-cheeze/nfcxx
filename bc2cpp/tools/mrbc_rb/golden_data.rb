@@ -3,6 +3,13 @@
 # The inputs golden_test.rb compiles with both the emitter and the oracle (also enumerated by snapshot.rb).
 
 SNIPPETS = [
+  # An array's trailing bare hash is a KeywordHashNode in Prism (including RBS's annotation metadata).
+  '[1, a: 2]',
+  '[a: 1, b: 2]',
+  '[1, **h]',
+  "[\n  1,\n  a: flag ? true : false\n]",
+  '[1, a: {b: 2}]',
+  'a=1; [a:]',
   'x = nil',
   'x = true',
   'x = false',

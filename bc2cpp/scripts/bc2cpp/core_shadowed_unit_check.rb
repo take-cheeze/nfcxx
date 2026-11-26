@@ -80,4 +80,29 @@ suite.check('the shadowed def registers nothing in the core unit',
 suite.check('the replacing definition keeps its own unit',
             shadowed.count { |unit| unit[:path] == 'Enumerable' } == 2)
 suite.check('a core def with no compiled body still refuses the path', units.call(UNCOMPILED).none? { |unit| unit[:path] == 'Enumerable' })
+# Outside-source metadata must use the default Ruby emitter too: the native compiler's parser state can leak from a
+# for-loop in one linked file into keyword arguments in a later file. Losing this scan registers core Hash#to_h over
+# the linked block-aware replacement.
+Dir.mktmpdir('core-outside-emitter') do |directory|
+  core = File.join(directory, '3rd/mruby/mrblib/hash.rb')
+  outside = File.join(directory, 'linked.rb')
+  FileUtils.mkdir_p(File.dirname(core))
+  File.write(core, "class Hash\n  def to_h; self; end\nend\n")
+  File.write(outside, "for e in []\nend\nf(x: {})\nclass Hash\n  def to_h(&block)\n    [1, transformed: block]\n  end\nend\n")
+  log = File.join(directory, 'compiler.log')
+  saved = ENV.values_at('BC2CPP_MRBC_RB', 'BC2CPP_MRBC_RB_LOG')
+  begin
+    ENV['BC2CPP_MRBC_RB'] = ''
+    ENV['BC2CPP_MRBC_RB_LOG'] = log
+    ireps, root = compile_ireps([core], 'outside_core', directory)
+    registry = build_registry(ireps, root)[0]
+    labels = CoreDefs.outside_redefined_labels(registry, ireps, [outside], 'outside_linked', directory)
+    suite.check('linked Hash#to_h keeps its replacement instead of the core definition',
+                labels.include?(registry.fetch('to_h').find { |d| d.owner == 'Hash' }.irep))
+    suite.check('outside-source metadata uses mrbc_rb with a native compiler available',
+                File.readlines(log).any? { |line| line.include?("\temitter\t") && line.include?('outside_linked_block_self_world') })
+  ensure
+    ENV['BC2CPP_MRBC_RB'], ENV['BC2CPP_MRBC_RB_LOG'] = saved
+  end
+end
 suite.finish!

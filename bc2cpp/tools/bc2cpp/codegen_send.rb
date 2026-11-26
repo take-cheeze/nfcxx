@@ -880,266 +880,8 @@ class CodeGen
     #     (DUP_TYPE_TAG_DISPATCH).
     # `respond_to?` has a positive-only fast path (a miss keeps dispatch so
     # respond_to_missing? runs; the two-argument form stays dynamic).
-    if name == '[]' && n == 2 && builtin_class_send_safe?(name, %w[Array])
-      start, length = argv
-      fallback = dynamic_dispatch_line(d, recv, name, argv)
-      return <<~CPP
-          // ARRAY_SLICE_READ :[] -- exact Array and Fixnum slice only; preserve coercion and overrides
-          if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class &&
-              mrb_fixnum_p(#{start}) && mrb_fixnum_p(#{length}) &&
-              !ARY_SHARED_P(mrb_ary_ptr(#{recv})) && mrb_fixnum(#{length}) >= 0 &&
-              mrb_fixnum(#{length}) <= 10) {
-            mrb_int bc2cpp_slice_start = mrb_fixnum(#{start});
-            mrb_int bc2cpp_slice_length = mrb_fixnum(#{length});
-            mrb_int bc2cpp_slice_array_length = ary_size(#{recv});
-            if (bc2cpp_slice_start < 0 && bc2cpp_slice_start >= -bc2cpp_slice_array_length) {
-              bc2cpp_slice_start += bc2cpp_slice_array_length;
-            }
-            if (bc2cpp_slice_start < 0 || bc2cpp_slice_array_length < bc2cpp_slice_start ||
-                bc2cpp_slice_length < 0) {
-              #{RegName[d]} = mrb_nil_value();
-            } else {
-              if (bc2cpp_slice_length > bc2cpp_slice_array_length - bc2cpp_slice_start) {
-                bc2cpp_slice_length = bc2cpp_slice_array_length - bc2cpp_slice_start;
-              }
-              if (bc2cpp_slice_length == 0) {
-                #{RegName[d]} = mrb_ary_new(M);
-              } else {
-                #{RegName[d]} = mrb_ary_new_from_values(M, bc2cpp_slice_length,
-                    ary_items(#{recv}) + bc2cpp_slice_start);
-              }
-            }
-          } else {
-            #{fallback.chomp}
-          }
-      CPP
-    end
-
-    if name == '[]=' && n == 3 && builtin_class_send_safe?(name, %w[Array])
-      # Array slice writes (optcarrot's mapper bank switches): mrb_ary_splice is the
-      # public native body of this three-argument form. Only exact Arrays with
-      # fixnum start/length; coercion, subclasses and non-Arrays keep dispatch.
-      # Array#[]= returns the replacement, mrb_ary_splice the receiver.
-      start, length, replacement = argv
-      fallback = dynamic_dispatch_line(d, recv, name, argv)
-      return <<~CPP
-          // ARRAY_SLICE_WRITE :[]= -- exact Array and fixnum indices only; preserve coercion and overrides
-          if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class &&
-              mrb_fixnum_p(#{start}) && mrb_fixnum_p(#{length})) {
-            bc2cpp_ary_splice(M, #{recv}, mrb_fixnum(#{start}), mrb_fixnum(#{length}), #{replacement});
-            #{RegName[d]} = #{replacement};
-          } else {
-            #{fallback.chomp}
-          }
-      CPP
-    end
-
-    if name == 'push' && n == 1 && builtin_class_send_safe?(name, %w[Array]) && !self_never_array?(self_implicit, irep, new_proof_idx)
-      value = argv.first
-      exact_push = exact_array_push_code(irep, new_proof_idx, new_proof_reg, self_implicit, name, d, recv, value)
-      return exact_push if exact_push
-
-      fallback = dynamic_dispatch_line(d, recv, name, argv)
-      return <<~CPP
-          // ARRAY_PUSH :push -- exact base Array and one value; preserve overrides and other arities
-          if (#{BranchHints.likely("mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class")}) {
-            bc2cpp_ary_push(M, #{recv}, #{value});
-            #{RegName[d]} = #{recv};
-          } else {
-            #{fallback.chomp}
-          }
-      CPP
-    end
-
-    if ['+', '-', '*'].include?(name) && n == 1 && builtin_class_send_safe?(name, %w[Integer Numeric])
-      call = numeric_slow_call(name, d, recv, argv, float: numeric_slow_float_safe?(name))
-      return <<~CPP
-          // FIXNUM_ARITHMETIC :#{name} -- NUMERIC_SLOW_PATH (ADR 0292): mruby's own Integer/Float body, by-name call only inside the helper
-          #{call.chomp}
-      CPP
-    end
-
-    # INTEGER_LSHIFT: `bits << n` on two Integers uses mrb_num_shift, the kernel
-    # Integer#<< calls (src/numeric.c int_lshift), so zero shifts, negative counts
-    # and the width limit match. MRB_INT_MIN counts and overflow (bigint or
-    # RangeError) take ordinary dispatch, which also keeps bigints out of C on
-    # 32-bit mrb_int builds. Placed next to the exact-Array push arm, so a site
-    # that was ARRAY_PUSH-only stays so when Integer#<< is overridden in Ruby.
-    if name == '<<' && n == 1 && builtin_class_send_safe?(name, %w[Integer])
-      value = argv.first
-      exact_push = builtin_class_send_safe?(name, %w[Array]) &&
-                   exact_array_push_code(irep, new_proof_idx, new_proof_reg, self_implicit, name, d, recv, value)
-      return exact_push if exact_push
-
-      fallback = numeric_slow_call(name, d, recv, argv).chomp
-      array_arm = ''
-      if builtin_class_send_safe?(name, %w[Array])
-        array_arm = <<~CPP
-            // ARRAY_PUSH :<< -- exact Array only; preserve subclass and override dispatch
-            if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class) {
-              bc2cpp_ary_push(M, #{recv}, #{value});
-              #{RegName[d]} = #{recv};
-            } else\x20
-        CPP
-      end
-      # Both arms at once meet Arrays and Integers alike, so only a lone Integer arm is hinted.
-      shift_ok = "mrb_integer_p(#{recv}) && mrb_integer_p(#{value}) && mrb_integer(#{value}) != MRB_INT_MIN"
-      shift_ok = BranchHints.likely(shift_ok) if array_arm.empty?
-      return <<~CPP
-          #{array_arm.chomp}// INTEGER_LSHIFT :<< -- two immediate Integers inline; overflow to a bigint, a bigint receiver and other classes take NUMERIC_SLOW_PATH
-          if (#{shift_ok}) {
-            mrb_int bc2cpp_shl_v = mrb_integer(#{recv}), bc2cpp_shl_w = mrb_integer(#{value}), bc2cpp_shl_out;
-            if (bc2cpp_shl_w == 0 || bc2cpp_shl_v == 0) {
-              #{RegName[d]} = #{recv};
-            } else if (mrb_num_shift(M, bc2cpp_shl_v, bc2cpp_shl_w, &bc2cpp_shl_out)) {
-              #{RegName[d]} = mrb_int_value(M, bc2cpp_shl_out);
-            } else {
-              #{fallback}
-            }
-          } else {
-            #{fallback}
-          }
-      CPP
-    end
-
-    integer_unary = compile_integer_unary(name, n, d, recv, argv)
-    return integer_unary if integer_unary
-
-    if name == '<<' && n == 1 && builtin_class_send_safe?(name, %w[Array])
-      value = argv.first
-      exact_push = exact_array_push_code(irep, new_proof_idx, new_proof_reg, self_implicit, name, d, recv, value)
-      return exact_push if exact_push
-
-      fallback = dynamic_dispatch_line(d, recv, name, argv)
-      return <<~CPP
-          // ARRAY_PUSH :<< -- exact Array only; preserve subclass and override dispatch
-          if (#{BranchHints.likely("mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class")}) {
-            bc2cpp_ary_push(M, #{recv}, #{value});
-            #{RegName[d]} = #{recv};
-          } else {
-            #{fallback.chomp}
-          }
-      CPP
-    end
-
-    if ['%', '&', '|', '^'].include?(name) && n == 1 && native_only_mono?(name)
-      left, right = recv, argv.first
-      fallback = numeric_slow_call(name, d, recv, argv)
-      operation = if name == '%'
-                    <<~CPP.chomp
-                      mrb_int bc2cpp_mod_left = mrb_fixnum(#{left});
-                      mrb_int bc2cpp_mod_right = mrb_fixnum(#{right});
-                      // MOD_POW2_CONSTANT: floor modulo by a positive power of two is the low-bit
-                      // mask for either sign; the test folds away unless the divisor is a constant.
-                      if (__builtin_constant_p(bc2cpp_mod_right) && bc2cpp_mod_right > 0 &&
-                          (bc2cpp_mod_right & (bc2cpp_mod_right - 1)) == 0) {
-                        #{RegName[d]} = mrb_fixnum_value(bc2cpp_mod_left & (bc2cpp_mod_right - 1));
-                      } else if (bc2cpp_mod_left == MRB_INT_MIN && bc2cpp_mod_right == -1) {
-                        #{RegName[d]} = mrb_fixnum_value(0);
-                      } else {
-                        mrb_int bc2cpp_mod_value = bc2cpp_mod_left % bc2cpp_mod_right;
-                        if ((bc2cpp_mod_left < 0) != (bc2cpp_mod_right < 0) && bc2cpp_mod_value != 0) {
-                          bc2cpp_mod_value += bc2cpp_mod_right;
-                        }
-                        #{RegName[d]} = mrb_fixnum_value(bc2cpp_mod_value);
-                      }
-                    CPP
-                  else
-                    "#{RegName[d]} = #{TaggedFixnum.bitop(left, name, right)};"
-                  end
-      return <<~CPP
-          // FIXNUM_BINARY :#{name} -- fixnum-only native semantics; bigint and other classes take NUMERIC_SLOW_PATH
-          if (#{BranchHints.likely("#{TaggedFixnum.pair(left, right)}#{' && mrb_fixnum(' + right + ') != 0' if name == '%'}")}) {
-            #{operation}
-          } else {
-            #{fallback.chomp}
-          }
-      CPP
-    end
-
-    if name == '>>' && n == 1 && builtin_class_send_safe?(name, %w[Integer Numeric])
-      value, width = recv, argv.first
-      fallback = numeric_slow_call(name, d, recv, argv)
-      return <<~CPP
-          // FIXNUM_SHIFT :>> -- guarded shifts; overflow and non-Fixnum cases take NUMERIC_SLOW_PATH
-          {
-          mrb_bool bc2cpp_shift_fast = FALSE;
-          mrb_int bc2cpp_shift_result = 0;
-          if (#{BranchHints.likely("mrb_fixnum_p(#{value}) && mrb_fixnum_p(#{width})")}) {
-            mrb_int bc2cpp_shift_value = mrb_fixnum(#{value});
-            mrb_int bc2cpp_shift_width = mrb_fixnum(#{width});
-            if (bc2cpp_shift_width == 0) {
-              bc2cpp_shift_result = bc2cpp_shift_value;
-              bc2cpp_shift_fast = TRUE;
-            } else if (bc2cpp_shift_width > 0) {
-              if (bc2cpp_shift_width >= MRB_INT_BIT - 1) {
-                bc2cpp_shift_result = bc2cpp_shift_value < 0 ? -1 : 0;
-              } else {
-                bc2cpp_shift_result = bc2cpp_shift_value >> bc2cpp_shift_width;
-              }
-              bc2cpp_shift_fast = TRUE;
-            } else if (bc2cpp_shift_width != MRB_INT_MIN) {
-              if (bc2cpp_shift_value == 0) {
-                bc2cpp_shift_fast = TRUE;
-              } else {
-                mrb_int bc2cpp_left_width = -bc2cpp_shift_width;
-                if (bc2cpp_left_width <= MRB_INT_BIT - 1 &&
-                    !(bc2cpp_shift_value > 0 && bc2cpp_shift_value > (MRB_INT_MAX >> bc2cpp_left_width)) &&
-                    !(bc2cpp_shift_value < 0 && bc2cpp_shift_value < (MRB_INT_MIN >> bc2cpp_left_width))) {
-                  if (bc2cpp_left_width == MRB_INT_BIT - 1) {
-                    bc2cpp_shift_result = MRB_INT_MIN;
-                  } else if (bc2cpp_shift_value > 0) {
-                    bc2cpp_shift_result = bc2cpp_shift_value << bc2cpp_left_width;
-                  } else {
-                    bc2cpp_shift_result = bc2cpp_shift_value * ((mrb_int)1 << bc2cpp_left_width);
-                  }
-                  bc2cpp_shift_fast = TRUE;
-                }
-              }
-            }
-          }
-          if (#{BranchHints.likely('bc2cpp_shift_fast')}) {
-            #{RegName[d]} = FIXABLE(bc2cpp_shift_result) ? mrb_fixnum_value(bc2cpp_shift_result) : mrb_int_value(M, bc2cpp_shift_result);
-          } else {
-            #{fallback.chomp}
-          }
-          }
-      CPP
-    end
-
-    if ['<', '<=', '>', '>='].include?(name) && n == 1 && native_only_mono?(name)
-      left, right = recv, argv.first
-      fallback = numeric_slow_call(name, d, recv, argv)
-      operator = { '<' => '<', '<=' => '<=', '>' => '>', '>=' => '>=' }.fetch(name)
-      return <<~CPP
-          // FIXNUM_COMPARE :#{name} -- fixnum-only native comparison; Float, bigint and other classes take NUMERIC_SLOW_PATH
-          if (#{BranchHints.likely(TaggedFixnum.pair(left, right))}) {
-            #{RegName[d]} = mrb_bool_value(#{TaggedFixnum.compare(left, operator, right)});
-          } else {
-            #{fallback.chomp}
-          }
-      CPP
-    end
-
-    if name == 'slice!' && n == 2 && builtin_class_send_safe?(name, %w[Array])
-      start, length = argv
-      fallback = dynamic_dispatch_line(d, recv, name, argv)
-      return <<~CPP
-          // ARRAY_PREFIX_SLICE_WRITE :slice! -- exact Array, zero start, nonnegative fixnum length
-          if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class &&
-              !mrb_frozen_p(mrb_obj_ptr(#{recv})) && mrb_fixnum_p(#{start}) &&
-              mrb_fixnum(#{start}) == 0 && mrb_fixnum_p(#{length}) && mrb_fixnum(#{length}) >= 0) {
-            mrb_value bc2cpp_slice_receiver = #{recv};
-            mrb_int bc2cpp_slice_len = mrb_fixnum(#{length});
-            mrb_int bc2cpp_array_len = ary_size(bc2cpp_slice_receiver);
-            if (bc2cpp_slice_len > bc2cpp_array_len) bc2cpp_slice_len = bc2cpp_array_len;
-            #{RegName[d]} = mrb_ary_new_from_values(M, bc2cpp_slice_len, ary_items(bc2cpp_slice_receiver));
-            mrb_ary_splice(M, bc2cpp_slice_receiver, 0, bc2cpp_slice_len, mrb_undef_value());
-          } else {
-            #{fallback.chomp}
-          }
-      CPP
-    end
+    primitive = compile_primitive_send_cases(name, n, d, recv, argv, self_implicit, irep, new_proof_idx, new_proof_reg)
+    return primitive if primitive
 
     # Resolve compiled MONO/TYPED targets first; only the final POLY fallback uses
     # the generated native C expressions.
@@ -1817,6 +1559,272 @@ class CodeGen
 
       "#{diag}#{note}#{miss}  #{line}"
     end
+  end
+
+  # Keep the Array and Integer native arms separate from target/receiver dispatch planning.
+  def compile_primitive_send_cases(name, n, d, recv, argv, self_implicit, irep, new_proof_idx, new_proof_reg)
+    if name == '[]' && n == 2 && builtin_class_send_safe?(name, %w[Array])
+      start, length = argv
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      return <<~CPP
+          // ARRAY_SLICE_READ :[] -- exact Array and Fixnum slice only; preserve coercion and overrides
+          if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class &&
+              mrb_fixnum_p(#{start}) && mrb_fixnum_p(#{length}) &&
+              !ARY_SHARED_P(mrb_ary_ptr(#{recv})) && mrb_fixnum(#{length}) >= 0 &&
+              mrb_fixnum(#{length}) <= 10) {
+            mrb_int bc2cpp_slice_start = mrb_fixnum(#{start});
+            mrb_int bc2cpp_slice_length = mrb_fixnum(#{length});
+            mrb_int bc2cpp_slice_array_length = ary_size(#{recv});
+            if (bc2cpp_slice_start < 0 && bc2cpp_slice_start >= -bc2cpp_slice_array_length) {
+              bc2cpp_slice_start += bc2cpp_slice_array_length;
+            }
+            if (bc2cpp_slice_start < 0 || bc2cpp_slice_array_length < bc2cpp_slice_start ||
+                bc2cpp_slice_length < 0) {
+              #{RegName[d]} = mrb_nil_value();
+            } else {
+              if (bc2cpp_slice_length > bc2cpp_slice_array_length - bc2cpp_slice_start) {
+                bc2cpp_slice_length = bc2cpp_slice_array_length - bc2cpp_slice_start;
+              }
+              if (bc2cpp_slice_length == 0) {
+                #{RegName[d]} = mrb_ary_new(M);
+              } else {
+                #{RegName[d]} = mrb_ary_new_from_values(M, bc2cpp_slice_length,
+                    ary_items(#{recv}) + bc2cpp_slice_start);
+              }
+            }
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
+    end
+
+    if name == '[]=' && n == 3 && builtin_class_send_safe?(name, %w[Array])
+      # Array slice writes (optcarrot's mapper bank switches): mrb_ary_splice is the
+      # public native body of this three-argument form. Only exact Arrays with
+      # fixnum start/length; coercion, subclasses and non-Arrays keep dispatch.
+      # Array#[]= returns the replacement, mrb_ary_splice the receiver.
+      start, length, replacement = argv
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      return <<~CPP
+          // ARRAY_SLICE_WRITE :[]= -- exact Array and fixnum indices only; preserve coercion and overrides
+          if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class &&
+              mrb_fixnum_p(#{start}) && mrb_fixnum_p(#{length})) {
+            bc2cpp_ary_splice(M, #{recv}, mrb_fixnum(#{start}), mrb_fixnum(#{length}), #{replacement});
+            #{RegName[d]} = #{replacement};
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
+    end
+
+    if name == 'push' && n == 1 && builtin_class_send_safe?(name, %w[Array]) && !self_never_array?(self_implicit, irep, new_proof_idx)
+      value = argv.first
+      exact_push = exact_array_push_code(irep, new_proof_idx, new_proof_reg, self_implicit, name, d, recv, value)
+      return exact_push if exact_push
+
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      return <<~CPP
+          // ARRAY_PUSH :push -- exact base Array and one value; preserve overrides and other arities
+          if (#{BranchHints.likely("mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class")}) {
+            bc2cpp_ary_push(M, #{recv}, #{value});
+            #{RegName[d]} = #{recv};
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
+    end
+
+    if ['+', '-', '*'].include?(name) && n == 1 && builtin_class_send_safe?(name, %w[Integer Numeric])
+      call = numeric_slow_call(name, d, recv, argv, float: numeric_slow_float_safe?(name))
+      return <<~CPP
+          // FIXNUM_ARITHMETIC :#{name} -- NUMERIC_SLOW_PATH (ADR 0292): mruby's own Integer/Float body, by-name call only inside the helper
+          #{call.chomp}
+      CPP
+    end
+
+    # INTEGER_LSHIFT: `bits << n` on two Integers uses mrb_num_shift, the kernel
+    # Integer#<< calls (src/numeric.c int_lshift), so zero shifts, negative counts
+    # and the width limit match. MRB_INT_MIN counts and overflow (bigint or
+    # RangeError) take ordinary dispatch, which also keeps bigints out of C on
+    # 32-bit mrb_int builds. Placed next to the exact-Array push arm, so a site
+    # that was ARRAY_PUSH-only stays so when Integer#<< is overridden in Ruby.
+    if name == '<<' && n == 1 && builtin_class_send_safe?(name, %w[Integer])
+      value = argv.first
+      exact_push = builtin_class_send_safe?(name, %w[Array]) &&
+                   exact_array_push_code(irep, new_proof_idx, new_proof_reg, self_implicit, name, d, recv, value)
+      return exact_push if exact_push
+
+      fallback = numeric_slow_call(name, d, recv, argv).chomp
+      array_arm = ''
+      if builtin_class_send_safe?(name, %w[Array])
+        array_arm = <<~CPP
+            // ARRAY_PUSH :<< -- exact Array only; preserve subclass and override dispatch
+            if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class) {
+              bc2cpp_ary_push(M, #{recv}, #{value});
+              #{RegName[d]} = #{recv};
+            } else\x20
+        CPP
+      end
+      # Both arms at once meet Arrays and Integers alike, so only a lone Integer arm is hinted.
+      shift_ok = "mrb_integer_p(#{recv}) && mrb_integer_p(#{value}) && mrb_integer(#{value}) != MRB_INT_MIN"
+      shift_ok = BranchHints.likely(shift_ok) if array_arm.empty?
+      return <<~CPP
+          #{array_arm.chomp}// INTEGER_LSHIFT :<< -- two immediate Integers inline; overflow to a bigint, a bigint receiver and other classes take NUMERIC_SLOW_PATH
+          if (#{shift_ok}) {
+            mrb_int bc2cpp_shl_v = mrb_integer(#{recv}), bc2cpp_shl_w = mrb_integer(#{value}), bc2cpp_shl_out;
+            if (bc2cpp_shl_w == 0 || bc2cpp_shl_v == 0) {
+              #{RegName[d]} = #{recv};
+            } else if (mrb_num_shift(M, bc2cpp_shl_v, bc2cpp_shl_w, &bc2cpp_shl_out)) {
+              #{RegName[d]} = mrb_int_value(M, bc2cpp_shl_out);
+            } else {
+              #{fallback}
+            }
+          } else {
+            #{fallback}
+          }
+      CPP
+    end
+
+    integer_unary = compile_integer_unary(name, n, d, recv, argv)
+    return integer_unary if integer_unary
+
+    if name == '<<' && n == 1 && builtin_class_send_safe?(name, %w[Array])
+      value = argv.first
+      exact_push = exact_array_push_code(irep, new_proof_idx, new_proof_reg, self_implicit, name, d, recv, value)
+      return exact_push if exact_push
+
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      return <<~CPP
+          // ARRAY_PUSH :<< -- exact Array only; preserve subclass and override dispatch
+          if (#{BranchHints.likely("mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class")}) {
+            bc2cpp_ary_push(M, #{recv}, #{value});
+            #{RegName[d]} = #{recv};
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
+    end
+
+    if ['%', '&', '|', '^'].include?(name) && n == 1 && native_only_mono?(name)
+      left, right = recv, argv.first
+      fallback = numeric_slow_call(name, d, recv, argv)
+      operation = if name == '%'
+                    <<~CPP.chomp
+                      mrb_int bc2cpp_mod_left = mrb_fixnum(#{left});
+                      mrb_int bc2cpp_mod_right = mrb_fixnum(#{right});
+                      // MOD_POW2_CONSTANT: floor modulo by a positive power of two is the low-bit
+                      // mask for either sign; the test folds away unless the divisor is a constant.
+                      if (__builtin_constant_p(bc2cpp_mod_right) && bc2cpp_mod_right > 0 &&
+                          (bc2cpp_mod_right & (bc2cpp_mod_right - 1)) == 0) {
+                        #{RegName[d]} = mrb_fixnum_value(bc2cpp_mod_left & (bc2cpp_mod_right - 1));
+                      } else if (bc2cpp_mod_left == MRB_INT_MIN && bc2cpp_mod_right == -1) {
+                        #{RegName[d]} = mrb_fixnum_value(0);
+                      } else {
+                        mrb_int bc2cpp_mod_value = bc2cpp_mod_left % bc2cpp_mod_right;
+                        if ((bc2cpp_mod_left < 0) != (bc2cpp_mod_right < 0) && bc2cpp_mod_value != 0) {
+                          bc2cpp_mod_value += bc2cpp_mod_right;
+                        }
+                        #{RegName[d]} = mrb_fixnum_value(bc2cpp_mod_value);
+                      }
+                    CPP
+                  else
+                    "#{RegName[d]} = #{TaggedFixnum.bitop(left, name, right)};"
+                  end
+      return <<~CPP
+          // FIXNUM_BINARY :#{name} -- fixnum-only native semantics; bigint and other classes take NUMERIC_SLOW_PATH
+          if (#{BranchHints.likely("#{TaggedFixnum.pair(left, right)}#{' && mrb_fixnum(' + right + ') != 0' if name == '%'}")}) {
+            #{operation}
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
+    end
+
+    if name == '>>' && n == 1 && builtin_class_send_safe?(name, %w[Integer Numeric])
+      value, width = recv, argv.first
+      fallback = numeric_slow_call(name, d, recv, argv)
+      return <<~CPP
+          // FIXNUM_SHIFT :>> -- guarded shifts; overflow and non-Fixnum cases take NUMERIC_SLOW_PATH
+          {
+          mrb_bool bc2cpp_shift_fast = FALSE;
+          mrb_int bc2cpp_shift_result = 0;
+          if (#{BranchHints.likely("mrb_fixnum_p(#{value}) && mrb_fixnum_p(#{width})")}) {
+            mrb_int bc2cpp_shift_value = mrb_fixnum(#{value});
+            mrb_int bc2cpp_shift_width = mrb_fixnum(#{width});
+            if (bc2cpp_shift_width == 0) {
+              bc2cpp_shift_result = bc2cpp_shift_value;
+              bc2cpp_shift_fast = TRUE;
+            } else if (bc2cpp_shift_width > 0) {
+              if (bc2cpp_shift_width >= MRB_INT_BIT - 1) {
+                bc2cpp_shift_result = bc2cpp_shift_value < 0 ? -1 : 0;
+              } else {
+                bc2cpp_shift_result = bc2cpp_shift_value >> bc2cpp_shift_width;
+              }
+              bc2cpp_shift_fast = TRUE;
+            } else if (bc2cpp_shift_width != MRB_INT_MIN) {
+              if (bc2cpp_shift_value == 0) {
+                bc2cpp_shift_fast = TRUE;
+              } else {
+                mrb_int bc2cpp_left_width = -bc2cpp_shift_width;
+                if (bc2cpp_left_width <= MRB_INT_BIT - 1 &&
+                    !(bc2cpp_shift_value > 0 && bc2cpp_shift_value > (MRB_INT_MAX >> bc2cpp_left_width)) &&
+                    !(bc2cpp_shift_value < 0 && bc2cpp_shift_value < (MRB_INT_MIN >> bc2cpp_left_width))) {
+                  if (bc2cpp_left_width == MRB_INT_BIT - 1) {
+                    bc2cpp_shift_result = MRB_INT_MIN;
+                  } else if (bc2cpp_shift_value > 0) {
+                    bc2cpp_shift_result = bc2cpp_shift_value << bc2cpp_left_width;
+                  } else {
+                    bc2cpp_shift_result = bc2cpp_shift_value * ((mrb_int)1 << bc2cpp_left_width);
+                  }
+                  bc2cpp_shift_fast = TRUE;
+                }
+              }
+            }
+          }
+          if (#{BranchHints.likely('bc2cpp_shift_fast')}) {
+            #{RegName[d]} = FIXABLE(bc2cpp_shift_result) ? mrb_fixnum_value(bc2cpp_shift_result) : mrb_int_value(M, bc2cpp_shift_result);
+          } else {
+            #{fallback.chomp}
+          }
+          }
+      CPP
+    end
+
+    if ['<', '<=', '>', '>='].include?(name) && n == 1 && native_only_mono?(name)
+      left, right = recv, argv.first
+      fallback = numeric_slow_call(name, d, recv, argv)
+      operator = { '<' => '<', '<=' => '<=', '>' => '>', '>=' => '>=' }.fetch(name)
+      return <<~CPP
+          // FIXNUM_COMPARE :#{name} -- fixnum-only native comparison; Float, bigint and other classes take NUMERIC_SLOW_PATH
+          if (#{BranchHints.likely(TaggedFixnum.pair(left, right))}) {
+            #{RegName[d]} = mrb_bool_value(#{TaggedFixnum.compare(left, operator, right)});
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
+    end
+
+    if name == 'slice!' && n == 2 && builtin_class_send_safe?(name, %w[Array])
+      start, length = argv
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      return <<~CPP
+          // ARRAY_PREFIX_SLICE_WRITE :slice! -- exact Array, zero start, nonnegative fixnum length
+          if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class &&
+              !mrb_frozen_p(mrb_obj_ptr(#{recv})) && mrb_fixnum_p(#{start}) &&
+              mrb_fixnum(#{start}) == 0 && mrb_fixnum_p(#{length}) && mrb_fixnum(#{length}) >= 0) {
+            mrb_value bc2cpp_slice_receiver = #{recv};
+            mrb_int bc2cpp_slice_len = mrb_fixnum(#{length});
+            mrb_int bc2cpp_array_len = ary_size(bc2cpp_slice_receiver);
+            if (bc2cpp_slice_len > bc2cpp_array_len) bc2cpp_slice_len = bc2cpp_array_len;
+            #{RegName[d]} = mrb_ary_new_from_values(M, bc2cpp_slice_len, ary_items(bc2cpp_slice_receiver));
+            mrb_ary_splice(M, bc2cpp_slice_receiver, 0, bc2cpp_slice_len, mrb_undef_value());
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
+    end
+
+    nil
   end
 
   # SELF_NOT_ARRAY: the class flow proves an implicit receiver is no Array, so the ARRAY_PUSH arm is dead and the send
