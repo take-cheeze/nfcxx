@@ -285,6 +285,12 @@
       "kind": "macro",
       "mruby": "RSTRING_LEN"
     },
+    "RSTRING_LENINT": {
+      "kind": "template",
+      "arity": 1,
+      "template": "((int)RSTRING_LEN($0))",
+      "caveat": "CRuby's int-typed byte length of a String; the length is truncated to int as CRuby's RSTRING_LENINT does"
+    },
     "NUM2INT": {
       "kind": "template",
       "arity": 1,
@@ -1055,6 +1061,12 @@
     "RARRAY_LEN": {
       "kind": "macro",
       "mruby": "RARRAY_LEN"
+    },
+    "RARRAY_LENINT": {
+      "kind": "template",
+      "arity": 1,
+      "template": "((int)RARRAY_LEN($0))",
+      "caveat": "CRuby's int-typed length of an Array; the length is truncated to int as CRuby's RARRAY_LENINT does"
     },
     "rb_utf8_str_new": {
       "kind": "call",
