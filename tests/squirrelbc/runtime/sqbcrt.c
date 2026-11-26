@@ -4,8 +4,9 @@
  *
  * Strings are interned, as the reference interns them: two equal strings are the same object, so equality is the raw
  * comparison the IR makes. Tables are open-addressing hash tables keyed by the raw value (a string by its object).
- * Nothing is freed. The string delegate has only `len`, and a table has no delegate: those are the only methods of the
- * subset. */
+ * Nothing is freed. The methods of the subset are the ones sqbc_rt_get finds: `len` of a string or an array, `tostring` of a
+ * number, a boolean, a string, an array or a table, and `print` in the root table. Any other method of a string or an array
+ * is `unsupported ... method`; a table's is "the index does not exist". */
 #include "sqbcrt.h"
 
 #include <inttypes.h>
@@ -28,6 +29,7 @@ static const char *type_name(uint32_t tag) {
     case SQBC_TAG_BOOL: return "bool";
     case SQBC_TAG_STRING: return "string";
     case SQBC_TAG_TABLE: return "table";
+    case SQBC_TAG_ARRAY: return "array";
     case SQBC_TAG_CLOSURE:
     case SQBC_TAG_NATIVE: return "function";
     default: return "?";
@@ -93,7 +95,7 @@ static size_t text_of(const SQV *v, char *buf, size_t bufsz, const char **out) {
       *out = buf;
       return (size_t)n;
     }
-    default: rt_error("tostring of a table or a function is not lowered");
+    default: rt_error("tostring of an array, a table or a function is not lowered");
   }
   return 0;
 }
@@ -192,6 +194,47 @@ static void table_newslot(SqTable *t, const SQV *k, const SQV *v) {
   t->count++;
 }
 
+/* ---- arrays --------------------------------------------------------------------------------------------------------- */
+
+typedef struct SqArray {
+  size_t count;
+  size_t cap;
+  SQV *items;
+} SqArray;
+
+static SqArray *array_of(const SQV *v) { return (SqArray *)(intptr_t)v->i; }
+
+static SQV make_array_val(size_t reserve) {
+  SqArray *a = calloc(1, sizeof *a);
+  if (!a) rt_error("out of memory");
+  a->cap = reserve > 0 ? reserve : 4;
+  a->items = calloc(a->cap, sizeof(SQV));
+  if (!a->items) rt_error("out of memory");
+  SQV v;
+  v.tag = SQBC_TAG_ARRAY;
+  v.pad = 0;
+  v.i = (int64_t)(intptr_t)a;
+  return v;
+}
+
+void sqbc_rt_newarray(SQV *dst, int reserve) {
+  SQV v = make_array_val(reserve > 0 ? (size_t)reserve : 0);
+  *dst = v;
+}
+
+void sqbc_rt_append(const SQV *self, const SQV *val) {
+  SQV v = *val;
+  SqArray *a = array_of(self);
+  if (a->count == a->cap) {
+    size_t cap = a->cap * 2;
+    SQV *items = realloc(a->items, cap * sizeof(SQV));
+    if (!items) rt_error("out of memory");
+    a->items = items;
+    a->cap = cap;
+  }
+  a->items[a->count++] = v;
+}
+
 /* ---- closures and natives ------------------------------------------------------------------------------------------- */
 
 /* An outer variable (sqobject.h SQOuter). While its local is live, valptr points into the stack; once closed (CLOSE, or the
@@ -240,12 +283,67 @@ typedef struct SqClosure {
   SqOuter **outers;
 } SqClosure;
 
+/* A native of the base library or a delegate: its operation (NAT_*) and the parameter count sqvm.cpp's CallNative checks
+ * (`this` included; a native without a count takes any). */
 typedef struct SqNative {
   int id;
+  int nparams;
 } SqNative;
 
-#define NATIVE_LEN 1
-static SqNative g_native_len = {NATIVE_LEN};
+enum { NAT_PRINT, NAT_STR_LEN, NAT_ARR_LEN, NAT_TOSTRING };
+
+static SqNative g_nat_print = {NAT_PRINT, 2};       /* sqbaselib.cpp base_print: print(value) */
+static SqNative g_nat_str_len = {NAT_STR_LEN, 1};   /* string delegate: len */
+static SqNative g_nat_arr_len = {NAT_ARR_LEN, 1};   /* array delegate: len */
+static SqNative g_nat_tostring = {NAT_TOSTRING, 1}; /* default delegate: tostring */
+
+static SQV make_native(const SqNative *n) {
+  SQV v;
+  v.tag = SQBC_TAG_NATIVE;
+  v.pad = 0;
+  v.i = (int64_t)(intptr_t)n;
+  return v;
+}
+
+/* The default delegate of SELF (sqvm.cpp InvokeDefaultDelegate, for the methods of the subset) for the string KEY: the
+ * native in OUT and 1, or 0 when there is none. */
+static int delegate_native(const SQV *self, const SQV *key, SQV *out) {
+  const char *name = str_of(key)->chars;
+  if (strcmp(name, "len") == 0) {
+    if (self->tag == SQBC_TAG_STRING) {
+      *out = make_native(&g_nat_str_len);
+      return 1;
+    }
+    if (self->tag == SQBC_TAG_ARRAY) {
+      *out = make_native(&g_nat_arr_len);
+      return 1;
+    }
+    return 0;
+  }
+  if (strcmp(name, "tostring") == 0) {
+    switch (self->tag) {
+      case SQBC_TAG_INTEGER:
+      case SQBC_TAG_BOOL:
+      case SQBC_TAG_STRING:
+      case SQBC_TAG_ARRAY:
+      case SQBC_TAG_TABLE:
+        *out = make_native(&g_nat_tostring);
+        return 1;
+      default: return 0;
+    }
+  }
+  return 0;
+}
+
+/* The other methods of the array delegate (sqbaselib.cpp, _array_default_delegate_funcz): not lowered. */
+static int is_array_method(const char *name) {
+  static const char *const names[] = {"append", "extend", "push",  "pop",     "top",    "insert", "remove",
+                                      "resize", "reverse", "sort", "slice",   "weakref", "clear",  "map",
+                                      "apply",  "reduce",  "filter", "find"};
+  for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+    if (strcmp(name, names[i]) == 0) return 1;
+  return 0;
+}
 
 /* ---- the stack and the root table ----------------------------------------------------------------------------------- */
 
@@ -255,6 +353,10 @@ static SQV g_root;
 void sqbc_rt_init(SQV *base, size_t nslots) {
   g_stack_end = base + nslots;
   g_root = make_table_val();
+  /* The base library in the root table: print only (sqbaselib.cpp). */
+  SQV key = make_string("print", 5);
+  SQV fn = make_native(&g_nat_print);
+  table_newslot(tbl(&g_root), &key, &fn);
   base[0] = g_root;
 }
 
@@ -331,29 +433,31 @@ void sqbc_rt_get(SQV *dst, const SQV *self, const SQV *key, int root_fallback) {
       *dst = out;
       return;
     }
-  } else if (s.tag == SQBC_TAG_STRING) {
-    /* sqvm.cpp Get: an integer index is the byte at that position (negative counts from the end); a name is looked up in
-     * the string delegate, which has only `len` here. */
-    if (k.tag == SQBC_TAG_INTEGER) {
-      SqStr *str = str_of(&s);
-      int64_t n = k.i;
-      if (n < 0) n += (int64_t)str->len;
-      if (n >= 0 && n < (int64_t)str->len) {
-        out.tag = SQBC_TAG_INTEGER;
-        out.pad = 0;
-        out.i = (int64_t)(signed char)str->chars[n];
-        *dst = out;
-        return;
-      }
-      raise_idx(&k);
-    }
-    if (k.tag == SQBC_TAG_STRING && strcmp(str_of(&k)->chars, "len") == 0) {
-      out.tag = SQBC_TAG_NATIVE;
+  } else if (s.tag == SQBC_TAG_ARRAY && k.tag == SQBC_TAG_INTEGER) {
+    /* sqvm.cpp Get: an integer index out of range is an error at once, with no fallback to the root table. */
+    SqArray *a = array_of(&s);
+    if (k.i < 0 || (uint64_t)k.i >= (uint64_t)a->count) raise_idx(&k);
+    out = a->items[k.i];
+    *dst = out;
+    return;
+  } else if (s.tag == SQBC_TAG_STRING && k.tag == SQBC_TAG_INTEGER) {
+    /* sqvm.cpp Get: the byte at that position (negative counts from the end), as a signed integer. */
+    SqStr *str = str_of(&s);
+    int64_t n = k.i;
+    if (n < 0) n += (int64_t)str->len;
+    if (n >= 0 && n < (int64_t)str->len) {
+      out.tag = SQBC_TAG_INTEGER;
       out.pad = 0;
-      out.i = (int64_t)(intptr_t)&g_native_len;
+      out.i = (int64_t)(signed char)str->chars[n];
       *dst = out;
       return;
     }
+    raise_idx(&k);
+  }
+  /* The default delegate, then the root table (selfidx 0). */
+  if (k.tag == SQBC_TAG_STRING && delegate_native(&s, &k, &out)) {
+    *dst = out;
+    return;
   }
   if (root_fallback) {
     TNode *n = table_find(tbl(&g_root), &k);
@@ -363,10 +467,16 @@ void sqbc_rt_get(SQV *dst, const SQV *self, const SQV *key, int root_fallback) {
       return;
     }
   }
-  if (s.tag == SQBC_TAG_STRING && k.tag == SQBC_TAG_STRING) {
+  if (k.tag == SQBC_TAG_STRING) {
     char msg[160];
-    snprintf(msg, sizeof msg, "unsupported string method '%.50s' (only len is lowered)", str_of(&k)->chars);
-    rt_error(msg);
+    if (s.tag == SQBC_TAG_STRING) {
+      snprintf(msg, sizeof msg, "unsupported string method '%.50s' (only len and tostring are lowered)", str_of(&k)->chars);
+      rt_error(msg);
+    }
+    if (s.tag == SQBC_TAG_ARRAY && is_array_method(str_of(&k)->chars)) {
+      snprintf(msg, sizeof msg, "unsupported array method '%.50s' (only len and tostring are lowered)", str_of(&k)->chars);
+      rt_error(msg);
+    }
   }
   raise_idx(&k);
 }
@@ -379,6 +489,17 @@ void sqbc_rt_set(const SQV *self, const SQV *key, const SQV *val, int root_fallb
       n->val = v;
       return;
     }
+  } else if (s.tag == SQBC_TAG_ARRAY) {
+    /* sqvm.cpp Set: a key that is not an integer is an error; an index out of range is an error, with no root fallback. */
+    if (k.tag != SQBC_TAG_INTEGER) {
+      char msg[96];
+      snprintf(msg, sizeof msg, "indexing %s with %s", type_name(s.tag), type_name(k.tag));
+      rt_error(msg);
+    }
+    SqArray *a = array_of(&s);
+    if (k.i < 0 || (uint64_t)k.i >= (uint64_t)a->count) raise_idx(&k);
+    a->items[k.i] = v;
+    return;
   } else {
     /* sqvm.cpp Set, default case. */
     char msg[64];
@@ -430,17 +551,37 @@ void sqbc_rt_call(const SQV *callee, SQV *ret, SQV *frame, int nargs) {
     return;
   }
   if (clo.tag == SQBC_TAG_NATIVE) {
-    /* The string delegate's len: one parameter, the string itself (sqbaselib.cpp default_delegate_len). */
-    if (nargs != 1) {
-      char msg[128];
-      snprintf(msg, sizeof msg, "wrong number of parameters (%d passed, 1 required)", nargs);
-      rt_error(msg);
+    const SqNative *nat = (const SqNative *)(intptr_t)clo.i;
+    /* sqvm.cpp CallNative: a count other than the native's is this text, with no counts. */
+    if (nargs != nat->nparams) rt_error("wrong number of parameters");
+    char buf[32];
+    const char *text;
+    SQV r;
+    r.tag = SQBC_TAG_NULL;
+    r.pad = 0;
+    r.i = 0;
+    switch (nat->id) {
+      case NAT_PRINT:
+        /* sqbaselib.cpp base_print: the text of the value, through the print function, with no newline of its own. */
+        text_of(frame + 1, buf, sizeof buf, &text);
+        printf("%s", text);
+        break;
+      case NAT_STR_LEN:
+        r.tag = SQBC_TAG_INTEGER;
+        r.i = (int64_t)str_of(frame)->len;
+        break;
+      case NAT_ARR_LEN:
+        r.tag = SQBC_TAG_INTEGER;
+        r.i = (int64_t)array_of(frame)->count;
+        break;
+      case NAT_TOSTRING: {
+        size_t n = text_of(frame, buf, sizeof buf, &text);
+        r = make_string(text, n);
+        break;
+      }
+      default: rt_error("internal: bad native");
     }
-    SQV n;
-    n.tag = SQBC_TAG_INTEGER;
-    n.pad = 0;
-    n.i = (int64_t)str_of(frame)->len;
-    *ret = n;
+    *ret = r;
     return;
   }
   char msg[96];

@@ -21,9 +21,12 @@
 // closure.
 //
 // Subset: LOAD (integer, boolean, null and string literals), LOADINT, LOADBOOL, LOADNULLS, MOVE, DMOVE, DLOAD, ADD, SUB, MUL,
-// DIV, MOD, NEG, NOT, CMP (>, >=, <, <=), EQ, NE, AND, OR, JMP, JZ, JCMP, RETURN, GET, GETK, SET, NEWSLOT, NEWOBJ (a table),
-// PREPCALL, PREPCALLK, CALL, CLOSURE, GETOUTER, SETOUTER, CLOSE. A nested prototype with default parameters or varargs is
-// refused, and so is anything else by name.
+// DIV, MOD, NEG, NOT, CMP (>, >=, <, <=), EQ, NE, AND, OR, JMP, JZ, JCMP, RETURN, GET, GETK, SET, NEWSLOT, NEWOBJ (a table or
+// an array), APPENDARRAY (not a float), PREPCALL, PREPCALLK, CALL, CLOSURE, GETOUTER, SETOUTER, CLOSE. A nested prototype with
+// default parameters or varargs is refused, and so is anything else by name.
+//
+// The root table holds the base library's print (the runtime puts it there); `tostring` and `len` are the delegates' methods,
+// found by GET like any other key (see sqbc_rt_get).
 #include "sq_lower.hpp"
 
 #include <cstdint>
@@ -69,6 +72,7 @@ enum : std::uint8_t {
   kOpSetOuter = 0x1F,
   kOpGetOuter = 0x20,
   kOpNewObj = 0x21,
+  kOpAppendArray = 0x22,
   kOpClose = 0x3C,
   kOpClosure = 0x30,
   kOpCmp = 0x28,
@@ -86,6 +90,10 @@ constexpr std::uint8_t kNoValue = 0xFF;  // RETURN with arg0 0xFF has no value (
 constexpr std::uint8_t kNoRegister = 0xFF;  // the bound register of a CLOSURE without an environment; so has a NEWSLOT
 constexpr int kSlotBytes = 16;
 constexpr int kNotTable = 0;  // NEWOBJ's arg3 (sqopcodes.h NOT_TABLE)
+constexpr int kNotArray = 1;  // NEWOBJ's arg3 (sqopcodes.h NOT_ARRAY)
+constexpr int kNotClass = 2;  // NEWOBJ's arg3 (sqopcodes.h NOT_CLASS): refused
+// APPENDARRAY's arg2 (sqopcodes.h AAT_*): the value is a register, a literal, an integer or a boolean, or a float.
+enum : int { kAatStack = 0, kAatLiteral = 1, kAatInt = 2, kAatFloat = 3, kAatBool = 4 };
 constexpr std::uint64_t kOtLocal = 0;  // SQOuterType: an outer variable of the enclosing frame (src is its register)
 constexpr std::uint64_t kOtOuter = 1;  // an outer variable of the enclosing closure (src is its outer index)
 
@@ -590,9 +598,38 @@ class Fn {
         break;
       }
       case kOpNewObj: {
-        if (in.arg3 != kNotTable) refuse("_OP_NEWOBJ of an array or a class");
+        // NEWOBJ: a table (arg1 is its size hint) or an array (arg1 its reserve), as sqvm.cpp _OP_NEWOBJ.
+        if (in.arg3 == kNotClass) refuse("_OP_NEWOBJ of a class");
         Addr d = reg(in.arg0);
-        line("(eval (call void &\"sqbc_rt_newtable\" " + d.obj + "))");
+        if (in.arg3 == kNotArray) {
+          line("(eval (call void &\"sqbc_rt_newarray\" " + d.obj + " " + c_int(in.arg1) + "))");
+        } else {
+          line("(eval (call void &\"sqbc_rt_newtable\" " + d.obj + "))");
+        }
+        break;
+      }
+      case kOpAppendArray: {
+        // APPENDARRAY: STK(arg0) gets one value appended, the value by arg2 (sqvm.cpp _OP_APPENDARRAY): a register
+        // (AAT_STACK arg1), a literal (AAT_LITERAL KST(arg1)), an integer (arg1), a boolean (arg1). The literal and the
+        // immediates are built in the kv scratch value, as the key of a GETK is.
+        Addr arr = reg(in.arg0);
+        Addr val;
+        switch (in.arg2) {
+          case kAatStack: val = reg(in.arg1); break;
+          case kAatLiteral:
+            val = literal_key(in.arg1, in.op);
+            break;
+          case kAatInt:
+            val = slot("kv");
+            store(val, kOtInteger, c_long(in.arg1));
+            break;
+          case kAatBool:
+            val = slot("kv");
+            store(val, kOtBool, c_long(in.arg1 != 0 ? 1 : 0));
+            break;
+          default: refuse("_OP_APPENDARRAY of a float value");
+        }
+        line("(eval (call void &\"sqbc_rt_append\" " + arr.obj + " " + val.obj + "))");
         break;
       }
       case kOpClosure: {

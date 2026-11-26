@@ -65,7 +65,8 @@ checked by tag. Anything else calls a helper, which performs the whole operation
 | GET, GETK | `sqbc_rt_get` into a scratch value, then the register. selfidx 0 (register 0) falls back to the root table |
 | PREPCALL, PREPCALLK | the callee by `sqbc_rt_get` into arg0; the receiver (arg2) copied into arg3 (sqvm.cpp order) |
 | SET, NEWSLOT | `sqbc_rt_set` / `sqbc_rt_newslot`; the value copied to arg0 when arg0 is a register |
-| NEWOBJ (a table) | `sqbc_rt_newtable`; an array or a class is refused |
+| NEWOBJ (a table, an array) | `sqbc_rt_newtable`, or `sqbc_rt_newarray` with arg1 as the reserve (NOT_ARRAY); a class is refused |
+| APPENDARRAY | `sqbc_rt_append` of the value of arg2 (AAT_STACK a register, AAT_LITERAL a literal, AAT_INT arg1, AAT_BOOL arg1); a float value is refused |
 | CALL | `sqbc_rt_call(callee, ret, frame, nargs)`: the frame starts at the `this` register (arg2); see section 4 |
 | CLOSURE | `sqbc_rt_closure` with the prototype's index, its parameters, frame size and outer count; a bound register (arg2) is the environment; each outer is bound by `sqbc_rt_outer_local` (a register of this frame: a local of the enclosing function) or `sqbc_rt_outer_outer` (an outer of the running closure) |
 | GETOUTER, SETOUTER | `sqbc_rt_getouter` / `sqbc_rt_setouter` on the running closure (the third parameter of `sq_fn_N`) |
@@ -74,7 +75,7 @@ checked by tag. Anything else calls a helper, which performs the whole operation
 | JMP, JZ | goto; JZ jumps when payload == 0 |
 | JCMP | the fused CMP and JZ of the compiler's peephole: jump when the comparison is false |
 | RETURN | copy of the register (or null) into `*ret`, then `(return)` |
-| everything else (LOADROOT, NEWOBJ of an array, BITW, INC, FOREACH, ...) | refused: `refused: _OP_NAME is not lowered yet (pc N)`, exit 3 |
+| everything else (LOADROOT, NEWOBJ of a class, BITW, INC, FOREACH, ...) | refused: `refused: _OP_NAME is not lowered yet (pc N)`, exit 3 |
 
 A nested function with default parameters or a vararg is refused by name (the main prototype is always vararg, with
 `vargv` unused, and is lowered either way).
@@ -98,6 +99,20 @@ exits 1, as `sqref` does.
   strings are the same object, so EQ and NE are the raw compare of the IR. `+` with a string operand concatenates both
   sides through ToString (null, a boolean, an integer; a table or a function is refused at runtime). `< <= > >=` on two
   strings compare the bytes, a proper prefix first.
+- Base library and delegates (sqbaselib.cpp). The root table holds `print` (sqbc_rt_init). `print(v)` writes the text of `v`
+  through the print function with no newline of its own: base_print asks for `"%s"` only, and the standalone `sq` prints
+  the same way (`print(1)` then `print(null)` gives `1null`). The oracle `sqref` sets the same print function. `print` takes
+  exactly one value: any other count is `wrong number of parameters` (CallNative, no counts in the text). `tostring` is the
+  default delegate's method of an integer, a boolean, a string, an array or a table (`x.tostring()`). The reference has no
+  `tostring` for null: `null.tostring()` is `the index 'tostring' does not exist`. A global `tostring(v)` is the root
+  table's table delegate, so it passes two values and is `wrong number of parameters`. `len` is the string's and the
+  array's, and takes no argument.
+- Arrays (sqarray.cpp, sqvm.cpp Get and Set). A GET or SET with an integer index out of range (a negative index is out of
+  range) is `the index 'K' does not exist` at once, with no fallback to the root table. A SET with a key that is not an
+  integer is `indexing array with T`. A GET with a string key that is not a method is `the index 'K' does not exist`; an
+  array method that is not lowered (push, append, ...) is `unsupported array method` at run time, where the reference
+  runs it. Arrays compare by identity for `==`; `<` on two arrays compares their addresses, as the reference does, and is
+  not tested.
 - Strings, tables and closures are all payloads that are never 0, so `IsFalse` is still "payload == 0" (sqvm.cpp's
   IsFalse tests the integer of the object, which is non-zero for a pointer).
 - A table GET or SET of a key it does not have is `the index 'K' does not exist` (Raise_IdxError, the key printed as
@@ -114,13 +129,13 @@ exits 1, as `sqref` does.
 
 ## 5. Tests
 
-- `tests/squirrelbc/run.sh`: the reader. 67 streams (`corpus/*.nut`, `lower/*.nut` and the synthetic stream of
+- `tests/squirrelbc/run.sh`: the reader. 78 streams (`corpus/*.nut`, `lower/*.nut` and the synthetic stream of
   `lower/synth.rb`) compile with `sq -c`, load in `sq_dump` (every instruction named, stream consumed), and run through
   `sqref` with the same result as their source. Also: the opcode table against the reference header; a golden dump
   (`reader/ints.dump`); and five malformed streams (truncated, trailing byte, bad tag, SQInteger size 4, corrupt TAIL),
   each refused with exit 1.
-- `tests/squirrelbc/lower/run.sh`: the end-to-end suite. 54 programs (`lower/*.nut`: integers, strings, tables, calls,
-  closures) match `sqref` on the printed result and the status; 19 runtime errors (`lower/rterr/`) match the message and
+- `tests/squirrelbc/lower/run.sh`: the end-to-end suite. 65 programs (`lower/*.nut`: integers, strings, tables, calls,
+  closures, print, tostring and arrays) match `sqref` on the printed result and the status; 29 runtime errors (`lower/rterr/`) match the message and
   status 1; 8 programs (`lower/err/`) are refused with exit 3; `lower/synth.rb` writes a stream with DLOAD, DMOVE, LINE and
   LOADNULLS. A string result is printed by `sqref` and by the driver alike (the text, one line).
 - The oracle is `tests/squirrelbc/oracle/sqref.c`: the reference VM, built against the reference tree's
@@ -140,13 +155,14 @@ source tree). Without them they exit 77 (skip). The lowering suite also needs `b
   the same size as SQInteger (8 bytes on LP64).
 - Only the LP64 layout is read. A wide SQChar, a 32-bit SQInteger, or a big-endian writer is refused.
 - Nothing above is verified against a 32-bit or Windows reference build.
-- The reference's root table has the base library (`print` and the rest): a call of `print` runs there and is "the index
-  'print' does not exist" here, since the runtime's root table is empty. Not lowered; no test.
-- Only `len` of the string delegate and no method of the table delegate (`t.len()`, `t.rawget` ...) are lowered. A string
-  method other than `len` is `unsupported string method` at run time, and a table method is "the index does not exist".
+- Still not lowered: a method of the array or string delegate other than `len` and `tostring` (`push`, `append`, `slice`,
+  ...) is `unsupported array method` or `unsupported string method` at run time, where the reference runs it; no test
+  (rterr/arr_method.nut was removed for that reason). A method of the table delegate other than `tostring` (`t.len()`,
+  `t.rawget` ...) is "the index does not exist". Float values (in `print`, `tostring` and arrays) are refused.
 - Objects (strings, tables, closures) are never freed: the runtime is a test harness with no collector, so a long loop
   that builds strings or tables uses memory without a bound.
-- A `tostring` of a table or a function (in a concatenation) is refused at run time: the reference prints an address.
+- A `tostring` of an array, a table or a function (in a concatenation, through `print` or the method) is refused at run
+  time: the reference prints an address.
 - LOADROOT (the reference's root-table fast path) is refused; the lowering reaches the root through GET on register 0.
 - The outer objects are kept as the reference keeps them (an open list by descending stack address, closed by CLOSE and by
   the return of the frame). A closure called after its creating frame has returned reads the closed value.
