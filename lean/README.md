@@ -23,7 +23,9 @@ constants, the wrapping, checked and bitwise integer operators, comparisons, `ic
 top-level `case` and `default` labels, `break`, `continue`, `return`, `unreachable`, `trap`). A form outside
 the subset gives `stuck` with its reason, naming the form; it is never skipped. Stack slots of integer type
 (`load` and `store` through a local) are modelled, and so are block pointers into the slots: `offset`, and
-`load` and `store` through a pointer. A slot is a block of the byte size its declaration gives; its bytes are
+`load` and `store` through a pointer, the aggregate `copy` between two of them (memmove, with the stored pointers
+in the range), and the equality of pointers (`eq` and `ne`) and the order of two pointers into one block. A slot is a
+block of the byte size its declaration gives; its bytes are
 little-endian, and a load or store reads or writes the bytes at its offset with its own width. A null
 dereference and an access past the end of a block are traps ("null dereference", "pointer out of bounds");
 the operations that are undefined in C++ trap, and the rest of what is not modelled is stuck, with the reason.

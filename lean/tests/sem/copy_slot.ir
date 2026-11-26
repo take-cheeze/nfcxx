@@ -1,0 +1,10 @@
+(ir-module "copy.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "main"
+  (ret int)
+  (params)
+  (slot "a" int 4 4)
+  (slot "b" int 4 4)
+  (store int $"a" (const int 1234567))
+  (copy 4 $"b" $"a")
+  (let %0 int (load int $"b"))
+  (return %0))
