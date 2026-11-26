@@ -198,10 +198,12 @@ class CodeGen
   end
 
   # The receiver's declared element entry when its one reaching definition is an ivar read, else nil.
+  # DECLARED_ELEMENT_HANDLERS: the walk crosses handler edges, so a receiver inside a rescue's protected range (its try
+  # body compiles the same instructions) is answered instead of refused. BC2CPP_DECLARED_ELEMENT_HANDLERS=0 refuses it.
   def declared_element_receiver(irep, idx, reg, owner, derived: false, depth: 0)
     return nil unless irep && idx && reg && owner
 
-    producers = BytecodeIR.producers(irep, idx, reg)
+    producers = BytecodeIR.producers(irep, idx, reg, through_handlers: ENV['BC2CPP_DECLARED_ELEMENT_HANDLERS'] != '0')
     return nil if producers.nil? || producers.empty?
     return declared_arg_element_receiver(irep, producers) if producers.any?(&:entry?)
 

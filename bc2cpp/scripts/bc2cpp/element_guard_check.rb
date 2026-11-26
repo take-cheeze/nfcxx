@@ -351,6 +351,14 @@ LOOP_SOURCE = <<~RUBY
       @things.sort_by { |t| t.hp }.size
     end
 
+    def rescued
+      s = 0
+      @things.each { |t| s += t.hp }
+      s
+    rescue StandardError
+      -1
+    end
+
     def swapped(flag)
       @things.map do |t|
         t = Other.new if flag
@@ -383,6 +391,7 @@ LOOP_DRIVER = <<~'RUBY'
   show('good') { p.good }
   show('folded') { p.folded }
   show('ordered') { p.ordered }
+  show('rescued') { p.rescued }
   show('swapped') { p.swapped(true) }
   p.poison
   show('bad total') { p.total }
@@ -411,7 +420,19 @@ Dir.mktmpdir('element_guard_loop_sig') do |sig_dir|
     check.call('a multi-class name on the element is an exact-class call',
                bodies['oks'].to_s.include?('CLOSED_WORLD_EXACT_CLASS :ok? -> Thing#ok?') && !bodies['oks'].to_s.include?('POLY_SMALL_N :ok?'))
     check.call('a reassigned parameter keeps its ordinary dispatch', !bodies['swapped'].to_s.include?('CLOSED_WORLD_EXACT_CLASS :ok? -> Thing#ok?'))
+    # DECLARED_ELEMENT_HANDLERS: the loop sits in the rescue's try body, emitted ahead of the method's own header.
+    try_body = code[/^static mrb_value Pack_rescued_impl_rescue_try\(.*?^}$/m].to_s
+    check.call('a loop inside a rescue tests each element it binds',
+               try_body.include?('DECLARED_ELEMENT_GUARD Pack#things iterated') && try_body.include?('Thing#hp'))
   end
+  ENV['BC2CPP_DECLARED_ELEMENT_HANDLERS'] = '0'
+  Dir.mktmpdir('element_guard_loop_handlers_off') do |dir|
+    code, = Bc2cppFixtureRuntime.generate(LOOP_SOURCE, dir, only_owners: %w[Pack Thing Other])
+    try_body = code[/^static mrb_value Pack_rescued_impl_rescue_try\(.*?^}$/m].to_s
+    check.call('BC2CPP_DECLARED_ELEMENT_HANDLERS=0 leaves the rescued loop unguarded',
+               !try_body.empty? && !try_body.include?('DECLARED_ELEMENT_GUARD Pack#things iterated'))
+  end
+  ENV.delete('BC2CPP_DECLARED_ELEMENT_HANDLERS')
   ENV['BC2CPP_DECLARED_LOOP_ELEMENT'] = '0'
   Dir.mktmpdir('element_guard_loop_off') do |dir|
     code, = Bc2cppFixtureRuntime.generate(LOOP_SOURCE, dir, only_owners: %w[Pack Thing Other])
