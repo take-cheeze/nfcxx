@@ -1,13 +1,14 @@
 # Lua 5.4 bytecode to Path B IR
 
-Status, 2026-11-24: every opcode but `TBC` lowers. 67 programs match Lua 5.4.9 (`tests/lua54bc/lower/run.sh`), and 21
+Status, 2026-11-26: every opcode but `TBC` lowers. 73 programs match Lua 5.4.9 (`tests/lua54bc/lower/run.sh`), and 34
 error programs print the same first line as lua.c, with its position, message and variable info. The runtime has numbers
 with coercion, strings with the string metatable, tables with metatables, closures and upvalues, multiple results,
 varargs, the metamethods listed below, protected calls (`pcall`, with `error` and `assert`), and the libraries:
 base (`print`, `type`, `tostring`, `tonumber`, `pairs`, `next`, `ipairs`, `select`, `setmetatable`, `getmetatable`,
 `rawget`, `rawset`, `rawequal`, `rawlen`), `table` (`insert`, `remove`, `concat`, `unpack`), `math` (`floor`, `ceil`,
 `abs`, `max`, `min`, `sqrt`, `tointeger`, `huge`, `pi`, `maxinteger`, `mininteger`) and `string` (`len`, `sub`, `upper`,
-`lower`, `rep`, `reverse`, `byte`, `char`, `format`).
+`lower`, `rep`, `reverse`, `byte`, `char`, `format`, and the pattern functions `find`, `match`, `gmatch`, `gsub`; see
+"String patterns").
 
 ## Pipeline
 
@@ -116,6 +117,7 @@ varargs) starts with a header and is linked into one list and into a set of addr
 
 - the Lua stack (`lua_stack`, all of it: a stale slot holds an address that is no longer in the set, so it is ignored);
 - the open upvalues, the string metatable, the `next` and `ipairs` iterators, and the running main closure;
+- the state values of host closures (`HostFn.up`, the subject and pattern of a `gmatch` iterator and its positions);
 - the C stack, conservatively. The helpers keep values in their locals, so every word of the C stack that is the address
   of an object in the set counts as a reference (`__builtin_unwind_init` and `setjmp` put the registers on the stack).
 
@@ -154,15 +156,38 @@ gives lstrlib's `attempt to add a 'string' with a 'number'`. Only tables have me
 
 - `tests/lua54bc/run.sh`: the reader loads real 5.4.9 chunks (dumped with `string.dump`); the opcode sequence matches
   `luac -l -l` when `LUAC` is set. The opcode check has not run: no `luac` is available here.
-- `tests/lua54bc/lower/run.sh`: 67 programs lower, emit, assemble, link (with `-lm`), run, and match
-  `print(dofile(...))` from Lua 5.4.9. 21 programs in `lower/err/` must give lua.c's first error line and status 1. A
-  `TBC` program is refused. Needs `LUA` (a 5.4.9 interpreter).
+- `tests/lua54bc/lower/run.sh`: 73 programs lower, emit, assemble, link (with `-lm`), run, and match
+  `print(dofile(...))` from Lua 5.4.9. 34 programs in `lower/err/` must give lua.c's first error line and status 1. A
+  `TBC` program is refused. Needs `LUA` (a 5.4.9 interpreter). The suite also passes with `LUA54RT_GC_THRESHOLD=1`.
+
+## String patterns
+
+`string.find`, `string.match`, `string.gmatch` and `string.gsub` in `lua54rt.c` (the section "string: pattern matching")
+are a direct port of lstrlib.c's matcher: `pat_match` is `match` with the same `goto`s, and `pat_classend`,
+`pat_match_class`, `pat_match_bracket_class`, `pat_single_match`, `pat_matchbalance`, `pat_max_expand`,
+`pat_min_expand`, `pat_start_capture`, `pat_end_capture` and `pat_match_capture` follow their namesakes. The same limits
+apply (32 captures, a match depth of 200, "pattern too complex"), and the error messages are lstrlib's.
+
+Covered: every class (`%a %c %d %g %l %p %s %u %w %x %z` and their complements, and any other escaped character as
+itself), sets with ranges and complements, `* + - ?`, the anchors `^` (at the start of `find`, `match` and `gsub`) and
+`$`, captures, position captures `()`, `%b`, `%f`, back-references `%1`..`%9`, the `init` argument (negative counts
+from the end), the plain flag of `find`, and the replacement of `gsub` as a string (`%0`..`%9`, `%%`), a table (indexed
+by the first capture) or a function (called with the captures), with the optional maximum count. A `false` or `nil`
+result keeps the match; a number result is converted; any other result is `invalid replacement value`.
+
+`gmatch` returns a host closure whose state is in `HostFn.up[0..3]`: the subject, the pattern, the position to search
+from and the end of the last match (-1 for none). A host function reads its own closure through `cur_host`, which
+`lua54rt_call` sets for the call; the iterator is the only one that needs it. Like lstrlib's `gmatch`, a `^` is not an
+anchor there.
+
+Not done: the `gsub` buffer is `malloc`ed, so an error raised in the middle of a `gsub` (a bad replacement, or an error
+in the replacement function) leaks that buffer. The matcher's recursion is on the C stack, bounded by the depth of 200.
 
 ## Not yet
 
-- **The rest of the libraries**: `string.find`, `match`, `gsub`, `gmatch` and the pattern matching, `%q` and `%a` in
-  `string.format`, `table.sort` and `table.move`, `math.random`, `load`, `dofile`, `require`, `select` with negative
-  indices, `utf8`, `os`, `io`, `coroutine`. Each is a host function in the runtime.
+- **The rest of the libraries**: `%q` and `%a` in `string.format`, `table.sort` and `table.move`, `math.random`, `load`,
+  `dofile`, `require`, `select` with negative indices, `utf8`, `os`, `io`, `coroutine`. Each is a host function in the
+  runtime.
 - **Error levels**: `error(msg, 2)` reports the caller's position as level 1 does. A `pcall` that calls a library
   function directly has no position in its message, as in Lua, but the library names (`'rep'`) are the short ones,
   where Lua qualifies them (`'string.rep'`) in that case.
