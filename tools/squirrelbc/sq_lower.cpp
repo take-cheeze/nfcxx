@@ -77,6 +77,7 @@ enum : std::uint8_t {
   kOpNewObj = 0x21,
   kOpAppendArray = 0x22,
   kOpNewSlotA = 0x3A,
+  kOpGetBase = 0x3B,
   kOpClose = 0x3C,
   kOpClosure = 0x30,
   kOpCmp = 0x28,
@@ -640,10 +641,11 @@ class Fn {
         // NEWOBJ: a table (arg1 is its size hint), an array (arg1 its reserve) or a class (arg1 the base register or -1,
         // arg2 the attributes register or 0xFF), as sqvm.cpp _OP_NEWOBJ and CLASS_OP.
         if (in.arg3 == kNotClass) {
-          if (in.arg1 != -1) refuse("_OP_NEWOBJ of a class with a base");
+          // arg1 is the base register (CLASS_OP's baseclass), -1 when there is none.
           if (in.arg2 != kNoAttributes) refuse("_OP_NEWOBJ of a class with attributes");
           Addr c = reg(in.arg0);
-          line("(eval (call void &\"sqbc_rt_newclass\" " + c.obj + "))");
+          std::string base = in.arg1 == -1 ? kNullSqvPtr : reg(in.arg1).obj;
+          line("(eval (call void &\"sqbc_rt_newclass\" " + c.obj + " " + base + "))");
           break;
         }
         Addr d = reg(in.arg0);
@@ -652,6 +654,12 @@ class Fn {
         } else {
           line("(eval (call void &\"sqbc_rt_newtable\" " + d.obj + "))");
         }
+        break;
+      }
+      case kOpGetBase: {
+        // GETBASE: TARGET = the class the running closure's class extends (sqvm.cpp _OP_GETBASE), or null.
+        Addr d = reg(in.arg0);
+        line("(eval (call void &\"sqbc_rt_getbase\" " + d.obj + " %2))");
         break;
       }
       case kOpNewSlotA: {

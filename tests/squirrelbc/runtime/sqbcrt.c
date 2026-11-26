@@ -234,128 +234,6 @@ static void table_newslot(SqTable *t, const SQV *k, const SQV *v) {
   t->count++;
 }
 
-/* ---- classes and instances ------------------------------------------------------------------------------------------ */
-
-static void refuse_float_key(const SQV *k);
-
-/* A member of a class (sqclass.h's members table and its field and method lists, as one list). An instance field has
- * is_field 1 and its value in the instance, at index idx; `val` is its default. A method, or a static member, is shared
- * by the class: `val` is its value. */
-typedef struct SqMember {
-  SQV key;
-  SQV val;
-  int is_field;
-  int idx;
-} SqMember;
-
-typedef struct SqClass {
-  SqMember *members;
-  size_t count;
-  size_t cap;
-  int nfields;
-  int locked; /* set by the first instance: the class can no longer get a field (SQClass::NewSlot) */
-  int ctor;   /* the member index of `constructor`, or -1 */
-} SqClass;
-
-typedef struct SqInstance {
-  SqClass *cls;
-  SQV *values; /* the class's nfields fields */
-} SqInstance;
-
-static SqClass *class_of(const SQV *v) { return (SqClass *)(intptr_t)v->i; }
-static SqInstance *inst_of(const SQV *v) { return (SqInstance *)(intptr_t)v->i; }
-
-static SqMember *class_find(SqClass *c, const SQV *key) {
-  for (size_t i = 0; i < c->count; i++)
-    if (key_eq(&c->members[i].key, key)) return &c->members[i];
-  return NULL;
-}
-
-static SqMember *class_add(SqClass *c, const SQV *key, const SQV *val, int is_field) {
-  if (c->count == c->cap) {
-    size_t cap = c->cap ? c->cap * 2 : 4;
-    SqMember *m = realloc(c->members, cap * sizeof(SqMember));
-    if (!m) rt_error("out of memory");
-    c->members = m;
-    c->cap = cap;
-  }
-  SqMember *m = &c->members[c->count++];
-  m->key = *key;
-  m->val = *val;
-  m->is_field = is_field;
-  m->idx = is_field ? c->nfields++ : -1;
-  return m;
-}
-
-void sqbc_rt_newclass(SQV *dst) {
-  SqClass *c = calloc(1, sizeof *c);
-  if (!c) rt_error("out of memory");
-  c->ctor = -1;
-  SQV v;
-  v.tag = SQBC_TAG_CLASS;
-  v.pad = 0;
-  v.i = (int64_t)(intptr_t)c;
-  *dst = v;
-}
-
-/* SQClass::NewSlot (sqclass.cpp), with the checks of SQVM::NewSlot: a closure or a static member is a shared member, any
- * other value is a field; a class with an instance takes only shared members; a name that is a method already is not
- * changed by a field of the same name (the reference's table keeps the method). */
-static void class_newslot(SqClass *c, const SQV *k, const SQV *v, int bstatic) {
-  int shared = v->tag == SQBC_TAG_CLOSURE || v->tag == SQBC_TAG_NATIVE || bstatic;
-  if (c->locked && !shared) rt_error("trying to modify a class that has already been instantiated");
-  SqMember *m = class_find(c, k);
-  if (m && m->is_field) {
-    m->val = *v; /* a field's default value is replaced, shared or not */
-    return;
-  }
-  if (!shared) {
-    if (!m) class_add(c, k, v, 1);
-    return;
-  }
-  if (m) {
-    m->val = *v;
-    return;
-  }
-  class_add(c, k, v, 0);
-  if (k->tag == SQBC_TAG_STRING && strcmp(str_of(k)->chars, "constructor") == 0) c->ctor = (int)(c->count - 1);
-}
-
-/* SQVM::Get on an instance or a class: a field of an instance is its value; anything else is the member's value. */
-static int class_get(const SQV *self, const SQV *key, SQV *out) {
-  SqClass *c = self->tag == SQBC_TAG_INSTANCE ? inst_of(self)->cls : class_of(self);
-  SqMember *m = class_find(c, key);
-  if (!m) return 0;
-  if (m->is_field && self->tag == SQBC_TAG_INSTANCE) *out = inst_of(self)->values[m->idx];
-  else *out = m->val;
-  return 1;
-}
-
-/* CreateClassInstance (sqvm.cpp): the class is locked, and the instance has the class's field defaults. */
-static SQV make_instance(SqClass *c) {
-  SqInstance *in = calloc(1, sizeof *in);
-  if (!in) rt_error("out of memory");
-  in->cls = c;
-  in->values = calloc(c->nfields > 0 ? (size_t)c->nfields : 1, sizeof(SQV));
-  if (!in->values) rt_error("out of memory");
-  for (size_t i = 0; i < c->count; i++)
-    if (c->members[i].is_field) in->values[c->members[i].idx] = c->members[i].val;
-  c->locked = 1;
-  SQV v;
-  v.tag = SQBC_TAG_INSTANCE;
-  v.pad = 0;
-  v.i = (int64_t)(intptr_t)in;
-  return v;
-}
-
-void sqbc_rt_newslota(const SQV *self, const SQV *key, const SQV *val, int bstatic) {
-  SQV s = *self, k = *key, v = *val;
-  if (s.tag != SQBC_TAG_CLASS) rt_error("object must be a class");
-  if (k.tag == SQBC_TAG_NULL) rt_error("null cannot be used as index");
-  refuse_float_key(&k);
-  class_newslot(class_of(&s), &k, &v, bstatic);
-}
-
 /* ---- arrays --------------------------------------------------------------------------------------------------------- */
 
 typedef struct SqArray {
@@ -443,6 +321,7 @@ typedef struct SqClosure {
   SQV env;
   int nouters;
   SqOuter **outers;
+  struct SqClass *base; /* the class of a method of a class with a base (GETBASE), or NULL */
 } SqClosure;
 
 /* A native of the base library or a delegate: its operation (NAT_*) and the parameter count sqvm.cpp's CallNative checks
@@ -528,6 +407,186 @@ static int is_array_method(const char *name) {
   return 0;
 }
 
+/* ---- classes and instances ------------------------------------------------------------------------------------------ */
+
+static void refuse_float_key(const SQV *k);
+
+/* A member of a class (sqclass.h's members table and its field and method lists, as one list). An instance field has
+ * is_field 1 and its value in the instance, at index idx; `val` is its default. A method, or a static member, is shared
+ * by the class: `val` is its value. */
+typedef struct SqMember {
+  SQV key;
+  SQV val;
+  int is_field;
+  int idx;
+} SqMember;
+
+typedef struct SqClass {
+  SqMember *members;
+  size_t count;
+  size_t cap;
+  int nfields;
+  int locked; /* set by the first instance: the class can no longer get a field (SQClass::NewSlot) */
+  int ctor;   /* the member index of `constructor`, or -1 */
+  struct SqClass *base; /* the class this one extends, or NULL */
+} SqClass;
+
+typedef struct SqInstance {
+  SqClass *cls;
+  SQV *values; /* the class's nfields fields */
+} SqInstance;
+
+static SqClass *class_of(const SQV *v) { return (SqClass *)(intptr_t)v->i; }
+static SqInstance *inst_of(const SQV *v) { return (SqInstance *)(intptr_t)v->i; }
+
+static SqMember *class_find(SqClass *c, const SQV *key) {
+  for (size_t i = 0; i < c->count; i++)
+    if (key_eq(&c->members[i].key, key)) return &c->members[i];
+  return NULL;
+}
+
+static SqMember *class_add(SqClass *c, const SQV *key, const SQV *val, int is_field) {
+  if (c->count == c->cap) {
+    size_t cap = c->cap ? c->cap * 2 : 4;
+    SqMember *m = realloc(c->members, cap * sizeof(SqMember));
+    if (!m) rt_error("out of memory");
+    c->members = m;
+    c->cap = cap;
+  }
+  SqMember *m = &c->members[c->count++];
+  m->key = *key;
+  m->val = *val;
+  m->is_field = is_field;
+  m->idx = is_field ? c->nfields++ : -1;
+  return m;
+}
+
+static SQV class_val(SqClass *c) {
+  SQV v;
+  v.tag = SQBC_TAG_CLASS;
+  v.pad = 0;
+  v.i = (int64_t)(intptr_t)c;
+  return v;
+}
+
+void sqbc_rt_newclass(SQV *dst, const SQV *base) {
+  SqClass *c = calloc(1, sizeof *c);
+  if (!c) rt_error("out of memory");
+  c->ctor = -1;
+  if (base) {
+    /* CLASS_OP (sqvm.cpp): the base must be a class; the new class has the base's members (SQClass::SQClass). */
+    if (base->tag != SQBC_TAG_CLASS) {
+      char msg[96];
+      snprintf(msg, sizeof msg, "trying to inherit from a %s", type_name(base->tag));
+      rt_error(msg);
+    }
+    SqClass *b = class_of(base);
+    c->base = b;
+    c->nfields = b->nfields;
+    c->ctor = b->ctor;
+    if (b->count > 0) {
+      c->members = malloc(b->count * sizeof(SqMember));
+      if (!c->members) rt_error("out of memory");
+      memcpy(c->members, b->members, b->count * sizeof(SqMember));
+      c->count = c->cap = b->count;
+    }
+  }
+  *dst = class_val(c);
+}
+
+/* The metamethods of a class (sqobject.h MM_*): a closure with one of these names is a metamethod in the reference, not a
+ * member. Not lowered. */
+static int is_metamethod_key(const SQV *k) {
+  static const char *const names[] = {"_add", "_sub", "_mul", "_div", "_unm", "_modulo", "_set", "_get", "_typeof",
+                                      "_nexti", "_cmp", "_call", "_cloned", "_newslot", "_delslot", "_tostring",
+                                      "_newmember", "_inherited"};
+  if (k->tag != SQBC_TAG_STRING) return 0;
+  for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+    if (strcmp(str_of(k)->chars, names[i]) == 0) return 1;
+  return 0;
+}
+
+/* SQClass::NewSlot (sqclass.cpp), with the checks of SQVM::NewSlot: a closure or a static member is a shared member, any
+ * other value is a field; a class with an instance takes only shared members; a name that is a method already is not
+ * changed by a field of the same name (the reference's table keeps the method). */
+/* A closure of a class with a base is a copy of it that knows the base (SQClass::NewSlot: `_closure(theval)->_base`), for
+ * GETBASE. The copy shares the outer variables of the original. */
+static SQV closure_with_base(const SQV *v, SqClass *base) {
+  SqClosure *src = (SqClosure *)(intptr_t)v->i; /* closure_of, defined further down */
+  SqClosure *c = calloc(1, sizeof *c);
+  if (!c) rt_error("out of memory");
+  *c = *src;
+  if (src->nouters > 0) {
+    c->outers = calloc((size_t)src->nouters, sizeof(SqOuter *));
+    if (!c->outers) rt_error("out of memory");
+    memcpy(c->outers, src->outers, (size_t)src->nouters * sizeof(SqOuter *));
+  }
+  c->base = base;
+  SQV r;
+  r.tag = SQBC_TAG_CLOSURE;
+  r.pad = 0;
+  r.i = (int64_t)(intptr_t)c;
+  return r;
+}
+
+static void class_newslot(SqClass *c, const SQV *k, const SQV *v, int bstatic) {
+  int shared = v->tag == SQBC_TAG_CLOSURE || v->tag == SQBC_TAG_NATIVE || bstatic;
+  if (c->locked && !shared) rt_error("trying to modify a class that has already been instantiated");
+  SqMember *m = class_find(c, k);
+  if (m && m->is_field) {
+    m->val = *v; /* a field's default value is replaced, shared or not */
+    return;
+  }
+  if (!shared) {
+    if (!m) class_add(c, k, v, 1);
+    return;
+  }
+  if (v->tag == SQBC_TAG_CLOSURE && is_metamethod_key(k)) rt_error("class metamethods are not lowered");
+  SQV theval = *v;
+  if (c->base && v->tag == SQBC_TAG_CLOSURE) theval = closure_with_base(v, c->base);
+  if (m) {
+    m->val = theval;
+    return;
+  }
+  class_add(c, k, &theval, 0);
+  if (k->tag == SQBC_TAG_STRING && strcmp(str_of(k)->chars, "constructor") == 0) c->ctor = (int)(c->count - 1);
+}
+
+/* SQVM::Get on an instance or a class: a field of an instance is its value; anything else is the member's value. */
+static int class_get(const SQV *self, const SQV *key, SQV *out) {
+  SqClass *c = self->tag == SQBC_TAG_INSTANCE ? inst_of(self)->cls : class_of(self);
+  SqMember *m = class_find(c, key);
+  if (!m) return 0;
+  if (m->is_field && self->tag == SQBC_TAG_INSTANCE) *out = inst_of(self)->values[m->idx];
+  else *out = m->val;
+  return 1;
+}
+
+/* CreateClassInstance (sqvm.cpp): the class is locked, and the instance has the class's field defaults. */
+static SQV make_instance(SqClass *c) {
+  SqInstance *in = calloc(1, sizeof *in);
+  if (!in) rt_error("out of memory");
+  in->cls = c;
+  in->values = calloc(c->nfields > 0 ? (size_t)c->nfields : 1, sizeof(SQV));
+  if (!in->values) rt_error("out of memory");
+  for (size_t i = 0; i < c->count; i++)
+    if (c->members[i].is_field) in->values[c->members[i].idx] = c->members[i].val;
+  for (SqClass *b = c; b; b = b->base) b->locked = 1; /* SQClass::Lock locks the base too */
+  SQV v;
+  v.tag = SQBC_TAG_INSTANCE;
+  v.pad = 0;
+  v.i = (int64_t)(intptr_t)in;
+  return v;
+}
+
+void sqbc_rt_newslota(const SQV *self, const SQV *key, const SQV *val, int bstatic) {
+  SQV s = *self, k = *key, v = *val;
+  if (s.tag != SQBC_TAG_CLASS) rt_error("object must be a class");
+  if (k.tag == SQBC_TAG_NULL) rt_error("null cannot be used as index");
+  refuse_float_key(&k);
+  class_newslot(class_of(&s), &k, &v, bstatic);
+}
+
 /* ---- the stack and the root table ----------------------------------------------------------------------------------- */
 
 static SQV *g_stack_end;
@@ -596,6 +655,16 @@ void sqbc_rt_setouter(const SQV *clo, int idx, const SQV *val) {
 }
 
 void sqbc_rt_close(SQV *from) { close_outers(from); }
+
+/* GETBASE: the class the running closure's class extends, or null (the main function has no closure). */
+void sqbc_rt_getbase(SQV *dst, const SQV *clo) {
+  SQV r;
+  r.tag = SQBC_TAG_NULL;
+  r.pad = 0;
+  r.i = 0;
+  if (clo && clo->tag == SQBC_TAG_CLOSURE && closure_of(clo)->base) r = class_val(closure_of(clo)->base);
+  *dst = r;
+}
 
 /* ---- Get, Set, NewSlot ---------------------------------------------------------------------------------------------- */
 

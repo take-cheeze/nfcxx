@@ -67,7 +67,8 @@ checked by tag. Anything else calls a helper, which performs the whole operation
 | PREPCALL, PREPCALLK | the callee by `sqbc_rt_get` into arg0; the receiver (arg2) copied into arg3 (sqvm.cpp order) |
 | SET, NEWSLOT | `sqbc_rt_set` / `sqbc_rt_newslot`; the value copied to arg0 when arg0 is a register |
 | NEWOBJ (a table, an array) | `sqbc_rt_newtable`, or `sqbc_rt_newarray` with arg1 as the reserve (NOT_ARRAY) |
-| NEWOBJ of a class (NOT_CLASS) | `sqbc_rt_newclass` into arg0, when arg1 is -1 (no base) and arg2 is 0xFF (no attributes); otherwise refused |
+| NEWOBJ of a class (NOT_CLASS) | `sqbc_rt_newclass` into arg0, with the base register arg1 (NULL when arg1 is -1); arg2 must be 0xFF (no attributes), else refused |
+| GETBASE | `sqbc_rt_getbase` into arg0: the class the running closure's class extends, or null (the running closure is the third parameter) |
 | NEWSLOTA | `sqbc_rt_newslota` (a class member; bit 1 of arg0 is the static flag); bit 0 (attributes) is refused |
 | APPENDARRAY | `sqbc_rt_append` of the value of arg2 (AAT_STACK a register, AAT_LITERAL a literal, AAT_INT arg1, AAT_BOOL arg1, AAT_FLOAT the float whose bits are arg1) |
 | CALL, TAILCALL | `sqbc_rt_call(callee, ret, frame, nargs)`: the frame starts at the `this` register (arg2); see section 4. TAILCALL is the same call: the compiler follows it with the RETURN of its target |
@@ -78,7 +79,7 @@ checked by tag. Anything else calls a helper, which performs the whole operation
 | JMP, JZ | goto; JZ jumps when payload == 0 |
 | JCMP | the fused CMP and JZ of the compiler's peephole: jump when the comparison is false |
 | RETURN | copy of the register (or null) into `*ret`, then `(return)` |
-| everything else (LOADROOT, GETBASE, INSTANCEOF, BITW, INC, FOREACH, ...) | refused: `refused: _OP_NAME is not lowered yet (pc N)`, exit 3 |
+| everything else (LOADROOT, INSTANCEOF, BITW, INC, FOREACH, ...) | refused: `refused: _OP_NAME is not lowered yet (pc N)`, exit 3 |
 
 A nested function with default parameters or a vararg is refused by name (the main prototype is always vararg, with
 `vargv` unused, and is lowered either way).
@@ -147,6 +148,12 @@ exits 1, as `sqref` does.
   delegate methods of an instance (`getclass`, `rawget`, `rawset`, `rawin`, `weakref`, `tostring`) and of a class
   (`getattributes`, `setattributes`, `rawget`, `rawset`, `rawin`, `weakref`) are `unsupported ... method` at run time,
   and `tostring` of an instance or a class is refused (the reference prints an address).
+- Inheritance (`extends`, CLASS_OP, SQClass's constructor). A class with a base starts with the base's members, fields
+  (with their indices, so an instance's fields are the base's then the new ones) and constructor; a field of the derived
+  class with a base member's name replaces the default. The base is locked with the derived class (SQClass::Lock). A
+  closure defined in a class with a base is a copy that knows the base, which GETBASE returns; `base.f()` is a GET on the
+  base class and a call with the instance as `this` (the compiler's MOVE of register 0). A base that is not a class is
+  `trying to inherit from a T`.
 - Calls (sqvm.cpp `_OP_CALL`, StartCall, Return): the callee's frame starts at the `this` register (arg2) of the caller,
   so its parameters are the caller's registers above it, and the result is written to the caller's target register (arg0)
   when it has one. `nargs` counts `this`: `wrong number of parameters (N passed, M required)` for a mismatch. A closure
@@ -156,14 +163,14 @@ exits 1, as `sqref` does.
 
 ## 5. Tests
 
-- `tests/squirrelbc/run.sh`: the reader. 93 streams (`corpus/*.nut`, `lower/*.nut` and the synthetic stream of
+- `tests/squirrelbc/run.sh`: the reader. 98 streams (`corpus/*.nut`, `lower/*.nut` and the synthetic stream of
   `lower/synth.rb`) compile with `sq -c`, load in `sq_dump` (every instruction named, stream consumed), and run through
   `sqref` with the same result as their source. Also: the opcode table against the reference header; a golden dump
   (`reader/ints.dump`); and five malformed streams (truncated, trailing byte, bad tag, SQInteger size 4, corrupt TAIL),
   each refused with exit 1.
-- `tests/squirrelbc/lower/run.sh`: the end-to-end suite. 80 programs (`lower/*.nut`: integers, strings, tables, calls,
-  closures, print, tostring, arrays, floats and classes) match `sqref` on the printed result and the status; 40 runtime errors
-  (`lower/rterr/`) match the message and status 1; 9 programs (`lower/err/`) are refused with exit 3; `lower/synth.rb` writes a stream with DLOAD, DMOVE, LINE and
+- `tests/squirrelbc/lower/run.sh`: the end-to-end suite. 85 programs (`lower/*.nut`: integers, strings, tables, calls,
+  closures, print, tostring, arrays, floats, classes and inheritance) match `sqref` on the printed result and the status;
+  42 runtime errors (`lower/rterr/`) match the message and status 1; 8 programs (`lower/err/`) are refused with exit 3; `lower/synth.rb` writes a stream with DLOAD, DMOVE, LINE and
   LOADNULLS. A string result is printed by `sqref` and by the driver alike (the text, one line).
 - The oracle is `tests/squirrelbc/oracle/sqref.c`: the reference VM, built against the reference tree's
   `libsquirrel_static.a`. It loads `.nut` (compile) and `.cnut` (`sq_readclosure`) and prints the result line.
@@ -195,6 +202,9 @@ source tree). Without them they exit 77 (skip). The lowering suite also needs `b
 - LOADROOT (the reference's root-table fast path) is refused; the lowering reaches the root through GET on register 0.
 - The outer objects are kept as the reference keeps them (an open list by descending stack address, closed by CLOSE and by
   the return of the frame). A closure called after its creating frame has returned reads the closed value.
-- Classes: a class with a base (`extends`, NEWOBJ with a base register) and a class or member with attributes (`</ ... />`) are refused by name.
+- Classes: a class or a member with attributes (`</ ... />`) is refused by name. A metamethod of a class (a closure named
+  `_add`, `_tostring`, `_inherited`, ... the MM_* names of sqobject.h) is `class metamethods are not lowered` at run time:
+  the reference makes it a metamethod, not a member, so the program's output differs; no test (a refusal from the
+  producer would not match a program the reference runs).
 - TAILCALL is lowered as CALL (the reference reuses the frame of a closure). A tail recursion deep enough to need the frame reuse is a stack overflow here (`stack overflow`, the runtime's own text).
-- Not lowered: GETBASE, INSTANCEOF, LOADROOT and DELETE (refused by name); the delegate methods of an instance and a class (section 4).
+- Not lowered: INSTANCEOF, LOADROOT and DELETE (refused by name); the delegate methods of an instance and a class (section 4).
