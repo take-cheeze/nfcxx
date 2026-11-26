@@ -149,6 +149,9 @@ inline bool spawn(Child& c, const std::vector<std::string>& args, const std::str
       ::dup2(fd, 2);
     }
     if (in >= 0) ::dup2(in, 0);
+    // A host that ignores SIGCHLD passes SIG_IGN across exec, and then the driver's own children are reaped on their own: their exit
+    // status is lost. The driver gets the default disposition.
+    ::signal(SIGCHLD, SIG_DFL);
     ::execvp(argv[0], argv.data());
     std::fprintf(stderr, "nfceval: cannot run %s: %s\n", argv[0], std::strerror(errno));
     ::_exit(127);
