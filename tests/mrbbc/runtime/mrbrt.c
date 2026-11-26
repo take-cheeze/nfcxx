@@ -35,6 +35,13 @@ typedef struct MAry {
   MV *items;
 } MAry;
 
+/* A hash of the program: pairs of keys and values in order (a key set again keeps its place). */
+typedef struct MHash {
+  long len, cap;
+  MV *keys, *vals;
+} MHash;
+static MHash *hash_of(const MV *v);
+
 /* Classes and objects. A method of the program is an MDef in the list of its class (newest first, so a redefinition wins),
  * and a top-level one is in object_class's list. A class has its name (the full one, A::B for a nested class), the key
  * GETCONST and CLASS find it by (the plain name), its class-level instance variables, and the next class of the registry.
@@ -42,8 +49,9 @@ typedef struct MAry {
 typedef struct MDef {
   const char *name;
   int id;
-  long min;  /* the required parameters: the fewest arguments */
-  long max;  /* the most arguments: the required and the optional parameters */
+  long min;  /* the required and post parameters: the fewest arguments */
+  long max;  /* the most arguments: the required, optional and post parameters, or -1 with a rest parameter */
+  int kd;    /* the method has keyword parameters (its keyword hash is not a positional argument) */
   struct MDef *next;
 } MDef;
 
@@ -146,12 +154,13 @@ static const char *class_name(const MV *v);
  * object, then in Object. An explicit receiver's call (mrbbc_find_send) looks in the receiver's class only: a top-level
  * method is private, so reaching one of those with an explicit receiver is a NoMethodError. A wrong argument count is an
  * ArgumentError and a name nothing defines a NoMethodError. */
-static void add_def(MDef **head, const char *name, int id, long min, long max) {
+static void add_def(MDef **head, const char *name, int id, long min, long max, int kd) {
   MDef *d = alloc(sizeof *d);
   d->name = name;
   d->id = id;
   d->min = min;
   d->max = max;
+  d->kd = kd;
   d->next = *head;
   *head = d;
 }
@@ -164,11 +173,13 @@ static MDef *find_def(MDef *d, const char *name) {
 }
 
 /* A count outside min..max is mruby's ArgumentError, whose message names the required count only (vm.c's ENTER gives
- * argnum_error(m1+m2)), even when the method has optional parameters. */
-static int check_arity(const MDef *d, long argc) {
-  if (argc < d->min || argc > d->max) {
+ * argnum_error(m1+m2)), even when the method has optional parameters. The keyword hash of a call counts as a positional
+ * argument when the method has no keyword parameters (vm.c's check_argument_count and ENTER). */
+static int check_arity(const MDef *d, long argc, long kw) {
+  long given = argc + (kw && !d->kd ? 1 : 0);
+  if (given < d->min || (d->max >= 0 && given > d->max)) {
     char msg[128];
-    snprintf(msg, sizeof msg, "wrong number of arguments (given %ld, expected %ld)", argc, d->min);
+    snprintf(msg, sizeof msg, "wrong number of arguments (given %ld, expected %ld)", given, d->min);
     mrbbc_raise("ArgumentError", msg);
   }
   return d->id;
@@ -189,21 +200,21 @@ static MDef *find_chain(MClass *c, const char *name, MClass **where) {
   return NULL;
 }
 
-void mrbbc_def(const char *name, int id, long min, long max) {
-  add_def(&object_class.defs, name, id, min, max);
+void mrbbc_def(const char *name, int id, long min, long max, int kd) {
+  add_def(&object_class.defs, name, id, min, max, kd);
   set_owner(id, &object_class);
 }
 
-void mrbbc_def_in(const MV *cls, const char *name, int id, long min, long max) {
+void mrbbc_def_in(const MV *cls, const char *name, int id, long min, long max, int kd) {
   if (cls->tag != MRBBC_CLS) mrbbc_raise("TypeError", "a method is defined on a class");
-  add_def(&cls_of(cls)->defs, name, id, min, max);
+  add_def(&cls_of(cls)->defs, name, id, min, max, kd);
   set_owner(id, cls_of(cls));
 }
 
-int mrbbc_find(const MV *self, const char *name, long argc) {
+int mrbbc_find(const MV *self, const char *name, long argc, long kw) {
   MClass *start = self->tag == MRBBC_OBJ ? obj_of(self)->cls : &object_class;
   MDef *d = find_chain(start, name, NULL);
-  if (d != NULL) return check_arity(d, argc);
+  if (d != NULL) return check_arity(d, argc, kw);
   {
     char msg[256];
     const char *cname = self->tag == MRBBC_OBJ ? obj_of(self)->cls->name : "Object";
@@ -220,26 +231,26 @@ static void private_error(const MV *recv, const char *name) {
   mrbbc_raise("NoMethodError", msg);
 }
 
-int mrbbc_find_send(const MV *recv, const char *name, long argc) {
+int mrbbc_find_send(const MV *recv, const char *name, long argc, long kw) {
   if (recv->tag == MRBBC_OBJ) {
     MClass *where = NULL;
     MDef *d = find_chain(obj_of(recv)->cls, name, &where);
     if (d == NULL) return -1;
     if (where == &object_class) private_error(recv, name);  /* a top-level def is a private method of Object */
-    return check_arity(d, argc);
+    return check_arity(d, argc, kw);
   }
   if (recv->tag == MRBBC_CLS && find_def(object_class.defs, name) != NULL) private_error(recv, name);
   return -1;
 }
 
-int mrbbc_find_super(const MV *self, int method, const char *name, long argc) {
+int mrbbc_find_super(const MV *self, int method, const char *name, long argc, long kw) {
   MClass *owner = method >= 0 && method < owners_n ? owners[method] : NULL;
   MDef *d = owner != NULL ? find_chain(owner->super, name, NULL) : NULL;
-  if (d != NULL) return check_arity(d, argc);
+  if (d != NULL) return check_arity(d, argc, kw);
   if (strcmp(name, "initialize") == 0) {
-    if (argc != 0) {
+    if (argc + kw != 0) {
       char msg[128];
-      snprintf(msg, sizeof msg, "wrong number of arguments (given %ld, expected 0)", argc);
+      snprintf(msg, sizeof msg, "wrong number of arguments (given %ld, expected 0)", argc + kw);
       mrbbc_raise("ArgumentError", msg);
     }
     return -1;
@@ -272,12 +283,12 @@ void mrbbc_super_nil(MV *dst) {
   dst->i = 0;
 }
 
-int mrbbc_find_init(const MV *obj, long argc) {
+int mrbbc_find_init(const MV *obj, long argc, long kw) {
   MDef *d = find_chain(obj_of(obj)->cls, "initialize", NULL);
-  if (d != NULL) return check_arity(d, argc);
-  if (argc != 0) {
+  if (d != NULL) return check_arity(d, argc, kw);
+  if (argc + kw != 0) {
     char msg[128];
-    snprintf(msg, sizeof msg, "wrong number of arguments (given %ld, expected 0)", argc);
+    snprintf(msg, sizeof msg, "wrong number of arguments (given %ld, expected 0)", argc + kw);
     mrbbc_raise("ArgumentError", msg);
   }
   return -1;
@@ -496,29 +507,6 @@ int mrbbc_break_take(MV *dst, MV *frame) {
   return 0;
 }
 
-/* The arguments of a block as mruby's non-strict parameters take them: with two or more parameters, one array argument is
- * splatted (its elements are the arguments, and its length the count). */
-static int block_splat(const MV *argv, long argc, long nslots) {
-  return nslots >= 2 && argc == 1 && argv[1].tag == MRBBC_ARY;
-}
-
-long mrbbc_block_argc(const MV *argv, long argc, long nslots) {
-  return block_splat(argv, argc, nslots) ? ary_of(&argv[1])->len : argc;
-}
-
-void mrbbc_block_arg(MV *dst, const MV *argv, long argc, long nslots, long i) {
-  if (block_splat(argv, argc, nslots)) {
-    mrbbc_ary_elt(dst, &argv[1], i - 1);
-    return;
-  }
-  if (i <= argc) {
-    *dst = argv[i];
-  } else {
-    dst->tag = MRBBC_NIL;
-    dst->i = 0;
-  }
-}
-
 void mrbbc_ary_elt(MV *dst, const MV *ary, long i) {
   const MAry *a = ary_of(ary);
   MV out;
@@ -566,6 +554,7 @@ static const char *class_name(const MV *v) {
     case MRBBC_FALSE: return "FalseClass";
     case MRBBC_STR: return "String";
     case MRBBC_ARY: return "Array";
+    case MRBBC_HASH: return "Hash";
     case MRBBC_SYM: return "Symbol";
     case MRBBC_OBJ: return obj_of(v)->cls->name;
     case MRBBC_CLS: return "Class";
@@ -615,7 +604,7 @@ static int user_method(const MV *recv, const char *name, long argc) {
   MDef *d;
   if (recv->tag != MRBBC_OBJ) return -1;
   d = find_chain(obj_of(recv)->cls, name, NULL);
-  return d == NULL ? -1 : check_arity(d, argc);
+  return d == NULL ? -1 : check_arity(d, argc, 0);
 }
 
 /* Calls the program's method id on recv, with the argument arg (none when arg is NULL). The result goes to ret, which may
@@ -739,6 +728,29 @@ static void inspect_value(Buf *b, const MV *v) {
       buf_char(b, ']');
       break;
     }
+    case MRBBC_HASH: {
+      /* mruby 4's form: `{k: 1, "s" => 2}` (a symbol key is written as its name and a colon) */
+      const MHash *h = hash_of(v);
+      long k;
+      if (h->len == 0) {
+        buf_str(b, "{}");
+        break;
+      }
+      buf_char(b, '{');
+      for (k = 0; k < h->len; k++) {
+        if (k) buf_str(b, ", ");
+        if (h->keys[k].tag == MRBBC_SYM) {
+          buf_str(b, sym_of(&h->keys[k]));
+          buf_str(b, ": ");
+        } else {
+          inspect_value(b, &h->keys[k]);
+          buf_str(b, " => ");
+        }
+        inspect_value(b, &h->vals[k]);
+      }
+      buf_char(b, '}');
+      break;
+    }
     default: mrbbc_raise("RuntimeError", "unknown value tag");
   }
 }
@@ -765,6 +777,7 @@ static int value_eq(const MV *a, const MV *b) {
   }
   if (a->tag != b->tag) return 0;
   switch (a->tag) {
+    case MRBBC_HASH: mrbbc_raise("NotImplementedError", "== of a Hash is not lowered yet");
     case MRBBC_INT: return a->i == b->i;
     case MRBBC_STR: return str_of(a)->len == str_of(b)->len && memcmp(str_of(a)->p, str_of(b)->p, (size_t)str_of(a)->len) == 0;
     case MRBBC_SYM: return strcmp(sym_of(a), sym_of(b)) == 0;
@@ -835,6 +848,224 @@ void mrbbc_ary_push(MV *ary, const MV *v) {
   a = ary_of(ary);
   ary_reserve(a, a->len + 1);
   a->items[a->len++] = item;
+}
+
+static MV nil_value(void) {
+  MV v;
+  v.tag = MRBBC_NIL;
+  v.i = 0;
+  return v;
+}
+
+/* A splat (vm.c's mrb_ary_splat): an array is copied, nil is the empty array, and any other value is the array of itself,
+ * except that an instance of a program class with a to_a of its own gives that. dst may be v. */
+void mrbbc_splat(MV *dst, const MV *v) {
+  MV src = *v, out;
+  int id = src.tag == MRBBC_OBJ ? user_method(&src, "to_a", 0) : -1;
+  long k;
+  if (src.tag == MRBBC_ARY) {
+    const MAry *a = ary_of(&src);
+    out = new_ary_value(a->len);
+    for (k = 0; k < a->len; k++) mrbbc_ary_push(&out, &a->items[k]);
+  } else if (src.tag == MRBBC_NIL) {
+    out = new_ary_value(0);
+  } else if (id >= 0) {
+    MV r;
+    call_user(&r, id, &src, NULL);
+    if (r.tag != MRBBC_ARY) mrbbc_raise("TypeError", "can't convert to Array");
+    out = new_ary_value(ary_of(&r)->len);
+    for (k = 0; k < ary_of(&r)->len; k++) mrbbc_ary_push(&out, &ary_of(&r)->items[k]);
+  } else {
+    out = new_ary_value(1);
+    mrbbc_ary_push(&out, &src);
+  }
+  *dst = out;
+}
+
+/* ARYCAT: dst is an array to which the splat of src is appended, or the splat itself when dst is nil. */
+void mrbbc_ary_cat(MV *dst, const MV *src) {
+  MV s;
+  long k;
+  mrbbc_splat(&s, src);
+  if (dst->tag == MRBBC_NIL) {
+    *dst = s;
+    return;
+  }
+  if (dst->tag != MRBBC_ARY) mrbbc_raise("TypeError", "expected Array");
+  for (k = 0; k < ary_of(&s)->len; k++) mrbbc_ary_push(dst, &ary_of(&s)->items[k]);
+}
+
+/* The argument vector of a splat call: self, then the elements of the array (its length is the count). Never freed, as the
+ * rest of the heap. */
+MV *mrbbc_splat_argv(const MV *self, const MV *ary) {
+  const MAry *a;
+  MV *argv;
+  long k;
+  if (ary->tag != MRBBC_ARY) mrbbc_raise("TypeError", "expected Array");
+  a = ary_of(ary);
+  argv = alloc((size_t)(a->len + 1) * sizeof(MV));
+  argv[0] = *self;
+  for (k = 0; k < a->len; k++) argv[k + 1] = a->items[k];
+  return argv;
+}
+
+long mrbbc_ary_len(const MV *ary) {
+  if (ary->tag != MRBBC_ARY) mrbbc_raise("TypeError", "expected Array");
+  return ary_of(ary)->len;
+}
+
+/* The bind of the parameters (see mrbbc_bind in mrbrt.h). This is vm.c's ENTER: the arguments are src[0..n), with
+ * n = argc (plus the keyword hash, src[argc], when it counts as positional), and a block's one array argument is splatted
+ * when two or more parameters take it. A count short of the required ones leaves nil (a block) or is checked by the caller
+ * (a method). The optional parameters that are given are the first ones after the required; the rest takes the middle, and
+ * the post parameters the last m2 of the arguments. */
+long mrbbc_bind(MV *r1, const MV *argv, long argc, long kw, long m1, long o, long r, long m2, long kd, long strict) {
+  const long len = m1 + o + r + m2;
+  const MV *src = argv + 1;
+  long n = argc, k, mlen, g;
+  if (!strict && len >= 2 && argc == 1 && argv[1].tag == MRBBC_ARY) {
+    src = ary_of(&argv[1])->items;
+    n = ary_of(&argv[1])->len;
+  } else if (kw && !kd) {
+    n = argc + 1;  /* the keyword hash is the last positional argument of a method without keyword parameters */
+  }
+  for (k = 0; k < len + kd; k++) r1[k] = nil_value();
+  if (n < len) {
+    mlen = m2;
+    if (n < m1 + m2) mlen = m1 < n ? n - m1 : 0;
+    for (k = 0; k < n - mlen; k++) r1[k] = src[k];
+    for (k = 0; k < mlen; k++) r1[len - m2 + k] = src[n - mlen + k];
+    if (r) {
+      MV rest = new_ary_value(0);
+      r1[m1 + o] = rest;
+    }
+    g = n - m1 - m2;
+  } else {
+    long rnum = n - m1 - o - m2;
+    for (k = 0; k < m1 + o; k++) r1[k] = src[k];
+    if (r) {
+      MV rest = new_ary_value(rnum);
+      for (k = 0; k < rnum; k++) mrbbc_ary_push(&rest, &src[m1 + o + k]);
+      r1[m1 + o] = rest;
+    }
+    for (k = 0; k < m2; k++) r1[len - m2 + k] = src[m1 + o + rnum + k];
+    g = o;
+  }
+  if (g < 0) g = 0;
+  if (g > o) g = o;
+  if (kd) {
+    /* the keyword hash: the call's, or a new empty one */
+    if (kw) r1[len] = src[argc];
+    else mrbbc_hash_new(&r1[len], 0);
+  }
+  return g;
+}
+
+/* KEY_P, KARG and KEYEND on the kdict, a hash of symbols by their names. */
+static MHash *hash_of(const MV *v) { return (MHash *)(intptr_t)v->i; }
+
+
+static long hash_index(const MHash *h, const MV *key) {
+  long k;
+  for (k = 0; k < h->len; k++) {
+    const MV *x = &h->keys[k];
+    if (x->tag != key->tag) continue;
+    switch (key->tag) {
+      case MRBBC_SYM:
+        if (strcmp(sym_of(x), sym_of(key)) == 0) return k;
+        break;
+      case MRBBC_INT:
+        if (x->i == key->i) return k;
+        break;
+      case MRBBC_STR:
+        if (str_of(x)->len == str_of(key)->len && memcmp(str_of(x)->p, str_of(key)->p, (size_t)str_of(key)->len) == 0) return k;
+        break;
+      case MRBBC_NIL:
+      case MRBBC_TRUE:
+      case MRBBC_FALSE: return k;
+      default:
+        if (x->i == key->i) return k;
+        break;
+    }
+  }
+  return -1;
+}
+
+static void hash_check(const MV *v) {
+  if (v->tag != MRBBC_HASH) mrbbc_raise("TypeError", "a keyword argument hash is expected");
+}
+
+void mrbbc_key_p(MV *dst, const MV *kdict, const char *name) {
+  MV key;
+  hash_check(kdict);
+  mrbbc_sym(&key, name);
+  *dst = bool_value(hash_index(hash_of(kdict), &key) >= 0);
+}
+
+void mrbbc_karg(MV *dst, const MV *kdict, const char *name) {
+  MHash *h;
+  MV key;
+  long k;
+  hash_check(kdict);
+  h = hash_of(kdict);
+  mrbbc_sym(&key, name);
+  k = hash_index(h, &key);
+  if (k < 0) {
+    char msg[160];
+    snprintf(msg, sizeof msg, "missing keyword: %s", name);
+    mrbbc_raise("ArgumentError", msg);
+  }
+  *dst = h->vals[k];
+  memmove(&h->keys[k], &h->keys[k + 1], (size_t)(h->len - k - 1) * sizeof(MV));
+  memmove(&h->vals[k], &h->vals[k + 1], (size_t)(h->len - k - 1) * sizeof(MV));
+  h->len--;
+}
+
+void mrbbc_keyend(const MV *kdict) {
+  const MHash *h;
+  char msg[160];
+  hash_check(kdict);
+  h = hash_of(kdict);
+  if (h->len == 0) return;
+  /* vm.c's KEYEND formats the first key with %v (its to_s): a symbol's name */
+  if (h->keys[0].tag == MRBBC_SYM) snprintf(msg, sizeof msg, "unknown keyword: %s", sym_of(&h->keys[0]));
+  else snprintf(msg, sizeof msg, "unknown keyword");
+  mrbbc_raise("ArgumentError", msg);
+}
+
+void mrbbc_hash_new(MV *dst, long cap) {
+  MHash *h = alloc(sizeof *h);
+  MV v;
+  h->len = 0;
+  h->cap = cap > 0 ? cap : 0;
+  h->keys = alloc((size_t)(h->cap + 1) * sizeof(MV));
+  h->vals = alloc((size_t)(h->cap + 1) * sizeof(MV));
+  set_obj(&v, MRBBC_HASH, h);
+  *dst = v;
+}
+
+static void hash_grow(MHash *h) {
+  if (h->len < h->cap) return;
+  h->cap = h->cap ? h->cap * 2 : 4;
+  h->keys = realloc(h->keys, (size_t)(h->cap + 1) * sizeof(MV));
+  h->vals = realloc(h->vals, (size_t)(h->cap + 1) * sizeof(MV));
+  if (h->keys == NULL || h->vals == NULL) mrbbc_raise("NoMemoryError", "failed to allocate memory");
+}
+
+void mrbbc_hash_set(MV *hash, const MV *key, const MV *value) {
+  MHash *h;
+  long k;
+  hash_check(hash);
+  h = hash_of(hash);
+  k = hash_index(h, key);
+  if (k < 0) {
+    hash_grow(h);
+    h->keys[h->len] = *key;
+    h->vals[h->len] = *value;
+    h->len++;
+  } else {
+    h->vals[k] = *value;
+  }
 }
 
 static int64_t floor_div(int64_t x, int64_t y) {
