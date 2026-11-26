@@ -18,6 +18,7 @@
  * Integers wider than the small-int range would be big ints in MicroPython (MICROPY_LONGINT_IMPL). They are an error here
  * until the runtime has them, so a test program must stay in the small-int range. Names are looked up in one module
  * globals table, keyed by the name's bytes. */
+#include <setjmp.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,7 +33,7 @@ typedef uint64_t mpv;
 /* MP_BINARY_OP_* and MP_UNARY_OP_* (py/runtime0.h), as the bytecode carries them. */
 enum {
   MPY_OP_LESS = 0, MPY_OP_MORE = 1, MPY_OP_EQUAL = 2, MPY_OP_LESS_EQUAL = 3, MPY_OP_MORE_EQUAL = 4, MPY_OP_NOT_EQUAL = 5,
-  MPY_OP_IN = 6, MPY_OP_IS = 7,
+  MPY_OP_IN = 6, MPY_OP_IS = 7, MPY_OP_EXCEPTION_MATCH = 8,
   MPY_OP_OR = 22, MPY_OP_XOR = 23, MPY_OP_AND = 24, MPY_OP_LSHIFT = 25, MPY_OP_RSHIFT = 26, MPY_OP_ADD = 27,
   MPY_OP_SUBTRACT = 28, MPY_OP_MULTIPLY = 29, MPY_OP_FLOOR_DIVIDE = 31, MPY_OP_MODULO = 33
 };
@@ -41,10 +42,10 @@ enum { MPY_UOP_POSITIVE = 0, MPY_UOP_NEGATIVE = 1, MPY_UOP_INVERT = 2, MPY_UOP_N
 #define MPY_SMALL_MAX ((int64_t)((1ULL << 62) - 1))
 #define MPY_SMALL_MIN ((int64_t)(-(1LL << 62)))
 
-static void fail(const char *what) {
-  fprintf(stderr, "mpy: %s\n", what);
-  exit(1);
-}
+/* An error. A message that starts with the name of an exception class ("ValueError: ...") raises that exception, which a
+ * try block can catch; any other message is fatal (see raise_text). */
+static void raise_text(const char *what);
+static void fail(const char *what) { raise_text(what); }
 
 static int is_small(mpv v) { return (v & 1) != 0; }
 static int64_t small_value(mpv v) { return ((int64_t)v) >> 1; }
@@ -57,12 +58,43 @@ static mpv make_small(int64_t n) {
 static int is_bool(mpv v) { return v == MPY_FALSE || v == MPY_TRUE; }
 
 /* Heap objects. The type is the first member of every heap record. */
+struct MpyClass;
+
+/* The type record that every heap object starts with. A class's info record is also the type of its instances: inst is
+ * 1 for those, cls is the class, base the class it derives from, and exc is 1 for an exception class and its instances. */
 typedef struct MpyType {
   const char *name;
+  const struct MpyType *base;
+  int exc;
+  int inst;
+  struct MpyClass *cls;
 } MpyType;
 
-static const MpyType mpy_type_str = {"str"};
-static const MpyType mpy_type_function = {"function"};
+static const MpyType mpy_type_str = {"str", NULL, 0, 0, NULL};
+static const MpyType mpy_type_function = {"function", NULL, 0, 0, NULL};
+
+/* The builtin exception classes (docs/notes/mpy-pathb.md, "Exceptions"), the bases first. */
+enum {
+  EXC_BASE_EXCEPTION, EXC_EXCEPTION, EXC_ARITHMETIC, EXC_LOOKUP, EXC_ZERO_DIVISION, EXC_INDEX, EXC_KEY, EXC_VALUE,
+  EXC_TYPE, EXC_ATTRIBUTE, EXC_NAME, EXC_RUNTIME, EXC_NOT_IMPLEMENTED, EXC_COUNT
+};
+static const MpyType mpy_exc_info[EXC_COUNT] = {
+  {"BaseException", NULL, 1, 1, NULL},
+  {"Exception", &mpy_exc_info[EXC_BASE_EXCEPTION], 1, 1, NULL},
+  {"ArithmeticError", &mpy_exc_info[EXC_EXCEPTION], 1, 1, NULL},
+  {"LookupError", &mpy_exc_info[EXC_EXCEPTION], 1, 1, NULL},
+  {"ZeroDivisionError", &mpy_exc_info[EXC_ARITHMETIC], 1, 1, NULL},
+  {"IndexError", &mpy_exc_info[EXC_LOOKUP], 1, 1, NULL},
+  {"KeyError", &mpy_exc_info[EXC_LOOKUP], 1, 1, NULL},
+  {"ValueError", &mpy_exc_info[EXC_EXCEPTION], 1, 1, NULL},
+  {"TypeError", &mpy_exc_info[EXC_EXCEPTION], 1, 1, NULL},
+  {"AttributeError", &mpy_exc_info[EXC_EXCEPTION], 1, 1, NULL},
+  {"NameError", &mpy_exc_info[EXC_EXCEPTION], 1, 1, NULL},
+  {"RuntimeError", &mpy_exc_info[EXC_EXCEPTION], 1, 1, NULL},
+  {"NotImplementedError", &mpy_exc_info[EXC_RUNTIME], 1, 1, NULL},
+};
+static const MpyType mpy_type_metaclass = {"type", NULL, 0, 0, NULL};   /* a user class object; its instances' type is its info */
+static const MpyType mpy_type_bound = {"method", NULL, 0, 0, NULL};     /* a bound method: a function with its self */
 
 typedef struct {
   const MpyType *type;
@@ -79,15 +111,15 @@ static const MpyStr *str_of(mpv v) { return (const MpyStr *)(uintptr_t)v; }
 
 /* Lists, tuples and iterators. A list owns its item array; a tuple holds its items in place; an iterator names its sequence
  * and the next index. */
-static const MpyType mpy_type_list = {"list"};
-static const MpyType mpy_type_tuple = {"tuple"};
-static const MpyType mpy_type_iter = {"iterator"};
-static const MpyType mpy_type_range = {"range"};
-static const MpyType mpy_type_dict = {"dict"};
-static const MpyType mpy_type_slice = {"slice"};
+static const MpyType mpy_type_list = {"list", NULL, 0, 0, NULL};
+static const MpyType mpy_type_tuple = {"tuple", NULL, 0, 0, NULL};
+static const MpyType mpy_type_iter = {"iterator", NULL, 0, 0, NULL};
+static const MpyType mpy_type_range = {"range", NULL, 0, 0, NULL};
+static const MpyType mpy_type_dict = {"dict", NULL, 0, 0, NULL};
+static const MpyType mpy_type_slice = {"slice", NULL, 0, 0, NULL};
 /* The builtin functions are called builtin_function_or_method; str and range are types, which are called too. */
-static const MpyType mpy_type_bfn = {"builtin_function_or_method"};
-static const MpyType mpy_type_type = {"type"};
+static const MpyType mpy_type_bfn = {"builtin_function_or_method", NULL, 0, 0, NULL};
+static const MpyType mpy_type_type = {"type", NULL, 0, 0, NULL};
 
 typedef struct {
   const MpyType *type;
@@ -140,15 +172,49 @@ typedef struct {
 
 /* The builtins: len, str and range (str and range are types, called as functions), and the list methods append and pop
  * that LOAD_METHOD gives. A builtin is a static record {type, id}; the id is the index in mpy_builtins. */
-enum { BI_LEN, BI_STR, BI_RANGE, BI_APPEND, BI_POP };
+/* BI_EXC + k is the builtin class of exception k (mpy_exc_info[k]). */
+enum { BI_LEN, BI_STR, BI_RANGE, BI_APPEND, BI_POP, BI_BUILD_CLASS, BI_EXC, BI_COUNT = BI_EXC + EXC_COUNT };
 typedef struct {
   const MpyType *type;
   int id;
 } MpyBuiltin;
-static const MpyBuiltin mpy_builtins[] = {
+static const MpyBuiltin mpy_builtins[BI_COUNT] = {
   {&mpy_type_bfn, BI_LEN}, {&mpy_type_type, BI_STR}, {&mpy_type_type, BI_RANGE},
-  {&mpy_type_bfn, BI_APPEND}, {&mpy_type_bfn, BI_POP},
+  {&mpy_type_bfn, BI_APPEND}, {&mpy_type_bfn, BI_POP}, {&mpy_type_bfn, BI_BUILD_CLASS},
+  {&mpy_type_type, BI_EXC + 0}, {&mpy_type_type, BI_EXC + 1}, {&mpy_type_type, BI_EXC + 2},
+  {&mpy_type_type, BI_EXC + 3}, {&mpy_type_type, BI_EXC + 4}, {&mpy_type_type, BI_EXC + 5},
+  {&mpy_type_type, BI_EXC + 6}, {&mpy_type_type, BI_EXC + 7}, {&mpy_type_type, BI_EXC + 8},
+  {&mpy_type_type, BI_EXC + 9}, {&mpy_type_type, BI_EXC + 10}, {&mpy_type_type, BI_EXC + 11},
+  {&mpy_type_type, BI_EXC + 12},
 };
+
+/* An instance of a class, or of an exception class: its type is the class's info record. arg is the argument an exception
+ * was given (0 for none); the dict holds the attributes. A class object is a MpyClass: its info is the type of its
+ * instances, and dict its namespace. A bound method is a function with its self. */
+typedef struct {
+  const MpyType *type;
+  mpv dict;
+  mpv arg;
+} MpyInst;
+
+typedef struct MpyClass {
+  const MpyType *type;   /* &mpy_type_metaclass */
+  MpyType info;
+  mpv dict;
+} MpyClass;
+
+typedef struct {
+  const MpyType *type;
+  mpv self;
+  mpv fn;
+} MpyBound;
+
+static int is_class(mpv v) { return is_heap(v) && type_of(v) == &mpy_type_metaclass; }
+static int is_inst(mpv v) { return is_heap(v) && type_of(v)->inst; }
+static int is_exc(mpv v) { return is_heap(v) && type_of(v)->exc; }
+static int is_function(mpv v) { return is_heap(v) && type_of(v) == &mpy_type_function; }
+static int is_bound(mpv v) { return is_heap(v) && type_of(v) == &mpy_type_bound; }
+static const MpyClass *class_of(mpv v) { return (const MpyClass *)(uintptr_t)v; }
 
 static int is_list(mpv v) { return is_heap(v) && type_of(v) == &mpy_type_list; }
 static int is_tuple(mpv v) { return is_heap(v) && type_of(v) == &mpy_type_tuple; }
@@ -164,9 +230,14 @@ static mpv builtin_obj(int id) { return (mpv)(uintptr_t)&mpy_builtins[id]; }
 
 /* The builtin with this name, or -1. The module's globals are searched first, so a program can shadow these. */
 static int builtin_index(const char *name, size_t len) {
+  size_t k;
   if (len == 3 && memcmp(name, "len", 3) == 0) return BI_LEN;
   if (len == 3 && memcmp(name, "str", 3) == 0) return BI_STR;
   if (len == 5 && memcmp(name, "range", 5) == 0) return BI_RANGE;
+  for (k = 0; k < EXC_COUNT; ++k) {
+    size_t n = strlen(mpy_exc_info[k].name);
+    if (n == len && memcmp(name, mpy_exc_info[k].name, len) == 0) return BI_EXC + (int)k;
+  }
   return -1;
 }
 
@@ -239,6 +310,7 @@ int mpy_truth(mpv v) {
   if (is_iter(v)) return 1;
   if (is_range(v)) return range_of(v)->len != 0;
   if (is_dict(v)) return dict_of(v)->used != 0;
+  if (is_inst(v) || is_class(v) || is_bound(v)) return 1;   /* no __bool__ or __len__ yet: an object is true */
   {
     size_t n;
     const mpv *items;
@@ -587,10 +659,41 @@ static mpv str_binop(int op, mpv a, mpv b) {
 mpv mpy_small(int64_t n) { return make_small(n); }
 
 /* A binary operator (the MP_BINARY_OP_* codes). Booleans take part as 0 and 1, as in Python. */
+/* The class an except clause names: a builtin exception class, a user class that derives from one, or a tuple of those. */
+static const MpyType *exc_class_info(mpv cls) {
+  if (is_builtin(cls) && ((const MpyBuiltin *)(uintptr_t)cls)->id >= BI_EXC) {
+    return &mpy_exc_info[((const MpyBuiltin *)(uintptr_t)cls)->id - BI_EXC];
+  }
+  if (is_class(cls) && class_of(cls)->info.exc) return &class_of(cls)->info;
+  fail("TypeError: catching classes that do not inherit from BaseException is not allowed");
+  return NULL;
+}
+
+/* exc is an except clause's class (or tuple of classes) matched against the raised exception (MP_BINARY_OP_EXCEPTION_MATCH). */
+static mpv exc_match(mpv exc, mpv cls) {
+  size_t n, i;
+  const mpv *items;
+  const MpyType *want, *t;
+  if (is_tuple(cls)) {
+    seq_items(cls, &n, &items);
+    for (i = 0; i < n; ++i) {
+      if (exc_match(exc, items[i]) == MPY_TRUE) return MPY_TRUE;
+    }
+    return MPY_FALSE;
+  }
+  want = exc_class_info(cls);
+  if (!is_exc(exc)) return MPY_FALSE;
+  for (t = type_of(exc); t != NULL; t = t->base) {
+    if (t == want) return MPY_TRUE;
+  }
+  return MPY_FALSE;
+}
+
 mpv mpy_binop(int op, mpv a, mpv b) {
   int64_t x, y, r = 0;
   /* The in-place forms (MP_BINARY_OP_INPLACE_OR = 9 .. INPLACE_POWER = 21) are the same operators on immutable ints:
    * INPLACE_X is X + 13 (runtime0.h). The in-place matrix multiply, true divide and power stay unsupported. */
+  if (op == MPY_OP_EXCEPTION_MATCH) return exc_match(a, b);   /* the except clause: a is the exception, b the class */
   if (op >= 9 && op <= 21) op += 13;
   if (op == MPY_OP_IN) return contains(b, a) ? MPY_TRUE : MPY_FALSE;   /* a in b: the right operand is the container */
   if (op == MPY_OP_IS) return a == b ? MPY_TRUE : MPY_FALSE;           /* the same word: one immediate or one object */
@@ -678,7 +781,53 @@ static Global *find_global(const char *name, size_t len) {
   return NULL;
 }
 
-void mpy_store_name(const char *name, size_t len, mpv value) {
+/* The class body being run: its namespace is a dict on this stack (a class body's names go there, and the stack is empty
+ * at module level). A block saves the depth, so an exception leaves the namespaces of the frames it skips. */
+static mpv *ns_stack = NULL;
+static size_t ns_n = 0, ns_cap = 0;
+
+static void ns_push(mpv dict) {
+  if (ns_n == ns_cap) {
+    ns_cap = ns_cap ? ns_cap * 2 : 8;
+    ns_stack = (mpv *)realloc(ns_stack, ns_cap * sizeof(mpv));
+    if (ns_stack == NULL) fail("out of memory");
+  }
+  ns_stack[ns_n++] = dict;
+}
+
+/* The one str object of each attribute or class-namespace name, so that a dict keyed by names finds them by pointer. */
+static mpv intern_name(const char *s, size_t len) {
+  static mpv *names = NULL;
+  static size_t n = 0, cap = 0;
+  size_t i;
+  for (i = 0; i < n; ++i) {
+    const MpyStr *t = str_of(names[i]);
+    if (t->len == len && memcmp(t->data, s, len) == 0) return names[i];
+  }
+  if (n == cap) {
+    cap = cap ? cap * 2 : 16;
+    names = (mpv *)realloc(names, cap * sizeof(mpv));
+    if (names == NULL) fail("out of memory");
+  }
+  {
+    MpyStr *t = alloc_str(len);
+    memcpy(t->data, s, len);
+    t->interned = 1;
+    names[n++] = (mpv)(uintptr_t)t;
+  }
+  return names[n - 1];
+}
+
+/* The value of key in dict dv, when it has one. */
+static int dict_find(mpv dv, mpv key, mpv *out) {
+  MpyDict *d = (MpyDict *)(uintptr_t)dv;
+  long at = map_lookup(d, key, MAP_LOOKUP);
+  if (at < 0) return 0;
+  *out = d->table[at].value;
+  return 1;
+}
+
+void mpy_store_global(const char *name, size_t len, mpv value) {
   Global *g = find_global(name, len);
   if (g == NULL) {
     if (n_globals == cap_globals) {
@@ -696,13 +845,38 @@ void mpy_store_name(const char *name, size_t len, mpv value) {
   g->value = value;
 }
 
-mpv mpy_load_name(const char *name, size_t len) {
+/* STORE_NAME: into the class body's namespace when one is running, else into the module's globals. */
+void mpy_store_name(const char *name, size_t len, mpv value) {
+  if (ns_n) dict_store(ns_stack[ns_n - 1], intern_name(name, len), value);
+  else mpy_store_global(name, len, value);
+}
+
+/* LOAD_GLOBAL: the module's globals, then the builtins. */
+mpv mpy_load_global(const char *name, size_t len) {
   Global *g = find_global(name, len);
   int b;
-  if (g != NULL) return g->value;
+  if (g != NULL && g->value != 0) return g->value;   /* 0 is a deleted global */
   b = builtin_index(name, len);
+  /* A class statement reads the module's __name__ for its __module__ (the module itself runs as __main__ here). */
+  if (b < 0 && len == 8 && memcmp(name, "__name__", 8) == 0) return new_str("__main__", 8);
   if (b < 0) fail("NameError: name is not defined");
   return builtin_obj(b);
+}
+
+/* LOAD_NAME: a class body's namespace first (when one is running), then the globals and the builtins. */
+mpv mpy_load_name(const char *name, size_t len) {
+  mpv v;
+  if (ns_n && dict_find(ns_stack[ns_n - 1], intern_name(name, len), &v)) return v;
+  return mpy_load_global(name, len);
+}
+
+/* DELETE_NAME: removes the name from the class body's namespace, or from the globals (where a deleted name is 0). */
+void mpy_delete_name(const char *name, size_t len) {
+  Global *g;
+  if (ns_n && map_lookup((MpyDict *)(uintptr_t)ns_stack[ns_n - 1], intern_name(name, len), MAP_REMOVE) >= 0) return;
+  g = find_global(name, len);
+  if (g == NULL || g->value == 0) fail("NameError: name is not defined");
+  g->value = 0;
 }
 
 /* For the driver: the value of a global, or MPY_NONE and 0 when there is none. */
@@ -795,6 +969,279 @@ mpv mpy_make_closure(uint64_t index, uint64_t nargs, uint64_t n) {
 /* Calls fn with the nargs values on top of the value stack, which they leave. A closure's captured cells go in front of
  * the arguments, as MicroPython's closure_call puts them, so the function sees its free variables as its first locals. */
 static mpv builtin_call(int id, const mpv *args, uint64_t n);
+mpv mpy_call(mpv fn, uint64_t nargs);
+
+/* str(v) for one argument: a str is itself, None and the bools and small ints as their text, and an exception its argument's
+ * text (as str() gives it). */
+static mpv str_of_value(mpv v) {
+  char buf[32];
+  int k;
+  if (is_str(v)) return v;
+  if (v == MPY_NONE) return new_str("None", 4);
+  if (v == MPY_TRUE) return new_str("True", 4);
+  if (v == MPY_FALSE) return new_str("False", 5);
+  if (is_small(v)) {
+    k = snprintf(buf, sizeof buf, "%lld", (long long)small_value(v));
+    return new_str(buf, (size_t)k);
+  }
+  if (is_exc(v)) return ((const MpyInst *)(uintptr_t)v)->arg ? str_of_value(((const MpyInst *)(uintptr_t)v)->arg) : new_str("", 0);
+  fail("str() of this value is not lowered yet");
+  return MPY_NONE;
+}
+
+/* Exceptions and the try blocks (docs/notes/mpy-pathb.md, "Exceptions"). A try block is a record that holds a jmp_buf. The
+ * lowered code calls _setjmp on it in the frame that owns the try; a raise longjmps to the innermost block that is not
+ * already running its handler. The block records the value stack's height and the namespace depth, which the landing
+ * restores. A landed block stays on the stack until its handler ends (POP_EXCEPT_JUMP, END_FINALLY), as MicroPython keeps its
+ * exception block; an exception raised by the handler skips it. */
+typedef struct MpyBlock {
+  jmp_buf jb;   /* first, so the block is the jmp_buf the lowered code passes to _setjmp */
+  struct MpyBlock *prev;
+  size_t vtop, ns_n;
+  int landed;   /* the handler is running (or is about to) */
+  mpv exc;
+} MpyBlock;
+
+static MpyBlock *blocks = NULL;
+static mpv pending_exc = 0;   /* the exception a landing hands to its handler */
+static mpv method_self = 0;   /* the self LOAD_METHOD found for the method it returned (0 for none) */
+
+static mpv new_inst_of(const MpyType *t) {
+  MpyInst *o = (MpyInst *)malloc(sizeof *o);
+  if (o == NULL) fail("out of memory");
+  o->type = t;
+  o->dict = mpy_build_map(0);
+  o->arg = 0;
+  return (mpv)(uintptr_t)o;
+}
+
+static mpv new_exc(int k, mpv arg) {
+  mpv e = new_inst_of(&mpy_exc_info[k]);
+  ((MpyInst *)(uintptr_t)e)->arg = arg;
+  return e;
+}
+
+/* An uncaught exception: the reference's last line, "Name: text". */
+static void uncaught(mpv exc) {
+  const MpyInst *e = (const MpyInst *)(uintptr_t)exc;
+  if (e->arg) {
+    const MpyStr *s = str_of(str_of_value(e->arg));
+    fprintf(stderr, "mpy: %s: ", type_of(exc)->name);
+    fwrite(s->data, 1, s->len, stderr);
+    fputc('\n', stderr);
+  } else {
+    fprintf(stderr, "mpy: %s: \n", type_of(exc)->name);
+  }
+  exit(1);
+}
+
+/* Raises exc (an exception instance): the innermost block that is not running its handler takes it. */
+static void raise_value(mpv exc) {
+  MpyBlock *b;
+  while (blocks != NULL && blocks->landed) {   /* a handler's own exception goes past its block */
+    b = blocks;
+    blocks = b->prev;
+    free(b);
+  }
+  if (blocks == NULL) uncaught(exc);
+  b = blocks;
+  vtop = b->vtop;
+  ns_n = b->ns_n;
+  b->landed = 1;
+  b->exc = exc;
+  pending_exc = exc;
+  longjmp(b->jb, 1);   /* to the _setjmp that the lowered code called in the frame that owns b */
+}
+
+/* A message that starts with an exception class's name raises that class (see fail). Otherwise it is fatal. */
+static void raise_text(const char *what) {
+  size_t k;
+  for (k = 0; k < EXC_COUNT; ++k) {
+    size_t n = strlen(mpy_exc_info[k].name);
+    if (strncmp(what, mpy_exc_info[k].name, n) == 0 && what[n] == ':') {
+      const char *msg = what + n + 1;
+      if (*msg == ' ') msg++;
+      raise_value(new_exc((int)k, new_str(msg, strlen(msg))));
+    }
+  }
+  fprintf(stderr, "mpy: %s\n", what);
+  exit(1);
+}
+
+/* SETUP_EXCEPT and SETUP_FINALLY: a new block; the lowered code then calls _setjmp on it. */
+mpv mpy_try_enter(void) {
+  MpyBlock *b = (MpyBlock *)malloc(sizeof *b);
+  if (b == NULL) fail("out of memory");
+  b->prev = blocks;
+  b->vtop = vtop;
+  b->ns_n = ns_n;
+  b->landed = 0;
+  b->exc = 0;
+  blocks = b;
+  return (mpv)(uintptr_t)b;
+}
+
+/* The exception a landing gives to its handler. */
+mpv mpy_take_exc(void) { return pending_exc; }
+
+/* POP_EXCEPT_JUMP: the block of the try (or of its handler) ends. */
+void mpy_block_pop(void) {
+  MpyBlock *b = blocks;
+  if (b == NULL) fail("internal: no try block to end");
+  blocks = b->prev;
+  free(b);
+}
+
+/* END_FINALLY: the block ends; then None goes on, and an exception is raised again. */
+void mpy_end_finally(mpv v) {
+  mpy_block_pop();
+  if (v == MPY_NONE) return;
+  if (is_exc(v)) raise_value(v);
+  fail("internal: END_FINALLY with a return or an unwind is not lowered yet");
+}
+
+/* RAISE_OBJ: raises a class (instantiated with no argument) or an exception instance. */
+void mpy_raise_obj(mpv v) {
+  if ((is_builtin(v) && ((const MpyBuiltin *)(uintptr_t)v)->id >= BI_EXC) || (is_class(v) && class_of(v)->info.exc)) {
+    v = mpy_call(v, 0);
+  }
+  if (!is_exc(v)) fail("TypeError: exceptions must derive from BaseException");
+  raise_value(v);
+}
+
+/* RAISE_LAST: a bare raise re-raises the exception of the innermost handler that runs. */
+void mpy_reraise(void) {
+  MpyBlock *b;
+  for (b = blocks; b != NULL; b = b->prev) {
+    if (b->landed) raise_value(b->exc);
+  }
+  fail("RuntimeError: no active exception to reraise");
+}
+
+/* The classes and their instances. An instance's dict holds its attributes; a class's dict is its namespace, and a
+ * method is a function in it. Attribute names are interned, so the dicts compare them by pointer. */
+static mpv make_bound(mpv self, mpv fn) {
+  MpyBound *m = (MpyBound *)malloc(sizeof *m);
+  if (m == NULL) fail("out of memory");
+  m->type = &mpy_type_bound;
+  m->self = self;
+  m->fn = fn;
+  return (mpv)(uintptr_t)m;
+}
+
+/* The value of key in a class or one of its bases (an exception class has no dict). */
+static int class_find(const MpyType *t, mpv key, mpv *out) {
+  for (; t != NULL; t = t->base) {
+    if (t->cls == NULL) break;
+    if (dict_find(((const MpyClass *)t->cls)->dict, key, out)) return 1;
+  }
+  return 0;
+}
+
+static void attr_error(mpv obj, const char *name, size_t len) {
+  char msg[200];
+  snprintf(msg, sizeof msg, "AttributeError: '%s' object has no attribute '%.*s'", type_name(obj), (int)len, name);
+  fail(msg);
+}
+
+/* obj.name as a value (LOAD_ATTR). A function found in the class is bound to the instance. */
+mpv mpy_load_attr(mpv obj, const char *name, size_t len) {
+  mpv key = intern_name(name, len), v;
+  if (is_inst(obj)) {
+    if (dict_find(((const MpyInst *)(uintptr_t)obj)->dict, key, &v)) return v;
+    if (class_find(type_of(obj), key, &v)) return is_function(v) ? make_bound(obj, v) : v;
+  } else if (is_class(obj)) {
+    if (class_find(&class_of(obj)->info, key, &v)) return v;
+  }
+  attr_error(obj, name, len);
+  return MPY_NONE;
+}
+
+/* obj.name = value (STORE_ATTR). Only an instance or a class has attributes. A value of 0 is a del (LOAD_NULL, STORE_ATTR, as
+ * MicroPython 1.29 compiles it), which removes the attribute. */
+void mpy_store_attr(mpv obj, const char *name, size_t len, mpv value) {
+  mpv key = intern_name(name, len);
+  mpv dict = 0;
+  if (is_inst(obj)) dict = ((const MpyInst *)(uintptr_t)obj)->dict;
+  else if (is_class(obj)) dict = class_of(obj)->dict;
+  else attr_error(obj, name, len);
+  if (value != 0) {
+    dict_store(dict, key, value);
+    return;
+  }
+  if (map_lookup((MpyDict *)(uintptr_t)dict, key, MAP_REMOVE) < 0) attr_error(obj, name, len);
+}
+
+/* LOAD_METHOD: the method of obj named name. The self it goes with is left in method_self (0 when the attribute is not a
+ * method of the class, so the call takes no self). A list has append and pop. */
+mpv mpy_load_method(mpv obj, const char *name, size_t len) {
+  mpv key = intern_name(name, len), v;
+  method_self = 0;
+  if (is_list(obj)) {
+    method_self = obj;
+    if (len == 6 && memcmp(name, "append", 6) == 0) return builtin_obj(BI_APPEND);
+    if (len == 3 && memcmp(name, "pop", 3) == 0) return builtin_obj(BI_POP);
+    method_self = 0;
+  } else if (is_inst(obj)) {
+    if (dict_find(((const MpyInst *)(uintptr_t)obj)->dict, key, &v)) return v;
+    if (class_find(type_of(obj), key, &v)) {
+      if (is_function(v)) method_self = obj;
+      return v;
+    }
+  } else if (is_class(obj)) {
+    if (class_find(&class_of(obj)->info, key, &v)) return v;
+  }
+  attr_error(obj, name, len);
+  return MPY_NONE;
+}
+
+/* The self that the last mpy_load_method left (0 for none). */
+mpv mpy_method_self(void) { return method_self; }
+
+/* CALL_METHOD: [self, args...] on the value stack, with the self 0 when there is none. */
+mpv mpy_call_method(mpv meth, uint64_t n) {
+  size_t base;
+  if (n + 1 > vtop) fail("mpy_call_method: the arguments are not on the value stack");
+  base = vtop - n - 1;
+  if (vstk[base] == 0) {   /* no self: drop the null, the arguments are the call's */
+    memmove(vstk + base, vstk + base + 1, n * sizeof(mpv));
+    vtop -= 1;
+    return mpy_call(meth, n);
+  }
+  return mpy_call(meth, n + 1);
+}
+
+/* Inserts v below the nargs values on top of the value stack (the self of a bound method, or of __init__). */
+static void insert_front(uint64_t nargs, mpv v) {
+  size_t base = vtop - nargs;
+  vstk_reserve(vtop + 1);
+  memmove(vstk + base + 1, vstk + base, nargs * sizeof(mpv));
+  vstk[base] = v;
+  vtop += 1;
+}
+
+/* Calling a class: a new instance, initialized by its __init__ (with the arguments). Without one, an exception takes its
+ * single argument, and other classes take none. */
+static mpv instantiate(mpv clsv, uint64_t nargs) {
+  const MpyClass *c = class_of(clsv);
+  mpv key = intern_name("__init__", 8), init = 0;
+  size_t base;
+  mpv self;
+  if (nargs > vtop) fail("mpy_call: the arguments are not on the value stack");
+  base = vtop - nargs;
+  self = new_inst_of(&((MpyClass *)(uintptr_t)clsv)->info);
+  if (class_find(&c->info, key, &init)) {
+    if (!is_function(init)) fail("TypeError: __init__ is not a function");
+    insert_front(nargs, self);
+    mpy_call(init, nargs + 1);
+    vtop = base;
+    return self;
+  }
+  if (nargs > 1 || (nargs == 1 && !c->info.exc)) fail("TypeError: this class takes no arguments");
+  if (nargs == 1) ((MpyInst *)(uintptr_t)self)->arg = vstk[base];
+  vtop = base;
+  return self;
+}
 
 mpv mpy_call(mpv fn, uint64_t nargs) {
   MpyFunc *f;
@@ -806,6 +1253,13 @@ mpv mpy_call(mpv fn, uint64_t nargs) {
     ret = builtin_call(((const MpyBuiltin *)(uintptr_t)fn)->id, nargs ? vstk + base : NULL, nargs);
     vtop = base;
     return ret;
+  }
+  if (is_class(fn)) return instantiate(fn, nargs);
+  if (is_bound(fn)) {
+    const MpyBound *m = (const MpyBound *)(uintptr_t)fn;
+    mpv target = m->fn;
+    insert_front(nargs, m->self);
+    return mpy_call(target, nargs + 1);
   }
   if (!is_heap(fn) || type_of(fn) != &mpy_type_function) fail("TypeError: object is not callable");
   f = (MpyFunc *)(uintptr_t)fn;
@@ -1189,6 +1643,10 @@ static mpv new_range(int64_t start, int64_t stop, int64_t step) {
 
 static mpv builtin_call(int id, const mpv *args, uint64_t n) {
   char msg[160];
+  if (id >= BI_EXC) {   /* an exception class: its instance, with the one argument it may take */
+    if (n > 1) fail("TypeError: exceptions with more than one argument are not lowered yet");
+    return new_exc(id - BI_EXC, n ? args[0] : 0);
+  }
   switch (id) {
     case BI_LEN: {
       size_t len;
@@ -1203,20 +1661,50 @@ static mpv builtin_call(int id, const mpv *args, uint64_t n) {
       return MPY_NONE;
     }
     case BI_STR: {
-      char buf[32];
-      int k;
       if (n == 0) return new_str("", 0);
       if (n != 1) fail("TypeError: str() takes at most 1 argument");
-      if (is_str(args[0])) return args[0];   /* str(s) is s, as in MicroPython */
-      if (args[0] == MPY_NONE) return new_str("None", 4);
-      if (args[0] == MPY_TRUE) return new_str("True", 4);
-      if (args[0] == MPY_FALSE) return new_str("False", 5);
-      if (is_small(args[0])) {
-        k = snprintf(buf, sizeof buf, "%lld", (long long)small_value(args[0]));
-        return new_str(buf, (size_t)k);
+      return str_of_value(args[0]);   /* str(s) is s, as in MicroPython */
+    }
+    case BI_BUILD_CLASS: {
+      /* __build_class__(body, name[, base]): the body runs with a namespace on the stack, then the class is made of it. The
+       * arguments are copied first: the body's call may move the value stack. */
+      mpv body, name_v, base_v = 0, ns, cv;
+      MpyClass *c;
+      const MpyType *base = NULL;
+      size_t i;
+      if (n < 2 || n > 3) fail("TypeError: __build_class__ takes 2 or 3 arguments");
+      body = args[0];
+      name_v = args[1];
+      if (n == 3) base_v = args[2];
+      if (!is_str(name_v)) fail("TypeError: class name must be a str");
+      if (n == 3) {
+        if (is_class(base_v)) base = &class_of(base_v)->info;
+        else if (is_builtin(base_v) && ((const MpyBuiltin *)(uintptr_t)base_v)->id >= BI_EXC) {
+          base = &mpy_exc_info[((const MpyBuiltin *)(uintptr_t)base_v)->id - BI_EXC];
+        } else fail("TypeError: a base class must be a class");
       }
-      fail("str() of this value is not lowered yet");
-      return MPY_NONE;
+      ns = mpy_build_map(0);
+      ns_push(ns);
+      mpy_call(body, 0);
+      ns_n -= 1;
+      c = (MpyClass *)malloc(sizeof *c);
+      if (c == NULL) fail("out of memory");
+      c->type = &mpy_type_metaclass;
+      c->dict = ns;
+      c->info.base = base;
+      c->info.exc = base ? base->exc : 0;
+      c->info.inst = 1;
+      c->info.cls = c;
+      {
+        const MpyStr *s = str_of(name_v);
+        char *nm = (char *)malloc(s->len + 1);
+        if (nm == NULL) fail("out of memory");
+        for (i = 0; i < s->len; ++i) nm[i] = s->data[i];
+        nm[s->len] = '\0';
+        c->info.name = nm;
+      }
+      cv = (mpv)(uintptr_t)c;
+      return cv;
     }
     case BI_RANGE: {
       uint64_t i;
@@ -1254,19 +1742,6 @@ static mpv builtin_call(int id, const mpv *args, uint64_t n) {
     default:
       fail("internal: unknown builtin");
   }
-  return MPY_NONE;
-}
-
-/* LOAD_METHOD: the method of obj named name. The lowering passes only append and pop. A list has them; any other value
- * fails with MicroPython's attribute error. */
-mpv mpy_load_method(mpv obj, const char *name, size_t len) {
-  char msg[160];
-  if (is_list(obj)) {
-    if (len == 6 && memcmp(name, "append", 6) == 0) return builtin_obj(BI_APPEND);
-    if (len == 3 && memcmp(name, "pop", 3) == 0) return builtin_obj(BI_POP);
-  }
-  snprintf(msg, sizeof msg, "AttributeError: '%s' object has no attribute '%.*s'", real_type_name(obj), (int)len, name);
-  fail(msg);
   return MPY_NONE;
 }
 
@@ -1343,8 +1818,24 @@ static void repr_into(Buf *b, mpv v) {
     }
     if (!is_l && n == 1) buf_put(b, ",", 1);
     buf_put(b, is_l ? "]" : ")", 1);
+  } else if (is_exc(v)) {
+    const MpyInst *e = (const MpyInst *)(uintptr_t)v;
+    buf_str(b, type_of(v)->name);
+    buf_put(b, "(", 1);
+    if (e->arg) {
+      repr_into(b, e->arg);
+      buf_str(b, ",");
+    }
+    buf_put(b, ")", 1);
+  } else if (is_class(v)) {
+    buf_str(b, "<class '");
+    buf_str(b, class_of(v)->info.name);
+    buf_str(b, "'>");
   } else fail("repr of this value is not lowered yet");
 }
+
+/* LOAD_BUILD_CLASS: the builtin __build_class__. */
+mpv mpy_build_class_fn(void) { return builtin_obj(BI_BUILD_CLASS); }
 
 /* Prints a value as the driver reports the result of the module: a str as its text, anything else as repr. */
 void mpy_print_value(mpv v) {
