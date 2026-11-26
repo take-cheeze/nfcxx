@@ -83,7 +83,7 @@ if MrbcRbDefault.from_env
   puts '-- generated descriptor'
   Dir.mktmpdir do |dir|
     code, = runtime.generate(FIXTURE, dir)
-    slots = code[/TrMixed_ivar_slots\[\] = \{\n(.*?)\n\};/m, 1].to_s
+    slots = code[/TrMixed_bc2cpp_ivar_slot_table\[\] = \{\n(.*?)\n\};/m, 1].to_s
     {
       'count' => 'MRB_DATA_IVAR_INT', 'tag' => 'MRB_DATA_IVAR_SYMBOL', 'on' => 'MRB_DATA_IVAR_BOOL',
       'opt' => 'MRB_DATA_IVAR_INT_OR_NIL', 'name' => 'MRB_DATA_IVAR_VALUE'
@@ -91,7 +91,7 @@ if MrbcRbDefault.from_env
       check.call("@#{name} is listed with #{kind}",
                  slots.include?("BC2CPP_IVAR_UNSPELLED(#{name}, offsetof(TrMixed_ivars, ivar_#{name}), #{kind})"))
     end
-    check.call('the descriptor count and index cover all five', code.match?(/TrMixed_ivar_slots, 5, sizeof\(TrMixed_ivars\), TrMixed_ivar_hash, \d+(?: BC2CPP_IVAR_NAMES\(TrMixed_ivar_names\))? \};/))
+    check.call('the descriptor count and index cover all five', code.match?(/TrMixed_bc2cpp_ivar_slot_table, 5, sizeof\(TrMixed_ivars\), TrMixed_ivar_hash, \d+(?: BC2CPP_IVAR_NAMES\(TrMixed_ivar_names\))? \};/))
     fields = code[/struct TrLate_ivars \{\n(.*?)\n\};/m, 1].to_s
     # @tl_a, not @a: any native source spelling @a (mruby-metaprog's doc comments do) makes the name outside-spelled,
     # which demotes its typed slot by design (demote_typed_ivars_foreign_writable). The name must be one no source spells.
@@ -106,7 +106,7 @@ if MrbcRbDefault.from_env
       end
     RUBY
     spelled_fields = spelled[/struct TrSpelled_ivars \{\n(.*?)\n\};/m, 1].to_s
-    spelled_slots = spelled[/TrSpelled_ivar_slots\[\] = \{\n(.*?)\n\};/m, 1].to_s
+    spelled_slots = spelled[/TrSpelled_bc2cpp_ivar_slot_table\[\] = \{\n(.*?)\n\};/m, 1].to_s
     check.call('a name a native source spells (@a) stays a :value slot, not the typed slot it would otherwise be',
                spelled_fields.include?('mrb_value ivar_a;') && !spelled_fields.include?('mrb_int ivar_a;') &&
                  spelled_slots.include?('BC2CPP_IVAR_UNSPELLED(a, offsetof(TrSpelled_ivars, ivar_a), MRB_DATA_IVAR_VALUE)'))

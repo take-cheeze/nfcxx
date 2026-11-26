@@ -242,8 +242,11 @@ struct Stats {
   // Type feedback (docs/notes/ast.md, "Feedback"): arithmetic and comparison nodes record the types of their operands before they
   // specialize.
   std::uint64_t feedback_records = 0;        // observations recorded by nodes that had not specialized yet
-  std::uint64_t speculations_installed = 0;  // specialized nodes installed from the types of recorded operands (not after a deopt)
-  std::uint64_t feedback_generic = 0;        // nodes that gave up speculating (operands of two kinds, or not numbers) and stayed generic
+  std::uint64_t speculations_installed = 0;  // specialized nodes installed from the types of recorded operands (also after a re-profile)
+  std::uint64_t feedback_generic = 0;        // nodes that gave up speculating (operands of two kinds, or not numbers) and stayed generic;
+                                             // also a node past State::reprofile_max re-profiles, after a deopt
+  std::uint64_t reprofiles = 0;              // deopts on numbers that sent a specialized node back to recording its operands (at most
+                                             // State::reprofile_max per node; docs/notes/ast.md, "Feedback")
   // The tier (docs/notes/ast.md, "Tiering"); all zero while it is off.
   std::uint64_t tier_compiled = 0;    // versions of functions that became callable native code (compiled here or loaded from the cache)
   std::uint64_t tier_compiles = 0;    // runs of the nfcxx driver
@@ -286,7 +289,7 @@ struct TierOptions {
   std::string rt_dir;               // the directory with nfcast_tier_rt.h; default: lib/ast next to the driver, or next to this source file
   unsigned timeout = 120;           // seconds one compile may take
   bool osr = true;                  // a hot loop is compiled and taken over in the middle of the call (NFCAST_TIER_OSR=0 turns it off)
-  bool jit = false;                 // a hot integer loop is compiled to x86-64 machine code (nfcast_jit.hpp; NFCAST_JIT=1, with the tier on)
+  bool jit = false;                 // a hot integer loop is compiled to x86-64 machine code (nfcast_jit.hpp; the driver takes --jit, with the tier on)
   unsigned share = 0;               // 1: versions with the same Merkle hash of their lowered form share one shared object (NFCAST_TIER_SHARE=1;
                                     // docs/notes/astro.md, "lib/ast spike"); 2: the same, but every version is still generated and compared
 };
@@ -346,6 +349,10 @@ struct State {
   // observations agree (docs/notes/ast.md, "Feedback"); operands of two kinds make it stay generic. 1 (or 0) specializes at the
   // first operands, as the engine did before feedback. Set in code before running scripts (no environment variable).
   unsigned feedback_warm = 2;
+  // A specialized arithmetic or comparison node whose guard fails on numbers goes back to recording its operands (a re-profile),
+  // and specializes to their new type after FEEDBACK_WARM agreeing observations. A node re-profiles at most this many times in its
+  // life; after that a further deopt leaves it generic for good (counted by feedback_generic). Set in code, not by environment.
+  unsigned reprofile_max = 2;
 
   // ---- errors ----
   [[noreturn]] void error(const Value& v);                // raise V as is
@@ -369,6 +376,7 @@ struct State {
 
   // ---- tiering (nfcast_tier.cpp) ----
   void enable_tier(const TierOptions& opt);  // TierOptions::Off turns it off again; versions already compiled stay usable
+  TierOptions tier_options() const;          // the options the tier was last enabled with (mode Off when there is none)
   std::string tier_state(const Value& fn);   // what the tier made of a script function: "cold", "compiled ...", "ineligible: why", ...
   // The Merkle hashes of the lowered form of a script function called with arguments ARGS (their types are the signature): [0] is
   // the whole function, then every expression and statement in pre-order. Empty when it is not a kernel for these arguments.

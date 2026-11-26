@@ -1,0 +1,14 @@
+(ir-module "call_double.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "twice"
+  (ret int)
+  (params (param %0 "x" int))
+  (let %1 int (wadd int %0 %0))
+  (set %0 %1)
+  (return %0))
+(function "main"
+  (ret int)
+  (params)
+  (let %0 int (const int 5))
+  (let %1 int (call int &"twice" %0))
+  (let %2 int (wadd int %0 %1))
+  (return %2))

@@ -10,13 +10,15 @@
 
 int main(int argc, char** argv) {
   bool stats = false;
+  bool jit = false;
   const char* path = nullptr;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--stats") == 0) stats = true;
+    else if (std::strcmp(argv[i], "--jit") == 0) jit = true;
     else path = argv[i];
   }
   if (!path) {
-    std::fprintf(stderr, "usage: nfcast_run [--stats] file.lua\n");
+    std::fprintf(stderr, "usage: nfcast_run [--stats] [--jit] file.lua\n");
     return 2;
   }
   std::ifstream in(path, std::ios::binary);
@@ -30,6 +32,15 @@ int main(int argc, char** argv) {
   if (code.size() >= 2 && code[0] == '#') code = "--" + code;  // a shebang line
   nfcast::State S;
   S.open_libs();
+  if (jit) {  // the machine-code tier for loops: needs the tier on (NFCAST_TIER=sync or async)
+    nfcast::TierOptions o = S.tier_options();
+    if (o.mode == nfcast::TierOptions::Off) {
+      std::fprintf(stderr, "nfcast_run: --jit needs the tier on (NFCAST_TIER=sync or async)\n");
+      return 2;
+    }
+    o.jit = true;
+    S.enable_tier(o);
+  }
   std::string err;
   nfcast::Closure* cl = S.load(code, path, &err);
   if (!cl) {
@@ -69,6 +80,10 @@ int main(int argc, char** argv) {
                    static_cast<unsigned long long>(st.tier_aborts));
       std::fprintf(stderr, "tier-osr: runs=%llu bailouts=%llu ineligible=%llu\n", static_cast<unsigned long long>(st.tier_osr_runs),
                    static_cast<unsigned long long>(st.tier_osr_bailouts), static_cast<unsigned long long>(st.tier_osr_ineligible));
+      std::fprintf(stderr, "jit: jit_compiled=%llu jit_entries=%llu jit_guard_misses=%llu jit_bailouts=%llu jit_refused=%llu\n",
+                   static_cast<unsigned long long>(st.jit_compiled), static_cast<unsigned long long>(st.jit_entries),
+                   static_cast<unsigned long long>(st.jit_guard_misses), static_cast<unsigned long long>(st.jit_bailouts),
+                   static_cast<unsigned long long>(st.jit_refused));
     }
   }
   return rc;

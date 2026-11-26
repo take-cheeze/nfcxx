@@ -94,27 +94,29 @@ def roundtripOne (path : String) : IO (Except String String) := do
     | none => return .ok s!"round trip ok: {total} functions"
     | some a => return .error s!"round trip differs in {bad} of {total} functions; first (original, reprinted): {a}"
 
-/-- Runs the function named `name` (no parameters) under the semantics of `NfcxxIR.Sem`, and reports its outcome. -/
+/-- Runs the function named `name` (no parameters) under the semantics of `NfcxxIR.Sem`, with the functions of
+the file available to its calls, and reports its outcome. -/
 def runOne (path name : String) : IO (Except String String) := do
   let src ← IO.FS.readFile path
   match parseFile src with
   | .error e => return .error e
   | .ok forms =>
+    let mut prog : List Func := []
     for f in forms do
       match f with
       | SExp.list (SExp.atom "function" :: _) =>
         match decodeFunc f with
         | .error e => return .error e
-        | .ok fn =>
-          if fn.linkage == name then
-            let line := match Nfcxx.IR.Sem.runFunc 1000000 fn with
-              | .value (some v) => s!"value {v}"
-              | .value none => "value none"
-              | .trap m => s!"trap: {m}"
-              | .stuck m => s!"stuck: {m}"
-            return .ok line
+        | .ok fn => prog := prog ++ [fn]
       | _ => pure ()
-    return .error s!"no function {name}"
+    if !prog.any (fun fn => fn.linkage == name) then
+      return .error s!"no function {name}"
+    let line := match Nfcxx.IR.Sem.runNamed 1000000 prog name with
+      | .value (some v) => s!"value {v}"
+      | .value none => "value none"
+      | .trap m => s!"trap: {m}"
+      | .stuck m => s!"stuck: {m}"
+    return .ok line
 
 def main (args : List String) : IO UInt32 := do
   match args with

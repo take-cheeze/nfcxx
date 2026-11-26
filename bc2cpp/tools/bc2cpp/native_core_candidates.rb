@@ -47,7 +47,7 @@ module NativeCoreCandidates
     mrb_hash_size mrb_hash_key_p mrb_hash_delete_key mrb_intern_cstr mrb_intern_static mrb_intern
     mrb_intern_str mrb_sym_name mrb_sym_str mrb_iv_get mrb_iv_set mrb_iv_defined
     mrb_obj_as_string mrb_obj_class mrb_obj_classname mrb_obj_equal mrb_obj_is_kind_of mrb_obj_new
-    mrb_obj_value mrb_raise mrb_raisef mrb_exc_get_id mrb_str_new mrb_str_new_cstr
+    mrb_obj_value mrb_raise mrb_raisef mrb_exc_get_id mrb_exc_raise mrb_full_gc mrb_str_new mrb_str_new_cstr
     mrb_str_new_static mrb_str_to_cstr mrb_string_value_cstr mrb_string_value_len mrb_str_cat mrb_str_cat_cstr
     mrb_str_cat_str mrb_str_append mrb_debug_get_position
   ].to_set.freeze

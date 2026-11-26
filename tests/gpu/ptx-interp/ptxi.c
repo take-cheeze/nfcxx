@@ -30,8 +30,9 @@
  * deadlock (exit 4).
  *
  * Timing (--timing, --sms, --issue, --bw, --lat, --l1). A cycle model, not a clock-by-clock simulation. Each
- * instruction has the latency of its class: alu, branch, local, global, atomic, barrier, l1. The defaults are 4, 4, 30,
- * 400, 400, 20 and 30 cycles, changed with --lat CLASS=CYCLES. Param loads and stores cost alu; a generic ld/st costs
+ * instruction has the latency of its class: alu, branch, local, global, atomic, barrier, l1. The defaults are 2, 4, 40,
+ * 320, 31, 24 and 30 cycles (alu, branch, local, global, atomic, barrier and l1; measured on an RTX 5050, sm_120, except
+ * branch and l1, which are not measured), changed with --lat CLASS=CYCLES. Param loads and stores cost alu; a generic ld/st costs
  * global, except a global load that hits the L1 (below), which costs l1.
  * A warp is 32 consecutive threads of a block, and it issues each instruction once for all its lanes. With --timing,
  * each lane counts, per instruction, its steps through it (s), its steps with the predicate true (a), and its true steps
@@ -993,7 +994,7 @@ static int noutcomes;
 /* The timing model (the header comment says what it is). */
 enum { LAT_ALU, LAT_BRANCH, LAT_LOCAL, LAT_GLOBAL, LAT_ATOMIC, LAT_BARRIER, LAT_L1, LAT_N };
 static const char *lat_names[LAT_N] = {"alu", "branch", "local", "global", "atomic", "barrier", "l1"};
-static uint64_t lat[LAT_N] = {4, 4, 30, 400, 400, 20, 30};
+static uint64_t lat[LAT_N] = {2, 4, 40, 320, 31, 24, 30};
 static int sms = 1;
 static uint64_t issue_rate = 4; /* warp instructions per cycle per SM */
 static uint64_t mem_bw = 16;    /* global bytes per cycle per SM */
@@ -1727,7 +1728,7 @@ static void usage(void) {
           "           [--random N [--seed S]] [--explore [--max-schedules M]] [--max-steps S]\n"
           "           [--timing] [--sms N] [--issue N] [--bw BYTES] [--lat CLASS=CYCLES]... [--l1 BYTES]\n"
           "  ARG: ptr:COUNT[:iota=START] | s32:VALUE | bytes:HEX\n"
-          "  CLASS: alu, branch, local, global, atomic, barrier, l1 (defaults 4 4 30 400 400 20 30)\n");
+          "  CLASS: alu, branch, local, global, atomic, barrier, l1 (defaults 2 4 40 320 31 24 30)\n");
   exit(EXIT_BAD);
 }
 

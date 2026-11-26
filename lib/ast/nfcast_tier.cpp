@@ -26,6 +26,7 @@
 // keeps one global stack of try blocks (lib_src/throw.c of the front end), so a second thread running C++ code with destructors
 // while the interpreter runs would corrupt it.
 #include <algorithm>
+#include <csignal>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -2092,7 +2093,13 @@ void launch(State& S, Version* v) {
   ++S.stats.tier_compiles;
   note(T, "compiling %s", v->cpp);
   v->spawned = true;
-  if (!bld::spawn(v->child, args, v->log)) {
+  // A host that ignores SIGCHLD (Python, Go, a daemon) passes SIG_IGN on to the driver across exec, and the driver's own steps
+  // (its Ruby scripts wait for the compilers) then fail: their status is lost and the driver exits 0 with no output. So the child
+  // gets the default disposition; the host's own is put back as soon as the fork is done (the child has its copy by then).
+  void (*host_chld)(int) = std::signal(SIGCHLD, SIG_DFL);
+  bool started = bld::spawn(v->child, args, v->log);
+  std::signal(SIGCHLD, host_chld);
+  if (!started) {
     v->spawned = false;
     ::unlink(v->cpp.c_str());
     return fail_version(S, v, "cannot start the driver");
@@ -2781,7 +2788,6 @@ void tier_init_from_env(State& S) {
     if (v > 0) o.threshold = o.loop_threshold = static_cast<unsigned>(v);
   }
   if (const char* r = std::getenv("NFCAST_TIER_OSR")) o.osr = !(r[0] == '0' && !r[1]);
-  if (const char* j = std::getenv("NFCAST_JIT")) o.jit = j[0] == '1' && !j[1];
   if (const char* sh = std::getenv("NFCAST_TIER_SHARE")) o.share = static_cast<unsigned>(std::atoi(sh));
   S.enable_tier(o);
 }
@@ -2795,6 +2801,13 @@ void tier_shutdown(State& S) {
   T->queued.clear();
   delete T;
   S.tier = nullptr;
+}
+
+TierOptions State::tier_options() const {
+  if (tier) return tier->opt;
+  TierOptions off;
+  off.mode = TierOptions::Off;
+  return off;
 }
 
 void State::enable_tier(const TierOptions& opt) {

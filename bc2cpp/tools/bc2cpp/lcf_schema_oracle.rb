@@ -16,7 +16,8 @@ require 'set'
 #   :uint8 -> Integer in [0, 255]; :bool -> true/false; :string -> String; :double -> Float;
 #   :Array1D/:Array2D -> LCF::Array1D/LCF::Array2D; :Tree -> LCF::Tree;
 #   :int8_array/:int32_array/:bool_array/:event/:move_commands -> Array; :int16_array -> Array, or Hash when
-#   the field has an `order`. `enums:` is documentation: to_rb never maps an Integer to its Symbol.
+#   the field has an `order`; :int16_packed -> LCF::ShortArray. `enums:` is documentation: to_rb never maps an
+#   Integer to its Symbol.
 #   An absent chunk reads the schema `default` (an Integer default that is a lambda is called) and nil
 #   when the field has none.
 module LcfSchemaOracle
@@ -26,7 +27,7 @@ module LcfSchemaOracle
     'int' => %w[Integer], 'uint8' => %w[Integer], 'bool' => %w[TrueClass FalseClass], 'string' => %w[String],
     'double' => %w[Float], 'Array1D' => %w[LCF::Array1D], 'Array2D' => %w[LCF::Array2D], 'Tree' => %w[LCF::Tree],
     'int8_array' => %w[Array], 'int32_array' => %w[Array], 'bool_array' => %w[Array], 'event' => %w[Array],
-    'move_commands' => %w[Array], 'int16_array' => %w[Array]
+    'move_commands' => %w[Array], 'int16_array' => %w[Array], 'int16_packed' => %w[LCF::ShortArray]
   }.freeze
   TYPE_RANGES = { 'int' => [-0x8000_0000, 0x7fff_ffff], 'uint8' => [0, 255] }.freeze
   DUMP = File.expand_path('lcf_schema_dump.rb', __dir__)

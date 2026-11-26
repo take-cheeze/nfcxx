@@ -14,7 +14,7 @@
 #                            State::max_depth = 1500 levels, a depth it sizes for about 1 KB of C++ stack per level: on Path B it needs
 #                            the stack of the frames of the SSA route (docs/notes/pathb-ssa-qbe.md, "Frames"), not gcc's
 #   - tests/ast/jit.cpp      the machine-code tier for loops (docs/notes/ast.md, "JIT") against the interpreter, with its counters;
-#                            the driver cases also run once with the tier on and NFCAST_JIT=1 (the seventh configuration)
+#                            the driver cases also run once with the tier on and --jit (the seventh configuration)
 #   NFCAST_TIER_CACHE=dir   where the tier keeps the code it compiles (default: the library's, under $TMPDIR; a rerun reuses it)
 cd "$(dirname "$0")/../.."
 backends=${NFCXX_BACKEND:-"pathb gcc"}
@@ -49,10 +49,10 @@ for be in $backends; do
     name=$(basename "$lua" .lua)
     for cfg in "0 NFCAST_INLINE=1 plain" "0 NFCAST_INLINE_WARM=1 inline-early" "0 NFCAST_INLINE=0 no-inline" \
                "sync NFCAST_INLINE=1 tier" "sync NFCAST_INLINE_WARM=1 tier+inline-early" \
-               "async NFCAST_INLINE=1 tier-async" "sync NFCAST_INLINE=1 tier+jit NFCAST_JIT=1"; do
-      set -- $cfg; tier=$1; inl=$2; label=$3; jit=${4:-NFCAST_JIT=0}
+               "async NFCAST_INLINE=1 tier-async" "sync NFCAST_INLINE=1 tier+jit --jit"; do
+      set -- $cfg; tier=$1; inl=$2; label=$3; jit=${4:-}
       tag=$name.$label
-      if ! (cd tests/ast/cases && env "$inl" "$jit" NFCXX_BACKEND=$be NFCAST_TIER=$tier NFCAST_TIER_THRESHOLD=1 "$out/driver" "$name.lua" > "$out/$tag.out" 2> "$out/$tag.err") ||
+      if ! (cd tests/ast/cases && env "$inl" NFCXX_BACKEND=$be NFCAST_TIER=$tier NFCAST_TIER_THRESHOLD=1 "$out/driver" $jit "$name.lua" > "$out/$tag.out" 2> "$out/$tag.err") ||
          ! cmp -s "$out/$tag.out" "tests/ast/cases/$name.out"; then
         echo "FAIL $be ast case $name ($label)"; diff "tests/ast/cases/$name.out" "$out/$tag.out" | head -10; head -5 "$out/$tag.err"; fail=1
       fi
