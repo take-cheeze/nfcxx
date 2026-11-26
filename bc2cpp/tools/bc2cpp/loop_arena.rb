@@ -14,8 +14,8 @@ require_relative 'callee_arena'
 # still read after the jump is in a register live there (RegisterFlow's liveness, handler edges included), in a slot
 # or object it reached, or rooted below the header's index; a callee holds nothing at a jump of its caller. Refused
 # where something other than a register holds a value: a method RegisterFlow refuses, one with handlers or captured
-# registers, and one that declares any other mrb_value local (a placed tuple, a buffer). BC2CPP_LOOP_ARENA=0 (or
-# BC2CPP_CALLEE_ARENA=0) leaves every loop alone.
+# registers, and one that declares any other mrb_value local (a placed tuple, a buffer; an instruction's own scoped
+# temporary is not one). BC2CPP_LOOP_ARENA=0 (or BC2CPP_CALLEE_ARENA=0) leaves every loop alone.
 class LoopArena < RegisterFlow
   # The names a method's own mrb_value locals may have: its registers, self and the parameters.
   OWN_LOCAL = /\A(?:r\d+|self)\z/
@@ -38,8 +38,12 @@ class LoopArena < RegisterFlow
     new(irep, texts, captured).place
   end
 
+  # The numeric ops' temporary (`{ mrb_value bc2cpp_nt; ... }`, codegen_insn.rb and cmp_num_outline.rb) is scoped to
+  # its own instruction's text, so it holds nothing at a backward jump.
+  SCOPED_TEMP = /\{\s*mrb_value bc2cpp_nt;/
+
   def self.foreign_locals?(text, params)
-    text.scan(/\bmrb_value\s*(\*?)\s*([A-Za-z_]\w*)\s*(\[?)/).any? do |star, name, bracket|
+    text.gsub(SCOPED_TEMP, '{').scan(/\bmrb_value\s*(\*?)\s*([A-Za-z_]\w*)\s*(\[?)/).any? do |star, name, bracket|
       !star.empty? || !bracket.empty? || !(name.match?(OWN_LOCAL) || params.include?(name))
     end
   end
