@@ -2089,6 +2089,58 @@ mpv mpy_unpack_get(mpv seq, uint64_t n, uint64_t i) {
   return items[n - 1 - i];
 }
 
+/* UNPACK_EX (mp_unpack_ex): seq is unpacked for left values before a star target and right values after it. The result is a list of
+ * the left + right + 1 values in stack order: value j goes to the stack slot j from the bottom, so the first value is the top one,
+ * and the star target is the list of the values in between. A list or a tuple is read in place; any other iterable is read once. */
+mpv mpy_unpack_ex(mpv seq, uint64_t left, uint64_t right) {
+  MpyList *out = list_new(left + right + 1), *star, *rest;
+  size_t len, k;
+  uint64_t i, n;
+  const mpv *items;
+  mpv it, item, *lefts;
+  char msg[120];
+  if (seq_items(seq, &len, &items)) {
+    if (len < left + right) {
+      snprintf(msg, sizeof msg, "ValueError: need more than %d values to unpack", (int)len);
+      fail(msg);
+    }
+    for (i = 0; i < right; ++i) list_append(out, items[len - 1 - i]);
+    star = list_new(len - left - right);
+    for (k = left; k + right < len; ++k) list_append(star, items[k]);
+    list_append(out, (mpv)(uintptr_t)star);
+    for (i = 0; i < left; ++i) list_append(out, items[left - 1 - i]);
+    return (mpv)(uintptr_t)out;
+  }
+  /* A generic iterable: the left values, then the rest in a list, of which the last right values are taken out. */
+  it = mpy_get_iter(seq);
+  lefts = (mpv *)malloc((left ? left : 1) * sizeof(mpv));
+  if (lefts == NULL) fail("out of memory");
+  for (n = 0; n < left; ++n) {
+    item = mpy_iter_next(it);
+    if (item == 0) {
+      snprintf(msg, sizeof msg, "ValueError: need more than %d values to unpack", (int)n);
+      fail(msg);
+    }
+    lefts[n] = item;
+  }
+  rest = list_new(0);
+  while ((item = mpy_iter_next(it)) != 0) list_append(rest, item);
+  if (rest->len < right) {
+    snprintf(msg, sizeof msg, "ValueError: need more than %d values to unpack", (int)left);
+    fail(msg);
+  }
+  for (i = 0; i < right; ++i) list_append(out, rest->items[rest->len - 1 - i]);
+  star = list_new(rest->len - right);
+  for (k = 0; k + right < rest->len; ++k) list_append(star, rest->items[k]);
+  list_append(out, (mpv)(uintptr_t)star);
+  for (i = 0; i < left; ++i) list_append(out, lefts[left - 1 - i]);
+  free(lefts);
+  return (mpv)(uintptr_t)out;
+}
+
+/* The value at stack slot j of an UNPACK_EX (see mpy_unpack_ex). */
+mpv mpy_unpack_ex_item(mpv r, uint64_t j) { return ((const MpyList *)(uintptr_t)r)->items[j]; }
+
 mpv mpy_get_iter(mpv obj) {
   MpyIter *it;
   size_t len;

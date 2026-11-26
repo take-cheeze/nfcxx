@@ -48,6 +48,10 @@ binary operators plus 13, as in `py/runtime0.h`; on ints they give the same resu
   the next index. The lowering pushes the items on the runtime value stack for `BUILD_LIST`/`BUILD_TUPLE`, as calls do.
 - `LOAD_SUBSCR`, `STORE_SUBSCR` and `UNPACK_SEQUENCE` (the first item ends on top, as MicroPython's `mp_unpack_sequence`
   leaves it) go through `mpy_getitem`, `mpy_setitem` and `mpy_unpack_get`. Their error messages are MicroPython's.
+- `UNPACK_EX` (a star target, `a, *b, c = xs`) is `mpy_unpack_ex`, which makes the values once as `mp_unpack_ex` lays them out
+  (a list in stack order, the first value last in the list), and the lowering stores value j at stack slot j from the sequence's
+  slot. The star target is a list of the values between. A list or tuple is read in place; any other iterable is read once, and
+  its short-sequence message counts the values read (`need more than N values to unpack`), as the reference does.
 - A `for` loop's iterator takes `kIterSlots` (4, the `MP_OBJ_ITER_BUF_NSLOTS` of obj.h on both 32- and 64-bit hosts) stack
   slots, with its object in the bottom one. `GET_ITER_STACK` makes it, `FOR_ITER` reads it there, and `break` pops all four.
   The plain `GET_ITER`, which never feeds a `for` loop, is refused.
@@ -182,7 +186,7 @@ labels of their targets. It covers small-int and None/bool constants, names (`LO
 `POP_JUMP_IF_FALSE`/`TRUE`, `JUMP`, the `JUMP_IF_*_OR_POP` pair (short-circuit `or`/`and`), `ROT_THREE` (chained
 comparisons), `LOAD_CONST_STRING` and `LOAD_CONST_OBJ` (str constants), `MAKE_FUNCTION`, `LOAD_DEREF`, `STORE_DEREF`,
 `MAKE_CLOSURE`, `CALL_FUNCTION`, `BUILD_LIST`/`BUILD_TUPLE`/`BUILD_SET`, `LOAD_SUBSCR`/`STORE_SUBSCR`, `BUILD_MAP`/`STORE_MAP`, `BUILD_SLICE`, `LOAD_NULL` (for `del`), `STORE_COMP` (list, dict and set
-comprehensions), `UNPACK_SEQUENCE`, `GET_ITER_STACK`
+comprehensions), `UNPACK_SEQUENCE`, `UNPACK_EX`, `GET_ITER_STACK`
 and `FOR_ITER`, and `RETURN_VALUE`, and the exception and class opcodes (see Exceptions and Classes): `SETUP_EXCEPT`,
 `SETUP_FINALLY`, `SETUP_WITH`, `WITH_CLEANUP`, `POP_EXCEPT_JUMP`, `END_FINALLY`, `UNWIND_JUMP`, `RAISE_OBJ`, `RAISE_LAST`, `LOAD_BUILD_CLASS`, `LOAD_ATTR`,
 `STORE_ATTR`, `LOAD_METHOD`/`CALL_METHOD`, `DELETE_FAST`, `DELETE_NAME`, `DELETE_DEREF`, `DUP_TOP_TWO`, with `LOAD_NAME`/`STORE_NAME` for the

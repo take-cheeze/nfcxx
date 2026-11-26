@@ -253,6 +253,9 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
     } else if (o == opcode("UNPACK_SEQUENCE")) {
       op.kind = "UNPACK_SEQUENCE";
       op.arg = in.arg;
+    } else if (o == opcode("UNPACK_EX")) {
+      op.kind = "UNPACK_EX";               // the values before the star (the low byte of the argument) and after it (the next byte)
+      op.arg = in.arg;
     } else if (o == opcode("GET_ITER_STACK")) {
       op.kind = "GET_ITER";                // a for loop's iterator, which takes kIterSlots stack slots
     } else if (o == opcode("GET_ITER")) {
@@ -339,6 +342,7 @@ int effect(const Op &op) {
   if (k == "STORE_MAP") return -2;                                       // the value and key go; the dict stays
   if (k == "STORE_COMP") return op.extra == 1 ? -2 : -1;                 // a dict takes its key and value, a list its item
   if (k == "UNPACK_SEQUENCE") return (int)op.arg - 1;
+  if (k == "UNPACK_EX") return (int)((op.arg & 0xff) + ((op.arg >> 8) & 0xff));   // the sequence goes, the star's values come
   if (k == "LOAD_SUBSCR") return -1;
   if (k == "STORE_SUBSCR") return -3;
   if (k == "FOR_ITER") return 1;   // the fall-through; the exhausted jump is handled per successor
@@ -1060,6 +1064,20 @@ class Lowerer {
         } else {
           std::string key = load(top), v = load(top - 1), coll = load(top - (int)op.arg);
           body << "  (eval (call void &\"mpy_dict_store\" " << coll << " " << key << " " << v << "))\n";
+        }
+      } else if (k == "UNPACK_EX") {
+        // The values of mp_unpack_ex, the first one on top: the runtime makes the list of them once (a generic iterable is read
+        // once), and value j is stored at stack slot j from the sequence's slot.
+        unsigned left = (unsigned)(op.arg & 0xff), right = (unsigned)((op.arg >> 8) & 0xff);
+        std::string seq = load(d - 1);   // read first: the item slots overlap it
+        std::string r = fresh();
+        body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_unpack_ex\" " << seq << " (const unsigned_long "
+             << left << ") (const unsigned_long " << right << ")))\n";
+        for (unsigned j = 0; j <= left + right; ++j) {
+          std::string item = fresh();
+          body << "  (let " << item << " unsigned_long (call unsigned_long &\"mpy_unpack_ex_item\" " << r
+               << " (const unsigned_long " << j << ")))\n";
+          push(d - 1 + (int)j, item);
         }
       } else if (k == "UNPACK_SEQUENCE") {
         int n = (int)op.arg;
