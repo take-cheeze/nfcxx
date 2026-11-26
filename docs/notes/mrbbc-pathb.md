@@ -101,7 +101,7 @@ Lowered (`mrb_lower.cpp`):
 | Super | `SUPER a b` (the method of the superclass of the method's own class), `ARGARY` (the arguments of a zsuper: the method's required and optional parameters, read in a method or in a block that a method makes); see "Super" |
 | Break | `BREAK` (from a block, to the call the block was passed to); see "Blocks" |
 | Blocks | `BLOCK` (a block made from child b, closed over this frame), `BLKPUSH` (the method's own block, in a method), `BLKCALL` (yield), `GETUPVAR` and `SETUPVAR` at level 0 (the frame the block was made in); see "Blocks" |
-| Parameters | `ENTER` with required and optional parameters (in a method or a block, at pc 0; the prologue copies the arguments given, and the jump ENTER picks sets the optional ones' defaults; a block may have two or more) |
+| Parameters | `ENTER` with required, optional, rest and post parameters and keyword parameters (in a method or a block, at pc 0; `mrbbc_bind` fills them as vm.c's ENTER does, and the jump ENTER picks sets the optional ones' defaults; a block may have two or more); `KEY_P`, `KARG`, `KEYEND` and `HASH` (the keyword hash); see "Parameters" |
 
 The method table. A `SEND0` or `SEND` (with `c` = n | k<<4, so n = 0 or 1 and k = 0) names its method by a symbol. A
 method outside the table is refused at lowering time with `refused: SEND0 of method 'NAME' is not lowered yet (pc N)`:
@@ -120,8 +120,26 @@ A method is a child irep that a `TDEF` names. Each such body is a function of it
 program is `mrb_irep_0`, as before). `argv[0]` is self and `argv[1..argc]` are the arguments the call gave: the prologue
 copies them into R(1)..R(n), n the method's required and optional parameters, and sets the other registers to nil. `argc`
 is the count at the call site (a constant of the SEND, or the count of a runtime call), which the optional parameters need.
-`blk` is the block the call gave, or a nil value. A method's ENTER must be its first instruction and have only required
-and optional parameters (aspec bits 0..12 zero, bit 23 zero); any other parameter is refused.
+`blk` is the block the call gave, or a nil value. The signature gained a `kw` argument (`long`, 1 when the call gave
+keyword arguments; the hash is then `argv[argc+1]`; `%4`). A method's ENTER must be its first instruction and must not have
+a `**` parameter (aspec bit 1), a block parameter (bit 0) or `&nil` (bit 23); any other parameter is lowered.
+
+Parameters (vm.c's ENTER, mruby 4.0's layout): the required, optional, rest and post parameters fill R(1..len) in that
+order (len = req+opt+rest+post); with keyword parameters the keyword hash is R(len+1); the block slot is R(len+kd+1). The
+prologue calls `mrbbc_bind(R(1), argv, argc, kw, m1, o, r, m2, kd, strict)`, which writes those registers the way vm.c's
+ENTER does (missing required ones are nil; the rest is an array of the middle arguments; the post ones are the last m2;
+for a block, one array argument is splatted when it takes two or more) and returns the count of optional parameters given,
+which the jumps choose the defaults by. A keyword hash given to a method without keyword parameters is a positional
+argument (vm.c's rule, also in the arity count). The arity error is `wrong number of arguments (given N, expected M)` with
+M = required + post (vm.c's `argnum_error(m1+m2)`). Its N follows vm.c's `argnum_error`, which reads `ci->n`: a body with
+required parameters only counts the positional arguments (the keyword hash only when there are none), a body with keyword
+parameters counts the positional arguments (the same exception), and any other body (optional, rest or post parameters)
+counts the keyword hash as a positional argument (`rterr/kw_positional_arity.rb`, `kw_kd_noargs.rb`, `kw_opt_count.rb`). A call with keyword arguments
+builds the hash from its pairs at R[a+n+1..] (`mrbbc_hash_new`, `mrbbc_hash_set`) and passes it as `argv[n+1]`. A
+missing keyword is `missing keyword: NAME` (ArgumentError, from KARG), and a keyword the method does not take is
+`unknown keyword: NAME` (from KEYEND, after the body's keywords are taken). A block with keyword parameters gets an empty
+hash (a yield gives no keywords). Keyword defaults may refer to positional parameters, not to other keywords (mruby 4.0
+says `undefined method`, and the producer refuses such a call).
 
 Optional parameters (vm.c's `ENTER`, `ci->pc += ...`): after ENTER come n+1 JMPs, the one at index k for k optional
 arguments given (k = argc - required, clamped to 0..n), and the last one jumps past all the defaults. The producer's
@@ -214,7 +232,10 @@ R[a+1..a+n] (b = n) and the block R[a+n+1], as `vm.c` takes them: a block of `su
   makes (ARGARY at level 2, which reads the method's parameters and block from the home frame: a block of the method's
   block passes the real block, as mruby does). A super with no explicit block in such a block passes nil: its implicit
   block is an upvar of level 2 past the method, which mruby reads as nil (see "Blocks"). Deeper blocks are refused.
-- A `super` with a splat (`super(*a)`), or a keyword argument is refused.
+- A `super` with a splat (`super(*a)`) or with keyword arguments (`super(a: 1)`, `super(x, k: 1) { }`) is lowered. A splat
+  is the array in R[a+1] with count 15 (vm.c's `CALL_MAXARGS`): the producer's `mrbbc_splat_argv` builds the argument
+  vector from it and `mrbbc_ary_len` gives the count, so a zsuper (the ARGARY's array) and an explicit splat share the path.
+  A splat of keyword arguments (`**h`, k = 15) and a splat with keyword arguments are refused.
 
 ### Operators, to_s and inspect
 
@@ -272,8 +293,17 @@ are the block's outer locals.
   block reads the method's, the main program's or the class body's register b, as vm.c's uvenv does (checked against the
   reference: a method's local, and a top-level local, set from a block in a block). The home's register must be one of its
   locals (below its `nlocals`), else refused. Level 2 from a depth-2 block is past that frame, nil for the block slot (see
-  the next bullet); any other level 2 read, and any read in a block of depth 3 or more, is refused. A block made by a method
+  the next bullet); any other level 2 read of a depth-2 block is refused. A block made by a method
   reads level 1 as nil: the method's proc has no environment above it.
+- Blocks nested three or more deep (round 8). The level counts the scopes out from the creator: level 0 is the frame the
+  block was made in (`%3`), level 1 the creator's own creator, and so on up to the method or the main program (checked
+  against the reference, `blk3_locals.rb`, `blk4_upvar.rb`). The closure keeps those frames in its `disp` array (`Clo`,
+  `MRBBC_MAX_DEPTH` = 8): a block made by a block gets its creator's `%3` first and the creator's own `disp` after it
+  (`mrbbc_block_nested`), and a block function takes its closure's `disp` as its `%5` parameter (`mrbbc_blk_disp` at the
+  call). `GETUPVAR` and `SETUPVAR` at level L >= 1 of a block of depth 3 or more read the frame `disp[L-1]`
+  (`mrbbc_upframe`), and the register must be a local of the body at that level (`upvar_body` walks the creators). A
+  return out of such a block and a break from it use the home and the call frame as before (`blk3_return.rb`,
+  `blk3_break.rb`). A block nested more than 8 deep is refused.
 - `GETUPVAR a b 1` in a block that a method makes directly, with b = the method's parameters + 1 (its block slot R(n+1)), is nil. The
   compiler emits it for the implicit block of a `super` in the block (gen_blkmove), and mruby 4.0.0 reads nil there: the
   method's proc has no environment, so the upvar of level 1 is nil. Checked against the reference (`sup_blk_noblock.rb`:
@@ -299,14 +329,15 @@ Refused by name (exit 3, `refused: opcode NAME is not lowered yet (pc N)`): ever
 prefixes and the instructions they widen, `LOADL` of a non-integer (`LOADL` never holds a string: mruby compiles a
 string literal to `STRING`), and a main program with a catch table. In particular `SENDB` of a name the program does not
 define in a class (a block call to a builtin), `RETURN_BLK` from a block of the top level (see below), `BREAK` outside a
-block, `GETUPVAR`/`SETUPVAR` at level 1 or more outside the depth-2 cases above, `BLKPUSH` of a block other than the method's own (a yield inside a
-block), a method call with a keyword argument, any other method name, `ASET`,
-`APOST`, `ARYCAT`/`ARYSPLAT` (a splat), `SYMBOL` (a quoted symbol) and `LOADSYM` of a name that is not plain (`:"a b"`,
+block), `GETUPVAR`/`SETUPVAR` at level 1 or more outside the depth-2 cases above, `BLKPUSH` of a block other than the method's own (a yield inside a
+block), a call with a splat of keyword arguments (`**h`), any other method name, `ASET`,
+`APOST`, `SYMBOL` (a quoted symbol) and `LOADSYM` of a name that is not plain (`:"a b"`,
 `:+`), a float, a global variable, an instance variable of the main program, `RETSELF` of the main program, `TCLASS` and
-`CLASS` in a method or a block, a method or block with parameters other than required and optional ones (rest, post, keyword
-or block parameters), a method definition whose name is not plain and not an operator, a `def` inside a method or a block,
-an operator the program defines at the top level, a `super` with a splat or a keyword argument, `ARGARY` other than the
-parameters of a method (or of a block a method makes, at level 1 or 2), and `ENTER` with such parameters are refused.
+`CLASS` in a method or a block, a method or block with a block parameter (`&b`), a `**` parameter or `&nil`, a method definition
+whose name is not plain and not an operator, a `def` inside a method or a block, an operator the program defines at the top
+level, a `super` with a splat of keyword arguments, `ARGARY` other than the parameters of a method (or of a block a method
+makes, at level 1 or 2), with rest, post or keyword parameters, and `ENTER` with such parameters are refused. A keyword or
+splat call to a builtin method (`first(n: 1)`, `new(*a)`) is refused.
 `SUPER` and `ARGARY` outside a method (the main program, a class body, or a block of one) are not refused: vm.c raises
 NoMethodError `super called outside of method` when they run, and so does the lowered code (`mrbbc_no_super`).
 
@@ -422,10 +453,14 @@ explicit receiver of a program-defined method, and blocks with two or more param
 `SUPER` (see "Classes" and "Super"), the operators, `to_s` and `inspect` that a program defines in a class (see
 "Operators, to_s and inspect"). Round 7 lowers optional parameters of methods and blocks (see "Methods" and "Blocks") and
 the zsuper of a block that a method makes, the variables and the implicit block of a block that a block makes (depth 2),
-and `SUPER` outside a method (a NoMethodError at run time; see "Super" and "Blocks"). Still refused: `RETURN_BLK` from a block
-of the top level, yields and variables more than two levels out (a block in a block in a block), `SENDB` of a builtin method,
-keyword arguments, rest and post parameters, `ASET`, `APOST`, splats, the quoted symbols, a zsuper in a block of depth 3,
-the instance variables of the top level, and a core class as a superclass
+and `SUPER` outside a method (a NoMethodError at run time; see "Super" and "Blocks"). Round 8 lowers rest, post and keyword
+parameters of methods and blocks (see "Parameters"), keyword arguments of calls (`SEND`, `SSEND`, `SENDB`, `SSENDB`, `SUPER`,
+`new`), splats of arguments (`f(*a)`, `super(*a)`, `[*a]`, `ARYCAT`, `ARYSPLAT`), and `HASH`. Still refused: `RETURN_BLK` from a
+block of the top level, yields and variables more than two levels out (a block in a block in a block), `SENDB` of a builtin
+method, `ASET`, `APOST`, the quoted symbols, a zsuper in a block of depth 3, a block nested more than 8 deep, `yield` in a block
+of depth 2 or more (`BLKPUSH` of a block that is not the method's own), the block parameter `&b` (a closure would outlive
+its frame if the block were returned or stored; the lowering has no escape analysis), `**` parameters, `&nil`, the
+instance variables of the top level, and a core class as a superclass
 (a run-time NotImplementedError: `class E < StandardError`). The strings and arrays in the
 subset are the ones the examples above name; `Array#-` and `Array#*`, `String#[]=`, ranges as indexes and the other
 methods of the core classes are not in it.

@@ -25,7 +25,8 @@ enum mrbbc_tag {
   MRBBC_SYM = 6,
   MRBBC_BLK = 7,
   MRBBC_OBJ = 8, /* an instance of a class the program defines (the int64 is its MObj) */
-  MRBBC_CLS = 9  /* a class the program defines, or Object (the int64 is its MClass) */
+  MRBBC_CLS = 9, /* a class the program defines, or Object (the int64 is its MClass) */
+  MRBBC_HASH = 10 /* a hash: the keyword arguments of a call, and the kdict of a method with keyword parameters */
 };
 
 typedef struct MV {
@@ -33,21 +34,23 @@ typedef struct MV {
   int64_t i;
 } MV;
 
-/* The program's methods (TDEF). mrbbc_def adds a top-level method (on Object) with the lowered body's number and its counts
- * of arguments, min (the required parameters) to max (the required and the optional ones); mrbbc_def_in adds one to the
- * class cls (the self of a class body). mrbbc_find returns the number of the body a self call of self runs, or raises
- * ArgumentError (wrong count) or NoMethodError (no such method). mrbbc_find_send is an
- * explicit receiver's call: it returns -1 when the method is not the receiver's class's (the builtin path then runs), and
- * raises NoMethodError for a top-level method, which is private. mrbbc_find_init is the initialize of a new object (-1
- * when there is none and no argument was given). */
-void mrbbc_def(const char *name, int id, long min, long max);
-void mrbbc_def_in(const MV *cls, const char *name, int id, long min, long max);
-int mrbbc_find(const MV *self, const char *name, long argc);
-int mrbbc_find_send(const MV *recv, const char *name, long argc);
-int mrbbc_find_init(const MV *obj, long argc);
+/* The program's methods (TDEF). mrbbc_def adds a top-level method (on Object) with the lowered body's number, its counts
+ * of arguments, min (the required and post parameters) to max (the ones before the rest parameter and the optional ones;
+ * -1 with a rest parameter), and kd (1 when it has keyword parameters); mrbbc_def_in adds one to the class cls (the self
+ * of a class body). A call's count argc is its positional arguments; kw is 1 when the call gave keyword arguments, whose
+ * hash is the call's last argument (a method without keyword parameters takes it as a positional one, as vm.c does).
+ * mrbbc_find returns the number of the body a self call of self runs, or raises ArgumentError (wrong count) or
+ * NoMethodError (no such method). mrbbc_find_send is an explicit receiver's call: it returns -1 when the method is not
+ * the receiver's class's (the builtin path then runs), and raises NoMethodError for a top-level method, which is private.
+ * mrbbc_find_init is the initialize of a new object (-1 when there is none and no argument was given). */
+void mrbbc_def(const char *name, int id, long min, long max, int kd);
+void mrbbc_def_in(const MV *cls, const char *name, int id, long min, long max, int kd);
+int mrbbc_find(const MV *self, const char *name, long argc, long kw);
+int mrbbc_find_send(const MV *recv, const char *name, long argc, long kw);
+int mrbbc_find_init(const MV *obj, long argc, long kw);
 /* SUPER: the method of the superclass of the class method number `method` is defined in, called on self (the name is
  * the one the TDEF gave). It returns -1 for the builtin initialize, which mrbbc_super_nil answers with nil. */
-int mrbbc_find_super(const MV *self, int method, const char *name, long argc);
+int mrbbc_find_super(const MV *self, int method, const char *name, long argc, long kw);
 void mrbbc_super_nil(MV *dst);
 void mrbbc_no_super(void) __attribute__((noreturn));
 
@@ -71,13 +74,26 @@ void mrbbc_setiv(const MV *self, const char *name, const MV *v);
 /* NoMethodError for a name the receiver does not have (the builtin path of a call the program also defines). */
 void mrbbc_no_method(const MV *recv, const char *name) __attribute__((noreturn));
 
-/* Block parameters, for a block of nslots (required and optional) parameters. mrbbc_block_argc is the count of arguments the
- * parameters take: a yield of one array to a block with two or more parameters is splatted (the count is the array's
- * length). mrbbc_block_arg writes parameter i (1-based) of the arguments, or nil past the count. mrbbc_ary_elt writes
- * element i of an array, or nil past its end. */
-long mrbbc_block_argc(const MV *argv, long argc, long nslots);
-void mrbbc_block_arg(MV *dst, const MV *argv, long argc, long nslots, long i);
+/* The parameters of a method (strict) or a block (not strict), as vm.c's ENTER binds them. R(1) is r1: the required (m1),
+ * optional (o), rest (r, 0 or 1) and post (m2) parameters fill R(1..m1+o+r+m2) in order, the rest one with an array, and
+ * the keyword hash (kd = 1) is R(m1+o+r+m2+1): the call's kw hash, or a new empty one. argv[0] is self and argv[1..argc]
+ * the positional arguments (argv[argc+1] the keyword hash when kw is 1 and kd is 0, which then counts as positional). A
+ * block of two or more parameters takes one array argument splatted (not strict). Returns the number of optional
+ * parameters the call gave, which the body's jumps choose the defaults by. Nothing is checked here: the count is checked by
+ * mrbbc_find. */
+long mrbbc_bind(MV *r1, const MV *argv, long argc, long kw, long m1, long o, long r, long m2, long kd, long strict);
 void mrbbc_ary_elt(MV *dst, const MV *ary, long i);
+
+/* Keyword parameters (vm.c's KEY_P, KARG and KEYEND) on the kdict of a method: whether it has the key, its value (the key is
+ * removed from the hash; "missing keyword" when it has none), and "unknown keyword" when keys are left over. */
+void mrbbc_key_p(MV *dst, const MV *kdict, const char *name);
+void mrbbc_karg(MV *dst, const MV *kdict, const char *name);
+void mrbbc_keyend(const MV *kdict);
+
+/* Hashes (HASH: dst = a new hash of the cap pairs to be set by mrbbc_hash_set; a key that is set again takes the new
+ * value). Keys are compared by their value for symbols, integers and strings, and by identity otherwise. */
+void mrbbc_hash_new(MV *dst, long cap);
+void mrbbc_hash_set(MV *hash, const MV *key, const MV *value);
 /* OP_AREF (`a, b = x`): an array's element i, or for a value that is not an array, the value at 0 and nil otherwise. */
 void mrbbc_aref(MV *dst, const MV *v, long i);
 
@@ -86,7 +102,17 @@ void mrbbc_aref(MV *dst, const MV *v, long i);
  * frame, the layout of Clo in mrbrt.c). The helpers read a block value: its number, its frame, its home, and argv[0] =
  * its self; mrbbc_blk_load copies the method's block (a nil one raises "unexpected yield"); mrbbc_blk_given writes true
  * or false for block_given?. A return out of a block is pending (mrbbc_return_block) until its home takes it. */
+/* Blocks nested deeper than MRBBC_MAX_DEPTH are not lowered (their closure keeps that many frames). MRBBC_CLO_BYTES is the
+ * size of the closure slot the lowering reserves for a BLOCK. A block made by a block (mrbbc_block_nested) gets the frames of
+ * its creators: outer is the creator's %3 and pdisp its disp, of nd entries; mrbbc_blk_disp is a block's disp array, and
+ * mrbbc_upframe(disp, k) the frame at upvar level k+1 of a block with that disp. */
+#define MRBBC_MAX_DEPTH 8
+#define MRBBC_CLO_BYTES 192
 void mrbbc_block(MV *dst, void *clo, long id, const MV *self, MV *frame, MV *home);
+void mrbbc_block_nested(MV *dst, void *clo, long id, const MV *self, MV *frame, MV *home, MV *outer, const MV *pdisp,
+                        long nd);
+MV *mrbbc_blk_disp(const MV *blk);
+MV *mrbbc_upframe(const MV *disp, long k);
 long mrbbc_blk_id(const MV *blk);
 MV *mrbbc_blk_frame(const MV *blk);
 MV *mrbbc_blk_home(const MV *blk);
@@ -131,6 +157,14 @@ void mrbbc_ary_new(MV *dst, long cap);
 
 /* ary.push(v). ary is an array register. */
 void mrbbc_ary_push(MV *ary, const MV *v);
+
+/* Splats (vm.c's mrb_ary_splat, see mrbrt.c): dst = splat(v); ARYCAT appends splat(src) to dst (or takes it when dst is nil).
+ * A splat call's arguments are the elements of an array: mrbbc_splat_argv gives a vector of self and those elements (its count
+ * is mrbbc_ary_len of the array). */
+void mrbbc_splat(MV *dst, const MV *v);
+void mrbbc_ary_cat(MV *dst, const MV *src);
+MV *mrbbc_splat_argv(const MV *self, const MV *ary);
+long mrbbc_ary_len(const MV *ary);
 
 /* dst = recv[idx] (GETIDX). dst may alias recv. */
 void mrbbc_getidx(MV *dst, const MV *recv, const MV *idx);

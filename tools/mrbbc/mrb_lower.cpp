@@ -5,18 +5,20 @@
 // tests/mrbbc/runtime/mrbrt.h); R(i) is the address %r<i>, the frame plus 16 i. The value the program returns is written
 // to *ret.
 //
-// A method (a child irep that a TDEF defines) is `mrb_m<N>(MV *ret, MV *argv, MV *blk, long argc)`: argv[0] is self and
-// argv[1..argc] the arguments the call gave, which the prologue copies into R(1)..R(n) (n = its required and optional
-// parameters; the ones not given are set by their defaults, entered at the jump OP_ENTER picks for argc). blk is the block
-// the call gave (nil if none). A
+// A method (a child irep that a TDEF defines) is `mrb_m<N>(MV *ret, MV *argv, MV *blk, long argc, long kw)`: argv[0] is self
+// and argv[1..argc] the positional arguments the call gave; kw is 1 when the call gave keyword arguments, whose hash is
+// argv[argc+1]. The prologue binds them to R(1)..R(len) (and the keyword hash to R(len+1)) by mrbbc_bind, as vm.c's ENTER
+// does; the optional parameters that were not given are set by their defaults, entered at the jump OP_ENTER picks. blk is
+// the block the call gave (nil if none). A
 // self call (SSEND, SSEND0, SSENDB) copies R(0) and the arguments into a vector of its own, asks the runtime for the
 // method's number (mrbbc_find: the latest definition of the name, and the count is checked there), and calls the
 // function of that number. The method table is filled when the TDEF runs (mrbbc_def), as mruby defines the method then.
 //
-// A block (a child irep that a BLOCK names) is `mrb_b<N>(MV *ret, MV *argv, long argc, MV *frame, MV *home)`: argv[0] is
-// the self the block was made in, argv[1..argc] the arguments the yield gave, frame is the frame of the function that made
-// the block (its registers are the block's outer locals, GETUPVAR and SETUPVAR at level 0), and home is the frame of the
-// method a `return` in the block leaves. BLOCK makes a closure in a slot of the caller (block number, a copy of self, the
+// A block (a child irep that a BLOCK names) is `mrb_b<N>(MV *ret, MV *argv, long argc, MV *frame, MV *home, MV *disp)`: argv[0]
+// is the self the block was made in, argv[1..argc] the arguments the yield gave, frame is the frame of the function that
+// made the block (its registers are the block's outer locals, GETUPVAR and SETUPVAR at level 0), home is the frame of the
+// method a `return` in the block leaves, and disp the frames of the creators past frame (level L >= 1 is disp[L-1]; for a
+// block nested three or more deep, see mrbbc_block_nested). BLOCK makes a closure in a slot of the caller (block number, a copy of self, the
 // frame, the home), and the value is the closure's address with the BLK tag. A yield (BLKPUSH to get the method's block,
 // BLKCALL to call it) dispatches on the block number, as a self call does on the method number. A closure is only used
 // while its frame is alive: a block is passed to a method and yielded there, and the program has no way to keep it (a
@@ -77,6 +79,7 @@ struct Shared {
   std::map<const mrb::Irep *, const mrb::Irep *> block_method;  // a block body -> the method body it is made in (at any depth)
   std::set<const mrb::Irep *> method_blocks;     // the block bodies a method makes directly (their creator is the method)
   std::map<const mrb::Irep *, int> depth;        // a block body -> the number of blocks it is in (1: made by a non-block)
+  std::map<const mrb::Irep *, const mrb::Irep *> creator;  // a block body -> the body whose BLOCK made it (its level-0 frame)
   std::map<const mrb::Irep *, const mrb::Irep *> frame_owner;  // a block body -> the body whose frame is its %4 (the home: the
                                                  // method, main program or class body its chain of blocks starts in)
   std::set<std::string> defined;                 // the names a TDEF of the program defines
@@ -89,8 +92,13 @@ struct Shared {
 // The state of one function's lowering: the fresh IR register numbers, the body, and the MV slots beyond the frame (their
 // names and sizes in bytes). %0 is the ret parameter; a method has %1 the argument vector and %2 the block; a block has
 // %1 the argument vector, %2 the argument count, %3 the frame it was made in and %4 its home (the frame of the method a
-// `return` in it leaves). The registers are numbered from kFirstReg.
-constexpr int kFirstReg = 5;
+// `return` in it leaves), and a method has %4 the keyword flag (1 when the call gave keyword arguments). The registers are
+// numbered from kFirstReg.
+constexpr int kFirstReg = 6;
+// The deepest block the lowering takes (the runtime's MRBBC_MAX_DEPTH: a closure keeps that many frames), and a block's
+// function has %5 the disp array of its closure (the frames of its creators past the first, see mrbbc_block_nested).
+constexpr long kMaxDepth = 8;
+constexpr std::size_t kCloBytes = 192;  // the closure slot of a BLOCK (the runtime's MRBBC_CLO_BYTES)
 // The registers past an irep's nregs that a frame keeps (see lower_irep).
 constexpr unsigned kRegSlack = 3;
 
@@ -100,7 +108,8 @@ struct Ctx {
   Kind kind;
   unsigned nregs;      // the frame's registers: the irep's, and any a TDEF writes past them (see lower_irep)
   std::size_t pc = 0;  // the instruction being lowered
-  std::string argc;    // the IR name of the count of arguments a method or a block was given (empty for the others)
+  std::string given;   // the IR name of the count of optional parameters a method or a block was given (empty for the others)
+  unsigned kdict = 0; // the register of the keyword hash (R(len+1)) of a body with keyword parameters, 0 for none
   int next;            // the next fresh register number, past the frame's registers (set by the constructor)
   std::ostringstream body;
   std::vector<std::pair<std::string, std::size_t>> slots;
@@ -409,25 +418,35 @@ int number_of(const std::map<const mrb::Irep *, int> &ids, const mrb::Irep &body
   return it->second;
 }
 
-// The parameters of a function body, from its ENTER (vm.c's MRB_ASPEC_*): the body starts with ENTER and has only required
-// and optional parameters, so its aspec has the required count in bits 18..22 and the optional count in bits 13..17, and
-// no rest, post, keyword or block parameter (bits 0..12) and no &nil (bit 23). Returns false for any other body.
-bool body_params(const mrb::Irep &body, long &req, long &opt) {
+// The parameters of a function body, from its ENTER (vm.c's MRB_ASPEC_*, mruby 4.0's layout): the required (req), optional
+// (opt), rest (rest, 0 or 1) and post (post) parameters fill R(1..len) in that order, len = req+opt+rest+post; with keyword
+// parameters (kd) the keyword hash is R(len+1); the block slot is R(len+kd+1). A body takes these; a `**` parameter (KDICT),
+// a block parameter (`&b`, bit 0) and `&nil` (bit 23) are not lowered and make body_params return false, as does a body
+// with no ENTER at pc 0.
+struct Params {
+  long req = 0, opt = 0, rest = 0, post = 0, kd = 0;
+  long len() const { return req + opt + rest + post; }
+  long block_slot() const { return len() + kd + 1; }
+};
+
+bool body_params(const mrb::Irep &body, Params &p) {
   std::vector<mrb::Insn> insns = mrb::decode_iseq(body);
   if (insns.empty() || insns[0].pc != 0 || insns[0].op != mrb::OP_ENTER || insns[0].ext != 0) return false;
   const std::uint32_t aspec = insns[0].args[0];
-  if ((aspec & 0x1fffu) != 0 || (aspec >> 23) != 0) return false;
-  req = static_cast<long>((aspec >> 18) & 0x1f);
-  opt = static_cast<long>((aspec >> 13) & 0x1f);
+  if ((aspec & 0x3u) != 0 || (aspec >> 23) != 0) return false;  // KDICT (bit 1), block (bit 0), &nil (bit 23)
+  p.req = static_cast<long>((aspec >> 18) & 0x1f);
+  p.opt = static_cast<long>((aspec >> 13) & 0x1f);
+  p.rest = static_cast<long>((aspec >> 12) & 0x1);
+  p.post = static_cast<long>((aspec >> 7) & 0x1f);
+  p.kd = static_cast<long>((aspec >> 2) & 0x1f) > 0 ? 1 : 0;
   return true;
 }
 
-// The number of parameters a method or block body has (required and optional): the registers 1..n that its arguments fill,
-// and the block slot is R(n+1). Throws when the body's parameters are not lowered (the caller has checked them already).
-long slot_count(const mrb::Irep &body) {
-  long req = 0, opt = 0;
-  if (!body_params(body, req, opt)) throw std::runtime_error("malformed: a function body with parameters that are not lowered");
-  return req + opt;
+// The parameters of a body the lowering has checked (see body_params).
+Params params_of(const mrb::Irep &body) {
+  Params p;
+  if (!body_params(body, p)) throw std::runtime_error("malformed: a function body with parameters that are not lowered");
+  return p;
 }
 
 // The pool and symbol operands, checked against the irep.
@@ -493,6 +512,7 @@ void collect(Shared &sh, const mrb::Irep &irep, Kind kind, bool home_main, const
       // a block made by a block takes the frame of its creator's home (BLOCK passes %4 on), so its depth and that frame
       // are the creator's: the frame of the body the chain starts in
       sh.depth[body] = kind == Kind::Block ? sh.depth.at(&irep) + 1 : 1;
+      sh.creator[body] = &irep;
       sh.frame_owner[body] = kind == Kind::Block ? sh.frame_owner.at(&irep) : &irep;
       child_kind[in.args[1]] = std::make_pair(Kind::Block, child_home_main);
     } else if (in.op == mrb::OP_EXEC) {
@@ -509,6 +529,18 @@ void collect(Shared &sh, const mrb::Irep &irep, Kind kind, bool home_main, const
     const mrb::Irep *cm = ck == Kind::Method ? &irep.reps[i] : ck == Kind::Block ? own : nullptr;
     collect(sh, irep.reps[i], ck, child_kind[i].second, cm);
   }
+}
+
+// The body an upvar of `level` in the block `irep` reads: level 0 is the body that made the block (its creator), level 1 the
+// creator's creator, and so on up to the method or the main program that starts the chain.
+const mrb::Irep *upvar_body(const Shared &sh, const mrb::Irep &irep, unsigned level) {
+  const mrb::Irep *b = &irep;
+  for (unsigned i = 0; i <= level; ++i) {
+    auto it = sh.creator.find(b);
+    if (it == sh.creator.end()) throw std::runtime_error("malformed: an upvar level past the outermost body");
+    b = it->second;
+  }
+  return b;
 }
 
 // Whether the value of a call's result must be checked for a `return` leaving a block: the calls of a method or a block
@@ -542,17 +574,74 @@ std::string nil_block(Ctx &c, const std::string &name) {
   return "$\"" + name + "\"";
 }
 
-// One branch per method of the module: when id is N, the function of method N runs with (ret, argv, blk, argc), where
-// argc is the count of arguments the call gives (an IR expression: the call site's count is known, and the callee's
-// optional parameters depend on it).
+// The keyword flag of a call: 1 when it has k keyword pairs (its hash is argv[n+1], see emit_kwargs), else 0.
+std::string kw_flag(unsigned k) { return k != 0 ? "(const long 1)" : "(const long 0)"; }
+
+// The size of a call's argument vector: self and the n arguments, and the keyword hash after them when the call has keyword
+// arguments (k pairs, at R[a+n+1]).
+std::size_t argv_slots(unsigned n, unsigned k) { return static_cast<std::size_t>(n) + 1 + (k != 0 ? 1 : 0); }
+
+// The keyword arguments of a call with k pairs at R[kidx] (kidx = a+n+1): a hash of the pairs (in order, as mruby's HASH
+// makes it), built in a slot of its own and copied to argv[n+1], where the callee finds it. The registers are the call's,
+// and they are left as they are.
+void emit_kwargs(Ctx &c, const std::string &argv, unsigned n, unsigned kidx, unsigned k) {
+  const std::string h = "kwhash" + std::to_string(c.pc);
+  c.add_slot(h, 16);
+  c.line("(eval (call void &\"mrbbc_hash_new\" $\"" + h + "\" (const long " + num(k) + ")))");
+  for (unsigned i = 0; i < k; ++i) {
+    c.line("(eval (call void &\"mrbbc_hash_set\" $\"" + h + "\" " + c.reg(kidx + 2 * i) + " " + c.reg(kidx + 2 * i + 1) + "))");
+  }
+  std::string p = c.fresh();
+  c.line("(let " + p + " (ptr unsigned_char) (offset $\"" + argv + "\" " + num(16 * (static_cast<long long>(n) + 1)) + "))");
+  c.line("(copy 16 " + p + " $\"" + h + "\")");
+}
+
+// One branch per method of the module: when id is N, the function of method N runs with (ret, argv, blk, argc, kw). The
+// operands are IR operands: argv is the argument vector (a slot, or a pointer the runtime made for a splat), argc the count
+// of positional arguments (the callee's optional parameters depend on it), and kw is 1 when the call gave keyword arguments
+// (its hash is argv[argc+1]).
 void emit_method_branches(Ctx &c, const Shared &sh, const std::string &id, const std::string &ret, const std::string &argv,
-                          const std::string &blk, const std::string &argc) {
+                          const std::string &blk, const std::string &argc, const std::string &kw) {
   for (std::size_t m = 0; m < sh.methods.size(); ++m) {
     std::string hit = c.fresh();
     c.line("(let " + hit + " bool (eq int " + id + " (const int " + num(static_cast<long long>(m)) + ")))");
-    c.line("(if " + hit + " (then (eval (call void &\"mrb_m" + std::to_string(m) + "\" " + ret + " $\"" + argv + "\" " + blk +
-           " " + argc + "))))");
+    c.line("(if " + hit + " (then (eval (call void &\"mrb_m" + std::to_string(m) + "\" " + ret + " " + argv + " " + blk +
+           " " + argc + " " + kw + "))))");
   }
+}
+
+// The argument vector and count of a call, as IR operands. A call with n arguments (k keyword pairs at R[a+n+1]) has them in
+// a slot of its own named `key` (self, then the arguments, then the keyword hash), and the count is n. A splat (n = 15: the
+// arguments are the elements of the array in R[a+1]) is built by the runtime: its vector is self then the elements, and the
+// count is the array's length (mrbbc_splat_argv, mrbbc_ary_len). A splat with keyword arguments is not lowered (refused by
+// the caller). `self` is the receiver's operand.
+struct CallArgs {
+  std::string argv, argc, kw;
+};
+
+CallArgs emit_call_args(Ctx &c, const std::string &key, const std::string &self, unsigned a, unsigned n, unsigned k) {
+  CallArgs r;
+  r.kw = kw_flag(k);
+  if (n == 15) {
+    r.argv = c.fresh();
+    c.line("(let " + r.argv + " (ptr unsigned_char) (call (ptr unsigned_char) &\"mrbbc_splat_argv\" " + self + " " + c.reg(a + 1) +
+           "))");
+    r.argc = c.fresh();
+    c.line("(let " + r.argc + " long (call long &\"mrbbc_ary_len\" " + c.reg(a + 1) + "))");
+    return r;
+  }
+  c.add_slot(key, 16 * argv_slots(n, k));
+  emit_arg_vector(c, key, self, a, n);
+  if (k != 0) emit_kwargs(c, key, n, a + n + 1, k);
+  r.argv = "$\"" + key + "\"";
+  r.argc = "(const long " + num(n) + ")";
+  return r;
+}
+
+// The register after the arguments of a call: the block (SENDB, SSENDB, SUPER) is R[a+nreg+kreg+1], where a splat takes one
+// register (mrb_bidx: n = 15 is one register) and the keyword pairs two each (a splat of keyword arguments, k = 15, one).
+unsigned block_reg(unsigned a, unsigned n, unsigned k) {
+  return a + (n == 15 ? 1 : n) + (k == 15 ? 1 : 2 * k) + 1;
 }
 
 // After a call that passes a block (SENDB, SSENDB): a break out of the block makes the call return its value, to dst, and
@@ -571,14 +660,17 @@ void emit_block_site(Ctx &c, const std::string &dst, std::size_t next_pc) {
 // R[a] = R[a].new(R[a+1] .. R[a+n]) for a class: the instance is made (mrbbc_alloc, which raises for another receiver), its
 // initialize runs with the arguments (mrbbc_find_init: none when the class has no initialize, and then no argument is
 // allowed), and the instance is the value.
-void emit_new(Ctx &c, const Shared &sh, unsigned a, unsigned n, std::size_t pc) {
+void emit_new(Ctx &c, const Shared &sh, unsigned a, unsigned n, unsigned k, std::size_t pc) {
   const std::string argv = "newargv" + std::to_string(pc);
-  c.add_slot(argv, 16 * (static_cast<std::size_t>(n) + 1));
+  c.add_slot(argv, 16 * argv_slots(n, k));
   c.line("(eval (call void &\"mrbbc_alloc\" $\"" + argv + "\" " + c.reg(a) + "))");
   emit_args(c, argv, a, n);
+  if (k != 0) emit_kwargs(c, argv, n, a + n + 1, k);
   std::string id = c.fresh();
-  c.line("(let " + id + " int (call int &\"mrbbc_find_init\" $\"" + argv + "\" (const long " + num(n) + ")))");
-  emit_method_branches(c, sh, id, c.reg(a), argv, nil_block(c, "newnil" + std::to_string(pc)), "(const long " + num(n) + ")");
+  c.line("(let " + id + " int (call int &\"mrbbc_find_init\" $\"" + argv + "\" (const long " + num(n) + ") " + kw_flag(k) +
+         "))");
+  emit_method_branches(c, sh, id, c.reg(a), "$\"" + argv + "\"", nil_block(c, "newnil" + std::to_string(pc)),
+                       "(const long " + num(n) + ")", kw_flag(k));
   emit_unwind_check(c);
   c.line("(copy 16 " + c.reg(a) + " $\"" + argv + "\")");
 }
@@ -587,7 +679,8 @@ void emit_new(Ctx &c, const Shared &sh, unsigned a, unsigned n, std::size_t pc) 
 // program's methods of the name are looked up on the receiver's class (mrbbc_find_send), one branch per method; when the
 // receiver has none of them, the builtin of the name runs (new, and the SEND0 and binary methods), or else NoMethodError.
 // A name that only a top-level def defines is refused: it is private, and that error is not reproduced here.
-void lower_send(Ctx &c, Shared &sh, const mrb::Insn &in, const std::string &name, unsigned a, unsigned n, bool has_blk) {
+void lower_send(Ctx &c, Shared &sh, const mrb::Insn &in, const std::string &name, unsigned a, unsigned n, unsigned k,
+                bool has_blk) {
   auto refuse = [&](const std::string &why) {
     throw Refused("refused: " + std::string(in.name) + " of method '" + name + "' " + why + " (pc " +
                   std::to_string(in.pc) + ")");
@@ -596,20 +689,24 @@ void lower_send(Ctx &c, Shared &sh, const mrb::Insn &in, const std::string &name
   if (!dispatch && sh.top.count(name) != 0) refuse("is a method of the program (not lowered yet)");
   int code = 0, op = 0;
   const bool is_new = name == "new" && !has_blk;
-  const bool zero = !has_blk && n == 0 && zero_arg_method(name, code);
-  const bool binary = !has_blk && n == 1 && binary_method(name, op);
+  const bool zero = !has_blk && n == 0 && k == 0 && zero_arg_method(name, code);
+  const bool binary = !has_blk && n == 1 && k == 0 && binary_method(name, op);
   if (!dispatch && !is_new && !zero && !binary) refuse(has_blk ? "with a block is not lowered yet" : "is not lowered yet");
+  if (!dispatch && !is_new && k != 0) refuse("with keyword arguments is not lowered yet");
+  if (!dispatch && n == 15) refuse("with a splat of arguments is not lowered yet");
+  if (n == 15 && k != 0) refuse("with a splat and keyword arguments is not lowered yet");
+  if (is_new && n == 15) refuse("with a splat of arguments is not lowered yet");
 
   const std::string pc = std::to_string(in.pc);
+  // the block of the call is after the arguments and the keyword pairs
+  const unsigned blk_reg = block_reg(a, n, k);
   if (dispatch) {
-    const std::string argv = "argv" + pc;
-    c.add_slot(argv, 16 * (static_cast<std::size_t>(n) + 1));
-    emit_arg_vector(c, argv, c.reg(a), a, n);
+    const CallArgs ca = emit_call_args(c, "argv" + pc, c.reg(a), a, n, k);
     const std::string id = c.fresh();
-    c.line("(let " + id + " int (call int &\"mrbbc_find_send\" " + c.reg(a) + " @\"" + symbol_data(sh, name) +
-           "\" (const long " + num(n) + ")))");
-    const std::string blk = has_blk ? c.reg(a + n + 1) : nil_block(c, "nil" + pc);
-    emit_method_branches(c, sh, id, c.reg(a), argv, blk, "(const long " + num(n) + ")");
+    c.line("(let " + id + " int (call int &\"mrbbc_find_send\" " + c.reg(a) + " @\"" + symbol_data(sh, name) + "\" " + ca.argc +
+           " " + ca.kw + "))");
+    const std::string blk = has_blk ? c.reg(blk_reg) : nil_block(c, "nil" + pc);
+    emit_method_branches(c, sh, id, c.reg(a), ca.argv, blk, ca.argc, ca.kw);
     if (has_blk) {
       emit_block_site(c, c.reg(a), in.pc + in.len);
     } else {
@@ -620,7 +717,7 @@ void lower_send(Ctx &c, Shared &sh, const mrb::Insn &in, const std::string &name
     c.line("(if " + neg + " (then");
   }
   if (is_new) {
-    emit_new(c, sh, a, n, in.pc);
+    emit_new(c, sh, a, n, k, in.pc);
   } else if (zero) {
     c.line("(eval (call void &\"mrbbc_send0\" " + c.reg(a) + " " + c.reg(a) + " (const int " + num(code) + ")))");
   } else if (binary) {
@@ -659,13 +756,15 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
   }
   // the parameters of the body: a method or a block takes its required and optional ones (a block with two or more splats a
   // single array argument, see the prologue); a class body takes none and has no ENTER
-  long req = 0, opt = 0;
+  Params pr;
   if (kind == Kind::Method || kind == Kind::Block) {
-    if (!body_params(irep, req, opt)) {
-      throw Refused("refused: " + fname + " has parameters other than required and optional ones (not lowered yet)");
+    if (!body_params(irep, pr)) {
+      throw Refused("refused: " + fname + " has a block parameter, ** or &nil, which is not lowered yet");
     }
   }
-  const long nslots = req + opt;  // the registers 1..nslots take the parameters; the block slot is R(nslots+1)
+  const long req = pr.req, opt = pr.opt;
+  const long len = pr.len();      // the registers 1..len take the parameters
+  const long bslot = pr.block_slot();  // the block slot: after the keyword hash (R(len+1)) when there are keyword parameters
   std::vector<mrb::Insn> insns = mrb::decode_iseq(irep);
 
   std::set<std::size_t> starts;
@@ -681,53 +780,40 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
   for (const mrb::Insn &in : insns) {
     if (in.op == mrb::OP_TDEF && in.args[0] + 1u > frame_regs) frame_regs = in.args[0] + 1u;
   }
-  // a method keeps its block in R(nslots+1), where the VM's caller leaves it (a zsuper or a super reads it from there)
-  if (kind == Kind::Method && frame_regs < static_cast<unsigned>(nslots) + 2u) frame_regs = static_cast<unsigned>(nslots) + 2u;
+  // a method and a block keep their block in R(bslot), where the VM's caller leaves it (a zsuper or a super reads it from there)
+  if ((kind == Kind::Method || kind == Kind::Block) && frame_regs < static_cast<unsigned>(bslot) + 1u) {
+    frame_regs = static_cast<unsigned>(bslot) + 1u;
+  }
 
   Ctx c(sh, irep, kind, frame_regs);
   for (unsigned i = 0; i < frame_regs; ++i) {
     c.line("(let " + c.reg(i) + " (ptr unsigned_char) (offset $\"frame\" " + num(16 * i) + "))");
   }
-  if (kind == Kind::Method) {
-    // R(0) is self and R(1..nslots) the arguments the call gave (argv[1..argc], %3); the others start as nil. The optional
-    // parameters that were not given stay nil here: the default code of each sets them (the ENTER jumps there).
-    c.argc = "%3";
+  if (pr.kd != 0) c.kdict = static_cast<unsigned>(len + 1);
+  if (kind == Kind::Method || kind == Kind::Block) {
+    // R(0) is self. mrbbc_bind writes the parameters as vm.c's ENTER binds them: R(1..len) and the keyword hash R(len+1) when
+    // there are keyword parameters, from the arguments the call gave (argv[1..argc] and, for a method, the keyword flag %4).
+    // It returns the count of optional parameters given, which the ENTER jumps choose the defaults by. A method's arguments are
+    // checked by the runtime (mrbbc_find); a block's are not (non-strict, and a splatted array argument is one of them).
+    const bool method = kind == Kind::Method;
     c.line("(copy 16 " + c.reg(0) + " %1)");
-    for (long i = 1; i <= nslots; ++i) {
-      std::string p = c.fresh(), given = c.fresh();
-      c.line("(let " + p + " (ptr unsigned_char) (offset %1 " + num(16 * i) + "))");
-      c.line("(let " + given + " bool (le.s long (const long " + num(i) + ") %3))");
-      c.line("(if " + given + " (then (copy 16 " + c.reg(static_cast<unsigned>(i)) + " " + p + ")) (else");
-      store_tag(c, c.reg(static_cast<unsigned>(i)), kTagNil);
-      c.line("))");
-    }
-    for (long i = nslots + 1; i < static_cast<long>(frame_regs); ++i) {
+    c.given = c.fresh();
+    c.line("(let " + c.given + " long (call long &\"mrbbc_bind\" " + c.reg(1) + " %1 " + (method ? "%3" : "%2") + " " +
+           (method ? "%4" : "(const long 0)") + " (const long " + num(req) + ") (const long " + num(opt) + ") (const long " +
+           num(pr.rest) + ") (const long " + num(pr.post) + ") (const long " + num(pr.kd) + ") (const long " +
+           (method ? "1" : "0") + ")))");
+    for (long i = bslot; i < static_cast<long>(frame_regs); ++i) {
       store_tag(c, c.reg(static_cast<unsigned>(i)), kTagNil);
     }
-    c.line("(copy 16 " + c.reg(static_cast<unsigned>(nslots + 1)) + " %2)");
-  } else if (kind == Kind::Class) {
+    if (method) c.line("(copy 16 " + c.reg(static_cast<unsigned>(bslot)) + " %2)");
+  }
+  if (kind == Kind::Class) {
     // R(0) is self; a class body takes no parameters
     c.line("(copy 16 " + c.reg(0) + " %1)");
     for (long i = 1; i < static_cast<long>(frame_regs); ++i) {
       store_tag(c, c.reg(static_cast<unsigned>(i)), kTagNil);
     }
-  } else if (kind == Kind::Block) {
-    // R(0) is self. The parameters are the arguments the yield gave, nil past their count (mrbbc_block_arg); with two or more
-    // parameters one array argument is splatted instead (mrbbc_block_argc gives the count then). The count is kept in a
-    // register for the choice of the optional parameters' defaults (OP_ENTER).
-    c.line("(copy 16 " + c.reg(0) + " %1)");
-    c.argc = c.fresh();
-    c.line("(let " + c.argc + " long (call long &\"mrbbc_block_argc\" %1 %2 (const long " + num(nslots) + ")))");
-    for (long i = 1; i <= nslots; ++i) {
-      c.line("(eval (call void &\"mrbbc_block_arg\" " + c.reg(static_cast<unsigned>(i)) + " %1 %2 (const long " + num(nslots) +
-             ") (const long " + num(i) + ")))");
-    }
-    for (long i = nslots + 1; i < static_cast<long>(frame_regs); ++i) {
-      store_tag(c, c.reg(static_cast<unsigned>(i)), kTagNil);
-    }
   }
-  std::size_t argary_end = static_cast<std::size_t>(-1);  // the pc after the last ARGARY (a zsuper's SUPER follows it)
-  unsigned argary_m1 = 0;                                 // the parameter count the last ARGARY gave (the zsuper's count)
   for (const mrb::Insn &in : insns) {
     c.pc = in.pc;
     c.line("");
@@ -778,7 +864,7 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
             }
             for (long j = 0; j < opt; ++j) {
               const std::string taken = c.fresh();
-              c.line("(let " + taken + " bool (lt.s long " + c.argc + " (const long " + num(req + j + 1) + ")))");
+              c.line("(let " + taken + " bool (lt.s long " + c.given + " (const long " + num(j + 1) + ")))");
               c.line("(if " + taken + " (then (goto " + lbl(insns[1 + j].pc) + ")))");
             }
             c.line("(goto " + lbl(insns[1 + opt].pc) + ")");
@@ -882,6 +968,14 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
           c.line("(eval (call void &\"mrbbc_ary_push\" " + c.reg(x[0]) + " " + c.reg(x[0] + 1 + i) + "))");
         }
         break;
+      case mrb::OP_ARYCAT:
+        // R[a] = R[a] + splat(R[a+1]) (vm.c's ARYCAT): the splat itself when R[a] is nil (a splat of arguments, `f(*x)`)
+        c.line("(eval (call void &\"mrbbc_ary_cat\" " + c.reg(x[0]) + " " + c.reg(x[0] + 1) + "))");
+        break;
+      case mrb::OP_ARYSPLAT:
+        // R[a] = splat(R[a]): an array as a copy, nil as [], another value as [value] (vm.c's mrb_ary_splat)
+        c.line("(eval (call void &\"mrbbc_splat\" " + c.reg(x[0]) + " " + c.reg(x[0]) + "))");
+        break;
       case mrb::OP_AREF:
         // R[a] = R[b][c] as vm.c gives it (the destructuring `a, b = x`): an array's element c, and for a value that is not
         // an array, the value itself at c = 0 and nil otherwise
@@ -909,10 +1003,13 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         // a def goes to Object at the top level, and to the class body's own class (self) in a class body
         if (kind != Kind::Main && kind != Kind::Class) refuse_method(name, "is defined in a method or a block (not lowered yet)");
         if (!plain_symbol(name) && !operator_symbol(name)) refuse_method(name, "has a name that is not plain (not lowered yet)");
-        long req = 0, opt = 0;
-        if (!body_params(body, req, opt)) refuse_method(name, "has parameters other than required and optional ones (not lowered yet)");
-        const std::string id = "(const int " + num(number_of(sh.method_ids, body, "method")) + ") (const long " + num(req) +
-                               ") (const long " + num(req + opt) + ")";
+        Params bp;
+        if (!body_params(body, bp)) refuse_method(name, "has a block parameter, ** or &nil (not lowered yet)");
+        // the counts of vm.c's check: the required and post parameters at least, and the rest's -1 or the most (the
+        // required, optional and post ones); kd says the method takes keyword arguments
+        const std::string id = "(const int " + num(number_of(sh.method_ids, body, "method")) + ") (const long " +
+                               num(bp.req + bp.post) + ") (const long " + (bp.rest != 0 ? std::string("-1") : num(bp.len())) +
+                               ") (const int " + num(bp.kd) + ")";
         if (kind == Kind::Class) {
           c.line("(eval (call void &\"mrbbc_def_in\" " + c.reg(0) + " @\"" + symbol_data(sh, name) + "\" " + id + "))");
         } else {
@@ -926,13 +1023,53 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         // a copy of R(0), and the frame), and the value is its address with the BLK tag
         const mrb::Irep &body = child_at(irep, x[1], in.pc);
         const std::string clo = "clo" + std::to_string(in.pc);
-        c.add_slot(clo, 40);  // the runtime's Clo: id, self, frame, home
+        c.add_slot(clo, kCloBytes);  // the runtime's Clo (MRBBC_CLO_BYTES): id, self, frame, home, and the frames of the creators
+        if (sh.depth.at(&body) > kMaxDepth) {
+          throw Refused("refused: a block nested more than " + std::to_string(kMaxDepth) + " levels is not lowered yet (pc " +
+                        std::to_string(in.pc) + ")");
+        }
         // the home of the block: this frame for a method or the main program, the block's own home for a block
         const std::string home = kind == Kind::Block ? "%4" : "$\"frame\"";
-        c.line("(eval (call void &\"mrbbc_block\" " + c.reg(x[0]) + " $\"" + clo + "\" (const long " +
-               num(number_of(sh.block_ids, body, "block")) + ") " + c.reg(0) + " $\"frame\" " + home + "))");
+        const std::string self_op = c.reg(0);
+        if (kind == Kind::Block) {
+          // a block made by a block: the new block's level 1 is this block's creator (%3), and its disp is that and this
+          // block's disp (%5, of depth-1 entries; see mrbbc_block_nested)
+          c.line("(eval (call void &\"mrbbc_block_nested\" " + c.reg(x[0]) + " $\"" + clo + "\" (const long " +
+                 num(number_of(sh.block_ids, body, "block")) + ") " + self_op + " $\"frame\" " + home + " %3 %5 (const long " +
+                 num(sh.depth.at(&irep) - 1) + ")))");
+        } else {
+          c.line("(eval (call void &\"mrbbc_block\" " + c.reg(x[0]) + " $\"" + clo + "\" (const long " +
+                 num(number_of(sh.block_ids, body, "block")) + ") " + self_op + " $\"frame\" " + home + "))");
+        }
         break;
       }
+      case mrb::OP_HASH: {
+        // R[a] = a new hash of the b pairs R[a], R[a+1], ... (key, value); built in a slot first, as R[a] is the first key
+        const std::string h = "hash" + std::to_string(in.pc);
+        c.add_slot(h, 16);
+        c.line("(eval (call void &\"mrbbc_hash_new\" $\"" + h + "\" (const long " + num(x[1]) + ")))");
+        for (unsigned i = 0; i < x[1]; ++i) {
+          c.line("(eval (call void &\"mrbbc_hash_set\" $\"" + h + "\" " + c.reg(x[0] + 2 * i) + " " + c.reg(x[0] + 2 * i + 1) +
+                 "))");
+        }
+        c.line("(copy 16 " + c.reg(x[0]) + " $\"" + h + "\")");
+        break;
+      }
+      case mrb::OP_KEY_P:
+      case mrb::OP_KARG: {
+        // KEY_P a b: R[a] = whether the keyword hash has the key Syms[b]; KARG a b: R[a] = the key's value, removed from the
+        // hash (ArgumentError "missing keyword" when it has none). The hash is R(len+1) of this body.
+        if (c.kdict == 0) throw std::runtime_error("malformed: " + std::string(in.name) + " in a body with no keyword parameters");
+        const std::string fn = in.op == mrb::OP_KEY_P ? "mrbbc_key_p" : "mrbbc_karg";
+        c.line("(eval (call void &\"" + fn + "\" " + c.reg(x[0]) + " " + c.reg(c.kdict) + " @\"" +
+               symbol_data(sh, sym_at(irep, x[1], in.pc)) + "\"))");
+        break;
+      }
+      case mrb::OP_KEYEND:
+        // ArgumentError "unknown keyword" for a key the call gave and the body did not take (vm.c's KEYEND)
+        if (c.kdict == 0) throw std::runtime_error("malformed: KEYEND in a body with no keyword parameters");
+        c.line("(eval (call void &\"mrbbc_keyend\" " + c.reg(c.kdict) + "))");
+        break;
       case mrb::OP_BLKPUSH: {
         // R[a] = the block of this method (vm.c: a nil block is "unexpected yield"); only the method's own block (level 0)
         if (kind != Kind::Method || (x[1] & 0xf) != 0) {
@@ -957,11 +1094,13 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         c.line("(let " + id + " long (call long &\"mrbbc_blk_id\" " + c.reg(x[0]) + "))");
         c.line("(let " + fr + " (ptr unsigned_char) (call (ptr unsigned_char) &\"mrbbc_blk_frame\" " + c.reg(x[0]) + "))");
         c.line("(let " + hm + " (ptr unsigned_char) (call (ptr unsigned_char) &\"mrbbc_blk_home\" " + c.reg(x[0]) + "))");
+        const std::string dp = c.fresh();
+        c.line("(let " + dp + " (ptr unsigned_char) (call (ptr unsigned_char) &\"mrbbc_blk_disp\" " + c.reg(x[0]) + "))");
         for (std::size_t m = 0; m < sh.blocks.size(); ++m) {
           std::string hit = c.fresh();
           c.line("(let " + hit + " bool (eq long " + id + " (const long " + num(static_cast<long long>(m)) + ")))");
           c.line("(if " + hit + " (then (eval (call void &\"mrb_b" + std::to_string(m) + "\" " + c.reg(x[0]) + " $\"" + argv +
-                 "\" (const long " + num(n) + ") " + fr + " " + hm + "))))");
+                 "\" (const long " + num(n) + ") " + fr + " " + hm + " " + dp + "))))");
         }
         emit_unwind_check(c);
         break;
@@ -976,7 +1115,7 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         // only for that register.
         if (kind == Kind::Block && x[2] == 1 && in.op == mrb::OP_GETUPVAR && sh.method_blocks.count(&irep) != 0) {
           const mrb::Irep *method = sh.block_method.at(&irep);
-          if (static_cast<long>(x[1]) == slot_count(*method) + 1) {
+          if (static_cast<long>(x[1]) == params_of(*method).block_slot()) {
             store_tag(c, c.reg(x[0]), kTagNil);
             break;
           }
@@ -985,7 +1124,7 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         // level 2 is past the method's env: the implicit block of a super there is nil, as mruby's level-2 upvar is (the
         // method's proc has no environment above it). Only the frame's own registers (its locals) are read.
         if (kind == Kind::Block && sh.depth.at(&irep) == 2 && x[2] == 2 && in.op == mrb::OP_GETUPVAR &&
-            sh.block_method.count(&irep) != 0 && static_cast<long>(x[1]) == slot_count(*sh.block_method.at(&irep)) + 1) {
+            sh.block_method.count(&irep) != 0 && static_cast<long>(x[1]) == params_of(*sh.block_method.at(&irep)).block_slot()) {
           store_tag(c, c.reg(x[0]), kTagNil);
           break;
         }
@@ -997,6 +1136,25 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
           }
           std::string p = c.fresh();
           c.line("(let " + p + " (ptr unsigned_char) (offset %4 " + num(16 * static_cast<long long>(x[1])) + "))");
+          if (in.op == mrb::OP_GETUPVAR) c.line("(copy 16 " + c.reg(x[0]) + " " + p + ")");
+          else c.line("(copy 16 " + p + " " + c.reg(x[0]) + ")");
+          break;
+        }
+        // A block nested three or more deep reads level L >= 1 from its closure's frames: disp[L-1] is the frame of the L-th
+        // scope out (mrbbc_upframe, see mrbbc_block_nested). The register must be one of that body's locals.
+        if (kind == Kind::Block && sh.depth.at(&irep) >= 3 && x[2] >= 1) {
+          if (x[2] > static_cast<unsigned>(sh.depth.at(&irep)) - 1u) {
+            throw std::runtime_error("malformed: " + std::string(in.name) + " at pc " + std::to_string(in.pc) + " past the outermost scope");
+          }
+          const mrb::Irep *owner = upvar_body(sh, irep, x[2]);
+          if (x[1] >= owner->nlocals) {
+            throw Refused("refused: " + std::string(in.name) + " of a register past the locals of the frame it reads is not lowered yet (pc " +
+                          std::to_string(in.pc) + ")");
+          }
+          const std::string fp = c.fresh(), p = c.fresh();
+          c.line("(let " + fp + " (ptr unsigned_char) (call (ptr unsigned_char) &\"mrbbc_upframe\" %5 (const long " +
+                 num(static_cast<long long>(x[2]) - 1) + ")))");
+          c.line("(let " + p + " (ptr unsigned_char) (offset " + fp + " " + num(16 * static_cast<long long>(x[1])) + "))");
           if (in.op == mrb::OP_GETUPVAR) c.line("(copy 16 " + c.reg(x[0]) + " " + p + ")");
           else c.line("(copy 16 " + p + " " + c.reg(x[0]) + ")");
           break;
@@ -1029,8 +1187,11 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         const bool in_method = kind == Kind::Method && lv == 0;
         const bool in_block = kind == Kind::Block && lv == 1 && sh.depth.at(&irep) == 1 && sh.method_blocks.count(&irep) != 0;
         const bool in_block2 = kind == Kind::Block && lv == 2 && sh.depth.at(&irep) == 2 && sh.block_method.count(&irep) != 0;
-        if (!(in_method || in_block || in_block2) || r != 0 || m2 != 0 || kd != 0 ||
-            static_cast<long>(m1) != slot_count(in_method ? irep : *sh.block_method.at(&irep))) {
+        // the method's parameters must be plain ones (required and optional): m1 is their count
+        const bool plain = in_method || in_block || in_block2;
+        const Params mp = plain ? params_of(in_method ? irep : *sh.block_method.at(&irep)) : Params();
+        if (!plain || r != 0 || m2 != 0 || kd != 0 || mp.rest != 0 || mp.post != 0 || mp.kd != 0 ||
+            static_cast<long>(m1) != mp.len()) {
           throw Refused("refused: ARGARY other than the parameters of a method (or of a block that a method makes) is not "
                         "lowered yet (pc " + std::to_string(in.pc) + ")");
         }
@@ -1047,8 +1208,6 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
           c.line("(eval (call void &\"mrbbc_ary_push\" " + c.reg(x[0]) + " " + param(i) + "))");
         }
         c.line("(copy 16 " + c.reg(x[0] + 1) + " " + param(m1 + 1) + ")");
-        argary_end = in.pc + in.len;
-        argary_m1 = m1;
         break;
       }
       case mrb::OP_SUPER: {
@@ -1068,35 +1227,21 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
           c.line("(eval (call void &\"mrbbc_no_super\"))");
           break;
         }
+        // n = 15 is a splat: the arguments are the elements of the array in R[a+1]. A zsuper's ARGARY made that array (the
+        // method's parameters, in order), so both take the same path. k = 15 is a splat of keyword arguments (not lowered).
         const unsigned n = x[1] & 0x0f, k = x[1] >> 4;
-        if (k != 0) throw Refused("refused: SUPER with keyword arguments is not lowered yet (pc " + std::to_string(in.pc) + ")");
-        // n = 15 is a splat (an array of any length) unless the ARGARY of a zsuper comes just before it: only that one has
-        // the method's parameter count many elements (ARGARY's m1)
-        const bool zparams = n == 15;
-        if (zparams && in.pc != argary_end) {
-          throw Refused("refused: SUPER with a splat of arguments is not lowered yet (pc " + std::to_string(in.pc) + ")");
-        }
-        const unsigned nargs = zparams ? argary_m1 : n;
-        const unsigned blk = zparams ? x[0] + 2 : x[0] + n + 1;
+        if (k == 15) throw Refused("refused: SUPER with a splat of keyword arguments is not lowered yet (pc " + std::to_string(in.pc) + ")");
+        if (n == 15 && k != 0) throw Refused("refused: SUPER with a splat and keyword arguments is not lowered yet (pc " + std::to_string(in.pc) + ")");
         const std::string name = sh.method_names.at(home);
-        const std::string argv = "argv" + std::to_string(in.pc);
-        c.add_slot(argv, 16 * (static_cast<std::size_t>(nargs) + 1));
-        c.line("(copy 16 $\"" + argv + "\" " + c.reg(0) + ")");
-        if (zparams) {
-          for (unsigned i = 0; i < nargs; ++i) {
-            std::string p = c.fresh();
-            c.line("(let " + p + " (ptr unsigned_char) (offset $\"" + argv + "\" " + num(16 * (i + 1)) + "))");
-            c.line("(eval (call void &\"mrbbc_ary_elt\" " + p + " " + c.reg(x[0] + 1) + " (const long " + num(i) + ")))");
-          }
-        } else {
-          emit_args(c, argv, x[0], n);
-        }
+        const CallArgs ca = emit_call_args(c, "argv" + std::to_string(in.pc), c.reg(0), x[0], n, k);
+        // the block is after the arguments and the keyword pairs
+        const unsigned blk = block_reg(x[0], n, k);
         // the superclass method's number, or -1 for the builtin initialize (BasicObject#initialize, which gives nil)
         const std::string id = c.fresh();
         c.line("(let " + id + " int (call int &\"mrbbc_find_super\" " + c.reg(0) + " (const int " +
-               num(number_of(sh.method_ids, *home, "method")) + ") @\"" + symbol_data(sh, name) + "\" (const long " +
-               num(nargs) + ")))");
-        emit_method_branches(c, sh, id, c.reg(x[0]), argv, c.reg(blk), "(const long " + num(nargs) + ")");
+               num(number_of(sh.method_ids, *home, "method")) + ") @\"" + symbol_data(sh, name) + "\" " + ca.argc + " " + ca.kw +
+               "))");
+        emit_method_branches(c, sh, id, c.reg(x[0]), ca.argv, c.reg(blk), ca.argc, ca.kw);
         const std::string neg = c.fresh();
         c.line("(let " + neg + " bool (lt.s int " + id + " (const int 0)))");
         c.line("(if " + neg + " (then (eval (call void &\"mrbbc_super_nil\" " + c.reg(x[0]) + "))))");
@@ -1113,7 +1258,7 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         const unsigned n = has_c ? (x[2] & 0x0f) : 0;
         const unsigned k = has_c ? (x[2] >> 4) : 0;
         const std::string name = method_name(x[1]);
-        if (k != 0) refuse_method(name, "with keyword arguments");
+        if (k == 15) refuse_method(name, "with a splat of keyword arguments");
         // block_given? is the Kernel method that reads the frame's block: the frame's own block, or none at the top level
         if (name == "block_given?" && n == 0 && in.op != mrb::OP_SSENDB && sh.defined.count(name) == 0) {
           if (kind == Kind::Main) {
@@ -1129,16 +1274,15 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
           refuse_method(name, "is not defined by the program (only the program's methods are lowered)");
         }
         if (object_method(name)) refuse_method(name, "is an Object method, which a self call is not lowered for");
-        const std::string argv = "argv" + std::to_string(in.pc);
-        c.add_slot(argv, 16 * (static_cast<std::size_t>(n) + 1));
-        emit_arg_vector(c, argv, c.reg(0), x[0], n);
-        // the block: the one the instruction passes, or nil
-        const std::string blk = in.op == mrb::OP_SSENDB ? c.reg(x[0] + n + 1) : nil_block(c, "nil" + std::to_string(in.pc));
+        if (n == 15 && k != 0) refuse_method(name, "with a splat and keyword arguments");
+        const CallArgs ca = emit_call_args(c, "argv" + std::to_string(in.pc), c.reg(0), x[0], n, k);
+        // the block: the one the instruction passes (after the arguments), or nil
+        const std::string blk = in.op == mrb::OP_SSENDB ? c.reg(block_reg(x[0], n, k)) : nil_block(c, "nil" + std::to_string(in.pc));
         // the runtime checks the count and gives the method's number; the call is one branch per method of the program
         const std::string id = c.fresh();
-        c.line("(let " + id + " int (call int &\"mrbbc_find\" " + c.reg(0) + " @\"" + symbol_data(sh, name) + "\" (const long " +
-               num(n) + ")))");
-        emit_method_branches(c, sh, id, c.reg(x[0]), argv, blk, "(const long " + num(n) + ")");
+        c.line("(let " + id + " int (call int &\"mrbbc_find\" " + c.reg(0) + " @\"" + symbol_data(sh, name) + "\" " + ca.argc +
+               " " + ca.kw + "))");
+        emit_method_branches(c, sh, id, c.reg(x[0]), ca.argv, blk, ca.argc, ca.kw);
         if (in.op == mrb::OP_SSENDB) {
           emit_block_site(c, c.reg(x[0]), in.pc + in.len);
         } else {
@@ -1149,14 +1293,14 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
       case mrb::OP_SEND0:
       case mrb::OP_SEND:
       case mrb::OP_SENDB: {
-        // R[a] = R[a].Syms[b](R[a+1] .. R[a+n]) with c = n | k<<4 (k keyword arguments, refused); SENDB has the block in
-        // R[a+n+1]. See lower_send.
+        // R[a] = R[a].Syms[b](R[a+1] .. R[a+n], then k keyword pairs) with c = n | k<<4; SENDB has the block after them. See
+        // lower_send.
         const bool has_c = in.op != mrb::OP_SEND0;
         const unsigned n = has_c ? (x[2] & 0x0f) : 0;
         const unsigned k = has_c ? (x[2] >> 4) : 0;
         const std::string name = method_name(x[1]);
-        if (k != 0) refuse_method(name, "with keyword arguments");
-        lower_send(c, sh, in, name, x[0], n, in.op == mrb::OP_SENDB);
+        if (k == 15) refuse_method(name, "with a splat of keyword arguments");
+        lower_send(c, sh, in, name, x[0], n, k, in.op == mrb::OP_SENDB);
         break;
       }
       case mrb::OP_GETIV:
@@ -1288,12 +1432,13 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
   std::ostringstream fn;
   fn << "(function \"" << fname << "\" (ret void) (params (param %0 \"ret\" (ptr (struct \"MV\")))";
   if (kind == Kind::Method) {
-    fn << " (param %1 \"argv\" (ptr (struct \"MV\"))) (param %2 \"blk\" (ptr (struct \"MV\"))) (param %3 \"argc\" long)";
+    fn << " (param %1 \"argv\" (ptr (struct \"MV\"))) (param %2 \"blk\" (ptr (struct \"MV\"))) (param %3 \"argc\" long)"
+       << " (param %4 \"kw\" long)";
   } else if (kind == Kind::Class) {
     fn << " (param %1 \"argv\" (ptr (struct \"MV\"))) (param %2 \"blk\" (ptr (struct \"MV\")))";
   } else if (kind == Kind::Block) {
     fn << " (param %1 \"argv\" (ptr (struct \"MV\"))) (param %2 \"argc\" long) (param %3 \"frame\" (ptr (struct \"MV\")))"
-       << " (param %4 \"home\" (ptr (struct \"MV\")))";
+       << " (param %4 \"home\" (ptr (struct \"MV\"))) (param %5 \"disp\" (ptr (struct \"MV\")))";
   }
   fn << ")\n";
   fn << "  (slot \"frame\" (struct \"MV\") " << 16 * static_cast<std::size_t>(frame_regs) << " 8)\n";
@@ -1328,7 +1473,7 @@ std::string lower_module(const mrb::Module &module, const std::string &source_na
     for (std::size_t m = 0; m < sh.methods.size(); ++m) {
       const std::string hit = "%" + std::to_string(5 + 2 * m);
       uc << "  (let " << hit << " bool (eq int %0 (const int " << m << ")))\n";
-      uc << "  (if " << hit << " (then (eval (call void &\"mrb_m" << m << "\" %1 %2 %3 %4))))\n";
+      uc << "  (if " << hit << " (then (eval (call void &\"mrb_m" << m << "\" %1 %2 %3 %4 (const long 0)))))\n";
     }
     uc << "  (return))\n";
     sh.functions += uc.str();
