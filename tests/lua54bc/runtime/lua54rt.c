@@ -55,7 +55,9 @@ typedef struct LString {
 static LV make_str(const char *p, size_t len);
 static const char *type_name(uint8_t tag);
 static void arg_fail(int k, const char *fname, const char *msg);
+static void lib_arg_error(int k, const char *fname, const char *what, const char *got);
 static int64_t arg_int(const LV *args, int nargs, int k, const char *fname);
+static int64_t opt_int(const LV *args, int nargs, int k, const char *fname, int64_t def);
 
 /* An internal inconsistency of the runtime, not a Lua error. */
 static void die(const char *what) {
@@ -600,6 +602,20 @@ static void make_host_nup(LV *dst, lua_cfn fn, int nup) {
 
 static void make_host(LV *dst, lua_cfn fn) { make_host_nup(dst, fn, 0); }
 
+/* The call stack for error levels: one entry per call, the position of the caller at the time of the call (NULL when the
+ * caller is not a Lua function, e.g. pcall). The top entry is the call of the running function, so level 1 (the caller of
+ * error) is the top, and level 2 is the entry below it. Entries past CALLSTACK_MAX are not kept. */
+#define CALLSTACK_MAX 4096
+static const char *callsite[CALLSTACK_MAX];
+static int call_depth = 0;
+
+static void push_callsite(const char *s) {
+  if (call_depth < CALLSTACK_MAX) callsite[call_depth] = s;
+  call_depth++;
+}
+
+static void pop_callsite(void) { call_depth--; }
+
 /* The results of a call are in ret[0..lua54rt_nret-1]: all of them, or wanted of them with nil after. */
 static void finish_call(LV *ret, int wanted, int a) {
   if (wanted < 0) {
@@ -618,9 +634,11 @@ void lua54rt_call(LV *fn, int nargs, LV *args, LV *ret, int wanted, int a) {
     LV out[64];
     const char *saved = site;
     HostFn *saved_host = cur_host;
+    push_callsite(saved);
     cur_host = (HostFn *)fn->v.p;
     int n = cur_host->fn(out, args, nargs);
     cur_host = saved_host;
+    pop_callsite();
     site = saved;
     lua54rt_nret = n;
     for (int k = 0; k < n; ++k) ret[k] = out[k];
@@ -633,7 +651,9 @@ void lua54rt_call(LV *fn, int nargs, LV *args, LV *ret, int wanted, int a) {
     lua54rt_nargs = nargs;
     lua54rt_nret = 0;
     const char *saved = site;
+    push_callsite(saved);
     c->fn(ret, args, c);
+    pop_callsite();
     site = saved;
     finish_call(ret, wanted, a);
     return;
@@ -1367,13 +1387,35 @@ void lua54rt_install_library(LV *env) {
 /* lua_error with a value: a protected call (pcall) takes it; otherwise lua.c reports it and stops. */
 static void host_raise(LV v) { raise_value(v); }
 
+/* The first line of a site (its "source:line:"), copied to buf. */
+static void first_line(const char *s, char *buf, size_t size) {
+  buf[0] = '\0';
+  if (s == NULL) return;
+  const char *nl = strchr(s, '\n');
+  size_t len = nl != NULL ? (size_t)(nl - s) : strlen(s);
+  if (len >= size) len = size - 1;
+  memcpy(buf, s, len);
+  buf[len] = '\0';
+}
+
+/* luaL_where for level: the position of the function at that level of the call stack, "" when it is not a Lua function. */
+static void level_where(int64_t level, char *buf, size_t size) {
+  int64_t idx = call_depth - level;
+  if (idx < 0 || idx >= CALLSTACK_MAX) {
+    buf[0] = '\0';
+    return;
+  }
+  first_line(callsite[idx], buf, size);
+}
+
+/* error(msg [, level]): a string message gets the position of the level, as luaB_error does. */
 static int host_error(LV *out, LV *args, int nargs) {
   (void)out;
   LV msg = nargs >= 1 ? args[0] : (LV){0};
-  int64_t level = nargs >= 2 && args[1].tag != TAG_NIL ? (args[1].tag == TAG_INT ? args[1].v.i : 1) : 1;
-  if (msg.tag == TAG_STR && level > 0 && site != NULL) {
+  int64_t level = opt_int(args, nargs, 2, "error", 1);
+  if (msg.tag == TAG_STR && level > 0) {
     char where[512];
-    site_line(0, where, sizeof where);
+    level_where(level, where, sizeof where);
     if (where[0] != '\0') {
       size_t n = strlen(where) + 1 + ((LString *)msg.v.p)->len;
       char *buf = (char *)malloc(n + 1);
@@ -1399,18 +1441,21 @@ static int host_assert(LV *out, LV *args, int nargs) {
 }
 
 /* pcall(f, ...): the results of f behind true, or false and the error value. The error longjmps to here. */
-static int host_pcall(LV *out, LV *args, int nargs) {
-  expect_arg(nargs, 1, "pcall", "value");
+/* pcall(f, ...) and xpcall(f, msgh, ...): the results of f behind true, or false and the error value (xpcall gives
+ * msgh's result for it). The error longjmps to here, with the call stack restored to its depth at the call. */
+static int protected_call(LV *out, LV *args, int nargs, int handler_arg) {
+  LV handler = args[handler_arg ? 1 : 0];   /* the callee's frame overwrites args[1..], so it is taken first */
   PCall p;
   p.prev = pcall_top;
-  p.base = args + 1;
+  p.base = args + (handler_arg ? 2 : 1);
   const char *saved_site = site;
+  int saved_depth = call_depth;
   pcall_top = &p;
   if (setjmp(p.jb) == 0) {
     LV fn = args[0];
     LV res[64];
     site = NULL;   /* a function called from here has no caller position, as in Lua */
-    lua54rt_call(&fn, nargs - 1, args + 1, res, -1, 0);
+    lua54rt_call(&fn, nargs - (handler_arg ? 2 : 1), args + (handler_arg ? 2 : 1), res, -1, 0);
     site = saved_site;
     pcall_top = p.prev;
     int n = lua54rt_top < 63 ? lua54rt_top : 63;
@@ -1419,11 +1464,29 @@ static int host_pcall(LV *out, LV *args, int nargs) {
     return n + 1;
   }
   site = saved_site;
+  call_depth = saved_depth;
   pcall_top = p.prev;
   lua54rt_close(p.base);   /* the upvalues of the frames the error left */
   out[0].tag = TAG_FALSE;
-  out[1] = p.err;
+  if (!handler_arg) {
+    out[1] = p.err;
+    return 2;
+  }
+  LV frame[1] = {p.err}, ret[4];
+  lua54rt_call(&handler, 1, frame, ret, 1, 0);
+  out[1] = ret[0];
   return 2;
+}
+
+static int host_pcall(LV *out, LV *args, int nargs) {
+  expect_arg(nargs, 1, "pcall", "value");
+  return protected_call(out, args, nargs, 0);
+}
+
+static int host_xpcall(LV *out, LV *args, int nargs) {
+  expect_arg(nargs, 2, "xpcall", "function");
+  if (args[1].tag != TAG_LCL && args[1].tag != TAG_LCF) lib_arg_error(2, "xpcall", "function", type_name(args[1].tag));
+  return protected_call(out, args, nargs, 1);
 }
 
 /* ---- argument checks (lauxlib.c's luaL_check*) ---- */
@@ -3007,6 +3070,8 @@ static void install_more(LV *env) {
   set_global(env, "assert", &f);
   make_host(&f, host_pcall);
   set_global(env, "pcall", &f);
+  make_host(&f, host_xpcall);
+  set_global(env, "xpcall", &f);
   make_host(&f, host_tonumber);
   set_global(env, "tonumber", &f);
   make_host(&f, host_rawget);
