@@ -47,7 +47,7 @@ constexpr int kTagNil = 0, kTagFalse = 1, kTagTrue = 2, kTagInt = 3;
 constexpr int kOpAdd = 0, kOpSub = 1, kOpMul = 2, kOpDiv = 3, kOpLt = 4, kOpLe = 5, kOpGt = 6, kOpGe = 7, kOpEq = 8,
               kOpNeq = 9;
 // The methods of SEND0 (enum mrbbc_method).
-constexpr int kMToS = 0, kMSize = 1, kMLength = 2, kMNot = 3;
+constexpr int kMToS = 0, kMSize = 1, kMLength = 2, kMNot = 3, kMInspect = 4;
 
 // What a function lowers: the main program, a method body (its argv and blk parameters) or a block body (its argv, argc
 // and the frame it was made in).
@@ -66,6 +66,7 @@ struct Shared {
   std::map<std::string, std::string> symbols;    // symbol name -> the data item holding its name
   std::map<const mrb::Irep *, int> method_ids;   // a method body -> its number (the function mrb_m<number>)
   std::vector<const mrb::Irep *> methods;        // the method bodies by number
+  std::map<const mrb::Irep *, std::string> method_names;  // a method body -> the name its TDEF gives (SUPER has no name operand)
   std::map<const mrb::Irep *, int> block_ids;    // a block body -> its number (the function mrb_b<number>)
   std::vector<const mrb::Irep *> blocks;         // the block bodies by number
   std::vector<const mrb::Irep *> classes;        // the class bodies (the children an EXEC runs) by number (mrb_k<number>)
@@ -328,12 +329,22 @@ bool plain_symbol(const std::string &s) {
   return i == s.size();
 }
 
+// The name of an operator method that a def may give (`def +(o)`): it prints as :+ with no quotes, as mruby's inspect does.
+bool operator_symbol(const std::string &s) {
+  static const char *const names[] = {"+", "-", "*", "/", "==", "!=", "<", "<=", ">", ">=", "!"};
+  for (const char *n : names) {
+    if (s == n) return true;
+  }
+  return false;
+}
+
 // The method of a SEND0 (no argument) the runtime implements, by its name (enum mrbbc_method); false for any other.
 bool zero_arg_method(const std::string &name, int &code) {
   if (name == "to_s") code = kMToS;
   else if (name == "size") code = kMSize;
   else if (name == "length") code = kMLength;
   else if (name == "!") code = kMNot;
+  else if (name == "inspect") code = kMInspect;
   else return false;
   return true;
 }
@@ -443,6 +454,7 @@ void collect(Shared &sh, const mrb::Irep &irep, Kind kind, bool home_main) {
       }
       const std::string name = sym_at(irep, in.args[1], in.pc);
       sh.defined.insert(name);
+      sh.method_names[body] = name;
       if (kind == Kind::Class) sh.in_class.insert(name);
       if (kind == Kind::Main) sh.top.insert(name);
       child_kind[in.args[2]] = std::make_pair(Kind::Method, false);
@@ -634,6 +646,8 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
   for (const mrb::Insn &in : insns) {
     if (in.op == mrb::OP_TDEF && in.args[0] + 1u > frame_regs) frame_regs = in.args[0] + 1u;
   }
+  // a method keeps its block in R(arity+1), where the VM's caller leaves it (a zsuper or a super reads it from there)
+  if (kind == Kind::Method && frame_regs < static_cast<unsigned>(arity) + 2u) frame_regs = static_cast<unsigned>(arity) + 2u;
 
   Ctx c(sh, irep, kind, frame_regs);
   for (unsigned i = 0; i < frame_regs; ++i) {
@@ -650,6 +664,7 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
     for (long i = arity + 1; i < static_cast<long>(frame_regs); ++i) {
       store_tag(c, c.reg(static_cast<unsigned>(i)), kTagNil);
     }
+    if (kind == Kind::Method) c.line("(copy 16 " + c.reg(static_cast<unsigned>(arity + 1)) + " %2)");
   } else if (kind == Kind::Block) {
     // R(0) is self. The parameters are argv[1..] for the arguments the yield gave, else nil (a proc takes what it gets). With
     // two or more parameters, one array argument is splatted instead (mrbbc_splats: the elements, nil past their end).
@@ -679,15 +694,18 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
       store_tag(c, c.reg(static_cast<unsigned>(i)), kTagNil);
     }
   }
+  std::size_t argary_end = static_cast<std::size_t>(-1);  // the pc after the last ARGARY (a zsuper's SUPER follows it)
   for (const mrb::Insn &in : insns) {
     c.pc = in.pc;
     c.line("");
     c.body << "  (label " << lbl(in.pc) << ")\n";
-    // an operator the program defines in a class is a call the fast path cannot make: refused
+    // an operator the program defines at the top level is an Object method that every value inherits (and mruby calls
+    // for a nil or a Symbol operand too): the runtime's operators do not reach it, so it is refused. A class's operator
+    // is found by the runtime from the receiver's class (mrbbc_binop, see "Operators" in the notes).
     if (const char *op_name = operator_method(in.op)) {
-      if (sh.in_class.count(op_name) != 0) {
+      if (sh.top.count(op_name) != 0) {
         throw Refused("refused: " + std::string(in.name) + " of the operator '" + op_name +
-                      "', which the program defines in a class, is not lowered yet (pc " + std::to_string(in.pc) + ")");
+                      "', which the program defines at the top level, is not lowered yet (pc " + std::to_string(in.pc) + ")");
       }
     }
     if (in.ext != 0 || in.op == mrb::OP_EXT1 || in.op == mrb::OP_EXT2 || in.op == mrb::OP_EXT3) {
@@ -762,12 +780,8 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         break;
       }
       case mrb::OP_STRCAT:
-        // str_cat(R[a], R[a+1]): R[a] is a string; the operand is appended as its to_s (mrb_obj_as_string). A to_s the
-        // program defines in a class would have to be called for an instance, which is not lowered
-        if (sh.in_class.count("to_s") != 0) {
-          throw Refused("refused: STRCAT with a to_s the program defines in a class is not lowered yet (pc " +
-                        std::to_string(in.pc) + ")");
-        }
+        // str_cat(R[a], R[a+1]): R[a] is a string; the operand is appended as its to_s (mrb_obj_as_string). The runtime
+        // calls a to_s the program defines in the operand's class (mrbbc_strcat)
         c.line("(eval (call void &\"mrbbc_strcat\" " + c.reg(x[0]) + " " + c.reg(x[0] + 1) + "))");
         break;
       case mrb::OP_LOADNIL: store_tag(c, c.reg(x[0]), kTagNil); break;
@@ -836,7 +850,7 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         const std::string name = method_name(x[1]);
         // a def goes to Object at the top level, and to the class body's own class (self) in a class body
         if (kind != Kind::Main && kind != Kind::Class) refuse_method(name, "is defined in a method or a block (not lowered yet)");
-        if (!plain_symbol(name)) refuse_method(name, "has a name that is not plain (not lowered yet)");
+        if (!plain_symbol(name) && !operator_symbol(name)) refuse_method(name, "has a name that is not plain (not lowered yet)");
         const long body_arity = required_arity(body);
         if (body_arity < 0) refuse_method(name, "has parameters other than required ones (not lowered yet)");
         const std::string id = "(const int " + num(number_of(sh.method_ids, body, "method")) + ") (const long " +
@@ -906,6 +920,67 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         c.line("(let " + p + " (ptr unsigned_char) (offset %3 " + num(16 * static_cast<long long>(x[1])) + "))");
         if (in.op == mrb::OP_GETUPVAR) c.line("(copy 16 " + c.reg(x[0]) + " " + p + ")");
         else c.line("(copy 16 " + p + " " + c.reg(x[0]) + ")");
+        break;
+      }
+      case mrb::OP_ARGARY: {
+        // ARGARY a b: the arguments of a zsuper (`super` in a method with parameters), as vm.c builds them: R[a] = the array
+        // of the parameters and R[a+1] = the block. Only the required parameters of a method at level 0 are lowered; the
+        // array holds R(1..m1) and the block is R(m1+1), where the caller leaves it.
+        const unsigned m1 = (x[1] >> 11) & 0x3f, r = (x[1] >> 10) & 1, m2 = (x[1] >> 5) & 0x1f, kd = (x[1] >> 4) & 1,
+                       lv = x[1] & 0xf;
+        if (kind != Kind::Method || lv != 0 || r != 0 || m2 != 0 || kd != 0 || m1 != static_cast<unsigned>(arity)) {
+          throw Refused("refused: ARGARY other than the required parameters of a method is not lowered yet (pc " +
+                        std::to_string(in.pc) + ")");
+        }
+        c.line("(eval (call void &\"mrbbc_ary_new\" " + c.reg(x[0]) + " (const long " + num(m1) + ")))");
+        for (unsigned i = 1; i <= m1; ++i) {
+          c.line("(eval (call void &\"mrbbc_ary_push\" " + c.reg(x[0]) + " " + c.reg(i) + "))");
+        }
+        c.line("(copy 16 " + c.reg(x[0] + 1) + " " + c.reg(m1 + 1) + ")");
+        argary_end = in.pc + in.len;
+        break;
+      }
+      case mrb::OP_SUPER: {
+        // SUPER a b: R[a] = the method of the superclass of the class the current method is defined in (mrbbc_find_super),
+        // called on self R(0). b = n | k<<4: the arguments are R[a+1..a+n] and the block R[a+n+1] (nil or the block; the
+        // SUPER takes the block from that register, as vm.c does). n = 15 is the zsuper of a method with parameters: the
+        // array of ARGARY is in R[a+1] (its elements are the method's arity many) and the block in R[a+2].
+        if (kind != Kind::Method) {
+          throw Refused("refused: SUPER outside a method is not lowered yet (pc " + std::to_string(in.pc) + ")");
+        }
+        const unsigned n = x[1] & 0x0f, k = x[1] >> 4;
+        if (k != 0) throw Refused("refused: SUPER with keyword arguments is not lowered yet (pc " + std::to_string(in.pc) + ")");
+        // n = 15 is a splat (an array of any length) unless the ARGARY of a zsuper comes just before it: only that one has
+        // the method's arity many elements
+        const bool zparams = n == 15;
+        if (zparams && in.pc != argary_end) {
+          throw Refused("refused: SUPER with a splat of arguments is not lowered yet (pc " + std::to_string(in.pc) + ")");
+        }
+        const unsigned nargs = zparams ? static_cast<unsigned>(arity) : n;
+        const unsigned blk = zparams ? x[0] + 2 : x[0] + n + 1;
+        const std::string name = sh.method_names.at(&irep);
+        const std::string argv = "argv" + std::to_string(in.pc);
+        c.add_slot(argv, 16 * (static_cast<std::size_t>(nargs) + 1));
+        c.line("(copy 16 $\"" + argv + "\" " + c.reg(0) + ")");
+        if (zparams) {
+          for (unsigned i = 0; i < nargs; ++i) {
+            std::string p = c.fresh();
+            c.line("(let " + p + " (ptr unsigned_char) (offset $\"" + argv + "\" " + num(16 * (i + 1)) + "))");
+            c.line("(eval (call void &\"mrbbc_ary_elt\" " + p + " " + c.reg(x[0] + 1) + " (const long " + num(i) + ")))");
+          }
+        } else {
+          emit_args(c, argv, x[0], n);
+        }
+        // the superclass method's number, or -1 for the builtin initialize (BasicObject#initialize, which gives nil)
+        const std::string id = c.fresh();
+        c.line("(let " + id + " int (call int &\"mrbbc_find_super\" " + c.reg(0) + " (const int " +
+               num(number_of(sh.method_ids, irep, "method")) + ") @\"" + symbol_data(sh, name) + "\" (const long " +
+               num(nargs) + ")))");
+        emit_method_branches(c, sh, id, c.reg(x[0]), argv, c.reg(blk));
+        const std::string neg = c.fresh();
+        c.line("(let " + neg + " bool (lt.s int " + id + " (const int 0)))");
+        c.line("(if " + neg + " (then (eval (call void &\"mrbbc_super_nil\" " + c.reg(x[0]) + "))))");
+        emit_block_site(c, c.reg(x[0]), in.pc + in.len);
         break;
       }
       case mrb::OP_SSEND0:
@@ -1120,6 +1195,21 @@ std::string lower_module(const mrb::Module &module, const std::string &source_na
   }
   for (std::size_t b = 0; b < sh.blocks.size(); ++b) {
     lower_irep(sh, *sh.blocks[b], "mrb_b" + std::to_string(b), Kind::Block);
+  }
+  // mrbbc_user_call(id, ret, argv, blk): the runtime calls the program's method number id (an operator, to_s or inspect of
+  // an instance of a program class, found on the receiver's class by mrbbc_find_send's rule). One branch per method.
+  {
+    std::ostringstream uc;
+    uc << "(function \"mrbbc_user_call\" (ret void) (params (param %0 \"id\" int)"
+       << " (param %1 \"ret\" (ptr (struct \"MV\"))) (param %2 \"argv\" (ptr (struct \"MV\")))"
+       << " (param %3 \"blk\" (ptr (struct \"MV\"))))\n";
+    for (std::size_t m = 0; m < sh.methods.size(); ++m) {
+      const std::string hit = "%" + std::to_string(4 + 2 * m);
+      uc << "  (let " << hit << " bool (eq int %0 (const int " << m << ")))\n";
+      uc << "  (if " << hit << " (then (eval (call void &\"mrb_m" << m << "\" %1 %2 %3))))\n";
+    }
+    uc << "  (return))\n";
+    sh.functions += uc.str();
   }
 
   std::ostringstream out;

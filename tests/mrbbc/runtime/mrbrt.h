@@ -44,6 +44,14 @@ void mrbbc_def_in(const MV *cls, const char *name, int id, long arity);
 int mrbbc_find(const MV *self, const char *name, long argc);
 int mrbbc_find_send(const MV *recv, const char *name, long argc);
 int mrbbc_find_init(const MV *obj, long argc);
+/* SUPER: the method of the superclass of the class method number `method` is defined in, called on self (the name is
+ * the one the TDEF gave). It returns -1 for the builtin initialize, which mrbbc_super_nil answers with nil. */
+int mrbbc_find_super(const MV *self, int method, const char *name, long argc);
+void mrbbc_super_nil(MV *dst);
+
+/* A call of the program's method number id from the runtime (the operators, to_s and inspect of an instance of a program
+ * class). The lowered module defines it: one branch per method, as a self call has. */
+void mrbbc_user_call(int id, MV *ret, MV *argv, MV *blk);
 
 /* Classes (CLASS, EXEC's class body, TCLASS, GETCONST) and objects. mrbbc_class defines the class name (a nil superclass
  * only) under cbase when it is a class, else under target when that is a class, else Object; an existing class of the
@@ -51,6 +59,7 @@ int mrbbc_find_init(const MV *obj, long argc);
  * raises NameError. mrbbc_alloc makes an instance of cls (new). mrbbc_getiv and mrbbc_setiv read and write an instance
  * variable of self (an object or a class; nil for another value). */
 void mrbbc_class(MV *dst, const MV *cbase, const MV *super, const char *name, const MV *target);
+/* A superclass must be a class (TypeError otherwise), and a reopened class must have the superclass it was made with. */
 void mrbbc_object_class(MV *dst);
 void mrbbc_getconst(MV *dst, const char *name);
 void mrbbc_alloc(MV *dst, const MV *cls);
@@ -98,7 +107,7 @@ enum mrbbc_op {
 };
 
 /* The methods of SEND0 that the producer lowers (the codes of mrb_lower.cpp). */
-enum mrbbc_method { MRBBC_M_TO_S, MRBBC_M_SIZE, MRBBC_M_LENGTH, MRBBC_M_NOT };
+enum mrbbc_method { MRBBC_M_TO_S, MRBBC_M_SIZE, MRBBC_M_LENGTH, MRBBC_M_NOT, MRBBC_M_INSPECT };
 
 /* dst = a OP b. Anything the runtime does not implement for these operands is an error, never a wrong value. Never
  * returns on an error. dst may alias a or b. */
