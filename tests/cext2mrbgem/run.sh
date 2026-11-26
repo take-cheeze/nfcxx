@@ -2017,6 +2017,16 @@ check grep -qF 'mrb_bug(mrb, "boom %d", 1)' "$work/api_conv_misc/src/api_conv_mi
 check grep -qF 'mrb_define_module_function(mrb, mrb->kernel_module, "conv_global", m_global, MRB_ARGS_NONE())' "$work/api_conv_misc/src/api_conv_misc.c"
 check grep -qF 'return mrb_yield(mrb, nfcx_block_arg(mrb), v);' "$work/api_conv_misc/src/api_conv_misc.c"
 check grep -qF 'mrb_get_args(mrb, "&", &nfcx_b);' "$work/api_conv_misc/src/api_conv_misc.c"
+
+# 2zzz110. a function-defining macro invoked at file scope (ffi's NUM_OP(name, ...)): each invocation is expanded, so the
+# functions it defines convert and are registered (before, "registered function has no definition"); the #define is then
+# unused and wrapped in #if 0
+rc=0; "$rb" "$conv" --scanner "$scanner" --name fn_macro tools/cext2mrbgem/fixtures/fn_macro/ext/fn_macro "$work/fn_macro" > "$work/fn_macro.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/fn_macro/NOT_BUILDABLE"
+check grep -qF 'static mrb_value fn_get_long(mrb_state *mrb, mrb_value self) {' "$work/fn_macro/src/fn_macro.c"
+check grep -qF 'mrb_define_method(mrb, mFn, "get2_long", fn_get2_long, MRB_ARGS_NONE());' "$work/fn_macro/src/fn_macro.c"
+check grep -qF '#if 0  /* BC2CPP-MRBGEM: unused macro' "$work/fn_macro/src/fn_macro.c"
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads

@@ -1082,6 +1082,56 @@
       "template": "mrb_obj_value(mrb_obj_class($m, $0))",
       "caveat": "the struct RClass * is wrapped with mrb_obj_value: CRuby returns the class as a VALUE"
     },
+    "rb_ivar_defined": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_bool_value(mrb_iv_defined($m, $0, $1))",
+      "template_cond": "mrb_iv_defined($m, $0, $1)",
+      "caveat": "the ID is the mruby symbol, as for rb_ivar_get; a value that cannot hold instance variables (an immediate) is not defined, as in CRuby"
+    },
+    "rb_obj_is_instance_of": {
+      "kind": "template",
+      "arity": 2,
+      "class_args": [
+        1
+      ],
+      "needs_mrb": true,
+      "template": "mrb_bool_value(mrb_obj_is_instance_of($m, $0, $1))",
+      "template_cond": "mrb_obj_is_instance_of($m, $0, $1)",
+      "caveat": "compares the object's class with the class argument, not its ancestors (rb_obj_is_kind_of is the ancestor test); the class argument must be a tracked class variable or an RClass * expression"
+    },
+    "rb_obj_dup": {
+      "kind": "call",
+      "mruby": "mrb_obj_dup",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "mruby raises TypeError for an immediate value (CRuby returns it unchanged, as 1.dup is 1) and for a singleton class"
+    },
+    "rb_str_to_str": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_convert_type($m, $0, MRB_TT_STRING, \"String\", \"to_str\")",
+      "caveat": "the to_str conversion CRuby's rb_str_to_str makes (TypeError when the value has no to_str); a String is returned as it is. mrb_str_to_str is not used: it converts a Symbol, Integer or Module with to_s"
+    },
+    "rb_mKernel": {
+      "kind": "expr",
+      "mruby": "mrb->kernel_module",
+      "needs_mrb": true
+    },
+    "RB_TEST": {
+      "kind": "call",
+      "mruby": "mrb_test",
+      "inject_mrb": false
+    },
+    "REALLOC_N": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "(($0) = (void *)mrb_realloc($m, $0, sizeof($1) * ($2)))",
+      "caveat": "CRuby's REALLOC_N is RB_REALLOC_N (ruby/internal/memory.h); reallocates the variable to n values of the type with mrb_realloc (see RB_ALLOC_N)"
+    },
     "rb_respond_to": {
       "kind": "call",
       "mruby": "mrb_respond_to",
@@ -3391,6 +3441,9 @@
       0
     ],
     "rb_obj_is_kind_of": [
+      1
+    ],
+    "rb_obj_is_instance_of": [
       1
     ],
     "rb_include_module": [
