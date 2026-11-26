@@ -114,8 +114,11 @@ exits 1, as `sqref` does.
 - Arrays (sqarray.cpp, sqvm.cpp Get and Set). A GET or SET with an integer index out of range (a negative index is out of
   range) is `the index 'K' does not exist` at once, with no fallback to the root table. A SET with a key that is not an
   integer is `indexing array with T`. A GET with a string key that is not a method is `the index 'K' does not exist`; an
-  array method that is not lowered (push, append, ...) is `unsupported array method` at run time, where the reference
-  runs it. Arrays compare by identity for `==`; `<` on two arrays compares their addresses, as the reference does, and is
+  array method that is not lowered (extend, insert, sort, map, ...) is `unsupported array method` at run time, where the
+  reference runs it. `append` and `push` (the result is the array), `pop` (`empty array` on an empty one), `reverse` (the
+  array), `slice` (`wrong indexes`, `slice out of range`; a null or non-number start or end is `parameter N has an invalid
+  type 'T' ; expected: 'integer|float'`) and `find` (the index, or null) are lowered, as are the argument counts of each
+  (`wrong number of parameters`). Arrays compare by identity for `==`; `<` on two arrays compares their addresses, as the reference does, and is
   not tested.
 - Floats (sqvm.cpp, sqobject.h). SQFloat is the 4-byte `float` of this build (no SQUSEDOUBLE): a float value is its
   4 bytes in the payload's low 32 bits. Arithmetic on a float, or on an integer and a float, is done in float (an integer
@@ -127,8 +130,12 @@ exits 1, as `sqref` does.
   print a float result with `%g`.
 - Strings, tables and closures are all payloads that are never 0, so `IsFalse` is still "payload == 0" (sqvm.cpp's
   IsFalse tests the integer of the object, which is non-zero for a pointer). A float is the one exception: see above.
-- Number methods: `tostring` is the number delegate's for an integer and a float. `tofloat`, `tointeger` and `tochar` are
-  not lowered: a call of one is `unsupported number method` at run time, where the reference runs it.
+- Number methods (sqbaselib.cpp `_number_default_delegate_funcz`, which a boolean takes too): `tostring`, `tofloat`,
+  `tointeger` and `tochar` are lowered. `tointeger` of a float truncates; `tochar` is the one byte `(SQChar)tointeger`, a
+  string of length 1 (a byte of 128 or more is negative when indexed, as the reference's char is signed). A string's
+  `tofloat` and `tointeger` (with an optional base) are lowered: `cannot convert the string` when no number starts the text;
+  a text with a `.` or an exponent is a float for `tointeger` too. `tointeger` with a base of 1 is not tested (the C
+  library's behaviour there is undefined and the reference reads an uninitialised end pointer).
 - A table GET or SET of a key it does not have is `the index 'K' does not exist` (Raise_IdxError, the key printed as
   PrintObjVal prints it: a string as itself, an integer in decimal, anything else as its type name). A SET on a non-table
   is `trying to set 'T'`, a NEWSLOT on a non-table is `indexing T with K`, a NEWSLOT with a null key is `null cannot be
@@ -145,9 +152,15 @@ exits 1, as `sqref` does.
   root fallback when the instance is register 0); NEWSLOT on an instance is `class instances do not support the new slot
   operator`; a SET or NEWSLOT on a class is `trying to set 'class'` and, for NEWSLOT, the class rules above. An instance
   and a class compare by identity, and an arithmetic or comparison error names them as `instance` and `class`. The
-  delegate methods of an instance (`getclass`, `rawget`, `rawset`, `rawin`, `weakref`, `tostring`) and of a class
-  (`getattributes`, `setattributes`, `rawget`, `rawset`, `rawin`, `weakref`) are `unsupported ... method` at run time,
-  and `tostring` of an instance or a class is refused (the reference prints an address).
+  delegate methods of an instance (`getclass`, `rawget`, `rawset`, `rawin`) and of a class (`rawget`, `rawset`, `rawin`,
+  `getbase`, `instance`) are lowered: `rawget` and `rawin` look at the members (fields and shared members) with no
+  metamethods (`the index doesn't exist` for a missing key in rawget, the reference's text, where the rawset of a missing
+  instance key is `the index 'K' does not exist`); a `rawset` of a class goes through NewSlot and a refused slot (a field of
+  a locked class) is silently not done, returning the class; a `rawset` of an instance takes only its fields and returns
+  the instance; `null` as a key is `null key`. `instance()` makes an instance with no constructor and locks the class, as
+  `CreateInstance` does. The other delegate methods (`weakref`, `getattributes`, `setattributes`, `newmember`,
+  `rawnewmember`, and `tostring` of an instance or a class) are `unsupported ... method` at run time (`tostring` of an
+  instance or a class is refused: the reference prints an address).
 - Inheritance (`extends`, CLASS_OP, SQClass's constructor). A class with a base starts with the base's members, fields
   (with their indices, so an instance's fields are the base's then the new ones) and constructor; a field of the derived
   class with a base member's name replaces the default. The base is locked with the derived class (SQClass::Lock). A
@@ -168,9 +181,9 @@ exits 1, as `sqref` does.
   `sqref` with the same result as their source. Also: the opcode table against the reference header; a golden dump
   (`reader/ints.dump`); and five malformed streams (truncated, trailing byte, bad tag, SQInteger size 4, corrupt TAIL),
   each refused with exit 1.
-- `tests/squirrelbc/lower/run.sh`: the end-to-end suite. 85 programs (`lower/*.nut`: integers, strings, tables, calls,
-  closures, print, tostring, arrays, floats, classes and inheritance) match `sqref` on the printed result and the status;
-  42 runtime errors (`lower/rterr/`) match the message and status 1; 8 programs (`lower/err/`) are refused with exit 3; `lower/synth.rb` writes a stream with DLOAD, DMOVE, LINE and
+- `tests/squirrelbc/lower/run.sh`: the end-to-end suite. 91 programs (`lower/*.nut`: integers, strings, tables, calls,
+  closures, print, tostring, arrays, floats, classes and inheritance, number and string conversions, array methods, class
+  and instance delegates) match `sqref` on the printed result and the status; 56 runtime errors (`lower/rterr/`) match the message and status 1; 8 programs (`lower/err/`) are refused with exit 3; `lower/synth.rb` writes a stream with DLOAD, DMOVE, LINE and
   LOADNULLS. A string result is printed by `sqref` and by the driver alike (the text, one line).
 - The oracle is `tests/squirrelbc/oracle/sqref.c`: the reference VM, built against the reference tree's
   `libsquirrel_static.a`. It loads `.nut` (compile) and `.cnut` (`sq_readclosure`) and prints the result line.
@@ -189,12 +202,11 @@ source tree). Without them they exit 77 (skip). The lowering suite also needs `b
   the same size as SQInteger (8 bytes on LP64).
 - Only the LP64 layout is read. A wide SQChar, a 32-bit SQInteger, or a big-endian writer is refused.
 - Nothing above is verified against a 32-bit or Windows reference build.
-- Still not lowered: a method of the array or string delegate other than `len` and `tostring` (`push`, `append`, `slice`,
-  ...) is `unsupported array method` or `unsupported string method` at run time, where the reference runs it; no test
-  (rterr/arr_method.nut was removed for that reason). A method of the table delegate other than `tostring` (`t.len()`,
-  `t.rawget` ...) is "the index does not exist". A float as a table or array key is `float keys are not lowered` at run
-  time (the reference hashes floats; not modelled). `tofloat`, `tointeger` and `tochar` (number methods) are
-  `unsupported number method` at run time.
+- Still not lowered: an array method other than `len`, `append`, `push`, `pop`, `reverse`, `slice` and `find` (`extend`,
+  `insert`, `sort`, `map`, ...), and a string method other than `len`, `tostring`, `tofloat` and `tointeger` (`slice`,
+  `find`, `tolower`, `toupper`, `weakref`) are `unsupported ... method` at run time, where the reference runs them; no test.
+  A method of the table delegate other than `tostring` (`t.len()`, `t.rawget` ...) is "the index does not exist". A
+  float as a table or array key is `float keys are not lowered` at run time (the reference hashes floats; not modelled).
 - Objects (strings, tables, closures) are never freed: the runtime is a test harness with no collector, so a long loop
   that builds strings or tables uses memory without a bound.
 - A `tostring` of an array, a table or a function (in a concatenation, through `print` or the method) is refused at run
@@ -207,4 +219,5 @@ source tree). Without them they exit 77 (skip). The lowering suite also needs `b
   the reference makes it a metamethod, not a member, so the program's output differs; no test (a refusal from the
   producer would not match a program the reference runs).
 - TAILCALL is lowered as CALL (the reference reuses the frame of a closure). A tail recursion deep enough to need the frame reuse is a stack overflow here (`stack overflow`, the runtime's own text).
-- Not lowered: INSTANCEOF, LOADROOT and DELETE (refused by name); the delegate methods of an instance and a class (section 4).
+- Not lowered: INSTANCEOF, LOADROOT and DELETE (refused by name); the delegate methods of an instance and a class that
+  section 4 does not list.

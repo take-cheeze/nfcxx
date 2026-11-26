@@ -5,8 +5,11 @@
  * Strings are interned, as the reference interns them: two equal strings are the same object, so equality is the raw
  * comparison the IR makes. Tables are open-addressing hash tables keyed by the raw value (a string by its object).
  * Nothing is freed. The methods of the subset are the ones sqbc_rt_get finds: `len` of a string or an array, `tostring` of a
- * number, a boolean, a string, an array or a table, and `print` in the root table. Any other method of a string or an array
- * is `unsupported ... method`; a table's is "the index does not exist". */
+ * number, a boolean, a string, an array or a table, `tofloat`, `tointeger` and `tochar` of a number or a boolean (`tofloat`
+ * and `tointeger` of a string), `append`, `push`, `pop`, `reverse`, `slice` and `find` of an array, `rawget`, `rawset`,
+ * `rawin` of a class or an instance, `getbase` and `instance` of a class, `getclass` of an instance, and `print` in the root
+ * table. Any other method of a string, an array, a class or an instance is `unsupported ... method`; a table's is "the index
+ * does not exist". */
 #include "sqbcrt.h"
 
 #include <inttypes.h>
@@ -324,19 +327,59 @@ typedef struct SqClosure {
   struct SqClass *base; /* the class of a method of a class with a base (GETBASE), or NULL */
 } SqClosure;
 
-/* A native of the base library or a delegate: its operation (NAT_*) and the parameter count sqvm.cpp's CallNative checks
- * (`this` included; a native without a count takes any). */
+/* A native of the base library or a delegate: its operation (NAT_*), the parameter count sqvm.cpp's CallNative checks (`this`
+ * included: a positive count is exact, a negative one is a minimum), and the types of the parameters, one letter each
+ * (sqstate.cpp CompileTypemask: 'n' an integer or a float, 'a' an array, 's' a string, 'x' an instance, 'y' a class, '.' any);
+ * NULL when no parameter is checked. */
 typedef struct SqNative {
   int id;
   int nparams;
+  const char *typemask;
 } SqNative;
 
-enum { NAT_PRINT, NAT_STR_LEN, NAT_ARR_LEN, NAT_TOSTRING };
+enum {
+  NAT_PRINT,
+  NAT_STR_LEN,
+  NAT_ARR_LEN,
+  NAT_TOSTRING,
+  NAT_NUM_TOFLOAT,    /* number and bool delegate: tofloat, tointeger, tochar */
+  NAT_NUM_TOINTEGER,
+  NAT_NUM_TOCHAR,
+  NAT_STR_TOFLOAT,    /* string delegate: tofloat, tointeger */
+  NAT_STR_TOINTEGER,
+  NAT_ARR_APPEND,     /* array delegate: append and push */
+  NAT_ARR_POP,
+  NAT_ARR_REVERSE,
+  NAT_ARR_SLICE,
+  NAT_ARR_FIND,
+  NAT_RAWGET,         /* class and instance delegate: rawget, rawset, rawin */
+  NAT_RAWSET,
+  NAT_RAWIN,
+  NAT_CLS_GETBASE,    /* class delegate: getbase, instance */
+  NAT_CLS_INSTANCE,
+  NAT_INST_GETCLASS   /* instance delegate: getclass */
+};
 
-static SqNative g_nat_print = {NAT_PRINT, 2};       /* sqbaselib.cpp base_print: print(value) */
-static SqNative g_nat_str_len = {NAT_STR_LEN, 1};   /* string delegate: len */
-static SqNative g_nat_arr_len = {NAT_ARR_LEN, 1};   /* array delegate: len */
-static SqNative g_nat_tostring = {NAT_TOSTRING, 1}; /* default delegate: tostring */
+static SqNative g_nat_print = {NAT_PRINT, 2, NULL};          /* sqbaselib.cpp base_print: print(value) */
+static SqNative g_nat_str_len = {NAT_STR_LEN, 1, NULL};      /* string delegate: len */
+static SqNative g_nat_arr_len = {NAT_ARR_LEN, 1, NULL};      /* array delegate: len */
+static SqNative g_nat_tostring = {NAT_TOSTRING, 1, NULL};    /* default delegate: tostring */
+static SqNative g_nat_num_tofloat = {NAT_NUM_TOFLOAT, 1, NULL};
+static SqNative g_nat_num_tointeger = {NAT_NUM_TOINTEGER, 1, NULL};
+static SqNative g_nat_num_tochar = {NAT_NUM_TOCHAR, 1, NULL};
+static SqNative g_nat_str_tofloat = {NAT_STR_TOFLOAT, 1, "s"};
+static SqNative g_nat_str_tointeger = {NAT_STR_TOINTEGER, -1, "sn"};
+static SqNative g_nat_arr_append = {NAT_ARR_APPEND, 2, "a"};
+static SqNative g_nat_arr_pop = {NAT_ARR_POP, 1, "a"};
+static SqNative g_nat_arr_reverse = {NAT_ARR_REVERSE, 1, "a"};
+static SqNative g_nat_arr_slice = {NAT_ARR_SLICE, -1, "ann"};
+static SqNative g_nat_arr_find = {NAT_ARR_FIND, 2, "a"};
+static SqNative g_nat_rawget = {NAT_RAWGET, 2, NULL};
+static SqNative g_nat_rawset = {NAT_RAWSET, 3, NULL};
+static SqNative g_nat_rawin = {NAT_RAWIN, 2, NULL};
+static SqNative g_nat_cls_getbase = {NAT_CLS_GETBASE, 1, NULL};
+static SqNative g_nat_cls_instance = {NAT_CLS_INSTANCE, 1, NULL};
+static SqNative g_nat_inst_getclass = {NAT_INST_GETCLASS, 1, NULL};
 
 static SQV make_native(const SqNative *n) {
   SQV v;
@@ -346,62 +389,108 @@ static SQV make_native(const SqNative *n) {
   return v;
 }
 
-/* The default delegate of SELF (sqvm.cpp InvokeDefaultDelegate, for the methods of the subset) for the string KEY: the
- * native in OUT and 1, or 0 when there is none. */
+/* Whether a value of tag TAG has the type of the typemask letter L (see SqNative). */
+static int tag_has_type(uint32_t tag, char l) {
+  switch (l) {
+    case 'n': return tag == SQBC_TAG_INTEGER || tag == SQBC_TAG_FLOAT;
+    case 'a': return tag == SQBC_TAG_ARRAY;
+    case 's': return tag == SQBC_TAG_STRING;
+    case 'x': return tag == SQBC_TAG_INSTANCE;
+    case 'y': return tag == SQBC_TAG_CLASS;
+    default: return 1;
+  }
+}
+
+/* The type text of the letter L in the parameter type error (sqdebug.cpp Raise_ParamTypeError, IdType2Name). */
+static const char *expected_type(char l) {
+  switch (l) {
+    case 'n': return "integer|float";
+    case 'a': return "array";
+    case 's': return "string";
+    case 'x': return "instance";
+    case 'y': return "class";
+    default: return "any";
+  }
+}
+
+/* The default delegate of SELF (sqvm.cpp InvokeDefaultDelegate, sqbaselib.cpp's delegate tables) for the string KEY: the
+ * native in OUT and 1, or 0 when the delegate has no such method (or it is one that is not lowered). */
 static int delegate_native(const SQV *self, const SQV *key, SQV *out) {
   const char *name = str_of(key)->chars;
-  if (strcmp(name, "len") == 0) {
-    if (self->tag == SQBC_TAG_STRING) {
-      *out = make_native(&g_nat_str_len);
-      return 1;
-    }
-    if (self->tag == SQBC_TAG_ARRAY) {
-      *out = make_native(&g_nat_arr_len);
-      return 1;
-    }
-    return 0;
+  const SqNative *n = NULL;
+  switch (self->tag) {
+    case SQBC_TAG_STRING:
+      if (strcmp(name, "len") == 0) n = &g_nat_str_len;
+      else if (strcmp(name, "tofloat") == 0) n = &g_nat_str_tofloat;
+      else if (strcmp(name, "tointeger") == 0) n = &g_nat_str_tointeger;
+      else if (strcmp(name, "tostring") == 0) n = &g_nat_tostring;
+      break;
+    case SQBC_TAG_ARRAY:
+      if (strcmp(name, "len") == 0) n = &g_nat_arr_len;
+      else if (strcmp(name, "append") == 0 || strcmp(name, "push") == 0) n = &g_nat_arr_append;
+      else if (strcmp(name, "pop") == 0) n = &g_nat_arr_pop;
+      else if (strcmp(name, "reverse") == 0) n = &g_nat_arr_reverse;
+      else if (strcmp(name, "slice") == 0) n = &g_nat_arr_slice;
+      else if (strcmp(name, "find") == 0) n = &g_nat_arr_find;
+      else if (strcmp(name, "tostring") == 0) n = &g_nat_tostring;
+      break;
+    case SQBC_TAG_INTEGER:
+    case SQBC_TAG_FLOAT:
+    case SQBC_TAG_BOOL:
+      if (strcmp(name, "tofloat") == 0) n = &g_nat_num_tofloat;
+      else if (strcmp(name, "tointeger") == 0) n = &g_nat_num_tointeger;
+      else if (strcmp(name, "tochar") == 0) n = &g_nat_num_tochar;
+      else if (strcmp(name, "tostring") == 0) n = &g_nat_tostring;
+      break;
+    case SQBC_TAG_TABLE:
+      if (strcmp(name, "tostring") == 0) n = &g_nat_tostring;
+      break;
+    case SQBC_TAG_CLASS:
+      if (strcmp(name, "rawget") == 0) n = &g_nat_rawget;
+      else if (strcmp(name, "rawset") == 0) n = &g_nat_rawset;
+      else if (strcmp(name, "rawin") == 0) n = &g_nat_rawin;
+      else if (strcmp(name, "getbase") == 0) n = &g_nat_cls_getbase;
+      else if (strcmp(name, "instance") == 0) n = &g_nat_cls_instance;
+      break;
+    case SQBC_TAG_INSTANCE:
+      if (strcmp(name, "getclass") == 0) n = &g_nat_inst_getclass;
+      else if (strcmp(name, "rawget") == 0) n = &g_nat_rawget;
+      else if (strcmp(name, "rawset") == 0) n = &g_nat_rawset;
+      else if (strcmp(name, "rawin") == 0) n = &g_nat_rawin;
+      break;
+    default: break;
   }
-  if (strcmp(name, "tostring") == 0) {
-    switch (self->tag) {
-      case SQBC_TAG_INTEGER:
-      case SQBC_TAG_FLOAT:
-      case SQBC_TAG_BOOL:
-      case SQBC_TAG_STRING:
-      case SQBC_TAG_ARRAY:
-      case SQBC_TAG_TABLE:
-        *out = make_native(&g_nat_tostring);
-        return 1;
-      default: return 0;
-    }
-  }
-  return 0;
+  if (!n) return 0;
+  *out = make_native(n);
+  return 1;
 }
 
-/* The other methods of the number delegate (sqbaselib.cpp: tofloat, tointeger, tochar), for an integer or a float. */
-static int is_number_method(const char *name) {
-  return strcmp(name, "tofloat") == 0 || strcmp(name, "tointeger") == 0 || strcmp(name, "tochar") == 0;
-}
-
-/* The other methods of the class and instance default delegates (sqbaselib.cpp): not lowered. */
+/* The methods of the class, instance, array and string delegates that are not lowered (sqbaselib.cpp): a call of one is
+ * `unsupported ... method` at run time. */
 static int is_class_method(const char *name) {
-  static const char *const names[] = {"getattributes", "setattributes", "rawget", "rawset", "rawin", "weakref"};
+  static const char *const names[] = {"getattributes", "setattributes", "weakref", "newmember", "rawnewmember"};
   for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
     if (strcmp(name, names[i]) == 0) return 1;
   return 0;
 }
 
 static int is_instance_method(const char *name) {
-  static const char *const names[] = {"getclass", "rawget", "rawset", "rawin", "weakref", "tostring"};
+  static const char *const names[] = {"weakref", "tostring"};
   for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
     if (strcmp(name, names[i]) == 0) return 1;
   return 0;
 }
 
-/* The other methods of the array delegate (sqbaselib.cpp, _array_default_delegate_funcz): not lowered. */
 static int is_array_method(const char *name) {
-  static const char *const names[] = {"append", "extend", "push",  "pop",     "top",    "insert", "remove",
-                                      "resize", "reverse", "sort", "slice",   "weakref", "clear",  "map",
-                                      "apply",  "reduce",  "filter", "find"};
+  static const char *const names[] = {"extend", "top",    "insert", "remove", "resize", "sort",   "weakref", "clear",
+                                      "map",    "apply",  "reduce", "filter"};
+  for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+    if (strcmp(name, names[i]) == 0) return 1;
+  return 0;
+}
+
+static int is_string_method(const char *name) {
+  static const char *const names[] = {"slice", "find", "tolower", "toupper", "weakref"};
   for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
     if (strcmp(name, names[i]) == 0) return 1;
   return 0;
@@ -529,27 +618,33 @@ static SQV closure_with_base(const SQV *v, SqClass *base) {
   return r;
 }
 
-static void class_newslot(SqClass *c, const SQV *k, const SQV *v, int bstatic) {
+/* Returns 0 when the class refuses the slot (a non-shared member of a class already instantiated), with nothing done. */
+static int class_try_newslot(SqClass *c, const SQV *k, const SQV *v, int bstatic) {
   int shared = v->tag == SQBC_TAG_CLOSURE || v->tag == SQBC_TAG_NATIVE || bstatic;
-  if (c->locked && !shared) rt_error("trying to modify a class that has already been instantiated");
+  if (c->locked && !shared) return 0;
   SqMember *m = class_find(c, k);
   if (m && m->is_field) {
     m->val = *v; /* a field's default value is replaced, shared or not */
-    return;
+    return 1;
   }
   if (!shared) {
     if (!m) class_add(c, k, v, 1);
-    return;
+    return 1;
   }
   if (v->tag == SQBC_TAG_CLOSURE && is_metamethod_key(k)) rt_error("class metamethods are not lowered");
   SQV theval = *v;
   if (c->base && v->tag == SQBC_TAG_CLOSURE) theval = closure_with_base(v, c->base);
   if (m) {
     m->val = theval;
-    return;
+    return 1;
   }
   class_add(c, k, &theval, 0);
   if (k->tag == SQBC_TAG_STRING && strcmp(str_of(k)->chars, "constructor") == 0) c->ctor = (int)(c->count - 1);
+  return 1;
+}
+
+static void class_newslot(SqClass *c, const SQV *k, const SQV *v, int bstatic) {
+  if (!class_try_newslot(c, k, v, bstatic)) rt_error("trying to modify a class that has already been instantiated");
 }
 
 /* SQVM::Get on an instance or a class: a field of an instance is its value; anything else is the member's value. */
@@ -739,16 +834,12 @@ void sqbc_rt_get(SQV *dst, const SQV *self, const SQV *key, int root_fallback) {
       snprintf(msg, sizeof msg, "unsupported instance method '%.50s' (not lowered)", str_of(&k)->chars);
       rt_error(msg);
     }
-    if (s.tag == SQBC_TAG_STRING) {
-      snprintf(msg, sizeof msg, "unsupported string method '%.50s' (only len and tostring are lowered)", str_of(&k)->chars);
+    if (s.tag == SQBC_TAG_STRING && is_string_method(str_of(&k)->chars)) {
+      snprintf(msg, sizeof msg, "unsupported string method '%.50s' (not lowered)", str_of(&k)->chars);
       rt_error(msg);
     }
     if (s.tag == SQBC_TAG_ARRAY && is_array_method(str_of(&k)->chars)) {
-      snprintf(msg, sizeof msg, "unsupported array method '%.50s' (only len and tostring are lowered)", str_of(&k)->chars);
-      rt_error(msg);
-    }
-    if (is_number(&s) && is_number_method(str_of(&k)->chars)) {
-      snprintf(msg, sizeof msg, "unsupported number method '%.50s' (only tostring is lowered)", str_of(&k)->chars);
+      snprintf(msg, sizeof msg, "unsupported array method '%.50s' (not lowered)", str_of(&k)->chars);
       rt_error(msg);
     }
   }
@@ -818,6 +909,129 @@ void sqbc_rt_newslot(const SQV *self, const SQV *key, const SQV *val) {
 
 /* ---- calls ---------------------------------------------------------------------------------------------------------- */
 
+/* ---- the base library's methods of numbers, strings, arrays, classes and instances (sqbaselib.cpp) ------------------------ */
+
+static SQV make_int(int64_t i) {
+  SQV v;
+  v.tag = SQBC_TAG_INTEGER;
+  v.pad = 0;
+  v.i = i;
+  return v;
+}
+
+static SQV make_bool(int b) {
+  SQV v;
+  v.tag = SQBC_TAG_BOOL;
+  v.pad = 0;
+  v.i = b ? 1 : 0;
+  return v;
+}
+
+static SQV make_null(void) {
+  SQV v;
+  v.tag = SQBC_TAG_NULL;
+  v.pad = 0;
+  v.i = 0;
+  return v;
+}
+
+/* tointeger and tofloat of a number or a boolean (sqobject.h): a float truncates; a boolean is 0 or 1 (its payload). */
+static int64_t number_to_int(const SQV *v) { return v->tag == SQBC_TAG_FLOAT ? (int64_t)float_of(v) : v->i; }
+
+static float number_to_float(const SQV *v) { return v->tag == SQBC_TAG_FLOAT ? float_of(v) : (float)v->i; }
+
+/* str2num (sqbaselib.cpp): the number that TEXT starts with, in BASE. A text with a '.' (or an exponent, in a base of 13 or
+ * less) is a float. False when no number starts the text; what follows the number is not looked at. */
+static int str_to_num(const char *text, int64_t base, SQV *res) {
+  int iseintbase = base > 13;
+  int isfloat = 0;
+  for (const char *p = text; *p; p++) {
+    if (*p == '.' || (!iseintbase && (*p == 'E' || *p == 'e'))) {
+      isfloat = 1;
+      break;
+    }
+  }
+  char *end = (char *)text;
+  if (isfloat) {
+    float r = (float)strtod(text, &end);
+    if (text == end) return 0;
+    *res = make_float(r);
+  } else {
+    long long r = strtoll(text, &end, (int)base);
+    if (text == end) return 0;
+    *res = make_int((int64_t)r);
+  }
+  return 1;
+}
+
+/* array.reverse (sq_arrayreverse): the items in reverse order, in place. */
+static void array_reverse_items(const SQV *self) {
+  SqArray *a = array_of(self);
+  for (size_t i = 0; i < a->count / 2; i++) {
+    SQV t = a->items[i];
+    a->items[i] = a->items[a->count - 1 - i];
+    a->items[a->count - 1 - i] = t;
+  }
+}
+
+/* array.slice (sqbaselib.cpp array_slice, get_slice_params): a new array of the items from START up to END. A missing or
+ * negative index counts from the start or the end; the typemask has made START and END numbers. */
+static SQV array_slice_of(const SQV *self, const SQV *frame, int nargs) {
+  SqArray *a = array_of(self);
+  int64_t alen = (int64_t)a->count;
+  int64_t sidx = 0, eidx = 0;
+  if (nargs > 1 && is_number(&frame[1])) sidx = number_to_int(&frame[1]);
+  if (nargs > 2) {
+    if (is_number(&frame[2])) eidx = number_to_int(&frame[2]);
+  } else {
+    eidx = alen;
+  }
+  if (sidx < 0) sidx = alen + sidx;
+  if (eidx < 0) eidx = alen + eidx;
+  if (eidx < sidx) rt_error("wrong indexes");
+  if (eidx > alen || sidx < 0) rt_error("slice out of range");
+  SQV r = make_array_val((size_t)(eidx - sidx));
+  for (int64_t i = sidx; i < eidx; i++) sqbc_rt_append(&r, &a->items[i]);
+  return r;
+}
+
+/* array.find (sqbaselib.cpp array_find): the index of the first item equal to VAL (IsEqual), or null. */
+static SQV array_find_of(const SQV *self, const SQV *val) {
+  SqArray *a = array_of(self);
+  for (size_t i = 0; i < a->count; i++)
+    if (sqbc_rt_equal(&a->items[i], val)) return make_int((int64_t)i);
+  return make_null();
+}
+
+/* rawget and rawin of a class or an instance (sqbaselib.cpp container_rawget, container_rawexists; sqapi.cpp sq_rawget):
+ * a member (a field or a shared member) by its key, with no metamethods. */
+static SQV raw_get_member(const SQV *self, const SQV *key) {
+  SQV out;
+  refuse_float_key(key);
+  if (!class_get(self, key, &out)) rt_error("the index doesn't exist");
+  return out;
+}
+
+static SQV raw_in_member(const SQV *self, const SQV *key) {
+  SqClass *c = self->tag == SQBC_TAG_INSTANCE ? inst_of(self)->cls : class_of(self);
+  refuse_float_key(key);
+  return make_bool(class_find(c, key) != NULL);
+}
+
+/* rawset (sqbaselib.cpp container_rawset; sqapi.cpp sq_rawset). A class takes the member as NewSlot does, and a refused
+ * one (a field of a class already instantiated) is silently not done; an instance takes only one of its fields. */
+static void raw_set_member(const SQV *self, const SQV *key, const SQV *val) {
+  if (key->tag == SQBC_TAG_NULL) rt_error("null key");
+  refuse_float_key(key);
+  if (self->tag == SQBC_TAG_CLASS) {
+    class_try_newslot(class_of(self), key, val, 0);
+    return;
+  }
+  SqMember *m = class_find(inst_of(self)->cls, key);
+  if (!m || !m->is_field) raise_idx(key);
+  inst_of(self)->values[m->idx] = *val;
+}
+
 void sqbc_rt_call(const SQV *callee, SQV *ret, SQV *frame, int nargs) {
   SQV clo = *callee;
   SQV scratch;
@@ -853,14 +1067,22 @@ void sqbc_rt_call(const SQV *callee, SQV *ret, SQV *frame, int nargs) {
   }
   if (clo.tag == SQBC_TAG_NATIVE) {
     const SqNative *nat = (const SqNative *)(intptr_t)clo.i;
-    /* sqvm.cpp CallNative: a count other than the native's is this text, with no counts. */
-    if (nargs != nat->nparams) rt_error("wrong number of parameters");
+    /* sqvm.cpp CallNative: the count (a minimum when negative) with this text, with no counts; then the types. */
+    if (nat->nparams > 0 ? nargs != nat->nparams : nargs < -nat->nparams) rt_error("wrong number of parameters");
+    if (nat->typemask) {
+      size_t tm = strlen(nat->typemask);
+      for (int i = 0; i < nargs && (size_t)i < tm; i++) {
+        if (!tag_has_type(frame[i].tag, nat->typemask[i])) {
+          char msg[160];
+          snprintf(msg, sizeof msg, "parameter %d has an invalid type '%s' ; expected: '%s'", i,
+                   type_name(frame[i].tag), expected_type(nat->typemask[i]));
+          rt_error(msg);
+        }
+      }
+    }
     char buf[32];
     const char *text;
-    SQV r;
-    r.tag = SQBC_TAG_NULL;
-    r.pad = 0;
-    r.i = 0;
+    SQV r = make_null();
     switch (nat->id) {
       case NAT_PRINT:
         /* sqbaselib.cpp base_print: the text of the value, through the print function, with no newline of its own. */
@@ -868,18 +1090,65 @@ void sqbc_rt_call(const SQV *callee, SQV *ret, SQV *frame, int nargs) {
         printf("%s", text);
         break;
       case NAT_STR_LEN:
-        r.tag = SQBC_TAG_INTEGER;
-        r.i = (int64_t)str_of(frame)->len;
+        r = make_int((int64_t)str_of(frame)->len);
         break;
       case NAT_ARR_LEN:
-        r.tag = SQBC_TAG_INTEGER;
-        r.i = (int64_t)array_of(frame)->count;
+        r = make_int((int64_t)array_of(frame)->count);
         break;
       case NAT_TOSTRING: {
         size_t n = text_of(frame, buf, sizeof buf, &text);
         r = make_string(text, n);
         break;
       }
+      case NAT_NUM_TOFLOAT: r = make_float(number_to_float(frame)); break;
+      case NAT_NUM_TOINTEGER: r = make_int(number_to_int(frame)); break;
+      case NAT_NUM_TOCHAR: {
+        /* sqbaselib.cpp number_delegate_tochar: (SQChar)tointeger(o), a string of that one byte. */
+        unsigned char c = (unsigned char)number_to_int(frame);
+        r = make_string((const char *)&c, 1);
+        break;
+      }
+      case NAT_STR_TOFLOAT:
+      case NAT_STR_TOINTEGER: {
+        /* default_delegate_tofloat / _tointeger: the text as a number (base 10, or the base argument); a text with no
+         * number is "cannot convert the string". */
+        int64_t base = nat->id == NAT_STR_TOINTEGER && nargs > 1 ? number_to_int(frame + 1) : 10;
+        SQV res;
+        if (!str_to_num(str_of(frame)->chars, base, &res)) rt_error("cannot convert the string");
+        if (nat->id == NAT_STR_TOFLOAT) r = make_float(number_to_float(&res));
+        else r = make_int(number_to_int(&res));
+        break;
+      }
+      case NAT_ARR_APPEND:
+        /* sq_arrayappend: the value is appended, and the result is the array. */
+        sqbc_rt_append(frame, frame + 1);
+        r = frame[0];
+        break;
+      case NAT_ARR_POP: {
+        SqArray *a = array_of(frame);
+        if (a->count == 0) rt_error("empty array");
+        r = a->items[--a->count];
+        break;
+      }
+      case NAT_ARR_REVERSE:
+        array_reverse_items(frame);
+        r = frame[0];
+        break;
+      case NAT_ARR_SLICE: r = array_slice_of(frame, frame, nargs); break;
+      case NAT_ARR_FIND: r = array_find_of(frame, frame + 1); break;
+      case NAT_RAWGET: r = raw_get_member(frame, frame + 1); break;
+      case NAT_RAWSET:
+        raw_set_member(frame, frame + 1, frame + 2);
+        r = frame[0];
+        break;
+      case NAT_RAWIN: r = raw_in_member(frame, frame + 1); break;
+      case NAT_CLS_GETBASE: {
+        SqClass *c = class_of(frame);
+        r = c->base ? class_val(c->base) : make_null();
+        break;
+      }
+      case NAT_CLS_INSTANCE: r = make_instance(class_of(frame)); break;
+      case NAT_INST_GETCLASS: r = class_val(inst_of(frame)->cls); break;
       default: rt_error("internal: bad native");
     }
     *ret = r;
