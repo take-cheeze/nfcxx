@@ -313,17 +313,15 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
   return out;
 }
 
-// The methods of the builtin types that the runtime does not have yet (str, list, dict, set, ...): a method call of one of
-// these names is refused. A class's method of such a name is refused too, which is the cost of not knowing the receiver's
-// type. The dict methods that are lowered (get, keys, values, items, pop, update) are not here.
+// The method names that no builtin type has yet (str, list, dict, set, ...): a method call of one of these names is refused,
+// and a class's method of such a name is refused too. A name that some builtin type has is not here: the runtime dispatches it
+// on the receiver's type (mpy_load_method), so the lowering does not need to know that type.
 // The names that a dict or a set has too (copy, clear, setdefault, popitem, fromkeys, add, discard, remove, union, intersection,
 // difference) are not refused here: the lowering does not know the receiver's type, so the runtime refuses them on a value
 // that is neither a dict nor a set (mpy_load_method, refused_method_name).
 const std::set<std::string> kBuiltinMethods = {
-    "capitalize", "center", "count", "encode", "endswith", "extend", "find", "format", "index",
-    "insert", "isalpha", "isdigit", "isspace", "join", "ljust", "lower", "lstrip", "partition",
-    "replace", "reverse", "rfind", "rindex", "rjust", "rstrip", "rsplit", "sort", "split", "splitlines",
-    "startswith", "strip", "title", "upper", "zfill"};
+    "capitalize", "center", "encode", "extend", "format", "index", "insert", "isalpha", "isdigit", "isspace", "ljust",
+    "partition", "reverse", "rfind", "rindex", "rjust", "rsplit", "sort", "splitlines", "title", "zfill"};
 
 // A for loop's iterator takes MP_OBJ_ITER_BUF_NSLOTS stack slots (obj.h: 4 on 32- and 64-bit hosts); its object is in the
 // bottom one. break pops all of them.

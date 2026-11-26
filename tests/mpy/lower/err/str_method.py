@@ -1,1 +1,1 @@
-result = 'abc'.upper()
+result = '{}'.format(1)

@@ -63,8 +63,9 @@ binary operators plus 13, as in `py/runtime0.h`; on ints they give the same resu
   range as a dict key or in equality.
 - `LOAD_METHOD` of `append` or `pop` on a list, or of the dict methods (see Dicts), gives the builtin method, and of an
   instance or class the method of its class (see Classes). A value with no such attribute fails with MicroPython's
-  AttributeError. The lowering refuses the builtin method names it does not lower, by name (`kBuiltinMethods` in
-  `mpy_lower.cpp`). `CALL_METHOD` passes the self (0
+  AttributeError. The lowering refuses the builtin method names that no builtin type has yet, by name (`kBuiltinMethods` in
+  `mpy_lower.cpp`); a name that some builtin type has is dispatched on the receiver at run time, and a receiver whose type
+  lacks it fails there. `CALL_METHOD` passes the self (0
   for none) and the arguments to `mpy_call_method`, so `xs.pop(i)` and `xs.append(x)` take one or two arguments. A keyword
   argument to a builtin method fails at run time (`function doesn't take keyword arguments`).
 - A constant tuple is one object in the .mpy file (mpy-cross folds it), so `LOAD_CONST_OBJ` builds it on each run from its items.
@@ -255,6 +256,17 @@ reference's message (`unsupported types for __add__: 'str', 'int'`; a bool is re
 and every other operator on a str are a runtime error saying they are not lowered yet. Truth: an empty str is false.
 `print` of a str writes its bytes and a newline, with no quotes.
 
+Methods on a str (`LOAD_METHOD` finds them in `str_method_index`, and `str_method` runs them): `upper`, `lower`, `strip`,
+`lstrip`, `rstrip` (with an optional set of characters, or the whitespace), `split` (a sep, or the whitespace runs, and
+maxsplit), `join` (any iterable of strs, with the str between them), `replace` (a count, and an empty old goes before
+each character and at the end), `startswith` and `endswith` (a str or a tuple of strs, with start and end), and `find` and
+`count` (with start and end). The positions are UTF-8 characters; upper and lower map ASCII letters only. The argument
+counts and the errors are the reference's (`function takes 1 positional arguments but 2 were given`, `function missing 1
+required positional arguments`, `function expected at most N arguments, got M`, `can't convert 'int' object to str
+implicitly`, `ValueError: empty separator`, `join expects a list of str/bytes objects consistent with self object`). A str
+bound below the start or end is clamped as the reference clamps it: `'hello'.find('', 9)` is 5, and `find` on an end before
+its start is -1. `format` is not lowered (refused by name).
+
 ## Exceptions
 
 MicroPython's exception stack (`py/vm.c`: SETUP_EXCEPT, SETUP_FINALLY, POP_EXCEPT_JUMP, END_FINALLY, UNWIND_JUMP, RAISE_OBJ,
@@ -358,7 +370,7 @@ a coroutine (vm.c's unwind_jump and END_FINALLY), and the lowering does the same
 
 ## Not yet
 
-Generators, str methods and formatting, str
+Generators, str formatting (`format`, `%`) and the str methods not listed above (`center`, `title`, `splitlines`, ...), str
 ordering and repetition,
 big ints, the set methods `copy` and `clear`, the list methods other than append and pop, subscripts of a range, and the rest
 of the opcodes. Equality of two dicts, two ranges or two views, `str` of a list, tuple, set or view, and

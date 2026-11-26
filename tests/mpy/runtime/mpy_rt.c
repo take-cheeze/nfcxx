@@ -195,6 +195,8 @@ enum {
   BI_SET_POP, BI_SET_UPDATE, BI_SET_DIFFERENCE_UPDATE, BI_SET_INTERSECTION_UPDATE, BI_SET_SYMDIFF, BI_SET_SYMDIFF_UPDATE,
   BI_SET_ISSUBSET, BI_SET_ISSUPERSET, BI_SET_ISDISJOINT,
   BI_SUPER, BI_INIT,
+  BI_STR_UPPER, BI_STR_LOWER, BI_STR_STRIP, BI_STR_LSTRIP, BI_STR_RSTRIP, BI_STR_SPLIT, BI_STR_JOIN, BI_STR_REPLACE,
+  BI_STR_STARTSWITH, BI_STR_ENDSWITH, BI_STR_FIND, BI_STR_COUNT,
   BI_EXC, BI_COUNT = BI_EXC + EXC_COUNT
 };
 typedef struct {
@@ -214,6 +216,9 @@ static const MpyBuiltin mpy_builtins[BI_COUNT] = {
   {&mpy_type_bfn, BI_SET_INTERSECTION_UPDATE}, {&mpy_type_bfn, BI_SET_SYMDIFF}, {&mpy_type_bfn, BI_SET_SYMDIFF_UPDATE},
   {&mpy_type_bfn, BI_SET_ISSUBSET}, {&mpy_type_bfn, BI_SET_ISSUPERSET}, {&mpy_type_bfn, BI_SET_ISDISJOINT},
   {&mpy_type_type, BI_SUPER}, {&mpy_type_bfn, BI_INIT},
+  {&mpy_type_bfn, BI_STR_UPPER}, {&mpy_type_bfn, BI_STR_LOWER}, {&mpy_type_bfn, BI_STR_STRIP}, {&mpy_type_bfn, BI_STR_LSTRIP},
+  {&mpy_type_bfn, BI_STR_RSTRIP}, {&mpy_type_bfn, BI_STR_SPLIT}, {&mpy_type_bfn, BI_STR_JOIN}, {&mpy_type_bfn, BI_STR_REPLACE},
+  {&mpy_type_bfn, BI_STR_STARTSWITH}, {&mpy_type_bfn, BI_STR_ENDSWITH}, {&mpy_type_bfn, BI_STR_FIND}, {&mpy_type_bfn, BI_STR_COUNT},
   {&mpy_type_type, BI_EXC + 0}, {&mpy_type_type, BI_EXC + 1}, {&mpy_type_type, BI_EXC + 2},
   {&mpy_type_type, BI_EXC + 3}, {&mpy_type_type, BI_EXC + 4}, {&mpy_type_type, BI_EXC + 5},
   {&mpy_type_type, BI_EXC + 6}, {&mpy_type_type, BI_EXC + 7}, {&mpy_type_type, BI_EXC + 8},
@@ -324,12 +329,30 @@ static int set_method_index(const char *name, size_t len) {
   return -1;
 }
 
+/* The builtin id of a str method (upper, lower, strip, lstrip, rstrip, split, join, replace, startswith, endswith, find, count), or -1. */
+static int str_method_index(const char *name, size_t len) {
+  static const struct {
+    const char *name;
+    int id;
+  } methods[] = {
+    {"upper", BI_STR_UPPER}, {"lower", BI_STR_LOWER}, {"strip", BI_STR_STRIP}, {"lstrip", BI_STR_LSTRIP},
+    {"rstrip", BI_STR_RSTRIP}, {"split", BI_STR_SPLIT}, {"join", BI_STR_JOIN}, {"replace", BI_STR_REPLACE},
+    {"startswith", BI_STR_STARTSWITH}, {"endswith", BI_STR_ENDSWITH}, {"find", BI_STR_FIND}, {"count", BI_STR_COUNT},
+  };
+  size_t k;
+  for (k = 0; k < sizeof methods / sizeof methods[0]; ++k) {
+    if (strlen(methods[k].name) == len && memcmp(name, methods[k].name, len) == 0) return methods[k].id;
+  }
+  return -1;
+}
+
 /* The method names that a dict or a set has and the runtime does not have for the other types: a method call of one of these on
  * a value that is not a dict or a set fails as not lowered (the lowering does not know the receiver's type, so it cannot refuse
  * them). */
 static int refused_method_name(const char *name, size_t len) {
   static const char *const names[] = {"copy", "clear", "setdefault", "popitem", "fromkeys", "add", "discard", "remove",
-                                      "union", "intersection", "difference"};
+                                      "union", "intersection", "difference", "count", "index", "insert", "extend", "reverse",
+                                      "sort"};
   size_t k;
   for (k = 0; k < sizeof names / sizeof names[0]; ++k) {
     if (strlen(names[k]) == len && memcmp(name, names[k], len) == 0) return 1;
@@ -1777,6 +1800,9 @@ mpv mpy_load_method(mpv obj, const char *name, size_t len) {
     /* fromkeys is a classmethod: it is called with no self */
     if (dict_method_index(name, len) != BI_DICT_FROMKEYS) method_self = obj;
     return builtin_obj(dict_method_index(name, len));
+  } else if (is_str(obj) && str_method_index(name, len) >= 0) {
+    method_self = obj;
+    return builtin_obj(str_method_index(name, len));
   } else if (is_set(obj)) {
     if (set_method_index(name, len) < 0) fail("a method of a set is not lowered yet");
     method_self = obj;
@@ -2346,8 +2372,306 @@ static mpv new_range(int64_t start, int64_t stop, int64_t step) {
   return (mpv)(uintptr_t)r;
 }
 
+/* The str methods (upper, lower, strip, lstrip, rstrip, split, join, replace, startswith, endswith, find and count). args[0] is
+ * the str, the self, and n counts it, as the other methods' counts do. The results and the errors are the reference's
+ * (py/objstr.c). Positions and counts are in UTF-8 characters; the case mapping is ASCII only. */
+static int is_ws_byte(unsigned char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'; }
+
+/* The length in bytes of the character that starts at byte i of s. */
+static size_t char_len_at(const MpyStr *s, size_t i) {
+  size_t j = i + 1;
+  while (j < s->len && (((unsigned char)s->data[j]) & 0xc0) == 0x80) ++j;
+  return j - i;
+}
+
+/* The number of characters in the bytes [0, b) of s. */
+static size_t chars_before(const MpyStr *s, size_t b) {
+  size_t i, n = 0;
+  for (i = 0; i < b; ++i) {
+    if ((((unsigned char)s->data[i]) & 0xc0) != 0x80) ++n;
+  }
+  return n;
+}
+
+/* The argument count check of a method (the count includes the self): lo and hi are the least and the most. A method with
+ * one count (lo == hi) says it takes that many, as the reference's builtins do. */
+static void method_arity(uint64_t n, uint64_t lo, uint64_t hi) {
+  char msg[160];
+  if (n < lo) {
+    snprintf(msg, sizeof msg, "TypeError: function missing %llu required positional arguments", (unsigned long long)(lo - n));
+    fail(msg);
+  }
+  if (n > hi) {
+    if (lo == hi) {
+      snprintf(msg, sizeof msg, "TypeError: function takes %llu positional arguments but %llu were given", (unsigned long long)hi,
+               (unsigned long long)n);
+    } else {
+      snprintf(msg, sizeof msg, "TypeError: function expected at most %llu arguments, got %llu", (unsigned long long)hi,
+               (unsigned long long)n);
+    }
+    fail(msg);
+  }
+}
+
+/* A str argument: any other value is a TypeError, as the reference's str methods give it. */
+static const MpyStr *str_arg(mpv v) {
+  char msg[160];
+  if (!is_str(v)) {
+    snprintf(msg, sizeof msg, "TypeError: can't convert '%s' object to str implicitly", real_type_name(v));
+    fail(msg);
+  }
+  return str_of(v);
+}
+
+/* The byte range [*bs, *be) of the characters [start, end) of s, for the optional start and end arguments (0 when absent), with
+ * the reference's clamping of negative and large bounds (an empty str is found at a start beyond the end). Returns 0 when end
+ * is before start, which find reports as not found; the range is then empty. */
+static int str_bounds(const MpyStr *s, mpv start_v, mpv end_v, size_t *bs, size_t *be) {
+  int64_t nc = (int64_t)str_chars(s), st = 0, en = nc;
+  if (start_v) st = need_int(start_v);
+  if (end_v) en = need_int(end_v);
+  if (st < 0) {
+    st += nc;
+    if (st < 0) st = 0;
+  }
+  if (st > nc) st = nc;
+  if (en < 0) {
+    en += nc;
+    if (en < 0) en = 0;
+  }
+  if (en > nc) en = nc;
+  *bs = byte_offset(s, (size_t)st);
+  if (en < st) {
+    *be = *bs;
+    return 0;
+  }
+  *be = byte_offset(s, (size_t)en);
+  return 1;
+}
+
+/* The byte offset of the first occurrence of sub in s that lies in [from, end), or -1. */
+static long find_bytes(const MpyStr *s, size_t from, size_t end, const MpyStr *sub) {
+  size_t i;
+  if (end < from || sub->len > end - from) return -1;
+  for (i = from; i + sub->len <= end; ++i) {
+    if (memcmp(s->data + i, sub->data, sub->len) == 0) return (long)i;
+  }
+  return -1;
+}
+
+/* Whether the character at [at, at + len) of s is in the set of characters chars (a str), or is whitespace when chars is None. */
+static int in_strip_set(const MpyStr *s, size_t at, size_t len, mpv chars) {
+  size_t k;
+  if (chars == MPY_NONE) return len == 1 && is_ws_byte((unsigned char)s->data[at]);
+  for (k = 0; k < str_of(chars)->len; k += char_len_at(str_of(chars), k)) {
+    const MpyStr *c = str_of(chars);
+    size_t cl = char_len_at(c, k);
+    if (cl == len && memcmp(c->data + k, s->data + at, len) == 0) return 1;
+  }
+  return 0;
+}
+
+/* strip, lstrip and rstrip: the characters of chars (or the whitespace) are removed from the left, the right, or both ends. */
+static mpv str_strip(const MpyStr *s, mpv chars, int left, int right) {
+  size_t b = 0, e = s->len;
+  if (chars != MPY_NONE) str_arg(chars);
+  if (left) {
+    while (b < e) {
+      size_t cl = char_len_at(s, b);
+      if (!in_strip_set(s, b, cl, chars)) break;
+      b += cl;
+    }
+  }
+  if (right) {
+    while (e > b) {
+      size_t j = e - 1;
+      while (j > b && (((unsigned char)s->data[j]) & 0xc0) == 0x80) --j;
+      if (!in_strip_set(s, j, e - j, chars)) break;
+      e = j;
+    }
+  }
+  return new_str(s->data + b, e - b);
+}
+
+/* upper and lower: the ASCII letters are mapped; other bytes are kept. */
+static mpv str_case(const MpyStr *s, int upper) {
+  MpyStr *r = alloc_str(s->len);
+  size_t i;
+  for (i = 0; i < s->len; ++i) {
+    char c = s->data[i];
+    if (upper && c >= 'a' && c <= 'z') c = (char)(c - 32);
+    else if (!upper && c >= 'A' && c <= 'Z') c = (char)(c + 32);
+    r->data[i] = c;
+  }
+  return (mpv)(uintptr_t)r;
+}
+
+/* split(sep=None, maxsplit=-1): with no sep, the runs of whitespace separate, and the leading and trailing ones are not items;
+ * with a sep, each occurrence is one. After maxsplit splits (a negative count is no limit) the rest is the last item. */
+static mpv str_split(const MpyStr *s, mpv sep_v, int64_t maxsplit) {
+  MpyList *out = list_new(0);
+  size_t i = 0, start = 0;
+  int64_t splits = 0;
+  if (sep_v == MPY_NONE) {
+    for (;;) {
+      while (i < s->len && is_ws_byte((unsigned char)s->data[i])) ++i;
+      if (i >= s->len) break;
+      if (maxsplit >= 0 && splits >= maxsplit) {
+        list_append(out, new_str(s->data + i, s->len - i));
+        return (mpv)(uintptr_t)out;
+      }
+      start = i;
+      while (i < s->len && !is_ws_byte((unsigned char)s->data[i])) ++i;
+      list_append(out, new_str(s->data + start, i - start));
+      splits++;
+    }
+    return (mpv)(uintptr_t)out;
+  }
+  {
+    const MpyStr *sep = str_arg(sep_v);
+    if (sep->len == 0) fail("ValueError: empty separator");
+    for (;;) {
+      long at;
+      if (maxsplit >= 0 && splits >= maxsplit) break;
+      at = find_bytes(s, i, s->len, sep);
+      if (at < 0) break;
+      list_append(out, new_str(s->data + start, (size_t)at - start));
+      splits++;
+      start = i = (size_t)at + sep->len;
+    }
+    list_append(out, new_str(s->data + start, s->len - start));
+  }
+  return (mpv)(uintptr_t)out;
+}
+
+/* replace(old, new, count=-1): the first count occurrences (all for a negative count) become new. An empty old goes before each
+ * character and at the end. */
+static mpv str_replace(const MpyStr *s, mpv old_v, mpv new_v, int64_t count) {
+  const MpyStr *old = str_arg(old_v), *nw = str_arg(new_v);
+  Buf b = {NULL, 0, 0};
+  size_t pos = 0;
+  int64_t k = 0;
+  if (count < 0) count = INT64_MAX;
+  if (old->len == 0) {
+    for (;;) {
+      if (k < count) {
+        buf_put(&b, nw->data, nw->len);
+        k++;
+      }
+      if (pos >= s->len) break;
+      {
+        size_t cl = char_len_at(s, pos);
+        buf_put(&b, s->data + pos, cl);
+        pos += cl;
+      }
+    }
+  } else {
+    for (;;) {
+      long at = k < count ? find_bytes(s, pos, s->len, old) : -1;
+      if (at < 0) break;
+      buf_put(&b, s->data + pos, (size_t)at - pos);
+      buf_put(&b, nw->data, nw->len);
+      pos = (size_t)at + old->len;
+      k++;
+    }
+    buf_put(&b, s->data + pos, s->len - pos);
+  }
+  return new_str(b.p ? b.p : "", b.n);
+}
+
+/* join(iterable): the strs of the iterable, with self between them. */
+static mpv str_join(const MpyStr *sep, mpv arg) {
+  mpv it = mpy_get_iter(arg), v;
+  Buf b = {NULL, 0, 0};
+  int first = 1;
+  while ((v = mpy_iter_next(it)) != 0) {
+    if (!is_str(v)) fail("TypeError: join expects a list of str/bytes objects consistent with self object");
+    if (!first) buf_put(&b, sep->data, sep->len);
+    buf_put(&b, str_of(v)->data, str_of(v)->len);
+    first = 0;
+  }
+  return new_str(b.p ? b.p : "", b.n);
+}
+
+/* startswith and endswith: the prefix (or suffix) is a str, or a tuple of strs, and it must lie in the range. */
+static int affix_match(const MpyStr *s, size_t bs, size_t be, mpv affix, int at_end) {
+  const MpyStr *p;
+  if (is_tuple(affix)) {
+    const MpyTuple *t = (const MpyTuple *)(uintptr_t)affix;
+    size_t k;
+    for (k = 0; k < t->len; ++k) {
+      if (affix_match(s, bs, be, t->items[k], at_end)) return 1;
+    }
+    return 0;
+  }
+  p = str_arg(affix);
+  if (p->len > be - bs) return 0;
+  return memcmp(at_end ? s->data + be - p->len : s->data + bs, p->data, p->len) == 0;
+}
+
+/* The str methods: id is one of BI_STR_UPPER .. BI_STR_COUNT. */
+static mpv str_method(int id, const mpv *args, uint64_t n) {
+  const MpyStr *s = str_arg(args[0]);
+  size_t bs = 0, be = 0;
+  switch (id) {
+    case BI_STR_UPPER:
+    case BI_STR_LOWER:
+      method_arity(n, 1, 1);
+      return str_case(s, id == BI_STR_UPPER);
+    case BI_STR_STRIP:
+    case BI_STR_LSTRIP:
+    case BI_STR_RSTRIP:
+      method_arity(n, 1, 2);
+      return str_strip(s, n == 2 ? args[1] : MPY_NONE, id != BI_STR_RSTRIP, id != BI_STR_LSTRIP);
+    case BI_STR_SPLIT:
+      method_arity(n, 1, 3);
+      return str_split(s, n >= 2 ? args[1] : MPY_NONE, n == 3 ? need_int(args[2]) : -1);
+    case BI_STR_JOIN:
+      method_arity(n, 2, 2);
+      return str_join(s, args[1]);
+    case BI_STR_REPLACE:
+      method_arity(n, 3, 4);
+      return str_replace(s, args[1], args[2], n == 4 ? need_int(args[3]) : -1);
+    case BI_STR_STARTSWITH:
+    case BI_STR_ENDSWITH:
+      method_arity(n, 2, 4);
+      str_bounds(s, n > 2 ? args[2] : 0, n > 3 ? args[3] : 0, &bs, &be);
+      return affix_match(s, bs, be, args[1], id == BI_STR_ENDSWITH) ? MPY_TRUE : MPY_FALSE;
+    case BI_STR_FIND:
+    case BI_STR_COUNT: {
+      const MpyStr *sub;
+      long at;
+      int64_t k = 0;
+      int in_order;
+      method_arity(n, 2, 4);
+      sub = str_arg(args[1]);
+      in_order = str_bounds(s, n > 2 ? args[2] : 0, n > 3 ? args[3] : 0, &bs, &be);
+      if (id == BI_STR_FIND) {
+        if (!in_order) return make_small(-1);
+        at = find_bytes(s, bs, be, sub);
+        return make_small(at < 0 ? -1 : (int64_t)chars_before(s, (size_t)at));
+      }
+      if (sub->len == 0) {   /* the empty str is found before each character of the range, and at its end */
+        return make_small((int64_t)chars_before(s, be) - (int64_t)chars_before(s, bs) + 1);
+      }
+      for (;;) {
+        at = find_bytes(s, bs, be, sub);
+        if (at < 0) break;
+        k++;
+        bs = (size_t)at + sub->len;
+      }
+      return make_small(k);
+    }
+    default:
+      break;
+  }
+  fail("a str method is not lowered yet");
+  return MPY_NONE;
+}
+
 static mpv builtin_call(int id, const mpv *args, uint64_t n) {
   char msg[160];
+  if (id >= BI_STR_UPPER && id <= BI_STR_COUNT) return str_method(id, args, n);
   if (id >= BI_EXC) {   /* an exception class: its instance, with the one argument it may take */
     if (n > 1) fail("TypeError: exceptions with more than one argument are not lowered yet");
     return new_exc(id - BI_EXC, n ? args[0] : 0);
