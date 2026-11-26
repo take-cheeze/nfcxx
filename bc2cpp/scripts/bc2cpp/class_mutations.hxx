@@ -17,6 +17,12 @@
 #include <mruby/class.h>
 #include <mruby/string.h>
 #include <mruby/variable.h>
+#if __has_include(<mruby/rom_graph.h>)
+#include <mruby/rom_graph.h>
+#endif
+#ifndef MRB_CLASS_MT
+#define MRB_CLASS_MT(c) ((c)->mt)
+#endif
 
 namespace class_mutations {
 
@@ -48,7 +54,7 @@ inline State state_of(mrb_state* M, struct RClass* c) {
   s.super = c->super;
   if (c->tt != MRB_TT_ICLASS)
     mrb_iv_foreach(M, mrb_obj_value(c), iv_cb, &s.iv);
-  for (const mrb_mt_tbl* t = c->mt; t; t = t->next)
+  for (const mrb_mt_tbl* t = MRB_CLASS_MT(c); t; t = t->next)
     s.mt.emplace_back(t, t->size);
   return s;
 }
@@ -77,10 +83,18 @@ inline int collect(mrb_state* M, struct RBasic* o, void* p) {
   return MRB_EACH_OBJ_OK;
 }
 
+// The heap's classes, and a ROM class graph's (mruby/rom_graph.h).
+inline void collect_all(mrb_state* M, std::map<struct RClass*, State>* m) {
+  mrb_objspace_each_objects(M, collect, m);
+#ifdef MRUBY_ROM_GRAPH_H
+  mrb_rom_graph_each(M, collect, m);
+#endif
+}
+
 inline void boot(mrb_state* M, const char* path) {
   g_mrb = M;
   g_path = path;
-  mrb_objspace_each_objects(M, collect, &g_boot);
+  collect_all(M, &g_boot);
 }
 
 inline std::string sym(mrb_state* M, mrb_sym s) {
@@ -95,7 +109,7 @@ inline void report() {
     return;
   M->gc.disabled = TRUE;
   std::map<struct RClass*, State> now;
-  mrb_objspace_each_objects(M, collect, &now);
+  collect_all(M, &now);
   const std::string out =
       std::string(g_path) + "/" + std::to_string(getpid()) + ".tsv";
   FILE* f = fopen(out.c_str(), "w");

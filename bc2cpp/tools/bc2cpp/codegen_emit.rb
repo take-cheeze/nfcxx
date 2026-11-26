@@ -599,18 +599,21 @@ class CodeGen
     #else
     #define BC2CPP_MT_TBL(t) nullptr
     #endif
+    #ifndef MRB_CLASS_MT
+    #define MRB_CLASS_MT(c) ((c)->mt)
+    #endif
     [[maybe_unused]] static void bc2cpp_mt_chain(mrb_state* M, struct RClass* c, const mrb_mt_entry* entries, int n, const mrb_mt_tbl* tbl, bool singleton) {
       if (singleton) c = mrb_class_ptr(mrb_singleton_class(M, mrb_obj_value(c)));
       MRB_CLASS_ORIGIN(c);
       bool chained = false;
-      for (mrb_mt_tbl* t = c->mt; t && !chained; t = t->next) chained = t->ptr == entries;
+      for (mrb_mt_tbl* t = MRB_CLASS_MT(c); t && !chained; t = t->next) chained = t->ptr == entries;
     #ifdef MRB_MT_ROM_TBL
       if (!chained && tbl) mrb_mt_init_rom_tbl(M, c, tbl);
       else
     #endif
       if (!chained) mrb_mt_init_rom(M, c, entries, n);
       const int flag_bits = MRB_MT_READONLY_BIT | MRB_MT_FROZEN_BIT;
-      for (mrb_mt_tbl* t = c->mt; t && t->ptr != entries; t = t->next) {
+      for (mrb_mt_tbl* t = MRB_CLASS_MT(c); t && t->ptr != entries; t = t->next) {
         if (t->alloc & MRB_MT_READONLY_BIT) continue;
         for (int i = 0; i < t->size;) {
           bool shadowed = false;

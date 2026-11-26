@@ -8283,6 +8283,16 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       next unless outputs[rel].to_s.match?(string_names)
       outputs[rel] = "#include <string.h>\n" + outputs[rel]
     end
+    # the encoding API (rb_encoding, rb_enc_*, rb_str_conv_enc, rb_usascii_encoding, ...) is declared by the fork's mruby/encoding.h:
+    # a source or header that uses its names includes it, and needs mruby-encoding on the build path. Without the declaration C takes the call
+    # as implicit int, which is the 'incompatible type' error in the compile check.
+    enc_names = /(?<![\w$])(?:rb_enc\w*|rb_encoding|rb_utf8_\w+|rb_usascii_\w+|rb_ascii8bit_\w+|rb_str_conv_enc|rb_str_export_to_enc|rb_default_\w*_encoding)(?![\w$])/
+    @files.each do |rel, f|
+      next if outputs[rel].to_s.match?(/#\s*include\s*[<"]mruby\/encoding\.h[>"]/)
+      next unless outputs[rel].to_s.match?(enc_names)
+      outputs[rel] = "#include <mruby/encoding.h>\n" + outputs[rel]
+      (@gem_deps ||= Set.new) << 'mruby-encoding'
+    end
     @files.each do |rel, f|
       next unless f['kind'] == 'src'
       t = outputs[rel]

@@ -1,22 +1,29 @@
 // nfcast JIT: x86-64 machine code for the loops of the AST interpreter (docs/notes/ast.md, "JIT"). The loop is read through the
 // tier's view of its nodes (tier_view), the same one the C tier lowers from, and only the subset listed in the notes is encoded:
-// integers, + - * and unary minus, `//` and `%` (floor division and modulo, as the interpreter's), the bitwise operators & | ~ (binary
-// xor), << and >> and unary ~ on integers, comparisons, and/or/not in conditions, if, while, repeat, numeric for loops with an integer
-// step that is a constant (except the one that takes over the loop, whose step is run-time), break, and locals. Integer arithmetic wraps
-// as the interpreter's does, and the bitwise operators never fail. The one operation that can fail is `//` or `%` by zero: the code then
-// stops, writes its locals back, and the interpreter raises the error (the deopt, see run() and resume()). A `/`, `^`, or anything else
-// outside the subset, makes compile() refuse the loop.
+// integers and floats (the float operators + - * / ^ and unary minus, the comparisons of two floats, and the mixed arithmetic of an
+// integer and a float as the interpreter does it), integer `//` and `%` (floor division and modulo, as the interpreter's), the
+// bitwise operators & | ~ (binary xor), << and >> and unary ~ on integers, comparisons of two integers, and/or/not in conditions, if,
+// while, repeat, numeric for loops with an integer step that is a constant (except the one that takes over the loop, whose step is
+// run-time), break, and locals. Integer arithmetic wraps as the interpreter's does, and the bitwise operators never fail. The one
+// operation that can fail is integer `//` or `%` by zero: the code then stops, writes its locals back, and the interpreter raises the
+// error (the deopt, see run() and resume()). Everything else outside the subset makes compile() refuse the loop.
+//
+// Types. Every local (and every hidden variable of a for loop) has one static type for the whole loop: an integer or a float. The
+// type of a live-in is the type of its value when the loop is compiled (compile() reads the frame), and the entry guard checks it at
+// every takeover; a local the loop declares takes the type of its first value, and an assignment of the other type is refused.
+// The word of a float is its IEEE double bit pattern; every operation of a float is SSE2 on it.
 //
 // Registers. The machine code has one 64-bit word per local (and per hidden variable of a for loop) in an array REGS, whose address
 // is in RBX (callee-saved, pushed at the entry). RAX, RCX and RDX are scratch; a binary operation of two compound operands evaluates
 // its left operand, pushes it, evaluates the right one, and pops the left one into RAX (a constant or a local operand is read directly,
-// with no push). There are no calls, no memory but REGS, and no allocation, so the
-// code has no side effects: whatever the entry guard does not cover cannot be observed before the loop ends.
+// with no push). There is no memory but REGS, and no allocation. The one call is to pow (for `^`), through the address of jit_pow
+// below, which is the interpreter's own flt_pow: the code keeps no value in a caller-saved register across it, and the stack is
+// aligned for it. Otherwise the code has no side effects: whatever the entry guard does not cover cannot be observed before the loop ends.
 //
 // Register allocation. The four most referenced words (weighted by loop depth) live in R12-R15 for the whole loop instead of in
 // REGS. They are loaded from REGS at the entry (after the guard, which reads only the frame) and every exit of the loop goes through
 // the epilogue, which stores back the live-ins the loop assigns before the callee-saved registers are restored. The loop has no
-// other exit: no call, no bail-out, and no operation can fail. So the frame sees the words only at entry and at that write-back.
+// other exit: no operation can fail except the zero divisor, which deopts. So the frame sees the words only at entry and at that write-back.
 // The code is generated twice: once with every word in memory to count the references, then with the allocation.
 #include "nfcast_jit.hpp"
 
@@ -47,9 +54,27 @@ Code::~Code() {
 #endif
 }
 
+// A word of REGS as the frame's value: an integer, or a float from its bits.
+static Value word_value(bool flt, std::int64_t w) {
+  if (!flt) return Value::integer(w);
+  double d;
+  std::memcpy(&d, &w, sizeof d);
+  return Value::number(d);
+}
+
+// The word of a live-in: its integer, or the bits of its float (the guard has checked the type).
+static std::int64_t value_word(const Value& v) {
+  if (v.t != T_FLT) return v.i;
+  std::int64_t w;
+  std::memcpy(&w, &v.d, sizeof w);
+  return w;
+}
+
 bool entry_ok(const Frame& f, const Code& c) {
-  for (int slot : c.in_slots)
-    if (f.base[slot].t != T_INT) return false;
+  for (std::size_t k = 0; k < c.in_slots.size(); ++k) {
+    auto want = c.reg_float[static_cast<std::size_t>(c.in_regs[k])] ? T_FLT : T_INT;
+    if (f.base[c.in_slots[k]].t != want) return false;
+  }
   return true;
 }
 
@@ -61,18 +86,25 @@ int run(Frame& f, const Code& c, const TierLoopState& st) {
     big.assign(static_cast<std::size_t>(c.nregs), 0);
     R = big.data();
   }
-  for (std::size_t k = 0; k < c.in_slots.size(); ++k) R[c.in_regs[k]] = f.base[c.in_slots[k]].i;
+  for (std::size_t k = 0; k < c.in_slots.size(); ++k) R[c.in_regs[k]] = value_word(f.base[c.in_slots[k]]);
   if (c.kind == TierLoopState::FOR_INT) {
     R[c.state_regs[0]] = st.i;
     R[c.state_regs[1]] = static_cast<std::int64_t>(st.count);
     R[c.state_regs[2]] = st.step;
   }
   int site = c.fn(R);
-  if (site != 0) {  // a deopt: every local of the loop goes back to the frame, as it is at the operation
-    for (std::size_t k = 0; k < c.bail_slots.size(); ++k) f.base[c.bail_slots[k]] = Value::integer(R[c.bail_regs[k]]);
+  if (site != 0) {  // a deopt: the locals of the site go back to the frame, as they are at the operation
+    const Code::Site& s = c.sites[static_cast<std::size_t>(site - 1)];
+    for (std::size_t k = 0; k < s.bail_slots.size(); ++k) {
+      std::size_t r = static_cast<std::size_t>(s.bail_regs[k]);
+      f.base[s.bail_slots[k]] = word_value(c.reg_float[r] != 0, R[s.bail_regs[k]]);
+    }
     return site;
   }
-  for (std::size_t k = 0; k < c.out_slots.size(); ++k) f.base[c.out_slots[k]] = Value::integer(R[c.out_regs[k]]);
+  for (std::size_t k = 0; k < c.out_slots.size(); ++k) {
+    std::size_t r = static_cast<std::size_t>(c.out_regs[k]);
+    f.base[c.out_slots[k]] = word_value(c.reg_float[r] != 0, R[c.out_regs[k]]);
+  }
   return 0;
 }
 
@@ -89,10 +121,23 @@ void resume(Frame& f, const Code& c, int k) {
 #if NFCAST_JIT_X64
 namespace {
 
-// ---- the encoder --------------------------------------------------------------------------------------------------------------------
+// ---- the encoder --------------------------------------------------------------------------------------------------------------
 enum { RAX = 0, RCX = 1, RDX = 2 };
 // The condition codes of Jcc (0F 80+cc) and SETcc. Negating a condition flips the low bit: E/NE, L/GE, LE/G.
-enum Cc { CC_E = 0x4, CC_NE = 0x5, CC_S = 0x8, CC_NS = 0x9, CC_L = 0xC, CC_GE = 0xD, CC_LE = 0xE, CC_G = 0xF };
+enum Cc {
+  CC_B = 0x2, CC_AE = 0x3, CC_E = 0x4, CC_NE = 0x5, CC_BE = 0x6, CC_A = 0x7, CC_S = 0x8, CC_NS = 0x9, CC_P = 0xA,
+  CC_L = 0xC, CC_GE = 0xD, CC_LE = 0xE, CC_G = 0xF
+};
+
+// The one call the code makes: pow, as the interpreter computes `^` (flt_pow, the same function). The code calls it with the operands
+// in xmm0 and xmm1 and takes the result from xmm0.
+double jit_pow(double x, double y) { return flt_pow(x, y); }
+
+std::int64_t bits_of(double d) {
+  std::int64_t w;
+  std::memcpy(&w, &d, sizeof w);
+  return w;
+}
 
 class Asm {
  public:
@@ -122,6 +167,8 @@ class Asm {
   }
   // The values pushed by the code emitted so far and not yet popped: a deopt drops them before it leaves the loop.
   int pushes() const { return pushes_; }
+  // The registers the prologue pushed (see set_phys): with the pushes, they decide the alignment of the stack for a call.
+  int saved_count() const { return static_cast<int>(saved_.size()); }
   void add_rsp(int n) {  // add rsp, 8 * n
     bytes({0x48, 0x81, 0xC4});
     u32(static_cast<std::uint32_t>(8 * n));
@@ -217,6 +264,20 @@ class Asm {
     b.push_back(0xB8);
     u32(v);
   }
+  // ---- floats (SSE2): the operands are in xmm0 and xmm1, the bits of a float in RAX or RCX ----
+  void movq_x_r(int x, int r) { bytes({0x66, 0x48, 0x0F, 0x6E, modrm(3, x, r)}); }   // movq xmmX, r64
+  void movq_r_x(int r, int x) { bytes({0x66, 0x48, 0x0F, 0x7E, modrm(3, x, r)}); }   // movq r64, xmmX
+  void cvtsi2sd(int x, int r) { bytes({0xF2, 0x48, 0x0F, 0x2A, modrm(3, x, r)}); }   // the integer r64 as a double
+  void sd_op(std::uint8_t opc, int dst, int src) { bytes({0xF2, 0x0F, opc, modrm(3, dst, src)}); }  // addsd 58, mulsd 59, subsd 5C, divsd 5E
+  void ucomisd(int x, int y) { bytes({0x66, 0x0F, 0x2E, modrm(3, x, y)}); }        // flags of xmmX against xmmY
+  void btc_rax_63() { bytes({0x48, 0x0F, 0xBA, 0xF8, 0x3F}); }                     // flip the sign bit (the unary minus of a float)
+  // A call of the absolute address FN (through RAX, which holds nothing the caller needs: the operands are in xmm0 and xmm1).
+  void call_abs(std::uintptr_t fn) {
+    mov_imm(RAX, static_cast<std::int64_t>(fn));
+    bytes({0xFF, 0xD0});  // call rax
+  }
+  void sub_rsp_8() { bytes({0x48, 0x83, 0xEC, 0x08}); }
+  void add_rsp_8() { bytes({0x48, 0x83, 0xC4, 0x08}); }
   void prologue() {  // push rbx; mov rbx, rdi; push the registers in use; load every allocated word into its register
     bytes({0x53, 0x48, 0x89, 0xFB});
     for (int r : saved_) push_r(r);
@@ -279,8 +340,9 @@ class Asm {
     b.push_back(0x89);
     b.push_back(static_cast<std::uint8_t>(0xC0 | ((src & 7) << 3) | (dst & 7)));
   }
+  static std::uint8_t modrm(int mod, int reg, int rm) { return static_cast<std::uint8_t>((mod << 6) | ((reg & 7) << 3) | (rm & 7)); }
   void bytes(std::initializer_list<std::uint8_t> xs) { b.insert(b.end(), xs.begin(), xs.end()); }
-  void op_rr(std::uint8_t opc, std::uint8_t modrm) { bytes({0x48, opc, modrm}); }
+  void op_rr(std::uint8_t opc, std::uint8_t modrm_byte) { bytes({0x48, opc, modrm_byte}); }
   void u32(std::uint32_t x) {
     for (int k = 0; k < 4; ++k) b.push_back(static_cast<std::uint8_t>((x >> (8 * k)) & 0xFF));
   }
@@ -301,25 +363,31 @@ class Asm {
   }
 };
 
+// The type of a register or a value: an integer, or a float (the bits in the word).
+enum { TY_INT = 0, TY_FLT = 1, TY_NONE = -1 };
+
 // ---- the code generator -------------------------------------------------------------------------------------------------------
-// Walks the loop through the tier's view. Every function returns false once the loop is refused (`why` says why; the first reason
-// is kept).
+// Walks the loop through the tier's view. Every function returns false (or TY_NONE) once the loop is refused (`why` says why; the
+// first reason is kept).
 struct Gen {
   Asm a;
   bool ok = true;
   std::string why;
   int nregs = 0;
+  std::vector<char> flt;        // per register: 1 when it holds a float (see Code::reg_float)
+  const Frame* fr = nullptr;    // the frame the loop is compiled in: the types of the live-ins are the types of their values
   std::set<int> declared;       // slots a local of the loop declares (anywhere in it): not live-ins
   std::set<int> seen;           // of those, the ones whose declaration has been passed in the text
   std::map<int, int> reg_of;    // frame slot -> register
   std::vector<int> in_slots, in_regs;  // the live-ins, in the order they were first used
   std::set<int> written;        // the live-ins the loop assigns
   std::vector<int> breaks;      // the exits of the enclosing loops
-  // The deopt (see Code::Site). The stub that every zero divisor jumps to is bound at the end of top_level. UNITS are the statements
-  // and conditions being generated, innermost last; SITES[k - 1] is the unit of the operation that leaves with k in EAX.
-  int bail = -1;
+  // The deopt (see Code::Site). Each zero divisor jumps to the stub of its site, bound at the end of top_level, which writes the
+  // site's locals back and returns the site. UNITS are the statements and conditions being generated, innermost last; SITES[k - 1] is
+  // the unit of the operation that leaves with k in EAX, and STUBS[k - 1] the label of its stub.
   std::vector<Code::Site> units;
   std::vector<Code::Site> sites;
+  std::vector<int> stubs;
 
   static Code::Site unit(Node* n, bool stmt) {
     Code::Site s;
@@ -335,15 +403,29 @@ struct Gen {
     }
     return false;
   }
+  int failt(const std::string& m) {
+    fail(m);
+    return TY_NONE;
+  }
 
-  // The register of a local the loop declares (declared just now).
-  int declare_reg(int slot) {
+  int new_reg(bool is_float) {
+    flt.push_back(is_float ? 1 : 0);
+    return nregs++;
+  }
+
+  // The register of a local the loop declares, of type TY (declared just now). The frame slot of a local may be shared with another
+  // local of the loop in a block that does not overlap (the parser reuses slots), so a declaration of the other type gets a register of
+  // its own, and reg_of then maps the slot to it: a name in the text refers to the latest declaration before it.
+  int declare_reg(int slot, int ty) {
     auto it = reg_of.find(slot);
-    if (it != reg_of.end()) return it->second;
-    int r = nregs++;
+    if (it != reg_of.end() && (flt[static_cast<std::size_t>(it->second)] != 0) == (ty == TY_FLT)) return it->second;
+    int r = new_reg(ty == TY_FLT);
     reg_of[slot] = r;
     return r;
   }
+
+  // The type of a live-in: the type of its value in the frame when the loop is compiled (an integer for anything but a float).
+  bool entry_float(int slot) const { return fr && fr->base[slot].t == T_FLT; }
 
   // The register of a frame slot the loop uses: a local of the loop (its declaration must have been passed in the text, so that the
   // slot is not one that an outer local shares) or a live-in (loaded at entry, and written back when assigned).
@@ -357,7 +439,7 @@ struct Gen {
     }
     auto it = reg_of.find(slot);
     if (it == reg_of.end()) {
-      int r = nregs++;
+      int r = new_reg(entry_float(slot));
       reg_of[slot] = r;
       in_slots.push_back(slot);
       in_regs.push_back(r);
@@ -366,6 +448,8 @@ struct Gen {
     if (write) written.insert(slot);
     return it->second;
   }
+
+  bool is_flt(int r) const { return flt[static_cast<std::size_t>(r)] != 0; }
 
   // Every slot a local of the loop declares, anywhere in it.
   void collect(Node* n) {
@@ -380,100 +464,172 @@ struct Gen {
     collect(v.cond);
   }
 
-  // Leaves the value of the integer expression N in RAX.
-  bool expr(Node* n) {
-    if (!n) return fail("an expression that is missing");
+  // Leaves the value of the numeric expression N in RAX (the bits of a float) and returns its type.
+  int expr(Node* n) {
+    if (!n) return failt("an expression that is missing");
     TierView v;
     tier_view(n, v);
     switch (v.kind) {
       case TierView::K_CONST:
-        if (v.k.t != T_INT) return fail("a constant that is not an integer");
-        a.mov_imm(RAX, v.k.i);
-        return true;
-      case TierView::K_LOCAL: {
-        if (v.flag) return fail("a local captured by a closure");
-        int r = slot_reg(v.slot, false);
-        if (r < 0) return false;
-        a.load(RAX, r);
-        return true;
-      }
-      case TierView::K_ARITH: {
-        if (v.op != AR_ADD && v.op != AR_SUB && v.op != AR_MUL && v.op != AR_IDIV && v.op != AR_MOD && v.op != AR_BAND &&
-            v.op != AR_BOR && v.op != AR_BXOR && v.op != AR_SHL && v.op != AR_SHR)
-          return fail("an operator outside the subset (a float division or power)");
-        if (!binary(v.kids[0], v.kids[1])) return false;
-        if (v.op == AR_ADD) a.add_rax_rcx();
-        else if (v.op == AR_SUB) a.sub_rax_rcx();
-        else if (v.op == AR_MUL) a.imul_rax_rcx();
-        else if (v.op == AR_BAND) a.and_rax_rcx();
-        else if (v.op == AR_BOR) a.or_rax_rcx();
-        else if (v.op == AR_BXOR) a.xor_rax_rcx();
-        else if (v.op == AR_SHL || v.op == AR_SHR) a.shift_rax_rcx(v.op == AR_SHR);
-        else floordiv(v.op == AR_MOD);
-        return true;
-      }
-      case TierView::K_UNARY:
-        if (v.op == AR_BNOT) {
-          if (!expr(v.kids[0])) return false;
-          a.not_rax();
-          return true;
+        if (v.k.t == T_INT) {
+          a.mov_imm(RAX, v.k.i);
+          return TY_INT;
         }
-        if (v.op != AR_UNM) return fail("an operator outside the subset (not, length)");
-        if (!expr(v.kids[0])) return false;
-        a.neg_rax();
-        return true;
+        if (v.k.t == T_FLT) {
+          a.mov_imm(RAX, bits_of(v.k.d));
+          return TY_FLT;
+        }
+        return failt("a constant that is not a number");
+      case TierView::K_LOCAL: {
+        if (v.flag) return failt("a local captured by a closure");
+        int r = slot_reg(v.slot, false);
+        if (r < 0) return TY_NONE;
+        a.load(RAX, r);
+        return is_flt(r) ? TY_FLT : TY_INT;
+      }
+      case TierView::K_ARITH:
+        return arith(v);
+      case TierView::K_UNARY: {
+        if (v.op != AR_BNOT && v.op != AR_UNM) return failt("an operator outside the subset (not, length)");
+        int t = expr(v.kids[0]);
+        if (t == TY_NONE) return TY_NONE;
+        if (v.op == AR_BNOT) {
+          if (t != TY_INT) return failt("a bitwise operator on a float");
+          a.not_rax();
+          return TY_INT;
+        }
+        if (t == TY_FLT) a.btc_rax_63();  // the sign bit: -x for every float, NaN included (as the interpreter's -x)
+        else a.neg_rax();
+        return t;
+      }
       case TierView::K_CMP:
       case TierView::K_EQ:
       case TierView::K_AND:
       case TierView::K_OR:
-        return fail("a comparison or a logical operator used as a value (only conditions are compiled)");
+        return failt("a comparison or a logical operator used as a value (only conditions are compiled)");
       case TierView::K_CALL:
-        return fail("a call");
+        return failt("a call");
       case TierView::K_UPVAL:
       case TierView::K_GLOBAL:
-        return fail("an upvalue or a global");
+        return failt("an upvalue or a global");
       default:
-        return fail("an expression outside the subset");
+        return failt("an expression outside the subset");
     }
   }
 
-  // A leaf is an integer constant or a local that is not captured: reading it runs no code that can change anything or fail, so its
-  // read may come before or after the other operand's evaluation (the expressions of the subset assign nothing).
+  // An arithmetic operation. The operands are numbers (integers or floats); an integer operand of a float operation is converted to
+  // a double first, as the interpreter does (arith_numbers). `/` and `^` always give a float.
+  int arith(const TierView& v) {
+    switch (v.op) {
+      case AR_ADD: case AR_SUB: case AR_MUL: case AR_DIV: case AR_POW: case AR_IDIV: case AR_MOD:
+      case AR_BAND: case AR_BOR: case AR_BXOR: case AR_SHL: case AR_SHR:
+        break;
+      default:
+        return failt("an operator outside the subset");
+    }
+    int tl = TY_NONE, tr = TY_NONE;
+    if (!binary(v.kids[0], v.kids[1], tl, tr)) return TY_NONE;
+    bool ints = tl == TY_INT && tr == TY_INT;
+    switch (v.op) {
+      case AR_DIV:  // x / y: a float division (a zero divisor gives inf, -inf or nan, no error)
+        to_xmm(tl, tr);
+        a.sd_op(0x5E, 0, 1);  // divsd xmm0, xmm1
+        a.movq_r_x(RAX, 0);
+        return TY_FLT;
+      case AR_POW:  // x ^ y: the call of pow (the interpreter's flt_pow)
+        to_xmm(tl, tr);
+        call_pow();
+        return TY_FLT;
+      case AR_ADD: case AR_SUB: case AR_MUL:
+        if (!ints) {
+          to_xmm(tl, tr);
+          a.sd_op(v.op == AR_ADD ? 0x58 : v.op == AR_SUB ? 0x5C : 0x59, 0, 1);  // addsd, subsd, mulsd
+          a.movq_r_x(RAX, 0);
+          return TY_FLT;
+        }
+        if (v.op == AR_ADD) a.add_rax_rcx();
+        else if (v.op == AR_SUB) a.sub_rax_rcx();
+        else a.imul_rax_rcx();
+        return TY_INT;
+      case AR_IDIV: case AR_MOD:
+        if (!ints) return failt("a floor division or a modulo of a float (not encoded)");
+        floordiv(v.op == AR_MOD);
+        return TY_INT;
+      default:  // the bitwise operators: integers only (a float with an integer value is refused as well)
+        if (!ints) return failt("a bitwise operator on a float");
+        if (v.op == AR_BAND) a.and_rax_rcx();
+        else if (v.op == AR_BOR) a.or_rax_rcx();
+        else if (v.op == AR_BXOR) a.xor_rax_rcx();
+        else a.shift_rax_rcx(v.op == AR_SHR);
+        return TY_INT;
+    }
+  }
+
+  // XMM0 = RAX and XMM1 = RCX as doubles: an integer is converted (cvtsi2sd, rounded as the C conversion), a float is moved.
+  void to_xmm(int tl, int tr) {
+    if (tl == TY_INT) a.cvtsi2sd(0, RAX);
+    else a.movq_x_r(0, RAX);
+    if (tr == TY_INT) a.cvtsi2sd(1, RCX);
+    else a.movq_x_r(1, RCX);
+  }
+
+  // RAX = pow(xmm0, xmm1), with the stack aligned for the call. Nothing is kept in a caller-saved register across it: the operands
+  // are in xmm0 and xmm1, the pushed values are in memory, and RBX and R12-R15 are callee-saved.
+  void call_pow() {
+    bool odd = (a.saved_count() + a.pushes()) % 2 == 1;  // rsp is 16-aligned at the call when the pushes that are live sum to even
+    if (odd) a.sub_rsp_8();
+    a.call_abs(reinterpret_cast<std::uintptr_t>(&jit_pow));
+    if (odd) a.add_rsp_8();
+    a.movq_r_x(RAX, 0);
+  }
+
+  // A leaf is an integer or a float constant, or a local that is not captured: reading it runs no code that can change anything or
+  // fail, so its read may come before or after the other operand's evaluation (the expressions of the subset assign nothing).
   bool leaf(Node* n) {
     TierView v;
     tier_view(n, v);
-    return (v.kind == TierView::K_CONST && v.k.t == T_INT) || (v.kind == TierView::K_LOCAL && !v.flag);
+    return (v.kind == TierView::K_CONST && (v.k.t == T_INT || v.k.t == T_FLT)) || (v.kind == TierView::K_LOCAL && !v.flag);
   }
-  // Loads the leaf N into REG (RAX or RCX).
-  bool leaf_into(Node* n, int reg) {
+  // Loads the leaf N into REG (RAX or RCX) and returns its type.
+  int leaf_into(Node* n, int reg) {
     TierView v;
     tier_view(n, v);
     if (v.kind == TierView::K_CONST) {
+      if (v.k.t == T_FLT) {
+        a.mov_imm(reg, bits_of(v.k.d));
+        return TY_FLT;
+      }
       a.mov_imm(reg, v.k.i);
-      return true;
+      return TY_INT;
     }
     int r = slot_reg(v.slot, false);
-    if (r < 0) return false;
+    if (r < 0) return TY_NONE;
     a.load(reg, r);
-    return true;
+    return is_flt(r) ? TY_FLT : TY_INT;
   }
 
-  // RAX = left, RCX = right. A leaf on either side needs no push: a leaf on the right is loaded into RCX after the left is evaluated,
-  // and a leaf on the left is loaded into RAX after the right is evaluated (its value moved to RCX first). Only two compound operands
-  // keep the left value on the machine stack while the right one is computed.
-  bool binary(Node* l, Node* r) {
+  // RAX = left, RCX = right (their types in TL and TR). A leaf on either side needs no push: a leaf on the right is loaded into RCX
+  // after the left is evaluated, and a leaf on the left is loaded into RAX after the right is evaluated (its value moved to RCX
+  // first). Only two compound operands keep the left value on the machine stack while the right one is computed.
+  bool binary(Node* l, Node* r, int& tl, int& tr) {
     if (leaf(r)) {
-      if (!expr(l)) return false;
-      return leaf_into(r, RCX);
+      tl = expr(l);
+      if (tl == TY_NONE) return false;
+      tr = leaf_into(r, RCX);
+      return tr != TY_NONE;
     }
     if (leaf(l)) {
-      if (!expr(r)) return false;
+      tr = expr(r);
+      if (tr == TY_NONE) return false;
       a.mov_rcx_rax();
-      return leaf_into(l, RAX);
+      tl = leaf_into(l, RAX);
+      return tl != TY_NONE;
     }
-    if (!expr(l)) return false;
+    tl = expr(l);
+    if (tl == TY_NONE) return false;
     a.push_rax();
-    if (!expr(r)) return false;
+    tr = expr(r);
+    if (tr == TY_NONE) return false;
     a.mov_rcx_rax();
     a.pop_rax();
     return true;
@@ -487,12 +643,19 @@ struct Gen {
       fail("internal: an operation outside a unit");
       return;
     }
-    sites.push_back(units.back());
+    Code::Site s = units.back();
+    for (const auto& kv : reg_of) {  // the locals as they are here (the live-ins seen so far; the rest are added at the end)
+      s.bail_slots.push_back(kv.first);
+      s.bail_regs.push_back(kv.second);
+    }
+    sites.push_back(s);
+    int stub = a.label();
+    stubs.push_back(stub);
     a.test_rcx_rcx();
     a.jcc(CC_NE, ok);
     if (a.pushes() > 0) a.add_rsp(a.pushes());
     a.mov_eax_imm(static_cast<std::uint32_t>(sites.size()));
-    a.jmp(bail);
+    a.jmp(stub);
     a.bind(ok);
   }
 
@@ -538,12 +701,14 @@ struct Gen {
     return r;
   }
 
-  // An expression that is a unit of its own (the start and the limit of a for loop).
-  bool expr_unit(Node* n) {
+  // A numeric expression that is a unit of its own (the start and the limit of a for loop): an integer, or the loop is refused.
+  bool int_unit(Node* n) {
     units.push_back(unit(n, false));
-    bool r = expr(n);
+    int t = expr(n);
     units.pop_back();
-    return r;
+    if (t == TY_INT) return true;
+    if (t == TY_NONE) return false;
+    return fail("a for loop whose start or limit is a float (not encoded)");
   }
 
   bool branch_(Node* n, bool jump_if, int target) {
@@ -551,13 +716,11 @@ struct Gen {
     TierView v;
     tier_view(n, v);
     switch (v.kind) {
-      case TierView::K_CMP: {
-        static const int cc[] = {CC_E, CC_NE, CC_L, CC_LE, CC_G, CC_GE};  // CMP_EQ, CMP_NE, CMP_LT, CMP_LE, CMP_GT, CMP_GE
+      case TierView::K_CMP:
         if (v.op < 0 || v.op > 5) return fail("a comparison outside the subset");
-        return compare(v.kids, cc[v.op], jump_if, target);
-      }
+        return compare(v.kids, v.op, jump_if, target);
       case TierView::K_EQ:
-        return compare(v.kids, v.flag ? CC_NE : CC_E, jump_if, target);
+        return compare(v.kids, v.flag ? 1 : 0, jump_if, target);  // CMP_NE, CMP_EQ
       case TierView::K_AND:
         if (!jump_if) return branch(v.kids[0], false, target) && branch(v.kids[1], false, target);
         {
@@ -586,17 +749,70 @@ struct Gen {
         break;
     }
     // A number (a local, an arithmetic result) is always true: its value is computed (it cannot fail) and the jump is unconditional.
-    if (!expr(n)) return false;
+    if (expr(n) == TY_NONE) return false;
     if (jump_if) a.jmp(target);
     return true;
   }
 
-  bool compare(const std::vector<Node*>& kids, int cc, bool jump_if, int target) {
+  // A comparison of two operands, OP being the CMP_* index (CMP_EQ, CMP_NE, CMP_LT, CMP_LE, CMP_GT, CMP_GE). Two integers compare as
+  // the integers do; two floats compare with ucomisd, where an unordered pair (a nan) makes every comparison false except ~=.
+  // An integer against a float is refused: the interpreter compares those exactly (nfcr_lt_if and its kin), which the code does not do.
+  bool compare(const std::vector<Node*>& kids, int op, bool jump_if, int target) {
     if (kids.size() != 2) return fail("a comparison without two operands");
-    if (!binary(kids[0], kids[1])) return false;
-    a.cmp_rax_rcx();
-    a.jcc(jump_if ? cc : (cc ^ 1), target);
-    return true;
+    int tl = TY_NONE, tr = TY_NONE;
+    if (!binary(kids[0], kids[1], tl, tr)) return false;
+    if (tl != tr) return fail("a comparison of an integer with a float (the exact comparison is not encoded)");
+    if (tl == TY_INT) {
+      static const int cc[] = {CC_E, CC_NE, CC_L, CC_LE, CC_G, CC_GE};
+      a.cmp_rax_rcx();
+      a.jcc(jump_if ? cc[op] : (cc[op] ^ 1), target);
+      return true;
+    }
+    to_xmm(TY_FLT, TY_FLT);
+    switch (op) {
+      // ucomisd sets CF for "below" (and for unordered), ZF for "equal" and PF for unordered. a < b is b above a (ucomisd xmm1, xmm0):
+      // above is false for an unordered pair, and so is its negation's complement, below-or-equal, taken on the false edge.
+      case 2:  // CMP_LT
+        a.ucomisd(1, 0);
+        a.jcc(jump_if ? CC_A : CC_BE, target);
+        return true;
+      case 3:  // CMP_LE
+        a.ucomisd(1, 0);
+        a.jcc(jump_if ? CC_AE : CC_B, target);
+        return true;
+      case 4:  // CMP_GT
+        a.ucomisd(0, 1);
+        a.jcc(jump_if ? CC_A : CC_BE, target);
+        return true;
+      case 5:  // CMP_GE
+        a.ucomisd(0, 1);
+        a.jcc(jump_if ? CC_AE : CC_B, target);
+        return true;
+      case 0:  // CMP_EQ: equal is ZF with no PF (an unordered pair sets both)
+        a.ucomisd(0, 1);
+        if (jump_if) {
+          int skip = a.label();
+          a.jcc(CC_P, skip);
+          a.jcc(CC_E, target);
+          a.bind(skip);
+        } else {
+          a.jcc(CC_P, target);
+          a.jcc(CC_NE, target);
+        }
+        return true;
+      default:  // CMP_NE: the negation of equal
+        a.ucomisd(0, 1);
+        if (jump_if) {
+          a.jcc(CC_P, target);
+          a.jcc(CC_NE, target);
+        } else {
+          int skip = a.label();
+          a.jcc(CC_P, skip);
+          a.jcc(CC_E, target);
+          a.bind(skip);
+        }
+        return true;
+    }
   }
 
   bool stmt(Node* n) {
@@ -638,22 +854,37 @@ struct Gen {
 
   bool decl(const TierView& v) {
     if (v.captured) return fail("a local captured by a closure");
-    if (v.multi_last || v.kids.size() != v.slots.size()) return fail("a local declared without one integer value");
+    if (v.multi_last || v.kids.size() != v.slots.size()) return fail("a local declared without one value per name");
     if (v.slots.size() == 1) {  // one local: its value goes straight to its register
-      if (!expr(v.kids[0])) return false;
-      a.store(declare_reg(v.slots[0]), RAX);
+      int t = expr(v.kids[0]);
+      if (t == TY_NONE) return false;
+      int r = declare_reg(v.slots[0], t);
+      if (r < 0) return false;
+      a.store(r, RAX);
       seen.insert(v.slots[0]);
       return true;
     }
+    std::vector<int> ts;
     for (Node* k : v.kids) {
-      if (!expr(k)) return false;
+      int t = expr(k);
+      if (t == TY_NONE) return false;
+      ts.push_back(t);
       a.push_rax();
     }
     for (std::size_t i = v.slots.size(); i-- > 0;) {
       a.pop_rax();
-      a.store(declare_reg(v.slots[i]), RAX);
+      int r = declare_reg(v.slots[i], ts[i]);
+      if (r < 0) return false;
+      a.store(r, RAX);
     }
     for (int s : v.slots) seen.insert(s);
+    return true;
+  }
+
+  // Stores RAX (of type T) into the local of word R: its type must be the local's.
+  bool store_typed(int r, int t) {
+    if ((t == TY_FLT) != is_flt(r)) return fail("an assignment that changes the type of a local (an integer and a float)");
+    a.store(r, RAX);
     return true;
   }
 
@@ -663,21 +894,24 @@ struct Gen {
       if (t != TierView::T_LOCAL) return fail("an assignment to a captured local, an upvalue, a global or a field");
     if (v.multi_last || v.kids.size() != v.slots.size()) return fail("an assignment of other than one value per target");
     if (v.slots.size() == 1) {  // one target: its value goes straight to its word
-      if (!expr(v.kids[0])) return false;
+      int t = expr(v.kids[0]);
+      if (t == TY_NONE) return false;
       int r = slot_reg(v.slots[0], true);
       if (r < 0) return false;
-      a.store(r, RAX);
-      return true;
+      return store_typed(r, t);
     }
+    std::vector<int> ts;
     for (Node* k : v.kids) {
-      if (!expr(k)) return false;
+      int t = expr(k);
+      if (t == TY_NONE) return false;
+      ts.push_back(t);
       a.push_rax();
     }
     for (std::size_t i = v.slots.size(); i-- > 0;) {
       a.pop_rax();
       int r = slot_reg(v.slots[i], true);
       if (r < 0) return false;
-      a.store(r, RAX);
+      if (!store_typed(r, ts[i])) return false;
     }
     return true;
   }
@@ -739,7 +973,8 @@ struct Gen {
     a.jmp(top);
   }
 
-  // A numeric `for` inside the loop: the start and the limit are evaluated once; the step is a constant (not zero).
+  // A numeric `for` inside the loop: the start and the limit are evaluated once; the step is a constant (not zero). The start and the
+  // limit are integers (a float one is refused, see int_unit).
   bool for_loop(const TierView& v) {
     if (v.captured) return fail("a loop variable captured by a closure");
     std::int64_t step = 1;
@@ -750,10 +985,10 @@ struct Gen {
       step = sv.k.i;
       if (step == 0) return fail("a for loop with a step of zero (an error the interpreter reports)");
     }
-    int hi = nregs++, hl = nregs++, hc = nregs++;
-    if (!expr_unit(v.kids[0])) return false;
+    int hi = new_reg(false), hl = new_reg(false), hc = new_reg(false);
+    if (!int_unit(v.kids[0])) return false;
     a.store(hi, RAX);
-    if (!expr_unit(v.kids[1])) return false;
+    if (!int_unit(v.kids[1])) return false;
     a.store(hl, RAX);
     int done = a.label(), top = a.label();
     a.load(RAX, hi);
@@ -778,7 +1013,8 @@ struct Gen {
       a.div_rcx();
     }
     a.store(hc, RAX);
-    int var = declare_reg(v.slots[0]);
+    int var = declare_reg(v.slots[0], TY_INT);
+    if (var < 0) return false;
     seen.insert(v.slots[0]);
     a.enter_loop();
     a.bind(top);
@@ -799,16 +1035,16 @@ bool top_level(Gen& g, Node* loop, int kind, Code& code) {
   TierView v;
   tier_view(loop, v);
   g.collect(loop);
-  g.bail = g.a.label();
   g.a.prologue();
   if (kind == TierLoopState::FOR_INT) {
     if (v.kind != TierView::K_FOR) return g.fail("a loop that is not a numeric for");
     if (v.captured) return g.fail("a loop variable captured by a closure");
-    int hi = g.nregs++, hc = g.nregs++, hs = g.nregs++;
+    int hi = g.new_reg(false), hc = g.new_reg(false), hs = g.new_reg(false);
     code.state_regs[0] = hi;
     code.state_regs[1] = hc;
     code.state_regs[2] = hs;
-    int var = g.declare_reg(v.slots[0]);
+    int var = g.declare_reg(v.slots[0], TY_INT);
+    if (var < 0) return false;
     g.seen.insert(v.slots[0]);
     int done = g.a.label(), top = g.a.label();
     g.a.enter_loop();
@@ -833,19 +1069,24 @@ bool top_level(Gen& g, Node* loop, int kind, Code& code) {
   for (std::size_t k = 0; k < g.in_slots.size(); ++k)
     if (g.written.count(g.in_slots[k])) g.a.spill(g.in_regs[k]);
   g.a.epilogue();
-  // The deopt stub (every zero divisor jumps here, with its site in EAX and its pushes dropped): every local of the loop goes back to
-  // REGS (an allocated one from its register; the others are in memory already), then the registers are restored and the code returns
-  // the site. Nothing else is written: the statement the site names is run by the interpreter from this state.
-  g.a.bind(g.bail);
-  for (const auto& kv : g.reg_of) g.a.spill(kv.second);
-  g.a.restore_ret();
+  // The deopt stubs (a zero divisor jumps to the stub of its site, with the site in EAX and its pushes dropped): the locals of the site
+  // go back to REGS (an allocated one from its register; the others are in memory already), then the registers are restored and the
+  // code returns the site. Nothing else is written: the statement the site names is run by the interpreter from this state.
+  // The live-ins are all in the stubs: one first used after a site in the text can be assigned before the site is reached again.
+  for (std::size_t k = 0; k < g.sites.size(); ++k) {
+    g.a.bind(g.stubs[k]);
+    for (int r : g.sites[k].bail_regs) g.a.spill(r);
+    for (int r : g.in_regs)
+      if (std::find(g.sites[k].bail_regs.begin(), g.sites[k].bail_regs.end(), r) == g.sites[k].bail_regs.end()) g.a.spill(r);
+    g.a.restore_ret();
+  }
   return g.ok;
 }
 
 }  // namespace
 #endif  // NFCAST_JIT_X64
 
-std::unique_ptr<Code> compile(Node* loop, int kind, std::string& why) {
+std::unique_ptr<Code> compile(Node* loop, int kind, const Frame& f, std::string& why) {
 #if NFCAST_JIT_X64
   if (kind == TierLoopState::FOR_FLT) {
     why = "a float for loop (the JIT compiles integer loops only)";
@@ -857,6 +1098,7 @@ std::unique_ptr<Code> compile(Node* loop, int kind, std::string& why) {
   // second pass accepts the loop when the first did.
   const int kFirstAllocReg = 12, kAllocRegs = 4;  // R12..R15
   Gen g1;
+  g1.fr = &f;
   Code c1;
   c1.kind = kind;
   if (!top_level(g1, loop, kind, c1) || !g1.a.finish()) {
@@ -876,6 +1118,7 @@ std::unique_ptr<Code> compile(Node* loop, int kind, std::string& why) {
   }
 
   Gen g;
+  g.fr = &f;
   g.a.set_phys(phys);
   std::unique_ptr<Code> code(new Code());
   code->kind = kind;
@@ -892,10 +1135,14 @@ std::unique_ptr<Code> compile(Node* loop, int kind, std::string& why) {
     }
   }
   code->nregs = g.nregs;
+  code->reg_float = g.flt;
   code->sites = g.sites;
-  for (const auto& kv : g.reg_of) {  // every local of the loop: written back when the code deopts
-    code->bail_slots.push_back(kv.first);
-    code->bail_regs.push_back(kv.second);
+  for (Code::Site& s : code->sites) {  // the live-ins are written back at every site, whether they were seen before it or not
+    for (std::size_t k = 0; k < g.in_slots.size(); ++k) {
+      if (std::find(s.bail_slots.begin(), s.bail_slots.end(), g.in_slots[k]) != s.bail_slots.end()) continue;
+      s.bail_slots.push_back(g.in_slots[k]);
+      s.bail_regs.push_back(g.in_regs[k]);
+    }
   }
   long page = sysconf(_SC_PAGESIZE);
   if (page <= 0) page = 4096;
@@ -919,6 +1166,7 @@ std::unique_ptr<Code> compile(Node* loop, int kind, std::string& why) {
 #else
   (void)loop;
   (void)kind;
+  (void)f;
   why = "the JIT is not available on this host (it is written for x86-64 Linux)";
   return nullptr;
 #endif

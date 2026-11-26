@@ -1,5 +1,5 @@
 // nfcast JIT, the machine-code tier for loops (docs/notes/ast.md, "JIT"). A hot `while`, `repeat` or integer `for` loop whose body is
-// 64-bit integer arithmetic on locals is encoded to x86-64 in memory and taken over at the same points as the C tier's loops
+// arithmetic on locals, integers and floats, is encoded to x86-64 in memory and taken over at the same points as the C tier's loops
 // (tier_loop in nfcast_tier.cpp). Everything else is refused at compile time and stays with the interpreter (or the C tier).
 // Off unless TierOptions::jit is set (the test driver takes --jit); off altogether on any host but x86-64 Linux.
 #pragma once
@@ -31,27 +31,32 @@ struct Code {
   int (*fn)(std::int64_t* regs) = nullptr;  // runs the loop on REGS: one 64-bit word per register, filled by run()
   int kind = 0;              // the TierLoopState::Kind it was made for
   int nregs = 0;             // registers REGS has
-  // A frame slot the loop reads or assigns without declaring it is a live-in: the frame must hold an integer in it at entry
-  // (entry_ok), and it is loaded into its register. The live-ins the loop assigns are written back when it ends.
+  std::vector<char> reg_float;  // per register: 1 when it holds a float (its IEEE double bits), 0 an integer
+  // A frame slot the loop reads or assigns without declaring it is a live-in: the frame must hold a value of the type of its register
+  // at entry (entry_ok: an integer, or a float), and it is loaded into its register. The live-ins the loop assigns are written back
+  // when it ends.
   std::vector<int> in_slots, in_regs;
   std::vector<int> out_slots, out_regs;
   int state_regs[3] = {-1, -1, -1};  // FOR_INT: the registers of the next value of the variable, the count, and the step
-  // Deopt (docs/notes/ast.md, "JIT"). Every local of the loop (a live-in or one it declares) is in bail_slots / bail_regs: when the
-  // code stops at an operation it cannot finish, these are written back to the frame. Site k (1-based, the value run() returns) is the
-  // statement or condition the operation is in: the interpreter runs that unit, which raises the error the operation raises.
+  // Deopt (docs/notes/ast.md, "JIT"). When the code stops at an operation it cannot finish, the locals of the site are written back to
+  // the frame (Site::bail_slots and bail_regs). Site k (1-based, the value run() returns) is the statement or condition the operation
+  // is in: the interpreter runs that unit, which raises the error the operation raises.
   struct Site {
     Node* node = nullptr;
     bool stmt = false;  // a statement (exec), else an expression (eval)
+    // The locals written back when the code stops here: every frame slot of the loop with its register, as the slot is at this point
+    // of the loop (a slot the loop reuses in two blocks has one register per declaration; the live-ins are in every site).
+    std::vector<int> bail_slots, bail_regs;
   };
-  std::vector<int> bail_slots, bail_regs;
   std::vector<Site> sites;
 };
 
-// The code of the loop LOOP, which is a `while`, `repeat` or numeric `for` (KIND: the TierLoopState::Kind it is entered with).
-// Null with WHY set when the loop is not in the subset (docs/notes/ast.md, "JIT" lists it).
-std::unique_ptr<Code> compile(Node* loop, int kind, std::string& why);
+// The code of the loop LOOP, which is a `while`, `repeat` or numeric `for` (KIND: the TierLoopState::Kind it is entered with). The
+// types of its live-ins are the types of their values in the frame F, now (the loop is compiled for them). Null with WHY set when the
+// loop is not in the subset (docs/notes/ast.md, "JIT" lists it).
+std::unique_ptr<Code> compile(Node* loop, int kind, const Frame& f, std::string& why);
 
-// The entry guard: every live-in holds an integer. Checked at every takeover; nothing runs unless it holds.
+// The entry guard: every live-in holds a value of its type (an integer or a float). Checked at every takeover; nothing runs unless it holds.
 bool entry_ok(const Frame& f, const Code& c);
 
 // Runs the code from the state ST (the state of a FOR_INT loop at the top of an iteration, see TierLoopState) with the guard holding.

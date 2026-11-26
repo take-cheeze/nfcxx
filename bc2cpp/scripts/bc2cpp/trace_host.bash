@@ -29,6 +29,8 @@
 #                     one, as MRB_GC_STRESS), so a missing GC root shows up; host_sweep.bash passes it on.
 #   BC2CPP_HOST_CLASS_MUTATIONS  a directory: what the run changed in the classes the boot left goes to DIR/PID.tsv
 #                     (class_mutations.hxx); class_mutations_report.rb reads a sweep's.
+#   BC2CPP_HOST_ROM_GRAPH  1: link the class graph the boot leaves back into the host as const data (mruby's
+#                     MRB_ROM_CLASS_GRAPH), after checking that a boot on it leaves the same graph.
 #
 # Needs on PATH: c++ (g++), cc, ar, nproc, clock_gettime-capable libc (Linux).
 set -euo pipefail
@@ -96,6 +98,8 @@ fi
 # (build_config.rb, BC2CPP_CLOSED_WIO_INT=1, which the build and this run must share).
 int_defs=()
 [ -d "$build_dir/closed/mrbgems/mruby-bigint" ] && int_defs+=(-DMRB_USE_BIGINT)
+# MRB_ROM_CLASS_GRAPH (build_config.rb): class.h's method-table accessor then reads a ROM class's slot.
+grep -a -q mrb_rom_graph_claim "$mruby_lib" && int_defs+=(-DMRB_ROM_CLASS_GRAPH)
 [ "${BC2CPP_CLOSED_WIO_INT:-0}" = 1 ] && int_defs+=(-DMRB_INT32)
 "$cxx" -std=gnu++17 -O1 -g -Wall "${lookup_defs[@]}" \
   -DMRB_ENABLE_CXX_EXCEPTION -DMRB_DEBUG "${int_defs[@]}" \
@@ -110,6 +114,31 @@ int_defs=()
   -Wl,--wrap=mrb_obj_alloc
 
 echo "built $host_dir/trace_host"
+
+# ROM_GRAPH (BC2CPP_HOST_ROM_GRAPH=1): the class graph this host's boot leaves, dumped as C (trace_host.cxx,
+# BC2CPP_HOST_ROM_GRAPH_DUMP), is linked back in, so its classes are const data; the boot of that host must dump the
+# same C again, or the graph is not what the boot builds.
+if [ "${BC2CPP_HOST_ROM_GRAPH:-0}" = 1 ]; then
+  graph="$host_dir/rom_graph.c"
+  BC2CPP_HOST_ROM_GRAPH_DUMP="$graph" BC2CPP_HOST_ROM_GRAPH_DUMP_ONLY=1 "$host_dir/trace_host" "$game_dir" 1 \
+    > "$host_dir/rom_graph.log" 2>&1 || { cat "$host_dir/rom_graph.log" >&2; exit 1; }
+  cc -std=gnu99 -O1 -g -c "${int_defs[@]}" -I"$mruby_inc" -I"$root/3rd/mruby/include" "$graph" \
+    -o "$host_dir/rom_graph.o"
+  "$cxx" "${lookup_link[@]}" -o "$host_dir/trace_host" "$host_dir/trace_host.o" "$host_dir/rom_graph.o" \
+    "$mruby_lib" "$host_dir/liblvgl.a" "$host_dir/libuni-algo.a" -lpthread -lm -Wl,--gc-sections \
+    -Wl,--wrap=mrb_obj_alloc
+  BC2CPP_HOST_ROM_GRAPH_DUMP="$host_dir/rom_graph.again.c" BC2CPP_HOST_ROM_GRAPH_DUMP_ONLY=1 \
+    "$host_dir/trace_host" "$game_dir" 1 > "$host_dir/rom_graph.again.log" 2>&1 \
+    || { cat "$host_dir/rom_graph.again.log" >&2; exit 1; }
+  grep -q 'on the graph' "$host_dir/rom_graph.again.log" \
+    || { echo "error: the host did not take its ROM class graph" >&2; exit 1; }
+  if ! cmp -s "$graph" "$host_dir/rom_graph.again.c"; then
+    echo "error: the boot on the ROM class graph left a different graph" >&2
+    diff "$graph" "$host_dir/rom_graph.again.c" | head -40 >&2
+    exit 1
+  fi
+  echo "ROM class graph: $(head -1 "$graph")"
+fi
 
 # The dump exists only in a BC2CPP_TRACE_TYPES=1 build (tools/bc2cpp/param_trace.rb).
 # The dump functions are static, so look for the row tag they print instead of a symbol.

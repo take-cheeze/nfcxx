@@ -25,7 +25,8 @@ still true for C and C++, and it stays the default producer. Bytecode front ends
 IR, so the rule is:
 
 - **Producers.** The C/C++ producer is `back_end()` in `be/nfcxx_ir.c`, from EDG's lowered IL in memory. A bytecode
-  producer decodes a bytecode image (Lua 5.4 chunk first; mruby irep and CPython `.pyc` only later, if at all) and
+  producer decodes a bytecode image (Lua 5.4 chunk first; then mruby irep, MicroPython, Squirrel and CPython 3.13 `.pyc`,
+  see docs/notes/cpython-pathb.md) and
   emits the same s-expression IR. It needs no EDG and no `cpfe`.
 - **The IR is the contract, not the producer.** Forms, the layout header and the goldens in section 2 onward apply to
   every producer. A producer may use only forms the IR already has, or add a new form in this document first. A new form

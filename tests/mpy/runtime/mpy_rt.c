@@ -1342,6 +1342,7 @@ typedef struct {
   mpv defaults;      /* the tuple of the defaults of the last n_def parameters, or 0 */
   uint64_t nkw;      /* the keyword-only parameters, after the npos positional ones (and before *args) */
   uint64_t star;     /* 1 when the function takes *args, the parameter after the keyword-only ones */
+  uint64_t varkw;    /* 1 when the function takes **kwargs, the last parameter (after *args when it has one) */
   mpv kwdefs;        /* the dict of the keyword-only parameters' defaults, or 0 */
   mpv closed[];      /* C99 flexible array member: the captured cells, the first parameters of the function */
 } MpyFunc;
@@ -1352,7 +1353,7 @@ void mpy_dispatch(uint64_t idx, mpv *ret, const mpv *args, uint64_t nargs);
 /* MAKE_FUNCTION and MAKE_CLOSURE, with or without defaults. The n captured cells are the top n values of the value stack,
  * which they leave (MAKE_CLOSURE pops them). */
 mpv mpy_make_func(uint64_t index, uint64_t npos, uint64_t n, uint64_t n_def, const char *sig, uint64_t sig_len, mpv defaults,
-                  uint64_t nkw, uint64_t star, mpv kwdefs) {
+                  uint64_t nkw, uint64_t star, uint64_t varkw, mpv kwdefs) {
   MpyFunc *f;
   if (n > vtop) fail("mpy_make_func: the captured cells are not on the value stack");
   f = (MpyFunc *)malloc(sizeof *f + n * sizeof(mpv));
@@ -1367,6 +1368,7 @@ mpv mpy_make_func(uint64_t index, uint64_t npos, uint64_t n, uint64_t n_def, con
   f->defaults = defaults;
   f->nkw = nkw;
   f->star = star;
+  f->varkw = varkw;
   f->kwdefs = kwdefs;
   if (n) memcpy(f->closed, vstk + (vtop - n), n * sizeof(mpv));
   vtop -= n;
@@ -1468,13 +1470,15 @@ static mpv kwonly_default(const MpyFunc *f, uint64_t p) {
 
 /* Calls the function fnv with its arguments on the value stack from base: n_pos positional ones, then n_kw keyword pairs (the
  * name, then the value). They are matched to the parameters as bc.c's mp_setup_code_state does. The parameters are the captured
- * cells, the positional ones, the keyword-only ones and then *args (when the function has it, a tuple of the positional
- * arguments that no positional parameter takes). The keyword arguments are matched by name, and the defaults fill the
+ * cells, the positional ones, the keyword-only ones, then *args (when the function has it, a tuple of the positional
+ * arguments that no positional parameter takes) and then **kwargs (when it has it, a dict of the keyword arguments that no
+ * parameter takes). The keyword arguments are matched by name, and the defaults fill the
  * parameters still unset (the positional ones from the defaults tuple, the keyword-only ones from the defaults dict). The
  * arguments are left on the stack for the caller to drop. */
 static mpv call_function(mpv fnv, size_t base, uint64_t n_pos, uint64_t n_kw) {
   const MpyFunc *f = (const MpyFunc *)(uintptr_t)fnv;
-  uint64_t k = f->n_closed, req = f->npos - f->n_def, fit = f->npos - k, total = f->npos + f->nkw + f->star, i, j, p;
+  uint64_t k = f->n_closed, req = f->npos - f->n_def, fit = f->npos - k, dict_at = f->npos + f->nkw + f->star,
+           total = dict_at + f->varkw, i, j, p;
   size_t top;
   mpv ret = MPY_NONE;
   if (!f->star && k + n_pos > f->npos) pos_args_mismatch(f, f->npos, k + n_pos);
@@ -1489,10 +1493,18 @@ static mpv call_function(mpv fnv, size_t base, uint64_t n_pos, uint64_t n_kw) {
     size_t extra = n_pos > fit ? (size_t)(n_pos - fit) : 0;
     vstk[top + f->npos + f->nkw] = make_tuple(vstk + base + (n_pos > fit ? fit : n_pos), extra);
   }
+  /* **kwargs: a new dict, sized by the keyword count as bc.c's mp_obj_new_dict(n_kw) is (its iteration order follows that). */
+  if (f->varkw) vstk[top + dict_at] = mpy_build_map(n_kw);
   for (j = 0; j < n_kw; ++j) {
     mpv name = vstk[base + n_pos + 2 * j], value = vstk[base + n_pos + 2 * j + 1];
     int q = find_param(f, name);
-    if (q < 0) keyword_error("unexpected keyword argument", name);
+    if (q < 0) {
+      if (!f->varkw) keyword_error("unexpected keyword argument", name);
+      if (map_lookup((MpyDict *)(uintptr_t)vstk[top + dict_at], name, MAP_LOOKUP) >= 0)
+        keyword_error("function got multiple values for argument", name);
+      dict_store(vstk[top + dict_at], name, value);
+      continue;
+    }
     if (vstk[top + (size_t)q] != 0) keyword_error("function got multiple values for argument", name);
     vstk[top + (size_t)q] = value;
   }
@@ -1540,12 +1552,64 @@ static void insert_at(size_t base, mpv v) {
   vtop += 1;
 }
 
+/* A keyword pair whose name is 0 (LOAD_NULL) is a **mapping argument (bc.c's mp_call_prepare_args_n_kw_var): its items, in the
+ * dict's table order, become keyword pairs. The pairs after the nargs positional arguments are replaced on the value stack by
+ * the expanded ones. Returns the new pair count (nkw when there is no **mapping). */
+static uint64_t expand_kw_splats(size_t base, uint64_t nargs, uint64_t nkw) {
+  uint64_t j, n_new = 0;
+  size_t o, size, i;
+  mpv *out;
+  int any = 0;
+  for (j = 0; j < nkw; ++j) {
+    mpv name = vstk[base + nargs + 2 * j], value = vstk[base + nargs + 2 * j + 1];
+    if (name != 0) {
+      n_new += 1;
+      continue;
+    }
+    any = 1;
+    if (!is_dict(value)) fail("TypeError: argument after ** must be a mapping");
+    n_new += dict_of(value)->used;
+  }
+  if (!any) return nkw;
+  size = (size_t)(nargs + 2 * n_new);
+  out = (mpv *)malloc((size ? size : 1) * sizeof(mpv));
+  if (out == NULL) fail("out of memory");
+  memcpy(out, vstk + base, (size_t)nargs * sizeof(mpv));
+  o = (size_t)nargs;
+  for (j = 0; j < nkw; ++j) {
+    mpv name = vstk[base + nargs + 2 * j], value = vstk[base + nargs + 2 * j + 1];
+    if (name != 0) {
+      out[o++] = name;
+      out[o++] = value;
+      continue;
+    }
+    {
+      const MpyDict *d = dict_of(value);
+      for (i = 0; i < d->alloc; ++i) {
+        mpv key = d->table[i].key;
+        if (key == 0 || key == MPY_SENTINEL) continue;
+        if (!is_str(key)) fail("TypeError: keywords must be strings");
+        out[o++] = key;
+        out[o++] = d->table[i].value;
+      }
+    }
+  }
+  vtop = base;
+  vstk_reserve(base + size);
+  memcpy(vstk + base, out, size * sizeof(mpv));
+  vtop = base + size;
+  free(out);
+  return n_new;
+}
+
 /* Calls fn with nargs positional arguments and nkw keyword pairs on the value stack, which they leave. */
 mpv mpy_call_kw(mpv fn, uint64_t nargs, uint64_t nkw) {
   size_t total, base;
   mpv ret;
   total = (size_t)(nargs + 2 * nkw);
   if (total > vtop) fail("mpy_call: the arguments are not on the value stack");
+  nkw = expand_kw_splats(vtop - total, nargs, nkw);
+  total = (size_t)(nargs + 2 * nkw);
   base = vtop - total;
   if (is_builtin(fn)) {
     ret = builtin_call(((const MpyBuiltin *)(uintptr_t)fn)->id, nargs ? vstk + base : NULL, nargs, nkw);

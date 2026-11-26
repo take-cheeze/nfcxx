@@ -1,5 +1,6 @@
 // .mpy bytecode -> Path B IR (docs/notes/mpy-pathb.md). The subset: small ints, None/bool, str constants, names, locals,
-// the operators, jumps, calls of functions (positional and keyword arguments, and defaults; no *args), closures (cell and free
+// the operators, jumps, calls of functions (positional and keyword arguments, defaults, *args and **kwargs parameters, and a
+// call's **mapping argument; no *args argument unpacking), closures (cell and free
 // variables, LOAD_DEREF, STORE_DEREF, MAKE_CLOSURE), lists, tuples, dicts (BUILD_MAP, STORE_MAP, and the methods get, keys,
 // values, items, pop and update), sets (BUILD_SET), slices, del of an item (LOAD_NULL with STORE_SUBSCR), list, dict and set
 // comprehensions (STORE_COMP), and return. Anything else is refused by name,
@@ -96,10 +97,14 @@ std::string opname(unsigned o) {
   return "?";
 }
 
+// A constant 0 load: LOAD_CONST_SMALL_INT 0, or its packed form (MP_BC_LOAD_CONST_SMALL_INT_MULTI with the excess 16, so 0x80).
+bool is_zero_load(const Insn &in) { return (in.opcode == opcode("LOAD_CONST_SMALL_INT") && in.arg == 0) || in.opcode == 0x80; }
+
 // The instructions of a code object, with the operand of each packed opcode taken from its opcode byte.
 std::vector<Op> normalize(const std::vector<Insn> &insns) {
   std::vector<Op> out;
-  for (const Insn &in : insns) {
+  for (size_t idx = 0; idx < insns.size(); ++idx) {
+    const Insn &in = insns[idx];
     Op op;
     op.offset = in.offset;
     op.next = in.offset + in.size;
@@ -290,6 +295,14 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
       op.kind = "CALL";                    // the operand is (keyword count << 8) | positional count
       op.arg = in.arg & 0xff;
       op.extra = in.arg >> 8;
+    } else if (o == opcode("CALL_FUNCTION_VAR_KW") || o == opcode("CALL_METHOD_VAR_KW")) {
+      // The operand is as CALL_FUNCTION's. The stack has a bitmap of the *-argument positions on top, pushed by the constant
+      // load just before the call. Only the ** mapping arguments are lowered, so the bitmap must be 0 (*args is refused).
+      if (idx == 0 || !is_zero_load(insns[idx - 1])) refused("a call with *args argument unpacking is not lowered yet");
+      bool method = o == opcode("CALL_METHOD_VAR_KW");
+      op.kind = method ? "CALL_METHOD_VAR" : "CALL_VAR";
+      op.arg = in.arg & 0xff;
+      op.extra = in.arg >> 8;
     } else if (o == opcode("LOAD_METHOD")) {
       op.kind = "LOAD_METHOD";             // the argument is the attribute's qstr; only append and pop are lowered (below)
       op.arg = in.arg;
@@ -357,9 +370,11 @@ int effect(const Op &op) {
   if (k == "GET_ITER") return kIterSlots - 1;   // the object goes, the iterator's slots come
   // A call's arguments are its positional ones and its keyword pairs (name and value), and both go with the function.
   if (k == "CALL") return -(int)(op.arg + 2 * op.extra);   // the function and its arguments go, the result comes
+  if (k == "CALL_VAR") return -(int)(op.arg + 2 * op.extra) - 1;   // as CALL, and the bitmap on top goes too
   if (k == "LOAD_METHOD") return 1;        // the object becomes the method, and stays as the self above it
   if (k == "LOAD_SUPER_METHOD") return -1; // the class and self go, the method takes the super's slot and the self stays
   if (k == "CALL_METHOD") return -(int)(op.arg + 2 * op.extra) - 1;   // the method, the self and the arguments go, the result comes
+  if (k == "CALL_METHOD_VAR") return -(int)(op.arg + 2 * op.extra) - 2;   // as CALL_METHOD, and the bitmap on top goes too
   if (k == "MAKE_FUNCTION_DEFARGS") return -1;             // the defaults tuple and the null go, the function comes
   if (k == "MAKE_CLOSURE_DEFARGS") return -1 - (int)op.extra;   // the defaults, the null and the captured cells go, the closure comes
   if (k == "MAKE_CLOSURE") return 1 - (int)op.extra;   // the captured cells go, the closure comes
@@ -469,7 +484,12 @@ class Lowerer {
     std::string sig = signature(rc, pre);
     data_ << "(data \"mpy.sig." << id << "\" (const (array " << sig.size() << " (const char))) (string \"" << ir_escape(sig)
           << "\"))\n";
-    infos_[id] = ChildInfo{pre.n_pos_args, pre.n_def_pos_args, sig.size(), pre.n_kwonly_args, (pre.scope_flags & kVarArgs) ? 1u : 0u};
+    infos_[id] = ChildInfo{pre.n_pos_args,
+                           pre.n_def_pos_args,
+                           sig.size(),
+                           pre.n_kwonly_args,
+                           (pre.scope_flags & kVarArgs) ? 1u : 0u,
+                           (pre.scope_flags & kVarKeywords) ? 1u : 0u};
     fns_[id] = unit(rc, true, "mpy_fn_" + std::to_string(id), n_free);
     return id;
   }
@@ -500,9 +520,10 @@ class Lowerer {
     Prelude pre = read_prelude(rc.data);
     if (!is_fn && pre.n_pos_args) refused("module code with arguments");
     if (pre.scope_flags & kGenerator) refused("a generator function is not lowered yet");
-    if (pre.scope_flags & kVarKeywords) refused("a function with **kwargs is not lowered yet");
-    // The parameters, in the locals' order: the positional ones (the captured cells among them), the keyword-only ones, then *args.
-    size_t n_params = pre.n_pos_args + pre.n_kwonly_args + ((pre.scope_flags & kVarArgs) ? 1 : 0);
+    // The parameters, in the locals' order (bc.c's mp_setup_code_state): the positional ones (the captured cells among them),
+    // the keyword-only ones, then *args, then **kwargs (the dict, last).
+    size_t n_params = pre.n_pos_args + pre.n_kwonly_args + ((pre.scope_flags & kVarArgs) ? 1 : 0) +
+                      ((pre.scope_flags & kVarKeywords) ? 1 : 0);
     if (n_params > pre.n_state) refused("a function with more arguments than locals");
     if (n_free > pre.n_pos_args) refused("a closure with more captured cells than arguments");
     // The cell variables this function owns: the local index of each (the prelude's cell list).
@@ -661,7 +682,8 @@ class Lowerer {
       body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_make_func\" (const unsigned_long " << id
            << ") (const unsigned_long " << ci.npos << ") (const unsigned_long " << ncells << ") (const unsigned_long " << ci.ndef
            << ") @\"mpy.sig." << id << "\" (const unsigned_long " << ci.sig_len << ") " << defaults
-           << " (const unsigned_long " << ci.nkw << ") (const unsigned_long " << ci.star << ") " << kwdefaults << "))\n";
+           << " (const unsigned_long " << ci.nkw << ") (const unsigned_long " << ci.star << ") (const unsigned_long "
+           << ci.varkw << ") " << kwdefaults << "))\n";
       return r;
     };
 
@@ -896,19 +918,19 @@ class Lowerer {
         }
         std::string r = make_function(id, (size_t)nc, defaults, kwdefaults);
         push(defargs ? d - nc - 2 : d - nc, r);
-      } else if (k == "CALL") {
+      } else if (k == "CALL" || k == "CALL_VAR") {
         // The positional arguments, then the keyword pairs (the name, then the value), go on the value stack; the function
-        // lies below them.
-        int n = (int)op.arg, m = n + 2 * (int)op.extra;
+        // lies below them. A CALL_VAR has the bitmap of *-argument positions (0, see normalize) on top, which is dropped.
+        int n = (int)op.arg, m = n + 2 * (int)op.extra, b = k == "CALL_VAR" ? 1 : 0;
         for (int i = 0; i < m; ++i) {
-          std::string v = load(d - m + i);
+          std::string v = load(d - b - m + i);
           body << "  (eval (call void &\"mpy_push\" " << v << "))\n";
         }
-        std::string f = load(d - m - 1);
+        std::string f = load(d - b - m - 1);
         std::string r = fresh();
         body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_call_kw\" " << f << " (const unsigned_long " << n
              << ") (const unsigned_long " << op.extra << ")))\n";
-        push(d - m - 1, r);
+        push(d - b - m - 1, r);
       } else if (k == "LOAD_METHOD") {
         // obj.name: the method, and the self to pass it (0 when the attribute is not a method of the class, so the call takes
         // none). mpy_load_method fails for a value that has no such attribute. The builtin methods of the other types are
@@ -931,19 +953,19 @@ class Lowerer {
         body << "  (let " << out << " unsigned_long (call unsigned_long &\"mpy_method_self\"))\n";
         push(d - 3, meth);
         push(d - 2, out);
-      } else if (k == "CALL_METHOD") {
+      } else if (k == "CALL_METHOD" || k == "CALL_METHOD_VAR") {
         // [method, self, args..., keyword pairs...]: the self (0 for none), the arguments and the pairs go on the value stack;
-        // mpy_call_method drops a null self and calls.
-        int n = (int)op.arg, m = n + 2 * (int)op.extra;
+        // mpy_call_method drops a null self and calls. A CALL_METHOD_VAR has the bitmap on top, which is dropped.
+        int n = (int)op.arg, m = n + 2 * (int)op.extra, b = k == "CALL_METHOD_VAR" ? 1 : 0;
         for (int i = 0; i <= m; ++i) {
-          std::string v = load(d - m - 1 + i);
+          std::string v = load(d - b - m - 1 + i);
           body << "  (eval (call void &\"mpy_push\" " << v << "))\n";
         }
-        std::string f = load(d - m - 2);
+        std::string f = load(d - b - m - 2);
         std::string r = fresh();
         body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_call_method\" " << f << " (const unsigned_long " << n
              << ") (const unsigned_long " << op.extra << ")))\n";
-        push(d - m - 2, r);
+        push(d - b - m - 2, r);
       } else if (k == "LOAD_ATTR") {
         if ((size_t)op.arg >= m_.qstrs.size()) throw std::runtime_error("mpy: qstr index out of range");
         std::string obj = pop(d), sym = name_sym((size_t)op.arg), r = fresh();
@@ -1216,6 +1238,7 @@ class Lowerer {
     size_t sig_len = 0;   // the length of its signature data item (mpy.sig.K)
     size_t nkw = 0;       // the keyword-only parameters, after the positional ones
     size_t star = 0;      // 1 when it takes *args, the parameter after the keyword-only ones
+    size_t varkw = 0;     // 1 when it takes **kwargs, the last parameter
   };
   std::vector<std::string> fns_;   // the IR of each child function, by number
   std::vector<ChildInfo> infos_;   // and each one's counts, for MAKE_FUNCTION and MAKE_CLOSURE

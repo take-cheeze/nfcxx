@@ -1961,10 +1961,12 @@ class CodeGen
       const unsigned gen = bc2cpp_state_gen(M);
       if (gen && done_gen == gen) return;
       done_gen = gen;
-      if (mrb_const_defined_at(M, mrb_obj_value(M->object_class), BC2CPP_LIT_SYM(M, "Bc2cppResumable"))) return;
       bc2cpp_fiber_define(M); // Fiber, FiberError and Fiber.yield exist before any suspendable method runs
       struct RClass* mod = mrb_define_module(M, "Bc2cppResumable");
       struct RClass* frame = mrb_define_class_under(M, mod, "Frame", M->object_class);
+      // Another unit's init made it already. The class alone does not say so: a ROM class graph (mruby/rom_graph.h)
+      // has the class before any init runs, and its methods only once one has.
+      if (mrb_obj_respond_to(M, frame, MRB_SYM(value))) return;
       MRB_SET_INSTANCE_TT(frame, MRB_TT_DATA);
     #ifdef BC2CPP_ROM_METHOD_TABLES
       static const mrb_mt_entry frame_rom[] = {

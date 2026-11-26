@@ -2713,7 +2713,7 @@ int jit_take_over(State& S, Frame& f, Node* loop, TierLoop* tl, const TierLoopSt
   if (tl->jit_refused || !edge) return 0;
   if (++tl->jit_edges < T->opt.loop_threshold) return 0;
   std::string why;
-  std::unique_ptr<jit::Code> c = jit::compile(loop, st.kind, why);
+  std::unique_ptr<jit::Code> c = jit::compile(loop, st.kind, f, why);
   if (!c) {
     tl->jit_refused = true;
     ++S.stats.jit_refused;
