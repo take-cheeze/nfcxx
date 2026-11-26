@@ -31,6 +31,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <sstream>
 #include <string>
@@ -46,8 +47,10 @@ enum : std::uint8_t {
   kOpLine = 0x00,
   kOpLoad = 0x01,
   kOpLoadInt = 0x02,
+  kOpLoadFloat = 0x03,
   kOpDLoad = 0x04,
   kOpCall = 0x06,
+  kOpTailCall = 0x05,
   kOpPrepCall = 0x07,
   kOpPrepCallK = 0x08,
   kOpGetK = 0x09,
@@ -73,6 +76,8 @@ enum : std::uint8_t {
   kOpGetOuter = 0x20,
   kOpNewObj = 0x21,
   kOpAppendArray = 0x22,
+  kOpNewSlotA = 0x3A,
+  kOpGetBase = 0x3B,
   kOpClose = 0x3C,
   kOpClosure = 0x30,
   kOpCmp = 0x28,
@@ -91,7 +96,10 @@ constexpr std::uint8_t kNoRegister = 0xFF;  // the bound register of a CLOSURE w
 constexpr int kSlotBytes = 16;
 constexpr int kNotTable = 0;  // NEWOBJ's arg3 (sqopcodes.h NOT_TABLE)
 constexpr int kNotArray = 1;  // NEWOBJ's arg3 (sqopcodes.h NOT_ARRAY)
-constexpr int kNotClass = 2;  // NEWOBJ's arg3 (sqopcodes.h NOT_CLASS): refused
+constexpr int kNotClass = 2;  // NEWOBJ's arg3 (sqopcodes.h NOT_CLASS): arg1 is the base (-1: none), arg2 the attributes
+constexpr std::uint8_t kNoAttributes = 0xFF;  // MAX_FUNC_STACKSIZE: a class or a member without attributes
+constexpr std::uint8_t kNewSlotAttributes = 0x01;  // NEWSLOTA's arg0: NEW_SLOT_ATTRIBUTES_FLAG (refused)
+constexpr std::uint8_t kNewSlotStatic = 0x02;      // NEWSLOTA's arg0: NEW_SLOT_STATIC_FLAG
 // APPENDARRAY's arg2 (sqopcodes.h AAT_*): the value is a register, a literal, an integer or a boolean, or a float.
 enum : int { kAatStack = 0, kAatLiteral = 1, kAatInt = 2, kAatFloat = 3, kAatBool = 4 };
 constexpr std::uint64_t kOtLocal = 0;  // SQOuterType: an outer variable of the enclosing frame (src is its register)
@@ -102,6 +110,21 @@ std::string c_long(std::int64_t v) { return "(const long " + num(v) + ")"; }
 std::string c_int(std::int64_t v) { return "(const int " + num(v) + ")"; }
 std::string c_tag(std::uint32_t t) { return "(const unsigned_int " + std::to_string(t) + ")"; }
 const std::string kNullSqvPtr = "(null (ptr (struct \"SQV\")))";
+
+// The bits of an SQFloat (this build's float, 4 bytes) as the low 32 bits of a float value's payload.
+std::int64_t float_bits(float f) {
+  std::uint32_t bits;
+  std::memcpy(&bits, &f, sizeof bits);
+  return static_cast<std::int64_t>(bits);
+}
+
+// The float whose 4 bytes are the instruction's arg1 (sqvm.cpp: *((const SQFloat *)&arg1)).
+float float_from_arg(std::int32_t arg) {
+  std::uint32_t bits = static_cast<std::uint32_t>(arg);
+  float f;
+  std::memcpy(&f, &bits, sizeof f);
+  return f;
+}
 
 // The IR operands of one SQV in the frame: the object pointer, and the pointers to its tag and payload.
 struct Addr {
@@ -287,8 +310,8 @@ class Fn {
       case kOtInteger: return Imm{kOtInteger, o.integer};
       case kOtBool: return Imm{kOtBool, o.integer ? 1 : 0};
       case kOtNull: return Imm{kOtNull, 0};
+      case kOtFloat: return Imm{kOtFloat, float_bits(static_cast<float>(o.floating))};
       case kOtString: refuse(opname(op) + " of a string literal as an immediate");
-      case kOtFloat: refuse(opname(op) + " of a float literal");
       default: refuse(opname(op) + " of an unknown literal type");
     }
   }
@@ -310,6 +333,20 @@ class Fn {
     std::string t = fresh();
     line("(let " + t + " bool " + rvalue + ")");
     return t;
+  }
+
+  // IsFalse (sqvm.cpp) of the value at `s` (loaded as `v`): a null, an integer, a boolean or a float whose payload is 0, and
+  // a float whose value is zero (-0.0 has payload bits other than 0, so the helper decides). A bool operand.
+  std::string falsy(const Addr &s, const Val &v) {
+    std::string z = test("(eq long " + v.pay + " (const long 0))");
+    std::string isf = test("(eq unsigned_int " + v.tag + " " + c_tag(kOtFloat) + ")");
+    line("(if " + isf + " (then");
+    std::string c = fresh();
+    line("(let " + c + " int (call int &\"sqbc_rt_float_zero\" " + s.obj + "))");
+    std::string cb = test("(ne int " + c + " (const int 0))");
+    line("(set " + z + " " + cb + ")");
+    line("))");
+    return z;
   }
 
   // flag := 1 when both values are integers.
@@ -393,12 +430,43 @@ class Fn {
     return kv;
   }
 
+  // IsEqual of the values at l and r, as a bool operand. The same type compares the raw value, except a float (the helper
+  // compares by value); two numbers of different types compare as floats (the helper); anything else is not equal.
+  std::string equal(const Addr &l, const Addr &r) {
+    Val lv = load(l);
+    Val rv = load(r);
+    std::string res = fresh();
+    line("(let " + res + " bool (const bool 0))");
+    auto by_helper = [&]() {
+      std::string c = fresh();
+      line("(let " + c + " int (call int &\"sqbc_rt_equal\" " + l.obj + " " + r.obj + "))");
+      std::string b = test("(ne int " + c + " (const int 0))");
+      line("(set " + res + " " + b + ")");
+    };
+    std::string same_tag = test("(eq unsigned_int " + lv.tag + " " + rv.tag + ")");
+    line("(if " + same_tag + " (then");
+    std::string isf = test("(eq unsigned_int " + lv.tag + " " + c_tag(kOtFloat) + ")");
+    line("(if " + isf + " (then");
+    by_helper();
+    line(") (else");
+    std::string same_pay = test("(eq long " + lv.pay + " " + rv.pay + ")");
+    line("(if " + same_pay + " (then (set " + res + " (const bool 1))))");
+    line("))");
+    line(") (else");
+    by_helper();
+    line("))");
+    return res;
+  }
+
   void step(const Instruction &in) {
     switch (in.op) {
       case kOpLine:
         break;
       case kOpLoadInt:
         store(reg(in.arg0), kOtInteger, c_long(in.arg1));
+        break;
+      case kOpLoadFloat:
+        store(reg(in.arg0), kOtFloat, c_long(float_bits(float_from_arg(in.arg1))));
         break;
       case kOpLoad:
         load_literal(reg(in.arg0), in.arg1, in.op);
@@ -443,9 +511,7 @@ class Fn {
         Addr d = reg(in.arg0);
         Addr s = reg(in.arg1);
         Val v = load(s);
-        std::string z = fresh();
-        line("(let " + z + " bool (eq long " + v.pay + " (const long 0)))");
-        store_bool(d, z);
+        store_bool(d, falsy(s, v));
         break;
       }
       case kOpCmp: {
@@ -459,38 +525,13 @@ class Fn {
       }
       case kOpEq:
       case kOpNe: {
+        // The literal (arg3 != 0, KST arg1) or the register arg1, compared with the register arg2 (IsEqual, sqvm.cpp).
         const bool is_ne = in.op == kOpNe;
         Addr d = reg(in.arg0);
         Addr l = reg(in.arg2);
-        Val lv = load(l);
-        std::string rtag, rpay;
-        if (in.arg3 != 0) {
-          if (literal(in.arg1, opname(in.op).c_str()).type == kOtString) {
-            // A string literal is interned, so its object is the one a equal string value holds.
-            Addr kv = literal_key(in.arg1, in.op);
-            Val kval = load(kv);
-            rtag = kval.tag;
-            rpay = kval.pay;
-          } else {
-            Imm m = imm(in.arg1, in.op);
-            rtag = c_tag(m.tag);
-            rpay = c_long(m.v);
-          }
-        } else {
-          Addr r = reg(in.arg1);
-          Val rv = load(r);
-          rtag = rv.tag;
-          rpay = rv.pay;
-        }
-        // IsEqual: the same type and the same raw value (a string or table is its object). Two different types are never
-        // equal here (no float).
-        std::string res = fresh();
-        line("(let " + res + " bool (const bool " + (is_ne ? "1" : "0") + "))");
-        std::string same_tag = test("(eq unsigned_int " + lv.tag + " " + rtag + ")");
-        line("(if " + same_tag + " (then");
-        std::string same_pay = test("(eq long " + lv.pay + " " + rpay + ")");
-        line("(if " + same_pay + " (then (set " + res + " (const bool " + (is_ne ? "0" : "1") + "))))");
-        line("))");
+        Addr r = in.arg3 != 0 ? literal_key(in.arg1, in.op) : reg(in.arg1);
+        std::string res = equal(l, r);
+        if (is_ne) res = test("(not bool " + res + ")");
         store_bool(d, res);
         break;
       }
@@ -503,8 +544,8 @@ class Fn {
         Addr d = reg(in.arg0);
         Addr s = reg(in.arg2);
         Val v = load(s);
-        std::string take = test(in.op == kOpAnd ? "(eq long " + v.pay + " (const long 0))"
-                                                : "(ne long " + v.pay + " (const long 0))");
+        std::string f = falsy(s, v);
+        std::string take = in.op == kOpAnd ? f : test("(not bool " + f + ")");
         line("(if " + take + " (then");
         store_val(d, v);
         line(goto_pc(static_cast<std::int64_t>(pc_) + 1 + in.arg1));
@@ -514,8 +555,7 @@ class Fn {
       case kOpJz: {
         Addr s = reg(in.arg0);
         Val v = load(s);
-        std::string z = fresh();
-        line("(let " + z + " bool (eq long " + v.pay + " (const long 0)))");
+        std::string z = falsy(s, v);
         line("(if " + z + " (then " + goto_pc(static_cast<std::int64_t>(pc_) + 1 + in.arg1) + "))");
         break;
       }
@@ -598,14 +638,39 @@ class Fn {
         break;
       }
       case kOpNewObj: {
-        // NEWOBJ: a table (arg1 is its size hint) or an array (arg1 its reserve), as sqvm.cpp _OP_NEWOBJ.
-        if (in.arg3 == kNotClass) refuse("_OP_NEWOBJ of a class");
+        // NEWOBJ: a table (arg1 is its size hint), an array (arg1 its reserve) or a class (arg1 the base register or -1,
+        // arg2 the attributes register or 0xFF), as sqvm.cpp _OP_NEWOBJ and CLASS_OP.
+        if (in.arg3 == kNotClass) {
+          // arg1 is the base register (CLASS_OP's baseclass), -1 when there is none.
+          if (in.arg2 != kNoAttributes) refuse("_OP_NEWOBJ of a class with attributes");
+          Addr c = reg(in.arg0);
+          std::string base = in.arg1 == -1 ? kNullSqvPtr : reg(in.arg1).obj;
+          line("(eval (call void &\"sqbc_rt_newclass\" " + c.obj + " " + base + "))");
+          break;
+        }
         Addr d = reg(in.arg0);
         if (in.arg3 == kNotArray) {
           line("(eval (call void &\"sqbc_rt_newarray\" " + d.obj + " " + c_int(in.arg1) + "))");
         } else {
           line("(eval (call void &\"sqbc_rt_newtable\" " + d.obj + "))");
         }
+        break;
+      }
+      case kOpGetBase: {
+        // GETBASE: TARGET = the class the running closure's class extends (sqvm.cpp _OP_GETBASE), or null.
+        Addr d = reg(in.arg0);
+        line("(eval (call void &\"sqbc_rt_getbase\" " + d.obj + " %2))");
+        break;
+      }
+      case kOpNewSlotA: {
+        // NEWSLOTA: STK(arg1)[STK(arg2)] := STK(arg3) on a class (sqvm.cpp NewSlotA), a static member when bit 1 of arg0 is
+        // set. No target. A member with attributes (bit 0) is refused.
+        if ((in.arg0 & kNewSlotAttributes) != 0) refuse("_OP_NEWSLOTA with member attributes");
+        Addr self = reg(in.arg1);
+        Addr key = reg(in.arg2);
+        Addr val = reg(in.arg3);
+        line("(eval (call void &\"sqbc_rt_newslota\" " + self.obj + " " + key.obj + " " + val.obj + " " +
+             c_int((in.arg0 & kNewSlotStatic) != 0 ? 1 : 0) + "))");
         break;
       }
       case kOpAppendArray: {
@@ -627,7 +692,11 @@ class Fn {
             val = slot("kv");
             store(val, kOtBool, c_long(in.arg1 != 0 ? 1 : 0));
             break;
-          default: refuse("_OP_APPENDARRAY of a float value");
+          case kAatFloat:
+            val = slot("kv");
+            store(val, kOtFloat, c_long(float_bits(float_from_arg(in.arg1))));
+            break;
+          default: refuse("_OP_APPENDARRAY with an unknown value kind");
         }
         line("(eval (call void &\"sqbc_rt_append\" " + arr.obj + " " + val.obj + "))");
         break;
@@ -686,9 +755,12 @@ class Fn {
         line("(eval (call void &\"sqbc_rt_close\" " + from.obj + "))");
         break;
       }
+      case kOpTailCall:
       case kOpCall: {
         // CALL: the callee is STK(arg1), its frame starts at STK(arg2) (this, then the arguments), arg3 values in all; the
-        // result goes to STK(arg0) when arg0 is a register.
+        // result goes to STK(arg0) when arg0 is a register. TAILCALL has the same operands, and the compiler follows it with
+        // the RETURN of STK(arg0): a call here, so the result is the same (the reference reuses the frame of a closure, so
+        // a tail recursion that is deep in the reference is deep here).
         Addr clo = reg(in.arg1);
         Addr frame = reg(in.arg2);
         std::string res = kNullSqvPtr;

@@ -53,21 +53,25 @@ checked by tag. Anything else calls a helper, which performs the whole operation
 | LINE | nothing (no debug hook) |
 | LOAD (int, bool, null literal), LOADINT, LOADBOOL, LOADNULLS, DLOAD | store of the immediate |
 | LOAD of a string literal, DLOAD of strings | `sqbc_rt_loadstr` into the register; the text is a `(data)` item of the module, interned by the runtime |
-| LOAD of a float literal, LOADFLOAT | refused |
+| LOAD of a float literal, LOADFLOAT | store of the float: tag OT_FLOAT (0x05000004), payload the 4 bytes of the float (low 32 bits) |
 | MOVE, DMOVE | copy of the 16 bytes, in the instruction's order |
-| ADD, SUB, MUL | int inline (`wadd`, `wsub`, `wmul`); else `sqbc_rt_arith` |
+| ADD, SUB, MUL | int inline (`wadd`, `wsub`, `wmul`); else `sqbc_rt_arith` (floats and mixed int/float there) |
 | DIV, MOD | `sqbc_rt_arith` |
 | NEG | `sqbc_rt_neg` |
-| NOT | int, bool or null: payload == 0 |
-| CMP with >, >=, <, <= | int inline (`lt.s` with the operands swapped for >, >=); else `sqbc_rt_compare` |
+| NOT | int, bool or null: payload == 0; a float: `sqbc_rt_float_zero` (IsFalse) |
+| CMP with >, >=, <, <= | int inline (`lt.s` with the operands swapped for >, >=); else `sqbc_rt_compare` (floats, mixed int/float) |
 | CMP with 3-way (<=>) | refused |
-| EQ, NE | same tag and same payload, with the literal form (arg3 != 0; a string literal is loaded first, so it is interned) |
+| EQ, NE | same tag and same payload, for a non-float; a float, or two different tags, through `sqbc_rt_equal` (IsEqual); the literal form (arg3 != 0) is loaded into the scratch value first, so a string literal is interned |
+| JZ, AND, OR | the truth of the value as NOT (a float through `sqbc_rt_float_zero`) |
 | GET, GETK | `sqbc_rt_get` into a scratch value, then the register. selfidx 0 (register 0) falls back to the root table |
 | PREPCALL, PREPCALLK | the callee by `sqbc_rt_get` into arg0; the receiver (arg2) copied into arg3 (sqvm.cpp order) |
 | SET, NEWSLOT | `sqbc_rt_set` / `sqbc_rt_newslot`; the value copied to arg0 when arg0 is a register |
-| NEWOBJ (a table, an array) | `sqbc_rt_newtable`, or `sqbc_rt_newarray` with arg1 as the reserve (NOT_ARRAY); a class is refused |
-| APPENDARRAY | `sqbc_rt_append` of the value of arg2 (AAT_STACK a register, AAT_LITERAL a literal, AAT_INT arg1, AAT_BOOL arg1); a float value is refused |
-| CALL | `sqbc_rt_call(callee, ret, frame, nargs)`: the frame starts at the `this` register (arg2); see section 4 |
+| NEWOBJ (a table, an array) | `sqbc_rt_newtable`, or `sqbc_rt_newarray` with arg1 as the reserve (NOT_ARRAY) |
+| NEWOBJ of a class (NOT_CLASS) | `sqbc_rt_newclass` into arg0, with the base register arg1 (NULL when arg1 is -1); arg2 must be 0xFF (no attributes), else refused |
+| GETBASE | `sqbc_rt_getbase` into arg0: the class the running closure's class extends, or null (the running closure is the third parameter) |
+| NEWSLOTA | `sqbc_rt_newslota` (a class member; bit 1 of arg0 is the static flag); bit 0 (attributes) is refused |
+| APPENDARRAY | `sqbc_rt_append` of the value of arg2 (AAT_STACK a register, AAT_LITERAL a literal, AAT_INT arg1, AAT_BOOL arg1, AAT_FLOAT the float whose bits are arg1) |
+| CALL, TAILCALL | `sqbc_rt_call(callee, ret, frame, nargs)`: the frame starts at the `this` register (arg2); see section 4. TAILCALL is the same call: the compiler follows it with the RETURN of its target |
 | CLOSURE | `sqbc_rt_closure` with the prototype's index, its parameters, frame size and outer count; a bound register (arg2) is the environment; each outer is bound by `sqbc_rt_outer_local` (a register of this frame: a local of the enclosing function) or `sqbc_rt_outer_outer` (an outer of the running closure) |
 | GETOUTER, SETOUTER | `sqbc_rt_getouter` / `sqbc_rt_setouter` on the running closure (the third parameter of `sq_fn_N`) |
 | CLOSE | `sqbc_rt_close` on the register arg1: the outers of the stack from there on move into their objects |
@@ -75,7 +79,7 @@ checked by tag. Anything else calls a helper, which performs the whole operation
 | JMP, JZ | goto; JZ jumps when payload == 0 |
 | JCMP | the fused CMP and JZ of the compiler's peephole: jump when the comparison is false |
 | RETURN | copy of the register (or null) into `*ret`, then `(return)` |
-| everything else (LOADROOT, NEWOBJ of a class, BITW, INC, FOREACH, ...) | refused: `refused: _OP_NAME is not lowered yet (pc N)`, exit 3 |
+| everything else (LOADROOT, INSTANCEOF, BITW, INC, FOREACH, ...) | refused: `refused: _OP_NAME is not lowered yet (pc N)`, exit 3 |
 
 A nested function with default parameters or a vararg is refused by name (the main prototype is always vararg, with
 `vargv` unused, and is lowered either way).
@@ -113,13 +117,43 @@ exits 1, as `sqref` does.
   array method that is not lowered (push, append, ...) is `unsupported array method` at run time, where the reference
   runs it. Arrays compare by identity for `==`; `<` on two arrays compares their addresses, as the reference does, and is
   not tested.
+- Floats (sqvm.cpp, sqobject.h). SQFloat is the 4-byte `float` of this build (no SQUSEDOUBLE): a float value is its
+  4 bytes in the payload's low 32 bits. Arithmetic on a float, or on an integer and a float, is done in float (an integer
+  converts to float first, `tofloat`); `/` gives inf or nan for a zero divisor, and `%` is `fmod` of the two as doubles,
+  stored as a float. `print`, `tostring` and the concatenation with a string print a float with `%g` (ToString, sqvm.cpp);
+  a comparison or equality error prints it with `%.14g` (PrintObjVal). Equal floats compare as 0 in ObjCmp, so `<`,
+  `<=`, `>`, `>=` agree with the reference for every value the subset makes (no NaN is tested). `IsFalse` is true for
+  +0.0 and -0.0. A float is equal to an integer of the same value (IsEqual compares as floats). The oracle and the driver
+  print a float result with `%g`.
 - Strings, tables and closures are all payloads that are never 0, so `IsFalse` is still "payload == 0" (sqvm.cpp's
-  IsFalse tests the integer of the object, which is non-zero for a pointer).
+  IsFalse tests the integer of the object, which is non-zero for a pointer). A float is the one exception: see above.
+- Number methods: `tostring` is the number delegate's for an integer and a float. `tofloat`, `tointeger` and `tochar` are
+  not lowered: a call of one is `unsupported number method` at run time, where the reference runs it.
 - A table GET or SET of a key it does not have is `the index 'K' does not exist` (Raise_IdxError, the key printed as
   PrintObjVal prints it: a string as itself, an integer in decimal, anything else as its type name). A SET on a non-table
   is `trying to set 'T'`, a NEWSLOT on a non-table is `indexing T with K`, a NEWSLOT with a null key is `null cannot be
   used as index`. A GET on a non-table gives the Raise_IdxError text (the reference falls through to it too).
 - A string indexed by an integer gives the byte as an integer (signed, as `char` is), a negative index counts from the end.
+- Classes (sqvm.cpp CLASS_OP, CreateClassInstance, NewSlot; sqclass.cpp). A class is a list of members: a field (an
+  instance value, initialised from the class's default at creation) and a shared member (a method, a static, or any
+  closure). The first instance locks the class: then a new non-closure, non-static member is `trying to modify a class
+  that has already been instantiated`, and an existing field's default cannot change either. A NEWSLOT of a member whose
+  name is a method keeps the method (the reference's table does), so a later field of that name has no effect. A
+  `constructor` member is the one a CALL of the class runs, with the instance as `this`; the CALL's target is the instance
+  (set before the constructor runs, as sqvm.cpp does), the arguments count `this`, and a class with no constructor ignores
+  them. A GET on an instance is its field or a shared member; a SET is only for a field (else the index error, after the
+  root fallback when the instance is register 0); NEWSLOT on an instance is `class instances do not support the new slot
+  operator`; a SET or NEWSLOT on a class is `trying to set 'class'` and, for NEWSLOT, the class rules above. An instance
+  and a class compare by identity, and an arithmetic or comparison error names them as `instance` and `class`. The
+  delegate methods of an instance (`getclass`, `rawget`, `rawset`, `rawin`, `weakref`, `tostring`) and of a class
+  (`getattributes`, `setattributes`, `rawget`, `rawset`, `rawin`, `weakref`) are `unsupported ... method` at run time,
+  and `tostring` of an instance or a class is refused (the reference prints an address).
+- Inheritance (`extends`, CLASS_OP, SQClass's constructor). A class with a base starts with the base's members, fields
+  (with their indices, so an instance's fields are the base's then the new ones) and constructor; a field of the derived
+  class with a base member's name replaces the default. The base is locked with the derived class (SQClass::Lock). A
+  closure defined in a class with a base is a copy that knows the base, which GETBASE returns; `base.f()` is a GET on the
+  base class and a call with the instance as `this` (the compiler's MOVE of register 0). A base that is not a class is
+  `trying to inherit from a T`.
 - Calls (sqvm.cpp `_OP_CALL`, StartCall, Return): the callee's frame starts at the `this` register (arg2) of the caller,
   so its parameters are the caller's registers above it, and the result is written to the caller's target register (arg0)
   when it has one. `nargs` counts `this`: `wrong number of parameters (N passed, M required)` for a mismatch. A closure
@@ -129,14 +163,14 @@ exits 1, as `sqref` does.
 
 ## 5. Tests
 
-- `tests/squirrelbc/run.sh`: the reader. 78 streams (`corpus/*.nut`, `lower/*.nut` and the synthetic stream of
+- `tests/squirrelbc/run.sh`: the reader. 98 streams (`corpus/*.nut`, `lower/*.nut` and the synthetic stream of
   `lower/synth.rb`) compile with `sq -c`, load in `sq_dump` (every instruction named, stream consumed), and run through
   `sqref` with the same result as their source. Also: the opcode table against the reference header; a golden dump
   (`reader/ints.dump`); and five malformed streams (truncated, trailing byte, bad tag, SQInteger size 4, corrupt TAIL),
   each refused with exit 1.
-- `tests/squirrelbc/lower/run.sh`: the end-to-end suite. 65 programs (`lower/*.nut`: integers, strings, tables, calls,
-  closures, print, tostring and arrays) match `sqref` on the printed result and the status; 29 runtime errors (`lower/rterr/`) match the message and
-  status 1; 8 programs (`lower/err/`) are refused with exit 3; `lower/synth.rb` writes a stream with DLOAD, DMOVE, LINE and
+- `tests/squirrelbc/lower/run.sh`: the end-to-end suite. 85 programs (`lower/*.nut`: integers, strings, tables, calls,
+  closures, print, tostring, arrays, floats, classes and inheritance) match `sqref` on the printed result and the status;
+  42 runtime errors (`lower/rterr/`) match the message and status 1; 8 programs (`lower/err/`) are refused with exit 3; `lower/synth.rb` writes a stream with DLOAD, DMOVE, LINE and
   LOADNULLS. A string result is printed by `sqref` and by the driver alike (the text, one line).
 - The oracle is `tests/squirrelbc/oracle/sqref.c`: the reference VM, built against the reference tree's
   `libsquirrel_static.a`. It loads `.nut` (compile) and `.cnut` (`sq_readclosure`) and prints the result line.
@@ -158,7 +192,9 @@ source tree). Without them they exit 77 (skip). The lowering suite also needs `b
 - Still not lowered: a method of the array or string delegate other than `len` and `tostring` (`push`, `append`, `slice`,
   ...) is `unsupported array method` or `unsupported string method` at run time, where the reference runs it; no test
   (rterr/arr_method.nut was removed for that reason). A method of the table delegate other than `tostring` (`t.len()`,
-  `t.rawget` ...) is "the index does not exist". Float values (in `print`, `tostring` and arrays) are refused.
+  `t.rawget` ...) is "the index does not exist". A float as a table or array key is `float keys are not lowered` at run
+  time (the reference hashes floats; not modelled). `tofloat`, `tointeger` and `tochar` (number methods) are
+  `unsupported number method` at run time.
 - Objects (strings, tables, closures) are never freed: the runtime is a test harness with no collector, so a long loop
   that builds strings or tables uses memory without a bound.
 - A `tostring` of an array, a table or a function (in a concatenation, through `print` or the method) is refused at run
@@ -166,3 +202,9 @@ source tree). Without them they exit 77 (skip). The lowering suite also needs `b
 - LOADROOT (the reference's root-table fast path) is refused; the lowering reaches the root through GET on register 0.
 - The outer objects are kept as the reference keeps them (an open list by descending stack address, closed by CLOSE and by
   the return of the frame). A closure called after its creating frame has returned reads the closed value.
+- Classes: a class or a member with attributes (`</ ... />`) is refused by name. A metamethod of a class (a closure named
+  `_add`, `_tostring`, `_inherited`, ... the MM_* names of sqobject.h) is `class metamethods are not lowered` at run time:
+  the reference makes it a metamethod, not a member, so the program's output differs; no test (a refusal from the
+  producer would not match a program the reference runs).
+- TAILCALL is lowered as CALL (the reference reuses the frame of a closure). A tail recursion deep enough to need the frame reuse is a stack overflow here (`stack overflow`, the runtime's own text).
+- Not lowered: INSTANCEOF, LOADROOT and DELETE (refused by name); the delegate methods of an instance and a class (section 4).

@@ -19,11 +19,14 @@ typedef struct SQV {
 #define SQBC_TAG_NULL 0x01000001u
 #define SQBC_TAG_INTEGER 0x05000002u
 #define SQBC_TAG_BOOL 0x01000008u
+#define SQBC_TAG_FLOAT 0x05000004u
 #define SQBC_TAG_STRING 0x08000010u
 #define SQBC_TAG_TABLE 0x0A000020u
 #define SQBC_TAG_ARRAY 0x08000040u
 #define SQBC_TAG_CLOSURE 0x08000100u
 #define SQBC_TAG_NATIVE 0x08000200u
+#define SQBC_TAG_CLASS 0x08004000u
+#define SQBC_TAG_INSTANCE 0x0A008000u
 
 /* Helper operands: the Squirrel opcode numbers of the operator (sqopcodes.h), and CmpOP (CMP_G, CMP_GE, CMP_L, CMP_LE). */
 #define SQBC_OP_ADD 0x11
@@ -50,6 +53,16 @@ void sqbc_rt_init(SQV *base, size_t nslots);
 void sqbc_rt_arith(int op, SQV *dst, SQV *a, SQV *b);
 void sqbc_rt_neg(SQV *dst, SQV *a);
 int sqbc_rt_compare(int op, SQV *a, SQV *b);
+/* IsEqual (sqvm.cpp) of two values: 1 when equal. Floats and numbers of different types compare as floats. */
+int sqbc_rt_equal(const SQV *a, const SQV *b);
+/* NEWOBJ of a class (no attributes): a class in dst, extending BASE when BASE is not NULL (it must be a class). NEWSLOTA
+ * adds a member of a class (BSTATIC: the NEW_SLOT_STATIC_FLAG); CALL of a class makes an instance (sqbc_rt_call). */
+void sqbc_rt_newclass(SQV *dst, const SQV *base);
+void sqbc_rt_newslota(const SQV *self, const SQV *key, const SQV *val, int bstatic);
+/* GETBASE: the class that the running closure's class extends (CLO is the running closure), or null. */
+void sqbc_rt_getbase(SQV *dst, const SQV *clo);
+/* The float value of a float is zero (+0.0 or -0.0): IsFalse of a float. Only called for a float. */
+int sqbc_rt_float_zero(const SQV *v);
 void sqbc_rt_loadstr(SQV *dst, const char *s, int64_t len);
 void sqbc_rt_newtable(SQV *dst);
 /* NEWOBJ of an array: an empty array with room for RESERVE values. APPENDARRAY: VAL is appended to ARR. */

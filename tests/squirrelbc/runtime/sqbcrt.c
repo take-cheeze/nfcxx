@@ -10,6 +10,7 @@
 #include "sqbcrt.h"
 
 #include <inttypes.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +28,9 @@ static const char *type_name(uint32_t tag) {
     case SQBC_TAG_NULL: return "null";
     case SQBC_TAG_INTEGER: return "integer";
     case SQBC_TAG_BOOL: return "bool";
+    case SQBC_TAG_FLOAT: return "float";
+    case SQBC_TAG_CLASS: return "class";
+    case SQBC_TAG_INSTANCE: return "instance";
     case SQBC_TAG_STRING: return "string";
     case SQBC_TAG_TABLE: return "table";
     case SQBC_TAG_ARRAY: return "array";
@@ -83,6 +87,31 @@ static SQV make_string(const char *s, size_t n) {
 
 static SqStr *str_of(const SQV *v) { return (SqStr *)(intptr_t)v->i; }
 
+/* A float (squirrel.h's SQFloat, the 4-byte float of this build) is the low 32 bits of the payload. */
+static float float_of(const SQV *v) {
+  uint32_t bits = (uint32_t)v->i;
+  float f;
+  memcpy(&f, &bits, sizeof f);
+  return f;
+}
+
+static SQV make_float(float f) {
+  uint32_t bits;
+  memcpy(&bits, &f, sizeof bits);
+  SQV v;
+  v.tag = SQBC_TAG_FLOAT;
+  v.pad = 0;
+  v.i = (int64_t)bits;
+  return v;
+}
+
+/* A number of the subset as a float (tofloat in sqobject.h: an integer converts). */
+static float number_as_float(const SQV *v) {
+  return v->tag == SQBC_TAG_INTEGER ? (float)v->i : float_of(v);
+}
+
+static int is_number(const SQV *v) { return v->tag == SQBC_TAG_INTEGER || v->tag == SQBC_TAG_FLOAT; }
+
 /* ToString of the subset (sqvm.cpp): a string as itself, null, a boolean, an integer. A table or a function has no text
  * that is the same on every run, so it is refused. */
 static size_t text_of(const SQV *v, char *buf, size_t bufsz, const char **out) {
@@ -95,7 +124,13 @@ static size_t text_of(const SQV *v, char *buf, size_t bufsz, const char **out) {
       *out = buf;
       return (size_t)n;
     }
-    default: rt_error("tostring of an array, a table or a function is not lowered");
+    case SQBC_TAG_FLOAT: {
+      /* sqvm.cpp ToString: the float with %g (the float promoted to double). */
+      int n = snprintf(buf, bufsz, "%g", (double)float_of(v));
+      *out = buf;
+      return (size_t)n;
+    }
+    default: rt_error("tostring of an array, a table, a class, an instance or a function is not lowered");
   }
   return 0;
 }
@@ -112,6 +147,11 @@ static const char *print_obj(const SQV *v, char *buf, size_t bufsz) {
   if (v->tag == SQBC_TAG_STRING) return str_of(v)->chars;
   if (v->tag == SQBC_TAG_INTEGER) {
     snprintf(buf, bufsz, "%" PRId64, v->i);
+    return buf;
+  }
+  if (v->tag == SQBC_TAG_FLOAT) {
+    /* sqdebug.cpp PrintObjVal: %.14g for a float. */
+    snprintf(buf, bufsz, "%.14g", (double)float_of(v));
     return buf;
   }
   return type_name(v->tag);
@@ -281,6 +321,7 @@ typedef struct SqClosure {
   SQV env;
   int nouters;
   SqOuter **outers;
+  struct SqClass *base; /* the class of a method of a class with a base (GETBASE), or NULL */
 } SqClosure;
 
 /* A native of the base library or a delegate: its operation (NAT_*) and the parameter count sqvm.cpp's CallNative checks
@@ -323,6 +364,7 @@ static int delegate_native(const SQV *self, const SQV *key, SQV *out) {
   if (strcmp(name, "tostring") == 0) {
     switch (self->tag) {
       case SQBC_TAG_INTEGER:
+      case SQBC_TAG_FLOAT:
       case SQBC_TAG_BOOL:
       case SQBC_TAG_STRING:
       case SQBC_TAG_ARRAY:
@@ -335,6 +377,26 @@ static int delegate_native(const SQV *self, const SQV *key, SQV *out) {
   return 0;
 }
 
+/* The other methods of the number delegate (sqbaselib.cpp: tofloat, tointeger, tochar), for an integer or a float. */
+static int is_number_method(const char *name) {
+  return strcmp(name, "tofloat") == 0 || strcmp(name, "tointeger") == 0 || strcmp(name, "tochar") == 0;
+}
+
+/* The other methods of the class and instance default delegates (sqbaselib.cpp): not lowered. */
+static int is_class_method(const char *name) {
+  static const char *const names[] = {"getattributes", "setattributes", "rawget", "rawset", "rawin", "weakref"};
+  for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+    if (strcmp(name, names[i]) == 0) return 1;
+  return 0;
+}
+
+static int is_instance_method(const char *name) {
+  static const char *const names[] = {"getclass", "rawget", "rawset", "rawin", "weakref", "tostring"};
+  for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+    if (strcmp(name, names[i]) == 0) return 1;
+  return 0;
+}
+
 /* The other methods of the array delegate (sqbaselib.cpp, _array_default_delegate_funcz): not lowered. */
 static int is_array_method(const char *name) {
   static const char *const names[] = {"append", "extend", "push",  "pop",     "top",    "insert", "remove",
@@ -343,6 +405,186 @@ static int is_array_method(const char *name) {
   for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
     if (strcmp(name, names[i]) == 0) return 1;
   return 0;
+}
+
+/* ---- classes and instances ------------------------------------------------------------------------------------------ */
+
+static void refuse_float_key(const SQV *k);
+
+/* A member of a class (sqclass.h's members table and its field and method lists, as one list). An instance field has
+ * is_field 1 and its value in the instance, at index idx; `val` is its default. A method, or a static member, is shared
+ * by the class: `val` is its value. */
+typedef struct SqMember {
+  SQV key;
+  SQV val;
+  int is_field;
+  int idx;
+} SqMember;
+
+typedef struct SqClass {
+  SqMember *members;
+  size_t count;
+  size_t cap;
+  int nfields;
+  int locked; /* set by the first instance: the class can no longer get a field (SQClass::NewSlot) */
+  int ctor;   /* the member index of `constructor`, or -1 */
+  struct SqClass *base; /* the class this one extends, or NULL */
+} SqClass;
+
+typedef struct SqInstance {
+  SqClass *cls;
+  SQV *values; /* the class's nfields fields */
+} SqInstance;
+
+static SqClass *class_of(const SQV *v) { return (SqClass *)(intptr_t)v->i; }
+static SqInstance *inst_of(const SQV *v) { return (SqInstance *)(intptr_t)v->i; }
+
+static SqMember *class_find(SqClass *c, const SQV *key) {
+  for (size_t i = 0; i < c->count; i++)
+    if (key_eq(&c->members[i].key, key)) return &c->members[i];
+  return NULL;
+}
+
+static SqMember *class_add(SqClass *c, const SQV *key, const SQV *val, int is_field) {
+  if (c->count == c->cap) {
+    size_t cap = c->cap ? c->cap * 2 : 4;
+    SqMember *m = realloc(c->members, cap * sizeof(SqMember));
+    if (!m) rt_error("out of memory");
+    c->members = m;
+    c->cap = cap;
+  }
+  SqMember *m = &c->members[c->count++];
+  m->key = *key;
+  m->val = *val;
+  m->is_field = is_field;
+  m->idx = is_field ? c->nfields++ : -1;
+  return m;
+}
+
+static SQV class_val(SqClass *c) {
+  SQV v;
+  v.tag = SQBC_TAG_CLASS;
+  v.pad = 0;
+  v.i = (int64_t)(intptr_t)c;
+  return v;
+}
+
+void sqbc_rt_newclass(SQV *dst, const SQV *base) {
+  SqClass *c = calloc(1, sizeof *c);
+  if (!c) rt_error("out of memory");
+  c->ctor = -1;
+  if (base) {
+    /* CLASS_OP (sqvm.cpp): the base must be a class; the new class has the base's members (SQClass::SQClass). */
+    if (base->tag != SQBC_TAG_CLASS) {
+      char msg[96];
+      snprintf(msg, sizeof msg, "trying to inherit from a %s", type_name(base->tag));
+      rt_error(msg);
+    }
+    SqClass *b = class_of(base);
+    c->base = b;
+    c->nfields = b->nfields;
+    c->ctor = b->ctor;
+    if (b->count > 0) {
+      c->members = malloc(b->count * sizeof(SqMember));
+      if (!c->members) rt_error("out of memory");
+      memcpy(c->members, b->members, b->count * sizeof(SqMember));
+      c->count = c->cap = b->count;
+    }
+  }
+  *dst = class_val(c);
+}
+
+/* The metamethods of a class (sqobject.h MM_*): a closure with one of these names is a metamethod in the reference, not a
+ * member. Not lowered. */
+static int is_metamethod_key(const SQV *k) {
+  static const char *const names[] = {"_add", "_sub", "_mul", "_div", "_unm", "_modulo", "_set", "_get", "_typeof",
+                                      "_nexti", "_cmp", "_call", "_cloned", "_newslot", "_delslot", "_tostring",
+                                      "_newmember", "_inherited"};
+  if (k->tag != SQBC_TAG_STRING) return 0;
+  for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+    if (strcmp(str_of(k)->chars, names[i]) == 0) return 1;
+  return 0;
+}
+
+/* SQClass::NewSlot (sqclass.cpp), with the checks of SQVM::NewSlot: a closure or a static member is a shared member, any
+ * other value is a field; a class with an instance takes only shared members; a name that is a method already is not
+ * changed by a field of the same name (the reference's table keeps the method). */
+/* A closure of a class with a base is a copy of it that knows the base (SQClass::NewSlot: `_closure(theval)->_base`), for
+ * GETBASE. The copy shares the outer variables of the original. */
+static SQV closure_with_base(const SQV *v, SqClass *base) {
+  SqClosure *src = (SqClosure *)(intptr_t)v->i; /* closure_of, defined further down */
+  SqClosure *c = calloc(1, sizeof *c);
+  if (!c) rt_error("out of memory");
+  *c = *src;
+  if (src->nouters > 0) {
+    c->outers = calloc((size_t)src->nouters, sizeof(SqOuter *));
+    if (!c->outers) rt_error("out of memory");
+    memcpy(c->outers, src->outers, (size_t)src->nouters * sizeof(SqOuter *));
+  }
+  c->base = base;
+  SQV r;
+  r.tag = SQBC_TAG_CLOSURE;
+  r.pad = 0;
+  r.i = (int64_t)(intptr_t)c;
+  return r;
+}
+
+static void class_newslot(SqClass *c, const SQV *k, const SQV *v, int bstatic) {
+  int shared = v->tag == SQBC_TAG_CLOSURE || v->tag == SQBC_TAG_NATIVE || bstatic;
+  if (c->locked && !shared) rt_error("trying to modify a class that has already been instantiated");
+  SqMember *m = class_find(c, k);
+  if (m && m->is_field) {
+    m->val = *v; /* a field's default value is replaced, shared or not */
+    return;
+  }
+  if (!shared) {
+    if (!m) class_add(c, k, v, 1);
+    return;
+  }
+  if (v->tag == SQBC_TAG_CLOSURE && is_metamethod_key(k)) rt_error("class metamethods are not lowered");
+  SQV theval = *v;
+  if (c->base && v->tag == SQBC_TAG_CLOSURE) theval = closure_with_base(v, c->base);
+  if (m) {
+    m->val = theval;
+    return;
+  }
+  class_add(c, k, &theval, 0);
+  if (k->tag == SQBC_TAG_STRING && strcmp(str_of(k)->chars, "constructor") == 0) c->ctor = (int)(c->count - 1);
+}
+
+/* SQVM::Get on an instance or a class: a field of an instance is its value; anything else is the member's value. */
+static int class_get(const SQV *self, const SQV *key, SQV *out) {
+  SqClass *c = self->tag == SQBC_TAG_INSTANCE ? inst_of(self)->cls : class_of(self);
+  SqMember *m = class_find(c, key);
+  if (!m) return 0;
+  if (m->is_field && self->tag == SQBC_TAG_INSTANCE) *out = inst_of(self)->values[m->idx];
+  else *out = m->val;
+  return 1;
+}
+
+/* CreateClassInstance (sqvm.cpp): the class is locked, and the instance has the class's field defaults. */
+static SQV make_instance(SqClass *c) {
+  SqInstance *in = calloc(1, sizeof *in);
+  if (!in) rt_error("out of memory");
+  in->cls = c;
+  in->values = calloc(c->nfields > 0 ? (size_t)c->nfields : 1, sizeof(SQV));
+  if (!in->values) rt_error("out of memory");
+  for (size_t i = 0; i < c->count; i++)
+    if (c->members[i].is_field) in->values[c->members[i].idx] = c->members[i].val;
+  for (SqClass *b = c; b; b = b->base) b->locked = 1; /* SQClass::Lock locks the base too */
+  SQV v;
+  v.tag = SQBC_TAG_INSTANCE;
+  v.pad = 0;
+  v.i = (int64_t)(intptr_t)in;
+  return v;
+}
+
+void sqbc_rt_newslota(const SQV *self, const SQV *key, const SQV *val, int bstatic) {
+  SQV s = *self, k = *key, v = *val;
+  if (s.tag != SQBC_TAG_CLASS) rt_error("object must be a class");
+  if (k.tag == SQBC_TAG_NULL) rt_error("null cannot be used as index");
+  refuse_float_key(&k);
+  class_newslot(class_of(&s), &k, &v, bstatic);
 }
 
 /* ---- the stack and the root table ----------------------------------------------------------------------------------- */
@@ -414,6 +656,16 @@ void sqbc_rt_setouter(const SQV *clo, int idx, const SQV *val) {
 
 void sqbc_rt_close(SQV *from) { close_outers(from); }
 
+/* GETBASE: the class the running closure's class extends, or null (the main function has no closure). */
+void sqbc_rt_getbase(SQV *dst, const SQV *clo) {
+  SQV r;
+  r.tag = SQBC_TAG_NULL;
+  r.pad = 0;
+  r.i = 0;
+  if (clo && clo->tag == SQBC_TAG_CLOSURE && closure_of(clo)->base) r = class_val(closure_of(clo)->base);
+  *dst = r;
+}
+
 /* ---- Get, Set, NewSlot ---------------------------------------------------------------------------------------------- */
 
 static void raise_idx(const SQV *k) {
@@ -424,8 +676,15 @@ static void raise_idx(const SQV *k) {
   rt_error(msg);
 }
 
+/* A float as a key: the table and array lookups of the subset are by the raw value, which the reference's hashing of
+ * floats is not; not lowered. */
+static void refuse_float_key(const SQV *k) {
+  if (k->tag == SQBC_TAG_FLOAT) rt_error("float keys are not lowered");
+}
+
 void sqbc_rt_get(SQV *dst, const SQV *self, const SQV *key, int root_fallback) {
   SQV s = *self, k = *key, out;
+  refuse_float_key(&k);
   if (s.tag == SQBC_TAG_TABLE) {
     TNode *n = table_find(tbl(&s), &k);
     if (n) {
@@ -438,6 +697,9 @@ void sqbc_rt_get(SQV *dst, const SQV *self, const SQV *key, int root_fallback) {
     SqArray *a = array_of(&s);
     if (k.i < 0 || (uint64_t)k.i >= (uint64_t)a->count) raise_idx(&k);
     out = a->items[k.i];
+    *dst = out;
+    return;
+  } else if ((s.tag == SQBC_TAG_CLASS || s.tag == SQBC_TAG_INSTANCE) && class_get(&s, &k, &out)) {
     *dst = out;
     return;
   } else if (s.tag == SQBC_TAG_STRING && k.tag == SQBC_TAG_INTEGER) {
@@ -469,6 +731,14 @@ void sqbc_rt_get(SQV *dst, const SQV *self, const SQV *key, int root_fallback) {
   }
   if (k.tag == SQBC_TAG_STRING) {
     char msg[160];
+    if (s.tag == SQBC_TAG_CLASS && is_class_method(str_of(&k)->chars)) {
+      snprintf(msg, sizeof msg, "unsupported class method '%.50s' (not lowered)", str_of(&k)->chars);
+      rt_error(msg);
+    }
+    if (s.tag == SQBC_TAG_INSTANCE && is_instance_method(str_of(&k)->chars)) {
+      snprintf(msg, sizeof msg, "unsupported instance method '%.50s' (not lowered)", str_of(&k)->chars);
+      rt_error(msg);
+    }
     if (s.tag == SQBC_TAG_STRING) {
       snprintf(msg, sizeof msg, "unsupported string method '%.50s' (only len and tostring are lowered)", str_of(&k)->chars);
       rt_error(msg);
@@ -477,12 +747,17 @@ void sqbc_rt_get(SQV *dst, const SQV *self, const SQV *key, int root_fallback) {
       snprintf(msg, sizeof msg, "unsupported array method '%.50s' (only len and tostring are lowered)", str_of(&k)->chars);
       rt_error(msg);
     }
+    if (is_number(&s) && is_number_method(str_of(&k)->chars)) {
+      snprintf(msg, sizeof msg, "unsupported number method '%.50s' (only tostring is lowered)", str_of(&k)->chars);
+      rt_error(msg);
+    }
   }
   raise_idx(&k);
 }
 
 void sqbc_rt_set(const SQV *self, const SQV *key, const SQV *val, int root_fallback) {
   SQV s = *self, k = *key, v = *val;
+  refuse_float_key(&k);
   if (s.tag == SQBC_TAG_TABLE) {
     TNode *n = table_find(tbl(&s), &k);
     if (n) {
@@ -500,6 +775,13 @@ void sqbc_rt_set(const SQV *self, const SQV *key, const SQV *val, int root_fallb
     if (k.i < 0 || (uint64_t)k.i >= (uint64_t)a->count) raise_idx(&k);
     a->items[k.i] = v;
     return;
+  } else if (s.tag == SQBC_TAG_INSTANCE) {
+    /* sqvm.cpp Set: a field of the instance; anything else falls through to the root fallback, then the index error. */
+    SqMember *m = class_find(inst_of(&s)->cls, &k);
+    if (m && m->is_field) {
+      inst_of(&s)->values[m->idx] = v;
+      return;
+    }
   } else {
     /* sqvm.cpp Set, default case. */
     char msg[64];
@@ -519,10 +801,16 @@ void sqbc_rt_set(const SQV *self, const SQV *key, const SQV *val, int root_fallb
 void sqbc_rt_newslot(const SQV *self, const SQV *key, const SQV *val) {
   SQV s = *self, k = *key, v = *val;
   if (k.tag == SQBC_TAG_NULL) rt_error("null cannot be used as index");
+  refuse_float_key(&k);
   if (s.tag == SQBC_TAG_TABLE) {
     table_newslot(tbl(&s), &k, &v);
     return;
   }
+  if (s.tag == SQBC_TAG_CLASS) {
+    class_newslot(class_of(&s), &k, &v, 0);
+    return;
+  }
+  if (s.tag == SQBC_TAG_INSTANCE) rt_error("class instances do not support the new slot operator");
   char msg[96];
   snprintf(msg, sizeof msg, "indexing %s with %s", type_name(s.tag), type_name(k.tag));
   rt_error(msg);
@@ -548,6 +836,19 @@ void sqbc_rt_call(const SQV *callee, SQV *ret, SQV *frame, int nargs) {
     sq_dispatch(c->fn, ret, frame, &running);
     /* LeaveFrame: the outer variables of the frame are closed (sqvm.cpp). */
     close_outers(frame);
+    return;
+  }
+  if (clo.tag == SQBC_TAG_CLASS) {
+    /* sqvm.cpp _OP_CALL of a class: the instance is the target, and the constructor, if the class has one, runs with the
+     * instance as `this` (the frame's first value). Without a constructor the arguments are not used. */
+    SqClass *c = class_of(&clo);
+    SQV inst = make_instance(c);
+    *ret = inst;
+    if (c->ctor >= 0 && c->members[c->ctor].val.tag == SQBC_TAG_CLOSURE) {
+      frame[0] = inst;
+      SQV ctor = c->members[c->ctor].val;
+      sqbc_rt_call(&ctor, NULL, frame, nargs);
+    }
     return;
   }
   if (clo.tag == SQBC_TAG_NATIVE) {
@@ -609,6 +910,21 @@ void sqbc_rt_arith(int op, SQV *dst, SQV *a, SQV *b) {
   /* Read both operands before dst is written: dst may be one of them. */
   SQV x = *a, y = *b;
   SQV r;
+  if (is_number(&x) && is_number(&y) && (x.tag == SQBC_TAG_FLOAT || y.tag == SQBC_TAG_FLOAT)) {
+    /* sqvm.cpp _ARITH_ and ARITH_OP, the float case: both operands as floats, no check of a zero divisor (`/` gives inf
+     * or nan); `%` is fmod of the two as doubles. */
+    float f1 = number_as_float(&x), f2 = number_as_float(&y), res = 0;
+    switch (op) {
+      case SQBC_OP_ADD: res = f1 + f2; break;
+      case SQBC_OP_SUB: res = f1 - f2; break;
+      case SQBC_OP_MUL: res = f1 * f2; break;
+      case SQBC_OP_DIV: res = f1 / f2; break;
+      case SQBC_OP_MOD: res = (float)fmod((double)f1, (double)f2); break;
+      default: rt_error("internal: bad arithmetic operator");
+    }
+    *dst = make_float(res);
+    return;
+  }
   if (op == SQBC_OP_MOD) {
     /* sqvm.cpp's _OP_MOD calls ARITH_OP and drops its result, and a failure only stores the message (Raise_Error): the
      * script goes on and the target keeps its value. So a zero divisor, or an operand that is not an integer, is not an
@@ -669,6 +985,10 @@ void sqbc_rt_neg(SQV *dst, SQV *a) {
     *dst = r;
     return;
   }
+  if (x.tag == SQBC_TAG_FLOAT) {
+    *dst = make_float(-float_of(&x));
+    return;
+  }
   {
     char msg[128];
     snprintf(msg, sizeof msg, "attempt to negate a %s", type_name(x.tag));
@@ -680,7 +1000,15 @@ void sqbc_rt_neg(SQV *dst, SQV *a) {
 int sqbc_rt_compare(int op, SQV *a, SQV *b) {
   SQV x = *a, y = *b;
   int64_t r;
-  if (x.tag == y.tag) {
+  if (x.tag == SQBC_TAG_FLOAT && y.tag == SQBC_TAG_FLOAT) {
+    /* ObjCmp: equal values are 0, else -1 when the first is less, and 1 otherwise. */
+    float f1 = float_of(&x), f2 = float_of(&y);
+    r = f1 == f2 ? 0 : (f1 < f2 ? -1 : 1);
+  } else if (is_number(&x) && is_number(&y) && x.tag != y.tag) {
+    /* An integer and a float: both as floats. */
+    float f1 = number_as_float(&x), f2 = number_as_float(&y);
+    r = f1 == f2 ? 0 : (f1 < f2 ? -1 : 1);
+  } else if (x.tag == y.tag) {
     if (x.i == y.i) {
       r = 0;
     } else if (x.tag == SQBC_TAG_STRING) {
@@ -716,3 +1044,18 @@ int sqbc_rt_compare(int op, SQV *a, SQV *b) {
   }
   return 0;
 }
+
+/* IsEqual (sqvm.cpp): the same type compares the raw value (a float by its value); two numbers of different types compare
+ * as floats; anything else is not equal. */
+int sqbc_rt_equal(const SQV *a, const SQV *b) {
+  SQV x = *a, y = *b;
+  if (x.tag == y.tag) {
+    if (x.tag == SQBC_TAG_FLOAT) return float_of(&x) == float_of(&y);
+    return x.i == y.i;
+  }
+  if (is_number(&x) && is_number(&y)) return number_as_float(&x) == number_as_float(&y);
+  return 0;
+}
+
+/* IsFalse of a float: 0.0 and -0.0 are false. The bits of a float that is not zero have a nonzero magnitude. */
+int sqbc_rt_float_zero(const SQV *v) { return float_of(v) == 0.0f; }

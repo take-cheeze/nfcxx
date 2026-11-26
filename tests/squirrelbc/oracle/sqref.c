@@ -4,7 +4,7 @@
  *
  * A .cnut (the stream of `sq -c`, tag 0xFAFA) is loaded with sq_readclosure, a .nut is compiled with sq_compilebuffer.
  * The closure runs with the root table as `this`. The result is printed the way the lowered programs print theirs
- * (tests/squirrelbc/runtime/driver.c): an integer as %lld, a boolean as true or false, null as null, a string as its text,
+ * (tests/squirrelbc/runtime/driver.c): an integer as %lld, a boolean as true or false, null as null, a string as its text, a float as %g,
  * one line. A runtime
  * error prints `error: MESSAGE` with the message alone and exits 1. Exit 2: the file cannot be read or compiled. */
 #include <stdarg.h>
@@ -99,6 +99,12 @@ int main(int argc, char **argv) {
       const SQChar *s = NULL;
       sq_getstring(v, -1, &s);
       printf("%s\n", s);
+      break;
+    }
+    case OT_FLOAT: {
+      SQFloat f = 0;
+      sq_getfloat(v, -1, &f);
+      printf("%g\n", (double)f);
       break;
     }
     default:
