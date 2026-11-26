@@ -167,6 +167,23 @@ expect_eq "energy: DRAM bytes (three sectors, 96 bytes)" "$ed" 96
 ei=$(energy_of ../sched/exchange.ptx exchange --grid 1 --block 2 ptr:2 ptr:2 --epj issue=1)
 expect_eq "energy: warp issues (15 instructions on the path)" "$ei" 15
 
+# 16. Multi-device (--devices N: N sets of --sms SMs; the blocks go round all of them). store_all.ptx, 8 blocks of 1024
+#     threads, 4096 bytes each at --bw 1 (one block's time is 4096 cycles on its SM).
+#     Two devices of one SM are the same machine as one device of two SMs: 4 blocks per SM, 16384.
+#     Eight devices of one SM: one block per device, and each device has its own memory system, so --gpu-bw 1 gives 4096
+#     (one device's 4096 bytes). One device of one SM with --gpu-bw 1 is one memory system for all 32768 bytes: 32768.
+#     A transfer of 1000 bytes after the kernel over a link of 10 bytes per cycle with 50 cycles of latency: 100 + 50 = 150,
+#     so 4096 + 150 = 4246.
+m_dev2=$(cycles store_all.ptx store_all --grid 8 --block 1024 ptr:1024 --sms 1 --devices 2 --bw 1)
+m_sms2=$(cycles store_all.ptx store_all --grid 8 --block 1024 ptr:1024 --sms 2 --bw 1)
+expect_eq "two devices of one SM are two SMs" "$m_dev2" "$m_sms2"
+m_gpu8=$(cycles store_all.ptx store_all --grid 8 --block 1024 ptr:1024 --sms 1 --devices 8 --bw 1 --gpu-bw 1)
+m_gpu1=$(cycles store_all.ptx store_all --grid 8 --block 1024 ptr:1024 --sms 1 --bw 1 --gpu-bw 1)
+expect_eq "eight devices: each device's memory is its own, 4096" "$m_gpu8" 4096
+expect_eq "one device: one memory system for all 32768 bytes" "$m_gpu1" 32768
+m_link=$(cycles store_all.ptx store_all --grid 8 --block 1024 ptr:1024 --sms 1 --devices 8 --bw 1 --xfer 1000 --link-bw 10 --link-lat 50)
+expect_eq "transfer over a link after the kernel: 4096 + 100 + 50" "$m_link" 4246
+
 # 9. Bad --lat is refused (exit 2) and an unknown class is not silently ignored.
 status=0; "$out/ptxi" "$ex" "${exargs[@]}" --lat dram=5 > /dev/null 2>&1 || status=$?
 [ "$status" -eq 2 ] || { echo "--lat dram=5: expected exit 2, got $status" >&2; exit 1; }

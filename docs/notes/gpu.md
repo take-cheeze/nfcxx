@@ -523,7 +523,14 @@ output says so. The checks use exchange.ptx: two lanes on one path pay twice one
 and its path has 15 warp issues. Thermal modeling is not included: a heat model needs calibrated power and a thermal
 network, neither of which this model has.
 
-Still not modelled: thermal behaviour, caches beyond the L2, miss merging, DRAM row buffers and banks, blocks that start at different times within a wave, and the queueing of memory traffic: `--gpu-bw` is a lower bound on the kernel's time (the total bytes at the GPU's rate), not a schedule of the bytes, so an imbalanced GPU can take longer than the bound. The L2 counts bytes per lane for loads that reach DRAM, so a coalesced cold load that one lane fills counts one sector, not four: the bandwidth bound is low for such loads when a cache is on.
+Multi-device (`--devices N`, `--xfer BYTES --link-bw B --link-lat C`). N devices are N sets of `--sms` SMs, and the blocks go
+round all of them. Each device has its own memory system, so `--gpu-bw` bounds each device by its own bytes. A transfer
+between devices is paid after the kernel, at `--link-bw` bytes per cycle plus `--link-lat` cycles. The transfer is serial,
+with no overlap with the kernel, and the link's topology and contention are not modelled. The checks use `store_all.ptx`:
+two devices of one SM equal two SMs (16384); eight devices give 4096 under `--gpu-bw 1`, and one device gives 32768; a 1000-byte
+transfer at 10 bytes per cycle with 50 cycles of latency adds 150 (4246 in all).
+
+Still not modelled: thermal behaviour, link topology and contention, caches beyond the L2, miss merging, DRAM row buffers and banks, blocks that start at different times within a wave, and the queueing of memory traffic: `--gpu-bw` is a lower bound on the kernel's time (the total bytes at the GPU's rate), not a schedule of the bytes, so an imbalanced GPU can take longer than the bound. The L2 counts bytes per lane for loads that reach DRAM, so a coalesced cold load that one lane fills counts one sector, not four: the bandwidth bound is low for such loads when a cache is on.
 
 Not measured against hardware yet: this machine has no GPU (`nvidia-smi` is missing), so the latencies are the defaults above, not calibrated values. Ranking real kernels is the check that matters, and it needs the RTX 2060 run of the same kernels.
 defaults above, not calibrated values. Ranking real kernels is the check that matters, and it needs the RTX 2060 run

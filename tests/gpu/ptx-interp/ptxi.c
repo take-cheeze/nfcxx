@@ -1030,6 +1030,10 @@ static double e_pj[LAT_N];
 static double e_issue, e_dram;
 static int energy_print;
 static double energy_last;
+static int devices = 1;          /* devices (--devices): sets of --sms SMs, blocks spread over all of them */
+static uint64_t xfer_bytes;     /* bytes moved between devices after the kernel (--xfer) */
+static uint64_t link_bw = 1;    /* bytes per cycle of the link between devices (--link-bw) */
+static uint64_t link_lat;       /* link latency in cycles (--link-lat) */
 static uint64_t issue_rate = 4; /* warp instructions per cycle per SM */
 static int resident = 1;        /* blocks an SM runs at a time (--resident) */
 static int warps_per_sm;        /* warp slots of an SM (--warps-per-sm); 0 = use --resident */
@@ -1300,7 +1304,9 @@ static void timing_epoch_end(int block) {
  * combined by max because both are lower bounds on the same bytes. */
 static void timing_finish(void) {
   if (!timing_print) return;
-  uint64_t *sm = calloc((size_t)sms, sizeof *sm);
+  /* Devices are sets of sms SMs; the blocks go round the whole machine, so SM g of the machine is device g / sms. */
+  int nsm = sms * devices;
+  uint64_t *sm = calloc((size_t)nsm, sizeof *sm);
   uint64_t *bt_of = calloc((size_t)nblocks, sizeof *bt_of), *slots_of = calloc((size_t)nblocks, sizeof *slots_of);
   uint64_t *bytes_of = calloc((size_t)nblocks, sizeof *bytes_of);
   if (!sm || !bt_of || !slots_of || !bytes_of) fail(EXIT_FAULT, "out of memory");
@@ -1314,14 +1320,14 @@ static void timing_finish(void) {
     for (int k = 0; k < wpb; k++) bytes_of[b] += warp_bytes[warp_index(b, k)];
     bt_of[b] = crit;
   }
-  for (int s = 0; s < sms; s++) {
-    /* The blocks this SM receives: s, s + sms, s + 2 sms, ... */
+  for (int s = 0; s < nsm; s++) {
+    /* The blocks this SM receives: s, s + nsm, s + 2 nsm, ... */
     for (int first = s; first < nblocks;) {
       uint64_t wcrit = 0, wslots = 0, wbytes = 0;
       int n = 0;
       int slots = warps_per_sm ? (warps_per_sm / wpb > 0 ? warps_per_sm / wpb : 1) : resident;
       if (blocks_per_sm && slots > blocks_per_sm) slots = blocks_per_sm;
-      for (int b = first; b < nblocks && n < slots; b += sms, n++) {
+      for (int b = first; b < nblocks && n < slots; b += nsm, n++) {
         if (bt_of[b] > wcrit) wcrit = bt_of[b];
         wslots += slots_of[b];
         wbytes += bytes_of[b];
@@ -1331,18 +1337,25 @@ static void timing_finish(void) {
       if (issue > wt) wt = issue;
       if (mem > wt) wt = mem;
       sm[s] += wt;
-      first += sms * n;
+      first += nsm * n;
     }
   }
   uint64_t total = 0;
-  for (int s = 0; s < sms; s++)
+  for (int s = 0; s < nsm; s++)
     if (sm[s] > total) total = sm[s];
   if (gpu_bw) {
-    uint64_t all_bytes = 0;
-    for (int b = 0; b < nblocks; b++) all_bytes += bytes_of[b];
-    uint64_t shared = (all_bytes + gpu_bw - 1) / gpu_bw;
-    if (shared > total) total = shared;
+    /* Each device has its own memory system: its bytes at gpu_bw, and the device with the most bytes bounds the kernel. */
+    uint64_t *dev_bytes = calloc((size_t)devices, sizeof *dev_bytes);
+    if (!dev_bytes) fail(EXIT_FAULT, "out of memory");
+    for (int b = 0; b < nblocks; b++) dev_bytes[(b % nsm) / sms] += bytes_of[b];
+    for (int d = 0; d < devices; d++) {
+      uint64_t shared = (dev_bytes[d] + gpu_bw - 1) / gpu_bw;
+      if (shared > total) total = shared;
+    }
+    free(dev_bytes);
   }
+  /* A transfer between devices is paid after the kernel: its bytes at link_bw, and the link latency. */
+  if (devices > 1 && xfer_bytes) total += (xfer_bytes + link_bw - 1) / link_bw + link_lat;
   {
     /* Energy: the threads' steps, the warp issues, and the DRAM bytes of the whole launch. */
     double e = 0;
@@ -1947,7 +1960,7 @@ static void usage(void) {
           "usage: ptxi FILE.ptx KERNEL [--grid X[,Y[,Z]]] [--block X[,Y[,Z]]] ARG... [--dump K]...\n"
           "           [--random N [--seed S]] [--explore [--max-schedules M]] [--max-steps S]\n"
           "           [--preset hopper-medium|hopper-large] [--timing] [--sms N] [--resident N | --warps-per-sm N]\n"
-          "           [--issue N] [--bw BYTES] [--epj CLASS=PJ]\n"
+          "           [--issue N] [--bw BYTES] [--epj CLASS=PJ] [--devices N [--xfer BYTES --link-bw B --link-lat C]]\n"
           "           [--lat CLASS=CYCLES]...\n"
           "           [--l1 BYTES] [--l2 BYTES] [--gpu-bw BYTES] [--blocks-per-sm N]\n"
           "  ARG: ptr:COUNT[:iota=START] | s32:VALUE | bytes:HEX\n"
@@ -2023,6 +2036,20 @@ int main(int argc, char **argv) {
       if (i + 1 >= argc) usage();
       sms = atoi(argv[++i]);
       if (sms < 1) usage();
+    } else if (!strcmp(argv[i], "--devices")) {
+      if (i + 1 >= argc) usage();
+      devices = atoi(argv[++i]);
+      if (devices < 1) usage();
+    } else if (!strcmp(argv[i], "--xfer")) {
+      if (i + 1 >= argc) usage();
+      xfer_bytes = strtoull(argv[++i], NULL, 10);
+    } else if (!strcmp(argv[i], "--link-bw")) {
+      if (i + 1 >= argc) usage();
+      link_bw = strtoull(argv[++i], NULL, 10);
+      if (link_bw == 0) usage();
+    } else if (!strcmp(argv[i], "--link-lat")) {
+      if (i + 1 >= argc) usage();
+      link_lat = strtoull(argv[++i], NULL, 10);
     } else if (!strcmp(argv[i], "--epj")) {
       if (i + 1 >= argc || !parse_epj(argv[++i])) usage();
     } else if (!strcmp(argv[i], "--lat")) {
