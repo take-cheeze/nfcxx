@@ -49,6 +49,13 @@ check grep -qF 'static mrb_value dump_it(mrb_state *mrb, mrb_value obj, mrb_valu
 check grep -qF 'if (mrb_nil_p(klass))' "$work/shadow_param/src/shadow_param.c"
 check grep -qF 'static struct RClass *klass;' "$work/shadow_param/src/shadow_param.c"
 
+# 2c'. a registered method named like the header it includes (ruby/encoding.h): its identifier in the include path is not a
+# use, so no refusal marker overlaps the include rewrite (used to raise "overlapping edits")
+rc=0; "$rb" "$conv" --scanner "$scanner" --name include_name_overlap tools/cext2mrbgem/fixtures/include_name_overlap/ext/include_name_overlap "$work/include_name_overlap" > "$work/include_name_overlap.log" 2>&1 || rc=$?
+check ok_rc "$rc"
+check sh -c "! grep -q 'overlapping edits\\|Traceback' '$work/include_name_overlap.log'"
+check grep -qx '#include <mruby/encoding.h>' "$work/include_name_overlap/src/include_name_overlap.c"
+
 # 2d. definitions whose return type or name is on another line are found (no false "no definition" refusal)
 rc=0; "$rb" "$conv" --scanner "$scanner" --name split_return tools/cext2mrbgem/fixtures/split_return/ext/split_return "$work/split_return" > "$work/split_return.log" 2>&1 || rc=$?
 check test "$rc" -eq 0

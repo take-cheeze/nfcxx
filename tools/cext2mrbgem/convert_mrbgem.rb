@@ -5314,6 +5314,13 @@ use_problem = lambda do |name, use|
     finditer(INC_RE, text).each do |m|
       next if masked[m.begin(0)] != '#'
       inc = m[1]
+      # a directive that is rewritten here replaces its whole text. An edit already inside that text is dropped, since the
+      # rewrite covers it: check_refs marks an identifier of the header name (ruby/encoding.h has the name encoding) as a
+      # direct use of a registered method called encoding, and that marker would otherwise overlap this rewrite (apply
+      # raises on any overlap, so only inputs that already failed are changed)
+      if @includes.key?(inc) || DROP_INCLUDES.key?(inc) || inc == 'ruby/encoding.h'
+        ed.drop(ed.overlapping(m.begin(0), m.end(0)))
+      end
       if @includes.key?(inc)
         map_include(rel, m, @includes[inc], masked, ed)
       elsif DROP_INCLUDES.key?(inc)
