@@ -4,8 +4,9 @@ import NfcxxIR.Syntax
 Executable semantics of a subset of the mid-level IR (docs/notes/pathb-stage2.md, sections 3, 4 and 6).
 
 The subset is what an integer-only function body needs: integer types, registers, stack slots of integer type
-(`load` and `store` through a local `$"x"`), block pointers into the slots (`offset`, and `load` and `store`
-through a pointer, with the null and bounds traps of the memory section below), constants, the wrapping,
+(`load` and `store` through a local `$"x"`), block pointers into the slots (`offset`, `load` and `store` through a
+pointer, the aggregate `copy` between two of them, and the equality and order of pointers, with the null and bounds
+traps of the memory section below), constants, the wrapping,
 checked and bitwise arithmetic, comparisons, the integer conversions `iconv` and same-width `bitcast`, `eval` of
 a value (its value is discarded), and the structured statements (`let`, `set`, `if`, `loop`, `block`, `switch`
 with its top-level `case` and `default` labels, `break`, `continue`, `return`, `unreachable`, `trap`). Everything
@@ -182,6 +183,10 @@ def Env.get (e : Env) (c : Cell) : Option Val :=
 def Env.set (e : Env) (c : Cell) (v : Val) (info : Option (Nat × Bool)) : Env :=
   (c, ⟨v, info⟩) :: e.filter (fun p => !(p.1 == c))
 
+/-- Removes a cell: it is unwritten again. -/
+def Env.clear (e : Env) (c : Cell) : Env :=
+  e.filter (fun p => !(p.1 == c))
+
 /-- How a statement list ends: falling off the end, leaving a loop, continuing it, or returning. -/
 inductive Flow where
   | normal
@@ -305,6 +310,16 @@ of the slot, and `(null T)` is the null pointer. The rules, where C++ makes an o
   pointer".
 - A load or store through the null pointer is the trap "null dereference".
 - A load or store that reaches past the end of its block is the trap "pointer out of bounds".
+- A `copy` of SIZE bytes checks both its addresses as a load or store of SIZE bytes does: a null operand is the trap
+  "null dereference", and a range past the end of its block is "pointer out of bounds". The copy reads every source
+  byte before it writes (memmove, so overlapping ranges in one slot are safe), and it moves the bytes of stored
+  pointers with their side table entries (`copyBytes`).
+
+Pointer comparison (`eq` and `ne` with pointer operands, and `lt` and `le` of two pointers into one block): two
+pointers are equal when they name the same block and offset, or both are null; a pointer into a block is not equal to
+null; `lt` and `le` compare the offsets. Pointers into different blocks are unequal, unless one is one past the end
+of its block, which is stuck (the standard leaves it unspecified), and so is their order. A pointer compared with an
+integer is stuck.
 
 A pointer (of any pointee type, or null) can be stored in a slot and loaded back: it occupies `ptrBytes` = 8 bytes,
 the pointer size of the module layout. Its identity is not in those bytes: each of the 8 bytes holds the marker
@@ -320,9 +335,9 @@ that it does not overwrite as `ptrStale`. The rules for the bytes:
 - A pointer load or store through a global, or of a pointer as an integer, is stuck as before. Storing an integer
   through a pointer type, or storing a pointer through an integer type, is stuck.
 
-Stuck, with the reason: a pointer where an integer is needed (arithmetic, comparison, conditions, casts, call
-arguments), an integer used as an address, a pointer bound to an integer register, `ret` of a pointer, a global or
-a function address, `index`, `pdiff`, `copy`, `bfstore`, and a slot the function does not declare. -/
+Stuck, with the reason: a pointer where an integer is needed (arithmetic, conditions, casts, call arguments, a
+comparison with an integer), an integer used as an address, a pointer bound to an integer register, `ret` of a
+pointer, a global or a function address, `index`, `pdiff`, `bfstore`, and a slot the function does not declare. -/
 
 /-- The size of a pointer in bytes: the `(pointer 8)` of the module layout that the tests use. The semantics does
 not read the layout, so a module with another pointer size needs this to follow it. -/
@@ -440,14 +455,84 @@ def loadPtr (env : Env) (b : Block) (off : Int) : Except Outcome Val :=
       else if (List.range ptrBytes).any (fun k => byteIs env x (o + k) ptrStale) then .error (.stuck ptrStaleMsg)
       else .error (.stuck "a pointer load from bytes that hold no stored pointer is not modelled")
 
+/-- The byte count of a copy: a number, or the value of a register, which must not be negative. -/
+def copySize (env : Env) : SizeArg → Except Outcome Nat
+  | SizeArg.num n => .ok n
+  | SizeArg.reg r =>
+    match env.get (.reg r) with
+    | some (Val.int k) =>
+      if k < 0 then .error (.stuck s!"copy of a negative number of bytes ({k})")
+      else .ok k.toNat
+    | some _ => .error (.stuck "a pointer value is used as the size of a copy")
+    | none => .error (.stuck s!"register %{r} is read before it is set")
+
+/-- Copies `n` bytes of slot `sx` from byte `soff` to slot `dx` from byte `doff`, as C++ `memmove` does: every source
+cell is read before any destination cell is written, so overlapping ranges in one slot copy as if through a buffer.
+A byte that is unwritten in the source is unwritten in the destination. The markers of stored pointers are bytes,
+so they are copied too; the side table entries that lie wholly in the source range move with them. A stored pointer
+that the range cuts is not moved: its marker bytes arrive without an entry, and loading a pointer there is stuck. -/
+def copyBytes (env : Env) (dx : String) (doff : Nat) (sx : String) (soff n : Nat) : Env :=
+  let srcBytes : List (Nat × Option Val) :=
+    (List.range n).map (fun i => (i, env.get (.byte sx (soff + i))))
+  let srcPtrs : List (Nat × Val) := env.filterMap (fun p =>
+    match p.1 with
+    | Cell.ptr y j =>
+      if y == sx && decide (soff ≤ j) && decide (j + ptrBytes ≤ soff + n) then some (j - soff, p.2.val) else none
+    | _ => none)
+  let e := invalidatePtrs env dx doff n
+  let e := srcBytes.foldl (fun e (i, v) =>
+    match v with
+    | some x => e.set (.byte dx (doff + i)) x none
+    | none => e.clear (.byte dx (doff + i))) e
+  srcPtrs.foldl (fun e (k, v) => e.set (.ptr dx (doff + k)) v none) e
+
+/-- The integer 1 for true and 0 for false. -/
+def boolInt (p : Bool) : Int := if p then 1 else 0
+
+/-- Pointer equality, as C++ defines it: two pointers into the same block are equal when their offsets are; two null
+pointers are equal; a pointer into a block is not equal to null. Pointers into two different blocks are not equal
+when neither is one past the end of its block; the standard leaves that case unspecified, so it is stuck. -/
+def ptrEq (env : Env) : Val → Val → Except Outcome Bool
+  | Val.null, Val.null => .ok true
+  | Val.null, Val.ptr _ _ => .ok false
+  | Val.ptr _ _, Val.null => .ok false
+  | Val.ptr (Block.slot x) o1, Val.ptr (Block.slot y) o2 =>
+    if x == y then .ok (o1 == o2)
+    else do
+      let s1 ← blockSize env (Block.slot x)
+      let s2 ← blockSize env (Block.slot y)
+      if decide (o1 < s1) && decide (o2 < s2) then .ok false
+      else .error (.stuck "equality of a pointer one past the end of its block with a pointer into another block is unspecified")
+  | _, _ => .error (.stuck "a pointer value is compared with an integer, which is not modelled")
+
+/-- A comparison whose operands may be pointers. Two integers compare as before. Pointers, or a pointer and null, compare
+with `eq` and `ne` by `ptrEq`; `lt` and `le` compare two pointers into the same block by their offsets. Other pointer
+comparisons (across blocks, with null, floating) are stuck, and so is a pointer compared with an integer. -/
+def evalCmpVal (env : Env) (op : CmpOp) (a b : Operand) : Except Outcome Val := do
+  let va ← evalVal env a
+  let vb ← evalVal env b
+  match va, vb with
+  | Val.int x, Val.int y => return Val.int (← evalCmp op x y)
+  | Val.int _, _ | _, Val.int _ =>
+    throw (.stuck "a pointer value is used where an integer is needed (pointer comparison, cast and arithmetic are not modelled)")
+  | _, _ =>
+    match op with
+    | .eq => return Val.int (boolInt (← ptrEq env va vb))
+    | .ne => return Val.int (boolInt (!(← ptrEq env va vb)))
+    | .lts | .ltu | .les | .leu =>
+      match va, vb with
+      | Val.ptr (Block.slot x) o1, Val.ptr (Block.slot y) o2 =>
+        if x == y then return Val.int (← evalCmp op o1 o2)
+        else throw (.stuck "relational comparison of pointers into different blocks is unspecified")
+      | _, _ => throw (.stuck "relational comparison of a null pointer, or of a pointer with null, is unspecified")
+    | .ltf | .lef => throw (.stuck "floating-point comparison is not modelled")
+
 /-- A value-producing form of integer type, in the subset. -/
 def evalIntRValue (env : Env) : RValue → Except Outcome Int
   | RValue.binop op t a b => do
     evalBin op t (← evalOperand env a) (← evalOperand env b)
   | RValue.unop op t a => do
     evalUn op t (← evalOperand env a)
-  | RValue.cmp op _ a b => do
-    evalCmp op (← evalOperand env a) (← evalOperand env b)
   | RValue.conv ConvOp.iconv t a => do
     match infoOf t with
     | some (bits, signed) => return wrapTo bits signed (← evalOperand env a)
@@ -474,6 +559,7 @@ def evalRValue (env : Env) : RValue → Except Outcome Val
       | throw (.stuck (memKind "load" t))
     let (b, off) ← derefAddr env a (byteWidth bits)
     loadInt env b off bits signed
+  | RValue.cmp op _ a b => evalCmpVal env op a b
   | RValue.offset a n => do
     match ← evalVal env a with
     | Val.ptr b off =>
@@ -616,6 +702,14 @@ def execStmt : Nat → Ctx → Env → Stmt → Except Outcome (Env × Flow)
       match b with
       | Block.slot x =>
         return (writeBytes env x off.toNat (byteWidth bits) (wrapTo bits signed k), .normal)
+    | Stmt.copyS sz dst src => do
+      -- both addresses are checked for null and bounds before any byte moves; the copy is memmove (copyBytes)
+      let n ← copySize env sz
+      let (db, doff) ← derefAddr env dst n
+      let (sb, soff) ← derefAddr env src n
+      match db, sb with
+      | Block.slot dx, Block.slot sx =>
+        return (copyBytes env dx doff.toNat sx soff.toNat n, .normal)
     | Stmt.evalS (RValue.call cty callee va args) => do
       -- the value of a call is discarded; a trap or a stuck form in the call still happens
       let _ ← callValue n ctx env cty callee va args

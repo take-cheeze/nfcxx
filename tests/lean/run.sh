@@ -70,5 +70,12 @@ expect tests/sem/ptr_store_load.ir "value 42"
 expect tests/sem/ptr_null_store.ir "trap: null dereference"
 expect tests/sem/ptr_overwrite.ir "stuck: a stored pointer was overwritten in part by an integer, so these bytes no longer hold it"
 expect tests/sem/ptr_partial_load.ir "stuck: pointer bytes read at a different width are not modelled"
+# aggregate copy between slots (a 4-byte int read back: 1234567); an overlapping copy inside one array is memmove
+# (bytes 0 to 7 to offset 4: the array becomes 1, 1, 2, 4, so 1 * 100 + 2 * 10 + 4 = 124); pointer equality of two
+# offsets into one slot (equal offsets: true, different: false, so 1 * 10 + 0 = 10); a copy through a null pointer
+expect tests/sem/copy_slot.ir "value 1234567"
+expect tests/sem/copy_overlap.ir "value 124"
+expect tests/sem/ptr_eq.ir "value 10"
+expect tests/sem/copy_null.ir "trap: null dereference"
 echo "ok: the semantics gives the expected outcome for the IR functions in tests/sem"
 exit $fail
