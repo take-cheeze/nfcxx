@@ -357,7 +357,9 @@ enum {
   NAT_RAWIN,
   NAT_CLS_GETBASE,    /* class delegate: getbase, instance */
   NAT_CLS_INSTANCE,
-  NAT_INST_GETCLASS   /* instance delegate: getclass */
+  NAT_INST_GETCLASS,  /* instance delegate: getclass */
+  NAT_CLS_GETATTRIBUTES,
+  NAT_CLS_SETATTRIBUTES
 };
 
 static SqNative g_nat_print = {NAT_PRINT, 2, NULL};          /* sqbaselib.cpp base_print: print(value) */
@@ -380,6 +382,8 @@ static SqNative g_nat_rawin = {NAT_RAWIN, 2, NULL};
 static SqNative g_nat_cls_getbase = {NAT_CLS_GETBASE, 1, NULL};
 static SqNative g_nat_cls_instance = {NAT_CLS_INSTANCE, 1, NULL};
 static SqNative g_nat_inst_getclass = {NAT_INST_GETCLASS, 1, NULL};
+static SqNative g_nat_cls_getattributes = {NAT_CLS_GETATTRIBUTES, 2, "y."};
+static SqNative g_nat_cls_setattributes = {NAT_CLS_SETATTRIBUTES, 3, "y.."};
 
 static SQV make_native(const SqNative *n) {
   SQV v;
@@ -451,6 +455,8 @@ static int delegate_native(const SQV *self, const SQV *key, SQV *out) {
       else if (strcmp(name, "rawin") == 0) n = &g_nat_rawin;
       else if (strcmp(name, "getbase") == 0) n = &g_nat_cls_getbase;
       else if (strcmp(name, "instance") == 0) n = &g_nat_cls_instance;
+      else if (strcmp(name, "getattributes") == 0) n = &g_nat_cls_getattributes;
+      else if (strcmp(name, "setattributes") == 0) n = &g_nat_cls_setattributes;
       break;
     case SQBC_TAG_INSTANCE:
       if (strcmp(name, "getclass") == 0) n = &g_nat_inst_getclass;
@@ -468,7 +474,7 @@ static int delegate_native(const SQV *self, const SQV *key, SQV *out) {
 /* The methods of the class, instance, array and string delegates that are not lowered (sqbaselib.cpp): a call of one is
  * `unsupported ... method` at run time. */
 static int is_class_method(const char *name) {
-  static const char *const names[] = {"getattributes", "setattributes", "weakref", "newmember", "rawnewmember"};
+  static const char *const names[] = {"weakref", "newmember", "rawnewmember"};
   for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
     if (strcmp(name, names[i]) == 0) return 1;
   return 0;
@@ -508,6 +514,7 @@ typedef struct SqMember {
   SQV val;
   int is_field;
   int idx;
+  SQV attrs; /* the member's attributes (SQClass::SetAttributes), null when it has none */
 } SqMember;
 
 typedef struct SqClass {
@@ -518,6 +525,7 @@ typedef struct SqClass {
   int locked; /* set by the first instance: the class can no longer get a field (SQClass::NewSlot) */
   int ctor;   /* the member index of `constructor`, or -1 */
   struct SqClass *base; /* the class this one extends, or NULL */
+  SQV attrs;            /* the class's attributes (CLASS_OP), null when it has none */
 } SqClass;
 
 typedef struct SqInstance {
@@ -547,6 +555,9 @@ static SqMember *class_add(SqClass *c, const SQV *key, const SQV *val, int is_fi
   m->val = *val;
   m->is_field = is_field;
   m->idx = is_field ? c->nfields++ : -1;
+  m->attrs.tag = SQBC_TAG_NULL;
+  m->attrs.pad = 0;
+  m->attrs.i = 0;
   return m;
 }
 
@@ -558,10 +569,18 @@ static SQV class_val(SqClass *c) {
   return v;
 }
 
-void sqbc_rt_newclass(SQV *dst, const SQV *base) {
+void sqbc_rt_newclass(SQV *dst, const SQV *base, const SQV *attrs) {
   SqClass *c = calloc(1, sizeof *c);
   if (!c) rt_error("out of memory");
   c->ctor = -1;
+  /* CLASS_OP: the attributes of the class, null when there are none (a class is not given the base's attributes). */
+  if (attrs) {
+    c->attrs = *attrs;
+  } else {
+    c->attrs.tag = SQBC_TAG_NULL;
+    c->attrs.pad = 0;
+    c->attrs.i = 0;
+  }
   if (base) {
     /* CLASS_OP (sqvm.cpp): the base must be a class; the new class has the base's members (SQClass::SQClass). */
     if (base->tag != SQBC_TAG_CLASS) {
@@ -674,12 +693,14 @@ static SQV make_instance(SqClass *c) {
   return v;
 }
 
-void sqbc_rt_newslota(const SQV *self, const SQV *key, const SQV *val, int bstatic) {
+void sqbc_rt_newslota(const SQV *self, const SQV *key, const SQV *val, int bstatic, const SQV *attrs) {
   SQV s = *self, k = *key, v = *val;
   if (s.tag != SQBC_TAG_CLASS) rt_error("object must be a class");
   if (k.tag == SQBC_TAG_NULL) rt_error("null cannot be used as index");
   refuse_float_key(&k);
   class_newslot(class_of(&s), &k, &v, bstatic);
+  /* sqvm.cpp NewSlotA: after the slot, the attributes are set on the member, unless they are null. */
+  if (attrs && attrs->tag != SQBC_TAG_NULL) class_find(class_of(&s), &k)->attrs = *attrs;
 }
 
 /* ---- the stack and the root table ----------------------------------------------------------------------------------- */
@@ -1149,6 +1170,24 @@ void sqbc_rt_call(const SQV *callee, SQV *ret, SQV *frame, int nargs) {
       }
       case NAT_CLS_INSTANCE: r = make_instance(class_of(frame)); break;
       case NAT_INST_GETCLASS: r = class_val(inst_of(frame)->cls); break;
+      case NAT_CLS_GETATTRIBUTES:
+      case NAT_CLS_SETATTRIBUTES: {
+        /* sqapi.cpp sq_getattributes and sq_setattributes: a null key is the class's own attributes; a member's are those
+         * of the member (a missing one is "wrong index"). The result is the attributes before a set. */
+        SqClass *c = class_of(frame);
+        SQV *slot;
+        if (frame[1].tag == SQBC_TAG_NULL) {
+          slot = &c->attrs;
+        } else {
+          refuse_float_key(frame + 1);
+          SqMember *m = class_find(c, frame + 1);
+          if (!m) rt_error("wrong index");
+          slot = &m->attrs;
+        }
+        r = *slot;
+        if (nat->id == NAT_CLS_SETATTRIBUTES) *slot = frame[2];
+        break;
+      }
       default: rt_error("internal: bad native");
     }
     *ret = r;

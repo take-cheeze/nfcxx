@@ -55,10 +55,11 @@ void sqbc_rt_neg(SQV *dst, SQV *a);
 int sqbc_rt_compare(int op, SQV *a, SQV *b);
 /* IsEqual (sqvm.cpp) of two values: 1 when equal. Floats and numbers of different types compare as floats. */
 int sqbc_rt_equal(const SQV *a, const SQV *b);
-/* NEWOBJ of a class (no attributes): a class in dst, extending BASE when BASE is not NULL (it must be a class). NEWSLOTA
- * adds a member of a class (BSTATIC: the NEW_SLOT_STATIC_FLAG); CALL of a class makes an instance (sqbc_rt_call). */
-void sqbc_rt_newclass(SQV *dst, const SQV *base);
-void sqbc_rt_newslota(const SQV *self, const SQV *key, const SQV *val, int bstatic);
+/* NEWOBJ of a class: a class in dst, extending BASE when BASE is not NULL (it must be a class), with the class attributes
+ * ATTRS (NULL: none, which is null). NEWSLOTA adds a member of a class (BSTATIC: the NEW_SLOT_STATIC_FLAG) with the member
+ * attributes ATTRS (NULL when the NEW_SLOT_ATTRIBUTES_FLAG is not set); CALL of a class makes an instance (sqbc_rt_call). */
+void sqbc_rt_newclass(SQV *dst, const SQV *base, const SQV *attrs);
+void sqbc_rt_newslota(const SQV *self, const SQV *key, const SQV *val, int bstatic, const SQV *attrs);
 /* GETBASE: the class that the running closure's class extends (CLO is the running closure), or null. */
 void sqbc_rt_getbase(SQV *dst, const SQV *clo);
 /* The float value of a float is zero (+0.0 or -0.0): IsFalse of a float. Only called for a float. */
