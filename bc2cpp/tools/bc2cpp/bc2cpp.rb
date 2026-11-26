@@ -241,6 +241,8 @@ require_relative 'codegen_call_inline'
 require_relative 'codegen_respond_to_fold'
 require_relative 'owner_call_direct'
 require_relative 'codegen_multi_return'
+require_relative 'callee_arena'
+require_relative 'loop_arena'
 require_relative 'codegen_literal_minmax'
 # Last: its compile_insn wrapper reads the text every other wrapper settled on.
 require_relative 'codegen_stack_strings'
@@ -1886,6 +1888,9 @@ BC2CPP_MAIN = lambda do
       #endif
       mrb_gc_protect(M, v);
     }
+  CPP
+  print CalleeArena.runtime
+  puts <<~'CPP'
     // Drop the arena entries a body made, then root its result: what the by-name call leaves.
     static inline mrb_value bc2cpp_arena_keep(mrb_state* M, int ai, mrb_value v) {
       mrb_gc_arena_restore(M, ai);
@@ -1959,7 +1964,7 @@ BC2CPP_MAIN = lambda do
       return mrb_undef_value();
     }
     static inline mrb_value bc2cpp_keep_removed(mrb_state* M, mrb_value v) {
-      bc2cpp_root(M, v);
+      bc2cpp_root_kept(v, M);
       return v;
     }
     static inline mrb_value bc2cpp_mrb_ary_pop(mrb_state* M, mrb_value a) { return bc2cpp_keep_removed(M, mrb_ary_pop(M, a)); }
@@ -2002,7 +2007,7 @@ BC2CPP_MAIN = lambda do
         // An immediate old value is never freed, so rooting it is a no-op (bc2cpp_root's own first test);
         // testing here avoids the root call for the common immediate old value.
         static inline void bc2cpp_keep_old(mrb_state* M, mrb_value old) {
-          if (!mrb_immediate_p(old)) bc2cpp_root(M, old);
+          if (!mrb_immediate_p(old)) bc2cpp_root_kept(old, M);
         }
       CPP
     else
@@ -2013,20 +2018,20 @@ BC2CPP_MAIN = lambda do
         // An immediate old value is never freed, so rooting it is a no-op (bc2cpp_root's own first test);
         // testing here avoids the noinline root call for the common immediate old value.
         static inline void bc2cpp_keep_old(mrb_state* M, mrb_value old) {
-          if (!mrb_immediate_p(old)) bc2cpp_root_value_first(old, M);
+          if (!mrb_immediate_p(old)) bc2cpp_root_kept(old, M);
         }
       CPP
     end
     puts <<~'CPP'
       // KEEP_OLD_BATCH (keep_old_batch.rb): the roots of a run of slot stores, in one call.
       [[gnu::noinline]] inline void bc2cpp_keep_olds2(mrb_value a, mrb_value b, mrb_state* M) {
-        bc2cpp_root(M, a);
-        bc2cpp_root(M, b);
+        bc2cpp_root_kept(a, M);
+        bc2cpp_root_kept(b, M);
       }
       [[gnu::noinline]] inline void bc2cpp_keep_olds3(mrb_value a, mrb_value b, mrb_value c, mrb_state* M) {
-        bc2cpp_root(M, a);
-        bc2cpp_root(M, b);
-        bc2cpp_root(M, c);
+        bc2cpp_root_kept(a, M);
+        bc2cpp_root_kept(b, M);
+        bc2cpp_root_kept(c, M);
       }
       // The elements ary[head, len) an Array store is about to drop, with mrb_ary_splice's own clamping.
       static inline void bc2cpp_keep_old_range(mrb_state* M, mrb_value ary, mrb_int head, mrb_int len) {
@@ -2053,7 +2058,7 @@ BC2CPP_MAIN = lambda do
     // EMBED_STORE_OUTLINED (codegen_ivar_poly.rb ivar_set_code): an embedded mrb_value slot's store, the same frozen
     // test, keep of the old value, store and write barrier as the inline form, in one out-of-line copy.
     [[maybe_unused, gnu::noinline]] static void bc2cpp_embed_store_unfrozen(mrb_state* M, mrb_value obj, mrb_value* slot, mrb_value v) {
-      bc2cpp_keep_old(M, *slot);
+      if (!bc2cpp_stores_itself(*slot, v)) bc2cpp_keep_old(M, *slot);
       *slot = v;
       mrb_field_write_barrier_value(M, (struct RBasic*)mrb_obj_ptr(obj), v);
     }
@@ -2076,7 +2081,7 @@ BC2CPP_MAIN = lambda do
     // mrb_ary_set without the root, for stores that only move values around inside a fresh temporary.
     static inline void bc2cpp_raw_ary_set(mrb_state* M, mrb_value ary, mrb_int n, mrb_value v) { mrb_ary_set(M, ary, n, v); }
     static inline void bc2cpp_mrb_ary_set(mrb_state* M, mrb_value ary, mrb_int n, mrb_value v) {
-      bc2cpp_keep_old(M, mrb_ary_entry(ary, n));
+      if (!bc2cpp_stores_itself(mrb_ary_entry(ary, n), v)) bc2cpp_keep_old(M, mrb_ary_entry(ary, n));
       mrb_ary_set(M, ary, n, v);
     }
     static inline mrb_value bc2cpp_mrb_ary_splice(mrb_state* M, mrb_value ary, mrb_int head, mrb_int len, mrb_value rpl) {
@@ -3452,6 +3457,9 @@ BC2CPP_MAIN = lambda do
   # in their methods and every helper they name is printed above.
   print ColdCompactCalls.apply(compiled)
   warn ColdCompactCalls.summary
+  # CALLEE_ARENA (callee_arena.rb): each `X_impl` gives back its arena on return. On the finished text, after the `X_mr`
+  # split and every pass that reads a body's statements; the shard copies are made from the printed text.
+  CalleeArena.wrap!(compiled)
   class_units.each { |unit| print unit[:code] }
   compiled.each do |m|
     print ShardOutput.unit_mark(m[:owner]) if shards > 1

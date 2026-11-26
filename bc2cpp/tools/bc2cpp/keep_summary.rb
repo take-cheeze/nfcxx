@@ -3,6 +3,7 @@
 require 'set'
 require 'stringio'
 require_relative 'compact_output'
+require_relative 'callee_arena'
 
 # ELEMENT_READ_SUMMARY (element_read_roots.rb): a root an element read gets for being live across a call carries a
 # marker naming what those calls call. Once the whole unit is printed, each function it defines is summarised over
@@ -74,9 +75,11 @@ module KeepSummary
   # Unit helpers read by hand: bc2cpp_sym interns a name into the unit's mrb_sym cache, which holds no object; the
   # TAGGED_FIXNUM word helpers (tagged_fixnum.rb) write their result through a reference to the caller's register.
   # The constant and class caches (codegen_const_tables.rb, the owner class slots) fill a slot once with what the
-  # lookup finds, which a missing constant turns into const_missing's raise.
+  # lookup finds, which a missing constant turns into const_missing's raise. CALLEE_ARENA's exit drops only entries
+  # above the callee's entry index and keeps the store roots there (callee_arena.rb), so a store under it still counts.
   AUDITED_HELPERS = Set['bc2cpp_sym', 'bc2cpp_fixnum_add', 'bc2cpp_fixnum_sub', 'bc2cpp_fixnum_mul',
-                        'bc2cpp_cconst_get', 'bc2cpp_owner_class_at', 'bc2cpp_owner_ref'].freeze
+                        'bc2cpp_cconst_get', 'bc2cpp_owner_class_at', 'bc2cpp_owner_ref', 'bc2cpp_arena_exit',
+                        'bc2cpp_root_kept', 'bc2cpp_stores_itself', 'bc2cpp_arena_back', 'bc2cpp_loop_root'].freeze
   # Calls that run code only on the way to a raise: the raise helpers, and the frozen check, which returns normally
   # having run nothing. mrb_exc_get_id names the raised class (an argument of the raise).
   RAISES = Set['mrb_raise', 'mrb_raisef', 'mrb_exc_raise', 'mrb_no_method_error', 'mrb_argnum_error',
@@ -143,11 +146,15 @@ module KeepSummary
     class Unreadable < StandardError; end
 
     VALUE_GLOBAL = /^(?:static\s+|inline\s+)*mrb_value\s+([A-Za-z_]\w*)\s*(?:\[[^\]\n]*\])?\s*[=;]/
+    LAMBDA_OPEN = CalleeArena::LAMBDA
+    LAMBDA_BLANK = "[&]()#{' ' * (LAMBDA_OPEN.size - 6)}{"
 
     Summary = Struct.new(:unknown, :stores, :restores, :raises, :blocker)
 
     def initialize(text)
-      @text = text.gsub(CompactOutput::TOKENS) { |token| token.gsub(/[^\n]/, ' ') }.b
+      # CALLEE_ARENA's lambda around a body (callee_arena.rb) is not a brace-initialised object.
+      @text = text.gsub(CompactOutput::TOKENS) { |token| token.gsub(/[^\n]/, ' ') }
+                  .gsub(LAMBDA_OPEN, LAMBDA_BLANK).b
       @macros = Set.new
       @bodies = {}
       @noreturn = Set.new

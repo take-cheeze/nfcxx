@@ -64,8 +64,10 @@ SINGLETON_SRC = "#{SRC}class TdS\n  def go\n    a = [[1, 2], [3, 4]]\n    def a.
 OWNERS = %w[TdList TdRow TdAry TdT TdS].freeze
 CALL = 'bc2cpp_ary_transpose(M, self)'
 
+# CALLEE_ARENA's two opening lines (tools/bc2cpp/callee_arena.rb) are left out, so line 1 is the body's own first.
 def transpose_body(code)
   code[/^mrb_value Array_transpose_impl\(mrb_state\* M.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m].to_s
+    .sub(/\A(.*\n)  int bc2cpp_ai = M->gc\.arena_idx;\n  return bc2cpp_arena_exit\(.*\n/, '\\1')
 end
 
 def generate_world(src, env = {})
