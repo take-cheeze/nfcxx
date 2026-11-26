@@ -143,6 +143,22 @@ structure Slot where
   bytes : Nat
   align : Nat
 
+/-- One item of a global's initializer that the semantics writes: `(scalar OFF TYPE (const TYPE V))` is the integer
+literal V of TYPE at byte OFF, and `(zero OFF N)` is N zero bytes at OFF. The other items (`bytes`, `addr`, and the
+scalars that are not integers) are not kept, so their bytes stay unwritten. -/
+inductive InitItem where
+  | scalar : Nat → Ty → String → InitItem
+  | zero : Nat → Nat → InitItem
+
+/-- A global variable `(global "NAME" TYPE SIZE ALIGN ATTRS...)`: its byte size, whether it has no definition in the
+module (`(extern)`), and the items of its `(init ...)` attribute when it has one. The type is not kept: a load or a
+store through the global takes its width from its own type. -/
+structure Global where
+  name : String
+  size : Nat
+  isExtern : Bool
+  initItems : Option (List InitItem)
+
 /-- A function. `attrs` are the linkage and start-up forms (`(static)`, `(weak)`, `(constructor PRIO)`, ...),
 kept as written until they get their own types. -/
 structure Func where
