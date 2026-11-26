@@ -3187,10 +3187,11 @@ static void tset(LV *t, int64_t i, LV *v) {
   lua54rt_settable(t, &k, v);
 }
 
+/* ltablib.c's tpack: lua_createtable(L, n, 1), then t[n] down to t[1] (the array part holds them, nils included). */
 static int host_tpack(LV *out, LV *args, int nargs) {
   LV t;
-  lua54rt_newtable(&t, 0, 0);
-  for (int k = 0; k < nargs; ++k) {
+  lua54rt_newtable(&t, 1, (unsigned int)nargs);
+  for (int k = nargs - 1; k >= 0; --k) {
     LV key;
     key.tag = TAG_INT;
     key.v.i = k + 1;

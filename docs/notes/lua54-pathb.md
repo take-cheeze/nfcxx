@@ -1,6 +1,6 @@
 # Lua 5.4 bytecode to Path B IR
 
-Status: every opcode lowers. 83 programs match Lua 5.4.9 (`tests/lua54bc/lower/run.sh`), and 47 error programs print the
+Status: every opcode lowers. 89 programs match Lua 5.4.9 (`tests/lua54bc/lower/run.sh`), and 52 error programs print the
 same first line as lua.c, with its position, message and variable info. The runtime has numbers with coercion, strings
 with the string metatable, tables with metatables, closures and upvalues, multiple results, varargs, the metamethods
 listed below, to-be-closed variables, protected calls (`pcall` and `xpcall`, with `error` and its levels, and `assert`),
@@ -144,6 +144,20 @@ On the garbage-heavy program (`gc_garbage.lua`) the peak resident size is 19 MB 
 
 Not done: weak tables (`__mode`), finalizers (`__gc`), and incremental or generational collection.
 
+## Tables
+
+`lua54rt.c`'s table is ltable.c's (Lua 5.4.9): an array part (`array`, `alimit`, and the `norealasize` hint that
+`BITRAS` is in ltable.c), and a hash part of 2^k nodes with `next` offsets, main positions and a `lastfree` search, so a
+rehash happens when Lua's does. `luaH_getn` (`table_getn`), `luaH_next` (`table_next`), `luaH_getint` (`table_getint`,
+which moves the `alimit` hint on a read, as Lua does), `rehash` with `computesizes`, and `luaH_resize` are ports of the
+same names. The border of `#` and the order of `pairs` over integer, float and boolean keys are then Lua's.
+
+Strings and other objects hash differently (Lua seeds its string hash at random, so the reference order of string keys
+is not fixed either). NEWTABLE passes lvm.c's size hints (`lua54rt_newtable(dst, hsize, asize)`), SETLIST grows the array
+at once (`luaH_resizearray`) and stores into it, and table.pack creates the table as ltablib.c does. Tests: `len_border.lua`
+(the shapes a program builds), `len_random.lua` (random updates, checking `#` and an order hash after each step) and
+`len_order.lua`.
+
 ## Metamethods
 
 Implemented in the runtime, with ltm.c's order (the first operand's metatable, then the second's):
@@ -175,8 +189,8 @@ gives lstrlib's `attempt to add a 'string' with a 'number'`. Only tables have me
 
 - `tests/lua54bc/run.sh`: the reader loads real 5.4.9 chunks (dumped with `string.dump`); the opcode sequence matches
   `luac -l -l` when `LUAC` is set. The opcode check has not run: no `luac` is available here.
-- `tests/lua54bc/lower/run.sh`: 83 programs lower, emit, assemble, link (with `-lm`), run, and match
-  `print(dofile(...))` from Lua 5.4.9. 47 programs in `lower/err/` must give lua.c's first error line and status 1. Needs
+- `tests/lua54bc/lower/run.sh`: 89 programs lower, emit, assemble, link (with `-lm`), run, and match
+  `print(dofile(...))` from Lua 5.4.9. 52 programs in `lower/err/` must give lua.c's first error line and status 1. Needs
   `LUA` (a 5.4.9 interpreter). The suite also passes with `LUA54RT_GC_THRESHOLD=1`, which collects at nearly every
   allocation.
 
@@ -212,5 +226,4 @@ in the replacement function) leaks that buffer. The matcher's recursion is on th
   `'string.rep'`, and `math.random(2, 1)` called through `pcall` is `'random'` here. Calls from Lua code are the same.
 - **Full tracebacks**: lua.c prints `stack traceback:` lines after the message; only the message is printed.
 - **`__gc`, `__mode`**.
-- **Length of tables with holes**: `#` counts from 1 up to the first nil, which is one border; Lua's `#` can pick another.
 - **`LOADKX` with more than 2^17 constants** is lowered but untested.
