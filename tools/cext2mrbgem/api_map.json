@@ -1052,6 +1052,70 @@
       "inject_mrb": true,
       "needs_mrb": true
     },
+    "rb_ary_join": {
+      "kind": "call",
+      "mruby": "mrb_ary_join",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_exc_new_str": {
+      "kind": "template",
+      "arity": 2,
+      "class_args": [0],
+      "needs_mrb": true,
+      "template": "mrb_exc_new_str($m, $0, $1)",
+      "caveat": "rb_exc_new_str(klass, str) is rb_exc_new3's function: the class is an RClass * (class_args), as for rb_exc_new3"
+    },
+    "rb_str_modify": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_str_modify($m, RSTRING($0))",
+      "caveat": "makes the string modifiable as CRuby does (a frozen string raises: mrb_str_modify checks it); the result is void in both"
+    },
+    "rb_str_new_shared": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_str_dup($m, $0)",
+      "caveat": "CRuby shares the buffer copy-on-write; mruby's mrb_str_dup returns an unshared copy with the same bytes, which is the value CRuby returns"
+    },
+    "rb_mKernel": {
+      "kind": "expr",
+      "mruby": "mrb->kernel_module",
+      "needs_mrb": true
+    },
+    "rb_obj_is_proc": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": false,
+      "template": "mrb_bool_value(mrb_proc_p($0))",
+      "caveat": "a Proc test (mruby's proc tag), as CRuby's rb_obj_is_proc"
+    },
+    "RB_SYMBOL_P": {
+      "kind": "call",
+      "mruby": "mrb_symbol_p",
+      "inject_mrb": false,
+      "needs_mrb": false
+    },
+    "RB_FIXNUM_P": {
+      "kind": "call",
+      "mruby": "mrb_fixnum_p",
+      "inject_mrb": false,
+      "needs_mrb": false
+    },
+    "RBIMPL_ASSERT_OR_ASSUME": {
+      "kind": "drop",
+      "reason": "an optimizer assumption in CRuby's release build (no run-time check, RUBY_DEBUG off); mruby has no assume hint, and the statement's meaning for a correct program is unchanged without it"
+    },
+    "RBIMPL_ATTR_FORMAT": {
+      "kind": "drop",
+      "reason": "a printf-format attribute: a compile-time check of the format string, with no run-time meaning; the declaration has the same meaning without it"
+    },
+    "RBIMPL_PRINTF_FORMAT": {
+      "kind": "drop",
+      "reason": "a printf-format attribute: a compile-time check of the format string, with no run-time meaning; the declaration has the same meaning without it"
+    },
     "rb_ary_push": {
       "kind": "call",
       "mruby": "mrb_ary_push",
