@@ -3,6 +3,7 @@
  * Values, numbers with lvm.c's rules, strings, tables with metatables, closures and upvalues, the calling protocol,
  * the operators with their metamethods, the host library, and the errors of ldebug.c with their variable names. */
 #include <ctype.h>
+#include <limits.h>
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -58,6 +59,8 @@ static void arg_fail(int k, const char *fname, const char *msg);
 static void lib_arg_error(int k, const char *fname, const char *what, const char *got);
 static int64_t arg_int(const LV *args, int nargs, int k, const char *fname);
 static int64_t opt_int(const LV *args, int nargs, int k, const char *fname, int64_t def);
+static struct Table *arg_table(const LV *args, int nargs, int k, const char *fname);
+static const char *arg_typename(const LV *args, int nargs, int k);
 
 /* An internal inconsistency of the runtime, not a Lua error. */
 static void die(const char *what) {
@@ -140,10 +143,27 @@ static const char *type_name(uint8_t tag) {
   }
 }
 
+static int get_mt(const LV *o, const char *event, LV *out);
+
+/* ldebug.c's luaT_objtypename: the __name of a table's metatable when that is a string, else the type name. The string
+ * lives in the metatable, which the value keeps alive while the message is built. */
+static const char *objtypename(const LV *v) {
+  LV n;
+  if (v->tag == TAG_TABLE && get_mt(v, "__name", &n) && n.tag == TAG_STR) return ((LString *)n.v.p)->bytes;
+  return type_name(v->tag);
+}
+
+/* lauxlib.c's luaL_typeerror: the same, for any value that has a metatable (a string has the string one). */
+static const char *argtypename(const LV *v) {
+  LV n;
+  if (get_mt(v, "__name", &n) && n.tag == TAG_STR) return ((LString *)n.v.p)->bytes;
+  return type_name(v->tag);
+}
+
 /* luaG_typeerror: "attempt to <op> a <type> value" with the info of the operand. */
-static void type_fail(const char *op, uint8_t tag, int operand) {
-  char buf[160];
-  snprintf(buf, sizeof buf, "attempt to %s a %s value", op, type_name(tag));
+static void type_fail(const char *op, const LV *v, int operand) {
+  char buf[300];
+  snprintf(buf, sizeof buf, "attempt to %s a %s value", op, objtypename(v));
   rt_fail(buf, operand);
 }
 
@@ -307,21 +327,33 @@ static int to_number(const LV *x, LV *out) {
   return 0;
 }
 
-/* ---- tables: a hash of key/value nodes with linear probing; keys normalized as lvm.c does (a float with an exact
- * integer value is the integer key). A nil value keeps its node until the next resize. No array part yet. ---- */
+/* ---- tables: ltable.c (Lua 5.4.9). An array part (array, alimit) and a hash part of 2^lsizenode nodes with chains
+ * (next offsets), main positions and free positions as ltable.c has them. So the border of '#' (luaH_getn), the order of
+ * next/pairs and the moment of a rehash are Lua's for integer, float and boolean keys. The hash of a string or a pointer
+ * differs from Lua's (Lua seeds its string hash randomly), so their positions do too. ---- */
 typedef struct Node {
-  LV key;
-  LV val;
-  int used;
+  LV key;     /* TAG_NIL: a node whose key was never set */
+  LV val;     /* TAG_NIL: an empty entry; its key stays until the next resize */
+  int next;   /* offset to the next node of the chain, 0 at the end */
 } Node;
 
 typedef struct Table {
   GCObj gc;
-  Node *nodes;
-  size_t cap;      /* a power of two, or 0 */
-  size_t count;    /* used nodes, including those with a nil value */
-  struct Table *meta;   /* the metatable, or NULL */
+  LV *array;                  /* the array part: realasize entries */
+  unsigned int alimit;        /* ltable.c's alimit: the array size, or a hint for '#' when norealasize is set */
+  unsigned char norealasize;  /* ltable.c's BITRAS: alimit is not the real size of the array */
+  Node *node;                 /* the hash part: 2^lsizenode nodes; &dummy_node when it is empty */
+  unsigned char lsizenode;
+  Node *lastfree;             /* the search for a free node goes down from here; NULL when the hash part is dummy_node */
+  struct Table *meta;         /* the metatable, or NULL */
 } Table;
+
+static Node dummy_node;               /* all zero: nil key, empty value, no chain */
+static LV absent_slot;                /* all zero: the nil that 'absent' lookups return; never written */
+
+#define MAXABITS 31
+#define MAXASIZE (1u << MAXABITS)
+#define MAXHBITS 30
 
 static uint64_t mix(uint64_t x) {
   x ^= x >> 33;
@@ -332,21 +364,12 @@ static uint64_t mix(uint64_t x) {
 
 static uint64_t hash_key(const LV *k) {
   switch (k->tag) {
-    case TAG_INT: return mix((uint64_t)k->v.i);
-    case TAG_FLOAT: {
-      uint64_t bits;
-      memcpy(&bits, &k->v.n, sizeof bits);
-      return mix(bits);
-    }
     case TAG_STR: {
       const LString *s = (const LString *)k->v.p;
       uint64_t h = 1469598103934665603ULL;
       for (size_t i = 0; i < s->len; ++i) h = (h ^ (unsigned char)s->bytes[i]) * 1099511628211ULL;
       return h;
     }
-    case TAG_NIL:
-    case TAG_FALSE:
-    case TAG_TRUE: return k->tag;
     default: return mix((uint64_t)(uintptr_t)k->v.p);
   }
 }
@@ -367,7 +390,8 @@ static int same_key(const LV *a, const LV *b) {
   }
 }
 
-/* The key as lvm.c stores it. Only valid for a key that is not nil or NaN. */
+/* The key as lvm.c stores it: a float with an exact integer value is that integer. Only valid for a key that is not nil
+ * or NaN. */
 static LV normal_key(const LV *k) {
   LV r = *k;
   if (k->tag == TAG_FLOAT && floor(k->v.n) == k->v.n && k->v.n >= -9223372036854775808.0 &&
@@ -378,59 +402,297 @@ static LV normal_key(const LV *k) {
   return r;
 }
 
-static Node *table_find(const Table *t, const LV *key) {
-  if (t->cap == 0) return NULL;
-  size_t mask = t->cap - 1;
-  for (size_t i = (size_t)hash_key(key) & mask;; i = (i + 1) & mask) {
-    Node *n = &t->nodes[i];
-    if (!n->used) return NULL;
+/* ltable.c's l_hashfloat. */
+static int l_hashfloat(double n) {
+  int i;
+  n = frexp(n, &i) * -(double)INT_MIN;
+  if (!(n >= -9223372036854775808.0 && n < 9223372036854775808.0)) return 0;   /* inf or NaN */
+  int64_t ni = (int64_t)n;
+  unsigned int u = (unsigned int)i + (unsigned int)ni;
+  return (int)(u <= (unsigned int)INT_MAX ? u : ~u);
+}
+
+static int table_isdummy(const Table *t) { return t->lastfree == NULL; }
+static size_t node_count(const Table *t) { return (size_t)1 << t->lsizenode; }
+
+/* The main position of a key (ltable.c's mainpositionTV). */
+static Node *mainposition(const Table *t, const LV *key) {
+  size_t size = node_count(t);
+  uint64_t mod = (uint64_t)((size - 1) | 1);
+  switch (key->tag) {
+    case TAG_INT: return &t->node[(uint64_t)key->v.i % mod];
+    case TAG_FLOAT: return &t->node[(uint64_t)(unsigned int)l_hashfloat(key->v.n) % mod];
+    case TAG_STR: return &t->node[hash_key(key) & (size - 1)];
+    case TAG_FALSE: return &t->node[0];
+    case TAG_TRUE: return &t->node[1 & (size - 1)];
+    default: return &t->node[(uint64_t)(uint32_t)(uintptr_t)key->v.p % mod];
+  }
+}
+
+/* The node that holds 'key' (not normalized is fine: the float and integer keys do not match), or NULL. */
+static Node *find_node(const Table *t, const LV *key) {
+  Node *n = mainposition(t, key);
+  for (;;) {
     if (same_key(&n->key, key)) return n;
+    if (n->next == 0) return NULL;
+    n += n->next;
   }
 }
 
-static void table_resize(Table *t, size_t cap) {
-  Node *old = t->nodes;
-  size_t oldcap = t->cap;
-  t->nodes = (Node *)calloc(cap, sizeof(Node));
-  if (t->nodes == NULL) die("out of memory");
-  t->cap = cap;
-  t->count = 0;
-  for (size_t i = 0; i < oldcap; ++i) {
-    if (old[i].used && old[i].val.tag != TAG_NIL) {
-      size_t mask = t->cap - 1;
-      size_t j = (size_t)hash_key(&old[i].key) & mask;
-      while (t->nodes[j].used) j = (j + 1) & mask;
-      t->nodes[j] = old[i];
-      t->count++;
+/* ltable.c's arrayindex: the array index of k, or 0 when k is not one. */
+static unsigned int arrayindex(int64_t k) {
+  if ((uint64_t)k - 1u < (uint64_t)MAXASIZE) return (unsigned int)k;
+  return 0;
+}
+
+/* luaO_ceillog2 for x >= 1. */
+static int ceillog2(unsigned int x) {
+  int l = 0;
+  x--;
+  while (x > 0) {
+    l++;
+    x >>= 1;
+  }
+  return l;
+}
+
+/* ltable.c's luaH_realasize: the size of the array part. */
+static unsigned int realasize(const Table *t) {
+  unsigned int limit = t->alimit;
+  if (!t->norealasize || (limit & (limit - 1)) == 0) return limit;
+  unsigned int size = limit;
+  size |= (size >> 1);
+  size |= (size >> 2);
+  size |= (size >> 4);
+  size |= (size >> 8);
+  size |= (size >> 16);
+  return size + 1;
+}
+
+static int ispow2realasize(const Table *t) { return t->norealasize || (t->alimit & (t->alimit - 1)) == 0; }
+
+static int limitequalsasize(const Table *t) { return !t->norealasize || (t->alimit & (t->alimit - 1)) == 0; }
+
+static unsigned int setlimittosize(Table *t) {
+  t->alimit = realasize(t);
+  t->norealasize = 0;
+  return t->alimit;
+}
+
+/* luaH_getint: the value slot of integer key, or &absent_slot. As in ltable.c, a read may move alimit (the hint). */
+static LV *table_getint(Table *t, int64_t key) {
+  uint64_t alimit = t->alimit;
+  if ((uint64_t)key - 1u < alimit) return &t->array[key - 1];
+  if (t->norealasize && (((uint64_t)key - 1u) & ~(alimit - 1u)) < alimit) {
+    t->alimit = (unsigned int)key;   /* probably '#t' is here now */
+    return &t->array[key - 1];
+  }
+  Node *n = &t->node[(uint64_t)key % (uint64_t)((node_count(t) - 1) | 1)];
+  for (;;) {
+    if (n->key.tag == TAG_INT && n->key.v.i == key) return &n->val;
+    if (n->next == 0) return &absent_slot;
+    n += n->next;
+  }
+}
+
+/* luaH_get: the value slot of a key (normalized or not), or &absent_slot. */
+static LV *table_get(Table *t, const LV *key) {
+  switch (key->tag) {
+    case TAG_INT: return table_getint(t, key->v.i);
+    case TAG_NIL: return &absent_slot;
+    case TAG_FLOAT: {
+      if (floor(key->v.n) == key->v.n && key->v.n >= -9223372036854775808.0 && key->v.n < 9223372036854775808.0)
+        return table_getint(t, (int64_t)key->v.n);
+      break;
     }
+    default: break;
   }
-  free(old);
-}
-
-static Node *table_slot(Table *t, const LV *key) {
-  Node *n = table_find(t, key);
-  if (n != NULL) return n;
-  if ((t->count + 1) * 2 > t->cap) table_resize(t, t->cap == 0 ? 4 : t->cap * 2);
-  size_t mask = t->cap - 1;
-  size_t j = (size_t)hash_key(key) & mask;
-  while (t->nodes[j].used) j = (j + 1) & mask;
-  t->nodes[j].used = 1;
-  t->nodes[j].key = *key;
-  t->nodes[j].val.tag = TAG_NIL;
-  t->count++;
-  return &t->nodes[j];
+  Node *n = find_node(t, key);
+  return n != NULL ? &n->val : &absent_slot;
 }
 
 /* lua_rawget: nil for a nil or NaN key, as Lua reads them. */
-static LV raw_get(const Table *t, const LV *key) {
-  LV v;
-  v.tag = TAG_NIL;
-  if (key->tag == TAG_NIL) return v;
-  if (key->tag == TAG_FLOAT && key->v.n != key->v.n) return v;
-  LV k = normal_key(key);
-  Node *n = table_find(t, &k);
-  if (n != NULL) return n->val;
-  return v;
+static LV raw_get(Table *t, const LV *key) {
+  if (key->tag == TAG_NIL) return absent_slot;
+  if (key->tag == TAG_FLOAT && key->v.n != key->v.n) return absent_slot;
+  return *table_get(t, key);
+}
+
+static void table_setnodevector(Table *t, unsigned int size) {
+  if (size == 0) {
+    t->node = &dummy_node;
+    t->lsizenode = 0;
+    t->lastfree = NULL;
+    return;
+  }
+  int lsize = ceillog2(size);
+  if (lsize > MAXHBITS) die("table overflow");
+  size = 1u << lsize;
+  t->node = (Node *)calloc(size, sizeof(Node));
+  if (t->node == NULL) die("out of memory");
+  t->lsizenode = (unsigned char)lsize;
+  t->lastfree = t->node + size;
+}
+
+static Node *getfreepos(Table *t) {
+  if (!table_isdummy(t)) {
+    while (t->lastfree > t->node) {
+      t->lastfree--;
+      if (t->lastfree->key.tag == TAG_NIL) return t->lastfree;
+    }
+  }
+  return NULL;
+}
+
+static void table_setint(Table *t, int64_t key, const LV *val);
+static void raw_set(Table *t, const LV *key, const LV *val);
+
+/* ltable.c's rehash: count the integer keys, choose the array size and resize. */
+static int countint(int64_t key, unsigned int *nums) {
+  unsigned int k = arrayindex(key);
+  if (k != 0) {
+    nums[ceillog2(k)]++;
+    return 1;
+  }
+  return 0;
+}
+
+static unsigned int numusearray(const Table *t, unsigned int *nums) {
+  unsigned int ause = 0, i = 1, asize = t->alimit;
+  unsigned int ttlg = 1;
+  for (int lg = 0; lg <= MAXABITS; lg++, ttlg *= 2) {
+    unsigned int lc = 0, lim = ttlg;
+    if (lim > asize) {
+      lim = asize;
+      if (i > lim) break;
+    }
+    for (; i <= lim; i++) {
+      if (t->array[i - 1].tag != TAG_NIL) lc++;
+    }
+    nums[lg] += lc;
+    ause += lc;
+  }
+  return ause;
+}
+
+static int numusehash(const Table *t, unsigned int *nums, unsigned int *pna) {
+  int totaluse = 0, ause = 0;
+  int i = (int)node_count(t);
+  while (i--) {
+    const Node *n = &t->node[i];
+    if (n->val.tag != TAG_NIL) {
+      if (n->key.tag == TAG_INT) ause += countint(n->key.v.i, nums);
+      totaluse++;
+    }
+  }
+  *pna += (unsigned int)ause;
+  return totaluse;
+}
+
+static unsigned int computesizes(unsigned int nums[], unsigned int *pna) {
+  int i;
+  unsigned int twotoi, a = 0, na = 0, optimal = 0;
+  for (i = 0, twotoi = 1; twotoi > 0 && *pna > twotoi / 2; i++, twotoi *= 2) {
+    a += nums[i];
+    if (a > twotoi / 2) {
+      optimal = twotoi;
+      na = a;
+    }
+  }
+  *pna = na;
+  return optimal;
+}
+
+static void exchange_hash(Table *a, Table *b) {
+  Node *node = a->node;
+  unsigned char lsizenode = a->lsizenode;
+  Node *lastfree = a->lastfree;
+  a->node = b->node;
+  a->lsizenode = b->lsizenode;
+  a->lastfree = b->lastfree;
+  b->node = node;
+  b->lsizenode = lsizenode;
+  b->lastfree = lastfree;
+}
+
+/* ltable.c's luaH_resize: the array gets newasize entries and the hash part gets room for nhsize keys. */
+static void table_resize(Table *t, unsigned int newasize, unsigned int nhsize) {
+  unsigned int i;
+  Table newt;
+  unsigned int oldasize = setlimittosize(t);
+  table_setnodevector(&newt, nhsize);
+  if (newasize < oldasize) {
+    t->alimit = newasize;
+    exchange_hash(t, &newt);
+    for (i = newasize; i < oldasize; i++) {
+      if (t->array[i].tag != TAG_NIL) table_setint(t, (int64_t)i + 1, &t->array[i]);
+    }
+    t->alimit = oldasize;
+    exchange_hash(t, &newt);
+  }
+  LV *newarray;
+  if (newasize == 0) {
+    free(t->array);
+    newarray = NULL;
+  } else {
+    newarray = (LV *)realloc(t->array, sizeof(LV) * (size_t)newasize);
+    if (newarray == NULL) die("out of memory");
+  }
+  exchange_hash(t, &newt);   /* t has the new hash part, newt the old one */
+  t->array = newarray;
+  t->alimit = newasize;
+  for (i = oldasize; i < newasize; i++) t->array[i].tag = TAG_NIL;
+  for (size_t j = 0; j < node_count(&newt); ++j) {
+    Node *old = &newt.node[j];
+    if (old->val.tag != TAG_NIL) raw_set(t, &old->key, &old->val);
+  }
+  if (!table_isdummy(&newt)) free(newt.node);
+}
+
+static void table_rehash(Table *t, const LV *ek) {
+  unsigned int nums[MAXABITS + 1];
+  unsigned int na, asize, totaluse;
+  for (int i = 0; i <= MAXABITS; i++) nums[i] = 0;
+  setlimittosize(t);
+  na = numusearray(t, nums);
+  totaluse = na;
+  totaluse += (unsigned int)numusehash(t, nums, &na);
+  if (ek->tag == TAG_INT) na += (unsigned int)countint(ek->v.i, nums);
+  totaluse++;
+  asize = computesizes(nums, &na);
+  table_resize(t, asize, totaluse - na);
+}
+
+/* ltable.c's luaH_newkey: key is normalized, not nil and not NaN. Nothing is inserted for a nil value. */
+static void table_newkey(Table *t, const LV *key, const LV *val) {
+  Node *mp;
+  if (val->tag == TAG_NIL) return;
+  mp = mainposition(t, key);
+  if (mp->val.tag != TAG_NIL || table_isdummy(t)) {   /* main position is taken? */
+    Node *f = getfreepos(t);
+    if (f == NULL) {
+      table_rehash(t, key);
+      raw_set(t, key, val);
+      return;
+    }
+    Node *othern = mainposition(t, &mp->key);
+    if (othern != mp) {   /* the colliding node is out of its main position: move it to the free node */
+      while (othern + othern->next != mp) othern += othern->next;
+      othern->next = (int)(f - othern);
+      *f = *mp;
+      if (mp->next != 0) {
+        f->next += (int)(mp - f);
+        mp->next = 0;
+      }
+      mp->val.tag = TAG_NIL;
+    } else {   /* the colliding node is in its main position: the new key goes to the free node */
+      if (mp->next != 0) f->next = (int)((mp + mp->next) - f);
+      mp->next = (int)(f - mp);
+      mp = f;
+    }
+  }
+  mp->key = *key;
+  mp->val = *val;
 }
 
 /* lua_rawset: nil and NaN keys are errors. */
@@ -438,41 +700,151 @@ static void raw_set(Table *t, const LV *key, const LV *val) {
   if (key->tag == TAG_NIL) rt_fail("table index is nil", -1);
   if (key->tag == TAG_FLOAT && key->v.n != key->v.n) rt_fail("table index is NaN", -1);
   LV k = normal_key(key);
-  if (val->tag == TAG_NIL) {
-    Node *n = table_find(t, &k);
-    if (n != NULL) n->val.tag = TAG_NIL;
+  LV *slot = table_get(t, &k);
+  if (slot != &absent_slot) {
+    *slot = *val;
     return;
   }
-  Node *n = table_slot(t, &k);
-  n->val = *val;
+  table_newkey(t, &k, val);
 }
 
-void lua54rt_newtable(LV *dst) {
+/* luaH_setint. */
+static void table_setint(Table *t, int64_t key, const LV *val) {
+  LV *p = table_getint(t, key);
+  if (p != &absent_slot) {
+    *p = *val;
+    return;
+  }
+  LV k;
+  k.tag = TAG_INT;
+  k.v.i = key;
+  table_newkey(t, &k, val);
+}
+
+void lua54rt_newtable(LV *dst, unsigned int hsize, unsigned int asize) {
   Table *t = (Table *)gc_alloc(GC_TABLE, sizeof *t);
   if (t == NULL) die("out of memory");
+  t->array = NULL;
+  t->alimit = 0;
+  t->norealasize = 0;
+  table_setnodevector(t, 0);
+  if (hsize != 0 || asize != 0) table_resize(t, asize, hsize);
   dst->tag = TAG_TABLE;
   dst->v.p = t;
 }
 
-/* The border: the largest n with t[1..n] all non-nil, found by counting from 1. */
-static int64_t table_border(const Table *t) {
-  int64_t n = 0;
-  for (;;) {
-    LV k;
-    k.tag = TAG_INT;
-    k.v.i = n + 1;
-    LV v = raw_get(t, &k);
-    if (v.tag == TAG_NIL) return n;
-    n++;
+/* ltable.c's hash_search: the border beyond the array part, from j (zero or present) with j + 1 present. */
+static uint64_t hash_search(Table *t, uint64_t j) {
+  uint64_t i;
+  if (j == 0) j++;
+  do {
+    i = j;
+    if (j <= (uint64_t)INT64_MAX / 2) {
+      j *= 2;
+    } else {
+      j = (uint64_t)INT64_MAX;
+      if (table_getint(t, (int64_t)j)->tag == TAG_NIL) break;
+      return j;
+    }
+  } while (table_getint(t, (int64_t)j)->tag != TAG_NIL);
+  while (j - i > 1u) {
+    uint64_t m = (i + j) / 2;
+    if (table_getint(t, (int64_t)m)->tag == TAG_NIL) j = m;
+    else i = m;
   }
+  return i;
 }
+
+static unsigned int binsearch(const LV *array, unsigned int i, unsigned int j) {
+  while (j - i > 1u) {
+    unsigned int m = (i + j) / 2;
+    if (array[m - 1].tag == TAG_NIL) j = m;
+    else i = m;
+  }
+  return i;
+}
+
+/* ltable.c's luaH_getn: a border of t, found as Lua finds it (and it may move alimit, as a hint). */
+static uint64_t table_getn(Table *t) {
+  unsigned int limit = t->alimit;
+  if (limit > 0 && t->array[limit - 1].tag == TAG_NIL) {   /* (1) */
+    if (limit >= 2 && t->array[limit - 2].tag != TAG_NIL) {
+      if (ispow2realasize(t) && !(((limit - 1) & (limit - 2)) == 0)) {
+        t->alimit = limit - 1;
+        t->norealasize = 1;
+      }
+      return limit - 1;
+    } else {
+      unsigned int boundary = binsearch(t->array, 0, limit);
+      if (ispow2realasize(t) && boundary > realasize(t) / 2) {
+        t->alimit = boundary;
+        t->norealasize = 1;
+      }
+      return boundary;
+    }
+  }
+  if (!limitequalsasize(t)) {   /* (2) */
+    if (t->array[limit].tag == TAG_NIL) return limit;
+    limit = realasize(t);
+    if (t->array[limit - 1].tag == TAG_NIL) {
+      unsigned int boundary = binsearch(t->array, t->alimit, limit);
+      t->alimit = boundary;
+      return boundary;
+    }
+  }
+  /* (3) */
+  if (table_isdummy(t) || table_getint(t, (int64_t)limit + 1)->tag == TAG_NIL) return limit;
+  return hash_search(t, limit);
+}
+
+/* ltable.c's luaH_next: the entry after key (nil for the first), in the array part and then in the nodes. Returns 0 at
+ * the end. */
+static int table_next(Table *t, const LV *key, LV *kout, LV *vout) {
+  unsigned int asize = realasize(t);
+  unsigned int i;
+  if (key->tag == TAG_NIL) {
+    i = 0;
+  } else {
+    unsigned int ai = key->tag == TAG_INT ? arrayindex(key->v.i) : 0;
+    if (ai - 1u < asize) {
+      i = ai;
+    } else {
+      Node *n = find_node(t, key);
+      if (n == NULL) {
+        /* luaG_runerror from next, a C function: no position */
+        raise_value(make_str("invalid key to 'next'", 22));
+      }
+      i = (unsigned int)(n - t->node) + 1 + asize;
+    }
+  }
+  for (; i < asize; i++) {
+    if (t->array[i].tag != TAG_NIL) {
+      kout->tag = TAG_INT;
+      kout->v.i = (int64_t)i + 1;
+      *vout = t->array[i];
+      return 1;
+    }
+  }
+  for (i -= asize; i < node_count(t); i++) {
+    Node *n = &t->node[i];
+    if (n->val.tag != TAG_NIL) {
+      *kout = n->key;
+      *vout = n->val;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/* The border of t (the '#' of Lua 5.4.9). */
+static int64_t table_border(Table *t) { return (int64_t)table_getn(t); }
 
 /* ---- metamethods (ltm.c): looked up in the metatable of a table; only tables have metatables here ---- */
 static Table *string_meta = NULL;   /* the metatable of every string; its __index is the string library */
 
 static int get_mt(const LV *o, const char *event, LV *out) {
-  const Table *mt;
-  if (o->tag == TAG_TABLE) mt = ((const Table *)o->v.p)->meta;
+  Table *mt;
+  if (o->tag == TAG_TABLE) mt = ((Table *)o->v.p)->meta;
   else if (o->tag == TAG_STR) mt = string_meta;
   else return 0;
   if (mt == NULL) return 0;
@@ -486,6 +858,12 @@ static int get_mt(const LV *o, const char *event, LV *out) {
 static int truthy(const LV *v) { return v->tag != TAG_NIL && v->tag != TAG_FALSE; }
 
 void lua54rt_call(LV *fn, int nargs, LV *args, LV *ret, int wanted, int a);
+
+/* A generic 'for' calls its iterator through lua54rt_tforcall, so the iterator's argument errors name it "for iterator"
+ * as luaL_argerror does. host_from_tfor is set while such a host function runs. */
+static int call_is_tfor = 0;
+static int host_from_tfor = 0;
+static const char *host_name(const char *name) { return host_from_tfor ? "for iterator" : name; }
 static void install_more(LV *env);
 void lua54rt_install_library(LV *env);
 
@@ -675,13 +1053,18 @@ static void finish_call(LV *ret, int wanted, int a) {
  * not a function is called through its __call metamethod, with the value as the first argument. The site of the call
  * is restored after it returns, so an error after a call reports the call's own operation. */
 void lua54rt_call(LV *fn, int nargs, LV *args, LV *ret, int wanted, int a) {
+  int from_tfor = call_is_tfor;   /* this call is the iterator of a generic 'for' (lua54rt_tforcall) */
+  call_is_tfor = 0;
   if (fn->tag == TAG_LCF) {
     LV out[64];
     const char *saved = site;
     HostFn *saved_host = cur_host;
+    int saved_tfor = host_from_tfor;
     push_callsite(saved);
     cur_host = (HostFn *)fn->v.p;
+    host_from_tfor = from_tfor;
     int n = cur_host->fn(out, args, nargs);
+    host_from_tfor = saved_tfor;
     cur_host = saved_host;
     pop_callsite();
     site = saved;
@@ -704,10 +1087,16 @@ void lua54rt_call(LV *fn, int nargs, LV *args, LV *ret, int wanted, int a) {
     return;
   }
   LV h;
-  if (!get_mt(fn, "__call", &h)) type_fail("call", fn->tag, 0);
+  if (!get_mt(fn, "__call", &h)) type_fail("call", fn, 0);
   for (int k = nargs; k > 0; --k) args[k] = args[k - 1];
   args[0] = *fn;
   lua54rt_call(&h, nargs + 1, args, ret, wanted, a);
+}
+
+/* TFORCALL: the iterator call of a generic 'for'. */
+void lua54rt_tforcall(LV *fn, int nargs, LV *args, LV *ret, int wanted, int a) {
+  call_is_tfor = 1;
+  lua54rt_call(fn, nargs, args, ret, wanted, a);
 }
 
 /* VARARGPREP: the extra arguments of the current call, saved for VARARG. */
@@ -945,10 +1334,10 @@ void lua54rt_arith(int op, LV *dst, LV *a, LV *b) {
   }
   if (bitwise) {
     int culprit = is_number(&x) ? 1 : 0;
-    type_fail("perform bitwise operation on", culprit ? y.tag : x.tag, culprit);
+    type_fail("perform bitwise operation on", culprit ? &y : &x, culprit);
   }
   int culprit = to_number(&x, &nx) ? 1 : 0;   /* luaG_opinterror: the first operand unless it is a number */
-  type_fail("perform arithmetic on", culprit ? y.tag : x.tag, culprit);
+  type_fail("perform arithmetic on", culprit ? &y : &x, culprit);
 }
 
 /* UNM and BNOT (the unary ops; their metamethods get the operand twice). */
@@ -971,7 +1360,7 @@ void lua54rt_unary(int op, LV *dst, LV *a) {
       *dst = call_mmv(&h, args, 2);
       return;
     }
-    type_fail("perform arithmetic on", x.tag, 0);
+    type_fail("perform arithmetic on", &x, 0);
   }
   /* OP_BNOT */
   int64_t i;
@@ -986,7 +1375,7 @@ void lua54rt_unary(int op, LV *dst, LV *a) {
     *dst = call_mmv(&h, args, 2);
     return;
   }
-  type_fail("perform bitwise operation on", x.tag, 0);
+  type_fail("perform bitwise operation on", &x, 0);
 }
 
 static int equal_values(const LV *a, const LV *b) {
@@ -999,7 +1388,7 @@ static int equal_values(const LV *a, const LV *b) {
 }
 
 static void order_fail(const LV *a, const LV *b) {
-  const char *t1 = type_name(a->tag), *t2 = type_name(b->tag);
+  const char *t1 = objtypename(a), *t2 = objtypename(b);
   char buf[160];
   if (strcmp(t1, t2) == 0) snprintf(buf, sizeof buf, "attempt to compare two %s values", t1);
   else snprintf(buf, sizeof buf, "attempt to compare %s with %s", t1, t2);
@@ -1058,9 +1447,9 @@ void lua54rt_len(LV *dst, LV *src) {
       *dst = call_mmv(&h, args, 2);
       return;
     }
-    n = table_border((const Table *)x.v.p);
+    n = table_border((Table *)x.v.p);
   } else {
-    type_fail("get length of", x.tag, 0);
+    type_fail("get length of", &x, 0);
     return;
   }
   dst->tag = TAG_INT;
@@ -1126,8 +1515,8 @@ void lua54rt_concat(LV *dst, LV *base, int n) {
       continue;
     }
     /* the culprit: l, unless l is fine; then acc, which is operand i+1 only while it is still the original value */
-    if (!l_ok) type_fail("concatenate", l.tag, i);
-    type_fail("concatenate", acc.tag, i + 1 == n - 1 ? i + 1 : -1);
+    if (!l_ok) type_fail("concatenate", &l, i);
+    type_fail("concatenate", &acc, i + 1 == n - 1 ? i + 1 : -1);
   }
   *dst = acc;
 }
@@ -1140,7 +1529,7 @@ void lua54rt_gettable(LV *dst, LV *t, LV *key) {
     int operand = loop == 0 ? 0 : -1;
     LV h;
     if (obj.tag == TAG_TABLE) {
-      LV v = raw_get((const Table *)obj.v.p, &k);
+      LV v = raw_get((Table *)obj.v.p, &k);
       if (v.tag != TAG_NIL) {
         *dst = v;
         return;
@@ -1150,7 +1539,7 @@ void lua54rt_gettable(LV *dst, LV *t, LV *key) {
         return;
       }
     } else if (!get_mt(&obj, "__index", &h)) {
-      type_fail("index", obj.tag, operand);
+      type_fail("index", &obj, operand);
     }
     if (h.tag == TAG_LCL || h.tag == TAG_LCF) {
       LV args[2] = {obj, k};
@@ -1169,13 +1558,13 @@ void lua54rt_settable(LV *t, LV *key, LV *val) {
     int operand = loop == 0 ? 0 : -1;
     LV h;
     if (obj.tag == TAG_TABLE) {
-      LV cur = raw_get((const Table *)obj.v.p, &k);
+      LV cur = raw_get((Table *)obj.v.p, &k);
       if (cur.tag != TAG_NIL || !get_mt(&obj, "__newindex", &h)) {
         raw_set((Table *)obj.v.p, &k, &v);
         return;
       }
     } else if (!get_mt(&obj, "__newindex", &h)) {
-      type_fail("index", obj.tag, operand);
+      type_fail("index", &obj, operand);
     }
     if (h.tag == TAG_LCL || h.tag == TAG_LCF) {
       LV args[3] = {obj, k, v};
@@ -1189,13 +1578,12 @@ void lua54rt_settable(LV *t, LV *key, LV *val) {
 
 /* OP_SETLIST: t[offset + j] := vals[j - 1] for j = 1..count. */
 void lua54rt_setlist(LV *t, long offset, LV *vals, int count) {
-  if (t->tag != TAG_TABLE) type_fail("index", t->tag, 0);
-  for (int j = 1; j <= count; ++j) {
-    LV k;
-    k.tag = TAG_INT;
-    k.v.i = offset + j;
-    raw_set((Table *)t->v.p, &k, &vals[j - 1]);
-  }
+  if (t->tag != TAG_TABLE) type_fail("index", t, 0);
+  Table *h = (Table *)t->v.p;
+  /* lvm.c's OP_SETLIST: the array part is made large enough at once, and the values go straight into it */
+  uint64_t last = (uint64_t)offset + (uint64_t)count;
+  if (last > realasize(h)) table_resize(h, (unsigned int)last, table_isdummy(h) ? 0 : (unsigned int)node_count(h));
+  for (int j = 1; j <= count; ++j) h->array[offset + j - 1] = vals[j - 1];
 }
 
 /* A closure for the main function of a chunk: upvalue 0 is _ENV, a fresh table; the others are nil. */
@@ -1212,7 +1600,7 @@ void *lua54rt_make_main(void *fn, int nupvals) {
     UpVal *uv = (UpVal *)gc_alloc(GC_UPVAL, sizeof *uv);
     if (uv == NULL) die("out of memory");
     uv->open_next = NULL;
-    if (k == 0) lua54rt_newtable(&uv->closed);
+    if (k == 0) lua54rt_newtable(&uv->closed, 0, 0);
     else uv->closed.tag = TAG_NIL;
     uv->v = &uv->closed;
     c->upvals[k] = uv;
@@ -1235,11 +1623,22 @@ static void write_value(FILE *f, const LV *v) {
     case TAG_NIL: fputs("nil", f); break;
     case TAG_FALSE: fputs("false", f); break;
     case TAG_TRUE: fputs("true", f); break;
-    case TAG_TABLE: fprintf(f, "table: %p", v->v.p); break;
+    case TAG_TABLE: {
+      /* luaL_tolstring: the __name of the metatable, when it is a string, in place of "table" */
+      LV n;
+      if (get_mt(v, "__name", &n) && n.tag == TAG_STR) fprintf(f, "%s: %p", ((LString *)n.v.p)->bytes, v->v.p);
+      else fprintf(f, "table: %p", v->v.p);
+      break;
+    }
     case TAG_LCL:
     case TAG_LCF: fprintf(f, "function: %p", v->v.p); break;
     default: fprintf(f, "?"); break;
   }
+}
+
+/* lauxlib.c's luaL_checkany: the argument must be given, whatever its value. */
+static void check_any(int nargs, int k, const char *fname) {
+  if (nargs < k) arg_fail(k, fname, "value expected");
 }
 
 static void expect_arg(int nargs, int k, const char *fname, const char *what) {
@@ -1252,8 +1651,8 @@ static void expect_arg(int nargs, int k, const char *fname, const char *what) {
 
 static Table *expect_table(const LV *v, int k, const char *fname) {
   if (v->tag != TAG_TABLE) {
-    char buf[160];
-    snprintf(buf, sizeof buf, "bad argument #%d to '%s' (table expected, got %s)", k, fname, type_name(v->tag));
+    char buf[300];
+    snprintf(buf, sizeof buf, "bad argument #%d to '%s' (table expected, got %s)", k, fname, argtypename(v));
     rt_fail(buf, -1);
   }
   return (Table *)v->v.p;
@@ -1285,13 +1684,13 @@ static int host_print(LV *out, LV *args, int nargs) {
 static void set_string(LV *dst, const char *s) { *dst = make_str(s, strlen(s)); }
 
 static int host_type(LV *out, LV *args, int nargs) {
-  expect_arg(nargs, 1, "type", "value");
+  check_any(nargs, 1, "type");
   set_string(&out[0], type_name(args[0].tag));
   return 1;
 }
 
 static int host_tostring(LV *out, LV *args, int nargs) {
-  expect_arg(nargs, 1, "tostring", "value");
+  check_any(nargs, 1, "tostring");
   if (args[0].tag == TAG_STR) {
     out[0] = args[0];
     return 1;
@@ -1312,28 +1711,30 @@ static LV next_fn, ipairs_iter_fn;
 
 /* next(t, k): the entry after k, in the order of the nodes; nil at the end. */
 static int host_next(LV *out, LV *args, int nargs) {
-  Table *t = expect_table(&args[0], 1, "next");
-  size_t start = 0;
-  if (nargs >= 2 && args[1].tag != TAG_NIL) {
-    LV k = normal_key(&args[1]);
-    Node *nd = table_find(t, &k);
-    if (nd == NULL) rt_fail("invalid key to 'next'", -1);
-    start = (size_t)(nd - t->nodes) + 1;
+  Table *t = expect_table(&args[0], 1, host_name("next"));
+  LV key;
+  key.tag = TAG_NIL;
+  if (nargs >= 2) key = args[1];
+  if (!table_next(t, &key, &out[0], &out[1])) {
+    out[0].tag = TAG_NIL;
+    return 1;
   }
-  for (size_t i = start; i < t->cap; ++i) {
-    if (t->nodes[i].used && t->nodes[i].val.tag != TAG_NIL) {
-      out[0] = t->nodes[i].key;
-      out[1] = t->nodes[i].val;
-      return 2;
-    }
-  }
-  out[0].tag = TAG_NIL;
-  return 1;
+  return 2;
 }
 
+/* pairs(v): the __pairs metamethod's three results, or next, v, nil (any value: next reports a bad one). */
 static int host_pairs(LV *out, LV *args, int nargs) {
-  expect_arg(nargs, 1, "pairs", "table");
-  expect_table(&args[0], 1, "pairs");
+  check_any(nargs, 1, "pairs");
+  LV h;
+  if (get_mt(&args[0], "__pairs", &h)) {
+    LV frame[1024], ret[256];
+    frame[0] = args[0];
+    lua54rt_call(&h, 1, frame, ret, 3, 0);
+    out[0] = ret[0];
+    out[1] = ret[1];
+    out[2] = ret[2];
+    return 3;
+  }
   out[0] = next_fn;
   out[1] = args[0];
   out[2].tag = TAG_NIL;
@@ -1342,6 +1743,12 @@ static int host_pairs(LV *out, LV *args, int nargs) {
 
 static int host_ipairs_iter(LV *out, LV *args, int nargs) {
   (void)nargs;
+  if (args[0].tag != TAG_TABLE && args[0].tag != TAG_STR) {
+    /* lua_geti in a C function: the error has no position and no variable info */
+    char buf[300];
+    snprintf(buf, sizeof buf, "attempt to index a %s value", objtypename(&args[0]));
+    raise_value(make_str(buf, strlen(buf)));
+  }
   LV i;
   i.tag = TAG_INT;
   i.v.i = args[1].v.i + 1;
@@ -1357,7 +1764,7 @@ static int host_ipairs_iter(LV *out, LV *args, int nargs) {
 }
 
 static int host_ipairs(LV *out, LV *args, int nargs) {
-  expect_arg(nargs, 1, "ipairs", "table");
+  check_any(nargs, 1, "ipairs");
   out[0] = ipairs_iter_fn;
   out[1] = args[0];
   out[2].tag = TAG_INT;
@@ -1384,21 +1791,33 @@ static int host_select(LV *out, LV *args, int nargs) {
   return produced;
 }
 
+/* lbaselib.c's luaB_setmetatable: a metatable with a __metatable field cannot be changed. */
 static int host_setmetatable(LV *out, LV *args, int nargs) {
-  Table *t = expect_table(&args[0], 1, "setmetatable");
+  Table *t = arg_table(args, nargs, 1, "setmetatable");
   if (nargs < 2 || (args[1].tag != TAG_NIL && args[1].tag != TAG_TABLE))
-    rt_fail("bad argument #2 to 'setmetatable' (nil or table expected)", -1);
+    lib_arg_error(2, "setmetatable", "nil or table", arg_typename(args, nargs, 2));
+  LV protected_field;
+  if (get_mt(&args[0], "__metatable", &protected_field)) rt_fail("cannot change a protected metatable", -1);
   t->meta = args[1].tag == TAG_TABLE ? (Table *)args[1].v.p : NULL;
   out[0] = args[0];
   return 1;
 }
 
+/* luaB_getmetatable: the __metatable field when there is one (any value), else the metatable, else nil. */
 static int host_getmetatable(LV *out, LV *args, int nargs) {
-  expect_arg(nargs, 1, "getmetatable", "value");
+  check_any(nargs, 1, "getmetatable");
+  LV field;
+  if (get_mt(&args[0], "__metatable", &field)) {
+    out[0] = field;
+    return 1;
+  }
+  Table *mt = NULL;
+  if (args[0].tag == TAG_TABLE) mt = ((Table *)args[0].v.p)->meta;
+  else if (args[0].tag == TAG_STR) mt = string_meta;
   out[0].tag = TAG_NIL;
-  if (args[0].tag == TAG_TABLE && ((Table *)args[0].v.p)->meta != NULL) {
+  if (mt != NULL) {
     out[0].tag = TAG_TABLE;
-    out[0].v.p = ((Table *)args[0].v.p)->meta;
+    out[0].v.p = mt;
   }
   return 1;
 }
@@ -1475,7 +1894,7 @@ static int host_error(LV *out, LV *args, int nargs) {
 }
 
 static int host_assert(LV *out, LV *args, int nargs) {
-  expect_arg(nargs, 1, "assert", "value");
+  check_any(nargs, 1, "assert");
   if (truthy(&args[0])) {
     for (int k = 0; k < nargs && k < 64; ++k) out[k] = args[k];
     return nargs < 64 ? nargs : 64;
@@ -1524,7 +1943,7 @@ static int protected_call(LV *out, LV *args, int nargs, int handler_arg) {
 }
 
 static int host_pcall(LV *out, LV *args, int nargs) {
-  expect_arg(nargs, 1, "pcall", "value");
+  check_any(nargs, 1, "pcall");
   return protected_call(out, args, nargs, 0);
 }
 
@@ -1549,7 +1968,7 @@ static void arg_fail(int k, const char *fname, const char *msg) {
 }
 
 static const char *arg_typename(const LV *args, int nargs, int k) {
-  return k > nargs ? "no value" : type_name(args[k - 1].tag);
+  return k > nargs ? "no value" : argtypename(&args[k - 1]);
 }
 
 static LV arg_str(const LV *args, int nargs, int k, const char *fname) {
@@ -1588,7 +2007,7 @@ static Table *arg_table(const LV *args, int nargs, int k, const char *fname) {
 
 static int host_tonumber(LV *out, LV *args, int nargs) {
   if (nargs < 2 || args[1].tag == TAG_NIL) {
-    expect_arg(nargs, 1, "tonumber", "value");
+    check_any(nargs, 1, "tonumber");
     LV n;
     if (to_number(&args[0], &n)) out[0] = n;
     else out[0].tag = TAG_NIL;
@@ -1623,21 +2042,21 @@ static int host_tonumber(LV *out, LV *args, int nargs) {
 
 static int host_rawget(LV *out, LV *args, int nargs) {
   Table *t = arg_table(args, nargs, 1, "rawget");
-  expect_arg(nargs, 2, "rawget", "value");
+  check_any(nargs, 2, "rawget");
   out[0] = raw_get(t, &args[1]);
   return 1;
 }
 
 static int host_rawset(LV *out, LV *args, int nargs) {
   Table *t = arg_table(args, nargs, 1, "rawset");
-  expect_arg(nargs, 3, "rawset", "value");
+  check_any(nargs, 3, "rawset");
   raw_set(t, &args[1], &args[2]);
   out[0] = args[0];
   return 1;
 }
 
 static int host_rawequal(LV *out, LV *args, int nargs) {
-  expect_arg(nargs, 2, "rawequal", "value");
+  check_any(nargs, 2, "rawequal");
   out[0].tag = equal_values(&args[0], &args[1]) ? TAG_TRUE : TAG_FALSE;
   return 1;
 }
@@ -1646,7 +2065,7 @@ static int host_rawlen(LV *out, LV *args, int nargs) {
   expect_arg(nargs, 1, "rawlen", "table or string");
   out[0].tag = TAG_INT;
   if (args[0].tag == TAG_STR) out[0].v.i = (int64_t)((LString *)args[0].v.p)->len;
-  else if (args[0].tag == TAG_TABLE) out[0].v.i = table_border((const Table *)args[0].v.p);
+  else if (args[0].tag == TAG_TABLE) out[0].v.i = table_border((Table *)args[0].v.p);
   else lib_arg_error(1, "rawlen", "table or string", arg_typename(args, nargs, 1));
   return 1;
 }
@@ -1844,7 +2263,7 @@ static int host_msqrt(LV *out, LV *args, int nargs) {
 }
 
 static int host_mtointeger(LV *out, LV *args, int nargs) {
-  expect_arg(nargs, 1, "tointeger", "value");
+  check_any(nargs, 1, "tointeger");
   int64_t i;
   if (args[0].tag == TAG_INT) out[0] = args[0];
   else if (args[0].tag == TAG_FLOAT && to_int_exact(&args[0], &i)) {
@@ -2770,7 +3189,7 @@ static void tset(LV *t, int64_t i, LV *v) {
 
 static int host_tpack(LV *out, LV *args, int nargs) {
   LV t;
-  lua54rt_newtable(&t);
+  lua54rt_newtable(&t, 0, 0);
   for (int k = 0; k < nargs; ++k) {
     LV key;
     key.tag = TAG_INT;
@@ -2904,7 +3323,7 @@ static void auxsort(SortCtx *c, int64_t lo, int64_t up, unsigned rnd) {
 static int host_tsort(LV *out, LV *args, int nargs) {
   (void)out;
   arg_table(args, nargs, 1, "sort");
-  int64_t n = table_border((const Table *)args[0].v.p);
+  int64_t n = table_border((Table *)args[0].v.p);
   if (n > 1) {
     if (n >= INT32_MAX) arg_fail(1, "sort", "array too big");
     if (nargs >= 2 && args[1].tag != TAG_NIL && args[1].tag != TAG_LCL && args[1].tag != TAG_LCF)
@@ -3010,7 +3429,7 @@ static int host_m_ult(LV *out, LV *args, int nargs) {
 }
 
 static int host_m_type(LV *out, LV *args, int nargs) {
-  expect_arg(nargs, 1, "type", "value");
+  check_any(nargs, 1, "type");
   out[0].tag = TAG_NIL;
   if (args[0].tag == TAG_INT) set_string(&out[0], "integer");
   else if (args[0].tag == TAG_FLOAT) set_string(&out[0], "float");
@@ -3197,7 +3616,7 @@ static void install_more(LV *env) {
   set_global(env, "collectgarbage", &f);
 
   LV tbl;
-  lua54rt_newtable(&tbl);
+  lua54rt_newtable(&tbl, 0, 0);
   add_fn(&tbl, "insert", host_tinsert);
   add_fn(&tbl, "remove", host_tremove);
   add_fn(&tbl, "concat", host_tconcat);
@@ -3208,7 +3627,7 @@ static void install_more(LV *env) {
   register_table(env, "table", &tbl);
 
   LV math;
-  lua54rt_newtable(&math);
+  lua54rt_newtable(&math, 0, 0);
   add_fn(&math, "floor", host_mfloor);
   add_fn(&math, "ceil", host_mceil);
   add_fn(&math, "abs", host_mabs);
@@ -3253,7 +3672,7 @@ static void install_more(LV *env) {
   register_table(env, "math", &math);
 
   LV str;
-  lua54rt_newtable(&str);
+  lua54rt_newtable(&str, 0, 0);
   add_fn(&str, "len", host_slen);
   add_fn(&str, "sub", host_ssub);
   add_fn(&str, "upper", host_supper);
@@ -3270,7 +3689,7 @@ static void install_more(LV *env) {
   register_table(env, "string", &str);
 
   LV os_tbl;
-  lua54rt_newtable(&os_tbl);
+  lua54rt_newtable(&os_tbl, 0, 0);
   add_fn(&os_tbl, "clock", host_oclock);
   add_fn(&os_tbl, "time", host_otime);
   add_fn(&os_tbl, "getenv", host_ogetenv);
@@ -3278,8 +3697,8 @@ static void install_more(LV *env) {
   register_table(env, "os", &os_tbl);
 
   LV io_tbl;
-  lua54rt_newtable(&io_tbl);
-  lua54rt_newtable(&io_stdout);
+  lua54rt_newtable(&io_tbl, 0, 0);
+  lua54rt_newtable(&io_stdout, 0, 0);
   add_fn(&io_stdout, "write", host_fwrite);
   add_fn(&io_tbl, "write", host_iowrite);
   key = make_str("stdout", 6);
@@ -3289,8 +3708,9 @@ static void install_more(LV *env) {
   set_global(env, "_G", env);
   LV version = make_str("Lua 5.4", 7);
   set_global(env, "_VERSION", &version);
-  string_meta = (Table *)gc_alloc(GC_TABLE, sizeof(Table));
-  if (string_meta == NULL) die("out of memory");
+  LV smt;
+  lua54rt_newtable(&smt, 0, 0);
+  string_meta = (Table *)smt.v.p;
   key = make_str("__index", 7);
   raw_set(string_meta, &key, &str);
 }
@@ -3411,10 +3831,15 @@ static void traverse(GCObj *o) {
   switch (o->kind) {
     case GC_TABLE: {
       Table *t = (Table *)o;
-      for (size_t i = 0; i < t->cap; ++i) {
-        if (t->nodes[i].used) {
-          mark_value(&t->nodes[i].key);
-          mark_value(&t->nodes[i].val);
+      unsigned int asize = realasize(t);
+      for (unsigned int i = 0; i < asize; ++i) mark_value(&t->array[i]);
+      if (!table_isdummy(t)) {
+        /* the keys of empty entries are marked too: a key that is freed could be reused and match a lookup */
+        for (size_t i = 0; i < node_count(t); ++i) {
+          if (t->node[i].key.tag != TAG_NIL) {
+            mark_value(&t->node[i].key);
+            mark_value(&t->node[i].val);
+          }
         }
       }
       mark_obj(t->meta);
@@ -3471,7 +3896,12 @@ static void scan_c_stack(void) {
 static void free_object(GCObj *o) {
   set_remove(o);
   switch (o->kind) {
-    case GC_TABLE: free(((Table *)o)->nodes); break;
+    case GC_TABLE: {
+      Table *t = (Table *)o;
+      free(t->array);
+      if (!table_isdummy(t)) free(t->node);
+      break;
+    }
     case GC_VARARGS: free(((VarArgs *)o)->vals); break;
     default: break;
   }

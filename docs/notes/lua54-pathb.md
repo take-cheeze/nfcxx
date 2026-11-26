@@ -67,7 +67,7 @@ refused (`refused: opcode ... is not lowered yet`), and nothing is emitted for i
 | `FORPREP`, `FORLOOP` | `lua54rt_forprep` and `lua54rt_forloop` (lvm.c's rules, integer and float loops) |
 | `TBC` | `lua54rt_tbc`: the slot is registered to be closed (nil and false are not; another value needs `__close`) |
 | `TFORPREP`, `TFORCALL`, `TFORLOOP` | `TFORPREP` registers the fourth value (the closing value) as `TBC` does; `TFORCALL` calls `R[A]` with the state and control, results to `R[A+4..]`; the loop goes on while the first result is not nil |
-| `NEWTABLE`, `SETLIST` (with or without `EXTRAARG`) | `lua54rt_newtable`, `lua54rt_setlist` |
+| `NEWTABLE`, `SETLIST` (with or without `EXTRAARG`) | `lua54rt_newtable` (the size hints of lvm.c), `lua54rt_setlist` (grows the array part at once, then stores into it) |
 | `GETTABLE`, `GETI`, `GETFIELD`, `GETTABUP` | `lua54rt_gettable` (`GETTABUP` loads the upvalue first, for `_ENV`) |
 | `SETTABLE`, `SETI`, `SETFIELD`, `SETTABUP` | `lua54rt_settable` |
 | `SELF` | a copy of the object to `R[A+1]`, then `lua54rt_gettable` |
@@ -150,7 +150,12 @@ Implemented in the runtime, with ltm.c's order (the first operand's metatable, t
 `__index` and `__newindex` (tables, functions, and chains), `__call`, the arithmetic and bitwise events, `__unm`,
 `__bnot`, `__eq` (for two tables), `__lt`, `__le`, `__concat` (pairwise from the right, as luaV_concat), `__len`,
 `__tostring` (in `print` and `tostring`). Strings convert to numbers in arithmetic, and a string that does not convert
-gives lstrlib's `attempt to add a 'string' with a 'number'`. Only tables have metatables.
+gives lstrlib's `attempt to add a 'string' with a 'number'`. Only tables have metatables, and the string metatable.
+
+`__metatable` (`getmetatable` returns the field, `setmetatable` gives lbaselib's `cannot change a protected metatable`),
+`__pairs` (`pairs` returns the metamethod's three results; without it, `next`, the value and nil, so `pairs(nil)` fails in
+`next` as `for iterator`) and `__name` (in `luaL_typeerror`'s `got <name>` and in luaG_typeerror's `attempt to ... a
+<name> value`, and in `tostring`).
 
 ## Decisions
 
@@ -206,6 +211,6 @@ in the replacement function) leaks that buffer. The matcher's recursion is on th
 - **Library names in messages**: a `pcall` that calls a library function directly gives `'rep'` where Lua gives
   `'string.rep'`, and `math.random(2, 1)` called through `pcall` is `'random'` here. Calls from Lua code are the same.
 - **Full tracebacks**: lua.c prints `stack traceback:` lines after the message; only the message is printed.
-- **`__gc`, `__mode`, `__metatable`**, `__pairs`, and `__name` in messages.
+- **`__gc`, `__mode`**.
 - **Length of tables with holes**: `#` counts from 1 up to the first nil, which is one border; Lua's `#` can pick another.
 - **`LOADKX` with more than 2^17 constants** is lowered but untested.
