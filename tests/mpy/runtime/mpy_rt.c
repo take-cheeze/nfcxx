@@ -1278,6 +1278,42 @@ void mpy_store_attr(mpv obj, const char *name, size_t len, mpv value) {
   if (map_lookup((MpyDict *)(uintptr_t)dict, key, MAP_REMOVE) < 0) attr_error(obj, name, len);
 }
 
+/* The with statement (SETUP_WITH and WITH_CLEANUP, py/vm.c). __exit__ is looked up before __enter__, as mp_load_method does, and
+ * the exit method is bound to the context manager; the value of __enter__ is the statement's `as` value. */
+mpv mpy_with_exit(mpv ctx) { return mpy_load_attr(ctx, "__exit__", 8); }
+
+mpv mpy_with_enter(mpv ctx) {
+  mpv enter = mpy_load_attr(ctx, "__enter__", 9);
+  return mpy_call(enter, 0);
+}
+
+/* The class of an exception instance, as its __exit__ gets it: a user class, or the builtin class of a builtin exception. */
+static mpv exc_class_value(mpv exc) {
+  const MpyType *t = type_of(exc);
+  if (t->cls != NULL) return (mpv)(uintptr_t)t->cls;
+  return builtin_obj(BI_EXC + (int)(t - mpy_exc_info));
+}
+
+/* WITH_CLEANUP: when the body ended normally (top is None), __exit__(None, None, None) is called. When it raised (top is the
+ * exception), __exit__(class, exception, None) is called, and the exception is suppressed when that is true, else it stays
+ * on top for END_FINALLY to raise again. The result takes the place of the exit method. */
+mpv mpy_with_cleanup(mpv exit, mpv top) {
+  mpv r;
+  if (top == MPY_NONE) {
+    mpy_push(MPY_NONE);
+    mpy_push(MPY_NONE);
+    mpy_push(MPY_NONE);
+    mpy_call(exit, 3);
+    return MPY_NONE;
+  }
+  if (!is_exc(top)) fail("unwinding a with statement (a return or a break in its body) is not lowered yet");
+  mpy_push(exc_class_value(top));
+  mpy_push(top);
+  mpy_push(MPY_NONE);
+  r = mpy_call(exit, 3);
+  return mpy_truth(r) ? MPY_NONE : top;
+}
+
 /* LOAD_METHOD: the method of obj named name. The self it goes with is left in method_self (0 when the attribute is not a
  * method of the class, so the call takes no self). A list has append and pop. */
 mpv mpy_load_method(mpv obj, const char *name, size_t len) {

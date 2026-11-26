@@ -4,5 +4,8 @@ class Ctx:
     def __exit__(self, a, b, c):
         return False
 
-with Ctx() as c:
-    result = 1
+def f():
+    with Ctx():
+        return 1
+
+result = f()

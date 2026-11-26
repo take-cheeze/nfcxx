@@ -162,7 +162,7 @@ comparisons), `LOAD_CONST_STRING` and `LOAD_CONST_OBJ` (str constants), `MAKE_FU
 `MAKE_CLOSURE`, `CALL_FUNCTION`, `BUILD_LIST`/`BUILD_TUPLE`/`BUILD_SET`, `LOAD_SUBSCR`/`STORE_SUBSCR`, `BUILD_MAP`/`STORE_MAP`, `BUILD_SLICE`, `LOAD_NULL` (for `del`), `STORE_COMP` (list, dict and set
 comprehensions), `UNPACK_SEQUENCE`, `GET_ITER_STACK`
 and `FOR_ITER`, and `RETURN_VALUE`, and the exception and class opcodes (see Exceptions and Classes): `SETUP_EXCEPT`,
-`SETUP_FINALLY`, `POP_EXCEPT_JUMP`, `END_FINALLY`, `UNWIND_JUMP`, `RAISE_OBJ`, `RAISE_LAST`, `LOAD_BUILD_CLASS`, `LOAD_ATTR`,
+`SETUP_FINALLY`, `SETUP_WITH`, `WITH_CLEANUP`, `POP_EXCEPT_JUMP`, `END_FINALLY`, `UNWIND_JUMP`, `RAISE_OBJ`, `RAISE_LAST`, `LOAD_BUILD_CLASS`, `LOAD_ATTR`,
 `STORE_ATTR`, `LOAD_METHOD`/`CALL_METHOD`, `DELETE_FAST`, `DELETE_NAME`, `DUP_TOP_TWO`, with `LOAD_NAME`/`STORE_NAME` for the
 class namespace and `LOAD_GLOBAL`/`STORE_GLOBAL` for the globals. Any other opcode is refused by name and no IR is written.
 
@@ -241,8 +241,18 @@ RAISE_LAST), as the lowering follows it:
 - The runtime's `fail()` messages that begin with an exception class name ("KeyError: ...", "IndexError: ...") raise that
   class, so a try catches the runtime's own errors. Any other message is fatal, as before.
 - A break or continue out of a try (UNWIND_JUMP) pops the blocks it leaves (its count is the low 7 bits of the extra byte;
-  bit 0x80 is a break out of a for loop, which drops the iterator's slots in the depth). Leaving a block that is a finally
-  (a handler with `as`) would run its code, so that is refused by name. `raise ... from` is refused.
+  bit 0x80 is a break out of a for loop, which drops the iterator's slots in the depth). Leaving a with block is refused by
+  name, and so is leaving a finally that is not the name-deleting one of an `except ... as` (a finally would run its code).
+  `raise ... from` is refused.
+- A return (RETURN_VALUE) pops every block it is in, as MicroPython's unwind_return drops the except blocks. A `return`
+  out of a with statement is refused, since the reference runs its `__exit__` there. Before this, a return left its block on the
+  runtime's block stack, so a later raise could longjmp into the returned frame.
+- A with statement (`SETUP_WITH`, `WITH_CLEANUP`, `mpy_with_exit`, `mpy_with_enter`, `mpy_with_cleanup`): SETUP_WITH looks up
+  `__exit__` and calls `__enter__` before its block is set up (so an exception from `__enter__` is not caught by it), and
+  leaves [exit, context manager, as-value] on the stack. The block is kind 2, a handler entered with [exit, manager, exception].
+  The normal path is body, LOAD_CONST_NONE, WITH_CLEANUP, END_FINALLY; the exception path lands on WITH_CLEANUP. WITH_CLEANUP
+  calls __exit__(None, None, None) for the normal path, and __exit__(class, exception, None) for the other. A true result
+  suppresses the exception (END_FINALLY then continues), else END_FINALLY raises it again.
 
 ## Classes
 
@@ -278,8 +288,8 @@ RAISE_LAST), as the lowering follows it:
 ## Not yet
 
 Defaults and keyword arguments (`MAKE_FUNCTION_DEFARGS`, `MAKE_CLOSURE_DEFARGS`), `del` of a closure variable
-(`DELETE_DEREF`), generators, str methods and formatting, str ordering and repetition, `raise ... from`, a `with`
-statement, `super()`, big ints, the dict methods `copy`, `clear`, `setdefault`, `popitem` and `fromkeys`, the set methods
+(`DELETE_DEREF`), generators, str methods and formatting, str ordering and repetition, `raise ... from`, `super()`,
+big ints, the dict methods `copy`, `clear`, `setdefault`, `popitem` and `fromkeys`, the set methods
 and operators (`add`, `|`, `==`, and so on), the list methods other than append and pop, subscripts of a range, and the rest
 of the opcodes. Equality of two dicts, two sets, two ranges or two views, `str` of a list, tuple, set or view, and
 containment in a range are refused at run time until their repr and equality are built. Changing a dict's size during a
