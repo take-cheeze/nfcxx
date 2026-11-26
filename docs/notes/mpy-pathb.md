@@ -272,6 +272,14 @@ RAISE_LAST), as the lowering follows it:
   the class namespace as the module's name scope after that (`x` at module level then reads the class's `x`). This lowering
   restores the module's scope, as CPython does.
 - `del obj.name` is LOAD_NULL then STORE_ATTR (no DELETE_ATTR in MicroPython 1.29), so a store of 0 removes the attribute.
+- `super()` (MicroPython 1.29's compile.c special case): a method that calls `super()` takes the class's `__class__` cell as a
+  free variable. The class body makes that cell (its prelude lists it as an owned cell) and returns it, and `__build_class__`
+  sets it to the new class. `super().name(args)` is `LOAD_GLOBAL super`, `LOAD_DEREF __class__`, `LOAD_FAST self`,
+  `LOAD_SUPER_METHOD name`, the arguments and `CALL_METHOD`: `LOAD_SUPER_METHOD` writes the method over the super global's slot
+  and leaves the self (vm.c). `super()` alone is a call of the builtin `super` with the class and self, and its object's
+  attributes and methods are looked up in the bases of the class (`super_attr`): the class itself is not searched. A base
+  with no `__init__` gives object's (no argument) or the exception's (its one argument). `super(cls, self)` with self not an
+  instance of cls is a `TypeError` with no text, as the reference raises it.
 - Attribute names in the lowering that are builtin methods of the other types (`count`, `upper`, `keys`, ...) are refused
   by name: the lowering does not know the receiver's type, so a class's method of such a name is refused too.
 
@@ -288,7 +296,7 @@ RAISE_LAST), as the lowering follows it:
 ## Not yet
 
 Defaults and keyword arguments (`MAKE_FUNCTION_DEFARGS`, `MAKE_CLOSURE_DEFARGS`), `del` of a closure variable
-(`DELETE_DEREF`), generators, str methods and formatting, str ordering and repetition, `raise ... from`, `super()`,
+(`DELETE_DEREF`), generators, str methods and formatting, str ordering and repetition, `raise ... from`,
 big ints, the dict methods `copy`, `clear`, `setdefault`, `popitem` and `fromkeys`, the set methods
 and operators (`add`, `|`, `==`, and so on), the list methods other than append and pop, subscripts of a range, and the rest
 of the opcodes. Equality of two dicts, two sets, two ranges or two views, `str` of a list, tuple, set or view, and
