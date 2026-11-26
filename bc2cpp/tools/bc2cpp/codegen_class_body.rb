@@ -778,7 +778,8 @@ class CodeGen
   end
 
   def rom_install_line(site, table)
-    "  bc2cpp_mt_install(M, #{site[:cls]}, #{table}, (int)(sizeof(#{table}) / sizeof(#{table}[0])), #{!!site[:singleton]});\n"
+    "  bc2cpp_mt_chain(M, #{site[:cls]}, #{table}, (int)(sizeof(#{table}) / sizeof(#{table}[0])), " \
+      "BC2CPP_MT_TBL(#{table}), #{!!site[:singleton]});\n"
   end
 
   # ROM_CLASS_BODY_DEFS' verify (BC2CPP_UNREGISTERED_VERIFY): the class finds, as its own method, the function and

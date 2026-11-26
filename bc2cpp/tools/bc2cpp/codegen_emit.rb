@@ -557,7 +557,14 @@ class CodeGen
       tables << "  #{macro}(#{row[:entry]}, #{row[:key]}, #{flags})\n"
     end
     tables << "};\n"
-    "  bc2cpp_mt_install(M, #{var}, #{table}, (int)(sizeof(#{table}) / sizeof(#{table}[0])), #{singleton});\n"
+    tables << rom_table_wrapper(table)
+    "  bc2cpp_mt_chain(M, #{var}, #{table}, (int)(sizeof(#{table}) / sizeof(#{table}[0])), BC2CPP_MT_TBL(#{table}), " \
+      "#{singleton});\n"
+  end
+
+  # ROM_TBL: the table's own const layer (MRB_MT_ROM_TBL), which a class with no table yet installs with no heap.
+  def rom_table_wrapper(table)
+    "#ifdef MRB_MT_ROM_TBL\nstatic const mrb_mt_tbl #{table}_tbl = MRB_MT_ROM_TBL(#{table});\n#endif\n"
   end
 
   # The owner's table and its rows by name, with the visibility each row gives (ROM_CLASS_BODY_DEFS reads them).
@@ -585,12 +592,22 @@ class CodeGen
   # ROM_INSTALL: chains one table into the class (its origin, as mrb_define_method_raw writes there) and drops the
   # heap top's entries of the same names (a class unit's or a native's definition), which mrb_define_method replaced.
   # A table already in the chain (a class unit installed it, ROM_CLASS_BODY_DEFS) is not chained again.
+  # ROM_TBL: `tbl` is the table's const layer (rom_table_wrapper), or null where the mruby has none.
   ROM_INSTALL_HELPER = <<~CPP
-    [[maybe_unused]] static void bc2cpp_mt_install(mrb_state* M, struct RClass* c, const mrb_mt_entry* entries, int n, bool singleton) {
+    #ifdef MRB_MT_ROM_TBL
+    #define BC2CPP_MT_TBL(t) (&t##_tbl)
+    #else
+    #define BC2CPP_MT_TBL(t) nullptr
+    #endif
+    [[maybe_unused]] static void bc2cpp_mt_chain(mrb_state* M, struct RClass* c, const mrb_mt_entry* entries, int n, const mrb_mt_tbl* tbl, bool singleton) {
       if (singleton) c = mrb_class_ptr(mrb_singleton_class(M, mrb_obj_value(c)));
       MRB_CLASS_ORIGIN(c);
       bool chained = false;
       for (mrb_mt_tbl* t = c->mt; t && !chained; t = t->next) chained = t->ptr == entries;
+    #ifdef MRB_MT_ROM_TBL
+      if (!chained && tbl) mrb_mt_init_rom_tbl(M, c, tbl);
+      else
+    #endif
       if (!chained) mrb_mt_init_rom(M, c, entries, n);
       const int flag_bits = MRB_MT_READONLY_BIT | MRB_MT_FROZEN_BIT;
       for (mrb_mt_tbl* t = c->mt; t && t->ptr != entries; t = t->next) {
@@ -612,6 +629,9 @@ class CodeGen
         }
       }
       mrb_method_cache_clear(M);
+    }
+    [[maybe_unused]] static void bc2cpp_mt_install(mrb_state* M, struct RClass* c, const mrb_mt_entry* entries, int n, bool singleton) {
+      bc2cpp_mt_chain(M, c, entries, n, nullptr, singleton);
     }
   CPP
 
