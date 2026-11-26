@@ -8,6 +8,9 @@ if ! command -v lake >/dev/null 2>&1; then
   exit 0
 fi
 lake build nfcxx_ir || { echo "FAIL tests/lean: build"; exit 1; }
+# The speculation model (NfcxxIR/Speculation.lean): its theorems and worked examples are checked by the build.
+lake build NfcxxIR || { echo "FAIL tests/lean: speculation model does not check"; exit 1; }
+echo "ok: the speculation model (NfcxxIR/Speculation.lean) checks: guard soundness, equivalence, never stuck"
 exe=.lake/build/bin/nfcxx_ir
 fail=0
 if ! "$exe" check ../tests/pathb-ir/*.ir > /dev/null; then
