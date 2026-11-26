@@ -202,8 +202,13 @@ copies its arguments into its locals `loc.N` and stores its result through `ret`
 parameter count, its signature and its defaults. A call pushes each argument on the runtime value stack (`mpy_push`), the
 keyword pairs (the name, then the value) after the positional ones, then calls `mpy_call_kw(fn, n, k)`, which matches them
 to the parameters as `bc.c`'s `mp_setup_code_state` does and dispatches. The parameters are laid out as in bc.c: the positional
-ones (the captured cells among them), then the keyword-only ones, then the `*args` tuple. `**kwargs` and generators are refused.
-`mpy_call_kw` puts the extra positional arguments in the `*args` tuple, when the function has one (`call_function`).
+ones (the captured cells among them), then the keyword-only ones, then the `*args` tuple, then the `**kwargs` dict (the last
+local, as bc.c has it). Generators are refused.
+`mpy_call_kw` puts the extra positional arguments in the `*args` tuple, when the function has one (`call_function`). A keyword
+argument that no parameter takes goes into the `**kwargs` dict, which is built with the keyword count as its size, as bc.c's
+`mp_obj_new_dict(n_kw)` is, so its iteration order is the reference's. A call's `**mapping` argument (`CALL_FUNCTION_VAR_KW`,
+`CALL_METHOD_VAR_KW` with a NULL name in the pair) is expanded into keyword pairs in `mpy_call_kw`, in the mapping's table order,
+as `mp_call_prepare_args_n_kw_var` does. A call with a `*args` argument (a non-zero bitmap on top) is refused.
 
 Default arguments: `MAKE_FUNCTION_DEFARGS` and `MAKE_CLOSURE_DEFARGS` take the defaults tuple, and the keyword-only defaults dict on top of it (or 0). The runtime keeps the dict (`mpy_make_func`
 takes it with the keyword-only count `nkw` and the `*args` flag `star`), and a keyword-only parameter that no argument gives
@@ -391,7 +396,9 @@ a coroutine (vm.c's unwind_jump and END_FINALLY), and the lowering does the same
 
 ## Not yet
 
-Generators, `**kwargs`, str formatting with a format spec or a conversion, `%`, and the str methods not listed above (`title`,
+Generators, a call with a `*args` argument (`f(*xs)`), a `**` mapping that is not a dict or has a non-str key (the reference's
+messages for these differ: `AttributeError: 'int' object has no attribute 'keys'`, `can't convert 'int' object to str
+implicitly`), str formatting with a format spec or a conversion, `%`, and the str methods not listed above (`title`,
 which the reference does not have, `splitlines`, ...), str ordering and repetition,
 big ints, the list and str methods the lowering refuses by name (`kBuiltinMethods`: `title`, `splitlines`, ...), subscripts of a range, and the rest
 of the opcodes. Equality of two dicts, two ranges or two views, `str` of a list, tuple, set or view, and
