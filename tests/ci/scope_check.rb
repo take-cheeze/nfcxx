@@ -104,14 +104,16 @@ check.call("bc2cpp paths name only scripts a world compiles (#{(listed - world_s
 
 LEGS = ['cases (QBE and gcc backends)', 'uop core and numpy (QBE backend)'].freeze
 
-def outcomes(full, pathb, bc2cpp = false, cext = false)
+def outcomes(full, pathb, bc2cpp = false, cext = false, mrbbc = false)
   needs = { 'pathb-changes' => { 'result' => 'success', 'outputs' => {
     'full_ci' => full.to_s, 'changed' => pathb.to_s,
     'test_matrix' => JSON.generate(LEGS.map { |name| { 'name' => name, 'run' => 'true' } })
   } },
             'bc2cpp-changes' => { 'result' => 'success', 'outputs' => { 'changed' => bc2cpp.to_s } },
-            'cext2mrbgem-changes' => { 'result' => 'success', 'outputs' => { 'changed' => cext.to_s } } }
-  [[CiScope::FULL_JOBS, full], [CiScope::PATHB_JOBS, pathb], [CiScope::BC2CPP_JOBS, bc2cpp], [CiScope::CEXT_JOBS, cext]].each do |names, enabled|
+            'cext2mrbgem-changes' => { 'result' => 'success', 'outputs' => { 'changed' => cext.to_s } },
+            'mrbbc-changes' => { 'result' => 'success', 'outputs' => { 'changed' => mrbbc.to_s } } }
+  [[CiScope::FULL_JOBS, full], [CiScope::PATHB_JOBS, pathb], [CiScope::BC2CPP_JOBS, bc2cpp], [CiScope::CEXT_JOBS, cext],
+   [CiScope::MRBBC_JOBS, mrbbc]].each do |names, enabled|
     names.each { |name| needs[name] = { 'result' => enabled ? 'success' : 'skipped' } }
   end
   needs[CiScope::SELF_AOT_JOB] = { 'result' => bc2cpp ? 'success' : 'skipped' }
@@ -132,6 +134,74 @@ cext_skipped = outcomes(false, false, false, true)
 cext_skipped['cext2mrbgem']['result'] = 'skipped'
 rejects.call('cext2mrbgem change: job skipped') { CiScope.validate(cext_skipped, nil, 'pull_request') }
 check.call('no cext2mrbgem change: its job may be skipped') { CiScope.validate(outcomes(true, true, true, false), nil, 'pull_request'); true }
+
+# mrbbc: its job is selected by its own filter, alone or with the rest, and must have run (not been skipped) when selected.
+check.call('mrbbc change alone: its job is required') { CiScope.validate(outcomes(false, false, false, false, true), nil, 'pull_request'); true }
+check.call('mrbbc change with the rest: its job is required') { CiScope.validate(outcomes(true, true, true, true, true), nil, 'pull_request'); true }
+%w[skipped failure cancelled].each do |status|
+  needs = outcomes(false, false, false, false, true)
+  needs['mrbbc']['result'] = status
+  rejects.call("mrbbc change: job #{status}") { CiScope.validate(needs, nil, 'pull_request') }
+end
+needs = outcomes(false, false, false, false, false)
+needs['mrbbc']['result'] = 'success'
+rejects.call('no mrbbc change: a job that ran anyway is a selection mismatch') { CiScope.validate(needs, nil, 'pull_request') }
+['', 'unknown', nil, true].each do |value|
+  needs = outcomes(false, false, false, false, true)
+  needs['mrbbc-changes']['outputs']['changed'] = value
+  rejects.call("invalid mrbbc changed=#{value.inspect}") { CiScope.validate(needs) }
+end
+needs = outcomes(false, false, false, false, true)
+needs['mrbbc-changes']['result'] = 'failure'
+rejects.call('mrbbc selection failed') { CiScope.validate(needs) }
+
+# The mrbbc filter (ci.yml, mrbbc-changes) covers what the suites read: every repository path a tests/mrbbc/*/run.sh names as
+# $root/PATH, and, for a build output, the scripts and submodules that build it. The job runs every suite, and the lowering
+# in each value layout and under GC stress.
+mrbbc_filter = YAML.safe_load(ci_workflow.fetch('jobs').fetch('mrbbc-changes').fetch('steps')
+                                         .map { |step| step.fetch('with', {})['filters'] }.compact.first).fetch('mrbbc')
+mrbbc_built_by = { 'build/mruby-tool' => %w[scripts/setup-mruby.sh scripts/mruby-tool-config.rb scripts/mruby-ninja.rb
+                                            3rd/mruby-onig-regexp 3rd/mruby-json],
+                   'build/qbe' => %w[scripts/setup-qbe.sh 3rd/qbe] }
+mrbbc_runs = Dir[File.join(repo, 'tests/mrbbc/*/run.sh')].sort
+mrbbc_read = mrbbc_runs.flat_map { |file| File.read(file).scan(%r{\$root/([\w./-]+)}).flatten }.uniq.flat_map do |path|
+  built = mrbbc_built_by.keys.find { |dir| path == dir || path.start_with?("#{dir}/") }
+  if built then mrbbc_built_by.fetch(built)
+  elsif path.start_with?('build/') then abort "FAIL mrbbc: #{path} is a build output with no entry in mrbbc_built_by"
+  elsif File.directory?(File.join(repo, path)) then ["#{path}/a"]
+  else [path]
+  end
+end
+# A trailing /** is any path under the directory, as in paths-filter; otherwise the glob is one path.
+mrbbc_matches = lambda do |path|
+  mrbbc_filter.any? do |glob|
+    glob.end_with?('/**') ? path.start_with?(glob.delete_suffix('**')) : File.fnmatch?(glob, path, File::FNM_PATHNAME)
+  end
+end
+check.call('the mrbbc run scripts name repository paths') { mrbbc_runs.length >= 3 && mrbbc_read.length > 5 }
+check.call("the mrbbc filter covers what the suites read (#{mrbbc_read.reject(&mrbbc_matches).join(' ')})") do
+  mrbbc_read.all?(&mrbbc_matches)
+end
+%w[tools/mrbbc/mrb_lower.cpp tests/mrbbc/lower/new.rb tests/mrbbc/runtime/mrbrt.c bc2cpp/tools/mrbc_rb/cli.rb
+   .github/workflows/ci.yml scripts/ci-scope.rb].each do |path|
+  check.call("the mrbbc filter covers #{path}") { mrbbc_matches.call(path) }
+end
+%w[bc2cpp/tools/bc2cpp/bc2cpp.rb tools/lua54bc/a.cpp docs/notes/mrbbc-pathb.md].each do |path|
+  check.call("the mrbbc filter leaves out #{path}") { !mrbbc_matches.call(path) }
+end
+mrbbc_legs = ci_workflow.fetch('jobs').fetch('mrbbc').fetch('strategy').fetch('matrix').fetch('include').map { |leg| leg.fetch('run') }
+mrbbc_text = mrbbc_legs.join("\n")
+mrbbc_runs.each do |file|
+  name = file.delete_prefix("#{repo}/")
+  check.call("the mrbbc job runs #{name}") { mrbbc_text.include?(name) }
+end
+lowering = mrbbc_text.lines.grep(%r{tests/mrbbc/lower/run\.sh})
+%w[4 16].each do |value|
+  check.call("the mrbbc job lowers in value layout #{value}") { lowering.any? { |line| line.include?("MRBBC_VALUE=#{value} ") } }
+end
+check.call('the mrbbc job lowers in the default value layout') { lowering.any? { |line| !line.include?('MRBBC_VALUE=') } }
+check.call('the mrbbc job lowers under GC stress') { lowering.any? { |line| line.include?('MRBBC_GC_THRESHOLD=1 ') } }
+check.call('the mrbbc lowering runs under bundle exec (Prism 1.9.0)') { lowering.all? { |line| line.include?('bundle exec ') } }
 
 # The third value is bc2cpp-changes: false + true is a change to bc2cpp/ alone, where only the bc2cpp jobs are selected.
 [[true, true, true], [true, true, false], [true, false, true], [true, false, false], [false, false, true], [false, false, false]]
