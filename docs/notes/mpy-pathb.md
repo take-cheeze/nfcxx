@@ -104,7 +104,7 @@ is {key, value}. An empty slot has key 0; a deleted one has the sentinel key 0x1
   `function expected at most 3 arguments, got N`, ...). `copy()` copies the table slot for slot (deleted slots too), `clear()`
   drops the table, `setdefault(k[, v])` hashes k and adds it with v (None), `popitem()` removes and returns the first live slot
   (`KeyError: popitem(): dictionary is empty`), and `fromkeys(iterable[, v])` is the classmethod: `d.fromkeys(...)` is called with
-  no self, and its table is sized by the iterable's length. Iterating a str (which `fromkeys` needs) is still refused. The
+  no self, and its table is sized by the iterable's length. Iterating a str is lowered (see Strings), so `fromkeys` takes a str. The
   lowering does not refuse `copy`, `clear`, `setdefault`, `popitem` or `fromkeys` by name, since the receiver's type is not
   known there: on a list, str or other value that is not a dict the runtime fails at run time ("a method copy of a 'list' is
   not lowered yet"). Read as a value (`f = d.get`) a dict method fails at run time.
@@ -143,7 +143,8 @@ is {key, value}. An empty slot has key 0; a deleted one has the sentinel key 0x1
   which the reference prints as `NotImplementedError: ` (with the trailing space). The value of a store must be a list or a
   tuple (`object 'int' isn't a tuple or list`); it is copied first, so `xs[1:4] = xs` works.
 - A tuple takes a step of 1 only, as does a str (`NotImplementedError: only slices with step=1 (aka None) are supported`).
-  A str is indexed and sliced by character, so `s[i]` is a one-character str. A tuple or str store or delete is `'tuple'
+  A str is indexed and sliced by character, so `s[i]` is a one-character str. Iterating a str (`for c in s`, GET_ITER_STACK
+and FOR_ITER, and `dict.fromkeys(s)`) gives one-character strs, one per UTF-8 character. A tuple or str store or delete is `'tuple'
   object doesn't support item assignment` (or `deletion`).
 - A list comprehension stores each value with `STORE_COMP` (kind 0), the collection being `arg >> 2` slots below the top (the
   offset of `vm.c`'s `sp[-(unum >> 2)]`). MicroPython 1.29 has no `LIST_APPEND` opcode; `STORE_COMP` does that job.
@@ -253,12 +254,20 @@ RAISE_LAST), as the lowering follows it:
 - The runtime's `fail()` messages that begin with an exception class name ("KeyError: ...", "IndexError: ...") raise that
   class, so a try catches the runtime's own errors. Any other message is fatal, as before.
 - A break or continue out of a try (UNWIND_JUMP) pops the blocks it leaves (its count is the low 7 bits of the extra byte;
-  bit 0x80 is a break out of a for loop, which drops the iterator's slots in the depth). Leaving a with block is refused by
-  name, and so is leaving a finally that is not the name-deleting one of an `except ... as` (a finally would run its code).
-  `raise ... from` is refused.
-- A return (RETURN_VALUE) pops every block it is in, as MicroPython's unwind_return drops the except blocks. A `return`
-  out of a with statement is refused, since the reference runs its `__exit__` there. Before this, a return left its block on the
-  runtime's block stack, so a later raise could longjmp into the returned frame.
+  bit 0x80 is a break out of a for loop, which drops the iterator's slots in the depth). Leaving a finally that is not the
+  name-deleting one of an `except ... as` is refused by name (a finally would run its code).
+- Leaving a with block (a break, a continue or a return out of its body) calls its `__exit__(None, None, None)` as WITH_CLEANUP's
+  normal path does, innermost block first. The block is dropped before the exit is called, so an exception from the exit goes to
+  the blocks around the statement (the reference may differ there; this is not checked). The walk records each with block with
+  its exit method's stack slot, and each for loop as an entry (kind 3) with its iterator's base slot, so a break that the
+  compiler emits as an UNWIND_JUMP (0x80) finds the slot the stack is cut back to. A break with no block to leave is four
+  POP_TOPs and a JUMP, as mp_emit_bc_unwind_jump emits it; the JUMP at the loop's base ends the loop's entry.
+- A return (RETURN_VALUE) leaves every block it is in, as MicroPython's unwind_return does, the with blocks included.
+  Before this, a return left its block on the runtime's block stack, so a later raise could longjmp into the returned frame.
+  A return out of a real `finally` still does not run the finally code: it is popped silently, as before (a gap, see Not yet).
+- `raise X from Y` (RAISE_FROM) is lowered as `mpy_raise_from`. MicroPython 1.29 does not set a cause: with a cause that is not
+  None, it prints `Warning: exception chaining not supported` on stderr (`mp_warning`) and raises X, so the lowering does the
+  same and the cause is dropped. `from None` prints nothing. The uncaught line is `Name: text`, as for `raise X`.
 - A with statement (`SETUP_WITH`, `WITH_CLEANUP`, `mpy_with_exit`, `mpy_with_enter`, `mpy_with_cleanup`): SETUP_WITH looks up
   `__exit__` and calls `__enter__` before its block is set up (so an exception from `__enter__` is not caught by it), and
   leaves [exit, context manager, as-value] on the stack. The block is kind 2, a handler entered with [exit, manager, exception].
@@ -308,11 +317,13 @@ RAISE_LAST), as the lowering follows it:
 ## Not yet
 
 Defaults and keyword arguments (`MAKE_FUNCTION_DEFARGS`, `MAKE_CLOSURE_DEFARGS`), `del` of a closure variable
-(`DELETE_DEREF`), generators, str methods and formatting, str ordering and repetition, `raise ... from`,
+(`DELETE_DEREF`), generators, str methods and formatting, str ordering and repetition,
 big ints, the set methods
 `pop`, `update`, `issubset` and the rest, `^` and the set comparisons, the list methods other than append and pop, subscripts of a range, and the rest
 of the opcodes. Equality of two dicts, two sets, two ranges or two views, `str` of a list, tuple, set or view, and
 containment in a range are refused at run time until their repr and equality are built. Changing a dict's size during a
 `for` over it is not checked (see Dicts). Identity of strs: a str built at run time is a new object, but MicroPython interns
 short strs, so `'a' + 'b' is 'ab'` is True there and False here. Nothing is freed: a str lives until the process ends. Also
-the `luac`-style opcode oracle is still blocked, and string pattern matching is paused.
+the `luac`-style opcode oracle is still blocked, and string pattern matching is paused. A return out of a `try ... finally` does
+not run the finally code (it is popped silently; a break out of one is refused). A `return` or `break` out of a `with` whose
+`__exit__` raises is not matched against the reference.
