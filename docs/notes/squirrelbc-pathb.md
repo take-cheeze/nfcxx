@@ -114,8 +114,8 @@ exits 1, as `sqref` does.
 - Arrays (sqarray.cpp, sqvm.cpp Get and Set). A GET or SET with an integer index out of range (a negative index is out of
   range) is `the index 'K' does not exist` at once, with no fallback to the root table. A SET with a key that is not an
   integer is `indexing array with T`. A GET with a string key that is not a method is `the index 'K' does not exist`; an
-  array method that is not lowered (sort, map, ...) is `unsupported array method` at run time, where the reference runs
-  it. `append` and `push` (the result is the array), `pop` (`empty array` on an empty one), `reverse` (the array),
+  array method that is not lowered (top, remove, resize, clear, ...) is `unsupported array method` at run time, where the
+  reference runs it. `sort`, `map`, `apply`, `reduce` and `filter` are lowered (section 4a). `append` and `push` (the result is the array), `pop` (`empty array` on an empty one), `reverse` (the array),
   `slice` (`wrong indexes`, `slice out of range`; a null or non-number start or end is `parameter N has an invalid type
   'T' ; expected: 'integer|float'`), `find` (the index, or null), `extend` (the items of an array appended; the result is
   the array) and `insert` (the value before the index, which may be the count; `index out of range` otherwise, a
@@ -131,8 +131,9 @@ exits 1, as `sqref` does.
   4 bytes in the payload's low 32 bits. Arithmetic on a float, or on an integer and a float, is done in float (an integer
   converts to float first, `tofloat`); `/` gives inf or nan for a zero divisor, and `%` is `fmod` of the two as doubles,
   stored as a float. `print`, `tostring` and the concatenation with a string print a float with `%g` (ToString, sqvm.cpp);
-  a comparison or equality error prints it with `%.14g` (PrintObjVal). Equal floats compare as 0 in ObjCmp, so `<`,
-  `<=`, `>`, `>=` agree with the reference for every value the subset makes (no NaN is tested). `IsFalse` is true for
+  a comparison or equality error prints it with `%.14g` (PrintObjVal). ObjCmp compares two floats by their bits
+  first: equal bits are 0, else the value decides. So 0.0 and -0.0 are not equal: `0.0 <= -0.0` is false and
+  `0.0 >= -0.0` is true, as the reference gives (`lower/float_zero_cmp.nut`). No NaN is tested. `IsFalse` is true for
   +0.0 and -0.0. A float is equal to an integer of the same value (IsEqual compares as floats). The oracle and the driver
   print a float result with `%g`.
 - Strings, tables and closures are all payloads that are never 0, so `IsFalse` is still "payload == 0" (sqvm.cpp's
@@ -184,20 +185,54 @@ exits 1, as `sqref` does.
   so its parameters are the caller's registers above it, and the result is written to the caller's target register (arg0)
   when it has one. `nargs` counts `this`: `wrong number of parameters (N passed, M required)` for a mismatch. A closure
   made without an environment takes the `this` the caller passes; a closure with a bound register takes that table.
+
+## 4a. Callbacks: the re-entrant call path
+
+`sort`, `map`, `apply`, `reduce` and `filter` of an array call a Squirrel closure from inside the runtime (sqbaselib.cpp
+__map_array, array_reduce, array_filter, _hsort). The runtime is C (`tests/squirrelbc/runtime/sqbcrt.c`), and the lowered
+code is `sq_fn_N` over the same flat stack, so the call needs no new IR form. The design:
+
+- Stack discipline. `g_top` is the first value above the running frame. `sqbc_rt_call` sets it to `frame + stacksize`
+  while a closure runs and to `frame + nargs` while a native runs, and restores the previous value on return. The
+  reference has the same discipline: StartCall moves the frame to the call's `this` register, and every register above
+  that is a dead temporary (the compiler allocates temporaries stack-wise above the live locals). So a callback's frame,
+  built at `g_top`, overlaps only dead values, and the live registers of the calling frames are untouched.
+- The call. `call_from_native` copies `this` and the arguments to `g_top` and calls `sqbc_rt_call`. The callback therefore
+  gets the same parameter count check, the same stack overflow check, the same closing of its outer variables when it
+  returns (`close_outers`), and the same error path as a call from the lowered code. A runtime error in the callback
+  prints its message and exits 1; the reference's SQ_ERROR propagation prints the same message from the same place.
+- Arguments, as the reference pushes them. map and apply (`__map_array`): `this` (the array), the item, the index when
+  the callee takes three values, the array when it takes four; the count is the callee's parameter count (a native's when
+  it checks one, else 4). filter: `this`, the index, the item. reduce: `this`, the accumulated value, the item. sort: the
+  root table, a, b. A callee of map with one parameter is called with the array below the item, as `sq_call` reads its
+  callee from there: `attempt to call 'array'`.
+- Order. sort is the reference's heapsort (_hsort, the same sift-down), so equal items end where the reference leaves
+  them (`lower/sort_pairs.nut`). A comparison function's result is read as sq_getinteger reads it: an integer, a float
+  truncated, a boolean as 0 or 1; anything else is `numeric value expected as return value of the compare function`.
+  The array is checked after each call: a change of the item count or of the item buffer is `array resized during sort
+  operation`. The buffer check compares our buffer; the reference compares its vector's, so a resize that the two
+  allocate differently is not modelled (no test does one).
+- Not modelled: a callback with more than four parameters. The reference reads stack values that were not pushed
+  there; the runtime refuses it with `callback with more than 4 parameters is not lowered`. No test.
+- No producer change: a CALL of `arr.map(f)` is the same PREPCALL and CALL as any other native method; the callbacks are
+  natives of the runtime, and a nested function with a default parameter or a vararg is still refused by the producer
+  (`lower/err/callback_default.nut`, `lower/err/callback_vararg.nut`).
 - Wrapping: `+ - *` and unary minus wrap, as the reference does on LP64 in practice. `INT64_MIN / -1` is undefined in the
   reference (its fast path has no check), and the runtime wraps. It is not tested.
 
 ## 5. Tests
 
-- `tests/squirrelbc/run.sh`: the reader. 98 streams (`corpus/*.nut`, `lower/*.nut` and the synthetic stream of
+- `tests/squirrelbc/run.sh`: the reader. 122 streams (`corpus/*.nut`, `lower/*.nut` and the synthetic stream of
   `lower/synth.rb`) compile with `sq -c`, load in `sq_dump` (every instruction named, stream consumed), and run through
   `sqref` with the same result as their source. Also: the opcode table against the reference header; a golden dump
   (`reader/ints.dump`); and five malformed streams (truncated, trailing byte, bad tag, SQInteger size 4, corrupt TAIL),
   each refused with exit 1.
-- `tests/squirrelbc/lower/run.sh`: the end-to-end suite. 98 programs (`lower/*.nut`: integers, strings, tables, calls,
+- `tests/squirrelbc/lower/run.sh`: the end-to-end suite. 109 programs (`lower/*.nut`: integers, strings, tables, calls,
   closures, print, tostring, arrays, floats, classes and inheritance, number and string conversions, array methods
-  (including extend and insert), string methods (slice, find, tolower, toupper), class and instance delegates, class
-  attributes) match `sqref` on the printed result and the status; 65 runtime errors (`lower/rterr/`) match the message and status 1; 6 programs (`lower/err/`) are refused with exit 3; `lower/synth.rb` writes a stream with DLOAD, DMOVE, LINE and
+  (including extend and insert, and the callbacks sort, map, apply, reduce, filter: `sort_*`, `map_basic`, `reduce_basic`,
+  `filter_basic`, `callback_*`), string methods (slice, find, tolower, toupper), class and instance delegates, class
+  attributes) match `sqref` on the printed result and the status; 78 runtime errors (`lower/rterr/`, the callback ones
+  included) match the message and status 1; 8 programs (`lower/err/`) are refused with exit 3; `lower/synth.rb` writes a stream with DLOAD, DMOVE, LINE and
   LOADNULLS. A string result is printed by `sqref` and by the driver alike (the text, one line).
 - The oracle is `tests/squirrelbc/oracle/sqref.c`: the reference VM, built against the reference tree's
   `libsquirrel_static.a`. It loads `.nut` (compile) and `.cnut` (`sq_readclosure`) and prints the result line.
@@ -216,10 +251,12 @@ source tree). Without them they exit 77 (skip). The lowering suite also needs `b
   the same size as SQInteger (8 bytes on LP64).
 - Only the LP64 layout is read. A wide SQChar, a 32-bit SQInteger, or a big-endian writer is refused.
 - Nothing above is verified against a 32-bit or Windows reference build.
-- Still not lowered: an array method other than `len`, `append`, `push`, `pop`, `reverse`, `slice`, `find`, `extend` and
-  `insert` (`sort`, `map`, `top`, `remove`, `resize`, ...), and a string method other than `len`, `tostring`, `tofloat`,
-  `tointeger`, `slice`, `find`, `tolower` and `toupper` (`weakref`) are `unsupported ... method` at run time, where the
-  reference runs them; no test.
+- Still not lowered: an array method other than `len`, `append`, `push`, `pop`, `reverse`, `slice`, `find`, `extend`,
+  `insert`, `sort`, `map`, `apply`, `reduce` and `filter` (`top`, `remove`, `resize`, `clear`, `weakref`), and a string
+  method other than `len`, `tostring`, `tofloat`, `tointeger`, `slice`, `find`, `tolower` and `toupper` (`weakref`) are
+  `unsupported ... method` at run time, where the reference runs them; no test. Every string method of the reference
+  except `weakref` is lowered. A class's `_cmp` metamethod, which ObjCmp calls for a table or an instance in a sort, is
+  refused with the other class metamethods (section 4).
   A method of the table delegate other than `tostring` (`t.len()`, `t.rawget` ...) is "the index does not exist". A
   float as a table or array key is `float keys are not lowered` at run time (the reference hashes floats; not modelled).
 - Objects (strings, tables, closures) are never freed: the runtime is a test harness with no collector, so a long loop
