@@ -18,6 +18,10 @@
 # symbols, lv, instructions) from it.
 
 require_relative 'world_root'
+require_relative 'backend'
+# Standalone backends do not load the C++ world's signatures or inference passes. A deferred/self runner dispatches
+# again in BC2CPP_MAIN, after its normal source loading and compiled-method registration.
+Bc2cppBackend.dispatch!(ARGV) if $PROGRAM_NAME == __FILE__ && !defined?(BC2CPP_DEFER_MAIN)
 require_relative 'probe_stats'
 require 'shellwords'
 require 'set'
@@ -287,6 +291,8 @@ end
 BC2CPP_MAIN = lambda do
   next unless $PROGRAM_NAME == __FILE__
 
+  Bc2cppBackend.dispatch!(ARGV)
+
   InFramePlacement.refuse_if_requested!
   FileIdentity.sources_fixed!
   # --annotated keeps the generated C++'s `//` proof and dispatch comments (the checks that read them pass it);
@@ -304,7 +310,7 @@ BC2CPP_MAIN = lambda do
   abort 'bc2cpp: BC2CPP_TYPE_CHECK_ONLY cannot emit shared units' if type_check_only && shared_units
   abort 'bc2cpp: cannot combine --units and --type-check-variants' if shared_units && type_check_variants
   if srcs.empty?
-    raise "usage: bc2cpp.rb [#{ANNOTATED_FLAG}] [#{SharedGeneration::FLAG} PLAN] file1.rb [file2.rb ...]  " \
+    raise "usage: bc2cpp.rb [--backend=cpp|mrbbc] [#{ANNOTATED_FLAG}] [#{SharedGeneration::FLAG} PLAN] file1.rb [file2.rb ...]  " \
           '(env: MRBC, OUT_SYMBOL, OUT_DIR, ONLY_OWNERS)'
   end
   # Closed world only: checked before any work.

@@ -33,6 +33,46 @@ tests/mrbbc/lower/run.sh
 
 Both exit 77 when mrbc, the mruby interpreter or QBE is missing; `MRBC`, `MRUBY` and `QBE` override the paths.
 
+## bc2cpp backend
+
+bc2cpp can send its usual `mrbc_rb` bytecode to this producer instead of emitting C++:
+
+```sh
+scripts/setup-mrbbc.sh
+scripts/setup-qbe.sh
+mkdir -p build/ruby-app
+OUT_DIR=build/ruby-app OUT_SYMBOL=app \
+  bundle exec ruby bc2cpp/tools/bc2cpp/bc2cpp.rb --backend=mrbbc app.rb > build/ruby-app/app.ir
+bundle exec ruby scripts/pathb-qbe-emit.rb build/ruby-app/app.ir > build/ruby-app/app.ssa
+build/qbe/qbe build/ruby-app/app.ssa > build/ruby-app/app.s
+cc -std=c99 -DMRBBC_VALUE=8 build/ruby-app/app.s \
+  tests/mrbbc/runtime/mrbrt.c tests/mrbbc/runtime/driver.c -o build/ruby-app/app
+build/ruby-app/app
+```
+
+The command writes Path B IR to stdout and keeps `app.mrb` in `OUT_DIR`. With no `OUT_DIR` or `OUT_SYMBOL`, these
+default to the first input's directory and its sanitized basename, as in the C++ path. Pass multiple Ruby files in
+load order to compile one complete program. The runtime driver prints the program's final value, as the lowerer
+suite does. `--backend=cpp` explicitly selects the existing default C++ output.
+
+`--mrbbc-value=8|4|16` selects the value layout (default 8); compile `mrbrt.c` and `driver.c` with the matching
+`MRBBC_VALUE`. `BC2CPP_MRBBC_LOWER` selects a lowerer executable path instead of `build/mrbbc/mrbbc_lower`.
+`scripts/setup-mrbbc.sh` builds that executable with `CXX` (default `c++`) and replaces it only after a successful
+build. The usual `MRBC`, `BC2CPP_NO_MRBC` and `BC2CPP_MRBC_RB` controls still select bytecode compilation and
+verification. The standalone backend dispatches before loading the C++ world's signatures and inference passes.
+
+This backend uses mrbbc's standalone runtime and supported subset, described below. C++ gem metadata, native/outside
+source lists, owner filtering, type-check-only mode and self-registration are rejected: supply the complete Ruby
+program as source arguments. It accepts neither C++ output switches such as `--annotated` nor shared-unit plans.
+The fork's `FSTRING` opcode (frozen string literals) is explicitly refused until mrbbc supports those semantics.
+Other unsupported constructs retain mrbbc's `refused:` diagnostic and status 3. A failed lowering writes no IR to
+stdout, even if an alternate lowerer printed partial output; option errors exit 2 and missing tools or I/O errors
+exit 1. The bytecode artifact may remain after a refusal.
+
+`bundle exec ruby tests/bc2cpp/mrbbc_backend.rb` checks this route, including runtime execution through QBE in all
+three layouts, multi-file classes and blocks under GC stress, frontend controls and atomic refusal. It requires the
+two setup commands above (or `BC2CPP_MRBBC_LOWER` and `QBE` paths); it uses no C mrbc or reference interpreter.
+
 ## The RITE 04.00 format (as mruby 4.0.0 writes and reads it)
 
 The layouts come from `src/dump.c` (writer) and `src/load.c` (reader). Corrections to the first brief, found from the
