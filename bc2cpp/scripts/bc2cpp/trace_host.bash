@@ -27,6 +27,8 @@
 #   BC2CPP_HOST_PREVIEW_MAP  start New Game on this map id's centre tile.
 #   BC2CPP_HOST_GC_STRESS  a full GC before every Nth object allocation after the boot (1: every
 #                     one, as MRB_GC_STRESS), so a missing GC root shows up; host_sweep.bash passes it on.
+#   BC2CPP_HOST_CLASS_MUTATIONS  a directory: what the run changed in the classes the boot left goes to DIR/PID.tsv
+#                     (class_mutations.hxx); class_mutations_report.rb reads a sweep's.
 #
 # Needs on PATH: c++ (g++), cc, ar, nproc, clock_gettime-capable libc (Linux).
 set -euo pipefail
