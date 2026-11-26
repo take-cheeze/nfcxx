@@ -154,8 +154,9 @@ RUBY
 suite = Bc2cppStepCheck.new('bc2cpp rescue shared handler check')
 check = suite.method(:check)
 
+# Up to the body's end, CALLEE_ARENA's closing line (tools/bc2cpp/callee_arena.rb) included.
 def impl_of(code, name)
-  code[/^mrb_value RshFx_#{name}_impl\(mrb_state\* M.*?fell off the end of its body"\);\n\}/m].to_s
+  code[/^mrb_value RshFx_#{name}_impl\(mrb_state\* M.*?fell off the end of its body"\);\n(?:  \}\(\)\);\n)?\}/m].to_s
 end
 
 def calls_in(text)

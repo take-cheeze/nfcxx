@@ -368,6 +368,7 @@ class CodeGen
       @resumable.kw = kw_table
       step_body_start = out.length
     else
+      impl_head_at = out.length
       out << "mrb_value #{impl_name}(mrb_state* M, #{(['mrb_value self'] + arg_params).join(', ')}) {\n"
       out << ColdCompact.profile_line("#{d.owner}##{d.name}") if ColdCompact.profile?
       out << errinfo_scope_line(irep)
@@ -737,6 +738,11 @@ class CodeGen
       # A read inside a try range is the try body's, which roots it there (ElementReadRootsCompileInsn).
       try_reads = rescue_regions.flat_map { |r| (irep.index_of_addr(r[:begin_addr])..irep.index_of_addr(r[:end_addr])).to_a }
       flow_bodies = ElementReadRoots.apply(irep, flow_bodies, flow_captured, handlers: flow_handlers, skip: try_reads) unless eligibility_only && ENV['BC2CPP_PROBE_TEXT_CLEANUP'] != '0'
+      # LOOP_ARENA (loop_arena.rb): each loop gives back its iteration's arena entries at its backward jumps.
+      unless eligibility_only || impl_head_at.nil?
+        flow_bodies, loop_decls = LoopArena.apply(irep, flow_bodies, flow_captured, out[impl_head_at..])
+        out << loop_decls
+      end
       flow_labels.each_with_index { |jump_label, idx| out << jump_label << flow_bodies[idx] }
     end
     @resumable.flat = false if @resumable

@@ -438,6 +438,89 @@ SOURCE = <<~RUBY
       mark_all
       [r, @m13]
     end
+
+    # CALLEE_ARENA (callee_arena.rb): a direct callee gives back its arena entries on return. These callees overwrite
+    # or unlink a value their caller still holds and allocate, so the exit has entries to drop; the store's root is
+    # what must survive it. Each has a block or a loop, so it stays a direct call (not inlined).
+    def reset_list
+      @list = Array.new(3) { |i| "new\#{i}" }
+      @tmp = [1, 2, 3]
+      nil
+    end
+
+    def callee_store_kept
+      r = @list
+      reset_list
+      churn
+      r.inspect
+    end
+
+    def drop_cell
+      n = 0
+      while n < 2
+        @tmp = [n, n]
+        n += 1
+      end
+      @cells.pop
+      nil
+    end
+
+    def callee_pop_kept
+      r = @cells[2]
+      drop_cell
+      churn
+      r.inspect
+    end
+
+    # The result of a callee that made garbage first: the exit roots it again after dropping the rest.
+    def fresh_pair
+      junk = Array.new(3) { |i| "junk\#{i}" }
+      ["pair" + "x", junk.size]
+    end
+
+    def callee_result
+      r = fresh_pair
+      churn
+      r.inspect
+    end
+
+    def garbage(n)
+      a = Array.new(2) { |i| "g\#{i}" }
+      [a, n].size
+    end
+
+    # The arena across many direct calls that each allocate: flat when each call gives its entries back. The index
+    # comes from a C Proc the scenario stores in $gcr_arena.
+    def arena_flat
+      before = $gcr_arena.call
+      i = 0
+      while i < 300
+        garbage(i)
+        i += 1
+      end
+      $gcr_arena.call - before
+    end
+
+    # LOOP_ARENA (loop_arena.rb): the element read is rooted each iteration (the callee may unlink it), so the loop's
+    # backward jump is what gives those entries back.
+    def touch(e)
+      n = 0
+      while n < 2
+        n += 1
+      end
+      e.inspect
+    end
+
+    def loop_flat
+      list = @cells
+      before = $gcr_arena.call
+      i = 0
+      while i < 300
+        touch(list[i % 3])
+        i += 1
+      end
+      $gcr_arena.call - before
+    end
   end
 RUBY
 
@@ -448,14 +531,20 @@ CASES = %w[ivar_return ivar_local gvar_overwrite ary_overwrite hash_overwrite ar
            batch_overwrite callee_unlinks rescue_clear_by_name block_clear_by_name block_rescue_clear_by_name
            rescue_block_clear_by_name nested_rescue_clear_by_name ensure_clear_by_name loop_body_clear_by_name
            rescue_alias_clear_by_name block_copy_clear_by_name loop_inline_clear_by_name loop_out_clear_by_name loop_break_clear_by_name
-           loop_next_iter_clear_by_name].freeze
-# Cases that need no root, so they match with the roots switched off too.
+           loop_next_iter_clear_by_name callee_store_kept].freeze
+# CALLEE_ARENA: a value a callee's store root keeps across that callee's arena exit (BC2CPP_CALLEE_ARENA_KEPT=0
+# drops it).
+KEPT_CASES = %w[callee_store_kept].freeze
+# Cases that need no store root, so they match with the roots switched off too. callee_pop_kept's root is
+# GC_KEEP_REMOVED's, which stays on; callee_result's is its callee's arena exit (CALLEE_ARENA).
 UNROOTED_CASES = %w[pure_between imm_flag_overwrite clean_callee_between rescue_dead_read block_dead_read
-                    loop_dead_read].freeze
+                    loop_dead_read callee_pop_kept callee_result].freeze
 
 SCENARIO = <<~CPP
+  static mrb_value gcr_arena_idx(mrb_state* M, mrb_value) { return mrb_fixnum_value(M->gc.arena_idx); }
   static int scenario(mrb_state* M) {
     const char* which = getenv("GCR_CASE");
+    mrb_gv_set(M, mrb_intern_lit(M, "$gcr_arena"), mrb_obj_value(mrb_proc_new_cfunc(M, gcr_arena_idx)));
     mrb_value obj = mrb_funcall_argv(M, mrb_obj_value(mrb_class_get(M, "GcRoot")), mrb_intern_lit(M, "new"), 0, nullptr);
     call(M, which, obj, which);
     return 0;
@@ -463,13 +552,13 @@ SCENARIO = <<~CPP
 CPP
 
 # [{case => [interpreted line, compiled line]}, built]: every case in its own process.
-def run_cases(dir, build)
+def run_cases(dir, build, names = CASES + UNROOTED_CASES)
   code, err = Bc2cppFixtureRuntime.generate(SOURCE, dir, core: true, only_owners: OWNERS)
   built, results = Bc2cppFixtureRuntime.run(dir, err, OWNERS, "#include <cstdlib>\n#{SCENARIO}", build: build, full: true,
-                                            envs: (CASES + UNROOTED_CASES).map { |c| { 'GCR_CASE' => c } })
+                                            envs: names.map { |c| { 'GCR_CASE' => c } })
   return [code, nil, false] unless built
 
-  per_case = (CASES + UNROOTED_CASES).zip(results).to_h do |name, (output, ok)|
+  per_case = names.zip(results).to_h do |name, (output, ok)|
     sections = Bc2cppFixtureRuntime.sections(output)
     plain = ->(lines) { lines.to_a.reject { |l| l.start_with?('  dispatches=') } }
     [name, { interpreted: plain.call(sections['interpreted']), compiled: plain.call(sections['compiled']), ok: ok }]
@@ -634,14 +723,63 @@ Dir.mktmpdir('bc2cpp-gc-root') do |dir|
     CPP
     arena_ok, = Bc2cppFixtureRuntime.run(dir, err, OWNERS, arena_scenario, build: build, full: true, vms: [true])
     suite.check('duplicate arena roots are bounded and a restore requires a fresh root', arena_ok)
-    _, rooted, built = run_cases(dir, build)
+    code, rooted, built = run_cases(dir, build, CASES + UNROOTED_CASES + %w[arena_flat loop_flat])
     suite.check('fixture builds and runs', built)
+    # The arena growth arena_flat reports, compiled: how many entries 300 direct calls left behind.
+    flat_growth = ->(results, name = 'arena_flat') { results&.dig(name, :compiled)&.first.to_s[/=> (\d+)\z/, 1]&.to_i }
     if built
       (CASES + UNROOTED_CASES).each do |name|
         r = rooted.fetch(name)
         suite.check("#{name}: the process survives and compiled matches interpreted",
                     r[:ok] && r[:interpreted].size == 1 && r[:compiled] == r[:interpreted])
       end
+      exit_open = 'return bc2cpp_arena_exit(M, bc2cpp_ai, [&]() __attribute__((always_inline)) -> mrb_value {'
+      suite.check('a direct callee gives its arena back on return (CALLEE_ARENA)',
+                  body_of.call(code, 'callee_store_kept').include?('GcRoot_reset_list_impl(') &&
+                  body_of.call(code, 'reset_list').include?(exit_open))
+      growth = flat_growth.call(rooted)
+      suite.check("300 allocating direct calls leave the arena flat (grew #{growth.inspect})",
+                  rooted['arena_flat'][:ok] && growth && growth < 16)
+      loop_growth = flat_growth.call(rooted, 'loop_flat')
+      suite.check("a loop of 300 rooted element reads leaves the arena flat (LOOP_ARENA, grew #{loop_growth.inspect})",
+                  rooted['loop_flat'][:ok] && loop_growth && loop_growth < 16)
+    end
+
+    Dir.mktmpdir('bc2cpp-gc-root-kept-off') do |kept_dir|
+      ENV['BC2CPP_CALLEE_ARENA_KEPT'] = '0'
+      begin
+        _, unkept, kept_built = run_cases(kept_dir, build, KEPT_CASES)
+      ensure
+        ENV.delete('BC2CPP_CALLEE_ARENA_KEPT')
+      end
+      suite.check('the build whose arena exits keep no store roots compiles', kept_built)
+      if kept_built
+        lost = KEPT_CASES.reject { |name| unkept[name][:ok] && unkept[name][:compiled] == unkept[name][:interpreted] }
+        suite.check('without the kept records each callee store loses the value its caller holds',
+                    lost.sort == KEPT_CASES.sort)
+      end
+    end
+    Dir.mktmpdir('bc2cpp-gc-root-callee-arena-off') do |arena_dir|
+      ENV['BC2CPP_CALLEE_ARENA'] = '0'
+      begin
+        _, grown, grown_built = run_cases(arena_dir, build, ['arena_flat'])
+      ensure
+        ENV.delete('BC2CPP_CALLEE_ARENA')
+      end
+      growth = grown_built && flat_growth.call(grown)
+      suite.check("BC2CPP_CALLEE_ARENA=0 keeps every callee's entries (grew #{growth.inspect})",
+                  grown_built && growth && growth >= 300)
+    end
+    Dir.mktmpdir('bc2cpp-gc-root-loop-arena-off') do |loop_dir|
+      ENV['BC2CPP_LOOP_ARENA'] = '0'
+      begin
+        _, grown, grown_built = run_cases(loop_dir, build, ['loop_flat'])
+      ensure
+        ENV.delete('BC2CPP_LOOP_ARENA')
+      end
+      growth = grown_built && flat_growth.call(grown, 'loop_flat')
+      suite.check("BC2CPP_LOOP_ARENA=0 keeps each iteration's root (grew #{growth.inspect})",
+                  grown_built && growth && growth >= 300)
     end
 
     Dir.mktmpdir('bc2cpp-gc-root-off') do |off_dir|
