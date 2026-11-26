@@ -94,7 +94,8 @@ is {key, value}. An empty slot has key 0; a deleted one has the sentinel key 0x1
 - Operations: `BUILD_MAP n` pushes an empty dict; `STORE_MAP` takes [dict, value, key] (key on top) and leaves the dict.
   A load, a store and `in` go through `mpy_getitem`, `mpy_setitem` and `map_lookup`. `len` and truth count the live items.
 - `del d[k]`: `LOAD_NULL` pushes 0, and `STORE_SUBSCR` with 0 deletes (MicroPython 1.29 has no DELETE_SUBSCR: the compiler
-  emits LOAD_NULL, ROT_THREE, STORE_SUBSCR). A list item is deleted the same way.
+  emits LOAD_NULL, ROT_THREE, STORE_SUBSCR). A list item is deleted the same way. A tuple key is hashed and compared as a
+  store or a load does (`del d[(3, 4)]` on a missing key is `KeyError: (3, 4)`; an unhashable item is the hash TypeError).
 - A dict comprehension stores each item with `STORE_COMP` (kind 1).
 - Methods (`LOAD_METHOD`, called by `CALL_METHOD`, with the dict as the self): `get(key[, default])` (None when missing),
   `pop(key[, default])` (a missing key with no default is a KeyError, the value stays in the slot the removal leaves),
@@ -124,13 +125,21 @@ is {key, value}. An empty slot has key 0; a deleted one has the sentinel key 0x1
   and the repr: `{a, b}` in table order, and `set()` when empty. Its hash is refused (a set is unhashable).
 - Methods (`LOAD_METHOD`, called by `CALL_METHOD`): `add(x)`, `discard(x)`, `remove(x)` (a missing item is `KeyError` with the
   item), and `union(other)`, `intersection(other)` and `difference(*others)`, whose argument may be any iterable, as objset.c
-  takes it. A set method not listed (`pop`, `update`, `issubset`, ...) fails at run time (`kBuiltinMethods` refuses the names
-  only the set and list have, and the rest fails as "not lowered yet").
+  takes it. Also `pop()` (the first item in table order, removed; an empty set is `KeyError: pop from an empty set`),
+  `update(*others)`, `difference_update(*others)`, `intersection_update(other)`, `symmetric_difference(other)`,
+  `symmetric_difference_update(other)`, `issubset(other)`, `issuperset(other)` and `isdisjoint(other)`. Each argument may be any
+  iterable; `issubset` and `issuperset` make a set of a non-set argument first, so an unhashable item is the hash TypeError.
+  The argument counts and the TypeErrors are the reference's. A set method not listed (`copy`, `clear`, ...) fails at run
+  time, as "not lowered yet" (`kBuiltinMethods` refuses the names only the set and list have).
 - Operators: `|`, `&` and `-` on two sets build a new set (`|` is a copy of the left set with the right's items added; `&` is a
   new set of the items of the right that are in the left, in the right's order; `-` removes the right's items from a copy).
-  The in-place `|=`, `&=` and `-=` change the left set (`s -= s` clears it). With a non-set operand the TypeError names the
-  operator without the in-place prefix (`unsupported types for __or__: 'set', 'list'`), as the reference does. `^`, the
-  comparisons and `==` on sets are not lowered yet. Equality of two sets fails (it is not built yet).
+  `^` is the symmetric difference: a copy of the left set with each item of the right added when it is not there and removed
+  when it is (`MAP_TOGGLE` in `map_lookup`, which is `ADD_IF_NOT_FOUND_OR_REMOVE_IF_FOUND`). The in-place `|=`, `&=`, `-=` and
+  `^=` change the left set (`s -= s` clears it). The comparisons are on two sets: `<` and `>` are the proper subset and
+  superset (the used counts must differ), `<=` and `>=` the subset and superset, and `==` and `!=` compare the items. With a
+  non-set operand, `==` and `!=` are identity (False and True), and the other operators are a TypeError that names the
+  operator without the in-place prefix (`unsupported types for __xor__: 'set', 'list'`), as the reference does. Two different
+  sets are equal by their items wherever `obj_equal` compares values (`in` on a list, and the items of tuples and lists).
 
 ## Slices
 
@@ -318,9 +327,8 @@ RAISE_LAST), as the lowering follows it:
 
 Defaults and keyword arguments (`MAKE_FUNCTION_DEFARGS`, `MAKE_CLOSURE_DEFARGS`), `del` of a closure variable
 (`DELETE_DEREF`), generators, str methods and formatting, str ordering and repetition,
-big ints, the set methods
-`pop`, `update`, `issubset` and the rest, `^` and the set comparisons, the list methods other than append and pop, subscripts of a range, and the rest
-of the opcodes. Equality of two dicts, two sets, two ranges or two views, `str` of a list, tuple, set or view, and
+big ints, the set methods `copy` and `clear`, the list methods other than append and pop, subscripts of a range, and the rest
+of the opcodes. Equality of two dicts, two ranges or two views, `str` of a list, tuple, set or view, and
 containment in a range are refused at run time until their repr and equality are built. Changing a dict's size during a
 `for` over it is not checked (see Dicts). Identity of strs: a str built at run time is a new object, but MicroPython interns
 short strs, so `'a' + 'b' is 'ab'` is True there and False here. Nothing is freed: a str lives until the process ends. Also

@@ -314,9 +314,7 @@ const std::set<std::string> kBuiltinMethods = {
     "capitalize", "center", "count", "encode", "endswith", "extend", "find", "format", "index",
     "insert", "isalpha", "isdigit", "isspace", "join", "ljust", "lower", "lstrip", "partition",
     "replace", "reverse", "rfind", "rindex", "rjust", "rstrip", "rsplit", "sort", "split", "splitlines",
-    "startswith", "strip", "title", "upper", "zfill",
-    "isdisjoint", "issubset", "issuperset", "symmetric_difference", "difference_update",
-    "intersection_update", "symmetric_difference_update"};
+    "startswith", "strip", "title", "upper", "zfill"};
 
 // A for loop's iterator takes MP_OBJ_ITER_BUF_NSLOTS stack slots (obj.h: 4 on 32- and 64-bit hosts); its object is in the
 // bottom one. break pops all of them.
