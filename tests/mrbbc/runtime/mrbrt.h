@@ -22,13 +22,35 @@ enum mrbbc_tag {
   MRBBC_INT = 3,
   MRBBC_STR = 4,
   MRBBC_ARY = 5,
-  MRBBC_SYM = 6
+  MRBBC_SYM = 6,
+  MRBBC_BLK = 7
 };
 
 typedef struct MV {
   uint8_t tag;
   int64_t i;
 } MV;
+
+/* The program's methods (TDEF): mrbbc_def adds the name, the lowered body's number and the arity; mrbbc_find returns the
+ * number of the body a self call runs, or raises ArgumentError (wrong count) or NoMethodError (no such method). */
+void mrbbc_def(const char *name, int id, long arity);
+int mrbbc_find(const char *name, long argc);
+
+/* Blocks. mrbbc_block makes the closure of a BLOCK at dst: it stores the block's number, a copy of self, the frame the
+ * block was made in and its home (the frame of the method a return leaves), in clo (a 40-byte slot of the caller's
+ * frame, the layout of Clo in mrbrt.c). The helpers read a block value: its number, its frame, its home, and argv[0] =
+ * its self; mrbbc_blk_load copies the method's block (a nil one raises "unexpected yield"); mrbbc_blk_given writes true
+ * or false for block_given?. A return out of a block is pending (mrbbc_return_block) until its home takes it. */
+void mrbbc_block(MV *dst, void *clo, long id, const MV *self, MV *frame, MV *home);
+long mrbbc_blk_id(const MV *blk);
+MV *mrbbc_blk_frame(const MV *blk);
+MV *mrbbc_blk_home(const MV *blk);
+void mrbbc_blk_args(MV *argv, const MV *blk);
+void mrbbc_blk_load(MV *dst, const MV *blk);
+void mrbbc_blk_given(MV *dst, const MV *blk);
+void mrbbc_return_block(const MV *value, MV *home);
+int mrbbc_unwinding(void);
+void mrbbc_unwind_take(MV *ret, MV *frame);
 
 /* The operators the binop helper takes (the opcode names of mruby's ops.h; NEQ is the SEND of "!="). */
 enum mrbbc_op {

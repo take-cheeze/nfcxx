@@ -80,6 +80,127 @@ void mrbbc_str_new(MV *dst, const char *p, long n) {
 
 void mrbbc_sym(MV *dst, const char *name) { set_obj(dst, MRBBC_SYM, name); }
 
+/* The methods of the program: each TDEF (mrbbc_def) adds one entry, the name, the number of the lowered body and its
+ * arity. Every method is defined on Object (the target class of a top-level def). mrbbc_find returns the body of the
+ * latest definition of a name, as a self call finds it; a call with the wrong number of arguments and a name nothing
+ * defined are the errors mruby raises. */
+typedef struct MDef {
+  const char *name;
+  int id;
+  long arity;
+} MDef;
+
+static MDef *mdefs = NULL;
+static size_t nmdefs = 0, capmdefs = 0;
+
+void mrbbc_def(const char *name, int id, long arity) {
+  MDef *d;
+  if (nmdefs == capmdefs) {
+    size_t cap = capmdefs ? 2 * capmdefs : 8;
+    MDef *p = realloc(mdefs, cap * sizeof *p);
+    if (p == NULL) mrbbc_raise("NoMemoryError", "failed to allocate memory");
+    mdefs = p;
+    capmdefs = cap;
+  }
+  d = &mdefs[nmdefs++];
+  d->name = name;
+  d->id = id;
+  d->arity = arity;
+}
+
+int mrbbc_find(const char *name, long argc) {
+  size_t i = nmdefs;
+  while (i-- > 0) {
+    if (strcmp(mdefs[i].name, name) == 0) {
+      if (mdefs[i].arity != argc) {
+        char msg[128];
+        snprintf(msg, sizeof msg, "wrong number of arguments (given %ld, expected %ld)", argc, mdefs[i].arity);
+        mrbbc_raise("ArgumentError", msg);
+      }
+      return mdefs[i].id;
+    }
+  }
+  {
+    char msg[256];
+    snprintf(msg, sizeof msg, "undefined method '%s' for Object", name);
+    mrbbc_raise("NoMethodError", msg);
+  }
+}
+
+/* A block value (MRBBC_BLK): the int64 is the Clo that mrbbc_block fills. The layout is 40 bytes, as the producer
+ * reserves it (tools/mrbbc/mrb_lower.cpp, the BLOCK slot). A closure lives in its frame, which is alive while the block
+ * can be yielded: a block is passed to a method and not kept (a block parameter is refused). home is the frame of the
+ * method the block was made in (the frame a return out of the block leaves). */
+typedef struct Clo {
+  long id;
+  MV self;
+  MV *frame;
+  MV *home;
+} Clo;
+
+static Clo *clo_of(const MV *v) { return (Clo *)(intptr_t)v->i; }
+
+void mrbbc_block(MV *dst, void *clo, long id, const MV *self, MV *frame, MV *home) {
+  Clo *c = clo;
+  c->id = id;
+  c->self = *self;
+  c->frame = frame;
+  c->home = home;
+  set_obj(dst, MRBBC_BLK, c);
+}
+
+long mrbbc_blk_id(const MV *blk) {
+  if (blk->tag != MRBBC_BLK) mrbbc_raise("LocalJumpError", "unexpected yield");
+  return clo_of(blk)->id;
+}
+
+MV *mrbbc_blk_frame(const MV *blk) {
+  if (blk->tag != MRBBC_BLK) mrbbc_raise("LocalJumpError", "unexpected yield");
+  return clo_of(blk)->frame;
+}
+
+MV *mrbbc_blk_home(const MV *blk) {
+  if (blk->tag != MRBBC_BLK) mrbbc_raise("LocalJumpError", "unexpected yield");
+  return clo_of(blk)->home;
+}
+
+/* A return out of a block. The value is pending for home: every call on the way returns at once (mrbbc_unwinding is
+ * checked after each call of a method or a block) until the function whose frame is home takes it (mrbbc_unwind_take),
+ * and that function returns the value. */
+static int unwind_pending = 0;
+static MV *unwind_home = NULL;
+static MV unwind_value;
+
+void mrbbc_return_block(const MV *value, MV *home) {
+  unwind_pending = 1;
+  unwind_home = home;
+  unwind_value = *value;
+}
+
+int mrbbc_unwinding(void) { return unwind_pending; }
+
+void mrbbc_unwind_take(MV *ret, MV *frame) {
+  if (unwind_pending && unwind_home == frame) {
+    *ret = unwind_value;
+    unwind_pending = 0;
+  }
+}
+
+void mrbbc_blk_args(MV *argv, const MV *blk) {
+  if (blk->tag != MRBBC_BLK) mrbbc_raise("LocalJumpError", "unexpected yield");
+  argv[0] = clo_of(blk)->self;
+}
+
+void mrbbc_blk_load(MV *dst, const MV *blk) {
+  if (blk->tag == MRBBC_NIL) mrbbc_raise("LocalJumpError", "unexpected yield");
+  *dst = *blk;
+}
+
+void mrbbc_blk_given(MV *dst, const MV *blk) {
+  dst->tag = blk->tag == MRBBC_NIL ? MRBBC_FALSE : MRBBC_TRUE;
+  dst->i = 0;
+}
+
 /* The class of a value, as NoMethodError and ArgumentError name it. */
 static const char *class_name(const MV *v) {
   switch (v->tag) {
