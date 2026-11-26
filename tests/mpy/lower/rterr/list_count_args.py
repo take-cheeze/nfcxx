@@ -1,0 +1,2 @@
+xs = []
+result = xs.count()

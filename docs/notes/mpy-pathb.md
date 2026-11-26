@@ -61,7 +61,9 @@ binary operators plus 13, as in `py/runtime0.h`; on ints they give the same resu
 - `range(...)` (one to three small-int arguments) is a MpyRange {start, stop, step, len}. `GET_ITER` on it makes an iterator
   whose index counts the items given; `len` and truth use `len`. Containment in a range is refused at run time, and so is a
   range as a dict key or in equality.
-- `LOAD_METHOD` of `append` or `pop` on a list, or of the dict methods (see Dicts), gives the builtin method, and of an
+- `LOAD_METHOD` of a list method (`append`, `pop`, `insert`, `extend`, `remove`, `index`, `count`, `reverse`, `sort`, `copy`,
+  `clear`) or a tuple method (`index`, `count`), of a str method (see Strings), or of the dict methods (see Dicts), gives the
+  builtin method, and of an
   instance or class the method of its class (see Classes). A value with no such attribute fails with MicroPython's
   AttributeError. The lowering refuses the builtin method names that no builtin type has yet, by name (`kBuiltinMethods` in
   `mpy_lower.cpp`); a name that some builtin type has is dispatched on the receiver at run time, and a receiver whose type
@@ -111,9 +113,10 @@ is {key, value}. An empty slot has key 0; a deleted one has the sentinel key 0x1
   drops the table, `setdefault(k[, v])` hashes k and adds it with v (None), `popitem()` removes and returns the first live slot
   (`KeyError: popitem(): dictionary is empty`), and `fromkeys(iterable[, v])` is the classmethod: `d.fromkeys(...)` is called with
   no self, and its table is sized by the iterable's length. Iterating a str is lowered (see Strings), so `fromkeys` takes a str. The
-  lowering does not refuse `copy`, `clear`, `setdefault`, `popitem` or `fromkeys` by name, since the receiver's type is not
-  known there: on a list, str or other value that is not a dict the runtime fails at run time ("a method copy of a 'list' is
-  not lowered yet"). Read as a value (`f = d.get`) a dict method fails at run time.
+  lowering does not refuse `setdefault`, `popitem` or `fromkeys` by name, since the receiver's type is not known there: on a
+  value that is not a dict (and has no such method) the runtime fails at run time ("a method popitem of a 'list' is not
+  lowered yet", or the AttributeError the reference gives for a value with no such attribute). Read as a value (`f = d.get`)
+  a dict method fails at run time.
 - A view is {type, dict, kind}, live: it reads the dict's table. `repr` is `dict_keys([...])`, `dict_values([...])` or
   `dict_items([(k, v), ...])`, in table order. `len`, truth, `in` (a key, a value by equality, a (key, value) pair) and
   iteration are lowered. A view has no hash and no equality (`==` fails here; the reference compares identities).
@@ -134,8 +137,8 @@ is {key, value}. An empty slot has key 0; a deleted one has the sentinel key 0x1
   `update(*others)`, `difference_update(*others)`, `intersection_update(other)`, `symmetric_difference(other)`,
   `symmetric_difference_update(other)`, `issubset(other)`, `issuperset(other)` and `isdisjoint(other)`. Each argument may be any
   iterable; `issubset` and `issuperset` make a set of a non-set argument first, so an unhashable item is the hash TypeError.
-  The argument counts and the TypeErrors are the reference's. A set method not listed (`copy`, `clear`, ...) fails at run
-  time, as "not lowered yet" (`kBuiltinMethods` refuses the names only the set and list have).
+  The argument counts and the TypeErrors are the reference's. `copy()` and `clear()` are the set's too (`copy` is the table
+  slot for slot, as the reference's `set_copy`; `clear` frees the table).
 - Operators: `|`, `&` and `-` on two sets build a new set (`|` is a copy of the left set with the right's items added; `&` is a
   new set of the items of the right that are in the left, in the right's order; `-` removes the right's items from a copy).
   `^` is the symmetric difference: a copy of the left set with each item of the right added when it is not there and removed
@@ -236,6 +239,15 @@ Representation and calling convention (`tests/mpy/runtime/mpy_rt.c`):
 A nested def with default arguments is a closure with its defaults (`MAKE_CLOSURE_DEFARGS`). A `del` of a cell or free variable
 (`DELETE_DEREF`) stores 0 in the cell, which is unbound, so a read of it is `NameError: local variable referenced before
 assignment` (the reference's text).
+
+List methods (`list_method` in the runtime): `insert` clamps its index as `list_insert` does; `extend` takes any iterable (a
+list is extended by its own items when it is itself); `remove`, `index` and `count` compare by `mp_obj_equal` and fail with
+`ValueError: object not in sequence`; `index` and `count` take a tuple too, and `index`'s start and end clamp as
+`mp_get_index` does. `reverse` is in place. `copy` is a new list; `clear` empties the list. `sort(key=None, reverse=False)`
+is MicroPython's `mp_quicksort` (objlist.c), ported with the same comparisons in the same order, so it is not stable and an
+equal key moves as the reference's does; the key is called on each comparison, as the reference calls it. Its comparisons
+are for ints (bools too) and strs, and any other pair is `TypeError: unsupported types for __lt__: 'X', 'Y'`. Keyword
+arguments reach a builtin only through `sort`; a keyword to any other builtin is `function doesn't take keyword arguments`.
 
 ## Strings
 
@@ -372,7 +384,7 @@ a coroutine (vm.c's unwind_jump and END_FINALLY), and the lowering does the same
 
 Generators, str formatting (`format`, `%`) and the str methods not listed above (`center`, `title`, `splitlines`, ...), str
 ordering and repetition,
-big ints, the set methods `copy` and `clear`, the list methods other than append and pop, subscripts of a range, and the rest
+big ints, the list and str methods the lowering refuses by name (`kBuiltinMethods`: `format`, `center`, `title`, `splitlines`, ...), subscripts of a range, and the rest
 of the opcodes. Equality of two dicts, two ranges or two views, `str` of a list, tuple, set or view, and
 containment in a range are refused at run time until their repr and equality are built. Changing a dict's size during a
 `for` over it is not checked (see Dicts). Identity of strs: a str built at run time is a new object, but MicroPython interns

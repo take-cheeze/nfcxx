@@ -320,8 +320,8 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
 // difference) are not refused here: the lowering does not know the receiver's type, so the runtime refuses them on a value
 // that is neither a dict nor a set (mpy_load_method, refused_method_name).
 const std::set<std::string> kBuiltinMethods = {
-    "capitalize", "center", "encode", "extend", "format", "index", "insert", "isalpha", "isdigit", "isspace", "ljust",
-    "partition", "reverse", "rfind", "rindex", "rjust", "rsplit", "sort", "splitlines", "title", "zfill"};
+    "capitalize", "center", "encode", "format", "isalpha", "isdigit", "isspace", "ljust", "partition", "rfind", "rindex",
+    "rjust", "rsplit", "splitlines", "title", "zfill"};
 
 // A for loop's iterator takes MP_OBJ_ITER_BUF_NSLOTS stack slots (obj.h: 4 on 32- and 64-bit hosts); its object is in the
 // bottom one. break pops all of them.

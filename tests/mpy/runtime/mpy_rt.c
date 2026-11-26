@@ -197,6 +197,8 @@ enum {
   BI_SUPER, BI_INIT,
   BI_STR_UPPER, BI_STR_LOWER, BI_STR_STRIP, BI_STR_LSTRIP, BI_STR_RSTRIP, BI_STR_SPLIT, BI_STR_JOIN, BI_STR_REPLACE,
   BI_STR_STARTSWITH, BI_STR_ENDSWITH, BI_STR_FIND, BI_STR_COUNT,
+  BI_LIST_INSERT, BI_LIST_EXTEND, BI_LIST_REMOVE, BI_LIST_INDEX, BI_LIST_COUNT, BI_LIST_REVERSE, BI_LIST_SORT, BI_LIST_COPY,
+  BI_LIST_CLEAR, BI_SET_COPY, BI_SET_CLEAR,
   BI_EXC, BI_COUNT = BI_EXC + EXC_COUNT
 };
 typedef struct {
@@ -219,6 +221,9 @@ static const MpyBuiltin mpy_builtins[BI_COUNT] = {
   {&mpy_type_bfn, BI_STR_UPPER}, {&mpy_type_bfn, BI_STR_LOWER}, {&mpy_type_bfn, BI_STR_STRIP}, {&mpy_type_bfn, BI_STR_LSTRIP},
   {&mpy_type_bfn, BI_STR_RSTRIP}, {&mpy_type_bfn, BI_STR_SPLIT}, {&mpy_type_bfn, BI_STR_JOIN}, {&mpy_type_bfn, BI_STR_REPLACE},
   {&mpy_type_bfn, BI_STR_STARTSWITH}, {&mpy_type_bfn, BI_STR_ENDSWITH}, {&mpy_type_bfn, BI_STR_FIND}, {&mpy_type_bfn, BI_STR_COUNT},
+  {&mpy_type_bfn, BI_LIST_INSERT}, {&mpy_type_bfn, BI_LIST_EXTEND}, {&mpy_type_bfn, BI_LIST_REMOVE}, {&mpy_type_bfn, BI_LIST_INDEX},
+  {&mpy_type_bfn, BI_LIST_COUNT}, {&mpy_type_bfn, BI_LIST_REVERSE}, {&mpy_type_bfn, BI_LIST_SORT}, {&mpy_type_bfn, BI_LIST_COPY},
+  {&mpy_type_bfn, BI_LIST_CLEAR}, {&mpy_type_bfn, BI_SET_COPY}, {&mpy_type_bfn, BI_SET_CLEAR},
   {&mpy_type_type, BI_EXC + 0}, {&mpy_type_type, BI_EXC + 1}, {&mpy_type_type, BI_EXC + 2},
   {&mpy_type_type, BI_EXC + 3}, {&mpy_type_type, BI_EXC + 4}, {&mpy_type_type, BI_EXC + 5},
   {&mpy_type_type, BI_EXC + 6}, {&mpy_type_type, BI_EXC + 7}, {&mpy_type_type, BI_EXC + 8},
@@ -320,7 +325,7 @@ static int set_method_index(const char *name, size_t len) {
     {"pop", BI_SET_POP}, {"update", BI_SET_UPDATE}, {"difference_update", BI_SET_DIFFERENCE_UPDATE},
     {"intersection_update", BI_SET_INTERSECTION_UPDATE}, {"symmetric_difference", BI_SET_SYMDIFF},
     {"symmetric_difference_update", BI_SET_SYMDIFF_UPDATE}, {"issubset", BI_SET_ISSUBSET},
-    {"issuperset", BI_SET_ISSUPERSET}, {"isdisjoint", BI_SET_ISDISJOINT},
+    {"issuperset", BI_SET_ISSUPERSET}, {"isdisjoint", BI_SET_ISDISJOINT}, {"copy", BI_SET_COPY}, {"clear", BI_SET_CLEAR},
   };
   size_t k;
   for (k = 0; k < sizeof methods / sizeof methods[0]; ++k) {
@@ -346,13 +351,36 @@ static int str_method_index(const char *name, size_t len) {
   return -1;
 }
 
+/* The builtin id of a list method (append, pop, insert, extend, remove, index, count, reverse, sort, copy, clear), or -1. */
+static int list_method_index(const char *name, size_t len) {
+  static const struct {
+    const char *name;
+    int id;
+  } methods[] = {
+    {"append", BI_APPEND}, {"pop", BI_POP}, {"insert", BI_LIST_INSERT}, {"extend", BI_LIST_EXTEND},
+    {"remove", BI_LIST_REMOVE}, {"index", BI_LIST_INDEX}, {"count", BI_LIST_COUNT}, {"reverse", BI_LIST_REVERSE},
+    {"sort", BI_LIST_SORT}, {"copy", BI_LIST_COPY}, {"clear", BI_LIST_CLEAR},
+  };
+  size_t k;
+  for (k = 0; k < sizeof methods / sizeof methods[0]; ++k) {
+    if (strlen(methods[k].name) == len && memcmp(name, methods[k].name, len) == 0) return methods[k].id;
+  }
+  return -1;
+}
+
+/* The builtin id of a tuple method (index and count), or -1. */
+static int tuple_method_index(const char *name, size_t len) {
+  if (len == 5 && memcmp(name, "index", 5) == 0) return BI_LIST_INDEX;
+  if (len == 5 && memcmp(name, "count", 5) == 0) return BI_LIST_COUNT;
+  return -1;
+}
+
 /* The method names that a dict or a set has and the runtime does not have for the other types: a method call of one of these on
  * a value that is not a dict or a set fails as not lowered (the lowering does not know the receiver's type, so it cannot refuse
  * them). */
 static int refused_method_name(const char *name, size_t len) {
-  static const char *const names[] = {"copy", "clear", "setdefault", "popitem", "fromkeys", "add", "discard", "remove",
-                                      "union", "intersection", "difference", "count", "index", "insert", "extend", "reverse",
-                                      "sort"};
+  static const char *const names[] = {"setdefault", "popitem", "fromkeys", "add", "discard", "union", "intersection",
+                                      "difference"};
   size_t k;
   for (k = 0; k < sizeof names / sizeof names[0]; ++k) {
     if (strlen(names[k]) == len && memcmp(name, names[k], len) == 0) return 1;
@@ -1356,7 +1384,7 @@ mpv mpy_str_lit(const char *bytes, size_t len, uint64_t id) {
   return lits[id];
 }
 
-static mpv builtin_call(int id, const mpv *args, uint64_t n);
+static mpv builtin_call(int id, const mpv *args, uint64_t n, uint64_t nkw);
 static mpv instantiate(mpv clsv, uint64_t nargs, uint64_t nkw);
 mpv mpy_call_kw(mpv fn, uint64_t nargs, uint64_t nkw);
 
@@ -1464,8 +1492,7 @@ mpv mpy_call_kw(mpv fn, uint64_t nargs, uint64_t nkw) {
   if (total > vtop) fail("mpy_call: the arguments are not on the value stack");
   base = vtop - total;
   if (is_builtin(fn)) {
-    if (nkw) fail("TypeError: function doesn't take keyword arguments");   /* the builtins take none, as the reference's do */
-    ret = builtin_call(((const MpyBuiltin *)(uintptr_t)fn)->id, nargs ? vstk + base : NULL, nargs);
+    ret = builtin_call(((const MpyBuiltin *)(uintptr_t)fn)->id, nargs ? vstk + base : NULL, nargs, nkw);
     vtop = base;
     return ret;
   }
@@ -1791,11 +1818,12 @@ mpv mpy_with_cleanup(mpv exit, mpv top) {
 mpv mpy_load_method(mpv obj, const char *name, size_t len) {
   mpv key = intern_name(name, len), v;
   method_self = 0;
-  if (is_list(obj)) {
+  if (is_list(obj) && list_method_index(name, len) >= 0) {
     method_self = obj;
-    if (len == 6 && memcmp(name, "append", 6) == 0) return builtin_obj(BI_APPEND);
-    if (len == 3 && memcmp(name, "pop", 3) == 0) return builtin_obj(BI_POP);
-    method_self = 0;
+    return builtin_obj(list_method_index(name, len));
+  } else if (is_tuple(obj) && tuple_method_index(name, len) >= 0) {
+    method_self = obj;
+    return builtin_obj(tuple_method_index(name, len));
   } else if (is_dict(obj) && dict_method_index(name, len) >= 0) {
     /* fromkeys is a classmethod: it is called with no self */
     if (dict_method_index(name, len) != BI_DICT_FROMKEYS) method_self = obj;
@@ -2397,18 +2425,21 @@ static size_t chars_before(const MpyStr *s, size_t b) {
  * one count (lo == hi) says it takes that many, as the reference's builtins do. */
 static void method_arity(uint64_t n, uint64_t lo, uint64_t hi) {
   char msg[160];
+  if (lo == hi) {   /* a method of one count says it takes that many, missing ones too */
+    if (n != lo) {
+      snprintf(msg, sizeof msg, "TypeError: function takes %llu positional arguments but %llu were given", (unsigned long long)lo,
+               (unsigned long long)n);
+      fail(msg);
+    }
+    return;
+  }
   if (n < lo) {
     snprintf(msg, sizeof msg, "TypeError: function missing %llu required positional arguments", (unsigned long long)(lo - n));
     fail(msg);
   }
   if (n > hi) {
-    if (lo == hi) {
-      snprintf(msg, sizeof msg, "TypeError: function takes %llu positional arguments but %llu were given", (unsigned long long)hi,
-               (unsigned long long)n);
-    } else {
-      snprintf(msg, sizeof msg, "TypeError: function expected at most %llu arguments, got %llu", (unsigned long long)hi,
-               (unsigned long long)n);
-    }
+    snprintf(msg, sizeof msg, "TypeError: function expected at most %llu arguments, got %llu", (unsigned long long)hi,
+             (unsigned long long)n);
     fail(msg);
   }
 }
@@ -2669,9 +2700,229 @@ static mpv str_method(int id, const mpv *args, uint64_t n) {
   return MPY_NONE;
 }
 
-static mpv builtin_call(int id, const mpv *args, uint64_t n) {
+/* The list methods (insert, extend, remove, index, count, reverse, sort, copy and clear). args[0] is the list (index and count take
+ * a tuple too); n counts the self, and nkw the keyword pairs after the positional arguments, which only sort takes. The results
+ * and the errors are the reference's (py/objlist.c, py/sequence.c). */
+static int str_is(mpv v, const char *s) {
+  size_t len = strlen(s);
+  return is_str(v) && str_of(v)->len == len && memcmp(str_of(v)->data, s, len) == 0;
+}
+
+static MpyList *list_arg(mpv v) {
+  if (!is_list(v)) fail("TypeError: method needs a list");
+  return (MpyList *)(uintptr_t)v;
+}
+
+/* A start or stop argument of a sequence of len items: a negative count from the end, clamped to [0, len] (mp_get_index). */
+static uint64_t seq_bound(mpv v, uint64_t len) {
+  int64_t i = need_int(v);
+  if (i < 0) {
+    i += (int64_t)len;
+    if (i < 0) i = 0;
+  } else if ((uint64_t)i > len) {
+    i = (int64_t)len;
+  }
+  return (uint64_t)i;
+}
+
+/* a < b for the sort: ints (bools too) and strs, as the reference's comparisons give them; anything else is a TypeError. */
+static int sort_less(mpv a, mpv b) {
   char msg[160];
+  if ((is_small(a) || is_bool(a)) && (is_small(b) || is_bool(b))) return need_int(a) < need_int(b);
+  if (is_str(a) && is_str(b)) {
+    const MpyStr *x = str_of(a), *y = str_of(b);
+    size_t m = x->len < y->len ? x->len : y->len;
+    int c = memcmp(x->data, y->data, m);
+    return c < 0 || (c == 0 && x->len < y->len);
+  }
+  snprintf(msg, sizeof msg, "TypeError: unsupported types for __lt__: '%s', '%s'", type_name(a), type_name(b));
+  fail(msg);
+  return 0;
+}
+
+/* The key of an item for the sort (none when key is 0). */
+static mpv sort_key_of(mpv key, mpv v) {
+  if (key == 0) return v;
+  mpy_push(v);
+  return mpy_call(key, 1);
+}
+
+/* MicroPython's sort (py/objlist.c's mp_quicksort): the items from head + 1 to tail, both indexes into items, with the pivot
+ * at tail. It is not stable, and it makes the same comparisons in the same order as the reference, so an error or an equal key
+ * comes out as the reference's does. want is the result of a comparison that keeps an item on the left: 1 ascending, 0 reverse. */
+static void quicksort(mpv *items, long head, long tail, mpv key, int want) {
+  while (tail - head > 1) {
+    long h = head, t = tail;
+    mpv v = sort_key_of(key, items[tail]);
+    for (;;) {
+      do {
+        ++h;
+      } while (h < t && sort_less(sort_key_of(key, items[h]), v) == want);
+      do {
+        --t;
+      } while (h < t && sort_less(v, sort_key_of(key, items[t])) == want);
+      if (h >= t) break;
+      {
+        mpv x = items[h];
+        items[h] = items[t];
+        items[t] = x;
+      }
+    }
+    {
+      mpv x = items[h];
+      items[h] = items[tail];
+      items[tail] = x;
+    }
+    if (t - head < tail - h) {
+      quicksort(items, head, t, key, want);
+      head = h;
+    } else {
+      quicksort(items, h, tail, key, want);
+      tail = t;
+    }
+  }
+}
+
+/* The list methods: id is one of BI_LIST_INSERT .. BI_LIST_CLEAR. */
+static mpv list_method(int id, const mpv *args, uint64_t n, uint64_t nkw) {
+  MpyList *l;
+  size_t k;
+  switch (id) {
+    case BI_LIST_INSERT: {
+      int64_t at;
+      method_arity(n, 3, 3);
+      l = list_arg(args[0]);
+      at = need_int(args[1]);
+      if (at < 0) {
+        at += (int64_t)l->len;
+        if (at < 0) at = 0;
+      }
+      if ((uint64_t)at > l->len) at = (int64_t)l->len;
+      list_append(l, MPY_NONE);
+      memmove(l->items + at + 1, l->items + at, (l->len - 1 - (size_t)at) * sizeof(mpv));
+      l->items[at] = args[2];
+      return MPY_NONE;
+    }
+    case BI_LIST_EXTEND: {
+      mpv arg;
+      method_arity(n, 2, 2);
+      l = list_arg(args[0]);
+      arg = args[1];
+      if (is_list(arg)) {   /* the items are read through the list each time, since it may be l itself */
+        size_t cnt = ((MpyList *)(uintptr_t)arg)->len;
+        for (k = 0; k < cnt; ++k) list_append(l, ((MpyList *)(uintptr_t)arg)->items[k]);
+      } else if (is_tuple(arg)) {
+        const MpyTuple *t = (const MpyTuple *)(uintptr_t)arg;
+        for (k = 0; k < t->len; ++k) list_append(l, t->items[k]);
+      } else {
+        mpv it = mpy_get_iter(arg), v;
+        while ((v = mpy_iter_next(it)) != 0) list_append(l, v);
+      }
+      return MPY_NONE;
+    }
+    case BI_LIST_REMOVE:
+      method_arity(n, 2, 2);
+      l = list_arg(args[0]);
+      for (k = 0; k < l->len; ++k) {
+        if (obj_equal(l->items[k], args[1])) {
+          memmove(l->items + k, l->items + k + 1, (l->len - k - 1) * sizeof(mpv));
+          l->len -= 1;
+          return MPY_NONE;
+        }
+      }
+      fail("ValueError: object not in sequence");
+      return MPY_NONE;
+    case BI_LIST_INDEX:
+    case BI_LIST_COUNT: {
+      size_t cnt = 0, start = 0, stop, found = 0;
+      const mpv *items = NULL;
+      if (!seq_items(args[0], &cnt, &items)) fail("TypeError: method needs a list or tuple");
+      if (id == BI_LIST_COUNT) {
+        method_arity(n, 2, 2);
+        for (k = 0; k < cnt; ++k) {
+          if (obj_equal(items[k], args[1])) found++;
+        }
+        return make_small((int64_t)found);
+      }
+      method_arity(n, 2, 4);
+      stop = cnt;
+      if (n > 2) start = (size_t)seq_bound(args[2], cnt);
+      if (n > 3) stop = (size_t)seq_bound(args[3], cnt);
+      for (k = start; k < stop; ++k) {
+        if (obj_equal(items[k], args[1])) return make_small((int64_t)k);
+      }
+      fail("ValueError: object not in sequence");
+      return MPY_NONE;
+    }
+    case BI_LIST_REVERSE: {
+      size_t len;
+      method_arity(n, 1, 1);
+      l = list_arg(args[0]);
+      len = l->len;
+      for (k = 0; k < len / 2; ++k) {
+        mpv a = l->items[k];
+        l->items[k] = l->items[len - k - 1];
+        l->items[len - k - 1] = a;
+      }
+      return MPY_NONE;
+    }
+    case BI_LIST_SORT: {
+      mpv key = 0;
+      int reverse = 0;
+      uint64_t j;
+      if (n != 1) fail("TypeError: extra positional arguments given");   /* the reference's argument parser says this */
+      for (j = 0; j < nkw; ++j) {
+        mpv name = args[n + 2 * j], value = args[n + 2 * j + 1];
+        if (str_is(name, "key")) key = value == MPY_NONE ? 0 : value;
+        else if (str_is(name, "reverse")) reverse = mpy_truth(value);
+        else fail("TypeError: extra keyword arguments given");
+      }
+      l = list_arg(args[0]);
+      quicksort(l->items, -1, (long)l->len - 1, key, reverse ? 0 : 1);
+      return MPY_NONE;
+    }
+    case BI_LIST_COPY: {
+      MpyList *c;
+      method_arity(n, 1, 1);
+      l = list_arg(args[0]);
+      c = list_new(l->len);
+      for (k = 0; k < l->len; ++k) list_append(c, l->items[k]);
+      return (mpv)(uintptr_t)c;
+    }
+    case BI_LIST_CLEAR:
+      method_arity(n, 1, 1);
+      l = list_arg(args[0]);
+      l->len = 0;
+      return MPY_NONE;
+    default:
+      break;
+  }
+  fail("a list method is not lowered yet");
+  return MPY_NONE;
+}
+
+/* set.copy() and set.clear(): args[0] is the set. */
+static mpv set_copy_clear(int id, const mpv *args, uint64_t n) {
+  MpyDict *s;
+  method_arity(n, 1, 1);
+  if (!is_set(args[0])) fail("TypeError: method needs a set");
+  if (id == BI_SET_COPY) return set_copy_of(args[0]);
+  /* as dict.clear: the table goes, and the set is empty */
+  s = (MpyDict *)(uintptr_t)args[0];
+  free(s->table);
+  s->table = NULL;
+  s->alloc = 0;
+  s->used = 0;
+  s->all_keys_are_qstrs = 1;
+  return MPY_NONE;
+}
+
+static mpv builtin_call(int id, const mpv *args, uint64_t n, uint64_t nkw) {
+  char msg[160];
+  if (nkw && id != BI_LIST_SORT) fail("TypeError: function doesn't take keyword arguments");   /* the builtins take none, as the reference's do */
   if (id >= BI_STR_UPPER && id <= BI_STR_COUNT) return str_method(id, args, n);
+  if (id >= BI_LIST_INSERT && id <= BI_LIST_CLEAR) return list_method(id, args, n, nkw);
+  if (id == BI_SET_COPY || id == BI_SET_CLEAR) return set_copy_clear(id, args, n);
   if (id >= BI_EXC) {   /* an exception class: its instance, with the one argument it may take */
     if (n > 1) fail("TypeError: exceptions with more than one argument are not lowered yet");
     return new_exc(id - BI_EXC, n ? args[0] : 0);
