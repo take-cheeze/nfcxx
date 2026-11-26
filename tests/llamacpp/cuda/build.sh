@@ -6,7 +6,10 @@
 # Usage: tests/llamacpp/cuda/build.sh [OUT_DIR]     (default: build/llcu); the program is OUT/test-backend-ops.
 # Env: LLAMA (clone, default build/targets/llama.cpp), CUDA_HOME (default /usr/local/cuda), JOBS (default 2:
 # ggml-cuda.cu alone takes about 7.5 GB). Skips (exit 0) without the clone or the CUDA headers.
+# NFCXX_CUDA_MAX_PTX_LINES defaults here to 2000000: llama.cpp's flash-attention instances inline to about 1.2M PTX lines
+# in one kernel, which the 1000000 default refuses (the kernel does not split). Set it to override.
 set -uo pipefail
+export NFCXX_CUDA_MAX_PTX_LINES=${NFCXX_CUDA_MAX_PTX_LINES:-2000000}
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 llama=${LLAMA:-$root/build/targets/llama.cpp}
 cuda=${CUDA_HOME:-/usr/local/cuda}
