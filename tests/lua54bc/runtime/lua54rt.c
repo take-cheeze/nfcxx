@@ -4,6 +4,7 @@
  * the operators with their metamethods, the host library, and the errors of ldebug.c with their variable names. */
 #include <ctype.h>
 #include <math.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <setjmp.h>
@@ -575,18 +576,26 @@ void lua54rt_setret(LV *ret, LV *src, int n) {
 
 /* A host function (the library): it reads args and writes up to 64 results to out, returning their count. */
 typedef int (*lua_cfn)(LV *out, LV *args, int nargs);
+/* A host closure has up to four state values (up[0..nup-1]), which the collector marks. The library's gmatch iterator
+ * keeps its subject, pattern and positions there. cur_host is the host function being called, set for the call. */
 typedef struct HostFn {
   GCObj gc;
   lua_cfn fn;
+  int nup;
+  LV up[4];
 } HostFn;
+static HostFn *cur_host = NULL;
 
-static void make_host(LV *dst, lua_cfn fn) {
+static void make_host_nup(LV *dst, lua_cfn fn, int nup) {
   HostFn *h = (HostFn *)gc_alloc(GC_LCF, sizeof *h);
   if (h == NULL) die("out of memory");
   h->fn = fn;
+  h->nup = nup;
   dst->tag = TAG_LCF;
   dst->v.p = h;
 }
+
+static void make_host(LV *dst, lua_cfn fn) { make_host_nup(dst, fn, 0); }
 
 /* The results of a call are in ret[0..lua54rt_nret-1]: all of them, or wanted of them with nil after. */
 static void finish_call(LV *ret, int wanted, int a) {
@@ -605,7 +614,10 @@ void lua54rt_call(LV *fn, int nargs, LV *args, LV *ret, int wanted, int a) {
   if (fn->tag == TAG_LCF) {
     LV out[64];
     const char *saved = site;
-    int n = ((HostFn *)fn->v.p)->fn(out, args, nargs);
+    HostFn *saved_host = cur_host;
+    cur_host = (HostFn *)fn->v.p;
+    int n = cur_host->fn(out, args, nargs);
+    cur_host = saved_host;
     site = saved;
     lua54rt_nret = n;
     for (int k = 0; k < n; ++k) ret[k] = out[k];
@@ -1968,6 +1980,590 @@ static int host_sformat(LV *out, LV *args, int nargs) {
   return 1;
 }
 
+/* Keeps the object of a string alive until here: the matcher holds only pointers into its bytes. */
+static void keep_alive(const void *p) { __asm__ volatile("" : : "g"(p) : "memory"); }
+
+/* ---- string: pattern matching (lstrlib.c's matching functions, ported) ----
+ * find, match, gmatch and gsub. The matcher reads the bytes of the subject and the pattern, which are strings, so the byte
+ * after each end is the NUL of the string, as in C. A capture is a Lua value: a substring, or an integer for a position
+ * capture "()". An error is raised as luaL_error raises it: at the position of the call. */
+#define MAXCAPTURES 32
+#define MAXCCALLS 200
+#define CAP_UNFINISHED (-1)
+#define CAP_POSITION (-2)
+#define L_ESC '%'
+#define SPECIALS "^$*+?.([%-"
+
+typedef struct MatchCapture {
+  const char *init;
+  ptrdiff_t len;
+} MatchCapture;
+
+typedef struct MatchState {
+  const char *src_init;
+  const char *src_end;
+  const char *p_end;
+  int matchdepth;
+  int level;
+  MatchCapture capture[MAXCAPTURES];
+} MatchState;
+
+static const char *pat_match(MatchState *ms, const char *s, const char *p);
+
+static void pat_prepstate(MatchState *ms, const char *s, size_t ls, const char *p, size_t lp) {
+  ms->src_init = s;
+  ms->src_end = s + ls;
+  ms->p_end = p + lp;
+}
+
+static void pat_reprepstate(MatchState *ms) {
+  ms->matchdepth = MAXCCALLS;
+  ms->level = 0;
+}
+
+static int pat_check_capture(MatchState *ms, int l) {
+  l -= '1';
+  if (l < 0 || l >= ms->level || ms->capture[l].len == CAP_UNFINISHED) {
+    char buf[64];
+    snprintf(buf, sizeof buf, "invalid capture index %%%d", l + 1);
+    rt_fail(buf, -1);
+  }
+  return l;
+}
+
+static int pat_capture_to_close(MatchState *ms) {
+  int level = ms->level;
+  for (level--; level >= 0; level--)
+    if (ms->capture[level].len == CAP_UNFINISHED) return level;
+  rt_fail("invalid pattern capture", -1);
+  return 0;
+}
+
+/* The end of the single-character class that starts at p (its suffix, if any, is at the result). */
+static const char *pat_classend(MatchState *ms, const char *p) {
+  switch (*p++) {
+    case L_ESC: {
+      if (p == ms->p_end) rt_fail("malformed pattern (ends with '%')", -1);
+      return p + 1;
+    }
+    case '[': {
+      if (*p == '^') p++;
+      do {  /* look for a ']' */
+        if (p == ms->p_end) rt_fail("malformed pattern (missing ']')", -1);
+        if (*(p++) == L_ESC && p < ms->p_end) p++;  /* skip escapes (e.g. '%]') */
+      } while (*p != ']');
+      return p + 1;
+    }
+    default: return p;
+  }
+}
+
+static int pat_match_class(int c, int cl) {
+  int res;
+  switch (tolower(cl)) {
+    case 'a': res = isalpha(c); break;
+    case 'c': res = iscntrl(c); break;
+    case 'd': res = isdigit(c); break;
+    case 'g': res = isgraph(c); break;
+    case 'l': res = islower(c); break;
+    case 'p': res = ispunct(c); break;
+    case 's': res = isspace(c); break;
+    case 'u': res = isupper(c); break;
+    case 'w': res = isalnum(c); break;
+    case 'x': res = isxdigit(c); break;
+    case 'z': res = (c == 0); break;  /* deprecated option */
+    default: return (cl == c);
+  }
+  return (islower(cl) ? res : !res);
+}
+
+/* [set] at p, whose closing ']' is at ec. */
+static int pat_match_bracket_class(int c, const char *p, const char *ec) {
+  int sig = 1;
+  if (*(p + 1) == '^') {
+    sig = 0;
+    p++;  /* skip the '^' */
+  }
+  while (++p < ec) {
+    if (*p == L_ESC) {
+      p++;
+      if (pat_match_class(c, (unsigned char)*p)) return sig;
+    } else if (*(p + 1) == '-' && (p + 2 < ec)) {
+      p += 2;
+      if ((unsigned char)*(p - 2) <= c && c <= (unsigned char)*p) return sig;
+    } else if ((unsigned char)*p == c) {
+      return sig;
+    }
+  }
+  return !sig;
+}
+
+static int pat_single_match(MatchState *ms, const char *s, const char *p, const char *ep) {
+  if (s >= ms->src_end) return 0;
+  int c = (unsigned char)*s;
+  switch (*p) {
+    case '.': return 1;  /* matches any char */
+    case L_ESC: return pat_match_class(c, (unsigned char)*(p + 1));
+    case '[': return pat_match_bracket_class(c, p, ep - 1);
+    default: return ((unsigned char)*p == c);
+  }
+}
+
+static const char *pat_matchbalance(MatchState *ms, const char *s, const char *p) {
+  if (p >= ms->p_end - 1) rt_fail("malformed pattern (missing arguments to '%b')", -1);
+  if (*s != *p) return NULL;
+  int b = *p;
+  int e = *(p + 1);
+  int cont = 1;
+  while (++s < ms->src_end) {
+    if (*s == e) {
+      if (--cont == 0) return s + 1;
+    } else if (*s == b) {
+      cont++;
+    }
+  }
+  return NULL;  /* string ends out of balance */
+}
+
+static const char *pat_max_expand(MatchState *ms, const char *s, const char *p, const char *ep) {
+  ptrdiff_t i = 0;  /* counts maximum expand for item */
+  while (pat_single_match(ms, s + i, p, ep)) i++;
+  /* keeps trying to match with the maximum repetitions */
+  while (i >= 0) {
+    const char *res = pat_match(ms, s + i, ep + 1);
+    if (res) return res;
+    i--;  /* else didn't match; reduce 1 repetition to try again */
+  }
+  return NULL;
+}
+
+static const char *pat_min_expand(MatchState *ms, const char *s, const char *p, const char *ep) {
+  for (;;) {
+    const char *res = pat_match(ms, s, ep + 1);
+    if (res != NULL) return res;
+    if (pat_single_match(ms, s, p, ep)) s++;  /* try with one more repetition */
+    else return NULL;
+  }
+}
+
+static const char *pat_start_capture(MatchState *ms, const char *s, const char *p, ptrdiff_t what) {
+  int level = ms->level;
+  if (level >= MAXCAPTURES) rt_fail("too many captures", -1);
+  ms->capture[level].init = s;
+  ms->capture[level].len = what;
+  ms->level = level + 1;
+  const char *res = pat_match(ms, s, p);
+  if (res == NULL) ms->level--;  /* undo capture */
+  return res;
+}
+
+static const char *pat_end_capture(MatchState *ms, const char *s, const char *p) {
+  int l = pat_capture_to_close(ms);
+  ms->capture[l].len = s - ms->capture[l].init;  /* close capture */
+  const char *res = pat_match(ms, s, p);
+  if (res == NULL) ms->capture[l].len = CAP_UNFINISHED;  /* undo capture */
+  return res;
+}
+
+static const char *pat_match_capture(MatchState *ms, const char *s, int l) {
+  l = pat_check_capture(ms, l);
+  size_t len = (size_t)ms->capture[l].len;
+  if ((size_t)(ms->src_end - s) >= len && memcmp(ms->capture[l].init, s, len) == 0) return s + len;
+  return NULL;
+}
+
+/* do_match: the end of the match of the pattern p at s, or NULL (lstrlib.c's match). */
+static const char *pat_match(MatchState *ms, const char *s, const char *p) {
+  if (ms->matchdepth-- == 0) rt_fail("pattern too complex", -1);
+init: /* using goto to optimize tail recursion */
+  if (p != ms->p_end) {  /* end of pattern? */
+    switch (*p) {
+      case '(': {  /* start capture */
+        if (*(p + 1) == ')')  /* position capture? */
+          s = pat_start_capture(ms, s, p + 2, CAP_POSITION);
+        else
+          s = pat_start_capture(ms, s, p + 1, CAP_UNFINISHED);
+        break;
+      }
+      case ')': {  /* end capture */
+        s = pat_end_capture(ms, s, p + 1);
+        break;
+      }
+      case '$': {
+        if ((p + 1) != ms->p_end) goto dflt;  /* the '$' is not the last char: default */
+        s = (s == ms->src_end) ? s : NULL;  /* check end of string */
+        break;
+      }
+      case L_ESC: {  /* escaped sequences not in the format class[*+?-]? */
+        switch (*(p + 1)) {
+          case 'b': {  /* balanced string? */
+            s = pat_matchbalance(ms, s, p + 2);
+            if (s != NULL) {
+              p += 4;
+              goto init;
+            }
+            break;
+          }
+          case 'f': {  /* frontier? */
+            const char *ep;
+            char previous;
+            p += 2;
+            if (*p != '[') rt_fail("missing '[' after '%f' in pattern", -1);
+            ep = pat_classend(ms, p);  /* points to what is next */
+            previous = (s == ms->src_init) ? '\0' : *(s - 1);
+            if (!pat_match_bracket_class((unsigned char)previous, p, ep - 1) &&
+                pat_match_bracket_class((unsigned char)*s, p, ep - 1)) {
+              p = ep;
+              goto init;
+            }
+            s = NULL;  /* match failed */
+            break;
+          }
+          case '0': case '1': case '2': case '3': case '4':
+          case '5': case '6': case '7': case '8': case '9': {  /* capture results (%0-%9)? */
+            s = pat_match_capture(ms, s, (unsigned char)*(p + 1));
+            if (s != NULL) {
+              p += 2;
+              goto init;
+            }
+            break;
+          }
+          default: goto dflt;
+        }
+        break;
+      }
+      default: dflt: {  /* pattern class plus optional suffix */
+        const char *ep = pat_classend(ms, p);  /* points to optional suffix */
+        /* does not match at least once? */
+        if (!pat_single_match(ms, s, p, ep)) {
+          if (*ep == '*' || *ep == '?' || *ep == '-') {  /* accept empty? */
+            p = ep + 1;
+            goto init;
+          }
+          s = NULL;  /* '+' or no suffix: fail */
+        } else {  /* matched once */
+          switch (*ep) {  /* handle optional suffix */
+            case '?': {
+              const char *res = pat_match(ms, s + 1, ep + 1);
+              if (res != NULL) {
+                s = res;
+              } else {
+                p = ep + 1;
+                goto init;
+              }
+              break;
+            }
+            case '+':  /* 1 or more repetitions: 1 match already done */
+              s = pat_max_expand(ms, s + 1, p, ep);
+              break;
+            case '*':  /* 0 or more repetitions */
+              s = pat_max_expand(ms, s, p, ep);
+              break;
+            case '-':  /* 0 or more repetitions (minimum) */
+              s = pat_min_expand(ms, s, p, ep);
+              break;
+            default:  /* no suffix */
+              s++;
+              p = ep;
+              goto init;
+          }
+        }
+        break;
+      }
+    }
+  }
+  ms->matchdepth++;
+  return s;
+}
+
+/* A growing buffer for the result of gsub (luaL_Buffer). */
+typedef struct Buf {
+  char *p;
+  size_t len, cap;
+} Buf;
+
+static void buf_add(Buf *b, const char *s, size_t n) {
+  if (b->len + n + 1 > b->cap) {
+    size_t cap = b->cap > 0 ? b->cap : 64;
+    while (b->len + n + 1 > cap) cap *= 2;
+    char *np = (char *)realloc(b->p, cap);
+    if (np == NULL) die("out of memory");
+    b->p = np;
+    b->cap = cap;
+  }
+  if (n > 0) memcpy(b->p + b->len, s, n);
+  b->len += n;
+}
+
+/* get_onecapture + push_onecapture: capture i as a value in *dst. With no captures, capture 0 is the whole match. */
+static void pat_one_capture(MatchState *ms, int i, const char *s, const char *e, LV *dst) {
+  if (i >= ms->level) {
+    if (i != 0) {
+      char buf[64];
+      snprintf(buf, sizeof buf, "invalid capture index %%%d", i + 1);
+      rt_fail(buf, -1);
+    }
+    *dst = make_str(s, (size_t)(e - s));
+    return;
+  }
+  ptrdiff_t l = ms->capture[i].len;
+  if (l == CAP_UNFINISHED) rt_fail("unfinished capture", -1);
+  if (l == CAP_POSITION) {
+    dst->tag = TAG_INT;
+    dst->v.i = (int64_t)(ms->capture[i].init - ms->src_init) + 1;
+    return;
+  }
+  *dst = make_str(ms->capture[i].init, (size_t)l);
+}
+
+/* push_captures: the captures of a match into out. With s == NULL (find), only the captures are pushed. */
+static int pat_push_captures(MatchState *ms, const char *s, const char *e, LV *out) {
+  int nlevels = (ms->level == 0 && s != NULL) ? 1 : ms->level;
+  for (int i = 0; i < nlevels; ++i) pat_one_capture(ms, i, s, e, &out[i]);
+  return nlevels;
+}
+
+/* lmemfind: the first occurrence of s2 in s1, or NULL. */
+static const char *pat_memfind(const char *s1, size_t l1, const char *s2, size_t l2) {
+  if (l2 == 0) return s1;
+  if (l2 > l1) return NULL;
+  for (size_t k = 0; k + l2 <= l1; ++k)
+    if (memcmp(s1 + k, s2, l2) == 0) return s1 + k;
+  return NULL;
+}
+
+/* nospecials: the pattern has no magic character, so find may search for it as plain text. */
+static int pat_no_specials(const char *p, size_t l) {
+  for (size_t k = 0; k < l; ++k)
+    if (p[k] != '\0' && strchr(SPECIALS, p[k]) != NULL) return 0;
+  return 1;
+}
+
+/* posrelatI: an initial position, negative from the end, clipped to [1, inf). */
+static size_t pat_posrelat(int64_t pos, size_t len) {
+  if (pos > 0) return (size_t)pos;
+  if (pos == 0) return 1;
+  if (pos < -(int64_t)len) return 1;
+  return len + (size_t)pos + 1;
+}
+
+/* str_find_aux: string.find (find != 0) and string.match. */
+static int pat_find_aux(LV *out, LV *args, int nargs, int find, const char *fname) {
+  LV sv = arg_str(args, nargs, 1, fname);
+  LV pv = arg_str(args, nargs, 2, fname);
+  const LString *S = (const LString *)sv.v.p, *P = (const LString *)pv.v.p;
+  size_t ls = S->len, lp = P->len;
+  size_t init = pat_posrelat(opt_int(args, nargs, 3, fname, 1), ls) - 1;
+  if (init > ls) {  /* start after string's end? */
+    out[0].tag = TAG_NIL;
+    return 1;
+  }
+  if (find && ((nargs >= 4 && truthy(&args[3])) || pat_no_specials(P->bytes, lp))) {
+    const char *s2 = pat_memfind(S->bytes + init, ls - init, P->bytes, lp);
+    if (s2 != NULL) {
+      out[0].tag = TAG_INT;
+      out[0].v.i = (int64_t)(s2 - S->bytes) + 1;
+      out[1].tag = TAG_INT;
+      out[1].v.i = (int64_t)(s2 - S->bytes) + (int64_t)lp;
+      keep_alive(S);
+      return 2;
+    }
+  } else {
+    MatchState ms;
+    const char *s1 = S->bytes + init;
+    const char *p = P->bytes;
+    size_t plen = lp;
+    int anchor = (*p == '^');
+    if (anchor) {
+      p++;
+      plen--;  /* skip anchor character */
+    }
+    pat_prepstate(&ms, S->bytes, ls, p, plen);
+    do {
+      pat_reprepstate(&ms);
+      const char *res = pat_match(&ms, s1, p);
+      if (res != NULL) {
+        int n;
+        if (find) {
+          out[0].tag = TAG_INT;
+          out[0].v.i = (int64_t)(s1 - S->bytes) + 1;  /* start */
+          out[1].tag = TAG_INT;
+          out[1].v.i = (int64_t)(res - S->bytes);  /* end */
+          n = pat_push_captures(&ms, NULL, NULL, out + 2) + 2;
+        } else {
+          n = pat_push_captures(&ms, s1, res, out);
+        }
+        keep_alive(S);
+        return n;
+      }
+    } while (s1++ < ms.src_end && !anchor);
+    keep_alive(S);
+  }
+  out[0].tag = TAG_NIL;  /* not found */
+  return 1;
+}
+
+static int host_sfind(LV *out, LV *args, int nargs) { return pat_find_aux(out, args, nargs, 1, "find"); }
+
+static int host_smatch(LV *out, LV *args, int nargs) { return pat_find_aux(out, args, nargs, 0, "match"); }
+
+/* The iterator of gmatch (gmatch_aux). Its state is the host closure's up[0] (subject), up[1] (pattern), up[2] (the
+ * position to search from) and up[3] (the end of the last match, -1 for none). */
+static int pat_gmatch_iter(LV *out, LV *args, int nargs) {
+  (void)args;
+  (void)nargs;
+  HostFn *self = cur_host;
+  const LString *S = (const LString *)self->up[0].v.p, *P = (const LString *)self->up[1].v.p;
+  MatchState ms;
+  pat_prepstate(&ms, S->bytes, S->len, P->bytes, P->len);
+  for (size_t src = (size_t)self->up[2].v.i; src <= S->len; ++src) {
+    pat_reprepstate(&ms);
+    const char *e = pat_match(&ms, S->bytes + src, P->bytes);
+    if (e != NULL && (int64_t)(e - S->bytes) != self->up[3].v.i) {
+      self->up[2].v.i = (int64_t)(e - S->bytes);
+      self->up[3].v.i = (int64_t)(e - S->bytes);
+      return pat_push_captures(&ms, S->bytes + src, e, out);
+    }
+  }
+  return 0;  /* not found */
+}
+
+static int host_sgmatch(LV *out, LV *args, int nargs) {
+  LV sv = arg_str(args, nargs, 1, "gmatch");
+  LV pv = arg_str(args, nargs, 2, "gmatch");
+  size_t ls = ((LString *)sv.v.p)->len;
+  size_t init = pat_posrelat(opt_int(args, nargs, 3, "gmatch", 1), ls) - 1;
+  if (init > ls) init = ls + 1;  /* start after string's end: no match */
+  make_host_nup(&out[0], pat_gmatch_iter, 4);
+  HostFn *h = (HostFn *)out[0].v.p;
+  h->up[0] = sv;
+  h->up[1] = pv;
+  h->up[2].tag = TAG_INT;
+  h->up[2].v.i = (int64_t)init;
+  h->up[3].tag = TAG_INT;
+  h->up[3].v.i = -1;  /* no match yet */
+  return 1;
+}
+
+/* add_s: the replacement string news, with %0-%9 and %%, for the match s..e. */
+static void pat_add_s(MatchState *ms, Buf *b, const char *s, const char *e, const LString *news) {
+  const char *p = news->bytes;
+  size_t l = news->len;
+  const char *q;
+  while ((q = (const char *)memchr(p, L_ESC, l)) != NULL) {
+    buf_add(b, p, (size_t)(q - p));
+    q++;  /* skip ESC */
+    if (*q == L_ESC) {  /* '%%' */
+      buf_add(b, q, 1);
+    } else if (*q == '0') {  /* '%0' */
+      buf_add(b, s, (size_t)(e - s));
+    } else if (*q >= '1' && *q <= '9') {  /* '%n' */
+      LV cap;
+      pat_one_capture(ms, *q - '1', s, e, &cap);
+      if (cap.tag == TAG_STR) {
+        buf_add(b, ((LString *)cap.v.p)->bytes, ((LString *)cap.v.p)->len);
+      } else {
+        char num[64];
+        size_t n = number_text(&cap, num, sizeof num);
+        buf_add(b, num, n);
+      }
+    } else {
+      rt_fail("invalid use of '%' in replacement string", -1);
+    }
+    l -= (size_t)(q + 1 - p);
+    p = q + 1;
+  }
+  buf_add(b, p, l);
+}
+
+/* add_value: the replacement of the match s..e by a string, a table (indexed by the first capture) or a function (called
+ * with the captures). A false or nil result keeps the match. Returns 1 when the text changed. */
+static int pat_add_value(MatchState *ms, Buf *b, const char *s, const char *e, LV *repl) {
+  LV res[256];
+  if (repl->tag == TAG_LCL || repl->tag == TAG_LCF) {
+    LV frame[1024];
+    LV fn = *repl;
+    int n = pat_push_captures(ms, s, e, frame);
+    lua54rt_call(&fn, n, frame, res, 1, 0);
+  } else if (repl->tag == TAG_TABLE) {
+    LV key, t = *repl;
+    pat_one_capture(ms, 0, s, e, &key);
+    lua54rt_gettable(&res[0], &t, &key);
+  } else {
+    pat_add_s(ms, b, s, e, (const LString *)repl->v.p);
+    return 1;
+  }
+  if (!truthy(&res[0])) {
+    buf_add(b, s, (size_t)(e - s));  /* keep original text */
+    return 0;
+  }
+  if (res[0].tag == TAG_STR) {
+    buf_add(b, ((LString *)res[0].v.p)->bytes, ((LString *)res[0].v.p)->len);
+  } else if (is_number(&res[0])) {
+    char num[64];
+    size_t n = number_text(&res[0], num, sizeof num);
+    buf_add(b, num, n);
+  } else {
+    char buf[64];
+    snprintf(buf, sizeof buf, "invalid replacement value (a %s)", type_name(res[0].tag));
+    rt_fail(buf, -1);
+  }
+  return 1;
+}
+
+static int host_sgsub(LV *out, LV *args, int nargs) {
+  LV sv = arg_str(args, nargs, 1, "gsub");
+  LV pv = arg_str(args, nargs, 2, "gsub");
+  const LString *S = (const LString *)sv.v.p, *P = (const LString *)pv.v.p;
+  int64_t max_s = opt_int(args, nargs, 4, "gsub", (int64_t)S->len + 1);
+  LV repl;
+  int tr = nargs >= 3 ? args[2].tag : TAG_NIL;
+  if (tr == TAG_STR || tr == TAG_INT || tr == TAG_FLOAT) repl = arg_str(args, nargs, 3, "gsub");
+  else if (tr == TAG_TABLE || tr == TAG_LCL || tr == TAG_LCF) repl = args[2];
+  else lib_arg_error(3, "gsub", "string/function/table", arg_typename(args, nargs, 3));
+
+  const char *src = S->bytes;
+  const char *p = P->bytes;
+  size_t lp = P->len;
+  const char *lastmatch = NULL;  /* end of last match */
+  int64_t n = 0;                 /* replacement count */
+  int changed = 0;
+  int anchor = (*p == '^');
+  if (anchor) {
+    p++;
+    lp--;  /* skip anchor character */
+  }
+  MatchState ms;
+  Buf b = {NULL, 0, 0};
+  pat_prepstate(&ms, S->bytes, S->len, p, lp);
+  while (n < max_s) {
+    pat_reprepstate(&ms);  /* (re)prepare state for new match */
+    const char *e = pat_match(&ms, src, p);
+    if (e != NULL && e != lastmatch) {  /* match? */
+      n++;
+      changed = pat_add_value(&ms, &b, src, e, &repl) | changed;
+      src = lastmatch = e;
+    } else if (src < ms.src_end) {  /* otherwise, skip one character */
+      buf_add(&b, src, 1);
+      src++;
+    } else {
+      break;  /* end of subject */
+    }
+    if (anchor) break;
+  }
+  if (!changed) {  /* no changes? */
+    out[0] = sv;
+  } else {  /* something changed */
+    buf_add(&b, src, (size_t)(ms.src_end - src));
+    out[0] = make_str(b.p != NULL ? b.p : "", b.len);
+    free(b.p);
+  }
+  out[1].tag = TAG_INT;
+  out[1].v.i = n;
+  keep_alive(S);
+  return 2;
+}
+
 /* The tables of the libraries; the string metatable is created in install_more. */
 
 static void register_table(LV *env, const char *name, LV *tbl) { set_global(env, name, tbl); }
@@ -2046,6 +2642,10 @@ static void install_more(LV *env) {
   add_fn(&str, "byte", host_sbyte);
   add_fn(&str, "char", host_schar);
   add_fn(&str, "format", host_sformat);
+  add_fn(&str, "find", host_sfind);
+  add_fn(&str, "match", host_smatch);
+  add_fn(&str, "gmatch", host_sgmatch);
+  add_fn(&str, "gsub", host_sgsub);
   register_table(env, "string", &str);
   string_meta = (Table *)gc_alloc(GC_TABLE, sizeof(Table));
   if (string_meta == NULL) die("out of memory");
@@ -2191,6 +2791,11 @@ static void traverse(GCObj *o) {
     case GC_VARARGS: {
       VarArgs *va = (VarArgs *)o;
       for (int k = 0; k < va->count; ++k) mark_value(&va->vals[k]);
+      break;
+    }
+    case GC_LCF: {
+      HostFn *h = (HostFn *)o;
+      for (int k = 0; k < h->nup; ++k) mark_value(&h->up[k]);
       break;
     }
     default: break;
