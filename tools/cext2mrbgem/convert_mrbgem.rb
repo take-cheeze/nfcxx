@@ -122,7 +122,7 @@ REG_RE = /(?<![#{WC}$.>])(rb_define_method|rb_define_private_method|rb_define_si
 ALLOC_REG_RE = /(?<![#{WC}$.>])(rb_define_alloc_func)#{SS}\(/
 # a right side that yields a class (a definition or a lookup of a class): not a non-class assignment to a class variable
 # a class expression of the fork (an RClass *): mrb->x_class, mrb_class_get / mrb_exc_get / mrb_module_get, or an E_*_ERROR class macro
-CLASS_EXPR_RE = /\A(?:mrb->\w+_class|mrb_class_get\(|mrb_exc_get\(|mrb_module_get\(|E_[A-Z][A-Z0-9_]*\z)/
+CLASS_EXPR_RE = /\A(?:mrb->(?:\w+_class|kernel_module)|mrb_class_get\(|mrb_exc_get\(|mrb_module_get\(|E_[A-Z][A-Z0-9_]*\z)/
 CLASS_RHS_RE = '(?:rb_define_(?:class|module)(?:_under)?|rb_const_get(?:_at)?|rb_path2class|rb_class_new|mrb_const_get|mrb_define_(?:class|module)(?:_under)?|mrb_class_get|rb_class_get)'
 CLASS_ASSIGN_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}=#{SS}rb_define_(?:class|module)(?:_under)?#{SS}\(/
 # an ID variable's only write in the gem: NAME = rb_intern("lit"); (matched on the masked text, the literal read from the source)
@@ -247,6 +247,91 @@ end
 
 def line_of(text, pos)
   psl(text, 0, pos).count("\n") + 1
+end
+
+# Function-defining macros. A function-like macro whose body defines functions (ffi's NUM_OP(name, type, ...) defines
+# memory_put_##name and its siblings) is expanded at each of its file-scope statement invocations, so the functions it
+# defines are ordinary definitions to the scanners. Per file: the macro has one unconditional #define, its body has no
+# string literal and no stringification, the invocation is `NAME(args);` at the start of a line outside any braces and
+# outside another macro body, and the expansion defines a function (DEF_RE). Each top-level item of the expansion goes
+# on its own line, so the lines after an expansion move (refusals there name the expanded text). The #define is left as
+# it is: with no use left it is an unused macro, which the converter wraps in #if 0 as it does any other.
+def expand_function_macros(text)
+  masked = mask_c(text)
+  starts = Hash.new { |h, k| h[k] = [] }
+  masked.to_enum(:scan, /^[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)\(/).each { starts[Regexp.last_match(1)] << Regexp.last_match.begin(0) }
+  cands = {}
+  starts.each do |name, at|
+    next unless at.length == 1
+    st = at[0]
+    # a #define under a conditional may be one of several alternatives: such a macro is not expanded
+    depth = 0
+    masked[0...st].scan(/^[ \t]*#[ \t]*(if|ifdef|ifndef|endif)\b/) { depth += Regexp.last_match(1) == 'endif' ? -1 : 1 }
+    next unless depth == 0
+    open = masked.index('(', st)
+    close = match_close(masked, open)
+    next if close < 0
+    params = psl(text, open + 1, close).split(',').map(&:strip).reject(&:empty?)
+    # the logical line of the #define: a line ending in a backslash continues
+    pos = close + 1
+    eol = nil
+    while eol.nil?
+      nl = text.index("\n", pos) || text.length
+      if nl > 0 && text[nl - 1] == '\\'
+        pos = nl + 1
+      else
+        eol = nl
+      end
+    end
+    body = psl(text, close + 1, eol).gsub(/\\\n/, ' ').gsub(%r{/\*.*?\*/}m, ' ').sub(%r{//.*\z}, '')
+    next if body.match?(/["']/) || body.gsub('##', '').include?('#')
+    cands[name] = { params: params, body: body }
+  end
+  return text if cands.empty?
+  edits = []
+  cands.each do |name, c|
+    masked.to_enum(:scan, /^([ \t]*)#{Regexp.escape(name)}[ \t]*\(/).each do
+      m = Regexp.last_match
+      name_pos = m.begin(0) + m[1].length
+      open = m.end(0) - 1
+      prev = m.begin(0) > 0 ? masked[0...m.begin(0)] : ''
+      next if prev.end_with?("\\\n")
+      close = match_close(masked, open)
+      next if close < 0
+      j = close + 1
+      j += 1 while j < masked.length && masked[j].match?(/[ \t]/)
+      next unless masked[j] == ';'
+      before = masked[0...name_pos]
+      next unless before.count('{') == before.count('}')
+      args = split_args(masked, open, close).map { |a, b| psl(text, a, b) }
+      next unless args.length == c[:params].length
+      expansion = format_expansion(c[:body], c[:params], args)
+      next unless DEF_RE.match?(expansion)
+      edits << [name_pos, j + 1, expansion]
+    end
+  end
+  edits.sort_by { |a, _b, _t| -a }.each { |a, b, t| text = psl(text, 0, a) + t + psl(text, b) }
+  text
+end
+
+# The body with its parameters replaced by the arguments (## pastes the adjacent pieces), with each top-level item on its
+# own line and the runs of blanks collapsed.
+def format_expansion(body, params, args)
+  map = params.zip(args).to_h
+  pieces = body.split(/\s*##\s*/, -1).map { |pc| pc.gsub(/\b[A-Za-z_]\w*\b/) { |id| map.fetch(id, id) } }
+  depth = 0
+  lines = []
+  cur = +''
+  pieces.join.each_char do |ch|
+    depth += 1 if ch == '{'
+    depth -= 1 if ch == '}'
+    cur << ch
+    next unless depth == 0 && (ch == ';' || ch == '}')
+    lines << cur.strip.gsub(/[ \t]+/, ' ')
+    cur = +''
+  end
+  lines << cur.strip.gsub(/[ \t]+/, ' ') unless cur.strip.empty?
+  lines.reject(&:empty?).join("\n")
 end
 
 def blank(s)
@@ -758,6 +843,8 @@ end
 ($replaces || []).each do |old, new|
   texts.each_key { |k| texts[k] = texts[k].gsub(old, new) }
 end
+# function-defining macros (NUM_OP(...) at file scope) are expanded in their own file, so the functions they define are found
+texts.each_key { |k| texts[k] = expand_function_macros(texts[k]) }
     Dir.children(@cext_dir).reject { |n| n.start_with?('.') }.sort.each do |base|
       path = File.join(@cext_dir, base)
       if File.directory?(path)

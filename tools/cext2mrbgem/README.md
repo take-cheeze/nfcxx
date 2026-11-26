@@ -70,6 +70,12 @@ What differs from the regex scan, and why:
 - `rb_scan_args(argc, argv, "<lead><optional>", &v...)` inside a variadic method becomes
   `mrb_get_args(mrb, "o|o", &v...)`, with optional outputs set to nil first. Only as a statement and only on the
   method's own argc and argv. Rest (`*`), keyword (`:`), block and fixed-arity forms are refused.
+- A function-defining macro (ffi's `NUM_OP(name, type, toNative, fromNative, swap)`, whose body defines
+  `memory_put_##name` and its siblings) is expanded at each of its file-scope statement invocations, so the functions
+  it defines are ordinary definitions and can be registered. The expansion is textual (parameters replaced, `##`
+  pastes joined) and is done once per file before the scan. Its top-level items go on their own lines, so the line
+  numbers after an expanded invocation in that file are the expanded text's. A macro with two `#define`s, a string
+  literal or a stringification in its body, or an expansion that defines no function is left as it is.
 - `rb_define_module_function(mod, "name", fn, argc)` becomes `mrb_define_module_function`, which defines the
   singleton and private instance method as CRuby does. `rb_define_const(klass, "NAME", v)` becomes
   `mrb_define_const(mrb, klass, "NAME", v)`. Both need the receiver to be a tracked class or module variable (a
