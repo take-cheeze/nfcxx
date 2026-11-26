@@ -6,12 +6,14 @@
  * comparison the IR makes. Tables are open-addressing hash tables keyed by the raw value (a string by its object).
  * Nothing is freed. The methods of the subset are the ones sqbc_rt_get finds: `len` of a string or an array, `tostring` of a
  * number, a boolean, a string, an array or a table, `tofloat`, `tointeger` and `tochar` of a number or a boolean (`tofloat`
- * and `tointeger` of a string), `append`, `push`, `pop`, `reverse`, `slice` and `find` of an array, `rawget`, `rawset`,
+ * and `tointeger` of a string), `append`, `push`, `pop`, `reverse`, `slice`, `find`, `extend` and `insert` of an array,
+ * `slice`, `find`, `tolower` and `toupper` of a string, `rawget`, `rawset`,
  * `rawin` of a class or an instance, `getbase` and `instance` of a class, `getclass` of an instance, and `print` in the root
  * table. Any other method of a string, an array, a class or an instance is `unsupported ... method`; a table's is "the index
  * does not exist". */
 #include "sqbcrt.h"
 
+#include <ctype.h>
 #include <inttypes.h>
 #include <math.h>
 #include <stdio.h>
@@ -352,6 +354,12 @@ enum {
   NAT_ARR_REVERSE,
   NAT_ARR_SLICE,
   NAT_ARR_FIND,
+  NAT_ARR_EXTEND,     /* array delegate: extend and insert */
+  NAT_ARR_INSERT,
+  NAT_STR_SLICE,      /* string delegate: slice, find, tolower and toupper */
+  NAT_STR_FIND,
+  NAT_STR_TOLOWER,
+  NAT_STR_TOUPPER,
   NAT_RAWGET,         /* class and instance delegate: rawget, rawset, rawin */
   NAT_RAWSET,
   NAT_RAWIN,
@@ -376,6 +384,12 @@ static SqNative g_nat_arr_pop = {NAT_ARR_POP, 1, "a"};
 static SqNative g_nat_arr_reverse = {NAT_ARR_REVERSE, 1, "a"};
 static SqNative g_nat_arr_slice = {NAT_ARR_SLICE, -1, "ann"};
 static SqNative g_nat_arr_find = {NAT_ARR_FIND, 2, "a"};
+static SqNative g_nat_arr_extend = {NAT_ARR_EXTEND, 2, "aa"};   /* sqbaselib.cpp array_extend */
+static SqNative g_nat_arr_insert = {NAT_ARR_INSERT, 3, "an"};   /* array_insert */
+static SqNative g_nat_str_slice = {NAT_STR_SLICE, -1, "snn"};   /* string_slice */
+static SqNative g_nat_str_find = {NAT_STR_FIND, -2, "ssn"};     /* string_find */
+static SqNative g_nat_str_tolower = {NAT_STR_TOLOWER, -1, "snn"}; /* string_tolower, string_toupper (STRING_TOFUNCZ) */
+static SqNative g_nat_str_toupper = {NAT_STR_TOUPPER, -1, "snn"};
 static SqNative g_nat_rawget = {NAT_RAWGET, 2, NULL};
 static SqNative g_nat_rawset = {NAT_RAWSET, 3, NULL};
 static SqNative g_nat_rawin = {NAT_RAWIN, 2, NULL};
@@ -428,6 +442,10 @@ static int delegate_native(const SQV *self, const SQV *key, SQV *out) {
       else if (strcmp(name, "tofloat") == 0) n = &g_nat_str_tofloat;
       else if (strcmp(name, "tointeger") == 0) n = &g_nat_str_tointeger;
       else if (strcmp(name, "tostring") == 0) n = &g_nat_tostring;
+      else if (strcmp(name, "slice") == 0) n = &g_nat_str_slice;
+      else if (strcmp(name, "find") == 0) n = &g_nat_str_find;
+      else if (strcmp(name, "tolower") == 0) n = &g_nat_str_tolower;
+      else if (strcmp(name, "toupper") == 0) n = &g_nat_str_toupper;
       break;
     case SQBC_TAG_ARRAY:
       if (strcmp(name, "len") == 0) n = &g_nat_arr_len;
@@ -436,6 +454,8 @@ static int delegate_native(const SQV *self, const SQV *key, SQV *out) {
       else if (strcmp(name, "reverse") == 0) n = &g_nat_arr_reverse;
       else if (strcmp(name, "slice") == 0) n = &g_nat_arr_slice;
       else if (strcmp(name, "find") == 0) n = &g_nat_arr_find;
+      else if (strcmp(name, "extend") == 0) n = &g_nat_arr_extend;
+      else if (strcmp(name, "insert") == 0) n = &g_nat_arr_insert;
       else if (strcmp(name, "tostring") == 0) n = &g_nat_tostring;
       break;
     case SQBC_TAG_INTEGER:
@@ -488,15 +508,15 @@ static int is_instance_method(const char *name) {
 }
 
 static int is_array_method(const char *name) {
-  static const char *const names[] = {"extend", "top",    "insert", "remove", "resize", "sort",   "weakref", "clear",
-                                      "map",    "apply",  "reduce", "filter"};
+  static const char *const names[] = {"top",   "remove", "resize", "sort",  "weakref", "clear",
+                                      "map",   "apply",  "reduce", "filter"};
   for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
     if (strcmp(name, names[i]) == 0) return 1;
   return 0;
 }
 
 static int is_string_method(const char *name) {
-  static const char *const names[] = {"slice", "find", "tolower", "toupper", "weakref"};
+  static const char *const names[] = {"weakref"};
   for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
     if (strcmp(name, names[i]) == 0) return 1;
   return 0;
@@ -997,22 +1017,74 @@ static void array_reverse_items(const SQV *self) {
 
 /* array.slice (sqbaselib.cpp array_slice, get_slice_params): a new array of the items from START up to END. A missing or
  * negative index counts from the start or the end; the typemask has made START and END numbers. */
-static SQV array_slice_of(const SQV *self, const SQV *frame, int nargs) {
-  SqArray *a = array_of(self);
-  int64_t alen = (int64_t)a->count;
+static void slice_bounds(const SQV *frame, int nargs, int64_t len, int64_t *sp, int64_t *ep) {
   int64_t sidx = 0, eidx = 0;
   if (nargs > 1 && is_number(&frame[1])) sidx = number_to_int(&frame[1]);
   if (nargs > 2) {
     if (is_number(&frame[2])) eidx = number_to_int(&frame[2]);
   } else {
-    eidx = alen;
+    eidx = len;
   }
-  if (sidx < 0) sidx = alen + sidx;
-  if (eidx < 0) eidx = alen + eidx;
+  if (sidx < 0) sidx = len + sidx;
+  if (eidx < 0) eidx = len + eidx;
   if (eidx < sidx) rt_error("wrong indexes");
-  if (eidx > alen || sidx < 0) rt_error("slice out of range");
+  if (eidx > len || sidx < 0) rt_error("slice out of range");
+  *sp = sidx;
+  *ep = eidx;
+}
+
+static SQV array_slice_of(const SQV *self, const SQV *frame, int nargs) {
+  SqArray *a = array_of(self);
+  int64_t sidx, eidx;
+  slice_bounds(frame, nargs, (int64_t)a->count, &sidx, &eidx);
   SQV r = make_array_val((size_t)(eidx - sidx));
   for (int64_t i = sidx; i < eidx; i++) sqbc_rt_append(&r, &a->items[i]);
+  return r;
+}
+
+/* array.insert (sqbaselib.cpp array_insert, SQArray::Insert): VAL goes before item IDX, which is at most the count. */
+static void array_insert_at(const SQV *self, int64_t idx, const SQV *val) {
+  SqArray *a = array_of(self);
+  if (idx < 0 || idx > (int64_t)a->count) rt_error("index out of range");
+  SQV v = *val;
+  sqbc_rt_append(self, &v);
+  memmove(a->items + idx + 1, a->items + idx, (a->count - 1 - (size_t)idx) * sizeof(SQV));
+  a->items[idx] = v;
+}
+
+/* string.slice (sqbaselib.cpp string_slice): the bytes from START up to END, as a new string. */
+static SQV string_slice_of(const SQV *self, const SQV *frame, int nargs) {
+  SqStr *s = str_of(self);
+  int64_t sidx, eidx;
+  slice_bounds(frame, nargs, (int64_t)s->len, &sidx, &eidx);
+  return make_string(s->chars + sidx, (size_t)(eidx - sidx));
+}
+
+/* string.find (sqbaselib.cpp string_find): the index of the first SUB at or after START (strstr, as the reference
+ * does: a NUL byte ends the text), or null when there is none or START is past the end. */
+static SQV string_find_of(const SQV *self, const SQV *frame, int nargs) {
+  SqStr *s = str_of(self);
+  int64_t start = nargs > 2 ? number_to_int(&frame[2]) : 0;
+  if ((int64_t)s->len > start && start >= 0) {
+    const char *hit = strstr(s->chars + start, str_of(&frame[1])->chars);
+    if (hit) return make_int((int64_t)(hit - s->chars));
+  }
+  return make_null();
+}
+
+/* string.tolower and toupper (sqbaselib.cpp STRING_TOFUNCZ): the whole string, with the bytes from START up to END
+ * changed (the reference copies the whole text and converts only that range). */
+static SQV string_case_of(const SQV *self, const SQV *frame, int nargs, int upper) {
+  SqStr *s = str_of(self);
+  int64_t sidx, eidx;
+  slice_bounds(frame, nargs, (int64_t)s->len, &sidx, &eidx);
+  char *snew = malloc(s->len + 1);
+  if (!snew) rt_error("out of memory");
+  memcpy(snew, s->chars, s->len);
+  for (int64_t i = sidx; i < eidx; i++)
+    snew[i] = (char)(upper ? toupper((unsigned char)snew[i]) : tolower((unsigned char)snew[i]));
+  SQV r = make_string(snew, s->len);
+  free(snew);
   return r;
 }
 
@@ -1157,6 +1229,22 @@ void sqbc_rt_call(const SQV *callee, SQV *ret, SQV *frame, int nargs) {
         break;
       case NAT_ARR_SLICE: r = array_slice_of(frame, frame, nargs); break;
       case NAT_ARR_FIND: r = array_find_of(frame, frame + 1); break;
+      case NAT_ARR_EXTEND: {
+        /* sqbaselib.cpp array_extend: the items of the argument are appended, and the result is the array */
+        SqArray *other = array_of(frame + 1);
+        size_t n = other->count;
+        for (size_t i = 0; i < n; i++) sqbc_rt_append(frame, &other->items[i]);
+        r = frame[0];
+        break;
+      }
+      case NAT_ARR_INSERT:
+        array_insert_at(frame, number_to_int(frame + 1), frame + 2);
+        r = frame[0];
+        break;
+      case NAT_STR_SLICE: r = string_slice_of(frame, frame, nargs); break;
+      case NAT_STR_FIND: r = string_find_of(frame, frame, nargs); break;
+      case NAT_STR_TOLOWER: r = string_case_of(frame, frame, nargs, 0); break;
+      case NAT_STR_TOUPPER: r = string_case_of(frame, frame, nargs, 1); break;
       case NAT_RAWGET: r = raw_get_member(frame, frame + 1); break;
       case NAT_RAWSET:
         raw_set_member(frame, frame + 1, frame + 2);

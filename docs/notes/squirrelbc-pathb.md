@@ -114,11 +114,18 @@ exits 1, as `sqref` does.
 - Arrays (sqarray.cpp, sqvm.cpp Get and Set). A GET or SET with an integer index out of range (a negative index is out of
   range) is `the index 'K' does not exist` at once, with no fallback to the root table. A SET with a key that is not an
   integer is `indexing array with T`. A GET with a string key that is not a method is `the index 'K' does not exist`; an
-  array method that is not lowered (extend, insert, sort, map, ...) is `unsupported array method` at run time, where the
-  reference runs it. `append` and `push` (the result is the array), `pop` (`empty array` on an empty one), `reverse` (the
-  array), `slice` (`wrong indexes`, `slice out of range`; a null or non-number start or end is `parameter N has an invalid
-  type 'T' ; expected: 'integer|float'`) and `find` (the index, or null) are lowered, as are the argument counts of each
-  (`wrong number of parameters`). Arrays compare by identity for `==`; `<` on two arrays compares their addresses, as the reference does, and is
+  array method that is not lowered (sort, map, ...) is `unsupported array method` at run time, where the reference runs
+  it. `append` and `push` (the result is the array), `pop` (`empty array` on an empty one), `reverse` (the array),
+  `slice` (`wrong indexes`, `slice out of range`; a null or non-number start or end is `parameter N has an invalid type
+  'T' ; expected: 'integer|float'`), `find` (the index, or null), `extend` (the items of an array appended; the result is
+  the array) and `insert` (the value before the index, which may be the count; `index out of range` otherwise, a
+  negative one too; the result is the array) are lowered, as are the argument counts of each (`wrong number of
+  parameters`).
+- Strings (sqbaselib.cpp string_slice, string_find, STRING_TOFUNCZ). `slice` takes the bounds of the array's slice (the
+  same errors). `find(sub, start)` is the index of the first `sub` from `start` (strstr, so a NUL byte ends the text), or
+  null when there is none, or when `start` is negative or not before the end (`find("", k)` is `k` for k below the
+  length). `tolower(start, end)` and `toupper` give the whole string with only the bytes in the range converted: the
+  reference copies the whole text and converts the range, so `tolower(0, 5)` keeps the rest as it is. Arrays compare by identity for `==`; `<` on two arrays compares their addresses, as the reference does, and is
   not tested.
 - Floats (sqvm.cpp, sqobject.h). SQFloat is the 4-byte `float` of this build (no SQUSEDOUBLE): a float value is its
   4 bytes in the payload's low 32 bits. Arithmetic on a float, or on an integer and a float, is done in float (an integer
@@ -187,9 +194,10 @@ exits 1, as `sqref` does.
   `sqref` with the same result as their source. Also: the opcode table against the reference header; a golden dump
   (`reader/ints.dump`); and five malformed streams (truncated, trailing byte, bad tag, SQInteger size 4, corrupt TAIL),
   each refused with exit 1.
-- `tests/squirrelbc/lower/run.sh`: the end-to-end suite. 93 programs (`lower/*.nut`: integers, strings, tables, calls,
-  closures, print, tostring, arrays, floats, classes and inheritance, number and string conversions, array methods, class
-  and instance delegates, class attributes) match `sqref` on the printed result and the status; 59 runtime errors (`lower/rterr/`) match the message and status 1; 6 programs (`lower/err/`) are refused with exit 3; `lower/synth.rb` writes a stream with DLOAD, DMOVE, LINE and
+- `tests/squirrelbc/lower/run.sh`: the end-to-end suite. 98 programs (`lower/*.nut`: integers, strings, tables, calls,
+  closures, print, tostring, arrays, floats, classes and inheritance, number and string conversions, array methods
+  (including extend and insert), string methods (slice, find, tolower, toupper), class and instance delegates, class
+  attributes) match `sqref` on the printed result and the status; 65 runtime errors (`lower/rterr/`) match the message and status 1; 6 programs (`lower/err/`) are refused with exit 3; `lower/synth.rb` writes a stream with DLOAD, DMOVE, LINE and
   LOADNULLS. A string result is printed by `sqref` and by the driver alike (the text, one line).
 - The oracle is `tests/squirrelbc/oracle/sqref.c`: the reference VM, built against the reference tree's
   `libsquirrel_static.a`. It loads `.nut` (compile) and `.cnut` (`sq_readclosure`) and prints the result line.
@@ -208,9 +216,10 @@ source tree). Without them they exit 77 (skip). The lowering suite also needs `b
   the same size as SQInteger (8 bytes on LP64).
 - Only the LP64 layout is read. A wide SQChar, a 32-bit SQInteger, or a big-endian writer is refused.
 - Nothing above is verified against a 32-bit or Windows reference build.
-- Still not lowered: an array method other than `len`, `append`, `push`, `pop`, `reverse`, `slice` and `find` (`extend`,
-  `insert`, `sort`, `map`, ...), and a string method other than `len`, `tostring`, `tofloat` and `tointeger` (`slice`,
-  `find`, `tolower`, `toupper`, `weakref`) are `unsupported ... method` at run time, where the reference runs them; no test.
+- Still not lowered: an array method other than `len`, `append`, `push`, `pop`, `reverse`, `slice`, `find`, `extend` and
+  `insert` (`sort`, `map`, `top`, `remove`, `resize`, ...), and a string method other than `len`, `tostring`, `tofloat`,
+  `tointeger`, `slice`, `find`, `tolower` and `toupper` (`weakref`) are `unsupported ... method` at run time, where the
+  reference runs them; no test.
   A method of the table delegate other than `tostring` (`t.len()`, `t.rawget` ...) is "the index does not exist". A
   float as a table or array key is `float keys are not lowered` at run time (the reference hashes floats; not modelled).
 - Objects (strings, tables, closures) are never freed: the runtime is a test harness with no collector, so a long loop
