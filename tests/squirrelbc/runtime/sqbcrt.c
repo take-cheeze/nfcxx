@@ -10,6 +10,7 @@
 #include "sqbcrt.h"
 
 #include <inttypes.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +28,7 @@ static const char *type_name(uint32_t tag) {
     case SQBC_TAG_NULL: return "null";
     case SQBC_TAG_INTEGER: return "integer";
     case SQBC_TAG_BOOL: return "bool";
+    case SQBC_TAG_FLOAT: return "float";
     case SQBC_TAG_STRING: return "string";
     case SQBC_TAG_TABLE: return "table";
     case SQBC_TAG_ARRAY: return "array";
@@ -83,6 +85,31 @@ static SQV make_string(const char *s, size_t n) {
 
 static SqStr *str_of(const SQV *v) { return (SqStr *)(intptr_t)v->i; }
 
+/* A float (squirrel.h's SQFloat, the 4-byte float of this build) is the low 32 bits of the payload. */
+static float float_of(const SQV *v) {
+  uint32_t bits = (uint32_t)v->i;
+  float f;
+  memcpy(&f, &bits, sizeof f);
+  return f;
+}
+
+static SQV make_float(float f) {
+  uint32_t bits;
+  memcpy(&bits, &f, sizeof bits);
+  SQV v;
+  v.tag = SQBC_TAG_FLOAT;
+  v.pad = 0;
+  v.i = (int64_t)bits;
+  return v;
+}
+
+/* A number of the subset as a float (tofloat in sqobject.h: an integer converts). */
+static float number_as_float(const SQV *v) {
+  return v->tag == SQBC_TAG_INTEGER ? (float)v->i : float_of(v);
+}
+
+static int is_number(const SQV *v) { return v->tag == SQBC_TAG_INTEGER || v->tag == SQBC_TAG_FLOAT; }
+
 /* ToString of the subset (sqvm.cpp): a string as itself, null, a boolean, an integer. A table or a function has no text
  * that is the same on every run, so it is refused. */
 static size_t text_of(const SQV *v, char *buf, size_t bufsz, const char **out) {
@@ -92,6 +119,12 @@ static size_t text_of(const SQV *v, char *buf, size_t bufsz, const char **out) {
     case SQBC_TAG_BOOL: *out = v->i ? "true" : "false"; return v->i ? 4 : 5;
     case SQBC_TAG_INTEGER: {
       int n = snprintf(buf, bufsz, "%" PRId64, v->i);
+      *out = buf;
+      return (size_t)n;
+    }
+    case SQBC_TAG_FLOAT: {
+      /* sqvm.cpp ToString: the float with %g (the float promoted to double). */
+      int n = snprintf(buf, bufsz, "%g", (double)float_of(v));
       *out = buf;
       return (size_t)n;
     }
@@ -112,6 +145,11 @@ static const char *print_obj(const SQV *v, char *buf, size_t bufsz) {
   if (v->tag == SQBC_TAG_STRING) return str_of(v)->chars;
   if (v->tag == SQBC_TAG_INTEGER) {
     snprintf(buf, bufsz, "%" PRId64, v->i);
+    return buf;
+  }
+  if (v->tag == SQBC_TAG_FLOAT) {
+    /* sqdebug.cpp PrintObjVal: %.14g for a float. */
+    snprintf(buf, bufsz, "%.14g", (double)float_of(v));
     return buf;
   }
   return type_name(v->tag);
@@ -323,6 +361,7 @@ static int delegate_native(const SQV *self, const SQV *key, SQV *out) {
   if (strcmp(name, "tostring") == 0) {
     switch (self->tag) {
       case SQBC_TAG_INTEGER:
+      case SQBC_TAG_FLOAT:
       case SQBC_TAG_BOOL:
       case SQBC_TAG_STRING:
       case SQBC_TAG_ARRAY:
@@ -333,6 +372,11 @@ static int delegate_native(const SQV *self, const SQV *key, SQV *out) {
     }
   }
   return 0;
+}
+
+/* The other methods of the number delegate (sqbaselib.cpp: tofloat, tointeger, tochar), for an integer or a float. */
+static int is_number_method(const char *name) {
+  return strcmp(name, "tofloat") == 0 || strcmp(name, "tointeger") == 0 || strcmp(name, "tochar") == 0;
 }
 
 /* The other methods of the array delegate (sqbaselib.cpp, _array_default_delegate_funcz): not lowered. */
@@ -424,8 +468,15 @@ static void raise_idx(const SQV *k) {
   rt_error(msg);
 }
 
+/* A float as a key: the table and array lookups of the subset are by the raw value, which the reference's hashing of
+ * floats is not; not lowered. */
+static void refuse_float_key(const SQV *k) {
+  if (k->tag == SQBC_TAG_FLOAT) rt_error("float keys are not lowered");
+}
+
 void sqbc_rt_get(SQV *dst, const SQV *self, const SQV *key, int root_fallback) {
   SQV s = *self, k = *key, out;
+  refuse_float_key(&k);
   if (s.tag == SQBC_TAG_TABLE) {
     TNode *n = table_find(tbl(&s), &k);
     if (n) {
@@ -477,12 +528,17 @@ void sqbc_rt_get(SQV *dst, const SQV *self, const SQV *key, int root_fallback) {
       snprintf(msg, sizeof msg, "unsupported array method '%.50s' (only len and tostring are lowered)", str_of(&k)->chars);
       rt_error(msg);
     }
+    if (is_number(&s) && is_number_method(str_of(&k)->chars)) {
+      snprintf(msg, sizeof msg, "unsupported number method '%.50s' (only tostring is lowered)", str_of(&k)->chars);
+      rt_error(msg);
+    }
   }
   raise_idx(&k);
 }
 
 void sqbc_rt_set(const SQV *self, const SQV *key, const SQV *val, int root_fallback) {
   SQV s = *self, k = *key, v = *val;
+  refuse_float_key(&k);
   if (s.tag == SQBC_TAG_TABLE) {
     TNode *n = table_find(tbl(&s), &k);
     if (n) {
@@ -519,6 +575,7 @@ void sqbc_rt_set(const SQV *self, const SQV *key, const SQV *val, int root_fallb
 void sqbc_rt_newslot(const SQV *self, const SQV *key, const SQV *val) {
   SQV s = *self, k = *key, v = *val;
   if (k.tag == SQBC_TAG_NULL) rt_error("null cannot be used as index");
+  refuse_float_key(&k);
   if (s.tag == SQBC_TAG_TABLE) {
     table_newslot(tbl(&s), &k, &v);
     return;
@@ -609,6 +666,21 @@ void sqbc_rt_arith(int op, SQV *dst, SQV *a, SQV *b) {
   /* Read both operands before dst is written: dst may be one of them. */
   SQV x = *a, y = *b;
   SQV r;
+  if (is_number(&x) && is_number(&y) && (x.tag == SQBC_TAG_FLOAT || y.tag == SQBC_TAG_FLOAT)) {
+    /* sqvm.cpp _ARITH_ and ARITH_OP, the float case: both operands as floats, no check of a zero divisor (`/` gives inf
+     * or nan); `%` is fmod of the two as doubles. */
+    float f1 = number_as_float(&x), f2 = number_as_float(&y), res = 0;
+    switch (op) {
+      case SQBC_OP_ADD: res = f1 + f2; break;
+      case SQBC_OP_SUB: res = f1 - f2; break;
+      case SQBC_OP_MUL: res = f1 * f2; break;
+      case SQBC_OP_DIV: res = f1 / f2; break;
+      case SQBC_OP_MOD: res = (float)fmod((double)f1, (double)f2); break;
+      default: rt_error("internal: bad arithmetic operator");
+    }
+    *dst = make_float(res);
+    return;
+  }
   if (op == SQBC_OP_MOD) {
     /* sqvm.cpp's _OP_MOD calls ARITH_OP and drops its result, and a failure only stores the message (Raise_Error): the
      * script goes on and the target keeps its value. So a zero divisor, or an operand that is not an integer, is not an
@@ -669,6 +741,10 @@ void sqbc_rt_neg(SQV *dst, SQV *a) {
     *dst = r;
     return;
   }
+  if (x.tag == SQBC_TAG_FLOAT) {
+    *dst = make_float(-float_of(&x));
+    return;
+  }
   {
     char msg[128];
     snprintf(msg, sizeof msg, "attempt to negate a %s", type_name(x.tag));
@@ -680,7 +756,15 @@ void sqbc_rt_neg(SQV *dst, SQV *a) {
 int sqbc_rt_compare(int op, SQV *a, SQV *b) {
   SQV x = *a, y = *b;
   int64_t r;
-  if (x.tag == y.tag) {
+  if (x.tag == SQBC_TAG_FLOAT && y.tag == SQBC_TAG_FLOAT) {
+    /* ObjCmp: equal values are 0, else -1 when the first is less, and 1 otherwise. */
+    float f1 = float_of(&x), f2 = float_of(&y);
+    r = f1 == f2 ? 0 : (f1 < f2 ? -1 : 1);
+  } else if (is_number(&x) && is_number(&y) && x.tag != y.tag) {
+    /* An integer and a float: both as floats. */
+    float f1 = number_as_float(&x), f2 = number_as_float(&y);
+    r = f1 == f2 ? 0 : (f1 < f2 ? -1 : 1);
+  } else if (x.tag == y.tag) {
     if (x.i == y.i) {
       r = 0;
     } else if (x.tag == SQBC_TAG_STRING) {
@@ -716,3 +800,18 @@ int sqbc_rt_compare(int op, SQV *a, SQV *b) {
   }
   return 0;
 }
+
+/* IsEqual (sqvm.cpp): the same type compares the raw value (a float by its value); two numbers of different types compare
+ * as floats; anything else is not equal. */
+int sqbc_rt_equal(const SQV *a, const SQV *b) {
+  SQV x = *a, y = *b;
+  if (x.tag == y.tag) {
+    if (x.tag == SQBC_TAG_FLOAT) return float_of(&x) == float_of(&y);
+    return x.i == y.i;
+  }
+  if (is_number(&x) && is_number(&y)) return number_as_float(&x) == number_as_float(&y);
+  return 0;
+}
+
+/* IsFalse of a float: 0.0 and -0.0 are false. The bits of a float that is not zero have a nonzero magnitude. */
+int sqbc_rt_float_zero(const SQV *v) { return float_of(v) == 0.0f; }

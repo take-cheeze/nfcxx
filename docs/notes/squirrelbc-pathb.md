@@ -53,20 +53,21 @@ checked by tag. Anything else calls a helper, which performs the whole operation
 | LINE | nothing (no debug hook) |
 | LOAD (int, bool, null literal), LOADINT, LOADBOOL, LOADNULLS, DLOAD | store of the immediate |
 | LOAD of a string literal, DLOAD of strings | `sqbc_rt_loadstr` into the register; the text is a `(data)` item of the module, interned by the runtime |
-| LOAD of a float literal, LOADFLOAT | refused |
+| LOAD of a float literal, LOADFLOAT | store of the float: tag OT_FLOAT (0x05000004), payload the 4 bytes of the float (low 32 bits) |
 | MOVE, DMOVE | copy of the 16 bytes, in the instruction's order |
-| ADD, SUB, MUL | int inline (`wadd`, `wsub`, `wmul`); else `sqbc_rt_arith` |
+| ADD, SUB, MUL | int inline (`wadd`, `wsub`, `wmul`); else `sqbc_rt_arith` (floats and mixed int/float there) |
 | DIV, MOD | `sqbc_rt_arith` |
 | NEG | `sqbc_rt_neg` |
-| NOT | int, bool or null: payload == 0 |
-| CMP with >, >=, <, <= | int inline (`lt.s` with the operands swapped for >, >=); else `sqbc_rt_compare` |
+| NOT | int, bool or null: payload == 0; a float: `sqbc_rt_float_zero` (IsFalse) |
+| CMP with >, >=, <, <= | int inline (`lt.s` with the operands swapped for >, >=); else `sqbc_rt_compare` (floats, mixed int/float) |
 | CMP with 3-way (<=>) | refused |
-| EQ, NE | same tag and same payload, with the literal form (arg3 != 0; a string literal is loaded first, so it is interned) |
+| EQ, NE | same tag and same payload, for a non-float; a float, or two different tags, through `sqbc_rt_equal` (IsEqual); the literal form (arg3 != 0) is loaded into the scratch value first, so a string literal is interned |
+| JZ, AND, OR | the truth of the value as NOT (a float through `sqbc_rt_float_zero`) |
 | GET, GETK | `sqbc_rt_get` into a scratch value, then the register. selfidx 0 (register 0) falls back to the root table |
 | PREPCALL, PREPCALLK | the callee by `sqbc_rt_get` into arg0; the receiver (arg2) copied into arg3 (sqvm.cpp order) |
 | SET, NEWSLOT | `sqbc_rt_set` / `sqbc_rt_newslot`; the value copied to arg0 when arg0 is a register |
 | NEWOBJ (a table, an array) | `sqbc_rt_newtable`, or `sqbc_rt_newarray` with arg1 as the reserve (NOT_ARRAY); a class is refused |
-| APPENDARRAY | `sqbc_rt_append` of the value of arg2 (AAT_STACK a register, AAT_LITERAL a literal, AAT_INT arg1, AAT_BOOL arg1); a float value is refused |
+| APPENDARRAY | `sqbc_rt_append` of the value of arg2 (AAT_STACK a register, AAT_LITERAL a literal, AAT_INT arg1, AAT_BOOL arg1, AAT_FLOAT the float whose bits are arg1) |
 | CALL | `sqbc_rt_call(callee, ret, frame, nargs)`: the frame starts at the `this` register (arg2); see section 4 |
 | CLOSURE | `sqbc_rt_closure` with the prototype's index, its parameters, frame size and outer count; a bound register (arg2) is the environment; each outer is bound by `sqbc_rt_outer_local` (a register of this frame: a local of the enclosing function) or `sqbc_rt_outer_outer` (an outer of the running closure) |
 | GETOUTER, SETOUTER | `sqbc_rt_getouter` / `sqbc_rt_setouter` on the running closure (the third parameter of `sq_fn_N`) |
@@ -113,8 +114,18 @@ exits 1, as `sqref` does.
   array method that is not lowered (push, append, ...) is `unsupported array method` at run time, where the reference
   runs it. Arrays compare by identity for `==`; `<` on two arrays compares their addresses, as the reference does, and is
   not tested.
+- Floats (sqvm.cpp, sqobject.h). SQFloat is the 4-byte `float` of this build (no SQUSEDOUBLE): a float value is its
+  4 bytes in the payload's low 32 bits. Arithmetic on a float, or on an integer and a float, is done in float (an integer
+  converts to float first, `tofloat`); `/` gives inf or nan for a zero divisor, and `%` is `fmod` of the two as doubles,
+  stored as a float. `print`, `tostring` and the concatenation with a string print a float with `%g` (ToString, sqvm.cpp);
+  a comparison or equality error prints it with `%.14g` (PrintObjVal). Equal floats compare as 0 in ObjCmp, so `<`,
+  `<=`, `>`, `>=` agree with the reference for every value the subset makes (no NaN is tested). `IsFalse` is true for
+  +0.0 and -0.0. A float is equal to an integer of the same value (IsEqual compares as floats). The oracle and the driver
+  print a float result with `%g`.
 - Strings, tables and closures are all payloads that are never 0, so `IsFalse` is still "payload == 0" (sqvm.cpp's
-  IsFalse tests the integer of the object, which is non-zero for a pointer).
+  IsFalse tests the integer of the object, which is non-zero for a pointer). A float is the one exception: see above.
+- Number methods: `tostring` is the number delegate's for an integer and a float. `tofloat`, `tointeger` and `tochar` are
+  not lowered: a call of one is `unsupported number method` at run time, where the reference runs it.
 - A table GET or SET of a key it does not have is `the index 'K' does not exist` (Raise_IdxError, the key printed as
   PrintObjVal prints it: a string as itself, an integer in decimal, anything else as its type name). A SET on a non-table
   is `trying to set 'T'`, a NEWSLOT on a non-table is `indexing T with K`, a NEWSLOT with a null key is `null cannot be
@@ -129,14 +140,14 @@ exits 1, as `sqref` does.
 
 ## 5. Tests
 
-- `tests/squirrelbc/run.sh`: the reader. 78 streams (`corpus/*.nut`, `lower/*.nut` and the synthetic stream of
+- `tests/squirrelbc/run.sh`: the reader. 87 streams (`corpus/*.nut`, `lower/*.nut` and the synthetic stream of
   `lower/synth.rb`) compile with `sq -c`, load in `sq_dump` (every instruction named, stream consumed), and run through
   `sqref` with the same result as their source. Also: the opcode table against the reference header; a golden dump
   (`reader/ints.dump`); and five malformed streams (truncated, trailing byte, bad tag, SQInteger size 4, corrupt TAIL),
   each refused with exit 1.
-- `tests/squirrelbc/lower/run.sh`: the end-to-end suite. 65 programs (`lower/*.nut`: integers, strings, tables, calls,
-  closures, print, tostring and arrays) match `sqref` on the printed result and the status; 29 runtime errors (`lower/rterr/`) match the message and
-  status 1; 8 programs (`lower/err/`) are refused with exit 3; `lower/synth.rb` writes a stream with DLOAD, DMOVE, LINE and
+- `tests/squirrelbc/lower/run.sh`: the end-to-end suite. 74 programs (`lower/*.nut`: integers, strings, tables, calls,
+  closures, print, tostring, arrays and floats) match `sqref` on the printed result and the status; 32 runtime errors
+  (`lower/rterr/`) match the message and status 1; 7 programs (`lower/err/`) are refused with exit 3; `lower/synth.rb` writes a stream with DLOAD, DMOVE, LINE and
   LOADNULLS. A string result is printed by `sqref` and by the driver alike (the text, one line).
 - The oracle is `tests/squirrelbc/oracle/sqref.c`: the reference VM, built against the reference tree's
   `libsquirrel_static.a`. It loads `.nut` (compile) and `.cnut` (`sq_readclosure`) and prints the result line.
@@ -158,7 +169,9 @@ source tree). Without them they exit 77 (skip). The lowering suite also needs `b
 - Still not lowered: a method of the array or string delegate other than `len` and `tostring` (`push`, `append`, `slice`,
   ...) is `unsupported array method` or `unsupported string method` at run time, where the reference runs it; no test
   (rterr/arr_method.nut was removed for that reason). A method of the table delegate other than `tostring` (`t.len()`,
-  `t.rawget` ...) is "the index does not exist". Float values (in `print`, `tostring` and arrays) are refused.
+  `t.rawget` ...) is "the index does not exist". A float as a table or array key is `float keys are not lowered` at run
+  time (the reference hashes floats; not modelled). `tofloat`, `tointeger` and `tochar` (number methods) are
+  `unsupported number method` at run time.
 - Objects (strings, tables, closures) are never freed: the runtime is a test harness with no collector, so a long loop
   that builds strings or tables uses memory without a bound.
 - A `tostring` of an array, a table or a function (in a concatenation, through `print` or the method) is refused at run

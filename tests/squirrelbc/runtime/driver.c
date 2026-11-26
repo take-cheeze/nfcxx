@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <inttypes.h>
+#include <string.h>
 
 #include "sqbcrt.h"
 
@@ -23,6 +24,14 @@ int main(void) {
     case SQBC_TAG_BOOL: printf("%s\n", ret.i ? "true" : "false"); break;
     case SQBC_TAG_NULL: printf("null\n"); break;
     case SQBC_TAG_STRING: printf("%s\n", sqbc_rt_text(&ret)); break;
+    case SQBC_TAG_FLOAT: {
+      /* A float as the oracle prints it: %g of the float (the bits are the low 32 of the payload). */
+      uint32_t bits = (uint32_t)ret.i;
+      float f;
+      memcpy(&f, &bits, sizeof f);
+      printf("%g\n", (double)f);
+      break;
+    }
     default: printf("(not printed: tag 0x%08x)\n", (unsigned)ret.tag); break;
   }
   return 0;
