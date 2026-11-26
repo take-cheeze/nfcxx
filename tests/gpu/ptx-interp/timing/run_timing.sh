@@ -96,6 +96,15 @@ expect_eq "bandwidth: 4096 bytes at 2 bytes per cycle" "$b2" 2048
 [ "$b16" -lt "$b2" ] || { echo "bandwidth: the critical path should bound a fast memory system, got $b16" >&2; exit 1; }
 echo "bandwidth: the critical path bounds a fast memory system ok ($b16)"
 
+# 6b. Coalescing. A warp issue of a global store moves one 32-byte sector for each distinct sector its lanes touch.
+#     store_all.ptx: 32 consecutive lanes of 4 bytes are 4 sectors per warp, 128 x 32 = 4096 bytes in all. store_stride.ptx:
+#     each lane is in its own sector, 32 sectors per warp, 1024 x 32 = 32768 bytes. At 1 byte per cycle the bandwidth
+#     bound is the bytes, and the critical path (a few hundred cycles) is far below both.
+sc1=$(cycles store_all.ptx store_all --grid 1 --block 1024 ptr:1024 --bw 1)
+ss1=$(cycles store_stride.ptx store_stride --grid 1 --block 1024 ptr:32768 --bw 1)
+expect_eq "coalesced stores: 4 sectors per warp" "$sc1" 4096
+expect_eq "scattered stores: 32 sectors per warp" "$ss1" 32768
+
 # 7. Resident blocks. Each block of the exchange kernel is crit-bound (its issue slots and bytes are far below its critical
 #    path), so co-resident blocks overlap completely: 8 blocks on one SM with --resident 8 take one block's time, the
 #    same as 8 blocks on 8 SMs, and waves of 2 take four block times.
