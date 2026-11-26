@@ -1,8 +1,10 @@
-/* mrbrt: integer operators and error exits of the mruby bytecode producer (mrbrt.h). C99, -Wall -Wextra clean. */
+/* mrbrt: the runtime of the mruby bytecode producer (mrbrt.h). C99, -Wall -Wextra clean. The messages are the ones of the
+ * pinned mruby 4.0.0 (probed with build/mruby-tool/bin/mruby; docs/notes/mrbbc-pathb.md, "Runtime errors"). */
 #include "mrbrt.h"
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 const char *mrbbc_progname = "mrbbc";
 
@@ -13,27 +15,94 @@ int __nfcxx_smul64_ovf(long a, long b) {
   return __builtin_mul_overflow(a, b, &r);
 }
 
+/* Heap objects. A string is one block: the length and the bytes, then a NUL. An array is a header and its items. */
+typedef struct MStr {
+  long len;
+  char p[];
+} MStr;
+
+typedef struct MAry {
+  long len, cap;
+  MV *items;
+} MAry;
+
 void mrbbc_raise(const char *cls, const char *message) {
   fflush(stdout);
   fprintf(stderr, "%s: %s (%s)\n", mrbbc_progname, message, cls);
   exit(1);
 }
 
-void mrbbc_set_bool(MV *dst, int truth) {
-  dst->tag = truth ? MRBBC_TRUE : MRBBC_FALSE;
+static void *alloc(size_t n) {
+  void *p = malloc(n);
+  if (p == NULL) mrbbc_raise("NoMemoryError", "failed to allocate memory");
+  return p;
 }
 
-void mrbbc_print(const MV *v) {
+static MStr *str_of(const MV *v) { return (MStr *)(intptr_t)v->i; }
+static MAry *ary_of(const MV *v) { return (MAry *)(intptr_t)v->i; }
+static const char *sym_of(const MV *v) { return (const char *)(intptr_t)v->i; }
+
+static void set_obj(MV *dst, int tag, const void *p) {
+  dst->tag = (uint8_t)tag;
+  dst->i = (int64_t)(intptr_t)p;
+}
+
+static MV new_str_value(const char *p, long n) {
+  MStr *s = alloc(sizeof(MStr) + (size_t)n + 1);
+  MV v;
+  s->len = n;
+  if (n > 0) memcpy(s->p, p, (size_t)n);
+  s->p[n] = '\0';
+  set_obj(&v, MRBBC_STR, s);
+  return v;
+}
+
+static MV int_value(int64_t i) {
+  MV v;
+  v.tag = MRBBC_INT;
+  v.i = i;
+  return v;
+}
+
+static MV bool_value(int truth) {
+  MV v;
+  v.tag = truth ? MRBBC_TRUE : MRBBC_FALSE;
+  v.i = 0;
+  return v;
+}
+
+void mrbbc_set_bool(MV *dst, int truth) { *dst = bool_value(truth); }
+
+void mrbbc_str_new(MV *dst, const char *p, long n) {
+  MV v = new_str_value(p, n);
+  *dst = v;
+}
+
+void mrbbc_sym(MV *dst, const char *name) { set_obj(dst, MRBBC_SYM, name); }
+
+/* The class of a value, as NoMethodError and ArgumentError name it. */
+static const char *class_name(const MV *v) {
   switch (v->tag) {
-    case MRBBC_NIL: printf("nil\n"); break;
-    case MRBBC_FALSE: printf("false\n"); break;
-    case MRBBC_TRUE: printf("true\n"); break;
-    case MRBBC_INT: printf("%lld\n", (long long)v->i); break;
-    default: mrbbc_raise("RuntimeError", "unknown value tag");
+    case MRBBC_NIL: return "NilClass";
+    case MRBBC_TRUE: return "TrueClass";
+    case MRBBC_FALSE: return "FalseClass";
+    case MRBBC_STR: return "String";
+    case MRBBC_ARY: return "Array";
+    case MRBBC_SYM: return "Symbol";
+    default: return "Integer";
   }
 }
 
-/* The method name of an operator, as mruby's error messages show it. */
+/* What a TypeError shows for an operand: nil, true and false by their names, anything else by its class. */
+static const char *type_text(const MV *v) {
+  switch (v->tag) {
+    case MRBBC_NIL: return "nil";
+    case MRBBC_TRUE: return "true";
+    case MRBBC_FALSE: return "false";
+    default: return class_name(v);
+  }
+}
+
 static const char *op_method(int op) {
   switch (op) {
     case MRBBC_OP_ADD: return "+";
@@ -44,95 +113,500 @@ static const char *op_method(int op) {
     case MRBBC_OP_LE: return "<=";
     case MRBBC_OP_GT: return ">";
     case MRBBC_OP_GE: return ">=";
+    case MRBBC_OP_NEQ: return "!=";
     default: return "==";
   }
 }
 
-/* The class of a value in mruby's messages (NoMethodError and ArgumentError name the class). */
-static const char *class_name(const MV *v) {
+static void no_method(const char *name, const MV *recv) {
+  char msg[160];
+  snprintf(msg, sizeof msg, "undefined method '%s' for %s", name, class_name(recv));
+  mrbbc_raise("NoMethodError", msg);
+}
+
+/* A growable byte buffer for inspect and to_s. */
+typedef struct Buf {
+  char *p;
+  size_t n, cap;
+} Buf;
+
+static void buf_put(Buf *b, const char *s, size_t n) {
+  if (b->n + n + 1 > b->cap) {
+    size_t cap = b->cap ? b->cap : 64;
+    char *p;
+    while (b->n + n + 1 > cap) cap *= 2;
+    p = alloc(cap);
+    if (b->n) memcpy(p, b->p, b->n);
+    free(b->p);
+    b->p = p;
+    b->cap = cap;
+  }
+  if (n) memcpy(b->p + b->n, s, n);
+  b->n += n;
+  b->p[b->n] = '\0';
+}
+
+static void buf_str(Buf *b, const char *s) { buf_put(b, s, strlen(s)); }
+
+static void buf_char(Buf *b, char c) { buf_put(b, &c, 1); }
+
+/* String#inspect of this build (byte strings): the named escapes, \# before #{ #$ #@, \xHH for other bytes that are
+ * not printable ASCII. */
+static void inspect_bytes(Buf *b, const char *s, long n) {
+  long k;
+  buf_char(b, '"');
+  for (k = 0; k < n; k++) {
+    unsigned char c = (unsigned char)s[k];
+    switch (c) {
+      case '"': buf_str(b, "\\\""); break;
+      case '\\': buf_str(b, "\\\\"); break;
+      case '\n': buf_str(b, "\\n"); break;
+      case '\r': buf_str(b, "\\r"); break;
+      case '\t': buf_str(b, "\\t"); break;
+      case '\f': buf_str(b, "\\f"); break;
+      case '\v': buf_str(b, "\\v"); break;
+      case '\b': buf_str(b, "\\b"); break;
+      case '\a': buf_str(b, "\\a"); break;
+      case 0x1b: buf_str(b, "\\e"); break;
+      case '#':
+        if (k + 1 < n && (s[k + 1] == '{' || s[k + 1] == '$' || s[k + 1] == '@')) buf_str(b, "\\#");
+        else buf_char(b, '#');
+        break;
+      default:
+        if (c >= 0x20 && c < 0x7f) {
+          buf_char(b, (char)c);
+        } else {
+          char h[8];
+          snprintf(h, sizeof h, "\\x%02x", (unsigned)c);
+          buf_str(b, h);
+        }
+    }
+  }
+  buf_char(b, '"');
+}
+
+/* The arrays being inspected, so that an array that contains itself prints as mruby prints it ("[...]"). */
+#define INSPECT_DEPTH 64
+static const MAry *inspecting[INSPECT_DEPTH];
+static int inspect_depth;
+
+static void inspect_value(Buf *b, const MV *v) {
   switch (v->tag) {
-    case MRBBC_NIL: return "NilClass";
-    case MRBBC_TRUE: return "TrueClass";
-    case MRBBC_FALSE: return "FalseClass";
-    default: return "Integer";
+    case MRBBC_NIL: buf_str(b, "nil"); break;
+    case MRBBC_TRUE: buf_str(b, "true"); break;
+    case MRBBC_FALSE: buf_str(b, "false"); break;
+    case MRBBC_INT: {
+      char h[32];
+      snprintf(h, sizeof h, "%lld", (long long)v->i);
+      buf_str(b, h);
+      break;
+    }
+    case MRBBC_STR: inspect_bytes(b, str_of(v)->p, str_of(v)->len); break;
+    case MRBBC_SYM:
+      buf_char(b, ':');
+      buf_str(b, sym_of(v));
+      break;
+    case MRBBC_ARY: {
+      const MAry *a = ary_of(v);
+      long k;
+      int i, seen = 0, pushed;
+      for (i = 0; i < inspect_depth; i++) {
+        if (inspecting[i] == a) seen = 1;
+      }
+      if (seen) {
+        buf_str(b, "[...]");
+        break;
+      }
+      buf_char(b, '[');
+      pushed = inspect_depth < INSPECT_DEPTH;
+      if (pushed) inspecting[inspect_depth++] = a;
+      for (k = 0; k < a->len; k++) {
+        if (k) buf_str(b, ", ");
+        inspect_value(b, &a->items[k]);
+      }
+      if (pushed) inspect_depth--;
+      buf_char(b, ']');
+      break;
+    }
+    default: mrbbc_raise("RuntimeError", "unknown value tag");
   }
 }
 
-/* The value as mruby's TypeError messages show it (nil, true or false). */
-static const char *value_text(const MV *v) {
-  switch (v->tag) {
-    case MRBBC_NIL: return "nil";
-    case MRBBC_TRUE: return "true";
-    default: return "false";
+void mrbbc_print(const MV *v) {
+  Buf b = {NULL, 0, 0};
+  inspect_value(&b, v);
+  buf_char(&b, '\n');
+  fwrite(b.p, 1, b.n, stdout);
+  free(b.p);
+}
+
+/* a == b (mruby's ==, for these values). Arrays compare element by element. */
+static int value_eq(const MV *a, const MV *b) {
+  if (a->tag != b->tag) return 0;
+  switch (a->tag) {
+    case MRBBC_INT: return a->i == b->i;
+    case MRBBC_STR: return str_of(a)->len == str_of(b)->len && memcmp(str_of(a)->p, str_of(b)->p, (size_t)str_of(a)->len) == 0;
+    case MRBBC_SYM: return strcmp(sym_of(a), sym_of(b)) == 0;
+    case MRBBC_ARY: {
+      const MAry *x = ary_of(a), *y = ary_of(b);
+      long k;
+      if (x == y) return 1;
+      if (x->len != y->len) return 0;
+      for (k = 0; k < x->len; k++) {
+        if (!value_eq(&x->items[k], &y->items[k])) return 0;
+      }
+      return 1;
+    }
+    default: return 1;  /* nil, true, false */
   }
 }
 
-/* Floor division, as mruby's Integer#/ rounds (toward negative infinity). The divisor is not zero. */
+/* The order of two strings (memcmp, then the lengths), as String#<=> gives its sign. */
+static int str_order(const MV *a, const MV *b) {
+  long n = str_of(a)->len < str_of(b)->len ? str_of(a)->len : str_of(b)->len;
+  int c = n ? memcmp(str_of(a)->p, str_of(b)->p, (size_t)n) : 0;
+  if (c) return c;
+  return str_of(a)->len < str_of(b)->len ? -1 : str_of(a)->len > str_of(b)->len;
+}
+
+static int compare_result(int op, int c) {
+  switch (op) {
+    case MRBBC_OP_LT: return c < 0;
+    case MRBBC_OP_LE: return c <= 0;
+    case MRBBC_OP_GT: return c > 0;
+    default: return c >= 0;  /* GE */
+  }
+}
+
+/* Array storage: room for at least need items. */
+static void ary_reserve(MAry *a, long need) {
+  if (need <= a->cap) return;
+  long cap = a->cap ? a->cap : 4;
+  MV *items;
+  while (cap < need) cap *= 2;
+  items = realloc(a->items, (size_t)cap * sizeof(MV));
+  if (items == NULL) mrbbc_raise("NoMemoryError", "failed to allocate memory");
+  a->items = items;
+  a->cap = cap;
+}
+
+static MV new_ary_value(long cap) {
+  MAry *a = alloc(sizeof(MAry));
+  MV v;
+  a->len = 0;
+  a->cap = 0;
+  a->items = NULL;
+  ary_reserve(a, cap > 0 ? cap : 0);
+  set_obj(&v, MRBBC_ARY, a);
+  return v;
+}
+
+void mrbbc_ary_new(MV *dst, long cap) {
+  MV v = new_ary_value(cap);
+  *dst = v;
+}
+
+void mrbbc_ary_push(MV *ary, const MV *v) {
+  MAry *a;
+  MV item = *v;
+  if (ary->tag != MRBBC_ARY) mrbbc_raise("TypeError", "expected Array");
+  a = ary_of(ary);
+  ary_reserve(a, a->len + 1);
+  a->items[a->len++] = item;
+}
+
 static int64_t floor_div(int64_t x, int64_t y) {
   int64_t q = x / y;
   if ((x % y != 0) && ((x < 0) != (y < 0))) q -= 1;
   return q;
 }
 
-void mrbbc_binop(int op, MV *dst, const MV *a, const MV *b) {
-  char msg[96];
+/* Integer on the left. The integer operators are exact up to overflow, which traps (see the header). */
+static void int_op(int op, MV *dst, const MV *a, const MV *b) {
+  char msg[160];
   int64_t r = 0;
+  MV out;
 
-  if (op == MRBBC_OP_EQ) {
-    /* mruby's == on these values is identity, which for nil, true, false and integers is the tag and the value. */
-    int same = a->tag == b->tag && (a->tag != MRBBC_INT || a->i == b->i);
-    mrbbc_set_bool(dst, same);
-    return;
-  }
-  /* The messages of mruby 4.0 (checked against the pinned interpreter, docs/notes/mrbbc-pathb.md). */
-  if (a->tag != MRBBC_INT) {
-    snprintf(msg, sizeof msg, "undefined method '%s' for %s", op_method(op), class_name(a));
-    mrbbc_raise("NoMethodError", msg);
-  }
   if (b->tag != MRBBC_INT) {
     if (op >= MRBBC_OP_LT) {
       snprintf(msg, sizeof msg, "comparison of Integer with %s failed", class_name(b));
       mrbbc_raise("ArgumentError", msg);
     }
     if (op == MRBBC_OP_ADD || op == MRBBC_OP_SUB) {
-      if (b->tag == MRBBC_NIL) {
-        mrbbc_raise("TypeError", "can't convert nil into Float");
-      }
-      snprintf(msg, sizeof msg, "%s cannot be converted to Float", value_text(b));
+      if (b->tag == MRBBC_NIL) mrbbc_raise("TypeError", "can't convert nil into Float");
+      snprintf(msg, sizeof msg, "%s cannot be converted to Float", type_text(b));
       mrbbc_raise("TypeError", msg);
     }
-    snprintf(msg, sizeof msg, "can't convert %s into Integer", value_text(b));
+    snprintf(msg, sizeof msg, "can't convert %s into Integer", type_text(b));
     mrbbc_raise("TypeError", msg);
   }
 
   switch (op) {
     case MRBBC_OP_ADD:
       if (__builtin_add_overflow(a->i, b->i, &r)) break;
-      dst->tag = MRBBC_INT;
-      dst->i = r;
+      *dst = int_value(r);
       return;
     case MRBBC_OP_SUB:
       if (__builtin_sub_overflow(a->i, b->i, &r)) break;
-      dst->tag = MRBBC_INT;
-      dst->i = r;
+      *dst = int_value(r);
       return;
     case MRBBC_OP_MUL:
       if (__builtin_mul_overflow(a->i, b->i, &r)) break;
-      dst->tag = MRBBC_INT;
-      dst->i = r;
+      *dst = int_value(r);
       return;
     case MRBBC_OP_DIV:
       if (b->i == 0) mrbbc_raise("ZeroDivisionError", "divided by 0");
       if (a->i == INT64_MIN && b->i == -1) break;
-      dst->tag = MRBBC_INT;
-      dst->i = floor_div(a->i, b->i);
+      *dst = int_value(floor_div(a->i, b->i));
       return;
-    case MRBBC_OP_LT: mrbbc_set_bool(dst, a->i < b->i); return;
-    case MRBBC_OP_LE: mrbbc_set_bool(dst, a->i <= b->i); return;
-    case MRBBC_OP_GT: mrbbc_set_bool(dst, a->i > b->i); return;
-    case MRBBC_OP_GE: mrbbc_set_bool(dst, a->i >= b->i); return;
-    default: break;
+    default:
+      out = bool_value(compare_result(op, a->i < b->i ? -1 : a->i > b->i));
+      *dst = out;
+      return;
   }
   /* Only an integer overflow gets here. mruby promotes it to a Bignum (or a Float); this producer does not. */
   mrbbc_raise("NotImplementedError", "integer overflow: mrbbc does not promote to Bignum");
+}
+
+/* String on the left: + (concatenation), * (repetition) and the comparisons. */
+static void str_op(int op, MV *dst, const MV *a, const MV *b) {
+  char msg[160];
+  MV out;
+  if (op == MRBBC_OP_ADD) {
+    long la, lb;
+    MStr *t;
+    if (b->tag != MRBBC_STR) {
+      snprintf(msg, sizeof msg, "%s cannot be converted to String", type_text(b));
+      mrbbc_raise("TypeError", msg);
+    }
+    la = str_of(a)->len;
+    lb = str_of(b)->len;
+    t = alloc(sizeof(MStr) + (size_t)(la + lb) + 1);
+    memcpy(t->p, str_of(a)->p, (size_t)la);
+    memcpy(t->p + la, str_of(b)->p, (size_t)lb);
+    t->p[la + lb] = '\0';
+    t->len = la + lb;
+    set_obj(&out, MRBBC_STR, t);
+    *dst = out;
+    return;
+  }
+  if (op == MRBBC_OP_MUL) {
+    long n, len, k;
+    MStr *t;
+    if (b->tag != MRBBC_INT) {
+      snprintf(msg, sizeof msg, "%s cannot be converted to Integer", type_text(b));
+      mrbbc_raise("TypeError", msg);
+    }
+    if (b->i < 0) mrbbc_raise("ArgumentError", "negative argument");
+    n = (long)b->i;
+    len = str_of(a)->len;
+    if (n != 0 && len > (long)(((size_t)-1 >> 1) / (size_t)n)) mrbbc_raise("ArgumentError", "argument too big");
+    t = alloc(sizeof(MStr) + (size_t)(len * n) + 1);
+    for (k = 0; k < n; k++) memcpy(t->p + k * len, str_of(a)->p, (size_t)len);
+    t->p[len * n] = '\0';
+    t->len = len * n;
+    set_obj(&out, MRBBC_STR, t);
+    *dst = out;
+    return;
+  }
+  if (op >= MRBBC_OP_LT) {
+    if (b->tag != MRBBC_STR) {
+      snprintf(msg, sizeof msg, "comparison of String with %s failed", class_name(b));
+      mrbbc_raise("ArgumentError", msg);
+    }
+    out = bool_value(compare_result(op, str_order(a, b)));
+    *dst = out;
+    return;
+  }
+  no_method(op_method(op), a);
+}
+
+/* Array on the left: + (concatenation). The other operators of Array are not in this runtime. */
+static void ary_op(int op, MV *dst, const MV *a, const MV *b) {
+  char msg[160];
+  if (op == MRBBC_OP_ADD) {
+    MV r;
+    MAry *x, *y, *z;
+    long k;
+    if (b->tag != MRBBC_ARY) {
+      snprintf(msg, sizeof msg, "%s cannot be converted to Array", type_text(b));
+      mrbbc_raise("TypeError", msg);
+    }
+    x = ary_of(a);
+    y = ary_of(b);
+    r = new_ary_value(x->len + y->len);
+    z = ary_of(&r);
+    for (k = 0; k < x->len; k++) z->items[z->len++] = x->items[k];
+    for (k = 0; k < y->len; k++) z->items[z->len++] = y->items[k];
+    *dst = r;
+    return;
+  }
+  if (op == MRBBC_OP_SUB || op == MRBBC_OP_MUL) {
+    snprintf(msg, sizeof msg, "Array#%s is not implemented by mrbbc", op_method(op));
+    mrbbc_raise("NotImplementedError", msg);
+  }
+  no_method(op_method(op), a);
+}
+
+/* Symbol on the left: the comparisons (by name), as Symbol includes Comparable. */
+static void sym_op(int op, MV *dst, const MV *a, const MV *b) {
+  char msg[160];
+  if (op >= MRBBC_OP_LT) {
+    int c;
+    if (b->tag != MRBBC_SYM) {
+      snprintf(msg, sizeof msg, "comparison of Symbol with %s failed", class_name(b));
+      mrbbc_raise("ArgumentError", msg);
+    }
+    c = strcmp(sym_of(a), sym_of(b));
+    *dst = bool_value(compare_result(op, c));
+    return;
+  }
+  no_method(op_method(op), a);
+}
+
+void mrbbc_binop(int op, MV *dst, const MV *a, const MV *b) {
+  if (op == MRBBC_OP_EQ || op == MRBBC_OP_NEQ) {
+    int eq = value_eq(a, b);
+    *dst = bool_value(op == MRBBC_OP_EQ ? eq : !eq);
+    return;
+  }
+  switch (a->tag) {
+    case MRBBC_INT: int_op(op, dst, a, b); return;
+    case MRBBC_STR: str_op(op, dst, a, b); return;
+    case MRBBC_ARY: ary_op(op, dst, a, b); return;
+    case MRBBC_SYM: sym_op(op, dst, a, b); return;
+    default: no_method(op_method(op), a);  /* nil, true, false */
+  }
+}
+
+/* The index of an element: a negative index counts from the end. Returns false when it is below zero after that. */
+static int ary_index(const MAry *a, long idx, long *out) {
+  long i = idx;
+  if (i < 0) i += a->len;
+  if (i < 0) return 0;
+  *out = i;
+  return 1;
+}
+
+void mrbbc_getidx(MV *dst, const MV *recv, const MV *idx) {
+  MV r;
+  r.tag = MRBBC_NIL;
+  r.i = 0;
+  if (recv->tag == MRBBC_ARY && idx->tag == MRBBC_INT) {
+    const MAry *a = ary_of(recv);
+    long i;
+    if (ary_index(a, (long)idx->i, &i) && i < a->len) r = a->items[i];
+    *dst = r;
+    return;
+  }
+  if (recv->tag == MRBBC_STR && idx->tag == MRBBC_INT) {
+    const MStr *s = str_of(recv);
+    long i = (long)idx->i;
+    if (i < 0) i += s->len;
+    if (i >= 0 && i < s->len) r = new_str_value(s->p + i, 1);
+    *dst = r;
+    return;
+  }
+  if (recv->tag == MRBBC_ARY || recv->tag == MRBBC_STR) {
+    mrbbc_raise("NotImplementedError", "[] with a non-integer index is not implemented by mrbbc");
+  }
+  no_method("[]", recv);
+}
+
+void mrbbc_getidx0(MV *dst, const MV *recv) {
+  MV zero = int_value(0);
+  mrbbc_getidx(dst, recv, &zero);
+}
+
+void mrbbc_setidx(const MV *recv, const MV *idx, const MV *v) {
+  MAry *a;
+  long i;
+  MV item = *v;
+  if (recv->tag != MRBBC_ARY) {
+    if (recv->tag == MRBBC_STR) mrbbc_raise("NotImplementedError", "String#[]= is not implemented by mrbbc");
+    no_method("[]=", recv);
+  }
+  if (idx->tag != MRBBC_INT) mrbbc_raise("NotImplementedError", "[]= with a non-integer index is not implemented by mrbbc");
+  a = ary_of(recv);
+  i = (long)idx->i;
+  if (i < 0) {
+    char msg[96];
+    if (i + a->len < 0) {
+      snprintf(msg, sizeof msg, "index %ld out of array", i);
+      mrbbc_raise("IndexError", msg);
+    }
+    i += a->len;
+  }
+  if (i >= a->len) {
+    long k;
+    ary_reserve(a, i + 1);
+    for (k = a->len; k <= i; k++) {
+      a->items[k].tag = MRBBC_NIL;
+      a->items[k].i = 0;
+    }
+    a->len = i + 1;
+  }
+  a->items[i] = item;
+}
+
+void mrbbc_strcat(MV *dst, const MV *src) {
+  Buf b = {NULL, 0, 0};
+  MV out;
+  const MStr *s;
+  if (dst->tag != MRBBC_STR) mrbbc_raise("TypeError", "expected String");
+  s = str_of(dst);
+  /* the operand as a string: itself, or its to_s (mrb_obj_as_string) */
+  MV piece;
+  if (src->tag == MRBBC_STR) {
+    piece = *src;
+  } else {
+    MV tmp = *src;
+    mrbbc_send0(&piece, &tmp, MRBBC_M_TO_S);
+  }
+  buf_put(&b, s->p, (size_t)s->len);
+  buf_put(&b, str_of(&piece)->p, (size_t)str_of(&piece)->len);
+  out = new_str_value(b.p ? b.p : "", (long)b.n);
+  free(b.p);
+  *dst = out;
+}
+
+void mrbbc_send0(MV *dst, const MV *recv, int m) {
+  MV r;
+  switch (m) {
+    case MRBBC_M_TO_S:
+      switch (recv->tag) {
+        case MRBBC_STR: r = *recv; break;
+        case MRBBC_NIL: r = new_str_value("", 0); break;
+        case MRBBC_TRUE: r = new_str_value("true", 4); break;
+        case MRBBC_FALSE: r = new_str_value("false", 5); break;
+        case MRBBC_SYM: r = new_str_value(sym_of(recv), (long)strlen(sym_of(recv))); break;
+        case MRBBC_INT: {
+          char h[32];
+          int n = snprintf(h, sizeof h, "%lld", (long long)recv->i);
+          r = new_str_value(h, n);
+          break;
+        }
+        default: {  /* Array#to_s is inspect */
+          Buf b = {NULL, 0, 0};
+          inspect_value(&b, recv);
+          r = new_str_value(b.p, (long)b.n);
+          free(b.p);
+          break;
+        }
+      }
+      break;
+    case MRBBC_M_SIZE:
+    case MRBBC_M_LENGTH:
+      if (recv->tag == MRBBC_STR) r = int_value(str_of(recv)->len);
+      else if (recv->tag == MRBBC_ARY) r = int_value(ary_of(recv)->len);
+      else if (recv->tag == MRBBC_SYM) r = int_value((int64_t)strlen(sym_of(recv)));
+      else if (m == MRBBC_M_SIZE && recv->tag == MRBBC_INT) r = int_value(8);  /* sizeof(mrb_int) */
+      else no_method(m == MRBBC_M_SIZE ? "size" : "length", recv);
+      break;
+    case MRBBC_M_NOT:
+      r = bool_value(recv->tag == MRBBC_NIL || recv->tag == MRBBC_FALSE);
+      break;
+    default: mrbbc_raise("RuntimeError", "unknown method code");
+  }
+  *dst = r;
 }

@@ -1,16 +1,19 @@
 // mruby 4.0 root irep -> Path B IR (docs/notes/mrbbc-pathb.md, section "The lowering").
 //
 // The main program becomes one IR function `mrb_irep_0(MV *ret)`. A register R(i) is a 16-byte slot `r<i>` of type
-// MV: a tag byte at offset 0 (nil 0, false 1, true 2, integer 3) and an int64 at offset 8 (the tags are the runtime's,
-// tests/mrbbc/runtime/mrbrt.h). The value the program returns is written to *ret.
+// MV: a tag byte at offset 0 and an int64 at offset 8 (the tags are the runtime's, tests/mrbbc/runtime/mrbrt.h). The
+// value the program returns is written to *ret.
 //
 // Integer operators have an inline fast path: when both operands hold integers, the operation is one IR statement
-// (checked add, subtract and multiply, which trap on overflow, and a signed compare). Everything else calls
-// mrbbc_binop (the runtime), which does the rest of mruby's rules: floor division, ZeroDivisionError, the errors for
-// nil and friends. The opcodes not in the switch are refused by name, as the other producers refuse them.
+// (checked add, subtract and multiply, which trap on overflow, and a signed compare). Everything else calls a runtime
+// helper (mrbbc_binop for operators, mrbbc_getidx and friends for indexing, mrbbc_send0 for the methods of SEND0),
+// which does the rest of mruby's rules. Strings and symbols are data items of the IR module; arrays are built by the
+// runtime. The opcodes not handled here are refused by name, as the other producers refuse them.
 #include "mrb_lower.hpp"
 
 #include <cstdint>
+#include <cstdio>
+#include <map>
 #include <set>
 #include <sstream>
 #include <string>
@@ -20,22 +23,28 @@ namespace mrbbc {
 
 namespace {
 
-// Tags and operator numbers of the runtime (tests/mrbbc/runtime/mrbrt.h).
+// Tags and operator numbers of the runtime (tests/mrbbc/runtime/mrbrt.h; the string, array and symbol tags are 4, 5, 6).
 constexpr int kTagNil = 0, kTagFalse = 1, kTagTrue = 2, kTagInt = 3;
-constexpr int kOpAdd = 0, kOpSub = 1, kOpMul = 2, kOpDiv = 3, kOpLt = 4, kOpLe = 5, kOpGt = 6, kOpGe = 7, kOpEq = 8;
+constexpr int kOpAdd = 0, kOpSub = 1, kOpMul = 2, kOpDiv = 3, kOpLt = 4, kOpLe = 5, kOpGt = 6, kOpGe = 7, kOpEq = 8,
+              kOpNeq = 9;
+// The methods of SEND0 (enum mrbbc_method).
+constexpr int kMToS = 0, kMSize = 1, kMLength = 2, kMNot = 3;
 
 std::string num(long long v) { return std::to_string(v); }
 
 // A label of an instruction, by its byte offset in the iseq.
 std::string lbl(std::size_t pc) { return "\"pc" + std::to_string(pc) + "\""; }
 
-// The state of one lowering: the fresh IR register numbers, the body, and the slots the body refers to.
+// The state of one lowering: the fresh IR register numbers, the body, the MV slots beyond the registers, and the data
+// items (string literals and symbol names).
 struct Ctx {
   const mrb::Irep &irep;
   std::size_t pc = 0;   // the instruction being lowered
   int next = 1;         // %0 is the ret parameter; fresh registers count from 1
   std::ostringstream body;
-  std::vector<std::string> imm_slots;  // slots for the immediates of the slow path (imm<pc>)
+  std::ostringstream data;                      // (data ...) items, written before the functions
+  std::vector<std::string> slots;               // MV slots: immediates of the slow paths, temporaries
+  std::map<std::string, std::string> symbols;   // symbol name -> the data item holding its name
 
   explicit Ctx(const mrb::Irep &i) : irep(i) {}
 
@@ -74,7 +83,7 @@ std::string falsy(Ctx &c, const std::string &addr) {
   return f;
 }
 
-// A bool register that is true when the value is truthy (tags 2 and 3).
+// A bool register that is true when the value is truthy (every other tag).
 std::string truthy(Ctx &c, const std::string &addr) {
   std::string t = load_tag(c, addr), f = c.fresh();
   c.line("(let " + f + " bool (le.u unsigned_char (const unsigned_char 2) " + t + "))");
@@ -126,7 +135,7 @@ void emit_int_op(Ctx &c, int op, const std::string &dst, const std::string &lhs,
   std::string imm_slot;
   if (is_imm) {
     imm_slot = "$\"imm" + std::to_string(c.pc) + "\"";
-    c.imm_slots.push_back("imm" + std::to_string(c.pc));
+    c.slots.push_back("imm" + std::to_string(c.pc));
     rhs_addr = imm_slot;
   }
 
@@ -167,11 +176,11 @@ void emit_int_op(Ctx &c, int op, const std::string &dst, const std::string &lhs,
   c.line("))");
 }
 
-// R[a] = R[a] OP R[b]. + - * and the four comparisons have the integer fast path of emit_int_op; EQ and DIV always call
-// the runtime (EQ is identity on these values, and DIV floors and raises ZeroDivisionError).
+// R[a] = R[a] OP R[b]. + - * and the four comparisons have the integer fast path of emit_int_op; the others always call
+// the runtime (EQ and NEQ are identity or content equality there, DIV floors and raises ZeroDivisionError).
 void emit_binary(Ctx &c, int op, unsigned a, unsigned b) {
   std::string dst = c.reg(a), lhs = c.reg(a), rhs = c.reg(b);
-  if (op == kOpDiv || op == kOpEq) {
+  if (op == kOpDiv || op == kOpEq || op == kOpNeq) {
     call_binop(c, op, dst, lhs, rhs);
     return;
   }
@@ -222,6 +231,106 @@ bool bigint_value(const mrb::Pool &k, std::int64_t &out) {
   return true;
 }
 
+// The bytes of a string in the IR text form the emitter reads: printable ASCII as it is, \" and \\, and any other byte
+// as three octal digits (the emitter's read_string takes exactly those escapes).
+std::string ir_bytes(const std::string &s) {
+  std::string out;
+  for (unsigned char ch : s) {
+    if (ch == '"' || ch == '\\') {
+      out += '\\';
+      out += static_cast<char>(ch);
+    } else if (ch >= 0x20 && ch < 0x7f) {
+      out += static_cast<char>(ch);
+    } else {
+      char buf[8];
+      std::snprintf(buf, sizeof buf, "\\%03o", static_cast<unsigned>(ch));
+      out += buf;
+    }
+  }
+  return out;
+}
+
+// A data item holding the bytes of s and a NUL: (data "NAME" (const (array N (const char))) (string "...")).
+void add_data(Ctx &c, const std::string &name, const std::string &bytes) {
+  c.data << "(data \"" << name << "\" (const (array " << bytes.size() + 1 << " (const char))) (string \"" << ir_bytes(bytes)
+         << "\\000\"))\n";
+}
+
+// A symbol's name, as a static string shared by every use of the symbol in the module.
+std::string symbol_data(Ctx &c, const std::string &name) {
+  auto it = c.symbols.find(name);
+  if (it != c.symbols.end()) return it->second;
+  std::string item = "mrbbc_sym" + std::to_string(c.symbols.size());
+  c.symbols[name] = item;
+  add_data(c, item, name);
+  return item;
+}
+
+// A symbol that prints as :NAME with no quotes: an identifier, optionally ending in ?, ! or =.
+bool plain_symbol(const std::string &s) {
+  auto alpha = [](char ch) { return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_'; };
+  auto digit = [](char ch) { return ch >= '0' && ch <= '9'; };
+  if (s.empty() || !alpha(s[0])) return false;
+  std::size_t i = 1;
+  while (i < s.size() && (alpha(s[i]) || digit(s[i]))) ++i;
+  if (i < s.size() && (s[i] == '?' || s[i] == '!' || s[i] == '=')) ++i;
+  return i == s.size();
+}
+
+// The method of a SEND0 (no argument) the runtime implements, by its name (enum mrbbc_method); false for any other.
+bool zero_arg_method(const std::string &name, int &code) {
+  if (name == "to_s") code = kMToS;
+  else if (name == "size") code = kMSize;
+  else if (name == "length") code = kMLength;
+  else if (name == "!") code = kMNot;
+  else return false;
+  return true;
+}
+
+// The operator of a SEND with one argument (`a.+(b)`, which is the same as the opcode ADD when a is an integer).
+bool binary_method(const std::string &name, int &op) {
+  if (name == "+") op = kOpAdd;
+  else if (name == "-") op = kOpSub;
+  else if (name == "*") op = kOpMul;
+  else if (name == "/") op = kOpDiv;
+  else if (name == "==") op = kOpEq;
+  else if (name == "!=") op = kOpNeq;
+  else if (name == "<") op = kOpLt;
+  else if (name == "<=") op = kOpLe;
+  else if (name == ">") op = kOpGt;
+  else if (name == ">=") op = kOpGe;
+  else return false;
+  return true;
+}
+
+// R[a] = a new array of the n registers from src (ARRAY, ARRAY2). The array is built in a temporary, because the first
+// element may be R[a] itself.
+void lower_array(Ctx &c, unsigned dst, unsigned src, unsigned n) {
+  const std::string tmp = "tmp" + std::to_string(c.pc);
+  c.slots.push_back(tmp);
+  c.line("(eval (call void &\"mrbbc_ary_new\" $\"" + tmp + "\" (const long " + num(n) + ")))");
+  for (unsigned i = 0; i < n; ++i) {
+    c.line("(eval (call void &\"mrbbc_ary_push\" $\"" + tmp + "\" " + c.reg(src + i) + "))");
+  }
+  c.line("(copy 16 " + c.reg(dst) + " $\"" + tmp + "\")");
+}
+
+const mrb::Pool &pool_at(const mrb::Irep &irep, std::uint32_t i, std::size_t pc) {
+  if (i >= irep.pool.size()) {
+    throw std::runtime_error("malformed: pool entry " + std::to_string(i) + " at pc " + std::to_string(pc) + " of " +
+                             std::to_string(irep.pool.size()));
+  }
+  return irep.pool[i];
+}
+
+const std::string &sym_at(const mrb::Irep &irep, std::uint32_t i, std::size_t pc) {
+  if (i >= irep.syms.size()) {
+    throw std::runtime_error("malformed: symbol " + std::to_string(i) + " at pc " + std::to_string(pc) + " of " +
+                             std::to_string(irep.syms.size()));
+  }
+  return irep.syms[i];
+}
+
 }  // namespace
 
 std::string lower_module(const mrb::Module &module, const std::string &source_name) {
@@ -251,6 +360,12 @@ std::string lower_module(const mrb::Module &module, const std::string &source_na
       }
       return lbl(target);
     };
+    // The method name of a SEND-family instruction (its symbol operand, index b).
+    auto method_name = [&](std::uint32_t sym) { return sym_at(root, sym, in.pc); };
+    auto refuse_method = [&](const std::string &name, const std::string &why) {
+      throw Refused("refused: " + std::string(in.name) + " of method '" + name + "' " + why + " (pc " +
+                    std::to_string(in.pc) + ")");
+    };
     switch (in.op) {
       case mrb::OP_NOP: break;
       case mrb::OP_MOVE:
@@ -276,6 +391,32 @@ std::string lower_module(const mrb::Module &module, const std::string &source_na
         store_int(c, c.reg(x[0]), "(const long " + num(static_cast<std::int32_t>(v)) + ")");
         break;
       }
+      case mrb::OP_LOADSYM: {
+        // R[a] = Syms[b]: a symbol with a plain name (the others are quoted in inspect, which is not lowered)
+        const std::string &name = sym_at(root, x[1], in.pc);
+        if (!plain_symbol(name)) {
+          throw Refused("refused: LOADSYM of the symbol :" + name + " (not a plain name) is not lowered yet (pc " +
+                        std::to_string(in.pc) + ")");
+        }
+        c.line("(eval (call void &\"mrbbc_sym\" " + c.reg(x[0]) + " @\"" + symbol_data(c, name) + "\"))");
+        break;
+      }
+      case mrb::OP_STRING: {
+        // R[a] = a new string of the pool entry b
+        const mrb::Pool &k = pool_at(root, x[1], in.pc);
+        if (k.kind != mrb::Pool::Kind::Str) {
+          throw std::runtime_error("malformed: STRING at pc " + std::to_string(in.pc) + " reads a pool entry that is not a string");
+        }
+        const std::string item = "mrbbc_str" + std::to_string(in.pc);
+        add_data(c, item, k.s);
+        c.line("(eval (call void &\"mrbbc_str_new\" " + c.reg(x[0]) + " @\"" + item + "\" (const long " +
+               num(static_cast<long long>(k.s.size())) + ")))");
+        break;
+      }
+      case mrb::OP_STRCAT:
+        // str_cat(R[a], R[a+1]): R[a] is a string; the operand is appended as its to_s (mrb_obj_as_string)
+        c.line("(eval (call void &\"mrbbc_strcat\" " + c.reg(x[0]) + " " + c.reg(x[0] + 1) + "))");
+        break;
       case mrb::OP_LOADNIL: store_tag(c, c.reg(x[0]), kTagNil); break;
       case mrb::OP_LOADTRUE: store_tag(c, c.reg(x[0]), kTagTrue); break;    // OP_LOADT in ops.h's spelling
       case mrb::OP_LOADFALSE: store_tag(c, c.reg(x[0]), kTagFalse); break;  // OP_LOADF
@@ -311,6 +452,50 @@ std::string lower_module(const mrb::Module &module, const std::string &source_na
                         ")");
         }
         store_int(c, c.reg(x[0]), "(const long " + num(value) + ")");
+        break;
+      }
+      case mrb::OP_ARRAY: lower_array(c, x[0], x[0], x[1]); break;   // R[a] = [R[a] .. R[a+b-1]]
+      case mrb::OP_ARRAY2: lower_array(c, x[0], x[1], x[2]); break;  // R[a] = [R[b] .. R[b+c-1]]
+      case mrb::OP_ARYPUSH:
+        // push R[a+1] .. R[a+b] onto the array in R[a]
+        for (std::uint32_t i = 0; i < x[1]; ++i) {
+          c.line("(eval (call void &\"mrbbc_ary_push\" " + c.reg(x[0]) + " " + c.reg(x[0] + 1 + i) + "))");
+        }
+        break;
+      case mrb::OP_GETIDX:
+        // R[a] = R[a][R[a+1]]
+        c.line("(eval (call void &\"mrbbc_getidx\" " + c.reg(x[0]) + " " + c.reg(x[0]) + " " + c.reg(x[0] + 1) + "))");
+        break;
+      case mrb::OP_GETIDX0:
+        // R[a] = R[b][0]; the scratch register a+1 of the VM's fallback is not needed by the runtime
+        c.line("(eval (call void &\"mrbbc_getidx0\" " + c.reg(x[0]) + " " + c.reg(x[1]) + "))");
+        break;
+      case mrb::OP_SETIDX:
+        // R[a][R[a+1]] = R[a+2]; the value of the assignment is left in R[a] (vm.c)
+        c.line("(eval (call void &\"mrbbc_setidx\" " + c.reg(x[0]) + " " + c.reg(x[0] + 1) + " " + c.reg(x[0] + 2) +
+               "))");
+        c.line("(copy 16 " + c.reg(x[0]) + " " + c.reg(x[0] + 2) + ")");
+        break;
+      case mrb::OP_SEND0:
+      case mrb::OP_SEND: {
+        // R[a] = R[a].send(Syms[b], R[a+1] .. R[a+n]) with c = n | k<<4 (k keyword arguments, refused)
+        const bool is_send = in.op == mrb::OP_SEND;
+        const unsigned n = is_send ? (x[2] & 0x0f) : 0;
+        const unsigned k = is_send ? (x[2] >> 4) : 0;
+        const std::string name = method_name(x[1]);
+        if (k != 0) refuse_method(name, "with keyword arguments");
+        if (n == 0) {
+          int code = 0;
+          if (!zero_arg_method(name, code)) refuse_method(name, "is not lowered yet");
+          c.line("(eval (call void &\"mrbbc_send0\" " + c.reg(x[0]) + " " + c.reg(x[0]) + " (const int " + num(code) +
+                 ")))");
+        } else if (n == 1) {
+          int op = 0;
+          if (!binary_method(name, op)) refuse_method(name, "is not lowered yet");
+          call_binop(c, op, c.reg(x[0]), c.reg(x[0]), c.reg(x[0] + 1));
+        } else {
+          refuse_method(name, "with " + std::to_string(n) + " arguments is not lowered yet");
+        }
         break;
       }
       case mrb::OP_JMP:
@@ -362,7 +547,7 @@ std::string lower_module(const mrb::Module &module, const std::string &source_na
   std::ostringstream fn;
   fn << "(function \"mrb_irep_0\" (ret void) (params (param %0 \"ret\" (ptr (struct \"MV\"))))\n";
   for (std::uint16_t i = 0; i < root.nregs; ++i) fn << "  (slot \"r" << i << "\" (struct \"MV\") 16 8)\n";
-  for (const std::string &s : c.imm_slots) fn << "  (slot \"" << s << "\" (struct \"MV\") 16 8)\n";
+  for (const std::string &s : c.slots) fn << "  (slot \"" << s << "\" (struct \"MV\") 16 8)\n";
   fn << c.body.str() << ")\n";
 
   std::ostringstream out;
@@ -370,6 +555,7 @@ std::string lower_module(const mrb::Module &module, const std::string &source_na
       << "\" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))\n";
   out << "(producer \"mruby-4.0\")\n";
   out << "(abi-type \"MV\" 16 8 (memory))\n";
+  out << c.data.str();
   out << fn.str();
   return out.str();
 }
