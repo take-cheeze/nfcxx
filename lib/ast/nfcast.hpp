@@ -274,9 +274,11 @@ struct Stats {
   std::uint64_t jit_compiled = 0;      // loops encoded to machine code
   std::uint64_t jit_entries = 0;       // takeovers: machine code ran the loop to its end
   std::uint64_t jit_guard_misses = 0;  // takeovers refused by the entry guard (a live-in local was not an integer): the interpreter went on
-  std::uint64_t jit_bailouts = 0;      // times compiled code handed a loop back to the interpreter: the guard misses, and run-time deopts
-                                       // (none in this slice: integer + - * wrap, and the operators that could fail are refused)
+  std::uint64_t jit_bailouts = 0;      // times compiled code handed a loop back to the interpreter: the guard misses, and the deopts (a
+                                       // zero divisor, which raises the error)
   std::uint64_t jit_refused = 0;       // loops the JIT refused at compile time (counted once per loop)
+  std::uint64_t jit_call_mismatches = 0;  // calls in compiled code whose result was not the kind the code expected: the statement that
+                                          // made the call was finished by the interpreter, and the loop went on in the interpreter from there
 };
 
 // Tiering is off unless a State is given options (or NFCAST_TIER is set in the environment, for the test drivers). A function

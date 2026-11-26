@@ -2688,24 +2688,28 @@ void tier_backedge(Frame& f) {
 // The machine-code tier, at the same takeover point as the C tier: 1 when the compiled loop ran to its end, 0 when the loop is not
 // taken over (the interpreter goes on, and the C tier may still take the loop over). Its guard, like the C tier's, is checked at every
 // takeover, and a loop whose guard failed is left to the interpreter until it is entered anew.
-int jit_enter(State& S, Frame& f, TierLoop* tl, const TierLoopState& st) {
+int jit_enter(State& S, Frame& f, TierLoop* tl, TierLoopState& st) {
   if (!jit::entry_ok(f, *tl->jit)) {
     ++S.stats.jit_guard_misses;
     ++S.stats.jit_bailouts;
     tl->jit_blocked = true;
     return 0;
   }
-  if (int site = jit::run(f, *tl->jit, st)) {
+  int r = jit::run(f, *tl->jit, st);
+  if (r > 0) {
     // A deopt: the code stopped at a zero divisor and wrote the loop's locals back. The interpreter runs the statement it stopped in,
     // which raises the error the interpreter raises there; the loop does not go on.
     ++S.stats.jit_bailouts;
-    jit::resume(f, *tl->jit, site);
+    jit::resume(f, *tl->jit, r);
+  }
+  if (r == jit::kRunGo || r == jit::kRunStop) {  // a call's result was not the kind expected: the interpreter finished the iteration
+    return r == jit::kRunGo ? 3 : 1;
   }
   ++S.stats.jit_entries;
   return 1;
 }
 
-int jit_take_over(State& S, Frame& f, Node* loop, TierLoop* tl, const TierLoopState& st, bool edge) {
+int jit_take_over(State& S, Frame& f, Node* loop, TierLoop* tl, TierLoopState& st, bool edge) {
   TierState* T = S.tier;
   if (!edge) tl->jit_blocked = false;  // a loop that is entered anew is tried again
   if (tl->jit_blocked) return 0;
@@ -2727,7 +2731,7 @@ int jit_take_over(State& S, Frame& f, Node* loop, TierLoop* tl, const TierLoopSt
   return jit_enter(S, f, tl, st);
 }
 
-int tier_loop(Frame& f, Node* loop, TierLoop*& hook, const TierLoopState& st, bool edge) {
+int tier_loop(Frame& f, Node* loop, TierLoop*& hook, TierLoopState& st, bool edge) {
   State& S = *f.S;
   TierState* T = S.tier;
   if (T->opt.mode == TierOptions::Off || (!T->opt.osr && !T->opt.jit) || f.inlined) return 0;

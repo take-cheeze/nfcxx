@@ -658,7 +658,8 @@ the JIT is off: every loop is refused with the reason "not available on this hos
 **Refused at compile time** (the loop is left to the interpreter or the C tier, and `jit_refused` counts it once): a bitwise operator on
 a float, even one with an integer value (the interpreter raises "has no integer representation" for a float without one, and the code
 does not encode that error); a local that takes the other type in an assignment (an integer in a float local, a float in an integer
-one); a comparison or a logical operator used as a value; calls; upvalues and globals; tables, strings and fields; a local captured by a
+one); a comparison or a logical operator used as a value; a call the subset does not cover (see "The calls to Lua functions"); an
+upvalue or a global read as a value (a callee is read by its call); tables, strings and fields; a local captured by a
 closure; `return`; a numeric `for` whose step is not a numeric constant, or is zero (the interpreter reports a zero step); a local read
 before its declaration in the text (a slot that an outer local shares).
 
@@ -692,13 +693,52 @@ The bitwise operators do not fail on integers, so they add no deopt and no site.
 
 **Counters** (`State::stats`, all zero unless the JIT is on): `jit_compiled` (loops encoded), `jit_entries` (takeovers that ran the loop
 to its end), `jit_guard_misses`, `jit_bailouts` (times compiled code handed a loop back to the interpreter: a guard miss, or a deopt, which
-is the one that raises the error), `jit_refused` (loops refused at compile time, counted once per loop).
+is the one that raises the error), `jit_refused` (loops refused at compile time, counted once per loop), `jit_call_mismatches` (calls
+whose result was not the kind the code expected: the interpreter finished that iteration, see "The calls to Lua functions"; a callee's
+error is not counted here, it leaves the loop as the interpreter's does).
 
 **The code.** One 64-bit word per local and per hidden variable of a `for` in an array whose address is in RBX. The four words with the
 most references (weighted by loop depth, so the loop's control variables come first) live in R12-R15 for the whole loop instead: they
 are loaded at the entry, after the guard, and stored back in the epilogue, which every exit of the loop reaches (the loop has no other
 exit). A binary operation with a constant or a local operand reads it directly; only two compound operands keep the left value on the
 machine stack. A single assignment or declaration stores its value straight to its word.
+
+**The calls to Lua functions.** A call `f(args)` in a loop is compiled when `f` is a global, an upvalue, or a local of the loop's function
+that the loop does not compute with or assign (a function is never a register: the callee is read through its node at each call, so a
+callee that the loop reads as a local is read from the frame or its cell); the arguments are numbers of the subset, with no call among
+them; and the call is a statement, an operand of an arithmetic operation or a comparison (its kind is the other operand's), or the value
+of an assignment or a declaration (the target's kind; a declaration takes an integer; a call that is the last value of a list of the
+same length takes its first value, as the interpreter's truncation does). A statement has at most one call. The code
+passes the run's context, the call node, the arguments (words in the stack area of the call; a float is its bits) and the kind it
+expects of the result (`jit_call_helper`, in `nfcast_jit.cpp`). The helper calls `CallBase::call_args` (`nfcast_nodes.cpp`): the
+interpreter's own call path, the function evaluated first, the line of the call set, `call_value` run with the call node as the place
+of the error, so the messages, the traceback, the arity adjustment and the return rule (the first value, nil for none) are the
+interpreter's. It does not dispatch, so the node is not respecialized and the node the tier was given stays in the tree.
+
+The errors. A C++ exception never unwinds through the machine code: the helper catches it and keeps it in the run's context, and
+`jit::run` rethrows it after the code has left, with the locals written back, so the error leaves the loop as the interpreter's
+does (the callee's frames were unwound by the callee's own code, as in the interpreter). A callee runs once: no deopt re-runs a unit
+that has a call. A division by a value that is not a constant after a call in the same statement is refused, since its deopt would run
+the statement, and the call, again; a division before the call is fine (the deopt runs the statement, and the call has not happened).
+
+The kinds. The helper returns the result's word when it is the kind the code expects (an integer, or a float). Another kind (nil, a
+boolean, a string, a table, or a float where an integer is expected) makes the code stop at the call's site, with the locals written
+back, and `jit::run` finishes the iteration in the interpreter, which is exact: the statement the call is in runs with the call node
+returning the value (`CallReplay`, set on the node only for that frame, so its arithmetic, its errors and its store are the
+interpreter's; an inlined call node, `InlineCall`, overrides `eval` and `exec` and checks it as well, or the inlined body would run and
+call the callee a second time), then the rest of each enclosing block of the loop's body (the site's chain of statements, as they are in the tree now:
+the replacement of a node by a respecialization is followed through `jit_current`), then the end of the iteration as the loop node does
+it (a repeat's condition, a numeric for's count or test, a while loop's edge). The loop then goes on in the interpreter from the next
+iteration: `tier_loop` returns 3 with the state of that iteration (`TierLoopState`, which a numeric for loop node takes), and the node
+continues. `jit_call_mismatches` counts these. The loop is taken over again at the next iteration edge if its entry guard holds.
+A local of the loop has the type the code gave it; the interpreter stores the value it has, so a local that changed its kind is left
+to the interpreter (the guard refuses the next takeover when a live-in is not of its type).
+
+The refusals of calls (each makes the loop refused, `jit_refused`): a call in a loop inside the loop (the outer loop is refused, and
+the inner loop, a loop of its own, is taken over with its call); a call in the condition of the loop itself; a call among the arguments
+of a call; a callee that is not a global, an upvalue or a local (a library function as a field, `math.abs`, is refused; a copy of it in a
+global is not); more than one call in a statement; a division by a value that is not a constant after a call in its statement; a call
+whose kind is not known (an operand of unary minus, a call as a whole condition); more than 16 arguments; a multiple-value last argument.
 
 **The calls.** The code calls the interpreter's own functions, each through a wrapper in `nfcast_jit.cpp` whose address is embedded in the
 code (`mov rax, imm64; call rax`), so the results are the interpreter's bit for bit:

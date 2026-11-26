@@ -29,7 +29,9 @@
 #include "nfcast_jit.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
+#include <exception>
 #include <initializer_list>
 #include <map>
 #include <set>
@@ -79,7 +81,126 @@ bool entry_ok(const Frame& f, const Code& c) {
   return true;
 }
 
-int run(Frame& f, const Code& c, const TierLoopState& st) {
+// The context of one run of the code (run() keeps it on its stack and stores its address in Code::ctx_reg): the frame; the error of a
+// callee, which the code has left with; the value of a call whose kind was not the one the code expected.
+struct JitCtx {
+  Frame* f;
+  std::exception_ptr err;
+  Value cached;
+};
+
+// What the call helper returns (in RAX and RDX): the word of the result, and a status: 0 the result is the kind the code expects (or
+// no kind is expected), 1 the callee raised an error (in the context), 2 the result is of another kind (in the context).
+struct JitRet {
+  std::int64_t w;
+  std::int64_t st;
+};
+
+constexpr int kMaxCallArgs = 16;
+
+// The call of the call node SITE by the compiled code: the N arguments are the words in ARGS (the bits of a float, for the arguments
+// whose bit is set in FLAGS >> 8, and an integer for the others), the function is called as the interpreter calls it (jit_call_value).
+// FLAGS & 3 is the kind the code expects of the result: 0 none, 1 an integer, 2 a float.
+JitRet jit_call_helper(JitCtx* c, Node* site, const std::int64_t* args, std::int64_t n, std::int64_t flags) {
+  Value av[kMaxCallArgs];
+  try {
+    for (std::int64_t k = 0; k < n; ++k) {
+      if ((flags >> (8 + k)) & 1) {
+        double d;
+        std::memcpy(&d, &args[k], sizeof d);
+        av[k] = Value::number(d);
+      } else {
+        av[k] = Value::integer(args[k]);
+      }
+    }
+    Value r = jit_call_value(*c->f, site, av, static_cast<int>(n));
+    int want = static_cast<int>(flags & 3);
+    if (want == 0) return JitRet{0, 0};
+    if (want == 1 && r.t == T_INT) return JitRet{r.i, 0};
+    if (want == 2 && r.t == T_FLT) {
+      std::int64_t w;
+      std::memcpy(&w, &r.d, sizeof w);
+      return JitRet{w, 0};
+    }
+    c->cached = r;
+    return JitRet{0, 2};
+  } catch (...) {  // never unwind through the machine code: the error is raised by run(), once the code has left
+    c->err = std::current_exception();
+    return JitRet{0, 1};
+  }
+}
+
+double word_double(std::int64_t w) {
+  double d;
+  std::memcpy(&d, &w, sizeof d);
+  return d;
+}
+
+// The code stopped at the call S.node, whose result was not the kind the code expected (ctx.cached). The statement the call is in is
+// finished by the interpreter with the call returning that value (CallReplay, which is in the frame F only), then the rest of the
+// iteration (S.chain). Then the loop goes on in the interpreter from the next iteration: its state is that of the iteration after the
+// one the call is in, as the code has it (for a for loop, from the registers the stub spilled).
+int finish_call(Frame& f, const Code& c, const Code::Site& s, JitCtx& ctx, const std::int64_t* R, TierLoopState& st) {
+  State& S = *f.S;
+  ++S.stats.jit_call_mismatches;  // counted here, so that an error the replay raises is counted too
+  TierLoopState next = st;
+  bool last = false;  // the iteration the call is in is the last one of a for loop
+  if (c.kind == TierLoopState::FOR_INT) {
+    std::int64_t hi = R[c.state_regs[0]], hs = R[c.state_regs[2]];
+    std::uint64_t hc = static_cast<std::uint64_t>(R[c.state_regs[1]]);
+    last = hc == 0;  // NumForNode: `if (count-- == 0) break;`
+    next.i = static_cast<std::int64_t>(static_cast<std::uint64_t>(hi) + static_cast<std::uint64_t>(hs));
+    next.count = hc - 1;
+    next.step = hs;
+  } else if (c.kind == TierLoopState::FOR_FLT) {
+    double idx = word_double(R[c.state_regs[0]]), limit = word_double(R[c.state_regs[1]]), step = word_double(R[c.state_regs[2]]);
+    double nx = idx + step;  // the loop's increment, then its test after an iteration
+    last = !(0 < step ? nx <= limit : limit <= nx);
+    next.d = nx;
+    next.limit = limit;
+    next.dstep = step;
+  }
+  if (S.top + 2 >= S.stack_end) S.rt_error("stack overflow");
+  Value* saved = S.top;
+  *S.top++ = ctx.cached;  // rooted on the stack while the interpreter holds it
+  CallReplay rp{&f, ctx.cached};
+  Node* call = jit_current(s.node);
+  jit_set_replay(call, &rp);
+  bool stop = false;
+  try {
+    for (Node* n : s.chain)
+      if (jit_current(n)->exec(f) == C_BREAK) {
+        stop = true;
+        break;
+      }
+    if (!stop && c.kind == TierLoopState::REPEAT && c.until && jit_current(c.until)->eval(f).truthy()) stop = true;
+  } catch (...) {
+    jit_set_replay(call, nullptr);
+    S.top = saved;
+    throw;
+  }
+  jit_set_replay(call, nullptr);
+  S.top = saved;
+  if (stop) return kRunStop;
+  // The end of the iteration, as the interpreter's loop node does it: the for loops check their count or their test after the
+  // safe point of the edge (a float loop has it before the test, an integer loop only when it goes on), a while loop has it too.
+  if (c.kind == TierLoopState::FOR_INT) {
+    if (last) return kRunStop;
+    st = next;
+    loop_edge(f);
+    return kRunGo;
+  }
+  if (c.kind == TierLoopState::FOR_FLT) {
+    loop_edge(f);
+    if (last) return kRunStop;
+    st = next;
+    return kRunGo;
+  }
+  loop_edge(f);
+  return kRunGo;
+}
+
+int run(Frame& f, const Code& c, TierLoopState& st) {
   std::int64_t small[64] = {0};
   std::vector<std::int64_t> big;
   std::int64_t* R = small;
@@ -87,6 +208,8 @@ int run(Frame& f, const Code& c, const TierLoopState& st) {
     big.assign(static_cast<std::size_t>(c.nregs), 0);
     R = big.data();
   }
+  JitCtx ctx{&f, nullptr, Value()};
+  if (c.ctx_reg >= 0) R[c.ctx_reg] = static_cast<std::int64_t>(reinterpret_cast<std::intptr_t>(&ctx));
   for (std::size_t k = 0; k < c.in_slots.size(); ++k) R[c.in_regs[k]] = value_word(f.base[c.in_slots[k]]);
   if (c.kind == TierLoopState::FOR_INT) {
     R[c.state_regs[0]] = st.i;
@@ -98,13 +221,15 @@ int run(Frame& f, const Code& c, const TierLoopState& st) {
     R[c.state_regs[2]] = value_word(Value::number(st.dstep));
   }
   int site = c.fn(R);
-  if (site != 0) {  // a deopt: the locals of the site go back to the frame, as they are at the operation
+  if (site != 0) {  // a deopt or a call: the locals of the site go back to the frame, as they are at the operation
     const Code::Site& s = c.sites[static_cast<std::size_t>(site - 1)];
     for (std::size_t k = 0; k < s.bail_slots.size(); ++k) {
       std::size_t r = static_cast<std::size_t>(s.bail_regs[k]);
       f.base[s.bail_slots[k]] = word_value(c.reg_float[r] != 0, R[s.bail_regs[k]]);
     }
-    return site;
+    if (s.kind == Code::Site::DEOPT) return site;
+    if (ctx.err) std::rethrow_exception(ctx.err);  // the callee's error: the loop is left, as the interpreter leaves it
+    return finish_call(f, c, s, ctx, R, st);
   }
   for (std::size_t k = 0; k < c.out_slots.size(); ++k) {
     std::size_t r = static_cast<std::size_t>(c.out_regs[k]);
@@ -127,7 +252,7 @@ void resume(Frame& f, const Code& c, int k) {
 namespace {
 
 // ---- the encoder --------------------------------------------------------------------------------------------------------------
-enum { RAX = 0, RCX = 1, RDX = 2, RDI = 7 };
+enum { RAX = 0, RCX = 1, RDX = 2, RSP = 4, RSI = 6, RDI = 7, R8 = 8 };
 // The condition codes of Jcc (0F 80+cc) and SETcc. Negating a condition flips the low bit: E/NE, L/GE, LE/G.
 enum Cc {
   CC_B = 0x2, CC_AE = 0x3, CC_E = 0x4, CC_NE = 0x5, CC_BE = 0x6, CC_A = 0x7, CC_S = 0x8, CC_NS = 0x9, CC_P = 0xA,
@@ -191,6 +316,26 @@ class Asm {
     b.push_back(0x58);
     --pushes_;
   }
+  void pop_rcx() {
+    b.push_back(0x59);
+    --pushes_;
+  }
+  // The stack space of the arguments of a call: N words below rsp, counted as pushes (a deopt drops them, the alignment counts them).
+  void reserve(int n) {
+    bytes({0x48, 0x81, 0xEC});  // sub rsp, imm32
+    u32(static_cast<std::uint32_t>(8 * n));
+    pushes_ += n;
+  }
+  void release(int n) {
+    bytes({0x48, 0x81, 0xC4});  // add rsp, imm32
+    u32(static_cast<std::uint32_t>(8 * n));
+    pushes_ -= n;
+  }
+  // mov [rsp + 8 * K], RAX: argument K of the reserved area.
+  void store_arg(int k) {
+    bytes({0x48, 0x89, 0x84, 0x24});  // mov [rsp + disp32], rax
+    u32(static_cast<std::uint32_t>(8 * k));
+  }
   // The values pushed by the code emitted so far and not yet popped: a deopt drops them before it leaves the loop.
   int pushes() const { return pushes_; }
   // The registers the prologue pushed (see set_phys): with the pushes, they decide the alignment of the stack for a call.
@@ -226,15 +371,15 @@ class Asm {
   void leave_loop() { --depth_; }
   const std::vector<long>& refs() const { return refs_; }
   // mov REG, V: the sign-extended imm32 form when V fits, else the imm64 one.
-  void mov_imm(int reg, std::int64_t v) {
+  void mov_imm(int reg, std::int64_t v) {  // REX.B for R8-R15 (the flags of a call are in R8)
     if (v >= INT32_MIN && v <= INT32_MAX) {
-      b.push_back(0x48);
+      b.push_back(static_cast<std::uint8_t>(0x48 | (reg >> 3)));
       b.push_back(0xC7);
-      b.push_back(static_cast<std::uint8_t>(0xC0 | reg));
+      b.push_back(static_cast<std::uint8_t>(0xC0 | (reg & 7)));
       u32(static_cast<std::uint32_t>(v));
     } else {
-      b.push_back(0x48);
-      b.push_back(static_cast<std::uint8_t>(0xB8 | reg));
+      b.push_back(static_cast<std::uint8_t>(0x48 | (reg >> 3)));
+      b.push_back(static_cast<std::uint8_t>(0xB8 | (reg & 7)));
       u64(static_cast<std::uint64_t>(v));
     }
   }
@@ -414,14 +559,38 @@ struct Gen {
   // site's locals back and returns the site. UNITS are the statements and conditions being generated, innermost last; SITES[k - 1] is
   // the unit of the operation that leaves with k in EAX, and STUBS[k - 1] the label of its stub.
   std::vector<Code::Site> units;
+  std::vector<bool> unit_called;  // per unit: a call was emitted in it (a division after it could not be deopted: see zero_check)
   std::vector<Code::Site> sites;
   std::vector<int> stubs;
+  // The calls (docs/notes/ast.md, "The calls"). LEVELS are the blocks being generated, innermost last: the statements of each (KIDS),
+  // the one being generated (IDX), and the calls in it so far (one statement has at most one call). A call that stops the code is
+  // finished by the interpreter from the statement it is in, so it needs the rest of each block, which these give.
+  struct Level {
+    const std::vector<Node*>* kids;
+    std::size_t idx;
+    int calls;
+  };
+  std::vector<Level> levels;
+  int inner_loops = 0;          // loops entered inside the loop being compiled (their statements are not in the subset for calls)
+  int args_depth = 0;           // the arguments of a call are generated (no call may be among them)
+  int ctx_word = -1;            // the word that holds the address of the run's context (Code::ctx_reg), made by the first call
+  std::set<int> callee_slots;   // the frame slots used as the function of a call: never a register
+  static constexpr int WANT_DISCARD = 2;  // call_expr: the result is not used
 
   static Code::Site unit(Node* n, bool stmt) {
     Code::Site s;
     s.node = n;
     s.stmt = stmt;
     return s;
+  }
+
+  void push_unit(Node* n, bool stmt) {
+    units.push_back(unit(n, stmt));
+    unit_called.push_back(false);
+  }
+  void pop_unit() {
+    units.pop_back();
+    unit_called.pop_back();
   }
 
   bool fail(const std::string& m) {
@@ -458,6 +627,10 @@ struct Gen {
   // The register of a frame slot the loop uses: a local of the loop (its declaration must have been passed in the text, so that the
   // slot is not one that an outer local shares) or a live-in (loaded at entry, and written back when assigned).
   int slot_reg(int slot, bool write) {
+    if (callee_slots.count(slot)) {
+      fail("a local used as a function and as a number");
+      return -1;
+    }
     if (declared.count(slot)) {
       if (!seen.count(slot)) {
         fail("a local of the loop used before its declaration (a slot shared with an outer local)");
@@ -493,7 +666,8 @@ struct Gen {
   }
 
   // Leaves the value of the numeric expression N in RAX (the bits of a float) and returns its type.
-  int expr(Node* n) {
+  // EXPECT is the kind the code expects of a call's result (TY_INT or TY_FLT: the context of the value); other expressions ignore it.
+  int expr(Node* n, int expect = TY_NONE) {
     if (!n) return failt("an expression that is missing");
     TierView v;
     tier_view(n, v);
@@ -536,7 +710,8 @@ struct Gen {
       case TierView::K_OR:
         return failt("a comparison or a logical operator used as a value (only conditions are compiled)");
       case TierView::K_CALL:
-        return failt("a call");
+        if (expect == TY_NONE) return failt("a call whose result kind is not known here (it is not an operand or a value of a local)");
+        return call_expr(n, expect);
       case TierView::K_UPVAL:
       case TierView::K_GLOBAL:
         return failt("an upvalue or a global");
@@ -648,7 +823,34 @@ struct Gen {
   // RAX = left, RCX = right (their types in TL and TR). A leaf on either side needs no push: a leaf on the right is loaded into RCX
   // after the left is evaluated, and a leaf on the left is loaded into RAX after the right is evaluated (its value moved to RCX
   // first). Only two compound operands keep the left value on the machine stack while the right one is computed.
+  bool is_call(Node* n) {
+    TierView v;
+    tier_view(n, v);
+    return v.kind == TierView::K_CALL;
+  }
+
   bool binary(Node* l, Node* r, int& tl, int& tr) {
+    bool lc = is_call(l), rc = is_call(r);
+    if (lc && rc) return fail("two calls in one operation");
+    if (rc) {  // the call is the right operand: the left one is computed first, and the call expects its kind
+      tl = expr(l);
+      if (tl == TY_NONE) return false;
+      a.push_rax();
+      tr = expr(r, tl);
+      if (tr == TY_NONE) return false;
+      a.mov_rcx_rax();
+      a.pop_rax();
+      return true;
+    }
+    if (lc) {  // the call is the left operand: the right one (which has no call) is computed first, and the call expects its kind
+      tr = expr(r);
+      if (tr == TY_NONE) return false;
+      a.push_rax();
+      tl = expr(l, tr);
+      if (tl == TY_NONE) return false;
+      a.pop_rcx();
+      return true;
+    }
     if (leaf(r)) {
       tl = expr(l);
       if (tl == TY_NONE) return false;
@@ -672,12 +874,91 @@ struct Gen {
     return true;
   }
 
+  // A call of the loop's own statements (docs/notes/ast.md, "The calls"). The function is a global, an upvalue, or a local that the loop
+  // only calls. The arguments are numbers, computed into the stack area of the call and then given to the helper with the node, the
+  // kind the code expects of the result (WANT: TY_INT, TY_FLT, or WANT_DISCARD), and the context. The helper returns the result's word in
+  // RAX and a status in RDX: nonzero leaves the code through the site's stub, which writes the locals back (run() then raises the
+  // callee's error, or finishes the statement with the call's value). The value is in RAX.
+  int call_expr(Node* n, int want) {
+    TierView v;
+    tier_view(n, v);
+    if (v.kind != TierView::K_CALL) return failt("internal: a call expected");
+    if (v.multi_last) return failt("a call whose last argument is several values");
+    if (args_depth > 0) return failt("a call among the arguments of a call");
+    if (inner_loops > 0) return failt("a call in a loop inside the loop (the loop's statements are compiled only at its own level)");
+    if (levels.empty()) return failt("a call in the condition of the loop");
+    if (levels.back().calls > 0) return failt("two calls in one statement");
+    int m = static_cast<int>(v.kids.size()) - 1;
+    if (m > kMaxCallArgs) return failt("a call with more than 16 arguments");
+    TierView fv;
+    tier_view(v.kids[0], fv);
+    if (fv.kind == TierView::K_LOCAL) {
+      if (declared.count(fv.slot) || written.count(fv.slot) || reg_of.count(fv.slot))
+        return failt("a local used as a function that the loop also computes with or assigns");
+      callee_slots.insert(fv.slot);
+    } else if (fv.kind != TierView::K_GLOBAL && fv.kind != TierView::K_UPVAL) {
+      return failt("a call of something other than a global, an upvalue or a local");
+    }
+    ++levels.back().calls;
+    if (ctx_word < 0) ctx_word = new_reg(false);
+    if (m > 0) a.reserve(m);
+    std::int64_t fmask = 0;
+    ++args_depth;
+    for (int k = 0; k < m; ++k) {
+      int t = expr(v.kids[static_cast<std::size_t>(k) + 1]);
+      if (t == TY_NONE) {
+        --args_depth;
+        return TY_NONE;
+      }
+      if (t == TY_FLT) fmask |= std::int64_t(1) << k;
+      a.store_arg(k);
+    }
+    --args_depth;
+    int code_want = want == TY_INT ? 1 : want == TY_FLT ? 2 : 0;
+    a.load(RDI, ctx_word);
+    a.mov_imm(RSI, static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(n)));
+    a.mov_rr_pub(RDX, RSP);  // the arguments
+    a.mov_imm(RCX, m);
+    a.mov_imm(R8, code_want | (fmask << 8));
+    call_c(reinterpret_cast<std::uintptr_t>(&jit_call_helper));
+    if (m > 0) a.release(m);
+    if (!unit_called.empty()) unit_called.back() = true;
+    // The site: the locals as they are here, and the chain of the statements the interpreter runs after a call that stops the code.
+    Code::Site site;
+    site.kind = Code::Site::CALL;
+    site.node = n;
+    for (int lv = static_cast<int>(levels.size()) - 1; lv >= 0; --lv) {
+      const Level& K = levels[static_cast<std::size_t>(lv)];
+      std::size_t from = lv == static_cast<int>(levels.size()) - 1 ? K.idx : K.idx + 1;  // the statement itself, then the ones after it
+      for (std::size_t j = from; j < K.kids->size(); ++j) site.chain.push_back((*K.kids)[j]);
+    }
+    for (const auto& kv : reg_of) {
+      site.bail_slots.push_back(kv.first);
+      site.bail_regs.push_back(kv.second);
+    }
+    sites.push_back(site);
+    int stub = a.label();
+    stubs.push_back(stub);
+    int ok = a.label();
+    a.test_rdx_rdx();
+    a.jcc(CC_E, ok);
+    if (a.pushes() > 0) a.add_rsp(a.pushes());
+    a.mov_eax_imm(static_cast<std::uint32_t>(sites.size()));
+    a.jmp(stub);
+    a.bind(ok);
+    return want == WANT_DISCARD ? TY_INT : want;
+  }
+
   // The deopt sites. A zero divisor in RCX leaves the code: it drops the values pushed so far, and jumps to the stub with the number of
   // the site (the unit being generated) in EAX. The site is recorded here, so the interpreter can run that unit to raise the error.
   void zero_check() {
     int ok = a.label();
     if (units.empty()) {  // not reached: every operation is inside a unit (a statement, a condition or a for loop's expression)
       fail("internal: an operation outside a unit");
+      return;
+    }
+    if (unit_called.back()) {  // the deopt would run the statement again, and the call with it
+      fail("a division by a value that is not a constant after a call in the same statement");
       return;
     }
     Code::Site s = units.back();
@@ -732,17 +1013,17 @@ struct Gen {
 
   // Jumps to TARGET when the condition N has the truth value JUMP_IF (Lua's: nil and false are false, everything else true).
   bool branch(Node* n, bool jump_if, int target) {
-    units.push_back(unit(n, false));
+    push_unit(n, false);
     bool r = branch_(n, jump_if, target);
-    units.pop_back();
+    pop_unit();
     return r;
   }
 
   // A numeric expression that is a unit of its own (the start and the limit of a for loop): its value is in RAX, its type is returned.
   int num_unit(Node* n) {
-    units.push_back(unit(n, false));
+    push_unit(n, false);
     int t = expr(n);
-    units.pop_back();
+    pop_unit();
     return t;
   }
 
@@ -886,32 +1167,46 @@ struct Gen {
     tier_view(n, v);
     switch (v.kind) {
       case TierView::K_BLOCK:
-        for (Node* k : v.kids)
-          if (!stmt(k)) return false;
+        levels.push_back(Level{&v.kids, 0, 0});
+        for (std::size_t i = 0; i < v.kids.size(); ++i) {
+          levels.back().idx = i;
+          levels.back().calls = 0;
+          if (!stmt(v.kids[i])) {
+            levels.pop_back();
+            return false;
+          }
+        }
+        levels.pop_back();
         return true;
       case TierView::K_DECL:
       case TierView::K_ASSIGN: {  // a unit of its own: its stores come after all its operands (a deopt runs the statement again)
-        units.push_back(unit(n, true));
+        push_unit(n, true);
         bool r = v.kind == TierView::K_DECL ? decl(v) : assign(v);
-        units.pop_back();
+        pop_unit();
         return r;
+      }
+      case TierView::K_CALL: {  // a call whose result is not used: no kind to check
+        push_unit(n, true);
+        int t = call_expr(n, WANT_DISCARD);
+        pop_unit();
+        return t != TY_NONE;
       }
       case TierView::K_IF:
         return conditional(v);
       case TierView::K_WHILE:
-        return while_loop(v);
       case TierView::K_REPEAT:
-        return repeat_loop(v);
-      case TierView::K_FOR:
-        return for_loop(v);
+      case TierView::K_FOR: {
+        ++inner_loops;
+        bool r = v.kind == TierView::K_WHILE ? while_loop(v) : v.kind == TierView::K_REPEAT ? repeat_loop(v) : for_loop(v);
+        --inner_loops;
+        return r;
+      }
       case TierView::K_BREAK:
         if (breaks.empty()) return fail("a break outside a loop");
         a.jmp(breaks.back());
         return true;
       case TierView::K_RETURN:
         return fail("a return inside the loop");
-      case TierView::K_CALL:
-        return fail("a call as a statement");
       default:
         return fail("a statement outside the subset");
     }
@@ -919,9 +1214,9 @@ struct Gen {
 
   bool decl(const TierView& v) {
     if (v.captured) return fail("a local captured by a closure");
-    if (v.multi_last || v.kids.size() != v.slots.size()) return fail("a local declared without one value per name");
-    if (v.slots.size() == 1) {  // one local: its value goes straight to its register
-      int t = expr(v.kids[0]);
+    if (v.kids.size() != v.slots.size()) return fail("a local declared without one value per name");  // a last call is cut to one value
+    if (v.slots.size() == 1) {  // one local: its value goes straight to its register (a call's value is an integer, or the interpreter goes on)
+      int t = expr(v.kids[0], TY_INT);
       if (t == TY_NONE) return false;
       int r = declare_reg(v.slots[0], t);
       if (r < 0) return false;
@@ -931,7 +1226,7 @@ struct Gen {
     }
     std::vector<int> ts;
     for (Node* k : v.kids) {
-      int t = expr(k);
+      int t = expr(k, TY_INT);
       if (t == TY_NONE) return false;
       ts.push_back(t);
       a.push_rax();
@@ -957,26 +1252,28 @@ struct Gen {
     if (v.captured) return fail("an assignment to a captured local, an upvalue, a global or a field");
     for (int t : v.tkinds)
       if (t != TierView::T_LOCAL) return fail("an assignment to a captured local, an upvalue, a global or a field");
-    if (v.multi_last || v.kids.size() != v.slots.size()) return fail("an assignment of other than one value per target");
-    if (v.slots.size() == 1) {  // one target: its value goes straight to its word
-      int t = expr(v.kids[0]);
-      if (t == TY_NONE) return false;
-      int r = slot_reg(v.slots[0], true);
+    if (v.kids.size() != v.slots.size()) return fail("an assignment of other than one value per target");  // a last call is cut to one value
+    std::vector<int> rs;  // the word of each target (a call's value has the kind of its target)
+    for (int slot : v.slots) {
+      int r = slot_reg(slot, true);
       if (r < 0) return false;
-      return store_typed(r, t);
+      rs.push_back(r);
+    }
+    if (v.slots.size() == 1) {  // one target: its value goes straight to its word
+      int t = expr(v.kids[0], is_flt(rs[0]) ? TY_FLT : TY_INT);
+      if (t == TY_NONE) return false;
+      return store_typed(rs[0], t);
     }
     std::vector<int> ts;
-    for (Node* k : v.kids) {
-      int t = expr(k);
+    for (std::size_t i = 0; i < v.kids.size(); ++i) {
+      int t = expr(v.kids[i], is_flt(rs[i]) ? TY_FLT : TY_INT);
       if (t == TY_NONE) return false;
       ts.push_back(t);
       a.push_rax();
     }
     for (std::size_t i = v.slots.size(); i-- > 0;) {
       a.pop_rax();
-      int r = slot_reg(v.slots[i], true);
-      if (r < 0) return false;
-      if (!store_typed(r, ts[i])) return false;
+      if (!store_typed(rs[i], ts[i])) return false;
     }
     return true;
   }
@@ -1216,6 +1513,7 @@ bool top_level(Gen& g, Node* loop, int kind, Code& code) {
   tier_view(loop, v);
   g.collect(loop);
   g.a.prologue();
+  if (kind == TierLoopState::REPEAT && v.kind == TierView::K_REPEAT) code.until = v.cond;
   if (kind == TierLoopState::FOR_INT) {
     if (v.kind != TierView::K_FOR) return g.fail("a loop that is not a numeric for");
     if (v.captured) return g.fail("a loop variable captured by a closure");
@@ -1285,6 +1583,8 @@ bool top_level(Gen& g, Node* loop, int kind, Code& code) {
     for (int r : g.sites[k].bail_regs) g.a.spill(r);
     for (int r : g.in_regs)
       if (std::find(g.sites[k].bail_regs.begin(), g.sites[k].bail_regs.end(), r) == g.sites[k].bail_regs.end()) g.a.spill(r);
+    for (int r : code.state_regs)  // the state of the loop (a call's stub hands it to the interpreter, see finish_call)
+      if (r >= 0) g.a.spill(r);
     g.a.restore_ret();
   }
   return g.ok;
@@ -1338,6 +1638,7 @@ std::unique_ptr<Code> compile(Node* loop, int kind, const Frame& f, std::string&
     }
   }
   code->nregs = g.nregs;
+  code->ctx_reg = g.ctx_word;
   code->reg_float = g.flt;
   code->sites = g.sites;
   for (Code::Site& s : code->sites) {  // the live-ins are written back at every site, whether they were seen before it or not

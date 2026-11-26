@@ -1409,10 +1409,28 @@ struct CallBase : Node {
   Node* fn_;
   std::vector<Node*> args_;
   bool multi_last_;
+  CallReplay* replay_ = nullptr;  // set by the machine-code tier while it finishes the statement this call is in (nfcast_jit.cpp)
   CallBase(Node* fn, std::vector<Node*> args) : fn_(fn), args_(std::move(args)) {
     multi_last_ = !args_.empty() && args_.back()->is_multi();
     adopt(fn_);
     for (Node*& a : args_) adopt(a);
+  }
+  // The machine-code tier's call (jit_call_value): what run() does after the arguments, with the arguments given. It calls through
+  // call_value, the function run() calls for a script or native function, and does not dispatch: the node is not respecialized, so the
+  // node in the tree stays the one the tier was given.
+  Value call_args(Frame& f, const Value* args, int n) {
+    State& S = *f.S;
+    Value* ab = S.top;
+    check_stack(S, static_cast<std::size_t>(n) + 2);
+    Value fnv = fn_->eval(f);
+    ab[0] = fnv;
+    for (int k = 0; k < n; ++k) ab[1 + k] = args[k];
+    S.top = ab + 1 + n;
+    f.line = line;
+    Rets out;
+    call_value(S, fnv, ab + 1, n, out, fn_);
+    S.top = ab;
+    return out.first();
   }
   bool is_multi() const override { return true; }
   bool is_call() const override { return true; }
@@ -1428,6 +1446,10 @@ struct CallBase : Node {
     return C_NORMAL;
   }
   void run(Frame& f, Rets& out) {
+    if (replay_ && replay_->f == &f) {  // the machine-code tier finishes this statement with the value the call returned
+      out.push(replay_->v);
+      return;
+    }
     State& S = *f.S;
     Value* ab = S.top;
     check_stack(S, args_.size() + 2);
@@ -1966,14 +1988,18 @@ struct WhileNode : Node {
     TierLoopState ts;
     ts.kind = TierLoopState::WHILE;
     if (f.S->tier)
-      if (int r = tier_loop(f, this, tl_, ts, false)) return r == 2 ? C_RETURN : C_NORMAL;  // compiled code takes the loop over
+      if (int r = tier_loop(f, this, tl_, ts, false)) {  // compiled code takes the loop over (3: it goes on here)
+        if (r != 3) return r == 2 ? C_RETURN : C_NORMAL;
+      }
     while (cond_->eval(f).truthy()) {
       int c = body_->exec(f);
       if (c == C_BREAK) break;
       if (c == C_RETURN) return c;
       loop_edge(f);
       if (f.S->tier)
-        if (int r = tier_loop(f, this, tl_, ts, true)) return r == 2 ? C_RETURN : C_NORMAL;
+        if (int r = tier_loop(f, this, tl_, ts, true)) {
+          if (r != 3) return r == 2 ? C_RETURN : C_NORMAL;
+        }
     }
     return C_NORMAL;
   }
@@ -1994,7 +2020,9 @@ struct RepeatNode : Node {
     TierLoopState ts;
     ts.kind = TierLoopState::REPEAT;
     if (f.S->tier)
-      if (int r = tier_loop(f, this, tl_, ts, false)) return r == 2 ? C_RETURN : C_NORMAL;
+      if (int r = tier_loop(f, this, tl_, ts, false)) {
+        if (r != 3) return r == 2 ? C_RETURN : C_NORMAL;
+      }
     for (;;) {
       int c = body_->exec(f);
       if (c == C_BREAK) break;
@@ -2002,7 +2030,9 @@ struct RepeatNode : Node {
       if (cond_->eval(f).truthy()) break;
       loop_edge(f);
       if (f.S->tier)
-        if (int r = tier_loop(f, this, tl_, ts, true)) return r == 2 ? C_RETURN : C_NORMAL;
+        if (int r = tier_loop(f, this, tl_, ts, true)) {
+          if (r != 3) return r == 2 ? C_RETURN : C_NORMAL;
+        }
     }
     return C_NORMAL;
   }
@@ -2084,7 +2114,11 @@ struct NumForNode : Node {
       if (S.tier) {
         ts.i = i;
         ts.count = count;
-        if (int r = tier_loop(f, this, tl_, ts, false)) return r == 2 ? C_RETURN : C_NORMAL;  // compiled code takes the loop over
+        if (int r = tier_loop(f, this, tl_, ts, false)) {  // compiled code takes the loop over (3: it goes on here, from ts)
+          if (r != 3) return r == 2 ? C_RETURN : C_NORMAL;
+          i = ts.i;
+          count = ts.count;
+        }
       }
       for (;;) {
         declare(f, var_, Value::integer(i));
@@ -2097,7 +2131,11 @@ struct NumForNode : Node {
         if (S.tier) {
           ts.i = i;
           ts.count = count;
-          if (int r = tier_loop(f, this, tl_, ts, true)) return r == 2 ? C_RETURN : C_NORMAL;
+          if (int r = tier_loop(f, this, tl_, ts, true)) {
+            if (r != 3) return r == 2 ? C_RETURN : C_NORMAL;
+            i = ts.i;
+            count = ts.count;
+          }
         }
       }
       return C_NORMAL;
@@ -2119,18 +2157,27 @@ struct NumForNode : Node {
     // for numbers, or after an iteration (where the condition is the plain one in both).
     if (S.tier && idx == idx && limit == limit) {
       ts.d = idx;
-      if (int r = tier_loop(f, this, tl_, ts, false)) return r == 2 ? C_RETURN : C_NORMAL;  // compiled code takes the loop over
+      if (int r = tier_loop(f, this, tl_, ts, false)) {  // compiled code takes the loop over (3: it goes on here, from ts)
+        if (r != 3) return r == 2 ? C_RETURN : C_NORMAL;
+        idx = ts.d;
+      }
     }
-    // Lua's forprep skips the loop only when the start is beyond the limit; a NaN is beyond nothing, so the body runs once
-    for (bool first = true; first ? !(0 < step ? limit < idx : idx < limit) : (0 < step ? idx <= limit : limit <= idx); idx += step, first = false) {
+    // Lua's forprep skips the loop only when the start is beyond the limit; a NaN is beyond nothing, so the body runs once. The test
+    // of the first iteration is the forprep one, of the others the one after an iteration.
+    for (bool first = true;; first = false) {
+      if (!(first ? !(0 < step ? limit < idx : idx < limit) : (0 < step ? idx <= limit : limit <= idx))) break;
       declare(f, var_, Value::number(idx));
       int c = body_->exec(f);
       if (c == C_BREAK) break;
       if (c == C_RETURN) return c;
+      idx += step;
       loop_edge(f);
       if (S.tier) {
-        ts.d = idx + step;  // where the loop goes on after this iteration
-        if (int r = tier_loop(f, this, tl_, ts, true)) return r == 2 ? C_RETURN : C_NORMAL;
+        ts.d = idx;  // where the loop goes on after this iteration
+        if (int r = tier_loop(f, this, tl_, ts, true)) {
+          if (r != 3) return r == 2 ? C_RETURN : C_NORMAL;
+          idx = ts.d;
+        }
       }
     }
     return C_NORMAL;
@@ -2465,5 +2512,16 @@ Node* n_break(Proto& P, int line) { return mk<BreakNode>(P, line); }
 // ================================================================================================================
 // Textually included: the node classes above live in an anonymous namespace.
 #include "nfcast_inline.inc"
+
+// ---- the machine-code tier's calls (nfcast_jit.cpp, docs/notes/ast.md "The calls") ----
+Value jit_call_value(Frame& f, Node* call, const Value* args, int n) {
+  CallBase* c = dynamic_cast<CallBase*>(call);
+  if (!c) f.S->rt_error("internal: the machine code calls a node that is not a call");
+  return c->call_args(f, args, n);
+}
+Node* jit_current(Node* n) { return n->slot ? *n->slot : n; }
+void jit_set_replay(Node* call, CallReplay* r) {
+  if (CallBase* c = dynamic_cast<CallBase*>(call)) c->replay_ = r;
+}
 
 }  // namespace nfcast

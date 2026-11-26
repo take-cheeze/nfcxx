@@ -554,7 +554,9 @@ struct InlineCall : CallBase {
     f.line = line;
     return n;
   }
+  // The machine-code tier's replay (CallBase::replay_) takes the place of the call, as in CallBase::run: no inlined body runs.
   Value eval(Frame& f) override {
+    if (replay_ && replay_->f == &f) return replay_->v;
     Value* ab;
     int n = prepare(f, ab);
     Value r;
@@ -569,12 +571,17 @@ struct InlineCall : CallBase {
     return r;
   }
   void evalMulti(Frame& f, Rets& out) override {
+    if (replay_ && replay_->f == &f) {
+      out.push(replay_->v);
+      return;
+    }
     Value* ab;
     int n = prepare(f, ab);
     dispatch(f, ab[0], ab + 1, n, out);
     f.S->top = ab;
   }
   int exec(Frame& f) override {
+    if (replay_ && replay_->f == &f) return C_NORMAL;
     eval(f);
     return C_NORMAL;
   }

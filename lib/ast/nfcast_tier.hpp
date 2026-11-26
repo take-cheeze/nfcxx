@@ -82,9 +82,12 @@ struct TierLoopState {
 };
 // 1: native code ran the rest of the loop (the locals it assigns are written back) and the interpreter must go on after the loop.
 // 2: it ran into a `return` of the function the loop is in, and the returned value is in the frame's results (C_RETURN).
+// 3: the machine code finished an iteration in the interpreter's place (a call whose result was not the kind it expected, see
+//    nfcast_jit.hpp) and the loop goes on in the interpreter from ST, which it sets: the state of the next iteration (a for loop
+//    takes its loop variable and count from it, a while or repeat loop goes on at its test or body as it is).
 // 0: the loop goes on in the interpreter, nothing was changed. EDGE: an iteration has just ended (the call counts it).
 // HOOK is the loop node's pointer to what the tier knows about it.
-int tier_loop(Frame& f, Node* loop, TierLoop*& hook, const TierLoopState& st, bool edge);
+int tier_loop(Frame& f, Node* loop, TierLoop*& hook, TierLoopState& st, bool edge);
 
 void tier_free(TierProto* tp);                                             // the Proto that owned TP is being destroyed
 void tier_init_from_env(State& S);                                         // State::State
