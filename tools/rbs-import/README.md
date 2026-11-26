@@ -2,7 +2,9 @@
 
 Imports RBS signatures for the gems a `Gemfile.lock` names.
 
-    ruby tools/rbs-import/rbs_import.rb --lock Gemfile.lock --out bc2cpp/sig --collection DIR [--only NAME,...]
+    ruby tools/rbs-import/rbs_import.rb --lock Gemfile.lock --out bc2cpp/sig/imported --collection DIR [--only NAME,...]
+
+`bc2cpp/sig/imported/` is git-ignored (see .gitignore): the output is regenerated from the lock file, not committed.
 
 For each locked gem, the signatures come from the first source that has them:
 
@@ -12,5 +14,5 @@ For each locked gem, the signatures come from the first source that has them:
 
 `_test` trees are skipped. Gems with no signatures in either source are reported as `none`, not as errors.
 
-Check: importing the six Rails 8.1 gems from `ruby/gem_rbs_collection` (commit 2ae0901) reproduces
-`bc2cpp/sig/rails` exactly.
+Check: importing the six Rails 8.1 gems from `ruby/gem_rbs_collection` (commit 2ae0901) reproduces the
+Rails 8.1 signatures exactly (the same files as the hand copy in PR #1752).

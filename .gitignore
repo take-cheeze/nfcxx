@@ -18,5 +18,5 @@ tools/*/.ninja_deps
 # git worktrees created for subagents (not repository content)
 /.claude/worktrees/
 
-# RBS imported from Gemfile.lock by tools/rbs-import (regenerated, not committed)
-/bc2cpp/sig/rails/
+# RBS imported from Gemfile.lock by tools/rbs-import for any gem (regenerated, not committed)
+/bc2cpp/sig/imported/
