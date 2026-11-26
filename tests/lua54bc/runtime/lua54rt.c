@@ -99,11 +99,14 @@ typedef struct PCall {
 } PCall;
 static PCall *pcall_top = NULL;
 
+static void close_to(LV *level, const LV *err);
+
 static void raise_value(LV err) {
   if (pcall_top != NULL) {
     pcall_top->err = err;
     longjmp(pcall_top->jb, 1);
   }
+  close_to(NULL, &err);   /* lua.c's protected call closes the to-be-closed variables before it reports the error */
   if (err.tag == TAG_STR) fprintf(stderr, "lua: %s\n", ((LString *)err.v.p)->bytes);
   else fprintf(stderr, "lua: (error object is a %s value)\n", type_name(err.tag));
   exit(1);
@@ -550,13 +553,55 @@ void lua54rt_capture(LV *dst, int k, int instack, int idx, void *encl, LV *base)
 }
 
 /* Closes the open upvalues at or above level: their values move into the cells (luaF_close). */
-void lua54rt_close(LV *level) {
+/* To-be-closed variables (lfunc.c): the slots that TBC registered (and the fourth value of a generic for), in the order
+ * they were registered. A registered slot at or above level is closed by close_to, last first. */
+typedef struct Tbc {
+  LV *slot;
+  const char *name;
+} Tbc;
+static Tbc *tbc_list = NULL;
+static int tbc_n = 0, tbc_cap = 0;
+
+/* Closes the upvalues and the to-be-closed variables at or above level: each variable's __close is called with its value
+ * and err (nil when the block ends normally). An entry is removed before its __close runs, so an error in it is not
+ * closed again. */
+static void close_to(LV *level, const LV *err) {
   while (open_upvals != NULL && open_upvals->v >= level) {
     UpVal *uv = open_upvals;
     uv->closed = *uv->v;
     uv->v = &uv->closed;
     open_upvals = uv->open_next;
   }
+  while (tbc_n > 0 && tbc_list[tbc_n - 1].slot >= level) {
+    LV v = *tbc_list[--tbc_n].slot, h;
+    if (!get_mt(&v, "__close", &h)) continue;
+    LV frame[1024], ret[256];
+    frame[0] = v;
+    frame[1] = err != NULL ? *err : (LV){0};
+    lua54rt_call(&h, 2, frame, ret, 0, 0);
+  }
+}
+
+void lua54rt_close(LV *level) { close_to(level, NULL); }
+
+/* TBC A: the variable in slot is to be closed. nil and false are not registered; any other value needs a __close
+ * metamethod (lfunc.c's checkclosemth). */
+void lua54rt_tbc(LV *slot, const char *name) {
+  if (slot->tag == TAG_NIL || slot->tag == TAG_FALSE) return;
+  LV h;
+  if (!get_mt(slot, "__close", &h)) {
+    char msg[160];
+    snprintf(msg, sizeof msg, "variable '%s' got a non-closable value", name);
+    rt_fail(msg, -1);
+  }
+  if (tbc_n == tbc_cap) {
+    tbc_cap = tbc_cap == 0 ? 16 : tbc_cap * 2;
+    tbc_list = (Tbc *)realloc(tbc_list, sizeof(Tbc) * (size_t)tbc_cap);
+    if (tbc_list == NULL) die("out of memory");
+  }
+  tbc_list[tbc_n].slot = slot;
+  tbc_list[tbc_n].name = name;
+  tbc_n++;
 }
 
 void lua54rt_getupval(LV *dst, void *cl, int idx) { *dst = *((LClosure *)cl)->upvals[idx]->v; }
@@ -1466,7 +1511,7 @@ static int protected_call(LV *out, LV *args, int nargs, int handler_arg) {
   site = saved_site;
   call_depth = saved_depth;
   pcall_top = p.prev;
-  lua54rt_close(p.base);   /* the upvalues of the frames the error left */
+  close_to(p.base, &p.err);   /* the upvalues and to-be-closed variables of the frames the error left */
   out[0].tag = TAG_FALSE;
   if (!handler_arg) {
     out[1] = p.err;
