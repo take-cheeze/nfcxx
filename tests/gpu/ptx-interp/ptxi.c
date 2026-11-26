@@ -4,7 +4,7 @@
  *                             [--random N [--seed S]] [--explore [--max-schedules M]] [--max-steps S]
  *                             [--timing] [--sms N] [--resident N | --warps-per-sm N] [--issue N] [--bw BYTES]
  *                             [--lat CLASS=CYCLES]...
- *                             [--l1 BYTES] [--gpu-bw BYTES] [--blocks-per-sm N]
+ *                             [--l1 BYTES] [--l2 BYTES] [--gpu-bw BYTES] [--blocks-per-sm N]
  *   ARG is one kernel parameter, in order:
  *     ptr:COUNT[:iota=START]   a global buffer of COUNT int32 (zeroed, or START+i in element i)
  *     s32:VALUE                a 32-bit scalar
@@ -31,24 +31,26 @@
  * that has exited no longer counts. A schedule in which every live thread waits and none can be released is a
  * deadlock (exit 4).
  *
- * Timing (--timing, --sms, --issue, --bw, --gpu-bw, --resident, --warps-per-sm, --blocks-per-sm, --lat, --l1). A cycle model, not a clock-by-clock simulation. Each
- * instruction has the latency of its class: alu, branch, local, global, atomic, barrier, l1. The defaults are 2, 4, 40,
- * 320, 31, 24 and 30 cycles (alu, branch, local, global, atomic, barrier and l1; measured on an RTX 5050, sm_120, except
- * branch and l1, which are not measured), changed with --lat CLASS=CYCLES. Param loads and stores cost alu; a generic ld/st costs
- * global, except a global load that hits the L1 (below), which costs l1.
+ * Timing (--timing, --sms, --issue, --bw, --gpu-bw, --resident, --warps-per-sm, --blocks-per-sm, --lat, --l1, --l2).
+ * A cycle model, not a clock-by-clock simulation. Each instruction has the latency of its class: alu, branch, local,
+ * global, atomic, barrier, l1, l2. The defaults are 2, 4, 40, 320, 31, 24, 30 and 120 cycles (alu, branch, local, global,
+ * atomic, barrier, l1 and l2; measured on an RTX 5050, sm_120, except branch, l1 and l2, which are not measured),
+ * changed with --lat CLASS=CYCLES. Param loads and stores cost alu; a generic ld/st costs global, except a global load
+ * that hits the L1 or the L2 (below), which costs l1 or l2.
  * A warp is 32 consecutive threads of a block, and it issues each instruction once for all its lanes. With --timing,
- * each lane counts, per instruction, its steps through it (s), its steps with the predicate true (a), and its true steps
- * that missed the L1 (m; a true step of any other global access is a miss). The warp issues the instruction max(s) times
- * over its lanes. max(a) of those issues pay the class latency and the rest (issues where only predicated-off lanes ran
- * it) pay alu. For a global load, the max(a) issues pay max(m) at the global latency and the rest at l1: a warp issue
- * waits for its slowest lane. So both sides of a divergent branch are paid, each once per issue, and a warp whose lanes
- * take one path pays what its busiest lane pays.
+ * each lane counts, per instruction, its steps through it (s), its steps with the predicate true (a), its true global
+ * loads that missed the L1 (p), and those that also missed the L2 (q). Other accesses are not counted, since their cost
+ * does not depend on a cache. The warp issues the instruction max(s) times over its lanes. max(a) of those issues pay
+ * the class latency and the rest (issues where only predicated-off lanes ran it) pay alu. For a global load, the max(a)
+ * issues pay max(q) at the global latency, max(p) - max(q) at the l2 latency and the rest at l1: a warp issue waits for
+ * its slowest lane, so an issue is charged an L2 hit only if no lane of it went to DRAM. So both sides of a divergent
+ * branch are paid, each once per issue, and a warp whose lanes take one path pays what its busiest lane pays.
  * A bar.sync closes the warp's epoch (the stretch between two generations). A generation completes at the latest
  * arrival among the warps with live threads, and each of those warps leaves at that clock; a warp whose threads have
  * all exited keeps its own time. A block takes the largest of three bounds: the largest warp time, since its warps run
  * in parallel; its issue slots, the sum over its warps of max(s), at --issue warp instructions per cycle (default 4);
  * and its global bytes at --bw bytes per cycle (default 16): each warp issue counts the 32-byte sectors its active
- * lanes touch (a sector once per issue), and a load that hits the L1 moves no bytes.
+ * lanes touch (a sector once per issue), and a load that hits the L1 or the L2 moves no bytes.
  * Residency. The blocks of an SM run in waves of R blocks, where R = min(W, --blocks-per-sm), W being the warp-slot
  * residency N / (warps per block), at least 1, when --warps-per-sm N is given, and --resident N (default 1) otherwise.
  * So --warps-per-sm replaces --resident when both are given, and --blocks-per-sm (default 0, no cap) can only lower R:
@@ -58,8 +60,8 @@
  * sum. The per-SM bytes bound stays: --bw is the load/store path of one SM. The kernel takes the slowest SM (--sms,
  * default 1), and with --gpu-bw BYTES (default 0, off) the whole GPU shares one memory system, so the kernel takes
  * max(slowest SM, ceil(total bytes of all blocks / BYTES)). The two bounds are combined by max, not sum, since both are
- * lower bounds on the same bytes; the total does not depend on --sms. Caches beyond the L1 are not modelled. Memory for the counts (only with --timing): three 4-byte
- * counters per thread per instruction, so nthreads x ninst x 12 bytes (about 400 MB for 4096 threads and 8192
+ * lower bounds on the same bytes; the total does not depend on --sms. Memory for the counts (only with --timing): four
+ * 4-byte counters per thread per instruction, so nthreads x ninst x 16 bytes (about 540 MB for 4096 threads and 8192
  * instructions); the per-warp maxima are the same size per warp.
  * A kernel whose path depends on what other threads did (a spin on shared memory, say) can take different paths in
  * different schedules. Then --explore and --random report the range of estimates over the schedules. The estimate goes
@@ -68,15 +70,29 @@
  * L1 (--l1 BYTES, a multiple of 128; default 0 = no cache). Each SM has a direct-mapped cache of 128-byte lines,
  * BYTES/128 of them, empty at the start of every schedule. A line is identified by the absolute arena address of its
  * first byte, so where a buffer starts decides which elements share a line (the first buffer starts at a line
- * boundary). A global load (or generic load, which is charged as global) whose line is present costs l1; one whose
- * line is absent costs global and fills the line, evicting whatever line had the same index. Stores and atomics write
- * through without allocating: they cost what they did before, and neither hit nor fill. The SM of a thread is its
- * block index mod --sms, and the blocks of one SM share its cache, so a later block hits on lines an earlier block
- * loaded. Hit or miss is decided when the interpreter executes the load, so it follows the order the schedule runs
+ * boundary). A global load (or generic load, which is charged as global) whose line is present costs l1; one whose line
+ * is absent fills the line, evicting whatever line had the same index, and then goes to the L2 (below), which decides
+ * between l2 and global. Stores and atomics write through without allocating: they cost what they did before, and
+ * neither hit nor fill. The SM of a thread is its block index mod --sms, and the blocks of one SM share its cache, so
+ * a later block hits on lines an earlier block loaded. Hit or miss is decided when the interpreter executes the load, so it follows the order the schedule runs
  * the loads in, not the clocks. Two limits follow: a fill is immediate, so a second load of a line still in flight
  * counts as a hit (no miss merging), and the estimate of a kernel whose hits depend on the order of its loads can
  * differ between schedules, which --explore and --random report as a range. When each line is loaded by one thread,
  * or by threads that always load in the same order, the hits are the same in every schedule and so is the estimate.
+ *
+ * L2 (--l2 BYTES, a multiple of 128; default 0 = no cache). One cache for the whole device, shared by every SM: a
+ * direct-mapped cache of 128-byte lines, BYTES/128 of them, indexed and tagged by the line address as the L1 is, and
+ * empty at the start of every schedule. It is consulted only by a global load that missed its SM's L1, and a load that
+ * hits it costs l2 (--lat l2=CYCLES, default 120) and moves no DRAM bytes. A load that misses it costs global, moves its
+ * sectors and fills the L2 line; the L1 line was filled already, on the L1 miss. So an L1 hit does not touch the L2, and
+ * an L2 line evicted by another line is not restored into an L1 that still holds it: no inclusion is enforced. Stores
+ * and atomics write through without allocating, as in the L1: they cost global and move bytes as before, and neither
+ * look up nor fill the L2. Hit or miss is decided as the load executes, as for the L1, so a line loaded by one SM is an
+ * L2 hit for every other SM, whichever block the schedule runs first. The same two limits as the L1 apply: a fill is
+ * immediate (no miss merging), and a kernel whose hits depend on the order of its loads gives a range over schedules.
+ * Bytes are counted per lane: a lane that hits a line another lane of the same warp issue just filled adds no sector,
+ * so a coalesced cold load counts one sector, not four (the L1 has the same undercount). The critical path is not
+ * affected, but the bandwidth bound is low for such loads when a cache is on.
  *
  *
  * Memory is one flat arena: the buffers from ARENA_BASE up, then one local frame per thread. An access of n bytes
@@ -1002,9 +1018,9 @@ static Outcome outcomes[MAXOUT];
 static int noutcomes;
 
 /* The timing model (the header comment says what it is). */
-enum { LAT_ALU, LAT_BRANCH, LAT_LOCAL, LAT_GLOBAL, LAT_ATOMIC, LAT_BARRIER, LAT_L1, LAT_N };
-static const char *lat_names[LAT_N] = {"alu", "branch", "local", "global", "atomic", "barrier", "l1"};
-static uint64_t lat[LAT_N] = {2, 4, 40, 320, 31, 24, 30};
+enum { LAT_ALU, LAT_BRANCH, LAT_LOCAL, LAT_GLOBAL, LAT_ATOMIC, LAT_BARRIER, LAT_L1, LAT_L2, LAT_N };
+static const char *lat_names[LAT_N] = {"alu", "branch", "local", "global", "atomic", "barrier", "l1", "l2"};
+static uint64_t lat[LAT_N] = {2, 4, 40, 320, 31, 24, 30, 120};
 static int sms = 1;
 static uint64_t issue_rate = 4; /* warp instructions per cycle per SM */
 static int resident = 1;        /* blocks an SM runs at a time (--resident) */
@@ -1021,11 +1037,15 @@ static int timing_blocks; /* of the last schedule */
 #define L1_MAX_BYTES (1ULL << 30)
 static uint64_t l1_bytes, l1_lines;
 static uint64_t *l1_tag; /* sms * l1_lines entries: the line each holds, or UINT64_MAX when empty */
+/* The L2 (the header comment says how it works). l2_lines is for the whole device; 0 means no cache. */
+static uint64_t l2_bytes, l2_lines;
+static uint64_t *l2_tag; /* l2_lines entries: the line each holds, or UINT64_MAX when empty */
 /* Warp costs (--timing only; see the header). Per thread and instruction: [0] steps, [1] steps with the predicate
- * true, [2] those that missed the L1. Per warp and instruction: the maxima of those over the warp's lanes, for the
- * current epoch. Per warp: the cost
+ * true, [2] those that missed the L1, [3] those that also missed the L2. Per warp and instruction: the maxima of those
+ * over the warp's lanes, for the current epoch. Per warp: the cost
  * of the epoch so far is warp_act (the class latencies of the max-active issues) plus warp_off issues at the alu
  * latency, and warp_clk is its clock when the epoch began. */
+#define NCNT 4 /* counters per thread (lane_cnt) or warp (warp_max) and instruction */
 static uint32_t *lane_cnt;
 static uint32_t *warp_max;
 static uint64_t *warp_act, *warp_off, *warp_clk, *warp_slots; /* slots: issue slots, summed over the kernel */
@@ -1091,19 +1111,33 @@ static int l1_load(const Thread *t, uint64_t addr) {
   return 0;
 }
 
-/* The cost of the active issues of an instruction whose maxima over the warp's lanes are act and miss. A global load
- * waits for its slowest lane: a miss is paid at the global latency, and the other issues at l1 (with no cache every
- * load misses, so miss == act). Every other instruction pays its class latency. */
-static uint64_t warp_cost(const Inst *in, uint32_t act, uint32_t miss) {
+/* A global load that missed its L1: 1 if the device-wide L2 holds its line. A miss fills the line. Returns 0 with no L2,
+ * so the caller charges global. */
+static int l2_load(uint64_t addr) {
+  if (!l2_lines) return 0;
+  uint64_t line = addr / LINE_BYTES;
+  uint64_t *slot = &l2_tag[line % l2_lines];
+  if (*slot == line) return 1;
+  *slot = line;
+  return 0;
+}
+
+/* The cost of the active issues of an instruction whose maxima over the warp's lanes are act (active steps), l1miss
+ * (steps that missed the L1) and gmiss (those that also missed the L2). A global load waits for its slowest lane: an
+ * issue pays global if some lane went to DRAM (gmiss of them), l2 if some lane hit the L2 (the rest of l1miss), and l1
+ * otherwise. With no L2 every L1 miss is a DRAM access, so gmiss == l1miss and the l2 term is 0. Every other
+ * instruction pays its class latency. */
+static uint64_t warp_cost(const Inst *in, uint32_t act, uint32_t l1miss, uint32_t gmiss) {
   if (in->op == OP_LD && (in->space == SPACE_GLOBAL || in->space == SPACE_NONE))
-    return (uint64_t)miss * lat[LAT_GLOBAL] + (uint64_t)(act - miss) * lat[LAT_L1];
+    return (uint64_t)gmiss * lat[LAT_GLOBAL] + (uint64_t)(l1miss - gmiss) * lat[LAT_L2] +
+           (uint64_t)(act - l1miss) * lat[LAT_L1];
   return (uint64_t)act * lat[lat_class(in)];
 }
 
 /* Global memory traffic (--timing only). A warp issue of a global access moves one 32-byte sector for each sector its
  * active lanes touch, counted once per issue: the key is the warp, its epoch, the instruction, the index of the issue
  * within the epoch (the j-th active step of each lane is the warp's j-th issue of that instruction, as in warp_max),
- * and the sector. An L1 hit moves nothing. */
+ * and the sector. An L1 or L2 hit moves nothing. */
 #define SECTOR_BYTES 32
 typedef struct {
   uint64_t w, ep, sector;
@@ -1155,19 +1189,20 @@ static int sect_insert(SectorKey k) {
   }
 }
 
-/* One issue of instruction in by thread t: a step through it, with its predicate true (active) or false. miss says an
- * active step missed the L1 (only global loads can). The warp's maxima are kept as the lanes step: the warp issues the
- * instruction as often as its busiest lane steps through it, and the active issues of those pay warp_cost. Each unit of
- * (max steps - max active) is an alu issue, so warp_off counts it: a step that raises only the step maximum adds one,
- * one that raises only the active maximum removes one, and a step that raises both (or neither) changes nothing. Each
- * new max step is also one issue slot of the warp. */
-static void warp_issue(const Thread *t, const Inst *in, int active, int miss, int moves, uint64_t addr) {
+/* One issue of instruction in by thread t: a step through it, with its predicate true (active) or false. l1miss says an
+ * active step missed the L1, and gmiss that it also missed the L2 (only global loads can). moves says the step moves
+ * bytes. The warp's maxima are kept as the lanes step: the warp issues the instruction as often as its busiest lane
+ * steps through it, and the active issues of those pay warp_cost. Each unit of (max steps - max active) is an alu
+ * issue, so warp_off counts it: a step that raises only the step maximum adds one, one that raises only the active
+ * maximum removes one, and a step that raises both (or neither) changes nothing. Each new max step is also one issue
+ * slot of the warp. */
+static void warp_issue(const Thread *t, const Inst *in, int active, int l1miss, int gmiss, int moves, uint64_t addr) {
   int g = (int)(t - threads);
   int pc = (int)(in - insts);
   int w = warp_index(t->block, (g - t->block * tpb) / 32);
-  uint32_t *c = &lane_cnt[((size_t)g * ninst + pc) * 3];
-  uint32_t *m = &warp_max[((size_t)w * ninst + pc) * 3];
-  uint64_t before = warp_cost(in, m[1], m[2]);
+  uint32_t *c = &lane_cnt[((size_t)g * ninst + pc) * NCNT];
+  uint32_t *m = &warp_max[((size_t)w * ninst + pc) * NCNT];
+  uint64_t before = warp_cost(in, m[1], m[2], m[3]);
   c[0]++;
   int dms = c[0] > m[0];
   if (dms) {
@@ -1182,18 +1217,23 @@ static void warp_issue(const Thread *t, const Inst *in, int active, int miss, in
       m[1]++;
       dma = 1;
     }
-    if (miss) {
+    if (l1miss) {
       c[2]++;
       if (c[2] > m[2]) m[2]++;
+    }
+    if (gmiss) {
+      c[3]++;
+      if (c[3] > m[3]) m[3]++;
     }
     if (moves) {
       SectorKey key = {(uint64_t)w, (warp_epoch[w] << 45) | ((uint64_t)pc << 32) | j, addr / SECTOR_BYTES};
       if (sect_insert(key)) warp_bytes[w] += SECTOR_BYTES;
     }
   }
-  /* The warp's cost is the sum of warp_cost over its instructions, which only grows as the maxima do, so the
-   * unsigned difference is exact. */
-  warp_act[w] += warp_cost(in, m[1], m[2]) - before;
+  /* The warp's cost is the sum of warp_cost over its instructions. Each warp_cost is an exact nonnegative total (the
+   * maxima satisfy gmiss <= l1miss <= act), so the unsigned difference is exact, even when raising gmiss lowers the cost
+   * (an L2 slower than DRAM). */
+  warp_act[w] += warp_cost(in, m[1], m[2], m[3]) - before;
   if (dms && !dma) warp_off[w]++;
   if (dma && !dms) warp_off[w]--;
 }
@@ -1210,9 +1250,9 @@ static void timing_epoch_end(int block) {
     warp_act[w] = 0;
     warp_off[w] = 0;
     warp_epoch[w]++;
-    memset(&warp_max[(size_t)w * ninst * 3], 0, sizeof *warp_max * ninst * 3);
+    memset(&warp_max[(size_t)w * ninst * NCNT], 0, sizeof *warp_max * ninst * NCNT);
     for (int l = k * 32; l < (k + 1) * 32 && l < tpb; l++)
-      memset(&lane_cnt[((size_t)(block * tpb + l)) * ninst * 3], 0, sizeof *lane_cnt * ninst * 3);
+      memset(&lane_cnt[((size_t)(block * tpb + l)) * ninst * NCNT], 0, sizeof *lane_cnt * ninst * NCNT);
   }
 }
 
@@ -1440,15 +1480,15 @@ static void step(Thread *t) {
     if (in->pred_neg) v = !v;
     if (!v) {
       /* A predicated-off instruction takes an issue slot but no memory latency. */
-      if (timing_print) warp_issue(t, in, 0, 0, 0, 0);
+      if (timing_print) warp_issue(t, in, 0, 0, 0, 0, 0);
       t->pc++;
       return;
     }
   }
   /* The address of a global access: a load's and an atomic's is operand 1, a store's and a reduction's operand 0. A
-   * global load is charged l1 if its line is cached, decided here as the load executes. The address is an absolute
-   * arena address, as in the switch. */
-  int cls = lat_class(in), miss = 0, memref = 0;
+   * global load is charged l1 if its line is cached in the L1, else l2 if it is in the L2, else global; decided here as
+   * the load executes. The address is an absolute arena address, as in the switch. */
+  int cls = lat_class(in), l1miss = 0, gmiss = 0, memref = 0;
   uint64_t addr = 0;
   if (in->op == OP_LD || in->op == OP_ST || in->op == OP_ATOM || in->op == OP_RED) {
     int mi = (in->op == OP_LD || in->op == OP_ATOM) ? 1 : 0;
@@ -1458,12 +1498,17 @@ static void step(Thread *t) {
     }
   }
   if (cls == LAT_GLOBAL && in->op == OP_LD) {
-    if (l1_load(t, addr))
+    if (l1_load(t, addr)) {
       cls = LAT_L1;
-    else
-      miss = 1;
+    } else {
+      l1miss = 1;
+      if (l2_load(addr))
+        cls = LAT_L2;
+      else
+        gmiss = 1;
+    }
   }
-  if (timing_print) warp_issue(t, in, 1, miss, memref && cls != LAT_L1, addr);
+  if (timing_print) warp_issue(t, in, 1, l1miss, gmiss, memref && cls != LAT_L1 && cls != LAT_L2, addr);
   uint64_t *r = t->r;
   int next = t->pc + 1;
   uint64_t a = 0, b = 0, c = 0;
@@ -1667,8 +1712,8 @@ static void setup_threads(const uint64_t grid[3], const uint64_t block[3], uint6
   wpb = (tpb + 31) / 32;
   if (timing_print) {
     size_t nw = (size_t)nblocks * (size_t)wpb;
-    lane_cnt = calloc((size_t)nthreads * ninst * 3, sizeof *lane_cnt);
-    warp_max = calloc(nw * ninst * 3, sizeof *warp_max);
+    lane_cnt = calloc((size_t)nthreads * ninst * NCNT, sizeof *lane_cnt);
+    warp_max = calloc(nw * ninst * NCNT, sizeof *warp_max);
     warp_act = calloc(nw, sizeof *warp_act);
     warp_off = calloc(nw, sizeof *warp_off);
     warp_clk = calloc(nw, sizeof *warp_clk);
@@ -1728,8 +1773,8 @@ static void reset_threads(void) {
   }
   if (timing_print) {
     size_t nw = (size_t)nblocks * (size_t)wpb;
-    memset(lane_cnt, 0, (size_t)nthreads * ninst * 3 * sizeof *lane_cnt);
-    memset(warp_max, 0, nw * ninst * 3 * sizeof *warp_max);
+    memset(lane_cnt, 0, (size_t)nthreads * ninst * NCNT * sizeof *lane_cnt);
+    memset(warp_max, 0, nw * ninst * NCNT * sizeof *warp_max);
     memset(warp_act, 0, nw * sizeof *warp_act);
     memset(warp_off, 0, nw * sizeof *warp_off);
     memset(warp_clk, 0, nw * sizeof *warp_clk);
@@ -1741,6 +1786,7 @@ static void reset_threads(void) {
   memset(arrived, 0, (size_t)nblocks * BARRIERS * sizeof *arrived);
   for (int b = 0; b < nblocks; b++) live[b] = tpb;
   if (l1_lines) memset(l1_tag, 0xff, (size_t)sms * l1_lines * sizeof *l1_tag); /* every entry UINT64_MAX: empty */
+  if (l2_lines) memset(l2_tag, 0xff, (size_t)l2_lines * sizeof *l2_tag);
   steps = 0;
 }
 
@@ -1852,9 +1898,9 @@ static void usage(void) {
           "           [--random N [--seed S]] [--explore [--max-schedules M]] [--max-steps S]\n"
           "           [--timing] [--sms N] [--resident N | --warps-per-sm N] [--issue N] [--bw BYTES]\n"
           "           [--lat CLASS=CYCLES]...\n"
-          "           [--l1 BYTES] [--gpu-bw BYTES] [--blocks-per-sm N]\n"
+          "           [--l1 BYTES] [--l2 BYTES] [--gpu-bw BYTES] [--blocks-per-sm N]\n"
           "  ARG: ptr:COUNT[:iota=START] | s32:VALUE | bytes:HEX\n"
-          "  CLASS: alu, branch, local, global, atomic, barrier, l1 (defaults 2 4 40 320 31 24 30)\n");
+          "  CLASS: alu, branch, local, global, atomic, barrier, l1, l2 (defaults 2 4 40 320 31 24 30 120)\n");
   exit(EXIT_BAD);
 }
 
@@ -1931,6 +1977,11 @@ int main(int argc, char **argv) {
       char *end;
       l1_bytes = strtoull(argv[++i], &end, 10);
       if (*end || argv[i][0] < '0' || argv[i][0] > '9' || l1_bytes % LINE_BYTES || l1_bytes > L1_MAX_BYTES) usage();
+    } else if (!strcmp(argv[i], "--l2")) {
+      if (i + 1 >= argc) usage();
+      char *end;
+      l2_bytes = strtoull(argv[++i], &end, 10);
+      if (*end || argv[i][0] < '0' || argv[i][0] > '9' || l2_bytes % LINE_BYTES || l2_bytes > L1_MAX_BYTES) usage();
     } else if (!strncmp(argv[i], "--", 2)) {
       usage();
     } else {
@@ -2033,6 +2084,11 @@ int main(int argc, char **argv) {
     l1_lines = l1_bytes / LINE_BYTES;
     l1_tag = malloc((size_t)sms * l1_lines * sizeof *l1_tag);
     if (!l1_tag) fail(EXIT_FAULT, "out of memory for the L1");
+  }
+  if (l2_bytes) {
+    l2_lines = l2_bytes / LINE_BYTES;
+    l2_tag = malloc(l2_lines * sizeof *l2_tag);
+    if (!l2_tag) fail(EXIT_FAULT, "out of memory for the L2");
   }
   setup_threads(grid, block, frame, local_start);
   init_arena();

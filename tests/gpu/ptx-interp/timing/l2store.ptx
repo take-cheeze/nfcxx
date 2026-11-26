@@ -1,0 +1,19 @@
+// One thread stores 1 to a[0] and then loads a[0]. A store writes through without allocating in the L2, so the load
+// after it misses the L2 and costs global, even with --l2 set. run_timing.sh derives the estimate by hand.
+.version 8.0
+.target sm_75
+.address_size 64
+
+.visible .entry l2store(
+  .param .u64 a_param
+)
+{
+  .reg .b32 %r<2>;
+  .reg .b64 %rd<2>;
+
+  ld.param.u64 %rd0, [a_param];
+  mov.u32 %r0, 1;
+  st.global.u32 [%rd0], %r0;
+  ld.global.u32 %r1, [%rd0];
+  ret;
+}
