@@ -55,10 +55,14 @@ binary operators plus 13, as in `py/runtime0.h`; on ints they give the same resu
 - repr: a list prints as `[...]`, a tuple as `(...)` with a trailing comma for one item, a str quoted as MicroPython quotes it,
   and a range as `range(a, b)` (or `range(a, b, step)` when the step is not 1). A top-level str prints raw, as before.
 - `range(...)` (one to three small-int arguments) is a MpyRange {start, stop, step, len}. `GET_ITER` on it makes an iterator
-  whose index counts the items given; `len` and truth use `len`. Containment in a range is refused at run time.
-- `LOAD_METHOD` of `append` or `pop` gives the list's builtin method (`mpy_load_method`), and a value of another type fails
-  with MicroPython's AttributeError. The lowering refuses every other attribute name by name. `CALL_METHOD` pushes the self
-  and the arguments, then calls, so `xs.pop(i)` and `xs.append(x)` take one or two arguments. A keyword argument is refused.
+  whose index counts the items given; `len` and truth use `len`. Containment in a range is refused at run time, and so is a
+  range as a dict key or in equality.
+- `LOAD_METHOD` of `append` or `pop` on a list, or of the dict methods (see Dicts), gives the builtin method, and of an
+  instance or class the method of its class (see Classes). A value with no such attribute fails with MicroPython's
+  AttributeError. The lowering refuses the builtin method names it does not lower, by name (`kBuiltinMethods` in
+  `mpy_lower.cpp`). `CALL_METHOD` passes the self (0
+  for none) and the arguments to `mpy_call_method`, so `xs.pop(i)` and `xs.append(x)` take one or two arguments. A keyword
+  argument is refused.
 - A constant tuple is one object in the .mpy file (mpy-cross folds it), so `LOAD_CONST_OBJ` builds it on each run from its items.
   The items may be None, the bools, small ints, strs, and tuples of those. An int outside the runtime's 62-bit small range is
   refused, as big ints are.
@@ -78,14 +82,55 @@ is {key, value}. An empty slot has key 0; a deleted one has the sentinel key 0x1
   table whose keys are all interned strs (a str literal of the module is interned, a str built at run time is not). Such a
   key is a KeyError, not a TypeError, as in the reference: `d[[1]]` with `d = {'a': 1}` is `KeyError: [1]`. A store always
   hashes, so `d[[1]] = 2` is `TypeError: unsupported type for __hash__: 'list'`.
-- A list, dict or slice is unhashable. A tuple or another kind of key is not lowered yet (it would need the tuple's hash and
-  equality).
+- A tuple's hash is `mp_obj_tuple_unary_op`'s: the address of MicroPython's empty tuple plus the sum of the items' hashes,
+  kept as a 63-bit small int. The reference's address is 16-aligned (`hash(())` is a multiple of 16), so the runtime starts
+  from a 16-aligned address too, and tables of up to 16 slots take the same order. Bigger tables depend on that address in
+  the reference, and it varies from run to run, so a test does not print one. A tuple key is unhashable when an item is.
+- A list, dict, set, view, range or slice is unhashable (`unsupported type for __hash__: 'X'`). A function, class or instance
+  hashes by its address.
+- Equality of keys (`mp_obj_equal`): the same word, equal strs, equal numbers and bools, and lists or tuples with equal
+  items (`obj_equal`). Two different dicts, sets or ranges are not compared yet, so that fails.
 - The KeyError text is `KeyError: ` followed by the key as `str` gives it: a str as its text, anything else by repr.
 - Operations: `BUILD_MAP n` pushes an empty dict; `STORE_MAP` takes [dict, value, key] (key on top) and leaves the dict.
   A load, a store and `in` go through `mpy_getitem`, `mpy_setitem` and `map_lookup`. `len` and truth count the live items.
 - `del d[k]`: `LOAD_NULL` pushes 0, and `STORE_SUBSCR` with 0 deletes (MicroPython 1.29 has no DELETE_SUBSCR: the compiler
   emits LOAD_NULL, ROT_THREE, STORE_SUBSCR). A list item is deleted the same way.
 - A dict comprehension stores each item with `STORE_COMP` (kind 1).
+- Methods (`LOAD_METHOD`, called by `CALL_METHOD`, with the dict as the self): `get(key[, default])` (None when missing),
+  `pop(key[, default])` (a missing key with no default is a KeyError, the value stays in the slot the removal leaves),
+  `keys()`, `values()` and `items()` (views, below) and `update([other])` (a dict, or an iterable of two-item lists or
+  tuples; a non-iterable is `'X' object isn't iterable`, a pair of another length `ValueError: dict update sequence has
+  wrong length`). Their argument-count errors are the reference's (`function missing 1 required positional arguments`,
+  `function expected at most 3 arguments, got N`, ...). `copy()` copies the table slot for slot (deleted slots too), `clear()`
+  drops the table, `setdefault(k[, v])` hashes k and adds it with v (None), `popitem()` removes and returns the first live slot
+  (`KeyError: popitem(): dictionary is empty`), and `fromkeys(iterable[, v])` is the classmethod: `d.fromkeys(...)` is called with
+  no self, and its table is sized by the iterable's length. Iterating a str is lowered (see Strings), so `fromkeys` takes a str. The
+  lowering does not refuse `copy`, `clear`, `setdefault`, `popitem` or `fromkeys` by name, since the receiver's type is not
+  known there: on a list, str or other value that is not a dict the runtime fails at run time ("a method copy of a 'list' is
+  not lowered yet"). Read as a value (`f = d.get`) a dict method fails at run time.
+- A view is {type, dict, kind}, live: it reads the dict's table. `repr` is `dict_keys([...])`, `dict_values([...])` or
+  `dict_items([(k, v), ...])`, in table order. `len`, truth, `in` (a key, a value by equality, a (key, value) pair) and
+  iteration are lowered. A view has no hash and no equality (`==` fails here; the reference compares identities).
+- Iteration (`for`, `GET_ITER_STACK`) of a dict, a set or a view is the table in order from the next slot. The reference
+  raises if the dict changes size during the loop; this does not check, so a loop that inserts is not matched.
+
+## Sets
+
+- A set is an `MpyDict` record with type `mpy_type_set` and no values, so the table, the probing and the growth are the map's.
+  The lookup differs from a dict's in one way, which `map_lookup` follows: a set always compares with `mp_obj_equal` (no
+  qstr shortcut). `BUILD_SET n` makes a set with n slots (`mp_obj_new_set(n, items)`) and adds the items in order.
+- A set comprehension stores each item with `STORE_COMP` (kind 2) into the set its code builds before the loop.
+- Operations: `in` (a lookup, which answers without hashing for an empty set, as `mp_set_lookup` does), `len`, truth, `for`,
+  and the repr: `{a, b}` in table order, and `set()` when empty. Its hash is refused (a set is unhashable).
+- Methods (`LOAD_METHOD`, called by `CALL_METHOD`): `add(x)`, `discard(x)`, `remove(x)` (a missing item is `KeyError` with the
+  item), and `union(other)`, `intersection(other)` and `difference(*others)`, whose argument may be any iterable, as objset.c
+  takes it. A set method not listed (`pop`, `update`, `issubset`, ...) fails at run time (`kBuiltinMethods` refuses the names
+  only the set and list have, and the rest fails as "not lowered yet").
+- Operators: `|`, `&` and `-` on two sets build a new set (`|` is a copy of the left set with the right's items added; `&` is a
+  new set of the items of the right that are in the left, in the right's order; `-` removes the right's items from a copy).
+  The in-place `|=`, `&=` and `-=` change the left set (`s -= s` clears it). With a non-set operand the TypeError names the
+  operator without the in-place prefix (`unsupported types for __or__: 'set', 'list'`), as the reference does. `^`, the
+  comparisons and `==` on sets are not lowered yet. Equality of two sets fails (it is not built yet).
 
 ## Slices
 
@@ -98,7 +143,8 @@ is {key, value}. An empty slot has key 0; a deleted one has the sentinel key 0x1
   which the reference prints as `NotImplementedError: ` (with the trailing space). The value of a store must be a list or a
   tuple (`object 'int' isn't a tuple or list`); it is copied first, so `xs[1:4] = xs` works.
 - A tuple takes a step of 1 only, as does a str (`NotImplementedError: only slices with step=1 (aka None) are supported`).
-  A str is indexed and sliced by character, so `s[i]` is a one-character str. A tuple or str store or delete is `'tuple'
+  A str is indexed and sliced by character, so `s[i]` is a one-character str. Iterating a str (`for c in s`, GET_ITER_STACK
+and FOR_ITER, and `dict.fromkeys(s)`) gives one-character strs, one per UTF-8 character. A tuple or str store or delete is `'tuple'
   object doesn't support item assignment` (or `deletion`).
 - A list comprehension stores each value with `STORE_COMP` (kind 0), the collection being `arg >> 2` slots below the top (the
   offset of `vm.c`'s `sp[-(unum >> 2)]`). MicroPython 1.29 has no `LIST_APPEND` opcode; `STORE_COMP` does that job.
@@ -126,9 +172,12 @@ labels of their targets. It covers small-int and None/bool constants, names (`LO
 `STORE_GLOBAL`), locals (`LOAD_FAST`/`STORE_FAST`), `POP_TOP`, `DUP_TOP`, `ROT_TWO`, the binary and unary operators,
 `POP_JUMP_IF_FALSE`/`TRUE`, `JUMP`, the `JUMP_IF_*_OR_POP` pair (short-circuit `or`/`and`), `ROT_THREE` (chained
 comparisons), `LOAD_CONST_STRING` and `LOAD_CONST_OBJ` (str constants), `MAKE_FUNCTION`, `LOAD_DEREF`, `STORE_DEREF`,
-`MAKE_CLOSURE`, `CALL_FUNCTION`, `BUILD_LIST`/`BUILD_TUPLE`, `LOAD_SUBSCR`/`STORE_SUBSCR`, `BUILD_MAP`/`STORE_MAP`, `BUILD_SLICE`, `LOAD_NULL` (for `del`), `STORE_COMP` (list and dict
+`MAKE_CLOSURE`, `CALL_FUNCTION`, `BUILD_LIST`/`BUILD_TUPLE`/`BUILD_SET`, `LOAD_SUBSCR`/`STORE_SUBSCR`, `BUILD_MAP`/`STORE_MAP`, `BUILD_SLICE`, `LOAD_NULL` (for `del`), `STORE_COMP` (list, dict and set
 comprehensions), `UNPACK_SEQUENCE`, `GET_ITER_STACK`
-and `FOR_ITER`, and `RETURN_VALUE`. Any other opcode is refused by name and no IR is written.
+and `FOR_ITER`, and `RETURN_VALUE`, and the exception and class opcodes (see Exceptions and Classes): `SETUP_EXCEPT`,
+`SETUP_FINALLY`, `SETUP_WITH`, `WITH_CLEANUP`, `POP_EXCEPT_JUMP`, `END_FINALLY`, `UNWIND_JUMP`, `RAISE_OBJ`, `RAISE_LAST`, `LOAD_BUILD_CLASS`, `LOAD_ATTR`,
+`STORE_ATTR`, `LOAD_METHOD`/`CALL_METHOD`, `DELETE_FAST`, `DELETE_NAME`, `DUP_TOP_TWO`, with `LOAD_NAME`/`STORE_NAME` for the
+class namespace and `LOAD_GLOBAL`/`STORE_GLOBAL` for the globals. Any other opcode is refused by name and no IR is written.
 
 Each code object is one IR function. The module body is `mpy_module`. A function is `mpy_fn_K(ret, args, nargs)`: it
 copies its arguments into its locals `loc.N` and stores its result through `ret`. The IR has no function-address value, so
@@ -182,6 +231,79 @@ reference's message (`unsupported types for __add__: 'str', 'int'`; a bool is re
 and every other operator on a str are a runtime error saying they are not lowered yet. Truth: an empty str is false.
 `print` of a str writes its bytes and a newline, with no quotes.
 
+## Exceptions
+
+MicroPython's exception stack (`py/vm.c`: SETUP_EXCEPT, SETUP_FINALLY, POP_EXCEPT_JUMP, END_FINALLY, UNWIND_JUMP, RAISE_OBJ,
+RAISE_LAST), as the lowering follows it:
+
+- A try block is a heap record `MpyBlock` {jmp_buf, the previous block, the value-stack height, the namespace depth, landed,
+  exc}, pushed on a block stack by `mpy_try_enter`. The lowered code calls `_setjmp` on it in its own frame. A raise
+  (`raise_value`) takes the innermost block that is not already running its handler, restores the value stack and the
+  namespace depth it saved, and `longjmp`s to it. The landing (a stub after the body) gives the exception to the handler at
+  the target, in the slot of the try's depth (the handler is entered one deeper than the try, as in the bytecode).
+- A landed block stays on the stack until its handler ends (POP_EXCEPT_JUMP, END_FINALLY pops it), as MicroPython keeps its
+  exception block. An exception raised by a handler therefore skips its own block. A bare `raise` re-raises the exception of
+  the innermost landed block (`mpy_reraise`).
+- `except C:` is the binary operator EXCEPTION_MATCH (8): C is a builtin exception class, a user class derived from one, or a
+  tuple of those. `as` binds the exception; the SETUP_FINALLY that wraps the handler body deletes the name at its end
+  (DELETE_FAST, or DELETE_NAME at module level), and an END_FINALLY with an exception on top raises it again.
+- Exception classes are builtin records (`BI_EXC + k`): BaseException, Exception, ArithmeticError, LookupError,
+  ZeroDivisionError, IndexError, KeyError, ValueError, TypeError, AttributeError, NameError, RuntimeError and
+  NotImplementedError, with MicroPython's bases. An instance is a `MpyInst` whose arg is its one argument (0 for none).
+  `str(e)` is the argument as `str` gives it; the uncaught line is `Name: text`, as the reference prints it.
+- The runtime's `fail()` messages that begin with an exception class name ("KeyError: ...", "IndexError: ...") raise that
+  class, so a try catches the runtime's own errors. Any other message is fatal, as before.
+- A break or continue out of a try (UNWIND_JUMP) pops the blocks it leaves (its count is the low 7 bits of the extra byte;
+  bit 0x80 is a break out of a for loop, which drops the iterator's slots in the depth). Leaving a finally that is not the
+  name-deleting one of an `except ... as` is refused by name (a finally would run its code).
+- Leaving a with block (a break, a continue or a return out of its body) calls its `__exit__(None, None, None)` as WITH_CLEANUP's
+  normal path does, innermost block first. The block is dropped before the exit is called, so an exception from the exit goes to
+  the blocks around the statement (the reference may differ there; this is not checked). The walk records each with block with
+  its exit method's stack slot, and each for loop as an entry (kind 3) with its iterator's base slot, so a break that the
+  compiler emits as an UNWIND_JUMP (0x80) finds the slot the stack is cut back to. A break with no block to leave is four
+  POP_TOPs and a JUMP, as mp_emit_bc_unwind_jump emits it; the JUMP at the loop's base ends the loop's entry.
+- A return (RETURN_VALUE) leaves every block it is in, as MicroPython's unwind_return does, the with blocks included.
+  Before this, a return left its block on the runtime's block stack, so a later raise could longjmp into the returned frame.
+  A return out of a real `finally` still does not run the finally code: it is popped silently, as before (a gap, see Not yet).
+- `raise X from Y` (RAISE_FROM) is lowered as `mpy_raise_from`. MicroPython 1.29 does not set a cause: with a cause that is not
+  None, it prints `Warning: exception chaining not supported` on stderr (`mp_warning`) and raises X, so the lowering does the
+  same and the cause is dropped. `from None` prints nothing. The uncaught line is `Name: text`, as for `raise X`.
+- A with statement (`SETUP_WITH`, `WITH_CLEANUP`, `mpy_with_exit`, `mpy_with_enter`, `mpy_with_cleanup`): SETUP_WITH looks up
+  `__exit__` and calls `__enter__` before its block is set up (so an exception from `__enter__` is not caught by it), and
+  leaves [exit, context manager, as-value] on the stack. The block is kind 2, a handler entered with [exit, manager, exception].
+  The normal path is body, LOAD_CONST_NONE, WITH_CLEANUP, END_FINALLY; the exception path lands on WITH_CLEANUP. WITH_CLEANUP
+  calls __exit__(None, None, None) for the normal path, and __exit__(class, exception, None) for the other. A true result
+  suppresses the exception (END_FINALLY then continues), else END_FINALLY raises it again.
+
+## Classes
+
+- `LOAD_BUILD_CLASS` is the builtin `__build_class__`. It runs the class body (a function) with a fresh namespace dict pushed
+  on the namespace stack, then makes the class (a `MpyClass`: its `MpyType info`, which is also the type of its instances,
+  its base, and its namespace dict). The body's LOAD_NAME and STORE_NAME go to the namespace on top of that stack; LOAD_GLOBAL
+  and STORE_GLOBAL (a function's names) always go to the globals, so a method never sees the class's names. A class base must
+  be a class or a builtin exception class.
+- An instance is a `MpyInst` {type, dict, arg}. Its attributes are in the dict, keyed by interned name strs (so a dict
+  finds them by pointer). `obj.name` (LOAD_ATTR) looks in the instance, then its class and bases; a function found there is
+  bound (`MpyBound`). `obj.name = v` (STORE_ATTR) stores in the instance (or in a class).
+- `obj.name(args)` is LOAD_METHOD then CALL_METHOD. LOAD_METHOD leaves the method and the self (0 when the attribute is not a
+  function of the class, or is in the instance), and CALL_METHOD calls with the self dropped when it is 0.
+- `Cls(args)` makes the instance and runs `__init__` with it, if the class (or a base) has one. Without one, a class that
+  derives from an exception takes one argument as the exception's argument; any other class takes none.
+- A class body that raises, with the exception caught outside it, is not tested against the reference: the reference keeps
+  the class namespace as the module's name scope after that (`x` at module level then reads the class's `x`). This lowering
+  restores the module's scope, as CPython does.
+- `del obj.name` is LOAD_NULL then STORE_ATTR (no DELETE_ATTR in MicroPython 1.29), so a store of 0 removes the attribute.
+- `super()` (MicroPython 1.29's compile.c special case): a method that calls `super()` takes the class's `__class__` cell as a
+  free variable. The class body makes that cell (its prelude lists it as an owned cell) and returns it, and `__build_class__`
+  sets it to the new class. `super().name(args)` is `LOAD_GLOBAL super`, `LOAD_DEREF __class__`, `LOAD_FAST self`,
+  `LOAD_SUPER_METHOD name`, the arguments and `CALL_METHOD`: `LOAD_SUPER_METHOD` writes the method over the super global's slot
+  and leaves the self (vm.c). `super()` alone is a call of the builtin `super` with the class and self, and its object's
+  attributes and methods are looked up in the bases of the class (`super_attr`): the class itself is not searched. A base
+  with no `__init__` gives object's (no argument) or the exception's (its one argument). `super(cls, self)` with self not an
+  instance of cls is a `TypeError` with no text, as the reference raises it.
+- Attribute names in the lowering that are builtin methods of the other types (`count`, `upper`, `keys`, ...) are refused
+  by name: the lowering does not know the receiver's type, so a class's method of such a name is refused too.
+
 ## Checks
 
 - `tests/mpy/reader_run.sh` (needs `MPY_CROSS`): every corpus module in `tests/mpy/corpus` loads and decodes.
@@ -195,10 +317,13 @@ and every other operator on a str are a runtime error saying they are not lowere
 ## Not yet
 
 Defaults and keyword arguments (`MAKE_FUNCTION_DEFARGS`, `MAKE_CLOSURE_DEFARGS`), `del` of a closure variable
-(`DELETE_DEREF`), generators, str methods and formatting, str ordering and repetition, classes, exceptions, big ints, dict
-methods and iterating a dict (`for`, `keys`), a dict key that is a tuple or another kind of object, sets (`BUILD_SET`, the
-set comprehension), the list methods other than append and pop, subscripts of a range, and the rest of the opcodes. Equality of two different lists or
-tuples (and so `in` on a list of them), containment in a range, `list.pop` and `str` of a list or tuple are refused at
-run time until their repr and equality are built. Identity of strs: a str built at run time is a new object, but
-MicroPython interns short strs, so `'a' + 'b' is 'ab'` is True there and False here. Nothing is freed: a str lives until the
-process ends. Also the `luac`-style opcode oracle is still blocked, and string pattern matching is paused.
+(`DELETE_DEREF`), generators, str methods and formatting, str ordering and repetition,
+big ints, the set methods
+`pop`, `update`, `issubset` and the rest, `^` and the set comparisons, the list methods other than append and pop, subscripts of a range, and the rest
+of the opcodes. Equality of two dicts, two sets, two ranges or two views, `str` of a list, tuple, set or view, and
+containment in a range are refused at run time until their repr and equality are built. Changing a dict's size during a
+`for` over it is not checked (see Dicts). Identity of strs: a str built at run time is a new object, but MicroPython interns
+short strs, so `'a' + 'b' is 'ab'` is True there and False here. Nothing is freed: a str lives until the process ends. Also
+the `luac`-style opcode oracle is still blocked, and string pattern matching is paused. A return out of a `try ... finally` does
+not run the finally code (it is popped silently; a break out of one is refused). A `return` or `break` out of a `with` whose
+`__exit__` raises is not matched against the reference.

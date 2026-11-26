@@ -8,6 +8,9 @@ if ! command -v lake >/dev/null 2>&1; then
   exit 0
 fi
 lake build nfcxx_ir || { echo "FAIL tests/lean: build"; exit 1; }
+# The speculation model (NfcxxIR/Speculation.lean): its theorems and worked examples are checked by the build.
+lake build NfcxxIR || { echo "FAIL tests/lean: speculation model does not check"; exit 1; }
+echo "ok: the speculation model (NfcxxIR/Speculation.lean) checks: guard soundness, equivalence, never stuck"
 exe=.lake/build/bin/nfcxx_ir
 fail=0
 if ! "$exe" check ../tests/pathb-ir/*.ir > /dev/null; then
@@ -60,5 +63,12 @@ expect tests/sem/ptr_oob.ir "trap: pointer out of bounds"
 expect tests/sem/ptr_load_oob.ir "trap: pointer out of bounds"
 expect tests/sem/ptr_global.ir "stuck: the address of the global @\"g\" is not modelled (only slots are blocks)"
 expect tests/sem/ptr_store_value.ir "stuck: store of a pointer value is not modelled"
+# pointers stored in memory (8 bytes, the module's pointer size): a pointer to x stored in p and loaded back through
+# p reads x (42); a null pointer round-trips (its load through p is the null trap); an integer store over a stored
+# pointer's byte invalidates it, so loading the pointer is stuck; a load of 8 integer bytes over a stored pointer is stuck
+expect tests/sem/ptr_store_load.ir "value 42"
+expect tests/sem/ptr_null_store.ir "trap: null dereference"
+expect tests/sem/ptr_overwrite.ir "stuck: a stored pointer was overwritten in part by an integer, so these bytes no longer hold it"
+expect tests/sem/ptr_partial_load.ir "stuck: pointer bytes read at a different width are not modelled"
 echo "ok: the semantics gives the expected outcome for the IR functions in tests/sem"
 exit $fail

@@ -7,7 +7,7 @@
 #   lower/*.lua   the printed results must equal `print(dofile(...))` from Lua 5.4.9.
 #   lower/err/*.lua  the error must equal lua.c's: the first stderr line after its progname (the position and the
 #                 message, with the variable info), and the exit status must be 1.
-# A program that uses an opcode not lowered yet must be refused (exit 3), never compiled.
+#   lower/tb/*.lua   the whole stderr must equal lua.c's, the traceback included, and the exit status must be 1.
 #
 #   LUA=/path/to/lua tests/lua54bc/lower/run.sh
 # Exit 77 (skip) when LUA is not a 5.4.9 interpreter.
@@ -68,22 +68,25 @@ for lua in "$dir"/lower/err/*.lua; do
   fi
 done
 
-# A program with an opcode that is not lowered yet (TBC, a to-be-closed variable) must be refused, not compiled.
-cat > "$work/refuse.lua" <<'LUA'
-local x <close> = nil
-return 1
-LUA
-"$LUA" "$dir/dump.lua" "$work/refuse.lua" "$work/refuse.luac" full
-if "$work/lower" "$work/refuse.luac" > "$work/refuse.ir" 2> "$work/refuse.err"; then
-  echo "FAIL refuse: a program with TBC was lowered"
-  fail=1
-elif [ "$?" -ne 3 ] || ! grep -q "refused:" "$work/refuse.err"; then
-  echo "FAIL refuse: wrong refusal: $(cat "$work/refuse.err")"
-  fail=1
-fi
+ntb=0
+for lua in "$dir"/lower/tb/*.lua; do
+  base=tb_$(basename "$lua" .lua)
+  if ! msg=$(build "$lua" "$base"); then echo "FAIL $base: $msg"; fail=1; continue; fi
+  "$work/$base" > /dev/null 2> "$work/$base.stderr"; status=$?
+  "$LUA" "$lua" > /dev/null 2> "$work/$base.lua_stderr"; lstatus=$?
+  # the progname (lua.c's argv[0]) is the path of the interpreter: compare from the position on
+  got=$(sed -E '1s/^[^:]*: /lua: /' "$work/$base.stderr")
+  want=$(sed -E '1s/^[^:]*: /lua: /' "$work/$base.lua_stderr")
+  ntb=$((ntb + 1))
+  if [ "$got" != "$want" ] || [ "$status" -ne "$lstatus" ]; then
+    echo "FAIL $base: the traceback differs (status $status, Lua gives $lstatus)"
+    diff <(printf '%s\n' "$want") <(printf '%s\n' "$got") | head -20
+    fail=1
+  fi
+done
 
 if [ "$fail" -ne 0 ]; then
   echo "lua54bc-lower: FAILED"
   exit 1
 fi
-echo "lua54bc-lower: $n programs match Lua 5.4.9; $ne error messages match lua.c; TBC is refused"
+echo "lua54bc-lower: $n programs match Lua 5.4.9; $ne error messages match lua.c; $ntb tracebacks match lua.c"

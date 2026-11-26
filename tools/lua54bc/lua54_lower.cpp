@@ -383,22 +383,23 @@ std::string imm_lv(Ctx &c, int value, bool is_float) {
 // An RK operand: a constant (is_k set) or a register.
 std::string rk(Ctx &c, unsigned idx, bool is_k) { return is_k ? constant_lv(c, c.p.k.at(idx)) : reg(c, idx); }
 
+// The symbol of a NUL-terminated data item holding text. The item is shared by equal texts.
+std::string text_item(Ctx &c, const std::string &text) {
+  auto it = c.m.sites.find(text);
+  if (it != c.m.sites.end()) return it->second;
+  std::string sym = "lua54.site." + std::to_string(c.m.sites.size());
+  c.m.sites[text] = sym;
+  c.m.data.push_back("(data \"" + sym + "\" (const (array " + std::to_string(text.size() + 1) +
+                     " (const char))) (string \"" + ir_escape(text) + "\\000\"))\n");
+  return sym;
+}
+
 // Sets the site of the operation about to run: the runtime reports its errors with this position and these operand infos.
 // The data item is shared by sites with the same text.
 void set_site(Ctx &c, const std::vector<std::string> &infos) {
   std::string text = c.m.chunkname + ":" + std::to_string(dbg::getfuncline(c.p, static_cast<int>(c.pc))) + ":";
   for (const std::string &s : infos) text += "\n" + s;
-  std::string sym;
-  auto it = c.m.sites.find(text);
-  if (it != c.m.sites.end()) {
-    sym = it->second;
-  } else {
-    sym = "lua54.site." + std::to_string(c.m.sites.size());
-    c.m.sites[text] = sym;
-    c.m.data.push_back("(data \"" + sym + "\" (const (array " + std::to_string(text.size() + 1) +
-                       " (const char))) (string \"" + ir_escape(text) + "\\000\"))\n");
-  }
-  c.line("(eval (call void &\"lua54rt_site\" @\"" + sym + "\"))");
+  c.line("(eval (call void &\"lua54rt_site\" @\"" + text_item(c, text) + "\"))");
 }
 
 // Arithmetic `R[a] := lhs op rhs` where op is ADD, SUB or MUL. The inline path needs both operands to be ints; a
@@ -493,7 +494,8 @@ void emit_helper_unary(Ctx &c, int op, unsigned a, unsigned b) {
 // CALL: R[a] is the function; its arguments are R[a+1..] (nargs values, an IR int); the results go to R[a..] (wanted of
 // them, or all of them with -1). The callee's base is R[a+1]; the function value is copied first, because R[a] receives
 // the first result. `info` is the variable info of the function for an error.
-void emit_call(Ctx &c, unsigned a, const std::string &nargs, int wanted, const std::string &info) {
+void emit_call(Ctx &c, unsigned a, const std::string &nargs, int wanted, const std::string &info,
+               const char *helper = "lua54rt_call") {
   std::string fn_slot = c.temp_lv();
   std::string fn_reg = reg(c, a);
   c.line("(copy 16 " + fn_slot + " " + fn_reg + ")");
@@ -501,7 +503,7 @@ void emit_call(Ctx &c, unsigned a, const std::string &nargs, int wanted, const s
   std::string args = reg(c, a + 1);
   std::string ret = reg(c, a);
   set_site(c, {info});
-  c.line("(eval (call void &\"lua54rt_call\" " + fn_slot + " " + nargs + " " + args + " " + ret + " (const int " +
+  c.line("(eval (call void &\"" + std::string(helper) + "\" " + fn_slot + " " + nargs + " " + args + " " + ret + " (const int " +
          std::to_string(wanted) + ") (const int " + std::to_string(a) + ")))");
 }
 
@@ -803,8 +805,11 @@ void lower_closure(Ctx &c, const Insn &i) {
   const Proto &child = *c.p.p.at(i.Bx());
   std::size_t fn = c.m.index.at(&child);
   std::string dst = reg(c, i.A());
+  // The function's "source:linedefined", for a traceback's "in function <source:line>".
+  std::string where = c.m.chunkname + ":" + std::to_string(child.linedefined);
   c.line("(eval (call void &\"lua54rt_closure\" " + dst + " &\"lua54_fn_" + std::to_string(fn) + "\" (const int " +
-         std::to_string(child.numparams) + ") (const int " + std::to_string(child.upvalues.size()) + ")))");
+         std::to_string(child.numparams) + ") (const int " + std::to_string(child.upvalues.size()) + ") @\"" +
+         text_item(c, where) + "\"))");
   for (std::size_t k = 0; k < child.upvalues.size(); ++k) {
     const UpvalDesc &u = child.upvalues[k];
     c.line("(eval (call void &\"lua54rt_capture\" " + dst + " (const int " + std::to_string(k) + ") (const int " +
@@ -837,7 +842,7 @@ void lower_call(Ctx &c, const Insn &i) {
 void lower_tailcall(Ctx &c, const Insn &i) {
   if (i.k()) c.line("(eval (call void &\"lua54rt_close\" %1))");
   std::string nargs = i.B() == 0 ? values_to_top(c, i.A() + 1) : "(const int " + std::to_string(i.B() - 1) + ")";
-  emit_call(c, i.A(), nargs, -1, c.reg_info(i.A()));
+  emit_call(c, i.A(), nargs, -1, c.reg_info(i.A()), "lua54rt_tailcall");
   emit_return_values(c, reg(c, i.A()), values_to_top(c, i.A()));
 }
 
@@ -930,13 +935,26 @@ void lower_loadkx(Ctx &c, const Insn &i) {
   go(c, c.pc + 2);
 }
 
-// TFORPREP A Bx: go to the TFORCALL. (The to-be-closed fourth value is not tracked yet.)
-void lower_tforprep(Ctx &c, const Insn &i) { go(c, c.pc + 1 + i.Bx()); }
+// TBC A: R[A] is a to-be-closed variable. lua54rt_tbc registers it; nil and false are not registered, and any other value
+// needs a __close metamethod. The name is the local's, for the error message.
+void lower_tbc(Ctx &c, const Insn &i) {
+  std::string name = dbg::local_name(c.p, static_cast<int>(i.A()) + 1, static_cast<int>(c.pc)).value_or("?");
+  set_site(c, {});
+  c.line("(eval (call void &\"lua54rt_tbc\" " + reg(c, i.A()) + " @\"" + text_item(c, name) + "\"))");
+}
+
+// TFORPREP A Bx: go to the TFORCALL. The fourth value, the closing value of the loop, is registered as a to-be-closed
+// variable (nil, the usual case, is not).
+void lower_tforprep(Ctx &c, const Insn &i) {
+  set_site(c, {});
+  c.line("(eval (call void &\"lua54rt_tbc\" " + reg(c, i.A() + 3) + " @\"" + text_item(c, "(for state)") + "\"))");
+  go(c, c.pc + 1 + i.Bx());
+}
 
 // TFORCALL A C: R[A+4..A+3+C] := R[A](R[A+1], R[A+2]).
 void lower_tforcall(Ctx &c, const Insn &i) {
   for (unsigned k = 0; k < 3; ++k) c.line("(copy 16 " + reg(c, i.A() + 4 + k) + " " + reg(c, i.A() + k) + ")");
-  emit_call(c, i.A() + 4, "(const int 2)", static_cast<int>(i.C()), " (for iterator 'for iterator')");
+  emit_call(c, i.A() + 4, "(const int 2)", static_cast<int>(i.C()), " (for iterator 'for iterator')", "lua54rt_tforcall");
 }
 
 // TFORLOOP A Bx: if R[A+4] is not nil, R[A+2] := R[A+4] and jump back to the loop body.
@@ -950,8 +968,19 @@ void lower_tforloop(Ctx &c, const Insn &i) {
   c.line("(goto " + lbl(back) + ")))");
 }
 
-// NEWTABLE A: a fresh table. The size hints are not used.
-void lower_newtable(Ctx &c, const Insn &i) { c.line("(eval (call void &\"lua54rt_newtable\" " + reg(c, i.A()) + "))"); }
+// NEWTABLE A B C k: a fresh table with lvm.c's size hints. B gives the hash part (2^(B-1) when B > 0), C the array part;
+// with k, C is extended by the EXTRAARG after it (which lowers to nothing, as it is only read here).
+void lower_newtable(Ctx &c, const Insn &i) {
+  unsigned long long hsize = i.B() > 0 ? (1ull << (i.B() - 1)) : 0;
+  unsigned long long asize = i.C();
+  if (i.k()) {
+    const Insn &extra = c.p.code.at(c.pc + 1);
+    if (extra.op() != EXTRAARG) throw std::runtime_error("refused: NEWTABLE with k is not followed by EXTRAARG");
+    asize += static_cast<unsigned long long>(extra.Ax()) * 256;   // MAXARG_C + 1
+  }
+  c.line("(eval (call void &\"lua54rt_newtable\" " + reg(c, i.A()) + " (const int " + std::to_string(hsize) +
+         ") (const int " + std::to_string(asize) + ")))");
+}
 
 // GETTABLE A B C: R[A] := R[B][R[C]]. GETI: the key is the integer C. GETFIELD: the key is the string K[C].
 void emit_gettable(Ctx &c, unsigned a, const std::string &t, const std::string &key, const std::string &info) {
@@ -1117,6 +1146,7 @@ const Lower *table() {
   t[GETUPVAL] = lower_getupval;
   t[SETUPVAL] = lower_setupval;
   t[CLOSE] = lower_close;
+  t[TBC] = lower_tbc;
   t[NEWTABLE] = lower_newtable;
   t[GETTABLE] = lower_gettable;
   t[GETI] = lower_geti;

@@ -1,14 +1,16 @@
 # Lua 5.4 bytecode to Path B IR
 
-Status, 2026-11-26: every opcode but `TBC` lowers. 73 programs match Lua 5.4.9 (`tests/lua54bc/lower/run.sh`), and 34
-error programs print the same first line as lua.c, with its position, message and variable info. The runtime has numbers
-with coercion, strings with the string metatable, tables with metatables, closures and upvalues, multiple results,
-varargs, the metamethods listed below, protected calls (`pcall`, with `error` and `assert`), and the libraries:
-base (`print`, `type`, `tostring`, `tonumber`, `pairs`, `next`, `ipairs`, `select`, `setmetatable`, `getmetatable`,
-`rawget`, `rawset`, `rawequal`, `rawlen`), `table` (`insert`, `remove`, `concat`, `unpack`), `math` (`floor`, `ceil`,
-`abs`, `max`, `min`, `sqrt`, `tointeger`, `huge`, `pi`, `maxinteger`, `mininteger`) and `string` (`len`, `sub`, `upper`,
-`lower`, `rep`, `reverse`, `byte`, `char`, `format`, and the pattern functions `find`, `match`, `gmatch`, `gsub`; see
-"String patterns").
+Status: every opcode lowers. 106 programs match Lua 5.4.9 (`tests/lua54bc/lower/run.sh`), and 54 error programs print the
+same first line as lua.c, with its position, message and variable info. The runtime has numbers with coercion, strings
+with the string metatable, tables with metatables, closures and upvalues, multiple results, varargs, the metamethods
+listed below, weak tables and `__gc` finalizers, to-be-closed variables, protected calls (`pcall` and `xpcall`, with `error` and its levels, and `assert`),
+and the libraries: base (`print`, `type`, `tostring`, `tonumber`, `pairs`, `next`, `ipairs`, `select` with negative
+indices, `setmetatable`, `getmetatable`, `rawget`, `rawset`, `rawequal`, `rawlen`, `_G`, `_VERSION`), `table` (`insert`,
+`remove`, `concat`, `unpack`, `pack`, `move`, `sort`), `math` (`floor`, `ceil`, `abs`, `max`, `min`, `sqrt`, `tointeger`,
+`fmod`, `modf`, `exp`, `log`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `ult`, `type`, `random`, `randomseed`, `huge`,
+`pi`, `maxinteger`, `mininteger`), `string` (`len`, `sub`, `upper`, `lower`, `rep`, `reverse`, `byte`, `char`, `format`
+with `%a` and `%q`, `find`, `match`, `gmatch`, `gsub`), `os` (`clock`, `time`, `getenv`, `exit`) and `io` (`write`, and
+`io.stdout:write`).
 
 ## Pipeline
 
@@ -22,7 +24,7 @@ luac-format chunk (Lua 5.4.9)            tools/lua54bc/lua54_chunk.cpp      read
 ```
 
 `tests/lua54bc/lower/run.sh` runs the whole chain on each program in `tests/lua54bc/lower/`, compares the result with
-`lua`'s, and checks that a program using CALL is refused.
+`lua`'s, and checks the error programs' first line and status.
 
 ## Value model
 
@@ -47,8 +49,8 @@ Each IR function's numbers are pre-order over the prototypes of the chunk: `lua5
 
 ## Op table
 
-`lua54_lower.cpp` has one lowering function per opcode. The only opcode without one is `TBC` (a to-be-closed variable);
-a chunk that has one is refused with `refused: opcode TBC ...`, and nothing is emitted for it.
+`lua54_lower.cpp` has one lowering function per opcode, and every opcode has one. A chunk with an opcode that has none is
+refused (`refused: opcode ... is not lowered yet`), and nothing is emitted for it.
 
 | opcodes | lowering |
 | --- | --- |
@@ -63,8 +65,9 @@ a chunk that has one is refused with `refused: opcode TBC ...`, and nothing is e
 | `TEST`, `TESTSET` | truthiness from the tag (nil and false are falsy), then the next `JMP` (`TESTSET` copies `R[B]` to `R[A]` when it takes the jump) |
 | `JMP` | `goto` |
 | `FORPREP`, `FORLOOP` | `lua54rt_forprep` and `lua54rt_forloop` (lvm.c's rules, integer and float loops) |
-| `TFORPREP`, `TFORCALL`, `TFORLOOP` | a call of `R[A]` with the state and control, results to `R[A+4..]`; the loop goes on while the first result is not nil |
-| `NEWTABLE`, `SETLIST` (with or without `EXTRAARG`) | `lua54rt_newtable`, `lua54rt_setlist` |
+| `TBC` | `lua54rt_tbc`: the slot is registered to be closed (nil and false are not; another value needs `__close`) |
+| `TFORPREP`, `TFORCALL`, `TFORLOOP` | `TFORPREP` registers the fourth value (the closing value) as `TBC` does; `TFORCALL` calls `R[A]` with the state and control, results to `R[A+4..]`; the loop goes on while the first result is not nil |
+| `NEWTABLE`, `SETLIST` (with or without `EXTRAARG`) | `lua54rt_newtable` (the size hints of lvm.c), `lua54rt_setlist` (grows the array part at once, then stores into it) |
 | `GETTABLE`, `GETI`, `GETFIELD`, `GETTABUP` | `lua54rt_gettable` (`GETTABUP` loads the upvalue first, for `_ENV`) |
 | `SETTABLE`, `SETI`, `SETFIELD`, `SETTABUP` | `lua54rt_settable` |
 | `SELF` | a copy of the object to `R[A+1]`, then `lua54rt_gettable` |
@@ -107,8 +110,32 @@ The info is computed here with ldebug.c's rules (`namespace dbg` in `lua54_lower
 `upvalue 'x'`, `constant 'x'` and `for iterator 'for iterator'` as lua.c does. The source name keeps luaO_chunkid's
 truncation (the last 56 characters after `...`).
 
-An error goes to stderr as `lua: <site line> <message><info>` and the process stops with status 1, as lua.c does. Only
-the first line is printed: the traceback is not. The run checks that first line, after the progname, against `lua`.
+An error goes to stderr as `lua: <site line> <message><info>` and the process stops with status 1, as lua.c does. The
+run checks that first line, after the progname, against `lua`, and the whole of stderr for the programs in `lower/tb/`.
+
+The traceback is lua.c's `msghandler` and `luaL_traceback`, computed at the error before the to-be-closed variables close.
+The call records (`callrec`, one per call: its site, its callee, whether it was a tail call, its metamethod event) give
+the frames, innermost first: a Lua frame's line is the site of the call it makes (the current site for the innermost),
+a host function is `[C]`, and the main chunk is the caller of the first record. A frame that made a tail call is gone,
+and a frame entered by one is followed by `(...tail calls...)`. A name is `function 'g'` when the callee is a global or
+a field of a library (`pushglobalfuncname`, searched in `_G` and the library tables), else `metamethod 'index'` for a
+metamethod, else the kind and name in the call's variable info (`local 'f'`, `method 'm'`, `for iterator ...`), else
+`function <source:linedefined>` (the closure keeps that text, from the lowering). A call made by a host function has no
+position, so a function called from `table.sort` is `function <...>`. The levels are cut as lauxlib's are: more than 22,
+the first 10 and the last 11 with the count of lauxlib's message. A table error object with a `__tostring` that gives a
+string is printed without a traceback, as lua.c does.
+
+`error(msg, level)` finds the position of its level in a call stack that the runtime keeps: each call pushes the position
+of its caller (NULL when the caller is not a Lua function, as for a call from `pcall`), so a host function is a level with
+no position, as in Lua. `pcall` and `xpcall` restore the depth when an error comes back to them. The levels do not
+drop the frame of a tail call (the traceback does), so the level of an error in a tail-called function is one more than
+Lua's.
+
+To-be-closed variables: `TBC` registers the variable's slot, and `CLOSE`, `RETURN` with `k`, and the end of a `pcall`
+that caught an error close the slots at or above the given one, last registered first. Each `__close` gets the value and
+the error (nil when the block ends normally). An uncaught error closes them too, before lua.c's message. Not done: an
+error inside a `__close` during an error's unwinding replaces the error in Lua; here it goes to the next protected call
+out.
 
 ## Garbage collection
 
@@ -123,12 +150,48 @@ varargs) starts with a header and is linked into one list and into a set of addr
 
 The sweep frees the unmarked objects. A collection runs when the bytes allocated since the last one exceed a threshold
 of at least 4 MB, or twice the live bytes. The collector is off until the main function starts, since the stack top is
-recorded then. `collectgarbage` supports `collect`, `step`, `count` (KB), `isrunning`, `stop` and `restart`.
+recorded then. `collectgarbage` supports `collect`, `step`, `count` (KB), `isrunning`, `stop` and `restart`; `stop` also
+stops the automatic collections, and an explicit `collect` or `step` still runs.
 
-The suite runs twice: normally, and with `LUA54RT_GC_THRESHOLD=1`, which collects at nearly every allocation. Both pass.
-On the garbage-heavy program (`gc_garbage.lua`) the peak resident size is 19 MB with collection, against 90 MB without.
+A collection marks the roots, then the atomic phase of lgc.c runs (`gc_collect`): the weak values are cleared, the tables
+with finalizers that are unmarked are resurrected (`separate_tobefnz`, newest first), and the weak keys are cleared, so
+a key of a finalized object stays until the next collection. Ephemerons (weak keys only) mark a value only while its key
+is alive (`converge_ephemerons`). A string is never cleared from a weak table, and a dead weak key becomes `TAG_DEADKEY`,
+which matches no key. Only an explicit `collectgarbage` marks the Lua stack up to the end of its arguments: a call is
+made into a fresh register, so the registers above it are dead, as lgc.c's top is. A call to `collectgarbage` first
+zeroes the stack below its caller (`scrub_stack`), and the host-call results are zeroed, so that no stale address
+left by an earlier call keeps an object alive through the conservative scan.
 
-Not done: weak tables (`__mode`), finalizers (`__gc`), and incremental or generational collection.
+Finalizers (`__gc`): `setmetatable` marks a table whose metatable has a `__gc` field (once, as luaC_checkfinalizer does;
+no marks while the state closes). A due finalizer runs from `run_finalizers` after an explicit collection, newest first,
+with the object as its argument; its errors are dropped (lua.c's warnings are off), and `collectgarbage` inside one
+gives nil. An automatic collection only makes finalizers due: they run at the next explicit collection or at exit.
+`lua54rt_close_state` (the driver after the results are printed, after an uncaught error's report, and `os.exit(code,
+true)`) runs the due ones and then all the marked objects, newest first, as `lua_close` does. The objects that are
+finalized are freed by a later collection if nothing refers to them.
+
+The suite runs three times: normally, with `LUA54RT_GC_THRESHOLD=1` (collection at nearly every allocation) and with
+`LUA54RT_GC_THRESHOLD=64`. All pass. On the garbage-heavy program (`gc_garbage.lua`) the peak resident size is 19 MB with
+collection, against 90 MB without.
+
+Not done: incremental or generational collection, so the timing of the automatic collections is not the reference's.
+The finalizer order and the weak results are those of the reference only after an explicit `collectgarbage` (the tests
+that depend on finalizer order use `collectgarbage("stop")` for the same reason). Userdata and `__gc` on anything but
+tables are not here (there are no userdata).
+
+## Tables
+
+`lua54rt.c`'s table is ltable.c's (Lua 5.4.9): an array part (`array`, `alimit`, and the `norealasize` hint that
+`BITRAS` is in ltable.c), and a hash part of 2^k nodes with `next` offsets, main positions and a `lastfree` search, so a
+rehash happens when Lua's does. `luaH_getn` (`table_getn`), `luaH_next` (`table_next`), `luaH_getint` (`table_getint`,
+which moves the `alimit` hint on a read, as Lua does), `rehash` with `computesizes`, and `luaH_resize` are ports of the
+same names. The border of `#` and the order of `pairs` over integer, float and boolean keys are then Lua's.
+
+Strings and other objects hash differently (Lua seeds its string hash at random, so the reference order of string keys
+is not fixed either). NEWTABLE passes lvm.c's size hints (`lua54rt_newtable(dst, hsize, asize)`), SETLIST grows the array
+at once (`luaH_resizearray`) and stores into it, and table.pack creates the table as ltablib.c does. Tests: `len_border.lua`
+(the shapes a program builds), `len_random.lua` (random updates, checking `#` and an order hash after each step) and
+`len_order.lua`.
 
 ## Metamethods
 
@@ -136,7 +199,12 @@ Implemented in the runtime, with ltm.c's order (the first operand's metatable, t
 `__index` and `__newindex` (tables, functions, and chains), `__call`, the arithmetic and bitwise events, `__unm`,
 `__bnot`, `__eq` (for two tables), `__lt`, `__le`, `__concat` (pairwise from the right, as luaV_concat), `__len`,
 `__tostring` (in `print` and `tostring`). Strings convert to numbers in arithmetic, and a string that does not convert
-gives lstrlib's `attempt to add a 'string' with a 'number'`. Only tables have metatables.
+gives lstrlib's `attempt to add a 'string' with a 'number'`. Only tables have metatables, and the string metatable.
+
+`__metatable` (`getmetatable` returns the field, `setmetatable` gives lbaselib's `cannot change a protected metatable`),
+`__pairs` (`pairs` returns the metamethod's three results; without it, `next`, the value and nil, so `pairs(nil)` fails in
+`next` as `for iterator`) and `__name` (in `luaL_typeerror`'s `got <name>` and in luaG_typeerror's `attempt to ... a
+<name> value`, and in `tostring`).
 
 ## Decisions
 
@@ -150,15 +218,17 @@ gives lstrlib's `attempt to add a 'string' with a 'number'`. Only tables have me
   `lua54rt_call` and `lua54rt_gettop`; no global is read by the IR.
 - **Strings are objects without interning.** Each string constant and each result is a new object. Equality compares the
   bytes, so behaviour is the same, only the cost differs.
-- **Refusal, not partial output.** A chunk with a `TBC` gives no IR at all.
+- **Refusal, not partial output.** A chunk with an opcode that has no lowering gives no IR at all.
 
 ## Verification
 
 - `tests/lua54bc/run.sh`: the reader loads real 5.4.9 chunks (dumped with `string.dump`); the opcode sequence matches
   `luac -l -l` when `LUAC` is set. The opcode check has not run: no `luac` is available here.
-- `tests/lua54bc/lower/run.sh`: 73 programs lower, emit, assemble, link (with `-lm`), run, and match
-  `print(dofile(...))` from Lua 5.4.9. 34 programs in `lower/err/` must give lua.c's first error line and status 1. A
-  `TBC` program is refused. Needs `LUA` (a 5.4.9 interpreter). The suite also passes with `LUA54RT_GC_THRESHOLD=1`.
+- `tests/lua54bc/lower/run.sh`: 106 programs lower, emit, assemble, link (with `-lm`), run, and match
+  `print(dofile(...))` from Lua 5.4.9. 54 programs in `lower/err/` must give lua.c's first error line and status 1, and 13
+  in `lower/tb/` must give lua.c's whole stderr (the traceback) and status 1. Needs
+  `LUA` (a 5.4.9 interpreter). The suite also passes with `LUA54RT_GC_THRESHOLD=1`, which collects at nearly every
+  allocation, and with `LUA54RT_GC_THRESHOLD=64`.
 
 ## String patterns
 
@@ -185,14 +255,11 @@ in the replacement function) leaks that buffer. The matcher's recursion is on th
 
 ## Not yet
 
-- **The rest of the libraries**: `%q` and `%a` in `string.format`, `table.sort` and `table.move`, `math.random`, `load`,
-  `dofile`, `require`, `select` with negative indices, `utf8`, `os`, `io`, `coroutine`. Each is a host function in the
-  runtime.
-- **Error levels**: `error(msg, 2)` reports the caller's position as level 1 does. A `pcall` that calls a library
-  function directly has no position in its message, as in Lua, but the library names (`'rep'`) are the short ones,
-  where Lua qualifies them (`'string.rep'`) in that case.
-- **Full tracebacks**: lua.c prints `stack traceback:` lines after the message; only the message is printed.
-- **To-be-closed variables** (`TBC`, `__close`, and the fourth value of a generic `for`).
-- **`__gc`, `__mode`, `__metatable`**, `__pairs`, and `__name` in messages.
-- **Length of tables with holes**: `#` counts from 1 up to the first nil, which is one border; Lua's `#` can pick another.
+- **The rest of the libraries**: `load`, `dofile`, `require` (they compile at run time, which the AOT path does not
+  do), `string.pack`, `unpack`, `packsize`, `dump`, `utf8`, `coroutine`, the rest of `os` (`date`, `difftime`, ...)
+  and `io` (`read`, files). Each is a host function in the runtime.
+- **Library names in messages**: a `pcall` that calls a library function directly gives `'rep'` where Lua gives
+  `'string.rep'`, and `math.random(2, 1)` called through `pcall` is `'random'` here. Calls from Lua code are the same.
+- **Incremental and generational collection**, so the timing of automatic collections (and of finalizers they make due)
+  differs from the reference; see "Garbage collection".
 - **`LOADKX` with more than 2^17 constants** is lowered but untested.

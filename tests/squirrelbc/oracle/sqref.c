@@ -4,9 +4,10 @@
  *
  * A .cnut (the stream of `sq -c`, tag 0xFAFA) is loaded with sq_readclosure, a .nut is compiled with sq_compilebuffer.
  * The closure runs with the root table as `this`. The result is printed the way the lowered programs print theirs
- * (tests/squirrelbc/runtime/driver.c): an integer as %lld, a boolean as true or false, null as null, a string as its text,
+ * (tests/squirrelbc/runtime/driver.c): an integer as %lld, a boolean as true or false, null as null, a string as its text, a float as %g,
  * one line. A runtime
  * error prints `error: MESSAGE` with the message alone and exits 1. Exit 2: the file cannot be read or compiled. */
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,6 +16,16 @@
 
 static SQInteger read_file(SQUserPointer up, SQUserPointer buf, SQInteger size) {
   return (SQInteger)fread(buf, 1, (size_t)size, (FILE *)up);
+}
+
+/* The print function of the standalone `sq` (sq/sq.c): the text is written with the format `%s` and no newline of its own,
+ * which is what base_print (sqbaselib.cpp) asks for. Without one, print does nothing. */
+static void print_func(HSQUIRRELVM v, const SQChar *fmt, ...) {
+  va_list vl;
+  (void)v;
+  va_start(vl, fmt);
+  vfprintf(stdout, fmt, vl);
+  va_end(vl);
 }
 
 int main(int argc, char **argv) {
@@ -33,6 +44,7 @@ int main(int argc, char **argv) {
   fseek(f, 0, SEEK_SET);
 
   HSQUIRRELVM v = sq_open(1024);
+  sq_setprintfunc(v, print_func, NULL);
   sq_pushroottable(v);
   if (is_stream) {
     if (SQ_FAILED(sq_readclosure(v, read_file, f))) {
@@ -87,6 +99,12 @@ int main(int argc, char **argv) {
       const SQChar *s = NULL;
       sq_getstring(v, -1, &s);
       printf("%s\n", s);
+      break;
+    }
+    case OT_FLOAT: {
+      SQFloat f = 0;
+      sq_getfloat(v, -1, &f);
+      printf("%g\n", (double)f);
       break;
     }
     default:

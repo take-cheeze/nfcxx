@@ -1,7 +1,8 @@
 // .mpy bytecode -> Path B IR (docs/notes/mpy-pathb.md). The subset: small ints, None/bool, str constants, names, locals,
 // the operators, jumps, calls of functions (positional arguments; no defaults, keywords or *args), closures (cell and free
-// variables, LOAD_DEREF, STORE_DEREF, MAKE_CLOSURE), lists, tuples, dicts (BUILD_MAP, STORE_MAP), slices, del of an item
-// (LOAD_NULL with STORE_SUBSCR), list and dict comprehensions (STORE_COMP), and return. Anything else is refused by name,
+// variables, LOAD_DEREF, STORE_DEREF, MAKE_CLOSURE), lists, tuples, dicts (BUILD_MAP, STORE_MAP, and the methods get, keys,
+// values, items, pop and update), sets (BUILD_SET), slices, del of an item (LOAD_NULL with STORE_SUBSCR), list, dict and set
+// comprehensions (STORE_COMP), and return. Anything else is refused by name,
 // and no IR is produced for a refused module.
 //
 // Each code object becomes one IR function. The stack is slots stk.N (one per depth) and the locals are loc.N. The module
@@ -18,6 +19,7 @@
 #include <cstdio>
 #include <functional>
 #include <map>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -138,11 +140,61 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
     } else if (o == opcode("STORE_FAST_N")) {
       op.kind = "STORE_LOCAL";
       op.arg = in.arg;
-    } else if (o == opcode("LOAD_NAME") || o == opcode("LOAD_GLOBAL")) {
-      op.kind = "LOAD_NAME";
+    } else if (o == opcode("LOAD_NAME")) {
+      op.kind = "LOAD_NAME";               // a class body's namespace, then the globals (mpy_load_name)
       op.arg = in.arg;
-    } else if (o == opcode("STORE_NAME") || o == opcode("STORE_GLOBAL")) {
-      op.kind = "STORE_NAME";
+    } else if (o == opcode("LOAD_GLOBAL")) {
+      op.kind = "LOAD_GLOBAL";             // the globals, then the builtins (mpy_load_global)
+      op.arg = in.arg;
+    } else if (o == opcode("STORE_NAME")) {
+      op.kind = "STORE_NAME";              // a class body's namespace, else the globals (mpy_store_name)
+      op.arg = in.arg;
+    } else if (o == opcode("STORE_GLOBAL")) {
+      op.kind = "STORE_GLOBAL";
+      op.arg = in.arg;
+    } else if (o == opcode("SETUP_EXCEPT") || o == opcode("SETUP_FINALLY")) {
+      // A try block: the handler is at the target, and its stack has the exception on top of the depth here.
+      op.kind = "SETUP";
+      op.arg = (long long)op.next + in.arg;
+      op.extra = o == opcode("SETUP_FINALLY") ? 1 : 0;   // the kind of block: 1 for a finally, 0 for an except
+    } else if (o == opcode("SETUP_WITH")) {
+      // A with statement: the context manager is on top. Its exit method goes below it, its __enter__ result on top, and the
+      // block is a finally (its exit runs on the way out, so an unwind through it is refused).
+      op.kind = "SETUP_WITH";
+      op.arg = (long long)op.next + in.arg;
+      op.extra = 2;   // the block kind: 2 for a with (1 for a finally, 0 for an except; see the walk)
+    } else if (o == opcode("WITH_CLEANUP")) {
+      op.kind = "WITH_CLEANUP";           // the exit method and the context manager below the top (None or an exception)
+    } else if (o == opcode("UNWIND_JUMP")) {
+      // A break or continue that leaves try blocks: the target is relative to the byte after the offset, which is the extra
+      // byte (the number of blocks to leave, and bit 0x80 for a break out of a for loop).
+      op.kind = "UNWIND_JUMP";
+      op.arg = (long long)op.next - 1 + in.arg;
+      op.extra = in.extra;
+    } else if (o == opcode("POP_EXCEPT_JUMP")) {
+      op.kind = "POP_EXCEPT_JUMP";         // ends the block, then jumps
+      op.arg = (long long)op.next + in.arg;
+    } else if (o == opcode("END_FINALLY")) {
+      op.kind = "END_FINALLY";             // ends the block; None goes on, an exception is raised again
+    } else if (o == opcode("DELETE_FAST")) {
+      op.kind = "DELETE_LOCAL";            // del of a local, as an except clause's name is deleted: it becomes unbound
+      op.arg = in.arg;
+    } else if (o == opcode("DELETE_NAME")) {
+      op.kind = "DELETE_NAME";             // del of a name in a class body or at module level
+      op.arg = in.arg;
+    } else if (o == opcode("RAISE_OBJ")) {
+      op.kind = "RAISE_OBJ";
+    } else if (o == opcode("RAISE_LAST")) {
+      op.kind = "RAISE_LAST";              // a bare raise
+    } else if (o == opcode("RAISE_FROM")) {
+      op.kind = "RAISE_FROM";              // the cause is on top of the exception (the reference drops it, see mpy_raise_from)
+    } else if (o == opcode("LOAD_BUILD_CLASS")) {
+      op.kind = "BUILD_CLASS";             // the builtin __build_class__, which the class statement calls
+    } else if (o == opcode("LOAD_ATTR")) {
+      op.kind = "LOAD_ATTR";
+      op.arg = in.arg;                     // a qstr
+    } else if (o == opcode("STORE_ATTR")) {
+      op.kind = "STORE_ATTR";              // the object is on top, the value below it (vm.c)
       op.arg = in.arg;
     } else if (o == opcode("POP_TOP")) {
       op.kind = "POP_TOP";
@@ -150,6 +202,8 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
       op.kind = "DUP_TOP";
     } else if (o == opcode("ROT_TWO")) {
       op.kind = "ROT_TWO";
+    } else if (o == opcode("DUP_TOP_TWO")) {
+      op.kind = "DUP_TWO";                 // the top two values are copied on top: a, b becomes a, b, a, b
     } else if (o == opcode("POP_JUMP_IF_FALSE")) {
       op.kind = "JUMP_IF_FALSE";
       op.arg = (long long)op.next + in.arg;
@@ -187,10 +241,12 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
     } else if (o == opcode("BUILD_SLICE")) {
       op.kind = "BUILD_SLICE";
       op.arg = in.arg;                    // 2 or 3: the start, the stop and the step (none when absent)
+    } else if (o == opcode("BUILD_SET")) {
+      op.kind = "BUILD_SET";              // the number of items, taken from the stack (mp_obj_new_set)
+      op.arg = in.arg;
     } else if (o == opcode("STORE_COMP")) {
       // A comprehension's store: the argument is (the collection's offset below the top << 2) | its kind (0 list, 1 dict,
-      // 2 set). A set comprehension is refused.
-      if ((in.arg & 3) == 2) refused("a set comprehension is not lowered yet");
+      // 2 set).
       op.kind = "STORE_COMP";
       op.arg = in.arg >> 2;
       op.extra = in.arg & 3;
@@ -228,6 +284,10 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
     } else if (o == opcode("LOAD_METHOD")) {
       op.kind = "LOAD_METHOD";             // the argument is the attribute's qstr; only append and pop are lowered (below)
       op.arg = in.arg;
+    } else if (o == opcode("LOAD_SUPER_METHOD")) {
+      // super().name: the class and the self are on the stack (the super global below them is replaced by the method).
+      op.kind = "LOAD_SUPER_METHOD";
+      op.arg = in.arg;
     } else if (o == opcode("CALL_METHOD")) {
       if ((in.arg >> 8) != 0) refused("keyword arguments in a call are not lowered yet");
       op.kind = "CALL_METHOD";             // the positional argument count; the method and its self lie below the arguments
@@ -244,6 +304,20 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
   return out;
 }
 
+// The methods of the builtin types that the runtime does not have yet (str, list, dict, set, ...): a method call of one of
+// these names is refused. A class's method of such a name is refused too, which is the cost of not knowing the receiver's
+// type. The dict methods that are lowered (get, keys, values, items, pop, update) are not here.
+// The names that a dict or a set has too (copy, clear, setdefault, popitem, fromkeys, add, discard, remove, union, intersection,
+// difference) are not refused here: the lowering does not know the receiver's type, so the runtime refuses them on a value
+// that is neither a dict nor a set (mpy_load_method, refused_method_name).
+const std::set<std::string> kBuiltinMethods = {
+    "capitalize", "center", "count", "encode", "endswith", "extend", "find", "format", "index",
+    "insert", "isalpha", "isdigit", "isspace", "join", "ljust", "lower", "lstrip", "partition",
+    "replace", "reverse", "rfind", "rindex", "rjust", "rstrip", "rsplit", "sort", "split", "splitlines",
+    "startswith", "strip", "title", "upper", "zfill",
+    "isdisjoint", "issubset", "issuperset", "symmetric_difference", "difference_update",
+    "intersection_update", "symmetric_difference_update"};
+
 // A for loop's iterator takes MP_OBJ_ITER_BUF_NSLOTS stack slots (obj.h: 4 on 32- and 64-bit hosts); its object is in the
 // bottom one. break pops all of them.
 constexpr int kIterSlots = 4;
@@ -253,9 +327,15 @@ int effect(const Op &op) {
   const std::string &k = op.kind;
   if (k == "LOAD_SMALL" || k == "LOAD_NONE" || k == "LOAD_FALSE" || k == "LOAD_TRUE" || k == "LOAD_NAME" ||
       k == "LOAD_LOCAL" || k == "LOAD_STR" || k == "LOAD_OBJ" || k == "LOAD_DEREF" || k == "DUP_TOP" ||
-      k == "MAKE_FUNCTION" || k == "LOAD_NULL" || k == "BUILD_MAP")
+      k == "MAKE_FUNCTION" || k == "LOAD_NULL" || k == "BUILD_MAP" || k == "LOAD_GLOBAL" || k == "BUILD_CLASS")
     return 1;
-  if (k == "BUILD_LIST" || k == "BUILD_TUPLE") return 1 - (int)op.arg;   // the items go, the container comes
+  if (k == "STORE_ATTR") return -2;      // the object and the value go
+  if (k == "SETUP_WITH") return 2;       // the exit method goes under the context manager, and __enter__'s value comes on top
+  if (k == "WITH_CLEANUP") return -2;    // the top and the context manager go; the result takes the exit method's place
+  if (k == "END_FINALLY" || k == "RAISE_OBJ") return -1;   // the value on top goes
+  if (k == "RAISE_FROM") return -2;      // the exception and its cause go
+  if (k == "DUP_TWO") return 2;
+  if (k == "BUILD_LIST" || k == "BUILD_TUPLE" || k == "BUILD_SET") return 1 - (int)op.arg;   // the items go, the container comes
   if (k == "BUILD_SLICE") return 1 - (int)op.arg;                        // the start, stop (and step) go, the slice comes
   if (k == "STORE_MAP") return -2;                                       // the value and key go; the dict stays
   if (k == "STORE_COMP") return op.extra == 1 ? -2 : -1;                 // a dict takes its key and value, a list its item
@@ -266,14 +346,22 @@ int effect(const Op &op) {
   if (k == "GET_ITER") return kIterSlots - 1;   // the object goes, the iterator's slots come
   if (k == "CALL") return -(int)op.arg;   // the function and its arguments go, the result comes
   if (k == "LOAD_METHOD") return 1;        // the object becomes the method, and stays as the self above it
+  if (k == "LOAD_SUPER_METHOD") return -1; // the class and self go, the method takes the super's slot and the self stays
   if (k == "CALL_METHOD") return -(int)op.arg - 1;   // the method, the self and the arguments go, the result comes
   if (k == "MAKE_CLOSURE") return 1 - (int)op.extra;   // the captured cells go, the closure comes
-  if (k == "STORE_NAME" || k == "STORE_LOCAL" || k == "STORE_DEREF" || k == "POP_TOP" || k == "BINARY" ||
-      k == "JUMP_IF_FALSE" || k == "JUMP_IF_TRUE" || k == "JUMP_IF_TRUE_OR_POP" || k == "JUMP_IF_FALSE_OR_POP" ||
-      k == "RETURN")
+  if (k == "STORE_NAME" || k == "STORE_GLOBAL" || k == "STORE_LOCAL" || k == "STORE_DEREF" || k == "POP_TOP" ||
+      k == "BINARY" || k == "JUMP_IF_FALSE" || k == "JUMP_IF_TRUE" || k == "JUMP_IF_TRUE_OR_POP" ||
+      k == "JUMP_IF_FALSE_OR_POP" || k == "RETURN")
     return -1;   // for the or-pop jumps this is the fall-through; the jump itself keeps the value
-  return 0;   // UNARY, ROT_TWO, JUMP
+  // UNARY, ROT_TWO, JUMP, LOAD_ATTR (the object becomes the attribute), SETUP, POP_EXCEPT_JUMP, RAISE_LAST: no change
+  return 0;
 }
+
+// An open block as the walk records it (see unit): 0 for an except, 1 for a finally, 2 for a with block and 3 for a for loop. A
+// with block's value also holds the stack slot of its exit method (the slot below its context manager, as SETUP_WITH leaves
+// it), and a for loop's holds the base slot of its iterator.
+int kind_of(int block) { return block & 3; }
+int exit_slot_of(int block) { return block >> 2; }
 
 std::string lbl(size_t at) { return "\"pc" + std::to_string(at) + "\""; }
 
@@ -385,45 +473,104 @@ class Lowerer {
     std::vector<Op> ops = normalize(decode_code(code.data(), code.size()));
 
     // The depth before each instruction, from the stack effects. A jump target must agree on it.
+    // The walk also keeps the try blocks open at each instruction (kind 1 for a finally, 0 for an except): a
+    // break or continue that leaves one is an UNWIND_JUMP, and leaving a finally would run its code, which is not lowered.
     std::map<size_t, int> depth;
+    std::map<size_t, std::vector<int>> blocks_at;
     std::map<size_t, size_t> index;
     for (size_t i = 0; i < ops.size(); ++i) index[ops[i].offset] = i;
     std::vector<size_t> work{0};
     depth[0] = 0;
+    blocks_at[0] = {};
     while (!work.empty()) {
       size_t at = work.back();
       work.pop_back();
       if (!index.count(at)) throw std::runtime_error("mpy: a jump lands between instructions");
       const Op &op = ops[index[at]];
       int d = depth[at];
+      const std::vector<int> open = blocks_at[at];
       int after = d + effect(op);
       if (after < 0) throw std::runtime_error("mpy: stack underflow");
-      // (successor, depth there). A jump-or-pop keeps its value when it jumps, so the target is at depth d.
-      std::vector<std::pair<size_t, int>> succ;
-      if (op.kind == "RETURN") {
-        // nothing follows
+      // (successor, depth there, the try blocks open there). A jump-or-pop keeps its value when it jumps, so the target is at
+      // depth d.
+      struct Succ {
+        size_t at;
+        int depth;
+        std::vector<int> blocks;
+      };
+      std::vector<Succ> succ;
+      std::vector<int> popped = open;
+      if (!popped.empty() && (op.kind == "POP_EXCEPT_JUMP" || op.kind == "END_FINALLY")) popped.pop_back();
+      if (op.kind == "RETURN" || op.kind == "RAISE_OBJ" || op.kind == "RAISE_LAST" || op.kind == "RAISE_FROM") {
+        // nothing follows (a raise never returns)
+      } else if (op.kind == "SETUP" || op.kind == "SETUP_WITH") {
+        // the handler is entered with the exception on top: the depth there is one more than at the try. A with statement's
+        // stack at its handler is the exit method, the context manager and the exception, so it is two more than before.
+        // A with block records its exit method's slot, which is the depth before it less one (SETUP_WITH's lowering).
+        int kind = op.kind == "SETUP_WITH" ? (2 | ((d - 1) << 2)) : op.extra;   // 1 for SETUP_FINALLY, 0 for SETUP_EXCEPT
+        std::vector<int> inner = open;
+        inner.push_back(kind);
+        succ.push_back({op.next, after, inner});
+        succ.push_back({(size_t)op.arg, op.kind == "SETUP_WITH" ? d + 2 : d + 1, inner});
+      } else if (op.kind == "POP_EXCEPT_JUMP") {
+        succ.push_back({(size_t)op.arg, after, popped});
+      } else if (op.kind == "UNWIND_JUMP") {
+        // Pops the blocks it leaves (extra & 0x7f of them), then, when bit 0x80 is set, the for loop it breaks out of. The stack
+        // at the target is the one the loop body had at its start: a with block's exit method and context manager are dropped with
+        // it (WITH_CLEANUP removes them), so the target is the lowest such slot; a break also drops the iterator.
+        size_t n = (size_t)(op.extra & 0x7f);
+        if (n > open.size()) throw std::runtime_error("mpy: an unwind leaves more blocks than are open");
+        std::vector<int> left(open.begin(), open.end() - (long)n);
+        int target_depth = d;
+        for (size_t i = open.size() - n; i < open.size(); ++i) {
+          if (kind_of(open[i]) == 1) refused("a break or continue out of a try block with a name (a finally) is not lowered yet");
+          if (kind_of(open[i]) == 2 && exit_slot_of(open[i]) < target_depth) target_depth = exit_slot_of(open[i]);
+        }
+        if (op.extra & 0x80) {
+          // the loop's entry is the next block out: it goes, and the target is the loop's base
+          if (left.empty() || kind_of(left.back()) != 3) throw std::runtime_error("mpy: internal: a break without its loop");
+          target_depth = exit_slot_of(left.back());
+          left.pop_back();
+        }
+        succ.push_back({(size_t)op.arg, target_depth, left});
+      } else if (op.kind == "GET_ITER") {
+        // A for loop's iterator: its kIterSlots slots start at the slot below the object. The loop is an entry (kind 3) in the
+        // open blocks until it is exhausted, so a break or continue out of the body can find its base.
+        std::vector<int> inner = open;
+        inner.push_back(3 | ((d - 1) << 2));
+        succ.push_back({op.next, after, inner});
       } else if (op.kind == "JUMP") {
-        succ.push_back({(size_t)op.arg, after});
+        // A break with no block to leave is four POP_TOPs (the iterator) and a JUMP (mp_emit_bc_unwind_jump): the JUMP at the
+        // loop's base leaves the loop, so its entry goes. Any other jump in a loop body is above the base.
+        std::vector<int> leaving = open;
+        if (!leaving.empty() && kind_of(leaving.back()) == 3 && d == exit_slot_of(leaving.back())) leaving.pop_back();
+        succ.push_back({(size_t)op.arg, after, leaving});
       } else if (op.kind == "JUMP_IF_FALSE" || op.kind == "JUMP_IF_TRUE") {
-        succ.push_back({(size_t)op.arg, after});
-        succ.push_back({op.next, after});
+        succ.push_back({(size_t)op.arg, after, open});
+        succ.push_back({op.next, after, open});
       } else if (op.kind == "FOR_ITER") {
-        // exhausted: the iterator's kIterSlots slots are dropped, so the target is that much shallower
-        succ.push_back({(size_t)op.arg, d - kIterSlots});
-        succ.push_back({op.next, after});
+        // exhausted: the iterator's kIterSlots slots are dropped, so the target is that much shallower, and the loop's entry ends
+        std::vector<int> done = open;
+        if (done.empty() || kind_of(done.back()) != 3) throw std::runtime_error("mpy: internal: a for loop without its entry");
+        done.pop_back();
+        succ.push_back({(size_t)op.arg, d - kIterSlots, done});
+        succ.push_back({op.next, after, open});
       } else if (op.kind == "JUMP_IF_FALSE_OR_POP" || op.kind == "JUMP_IF_TRUE_OR_POP") {
-        succ.push_back({(size_t)op.arg, d});
-        succ.push_back({op.next, after});
+        succ.push_back({(size_t)op.arg, d, open});
+        succ.push_back({op.next, after, open});
+      } else if (op.kind == "END_FINALLY") {
+        succ.push_back({op.next, after, popped});
       } else {
-        succ.push_back({op.next, after});
+        succ.push_back({op.next, after, open});
       }
-      for (const auto &[s, sd] : succ) {
-        if (s >= code.size()) throw std::runtime_error("mpy: a jump leaves the code");
-        auto it = depth.find(s);
+      for (const Succ &s : succ) {
+        if (s.at >= code.size()) throw std::runtime_error("mpy: a jump leaves the code");
+        auto it = depth.find(s.at);
         if (it == depth.end()) {
-          depth[s] = sd;
-          work.push_back(s);
-        } else if (it->second != sd) {
+          depth[s.at] = s.depth;
+          blocks_at[s.at] = s.blocks;
+          work.push_back(s.at);
+        } else if (it->second != s.depth || blocks_at[s.at] != s.blocks) {
           throw std::runtime_error("mpy: stack depth differs at a join");
         }
       }
@@ -439,6 +586,7 @@ class Lowerer {
 
     int next = is_fn ? 3 : 0;   // %0..%2 are the parameters of a function
     std::ostringstream body;
+    std::ostringstream stubs;   // the landing of each try block: out of line, after the body (see SETUP)
     auto fresh = [&]() { return "%" + std::to_string(next++); };
     auto slot = [](const std::string &kind, int i) { return "$\"" + kind + "." + std::to_string(i) + "\""; };
     auto push = [&](int d, const std::string &value) {
@@ -509,6 +657,22 @@ class Lowerer {
       body << "  (store unsigned_long " << local((long long)c) << " " << cell << ")\n";
     }
 
+    // Leaves the n innermost blocks of open (a return or an unwinding jump), innermost first, as the reference does: a with block
+    // calls its __exit__ with None, None, None (WITH_CLEANUP's normal path), and an except block is dropped. The block is dropped
+    // before the exit is called, so an exception from the exit goes to the blocks that enclose the statement. A for loop's entry
+    // (kind 3) has no block to drop, so it is skipped.
+    auto leave_blocks = [&](const std::vector<int> &open, size_t n) {
+      for (size_t i = open.size(); i-- > open.size() - n;) {
+        if (kind_of(open[i]) == 3) continue;
+        body << "  (eval (call void &\"mpy_block_pop\"))\n";
+        if (kind_of(open[i]) == 2) {
+          std::string ex = load(exit_slot_of(open[i])), r = fresh();
+          body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_with_cleanup\" " << ex
+               << " (const unsigned_long 6)))\n";
+        }
+      }
+    };
+
     for (const Op &op : ops) {
       auto dit = depth.find(op.offset);
       if (dit == depth.end()) continue;   // unreachable code emits nothing
@@ -534,19 +698,20 @@ class Lowerer {
           value = constant(m_.objs[(size_t)op.arg]);
         }
         push(d, value);
-      } else if (k == "LOAD_NAME") {
+      } else if (k == "LOAD_NAME" || k == "LOAD_GLOBAL") {
         std::string sym = name_sym((size_t)op.arg);
         size_t len = m_.qstrs[(size_t)op.arg].size();
         std::string r = fresh();
-        body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_load_name\" @\"" << sym
+        body << "  (let " << r << " unsigned_long (call unsigned_long &\""
+             << (k == "LOAD_NAME" ? "mpy_load_name" : "mpy_load_global") << "\" @\"" << sym
              << "\" (const unsigned_long " << len << ")))\n";
         push(d, r);
-      } else if (k == "STORE_NAME") {
+      } else if (k == "STORE_NAME" || k == "STORE_GLOBAL") {
         std::string sym = name_sym((size_t)op.arg);
         size_t len = m_.qstrs[(size_t)op.arg].size();
         std::string v = pop(d);
-        body << "  (eval (call void &\"mpy_store_name\" @\"" << sym << "\" (const unsigned_long " << len << ") " << v
-             << "))\n";
+        body << "  (eval (call void &\"" << (k == "STORE_NAME" ? "mpy_store_name" : "mpy_store_global") << "\" @\"" << sym
+             << "\" (const unsigned_long " << len << ") " << v << "))\n";
       } else if (k == "LOAD_LOCAL") {
         std::string r = fresh();
         body << "  (let " << r << " unsigned_long (load unsigned_long " << local(op.arg) << "))\n";
@@ -559,6 +724,10 @@ class Lowerer {
       } else if (k == "DUP_TOP") {
         std::string v = pop(d);
         push(d, v);   // the copy goes on top; the original is still in the slot below it
+      } else if (k == "DUP_TWO") {
+        std::string a = load(d - 2), b = load(d - 1);
+        push(d, a);
+        push(d + 1, b);
       } else if (k == "ROT_TWO") {
         // pop(d) takes the top (slot d-1), pop(d-1) the one below it (slot d-2); the top goes below after the rotation.
         std::string top = pop(d), below = pop(d - 1);
@@ -621,18 +790,30 @@ class Lowerer {
              << ")))\n";
         push(d - n - 1, r);
       } else if (k == "LOAD_METHOD") {
-        // obj.name, for the list methods the runtime has. The method comes from mpy_load_method (which fails for any other
-        // value); obj stays on the stack as the self. Any other name is refused: its method is not in the runtime yet.
+        // obj.name: the method, and the self to pass it (0 when the attribute is not a method of the class, so the call takes
+        // none). mpy_load_method fails for a value that has no such attribute. The builtin methods of the other types are
+        // refused by name, since the runtime does not have them.
         if ((size_t)op.arg >= m_.qstrs.size()) throw std::runtime_error("mpy: qstr index out of range");
         const std::string name = m_.qstrs[(size_t)op.arg];
-        if (name != "append" && name != "pop") refused("method " + name + " is not lowered yet");
-        std::string obj = pop(d), sym = name_sym((size_t)op.arg), meth = fresh();
+        if (kBuiltinMethods.count(name)) refused("method " + name + " is not lowered yet");
+        std::string obj = pop(d), sym = name_sym((size_t)op.arg), meth = fresh(), self = fresh();
         body << "  (let " << meth << " unsigned_long (call unsigned_long &\"mpy_load_method\" " << obj << " @\"" << sym
              << "\" (const unsigned_long " << name.size() << ")))\n";
+        body << "  (let " << self << " unsigned_long (call unsigned_long &\"mpy_method_self\"))\n";
         push(d - 1, meth);
-        push(d, obj);
+        push(d, self);
+      } else if (k == "LOAD_SUPER_METHOD") {
+        // [super, cls, self] become [method, self]: vm.c writes the method over the super global's slot and leaves the self.
+        if ((size_t)op.arg >= m_.qstrs.size()) throw std::runtime_error("mpy: qstr index out of range");
+        std::string self = pop(d), cls = load(d - 2), sym = name_sym((size_t)op.arg), meth = fresh(), out = fresh();
+        body << "  (let " << meth << " unsigned_long (call unsigned_long &\"mpy_load_super_method\" " << cls << " " << self
+             << " @\"" << sym << "\" (const unsigned_long " << m_.qstrs[(size_t)op.arg].size() << ")))\n";
+        body << "  (let " << out << " unsigned_long (call unsigned_long &\"mpy_method_self\"))\n";
+        push(d - 3, meth);
+        push(d - 2, out);
       } else if (k == "CALL_METHOD") {
-        // [method, self, args...]: the self and the arguments go on the value stack, and mpy_call takes them all.
+        // [method, self, args...]: the self (0 for none) and the arguments go on the value stack; mpy_call_method drops a
+        // null self and calls.
         int n = (int)op.arg;
         for (int i = 0; i <= n; ++i) {
           std::string v = load(d - n - 1 + i);
@@ -640,9 +821,85 @@ class Lowerer {
         }
         std::string f = load(d - n - 2);
         std::string r = fresh();
-        body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_call\" " << f << " (const unsigned_long " << n + 1
+        body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_call_method\" " << f << " (const unsigned_long " << n
              << ")))\n";
         push(d - n - 2, r);
+      } else if (k == "LOAD_ATTR") {
+        if ((size_t)op.arg >= m_.qstrs.size()) throw std::runtime_error("mpy: qstr index out of range");
+        std::string obj = pop(d), sym = name_sym((size_t)op.arg), r = fresh();
+        body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_load_attr\" " << obj << " @\"" << sym
+             << "\" (const unsigned_long " << m_.qstrs[(size_t)op.arg].size() << ")))\n";
+        push(d - 1, r);
+      } else if (k == "STORE_ATTR") {
+        // the object is on top, the value below it
+        if ((size_t)op.arg >= m_.qstrs.size()) throw std::runtime_error("mpy: qstr index out of range");
+        std::string obj = pop(d), val = pop(d - 1), sym = name_sym((size_t)op.arg);
+        body << "  (eval (call void &\"mpy_store_attr\" " << obj << " @\"" << sym << "\" (const unsigned_long "
+             << m_.qstrs[(size_t)op.arg].size() << ") " << val << "))\n";
+      } else if (k == "BUILD_CLASS") {
+        std::string r = fresh();
+        body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_build_class_fn\"))\n";
+        push(d, r);
+      } else if (k == "SETUP" || k == "SETUP_WITH") {
+        // A try block (SETUP_EXCEPT, SETUP_FINALLY, SETUP_WITH): the block is pushed, and _setjmp is called on it in this frame. It
+        // returns 0 here; when a raise longjmps back, it returns 1, and the landing stub (after the body) hands the exception to
+        // the handler at the target, in the slot of this depth (the slot above the context manager for a with statement).
+        int exc_slot = d;
+        if (k == "SETUP_WITH") {
+          // __exit__ is looked up and __enter__ called before the block, so an exception from __enter__ is not this with's.
+          // The exit method goes below the context manager (slot d-1 is the manager's, moved to d), and __enter__'s value on top.
+          std::string ctx = load(d - 1), ex = fresh(), en = fresh();
+          body << "  (let " << ex << " unsigned_long (call unsigned_long &\"mpy_with_exit\" " << ctx << "))\n";
+          body << "  (let " << en << " unsigned_long (call unsigned_long &\"mpy_with_enter\" " << ctx << "))\n";
+          push(d - 1, ex);
+          push(d, ctx);
+          push(d + 1, en);
+          exc_slot = d + 1;
+        }
+        std::string landing = "land" + std::to_string(op.offset);
+        std::string jb = fresh(), rc = fresh(), c = fresh(), e = fresh();
+        body << "  (let " << jb << " unsigned_long (call unsigned_long &\"mpy_try_enter\"))\n";
+        body << "  (let " << rc << " int (call int &\"_setjmp\" " << jb << "))\n";
+        body << "  (let " << c << " bool (ne int " << rc << " (const int 0)))\n";
+        body << "  (if " << c << " (then (goto \"" << landing << "\")) (else))\n";
+        stubs << "  (label \"" << landing << "\")\n";
+        stubs << "  (let " << e << " unsigned_long (call unsigned_long &\"mpy_take_exc\"))\n";
+        stubs << "  (store unsigned_long " << slot("stk", exc_slot) << " " << e << ")\n";
+        stubs << "  (goto " << lbl((size_t)op.arg) << ")\n";
+      } else if (k == "WITH_CLEANUP") {
+        // The stack is [exit method, context manager, top] (slots d-3, d-2, d-1): the top is None when the body ended, or the
+        // exception that is raised. The result takes the exit method's slot, and END_FINALLY checks it.
+        std::string top = load(d - 1), ex = load(d - 3), r = fresh();
+        body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_with_cleanup\" " << ex << " " << top << "))\n";
+        push(d - 3, r);
+      } else if (k == "POP_EXCEPT_JUMP") {
+        body << "  (eval (call void &\"mpy_block_pop\"))\n";
+        body << "  (goto " << lbl((size_t)op.arg) << ")\n";
+      } else if (k == "UNWIND_JUMP") {
+        // Leaves (extra & 0x7f) blocks, running the exit of each with block; a for loop's iterator (bit 0x80) is dropped by the
+        // depth, which is static here.
+        auto open_it = blocks_at.find(op.offset);
+        if (open_it == blocks_at.end()) throw std::runtime_error("mpy: internal: an unwind at an unknown depth");
+        leave_blocks(open_it->second, (size_t)(op.extra & 0x7f));
+        body << "  (goto " << lbl((size_t)op.arg) << ")\n";
+      } else if (k == "RAISE_FROM") {
+        // [exception, cause] with the cause on top
+        std::string cause = pop(d), exc = pop(d - 1);
+        body << "  (eval (call void &\"mpy_raise_from\" " << exc << " " << cause << "))\n";
+      } else if (k == "END_FINALLY") {
+        std::string v = pop(d);
+        body << "  (eval (call void &\"mpy_end_finally\" " << v << "))\n";
+      } else if (k == "RAISE_OBJ") {
+        std::string v = pop(d);
+        body << "  (eval (call void &\"mpy_raise_obj\" " << v << "))\n";
+      } else if (k == "RAISE_LAST") {
+        body << "  (eval (call void &\"mpy_reraise\"))\n";
+      } else if (k == "DELETE_LOCAL") {
+        body << "  (store unsigned_long " << local(op.arg) << " (const unsigned_long 0))\n";   // 0 is unbound
+      } else if (k == "DELETE_NAME") {
+        std::string sym = name_sym((size_t)op.arg);
+        body << "  (eval (call void &\"mpy_delete_name\" @\"" << sym << "\" (const unsigned_long "
+             << m_.qstrs[(size_t)op.arg].size() << ")))\n";
       } else if (k == "JUMP_IF_FALSE" || k == "JUMP_IF_TRUE") {
         std::string v = pop(d);
         std::string t = fresh(), c = fresh();
@@ -669,7 +926,7 @@ class Lowerer {
         } else {
           body << "  (if " << c << " (then (goto " << lbl((size_t)op.arg) << ")) (else))\n";
         }
-      } else if (k == "BUILD_LIST" || k == "BUILD_TUPLE") {
+      } else if (k == "BUILD_LIST" || k == "BUILD_TUPLE" || k == "BUILD_SET") {
         int n = (int)op.arg;
         for (int i = 0; i < n; ++i) {
           std::string v = load(d - n + i);
@@ -677,7 +934,8 @@ class Lowerer {
         }
         std::string r = fresh();
         body << "  (let " << r << " unsigned_long (call unsigned_long &\""
-             << (k == "BUILD_LIST" ? "mpy_build_list" : "mpy_build_tuple") << "\" (const unsigned_long " << n << ")))\n";
+             << (k == "BUILD_LIST" ? "mpy_build_list" : (k == "BUILD_SET" ? "mpy_build_set" : "mpy_build_tuple"))
+             << "\" (const unsigned_long " << n << ")))\n";
         push(d - n, r);
       } else if (k == "LOAD_SUBSCR") {
         std::string idx = pop(d), obj = pop(d - 1);
@@ -723,6 +981,9 @@ class Lowerer {
         if (op.extra == 0) {
           std::string v = load(top), coll = load(top - (int)op.arg);
           body << "  (eval (call void &\"mpy_list_append\" " << coll << " " << v << "))\n";
+        } else if (op.extra == 2) {
+          std::string v = load(top), coll = load(top - (int)op.arg);
+          body << "  (eval (call void &\"mpy_set_store\" " << coll << " " << v << "))\n";
         } else {
           std::string key = load(top), v = load(top - 1), coll = load(top - (int)op.arg);
           body << "  (eval (call void &\"mpy_dict_store\" " << coll << " " << key << " " << v << "))\n";
@@ -751,6 +1012,10 @@ class Lowerer {
             } else if (k == "JUMP") {
         body << "  (goto " << lbl((size_t)op.arg) << ")\n";
       } else if (k == "RETURN") {
+        // A return leaves every block it is in (MicroPython's unwind_return): a with block calls its __exit__, and an except block
+        // is dropped.
+        auto open_it = blocks_at.find(op.offset);
+        if (open_it != blocks_at.end()) leave_blocks(open_it->second, open_it->second.size());
         std::string v = pop(d);
         if (is_fn) body << "  (store unsigned_long %0 " << v << ")\n";
         body << "  (return)\n";
@@ -758,6 +1023,7 @@ class Lowerer {
         throw std::runtime_error("mpy: internal: kind not handled: " + k);
       }
     }
+    body << stubs.str();
 
     std::ostringstream out;
     out << "(function \"" << fname << "\" (ret void) "

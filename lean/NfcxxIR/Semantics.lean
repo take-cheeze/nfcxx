@@ -10,8 +10,8 @@ checked and bitwise arithmetic, comparisons, the integer conversions `iconv` and
 a value (its value is discarded), and the structured statements (`let`, `set`, `if`, `loop`, `block`, `switch`
 with its top-level `case` and `default` labels, `break`, `continue`, `return`, `unreachable`, `trap`). Everything
 else is reported as `stuck` with the reason, never silently skipped: pointers into anything but a slot, pointers
-stored in memory, calls outside the module, floats, exceptions, `goto`, and labels nested inside a switch arm.
-Those are the next steps.
+stored in memory outside the slot model (see the memory section), calls outside the module, floats, exceptions,
+`goto`, and labels nested inside a switch arm. Those are the next steps.
 
 Values are mathematical integers, kept in the range of their type by `wrapTo` after every operation, or pointers
 (see the memory section). A boolean is 0 or 1. The semantics is fuel-bounded: running out of fuel is `stuck`, so
@@ -152,6 +152,9 @@ name is declared more than once in the function (scopes are not modelled, so tha
 inductive Cell where
   | reg : Nat → Cell
   | byte : String → Nat → Cell
+  /-- The side table of stored pointers: the pointer (a block and offset, or null) stored over the bytes
+  `[i, i + ptrBytes)` of slot `x`, keyed by the slot name and the index `i` of its first byte. -/
+  | ptr : String → Nat → Cell
   | size : String → Cell
   | dup : String → Cell
   deriving BEq
@@ -303,10 +306,37 @@ of the slot, and `(null T)` is the null pointer. The rules, where C++ makes an o
 - A load or store through the null pointer is the trap "null dereference".
 - A load or store that reaches past the end of its block is the trap "pointer out of bounds".
 
-Stuck, with the reason: a load or store of a pointer type, a pointer as the value of a store, `ret` of a pointer, a
-pointer where an integer is needed (arithmetic, comparison, conditions, casts, call arguments), an integer used as
-an address, a pointer bound to an integer register, a global or a function address, `index`, `pdiff`, `copy`,
-`bfstore`, and a slot the function does not declare. -/
+A pointer (of any pointee type, or null) can be stored in a slot and loaded back: it occupies `ptrBytes` = 8 bytes,
+the pointer size of the module layout. Its identity is not in those bytes: each of the 8 bytes holds the marker
+`ptrByte`, and the side table `Cell.ptr x i` holds the pointer itself, keyed by the slot and the index of its
+first byte. A load of a pointer type reads the side table entry at its offset; a store of a pointer writes the
+markers and the entry. Any integer store over part of a stored pointer drops its entry and marks the bytes of it
+that it does not overwrite as `ptrStale`. The rules for the bytes:
+- A pointer load where the side table has no entry at its offset is stuck: if the bytes overlap a stored pointer
+  that starts before the offset, "pointer bytes read at a different width are not modelled"; if an integer store
+  overwrote part of it, the reason says so; otherwise the bytes hold no stored pointer.
+- An integer load that reads a marker byte, of any width or offset, is stuck with "pointer bytes read at a
+  different width are not modelled" (a stale byte says it was overwritten in part).
+- A pointer load or store through a global, or of a pointer as an integer, is stuck as before. Storing an integer
+  through a pointer type, or storing a pointer through an integer type, is stuck.
+
+Stuck, with the reason: a pointer where an integer is needed (arithmetic, comparison, conditions, casts, call
+arguments), an integer used as an address, a pointer bound to an integer register, `ret` of a pointer, a global or
+a function address, `index`, `pdiff`, `copy`, `bfstore`, and a slot the function does not declare. -/
+
+/-- The size of a pointer in bytes: the `(pointer 8)` of the module layout that the tests use. The semantics does
+not read the layout, so a module with another pointer size needs this to follow it. -/
+def ptrBytes : Nat := 8
+
+/-- The marker in a byte of a stored pointer. It is not a byte value (0 to 255), so an integer read never sees it
+as one. -/
+def ptrByte : Int := 256
+
+/-- The marker in a byte of a pointer whose side table entry was dropped by an integer store over part of it. -/
+def ptrStale : Int := 257
+
+def ptrPartialMsg : String := "pointer bytes read at a different width are not modelled"
+def ptrStaleMsg : String := "a stored pointer was overwritten in part by an integer, so these bytes no longer hold it"
 
 /-- The bytes an integer of `bits` bits takes in memory. -/
 def byteWidth (bits : Nat) : Nat := (bits + 7) / 8
@@ -334,19 +364,51 @@ def readBytes (env : Env) (x : String) (off : Nat) : Nat → Int → Except Outc
   | 0, acc => .ok acc
   | k + 1, acc =>
     match env.get (.byte x (off + k)) with
-    | some (Val.int b) => readBytes env x off k (acc * 256 + b)
+    | some (Val.int b) =>
+      if b == ptrByte then .error (.stuck ptrPartialMsg)
+      else if b == ptrStale then .error (.stuck ptrStaleMsg)
+      else readBytes env x off k (acc * 256 + b)
     | _ => .error (.stuck s!"slot $\"{x}\" is read before it is written")
 
-/-- Writes an integer of `w` bytes at byte `off` of a slot, little-endian. -/
+/-- Whether a byte of a slot holds the marker `t`. -/
+def byteIs (env : Env) (x : String) (i : Nat) (t : Int) : Bool :=
+  match env.get (.byte x i) with
+  | some (Val.int b) => b == t
+  | _ => false
+
+/-- Whether a stored pointer (its side table entry, starting at `j`) overlaps the bytes `[off, off + w)`. -/
+def overlapsPtr (x : String) (off w : Nat) : Cell → Bool
+  | Cell.ptr y j => y == x && decide (j < off + w) && decide (off < j + ptrBytes)
+  | _ => false
+
+/-- Drops the stored pointers that overlap the bytes `[off, off + w)` of a slot. The bytes of a dropped pointer that
+are still markers become stale, so reading them is stuck. The caller then writes the bytes `[off, off + w)`. -/
+def invalidatePtrs (env : Env) (x : String) (off w : Nat) : Env :=
+  let hit := env.filter (fun p => overlapsPtr x off w p.1)
+  let kept := env.filter (fun p => !overlapsPtr x off w p.1)
+  hit.foldl (fun e p =>
+    match p.1 with
+    | Cell.ptr _ j =>
+      (List.range ptrBytes).foldl (fun e2 k =>
+        if byteIs e2 x (j + k) ptrByte then e2.set (.byte x (j + k)) (Val.int ptrStale) none else e2) e
+    | _ => e) kept
+
+/-- Writes an integer of `w` bytes at byte `off` of a slot, little-endian. A stored pointer that the bytes overlap
+is dropped. -/
 def writeBytes (env : Env) (x : String) (off w : Nat) (v : Int) : Env :=
   (List.range w).foldl (fun e i =>
-    e.set (.byte x (off + i)) (Val.int ((v % 2 ^ (8 * w)) / 256 ^ i % 256)) none) env
+    e.set (.byte x (off + i)) (Val.int ((v % 2 ^ (8 * w)) / 256 ^ i % 256)) none) (invalidatePtrs env x off w)
 
-/-- The name of a memory access on a type, for the stuck messages. -/
+/-- Writes a pointer (or null) at byte `off` of a slot: the markers over its `ptrBytes` bytes, and the side table
+entry. A stored pointer that the bytes overlap is dropped first. -/
+def writePtr (env : Env) (x : String) (off : Nat) (v : Val) : Env :=
+  let e := invalidatePtrs env x off ptrBytes
+  let e := (List.range ptrBytes).foldl (fun e i => e.set (.byte x (off + i)) (Val.int ptrByte) none) e
+  e.set (.ptr x off) v none
+
+/-- The name of a memory access on a non-integer type, for the stuck messages. -/
 def memKind (verb : String) (t : Ty) : String :=
-  match t with
-  | Ty.ptr _ => s!"{verb} of a pointer type is not modelled"
-  | _ => s!"{verb} of a non-integer type {tyText t}"
+  s!"{verb} of a non-integer type {tyText t}"
 
 /-- The block and offset an address operand denotes for an access of `w` bytes, after the null and bounds checks. -/
 def derefAddr (env : Env) (o : Operand) (w : Nat) : Except Outcome (Block × Int) := do
@@ -364,6 +426,19 @@ def loadInt (env : Env) (b : Block) (off : Int) (bits : Nat) (signed : Bool) : E
   | Block.slot x => do
     let acc ← readBytes env x off.toNat (byteWidth bits) 0
     return Val.int (wrapTo bits signed acc)
+
+/-- The pointer a load of a pointer type reads at `off` of a block: the side table entry there. The bytes at the
+offset are not a stored pointer otherwise, and the reason says which way. -/
+def loadPtr (env : Env) (b : Block) (off : Int) : Except Outcome Val :=
+  match b with
+  | Block.slot x =>
+    let o := off.toNat
+    match env.get (.ptr x o) with
+    | some v => .ok v
+    | none =>
+      if (List.range ptrBytes).any (fun k => byteIs env x (o + k) ptrByte) then .error (.stuck ptrPartialMsg)
+      else if (List.range ptrBytes).any (fun k => byteIs env x (o + k) ptrStale) then .error (.stuck ptrStaleMsg)
+      else .error (.stuck "a pointer load from bytes that hold no stored pointer is not modelled")
 
 /-- A value-producing form of integer type, in the subset. -/
 def evalIntRValue (env : Env) : RValue → Except Outcome Int
@@ -391,6 +466,9 @@ def evalIntRValue (env : Env) : RValue → Except Outcome Int
 /-- A value-producing form: an operand, a load or an offset (the pointer forms), or an integer form. -/
 def evalRValue (env : Env) : RValue → Except Outcome Val
   | RValue.operand o => evalVal env o
+  | RValue.load _ (Ty.ptr _) a => do
+    let (b, off) ← derefAddr env a ptrBytes
+    loadPtr env b off
   | RValue.load _ t a => do
     let some (bits, signed) := infoOf t
       | throw (.stuck (memKind "load" t))
@@ -521,6 +599,13 @@ def execStmt : Nat → Ctx → Env → Stmt → Except Outcome (Env × Flow)
         | none => operandInfo env o
       if info.isSome && !v.isInt then throw (.stuck s!"a pointer value is assigned to %{r}, which has an integer type")
       return (env.set (.reg r) v info, .normal)
+    | Stmt.storeS _ (Ty.ptr _) a val => do
+      let (b, off) ← derefAddr env a ptrBytes
+      let v ← evalVal env val
+      if v.isInt then throw (.stuck "store of an integer into a pointer type is not modelled")
+      match b with
+      | Block.slot x =>
+        return (writePtr env x off.toNat v, .normal)
     | Stmt.storeS _ t a val => do
       let some (bits, signed) := infoOf t
         | throw (.stuck (memKind "store" t))

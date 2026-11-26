@@ -113,8 +113,8 @@ or a float zero), which also matters for the names in error messages.
 
 ## Feedback
 
-An arithmetic or comparison node does not specialize on the first operands it sees; it records their types first. Each
-observation is classed:
+An arithmetic or comparison node does not specialize on the first operands it sees; it records their types first (indexing and
+field reads do the same, see below). Each observation is classed:
 
 | Class | Operands | Specialized to |
 | --- | --- | --- |
@@ -147,7 +147,20 @@ loop that turns float for the last 40 iterations (one deopt, one re-profile, no 
 deopt, no re-profile), comparisons, a comparison whose operands change type every 20 iterations (three deopts, two re-profiles, a
 give-up, and the right count), and the threshold knob at 3 and at 1.
 
-Not done: no feedback for indexing, fields, calls, methods or assignments to them; they still specialize on the first observation.
+Indexing and field reads take the same route, on the classes of their keys and receivers. An index node (`t[k]`) classes its
+operands as a table at an integer key (the array-part node, `IndexArr`), a table at a string key (`IndexStr`, a hash-part lookup
+with the node of the last lookup cached, guarded by the key's string object), or anything else (generic). A field node (`t.name`,
+whose key is always the constant name) classes its receiver as a table (`FieldTab`, the cached slot) or a host object
+(`FieldHost`), or anything else (generic). The profile nodes (`IndexProfile`, `FieldProfile`) read as the specialized nodes do,
+so they count no generic read; a deopt on the other key kind (an integer node given a string, or the reverse) or the other receiver
+kind re-profiles under the same bound (`reprofile_max`), and a deopt with `feedback_warm <= 1` goes to the generic node, as these
+nodes did before feedback. A cache miss inside `FieldTab` or `IndexStr` refills the cache and is not a deopt. The counter
+`generic_reads` counts the reads that the generic nodes (`IndexGen`, `FieldGen`) make. `tests/ast/engine.cpp` checks, in the same
+section, an integer-keyed read loop (two records, one speculation, no generic read), a field read loop (two records, one
+speculation, no generic read), a key kind that changes once (one deopt, one re-profile, the string node after it, the right sum)
+and one that changes every 20 iterations (three deopts, two re-profiles, a give-up, and 140 generic reads after it).
+
+Not done: no feedback for calls, methods or assignments to them; they still specialize on the first observation.
 Nothing counts the observations that a specialized node does not make, so a node that re-profiles sees only the operands of the
 observations it records. The tier compiles from the tree and does not read the feedback. Unary operators, `..` and `==` do not record.
 
