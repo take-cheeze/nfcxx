@@ -406,10 +406,8 @@ def rites_from_tree(root)
 end
 
 # [ireps (label => Irep), root_label] for +src_paths+ compiled by mrbc.
-# +emitter+ false: a compile whose ireps only feed an analysis (the linked sources this build does not compile, which
-# CORE_OUTSIDE_REDEFINED and BlockSelfWorld read) takes mrbc when there is one, except under BC2CPP_MRBC_RB=verify. The
-# emitter's bytes are mrbc's (golden_test), and such a read does without its annotations; in a self-compiled bc2cpp the
-# emitter spent most of a small run compiling those sources again.
+# +emitter+ false opts into native mrbc when available, except under BC2CPP_MRBC_RB=verify. Analysis reads normally use
+# the default emitter too: a native parser failure must not discard linked Ruby method overrides.
 def compile_ireps(src_paths, symbol, out_dir, mrbc: MRBC, emitter: true, cache: IrepCache.directory_for_sources(src_paths))
   load_ireps(run_mrbc(src_paths, symbol, out_dir, mrbc: mrbc, emitter: emitter), cache: cache)
 end

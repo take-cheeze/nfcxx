@@ -93,7 +93,7 @@ module CoreDefs
   # The outside Ruby sources +paths+ (sorted, expanded) as [ireps, root], compiled once per list for every reader.
   def outside_compile(paths, symbol, out_dir)
     @outside_compiles ||= {}
-    @outside_compiles[paths] ||= compile_ireps(paths, "#{symbol}_block_self_world", out_dir, emitter: false,
+    @outside_compiles[paths] ||= compile_ireps(paths, "#{symbol}_block_self_world", out_dir,
                                                                  cache: IrepCache.analysis_directory(paths))
   end
 
