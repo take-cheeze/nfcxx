@@ -136,6 +136,20 @@ ws16=$(cycles store_all.ptx store_all --grid 8 --block 64 ptr:64 --sms 1 --warps
 expect_eq "warp slots 4: two blocks resident, four waves" "$ws4" "$((4 * t64))"
 expect_eq "warp slots 16: eight blocks resident, one wave" "$ws16" "$t64"
 
+# 14. Hopper presets (--preset, from the Theoric note: Y2-Hopper-Medium and Y2-Hopper-Large). exchange.ptx with one warp per
+#     block: each thread's clock is 12 (six alu before the first store), the store (662), the barrier (24), three alu (6),
+#     the load (662), the add (2), the store (662) and ret (4), so a block takes 2034 when one block runs per SM. The loads
+#     of this kernel are L1 misses, so the warp pays the global latency. With 132 SMs (large) or 8 SMs (medium) every block
+#     has its own SM, so the estimate is one block's time.
+ph_large=$(cycles ../sched/exchange.ptx exchange --preset hopper-large --grid 132 --block 2 ptr:264 ptr:264)
+ph_medium=$(cycles ../sched/exchange.ptx exchange --preset hopper-medium --grid 8 --block 2 ptr:16 ptr:16)
+expect_eq "hopper-large: 132 SMs, one block each: 2034" "$ph_large" 2034
+expect_eq "hopper-medium: 8 SMs, one block each: 2034" "$ph_medium" 2034
+# Waves: one SM with 64 warp slots holds 64 one-warp blocks, so 132 blocks take three waves (64, 64, 4) of 2034 each. The
+# caches are turned off after the preset, so the blocks do not share a line through the L1: 3 x 2034 = 6102.
+ph_waves=$(cycles ../sched/exchange.ptx exchange --preset hopper-large --l1 0 --l2 0 --sms 1 --grid 132 --block 2 ptr:264 ptr:264)
+expect_eq "hopper-large on one SM: 64 warp slots, 132 blocks, three waves: 3 x 2034" "$ph_waves" 6102
+
 # 9. Bad --lat is refused (exit 2) and an unknown class is not silently ignored.
 status=0; "$out/ptxi" "$ex" "${exargs[@]}" --lat dram=5 > /dev/null 2>&1 || status=$?
 [ "$status" -eq 2 ] || { echo "--lat dram=5: expected exit 2, got $status" >&2; exit 1; }

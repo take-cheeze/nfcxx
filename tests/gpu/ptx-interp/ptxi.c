@@ -1896,12 +1896,38 @@ static void usage(void) {
   fprintf(stderr,
           "usage: ptxi FILE.ptx KERNEL [--grid X[,Y[,Z]]] [--block X[,Y[,Z]]] ARG... [--dump K]...\n"
           "           [--random N [--seed S]] [--explore [--max-schedules M]] [--max-steps S]\n"
-          "           [--timing] [--sms N] [--resident N | --warps-per-sm N] [--issue N] [--bw BYTES]\n"
+          "           [--preset hopper-medium|hopper-large] [--timing] [--sms N] [--resident N | --warps-per-sm N]\n"
+          "           [--issue N] [--bw BYTES]\n"
           "           [--lat CLASS=CYCLES]...\n"
           "           [--l1 BYTES] [--l2 BYTES] [--gpu-bw BYTES] [--blocks-per-sm N]\n"
           "  ARG: ptr:COUNT[:iota=START] | s32:VALUE | bytes:HEX\n"
           "  CLASS: alu, branch, local, global, atomic, barrier, l1, l2 (defaults 2 4 40 320 31 24 30 120)\n");
   exit(EXIT_BAD);
+}
+
+/* The Hopper configurations of the Theoric note (Y2-Hopper-Medium and Y2-Hopper-Large), set with --preset. A preset sets the
+ * SM count, the warp slots (64 warps: four schedulers of 16 warps), the device-wide L2 (50 MB, 283 cycles), the L1 (256 KB
+ * per SM), HBM (its timing queue moves 64 sectors of 32 bytes per cycle on the medium configuration; the large one's
+ * "about 4 TB/s" is taken at an assumed 1.8 GHz clock, 2222 bytes per cycle, since the note gives no clock) and the
+ * global latency (662 cycles). Options after a preset still apply. The note's small configuration has four lanes per
+ * warp, which this model does not have (warps are 32 threads), so it is not a preset. */
+static int apply_preset(const char *name) {
+  if (!strcmp(name, "hopper-medium")) {
+    sms = 8;
+    gpu_bw = 2048;
+  } else if (!strcmp(name, "hopper-large")) {
+    sms = 132;
+    gpu_bw = 2222;
+  } else {
+    return 0;
+  }
+  warps_per_sm = 64;
+  issue_rate = 4;
+  l1_bytes = 262144;
+  l2_bytes = 52428800;
+  lat[LAT_L2] = 283;
+  lat[LAT_GLOBAL] = 662;
+  return 1;
 }
 
 int main(int argc, char **argv) {
@@ -1941,6 +1967,8 @@ int main(int argc, char **argv) {
     } else if (!strcmp(argv[i], "--timing")) {
       if (!timing_print) atexit(timing_report);
       timing_print = 1;
+    } else if (!strcmp(argv[i], "--preset")) {
+      if (i + 1 >= argc || !apply_preset(argv[++i])) usage();
     } else if (!strcmp(argv[i], "--sms")) {
       if (i + 1 >= argc) usage();
       sms = atoi(argv[++i]);

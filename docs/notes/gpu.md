@@ -507,6 +507,15 @@ bytes in all, 4096 per block): with `--sms 8 --bw 1` the answer is 4096; `--gpu-
 block, critical-path bound): 8 blocks on one SM are 8064 cycles with `--blocks-per-sm 1`, and `--resident 8
 --blocks-per-sm 2` gives four waves, 4032.
 
+Hopper presets (`--preset hopper-medium` and `--preset hopper-large`, from the Theoric note's Y2-Hopper-Medium and
+Y2-Hopper-Large). They set the SM count (8 or 132), 64 warp slots per SM, a 256 KB L1 per SM, a 50 MB device-wide L2 at 283
+cycles, the global latency at 662 cycles, and the HBM bandwidth: 2048 bytes per cycle for the medium configuration (64
+sectors of 32 bytes), and for the large one 2222 bytes per cycle, from the note's "about 4 TB/s" at an assumed 1.8 GHz
+clock (the note gives no clock). Options after a preset still apply. The note's small configuration has four lanes per
+warp, which this model does not have, so it is not a preset. Checks: one block per SM gives 2034 cycles (exchange.ptx with
+one warp per block), and 132 blocks on one SM with 64 warp slots take three waves, 6102. These are model values; the note's
+runs were not reproduced here, since this machine has no GPU.
+
 Still not modelled: caches beyond the L2, miss merging, DRAM row buffers and banks, blocks that start at different times within a wave, and the queueing of memory traffic: `--gpu-bw` is a lower bound on the kernel's time (the total bytes at the GPU's rate), not a schedule of the bytes, so an imbalanced GPU can take longer than the bound. The L2 counts bytes per lane for loads that reach DRAM, so a coalesced cold load that one lane fills counts one sector, not four: the bandwidth bound is low for such loads when a cache is on.
 
 Not measured against hardware yet: this machine has no GPU (`nvidia-smi` is missing), so the latencies are the defaults above, not calibrated values. Ranking real kernels is the check that matters, and it needs the RTX 2060 run of the same kernels.
