@@ -150,6 +150,23 @@ expect_eq "hopper-medium: 8 SMs, one block each: 2034" "$ph_medium" 2034
 ph_waves=$(cycles ../sched/exchange.ptx exchange --preset hopper-large --l1 0 --l2 0 --sms 1 --grid 132 --block 2 ptr:264 ptr:264)
 expect_eq "hopper-large on one SM: 64 warp slots, 132 blocks, three waves: 3 x 2034" "$ph_waves" 6102
 
+energy_of() {
+  local line
+  line=$("$out/ptxi" "$@" --timing 2>&1 >/dev/null) || { echo "ptxi failed on: $*" >&2; exit 1; }
+  printf '%s\n' "$line" | sed -n 's/^energy: \([0-9]*\) pJ.*/\1/p'
+}
+# 15. Energy (--epj, uncalibrated values given by the test). exchange.ptx, one warp: the energy of its active steps grows
+#     with its lanes, so two threads on the same path pay twice one thread's ALU energy; a DRAM byte term counts the sectors
+#     the warp moves (the store, the load and the store, one 32-byte sector each: 96 bytes); and the issue term counts the
+#     instructions on the path (15: two ld.param, mov, add, mul.wide, add, st, bar, sub, mul.wide, add, ld, add, st, ret).
+e1=$(energy_of ../sched/exchange.ptx exchange --grid 1 --block 1 ptr:2 ptr:2 --epj alu=1)
+e2=$(energy_of ../sched/exchange.ptx exchange --grid 1 --block 2 ptr:2 ptr:2 --epj alu=1)
+expect_eq "energy: two lanes on one path pay twice one lane's ALU energy" "$e2" "$((2 * e1))"
+ed=$(energy_of ../sched/exchange.ptx exchange --grid 1 --block 2 ptr:2 ptr:2 --epj dram=1)
+expect_eq "energy: DRAM bytes (three sectors, 96 bytes)" "$ed" 96
+ei=$(energy_of ../sched/exchange.ptx exchange --grid 1 --block 2 ptr:2 ptr:2 --epj issue=1)
+expect_eq "energy: warp issues (15 instructions on the path)" "$ei" 15
+
 # 9. Bad --lat is refused (exit 2) and an unknown class is not silently ignored.
 status=0; "$out/ptxi" "$ex" "${exargs[@]}" --lat dram=5 > /dev/null 2>&1 || status=$?
 [ "$status" -eq 2 ] || { echo "--lat dram=5: expected exit 2, got $status" >&2; exit 1; }

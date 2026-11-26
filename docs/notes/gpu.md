@@ -516,7 +516,14 @@ warp, which this model does not have, so it is not a preset. Checks: one block p
 one warp per block), and 132 blocks on one SM with 64 warp slots take three waves, 6102. These are model values; the note's
 runs were not reproduced here, since this machine has no GPU.
 
-Still not modelled: caches beyond the L2, miss merging, DRAM row buffers and banks, blocks that start at different times within a wave, and the queueing of memory traffic: `--gpu-bw` is a lower bound on the kernel's time (the total bytes at the GPU's rate), not a schedule of the bytes, so an imbalanced GPU can take longer than the bound. The L2 counts bytes per lane for loads that reach DRAM, so a coalesced cold load that one lane fills counts one sector, not four: the bandwidth bound is low for such loads when a cache is on.
+Energy (`--epj CLASS=PJ`, `--epj issue=PJ`, `--epj dram=PJ`, `--timing` only). A thread pays the energy of each step it takes
+with its predicate true, by the class the step ends in; a warp issue pays `issue`; each DRAM byte (the sectors of
+`--timing`'s byte count) pays `dram`. The values are the user's: none is calibrated, every one defaults to 0, and the
+output says so. The checks use exchange.ptx: two lanes on one path pay twice one lane's ALU energy, its DRAM bytes are 96,
+and its path has 15 warp issues. Thermal modeling is not included: a heat model needs calibrated power and a thermal
+network, neither of which this model has.
+
+Still not modelled: thermal behaviour, caches beyond the L2, miss merging, DRAM row buffers and banks, blocks that start at different times within a wave, and the queueing of memory traffic: `--gpu-bw` is a lower bound on the kernel's time (the total bytes at the GPU's rate), not a schedule of the bytes, so an imbalanced GPU can take longer than the bound. The L2 counts bytes per lane for loads that reach DRAM, so a coalesced cold load that one lane fills counts one sector, not four: the bandwidth bound is low for such loads when a cache is on.
 
 Not measured against hardware yet: this machine has no GPU (`nvidia-smi` is missing), so the latencies are the defaults above, not calibrated values. Ranking real kernels is the check that matters, and it needs the RTX 2060 run of the same kernels.
 defaults above, not calibrated values. Ranking real kernels is the check that matters, and it needs the RTX 2060 run

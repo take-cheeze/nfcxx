@@ -982,6 +982,7 @@ typedef struct {
   int state;
   int bar;     /* while T_BLOCKED: the barrier ID it waits at */
   int depth;
+  double epj; /* energy of this thread's active steps (--epj, --timing only), in pJ */
   Frame stack[MAXFUNC];
 } Thread;
 
@@ -1022,6 +1023,13 @@ enum { LAT_ALU, LAT_BRANCH, LAT_LOCAL, LAT_GLOBAL, LAT_ATOMIC, LAT_BARRIER, LAT_
 static const char *lat_names[LAT_N] = {"alu", "branch", "local", "global", "atomic", "barrier", "l1", "l2"};
 static uint64_t lat[LAT_N] = {2, 4, 40, 320, 31, 24, 30, 120};
 static int sms = 1;
+/* Energy (--epj CLASS=PJ, --timing only). A thread pays the energy of each step it takes with its predicate true, by the
+ * class the step ends in (the lat classes); a warp issue pays issue, and each DRAM byte (see warp_bytes) pays dram. The
+ * values are whatever the user gives: none is calibrated, and the default is 0. */
+static double e_pj[LAT_N];
+static double e_issue, e_dram;
+static int energy_print;
+static double energy_last;
 static uint64_t issue_rate = 4; /* warp instructions per cycle per SM */
 static int resident = 1;        /* blocks an SM runs at a time (--resident) */
 static int warps_per_sm;        /* warp slots of an SM (--warps-per-sm); 0 = use --resident */
@@ -1072,6 +1080,31 @@ static int lat_class(const Inst *in) {
     default:
       return LAT_ALU;
   }
+}
+
+/* --epj CLASS=PJ: a lat class (its steps), issue (a warp issue) or dram (a DRAM byte). */
+static int parse_epj(const char *s) {
+  const char *eq = strchr(s, '=');
+  if (!eq || eq[1] == '\0') return 0;
+  char *end;
+  double v = strtod(eq + 1, &end);
+  if (*end || v < 0) return 0;
+  size_t n = (size_t)(eq - s);
+  if (n == 5 && !strncmp(s, "issue", 5)) {
+    e_issue = v;
+  } else if (n == 4 && !strncmp(s, "dram", 4)) {
+    e_dram = v;
+  } else {
+    int found = 0;
+    for (int c = 0; c < LAT_N; c++)
+      if (strlen(lat_names[c]) == n && !strncmp(s, lat_names[c], n)) {
+        e_pj[c] = v;
+        found = 1;
+      }
+    if (!found) return 0;
+  }
+  energy_print = 1;
+  return 1;
 }
 
 /* --lat CLASS=CYCLES. */
@@ -1310,6 +1343,17 @@ static void timing_finish(void) {
     uint64_t shared = (all_bytes + gpu_bw - 1) / gpu_bw;
     if (shared > total) total = shared;
   }
+  {
+    /* Energy: the threads' steps, the warp issues, and the DRAM bytes of the whole launch. */
+    double e = 0;
+    uint64_t all_slots = 0, all_bytes = 0;
+    for (int b = 0; b < nblocks; b++) {
+      all_slots += slots_of[b];
+      all_bytes += bytes_of[b];
+    }
+    for (int g = 0; g < nthreads; g++) e += threads[g].epj;
+    energy_last = e + e_issue * (double)all_slots + e_dram * (double)all_bytes;
+  }
   free(sm);
   free(bt_of);
   free(slots_of);
@@ -1323,6 +1367,8 @@ static void timing_finish(void) {
 /* At exit with --timing: one estimate if every schedule agreed, otherwise the range. */
 static void timing_report(void) {
   if (!timing_n) return;
+  if (energy_print)
+    fprintf(stderr, "energy: %.0f pJ (uncalibrated: the values are the --epj ones, last schedule)\n", energy_last);
   if (timing_min == timing_max)
     fprintf(stderr, "timing: %llu cycles estimated (%d blocks on %d SMs, %llu schedules)\n",
             (unsigned long long)timing_min, timing_blocks, sms, (unsigned long long)timing_n);
@@ -1508,7 +1554,10 @@ static void step(Thread *t) {
         gmiss = 1;
     }
   }
-  if (timing_print) warp_issue(t, in, 1, l1miss, gmiss, memref && cls != LAT_L1 && cls != LAT_L2, addr);
+  if (timing_print) {
+    warp_issue(t, in, 1, l1miss, gmiss, memref && cls != LAT_L1 && cls != LAT_L2, addr);
+    t->epj += e_pj[cls];
+  }
   uint64_t *r = t->r;
   int next = t->pc + 1;
   uint64_t a = 0, b = 0, c = 0;
@@ -1770,6 +1819,7 @@ static void reset_threads(void) {
     t->depth = 0;
     t->state = T_RUN;
     t->bar = -1;
+    t->epj = 0;
   }
   if (timing_print) {
     size_t nw = (size_t)nblocks * (size_t)wpb;
@@ -1897,7 +1947,7 @@ static void usage(void) {
           "usage: ptxi FILE.ptx KERNEL [--grid X[,Y[,Z]]] [--block X[,Y[,Z]]] ARG... [--dump K]...\n"
           "           [--random N [--seed S]] [--explore [--max-schedules M]] [--max-steps S]\n"
           "           [--preset hopper-medium|hopper-large] [--timing] [--sms N] [--resident N | --warps-per-sm N]\n"
-          "           [--issue N] [--bw BYTES]\n"
+          "           [--issue N] [--bw BYTES] [--epj CLASS=PJ]\n"
           "           [--lat CLASS=CYCLES]...\n"
           "           [--l1 BYTES] [--l2 BYTES] [--gpu-bw BYTES] [--blocks-per-sm N]\n"
           "  ARG: ptr:COUNT[:iota=START] | s32:VALUE | bytes:HEX\n"
@@ -1973,6 +2023,8 @@ int main(int argc, char **argv) {
       if (i + 1 >= argc) usage();
       sms = atoi(argv[++i]);
       if (sms < 1) usage();
+    } else if (!strcmp(argv[i], "--epj")) {
+      if (i + 1 >= argc || !parse_epj(argv[++i])) usage();
     } else if (!strcmp(argv[i], "--lat")) {
       if (i + 1 >= argc || !parse_lat(argv[++i])) usage();
     } else if (!strcmp(argv[i], "--issue")) {
