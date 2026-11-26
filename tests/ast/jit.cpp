@@ -61,7 +61,8 @@ static void jit_on(State& S) {
 
 // What the counters must say about a program's loops (ENTERED: compiled, and taken over at least twice; DEOPT: compiled, and the
 // code stopped at a zero divisor once, which the error of the program shows).
-enum Expect { ANY, COMPILED, ENTERED, REFUSED, GUARD, DEOPT };
+// MIXED: compiled, and a takeover refused by the guard after one that ran (a float local compiled as a float, entered with an integer).
+enum Expect { ANY, COMPILED, ENTERED, REFUSED, GUARD, DEOPT, MIXED };
 
 struct Case {
   const char* name;
@@ -109,22 +110,52 @@ static const Case cases[] = {
      "for i = 1, 3 do q = q - 2 end\n"
      "return m, r, p, q",
      COMPILED},
-    {"a live-in that is a float at entry: the guard fails, the interpreter runs",
+    {"a float added to an integer local after the takeover: refused (the local would change type)",
      "local f = 2.5\n"
      "local s, i = 0, 0\n"
-     "while i < 10 do s = s + f i = i + 1 end\n"
+     "while i < 10 do if i == 5 then s = s + f end i = i + 1 end\n"
      "return s",
-     GUARD},
-    {"float division is refused (the result is a float, outside the subset)",
+     REFUSED},
+    {"a float local compiled as a float, entered later with an integer: the guard fails on those entries",
+     "local x = 2.5\n"
+     "local s = 0.0\n"
+     "for k = 1, 4 do\n"
+     "  local y = (k == 1) and x or 3\n"
+     "  local i = 0\n"
+     "  while i < 3 do s = s + y i = i + 1 end\n"
+     "end\n"
+     "return s",
+     MIXED},
+    {"an integer local that takes a float quotient after the takeover: refused (the local would change type)",
      "local q = 0\n"
-     "for i = 1, 20 do q = q + i / 3 end\n"
+     "for i = 1, 20 do if i == 5 then q = q + i / 3 end end\n"
      "return q",
      REFUSED},
-    {"a power is refused",
-     "local q = 0\n"
-     "for i = 1, 20 do q = q + i ^ 2 end\n"
-     "return q",
+    {"a float local assigned an integer after the takeover: refused",
+     "local x = 0.5\n"
+     "for i = 1, 5 do if i == 3 then x = i end end\n"
+     "return x",
      REFUSED},
+    {"a float local and an integer local in sibling blocks, with the frame slot reused: each keeps its type",
+     "local acc, n = 0.0, 0\n"
+     "for i = 1, 30 do\n"
+     "  do local t = i / 4 acc = acc + t end\n"
+     "  do local k = i * 3 n = n + k end\n"
+     "  do local t2 = 2.5 * i acc = acc - t2 + 1 end\n"
+     "  do local u = i // 2 n = n - u end\n"
+     "end\n"
+     "return acc, n",
+     COMPILED},
+    {"float division with a float accumulator, and a zero divisor that is not an error",
+     "local q, z = 0.0, 0.0\n"
+     "for i = 1, 20 do q = q + i / 3 + 1 / (z + i - 1) end\n"
+     "return q",
+     COMPILED},
+    {"a power with a float accumulator",
+     "local q = 0.0\n"
+     "for i = 1, 20 do q = q + i ^ 2 + 2 ^ (i / 4) end\n"
+     "return q",
+     COMPILED},
     {"floor division and modulo on positive and negative operands, constant and compound, as the interpreter's",
      "local q, r = 0, 0\n"
      "for a = -20, 20 do\n"
@@ -341,27 +372,107 @@ static const Case cases[] = {
      "end\n"
      "return hits, j",
      COMPILED},
-    {"bitwise operators mixed with a refused operator: the loop falls back and gives the interpreter's result",
+    {"bitwise operators with a power added to an integer local after the takeover: the loop falls back and gives the interpreter's result",
      "local s, t = 0, 0\n"
      "for i = 1, 50 do\n"
      "  s = (s ~ i) & 0xFFFF\n"
-     "  t = t + (i ^ 2)\n"
+     "  if i == 7 then t = t + (i ^ 2) end\n"
      "end\n"
      "return s, t",
      REFUSED},
-    {"a bitwise operator on a float with an integer value: the guard fails, the interpreter runs the loop",
+    {"a bitwise operator on a float, even one with an integer value: refused",
      "local f = 2.0\n"
      "local s = 0\n"
      "for i = 1, 10 do s = s + (i | f) end\n"
      "return s",
-     GUARD},
-    {"a float among six locals: the guard fails, and the interpreter runs the loop",
+     REFUSED},
+    {"a float added to one of six integer locals after the takeover: refused, and the interpreter runs the loop",
      "local f = 0.5\n"
      "local a, b, c, d, e, g = 1, 2, 3, 4, 5, 6\n"
      "local s = 0\n"
-     "for i = 1, 10 do a = a + i b = b + a c = c + f s = s + e + g end\n"
+     "for i = 1, 10 do a = a + i b = b + a if i == 6 then c = c + f end s = s + e + g end\n"
      "return a, b, c, d, e, g, s",
-     GUARD},
+     REFUSED},
+    {"float locals with the four operators, mixed with integers, and a float that the loop declares",
+     "local x, y = 0.5, 1.0\n"
+     "local n = 0\n"
+     "for i = 1, 200 do\n"
+     "  local t = x * 1.0001 + i / 7\n"
+     "  x = t - y / (i + 0.5)\n"
+     "  y = y * 0.999 + (i - 3) * 0.25 - 2 / i\n"
+     "  n = n + 1\n"
+     "end\n"
+     "return x, y, n",
+     COMPILED},
+    {"float division by zero: inf, -inf and nan, with no error, as the interpreter gives them",
+     "local zero, s, t, u = 0.0, 0.0, 0.0, 0.0\n"
+     "local a, b, c, d = 1 / zero, -1 / zero, zero / zero, 1.0 / (zero * -1)\n"
+     "for i = 1, 4 do\n"
+     "  s = s + 1 / (zero + i - 1)\n"
+     "  t = t + -1 / (zero + i - 1)\n"
+     "  u = u + (zero + i - 1) / (zero + i - 1)\n"
+     "end\n"
+     "return a, b, c, d, s, t, u",
+     COMPILED},
+    {"comparisons of floats with nan and inf, and of -0.0 with 0.0",
+     "local zero, nan, inf = 0.0, 0.0 / 0.0, 1.0 / 0.0\n"
+     "local cnt = 0\n"
+     "for i = 1, 10 do\n"
+     "  local fi = i * 0.5\n"
+     "  if nan < fi then cnt = cnt + 1 end\n"
+     "  if nan <= fi then cnt = cnt + 2 end\n"
+     "  if nan > fi then cnt = cnt + 4 end\n"
+     "  if nan >= fi then cnt = cnt + 8 end\n"
+     "  if nan == nan then cnt = cnt + 16 end\n"
+     "  if nan ~= nan then cnt = cnt + 32 end\n"
+     "  if inf > fi then cnt = cnt + 64 end\n"
+     "  if fi < inf then cnt = cnt + 128 end\n"
+     "  if -inf == -inf and fi ~= fi then cnt = cnt + 256 end\n"
+     "  if fi == 2.5 then cnt = cnt + 512 end\n"
+     "  if fi ~= 2.5 then cnt = cnt + 1024 end\n"
+     "  if zero == -zero then cnt = cnt + 2048 end\n"
+     "  if fi <= 2.5 and fi >= 1.0 or nan ~= 0.0 then cnt = cnt + 4096 end\n"
+     "end\n"
+     "return cnt",
+     COMPILED},
+    {"a power on positive, negative, zero, fractional, nan and inf operands, as the interpreter's pow",
+     "local zero, nan, inf = 0.0, 0.0 / 0.0, 1.0 / 0.0\n"
+     "local p, q, r, s, t, u = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0\n"
+     "for i = 1, 30 do\n"
+     "  local b = (i - 15) * 0.5\n"
+     "  local e = (i % 7) - 3.5\n"
+     "  p = p + b ^ 2 + b ^ 3.0\n"
+     "  q = q + (b + 0.0) ^ e\n"
+     "  r = r + (zero - b) ^ 0.5 + 2 ^ e\n"
+     "  s = s + zero ^ e + e ^ zero\n"
+     "  t = t + inf ^ e + (-inf) ^ 3 + nan ^ e\n"
+     "  u = u + b ^ inf + 1 ^ nan\n"
+     "end\n"
+     "return p, q, r, s, t, u",
+     COMPILED},
+    {"a loop that mixes a power with integer operations",
+     "local h, w = 0, 0.0\n"
+     "for i = 1, 50 do\n"
+     "  h = h * 31 + i\n"
+     "  w = w + (i ^ 2) * 0.5 + (h & 255) - i // 3 + 2 ^ -i\n"
+     "end\n"
+     "return h, w",
+     COMPILED},
+    {"a comparison of an integer with a float (the exact comparison is not encoded): refused",
+     "local c = 0\n"
+     "for i = 1, 10 do if i < 2.5 then c = c + 1 end end\n"
+     "return c",
+     REFUSED},
+    {"a float floor division (not encoded): refused",
+     "local c = 0.0\n"
+     "for i = 1, 10 do c = c + (c + i) // 2.0 end\n"
+     "return c",
+     REFUSED},
+    {"a while around an inner for whose limit is a float: the while is refused, the inner for is taken over on its own",
+     "local s, n, i = 0, 7.5, 0\n"
+     "while i < 3 do i = i + 1 for j = 1, n / 2 do s = s + j end end\n"
+     "return s",
+     ANY},
 };
 
 // The generated loops: integer statements and expressions over three locals and the loop variable, with wraparound, nested ifs and
@@ -377,6 +488,7 @@ struct Rng {
 
 // Set for the batch of programs with the bitwise operators (the other batch is generated as before, the same programs).
 static bool gen_bits = false;
+static bool gen_float = false;  // the batch of float programs (gen_float_program)
 
 static std::string gen_expr(Rng& r, int depth) {
   static const char* vars[] = {"a", "b", "c", "i"};
@@ -457,6 +569,87 @@ static std::string gen_program(Rng& r) {
          loop + "return a, b, c";
 }
 
+// The generated float programs: float locals x, y, z (assigned floats only), an integer local n and the loop variable i. The integers
+// meet floats in arithmetic, `/` and `^` (which give floats), and a comparison is between two floats (the integer against a float is
+// refused, see the cases), so every loop is in the subset and must compile. The divisors of the integer operations are constants that
+// are not zero, so no deopt.
+static std::string gen_iexpr(Rng& r, int depth) {
+  if (depth <= 0 || r.pick(3) == 0) {
+    switch (r.pick(3)) {
+      case 0: return r.pick(2) ? "i" : "n";
+      case 1: return std::to_string(r.pick(20) - 10);
+      default: return "9223372036854775807";
+    }
+  }
+  switch (r.pick(5)) {
+    case 0: return "(" + gen_iexpr(r, depth - 1) + " + " + gen_iexpr(r, depth - 1) + ")";
+    case 1: return "(" + gen_iexpr(r, depth - 1) + " * " + gen_iexpr(r, depth - 1) + ")";
+    case 2: {
+      static const char* divisors[] = {"-1", "2", "-3", "7", "9223372036854775807"};
+      return "(" + gen_iexpr(r, depth - 1) + " // " + divisors[r.pick(5)] + ")";
+    }
+    case 3: return "(-(" + gen_iexpr(r, depth - 1) + "))";
+    default: return "(" + gen_iexpr(r, depth - 1) + " % 5)";
+  }
+}
+
+static std::string gen_fexpr(Rng& r, int depth) {
+  static const char* leaves[] = {"x", "y", "z", "0.0", "-0.0", "0.5", "-2.25", "3.0", "1e300", "-1e-300", "7.75", "1.0"};
+  static const char* ops[] = {" + ", " - ", " * ", " / ", " ^ "};
+  if (depth <= 0 || r.pick(3) == 0) return leaves[r.pick(12)];
+  switch (r.pick(7)) {
+    case 0: case 1: case 2: case 3: return "(" + gen_fexpr(r, depth - 1) + ops[r.pick(5)] + gen_fexpr(r, depth - 1) + ")";
+    case 4: return "(-(" + gen_fexpr(r, depth - 1) + "))";
+    case 5: return "(" + gen_iexpr(r, 2) + ops[r.pick(5)] + gen_fexpr(r, depth - 1) + ")";  // an integer and a float
+    default: return "(" + gen_iexpr(r, 2) + (r.pick(2) ? " / " : " ^ ") + gen_iexpr(r, 2) + ")";  // integers, a float result
+  }
+}
+
+static std::string gen_fcond(Rng& r, int depth) {
+  static const char* ops[] = {"<", "<=", ">", ">=", "==", "~="};
+  if (depth > 0 && r.pick(4) == 0) {
+    switch (r.pick(3)) {
+      case 0: return "(" + gen_fcond(r, depth - 1) + " and " + gen_fcond(r, depth - 1) + ")";
+      case 1: return "(" + gen_fcond(r, depth - 1) + " or " + gen_fcond(r, depth - 1) + ")";
+      default: return "(not (" + gen_fcond(r, depth - 1) + "))";
+    }
+  }
+  return gen_fexpr(r, 2) + " " + ops[r.pick(6)] + " " + gen_fexpr(r, 2);
+}
+
+static std::string gen_fstmt(Rng& r, int depth, int& wcount) {
+  switch (depth > 0 ? r.pick(6) : r.pick(4)) {
+    case 0: return "x = " + gen_fexpr(r, 3) + "\n";
+    case 1: return "y = " + gen_fexpr(r, 3) + " z = z + " + gen_fexpr(r, 2) + "\n";
+    case 2: return "n = n + " + gen_iexpr(r, 2) + "\n";
+    case 3: {
+      std::string t = "t" + std::to_string(wcount);
+      ++wcount;
+      return "local " + t + " = " + gen_fexpr(r, 2) + " x = x + " + t + "\n";
+    }
+    case 4:
+      return "if " + gen_fcond(r, 2) + " then " + gen_fstmt(r, depth - 1, wcount) + " else " + gen_fstmt(r, depth - 1, wcount) + " end\n";
+    default: {
+      std::string w = "w" + std::to_string(wcount);
+      ++wcount;
+      return "do local " + w + " = 0 while " + w + " < " + std::to_string(1 + r.pick(4)) + " do " + w + " = " + w + " + 1 " +
+             gen_fstmt(r, depth - 1, wcount) + " end end\n";
+    }
+  }
+}
+
+static std::string gen_float_program(Rng& r) {
+  static const char* init[] = {"0.5", "-0.0", "2.25", "-3.0", "0.0", "1e300"};
+  int wcount = 0;
+  std::string body;
+  int n = 2 + r.pick(3);
+  for (int k = 0; k < n; ++k) body += gen_fstmt(r, 2, wcount);
+  std::string loop = "for i = 1, " + std::to_string(3 + r.pick(30)) + " do\n" + body + "end\n";
+  if (r.pick(2)) loop = "for i = 1, " + std::to_string(2 + r.pick(10)) + " do\n" + "for j = 1, 3 do\n" + body + "end\nend\n";
+  return "local x, y, z = " + std::string(init[r.pick(6)]) + ", " + init[r.pick(6)] + ", " + init[r.pick(6)] + "\nlocal n = 0\n" +
+         loop + "return x, y, z, n";
+}
+
 int main() {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   // The default is off: no tier, no counters.
@@ -500,6 +693,7 @@ int main() {
         case ENTERED: CHECK(st.jit_compiled >= 1 && st.jit_entries >= 2 && st.jit_guard_misses == 0); break;
         case REFUSED: CHECK(st.jit_refused >= 1 && st.jit_entries == 0); break;
         case GUARD: CHECK(st.jit_guard_misses >= 1 && st.jit_entries == 0); break;
+        case MIXED: CHECK(st.jit_compiled >= 1 && st.jit_entries >= 1 && st.jit_guard_misses >= 1); break;
         case DEOPT: CHECK(st.jit_compiled >= 1 && st.jit_bailouts == 1 && st.jit_guard_misses == 0 && st.jit_refused == 0); break;
         case ANY: break;
       }
@@ -550,18 +744,20 @@ int main() {
   }
 
   // Generated loops: each must agree with the interpreter, and (on this host) compile without a refusal. The second batch has
-  // the bitwise operators and the shifts; the first is the same as before them.
+  // the bitwise operators and the shifts; the third has floats (gen_float_program); the first is the same as before them.
   std::printf("-- generated loops\n");
   unsigned long long entries = 0, compiled = 0;
   int gen_fail = 0;
   const int kPrograms = 300;
-  for (int batch = 0; batch < 2; ++batch) {
+  static const char* batch_names[] = {"arithmetic", "bitwise", "float"};
+  for (int batch = 0; batch < 3; ++batch) {
     gen_bits = batch == 1;
-    Rng r = batch == 0 ? Rng{0x9E3779B97F4A7C15ULL} : Rng{0x2545F4914F6CDD1DULL};
+    gen_float = batch == 2;
+    Rng r = batch == 0 ? Rng{0x9E3779B97F4A7C15ULL} : batch == 1 ? Rng{0x2545F4914F6CDD1DULL} : Rng{0x51AF2C8E0B3D96A7ULL};
     unsigned long long b_entries = 0, b_compiled = 0;
     int b_fail = 0;
     for (int k = 0; k < kPrograms; ++k) {
-      std::string code = gen_program(r);
+      std::string code = gen_float ? gen_float_program(r) : gen_program(r);
       State P;
       P.open_libs();
       TierOptions off;
@@ -578,7 +774,7 @@ int main() {
       if (avail) ok = ok && S.stats.jit_refused == 0;
       if (!ok) {
         ++b_fail;
-        std::printf("FAIL generated program %d (%s):\n%s\n  got %s\n  want %s\n", k, batch ? "bitwise" : "arithmetic",
+        std::printf("FAIL generated program %d (%s):\n%s\n  got %s\n  want %s\n", k, batch_names[batch],
                     code.c_str(), got.c_str(), want.c_str());
       }
     }
@@ -586,10 +782,11 @@ int main() {
     entries += b_entries;
     compiled += b_compiled;
     if (avail) CHECK(b_compiled >= static_cast<unsigned long long>(kPrograms) && b_entries >= static_cast<unsigned long long>(kPrograms));
-    std::printf("ok   %d %s generated programs: %llu loops compiled, %llu takeovers%s\n", kPrograms,
-                batch ? "bitwise" : "arithmetic", b_compiled, b_entries, b_fail ? " (FAILURES)" : "");
+    std::printf("ok   %d %s generated programs: %llu loops compiled, %llu takeovers%s\n", kPrograms, batch_names[batch], b_compiled,
+                b_entries, b_fail ? " (FAILURES)" : "");
   }
   gen_bits = false;
+  gen_float = false;
   CHECK(gen_fail == 0);
 
   if (failures) std::printf("%d of %d check(s) failed\n", failures, checks);
