@@ -1,5 +1,5 @@
 // .mpy bytecode -> Path B IR (docs/notes/mpy-pathb.md). The subset: small ints, None/bool, str constants, names, locals,
-// the operators, jumps, calls of functions (positional arguments; no defaults, keywords or *args), closures (cell and free
+// the operators, jumps, calls of functions (positional and keyword arguments, and defaults; no *args), closures (cell and free
 // variables, LOAD_DEREF, STORE_DEREF, MAKE_CLOSURE), lists, tuples, dicts (BUILD_MAP, STORE_MAP, and the methods get, keys,
 // values, items, pop and update), sets (BUILD_SET), slices, del of an item (LOAD_NULL with STORE_SUBSCR), list, dict and set
 // comprehensions (STORE_COMP), and return. Anything else is refused by name,
@@ -270,8 +270,13 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
       op.kind = "MAKE_CLOSURE";            // the argument is the child's index; the extra byte is the number of cells
       op.arg = in.arg;
       op.extra = in.extra;
+    } else if (o == opcode("MAKE_FUNCTION_DEFARGS")) {
+      op.kind = "MAKE_FUNCTION_DEFARGS";   // the child's index; the defaults tuple and a null (the keyword defaults) are below
+      op.arg = in.arg;
     } else if (o == opcode("MAKE_CLOSURE_DEFARGS")) {
-      refused("default arguments of a nested function (MAKE_CLOSURE_DEFARGS) are not lowered yet");
+      op.kind = "MAKE_CLOSURE_DEFARGS";    // the child's index; the extra byte is the number of cells, above the defaults
+      op.arg = in.arg;
+      op.extra = in.extra;
     } else if (o == opcode("LOAD_DEREF")) {
       op.kind = "LOAD_DEREF";              // a cell or free variable: the argument is its local index
       op.arg = in.arg;
@@ -282,9 +287,9 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
       op.kind = "DELETE_DEREF";            // del of a cell or free variable: the cell's value becomes unbound (0)
       op.arg = in.arg;
     } else if (o == opcode("CALL_FUNCTION")) {
-      if ((in.arg >> 8) != 0) refused("keyword arguments in a call are not lowered yet");
-      op.kind = "CALL";
-      op.arg = in.arg;                     // the positional argument count
+      op.kind = "CALL";                    // the operand is (keyword count << 8) | positional count
+      op.arg = in.arg & 0xff;
+      op.extra = in.arg >> 8;
     } else if (o == opcode("LOAD_METHOD")) {
       op.kind = "LOAD_METHOD";             // the argument is the attribute's qstr; only append and pop are lowered (below)
       op.arg = in.arg;
@@ -293,9 +298,9 @@ std::vector<Op> normalize(const std::vector<Insn> &insns) {
       op.kind = "LOAD_SUPER_METHOD";
       op.arg = in.arg;
     } else if (o == opcode("CALL_METHOD")) {
-      if ((in.arg >> 8) != 0) refused("keyword arguments in a call are not lowered yet");
-      op.kind = "CALL_METHOD";             // the positional argument count; the method and its self lie below the arguments
-      op.arg = in.arg;
+      op.kind = "CALL_METHOD";             // the method and its self lie below the arguments (the counts as for CALL)
+      op.arg = in.arg & 0xff;
+      op.extra = in.arg >> 8;
     } else if (o == opcode("RETURN_VALUE")) {
       op.kind = "RETURN";
     } else {
@@ -347,10 +352,13 @@ int effect(const Op &op) {
   if (k == "STORE_SUBSCR") return -3;
   if (k == "FOR_ITER") return 1;   // the fall-through; the exhausted jump is handled per successor
   if (k == "GET_ITER") return kIterSlots - 1;   // the object goes, the iterator's slots come
-  if (k == "CALL") return -(int)op.arg;   // the function and its arguments go, the result comes
+  // A call's arguments are its positional ones and its keyword pairs (name and value), and both go with the function.
+  if (k == "CALL") return -(int)(op.arg + 2 * op.extra);   // the function and its arguments go, the result comes
   if (k == "LOAD_METHOD") return 1;        // the object becomes the method, and stays as the self above it
   if (k == "LOAD_SUPER_METHOD") return -1; // the class and self go, the method takes the super's slot and the self stays
-  if (k == "CALL_METHOD") return -(int)op.arg - 1;   // the method, the self and the arguments go, the result comes
+  if (k == "CALL_METHOD") return -(int)(op.arg + 2 * op.extra) - 1;   // the method, the self and the arguments go, the result comes
+  if (k == "MAKE_FUNCTION_DEFARGS") return -1;             // the defaults tuple and the null go, the function comes
+  if (k == "MAKE_CLOSURE_DEFARGS") return -1 - (int)op.extra;   // the defaults, the null and the captured cells go, the closure comes
   if (k == "MAKE_CLOSURE") return 1 - (int)op.extra;   // the captured cells go, the closure comes
   if (k == "STORE_NAME" || k == "STORE_GLOBAL" || k == "STORE_LOCAL" || k == "STORE_DEREF" || k == "POP_TOP" ||
       k == "BINARY" || k == "JUMP_IF_FALSE" || k == "JUMP_IF_TRUE" || k == "JUMP_IF_TRUE_OR_POP" ||
@@ -376,8 +384,7 @@ class Lowerer {
 
   std::string text(const std::string &source_name) {
     if (m_.top.data.empty()) throw std::runtime_error("mpy: the module has no code");
-    size_t nargs = 0;
-    std::string module_fn = unit(m_.top, false, "mpy_module", 0, nargs);
+    std::string module_fn = unit(m_.top, false, "mpy_module", 0);
     std::ostringstream out;
     out << "(ir-module \"" << source_name << "\" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4)"
         << " (double 8) (long_double 16)))\n";
@@ -417,23 +424,50 @@ class Lowerer {
     return id;
   }
 
-  // The function number of a child code object, lowering it on first use. n_free is the number of captured cells it takes
-  // (MAKE_CLOSURE's operand; 0 for MAKE_FUNCTION), and nargs is its positional argument count without them.
-  size_t child(const RawCode &rc, size_t n_free, size_t &nargs) {
-    auto it = ids_.find(&rc);
-    if (it != ids_.end()) {
-      nargs = nargs_[it->second];
-      return it->second;
+  // The signature of a function (MpyFunc in the runtime): its name, then its positional parameters' names, each NUL-terminated.
+  // The info of a code object is the name's qstr, then the argument names as qstr indices (mp_setup_code_state reads them the
+  // same way), and the qstrs are the module's table.
+  std::string signature(const RawCode &rc, const Prelude &pre) const {
+    size_t at = pre.info_offset;
+    auto uint = [&]() {
+      size_t v = 0;
+      uint8_t b;
+      do {
+        if (at >= rc.data.size()) throw std::runtime_error("mpy: truncated code info");
+        b = rc.data[at++];
+        v = (v << 7) | (b & 0x7f);
+      } while (b & 0x80);
+      return v;
+    };
+    auto qstr_text = [&]() {
+      size_t q = uint();
+      if (q >= m_.qstrs.size()) throw std::runtime_error("mpy: qstr index out of range");
+      return m_.qstrs[q];
+    };
+    std::string out = qstr_text();
+    out.push_back('\0');
+    for (unsigned i = 0; i < pre.n_pos_args; ++i) {
+      out += qstr_text();
+      out.push_back('\0');
     }
+    return out;
+  }
+
+  // The function number of a child code object, lowering it on first use. n_free is the number of captured cells it takes
+  // (MAKE_CLOSURE's operand; 0 for MAKE_FUNCTION). Its signature is the data item mpy.sig.K, and its counts are in infos_.
+  size_t child(const RawCode &rc, size_t n_free) {
+    auto it = ids_.find(&rc);
+    if (it != ids_.end()) return it->second;
     size_t id = fns_.size();
     fns_.emplace_back();
-    nargs_.push_back(0);
+    infos_.push_back(ChildInfo{});
     ids_[&rc] = id;
-    size_t n = 0;
-    std::string f = unit(rc, true, "mpy_fn_" + std::to_string(id), n_free, n);
-    fns_[id] = f;
-    nargs_[id] = n;
-    nargs = n;
+    Prelude pre = read_prelude(rc.data);
+    std::string sig = signature(rc, pre);
+    data_ << "(data \"mpy.sig." << id << "\" (const (array " << sig.size() << " (const char))) (string \"" << ir_escape(sig)
+          << "\"))\n";
+    infos_[id] = ChildInfo{pre.n_pos_args, pre.n_def_pos_args, sig.size()};
+    fns_[id] = unit(rc, true, "mpy_fn_" + std::to_string(id), n_free);
     return id;
   }
 
@@ -459,14 +493,13 @@ class Lowerer {
   // One code object as an IR function. For a function, its arguments come in through args, and the result goes to ret.
   // n_free is the number of captured cells, which are its first arguments (see the header comment); nargs is set to the
   // positional count the caller passes, without them.
-  std::string unit(const RawCode &rc, bool is_fn, const std::string &fname, size_t n_free, size_t &nargs) {
+  std::string unit(const RawCode &rc, bool is_fn, const std::string &fname, size_t n_free) {
     Prelude pre = read_prelude(rc.data);
     if (!is_fn && pre.n_pos_args) refused("module code with arguments");
-    if (pre.n_kwonly_args || pre.n_def_pos_args) refused("keyword or default arguments are not lowered yet");
+    if (pre.n_kwonly_args) refused("keyword-only arguments are not lowered yet");
     if (pre.scope_flags) refused("a generator, *args or **kwargs function is not lowered yet");
     if (pre.n_pos_args > pre.n_state) refused("a function with more arguments than locals");
     if (n_free > pre.n_pos_args) refused("a closure with more captured cells than arguments");
-    nargs = pre.n_pos_args - n_free;
     // The cell variables this function owns: the local index of each (the prelude's cell list).
     std::vector<size_t> cells;
     for (size_t i = 0; i < pre.n_cell; ++i) {
@@ -610,6 +643,17 @@ class Lowerer {
     auto local = [&](long long i) {
       if (i < 0 || i >= (long long)pre.n_state) throw std::runtime_error("mpy: local out of range");
       return slot("loc", (int)i);
+    };
+
+    // A function object (MAKE_FUNCTION and MAKE_CLOSURE, with or without defaults): mpy_make_func takes the ncells captured cells
+    // from the value stack and the defaults tuple (0 for none), and its signature is the child's data item. Returns the value.
+    auto make_function = [&](size_t id, size_t ncells, const std::string &defaults) {
+      const ChildInfo &ci = infos_[id];
+      std::string r = fresh();
+      body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_make_func\" (const unsigned_long " << id
+           << ") (const unsigned_long " << ci.npos << ") (const unsigned_long " << ncells << ") (const unsigned_long " << ci.ndef
+           << ") @\"mpy.sig." << id << "\" (const unsigned_long " << ci.sig_len << ") " << defaults << "))\n";
+      return r;
     };
 
     // A str literal: its bytes are a data item, and mpy_str_lit returns the record (allocated on first use). Returns the value.
@@ -817,40 +861,43 @@ class Lowerer {
         std::string cell = fresh();
         body << "  (let " << cell << " unsigned_long (load unsigned_long " << local(op.arg) << "))\n";
         body << "  (eval (call void &\"mpy_cell_set\" " << cell << " (const unsigned_long 0)))\n";
-      } else if (k == "MAKE_FUNCTION") {
+      } else if (k == "MAKE_FUNCTION" || k == "MAKE_FUNCTION_DEFARGS") {
+        // A function with no captured cells. With defaults, the defaults tuple is below the keyword defaults' null, and the
+        // function takes their place (the stack effect of MAKE_FUNCTION_DEFARGS is -1).
         if ((size_t)op.arg >= rc.children.size()) throw std::runtime_error("mpy: child index out of range");
-        size_t n = 0;
-        size_t id = child(rc.children[(size_t)op.arg], 0, n);
-        std::string r = fresh();
-        body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_make_function\" (const unsigned_long " << id
-             << ") (const unsigned_long " << n << ")))\n";
-        push(d, r);
-      } else if (k == "MAKE_CLOSURE") {
+        bool defargs = k == "MAKE_FUNCTION_DEFARGS";
+        size_t id = child(rc.children[(size_t)op.arg], 0);
+        std::string defaults = defargs ? load(d - 2) : "(const unsigned_long 0)";
+        std::string r = make_function(id, 0, defaults);
+        push(defargs ? d - 2 : d, r);
+      } else if (k == "MAKE_CLOSURE" || k == "MAKE_CLOSURE_DEFARGS") {
         // The captured cells are the raw slots LOAD_FAST pushed (below the closure's stack position). They go on the runtime
-        // value stack, where mpy_make_closure takes them, as the arguments of a call do.
+        // value stack, where mpy_make_func takes them, as the arguments of a call do. With defaults, the defaults tuple is
+        // below the null and the cells.
         if ((size_t)op.arg >= rc.children.size()) throw std::runtime_error("mpy: child index out of range");
+        bool defargs = k == "MAKE_CLOSURE_DEFARGS";
         int nc = (int)op.extra;
-        size_t n = 0;
-        size_t id = child(rc.children[(size_t)op.arg], (size_t)nc, n);
+        size_t id = child(rc.children[(size_t)op.arg], (size_t)nc);
+        std::string defaults = defargs ? load(d - nc - 2) : "(const unsigned_long 0)";
         for (int i = 0; i < nc; ++i) {
           std::string v = load(d - nc + i);
           body << "  (eval (call void &\"mpy_push\" " << v << "))\n";
         }
-        std::string r = fresh();
-        body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_make_closure\" (const unsigned_long " << id
-             << ") (const unsigned_long " << n << ") (const unsigned_long " << nc << ")))\n";
-        push(d - nc, r);
+        std::string r = make_function(id, (size_t)nc, defaults);
+        push(defargs ? d - nc - 2 : d - nc, r);
       } else if (k == "CALL") {
-        int n = (int)op.arg;
-        for (int i = 0; i < n; ++i) {
-          std::string v = load(d - n + i);
+        // The positional arguments, then the keyword pairs (the name, then the value), go on the value stack; the function
+        // lies below them.
+        int n = (int)op.arg, m = n + 2 * (int)op.extra;
+        for (int i = 0; i < m; ++i) {
+          std::string v = load(d - m + i);
           body << "  (eval (call void &\"mpy_push\" " << v << "))\n";
         }
-        std::string f = load(d - n - 1);
+        std::string f = load(d - m - 1);
         std::string r = fresh();
-        body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_call\" " << f << " (const unsigned_long " << n
-             << ")))\n";
-        push(d - n - 1, r);
+        body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_call_kw\" " << f << " (const unsigned_long " << n
+             << ") (const unsigned_long " << op.extra << ")))\n";
+        push(d - m - 1, r);
       } else if (k == "LOAD_METHOD") {
         // obj.name: the method, and the self to pass it (0 when the attribute is not a method of the class, so the call takes
         // none). mpy_load_method fails for a value that has no such attribute. The builtin methods of the other types are
@@ -874,18 +921,18 @@ class Lowerer {
         push(d - 3, meth);
         push(d - 2, out);
       } else if (k == "CALL_METHOD") {
-        // [method, self, args...]: the self (0 for none) and the arguments go on the value stack; mpy_call_method drops a
-        // null self and calls.
-        int n = (int)op.arg;
-        for (int i = 0; i <= n; ++i) {
-          std::string v = load(d - n - 1 + i);
+        // [method, self, args..., keyword pairs...]: the self (0 for none), the arguments and the pairs go on the value stack;
+        // mpy_call_method drops a null self and calls.
+        int n = (int)op.arg, m = n + 2 * (int)op.extra;
+        for (int i = 0; i <= m; ++i) {
+          std::string v = load(d - m - 1 + i);
           body << "  (eval (call void &\"mpy_push\" " << v << "))\n";
         }
-        std::string f = load(d - n - 2);
+        std::string f = load(d - m - 2);
         std::string r = fresh();
         body << "  (let " << r << " unsigned_long (call unsigned_long &\"mpy_call_method\" " << f << " (const unsigned_long " << n
-             << ")))\n";
-        push(d - n - 2, r);
+             << ") (const unsigned_long " << op.extra << ")))\n";
+        push(d - m - 2, r);
       } else if (k == "LOAD_ATTR") {
         if ((size_t)op.arg >= m_.qstrs.size()) throw std::runtime_error("mpy: qstr index out of range");
         std::string obj = pop(d), sym = name_sym((size_t)op.arg), r = fresh();
@@ -1152,8 +1199,13 @@ class Lowerer {
   std::map<std::string, std::string> names_;
   std::map<std::string, size_t> str_ids_;   // the id of each str literal's text (mpy_str_lit)
   std::map<const RawCode *, size_t> ids_;
+  struct ChildInfo {
+    size_t npos = 0;      // the positional parameters (the captured cells included)
+    size_t ndef = 0;      // the last ndef of them have defaults
+    size_t sig_len = 0;   // the length of its signature data item (mpy.sig.K)
+  };
   std::vector<std::string> fns_;   // the IR of each child function, by number
-  std::vector<size_t> nargs_;      // and each one's positional argument count
+  std::vector<ChildInfo> infos_;   // and each one's counts, for MAKE_FUNCTION and MAKE_CLOSURE
 };
 
 }  // namespace

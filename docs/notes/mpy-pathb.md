@@ -66,7 +66,7 @@ binary operators plus 13, as in `py/runtime0.h`; on ints they give the same resu
   AttributeError. The lowering refuses the builtin method names it does not lower, by name (`kBuiltinMethods` in
   `mpy_lower.cpp`). `CALL_METHOD` passes the self (0
   for none) and the arguments to `mpy_call_method`, so `xs.pop(i)` and `xs.append(x)` take one or two arguments. A keyword
-  argument is refused.
+  argument to a builtin method fails at run time (`function doesn't take keyword arguments`).
 - A constant tuple is one object in the .mpy file (mpy-cross folds it), so `LOAD_CONST_OBJ` builds it on each run from its items.
   The items may be None, the bools, small ints, strs, and tuples of those. An int outside the runtime's 62-bit small range is
   refused, as big ints are.
@@ -194,9 +194,19 @@ class namespace and `LOAD_GLOBAL`/`STORE_GLOBAL` for the globals. Any other opco
 
 Each code object is one IR function. The module body is `mpy_module`. A function is `mpy_fn_K(ret, args, nargs)`: it
 copies its arguments into its locals `loc.N` and stores its result through `ret`. The IR has no function-address value, so
-`mpy_dispatch(K, ret, args, nargs)` routes a call to `mpy_fn_K`, and a function object is a runtime record holding K and the
-argument count. A call pushes each argument on the runtime value stack (`mpy_push`), then calls `mpy_call(fn, n)`, which
-checks the arity and dispatches. Functions with defaults, keyword arguments or `*args` are refused.
+`mpy_dispatch(K, ret, args, nargs)` routes a call to `mpy_fn_K`, and a function object is a runtime record holding K, its
+parameter count, its signature and its defaults. A call pushes each argument on the runtime value stack (`mpy_push`), the
+keyword pairs (the name, then the value) after the positional ones, then calls `mpy_call_kw(fn, n, k)`, which matches them
+to the parameters as `bc.c`'s `mp_setup_code_state` does and dispatches. `*args`, keyword-only parameters and `**kwargs` are refused.
+
+Default arguments: `MAKE_FUNCTION_DEFARGS` and `MAKE_CLOSURE_DEFARGS` take the defaults tuple (the keyword defaults' null
+sentinel is below it, and is ignored). A function's signature is a data item `mpy.sig.K`: its name, then its parameter names,
+each NUL-terminated, from the code info. A missing argument takes the default of its parameter (the last ones have defaults).
+The argument errors are the reference's (`f() takes 2 positional arguments but 3 were given`, `unexpected keyword argument
+'d'`, `function got multiple values for argument 'a'`, `function missing required positional argument #N`, where N is the
+index of the highest-numbered missing parameter without a default, as `bc.c` reports it). A closure counts its captured
+cells among the positional arguments, as the reference does. A keyword argument to a builtin function or method is
+`function doesn't take keyword arguments`, as the reference's builtins say.
 
 ## Closures
 
@@ -222,7 +232,7 @@ Representation and calling convention (`tests/mpy/runtime/mpy_rt.c`):
   arguments. So `mpy_fn_K` copies all of its arguments, the cells included, into its locals with no special case, and
   `LOAD_DEREF` and `STORE_DEREF` read and write through the cell in the local.
 
-A nested def that has default arguments (`MAKE_CLOSURE_DEFARGS`) is refused by name. A `del` of a cell or free variable
+A nested def with default arguments is a closure with its defaults (`MAKE_CLOSURE_DEFARGS`). A `del` of a cell or free variable
 (`DELETE_DEREF`) stores 0 in the cell, which is unbound, so a read of it is `NameError: local variable referenced before
 assignment` (the reference's text).
 
@@ -348,7 +358,7 @@ a coroutine (vm.c's unwind_jump and END_FINALLY), and the lowering does the same
 
 ## Not yet
 
-Defaults and keyword arguments (`MAKE_FUNCTION_DEFARGS`, `MAKE_CLOSURE_DEFARGS`), generators, str methods and formatting, str
+Generators, str methods and formatting, str
 ordering and repetition,
 big ints, the set methods `copy` and `clear`, the list methods other than append and pop, subscripts of a range, and the rest
 of the opcodes. Equality of two dicts, two ranges or two views, `str` of a list, tuple, set or view, and
