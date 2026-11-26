@@ -104,13 +104,14 @@ check.call("bc2cpp paths name only scripts a world compiles (#{(listed - world_s
 
 LEGS = ['cases (QBE and gcc backends)', 'uop core and numpy (QBE backend)'].freeze
 
-def outcomes(full, pathb, bc2cpp = false)
+def outcomes(full, pathb, bc2cpp = false, cext = false)
   needs = { 'pathb-changes' => { 'result' => 'success', 'outputs' => {
     'full_ci' => full.to_s, 'changed' => pathb.to_s,
     'test_matrix' => JSON.generate(LEGS.map { |name| { 'name' => name, 'run' => 'true' } })
   } },
-            'bc2cpp-changes' => { 'result' => 'success', 'outputs' => { 'changed' => bc2cpp.to_s } } }
-  [[CiScope::FULL_JOBS, full], [CiScope::PATHB_JOBS, pathb], [CiScope::BC2CPP_JOBS, bc2cpp]].each do |names, enabled|
+            'bc2cpp-changes' => { 'result' => 'success', 'outputs' => { 'changed' => bc2cpp.to_s } },
+            'cext2mrbgem-changes' => { 'result' => 'success', 'outputs' => { 'changed' => cext.to_s } } }
+  [[CiScope::FULL_JOBS, full], [CiScope::PATHB_JOBS, pathb], [CiScope::BC2CPP_JOBS, bc2cpp], [CiScope::CEXT_JOBS, cext]].each do |names, enabled|
     names.each { |name| needs[name] = { 'result' => enabled ? 'success' : 'skipped' } }
   end
   needs[CiScope::SELF_AOT_JOB] = { 'result' => bc2cpp ? 'success' : 'skipped' }
@@ -124,6 +125,13 @@ check.call('manual run: self-aot may be skipped') { CiScope.validate(dispatch, n
 rejects.call('pull request: self-aot skipped with bc2cpp selected') { CiScope.validate(dispatch, nil, 'pull_request') }
 dispatch[CiScope::SELF_AOT_JOB]['result'] = 'failure'
 rejects.call('manual run: self-aot failure') { CiScope.validate(dispatch, nil, 'workflow_dispatch') }
+
+# cext2mrbgem: its job is selected by its own filter, alone or with the rest.
+check.call('cext2mrbgem change alone: its job is required') { CiScope.validate(outcomes(false, false, false, true), nil, 'pull_request'); true }
+cext_skipped = outcomes(false, false, false, true)
+cext_skipped['cext2mrbgem']['result'] = 'skipped'
+rejects.call('cext2mrbgem change: job skipped') { CiScope.validate(cext_skipped, nil, 'pull_request') }
+check.call('no cext2mrbgem change: its job may be skipped') { CiScope.validate(outcomes(true, true, true, false), nil, 'pull_request'); true }
 
 # The third value is bc2cpp-changes: false + true is a change to bc2cpp/ alone, where only the bc2cpp jobs are selected.
 [[true, true, true], [true, true, false], [true, false, true], [true, false, false], [false, false, true], [false, false, false]]

@@ -20,6 +20,8 @@ module CiScope
   PATHB_JOBS = %w[pathb-build pathb-test].freeze
   # The bc2cpp jobs of ci.yml: required whenever bc2cpp-changes reports a change to one of their paths (or on a manual run).
   BC2CPP_JOBS = %w[world mrbc-rb mrbc-snapshot checks nfcxx-clang-parity].freeze
+  # The cext2mrbgem converter suite of ci.yml: required whenever cext2mrbgem-changes reports a change to its paths (or on a manual run).
+  CEXT_JOBS = %w[cext2mrbgem].freeze
   # The bc2cpp self build: selected like BC2CPP_JOBS, except that a manual run starts it only with its self_aot input.
   SELF_AOT_JOB = 'self-aot'
 
@@ -81,7 +83,15 @@ module CiScope
       raise ArgumentError, 'bc2cpp selection output is missing or invalid'
     end
 
-    [[FULL_JOBS, full], [PATHB_JOBS, pathb], [BC2CPP_JOBS, bc2cpp_changed]].each do |names, enabled|
+    cext = needs.fetch('cext2mrbgem-changes', {})
+    raise ArgumentError, 'cext2mrbgem selection did not succeed' unless cext['result'] == 'success'
+
+    cext_changed = cext.fetch('outputs', {})['changed']
+    unless %w[true false].include?(cext_changed)
+      raise ArgumentError, 'cext2mrbgem selection output is missing or invalid'
+    end
+
+    [[FULL_JOBS, full], [PATHB_JOBS, pathb], [BC2CPP_JOBS, bc2cpp_changed], [CEXT_JOBS, cext_changed]].each do |names, enabled|
       expected = enabled == 'true' ? 'success' : 'skipped'
       names.each do |name|
         actual = needs.fetch(name, {})['result']
