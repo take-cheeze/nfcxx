@@ -21,6 +21,35 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* The metamethods of a class (sqobject.h MT_*, the order of the reference's _metamethods table). A class keeps the closure
+ * of each one it has (SQClass::NewSlot), apart from its members. */
+enum {
+  MT_ADD,
+  MT_SUB,
+  MT_MUL,
+  MT_DIV,
+  MT_UNM,
+  MT_MODULO,
+  MT_SET,
+  MT_GET,
+  MT_TYPEOF,
+  MT_NEXTI,
+  MT_CMP,
+  MT_CALL,
+  MT_CLONED,
+  MT_NEWSLOT,
+  MT_DELSLOT,
+  MT_TOSTRING,
+  MT_NEWMEMBER,
+  MT_INHERITED,
+  MT_LAST
+};
+
+static void call_from_native(const SQV *callee, SQV *ret, const SQV *args, int n);
+static const SQV *inst_mm(const SQV *self, int mm);
+static SQV make_null(void);
+static SQV make_bool(int b);
+
 /* ---- errors --------------------------------------------------------------------------------------------------------- */
 
 static void rt_error(const char *msg) {
@@ -136,8 +165,22 @@ static size_t text_of(const SQV *v, char *buf, size_t bufsz, const char **out) {
       *out = buf;
       return (size_t)n;
     }
-    default: rt_error("tostring of an array, a table, a class, an instance or a function is not lowered");
+    case SQBC_TAG_INSTANCE: {
+      /* ToString (sqvm.cpp): the class's _tostring, called with the instance as `this`, must return a string. Any other
+       * result makes the reference print the instance's address, which is not the same on every run. */
+      const SQV *m = inst_mm(v, MT_TOSTRING);
+      SQV self = *v, r;
+      if (!m) break;
+      SQV f = *m;
+      call_from_native(&f, &r, &self, 1);
+      if (r.tag != SQBC_TAG_STRING)
+        rt_error("tostring of an instance whose _tostring does not return a string is not lowered");
+      *out = str_of(&r)->chars;
+      return str_of(&r)->len;
+    }
+    default: break;
   }
+  rt_error("tostring of an array, a table, a class, an instance or a function is not lowered");
   return 0;
 }
 
@@ -328,6 +371,9 @@ typedef struct SqClosure {
   int nouters;
   SqOuter **outers;
   struct SqClass *base; /* the class of a method of a class with a base (GETBASE), or NULL */
+  int varparams;        /* the prototype's vararg flag: its last parameter is the array of the extra arguments */
+  int ndef;             /* the number of default parameters, the last ones of the parameter list */
+  SQV *defs;            /* the default values (CLOSURE_OP copies them when the closure is made), NDEF of them */
 } SqClosure;
 
 /* A native of the base library or a delegate: its operation (NAT_*), the parameter count sqvm.cpp's CallNative checks (`this`
@@ -502,6 +548,7 @@ static int delegate_native(const SQV *self, const SQV *key, SQV *out) {
       else if (strcmp(name, "rawget") == 0) n = &g_nat_rawget;
       else if (strcmp(name, "rawset") == 0) n = &g_nat_rawset;
       else if (strcmp(name, "rawin") == 0) n = &g_nat_rawin;
+      else if (strcmp(name, "tostring") == 0) n = &g_nat_tostring;
       break;
     default: break;
   }
@@ -520,7 +567,7 @@ static int is_class_method(const char *name) {
 }
 
 static int is_instance_method(const char *name) {
-  static const char *const names[] = {"weakref", "tostring"};
+  static const char *const names[] = {"weakref"};
   for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
     if (strcmp(name, names[i]) == 0) return 1;
   return 0;
@@ -564,6 +611,7 @@ typedef struct SqClass {
   int ctor;   /* the member index of `constructor`, or -1 */
   struct SqClass *base; /* the class this one extends, or NULL */
   SQV attrs;            /* the class's attributes (CLASS_OP), null when it has none */
+  SQV mm[MT_LAST];      /* the metamethods (SQClass::_metamethods): a closure, or a tag 0 when there is none */
 } SqClass;
 
 typedef struct SqInstance {
@@ -573,6 +621,15 @@ typedef struct SqInstance {
 
 static SqClass *class_of(const SQV *v) { return (SqClass *)(intptr_t)v->i; }
 static SqInstance *inst_of(const SQV *v) { return (SqInstance *)(intptr_t)v->i; }
+
+/* The metamethod MM of a class, or NULL (SQClass::GetMetaMethod). */
+static const SQV *class_mm(const SqClass *c, int mm) { return c->mm[mm].tag ? &c->mm[mm] : NULL; }
+
+/* SQInstance::GetMetaMethod: the metamethod of the instance's class, or NULL. A class or any other value has none. */
+static const SQV *inst_mm(const SQV *self, int mm) {
+  if (self->tag != SQBC_TAG_INSTANCE) return NULL;
+  return class_mm(inst_of(self)->cls, mm);
+}
 
 static SqMember *class_find(SqClass *c, const SQV *key) {
   for (size_t i = 0; i < c->count; i++)
@@ -611,14 +668,11 @@ void sqbc_rt_newclass(SQV *dst, const SQV *base, const SQV *attrs) {
   SqClass *c = calloc(1, sizeof *c);
   if (!c) rt_error("out of memory");
   c->ctor = -1;
-  /* CLASS_OP: the attributes of the class, null when there are none (a class is not given the base's attributes). */
-  if (attrs) {
-    c->attrs = *attrs;
-  } else {
-    c->attrs.tag = SQBC_TAG_NULL;
-    c->attrs.pad = 0;
-    c->attrs.i = 0;
-  }
+  SQV attrs_val;
+  attrs_val.tag = SQBC_TAG_NULL;
+  attrs_val.pad = 0;
+  attrs_val.i = 0;
+  if (attrs) attrs_val = *attrs; /* CLASS_OP: a class without attributes has null (not the base's) */
   if (base) {
     /* CLASS_OP (sqvm.cpp): the base must be a class; the new class has the base's members (SQClass::SQClass). */
     if (base->tag != SQBC_TAG_CLASS) {
@@ -636,20 +690,34 @@ void sqbc_rt_newclass(SQV *dst, const SQV *base, const SQV *attrs) {
       memcpy(c->members, b->members, b->count * sizeof(SqMember));
       c->count = c->cap = b->count;
     }
+    /* SQClass::SQClass copies the base's metamethods. */
+    memcpy(c->mm, b->mm, sizeof c->mm);
   }
-  *dst = class_val(c);
+  c->attrs = attrs_val; /* the reference sets the attributes after the _inherited call (CLASS_OP) */
+  SQV cv = class_val(c);
+  if (base) {
+    /* CLASS_OP: the new class is pushed and the base's _inherited metamethod is called with it as `this` and the class
+     * attributes as its parameter. Its result is ignored. */
+    const SQV *m = class_mm(c, MT_INHERITED);
+    if (m) {
+      SQV f = *m;
+      SQV args[2] = {cv, attrs_val}, r;
+      call_from_native(&f, &r, args, 2);
+    }
+  }
+  *dst = cv;
 }
 
-/* The metamethods of a class (sqobject.h MM_*): a closure with one of these names is a metamethod in the reference, not a
- * member. Not lowered. */
-static int is_metamethod_key(const SQV *k) {
-  static const char *const names[] = {"_add", "_sub", "_mul", "_div", "_unm", "_modulo", "_set", "_get", "_typeof",
-                                      "_nexti", "_cmp", "_call", "_cloned", "_newslot", "_delslot", "_tostring",
-                                      "_newmember", "_inherited"};
-  if (k->tag != SQBC_TAG_STRING) return 0;
-  for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
-    if (strcmp(str_of(k)->chars, names[i]) == 0) return 1;
-  return 0;
+/* The metamethod named by key K (sqobject.h MM_*), or -1. Only a closure with one of these names is a metamethod. */
+static int mm_index(const SQV *k) {
+  static const char *const names[MT_LAST] = {"_add",   "_sub",     "_mul",     "_div",        "_unm",     "_modulo",
+                                              "_set",   "_get",     "_typeof",  "_nexti",      "_cmp",     "_call",
+                                              "_cloned", "_newslot", "_delslot", "_tostring",  "_newmember",
+                                              "_inherited"};
+  if (k->tag != SQBC_TAG_STRING) return -1;
+  for (int i = 0; i < MT_LAST; i++)
+    if (strcmp(str_of(k)->chars, names[i]) == 0) return i;
+  return -1;
 }
 
 /* SQClass::NewSlot (sqclass.cpp), with the checks of SQVM::NewSlot: a closure or a static member is a shared member, any
@@ -688,7 +756,13 @@ static int class_try_newslot(SqClass *c, const SQV *k, const SQV *v, int bstatic
     if (!m) class_add(c, k, v, 1);
     return 1;
   }
-  if (v->tag == SQBC_TAG_CLOSURE && is_metamethod_key(k)) rt_error("class metamethods are not lowered");
+  /* SQClass::NewSlot: a closure named as a metamethod is the metamethod, and the members are not touched (no closure
+   * copy, no member). */
+  int mmi = (v->tag == SQBC_TAG_CLOSURE || v->tag == SQBC_TAG_NATIVE) ? mm_index(k) : -1;
+  if (mmi >= 0) {
+    c->mm[mmi] = *v;
+    return 1;
+  }
   SQV theval = *v;
   if (c->base && v->tag == SQBC_TAG_CLOSURE) theval = closure_with_base(v, c->base);
   if (m) {
@@ -734,6 +808,20 @@ static SQV make_instance(SqClass *c) {
 void sqbc_rt_newslota(const SQV *self, const SQV *key, const SQV *val, int bstatic, const SQV *attrs) {
   SQV s = *self, k = *key, v = *val;
   if (s.tag != SQBC_TAG_CLASS) rt_error("object must be a class");
+  /* sqvm.cpp NewSlotA (not raw): a class with a _newmember metamethod is called with the class as `this` and the key, the
+   * value, the attributes (null when none) and the static flag; the member is then not added, nor its attributes set. */
+  const SQV *nm = class_mm(class_of(&s), MT_NEWMEMBER);
+  if (nm) {
+    SQV f = *nm;
+    SQV args[5], r;
+    args[0] = s;
+    args[1] = k;
+    args[2] = v;
+    args[3] = attrs ? *attrs : make_null();
+    args[4] = make_bool(bstatic);
+    call_from_native(&f, &r, args, 5);
+    return;
+  }
   if (k.tag == SQBC_TAG_NULL) rt_error("null cannot be used as index");
   refuse_float_key(&k);
   class_newslot(class_of(&s), &k, &v, bstatic);
@@ -748,6 +836,13 @@ static SQV g_root;
 /* The first value above the running frame: the frame of a closure ends at its stacksize, and a native's frame ends after its
  * arguments (sqbc_rt_call sets it and restores it). A native that calls a closure builds the callee's frame here. */
 static SQV *g_top;
+
+/* The main function's frame (sq_fn_0 calls it first): the first value above it is its end, as sqbc_rt_call sets it for a
+ * closure. */
+void sqbc_rt_enter(SQV *base, int stacksize) {
+  if (base + stacksize > g_stack_end) rt_error("stack overflow");
+  g_top = base + stacksize;
+}
 
 void sqbc_rt_init(SQV *base, size_t nslots) {
   g_stack_end = base + nslots;
@@ -765,13 +860,30 @@ void sqbc_rt_newtable(SQV *dst) {
   *dst = v;
 }
 
-void sqbc_rt_closure(SQV *dst, int fn, int nparams, int stacksize, const SQV *env, int nouters) {
+/* The default values of the closure being made, stashed by sqbc_rt_default_stash before sqbc_rt_closure takes them. */
+#define SQBC_MAX_DEFAULTS 64
+static SQV g_defs_stash[SQBC_MAX_DEFAULTS];
+
+void sqbc_rt_default_stash(int i, const SQV *val) {
+  if (i < 0 || i >= SQBC_MAX_DEFAULTS) rt_error("too many default parameters");
+  g_defs_stash[i] = *val;
+}
+
+void sqbc_rt_closure(SQV *dst, int fn, int nparams, int stacksize, const SQV *env, int nouters, int varparams, int ndef) {
   SqClosure *c = calloc(1, sizeof *c);
   if (!c) rt_error("out of memory");
   c->fn = fn;
   c->nparams = nparams;
   c->stacksize = stacksize;
   c->nouters = nouters;
+  c->varparams = varparams;
+  c->ndef = ndef;
+  if (ndef > 0) {
+    /* CLOSURE_OP: the defaults are the values of their registers when the closure is made (the stash). */
+    c->defs = calloc((size_t)ndef, sizeof *c->defs);
+    if (!c->defs) rt_error("out of memory");
+    for (int i = 0; i < ndef; i++) c->defs[i] = g_defs_stash[i];
+  }
   if (nouters > 0) {
     c->outers = calloc((size_t)nouters, sizeof(SqOuter *));
     if (!c->outers) rt_error("out of memory");
@@ -793,6 +905,7 @@ void sqbc_rt_closure(SQV *dst, int fn, int nparams, int stacksize, const SQV *en
 }
 
 static SqClosure *closure_of(const SQV *v) { return (SqClosure *)(intptr_t)v->i; }
+
 
 void sqbc_rt_outer_local(SQV *dst, int idx, SQV *slot) {
   closure_of(dst)->outers[idx] = find_outer(slot);
@@ -874,6 +987,16 @@ void sqbc_rt_get(SQV *dst, const SQV *self, const SQV *key, int root_fallback) {
     }
     raise_idx(&k);
   }
+  /* FallBackGet (sqvm.cpp): a miss on an instance calls its class's _get with the key, before the default delegate and the
+   * root table. The closure's result is the value. */
+  const SQV *gm = inst_mm(&s, MT_GET);
+  if (gm) {
+    SQV f = *gm;
+    SQV args[2] = {s, k};
+    call_from_native(&f, &out, args, 2);
+    *dst = out;
+    return;
+  }
   /* The default delegate, then the root table (selfidx 0). */
   if (k.tag == SQBC_TAG_STRING && delegate_native(&s, &k, &out)) {
     *dst = out;
@@ -930,10 +1053,18 @@ void sqbc_rt_set(const SQV *self, const SQV *key, const SQV *val, int root_fallb
     a->items[k.i] = v;
     return;
   } else if (s.tag == SQBC_TAG_INSTANCE) {
-    /* sqvm.cpp Set: a field of the instance; anything else falls through to the root fallback, then the index error. */
+    /* sqvm.cpp Set: a field of the instance; anything else goes to FallBackSet, the class's _set (called with the key and
+     * the value; its result is not used), then the root fallback, then the index error. */
     SqMember *m = class_find(inst_of(&s)->cls, &k);
     if (m && m->is_field) {
       inst_of(&s)->values[m->idx] = v;
+      return;
+    }
+    const SQV *sm = inst_mm(&s, MT_SET);
+    if (sm) {
+      SQV f = *sm;
+      SQV args[3] = {s, k, v}, r;
+      call_from_native(&f, &r, args, 3);
       return;
     }
   } else {
@@ -964,7 +1095,17 @@ void sqbc_rt_newslot(const SQV *self, const SQV *key, const SQV *val) {
     class_newslot(class_of(&s), &k, &v, 0);
     return;
   }
-  if (s.tag == SQBC_TAG_INSTANCE) rt_error("class instances do not support the new slot operator");
+  if (s.tag == SQBC_TAG_INSTANCE) {
+    /* SQVM::NewSlot: an instance's _newslot metamethod, with the key and the value; else the error. */
+    const SQV *nm = inst_mm(&s, MT_NEWSLOT);
+    if (nm) {
+      SQV f = *nm;
+      SQV args[3] = {s, k, v}, r;
+      call_from_native(&f, &r, args, 3);
+      return;
+    }
+    rt_error("class instances do not support the new slot operator");
+  }
   char msg[96];
   snprintf(msg, sizeof msg, "indexing %s with %s", type_name(s.tag), type_name(k.tag));
   rt_error(msg);
@@ -1152,9 +1293,19 @@ static void raw_set_member(const SQV *self, const SQV *key, const SQV *val) {
 /* ObjCmp (sqvm.cpp): -1 when X orders before Y, 0 when they are the same value and 1 otherwise. Two values of one type
  * compare by their raw value first (so equal bits are 0, and -0.0 is not equal to 0.0), then by value; an integer and a
  * float compare as floats; null is before anything else. Any other pair raises the comparison error. */
-static int obj_cmp(const SQV *x, const SQV *y) {
+static int64_t obj_cmp(const SQV *x, const SQV *y) {
   if (x->tag == y->tag) {
     if (x->i == y->i) return 0;
+    /* ObjCmp: a table, userdata or instance whose class has _cmp is compared by it, with the other value as its
+     * parameter; the result must be an integer and is the comparison's value as it is. */
+    const SQV *cm = inst_mm(x, MT_CMP);
+    if (cm) {
+      SQV f = *cm;
+      SQV args[2] = {*x, *y}, res;
+      call_from_native(&f, &res, args, 2);
+      if (res.tag != SQBC_TAG_INTEGER) rt_error("_cmp must return an integer");
+      return res.i;
+    }
     switch (x->tag) {
       case SQBC_TAG_STRING: {
         /* scstrcmp: the bytes in order, a proper prefix first. */
@@ -1216,22 +1367,31 @@ static int is_false(const SQV *v) { return v->tag == SQBC_TAG_FLOAT ? sqbc_rt_fl
 static void map_items(const SQV *src, const SQV *fn, SqArray *dst) {
   size_t size = array_of(src)->count;
   int nargs = callback_nargs(fn);
-  if (nargs > 4) rt_error("callback with more than 4 parameters is not lowered");
+  /* The reference's stack for the call, as sqbaselib.cpp __map_array builds it: S[0] is the map's `this` (the array), S[1]
+   * its argument (the callback), then the callback pushed once more, and then per item the array, the item, the index
+   * (nargs >= 3) and the array (nargs >= 4). sq_call(nargs) takes the callee from the value below the nargs values on top,
+   * pops the arguments, pushes the result and __map_array pops it. So the callback's own copy is consumed by a call whose
+   * callee is S[1] (nargs 5): the next item then finds the array below, and fails. The values below S[0] are the caller's
+   * stack, which is not modelled: a callee read there (nargs 7 and more) is refused. */
+  SQV stk[8];
+  int top = 0;
+  stk[top++] = *src;
+  stk[top++] = *fn;
+  stk[top++] = *fn;
   SQV temp = make_null();
   for (size_t n = 0; n < size; n++) {
     SqArray *a = array_of(src);
     if (n < a->count) temp = a->items[n];
-    SQV pushed[5];
-    int np = 0;
-    pushed[np++] = *fn;
-    pushed[np++] = *src;
-    pushed[np++] = temp;
-    if (nargs >= 3) pushed[np++] = make_int((int64_t)n);
-    if (nargs >= 4) pushed[np++] = *src;
-    /* sq_call(nargs): the callee is the value below the nargs values pushed last. */
-    int at = np - nargs - 1;
+    stk[top++] = *src;
+    stk[top++] = temp;
+    if (nargs >= 3) stk[top++] = make_int((int64_t)n);
+    if (nargs >= 4) stk[top++] = *src;
+    int callee = top - nargs - 1;
+    if (callee < 0)
+      rt_error("callback with 6 or more parameters is not lowered (sq_call reads its callee below the map's frame)");
     SQV res;
-    call_from_native(&pushed[at], &res, pushed + at + 1, nargs);
+    call_from_native(&stk[callee], &res, &stk[callee + 1], nargs);
+    top -= nargs;
     if (n < dst->count) dst->items[n] = res;
   }
 }
@@ -1356,10 +1516,32 @@ void sqbc_rt_call(const SQV *callee, SQV *ret, SQV *frame, int nargs) {
   if (!ret) ret = &scratch;
   if (clo.tag == SQBC_TAG_CLOSURE) {
     SqClosure *c = (SqClosure *)(intptr_t)clo.i;
-    if (nargs != c->nparams) {
-      char msg[128];
-      snprintf(msg, sizeof msg, "wrong number of parameters (%d passed, %d required)", nargs, c->nparams);
-      rt_error(msg);
+    /* StartCall (sqvm.cpp): a vararg function takes the parameters before its last one, and the extra arguments go into an
+     * array that is that last parameter (the reference nulls the arguments it packed). Otherwise the arguments must be the
+     * parameters, or the missing ones are the last default parameters, whose values the closure has. */
+    if (c->varparams) {
+      int fixed = c->nparams - 1;
+      if (nargs < fixed) {
+        char msg[128];
+        snprintf(msg, sizeof msg, "wrong number of parameters (%d passed, at least %d required)", nargs, fixed);
+        rt_error(msg);
+      }
+      if (frame + fixed + 1 > g_stack_end) rt_error("stack overflow");
+      SQV arr = make_array_val((size_t)(nargs - fixed));
+      for (int k = fixed; k < nargs; k++) {
+        sqbc_rt_append(&arr, &frame[k]);
+        frame[k] = make_null();
+      }
+      frame[fixed] = arr;
+    } else if (nargs != c->nparams) {
+      int diff = c->nparams - nargs;
+      if (!(nargs < c->nparams && c->ndef > 0 && diff <= c->ndef)) {
+        char msg[128];
+        snprintf(msg, sizeof msg, "wrong number of parameters (%d passed, %d required)", nargs, c->nparams);
+        rt_error(msg);
+      }
+      if (frame + c->nparams > g_stack_end) rt_error("stack overflow");
+      for (int k = 0; k < diff; k++) frame[nargs + k] = c->defs[c->ndef - diff + k];
     }
     if (frame + c->stacksize > g_stack_end) rt_error("stack overflow");
     if (c->has_env) frame[0] = c->env;
@@ -1384,6 +1566,18 @@ void sqbc_rt_call(const SQV *callee, SQV *ret, SQV *frame, int nargs) {
       SQV ctor = c->members[c->ctor].val;
       sqbc_rt_call(&ctor, NULL, frame, nargs);
     }
+    return;
+  }
+  if (clo.tag == SQBC_TAG_INSTANCE && inst_mm(&clo, MT_CALL)) {
+    /* sqvm.cpp _OP_CALL of an instance: the _call metamethod is called with the instance as `this`, and the call's nargs
+     * values (the caller's `this` first) as its parameters. */
+    SQV f = *inst_mm(&clo, MT_CALL);
+    SQV *args = malloc(((size_t)nargs + 1) * sizeof *args);
+    if (!args) rt_error("out of memory");
+    args[0] = clo;
+    for (int i = 0; i < nargs; i++) args[i + 1] = frame[i];
+    call_from_native(&f, ret, args, nargs + 1);
+    free(args);
     return;
   }
   if (clo.tag == SQBC_TAG_NATIVE) {
@@ -1566,6 +1760,24 @@ void sqbc_rt_arith(int op, SQV *dst, SQV *a, SQV *b) {
     *dst = make_float(res);
     return;
   }
+  /* ArithMetaMethod (sqvm.cpp): an instance on the left has the operator's metamethod, called with the right operand as its
+   * parameter. A `+` with a string operand is a concatenation (ARITH_OP's StringCat), not this. */
+  if (x.tag == SQBC_TAG_INSTANCE && !(op == SQBC_OP_ADD && y.tag == SQBC_TAG_STRING)) {
+    int mmi = op == SQBC_OP_ADD   ? MT_ADD
+              : op == SQBC_OP_SUB ? MT_SUB
+              : op == SQBC_OP_MUL ? MT_MUL
+              : op == SQBC_OP_DIV ? MT_DIV
+                                  : MT_MODULO;
+    const SQV *m = inst_mm(&x, mmi);
+    if (m) {
+      SQV f = *m;
+      SQV args[2] = {x, y}, res;
+      call_from_native(&f, &res, args, 2);
+      *dst = res;
+      return;
+    }
+    if (op == SQBC_OP_MOD) return; /* no metamethod: the message is only recorded, as below */
+  }
   if (op == SQBC_OP_MOD) {
     /* sqvm.cpp's _OP_MOD calls ARITH_OP and drops its result, and a failure only stores the message (Raise_Error): the
      * script goes on and the target keeps its value. So a zero divisor, or an operand that is not an integer, is not an
@@ -1606,7 +1818,7 @@ void sqbc_rt_arith(int op, SQV *dst, SQV *a, SQV *b) {
     *dst = r;
     return;
   }
-  /* sqvm.cpp ArithMetaMethod: no metamethods in the subset. */
+  /* sqvm.cpp ArithMetaMethod: no metamethod of the left operand. */
   {
     char opc = op == SQBC_OP_ADD ? '+' : op == SQBC_OP_SUB ? '-' : op == SQBC_OP_MUL ? '*'
              : op == SQBC_OP_DIV ? '/' : '%';
@@ -1630,6 +1842,15 @@ void sqbc_rt_neg(SQV *dst, SQV *a) {
     *dst = make_float(-float_of(&x));
     return;
   }
+  /* NEG_OP: an instance's _unm metamethod, called with the instance as `this` and no parameter. */
+  const SQV *um = inst_mm(&x, MT_UNM);
+  if (um) {
+    SQV f = *um;
+    SQV args[1] = {x}, r;
+    call_from_native(&f, &r, args, 1);
+    *dst = r;
+    return;
+  }
   {
     char msg[128];
     snprintf(msg, sizeof msg, "attempt to negate a %s", type_name(x.tag));
@@ -1639,7 +1860,7 @@ void sqbc_rt_neg(SQV *dst, SQV *a) {
 
 /* ObjCmp (sqvm.cpp), then CMP_OP's operator on its result. */
 int sqbc_rt_compare(int op, SQV *a, SQV *b) {
-  int r = obj_cmp(a, b);
+  int64_t r = obj_cmp(a, b);
   switch (op) {
     case SQBC_CMP_G: return r > 0;
     case SQBC_CMP_GE: return r >= 0;

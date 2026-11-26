@@ -81,8 +81,8 @@ checked by tag. Anything else calls a helper, which performs the whole operation
 | RETURN | copy of the register (or null) into `*ret`, then `(return)` |
 | everything else (LOADROOT, INSTANCEOF, BITW, INC, FOREACH, ...) | refused: `refused: _OP_NAME is not lowered yet (pc N)`, exit 3 |
 
-A nested function with default parameters or a vararg is refused by name (the main prototype is always vararg, with
-`vargv` unused, and is lowered either way).
+A nested function with default parameters or a vararg is lowered (section 4b). The main prototype is always vararg, with
+`vargv` unused.
 
 Each module gets one `sq_fn_N(ret, base, clo)` per prototype (pre-order, main is 0; `clo` is the running closure, NULL for
 main) and a dispatcher `sq_dispatch(fn, ret, frame, clo)`, an IR function with one test per prototype, which the runtime
@@ -167,8 +167,9 @@ exits 1, as `sqref` does.
   a locked class) is silently not done, returning the class; a `rawset` of an instance takes only its fields and returns
   the instance; `null` as a key is `null key`. `instance()` makes an instance with no constructor and locks the class, as
   `CreateInstance` does. The other delegate methods (`weakref`, `newmember`,
-  `rawnewmember`, and `tostring` of an instance or a class) are `unsupported ... method` at run time (`tostring` of an
-  instance or a class is refused: the reference prints an address).
+  `rawnewmember`, and `tostring` of a class) are `unsupported ... method` at run time (`tostring` of a class is refused: the
+  reference prints an address). `tostring` of an instance is lowered when its class has `_tostring` (below); without it the
+  reference prints an address, and it is refused.
 - Inheritance (`extends`, CLASS_OP, SQClass's constructor). A class with a base starts with the base's members, fields
   (with their indices, so an instance's fields are the base's then the new ones) and constructor; a field of the derived
   class with a base member's name replaces the default. The base is locked with the derived class (SQClass::Lock). A
@@ -181,6 +182,35 @@ exits 1, as `sqref` does.
   attributes. The class's `getattributes(key)` and `setattributes(key, value)`: a null key is the class's own attributes;
   another key is a member's, and a missing member is `wrong index`; setattributes gives back the value before. An
   instance has no `getattributes` (the index error). The attribute tables are ordinary tables.
+- Class metamethods (sqobject.h MT_*; sqclass.cpp NewSlot; sqvm.cpp). A closure (or a native closure) named as one of them
+  is the class's metamethod, not a member: `C._add` is an index error, a field of that name keeps being a field, and a
+  derived class copies the base's metamethods when it is created. Each is called as the reference calls it, with the
+  instance (or the class) as `this`:
+  - `_add`, `_sub`, `_mul`, `_div`, `_modulo` (ArithMetaMethod) and `_unm` (NEG_OP): the left operand's, with the right operand
+    as its parameter (`_unm`: none). A `+` with a string operand is a concatenation, not `_add`. A `%` with no `_modulo`
+    only records the error, as the `%` rule above says. Tests `cls_arith`, `cls_concat_tostring`, `cls_mod_nomm`,
+    `rterr/cls_arith_left`, `rterr/cls_unm_missing`.
+  - `_cmp` (ObjCmp): two instances of one class order by it; the identical instance is 0 without the call. The result must be
+    an integer (`_cmp must return an integer`) and is used as it is, so the operator takes its sign and the default sort (no
+    comparator) uses it too. Tests `cls_cmp`, `rterr/cls_cmp_type`.
+  - `_tostring` (ToString): `print`, a concatenation with a string on either side (the left operand first), and the
+    `tostring` method of an instance. Tests `cls_tostring`, `cls_concat_tostring`.
+  - `_get` (FallBackGet): a miss on an instance, before the default delegate and the root table, so an unqualified name in a
+    method (looked up on `this` first) goes through it. `_set` (FallBackSet): a SET of a name that is not a field; without
+    it, the index error. `_newslot` (NewSlot): a NEWSLOT on an instance; without it, the error. Tests `cls_get_set`,
+    `cls_newslot`, `rterr/cls_set_arity`.
+  - `_call` (CALL): a call of an instance, with the instance as `this` and the call's values as parameters (the caller's
+    `this` value first, as sqvm.cpp pushes them); without it, `attempt to call 'instance'`. Tests `cls_call`,
+    `rterr/cls_call_arity`, `rterr/cls_call_missing`.
+  - `_inherited` (CLASS_OP): run when a class with a base is made, with the new class as `this` and the class attributes as
+    the parameter; a class derived from that one takes it and runs it again. Test `cls_inherited`.
+  - `_newmember` (NewSlotA, a member of a class body): called with the key, the value, the attributes (null when none) and the
+    static flag, and the member is not added. Test `cls_newmember`.
+  - `_typeof`, `_nexti`, `_delslot` and `_cloned` are stored and never called: TYPEOF, FOREACH, DELETE and CLONE are refused
+    by the producer (`lower/err/cls_typeof.nut`, `cls_nexti.nut`, `cls_delslot.nut`, `cls_cloned.nut`).
+- The main function starts with `sqbc_rt_enter`, which sets the runtime's top above the main frame. The driver calls
+  `sq_fn_0` directly, not through `sqbc_rt_call`, so without it a callback from the main program built its frame over the
+  main's own registers.
 - Calls (sqvm.cpp `_OP_CALL`, StartCall, Return): the callee's frame starts at the `this` register (arg2) of the caller,
   so its parameters are the caller's registers above it, and the result is written to the caller's target register (arg0)
   when it has one. `nargs` counts `this`: `wrong number of parameters (N passed, M required)` for a mismatch. A closure
@@ -212,26 +242,50 @@ code is `sq_fn_N` over the same flat stack, so the call needs no new IR form. Th
   The array is checked after each call: a change of the item count or of the item buffer is `array resized during sort
   operation`. The buffer check compares our buffer; the reference compares its vector's, so a resize that the two
   allocate differently is not modelled (no test does one).
-- Not modelled: a callback with more than four parameters. The reference reads stack values that were not pushed
-  there; the runtime refuses it with `callback with more than 4 parameters is not lowered`. No test.
+- Callbacks with more than four parameters (`map` and `apply` only: `reduce`, `filter` and `sort` always call with three
+  values, so a longer callback is `wrong number of parameters` there, as `lower/rterr/reduce_arity`, `sort_cmp_arity`).
+  `map`/`apply` builds the reference's stack exactly (`map_items`): the array and the callback below, the callback pushed
+  once, then per item the array, the item, the index (three or more) and the array (four or more), and `sq_call` takes
+  the callee from `nargs + 1` below the top. So a callback of four declared parameters (nargs 5) is called for the first
+  item, whose call consumes the callback's copy; the second item then reads the array as its callee
+  (`attempt to call 'array'`). Five declared (nargs 6) is `attempt to call 'array'` on the first item. Tests
+  `callback_four`, `callback_four_apply`, `callback_five_empty`, `rterr/callback_four_items`, `rterr/callback_five`,
+  `rterr/callback_five_apply`. Six declared or more (nargs 7 and up) read below the map's own frame, which is the
+  caller's stack: the reference gives `wrong number of parameters` for nargs 7, `attempt to call 'array'` for nargs 8 and
+  `attempt to call 'table'` for nargs 10 (probed with the callback's declared parameters 6, 7 and 9), so the runtime refuses
+  them at the first item with a named message. No test: nothing it prints can match the reference.
 - No producer change: a CALL of `arr.map(f)` is the same PREPCALL and CALL as any other native method; the callbacks are
-  natives of the runtime, and a nested function with a default parameter or a vararg is still refused by the producer
-  (`lower/err/callback_default.nut`, `lower/err/callback_vararg.nut`).
+  natives of the runtime. A default-parameter or vararg callback is lowered as any closure (`lower/callback_default.nut`,
+  `lower/callback_vararg.nut`; section 4b).
 - Wrapping: `+ - *` and unary minus wrap, as the reference does on LP64 in practice. `INT64_MIN / -1` is undefined in the
   reference (its fast path has no check), and the runtime wraps. It is not tested.
 
+## 4b. Default parameters and varargs (StartCall, CLOSURE_OP)
+
+- Defaults. CLOSURE_OP copies the values of the default parameters' registers of the creating frame into the closure, before
+  the closure is stored in its own register (the register may be one of them). The producer stashes them first
+  (`sqbc_rt_default_stash`), and `sqbc_rt_closure` takes the stash. A call with fewer arguments than parameters fills the
+  missing ones from the last defaults, in order, when the missing count is at most the default count (StartCall); otherwise
+  `wrong number of parameters (N passed, M required)`. Tests `closure_default`, `closure_default_local` (the default is the
+  value of a local when the closure is made), `callback_default`, `rterr/default_few`.
+- Varargs. A vararg function's last parameter is its `vargv`. A call takes the fixed parameters (the ones before it),
+  and packs the arguments after them into a new array in that parameter; the reference nulls the packed arguments
+  (StartCall). Fewer arguments than the fixed ones is `wrong number of parameters (N passed, at least M required)`. Tests
+  `vararg_pack`, `callback_vararg` (a callback gets the item alone in `vargv`, as map passes the callback's parameter count),
+  `rterr/vararg_few`.
+
 ## 5. Tests
 
-- `tests/squirrelbc/run.sh`: the reader. 122 streams (`corpus/*.nut`, `lower/*.nut` and the synthetic stream of
+- `tests/squirrelbc/run.sh`: the reader. 140 streams (`corpus/*.nut`, `lower/*.nut` and the synthetic stream of
   `lower/synth.rb`) compile with `sq -c`, load in `sq_dump` (every instruction named, stream consumed), and run through
   `sqref` with the same result as their source. Also: the opcode table against the reference header; a golden dump
   (`reader/ints.dump`); and five malformed streams (truncated, trailing byte, bad tag, SQInteger size 4, corrupt TAIL),
   each refused with exit 1.
-- `tests/squirrelbc/lower/run.sh`: the end-to-end suite. 109 programs (`lower/*.nut`: integers, strings, tables, calls,
+- `tests/squirrelbc/lower/run.sh`: the end-to-end suite. 127 programs (`lower/*.nut`: integers, strings, tables, calls,
   closures, print, tostring, arrays, floats, classes and inheritance, number and string conversions, array methods
   (including extend and insert, and the callbacks sort, map, apply, reduce, filter: `sort_*`, `map_basic`, `reduce_basic`,
   `filter_basic`, `callback_*`), string methods (slice, find, tolower, toupper), class and instance delegates, class
-  attributes) match `sqref` on the printed result and the status; 78 runtime errors (`lower/rterr/`, the callback ones
+  attributes) match `sqref` on the printed result and the status; 89 runtime errors (`lower/rterr/`, the callback ones
   included) match the message and status 1; 8 programs (`lower/err/`) are refused with exit 3; `lower/synth.rb` writes a stream with DLOAD, DMOVE, LINE and
   LOADNULLS. A string result is printed by `sqref` and by the driver alike (the text, one line).
 - The oracle is `tests/squirrelbc/oracle/sqref.c`: the reference VM, built against the reference tree's
@@ -255,8 +309,7 @@ source tree). Without them they exit 77 (skip). The lowering suite also needs `b
   `insert`, `sort`, `map`, `apply`, `reduce` and `filter` (`top`, `remove`, `resize`, `clear`, `weakref`), and a string
   method other than `len`, `tostring`, `tofloat`, `tointeger`, `slice`, `find`, `tolower` and `toupper` (`weakref`) are
   `unsupported ... method` at run time, where the reference runs them; no test. Every string method of the reference
-  except `weakref` is lowered. A class's `_cmp` metamethod, which ObjCmp calls for a table or an instance in a sort, is
-  refused with the other class metamethods (section 4).
+  except `weakref` is lowered. The class metamethods are in section 4.
   A method of the table delegate other than `tostring` (`t.len()`, `t.rawget` ...) is "the index does not exist". A
   float as a table or array key is `float keys are not lowered` at run time (the reference hashes floats; not modelled).
 - Objects (strings, tables, closures) are never freed: the runtime is a test harness with no collector, so a long loop
@@ -266,10 +319,10 @@ source tree). Without them they exit 77 (skip). The lowering suite also needs `b
 - LOADROOT (the reference's root-table fast path) is refused; the lowering reaches the root through GET on register 0.
 - The outer objects are kept as the reference keeps them (an open list by descending stack address, closed by CLOSE and by
   the return of the frame). A closure called after its creating frame has returned reads the closed value.
-- Classes: a metamethod of a class (a closure named
-  `_add`, `_tostring`, `_inherited`, ... the MM_* names of sqobject.h) is `class metamethods are not lowered` at run time:
-  the reference makes it a metamethod, not a member, so the program's output differs; no test (a refusal from the
-  producer would not match a program the reference runs).
+- Class metamethods that are not observable here: `_typeof`, `_nexti`, `_delslot` and `_cloned` are stored (section 4) but
+  never called, because TYPEOF, FOREACH, DELETE and CLONE are refused by the producer.
+- A `tostring` of a class is refused at run time, and so is a `tostring` of an instance whose `_tostring` does not return a
+  string (the reference prints an address).
 - TAILCALL is lowered as CALL (the reference reuses the frame of a closure). A tail recursion deep enough to need the frame reuse is a stack overflow here (`stack overflow`, the runtime's own text).
 - Not lowered: INSTANCEOF, LOADROOT and DELETE (refused by name); the delegate methods of an instance and a class that
   section 4 does not list.
