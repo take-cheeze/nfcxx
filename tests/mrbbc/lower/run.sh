@@ -15,6 +15,7 @@
 # A program that is refused never reaches the emitter, so a refusal is not a silent miscompile.
 #
 #   tests/mrbbc/lower/run.sh
+# MRBBC_VALUE selects the value layout (8, the default; 4 or 16): the lowering's --value and the runtime's MRBBC_VALUE.
 # Exit 77 (skip) when mrbc, the mruby interpreter or QBE is missing.
 set -u
 root=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -26,6 +27,7 @@ MRBC=${MRBC:-$root/bc2cpp/tools/mrbc_rb/bin/mrbc_rb}
 export MRBC_FALLBACK=${MRBC_FALLBACK:-/nonexistent}
 MRUBY=${MRUBY:-$root/build/mruby-tool/bin/mruby}
 QBE=${QBE:-$root/build/qbe/qbe}
+VALUE=${MRBBC_VALUE:-8}
 work=${TMPDIR:-/tmp}/mrbbc-lower.$$
 mkdir -p "$work"
 trap 'rm -rf "$work"' EXIT
@@ -37,14 +39,14 @@ fi
 
 c++ -std=c++17 -O1 -Wall -Wextra -Werror -I"$src" -o "$work/lower" "$src/mrb_rite.cpp" "$src/mrb_lower.cpp" \
   "$src/mrbbc_lower_main.cpp" || exit 1
-cc -std=c99 -Wall -Wextra -Werror -c -o "$work/mrbrt.o" "$rt/mrbrt.c" || exit 1
-cc -std=c99 -Wall -Wextra -Werror -c -o "$work/driver.o" "$rt/driver.c" || exit 1
+cc -std=c99 -Wall -Wextra -Werror -DMRBBC_VALUE="$VALUE" -c -o "$work/mrbrt.o" "$rt/mrbrt.c" || exit 1
+cc -std=c99 -Wall -Wextra -Werror -DMRBBC_VALUE="$VALUE" -c -o "$work/driver.o" "$rt/driver.c" || exit 1
 
 # build SRC NAME: the program binary in $work/NAME, or the failing step's message on stdout (status 1).
 build() {
   local rb=$1 base=$2
   "$MRBC" -o "$work/$base.rite" "$rb" > /dev/null 2>&1 || { echo "mrbc refused the program"; return 1; }
-  "$work/lower" "$work/$base.rite" > "$work/$base.ir" 2> "$work/$base.err" \
+  "$work/lower" --value="$VALUE" "$work/$base.rite" > "$work/$base.ir" 2> "$work/$base.err" \
     || { echo "lowering: $(cat "$work/$base.err")"; return 1; }
   "$root/scripts/mrb.rb" "$root/scripts/pathb-qbe-emit.rb" "$work/$base.ir" > "$work/$base.ssa" 2> "$work/$base.err" \
     || { echo "emitter: $(cat "$work/$base.err")"; return 1; }
@@ -119,4 +121,4 @@ if [ "$fail" -ne 0 ]; then
   echo "mrbbc-lower: FAILED"
   exit 1
 fi
-echo "mrbbc-lower: $n programs match mruby 4.0; $nr runtime errors match mruby; $ne programs refused (exit 3)"
+echo "mrbbc-lower (value $VALUE): $n programs match mruby 4.0; $nr runtime errors match mruby; $ne programs refused (exit 3)"

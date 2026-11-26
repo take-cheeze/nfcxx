@@ -65,17 +65,30 @@ DBG or LVAR section before IREP.
 
 ### Values and registers
 
-A register R(i) is a 16-byte slot `r<i>` of type `MV`: the tag byte at offset 0 and an int64 at offset 8. The tags are
-the runtime's (`tests/mrbbc/runtime/mrbrt.h`): nil 0, false 1, true 2, integer 3, string 4, array 5, symbol 6. The
-int64 of a string, an array or a symbol is a pointer to the runtime's object: a string is a length and its bytes, an
-array a length, a capacity and its `MV` items, a symbol the NUL-terminated name in the module's data. The objects are
-allocated by the runtime's collector (mark and sweep, mrbrt.c, "the collector"), and freed when they are unreachable. The main program becomes one IR function `mrb_irep_0(MV *ret)`.
-A `RETURN` copies R(a) into `*ret`, and the driver prints `*ret` the way `p` does.
+A register R(i) is a slot `r<i>` of type `MV`, in one of three layouts (`mrbbc_lower --value=N`, and the runtime built
+with `-DMRBBC_VALUE=N`; `tests/mrbbc/lower/run.sh` takes `MRBBC_VALUE`):
 
-Integer operators have an inline fast path. When every operand has the integer tag, `+`, `-` and `*` are the IR's
-checked `cadd`, `csub` and `cmul` (they trap on overflow), and `<`, `<=`, `>`, `>=` are signed `lt.s` and `le.s` (the
-operands of `>` and `>=` are swapped). Everything else calls `mrbbc_binop`, which does the rest of mruby's rules for
-integers, strings, arrays and symbols (`==` compares contents: strings by bytes, arrays element by element).
+| Layout | Register | Encoding |
+| --- | --- | --- |
+| `8` (default) | a 64-bit word | an integer in -2^62..2^62-1 is `(i << 1) \| 1`; a symbol `(index << 2) \| 2`; nil, false, true are 0, 4, 12; any other word is the address of an object whose header gives its tag |
+| `4` | a 32-bit word | the same, with small integers in -2^30..2^30-1; on a 64-bit host the objects come from an arena mapped below 2 GB (`MAP_32BIT`, x86-64 Linux) |
+| `16` | tag byte + int64 | the tag at offset 0 (the runtime's tags, `mrbrt.h`), the int64 or the object's address at offset 8 |
+
+Integers are exact to 64 bits in every layout: one outside the small range is a boxed integer, an object of the heap. Past
+64 bits the runtime raises `NotImplementedError` (see the deviations). A symbol is the index of its interned name. The
+objects (strings, arrays, hashes, instances, closures, boxed integers) are allocated by the runtime's collector (mark and
+sweep, mrbrt.c, "the collector"), and freed when they are unreachable. The main program becomes one IR function
+`mrb_irep_0(MV *ret)`. A `RETURN` copies R(a) into `*ret`, and the driver prints `*ret` the way `p` does. A copy of a
+register is a load and a store of its word (two for the 16-byte layout), not the IR's `copy`, which the emitter makes a
+`memmove` call.
+
+Integer operators have an inline fast path when every operand is a small integer. In a word layout, `<`, `<=`, `>`, `>=`
+compare the words (the tagging keeps the order); `+`, `-` and `*` shift the integers out, compute with wrapping
+operations (`*` only for factors of at most half the word, so the product cannot wrap) and store the result when it is in
+the small range. Otherwise `mrbbc_binop` runs, which boxes a larger result. In the 16-byte layout `+`, `-` and `*` are the
+IR's checked `cadd`, `csub` and `cmul` (they trap on overflow). Everything else calls `mrbbc_binop`, which does the rest of
+mruby's rules for integers, strings, arrays and symbols (`==` compares contents: strings by bytes, arrays element by
+element).
 
 String literals and symbol names are data items of the IR module: `(data "mrbbc_strPC" (const (array N (const char)))
 (string "..."))` for a `STRING` at pc PC, and one `mrbbc_symK` per distinct symbol name. Temporaries that the array
@@ -399,12 +412,10 @@ whose message says so, never with a value.
 
 ## Deviations from mruby
 
-- **Integer overflow.** mruby promotes an overflowing `+ - *` (and `INT_MIN / -1`) to a Bignum or a Float. The inline
-  path traps (the IR's checked operations abort, SIGABRT); the runtime path raises `NotImplementedError`. The corpus
-  avoids overflow. Values up to 2^63 - 1 are exact.
-- **Integer width.** This build uses mruby's default word boxing (`MRB_WORD_BOXING`), so its immediate integers are
-  narrower than 64 bits and larger values are heap objects. The producer uses 64-bit integers throughout. The corpus
-  stays within the immediate range, so the comparison with mruby does not test that boundary.
+- **Integer overflow.** mruby promotes an integer past 64 bits (an overflowing `+ - *`, `INT_MIN / -1`) to a Bignum. The
+  runtime raises `NotImplementedError` there (the 16-byte layout's inline path traps instead: the IR's checked
+  operations abort). Values up to 2^63 - 1 are exact in every layout; `int_big.rb` crosses the small ranges of the word
+  layouts.
 - **Refusals in place of silence.** Everything outside the subset is refused at lowering time, never compiled to a
   wrong value. The runtime's own gaps (listed above) are loud: a `NotImplementedError`, not a value.
 - **Nested class names.** A nested class (`class A; class B`) is found by its plain name from anywhere, as
