@@ -23,7 +23,9 @@ enum mrbbc_tag {
   MRBBC_STR = 4,
   MRBBC_ARY = 5,
   MRBBC_SYM = 6,
-  MRBBC_BLK = 7
+  MRBBC_BLK = 7,
+  MRBBC_OBJ = 8, /* an instance of a class the program defines (the int64 is its MObj) */
+  MRBBC_CLS = 9  /* a class the program defines, or Object (the int64 is its MClass) */
 };
 
 typedef struct MV {
@@ -31,10 +33,37 @@ typedef struct MV {
   int64_t i;
 } MV;
 
-/* The program's methods (TDEF): mrbbc_def adds the name, the lowered body's number and the arity; mrbbc_find returns the
- * number of the body a self call runs, or raises ArgumentError (wrong count) or NoMethodError (no such method). */
+/* The program's methods (TDEF). mrbbc_def adds a top-level method (on Object) with the lowered body's number and the
+ * arity; mrbbc_def_in adds one to the class cls (the self of a class body). mrbbc_find returns the number of the body a
+ * self call of self runs, or raises ArgumentError (wrong count) or NoMethodError (no such method). mrbbc_find_send is an
+ * explicit receiver's call: it returns -1 when the method is not the receiver's class's (the builtin path then runs), and
+ * raises NoMethodError for a top-level method, which is private. mrbbc_find_init is the initialize of a new object (-1
+ * when there is none and no argument was given). */
 void mrbbc_def(const char *name, int id, long arity);
-int mrbbc_find(const char *name, long argc);
+void mrbbc_def_in(const MV *cls, const char *name, int id, long arity);
+int mrbbc_find(const MV *self, const char *name, long argc);
+int mrbbc_find_send(const MV *recv, const char *name, long argc);
+int mrbbc_find_init(const MV *obj, long argc);
+
+/* Classes (CLASS, EXEC's class body, TCLASS, GETCONST) and objects. mrbbc_class defines the class name (a nil superclass
+ * only) under cbase when it is a class, else under target when that is a class, else Object; an existing class of the
+ * name is reopened. mrbbc_object_class is Object (TCLASS at the top level). mrbbc_getconst reads a class by its name, or
+ * raises NameError. mrbbc_alloc makes an instance of cls (new). mrbbc_getiv and mrbbc_setiv read and write an instance
+ * variable of self (an object or a class; nil for another value). */
+void mrbbc_class(MV *dst, const MV *cbase, const MV *super, const char *name, const MV *target);
+void mrbbc_object_class(MV *dst);
+void mrbbc_getconst(MV *dst, const char *name);
+void mrbbc_alloc(MV *dst, const MV *cls);
+void mrbbc_getiv(MV *dst, const MV *self, const char *name);
+void mrbbc_setiv(const MV *self, const char *name, const MV *v);
+
+/* NoMethodError for a name the receiver does not have (the builtin path of a call the program also defines). */
+void mrbbc_no_method(const MV *recv, const char *name) __attribute__((noreturn));
+
+/* Block parameters: mrbbc_splats is true when a yield gave one array (argc 1, argv[1] an array), which a block with two
+ * or more parameters splats; mrbbc_ary_elt writes element i of the array, or nil past its end. */
+int mrbbc_splats(const MV *argv, long argc);
+void mrbbc_ary_elt(MV *dst, const MV *ary, long i);
 
 /* Blocks. mrbbc_block makes the closure of a BLOCK at dst: it stores the block's number, a copy of self, the frame the
  * block was made in and its home (the frame of the method a return leaves), in clo (a 40-byte slot of the caller's
@@ -49,8 +78,10 @@ void mrbbc_blk_args(MV *argv, const MV *blk);
 void mrbbc_blk_load(MV *dst, const MV *blk);
 void mrbbc_blk_given(MV *dst, const MV *blk);
 void mrbbc_return_block(const MV *value, MV *home);
+void mrbbc_break(const MV *value, MV *home);
 int mrbbc_unwinding(void);
 void mrbbc_unwind_take(MV *ret, MV *frame);
+int mrbbc_break_take(MV *dst, MV *frame);
 
 /* The operators the binop helper takes (the opcode names of mruby's ops.h; NEQ is the SEND of "!="). */
 enum mrbbc_op {

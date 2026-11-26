@@ -26,6 +26,38 @@ typedef struct MAry {
   MV *items;
 } MAry;
 
+/* Classes and objects. A method of the program is an MDef in the list of its class (newest first, so a redefinition wins),
+ * and a top-level one is in object_class's list. A class has its name (the full one, A::B for a nested class), the key
+ * GETCONST and CLASS find it by (the plain name), its class-level instance variables, and the next class of the registry.
+ * An object is its class and its instance variables. Heap objects are malloc'd and never freed, as the rest. */
+typedef struct MDef {
+  const char *name;
+  int id;
+  long arity;
+  struct MDef *next;
+} MDef;
+
+typedef struct MIvar {
+  const char *name;
+  MV val;
+  struct MIvar *next;
+} MIvar;
+
+typedef struct MClass {
+  const char *key, *name;
+  MDef *defs;
+  MIvar *ivars;
+  struct MClass *next;
+} MClass;
+
+typedef struct MObj {
+  MClass *cls;
+  MIvar *ivars;
+} MObj;
+
+static MClass object_class = {"Object", "Object", NULL, NULL, NULL};
+static MClass *class_registry = NULL;
+
 void mrbbc_raise(const char *cls, const char *message) {
   fflush(stdout);
   fprintf(stderr, "%s: %s (%s)\n", mrbbc_progname, message, cls);
@@ -79,53 +111,200 @@ void mrbbc_str_new(MV *dst, const char *p, long n) {
 }
 
 void mrbbc_sym(MV *dst, const char *name) { set_obj(dst, MRBBC_SYM, name); }
+static const char *class_name(const MV *v);
 
-/* The methods of the program: each TDEF (mrbbc_def) adds one entry, the name, the number of the lowered body and its
- * arity. Every method is defined on Object (the target class of a top-level def). mrbbc_find returns the body of the
- * latest definition of a name, as a self call finds it; a call with the wrong number of arguments and a name nothing
- * defined are the errors mruby raises. */
-typedef struct MDef {
-  const char *name;
-  int id;
-  long arity;
-} MDef;
-
-static MDef *mdefs = NULL;
-static size_t nmdefs = 0, capmdefs = 0;
-
-void mrbbc_def(const char *name, int id, long arity) {
-  MDef *d;
-  if (nmdefs == capmdefs) {
-    size_t cap = capmdefs ? 2 * capmdefs : 8;
-    MDef *p = realloc(mdefs, cap * sizeof *p);
-    if (p == NULL) mrbbc_raise("NoMemoryError", "failed to allocate memory");
-    mdefs = p;
-    capmdefs = cap;
-  }
-  d = &mdefs[nmdefs++];
+/* The methods and classes of the program (see MDef and MClass above). mrbbc_def and mrbbc_def_in add an entry to the list
+ * of Object or of a class, so a redefinition wins. A self call (mrbbc_find) looks in the class of self when self is an
+ * object, then in Object. An explicit receiver's call (mrbbc_find_send) looks in the receiver's class only: a top-level
+ * method is private, so reaching one of those with an explicit receiver is a NoMethodError. A wrong argument count is an
+ * ArgumentError and a name nothing defines a NoMethodError. */
+static void add_def(MDef **head, const char *name, int id, long arity) {
+  MDef *d = alloc(sizeof *d);
   d->name = name;
   d->id = id;
   d->arity = arity;
+  d->next = *head;
+  *head = d;
 }
 
-int mrbbc_find(const char *name, long argc) {
-  size_t i = nmdefs;
-  while (i-- > 0) {
-    if (strcmp(mdefs[i].name, name) == 0) {
-      if (mdefs[i].arity != argc) {
-        char msg[128];
-        snprintf(msg, sizeof msg, "wrong number of arguments (given %ld, expected %ld)", argc, mdefs[i].arity);
-        mrbbc_raise("ArgumentError", msg);
-      }
-      return mdefs[i].id;
-    }
+static MDef *find_def(MDef *d, const char *name) {
+  for (; d != NULL; d = d->next) {
+    if (strcmp(d->name, name) == 0) return d;
   }
+  return NULL;
+}
+
+static int check_arity(const MDef *d, long argc) {
+  if (d->arity != argc) {
+    char msg[128];
+    snprintf(msg, sizeof msg, "wrong number of arguments (given %ld, expected %ld)", argc, d->arity);
+    mrbbc_raise("ArgumentError", msg);
+  }
+  return d->id;
+}
+
+static MClass *cls_of(const MV *v) { return (MClass *)(intptr_t)v->i; }
+static MObj *obj_of(const MV *v) { return (MObj *)(intptr_t)v->i; }
+
+void mrbbc_def(const char *name, int id, long arity) { add_def(&object_class.defs, name, id, arity); }
+
+void mrbbc_def_in(const MV *cls, const char *name, int id, long arity) {
+  if (cls->tag != MRBBC_CLS) mrbbc_raise("TypeError", "a method is defined on a class");
+  add_def(&cls_of(cls)->defs, name, id, arity);
+}
+
+int mrbbc_find(const MV *self, const char *name, long argc) {
+  MDef *d = NULL;
+  if (self->tag == MRBBC_OBJ) d = find_def(obj_of(self)->cls->defs, name);
+  if (d == NULL) d = find_def(object_class.defs, name);
+  if (d != NULL) return check_arity(d, argc);
   {
     char msg[256];
-    snprintf(msg, sizeof msg, "undefined method '%s' for Object", name);
+    const char *cname = self->tag == MRBBC_OBJ ? obj_of(self)->cls->name : "Object";
+    snprintf(msg, sizeof msg, "undefined method '%s' for %s", name, cname);
     mrbbc_raise("NoMethodError", msg);
   }
 }
+
+int mrbbc_find_send(const MV *recv, const char *name, long argc) {
+  if (recv->tag == MRBBC_OBJ) {
+    MDef *d = find_def(obj_of(recv)->cls->defs, name);
+    if (d != NULL) return check_arity(d, argc);
+  }
+  if ((recv->tag == MRBBC_OBJ || recv->tag == MRBBC_CLS) && find_def(object_class.defs, name) != NULL) {
+    char msg[256];
+    snprintf(msg, sizeof msg, "private method '%s' called for %s", name, class_name(recv));
+    mrbbc_raise("NoMethodError", msg);
+  }
+  return -1;
+}
+
+int mrbbc_find_init(const MV *obj, long argc) {
+  MDef *d = find_def(obj_of(obj)->cls->defs, "initialize");
+  if (d != NULL) return check_arity(d, argc);
+  if (argc != 0) {
+    char msg[128];
+    snprintf(msg, sizeof msg, "wrong number of arguments (given %ld, expected 0)", argc);
+    mrbbc_raise("ArgumentError", msg);
+  }
+  return -1;
+}
+
+static MClass *find_class(const char *key) {
+  MClass *c;
+  for (c = class_registry; c != NULL; c = c->next) {
+    if (strcmp(c->key, key) == 0) return c;
+  }
+  return NULL;
+}
+
+/* The names of the classes and modules of mruby's core: the program does not reopen or read them (not lowered). */
+static int core_name(const char *name) {
+  static const char *const names[] = {
+      "Object",    "BasicObject", "Module",    "Class",          "Kernel",    "Comparable", "Enumerable",
+      "NilClass",  "TrueClass",   "FalseClass", "Integer",        "Float",     "String",     "Symbol",
+      "Array",     "Hash",        "Range",     "Proc",           "Exception", "StandardError", "NameError",
+      "NoMethodError", "ArgumentError", "TypeError", "ZeroDivisionError", "IndexError", "RuntimeError",
+      "LocalJumpError", "NotImplementedError", "Math", "Struct", "Time"};
+  size_t i;
+  for (i = 0; i < sizeof names / sizeof names[0]; i++) {
+    if (strcmp(names[i], name) == 0) return 1;
+  }
+  return 0;
+}
+
+void mrbbc_class(MV *dst, const MV *cbase, const MV *super, const char *name, const MV *target) {
+  MClass *outer = &object_class, *c;
+  if (super->tag != MRBBC_NIL) mrbbc_raise("NotImplementedError", "a class with a superclass is not lowered yet");
+  if (cbase->tag == MRBBC_CLS) {
+    outer = cls_of(cbase);
+  } else if (target->tag == MRBBC_CLS) {
+    outer = cls_of(target);
+  }
+  c = find_class(name);
+  if (c == NULL) {
+    if (core_name(name)) mrbbc_raise("NotImplementedError", "reopening a core class is not lowered yet");
+    c = alloc(sizeof *c);
+    c->key = name;
+    if (outer == &object_class) {
+      c->name = name;
+    } else {
+      size_t n = strlen(outer->name) + 2 + strlen(name) + 1;
+      char *full = alloc(n);
+      snprintf(full, n, "%s::%s", outer->name, name);
+      c->name = full;
+    }
+    c->defs = NULL;
+    c->ivars = NULL;
+    c->next = class_registry;
+    class_registry = c;
+  }
+  set_obj(dst, MRBBC_CLS, c);
+}
+
+void mrbbc_object_class(MV *dst) { set_obj(dst, MRBBC_CLS, &object_class); }
+
+void mrbbc_getconst(MV *dst, const char *name) {
+  MClass *c = find_class(name);
+  if (c != NULL) {
+    set_obj(dst, MRBBC_CLS, c);
+    return;
+  }
+  if (core_name(name)) mrbbc_raise("NotImplementedError", "a core constant is not lowered yet");
+  {
+    char msg[256];
+    snprintf(msg, sizeof msg, "uninitialized constant %s", name);
+    mrbbc_raise("NameError", msg);
+  }
+}
+
+void mrbbc_alloc(MV *dst, const MV *cls) {
+  MObj *o;
+  if (cls->tag != MRBBC_CLS) mrbbc_no_method(cls, "new");
+  o = alloc(sizeof *o);
+  o->cls = cls_of(cls);
+  o->ivars = NULL;
+  set_obj(dst, MRBBC_OBJ, o);
+}
+
+static MIvar **ivars_of(const MV *self) {
+  if (self->tag == MRBBC_OBJ) return &obj_of(self)->ivars;
+  if (self->tag == MRBBC_CLS) return &cls_of(self)->ivars;
+  return NULL;
+}
+
+void mrbbc_getiv(MV *dst, const MV *self, const char *name) {
+  MIvar **head = ivars_of(self), *v;
+  MV out;
+  out.tag = MRBBC_NIL;
+  out.i = 0;
+  if (head != NULL) {
+    for (v = *head; v != NULL; v = v->next) {
+      if (strcmp(v->name, name) == 0) {
+        out = v->val;
+        break;
+      }
+    }
+  }
+  *dst = out;
+}
+
+void mrbbc_setiv(const MV *self, const char *name, const MV *val) {
+  MIvar **head = ivars_of(self), *v;
+  if (head == NULL) mrbbc_raise("NotImplementedError", "an instance variable of this value is not lowered yet");
+  for (v = *head; v != NULL; v = v->next) {
+    if (strcmp(v->name, name) == 0) {
+      v->val = *val;
+      return;
+    }
+  }
+  v = alloc(sizeof *v);
+  v->name = name;
+  v->val = *val;
+  v->next = *head;
+  *head = v;
+}
+
 
 /* A block value (MRBBC_BLK): the int64 is the Clo that mrbbc_block fills. The layout is 40 bytes, as the producer
  * reserves it (tools/mrbbc/mrb_lower.cpp, the BLOCK slot). A closure lives in its frame, which is alive while the block
@@ -168,11 +347,21 @@ MV *mrbbc_blk_home(const MV *blk) {
  * checked after each call of a method or a block) until the function whose frame is home takes it (mrbbc_unwind_take),
  * and that function returns the value. */
 static int unwind_pending = 0;
+static int unwind_break = 0; /* the pending exit is a break (its home is the frame of the call the block was passed to) */
 static MV *unwind_home = NULL;
 static MV unwind_value;
 
 void mrbbc_return_block(const MV *value, MV *home) {
   unwind_pending = 1;
+  unwind_break = 0;
+  unwind_home = home;
+  unwind_value = *value;
+}
+
+/* A break out of a block: the call that the block was passed to (the frame that made the block, home) returns value. */
+void mrbbc_break(const MV *value, MV *home) {
+  unwind_pending = 1;
+  unwind_break = 1;
   unwind_home = home;
   unwind_value = *value;
 }
@@ -180,10 +369,32 @@ void mrbbc_return_block(const MV *value, MV *home) {
 int mrbbc_unwinding(void) { return unwind_pending; }
 
 void mrbbc_unwind_take(MV *ret, MV *frame) {
-  if (unwind_pending && unwind_home == frame) {
+  if (unwind_pending && !unwind_break && unwind_home == frame) {
     *ret = unwind_value;
     unwind_pending = 0;
   }
+}
+
+/* Takes a pending break whose home is frame: dst gets its value, and the caller goes on after the call. */
+int mrbbc_break_take(MV *dst, MV *frame) {
+  if (unwind_pending && unwind_break && unwind_home == frame) {
+    *dst = unwind_value;
+    unwind_pending = 0;
+    unwind_break = 0;
+    return 1;
+  }
+  return 0;
+}
+
+int mrbbc_splats(const MV *argv, long argc) { return argc == 1 && argv[1].tag == MRBBC_ARY; }
+
+void mrbbc_ary_elt(MV *dst, const MV *ary, long i) {
+  const MAry *a = ary_of(ary);
+  MV out;
+  out.tag = MRBBC_NIL;
+  out.i = 0;
+  if (i < a->len) out = a->items[i];
+  *dst = out;
 }
 
 void mrbbc_blk_args(MV *argv, const MV *blk) {
@@ -210,6 +421,9 @@ static const char *class_name(const MV *v) {
     case MRBBC_STR: return "String";
     case MRBBC_ARY: return "Array";
     case MRBBC_SYM: return "Symbol";
+    case MRBBC_OBJ: return obj_of(v)->cls->name;
+    case MRBBC_CLS: return "Class";
+    case MRBBC_BLK: return "Proc";
     default: return "Integer";
   }
 }
@@ -239,11 +453,15 @@ static const char *op_method(int op) {
   }
 }
 
+static void no_method(const char *name, const MV *recv) __attribute__((noreturn));
+
 static void no_method(const char *name, const MV *recv) {
   char msg[160];
   snprintf(msg, sizeof msg, "undefined method '%s' for %s", name, class_name(recv));
   mrbbc_raise("NoMethodError", msg);
 }
+
+void mrbbc_no_method(const MV *recv, const char *name) { no_method(name, recv); }
 
 /* A growable byte buffer for inspect and to_s. */
 typedef struct Buf {
@@ -327,6 +545,8 @@ static void inspect_value(Buf *b, const MV *v) {
       buf_char(b, ':');
       buf_str(b, sym_of(v));
       break;
+    case MRBBC_CLS: buf_str(b, cls_of(v)->name); break;
+    case MRBBC_OBJ: mrbbc_raise("NotImplementedError", "inspect of an instance is not lowered yet");
     case MRBBC_ARY: {
       const MAry *a = ary_of(v);
       long k;
@@ -368,6 +588,8 @@ static int value_eq(const MV *a, const MV *b) {
     case MRBBC_INT: return a->i == b->i;
     case MRBBC_STR: return str_of(a)->len == str_of(b)->len && memcmp(str_of(a)->p, str_of(b)->p, (size_t)str_of(a)->len) == 0;
     case MRBBC_SYM: return strcmp(sym_of(a), sym_of(b)) == 0;
+    case MRBBC_OBJ:
+    case MRBBC_CLS: return a->i == b->i;  /* identity */
     case MRBBC_ARY: {
       const MAry *x = ary_of(a), *y = ary_of(b);
       long k;
@@ -701,6 +923,8 @@ void mrbbc_send0(MV *dst, const MV *recv, int m) {
         case MRBBC_TRUE: r = new_str_value("true", 4); break;
         case MRBBC_FALSE: r = new_str_value("false", 5); break;
         case MRBBC_SYM: r = new_str_value(sym_of(recv), (long)strlen(sym_of(recv))); break;
+        case MRBBC_CLS: r = new_str_value(cls_of(recv)->name, (long)strlen(cls_of(recv)->name)); break;
+        case MRBBC_OBJ: mrbbc_raise("NotImplementedError", "to_s of an instance is not lowered yet");
         case MRBBC_INT: {
           char h[32];
           int n = snprintf(h, sizeof h, "%lld", (long long)recv->i);
