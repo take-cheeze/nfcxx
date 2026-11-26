@@ -446,19 +446,43 @@ that each one ran the body. The vector add is verified; the small kernel is not.
 ## Timing model (`ptxi --timing`)
 
 The interpreter also estimates how many cycles a kernel takes, in the style of the Theoric note on virtual hardware
-(a deterministic model that ranks kernels; it is not a clock-by-clock simulator). Each thread has a clock, and each
-instruction it issues adds the latency of its class: `alu`, `branch`, `local`, `global`, `atomic`, `barrier`
-(defaults 4, 4, 30, 400, 400, 20; `--lat CLASS=CYCLES` changes one). A predicated-off instruction costs an ALU issue.
-A `bar.sync` generation completes at its latest arrival. A block takes the largest clock of its threads, the blocks of
-an SM run one after another (`--sms N`, default 1), and the kernel takes the slowest SM. The estimate ignores issue
-width, bandwidth, caches and the serialization of divergent paths.
+(a deterministic model that ranks kernels; it is not a clock-by-clock simulator). Each instruction costs the latency of
+its class: `alu`, `branch`, `local`, `global`, `atomic`, `barrier`, `l1` (defaults 2, 4, 40, 320, 31, 24, 30, the first six measured on an RTX 5050, sm_120, and branch and l1 not measured;
+`--lat CLASS=CYCLES` changes one). A predicated-off instruction costs an ALU issue.
+
+A warp is 32 consecutive threads of a block, and it issues each instruction once for all its lanes. With `--timing`,
+each lane counts its steps through each instruction, the steps where its predicate was true, and the true steps that
+missed the L1. The warp issues the instruction as often as its busiest lane steps through it: the issues where some lane
+ran it cost the class latency (the busiest lane's true-predicate count), and the rest cost an ALU issue. So both sides of
+a divergent branch are paid, each once per issue. A global load waits for its slowest lane: the busiest lane's misses
+cost the `global` latency and the other issues cost `l1`. A `bar.sync` generation completes at the latest arrival among
+the warps with live threads, and each of those warps leaves at that time. A block takes the largest of three bounds: the
+largest warp time; its issue slots, the sum over its warps of the busiest lane's step count, at `--issue N` warp
+instructions per cycle (default 4); and its global bytes at `--bw BYTES` per cycle (default 16), each lane's access
+counted at its own size, except that an L1 hit moves no bytes. The blocks of an SM run one after another (`--sms N`,
+default 1), and the kernel takes the slowest SM. The counts take three 4-byte counters per thread and instruction, so
+`nthreads x ninst x 12` bytes (about 400 MB for 4096 threads and 8192 instructions, a few MB for a typical kernel); they
+are kept only with `--timing`.
+
+Caches: `--l1 BYTES` (a multiple of 128; default 0, no cache) gives each SM a direct-mapped L1 of 128-byte lines,
+empty at the start of each schedule. A global load whose line is present costs `l1`; a miss costs `global` and fills
+the line. Stores and atomics write through without allocating, so they cost what they did and neither hit nor fill.
+An SM's cache is shared by the blocks that run on it (block index mod `--sms`), in the order the schedule executes
+their loads. Two limits: a fill is immediate, so a load of a line still in flight counts as a hit, and when the hits
+depend on the order of the loads, `--explore` and `--random` report a range. The header of `ptxi.c` has the details.
 
 `--timing` prints the estimate to stderr at exit. With `--explore` or `--random` it gives one estimate when every
 schedule agrees, and the range otherwise: the megakernel's atomic version agrees, the version without its atomic does
-not (its loop runs a different number of times in different schedules, 2472 to 2476 cycles over 20 schedules).
-`tests/gpu/ptx-interp/timing/run_timing.sh` checks the per-instruction charges, the barrier wait (1248 cycles with the
-barrier, 832 without, derived by hand from the model), the scaling with `--sms`, and the ranges above.
+not (its loop runs a different number of times in different schedules, 2472 to 2476 cycles over 20 schedules with the former defaults; run_timing.sh pins those values, since at the calibrated alu the two paths tie).
+`tests/gpu/ptx-interp/timing/run_timing.sh` checks the per-instruction charges, the barrier wait (1000 cycles with the
+barrier, 976 without: the warp pays for both sides of the predicated loads), the warp cost of a divergent
+if/else (`timing/divergent.ptx`: 976 cycles), the scaling with `--sms`, the
+issue-width and bandwidth bounds (exact values: 4096 cycles at 1 byte per cycle for 4096 bytes, 2048 at 2, and halving
+`--issue` doubles an ALU-bound block), the L1 (`l1line.ptx`: 32 threads reading one 128-byte line; one block gives 656
+cycles, two blocks on one SM 1022 (one miss, then a block of hits) against 1312 without the cache; the per-SM keying is
+exact over every schedule of three blocks on two SMs, 1022; and `evict.ptx`: a one-line cache evicts, 966 against 676
+for two lines), and the ranges above.
 
-Not measured against hardware yet: this machine has no GPU (`nvidia-smi` is missing), so the latencies are the
+Still not modelled: caches beyond the optional L1. Not measured against hardware yet: this machine has no GPU (`nvidia-smi` is missing), so the latencies are the
 defaults above, not calibrated values. Ranking real kernels is the check that matters, and it needs the RTX 2060 run
 of the same kernels.

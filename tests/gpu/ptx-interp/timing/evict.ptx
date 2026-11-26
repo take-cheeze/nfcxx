@@ -1,0 +1,20 @@
+// One thread loads a[0], then a[32] (the next 128-byte line), then a[0] again. With a one-line L1 the second load evicts
+// the first line, so all three loads miss; with two lines they map to different indices, so the third load hits. The
+// estimates are derived in run_timing.sh.
+.version 8.0
+.target sm_75
+.address_size 64
+
+.visible .entry evict(
+  .param .u64 a_param
+)
+{
+  .reg .b32 %r<3>;
+  .reg .b64 %rd<2>;
+
+  ld.param.u64 %rd0, [a_param];
+  ld.global.u32 %r0, [%rd0];
+  ld.global.u32 %r1, [%rd0+128];
+  ld.global.u32 %r2, [%rd0];
+  ret;
+}

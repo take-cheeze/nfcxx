@@ -1,0 +1,29 @@
+// A chain of 16 adds per thread, no memory. With many warps per block the issue slots, not the critical path, decide the
+// estimate: run_timing.sh checks that halving the issue rate doubles it.
+.version 8.0
+.target sm_75
+.address_size 64
+
+.visible .entry alu_chain()
+{
+  .reg .b32 %r<2>;
+
+  mov.u32 %r0, %tid.x;
+  add.s32 %r1, %r0, 1;
+  add.s32 %r1, %r0, 2;
+  add.s32 %r1, %r0, 3;
+  add.s32 %r1, %r0, 4;
+  add.s32 %r1, %r0, 5;
+  add.s32 %r1, %r0, 6;
+  add.s32 %r1, %r0, 7;
+  add.s32 %r1, %r0, 8;
+  add.s32 %r1, %r0, 9;
+  add.s32 %r1, %r0, 10;
+  add.s32 %r1, %r0, 11;
+  add.s32 %r1, %r0, 12;
+  add.s32 %r1, %r0, 13;
+  add.s32 %r1, %r0, 14;
+  add.s32 %r1, %r0, 15;
+  add.s32 %r1, %r0, 16;
+  ret;
+}
