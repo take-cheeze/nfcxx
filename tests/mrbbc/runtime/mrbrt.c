@@ -52,6 +52,7 @@ typedef struct MDef {
   long min;  /* the required and post parameters: the fewest arguments */
   long max;  /* the most arguments: the required, optional and post parameters, or -1 with a rest parameter */
   int kd;    /* the method has keyword parameters (its keyword hash is not a positional argument) */
+  int fast;  /* only required parameters (vm.c's ENTER fast path): an empty `**h` splat is a positional argument */
   struct MDef *next;
 } MDef;
 
@@ -154,13 +155,14 @@ static const char *class_name(const MV *v);
  * object, then in Object. An explicit receiver's call (mrbbc_find_send) looks in the receiver's class only: a top-level
  * method is private, so reaching one of those with an explicit receiver is a NoMethodError. A wrong argument count is an
  * ArgumentError and a name nothing defines a NoMethodError. */
-static void add_def(MDef **head, const char *name, int id, long min, long max, int kd) {
+static void add_def(MDef **head, const char *name, int id, long min, long max, int flags) {
   MDef *d = alloc(sizeof *d);
   d->name = name;
   d->id = id;
   d->min = min;
   d->max = max;
-  d->kd = kd;
+  d->kd = flags & 1;
+  d->fast = (flags & 2) != 0;
   d->next = *head;
   *head = d;
 }
@@ -176,7 +178,10 @@ static MDef *find_def(MDef *d, const char *name) {
  * argnum_error(m1+m2)), even when the method has optional parameters. The keyword hash of a call counts as a positional
  * argument when the method has no keyword parameters (vm.c's check_argument_count and ENTER). */
 static int check_arity(const MDef *d, long argc, long kw) {
-  long count = argc + (kw && !d->kd ? 1 : 0), given;
+  /* kw: 0 for no keyword argument, 1 for keywords, 2 for an empty `**h` splat (see mrbbc_kw_flag). Keywords count as a
+   * positional argument of a method without keyword parameters; an empty splat does so only for the fast path of ENTER. */
+  long count = argc + (kw == 1 && !d->kd ? 1 : 0), given;
+  if (kw == 2 && !d->kd && d->fast) count = argc + 1;
   if (count < d->min || (d->max >= 0 && count > d->max)) {
     char msg[128];
     /* the count mruby's message gives (vm.c's argnum_error reads ci->n): a body of required parameters only (the fast path of
@@ -184,7 +189,7 @@ static int check_arity(const MDef *d, long argc, long kw) {
      * positional arguments, and a call of no positional arguments but keywords counts the hash as one; any other body
      * (optional, rest or post parameters) gives the count with the keyword hash */
     if (!d->kd && d->max != d->min) given = count;
-    else given = argc + (argc == 0 && kw ? 1 : 0);
+    else given = argc + (argc == 0 && kw == 1 ? 1 : 0);
     snprintf(msg, sizeof msg, "wrong number of arguments (given %ld, expected %ld)", given, d->min);
     mrbbc_raise("ArgumentError", msg);
   }
@@ -206,14 +211,14 @@ static MDef *find_chain(MClass *c, const char *name, MClass **where) {
   return NULL;
 }
 
-void mrbbc_def(const char *name, int id, long min, long max, int kd) {
-  add_def(&object_class.defs, name, id, min, max, kd);
+void mrbbc_def(const char *name, int id, long min, long max, int flags) {
+  add_def(&object_class.defs, name, id, min, max, flags);
   set_owner(id, &object_class);
 }
 
-void mrbbc_def_in(const MV *cls, const char *name, int id, long min, long max, int kd) {
+void mrbbc_def_in(const MV *cls, const char *name, int id, long min, long max, int flags) {
   if (cls->tag != MRBBC_CLS) mrbbc_raise("TypeError", "a method is defined on a class");
-  add_def(&cls_of(cls)->defs, name, id, min, max, kd);
+  add_def(&cls_of(cls)->defs, name, id, min, max, flags);
   set_owner(id, cls_of(cls));
 }
 
@@ -254,9 +259,9 @@ int mrbbc_find_super(const MV *self, int method, const char *name, long argc, lo
   MDef *d = owner != NULL ? find_chain(owner->super, name, NULL) : NULL;
   if (d != NULL) return check_arity(d, argc, kw);
   if (strcmp(name, "initialize") == 0) {
-    if (argc + kw != 0) {
+    if (argc + (kw == 1) != 0) {
       char msg[128];
-      snprintf(msg, sizeof msg, "wrong number of arguments (given %ld, expected 0)", argc + kw);
+      snprintf(msg, sizeof msg, "wrong number of arguments (given %ld, expected 0)", argc + (kw == 1));
       mrbbc_raise("ArgumentError", msg);
     }
     return -1;
@@ -292,9 +297,9 @@ void mrbbc_super_nil(MV *dst) {
 int mrbbc_find_init(const MV *obj, long argc, long kw) {
   MDef *d = find_chain(obj_of(obj)->cls, "initialize", NULL);
   if (d != NULL) return check_arity(d, argc, kw);
-  if (argc + kw != 0) {
+  if (argc + (kw == 1) != 0) {
     char msg[128];
-    snprintf(msg, sizeof msg, "wrong number of arguments (given %ld, expected 0)", argc + kw);
+    snprintf(msg, sizeof msg, "wrong number of arguments (given %ld, expected 0)", argc + (kw == 1));
     mrbbc_raise("ArgumentError", msg);
   }
   return -1;
@@ -954,15 +959,17 @@ long mrbbc_ary_len(const MV *ary) {
  * when two or more parameters take it. A count short of the required ones leaves nil (a block) or is checked by the caller
  * (a method). The optional parameters that are given are the first ones after the required; the rest takes the middle, and
  * the post parameters the last m2 of the arguments. */
-long mrbbc_bind(MV *r1, const MV *argv, long argc, long kw, long m1, long o, long r, long m2, long kd, long strict) {
+long mrbbc_bind(MV *r1, const MV *argv, long argc, long kw, long m1, long o, long r, long m2, long kd, long strict, long fast) {
   const long len = m1 + o + r + m2;
   const MV *src = argv + 1;
   long n = argc, k, mlen, g;
   if (!strict && len >= 2 && argc == 1 && argv[1].tag == MRBBC_ARY) {
     src = ary_of(&argv[1])->items;
     n = ary_of(&argv[1])->len;
-  } else if (kw && !kd) {
-    n = argc + 1;  /* the keyword hash is the last positional argument of a method without keyword parameters */
+  } else if (!kd && (kw == 1 || (kw == 2 && fast))) {
+    /* the keyword hash is the last positional argument of a method without keyword parameters (an empty `**h` one only on
+     * the fast path of ENTER) */
+    n = argc + 1;
   }
   for (k = 0; k < len + kd; k++) r1[k] = nil_value();
   if (n < len) {
@@ -1101,6 +1108,33 @@ void mrbbc_hash_set(MV *hash, const MV *key, const MV *value) {
   } else {
     h->vals[k] = *value;
   }
+}
+
+/* HASHCAT (`**h` in a call): the pairs of src are set into hash, a later key taking the value (vm.c's mrb_hash_merge). A
+ * value that is not a hash is a TypeError: nil and the others alike (the program defines no to_hash, see the lowering). */
+void mrbbc_hash_cat(MV *hash, const MV *src) {
+  const MHash *from;
+  long k;
+  hash_check(hash);
+  if (src->tag != MRBBC_HASH) {
+    char msg[160];
+    snprintf(msg, sizeof msg, "%s cannot be converted to Hash", type_text(src));
+    mrbbc_raise("TypeError", msg);
+  }
+  from = hash_of(src);
+  for (k = 0; k < from->len; k++) mrbbc_hash_set(hash, &from->keys[k], &from->vals[k]);
+}
+
+/* The keyword flag of a `**h` splat: 1 when the hash has a key; 2 for an empty one, which vm.c still passes (a positional hash
+ * to a method of only required parameters, and nothing to the others). */
+long mrbbc_kw_flag(const MV *h) {
+  hash_check(h);
+  return hash_of(h)->len > 0 ? 1 : 2;
+}
+
+/* `&nil` in a parameter list (vm.c's ENTER): a block given to the method is an ArgumentError. */
+void mrbbc_noblock(const MV *blk) {
+  if (blk->tag != MRBBC_NIL) mrbbc_raise("ArgumentError", "no block accepted");
 }
 
 static int64_t floor_div(int64_t x, int64_t y) {

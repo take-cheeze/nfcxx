@@ -122,7 +122,8 @@ copies them into R(1)..R(n), n the method's required and optional parameters, an
 is the count at the call site (a constant of the SEND, or the count of a runtime call), which the optional parameters need.
 `blk` is the block the call gave, or a nil value. The signature gained a `kw` argument (`long`, 1 when the call gave
 keyword arguments; the hash is then `argv[argc+1]`; `%4`). A method's ENTER must be its first instruction and must not have
-a `**` parameter (aspec bit 1), a block parameter (bit 0) or `&nil` (bit 23); any other parameter is lowered.
+a block parameter (bit 0); `**` (aspec bit 1) and `&nil` (bit 23) are lowered, and any other parameter is too. A block
+with a `**` or `&nil` parameter is refused.
 
 Parameters (vm.c's ENTER, mruby 4.0's layout): the required, optional, rest and post parameters fill R(1..len) in that
 order (len = req+opt+rest+post); with keyword parameters the keyword hash is R(len+1); the block slot is R(len+kd+1). The
@@ -139,7 +140,17 @@ builds the hash from its pairs at R[a+n+1..] (`mrbbc_hash_new`, `mrbbc_hash_set`
 missing keyword is `missing keyword: NAME` (ArgumentError, from KARG), and a keyword the method does not take is
 `unknown keyword: NAME` (from KEYEND, after the body's keywords are taken). A block with keyword parameters gets an empty
 hash (a yield gives no keywords). Keyword defaults may refer to positional parameters, not to other keywords (mruby 4.0
-says `undefined method`, and the producer refuses such a call).
+says `undefined method`, and the producer refuses such a call: `err/kw_default_kw.rb`).
+
+A `**` parameter is the keyword hash itself (R(len+1), the `kd` of the prologue), so its local needs no move; the keyword
+parameters take their keys out of it (`KARG`), as vm.c does. A `&nil` parameter makes a block given to the method an
+ArgumentError `no block accepted` on entry (`mrbbc_noblock`). A `**h` splat in a call is built as vm.c's codegen builds
+it: `HASH` (an empty hash), then `HASHCAT` (`mrbbc_hash_cat`: the pairs of a hash, later keys winning; nil or another
+value is a TypeError, and a program that defines `to_hash` is refused, since mruby would convert other objects with it),
+then the `HASHADD` of the pairs after it. The call's keyword flag is `mrbbc_kw_flag`: 1 when the hash has a key, 2 when it
+is empty. A flag of 2 is a positional hash only for a method of only required parameters (vm.c's ENTER fast path, the
+TDEF's flag bit 1; `mrbbc_bind` and `check_arity` take it so), and nothing for the others: `one(**{})` binds `{}` to
+`def one(x)`, while `def m(a, b = 1)` gets no hash.
 
 Optional parameters (vm.c's `ENTER`, `ci->pc += ...`): after ENTER come n+1 JMPs, the one at index k for k optional
 arguments given (k = argc - required, clamped to 0..n), and the last one jumps past all the defaults. The producer's
@@ -235,7 +246,7 @@ R[a+1..a+n] (b = n) and the block R[a+n+1], as `vm.c` takes them: a block of `su
 - A `super` with a splat (`super(*a)`) or with keyword arguments (`super(a: 1)`, `super(x, k: 1) { }`) is lowered. A splat
   is the array in R[a+1] with count 15 (vm.c's `CALL_MAXARGS`): the producer's `mrbbc_splat_argv` builds the argument
   vector from it and `mrbbc_ary_len` gives the count, so a zsuper (the ARGARY's array) and an explicit splat share the path.
-  A splat of keyword arguments (`**h`, k = 15) and a splat with keyword arguments are refused.
+  A splat of keyword arguments (`**h`, k = 15) is lowered (see "Parameters"); a splat with keyword arguments (n = 15 and k) is refused.
 
 ### Operators, to_s and inspect
 
@@ -330,12 +341,12 @@ prefixes and the instructions they widen, `LOADL` of a non-integer (`LOADL` neve
 string literal to `STRING`), and a main program with a catch table. In particular `SENDB` of a name the program does not
 define in a class (a block call to a builtin), `RETURN_BLK` from a block of the top level (see below), `BREAK` outside a
 block), `GETUPVAR`/`SETUPVAR` at level 1 or more outside the depth-2 cases above, `BLKPUSH` of a block other than the method's own (a yield inside a
-block), a call with a splat of keyword arguments (`**h`), any other method name, `ASET`,
+block), any other method name, `ASET`,
 `APOST`, `SYMBOL` (a quoted symbol) and `LOADSYM` of a name that is not plain (`:"a b"`,
 `:+`), a float, a global variable, an instance variable of the main program, `RETSELF` of the main program, `TCLASS` and
-`CLASS` in a method or a block, a method or block with a block parameter (`&b`), a `**` parameter or `&nil`, a method definition
+`CLASS` in a method or a block, a method with a block parameter (`&b`), a block with a `**` or `&nil` parameter, a method definition
 whose name is not plain and not an operator, a `def` inside a method or a block, an operator the program defines at the top
-level, a `super` with a splat of keyword arguments, `ARGARY` other than the parameters of a method (or of a block a method
+level, a splat of keyword arguments with a splat of arguments, `ARGARY` other than the parameters of a method (or of a block a method
 makes, at level 1 or 2), with rest, post or keyword parameters, and `ENTER` with such parameters are refused. A keyword or
 splat call to a builtin method (`first(n: 1)`, `new(*a)`) is refused.
 `SUPER` and `ARGARY` outside a method (the main program, a class body, or a block of one) are not refused: vm.c raises
@@ -455,11 +466,12 @@ explicit receiver of a program-defined method, and blocks with two or more param
 the zsuper of a block that a method makes, the variables and the implicit block of a block that a block makes (depth 2),
 and `SUPER` outside a method (a NoMethodError at run time; see "Super" and "Blocks"). Round 8 lowers rest, post and keyword
 parameters of methods and blocks (see "Parameters"), keyword arguments of calls (`SEND`, `SSEND`, `SENDB`, `SSENDB`, `SUPER`,
-`new`), splats of arguments (`f(*a)`, `super(*a)`, `[*a]`, `ARYCAT`, `ARYSPLAT`), and `HASH`. Still refused: `RETURN_BLK` from a
+`new`), splats of arguments (`f(*a)`, `super(*a)`, `[*a]`, `ARYCAT`, `ARYSPLAT`), and `HASH`. Round 9 lowers `**`
+parameters and `&nil` of methods, and the `**h` splat of calls (`HASHCAT`, `HASHADD`; see "Parameters"). Still refused: `RETURN_BLK` from a
 block of the top level, yields and variables more than two levels out (a block in a block in a block), `SENDB` of a builtin
 method, `ASET`, `APOST`, the quoted symbols, a zsuper in a block of depth 3, a block nested more than 8 deep, `yield` in a block
 of depth 2 or more (`BLKPUSH` of a block that is not the method's own), the block parameter `&b` (a closure would outlive
-its frame if the block were returned or stored; the lowering has no escape analysis), `**` parameters, `&nil`, the
+its frame if the block were returned or stored; the lowering has no escape analysis; `err/blk_param.rb`, `blk_param_escape.rb`), `**` and `&nil` parameters of a block (`err/blk_kwrest.rb`), the
 instance variables of the top level, and a core class as a superclass
 (a run-time NotImplementedError: `class E < StandardError`). The strings and arrays in the
 subset are the ones the examples above name; `Array#-` and `Array#*`, `String#[]=`, ranges as indexes and the other

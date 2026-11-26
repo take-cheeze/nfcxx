@@ -420,11 +420,14 @@ int number_of(const std::map<const mrb::Irep *, int> &ids, const mrb::Irep &body
 
 // The parameters of a function body, from its ENTER (vm.c's MRB_ASPEC_*, mruby 4.0's layout): the required (req), optional
 // (opt), rest (rest, 0 or 1) and post (post) parameters fill R(1..len) in that order, len = req+opt+rest+post; with keyword
-// parameters (kd) the keyword hash is R(len+1); the block slot is R(len+kd+1). A body takes these; a `**` parameter (KDICT),
-// a block parameter (`&b`, bit 0) and `&nil` (bit 23) are not lowered and make body_params return false, as does a body
-// with no ENTER at pc 0.
+// parameters, or a `**` parameter (kdict, vm.c's MRB_ASPEC_KDICT: the kwrest local is the keyword hash register itself), the
+// keyword hash is R(len+1); the block slot is R(len+kd+1). A `&nil` parameter (noblock, bit 23) is checked on entry. A body
+// takes these; a block parameter (`&b`, bit 0) and any other bit of the spec are not lowered and make body_params return
+// false, as does a body with no ENTER at pc 0.
 struct Params {
   long req = 0, opt = 0, rest = 0, post = 0, kd = 0;
+  bool kdict = false;    // a `**` parameter
+  bool noblock = false;  // a `&nil` parameter
   long len() const { return req + opt + rest + post; }
   long block_slot() const { return len() + kd + 1; }
 };
@@ -433,14 +436,21 @@ bool body_params(const mrb::Irep &body, Params &p) {
   std::vector<mrb::Insn> insns = mrb::decode_iseq(body);
   if (insns.empty() || insns[0].pc != 0 || insns[0].op != mrb::OP_ENTER || insns[0].ext != 0) return false;
   const std::uint32_t aspec = insns[0].args[0];
-  if ((aspec & 0x3u) != 0 || (aspec >> 23) != 0) return false;  // KDICT (bit 1), block (bit 0), &nil (bit 23)
+  if ((aspec & 0x1u) != 0 || (aspec >> 24) != 0) return false;  // a block parameter (bit 0); no bit past NOBLOCK (bit 23)
   p.req = static_cast<long>((aspec >> 18) & 0x1f);
   p.opt = static_cast<long>((aspec >> 13) & 0x1f);
   p.rest = static_cast<long>((aspec >> 12) & 0x1);
   p.post = static_cast<long>((aspec >> 7) & 0x1f);
-  p.kd = static_cast<long>((aspec >> 2) & 0x1f) > 0 ? 1 : 0;
+  p.kdict = ((aspec >> 1) & 0x1u) != 0;
+  p.noblock = ((aspec >> 23) & 0x1u) != 0;
+  p.kd = (static_cast<long>((aspec >> 2) & 0x1f) > 0 || p.kdict) ? 1 : 0;
   return true;
 }
+
+// Whether a body has only required parameters, the case vm.c's ENTER takes on its fast path: there an empty `**h` splat is
+// passed as a positional hash (vm.c counts the keyword hash with the arguments; see mrbbc_bind and check_arity). A `&nil`
+// parameter is not on that path (its bit is outside the fast path's mask).
+bool fast_params(const Params &p) { return p.opt == 0 && p.rest == 0 && p.post == 0 && p.kd == 0 && !p.noblock; }
 
 // The parameters of a body the lowering has checked (see body_params).
 Params params_of(const mrb::Irep &body) {
@@ -574,8 +584,16 @@ std::string nil_block(Ctx &c, const std::string &name) {
   return "$\"" + name + "\"";
 }
 
-// The keyword flag of a call: 1 when it has k keyword pairs (its hash is argv[n+1], see emit_kwargs), else 0.
-std::string kw_flag(unsigned k) { return k != 0 ? "(const long 1)" : "(const long 0)"; }
+// The keyword flag of a call: 1 when it has keyword arguments (its hash is argv[n+1], see emit_kwargs), else 0. k = 15 is a
+// `**h` splat, whose hash is R[kidx]: vm.c passes it as keywords only when it has a key (an empty one is no argument), so the
+// flag is computed by the runtime. Call after emit_kwargs.
+std::string kw_flag(Ctx &c, unsigned k, unsigned kidx) {
+  if (k == 0) return "(const long 0)";
+  if (k != 15) return "(const long 1)";
+  const std::string f = c.fresh();
+  c.line("(let " + f + " long (call long &\"mrbbc_kw_flag\" " + c.reg(kidx) + "))");
+  return f;
+}
 
 // The size of a call's argument vector: self and the n arguments, and the keyword hash after them when the call has keyword
 // arguments (k pairs, at R[a+n+1]).
@@ -583,8 +601,15 @@ std::size_t argv_slots(unsigned n, unsigned k) { return static_cast<std::size_t>
 
 // The keyword arguments of a call with k pairs at R[kidx] (kidx = a+n+1): a hash of the pairs (in order, as mruby's HASH
 // makes it), built in a slot of its own and copied to argv[n+1], where the callee finds it. The registers are the call's,
-// and they are left as they are.
+// and they are left as they are. k = 15: R[kidx] is already the hash (a `**h` splat, built by HASH and HASHCAT as vm.c's
+// codegen does, so the callee may take its keys out of it), and it is copied as it is.
 void emit_kwargs(Ctx &c, const std::string &argv, unsigned n, unsigned kidx, unsigned k) {
+  if (k == 15) {
+    std::string p = c.fresh();
+    c.line("(let " + p + " (ptr unsigned_char) (offset $\"" + argv + "\" " + num(16 * (static_cast<long long>(n) + 1)) + "))");
+    c.line("(copy 16 " + p + " " + c.reg(kidx) + ")");
+    return;
+  }
   const std::string h = "kwhash" + std::to_string(c.pc);
   c.add_slot(h, 16);
   c.line("(eval (call void &\"mrbbc_hash_new\" $\"" + h + "\" (const long " + num(k) + ")))");
@@ -621,8 +646,8 @@ struct CallArgs {
 
 CallArgs emit_call_args(Ctx &c, const std::string &key, const std::string &self, unsigned a, unsigned n, unsigned k) {
   CallArgs r;
-  r.kw = kw_flag(k);
   if (n == 15) {
+    r.kw = kw_flag(c, 0, 0);
     r.argv = c.fresh();
     c.line("(let " + r.argv + " (ptr unsigned_char) (call (ptr unsigned_char) &\"mrbbc_splat_argv\" " + self + " " + c.reg(a + 1) +
            "))");
@@ -633,6 +658,7 @@ CallArgs emit_call_args(Ctx &c, const std::string &key, const std::string &self,
   c.add_slot(key, 16 * argv_slots(n, k));
   emit_arg_vector(c, key, self, a, n);
   if (k != 0) emit_kwargs(c, key, n, a + n + 1, k);
+  r.kw = kw_flag(c, k, a + n + 1);
   r.argv = "$\"" + key + "\"";
   r.argc = "(const long " + num(n) + ")";
   return r;
@@ -666,11 +692,11 @@ void emit_new(Ctx &c, const Shared &sh, unsigned a, unsigned n, unsigned k, std:
   c.line("(eval (call void &\"mrbbc_alloc\" $\"" + argv + "\" " + c.reg(a) + "))");
   emit_args(c, argv, a, n);
   if (k != 0) emit_kwargs(c, argv, n, a + n + 1, k);
+  const std::string kw = kw_flag(c, k, a + n + 1);
   std::string id = c.fresh();
-  c.line("(let " + id + " int (call int &\"mrbbc_find_init\" $\"" + argv + "\" (const long " + num(n) + ") " + kw_flag(k) +
-         "))");
+  c.line("(let " + id + " int (call int &\"mrbbc_find_init\" $\"" + argv + "\" (const long " + num(n) + ") " + kw + "))");
   emit_method_branches(c, sh, id, c.reg(a), "$\"" + argv + "\"", nil_block(c, "newnil" + std::to_string(pc)),
-                       "(const long " + num(n) + ")", kw_flag(k));
+                       "(const long " + num(n) + ")", kw);
   emit_unwind_check(c);
   c.line("(copy 16 " + c.reg(a) + " $\"" + argv + "\")");
 }
@@ -759,7 +785,10 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
   Params pr;
   if (kind == Kind::Method || kind == Kind::Block) {
     if (!body_params(irep, pr)) {
-      throw Refused("refused: " + fname + " has a block parameter, ** or &nil, which is not lowered yet");
+      throw Refused("refused: " + fname + " has a block parameter (&b), which is not lowered yet");
+    }
+    if (kind == Kind::Block && (pr.kdict || pr.noblock)) {
+      throw Refused("refused: " + fname + " has a ** or &nil parameter, which a block does not lower yet");
     }
   }
   const long req = pr.req, opt = pr.opt;
@@ -797,11 +826,13 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
     // checked by the runtime (mrbbc_find); a block's are not (non-strict, and a splatted array argument is one of them).
     const bool method = kind == Kind::Method;
     c.line("(copy 16 " + c.reg(0) + " %1)");
+    // vm.c's ENTER for a `&nil` parameter: a block given to the method is an ArgumentError (before the parameters are bound)
+    if (pr.noblock) c.line("(eval (call void &\"mrbbc_noblock\" %2))");
     c.given = c.fresh();
     c.line("(let " + c.given + " long (call long &\"mrbbc_bind\" " + c.reg(1) + " %1 " + (method ? "%3" : "%2") + " " +
            (method ? "%4" : "(const long 0)") + " (const long " + num(req) + ") (const long " + num(opt) + ") (const long " +
            num(pr.rest) + ") (const long " + num(pr.post) + ") (const long " + num(pr.kd) + ") (const long " +
-           (method ? "1" : "0") + ")))");
+           (method ? "1" : "0") + ") (const long " + (fast_params(pr) ? "1" : "0") + ")))");
     for (long i = bslot; i < static_cast<long>(frame_regs); ++i) {
       store_tag(c, c.reg(static_cast<unsigned>(i)), kTagNil);
     }
@@ -1004,12 +1035,14 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         if (kind != Kind::Main && kind != Kind::Class) refuse_method(name, "is defined in a method or a block (not lowered yet)");
         if (!plain_symbol(name) && !operator_symbol(name)) refuse_method(name, "has a name that is not plain (not lowered yet)");
         Params bp;
-        if (!body_params(body, bp)) refuse_method(name, "has a block parameter, ** or &nil (not lowered yet)");
+        if (!body_params(body, bp)) refuse_method(name, "has a block parameter (&b) (not lowered yet)");
         // the counts of vm.c's check: the required and post parameters at least, and the rest's -1 or the most (the
-        // required, optional and post ones); kd says the method takes keyword arguments
+        // required, optional and post ones); the flags: bit 0 says the method takes keyword arguments, bit 1 that it has
+        // only required parameters (vm.c's ENTER fast path, see fast_params)
+        const int flags = static_cast<int>(bp.kd) | (fast_params(bp) ? 2 : 0);
         const std::string id = "(const int " + num(number_of(sh.method_ids, body, "method")) + ") (const long " +
                                num(bp.req + bp.post) + ") (const long " + (bp.rest != 0 ? std::string("-1") : num(bp.len())) +
-                               ") (const int " + num(bp.kd) + ")";
+                               ") (const int " + num(flags) + ")";
         if (kind == Kind::Class) {
           c.line("(eval (call void &\"mrbbc_def_in\" " + c.reg(0) + " @\"" + symbol_data(sh, name) + "\" " + id + "))");
         } else {
@@ -1055,6 +1088,21 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         c.line("(copy 16 " + c.reg(x[0]) + " $\"" + h + "\")");
         break;
       }
+      case mrb::OP_HASHADD:
+        // R[a] gets the b pairs R[a+1], R[a+2], ... (vm.c's HASHADD: a hash made by HASH or HASHCAT, set key by key)
+        for (std::uint32_t i = 0; i < x[1]; ++i) {
+          c.line("(eval (call void &\"mrbbc_hash_set\" " + c.reg(x[0]) + " " + c.reg(x[0] + 1 + 2 * i) + " " +
+                 c.reg(x[0] + 2 + 2 * i) + "))");
+        }
+        break;
+      case mrb::OP_HASHCAT:
+        // R[a] takes the pairs of R[a+1], a hash or nil (vm.c's mrb_hash_merge of the splat `**h`; nil raises TypeError). A
+        // program that defines to_hash is refused: mruby would convert another object with it, and that call is not lowered.
+        if (sh.defined.count("to_hash") != 0) {
+          throw Refused("refused: HASHCAT of a program that defines to_hash is not lowered yet (pc " + std::to_string(in.pc) + ")");
+        }
+        c.line("(eval (call void &\"mrbbc_hash_cat\" " + c.reg(x[0]) + " " + c.reg(x[0] + 1) + "))");
+        break;
       case mrb::OP_KEY_P:
       case mrb::OP_KARG: {
         // KEY_P a b: R[a] = whether the keyword hash has the key Syms[b]; KARG a b: R[a] = the key's value, removed from the
@@ -1228,9 +1276,8 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
           break;
         }
         // n = 15 is a splat: the arguments are the elements of the array in R[a+1]. A zsuper's ARGARY made that array (the
-        // method's parameters, in order), so both take the same path. k = 15 is a splat of keyword arguments (not lowered).
+        // method's parameters, in order), so both take the same path. k = 15 is a splat of keyword arguments (a `**h`).
         const unsigned n = x[1] & 0x0f, k = x[1] >> 4;
-        if (k == 15) throw Refused("refused: SUPER with a splat of keyword arguments is not lowered yet (pc " + std::to_string(in.pc) + ")");
         if (n == 15 && k != 0) throw Refused("refused: SUPER with a splat and keyword arguments is not lowered yet (pc " + std::to_string(in.pc) + ")");
         const std::string name = sh.method_names.at(home);
         const CallArgs ca = emit_call_args(c, "argv" + std::to_string(in.pc), c.reg(0), x[0], n, k);
@@ -1258,7 +1305,6 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         const unsigned n = has_c ? (x[2] & 0x0f) : 0;
         const unsigned k = has_c ? (x[2] >> 4) : 0;
         const std::string name = method_name(x[1]);
-        if (k == 15) refuse_method(name, "with a splat of keyword arguments");
         // block_given? is the Kernel method that reads the frame's block: the frame's own block, or none at the top level
         if (name == "block_given?" && n == 0 && in.op != mrb::OP_SSENDB && sh.defined.count(name) == 0) {
           if (kind == Kind::Main) {
@@ -1299,7 +1345,6 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         const unsigned n = has_c ? (x[2] & 0x0f) : 0;
         const unsigned k = has_c ? (x[2] >> 4) : 0;
         const std::string name = method_name(x[1]);
-        if (k == 15) refuse_method(name, "with a splat of keyword arguments");
         lower_send(c, sh, in, name, x[0], n, k, in.op == mrb::OP_SENDB);
         break;
       }
