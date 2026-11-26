@@ -383,22 +383,23 @@ std::string imm_lv(Ctx &c, int value, bool is_float) {
 // An RK operand: a constant (is_k set) or a register.
 std::string rk(Ctx &c, unsigned idx, bool is_k) { return is_k ? constant_lv(c, c.p.k.at(idx)) : reg(c, idx); }
 
+// The symbol of a NUL-terminated data item holding text. The item is shared by equal texts.
+std::string text_item(Ctx &c, const std::string &text) {
+  auto it = c.m.sites.find(text);
+  if (it != c.m.sites.end()) return it->second;
+  std::string sym = "lua54.site." + std::to_string(c.m.sites.size());
+  c.m.sites[text] = sym;
+  c.m.data.push_back("(data \"" + sym + "\" (const (array " + std::to_string(text.size() + 1) +
+                     " (const char))) (string \"" + ir_escape(text) + "\\000\"))\n");
+  return sym;
+}
+
 // Sets the site of the operation about to run: the runtime reports its errors with this position and these operand infos.
 // The data item is shared by sites with the same text.
 void set_site(Ctx &c, const std::vector<std::string> &infos) {
   std::string text = c.m.chunkname + ":" + std::to_string(dbg::getfuncline(c.p, static_cast<int>(c.pc))) + ":";
   for (const std::string &s : infos) text += "\n" + s;
-  std::string sym;
-  auto it = c.m.sites.find(text);
-  if (it != c.m.sites.end()) {
-    sym = it->second;
-  } else {
-    sym = "lua54.site." + std::to_string(c.m.sites.size());
-    c.m.sites[text] = sym;
-    c.m.data.push_back("(data \"" + sym + "\" (const (array " + std::to_string(text.size() + 1) +
-                       " (const char))) (string \"" + ir_escape(text) + "\\000\"))\n");
-  }
-  c.line("(eval (call void &\"lua54rt_site\" @\"" + sym + "\"))");
+  c.line("(eval (call void &\"lua54rt_site\" @\"" + text_item(c, text) + "\"))");
 }
 
 // Arithmetic `R[a] := lhs op rhs` where op is ADD, SUB or MUL. The inline path needs both operands to be ints; a
@@ -930,8 +931,21 @@ void lower_loadkx(Ctx &c, const Insn &i) {
   go(c, c.pc + 2);
 }
 
-// TFORPREP A Bx: go to the TFORCALL. (The to-be-closed fourth value is not tracked yet.)
-void lower_tforprep(Ctx &c, const Insn &i) { go(c, c.pc + 1 + i.Bx()); }
+// TBC A: R[A] is a to-be-closed variable. lua54rt_tbc registers it; nil and false are not registered, and any other value
+// needs a __close metamethod. The name is the local's, for the error message.
+void lower_tbc(Ctx &c, const Insn &i) {
+  std::string name = dbg::local_name(c.p, static_cast<int>(i.A()) + 1, static_cast<int>(c.pc)).value_or("?");
+  set_site(c, {});
+  c.line("(eval (call void &\"lua54rt_tbc\" " + reg(c, i.A()) + " @\"" + text_item(c, name) + "\"))");
+}
+
+// TFORPREP A Bx: go to the TFORCALL. The fourth value, the closing value of the loop, is registered as a to-be-closed
+// variable (nil, the usual case, is not).
+void lower_tforprep(Ctx &c, const Insn &i) {
+  set_site(c, {});
+  c.line("(eval (call void &\"lua54rt_tbc\" " + reg(c, i.A() + 3) + " @\"" + text_item(c, "(for state)") + "\"))");
+  go(c, c.pc + 1 + i.Bx());
+}
 
 // TFORCALL A C: R[A+4..A+3+C] := R[A](R[A+1], R[A+2]).
 void lower_tforcall(Ctx &c, const Insn &i) {
@@ -1117,6 +1131,7 @@ const Lower *table() {
   t[GETUPVAL] = lower_getupval;
   t[SETUPVAL] = lower_setupval;
   t[CLOSE] = lower_close;
+  t[TBC] = lower_tbc;
   t[NEWTABLE] = lower_newtable;
   t[GETTABLE] = lower_gettable;
   t[GETI] = lower_geti;

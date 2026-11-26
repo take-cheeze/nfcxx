@@ -1,0 +1,8 @@
+print(select(-1, "a", "b", "c"))
+print(select(-3, "a", "b", "c"))
+print(select(2, "a", "b", "c"))
+print(select("#", nil, nil))
+print(select(5, "a"))
+print(select(-2, 1, 2, 3))
+print(select(2, "x", "y", "z", "w"))
+return select(4, 1, 2, 3)

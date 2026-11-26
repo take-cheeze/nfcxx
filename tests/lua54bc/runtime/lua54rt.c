@@ -10,6 +10,7 @@
 #include <setjmp.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 typedef struct LV {
   uint8_t tag;
@@ -53,6 +54,10 @@ typedef struct LString {
 
 static LV make_str(const char *p, size_t len);
 static const char *type_name(uint8_t tag);
+static void arg_fail(int k, const char *fname, const char *msg);
+static void lib_arg_error(int k, const char *fname, const char *what, const char *got);
+static int64_t arg_int(const LV *args, int nargs, int k, const char *fname);
+static int64_t opt_int(const LV *args, int nargs, int k, const char *fname, int64_t def);
 
 /* An internal inconsistency of the runtime, not a Lua error. */
 static void die(const char *what) {
@@ -94,11 +99,14 @@ typedef struct PCall {
 } PCall;
 static PCall *pcall_top = NULL;
 
+static void close_to(LV *level, const LV *err);
+
 static void raise_value(LV err) {
   if (pcall_top != NULL) {
     pcall_top->err = err;
     longjmp(pcall_top->jb, 1);
   }
+  close_to(NULL, &err);   /* lua.c's protected call closes the to-be-closed variables before it reports the error */
   if (err.tag == TAG_STR) fprintf(stderr, "lua: %s\n", ((LString *)err.v.p)->bytes);
   else fprintf(stderr, "lua: (error object is a %s value)\n", type_name(err.tag));
   exit(1);
@@ -545,13 +553,55 @@ void lua54rt_capture(LV *dst, int k, int instack, int idx, void *encl, LV *base)
 }
 
 /* Closes the open upvalues at or above level: their values move into the cells (luaF_close). */
-void lua54rt_close(LV *level) {
+/* To-be-closed variables (lfunc.c): the slots that TBC registered (and the fourth value of a generic for), in the order
+ * they were registered. A registered slot at or above level is closed by close_to, last first. */
+typedef struct Tbc {
+  LV *slot;
+  const char *name;
+} Tbc;
+static Tbc *tbc_list = NULL;
+static int tbc_n = 0, tbc_cap = 0;
+
+/* Closes the upvalues and the to-be-closed variables at or above level: each variable's __close is called with its value
+ * and err (nil when the block ends normally). An entry is removed before its __close runs, so an error in it is not
+ * closed again. */
+static void close_to(LV *level, const LV *err) {
   while (open_upvals != NULL && open_upvals->v >= level) {
     UpVal *uv = open_upvals;
     uv->closed = *uv->v;
     uv->v = &uv->closed;
     open_upvals = uv->open_next;
   }
+  while (tbc_n > 0 && tbc_list[tbc_n - 1].slot >= level) {
+    LV v = *tbc_list[--tbc_n].slot, h;
+    if (!get_mt(&v, "__close", &h)) continue;
+    LV frame[1024], ret[256];
+    frame[0] = v;
+    frame[1] = err != NULL ? *err : (LV){0};
+    lua54rt_call(&h, 2, frame, ret, 0, 0);
+  }
+}
+
+void lua54rt_close(LV *level) { close_to(level, NULL); }
+
+/* TBC A: the variable in slot is to be closed. nil and false are not registered; any other value needs a __close
+ * metamethod (lfunc.c's checkclosemth). */
+void lua54rt_tbc(LV *slot, const char *name) {
+  if (slot->tag == TAG_NIL || slot->tag == TAG_FALSE) return;
+  LV h;
+  if (!get_mt(slot, "__close", &h)) {
+    char msg[160];
+    snprintf(msg, sizeof msg, "variable '%s' got a non-closable value", name);
+    rt_fail(msg, -1);
+  }
+  if (tbc_n == tbc_cap) {
+    tbc_cap = tbc_cap == 0 ? 16 : tbc_cap * 2;
+    tbc_list = (Tbc *)realloc(tbc_list, sizeof(Tbc) * (size_t)tbc_cap);
+    if (tbc_list == NULL) die("out of memory");
+  }
+  tbc_list[tbc_n].slot = slot;
+  tbc_list[tbc_n].name = name;
+  tbc_n++;
 }
 
 void lua54rt_getupval(LV *dst, void *cl, int idx) { *dst = *((LClosure *)cl)->upvals[idx]->v; }
@@ -597,6 +647,20 @@ static void make_host_nup(LV *dst, lua_cfn fn, int nup) {
 
 static void make_host(LV *dst, lua_cfn fn) { make_host_nup(dst, fn, 0); }
 
+/* The call stack for error levels: one entry per call, the position of the caller at the time of the call (NULL when the
+ * caller is not a Lua function, e.g. pcall). The top entry is the call of the running function, so level 1 (the caller of
+ * error) is the top, and level 2 is the entry below it. Entries past CALLSTACK_MAX are not kept. */
+#define CALLSTACK_MAX 4096
+static const char *callsite[CALLSTACK_MAX];
+static int call_depth = 0;
+
+static void push_callsite(const char *s) {
+  if (call_depth < CALLSTACK_MAX) callsite[call_depth] = s;
+  call_depth++;
+}
+
+static void pop_callsite(void) { call_depth--; }
+
 /* The results of a call are in ret[0..lua54rt_nret-1]: all of them, or wanted of them with nil after. */
 static void finish_call(LV *ret, int wanted, int a) {
   if (wanted < 0) {
@@ -615,9 +679,11 @@ void lua54rt_call(LV *fn, int nargs, LV *args, LV *ret, int wanted, int a) {
     LV out[64];
     const char *saved = site;
     HostFn *saved_host = cur_host;
+    push_callsite(saved);
     cur_host = (HostFn *)fn->v.p;
     int n = cur_host->fn(out, args, nargs);
     cur_host = saved_host;
+    pop_callsite();
     site = saved;
     lua54rt_nret = n;
     for (int k = 0; k < n; ++k) ret[k] = out[k];
@@ -630,7 +696,9 @@ void lua54rt_call(LV *fn, int nargs, LV *args, LV *ret, int wanted, int a) {
     lua54rt_nargs = nargs;
     lua54rt_nret = 0;
     const char *saved = site;
+    push_callsite(saved);
     c->fn(ret, args, c);
+    pop_callsite();
     site = saved;
     finish_call(ret, wanted, a);
     return;
@@ -1298,19 +1366,21 @@ static int host_ipairs(LV *out, LV *args, int nargs) {
 }
 
 /* select('#', ...) or select(n, ...): the values from the n-th on. */
+/* lbaselib.c's luaB_select: the index counts the selector too, so the values are args[i..nargs-1]; a negative index counts
+ * from the end. */
 static int host_select(LV *out, LV *args, int nargs) {
   expect_arg(nargs, 1, "select", "number");
-  int count = nargs - 1;
-  if (args[0].tag == TAG_STR && ((LString *)args[0].v.p)->len == 1 && ((LString *)args[0].v.p)->bytes[0] == '#') {
+  if (args[0].tag == TAG_STR && ((LString *)args[0].v.p)->bytes[0] == '#') {
     out[0].tag = TAG_INT;
-    out[0].v.i = count;
+    out[0].v.i = nargs - 1;
     return 1;
   }
-  if (args[0].tag != TAG_INT) rt_fail("bad argument #1 to 'select' (number expected)", -1);
-  int64_t n = args[0].v.i;
-  if (n < 1) rt_fail("bad argument #1 to 'select' (index out of range)", -1);
+  int64_t i = arg_int(args, nargs, 1, "select");
+  if (i < 0) i = nargs + i;
+  else if (i > nargs) i = nargs;
+  if (i < 1) arg_fail(1, "select", "index out of range");
   int produced = 0;
-  for (int64_t k = n; k <= count; ++k) out[produced++] = args[k];
+  for (int64_t k = i; k < nargs && produced < 64; ++k) out[produced++] = args[k];
   return produced;
 }
 
@@ -1362,13 +1432,35 @@ void lua54rt_install_library(LV *env) {
 /* lua_error with a value: a protected call (pcall) takes it; otherwise lua.c reports it and stops. */
 static void host_raise(LV v) { raise_value(v); }
 
+/* The first line of a site (its "source:line:"), copied to buf. */
+static void first_line(const char *s, char *buf, size_t size) {
+  buf[0] = '\0';
+  if (s == NULL) return;
+  const char *nl = strchr(s, '\n');
+  size_t len = nl != NULL ? (size_t)(nl - s) : strlen(s);
+  if (len >= size) len = size - 1;
+  memcpy(buf, s, len);
+  buf[len] = '\0';
+}
+
+/* luaL_where for level: the position of the function at that level of the call stack, "" when it is not a Lua function. */
+static void level_where(int64_t level, char *buf, size_t size) {
+  int64_t idx = call_depth - level;
+  if (idx < 0 || idx >= CALLSTACK_MAX) {
+    buf[0] = '\0';
+    return;
+  }
+  first_line(callsite[idx], buf, size);
+}
+
+/* error(msg [, level]): a string message gets the position of the level, as luaB_error does. */
 static int host_error(LV *out, LV *args, int nargs) {
   (void)out;
   LV msg = nargs >= 1 ? args[0] : (LV){0};
-  int64_t level = nargs >= 2 && args[1].tag != TAG_NIL ? (args[1].tag == TAG_INT ? args[1].v.i : 1) : 1;
-  if (msg.tag == TAG_STR && level > 0 && site != NULL) {
+  int64_t level = opt_int(args, nargs, 2, "error", 1);
+  if (msg.tag == TAG_STR && level > 0) {
     char where[512];
-    site_line(0, where, sizeof where);
+    level_where(level, where, sizeof where);
     if (where[0] != '\0') {
       size_t n = strlen(where) + 1 + ((LString *)msg.v.p)->len;
       char *buf = (char *)malloc(n + 1);
@@ -1394,18 +1486,21 @@ static int host_assert(LV *out, LV *args, int nargs) {
 }
 
 /* pcall(f, ...): the results of f behind true, or false and the error value. The error longjmps to here. */
-static int host_pcall(LV *out, LV *args, int nargs) {
-  expect_arg(nargs, 1, "pcall", "value");
+/* pcall(f, ...) and xpcall(f, msgh, ...): the results of f behind true, or false and the error value (xpcall gives
+ * msgh's result for it). The error longjmps to here, with the call stack restored to its depth at the call. */
+static int protected_call(LV *out, LV *args, int nargs, int handler_arg) {
+  LV handler = args[handler_arg ? 1 : 0];   /* the callee's frame overwrites args[1..], so it is taken first */
   PCall p;
   p.prev = pcall_top;
-  p.base = args + 1;
+  p.base = args + (handler_arg ? 2 : 1);
   const char *saved_site = site;
+  int saved_depth = call_depth;
   pcall_top = &p;
   if (setjmp(p.jb) == 0) {
     LV fn = args[0];
     LV res[64];
     site = NULL;   /* a function called from here has no caller position, as in Lua */
-    lua54rt_call(&fn, nargs - 1, args + 1, res, -1, 0);
+    lua54rt_call(&fn, nargs - (handler_arg ? 2 : 1), args + (handler_arg ? 2 : 1), res, -1, 0);
     site = saved_site;
     pcall_top = p.prev;
     int n = lua54rt_top < 63 ? lua54rt_top : 63;
@@ -1414,17 +1509,42 @@ static int host_pcall(LV *out, LV *args, int nargs) {
     return n + 1;
   }
   site = saved_site;
+  call_depth = saved_depth;
   pcall_top = p.prev;
-  lua54rt_close(p.base);   /* the upvalues of the frames the error left */
+  close_to(p.base, &p.err);   /* the upvalues and to-be-closed variables of the frames the error left */
   out[0].tag = TAG_FALSE;
-  out[1] = p.err;
+  if (!handler_arg) {
+    out[1] = p.err;
+    return 2;
+  }
+  LV frame[1] = {p.err}, ret[4];
+  lua54rt_call(&handler, 1, frame, ret, 1, 0);
+  out[1] = ret[0];
   return 2;
+}
+
+static int host_pcall(LV *out, LV *args, int nargs) {
+  expect_arg(nargs, 1, "pcall", "value");
+  return protected_call(out, args, nargs, 0);
+}
+
+static int host_xpcall(LV *out, LV *args, int nargs) {
+  expect_arg(nargs, 2, "xpcall", "function");
+  if (args[1].tag != TAG_LCL && args[1].tag != TAG_LCF) lib_arg_error(2, "xpcall", "function", type_name(args[1].tag));
+  return protected_call(out, args, nargs, 1);
 }
 
 /* ---- argument checks (lauxlib.c's luaL_check*) ---- */
 static void lib_arg_error(int k, const char *fname, const char *what, const char *got) {
   char buf[256];
   snprintf(buf, sizeof buf, "bad argument #%d to '%s' (%s expected, got %s)", k, fname, what, got);
+  rt_fail(buf, -1);
+}
+
+/* luaL_argerror with a message of its own: "bad argument #k to 'fname' (msg)". */
+static void arg_fail(int k, const char *fname, const char *msg) {
+  char buf[256];
+  snprintf(buf, sizeof buf, "bad argument #%d to '%s' (%s)", k, fname, msg);
   rt_fail(buf, -1);
 }
 
@@ -1449,7 +1569,7 @@ static int64_t arg_int(const LV *args, int nargs, int k, const char *fname) {
     if (n.tag == TAG_INT) return n.v.i;
     int64_t i;
     if (to_int_exact(&n, &i)) return i;
-    lib_arg_error(k, fname, "integer", "number");
+    arg_fail(k, fname, "number has no integer representation");
   }
   lib_arg_error(k, fname, "number", arg_typename(args, nargs, k));
   return 0;
@@ -1545,7 +1665,7 @@ static int host_tinsert(LV *out, LV *args, int nargs) {
   }
   if (nargs != 3) rt_fail("wrong number of arguments to 'insert'", -1);
   int64_t pos = arg_int(args, nargs, 2, "insert");
-  if ((uint64_t)pos - 1u >= (uint64_t)e) lib_arg_error(2, "insert", "position out of bounds", "number");
+  if ((uint64_t)pos - 1u >= (uint64_t)e) arg_fail(2, "insert", "position out of bounds");
   for (int64_t i = e; i > pos; --i) {
     LV from, to;
     to.tag = TAG_INT;
@@ -1565,7 +1685,7 @@ static int host_tremove(LV *out, LV *args, int nargs) {
   Table *t = arg_table(args, nargs, 1, "remove");
   int64_t size = table_border(t);
   int64_t pos = opt_int(args, nargs, 2, "remove", size);
-  if (pos != size && (uint64_t)pos - 1u > (uint64_t)size) lib_arg_error(2, "remove", "position out of bounds", "number");
+  if (pos != size && (uint64_t)pos - 1u > (uint64_t)size) arg_fail(2, "remove", "position out of bounds");
   LV key;
   key.tag = TAG_INT;
   key.v.i = pos;
@@ -1846,6 +1966,56 @@ static int host_schar(LV *out, LV *args, int nargs) {
 }
 
 /* string.format: %d %i %u %c %x %X %o %e %E %f %g %G %s %q %% with flags, width and precision as printf. */
+/* %q (lstrlib.c's addliteral): a literal that reads back as the same value. Strings are quoted with the escapes of
+ * addquoted; integers are decimal (the minimum as hex); floats are hexadecimal, or 1e9999, -1e9999 and (0/0). */
+static LV literal_of(const LV *v, int argno) {
+  char buf[64];
+  switch (v->tag) {
+    case TAG_STR: {
+      const LString *s = (const LString *)v->v.p;
+      char *out = (char *)malloc(s->len * 4 + 3);
+      if (out == NULL) die("out of memory");
+      size_t n = 0;
+      out[n++] = '"';
+      for (size_t k = 0; k < s->len; ++k) {
+        unsigned char c = (unsigned char)s->bytes[k];
+        if (c == '"' || c == '\\' || c == '\n') {
+          out[n++] = '\\';
+          out[n++] = (char)c;
+        } else if (iscntrl(c)) {
+          int next = k + 1 < s->len ? (unsigned char)s->bytes[k + 1] : 0;
+          n += (size_t)sprintf(out + n, isdigit(next) ? "\\%03d" : "\\%d", (int)c);
+        } else {
+          out[n++] = (char)c;
+        }
+      }
+      out[n++] = '"';
+      LV r = make_str(out, n);
+      free(out);
+      return r;
+    }
+    case TAG_INT:
+      if (v->v.i == INT64_MIN) snprintf(buf, sizeof buf, "0x%llx", (unsigned long long)v->v.i);
+      else snprintf(buf, sizeof buf, "%lld", (long long)v->v.i);
+      return make_str(buf, strlen(buf));
+    case TAG_FLOAT: {
+      double n = v->v.n;
+      const char *s = buf;
+      if (n == HUGE_VAL) s = "1e9999";
+      else if (n == -HUGE_VAL) s = "-1e9999";
+      else if (n != n) s = "(0/0)";
+      else snprintf(buf, sizeof buf, "%a", n);
+      return make_str(s, strlen(s));
+    }
+    case TAG_NIL: return make_str("nil", 3);
+    case TAG_FALSE: return make_str("false", 5);
+    case TAG_TRUE: return make_str("true", 4);
+    default: break;
+  }
+  arg_fail(argno, "format", "value has no literal form");
+  return make_str("", 0);
+}
+
 static int host_sformat(LV *out, LV *args, int nargs) {
   LV fmt = arg_str(args, nargs, 1, "format");
   const LString *f = (const LString *)fmt.v.p;
@@ -1879,6 +2049,7 @@ static int host_sformat(LV *out, LV *args, int nargs) {
     memcpy(spec, f->bytes + start, sl);
     spec[sl] = '\0';
     arg++;
+    if (arg > nargs) arg_fail(arg, "format", "no value");
     char piece[512];
     int pl = 0;
     switch (conv) {
@@ -1905,6 +2076,21 @@ static int host_sformat(LV *out, LV *args, int nargs) {
         pl = snprintf(piece, sizeof piece, spec, (int)v);
         break;
       }
+      case 'q': {
+        if (sl != 1) rt_fail("specifier '%q' cannot have modifiers", -1);
+        LV lit = literal_of(&args[arg - 1], arg);
+        const LString *ls = (const LString *)lit.v.p;
+        if (len + ls->len + 1 >= cap) {
+          while (len + ls->len + 1 >= cap) cap *= 2;
+          buf = (char *)realloc(buf, cap);
+        }
+        memcpy(buf + len, ls->bytes, ls->len);
+        len += ls->len;
+        pl = 0;
+        break;
+      }
+      case 'a':
+      case 'A':
       case 'e':
       case 'E':
       case 'f':
@@ -2564,6 +2750,418 @@ static int host_sgsub(LV *out, LV *args, int nargs) {
   return 2;
 }
 
+/* ---- table: pack, move, sort (ltablib.c) ---- */
+
+/* t[i] and t[i] = v with the metamethods, as lua_geti and lua_seti. */
+static LV tget(LV *t, int64_t i) {
+  LV k, v;
+  k.tag = TAG_INT;
+  k.v.i = i;
+  lua54rt_gettable(&v, t, &k);
+  return v;
+}
+
+static void tset(LV *t, int64_t i, LV *v) {
+  LV k;
+  k.tag = TAG_INT;
+  k.v.i = i;
+  lua54rt_settable(t, &k, v);
+}
+
+static int host_tpack(LV *out, LV *args, int nargs) {
+  LV t;
+  lua54rt_newtable(&t);
+  for (int k = 0; k < nargs; ++k) {
+    LV key;
+    key.tag = TAG_INT;
+    key.v.i = k + 1;
+    raw_set((Table *)t.v.p, &key, &args[k]);
+  }
+  LV key = make_str("n", 1), n;
+  n.tag = TAG_INT;
+  n.v.i = nargs;
+  raw_set((Table *)t.v.p, &key, &n);
+  out[0] = t;
+  return 1;
+}
+
+/* table.move(a1, f, e, t [, a2]): the elements f..e of a1 go to a2 at t, in the order that does not overwrite them. */
+static int host_tmove(LV *out, LV *args, int nargs) {
+  arg_table(args, nargs, 1, "move");
+  int64_t f = arg_int(args, nargs, 2, "move");
+  int64_t e = arg_int(args, nargs, 3, "move");
+  int64_t t = arg_int(args, nargs, 4, "move");
+  int tt = nargs >= 5 && args[4].tag != TAG_NIL ? 5 : 1;
+  if (tt == 5) arg_table(args, nargs, 5, "move");
+  LV *dst = &args[tt - 1];
+  if (e >= f) {
+    if (!(f > 0 || e < INT64_MAX + f)) arg_fail(3, "move", "too many elements to move");
+    int64_t n = e - f + 1;
+    if (!(t <= INT64_MAX - n + 1)) arg_fail(4, "move", "destination wrap around");
+    if (t > e || t <= f || (tt != 1 && !equal_values(&args[0], dst))) {
+      for (int64_t i = 0; i < n; ++i) {
+        LV v = tget(&args[0], f + i);
+        tset(dst, t + i, &v);
+      }
+    } else {
+      for (int64_t i = n - 1; i >= 0; --i) {
+        LV v = tget(&args[0], f + i);
+        tset(dst, t + i, &v);
+      }
+    }
+  }
+  out[0] = *dst;
+  return 1;
+}
+
+/* The quicksort of ltablib.c, with the same comparisons and the same swaps: the values it holds are kept in locals,
+ * and the table is read and written with tget and tset. The pivot is the middle element; a randomized pivot is used only
+ * after a badly unbalanced partition, as in Lua (its seed here is fixed). */
+typedef struct SortCtx {
+  LV *t;
+  LV *cmp;   /* the order function, or NULL for <. */
+} SortCtx;
+
+static int sort_lt(SortCtx *c, const LV *a, const LV *b) {
+  if (c->cmp == NULL) return lua54rt_cmp(0, (LV *)a, (LV *)b);
+  LV frame[1024], ret[256], fn = *c->cmp;
+  frame[0] = *a;
+  frame[1] = *b;
+  lua54rt_call(&fn, 2, frame, ret, 1, 0);
+  return truthy(&ret[0]);
+}
+
+#define SORT_RANLIMIT 100u
+
+static int64_t partition(SortCtx *c, int64_t lo, int64_t up, LV *pivot) {
+  int64_t i = lo, j = up - 1;
+  LV ai, aj;
+  for (;;) {
+    for (;;) {
+      ai = tget(c->t, ++i);
+      if (!sort_lt(c, &ai, pivot)) break;
+      if (i == up - 1) rt_fail("invalid order function for sorting", -1);
+    }
+    for (;;) {
+      aj = tget(c->t, --j);
+      if (!sort_lt(c, pivot, &aj)) break;
+      if (j < i) rt_fail("invalid order function for sorting", -1);
+    }
+    if (j < i) {
+      tset(c->t, up - 1, &ai);
+      tset(c->t, i, pivot);
+      return i;
+    }
+    tset(c->t, i, &aj);
+    tset(c->t, j, &ai);
+  }
+}
+
+static void auxsort(SortCtx *c, int64_t lo, int64_t up, unsigned rnd) {
+  while (lo < up) {
+    LV alo = tget(c->t, lo), aup = tget(c->t, up);
+    if (sort_lt(c, &aup, &alo)) {
+      tset(c->t, lo, &aup);
+      tset(c->t, up, &alo);
+    }
+    if (up - lo == 1) return;
+    int64_t p;
+    if (up - lo < (int64_t)SORT_RANLIMIT || rnd == 0) p = (lo + up) / 2;
+    else {
+      uint64_t r4 = (uint64_t)(up - lo) / 4;
+      p = (int64_t)(rnd % (r4 * 2)) + lo + (int64_t)r4;
+    }
+    LV ap = tget(c->t, p), alo2 = tget(c->t, lo);
+    if (sort_lt(c, &ap, &alo2)) {
+      tset(c->t, p, &alo2);
+      tset(c->t, lo, &ap);
+    } else {
+      LV aup2 = tget(c->t, up);
+      if (sort_lt(c, &aup2, &ap)) {
+        tset(c->t, p, &aup2);
+        tset(c->t, up, &ap);
+      }
+    }
+    if (up - lo == 2) return;
+    LV pivot = tget(c->t, p), aup1 = tget(c->t, up - 1);
+    tset(c->t, p, &aup1);
+    tset(c->t, up - 1, &pivot);
+    p = partition(c, lo, up, &pivot);
+    int64_t n;
+    if (p - lo < up - p) {
+      auxsort(c, lo, p - 1, rnd);
+      n = p - lo;
+      lo = p + 1;
+    } else {
+      auxsort(c, p + 1, up, rnd);
+      n = up - p;
+      up = p - 1;
+    }
+    if ((up - lo) / 128 > n) rnd = 0x5bd1e995u;
+  }
+}
+
+static int host_tsort(LV *out, LV *args, int nargs) {
+  (void)out;
+  arg_table(args, nargs, 1, "sort");
+  int64_t n = table_border((const Table *)args[0].v.p);
+  if (n > 1) {
+    if (n >= INT32_MAX) arg_fail(1, "sort", "array too big");
+    if (nargs >= 2 && args[1].tag != TAG_NIL && args[1].tag != TAG_LCL && args[1].tag != TAG_LCF)
+      lib_arg_error(2, "sort", "function", arg_typename(args, nargs, 2));
+    SortCtx c;
+    c.t = &args[0];
+    c.cmp = nargs >= 2 && args[1].tag != TAG_NIL ? &args[1] : NULL;
+    auxsort(&c, 1, n, 0);
+  }
+  return 0;
+}
+
+/* ---- math: the rest of lmathlib.c ---- */
+
+#define MATH_F1(name, expr)                                          \
+  static int host_m_##name(LV *out, LV *args, int nargs) {           \
+    double x = arg_float(args, nargs, 1, #name);                     \
+    out[0].tag = TAG_FLOAT;                                          \
+    out[0].v.n = (expr);                                             \
+    return 1;                                                        \
+  }
+
+static double arg_float(const LV *args, int nargs, int k, const char *fname) {
+  LV n;
+  if (k <= nargs && to_number(&args[k - 1], &n)) return as_float(&n);
+  lib_arg_error(k, fname, "number", arg_typename(args, nargs, k));
+  return 0;
+}
+
+MATH_F1(exp, exp(x))
+MATH_F1(sin, sin(x))
+MATH_F1(cos, cos(x))
+MATH_F1(tan, tan(x))
+MATH_F1(asin, asin(x))
+MATH_F1(acos, acos(x))
+
+static int host_m_atan(LV *out, LV *args, int nargs) {
+  double y = arg_float(args, nargs, 1, "atan");
+  double x = nargs >= 2 && args[1].tag != TAG_NIL ? arg_float(args, nargs, 2, "atan") : 1.0;
+  out[0].tag = TAG_FLOAT;
+  out[0].v.n = atan2(y, x);
+  return 1;
+}
+
+static int host_m_log(LV *out, LV *args, int nargs) {
+  double x = arg_float(args, nargs, 1, "log"), res;
+  if (nargs < 2 || args[1].tag == TAG_NIL) res = log(x);
+  else {
+    double base = arg_float(args, nargs, 2, "log");
+    if (base == 2.0) res = log2(x);
+    else if (base == 10.0) res = log10(x);
+    else res = log(x) / log(base);
+  }
+  out[0].tag = TAG_FLOAT;
+  out[0].v.n = res;
+  return 1;
+}
+
+static int host_m_fmod(LV *out, LV *args, int nargs) {
+  if (nargs >= 2 && args[0].tag == TAG_INT && args[1].tag == TAG_INT) {
+    int64_t d = args[1].v.i;
+    if ((uint64_t)d + 1u <= 1u) {   /* 0 or -1: no overflow in the division */
+      if (d == 0) arg_fail(2, "fmod", "zero");
+      out[0].tag = TAG_INT;
+      out[0].v.i = 0;
+    } else {
+      out[0].tag = TAG_INT;
+      out[0].v.i = args[0].v.i % d;
+    }
+    return 1;
+  }
+  double a = arg_float(args, nargs, 1, "fmod"), b = arg_float(args, nargs, 2, "fmod");
+  out[0].tag = TAG_FLOAT;
+  out[0].v.n = fmod(a, b);
+  return 1;
+}
+
+static int host_m_modf(LV *out, LV *args, int nargs) {
+  if (nargs >= 1 && args[0].tag == TAG_INT) {
+    out[0] = args[0];
+    out[1].tag = TAG_FLOAT;
+    out[1].v.n = 0.0;
+    return 2;
+  }
+  double n = arg_float(args, nargs, 1, "modf");
+  double ip = n < 0 ? ceil(n) : floor(n);
+  out[0].tag = TAG_FLOAT;
+  out[0].v.n = ip;
+  if (ip >= -9223372036854775808.0 && ip < 9223372036854775808.0) {   /* pushnumint: an integer when it fits */
+    out[0].tag = TAG_INT;
+    out[0].v.i = (int64_t)ip;
+  }
+  out[1].tag = TAG_FLOAT;
+  out[1].v.n = n == ip ? 0.0 : n - ip;
+  return 2;
+}
+
+static int host_m_ult(LV *out, LV *args, int nargs) {
+  uint64_t a = (uint64_t)arg_int(args, nargs, 1, "ult");
+  uint64_t b = (uint64_t)arg_int(args, nargs, 2, "ult");
+  out[0].tag = a < b ? TAG_TRUE : TAG_FALSE;
+  return 1;
+}
+
+static int host_m_type(LV *out, LV *args, int nargs) {
+  expect_arg(nargs, 1, "type", "value");
+  out[0].tag = TAG_NIL;
+  if (args[0].tag == TAG_INT) set_string(&out[0], "integer");
+  else if (args[0].tag == TAG_FLOAT) set_string(&out[0], "float");
+  return 1;
+}
+
+/* lmathlib.c's xoshiro256**, with its seeding, so that math.randomseed(n) gives the same numbers as Lua 5.4.9. */
+static uint64_t rng[4];
+
+static uint64_t rotl64(uint64_t x, int n) { return (x << n) | (x >> (64 - n)); }
+
+static uint64_t nextrand(void) {
+  uint64_t s0 = rng[0], s1 = rng[1], s2 = rng[2] ^ s0, s3 = rng[3] ^ s1;
+  uint64_t res = rotl64(s1 * 5, 7) * 9;
+  rng[0] = s0 ^ s3;
+  rng[1] = s1 ^ s2;
+  rng[2] = s2 ^ (s1 << 17);
+  rng[3] = rotl64(s3, 45);
+  return res;
+}
+
+static void setseed(uint64_t n1, uint64_t n2) {
+  rng[0] = n1;
+  rng[1] = 0xff;
+  rng[2] = n2;
+  rng[3] = 0;
+  for (int i = 0; i < 16; ++i) nextrand();
+}
+
+/* lmathlib.c's project: a random integer in [0, n] without bias, from ran and further draws. */
+static uint64_t project(uint64_t ran, uint64_t n) {
+  if ((n & (n + 1)) == 0) return ran & n;
+  uint64_t lim = n;
+  lim |= lim >> 1;
+  lim |= lim >> 2;
+  lim |= lim >> 4;
+  lim |= lim >> 8;
+  lim |= lim >> 16;
+  lim |= lim >> 32;
+  while ((ran &= lim) > n) ran = nextrand();
+  return ran;
+}
+
+static int host_m_random(LV *out, LV *args, int nargs) {
+  uint64_t rv = nextrand();
+  int64_t low = 0, up = 0;
+  switch (nargs) {
+    case 0:
+      out[0].tag = TAG_FLOAT;
+      out[0].v.n = (double)(rv >> 11) * 0x1.0p-53;
+      return 1;
+    case 1:
+      low = 1;
+      up = arg_int(args, nargs, 1, "random");
+      if (up == 0) {
+        out[0].tag = TAG_INT;
+        out[0].v.i = (int64_t)rv;
+        return 1;
+      }
+      break;
+    case 2:
+      low = arg_int(args, nargs, 1, "random");
+      up = arg_int(args, nargs, 2, "random");
+      break;
+    default: rt_fail("wrong number of arguments", -1);
+  }
+  if (!(low <= up)) arg_fail(1, "random", "interval is empty");
+  out[0].tag = TAG_INT;
+  out[0].v.i = (int64_t)(project(rv, (uint64_t)up - (uint64_t)low) + (uint64_t)low);
+  return 1;
+}
+
+static int host_m_randomseed(LV *out, LV *args, int nargs) {
+  uint64_t n1, n2;
+  if (nargs == 0) {
+    n1 = (uint64_t)time(NULL);
+    n2 = (uint64_t)(uintptr_t)&out;
+  } else {
+    n1 = (uint64_t)arg_int(args, nargs, 1, "randomseed");
+    n2 = nargs >= 2 && args[1].tag != TAG_NIL ? (uint64_t)arg_int(args, nargs, 2, "randomseed") : 0;
+  }
+  setseed(n1, n2);
+  out[0].tag = TAG_INT;
+  out[0].v.i = (int64_t)n1;
+  out[1].tag = TAG_INT;
+  out[1].v.i = (int64_t)n2;
+  return 2;
+}
+
+/* ---- os and io: what a test program prints with and reads the clock with ---- */
+static int host_oclock(LV *out, LV *args, int nargs) {
+  (void)args;
+  (void)nargs;
+  out[0].tag = TAG_FLOAT;
+  out[0].v.n = (double)clock() / CLOCKS_PER_SEC;
+  return 1;
+}
+
+static int host_otime(LV *out, LV *args, int nargs) {
+  (void)args;
+  (void)nargs;
+  out[0].tag = TAG_INT;
+  out[0].v.i = (int64_t)time(NULL);
+  return 1;
+}
+
+static int host_ogetenv(LV *out, LV *args, int nargs) {
+  LV name = arg_str(args, nargs, 1, "getenv");
+  const char *v = getenv(((LString *)name.v.p)->bytes);
+  if (v == NULL) out[0].tag = TAG_NIL;
+  else out[0] = make_str(v, strlen(v));
+  return 1;
+}
+
+static int host_oexit(LV *out, LV *args, int nargs) {
+  (void)out;
+  int code = 0;
+  if (nargs >= 1 && args[0].tag == TAG_FALSE) code = 1;
+  else if (nargs >= 1 && args[0].tag == TAG_INT) code = (int)args[0].v.i;
+  fflush(stdout);
+  exit(code);
+}
+
+/* io.write(...): the values go to stdout; the result is the stdout table, as in Lua (a file with a write method). */
+static LV io_stdout;
+
+static void write_args(const LV *args, int nargs, const char *fname) {
+  for (int k = 1; k <= nargs; ++k) {
+    const LV *v = &args[k - 1];
+    if (v->tag == TAG_STR) fwrite(((LString *)v->v.p)->bytes, 1, ((LString *)v->v.p)->len, stdout);
+    else if (is_number(v)) {
+      char buf[64];
+      size_t n = number_text(v, buf, sizeof buf);
+      fwrite(buf, 1, n, stdout);
+    } else lib_arg_error(k, fname, "string", arg_typename(args, nargs, k));
+  }
+}
+
+static int host_iowrite(LV *out, LV *args, int nargs) {
+  write_args(args, nargs, "write");
+  out[0] = io_stdout;
+  return 1;
+}
+
+/* io.stdout:write(...): the first argument is the file itself. */
+static int host_fwrite(LV *out, LV *args, int nargs) {
+  write_args(args + 1, nargs - 1, "write");
+  out[0] = args[0];
+  return 1;
+}
+
 /* The tables of the libraries; the string metatable is created in install_more. */
 
 static void register_table(LV *env, const char *name, LV *tbl) { set_global(env, name, tbl); }
@@ -2583,6 +3181,8 @@ static void install_more(LV *env) {
   set_global(env, "assert", &f);
   make_host(&f, host_pcall);
   set_global(env, "pcall", &f);
+  make_host(&f, host_xpcall);
+  set_global(env, "xpcall", &f);
   make_host(&f, host_tonumber);
   set_global(env, "tonumber", &f);
   make_host(&f, host_rawget);
@@ -2602,6 +3202,9 @@ static void install_more(LV *env) {
   add_fn(&tbl, "remove", host_tremove);
   add_fn(&tbl, "concat", host_tconcat);
   add_fn(&tbl, "unpack", host_tunpack);
+  add_fn(&tbl, "pack", host_tpack);
+  add_fn(&tbl, "move", host_tmove);
+  add_fn(&tbl, "sort", host_tsort);
   register_table(env, "table", &tbl);
 
   LV math;
@@ -2613,6 +3216,24 @@ static void install_more(LV *env) {
   add_fn(&math, "min", host_mmin);
   add_fn(&math, "sqrt", host_msqrt);
   add_fn(&math, "tointeger", host_mtointeger);
+  add_fn(&math, "exp", host_m_exp);
+  add_fn(&math, "sin", host_m_sin);
+  add_fn(&math, "cos", host_m_cos);
+  add_fn(&math, "tan", host_m_tan);
+  add_fn(&math, "asin", host_m_asin);
+  add_fn(&math, "acos", host_m_acos);
+  add_fn(&math, "atan", host_m_atan);
+  add_fn(&math, "log", host_m_log);
+  add_fn(&math, "fmod", host_m_fmod);
+  add_fn(&math, "modf", host_m_modf);
+  add_fn(&math, "ult", host_m_ult);
+  add_fn(&math, "type", host_m_type);
+  add_fn(&math, "random", host_m_random);
+  add_fn(&math, "randomseed", host_m_randomseed);
+  {
+    LV seeds[2];
+    host_m_randomseed(seeds, NULL, 0);   /* the generator starts from a time-based seed, as in Lua */
+  }
   LV v;
   v.tag = TAG_FLOAT;
   v.v.n = HUGE_VAL;
@@ -2647,6 +3268,27 @@ static void install_more(LV *env) {
   add_fn(&str, "gmatch", host_sgmatch);
   add_fn(&str, "gsub", host_sgsub);
   register_table(env, "string", &str);
+
+  LV os_tbl;
+  lua54rt_newtable(&os_tbl);
+  add_fn(&os_tbl, "clock", host_oclock);
+  add_fn(&os_tbl, "time", host_otime);
+  add_fn(&os_tbl, "getenv", host_ogetenv);
+  add_fn(&os_tbl, "exit", host_oexit);
+  register_table(env, "os", &os_tbl);
+
+  LV io_tbl;
+  lua54rt_newtable(&io_tbl);
+  lua54rt_newtable(&io_stdout);
+  add_fn(&io_stdout, "write", host_fwrite);
+  add_fn(&io_tbl, "write", host_iowrite);
+  key = make_str("stdout", 6);
+  raw_set((Table *)io_tbl.v.p, &key, &io_stdout);
+  register_table(env, "io", &io_tbl);
+
+  set_global(env, "_G", env);
+  LV version = make_str("Lua 5.4", 7);
+  set_global(env, "_VERSION", &version);
   string_meta = (Table *)gc_alloc(GC_TABLE, sizeof(Table));
   if (string_meta == NULL) die("out of memory");
   key = make_str("__index", 7);
