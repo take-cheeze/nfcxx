@@ -381,3 +381,79 @@ Full-generation A/B at the depth-16 default: 236.6M vs 228.4M total
 allocations; every main/shard/header/entry/bytecode artifact is
 byte-identical. The registered shard check passes, including the non-ASCII
 identifier, prelude/edge-case, colocate linkage and runtime-parity cases.
+
+## Profile after dense traversal and primitive-send extraction (November 26)
+
+Profiled PR #1757 at `d3a1ddd08`, with world `fd3221cccc08d3d7fdf38ed37892fe1d81542dba`,
+on CRuby 4.0.5 + YJIT. The normal self-build baked the current source graph: 395 Ruby inputs and
+6,395 translated methods. StackProf sampled CPU at 1 ms in the generation subprocess, including
+the output passes run by exit handlers. A separate replay sampled every 2,000 allocations on the
+same inputs. All 20 C++, header and bytecode artifacts match between the two runs.
+
+| Measurement | CPU profile | Allocation profile |
+| --- | ---: | ---: |
+| Whole generation wall time, including exit handlers | 190.06 s | 211.55 s |
+| Process user + system CPU | 189.89 s | 210.19 s |
+| Allocations | 261.45M | 245.34M |
+| GC time | 49.28 s | 51.82 s |
+
+The first run used the existing disk cache without clearing it; the replay could reuse entries
+the first run populated. Native compilation and unrelated host work overlapped parts of these runs.
+These are diagnostic observations with different sampling overhead and cache state, not an A/B
+speedup measurement. The CPU sample miss rate was 2.68%; GC accounted for 26.7% of CPU samples.
+
+The CPU-profiled driver's logged phases took 140.03 s through diagnostics: method compilation
+68.93 s, mrbc_rb/irep decoding/registry 17.52 s, global facts and annotations 17.04 s, final
+return/fixnum proofs and ivars 11.21 s, C++ emission and symbol rewrite 10.07 s. The remaining
+elapsed time includes exit-handler output passes and their GC. It must not be attributed to
+sharding alone.
+
+Next candidates, based on sampled call trees (inclusive costs overlap):
+
+1. **KeepSummary's generated-text scans.** `KeepSummary.rewrite` accounts for 12.98 s sampled CPU
+   and approximately 25.20M sampled allocations. `Unit#own_effects` accounts for 6.28 s, including
+   the call scan and `store_kind`'s assignment scans. Investigate avoiding repeated regex scans
+   of statements and carrying immutable parsed facts between summary consumers. Preserve the
+   conservative treatment of unknown calls and pointer/member stores; output parity is required.
+2. **Shard and shared-prelude identifier allocation.** The sharding exit handler accounts for
+   16.33 s sampled CPU and approximately 49.82M allocations. Its rewrite takes 10.21 s and
+   colocate 6.02 s. `shared_prelude_items` still scans the whole code with a capturing regex;
+   `each_delimited_identifier` accounts for approximately 9.87M allocations itself. Investigate
+   reusing identifier sets and avoiding fresh identifier slices while preserving each scanner's
+   different boundary rules. The earlier ASCII and delimiter improvements are already present.
+3. **YieldReach's received-block fixed point.** `compute_received` takes 5.13 s sampled CPU;
+   4.92 s is in `Set#merge`. Consider a changed-node worklist or delta propagation instead of
+   repeatedly merging unchanged sets across all forwarding edges. Allocation samples attribute
+   only about 1.00M objects to this subtree: this is primarily a CPU candidate.
+4. **mrbc_rb annotation construction.** `Annotations.canonical` accounts for approximately
+   11.50M inclusive allocations, although only 1.58 s sampled CPU. Investigate sharing immutable
+   annotation values if later profiles confirm allocation pressure. Keep the linked-source scan
+   on the default Ruby emitter; reverting it to native mrbc would reintroduce the parser failure.
+
+Reaching-definition queries now account for 5.53 s sampled CPU (the compute loop 3.78 s), versus
+the larger text passes above. The base guarded-fallback method accounts for only 0.57 s inclusive;
+its prepend wrappers overlap, and none exceeded 1.16 s. The old fallback-plan and dataflow rankings
+should therefore not be carried forward unchanged.
+
+A separate no-object-cache native compilation of all 16 units with eight workers succeeds:
+74.89 s wall, 554.38 s aggregate user + system CPU. The slowest units are shards 13 (42.34 s),
+10 (41.65 s), and 14 (40.53 s), each about 4.82 MB; registration takes 36.57 s. The nfcxx timing
+log records 546.47 s across its combined front-end/C-compile/link spans. It does not separate
+EDG from backend C compilation, so these results do not justify tuning either component alone.
+An initial attempt with GCC's `-ftime-report` was rejected by the frontend; the successful run
+omits that flag. These measurements are not directly comparable to the earlier frozen-input build.
+
+The rebuilt compiled compiler also passes a 96-method fixture's C++ and bytecode parity check,
+executing 2,613,394 translated-method calls. Its perf-sampled run takes 20.37 s wall and 20.33 s
+user + system CPU. Self samples include `mrb_vm_exec` 25.5%, `get_args_v` 6.1%,
+`funcall_with_block_m` 5.7%, and Oniguruma `match_at` 3.7%; `onig_byte_to_char` is now 1.4%.
+This is a small compiled-compiler workload, not a full 395-input self-hosted generation profile.
+It suggests investigating interpreted work and argument/block dispatch next for compiled runtime
+performance, rather than assuming the earlier regexp byte-offset bottleneck still dominates.
+`runner_generation.rb` additionally passes native-oracle verification, generated C++/bytecode
+parity and linked runtime behavior, with 932,521 translated-method calls.
+
+Local ignored artifacts, input hashes, profiling drivers and reports are under
+`build/bench/profile-1757` and `build/bench/profile-1757-*.rb`. The CPU and allocation dumps,
+native per-unit results and timing log, perf capture, artifact comparison, and runner log are
+retained there; no Python was used.
