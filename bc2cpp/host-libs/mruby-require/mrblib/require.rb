@@ -94,14 +94,11 @@ class Object
       return true
     end
 
-    # Built features (the native loaded-feature list) and files. Where the native half is not built (CRuby, which loads
-    # this file in its own checks), an unknown name raises LoadError here.
-    if respond_to?(:__native_require, true)
-      loaded = __native_require(feature)
-      MRubyRequire::LOADED[feature] = true if loaded
-      return loaded
-    end
-    raise LoadError, "cannot load such file -- #{feature}"
+    # Built features (the native loaded-feature list) and files: Kernel#require, the native half where it is built
+    # (CRuby, which loads this file in its own checks, answers with its own require).
+    loaded = super(feature)
+    MRubyRequire::LOADED[feature] = true if loaded
+    loaded
   end
 end
 

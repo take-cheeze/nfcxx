@@ -159,9 +159,9 @@ rb_require(mrb_state *mrb, const char *name)
 }
 
 /* The native half of require: built features (the loaded-feature list) and files. The Ruby side (mrblib/require.rb)
-   answers the baked sources and the features its checks provide, and calls this for anything else. */
+   answers the baked sources and the features its checks provide, and calls this (super) for anything else. */
 static mrb_value
-k_native_require(mrb_state *mrb, mrb_value self)
+k_require(mrb_state *mrb, mrb_value self)
 {
   mrb_value name;
   mrb_get_args(mrb, "S", &name);
@@ -212,7 +212,7 @@ mrb_mruby_require_gem_init(mrb_state *mrb)
   if (!mrb_class_defined(mrb, "LoadError")) {
     mrb_define_class(mrb, "LoadError", script);
   }
-  mrb_define_method(mrb, mrb->kernel_module, "__native_require", k_native_require, MRB_ARGS_REQ(1));
+  mrb_define_method(mrb, mrb->kernel_module, "require", k_require, MRB_ARGS_REQ(1));
   mrb_define_method(mrb, mrb->module_class, "autoload", mod_autoload, MRB_ARGS_REQ(2));
   mrb_define_method(mrb, mrb->module_class, "autoload?", mod_autoload_p, MRB_ARGS_REQ(1));
 }
