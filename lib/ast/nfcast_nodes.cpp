@@ -854,12 +854,36 @@ struct EqNode : Node {
   }
 };
 
+// ---- type feedback for indexing and field reads (docs/notes/ast.md, "Feedback") ----------------------------------------------
+// An index node classes its operands: a table at an integer key (FA_INT), a table at a string key (FA_STR), anything else
+// (FA_OTHER). A field node classes its receiver: a table (FA_TAB), a host object (FA_HOST), anything else (FA_OTHER). Both
+// follow the arithmetic policy: a profile node reads as the specialized node would, records the classes, installs the node
+// for its class after State::feedback_warm agreeing observations, gives up for good on FA_OTHER or on two classes, and
+// re-profiles (at most State::reprofile_max times) after a deopt on the other kind of key or receiver. With feedback_warm <= 1
+// there is no profile, and a deopt goes to the generic node, as these nodes did before feedback.
+enum : std::uint8_t { FA_INT = 1, FA_STR = 2, FA_TAB = 1, FA_HOST = 2, FA_OTHER = 4 };
+constexpr std::uint8_t kFaMixed = 3;  // FA_INT | FA_STR, and FA_TAB | FA_HOST
+
+inline std::uint8_t fa_index_class(const Value& o, const Value& k) {
+  if (o.t != T_TAB) return FA_OTHER;
+  if (k.t == T_INT) return FA_INT;
+  if (k.t == T_STR) return FA_STR;
+  return FA_OTHER;
+}
+
+inline std::uint8_t fa_field_class(const Value& o) {
+  if (o.t == T_TAB) return FA_TAB;
+  if (o.t == T_HOST) return FA_HOST;
+  return FA_OTHER;
+}
+
 // ================================================================================================================
 // indexing and field access
 // ================================================================================================================
 // Indexing t[k] where the key is computed.
 struct IndexBase : Node {
   Node *obj_, *key_;
+  unsigned reprofiles = 0;  // deopts on the other kind of key that sent this node back to recording (State::reprofile_max bounds it)
   IndexBase(Node* o, Node* k) : obj_(o), key_(k) {
     adopt(obj_);
     adopt(key_);
@@ -899,9 +923,15 @@ struct IndexBase : Node {
   }
 };
 
+IndexBase* index_deopt(Frame& f, IndexBase* self, const Value& o, const Value& k);  // below, with the feedback nodes
+
+// The generic node: every read takes the generic table lookup (counted in generic_reads).
 struct IndexGen : IndexBase {
   using IndexBase::IndexBase;
-  Value get(Frame& f, const Value& o, const Value& k) override { return generic_get(this, f, o, k); }
+  Value get(Frame& f, const Value& o, const Value& k) override {
+    ++f.S->stats.generic_reads;
+    return generic_get(this, f, o, k);
+  }
 };
 
 struct IndexArr : IndexBase {  // a table indexed by an integer
@@ -914,23 +944,108 @@ struct IndexArr : IndexBase {  // a table indexed by an integer
       return slow(f, o, k);
     }
     ++f.S->stats.deopts;
-    return respec<IndexGen>(f, this, obj_, key_)->get(f, o, k);
+    return index_deopt(f, this, o, k)->get(f, o, k);
   }
 };
 
+struct IndexStr : IndexBase {  // a table indexed by a string: the hash part, with the node of the last lookup cached
+  long cache = -1;
+  using IndexBase::IndexBase;
+  Value get(Frame& f, const Value& o, const Value& k) override {
+    if (o.t == T_TAB && k.t == T_STR) {
+      Table* t = o.tab();
+      const String* s = k.s();
+      long i = cache;
+      // The guard: the cached node holds this very string object (the same object is the same key); else look the key up.
+      if (!(static_cast<unsigned long>(i) < t->hcap && t->nodes[i].key.t == T_STR && t->nodes[i].key.o == s)) {
+        i = t->find_str(s);
+        if (i >= 0) cache = i;
+      }
+      if (i >= 0) {
+        const Value& v = t->nodes[i].val;
+        if (!v.is_nil()) return v;
+      }
+      if (!t->meta) return Value();
+      return slow(f, o, k);
+    }
+    ++f.S->stats.deopts;
+    return index_deopt(f, this, o, k)->get(f, o, k);
+  }
+};
+
+// The node an index node is specialized to for the class C of its operands, made in place of SELF (the caller counts the
+// speculation). RP is the re-profile count the new node keeps.
+IndexBase* index_node(Frame& f, IndexBase* self, std::uint8_t c, unsigned rp) {
+  IndexBase* n;
+  if (c == FA_INT) n = respec<IndexArr>(f, self, self->obj_, self->key_);
+  else if (c == FA_STR) n = respec<IndexStr>(f, self, self->obj_, self->key_);
+  else n = respec<IndexGen>(f, self, self->obj_, self->key_);
+  n->reprofiles = rp;
+  return n;
+}
+
+// An index node that has not specialized: it reads as the specialized node does (no generic read is counted), records the
+// class of each observation, and installs the node for the class after feedback_warm agreeing observations.
+struct IndexProfile : IndexBase {
+  using IndexBase::IndexBase;
+  std::uint8_t kinds = 0;  // the classes seen so far
+  unsigned seen = 0;       // observations recorded
+  Value get(Frame& f, const Value& o, const Value& k) override {
+    std::uint8_t c = fa_index_class(o, k);
+    ++f.S->stats.feedback_records;
+    if (c == FA_OTHER || (kinds | c) == kFaMixed) {
+      ++f.S->stats.feedback_generic;
+      return respec<IndexGen>(f, this, obj_, key_)->get(f, o, k);
+    }
+    kinds = static_cast<std::uint8_t>(kinds | c);
+    ++seen;
+    if (seen >= f.S->feedback_warm) {
+      IndexBase* n = index_node(f, this, kinds, reprofiles);
+      ++f.S->stats.speculations_installed;
+      return n->get(f, o, k);
+    }
+    Table* t = o.tab();
+    Value v = t->get(k);
+    if (!v.is_nil() || !t->meta) return v;
+    return slow(f, o, k);
+  }
+};
+
+// The first evaluation of an index node: it records the operands (feedback_warm > 1) or specializes at once.
 struct IndexUninit : IndexBase {
   using IndexBase::IndexBase;
   Value get(Frame& f, const Value& o, const Value& k) override {
-    if (o.t == T_TAB && k.t == T_INT) return respec<IndexArr>(f, this, obj_, key_)->get(f, o, k);
-    return respec<IndexGen>(f, this, obj_, key_)->get(f, o, k);
+    if (f.S->feedback_warm <= 1) {
+      std::uint8_t c = fa_index_class(o, k);
+      if (c != FA_OTHER) ++f.S->stats.speculations_installed;
+      return index_node(f, this, c, 0)->get(f, o, k);
+    }
+    return respec<IndexProfile>(f, this, obj_, key_)->get(f, o, k);
   }
 };
+
+// The node that takes over from SELF, an index node whose guard failed on O and K (the caller counts the deopt). A key of the
+// kind the node speculated on re-profiles (at most State::reprofile_max times); anything else stays generic.
+IndexBase* index_deopt(Frame& f, IndexBase* self, const Value& o, const Value& k) {
+  std::uint8_t c = fa_index_class(o, k);
+  if (c == FA_OTHER || f.S->feedback_warm <= 1) return respec<IndexGen>(f, self, self->obj_, self->key_);
+  if (self->reprofiles >= f.S->reprofile_max) {
+    ++f.S->stats.feedback_generic;  // the bound is reached: the node stays generic for good
+    return respec<IndexGen>(f, self, self->obj_, self->key_);
+  }
+  unsigned n = self->reprofiles + 1;
+  ++f.S->stats.reprofiles;
+  IndexProfile* p = respec<IndexProfile>(f, self, self->obj_, self->key_);
+  p->reprofiles = n;
+  return p;
+}
 
 // Indexing with a constant string key: t.name. Specialized for tables (an inline cache of the node index), for host
 // objects (a cache of the member by the object's class) and strings.
 struct FieldBase : Node {
   Node* obj_;
   String* name_;
+  unsigned reprofiles = 0;  // as IndexBase::reprofiles
   FieldBase(Node* o, String* n) : obj_(o), name_(n) { adopt(obj_); }
   int target_kind() const override { return 4; }
   int node_kind() const override { return 2; }
@@ -946,9 +1061,15 @@ struct FieldBase : Node {
   }
 };
 
+FieldBase* field_deopt(Frame& f, FieldBase* self, const Value& o);  // below, with the feedback nodes
+
+// The generic node: a read of a field of anything but a table or a host object (counted in generic_reads).
 struct FieldGen : FieldBase {
   using FieldBase::FieldBase;
-  Value get(Frame& f, const Value& o) override { return slow(f, o); }
+  Value get(Frame& f, const Value& o) override {
+    ++f.S->stats.generic_reads;
+    return slow(f, o);
+  }
 };
 
 struct FieldTab : FieldBase {
@@ -970,7 +1091,7 @@ struct FieldTab : FieldBase {
       return slow(f, o);
     }
     ++f.S->stats.deopts;
-    return respec<FieldGen>(f, this, obj_, name_)->get(f, o);
+    return field_deopt(f, this, o)->get(f, o);
   }
 };
 
@@ -991,16 +1112,81 @@ struct FieldHost : FieldBase {
       return ic_member->get(*f.S, h);
     }
     ++f.S->stats.deopts;
-    return respec<FieldGen>(f, this, obj_, name_)->get(f, o);
+    return field_deopt(f, this, o)->get(f, o);
   }
 };
 
+// The node a field node is specialized to for the class C of its receiver, made in place of SELF (the caller counts the
+// speculation). RP is the re-profile count the new node keeps.
+FieldBase* field_node(Frame& f, FieldBase* self, std::uint8_t c, unsigned rp) {
+  FieldBase* n;
+  if (c == FA_TAB) n = respec<FieldTab>(f, self, self->obj_, self->name_);
+  else if (c == FA_HOST) n = respec<FieldHost>(f, self, self->obj_, self->name_);
+  else n = respec<FieldGen>(f, self, self->obj_, self->name_);
+  n->reprofiles = rp;
+  return n;
+}
+
+// A field node that has not specialized: it reads the receiver as the specialized node does (no generic read is counted),
+// records the class of each receiver, and installs the node for the class after feedback_warm agreeing observations.
+struct FieldProfile : FieldBase {
+  using FieldBase::FieldBase;
+  std::uint8_t kinds = 0;  // the classes seen so far
+  unsigned seen = 0;       // observations recorded
+  Value get(Frame& f, const Value& o) override {
+    std::uint8_t c = fa_field_class(o);
+    ++f.S->stats.feedback_records;
+    if (c == FA_OTHER || (kinds | c) == kFaMixed) {
+      ++f.S->stats.feedback_generic;
+      return respec<FieldGen>(f, this, obj_, name_)->get(f, o);
+    }
+    kinds = static_cast<std::uint8_t>(kinds | c);
+    ++seen;
+    if (seen >= f.S->feedback_warm) {
+      FieldBase* n = field_node(f, this, kinds, reprofiles);
+      ++f.S->stats.speculations_installed;
+      return n->get(f, o);
+    }
+    if (c == FA_TAB) {
+      Table* t = o.tab();
+      Value v = t->get_str(name_);
+      if (!v.is_nil() || !t->meta) return v;
+      return slow(f, o);
+    }
+    HostObject* h = o.hostobj();
+    HostMember* m = h->member(*f.S, name_);
+    if (!m) return Value();
+    f.line = line;
+    return m->get(*f.S, h);
+  }
+};
+
+// The node that takes over from SELF, a field node whose guard failed on the receiver O (the caller counts the deopt). A table
+// or a host object re-profiles (at most State::reprofile_max times); anything else stays generic.
+FieldBase* field_deopt(Frame& f, FieldBase* self, const Value& o) {
+  std::uint8_t c = fa_field_class(o);
+  if (c == FA_OTHER || f.S->feedback_warm <= 1) return respec<FieldGen>(f, self, self->obj_, self->name_);
+  if (self->reprofiles >= f.S->reprofile_max) {
+    ++f.S->stats.feedback_generic;  // the bound is reached: the node stays generic for good
+    return respec<FieldGen>(f, self, self->obj_, self->name_);
+  }
+  unsigned n = self->reprofiles + 1;
+  ++f.S->stats.reprofiles;
+  FieldProfile* p = respec<FieldProfile>(f, self, self->obj_, self->name_);
+  p->reprofiles = n;
+  return p;
+}
+
+// The first evaluation of a field node: it records the receiver (feedback_warm > 1) or specializes at once.
 struct FieldUninit : FieldBase {
   using FieldBase::FieldBase;
   Value get(Frame& f, const Value& o) override {
-    if (o.t == T_TAB) return respec<FieldTab>(f, this, obj_, name_)->get(f, o);
-    if (o.t == T_HOST) return respec<FieldHost>(f, this, obj_, name_)->get(f, o);
-    return respec<FieldGen>(f, this, obj_, name_)->get(f, o);
+    if (f.S->feedback_warm <= 1) {
+      std::uint8_t c = fa_field_class(o);
+      if (c != FA_OTHER) ++f.S->stats.speculations_installed;
+      return field_node(f, this, c, 0)->get(f, o);
+    }
+    return respec<FieldProfile>(f, this, obj_, name_)->get(f, o);
   }
 };
 
