@@ -101,8 +101,13 @@ is {key, value}. An empty slot has key 0; a deleted one has the sentinel key 0x1
   `keys()`, `values()` and `items()` (views, below) and `update([other])` (a dict, or an iterable of two-item lists or
   tuples; a non-iterable is `'X' object isn't iterable`, a pair of another length `ValueError: dict update sequence has
   wrong length`). Their argument-count errors are the reference's (`function missing 1 required positional arguments`,
-  `function expected at most 3 arguments, got N`, ...). A method the runtime lacks (copy, clear, setdefault, popitem,
-  fromkeys) is refused by name, and read as a value (`f = d.get`) it fails at run time.
+  `function expected at most 3 arguments, got N`, ...). `copy()` copies the table slot for slot (deleted slots too), `clear()`
+  drops the table, `setdefault(k[, v])` hashes k and adds it with v (None), `popitem()` removes and returns the first live slot
+  (`KeyError: popitem(): dictionary is empty`), and `fromkeys(iterable[, v])` is the classmethod: `d.fromkeys(...)` is called with
+  no self, and its table is sized by the iterable's length. Iterating a str (which `fromkeys` needs) is still refused. The
+  lowering does not refuse `copy`, `clear`, `setdefault`, `popitem` or `fromkeys` by name, since the receiver's type is not
+  known there: on a list, str or other value that is not a dict the runtime fails at run time ("a method copy of a 'list' is
+  not lowered yet"). Read as a value (`f = d.get`) a dict method fails at run time.
 - A view is {type, dict, kind}, live: it reads the dict's table. `repr` is `dict_keys([...])`, `dict_values([...])` or
   `dict_items([(k, v), ...])`, in table order. `len`, truth, `in` (a key, a value by equality, a (key, value) pair) and
   iteration are lowered. A view has no hash and no equality (`==` fails here; the reference compares identities).
@@ -117,8 +122,15 @@ is {key, value}. An empty slot has key 0; a deleted one has the sentinel key 0x1
 - A set comprehension stores each item with `STORE_COMP` (kind 2) into the set its code builds before the loop.
 - Operations: `in` (a lookup, which answers without hashing for an empty set, as `mp_set_lookup` does), `len`, truth, `for`,
   and the repr: `{a, b}` in table order, and `set()` when empty. Its hash is refused (a set is unhashable).
-- Methods of a set (`add`, `pop`, `union`, ...) are refused: `kBuiltinMethods` covers the names the lowering knows, and any
-  other method name fails at run time. Equality of two sets fails (it is not built yet).
+- Methods (`LOAD_METHOD`, called by `CALL_METHOD`): `add(x)`, `discard(x)`, `remove(x)` (a missing item is `KeyError` with the
+  item), and `union(other)`, `intersection(other)` and `difference(*others)`, whose argument may be any iterable, as objset.c
+  takes it. A set method not listed (`pop`, `update`, `issubset`, ...) fails at run time (`kBuiltinMethods` refuses the names
+  only the set and list have, and the rest fails as "not lowered yet").
+- Operators: `|`, `&` and `-` on two sets build a new set (`|` is a copy of the left set with the right's items added; `&` is a
+  new set of the items of the right that are in the left, in the right's order; `-` removes the right's items from a copy).
+  The in-place `|=`, `&=` and `-=` change the left set (`s -= s` clears it). With a non-set operand the TypeError names the
+  operator without the in-place prefix (`unsupported types for __or__: 'set', 'list'`), as the reference does. `^`, the
+  comparisons and `==` on sets are not lowered yet. Equality of two sets fails (it is not built yet).
 
 ## Slices
 
@@ -272,6 +284,14 @@ RAISE_LAST), as the lowering follows it:
   the class namespace as the module's name scope after that (`x` at module level then reads the class's `x`). This lowering
   restores the module's scope, as CPython does.
 - `del obj.name` is LOAD_NULL then STORE_ATTR (no DELETE_ATTR in MicroPython 1.29), so a store of 0 removes the attribute.
+- `super()` (MicroPython 1.29's compile.c special case): a method that calls `super()` takes the class's `__class__` cell as a
+  free variable. The class body makes that cell (its prelude lists it as an owned cell) and returns it, and `__build_class__`
+  sets it to the new class. `super().name(args)` is `LOAD_GLOBAL super`, `LOAD_DEREF __class__`, `LOAD_FAST self`,
+  `LOAD_SUPER_METHOD name`, the arguments and `CALL_METHOD`: `LOAD_SUPER_METHOD` writes the method over the super global's slot
+  and leaves the self (vm.c). `super()` alone is a call of the builtin `super` with the class and self, and its object's
+  attributes and methods are looked up in the bases of the class (`super_attr`): the class itself is not searched. A base
+  with no `__init__` gives object's (no argument) or the exception's (its one argument). `super(cls, self)` with self not an
+  instance of cls is a `TypeError` with no text, as the reference raises it.
 - Attribute names in the lowering that are builtin methods of the other types (`count`, `upper`, `keys`, ...) are refused
   by name: the lowering does not know the receiver's type, so a class's method of such a name is refused too.
 
@@ -288,9 +308,9 @@ RAISE_LAST), as the lowering follows it:
 ## Not yet
 
 Defaults and keyword arguments (`MAKE_FUNCTION_DEFARGS`, `MAKE_CLOSURE_DEFARGS`), `del` of a closure variable
-(`DELETE_DEREF`), generators, str methods and formatting, str ordering and repetition, `raise ... from`, `super()`,
-big ints, the dict methods `copy`, `clear`, `setdefault`, `popitem` and `fromkeys`, the set methods
-and operators (`add`, `|`, `==`, and so on), the list methods other than append and pop, subscripts of a range, and the rest
+(`DELETE_DEREF`), generators, str methods and formatting, str ordering and repetition, `raise ... from`,
+big ints, the set methods
+`pop`, `update`, `issubset` and the rest, `^` and the set comparisons, the list methods other than append and pop, subscripts of a range, and the rest
 of the opcodes. Equality of two dicts, two sets, two ranges or two views, `str` of a list, tuple, set or view, and
 containment in a range are refused at run time until their repr and equality are built. Changing a dict's size during a
 `for` over it is not checked (see Dicts). Identity of strs: a str built at run time is a new object, but MicroPython interns

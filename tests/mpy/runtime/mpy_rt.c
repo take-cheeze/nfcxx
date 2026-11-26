@@ -118,6 +118,8 @@ static const MpyType mpy_type_range = {"range", NULL, 0, 0, NULL};
 static const MpyType mpy_type_dict = {"dict", NULL, 0, 0, NULL};
 static const MpyType mpy_type_set = {"set", NULL, 0, 0, NULL};
 static const MpyType mpy_type_view = {"dict_view", NULL, 0, 0, NULL};   /* keys(), values() and items() */
+static const MpyType mpy_type_super = {"super", NULL, 0, 0, NULL};     /* super(cls, self): the bases of cls, for self */
+static const MpyType mpy_type_cell = {"cell", NULL, 0, 0, NULL};       /* a closure's box (only the class body returns one) */
 static const MpyType mpy_type_slice = {"slice", NULL, 0, 0, NULL};
 /* The builtin functions are called builtin_function_or_method; str and range are types, which are called too. */
 static const MpyType mpy_type_bfn = {"builtin_function_or_method", NULL, 0, 0, NULL};
@@ -188,6 +190,9 @@ typedef struct {
 enum {
   BI_LEN, BI_STR, BI_RANGE, BI_APPEND, BI_POP, BI_BUILD_CLASS,
   BI_DICT_GET, BI_DICT_KEYS, BI_DICT_VALUES, BI_DICT_ITEMS, BI_DICT_POP, BI_DICT_UPDATE,
+  BI_DICT_COPY, BI_DICT_CLEAR, BI_DICT_SETDEFAULT, BI_DICT_POPITEM, BI_DICT_FROMKEYS,
+  BI_SET_ADD, BI_SET_DISCARD, BI_SET_REMOVE, BI_SET_UNION, BI_SET_INTERSECTION, BI_SET_DIFFERENCE,
+  BI_SUPER, BI_INIT,
   BI_EXC, BI_COUNT = BI_EXC + EXC_COUNT
 };
 typedef struct {
@@ -199,6 +204,11 @@ static const MpyBuiltin mpy_builtins[BI_COUNT] = {
   {&mpy_type_bfn, BI_APPEND}, {&mpy_type_bfn, BI_POP}, {&mpy_type_bfn, BI_BUILD_CLASS},
   {&mpy_type_bfn, BI_DICT_GET}, {&mpy_type_bfn, BI_DICT_KEYS}, {&mpy_type_bfn, BI_DICT_VALUES},
   {&mpy_type_bfn, BI_DICT_ITEMS}, {&mpy_type_bfn, BI_DICT_POP}, {&mpy_type_bfn, BI_DICT_UPDATE},
+  {&mpy_type_bfn, BI_DICT_COPY}, {&mpy_type_bfn, BI_DICT_CLEAR}, {&mpy_type_bfn, BI_DICT_SETDEFAULT},
+  {&mpy_type_bfn, BI_DICT_POPITEM}, {&mpy_type_bfn, BI_DICT_FROMKEYS},
+  {&mpy_type_bfn, BI_SET_ADD}, {&mpy_type_bfn, BI_SET_DISCARD}, {&mpy_type_bfn, BI_SET_REMOVE},
+  {&mpy_type_bfn, BI_SET_UNION}, {&mpy_type_bfn, BI_SET_INTERSECTION}, {&mpy_type_bfn, BI_SET_DIFFERENCE},
+  {&mpy_type_type, BI_SUPER}, {&mpy_type_bfn, BI_INIT},
   {&mpy_type_type, BI_EXC + 0}, {&mpy_type_type, BI_EXC + 1}, {&mpy_type_type, BI_EXC + 2},
   {&mpy_type_type, BI_EXC + 3}, {&mpy_type_type, BI_EXC + 4}, {&mpy_type_type, BI_EXC + 5},
   {&mpy_type_type, BI_EXC + 6}, {&mpy_type_type, BI_EXC + 7}, {&mpy_type_type, BI_EXC + 8},
@@ -226,6 +236,13 @@ typedef struct {
   mpv self;
   mpv fn;
 } MpyBound;
+
+/* super(cls, self): cls is the class's info record, whose base is searched; self is the instance (or class) it was given. */
+typedef struct {
+  const MpyType *type;
+  const MpyType *cls;
+  mpv self;
+} MpySuper;
 
 static int is_class(mpv v) { return is_heap(v) && type_of(v) == &mpy_type_metaclass; }
 static int is_inst(mpv v) { return is_heap(v) && type_of(v)->inst; }
@@ -255,6 +272,7 @@ static int builtin_index(const char *name, size_t len) {
   if (len == 3 && memcmp(name, "len", 3) == 0) return BI_LEN;
   if (len == 3 && memcmp(name, "str", 3) == 0) return BI_STR;
   if (len == 5 && memcmp(name, "range", 5) == 0) return BI_RANGE;
+  if (len == 5 && memcmp(name, "super", 5) == 0) return BI_SUPER;
   for (k = 0; k < EXC_COUNT; ++k) {
     size_t n = strlen(mpy_exc_info[k].name);
     if (n == len && memcmp(name, mpy_exc_info[k].name, len) == 0) return BI_EXC + (int)k;
@@ -262,7 +280,7 @@ static int builtin_index(const char *name, size_t len) {
   return -1;
 }
 
-/* The builtin id of a dict method (get, keys, values, items, pop, update), or -1. */
+/* The builtin id of a dict method (get, keys, values, items, pop, update, copy, clear, setdefault, popitem, fromkeys), or -1. */
 static int dict_method_index(const char *name, size_t len) {
   static const struct {
     const char *name;
@@ -270,12 +288,43 @@ static int dict_method_index(const char *name, size_t len) {
   } methods[] = {
     {"get", BI_DICT_GET}, {"keys", BI_DICT_KEYS}, {"values", BI_DICT_VALUES},
     {"items", BI_DICT_ITEMS}, {"pop", BI_DICT_POP}, {"update", BI_DICT_UPDATE},
+    {"copy", BI_DICT_COPY}, {"clear", BI_DICT_CLEAR}, {"setdefault", BI_DICT_SETDEFAULT},
+    {"popitem", BI_DICT_POPITEM}, {"fromkeys", BI_DICT_FROMKEYS},
   };
   size_t k;
   for (k = 0; k < sizeof methods / sizeof methods[0]; ++k) {
     if (strlen(methods[k].name) == len && memcmp(name, methods[k].name, len) == 0) return methods[k].id;
   }
   return -1;
+}
+
+/* The builtin id of a set method (add, discard, remove, union, intersection, difference), or -1. */
+static int set_method_index(const char *name, size_t len) {
+  static const struct {
+    const char *name;
+    int id;
+  } methods[] = {
+    {"add", BI_SET_ADD}, {"discard", BI_SET_DISCARD}, {"remove", BI_SET_REMOVE},
+    {"union", BI_SET_UNION}, {"intersection", BI_SET_INTERSECTION}, {"difference", BI_SET_DIFFERENCE},
+  };
+  size_t k;
+  for (k = 0; k < sizeof methods / sizeof methods[0]; ++k) {
+    if (strlen(methods[k].name) == len && memcmp(name, methods[k].name, len) == 0) return methods[k].id;
+  }
+  return -1;
+}
+
+/* The method names that a dict or a set has and the runtime does not have for the other types: a method call of one of these on
+ * a value that is not a dict or a set fails as not lowered (the lowering does not know the receiver's type, so it cannot refuse
+ * them). */
+static int refused_method_name(const char *name, size_t len) {
+  static const char *const names[] = {"copy", "clear", "setdefault", "popitem", "fromkeys", "add", "discard", "remove",
+                                      "union", "intersection", "difference"};
+  size_t k;
+  for (k = 0; k < sizeof names / sizeof names[0]; ++k) {
+    if (strlen(names[k]) == len && memcmp(name, names[k], len) == 0) return 1;
+  }
+  return 0;
 }
 
 /* The item count and items of a list or tuple; 0 when v is neither. */
@@ -788,17 +837,123 @@ static mpv exc_match(mpv exc, mpv cls) {
   return MPY_FALSE;
 }
 
+mpv mpy_get_iter(mpv obj);
+mpv mpy_iter_next(mpv iter);
+
+/* Sets (docs/notes/mpy-pathb.md, "Sets"): the table of a new set, and the copies and updates of objset.c. A new set has alloc slots
+ * (mp_obj_new_set(n, NULL) for 0). */
+static mpv set_new(size_t alloc) {
+  mpv r = mpy_build_map((uint64_t)alloc);
+  ((MpyDict *)(uintptr_t)r)->type = &mpy_type_set;
+  return r;
+}
+
+/* set_copy: the same table, slot for slot. */
+static mpv set_copy_of(mpv sv) {
+  const MpyDict *s = dict_of(sv);
+  mpv r = set_new(s->alloc);
+  MpyDict *c = (MpyDict *)(uintptr_t)r;
+  if (s->alloc) memcpy(c->table, s->table, s->alloc * sizeof(MpyEntry));
+  c->used = s->used;
+  c->all_keys_are_qstrs = s->all_keys_are_qstrs;
+  return r;
+}
+
+/* set_update_int: the items of other (any iterable) are added to s. */
+static void set_add_items(mpv sv, mpv other) {
+  mpv it = mpy_get_iter(other), item;
+  while ((item = mpy_iter_next(it)) != 0) map_lookup((MpyDict *)(uintptr_t)sv, item, MAP_ADD);
+}
+
+/* The items of other are removed from s (set_diff_int). When other is s itself, s is cleared. */
+static void set_remove_items(mpv sv, mpv other) {
+  MpyDict *s = (MpyDict *)(uintptr_t)sv;
+  mpv it, item;
+  if (sv == other) {
+    free(s->table);
+    s->table = NULL;
+    s->alloc = 0;
+    s->used = 0;
+    return;
+  }
+  it = mpy_get_iter(other);
+  while ((item = mpy_iter_next(it)) != 0) map_lookup(s, item, MAP_REMOVE);
+}
+
+/* set_intersect_int, not in place: a new set of the items of other that are in s, added in other's order. */
+static mpv set_intersect_of(mpv sv, mpv other) {
+  mpv out, it, item;
+  if (sv == other) return set_copy_of(sv);
+  out = set_new(0);
+  it = mpy_get_iter(other);
+  while ((item = mpy_iter_next(it)) != 0) {
+    if (map_lookup((MpyDict *)(uintptr_t)sv, item, MAP_LOOKUP) >= 0) map_lookup((MpyDict *)(uintptr_t)out, item, MAP_ADD);
+  }
+  return out;
+}
+
+/* set_intersect_int, in place: s takes the table of the intersection (none when other is s itself). */
+static void set_intersect_inplace(mpv sv, mpv other) {
+  MpyDict *s, *o;
+  mpv out;
+  if (sv == other) return;
+  out = set_intersect_of(sv, other);
+  s = (MpyDict *)(uintptr_t)sv;
+  o = (MpyDict *)(uintptr_t)out;
+  free(s->table);
+  s->table = o->table;
+  s->alloc = o->alloc;
+  s->used = o->used;
+}
+
+/* The set operators (set_binary_op): | & - and their in-place forms, with both operands sets. Other operands are a TypeError
+ * that names the operator without the in-place prefix, as the reference reports it. */
+static mpv set_binop(int op, int inplace, mpv a, mpv b) {
+  const char *name = op == MPY_OP_OR ? "__or__" : (op == MPY_OP_AND ? "__and__" : "__sub__");
+  char msg[200];
+  if ((op != MPY_OP_OR && op != MPY_OP_AND && op != MPY_OP_SUBTRACT) || !is_set(a) || !is_set(b)) {
+    if (op == MPY_OP_OR || op == MPY_OP_AND || op == MPY_OP_SUBTRACT) {
+      snprintf(msg, sizeof msg, "TypeError: unsupported types for %s: '%s', '%s'", name, type_name(a), type_name(b));
+      fail(msg);
+    }
+    fail("an operator on a set (other than |, &, - and their in-place forms) is not lowered yet");
+  }
+  if (op == MPY_OP_OR) {
+    if (!inplace) {
+      mpv r = set_copy_of(a);
+      set_add_items(r, b);
+      return r;
+    }
+    set_add_items(a, b);
+    return a;
+  }
+  if (op == MPY_OP_AND) {
+    if (!inplace) return set_intersect_of(a, b);
+    set_intersect_inplace(a, b);
+    return a;
+  }
+  if (!inplace) {
+    mpv r = set_copy_of(a);
+    set_remove_items(r, b);
+    return r;
+  }
+  set_remove_items(a, b);
+  return a;
+}
+
 mpv mpy_binop(int op, mpv a, mpv b) {
   int64_t x, y, r = 0;
   /* The in-place forms (MP_BINARY_OP_INPLACE_OR = 9 .. INPLACE_POWER = 21) are the same operators on immutable ints:
    * INPLACE_X is X + 13 (runtime0.h). The in-place matrix multiply, true divide and power stay unsupported. */
+  int inplace = op >= 9 && op <= 21;
   if (op == MPY_OP_EXCEPTION_MATCH) return exc_match(a, b);   /* the except clause: a is the exception, b the class */
-  if (op >= 9 && op <= 21) op += 13;
+  if (inplace) op += 13;
   if (op == MPY_OP_IN) return contains(b, a) ? MPY_TRUE : MPY_FALSE;   /* a in b: the right operand is the container */
   if (op == MPY_OP_IS) return a == b ? MPY_TRUE : MPY_FALSE;           /* the same word: one immediate or one object */
   if (is_str(a) || is_str(b)) return str_binop(op, a, b);
-  if (is_set(a) || is_set(b) || is_view(a) || is_view(b)) {
-    fail("an operator on a set or a dict view (other than in and is) is not lowered yet");
+  if (is_set(a) || is_set(b)) return set_binop(op, inplace, a, b);
+  if (is_view(a) || is_view(b)) {
+    fail("an operator on a dict view (other than in and is) is not lowered yet");
   }
   x = need_int(a);
   y = need_int(b);
@@ -1246,6 +1401,50 @@ static void attr_error(mpv obj, const char *name, size_t len) {
   fail(msg);
 }
 
+/* super objects. super_find is super_attr (py/objtype.c): the value of name in the bases of the class, the class itself is not
+ * searched. __init__ is found in object and in an exception's base even though they have no dict here: it is BI_INIT, and
+ * method is set when the value takes the self (a function, or BI_INIT). */
+static int is_super(mpv v) { return is_heap(v) && type_of(v) == &mpy_type_super; }
+
+static int super_find(const MpySuper *s, const char *name, size_t len, mpv *v, int *method) {
+  mpv key = intern_name(name, len);
+  if (s->cls->base != NULL && class_find(s->cls->base, key, v)) {
+    *method = is_function(*v);
+    return 1;
+  }
+  if (len == 8 && memcmp(name, "__init__", 8) == 0) {
+    *v = builtin_obj(BI_INIT);
+    *method = 1;
+    return 1;
+  }
+  return 0;
+}
+
+static void super_error(const char *name, size_t len) {
+  char msg[200];
+  snprintf(msg, sizeof msg, "AttributeError: 'super' object has no attribute '%.*s'", (int)len, name);
+  fail(msg);
+}
+
+/* super(cls, self), the builtin: self is an instance of cls or of a class derived from it, or a class that is (checked as a
+ * type). A failed check is a TypeError with no text, as the reference raises it. */
+static mpv super_new(mpv clsv, mpv self) {
+  MpySuper *s;
+  const MpyType *st;
+  const MpyType *want;
+  if (!is_class(clsv)) fail("TypeError: ");
+  want = &class_of(clsv)->info;
+  st = is_class(self) ? &class_of(self)->info : (is_inst(self) ? type_of(self) : NULL);
+  while (st != NULL && st != want) st = st->base;
+  if (st == NULL) fail("TypeError: ");
+  s = (MpySuper *)malloc(sizeof *s);
+  if (s == NULL) fail("out of memory");
+  s->type = &mpy_type_super;
+  s->cls = want;
+  s->self = self;
+  return (mpv)(uintptr_t)s;
+}
+
 /* obj.name as a value (LOAD_ATTR). A function found in the class is bound to the instance. */
 mpv mpy_load_attr(mpv obj, const char *name, size_t len) {
   mpv key = intern_name(name, len), v;
@@ -1254,6 +1453,11 @@ mpv mpy_load_attr(mpv obj, const char *name, size_t len) {
     if (class_find(type_of(obj), key, &v)) return is_function(v) ? make_bound(obj, v) : v;
   } else if (is_class(obj)) {
     if (class_find(&class_of(obj)->info, key, &v)) return v;
+  } else if (is_super(obj)) {
+    const MpySuper *s = (const MpySuper *)(uintptr_t)obj;
+    int method = 0;
+    if (super_find(s, name, len, &v, &method)) return method ? make_bound(s->self, v) : v;
+    super_error(name, len);
   } else if (is_dict(obj) && dict_method_index(name, len) >= 0) {
     fail("a dict method read as a value (not called at once) is not lowered yet");
   } else if (is_set(obj)) {
@@ -1325,10 +1529,19 @@ mpv mpy_load_method(mpv obj, const char *name, size_t len) {
     if (len == 3 && memcmp(name, "pop", 3) == 0) return builtin_obj(BI_POP);
     method_self = 0;
   } else if (is_dict(obj) && dict_method_index(name, len) >= 0) {
-    method_self = obj;
+    /* fromkeys is a classmethod: it is called with no self */
+    if (dict_method_index(name, len) != BI_DICT_FROMKEYS) method_self = obj;
     return builtin_obj(dict_method_index(name, len));
   } else if (is_set(obj)) {
-    fail("a method of a set is not lowered yet");
+    if (set_method_index(name, len) < 0) fail("a method of a set is not lowered yet");
+    method_self = obj;
+    return builtin_obj(set_method_index(name, len));
+  } else if (is_super(obj)) {
+    const MpySuper *s = (const MpySuper *)(uintptr_t)obj;
+    int method = 0;
+    if (!super_find(s, name, len, &v, &method)) super_error(name, len);
+    if (method) method_self = s->self;
+    return v;
   } else if (is_inst(obj)) {
     if (dict_find(((const MpyInst *)(uintptr_t)obj)->dict, key, &v)) return v;
     if (class_find(type_of(obj), key, &v)) {
@@ -1338,8 +1551,29 @@ mpv mpy_load_method(mpv obj, const char *name, size_t len) {
   } else if (is_class(obj)) {
     if (class_find(&class_of(obj)->info, key, &v)) return v;
   }
+  if (!is_inst(obj) && !is_class(obj) && refused_method_name(name, len)) {
+    char msg[200];
+    snprintf(msg, sizeof msg, "a method %.*s of a '%s' is not lowered yet", (int)len, name, type_name(obj));
+    fail(msg);
+  }
   attr_error(obj, name, len);
   return MPY_NONE;
+}
+
+/* LOAD_SUPER_METHOD: the method name of super(cls, self), looked up as mp_load_super_method does, with the self it goes with
+ * (left in method_self, as mpy_load_method leaves it). cls is the class, self the instance. */
+mpv mpy_load_super_method(mpv clsv, mpv self, const char *name, size_t len) {
+  MpySuper s;
+  mpv v = 0;
+  int method = 0;
+  method_self = 0;
+  if (!is_class(clsv)) fail("TypeError: ");
+  s.type = &mpy_type_super;
+  s.cls = &class_of(clsv)->info;
+  s.self = self;
+  if (!super_find(&s, name, len, &v, &method)) super_error(name, len);
+  if (method) method_self = self;
+  return v;
 }
 
 /* The self that the last mpy_load_method left (0 for none). */
@@ -1783,12 +2017,14 @@ mpv mpy_iter_next(mpv iter) {
  * is unbound (the variable has not been assigned yet). Cells are never values a program can name: lowered code reaches them
  * only through its locals and the captured cells of a closure. */
 typedef struct {
+  const MpyType *type;
   mpv value;
 } MpyCell;
 
 mpv mpy_make_cell(mpv value) {
   MpyCell *c = (MpyCell *)malloc(sizeof *c);
   if (c == NULL) fail("out of memory");
+  c->type = &mpy_type_cell;
   c->value = value;
   return (mpv)(uintptr_t)c;
 }
@@ -1874,7 +2110,7 @@ static mpv builtin_call(int id, const mpv *args, uint64_t n) {
     case BI_BUILD_CLASS: {
       /* __build_class__(body, name[, base]): the body runs with a namespace on the stack, then the class is made of it. The
        * arguments are copied first: the body's call may move the value stack. */
-      mpv body, name_v, base_v = 0, ns, cv;
+      mpv body, name_v, base_v = 0, ns, cv, cell_v;
       MpyClass *c;
       const MpyType *base = NULL;
       size_t i;
@@ -1891,7 +2127,7 @@ static mpv builtin_call(int id, const mpv *args, uint64_t n) {
       }
       ns = mpy_build_map(0);
       ns_push(ns);
-      mpy_call(body, 0);
+      cell_v = mpy_call(body, 0);   /* the body returns the cell of __class__ when a method uses super(), else None */
       ns_n -= 1;
       c = (MpyClass *)malloc(sizeof *c);
       if (c == NULL) fail("out of memory");
@@ -1910,6 +2146,7 @@ static mpv builtin_call(int id, const mpv *args, uint64_t n) {
         c->info.name = nm;
       }
       cv = (mpv)(uintptr_t)c;
+      if (is_heap(cell_v) && type_of(cell_v) == &mpy_type_cell) ((MpyCell *)(uintptr_t)cell_v)->value = cv;
       return cv;
     }
     case BI_RANGE: {
@@ -1975,6 +2212,141 @@ static mpv builtin_call(int id, const mpv *args, uint64_t n) {
         fail(msg);
       }
       if (n == 2) dict_update(args[0], args[1]);
+      return MPY_NONE;
+    }
+    case BI_DICT_COPY:
+    case BI_DICT_CLEAR:
+    case BI_DICT_POPITEM: {
+      /* d.copy(), d.clear() and d.popitem(): args[0] is the dict, and the count includes it (objdict.c). */
+      MpyDict *s;
+      if (n != 1) {
+        snprintf(msg, sizeof msg, "TypeError: function takes 1 positional arguments but %d were given", (int)n);
+        fail(msg);
+      }
+      s = (MpyDict *)(uintptr_t)args[0];
+      if (id == BI_DICT_COPY) {
+        /* the same table, slot for slot, deleted slots included (mp_obj_dict_copy copies the table) */
+        MpyDict *c = (MpyDict *)(uintptr_t)mpy_build_map(s->alloc);
+        if (s->alloc) memcpy(c->table, s->table, s->alloc * sizeof(MpyEntry));
+        c->used = s->used;
+        c->all_keys_are_qstrs = s->all_keys_are_qstrs;
+        return (mpv)(uintptr_t)c;
+      }
+      if (id == BI_DICT_CLEAR) {
+        /* mp_map_clear: no table, and the keys are all strs again */
+        free(s->table);
+        s->table = NULL;
+        s->alloc = 0;
+        s->used = 0;
+        s->all_keys_are_qstrs = 1;
+        return MPY_NONE;
+      }
+      /* popitem: the first live slot in table order, which is removed (its key becomes the sentinel) */
+      if (s->used == 0) fail("KeyError: popitem(): dictionary is empty");
+      {
+        size_t e;
+        mpv k, v;
+        for (e = 0; e < s->alloc; ++e) {
+          if (s->table[e].key != 0 && s->table[e].key != MPY_SENTINEL) break;
+        }
+        k = s->table[e].key;
+        v = s->table[e].value;
+        s->used -= 1;
+        s->table[e].key = MPY_SENTINEL;
+        s->table[e].value = 0;
+        return view_item_tuple(k, v);
+      }
+    }
+    case BI_DICT_SETDEFAULT: {
+      /* d.setdefault(key[, default]): the value of key, which is added with default (None) when it is not there */
+      MpyDict *s;
+      long at;
+      if (n < 2) fail("TypeError: function missing 1 required positional arguments");
+      if (n > 3) {
+        snprintf(msg, sizeof msg, "TypeError: function expected at most 3 arguments, got %d", (int)n);
+        fail(msg);
+      }
+      s = (MpyDict *)(uintptr_t)args[0];
+      at = map_lookup(s, args[1], MAP_ADD);   /* the key is hashed here, as MicroPython's ADD lookup does */
+      if (s->table[at].value == 0) s->table[at].value = n == 3 ? args[2] : MPY_NONE;
+      return s->table[at].value;
+    }
+    case BI_DICT_FROMKEYS: {
+      /* dict.fromkeys(iterable[, value]): no self, so the arguments are the iterable and the value. The table is sized by the
+       * iterable's length when it has one (mp_obj_len_maybe), else it starts empty. The count in a message includes the class. */
+      mpv it, item, r, value = MPY_NONE;
+      size_t len = 0, items;
+      const mpv *elems;
+      if (n < 1) fail("TypeError: function missing 1 required positional arguments");
+      if (n > 2) {
+        snprintf(msg, sizeof msg, "TypeError: function expected at most 3 arguments, got %d", (int)n + 1);
+        fail(msg);
+      }
+      if (n == 2) value = args[1];
+      it = mpy_get_iter(args[0]);
+      if (is_dict(args[0]) || is_set(args[0])) len = dict_of(args[0])->used;
+      else if (is_view(args[0])) len = dict_of(view_of(args[0])->dict)->used;
+      else if (is_range(args[0])) len = range_of(args[0])->len;
+      else if (seq_items(args[0], &items, &elems)) len = items;
+      r = mpy_build_map(len);
+      while ((item = mpy_iter_next(it)) != 0) dict_store(r, item, value);
+      return r;
+    }
+    case BI_SET_ADD:
+    case BI_SET_DISCARD:
+    case BI_SET_REMOVE: {
+      /* s.add(item), s.discard(item) and s.remove(item) (objset.c): None, and remove raises KeyError for a missing item */
+      long at;
+      if (n != 2) {
+        snprintf(msg, sizeof msg, "TypeError: function takes 2 positional arguments but %d were given", (int)n);
+        fail(msg);
+      }
+      if (id == BI_SET_ADD) {
+        map_lookup((MpyDict *)(uintptr_t)args[0], args[1], MAP_ADD);
+        return MPY_NONE;
+      }
+      at = map_lookup((MpyDict *)(uintptr_t)args[0], args[1], MAP_REMOVE);
+      if (at < 0 && id == BI_SET_REMOVE) key_error(args[1]);
+      return MPY_NONE;
+    }
+    case BI_SET_UNION:
+    case BI_SET_INTERSECTION: {
+      /* s.union(other) and s.intersection(other): other is any iterable */
+      if (n != 2) {
+        snprintf(msg, sizeof msg, "TypeError: function takes 2 positional arguments but %d were given", (int)n);
+        fail(msg);
+      }
+      if (id == BI_SET_UNION) {
+        mpv r = set_copy_of(args[0]);
+        set_add_items(r, args[1]);
+        return r;
+      }
+      return set_intersect_of(args[0], args[1]);
+    }
+    case BI_SET_DIFFERENCE: {
+      /* s.difference(*others): a copy of s from which the items of each other are removed */
+      mpv r;
+      uint64_t k;
+      if (n < 1) fail("TypeError: function takes at least 1 positional arguments");
+      r = set_copy_of(args[0]);
+      for (k = 1; k < n; ++k) set_remove_items(r, args[k]);
+      return r;
+    }
+    case BI_SUPER: {
+      /* super(cls, self), as the lowering calls it for a super() whose class and self it has loaded */
+      if (n != 2) fail("TypeError: function takes exactly 2 arguments");
+      return super_new(args[0], args[1]);
+    }
+    case BI_INIT: {
+      /* object.__init__ and the exception's __init__, reached by super().__init__(...): self is args[0]. An exception keeps its
+       * one argument; object takes none. */
+      if (n < 1) fail("TypeError: __init__ needs self");
+      if (n == 1) return MPY_NONE;
+      if (n == 2 && is_inst(args[0]) && type_of(args[0])->exc) {
+        ((MpyInst *)(uintptr_t)args[0])->arg = args[1];
+        return MPY_NONE;
+      }
+      fail("TypeError: object.__init__() takes exactly one argument (the instance to initialize)");
       return MPY_NONE;
     }
     case BI_POP: {
