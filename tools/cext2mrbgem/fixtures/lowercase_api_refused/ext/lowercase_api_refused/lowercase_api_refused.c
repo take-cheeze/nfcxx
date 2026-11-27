@@ -3,7 +3,7 @@
 
 static VALUE lc_make(VALUE self)
 {
-    st_table *t = st_init_numtable();
+    st_table *t = st_init_numhashtab();
     void *p = ruby_xmalloc2_unmapped(8);
     return self;
 }
