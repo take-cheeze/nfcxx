@@ -26,6 +26,13 @@ struct LowerOptions {
 // The IR module of the main program (the root irep). Throws Refused, or std::runtime_error for a malformed irep.
 std::string lower_module(const mrb::Module &module, const std::string &source_name, const LowerOptions &options = {});
 
+// Every refusal of the module, one line each ("<function> (<method name>): refused: ..."), instead of stopping at the
+// first: a census of what the lowering still lacks. No IR is produced. A body whose scan cannot go on past a refused
+// instruction is reported as "stopped:" and the other bodies are still scanned. *functions, when given, is set to the
+// number of functions scanned.
+std::vector<std::string> report_refusals(const mrb::Module &module, const LowerOptions &options = {},
+                                         std::size_t *functions = nullptr);
+
 }  // namespace mrbbc
 
 #endif  // NFCXX_MRBBC_LOWER_HPP
