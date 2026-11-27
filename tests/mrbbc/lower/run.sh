@@ -10,9 +10,10 @@
 #   lower/rterr/*.rb an uncaught runtime error: the exit status is 1 and the last stderr line, after its "file:line: "
 #                    prefix, equals the mruby's (the class in parentheses included).
 #   lower/err/*.rb   a program with an opcode, operand form or table the producer does not lower yet. It is refused: the
-#                    lowering exits 3, writes "refused:" on stderr and nothing on stdout. A program with more than 255
-#                    registers (EXT1 prefixes) is generated here and refused the same way. --report-all lists that
+#                    lowering exits 3, writes "refused:" on stderr and nothing on stdout. --report-all lists that
 #                    refusal first (and every one, as err/NAME.report says when it exists); it lists none for lower/*.rb.
+# Generated value programs cover the EXT prefixes: registers past 255 (EXT1), and symbols, strings and method bodies past
+# 255 in one irep (EXT2, and the TCLASS/METHOD/DEF form of a def past child 255).
 # A program that is refused never reaches the emitter, so a refusal is not a silent miscompile.
 #
 #   tests/mrbbc/lower/run.sh
@@ -70,7 +71,7 @@ value_ref() {
 }
 
 # The generated programs: 200 locals with a sum (registers below 256), and a 100-deep nested sum over the locals,
-# which needs registers past 255 (mrbc widens those with an EXT1 prefix; the producer refuses them).
+# which needs registers past 255 (mrbc widens those with an EXT1 prefix).
 wide_ok=$work/wide_locals.rb
 wide_ext=$work/wide_ext.rb
 : > "$wide_ok"
@@ -81,10 +82,21 @@ pre=; post=
 for i in $(seq 1 100); do pre="$pre""v$i + ("; post=")$post"; done
 echo "x = ${pre}v101${post}" >> "$wide_ext"
 echo "x" >> "$wide_ext"
+# A class of 300 methods (the defs past child 255 are TCLASS, METHOD and DEF, and their names EXT2 symbols), and a main
+# program with 300 symbols and 300 strings, so that its sends, LOADSYM and STRING take EXT2 operands.
+wide_sym=$work/wide_sym.rb
+{
+  echo "class S"
+  for i in $(seq 0 299); do echo "  def s$i(x) = x + $i"; done
+  echo "end"
+  echo "o = S.new"
+  for i in $(seq 0 299); do echo "v = :w$i"; echo "t = \"str$i\""; done
+  echo "[v, t, o.s0(1), o.s299(1), S.new.s150(2), [1, 2].first, :w299]"
+} > "$wide_sym"
 
 fail=0
 n=0
-for rb in "$dir"/*.rb "$wide_ok"; do
+for rb in "$dir"/*.rb "$wide_ok" "$wide_ext" "$wide_sym"; do
   base=$(basename "$rb" .rb)
   if ! msg=$(build "$rb" "$base"); then echo "FAIL $base: $msg"; fail=1; continue; fi
   value_ref "$rb" "$work/$base.ref.rb"
@@ -116,7 +128,7 @@ for rb in "$dir"/rterr/*.rb; do
 done
 
 ne=0
-for rb in "$dir"/err/*.rb "$wide_ext"; do
+for rb in "$dir"/err/*.rb; do
   base=err_$(basename "$rb" .rb)
   "$MRBC" -o "$work/$base.rite" "$rb" > /dev/null 2>&1 || { echo "FAIL $base: mrbc refused the program"; fail=1; continue; }
   "$work/lower" "$work/$base.rite" > "$work/$base.out" 2> "$work/$base.err"; status=$?
