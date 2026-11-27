@@ -6,7 +6,8 @@ MRuby::Build.new do |conf|
   # wrong on some Linux hosts; naming the POSIX HAL gems makes the choice explicit, as mruby recommends.
   %w[hal-posix-io hal-posix-dir hal-posix-socket hal-posix-task].each { |g| conf.gem core: g }
   conf.gembox 'default'
-  conf.gem File.expand_path('../../bc2cpp/host-libs/mruby-signal', __dir__)   # Signal.trap (not in the fork)
+  # Signal.trap (not in the fork). The scripts copy this file to a temp dir, so the root comes from NFCXX_ROOT.
+  conf.gem File.join(ENV.fetch('NFCXX_ROOT', File.expand_path('../..', __dir__)), 'bc2cpp/host-libs/mruby-signal')
   conf.cc.command = ENV.fetch('MRUBY_CC', 'gcc')
   conf.linker.command = ENV.fetch('MRUBY_LD', ENV.fetch('MRUBY_CC', 'gcc'))
   conf.archiver.command = 'ar'
