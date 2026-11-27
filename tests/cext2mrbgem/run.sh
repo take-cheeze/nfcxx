@@ -153,6 +153,28 @@ check test "$rc" -eq 2
 check grep -q '  rb_reg_regcomp  stuck point' "$work/nested_depth_control/REFUSALS.txt"
 check grep -q '  rb_obj_is_kind_of  the arguments are not all plain' "$work/nested_depth_control/REFUSALS.txt"
 
+# 2h3. a gem-local cast macro as a whole argument: NCM_DISCARD(t, v) is ((t)(uintptr_t)(v)), a plain cast of its parameter, so
+# its expansion is the argument of TypedData_Wrap_Struct (kept as the expansion says). The control's macro body is not a cast:
+# it is not expanded, and its argument stays the call
+rc=0; "$rb" "$conv" --scanner "$scanner" --name nested_cast_macro tools/cext2mrbgem/fixtures/nested_cast_macro/ext/nested_cast_macro "$work/nested_cast_macro" > "$work/nested_cast_macro.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/nested_cast_macro/NOT_BUILDABLE"
+check grep -qF 'mrb_data_object_alloc(mrb, mrb_class_ptr(klass), ((void *)(uintptr_t)(p)), &ncm_type)' "$work/nested_cast_macro/src/nested_cast_macro.c"
+rc=0; "$rb" "$conv" --scanner "$scanner" --name nested_cast_macro_refused tools/cext2mrbgem/fixtures/nested_cast_macro_refused/ext/nested_cast_macro_refused "$work/nested_cast_macro_refused" > "$work/nested_cast_macro_refused.log" 2>&1 || rc=$?
+check grep -qF 'mrb_data_object_alloc(mrb, mrb_class_ptr(klass), NCMR_OFFSET(p), &ncmr_type)' "$work/nested_cast_macro_refused/src/nested_cast_macro_refused.c"
+check sh -c "! grep -q 'Traceback' '$work/nested_cast_macro_refused.log'"
+
+# 2h4. a (VALUE) cast of a VALUE operand is an identity: rb_ensure's data (VALUE)self and a local (VALUE)ctx become self and ctx
+# (mrb_ensure takes the mrb_value). The control's data is a VALUE array (a pointer cast, not an identity): rb_ensure stays refused
+rc=0; "$rb" "$conv" --scanner "$scanner" --name value_cast_identity tools/cext2mrbgem/fixtures/value_cast_identity/ext/value_cast_identity "$work/value_cast_identity" > "$work/value_cast_identity.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/value_cast_identity/NOT_BUILDABLE"
+check grep -qF 'mrb_value held = ctx;' "$work/value_cast_identity/src/value_cast_identity.c"
+check grep -qF 'return mrb_ensure(mrb, vci_body, self, vci_clean, held);' "$work/value_cast_identity/src/value_cast_identity.c"
+rc=0; "$rb" "$conv" --scanner "$scanner" --name value_cast_identity_refused tools/cext2mrbgem/fixtures/value_cast_identity_refused/ext/value_cast_identity_refused "$work/value_cast_identity_refused" > "$work/value_cast_identity_refused.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check grep -q '  rb_ensure  rb_ensure needs static VALUE callbacks' "$work/value_cast_identity_refused/REFUSALS.txt"
+
 # 2i. helper threading: a helper with a header declaration, called from another file and from a registered
 # method, is threaded everywhere (declaration, definition, calls) with a caveat; a helper taken as a value and a
 # helper name shadowed by a local stay refused
