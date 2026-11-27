@@ -1750,12 +1750,40 @@ def dtype_parse(rel, m)
   nested_free = nested[1] && %w[RUBY_TYPED_DEFAULT_FREE RUBY_DEFAULT_FREE].include?(nested[1][2]) ? 'mrb_free' : (nested[1] && nested[1][2])
   # the members after free (dsize, and dcompact when the input has one) are dropped: mruby does not move objects, so
   # compaction is never needed; dsize is the memory report, which mruby does not use
-  unless (nested.size >= 2 && nested.size <= 5) && ok_fn.call(nested[0][2]) && ok_fn.call(nested_free || 'NULL') && %w[0 NULL].include?(els[2][2]) && %w[0 NULL].include?(els[3][2])
-    return { 'error' => 'the mark or free function, the parent or the data slot is not a plain name or 0/NULL' }
+  parent = dtype_parent_name(els[2][2])
+  unless (nested.size >= 2 && nested.size <= 5) && ok_fn.call(nested[0][2]) && ok_fn.call(nested_free || 'NULL') && parent != :bad && %w[0 NULL].include?(els[3][2])
+    return { 'error' => 'the mark or free function, the parent or the data slot is not a plain name, &name or 0/NULL' }
   end
   return { 'error' => 'the name is not a string literal' } unless els[0][2].start_with?('"')
   { 'error' => nil, 'open' => open, 'close' => close, 'name' => els[0][2], 'mark' => nested[0][2], 'free' => nested_free,
-    'mark_pos' => nested[0][0], 'free_pos' => nested[1][0] }
+    'mark_pos' => nested[0][0], 'free_pos' => nested[1][0], 'parent' => parent }
+end
+
+# a rb_data_type_t parent member: nil for 0/NULL, the name for &name, :bad for anything else (a parent is emitted as &name,
+# the type expression of the parent's own declaration, once the name is checked against the converted types of the input)
+def dtype_parent_name(t)
+  return nil if %w[0 NULL].include?(t)
+  m = t.match(/\A&\s*([A-Za-z_]\w*)\z/)
+  m ? m[1] : :bad
+end
+
+# the name a rb_data_type_t declaration defines (the dtype_decls match starts at rb_data_type_t)
+def dtype_name(m)
+  m[0][/\Arb_data_type_t[ \t\n]+([A-Za-z_]\w*)/, 1]
+end
+
+# the names of the rb_data_type_t declarations the input converts (no initializer error)
+def converted_dtype_names
+  @converted_dtype_names ||= dtype_decls.reject { |_r, _m, i| i['error'] }.map { |_r, m, _i| dtype_name(m) }.to_set
+end
+
+# whether the fork's mrb_data_type has a parent field (mrb_data_type.parent, include/mruby/data.h): NFCX_MRUBY_DATA_H names
+# the header, else the mruby/data.h of each NFCX_MRUBY_INCLUDE directory. Without the field a parent is refused, as before.
+def mruby_data_parent_field?
+  return @mruby_data_parent_field if defined?(@mruby_data_parent_field)
+  h = ENV['NFCX_MRUBY_DATA_H'].to_s
+  paths = h.empty? ? ENV['NFCX_MRUBY_INCLUDE'].to_s.split(':').reject(&:empty?).map { |d| File.join(d, 'mruby/data.h') } : [h]
+  @mruby_data_parent_field = paths.any? { |p| File.file?(p) && File.read(p).match?(/\bconst\s+struct\s+mrb_data_type\s*\*\s*parent\s*;/) }
 end
 
   # A macro call that is a compaction member of a data type's .function, such as ffi's ffi_compact_callback(f): every #define
@@ -1811,11 +1839,11 @@ end
     unless ok_fn.call(mark) && ok_fn.call(free)
       return { 'error' => 'the mark or free function is not a plain name or 0/NULL (a macro such as RUBY_TYPED_DEFAULT_FREE is not mapped)' }
     end
-    parent = fields['parent'] ? fields['parent'][2] : '0'
+    parent = dtype_parent_name(fields['parent'] ? fields['parent'][2] : '0')
     data = fields['data'] ? fields['data'][2] : '0'
-    return { 'error' => 'the parent or the data slot is not 0/NULL' } unless %w[0 NULL].include?(parent) && %w[0 NULL].include?(data)
+    return { 'error' => 'the parent or the data slot is not 0/NULL or &name' } unless parent != :bad && %w[0 NULL].include?(data)
     { 'error' => nil, 'open' => open, 'close' => close, 'name' => fields['wrap_struct_name'][2], 'mark' => mark, 'free' => free,
-      'mark_pos' => sf['dmark'] ? sf['dmark'][3] : nil, 'free_pos' => sf['dfree'] ? sf['dfree'][3] : nil }
+      'mark_pos' => sf['dmark'] ? sf['dmark'][3] : nil, 'free_pos' => sf['dfree'] ? sf['dfree'][3] : nil, 'parent' => parent }
   end
 
 # the data type declarations of the input, and the callback positions (the mark and free names) they use
@@ -5608,13 +5636,24 @@ end
         end
         next
       end
+      # a parent is emitted as &name: the name must be another converted rb_data_type_t of the input (it is declared in the
+      # output under the same name), and the fork's mrb_data_type must have the parent field
+      parent = info['parent']
+      if parent && (parent == dtype_name(m) || !converted_dtype_names.include?(parent))
+        stub.call("the parent #{parent} is not a converted rb_data_type_t of the input (declared outside the input, refused, or the type itself)")
+        next
+      end
+      if parent && !mruby_data_parent_field?
+        stub.call('the parent is not 0/NULL: the mruby data type has no parent field (mrb_data_type.parent, include/mruby/data.h)')
+        next
+      end
       (@dtype_mark_names ||= Set.new) << info['mark'] unless info['mark'] == '0' || info['mark'] == 'NULL'
       mark = info['mark'] == '0' ? 'NULL' : info['mark']
       free = info['free'] == '0' ? 'NULL' : info['free']
       ed.add(m.begin(0), m.begin(0) + 'rb_data_type_t'.length, 'mrb_data_type')
-      ed.add(info['open'], info['close'] + 1, "{ #{info['name']}, #{free}, #{mark} }")
+      ed.add(info['open'], info['close'] + 1, "{ #{info['name']}, #{free}, #{mark}#{parent ? ", &#{parent}" : ''} }")
       rewrite(rel, m.begin(0), 'rb_data_type_t', 'mrb_data_type',
-              'the initializer is reordered to mruby\'s {name, dfree, mark}; RUBY_TYPED_* flags are dropped (0 in mruby)')
+              "the initializer is reordered to mruby's {name, dfree, mark#{parent ? ', parent' : ''}}; RUBY_TYPED_* flags are dropped (0 in mruby)")
     end
     # 5. identifier pass. Local names: functions the input defines (a prototype alone does not count: it may declare a
     # CRuby API), class variables and the macros the input defines (scan_local_macros).

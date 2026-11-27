@@ -867,7 +867,20 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dtype_parent tools/cext2mrbg
 check test "$rc" -eq 2
 check test -e "$work/api_dtype_parent/NOT_BUILDABLE"
 check grep -qF 'struct mrb_data_type pa_child = { "PaChild", NULL, NULL };' "$work/api_dtype_parent/src/api_dtype_parent.c"
-check grep -q "  rb_data_type_t  the parent or the data slot is not 0/NULL" "$work/api_dtype_parent/REFUSALS.txt"
+check grep -q "  rb_data_type_t  the parent pa_outside is not a converted rb_data_type_t of the input" "$work/api_dtype_parent/REFUSALS.txt"
+
+# 2zp3. a parent that names another rb_data_type_t of the input converts to .parent = &name when the fork's mrb_data_type has
+# the parent field (NFCX_MRUBY_DATA_H: the fork's include/mruby/data.h, copied to fixtures/mruby_data_parent); without the
+# field the same parent is refused, so the generated code compiles against the struct it is given
+rc=0; NFCX_MRUBY_DATA_H=$root/tools/cext2mrbgem/fixtures/mruby_data_parent/mruby/data.h "$rb" "$conv" --scanner "$scanner" --name api_dtype_parent_ok tools/cext2mrbgem/fixtures/api_dtype_parent_ok/ext/api_dtype_parent_ok "$work/api_dtype_parent_ok" > "$work/api_dtype_parent_ok.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_dtype_parent_ok/NOT_BUILDABLE"
+check grep -qF 'static const mrb_data_type pc_base = { "PcBase", NULL, NULL };' "$work/api_dtype_parent_ok/src/api_dtype_parent_ok.c"
+check grep -qF 'static const mrb_data_type pc_child = { "PcChild", pc_free, pc_mark, &pc_base };' "$work/api_dtype_parent_ok/src/api_dtype_parent_ok.c"
+rc=0; env -u NFCX_MRUBY_DATA_H "$rb" "$conv" --scanner "$scanner" --name api_dtype_parent_nofield tools/cext2mrbgem/fixtures/api_dtype_parent_ok/ext/api_dtype_parent_ok "$work/api_dtype_parent_nofield" > "$work/api_dtype_parent_nofield.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test -e "$work/api_dtype_parent_nofield/NOT_BUILDABLE"
+check grep -q "  rb_data_type_t  the parent is not 0/NULL: the mruby data type has no parent field" "$work/api_dtype_parent_nofield/REFUSALS.txt"
 
 # 2zq. TypedData_Make_Struct and TypedData_Wrap_Struct map to mrb_data_object_alloc; the struct is allocated with mrb_calloc
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_typed_alloc tools/cext2mrbgem/fixtures/api_typed_alloc/ext/api_typed_alloc "$work/api_typed_alloc" > "$work/api_typed_alloc.log" 2>&1 || rc=$?
