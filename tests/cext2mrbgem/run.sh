@@ -134,6 +134,25 @@ check test -e "$work/nested_args_refused/NOT_BUILDABLE"
 check grep -q '  rb_str_concat  the arguments are not all plain' "$work/nested_args_refused/REFUSALS.txt"
 check grep -q '  rb_ensure  rb_ensure needs static VALUE callbacks' "$work/nested_args_refused/REFUSALS.txt"
 
+# 2h3. nested calls in nested calls: an argument of a call that is itself a nested call converts up to three levels under the
+# outer call (the inner call is rewritten first, innermost first). A four-level chain passes the depth bound and is refused with
+# the outer call's own reason; a nested call whose innermost call is a refused API stays refused (a control)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name nested_depth tools/cext2mrbgem/fixtures/nested_depth/ext/nested_depth "$work/nested_depth" > "$work/nested_depth.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/nested_depth/NOT_BUILDABLE"
+check grep -qF 'return mrb_bool_value(mrb_obj_is_kind_of(mrb, mrb_ary_entry(mrb_ary_entry(x, i), 0), mrb->string_class));' "$work/nested_depth/src/nested_depth.c"
+check grep -qF 'return mrb_bool_value(mrb_obj_is_kind_of(mrb, mrb_ary_entry(mrb_ary_entry(mrb_ary_entry(x, i), 0), 1), mrb->string_class));' "$work/nested_depth/src/nested_depth.c"
+check grep -qF '    mrb_exc_raise(mrb, mrb_obj_value(mrb->exc));' "$work/nested_depth/src/nested_depth.c"
+check sh -c "! grep -q '^ *return[^*]*[^m]rb_ary_entry\|^ *rb_jump_tag\|^ *return[^*]*FIX2INT\|Traceback' '$work/nested_depth/src/nested_depth.c' '$work/nested_depth.log'"
+rc=0; "$rb" "$conv" --scanner "$scanner" --name nested_depth_four tools/cext2mrbgem/fixtures/nested_depth_four/ext/nested_depth_four "$work/nested_depth_four" > "$work/nested_depth_four.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test -e "$work/nested_depth_four/NOT_BUILDABLE"
+check grep -q '  rb_obj_is_kind_of  the arguments are not all plain' "$work/nested_depth_four/REFUSALS.txt"
+rc=0; "$rb" "$conv" --scanner "$scanner" --name nested_depth_control tools/cext2mrbgem/fixtures/nested_depth_control/ext/nested_depth_control "$work/nested_depth_control" > "$work/nested_depth_control.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check grep -q '  rb_reg_regcomp  stuck point' "$work/nested_depth_control/REFUSALS.txt"
+check grep -q '  rb_obj_is_kind_of  the arguments are not all plain' "$work/nested_depth_control/REFUSALS.txt"
+
 # 2h3. a gem-local cast macro as a whole argument: NCM_DISCARD(t, v) is ((t)(uintptr_t)(v)), a plain cast of its parameter, so
 # its expansion is the argument of TypedData_Wrap_Struct (kept as the expansion says). The control's macro body is not a cast:
 # it is not expanded, and its argument stays the call
