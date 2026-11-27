@@ -93,6 +93,37 @@
     }
   },
   "entries": {
+    "rb_Integer": {
+      "kind": "call",
+      "mruby": "mrb_Integer",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "Kernel#Integer conversion of the value (a String is parsed, a Float truncated, nil raises), as CRuby's rb_Integer; mruby's mrb_Integer"
+    },
+    "rb_enc_str_new_cstr": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "ignored_args": [1],
+      "template": "mrb_str_new_cstr($m, $0)",
+      "caveat": "the encoding argument is dropped: mruby strings carry no encoding, so the bytes are kept and the result is not tagged (as rb_enc_str_new)"
+    },
+    "rb_external_str_new_with_enc": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "ignored_args": [2],
+      "template": "mrb_str_new($m, $0, $1)",
+      "caveat": "the encoding argument is dropped: mruby strings carry no encoding, so the bytes are kept and the result is not tagged (as rb_enc_str_new)"
+    },
+    "rb_enc_str_buf_cat": {
+      "kind": "template",
+      "arity": 4,
+      "needs_mrb": true,
+      "ignored_args": [3],
+      "template": "mrb_str_cat($m, $0, $1, $2)",
+      "caveat": "appends the ptr and len bytes to the string; the encoding argument is dropped (mruby strings carry no encoding), as rb_str_cat"
+    },
     "rb_ary_concat": {"kind": "call", "mruby": "mrb_ary_concat", "inject_mrb": true, "needs_mrb": true, "caveat": "mruby returns void; the CRuby return value (the array) is not available"},
     "rb_uint2inum": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "mrb_bint_new_uint64($m, (uint64_t)($0))", "caveat": "a fixnum when the value fits one, a bigint otherwise, as CRuby (the same conversion as rb_ull2inum)"},
     "UINT64T2NUM": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "mrb_bint_new_uint64($m, (uint64_t)($0))", "caveat": "a fixnum when the value fits one, a bigint otherwise, as CRuby (the same conversion as rb_ull2inum)"},

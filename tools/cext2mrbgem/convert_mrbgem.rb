@@ -1023,7 +1023,9 @@ expand_decorator_macros(texts)
         when 'define'
           name = rest[/\A(\w+)/, 1]
           next if name.nil?
-          tainted = stack.any? { |g, _, _| !g }
+          # a conditional is a possible fallback only when it names a HAVE_ check or a CRuby-looking name, or has another branch
+          # (#else/#elif); a build switch such as #ifndef NOKOGIRI_NATIVE with no other branch is not one
+          tainted = stack.any? { |g, conds, _| !g && (conds.size > 1 || conds.any? { |c| c.match?(/HAVE_/) || c.scan(/[A-Za-z_]\w*/).any? { |w| UNKNOWN_RE.match?(w) } }) }
           (defined[name] ||= []) << [rel, pos, tainted]
         when 'undef'
           name = rest[/\A(\w+)/, 1]
@@ -2003,25 +2005,27 @@ end
     end
     return { 'error' => 'the name is not a string literal' } unless fields['wrap_struct_name'] && fields['wrap_struct_name'][2].start_with?('"')
     fn = fields['function']
-    return { 'error' => 'no .function field' } unless fn
-    return { 'error' => '.function is not a braced group' } unless fn[2].start_with?('{') && fn[2].end_with?('}')
-    brace = fn[0] + tx[fn[0]...fn[1]].index('{')
-    # the elements of .function: a preprocessor line before an element (#ifdef HAVE_RB_GC_LOCATION) is not part of it, and an
-    # element in inactive text (its branch is not in this build) is not an element (mruby's data type has no compaction hook)
-    inactive = (@excluded_spans || {})[rel] || []
-    sub = split_args(mk, brace, fn[1] - 1).map { |a, b| [a, b, psl(tx, a, b)] }
-    sub = sub.reject { |a, _b, _t| inactive.any? { |x, z| x < a && a < z } }
-    sub = sub.map { |a, b, t| [a, b, t.gsub(/^[ \t]*#[^\n]*\n?/, '').strip] }.reject { |_a, _b, t| t.empty? }
     sf = {}
-    sub.each do |a, b, t|
-      mm = t.match(/\A\.\s*([A-Za-z_]\w*)\s*=\s*(.*)\z/m)
-      # a compaction member written as a macro call (ffi's ffi_compact_callback(f)) is dropped, as the positional form drops dcompact
-      next if mm.nil? && compaction_macro_call?(t)
-      return { 'error' => '.function holds a non-designated element' } unless mm
-      # the position of the value's first character (after the '=' and its spaces): the identifier's own position
-      eq = t.index('=')
-      lead = t[(eq + 1)..][/\A\s*/].length
-      sf[mm[1]] = [a, b, mm[2].strip, a + eq + 1 + lead]
+    # no .function field: every member of the function group is 0 (no mark and no free), as the positional form's zeroed group
+    if fn
+      return { 'error' => '.function is not a braced group' } unless fn[2].start_with?('{') && fn[2].end_with?('}')
+      brace = fn[0] + tx[fn[0]...fn[1]].index('{')
+      # the elements of .function: a preprocessor line before an element (#ifdef HAVE_RB_GC_LOCATION) is not part of it, and an
+      # element in inactive text (its branch is not in this build) is not an element (mruby's data type has no compaction hook)
+      inactive = (@excluded_spans || {})[rel] || []
+      sub = split_args(mk, brace, fn[1] - 1).map { |a, b| [a, b, psl(tx, a, b)] }
+      sub = sub.reject { |a, _b, _t| inactive.any? { |x, z| x < a && a < z } }
+      sub = sub.map { |a, b, t| [a, b, t.gsub(/^[ \t]*#[^\n]*\n?/, '').strip] }.reject { |_a, _b, t| t.empty? }
+      sub.each do |a, b, t|
+        mm = t.match(/\A\.\s*([A-Za-z_]\w*)\s*=\s*(.*)\z/m)
+        # a compaction member written as a macro call (ffi's ffi_compact_callback(f)) is dropped, as the positional form drops dcompact
+        next if mm.nil? && compaction_macro_call?(t)
+        return { 'error' => '.function holds a non-designated element' } unless mm
+        # the position of the value's first character (after the '=' and its spaces): the identifier's own position
+        eq = t.index('=')
+        lead = t[(eq + 1)..][/\A\s*/].length
+        sf[mm[1]] = [a, b, mm[2].strip, a + eq + 1 + lead]
+      end
     end
     ok_fn = ->(t) { t.match?(/\A[A-Za-z_][#{WC}]*\z/) || t == 'NULL' || t == '0' }
     mark = sf['dmark'] ? sf['dmark'][2] : 'NULL'
@@ -3902,7 +3906,8 @@ use_problem = lambda do |name, use|
       e = @entries[t]
       next false unless e.is_a?(Hash) && e['kind'] == 'expr' && e['mruby'].is_a?(String)
       e['mruby'].match?(/\Amrb->\w+_class\z/) || e['mruby'].match?(/\Amrb_class_get\(mrb, "[^"]+"\)\z/) ||
-        e['mruby'].match?(/\Amrb_exc_get\(mrb, "[^"]+"\)\z/) || e['mruby'].match?(/\Amrb_module_get\(mrb, "[^"]+"\)\z/)
+        e['mruby'].match?(/\Amrb_exc_get\(mrb, "[^"]+"\)\z/) || e['mruby'].match?(/\Amrb_module_get\(mrb, "[^"]+"\)\z/) ||
+        e['mruby'].match?(/\AE_[A-Z][A-Z0-9_]*\z/) # mruby.h's exception-class macros: (mrb_exc_get(mrb, "RuntimeError"))
     end
   end
 
@@ -7279,7 +7284,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       end
       if entry['intern_arg']
         # a C name argument (a string literal) becomes the symbol mruby takes: mrb_intern_cstr(mrb, "name")
-        cp = pyfind(masked, ')', nxt)
+        cp = match_close(masked, nxt)
         args = cp > 0 ? split_args(masked, nxt, cp) : []
         k = entry['intern_arg']
         lit = args.size > k ? psl(@files[rel]['text'], args[k][0], args[k][1]) : ''
@@ -7667,6 +7672,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       rewrite(rel, s, 'rb_ary_new3', 'nfcx_ary_new3(mrb, __VA_ARGS__)', 'the count and values come from the expansion (a variadic helper)')
       return
     end
+    n_text = n_text.sub(/\A\(\s*rb_len_t\s*\)\s*/, '') # (rb_len_t)2: the count is still the literal 2
     unless n_text.match?(/\A\d+\z/) && args.size == 1 + n_text.to_i
       refuse(rel, s, 'rb_ary_new3', 'the count must be an integer literal that matches the values (not supported)')
       return
@@ -7782,7 +7788,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       return
     end
     name =
-      if (m = /\Arb_intern\(\s*"([^"\\]+)"\s*\)\z/.match(id_text)) then m[1]
+      if (m = /\Arb_intern(?:_const)?\(\s*"([^"\\]+)"\s*\)\z/.match(id_text)) then m[1]
       elsif (m = /\A'([^'\\])'\z/.match(id_text)) then m[1]
       end
       name ||= @id_literals[id_text] if id_text.match?(/\A[#{WC}]+\z/)
