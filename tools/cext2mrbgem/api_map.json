@@ -78,7 +78,7 @@
     },
     "ruby/st.h": {
       "headers": [],
-      "caveat": "CRuby's st.h declares the st table API and the st_retval enum; mruby has no st table (its hash is mrb_hash). The include is dropped: st_retval's ST_* return codes are mapped (ST_CONTINUE, ST_STOP as expressions), and any st_table or st_* call has no entry and is refused where it is used"
+      "caveat": "CRuby's st.h declares the st table API and the st_retval enum; mruby has no st table (its hash is mrb_hash). The include is dropped: st_retval's ST_* return codes are mapped (ST_CONTINUE, ST_STOP as expressions; ST_DELETE and ST_CHECK for st_foreach in a gem that uses the st table API). The st table API (st_init_*table and their _with_size forms, st_init_table, st_insert, st_add_direct, st_lookup, st_delete, st_foreach, st_free_table, st_strcasecmp, st_strncasecmp) maps to the gem-local C table (nfcx_st.h and nfcx_st.c, no mruby state); a st_foreach callback that needs the mruby state is refused. st_update, st_keys, st_clear, st_copy and the rest of st.h are not shimmed: a call to one has no entry and is refused where it is used"
     },
     "ruby/re.h": {
       "headers": [
