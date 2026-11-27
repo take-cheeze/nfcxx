@@ -2189,6 +2189,34 @@ check test "$rc" -eq 0
 check test ! -e "$work/define_macro/NOT_BUILDABLE"
 check sh -c "! grep -q 'RDM_INFO_VERSION' '$work/define_macro/REFUSALS.txt'"
 check grep -qF '#define DM_VERSION DM_STR(RDM_INFO_VERSION)' "$work/define_macro/src/define_macro.c"
+
+# 2zzz182. the global-state restore on the exception path (a registered method of a gem that uses the global state): its body is the
+# callback of mrb_ensure, which runs the restore when the body returns and when an exception leaves it (the longjmp of mruby skips
+# a plain restore). The wrapper saves the global and sets it; the body reads its self and the saved state from the frame.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name global_escape tools/cext2mrbgem/fixtures/global_escape/ext/global_escape "$work/global_escape" > "$work/global_escape.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/global_escape/NOT_BUILDABLE"
+check grep -qF 'static mrb_value ge_call_bc2_body(mrb_state *mrb, mrb_value nfcx_bc2_fv) {' "$work/global_escape/src/global_escape.c"
+check grep -qF 'return mrb_ensure(mrb, ge_call_bc2_body, mrb_cptr_value(mrb, &nfcx_bc2_f), nfcx_bc2_restore, mrb_cptr_value(mrb, &nfcx_bc2_f));' "$work/global_escape/src/global_escape.c"
+check grep -qF 'global_escape_bc2_mrb = ((struct nfcx_bc2_frame *)mrb_cptr(fv))->old;' "$work/global_escape/src/global_escape.c"
+check grep -qF 'if (nfcx_bc2_f.old != NULL && nfcx_bc2_f.old != mrb) abort(); /* nested mruby state */' "$work/global_escape/src/global_escape.c"
+# the run: built with the gem and the harness against a built libmruby (MRUBY_BUILD: a tree with build/host/lib/libmruby.a and its
+# headers); the harness exits 1 when the global is left set after an escaped exception
+if [ -n "${MRUBY_BUILD:-}" ] && [ -f "$MRUBY_BUILD/build/host/lib/libmruby.a" ]; then
+  hb=$work/global_escape_harness; rm -rf "$hb"; mkdir -p "$hb"
+  inc="-I $work/global_escape/include -I $MRUBY_BUILD/include -I $MRUBY_BUILD/build/host/include"
+  hok=1
+  for c in "$work"/global_escape/src/*.c tools/cext2mrbgem/fixtures/global_escape/harness.c; do
+    gcc -std=gnu99 -c -w -DMRB_USE_BIGINT $inc "$c" -o "$hb/$(basename "$c" .c).o" || hok=0
+  done
+  if [ "$hok" -eq 1 ] && g++ -o "$hb/harness" "$hb"/*.o -Wl,--start-group "$MRUBY_BUILD/build/host/lib/libmruby.a" -Wl,--end-group -lm -lonig 2> "$hb/link.err"; then
+    check "$hb/harness"
+  else
+    check sh -c "echo 'harness did not build' >&2; false"
+  fi
+else
+  echo "SKIP [$leg] global_escape harness: MRUBY_BUILD does not name a built libmruby (the converted code is checked by the grep tests above)"
+fi
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads

@@ -1887,10 +1887,14 @@ expand_decorator_macros(texts)
     args.unshift('mrb') if @helper_names.include?(name)
     call = "#{split_impl_name(name)}(#{args.join(', ')})"
     if @global_wrap
-      # as a registered method: the global state is set on entry and restored on return (wrap_returns)
-      g = @global_name
-      lines.unshift("mrb_state *nfcx_bc2_old = #{g};", "if (nfcx_bc2_old != NULL && nfcx_bc2_old != mrb) abort(); /* nested mruby state */", "#{g} = mrb;")
-      lines += ["mrb_value nfcx_bc2_ret = #{call};", "#{g} = nfcx_bc2_old;", 'return nfcx_bc2_ret;']
+      # as a registered method: the global state is set on entry and restored on every exit, the exception path included
+      # (bc2_wrapper): the call runs in the mrb_ensure callback, which reads the method's self from the frame
+      body = "static mrb_value #{name}_bc2_body(mrb_state *mrb, mrb_value nfcx_bc2_fv) {\n" \
+             "  struct nfcx_bc2_frame *nfcx_bc2_f = (struct nfcx_bc2_frame *)mrb_cptr(nfcx_bc2_fv);\n" \
+             "  mrb_value #{split_self(d0)} = nfcx_bc2_f->self;\n"
+      body += (lines + ["return #{call};"]).map { |l| "  #{l}" }.join("\n") + "\n}"
+      wrap = bc2_wrapper(split_wrapper_hdr(d0), name, split_self(d0))
+      return bc2_frame_defs + body + "\n\n" + wrap
     else
       lines << "return #{call};"
     end
@@ -5647,6 +5651,31 @@ use_problem = lambda do |name, use|
     ((@global_macro_spans || {})[rel] || []).any? { |a, b| a < pos && pos < b }
   end
 
+  # The global-state frame (the registered methods of a gem that uses the global state). A registered method's wrapper saves
+  # the state the global held and sets the global to its mrb, then runs the body as the callback of mrb_ensure with a frame
+  # (self, and the saved state) as the data: mrb_ensure runs the restore (nfcx_bc2_restore) when the body returns and when an
+  # exception leaves it, so an escaped exception cannot leave the global pointing at a state it no longer runs under.
+  def bc2_frame_defs
+    "#ifndef NFCX_BC2_FRAME\n#define NFCX_BC2_FRAME\n" \
+    "struct nfcx_bc2_frame { mrb_value self; mrb_state *old; };\n" \
+    "static mrb_value nfcx_bc2_restore(mrb_state *mrb, mrb_value fv) {\n  (void)mrb;\n" \
+    "  #{@global_name} = ((struct nfcx_bc2_frame *)mrb_cptr(fv))->old;\n  return mrb_nil_value();\n}\n#endif\n"
+  end
+
+  # the body's prologue: its self and the saved state, from the frame it is called with
+  def bc2_frame_prologue(self_name)
+    "\n  struct nfcx_bc2_frame *nfcx_bc2_f = (struct nfcx_bc2_frame *)mrb_cptr(nfcx_bc2_fv);\n" \
+    "  mrb_value #{self_name} = nfcx_bc2_f->self;\n  mrb_state *nfcx_bc2_old = nfcx_bc2_f->old;"
+  end
+
+  # the wrapper: the registered function, saving and setting the global state, then the body under mrb_ensure
+  def bc2_wrapper(hdr, name, self_name)
+    g = @global_name
+    "#{hdr} {\n  struct nfcx_bc2_frame nfcx_bc2_f;\n  nfcx_bc2_f.self = #{self_name};\n  nfcx_bc2_f.old = #{g};\n" \
+    "  if (nfcx_bc2_f.old != NULL && nfcx_bc2_f.old != mrb) abort(); /* nested mruby state */\n  #{g} = mrb;\n" \
+    "  return mrb_ensure(mrb, #{name}_bc2_body, mrb_cptr_value(mrb, &nfcx_bc2_f), nfcx_bc2_restore, mrb_cptr_value(mrb, &nfcx_bc2_f));\n}"
+  end
+
   # A registered method or Init with a global-state user saves the previous value on entry and restores it on each
   # return, so a nested state (a method that runs Ruby code in another state) sees its own state again afterwards.
   # The return expression is evaluated before the restore. A VALUE function that falls off its end is undefined in C
@@ -5891,7 +5920,24 @@ end
       if d['proto']
         ed.add(d['hstart'], d['hend'], hdr)
       else
-        # a registered method or Init of a gem that uses the global state saves and restores it (wrap_returns)
+        # a registered method of a gem that uses the global state: the body is the callback of mrb_ensure (bc2_wrapper), so the
+        # state is restored when an exception leaves it; its own returns restore it too (wrap_returns)
+        sm = @global_wrap && @valid_reg_names.include?(name) ? hdr.match(/\(mrb_state \*mrb, mrb_value (\w+)\)\z/) : nil
+        if sm
+          # the receiver is self (an instance method) or klass (a class method): the frame's value under the header's name
+          selfn = sm[1]
+          body_hdr = hdr.sub(/\(mrb_state \*mrb, mrb_value \w+\)\z/, '(mrb_state *mrb, mrb_value nfcx_bc2_fv)')
+                        .sub(/\b#{Regexp.escape(name)}\(/, "#{name}_bc2_body(")
+          pro = bc2_frame_prologue(selfn) + "\n  (void)nfcx_bc2_old;" + pro
+          wrap_returns(rel, d, false)
+          ed.add(d['hstart'], d['hend'], bc2_frame_defs + body_hdr + ' ')
+          ed.add(d['brace'] + 1, d['brace'] + 1, pro)
+          ed.add(d['body_end'] + 1, d['body_end'] + 1, "\n\n#{bc2_wrapper(hdr, name, selfn)}\n")
+          rewrite(rel, d['hstart'], "#{d['name']}(...)", hdr)
+          next
+        end
+        # Init (and a registered method whose header is not the (mrb, self) form): the global state is set on entry and
+        # restored on each return (wrap_returns). Neither runs under mrb_ensure, so an exception leaving them is not restored
         if @global_wrap && (@valid_reg_names.include?(name) || name == init_name)
           g = @global_name
           pro = "\n  mrb_state *nfcx_bc2_old = #{g};\n  if (nfcx_bc2_old != NULL && nfcx_bc2_old != mrb) abort(); /* nested mruby state */\n  #{g} = mrb;" + pro
