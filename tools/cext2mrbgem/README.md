@@ -52,6 +52,11 @@ What differs from the regex scan, and why:
 
 ## Behaviour
 
+- `--header ../NAME.h` (corpus_flags.json: json-parser and json-generator, `../json.h`) reads one header of the gem that lies
+  directly above the extension directory, and only that one: the path must be exactly `../NAME.h`, the file must exist, and a
+  source of the extension must include it by that path. The header is written to the output root (`NAME.h` next to `src/`),
+  where the sources' `"../NAME.h"` includes resolve. Other quoted includes outside the extension directory stay refused (json's
+  `../vendor/` and `../simd/` headers are still refused).
 - Calls and macros are mapped through `api_map.json`. Any CRuby-looking identifier without
   an entry is refused: a marker comment is left in the output and the item is listed in
   `REFUSALS.txt`. Exit status 2 means refusals were recorded.
@@ -80,14 +85,16 @@ What differs from the regex scan, and why:
   `inline` in front) is expanded like the function-defining macros: at each invocation at the start of a line outside any
   braces, `ALWAYS_INLINE(static) int f(...) {` becomes `static int f(...) {` (the argument is a storage class or a whole
   declaration). The attribute and `inline` are dropped, as they are hints; a kept `inline` on an external function would
-  have no external definition. The two names are known without their `#define`, since json's `json.h` lies outside the
-  extension directory and is not read; a `#define` of the name in the gem replaces that and must have the same form.
+  have no external definition. Without `--header ../json.h` (below) the two names are known without their `#define`, since
+  json's `json.h` lies outside the extension directory and is not read; a `#define` of the name in the gem replaces that
+  and must have the same form.
   `NORETURN(...)` and `MAYBE_UNUSED(...)` are not expanded: their wrappers are removed by `noreturn_mask`, as before.
   json-parser is converted with `--define HAVE_RB_HASH_BULK_INSERT` (`corpus_flags.json`): the fork provides that function,
   and the file's own static fallback of it, under `#ifndef`, would otherwise collide with its api_map mapping. A definition
   whose name is a CRuby API name (api_map.json) in a branch the build excludes (`text_inactive_spans`) is not a declaration
-  of the gem, in the regex scan as in the libclang one. Without that define, the collision stops the converter with
-  "internal: overlapping edits" (a known gap: such a definition should be refused instead).
+  of the gem, in the regex scan as in the libclang one. Without that define, the gem's helper of that name takes the mruby
+  state inside the call that the api_map mapping rewrites whole; the two edits overlap, so that call is refused with a
+  reason (REFUSALS.txt, "the call overlaps a rewritten span"), not converted.
 - `rb_define_module_function(mod, "name", fn, argc)` becomes `mrb_define_module_function`, which defines the
   singleton and private instance method as CRuby does. `rb_define_const(klass, "NAME", v)` becomes
   `mrb_define_const(mrb, klass, "NAME", v)`. Both need the receiver to be a tracked class or module variable (a
