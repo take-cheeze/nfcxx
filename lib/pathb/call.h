@@ -80,14 +80,12 @@ typedef struct NfcI64Target {
   void *closure;
 } NfcI64Target;
 
-static inline NfcCallStatus nfc_call_i64_entry(void *closure, NfcCallFrame *frame) {
-  const NfcI64Target *target = (const NfcI64Target *)closure;
-  int64_t args[NFC_CALL_I64_MAX_ARGS], result;
+/* Adapter helpers: use a frame validated by nfc_call_invoke; write only after read_i64_args succeeds. */
+static inline NfcCallStatus nfc_call_read_i64_args(NfcCallFrame *frame, size_t arity, int64_t *args, size_t limit) {
   size_t i;
   NfcCallStatus status;
-  if (!target || !target->invoke) return nfc_call_error(frame, NFC_CALL_INVALID, "invalid i64 target");
-  if (frame->nargs != target->arity) return nfc_call_error(frame, NFC_CALL_ARITY, "wrong argument count");
-  if (target->arity > NFC_CALL_I64_MAX_ARGS) return nfc_call_error(frame, NFC_CALL_UNSUPPORTED, "too many i64 arguments");
+  if (frame->nargs != arity) return nfc_call_error(frame, NFC_CALL_ARITY, "wrong argument count");
+  if (arity > limit) return nfc_call_error(frame, NFC_CALL_UNSUPPORTED, "too many i64 arguments");
   if (frame->capacity < 1) return nfc_call_error(frame, NFC_CALL_ARITY, "one result slot is required");
   /* Read all inputs before writing: arguments and results may alias. */
   for (i = 0; i < frame->nargs; i++) {
@@ -96,11 +94,24 @@ static inline NfcCallStatus nfc_call_i64_entry(void *closure, NfcCallFrame *fram
     if (status != NFC_CALL_OK) return nfc_call_error(frame, status, "argument is not an i64");
   }
   if (!frame->results[0].codec->write_i64) return nfc_call_error(frame, NFC_CALL_UNSUPPORTED, "slot cannot write i64");
-  result = target->invoke(target->closure, args);
-  status = frame->results[0].codec->write_i64(frame->results[0].owner, frame->results[0].data, result);
+  return NFC_CALL_OK;
+}
+
+static inline NfcCallStatus nfc_call_write_i64_result(NfcCallFrame *frame, int64_t result) {
+  NfcCallStatus status = frame->results[0].codec->write_i64(frame->results[0].owner, frame->results[0].data, result);
   if (status != NFC_CALL_OK) return nfc_call_error(frame, status, "cannot write i64 result");
   frame->nresults = 1;
   return NFC_CALL_OK;
+}
+
+static inline NfcCallStatus nfc_call_i64_entry(void *closure, NfcCallFrame *frame) {
+  const NfcI64Target *target = (const NfcI64Target *)closure;
+  int64_t args[NFC_CALL_I64_MAX_ARGS];
+  NfcCallStatus status;
+  if (!target || !target->invoke) return nfc_call_error(frame, NFC_CALL_INVALID, "invalid i64 target");
+  status = nfc_call_read_i64_args(frame, target->arity, args, NFC_CALL_I64_MAX_ARGS);
+  if (status != NFC_CALL_OK) return status;
+  return nfc_call_write_i64_result(frame, target->invoke(target->closure, args));
 }
 
 static inline NfcCallStatus nfc_native_read_i64(void *owner, const void *slot, int64_t *out) {

@@ -5,10 +5,17 @@ static NfcCallStatus read_i64(void *owner, const void *slot, int64_t *out) {
   (void)owner;
   return mrbbc_int_read(slot, out) ? NFC_CALL_OK : NFC_CALL_TYPE;
 }
+typedef struct IntegerWrite { MV *slot; int64_t value; } IntegerWrite;
+static void write_integer(void *data) {
+  IntegerWrite *write = data;
+  mrbbc_int_new(write->slot, write->value);
+}
 static NfcCallStatus write_i64(void *owner, void *slot, int64_t value) {
+  IntegerWrite write = {slot, value};
+  MrbbcCallError error;
   (void)owner;
-  mrbbc_int_new(slot, value);
-  return NFC_CALL_OK;
+  /* This codec can be called inside a foreign C++ frame: do not longjmp over its destructors on allocation failure. */
+  return mrbbc_protect(write_integer, &write, &error) ? NFC_CALL_OK : NFC_CALL_EXCEPTION;
 }
 const NfcCallCodec mrbbc_call_codec = {read_i64, write_i64};
 
