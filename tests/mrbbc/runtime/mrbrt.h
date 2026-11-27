@@ -112,6 +112,14 @@ void mrbbc_no_super(void) __attribute__((noreturn));
 /* A call of the program's method number id from the runtime (the operators, to_s and inspect of an instance of a program
  * class), with argc arguments in argv[1..argc]. The lowered module defines it: one branch per method, as a self call has. */
 void mrbbc_user_call(int id, MV *ret, MV *argv, MV *blk, long argc);
+/* The lowered module's block dispatcher. mrbbc_yield supplies the closure's self in argv[0]. */
+void mrbbc_user_yield(MV *ret, const MV *blk, MV *argv, long argc);
+void mrbbc_yield(MV *ret, const MV *blk, MV *argv, long argc);
+/* Borrow argv for the lifetime of mrbbc_run. ARGV is made lazily and remains a GC root. */
+void mrbbc_set_args(int argc, char **argv);
+void mrbbc_getglobal(MV *dst, const char *name);
+/* The optional hosted adapter (MRBBC_LIBUV=1); unsupported forms raise, never silently use libc I/O. */
+void mrbbc_host_send(MV *dst, const MV *recv, const MV *args, long argc, const char *name);
 
 /* Classes (CLASS, EXEC's class body, TCLASS, GETCONST) and objects. mrbbc_class defines the class name (a nil superclass
  * only) under cbase when it is a class, else under target when that is a class, else Object; an existing class of the
@@ -199,7 +207,12 @@ enum mrbbc_op {
 };
 
 /* The methods of SEND0 that the producer lowers (the codes of mrb_lower.cpp). */
-enum mrbbc_method { MRBBC_M_TO_S, MRBBC_M_SIZE, MRBBC_M_LENGTH, MRBBC_M_NOT, MRBBC_M_INSPECT };
+enum mrbbc_method { MRBBC_M_TO_S, MRBBC_M_SIZE, MRBBC_M_LENGTH, MRBBC_M_NOT, MRBBC_M_INSPECT,
+                    MRBBC_M_FIRST, MRBBC_M_JOIN };
+enum mrbbc_iterator { MRBBC_I_MAP, MRBBC_I_FIND, MRBBC_I_EACH };
+/* Builtin Array/String append, and Array iteration with an explicit block. dst may alias recv. */
+void mrbbc_append(MV *dst, const MV *recv, const MV *value);
+void mrbbc_iter(MV *dst, const MV *recv, const MV *blk, int method);
 
 /* dst = a OP b. Anything the runtime does not implement for these operands is an error, never a wrong value. Never
  * returns on an error. dst may alias a or b. */

@@ -32,6 +32,14 @@ void mrbbc_user_call(int id, MV *ret, MV *argv, MV *blk, long argc) {
   mrbbc_raise("NotImplementedError", "gc_test has no program methods");
 }
 
+void mrbbc_user_yield(MV *ret, const MV *blk, MV *argv, long argc) {
+  (void)ret;
+  (void)blk;
+  (void)argv;
+  (void)argc;
+  mrbbc_raise("NotImplementedError", "gc_test has no program blocks");
+}
+
 /* The test's values are the registers of a frame of its own, registered with the collector as a lowered function's are
  * (precise roots, mrbrt.h; the conservative scan finds them too). */
 #define s fr[0]

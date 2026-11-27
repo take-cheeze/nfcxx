@@ -61,7 +61,7 @@ cp "$here/mruby_build_config.rb" "$tmp/build_config.rb"
 for b in $backends; do
   if [ $b = control ]; then cc=gcc; be=gcc; else cc=$root/nfcc; be=$b; fi
   bdir=$tmp/build-$b
-  if ! out=$(cd "$src" && NFCXX_BACKEND=$be MRUBY_CC=$cc MRUBY_CONFIG=$tmp/build_config.rb MRUBY_ONIG_DIR=$work/mruby-onig-regexp \
+  if ! out=$(cd "$src" && NFCXX_ROOT=$root NFCXX_BACKEND=$be MRUBY_CC=$cc MRUBY_CONFIG=$tmp/build_config.rb MRUBY_ONIG_DIR=$work/mruby-onig-regexp \
              MRUBY_BUILD_DIR=$bdir "${rake[@]}" -j"$(nproc)" all 2>&1); then
     msg=$(grep -m1 -E '(^|[ :])error|undefined reference|fatal error|invalid instruction' <<<"$out" || tail -1 <<<"$out")
     echo "FAIL $b optcarrot: mruby build blocked: $msg"; fail=1; continue

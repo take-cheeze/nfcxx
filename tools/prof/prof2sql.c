@@ -7,14 +7,19 @@
  * less the time of the calls made inside it (self time). A call still open when the profile ends (a thread still running at
  * exit) is counted in runs.open_calls and left out of the sites.
  *
+ * The allocation counts of each thread (chunk tid 0xFFFFFFFC, docs/notes/profile-format.md) are added to the sites: allocs,
+ * alloc_bytes and frees of the site. The sites 0xFFFFFFFF (outside: no open call) and 0xFFFFFFFE (overflow) are stored as
+ * the rows "(outside)" and "(overflow)" with calls 0.
+ *
  * With CALLGRIND_OUT (a file from `valgrind --tool=callgrind --dump-instr=yes`), each site also gets self_instructions: the
  * Ir (instructions executed) of its function, without the instructions of the functions it calls. That is the compute
  * count of a C site (docs/notes/profiler.md, "Compute counts"). See cg_* below for how a site is matched to a callgrind
  * function, and tests/prof/callgrind.sh for the cross-check. Without it the column is NULL.
  *
  * Schema (docs/notes/profiler-model.md):
- *   runs(run_id, source, imported_at, format_version, events, threads, open_calls, ...)
- *   sites(run_id, site, name, calls, inclusive_ns, exclusive_ns, self_instructions), primary key (run_id, site)
+ *   runs(run_id, source, imported_at, format_version, events, threads, open_calls, machine, allocs, alloc_bytes, frees)
+ *   sites(run_id, site, name, calls, inclusive_ns, exclusive_ns, self_instructions, allocs, alloc_bytes, frees),
+ *   primary key (run_id, site)
  */
 #define _POSIX_C_SOURCE 200809L /* getline, strdup */
 
@@ -26,6 +31,9 @@
 #include <sqlite3.h>
 
 #define MAX_DEPTH 65536
+#define ALLOC_ROW_BYTES 28
+#define SITE_OUTSIDE 0xFFFFFFFFu
+#define SITE_OVERFLOW 0xFFFFFFFEu
 
 typedef struct {
   uint32_t site;
@@ -56,6 +64,7 @@ typedef struct {
   uint64_t calls;
   uint64_t inclusive_ns;
   uint64_t exclusive_ns;
+  uint64_t allocs, alloc_bytes, frees;
   char *name;
   int used;
   int has_self; /* self_instructions is known (a callgrind function matched the site) */
@@ -209,6 +218,28 @@ static int read_profile(FILE *f, importer *im, uint32_t *version) {
         names[nnames].site = hdr[0];
         names[nnames].name = name;
         nnames++;
+      }
+      continue;
+    }
+    if (ch.tid == 0xFFFFFFFCu) {
+      /* one thread's allocation counts by site: count bytes, ALLOC_ROW_BYTES per row (site, allocs, bytes, frees) */
+      uint32_t r;
+      if (ch.count % ALLOC_ROW_BYTES != 0) return die("bad allocation chunk size");
+      for (r = 0; r < ch.count / ALLOC_ROW_BYTES; r++) {
+        unsigned char row[ALLOC_ROW_BYTES];
+        uint32_t site;
+        uint64_t allocs, bytes, frees;
+        site_stat *s;
+        if (fread(row, 1, sizeof row, f) != sizeof row) return die("truncated allocation chunk");
+        memcpy(&site, row, 4);
+        memcpy(&allocs, row + 4, 8);
+        memcpy(&bytes, row + 12, 8);
+        memcpy(&frees, row + 20, 8);
+        s = site_of(&im->sites, site);
+        if (s == NULL) return die("out of memory");
+        s->allocs += allocs;
+        s->alloc_bytes += bytes;
+        s->frees += frees;
       }
       continue;
     }
@@ -555,7 +586,8 @@ static int store(sqlite3 *db, const char *source, const importer *im, uint32_t v
     return 1;
   if (exec(db, "CREATE TABLE IF NOT EXISTS sites(run_id INTEGER NOT NULL REFERENCES runs(run_id), site INTEGER NOT NULL,"
                " name TEXT NOT NULL, calls INTEGER NOT NULL, inclusive_ns INTEGER NOT NULL, exclusive_ns INTEGER NOT NULL,"
-               " self_instructions INTEGER, PRIMARY KEY (run_id, site));") != 0)
+               " self_instructions INTEGER, allocs INTEGER NOT NULL, alloc_bytes INTEGER NOT NULL, frees INTEGER NOT NULL,"
+               " PRIMARY KEY (run_id, site));") != 0)
     return 1;
   if (ensure_self_column(db) != 0) return 1;
   if (exec(db, "BEGIN;") != 0) return 1;
@@ -577,22 +609,29 @@ static int store(sqlite3 *db, const char *source, const importer *im, uint32_t v
   if (sqlite3_step(ins_run) != SQLITE_DONE) goto out;
   run_id = sqlite3_last_insert_rowid(db);
   if (sqlite3_prepare_v2(db,
-                         "INSERT INTO sites(run_id, site, name, calls, inclusive_ns, exclusive_ns, self_instructions)"
-                         " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
+                         "INSERT INTO sites(run_id, site, name, calls, inclusive_ns, exclusive_ns, self_instructions, allocs, alloc_bytes, frees)"
+                         " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10);",
                          -1, &ins_site, NULL) != SQLITE_OK)
     goto out;
   for (i = 0; i < im->sites.cap; i++) {
     const site_stat *s = &im->sites.slots[i];
+    const char *name;
     if (!s->used) continue;
+    if (s->site == SITE_OUTSIDE) name = "(outside)";
+    else if (s->site == SITE_OVERFLOW) name = "(overflow)";
+    else name = s->name ? s->name : "";
     sqlite3_reset(ins_site);
     sqlite3_bind_int64(ins_site, 1, run_id);
     sqlite3_bind_int64(ins_site, 2, (sqlite3_int64)s->site);
-    sqlite3_bind_text(ins_site, 3, s->name ? s->name : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(ins_site, 3, name, -1, SQLITE_STATIC);
     sqlite3_bind_int64(ins_site, 4, (sqlite3_int64)s->calls);
     sqlite3_bind_int64(ins_site, 5, (sqlite3_int64)s->inclusive_ns);
     sqlite3_bind_int64(ins_site, 6, (sqlite3_int64)s->exclusive_ns);
     if (s->has_self) sqlite3_bind_int64(ins_site, 7, (sqlite3_int64)s->self_ir);
     else sqlite3_bind_null(ins_site, 7);
+    sqlite3_bind_int64(ins_site, 8, (sqlite3_int64)s->allocs);
+    sqlite3_bind_int64(ins_site, 9, (sqlite3_int64)s->alloc_bytes);
+    sqlite3_bind_int64(ins_site, 10, (sqlite3_int64)s->frees);
     if (sqlite3_step(ins_site) != SQLITE_DONE) goto out;
   }
   rc = 0;

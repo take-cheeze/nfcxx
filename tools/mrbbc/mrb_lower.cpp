@@ -51,7 +51,7 @@ constexpr int kTagNil = 0, kTagFalse = 1, kTagTrue = 2, kTagInt = 3;
 constexpr int kOpAdd = 0, kOpSub = 1, kOpMul = 2, kOpDiv = 3, kOpLt = 4, kOpLe = 5, kOpGt = 6, kOpGe = 7, kOpEq = 8,
               kOpNeq = 9;
 // The methods of SEND0 (enum mrbbc_method).
-constexpr int kMToS = 0, kMSize = 1, kMLength = 2, kMNot = 3, kMInspect = 4;
+constexpr int kMToS = 0, kMSize = 1, kMLength = 2, kMNot = 3, kMInspect = 4, kMFirst = 5, kMJoin = 6;
 
 // What a function lowers: the main program, a method body (its argv and blk parameters) or a block body (its argv, argc
 // and the frame it was made in).
@@ -501,7 +501,7 @@ bool plain_symbol(const std::string &s) {
 
 // The name of an operator method that a def may give (`def +(o)`): it prints as :+ with no quotes, as mruby's inspect does.
 bool operator_symbol(const std::string &s) {
-  static const char *const names[] = {"+", "-", "*", "/", "==", "!=", "<", "<=", ">", ">=", "!"};
+  static const char *const names[] = {"+", "-", "*", "/", "==", "!=", "<", "<=", ">", ">=", "!", "<<"};
   for (const char *n : names) {
     if (s == n) return true;
   }
@@ -515,6 +515,8 @@ bool zero_arg_method(const std::string &name, int &code) {
   else if (name == "length") code = kMLength;
   else if (name == "!") code = kMNot;
   else if (name == "inspect") code = kMInspect;
+  else if (name == "first") code = kMFirst;
+  else if (name == "join") code = kMJoin;
   else return false;
   return true;
 }
@@ -868,7 +870,13 @@ void lower_send(Ctx &c, Shared &sh, const mrb::Insn &in, const std::string &name
   const bool is_new = name == "new" && !has_blk;
   const bool zero = !has_blk && n == 0 && k == 0 && zero_arg_method(name, code);
   const bool binary = !has_blk && n == 1 && k == 0 && binary_method(name, op);
-  if (!dispatch && !is_new && !zero && !binary) refuse(has_blk ? "with a block is not lowered yet" : "is not lowered yet");
+  const bool append = !has_blk && n == 1 && k == 0 && name == "<<";
+  const bool iterate = has_blk && n == 0 && k == 0 && (name == "map" || name == "find" || name == "each");
+  const bool host = !has_blk && k == 0 &&
+      ((name == "read" && n <= 1) || (name == "write" && (n == 1 || n == 2)) ||
+       (n == 1 && (name == "exist?" || name == "file?" || name == "directory?" || name == "executable?")));
+  if (!dispatch && !is_new && !zero && !binary && !append && !iterate && !host)
+    refuse(has_blk ? "with a block is not lowered yet" : "is not lowered yet");
   if (!dispatch && !is_new && k != 0) refuse("with keyword arguments is not lowered yet");
   if (!dispatch && n == 15) refuse("with a splat of arguments is not lowered yet");
   if (n == 15 && k != 0) refuse("with a splat and keyword arguments is not lowered yet");
@@ -897,6 +905,17 @@ void lower_send(Ctx &c, Shared &sh, const mrb::Insn &in, const std::string &name
     emit_new(c, sh, a, n, k, in.pc);
   } else if (zero) {
     c.line("(eval (call void &\"mrbbc_send0\" " + c.reg(a) + " " + c.reg(a) + " (const int " + num(code) + ")))");
+    if (code == kMJoin) emit_unwind_check(c);
+  } else if (append) {
+    c.line("(eval (call void &\"mrbbc_append\" " + c.reg(a) + " " + c.reg(a) + " " + c.reg(a + 1) + "))");
+  } else if (iterate) {
+    const int method = name == "map" ? 0 : name == "find" ? 1 : 2;
+    c.line("(eval (call void &\"mrbbc_iter\" " + c.reg(a) + " " + c.reg(a) + " " + c.reg(blk_reg) +
+           " (const int " + num(method) + ")))");
+    emit_block_site(c, c.reg(a), in.pc + in.len);
+  } else if (host) {
+    c.line("(eval (call void &\"mrbbc_host_send\" " + c.reg(a) + " " + c.reg(a) + " " + c.reg(n ? a + 1 : a) +
+           " (const long " + num(n) + ") @\"" + symbol_data(sh, name) + "\"))");
   } else if (binary) {
     call_binop(c, op, c.reg(a), c.reg(a), c.reg(a + 1));
   } else {
@@ -1360,24 +1379,13 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         const unsigned n = x[1];
         const std::string argv = "argv" + std::to_string(in.pc);
         c.add_slot(argv, kV() * (static_cast<std::size_t>(n) + 1));
-        c.line("(eval (call void &\"mrbbc_blk_args\" $\"" + argv + "\" " + c.reg(x[0]) + "))");
         for (unsigned i = 1; i <= n; ++i) {
           std::string p = c.fresh();
           c.line("(let " + p + " (ptr unsigned_char) (offset $\"" + argv + "\" " + num(kV() * i) + "))");
           c.line("(copy " + vsize() + " " + p + " " + c.reg(x[0] + i) + ")");
         }
-        std::string id = c.fresh(), fr = c.fresh(), hm = c.fresh();
-        c.line("(let " + id + " long (call long &\"mrbbc_blk_id\" " + c.reg(x[0]) + "))");
-        c.line("(let " + fr + " (ptr unsigned_char) (call (ptr unsigned_char) &\"mrbbc_blk_frame\" " + c.reg(x[0]) + "))");
-        c.line("(let " + hm + " (ptr unsigned_char) (call (ptr unsigned_char) &\"mrbbc_blk_home\" " + c.reg(x[0]) + "))");
-        const std::string dp = c.fresh();
-        c.line("(let " + dp + " (ptr unsigned_char) (call (ptr unsigned_char) &\"mrbbc_blk_disp\" " + c.reg(x[0]) + "))");
-        for (std::size_t m = 0; m < sh.blocks.size(); ++m) {
-          std::string hit = c.fresh();
-          c.line("(let " + hit + " bool (eq long " + id + " (const long " + num(static_cast<long long>(m)) + ")))");
-          c.line("(if " + hit + " (then (eval (call void &\"mrb_b" + std::to_string(m) + "\" " + c.reg(x[0]) + " $\"" + argv +
-                 "\" (const long " + num(n) + ") " + fr + " " + hm + " " + dp + "))))");
-        }
+        c.line("(eval (call void &\"mrbbc_yield\" " + c.reg(x[0]) + " " + c.reg(x[0]) + " $\"" + argv +
+               "\" (const long " + num(n) + ")))");
         emit_unwind_check(c);
         break;
       }
@@ -1590,6 +1598,13 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         }
         break;
       }
+      case mrb::OP_GETGV: {
+        const std::string name = sym_at(irep, x[1], in.pc);
+        if (name != "$stdin" && name != "$stdout" && name != "$stderr" && name != "$0" && name != "$PROGRAM_NAME")
+          throw Refused("refused: global '" + name + "' is not lowered yet (pc " + std::to_string(in.pc) + ")");
+        c.line("(eval (call void &\"mrbbc_getglobal\" " + c.reg(x[0]) + " @\"" + symbol_data(sh, name) + "\"))");
+        break;
+      }
       case mrb::OP_GETCONST:
         // R[a] = the class Syms[b] (a constant that names a class the program defines; mrbbc_getconst)
         c.line("(eval (call void &\"mrbbc_getconst\" " + c.reg(x[0]) + " @\"" + symbol_data(sh, sym_at(irep, x[1], in.pc)) +
@@ -1755,6 +1770,25 @@ std::string lower_module(const mrb::Module &module, const std::string &source_na
     }
     uc << "  (return))\n";
     sh.functions += uc.str();
+  }
+
+  // One block dispatch entry for runtime iterators and OP_BLKCALL. The runtime roots the block and argument vector.
+  {
+    std::ostringstream bc;
+    bc << "(function \"mrbbc_user_yield\" (ret void) (params (param %0 \"ret\" (ptr (struct \"MV\")))"
+       << " (param %1 \"blk\" (ptr (struct \"MV\"))) (param %2 \"argv\" (ptr (struct \"MV\")))"
+       << " (param %3 \"argc\" long))\n"
+       << "  (let %4 long (call long &\"mrbbc_blk_id\" %1))\n"
+       << "  (let %5 (ptr unsigned_char) (call (ptr unsigned_char) &\"mrbbc_blk_frame\" %1))\n"
+       << "  (let %6 (ptr unsigned_char) (call (ptr unsigned_char) &\"mrbbc_blk_home\" %1))\n"
+       << "  (let %7 (ptr unsigned_char) (call (ptr unsigned_char) &\"mrbbc_blk_disp\" %1))\n";
+    for (std::size_t b = 0; b < sh.blocks.size(); ++b) {
+      const std::string hit = "%" + std::to_string(8 + b);
+      bc << "  (let " << hit << " bool (eq long %4 (const long " << b << ")))\n"
+         << "  (if " << hit << " (then (eval (call void &\"mrb_b" << b << "\" %0 %2 %3 %5 %6 %7))))\n";
+    }
+    bc << "  (return))\n";
+    sh.functions += bc.str();
   }
 
   std::ostringstream out;

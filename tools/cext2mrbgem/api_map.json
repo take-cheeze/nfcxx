@@ -93,6 +93,18 @@
     }
   },
   "entries": {
+    "rb_ary_concat": {"kind": "call", "mruby": "mrb_ary_concat", "inject_mrb": true, "needs_mrb": true, "caveat": "mruby returns void; the CRuby return value (the array) is not available"},
+    "rb_uint2inum": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "mrb_bint_new_uint64($m, (uint64_t)($0))", "caveat": "a fixnum when the value fits one, a bigint otherwise, as CRuby (the same conversion as rb_ull2inum)"},
+    "UINT64T2NUM": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "mrb_bint_new_uint64($m, (uint64_t)($0))", "caveat": "a fixnum when the value fits one, a bigint otherwise, as CRuby (the same conversion as rb_ull2inum)"},
+    "INT64T2NUM": {"kind": "call", "mruby": "mrb_fixnum_value", "inject_mrb": false, "needs_mrb": false, "caveat": "an mruby fixnum; a value beyond mruby's integer range is not represented (as LL2NUM)"},
+    "RB_FIX2LONG": {"kind": "call", "mruby": "mrb_fixnum", "inject_mrb": false, "needs_mrb": false, "caveat": "no check that the value is a fixnum; the result is mrb_int"},
+    "RB_FIX2LEN": {"kind": "call", "mruby": "mrb_fixnum", "inject_mrb": false, "needs_mrb": false, "caveat": "no check that the value is a fixnum; the result is mrb_int, not size_t"},
+    "RB_NUM2LONG": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "((long)mrb_int($m, $0))", "caveat": "converts through mruby's integer conversion (mrb_to_int, the mrb_int macro): a Float is truncated, a non-numeric value raises TypeError"},
+    "RB_NUM2LEN": {"kind": "template", "arity": 1, "needs_mrb": true, "template": "((size_t)mrb_int($m, $0))", "caveat": "converts through mruby's integer conversion (see NUM2LONG); a negative value becomes a large size_t, as with mruby's mrb_int cast"},
+    "RB_STATIC_SYM_P": {"kind": "call", "mruby": "mrb_symbol_p", "inject_mrb": false, "needs_mrb": false, "caveat": "every mruby symbol is static (there are no dynamic symbols in the fork)"},
+    "rb_str_set_len": {"kind": "call", "mruby": "mrb_str_resize", "inject_mrb": true, "needs_mrb": true, "caveat": "CRuby sets the length and NUL-terminates; mrb_str_resize also reallocates to the length, which covers the same uses (the length must not exceed the capacity CRuby guarantees)"},
+    "rb_utf8_str_new_static": {"kind": "call", "mruby": "mrb_str_new_static", "inject_mrb": true, "needs_mrb": true, "caveat": "the UTF-8 encoding is not kept: mruby strings have no per-string encoding tag (see the msgpack note)"},
+    "rb_eval_string": {"kind": "call", "mruby": "mrb_load_string", "inject_mrb": true, "needs_mrb": true, "caveat": "evaluates the C string at top level like CRuby's rb_eval_string; the result is returned as a VALUE"},
     "rb_str_encode": {
       "kind": "template",
       "arity": 4,
