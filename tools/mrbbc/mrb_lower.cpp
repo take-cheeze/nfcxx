@@ -71,6 +71,7 @@ struct Shared {
   std::map<const mrb::Irep *, int> method_ids;   // a method body -> its number (the function mrb_m<number>)
   std::vector<const mrb::Irep *> methods;        // the method bodies by number
   std::map<const mrb::Irep *, std::string> method_names;  // a method body -> the name its TDEF gives (SUPER has no name operand)
+  std::map<std::string, std::vector<int>> methods_named;  // a name -> the numbers of the method bodies its TDEFs give
   std::map<const mrb::Irep *, int> block_ids;    // a block body -> its number (the function mrb_b<number>)
   std::vector<const mrb::Irep *> blocks;         // the block bodies by number
   std::vector<const mrb::Irep *> classes;        // the class bodies (the children an EXEC runs) by number (mrb_k<number>)
@@ -778,15 +779,19 @@ void emit_kwargs(Ctx &c, const std::string &argv, unsigned n, unsigned kidx, uns
   c.line("(copy " + vsize() + " " + p + " $\"" + h + "\")");
 }
 
-// One branch per method of the module: when id is N, the function of method N runs with (ret, argv, blk, argc, kw). The
-// operands are IR operands: argv is the argument vector (a slot, or a pointer the runtime made for a splat), argc the count
-// of positional arguments (the callee's optional parameters depend on it), and kw is 1 when the call gave keyword arguments
-// (its hash is argv[argc+1]).
-void emit_method_branches(Ctx &c, const Shared &sh, const std::string &id, const std::string &ret, const std::string &argv,
-                          const std::string &blk, const std::string &argc, const std::string &kw) {
-  for (std::size_t m = 0; m < sh.methods.size(); ++m) {
+// One branch per method of the module named `name`: when id is N, the function of method N runs with (ret, argv, blk, argc,
+// kw). The runtime's lookups of a name (mrbbc_find and the others) give only numbers that a def of that name registered
+// (mrbbc_def, mrbbc_def_in), so the other methods need no branch; a call site costs the defs of its name, not every method.
+// The operands are IR operands: argv is the argument vector (a slot, or a pointer the runtime made for a splat), argc the
+// count of positional arguments (the callee's optional parameters depend on it), and kw is 1 when the call gave keyword
+// arguments (its hash is argv[argc+1]).
+void emit_method_branches(Ctx &c, const Shared &sh, const std::string &name, const std::string &id, const std::string &ret,
+                          const std::string &argv, const std::string &blk, const std::string &argc, const std::string &kw) {
+  auto named = sh.methods_named.find(name);
+  if (named == sh.methods_named.end()) return;
+  for (int m : named->second) {
     std::string hit = c.fresh();
-    c.line("(let " + hit + " bool (eq int " + id + " (const int " + num(static_cast<long long>(m)) + ")))");
+    c.line("(let " + hit + " bool (eq int " + id + " (const int " + num(m) + ")))");
     c.line("(if " + hit + " (then (eval (call void &\"mrb_m" + std::to_string(m) + "\" " + ret + " " + argv + " " + blk +
            " " + argc + " " + kw + "))))");
   }
@@ -852,14 +857,14 @@ void emit_new(Ctx &c, const Shared &sh, unsigned a, unsigned n, unsigned k, std:
   const std::string kw = kw_flag(c, k, a + n + 1);
   std::string id = c.fresh();
   c.line("(let " + id + " int (call int &\"mrbbc_find_init\" $\"" + argv + "\" (const long " + num(n) + ") " + kw + "))");
-  emit_method_branches(c, sh, id, c.reg(a), "$\"" + argv + "\"", nil_block(c, "newnil" + std::to_string(pc)),
+  emit_method_branches(c, sh, "initialize", id, c.reg(a), "$\"" + argv + "\"", nil_block(c, "newnil" + std::to_string(pc)),
                        "(const long " + num(n) + ")", kw);
   emit_unwind_check(c);
   c.line("(copy " + vsize() + " " + c.reg(a) + " $\"" + argv + "\")");
 }
 
 // R[a] = R[a].name(R[a+1] .. R[a+n]) with an explicit receiver (SEND0, SEND, and SENDB with the block in R[a+n+1]). The
-// program's methods of the name are looked up on the receiver's class (mrbbc_find_send), one branch per method; when the
+// program's methods of the name are looked up on the receiver's class (mrbbc_find_send), one branch per method of the name; when the
 // receiver has none of them, the builtin of the name runs (new, and the SEND0 and binary methods), or else NoMethodError.
 // A name that only a top-level def defines is refused: it is private, and that error is not reproduced here.
 void lower_send(Ctx &c, Shared &sh, const mrb::Insn &in, const std::string &name, unsigned a, unsigned n, unsigned k,
@@ -895,7 +900,7 @@ void lower_send(Ctx &c, Shared &sh, const mrb::Insn &in, const std::string &name
     c.line("(let " + id + " int (call int &\"mrbbc_find_send\" " + c.reg(a) + " @\"" + symbol_data(sh, name) + "\" " + ca.argc +
            " " + ca.kw + "))");
     const std::string blk = has_blk ? c.reg(blk_reg) : nil_block(c, "nil" + pc);
-    emit_method_branches(c, sh, id, c.reg(a), ca.argv, blk, ca.argc, ca.kw);
+    emit_method_branches(c, sh, name, id, c.reg(a), ca.argv, blk, ca.argc, ca.kw);
     if (has_blk) {
       emit_block_site(c, c.reg(a), in.pc + in.len);
     } else {
@@ -1528,7 +1533,7 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         c.line("(let " + id + " int (call int &\"mrbbc_find_super\" " + c.reg(0) + " (const int " +
                num(number_of(sh.method_ids, *home, "method")) + ") @\"" + symbol_data(sh, name) + "\" " + ca.argc + " " + ca.kw +
                "))");
-        emit_method_branches(c, sh, id, c.reg(x[0]), ca.argv, c.reg(blk), ca.argc, ca.kw);
+        emit_method_branches(c, sh, name, id, c.reg(x[0]), ca.argv, c.reg(blk), ca.argc, ca.kw);
         const std::string neg = c.fresh();
         c.line("(let " + neg + " bool (lt.s int " + id + " (const int 0)))");
         c.line("(if " + neg + " (then (eval (call void &\"mrbbc_super_nil\" " + c.reg(x[0]) + "))))");
@@ -1564,11 +1569,11 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         const CallArgs ca = emit_call_args(c, "argv" + std::to_string(in.pc), c.reg(0), x[0], n, k);
         // the block: the one the instruction passes (after the arguments), or nil
         const std::string blk = in.op == mrb::OP_SSENDB ? c.reg(block_reg(x[0], n, k)) : nil_block(c, "nil" + std::to_string(in.pc));
-        // the runtime checks the count and gives the method's number; the call is one branch per method of the program
+        // the runtime checks the count and gives the method's number; the call is one branch per method of the name
         const std::string id = c.fresh();
         c.line("(let " + id + " int (call int &\"mrbbc_find\" " + c.reg(0) + " @\"" + symbol_data(sh, name) + "\" " + ca.argc +
                " " + ca.kw + "))");
-        emit_method_branches(c, sh, id, c.reg(x[0]), ca.argv, blk, ca.argc, ca.kw);
+        emit_method_branches(c, sh, name, id, c.reg(x[0]), ca.argv, blk, ca.argc, ca.kw);
         if (in.op == mrb::OP_SSENDB) {
           emit_block_site(c, c.reg(x[0]), in.pc + in.len);
         } else {
@@ -1808,6 +1813,7 @@ std::string lower_module(const mrb::Module &module, const std::string &source_na
   const mrb::Irep &root = module.root;
   Shared sh;
   collect(sh, root, Kind::Main, true, nullptr);
+  for (std::size_t m = 0; m < sh.methods.size(); ++m) sh.methods_named[sh.method_names.at(sh.methods[m])].push_back(static_cast<int>(m));
   lower_irep(sh, root, "mrb_irep_0", Kind::Main);
   for (std::size_t m = 0; m < sh.methods.size(); ++m) {
     lower_irep(sh, *sh.methods[m], "mrb_m" + std::to_string(m), Kind::Method);
