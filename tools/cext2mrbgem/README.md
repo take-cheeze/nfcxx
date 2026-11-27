@@ -76,6 +76,18 @@ What differs from the regex scan, and why:
   pastes joined) and is done once per file before the scan. Its top-level items go on their own lines, so the line
   numbers after an expanded invocation in that file are the expanded text's. A macro with two `#define`s, a string
   literal or a stringification in its body, or an expansion that defines no function is left as it is.
+- A decorator macro (json's `ALWAYS_INLINE(x)` and `NOINLINE(x)`, whose body is the parameter with an attribute and
+  `inline` in front) is expanded like the function-defining macros: at each invocation at the start of a line outside any
+  braces, `ALWAYS_INLINE(static) int f(...) {` becomes `static int f(...) {` (the argument is a storage class or a whole
+  declaration). The attribute and `inline` are dropped, as they are hints; a kept `inline` on an external function would
+  have no external definition. The two names are known without their `#define`, since json's `json.h` lies outside the
+  extension directory and is not read; a `#define` of the name in the gem replaces that and must have the same form.
+  `NORETURN(...)` and `MAYBE_UNUSED(...)` are not expanded: their wrappers are removed by `noreturn_mask`, as before.
+  json-parser is converted with `--define HAVE_RB_HASH_BULK_INSERT` (`corpus_flags.json`): the fork provides that function,
+  and the file's own static fallback of it, under `#ifndef`, would otherwise collide with its api_map mapping. A definition
+  whose name is a CRuby API name (api_map.json) in a branch the build excludes (`text_inactive_spans`) is not a declaration
+  of the gem, in the regex scan as in the libclang one. Without that define, the collision stops the converter with
+  "internal: overlapping edits" (a known gap: such a definition should be refused instead).
 - `rb_define_module_function(mod, "name", fn, argc)` becomes `mrb_define_module_function`, which defines the
   singleton and private instance method as CRuby does. `rb_define_const(klass, "NAME", v)` becomes
   `mrb_define_const(mrb, klass, "NAME", v)`. Both need the receiver to be a tracked class or module variable (a
@@ -90,7 +102,10 @@ What differs from the regex scan, and why:
   the impl. The impl takes `mrb` first only when its body needs the state and every direct caller has it in scope (a
   method, Init or threaded helper); otherwise the method is refused, with the reason. Refused too: a variadic method whose
   body calls `rb_scan_args` (its arguments would come from the mruby call frame), a name defined more than once, a use
-  through its address, and a direct call in a header. The wrapper is not compiled, so the split is text only.
+  through its address, and a direct call in a header. The wrapper is not compiled, so the split is text only. A use of the
+  name that is not a call does not count as a use of the function: a parameter or a local of that name (in scope at the
+  use), a file-scope variable of the file, or a `#include` name. A call where a local hides the name (before its
+  declaration, or outside its block) is still a call.
 - A helper that needs the mruby state gets an `mrb_state *mrb` parameter in its definition, in every prototype (the
   `.c` and `.h` files are both scanned) and at every call site. This needs a unique definition, and every use must be
   a direct call inside a function body whose name is not shadowed there. A use as a value (a function pointer) or at
@@ -130,12 +145,36 @@ not load). It also converts `bcrypt-ruby` at a pinned commit (fetched to
 conversion has no refusals, the entry function is `mrb_bcrypt_gem_init`, and the two
 expected warnings are recorded. None of the outputs are compiled by the test.
 
-## Known gap: helper threading and exceptions
+## Global state and exceptions
 
-Helpers that need the mruby state read a file-scope global `<funcname>_bc2_mrb`. Each
-wrapped method saves the previous value on entry and restores it on exit. mruby raises
-exceptions by longjmp, so when an exception unwinds through a wrapped method the
-restore is skipped. The global can then hold a stale state for code that runs later.
-Nothing in the converter or its tests detects this, and the generated C has not been
-compiled. Restoring at each call boundary, or refusing helpers that run after a call
-which may raise, would close the gap. Until then, treat the helper path as unverified.
+Helpers that need the mruby state but cannot take it as an argument (the global-state path) read a file-scope
+global `<funcname>_bc2_mrb`. A registered method of such a gem is wrapped:
+
+- The wrapper saves the value the global held, aborts if that value is another state (a nested state is not
+  supported), sets the global to its `mrb`, and runs the method body as the callback of `mrb_ensure`, with a frame
+  (`struct nfcx_bc2_frame`: the method's `self` and the saved value) as the callback's data.
+- `mrb_ensure` runs the restore (`nfcx_bc2_restore`, which puts the saved value back) when the body returns and when
+  an exception leaves it, then re-raises. mruby raises by longjmp, so a restore after the body alone would be skipped
+  on the exception path; the global is therefore restored on every exit.
+- The body keeps its own restores before each `return` (wrap_returns and the macro return plans), which are now
+  redundant but harmless, since they run before the `mrb_ensure` restore.
+
+Split methods (an impl and a wrapper) get the same form: the wrapper's argument reads and impl call are the
+`mrb_ensure` body. In a gem with a global-state user every registered method is wrapped, as before, so each of
+their functions changes; the rest of the output (helpers, Init, other gems) does not, and the refusals are the same
+kinds as before.
+
+The fix is tested by `tools/cext2mrbgem/fixtures/global_escape`: a macro that uses the global, expanded in a
+registered method, raises through the method (`BasicObject#to_s` is missing). `tests/cext2mrbgem/run.sh` checks the
+generated wrapper and body, and, when `MRUBY_BUILD` names a built libmruby tree (`build/host/lib/libmruby.a` and its
+headers), compiles the gem with `harness.c`, which requires that the global holds no state after the escaped
+exception and after a normal return, and that a second state can be initialised and called. Without `MRUBY_BUILD`
+the run test prints SKIP.
+
+What remains:
+
+- Init is not under `mrb_ensure` (it is void, and its returns restore the global as before). An exception that
+  leaves Init keeps the global set to the gem's state until the next wrapped method or Init runs.
+- The generated C is compiled by `check_mruby_compile.sh` (compile and link only). The runtime behaviour above is
+  checked on one fixture, not on the corpus.
+- A nested state (a method on one state that runs a method on another) still aborts, as before.

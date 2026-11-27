@@ -233,7 +233,6 @@ def run_loop(args, state, ld_available)
     if a == "--emit-c" then state.emit_c = 1
     elsif a == "--emit-hip" then state.emit_hip = 1
     elsif starts_with?(a, "--backend=")
-      raise NfcxxExit.new("nfcxx: --backend=pathb cannot be combined with --profile (docs/notes/profiler.md)", 2) if a == "--backend=pathb" && state.cflags.include?("-finstrument-functions")
       state.backend = a[10..]
       state.backend_explicit = 1
       state.path_b = 1 if state.backend == "pathb"
@@ -261,21 +260,27 @@ def run_loop(args, state, ld_available)
       end
     elsif a == "--obfuscate-kernels" then state.obfuscate = 1
     elsif a == "--profile"
-      # docs/notes/profiler.md: -finstrument-functions on the C compiles (gcc backend only), with the profiler runtime linked in.
-      # The profile is written at run time when NFCXX_PROFILE names a file.
-      raise NfcxxExit.new("nfcxx: --profile needs the gcc backend; it cannot be used with --backend=pathb (docs/notes/profiler.md)", 2) if state.backend == "pathb"
-      state.backend = "gcc"
-      state.backend_explicit = 1
+      # docs/notes/profiler.md: the Path B route instruments the program (scripts/nfcxx-pathb.rb plans the hooks, the runtime
+      # and the link); the gcc backend gets -finstrument-functions on the C compiles, with the profiler runtime linked in.
+      # The backend is not forced here. The profile is written at run time when NFCXX_PROFILE names a file.
       state.cflags << "-finstrument-functions" unless state.cflags.include?("-finstrument-functions")
       state.rdynamic = 1 # the program's global functions go into the dynamic symbol table, so the profile can name them
+      # The runtime is C: it goes in cfiles, compiled by gcc like any C input (body's c_inputs), so the C++ path (eccp,
+      # EDG in C++ mode) never sees it, and c_inputs leaves -finstrument-functions off these files.
       prof_dir = File.expand_path("../lib/prof", __dir__)
+      # allocation counts. A dynamic link: nfcxx_alloc.c defines malloc, calloc, realloc and free (forwarding to glibc's
+      # __libc_*), and libc's PLT calls reach them. A static link cannot define them (libc.a's malloc.o would clash), so
+      # nfcxx_alloc_wrap.c (nfcxx_alloc.c with the __wrap_ names) is linked with --wrap, which also covers libc.a's calls.
+      static_link = args.include?("-static")
+      alloc_src = static_link ? "nfcxx_alloc_wrap.c" : "nfcxx_alloc.c"
       [File.join(prof_dir, "nfcxx_prof.c"), File.join(prof_dir, "nfcxx_prof_cyg.c"),
-       File.join(prof_dir, "nfcxx_machine.c"), File.join(prof_dir, "nfcxx_alloc.c")].each do |src|
-        state.files << src unless state.files.include?(src)
+       File.join(prof_dir, "nfcxx_machine.c"), File.join(prof_dir, alloc_src)].each do |src|
+        state.cfiles << src unless state.cfiles.include?(src)
       end
-      # allocation counts: malloc, calloc, realloc and free go through lib/prof/nfcxx_alloc.c
-      wrap = "-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free"
-      state.files << wrap unless state.files.include?(wrap)
+      if static_link
+        wrap = "-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free"
+        state.files << wrap unless state.files.include?(wrap)
+      end
     elsif a == "-fsanitize=address" then state.asan = 1
     elsif a == "-fsafe-pointers" then state.safeptr = 1
     elsif a == "-fno-safe-pointers" then state.safeptr = 0

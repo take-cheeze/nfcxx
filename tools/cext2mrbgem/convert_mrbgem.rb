@@ -334,6 +334,102 @@ def format_expansion(body, params, args)
   lines.reject(&:empty?).join("\n")
 end
 
+# Decorator macros. A function-like macro with one parameter whose body is that parameter with attributes and `inline`
+# in front wraps a declaration: json's `#define ALWAYS_INLINE(x) inline __attribute__((always_inline)) x` (and the
+# `NOINLINE(x) x` of the alternative without the attribute) makes `ALWAYS_INLINE(static) int f(...) {` a definition. Each
+# invocation at the start of a line outside any braces is replaced by its argument, which is a storage class (`static`)
+# or a whole declaration. The attributes and `inline` are hints: the function is an ordinary definition of the storage
+# class the argument gives. (A kept `inline` on an external function would be an inline definition with no external one.)
+# Every #define of the name in the gem (any file, under any conditional) must have this form. The #define is left as it is:
+# no use of the decorator is left in the output.
+DECORATOR_KEYWORDS = %w[inline __inline __inline__ __forceinline].freeze
+
+# The logical line of a #define whose parameter list closes at close: the body, with continuations joined and comments gone.
+def define_body(text, close)
+  pos = close + 1
+  eol = nil
+  while eol.nil?
+    nl = text.index("\n", pos) || text.length
+    if nl > 0 && text[nl - 1] == '\\'
+      pos = nl + 1
+    else
+      eol = nl
+    end
+  end
+  psl(text, close + 1, eol).gsub(/\\\n/, ' ').gsub(%r{/\*.*?\*/}m, ' ').sub(%r{//.*\z}, '')
+end
+
+# true when the #define matched by m (on the masked text) is a decorator: one parameter, and the body is the parameter with
+# only attributes and `inline` in front of it
+def decorator_define?(text, masked, m)
+  open = m.end(0)
+  return false unless masked[open] == '('
+  close = match_close(masked, open)
+  return false if close < 0
+  params = psl(text, open + 1, close).split(',').map(&:strip)
+  return false unless params.length == 1 && params[0].match?(/\A[A-Za-z_]\w*\z/)
+  words = define_body(text, close).gsub(/__attribute__\s*\(\([^()]*\)\)/, ' ').split
+  words.last == params[0] && (words[0...-1] - DECORATOR_KEYWORDS).empty?
+end
+
+# json's decorators: json.h (ext/json/ext/json.h) is outside the extension directory of the parser and generator, so its
+# #define is not read; the names are known here, with the same meaning (the attribute is a hint). A #define of the name in
+# the gem replaces that: it must be a decorator, or the name is left alone.
+BUILTIN_DECORATORS = %w[ALWAYS_INLINE NOINLINE].freeze
+DECORATOR_LEFT_TO_NORETURN_MASK = %w[NORETURN MAYBE_UNUSED].freeze
+
+# the names of the decorator macros of the gem: every #define of the name must be a decorator, or the name is left alone
+def decorator_macro_names(texts)
+  ok = BUILTIN_DECORATORS.to_h { |n| [n, true] }
+  texts.each_value do |text|
+    masked = mask_c(text)
+    masked.to_enum(:scan, /^[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)/).each do
+      m = Regexp.last_match
+      ok[m[1]] = (ok.fetch(m[1], true) && decorator_define?(text, masked, m))
+    end
+  end
+  # NORETURN(decl) and MAYBE_UNUSED(decl) are CRuby's identity wrappers, which noreturn_mask already handles (their tokens are
+  # removed); a gem's own #define of them (oj's `#define NORETURN(x) x`) is not a decorator for this expansion
+  ok.select { |n, v| v && !DECORATOR_LEFT_TO_NORETURN_MASK.include?(n) }.keys
+end
+
+# an argument that is a storage class, or a complete definition or prototype whose declarator follows the decorator
+def decorated_declaration?(arg)
+  return true if arg.match?(/\A(?:static|extern)\z/)
+  !arg.empty? && DEF_RE.match?(arg + ';')
+end
+
+# Expands the decorator macros in every text of the gem (texts is changed in place).
+def expand_decorator_macros(texts)
+  names = decorator_macro_names(texts)
+  return texts if names.empty?
+  texts.each_key do |k|
+    text = texts[k]
+    masked = mask_c(text)
+    edits = []
+    names.each do |name|
+      masked.to_enum(:scan, /^([ \t]*)#{Regexp.escape(name)}[ \t]*\(/).each do
+        m = Regexp.last_match
+        name_pos = m.begin(0) + m[1].length
+        open = m.end(0) - 1
+        prev = m.begin(0) > 0 ? masked[0...m.begin(0)] : ''
+        next if prev.end_with?("\\\n")
+        close = match_close(masked, open)
+        next if close < 0
+        before = masked[0...name_pos]
+        next unless before.count('{') == before.count('}')
+        arg = psl(text, open + 1, close).strip
+        next unless decorated_declaration?(arg)
+        edits << [name_pos, close + 1, arg]
+      end
+    end
+    next if edits.empty?
+    edits.sort_by { |a, _b, _t| -a }.each { |a, b, t| text = psl(text, 0, a) + t + psl(text, b) }
+    texts[k] = text
+  end
+  texts
+end
+
 def blank(s)
   s.gsub(/[^\n]/, ' ')
 end
@@ -865,6 +961,8 @@ end
 end
 # function-defining macros (NUM_OP(...) at file scope) are expanded in their own file, so the functions they define are found
 texts.each_key { |k| texts[k] = expand_function_macros(texts[k]) }
+# decorator macros (ALWAYS_INLINE(static) int f(...)) are expanded gem-wide: their #define may be in a header
+expand_decorator_macros(texts)
     Dir.children(@cext_dir).reject { |n| n.start_with?('.') }.sort.each do |base|
       path = File.join(@cext_dir, base)
       if File.directory?(path)
@@ -1162,6 +1260,14 @@ texts.each_key { |k| texts[k] = expand_function_macros(texts[k]) }
     # declarations and definitions, from the scanner chosen at start (see declarations_by_file)
     declarations_by_file.each do |rel, decls|
       f = @files[rel]
+      # a definition with the name of a CRuby API (api_map.json) in a branch the build excludes (text_inactive_spans: #if 0,
+      # or an #ifdef/#ifndef of a -D name) is not a definition of this build: the fork provides the API, and the calls go to
+      # its mapping (json's static fallback of rb_hash_bulk_insert under #ifndef HAVE_RB_HASH_BULK_INSERT, with that --define).
+      # Other excluded definitions are converted as before.
+      inactive = text_inactive_spans(rel)
+      decls = decls.reject do |d|
+        !d['proto'] && @entries.key?(d['name']) && d['brace'] && inactive.any? { |a, z| a < d['brace'] && d['brace'] < z }
+      end
       decls.each do |d|
         next if f['kind'] != 'src' && !d['proto'] && !d['storage'].split.include?('static') # a header body is converted only when it is static (inline or not): it is local to each includer
         next if NON_FUNC_WORDS.include?(d['name']) || NON_FUNC_WORDS.include?(py_split_ws(d['ret']).last)
@@ -1443,9 +1549,10 @@ texts.each_key { |k| texts[k] = expand_function_macros(texts[k]) }
   def refuse_direct_uses(name)
     msg = 'registered method function is also called directly (not supported)'
     msg += " (#{@split_reason[name]})" if @split_reason[name]
-    uses = (@occ[name] || []).reject do |rel, s, _e|
+    uses = (@occ[name] || []).reject do |rel, s, e|
       @regs.any? { |r| r['error'].nil? && r['file'] == rel && r['open'] <= s && s <= r['close'] } ||
-        @decls.any? { |d| d['name'] == name && rel == d['file'] && d['hstart'] <= s && s < d['hend'] }
+        @decls.any? { |d| d['name'] == name && rel == d['file'] && d['hstart'] <= s && s < d['hend'] } ||
+        not_a_function_use?(name, rel, s, e)
     end
     # A method whose body reads its arguments from the call frame (rb_scan_args) cannot be called directly: the direct
     # call F(n, NULL, self) would read the caller's frame. Called through its name (mrb_funcall_argv) it runs in its own
@@ -1633,6 +1740,64 @@ texts.each_key { |k| texts[k] = expand_function_macros(texts[k]) }
     !(body =~ /(?<![#{WC}])(?!return(?![#{WC}])|else(?![#{WC}])|case(?![#{WC}])|goto(?![#{WC}]))[A-Za-z_][#{WC}]*[ \t\n\*]+#{n}#{SS}[=;,\[)]|\(#{SS}\*#{SS}#{n}#{SS}\)/).nil?
   end
 
+  # A use of NAME that is not a reference to a function: the identifier names a variable, a parameter, or text that is not
+  # C code. Such a use is not a call and does not take the address of the function, so the split and the refusal skip it.
+  # A use followed by '(' is never skipped (a call through a hiding name is decided by the split). The uses that qualify:
+  #  - in a #pragma or #include line (not C code);
+  #  - a declarator: a parameter or variable declared here (a type word, then optional '*', before the name, and a ',',
+  #    ')', ';', '=' or '[' after it);
+  #  - a file-scope variable of this name in the same file (every use in that file is the variable);
+  #  - a parameter of the enclosing function, or a local declared in a block of its body whose scope contains the use
+  #    (a declaration is in scope from its statement to the closing brace of its block).
+  # Conservative: a declaration not recognised leaves its uses as uses (a refusal, never a wrong rewrite).
+  def not_a_function_use?(name, rel, s, e)
+    masked = @files[rel]['masked']
+    nx = next_nonspace(masked, e)
+    return false if nx >= 0 && masked[nx] == '('
+    ls = s.zero? ? 0 : (masked.rindex("\n", s - 1) || -1) + 1
+    return true if masked[ls..].to_s[/\A[ \t]*#[ \t]*(pragma|include)\b/]
+    after = nx >= 0 ? masked[nx] : ''
+    before = masked[[s - 120, 0].max...s].to_s
+    return true if after.match?(/[,);=\[]/) &&
+                   before.match?(/(?<![#{WC}])(?!(?:return|else|case|goto|sizeof|do|typedef)(?![#{WC}]))[A-Za-z_][#{WC}]*[ \t\n]*\**[ \t\n]*\z/)
+    return true if file_scope_var_names(rel).include?(name)
+    fn = enclosing_func(rel, s)
+    fn ? shadowed_at?(name, fn, s) : false
+  end
+
+  # true when a parameter of fn, or a local declared in a block of fn whose scope contains pos, is named name at pos
+  def shadowed_at?(name, fn, pos)
+    return true if param_names(fn).include?(name)
+    block_decl_scopes(fn).any? { |nm, seg, close| nm == name && seg <= pos && pos < close }
+  end
+
+  # the file-scope variables of a file: the top-level declarators of the file text (outside every brace)
+  def file_scope_var_names(rel)
+    @file_scope_vars ||= {}
+    @file_scope_vars[rel] ||= begin
+      masked = @files[rel]['masked']
+      body_top_declarations({ 'file' => rel, 'brace' => -1, 'body_end' => masked.length }).map(&:first).to_set
+    end
+  end
+
+  # [name, declaration position, scope end] for the top-level declarators of each block of fn (its body and nested blocks)
+  def block_decl_scopes(fn)
+    @block_decl_scopes ||= {}
+    @block_decl_scopes[[fn['file'], fn['brace']]] ||= begin
+      masked = @files[fn['file']]['masked']
+      out = []
+      masked[fn['brace']..fn['body_end']].to_enum(:scan, /\{/).each do
+        open = fn['brace'] + Regexp.last_match.begin(0)
+        close = match_close(masked, open)
+        next if close < 0 || close > fn['body_end']
+        body_top_declarations({ 'file' => fn['file'], 'brace' => open, 'body_end' => close }).each do |nm, seg|
+          out << [nm, seg, close]
+        end
+      end
+      out
+    end
+  end
+
   def split_problem(name, uses)
     return 'it has more than one definition' if @defs[name].size != 1
     return "the names #{name}_impl and #{name}_nfcx_impl are already used in the input" if @occ.key?("#{name}_impl") && @occ.key?("#{name}_nfcx_impl")
@@ -1659,13 +1824,15 @@ texts.each_key { |k| texts[k] = expand_function_macros(texts[k]) }
       next if is_member(masked, s)
       ob = enclosing_open_brace(masked, s)
       next if ob && masked[[ob - 60, 0].max...ob].to_s.match?(/\b(?:struct|union)[ \t\n]*[A-Za-z_]?\w*[ \t\n]*\z/)
+      # a parameter, variable or #include name of the same name is not a use of the function (not_a_function_use?)
+      next if not_a_function_use?(name, rel, s, e)
       if @files[rel]['kind'] != 'src' && !single_src_header?(rel)
         return "it is used in #{rel}, a header, whose function bodies are not converted (it is not included by exactly one source)"
       end
       nx = next_nonspace(masked, e)
       return 'its address is taken, so a pointer would reach the wrapper' unless nx >= 0 && masked[nx] == '('
       fn = enclosing_func(rel, s)
-      return 'its name is shadowed in a function that calls it' if fn && shadowed_in?(name, fn)
+      return 'its name is shadowed in a function that calls it' if fn && shadowed_at?(name, fn, s)
     end
     nil
   end
@@ -1720,10 +1887,14 @@ texts.each_key { |k| texts[k] = expand_function_macros(texts[k]) }
     args.unshift('mrb') if @helper_names.include?(name)
     call = "#{split_impl_name(name)}(#{args.join(', ')})"
     if @global_wrap
-      # as a registered method: the global state is set on entry and restored on return (wrap_returns)
-      g = @global_name
-      lines.unshift("mrb_state *nfcx_bc2_old = #{g};", "if (nfcx_bc2_old != NULL && nfcx_bc2_old != mrb) abort(); /* nested mruby state */", "#{g} = mrb;")
-      lines += ["mrb_value nfcx_bc2_ret = #{call};", "#{g} = nfcx_bc2_old;", 'return nfcx_bc2_ret;']
+      # as a registered method: the global state is set on entry and restored on every exit, the exception path included
+      # (bc2_wrapper): the call runs in the mrb_ensure callback, which reads the method's self from the frame
+      body = "static mrb_value #{name}_bc2_body(mrb_state *mrb, mrb_value nfcx_bc2_fv) {\n" \
+             "  struct nfcx_bc2_frame *nfcx_bc2_f = (struct nfcx_bc2_frame *)mrb_cptr(nfcx_bc2_fv);\n" \
+             "  mrb_value #{split_self(d0)} = nfcx_bc2_f->self;\n"
+      body += (lines + ["return #{call};"]).map { |l| "  #{l}" }.join("\n") + "\n}"
+      wrap = bc2_wrapper(split_wrapper_hdr(d0), name, split_self(d0))
+      return bc2_frame_defs + body + "\n\n" + wrap
     else
       lines << "return #{call};"
     end
@@ -2497,6 +2668,8 @@ end
       # the field may also be stored as an address (x.NAME = &helper;)
       masked.to_enum(:scan, /(?:\.|->)\s*#{rec[:name]}\s*=\s*&?\s*([A-Za-z_]\w*)\s*;/).each do
         am = Regexp.last_match
+        # a store of data (x->mday = _mday, a member of another struct of the same name) is not a callback store
+        next if data_store_value?(frel, am.begin(1), am[1])
         # a parameter of the enclosing function: the callback it receives (its parameter record gives the helpers)
         en = enclosing_func(frel, am.begin(1))
         j = en && fn_param_names(en).index(am[1])
@@ -2536,7 +2709,14 @@ end
             t = psl(text, a[0], a[1]).strip
             lead = psl(text, a[0], a[1])[/\A\s*/].length
             # NULL is no callback: the entry leaves the field unset, so it is not an assign
-            rec[:assigns] << [t, frel, a[0] + lead] if t.match?(/\A[A-Za-z_]\w*\z/) && t != 'NULL'
+            if t.match?(/\A[A-Za-z_]\w*\z/) && t != 'NULL'
+              rec[:assigns] << [t, frel, a[0] + lead]
+            elsif (cast = fnptr_cast_entry(masked, a[0] + lead, a[1]))
+              # a cast entry, (RET (*)(PARAMS))helper (date's tmx_funcs): the helper is the callback, and the cast's parameter
+              # list gains mrb with the field's (edit_fnptr_fields)
+              rec[:assigns] << [cast[:helper], frel, cast[:hpos]]
+              (rec[:casts] ||= []) << [frel, cast[:ppos]]
+            end
           end
         end
       end
@@ -2545,7 +2725,122 @@ end
         rec[:calls] << [cm.end(0) - 1, enclosing_func(frel, cm.begin(0))&.fetch('name', nil), frel]
       end
     end
+    # calls through a macro of the field (date's tmx_attr(mday), whose body is (tmx->funcs->x)(tmx->dat))
+    fn_attr_macro_calls(rec[:name]).each { |copen, fname, mrel| rec[:calls] << [copen, fname, mrel] }
     rec
+  end
+
+  # a cast entry of a positional initializer, (RET (*)(PARAMS))helper, in masked[s, e): {helper, hpos (the helper's position),
+  # ppos (the position after the '(' of the cast's parameter list, where mrb goes)}, or nil when it is not such a cast
+  def fnptr_cast_entry(masked, s, e)
+    return nil unless masked[s] == '('
+    close = match_close(masked, s)
+    return nil if close < 0 || close >= e
+    rest = psl(masked, close + 1, e)
+    helper = rest.strip
+    return nil unless helper.match?(/\A[A-Za-z_]\w*\z/) && helper != 'NULL'
+    pm = /\(\s*\*\s*\)\s*\(/.match(psl(masked, s, close))
+    return nil unless pm
+    { helper: helper, hpos: close + 1 + rest[/\A\s*/].length, ppos: s + pm.end(0) }
+  end
+
+  # The macros of one parameter whose body calls the parameter's member (M(x) ... ->x)(...)): [macro name, its file, the position
+  # of the call's '(' in the body]
+  def fn_attr_macros
+    @fn_attr_macros ||= begin
+      out = []
+      @files.each do |rel, f|
+        masked = f['masked']
+        masked.to_enum(:scan, /^[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)\([ \t]*([A-Za-z_]\w*)[ \t]*\)/).each do
+          m = Regexp.last_match
+          body = psl(masked, m.end(0), logical_line_end(masked, m.end(0)))
+          bm = /(?:->|\.)[ \t\n]*#{Regexp.escape(m[2])}[ \t\n]*\)[ \t\n]*\(/.match(body)
+          next unless bm
+          out << [m[1], rel, m.end(0) + bm.end(0) - 1]
+        end
+      end
+      out
+    end
+  end
+
+  # The calls of a field NAME made through such a macro when NAME is its argument: [call position, enclosing function, the macro's
+  # file] for each function that expands the macro (nil where an expansion is not in a function)
+  def fn_attr_macro_calls(name)
+    out = []
+    fn_attr_macros.each do |mname, mrel, copen|
+      (@occ[mname] || []).each do |orel, os, oe|
+        next unless @files[orel]['masked'][oe..].to_s.match?(/\A[ \t\n]*\([ \t\n]*#{Regexp.escape(name)}[ \t\n]*\)/)
+        (@macro_call_keys ||= Set.new) << [mrel, copen]
+        macro_expansion_fns(orel, os).each { |fname| out << [copen, fname, mrel] }
+      end
+    end
+    out
+  end
+
+  # The names declared as function pointers in the input: a (*NAME)( declarator, and a variable of a function-pointer typedef
+  def fnptr_value_names
+    @fnptr_value_names ||= begin
+      names = Set.new
+      typedefs = Set.new
+      @files.each_value do |f|
+        f['masked'].to_enum(:scan, /\btypedef[ \t\n]+[^;{}()]*?\(\s*\*\s*([A-Za-z_]\w*)\s*\)\s*\(/).each { typedefs << Regexp.last_match[1] }
+        # a struct field's declarator names a member, not a variable: a bare identifier is never a member (x->f = v stores v)
+        f['masked'].to_enum(:scan, /\(\s*\*\s*([A-Za-z_]\w*)\s*\)\s*\(/).each do
+          m = Regexp.last_match
+          names << m[1] unless struct_body_before?(f['masked'], m.begin(0))
+        end
+      end
+      unless typedefs.empty?
+        tre = Regexp.union(typedefs.to_a)
+        @files.each_value do |f|
+          f['masked'].to_enum(:scan, /\b#{tre}\b[ \t\n\*]+([A-Za-z_]\w*)/).each { names << Regexp.last_match[1] }
+        end
+      end
+      names
+    end
+  end
+
+  # Whether the value v (an identifier) of a store X->NAME = v at pos in rel is data, not a possible callback: v is not a helper and
+  # not declared as a function pointer (a C object of another type holds no helper address). A macro parameter is data when every
+  # expansion of the macro passes data for it. Anything else is taken as a possible callback (the store is kept).
+  def data_store_value?(rel, pos, v, seen = Set.new)
+    return false if @defs.key?(v) || fnptr_value_names.include?(v)
+    dd = define_at(rel, pos)
+    return true if dd.nil? || enclosing_func(rel, pos)
+    idx = macro_param_index(dd[0], dd[3], v)
+    return true if idx.nil?
+    return false if seen.include?(dd[0])
+    (@occ[dd[0]] || []).each do |orel, os, oe|
+      od = define_at(orel, os)
+      next if od && od[0] == dd[0]
+      m = @files[orel]['masked']
+      open = next_nonspace(m, oe)
+      return false unless m[open] == '('
+      close = match_close(m, open)
+      return false if close < 0
+      a = split_args(m, open, close)[idx]
+      return false unless a
+      arg = psl(m, a[0], a[1]).strip
+      return false unless arg.match?(/\A[A-Za-z_]\w*\z|\A\d+\z/)
+      return false unless data_store_value?(orel, a[0], arg, seen | [dd[0]])
+    end
+    true
+  end
+
+  # the functions that expand the use at pos (the names of the enclosing functions; a use inside a macro body is followed to
+  # that macro's own uses). [nil] when a use is in no function and no macro.
+  def macro_expansion_fns(rel, pos, seen = Set.new)
+    fn = enclosing_func(rel, pos)
+    return [fn['name']] if fn
+    dd = define_at(rel, pos)
+    return [nil] if dd.nil? || seen.include?(dd[0])
+    out = []
+    (@occ[dd[0]] || []).each do |orel, os, _oe|
+      od = define_at(orel, os)
+      next if od && od[0] == dd[0]
+      out.concat(macro_expansion_fns(orel, os, seen | [dd[0]]))
+    end
+    out.empty? ? [nil] : out
   end
 
   # whether the innermost unclosed brace before pos opens a struct body (struct TAG { or struct {)
@@ -2601,6 +2896,13 @@ end
       if r[:rel] == rel && r[:owner].nil? && !(applied_pstart ||= Set.new).include?(r[:params_start])
         applied_pstart << r[:params_start]
         ed.add(r[:params_start], r[:params_start], 'mrb_state *mrb, ')
+      end
+      # a cast entry of the field's initializer, (RET (*)(PARAMS))helper: its parameter list gains mrb with the callback type
+      (r[:casts] || []).each do |crel, ppos|
+        next unless crel == rel
+        next if (applied_casts ||= Set.new).include?(ppos)
+        applied_casts << ppos
+        ed.add(ppos, ppos, 'mrb_state *mrb, ')
       end
       r[:calls].each do |copen, _, crel|
         next unless crel == rel
@@ -2768,9 +3070,29 @@ forced = (@reg_names - @split_names) | Set.new(@init_defs.map { |d| d['name'] })
         @fnptr_addr_taken[fn] = @files.values.any? { |f| f['masked'].match?(/\b#{Regexp.escape(fn)}\b(?!\s*\()/) }
       end
     end
+    base_ok = lambda do |r|
+      !r[:assigns].empty? && r[:assigns].all? { |h, _, _| @defs.key?(h) } && r[:calls].all? { |_, fn, _| fn && !fn_addr_taken.call(fn) }
+    end
+    # the group of records that call through one macro body: its call is edited once, for every field it serves, so either all of
+    # them are ok or none is (a field left as it is keeps its type without mrb, and the shared call must not pass it)
+    group_demoted = Set.new
+    loop do
+      bad_keys = Set.new
+      @fnptr_recs.each do |r|
+        next if base_ok.call(r) && !group_demoted.include?(r)
+        r[:calls].each { |c, _, cr| bad_keys << [cr, c] if (@macro_call_keys || Set.new).include?([cr, c]) }
+      end
+      grew = false
+      @fnptr_recs.each do |r|
+        next if group_demoted.include?(r) || !base_ok.call(r) || r[:calls].none? { |c, _, cr| bad_keys.include?([cr, c]) }
+        group_demoted << r
+        grew = true
+      end
+      break unless grew
+    end
     @fnptr_recs.each do |r|
       next if r[:assigns].empty?
-      r[:ok] = r[:assigns].all? { |h, _, _| @defs.key?(h) } && r[:calls].all? { |_, fn, _| fn && !fn_addr_taken.call(fn) }
+      r[:ok] = base_ok.call(r) && !group_demoted.include?(r)
       # only a record that is ok forces its callbacks: a refused field must not make its callbacks need the state
       r[:assigns].each { |h, _, _| forced << h if @defs.key?(h) && r[:ok] }
       forced << r[:owner] if r[:ok] && r[:owner]
@@ -2980,6 +3302,8 @@ end
         # a file-scope array of this name in this file is a variable, not a use of a helper of the same name elsewhere
         next if @files[rel]['masked'].match?(/^[ \t]*(?:static[ \t]+|const[ \t]+)*[A-Za-z_][\w \t\*]*?\b#{Regexp.escape(name)}[ \t]*\[[^\]\n]*\][ \t]*(?:=|;)/)
         next if @decls.any? { |d| d['name'] == name && rel == d['file'] && d['hstart'] <= s && s < d['hend'] }
+        # a split registered method: a parameter, variable or #include name of the same name is not a use (not_a_function_use?)
+        next if @split_names.include?(name) && not_a_function_use?(name, rel, s, e)
         # the body of an object-like alias (#define alias real_name): its invocations are the uses, resolved by object_macro_name
         lstart = @files[rel]['masked'].rindex("\n", s - 1) || -1
         dline = @files[rel]['masked'][(lstart + 1)...s].to_s
@@ -3095,7 +3419,8 @@ use_problem = lambda do |name, use|
         next ('helper needs the mruby state threaded in, but the call is not in a function definition the ' \
               'converter recognises (a macro-decorated definition, or file scope) (not supported)')
       end
-      if shadowed.call(name, fn)
+      # a split registered method is tested at the call (a local hides the name from its declaration on, in its block)
+      if (@split_names.include?(name) ? shadowed_at?(name, fn, s) : shadowed.call(name, fn))
         next 'helper needs the mruby state threaded in, but its name is shadowed in the calling function (not supported)'
       end
       nil
@@ -3116,6 +3441,27 @@ use_problem = lambda do |name, use|
         refuse(frel, pos, h, 'a function-pointer field or parameter it is stored in is called from a function without the mruby state (not supported)')
       end
       r[:ok] = false
+    end
+    # a macro call of several fields is edited once (see group_demoted): a field that is no longer ok takes the others that share
+    # its macro call with it, and their callbacks are refused (they are stored in a field whose type keeps mrb out)
+    loop do
+      bad_keys = Set.new
+      (@fnptr_recs || []).each do |r|
+        next if r[:ok]
+        r[:calls].each { |c, _, cr| bad_keys << [cr, c] if (@macro_call_keys || Set.new).include?([cr, c]) }
+      end
+      grew = false
+      (@fnptr_recs || []).each do |r|
+        next unless r[:ok] && r[:calls].any? { |c, _, cr| bad_keys.include?([cr, c]) }
+        r[:ok] = false
+        grew = true
+        r[:assigns].each do |h, frel, pos|
+          next unless cands.include?(h)
+          cands.delete(h)
+          refuse(frel, pos, h, 'a function-pointer field that shares a macro call with a field which is not threaded (not supported)')
+        end
+      end
+      break unless grew
     end
     # The macro decision needs the threaded set, and the threaded set needs the macro decision (a direct call from a
     # macro body is a use only when the macro expands in a function with the state). Greatest fixpoint: start from the
@@ -5305,6 +5651,31 @@ use_problem = lambda do |name, use|
     ((@global_macro_spans || {})[rel] || []).any? { |a, b| a < pos && pos < b }
   end
 
+  # The global-state frame (the registered methods of a gem that uses the global state). A registered method's wrapper saves
+  # the state the global held and sets the global to its mrb, then runs the body as the callback of mrb_ensure with a frame
+  # (self, and the saved state) as the data: mrb_ensure runs the restore (nfcx_bc2_restore) when the body returns and when an
+  # exception leaves it, so an escaped exception cannot leave the global pointing at a state it no longer runs under.
+  def bc2_frame_defs
+    "#ifndef NFCX_BC2_FRAME\n#define NFCX_BC2_FRAME\n" \
+    "struct nfcx_bc2_frame { mrb_value self; mrb_state *old; };\n" \
+    "static mrb_value nfcx_bc2_restore(mrb_state *mrb, mrb_value fv) {\n  (void)mrb;\n" \
+    "  #{@global_name} = ((struct nfcx_bc2_frame *)mrb_cptr(fv))->old;\n  return mrb_nil_value();\n}\n#endif\n"
+  end
+
+  # the body's prologue: its self and the saved state, from the frame it is called with
+  def bc2_frame_prologue(self_name)
+    "\n  struct nfcx_bc2_frame *nfcx_bc2_f = (struct nfcx_bc2_frame *)mrb_cptr(nfcx_bc2_fv);\n" \
+    "  mrb_value #{self_name} = nfcx_bc2_f->self;\n  mrb_state *nfcx_bc2_old = nfcx_bc2_f->old;"
+  end
+
+  # the wrapper: the registered function, saving and setting the global state, then the body under mrb_ensure
+  def bc2_wrapper(hdr, name, self_name)
+    g = @global_name
+    "#{hdr} {\n  struct nfcx_bc2_frame nfcx_bc2_f;\n  nfcx_bc2_f.self = #{self_name};\n  nfcx_bc2_f.old = #{g};\n" \
+    "  if (nfcx_bc2_f.old != NULL && nfcx_bc2_f.old != mrb) abort(); /* nested mruby state */\n  #{g} = mrb;\n" \
+    "  return mrb_ensure(mrb, #{name}_bc2_body, mrb_cptr_value(mrb, &nfcx_bc2_f), nfcx_bc2_restore, mrb_cptr_value(mrb, &nfcx_bc2_f));\n}"
+  end
+
   # A registered method or Init with a global-state user saves the previous value on entry and restores it on each
   # return, so a nested state (a method that runs Ruby code in another state) sees its own state again afterwards.
   # The return expression is evaluated before the restore. A VALUE function that falls off its end is undefined in C
@@ -5549,7 +5920,24 @@ end
       if d['proto']
         ed.add(d['hstart'], d['hend'], hdr)
       else
-        # a registered method or Init of a gem that uses the global state saves and restores it (wrap_returns)
+        # a registered method of a gem that uses the global state: the body is the callback of mrb_ensure (bc2_wrapper), so the
+        # state is restored when an exception leaves it; its own returns restore it too (wrap_returns)
+        sm = @global_wrap && @valid_reg_names.include?(name) ? hdr.match(/\(mrb_state \*mrb, mrb_value (\w+)\)\z/) : nil
+        if sm
+          # the receiver is self (an instance method) or klass (a class method): the frame's value under the header's name
+          selfn = sm[1]
+          body_hdr = hdr.sub(/\(mrb_state \*mrb, mrb_value \w+\)\z/, '(mrb_state *mrb, mrb_value nfcx_bc2_fv)')
+                        .sub(/\b#{Regexp.escape(name)}\(/, "#{name}_bc2_body(")
+          pro = bc2_frame_prologue(selfn) + "\n  (void)nfcx_bc2_old;" + pro
+          wrap_returns(rel, d, false)
+          ed.add(d['hstart'], d['hend'], bc2_frame_defs + body_hdr + ' ')
+          ed.add(d['brace'] + 1, d['brace'] + 1, pro)
+          ed.add(d['body_end'] + 1, d['body_end'] + 1, "\n\n#{bc2_wrapper(hdr, name, selfn)}\n")
+          rewrite(rel, d['hstart'], "#{d['name']}(...)", hdr)
+          next
+        end
+        # Init (and a registered method whose header is not the (mrb, self) form): the global state is set on entry and
+        # restored on each return (wrap_returns). Neither runs under mrb_ensure, so an exception leaving them is not restored
         if @global_wrap && (@valid_reg_names.include?(name) || name == init_name)
           g = @global_name
           pro = "\n  mrb_state *nfcx_bc2_old = #{g};\n  if (nfcx_bc2_old != NULL && nfcx_bc2_old != mrb) abort(); /* nested mruby state */\n  #{g} = mrb;" + pro
@@ -5625,9 +6013,11 @@ end
     # 4b. a direct call of a split registered method calls its impl (the mrb argument, if any, is added above). A
     # use inside a registration is the wrapper's name, and stays.
     @split_names.to_a.sort.each do |name|
-      (@occ[name] || []).each do |orel, s, _e|
+      (@occ[name] || []).each do |orel, s, oe|
         next if orel != rel || header_spans.any? { |a, b| a <= s && s < b }
         next if @regs.any? { |r| r['error'].nil? && r['file'] == rel && r['open'] <= s && s <= r['close'] }
+        # a parameter, local or #include name of the same name is not a call (not_a_function_use?): it keeps its name
+        next if not_a_function_use?(name, rel, s, oe)
         # a member access or a struct or union field named like the method is not a call of it
         mk = @files[rel]['masked']
         next if is_member(mk, s)
@@ -5695,7 +6085,10 @@ end
     end
     # 5. identifier pass. Local names: functions the input defines (a prototype alone does not count: it may declare a
     # CRuby API), class variables and the macros the input defines (scan_local_macros).
-    local_syms = Set.new(@defs.keys) | @class_vars | @local_macros | local_enumerators | local_file_scope_names | local_macro_arg_names
+    # the names the build defines (--define NAME[=VALUE], as extconf sets them: racc's RACC_INFO_VERSION) are macros of the build, not
+    # CRuby names, so the identifier pass keeps them as written (the build's -D supplies them); a name with an api_map entry keeps its entry
+    build_macros = (@defines || []).map { |d| d.split('=', 2)[0] }.reject { |n| @entries.key?(n) }.to_set
+    local_syms = Set.new(@defs.keys) | @class_vars | @local_macros | local_enumerators | local_file_scope_names | local_macro_arg_names | build_macros
     body_spans = @defs.values.flatten.select { |d| d['file'] == rel }.map { |d| [d['brace'], d['body_end']] }
     # text-inactive branches (#if 0, a #ifdef of a name this build defines or the gem #defines) are excluded like dead definitions
     text_inactive_spans(rel).each do |a, z|

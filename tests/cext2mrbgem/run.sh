@@ -581,7 +581,7 @@ check grep -qF 'rest = mrb_ary_new_from_values(mrb, nfcx_rn, nfcx_ra);' "$work/a
 # type name (struct ct_funcs) is not a use of the table.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_cast_table tools/cext2mrbgem/fixtures/api_cast_table/ext/api_cast_table "$work/api_cast_table" > "$work/api_cast_table.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
-check grep -qF '(mrb_value (*)(void *))ct_secs,' "$work/api_cast_table/src/api_cast_table.c"
+check grep -qF '(mrb_value (*)(mrb_state *mrb, void *))ct_secs,' "$work/api_cast_table/src/api_cast_table.c"
 # 2zzz47. a callback passed as an argument of a file-scope macro: the macro escapes the pointer only if its body does, and here
 # the body passes it to a helper that calls it and keeps nothing; the callback is threaded and the macro call converted.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_macro_cb tools/cext2mrbgem/fixtures/api_macro_cb/ext/api_macro_cb "$work/api_macro_cb" > "$work/api_macro_cb.log" 2>&1 || rc=$?
@@ -929,6 +929,23 @@ check test ! -e "$work/api_fnptr_table/NOT_BUILDABLE"
 check grep -qF 'typedef void (*atb_dump_fn)(mrb_state *mrb, mrb_value obj, int depth);' "$work/api_fnptr_table/src/api_fnptr_table.c"
 check grep -qF 'atb_table[0](mrb, v, 0);' "$work/api_fnptr_table/src/api_fnptr_table.c"
 
+# 2zy. a function-pointer table whose entries are casts of helpers that need the state (date's tmx_funcs): the helpers are threaded
+# (no global state), the cast's parameter list gains mrb, and the call through the field in a macro passes it
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fnptr_cast_table tools/cext2mrbgem/fixtures/api_fnptr_cast_table/ext/api_fnptr_cast_table "$work/api_fnptr_cast_table" > "$work/api_fnptr_cast_table.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_fnptr_cast_table/NOT_BUILDABLE"
+check grep -qF '(int (*)(mrb_state *mrb, void *))fct_m_mday,' "$work/api_fnptr_cast_table/src/api_fnptr_cast_table.c"
+check grep -qF '#define fct_attr(x) (fct->funcs->x)(mrb, fct->dat)' "$work/api_fnptr_cast_table/src/api_fnptr_cast_table.c"
+check grep -qF 'static int fct_m_mday(mrb_state *mrb, void *dat) {' "$work/api_fnptr_cast_table/src/api_fnptr_cast_table.c"
+check sh -c "! grep -q 'bc2_mrb' '$work/api_fnptr_cast_table/src/api_fnptr_cast_table.c'"
+
+# 2zz. two fields called through one macro body: one is not threaded (its helper is not defined here), so the macro body is not edited
+# and the other field keeps its type too (a shared call takes mrb for every field it serves or for none)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fnptr_macro_group tools/cext2mrbgem/fixtures/api_fnptr_macro_group/ext/api_fnptr_macro_group "$work/api_fnptr_macro_group" > "$work/api_fnptr_macro_group.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF '#define mg_attr(x) (mg->funcs->x)(mg->dat)' "$work/api_fnptr_macro_group/src/api_fnptr_macro_group.c"
+check grep -qF '    int (*a)(void *dat);' "$work/api_fnptr_macro_group/src/api_fnptr_macro_group.c"
+
 # 2zx. a static helper defined in two files is renamed per file (NAME__STEM): each copy is threaded on its own (api_map.json batch N16)
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_static_dup tools/cext2mrbgem/fixtures/api_static_dup/ext/api_static_dup "$work/api_static_dup" > "$work/api_static_dup.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
@@ -1117,6 +1134,31 @@ check test "$rc" -eq 2
 check test -e "$work/reg_split_refused/NOT_BUILDABLE"
 check grep -qF '  rsr_make  registered method function is also called directly (not supported) (its direct caller rsr_plain_caller has no mruby state in scope' "$work/reg_split_refused/REFUSALS.txt"
 check sh -c "! grep -q 'rsr_make_impl' '$work/reg_split_refused/src/reg_split_refused.c'"
+
+# 2x2. direct calls of a registered method, two call sites: the method is split and both calls go to its impl. The method's
+# name is also a parameter of a prototype and a definition, and a local of a nested block (in scope there only) with an
+# assignment to it: those are variables, not calls, so they do not refuse the method and keep their names.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name reg_direct tools/cext2mrbgem/fixtures/reg_direct/ext/reg_direct "$work/reg_direct" > "$work/reg_direct.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/reg_direct/NOT_BUILDABLE"
+check grep -qF 'static mrb_value rd_tally_impl(mrb_state *mrb, mrb_value self, mrb_value x) {' "$work/reg_direct/src/reg_direct.c"
+check grep -qF 'static mrb_value rd_tally(mrb_state *mrb, mrb_value self) {' "$work/reg_direct/src/reg_direct.c"
+check grep -qF 'mrb_value a = rd_tally_impl(mrb, self, self);' "$work/reg_direct/src/reg_direct.c"
+check grep -qF 'mrb_value b = rd_tally_impl(mrb, self, a);' "$work/reg_direct/src/reg_direct.c"
+check grep -qF 'mrb_value rd_tally = mrb_nil_value();' "$work/reg_direct/src/reg_direct.c"
+check grep -qF 'a = rd_tally;' "$work/reg_direct/src/reg_direct.c"
+check grep -qF 'static mrb_value rd_helper(mrb_state *mrb, mrb_value self, mrb_value rd_tally) {' "$work/reg_direct/src/reg_direct.c"
+check grep -qF '    return rd_tally;' "$work/reg_direct/src/reg_direct.c"
+check grep -qF 'mrb_define_method(mrb, mRegDirect, "tally", rd_tally, MRB_ARGS_REQ(1));' "$work/reg_direct/src/reg_direct.c"
+check sh -c "! grep -q 'rd_tally_impl;\|rd_tally(mrb, self, ' '$work/reg_direct/src/reg_direct.c'"
+# negative: the name's address is taken before a local of the same name is declared (the first use is the file-scope function):
+# the method keeps its refusal, and the local's uses are not refused
+rc=0; "$rb" "$conv" --scanner "$scanner" --name reg_direct_addr tools/cext2mrbgem/fixtures/reg_direct_addr/ext/reg_direct_addr "$work/reg_direct_addr" > "$work/reg_direct_addr.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test -e "$work/reg_direct_addr/NOT_BUILDABLE"
+check grep -qF 'rda_tally  registered method function is also called directly (not supported) (its address is taken, so a pointer would reach the wrapper)' "$work/reg_direct_addr/REFUSALS.txt"
+check sh -c "! grep -q 'rda_tally_impl' '$work/reg_direct_addr/src/reg_direct_addr.c'"
+check sh -c "[ \"\$(grep -c 'registered method function is also called directly' '$work/reg_direct_addr/REFUSALS.txt')\" -eq 1 ]"
 
 # 2j. lowercase CRuby APIs (st_*, ruby_*) are refused, not passed silently
 ruby tools/cext2mrbgem/convert_mrbgem.rb --name lowercase_api_refused tools/cext2mrbgem/fixtures/lowercase_api_refused/ext/lowercase_api_refused "$work/lowercase_api_refused" > "$work/lowercase_api_refused.log" 2>&1 || rc=$?
@@ -2056,6 +2098,29 @@ check grep -qF 'static mrb_value fn_get_long(mrb_state *mrb, mrb_value self) {' 
 check grep -qF 'mrb_define_method(mrb, mFn, "get2_long", fn_get2_long, MRB_ARGS_NONE());' "$work/fn_macro/src/fn_macro.c"
 check grep -qF '#if 0  /* BC2CPP-MRBGEM: unused macro' "$work/fn_macro/src/fn_macro.c"
 
+# 2zzz110b. decorated definitions: ALWAYS_INLINE(static) and NOINLINE(static) (json's decorators, #defined in the fixture) wrap
+# the definitions, which are then ordinary definitions: the static helper they call is threaded and the method reaches it.
+# Before, the definitions were refused ("a macro-decorated definition"). No decorator is left in the output.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name decorated_static tools/cext2mrbgem/fixtures/decorated_static/ext/decorated_static "$work/decorated_static" > "$work/decorated_static.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/decorated_static/NOT_BUILDABLE"
+check sh -c "! grep -q 'macro-decorated' '$work/decorated_static/REFUSALS.txt' 2>/dev/null"
+check grep -qF 'static mrb_value ds_greeting(mrb_state *mrb, mrb_value name) {' "$work/decorated_static/src/decorated_static.c"
+check grep -qF 'return ds_greeting(mrb, name);' "$work/decorated_static/src/decorated_static.c"
+check grep -qF 'return ds_wrap(mrb, name);' "$work/decorated_static/src/decorated_static.c"
+check grep -qF 'mrb_define_method(mrb, mDs, "greet", ds_greet, MRB_ARGS_REQ(1));' "$work/decorated_static/src/decorated_static.c"
+check sh -c "! grep -q '^\(ALWAYS_INLINE\|NOINLINE\)(' '$work/decorated_static/src/decorated_static.c'"
+
+# 2zzz110c. a decorated definition that is not static (NOINLINE(VALUE f(...))): the decorator is not #defined in the input, so
+# the converter's built-in json decorators apply; the result is an ordinary external definition with no decorator left
+rc=0; "$rb" "$conv" --scanner "$scanner" --name decorated_extern tools/cext2mrbgem/fixtures/decorated_extern/ext/decorated_extern "$work/decorated_extern" > "$work/decorated_extern.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/decorated_extern/NOT_BUILDABLE"
+check grep -qF 'mrb_value ext_shout(mrb_state *mrb, mrb_value self) {' "$work/decorated_extern/src/decorated_extern.c"
+check grep -qF 'static mrb_value ext_helper(mrb_state *mrb, mrb_value str) {' "$work/decorated_extern/src/decorated_extern.c"
+check grep -qF 'return ext_helper(mrb, str);' "$work/decorated_extern/src/decorated_extern.c"
+check sh -c "! grep -q '^\(ALWAYS_INLINE\|NOINLINE\)(' '$work/decorated_extern/src/decorated_extern.c'"
+
 # 2zzz111. a struct field and a file-scope variable named like a CRuby API (ruby_sd, as pg's pg_cancel_connection.c has):
 # the declarations and the member accesses are the input's own names, so no refusal (before, "no entry in api_map.json")
 rc=0; "$rb" "$conv" --scanner "$scanner" --name ruby_field tools/cext2mrbgem/fixtures/ruby_field/ext/ruby_field "$work/ruby_field" > "$work/ruby_field.log" 2>&1 || rc=$?
@@ -2114,6 +2179,44 @@ check grep -qF 'if (mrb_value_identical(*output_data ,  uncompilable_marker)) re
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_singleton_alias tools/cext2mrbgem/fixtures/api_singleton_alias/ext/api_singleton_alias "$work/api_singleton_alias" > "$work/api_singleton_alias.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'mrb_define_alias(mrb, mrb_class_ptr(mrb_singleton_class(mrb, mrb_obj_value(klass))), "new_in", "alloc_in");' "$work/api_singleton_alias/src/api_singleton_alias.c"
+# 2zzz181. --define NAME=VALUE: a name the build defines is a macro of the build, not a CRuby name (racc's RACC_INFO_VERSION, which
+# extconf defines). Without the define the identifier is refused (the control); with it, the identifier in the macro body is kept as
+# written and the conversion has no refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name define_macro tools/cext2mrbgem/fixtures/define_macro/ext/define_macro "$work/define_macro_nodef" > "$work/define_macro_nodef.log" 2>&1 || rc=$?
+check grep -q 'RDM_INFO_VERSION  no entry in api_map.json' "$work/define_macro_nodef/REFUSALS.txt"
+rc=0; "$rb" "$conv" --scanner "$scanner" --name define_macro --define RDM_INFO_VERSION=1.8.1 tools/cext2mrbgem/fixtures/define_macro/ext/define_macro "$work/define_macro" > "$work/define_macro.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/define_macro/NOT_BUILDABLE"
+check sh -c "! grep -q 'RDM_INFO_VERSION' '$work/define_macro/REFUSALS.txt'"
+check grep -qF '#define DM_VERSION DM_STR(RDM_INFO_VERSION)' "$work/define_macro/src/define_macro.c"
+
+# 2zzz182. the global-state restore on the exception path (a registered method of a gem that uses the global state): its body is the
+# callback of mrb_ensure, which runs the restore when the body returns and when an exception leaves it (the longjmp of mruby skips
+# a plain restore). The wrapper saves the global and sets it; the body reads its self and the saved state from the frame.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name global_escape tools/cext2mrbgem/fixtures/global_escape/ext/global_escape "$work/global_escape" > "$work/global_escape.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/global_escape/NOT_BUILDABLE"
+check grep -qF 'static mrb_value ge_call_bc2_body(mrb_state *mrb, mrb_value nfcx_bc2_fv) {' "$work/global_escape/src/global_escape.c"
+check grep -qF 'return mrb_ensure(mrb, ge_call_bc2_body, mrb_cptr_value(mrb, &nfcx_bc2_f), nfcx_bc2_restore, mrb_cptr_value(mrb, &nfcx_bc2_f));' "$work/global_escape/src/global_escape.c"
+check grep -qF 'global_escape_bc2_mrb = ((struct nfcx_bc2_frame *)mrb_cptr(fv))->old;' "$work/global_escape/src/global_escape.c"
+check grep -qF 'if (nfcx_bc2_f.old != NULL && nfcx_bc2_f.old != mrb) abort(); /* nested mruby state */' "$work/global_escape/src/global_escape.c"
+# the run: built with the gem and the harness against a built libmruby (MRUBY_BUILD: a tree with build/host/lib/libmruby.a and its
+# headers); the harness exits 1 when the global is left set after an escaped exception
+if [ -n "${MRUBY_BUILD:-}" ] && [ -f "$MRUBY_BUILD/build/host/lib/libmruby.a" ]; then
+  hb=$work/global_escape_harness; rm -rf "$hb"; mkdir -p "$hb"
+  inc="-I $work/global_escape/include -I $MRUBY_BUILD/include -I $MRUBY_BUILD/build/host/include"
+  hok=1
+  for c in "$work"/global_escape/src/*.c tools/cext2mrbgem/fixtures/global_escape/harness.c; do
+    gcc -std=gnu99 -c -w -DMRB_USE_BIGINT $inc "$c" -o "$hb/$(basename "$c" .c).o" || hok=0
+  done
+  if [ "$hok" -eq 1 ] && g++ -o "$hb/harness" "$hb"/*.o -Wl,--start-group "$MRUBY_BUILD/build/host/lib/libmruby.a" -Wl,--end-group -lm -lonig 2> "$hb/link.err"; then
+    check "$hb/harness"
+  else
+    check sh -c "echo 'harness did not build' >&2; false"
+  fi
+else
+  echo "SKIP [$leg] global_escape harness: MRUBY_BUILD does not name a built libmruby (the converted code is checked by the grep tests above)"
+fi
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads

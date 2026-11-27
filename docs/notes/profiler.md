@@ -17,13 +17,17 @@ Implemented so far (prototype, format version 1):
   with it the file holds the expected pairs at two sites over three threads, with enters and exits alternating per thread
   and timestamps not going backwards.
 
-- `--profile` in the driver (`scripts/nfcxx-loop.rb`): adds `-finstrument-functions` to the C compiles and links
+- `--profile` in the driver: the default route (Path B on x86-64 Linux, `scripts/nfcxx-pathb.rb`) passes `--profile` to
+  `pathb-cc.rb` and links the runtime (see "Path B hooks" below); `--backend=pathb --profile` is the same route. With the gcc
+  backend (`--backend=gcc`, or elsewhere) the driver adds `-finstrument-functions` to the C compiles and links
   `lib/prof/nfcxx_prof.c` and `lib/prof/nfcxx_prof_cyg.c`, which map gcc's `__cyg_profile_func_enter/exit` onto the
-  runtime. It implies the gcc backend and is refused with `--backend=pathb`. The site of a function is its address for now.
-  `tests/prof/run.sh` builds `cprog.c` with it and checks the profile (`check_any.c`): fib(10) gives 178 pairs at 2 sites.
-  Only C inputs are covered so far; the C++ path and the nfcast tier are not.
+  runtime (`scripts/nfcxx-loop.rb`). The site of a function is its address for now.
+  `tests/prof/run.sh` builds `cprog.c` with the gcc backend and checks the profile (`check_any.c`): fib(10) gives 178 pairs at
+  2 sites. `tests/prof/pathb.sh` does the same for `cprog.c` and `cxxprog.cpp` (179 pairs at 3 sites) through Path B.
+  The runtime is compiled as C (cfiles) without `-finstrument-functions`, and for C++ the flag reaches the gcc compile
+  of the C that EDG emits (the `profile_opts` group of the eccp call).
 
-Not yet done: the Path B IR does not emit the calls, the C++ path does not pass the flag through, the nfcast tier does not
+Not yet done: the Path B IR does not emit the calls, the nfcast tier does not
 emit them, the file has no IR hash, and no compute counts from the runtime (callgrind gives them offline, see "Compute counts" below). The
 string table of site names is done (below). Those are the next steps below.
 
@@ -63,13 +67,18 @@ was used (`clock=tsc` or `clock=monotonic`). Measured on one machine only; the f
 2. **Allocation counts.** Count `malloc` and `free` calls and bytes. Two ways: `--wrap=malloc` at link time for compiled
    programs, and the `gc_alloc` chokepoint in `lib/ast/nfcast_core.cpp` (plus the one direct `std::malloc` there) for nfcast.
    Counts go into the per-function record; sampling by bytes is kept for stack capture.
-3. **Compute counts.** Done for C programs from callgrind, as the external cross-check (see "Compute counts" below). Still to
-   do: node evaluations for nfcast, counted in the existing dispatch.
+3. **Compute counts.** Done for C programs from callgrind, as the external cross-check (see "Compute counts" below). Done for
+   nfcast: `State::stats.node_evals` counts the interpreter's node evaluations, one per call of a node's `eval`, `evalMulti` or
+   `exec`, where the method starts (`count_node`). It is a count of dispatches, not of instructions and not of time: it does
+   not measure the machine work of a node, and nodes run by the tier's or the JIT's machine code count nothing. It is compiled
+   in only with `-DNFCAST_COUNT_NODES` (the default build has no counter code), because a runtime switch cost 5% of instructions
+   with the switch off. Checked by `tests/ast/counts/loop.lua` (28 evaluations in a count build) in `tests/ast/run.sh`; see
+   `docs/notes/ast.md`, "Stats".
 4. **nfcast tier.** Done in the prototype behind `NFCAST_TIER_PROFILE=1` (`docs/notes/ast.md`, "Tiering"): the generated C calls
    `__nfcxx_prof_enter` / `__nfcxx_prof_exit` per function (site = FNV-1a of the proto's tier serial and number), the flag is in the
-   compile cache key and the Merkle hash, and an abandoned run closes the calls it left open. Open: each shared object has its own
-   copy of the runtime, so a run with several compiled units keeps only the last profile written to `NFCXX_PROFILE`. The fix is for
-   the host to load one runtime (RTLD_GLOBAL) that the objects bind to.
+   compile cache key and the Merkle hash, and an abandoned run closes the calls it left open. Done: the runtime is one shared object
+   (`libnfcxx_prof.so`, built into the cache by `build_prof_lib` in `lib/ast/nfcast_tier.cpp`) that every compiled unit depends on,
+   so the loader maps one copy per process and a run with several compiled units writes one profile (`tests/ast/profile/two.lua`).
 
 ## Decisions taken in the prototype
 
@@ -95,8 +104,12 @@ Two more chunks, both written at exit with a reserved tid and counted in bytes:
 - `tid = 0xFFFFFFFE`: the machine description (`nfcxx_machine_format`). Quick by default: sysfs and cpuid only. Set
   `NFCXX_PROFILE_BENCH=1` to add the clock and bandwidth measurements (about 0.4 s).
 - `tid = 0xFFFFFFFD`: the allocation totals as `allocs=N alloc_bytes=B frees=F`. Under `--profile` the link wraps
-  `malloc`, `calloc`, `realloc` and `free` (`lib/prof/nfcxx_alloc.c`); without the wrap the counts are zero. The runtime's
-  own buffers are counted too, a few KB.
+  `malloc`, `calloc`, `realloc` and `free`: `lib/prof/nfcxx_alloc.c` defines them, counts, and forwards to glibc's
+  `__libc_malloc` and friends. libc calls malloc through the PLT, so libc's own allocations (fopen's FILE and buffer, strdup)
+  are counted too, in the site of the call that made them (`tests/prof/libc.sh`). A `-static` link cannot define them (libc.a's
+  malloc.o would clash), so the driver links `lib/prof/nfcxx_alloc_wrap.c` with `-Wl,--wrap`, which also reaches libc.a's calls.
+  Its functions have no symbol names there, so the profile names them `+0x<offset>`. A program not built with `--profile`
+  has no such definitions and its counts stay at zero. The runtime's own buffers are counted too, a few KB.
 
 `tools/prof/prof2sql.c` stores the machine text and the three totals on each `runs` row.
 
@@ -107,7 +120,8 @@ keeps a fixed table of rows, one per site (1024 slots, at most 768 sites), alloc
 makes the site's row the current one and the exit hook restores the enclosing one; the malloc wrappers add to the current
 row without allocating or locking. A thread writes its rows as a `0xFFFFFFFC` chunk when it exits. The format is in
 `docs/notes/profile-format.md`. Sites that did not fit are counted in an overflow row. The test program
-`tests/prof/allocsites.c` checks the exact counts of two functions (`tests/prof/sqlite.sh`).
+`tests/prof/allocsites.c` checks the exact counts of two functions (`tests/prof/sqlite.sh`). `tests/prof/libc.sh` checks that
+the allocations libc makes (fopen, strdup) are counted in the site of the call that makes them.
 
 `tools/prof/prof2sql.c` stores the machine text and the three totals on each `runs` row.
 
@@ -147,3 +161,26 @@ run. It needs valgrind and takes about a second here (the driver build included)
 join the default run if valgrind is assumed. Its checks: callgrind's self Ir sums to its totals; main's inclusive Ir is at
 least fib's self Ir; the callgrind entries of `main` and `fib` equal their nm addresses; and for each site the profile's
 calls equal callgrind's calls and `self_instructions` equals the self Ir found through nm.
+
+## Path B hooks (`--profile` on the SSA route)
+
+`scripts/pathb-cc.rb --profile` (and `scripts/pathb-ssa-build --profile`) sets `Qbe.prof` in `scripts/pathb-ssa-qbe.rb`. The
+emitter then calls the runtime at the start of each defined function and before each `ret`:
+
+    call $__nfcxx_prof_enter_addr(l $FUNCTION)
+    ...
+    call $__nfcxx_prof_exit_addr(l $FUNCTION)
+
+with `$FUNCTION` the symbol the function is defined under (the hidden entry's body is `NAME.nfcxxhid`). The runtime names
+each site by the function's address, as the gcc hooks do (`lib/prof/nfcxx_prof_cyg.c`). Without `--profile` the emitted
+assembly is unchanged: `tests/pathb-prof/run.sh` checks the hooks are referenced only with the flag, and a plain object from
+the untouched HEAD is byte-identical to one from the working tree.
+
+Limits, not done:
+- The driver routes `--profile` through Path B (`scripts/nfcxx-pathb.rb`, `tests/prof/pathb.sh`): the runtime's C sources are
+  compiled by `pathb-cc.rb` without `--profile` and with `-DNFCXX_PROF_NO_TSC=1`, so the clock is CLOCK_MONOTONIC (the SSA
+  route has no `__builtin_ia32_rdtsc`). A Path B build that falls back to gcc (an unported construct) uses gcc's hooks instead.
+- A function left by a C++ exception (or a longjmp) does not run its exit hook, so its call stays open in the profile. The
+  EH landing pads would need the exit hook too.
+- `tests/pathb-cc/run.sh` already fails on HEAD for `template` and `ir-opt-inline-explicit` (their objects differ from the
+  bash oracle); this change does not affect that.

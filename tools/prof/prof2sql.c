@@ -20,6 +20,11 @@
  *   runs(run_id, source, imported_at, format_version, events, threads, open_calls, machine, allocs, alloc_bytes, frees)
  *   sites(run_id, site, name, calls, inclusive_ns, exclusive_ns, self_instructions, allocs, alloc_bytes, frees),
  *   primary key (run_id, site)
+ *
+ * The schema version is PRAGMA user_version (SCHEMA_VERSION below). Opening a database runs migrate(): the tables are created
+ * if missing, and each column the current schema has but the database lacks is added with ALTER TABLE ... ADD COLUMN. Rows
+ * already there are kept; the added allocation counts are 0 and machine and self_instructions are NULL. A database whose
+ * version is newer than this program's is refused.
  */
 #define _POSIX_C_SOURCE 200809L /* getline, strdup */
 
@@ -562,16 +567,82 @@ static int exec(sqlite3 *db, const char *sql) {
   return 0;
 }
 
-/* the sites table of an older database has no self_instructions column: add it, so the importer works on it */
-static int ensure_self_column(sqlite3 *db) {
+/* ---- schema and migration ----
+ * SCHEMA_VERSION is the layout this program writes, kept in PRAGMA user_version. Version 0 is a database that never had a
+ * version: the first layout (runs without machine and the allocation totals, sites without self_instructions and the
+ * allocation counts) or an empty file. Each later layout is a migration step; for now there is one, which adds the columns
+ * of version 1 to version 2. migrate() is column-driven: it adds whichever column of added_columns the table lacks, so a
+ * database of any earlier layout reaches the current one.
+ */
+#define SCHEMA_VERSION 2
+
+typedef struct {
+  const char *table;
+  const char *column;
+  const char *decl; /* the column's type and constraints; NOT NULL columns carry DEFAULT 0 so existing rows stay valid */
+} column_spec;
+
+static const column_spec added_columns[] = {
+    {"runs", "machine", "TEXT"},
+    {"runs", "allocs", "INTEGER NOT NULL DEFAULT 0"},
+    {"runs", "alloc_bytes", "INTEGER NOT NULL DEFAULT 0"},
+    {"runs", "frees", "INTEGER NOT NULL DEFAULT 0"},
+    {"sites", "self_instructions", "INTEGER"},
+    {"sites", "allocs", "INTEGER NOT NULL DEFAULT 0"},
+    {"sites", "alloc_bytes", "INTEGER NOT NULL DEFAULT 0"},
+    {"sites", "frees", "INTEGER NOT NULL DEFAULT 0"},
+};
+
+/* whether TABLE has COLUMN, by PRAGMA table_info */
+static int has_column(sqlite3 *db, const char *table, const char *column, int *have) {
   sqlite3_stmt *st = NULL;
-  int have = 0;
-  if (sqlite3_prepare_v2(db, "SELECT 1 FROM pragma_table_info('sites') WHERE name = 'self_instructions';", -1, &st, NULL) != SQLITE_OK)
-    return 1;
-  if (sqlite3_step(st) == SQLITE_ROW) have = 1;
+  int rc;
+  *have = 0;
+  if (sqlite3_prepare_v2(db, "SELECT name FROM pragma_table_info(?1);", -1, &st, NULL) != SQLITE_OK) return 1;
+  sqlite3_bind_text(st, 1, table, -1, SQLITE_STATIC);
+  while ((rc = sqlite3_step(st)) == SQLITE_ROW)
+    if (strcmp((const char *)sqlite3_column_text(st, 0), column) == 0) *have = 1;
   sqlite3_finalize(st);
-  if (have) return 0;
-  return exec(db, "ALTER TABLE sites ADD COLUMN self_instructions INTEGER;");
+  return rc == SQLITE_DONE ? 0 : 1;
+}
+
+static int migrate(sqlite3 *db) {
+  sqlite3_stmt *st = NULL;
+  sqlite3_int64 version = 0;
+  size_t i;
+  char sql[256];
+  if (sqlite3_prepare_v2(db, "PRAGMA user_version;", -1, &st, NULL) != SQLITE_OK) return 1;
+  if (sqlite3_step(st) == SQLITE_ROW) version = sqlite3_column_int64(st, 0);
+  sqlite3_finalize(st);
+  if (version > SCHEMA_VERSION) {
+    fprintf(stderr, "prof2sql: database schema version %lld is newer than this prof2sql (version %d)\n", (long long)version,
+            SCHEMA_VERSION);
+    return 1;
+  }
+  if (exec(db, "BEGIN;") != 0) return 1;
+  if (exec(db, "CREATE TABLE IF NOT EXISTS runs(run_id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL,"
+               " imported_at TEXT NOT NULL DEFAULT (datetime('now')), format_version INTEGER NOT NULL,"
+               " events INTEGER NOT NULL, threads INTEGER NOT NULL, open_calls INTEGER NOT NULL, machine TEXT,"
+               " allocs INTEGER NOT NULL DEFAULT 0, alloc_bytes INTEGER NOT NULL DEFAULT 0, frees INTEGER NOT NULL DEFAULT 0);") != 0 ||
+      exec(db, "CREATE TABLE IF NOT EXISTS sites(run_id INTEGER NOT NULL REFERENCES runs(run_id), site INTEGER NOT NULL,"
+               " name TEXT NOT NULL, calls INTEGER NOT NULL, inclusive_ns INTEGER NOT NULL, exclusive_ns INTEGER NOT NULL,"
+               " self_instructions INTEGER, allocs INTEGER NOT NULL DEFAULT 0, alloc_bytes INTEGER NOT NULL DEFAULT 0,"
+               " frees INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (run_id, site));") != 0)
+    goto fail;
+  for (i = 0; i < sizeof added_columns / sizeof added_columns[0]; i++) {
+    const column_spec *c = &added_columns[i];
+    int have;
+    if (has_column(db, c->table, c->column, &have) != 0) goto fail;
+    if (have) continue;
+    snprintf(sql, sizeof sql, "ALTER TABLE %s ADD COLUMN %s %s;", c->table, c->column, c->decl);
+    if (exec(db, sql) != 0) goto fail;
+  }
+  snprintf(sql, sizeof sql, "PRAGMA user_version = %d;", SCHEMA_VERSION);
+  if (exec(db, sql) != 0) goto fail;
+  return exec(db, "COMMIT;");
+fail:
+  exec(db, "ROLLBACK;");
+  return 1;
 }
 
 static int store(sqlite3 *db, const char *source, const importer *im, uint32_t version) {
@@ -579,17 +650,6 @@ static int store(sqlite3 *db, const char *source, const importer *im, uint32_t v
   sqlite3_int64 run_id;
   size_t i;
   int rc = 1;
-  if (exec(db, "CREATE TABLE IF NOT EXISTS runs(run_id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL,"
-               " imported_at TEXT NOT NULL DEFAULT (datetime('now')), format_version INTEGER NOT NULL,"
-               " events INTEGER NOT NULL, threads INTEGER NOT NULL, open_calls INTEGER NOT NULL, machine TEXT,"
-               " allocs INTEGER NOT NULL, alloc_bytes INTEGER NOT NULL, frees INTEGER NOT NULL);") != 0)
-    return 1;
-  if (exec(db, "CREATE TABLE IF NOT EXISTS sites(run_id INTEGER NOT NULL REFERENCES runs(run_id), site INTEGER NOT NULL,"
-               " name TEXT NOT NULL, calls INTEGER NOT NULL, inclusive_ns INTEGER NOT NULL, exclusive_ns INTEGER NOT NULL,"
-               " self_instructions INTEGER, allocs INTEGER NOT NULL, alloc_bytes INTEGER NOT NULL, frees INTEGER NOT NULL,"
-               " PRIMARY KEY (run_id, site));") != 0)
-    return 1;
-  if (ensure_self_column(db) != 0) return 1;
   if (exec(db, "BEGIN;") != 0) return 1;
   if (sqlite3_prepare_v2(db,
                          "INSERT INTO runs(source, format_version, events, threads, open_calls, machine, allocs, alloc_bytes, frees)"
@@ -698,7 +758,8 @@ int main(int argc, char **argv) {
     free_importer(&im);
     return 1;
   }
-  rc = store(db, argv[1], &im, version);
+  rc = migrate(db);
+  if (rc == 0) rc = store(db, argv[1], &im, version);
   sqlite3_close(db);
   free_importer(&im);
   return rc;

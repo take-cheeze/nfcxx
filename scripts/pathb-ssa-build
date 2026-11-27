@@ -464,6 +464,8 @@ ld_trap = false
 no_fp = false
 safe = false
 asan = false
+prof = false
+cxx = false   # --cxx: the unit is C++ (--profile gives its functions a landing pad for the exit hook, scripts/pathb-ssa-qbe.rb)
 pic = false
 no_pie = false
 trap_checks = false
@@ -485,6 +487,8 @@ while args.first&.start_with?("-") && args.first != "-"
   when "--avx2" then $qbe_flags << "-Y"
   when "--safe" then safe = true
   when "--asan" then asan = true
+  when "--profile" then prof = true   # the profiler hooks (docs/notes/profiler.md, "Path B")
+  when "--cxx" then cxx = true        # a C++ unit: with --profile, the profiled functions unwind through their exit hook
   when "--debug-lines" then debug_lines = true   # -g: a dbgloc line for each (loc ...): the object's line table
   when "--pic" then pic = true
   when "--no-pie" then no_pie = true   # -fno-PIE: a function address is the symbol, not a cell
@@ -501,6 +505,8 @@ usage_exit if safe && output.nil?
 usage_exit if asan && safe   # both replace malloc and check accesses: one at a time
 Qbe.safe = safe
 Qbe.asan = asan
+Qbe.prof = prof
+Qbe.cxx = cxx
 Qbe.debug_lines = debug_lines
 Qbe.pic = pic
 Qbe.trap_checks = trap_checks

@@ -16,6 +16,10 @@ extern "C" {
 void __nfcxx_prof_enter(uint32_t site);
 void __nfcxx_prof_exit(uint32_t site);
 
+/* The same events, with the function's address as the site (gcc's hooks and the Path B hooks, nfcxx_prof_cyg.c). */
+void __nfcxx_prof_enter_addr(void *fn);
+void __nfcxx_prof_exit_addr(void *fn);
+
 /* 1 when a profile is being written, 0 otherwise. */
 int __nfcxx_prof_enabled(void);
 

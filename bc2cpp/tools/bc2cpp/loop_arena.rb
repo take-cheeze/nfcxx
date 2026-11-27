@@ -38,10 +38,11 @@ class LoopArena < RegisterFlow
     new(irep, texts, captured).place
   end
 
-  # The numeric ops' temporary (`{ mrb_value bc2cpp_nt; ... }`, codegen_insn.rb and cmp_num_outline.rb) and a yield's
-  # argument buffer (`{ mrb_value blkcall_args[] = { r1, r2 }; ... }`, OP_BLKCALL) are scoped to their own
-  # instruction's text, so they hold nothing at a backward jump.
-  SCOPED_TEMP = /\{\s*mrb_value (?:bc2cpp_nt;|blkcall_args\[\] =)/
+  # The numeric ops' temporary (`{ mrb_value bc2cpp_nt; ... }`, codegen_insn.rb and cmp_num_outline.rb), a yield's
+  # argument buffer (`{ mrb_value blkcall_args[] = { r1, r2 }; ... }`, OP_BLKCALL) and an Array literal's elements
+  # (`{ mrb_value elems[] = { r1, r2 }; ... }`, OP_ARRAY) are scoped to their own instruction's text, so they hold
+  # nothing at a backward jump.
+  SCOPED_TEMP = /\{\s*mrb_value (?:bc2cpp_nt;|blkcall_args\[\] =|elems\[\] =)/
 
   def self.foreign_locals?(text, params)
     text.gsub(SCOPED_TEMP, '{').scan(/\bmrb_value\s*(\*?)\s*([A-Za-z_]\w*)\s*(\[?)/).any? do |star, name, bracket|
