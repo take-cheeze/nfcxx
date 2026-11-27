@@ -143,7 +143,7 @@ check test "$rc" -eq 0
 check test ! -e "$work/nested_depth/NOT_BUILDABLE"
 check grep -qF 'return mrb_bool_value(mrb_obj_is_kind_of(mrb, mrb_ary_entry(mrb_ary_entry(x, i), 0), mrb->string_class));' "$work/nested_depth/src/nested_depth.c"
 check grep -qF 'return mrb_bool_value(mrb_obj_is_kind_of(mrb, mrb_ary_entry(mrb_ary_entry(mrb_ary_entry(x, i), 0), 1), mrb->string_class));' "$work/nested_depth/src/nested_depth.c"
-check grep -qF '    mrb_exc_raise(mrb, mrb_obj_value(mrb->exc));' "$work/nested_depth/src/nested_depth.c"
+check grep -qF '    ((mrb->exc) ? mrb_exc_raise(mrb, mrb_obj_value(mrb->exc)) : (void)0);' "$work/nested_depth/src/nested_depth.c"
 check sh -c "! grep -q '^ *return[^*]*[^m]rb_ary_entry\|^ *rb_jump_tag\|^ *return[^*]*FIX2INT\|Traceback' '$work/nested_depth/src/nested_depth.c' '$work/nested_depth.log'"
 rc=0; "$rb" "$conv" --scanner "$scanner" --name nested_depth_four tools/cext2mrbgem/fixtures/nested_depth_four/ext/nested_depth_four "$work/nested_depth_four" > "$work/nested_depth_four.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
@@ -892,7 +892,7 @@ check grep -qF 'return mrb_gv_get(mrb, mrb_intern_lit(mrb, "$~"));' "$work/api_r
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_jump_tag tools/cext2mrbgem/fixtures/api_jump_tag/ext/api_jump_tag "$work/api_jump_tag" > "$work/api_jump_tag.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check test ! -e "$work/api_jump_tag/NOT_BUILDABLE"
-check grep -qF 'mrb_exc_raise(mrb, mrb_obj_value(mrb->exc));' "$work/api_jump_tag/src/api_jump_tag.c"
+check grep -qF '((mrb->exc) ? mrb_exc_raise(mrb, mrb_obj_value(mrb->exc)) : (void)0);' "$work/api_jump_tag/src/api_jump_tag.c"
 
 # 2zn. RUBY_TYPED_* flags (api_map.json batch N9): mruby has no such flags, so each is 0 (caveated)
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_typed_flags tools/cext2mrbgem/fixtures/api_typed_flags/ext/api_typed_flags "$work/api_typed_flags" > "$work/api_typed_flags.log" 2>&1 || rc=$?
