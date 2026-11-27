@@ -11,7 +11,8 @@
 #                    prefix, equals the mruby's (the class in parentheses included).
 #   lower/err/*.rb   a program with an opcode, operand form or table the producer does not lower yet. It is refused: the
 #                    lowering exits 3, writes "refused:" on stderr and nothing on stdout. A program with more than 255
-#                    registers (EXT1 prefixes) is generated here and refused the same way.
+#                    registers (EXT1 prefixes) is generated here and refused the same way. --report-all lists that
+#                    refusal first (and every one, as err/NAME.report says when it exists); it lists none for lower/*.rb.
 # A program that is refused never reaches the emitter, so a refusal is not a silent miscompile.
 #
 #   tests/mrbbc/lower/run.sh
@@ -87,6 +88,9 @@ for rb in "$dir"/*.rb "$wide_ok"; do
   base=$(basename "$rb" .rb)
   if ! msg=$(build "$rb" "$base"); then echo "FAIL $base: $msg"; fail=1; continue; fi
   value_ref "$rb" "$work/$base.ref.rb"
+  if ! report=$("$work/lower" --report-all "$work/$base.rite" 2> /dev/null) || [ -n "$report" ]; then
+    echo "FAIL $base: --report-all lists [$(echo "$report" | head -n 1)]"; fail=1; continue
+  fi
   got=$("$work/$base") || { echo "FAIL $base: the program exited with status $?"; fail=1; continue; }
   want=$("$MRUBY" "$work/$base.ref.rb") || { echo "FAIL $base: the reference failed"; fail=1; continue; }
   n=$((n + 1))
@@ -119,6 +123,16 @@ for rb in "$dir"/err/*.rb "$wide_ext"; do
   ne=$((ne + 1))
   if [ "$status" -ne 3 ] || ! grep -q '^refused: ' "$work/$base.err" || [ -s "$work/$base.out" ]; then
     echo "FAIL $base: status $status, stderr [$(head -n 1 "$work/$base.err")]"
+    fail=1
+    continue
+  fi
+  "$work/lower" --report-all "$work/$base.rite" > "$work/$base.report" 2> /dev/null; status=$?
+  first=$(head -n 1 "$work/$base.report" | sed -E 's/^[^:]*: //')
+  if [ "$status" -ne 3 ] || [ "$first" != "$(head -n 1 "$work/$base.err")" ]; then
+    echo "FAIL $base: --report-all status $status, first [$first]"
+    fail=1
+  elif [ -f "${rb%.rb}.report" ] && ! diff -u "${rb%.rb}.report" "$work/$base.report"; then
+    echo "FAIL $base: --report-all differs from $(basename "${rb%.rb}").report"
     fail=1
   fi
 done

@@ -1,0 +1,6 @@
+mrb_irep_0: refused: TDEF of method 'f' has a block parameter (&b) (not lowered yet) (pc 0)
+mrb_irep_0: refused: SEND0 of method 'abs' is not lowered yet (pc 19)
+mrb_m0 (f): refused: mrb_m0 has a block parameter (&b), which is not lowered yet
+mrb_m0 (f): refused: SEND0 of method 'call' is not lowered yet (pc 10)
+mrb_m1 (g): refused: LOADL of a non-integer constant is not lowered yet (pc 4)
+mrb_m1 (g): refused: opcode SETGV is not lowered yet (pc 7)
