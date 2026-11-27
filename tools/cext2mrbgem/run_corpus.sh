@@ -10,7 +10,8 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 SRC=${1:?usage: run_corpus.sh CORPUS_SRC OUT_DIR}
 OUT=${2:?usage: run_corpus.sh CORPUS_SRC OUT_DIR}
-export NFCX_MRUBY_INCLUDE=${NFCX_MRUBY_INCLUDE:-/home/user/mruby/include:/home/user/mruby/build/host/include:/home/user/mruby/mrbgems/mruby-encoding/include:/home/user/mruby/mrbgems/mruby-time/include:/home/user/nfcxx/3rd/mruby-marshal/include}
+# the mruby headers of the repo's own 3rd/mruby fork tree (the include dirs its source has; overridable by env)
+export NFCX_MRUBY_INCLUDE=${NFCX_MRUBY_INCLUDE:-$REPO/3rd/mruby/include:$REPO/3rd/mruby/mrbgems/mruby-encoding/include:$REPO/3rd/mruby/mrbgems/mruby-time/include:$REPO/3rd/mruby/mrbgems/mruby-marshal/include:$REPO/3rd/mruby/mrbgems/mruby-require/include}
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 to=0; ts=0

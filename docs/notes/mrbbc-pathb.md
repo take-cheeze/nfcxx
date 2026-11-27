@@ -88,6 +88,9 @@ The full nfcxx command-line driver still needs modules, general constants/global
 
 ### Optional libuv host runtime
 
+For language-independent boxed argument frames and explicit typed integer exports, see
+[`pathb-call.md`](pathb-call.md). That interface does not depend on the hosted adapter below.
+
 The standalone runtime also has an optional hosted build, enabled with `MRBBC_LIBUV=1`. It lowers `ARGV`, `$0`/
 `$PROGRAM_NAME`, `$stdin`/`$stdout`/`$stderr` (and `STDIN`/`STDOUT`/`STDERR`), standard-stream `read` without a length,
 standard-stream `write(string)`, `File.read(path)`, `File.write(path, string)`, `File.exist?`, `File.file?`,

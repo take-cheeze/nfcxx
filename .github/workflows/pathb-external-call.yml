@@ -1,0 +1,51 @@
+name: Path B external boxed calls
+
+# Large optional SDKs stay out of ordinary PR CI. This reproduces the real-library integration explicitly.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  external-call:
+    runs-on: ubuntu-24.04
+    env:
+      CC: clang
+      CXX: clang++
+      QT6: '1'
+      TVM_FFI_ROOT: ${{ github.workspace }}/build/call-deps/tvm-ffi
+      TVM_FFI_LIBDIR: ${{ github.workspace }}/build/call-deps/tvm-ffi/build/lib
+      LIBTORCH: ${{ github.workspace }}/build/call-deps/libtorch
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '4.0'
+          bundler-cache: true
+      - name: C/C++ build tools and Qt Core development files
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends build-essential clang cmake ninja-build pkg-config qt6-base-dev curl unzip
+      - name: Build pinned tvm-ffi C++ runtime
+        run: |
+          mkdir -p "$TVM_FFI_ROOT"
+          git -C "$TVM_FFI_ROOT" init
+          git -C "$TVM_FFI_ROOT" remote add origin https://github.com/apache/tvm-ffi.git
+          git -C "$TVM_FFI_ROOT" fetch --depth=1 origin 05e3a7c5568b5e21c92f50aa7b916fe25e674b61
+          git -C "$TVM_FFI_ROOT" checkout --detach FETCH_HEAD
+          git -C "$TVM_FFI_ROOT" submodule update --init --depth=1 3rdparty/dlpack
+          cmake -S "$TVM_FFI_ROOT" -B "$TVM_FFI_ROOT/build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DTVM_FFI_USE_LIBBACKTRACE=OFF -DTVM_FFI_BACKTRACE_ON_SEGFAULT=OFF -DTVM_FFI_USE_EXTRA_CXX_API=OFF
+          cmake --build "$TVM_FFI_ROOT/build" -j 2
+      - name: Pinned CPU libtorch C++ distribution
+        working-directory: build/call-deps
+        run: |
+          curl -fL --retry 3 'https://download.pytorch.org/libtorch/cpu/libtorch-cxx11-abi-shared-with-deps-2.5.1%2Bcpu.zip' -o libtorch.zip
+          echo '618ca54eef82a1dca46ff1993d5807d9c0deb0bae147da4974166a147cb562fa  libtorch.zip' | sha256sum -c -
+          unzip -q libtorch.zip
+      - name: Real libraries and complete nested chain, all value layouts
+        run: |
+          scripts/setup-mrbbc.sh
+          scripts/setup-qbe.sh
+          bundle exec ruby tests/bc2cpp/mrbbc_external_call.rb
