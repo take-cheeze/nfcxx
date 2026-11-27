@@ -295,8 +295,8 @@ for its closure.
   a program of this subset defines methods on), then R[a] = the symbol, as `vm.c` sets it. A redefinition wins.
 - `SSEND0 a b`, `SSEND a b c` and `SSENDB a b c` (self's method, with `n` = c arguments): the arguments R[a+1..a+n] are
   copied into a vector of their own, self first. `mrbbc_find(name, n)` returns the number of the latest definition of
-  the name, or raises. The call is then one branch per method of the module: `if id == N then mrb_m<N>(&R[a], argv,
-  blk)`, where blk is R[a+n+1] for SSENDB and a nil slot otherwise. A method's return writes R[a] through `ret`, so the
+  the name, or raises. The call is then one branch per method of the module with that name (the runtime only gives
+  numbers a def of the name registered): `if id == N then mrb_m<N>(&R[a], argv, blk)`, where blk is R[a+n+1] for SSENDB and a nil slot otherwise. A method's return writes R[a] through `ret`, so the
   caller's register gets the result as `RETURN` gives it.
 - Only names the program defines are lowered for a self call (`sh.defined`). A self call to a name the program does not
   define is refused, so `foo` with no `def foo` is not in the lowered set, and the `NoMethodError` of an undefined
@@ -338,7 +338,7 @@ same way: the cbase is nil there too, so the class is defined under the body's s
 - `GETCONST a b` (`mrbbc_getconst`): the class named Syms[b] (any class of the program, by its plain name, so a nested
   class is also found from anywhere); an unknown name is `NameError` (`uninitialized constant NAME`).
 - `SEND0`, `SEND` and `SENDB` with an explicit receiver: when the program defines the name in a class, one branch per
-  method of the module is taken for the id `mrbbc_find_send` returns (the receiver's class's method, with its arity
+  method of the name is taken for the id `mrbbc_find_send` returns (the receiver's class's method, with its arity
   checked); otherwise the builtin of the name runs (`new`, the SEND0 methods and the binary methods), and a name none of
   those has is NoMethodError (`undefined method 'NAME' for CLASS`). A name only a top-level def defines is refused (it is
   private in mruby, and that error is not reproduced).

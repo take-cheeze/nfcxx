@@ -137,6 +137,21 @@ for rb in "$dir"/err/*.rb "$wide_ext"; do
   fi
 done
 
+# A call site branches only to the methods of its name: the IR of a class with n one-line methods that one method calls in
+# turn grows linearly with n (about twice for twice the methods), not with n * n.
+dispatch_ir() {
+  local n=$1 rb=$work/dispatch$1.rb i
+  { echo "class C"; for i in $(seq 1 "$n"); do echo "  def m$i(x) = x + $i"; done
+    echo "  def all(x)"; for i in $(seq 1 "$n"); do echo "    x = m$i(x)"; done; echo "    x"; echo "  end"; echo "end"
+    echo "C.new.all(0)"; } > "$rb"
+  "$MRBC" -o "$work/dispatch$n.rite" "$rb" > /dev/null 2>&1 && "$work/lower" --value="$VALUE" "$work/dispatch$n.rite" | wc -c
+}
+small=$(dispatch_ir 60) big=$(dispatch_ir 120)
+if [ -z "$small" ] || [ -z "$big" ] || [ "$small" -eq 0 ] || [ $((big * 10 / small)) -gt 25 ]; then
+  echo "FAIL dispatch size: the IR of 60 methods is [$small] bytes, of 120 [$big] bytes (more than 2.5 times)"
+  fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "mrbbc-lower: FAILED"
   exit 1
