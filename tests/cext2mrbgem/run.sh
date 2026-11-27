@@ -1118,6 +1118,31 @@ check test -e "$work/reg_split_refused/NOT_BUILDABLE"
 check grep -qF '  rsr_make  registered method function is also called directly (not supported) (its direct caller rsr_plain_caller has no mruby state in scope' "$work/reg_split_refused/REFUSALS.txt"
 check sh -c "! grep -q 'rsr_make_impl' '$work/reg_split_refused/src/reg_split_refused.c'"
 
+# 2x2. direct calls of a registered method, two call sites: the method is split and both calls go to its impl. The method's
+# name is also a parameter of a prototype and a definition, and a local of a nested block (in scope there only) with an
+# assignment to it: those are variables, not calls, so they do not refuse the method and keep their names.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name reg_direct tools/cext2mrbgem/fixtures/reg_direct/ext/reg_direct "$work/reg_direct" > "$work/reg_direct.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/reg_direct/NOT_BUILDABLE"
+check grep -qF 'static mrb_value rd_tally_impl(mrb_state *mrb, mrb_value self, mrb_value x) {' "$work/reg_direct/src/reg_direct.c"
+check grep -qF 'static mrb_value rd_tally(mrb_state *mrb, mrb_value self) {' "$work/reg_direct/src/reg_direct.c"
+check grep -qF 'mrb_value a = rd_tally_impl(mrb, self, self);' "$work/reg_direct/src/reg_direct.c"
+check grep -qF 'mrb_value b = rd_tally_impl(mrb, self, a);' "$work/reg_direct/src/reg_direct.c"
+check grep -qF 'mrb_value rd_tally = mrb_nil_value();' "$work/reg_direct/src/reg_direct.c"
+check grep -qF 'a = rd_tally;' "$work/reg_direct/src/reg_direct.c"
+check grep -qF 'static mrb_value rd_helper(mrb_state *mrb, mrb_value self, mrb_value rd_tally) {' "$work/reg_direct/src/reg_direct.c"
+check grep -qF '    return rd_tally;' "$work/reg_direct/src/reg_direct.c"
+check grep -qF 'mrb_define_method(mrb, mRegDirect, "tally", rd_tally, MRB_ARGS_REQ(1));' "$work/reg_direct/src/reg_direct.c"
+check sh -c "! grep -q 'rd_tally_impl;\|rd_tally(mrb, self, ' '$work/reg_direct/src/reg_direct.c'"
+# negative: the name's address is taken before a local of the same name is declared (the first use is the file-scope function):
+# the method keeps its refusal, and the local's uses are not refused
+rc=0; "$rb" "$conv" --scanner "$scanner" --name reg_direct_addr tools/cext2mrbgem/fixtures/reg_direct_addr/ext/reg_direct_addr "$work/reg_direct_addr" > "$work/reg_direct_addr.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test -e "$work/reg_direct_addr/NOT_BUILDABLE"
+check grep -qF 'rda_tally  registered method function is also called directly (not supported) (its address is taken, so a pointer would reach the wrapper)' "$work/reg_direct_addr/REFUSALS.txt"
+check sh -c "! grep -q 'rda_tally_impl' '$work/reg_direct_addr/src/reg_direct_addr.c'"
+check sh -c "[ \"\$(grep -c 'registered method function is also called directly' '$work/reg_direct_addr/REFUSALS.txt')\" -eq 1 ]"
+
 # 2j. lowercase CRuby APIs (st_*, ruby_*) are refused, not passed silently
 ruby tools/cext2mrbgem/convert_mrbgem.rb --name lowercase_api_refused tools/cext2mrbgem/fixtures/lowercase_api_refused/ext/lowercase_api_refused "$work/lowercase_api_refused" > "$work/lowercase_api_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2

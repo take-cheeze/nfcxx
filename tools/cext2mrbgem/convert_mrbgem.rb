@@ -1443,9 +1443,10 @@ texts.each_key { |k| texts[k] = expand_function_macros(texts[k]) }
   def refuse_direct_uses(name)
     msg = 'registered method function is also called directly (not supported)'
     msg += " (#{@split_reason[name]})" if @split_reason[name]
-    uses = (@occ[name] || []).reject do |rel, s, _e|
+    uses = (@occ[name] || []).reject do |rel, s, e|
       @regs.any? { |r| r['error'].nil? && r['file'] == rel && r['open'] <= s && s <= r['close'] } ||
-        @decls.any? { |d| d['name'] == name && rel == d['file'] && d['hstart'] <= s && s < d['hend'] }
+        @decls.any? { |d| d['name'] == name && rel == d['file'] && d['hstart'] <= s && s < d['hend'] } ||
+        not_a_function_use?(name, rel, s, e)
     end
     # A method whose body reads its arguments from the call frame (rb_scan_args) cannot be called directly: the direct
     # call F(n, NULL, self) would read the caller's frame. Called through its name (mrb_funcall_argv) it runs in its own
@@ -1633,6 +1634,64 @@ texts.each_key { |k| texts[k] = expand_function_macros(texts[k]) }
     !(body =~ /(?<![#{WC}])(?!return(?![#{WC}])|else(?![#{WC}])|case(?![#{WC}])|goto(?![#{WC}]))[A-Za-z_][#{WC}]*[ \t\n\*]+#{n}#{SS}[=;,\[)]|\(#{SS}\*#{SS}#{n}#{SS}\)/).nil?
   end
 
+  # A use of NAME that is not a reference to a function: the identifier names a variable, a parameter, or text that is not
+  # C code. Such a use is not a call and does not take the address of the function, so the split and the refusal skip it.
+  # A use followed by '(' is never skipped (a call through a hiding name is decided by the split). The uses that qualify:
+  #  - in a #pragma or #include line (not C code);
+  #  - a declarator: a parameter or variable declared here (a type word, then optional '*', before the name, and a ',',
+  #    ')', ';', '=' or '[' after it);
+  #  - a file-scope variable of this name in the same file (every use in that file is the variable);
+  #  - a parameter of the enclosing function, or a local declared in a block of its body whose scope contains the use
+  #    (a declaration is in scope from its statement to the closing brace of its block).
+  # Conservative: a declaration not recognised leaves its uses as uses (a refusal, never a wrong rewrite).
+  def not_a_function_use?(name, rel, s, e)
+    masked = @files[rel]['masked']
+    nx = next_nonspace(masked, e)
+    return false if nx >= 0 && masked[nx] == '('
+    ls = s.zero? ? 0 : (masked.rindex("\n", s - 1) || -1) + 1
+    return true if masked[ls..].to_s[/\A[ \t]*#[ \t]*(pragma|include)\b/]
+    after = nx >= 0 ? masked[nx] : ''
+    before = masked[[s - 120, 0].max...s].to_s
+    return true if after.match?(/[,);=\[]/) &&
+                   before.match?(/(?<![#{WC}])(?!(?:return|else|case|goto|sizeof|do|typedef)(?![#{WC}]))[A-Za-z_][#{WC}]*[ \t\n]*\**[ \t\n]*\z/)
+    return true if file_scope_var_names(rel).include?(name)
+    fn = enclosing_func(rel, s)
+    fn ? shadowed_at?(name, fn, s) : false
+  end
+
+  # true when a parameter of fn, or a local declared in a block of fn whose scope contains pos, is named name at pos
+  def shadowed_at?(name, fn, pos)
+    return true if param_names(fn).include?(name)
+    block_decl_scopes(fn).any? { |nm, seg, close| nm == name && seg <= pos && pos < close }
+  end
+
+  # the file-scope variables of a file: the top-level declarators of the file text (outside every brace)
+  def file_scope_var_names(rel)
+    @file_scope_vars ||= {}
+    @file_scope_vars[rel] ||= begin
+      masked = @files[rel]['masked']
+      body_top_declarations({ 'file' => rel, 'brace' => -1, 'body_end' => masked.length }).map(&:first).to_set
+    end
+  end
+
+  # [name, declaration position, scope end] for the top-level declarators of each block of fn (its body and nested blocks)
+  def block_decl_scopes(fn)
+    @block_decl_scopes ||= {}
+    @block_decl_scopes[[fn['file'], fn['brace']]] ||= begin
+      masked = @files[fn['file']]['masked']
+      out = []
+      masked[fn['brace']..fn['body_end']].to_enum(:scan, /\{/).each do
+        open = fn['brace'] + Regexp.last_match.begin(0)
+        close = match_close(masked, open)
+        next if close < 0 || close > fn['body_end']
+        body_top_declarations({ 'file' => fn['file'], 'brace' => open, 'body_end' => close }).each do |nm, seg|
+          out << [nm, seg, close]
+        end
+      end
+      out
+    end
+  end
+
   def split_problem(name, uses)
     return 'it has more than one definition' if @defs[name].size != 1
     return "the names #{name}_impl and #{name}_nfcx_impl are already used in the input" if @occ.key?("#{name}_impl") && @occ.key?("#{name}_nfcx_impl")
@@ -1659,13 +1718,15 @@ texts.each_key { |k| texts[k] = expand_function_macros(texts[k]) }
       next if is_member(masked, s)
       ob = enclosing_open_brace(masked, s)
       next if ob && masked[[ob - 60, 0].max...ob].to_s.match?(/\b(?:struct|union)[ \t\n]*[A-Za-z_]?\w*[ \t\n]*\z/)
+      # a parameter, variable or #include name of the same name is not a use of the function (not_a_function_use?)
+      next if not_a_function_use?(name, rel, s, e)
       if @files[rel]['kind'] != 'src' && !single_src_header?(rel)
         return "it is used in #{rel}, a header, whose function bodies are not converted (it is not included by exactly one source)"
       end
       nx = next_nonspace(masked, e)
       return 'its address is taken, so a pointer would reach the wrapper' unless nx >= 0 && masked[nx] == '('
       fn = enclosing_func(rel, s)
-      return 'its name is shadowed in a function that calls it' if fn && shadowed_in?(name, fn)
+      return 'its name is shadowed in a function that calls it' if fn && shadowed_at?(name, fn, s)
     end
     nil
   end
@@ -2980,6 +3041,8 @@ end
         # a file-scope array of this name in this file is a variable, not a use of a helper of the same name elsewhere
         next if @files[rel]['masked'].match?(/^[ \t]*(?:static[ \t]+|const[ \t]+)*[A-Za-z_][\w \t\*]*?\b#{Regexp.escape(name)}[ \t]*\[[^\]\n]*\][ \t]*(?:=|;)/)
         next if @decls.any? { |d| d['name'] == name && rel == d['file'] && d['hstart'] <= s && s < d['hend'] }
+        # a split registered method: a parameter, variable or #include name of the same name is not a use (not_a_function_use?)
+        next if @split_names.include?(name) && not_a_function_use?(name, rel, s, e)
         # the body of an object-like alias (#define alias real_name): its invocations are the uses, resolved by object_macro_name
         lstart = @files[rel]['masked'].rindex("\n", s - 1) || -1
         dline = @files[rel]['masked'][(lstart + 1)...s].to_s
@@ -3095,7 +3158,8 @@ use_problem = lambda do |name, use|
         next ('helper needs the mruby state threaded in, but the call is not in a function definition the ' \
               'converter recognises (a macro-decorated definition, or file scope) (not supported)')
       end
-      if shadowed.call(name, fn)
+      # a split registered method is tested at the call (a local hides the name from its declaration on, in its block)
+      if (@split_names.include?(name) ? shadowed_at?(name, fn, s) : shadowed.call(name, fn))
         next 'helper needs the mruby state threaded in, but its name is shadowed in the calling function (not supported)'
       end
       nil
@@ -5625,9 +5689,11 @@ end
     # 4b. a direct call of a split registered method calls its impl (the mrb argument, if any, is added above). A
     # use inside a registration is the wrapper's name, and stays.
     @split_names.to_a.sort.each do |name|
-      (@occ[name] || []).each do |orel, s, _e|
+      (@occ[name] || []).each do |orel, s, oe|
         next if orel != rel || header_spans.any? { |a, b| a <= s && s < b }
         next if @regs.any? { |r| r['error'].nil? && r['file'] == rel && r['open'] <= s && s <= r['close'] }
+        # a parameter, local or #include name of the same name is not a call (not_a_function_use?): it keeps its name
+        next if not_a_function_use?(name, rel, s, oe)
         # a member access or a struct or union field named like the method is not a call of it
         mk = @files[rel]['masked']
         next if is_member(mk, s)
