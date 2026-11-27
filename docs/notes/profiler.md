@@ -17,13 +17,15 @@ Implemented so far (prototype, format version 1):
   with it the file holds the expected pairs at two sites over three threads, with enters and exits alternating per thread
   and timestamps not going backwards.
 
-- `--profile` in the driver (`scripts/nfcxx-loop.rb`): adds `-finstrument-functions` to the C compiles and links
+- `--profile` in the driver: the default route (Path B on x86-64 Linux, `scripts/nfcxx-pathb.rb`) passes `--profile` to
+  `pathb-cc.rb` and links the runtime (see "Path B hooks" below); `--backend=pathb --profile` is the same route. With the gcc
+  backend (`--backend=gcc`, or elsewhere) the driver adds `-finstrument-functions` to the C compiles and links
   `lib/prof/nfcxx_prof.c` and `lib/prof/nfcxx_prof_cyg.c`, which map gcc's `__cyg_profile_func_enter/exit` onto the
-  runtime. It implies the gcc backend and is refused with `--backend=pathb`. The site of a function is its address for now.
-  `tests/prof/run.sh` builds `cprog.c` with it and checks the profile (`check_any.c`): fib(10) gives 178 pairs at 2 sites.
-  C and C++ inputs on the gcc route are covered (`tests/prof/cxx.sh` for C++); the nfcast tier is not. The runtime is
-  compiled as C (cfiles) without `-finstrument-functions`, and for C++ the flag reaches the gcc compile of the C that EDG
-  emits (the `profile_opts` group of the eccp call).
+  runtime (`scripts/nfcxx-loop.rb`). The site of a function is its address for now.
+  `tests/prof/run.sh` builds `cprog.c` with the gcc backend and checks the profile (`check_any.c`): fib(10) gives 178 pairs at
+  2 sites. `tests/prof/pathb.sh` does the same for `cprog.c` and `cxxprog.cpp` (179 pairs at 3 sites) through Path B.
+  The runtime is compiled as C (cfiles) without `-finstrument-functions`, and for C++ the flag reaches the gcc compile
+  of the C that EDG emits (the `profile_opts` group of the eccp call).
 
 Not yet done: the Path B IR does not emit the calls, the nfcast tier does not
 emit them, the file has no IR hash, and no compute counts from the runtime (callgrind gives them offline, see "Compute counts" below). The
@@ -170,8 +172,9 @@ assembly is unchanged: `tests/pathb-prof/run.sh` checks the hooks are referenced
 the untouched HEAD is byte-identical to one from the working tree.
 
 Limits, not done:
-- The driver does not yet route `--profile` through Path B: `scripts/nfcxx-loop.rb` still forces the gcc backend for it, and
-  the Path B link does not add the runtime. The test links the runtime by hand.
+- The driver routes `--profile` through Path B (`scripts/nfcxx-pathb.rb`, `tests/prof/pathb.sh`): the runtime's C sources are
+  compiled by `pathb-cc.rb` without `--profile` and with `-DNFCXX_PROF_NO_TSC=1`, so the clock is CLOCK_MONOTONIC (the SSA
+  route has no `__builtin_ia32_rdtsc`). A Path B build that falls back to gcc (an unported construct) uses gcc's hooks instead.
 - A function left by a C++ exception (or a longjmp) does not run its exit hook, so its call stays open in the profile. The
   EH landing pads would need the exit hook too.
 - `tests/pathb-cc/run.sh` already fails on HEAD for `template` and `ir-opt-inline-explicit` (their objects differ from the
