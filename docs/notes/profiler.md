@@ -24,8 +24,8 @@ Implemented so far (prototype, format version 1):
   Only C inputs are covered so far; the C++ path and the nfcast tier are not.
 
 Not yet done: the Path B IR does not emit the calls, the C++ path does not pass the flag through, the nfcast tier does not
-emit them, the file has no IR hash, and no allocation or compute counts. The string table of site names is done (below). Those are the next
-steps below.
+emit them, the file has no IR hash, and no compute counts from the runtime (callgrind gives them offline, see "Compute counts" below). The
+string table of site names is done (below). Those are the next steps below.
 
 ## Switching on
 
@@ -63,8 +63,8 @@ was used (`clock=tsc` or `clock=monotonic`). Measured on one machine only; the f
 2. **Allocation counts.** Count `malloc` and `free` calls and bytes. Two ways: `--wrap=malloc` at link time for compiled
    programs, and the `gc_alloc` chokepoint in `lib/ast/nfcast_core.cpp` (plus the one direct `std::malloc` there) for nfcast.
    Counts go into the per-function record; sampling by bytes is kept for stack capture.
-3. **Compute counts.** From callgrind (instruction counts) as the external cross-check; from node evaluations for nfcast,
-   counted in the existing dispatch.
+3. **Compute counts.** Done for C programs from callgrind, as the external cross-check (see "Compute counts" below). Still to
+   do: node evaluations for nfcast, counted in the existing dispatch.
 4. **nfcast tier.** Emit the calls into the tier's generated C when profiling is on, and add the profiling flag to the cache
    key so instrumented and plain code are never served in place of each other.
 
@@ -97,3 +97,40 @@ Two more chunks, both written at exit with a reserved tid and counted in bytes:
 
 `tools/prof/prof2sql.c` stores the machine text and the three totals on each `runs` row. Per-site allocation counts need
 stack capture and are not done.
+
+## Compute counts (C programs, from callgrind)
+
+The compute count of a site is its **self instructions**: callgrind's `Ir` (instructions executed) for the site's function,
+counting only the cost lines of the function's own code. Callgrind records the cost of a call on the call line as the
+callee's inclusive cost, so the self figure leaves out the callees. It is stored as `sites.self_instructions`
+(`tools/prof/prof2sql.c`, optional third argument `CALLGRIND_OUT`; NULL when no callgrind file is given).
+
+What it counts and what it does not:
+
+- Counted: the function's own instructions, including the set-up of the hook call that `-finstrument-functions` adds at the
+  enter and exit of each call. The hooks' bodies are separate callgrind functions (`__cyg_profile_func_enter`,
+  `__nfcxx_prof_enter` and so on). In the `cprog` run each runs 178 times at about 14 to 15 Ir per call, about 10,000 of the
+  479,000 instructions of the whole run. They belong to no site, so the profiler's own cost is visible this way.
+- Not counted: callees the profiler did not instrument, such as libc's `malloc` and `printf`. They are separate callgrind functions and
+  outside the site's self Ir, but their time is inside its `exclusive_ns`. So for `main` the two figures measure different
+  things (147 Ir against about 2 ms of exclusive time); for `fib` they agree in kind.
+- Recursion: callgrind names the recursive levels `fib`, `fib'2`, and so on. A site sums all of them.
+
+Matching a site to a callgrind function (`map_callgrind` in `tools/prof/prof2sql.c`):
+
+- A site named by its symbol (an exported function such as `main`) matches the callgrind function of that name.
+- A site named `+0x<offset>` is a static function. Callgrind names it by its symbol, but the profile does not carry that
+  name. The callgrind file is therefore written with `--dump-instr=yes`, which gives the address of each function's entry
+  (the target of its first call). A base is taken from a named site: `base = entry(named) - site(named)`, which is the link
+  address of `__executable_start`. The `+0x` site then matches the function whose entry is `base + offset`.
+- Where it can fail: (1) a profile with no symbol-named site that callgrind has an entry for (no `main`, say): the `+0x`
+  sites stay NULL and prof2sql warns; (2) a static function reached only by a tail jump, which callgrind records as a jump
+  rather than a call, has no entry and stays NULL; (3) two callgrind functions at one entry address (aliases): the first
+  one found is used. The check in `tests/prof/callgrind_check.py` maps `+0x` sites through nm instead, so any disagreement
+  with the entry mapping is a FAIL.
+
+Test: `tests/prof/callgrind.sh`, which runs `tests/prof/callgrind_check.py`. It is a separate test and not in the default
+run. It needs valgrind and takes about a second here (the driver build included), well under the 30 s limit, so it could
+join the default run if valgrind is assumed. Its checks: callgrind's self Ir sums to its totals; main's inclusive Ir is at
+least fib's self Ir; the callgrind entries of `main` and `fib` equal their nm addresses; and for each site the profile's
+calls equal callgrind's calls and `self_instructions` equals the self Ir found through nm.

@@ -12,7 +12,7 @@ Three kinds of data, kept apart so that each can be reused:
 | --- | --- | --- |
 | **Program behaviour**: per-site calls, inclusive and exclusive time, timeline | `lib/prof` profile file | SQLite, `runs` and `sites` (done: `tools/prof/prof2sql.c`) |
 | **Machine parameters**: cores, cache sizes and line sizes, ISA flags, clock, measured bandwidth and flop rate | `lib/prof/nfcxx_machine` probe (in progress) | SQLite, `machines` (planned) |
-| **Workload counts**: allocations and bytes, compute operations, input sizes | counters (planned) | SQLite, `sites` columns and `size_samples` (planned) |
+| **Workload counts**: allocations and bytes, compute operations, input sizes | counters (planned); compute operations for C from callgrind | SQLite, `sites` columns (`self_instructions` done) and `size_samples` (planned) |
 
 The model reads the three and writes predictions and diagnoses. It never reads the hardware directly, so a model run on
 stored data gives the same answer on any machine.
@@ -66,13 +66,16 @@ threads; the first version uses only Amdahl.
 What exists (`tools/prof/prof2sql.c`, test `tests/prof/sqlite.sh`):
 
 - `runs(run_id, source, imported_at, format_version, events, threads, open_calls)`
-- `sites(run_id, site, name, calls, inclusive_ns, exclusive_ns)`, key `(run_id, site)`
+- `sites(run_id, site, name, calls, inclusive_ns, exclusive_ns, self_instructions)`, key `(run_id, site)`. The last column
+  is the compute count of a C site: callgrind's self Ir of its function, NULL unless prof2sql is given a callgrind file
+  (`docs/notes/profiler.md`, "Compute counts").
 
 Planned:
 
 - `machines(machine_id, cpu_model, isa_flags, ncpu, caches_json, clock_ghz, bandwidth_gbps, flops_gflops, probed_at)`, and
   `runs.machine_id` to link each run to the machine it ran on.
-- `sites.allocs`, `sites.alloc_bytes`, `sites.compute_ops` (from the counters), and `sites.intensity` (computed).
+- `sites.allocs`, `sites.alloc_bytes`, and `sites.intensity` (computed). `compute_ops` is `self_instructions` for C (callgrind
+  Ir, which counts the hook set-up too); nfcast will need its own count from node evaluations.
 - `size_samples(run_id, site, size, cost_ns)`: the points of the size fit, bucketed by power of two.
 - `edges(run_id, from_id, to_id, kind)` for `waits_for` and the call tree, for the critical path.
 
@@ -92,6 +95,9 @@ compiler.
   now (`tests/prof/dbcheck.c`).
 - Roofline predictions are checked against a microbenchmark with a known intensity (a streaming sum and a dense multiply)
   before they are trusted on a program.
+- The compute counts of C sites are checked against callgrind (`tests/prof/callgrind.sh`, a separate test): callgrind's self
+  Ir sums to its totals, each site's profile calls equal callgrind's calls to it, and each site's `self_instructions` equals
+  the self Ir of its function found through nm.
 - Knee predictions are checked by running the same site at sizes either side of the predicted knee.
 
 ## Caveats
