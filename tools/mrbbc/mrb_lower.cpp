@@ -36,6 +36,7 @@
 #include <cstdio>
 #include <map>
 #include <set>
+#include <tuple>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -71,6 +72,11 @@ struct Shared {
   std::map<const mrb::Irep *, int> method_ids;   // a method body -> its number (the function mrb_m<number>)
   std::vector<const mrb::Irep *> methods;        // the method bodies by number
   std::map<const mrb::Irep *, std::string> method_names;  // a method body -> the name its TDEF gives (SUPER has no name operand)
+  // The accessors attr_reader, attr_writer and attr_accessor define (attr_methods): a method number whose sh.methods entry
+  // is nullptr -> its instance variable and whether it is the writer; and the methods each such call defines, by its site
+  // (the class body and the pc), as (name, number, writer).
+  std::map<int, std::pair<std::string, bool>> accessors;
+  std::map<std::pair<const mrb::Irep *, std::size_t>, std::vector<std::tuple<std::string, int, bool>>> attr_sites;
   std::map<const mrb::Irep *, int> block_ids;    // a block body -> its number (the function mrb_b<number>)
   std::vector<const mrb::Irep *> blocks;         // the block bodies by number
   std::vector<const mrb::Irep *> classes;        // the class bodies (the children an EXEC runs) by number (mrb_k<number>)
@@ -667,6 +673,29 @@ const mrb::Insn *wide_def(const std::vector<mrb::Insn> &insns, std::size_t i) {
   return &insns[j];
 }
 
+// The names of a class body's attr_reader, attr_writer or attr_accessor call at insns[i] (SSEND R[a] n): each argument
+// R[a+1..a+n] is set by the LOADSYM right before the call, in order, as mrbc compiles `attr_reader :x, :y`. Empty for any
+// other instruction, and for a call whose arguments are not those literal symbols (it is refused, as before).
+std::vector<std::string> attr_names(const mrb::Irep &irep, const std::vector<mrb::Insn> &insns, std::size_t i) {
+  const mrb::Insn &in = insns[i];
+  if (in.op != mrb::OP_SSEND) return {};
+  const std::string &name = sym_at(irep, in.args[1], in.pc);
+  if (name != "attr_reader" && name != "attr_writer" && name != "attr_accessor") return {};
+  const unsigned n = in.args[2] & 0x0f;
+  if ((in.args[2] >> 4) != 0 || n == 0 || n == 15) return {};
+  std::vector<std::string> names(n);
+  std::size_t j = i;
+  for (unsigned k = n; k > 0; --k) {
+    if (j > 0 && ext_prefix(insns[j - 1])) --j;
+    if (j == 0) return {};
+    const mrb::Insn &ld = insns[--j];
+    if (ld.op != mrb::OP_LOADSYM || ld.args[0] != in.args[0] + k) return {};
+    names[k - 1] = sym_at(irep, ld.args[1], ld.pc);
+    if (!plain_symbol(names[k - 1])) return {};
+  }
+  return names;
+}
+
 // Finds the functions of the module: every TDEF's body is a method and every BLOCK's body a block, each numbered in the
 // order found (the main program first, then the children in order), and the names the program defines are recorded.
 // `kind` is what irep lowers to, and `home_main` says that its home (the function a `return` from it leaves; for a block)
@@ -698,6 +727,23 @@ void collect(Shared &sh, const mrb::Irep &irep, Kind kind, bool home_main, const
   };
   for (std::size_t i = 0; i < insns.size(); ++i) {
     const mrb::Insn &in = insns[i];
+    if (kind == Kind::Class && in.op == mrb::OP_SSEND) {
+      const std::string call = sym_at(irep, in.args[1], in.pc);
+      auto &site = sh.attr_sites[{&irep, in.pc}];
+      for (const std::string &attr : attr_names(irep, insns, i)) {
+        for (bool writer : {false, true}) {
+          if (writer ? call == "attr_reader" : call == "attr_writer") continue;
+          const std::string mname = writer ? attr + "=" : attr;
+          const int id = static_cast<int>(sh.methods.size());
+          sh.methods.push_back(nullptr);
+          sh.accessors[id] = {"@" + attr, writer};
+          site.emplace_back(mname, id, writer);
+          sh.defined.insert(mname);
+          sh.in_class.insert(mname);
+        }
+      }
+      if (site.empty()) sh.attr_sites.erase({&irep, in.pc});
+    }
     if (in.op == mrb::OP_TDEF) {
       add_def(in.args[2], in.args[1], in.pc);
     } else if (const mrb::Insn *def = wide_def(insns, i)) {
@@ -1611,6 +1657,18 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
           }
           break;
         }
+        // attr_reader, attr_writer and attr_accessor of literal symbols in a class body (attr_names): each accessor is a
+        // method of its own (lower_accessor), defined on self as a def is; the call's value is nil, as mruby's
+        auto attr = kind == Kind::Class ? sh.attr_sites.find({&irep, in.pc}) : sh.attr_sites.end();
+        if (attr != sh.attr_sites.end()) {
+          for (const auto &m : attr->second) {
+            const std::string arity = std::get<2>(m) ? "1" : "0";
+            c.line("(eval (call void &\"mrbbc_def_in\" " + c.reg(0) + " @\"" + symbol_data(sh, std::get<0>(m)) + "\" (const int " +
+                   num(std::get<1>(m)) + ") (const long " + arity + ") (const long " + arity + ") (const int 2)))");
+          }
+          store_tag(c, c.reg(x[0]), kTagNil);
+          break;
+        }
         if (sh.defined.count(name) == 0) {
           refuse_method(name, "is not defined by the program (only the program's methods are lowered)");
         }
@@ -1800,6 +1858,24 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
   sh.functions += fn.str();
 }
 
+// The function of an accessor (Shared::accessors), with a method's parameters: the reader gives self's instance variable
+// (nil when it is not set) and the writer sets it to its argument and gives that. The call's count was checked by the
+// lookup (mrbbc_def_in's 0 or 1), and the values are in the caller's frame, so the accessor needs no frame of its own.
+void lower_accessor(Shared &sh, int id) {
+  const auto &acc = sh.accessors.at(id);
+  const std::string ivar = "@\"" + symbol_data(sh, acc.first) + "\"";
+  std::ostringstream fn;
+  fn << "(function \"mrb_m" << id << "\" (ret void) (params (param %0 \"ret\" (ptr (struct \"MV\")))"
+     << " (param %1 \"argv\" (ptr (struct \"MV\"))) (param %2 \"blk\" (ptr (struct \"MV\"))) (param %3 \"argc\" long)"
+     << " (param %4 \"kw\" long))\n";
+  if (acc.second) {
+    fn << "  (let %5 (ptr unsigned_char) (offset %1 " << kV() << "))\n"
+       << "  (eval (call void &\"mrbbc_setiv\" %1 " << ivar << " %5))\n";
+  }
+  fn << "  (eval (call void &\"mrbbc_getiv\" %0 %1 " << ivar << "))\n  (return))\n";
+  sh.functions += fn.str();
+}
+
 // An explicit native i64 boundary, plus the vector thunk consumed by the shared boxed-call adapter.
 // The Ruby body retains its existing MV ABI and dynamic definition lookup; no speculative type inference is implied.
 void emit_i64_exports(Shared &sh, const LowerOptions &options) {
@@ -1881,7 +1957,9 @@ std::vector<std::string> report_refusals(const mrb::Module &module, const LowerO
     }
   };
   scan(module.root, "mrb_irep_0", Kind::Main);
-  for (std::size_t m = 0; m < sh.methods.size(); ++m) scan(*sh.methods[m], "mrb_m" + std::to_string(m), Kind::Method);
+  for (std::size_t m = 0; m < sh.methods.size(); ++m) {
+    if (sh.methods[m] != nullptr) scan(*sh.methods[m], "mrb_m" + std::to_string(m), Kind::Method);  // an accessor has no body
+  }
   for (std::size_t k = 0; k < sh.classes.size(); ++k) scan(*sh.classes[k], "mrb_k" + std::to_string(k), Kind::Class);
   for (std::size_t b = 0; b < sh.blocks.size(); ++b) scan(*sh.blocks[b], "mrb_b" + std::to_string(b), Kind::Block);
   if (functions != nullptr) *functions = 1 + sh.methods.size() + sh.classes.size() + sh.blocks.size();
@@ -1898,7 +1976,11 @@ std::string lower_module(const mrb::Module &module, const std::string &source_na
   collect(sh, root, Kind::Main, true, nullptr);
   lower_irep(sh, root, "mrb_irep_0", Kind::Main);
   for (std::size_t m = 0; m < sh.methods.size(); ++m) {
-    lower_irep(sh, *sh.methods[m], "mrb_m" + std::to_string(m), Kind::Method);
+    if (sh.methods[m] == nullptr) {
+      lower_accessor(sh, static_cast<int>(m));
+    } else {
+      lower_irep(sh, *sh.methods[m], "mrb_m" + std::to_string(m), Kind::Method);
+    }
   }
   for (std::size_t k = 0; k < sh.classes.size(); ++k) {
     lower_irep(sh, *sh.classes[k], "mrb_k" + std::to_string(k), Kind::Class);

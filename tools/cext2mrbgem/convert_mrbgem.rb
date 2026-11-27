@@ -2188,8 +2188,9 @@ end
         data_ok = ->(d) { d.match?(ident) && (!@entries.key?(d) || d.match?(/\AQ(?:nil|undef|true|false)\z/)) }
         # a pointer passed as data: (VALUE)name, whose callback uses the parameter only in pointer casts
         # (VALUE)name, or the converter's nfcx_ptr_value(name): a pointer carried in a VALUE
-        ptr_data = ->(d) { d.match?(/\A\(VALUE\)\s*[A-Za-z_][#{WC}]*\z/) || d.match?(/\Anfcx_ptr_value\(\s*&?[A-Za-z_][#{WC}]*\s*\)\z/) }
-        next unless [d1, d2].all? { |d| data_ok.call(d) || ptr_data.call(d) }
+        # (VALUE)v where v is a VALUE of the converter's model is an identity (value_cast_identity?), not a pointer
+        ptr_data = ->(d) { (d.match?(/\A\(VALUE\)\s*[A-Za-z_][#{WC}]*\z/) && !value_cast_identity?(rel, s0, d)) || d.match?(/\Anfcx_ptr_value\(\s*&?[A-Za-z_][#{WC}]*\s*\)\z/) }
+        next unless [d1, d2].all? { |d| data_ok.call(d) || ptr_data.call(d) || value_cast_identity?(rel, s0, d) }
         raw_refs[[rel, b_cb]] += 1
         raw_refs[[rel, r_cb]] += 1
         cands << { rel: rel, s: s0, e: close + 1, b: b_cb, d1: d1, r: r_cb, d2: d2, cls: cls_text,
@@ -2213,7 +2214,7 @@ end
       bdef = (@defs[c[:b]] || []).find { |x| x['file'] == rel }
       casts = []
       cast_ok = [[c[:d1], bdef], [c[:d2], rdef]].all? do |dd, dfn|
-        next true unless dd.match?(/\A\(VALUE\)/)
+        next true unless dd.match?(/\A\(VALUE\)/) && !value_cast_identity?(rel, c[:s], dd)
         pos = ptr_cast_uses(rel, dfn, text, masked, 0)
         casts.concat(pos) unless pos.nil?
         !pos.nil?
@@ -2248,7 +2249,8 @@ end
         # (VALUE)p where p is a pointer declared in this file (oj's (VALUE)out): the pointer is carried in the VALUE
         ptr_name = ->(d) { (pm = /\A\(VALUE\)\s*([A-Za-z_]\w*)\z/.match(d)) && masked.match?(/\*\s*#{Regexp.escape(pm[1])}\b/) }
         ptr_data = ->(d) { d.match?(/\A\(VALUE\)\s*&[A-Za-z_][#{WC}]*\z/) || ptr_name.call(d) }
-        next unless [d1, d2].all? { |d| data_ok.call(d) || ptr_data.call(d) }
+        # (VALUE)v where v is a VALUE of the converter's model: the cast is an identity, and the data is v
+        next unless [d1, d2].all? { |d| data_ok.call(d) || ptr_data.call(d) || value_cast_identity?(rel, s, d) }
         cands << { rel: rel, s: s, e: close + 1, b: b_cb, d1: d1, ecb: e_cb, d2: d2,
                    bpos: args_pos[0], epos: args_pos[2] }
       end
@@ -2280,6 +2282,79 @@ end
       out << c.merge(cast_pos: cast_pos.uniq)
     end
     out
+  end
+
+  # a VALUE name at pos in the converter's model: a VALUE local, parameter or file-scope VALUE, not a pointer, a VALUE array or a
+  # class variable. The cast (VALUE)name of such a name is an identity (value_cast_identity?)
+  def value_operand_at?(rel, pos, nm)
+    return false if @class_vars.include?(nm)
+    fn = enclosing_func(rel, pos)
+    return false if fn && value_pointer_names(fn).include?(nm)
+    local_value_at?(rel, pos, nm) || file_scope_value_names(rel).include?(nm)
+  end
+
+  # text is (VALUE)name, a cast of a VALUE operand (value_operand_at?): an identity, so the converted value is name itself
+  def value_cast_identity?(rel, pos, text)
+    pm = /\A\(\s*VALUE\s*\)\s*([A-Za-z_]\w*)\z/.match(text.to_s.strip)
+    !pm.nil? && value_operand_at?(rel, pos, pm[1])
+  end
+
+  # the function-like #define bodies of the gem, by macro name: [[params, body], ...] (indexed once per run)
+  def gem_macro_defs
+    @gem_macro_defs ||= begin
+      idx = Hash.new { |h, k| h[k] = [] }
+      @files.each do |rel, f|
+        text = f['text']
+        text.to_enum(:scan, /^[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)\(([^)\n]*)\)/).each do
+          m = Regexp.last_match
+          body = psl(text, m.end(0), logical_line_end(f['masked'], m.end(0))).gsub(/[ \t]*\\\n[ \t]*/, ' ').strip
+          idx[m[1]] << [m[2].split(',', -1).map(&:strip), body]
+        end
+      end
+      idx
+    end
+  end
+
+  # the arguments of a balanced argument list (the text inside a call's parentheses), split at top-level commas, or nil
+  def top_level_args(s)
+    out = []
+    depth = 0
+    start = 0
+    s.each_char.with_index do |ch, i|
+      case ch
+      when '(', '[', '{' then depth += 1
+      when ')', ']', '}'
+        depth -= 1
+        return nil if depth < 0
+      when ','
+        if depth == 0
+          out << s[start...i].strip
+          start = i + 1
+        end
+      end
+    end
+    return nil unless depth == 0
+    out << s[start..].strip
+  end
+
+  # a call NAME(args) of a gem-local function-like macro, defined once, whose body is a plain cast of one parameter
+  # (((T)(uintptr_t)(p)) or ((T)(p))): the body with each parameter replaced by its argument, or nil. A macro that is in the
+  # API map, or whose body is any other expression, is not expanded (its argument stays as it is, and is refused as before)
+  GEM_CAST_BODY_RE = /\A\(\s*\(\s*[A-Za-z_][\w\s*]*?\s*\)\s*(?:\(\s*uintptr_t\s*\)\s*)?\(\s*([A-Za-z_]\w*)\s*\)\s*\)\z/
+
+  def gem_cast_macro_expansion(text)
+    m = /\A([A-Za-z_]\w*)\s*\((.*)\)\z/m.match(text.to_s.strip)
+    return nil unless m
+    name = m[1]
+    return nil if @entries.key?(name) || @types.key?(name)
+    defs = gem_macro_defs[name]
+    return nil unless defs.size == 1
+    params, body = defs[0]
+    cast_param = body[GEM_CAST_BODY_RE, 1]
+    return nil unless cast_param && params.all? { |p| p.match?(/\A[A-Za-z_]\w*\z/) }
+    args = top_level_args(m[2])
+    return nil unless args && args.size == params.size && args.all? { |a| !a.empty? }
+    body.gsub(/[A-Za-z_]\w*/) { |w| (k = params.index(w)) ? args[k] : w }
   end
 
   # a typedef of a pointer type in the gem: typedef ... *NAME;
@@ -4754,6 +4829,28 @@ use_problem = lambda do |name, use|
     end
   end
 
+  # (VALUE)v where v is a VALUE of the converter's model (value_operand_at?) is an identity: the fork's VALUE is already an
+  # mrb_value, so the cast becomes v. The type mapping's rename of the cast's VALUE token is part of the replaced span. A cast
+  # of an operand that is not a VALUE (a pointer, a member, a call) is left as it is, and any other edit in the span skips it.
+  def value_identity_cast_pass
+    @files.each_key do |rel|
+      mv = @files[rel]['masked']
+      mv.to_enum(:scan, /\(\s*VALUE\s*\)\s*([A-Za-z_]\w*)(?![\w(\[.]|\s*(?:->|\.|\[|\())/).each do
+        m = Regexp.last_match
+        nm = m[1]
+        next if in_dead_init(rel, m.begin(0))
+        next unless value_operand_at?(rel, m.begin(1), nm)
+        ed = @edits[rel]
+        next if ed.overlaps(m.begin(1), m.end(1))
+        items = ed.overlapping(m.begin(0), m.end(1))
+        next unless items.all? { |a, b, t| t == 'mrb_value' && a >= m.begin(0) && b <= m.begin(1) }
+        ed.drop(items)
+        ed.add(m.begin(0), m.end(1), nm)
+        rewrite(rel, m.begin(0), nm, nm, 'a (VALUE) cast of a VALUE is an identity: the mruby value is the operand itself')
+      end
+    end
+  end
+
   def value_struct_pointer_cast_pass
     ptr_typedefs = pointer_typedef_names
     @files.each_key do |rel|
@@ -6969,6 +7066,9 @@ end
       args = cp > 0 ? split_args(masked, nxt, cp) : []
       # a macro's line continuation inside an argument (the backslash at a line end) is not part of the argument's text
       texts = args.map { |a, b| psl(@files[rel]['text'], a, b).gsub(/[ \t]*\\\n[ \t]*/, ' ').strip }
+      # a gem macro argument whose expansion is a plain cast of its parameter (nokogiri's DISCARD_CONST_QUAL(t, v) is
+      # ((t)(uintptr_t)(v))) is that expansion, so the argument is plain; any other macro argument stays as it is (refused below)
+      texts = texts.map { |t| gem_cast_macro_expansion(t) || t }
       if texts.size != entry['arity']
         refuse(rel, s, name, "expected #{entry['arity']} arguments, found #{texts.size}")
         return
@@ -7215,7 +7315,9 @@ end
         return
       end
       conv = lambda do |x|
-        if (pm = /\A\(VALUE\)\s*([A-Za-z_][#{WC}]*)\z/.match(x))
+        if value_cast_identity?(rel, s, x)
+          x.strip.sub(/\A\(VALUE\)\s*/, '')
+        elsif (pm = /\A\(VALUE\)\s*([A-Za-z_][#{WC}]*)\z/.match(x))
           "mrb_cptr_value(#{mrb_tok(rel, s)}, #{pm[1]})"
         elsif x.match?(/\AQ(?:nil|undef|true|false)\z/)
           @entries[x]['mruby']
@@ -7259,7 +7361,9 @@ end
         return
       end
       conv = lambda do |x|
-        if (pm = /\A\(VALUE\)\s*&([A-Za-z_][#{WC}]*)\z/.match(x))
+        if value_cast_identity?(rel, s, x)
+          x.strip.sub(/\A\(VALUE\)\s*/, '')
+        elsif (pm = /\A\(VALUE\)\s*&([A-Za-z_][#{WC}]*)\z/.match(x))
           "mrb_cptr_value(#{mrb_tok(rel, s)}, &#{pm[1]})"
         elsif (pm = /\A\(VALUE\)\s*([A-Za-z_]\w*)\z/.match(x)) && !x.match?(/\AQ(?:nil|undef|true|false)\z/)
           "mrb_cptr_value(#{mrb_tok(rel, s)}, #{pm[1]})"
@@ -9324,6 +9428,7 @@ end
     value_order_stuck_pass
     value_identity_pass
     value_as_integer_arg_pass
+    value_identity_cast_pass
     value_struct_pointer_cast_pass
     value_cast_integer_stuck_pass
     value_cast_zero_pass
