@@ -1,6 +1,6 @@
 // mrbbc_lower: prints the Path B IR module of an mruby 4.0 RITE file on stdout (tools/mrbbc/mrb_lower.hpp).
 //
-//   mrbbc_lower [--value=8|4|16] program.rite > program.ir
+//   mrbbc_lower [--value=8|4|16] [--export-i64=NAME ...] program.rite > program.ir
 //
 // --value is the layout of a register (mrb_lower.hpp, LowerOptions); the runtime is built with the same MRBBC_VALUE.
 //
@@ -23,6 +23,8 @@ int main(int argc, char **argv) {
     const std::string arg = argv[i];
     if (arg == "--value=8" || arg == "--value=4" || arg == "--value=16") {
       options.value_bytes = std::stoi(arg.substr(8));
+    } else if (arg.compare(0, 13, "--export-i64=") == 0) {
+      options.i64_exports.push_back(arg.substr(13));
     } else if (path == nullptr && arg.compare(0, 2, "--") != 0) {
       path = argv[i];
     } else {
@@ -30,7 +32,7 @@ int main(int argc, char **argv) {
     }
   }
   if (usage || path == nullptr) {
-    std::fprintf(stderr, "usage: %s [--value=8|4|16] program.rite\n", argv[0]);
+    std::fprintf(stderr, "usage: %s [--value=8|4|16] [--export-i64=NAME ...] program.rite\n", argv[0]);
     return 2;
   }
   std::ifstream in(path, std::ios::binary);

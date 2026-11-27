@@ -85,6 +85,7 @@ struct Shared {
   std::set<std::string> defined;                 // the names a TDEF of the program defines
   std::set<std::string> in_class;                // the names a TDEF defines in a class body (a method of a class)
   std::set<std::string> top;                     // the names a TDEF defines at the top level (methods of Object)
+  std::map<std::string, std::vector<const mrb::Irep *>> top_methods;
   std::string functions;                         // the function definitions, the main program first
   int serial = 0;                                // makes the names of the string data items unique
 };
@@ -661,7 +662,10 @@ void collect(Shared &sh, const mrb::Irep &irep, Kind kind, bool home_main, const
       sh.defined.insert(name);
       sh.method_names[body] = name;
       if (kind == Kind::Class) sh.in_class.insert(name);
-      if (kind == Kind::Main) sh.top.insert(name);
+      if (kind == Kind::Main) {
+        sh.top.insert(name);
+        sh.top_methods[name].push_back(body);
+      }
       child_kind[in.args[2]] = std::make_pair(Kind::Method, false);
     } else if (in.op == mrb::OP_BLOCK) {
       const mrb::Irep *body = &child_at(irep, in.args[1], in.pc);
@@ -1736,6 +1740,64 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
   sh.functions += fn.str();
 }
 
+// An explicit native i64 boundary, plus the vector thunk consumed by the shared boxed-call adapter.
+// The Ruby body retains its existing MV ABI and dynamic definition lookup; no speculative type inference is implied.
+void emit_i64_exports(Shared &sh, const LowerOptions &options) {
+  std::set<std::string> seen;
+  for (const std::string &name : options.i64_exports) {
+    const auto letter = [](char ch) { return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_'; };
+    bool valid = !name.empty() && letter(name[0]);
+    for (char ch : name) valid = valid && (letter(ch) || (ch >= '0' && ch <= '9'));
+    if (!valid || !seen.insert(name).second) throw Refused("refused: invalid or duplicate i64 export '" + name + "'");
+    auto found = sh.top_methods.find(name);
+    if (found == sh.top_methods.end()) throw Refused("refused: i64 export '" + name + "' is not a top-level method");
+    const long arity = params_of(*found->second.front()).req;
+    for (const mrb::Irep *body : found->second) {
+      const Params p = params_of(*body);
+      if (!fast_params(p) || p.req != arity)
+        throw Refused("refused: i64 export '" + name + "' needs a fixed required-argument signature");
+    }
+    std::ostringstream out;
+    out << "(function \"mrbbc_i64_" << name << "\" (ret long_long) (params";
+    for (long i = 0; i < arity; i++) out << " (param %" << i << " \"a" << i << "\" long_long)";
+    out << ")\n  (slot \"boxed\" (struct \"MV\") " << (arity + 3) * kV() << " " << kAlign() << ")\n"
+        << "  (slot \"gcf\" (struct \"MV\") " << kGcFrameBytes << " 8)\n";
+    long next = arity;
+    auto fresh = [&]() { return "%" + std::to_string(next++); };
+    const std::string blk = fresh(), ret = fresh();
+    out << "  (let " << blk << " (ptr unsigned_char) (offset $\"boxed\" " << (arity + 1) * kV() << "))\n"
+        << "  (let " << ret << " (ptr unsigned_char) (offset $\"boxed\" " << (arity + 2) * kV() << "))\n"
+        << "  (eval (call void &\"mrbbc_gc_enter\" $\"gcf\" $\"boxed\" (const long " << arity + 3 << ")))\n";
+    for (long i = 0; i < arity; i++) {
+      const std::string arg = fresh();
+      out << "  (let " << arg << " (ptr unsigned_char) (offset $\"boxed\" " << (i + 1) * kV() << "))\n"
+          << "  (eval (call void &\"mrbbc_int_new\" " << arg << " %" << i << "))\n";
+    }
+    const std::string id = fresh(), result = fresh();
+    out << "  (let " << id << " int (call int &\"mrbbc_find\" $\"boxed\" @\"" << symbol_data(sh, name)
+        << "\" (const long " << arity << ") (const long 0)))\n"
+        << "  (eval (call void &\"mrbbc_user_call\" " << id << " " << ret << " $\"boxed\" " << blk
+        << " (const long " << arity << ")))\n"
+        << "  (let " << result << " long_long (call long_long &\"mrbbc_int_require\" " << ret << "))\n"
+        << "  (eval (call void &\"mrbbc_gc_leave\" $\"gcf\"))\n  (return " << result << "))\n";
+    out << "(function \"mrbbc_i64v_" << name << "\" (ret long_long)"
+        << " (params (param %0 \"closure\" (ptr void)) (param %1 \"args\" (ptr long_long)))\n";
+    std::vector<std::string> args;
+    next = 2;
+    for (long i = 0; i < arity; i++) {
+      const std::string ptr = fresh(), arg = fresh();
+      out << "  (let " << ptr << " (ptr long_long) (offset %1 " << i * 8 << "))\n"
+          << "  (let " << arg << " long_long (load long_long " << ptr << "))\n";
+      args.push_back(arg);
+    }
+    const std::string value = fresh();
+    out << "  (let " << value << " long_long (call long_long &\"mrbbc_i64_" << name << "\"";
+    for (const std::string &arg : args) out << " " << arg;
+    out << "))\n  (return " << value << "))\n";
+    sh.functions += out.str();
+  }
+}
+
 }  // namespace
 
 std::string lower_module(const mrb::Module &module, const std::string &source_name, const LowerOptions &options) {
@@ -1791,6 +1853,7 @@ std::string lower_module(const mrb::Module &module, const std::string &source_na
     sh.functions += bc.str();
   }
 
+  emit_i64_exports(sh, options);
   std::ostringstream out;
   out << "(ir-module \"" << source_name
       << "\" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))\n";
