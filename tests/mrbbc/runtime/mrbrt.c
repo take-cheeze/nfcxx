@@ -5,6 +5,9 @@
 #include <sys/mman.h>
 #endif
 #include "mrbrt.h"
+#if MRBBC_LIBUV
+#include "mrbrt_uv.h"
+#endif
 
 #include <setjmp.h>
 #include <limits.h>
@@ -116,6 +119,11 @@ typedef struct MObj {
 
 static MClass *object_cls(void);
 static MClass *class_registry = NULL;
+static int host_argc;
+static char **host_argv;
+static MV host_args, host_streams[3];
+static int host_args_ready;
+static int host_constant(MV *dst, const char *name);
 
 /* The class each method body is defined on, by the method's number (the TDEF's class; Object for a top-level def). A SUPER
  * looks from the superclass of that class. */
@@ -572,7 +580,7 @@ static int core_name(const char *name) {
       "NilClass",  "TrueClass",   "FalseClass", "Integer",        "Float",     "String",     "Symbol",
       "Array",     "Hash",        "Range",     "Proc",           "Exception", "StandardError", "NameError",
       "NoMethodError", "ArgumentError", "TypeError", "ZeroDivisionError", "IndexError", "RuntimeError",
-      "LocalJumpError", "NotImplementedError", "Math", "Struct", "Time"};
+      "LocalJumpError", "NotImplementedError", "Math", "Struct", "Time", "File", "IO", "Dir"};
   size_t i;
   for (i = 0; i < sizeof names / sizeof names[0]; i++) {
     if (strcmp(names[i], name) == 0) return 1;
@@ -582,6 +590,8 @@ static int core_name(const char *name) {
 
 void mrbbc_class(MV *dst, const MV *cbase, const MV *super, const char *name, const MV *target) {
   MClass *outer = object_cls(), *c, *sup = NULL;
+  if (strcmp(name, "File") == 0 || strcmp(name, "IO") == 0 || strcmp(name, "Dir") == 0)
+    mrbbc_raise("NotImplementedError", "reopening a host class is not lowered yet");
   if (tag_of(super) != MRBBC_NIL) {
     char msg[160];
     if (tag_of(super) != MRBBC_CLS) {
@@ -630,6 +640,7 @@ void mrbbc_class(MV *dst, const MV *cbase, const MV *super, const char *name, co
 void mrbbc_object_class(MV *dst) { set_obj(dst, MRBBC_CLS, object_cls()); }
 
 void mrbbc_getconst(MV *dst, const char *name) {
+  if (host_constant(dst, name)) return;
   MClass *c = find_class(name);
   if (c == NULL && strcmp(name, "Object") == 0) c = object_cls();
   if (c != NULL) {
@@ -647,6 +658,8 @@ void mrbbc_getconst(MV *dst, const char *name) {
 void mrbbc_alloc(MV *dst, const MV *cls) {
   MObj *o;
   if (tag_of(cls) != MRBBC_CLS) mrbbc_no_method(cls, "new");
+  if (strcmp(cls_of(cls)->name, "IO") == 0 || strcmp(cls_of(cls)->name, "File") == 0 || strcmp(cls_of(cls)->name, "Dir") == 0)
+    mrbbc_raise("NotImplementedError", "constructing host handles is not lowered yet");
   o = gc_alloc(GC_OBJ, sizeof *o);
   o->cls = cls_of(cls);
   o->ivars = NULL;
@@ -1930,6 +1943,178 @@ static void join_value(MV *dst, const MV *recv) {
   free(buffer.p);
 }
 
+/* ---- optional hosted operations ---- */
+void mrbbc_set_args(int argc, char **argv) {
+  host_argc = argc;
+  host_argv = argv;
+  host_args_ready = 0;
+  host_args = nil_value();
+}
+
+#if MRBBC_LIBUV
+static MClass *host_class(const char *name) {
+  MClass *c = find_class(name);
+  if (c == NULL) {
+    MClass *root = object_cls();
+    c = gc_alloc(GC_CLS, sizeof *c);
+    c->key = c->name = name;
+    c->super = root;
+    c->next = class_registry;
+    class_registry = c;
+  }
+  return c;
+}
+#endif
+
+static int host_constant(MV *dst, const char *name) {
+  if (strcmp(name, "STDIN") == 0 || strcmp(name, "STDOUT") == 0 || strcmp(name, "STDERR") == 0) {
+    mrbbc_getglobal(dst, strcmp(name, "STDIN") == 0 ? "$stdin" : strcmp(name, "STDOUT") == 0 ? "$stdout" : "$stderr");
+    return 1;
+  }
+  if (strcmp(name, "ARGV") == 0) {
+    if (!host_args_ready) {
+      MV item = nil_value();
+      int mark = gc_protect(&item), i;
+      host_args = new_ary_value(host_argc > 0 ? host_argc - 1 : 0);
+      for (i = 1; i < host_argc; i++) {
+        item = new_str_value(host_argv[i], (long)strlen(host_argv[i]));
+        mrbbc_ary_push(&host_args, &item);
+      }
+      gc_unprotect(mark);
+      host_args_ready = 1;
+    }
+    *dst = host_args;
+    return 1;
+  }
+  if (strcmp(name, "File") != 0 && strcmp(name, "IO") != 0 && strcmp(name, "Dir") != 0) return 0;
+#if MRBBC_LIBUV
+  /* Class registry names must outlive a call, even when a caller supplies a temporary C string. */
+  name = strcmp(name, "File") == 0 ? "File" : strcmp(name, "Dir") == 0 ? "Dir" : "IO";
+  set_obj(dst, MRBBC_CLS, host_class(name));
+#else
+  (void)dst;
+  mrbbc_raise("NotImplementedError", "host I/O requires the libuv runtime (MRBBC_LIBUV=1)");
+#endif
+  return 1;
+}
+
+void mrbbc_getglobal(MV *dst, const char *name) {
+  int fd;
+  if (strcmp(name, "$0") == 0 || strcmp(name, "$PROGRAM_NAME") == 0) {
+    *dst = new_str_value(mrbbc_progname, (long)strlen(mrbbc_progname));
+    return;
+  }
+  fd = strcmp(name, "$stdin") == 0 ? 0 : strcmp(name, "$stdout") == 0 ? 1 : strcmp(name, "$stderr") == 0 ? 2 : -1;
+  if (fd < 0) mrbbc_raise("NotImplementedError", "this global is not lowered yet");
+#if MRBBC_LIBUV
+  if (tag_of(&host_streams[fd]) == MRBBC_NIL) {
+    MClass *cls = host_class("IO");
+    MObj *stream = gc_alloc(GC_OBJ, sizeof *stream);
+    stream->cls = cls;
+    set_obj(&host_streams[fd], MRBBC_OBJ, stream);
+  }
+  *dst = host_streams[fd];
+#else
+  (void)dst;
+  mrbbc_raise("NotImplementedError", "host I/O requires the libuv runtime (MRBBC_LIBUV=1)");
+#endif
+}
+
+#if MRBBC_LIBUV
+static void host_error(int code) {
+  char cls[96];
+  snprintf(cls, sizeof cls, "Errno::%s", mrbbc_uv_error_name(code));
+  mrbbc_raise(cls, mrbbc_uv_error(code));
+}
+
+static const char *host_string(const MV *v, int path) {
+  if (tag_of(v) != MRBBC_STR)
+    mrbbc_raise("NotImplementedError", "host I/O String coercion is not lowered yet");
+  if (path && memchr(str_of(v)->p, '\0', (size_t)str_of(v)->len) != NULL)
+    mrbbc_raise("ArgumentError", "path name contains null byte");
+  return str_of(v)->p;
+}
+
+static void host_read(MV *dst, int fd, int owned) {
+  Buf b = {NULL, 0, 0};
+  char chunk[16384];
+  long n;
+  int closed = 0;
+  while ((n = mrbbc_uv_read(fd, chunk, sizeof chunk)) > 0) buf_put(&b, chunk, (size_t)n);
+  if (owned) closed = mrbbc_uv_close(fd);
+  if (n < 0 || closed < 0) {
+    free(b.p);
+    host_error(n < 0 ? (int)n : closed);
+  }
+  *dst = new_str_value(b.p ? b.p : "", (long)b.n);
+  free(b.p);
+}
+
+static void host_write(MV *dst, int fd, const MV *data, int owned) {
+  const MStr *s = str_of(data);
+  long sent = 0, n = 1;
+  int closed = 0;
+  while (sent < s->len) {
+    unsigned int chunk = (unsigned int)(s->len - sent > 1048576 ? 1048576 : s->len - sent);
+    n = mrbbc_uv_write(fd, s->p + sent, chunk);
+    if (n <= 0) break;
+    sent += n;
+  }
+  if (owned) closed = mrbbc_uv_close(fd);
+  if (n < 0 || closed < 0) host_error(n < 0 ? (int)n : closed);
+  if (sent != s->len) mrbbc_raise("IOError", "write made no progress");
+  *dst = int_value(sent);
+}
+#endif
+
+void mrbbc_host_send(MV *dst, const MV *recv, const MV *args, long argc, const char *name) {
+#if MRBBC_LIBUV
+  MV roots[3];
+  MrbbcGCFrame frame;
+  int fd = -1, i;
+  const char *cls = tag_of(recv) == MRBBC_CLS ? cls_of(recv)->name : "";
+  mrbbc_gc_enter(&frame, roots, 3);
+  roots[0] = *recv;
+  for (i = 0; i < argc && i < 2; i++) roots[i + 1] = args[i];
+  if (strcmp(cls, "File") == 0 || strcmp(cls, "Dir") == 0) {
+    const char *path;
+    int is_file = strcmp(cls, "File") == 0;
+    if (argc < 1) mrbbc_raise("NotImplementedError", "this host call form is not lowered yet");
+    path = host_string(&roots[1], 1);
+    if (is_file && strcmp(name, "read") == 0 && argc == 1) {
+      fd = mrbbc_uv_open(path, 0);
+      if (fd < 0) host_error(fd);
+      host_read(dst, fd, 1);
+    } else if (is_file && strcmp(name, "write") == 0 && argc == 2) {
+      host_string(&roots[2], 0); /* validate before opening/truncating the destination */
+      fd = mrbbc_uv_open(path, 1);
+      if (fd < 0) host_error(fd);
+      host_write(dst, fd, &roots[2], 1);
+    } else if (argc == 1 && (strcmp(name, "exist?") == 0 ||
+               (is_file && (strcmp(name, "file?") == 0 || strcmp(name, "directory?") == 0 || strcmp(name, "executable?") == 0)))) {
+      *dst = bool_value(mrbbc_uv_test(path, is_file ? name : "directory?"));
+    } else no_method(name, &roots[0]);
+  } else {
+    for (i = 0; i < 3; i++) {
+      if (tag_of(&host_streams[i]) != MRBBC_NIL && same_value(&roots[0], &host_streams[i])) fd = i;
+    }
+    if (fd < 0) no_method(name, &roots[0]);
+    if (strcmp(name, "read") == 0 && argc == 0) {
+      if (fd != 0) mrbbc_raise("IOError", "not opened for reading");
+      host_read(dst, fd, 0);
+    } else if (strcmp(name, "write") == 0 && argc == 1) {
+      if (fd == 0) mrbbc_raise("IOError", "not opened for writing");
+      host_string(&roots[1], 0);
+      host_write(dst, fd, &roots[1], 0);
+    } else mrbbc_raise("NotImplementedError", "this IO call form is not lowered yet");
+  }
+  mrbbc_gc_leave(&frame);
+#else
+  (void)dst; (void)recv; (void)args; (void)argc; (void)name;
+  mrbbc_raise("NotImplementedError", "host I/O requires the libuv runtime (MRBBC_LIBUV=1)");
+#endif
+}
+
 /* ---- the collector: mark and sweep (the design of lua54rt.c's collector) ----
  * Every heap object is allocated by gc_alloc (strings, arrays, hashes, argument vectors, instances, classes, method and
  * instance-variable records, boxed integers, closures) with a GCHdr, linked into one list. A collection marks from the
@@ -1947,6 +2132,7 @@ static void join_value(MV *dst, const MV *recv) {
  *   - owners: the class of each method number (its classes are in the registry; marked again for the record);
  *   - unwind_value: a pending return or break value, held until its home takes it;
  *   - inspecting: the arrays being inspected;
+ *   - host_args and host_streams: the shared ARGV array and borrowed standard-stream objects;
  *   - entry_ret: the result slot of the entry, which the program writes when it returns.
  * The traversal follows each kind's fields: an array's items, a hash's keys and values, an argument vector's items, an
  * object's class and instance variables, an instance variable's value and next, a method's next, a class's methods,
@@ -2229,6 +2415,8 @@ static void mark_roots(void) {
   mark_obj(object_cls()->ivars);
   for (i = 0; i < (size_t)owners_n; i++) mark_obj(owners[i]);
   mark_value(&unwind_value);
+  mark_value(&host_args);
+  for (i = 0; i < 3; i++) mark_value(&host_streams[i]);
   for (i = 0; i < (size_t)inspect_depth; i++) mark_obj(inspecting[i]);
   if (entry_ret != NULL) mark_value(entry_ret);
 #if MRBBC_GC_CONSERVATIVE

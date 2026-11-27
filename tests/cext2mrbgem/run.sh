@@ -2082,6 +2082,38 @@ check grep -qF 'return nfcx_path_to_class(mrb, "Foo::Bar");' "$work/path2class/s
 check grep -qF 'p2c_bar = nfcx_path_to_class(mrb, "Foo::Bar");' "$work/path2class/src/path2class.c"
 check grep -qF 'return nfcx_path_to_class(mrb, mrb_string_cstr(mrb, path));' "$work/path2class/src/path2class.c"
 check grep -qF '#include <string.h>' "$work/path2class/src/path2class.c"
+
+# 2zzz176. a Q constant as a constant value (a static local's initializer, a file-scope table entry) is the macro of the fork's
+# boxing: the file defines NFCX_Q_* once, after the includes, with .w under word boxing (the default) and .value/.tt otherwise.
+# The struct literal with .value.i and .tt alone does not compile under the default boxing.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_qconst_box tools/cext2mrbgem/fixtures/api_qconst_box/ext/api_qconst_box "$work/api_qconst_box" > "$work/api_qconst_box.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test "$(grep -c 'define NFCX_Q_NIL ((mrb_value){.w = MRB_Qnil})' "$work/api_qconst_box/src/api_qconst_box.c")" -eq 1
+check test "$(grep -c '\.value\.i = 0, \.tt = MRB_TT_FALSE' "$work/api_qconst_box/src/api_qconst_box.c")" -eq 1
+check grep -qF 'static mrb_value pat = NFCX_Q_NIL;' "$work/api_qconst_box/src/api_qconst_box.c"
+check grep -qF 'static struct entry table[] = { { "nil", NFCX_Q_NIL }' "$work/api_qconst_box/src/api_qconst_box.c"
+# 2zzz177. a parenthesized operand of ! is a condition: !(rb_obj_is_kind_of(...)) takes the Boolean test (mrb_obj_is_kind_of),
+# not mrb_bool_value of it (a VALUE negated does not compile)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_not_paren tools/cext2mrbgem/fixtures/api_not_paren/ext/api_not_paren "$work/api_not_paren" > "$work/api_not_paren.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'if (!(mrb_obj_is_kind_of(mrb, obj, mrb_class_ptr(cls)))) return mrb_false_value();' "$work/api_not_paren/src/api_not_paren.c"
+check sh -c "! grep -q 'mrb_bool_value(mrb_obj_is_kind_of' '$work/api_not_paren/src/api_not_paren.c'"
+# 2zzz178. a prototype of a registered method with unnamed VALUE parameters (static VALUE f(VALUE);) takes the header of its
+# definition: no "is not a plain VALUE" refusal, and the prototype is the mruby signature (no conflicting types)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_proto_alloc tools/cext2mrbgem/fixtures/api_proto_alloc/ext/api_proto_alloc "$work/api_proto_alloc" > "$work/api_proto_alloc.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check sh -c "! grep -q 'is not a plain VALUE\\|REFUSED: thing_alloc' '$work/api_proto_alloc/REFUSALS.txt'"
+check grep -qF 'static mrb_value thing_alloc(mrb_state *mrb, mrb_value klass);' "$work/api_proto_alloc/src/api_proto_alloc.c"
+# 2zzz179. a VALUE compared through a dereferenced VALUE pointer parameter (*output_data == klass) is the identity test: the
+# operand's name is '*output_data' (a whitespace-only delete; a single-quoted ' \t' also deleted the letter t of the name)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_deref_cmp tools/cext2mrbgem/fixtures/api_deref_cmp/ext/api_deref_cmp "$work/api_deref_cmp" > "$work/api_deref_cmp.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'if (mrb_value_identical(*output_data ,  uncompilable_marker)) return 1;' "$work/api_deref_cmp/src/api_deref_cmp.c"
+# 2zzz180. rb_singleton_class (a VALUE in mruby) in the class position of rb_define_alias is its class pointer: wrapped in
+# mrb_class_ptr after the state argument (mrb_define_alias takes a struct RClass *; the wrap is not before the state argument)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_singleton_alias tools/cext2mrbgem/fixtures/api_singleton_alias/ext/api_singleton_alias "$work/api_singleton_alias" > "$work/api_singleton_alias.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_define_alias(mrb, mrb_class_ptr(mrb_singleton_class(mrb, mrb_obj_value(klass))), "new_in", "alloc_in");' "$work/api_singleton_alias/src/api_singleton_alias.c"
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads

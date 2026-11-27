@@ -67,8 +67,11 @@ was used (`clock=tsc` or `clock=monotonic`). Measured on one machine only; the f
    Counts go into the per-function record; sampling by bytes is kept for stack capture.
 3. **Compute counts.** Done for C programs from callgrind, as the external cross-check (see "Compute counts" below). Still to
    do: node evaluations for nfcast, counted in the existing dispatch.
-4. **nfcast tier.** Emit the calls into the tier's generated C when profiling is on, and add the profiling flag to the cache
-   key so instrumented and plain code are never served in place of each other.
+4. **nfcast tier.** Done in the prototype behind `NFCAST_TIER_PROFILE=1` (`docs/notes/ast.md`, "Tiering"): the generated C calls
+   `__nfcxx_prof_enter` / `__nfcxx_prof_exit` per function (site = FNV-1a of the proto's tier serial and number), the flag is in the
+   compile cache key and the Merkle hash, and an abandoned run closes the calls it left open. Open: each shared object has its own
+   copy of the runtime, so a run with several compiled units keeps only the last profile written to `NFCXX_PROFILE`. The fix is for
+   the host to load one runtime (RTLD_GLOBAL) that the objects bind to.
 
 ## Decisions taken in the prototype
 
@@ -97,8 +100,18 @@ Two more chunks, both written at exit with a reserved tid and counted in bytes:
   `malloc`, `calloc`, `realloc` and `free` (`lib/prof/nfcxx_alloc.c`); without the wrap the counts are zero. The runtime's
   own buffers are counted too, a few KB.
 
-`tools/prof/prof2sql.c` stores the machine text and the three totals on each `runs` row. Per-site allocation counts need
-stack capture and are not done.
+`tools/prof/prof2sql.c` stores the machine text and the three totals on each `runs` row.
+
+## Allocation counts per site (done)
+
+The allocations of a call are attributed to the site of its innermost open call, not to a captured stack. Each thread
+keeps a fixed table of rows, one per site (1024 slots, at most 768 sites), allocated at its first event. The enter hook
+makes the site's row the current one and the exit hook restores the enclosing one; the malloc wrappers add to the current
+row without allocating or locking. A thread writes its rows as a `0xFFFFFFFC` chunk when it exits. The format is in
+`docs/notes/profile-format.md`. Sites that did not fit are counted in an overflow row. The test program
+`tests/prof/allocsites.c` checks the exact counts of two functions (`tests/prof/sqlite.sh`).
+
+`tools/prof/prof2sql.c` stores the machine text and the three totals on each `runs` row.
 
 ## Compute counts (C programs, from callgrind)
 

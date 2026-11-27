@@ -872,7 +872,10 @@ void lower_send(Ctx &c, Shared &sh, const mrb::Insn &in, const std::string &name
   const bool binary = !has_blk && n == 1 && k == 0 && binary_method(name, op);
   const bool append = !has_blk && n == 1 && k == 0 && name == "<<";
   const bool iterate = has_blk && n == 0 && k == 0 && (name == "map" || name == "find" || name == "each");
-  if (!dispatch && !is_new && !zero && !binary && !append && !iterate)
+  const bool host = !has_blk && k == 0 &&
+      ((name == "read" && n <= 1) || (name == "write" && (n == 1 || n == 2)) ||
+       (n == 1 && (name == "exist?" || name == "file?" || name == "directory?" || name == "executable?")));
+  if (!dispatch && !is_new && !zero && !binary && !append && !iterate && !host)
     refuse(has_blk ? "with a block is not lowered yet" : "is not lowered yet");
   if (!dispatch && !is_new && k != 0) refuse("with keyword arguments is not lowered yet");
   if (!dispatch && n == 15) refuse("with a splat of arguments is not lowered yet");
@@ -910,6 +913,9 @@ void lower_send(Ctx &c, Shared &sh, const mrb::Insn &in, const std::string &name
     c.line("(eval (call void &\"mrbbc_iter\" " + c.reg(a) + " " + c.reg(a) + " " + c.reg(blk_reg) +
            " (const int " + num(method) + ")))");
     emit_block_site(c, c.reg(a), in.pc + in.len);
+  } else if (host) {
+    c.line("(eval (call void &\"mrbbc_host_send\" " + c.reg(a) + " " + c.reg(a) + " " + c.reg(n ? a + 1 : a) +
+           " (const long " + num(n) + ") @\"" + symbol_data(sh, name) + "\"))");
   } else if (binary) {
     call_binop(c, op, c.reg(a), c.reg(a), c.reg(a + 1));
   } else {
@@ -1590,6 +1596,13 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         } else {
           c.line("(eval (call void &\"mrbbc_setiv\" " + c.reg(0) + " " + sym + " " + c.reg(x[0]) + "))");
         }
+        break;
+      }
+      case mrb::OP_GETGV: {
+        const std::string name = sym_at(irep, x[1], in.pc);
+        if (name != "$stdin" && name != "$stdout" && name != "$stderr" && name != "$0" && name != "$PROGRAM_NAME")
+          throw Refused("refused: global '" + name + "' is not lowered yet (pc " + std::to_string(in.pc) + ")");
+        c.line("(eval (call void &\"mrbbc_getglobal\" " + c.reg(x[0]) + " @\"" + symbol_data(sh, name) + "\"))");
         break;
       }
       case mrb::OP_GETCONST:

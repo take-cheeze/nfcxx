@@ -3540,6 +3540,9 @@ use_problem = lambda do |name, use|
     if masked[p] == '('
       j = prev_nonspace(masked, p - 1)
       return false if j < 0
+      # a parenthesized operand of ! or of && / || is a condition too: !(rb_obj_is_kind_of(...))
+      return true if masked[j] == '!'
+      return true if (masked[j] == '&' && j > 0 && masked[j - 1] == '&') || (masked[j] == '|' && j > 0 && masked[j - 1] == '|')
       return !!(/(?:\bif|\bwhile)\z/.match(psl(masked, [j - 6, 0].max, j + 1)))
     end
     return true if masked[p] == '!'
@@ -4595,7 +4598,8 @@ use_problem = lambda do |name, use|
         next if masked[op_s - 1] == '#' || masked[[op_s - 8, 0].max...op_s].to_s.include?('#')
         fn = enclosing_func(rel, op_s)
         next unless fn
-        value_names = value_names_of(fn) | all_file_scope_value_names
+        # a dereference of a VALUE pointer parameter (VALUE *output_data: *output_data == Qnil) is a VALUE operand too
+        value_names = value_names_of(fn) | all_file_scope_value_names | value_pointer_names(fn).map { |n| "*#{n}" }
         l_start, l_text = left_operand(masked, op_s)
         r_end, r_text = right_operand(masked, op_e)
         next if l_text.nil? || r_text.nil? || l_text.empty? || r_text.empty?
@@ -5006,7 +5010,7 @@ use_problem = lambda do |name, use|
     t = t.strip
     return true if t.match?(/\AQ(?:nil|true|false|undef)\z/)
     return true if t.match?(/\A[A-Za-z_]\w*\z/) && value_names.include?(t)
-    return true if t.match?(/\A\*\s*[A-Za-z_]\w*\z/) && value_names.include?(t.delete(' \t'))
+    return true if t.match?(/\A\*\s*[A-Za-z_]\w*\z/) && value_names.include?(t.gsub(/\s/, ''))
     return true if t.match?(/\A[A-Za-z_]\w*\z/) && @class_vars.include?(t)
     # a macro whose body is a VALUE cast (msgpack's NO_MAPPED_STRING is ((VALUE)0)) is a VALUE operand
     return true if t.match?(/\A[A-Za-z_]\w*\z/) && value_macro?(t)
@@ -5519,7 +5523,10 @@ use_problem = lambda do |name, use|
       # Only a function with a surviving registration gets the method signature. A refused registration
       # (e.g. no definition in the input) leaves its prototype as is; the refusal is already recorded.
       if @valid_reg_names.include?(name)
-        hdr, pro, err = registered_header(d)
+        # a prototype of a registered method takes the header of its definition (in this file): its parameters may be unnamed
+        # (static VALUE f(VALUE);), which the definition's parameter list is not held to
+        def_d = d['proto'] ? (@defs[name] || []).find { |x| x['file'] == rel } : nil
+        hdr, pro, err = registered_header(def_d || d)
         pro = '' if d['proto']
       elsif d['name'] == (@init_defs.empty? ? nil : @init_defs[0]['name']) && !d['proto']
         hdr = "void mrb_#{@funcname}_gem_init(mrb_state *mrb)"
@@ -6750,6 +6757,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       # a class position that holds a VALUE name of the function (a class value, not a tracked class variable) is unwrapped
       # with mrb_class_ptr; the call's name is the only other edit, so this one does not overlap it
       # (an entry with arg_order rewrites its whole argument list, and handles its class argument itself)
+      class_wraps = []  # class arguments wrapped in mrb_class_ptr after the state argument is injected (see below)
       if !entry['arg_order'] && (positions = (@special_pos || {})[name]) && !positions.empty?
         cpc = match_close(@files[rel]['masked'], nxt)
         cargs = cpc > 0 ? split_args(@files[rel]['masked'], nxt, cpc) : []
@@ -6759,6 +6767,13 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
           next unless cargs[pi]
           ca, cb = cargs[pi]
           at = psl(@files[rel]['text'], ca, cb).strip
+          # a mapped call whose mruby form returns a VALUE (rb_singleton_class: mrb_singleton_class takes and returns an mrb_value)
+          # is a class argument as its class pointer: the call is wrapped in mrb_class_ptr (the call's own rewrite stays)
+          if (vc = at.match(/\A([A-Za-z_]\w*)\s*\(/)) && (vce = @entries[vc[1]]).is_a?(Hash) &&
+             vce['template'].to_s.start_with?('mrb_singleton_class(') && at.end_with?(')')
+            class_wraps << [ca, cb]
+            next
+          end
           # a VALUE parameter that shadows a class variable of the same name is a value (is_param)
           next unless at.match?(/\A[A-Za-z_][#{WC}]*\z/)
           # an unowned class variable (a VALUE at file scope) in a class position takes its class pointer too
@@ -6887,6 +6902,10 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         t = mrb_tok(rel, s)
         ed.add(nxt + 1, nxt + 1, masked[pa] == ')' ? t : "#{t}, ")
       end
+      class_wraps.each do |ca, cb|
+        ed.add(ca, ca, 'mrb_class_ptr(')
+        ed.add(cb, cb, ')')
+      end
       rewrite(rel, s, name, entry['mruby'], entry['caveat'])
     when 'macro'
       if entry['mruby'] != name
@@ -6988,10 +7007,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       # literal with the fork's bits (mrb_nil_value() is a function call, not a constant)
       if %w[Qnil Qtrue Qfalse Qundef].include?(name) && enclosing_func(rel, s) &&
          masked[[s - 80, 0].max...s].to_s.match?(/\bstatic\s+(?:const\s+)?(?:VALUE|mrb_value)\s+[A-Za-z_]\w*\s*=\s*\z/)
-        static_lit = { 'Qnil' => '((mrb_value){.value.i = 0, .tt = MRB_TT_FALSE})',
-                       'Qtrue' => '((mrb_value){.value.i = 1, .tt = MRB_TT_TRUE})',
-                       'Qfalse' => '((mrb_value){.value.i = 1, .tt = MRB_TT_FALSE})',
-                       'Qundef' => '((mrb_value){.value.i = 0, .tt = MRB_TT_UNDEF})' }[name]
+        static_lit = q_literal(rel, s, name) || Q_COMPOUND_LITERAL[name]
         ed.add(s, e, static_lit)
         rewrite(rel, s, name, static_lit, 'a static local initialized with a Q constant: a constant compound literal (the fork\'s bits)')
         return
@@ -7009,10 +7025,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       # (inside a macro, a Q constant of a brace initializer is the same constant: a table entry from a macro, f(N) { ..., Qnil })
       in_init_brace = !define_at(rel, s).nil? && masked[[s - 160, 0].max...s].to_s.match?(/=\s*\{[^;]*\z/)
       if %w[Qnil Qtrue Qfalse Qundef].include?(name) && !fs_init && enclosing_func(rel, s).nil? && (define_at(rel, s).nil? || in_init_brace)
-        const_lit = { 'Qnil' => '((mrb_value){.value.i = 0, .tt = MRB_TT_FALSE})',
-                      'Qtrue' => '((mrb_value){.value.i = 1, .tt = MRB_TT_TRUE})',
-                      'Qfalse' => '((mrb_value){.value.i = 1, .tt = MRB_TT_FALSE})',
-                      'Qundef' => '((mrb_value){.value.i = 0, .tt = MRB_TT_UNDEF})' }[name]
+        const_lit = q_literal(rel, s, name) || Q_COMPOUND_LITERAL[name]
         ed.add(s, e, const_lit)
         rewrite(rel, s, name, const_lit, 'a file-scope Q constant as a constant value (the fork\'s nil, true or false bits)')
         return
@@ -7071,6 +7084,54 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     else
       refuse(rel, s, name, "unknown kind #{py_repr(kind)} in api_map.json")
     end
+  end
+
+  # The Q constants as constant mrb_value literals (a file-scope table entry, a static local initializer). The fork's mrb_value
+  # layout depends on its boxing: word boxing (the default, mrbconf.h) has the .w word, no boxing has .value and .tt. The
+  # literal is therefore a macro the file defines once (Q_LITERAL_PRELUDE), after the includes, with the layout of the boxing
+  # the build selects; Q_COMPOUND_LITERAL is the no-boxing literal, used only where no place for the prelude is found.
+  Q_COMPOUND_LITERAL = { 'Qnil' => '((mrb_value){.value.i = 0, .tt = MRB_TT_FALSE})',
+                         'Qtrue' => '((mrb_value){.value.i = 1, .tt = MRB_TT_TRUE})',
+                         'Qfalse' => '((mrb_value){.value.i = 1, .tt = MRB_TT_FALSE})',
+                         'Qundef' => '((mrb_value){.value.i = 0, .tt = MRB_TT_UNDEF})' }.freeze
+  Q_LITERAL_PRELUDE = <<~'C'.chomp
+    /* BC2CPP-MRBGEM: the Q constants as constant mrb_value literals (the layout of the fork's boxing) */
+    #if defined(MRB_WORD_BOXING)
+    #define NFCX_Q_NIL ((mrb_value){.w = MRB_Qnil})
+    #define NFCX_Q_TRUE ((mrb_value){.w = MRB_Qtrue})
+    #define NFCX_Q_FALSE ((mrb_value){.w = MRB_Qfalse})
+    #define NFCX_Q_UNDEF ((mrb_value){.w = MRB_Qundef})
+    #else
+    #define NFCX_Q_NIL ((mrb_value){.value.i = 0, .tt = MRB_TT_FALSE})
+    #define NFCX_Q_TRUE ((mrb_value){.value.i = 1, .tt = MRB_TT_TRUE})
+    #define NFCX_Q_FALSE ((mrb_value){.value.i = 1, .tt = MRB_TT_FALSE})
+    #define NFCX_Q_UNDEF ((mrb_value){.value.i = 0, .tt = MRB_TT_UNDEF})
+    #endif
+  C
+
+  # the constant mrb_value literal of the Q constant name at s (see Q_LITERAL_PRELUDE): the file's macro, whose prelude is added
+  # once before the enclosing macro, function or (file scope) the last #include before s; nil when there is no such place
+  def q_literal(rel, s, name)
+    lit = { 'Qnil' => 'NFCX_Q_NIL', 'Qtrue' => 'NFCX_Q_TRUE', 'Qfalse' => 'NFCX_Q_FALSE', 'Qundef' => 'NFCX_Q_UNDEF' }[name]
+    return nil unless lit
+    dpre = define_at(rel, s)
+    fn = enclosing_func(rel, s)
+    at = if dpre
+           dpre[1]
+         elsif fn
+           fn['hstart']
+         else
+           inc = @files[rel]['masked'].to_enum(:scan, /^[ \t]*#[ \t]*include\b[^\n]*\n/).map { Regexp.last_match }
+                                      .select { |m| m.end(0) <= s }.last
+           inc && inc.end(0)
+         end
+    return nil unless at
+    @prelude_done ||= Set.new
+    unless @prelude_done.include?([rel, 'nfcx_q_literals'])
+      @prelude_done << [rel, 'nfcx_q_literals']
+      @edits[rel].add(at, at, Q_LITERAL_PRELUDE + "\n")
+    end
+    lit
   end
 
   # rb_struct_define(name, m1, ..., NULL) and rb_struct_new(klass, v1, ..., vn) of the mruby-struct gem: the variadic helper
