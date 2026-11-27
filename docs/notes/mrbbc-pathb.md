@@ -33,6 +33,10 @@ tests/mrbbc/lower/run.sh
 
 Both exit 77 when mrbc, the mruby interpreter or QBE is missing; `MRBC`, `MRUBY` and `QBE` override the paths.
 
+`mrbbc_lower --report-all program.rite` writes no IR and lists every refusal of the program, one per line
+(`<function> (<method>): refused: ...`), instead of stopping at the first, and on stderr how many functions have one; it
+exits 3 when there is any. It is the census of what a larger program still needs.
+
 ## bc2cpp backend
 
 bc2cpp can send its usual `mrbc_rb` bytecode to this producer instead of emitting C++:
