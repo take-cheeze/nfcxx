@@ -38,6 +38,9 @@
 #   file.cpp2:     Cpp2 source, experimental: cppfront (build/cppfront, scripts/setup-cppfront.sh) translates it to C++ first.
 #                  docs/notes/cpp2.md.
 #   --trace=FILE: write a Chrome trace-event JSON file (open in ui.perfetto.dev); NFCXX_TRACE=FILE too.
+#   --profile: instrument the C compiles with -finstrument-functions (gcc backend; implies it, refused with --backend=pathb) and
+#                  link the profiler runtime (lib/prof). The run writes its profile to the file NFCXX_PROFILE names, and
+#                  writes none when that is unset (docs/notes/profiler.md).
 #   --time-log=FILE (NFCXX_TIME_LOG=FILE): appends one line per stage, "SECONDS<Tab>CATEGORY<Tab>STAGE<Tab>SOURCE", to FILE; the compiles
 #                  of a parallel build can share it (sort -rn FILE ranks them). A .cu file's stages are the rewriter's two
 #                  passes, the device front end, the PTX emitter, ptxas, the embed step and the host compile (eccp).
