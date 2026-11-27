@@ -336,12 +336,16 @@ check sh -c "! grep -q '#if 0' '$work/api_init_helper/src/api_init_helper.c'"
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_kr_proto tools/cext2mrbgem/fixtures/api_kr_proto/ext/api_kr_proto "$work/api_kr_proto" > "$work/api_kr_proto.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'return kp_helper(mrb, v);' "$work/api_kr_proto/src/api_kr_proto.c"
-# 2zzz39. a function in a file-scope table of this file: the table is used only in registered methods, so the function runs in a
-# method's dynamic extent, where the global state is set (global mode); the table's declaration is not a use.
+# 2zzz39. a function in a file-scope table of this file (an anonymous typedef struct, typedef struct { ... } T, whose variable is the
+# positional table): the field takes mrb, the function is threaded with it, and the call through the field passes the state, in the
+# registered method that makes it (the table's declaration is not a use). Before the anonymous typedef was a callback table (ffi's
+# MemoryOp), the function ran in global mode.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fn_table tools/cext2mrbgem/fixtures/api_fn_table/ext/api_fn_table "$work/api_fn_table" > "$work/api_fn_table.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
-check grep -qF 'static mrb_value ft_item(mrb_value v) {' "$work/api_fn_table/src/api_fn_table.c"
+check grep -qF 'typedef struct { mrb_value (*on_item)(mrb_state *mrb, mrb_value v); } FtCallbacks;' "$work/api_fn_table/src/api_fn_table.c"
+check grep -qF 'static mrb_value ft_item(mrb_state *mrb, mrb_value v) {' "$work/api_fn_table/src/api_fn_table.c"
 check grep -qF 'static FtCallbacks ft_cbs = { ft_item };' "$work/api_fn_table/src/api_fn_table.c"
+check grep -qF 'return ft_cbs.on_item(mrb, v);' "$work/api_fn_table/src/api_fn_table.c"
 # 2zzz40. an inline rb_intern("lit") argument of a template (an ID position) is the literal's symbol (mrb_intern_cstr).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_const_intern tools/cext2mrbgem/fixtures/api_const_intern/ext/api_const_intern "$work/api_const_intern" > "$work/api_const_intern.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
@@ -2189,6 +2193,20 @@ check test "$rc" -eq 0
 check test ! -e "$work/define_macro/NOT_BUILDABLE"
 check sh -c "! grep -q 'RDM_INFO_VERSION' '$work/define_macro/REFUSALS.txt'"
 check grep -qF '#define DM_VERSION DM_STR(RDM_INFO_VERSION)' "$work/define_macro/src/define_macro.c"
+
+# 2zzz183. a table of callbacks of an anonymous struct typedef (ffi's MemoryOp, typedef struct { ... } T): the typedef's fields take mrb,
+# the callbacks of a function-defining macro (##-pasted names) and the positional entries of the typedef's variables are threaded, and the
+# calls through a member (op->put(...)) and through a parenthesised one ((*f.op->get)(...)) pass the state; no callback reads the global
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_memop_table tools/cext2mrbgem/fixtures/api_memop_table/ext/api_memop_table "$work/api_memop_table" > "$work/api_memop_table.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_memop_table/NOT_BUILDABLE"
+check grep -qF '    mrb_value (*get)(mrb_state *mrb, void *ptr, long offset);' "$work/api_memop_table/src/api_memop_table.c"
+check grep -qF '    void (*put)(mrb_state *mrb, void *ptr, long offset, mrb_value value);' "$work/api_memop_table/src/api_memop_table.c"
+check grep -qF 'static mrb_value memop_get_int8(mrb_state *mrb, void *ptr, long off) {' "$work/api_memop_table/src/api_memop_table.c"
+check grep -qF 'static memop_ops memop_ops_int8 = { memop_get_int8, memop_put_int8 }' "$work/api_memop_table/src/api_memop_table.c"
+check grep -qF '(*f.op->get)(mrb, f.ptr, 0)' "$work/api_memop_table/src/api_memop_table.c"
+check grep -qF 'f.op->put(mrb, f.ptr, 0, v);' "$work/api_memop_table/src/api_memop_table.c"
+check sh -c "! grep -q 'memop_[gp][a-z]*_int[0-9]*(.*bc2_mrb' '$work/api_memop_table/src/api_memop_table.c'"
 
 # 2zzz182. the global-state restore on the exception path (a registered method of a gem that uses the global state): its body is the
 # callback of mrb_ensure, which runs the restore when the body returns and when an exception leaves it (the longjmp of mruby skips

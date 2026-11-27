@@ -2412,6 +2412,14 @@ end
     nil
   end
 
+  # The name T of an anonymous struct body opened at bo (typedef struct { ... } T;), or nil
+  def anon_struct_typedef(masked, bo)
+    return nil unless psl(masked, [bo - 40, 0].max, bo).match?(/\btypedef\s+struct\s*\z/)
+    bc = match_close(masked, bo)
+    return nil if bc < 0
+    psl(masked, bc + 1, [bc + 200, masked.length].min)[/\A\s*([A-Za-z_]\w*)\s*;/, 1]
+  end
+
   def fnptr_decls(rel)
     masked = @files[rel]['masked']
     out = []
@@ -2427,7 +2435,9 @@ end
       bo = struct_body_open(masked, m.begin(0))
       tag = bo && psl(masked, [bo - 60, 0].max, bo)[/struct\s+(\w+)\s*\z/, 1]
       index = bo ? masked[(bo + 1)...m.begin(0)].to_s.count(';') : nil
-      out << { rel: rel, name: m[1], params_start: open + 1, tag: tag, index: index }
+      # an anonymous struct (typedef struct { ... } T;): its variables are T var = { h1, h2, ... } (ffi's MemoryOp)
+      stypedef = bo && tag.nil? ? anon_struct_typedef(masked, bo) : nil
+      out << { rel: rel, name: m[1], params_start: open + 1, tag: tag, index: index, stypedef: stypedef }
     end
     # Fields whose type is a typedef of a function pointer, typedef RET (*T)(PARAMS): each field of type T in a struct body of
     # this file is a callback field, and its parameter list is the typedef's (retyped once for all of them: see edit_fnptr_fields)
@@ -2686,8 +2696,10 @@ end
         rec[:assigns] << [am[1], frel, am.begin(1)]
       end
       # a positional initializer of a struct of the tag: struct TAG var = { h1, h2, ... }: the member at index is the helper
-      if rec[:tag] && rec[:index]
-        masked.to_enum(:scan, /\bstruct\s+#{rec[:tag]}\s+\w+\s*(?:\[[^\]]*\])?\s*=\s*\{/).each do
+      # (of an anonymous struct, T var = { h1, h2, ... } for its typedef name T)
+      if (rec[:tag] || rec[:stypedef]) && rec[:index]
+        head = rec[:tag] ? "\\bstruct\\s+#{rec[:tag]}" : "\\b#{Regexp.escape(rec[:stypedef])}"
+        masked.to_enum(:scan, /#{head}\s+\w+\s*(?:\[[^\]]*\])?\s*=\s*\{/).each do
           im = Regexp.last_match
           bo = im.end(0) - 1
           bc = match_close(masked, bo)
@@ -2721,6 +2733,11 @@ end
         end
       end
       masked.to_enum(:scan, /(?:\.|->)\s*#{rec[:name]}\s*\(/).each do
+        cm = Regexp.last_match
+        rec[:calls] << [cm.end(0) - 1, enclosing_func(frel, cm.begin(0))&.fetch('name', nil), frel]
+      end
+      # a call through a parenthesised member, (*p->NAME)(args) (ffi's (*f->memoryOp->get)(...)): the '(' after the ')'
+      masked.to_enum(:scan, /(?:\.|->)\s*#{rec[:name]}\s*\)\s*\(/).each do
         cm = Regexp.last_match
         rec[:calls] << [cm.end(0) - 1, enclosing_func(frel, cm.begin(0))&.fetch('name', nil), frel]
       end
