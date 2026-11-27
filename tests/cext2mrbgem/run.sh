@@ -2025,6 +2025,14 @@ check grep -qF 'mrb_define_module_function(mrb, mrb->kernel_module, "conv_global
 check grep -qF 'return mrb_yield(mrb, nfcx_block_arg(mrb), v);' "$work/api_conv_misc/src/api_conv_misc.c"
 check grep -qF 'mrb_get_args(mrb, "&", &nfcx_b);' "$work/api_conv_misc/src/api_conv_misc.c"
 
+# 2c''. a quoted include of a header outside the extension directory ("../hdr.h"): refused at conversion time, with its own
+# reason, so the refusal does not depend on the compile check (which stops at the first such include)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name include_outside tools/cext2mrbgem/fixtures/include_outside/ext/include_outside "$work/include_outside" > "$work/include_outside.log" 2>&1 || rc=$?
+check ok_rc "$rc"
+check sh -c "! grep -q 'Traceback' '$work/include_outside.log'"
+check grep -qF 'include_outside.c:2  #include "../hdr.h"  include outside the extension directory: ../hdr.h (the converter reads only the extension root; the header is not in the output)' "$work/include_outside/REFUSALS.txt"
+check test -e "$work/include_outside/NOT_BUILDABLE"
+
 # 2zzz110. a function-defining macro invoked at file scope (ffi's NUM_OP(name, ...)): each invocation is expanded, so the
 # functions it defines convert and are registered (before, "registered function has no definition"); the #define is then
 # unused and wrapped in #if 0
@@ -2050,6 +2058,17 @@ check test "$rc" -eq 2
 check test -e "$work/ruby_field_unknown/NOT_BUILDABLE"
 check grep -q 'ruby_nosuch_api  no entry in api_map.json' "$work/ruby_field_unknown/REFUSALS.txt"
 check sh -c "! grep -q '  ruby_sd  ' '$work/ruby_field_unknown/REFUSALS.txt'"
+# 2zzz111. rb_path2class (a C string path) and rb_path_to_class (a String VALUE) look a class up by its "::" path: one
+# prelude helper per file (nfcx_path_to_class, emitted once), called from a registered method and from Init, no refusal
+rc=0; "$rb" "$conv" --scanner "$scanner" --name path2class tools/cext2mrbgem/fixtures/path2class/ext/path2class "$work/path2class" > "$work/path2class.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/path2class/NOT_BUILDABLE"
+check sh -c "! grep -q 'rb_path' '$work/path2class/REFUSALS.txt' 2>/dev/null"
+check test "$(grep -c '^static mrb_value nfcx_path_to_class(' "$work/path2class/src/path2class.c")" -eq 1
+check grep -qF 'return nfcx_path_to_class(mrb, "Foo::Bar");' "$work/path2class/src/path2class.c"
+check grep -qF 'p2c_bar = nfcx_path_to_class(mrb, "Foo::Bar");' "$work/path2class/src/path2class.c"
+check grep -qF 'return nfcx_path_to_class(mrb, mrb_string_cstr(mrb, path));' "$work/path2class/src/path2class.c"
+check grep -qF '#include <string.h>' "$work/path2class/src/path2class.c"
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads

@@ -726,6 +726,26 @@ class Converter
     srcs.size == 1
   end
 
+  # the tree path a quoted include names from file rel: the includer's directory joined with the path, '.' and '..' resolved
+  # (a path that leaves the tree starts with '..')
+  def include_key(rel, inc)
+    parts = []
+    (File.dirname(rel).split('/') + inc.split('/')).each do |seg|
+      next if seg.empty? || seg == '.'
+      if seg == '..' && !parts.empty? && parts.last != '..'
+        parts.pop
+      else
+        parts << seg
+      end
+    end
+    parts.join('/')
+  end
+
+  # a quoted include resolves in the output tree when the path from the includer's directory, or from the tree root, is a file of it
+  def include_in_tree?(rel, inc)
+    @files.key?(include_key(rel, inc)) || @files.key?(include_key('', inc))
+  end
+
   def refuse(rel, pos, api, reason)
     if rel.nil?
       @refusals << { 'file' => '(gem)', 'line' => 0, 'api' => api, 'reason' => reason }
@@ -5446,6 +5466,17 @@ use_problem = lambda do |name, use|
           end
         end
       end
+    end
+    # 1b. a quoted include that names a header outside the extension directory ("../json.h": the converter reads only the
+    # extension root, so the header is not in the output tree). The compile check stops at the first such include, so the
+    # refusal is recorded here, at conversion time, for every such include in the file.
+    finditer(/#[ \t]*include[ \t]*"([^"\n]+)"/, text).each do |m|
+      next if masked[m.begin(0)] != '#'
+      inc = m[1]
+      next if include_in_tree?(rel, inc)
+      next unless include_key(rel, inc).split('/').first == '..'
+      refuse(rel, m.begin(0), "#include \"#{inc}\"",
+             "include outside the extension directory: #{inc} (the converter reads only the extension root; the header is not in the output)")
     end
     # 2. function headers
     init_name = @init_defs.empty? ? nil : @init_defs[0]['name']
