@@ -96,6 +96,10 @@
     "--replace",
     "#define rb_gc_mark_movable rb_gc_mark=#define rb_gc_mark_movable(x) rb_gc_mark(x)"
   ],
+  "racc": [
+    "--define",
+    "RACC_INFO_VERSION=1.8.1"
+  ],
   "fast_blank": [
     "--define",
     "RUBY_API_VERSION_CODE=20200"

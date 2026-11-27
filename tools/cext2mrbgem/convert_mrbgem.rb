@@ -5762,7 +5762,7 @@ end
       elsif (name == 'T_RATIONAL' || name == 'T_COMPLEX') && (cc_t = call_context(masked, s)) && cc_t[0] == 'RB_TYPE_P'
         # the type argument of an RB_TYPE_P that is rewritten to a class test (or refused with its own reason): not a use here
         next
-      elsif UNKNOWN_RE.match?(name) && !local_syms.include?(name) && !local_value_at?(rel, s, name) &&
+      elsif UNKNOWN_RE.match?(name) && !local_syms.include?(name) && !local_value_at?(rel, s, name) && !input_declared_names.include?(name) &&
             !(@local_tags.include?(name) && psl(masked, [s - 40, 0].max, s).match?(/\b(?:struct|union|enum)[ \t\n]+\z/))
         # a CRuby type tag the fork cannot test has its recorded reason (type_check_refused), not a generic one
         if name == 'T_STRUCT' && (cmp = psl(masked, e, [e + 200, masked.length].min).match(/\A[ \t\n]*(!=|==)[ \t\n]*rb_type\(([^()]+)\)/))
@@ -6152,6 +6152,30 @@ end
       return true if d.key?('body_end') && d['brace'] < pos && pos < d['body_end'] && param_names(d).include?(name)
     end
     false
+  end
+
+  # words that can precede an expression (return x uses x; it does not declare it)
+  DECL_NON_TYPE_WORDS = Set.new(%w[return else goto case typedef sizeof do new delete throw struct union enum]).freeze
+
+  # The names the input declares as a variable or a struct/union field, in every file: an identifier after a type name (or after
+  # a *), followed by ; , = [ : or ), outside a preprocessor line. A prototype (the name followed by "(") declares nothing here,
+  # since it may declare a CRuby API. A ruby_ name the input declares is the input's own (a struct field such as pg's ruby_sd),
+  # so a use of it is not an unknown-API refusal.
+  def input_declared_names
+    @input_declared_names ||= begin
+      names = Set.new
+      @files.each_value do |f|
+        masked = f['masked']
+        masked.to_enum(:scan, /(?<![#{WC}$])([A-Za-z_][#{WC}]*)(?:[ \t\r\n]+|[ \t\r\n]*\*[ \t\r\n]*)([A-Za-z_][#{WC}]*)[ \t\r\n]*(?=[;,=\[:)])/).each do
+          m = Regexp.last_match
+          next if DECL_NON_TYPE_WORDS.include?(m[1])
+          ls = masked.rindex("\n", m.begin(0))
+          next if masked[(ls ? ls + 1 : 0)...m.begin(0)].match?(/\A[ \t]*#/)
+          names << m[2]
+        end
+      end
+      names
+    end
   end
 
   # a VALUE local of the enclosing macro body or function (VALUE a, b; in it), not a CRuby name

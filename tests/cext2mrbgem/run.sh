@@ -2034,6 +2034,22 @@ check test ! -e "$work/fn_macro/NOT_BUILDABLE"
 check grep -qF 'static mrb_value fn_get_long(mrb_state *mrb, mrb_value self) {' "$work/fn_macro/src/fn_macro.c"
 check grep -qF 'mrb_define_method(mrb, mFn, "get2_long", fn_get2_long, MRB_ARGS_NONE());' "$work/fn_macro/src/fn_macro.c"
 check grep -qF '#if 0  /* BC2CPP-MRBGEM: unused macro' "$work/fn_macro/src/fn_macro.c"
+
+# 2zzz111. a struct field and a file-scope variable named like a CRuby API (ruby_sd, as pg's pg_cancel_connection.c has):
+# the declarations and the member accesses are the input's own names, so no refusal (before, "no entry in api_map.json")
+rc=0; "$rb" "$conv" --scanner "$scanner" --name ruby_field tools/cext2mrbgem/fixtures/ruby_field/ext/ruby_field "$work/ruby_field" > "$work/ruby_field.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/ruby_field/NOT_BUILDABLE"
+check sh -c "! grep -qs '^ruby_field\.c:[0-9]' '$work/ruby_field/REFUSALS.txt'"
+check grep -qF 'int ruby_sd;' "$work/ruby_field/src/ruby_field.c"
+check grep -qF 'p->ruby_sd = 7;' "$work/ruby_field/src/ruby_field.c"
+check grep -qF 'ruby_count++;' "$work/ruby_field/src/ruby_field.c"
+# the field does not hide an undeclared CRuby call: the call is refused
+rc=0; "$rb" "$conv" --scanner "$scanner" --name ruby_field_unknown tools/cext2mrbgem/fixtures/ruby_field_unknown/ext/ruby_field_unknown "$work/ruby_field_unknown" > "$work/ruby_field_unknown.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test -e "$work/ruby_field_unknown/NOT_BUILDABLE"
+check grep -q 'ruby_nosuch_api  no entry in api_map.json' "$work/ruby_field_unknown/REFUSALS.txt"
+check sh -c "! grep -q '  ruby_sd  ' '$work/ruby_field_unknown/REFUSALS.txt'"
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads
@@ -2044,6 +2060,20 @@ else
   leg=libclang
   echo "SKIP [libclang] $(cat "$root_work/libclang_check.txt")"
 fi
+
+# corpus driver naming (run_corpus.sh, once, regex scan): a gem is named by its versioned root (foo-1.0 gives foo; bar-2.1.3 gives
+# bar), and a gem with several extensions gets one output per extension (foo-a, foo-b), so the second does not overwrite the first.
+# corpus_flags.json's racc entry is the define racc's extconf passes (corpus_defs.py prints it as -D).
+leg=corpus
+naming=$root_work/naming
+rm -rf "$naming"; mkdir -p "$naming/src/foo-1.0/ext/foo/a" "$naming/src/foo-1.0/ext/foo/b" "$naming/src/bar-2.1.3/ext/bar"
+for d in foo-1.0/ext/foo/a foo-1.0/ext/foo/b bar-2.1.3/ext/bar; do cp tools/cext2mrbgem/fixtures/tiny/ext/tiny/* "$naming/src/$d/"; done
+NFCX_MRUBY_INCLUDE="$root/3rd/mruby/include" bash tools/cext2mrbgem/run_corpus.sh "$naming/src" "$naming/out" > "$naming/log.txt" 2>&1 || true
+check test -d "$naming/out/bar"
+check test -d "$naming/out/foo-a"
+check test -d "$naming/out/foo-b"
+check test ! -e "$naming/out/foo"
+check sh -c "python3 tools/cext2mrbgem/corpus_defs.py tools/cext2mrbgem/corpus_flags.json racc | grep -qx -- '-DRACC_INFO_VERSION=1.8.1'"
 echo
 
 if [ "$fail" -ne 0 ]; then echo "cext2mrbgem tests FAILED"; exit 1; fi
