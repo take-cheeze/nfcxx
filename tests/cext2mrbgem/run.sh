@@ -2081,6 +2081,29 @@ check grep -qF 'static mrb_value fn_get_long(mrb_state *mrb, mrb_value self) {' 
 check grep -qF 'mrb_define_method(mrb, mFn, "get2_long", fn_get2_long, MRB_ARGS_NONE());' "$work/fn_macro/src/fn_macro.c"
 check grep -qF '#if 0  /* BC2CPP-MRBGEM: unused macro' "$work/fn_macro/src/fn_macro.c"
 
+# 2zzz110b. decorated definitions: ALWAYS_INLINE(static) and NOINLINE(static) (json's decorators, #defined in the fixture) wrap
+# the definitions, which are then ordinary definitions: the static helper they call is threaded and the method reaches it.
+# Before, the definitions were refused ("a macro-decorated definition"). No decorator is left in the output.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name decorated_static tools/cext2mrbgem/fixtures/decorated_static/ext/decorated_static "$work/decorated_static" > "$work/decorated_static.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/decorated_static/NOT_BUILDABLE"
+check sh -c "! grep -q 'macro-decorated' '$work/decorated_static/REFUSALS.txt' 2>/dev/null"
+check grep -qF 'static mrb_value ds_greeting(mrb_state *mrb, mrb_value name) {' "$work/decorated_static/src/decorated_static.c"
+check grep -qF 'return ds_greeting(mrb, name);' "$work/decorated_static/src/decorated_static.c"
+check grep -qF 'return ds_wrap(mrb, name);' "$work/decorated_static/src/decorated_static.c"
+check grep -qF 'mrb_define_method(mrb, mDs, "greet", ds_greet, MRB_ARGS_REQ(1));' "$work/decorated_static/src/decorated_static.c"
+check sh -c "! grep -q '^\(ALWAYS_INLINE\|NOINLINE\)(' '$work/decorated_static/src/decorated_static.c'"
+
+# 2zzz110c. a decorated definition that is not static (NOINLINE(VALUE f(...))): the decorator is not #defined in the input, so
+# the converter's built-in json decorators apply; the result is an ordinary external definition with no decorator left
+rc=0; "$rb" "$conv" --scanner "$scanner" --name decorated_extern tools/cext2mrbgem/fixtures/decorated_extern/ext/decorated_extern "$work/decorated_extern" > "$work/decorated_extern.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/decorated_extern/NOT_BUILDABLE"
+check grep -qF 'mrb_value ext_shout(mrb_state *mrb, mrb_value self) {' "$work/decorated_extern/src/decorated_extern.c"
+check grep -qF 'static mrb_value ext_helper(mrb_state *mrb, mrb_value str) {' "$work/decorated_extern/src/decorated_extern.c"
+check grep -qF 'return ext_helper(mrb, str);' "$work/decorated_extern/src/decorated_extern.c"
+check sh -c "! grep -q '^\(ALWAYS_INLINE\|NOINLINE\)(' '$work/decorated_extern/src/decorated_extern.c'"
+
 # 2zzz111. a struct field and a file-scope variable named like a CRuby API (ruby_sd, as pg's pg_cancel_connection.c has):
 # the declarations and the member accesses are the input's own names, so no refusal (before, "no entry in api_map.json")
 rc=0; "$rb" "$conv" --scanner "$scanner" --name ruby_field tools/cext2mrbgem/fixtures/ruby_field/ext/ruby_field "$work/ruby_field" > "$work/ruby_field.log" 2>&1 || rc=$?

@@ -76,6 +76,18 @@ What differs from the regex scan, and why:
   pastes joined) and is done once per file before the scan. Its top-level items go on their own lines, so the line
   numbers after an expanded invocation in that file are the expanded text's. A macro with two `#define`s, a string
   literal or a stringification in its body, or an expansion that defines no function is left as it is.
+- A decorator macro (json's `ALWAYS_INLINE(x)` and `NOINLINE(x)`, whose body is the parameter with an attribute and
+  `inline` in front) is expanded like the function-defining macros: at each invocation at the start of a line outside any
+  braces, `ALWAYS_INLINE(static) int f(...) {` becomes `static int f(...) {` (the argument is a storage class or a whole
+  declaration). The attribute and `inline` are dropped, as they are hints; a kept `inline` on an external function would
+  have no external definition. The two names are known without their `#define`, since json's `json.h` lies outside the
+  extension directory and is not read; a `#define` of the name in the gem replaces that and must have the same form.
+  `NORETURN(...)` and `MAYBE_UNUSED(...)` are not expanded: their wrappers are removed by `noreturn_mask`, as before.
+  json-parser is converted with `--define HAVE_RB_HASH_BULK_INSERT` (`corpus_flags.json`): the fork provides that function,
+  and the file's own static fallback of it, under `#ifndef`, would otherwise collide with its api_map mapping. A definition
+  whose name is a CRuby API name (api_map.json) in a branch the build excludes (`text_inactive_spans`) is not a declaration
+  of the gem, in the regex scan as in the libclang one. Without that define, the collision stops the converter with
+  "internal: overlapping edits" (a known gap: such a definition should be refused instead).
 - `rb_define_module_function(mod, "name", fn, argc)` becomes `mrb_define_module_function`, which defines the
   singleton and private instance method as CRuby does. `rb_define_const(klass, "NAME", v)` becomes
   `mrb_define_const(mrb, klass, "NAME", v)`. Both need the receiver to be a tracked class or module variable (a
