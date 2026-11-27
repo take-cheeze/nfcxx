@@ -22,7 +22,7 @@ int main(int argc, char **argv) {
   sqlite3_stmt *st = NULL;
   long long allocs, bytes, frees;
   int main_allocs = -1, alloc_some_allocs = -1, alloc_some_calls = -1, alloc_some_bytes = -1, alloc_some_frees = -1;
-  int rc, rows = 0;
+  int rc, rows = 0, unnamed;
 
   if (argc != 2) return fail("usage: libc_check DB");
   if (sqlite3_open_v2(argv[1], &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) return fail("cannot open the database");
@@ -49,14 +49,17 @@ int main(int argc, char **argv) {
     long long b = sqlite3_column_int64(st, 3), f = sqlite3_column_int64(st, 4);
     rows++;
     printf("site %s: calls=%lld allocs=%lld alloc_bytes=%lld frees=%lld\n", name, calls, a, b, f);
-    if (strcmp(name, "main") == 0) {
+    /* a static link cannot name its functions (dladdr finds no symbol), so the row is "+0x..." and is told apart by its
+     * calls: main is called once, alloc_some twice */
+    unnamed = strncmp(name, "+0x", 3) == 0;
+    if (strcmp(name, "main") == 0 || (unnamed && calls == 1)) {
       main_allocs = (int)a;
-    } else if (strcmp(name, "alloc_some") == 0) {
+    } else if (strcmp(name, "alloc_some") == 0 || (unnamed && calls == 2)) {
       alloc_some_calls = (int)calls;
       alloc_some_allocs = (int)a;
       alloc_some_bytes = (int)b;
       alloc_some_frees = (int)f;
-    } else if (name[0] != '(') {
+    } else if (name[0] != '(' && !unnamed) {
       sqlite3_finalize(st);
       sqlite3_close(db);
       fprintf(stderr, "libc_check: unexpected site %s (libc is not instrumented)\n", name);

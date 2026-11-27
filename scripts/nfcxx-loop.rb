@@ -269,12 +269,19 @@ def run_loop(args, state, ld_available)
       state.cflags << "-finstrument-functions" unless state.cflags.include?("-finstrument-functions")
       state.rdynamic = 1 # the program's global functions go into the dynamic symbol table, so the profile can name them
       prof_dir = File.expand_path("../lib/prof", __dir__)
+      # allocation counts. A dynamic link: nfcxx_alloc.c defines malloc, calloc, realloc and free (forwarding to glibc's
+      # __libc_*), and libc's PLT calls reach them. A static link cannot define them (libc.a's malloc.o would clash), so
+      # nfcxx_alloc_wrap.c (nfcxx_alloc.c with the __wrap_ names) is linked with --wrap, which also covers libc.a's calls.
+      static_link = args.include?("-static")
+      alloc_src = static_link ? "nfcxx_alloc_wrap.c" : "nfcxx_alloc.c"
       [File.join(prof_dir, "nfcxx_prof.c"), File.join(prof_dir, "nfcxx_prof_cyg.c"),
-       File.join(prof_dir, "nfcxx_machine.c"), File.join(prof_dir, "nfcxx_alloc.c")].each do |src|
+       File.join(prof_dir, "nfcxx_machine.c"), File.join(prof_dir, alloc_src)].each do |src|
         state.files << src unless state.files.include?(src)
       end
-      # allocation counts: nfcxx_alloc.c defines malloc, calloc, realloc and free (forwarding to glibc's __libc_*), so libc's
-      # allocations are counted too; it is one of the files above
+      if static_link
+        wrap = "-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free"
+        state.files << wrap unless state.files.include?(wrap)
+      end
     elsif a == "-fsanitize=address" then state.asan = 1
     elsif a == "-fsafe-pointers" then state.safeptr = 1
     elsif a == "-fno-safe-pointers" then state.safeptr = 0

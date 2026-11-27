@@ -18,6 +18,15 @@
 
 #define NOINSTR __attribute__((no_instrument_function))
 
+/* A dynamic link defines the four names (they take over libc's PLT calls). The static variant (nfcxx_alloc_wrap.c, which
+ * defines NFCXX_ALLOC_WRAP) defines __wrap_ names instead, for -Wl,--wrap: a static libc.a would clash with the plain names.
+ * Both forward to __libc_*, which both links have. */
+#ifdef NFCXX_ALLOC_WRAP
+#define ENTRY(name) __wrap_##name
+#else
+#define ENTRY(name) name
+#endif
+
 static uint64_t g_allocs = 0, g_alloc_bytes = 0, g_frees = 0;
 
 /* glibc's allocator, exported under these names (the public malloc, calloc, realloc and free are the ones defined below) */
@@ -42,26 +51,26 @@ NOINSTR static void count_free(void) {
   if (c != NULL) c->frees++;
 }
 
-NOINSTR void *malloc(size_t n) {
+NOINSTR void *ENTRY(malloc)(size_t n) {
   void *p = __libc_malloc(n);
   if (p != NULL) count_alloc(n);
   return p;
 }
 
-NOINSTR void *calloc(size_t n, size_t m) {
+NOINSTR void *ENTRY(calloc)(size_t n, size_t m) {
   void *p = __libc_calloc(n, m);
   if (p != NULL) count_alloc(n * m);
   return p;
 }
 
-NOINSTR void *realloc(void *p, size_t n) {
+NOINSTR void *ENTRY(realloc)(void *p, size_t n) {
   void *q = __libc_realloc(p, n);
   if (q != NULL) count_alloc(n);
   if (q != NULL && p != NULL) count_free();
   return q;
 }
 
-NOINSTR void free(void *p) {
+NOINSTR void ENTRY(free)(void *p) {
   if (p != NULL) count_free();
   __libc_free(p);
 }

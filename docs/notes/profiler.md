@@ -97,7 +97,9 @@ Two more chunks, both written at exit with a reserved tid and counted in bytes:
 - `tid = 0xFFFFFFFD`: the allocation totals as `allocs=N alloc_bytes=B frees=F`. Under `--profile` the link wraps
   `malloc`, `calloc`, `realloc` and `free`: `lib/prof/nfcxx_alloc.c` defines them, counts, and forwards to glibc's
   `__libc_malloc` and friends. libc calls malloc through the PLT, so libc's own allocations (fopen's FILE and buffer, strdup)
-  are counted too, in the site of the call that made them (`tests/prof/libc.sh`). A program not built with `--profile`
+  are counted too, in the site of the call that made them (`tests/prof/libc.sh`). A `-static` link cannot define them (libc.a's
+  malloc.o would clash), so the driver links `lib/prof/nfcxx_alloc_wrap.c` with `-Wl,--wrap`, which also reaches libc.a's calls.
+  Its functions have no symbol names there, so the profile names them `+0x<offset>`. A program not built with `--profile`
   has no such definitions and its counts stay at zero. The runtime's own buffers are counted too, a few KB.
 
 `tools/prof/prof2sql.c` stores the machine text and the three totals on each `runs` row.
