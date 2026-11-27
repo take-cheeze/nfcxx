@@ -7,6 +7,7 @@ MRuby::Build.new do |conf|
   conf.toolchain :gcc
   %w[hal-posix-io hal-posix-dir hal-posix-socket hal-posix-task].each { |g| conf.gem core: g }
   conf.gembox 'default'
+  conf.gem File.expand_path('../../../bc2cpp/host-libs/mruby-signal', __dir__)   # Signal.trap (not in the fork)
   conf.gem ENV.fetch('MRUBY_ONIG_DIR')
   conf.cc.command = ENV.fetch('MRUBY_CC', 'gcc')
   conf.linker.command = ENV.fetch('MRUBY_LD', ENV.fetch('MRUBY_CC', 'gcc'))
