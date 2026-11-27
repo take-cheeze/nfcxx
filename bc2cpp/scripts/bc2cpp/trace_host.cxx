@@ -15,6 +15,9 @@
 // BC2CPP_HOST_CLASS_MUTATIONS=DIR records what the run changes in the boot's
 // classes (class_mutations.hxx).
 //
+// BC2CPP_HOST_FRAMEHASH=1 prints "FH <frame> <hash>" after every frame: the
+// FNV-1a hash of the whole screen, drawn first (FRAMEHASH below).
+//
 // HOST_ARENA: the GC arena is restored after the boot and after every frame, as
 // a device host does. A main_loop call that leaves more in the arena than
 // mrb_funcall would (its result, if that is a heap object) fails the run.
@@ -146,6 +149,20 @@ void delay_ms(uint32_t ms) {
 // flush acknowledged or it stops rendering.
 void flush_cb(lv_display_t* disp, const lv_area_t*, uint8_t*) {
   lv_display_flush_ready(disp);
+}
+
+// FRAMEHASH: the full-screen buffer (LV_DISPLAY_RENDER_MODE_FULL) after a
+// forced refresh, so the hash does not depend on when LVGL's refresh timer
+// last ran. Two builds that draw the same frames print the same lines.
+void print_frame_hash(long frame, const uint8_t* buf, size_t len) {
+  lv_refr_now(nullptr);
+  uint64_t h = 1469598103934665603ULL;
+  for (size_t i = 0; i < len; ++i) {
+    h ^= buf[i];
+    h *= 1099511628211ULL;
+  }
+  fprintf(stdout, "FH %ld %016llx\n", frame,
+          static_cast<unsigned long long>(h));
 }
 
 // BC2CPP_HOST_MT_COUNT=1: the number of method-table entries of every class,
@@ -574,6 +591,8 @@ int main(int argc, char** argv) {
           BC2CPP_ENTRY_RPG2k_current_scene_name ? "direct" : "by-name");
 
   const std::vector<KeyTap> taps = parse_keys(getenv("BC2CPP_HOST_KEYS"));
+  const char* const fh = getenv("BC2CPP_HOST_FRAMEHASH");
+  const bool frame_hash = fh && strcmp(fh, "1") == 0;
   const int frame_ai = mrb_gc_arena_save(M);
   for (long frame = 0; frame < frames; ++frame) {
     print_scene(M, game, frame, frame % 50 == 0);
@@ -599,6 +618,8 @@ int main(int argc, char** argv) {
       return 5;
     }
     mrb_gc_arena_restore(M, frame_ai);
+    if (frame_hash)
+      print_frame_hash(frame, static_cast<const uint8_t*>(buf), buf_size);
   }
   print_scene(M, game, frames, true);
   mrb_gc_arena_restore(M, frame_ai);
