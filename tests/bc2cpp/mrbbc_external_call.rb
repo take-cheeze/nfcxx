@@ -13,8 +13,9 @@ selected << 'tvm' if ENV['TVM_FFI_ROOT']
 selected << 'torch' if ENV['LIBTORCH']
 selected << 'qt' if ENV['QT6_PREFIX'] || ENV['QT6'] == '1'
 selected << 'chain' if selected.size == 3
+selected << 'nfcast' if ENV['NFCAST'] == '1'
 if selected.empty?
-  warn 'skip: set TVM_FFI_ROOT, LIBTORCH, QT6_PREFIX or QT6=1 for real-library call tests'
+  warn 'skip: set TVM_FFI_ROOT, LIBTORCH, QT6_PREFIX, QT6=1 or NFCAST=1 for integration tests'
   exit 77
 end
 checks = 0
@@ -49,6 +50,17 @@ Dir.mktmpdir('mrbbc-external') do |dir|
   rt = File.join(root, 'tests/mrbbc/runtime')
   test_dir = File.join(root, 'tests/mrbbc/call')
   qt_sources = []
+  ast_objects = []
+  if selected.include?('nfcast')
+    sources = %w[nfcast_core nfcast_ops nfcast_parse nfcast_nodes nfcast_lib nfcast_tier nfcast_jit nfcast_bytecode]
+                .map { |name| File.join(root, "lib/ast/#{name}.cpp") }
+    sources << File.join(root, 'tools/lua54bc/lua54_chunk.cpp')
+    sources.each_with_index do |source, i|
+      object = File.join(dir, "nfcast#{i}.o")
+      run.call(cxx, '-std=c++20', '-O1', '-pthread', *extra, '-c', source, '-o', object)
+      ast_objects << object
+    end
+  end
   if selected.include?('qt')
     %w[lib/pathb/call_qt.hpp tests/mrbbc/call/qt_object.hpp].each_with_index do |header, i|
       generated = File.join(dir, "moc#{i}.cpp")
@@ -95,6 +107,9 @@ Dir.mktmpdir('mrbbc-external') do |dir|
       when 'chain'
         flags = flags_by_adapter.values.flatten + ['-DQT_NO_KEYWORDS']
         sources = qt_sources
+      when 'nfcast'
+        sources = ast_objects
+        flags = ['-ldl']
       end
       flags_by_adapter[adapter] = flags
       exe = File.join(dir, "#{adapter}#{value}")

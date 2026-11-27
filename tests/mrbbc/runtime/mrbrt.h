@@ -36,7 +36,8 @@ enum mrbbc_tag {
   MRBBC_BLK = 7,
   MRBBC_OBJ = 8, /* an instance of a class the program defines (the int64 is its MObj) */
   MRBBC_CLS = 9, /* a class the program defines, or Object (the int64 is its MClass) */
-  MRBBC_HASH = 10 /* a hash: the keyword arguments of a call, and the kdict of a method with keyword parameters */
+  MRBBC_HASH = 10, /* a hash: the keyword arguments of a call, and the kdict of a method with keyword parameters */
+  MRBBC_FOREIGN = 11 /* an opaque host reference; its release callback runs when collected */
 };
 
 #ifndef MRBBC_VALUE
@@ -228,6 +229,11 @@ void mrbbc_binop(int op, MV *dst, const MV *a, const MV *b);
 
 /* dst = a new string of the n bytes at p (a copy). */
 void mrbbc_str_new(MV *dst, const char *p, long n);
+int mrbbc_str_view(const MV *value, const char **data, long *size);
+void mrbbc_set_nil(MV *dst);
+/* Ownership transfers only on successful return; domain prevents interpreting another embedder's payload. */
+void mrbbc_foreign_new(MV *dst, const void *domain, void *data, void (*release)(void *));
+void *mrbbc_foreign_data(const MV *value, const void *domain);
 
 /* dst = the symbol with the name p (static storage; the pointer is the symbol's identity). */
 void mrbbc_sym(MV *dst, const char *name);
