@@ -3736,6 +3736,9 @@ use_problem = lambda do |name, use|
           s = m.begin(0)
           e = logical_line_end(masked, m.end(0))
           next if (accepted[rel] || []).include?([s, e])
+          # a #define in inactive text (#if 0, an excluded branch) or an unused macro (wrapped in #if 0 by the unused-macro pass)
+          # is dead: it gets no marker and no mrb argument
+          next if inactive_text_at?(rel, s) || unused_macro?(rel, name, s, e)
           body = psl(masked, m.end(0), e)
           # a body that calls a helper which needs the state is handled the same way: its call takes the global
           # a macro is a global macro only when its body calls the global state: a macro that calls only threaded helpers
@@ -3777,6 +3780,8 @@ use_problem = lambda do |name, use|
             next true if ((@excluded_spans || {})[orel] || []).any? { |x, z| x < os && os < z }
             # another #define of the same macro (an alternative branch) is a definition, not an expansion
             next true if (dd = define_at(orel, os)) && dd[0] == name
+            # an expansion in the body of an unused macro (dead text, wrapped in #if 0) is dead code
+            next true if (dd = define_at(orel, os)) && unused_macro?(orel, dd[0], dd[1], dd[2])
             # a macro is local to its file: a same-named macro of another file is another definition, not a use
             next true if orel != rel
             fn = enclosing_func(orel, os)
@@ -3807,6 +3812,16 @@ use_problem = lambda do |name, use|
     end
   end
 
+  # a macro with no use in the gem (no occurrence outside its own #define, and no name pasted from it): dead text, which the
+  # unused-macro pass keeps under #if 0
+  def unused_macro?(rel, name, a, b)
+    paste_suffixes = (@paste_suffixes ||= @files.values.inject(Set.new) do |acc, f|
+      acc | f['masked'].scan(/##\s*([A-Za-z_]\w*)/).flatten.to_set
+    end)
+    (@occ[name] || []).none? { |r, os, _oe| !(r == rel && a <= os && os < b) } &&
+      paste_suffixes.none? { |sfx| name.end_with?(sfx) }
+  end
+
   # [name, start, end, rel] of the #define that holds pos, or nil
   def define_at(rel, pos)
     d = define_spans(rel).find { |_n, a, b| a < pos && pos < b }
@@ -3835,6 +3850,8 @@ use_problem = lambda do |name, use|
       next true if ((@excluded_spans || {})[orel] || []).any? { |x, z| x < os && os < z }
       # another #define of the same macro (an alternative branch) is a definition, not an expansion
       next true if (dd = define_at(orel, os)) && dd[0] == name
+      # an expansion in the body of an unused macro (dead text, wrapped in #if 0) is dead code
+      next true if (dd = define_at(orel, os)) && unused_macro?(orel, dd[0], dd[1], dd[2])
       fn = enclosing_func(orel, os)
       if fn.nil?
         # an expansion inside another macro's body is ok when that macro's own expansions are (the nesting is followed)
@@ -6160,12 +6177,8 @@ end
     # A macro with no use anywhere in the gem (no occurrence outside its own #define) is dead text: its CRuby body is not
     # converted, so the #define is kept under #if 0 and its names are not refused. A macro used in any file is not dead.
     # a name built by pasting (s##_trunc with s = jd makes jd_trunc) is a use of the macro it names
-    paste_suffixes = (@paste_suffixes ||= @files.values.inject(Set.new) do |acc, f|
-      acc | f['masked'].scan(/##\s*([A-Za-z_]\w*)/).flatten.to_set
-    end)
     unused_spans = define_spans(rel).select do |mname, a, b|
-      (@occ[mname] || []).none? { |r, os, _oe| !(r == rel && a <= os && os < b) } &&
-        paste_suffixes.none? { |sfx| mname.end_with?(sfx) }
+      unused_macro?(rel, mname, a, b)
     end.map { |_n, a, b| [a, b] }
     unused_spans.each do |a, b|
       ed.add(a, a, "#if 0  /* BC2CPP-MRBGEM: unused macro (no use in the gem): its CRuby body is not converted */\n")
