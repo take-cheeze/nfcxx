@@ -151,7 +151,8 @@ sources:
 - Instructions: one opcode byte and its operands, with the formats of `ops.h` (B, BB, BBB, BS, BSS, S, W, Z; S is a
   signed 16-bit offset). An `EXT1`/`EXT2`/`EXT3` prefix is an instruction of its own; the instruction after it has its
   operands widened by the `FETCH_*_n` macros of `ops.h` (16-bit first operand for EXT1, a 16-bit second one for EXT2,
-  and both 16-bit for EXT3). `mrbc` uses a prefix when a register is past 255.
+  and both 16-bit for EXT3). `mrbc` uses a prefix when a register, a symbol, a pool entry or a child is past 255. The
+  lowering takes the widened instruction as it takes the narrow one.
 
 `mrb::decode_iseq` throws on an opcode out of range, a prefix with no instruction after it, or an instruction that runs
 past the iseq. The reader checks every section size and the record sizes, rejects bytes after END, and rejects a
@@ -324,6 +325,8 @@ same way: the cbase is nil there too, so the class is defined under the body's s
   A self call (`mrbbc_find`), an explicit receiver (`mrbbc_find_send`) and the initialize of `new` (`mrbbc_find_init`) all
   use it. An explicit receiver that reaches a top-level def (Object's, private in mruby) is a NoMethodError.
 - `TCLASS a`: R[a] = Object at the top level, the class body's self in a class body (a method or a block is refused).
+- `TCLASS a; METHOD a+1 c; DEF a b` is mrbc's def of a body past child 255 (TDEF has one byte for c), lowered as `TDEF a b c`.
+  `METHOD` and `DEF` in any other sequence are refused.
 - `EXEC a b`: runs class body b with self R[a] and R[a] = its value (`mrb_k<N>`, called directly: the child is static).
 - `TDEF` in a class body defines the method on that class (`mrbbc_def_in` with self), at the top level on Object
   (`mrbbc_def`). A class has its own list of methods, newest first, so a redefinition wins; the lookup for a self call
@@ -466,8 +469,7 @@ Lifetime: a closure is valid while its frame is alive. A block is passed to a me
 has no way to keep it (a block parameter is refused), so no closure outlives its frame. This is the producer's reading,
 and a program that kept a block would make the closure dangle.
 
-Refused by name (exit 3, `refused: opcode NAME is not lowered yet (pc N)`): every other opcode, the `EXT1`-`EXT3`
-prefixes and the instructions they widen, `LOADL` of a non-integer (`LOADL` never holds a string: mruby compiles a
+Refused by name (exit 3, `refused: opcode NAME is not lowered yet (pc N)`): every other opcode, `LOADL` of a non-integer (`LOADL` never holds a string: mruby compiles a
 string literal to `STRING`), and a main program with a catch table. In particular `SENDB` of a name the program does not
 define in a class (a block call to a builtin), `RETURN_BLK` from a block of the top level (see below), `BREAK` outside a
 block), `GETUPVAR`/`SETUPVAR` at level 1 or more outside the depth-2 cases above, `BLKPUSH` of a block other than the method's own (a yield inside a
@@ -585,7 +587,7 @@ whose message says so, never with a value.
   7 (`super` and `super(1)` at the top level, a zsuper at the top level, a `super` in a top-level block, a `super` in a class
   body, each a NoMethodError); 29 programs are refused with status 3, a `refused:` message and no stdout: 28 in `err/`
   (rest, post, block and keyword parameters, a zsuper in a block of a block of a block, a zsuper in a block with a splat and
-  with a keyword argument, and an operator the program defines at the top level) and a generated one with EXT1 prefixes. `err/` is the refusal set, `rterr/` the runtime errors; the brief's "err/ programs must be
+  with a keyword argument, and an operator the program defines at the top level). `err/` is the refusal set, `rterr/` the runtime errors; the brief's "err/ programs must be
   refused" is read as the first.
 
 - Measurement (`tests/mrbbc/lower/measure.sh`): one row per value program with the IR bytes, the `.text` bytes of the

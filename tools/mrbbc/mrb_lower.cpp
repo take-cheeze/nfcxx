@@ -639,6 +639,27 @@ const mrb::Irep &child_at(const mrb::Irep &irep, std::uint32_t i, std::size_t pc
   return irep.reps[i];
 }
 
+bool ext_prefix(const mrb::Insn &in) { return in.op == mrb::OP_EXT1 || in.op == mrb::OP_EXT2 || in.op == mrb::OP_EXT3; }
+
+// The index of the instruction before insns[i] and its EXT prefix (insns.size() when there is none).
+std::size_t before(const std::vector<mrb::Insn> &insns, std::size_t i) {
+  if (i > 0 && ext_prefix(insns[i - 1])) --i;
+  return i == 0 ? insns.size() : i - 1;
+}
+
+// The DEF that a METHOD at insns[i] feeds, or nullptr. mruby's codegen writes a def whose body is child 256 or later as
+// TCLASS a; METHOD a+1 c; DEF a sym (TDEF holds one byte for c), which is a TDEF a sym c in two steps; the lowering takes
+// the pair and nothing else METHOD makes.
+const mrb::Insn *wide_def(const std::vector<mrb::Insn> &insns, std::size_t i) {
+  if (insns[i].op != mrb::OP_METHOD) return nullptr;
+  const std::size_t t = before(insns, i);  // the TCLASS
+  if (t == insns.size() || insns[t].op != mrb::OP_TCLASS || insns[t].args[0] + 1 != insns[i].args[0]) return nullptr;
+  std::size_t j = i + 1;
+  if (j < insns.size() && ext_prefix(insns[j])) ++j;
+  if (j >= insns.size() || insns[j].op != mrb::OP_DEF || insns[j].args[0] + 1 != insns[i].args[0]) return nullptr;
+  return &insns[j];
+}
+
 // Finds the functions of the module: every TDEF's body is a method and every BLOCK's body a block, each numbered in the
 // order found (the main program first, then the children in order), and the names the program defines are recorded.
 // `kind` is what irep lowers to, and `home_main` says that its home (the function a `return` from it leaves; for a block)
@@ -651,22 +672,29 @@ void collect(Shared &sh, const mrb::Irep &irep, Kind kind, bool home_main, const
   const bool child_home_main = kind == Kind::Main || kind == Kind::Class || (kind == Kind::Block && home_main);
   const mrb::Irep *own = kind == Kind::Method ? &irep : method;  // the method the blocks of this irep are made in
   std::vector<std::pair<Kind, bool>> child_kind(irep.reps.size(), std::make_pair(Kind::Method, false));
-  for (const mrb::Insn &in : mrb::decode_iseq(irep)) {
+  const std::vector<mrb::Insn> insns = mrb::decode_iseq(irep);
+  auto add_def = [&](std::uint32_t child, std::uint32_t sym, std::size_t pc) {
+    const mrb::Irep *body = &child_at(irep, child, pc);
+    if (sh.method_ids.count(body) == 0) {
+      sh.method_ids[body] = static_cast<int>(sh.methods.size());
+      sh.methods.push_back(body);
+    }
+    const std::string name = sym_at(irep, sym, pc);
+    sh.defined.insert(name);
+    sh.method_names[body] = name;
+    if (kind == Kind::Class) sh.in_class.insert(name);
+    if (kind == Kind::Main) {
+      sh.top.insert(name);
+      sh.top_methods[name].push_back(body);
+    }
+    child_kind[child] = std::make_pair(Kind::Method, false);
+  };
+  for (std::size_t i = 0; i < insns.size(); ++i) {
+    const mrb::Insn &in = insns[i];
     if (in.op == mrb::OP_TDEF) {
-      const mrb::Irep *body = &child_at(irep, in.args[2], in.pc);
-      if (sh.method_ids.count(body) == 0) {
-        sh.method_ids[body] = static_cast<int>(sh.methods.size());
-        sh.methods.push_back(body);
-      }
-      const std::string name = sym_at(irep, in.args[1], in.pc);
-      sh.defined.insert(name);
-      sh.method_names[body] = name;
-      if (kind == Kind::Class) sh.in_class.insert(name);
-      if (kind == Kind::Main) {
-        sh.top.insert(name);
-        sh.top_methods[name].push_back(body);
-      }
-      child_kind[in.args[2]] = std::make_pair(Kind::Method, false);
+      add_def(in.args[2], in.args[1], in.pc);
+    } else if (const mrb::Insn *def = wide_def(insns, i)) {
+      add_def(in.args[1], def->args[1], in.pc);
     } else if (in.op == mrb::OP_BLOCK) {
       const mrb::Irep *body = &child_at(irep, in.args[1], in.pc);
       if (sh.block_ids.count(body) == 0) {
@@ -1096,7 +1124,8 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
       store_tag(c, c.reg(static_cast<unsigned>(i)), kTagNil);
     }
   }
-  for (const mrb::Insn &in : insns) {
+  for (std::size_t idx = 0; idx < insns.size(); ++idx) {
+    const mrb::Insn &in = insns[idx];
     c.pc = in.pc;
     c.line("");
     c.body << "  (label " << lbl(in.pc) << ")\n";
@@ -1109,10 +1138,8 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
                       "', which the program defines at the top level, is not lowered yet (pc " + std::to_string(in.pc) + ")");
       }
     }
-    if (in.ext != 0 || in.op == mrb::OP_EXT1 || in.op == mrb::OP_EXT2 || in.op == mrb::OP_EXT3) {
-      throw Refused("refused: opcode " + std::string(in.name) + " (wide operands, EXT prefix) is not lowered yet (pc " +
-                    std::to_string(in.pc) + ")");
-    }
+    // an EXT prefix only widens the operands of the next instruction, which the decoder has read in full
+    if (ext_prefix(in)) continue;
     const std::vector<std::uint32_t> &x = in.args;
     auto jump_to = [&](std::size_t target) {
       if (!starts.count(target) && !ends.count(target)) {
@@ -1277,10 +1304,28 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
                "))");
         c.line("(copy " + vsize() + " " + c.reg(x[0]) + " " + c.reg(x[0] + 2) + ")");
         break;
+      case mrb::OP_METHOD:
+        // the body of a wide def (wide_def): the DEF after it defines it, and R[a] is not read past that DEF
+        if (wide_def(insns, idx) == nullptr) {
+          throw Refused("refused: opcode METHOD other than a def's is not lowered yet (pc " + std::to_string(in.pc) + ")");
+        }
+        break;
+      case mrb::OP_DEF:
       case mrb::OP_TDEF: {
         // R[a] = the symbol of the method Syms[b], defined as the body of child c on the target class (Object here, the
-        // only class a program of this subset defines methods on); the body is a function of its own (mrb_m<number>)
-        const mrb::Irep &body = child_at(irep, x[2], in.pc);
+        // only class a program of this subset defines methods on); the body is a function of its own (mrb_m<number>).
+        // DEF is the second half of a wide def (TCLASS a; METHOD a+1 c; DEF a b), whose c is the METHOD's.
+        std::uint32_t child = 0;
+        if (in.op == mrb::OP_TDEF) {
+          child = x[2];
+        } else {
+          const std::size_t m = before(insns, idx);  // the METHOD
+          if (m == insns.size() || wide_def(insns, m) != &in) {
+            throw Refused("refused: opcode DEF other than a def's is not lowered yet (pc " + std::to_string(in.pc) + ")");
+          }
+          child = insns[m].args[1];
+        }
+        const mrb::Irep &body = child_at(irep, child, in.pc);
         const std::string name = method_name(x[1]);
         // a def goes to Object at the top level, and to the class body's own class (self) in a class body
         if (kind != Kind::Main && kind != Kind::Class) refuse_method(name, "is defined in a method or a block (not lowered yet)");
