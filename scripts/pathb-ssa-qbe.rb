@@ -177,7 +177,7 @@ module Qbe
     # interpose (not static) is read through the GOT or a pointer cell, never as a PC-relative reference, which ld rejects for
     # a symbol of a shared object (R_X86_64_PC32 "can not be used when making a shared object").
     # darwin: the module is for a Darwin target (the builder sets it from the host; a closed script world has no RbConfig).
-    attr_accessor :ptr32, :regparm3, :xadd, :cmpxchg, :jtab, :safe, :asan, :prof, :darwin, :got_extern, :pic, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_thunks, :trap_checks, :no_pie, :nothrow, :debug_lines
+    attr_accessor :ptr32, :regparm3, :xadd, :cmpxchg, :jtab, :safe, :asan, :prof, :darwin, :got_extern, :pic, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_thunks, :trap_checks, :no_pie, :nothrow, :debug_lines, :cxx
   end
   # --asan, milestone 2: the redzone on each side of a slot that stays in memory (poisoned at the function's entry, unpoisoned
   # before its return). 32 bytes, as the qbe backend's (docs/notes/asan.md).
@@ -190,6 +190,9 @@ module Qbe
   self.safe = false
   # --profile (docs/notes/profiler.md): each defined function calls the profiler hooks at its entry and before each return.
   self.prof = false
+  # --cxx (with --profile, scripts/pathb-cc.rb for a C++ source): a function that unwinds through a call gets the landing pad
+  # PROF_PAD. Only a C++ unit can throw into the profiled function; a C object refers to no personality (libstdc++ is not linked).
+  self.cxx = false
   # --i386 (the 32-bit targets, i386 and i386_regparm3): pointers are 32-bit, of class w; `long` is read as `int` by the driver
   # (scripts/pathb-ssa-build renames the IR's tokens), long long stays class l. docs/notes/nfcc-pathb.md, 3rd/qbe/doc/i386.txt.
   self.ptr32 = false
@@ -591,6 +594,8 @@ module Qbe
       allocs
       escape_slots if returns_twice?(@blocks)
       plan_phis
+      @prof_pad_used = false
+      @prof_pass_through = Qbe.prof && Qbe.cxx && @form.drop(2).none? { |p| p.is_a?(Array) && %w[eh-noexcept eh-spec].include?(head(p)) }
       @blocks.each do |b|
         @cur = b[1].to_s
         @loc = nil
@@ -600,6 +605,11 @@ module Qbe
         @eh_block_line ||= {}
         ehu = items.find { |it| head(it) == "eh-unwind" }
         @eh_block_line[@label] = ehu && "  ehunwind #{ehu[1] == "0" ? "0" : "@#{block_label(ehu[1])}"}"
+        if ehu.nil? && prof_pass_through?(items)
+          items = items.dup.insert(items.index { |it| head(it) != "phi" } || items.size, ["prof-unwind"])
+          @eh_block_line[@label] = "  ehunwind @#{PROF_PAD}"
+          @prof_pad_used = true
+        end
         # A trap or unreachable ends the block in QBE (hlt): what follows it in the SSA block is dead, and QBE rejects an
         # instruction after hlt, so the block is cut there.
         halt = items.index { |it| %w[trap unreachable].include?(head(it)) }
@@ -608,6 +618,7 @@ module Qbe
         pending_phi_operands(@cur)
         item_lines(items.last) if items.any?
       end
+      @lines.concat(prof_pad_lines) if @prof_pad_used
       @lines << "}"
       resolve_phi_predecessors
       eh_relabel if @eh_block_line&.values&.any?
@@ -636,6 +647,47 @@ module Qbe
     # The symbol the function is defined under: the body of a hidden entry is NAME.nfcxxhid. --profile names this symbol.
     def prof_symbol
       @hidden_name ? "#{@name}.nfcxxhid" : @name
+    end
+
+    # --profile and an exception (docs/notes/profiler.md, "Path B"): the exit hook must run when the unwinder leaves the function,
+    # or the profile keeps the call open. A call with no state (no landing pad of its own) unwinds through the function, so its
+    # block gets a landing pad of the function, PROF_PAD: a cleanup that runs the exit hook and resumes the unwind. A pad's own
+    # state (the cleanups and catch clauses of a try) resumes through _Unwind_Resume, which is where the exit hook is called
+    # (item_lines, "eval"). A function with a noexcept or dynamic exception specification keeps its own states: an exception
+    # that leaves it is the terminate or unexpected path, not an unwind through the function.
+    PROF_PAD = "nfprofpad"
+
+    # Whether a block with no eh-unwind line needs the function's profiling pad: it makes a call, and it is not the block that
+    # resumes the unwind (that one is a call of _Unwind_Resume and gets the exit hook instead).
+    def prof_pass_through?(items)
+      return false unless @prof_pass_through
+      return false if items.any? { |it| resume_eval?(it) }
+
+      items.any? { |it| contains_call?(it) }
+    end
+
+    def resume_eval?(item)
+      head(item) == "eval" && head(item[1]) == "call" && item[1][2].is_a?(Ref) && item[1][2].sigil == "&" &&
+        Qbe.symbol(item[1][2].raw) == "_Unwind_Resume"
+    end
+
+    def contains_call?(x)
+      return false unless x.is_a?(Array)
+      return true if head(x) == "call"
+
+      x.any? { |y| contains_call?(y) }
+    end
+
+    # The landing pad of the profiled function's pass-through calls: its exit hook, then the unwind goes on. QBE gives the
+    # calls of a landing pad block no call site (ehpad makes the block EhTerm), and the unwinder looks the resume call up
+    # in the LSDA when it re-enters the frame: so the exit hook and _Unwind_Resume are in a block of their own, which is
+    # not a pad and has the call site of an unwind through the function (no pad, action 0).
+    PROF_RESUME = "nfprofresume"
+
+    def prof_pad_lines
+      [ "@#{PROF_PAD}", "  ehpad 1", "  %nfprof_exc =l ehptr", "  jmp @#{PROF_RESUME}",
+        "@#{PROF_RESUME}", "  call $__nfcxx_prof_exit_addr(l $#{prof_symbol})",
+        "  call $_Unwind_Resume(l %nfprof_exc)", "  hlt" ]
     end
 
     def header
@@ -1422,7 +1474,7 @@ end
           name = l[1..]
           if @eh_block_line.key?(name)
             cur = @eh_block_line[name]
-          elsif cur && name != "start"
+          elsif cur && name != "start" && name != PROF_PAD && name != PROF_RESUME
             out << cur
           end
         end
@@ -1951,6 +2003,7 @@ end
         @lines << "  #{reg(item[1])} =#{Qbe.cls(item[2])} phi #{pairs}"
       when "let" then let_lines(item[1], item[2], item[3])
       when "eh-unwind" then @lines << "  ehunwind #{item[1] == "0" ? "0" : "@#{block_label(item[1])}"}"
+      when "prof-unwind" then @lines << "  ehunwind @#{PROF_PAD}"
       when "eh-pad"
         raise QbeUnsupported, "exception tables on the 32-bit x86 target (QBE's i386 writes none)" if Qbe.ptr32
         @lines << "  ehpad #{item[1]}#{item[2..].map { |t| " #{t}" }.join}"
@@ -2028,6 +2081,8 @@ end
           return
         end
 
+        # --profile: an exception that leaves the function resumes through here, and the exit hook runs first.
+        @lines << "  call $__nfcxx_prof_exit_addr(l $#{prof_symbol})" if Qbe.prof && resume_eval?(item)
         sret, dest, sym, args = call_parts(item[1])
         if sret.nil? || sret.shape == "empty"
           @lines << "  call #{sym}(#{args.join(', ')})"

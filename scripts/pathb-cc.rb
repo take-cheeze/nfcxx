@@ -170,6 +170,8 @@ if safe_on == 1
   dump_opts << "--ir-loc"
 end
 prof = prof_on == 1 ? ["--profile"] : []
+# --profile of a C++ unit (any source but a .c file): the SSA route gives the profiled functions their exit hook on unwind
+prof_cxx = prof_on == 1 && File.extname(src) != ".c" ? ["--cxx"] : []
 asan = []
 if asan_on == 1
   asan = ["--asan"]
@@ -277,7 +279,7 @@ rc = 0
 emit_err = File.join(tmp, "#{n}.emit")
 s_path = File.join(tmp, "#{n}.s")
 ssa_cmd = [File.join(ROOT, "scripts", "pathb-ssa-build"), "--qbe=#{qbe}", "-o", s_path, *i386opt, *pic, *nopie, *ldopt,
-           *safe, *asan, *prof, *debug, ir]
+           *safe, *asan, *prof, *prof_cxx, *debug, ir]
 # The SSA route's budget grows with the IR it is given: QBE with the default loop vectorizer takes about 23 s per MB of IL (a
 # 17 MB unit, one large function of Lean's generated C, took 390 s), and the budget allows 40 s per MB, so a loaded machine still
 # fits. Only the default limit grows; an explicit --timeout or NFCXX_PATHB_TIMEOUT stands for every stage.
