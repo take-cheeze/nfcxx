@@ -141,6 +141,13 @@ struct Ctx {
 // other values (a symbol, an address) left to the runtime. Every access to a value's bits in the lowering goes through
 // the helpers below.
 int g_value_bytes = 8;
+// report_refusals collects here instead of letting the first refusal end the module (nullptr: a refusal is thrown).
+std::vector<std::string> *g_report = nullptr;
+// Records a refusal of fname (the method's name when it has one) in report mode, or throws it.
+void refuse_or_record(const std::string &fname, const std::string &name, const std::string &why) {
+  if (g_report == nullptr) throw Refused(why);
+  g_report->push_back(fname + (name.empty() ? "" : " (" + name + ")") + ": " + why);
+}
 std::size_t kV() { return static_cast<std::size_t>(g_value_bytes); }
 std::string vsize() { return std::to_string(g_value_bytes); }
 int kAlign() { return g_value_bytes == 4 ? 4 : 8; }
@@ -591,7 +598,6 @@ bool body_params(const mrb::Irep &body, Params &p) {
   std::vector<mrb::Insn> insns = mrb::decode_iseq(body);
   if (insns.empty() || insns[0].pc != 0 || insns[0].op != mrb::OP_ENTER || insns[0].ext != 0) return false;
   const std::uint32_t aspec = insns[0].args[0];
-  if ((aspec & 0x1u) != 0 || (aspec >> 24) != 0) return false;  // a block parameter (bit 0); no bit past NOBLOCK (bit 23)
   p.req = static_cast<long>((aspec >> 18) & 0x1f);
   p.opt = static_cast<long>((aspec >> 13) & 0x1f);
   p.rest = static_cast<long>((aspec >> 12) & 0x1);
@@ -599,7 +605,8 @@ bool body_params(const mrb::Irep &body, Params &p) {
   p.kdict = ((aspec >> 1) & 0x1u) != 0;
   p.noblock = ((aspec >> 23) & 0x1u) != 0;
   p.kd = (static_cast<long>((aspec >> 2) & 0x1f) > 0 || p.kdict) ? 1 : 0;
-  return true;
+  // a block parameter (bit 0); no bit past NOBLOCK (bit 23). p is filled anyway, for report_refusals.
+  return (aspec & 0x1u) == 0 && (aspec >> 24) == 0;
 }
 
 // Whether a body has only required parameters, the case vm.c's ENTER takes on its fast path: there an empty `**h` splat is
@@ -1032,19 +1039,21 @@ std::string root_frame(Ctx &c, unsigned frame_regs, const std::string &body) {
 
 // Lowers one irep to the function `fname` and appends it to sh.functions.
 void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kind kind) {
+  auto name_it = sh.method_names.find(&irep);
+  const std::string mname = name_it == sh.method_names.end() ? "" : name_it->second;
   if (!irep.catches.empty()) {
     const char *what = kind == Kind::Main ? "the main program" : kind == Kind::Method ? "a method" : kind == Kind::Class ? "a class body" : "a block";
-    throw Refused(std::string("refused: ") + what + " has a catch table");
+    refuse_or_record(fname, mname, std::string("refused: ") + what + " has a catch table");
   }
   // the parameters of the body: a method or a block takes its required and optional ones (a block with two or more splats a
   // single array argument, see the prologue); a class body takes none and has no ENTER
   Params pr;
   if (kind == Kind::Method || kind == Kind::Block) {
     if (!body_params(irep, pr)) {
-      throw Refused("refused: " + fname + " has a block parameter (&b), which is not lowered yet");
+      refuse_or_record(fname, mname, "refused: " + fname + " has a block parameter (&b), which is not lowered yet");
     }
     if (kind == Kind::Block && (pr.kdict || pr.noblock)) {
-      throw Refused("refused: " + fname + " has a ** or &nil parameter, which a block does not lower yet");
+      refuse_or_record(fname, mname, "refused: " + fname + " has a ** or &nil parameter, which a block does not lower yet");
     }
   }
   const long req = pr.req, opt = pr.opt;
@@ -1105,6 +1114,7 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
     c.pc = in.pc;
     c.line("");
     c.body << "  (label " << lbl(in.pc) << ")\n";
+    try {
     // an operator the program defines at the top level is an Object method that every value inherits (and mruby calls
     // for a nil or a Symbol operand too): the runtime's operators do not reach it, so it is refused. A class's operator
     // is found by the runtime from the receiver's class (mrbbc_binop, see "Operators" in the notes).
@@ -1720,6 +1730,11 @@ void lower_irep(Shared &sh, const mrb::Irep &irep, const std::string &fname, Kin
         throw Refused("refused: opcode " + std::string(in.name) + " is not lowered yet (pc " + std::to_string(in.pc) +
                       ")");
     }
+    } catch (const Refused &e) {
+      // in report mode the instruction's IR is dropped and the scan goes on (no IR is written then)
+      if (g_report == nullptr) throw;
+      refuse_or_record(fname, mname, e.what());
+    }
   }
   // A jump to the end of the iseq returns; the ret slot keeps the nil the driver put there.
   c.body << "  (label " << lbl(irep.iseq.size()) << ")\n";
@@ -1804,6 +1819,34 @@ void emit_i64_exports(Shared &sh, const LowerOptions &options) {
 }
 
 }  // namespace
+
+std::vector<std::string> report_refusals(const mrb::Module &module, const LowerOptions &options, std::size_t *functions) {
+  if (options.value_bytes != 16 && options.value_bytes != 8 && options.value_bytes != 4) {
+    throw std::runtime_error("the value layout is 16, 8 or 4 bytes");
+  }
+  g_value_bytes = options.value_bytes;
+  std::vector<std::string> out;
+  struct Reset {
+    ~Reset() { g_report = nullptr; }
+  } reset;
+  g_report = &out;
+  Shared sh;
+  collect(sh, module.root, Kind::Main, true, nullptr);
+  // a body whose scan stops (a malformed operand past a refused instruction) is reported and the next body goes on
+  auto scan = [&](const mrb::Irep &irep, const std::string &fname, Kind kind) {
+    try {
+      lower_irep(sh, irep, fname, kind);
+    } catch (const std::runtime_error &e) {
+      out.push_back(fname + ": stopped: " + e.what());
+    }
+  };
+  scan(module.root, "mrb_irep_0", Kind::Main);
+  for (std::size_t m = 0; m < sh.methods.size(); ++m) scan(*sh.methods[m], "mrb_m" + std::to_string(m), Kind::Method);
+  for (std::size_t k = 0; k < sh.classes.size(); ++k) scan(*sh.classes[k], "mrb_k" + std::to_string(k), Kind::Class);
+  for (std::size_t b = 0; b < sh.blocks.size(); ++b) scan(*sh.blocks[b], "mrb_b" + std::to_string(b), Kind::Block);
+  if (functions != nullptr) *functions = 1 + sh.methods.size() + sh.classes.size() + sh.blocks.size();
+  return out;
+}
 
 std::string lower_module(const mrb::Module &module, const std::string &source_name, const LowerOptions &options) {
   if (options.value_bytes != 16 && options.value_bytes != 8 && options.value_bytes != 4) {

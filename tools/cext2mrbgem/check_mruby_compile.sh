@@ -2,7 +2,8 @@
 # Compiles each converted gem's src/*.c against the mruby headers, with the gem's corpus defines (corpus_flags.json), and links the
 # objects as a shared object with --no-undefined against libmruby: a converted gem that compiles and links has no undefined symbols.
 # usage: check_mruby_compile.sh CONVERTED_DIR GEM [GEM...]   (CONVERTED_DIR holds one converted gem per directory: CONVERTED_DIR/GEM)
-# MRUBY_LIB (optional) lists the mruby archives to link, space-separated (default: MRUBY's build/host/lib/libmruby.a).
+# MRUBY_LIB (optional) lists the mruby archives and link flags, space-separated (default: MRUBY's build/host/lib/libmruby.a and
+# the fork's default gembox pulls in mruby-onig-regexp, which bundles Onigmo when no system onig is found: its objects are in libmruby.a, so no -lonig is needed; MRUBY_LIB replaces the default).
 # MRUBY (default: the repo's own 3rd/mruby fork tree, HERE/../../3rd/mruby) is the mruby tree with build/host/lib/libmruby.a (built
 # from the fork with its own rake, a host build); MRUBY_UV (default /home/user/mruby-uv) is the mruby-uv tree that bcrypt's thread
 # header needs.

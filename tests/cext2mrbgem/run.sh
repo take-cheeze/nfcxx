@@ -118,6 +118,22 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name const_get_at_value tools/cext2mr
 check test "$rc" -eq 0
 check grep -qF 'mrb_const_get_at(mrb, mrb_class_ptr(mod), version)' "$work/const_get_at_value/src/const_get_at_value.c"
 
+# 2h2. nested calls as whole arguments of a template: the inner call is rewritten first and its text takes the outer call's
+# argument (a kind_of of a plain call; a funcall in rb_str_concat; a nested constant lookup as a class argument, unwrapped with
+# mrb_class_ptr). An inner call that is refused keeps the outer call refused too, with the outer's own reason
+rc=0; "$rb" "$conv" --scanner "$scanner" --name nested_args tools/cext2mrbgem/fixtures/nested_args/ext/nested_args "$work/nested_args" > "$work/nested_args.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/nested_args/NOT_BUILDABLE"
+check grep -qF 'return mrb_bool_value(mrb_obj_is_kind_of(mrb, f(x), mrb->string_class));' "$work/nested_args/src/nested_args.c"
+check grep -qF 'return (mrb_str_concat(mrb, a, mrb_funcall_argv(mrb, a, mrb_intern_cstr(mrb, "to_s"), 0, NULL)), a);' "$work/nested_args/src/nested_args.c"
+check grep -qF 'return mrb_const_get_at(mrb, mrb_class_ptr(mrb_const_get_at(mrb, mNA, mrb_intern_cstr(mrb, "A"))), mrb_intern_cstr(mrb, "B"));' "$work/nested_args/src/nested_args.c"
+check sh -c "! grep -q 'overlaps a rewritten\\|Traceback' '$work/nested_args.log'"
+rc=0; "$rb" "$conv" --scanner "$scanner" --name nested_args_refused tools/cext2mrbgem/fixtures/nested_args_refused/ext/nested_args_refused "$work/nested_args_refused" > "$work/nested_args_refused.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test -e "$work/nested_args_refused/NOT_BUILDABLE"
+check grep -q '  rb_str_concat  the arguments are not all plain' "$work/nested_args_refused/REFUSALS.txt"
+check grep -q '  rb_ensure  rb_ensure needs static VALUE callbacks' "$work/nested_args_refused/REFUSALS.txt"
+
 # 2i. helper threading: a helper with a header declaration, called from another file and from a registered
 # method, is threaded everywhere (declaration, definition, calls) with a caveat; a helper taken as a value and a
 # helper name shadowed by a local stay refused
@@ -1744,7 +1760,7 @@ check grep -qF 'mrb_symbol(' "$work/api_id_return/src/api_id_return.c"
 # 2zzz151. a refused statement in Init is dropped as a no-op (the user's decision): the gem loads, so gem_init.c has no #error
 # and the statement is recorded as dropped in REFUSALS.txt.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_init_drop tools/cext2mrbgem/fixtures/api_init_drop/ext/api_init_drop "$work/api_init_drop" > "$work/api_init_drop.log" 2>&1 || rc=$?
-check grep -qF 'BC2CPP-MRBGEM dropped in Init (rb_thread_local_aset)' "$work/api_init_drop/src/api_init_drop.c"
+check grep -qF 'BC2CPP-MRBGEM dropped in Init (rb_ary_dup)' "$work/api_init_drop/src/api_init_drop.c"
 check test "$(grep -c '#error' "$work/api_init_drop/src/gem_init.c")" -eq 0
 check grep -qF '[dropped in Init' "$work/api_init_drop/REFUSALS.txt"
 check grep -qF 'STATUS: STUBBED' "$work/api_init_drop/REFUSALS.txt"
@@ -2285,6 +2301,15 @@ if [ -n "${MRUBY_BUILD:-}" ] && [ -f "$MRUBY_BUILD/build/host/lib/libmruby.a" ];
 else
   echo "SKIP [$leg] global_escape harness: MRUBY_BUILD does not name a built libmruby (the converted code is checked by the grep tests above)"
 fi
+# 2zzz184. a macro with the state's API in a disabled branch (#if 0) or unused in the gem gets no global-state marker and no mrb
+# argument (ffi's NUM_OP, an unused function-defining macro, had "(mrb = ...)" in its log); a used macro keeps its marker
+rc=0; "$rb" "$conv" --scanner "$scanner" --name disabled_macro tools/cext2mrbgem/fixtures/disabled_macro/ext/disabled_macro "$work/disabled_macro" > "$work/disabled_macro.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/disabled_macro/NOT_BUILDABLE"
+check sh -c "! grep -qF 'DM_OLD_RAISE (mrb' '$work/disabled_macro/conversion_log.json'"
+check sh -c "! grep -qF 'DM_UNUSED_RAISE (mrb' '$work/disabled_macro/conversion_log.json'"
+check grep -qF '"to": "DM_TO_S (mrb = disabled_macro_bc2_mrb)"' "$work/disabled_macro/conversion_log.json"
+check grep -qF '#if 0  /* BC2CPP-MRBGEM: unused macro' "$work/disabled_macro/src/disabled_macro.c"
 
 # 2zzz190. a coder callback stored by pg_define_coder (a function of the input that keeps the pointer): its address is not a
 # refusal; the callback reads the global state (set by the registered method that runs it, and by Init, which keeps it set).
