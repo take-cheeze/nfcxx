@@ -334,6 +334,102 @@ def format_expansion(body, params, args)
   lines.reject(&:empty?).join("\n")
 end
 
+# Decorator macros. A function-like macro with one parameter whose body is that parameter with attributes and `inline`
+# in front wraps a declaration: json's `#define ALWAYS_INLINE(x) inline __attribute__((always_inline)) x` (and the
+# `NOINLINE(x) x` of the alternative without the attribute) makes `ALWAYS_INLINE(static) int f(...) {` a definition. Each
+# invocation at the start of a line outside any braces is replaced by its argument, which is a storage class (`static`)
+# or a whole declaration. The attributes and `inline` are hints: the function is an ordinary definition of the storage
+# class the argument gives. (A kept `inline` on an external function would be an inline definition with no external one.)
+# Every #define of the name in the gem (any file, under any conditional) must have this form. The #define is left as it is:
+# no use of the decorator is left in the output.
+DECORATOR_KEYWORDS = %w[inline __inline __inline__ __forceinline].freeze
+
+# The logical line of a #define whose parameter list closes at close: the body, with continuations joined and comments gone.
+def define_body(text, close)
+  pos = close + 1
+  eol = nil
+  while eol.nil?
+    nl = text.index("\n", pos) || text.length
+    if nl > 0 && text[nl - 1] == '\\'
+      pos = nl + 1
+    else
+      eol = nl
+    end
+  end
+  psl(text, close + 1, eol).gsub(/\\\n/, ' ').gsub(%r{/\*.*?\*/}m, ' ').sub(%r{//.*\z}, '')
+end
+
+# true when the #define matched by m (on the masked text) is a decorator: one parameter, and the body is the parameter with
+# only attributes and `inline` in front of it
+def decorator_define?(text, masked, m)
+  open = m.end(0)
+  return false unless masked[open] == '('
+  close = match_close(masked, open)
+  return false if close < 0
+  params = psl(text, open + 1, close).split(',').map(&:strip)
+  return false unless params.length == 1 && params[0].match?(/\A[A-Za-z_]\w*\z/)
+  words = define_body(text, close).gsub(/__attribute__\s*\(\([^()]*\)\)/, ' ').split
+  words.last == params[0] && (words[0...-1] - DECORATOR_KEYWORDS).empty?
+end
+
+# json's decorators: json.h (ext/json/ext/json.h) is outside the extension directory of the parser and generator, so its
+# #define is not read; the names are known here, with the same meaning (the attribute is a hint). A #define of the name in
+# the gem replaces that: it must be a decorator, or the name is left alone.
+BUILTIN_DECORATORS = %w[ALWAYS_INLINE NOINLINE].freeze
+DECORATOR_LEFT_TO_NORETURN_MASK = %w[NORETURN MAYBE_UNUSED].freeze
+
+# the names of the decorator macros of the gem: every #define of the name must be a decorator, or the name is left alone
+def decorator_macro_names(texts)
+  ok = BUILTIN_DECORATORS.to_h { |n| [n, true] }
+  texts.each_value do |text|
+    masked = mask_c(text)
+    masked.to_enum(:scan, /^[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)/).each do
+      m = Regexp.last_match
+      ok[m[1]] = (ok.fetch(m[1], true) && decorator_define?(text, masked, m))
+    end
+  end
+  # NORETURN(decl) and MAYBE_UNUSED(decl) are CRuby's identity wrappers, which noreturn_mask already handles (their tokens are
+  # removed); a gem's own #define of them (oj's `#define NORETURN(x) x`) is not a decorator for this expansion
+  ok.select { |n, v| v && !DECORATOR_LEFT_TO_NORETURN_MASK.include?(n) }.keys
+end
+
+# an argument that is a storage class, or a complete definition or prototype whose declarator follows the decorator
+def decorated_declaration?(arg)
+  return true if arg.match?(/\A(?:static|extern)\z/)
+  !arg.empty? && DEF_RE.match?(arg + ';')
+end
+
+# Expands the decorator macros in every text of the gem (texts is changed in place).
+def expand_decorator_macros(texts)
+  names = decorator_macro_names(texts)
+  return texts if names.empty?
+  texts.each_key do |k|
+    text = texts[k]
+    masked = mask_c(text)
+    edits = []
+    names.each do |name|
+      masked.to_enum(:scan, /^([ \t]*)#{Regexp.escape(name)}[ \t]*\(/).each do
+        m = Regexp.last_match
+        name_pos = m.begin(0) + m[1].length
+        open = m.end(0) - 1
+        prev = m.begin(0) > 0 ? masked[0...m.begin(0)] : ''
+        next if prev.end_with?("\\\n")
+        close = match_close(masked, open)
+        next if close < 0
+        before = masked[0...name_pos]
+        next unless before.count('{') == before.count('}')
+        arg = psl(text, open + 1, close).strip
+        next unless decorated_declaration?(arg)
+        edits << [name_pos, close + 1, arg]
+      end
+    end
+    next if edits.empty?
+    edits.sort_by { |a, _b, _t| -a }.each { |a, b, t| text = psl(text, 0, a) + t + psl(text, b) }
+    texts[k] = text
+  end
+  texts
+end
+
 def blank(s)
   s.gsub(/[^\n]/, ' ')
 end
@@ -865,6 +961,8 @@ end
 end
 # function-defining macros (NUM_OP(...) at file scope) are expanded in their own file, so the functions they define are found
 texts.each_key { |k| texts[k] = expand_function_macros(texts[k]) }
+# decorator macros (ALWAYS_INLINE(static) int f(...)) are expanded gem-wide: their #define may be in a header
+expand_decorator_macros(texts)
     Dir.children(@cext_dir).reject { |n| n.start_with?('.') }.sort.each do |base|
       path = File.join(@cext_dir, base)
       if File.directory?(path)
@@ -1162,6 +1260,14 @@ texts.each_key { |k| texts[k] = expand_function_macros(texts[k]) }
     # declarations and definitions, from the scanner chosen at start (see declarations_by_file)
     declarations_by_file.each do |rel, decls|
       f = @files[rel]
+      # a definition with the name of a CRuby API (api_map.json) in a branch the build excludes (text_inactive_spans: #if 0,
+      # or an #ifdef/#ifndef of a -D name) is not a definition of this build: the fork provides the API, and the calls go to
+      # its mapping (json's static fallback of rb_hash_bulk_insert under #ifndef HAVE_RB_HASH_BULK_INSERT, with that --define).
+      # Other excluded definitions are converted as before.
+      inactive = text_inactive_spans(rel)
+      decls = decls.reject do |d|
+        !d['proto'] && @entries.key?(d['name']) && d['brace'] && inactive.any? { |a, z| a < d['brace'] && d['brace'] < z }
+      end
       decls.each do |d|
         next if f['kind'] != 'src' && !d['proto'] && !d['storage'].split.include?('static') # a header body is converted only when it is static (inline or not): it is local to each includer
         next if NON_FUNC_WORDS.include?(d['name']) || NON_FUNC_WORDS.include?(py_split_ws(d['ret']).last)
