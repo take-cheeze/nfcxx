@@ -93,6 +93,9 @@
     }
   },
   "entries": {
+    "rb_str_set_len": {"kind": "call", "mruby": "mrb_str_resize", "inject_mrb": true, "needs_mrb": true, "caveat": "CRuby sets the length and NUL-terminates; mrb_str_resize also reallocates to the length, which covers the same uses (the length must not exceed the capacity CRuby guarantees)"},
+    "rb_utf8_str_new_static": {"kind": "call", "mruby": "mrb_str_new_static", "inject_mrb": true, "needs_mrb": true, "caveat": "the UTF-8 encoding is not kept: mruby strings have no per-string encoding tag (see the msgpack note)"},
+    "rb_eval_string": {"kind": "call", "mruby": "mrb_load_string", "inject_mrb": true, "needs_mrb": true, "caveat": "evaluates the C string at top level like CRuby's rb_eval_string; the result is returned as a VALUE"},
     "rb_str_encode": {
       "kind": "template",
       "arity": 4,
