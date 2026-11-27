@@ -14,6 +14,7 @@ jobs:
       CC: clang
       CXX: clang++
       QT6: '1'
+      NFCAST: '1'
       TVM_FFI_ROOT: ${{ github.workspace }}/build/call-deps/tvm-ffi
       TVM_FFI_LIBDIR: ${{ github.workspace }}/build/call-deps/tvm-ffi/build/lib
       LIBTORCH: ${{ github.workspace }}/build/call-deps/libtorch

@@ -56,10 +56,55 @@ static void body(MV *ret) {
   mrbbc_int_new(&values[0], -1);
   check(nfc_call_invoke(&callable, &frame) == NFC_CALL_EXCEPTION && std::strstr(frame.error, "negative input"), "TVM error to frame");
   target = {text.value, 0}; frame.nargs = 0;
-  check(nfc_call_invoke(&callable, &frame) == NFC_CALL_TYPE && frame.nresults == 0, "owned TVM noninteger result refused and released");
+  check(nfc_call_invoke(&callable, &frame) == NFC_CALL_OK && mrbbc_tag(&values[2]) == MRBBC_STR, "owned TVM string result converted and released");
   target = {sum.value, 2}; frame.nargs = 2;
   mrbbc_int_new(&values[0], INT64_MIN); mrbbc_int_new(&values[1], 0);
   check(nfc_call_invoke(&callable, &frame) == NFC_CALL_OK && mrbbc_int_read(&values[2], &number) && number == INT64_MIN, "Ruby boxes round trip through TVM function");
+  {
+    NfcValueTarget echo{1, copy_value, nullptr}; NfcCallable generic{nfc_call_value_entry, &echo};
+    Function echo_function;
+    check(bridge::create_function(generic, &echo_function.value) == 0, "create generic TVM function");
+    nfc::pathb::Values samples;
+    samples.values[1].kind = NFC_VALUE_BOOL; samples.values[1].as.boolean = 1;
+    samples.values[2].kind = NFC_VALUE_I64; samples.values[2].as.i64 = INT64_MIN;
+    samples.values[3].kind = NFC_VALUE_F64; samples.values[3].as.f64 = -0.0;
+    nfc_value_set_data(&samples.values[4], NFC_VALUE_TEXT, "日本語\0text", sizeof("日本語\0text") - 1);
+    nfc_value_set_data(&samples.values[5], NFC_VALUE_BYTES, "\xff\0bytes", 7);
+    for (size_t i = 0; i < 6; i++) {
+      bridge::AnyResult input, output;
+      nfc::pathb::Value decoded;
+      check(bridge::write_value(nullptr, &input.value, &samples.values[i]) == NFC_CALL_OK, "encode TVM generic value");
+      check(TVMFFIFunctionCall(echo_function.value, &input.value, 1, &output.value) == 0, "TVM generic safe call");
+      check(bridge::read_value(nullptr, &output.value, &decoded.value) == NFC_CALL_OK && same_value(decoded.value, samples.values[i]), "TVM primitive/text/binary round trip");
+    }
+    MrbbcValueTarget ruby_echo{"allocate_echo", 1, 0}; NfcCallable ruby_generic{mrbbc_value_call_entry, &ruby_echo};
+    bridge::AnyResult function_value;
+    function_value.value.type_index = kTVMFFIFunction;
+    TVMFFIObjectIncRef(echo_function.value);
+    function_value.value.v_obj = static_cast<TVMFFIObject *>(echo_function.value);
+    nfc::pathb::Value captured, returned;
+    check(bridge::read_value(nullptr, &function_value.value, &captured.value) == NFC_CALL_OK && captured.value.kind == NFC_VALUE_HANDLE, "retain TVM object handle");
+    NfcCallSlot input_slot = nfc_call_value_slot(&captured.value), output_slot = nfc_call_value_slot(&returned.value);
+    NfcCallFrame object_frame{NFC_CALL_VERSION, &input_slot, 1, &output_slot, 1, 0, nullptr, {0}};
+    check(nfc_call_invoke(&ruby_generic, &object_frame) == NFC_CALL_OK, "TVM function handle through compiled Ruby");
+    nfc_value_clear(&captured.value); mrbbc_gc_collect();
+    auto *retained = nfc::pathb::get_handle<bridge::ObjectRef>(returned.value);
+    check(retained && retained->value == echo_function.value, "TVM handle identity/lifetime preserved");
+  }
+  auto released = std::make_shared<int>(0);
+  {
+    nfc::pathb::Value owner;
+    nfc::pathb::owned_handle(&owner.value, OwnedTarget(released));
+    auto *provider = nfc::pathb::get_handle<OwnedTarget>(owner.value);
+    NfcCallable fn{nfc_call_value_entry, const_cast<NfcValueTarget *>(&provider->target)};
+    Function owned;
+    check(bridge::create_function(fn, &owned.value, &owner.value) == 0, "TVM Function retains callable owner");
+    nfc_value_clear(&owner.value);
+    check(*released == 0, "provider survives caller releasing owner");
+    TVMFFIAny input = integer(7), output{};
+    check(TVMFFIFunctionCall(owned.value, &input, 1, &output) == 0 && output.v_int64 == 7, "owned TVM closure remains callable");
+  }
+  check(*released == 1, "TVM Function releases closure owner exactly once");
   mrbbc_gc_leave(&roots);
 }
 int main() { MV ret{}; mrbbc_run(body, &ret); std::printf("tvm-ffi: %d checks passed\n", checks); }
