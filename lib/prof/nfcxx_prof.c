@@ -129,7 +129,9 @@ static size_t g_count = 0;
 /* Timestamps. A record's ts_ns is nanoseconds from the start of the profile. On x86 with an invariant TSC the clock
  * is rdtsc, calibrated against CLOCK_MONOTONIC when the profile starts (about 5 ms); otherwise, or with
  * NFCXX_PROFILE_CLOCK=monotonic, it is CLOCK_MONOTONIC. The file's counters chunk says which one was used. */
-#if defined(__x86_64__) || defined(__i386__)
+/* NFCXX_PROF_NO_TSC (the driver's Path B build of this file, scripts/nfcxx-pathb.rb) takes the monotonic clock: the Path B
+ * SSA route does not model __builtin_ia32_rdtsc. */
+#if (defined(__x86_64__) || defined(__i386__)) && !defined(NFCXX_PROF_NO_TSC)
 #include <cpuid.h>
 #define PROF_HAVE_TSC 1
 #endif
@@ -141,9 +143,13 @@ static uint64_t mono_ns(void) {
 }
 
 static int g_use_tsc = 0;
+#ifdef PROF_HAVE_TSC
 static uint64_t g_tsc0 = 0;
+#endif
 static uint64_t g_mono0 = 0;
+#ifdef PROF_HAVE_TSC
 static double g_ns_per_tick = 1.0;
+#endif
 
 #ifdef PROF_HAVE_TSC
 static int tsc_invariant(void) {

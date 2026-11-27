@@ -138,6 +138,11 @@ end
 DRIVER = "ROOT/nfcxx".freeze
 PATHB_CC = "ROOT/scripts/pathb-cc.rb".freeze
 LIBC = "ROOT/build/edg/lib/libC.a".freeze
+# --profile (docs/notes/profiler.md, "Path B"): the program's functions call the hooks (pathb-cc.rb --profile). The profiler
+# runtime (lib/prof) is compiled as C without the hooks, so its own functions are not instrumented, and linked with the program;
+# the program's global functions go into the dynamic symbol table (-rdynamic), and malloc, calloc, realloc and free are wrapped.
+PROF_RT = %w[nfcxx_prof.c nfcxx_prof_cyg.c nfcxx_machine.c nfcxx_alloc.c].freeze
+PROF_WRAP = "-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free".freeze
 CHOICES = %w[default pathb gcc].freeze
 # the environment variables the plan reads (the bash's defaults for the linker and the dialect): their values are the facts'
 PLAN_ENV = %w[NFCXX_LD NFCXX_DIALECT].freeze
@@ -299,6 +304,7 @@ class Plan
     @ld_name = nil
     @eh_shim = true
     @default_backend = false
+    @profile = false  # --profile: the Path B hooks, the runtime and the wrapped allocation functions
     @trace = nil      # --trace=FILE (the last one; "" is off, as the bash's trace= is)
     @time_log = nil   # --time-log=FILE (the last one; "" is off)
     # the environment first (the arguments after it override it, as in the bash): NFCXX_DIALECT (non-empty: asked for), NFCXX_LD
@@ -373,6 +379,8 @@ class Plan
         exit_with("nfcxx: #{flag} takes on or off (got '#{value}')", 2) unless %w[on 1 off 0].include?(value)
       elsif x.start_with?("--module-dir=")
         nil # the directory of module files: a module source is refused by checks
+      elsif x == "--profile"
+        @profile = true # the Path B hooks, the profiler runtime and the allocation wraps (profile_runtime_objects)
       elsif x.start_with?("--")
         unported(x)
       elsif x.start_with?("-fuse-ld=")
@@ -573,6 +581,7 @@ class Plan
     f << "--safe-pointers" if @safeptr
     f << "--ir-opt=#{@ir_opt}" unless @ir_opt.nil?
     f << "--asan" if @asan
+    f << "--profile" if @profile
     f << "--pic" if @pic
     f << "-g" if @dbg_g && !%w[-g0 -ggdb0].include?(@dbg_g) # -g (the last, unless -g0): the line table
     f << @vec_pb if @vec_pb
@@ -698,7 +707,7 @@ class Plan
   def ldopts
     o = []
     o << "-shared" if @shared
-    o << "-rdynamic" if @rdynamic
+    o << "-rdynamic" if @rdynamic || @profile
     o << "-fuse-ld=#{@ld_name}" if @ld_name
     o
   end
@@ -739,6 +748,7 @@ class Plan
     unported("#{LIBC} does not exist") unless @facts.flag?("libc-a")
     ldrt = fact_path("pathb-ldrt")
     shim, vla = hosted_extras
+    rt = profile_runtime_objects
     # the driver's EH shim step, and its ASan VLA step, come before the compiles (not in a -shared link)
     unless @shared
       traced("EH shim", "driver") { nil }
@@ -761,9 +771,26 @@ class Plan
         pobjs << o
       end
     end
-    argv = ["cc", *asan_c, *ldopts, "-o", @out, *sprt, *@c_objs, *pobjs, *plink, ldrt, *shim, *vla,
+    argv = ["cc", *asan_c, *ldopts, "-o", @out, *sprt, *@c_objs, *rt, *pobjs, *plink, ldrt, *shim, *vla,
             LIBC, "-lstdc++", "-lgcc_s", "-lpthread", "-lm", "-latomic"]
     traced("link", "pathb") { @lines << ["RUN", *argv] }
+  end
+
+  # --profile: the profiler runtime, each source compiled as C with the pb_flags but without --profile (its own functions are not
+  # instrumented), to TMP/rN.o. The wrapped allocation functions are a link option (PROF_WRAP, added to the files here).
+  def profile_runtime_objects
+    return [] unless @profile
+
+    @files << PROF_WRAP unless @files.include?(PROF_WRAP)
+    PROF_RT.each_with_index.map do |c, n|
+      dst = "TMP/r#{n}.o"
+      # NFCXX_PROF_NO_TSC: the clock is CLOCK_MONOTONIC (the SSA route has no rdtsc; see nfcxx_prof.c)
+      argv = [PATHB_CC, *@pb_flags.reject { |f| f == "--profile" }, "-std=c11", "-DNFCXX_PROF_NO_TSC=1", "-I", "ROOT/lib/prof",
+              "ROOT/lib/prof/#{c}", "-o", dst]
+      @lines << ["RUN", *argv]
+      check_status(c, @facts.status(c))
+      dst
+    end
   end
 
   # A link argument as it goes to cc: the CUB archive (scripts/cuda-cub.rb's path, when it has one) goes before the -lcudart it
@@ -781,8 +808,9 @@ class Plan
     unported("#{LIBC} does not exist") unless @facts.flag?("libc-a")
     ldrt = fact_path("pathb-ldrt")
     cvla = @asan ? [fact_path("asan-vla")] : []
+    rt = profile_runtime_objects
     files = @files.flat_map { |x| link_option(x) }
-    argv = ["cc", *asan_c, *ldopts, *@c_objs, *files, *cvla, "-o", @out, ldrt, LIBC, "-lstdc++", "-lm", "-latomic"]
+    argv = ["cc", *asan_c, *ldopts, *@c_objs, *rt, *files, *cvla, "-o", @out, ldrt, LIBC, "-lstdc++", "-lm", "-latomic"]
     @lines << ["RUN", *argv]
   end
 end
