@@ -252,6 +252,8 @@ require_relative 'codegen_literal_minmax'
 require_relative 'codegen_stack_strings'
 # After STACK_STRINGS: its compile_insn wrapper rewrites the settled text of the Rect sites and their draws.
 require_relative 'codegen_stack_rect'
+# After STACK_RECT: its compile_insn wrapper puts the pre-arm around the text every other wrapper settled on.
+require_relative 'codegen_float_shadow'
 
 # The main block is a lambda: its ~250 locals do not fit the one irep a top-level block gets when every file is compiled as
 # one program (docs/bc2cpp-self-compile.md). A host that wants to register compiled code between loading the sources and
@@ -1969,6 +1971,45 @@ BC2CPP_MAIN = lambda do
     #endif
       return mrb_undef_value();
     }
+    #ifndef MRB_NO_FLOAT
+    // FLOAT_SHADOW (codegen_float_shadow.rb): an operand whose mask bit is set may be the mrb_undef marker of a value
+    // kept unboxed in f. Takes OP_MATH's / OP_DIV's / OP_CMP's Float arm (both operands Integer or Float, one a Float):
+    // the result in *out (op 0..3: + - * /) or 1 + the comparison (op 4..7: < <= > >=). 0: no Float arm.
+    [[gnu::noinline]] inline int bc2cpp_flo_bin(int op, int mask, mrb_value a, mrb_float fa, mrb_value b, mrb_float fb,
+                                                mrb_float* out) {
+      bool flo = true;
+      mrb_float x, y;
+      if ((mask & 1) && mrb_undef_p(a)) x = fa;
+      else if (mrb_float_p(a)) x = mrb_float(a);
+      else if (mrb_integer_p(a)) { x = (mrb_float)mrb_integer(a); flo = false; }
+      else return 0;
+      if ((mask & 2) && mrb_undef_p(b)) y = fb;
+      else if (mrb_float_p(b)) y = mrb_float(b);
+      else if (mrb_integer_p(b)) { if (!flo) return 0; y = (mrb_float)mrb_integer(b); }
+      else return 0;
+      switch (op) {
+      case 0: *out = x + y; return 1;
+      case 1: *out = x - y; return 1;
+      case 2: *out = x * y; return 1;
+      case 3: *out = mrb_div_float(x, y); return 1;
+      case 4: return 1 + (x < y);
+      case 5: return 1 + (x <= y);
+      case 6: return 1 + (x > y);
+      default: return 1 + (x >= y);
+      }
+    }
+    // FLOAT_SHADOW: OP_ADDI / OP_SUBI's Float arm (step is the signed immediate).
+    [[gnu::noinline]] inline int bc2cpp_flo_imm(int mask, mrb_value a, mrb_float fa, mrb_int step, mrb_float* out) {
+      if ((mask & 1) && mrb_undef_p(a)) *out = fa + step;
+      else if (mrb_float_p(a)) *out = mrb_float(a) + step;
+      else return 0;
+      return 1;
+    }
+    // FLOAT_SHADOW: the boxed value of an operand that may hold the marker, before an instruction's own text reads it.
+    static inline mrb_value bc2cpp_flo_box(mrb_state* M, mrb_value v, mrb_float f) {
+      return mrb_undef_p(v) ? mrb_float_value(M, f) : v;
+    }
+    #endif
     static inline mrb_value bc2cpp_keep_removed(mrb_state* M, mrb_value v) {
       bc2cpp_root_kept(v, M);
       return v;
