@@ -32,8 +32,8 @@ module Bc2cppBackend
     end
     raise Error, '--backend must be cpp or mrbbc' unless %w[cpp mrbbc].include?(backend)
 
-    if backend == 'cpp' && argv.any? { |arg| arg.start_with?('--mrbbc-value') }
-      raise Error, '--mrbbc-value requires --backend=mrbbc'
+    if backend == 'cpp' && argv.any? { |arg| arg.start_with?('--mrbbc-value', '--mrbbc-export-i64') }
+      raise Error, '--mrbbc options require --backend=mrbbc'
     end
     backend
   end
@@ -42,6 +42,7 @@ module Bc2cppBackend
   def run_mrbbc(argv)
     value = '8'
     sources = []
+    exports = []
     seen_value = false
     args = argv.dup
     until args.empty?
@@ -52,13 +53,19 @@ module Bc2cppBackend
         seen_value = true
         value = arg == '--mrbbc-value' ? args.shift : arg.delete_prefix('--mrbbc-value=')
         raise Error, '--mrbbc-value must be 8, 4 or 16' unless %w[8 4 16].include?(value)
+      elsif arg == '--mrbbc-export-i64' || arg.start_with?('--mrbbc-export-i64=')
+        name = arg == '--mrbbc-export-i64' ? args.shift : arg.delete_prefix('--mrbbc-export-i64=')
+        raise Error, '--mrbbc-export-i64 requires a plain method name' unless name&.match?(/\A[A-Za-z_][A-Za-z0-9_]*\z/)
+        raise Error, "duplicate i64 export: #{name}" if exports.include?(name)
+
+        exports << name
       elsif arg.start_with?('-')
         raise Error, "the mrbbc backend does not accept #{arg}"
       else
         sources << arg
       end
     end
-    raise Error, 'usage: bc2cpp.rb --backend=mrbbc [--mrbbc-value=8|4|16] file.rb [file2.rb ...]' if sources.empty?
+    raise Error, 'usage: bc2cpp.rb --backend=mrbbc [--mrbbc-value=8|4|16] [--mrbbc-export-i64=NAME ...] file.rb [file2.rb ...]' if sources.empty?
 
     unsupported = CPP_INPUTS.reject { |key| ENV[key].to_s.empty? }
     unsupported << 'BC2CPP_TYPE_CHECK_ONLY' if ENV['BC2CPP_TYPE_CHECK_ONLY'] == '1'
@@ -86,7 +93,8 @@ module Bc2cppBackend
       return 3
     end
 
-    output, errors, status = Open3.capture3(lower, "--value=#{value}", File.join(out_dir, "#{symbol}.mrb"))
+    output, errors, status = Open3.capture3(lower, "--value=#{value}", *exports.map { |name| "--export-i64=#{name}" },
+                                          File.join(out_dir, "#{symbol}.mrb"))
     $stderr.write(errors)
     return status.exitstatus || 128 + status.termsig unless status.success?
 
