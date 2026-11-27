@@ -2025,6 +2025,14 @@ check grep -qF 'mrb_define_module_function(mrb, mrb->kernel_module, "conv_global
 check grep -qF 'return mrb_yield(mrb, nfcx_block_arg(mrb), v);' "$work/api_conv_misc/src/api_conv_misc.c"
 check grep -qF 'mrb_get_args(mrb, "&", &nfcx_b);' "$work/api_conv_misc/src/api_conv_misc.c"
 
+# 2c''. a quoted include of a header outside the extension directory ("../hdr.h"): refused at conversion time, with its own
+# reason, so the refusal does not depend on the compile check (which stops at the first such include)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name include_outside tools/cext2mrbgem/fixtures/include_outside/ext/include_outside "$work/include_outside" > "$work/include_outside.log" 2>&1 || rc=$?
+check ok_rc "$rc"
+check sh -c "! grep -q 'Traceback' '$work/include_outside.log'"
+check grep -qF 'include_outside.c:2  #include "../hdr.h"  include outside the extension directory: ../hdr.h (the converter reads only the extension root; the header is not in the output)' "$work/include_outside/REFUSALS.txt"
+check test -e "$work/include_outside/NOT_BUILDABLE"
+
 # 2zzz110. a function-defining macro invoked at file scope (ffi's NUM_OP(name, ...)): each invocation is expanded, so the
 # functions it defines convert and are registered (before, "registered function has no definition"); the #define is then
 # unused and wrapped in #if 0
