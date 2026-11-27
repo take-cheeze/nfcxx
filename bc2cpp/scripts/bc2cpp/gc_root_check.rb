@@ -35,13 +35,17 @@ call_scans.each do |body|
 end
 suite.check("the call-name scanner preserves #{call_scans.size} lexical cases", true)
 
-# LOOP_ARENA: a numeric op's scoped temporary does not refuse the method's loops; any other mrb_value local does.
+# LOOP_ARENA: a numeric op's scoped temporary and a yield's argument buffer do not refuse the method's loops; any other
+# mrb_value local does.
 require_relative '../../tools/bc2cpp/loop_arena'
 scoped = "{ mrb_value bc2cpp_nt;\nif (!mrb_undef_p(bc2cpp_nt = bc2cpp_num_add_float(M, r3, r4))) {\n  r3 = bc2cpp_nt;\n}\n}\n"
-suite.check("a loop's numeric temporary is scoped to its instruction (LOOP_ARENA)",
+suite.check("a loop's numeric temporary and yield buffer are scoped to their instruction (LOOP_ARENA)",
             !LoopArena.foreign_locals?(scoped, []) &&
             LoopArena.foreign_locals?("mrb_value bc2cpp_nt;\nr3 = bc2cpp_nt;\n", []) &&
-            LoopArena.foreign_locals?("{ mrb_value bc2cpp_tmp;\n}\n", []))
+            LoopArena.foreign_locals?("{ mrb_value bc2cpp_tmp;\n}\n", []) &&
+            !LoopArena.foreign_locals?("  {\n    mrb_value blkcall_args[] = { r6, r7 };\n    r5 = bc2cpp_yield_argv(M, r5, 2, " \
+                                       "blkcall_args);\n  }\n", []) &&
+            LoopArena.foreign_locals?("mrb_value blkcall_args[2];\n", []))
 
 SOURCE = <<~RUBY
   class GcRoot
