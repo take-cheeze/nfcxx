@@ -9,7 +9,7 @@
 #                            without early inlining; and with the tier compiling in the background (NFCAST_TIER=async), where
 #                            which calls run as native code depends on timing and the output must not. The collector runs at its
 #                            default; its forced-collection stress (NFCAST_GC_STRESS=1) is covered by engine.cpp and tier.cpp, not here
-#   - tests/ast/counts/loop.lua  the node-evaluation count (State::stats.node_evals, with NFCAST_COUNT_NODES=1) of a known program: 28
+#   - tests/ast/counts/loop.lua  the node-evaluation count (State::stats.node_evals, in a -DNFCAST_COUNT_NODES build) of a known program: 28
 #   NFCXX_BACKEND=pathb|gcc|qbe   (default: pathb and gcc)
 #                            cases/inline_loops.lua ends in a deep recursion (pcall of an infinite one) that the engine cuts at
 #                            State::max_depth = 1500 levels, a depth it sizes for about 1 KB of C++ stack per level: on Path B it needs
@@ -24,7 +24,7 @@
 cd "$(dirname "$0")/../.."
 backends=${NFCXX_BACKEND:-"pathb gcc"}
 srcs=(lib/ast/nfcast_core.cpp lib/ast/nfcast_ops.cpp lib/ast/nfcast_parse.cpp lib/ast/nfcast_nodes.cpp lib/ast/nfcast_lib.cpp lib/ast/nfcast_tier.cpp lib/ast/nfcast_jit.cpp lib/ast/nfcast_bytecode.cpp tools/lua54bc/lua54_chunk.cpp)
-unset NFCAST_TIER NFCAST_TIER_THRESHOLD NFCAST_TIER_DEBUG NFCAST_GC_STRESS NFCAST_INLINE NFCAST_INLINE_WARM NFCAST_COUNT_NODES
+unset NFCAST_TIER NFCAST_TIER_THRESHOLD NFCAST_TIER_DEBUG NFCAST_GC_STRESS NFCAST_INLINE NFCAST_INLINE_WARM
 export NFCXX="$PWD/nfcxx"   # the tier finds the driver itself, but the cases run from another directory
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for be in $backends; do
@@ -94,18 +94,27 @@ for be in $backends; do
     { echo "FAIL $be ast profile: a profile written without NFCAST_TIER_PROFILE"; fail=1; prof_ok=0; }
   [ $prof_ok = 1 ] && echo "ok   $be ast profile: the compiled fib writes 21891 enter/exit pairs, an abandoned run closes its call, two compiled units share one profile, and no profile without NFCAST_TIER_PROFILE"
   # The compute count (docs/notes/profiler.md, "Next steps", item 3): State::stats.node_evals counts the interpreter's node evaluations
-  # and only with NFCAST_COUNT_NODES=1. tests/ast/counts/loop.lua makes exactly 28 (its comment works them out, by phase of the
-  # arithmetic node); without the switch the count stays 0.
+  # only in a build with -DNFCAST_COUNT_NODES (the default build compiles the counter out, so its count is 0). This block builds the
+  # whole engine and the driver once more with that define, into $out/count, and runs tests/ast/counts/loop.lua there: it makes exactly
+  # 28 evaluations (its comment works them out, by phase of the arithmetic node). The default driver must report 0.
+  cdir=$out/count; mkdir -p "$cdir"; cobjs=(); cpids=(); cbad=0
+  for f in "${srcs[@]}" tests/ast/driver.cpp; do
+    o=$cdir/$(basename "$f" .cpp).o; cobjs+=("$o")
+    (NFCXX_BACKEND=$be ./nfcxx -c -O2 -DNFCAST_COUNT_NODES -I lib/ast "$f" -o "$o" > "$o.log" 2>&1) & cpids+=($!)
+  done
+  for p in "${cpids[@]}"; do wait "$p" || cbad=1; done
   cnt_ok=1
-  if ! (cd tests/ast/counts && NFCAST_COUNT_NODES=1 NFCXX_BACKEND=$be "$out/driver" --stats loop.lua > "$out/counts.out" 2> "$out/counts.err") ||
+  if [ $cbad = 1 ] || ! NFCXX_BACKEND=$be ./nfcxx "${cobjs[@]}" -o "$cdir/driver" > "$cdir/link.log" 2>&1; then
+    echo "FAIL $be ast node counts (count build)"; head -10 "$cdir"/*.log | grep -v prelinker; cnt_ok=0; fail=1
+  elif ! (cd tests/ast/counts && NFCXX_BACKEND=$be "$cdir/driver" --stats loop.lua > "$out/counts.out" 2> "$out/counts.err") ||
      [ "$(cat "$out/counts.out")" != 15 ] || ! grep -q " node_evals=28$" "$out/counts.err"; then
-    echo "FAIL $be ast node counts (loop.lua: expected 15 and node_evals=28)"; cat "$out/counts.out"; tail -1 "$out/counts.err"; cnt_ok=0; fail=1
+    echo "FAIL $be ast node counts: count build, loop.lua (expected 15 and node_evals=28)"; cat "$out/counts.out"; tail -1 "$out/counts.err"; cnt_ok=0; fail=1
   fi
   if ! (cd tests/ast/counts && NFCXX_BACKEND=$be "$out/driver" --stats loop.lua > "$out/counts0.out" 2> "$out/counts0.err") ||
      ! grep -q " node_evals=0$" "$out/counts0.err"; then
-    echo "FAIL $be ast node counts: counted without NFCAST_COUNT_NODES"; tail -1 "$out/counts0.err"; cnt_ok=0; fail=1
+    echo "FAIL $be ast node counts: the default build counted"; tail -1 "$out/counts0.err"; cnt_ok=0; fail=1
   fi
-  [ $cnt_ok = 1 ] && echo "ok   $be ast node counts: tests/ast/counts/loop.lua makes 28 node evaluations with NFCAST_COUNT_NODES=1, 0 without"
+  [ $cnt_ok = 1 ] && echo "ok   $be ast node counts: tests/ast/counts/loop.lua makes 28 node evaluations in the count build (-DNFCAST_COUNT_NODES), 0 in the default build"
   # Lua 5.4 binary chunks (docs/notes/ast.md, "Bytecode"): the reference Lua dumps each program, and the driver runs the dump.
   if [ -z "${LUA:-}" ] || ! "$LUA" -v 2>&1 | grep -q '^Lua 5\.4\.9\b'; then
     echo "skip $be ast bytecode: set LUA to a Lua 5.4.9 interpreter"
