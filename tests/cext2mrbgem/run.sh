@@ -850,6 +850,29 @@ check test ! -e "$work/api_dtype/NOT_BUILDABLE"
 check grep -qF 'static void holder_mark(mrb_state *mrb, void *p) {' "$work/api_dtype/src/api_dtype.c"
 check grep -qF 'static const mrb_data_type holder_type = { "holder", holder_free, holder_mark };' "$work/api_dtype/src/api_dtype.c"
 
+# nokogiri's false refusals: rb_intern_const names in rb_funcall, an (rb_len_t) literal count in rb_ary_new3, rb_iv_get's name
+# after a nested call, E_RUNTIME_ERROR as the class of rb_exc_new3, a data type with no .function group, and a gem macro
+# (RBSTR_NK) under a build switch (#ifndef) with no other branch, which is local, not a CRuby name
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_nk_refusals tools/cext2mrbgem/fixtures/api_nk_refusals/ext/api_nk_refusals "$work/api_nk_refusals" > "$work/api_nk_refusals.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_nk_refusals/NOT_BUILDABLE"
+check grep -qF 'mrb_funcall_argv(mrb, obj, mrb_intern_cstr(mrb, "[]"), 1, (mrb_value[]){mrb_fixnum_value(0)})' "$work/api_nk_refusals/src/api_nk_refusals.c"
+check grep -qF 'mrb_ary_new_from_values(mrb, 2, (mrb_value[]){a, b})' "$work/api_nk_refusals/src/api_nk_refusals.c"
+check grep -qF 'mrb_iv_get(mrb, mrb_ary_entry(obj, 0), mrb_intern_cstr(mrb, "@nk_flag"))' "$work/api_nk_refusals/src/api_nk_refusals.c"
+check grep -qF 'mrb_exc_new_str(mrb, E_RUNTIME_ERROR, msg)' "$work/api_nk_refusals/src/api_nk_refusals.c"
+check grep -qF 'static const mrb_data_type nk_plain_type = { "nk_plain", NULL, NULL };' "$work/api_nk_refusals/src/api_nk_refusals.c"
+check grep -qF 'mrb_str_new_cstr(api_nk_refusals_bc2_mrb, x)' "$work/api_nk_refusals/src/api_nk_refusals.c"
+
+# the api_map entries for rb_Integer, rb_enc_str_new_cstr, rb_external_str_new_with_enc and rb_enc_str_buf_cat: the encoding
+# argument is dropped (mruby strings carry none), the bytes and the count are kept
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_nk_encstr tools/cext2mrbgem/fixtures/api_nk_encstr/ext/api_nk_encstr "$work/api_nk_encstr" > "$work/api_nk_encstr.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_nk_encstr/NOT_BUILDABLE"
+check grep -qF 'mrb_value i = mrb_Integer(mrb, v);' "$work/api_nk_encstr/src/api_nk_encstr.c"
+check grep -qF 'mrb_value a = mrb_str_new_cstr(mrb, "abc");' "$work/api_nk_encstr/src/api_nk_encstr.c"
+check grep -qF 'mrb_value b = mrb_str_new(mrb, "xy", 2);' "$work/api_nk_encstr/src/api_nk_encstr.c"
+check grep -qF 'mrb_str_cat(mrb, out, "pq", 2);' "$work/api_nk_encstr/src/api_nk_encstr.c"
+
 # a data type whose mark is (RUBY_DATA_FUNC) NULL and whose free is RUBY_TYPED_DEFAULT_FREE (pg's coder types): no refusal
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dtype_cast_null tools/cext2mrbgem/fixtures/api_dtype_cast_null/ext/api_dtype_cast_null "$work/api_dtype_cast_null" > "$work/api_dtype_cast_null.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
