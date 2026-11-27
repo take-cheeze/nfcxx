@@ -115,6 +115,11 @@ void mrbbc_user_call(int id, MV *ret, MV *argv, MV *blk, long argc);
 /* The lowered module's block dispatcher. mrbbc_yield supplies the closure's self in argv[0]. */
 void mrbbc_user_yield(MV *ret, const MV *blk, MV *argv, long argc);
 void mrbbc_yield(MV *ret, const MV *blk, MV *argv, long argc);
+/* Borrow argv for the lifetime of mrbbc_run. ARGV is made lazily and remains a GC root. */
+void mrbbc_set_args(int argc, char **argv);
+void mrbbc_getglobal(MV *dst, const char *name);
+/* The optional hosted adapter (MRBBC_LIBUV=1); unsupported forms raise, never silently use libc I/O. */
+void mrbbc_host_send(MV *dst, const MV *recv, const MV *args, long argc, const char *name);
 
 /* Classes (CLASS, EXEC's class body, TCLASS, GETCONST) and objects. mrbbc_class defines the class name (a nil superclass
  * only) under cbase when it is a class, else under target when that is a class, else Object; an existing class of the
