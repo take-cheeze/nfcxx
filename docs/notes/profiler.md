@@ -67,9 +67,9 @@ was used (`clock=tsc` or `clock=monotonic`). Measured on one machine only; the f
    do: node evaluations for nfcast, counted in the existing dispatch.
 4. **nfcast tier.** Done in the prototype behind `NFCAST_TIER_PROFILE=1` (`docs/notes/ast.md`, "Tiering"): the generated C calls
    `__nfcxx_prof_enter` / `__nfcxx_prof_exit` per function (site = FNV-1a of the proto's tier serial and number), the flag is in the
-   compile cache key and the Merkle hash, and an abandoned run closes the calls it left open. Open: each shared object has its own
-   copy of the runtime, so a run with several compiled units keeps only the last profile written to `NFCXX_PROFILE`. The fix is for
-   the host to load one runtime (RTLD_GLOBAL) that the objects bind to.
+   compile cache key and the Merkle hash, and an abandoned run closes the calls it left open. Done: the runtime is one shared object
+   (`libnfcxx_prof.so`, built into the cache by `build_prof_lib` in `lib/ast/nfcast_tier.cpp`) that every compiled unit depends on,
+   so the loader maps one copy per process and a run with several compiled units writes one profile (`tests/ast/profile/two.lua`).
 
 ## Decisions taken in the prototype
 
