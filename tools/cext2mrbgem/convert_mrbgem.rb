@@ -6863,34 +6863,61 @@ end
   # A call that is no API entry stays as it is, when no name in it needs a rewrite. Returns the text, or nil when the call is
   # not supported here (an edit already covers part of it, or it is refused; the state is restored), so the outer call is
   # refused by its argument check, as before.
+  # the deepest nesting of calls rewritten as one argument's text (nested_call_text): a call in an argument of a call in an
+  # argument of a template, ... Deeper nesting is refused, as before (the outer call is refused by its argument check).
+  NESTED_CALL_DEPTH = 3
+
+  # the text of a nested call at p (its name, its close parenthesis at cp), an argument of an outer template or of another
+  # nested call. An API entry of kind template, call or special is mapped in a scratch edit set (map_entry); its edits, composed
+  # over its span, are its text. A call that is no API entry stays as it is, when no name in it needs a rewrite. A nested call
+  # with an API name in one of its own arguments (nested_arg_subs) is rewritten first, one level deeper. Returns the text, or nil
+  # when the call is not supported here (an edit already covers part of it, the depth bound is passed, or it is refused; the
+  # state is restored), so the outer call is refused by its argument check, as before.
   def nested_call_text(rel, p, name, cp, class_pos)
+    @nest_depth = (@nest_depth || 0) + 1
+    return nil if @nest_depth > NESTED_CALL_DEPTH
+    nested_call_text_at(rel, p, name, cp, class_pos)
+  ensure
+    @nest_depth -= 1
+  end
+
+  def nested_call_text_at(rel, p, name, cp, class_pos)
     text = @files[rel]['text']
     ed = @edits[rel]
     norm = ->(x) { x.gsub(/[ \t]*\\\n[ \t]*/, ' ').strip }
     return nil if ed.overlaps(p, cp + 1) || in_dead_init(rel, p)
     entry = @entries[name]
     if entry.nil?
-      return nil if class_pos || !nested_gap_ok?(rel, p, cp + 1)
-      return norm.call(text[p...(cp + 1)].to_s)
+      return nil if class_pos
+      return norm.call(text[p...(cp + 1)].to_s) if nested_gap_ok?(rel, p, cp + 1)
+    elsif !%w[template call special].include?(entry['kind'])
+      return nil
     end
-    return nil unless %w[template call special].include?(entry['kind'])
     # a class argument takes the call's VALUE through mrb_class_ptr: only a template that returns a VALUE (not an RClass *)
-    if class_pos && !(entry['kind'] == 'template' && entry['template'].to_s.start_with?('mrb_') && !entry['template'].to_s.start_with?('mrb_class('))
+    if entry && class_pos && !(entry['kind'] == 'template' && entry['template'].to_s.start_with?('mrb_') && !entry['template'].to_s.start_with?('mrb_class('))
       return nil
     end
     st = nested_state(rel)
-    scratch = Edits.new
-    refused_before = @refusals.size
-    @edits[rel] = scratch
-    begin
-      map_entry(rel, p, p + name.size, name, entry)
-    ensure
-      @edits[rel] = ed
-    end
-    if @refusals.size > refused_before
+    subs = nested_arg_subs(rel, p, name, cp, entry)
+    if subs.nil?
       nested_restore(st)
       return nil
     end
+    scratch = Edits.new
+    if entry
+      refused_before = @refusals.size
+      @edits[rel] = scratch
+      begin
+        map_entry(rel, p, p + name.size, name, entry)
+      ensure
+        @edits[rel] = ed
+      end
+      if @refusals.size > refused_before
+        nested_restore(st)
+        return nil
+      end
+    end
+    subs.each { |(a, b), t| scratch.add(a, b, t) }
     out = +''
     gaps = []
     cur = p
@@ -6909,6 +6936,35 @@ end
       return nil
     end
     norm.call(out)
+  end
+
+  # the nested calls among the arguments of the call at p (close parenthesis cp) that hold an API name the gap check would refuse:
+  # each is rewritten first (nested_call_text, one level deeper). Returns {[start, end] => text} over the nested call's span (from
+  # its name to its close parenthesis); nil when one is refused. A template or special entry maps its own arguments (none here);
+  # a call entry keeps its arguments as they are, so only an argument it does not reorder, wrap or class-position may hold one.
+  def nested_arg_subs(rel, p, name, cp, entry)
+    return {} if entry && entry['kind'] != 'call'
+    masked = @files[rel]['masked']
+    op = next_nonspace(masked, p + name.size)
+    return {} unless op >= 0 && op < cp && masked[op] == '('
+    special = (entry && (@special_pos || {})[name]) || []
+    subs = {}
+    split_args(masked, op, cp).each_with_index do |(a, b), k|
+      next if nested_gap_ok?(rel, a, b)
+      p0 = next_nonspace(masked, a)
+      return nil if p0 < 0 || p0 >= b
+      name0 = masked[p0, 200].to_s[/\A[A-Za-z_]\w*/]
+      return nil if name0.nil?
+      op0 = next_nonspace(masked, p0 + name0.size)
+      return nil unless op0 >= 0 && op0 < b && masked[op0] == '('
+      cp0 = match_close(masked, op0)
+      return nil unless cp0 > 0 && cp0 < b && masked[(cp0 + 1)...b].to_s.strip.empty?
+      return nil if entry && (%w[arg_order append_args wrap_arg intern_arg format_arg].any? { |key| entry[key] } || special.include?(k))
+      ctext = nested_call_text(rel, p0, name0, cp0, false)
+      return nil if ctext.nil?
+      subs[[p0, cp0 + 1]] = ctext
+    end
+    subs
   end
 
   def map_entry(rel, s, e, name, entry)
