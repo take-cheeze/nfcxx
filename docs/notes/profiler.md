@@ -79,3 +79,16 @@ benchmark has been run yet.
 - A thread still running at exit loses its unflushed records. Flushing at exit for the calling thread only is the
   deliberate choice here; joining workers before exit, as the test does, gives the full profile.
 - A write error turns recording off for the rest of the run rather than silently losing data mid-file.
+
+## Machine record and allocation counts (done)
+
+Two more chunks, both written at exit with a reserved tid and counted in bytes:
+
+- `tid = 0xFFFFFFFE`: the machine description (`nfcxx_machine_format`). Quick by default: sysfs and cpuid only. Set
+  `NFCXX_PROFILE_BENCH=1` to add the clock and bandwidth measurements (about 0.4 s).
+- `tid = 0xFFFFFFFD`: the allocation totals as `allocs=N alloc_bytes=B frees=F`. Under `--profile` the link wraps
+  `malloc`, `calloc`, `realloc` and `free` (`lib/prof/nfcxx_alloc.c`); without the wrap the counts are zero. The runtime's
+  own buffers are counted too, a few KB.
+
+`tools/prof/prof2sql.c` stores the machine text and the three totals on each `runs` row. Per-site allocation counts need
+stack capture and are not done.

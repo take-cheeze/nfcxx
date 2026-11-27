@@ -41,12 +41,37 @@ static int check_run(sqlite3 *db, sqlite3_int64 run) {
   if (sqlite3_step(st) == SQLITE_ROW) open_calls = sqlite3_column_int64(st, 0);
   sqlite3_finalize(st);
 
+  if (sqlite3_prepare_v2(db, "SELECT allocs, alloc_bytes, frees FROM runs WHERE run_id = ?1;", -1, &st, NULL) != SQLITE_OK)
+    return fail("prepare");
+  sqlite3_bind_int64(st, 1, run);
+  if (sqlite3_step(st) == SQLITE_ROW) {
+    long long allocs = sqlite3_column_int64(st, 0), bytes = sqlite3_column_int64(st, 1), frees = sqlite3_column_int64(st, 2);
+    sqlite3_finalize(st);
+    if (allocs < 10 || bytes < 1000 || frees < 10) return fail("allocation counts are below the program's own allocations");
+  } else {
+    sqlite3_finalize(st);
+    return fail("no run row");
+  }
+
   if (sites != 2) return fail("expected 2 sites in a run");
   if (!main_named) return fail("main is not named");
   if (main_calls != 1) return fail("main should be called once");
   if (fib_calls != 177) return fail("fib should be called 177 times");
   if (open_calls != 0) return fail("a call was left open");
   if (sum_excl != main_incl) return fail("exclusive times do not add up to main's inclusive time");
+  {
+    /* the machine description of the run was stored with it */
+    sqlite3_stmt *m = NULL;
+    int ok = 0;
+    if (sqlite3_prepare_v2(db, "SELECT machine FROM runs WHERE run_id = ?1;", -1, &m, NULL) != SQLITE_OK) return fail("prepare");
+    sqlite3_bind_int64(m, 1, run);
+    if (sqlite3_step(m) == SQLITE_ROW) {
+      const char *text = (const char *)sqlite3_column_text(m, 0);
+      ok = text != NULL && strstr(text, "cpu model") != NULL && strstr(text, "page size") != NULL;
+    }
+    sqlite3_finalize(m);
+    if (!ok) return fail("the machine description is not stored with the run");
+  }
   return 0;
 }
 

@@ -6,7 +6,7 @@ cd "$(dirname "$0")/../.."
 out=build/prof
 mkdir -p "$out"
 cc=${CC:-gcc}
-$cc -std=c11 -O2 -Wall -Wextra -Werror -pthread -Ilib/prof lib/prof/nfcxx_prof.c tests/prof/basic.c -o "$out/basic"
+$cc -std=c11 -O2 -Wall -Wextra -Werror -pthread -Ilib/prof lib/prof/nfcxx_prof.c lib/prof/nfcxx_machine.c tests/prof/basic.c -lm -o "$out/basic"
 $cc -std=c11 -O2 -Wall -Wextra -Werror tests/prof/check.c -o "$out/check"
 
 rm -f "$out/unset.prof"

@@ -21,6 +21,11 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "nfcxx_prof.h"
+#include "nfcxx_machine.h"
+#include "nfcxx_alloc.h"
+
+/* weak, so a build that does not link nfcxx_alloc.c (the wrappers) still links; the counts are then zero */
+extern void nfcxx_alloc_counts(uint64_t *allocs, uint64_t *bytes, uint64_t *frees) __attribute__((weak));
 
 #include <dlfcn.h>
 #include <errno.h>
@@ -38,6 +43,10 @@
 #define PROF_CHUNK_RECORDS 4096u
 #define PROF_KIND_ENTER 0u
 #define PROF_KIND_EXIT 1u
+/* a chunk with this tid holds the machine description: count bytes of text (nfcxx_machine_format) */
+#define PROF_TID_MACHINE 0xFFFFFFFEu
+/* a chunk with this tid holds the run's allocation totals: count bytes of "key=value" text */
+#define PROF_TID_COUNTERS 0xFFFFFFFDu
 
 /* the first byte of the executable image; weak, so a build without it still links */
 extern char __executable_start[] __attribute__((weak));
@@ -79,6 +88,8 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER; /* guards g_fd, the n
 static pthread_key_t g_key;
 static uint32_t g_next_tid = 1;
 static __thread prof_tls tls;
+static char *g_machine_text = NULL; /* the machine description, written at exit */
+static size_t g_machine_len = 0;
 static name_slot *g_slots = NULL;
 static size_t g_cap = 0;
 static size_t g_count = 0;
@@ -209,6 +220,34 @@ static void write_names(void) {
   }
 }
 
+/* called with g_lock held: the allocation totals as one chunk with tid PROF_TID_COUNTERS, text "key=value" pairs */
+static void write_counters(void) {
+  char text[128];
+  uint64_t a, b, f;
+  uint32_t hdr[2];
+  int n;
+  if (g_fd < 0) return;
+  a = b = f = 0;
+  if (nfcxx_alloc_counts != NULL) nfcxx_alloc_counts(&a, &b, &f); /* weak: zero when nfcxx_alloc.c is not linked */
+  n = snprintf(text, sizeof text, "allocs=%llu alloc_bytes=%llu frees=%llu\n", (unsigned long long)a,
+               (unsigned long long)b, (unsigned long long)f);
+  if (n <= 0 || (size_t)n >= sizeof text) return;
+  hdr[0] = PROF_TID_COUNTERS;
+  hdr[1] = (uint32_t)n;
+  write_all(hdr, sizeof hdr);
+  write_all(text, (size_t)n);
+}
+
+/* called with g_lock held: the machine description as one chunk with tid PROF_TID_MACHINE */
+static void write_machine(void) {
+  uint32_t hdr[2];
+  if (g_fd < 0 || g_machine_text == NULL) return;
+  hdr[0] = PROF_TID_MACHINE;
+  hdr[1] = (uint32_t)g_machine_len;
+  write_all(hdr, sizeof hdr);
+  write_all(g_machine_text, g_machine_len);
+}
+
 static void tls_destroy(void *v) {
   (void)v;
   flush_tls();
@@ -262,6 +301,8 @@ int __nfcxx_prof_enabled(void) { return g_enabled; }
 static void flush_at_exit(void) {
   flush_tls();
   pthread_mutex_lock(&g_lock);
+  write_machine();
+  write_counters();
   write_names();
   if (g_fd >= 0) close(g_fd);
   g_fd = -1;
@@ -283,6 +324,19 @@ __attribute__((constructor)) static void nfcxx_prof_start(void) {
   h.version = PROF_VERSION;
   h.byte_order = PROF_BYTE_ORDER;
   write_all(&h, sizeof h);
+  {
+    /* the machine: quick (sysfs and cpuid only) unless NFCXX_PROFILE_BENCH is set, which adds the timed measurements */
+    nfcxx_machine m;
+    unsigned flags = getenv("NFCXX_PROFILE_BENCH") != NULL ? 0u : (NFCXX_MACHINE_SKIP_CLOCK | NFCXX_MACHINE_SKIP_BW);
+    if (nfcxx_machine_probe_ex(&m, flags) == 0) {
+      size_t need = nfcxx_machine_format(&m, NULL, 0);
+      g_machine_text = (char *)malloc(need + 1);
+      if (g_machine_text != NULL) {
+        nfcxx_machine_format(&m, g_machine_text, need + 1);
+        g_machine_len = need;
+      }
+    }
+  }
   if (pthread_key_create(&g_key, tls_destroy) != 0) {
     close(g_fd);
     g_fd = -1;

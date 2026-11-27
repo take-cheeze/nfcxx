@@ -65,6 +65,8 @@ typedef struct {
   site_table sites;
   uint64_t events;
   uint64_t open_calls;
+  char *machine; /* the machine description of the run (the text nfcxx_machine_format wrote), or NULL */
+  uint64_t allocs, alloc_bytes, frees; /* the run's allocation totals (0 when the program was not wrapped) */
 } importer;
 
 static int die(const char *msg) {
@@ -201,6 +203,26 @@ static int read_profile(FILE *f, importer *im, uint32_t *version) {
       }
       continue;
     }
+    if (ch.tid == 0xFFFFFFFEu || ch.tid == 0xFFFFFFFDu) {
+      /* the machine description (0xFFFFFFFE) or the allocation counters (0xFFFFFFFD): count bytes of text */
+      char *text = (char *)malloc(ch.count + 1u);
+      if (text == NULL) return die("out of memory");
+      if (fread(text, 1, ch.count, f) != ch.count) return die("truncated machine description");
+      text[ch.count] = '\0';
+      if (ch.tid == 0xFFFFFFFDu) {
+        unsigned long long a = 0, b = 0, fr = 0;
+        if (sscanf(text, "allocs=%llu alloc_bytes=%llu frees=%llu", &a, &b, &fr) == 3) {
+          im->allocs = a;
+          im->alloc_bytes = b;
+          im->frees = fr;
+        }
+        free(text);
+      } else {
+        free(im->machine);
+        im->machine = text;
+      }
+      continue;
+    }
     if (ch.count == 0 || ch.count > 4096) return die("bad chunk size");
     if (fread(buf, sizeof(rec), ch.count, f) != ch.count) return die("truncated chunk");
     for (i = 0; i < ch.count; i++) {
@@ -259,14 +281,17 @@ static int store(sqlite3 *db, const char *source, const importer *im, uint32_t v
   int rc = 1;
   if (exec(db, "CREATE TABLE IF NOT EXISTS runs(run_id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL,"
                " imported_at TEXT NOT NULL DEFAULT (datetime('now')), format_version INTEGER NOT NULL,"
-               " events INTEGER NOT NULL, threads INTEGER NOT NULL, open_calls INTEGER NOT NULL);") != 0)
+               " events INTEGER NOT NULL, threads INTEGER NOT NULL, open_calls INTEGER NOT NULL, machine TEXT,"
+               " allocs INTEGER NOT NULL, alloc_bytes INTEGER NOT NULL, frees INTEGER NOT NULL);") != 0)
     return 1;
   if (exec(db, "CREATE TABLE IF NOT EXISTS sites(run_id INTEGER NOT NULL REFERENCES runs(run_id), site INTEGER NOT NULL,"
                " name TEXT NOT NULL, calls INTEGER NOT NULL, inclusive_ns INTEGER NOT NULL, exclusive_ns INTEGER NOT NULL,"
                " PRIMARY KEY (run_id, site));") != 0)
     return 1;
   if (exec(db, "BEGIN;") != 0) return 1;
-  if (sqlite3_prepare_v2(db, "INSERT INTO runs(source, format_version, events, threads, open_calls) VALUES (?1, ?2, ?3, ?4, ?5);",
+  if (sqlite3_prepare_v2(db,
+                         "INSERT INTO runs(source, format_version, events, threads, open_calls, machine, allocs, alloc_bytes, frees)"
+                         " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9);",
                          -1, &ins_run, NULL) != SQLITE_OK)
     goto out;
   sqlite3_bind_text(ins_run, 1, source, -1, SQLITE_STATIC);
@@ -274,6 +299,11 @@ static int store(sqlite3 *db, const char *source, const importer *im, uint32_t v
   sqlite3_bind_int64(ins_run, 3, (sqlite3_int64)im->events);
   sqlite3_bind_int64(ins_run, 4, (sqlite3_int64)im->nthreads);
   sqlite3_bind_int64(ins_run, 5, (sqlite3_int64)im->open_calls);
+  if (im->machine != NULL) sqlite3_bind_text(ins_run, 6, im->machine, -1, SQLITE_STATIC);
+  else sqlite3_bind_null(ins_run, 6);
+  sqlite3_bind_int64(ins_run, 7, (sqlite3_int64)im->allocs);
+  sqlite3_bind_int64(ins_run, 8, (sqlite3_int64)im->alloc_bytes);
+  sqlite3_bind_int64(ins_run, 9, (sqlite3_int64)im->frees);
   if (sqlite3_step(ins_run) != SQLITE_DONE) goto out;
   run_id = sqlite3_last_insert_rowid(db);
   if (sqlite3_prepare_v2(db, "INSERT INTO sites(run_id, site, name, calls, inclusive_ns, exclusive_ns) VALUES (?1, ?2, ?3, ?4, ?5, ?6);",
@@ -309,6 +339,7 @@ static void free_importer(importer *im) {
   free(im->threads);
   for (i = 0; i < im->sites.cap; i++) free(im->sites.slots[i].name);
   free(im->sites.slots);
+  free(im->machine);
 }
 
 int main(int argc, char **argv) {

@@ -69,6 +69,10 @@ int main(int argc, char **argv) {
       }
       continue;
     }
+    if (ch.tid == 0xFFFFFFFEu || ch.tid == 0xFFFFFFFDu) { /* the machine description or the counters: count bytes of text */
+      if (fseek(f, (long)ch.count, SEEK_CUR) != 0) return fail("truncated machine description");
+      continue;
+    }
     if (ch.count == 0 || ch.count > 4096) return fail("bad chunk size");
     if (fread(buf, sizeof(rec), ch.count, f) != ch.count) return fail("truncated chunk");
     for (k = 0; k < ntids; k++)

@@ -269,9 +269,13 @@ def run_loop(args, state, ld_available)
       state.cflags << "-finstrument-functions" unless state.cflags.include?("-finstrument-functions")
       state.rdynamic = 1 # the program's global functions go into the dynamic symbol table, so the profile can name them
       prof_dir = File.expand_path("../lib/prof", __dir__)
-      [File.join(prof_dir, "nfcxx_prof.c"), File.join(prof_dir, "nfcxx_prof_cyg.c")].each do |src|
+      [File.join(prof_dir, "nfcxx_prof.c"), File.join(prof_dir, "nfcxx_prof_cyg.c"),
+       File.join(prof_dir, "nfcxx_machine.c"), File.join(prof_dir, "nfcxx_alloc.c")].each do |src|
         state.files << src unless state.files.include?(src)
       end
+      # allocation counts: malloc, calloc, realloc and free go through lib/prof/nfcxx_alloc.c
+      wrap = "-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free"
+      state.files << wrap unless state.files.include?(wrap)
     elsif a == "-fsanitize=address" then state.asan = 1
     elsif a == "-fsafe-pointers" then state.safeptr = 1
     elsif a == "-fno-safe-pointers" then state.safeptr = 0
