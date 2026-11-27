@@ -98,6 +98,36 @@ The simplest option that gets the same zero-copy benefit is what decision 1 alre
 table, read with `memcpy` or `mmap`. Measure the read time on a realistic profile before choosing anything more complex; no
 timing has been done yet.
 
+## Allocation counts by site (prototype, format version 1)
+
+Implemented in `lib/prof/nfcxx_prof.c` and `lib/prof/nfcxx_alloc.c`; read by `tools/prof/prof2sql.c`. A chunk with
+`tid = 0xFFFFFFFC` holds one thread's allocation counts, written when the thread exits (and for the calling thread at
+process exit):
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `tid` | u32 | `0xFFFFFFFC` |
+| `count` | u32 | **bytes**, not rows: 28 per row. A reader that does not know the tid skips `count` bytes, as it does for the machine and counter chunks |
+| row: `site` | u32 | the site (as in the event records); `0xFFFFFFFF` = outside (no open call), `0xFFFFFFFE` = overflow (the thread had no row left for the site) |
+| row: `allocs` | u64 | `malloc`, `calloc` and `realloc` calls made while the site was the innermost open call (`realloc` counts one allocation) |
+| row: `bytes` | u64 | bytes requested by those calls (`calloc` counts `n * m`) |
+| row: `frees` | u64 | `free` calls, and `realloc` calls with a non-NULL old block, made at the site |
+
+Each field is written in host byte order at offsets 0, 4, 12 and 20 of the 28-byte row (no padding). A site may appear
+in several chunks, one per thread, and in one chunk only once per thread; a reader adds the rows of a site together.
+
+Rules:
+
+- A thread's row is chosen by its innermost open call: the enter hook pushes the enclosing row and the exit hook pops it.
+  A call that finds no row (the table holds 768 sites already) counts in the overflow row. Before a thread's first event,
+  its allocations count in the run's totals only (the `0xFFFFFFFD` chunk), not in any site.
+- The wrappers do not allocate and do not lock: each adds to the calling thread's own row.
+- If the enter stack cannot grow, the call's allocations count in the enclosing call's row and its exit is not popped.
+- Totals (`0xFFFFFFFD`) include everything; the per-site rows do not, by design, cover allocations made before a thread's
+  first event, nor those of a thread still running at exit.
+
+`prof2sql` stores the rows in `sites(allocs, alloc_bytes, frees)`; the `(outside)` and `(overflow)` rows have calls 0.
+
 ## Open items
 
 - Confirm the record layout and size buckets (the size-to-cost fit in the design discussion) before writing the binary

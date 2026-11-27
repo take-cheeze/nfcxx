@@ -3,8 +3,15 @@
  * File layout (host byte order; the byte-order marker lets a reader reject a file from another byte order):
  *   header:  char magic[8] = "NFCPROF1"; uint32 version = 1; uint32 byte_order = 0x01020304
  *   chunks:  repeated { uint32 tid; uint32 count; ... }
- *            tid != 0: count records, each { uint32 site; uint32 kind (0 enter, 1 exit); uint64 ts_ns (CLOCK_MONOTONIC) }
+ *            tid != 0 and not reserved: count records, each { uint32 site; uint32 kind (0 enter, 1 exit); uint64 ts_ns (CLOCK_MONOTONIC) }
  *            tid == 0: the string table, written once at exit; count entries, each { uint32 site; uint32 len; char name[len] }
+ *            tid == 0xFFFFFFFE: the machine description, count bytes of text (nfcxx_machine_format)
+ *            tid == 0xFFFFFFFD: the run's allocation totals, count bytes of "allocs=N alloc_bytes=B frees=F" text
+ *            tid == 0xFFFFFFFC: allocation counts of one thread by site, count bytes = 28 * rows; each row is
+ *                               { uint32 site @0; uint64 allocs @4; uint64 bytes @12; uint64 frees @20 } (host byte order)
+ *                               and a site may appear in several chunks (one per thread), so a reader adds them up.
+ *                               Sites 0xFFFFFFFF (outside: no open call) and 0xFFFFFFFE (overflow: the thread has no row
+ *                               left for the site) are not offsets of code.
  *
  * A site is the offset of the function from the start of the executable image (see nfcxx_prof_cyg.c). Its name is the
  * exported symbol that contains it (dladdr), or "+0x<offset>" when there is none. A site gets its name the first time a
@@ -14,8 +21,12 @@
  * the thread produced them, so a thread's enters and exits nest as its calls nest. Chunks of different threads may
  * interleave in the file; the tid says which thread a chunk belongs to.
  *
+ * Allocations: each thread keeps a row of counts per site (a fixed table of PROF_SITE_SLOTS rows, allocated at its first
+ * event). A call's site is the one of the innermost open call of the thread; the wrappers in nfcxx_alloc.c add to that row
+ * through nfcxx_alloc_cur, so they never allocate. A thread's rows are written at its exit.
+ *
  * Threads: a thread's buffer is flushed when it exits (a pthread key destructor) and, for the thread that calls exit(),
- * at exit. Other threads still running when the process exits lose their unflushed records.
+ * at exit. Other threads still running when the process exits lose their unflushed records and counts.
  */
 #define _GNU_SOURCE 1
 #define _POSIX_C_SOURCE 200809L
@@ -47,6 +58,18 @@ extern void nfcxx_alloc_counts(uint64_t *allocs, uint64_t *bytes, uint64_t *free
 #define PROF_TID_MACHINE 0xFFFFFFFEu
 /* a chunk with this tid holds the run's allocation totals: count bytes of "key=value" text */
 #define PROF_TID_COUNTERS 0xFFFFFFFDu
+/* a chunk with this tid holds one thread's allocation counts by site: count bytes, PROF_ALLOC_ROW_BYTES per row */
+#define PROF_TID_SITE_ALLOCS 0xFFFFFFFCu
+#define PROF_ALLOC_ROW_BYTES 28u
+#define PROF_ALLOC_BATCH 64u
+/* per thread: rows of allocation counts (open addressing by site); at most PROF_SITE_LIMIT sites get a row, the rest of
+ * the calls count in the overflow row. The limit keeps a free row in the table, so a lookup always ends. */
+#define PROF_SITE_SLOTS 1024u
+#define PROF_SITE_LIMIT 768u
+#define PROF_SITE_OUTSIDE 0xFFFFFFFFu
+#define PROF_SITE_OVERFLOW 0xFFFFFFFEu
+/* the rows of a thread in the order flush_counts walks them: outside, overflow, then the site rows */
+#define PROF_ROWS (PROF_SITE_SLOTS + 2u)
 
 /* the first byte of the executable image; weak, so a build without it still links */
 extern char __executable_start[] __attribute__((weak));
@@ -73,6 +96,13 @@ typedef struct {
   uint32_t n;
   uint32_t tid;
   int failed;
+  nfcxx_site_count *counts;  /* PROF_SITE_SLOTS rows; NULL when they could not be allocated (calls then use overflow) */
+  uint32_t nsites;           /* rows of counts in use */
+  nfcxx_site_count outside;  /* allocations with no open call */
+  nfcxx_site_count overflow; /* allocations of calls whose site has no row */
+  nfcxx_site_count **saved;  /* the nfcxx_alloc_cur of each enclosing call, the innermost last */
+  size_t sdepth, scap;
+  size_t lost;               /* calls entered without a saved entry (the stack could not grow); their exits are skipped */
 } prof_tls;
 
 /* the sites seen so far, with their names: an open-addressing table keyed by site (capacity a power of two) */
@@ -88,6 +118,8 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER; /* guards g_fd, the n
 static pthread_key_t g_key;
 static uint32_t g_next_tid = 1;
 static __thread prof_tls tls;
+/* the row the calling thread's allocations are counted in (declared in nfcxx_alloc.h, used by nfcxx_alloc.c) */
+__thread nfcxx_site_count *nfcxx_alloc_cur __attribute__((tls_model("initial-exec"))) = NULL;
 static char *g_machine_text = NULL; /* the machine description, written at exit */
 static size_t g_machine_len = 0;
 static name_slot *g_slots = NULL;
@@ -180,6 +212,56 @@ static void name_sites(const prof_rec *recs, uint32_t n) {
   }
 }
 
+/* ---- the per-thread allocation rows ---- */
+
+/* The row of SITE in this thread: its own row, a new one, or the overflow row when the table has no room. */
+static nfcxx_site_count *site_row(uint32_t site) {
+  uint32_t j;
+  nfcxx_site_count *c;
+  if (tls.counts == NULL) return &tls.overflow;
+  j = (site * 2654435761u) & (PROF_SITE_SLOTS - 1);
+  for (;;) {
+    c = &tls.counts[j];
+    if (!c->used) break;
+    if (c->site == site) return c;
+    j = (j + 1) & (PROF_SITE_SLOTS - 1);
+  }
+  if (tls.nsites >= PROF_SITE_LIMIT) return &tls.overflow;
+  c->used = 1;
+  c->site = site;
+  tls.nsites++;
+  return c;
+}
+
+/* Saves the current row for the call being entered. Returns 0 when the stack cannot grow. */
+static int saved_push(void) {
+  if (tls.sdepth == tls.scap) {
+    size_t ncap = tls.scap ? tls.scap * 2 : 64;
+    nfcxx_site_count **ns = (nfcxx_site_count **)realloc(tls.saved, ncap * sizeof *ns);
+    if (ns == NULL) return 0;
+    tls.saved = ns;
+    tls.scap = ncap;
+  }
+  tls.saved[tls.sdepth++] = nfcxx_alloc_cur;
+  return 1;
+}
+
+static int row_used(const nfcxx_site_count *c) { return c->allocs != 0 || c->bytes != 0 || c->frees != 0; }
+
+/* row K of this thread in the flush order, or NULL */
+static const nfcxx_site_count *row_at(uint32_t k) {
+  if (k == 0) return &tls.outside;
+  if (k == 1) return &tls.overflow;
+  return tls.counts != NULL ? &tls.counts[k - 2] : NULL;
+}
+
+static void put_row(unsigned char *p, const nfcxx_site_count *c) {
+  memcpy(p, &c->site, 4);
+  memcpy(p + 4, &c->allocs, 8);
+  memcpy(p + 12, &c->bytes, 8);
+  memcpy(p + 20, &c->frees, 8);
+}
+
 /* ---- output ---- */
 
 static void flush_tls(void) {
@@ -195,6 +277,36 @@ static void flush_tls(void) {
   }
   pthread_mutex_unlock(&g_lock);
   tls.n = 0;
+}
+
+/* this thread's nonzero allocation rows as one PROF_TID_SITE_ALLOCS chunk. Only the owning thread calls it, and it
+ * allocates nothing, so the rows do not change while they are written. */
+static void flush_counts(void) {
+  unsigned char batch[PROF_ALLOC_BATCH * PROF_ALLOC_ROW_BYTES];
+  uint32_t rows = 0, k, nb = 0;
+  uint32_t hdr[2];
+  for (k = 0; k < PROF_ROWS; k++) {
+    const nfcxx_site_count *c = row_at(k);
+    if (c != NULL && row_used(c)) rows++;
+  }
+  if (rows == 0) return;
+  pthread_mutex_lock(&g_lock);
+  if (g_fd >= 0) {
+    hdr[0] = PROF_TID_SITE_ALLOCS;
+    hdr[1] = rows * PROF_ALLOC_ROW_BYTES;
+    write_all(hdr, sizeof hdr);
+    for (k = 0; k < PROF_ROWS; k++) {
+      const nfcxx_site_count *c = row_at(k);
+      if (c == NULL || !row_used(c)) continue;
+      put_row(batch + (size_t)nb * PROF_ALLOC_ROW_BYTES, c);
+      if (++nb == PROF_ALLOC_BATCH) {
+        write_all(batch, sizeof batch);
+        nb = 0;
+      }
+    }
+    if (nb > 0) write_all(batch, (size_t)nb * PROF_ALLOC_ROW_BYTES);
+  }
+  pthread_mutex_unlock(&g_lock);
 }
 
 /* called with g_lock held: the string table as one chunk with tid 0 */
@@ -251,11 +363,18 @@ static void write_machine(void) {
 static void tls_destroy(void *v) {
   (void)v;
   flush_tls();
+  flush_counts();
+  nfcxx_alloc_cur = NULL; /* allocations from here on count in the run's totals only */
+  free(tls.counts);
+  tls.counts = NULL;
+  free(tls.saved);
+  tls.saved = NULL;
+  tls.sdepth = tls.scap = tls.lost = 0;
   free(tls.buf);
   tls.buf = NULL;
 }
 
-/* First event of a thread: allocate its buffer, take a thread id and register the destructor. */
+/* First event of a thread: allocate its buffer and its rows, take a thread id and register the destructor. */
 static int tls_init(void) {
   if (tls.failed) return 0;
   tls.buf = (prof_rec *)malloc(sizeof(prof_rec) * PROF_CHUNK_RECORDS);
@@ -263,6 +382,15 @@ static int tls_init(void) {
     tls.failed = 1;
     return 0;
   }
+  tls.counts = (nfcxx_site_count *)calloc(PROF_SITE_SLOTS, sizeof *tls.counts); /* NULL: calls count in the overflow row */
+  tls.nsites = 0;
+  memset(&tls.outside, 0, sizeof tls.outside);
+  tls.outside.site = PROF_SITE_OUTSIDE;
+  tls.outside.used = 1;
+  memset(&tls.overflow, 0, sizeof tls.overflow);
+  tls.overflow.site = PROF_SITE_OVERFLOW;
+  tls.overflow.used = 1;
+  tls.sdepth = tls.lost = 0;
   pthread_mutex_lock(&g_lock);
   tls.tid = g_next_tid++;
   pthread_mutex_unlock(&g_lock);
@@ -270,9 +398,12 @@ static int tls_init(void) {
   if (pthread_setspecific(g_key, &tls) != 0) {
     free(tls.buf);
     tls.buf = NULL;
+    free(tls.counts);
+    tls.counts = NULL;
     tls.failed = 1;
     return 0;
   }
+  nfcxx_alloc_cur = &tls.outside;
   return 1;
 }
 
@@ -288,18 +419,29 @@ static void record(uint32_t site, uint32_t kind) {
 
 void __nfcxx_prof_enter(uint32_t site) {
   if (!g_enabled) return;
+  if (tls.buf == NULL && !tls_init()) return;
+  if (tls.lost > 0 || !saved_push()) {
+    tls.lost++;
+    record(site, PROF_KIND_ENTER);
+    return;
+  }
   record(site, PROF_KIND_ENTER);
+  nfcxx_alloc_cur = site_row(site);
 }
 
 void __nfcxx_prof_exit(uint32_t site) {
   if (!g_enabled) return;
+  if (tls.buf == NULL && !tls_init()) return;
   record(site, PROF_KIND_EXIT);
+  if (tls.lost > 0) tls.lost--;
+  else if (tls.sdepth > 0) nfcxx_alloc_cur = tls.saved[--tls.sdepth];
 }
 
 int __nfcxx_prof_enabled(void) { return g_enabled; }
 
 static void flush_at_exit(void) {
   flush_tls();
+  flush_counts();
   pthread_mutex_lock(&g_lock);
   write_machine();
   write_counters();

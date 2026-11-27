@@ -90,5 +90,13 @@ Two more chunks, both written at exit with a reserved tid and counted in bytes:
   `malloc`, `calloc`, `realloc` and `free` (`lib/prof/nfcxx_alloc.c`); without the wrap the counts are zero. The runtime's
   own buffers are counted too, a few KB.
 
-`tools/prof/prof2sql.c` stores the machine text and the three totals on each `runs` row. Per-site allocation counts need
-stack capture and are not done.
+`tools/prof/prof2sql.c` stores the machine text and the three totals on each `runs` row.
+
+## Allocation counts per site (done)
+
+The allocations of a call are attributed to the site of its innermost open call, not to a captured stack. Each thread
+keeps a fixed table of rows, one per site (1024 slots, at most 768 sites), allocated at its first event. The enter hook
+makes the site's row the current one and the exit hook restores the enclosing one; the malloc wrappers add to the current
+row without allocating or locking. A thread writes its rows as a `0xFFFFFFFC` chunk when it exits. The format is in
+`docs/notes/profile-format.md`. Sites that did not fit are counted in an overflow row. The test program
+`tests/prof/allocsites.c` checks the exact counts of two functions (`tests/prof/sqlite.sh`).

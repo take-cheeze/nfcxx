@@ -1,7 +1,11 @@
 /* Allocation counts for the profiler (docs/notes/profiler.md). Under --profile the link wraps malloc, calloc, realloc and free
  * (-Wl,--wrap), so every allocation of the program and of the libraries it calls passes through here. The counts are totals
- * for the run: allocations, bytes requested and frees. The runtime's own buffers are counted too; they are a few KB.
- * Without the wrap the counters stay at zero. */
+ * for the run (allocations, bytes requested and frees), and each thread also adds them to the row of its current site
+ * (nfcxx_alloc_cur, nfcxx_prof.c). Without the wrap the counters stay at zero.
+ *
+ * The wrappers never allocate and never lock: they are called from malloc's own callers, possibly before the profiler's
+ * constructor has run or from a thread it does not know. The per-site part is a plain increment of the calling thread's own
+ * row. */
 #define _GNU_SOURCE 1
 
 #include <stddef.h>
@@ -10,6 +14,8 @@
 
 #include "nfcxx_alloc.h"
 
+#define NOINSTR __attribute__((no_instrument_function))
+
 static uint64_t g_allocs = 0, g_alloc_bytes = 0, g_frees = 0;
 
 void *__real_malloc(size_t n);
@@ -17,32 +23,43 @@ void *__real_calloc(size_t n, size_t m);
 void *__real_realloc(void *p, size_t n);
 void __real_free(void *p);
 
-static void count_alloc(size_t n) {
+NOINSTR static void count_alloc(size_t n) {
+  nfcxx_site_count *c = nfcxx_alloc_cur;
   __atomic_fetch_add(&g_allocs, 1, __ATOMIC_RELAXED);
   __atomic_fetch_add(&g_alloc_bytes, (uint64_t)n, __ATOMIC_RELAXED);
+  if (c != NULL) {
+    c->allocs++;
+    c->bytes += (uint64_t)n;
+  }
 }
 
-void *__wrap_malloc(size_t n) {
+NOINSTR static void count_free(void) {
+  nfcxx_site_count *c = nfcxx_alloc_cur;
+  __atomic_fetch_add(&g_frees, 1, __ATOMIC_RELAXED);
+  if (c != NULL) c->frees++;
+}
+
+NOINSTR void *__wrap_malloc(size_t n) {
   void *p = __real_malloc(n);
   if (p != NULL) count_alloc(n);
   return p;
 }
 
-void *__wrap_calloc(size_t n, size_t m) {
+NOINSTR void *__wrap_calloc(size_t n, size_t m) {
   void *p = __real_calloc(n, m);
   if (p != NULL) count_alloc(n * m);
   return p;
 }
 
-void *__wrap_realloc(void *p, size_t n) {
+NOINSTR void *__wrap_realloc(void *p, size_t n) {
   void *q = __real_realloc(p, n);
   if (q != NULL) count_alloc(n);
-  if (q != NULL && p != NULL) __atomic_fetch_add(&g_frees, 1, __ATOMIC_RELAXED);
+  if (q != NULL && p != NULL) count_free();
   return q;
 }
 
-void __wrap_free(void *p) {
-  if (p != NULL) __atomic_fetch_add(&g_frees, 1, __ATOMIC_RELAXED);
+NOINSTR void __wrap_free(void *p) {
+  if (p != NULL) count_free();
   __real_free(p);
 }
 
