@@ -21,9 +21,11 @@ Implemented so far (prototype, format version 1):
   `lib/prof/nfcxx_prof.c` and `lib/prof/nfcxx_prof_cyg.c`, which map gcc's `__cyg_profile_func_enter/exit` onto the
   runtime. It implies the gcc backend and is refused with `--backend=pathb`. The site of a function is its address for now.
   `tests/prof/run.sh` builds `cprog.c` with it and checks the profile (`check_any.c`): fib(10) gives 178 pairs at 2 sites.
-  Only C inputs are covered so far; the C++ path and the nfcast tier are not.
+  C and C++ inputs on the gcc route are covered (`tests/prof/cxx.sh` for C++); the nfcast tier is not. The runtime is
+  compiled as C (cfiles) without `-finstrument-functions`, and for C++ the flag reaches the gcc compile of the C that EDG
+  emits (the `profile_opts` group of the eccp call).
 
-Not yet done: the Path B IR does not emit the calls, the C++ path does not pass the flag through, the nfcast tier does not
+Not yet done: the Path B IR does not emit the calls, the nfcast tier does not
 emit them, the file has no IR hash, and no compute counts from the runtime (callgrind gives them offline, see "Compute counts" below). The
 string table of site names is done (below). Those are the next steps below.
 

@@ -1323,14 +1323,20 @@ const char* kPostRt =
 // before every return, so the profiler sees the same enters and exits as a call would make. An abandoned run jumps back to the entry
 // with the calls it left open still on the stack of this thread: nfct_punwind closes them, innermost first, so the records alternate.
 // A stack deeper than the table is a run abandoned like a too deep recursion (it is then done again in the interpreter).
+// The table is allocated at a thread's first enter, not declared as a thread-local array: the profiler runtime's initial-exec
+// TLS (lib/prof, nfcxx_alloc_cur) makes the object DF_STATIC_TLS, and dlopen must then fit every thread-local block of the
+// object into glibc's static TLS surplus (about 2 KB), which a 16 KB array does not fit ("cannot allocate memory in static
+// TLS block"). A pointer and a counter fit.
 const char* kProfRt =
     "#include <stdint.h>\n"
+    "#include <stdlib.h>\n"
     "extern \"C\" { void __nfcxx_prof_enter(uint32_t site); void __nfcxx_prof_exit(uint32_t site); }\n"
     "#define NFCT_PROF_CAP 4096\n"
-    "static __thread uint32_t nfct_ps[NFCT_PROF_CAP];\n"
+    "static __thread uint32_t *nfct_ps;\n"
     "static __thread int nfct_pn = 0;\n"
     "static void nfct_penter(nfcr_Ctx* cx, uint32_t s) {\n"
-    "  if (nfct_pn >= NFCT_PROF_CAP) nfct_bail(cx);\n"
+    "  if (!nfct_ps) nfct_ps = (uint32_t*)calloc(NFCT_PROF_CAP, sizeof(uint32_t));\n"
+    "  if (!nfct_ps || nfct_pn >= NFCT_PROF_CAP) nfct_bail(cx);\n"
     "  nfct_ps[nfct_pn++] = s;\n"
     "  __nfcxx_prof_enter(s);\n"
     "}\n"

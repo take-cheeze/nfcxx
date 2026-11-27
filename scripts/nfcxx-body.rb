@@ -706,7 +706,9 @@ module NfcxxBody
           fail_fallback(c, prc)
         end
       else
-        cmd = [gcc_cc, "-c", "-O2", "-fwrapv", "-fno-strict-aliasing", *a("asan_c"), *flags_pic, *a("cflags"), c, "-o", o]
+        # the profiler runtime (lib/prof) is not instrumented: --profile's -finstrument-functions is left off its compiles
+        cflags = File.dirname(File.expand_path(c)) == File.join(ROOT, "lib", "prof") ? a("cflags") - ["-finstrument-functions"] : a("cflags")
+        cmd = [gcc_cc, "-c", "-O2", "-fwrapv", "-fno-strict-aliasing", *a("asan_c"), *flags_pic, *cflags, c, "-o", o]
         st = run_cmd(*cmd, env: @env)
         raise Exit.new(st) unless st == 0
       end
@@ -949,6 +951,8 @@ module NfcxxBody
     end
     eccp_bin = File.join(edg, "eccp")
     @a["keep_static"] = keep_static
+    # --profile's -finstrument-functions reaches the gcc compile of the C that EDG emits (eccp drops cflags otherwise)
+    @a["profile_opts"] = a("cflags").include?("-finstrument-functions") ? ["--c_to_obj_option", "-finstrument-functions"] : []
     @a["eh_unwind"] = eh_unwind
     @a["cobjs"] = a("cobjs")
     @a["eflist"] = []
@@ -984,7 +988,7 @@ module NfcxxBody
     state_put(out, "root", ROOT)
     state_put(out, "files", a("files"))
     state_put(out, "compile_only", v("compile_only"))
-    %w[sys_inc hosted_libs keep_static eh_unwind picopts cobjs pre_opts cuda_opts shim vlart rtlib].each { |n| state_put(out, n, a(n)) }
+    %w[sys_inc hosted_libs keep_static profile_opts eh_unwind picopts cobjs pre_opts cuda_opts shim vlart rtlib].each { |n| state_put(out, n, a(n)) }
     state_put(out, "moves", moves)
     out
   end
