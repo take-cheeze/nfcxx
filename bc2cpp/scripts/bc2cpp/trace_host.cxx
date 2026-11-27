@@ -163,6 +163,8 @@ void print_frame_hash(long frame, const uint8_t* buf, size_t len) {
   }
   fprintf(stdout, "FH %ld %016llx\n", frame,
           static_cast<unsigned long long>(h));
+  // A whole line at a time, so the game's stderr cannot land inside one.
+  fflush(stdout);
 }
 
 // BC2CPP_HOST_MT_COUNT=1: the number of method-table entries of every class,
