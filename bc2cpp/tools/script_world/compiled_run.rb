@@ -116,6 +116,7 @@ def mruby_config(temp, gems, flags)
     base = proc do
       toolchain
       gembox 'full-core'
+      gem #{File.join(BC2CPP_TREE_ROOT, 'host-libs/mruby-signal').dump}
       # The interpreter's VM limits (MRB_STACK_MAX, 0x40000 slots, and MRB_CALL_LEVEL_MAX, 512 calls, by default) are ones the
       # compiled build, which recurses on the C stack, does not share: a deep recursion that CRuby and the compiled build
       # finish raises SystemStackError here.

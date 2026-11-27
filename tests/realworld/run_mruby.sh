@@ -32,7 +32,7 @@ for b in $backends; do
   if [ $b = control ]; then cc=gcc; be=gcc; else cc=$root/nfcc; be=$b; fi
   bdir=$tmp/build-$b
   # The build runs in the clone (rake needs its tree) but writes every output under $bdir.
-  if ! out=$(cd "$src" && NFCXX_BACKEND=$be MRUBY_CC=$cc MRUBY_CONFIG=$tmp/build_config.rb \
+  if ! out=$(cd "$src" && NFCXX_ROOT=$root NFCXX_BACKEND=$be MRUBY_CC=$cc MRUBY_CONFIG=$tmp/build_config.rb \
              MRUBY_BUILD_DIR=$bdir "${rake[@]}" -j"$(nproc)" all 2>&1); then
     msg=$(grep -m1 -E '(^|[ :])error|undefined reference|fatal error|invalid instruction' <<<"$out" || tail -1 <<<"$out")
     [ $b = qbe ] && grep -q 'va_arg with non-scalar' <<<"$out" && msg="$msg (cproc lacks cproc-vaarg-aggregate (a commit on take-cheeze/cproc branch nfcxx-asan-combined); re-run scripts/setup-qbe.sh)"

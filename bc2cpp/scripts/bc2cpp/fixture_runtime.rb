@@ -91,6 +91,7 @@ module Bc2cppFixtureRuntime
     MRuby::Build.new('host') do |conf|
       toolchain :gcc
       conf.gembox 'full-core'
+      conf.gem '#{BC2CPP_TREE_ROOT}/host-libs/mruby-signal'
       conf.gem '#{ROOT}/3rd/mruby-stringio'
       conf.cxx.flags << '-std=gnu++17'
       enable_cxx_exception

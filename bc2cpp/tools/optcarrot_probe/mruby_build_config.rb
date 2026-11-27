@@ -15,6 +15,7 @@ require_relative '../bc2cpp/world_root'
 MRuby::Build.new do |conf|
   conf.toolchain
   conf.gembox 'full-core'
+  conf.gem File.join(BC2CPP_TREE_ROOT, 'host-libs/mruby-signal')   # Signal.trap (not in the fork)
   conf.gem File.join(BC2CPP_WORLD_ROOT, "3rd/mruby-onig-regexp")
   conf.enable_debug
 end
