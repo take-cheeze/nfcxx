@@ -21,6 +21,9 @@
 #define MRBBC_MRBRT_H
 
 #include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 enum mrbbc_tag {
   MRBBC_NIL = 0,
@@ -281,4 +284,7 @@ void mrbbc_gc_collect(void);
 long mrbbc_gc_count(void);
 void mrbbc_gc_set_threshold(long bytes);
 
+#ifdef __cplusplus
+}
+#endif
 #endif /* MRBBC_MRBRT_H */

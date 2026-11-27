@@ -6,7 +6,8 @@ an owner/context pointer, and the address of a value in that owner's representat
 slots to its function's native signature. A known target can instead be called through its ordinary typed native entry.
 
 The first implementation supports signed 64-bit integer signatures. Native C/C++ slots, mrbbc's three MV layouts, and
-other representations can participate by supplying integer read/write codecs. Lua/MicroPython/Squirrel adapters,
+other representations can participate by supplying integer read/write codecs. Optional tvm-ffi, libtorch and Qt Core
+adapters are described below. Lua/MicroPython/Squirrel adapters,
 other scalar types, strings, object handles, and generated unboxed language bodies are subsequent work; they are not
 automatically supported by introducing this header.
 
@@ -92,3 +93,104 @@ layouts with GC threshold 1. A native driver compares typed calls, boxed calls w
 aliasing, full-width integers, nested C-to-Ruby calls, exception recovery, and invalid frames/signatures. It also builds
 and runs a standalone C++ caller. Set `RT_CFLAGS='-fsanitize=address,undefined -g -fno-omit-frame-pointer'` to instrument
 the C runtime and adapter; generated QBE assembly is not sanitizer-instrumented.
+
+## tvm-ffi, libtorch boxed calls, and Qt objects
+
+These are optional C++ adapters. They include their vendor headers only when selected; the core C interface and mrbbc
+runtime still need none of these SDKs or libuv. They currently convert integer signatures, not tensors or arbitrary
+objects. The real-library tests use generated Ruby exports through Path B/QBE, not substitutes for the vendor APIs.
+
+| Adapter | External caller to a compiled callable | Shared frame to the external runtime |
+| --- | --- | --- |
+| `lib/pathb/call_tvm.hpp` | `create_function` creates a real tvm-ffi Function with `TVMFFISafeCallType`; callers use `TVMFFIFunctionCall` | `Target{function, arity}` and `entry` pack integer `TVMFFIAny` arguments and call that Function |
+| `lib/pathb/call_torch.hpp` | `BoxedKernel` registers a callable with libtorch's dispatcher as a stateful boxed kernel | `Target{OperatorHandle}` and `entry` invoke `callBoxed` on an `IValue` stack |
+| `lib/pathb/call_qt.hpp`, `call_qt.cpp` | `CallableObject` exposes a `call(QVariantList)` Qt slot, reflected error properties, and result/error signals | `MethodTarget` invokes a reflected method; `PropertyTarget` reads/writes a declared property |
+
+For tvm-ffi, wrap an existing callable with:
+
+```cpp
+TVMFFIObjectHandle function = nullptr;
+nfc::pathb::tvm::create_function(callable, &function);
+// TVMFFIFunctionCall(function, args, nargs, &result), with result initialized to None.
+// Release the owned Function with TVMFFIObjectDecRef when finished.
+```
+
+The Function owns a copy of the callable descriptor; its closure remains borrowed and must outlive the Function.
+Targets borrow their Function handles. Integer codecs reject bool, float, Tensor, object and BigInt representations.
+A result slot must be None or integer before writing; owned objects are not overwritten implicitly. Foreign owned
+noninteger results are released when refused. Vendor errors are moved from tvm-ffi TLS, copied to the frame diagnostic,
+and released; compiled runtime failures become tvm-ffi errors at its safe-call boundary.
+See the [tvm-ffi ABI contract](https://tvm.apache.org/ffi/concepts/abi_overview.html).
+
+For libtorch, register the callable against an explicit fixed integer schema:
+
+```cpp
+auto library = MAKE_TORCH_LIBRARY(my_callables);
+library.def("sum(int a, int b) -> int", torch::CppFunction::makeFromBoxedFunctor(
+    std::make_unique<nfc::pathb::libtorch::BoxedKernel>(callable, 2)));
+auto op = c10::Dispatcher::singleton().findSchemaOrThrow("my_callables::sum", "");
+// op.callBoxed(&stack), or use nfc::pathb::libtorch::Target{op} through the shared frame.
+```
+
+The kernel consumes the argument suffix and leaves values below the call frame intact. Failed calls preserve the input
+stack. Keep the Library registration and callable closure alive during calls. This bridge uses libtorch's versioned C++
+API, not a stable C ABI: compile against matching headers, libraries, and `_GLIBCXX_USE_CXX11_ABI`. Schema validation
+rejects variadic, Tensor, bool, optional and noninteger signatures rather than treating their storage as integers.
+Native libtorch exceptions become frame status; compiled exceptions become C++ exceptions for dispatcher callers.
+The reference implementation is [PyTorch's boxed dispatcher](https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/core/dispatch/Dispatcher.h).
+
+### Qt Core details
+
+`CallableObject` is a real `QObject` with `Q_OBJECT`; run `moc` on `call_qt.hpp` and link that output with `call_qt.cpp`
+and Qt6::Core (or enable CMake AUTOMOC and list both files in the target). No GUI or widgets are needed.
+
+```cpp
+nfc::pathb::qt::CallableObject object(callable);
+QVariant result;
+QVariantList args{20, 22};
+QMetaObject::invokeMethod(&object, "call", Qt::DirectConnection,
+                         Q_RETURN_ARG(QVariant, result), Q_ARG(QVariantList, args));
+// Connect a QVariantList signal to CallableObject::call, and observe resultReady(qlonglong)/callFailed(QString).
+```
+
+`lastStatus` and `lastError` are reflected read-only properties; failures return an invalid QVariant and emit
+`callFailed`, without throwing through Qt's slot boundary. Both methods and properties support native Qt `int` and
+`qlonglong` with range checks before narrowing. The common representation remains i64. `MethodTarget` accepts at most
+ten integer arguments and one integer return; `PropertyTarget` handles declared readable/writable integer properties.
+The wrapper's QVariant codec accepts signed Int/LongLong, without bool/string/float coercion. A property write returns
+the assigned integer and lets Qt's normal setter/NOTIFY signals run. Dynamic properties and arbitrary method signatures
+are not supported yet. See [Qt's meta-object system](https://doc.qt.io/qt-6/metaobjects.html).
+
+Targets use `QPointer` to reject deleted objects. The wrapper also checks its lifetime after foreign calls and property
+notifications, since a connected handler may delete it. Calls are synchronous and require the object's owning thread;
+the wrapper also stays bound to its creation thread. Create it on the language runtime's owner thread and keep that
+runtime active for the duration of the Qt interaction. This does not make a language runtime thread-safe. No queued
+result protocol or cross-thread blocking dispatch is introduced. As with ordinary Qt callbacks, connected slots must
+not throw C++ exceptions through Qt signal activation. Define `QT_NO_KEYWORDS` when combining Qt and libtorch headers;
+the adapter uses Qt's explicit `Q_SIGNALS`/`Q_SLOTS`/`Q_EMIT` macros.
+
+### Real-library test
+
+```sh
+# Build tvm-ffi's C++ runtime with CMake; no Python package or interpreter is required.
+# LIBTORCH can name a standalone C++ distribution or a directory containing torch's include/, lib/, share/.
+CXX=clang++ TVM_FFI_ROOT=/path/to/tvm-ffi TVM_FFI_LIBDIR=/path/to/tvm-ffi/build/lib \
+  LIBTORCH=/path/to/libtorch QT6=1 bundle exec ruby tests/bc2cpp/mrbbc_external_call.rb
+```
+
+Select any subset with `TVM_FFI_ROOT`, `LIBTORCH`, or `QT6=1`; `QT6_PREFIX` supports a separate Qt installation and `MOC`
+overrides the tool. The runner uses pkg-config for Qt, discovers libtorch's required C++ string ABI from its CMake
+configuration (`TORCH_CXX11_ABI` overrides it), and accepts `CXXFLAGS` for compiler flags. GCC 15 with libtorch 2.14.1
+can emit an optimized `IValue`/intrusive_ptr `-Wstringop-overflow` diagnostic under `-Werror`; Clang is tested at `-O1`,
+and GCC is tested at `-O0` (`CXXFLAGS=-O0`). No warning is globally suppressed in the adapter.
+
+With all three selected, the runner also tests **Qt meta-call → libtorch boxed dispatcher → tvm-ffi Function → compiled
+Ruby**, returning through every representation. It checks full-width integers, an error originating in Ruby, and a
+successful call afterward. Every scenario runs in all three MV layouts with GC threshold 1. `MRBBC_VALUES=8` selects
+one layout; `RT_CFLAGS='-fsanitize=address,undefined -g -fno-omit-frame-pointer' ASAN_OPTIONS=detect_leaks=0` instruments
+our runtime/adapters (vendor binaries and QBE assembly remain uninstrumented). Tested locally with tvm-ffi commit
+`05e3a7c5568b5e21c92f50aa7b916fe25e674b61`, CPU libtorch 2.5.1 and 2.14.1, and Qt 6.10.2.
+
+`.github/workflows/pathb-external-call.yml` provides a manual-only reproduction with pinned tvm-ffi, the standalone CPU
+libtorch 2.5.1 C++ distribution, and Ubuntu's Qt Core development files. These large optional SDKs are not downloaded
+by ordinary PR CI.
