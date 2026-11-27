@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # cext2mrbgem converter tests: text-only. Runs tools/cext2mrbgem/convert_mrbgem.rb (CRuby, standard library only;
 # RUBY selects the interpreter, default ruby) on the in-repo fixtures and on bcrypt-ruby at a pinned commit
-# (fetched unless BCRYPT_DIR points at a checkout). Nothing is compiled.
+# (fetched unless BCRYPT_DIR points at a checkout). Nothing is compiled, except the st_table shim (nfcx_st.c, C99 with gcc:
+# the emitted file is built and run with tests/cext2mrbgem/nfcx_st_test.c, at the end).
 # Two legs run the same assertions: --scanner regex (the DEF_RE regex scan) and --scanner libclang (the declaration
 # scan through libclang-edg, tools/cext2mrbgem/decl_scan.rb). The libclang leg prints SKIP when the library does not
 # load: CEXT_LIBCLANG, default build/libclang-edg/libclang-edg.so.
@@ -1248,7 +1249,7 @@ check sh -c "[ \"\$(grep -c 'registered method function is also called directly'
 # 2j. lowercase CRuby APIs (st_*, ruby_*) are refused, not passed silently
 ruby tools/cext2mrbgem/convert_mrbgem.rb --name lowercase_api_refused tools/cext2mrbgem/fixtures/lowercase_api_refused/ext/lowercase_api_refused "$work/lowercase_api_refused" > "$work/lowercase_api_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
-check grep -q "st_init_numtable  no entry in api_map.json" "$work/lowercase_api_refused/REFUSALS.txt"
+check grep -q "st_init_numhashtab  no entry in api_map.json" "$work/lowercase_api_refused/REFUSALS.txt"
 check grep -q "ruby_xmalloc2_unmapped  no entry in api_map.json" "$work/lowercase_api_refused/REFUSALS.txt"
 
 # 3. bcrypt-ruby at a pinned commit
@@ -1745,6 +1746,32 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_st_include tools/cext2mrbgem
 check test "$rc" -eq 0
 check test ! -e "$work/api_st_include/NOT_BUILDABLE"
 check grep -qF 'return 0;' "$work/api_st_include/src/api_st_include.c"
+# 2zzz-st. CRuby's st_table API (nfcx_st.h / nfcx_st.c) is the converted gem's own plain C table: a file that uses an st_* name
+# includes nfcx_st.h and the two support files are written; the number, string and strcase tables and st_foreach with ST_DELETE convert
+for n in api_st_numtable api_st_strtable api_st_strcasetable api_st_foreach_delete; do
+  rc=0; "$rb" "$conv" --scanner "$scanner" --name $n tools/cext2mrbgem/fixtures/$n/ext/$n "$work/$n" > "$work/$n.log" 2>&1 || rc=$?
+  check test "$rc" -eq 0
+  check test ! -e "$work/$n/NOT_BUILDABLE"
+  check test -f "$work/$n/include/nfcx_st.h"
+  check test -f "$work/$n/src/nfcx_st.c"
+  check grep -qF "#include \"nfcx_st.h\"" "$work/$n/src/$n.c"
+done
+check grep -qF 'st_insert(table, (st_data_t)' "$work/api_st_numtable/src/api_st_numtable.c"
+check grep -qF 'st_init_strtable()' "$work/api_st_strtable/src/api_st_strtable.c"
+check grep -qF 'st_strncasecmp(mrb_string_value_cstr(mrb, &a)' "$work/api_st_strcasetable/src/api_st_strcasetable.c"
+check grep -qF 'return 2;' "$work/api_st_foreach_delete/src/api_st_foreach_delete.c"
+check grep -qF 'return 3;' "$work/api_st_foreach_delete/src/api_st_foreach_delete.c"
+# rb_hash_foreach's callback that returns ST_DELETE is refused: mrb_hash_foreach stops on any non-zero result
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_foreach_st_delete tools/cext2mrbgem/fixtures/api_hash_foreach_st_delete/ext/api_hash_foreach_st_delete "$work/api_hash_foreach_st_delete" > "$work/api_hash_foreach_st_delete.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check grep -qF 'returns ST_DELETE or ST_CHECK: mrb_hash_foreach stops' "$work/api_hash_foreach_st_delete/REFUSALS.txt"
+# the control: an st_foreach callback that needs the mruby state is still refused (state threading is not part of the st table)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_st_foreach_mrb tools/cext2mrbgem/fixtures/api_st_foreach_mrb/ext/api_st_foreach_mrb "$work/api_st_foreach_mrb" > "$work/api_st_foreach_mrb.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check grep -qF 'helper needs mruby state; threading refused' "$work/api_st_foreach_mrb/REFUSALS.txt"
+# a gem that does not use st_* gets no support files (the tiny fixture)
+check test ! -e "$work/tiny/src/nfcx_st.c"
+check test ! -e "$work/tiny/include/nfcx_st.h"
 # 2zzz142. a union member is a field when deciding whether a name is a VALUE field: a name that is a VALUE member of one struct and an integer
 # member of a union is not a VALUE field, so the integer assignment (c.value = 0) keeps its integer 0.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_union_field tools/cext2mrbgem/fixtures/api_union_field/ext/api_union_field "$work/api_union_field" > "$work/api_union_field.log" 2>&1 || rc=$?
@@ -2393,6 +2420,17 @@ check test -d "$naming/out/foo-a"
 check test -d "$naming/out/foo-b"
 check test ! -e "$naming/out/foo"
 check sh -c "python3 tools/cext2mrbgem/corpus_defs.py tools/cext2mrbgem/corpus_flags.json racc | grep -qx -- '-DRACC_INFO_VERSION=1.8.1'"
+echo
+
+# the st_table shim: the support source the converter emits (api_st_numtable's) is built as C99 with no warnings, and the C test
+# (tests/cext2mrbgem/nfcx_st_test.c: insert, lookup, delete, growth, foreach with ST_DELETE and ST_STOP, the strcase compares) runs
+leg=st-shim
+stw=$root_work/st-shim
+rm -rf "$stw"; mkdir -p "$stw"
+rc=0; "$rb" "$conv" --scanner regex --name api_st_numtable tools/cext2mrbgem/fixtures/api_st_numtable/ext/api_st_numtable "$stw/conv" > "$stw/conv.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check gcc -std=c99 -Wall -Wextra -Werror -pedantic -I "$stw/conv/include" -o "$stw/nfcx_st_test" tests/cext2mrbgem/nfcx_st_test.c "$stw/conv/src/nfcx_st.c"
+check "$stw/nfcx_st_test"
 echo
 
 if [ "$fail" -ne 0 ]; then echo "cext2mrbgem tests FAILED"; exit 1; fi

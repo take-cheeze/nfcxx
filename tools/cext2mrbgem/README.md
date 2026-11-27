@@ -65,6 +65,14 @@ What differs from the regex scan, and why:
 - `rb_ext_ractor_safe` and the `ruby/util.h` include are dropped with a warning
   (`WARNINGS.txt`, printed to stderr). Dropped items never make the output buildable by
   themselves.
+- CRuby's st_table API (`st_init_numtable`, `st_init_strtable`, `st_init_strcasetable` and their `_with_size` forms,
+  `st_init_table`, `st_insert`, `st_add_direct`, `st_lookup`, `st_delete`, `st_foreach`, `st_free_table`, `st_strcasecmp`,
+  `st_strncasecmp`) is served by a plain C table, `include/nfcx_st.h` and `src/nfcx_st.c` (libc only, no mruby state; the
+  implementation is in the converter). A file that uses one of those names or the `st_table`, `st_data_t` and `st_hash_type`
+  types includes `nfcx_st.h`; the two support files are written only when some file uses them. Number and pointer keys compare
+  by value, string keys by content (case-insensitively for the strcase table). `st_foreach` passes its callback as is, so a
+  callback that needs the mruby state is still refused. The `ST_DELETE` and `ST_CHECK` results are mapped for `st_foreach`; a
+  `rb_hash_foreach` callback that returns one of them is refused, since mrb_hash_foreach stops on any non-zero result.
 - `rb_thread_call_without_gvl` is modelled on mruby-uv: `include/nfcx_uv_thread.h` runs the
   function on the libuv thread pool and runs the loop until it finishes. The gem then
   depends on `mruby-uv`.
