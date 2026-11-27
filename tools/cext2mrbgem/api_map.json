@@ -120,6 +120,27 @@
       "template": "mrb_marshal_load($m, $0)",
       "caveat": "CRuby's rb_marshal_load(port) reads a marshalled object from a string: the mruby-marshal gem (3rd/mruby-marshal) provides mrb_marshal_load(mrb, str), and the converted gem depends on it (api_map gem_dep). The argument is a String, as CRuby's port reads from one"
     },
+    "rb_path2class": {
+    "kind": "template",
+    "arity": 1,
+    "needs_mrb": true,
+    "c_str_args": [
+      0
+    ],
+    "prelude": "#include <string.h>\nstatic mrb_value nfcx_path_to_class(mrb_state *mrb, const char *path) {\n  mrb_value c = mrb_obj_value(mrb->object_class);\n  const char *pbeg = path, *p = path, *pend = path + strlen(path);\n  if (p == pend || p[0] == '#') mrb_raisef(mrb, E_ARGUMENT_ERROR, \"can't retrieve anonymous class %S\", mrb_str_new_cstr(mrb, path));\n  while (p < pend) {\n    mrb_bool named = 0;\n    mrb_sym id = 0;\n    while (p < pend && *p != ':') p++;\n    if (p > pbeg) { named = 1; id = mrb_intern(mrb, pbeg, (size_t)(p - pbeg)); }\n    if (p < pend) {\n      if ((size_t)(pend - p) < 2 || p[1] != ':') goto undefined;\n      p += 2;\n      pbeg = p;\n    }\n    if (!named || !mrb_const_defined_at(mrb, c, id)) goto undefined;\n    c = mrb_const_get_at(mrb, mrb_class_ptr(c), id);\n    if (!mrb_class_p(c) && !mrb_module_p(c)) mrb_raisef(mrb, E_TYPE_ERROR, \"%S does not refer to class/module\", mrb_str_new_cstr(mrb, path));\n  }\n  return c;\nundefined:\n  mrb_raisef(mrb, E_ARGUMENT_ERROR, \"undefined class/module %S\", mrb_str_new(mrb, path, (size_t)(p - path)));\n  return mrb_nil_value();\n}",
+    "prelude_name": "nfcx_path_to_class",
+    "template": "nfcx_path_to_class($m, $0)",
+    "caveat": "CRuby's rb_path2class(path) is rb_path_to_class on a new String: the path is split on \"::\" and each segment is looked up in the constant table of the class or module before it, from Object (CRuby's rb_const_search, exclude and no recursion). A missing segment raises ArgumentError \"undefined class/module <path up to the segment>\"; a segment that is not a class or module raises TypeError \"<path> does not refer to class/module\"; an empty or anonymous path raises ArgumentError. Modules are walked as well (JSON::Ext is a module), so mrb_class_get_under is not used. The result is the class as a VALUE (an mrb_value)"
+  },
+    "rb_path_to_class": {
+    "kind": "template",
+    "arity": 1,
+    "needs_mrb": true,
+    "prelude": "#include <string.h>\nstatic mrb_value nfcx_path_to_class(mrb_state *mrb, const char *path) {\n  mrb_value c = mrb_obj_value(mrb->object_class);\n  const char *pbeg = path, *p = path, *pend = path + strlen(path);\n  if (p == pend || p[0] == '#') mrb_raisef(mrb, E_ARGUMENT_ERROR, \"can't retrieve anonymous class %S\", mrb_str_new_cstr(mrb, path));\n  while (p < pend) {\n    mrb_bool named = 0;\n    mrb_sym id = 0;\n    while (p < pend && *p != ':') p++;\n    if (p > pbeg) { named = 1; id = mrb_intern(mrb, pbeg, (size_t)(p - pbeg)); }\n    if (p < pend) {\n      if ((size_t)(pend - p) < 2 || p[1] != ':') goto undefined;\n      p += 2;\n      pbeg = p;\n    }\n    if (!named || !mrb_const_defined_at(mrb, c, id)) goto undefined;\n    c = mrb_const_get_at(mrb, mrb_class_ptr(c), id);\n    if (!mrb_class_p(c) && !mrb_module_p(c)) mrb_raisef(mrb, E_TYPE_ERROR, \"%S does not refer to class/module\", mrb_str_new_cstr(mrb, path));\n  }\n  return c;\nundefined:\n  mrb_raisef(mrb, E_ARGUMENT_ERROR, \"undefined class/module %S\", mrb_str_new(mrb, path, (size_t)(p - path)));\n  return mrb_nil_value();\n}",
+    "prelude_name": "nfcx_path_to_class",
+    "template": "nfcx_path_to_class($m, mrb_string_cstr($m, $0))",
+    "caveat": "CRuby's rb_path_to_class(path) takes a String VALUE: the fork's mrb_string_cstr gives the bytes (it raises for a non-String and for a NUL byte). Same lookup, and the same errors, as rb_path2class. mruby strings carry no encoding, so CRuby's non-ASCII-compatible encoding error is not raised"
+  },
     "rb_reg_new": {
       "kind": "template",
       "arity": 3,

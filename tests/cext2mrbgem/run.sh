@@ -2042,6 +2042,18 @@ check test ! -e "$work/fn_macro/NOT_BUILDABLE"
 check grep -qF 'static mrb_value fn_get_long(mrb_state *mrb, mrb_value self) {' "$work/fn_macro/src/fn_macro.c"
 check grep -qF 'mrb_define_method(mrb, mFn, "get2_long", fn_get2_long, MRB_ARGS_NONE());' "$work/fn_macro/src/fn_macro.c"
 check grep -qF '#if 0  /* BC2CPP-MRBGEM: unused macro' "$work/fn_macro/src/fn_macro.c"
+
+# 2zzz111. rb_path2class (a C string path) and rb_path_to_class (a String VALUE) look a class up by its "::" path: one
+# prelude helper per file (nfcx_path_to_class, emitted once), called from a registered method and from Init, no refusal
+rc=0; "$rb" "$conv" --scanner "$scanner" --name path2class tools/cext2mrbgem/fixtures/path2class/ext/path2class "$work/path2class" > "$work/path2class.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/path2class/NOT_BUILDABLE"
+check sh -c "! grep -q 'rb_path' '$work/path2class/REFUSALS.txt' 2>/dev/null"
+check test "$(grep -c '^static mrb_value nfcx_path_to_class(' "$work/path2class/src/path2class.c")" -eq 1
+check grep -qF 'return nfcx_path_to_class(mrb, "Foo::Bar");' "$work/path2class/src/path2class.c"
+check grep -qF 'p2c_bar = nfcx_path_to_class(mrb, "Foo::Bar");' "$work/path2class/src/path2class.c"
+check grep -qF 'return nfcx_path_to_class(mrb, mrb_string_cstr(mrb, path));' "$work/path2class/src/path2class.c"
+check grep -qF '#include <string.h>' "$work/path2class/src/path2class.c"
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads
