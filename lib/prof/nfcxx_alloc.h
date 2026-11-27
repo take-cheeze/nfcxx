@@ -1,5 +1,5 @@
 /* Allocation counts of the run and per site (lib/prof/nfcxx_alloc.c, lib/prof/nfcxx_prof.c). Zero unless the program is
- * linked with the malloc wrappers. */
+ * built with --profile (nfcxx_alloc.c defines malloc and free). */
 #ifndef NFCXX_ALLOC_H
 #define NFCXX_ALLOC_H
 

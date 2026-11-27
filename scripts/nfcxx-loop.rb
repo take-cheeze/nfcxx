@@ -273,9 +273,8 @@ def run_loop(args, state, ld_available)
        File.join(prof_dir, "nfcxx_machine.c"), File.join(prof_dir, "nfcxx_alloc.c")].each do |src|
         state.files << src unless state.files.include?(src)
       end
-      # allocation counts: malloc, calloc, realloc and free go through lib/prof/nfcxx_alloc.c
-      wrap = "-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free"
-      state.files << wrap unless state.files.include?(wrap)
+      # allocation counts: nfcxx_alloc.c defines malloc, calloc, realloc and free (forwarding to glibc's __libc_*), so libc's
+      # allocations are counted too; it is one of the files above
     elsif a == "-fsanitize=address" then state.asan = 1
     elsif a == "-fsafe-pointers" then state.safeptr = 1
     elsif a == "-fno-safe-pointers" then state.safeptr = 0
