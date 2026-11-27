@@ -2114,6 +2114,16 @@ check grep -qF 'if (mrb_value_identical(*output_data ,  uncompilable_marker)) re
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_singleton_alias tools/cext2mrbgem/fixtures/api_singleton_alias/ext/api_singleton_alias "$work/api_singleton_alias" > "$work/api_singleton_alias.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'mrb_define_alias(mrb, mrb_class_ptr(mrb_singleton_class(mrb, mrb_obj_value(klass))), "new_in", "alloc_in");' "$work/api_singleton_alias/src/api_singleton_alias.c"
+# 2zzz181. --define NAME=VALUE: a name the build defines is a macro of the build, not a CRuby name (racc's RACC_INFO_VERSION, which
+# extconf defines). Without the define the identifier is refused (the control); with it, the identifier in the macro body is kept as
+# written and the conversion has no refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name define_macro tools/cext2mrbgem/fixtures/define_macro/ext/define_macro "$work/define_macro_nodef" > "$work/define_macro_nodef.log" 2>&1 || rc=$?
+check grep -q 'RDM_INFO_VERSION  no entry in api_map.json' "$work/define_macro_nodef/REFUSALS.txt"
+rc=0; "$rb" "$conv" --scanner "$scanner" --name define_macro --define RDM_INFO_VERSION=1.8.1 tools/cext2mrbgem/fixtures/define_macro/ext/define_macro "$work/define_macro" > "$work/define_macro.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/define_macro/NOT_BUILDABLE"
+check sh -c "! grep -q 'RDM_INFO_VERSION' '$work/define_macro/REFUSALS.txt'"
+check grep -qF '#define DM_VERSION DM_STR(RDM_INFO_VERSION)' "$work/define_macro/src/define_macro.c"
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads

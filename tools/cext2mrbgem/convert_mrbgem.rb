@@ -5695,7 +5695,10 @@ end
     end
     # 5. identifier pass. Local names: functions the input defines (a prototype alone does not count: it may declare a
     # CRuby API), class variables and the macros the input defines (scan_local_macros).
-    local_syms = Set.new(@defs.keys) | @class_vars | @local_macros | local_enumerators | local_file_scope_names | local_macro_arg_names
+    # the names the build defines (--define NAME[=VALUE], as extconf sets them: racc's RACC_INFO_VERSION) are macros of the build, not
+    # CRuby names, so the identifier pass keeps them as written (the build's -D supplies them); a name with an api_map entry keeps its entry
+    build_macros = (@defines || []).map { |d| d.split('=', 2)[0] }.reject { |n| @entries.key?(n) }.to_set
+    local_syms = Set.new(@defs.keys) | @class_vars | @local_macros | local_enumerators | local_file_scope_names | local_macro_arg_names | build_macros
     body_spans = @defs.values.flatten.select { |d| d['file'] == rel }.map { |d| [d['brace'], d['body_end']] }
     # text-inactive branches (#if 0, a #ifdef of a name this build defines or the gem #defines) are excluded like dead definitions
     text_inactive_spans(rel).each do |a, z|
