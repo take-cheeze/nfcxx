@@ -104,8 +104,12 @@ Two more chunks, both written at exit with a reserved tid and counted in bytes:
 - `tid = 0xFFFFFFFE`: the machine description (`nfcxx_machine_format`). Quick by default: sysfs and cpuid only. Set
   `NFCXX_PROFILE_BENCH=1` to add the clock and bandwidth measurements (about 0.4 s).
 - `tid = 0xFFFFFFFD`: the allocation totals as `allocs=N alloc_bytes=B frees=F`. Under `--profile` the link wraps
-  `malloc`, `calloc`, `realloc` and `free` (`lib/prof/nfcxx_alloc.c`); without the wrap the counts are zero. The runtime's
-  own buffers are counted too, a few KB.
+  `malloc`, `calloc`, `realloc` and `free`: `lib/prof/nfcxx_alloc.c` defines them, counts, and forwards to glibc's
+  `__libc_malloc` and friends. libc calls malloc through the PLT, so libc's own allocations (fopen's FILE and buffer, strdup)
+  are counted too, in the site of the call that made them (`tests/prof/libc.sh`). A `-static` link cannot define them (libc.a's
+  malloc.o would clash), so the driver links `lib/prof/nfcxx_alloc_wrap.c` with `-Wl,--wrap`, which also reaches libc.a's calls.
+  Its functions have no symbol names there, so the profile names them `+0x<offset>`. A program not built with `--profile`
+  has no such definitions and its counts stay at zero. The runtime's own buffers are counted too, a few KB.
 
 `tools/prof/prof2sql.c` stores the machine text and the three totals on each `runs` row.
 
@@ -116,7 +120,8 @@ keeps a fixed table of rows, one per site (1024 slots, at most 768 sites), alloc
 makes the site's row the current one and the exit hook restores the enclosing one; the malloc wrappers add to the current
 row without allocating or locking. A thread writes its rows as a `0xFFFFFFFC` chunk when it exits. The format is in
 `docs/notes/profile-format.md`. Sites that did not fit are counted in an overflow row. The test program
-`tests/prof/allocsites.c` checks the exact counts of two functions (`tests/prof/sqlite.sh`).
+`tests/prof/allocsites.c` checks the exact counts of two functions (`tests/prof/sqlite.sh`). `tests/prof/libc.sh` checks that
+the allocations libc makes (fopen, strdup) are counted in the site of the call that makes them.
 
 `tools/prof/prof2sql.c` stores the machine text and the three totals on each `runs` row.
 

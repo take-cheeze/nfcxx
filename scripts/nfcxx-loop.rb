@@ -268,13 +268,19 @@ def run_loop(args, state, ld_available)
       # The runtime is C: it goes in cfiles, compiled by gcc like any C input (body's c_inputs), so the C++ path (eccp,
       # EDG in C++ mode) never sees it, and c_inputs leaves -finstrument-functions off these files.
       prof_dir = File.expand_path("../lib/prof", __dir__)
+      # allocation counts. A dynamic link: nfcxx_alloc.c defines malloc, calloc, realloc and free (forwarding to glibc's
+      # __libc_*), and libc's PLT calls reach them. A static link cannot define them (libc.a's malloc.o would clash), so
+      # nfcxx_alloc_wrap.c (nfcxx_alloc.c with the __wrap_ names) is linked with --wrap, which also covers libc.a's calls.
+      static_link = args.include?("-static")
+      alloc_src = static_link ? "nfcxx_alloc_wrap.c" : "nfcxx_alloc.c"
       [File.join(prof_dir, "nfcxx_prof.c"), File.join(prof_dir, "nfcxx_prof_cyg.c"),
-       File.join(prof_dir, "nfcxx_machine.c"), File.join(prof_dir, "nfcxx_alloc.c")].each do |src|
+       File.join(prof_dir, "nfcxx_machine.c"), File.join(prof_dir, alloc_src)].each do |src|
         state.cfiles << src unless state.cfiles.include?(src)
       end
-      # allocation counts: malloc, calloc, realloc and free go through lib/prof/nfcxx_alloc.c
-      wrap = "-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free"
-      state.files << wrap unless state.files.include?(wrap)
+      if static_link
+        wrap = "-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free"
+        state.files << wrap unless state.files.include?(wrap)
+      end
     elsif a == "-fsanitize=address" then state.asan = 1
     elsif a == "-fsafe-pointers" then state.safeptr = 1
     elsif a == "-fno-safe-pointers" then state.safeptr = 0
