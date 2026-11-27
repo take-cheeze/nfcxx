@@ -158,6 +158,16 @@ global `<funcname>_bc2_mrb`. A registered method of such a gem is wrapped:
   on the exception path; the global is therefore restored on every exit.
 - The body keeps its own restores before each `return` (wrap_returns and the macro return plans), which are now
   redundant but harmless, since they run before the `mrb_ensure` restore.
+- Init sets the global and does not restore the previous value: it leaves the gem's state set for the life of the gem
+  (its saved value is its own `mrb`, so its returns put that back). The generated `mrb_<fn>_gem_final` clears the global
+  (`<fn>_bc2_mrb = NULL;`, with `extern struct mrb_state *<fn>_bc2_mrb;` in `src/gem_init.c`). mruby has no close hook
+  other than gem_final, so this clearing is the only protection against a dangling pointer after `mrb_close`. gem_final
+  clears the global whatever state it holds; it does not check that the state is the one being closed.
+- A coder callback passed to `pg_define_coder` (a function of the input that the registration stores in the coder
+  table) is on the global path, not refused. The table keeps the pointer for the life of the gem, and the coder runs only
+  from a call a registered method makes, so the global is set when it runs. Its address in any other call stays refused.
+  The C-API callbacks (the functions given to rb_ensure and rb_rescue, and a dcompact callback) are not on this path:
+  they keep their refusals.
 
 Split methods (an impl and a wrapper) get the same form: the wrapper's argument reads and impl call are the
 `mrb_ensure` body. In a gem with a global-state user every registered method is wrapped, as before, so each of
@@ -173,8 +183,13 @@ the run test prints SKIP.
 
 What remains:
 
-- Init is not under `mrb_ensure` (it is void, and its returns restore the global as before). An exception that
-  leaves Init keeps the global set to the gem's state until the next wrapped method or Init runs.
+- Init is not under `mrb_ensure` (it is void). An exception that leaves Init keeps the global set to the gem's state
+  (it is set for the life of the gem, as described above).
+- The global is one per process. The nested-state abort still fires when a different `mrb_state` enters a wrapped
+  method or Init while the global is set, and with Init leaving the global set this is now the usual case for a second
+  state in the same process, not only a nested call. A second state is therefore not supported while the first is open.
+- The coder path is checked by the fixture `stored_coder` (generated text and the gem_final clearing), not by running
+  pg: no Ruby-level pg test runs in this environment.
 - The generated C is compiled by `check_mruby_compile.sh` (compile and link only). The runtime behaviour above is
   checked on one fixture, not on the corpus.
 - A nested state (a method on one state that runs a method on another) still aborts, as before.

@@ -478,7 +478,8 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_alt_branch tools/cext2mrbgem
 check test "$rc" -eq 0
 check grep -qF 'mrb_obj_as_string(api_alt_branch_bc2_mrb, (x))' "$work/api_alt_branch/src/api_alt_branch.c"
 # a method entered while another mruby state is active aborts (the global state is one state; a nested one would be wrong)
-check grep -qF 'if (nfcx_bc2_old != NULL && nfcx_bc2_old != mrb) abort();' "$work/api_alt_branch/src/api_alt_branch.c"
+check grep -qF 'if (api_alt_branch_bc2_mrb != NULL && api_alt_branch_bc2_mrb != mrb) abort(); /* nested mruby state */' "$work/api_alt_branch/src/api_alt_branch.c"
+check grep -qF 'if (nfcx_bc2_f.old != NULL && nfcx_bc2_f.old != mrb) abort();' "$work/api_alt_branch/src/api_alt_branch.c"
 # 2zzz80. A callee that takes two callbacks: each function-pointer parameter takes its own helper, and both helpers gain mrb.
 # (The regex scanner cannot read two parenthesis levels in a parameter list, so it refuses this safely: the test is libclang's.)
 if [ "$scanner" = libclang ]; then
@@ -2235,6 +2236,24 @@ if [ -n "${MRUBY_BUILD:-}" ] && [ -f "$MRUBY_BUILD/build/host/lib/libmruby.a" ];
 else
   echo "SKIP [$leg] global_escape harness: MRUBY_BUILD does not name a built libmruby (the converted code is checked by the grep tests above)"
 fi
+
+# 2zzz190. a coder callback stored by pg_define_coder (a function of the input that keeps the pointer): its address is not a
+# refusal; the callback reads the global state (set by the registered method that runs it, and by Init, which keeps it set).
+# gem_final clears the global; Init does not restore the previous value (it leaves its own state set for the life of the gem).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name stored_coder tools/cext2mrbgem/fixtures/stored_coder/ext/stored_coder "$work/stored_coder" > "$work/stored_coder.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/stored_coder/NOT_BUILDABLE"
+check grep -qF 'sc_enc(mrb_value v)' "$work/stored_coder/src/stored_coder.c"
+check grep -qF 'return mrb_str_new_cstr(stored_coder_bc2_mrb, "encoded");' "$work/stored_coder/src/stored_coder.c"
+check grep -qF 'pg_define_coder("Enc", sc_enc);' "$work/stored_coder/src/stored_coder.c"
+check grep -qF 'extern struct mrb_state *stored_coder_bc2_mrb;' "$work/stored_coder/src/gem_init.c"
+check grep -qF 'mrb_state *nfcx_bc2_old = mrb;' "$work/stored_coder/src/stored_coder.c"
+check grep -qF 'if (stored_coder_bc2_mrb != NULL && stored_coder_bc2_mrb != mrb) abort(); /* nested mruby state */' "$work/stored_coder/src/stored_coder.c"
+check sh -c "! sed -n '/^void mrb_stored_coder_gem_init/,/^}/p' '$work/stored_coder/src/stored_coder.c' | grep -q 'stored_coder_bc2_mrb = nfcx_bc2_old'"
+check grep -qx '  stored_coder_bc2_mrb = NULL;' "$work/stored_coder/src/gem_init.c"
+check grep -q 'mrb_stored_coder_gem_final(mrb_state \*mrb)' "$work/stored_coder/src/gem_init.c"
+# a gem that does not use the global state has no extern and no clearing in gem_final (the tiny fixture)
+check sh -c "! grep -q 'bc2_mrb' '$work/tiny/src/gem_init.c'"
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads
