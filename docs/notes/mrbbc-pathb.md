@@ -324,6 +324,9 @@ same way: the cbase is nil there too, so the class is defined under the body's s
   A self call (`mrbbc_find`), an explicit receiver (`mrbbc_find_send`) and the initialize of `new` (`mrbbc_find_init`) all
   use it. An explicit receiver that reaches a top-level def (Object's, private in mruby) is a NoMethodError.
 - `TCLASS a`: R[a] = Object at the top level, the class body's self in a class body (a method or a block is refused).
+- `attr_reader`, `attr_writer` and `attr_accessor` of literal symbols in a class body define one generated method per
+  accessor on the class (`mrbbc_def_in`, 0 or 1 argument), which reads or sets the instance variable; the call gives nil.
+  Any other argument is refused.
 - `EXEC a b`: runs class body b with self R[a] and R[a] = its value (`mrb_k<N>`, called directly: the child is static).
 - `TDEF` in a class body defines the method on that class (`mrbbc_def_in` with self), at the top level on Object
   (`mrbbc_def`). A class has its own list of methods, newest first, so a redefinition wins; the lookup for a self call
