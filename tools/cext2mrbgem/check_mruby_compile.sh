@@ -2,7 +2,8 @@
 # Compiles each converted gem's src/*.c against the mruby headers, with the gem's corpus defines (corpus_flags.json), and links the
 # objects as a shared object with --no-undefined against libmruby: a converted gem that compiles and links has no undefined symbols.
 # usage: check_mruby_compile.sh CONVERTED_DIR GEM [GEM...]   (CONVERTED_DIR holds one converted gem per directory: CONVERTED_DIR/GEM)
-# MRUBY_LIB (optional) lists the mruby archives to link, space-separated (default: MRUBY's build/host/lib/libmruby.a).
+# MRUBY_LIB (optional) lists the mruby archives and link flags, space-separated (default: MRUBY's build/host/lib/libmruby.a and
+# -lonig: the fork's default gembox pulls in mruby-onig-regexp, so its libmruby.a needs libonig; MRUBY_LIB replaces the whole default).
 # MRUBY (default: the repo's own 3rd/mruby fork tree, HERE/../../3rd/mruby) is the mruby tree with build/host/lib/libmruby.a (built
 # from the fork with its own rake, a host build); MRUBY_UV (default /home/user/mruby-uv) is the mruby-uv tree that bcrypt's thread
 # header needs.
@@ -49,7 +50,7 @@ for N in "$@"; do
     # g++ always: the fork builds libmruby with MRB_ENABLE_CXX_EXCEPTION, so it needs the C++ runtime (__cxa_*) even for a C gem
     linker=g++
     gcc -c -w "$W/main.c" -o "$W/main.o"
-    $linker -o "$W/check" "$W/main.o" $objs -Wl,--start-group ${MRUBY_LIB:-$MR/build/host/lib/libmruby.a} -Wl,--end-group -lm 2> "$W/link.err" \
+    $linker -o "$W/check" "$W/main.o" $objs -Wl,--start-group ${MRUBY_LIB:-$MR/build/host/lib/libmruby.a -lonig} -Wl,--end-group -lm 2> "$W/link.err" \
       || { echo "LINK $N: $(grep -o 'undefined reference to [^ ]*' "$W/link.err" | sort -u | head -8 | tr '\n' ' ')"; head -3 "$W/link.err" | cut -c1-200; errs=$((errs + 1)); }
   fi
   echo "== $N: compile-and-link errors=$errs"

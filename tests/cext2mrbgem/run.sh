@@ -2235,6 +2235,15 @@ if [ -n "${MRUBY_BUILD:-}" ] && [ -f "$MRUBY_BUILD/build/host/lib/libmruby.a" ];
 else
   echo "SKIP [$leg] global_escape harness: MRUBY_BUILD does not name a built libmruby (the converted code is checked by the grep tests above)"
 fi
+# 2zzz184. a macro with the state's API in a disabled branch (#if 0) or unused in the gem gets no global-state marker and no mrb
+# argument (ffi's NUM_OP, an unused function-defining macro, had "(mrb = ...)" in its log); a used macro keeps its marker
+rc=0; "$rb" "$conv" --scanner "$scanner" --name disabled_macro tools/cext2mrbgem/fixtures/disabled_macro/ext/disabled_macro "$work/disabled_macro" > "$work/disabled_macro.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/disabled_macro/NOT_BUILDABLE"
+check sh -c "! grep -qF 'DM_OLD_RAISE (mrb' '$work/disabled_macro/conversion_log.json'"
+check sh -c "! grep -qF 'DM_UNUSED_RAISE (mrb' '$work/disabled_macro/conversion_log.json'"
+check grep -qF '"to": "DM_TO_S (mrb = disabled_macro_bc2_mrb)"' "$work/disabled_macro/conversion_log.json"
+check grep -qF '#if 0  /* BC2CPP-MRBGEM: unused macro' "$work/disabled_macro/src/disabled_macro.c"
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads
