@@ -1121,6 +1121,39 @@ frame and gets the errors).
   not looked through just makes the loop run in the interpreter) is a count in `tier.cpp`.
 - `tests/eval/run.sh` passes with nfceval built on `nfceval_build.hpp`, `tests/poly/run.sh` with `POLY_LANGS=ast` too, both back ends.
 
+## Stats
+
+`State::stats` (`struct Stats` in `nfcast.hpp`) holds the counters of each part of the engine; the sections above name theirs.
+`tests/ast/driver --stats` prints them to stderr after a run.
+
+The compute count is `node_evals`: the number of node evaluations of the interpreter (the input of the profiler's compute
+counts, `docs/notes/profiler.md`, "Next steps", item 3).
+
+- What is counted: one per call of a node's `eval`, `evalMulti` or `exec` made by the interpreter, at the first line of that
+  method (`count_node`, `nfcast_impl.hpp`). A statement run through a block's `exec` counts once, and a node whose `eval` only calls
+  its own `exec` counts once. The operands of a generic or profiling arithmetic node are dispatched, so they count; a specialized
+  arithmetic or comparison node reads a local or a constant operand in place, so that operand counts nothing.
+- What is not: machine instructions, time, or allocation. What the tier or the JIT runs as native code evaluates no nodes and counts
+  nothing; a loop or call they hand back to the interpreter counts from there.
+- Build: compiled in only with `-DNFCAST_COUNT_NODES` (`count_node`, `nfcast_impl.hpp`, is empty otherwise). The default build has
+  no check and no increment, so `node_evals` is 0 there. A count build is the whole engine compiled with the define.
+- Check: `tests/ast/counts/loop.lua` makes 28 evaluations in a count build (the file works them out line by line: the first two
+  iterations of `s = s + i` are still recording their operands, so their operands are dispatched; the last three run the specialized
+  node). `tests/ast/run.sh` builds the count driver (`$out/count/driver`), checks the 28, and checks that the default driver says 0.
+- Overhead, measured with cachegrind (`--cache-sim=no`, instructions executed; deterministic, unlike the wall clock on the test VM).
+  `intloop` with 300,000 iterations ten times:
+
+| Build | Instructions | Over origin/main |
+| --- | ---: | ---: |
+| origin/main (no counter code) | 772.5 M | |
+| default build (counter compiled out) | 772.5 M | 0.0% |
+| count build (`-DNFCAST_COUNT_NODES`) | 796.5 M | +3.1% |
+
+`fib(20)`: 15.24 M for origin/main and the default build, 15.55 M for the count build (+2.0%).
+
+An earlier version checked a runtime switch in every node; that cost +5.4% with the switch off, which is why the count is now
+compiled in only on request.
+
 ## Speed
 
 Measured once, on the host compiler (g++ -O2 for this engine, gcc -O2 for the reference Lua 5.4.9), best of three, seconds. Indicative

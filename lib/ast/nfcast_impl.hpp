@@ -127,6 +127,14 @@ inline Proto* owner_proto(Frame& f) {
   return r->cl->proto;
 }
 
+// One node evaluation, for State::stats.node_evals: the first thing the eval, evalMulti or exec of a node does. Compiled in only
+// when NFCAST_COUNT_NODES is defined (a count build, tests/ast/run.sh): the default build has no check and no increment.
+#ifdef NFCAST_COUNT_NODES
+inline void count_node(Frame& f) { ++f.S->stats.node_evals; }
+#else
+inline void count_node(Frame&) {}
+#endif
+
 struct Node {
   int line = 0;
   Node** slot = nullptr;  // where the parent holds this node; a rewrite stores the replacement there
