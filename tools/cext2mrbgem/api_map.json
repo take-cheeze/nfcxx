@@ -2586,8 +2586,8 @@
       "kind": "template",
       "arity": 1,
       "needs_mrb": true,
-      "template": "mrb_exc_raise($m, mrb_obj_value($m->exc))",
-      "caveat": "re-raises the exception that mrb_protect caught (mrb->exc); CRuby's state argument is not needed, and the state is ignored"
+      "template": "(($m->exc) ? mrb_exc_raise($m, mrb_obj_value($m->exc)) : (void)0)",
+      "caveat": "re-raises the exception that mrb_protect caught (mrb->exc) when one is pending; with no pending exception (mrb->exc is NULL) it does nothing, as CRuby's rb_jump_tag does with no pending jump. CRuby's state argument is not needed, and the state is ignored"
     },
     "RUBY_TYPED_FREE_IMMEDIATELY": {
       "kind": "expr",
