@@ -38,9 +38,27 @@
     "--define",
     "HAVE_SYS_TIME_H"
   ],
+  "json-generator": [
+    "--define",
+    "HAVE__BOOL",
+    "--undefine",
+    "JSON_TRUFFLERUBY_RB_CATCH_BUG",
+    "--undefine",
+    "RUBY_DEBUG",
+    "--header",
+    "../json.h"
+  ],
   "json-parser": [
     "--define",
-    "HAVE_RB_HASH_BULK_INSERT"
+    "HAVE_RB_HASH_BULK_INSERT",
+    "--define",
+    "HAVE__BOOL",
+    "--undefine",
+    "JSON_TRUFFLERUBY_RB_CATCH_BUG",
+    "--undefine",
+    "RUBY_DEBUG",
+    "--header",
+    "../json.h"
   ],
   "oj": [
     "--undefine",

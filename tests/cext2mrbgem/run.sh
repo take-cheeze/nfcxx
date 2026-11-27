@@ -2093,6 +2093,32 @@ check sh -c "! grep -q 'Traceback' '$work/include_outside.log'"
 check grep -qF 'include_outside.c:2  #include "../hdr.h"  include outside the extension directory: ../hdr.h (the converter reads only the extension root; the header is not in the output)' "$work/include_outside/REFUSALS.txt"
 check test -e "$work/include_outside/NOT_BUILDABLE"
 
+# 2c-flag. --header ../hdr_flag.h: the one named header (one level above the extension directory) is read into the output, its include
+# is kept and resolves (no refusal); a flag that names no file, or a path that is not directly above the extension, is an error
+rc=0; "$rb" "$conv" --scanner "$scanner" --name include_flag --header ../hdr_flag.h tools/cext2mrbgem/fixtures/include_flag/ext/include_flag "$work/include_flag" > "$work/include_flag.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test -e "$work/include_flag/hdr_flag.h"
+check grep -qF '#include "../hdr_flag.h"' "$work/include_flag/src/include_flag.c"
+check sh -c "! grep -q 'include outside' '$work/include_flag/REFUSALS.txt'"
+rc=0; "$rb" "$conv" --scanner "$scanner" --name include_flag --header ../nothere.h tools/cext2mrbgem/fixtures/include_flag/ext/include_flag "$work/include_flag_missing" > "$work/include_flag_missing.log" 2>&1 || rc=$?
+check test "$rc" -ne 0
+check grep -qF 'no such file beside the extension directory' "$work/include_flag_missing.log"
+rc=0; "$rb" "$conv" --scanner "$scanner" --name include_flag --header ../../hdr_flag.h tools/cext2mrbgem/fixtures/include_flag/ext/include_flag "$work/include_flag_deep" > "$work/include_flag_deep.log" 2>&1 || rc=$?
+check test "$rc" -ne 0
+check grep -qF 'only a header directly one level up' "$work/include_flag_deep.log"
+
+# 2c-overlap. a helper whose name is a CRuby API (rb_hash_bulk_insert: json's TruffleRuby fallback under #ifndef) needs the mruby state,
+# and the API mapping rewrites the whole call: the two edits overlap, so the call is refused with a reason (no crash, REFUSALS.txt). With
+# the define the fallback is inactive, the call maps to the fork's API and the conversion is clean.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name hash_overlap tools/cext2mrbgem/fixtures/hash_overlap/ext/hash_overlap "$work/hash_overlap" > "$work/hash_overlap.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check sh -c "! grep -q 'Traceback\|overlapping edits' '$work/hash_overlap.log'"
+check grep -qF 'the call overlaps a rewritten span (not supported)' "$work/hash_overlap/REFUSALS.txt"
+check test -e "$work/hash_overlap/NOT_BUILDABLE"
+rc=0; "$rb" "$conv" --scanner "$scanner" --name hash_overlap --define HAVE_RB_HASH_BULK_INSERT tools/cext2mrbgem/fixtures/hash_overlap/ext/hash_overlap "$work/hash_overlap_def" > "$work/hash_overlap_def.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_hash_bulk_insert(mrb, 2, pairs, hash);' "$work/hash_overlap_def/src/hash_overlap.c"
+
 # 2zzz110. a function-defining macro invoked at file scope (ffi's NUM_OP(name, ...)): each invocation is expanded, so the
 # functions it defines convert and are registered (before, "registered function has no definition"); the #define is then
 # unused and wrapped in #if 0

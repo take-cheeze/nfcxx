@@ -372,9 +372,10 @@ def decorator_define?(text, masked, m)
   words.last == params[0] && (words[0...-1] - DECORATOR_KEYWORDS).empty?
 end
 
-# json's decorators: json.h (ext/json/ext/json.h) is outside the extension directory of the parser and generator, so its
-# #define is not read; the names are known here, with the same meaning (the attribute is a hint). A #define of the name in
-# the gem replaces that: it must be a decorator, or the name is left alone.
+# json's decorators: json.h (ext/json/ext/json.h) is outside the extension directory of the parser and generator; it is read
+# only with --header ../json.h (see load). Without that flag its #define is not read, so the names are known here, with the
+# same meaning (the attribute is a hint). A #define of the name in the gem replaces that: it must be a decorator, or the name
+# is left alone.
 BUILTIN_DECORATORS = %w[ALWAYS_INLINE NOINLINE].freeze
 DECORATOR_LEFT_TO_NORETURN_MASK = %w[NORETURN MAYBE_UNUSED].freeze
 
@@ -948,6 +949,17 @@ end
 sub_headers = Dir.children(@cext_dir).reject { |n| n.start_with?('.') }.sort.select { |n| File.directory?(File.join(@cext_dir, n)) }
                   .flat_map { |d| (Dir.glob(File.join(@cext_dir, d, '*.{h,c}')) + Dir.glob(File.join(@cext_dir, d, '**', '*.{hh,hpp,hxx}'))).sort.map { |p| p.sub(File.join(@cext_dir, '') , '') } }
 sub_headers.each { |rel| texts[rel] = read_text(File.join(@cext_dir, rel)) }
+# --header PATH: a header of the gem directly above the extension directory, named by PATH relative to it ("../json.h": json's
+# ext/json.h, which its parser and generator include). Only the paths the flags name are read, and only one that a source of
+# this extension includes by that very path; any other include outside the directory is still refused (the include check of the scan)
+extra_headers = ($extra_headers || []).uniq.sort
+extra_headers.each do |rel|
+  abort "error: --header #{rel}: only a header directly one level up (../NAME.h) is read this way" unless rel.match?(%r{\A\.\./[^/]+\.(?:h|hh|hpp)\z})
+  abort "error: --header #{rel}: no such file beside the extension directory" unless File.file?(File.join(@cext_dir, rel))
+  included = texts.values.any? { |t| t.match?(/^[ \t]*#[ \t]*include[ \t]*"#{Regexp.escape(rel)}"/) }
+  abort "error: --header #{rel}: no source of the extension includes it by that path" unless included
+  texts[rel] = read_text(File.join(@cext_dir, rel))
+end
 texts.each_key { |k| texts[k] = kr_normalize(texts[k]) }
 texts = static_rename(texts)
 # --rename OLD=NEW: the gem's own identifier OLD is NEW in every source and header (a name the system headers declare, e.g. crypt_r)
@@ -985,7 +997,7 @@ expand_decorator_macros(texts)
       # gem_init.c is the generated file; the input's own copy is refused (set up before the refusal is recorded)
       refuse(base, 0, 'gem_init.c', 'name collides with the generated gem_init.c') if base == 'gem_init.c'
     end
-    sub_headers.each do |rel|
+    (sub_headers + extra_headers).each do |rel|
       @files[rel] = { 'text' => texts.fetch(rel), 'masked' => mask_c(texts.fetch(rel)), 'kind' => 'hdr' }
       noreturn_mask(rel)
       @edits[rel] = Edits.new
@@ -5904,6 +5916,8 @@ use_problem = lambda do |name, use|
     finditer(/#[ \t]*include[ \t]*"([^"\n]+)"/, text).each do |m|
       next if masked[m.begin(0)] != '#'
       inc = m[1]
+      # a CRuby header is the include loop's (process step 1), whether it is written with <> or "" (json.h's "ruby.h")
+      next if INC_RE.match?(m[0])
       next if include_in_tree?(rel, inc)
       next unless include_key(rel, inc).split('/').first == '..'
       refuse(rel, m.begin(0), "#include \"#{inc}\"",
@@ -7030,6 +7044,14 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         else
           texts[k]
         end
+      end
+      # the whole call is one edit: an edit already inside it (the mruby argument a gem helper of the same name takes at this
+      # call: json's static fallback of rb_hash_bulk_insert, under #ifndef HAVE_RB_HASH_BULK_INSERT) cannot be kept with it,
+      # so the call is refused, not rewritten twice (the edits would overlap, and the edit pass would fail)
+      if ed.overlapping(s, cp + 1).any?
+        refuse(rel, s, name, 'the call overlaps a rewritten span (not supported): an edit inside the call (a gem helper of the same ' \
+                             'name takes the mruby state there) and the API mapping of the whole call cannot both be applied')
+        return
       end
       ed.add(s, cp + 1, out)
       # a template that needs a gem at run time declares it (api_map gem_dep): the converted gem depends on it
@@ -9209,6 +9231,8 @@ def main(argv)
       undefines << args.shift
     elsif opt == '--exclude' && !args.empty?
       ($excluded_files ||= Set.new) << args.shift
+    elsif opt == '--header' && !args.empty?
+      ($extra_headers ||= []) << args.shift
     elsif opt == '--replace' && !args.empty? && args.first.include?('=')
       ($replaces ||= []) << args.shift.split('=', 2).map { |t| t.gsub('\\n', "\n") }
     elsif opt == '--thread-sync'
@@ -9226,7 +9250,7 @@ def main(argv)
     end
   end
   if args.nil? || args.size != 2
-    warn 'usage: convert_mrbgem.rb [--name GEM] [--scanner auto|libclang|regex] [--define NAME[=VALUE]]... [--undefine NAME]... [--exclude FILE]... [--rename OLD=NEW]... [--thread-sync] [--replace OLD=NEW]... ' \
+    warn 'usage: convert_mrbgem.rb [--name GEM] [--scanner auto|libclang|regex] [--define NAME[=VALUE]]... [--undefine NAME]... [--exclude FILE]... [--header ../NAME.h]... [--rename OLD=NEW]... [--thread-sync] [--replace OLD=NEW]... ' \
          '[--stored-tag NAME=VALUE]... <cext_dir> <out_dir>'
     return 1
   end
