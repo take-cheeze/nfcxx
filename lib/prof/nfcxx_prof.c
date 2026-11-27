@@ -126,10 +126,66 @@ static name_slot *g_slots = NULL;
 static size_t g_cap = 0;
 static size_t g_count = 0;
 
-static uint64_t now_ns(void) {
+/* Timestamps. A record's ts_ns is nanoseconds from the start of the profile. On x86 with an invariant TSC the clock
+ * is rdtsc, calibrated against CLOCK_MONOTONIC when the profile starts (about 5 ms); otherwise, or with
+ * NFCXX_PROFILE_CLOCK=monotonic, it is CLOCK_MONOTONIC. The file's counters chunk says which one was used. */
+#if defined(__x86_64__) || defined(__i386__)
+#include <cpuid.h>
+#define PROF_HAVE_TSC 1
+#endif
+
+static uint64_t mono_ns(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
+
+static int g_use_tsc = 0;
+static uint64_t g_tsc0 = 0;
+static uint64_t g_mono0 = 0;
+static double g_ns_per_tick = 1.0;
+
+#ifdef PROF_HAVE_TSC
+static int tsc_invariant(void) {
+  unsigned a = 0, b = 0, c = 0, d = 0;
+  if (!__get_cpuid(0x80000000u, &a, &b, &c, &d) || a < 0x80000007u) return 0;
+  __get_cpuid(0x80000007u, &a, &b, &c, &d);
+  return (int)((d >> 8) & 1u);
+}
+
+/* busy-waits 5 ms against the monotonic clock to measure the TSC rate */
+static void calibrate_tsc(void) {
+  uint64_t m0 = mono_ns(), m1, t0, t1;
+  t0 = __builtin_ia32_rdtsc();
+  do {
+    m1 = mono_ns();
+  } while (m1 - m0 < 5000000u);
+  t1 = __builtin_ia32_rdtsc();
+  if (t1 > t0 && m1 > m0) {
+    g_ns_per_tick = (double)(m1 - m0) / (double)(t1 - t0);
+    g_tsc0 = t0;
+    g_use_tsc = 1;
+  }
+}
+#endif
+
+static void start_clock(void) {
+  const char *mode = getenv("NFCXX_PROFILE_CLOCK");
+  g_mono0 = mono_ns();
+#ifdef PROF_HAVE_TSC
+  if ((mode == NULL || strcmp(mode, "monotonic") != 0) && tsc_invariant()) calibrate_tsc();
+#else
+  (void)mode;
+#endif
+}
+
+static uint64_t now_ns(void) {
+  if (g_use_tsc) {
+#ifdef PROF_HAVE_TSC
+    return (uint64_t)((double)(__builtin_ia32_rdtsc() - g_tsc0) * g_ns_per_tick);
+#endif
+  }
+  return mono_ns() - g_mono0;
 }
 
 static void write_all(const void *p, size_t n) {
@@ -341,8 +397,8 @@ static void write_counters(void) {
   if (g_fd < 0) return;
   a = b = f = 0;
   if (nfcxx_alloc_counts != NULL) nfcxx_alloc_counts(&a, &b, &f); /* weak: zero when nfcxx_alloc.c is not linked */
-  n = snprintf(text, sizeof text, "allocs=%llu alloc_bytes=%llu frees=%llu\n", (unsigned long long)a,
-               (unsigned long long)b, (unsigned long long)f);
+  n = snprintf(text, sizeof text, "allocs=%llu alloc_bytes=%llu frees=%llu clock=%s\n", (unsigned long long)a,
+               (unsigned long long)b, (unsigned long long)f, g_use_tsc ? "tsc" : "monotonic");
   if (n <= 0 || (size_t)n >= sizeof text) return;
   hdr[0] = PROF_TID_COUNTERS;
   hdr[1] = (uint32_t)n;
@@ -457,6 +513,7 @@ __attribute__((constructor)) static void nfcxx_prof_start(void) {
   const char *path = getenv("NFCXX_PROFILE");
   prof_header h;
   if (path == NULL || *path == '\0') return;
+  start_clock();
   g_fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
   if (g_fd < 0) {
     fprintf(stderr, "nfcxx prof: cannot open %s: %s\n", path, strerror(errno));

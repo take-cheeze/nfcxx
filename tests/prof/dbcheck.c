@@ -4,6 +4,7 @@
  * them, and fib allocating nothing. Run 3 is the allocsites profile: grab_blocks has 2 calls with 10 allocations of 64 bytes
  * (640 bytes) and no frees, and release_blocks has 10 frees and no allocations. Sites whose name starts with "(" (outside,
  * overflow) are not calls and are left out of these checks.
+ * Without a callgrind file self_instructions is NULL; callgrind.sh checks the values when one is given.
  */
 #include <stdio.h>
 #include <string.h>
@@ -63,6 +64,15 @@ static int check_run(sqlite3 *db, sqlite3_int64 run) {
     sqlite3_finalize(st);
     return fail("no run row");
   }
+
+  if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM sites WHERE run_id = ?1 AND self_instructions IS NOT NULL;", -1, &st, NULL) != SQLITE_OK)
+    return fail("prepare");
+  sqlite3_bind_int64(st, 1, run);
+  if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int64(st, 0) != 0) {
+    sqlite3_finalize(st);
+    return fail("self_instructions is set, but no callgrind file was given");
+  }
+  sqlite3_finalize(st);
 
   if (sites != 2) return fail("expected 2 sites in a run");
   if (!main_named) return fail("main is not named");
