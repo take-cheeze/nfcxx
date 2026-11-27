@@ -581,7 +581,7 @@ check grep -qF 'rest = mrb_ary_new_from_values(mrb, nfcx_rn, nfcx_ra);' "$work/a
 # type name (struct ct_funcs) is not a use of the table.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_cast_table tools/cext2mrbgem/fixtures/api_cast_table/ext/api_cast_table "$work/api_cast_table" > "$work/api_cast_table.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
-check grep -qF '(mrb_value (*)(void *))ct_secs,' "$work/api_cast_table/src/api_cast_table.c"
+check grep -qF '(mrb_value (*)(mrb_state *mrb, void *))ct_secs,' "$work/api_cast_table/src/api_cast_table.c"
 # 2zzz47. a callback passed as an argument of a file-scope macro: the macro escapes the pointer only if its body does, and here
 # the body passes it to a helper that calls it and keeps nothing; the callback is threaded and the macro call converted.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_macro_cb tools/cext2mrbgem/fixtures/api_macro_cb/ext/api_macro_cb "$work/api_macro_cb" > "$work/api_macro_cb.log" 2>&1 || rc=$?
@@ -928,6 +928,23 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_fnptr_table/NOT_BUILDABLE"
 check grep -qF 'typedef void (*atb_dump_fn)(mrb_state *mrb, mrb_value obj, int depth);' "$work/api_fnptr_table/src/api_fnptr_table.c"
 check grep -qF 'atb_table[0](mrb, v, 0);' "$work/api_fnptr_table/src/api_fnptr_table.c"
+
+# 2zy. a function-pointer table whose entries are casts of helpers that need the state (date's tmx_funcs): the helpers are threaded
+# (no global state), the cast's parameter list gains mrb, and the call through the field in a macro passes it
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fnptr_cast_table tools/cext2mrbgem/fixtures/api_fnptr_cast_table/ext/api_fnptr_cast_table "$work/api_fnptr_cast_table" > "$work/api_fnptr_cast_table.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_fnptr_cast_table/NOT_BUILDABLE"
+check grep -qF '(int (*)(mrb_state *mrb, void *))fct_m_mday,' "$work/api_fnptr_cast_table/src/api_fnptr_cast_table.c"
+check grep -qF '#define fct_attr(x) (fct->funcs->x)(mrb, fct->dat)' "$work/api_fnptr_cast_table/src/api_fnptr_cast_table.c"
+check grep -qF 'static int fct_m_mday(mrb_state *mrb, void *dat) {' "$work/api_fnptr_cast_table/src/api_fnptr_cast_table.c"
+check sh -c "! grep -q 'bc2_mrb' '$work/api_fnptr_cast_table/src/api_fnptr_cast_table.c'"
+
+# 2zz. two fields called through one macro body: one is not threaded (its helper is not defined here), so the macro body is not edited
+# and the other field keeps its type too (a shared call takes mrb for every field it serves or for none)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fnptr_macro_group tools/cext2mrbgem/fixtures/api_fnptr_macro_group/ext/api_fnptr_macro_group "$work/api_fnptr_macro_group" > "$work/api_fnptr_macro_group.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF '#define mg_attr(x) (mg->funcs->x)(mg->dat)' "$work/api_fnptr_macro_group/src/api_fnptr_macro_group.c"
+check grep -qF '    int (*a)(void *dat);' "$work/api_fnptr_macro_group/src/api_fnptr_macro_group.c"
 
 # 2zx. a static helper defined in two files is renamed per file (NAME__STEM): each copy is threaded on its own (api_map.json batch N16)
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_static_dup tools/cext2mrbgem/fixtures/api_static_dup/ext/api_static_dup "$work/api_static_dup" > "$work/api_static_dup.log" 2>&1 || rc=$?

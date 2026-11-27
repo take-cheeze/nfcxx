@@ -2664,6 +2664,8 @@ end
       # the field may also be stored as an address (x.NAME = &helper;)
       masked.to_enum(:scan, /(?:\.|->)\s*#{rec[:name]}\s*=\s*&?\s*([A-Za-z_]\w*)\s*;/).each do
         am = Regexp.last_match
+        # a store of data (x->mday = _mday, a member of another struct of the same name) is not a callback store
+        next if data_store_value?(frel, am.begin(1), am[1])
         # a parameter of the enclosing function: the callback it receives (its parameter record gives the helpers)
         en = enclosing_func(frel, am.begin(1))
         j = en && fn_param_names(en).index(am[1])
@@ -2703,7 +2705,14 @@ end
             t = psl(text, a[0], a[1]).strip
             lead = psl(text, a[0], a[1])[/\A\s*/].length
             # NULL is no callback: the entry leaves the field unset, so it is not an assign
-            rec[:assigns] << [t, frel, a[0] + lead] if t.match?(/\A[A-Za-z_]\w*\z/) && t != 'NULL'
+            if t.match?(/\A[A-Za-z_]\w*\z/) && t != 'NULL'
+              rec[:assigns] << [t, frel, a[0] + lead]
+            elsif (cast = fnptr_cast_entry(masked, a[0] + lead, a[1]))
+              # a cast entry, (RET (*)(PARAMS))helper (date's tmx_funcs): the helper is the callback, and the cast's parameter
+              # list gains mrb with the field's (edit_fnptr_fields)
+              rec[:assigns] << [cast[:helper], frel, cast[:hpos]]
+              (rec[:casts] ||= []) << [frel, cast[:ppos]]
+            end
           end
         end
       end
@@ -2712,7 +2721,122 @@ end
         rec[:calls] << [cm.end(0) - 1, enclosing_func(frel, cm.begin(0))&.fetch('name', nil), frel]
       end
     end
+    # calls through a macro of the field (date's tmx_attr(mday), whose body is (tmx->funcs->x)(tmx->dat))
+    fn_attr_macro_calls(rec[:name]).each { |copen, fname, mrel| rec[:calls] << [copen, fname, mrel] }
     rec
+  end
+
+  # a cast entry of a positional initializer, (RET (*)(PARAMS))helper, in masked[s, e): {helper, hpos (the helper's position),
+  # ppos (the position after the '(' of the cast's parameter list, where mrb goes)}, or nil when it is not such a cast
+  def fnptr_cast_entry(masked, s, e)
+    return nil unless masked[s] == '('
+    close = match_close(masked, s)
+    return nil if close < 0 || close >= e
+    rest = psl(masked, close + 1, e)
+    helper = rest.strip
+    return nil unless helper.match?(/\A[A-Za-z_]\w*\z/) && helper != 'NULL'
+    pm = /\(\s*\*\s*\)\s*\(/.match(psl(masked, s, close))
+    return nil unless pm
+    { helper: helper, hpos: close + 1 + rest[/\A\s*/].length, ppos: s + pm.end(0) }
+  end
+
+  # The macros of one parameter whose body calls the parameter's member (M(x) ... ->x)(...)): [macro name, its file, the position
+  # of the call's '(' in the body]
+  def fn_attr_macros
+    @fn_attr_macros ||= begin
+      out = []
+      @files.each do |rel, f|
+        masked = f['masked']
+        masked.to_enum(:scan, /^[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)\([ \t]*([A-Za-z_]\w*)[ \t]*\)/).each do
+          m = Regexp.last_match
+          body = psl(masked, m.end(0), logical_line_end(masked, m.end(0)))
+          bm = /(?:->|\.)[ \t\n]*#{Regexp.escape(m[2])}[ \t\n]*\)[ \t\n]*\(/.match(body)
+          next unless bm
+          out << [m[1], rel, m.end(0) + bm.end(0) - 1]
+        end
+      end
+      out
+    end
+  end
+
+  # The calls of a field NAME made through such a macro when NAME is its argument: [call position, enclosing function, the macro's
+  # file] for each function that expands the macro (nil where an expansion is not in a function)
+  def fn_attr_macro_calls(name)
+    out = []
+    fn_attr_macros.each do |mname, mrel, copen|
+      (@occ[mname] || []).each do |orel, os, oe|
+        next unless @files[orel]['masked'][oe..].to_s.match?(/\A[ \t\n]*\([ \t\n]*#{Regexp.escape(name)}[ \t\n]*\)/)
+        (@macro_call_keys ||= Set.new) << [mrel, copen]
+        macro_expansion_fns(orel, os).each { |fname| out << [copen, fname, mrel] }
+      end
+    end
+    out
+  end
+
+  # The names declared as function pointers in the input: a (*NAME)( declarator, and a variable of a function-pointer typedef
+  def fnptr_value_names
+    @fnptr_value_names ||= begin
+      names = Set.new
+      typedefs = Set.new
+      @files.each_value do |f|
+        f['masked'].to_enum(:scan, /\btypedef[ \t\n]+[^;{}()]*?\(\s*\*\s*([A-Za-z_]\w*)\s*\)\s*\(/).each { typedefs << Regexp.last_match[1] }
+        # a struct field's declarator names a member, not a variable: a bare identifier is never a member (x->f = v stores v)
+        f['masked'].to_enum(:scan, /\(\s*\*\s*([A-Za-z_]\w*)\s*\)\s*\(/).each do
+          m = Regexp.last_match
+          names << m[1] unless struct_body_before?(f['masked'], m.begin(0))
+        end
+      end
+      unless typedefs.empty?
+        tre = Regexp.union(typedefs.to_a)
+        @files.each_value do |f|
+          f['masked'].to_enum(:scan, /\b#{tre}\b[ \t\n\*]+([A-Za-z_]\w*)/).each { names << Regexp.last_match[1] }
+        end
+      end
+      names
+    end
+  end
+
+  # Whether the value v (an identifier) of a store X->NAME = v at pos in rel is data, not a possible callback: v is not a helper and
+  # not declared as a function pointer (a C object of another type holds no helper address). A macro parameter is data when every
+  # expansion of the macro passes data for it. Anything else is taken as a possible callback (the store is kept).
+  def data_store_value?(rel, pos, v, seen = Set.new)
+    return false if @defs.key?(v) || fnptr_value_names.include?(v)
+    dd = define_at(rel, pos)
+    return true if dd.nil? || enclosing_func(rel, pos)
+    idx = macro_param_index(dd[0], dd[3], v)
+    return true if idx.nil?
+    return false if seen.include?(dd[0])
+    (@occ[dd[0]] || []).each do |orel, os, oe|
+      od = define_at(orel, os)
+      next if od && od[0] == dd[0]
+      m = @files[orel]['masked']
+      open = next_nonspace(m, oe)
+      return false unless m[open] == '('
+      close = match_close(m, open)
+      return false if close < 0
+      a = split_args(m, open, close)[idx]
+      return false unless a
+      arg = psl(m, a[0], a[1]).strip
+      return false unless arg.match?(/\A[A-Za-z_]\w*\z|\A\d+\z/)
+      return false unless data_store_value?(orel, a[0], arg, seen | [dd[0]])
+    end
+    true
+  end
+
+  # the functions that expand the use at pos (the names of the enclosing functions; a use inside a macro body is followed to
+  # that macro's own uses). [nil] when a use is in no function and no macro.
+  def macro_expansion_fns(rel, pos, seen = Set.new)
+    fn = enclosing_func(rel, pos)
+    return [fn['name']] if fn
+    dd = define_at(rel, pos)
+    return [nil] if dd.nil? || seen.include?(dd[0])
+    out = []
+    (@occ[dd[0]] || []).each do |orel, os, _oe|
+      od = define_at(orel, os)
+      next if od && od[0] == dd[0]
+      out.concat(macro_expansion_fns(orel, os, seen | [dd[0]]))
+    end
+    out.empty? ? [nil] : out
   end
 
   # whether the innermost unclosed brace before pos opens a struct body (struct TAG { or struct {)
@@ -2768,6 +2892,13 @@ end
       if r[:rel] == rel && r[:owner].nil? && !(applied_pstart ||= Set.new).include?(r[:params_start])
         applied_pstart << r[:params_start]
         ed.add(r[:params_start], r[:params_start], 'mrb_state *mrb, ')
+      end
+      # a cast entry of the field's initializer, (RET (*)(PARAMS))helper: its parameter list gains mrb with the callback type
+      (r[:casts] || []).each do |crel, ppos|
+        next unless crel == rel
+        next if (applied_casts ||= Set.new).include?(ppos)
+        applied_casts << ppos
+        ed.add(ppos, ppos, 'mrb_state *mrb, ')
       end
       r[:calls].each do |copen, _, crel|
         next unless crel == rel
@@ -2935,9 +3066,29 @@ forced = (@reg_names - @split_names) | Set.new(@init_defs.map { |d| d['name'] })
         @fnptr_addr_taken[fn] = @files.values.any? { |f| f['masked'].match?(/\b#{Regexp.escape(fn)}\b(?!\s*\()/) }
       end
     end
+    base_ok = lambda do |r|
+      !r[:assigns].empty? && r[:assigns].all? { |h, _, _| @defs.key?(h) } && r[:calls].all? { |_, fn, _| fn && !fn_addr_taken.call(fn) }
+    end
+    # the group of records that call through one macro body: its call is edited once, for every field it serves, so either all of
+    # them are ok or none is (a field left as it is keeps its type without mrb, and the shared call must not pass it)
+    group_demoted = Set.new
+    loop do
+      bad_keys = Set.new
+      @fnptr_recs.each do |r|
+        next if base_ok.call(r) && !group_demoted.include?(r)
+        r[:calls].each { |c, _, cr| bad_keys << [cr, c] if (@macro_call_keys || Set.new).include?([cr, c]) }
+      end
+      grew = false
+      @fnptr_recs.each do |r|
+        next if group_demoted.include?(r) || !base_ok.call(r) || r[:calls].none? { |c, _, cr| bad_keys.include?([cr, c]) }
+        group_demoted << r
+        grew = true
+      end
+      break unless grew
+    end
     @fnptr_recs.each do |r|
       next if r[:assigns].empty?
-      r[:ok] = r[:assigns].all? { |h, _, _| @defs.key?(h) } && r[:calls].all? { |_, fn, _| fn && !fn_addr_taken.call(fn) }
+      r[:ok] = base_ok.call(r) && !group_demoted.include?(r)
       # only a record that is ok forces its callbacks: a refused field must not make its callbacks need the state
       r[:assigns].each { |h, _, _| forced << h if @defs.key?(h) && r[:ok] }
       forced << r[:owner] if r[:ok] && r[:owner]
@@ -3286,6 +3437,27 @@ use_problem = lambda do |name, use|
         refuse(frel, pos, h, 'a function-pointer field or parameter it is stored in is called from a function without the mruby state (not supported)')
       end
       r[:ok] = false
+    end
+    # a macro call of several fields is edited once (see group_demoted): a field that is no longer ok takes the others that share
+    # its macro call with it, and their callbacks are refused (they are stored in a field whose type keeps mrb out)
+    loop do
+      bad_keys = Set.new
+      (@fnptr_recs || []).each do |r|
+        next if r[:ok]
+        r[:calls].each { |c, _, cr| bad_keys << [cr, c] if (@macro_call_keys || Set.new).include?([cr, c]) }
+      end
+      grew = false
+      (@fnptr_recs || []).each do |r|
+        next unless r[:ok] && r[:calls].any? { |c, _, cr| bad_keys.include?([cr, c]) }
+        r[:ok] = false
+        grew = true
+        r[:assigns].each do |h, frel, pos|
+          next unless cands.include?(h)
+          cands.delete(h)
+          refuse(frel, pos, h, 'a function-pointer field that shares a macro call with a field which is not threaded (not supported)')
+        end
+      end
+      break unless grew
     end
     # The macro decision needs the threaded set, and the threaded set needs the macro decision (a direct call from a
     # macro body is a use only when the macro expands in a function with the state). Greatest fixpoint: start from the
