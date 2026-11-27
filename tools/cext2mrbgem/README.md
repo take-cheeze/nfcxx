@@ -133,12 +133,36 @@ not load). It also converts `bcrypt-ruby` at a pinned commit (fetched to
 conversion has no refusals, the entry function is `mrb_bcrypt_gem_init`, and the two
 expected warnings are recorded. None of the outputs are compiled by the test.
 
-## Known gap: helper threading and exceptions
+## Global state and exceptions
 
-Helpers that need the mruby state read a file-scope global `<funcname>_bc2_mrb`. Each
-wrapped method saves the previous value on entry and restores it on exit. mruby raises
-exceptions by longjmp, so when an exception unwinds through a wrapped method the
-restore is skipped. The global can then hold a stale state for code that runs later.
-Nothing in the converter or its tests detects this, and the generated C has not been
-compiled. Restoring at each call boundary, or refusing helpers that run after a call
-which may raise, would close the gap. Until then, treat the helper path as unverified.
+Helpers that need the mruby state but cannot take it as an argument (the global-state path) read a file-scope
+global `<funcname>_bc2_mrb`. A registered method of such a gem is wrapped:
+
+- The wrapper saves the value the global held, aborts if that value is another state (a nested state is not
+  supported), sets the global to its `mrb`, and runs the method body as the callback of `mrb_ensure`, with a frame
+  (`struct nfcx_bc2_frame`: the method's `self` and the saved value) as the callback's data.
+- `mrb_ensure` runs the restore (`nfcx_bc2_restore`, which puts the saved value back) when the body returns and when
+  an exception leaves it, then re-raises. mruby raises by longjmp, so a restore after the body alone would be skipped
+  on the exception path; the global is therefore restored on every exit.
+- The body keeps its own restores before each `return` (wrap_returns and the macro return plans), which are now
+  redundant but harmless, since they run before the `mrb_ensure` restore.
+
+Split methods (an impl and a wrapper) get the same form: the wrapper's argument reads and impl call are the
+`mrb_ensure` body. In a gem with a global-state user every registered method is wrapped, as before, so each of
+their functions changes; the rest of the output (helpers, Init, other gems) does not, and the refusals are the same
+kinds as before.
+
+The fix is tested by `tools/cext2mrbgem/fixtures/global_escape`: a macro that uses the global, expanded in a
+registered method, raises through the method (`BasicObject#to_s` is missing). `tests/cext2mrbgem/run.sh` checks the
+generated wrapper and body, and, when `MRUBY_BUILD` names a built libmruby tree (`build/host/lib/libmruby.a` and its
+headers), compiles the gem with `harness.c`, which requires that the global holds no state after the escaped
+exception and after a normal return, and that a second state can be initialised and called. Without `MRUBY_BUILD`
+the run test prints SKIP.
+
+What remains:
+
+- Init is not under `mrb_ensure` (it is void, and its returns restore the global as before). An exception that
+  leaves Init keeps the global set to the gem's state until the next wrapped method or Init runs.
+- The generated C is compiled by `check_mruby_compile.sh` (compile and link only). The runtime behaviour above is
+  checked on one fixture, not on the corpus.
+- A nested state (a method on one state that runs a method on another) still aborts, as before.
