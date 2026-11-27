@@ -41,7 +41,7 @@ static void body(MV *ret) {
   target.method = method("fail()"); frame.nargs = 0;
   check(nfc_call_invoke(&callable, &frame) == NFC_CALL_EXCEPTION && std::strstr(frame.error, "Qt method failure"), "Qt direct exception to frame");
   target.method = method("text()");
-  check(nfc_call_invoke(&callable, &frame) == NFC_CALL_UNSUPPORTED, "Qt noninteger method refused");
+  check(nfc_call_invoke(&callable, &frame) == NFC_CALL_OK && mrbbc_tag(&values[2]) == MRBBC_STR, "Qt text method result");
   target.method = method("increment(int)"); frame.nargs = 1;
   mrbbc_int_new(&values[0], INT64_MAX);
   check(nfc_call_invoke(&callable, &frame) == NFC_CALL_TYPE, "Qt int argument range checked");
@@ -73,6 +73,79 @@ static void body(MV *ret) {
   QPointer<bridge::CallableObject> alive(ephemeral);
   QObject::connect(ephemeral, &bridge::CallableObject::errorChanged, &counter, [ephemeral] { delete ephemeral; });
   check(!ephemeral->call({20, 22}).isValid() && !alive, "QObject deletion during notification is safe");
+  {
+    MrbbcValueTarget echo{"allocate_echo", 1, 1};
+    bridge::CallableObject text_object({mrbbc_value_call_entry, &echo});
+    QVariant notified;
+    QObject::connect(&text_object, &bridge::CallableObject::valueReady, &counter, [&](QVariant value) { notified = value; });
+    QString text = QString::fromUtf8("日本語\0text", sizeof("日本語\0text") - 1);
+    check(text_object.call({text}).toString() == text && notified.toString() == text, "Qt text through generic Ruby call and value signal");
+    echo.utf8_result = 0;
+    QByteArray bytes("a\0\xff", 3);
+    check(text_object.call({bytes}).toByteArray() == bytes, "Qt binary buffer through generic Ruby call");
+    nfc::pathb::Values owned;
+    nfc::pathb::Value converted;
+    QVariant boxed = QVariant::fromValue<QObject *>(&counter);
+    check(bridge::codec.read_value(nullptr, &boxed, &owned.values[0]) == NFC_CALL_OK && owned.values[0].kind == NFC_VALUE_HANDLE, "capture QObject identity as guarded handle");
+    NfcCallSlot native_args[2] = {nfc_call_value_slot(&owned.values[0]), nfc_call_value_slot(&owned.values[1])};
+    NfcCallSlot native_result = nfc_call_value_slot(&converted.value);
+    NfcCallFrame generic_frame{NFC_CALL_VERSION, native_args, 1, &native_result, 1, 0, nullptr, {0}};
+    NfcCallable ruby_generic{mrbbc_value_call_entry, &echo};
+    check(nfc_call_invoke(&ruby_generic, &generic_frame) == NFC_CALL_OK, "QObject handle through allocating compiled Ruby");
+    QVariant unboxed;
+    check(bridge::codec.write_value(nullptr, &unboxed, &converted.value) == NFC_CALL_OK && unboxed.value<QObject *>() == &counter, "QObject identity preserved");
+    target = {&counter, method("objectIdentity(QObject*)")};
+    check(nfc_call_invoke(&callable, &generic_frame) == NFC_CALL_OK && converted.value.kind == NFC_VALUE_HANDLE, "reflected QObject argument and result");
+    nfc_value_clear(&owned.values[0]); owned.values[0].kind = NFC_VALUE_F64; owned.values[0].as.f64 = 1.25;
+    target.method = method("twice(double)");
+    check(nfc_call_invoke(&callable, &generic_frame) == NFC_CALL_OK && converted.value.kind == NFC_VALUE_F64 && converted.value.as.f64 == 2.5, "Qt floating method");
+    target.method = method("flip(bool)");
+    check(nfc_call_invoke(&callable, &generic_frame) == NFC_CALL_TYPE, "Qt bool rejects numeric coercion");
+    nfc_value_clear(&owned.values[0]); owned.values[0].kind = NFC_VALUE_BOOL; owned.values[0].as.boolean = 1;
+    check(nfc_call_invoke(&callable, &generic_frame) == NFC_CALL_OK && converted.value.kind == NFC_VALUE_BOOL && !converted.value.as.boolean, "Qt boolean method");
+    target.method = method("appendText(QString,QString)"); generic_frame.nargs = 2;
+    nfc_value_set_data(&owned.values[0], NFC_VALUE_TEXT, "日本語", sizeof("日本語") - 1);
+    nfc_value_set_data(&owned.values[1], NFC_VALUE_TEXT, "\0tail", 5);
+    check(nfc_call_invoke(&callable, &generic_frame) == NFC_CALL_OK && converted.value.kind == NFC_VALUE_TEXT && converted.value.as.buffer.size == sizeof("日本語") - 1 + 5, "Qt reflected text arguments and result");
+    target.method = method("reset()"); generic_frame.nargs = 0;
+    check(nfc_call_invoke(&callable, &generic_frame) == NFC_CALL_OK && converted.value.kind == NFC_VALUE_NONE, "Qt void result maps to successful None");
+    property = {&counter, "title", true}; generic_frame.nargs = 1;
+    check(nfc_call_invoke(&access, &generic_frame) == NFC_CALL_OK && counter.property("title").toString() == QString::fromUtf8("日本語"), "Qt text property write");
+    property.write = false; generic_frame.nargs = 0;
+    check(nfc_call_invoke(&access, &generic_frame) == NFC_CALL_OK && converted.value.kind == NFC_VALUE_TEXT, "Qt text property read");
+    property = {&counter, "bytes", true}; generic_frame.nargs = 1;
+    nfc_value_set_data(&owned.values[0], NFC_VALUE_BYTES, bytes.data(), 3);
+    check(nfc_call_invoke(&access, &generic_frame) == NFC_CALL_OK && counter.property("bytes").toByteArray() == bytes, "Qt binary property write");
+    auto *deleted = new QObject;
+    boxed = QVariant::fromValue(deleted);
+    check(bridge::codec.read_value(nullptr, &boxed, &owned.values[0]) == NFC_CALL_OK, "capture temporary QObject handle");
+    delete deleted;
+    check(bridge::codec.write_value(nullptr, &unboxed, &owned.values[0]) == NFC_CALL_INVALID, "expired QObject handle cannot be unboxed");
+    nfc_value_set_data(&owned.values[0], NFC_VALUE_TEXT, "\xef\xbb\xbf" "x", 4);
+    check(bridge::codec.write_value(nullptr, &unboxed, &owned.values[0]) == NFC_CALL_OK && unboxed.toString().front().unicode() == 0xfeff, "Qt text conversion preserves initial U+FEFF");
+    check(bridge::codec.read_value(nullptr, &unboxed, &converted.value) == NFC_CALL_OK && same_value(owned.values[0], converted.value), "Qt BOM text round trip");
+    QVariant invalid(QString(1, QChar(0xd800)));
+    check(bridge::codec.read_value(nullptr, &invalid, &converted.value) == NFC_CALL_TYPE, "Qt unpaired surrogate is refused without replacement");
+  }
+  {
+    auto released = std::make_shared<int>(0);
+    nfc::pathb::Value owner; nfc::pathb::owned_handle(&owner.value, OwnedTarget(released));
+    auto *provider = const_cast<OwnedTarget *>(nfc::pathb::get_handle<OwnedTarget>(owner.value));
+    provider->target.closure = provider;
+    provider->target.invoke = [](void *data, const NfcValue *args, size_t, NfcValue *out) {
+      auto *provider = static_cast<OwnedTarget *>(data);
+      delete static_cast<bridge::CallableObject *>(provider->data);
+      check(*provider->released == 0, "in-flight Qt invocation retains closure while QObject is deleted");
+      return nfc_value_copy(out, &args[0]);
+    };
+    auto *object = new bridge::CallableObject({nfc_call_value_entry, &provider->target}, nullptr, &owner.value);
+    provider->data = object;
+    nfc_value_clear(&owner.value);
+    check(*released == 0, "QObject wrapper retains callable owner");
+    QPointer<bridge::CallableObject> guarded(object);
+    check(!object->call({7}).isValid() && !guarded, "QObject may be deleted by the callable");
+    check(*released == 1, "QObject deletion releases owner after in-flight call");
+  }
   mrbbc_gc_leave(&roots);
 }
 int main(int argc, char **argv) {

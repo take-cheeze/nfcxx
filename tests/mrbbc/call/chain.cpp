@@ -33,6 +33,35 @@ static void body(MV *ret) {
   check(div_object.call({9, 3}).toLongLong() == 3 && div_object.lastError().isEmpty(), "all three boundaries recover");
   result = sum_object.call({QVariant::fromValue<qlonglong>(INT64_MIN), 0});
   check(result.toLongLong() == INT64_MIN, "full-width integer through all three boundaries");
+  {
+    MrbbcValueTarget text_target{"echo_value", 1, 1}, bytes_target{"echo_value", 1, 0};
+    NfcCallable ruby_text{mrbbc_value_call_entry, &text_target}, ruby_bytes{mrbbc_value_call_entry, &bytes_target};
+    NfcValueTarget scalar_target{1, copy_value, nullptr}; NfcCallable scalar{nfc_call_value_entry, &scalar_target};
+    Function text_function, bytes_function, scalar_function;
+    check(tvm::create_function(ruby_text, &text_function.value) == 0 && tvm::create_function(ruby_bytes, &bytes_function.value) == 0 &&
+          tvm::create_function(scalar, &scalar_function.value) == 0, "create generic chain functions");
+    tvm::Target text_tvm{text_function.value, 1}, bytes_tvm{bytes_function.value, 1}, scalar_tvm{scalar_function.value, 1};
+    auto values_library = MAKE_TORCH_LIBRARY(nfcxx_chain_values);
+    values_library.def("text(str value) -> str", torch::CppFunction::makeFromBoxedFunctor(std::make_unique<torch_bridge::BoxedKernel>(NfcCallable{tvm::entry, &text_tvm}, 1)));
+    values_library.def("bytes(str value) -> str", torch::CppFunction::makeFromBoxedFunctor(std::make_unique<torch_bridge::BoxedKernel>(NfcCallable{tvm::entry, &bytes_tvm}, 1)));
+    values_library.def("boolean(bool value) -> bool", torch::CppFunction::makeFromBoxedFunctor(std::make_unique<torch_bridge::BoxedKernel>(NfcCallable{tvm::entry, &bytes_tvm}, 1)));
+    values_library.def("floating(float value) -> float", torch::CppFunction::makeFromBoxedFunctor(std::make_unique<torch_bridge::BoxedKernel>(NfcCallable{tvm::entry, &scalar_tvm}, 1)));
+    values_library.def("optional(str? value) -> str?", torch::CppFunction::makeFromBoxedFunctor(std::make_unique<torch_bridge::BoxedKernel>(NfcCallable{tvm::entry, &bytes_tvm}, 1)));
+    torch_bridge::Target target{c10::Dispatcher::singleton().findSchemaOrThrow("nfcxx_chain_values::text", "")};
+    qt::CallableObject object({torch_bridge::entry, &target});
+    QString text = QString::fromUtf8("日本語\0text", sizeof("日本語\0text") - 1);
+    check(object.call({text}).toString() == text && object.lastStatus() == NFC_CALL_OK, "Unicode/NUL text through Qt, torch, TVM and Ruby");
+    target.op = c10::Dispatcher::singleton().findSchemaOrThrow("nfcxx_chain_values::bytes", "");
+    QByteArray bytes("\xff\0binary", 8);
+    check(object.call({bytes}).toByteArray() == bytes && object.lastStatus() == NFC_CALL_OK, "binary buffer through all three boundaries and Ruby");
+    target.op = c10::Dispatcher::singleton().findSchemaOrThrow("nfcxx_chain_values::boolean", "");
+    check(object.call({true}).toBool() && object.lastStatus() == NFC_CALL_OK, "boolean through all three boundaries and Ruby");
+    target.op = c10::Dispatcher::singleton().findSchemaOrThrow("nfcxx_chain_values::floating", "");
+    QVariant floating = object.call({-0.0});
+    check(object.lastStatus() == NFC_CALL_OK && floating.metaType().id() == QMetaType::Double && std::signbit(floating.toDouble()), "double signed zero through external adapters and native value target");
+    target.op = c10::Dispatcher::singleton().findSchemaOrThrow("nfcxx_chain_values::optional", "");
+    check(!object.call({QVariant()}).isValid() && object.lastStatus() == NFC_CALL_OK, "successful None through all three boundaries and Ruby");
+  }
 }
 int main(int argc, char **argv) {
   QCoreApplication app(argc, argv); MV ret{}; mrbbc_run(body, &ret);

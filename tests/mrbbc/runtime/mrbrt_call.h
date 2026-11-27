@@ -10,6 +10,9 @@ extern "C" {
  * Run module initialization first, under mrbbc_run. All MV argument/result slots must be registered GC roots. */
 extern const NfcCallCodec mrbbc_call_codec;
 NfcCallStatus mrbbc_call_entry(void *target, NfcCallFrame *frame);
+/* Generic top-level method call. Strings are bytes by default; utf8_result requests strict UTF-8 text. */
+typedef struct MrbbcValueTarget { const char *name; size_t arity; int utf8_result; } MrbbcValueTarget;
+NfcCallStatus mrbbc_value_call_entry(void *target, NfcCallFrame *frame);
 static inline NfcCallSlot mrbbc_call_slot(MV *value) {
   NfcCallSlot slot = {&mrbbc_call_codec, NULL, value};
   return slot;

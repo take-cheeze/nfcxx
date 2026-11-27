@@ -1,5 +1,6 @@
 #include "external_common.hpp"
 #include "../../../lib/pathb/call_torch.hpp"
+#include <ATen/ops/ones.h>
 namespace bridge = nfc::pathb::libtorch;
 static void body(MV *ret) {
   mrb_irep_0(ret);
@@ -36,10 +37,59 @@ static void body(MV *ret) {
   target.op = c10::Dispatcher::singleton().findSchemaOrThrow("nfcxx_call::failure", ""); frame.nargs = 1;
   check(nfc_call_invoke(&callable, &frame) == NFC_CALL_EXCEPTION && std::strstr(frame.error, "libtorch failure"), "libtorch exception to frame status");
   target.op = c10::Dispatcher::singleton().findSchemaOrThrow("nfcxx_call::text", "");
-  check(nfc_call_invoke(&callable, &frame) == NFC_CALL_UNSUPPORTED, "noninteger operator schema refused");
+  check(nfc_call_invoke(&callable, &frame) == NFC_CALL_TYPE, "schema rejects mismatched argument kind");
   target.op = sum; frame.nargs = 2;
   mrbbc_int_new(&values[0], INT64_MIN); mrbbc_int_new(&values[1], 0);
   check(nfc_call_invoke(&callable, &frame) == NFC_CALL_OK && mrbbc_int_read(&values[2], &number) && number == INT64_MIN, "boxed full-width result after failure");
+  {
+    MrbbcValueTarget echo{"allocate_echo", 1, 0}; NfcCallable generic{mrbbc_value_call_entry, &echo};
+    auto values_library = MAKE_TORCH_LIBRARY(nfcxx_call_values);
+    values_library.def("echo_tensor(Tensor value) -> Tensor", torch::CppFunction::makeFromBoxedFunctor(std::make_unique<bridge::BoxedKernel>(generic, 1)));
+    values_library.def("echo_text(str value) -> str", torch::CppFunction::makeFromBoxedFunctor(std::make_unique<bridge::BoxedKernel>(generic, 1)));
+    auto tensor_op = c10::Dispatcher::singleton().findSchemaOrThrow("nfcxx_call_values::echo_tensor", "");
+    auto tensor = at::ones({2}, at::TensorOptions().dtype(at::kDouble));
+    c10::Stack tensors{c10::IValue(tensor)};
+    tensor_op.callBoxed(&tensors);
+    check(tensors.size() == 1 && tensors[0].isTensor() && tensors[0].toTensor().is_same(tensor), "Tensor handle round trip through allocating Ruby call");
+    mrbbc_gc_collect();
+    check(tensors[0].toTensor().sum().item<double>() == 2.0, "Tensor survives Ruby GC");
+    nfc::pathb::Values owned;
+    c10::IValue boxed(tensor);
+    check(bridge::read_value(nullptr, &boxed, &owned.values[0]) == NFC_CALL_OK, "capture Tensor as owned handle");
+    nfc_value_copy(&owned.values[1], &owned.values[0]);
+    owned.values[2].kind = NFC_VALUE_I64; owned.values[2].as.i64 = 1;
+    NfcCallSlot tensor_args[3] = {nfc_call_value_slot(&owned.values[0]), nfc_call_value_slot(&owned.values[1]), nfc_call_value_slot(&owned.values[2])};
+    nfc::pathb::Value added;
+    NfcCallSlot tensor_result = nfc_call_value_slot(&added.value);
+    NfcCallFrame tensor_frame{NFC_CALL_VERSION, tensor_args, 3, &tensor_result, 1, 0, nullptr, {0}};
+    bridge::Target add{c10::Dispatcher::singleton().findSchemaOrThrow("aten::add", "Tensor")};
+    NfcCallable add_call{bridge::entry, &add};
+    check(nfc_call_invoke(&add_call, &tensor_frame) == NFC_CALL_OK, "shared handles call native aten::add.Tensor");
+    auto *sum = nfc::pathb::get_handle<bridge::ObjectRef>(added.value);
+    check(sum && sum->value.isTensor() && sum->value.toTensor().sum().item<double>() == 4.0, "native Tensor result retained");
+    auto text_op = c10::Dispatcher::singleton().findSchemaOrThrow("nfcxx_call_values::echo_text", "");
+    std::string bytes("a\0\xff", 3); c10::Stack strings{c10::IValue(bytes)};
+    text_op.callBoxed(&strings);
+    check(strings[0].toStringRef() == bytes, "binary libtorch string through compiled Ruby");
+    c10::IValue double_value(-0.0), bool_value(true);
+    nfc::pathb::Value decoded;
+    check(bridge::read_value(nullptr, &double_value, &decoded.value) == NFC_CALL_OK && decoded.value.kind == NFC_VALUE_F64 && std::signbit(decoded.value.as.f64), "libtorch signed double zero");
+    check(bridge::read_value(nullptr, &bool_value, &decoded.value) == NFC_CALL_OK && decoded.value.kind == NFC_VALUE_BOOL, "libtorch bool remains distinct from int");
+  }
+  auto released = std::make_shared<int>(0);
+  {
+    nfc::pathb::Value owner; nfc::pathb::owned_handle(&owner.value, OwnedTarget(released));
+    auto *provider = nfc::pathb::get_handle<OwnedTarget>(owner.value);
+    auto owned_library = MAKE_TORCH_LIBRARY(nfcxx_owned);
+    owned_library.def("echo(int value) -> int", torch::CppFunction::makeFromBoxedFunctor(std::make_unique<bridge::BoxedKernel>(
+      NfcCallable{nfc_call_value_entry, const_cast<NfcValueTarget *>(&provider->target)}, 1, &owner.value)));
+    nfc_value_clear(&owner.value);
+    check(*released == 0, "libtorch registration retains callable owner");
+    auto op = c10::Dispatcher::singleton().findSchemaOrThrow("nfcxx_owned::echo", "");
+    c10::Stack arguments{c10::IValue(int64_t(9))}; op.callBoxed(&arguments);
+    check(arguments[0].toInt() == 9, "owned libtorch closure remains callable");
+  }
+  check(*released == 1, "libtorch unregister releases callable owner exactly once");
   mrbbc_gc_leave(&roots);
 }
 int main() { MV ret{}; mrbbc_run(body, &ret); std::printf("libtorch boxed: %d checks passed\n", checks); }
