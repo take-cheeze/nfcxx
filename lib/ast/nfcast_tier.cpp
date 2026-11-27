@@ -2155,11 +2155,11 @@ void launch(State& S, Version* v) {
   args.push_back("-shared");
   args.push_back(v->cpp);
   if (T->opt.profile) {  // the gcc back end, as --profile needs; the runtime is the shared object build_prof_lib made (it has the
-                         // wraps and no -finstrument-functions hooks, which would add a second enter and exit for every call)
+                         // allocation wrappers, defined under their plain names, and no -finstrument-functions hooks, which would add a
+                         // second enter and exit for every call). No --wrap: a shared object takes the plain names (nfcxx_alloc.c)
     args.push_back("--backend=gcc");
     args.push_back(T->prof_lib);
     args.push_back("-Wl,-rpath," + dir_of(T->prof_lib));  // where the loader finds the runtime when the process has not loaded it yet
-    args.push_back("-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free");  // the objects' allocations go through the runtime's
   }
   args.push_back("-o");
   args.push_back(v->tmp);
@@ -2217,6 +2217,9 @@ bool build_prof_lib(TierState* T, std::string* err) {
   std::string k = "nfcxx-prof-so\n//driver:" + T->driver;
   const char* be = std::getenv("NFCXX_BACKEND");
   k += std::string("\n//backend:") + (be ? be : "");
+  // the link: nfcxx_alloc.c defines malloc and friends under their plain names, with no --wrap. A runtime built the other way
+  // (with --wrap, which does not load) is in the cache under the same sources, so the key names the link.
+  k += "\n//link:plain-alloc-names";
   for (const char* f : {"nfcxx_prof.c", "nfcxx_machine.c", "nfcxx_alloc.c"}) {
     srcs.push_back(T->prof_dir + "/" + f);
     k += "\n//src:" + bld::read_file(srcs.back());
@@ -2235,7 +2238,6 @@ bool build_prof_lib(TierState* T, std::string* err) {
   args.insert(args.end(), srcs.begin(), srcs.end());
   args.push_back("--backend=gcc");  // as --profile needs (the runtime is the same one --profile links in)
   args.push_back("-Wl,-soname,libnfcxx_prof.so");  // the objects name it by this (DT_NEEDED), so the loader finds the one loaded
-  args.push_back("-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free");  // nfcxx_alloc.c calls __real_* (the driver's --profile)
   args.push_back("-o");
   args.push_back(tmp);
   int status = -1;
