@@ -41,12 +41,18 @@ When the compiler emits the calls (next step), the `--profile` flag decides whet
 has no calls in it. The environment variable only decides whether a profile is written, so an instrumented binary can be
 run with and without profiling.
 
-## Overhead, as built now
+## Overhead, measured
 
-Each enter or exit costs one load of a global flag when profiling is off. When it is on, one `clock_gettime` (vDSO), one
-16-byte store into a thread-local buffer, and a `write` per 4096 events. The per-event `clock_gettime` is the largest cost;
-`rdtsc` (calibrated at start-up) is the planned replacement. These costs are estimates from the code, not measurements. No
-benchmark has been run yet.
+`tests/prof/overhead.sh` times one enter/exit pair (2,000,000 pairs, three runs each, Xeon VM here):
+
+| Mode | ns per pair |
+| --- | ---: |
+| profiling off (`NFCXX_PROFILE` unset) | 0.8 |
+| TSC clock (default where the TSC is invariant) | 34 to 38 |
+| `CLOCK_MONOTONIC` (`NFCXX_PROFILE_CLOCK=monotonic`, or no invariant TSC) | 50 to 52 |
+
+The TSC is calibrated against `CLOCK_MONOTONIC` for 5 ms when the profile starts. The counters chunk records which clock
+was used (`clock=tsc` or `clock=monotonic`). Measured on one machine only; the flush cost is included.
 
 ## Next steps, in order
 
@@ -64,7 +70,6 @@ benchmark has been run yet.
    compile cache key and the Merkle hash, and an abandoned run closes the calls it left open. Open: each shared object has its own
    copy of the runtime, so a run with several compiled units keeps only the last profile written to `NFCXX_PROFILE`. The fix is for
    the host to load one runtime (RTLD_GLOBAL) that the objects bind to.
-5. **Cheaper timestamps.** Replace `clock_gettime` with a calibrated `rdtsc`, after the overhead has been measured.
 
 ## Decisions taken in the prototype
 
