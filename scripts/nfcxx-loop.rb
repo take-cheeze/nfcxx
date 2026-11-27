@@ -268,10 +268,12 @@ def run_loop(args, state, ld_available)
       state.backend_explicit = 1
       state.cflags << "-finstrument-functions" unless state.cflags.include?("-finstrument-functions")
       state.rdynamic = 1 # the program's global functions go into the dynamic symbol table, so the profile can name them
+      # The runtime is C: it goes in cfiles, compiled by gcc like any C input (body's c_inputs), so the C++ path (eccp,
+      # EDG in C++ mode) never sees it, and c_inputs leaves -finstrument-functions off these files.
       prof_dir = File.expand_path("../lib/prof", __dir__)
       [File.join(prof_dir, "nfcxx_prof.c"), File.join(prof_dir, "nfcxx_prof_cyg.c"),
        File.join(prof_dir, "nfcxx_machine.c"), File.join(prof_dir, "nfcxx_alloc.c")].each do |src|
-        state.files << src unless state.files.include?(src)
+        state.cfiles << src unless state.cfiles.include?(src)
       end
       # allocation counts: malloc, calloc, realloc and free go through lib/prof/nfcxx_alloc.c
       wrap = "-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free"
