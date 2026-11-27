@@ -1,6 +1,7 @@
 /* Checks the database that tools/prof/prof2sql wrote from two imports of the cprog profile (tests/prof/sqlite.sh).
  * For each run: 2 sites (main and fib), main named, main called once, fib called 177 times, no open calls, and the
- * exclusive times of all sites add up to main's inclusive time (the time of one thread's top-level calls).
+ * exclusive times of all sites add up to main's inclusive time (the time of one thread's top-level calls). Without a
+ * callgrind file, self_instructions is NULL for every site. callgrind.sh checks the values when one is given.
  */
 #include <stdio.h>
 #include <string.h>
@@ -52,6 +53,15 @@ static int check_run(sqlite3 *db, sqlite3_int64 run) {
     sqlite3_finalize(st);
     return fail("no run row");
   }
+
+  if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM sites WHERE run_id = ?1 AND self_instructions IS NOT NULL;", -1, &st, NULL) != SQLITE_OK)
+    return fail("prepare");
+  sqlite3_bind_int64(st, 1, run);
+  if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int64(st, 0) != 0) {
+    sqlite3_finalize(st);
+    return fail("self_instructions is set, but no callgrind file was given");
+  }
+  sqlite3_finalize(st);
 
   if (sites != 2) return fail("expected 2 sites in a run");
   if (!main_named) return fail("main is not named");
