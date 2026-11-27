@@ -299,6 +299,10 @@ struct TierOptions {
   bool jit = false;                 // a hot integer loop is compiled to x86-64 machine code (nfcast_jit.hpp; the driver takes --jit, with the tier on)
   unsigned share = 0;               // 1: versions with the same Merkle hash of their lowered form share one shared object (NFCAST_TIER_SHARE=1;
                                     // docs/notes/astro.md, "lib/ast spike"); 2: the same, but every version is still generated and compared
+  bool profile = false;             // the generated C calls __nfcxx_prof_enter / __nfcxx_prof_exit around every function (the profiler
+                                    // runtime, lib/prof, is linked into each shared object; the compiles use the gcc back end). The
+                                    // compile cache key and the Merkle hash include it, so plain and instrumented code never replace
+                                    // each other (NFCAST_TIER_PROFILE=1; docs/notes/profiler.md, "Next steps", item 4)
 };
 
 struct TierState;

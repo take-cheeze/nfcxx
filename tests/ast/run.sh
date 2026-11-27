@@ -66,6 +66,25 @@ for be in $backends; do
   echo "ok   $be ast: $(tail -1 <<<"$res"); $n programs equal to Lua 5.4 (with inlining on, early and off, with the tier at threshold 1 (also with early inlining), and with it compiling in the background)"
   echo "ok   $be ast tier: $(tail -1 <<<"$tres")"
   echo "ok   $be ast jit: $(tail -1 <<<"$jres")"
+  # The profile of the tier (docs/notes/profiler.md, "Next steps", item 4): with NFCAST_TIER_PROFILE=1 the compiled functions call the
+  # profiler runtime, and NFCXX_PROFILE gets their enters and exits (tests/prof/check_any.c checks them). Each case compiles one shared
+  # object, which carries the runtime, so each writes the profile itself. Without the switch no profile is written.
+  gcc -std=c11 -O2 -Wall -Wextra -Werror tests/prof/check_any.c -o "$out/check_any" || { echo "FAIL $be ast profile (check_any)"; fail=1; }
+  prof_ok=1
+  rm -f "$out/fib.prof"
+  if ! (cd tests/ast/profile && env NFCXX_BACKEND=$be NFCAST_TIER=sync NFCAST_TIER_THRESHOLD=1 NFCAST_TIER_PROFILE=1 NFCXX_PROFILE="$out/fib.prof" "$out/driver" fib.lua > "$out/fib.out" 2> "$out/fib.err") ||
+     ! grep -qx "6765" "$out/fib.out" || ! "$out/check_any" "$out/fib.prof" | grep -q "sites=1 pairs=21891 threads=1"; then
+    echo "FAIL $be ast profile fib"; head -5 "$out/fib.err"; "$out/check_any" "$out/fib.prof" 2>&1 | head -3; prof_ok=0; fail=1
+  fi
+  rm -f "$out/abort.prof"
+  if ! (cd tests/ast/profile && env NFCXX_BACKEND=$be NFCAST_TIER=sync NFCAST_TIER_THRESHOLD=1 NFCAST_TIER_PROFILE=1 NFCXX_PROFILE="$out/abort.prof" "$out/driver" abort.lua > "$out/abort.out" 2> "$out/abort.err") ||
+     ! grep -q "attempt to divide by zero" "$out/abort.out" || ! "$out/check_any" "$out/abort.prof" | grep -q "sites=1 pairs=1 threads=1"; then
+    echo "FAIL $be ast profile abort"; cat "$out/abort.out"; head -5 "$out/abort.err"; "$out/check_any" "$out/abort.prof" 2>&1 | head -3; prof_ok=0; fail=1
+  fi
+  rm -f "$out/plain.prof"
+  (cd tests/ast/profile && env NFCXX_BACKEND=$be NFCAST_TIER=sync NFCAST_TIER_THRESHOLD=1 NFCXX_PROFILE="$out/plain.prof" "$out/driver" fib.lua > "$out/plain.out") && grep -qx "6765" "$out/plain.out" && test ! -e "$out/plain.prof" ||
+    { echo "FAIL $be ast profile: a profile written without NFCAST_TIER_PROFILE"; fail=1; prof_ok=0; }
+  [ $prof_ok = 1 ] && echo "ok   $be ast profile: the compiled fib writes 21891 enter/exit pairs, an abandoned run closes its call, and no profile without NFCAST_TIER_PROFILE"
   # Lua 5.4 binary chunks (docs/notes/ast.md, "Bytecode"): the reference Lua dumps each program, and the driver runs the dump.
   if [ -z "${LUA:-}" ] || ! "$LUA" -v 2>&1 | grep -q '^Lua 5\.4\.9\b'; then
     echo "skip $be ast bytecode: set LUA to a Lua 5.4.9 interpreter"
