@@ -73,6 +73,19 @@ exit 1. The bytecode artifact may remain after a refusal.
 three layouts, multi-file classes and blocks under GC stress, frontend controls and atomic refusal. It requires the
 two setup commands above (or `BC2CPP_MRBBC_LOWER` and `QBE` paths); it uses no C mrbc or reference interpreter.
 
+The unmodified `scripts/nfcxx-state.rb` can be compiled with a separate entry harness:
+
+```sh
+mkdir -p build/driver-state
+OUT_DIR=build/driver-state OUT_SYMBOL=state \
+  bundle exec ruby bc2cpp/tools/bc2cpp/bc2cpp.rb --backend=mrbbc \
+  scripts/nfcxx-state.rb tests/mrbbc/nfcxx/state_entry.rb > build/driver-state/state.ir
+```
+
+Emit and link this IR with the same QBE/runtime commands above. The harness exercises `names`, first-match and missing
+`get`, shared value arrays, and NUL-delimited `records`; CI compares these with Ruby in all three layouts under GC stress.
+The full nfcxx command-line driver still needs modules, constants, global/argument access and I/O lowering.
+
 ## The RITE 04.00 format (as mruby 4.0.0 writes and reads it)
 
 The layouts come from `src/dump.c` (writer) and `src/load.c` (reader). Corrections to the first brief, found from the
@@ -172,6 +185,15 @@ method outside the table is refused at lowering time with `refused: SEND0 of met
 | `size`, `length` | string and array (byte count and length); symbol (its name's length); `size` of an integer is 8, as `sizeof(mrb_int)` |
 | `!` | any value: true for nil and false |
 | `+ - * / == != < <= > >=` (one argument) | the binop helper, as the opcode |
+| `<<` (one argument) | appends an element to an array, or a String/byte integer (0..255) to a string; returns the same receiver |
+| `first` (no argument) | the first array element, or nil |
+| `join` (no argument) | array elements joined with no separator; nested arrays are flattened and other elements use `to_s`, as mruby does |
+| `map`, `find`, `each` (no argument, explicit block) | array iteration; `find` returns the original matching element or nil, `each` returns the receiver |
+
+Append preserves aliases of strings and arrays. Hash insertion snapshots String keys, so appending to a key's original
+alias does not rename the stored entry. Iterators read the array's current length each turn, preserve destructuring,
+and propagate `break` and nonlocal `return`. The receiver, block, result and callback arguments remain GC roots across
+callbacks. Program-defined methods of these names retain their normal dispatch ahead of the builtin fallback.
 
 ### Methods
 
@@ -338,6 +360,11 @@ A block is a child irep that a `BLOCK` names. Its body is a function `mrb_b<N>(M
 (numbered over the module like the methods). `frame` is the frame of the function that executed the BLOCK: its registers
 are the block's outer locals.
 
+`BLKCALL` and the runtime's array iterators use `mrbbc_yield`; it invokes the module's `mrbbc_user_yield` dispatcher
+for a closure. Symbol blocks such as `map(&:first)` call a program-defined method or a supported zero-argument builtin
+on the first yielded argument. Other dynamic Symbol calls raise `NotImplementedError`. Lowered modules now export
+both `mrbbc_user_call` and `mrbbc_user_yield`; regenerate saved IR when updating the runtime.
+
 - `BLOCK a b` fills a 32-byte closure in a slot of the caller's frame (`mrbbc_block`: the block number, a copy of R(0)
   as self, the frame), and R[a] is the closure's address with the BLK tag (7).
 - `SSENDB a b c` is a self call with the block R[a+n+1] (see "Methods"; `blk` is that register, or nil for SSEND).
@@ -472,6 +499,10 @@ whose message says so, never with a value.
   Classes are never collected (the class table is a root), and neither are symbols (their names are static).
 - **Strings are bytes.** This build of mruby has no UTF-8 character handling: `size`, `length` and `[]` count bytes
   (`"é".size` is 2), and `inspect` escapes the bytes of a non-ASCII character as `\xHH`. The runtime does the same.
+- **Collection forms.** Iterator results without an explicit block (Enumerators), custom block `to_proc` conversion,
+  Hash iteration, optional `find` defaults and `join` separators are not lowered. `Integer#<<` raises
+  `NotImplementedError`; the lowered `<<` builtin covers Array and String receivers. String append checks its argument
+  directly rather than invoking `to_str`, as mruby does.
 - **Recursion.** An array that contains itself inspects as `[...]`, as mruby does. Comparing two such arrays with `==`
   is not guarded and can overflow the C stack.
 
