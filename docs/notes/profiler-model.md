@@ -117,3 +117,15 @@ compiler.
 3. Size samples and knees.
 4. Amdahl bound from the critical path.
 5. ECM and LogP, when loop counters and the synchronisation probe exist.
+
+## Roofline proxy (implemented)
+
+`tools/prof/model.c` (test: `tests/prof/model.sh`) applies the roofline per site, with proxies because no hardware counters
+exist here: work is callgrind's self instructions (`sites.self_instructions`), traffic is the bytes the site requested from the
+heap (`sites.alloc_bytes`), the peak is the machine record's clock times one instruction per cycle, and the bandwidth is the
+machine record's streaming bandwidth. The clock and bandwidth need a profile taken with `NFCXX_PROFILE_BENCH=1`; without them
+the tool says so. A site with no heap traffic is reported as compute-bound; its efficiency is therefore against the peak.
+
+Limits: allocated bytes are not memory traffic (a site can stream a buffer it did not allocate, or allocate and not touch it),
+one instruction per cycle is an assumption, and a short site's self time is dominated by the profiler's own overhead, so its
+efficiency is not meaningful. The output is an estimate to rank sites, not a measurement.
