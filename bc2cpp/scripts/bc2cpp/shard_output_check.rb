@@ -886,8 +886,10 @@ suite.check('the copy of a guard wrapper leaves out the program-class guard its 
             !guarded_copy.empty? && !guarded_copy.include?('DECLARED_PARAM_GUARD GuardMid#guard_advance arg 1 '))
 suite.check('the copy keeps the Integer guard (the flow\'s Integer bit is not the fixnum test)',
             guarded_copy.include?('DECLARED_PARAM_GUARD GuardMid#guard_advance arg 2 '))
+# The guard opens the body, inside CALLEE_ARENA's exit when the wrapper has one (callee_arena.rb).
+arena_open = /(?:  int bc2cpp_ai = .*\n  return bc2cpp_arena_exit\(.*\n)?/
 suite.check('the original keeps both guards for its outside callers',
-            on.match?(/^mrb_value GuardMid_guard_advance_impl\(.*\{\n.*DECLARED_PARAM_GUARD GuardMid#guard_advance arg 1 /))
+            on.match?(/^mrb_value GuardMid_guard_advance_impl\(.*\{\n#{arena_open}.*DECLARED_PARAM_GUARD GuardMid#guard_advance arg 1 /))
 suite.check('BC2CPP_SHARD_COLOCATE_GUARDS=0 keeps the guard in the copy',
             copy_body.call(guard_texts['0'], 'GuardMid_guard_advance_impl').include?('DECLARED_PARAM_GUARD GuardMid#guard_advance arg 1 '))
 

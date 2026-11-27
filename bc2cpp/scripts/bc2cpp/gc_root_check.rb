@@ -50,6 +50,15 @@ suite.check("a loop's numeric temporary, yield buffer and Array literal are scop
                                        "elems);\n  }\n", []) &&
             LoopArena.foreign_locals?("mrb_value elems[2];\n", []))
 
+# CALLEE_ARENA: a declared-return guard's `X_impl` runs its body through `X_impl_unguarded`, and gives that body's
+# arena entries back as an unguarded one does.
+require_relative '../../tools/bc2cpp/callee_arena'
+guarded = "static inline mrb_value X_impl_unguarded(mrb_value self) {\n  return mrb_ary_new(M);\n}\n" \
+          "mrb_value X_impl(mrb_value self) {\n  mrb_value bc2cpp_declared_ret = X_impl_unguarded(self);\n" \
+          "  return bc2cpp_declared_ret;\n}\n"
+suite.check("a declared-return guard's X_impl gives its body's arena entries back (CALLEE_ARENA)",
+            CalleeArena.wrap_code(guarded, 'X_impl').to_s.include?('bc2cpp_arena_exit(M, bc2cpp_ai'))
+
 SOURCE = <<~RUBY
   class GcRoot
     KEEP = []
