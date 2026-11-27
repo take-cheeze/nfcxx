@@ -671,13 +671,6 @@ module Qbe
         Qbe.symbol(item[1][2].raw) == "_Unwind_Resume"
     end
 
-    def contains_call?(x)
-      return false unless x.is_a?(Array)
-      return true if head(x) == "call"
-
-      x.any? { |y| contains_call?(y) }
-    end
-
     # The landing pad of the profiled function's pass-through calls: its exit hook, then the unwind goes on. QBE gives the
     # calls of a landing pad block no call site (ehpad makes the block EhTerm), and the unwinder looks the resume call up
     # in the LSDA when it re-enters the frame: so the exit hook and _Unwind_Resume are in a block of their own, which is
