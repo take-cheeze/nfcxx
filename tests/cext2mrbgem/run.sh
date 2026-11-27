@@ -478,7 +478,8 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_alt_branch tools/cext2mrbgem
 check test "$rc" -eq 0
 check grep -qF 'mrb_obj_as_string(api_alt_branch_bc2_mrb, (x))' "$work/api_alt_branch/src/api_alt_branch.c"
 # a method entered while another mruby state is active aborts (the global state is one state; a nested one would be wrong)
-check grep -qF 'if (nfcx_bc2_old != NULL && nfcx_bc2_old != mrb) abort();' "$work/api_alt_branch/src/api_alt_branch.c"
+check grep -qF 'if (api_alt_branch_bc2_mrb != NULL && api_alt_branch_bc2_mrb != mrb) abort(); /* nested mruby state */' "$work/api_alt_branch/src/api_alt_branch.c"
+check grep -qF 'if (nfcx_bc2_f.old != NULL && nfcx_bc2_f.old != mrb) abort();' "$work/api_alt_branch/src/api_alt_branch.c"
 # 2zzz80. A callee that takes two callbacks: each function-pointer parameter takes its own helper, and both helpers gain mrb.
 # (The regex scanner cannot read two parenthesis levels in a parameter list, so it refuses this safely: the test is libclang's.)
 if [ "$scanner" = libclang ]; then
@@ -848,6 +849,29 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_dtype/NOT_BUILDABLE"
 check grep -qF 'static void holder_mark(mrb_state *mrb, void *p) {' "$work/api_dtype/src/api_dtype.c"
 check grep -qF 'static const mrb_data_type holder_type = { "holder", holder_free, holder_mark };' "$work/api_dtype/src/api_dtype.c"
+
+# nokogiri's false refusals: rb_intern_const names in rb_funcall, an (rb_len_t) literal count in rb_ary_new3, rb_iv_get's name
+# after a nested call, E_RUNTIME_ERROR as the class of rb_exc_new3, a data type with no .function group, and a gem macro
+# (RBSTR_NK) under a build switch (#ifndef) with no other branch, which is local, not a CRuby name
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_nk_refusals tools/cext2mrbgem/fixtures/api_nk_refusals/ext/api_nk_refusals "$work/api_nk_refusals" > "$work/api_nk_refusals.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_nk_refusals/NOT_BUILDABLE"
+check grep -qF 'mrb_funcall_argv(mrb, obj, mrb_intern_cstr(mrb, "[]"), 1, (mrb_value[]){mrb_fixnum_value(0)})' "$work/api_nk_refusals/src/api_nk_refusals.c"
+check grep -qF 'mrb_ary_new_from_values(mrb, 2, (mrb_value[]){a, b})' "$work/api_nk_refusals/src/api_nk_refusals.c"
+check grep -qF 'mrb_iv_get(mrb, mrb_ary_entry(obj, 0), mrb_intern_cstr(mrb, "@nk_flag"))' "$work/api_nk_refusals/src/api_nk_refusals.c"
+check grep -qF 'mrb_exc_new_str(mrb, E_RUNTIME_ERROR, msg)' "$work/api_nk_refusals/src/api_nk_refusals.c"
+check grep -qF 'static const mrb_data_type nk_plain_type = { "nk_plain", NULL, NULL };' "$work/api_nk_refusals/src/api_nk_refusals.c"
+check grep -qF 'mrb_str_new_cstr(api_nk_refusals_bc2_mrb, x)' "$work/api_nk_refusals/src/api_nk_refusals.c"
+
+# the api_map entries for rb_Integer, rb_enc_str_new_cstr, rb_external_str_new_with_enc and rb_enc_str_buf_cat: the encoding
+# argument is dropped (mruby strings carry none), the bytes and the count are kept
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_nk_encstr tools/cext2mrbgem/fixtures/api_nk_encstr/ext/api_nk_encstr "$work/api_nk_encstr" > "$work/api_nk_encstr.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_nk_encstr/NOT_BUILDABLE"
+check grep -qF 'mrb_value i = mrb_Integer(mrb, v);' "$work/api_nk_encstr/src/api_nk_encstr.c"
+check grep -qF 'mrb_value a = mrb_str_new_cstr(mrb, "abc");' "$work/api_nk_encstr/src/api_nk_encstr.c"
+check grep -qF 'mrb_value b = mrb_str_new(mrb, "xy", 2);' "$work/api_nk_encstr/src/api_nk_encstr.c"
+check grep -qF 'mrb_str_cat(mrb, out, "pq", 2);' "$work/api_nk_encstr/src/api_nk_encstr.c"
 
 # a data type whose mark is (RUBY_DATA_FUNC) NULL and whose free is RUBY_TYPED_DEFAULT_FREE (pg's coder types): no refusal
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dtype_cast_null tools/cext2mrbgem/fixtures/api_dtype_cast_null/ext/api_dtype_cast_null "$work/api_dtype_cast_null" > "$work/api_dtype_cast_null.log" 2>&1 || rc=$?
@@ -2092,6 +2116,32 @@ check sh -c "! grep -q 'Traceback' '$work/include_outside.log'"
 check grep -qF 'include_outside.c:2  #include "../hdr.h"  include outside the extension directory: ../hdr.h (the converter reads only the extension root; the header is not in the output)' "$work/include_outside/REFUSALS.txt"
 check test -e "$work/include_outside/NOT_BUILDABLE"
 
+# 2c-flag. --header ../hdr_flag.h: the one named header (one level above the extension directory) is read into the output, its include
+# is kept and resolves (no refusal); a flag that names no file, or a path that is not directly above the extension, is an error
+rc=0; "$rb" "$conv" --scanner "$scanner" --name include_flag --header ../hdr_flag.h tools/cext2mrbgem/fixtures/include_flag/ext/include_flag "$work/include_flag" > "$work/include_flag.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test -e "$work/include_flag/hdr_flag.h"
+check grep -qF '#include "../hdr_flag.h"' "$work/include_flag/src/include_flag.c"
+check sh -c "! grep -q 'include outside' '$work/include_flag/REFUSALS.txt'"
+rc=0; "$rb" "$conv" --scanner "$scanner" --name include_flag --header ../nothere.h tools/cext2mrbgem/fixtures/include_flag/ext/include_flag "$work/include_flag_missing" > "$work/include_flag_missing.log" 2>&1 || rc=$?
+check test "$rc" -ne 0
+check grep -qF 'no such file beside the extension directory' "$work/include_flag_missing.log"
+rc=0; "$rb" "$conv" --scanner "$scanner" --name include_flag --header ../../hdr_flag.h tools/cext2mrbgem/fixtures/include_flag/ext/include_flag "$work/include_flag_deep" > "$work/include_flag_deep.log" 2>&1 || rc=$?
+check test "$rc" -ne 0
+check grep -qF 'only a header directly one level up' "$work/include_flag_deep.log"
+
+# 2c-overlap. a helper whose name is a CRuby API (rb_hash_bulk_insert: json's TruffleRuby fallback under #ifndef) needs the mruby state,
+# and the API mapping rewrites the whole call: the two edits overlap, so the call is refused with a reason (no crash, REFUSALS.txt). With
+# the define the fallback is inactive, the call maps to the fork's API and the conversion is clean.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name hash_overlap tools/cext2mrbgem/fixtures/hash_overlap/ext/hash_overlap "$work/hash_overlap" > "$work/hash_overlap.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check sh -c "! grep -q 'Traceback\|overlapping edits' '$work/hash_overlap.log'"
+check grep -qF 'the call overlaps a rewritten span (not supported)' "$work/hash_overlap/REFUSALS.txt"
+check test -e "$work/hash_overlap/NOT_BUILDABLE"
+rc=0; "$rb" "$conv" --scanner "$scanner" --name hash_overlap --define HAVE_RB_HASH_BULK_INSERT tools/cext2mrbgem/fixtures/hash_overlap/ext/hash_overlap "$work/hash_overlap_def" > "$work/hash_overlap_def.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_hash_bulk_insert(mrb, 2, pairs, hash);' "$work/hash_overlap_def/src/hash_overlap.c"
+
 # 2zzz110. a function-defining macro invoked at file scope (ffi's NUM_OP(name, ...)): each invocation is expanded, so the
 # functions it defines convert and are registered (before, "registered function has no definition"); the #define is then
 # unused and wrapped in #if 0
@@ -2244,6 +2294,24 @@ check sh -c "! grep -qF 'DM_OLD_RAISE (mrb' '$work/disabled_macro/conversion_log
 check sh -c "! grep -qF 'DM_UNUSED_RAISE (mrb' '$work/disabled_macro/conversion_log.json'"
 check grep -qF '"to": "DM_TO_S (mrb = disabled_macro_bc2_mrb)"' "$work/disabled_macro/conversion_log.json"
 check grep -qF '#if 0  /* BC2CPP-MRBGEM: unused macro' "$work/disabled_macro/src/disabled_macro.c"
+
+# 2zzz190. a coder callback stored by pg_define_coder (a function of the input that keeps the pointer): its address is not a
+# refusal; the callback reads the global state (set by the registered method that runs it, and by Init, which keeps it set).
+# gem_final clears the global; Init does not restore the previous value (it leaves its own state set for the life of the gem).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name stored_coder tools/cext2mrbgem/fixtures/stored_coder/ext/stored_coder "$work/stored_coder" > "$work/stored_coder.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/stored_coder/NOT_BUILDABLE"
+check grep -qF 'sc_enc(mrb_value v)' "$work/stored_coder/src/stored_coder.c"
+check grep -qF 'return mrb_str_new_cstr(stored_coder_bc2_mrb, "encoded");' "$work/stored_coder/src/stored_coder.c"
+check grep -qF 'pg_define_coder("Enc", sc_enc);' "$work/stored_coder/src/stored_coder.c"
+check grep -qF 'extern struct mrb_state *stored_coder_bc2_mrb;' "$work/stored_coder/src/gem_init.c"
+check grep -qF 'mrb_state *nfcx_bc2_old = mrb;' "$work/stored_coder/src/stored_coder.c"
+check grep -qF 'if (stored_coder_bc2_mrb != NULL && stored_coder_bc2_mrb != mrb) abort(); /* nested mruby state */' "$work/stored_coder/src/stored_coder.c"
+check sh -c "! sed -n '/^void mrb_stored_coder_gem_init/,/^}/p' '$work/stored_coder/src/stored_coder.c' | grep -q 'stored_coder_bc2_mrb = nfcx_bc2_old'"
+check grep -qx '  stored_coder_bc2_mrb = NULL;' "$work/stored_coder/src/gem_init.c"
+check grep -q 'mrb_stored_coder_gem_final(mrb_state \*mrb)' "$work/stored_coder/src/gem_init.c"
+# a gem that does not use the global state has no extern and no clearing in gem_final (the tiny fixture)
+check sh -c "! grep -q 'bc2_mrb' '$work/tiny/src/gem_init.c'"
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads

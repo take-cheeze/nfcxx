@@ -52,6 +52,11 @@ What differs from the regex scan, and why:
 
 ## Behaviour
 
+- `--header ../NAME.h` (corpus_flags.json: json-parser and json-generator, `../json.h`) reads one header of the gem that lies
+  directly above the extension directory, and only that one: the path must be exactly `../NAME.h`, the file must exist, and a
+  source of the extension must include it by that path. The header is written to the output root (`NAME.h` next to `src/`),
+  where the sources' `"../NAME.h"` includes resolve. Other quoted includes outside the extension directory stay refused (json's
+  `../vendor/` and `../simd/` headers are still refused).
 - Calls and macros are mapped through `api_map.json`. Any CRuby-looking identifier without
   an entry is refused: a marker comment is left in the output and the item is listed in
   `REFUSALS.txt`. Exit status 2 means refusals were recorded.
@@ -80,14 +85,16 @@ What differs from the regex scan, and why:
   `inline` in front) is expanded like the function-defining macros: at each invocation at the start of a line outside any
   braces, `ALWAYS_INLINE(static) int f(...) {` becomes `static int f(...) {` (the argument is a storage class or a whole
   declaration). The attribute and `inline` are dropped, as they are hints; a kept `inline` on an external function would
-  have no external definition. The two names are known without their `#define`, since json's `json.h` lies outside the
-  extension directory and is not read; a `#define` of the name in the gem replaces that and must have the same form.
+  have no external definition. Without `--header ../json.h` (below) the two names are known without their `#define`, since
+  json's `json.h` lies outside the extension directory and is not read; a `#define` of the name in the gem replaces that
+  and must have the same form.
   `NORETURN(...)` and `MAYBE_UNUSED(...)` are not expanded: their wrappers are removed by `noreturn_mask`, as before.
   json-parser is converted with `--define HAVE_RB_HASH_BULK_INSERT` (`corpus_flags.json`): the fork provides that function,
   and the file's own static fallback of it, under `#ifndef`, would otherwise collide with its api_map mapping. A definition
   whose name is a CRuby API name (api_map.json) in a branch the build excludes (`text_inactive_spans`) is not a declaration
-  of the gem, in the regex scan as in the libclang one. Without that define, the collision stops the converter with
-  "internal: overlapping edits" (a known gap: such a definition should be refused instead).
+  of the gem, in the regex scan as in the libclang one. Without that define, the gem's helper of that name takes the mruby
+  state inside the call that the api_map mapping rewrites whole; the two edits overlap, so that call is refused with a
+  reason (REFUSALS.txt, "the call overlaps a rewritten span"), not converted.
 - `rb_define_module_function(mod, "name", fn, argc)` becomes `mrb_define_module_function`, which defines the
   singleton and private instance method as CRuby does. `rb_define_const(klass, "NAME", v)` becomes
   `mrb_define_const(mrb, klass, "NAME", v)`. Both need the receiver to be a tracked class or module variable (a
@@ -158,6 +165,16 @@ global `<funcname>_bc2_mrb`. A registered method of such a gem is wrapped:
   on the exception path; the global is therefore restored on every exit.
 - The body keeps its own restores before each `return` (wrap_returns and the macro return plans), which are now
   redundant but harmless, since they run before the `mrb_ensure` restore.
+- Init sets the global and does not restore the previous value: it leaves the gem's state set for the life of the gem
+  (its saved value is its own `mrb`, so its returns put that back). The generated `mrb_<fn>_gem_final` clears the global
+  (`<fn>_bc2_mrb = NULL;`, with `extern struct mrb_state *<fn>_bc2_mrb;` in `src/gem_init.c`). mruby has no close hook
+  other than gem_final, so this clearing is the only protection against a dangling pointer after `mrb_close`. gem_final
+  clears the global whatever state it holds; it does not check that the state is the one being closed.
+- A coder callback passed to `pg_define_coder` (a function of the input that the registration stores in the coder
+  table) is on the global path, not refused. The table keeps the pointer for the life of the gem, and the coder runs only
+  from a call a registered method makes, so the global is set when it runs. Its address in any other call stays refused.
+  The C-API callbacks (the functions given to rb_ensure and rb_rescue, and a dcompact callback) are not on this path:
+  they keep their refusals.
 
 Split methods (an impl and a wrapper) get the same form: the wrapper's argument reads and impl call are the
 `mrb_ensure` body. In a gem with a global-state user every registered method is wrapped, as before, so each of
@@ -173,8 +190,13 @@ the run test prints SKIP.
 
 What remains:
 
-- Init is not under `mrb_ensure` (it is void, and its returns restore the global as before). An exception that
-  leaves Init keeps the global set to the gem's state until the next wrapped method or Init runs.
+- Init is not under `mrb_ensure` (it is void). An exception that leaves Init keeps the global set to the gem's state
+  (it is set for the life of the gem, as described above).
+- The global is one per process. The nested-state abort still fires when a different `mrb_state` enters a wrapped
+  method or Init while the global is set, and with Init leaving the global set this is now the usual case for a second
+  state in the same process, not only a nested call. A second state is therefore not supported while the first is open.
+- The coder path is checked by the fixture `stored_coder` (generated text and the gem_final clearing), not by running
+  pg: no Ruby-level pg test runs in this environment.
 - The generated C is compiled by `check_mruby_compile.sh` (compile and link only). The runtime behaviour above is
   checked on one fixture, not on the corpus.
 - A nested state (a method on one state that runs a method on another) still aborts, as before.

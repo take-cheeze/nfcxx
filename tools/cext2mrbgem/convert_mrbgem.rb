@@ -372,9 +372,10 @@ def decorator_define?(text, masked, m)
   words.last == params[0] && (words[0...-1] - DECORATOR_KEYWORDS).empty?
 end
 
-# json's decorators: json.h (ext/json/ext/json.h) is outside the extension directory of the parser and generator, so its
-# #define is not read; the names are known here, with the same meaning (the attribute is a hint). A #define of the name in
-# the gem replaces that: it must be a decorator, or the name is left alone.
+# json's decorators: json.h (ext/json/ext/json.h) is outside the extension directory of the parser and generator; it is read
+# only with --header ../json.h (see load). Without that flag its #define is not read, so the names are known here, with the
+# same meaning (the attribute is a hint). A #define of the name in the gem replaces that: it must be a decorator, or the name
+# is left alone.
 BUILTIN_DECORATORS = %w[ALWAYS_INLINE NOINLINE].freeze
 DECORATOR_LEFT_TO_NORETURN_MASK = %w[NORETURN MAYBE_UNUSED].freeze
 
@@ -948,6 +949,17 @@ end
 sub_headers = Dir.children(@cext_dir).reject { |n| n.start_with?('.') }.sort.select { |n| File.directory?(File.join(@cext_dir, n)) }
                   .flat_map { |d| (Dir.glob(File.join(@cext_dir, d, '*.{h,c}')) + Dir.glob(File.join(@cext_dir, d, '**', '*.{hh,hpp,hxx}'))).sort.map { |p| p.sub(File.join(@cext_dir, '') , '') } }
 sub_headers.each { |rel| texts[rel] = read_text(File.join(@cext_dir, rel)) }
+# --header PATH: a header of the gem directly above the extension directory, named by PATH relative to it ("../json.h": json's
+# ext/json.h, which its parser and generator include). Only the paths the flags name are read, and only one that a source of
+# this extension includes by that very path; any other include outside the directory is still refused (the include check of the scan)
+extra_headers = ($extra_headers || []).uniq.sort
+extra_headers.each do |rel|
+  abort "error: --header #{rel}: only a header directly one level up (../NAME.h) is read this way" unless rel.match?(%r{\A\.\./[^/]+\.(?:h|hh|hpp)\z})
+  abort "error: --header #{rel}: no such file beside the extension directory" unless File.file?(File.join(@cext_dir, rel))
+  included = texts.values.any? { |t| t.match?(/^[ \t]*#[ \t]*include[ \t]*"#{Regexp.escape(rel)}"/) }
+  abort "error: --header #{rel}: no source of the extension includes it by that path" unless included
+  texts[rel] = read_text(File.join(@cext_dir, rel))
+end
 texts.each_key { |k| texts[k] = kr_normalize(texts[k]) }
 texts = static_rename(texts)
 # --rename OLD=NEW: the gem's own identifier OLD is NEW in every source and header (a name the system headers declare, e.g. crypt_r)
@@ -985,7 +997,7 @@ expand_decorator_macros(texts)
       # gem_init.c is the generated file; the input's own copy is refused (set up before the refusal is recorded)
       refuse(base, 0, 'gem_init.c', 'name collides with the generated gem_init.c') if base == 'gem_init.c'
     end
-    sub_headers.each do |rel|
+    (sub_headers + extra_headers).each do |rel|
       @files[rel] = { 'text' => texts.fetch(rel), 'masked' => mask_c(texts.fetch(rel)), 'kind' => 'hdr' }
       noreturn_mask(rel)
       @edits[rel] = Edits.new
@@ -1023,7 +1035,9 @@ expand_decorator_macros(texts)
         when 'define'
           name = rest[/\A(\w+)/, 1]
           next if name.nil?
-          tainted = stack.any? { |g, _, _| !g }
+          # a conditional is a possible fallback only when it names a HAVE_ check or a CRuby-looking name, or has another branch
+          # (#else/#elif); a build switch such as #ifndef NOKOGIRI_NATIVE with no other branch is not one
+          tainted = stack.any? { |g, conds, _| !g && (conds.size > 1 || conds.any? { |c| c.match?(/HAVE_/) || c.scan(/[A-Za-z_]\w*/).any? { |w| UNKNOWN_RE.match?(w) } }) }
           (defined[name] ||= []) << [rel, pos, tainted]
         when 'undef'
           name = rest[/\A(\w+)/, 1]
@@ -2003,25 +2017,27 @@ end
     end
     return { 'error' => 'the name is not a string literal' } unless fields['wrap_struct_name'] && fields['wrap_struct_name'][2].start_with?('"')
     fn = fields['function']
-    return { 'error' => 'no .function field' } unless fn
-    return { 'error' => '.function is not a braced group' } unless fn[2].start_with?('{') && fn[2].end_with?('}')
-    brace = fn[0] + tx[fn[0]...fn[1]].index('{')
-    # the elements of .function: a preprocessor line before an element (#ifdef HAVE_RB_GC_LOCATION) is not part of it, and an
-    # element in inactive text (its branch is not in this build) is not an element (mruby's data type has no compaction hook)
-    inactive = (@excluded_spans || {})[rel] || []
-    sub = split_args(mk, brace, fn[1] - 1).map { |a, b| [a, b, psl(tx, a, b)] }
-    sub = sub.reject { |a, _b, _t| inactive.any? { |x, z| x < a && a < z } }
-    sub = sub.map { |a, b, t| [a, b, t.gsub(/^[ \t]*#[^\n]*\n?/, '').strip] }.reject { |_a, _b, t| t.empty? }
     sf = {}
-    sub.each do |a, b, t|
-      mm = t.match(/\A\.\s*([A-Za-z_]\w*)\s*=\s*(.*)\z/m)
-      # a compaction member written as a macro call (ffi's ffi_compact_callback(f)) is dropped, as the positional form drops dcompact
-      next if mm.nil? && compaction_macro_call?(t)
-      return { 'error' => '.function holds a non-designated element' } unless mm
-      # the position of the value's first character (after the '=' and its spaces): the identifier's own position
-      eq = t.index('=')
-      lead = t[(eq + 1)..][/\A\s*/].length
-      sf[mm[1]] = [a, b, mm[2].strip, a + eq + 1 + lead]
+    # no .function field: every member of the function group is 0 (no mark and no free), as the positional form's zeroed group
+    if fn
+      return { 'error' => '.function is not a braced group' } unless fn[2].start_with?('{') && fn[2].end_with?('}')
+      brace = fn[0] + tx[fn[0]...fn[1]].index('{')
+      # the elements of .function: a preprocessor line before an element (#ifdef HAVE_RB_GC_LOCATION) is not part of it, and an
+      # element in inactive text (its branch is not in this build) is not an element (mruby's data type has no compaction hook)
+      inactive = (@excluded_spans || {})[rel] || []
+      sub = split_args(mk, brace, fn[1] - 1).map { |a, b| [a, b, psl(tx, a, b)] }
+      sub = sub.reject { |a, _b, _t| inactive.any? { |x, z| x < a && a < z } }
+      sub = sub.map { |a, b, t| [a, b, t.gsub(/^[ \t]*#[^\n]*\n?/, '').strip] }.reject { |_a, _b, t| t.empty? }
+      sub.each do |a, b, t|
+        mm = t.match(/\A\.\s*([A-Za-z_]\w*)\s*=\s*(.*)\z/m)
+        # a compaction member written as a macro call (ffi's ffi_compact_callback(f)) is dropped, as the positional form drops dcompact
+        next if mm.nil? && compaction_macro_call?(t)
+        return { 'error' => '.function holds a non-designated element' } unless mm
+        # the position of the value's first character (after the '=' and its spaces): the identifier's own position
+        eq = t.index('=')
+        lead = t[(eq + 1)..][/\A\s*/].length
+        sf[mm[1]] = [a, b, mm[2].strip, a + eq + 1 + lead]
+      end
     end
     ok_fn = ->(t) { t.match?(/\A[A-Za-z_][#{WC}]*\z/) || t == 'NULL' || t == '0' }
     mark = sf['dmark'] ? sf['dmark'][2] : 'NULL'
@@ -3550,6 +3566,16 @@ use_problem = lambda do |name, use|
       gcands << name if single_or_exclusive?(name)
     end
     with_state = cands | @valid_reg_names | (init_first ? Set[init_first] : Set.new)
+    # a coder callback passed to pg_define_coder (a function of the input): the coder table keeps the pointer for the life of
+    # the gem, and the coder runs only from a call that a registered method of the gem makes (the global state is set in it)
+    stored_coder_use = lambda do |name, rel, s|
+      masked = @files[rel]['masked']
+      open, callee = innermost_open(masked, s)
+      before = prev_nonspace(masked, s - 1)
+      after = next_nonspace(masked, s + name.length)
+      open == '(' && callee == 'pg_define_coder' && @defs.key?(callee) && before >= 0 && '(,'.include?(masked[before]) &&
+        after >= 0 && ',)'.include?(masked[after])
+    end
     global_use = lambda do |name, use, members|
       rel, s, direct, fn = use
       # --method-scope-fn NAME: the helper's address is stored only inside a parser or table that lives for one registered method
@@ -3558,6 +3584,7 @@ use_problem = lambda do |name, use|
       # a callback passed to rb_hash_foreach / rb_ivar_foreach is converted by that call (the callback takes mrb)
       next nil if !direct && (@hash_cb_pos || Set.new).include?([rel, s])
       next nil if !direct && (@onig_cb_pos || Set.new).include?([rel, s])
+      next nil if !direct && stored_coder_use.call(name, rel, s)
       macro = fn.nil? && direct ? define_at(rel, s) : nil
       if fn.nil?
         # a function address in a file-scope table (an initializer of a variable of this file) runs only when the table is
@@ -3936,7 +3963,8 @@ use_problem = lambda do |name, use|
       e = @entries[t]
       next false unless e.is_a?(Hash) && e['kind'] == 'expr' && e['mruby'].is_a?(String)
       e['mruby'].match?(/\Amrb->\w+_class\z/) || e['mruby'].match?(/\Amrb_class_get\(mrb, "[^"]+"\)\z/) ||
-        e['mruby'].match?(/\Amrb_exc_get\(mrb, "[^"]+"\)\z/) || e['mruby'].match?(/\Amrb_module_get\(mrb, "[^"]+"\)\z/)
+        e['mruby'].match?(/\Amrb_exc_get\(mrb, "[^"]+"\)\z/) || e['mruby'].match?(/\Amrb_module_get\(mrb, "[^"]+"\)\z/) ||
+        e['mruby'].match?(/\AE_[A-Z][A-Z0-9_]*\z/) # mruby.h's exception-class macros: (mrb_exc_get(mrb, "RuntimeError"))
     end
   end
 
@@ -5910,6 +5938,8 @@ use_problem = lambda do |name, use|
     finditer(/#[ \t]*include[ \t]*"([^"\n]+)"/, text).each do |m|
       next if masked[m.begin(0)] != '#'
       inc = m[1]
+      # a CRuby header is the include loop's (process step 1), whether it is written with <> or "" (json.h's "ruby.h")
+      next if INC_RE.match?(m[0])
       next if include_in_tree?(rel, inc)
       next unless include_key(rel, inc).split('/').first == '..'
       refuse(rel, m.begin(0), "#include \"#{inc}\"",
@@ -5971,11 +6001,17 @@ end
           next
         end
         # Init (and a registered method whose header is not the (mrb, self) form): the global state is set on entry and
-        # restored on each return (wrap_returns). Neither runs under mrb_ensure, so an exception leaving them is not restored
+        # restored on each return (wrap_returns). Neither runs under mrb_ensure, so an exception leaving them is not restored.
+        # Init does not restore the previous value: it leaves the global set to its state for the life of the gem (gem_final
+        # clears it), so its saved value is its own mrb and its returns put that back (no change)
         if @global_wrap && (@valid_reg_names.include?(name) || name == init_name)
           g = @global_name
-          pro = "\n  mrb_state *nfcx_bc2_old = #{g};\n  if (nfcx_bc2_old != NULL && nfcx_bc2_old != mrb) abort(); /* nested mruby state */\n  #{g} = mrb;" + pro
-          wrap_returns(rel, d, name == init_name && !@valid_reg_names.include?(name))
+          if name == init_name && !@valid_reg_names.include?(name)
+            pro = "\n  mrb_state *nfcx_bc2_old = mrb;\n  (void)nfcx_bc2_old;\n  if (#{g} != NULL && #{g} != mrb) abort(); /* nested mruby state */\n  #{g} = mrb;" + pro
+          else
+            pro = "\n  mrb_state *nfcx_bc2_old = #{g};\n  if (nfcx_bc2_old != NULL && nfcx_bc2_old != mrb) abort(); /* nested mruby state */\n  #{g} = mrb;" + pro
+            wrap_returns(rel, d, false)
+          end
         end
         ed.add(d['hstart'], d['hend'], hdr + ' ')
         ed.add(d['brace'] + 1, d['brace'] + 1, pro) unless pro.empty?
@@ -7027,6 +7063,14 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
           texts[k]
         end
       end
+      # the whole call is one edit: an edit already inside it (the mruby argument a gem helper of the same name takes at this
+      # call: json's static fallback of rb_hash_bulk_insert, under #ifndef HAVE_RB_HASH_BULK_INSERT) cannot be kept with it,
+      # so the call is refused, not rewritten twice (the edits would overlap, and the edit pass would fail)
+      if ed.overlapping(s, cp + 1).any?
+        refuse(rel, s, name, 'the call overlaps a rewritten span (not supported): an edit inside the call (a gem helper of the same ' \
+                             'name takes the mruby state there) and the API mapping of the whole call cannot both be applied')
+        return
+      end
       ed.add(s, cp + 1, out)
       # a template that needs a gem at run time declares it (api_map gem_dep): the converted gem depends on it
       (@gem_deps ||= Set.new) << entry['gem_dep'] if entry['gem_dep']
@@ -7309,7 +7353,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       end
       if entry['intern_arg']
         # a C name argument (a string literal) becomes the symbol mruby takes: mrb_intern_cstr(mrb, "name")
-        cp = pyfind(masked, ')', nxt)
+        cp = match_close(masked, nxt)
         args = cp > 0 ? split_args(masked, nxt, cp) : []
         k = entry['intern_arg']
         lit = args.size > k ? psl(@files[rel]['text'], args[k][0], args[k][1]) : ''
@@ -7697,6 +7741,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       rewrite(rel, s, 'rb_ary_new3', 'nfcx_ary_new3(mrb, __VA_ARGS__)', 'the count and values come from the expansion (a variadic helper)')
       return
     end
+    n_text = n_text.sub(/\A\(\s*rb_len_t\s*\)\s*/, '') # (rb_len_t)2: the count is still the literal 2
     unless n_text.match?(/\A\d+\z/) && args.size == 1 + n_text.to_i
       refuse(rel, s, 'rb_ary_new3', 'the count must be an integer literal that matches the values (not supported)')
       return
@@ -7812,7 +7857,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       return
     end
     name =
-      if (m = /\Arb_intern\(\s*"([^"\\]+)"\s*\)\z/.match(id_text)) then m[1]
+      if (m = /\Arb_intern(?:_const)?\(\s*"([^"\\]+)"\s*\)\z/.match(id_text)) then m[1]
       elsif (m = /\A'([^'\\])'\z/.match(id_text)) then m[1]
       end
       name ||= @id_literals[id_text] if id_text.match?(/\A[#{WC}]+\z/)
@@ -9045,6 +9090,9 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     gem_init = []
     unstubbed = @refusals.reject { |r| (@stubbed || Set.new).include?([r['file'], r['line']]) }
     gem_init << '#error "BC2CPP-MRBGEM: NOT BUILDABLE, see REFUSALS.txt"' unless unstubbed.empty?
+    # a gem that uses the global state: gem_final clears it (Init leaves it set for the life of the gem). mruby has no close hook
+    # other than this, so after mrb_close the global does not point at the closed state.
+    clear_global = @global_wrap && init_file ? "  #{@global_name} = NULL;" : nil
     gem_init += [
       "/* Generated by convert_mrbgem.rb from ext/#{@name}. */",
       '#include <mruby.h>',
@@ -9052,13 +9100,16 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       init_file ? "/* mrb_#{fn}_gem_init is defined in src/#{init_file} (the converted Init_ function). */" :
         "void\nmrb_#{fn}_gem_init(mrb_state *mrb)  /* no Init_ function: see REFUSALS.txt */\n{\n  (void)mrb;\n}",
       '',
+    ]
+    gem_init << "extern struct mrb_state *#{@global_name};" if clear_global
+    gem_init += [
       'void',
       "mrb_#{fn}_gem_final(mrb_state *mrb)",
       '{',
       '  (void)mrb;',
-      '}',
-      '',
     ]
+    gem_init << clear_global if clear_global
+    gem_init += ['}', '']
     write_bytes(File.join(src_dir, 'gem_init.c'), gem_init.join("\n"))
     status = if @refusals.empty? then 'no refusals (NOT compiled or tested)'
              elsif unstubbed.empty? then 'STUBBED (every refused use is in a stub that raises NotImplementedError, or was dropped as a no-op in Init: see [dropped in Init])'
@@ -9199,6 +9250,8 @@ def main(argv)
       undefines << args.shift
     elsif opt == '--exclude' && !args.empty?
       ($excluded_files ||= Set.new) << args.shift
+    elsif opt == '--header' && !args.empty?
+      ($extra_headers ||= []) << args.shift
     elsif opt == '--replace' && !args.empty? && args.first.include?('=')
       ($replaces ||= []) << args.shift.split('=', 2).map { |t| t.gsub('\\n', "\n") }
     elsif opt == '--thread-sync'
@@ -9216,7 +9269,7 @@ def main(argv)
     end
   end
   if args.nil? || args.size != 2
-    warn 'usage: convert_mrbgem.rb [--name GEM] [--scanner auto|libclang|regex] [--define NAME[=VALUE]]... [--undefine NAME]... [--exclude FILE]... [--rename OLD=NEW]... [--thread-sync] [--replace OLD=NEW]... ' \
+    warn 'usage: convert_mrbgem.rb [--name GEM] [--scanner auto|libclang|regex] [--define NAME[=VALUE]]... [--undefine NAME]... [--exclude FILE]... [--header ../NAME.h]... [--rename OLD=NEW]... [--thread-sync] [--replace OLD=NEW]... ' \
          '[--stored-tag NAME=VALUE]... <cext_dir> <out_dir>'
     return 1
   end
