@@ -36,7 +36,8 @@ typedef struct GCHdr {
   uint16_t block; /* the arena's size class of the block (raw_free) */
 } GCHdr;
 
-enum { GC_STR = 1, GC_ARY, GC_HASH, GC_VEC, GC_OBJ, GC_IVAR, GC_DEF, GC_CLS, GC_INT, GC_CLO };
+enum { GC_STR = 1, GC_ARY, GC_HASH, GC_VEC, GC_OBJ, GC_IVAR, GC_DEF, GC_CLS, GC_INT, GC_CLO, GC_FOREIGN };
+typedef struct MForeign { const void *domain; void *data; void (*release)(void *); } MForeign;
 
 static void *gc_alloc(uint8_t kind, size_t size);
 /* The innermost frame the lowered code registered (mrbbc_gc_enter), and the values a helper protects while it allocates:
@@ -265,6 +266,7 @@ static int kind_tag(int kind) {
     case GC_OBJ: return MRBBC_OBJ;
     case GC_CLS: return MRBBC_CLS;
     case GC_CLO: return MRBBC_BLK;
+    case GC_FOREIGN: return MRBBC_FOREIGN;
     default: return MRBBC_INT;
   }
 }
@@ -423,6 +425,23 @@ static MV new_str_value(const char *p, long n) {
 }
 
 void mrbbc_set_bool(MV *dst, int truth) { *dst = bool_value(truth); }
+void mrbbc_set_nil(MV *dst) { *dst = nil_value(); }
+
+int mrbbc_str_view(const MV *value, const char **data, long *size) {
+  if (tag_of(value) != MRBBC_STR) return 0;
+  *data = str_of(value)->p; *size = str_of(value)->len; return 1;
+}
+void mrbbc_foreign_new(MV *dst, const void *domain, void *data, void (*release)(void *)) {
+  MForeign *value = gc_alloc(GC_FOREIGN, sizeof *value);
+  value->domain = domain; value->data = data; value->release = release;
+  *dst = ptr_value(MRBBC_FOREIGN, value);
+}
+void *mrbbc_foreign_data(const MV *value, const void *domain) {
+  MForeign *foreign;
+  if (tag_of(value) != MRBBC_FOREIGN) return NULL;
+  foreign = ptr_of(value);
+  return foreign->domain == domain ? foreign->data : NULL;
+}
 
 void mrbbc_str_new(MV *dst, const char *p, long n) {
   MV v = new_str_value(p, n);
@@ -900,6 +919,7 @@ static const char *class_name(const MV *v) {
     case MRBBC_OBJ: return obj_of(v)->cls->name;
     case MRBBC_CLS: return "Class";
     case MRBBC_BLK: return "Proc";
+    case MRBBC_FOREIGN: return "ForeignObject";
     default: return "Integer";
   }
 }
@@ -1040,6 +1060,7 @@ static void inspect_value(Buf *b, const MV *v) {
       buf_str(b, sym_of(v));
       break;
     case MRBBC_CLS: buf_str(b, cls_of(v)->name); break;
+    case MRBBC_FOREIGN: buf_str(b, "#<ForeignObject>"); break;
     case MRBBC_OBJ: {
       /* the program's inspect, as the p of an instance calls it; the default one prints an address, which is not lowered */
       MV r;
@@ -1129,7 +1150,8 @@ static int value_eq(const MV *a, const MV *b) {
     case MRBBC_INT: return int_of(a) == int_of(b);
     case MRBBC_STR: return str_of(a)->len == str_of(b)->len && memcmp(str_of(a)->p, str_of(b)->p, (size_t)str_of(a)->len) == 0;
     case MRBBC_SYM: return strcmp(sym_of(a), sym_of(b)) == 0;
-    case MRBBC_CLS: return same_value(a, b);  /* identity */
+    case MRBBC_CLS:
+    case MRBBC_FOREIGN: return same_value(a, b);  /* identity */
     case MRBBC_ARY: {
       const MAry *x = ary_of(a), *y = ary_of(b);
       long k;
@@ -2338,7 +2360,8 @@ static void mark_value(const MV *v) {
     case MRBBC_HASH:
     case MRBBC_OBJ:
     case MRBBC_CLS:
-    case MRBBC_BLK: mark_obj(ptr_of(v)); break;
+    case MRBBC_BLK:
+    case MRBBC_FOREIGN: mark_obj(ptr_of(v)); break;
 #if MRBBC_VALUE != 16
     case MRBBC_INT:
       if (!(v->w & 1)) mark_obj(ptr_of(v)); /* a boxed integer */
@@ -2479,6 +2502,11 @@ static void free_object(GCHdr *h) {
   set_remove(p);
 #endif
   switch (h->kind) {
+    case GC_FOREIGN: {
+      MForeign *foreign = p;
+      if (foreign->release) foreign->release(foreign->data);
+      break;
+    }
     case GC_STR: free(((MStr *)p)->p); break;
     case GC_ARY: free(((MAry *)p)->items); break;
     case GC_HASH:
