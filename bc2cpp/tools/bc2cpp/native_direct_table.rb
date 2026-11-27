@@ -245,6 +245,9 @@ module NativeDirect
       "RGSS::Color" => ["color_red_direct", []],
       "RGSS::Tone" => ["tone_red_direct", []]
     },
+    "snap_to_bitmap" => {
+      "RGSS::Graphics.singleton" => ["gfx_snap_to_bitmap_direct", []]
+    },
     "speak" => {
       "RGSS::Tts.singleton" => ["tts_speak_direct", [:cstr]]
     },

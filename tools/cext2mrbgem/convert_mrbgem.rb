@@ -664,6 +664,11 @@ class Edits
     @items.any? { |a, b, _| a < e && s < b }
   end
 
+  # the edits made so far, as [start, end, text] (a nested call's scratch edits are composed into its text)
+  def items
+    @items
+  end
+
   # an edit that starts, ends or spans the position p (a zero-width insertion there would conflict with it)
   def touches?(p)
     @items.any? { |a, b, _| a <= p && p <= b }
@@ -3736,6 +3741,9 @@ use_problem = lambda do |name, use|
           s = m.begin(0)
           e = logical_line_end(masked, m.end(0))
           next if (accepted[rel] || []).include?([s, e])
+          # a #define in inactive text (#if 0, an excluded branch) or an unused macro (wrapped in #if 0 by the unused-macro pass)
+          # is dead: it gets no marker and no mrb argument
+          next if inactive_text_at?(rel, s) || unused_macro?(rel, name, s, e)
           body = psl(masked, m.end(0), e)
           # a body that calls a helper which needs the state is handled the same way: its call takes the global
           # a macro is a global macro only when its body calls the global state: a macro that calls only threaded helpers
@@ -3777,6 +3785,8 @@ use_problem = lambda do |name, use|
             next true if ((@excluded_spans || {})[orel] || []).any? { |x, z| x < os && os < z }
             # another #define of the same macro (an alternative branch) is a definition, not an expansion
             next true if (dd = define_at(orel, os)) && dd[0] == name
+            # an expansion in the body of an unused macro (dead text, wrapped in #if 0) is dead code
+            next true if (dd = define_at(orel, os)) && unused_macro?(orel, dd[0], dd[1], dd[2])
             # a macro is local to its file: a same-named macro of another file is another definition, not a use
             next true if orel != rel
             fn = enclosing_func(orel, os)
@@ -3807,6 +3817,16 @@ use_problem = lambda do |name, use|
     end
   end
 
+  # a macro with no use in the gem (no occurrence outside its own #define, and no name pasted from it): dead text, which the
+  # unused-macro pass keeps under #if 0
+  def unused_macro?(rel, name, a, b)
+    paste_suffixes = (@paste_suffixes ||= @files.values.inject(Set.new) do |acc, f|
+      acc | f['masked'].scan(/##\s*([A-Za-z_]\w*)/).flatten.to_set
+    end)
+    (@occ[name] || []).none? { |r, os, _oe| !(r == rel && a <= os && os < b) } &&
+      paste_suffixes.none? { |sfx| name.end_with?(sfx) }
+  end
+
   # [name, start, end, rel] of the #define that holds pos, or nil
   def define_at(rel, pos)
     d = define_spans(rel).find { |_n, a, b| a < pos && pos < b }
@@ -3835,6 +3855,8 @@ use_problem = lambda do |name, use|
       next true if ((@excluded_spans || {})[orel] || []).any? { |x, z| x < os && os < z }
       # another #define of the same macro (an alternative branch) is a definition, not an expansion
       next true if (dd = define_at(orel, os)) && dd[0] == name
+      # an expansion in the body of an unused macro (dead text, wrapped in #if 0) is dead code
+      next true if (dd = define_at(orel, os)) && unused_macro?(orel, dd[0], dd[1], dd[2])
       fn = enclosing_func(orel, os)
       if fn.nil?
         # an expansion inside another macro's body is ok when that macro's own expansions are (the nesting is followed)
@@ -6160,12 +6182,8 @@ end
     # A macro with no use anywhere in the gem (no occurrence outside its own #define) is dead text: its CRuby body is not
     # converted, so the #define is kept under #if 0 and its names are not refused. A macro used in any file is not dead.
     # a name built by pasting (s##_trunc with s = jd makes jd_trunc) is a use of the macro it names
-    paste_suffixes = (@paste_suffixes ||= @files.values.inject(Set.new) do |acc, f|
-      acc | f['masked'].scan(/##\s*([A-Za-z_]\w*)/).flatten.to_set
-    end)
     unused_spans = define_spans(rel).select do |mname, a, b|
-      (@occ[mname] || []).none? { |r, os, _oe| !(r == rel && a <= os && os < b) } &&
-        paste_suffixes.none? { |sfx| mname.end_with?(sfx) }
+      unused_macro?(rel, mname, a, b)
     end.map { |_n, a, b| [a, b] }
     unused_spans.each do |a, b|
       ed.add(a, a, "#if 0  /* BC2CPP-MRBGEM: unused macro (no use in the gem): its CRuby body is not converted */\n")
@@ -6807,6 +6825,92 @@ end
     [bs, be]
   end
 
+  # the state a nested call's rewrite may change, saved before it and put back when the rewrite is refused (or the call that
+  # holds it is refused)
+  def nested_state(rel)
+    { refusals: @refusals.size, warnings: @warnings.size, rewrites: @rewrites.size,
+      claimed: @claimed_spans && @claimed_spans.transform_values(&:dup), gem_deps: @gem_deps && @gem_deps.dup,
+      prelude: @prelude_done && @prelude_done.dup, block_args: @block_arg_files && @block_arg_files.dup,
+      yield_cb: @yield_cb_files && @yield_cb_files.dup, ptr_cast: @ptr_cast_applied && @ptr_cast_applied.dup }
+  end
+
+  def nested_restore(st)
+    @refusals.slice!(st[:refusals]..)
+    @warnings.slice!(st[:warnings]..)
+    @rewrites.slice!(st[:rewrites]..)
+    @claimed_spans = st[:claimed]
+    @gem_deps = st[:gem_deps]
+    @prelude_done = st[:prelude]
+    @block_arg_files = st[:block_args]
+    @yield_cb_files = st[:yield_cb]
+    @ptr_cast_applied = st[:ptr_cast]
+  end
+
+  # a stretch of a nested call that no edit covers has no name the pass would convert: not an API name, a type, a class
+  # variable, mrb, or a function whose calls the pass rewrites (a helper threaded with the state, a registered method)
+  def nested_gap_ok?(rel, from, to)
+    seg = @files[rel]['masked'][from...to].to_s
+    seg.to_enum(:scan, /[A-Za-z_]\w*/).map { Regexp.last_match }.all? do |m|
+      w = m[0]
+      next true if seg[0...m.begin(0)].rstrip.match?(/(?:\.|->)\z/)
+      !(w == 'mrb' || @entries.key?(w) || @types.key?(w) || @class_vars.include?(w) || (@helper_names || Set.new).include?(w) ||
+        (@threaded_cands || Set.new).include?(w) || (@valid_reg_names || Set.new).include?(w))
+    end
+  end
+
+  # the text of a nested call at p (its name, its close parenthesis at cp), an argument of an outer template. An API entry of
+  # kind template, call or special is mapped in a scratch edit set (map_entry); its edits, composed over its span, are its text.
+  # A call that is no API entry stays as it is, when no name in it needs a rewrite. Returns the text, or nil when the call is
+  # not supported here (an edit already covers part of it, or it is refused; the state is restored), so the outer call is
+  # refused by its argument check, as before.
+  def nested_call_text(rel, p, name, cp, class_pos)
+    text = @files[rel]['text']
+    ed = @edits[rel]
+    norm = ->(x) { x.gsub(/[ \t]*\\\n[ \t]*/, ' ').strip }
+    return nil if ed.overlaps(p, cp + 1) || in_dead_init(rel, p)
+    entry = @entries[name]
+    if entry.nil?
+      return nil if class_pos || !nested_gap_ok?(rel, p, cp + 1)
+      return norm.call(text[p...(cp + 1)].to_s)
+    end
+    return nil unless %w[template call special].include?(entry['kind'])
+    # a class argument takes the call's VALUE through mrb_class_ptr: only a template that returns a VALUE (not an RClass *)
+    if class_pos && !(entry['kind'] == 'template' && entry['template'].to_s.start_with?('mrb_') && !entry['template'].to_s.start_with?('mrb_class('))
+      return nil
+    end
+    st = nested_state(rel)
+    scratch = Edits.new
+    refused_before = @refusals.size
+    @edits[rel] = scratch
+    begin
+      map_entry(rel, p, p + name.size, name, entry)
+    ensure
+      @edits[rel] = ed
+    end
+    if @refusals.size > refused_before
+      nested_restore(st)
+      return nil
+    end
+    out = +''
+    gaps = []
+    cur = p
+    okc = true
+    scratch.items.sort_by { |a, b, _| [a, b] }.each do |a, b, t|
+      okc &&= a >= cur && b <= cp + 1
+      next unless okc
+      gaps << [cur, a]
+      out << text[cur...a].to_s << t.to_s
+      cur = b
+    end
+    gaps << [cur, cp + 1]
+    out << text[cur...(cp + 1)].to_s
+    unless okc && gaps.all? { |g0, g1| nested_gap_ok?(rel, g0, g1) }
+      nested_restore(st)
+      return nil
+    end
+    norm.call(out)
+  end
+
   def map_entry(rel, s, e, name, entry)
     masked = @files[rel]['masked']
     ed = @edits[rel]
@@ -6991,11 +7095,35 @@ end
           return
         end
       end
-ignored = entry['ignored_args'] || []
-# an argument the template drops (an encoding) may be a call of a pure encoding getter: its value is not used
-unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:rb_utf8_encoding|rb_ascii8bit_encoding|rb_usascii_encoding)\(\)\z/) || t.match?(/\Arb_enc_get\(\s*[A-Za-z_][#{WC}]*\s*\)\z/) || t.match?(/\A(?:[A-Za-z_][#{WC}]*(?:\s*(?:->|\.)\s*[A-Za-z_][#{WC}]*)*)\z/) ||
+      # a nested call that is a whole argument (rb_obj_is_kind_of(f(x), rb_cFoo), rb_str_concat(a, rb_funcall(...)), a class argument
+      # rb_const_get_at(rb_const_get_at(m, ...), ...)): the inner call is rewritten first (nested_call_text), and its text takes the
+      # argument's place, so this edit covers it and the pass skips the inner call (claimed span). Nothing is kept when this call is refused.
+      nested = {}
+      nested_spans = {}
+      nested_snap = nil
+      texts.each_with_index do |t, k|
+        next unless t.match?(/\A[A-Za-z_]\w*\s*\(/)
+        a0, b0 = args[k]
+        p0 = next_nonspace(masked, a0)
+        next if p0 < 0 || p0 >= b0
+        name0 = masked[p0, 200].to_s[/\A[A-Za-z_]\w*/]
+        op0 = next_nonspace(masked, p0 + name0.size)
+        next unless op0 >= 0 && masked[op0] == '('
+        cp0 = match_close(masked, op0)
+        next unless cp0 > 0 && cp0 < b0 && masked[(cp0 + 1)...b0].to_s.strip.empty?
+        nested_snap ||= nested_state(rel)
+        ctext = nested_call_text(rel, p0, name0, cp0, class_args.include?(k))
+        next if ctext.nil?   # refused by the argument check below, as before
+
+        nested[k] = ctext
+        nested_spans[k] = [p0, cp0 + 1]
+      end
+      ignored = entry['ignored_args'] || []
+      # an argument the template drops (an encoding) may be a call of a pure encoding getter: its value is not used
+      unless texts.each_with_index.all? { |t, i| nested.key?(i) || (ignored.include?(i) ? t.match?(/\A(?:rb_utf8_encoding|rb_ascii8bit_encoding|rb_usascii_encoding)\(\)\z/) || t.match?(/\Arb_enc_get\(\s*[A-Za-z_][#{WC}]*\s*\)\z/) || t.match?(/\A(?:[A-Za-z_][#{WC}]*(?:\s*(?:->|\.)\s*[A-Za-z_][#{WC}]*)*)\z/) ||
   # a choice of encoding getters (utf8 ? rb_utf8_encoding() : rb_ascii8bit_encoding()): the value is dropped with the argument
-  t.match?(/\A[A-Za-z_][#{WC}]*\s*\?\s*(?:rb_(?:utf8|ascii8bit|usascii)_encoding\(\)|rb_enc_get\(\s*[A-Za-z_][#{WC}]*\s*\))\s*:\s*(?:rb_(?:utf8|ascii8bit|usascii)_encoding\(\)|rb_enc_get\(\s*[A-Za-z_][#{WC}]*\s*\))\z/) :(class_args.include?(i) ? (@class_vars.include?(t.delete('&')) || class_expr_ok.call(t.delete('&')) || value_class_arg.call(t.delete('&'), s)) : (t.match?(/\A&?(?:[A-Za-z_][#{WC}]*(?:(?:->|\.)[A-Za-z_][#{WC}]*)*|\d+|(?:struct|union)[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && (!@class_vars.include?(t.delete('&')) || entry['class_var_value'] || shadowed_local?(rel, t.delete('&'), s)) || plain_expr?(t, rel) || t.match?(/\Arb_intern(?:_const)?\(\s*"[^"\\]*"\s*\)\z/) || ((str_args.include?(i) || (entry['c_str_args'] || []).include?(i)) && t.match?(/\A"[^"\\]*"\z/)))) }
+  t.match?(/\A[A-Za-z_][#{WC}]*\s*\?\s*(?:rb_(?:utf8|ascii8bit|usascii)_encoding\(\)|rb_enc_get\(\s*[A-Za-z_][#{WC}]*\s*\))\s*:\s*(?:rb_(?:utf8|ascii8bit|usascii)_encoding\(\)|rb_enc_get\(\s*[A-Za-z_][#{WC}]*\s*\))\z/) :(class_args.include?(i) ? (@class_vars.include?(t.delete('&')) || class_expr_ok.call(t.delete('&')) || value_class_arg.call(t.delete('&'), s)) : (t.match?(/\A&?(?:[A-Za-z_][#{WC}]*(?:(?:->|\.)[A-Za-z_][#{WC}]*)*|\d+|(?:struct|union)[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && (!@class_vars.include?(t.delete('&')) || entry['class_var_value'] || shadowed_local?(rel, t.delete('&'), s)) || plain_expr?(t, rel) || t.match?(/\Arb_intern(?:_const)?\(\s*"[^"\\]*"\s*\)\z/) || ((str_args.include?(i) || (entry['c_str_args'] || []).include?(i)) && t.match?(/\A"[^"\\]*"\z/))))) }
+        nested_restore(nested_snap) if nested_snap
         refuse(rel, s, name, 'the arguments are not all plain identifiers or integer literals (only those are substituted)')
         return
       end
@@ -7014,6 +7142,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       out = (cond ? entry['template_cond'] : entry['template']).gsub(/\$(\d+)|\$m/) do
         next mrb_tok(rel, s) unless $1
         k = $1.to_i
+        # a nested call (nested_call_text): its rewritten text; a class argument takes it as the class pointer
+        next(class_args.include?(k) ? "mrb_class_ptr(#{nested[k]})" : nested[k]) if nested.key?(k)
         t = texts[k].delete('&')
         # a class argument that the map turns into an RClass * expression (rb_cHash -> mrb->hash_class): the expression
         if class_args.include?(k) && !@class_vars.include?(t) && class_expr_ok.call(t)
@@ -7054,10 +7184,13 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       # call: json's static fallback of rb_hash_bulk_insert, under #ifndef HAVE_RB_HASH_BULK_INSERT) cannot be kept with it,
       # so the call is refused, not rewritten twice (the edits would overlap, and the edit pass would fail)
       if ed.overlapping(s, cp + 1).any?
+        nested_restore(nested_snap) if nested_snap
         refuse(rel, s, name, 'the call overlaps a rewritten span (not supported): an edit inside the call (a gem helper of the same ' \
                              'name takes the mruby state there) and the API mapping of the whole call cannot both be applied')
         return
       end
+      # the nested calls this edit covers: the pass skips them (their rewrite is in out)
+      nested_spans.each_value { |ns0, ns1| ((@claimed_spans ||= {})[rel] ||= []) << [ns0, ns1] }
       ed.add(s, cp + 1, out)
       # a template that needs a gem at run time declares it (api_map gem_dep): the converted gem depends on it
       (@gem_deps ||= Set.new) << entry['gem_dep'] if entry['gem_dep']
