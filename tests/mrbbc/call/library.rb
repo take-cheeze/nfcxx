@@ -38,3 +38,21 @@ end
 def after_error
   ["safe", [1, 2]].inspect.size
 end
+
+def echo_value(value)
+  value
+end
+
+def allocate_echo(value)
+  items = [value, "allocate"]
+  "more" + "allocation"
+  items[0]
+end
+
+def append_value(value, suffix)
+  value << suffix
+end
+
+def flip_value(value)
+  !value
+end

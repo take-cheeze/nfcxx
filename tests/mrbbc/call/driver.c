@@ -31,8 +31,8 @@ static NfcCallStatus other_read(void *owner, const void *slot, int64_t *out) {
 static NfcCallStatus other_write(void *owner, void *slot, int64_t value) {
   (void)owner; ((OtherValue *)slot)->complemented = ~value; return NFC_CALL_OK;
 }
-static const NfcCallCodec other_codec = {other_read, other_write};
-static const NfcCallCodec no_codec = {NULL, NULL};
+static const NfcCallCodec other_codec = {other_read, other_write, NULL, NULL};
+static const NfcCallCodec no_codec = {NULL, NULL, NULL, NULL};
 static int native_calls;
 static int64_t native_add(int64_t a, int64_t b) { return a + b; }
 static int64_t native_vector(void *unused, const int64_t *args) {

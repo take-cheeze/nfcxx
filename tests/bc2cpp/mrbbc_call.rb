@@ -43,6 +43,11 @@ Dir.mktmpdir('mrbbc-call') do |dir|
     output = run.call(path)
     check.call(output.match?(/boxed\/direct call ABI: \d+ checks passed/), "missing runtime checks: #{output}")
     puts "layout #{value}: #{output.strip}"
+    values_exe = File.join(dir, "values#{value}")
+    run.call(ENV.fetch('CC', 'cc'), '-std=c99', '-Wall', '-Wextra', '-Werror', '-O2', "-DMRBBC_VALUE=#{value}",
+             '-DMRBBC_GC_THRESHOLD=1', *Shellwords.split(ENV.fetch('RT_CFLAGS', '')), "#{path}.s",
+             File.join(rt, 'mrbrt.c'), File.join(rt, 'mrbrt_call.c'), File.join(root, 'tests/mrbbc/call/values_driver.c'), '-o', values_exe)
+    puts "layout #{value}: #{run.call(values_exe).strip}"
   end
   {
     'missing' => 'def other; 1; end',
