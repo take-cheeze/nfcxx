@@ -26,6 +26,7 @@
 // keeps one global stack of try blocks (lib_src/throw.c of the front end), so a second thread running C++ code with destructors
 // while the interpreter runs would corrupt it.
 #include <algorithm>
+#include <climits>
 #include <csignal>
 #include <cmath>
 #include <cstdio>
@@ -264,6 +265,7 @@ struct TierProto {
 struct TierState {
   TierOptions opt;
   std::string driver, cache, rt_text, rt_dir;
+  std::string prof_dir;  // TierOptions::profile: where lib/prof is (the runtime the compiles link in)
   bool cache_ok = false, rt_ok = false, resolved = false;
   std::uint64_t next_serial = 1;
   std::vector<Version*> pending;  // compiles running (Async)
@@ -888,12 +890,14 @@ std::uint64_t mix_str(std::uint64_t h, const std::string& s) {
 }
 
 // The hash of a unit and the types it is compiled for: the bodies, what they read from outside, whom they call.
-std::uint64_t merkle_unit(const Unit& U, const std::vector<Ty>& sig, const UnitMeta& m, Ty ret, std::vector<std::uint64_t>* all) {
+std::uint64_t merkle_unit(const Unit& U, const std::vector<Ty>& sig, const UnitMeta& m, Ty ret, std::vector<std::uint64_t>* all,
+                          bool profile = false) {
   std::uint64_t h = mix(0x55, sig.size());
   for (Ty t : sig) h = mix(h, static_cast<std::uint64_t>(t));
   h = mix(h, static_cast<std::uint64_t>(ret));
   h = mix(h, static_cast<std::uint64_t>(m.nfv));
   h = mix(h, static_cast<std::uint64_t>(m.max_nslots));
+  if (profile) h = mix(h, 0x70726f66);  // instrumented code is a different version (plain code is hashed as it always was)
   std::size_t at = 0;
   if (all) {
     at = all->size();
@@ -1314,6 +1318,29 @@ const char* kPostRt =
     "static double nfct_id(double x) { return x; }\n"
     "static double (*volatile nfct_opq_p)(double) = nfct_id;\n";
 
+// Only with TierOptions::profile (the text is not in the source otherwise). Each function calls nfct_penter on entry and nfct_pexit
+// before every return, so the profiler sees the same enters and exits as a call would make. An abandoned run jumps back to the entry
+// with the calls it left open still on the stack of this thread: nfct_punwind closes them, innermost first, so the records alternate.
+// A stack deeper than the table is a run abandoned like a too deep recursion (it is then done again in the interpreter).
+const char* kProfRt =
+    "#include <stdint.h>\n"
+    "extern \"C\" { void __nfcxx_prof_enter(uint32_t site); void __nfcxx_prof_exit(uint32_t site); }\n"
+    "#define NFCT_PROF_CAP 4096\n"
+    "static __thread uint32_t nfct_ps[NFCT_PROF_CAP];\n"
+    "static __thread int nfct_pn = 0;\n"
+    "static void nfct_penter(nfcr_Ctx* cx, uint32_t s) {\n"
+    "  if (nfct_pn >= NFCT_PROF_CAP) nfct_bail(cx);\n"
+    "  nfct_ps[nfct_pn++] = s;\n"
+    "  __nfcxx_prof_enter(s);\n"
+    "}\n"
+    "static void nfct_pexit(uint32_t s) {\n"
+    "  --nfct_pn;\n"
+    "  __nfcxx_prof_exit(s);\n"
+    "}\n"
+    "static void nfct_punwind(void) {\n"
+    "  while (nfct_pn > 0) __nfcxx_prof_exit(nfct_ps[--nfct_pn]);\n"
+    "}\n";
+
 struct Gen {
   Unit& U;
   Infer& in;
@@ -1323,13 +1350,34 @@ struct Gen {
   bool top_used = false;  // a self tail call was written: the body has the label it jumps to
   bool jumps = false;     // a tail call of another instance was written as a jump (tail_jump): the calls go through the wrappers
 
-  Gen(Unit& u, Infer& i) : U(u), in(i) {}
+  bool prof = false;      // TierOptions::profile: the functions call the profiler runtime (kProfRt) on entry and before each return
+
+  Gen(Unit& u, Infer& i, bool profile = false) : U(u), in(i), prof(profile) {}
 
   std::string tmp() { return "t" + num(ntmp++); }
   Inst& inst() { return in.insts[static_cast<std::size_t>(inst_idx)]; }
   ProtoIR& proto() { return *U.protos[static_cast<std::size_t>(inst().proto)]; }
   Ty ty(const IExpr* e) { return inst().ety[static_cast<std::size_t>(e->id)]; }
   static std::string vname(int v) { return "v" + num(v); }
+
+  // The site of the function (the profile's number for it): a 32-bit FNV-1a hash of the proto's serial (its identity in the tier,
+  // unique to the function within a run; 0 when the proto has none) and its number in the unit. Stable within a run; a site of
+  // another run, or of another unit that has the same serial, is not told apart by the profile.
+  std::uint32_t site_of(int p) const {
+    const std::uint64_t parts[2] = {U.protos[static_cast<std::size_t>(p)]->serial, static_cast<std::uint64_t>(p)};
+    std::uint32_t h = 2166136261u;
+    for (std::uint64_t x : parts)
+      for (int b = 0; b < 8; ++b) {
+        h ^= static_cast<std::uint32_t>((x >> (8 * b)) & 0xff);
+        h *= 16777619u;
+      }
+    return h;
+  }
+  // The profiler calls around the function being written (empty when the tier does not profile).
+  std::string enter() { return prof ? "nfct_penter(cx, " + num(site_of(inst().proto)) + "u);\n" : ""; }
+  std::string leave() { return prof ? "nfct_pexit(" + num(site_of(inst().proto)) + "u);\n" : ""; }
+  // What the entry does when a run is abandoned: the calls left open are closed first (plain: as it always was).
+  std::string bail_ret() const { return prof ? "{ nfct_punwind(); return 1; }" : "return 1;"; }
 
   static std::string dbl_lit(double d) {
     if (d != d || d - d != 0) {  // NaN or infinite: by bits
@@ -1652,7 +1700,7 @@ struct Gen {
             else cur += "o[" + num(static_cast<long long>(at)) + "].i = " + t + ";\n";
           }
           writeback();
-          cur += "return 1;\n";
+          cur += leave() + "return 1;\n";
           break;
         }
         if (s->tail && !(inst_idx == 0 && is_osr()) && self_call(s->exprs[0])) {  // not in the loop of an OSR unit, which returns out of its frame
@@ -1664,12 +1712,12 @@ struct Gen {
           break;
         }
         if (s->exprs.empty()) {
-          cur += "--cx->depth;\nreturn;\n";
+          cur += leave() + "--cx->depth;\nreturn;\n";
         } else {
           std::string v = ex(s->exprs[0]);
           std::string t = tmp();
           Ty rt = inst().ret;
-          cur += std::string(ty_c(rt)) + " " + t + " = " + conv(v, ty(s->exprs[0]), rt) + ";\n--cx->depth;\nreturn " + t + ";\n";
+          cur += std::string(ty_c(rt)) + " " + t + " = " + conv(v, ty(s->exprs[0]), rt) + ";\n" + leave() + "--cx->depth;\nreturn " + t + ";\n";
         }
         break;
       }
@@ -1743,7 +1791,7 @@ struct Gen {
       }
     }
     jumps = true;
-    cur += "cx->tgt = " + num(j + 1) + ";\n--cx->depth;\nreturn " + zero(inst().ret) + ";\n";
+    cur += "cx->tgt = " + num(j + 1) + ";\n" + leave() + "--cx->depth;\nreturn " + zero(inst().ret) + ";\n";
   }
 
   // The declarations of the wrappers and of the dispatchers of a unit with tail jumps. A wrapper runs instance IDX and then the
@@ -1886,6 +1934,7 @@ struct Gen {
     ProtoIR& P = proto();
     cur.clear();
     ntmp = 0;
+    cur += enter();
     std::vector<int> pidx(static_cast<std::size_t>(P.nvars), -1);
     for (int k = 0; k < P.nparams; ++k) pidx[static_cast<std::size_t>(P.pvars[static_cast<std::size_t>(k)])] = k;
     for (int v = 0; v < P.nvars; ++v) {
@@ -1896,7 +1945,7 @@ struct Gen {
     }
     stmt(P.body);
     writeback();
-    return head_osr() + " {\n" + cur + "return 0;\n}\n";
+    return head_osr() + " {\n" + cur + leave() + "return 0;\n}\n";
   }
 
   std::string trampoline_osr() {
@@ -1911,7 +1960,7 @@ struct Gen {
     if (U.osr_style == TierLoopState::FOR_INT) call += ", a[" + n0 + "].i, (nfcr_u64)a[" + n1 + "].i, a[" + n2 + "].i";
     else if (U.osr_style == TierLoopState::FOR_FLT) call += ", a[" + n0 + "].d, a[" + n1 + "].d, a[" + n2 + "].d";
     call += ", r)";
-    return "extern \"C\" int nfcast_tier_run(nfcr_Ctx* cx, const nfcr_W* a, nfcr_W* r) {\n  jmp_buf jb;\n  cx->jb = &jb;\n  if (setjmp(jb)) return 1;\n  return " +
+    return "extern \"C\" int nfcast_tier_run(nfcr_Ctx* cx, const nfcr_W* a, nfcr_W* r) {\n  jmp_buf jb;\n  cx->jb = &jb;\n  if (setjmp(jb)) " + bail_ret() + "\n  return " +
            call + " ? 2 : 0;\n}\n";
   }
 
@@ -1931,6 +1980,7 @@ struct Gen {
     ProtoIR& P = proto();
     cur.clear();
     ntmp = 0;
+    cur += enter();
     for (int v = 0; v < P.nvars; ++v) {
       Ty t = I.vty[static_cast<std::size_t>(v)];
       std::string init = v < P.nparams ? conv("p" + num(v), I.sig[static_cast<std::size_t>(v)], t) : zero(t);  // a parameter that is assigned a float is an N
@@ -1941,8 +1991,8 @@ struct Gen {
     top_used = false;
     emit_block(P.body);
     if (top_used) cur.insert(top, "nfct_top:;\n");
-    if (can_complete(P.body)) cur += "--cx->depth;\n";
-    else if (I.ret != Y_V) cur += "return " + zero(I.ret) + ";\n";
+    if (can_complete(P.body)) cur += leave() + "--cx->depth;\n";
+    else if (I.ret != Y_V) cur += leave() + "return " + zero(I.ret) + ";\n";
     return head(idx) + " {\n" + cur + "}\n";
   }
 
@@ -1956,7 +2006,7 @@ struct Gen {
       call += ", " + std::string(t == Y_F ? "a[" + num(k) + "].d" : t == Y_B ? "(int)a[" + num(k) + "].i" : "a[" + num(k) + "].i");
     }
     call += ")";
-    std::string s = "extern \"C\" int nfcast_tier_run(nfcr_Ctx* cx, const nfcr_W* a, nfcr_W* r) {\n  jmp_buf jb;\n  cx->jb = &jb;\n  if (setjmp(jb)) return 1;\n";
+    std::string s = "extern \"C\" int nfcast_tier_run(nfcr_Ctx* cx, const nfcr_W* a, nfcr_W* r) {\n  jmp_buf jb;\n  cx->jb = &jb;\n  if (setjmp(jb)) " + bail_ret() + "\n";
     if (I.ret == Y_V) s += "  " + call + ";\n";
     else if (I.ret == Y_N) s += "  { nfcr_N rn = " + call + "; *r = rn.w; cx->rtag = rn.f; }\n";
     else if (I.ret == Y_F) s += "  r->d = " + call + ";\n";
@@ -1969,6 +2019,7 @@ struct Gen {
     out += rt_text;
     out += "\n";
     out += kPostRt;
+    if (prof) out += kProfRt;
     std::string bodies;
     for (std::size_t i = 0; i < in.insts.size(); ++i)
       if (in.live[i]) bodies += function(static_cast<int>(i));
@@ -2023,6 +2074,14 @@ void resolve(TierState* T) {
   if (const char* e = std::getenv("NFCAST_TIER_RT")) cands.push_back(e);
   cands.push_back(dir_of(__FILE__));
   cands.push_back(bld::repo_root_of(__FILE__) + "/lib/ast");
+  // The profiler runtime, by an absolute path: the compiles run from other directories, and __FILE__ may be relative to the build.
+  for (const std::string& c : {dir_of(T->driver) + "/lib/prof", bld::repo_root_of(__FILE__) + "/lib/prof"}) {
+    char abs[PATH_MAX];
+    if (::realpath(c.c_str(), abs) && bld::file_exists(std::string(abs) + "/nfcxx_prof.c")) {
+      T->prof_dir = abs;
+      break;
+    }
+  }
   if (has_slash(T->driver)) cands.push_back(dir_of(T->driver) + "/lib/ast");
   for (const std::string& c : cands) {
     std::string t = bld::read_file(c + "/nfcast_tier_rt.h");
@@ -2088,6 +2147,12 @@ void launch(State& S, Version* v) {
   args.push_back(T->driver);
   args.push_back("-shared");
   args.push_back(v->cpp);
+  if (T->opt.profile) {  // the profiler runtime, as the driver's --profile links it (without the -finstrument-functions hooks, which
+                         // would add a second enter and exit for every call); the gcc back end, as --profile needs
+    args.push_back("--backend=gcc");
+    for (const char* f : {"nfcxx_prof.c", "nfcxx_machine.c", "nfcxx_alloc.c"}) args.push_back(T->prof_dir + "/" + f);
+    args.push_back("-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free");  // nfcxx_alloc.c calls __real_* (the driver's --profile)
+  }
   args.push_back("-o");
   args.push_back(v->tmp);
   ++S.stats.tier_compiles;
@@ -2138,10 +2203,12 @@ void start_build(State& S, Version* v, const std::string& src) {
   resolve(T);
   if (!T->rt_ok) return fail_version(S, v, "cannot find nfcast_tier_rt.h");
   if (!T->cache_ok) return fail_version(S, v, "no usable cache directory");
+  if (T->opt.profile && T->prof_dir.empty()) return fail_version(S, v, "cannot find lib/prof (the profiler runtime)");
   std::string k = src;
   k += "\n//driver:" + T->driver;
   const char* be = std::getenv("NFCXX_BACKEND");
   k += std::string("\n//backend:") + (be ? be : "");
+  if (T->opt.profile) k += "\n//profile:gcc+prof";  // instrumented code (and its link) never shares an entry with plain code
   std::string key = bld::hash_hex(k);
   std::string base = T->cache + "/nfcast-tier-" + key;
   v->so = base + ".so";
@@ -2244,7 +2311,7 @@ void request(State& S, TierProto* tp, Closure* cl, const std::vector<Ty>& sig) {
   v->meta = make_meta(U);
   set_storage_types(v->meta, U, in);
   if (T->opt.share) {
-    v->mkey = merkle_unit(U, sig, v->meta, v->ret, nullptr);
+    v->mkey = merkle_unit(U, sig, v->meta, v->ret, nullptr, T->opt.profile);
     std::map<std::uint64_t, std::string>::iterator it = T->shared.find(v->mkey);
     if (T->opt.share == 1 && it != T->shared.end() && bld::file_exists(it->second)) {  // no code generation, no source hash
       v->so = it->second;
@@ -2258,11 +2325,11 @@ void request(State& S, TierProto* tp, Closure* cl, const std::vector<Ty>& sig) {
       hit->so.clear();
       hit->st = Version::Building;
       T->shared.erase(it);
-      start_build(S, hit, Gen(U, in).source(T->rt_text));
+      start_build(S, hit, Gen(U, in, T->opt.profile).source(T->rt_text));
       return;
     }
   }
-  Gen g(U, in);
+  Gen g(U, in, T->opt.profile);
   std::string src = g.source(T->rt_text);
   Version* raw = v.get();
   tp->vers.push_back(std::move(v));
@@ -2548,7 +2615,7 @@ void osr_request(State& S, TierProto* tp, TierLoop* tl, Frame& f, Node* loop, in
   v->in_written = tl->in_written;
   const ProtoIR& P = *U.protos[0];
   for (int var : P.pvars) v->out_ty.push_back(in.insts[0].vty[static_cast<std::size_t>(var)]);
-  Gen g(U, in);
+  Gen g(U, in, T->opt.profile);
   std::string src = g.source(T->rt_text);
   Version* raw = v.get();
   tl->vers.push_back(std::move(v));
@@ -2796,6 +2863,7 @@ void tier_init_from_env(State& S) {
   }
   if (const char* r = std::getenv("NFCAST_TIER_OSR")) o.osr = !(r[0] == '0' && !r[1]);
   if (const char* sh = std::getenv("NFCAST_TIER_SHARE")) o.share = static_cast<unsigned>(std::atoi(sh));
+  if (const char* p = std::getenv("NFCAST_TIER_PROFILE")) o.profile = !(p[0] == '0' && !p[1]);
   S.enable_tier(o);
 }
 
@@ -2853,7 +2921,7 @@ std::vector<std::uint64_t> State::tier_merkle(const Value& fn, const Value* args
   if (!in.run(sig)) return all;
   UnitMeta m = make_meta(U);
   set_storage_types(m, U, in);
-  merkle_unit(U, sig, m, in.insts[0].ret, &all);
+  merkle_unit(U, sig, m, in.insts[0].ret, &all, tier->opt.profile);
   return all;
 }
 

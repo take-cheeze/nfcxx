@@ -59,8 +59,11 @@ benchmark has been run yet.
    Counts go into the per-function record; sampling by bytes is kept for stack capture.
 3. **Compute counts.** From callgrind (instruction counts) as the external cross-check; from node evaluations for nfcast,
    counted in the existing dispatch.
-4. **nfcast tier.** Emit the calls into the tier's generated C when profiling is on, and add the profiling flag to the cache
-   key so instrumented and plain code are never served in place of each other.
+4. **nfcast tier.** Done in the prototype behind `NFCAST_TIER_PROFILE=1` (`docs/notes/ast.md`, "Tiering"): the generated C calls
+   `__nfcxx_prof_enter` / `__nfcxx_prof_exit` per function (site = FNV-1a of the proto's tier serial and number), the flag is in the
+   compile cache key and the Merkle hash, and an abandoned run closes the calls it left open. Open: each shared object has its own
+   copy of the runtime, so a run with several compiled units keeps only the last profile written to `NFCXX_PROFILE`. The fix is for
+   the host to load one runtime (RTLD_GLOBAL) that the objects bind to.
 5. **Cheaper timestamps.** Replace `clock_gettime` with a calibrated `rdtsc`, after the overhead has been measured.
 
 ## Decisions taken in the prototype
