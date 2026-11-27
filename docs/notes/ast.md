@@ -367,11 +367,10 @@ S.enable_tier(t);          // t.mode = nfcast::TierOptions::Async: compile in th
 For the test drivers the environment does the same when the `State` is created: `NFCAST_TIER=sync|async|0`,
 `NFCAST_TIER_THRESHOLD=n` (calls and loop iterations; the tests use 1), `NFCAST_TIER_CACHE=dir`, `NFCAST_TIER_RT=dir` (where
 `nfcast_tier_rt.h` is, if not next to `nfcast_tier.cpp`), `NFCAST_TIER_DEBUG=1` (what it compiles, loads and refuses, on stderr),
-`NFCAST_TIER_PROFILE=1` (the compiled functions call the profiler runtime on entry and exit, the shared objects link `lib/prof`, the
-compiles use the gcc back end, and the cache key includes the flag; `NFCXX_PROFILE` names the file the records go to. Each shared
-object carries its own copy of the runtime and writes that file itself, so a run that compiles more than one unit leaves the profile
-of the last one: a profile of several units needs the runtime loaded once by the host, which is not done yet; see
-`docs/notes/profiler.md`);
+`NFCAST_TIER_PROFILE=1` (the compiled functions call the profiler runtime on entry and exit, the shared objects depend on
+`libnfcxx_prof.so` (built once into the cache from `lib/prof`), the compiles use the gcc back end, and the cache key includes the flag;
+`NFCXX_PROFILE` names the file the records go to. The process has one runtime, so a run that compiles several units writes one profile
+of all of them; `tests/ast/profile/two.lua` checks it);
 the driver is `$NFCXX`, else `<repo>/nfcxx`, else `nfcxx` on `PATH`. `State::tier_state(fn)` says what became of a function
 (`cold`, `compiled ii->i`, `ineligible: why`, `failed ...`), `State::tier_wait()` waits for the compiles that are running. The other
 fields of `TierOptions` are `threshold` and `loop_threshold`, `jobs` (compiles running at once in `Async`), `driver`, `cache_dir`,
