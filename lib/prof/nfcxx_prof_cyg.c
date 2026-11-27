@@ -23,3 +23,7 @@ NOINSTR void __cyg_profile_func_exit(void *fn, void *call_site) {
   (void)call_site;
   __nfcxx_prof_exit(site_of(fn));
 }
+
+/* The Path B hooks (scripts/pathb-ssa-qbe.rb, --profile): the same events, named by the function's address. */
+NOINSTR void __nfcxx_prof_enter_addr(void *fn) { __nfcxx_prof_enter(site_of(fn)); }
+NOINSTR void __nfcxx_prof_exit_addr(void *fn) { __nfcxx_prof_exit(site_of(fn)); }

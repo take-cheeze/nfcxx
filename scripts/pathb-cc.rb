@@ -64,6 +64,7 @@ src = ""
 out = ""
 safe_on = ENV["NFCXX_SAFE_POINTERS"] == "1" ? 1 : 0
 asan_on = ENV["NFCXX_PATHB_ASAN"] == "1" ? 1 : 0
+prof_on = 0   # --profile
 passes = "inline,hoist-pure"   # the default; --ir-opt=LIST changes it (--ir-opt=inline turns hoist-pure off, --ir-opt=none the passes)
 ir_opt_max = ENV["NFCXX_IR_OPT_MAX"].to_s.empty? ? "268435456" : ENV["NFCXX_IR_OPT_MAX"]
 passes_given = 0
@@ -96,6 +97,7 @@ while !args.empty?
   when "-o" then out = args.shift.to_s
   when "--safe-pointers" then safe_on = 1
   when "--asan" then asan_on = 1
+  when "--profile" then prof_on = 1   # the profiler hooks (docs/notes/profiler.md, "Path B")
   when "-g", /\A-g[0-3]\z/, "-ggdb", /\A-ggdb[0-3]\z/ then debug_on = x != "-g0" && x != "-ggdb0" ? 1 : 0
   when "--no-pie" then nopie = ["--no-pie"]
   when "--i386", "--target=linux_i686" then i386 = 1
@@ -167,6 +169,7 @@ if safe_on == 1
   safe = ["--safe"]
   dump_opts << "--ir-loc"
 end
+prof = prof_on == 1 ? ["--profile"] : []
 asan = []
 if asan_on == 1
   asan = ["--asan"]
@@ -274,7 +277,7 @@ rc = 0
 emit_err = File.join(tmp, "#{n}.emit")
 s_path = File.join(tmp, "#{n}.s")
 ssa_cmd = [File.join(ROOT, "scripts", "pathb-ssa-build"), "--qbe=#{qbe}", "-o", s_path, *i386opt, *pic, *nopie, *ldopt,
-           *safe, *asan, *debug, ir]
+           *safe, *asan, *prof, *debug, ir]
 # The SSA route's budget grows with the IR it is given: QBE with the default loop vectorizer takes about 23 s per MB of IL (a
 # 17 MB unit, one large function of Lean's generated C, took 390 s), and the budget allows 40 s per MB, so a loaded machine still
 # fits. Only the default limit grows; an explicit --timeout or NFCXX_PATHB_TIMEOUT stands for every stage.

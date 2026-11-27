@@ -149,3 +149,25 @@ run. It needs valgrind and takes about a second here (the driver build included)
 join the default run if valgrind is assumed. Its checks: callgrind's self Ir sums to its totals; main's inclusive Ir is at
 least fib's self Ir; the callgrind entries of `main` and `fib` equal their nm addresses; and for each site the profile's
 calls equal callgrind's calls and `self_instructions` equals the self Ir found through nm.
+
+## Path B hooks (`--profile` on the SSA route)
+
+`scripts/pathb-cc.rb --profile` (and `scripts/pathb-ssa-build --profile`) sets `Qbe.prof` in `scripts/pathb-ssa-qbe.rb`. The
+emitter then calls the runtime at the start of each defined function and before each `ret`:
+
+    call $__nfcxx_prof_enter_addr(l $FUNCTION)
+    ...
+    call $__nfcxx_prof_exit_addr(l $FUNCTION)
+
+with `$FUNCTION` the symbol the function is defined under (the hidden entry's body is `NAME.nfcxxhid`). The runtime names
+each site by the function's address, as the gcc hooks do (`lib/prof/nfcxx_prof_cyg.c`). Without `--profile` the emitted
+assembly is unchanged: `tests/pathb-prof/run.sh` checks the hooks are referenced only with the flag, and a plain object from
+the untouched HEAD is byte-identical to one from the working tree.
+
+Limits, not done:
+- The driver does not yet route `--profile` through Path B: `scripts/nfcxx-loop.rb` still forces the gcc backend for it, and
+  the Path B link does not add the runtime. The test links the runtime by hand.
+- A function left by a C++ exception (or a longjmp) does not run its exit hook, so its call stays open in the profile. The
+  EH landing pads would need the exit hook too.
+- `tests/pathb-cc/run.sh` already fails on HEAD for `template` and `ir-opt-inline-explicit` (their objects differ from the
+  bash oracle); this change does not affect that.

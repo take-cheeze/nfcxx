@@ -177,7 +177,7 @@ module Qbe
     # interpose (not static) is read through the GOT or a pointer cell, never as a PC-relative reference, which ld rejects for
     # a symbol of a shared object (R_X86_64_PC32 "can not be used when making a shared object").
     # darwin: the module is for a Darwin target (the builder sets it from the host; a closed script world has no RbConfig).
-    attr_accessor :ptr32, :regparm3, :xadd, :cmpxchg, :jtab, :safe, :asan, :darwin, :got_extern, :pic, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_thunks, :trap_checks, :no_pie, :nothrow, :debug_lines
+    attr_accessor :ptr32, :regparm3, :xadd, :cmpxchg, :jtab, :safe, :asan, :prof, :darwin, :got_extern, :pic, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_thunks, :trap_checks, :no_pie, :nothrow, :debug_lines
   end
   # --asan, milestone 2: the redzone on each side of a slot that stays in memory (poisoned at the function's entry, unpoisoned
   # before its return). 32 bytes, as the qbe backend's (docs/notes/asan.md).
@@ -188,6 +188,8 @@ module Qbe
   # the argument indices, the length being argument 2.
   SP_MEMFN = { "memcpy" => [0, 1], "memmove" => [0, 1], "memset" => [0], "memcmp" => [0, 1], "bcmp" => [0, 1] }.freeze
   self.safe = false
+  # --profile (docs/notes/profiler.md): each defined function calls the profiler hooks at its entry and before each return.
+  self.prof = false
   # --i386 (the 32-bit targets, i386 and i386_regparm3): pointers are 32-bit, of class w; `long` is read as `int` by the driver
   # (scripts/pathb-ssa-build renames the IR's tokens), long long stays class l. docs/notes/nfcc-pathb.md, 3rd/qbe/doc/i386.txt.
   self.ptr32 = false
@@ -631,6 +633,11 @@ module Qbe
       @lines = out
     end
 
+    # The symbol the function is defined under: the body of a hidden entry is NAME.nfcxxhid. --profile names this symbol.
+    def prof_symbol
+      @hidden_name ? "#{@name}.nfcxxhid" : @name
+    end
+
     def header
       sig = []
       @ints = 0             # integer argument registers taken so far (AArch64)
@@ -720,6 +727,7 @@ module Qbe
         @lines << "#{static ? "" : "export "}#{secl}function #{ret}$#{@name}(#{sig.join(", ")}) {"
       end
       @lines << "@start"
+      @lines << "  call $__nfcxx_prof_enter_addr(l $#{prof_symbol})" if Qbe.prof
       eh_header
       @f16_params.each { |n| f16_from_sse("%h#{n}", "%p#{n}") }
     end
@@ -2038,6 +2046,7 @@ end
         jump_to(item[3])
         @lines << "  jnz #{cond}, @#{block_label(item[2])}, @#{block_label(item[3])}"
       when "ret"
+        @lines << "  call $__nfcxx_prof_exit_addr(l $#{prof_symbol})" if Qbe.prof
         asan_leave
         # --safe: the frame is released before the return (pathb-qbe-emit.rb's SP_LEAVE, with the first object).
         @lines << "  call $__nfcxx_sp_leave(l #{@sp_objs.first[0]})" if Qbe.safe && !@sp_objs.empty?
