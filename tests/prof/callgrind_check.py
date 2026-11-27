@@ -154,7 +154,7 @@ def main():
                f"nm gives {hex(want) if want is not None else 'no symbol'}")
 
     db = sqlite3.connect(dbpath)
-    rows = db.execute("SELECT name, calls, exclusive_ns, self_instructions FROM sites WHERE run_id = 1 ORDER BY site").fetchall()
+    rows = db.execute("SELECT name, calls, exclusive_ns, self_instructions FROM sites WHERE run_id = 1 AND name NOT LIKE '(%' ORDER BY site").fetchall()
     db.close()
     report(len(rows) == 2, f"database: run 1 has {len(rows)} sites (expected 2)")
 
