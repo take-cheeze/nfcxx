@@ -426,6 +426,7 @@ State::State() : impl(new Impl) {
   top = stack;
   impl->strtab.assign(256, nullptr);
   if (const char* e = std::getenv("NFCAST_GC_STRESS")) gc_stress = e[0] == '1';
+  if (const char* e = std::getenv("NFCAST_COUNT_NODES")) count_nodes = e[0] == '1';
   if (const char* e = std::getenv("NFCAST_INLINE")) inlining = e[0] != '0';
   if (const char* e = std::getenv("NFCAST_INLINE_WARM")) inline_warm = static_cast<unsigned>(std::atoi(e));
   for (int i = 0; i < TM_N; ++i) impl->tmname[i] = nullptr;

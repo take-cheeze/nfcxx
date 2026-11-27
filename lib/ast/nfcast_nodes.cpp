@@ -55,7 +55,7 @@ inline void check_stack(State& S, std::size_t n) {
 struct NameNode : Node {
   std::string d;
   explicit NameNode(std::string s) : d(std::move(s)) {}
-  Value eval(Frame&) override { return Value(); }
+  Value eval(Frame& f) override { count_node(f); return Value(); }
   void describe(std::string& out) const override { out = d; }
 };
 
@@ -65,7 +65,7 @@ struct NameNode : Node {
 struct ConstNode : Node {
   Value v;
   explicit ConstNode(const Value& x) : v(x) {}
-  Value eval(Frame&) override { return v; }
+  Value eval(Frame& f) override { count_node(f); return v; }
   bool is_simple() const override { return true; }
   int node_kind() const override { return 1; }
   void describe(std::string& out) const override {
@@ -90,6 +90,7 @@ struct LocalNode : Node {
     vi = nullptr;
   }
   Value eval(Frame& f) override {
+    count_node(f);
     const Value& s = f.base[slot];
     return cell ? static_cast<Cell*>(s.o)->v : s;
   }
@@ -108,7 +109,7 @@ struct UpvalNode : Node {
   int idx;
   std::string name;
   UpvalNode(int i, std::string n) : idx(i), name(std::move(n)) {}
-  Value eval(Frame& f) override { return f.cl->up[idx]->v; }
+  Value eval(Frame& f) override { count_node(f); return f.cl->up[idx]->v; }
   bool is_simple() const override { return true; }
   void describe(std::string& out) const override { out = "upvalue '" + name + "'"; }
   int target_kind() const override { return 2; }
@@ -122,6 +123,7 @@ struct GlobalNode : Node {
   void describe(std::string& out) const override { out = "global '" + std::string(name->view()) + "'"; }
   int target_kind() const override { return 3; }
   Value eval(Frame& f) override {
+    count_node(f);
     Table* g = f.S->globals;
     long i = cache;
     if (static_cast<unsigned long>(i) < g->hcap && g->nodes[i].key.t == T_STR && g->nodes[i].key.o == name) {
@@ -162,8 +164,9 @@ struct GlobalNode : Node {
 };
 
 struct VarargNode : Node {
-  Value eval(Frame& f) override { return f.nva > 0 ? f.va[0] : Value(); }
+  Value eval(Frame& f) override { count_node(f); return f.nva > 0 ? f.va[0] : Value(); }
   void evalMulti(Frame& f, Rets& out) override {
+    count_node(f);
     for (int i = 0; i < f.nva; ++i) out.push(f.va[i]);
   }
   bool is_multi() const override { return true; }
@@ -174,6 +177,7 @@ struct FunctionNode : Node {
   Proto* child;
   explicit FunctionNode(Proto* c) : child(c) {}
   Value eval(Frame& f) override {
+    count_node(f);
     State& S = *f.S;
     std::uint32_t nup = static_cast<std::uint32_t>(child->upvals.size());
     Closure* cl = new_closure(S, child, nup);
@@ -197,7 +201,7 @@ struct FunctionNode : Node {
 struct ParenNode : Node {
   Node* e_;
   explicit ParenNode(Node* e) : e_(e) { adopt(e_); }
-  Value eval(Frame& f) override { return e_->eval(f); }
+  Value eval(Frame& f) override { count_node(f); return e_->eval(f); }
   bool is_simple() const override { return e_->is_simple(); }
   void describe(std::string& out) const override { e_->describe(out); }
 };
@@ -308,6 +312,7 @@ struct ArithBase : Node {
   }
   // Evaluates the operands left to right, keeping the first rooted while the second runs, then computes.
   Value eval(Frame& f) override {
+    count_node(f);
     Value a = l_->eval(f), b;
     if (a.is_gc() && !r_->is_simple()) {
       Pushed p(*f.S, a);
@@ -355,6 +360,7 @@ template <int OP, int LK, int RK>
 struct ArithII : ArithBase {
   ArithII(Node* l, Node* r) : ArithBase(OP, l, r) { bind(); }
   Value eval(Frame& f) override {
+    count_node(f);
     Value a, b;
     read_operands<LK, RK>(f, l_, r_, lo_, ro_, a, b);
     return calc(f, a, b);
@@ -374,6 +380,7 @@ template <int OP, int LK, int RK>
 struct ArithNN : ArithBase {
   ArithNN(Node* l, Node* r) : ArithBase(OP, l, r) { bind(); }
   Value eval(Frame& f) override {
+    count_node(f);
     Value a, b;
     read_operands<LK, RK>(f, l_, r_, lo_, ro_, a, b);
     return calc(f, a, b);
@@ -567,6 +574,7 @@ struct UnaryNode : Node {
   Node* e_;
   UnaryNode(int o, Node* e) : op(o), e_(e) { adopt(e_); }
   Value eval(Frame& f) override {
+    count_node(f);
     Value v = e_->eval(f);
     switch (op) {
       case OPX_NOT: return Value::boolean(!v.truthy());
@@ -596,6 +604,7 @@ struct AndNode : Node {
     adopt(r_);
   }
   Value eval(Frame& f) override {
+    count_node(f);
     Value a = l_->eval(f);
     return a.truthy() ? r_->eval(f) : a;
   }
@@ -614,6 +623,7 @@ struct OrNode : Node {
     adopt(r_);
   }
   Value eval(Frame& f) override {
+    count_node(f);
     Value a = l_->eval(f);
     return a.truthy() ? a : r_->eval(f);
   }
@@ -633,6 +643,7 @@ struct ConcatNode : Node {
     return true;
   }
   Value eval(Frame& f) override {
+    count_node(f);
     State& S = *f.S;
     int n = static_cast<int>(parts_.size());
     check_stack(S, static_cast<std::size_t>(n));
@@ -674,6 +685,7 @@ struct CmpBase : Node {
     ro_ = bind_operand(r_);
   }
   Value eval(Frame& f) override {
+    count_node(f);
     Value a = l_->eval(f), b;
     if (a.is_gc() && !r_->is_simple()) {
       Pushed p(*f.S, a);
@@ -706,6 +718,7 @@ template <int OP, int LK, int RK>
 struct CmpII : CmpBase {
   CmpII(Node* l, Node* r) : CmpBase(OP, l, r) { bind(); }
   Value eval(Frame& f) override {
+    count_node(f);
     Value a, b;
     read_operands<LK, RK>(f, l_, r_, lo_, ro_, a, b);
     return calc(f, a, b);
@@ -722,6 +735,7 @@ template <int OP, int LK, int RK>
 struct CmpFF : CmpBase {  // both floats
   CmpFF(Node* l, Node* r) : CmpBase(OP, l, r) { bind(); }
   Value eval(Frame& f) override {
+    count_node(f);
     Value a, b;
     read_operands<LK, RK>(f, l_, r_, lo_, ro_, a, b);
     return calc(f, a, b);
@@ -836,6 +850,7 @@ struct EqNode : Node {
     adopt(r_);
   }
   Value eval(Frame& f) override {
+    count_node(f);
     Value a = l_->eval(f), b;
     if (a.is_gc() && !r_->is_simple()) {
       Pushed p(*f.S, a);
@@ -899,6 +914,7 @@ struct IndexBase : Node {
     else out = "field '?'";
   }
   Value eval(Frame& f) override {
+    count_node(f);
     Value o = obj_->eval(f), k;
     if (o.is_gc() && !key_->is_simple()) {
       Pushed p(*f.S, o);
@@ -1051,6 +1067,7 @@ struct FieldBase : Node {
   int node_kind() const override { return 2; }
   void describe(std::string& out) const override { out = "field '" + std::string(name_->view()) + "'"; }
   Value eval(Frame& f) override {
+    count_node(f);
     Value o = obj_->eval(f);
     return get(f, o);
   }
@@ -1200,6 +1217,7 @@ struct SetIndexBase : Node {
   }
   // Evaluates the object, the key and the value in that order, keeping the earlier ones rooted.
   Value eval(Frame& f) override {
+    count_node(f);
     State& S = *f.S;
     Value o, k, v;
     o = obj_->eval(f);
@@ -1271,6 +1289,7 @@ struct SetFieldBase : Node {
     adopt(val_);
   }
   Value eval(Frame& f) override {
+    count_node(f);
     Value o = obj_->eval(f), v;
     if (o.is_gc() && !val_->is_simple()) {
       Pushed p(*f.S, o);
@@ -1435,12 +1454,14 @@ struct CallBase : Node {
   bool is_multi() const override { return true; }
   bool is_call() const override { return true; }
   Value eval(Frame& f) override {
+    count_node(f);
     Rets r;
     run(f, r);
     return r.first();
   }
-  void evalMulti(Frame& f, Rets& out) override { run(f, out); }
+  void evalMulti(Frame& f, Rets& out) override { count_node(f); run(f, out); }
   int exec(Frame& f) override {
+    count_node(f);
     Rets r;
     run(f, r);
     return C_NORMAL;
@@ -1533,12 +1554,14 @@ struct MethodBase : Node {
   bool is_multi() const override { return true; }
   bool is_call() const override { return true; }
   Value eval(Frame& f) override {
+    count_node(f);
     Rets r;
     run(f, r);
     return r.first();
   }
-  void evalMulti(Frame& f, Rets& out) override { run(f, out); }
+  void evalMulti(Frame& f, Rets& out) override { count_node(f); run(f, out); }
   int exec(Frame& f) override {
+    count_node(f);
     Rets r;
     run(f, r);
     return C_NORMAL;
@@ -1715,6 +1738,7 @@ struct TableNode : Node {
     }
   }
   Value eval(Frame& f) override {
+    count_node(f);
     State& S = *f.S;
     Table* t = S.new_table(npos_, nkeyed_);
     Pushed pt(S, Value::table(t));
@@ -1781,6 +1805,7 @@ struct BlockNode : Node {
     return Value();
   }
   int exec(Frame& f) override {
+    count_node(f);
     for (Node* s : stmts_) {
       int c = s->exec(f);
       if (c) return c;
@@ -1827,6 +1852,7 @@ struct LocalDeclNode : Node {
     return Value();
   }
   int exec(Frame& f) override {
+    count_node(f);
     State& S = *f.S;
     if (vars_.size() == 1 && exprs_.size() == 1) {  // a call adjusted to one value is its first value
       Value v = exprs_[0]->eval(f);
@@ -1870,6 +1896,7 @@ struct AssignLocal : Node {
     return Value();
   }
   int exec(Frame& f) override {
+    count_node(f);
     target_->assign(f, val_->eval(f));
     return C_NORMAL;
   }
@@ -1884,6 +1911,7 @@ struct AssignUpval : Node {
     return Value();
   }
   int exec(Frame& f) override {
+    count_node(f);
     f.cl->up[idx]->v = val_->eval(f);
     return C_NORMAL;
   }
@@ -1898,6 +1926,7 @@ struct AssignGlobal : Node {
     return Value();
   }
   int exec(Frame& f) override {
+    count_node(f);
     target_->line = line;
     target_->assign(f, val_->eval(f));
     return C_NORMAL;
@@ -1924,6 +1953,7 @@ struct AssignMulti : Node {
     return Value();
   }
   int exec(Frame& f) override {
+    count_node(f);
     State& S = *f.S;
     std::size_t nt = targets_.size();
     check_stack(S, nt * 3 + exprs_.size() + 4);
@@ -1985,6 +2015,7 @@ struct WhileNode : Node {
   }
   TierLoop* tl_ = nullptr;  // what the tier knows about this loop (nfcast_tier.cpp)
   int exec(Frame& f) override {
+    count_node(f);
     TierLoopState ts;
     ts.kind = TierLoopState::WHILE;
     if (f.S->tier)
@@ -2017,6 +2048,7 @@ struct RepeatNode : Node {
   }
   TierLoop* tl_ = nullptr;  // what the tier knows about this loop (nfcast_tier.cpp)
   int exec(Frame& f) override {
+    count_node(f);
     TierLoopState ts;
     ts.kind = TierLoopState::REPEAT;
     if (f.S->tier)
@@ -2051,6 +2083,7 @@ struct IfNode : Node {
     return Value();
   }
   int exec(Frame& f) override {
+    count_node(f);
     for (std::size_t i = 0; i < conds_.size(); ++i)
       if (conds_[i]->eval(f).truthy()) return blocks_[i]->exec(f);
     if (else_) return else_->exec(f);
@@ -2085,6 +2118,7 @@ struct NumForNode : Node {
     return Value();
   }
   int exec(Frame& f) override {
+    count_node(f);
     State& S = *f.S;
     Value init = start_->eval(f);
     Value lim = limit_->eval(f);
@@ -2221,6 +2255,7 @@ struct ForInNode : Node {
     }
   }
   int exec(Frame& f) override {
+    count_node(f);
     State& S = *f.S;
     // The three values of the explist go to the hidden slots (rooted there).
     check_stack(S, exprs_.size() + 8);
@@ -2339,6 +2374,7 @@ struct LocalFuncNode : Node {
     return Value();
   }
   int exec(Frame& f) override {
+    count_node(f);
     if (var_.captured) {
       Cell* c = new_cell(*f.S, Value());
       f.base[var_.slot] = Value::object(T_CELL, c);  // visible to the closure, which refers to itself
@@ -2363,6 +2399,7 @@ struct ReturnNode : Node {
     return Value();
   }
   int exec(Frame& f) override {
+    count_node(f);
     State& S = *f.S;
     if (exprs_.empty()) return C_RETURN;
     if (exprs_.size() == 1) {
@@ -2389,8 +2426,8 @@ struct ReturnNode : Node {
 };
 
 struct BreakNode : Node {
-  Value eval(Frame&) override { return Value(); }
-  int exec(Frame&) override { return C_BREAK; }
+  Value eval(Frame& f) override { count_node(f); return Value(); }
+  int exec(Frame& f) override { count_node(f); return C_BREAK; }
 };
 
 }  // namespace

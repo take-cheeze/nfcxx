@@ -63,8 +63,12 @@ was used (`clock=tsc` or `clock=monotonic`). Measured on one machine only; the f
 2. **Allocation counts.** Count `malloc` and `free` calls and bytes. Two ways: `--wrap=malloc` at link time for compiled
    programs, and the `gc_alloc` chokepoint in `lib/ast/nfcast_core.cpp` (plus the one direct `std::malloc` there) for nfcast.
    Counts go into the per-function record; sampling by bytes is kept for stack capture.
-3. **Compute counts.** Done for C programs from callgrind, as the external cross-check (see "Compute counts" below). Still to
-   do: node evaluations for nfcast, counted in the existing dispatch.
+3. **Compute counts.** Done for C programs from callgrind, as the external cross-check (see "Compute counts" below). Done for
+   nfcast: `State::stats.node_evals` counts the interpreter's node evaluations, one per call of a node's `eval`, `evalMulti` or
+   `exec`, where the method starts (`count_node`). It is a count of dispatches, not of instructions and not of time: it does
+   not measure the machine work of a node, and nodes run by the tier's or the JIT's machine code count nothing. It is off unless
+   `State::count_nodes` (`NFCAST_COUNT_NODES=1`) is set, because the counter costs a few percent on loops. Checked by
+   `tests/ast/counts/loop.lua` (28 evaluations) in `tests/ast/run.sh`; see `docs/notes/ast.md`, "Stats".
 4. **nfcast tier.** Done in the prototype behind `NFCAST_TIER_PROFILE=1` (`docs/notes/ast.md`, "Tiering"): the generated C calls
    `__nfcxx_prof_enter` / `__nfcxx_prof_exit` per function (site = FNV-1a of the proto's tier serial and number), the flag is in the
    compile cache key and the Merkle hash, and an abandoned run closes the calls it left open. Done: the runtime is one shared object

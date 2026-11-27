@@ -127,6 +127,12 @@ inline Proto* owner_proto(Frame& f) {
   return r->cl->proto;
 }
 
+// One node evaluation, for State::stats.node_evals: the first thing the eval, evalMulti or exec of a node does. Off unless
+// State::count_nodes is set (the counter costs a few percent of the loops of the benchmarks, tests/ast/bench).
+inline void count_node(Frame& f) {
+  if (f.S->count_nodes) ++f.S->stats.node_evals;
+}
+
 struct Node {
   int line = 0;
   Node** slot = nullptr;  // where the parent holds this node; a rewrite stores the replacement there

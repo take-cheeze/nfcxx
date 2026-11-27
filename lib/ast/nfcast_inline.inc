@@ -62,6 +62,7 @@ struct SubstLocal : Node {  // a local of the frame UP links back from the runni
   std::string name;
   SubstLocal(int u, int s, std::string n) : up(u), slot(s), name(std::move(n)) {}
   Value eval(Frame& f) override {
+    count_node(f);
     Frame* r = f.prev;
     for (int i = 1; i < up; ++i) r = r->prev;
     return r->base[slot];
@@ -74,7 +75,7 @@ struct SubstConst : Node {
   Value v;
   std::string name;
   SubstConst(const Value& x, std::string n) : v(x), name(std::move(n)) {}
-  Value eval(Frame&) override { return v; }
+  Value eval(Frame& f) override { count_node(f); return v; }
   bool is_simple() const override { return true; }
   void describe(std::string& out) const override { out = "local '" + name + "'"; }
 };
@@ -556,6 +557,7 @@ struct InlineCall : CallBase {
   }
   // The machine-code tier's replay (CallBase::replay_) takes the place of the call, as in CallBase::run: no inlined body runs.
   Value eval(Frame& f) override {
+    count_node(f);
     if (replay_ && replay_->f == &f) return replay_->v;
     Value* ab;
     int n = prepare(f, ab);
@@ -571,6 +573,7 @@ struct InlineCall : CallBase {
     return r;
   }
   void evalMulti(Frame& f, Rets& out) override {
+    count_node(f);
     if (replay_ && replay_->f == &f) {
       out.push(replay_->v);
       return;
@@ -581,8 +584,11 @@ struct InlineCall : CallBase {
     f.S->top = ab;
   }
   int exec(Frame& f) override {
-    if (replay_ && replay_->f == &f) return C_NORMAL;
-    eval(f);
+    if (replay_ && replay_->f == &f) {
+      count_node(f);
+      return C_NORMAL;
+    }
+    eval(f);  // counts the node
     return C_NORMAL;
   }
   void dispatch(Frame& f, const Value& fnv, Value* args, int n, Rets& out) override {
@@ -646,6 +652,7 @@ struct MethodInline : MethodBase {
     f.S->top = ab;
   }
   Value eval(Frame& f) override {
+    count_node(f);
     Value o = obj_->eval(f);
     Value r;
     if (o.t != T_TAB) {

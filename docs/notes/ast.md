@@ -1121,6 +1121,40 @@ frame and gets the errors).
   not looked through just makes the loop run in the interpreter) is a count in `tier.cpp`.
 - `tests/eval/run.sh` passes with nfceval built on `nfceval_build.hpp`, `tests/poly/run.sh` with `POLY_LANGS=ast` too, both back ends.
 
+## Stats
+
+`State::stats` (`struct Stats` in `nfcast.hpp`) holds the counters of each part of the engine; the sections above name theirs.
+`tests/ast/driver --stats` prints them to stderr after a run.
+
+The compute count is `node_evals`: the number of node evaluations of the interpreter (the input of the profiler's compute
+counts, `docs/notes/profiler.md`, "Next steps", item 3).
+
+- What is counted: one per call of a node's `eval`, `evalMulti` or `exec` made by the interpreter, at the first line of that
+  method (`count_node`, `nfcast_impl.hpp`). A statement run through a block's `exec` counts once, and a node whose `eval` only calls
+  its own `exec` counts once. The operands of a generic or profiling arithmetic node are dispatched, so they count; a specialized
+  arithmetic or comparison node reads a local or a constant operand in place, so that operand counts nothing.
+- What is not: machine instructions, time, or allocation. What the tier or the JIT runs as native code evaluates no nodes and counts
+  nothing; a loop or call they hand back to the interpreter counts from there.
+- Switch: off by default. `State::count_nodes`, or `NFCAST_COUNT_NODES=1` in the environment (read by the State constructor like
+  `NFCAST_INLINE`). With it off `node_evals` stays 0.
+- Check: `tests/ast/counts/loop.lua` makes 28 evaluations (the file works them out line by line: the first two iterations of
+  `s = s + i` are still recording their operands, so their operands are dispatched; the last three run the specialized node).
+  `tests/ast/run.sh` checks the 28 with the switch on and the 0 with it off.
+
+Overhead of the counter, measured with cachegrind (`--cache-sim=no`, instructions executed; deterministic, unlike the wall clock
+on the test VM, where the same binary ranged over 513 to 614 ms in repeated runs). `intloop` with 300,000 iterations ten times:
+
+| Build | Instructions | Over the build without the counter |
+| --- | ---: | ---: |
+| without the counter code (origin/main) | 772.5 M | |
+| counter always on (an unconditional increment; not what is merged) | 796.5 M | +3.1% |
+| counter in, switch off (merged) | 814.5 M | +5.4% |
+| counter in, switch on (`NFCAST_COUNT_NODES=1`) | 829.5 M | +7.4% |
+
+`fib(20)`: 15.24 M without, 15.73 M with the switch off (+3.2%), 15.91 M on (+4.4%). The switch check is the cost when it is off,
+and it costs more than the plain increment would. Removing it when the counter is not wanted needs a compile-time switch, which is
+not done here.
+
 ## Speed
 
 Measured once, on the host compiler (g++ -O2 for this engine, gcc -O2 for the reference Lua 5.4.9), best of three, seconds. Indicative

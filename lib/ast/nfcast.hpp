@@ -279,6 +279,10 @@ struct Stats {
   std::uint64_t jit_refused = 0;       // loops the JIT refused at compile time (counted once per loop)
   std::uint64_t jit_call_mismatches = 0;  // calls in compiled code whose result was not the kind the code expected: the statement that
                                           // made the call was finished by the interpreter, and the loop went on in the interpreter from there
+  // Compute count (docs/notes/ast.md, "Stats"; docs/notes/profiler.md, "Next steps", item 3): one per evaluation of a node by the
+  // interpreter, counted where the node's eval, evalMulti or exec runs. Nodes run by compiled code (the tier, the JIT) count nothing.
+  // Only counted while State::count_nodes is set.
+  std::uint64_t node_evals = 0;
 };
 
 // Tiering is off unless a State is given options (or NFCAST_TIER is set in the environment, for the test drivers). A function
@@ -347,6 +351,8 @@ struct State {
   std::size_t gc_bytes() const { return bytes; }
   std::size_t gc_threshold = 1 << 20;
   bool gc_stress = false;  // collect at every safe point (a function entry, a loop iteration), for tests; NFCAST_GC_STRESS=1
+  bool count_nodes = false;  // count the node evaluations of the interpreter in Stats::node_evals (docs/notes/ast.md, "Stats");
+                             // NFCAST_COUNT_NODES=1 turns it on at creation
 
   // ---- inlining ----
   // A call site that has called the same script function INLINE_WARM times is rewritten into a node that runs a private copy of
