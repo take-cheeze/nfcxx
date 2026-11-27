@@ -951,9 +951,11 @@ jobs:
 
       - name: mrbbc backend lowering and runtime
         run: |
+          sudo apt-get install -y -qq libuv1-dev pkg-config
           scripts/setup-mrbbc.sh
           scripts/setup-qbe.sh
           bundle exec ruby tests/bc2cpp/mrbbc_backend.rb
+          bundle exec ruby tests/bc2cpp/mrbbc_uv.rb
 
       - name: Golden, CLI and integration tests against the fork's mrbc
         run: tests/bc2cpp/run_mrbc_rb.sh

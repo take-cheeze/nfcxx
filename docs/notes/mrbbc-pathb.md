@@ -84,7 +84,47 @@ OUT_DIR=build/driver-state OUT_SYMBOL=state \
 
 Emit and link this IR with the same QBE/runtime commands above. The harness exercises `names`, first-match and missing
 `get`, shared value arrays, and NUL-delimited `records`; CI compares these with Ruby in all three layouts under GC stress.
-The full nfcxx command-line driver still needs modules, constants, global/argument access and I/O lowering.
+The full nfcxx command-line driver still needs modules, general constants/globals, requires, and further host APIs.
+
+### Optional libuv host runtime
+
+The standalone runtime also has an optional hosted build, enabled with `MRBBC_LIBUV=1`. It lowers `ARGV`, `$0`/
+`$PROGRAM_NAME`, `$stdin`/`$stdout`/`$stderr` (and `STDIN`/`STDOUT`/`STDERR`), standard-stream `read` without a length,
+standard-stream `write(string)`, `File.read(path)`, `File.write(path, string)`, `File.exist?`, `File.file?`,
+`File.directory?`, `File.executable?` and `Dir.exist?`. Reads and writes preserve binary bytes. `ARGV` is one shared,
+mutable, rooted array; custom embedding drivers supply the borrowed process arguments with `mrbbc_set_args` before
+`mrbbc_run`. `ARGV` and the program-name globals do not require libuv.
+
+For example, compile the unchanged state library with an entry that consumes process arguments and binary stdin,
+writes records to the file named by its first argument, copies them to stdout, and reports checks on stderr:
+
+```sh
+# Install libuv's development files and pkg-config (Ubuntu: libuv1-dev pkg-config).
+mkdir -p build/driver-state-io
+OUT_DIR=build/driver-state-io OUT_SYMBOL=state \
+  bundle exec ruby bc2cpp/tools/bc2cpp/bc2cpp.rb --backend=mrbbc \
+  scripts/nfcxx-state.rb tests/mrbbc/nfcxx/state_io_entry.rb > build/driver-state-io/state.ir
+bundle exec ruby scripts/pathb-qbe-emit.rb build/driver-state-io/state.ir > build/driver-state-io/state.ssa
+build/qbe/qbe build/driver-state-io/state.ssa > build/driver-state-io/state.s
+cc -std=c99 -DMRBBC_VALUE=8 -DMRBBC_LIBUV=1 build/driver-state-io/state.s \
+  tests/mrbbc/runtime/mrbrt.c tests/mrbbc/runtime/mrbrt_uv.c tests/mrbbc/runtime/uv_driver.c \
+  $(pkg-config --cflags --libs libuv) -o build/driver-state-io/state
+printf 'input\000bytes' | build/driver-state-io/state build/driver-state-io/records . example
+```
+
+`uv_driver.c` lets the program own stdout; the test driver `driver.c` instead prints its final expression. The adapter uses
+libuv's synchronous filesystem API (NULL callbacks), cleans every request, handles partial writes and closes files it
+opens on success or I/O failure. Standard descriptors are borrowed and never closed by the adapter. No callback or
+event loop retains a Ruby value. OS failures raise an `Errno::NAME` error with libuv's platform message; messages need
+not match mruby's libc formatting. The existing runtime error path still terminates the process rather than rescuing.
+
+The libuv dependency is optional: ordinary runtime builds and embedded targets need neither its headers nor its library;
+host calls there fail explicitly with `NotImplementedError`. Length/offset/keyword forms, File/IO handle construction,
+custom String/path coercion, environment access, process spawning, dynamic requires, and general globals remain
+unsupported. This is a host I/O foundation, not full CLI compilation or asynchronous Ruby I/O.
+
+`bundle exec ruby tests/bc2cpp/mrbbc_uv.rb` compares the actual state-library scenario and stream operations against Ruby
+in byte mode, for all three layouts with GC stress; it also checks I/O errors and refusal without the optional adapter.
 
 ## The RITE 04.00 format (as mruby 4.0.0 writes and reads it)
 
