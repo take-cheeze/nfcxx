@@ -194,8 +194,9 @@ module CalleeArena
   OPEN = "  int bc2cpp_ai = M->gc.arena_idx;\n  return bc2cpp_arena_exit(M, bc2cpp_ai, #{LAMBDA}\n"
   CLOSE = "  }());\n"
   # What makes a body's arena growth unbounded: a loop, or a call that may run compiled or Ruby code.
-  RUNS_CODE = /\bgoto[ ]L\w+;|\bwhile\b|\bfor[ ]\(|_impl\(|_direct\(|owner_call|funcall|bc2cpp_send|yield|_block|ccall|
-               _proc|bc2cpp_call/x
+  # A declared-return guard's `X_impl` only calls its body, `X_impl_unguarded` (DECLARED_RETURN_GUARD).
+  RUNS_CODE = /\bgoto[ ]L\w+;|\bwhile\b|\bfor[ ]\(|_impl\(|_impl_unguarded\(|_direct\(|owner_call|funcall|bc2cpp_send|yield|
+               _block|ccall|_proc|bc2cpp_call/x
 
   # Each `X_impl` definition of the compiled methods, as printed (a split `X_impl` builds the Array from
   # `X_mr`'s buffer; `X_mr` itself is not wrapped).
