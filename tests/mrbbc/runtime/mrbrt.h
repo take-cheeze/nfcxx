@@ -21,6 +21,9 @@
 #define MRBBC_MRBRT_H
 
 #include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 enum mrbbc_tag {
   MRBBC_NIL = 0,
@@ -66,6 +69,11 @@ typedef char mrbbc_mv_size[sizeof(MV) == MRBBC_VALUE ? 1 : -1];
 /* dst = the integer i: a boxed one when i is outside the small range of the layout (the lowering calls it for a constant
  * or a result past that range). */
 void mrbbc_int_new(MV *dst, long long i);
+int mrbbc_int_read(const MV *value, int64_t *out);
+long long mrbbc_int_require(const MV *value);
+/* Host call boundary; ordinary Ruby execution still reports uncaught errors and exits. */
+typedef struct MrbbcCallError { char kind[96], message[256]; } MrbbcCallError;
+int mrbbc_protect(void (*body)(void *), void *data, MrbbcCallError *error);
 
 /* The tag of a value (enum mrbbc_tag), for code outside the runtime that tests a value (a boxed integer's is MRBBC_INT). */
 int mrbbc_tag(const MV *v);
@@ -276,4 +284,7 @@ void mrbbc_gc_collect(void);
 long mrbbc_gc_count(void);
 void mrbbc_gc_set_threshold(long bytes);
 
+#ifdef __cplusplus
+}
+#endif
 #endif /* MRBBC_MRBRT_H */

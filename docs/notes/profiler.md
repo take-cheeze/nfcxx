@@ -24,8 +24,10 @@ Implemented so far (prototype, format version 1):
   runtime (`scripts/nfcxx-loop.rb`). The site of a function is its address for now.
   `tests/prof/run.sh` builds `cprog.c` with the gcc backend and checks the profile (`check_any.c`): fib(10) gives 178 pairs at
   2 sites. `tests/prof/pathb.sh` does the same for `cprog.c` and `cxxprog.cpp` (179 pairs at 3 sites) through Path B.
+  The runtime is compiled as C (cfiles) without `-finstrument-functions`, and for C++ the flag reaches the gcc compile
+  of the C that EDG emits (the `profile_opts` group of the eccp call).
 
-Not yet done: the Path B IR does not emit the calls, the C++ path does not pass the flag through, the nfcast tier does not
+Not yet done: the Path B IR does not emit the calls, the nfcast tier does not
 emit them, the file has no IR hash, and no compute counts from the runtime (callgrind gives them offline, see "Compute counts" below). The
 string table of site names is done (below). Those are the next steps below.
 
@@ -69,9 +71,9 @@ was used (`clock=tsc` or `clock=monotonic`). Measured on one machine only; the f
    do: node evaluations for nfcast, counted in the existing dispatch.
 4. **nfcast tier.** Done in the prototype behind `NFCAST_TIER_PROFILE=1` (`docs/notes/ast.md`, "Tiering"): the generated C calls
    `__nfcxx_prof_enter` / `__nfcxx_prof_exit` per function (site = FNV-1a of the proto's tier serial and number), the flag is in the
-   compile cache key and the Merkle hash, and an abandoned run closes the calls it left open. Open: each shared object has its own
-   copy of the runtime, so a run with several compiled units keeps only the last profile written to `NFCXX_PROFILE`. The fix is for
-   the host to load one runtime (RTLD_GLOBAL) that the objects bind to.
+   compile cache key and the Merkle hash, and an abandoned run closes the calls it left open. Done: the runtime is one shared object
+   (`libnfcxx_prof.so`, built into the cache by `build_prof_lib` in `lib/ast/nfcast_tier.cpp`) that every compiled unit depends on,
+   so the loader maps one copy per process and a run with several compiled units writes one profile (`tests/ast/profile/two.lua`).
 
 ## Decisions taken in the prototype
 

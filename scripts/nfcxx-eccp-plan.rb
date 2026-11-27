@@ -13,7 +13,7 @@
 #
 # RECORDS: NUL-separated. "k NAME" starts a group; "v VALUE" adds a value to the group (an empty value is "v").
 # The groups: eccp (the EDG driver), std, dialect, out (the -o name), extra, inst_opts, modopts, diag_opts, userinc, sys_inc,
-# hosted_libs, keep_static, eh_unwind, picopts, cobjs, preinc (the forced includes: their pre_opts are planned from them),
+# hosted_libs, keep_static, profile_opts, eh_unwind, picopts, cobjs, preinc (the forced includes: their pre_opts are planned from them),
 # cuda_opts, eflist, shim, vlart, rtlib. The scalars (eccp, std, dialect, out) have one value. An absent group is empty.
 #
 # Standard output: NUL-separated records, then the end marker "z":
@@ -43,7 +43,7 @@ module NfcxxEccpPlan
      *g.call("extra"), *g.call("inst_opts"), *g.call("modopts"), *g.call("diag_opts"), *g.call("userinc"),
      *g.call("sys_inc"), *g.call("hosted_libs"),
      "--c_to_obj_option", "-O2", "--c_to_obj_option", "-fwrapv", "--c_to_obj_option", "-fno-strict-aliasing",
-     *g.call("keep_static"), *g.call("eh_unwind"), "--c_to_obj_option", "-fgnu89-inline",
+     *g.call("keep_static"), *g.call("profile_opts"), *g.call("eh_unwind"), "--c_to_obj_option", "-fgnu89-inline",
      *g.call("picopts"), *g.call("cobjs"), *g.call("pre_opts"), *g.call("cuda_opts"), *g.call("eflist"),
      *g.call("shim"), *g.call("vlart"), *g.call("rtlib"), "-o", scalar.call("out")]
   end

@@ -3,10 +3,11 @@
 # objects as a shared object with --no-undefined against libmruby: a converted gem that compiles and links has no undefined symbols.
 # usage: check_mruby_compile.sh CONVERTED_DIR GEM [GEM...]   (CONVERTED_DIR holds one converted gem per directory: CONVERTED_DIR/GEM)
 # MRUBY_LIB (optional) lists the mruby archives to link, space-separated (default: MRUBY's build/host/lib/libmruby.a).
-# MRUBY (default /home/user/mruby) is the mruby tree with build/host/lib/libmruby.a; MRUBY_UV (default /home/user/mruby-uv) is the
-# mruby-uv tree that bcrypt's thread header needs.
+# MRUBY (default: the repo's own 3rd/mruby fork tree, HERE/../../3rd/mruby) is the mruby tree with build/host/lib/libmruby.a (built
+# from the fork with its own rake, a host build); MRUBY_UV (default /home/user/mruby-uv) is the mruby-uv tree that bcrypt's thread
+# header needs.
 HERE=$(cd "$(dirname "$0")" && pwd)
-MR=${MRUBY:-/home/user/mruby}
+MR=${MRUBY:-$HERE/../../3rd/mruby}
 UV=${MRUBY_UV:-/home/user/mruby-uv}
 ROOT=${1:?usage: check_mruby_compile.sh CONVERTED_DIR GEM...}; shift
 rc=0
@@ -19,8 +20,9 @@ for N in "$@"; do
   INC="-I $G/include -I $MR/include -I $MR/build/host/include -I $UV/fork/src -I $UV/fork/include"
   # the fork builds every object with MRB_USE_BIGINT (mrbgems/mruby-bigint/mrbgem.rake): the bigint helpers are declared under it
   DEFS="$DEFS -DMRB_USE_BIGINT"
-  # the same extra mruby gem headers the corpus runner gives (mruby-encoding, mruby-time, mruby-marshal)
-  for d in $(echo "${NFCX_MRUBY_INCLUDE:-/home/user/mruby/include:/home/user/mruby/build/host/include:/home/user/mruby/mrbgems/mruby-encoding/include:/home/user/mruby/mrbgems/mruby-time/include:/home/user/nfcxx/3rd/mruby-marshal/include}" | tr : " "); do
+  # the same extra mruby gem headers the corpus runner gives (mruby-encoding, mruby-time, mruby-marshal, mruby-require)
+  # (default: the fork tree's include dirs that exist in its source; the fork build writes no build/host/include)
+  for d in $(echo "${NFCX_MRUBY_INCLUDE:-$MR/include:$MR/mrbgems/mruby-encoding/include:$MR/mrbgems/mruby-time/include:$MR/mrbgems/mruby-marshal/include:$MR/mrbgems/mruby-require/include}" | tr : " "); do
     INC="$INC -I $d"
   done
   errs=0

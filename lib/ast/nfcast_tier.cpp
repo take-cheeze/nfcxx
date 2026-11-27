@@ -265,7 +265,8 @@ struct TierProto {
 struct TierState {
   TierOptions opt;
   std::string driver, cache, rt_text, rt_dir;
-  std::string prof_dir;  // TierOptions::profile: where lib/prof is (the runtime the compiles link in)
+  std::string prof_dir;  // TierOptions::profile: where lib/prof is (the sources of the runtime)
+  std::string prof_lib;  // TierOptions::profile: the runtime as one shared object, built once (build_prof_lib)
   bool cache_ok = false, rt_ok = false, resolved = false;
   std::uint64_t next_serial = 1;
   std::vector<Version*> pending;  // compiles running (Async)
@@ -897,7 +898,7 @@ std::uint64_t merkle_unit(const Unit& U, const std::vector<Ty>& sig, const UnitM
   h = mix(h, static_cast<std::uint64_t>(ret));
   h = mix(h, static_cast<std::uint64_t>(m.nfv));
   h = mix(h, static_cast<std::uint64_t>(m.max_nslots));
-  if (profile) h = mix(h, 0x70726f66);  // instrumented code is a different version (plain code is hashed as it always was)
+  if (profile) h = mix(h, 0x70726f67);  // instrumented code is a different version (plain code is hashed as it always was); linked to the shared runtime
   std::size_t at = 0;
   if (all) {
     at = all->size();
@@ -1322,14 +1323,20 @@ const char* kPostRt =
 // before every return, so the profiler sees the same enters and exits as a call would make. An abandoned run jumps back to the entry
 // with the calls it left open still on the stack of this thread: nfct_punwind closes them, innermost first, so the records alternate.
 // A stack deeper than the table is a run abandoned like a too deep recursion (it is then done again in the interpreter).
+// The table is allocated at a thread's first enter, not declared as a thread-local array: the profiler runtime's initial-exec
+// TLS (lib/prof, nfcxx_alloc_cur) makes the object DF_STATIC_TLS, and dlopen must then fit every thread-local block of the
+// object into glibc's static TLS surplus (about 2 KB), which a 16 KB array does not fit ("cannot allocate memory in static
+// TLS block"). A pointer and a counter fit.
 const char* kProfRt =
     "#include <stdint.h>\n"
+    "#include <stdlib.h>\n"
     "extern \"C\" { void __nfcxx_prof_enter(uint32_t site); void __nfcxx_prof_exit(uint32_t site); }\n"
     "#define NFCT_PROF_CAP 4096\n"
-    "static __thread uint32_t nfct_ps[NFCT_PROF_CAP];\n"
+    "static __thread uint32_t *nfct_ps;\n"
     "static __thread int nfct_pn = 0;\n"
     "static void nfct_penter(nfcr_Ctx* cx, uint32_t s) {\n"
-    "  if (nfct_pn >= NFCT_PROF_CAP) nfct_bail(cx);\n"
+    "  if (!nfct_ps) nfct_ps = (uint32_t*)calloc(NFCT_PROF_CAP, sizeof(uint32_t));\n"
+    "  if (!nfct_ps || nfct_pn >= NFCT_PROF_CAP) nfct_bail(cx);\n"
     "  nfct_ps[nfct_pn++] = s;\n"
     "  __nfcxx_prof_enter(s);\n"
     "}\n"
@@ -2147,11 +2154,12 @@ void launch(State& S, Version* v) {
   args.push_back(T->driver);
   args.push_back("-shared");
   args.push_back(v->cpp);
-  if (T->opt.profile) {  // the profiler runtime, as the driver's --profile links it (without the -finstrument-functions hooks, which
-                         // would add a second enter and exit for every call); the gcc back end, as --profile needs
+  if (T->opt.profile) {  // the gcc back end, as --profile needs; the runtime is the shared object build_prof_lib made (it has the
+                         // wraps and no -finstrument-functions hooks, which would add a second enter and exit for every call)
     args.push_back("--backend=gcc");
-    for (const char* f : {"nfcxx_prof.c", "nfcxx_machine.c", "nfcxx_alloc.c"}) args.push_back(T->prof_dir + "/" + f);
-    args.push_back("-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free");  // nfcxx_alloc.c calls __real_* (the driver's --profile)
+    args.push_back(T->prof_lib);
+    args.push_back("-Wl,-rpath," + dir_of(T->prof_lib));  // where the loader finds the runtime when the process has not loaded it yet
+    args.push_back("-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free");  // the objects' allocations go through the runtime's
   }
   args.push_back("-o");
   args.push_back(v->tmp);
@@ -2197,6 +2205,56 @@ void poll_pending(State& S) {
   }
 }
 
+// TierOptions::profile: the profiler runtime as one shared object, libnfcxx_prof.so, in the cache. Each profiled object depends on
+// it (DT_NEEDED, with its directory in the RUNPATH), so the dynamic loader maps it once per process and every object's hooks bind
+// to that one copy: one set of buffers, one file, one constructor (which opens NFCXX_PROFILE). The other ways were worse: a copy
+// linked into each object gives each its own state (the last object to load truncates the file and the hooks of the others write
+// to their own buffers), and an RTLD_GLOBAL copy would put every exported name of every object in the global scope. The host does
+// not link lib/prof, and objects are still dlopen'd RTLD_LOCAL. The file is named by the driver, the back end and the sources, so a
+// changed runtime is built again.
+bool build_prof_lib(TierState* T, std::string* err) {
+  std::vector<std::string> srcs;
+  std::string k = "nfcxx-prof-so\n//driver:" + T->driver;
+  const char* be = std::getenv("NFCXX_BACKEND");
+  k += std::string("\n//backend:") + (be ? be : "");
+  for (const char* f : {"nfcxx_prof.c", "nfcxx_machine.c", "nfcxx_alloc.c"}) {
+    srcs.push_back(T->prof_dir + "/" + f);
+    k += "\n//src:" + bld::read_file(srcs.back());
+  }
+  std::string dir = T->cache + "/prof-" + bld::hash_hex(k);
+  T->prof_lib = dir + "/libnfcxx_prof.so";
+  if (bld::file_exists(T->prof_lib)) return true;
+  ::mkdir(dir.c_str(), 0700);  // it may exist already; the build below decides
+  // Built under a name with this pid and renamed into place: another process may be building the same runtime at the same time.
+  std::string pid = std::to_string(static_cast<long>(::getpid()));
+  std::string tmp = dir + "/libnfcxx_prof." + pid + ".so";
+  std::string log = dir + "/build." + pid + ".log";
+  std::vector<std::string> args;
+  args.push_back(T->driver);
+  args.push_back("-shared");
+  args.insert(args.end(), srcs.begin(), srcs.end());
+  args.push_back("--backend=gcc");  // as --profile needs (the runtime is the same one --profile links in)
+  args.push_back("-Wl,-soname,libnfcxx_prof.so");  // the objects name it by this (DT_NEEDED), so the loader finds the one loaded
+  args.push_back("-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free");  // nfcxx_alloc.c calls __real_* (the driver's --profile)
+  args.push_back("-o");
+  args.push_back(tmp);
+  int status = -1;
+  std::string out = bld::run_driver(args, log, T->opt.timeout, status);
+  ::unlink(log.c_str());
+  if (status != 0 || !bld::file_exists(tmp)) {
+    ::unlink(tmp.c_str());
+    *err = "cannot build the profiler runtime: " + bld::failure_reason(status, T->driver, T->opt.timeout);
+    if (!out.empty()) *err += ": " + out.substr(0, 300);
+    return false;
+  }
+  if (::rename(tmp.c_str(), T->prof_lib.c_str()) != 0) {
+    ::unlink(tmp.c_str());
+    *err = std::string("cannot install ") + T->prof_lib + ": " + std::strerror(errno);
+    return false;
+  }
+  return true;
+}
+
 // Starts the build of V from SRC: from the cache if the shared object is there, else by running the driver.
 void start_build(State& S, Version* v, const std::string& src) {
   TierState* T = S.tier;
@@ -2204,11 +2262,15 @@ void start_build(State& S, Version* v, const std::string& src) {
   if (!T->rt_ok) return fail_version(S, v, "cannot find nfcast_tier_rt.h");
   if (!T->cache_ok) return fail_version(S, v, "no usable cache directory");
   if (T->opt.profile && T->prof_dir.empty()) return fail_version(S, v, "cannot find lib/prof (the profiler runtime)");
+  if (T->opt.profile && T->prof_lib.empty()) {  // built before any object that needs it is loaded (a cached one as well)
+    std::string err;
+    if (!build_prof_lib(T, &err)) return fail_version(S, v, err);
+  }
   std::string k = src;
   k += "\n//driver:" + T->driver;
   const char* be = std::getenv("NFCXX_BACKEND");
   k += std::string("\n//backend:") + (be ? be : "");
-  if (T->opt.profile) k += "\n//profile:gcc+prof";  // instrumented code (and its link) never shares an entry with plain code
+  if (T->opt.profile) k += "\n//profile:gcc+prof-so";  // instrumented code (and its link) never shares an entry with plain code
   std::string key = bld::hash_hex(k);
   std::string base = T->cache + "/nfcast-tier-" + key;
   v->so = base + ".so";

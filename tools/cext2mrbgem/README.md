@@ -90,7 +90,10 @@ What differs from the regex scan, and why:
   the impl. The impl takes `mrb` first only when its body needs the state and every direct caller has it in scope (a
   method, Init or threaded helper); otherwise the method is refused, with the reason. Refused too: a variadic method whose
   body calls `rb_scan_args` (its arguments would come from the mruby call frame), a name defined more than once, a use
-  through its address, and a direct call in a header. The wrapper is not compiled, so the split is text only.
+  through its address, and a direct call in a header. The wrapper is not compiled, so the split is text only. A use of the
+  name that is not a call does not count as a use of the function: a parameter or a local of that name (in scope at the
+  use), a file-scope variable of the file, or a `#include` name. A call where a local hides the name (before its
+  declaration, or outside its block) is still a call.
 - A helper that needs the mruby state gets an `mrb_state *mrb` parameter in its definition, in every prototype (the
   `.c` and `.h` files are both scanned) and at every call site. This needs a unique definition, and every use must be
   a direct call inside a function body whose name is not shadowed there. A use as a value (a function pointer) or at

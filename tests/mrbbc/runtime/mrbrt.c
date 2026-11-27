@@ -65,7 +65,28 @@ typedef struct MStr {
 typedef struct Buf {
   char *p;
   size_t n, cap;
+  struct Buf *guard_next;
+  struct RuntimeGuard *guard;
 } Buf;
+#define BUF_INIT {NULL, 0, 0, NULL, NULL}
+
+typedef struct RuntimeGuard {
+  jmp_buf jump;
+  MrbbcCallError *error;
+  Buf *buffers;
+} RuntimeGuard;
+static RuntimeGuard *runtime_guard;
+
+static void buf_release(Buf *b) {
+  if (b->guard) {
+    Buf **at = &b->guard->buffers;
+    while (*at && *at != b) at = &(*at)->guard_next;
+    if (*at) *at = b->guard_next;
+    b->guard = NULL;
+  }
+  free(b->p);
+  b->p = NULL;
+}
 
 static void inspect_value(Buf *b, const MV *v);
 static MV to_s_string(const MV *v);
@@ -143,6 +164,13 @@ static void set_owner(int id, MClass *c) {
 }
 
 void mrbbc_raise(const char *cls, const char *message) {
+  if (runtime_guard) {
+    snprintf(runtime_guard->error->kind, sizeof runtime_guard->error->kind, "%s", cls);
+    snprintf(runtime_guard->error->message, sizeof runtime_guard->error->message, "%s", message);
+    /* Free live temporary buffers before longjmp invalidates the stack records that own them. */
+    while (runtime_guard->buffers) buf_release(runtime_guard->buffers);
+    longjmp(runtime_guard->jump, 1);
+  }
   fflush(stdout);
   fprintf(stderr, "%s: %s (%s)\n", mrbbc_progname, message, cls);
   exit(1);
@@ -306,6 +334,18 @@ static long sym_index(const MV *v) { return (long)(v->w >> 2); }
 #endif
 
 void mrbbc_int_new(MV *dst, long long i) { *dst = int_value((int64_t)i); }
+
+int mrbbc_int_read(const MV *value, int64_t *out) {
+  if (tag_of(value) != MRBBC_INT) return 0;
+  *out = int_of(value);
+  return 1;
+}
+
+long long mrbbc_int_require(const MV *value) {
+  int64_t out;
+  if (!mrbbc_int_read(value, &out)) mrbbc_raise("TypeError", "i64 export must return an Integer");
+  return (long long)out;
+}
 
 int mrbbc_tag(const MV *v) { return tag_of(v); }
 
@@ -595,11 +635,11 @@ void mrbbc_class(MV *dst, const MV *cbase, const MV *super, const char *name, co
   if (tag_of(super) != MRBBC_NIL) {
     char msg[160];
     if (tag_of(super) != MRBBC_CLS) {
-      Buf b = {NULL, 0, 0};
+      Buf b = BUF_INIT;
       if (tag_of(super) == MRBBC_OBJ) mrbbc_raise("NotImplementedError", "a superclass that is an instance is not lowered yet");
       inspect_value(&b, super);
       snprintf(msg, sizeof msg, "superclass must be a Class (%s given)", b.p);
-      free(b.p);
+      buf_release(&b);
       mrbbc_raise("TypeError", msg);
     }
     sup = cls_of(super);
@@ -919,6 +959,11 @@ static void call_user(MV *ret, int id, const MV *recv, const MV *arg) {
 }
 
 static void buf_put(Buf *b, const char *s, size_t n) {
+  if (!b->p && runtime_guard) {
+    b->guard = runtime_guard;
+    b->guard_next = runtime_guard->buffers;
+    runtime_guard->buffers = b;
+  }
   if (b->n + n + 1 > b->cap) {
     size_t cap = b->cap ? b->cap : 64;
     char *p;
@@ -1059,11 +1104,11 @@ static void inspect_value(Buf *b, const MV *v) {
 }
 
 void mrbbc_print(const MV *v) {
-  Buf b = {NULL, 0, 0};
+  Buf b = BUF_INIT;
   inspect_value(&b, v);
   buf_char(&b, '\n');
   fwrite(b.p, 1, b.n, stdout);
-  free(b.p);
+  buf_release(&b);
 }
 
 /* a == b (mruby's ==, for these values). Arrays compare element by element. An instance is equal to itself (rb_equal checks
@@ -1671,7 +1716,7 @@ void mrbbc_setidx(const MV *recv, const MV *idx, const MV *v) {
 }
 
 void mrbbc_strcat(MV *dst, const MV *src) {
-  Buf b = {NULL, 0, 0};
+  Buf b = BUF_INIT;
   MV roots[3];
   MrbbcGCFrame frame;
   if (tag_of(dst) != MRBBC_STR) mrbbc_raise("TypeError", "expected String");
@@ -1684,7 +1729,7 @@ void mrbbc_strcat(MV *dst, const MV *src) {
   buf_put(&b, str_of(&roots[0])->p, (size_t)str_of(&roots[0])->len);
   buf_put(&b, str_of(&roots[2])->p, (size_t)str_of(&roots[2])->len);
   *dst = new_str_value(b.p ? b.p : "", (long)b.n);
-  free(b.p);
+  buf_release(&b);
   mrbbc_gc_leave(&frame);
 }
 
@@ -1715,10 +1760,10 @@ void mrbbc_send0(MV *dst, const MV *recv, int m) {
           break;
         }
         default: {  /* Array#to_s is inspect */
-          Buf b = {NULL, 0, 0};
+          Buf b = BUF_INIT;
           inspect_value(&b, recv);
           r = new_str_value(b.p, (long)b.n);
-          free(b.p);
+          buf_release(&b);
           break;
         }
       }
@@ -1735,10 +1780,10 @@ void mrbbc_send0(MV *dst, const MV *recv, int m) {
       r = bool_value(tag_of(recv) == MRBBC_NIL || tag_of(recv) == MRBBC_FALSE);
       break;
     case MRBBC_M_INSPECT: {
-      Buf b = {NULL, 0, 0};
+      Buf b = BUF_INIT;
       inspect_value(&b, recv);
       r = new_str_value(b.p ? b.p : "", (long)b.n);
-      free(b.p);
+      buf_release(&b);
       break;
     }
     case MRBBC_M_FIRST:
@@ -1936,11 +1981,11 @@ static void join_into(Buf *buffer, const MV *value, const JoinFrame *prev) {
 }
 
 static void join_value(MV *dst, const MV *recv) {
-  Buf buffer = {NULL, 0, 0};
+  Buf buffer = BUF_INIT;
   if (tag_of(recv) != MRBBC_ARY) no_method("join", recv);
   join_into(&buffer, recv, NULL);
   if (!mrbbc_unwinding()) *dst = new_str_value(buffer.p ? buffer.p : "", (long)buffer.n);
-  free(buffer.p);
+  buf_release(&buffer);
 }
 
 /* ---- optional hosted operations ---- */
@@ -2036,18 +2081,18 @@ static const char *host_string(const MV *v, int path) {
 }
 
 static void host_read(MV *dst, int fd, int owned) {
-  Buf b = {NULL, 0, 0};
+  Buf b = BUF_INIT;
   char chunk[16384];
   long n;
   int closed = 0;
   while ((n = mrbbc_uv_read(fd, chunk, sizeof chunk)) > 0) buf_put(&b, chunk, (size_t)n);
   if (owned) closed = mrbbc_uv_close(fd);
   if (n < 0 || closed < 0) {
-    free(b.p);
+    buf_release(&b);
     host_error(n < 0 ? (int)n : closed);
   }
   *dst = new_str_value(b.p ? b.p : "", (long)b.n);
-  free(b.p);
+  buf_release(&b);
 }
 
 static void host_write(MV *dst, int fd, const MV *data, int owned) {
@@ -2507,4 +2552,37 @@ void mrbbc_run(void (*entry)(MV *ret), MV *ret) {
   entry(ret);
   entry_ret = NULL;
   stack_base = NULL;
+}
+
+int mrbbc_protect(void (*body)(void *), void *data, MrbbcCallError *error) {
+  RuntimeGuard guard;
+  RuntimeGuard *previous = runtime_guard;
+  MrbbcGCFrame saved_frame, *previous_gc = gc_top;
+  MV saved_value;
+  int previous_protect = protect_n, previous_inspect = inspect_depth;
+  int previous_pending = unwind_pending, previous_break = unwind_break;
+  MV *previous_home = unwind_home;
+  int failed;
+  if (!body || !error) return 0;
+  error->kind[0] = error->message[0] = '\0';
+  mrbbc_gc_enter(&saved_frame, &saved_value, 1);
+  saved_value = unwind_value;
+  guard.error = error;
+  guard.buffers = NULL;
+  runtime_guard = &guard;
+  failed = setjmp(guard.jump);
+  if (!failed) {
+    body(data);
+    while (guard.buffers) buf_release(guard.buffers);
+  }
+  runtime_guard = previous;
+  /* Frames/protections in abandoned generated functions must never be scanned again. */
+  gc_top = previous_gc;
+  protect_n = previous_protect;
+  inspect_depth = previous_inspect;
+  unwind_pending = previous_pending;
+  unwind_break = previous_break;
+  unwind_home = previous_home;
+  unwind_value = saved_value;
+  return !failed;
 }

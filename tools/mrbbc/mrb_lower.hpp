@@ -4,6 +4,7 @@
 
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "mrb_rite.hpp"
 
@@ -19,6 +20,7 @@ struct Refused : std::runtime_error {
 // byte and an int64). The runtime must be built with the same MRBBC_VALUE (tests/mrbbc/runtime/mrbrt.h).
 struct LowerOptions {
   int value_bytes = 8;
+  std::vector<std::string> i64_exports;
 };
 
 // The IR module of the main program (the root irep). Throws Refused, or std::runtime_error for a malformed irep.
