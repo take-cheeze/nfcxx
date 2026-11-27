@@ -78,6 +78,40 @@ Dir.mktmpdir('bc2cpp-mrbbc') do |dir|
   check.call("multi-file lowering failed: #{error}", status.success?)
   check.call('multi-file class/block/GC result differs', build_and_run.call(output, '8', 'classes') == "[22, 10]\n")
 
+  # Compile the real driver class unchanged, with a separate entry harness. The reference runs the same source and
+  # harness on CRuby; normalize strings to bytes to match mrbbc's documented byte-string inspect format.
+  binary_values = lambda do |value|
+    value.is_a?(String) ? value.b : value.is_a?(Array) ? value.map { |v| binary_values.call(v) } :
+      value.is_a?(Hash) ? value.to_h { |k, v| [binary_values.call(k), binary_values.call(v)] } : value
+  end
+  # CRuby prints byte escapes in uppercase, mruby in lowercase. Preserve escaped literal backslashes.
+  inspect_bytes = lambda do |value|
+    binary_values.call(value).inspect.gsub(/((?<!\\)(?:\\\\)*)\\x([0-9A-Fa-f]{2})/) do
+      "#{Regexp.last_match(1)}\\x#{Regexp.last_match(2).downcase}"
+    end + "\n"
+  end
+  driver_source = File.join(root, 'scripts/nfcxx-state.rb')
+  harness = File.join(root, 'tests/mrbbc/nfcxx/state_entry.rb')
+  scenario = File.read(harness)
+  expected = inspect_bytes.call(TOPLEVEL_BINDING.eval(File.read(driver_source) + "\n" + scenario))
+  %w[8 4 16].each do |value|
+    output, error, status = run.call(['--backend=mrbbc', "--mrbbc-value=#{value}", driver_source, harness])
+    check.call("real nfcxx-state lowering failed: #{error}", status.success?)
+    check.call("real nfcxx-state runtime differs for layout #{value}",
+               build_and_run.call(output, value, "state#{value}") == expected)
+  end
+  %w[array_collections append_alias collection_override sup_array_each_block].each do |fixture|
+    path = File.join(root, "tests/mrbbc/lower/#{fixture}.rb")
+    reference = inspect_bytes.call(TOPLEVEL_BINDING.eval(File.read(path)))
+    %w[8 4 16].each do |value|
+      output, error, status = run.call(['--backend=mrbbc', "--mrbbc-value=#{value}", path])
+      check.call("collection lowering failed for #{fixture}: #{error}", status.success?)
+      actual = build_and_run.call(output, value, "#{fixture}#{value}")
+      check.call("collection runtime differs for #{fixture}, layout #{value}: #{actual.inspect} != #{reference.inspect}",
+                 actual == reference)
+    end
+  end
+
   frozen_source = File.join(dir, 'frozen.rb')
   File.write(frozen_source, "# frozen_string_literal: true\n'no thawing'\n")
   output, error, status = run.call(['--backend=mrbbc', frozen_source])

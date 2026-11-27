@@ -7,6 +7,7 @@
 #include "mrbrt.h"
 
 #include <setjmp.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,10 +51,11 @@ static void gc_unprotect(int mark) { protect_n = mark; }
 static void gc_grow(const void *p, size_t n);
 static void gc_collect(void);
 
-/* Heap objects. A string is one block: the length and the bytes, then a NUL. An array is a header and its items. */
+/* Strings and arrays own growable buffers; their object addresses stay stable when an alias appends to them. */
 typedef struct MStr {
   long len;
-  char p[];
+  size_t cap;
+  char *p;
 } MStr;
 
 /* A growable byte buffer for inspect and to_s. */
@@ -64,6 +66,7 @@ typedef struct Buf {
 
 static void inspect_value(Buf *b, const MV *v);
 static MV to_s_string(const MV *v);
+static void join_value(MV *dst, const MV *recv);
 
 typedef struct MAry {
   long len, cap;
@@ -351,12 +354,22 @@ static MAry *ary_of(const MV *v) { return (MAry *)ptr_of(v); }
 
 static void set_obj(MV *dst, int tag, const void *p) { *dst = ptr_value(tag, p); }
 
-static MV new_str_value(const char *p, long n) {
-  MStr *s = gc_alloc(GC_STR, sizeof(MStr) + (size_t)n + 1);
-  MV v;
+static MStr *new_str_storage(long n) {
+  MStr *s;
+  if (n < 0 || (uint64_t)n > UINT32_MAX - sizeof(MStr) - 1) mrbbc_raise("ArgumentError", "argument too big");
+  s = gc_alloc(GC_STR, sizeof(MStr));
+  s->cap = (size_t)n + 1;
+  s->p = alloc(s->cap);
+  gc_grow(s, s->cap);
   s->len = n;
-  if (n > 0) memcpy(s->p, p, (size_t)n);
   s->p[n] = '\0';
+  return s;
+}
+
+static MV new_str_value(const char *p, long n) {
+  MStr *s = new_str_storage(n);
+  MV v;
+  if (n > 0) memcpy(s->p, p, (size_t)n);
   set_obj(&v, MRBBC_STR, s);
   return v;
 }
@@ -1341,17 +1354,26 @@ static void hash_grow(MHash *h) {
 void mrbbc_hash_set(MV *hash, const MV *key, const MV *value) {
   MHash *h;
   long k;
+  MV roots[4];
+  MrbbcGCFrame frame;
   hash_check(hash);
-  h = hash_of(hash);
-  k = hash_index(h, key);
+  mrbbc_gc_enter(&frame, roots, 4);
+  roots[0] = *hash;
+  roots[1] = *key;
+  roots[2] = *value;
+  h = hash_of(&roots[0]);
+  k = hash_index(h, &roots[1]);
   if (k < 0) {
+    /* mruby snapshots a String key. Mutating the caller's alias must not rename an entry. */
+    roots[3] = tag_of(&roots[1]) == MRBBC_STR ? new_str_value(str_of(&roots[1])->p, str_of(&roots[1])->len) : roots[1];
     hash_grow(h);
-    h->keys[h->len] = *key;
-    h->vals[h->len] = *value;
+    h->keys[h->len] = roots[3];
+    h->vals[h->len] = roots[2];
     h->len++;
   } else {
-    h->vals[k] = *value;
+    h->vals[k] = roots[2];
   }
+  mrbbc_gc_leave(&frame);
 }
 
 /* HASHCAT (`**h` in a call): the pairs of src are set into hash, a later key taking the value (vm.c's mrb_hash_merge). A
@@ -1447,7 +1469,8 @@ static void str_op(int op, MV *dst, const MV *a, const MV *b) {
     }
     la = str_of(a)->len;
     lb = str_of(b)->len;
-    t = gc_alloc(GC_STR, sizeof(MStr) + (size_t)(la + lb) + 1);
+    if (lb > LONG_MAX - la) mrbbc_raise("ArgumentError", "argument too big");
+    t = new_str_storage(la + lb);
     memcpy(t->p, str_of(a)->p, (size_t)la);
     memcpy(t->p + la, str_of(b)->p, (size_t)lb);
     t->p[la + lb] = '\0';
@@ -1467,7 +1490,7 @@ static void str_op(int op, MV *dst, const MV *a, const MV *b) {
     n = (long)int_of(b);
     len = str_of(a)->len;
     if (n != 0 && len > (long)(((size_t)-1 >> 1) / (size_t)n)) mrbbc_raise("ArgumentError", "argument too big");
-    t = gc_alloc(GC_STR, sizeof(MStr) + (size_t)(len * n) + 1);
+    t = new_str_storage(len * n);
     for (k = 0; k < n; k++) memcpy(t->p + k * len, str_of(a)->p, (size_t)len);
     t->p[len * n] = '\0';
     t->len = len * n;
@@ -1636,17 +1659,20 @@ void mrbbc_setidx(const MV *recv, const MV *idx, const MV *v) {
 
 void mrbbc_strcat(MV *dst, const MV *src) {
   Buf b = {NULL, 0, 0};
-  MV out;
-  const MStr *s;
+  MV roots[3];
+  MrbbcGCFrame frame;
   if (tag_of(dst) != MRBBC_STR) mrbbc_raise("TypeError", "expected String");
-  s = str_of(dst);
+  mrbbc_gc_enter(&frame, roots, 3);
+  roots[0] = *dst;
+  roots[1] = *src;
   /* the operand as a string: itself, or its to_s (mrb_obj_as_string) */
-  MV piece = to_s_string(src);
-  buf_put(&b, s->p, (size_t)s->len);
-  buf_put(&b, str_of(&piece)->p, (size_t)str_of(&piece)->len);
-  out = new_str_value(b.p ? b.p : "", (long)b.n);
+  roots[2] = to_s_string(&roots[1]);
+  if (mrbbc_unwinding()) { mrbbc_gc_leave(&frame); return; }
+  buf_put(&b, str_of(&roots[0])->p, (size_t)str_of(&roots[0])->len);
+  buf_put(&b, str_of(&roots[2])->p, (size_t)str_of(&roots[2])->len);
+  *dst = new_str_value(b.p ? b.p : "", (long)b.n);
   free(b.p);
-  *dst = out;
+  mrbbc_gc_leave(&frame);
 }
 
 void mrbbc_send0(MV *dst, const MV *recv, int m) {
@@ -1702,6 +1728,13 @@ void mrbbc_send0(MV *dst, const MV *recv, int m) {
       free(b.p);
       break;
     }
+    case MRBBC_M_FIRST:
+      if (tag_of(recv) != MRBBC_ARY) no_method("first", recv);
+      r = ary_of(recv)->len ? ary_of(recv)->items[0] : nil_value();
+      break;
+    case MRBBC_M_JOIN:
+      join_value(dst, recv);
+      return;
     default: mrbbc_raise("RuntimeError", "unknown method code");
   }
   *dst = r;
@@ -1715,6 +1748,186 @@ static MV to_s_string(const MV *v) {
   mrbbc_send0(&r, v, MRBBC_M_TO_S);
   if (tag_of(&r) != MRBBC_STR) mrbbc_raise("NotImplementedError", "to_s of an instance that gives no string is not lowered yet");
   return r;
+}
+
+/* A block is either a closure of the module or a Symbol as vm.c's SENDB accepts (&:first, for example). */
+void mrbbc_yield(MV *ret, const MV *blk, MV *argv, long argc) {
+  MV roots[1];
+  MrbbcGCFrame frame;
+  mrbbc_gc_enter(&frame, roots, 1);
+  roots[0] = *blk;
+  if (tag_of(&roots[0]) == MRBBC_SYM) {
+    const char *name = sym_of(&roots[0]);
+    int id, method = -1;
+    if (argc == 0) mrbbc_raise("ArgumentError", "no receiver given");
+    /* Symbol#to_proc uses funcall, including private Object methods, as mruby's generated proc does. */
+    id = user_method(&argv[1], name, argc - 1);
+    if (id >= 0) {
+      MV nil = nil_value();
+      mrbbc_user_call(id, ret, argv + 1, &nil, argc - 1);
+    } else {
+      if (strcmp(name, "first") == 0) method = MRBBC_M_FIRST;
+      else if (strcmp(name, "size") == 0) method = MRBBC_M_SIZE;
+      else if (strcmp(name, "length") == 0) method = MRBBC_M_LENGTH;
+      else if (strcmp(name, "to_s") == 0) method = MRBBC_M_TO_S;
+      else if (strcmp(name, "inspect") == 0) method = MRBBC_M_INSPECT;
+      else if (strcmp(name, "!") == 0) method = MRBBC_M_NOT;
+      else if (strcmp(name, "join") == 0) method = MRBBC_M_JOIN;
+      if (method < 0 || argc != 1) mrbbc_raise("NotImplementedError", "this Symbol block call is not lowered yet");
+      mrbbc_send0(ret, &argv[1], method);
+    }
+  } else {
+    if (tag_of(&roots[0]) != MRBBC_BLK) {
+      char message[128];
+      if (tag_of(&roots[0]) == MRBBC_NIL) mrbbc_raise("LocalJumpError", "unexpected yield");
+      snprintf(message, sizeof message, "can't convert %s into Proc", class_name(&roots[0]));
+      mrbbc_raise("TypeError", message);
+    }
+    mrbbc_blk_args(argv, &roots[0]);
+    mrbbc_user_yield(ret, &roots[0], argv, argc);
+  }
+  mrbbc_gc_leave(&frame);
+}
+
+void mrbbc_iter(MV *dst, const MV *recv, const MV *blk, int method) {
+  MV roots[7];
+  MrbbcGCFrame frame;
+  long i;
+  const char *name = method == MRBBC_I_MAP ? "map" : method == MRBBC_I_FIND ? "find" : "each";
+  /* SENDB validates an explicit block even for an empty array. A nil block would return an Enumerator. */
+  if (tag_of(blk) != MRBBC_BLK && tag_of(blk) != MRBBC_SYM && tag_of(blk) != MRBBC_NIL) {
+    char message[128];
+    if (tag_of(blk) == MRBBC_OBJ && user_method(blk, "to_proc", 0) >= 0)
+      mrbbc_raise("NotImplementedError", "block to_proc coercion is not lowered yet");
+    snprintf(message, sizeof message, "can't convert %s into Proc", class_name(blk));
+    mrbbc_raise("TypeError", message);
+  }
+  if (tag_of(recv) != MRBBC_ARY) {
+    if (tag_of(recv) == MRBBC_HASH) mrbbc_raise("NotImplementedError", "Hash iteration is not lowered yet");
+    no_method(name, recv);
+  }
+  if (tag_of(blk) == MRBBC_NIL) mrbbc_raise("NotImplementedError", "blockless Array iteration is not lowered yet");
+  mrbbc_gc_enter(&frame, roots, 7);
+  roots[0] = *recv;
+  roots[1] = *blk;
+  /* A map result must stay rooted while the block allocates; argv and its result are roots as well. */
+  if (method == MRBBC_I_MAP) roots[2] = new_ary_value(ary_of(&roots[0])->len);
+  for (i = 0; i < ary_of(&roots[0])->len; i++) {
+    roots[3] = ary_of(&roots[0])->items[i];
+    roots[6] = roots[3];
+    mrbbc_yield(&roots[4], &roots[1], &roots[5], 1);
+    if (mrbbc_unwinding()) break;
+    if (method == MRBBC_I_MAP) mrbbc_ary_push(&roots[2], &roots[4]);
+    if (method == MRBBC_I_FIND && tag_of(&roots[4]) != MRBBC_NIL && tag_of(&roots[4]) != MRBBC_FALSE) {
+      roots[2] = roots[3];
+      break;
+    }
+  }
+  *dst = method == MRBBC_I_EACH ? roots[0] : roots[2];
+  mrbbc_gc_leave(&frame);
+}
+
+static void str_reserve(MStr *s, size_t need) {
+  size_t cap = s->cap;
+  char *p;
+  const size_t limit = UINT32_MAX - sizeof(MStr);
+  if (need <= cap) return;
+  if (need > limit) mrbbc_raise("ArgumentError", "argument too big");
+  while (cap < need) cap = cap > limit / 2 ? need : cap * 2;
+  p = realloc(s->p, cap);
+  if (p == NULL) mrbbc_raise("NoMemoryError", "failed to allocate memory");
+  s->p = p;
+  gc_grow(s, cap - s->cap);
+  s->cap = cap;
+}
+
+void mrbbc_append(MV *dst, const MV *recv, const MV *value) {
+  MV roots[3];
+  MrbbcGCFrame frame;
+  MStr *s;
+  long n;
+  char byte = 0;
+  int integer;
+  mrbbc_gc_enter(&frame, roots, 3);
+  roots[0] = *recv;
+  roots[1] = *value;
+  if (tag_of(&roots[0]) == MRBBC_ARY) {
+    mrbbc_ary_push(&roots[0], &roots[1]);
+    *dst = roots[0];
+    mrbbc_gc_leave(&frame);
+    return;
+  }
+  if (tag_of(&roots[0]) != MRBBC_STR) {
+    if (tag_of(&roots[0]) == MRBBC_INT) mrbbc_raise("NotImplementedError", "Integer#<< is not lowered yet");
+    no_method("<<", &roots[0]);
+  }
+  integer = tag_of(&roots[1]) == MRBBC_INT;
+  if (integer) {
+    int64_t code = int_of(&roots[1]);
+    if (code < 0 || code > 255) {
+      char message[96];
+      snprintf(message, sizeof message, "%lld out of char range", (long long)code);
+      mrbbc_raise("RangeError", message);
+    }
+    byte = (char)code;
+  } else {
+    /* mruby's String#<< accepts a String directly; it does not invoke an object's to_str. */
+    if (tag_of(&roots[1]) != MRBBC_STR) {
+      char message[128];
+      snprintf(message, sizeof message, "%s cannot be converted to String", type_text(&roots[1]));
+      mrbbc_raise("TypeError", message);
+    }
+  }
+  s = str_of(&roots[0]);
+  n = integer ? 1 : str_of(&roots[1])->len;
+  if (n > LONG_MAX - s->len) mrbbc_raise("ArgumentError", "argument too big");
+  str_reserve(s, (size_t)(s->len + n) + 1);
+  /* Read the source buffer after reserve: self-append may have moved that same buffer. */
+  if (n) memmove(s->p + s->len, integer ? &byte : str_of(&roots[1])->p, (size_t)n);
+  s->len += n;
+  s->p[s->len] = '\0';
+  *dst = roots[0];
+  mrbbc_gc_leave(&frame);
+}
+
+typedef struct JoinFrame {
+  const MAry *array;
+  const struct JoinFrame *prev;
+} JoinFrame;
+
+static void join_into(Buf *buffer, const MV *value, const JoinFrame *prev) {
+  MV roots[2];
+  MrbbcGCFrame frame;
+  JoinFrame here;
+  const JoinFrame *p;
+  long i;
+  mrbbc_gc_enter(&frame, roots, 2);
+  roots[0] = *value;
+  here.array = ary_of(&roots[0]);
+  here.prev = prev;
+  for (p = prev; p != NULL; p = p->prev) {
+    if (p->array == here.array) mrbbc_raise("ArgumentError", "recursive array join");
+  }
+  for (i = 0; i < here.array->len; i++) {
+    roots[1] = here.array->items[i];
+    if (tag_of(&roots[1]) == MRBBC_ARY) {
+      join_into(buffer, &roots[1], &here);
+    } else {
+      /* mruby's Array#join uses to_s here, not CRuby's to_str/to_ary coercion protocol. */
+      roots[1] = to_s_string(&roots[1]);
+      if (!mrbbc_unwinding()) buf_put(buffer, str_of(&roots[1])->p, (size_t)str_of(&roots[1])->len);
+    }
+    if (mrbbc_unwinding()) break;
+  }
+  mrbbc_gc_leave(&frame);
+}
+
+static void join_value(MV *dst, const MV *recv) {
+  Buf buffer = {NULL, 0, 0};
+  if (tag_of(recv) != MRBBC_ARY) no_method("join", recv);
+  join_into(&buffer, recv, NULL);
+  if (!mrbbc_unwinding()) *dst = new_str_value(buffer.p ? buffer.p : "", (long)buffer.n);
+  free(buffer.p);
 }
 
 /* ---- the collector: mark and sweep (the design of lua54rt.c's collector) ----
@@ -2033,6 +2246,7 @@ static void free_object(GCHdr *h) {
   set_remove(p);
 #endif
   switch (h->kind) {
+    case GC_STR: free(((MStr *)p)->p); break;
     case GC_ARY: free(((MAry *)p)->items); break;
     case GC_HASH:
       free(((MHash *)p)->keys);
