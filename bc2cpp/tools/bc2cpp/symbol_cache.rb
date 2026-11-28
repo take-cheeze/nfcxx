@@ -20,7 +20,7 @@ module SymbolCache
   # OP_SEND / OP_SSEND check and mrb_funcall does not; the slot carries the check's level.
   # NATIVE_SINGLETON_CALL: `bc2cpp_native_singleton_named` is an explicit-receiver by-name call whose
   # method the compiler proved to be one native singleton function; it keeps level 2 as its fallback is a
-  # checked send, and gets a per-site method cache slot (BC2CPP_NSC_SLOT).
+  # checked send, and gets a method cache slot (BC2CPP_NSC_SLOT_OF: one per kind and method id, see NATIVE_SINGLETON).
   # CORE_SELF_NATIVE: `bc2cpp_native_owner_named` is the same for a self call (level 1: no visibility check).
   # EXACT_NATIVE_SLOT: `bc2cpp_native_slot_named` is an explicit-receiver call (level 2) with a slot per method id.
   CHECKED_FUNCALLS = { 'bc2cpp_funcall_noarg' => 1, 'bc2cpp_funcall_explicit' => 2,
@@ -190,8 +190,8 @@ module SymbolCache
                         nil_tested?(code, start, receiver) ? "bc2cpp_nil_receiver_id(M, #{index}" : "bc2cpp_nil_receiver(M, #{receiver}, #{index}"
                       when 'bc2cpp_owner_call_named' then "bc2cpp_owner_call(M, #{receiver}, #{index}"
                       when 'bc2cpp_owner_call_argv_named' then "bc2cpp_owner_call_argv(M, #{receiver}, #{index}"
-                      when 'bc2cpp_native_singleton_named' then "bc2cpp_native_singleton(M, #{receiver}, #{index}, BC2CPP_NSC_SLOT,"
-                      when 'bc2cpp_native_owner_named' then "bc2cpp_native_owner(M, #{receiver}, #{index}, BC2CPP_NSC_SLOT,"
+                      when 'bc2cpp_native_singleton_named' then "bc2cpp_native_singleton(M, #{receiver}, #{index}, BC2CPP_NSC_SLOT_OF(0, #{index}),"
+                      when 'bc2cpp_native_owner_named' then "bc2cpp_native_owner(M, #{receiver}, #{index}, BC2CPP_NSC_SLOT_OF(1, #{index}),"
                       when 'bc2cpp_native_slot_named' then "bc2cpp_native_slot(M, #{receiver}, #{index}, bc2cpp_xslot_#{index},"
                       else "bc2cpp_send(M, #{receiver}, #{index},"
                       end
@@ -479,7 +479,8 @@ module SymbolCache
   }'],
     ['BC2CPP_SHARD_ONE_BODY static mrb_value bc2cpp_owner_call_argv(mrb_state* M, mrb_value recv, const bc2cpp_owner_desc* d, mrb_value blk, mrb_int argc, const mrb_value* argv,
                                         mrb_value caller_self = mrb_nil_value()) {
-  bc2cpp_owner_set& s = *d->set;
+  bc2cpp_owner_set scratch;
+  bc2cpp_owner_set& s = bc2cpp_owner_set_of(d, scratch);
   int level = d->level;
   mrb_sym mid = bc2cpp_sym(M, d->mid);
 ',
@@ -491,7 +492,8 @@ struct bc2cpp_owner_gem {
 BC2CPP_SHARD_ONE_BODY static mrb_value bc2cpp_owner_call_core(mrb_state* M, mrb_value recv, const bc2cpp_owner_desc* d, mrb_sym mid,
                                         const bc2cpp_owner_gem* g, mrb_value blk, mrb_int argc, const mrb_value* argv,
                                         mrb_value caller_self) {
-  bc2cpp_owner_set& s = *d->set;
+  bc2cpp_owner_set scratch;
+  bc2cpp_owner_set& s = bc2cpp_owner_set_of(d, scratch);
   int level = d->level;
   struct RClass* klass = mrb_class(M, recv);
 '],
@@ -532,8 +534,8 @@ BC2CPP_SHARD_ONE_BODY static mrb_value bc2cpp_owner_call_argv(mrb_state* M, mrb_
   // As bc2cpp_funcall_argv: Proc#call and its aliases on a compiled block are a yield, not an OP_CALL in a C frame.
   if (mrb_nil_p(blk) && mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return bc2cpp_yield_argv(M, recv, argc, argv);
 #ifdef BC2CPP_OWNER_ICACHE
-  bc2cpp_owner_set& s = *d->set;
-  if (bc2cpp_owner_icache_hit(M, s, mrb_class(M, recv), mid, argc)) return bc2cpp_keep_call(M, [&] { return bc2cpp_call_found(M, recv, mid, &s.hit_m, s.hit_c, argc, argv, blk); });
+  bc2cpp_owner_set* s = *d->set;
+  if (s && bc2cpp_owner_icache_hit(M, *s, mrb_class(M, recv), mid, argc)) return bc2cpp_keep_call(M, [&] { return bc2cpp_call_found(M, recv, mid, &s->hit_m, s->hit_c, argc, argv, blk); });
 #endif
 #ifdef BC2CPP_OWNER_ICACHE_STATS
   ++bc2cpp_owner_icache_misses;
@@ -579,7 +581,7 @@ BC2CPP_SHARD_ONE_BODY static mrb_value bc2cpp_owner_call_argv(mrb_state* M, mrb_
   # is dated the same way. Its hits and lookups are not counted (the counters are each gem's).
   OWNER_CALL_PROGRAM = <<~CPP
     // PROGRAM_OWNER_SITES (symbol_cache.rb): MID is a presym id; the set is dated by bc2cpp_program_owner_epoch.
-    #define BC2CPP_OWNERS_PW(MID, ...) ([]() -> const bc2cpp_owner_desc* { static const char* const names[] = { __VA_ARGS__, nullptr }; static bc2cpp_owner_set s; static const bc2cpp_owner_desc d = { names, nullptr, &s, MID, 0 }; return &d; }())
+    #define BC2CPP_OWNERS_PW(MID, ...) ([]() -> const bc2cpp_owner_desc* { static const char* const names[] = { __VA_ARGS__, nullptr }; static bc2cpp_owner_set* s; static const bc2cpp_owner_desc d = { names, nullptr, &s, MID, 0 }; return &d; }())
     static const bc2cpp_owner_gem bc2cpp_owner_program_state = {
       &bc2cpp_program_owner_epoch,
       nullptr,
@@ -592,8 +594,8 @@ BC2CPP_SHARD_ONE_BODY static mrb_value bc2cpp_owner_call_argv(mrb_state* M, mrb_
       mrb_sym mid = (mrb_sym)d->mid;
       if (mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return bc2cpp_yield_argv(M, recv, argc, argv);
     #ifdef BC2CPP_OWNER_ICACHE
-      bc2cpp_owner_set& s = *d->set;
-      if (bc2cpp_owner_icache_hit_at(M, s, mrb_class(M, recv), mid, argc, bc2cpp_program_owner_epoch)) return bc2cpp_keep_call(M, [&] { return bc2cpp_call_found(M, recv, mid, &s.hit_m, s.hit_c, argc, argv, mrb_nil_value()); });
+      bc2cpp_owner_set* s = *d->set;
+      if (s && bc2cpp_owner_icache_hit_at(M, *s, mrb_class(M, recv), mid, argc, bc2cpp_program_owner_epoch)) return bc2cpp_keep_call(M, [&] { return bc2cpp_call_found(M, recv, mid, &s->hit_m, s->hit_c, argc, argv, mrb_nil_value()); });
     #endif
       return bc2cpp_owner_call_core(M, recv, d, mid, &bc2cpp_owner_program_state, mrb_nil_value(), argc, argv, mrb_nil_value());
     }
@@ -790,19 +792,25 @@ static inline bool bc2cpp_owner_icache_hit(mrb_state* M, const bc2cpp_owner_set&
   # registered on the constant's singleton class (tools/bc2cpp/native_singletons.rb). The function reads its
   # arguments through mrb_get_args from the call frame, so it cannot be called bare; this runs the frame
   # mrb_funcall would push (mrb_funcall_with_method is funcall_with_block_m with the lookup done), once per site
-  # instead of the two lookups a checked bc2cpp_send makes. The slot is filled by the first call and is valid for
-  # one VM (epoch, state) and one receiver. Anything the proof assumed but the VM does not show -- the method is
+  # instead of the two lookups a checked bc2cpp_send makes. The slot is filled by a call and is valid for one VM
+  # (epoch), one receiver and one argument count. Anything the proof assumed but the VM does not show -- the method is
   # not a public C function, or an attr_reader-style NOARG function is given arguments -- is not cached and takes
   # the ordinary checked send, so a wrong proof costs speed, never the error or the answer.
+  #
+  # NSC_SLOT_SHARE: everything a slot keeps is a function of what it is keyed on, so every site of one kind (0
+  # singleton, 1 owner) and method id in a unit shares one slot (static: the epoch is the unit's). Sites of the same
+  # name on other receivers or counts only refill it. OWNER_SET_EPOCH holds as for the owner sets: both calls take
+  # bc2cpp_sym(M, i) before reading the slot, so a current epoch names the calling VM and the slot keeps no state.
   NATIVE_SINGLETON = <<~CPP
     struct bc2cpp_nsc_slot {
       unsigned epoch;
-      mrb_state* state;
       struct RObject* recv;
       mrb_method_t m;
       struct RClass* owner;
+      mrb_int argc;
     };
-    #define BC2CPP_NSC_SLOT ([]() -> bc2cpp_nsc_slot& { static bc2cpp_nsc_slot s; return s; }())
+    template <int K, int I> static bc2cpp_nsc_slot bc2cpp_nsc_slot_at;
+    #define BC2CPP_NSC_SLOT_OF(K, I) (bc2cpp_nsc_slot_at<K, I>)
     // Keeps `m` (found on `c`) in the slot for `key`, or refuses: not a C function, or an argument count the
     // function cannot take.
     static bool bc2cpp_nsc_accept(mrb_state* M, bc2cpp_nsc_slot& s, struct RObject* key, mrb_method_t m, struct RClass* c, mrb_int argc) {
@@ -820,7 +828,7 @@ static inline bool bc2cpp_owner_icache_hit(mrb_state* M, const bc2cpp_owner_set&
         if (MRB_PROC_CFUNC_P(p) && MRB_PROC_NOARG_P(p)) return false;
       }
       s.epoch = bc2cpp_nsc_epoch;
-      s.state = M;
+      s.argc = argc;
       s.recv = key;
       s.m = m;
       s.owner = c;
@@ -842,7 +850,7 @@ static inline bool bc2cpp_owner_icache_hit(mrb_state* M, const bc2cpp_owner_set&
       mrb_value caller_self = va_arg(ap, mrb_value);  // CALLER_SELF, as bc2cpp_send's level 2
       va_end(ap);
       mrb_sym mid = bc2cpp_sym(M, i);
-      bool cached = s.epoch == bc2cpp_nsc_epoch && s.state == M && (mrb_type(recv) == MRB_TT_CLASS || mrb_type(recv) == MRB_TT_MODULE) &&
+      bool cached = s.epoch == bc2cpp_nsc_epoch && s.argc == argc && (mrb_type(recv) == MRB_TT_CLASS || mrb_type(recv) == MRB_TT_MODULE) &&
                     s.recv == mrb_obj_ptr(recv);
       if (cached || bc2cpp_nsc_fill(M, s, recv, mid, argc)) {
         return bc2cpp_keep_call(M, [&] { return bc2cpp_call_found(M, recv, mid, &s.m, s.owner, argc, argv, mrb_nil_value()); });
@@ -861,7 +869,7 @@ static inline bool bc2cpp_owner_icache_hit(mrb_state* M, const bc2cpp_owner_set&
       for (mrb_int k = 0; k < argc; k++) argv[k] = va_arg(ap, mrb_value);
       va_end(ap);
       mrb_sym mid = bc2cpp_sym(M, i);
-      bool cached = owner && s.epoch == bc2cpp_nsc_epoch && s.state == M && s.recv == (struct RObject*)owner;
+      bool cached = owner && s.epoch == bc2cpp_nsc_epoch && s.argc == argc && s.recv == (struct RObject*)owner;
       if (!cached && owner) {
         struct RClass* c = owner;
         mrb_method_t m = bc2cpp_find_proven(M, &c, mid);
@@ -919,13 +927,16 @@ static inline bool bc2cpp_owner_icache_hit(mrb_state* M, const bc2cpp_owner_set&
       unsigned* epoch;
       int count;
     };
-    // The run-time state of an owner set, zero-initialised (.bss: an initialised one would be a .data image in flash).
+    // The run-time state of an owner set. OWNER_SET_LAZY: a site keeps only a pointer (.bss), and the set is allocated
+    // zeroed by the site's first call, so a site that never runs costs no state (bc2cpp_owner_set_of).
     // OWNER_SET_EPOCH: the set is valid while `epoch` is bc2cpp_owner_epoch. It keeps no mrb_state: every use follows
     // a bc2cpp_sym(M, ...) of the same call, which bumps the epoch whenever the gem's VM changes (or the gem is
     // finalised), so a current epoch names the calling VM. Narrow fields sit last, for padding.
     struct bc2cpp_owner_set {
-      // Owners already matched: up to 32, allocated on the first miss (an inline 32-slot array was most of a site's bytes).
-      struct RClass** seen;
+      // Owners already matched, up to 32: the first two inline (most sites see one), the rest in `more`, allocated
+      // when a third is matched.
+      struct RClass* seen[2];
+      struct RClass** more;
       // OWNER_CALL_ICACHE: the last call that passed every check (hit_klass null: none).
       struct RClass* hit_klass;
       struct RClass* hit_c;
@@ -944,10 +955,25 @@ static inline bool bc2cpp_owner_icache_hit(mrb_state* M, const bc2cpp_owner_set&
     struct bc2cpp_owner_desc {
       const char* const* names;
       const bc2cpp_owner_directs* direct;
-      bc2cpp_owner_set* set;
+      bc2cpp_owner_set** set;
       uint16_t mid;
       uint8_t level;
     };
+    // OWNER_SET_LAZY: the site's set, allocated on its first call. When the allocation fails the call runs on
+    // `scratch`, zeroed: it keeps nothing, so every check runs as on a first call.
+    [[gnu::noinline]] static bc2cpp_owner_set& bc2cpp_owner_set_make(const bc2cpp_owner_desc* d, bc2cpp_owner_set& scratch) {
+      bc2cpp_owner_set* p = (bc2cpp_owner_set*)calloc(1, sizeof(bc2cpp_owner_set));
+      if (!p) {
+        memset(&scratch, 0, sizeof scratch);
+        return scratch;
+      }
+      *d->set = p;
+      return *p;
+    }
+    static inline bc2cpp_owner_set& bc2cpp_owner_set_of(const bc2cpp_owner_desc* d, bc2cpp_owner_set& scratch) {
+      bc2cpp_owner_set* p = *d->set;
+      return p ? *p : bc2cpp_owner_set_make(d, scratch);
+    }
     #ifdef BC2CPP_OWNER_ICACHE_STATS
     // Hits and full lookups, for scripts/bc2cpp/owner_call_icache_check.rb; printed at exit.
     #include <stdio.h>
@@ -983,10 +1009,10 @@ static inline bool bc2cpp_owner_icache_hit(mrb_state* M, const bc2cpp_owner_set&
     }
     #endif
     // I is the call's symbol slot, L its level, then the owner list.
-    #define BC2CPP_OWNERS(I, L, ...) ([]() -> const bc2cpp_owner_desc* { static const char* const names[] = { __VA_ARGS__, nullptr }; static bc2cpp_owner_set s; static const bc2cpp_owner_desc d = { names, nullptr, &s, I, L }; return &d; }())
+    #define BC2CPP_OWNERS(I, L, ...) ([]() -> const bc2cpp_owner_desc* { static const char* const names[] = { __VA_ARGS__, nullptr }; static bc2cpp_owner_set* s; static const bc2cpp_owner_desc d = { names, nullptr, &s, I, L }; return &d; }())
     // OWNER_CALL_DIRECT: DIRECTS is a run of BC2CPP_OWNER_DIRECT(owner, entry, aspec, visibility), no commas between.
     #define BC2CPP_OWNER_DIRECT(owner, fn, aspec, vis) { owner, fn, (uint32_t)(aspec) | (uint32_t)(vis) },
-    #define BC2CPP_OWNERS_D(I, L, DIRECTS, ...) ([]() -> const bc2cpp_owner_desc* { static const char* const names[] = { __VA_ARGS__, nullptr }; static const bc2cpp_owner_direct rows[] = { DIRECTS }; static struct RClass* cls[sizeof rows / sizeof rows[0]]; static unsigned ep; static const bc2cpp_owner_directs dr = { rows, cls, &ep, (int)(sizeof rows / sizeof rows[0]) }; static bc2cpp_owner_set s; static const bc2cpp_owner_desc d = { names, &dr, &s, I, L }; return &d; }())
+    #define BC2CPP_OWNERS_D(I, L, DIRECTS, ...) ([]() -> const bc2cpp_owner_desc* { static const char* const names[] = { __VA_ARGS__, nullptr }; static const bc2cpp_owner_direct rows[] = { DIRECTS }; static struct RClass* cls[sizeof rows / sizeof rows[0]]; static unsigned ep; static const bc2cpp_owner_directs dr = { rows, cls, &ep, (int)(sizeof rows / sizeof rows[0]) }; static bc2cpp_owner_set* s; static const bc2cpp_owner_desc d = { names, &dr, &s, I, L }; return &d; }())
     // OWNER_SET_SHARE (owner_set_share.rb): the descriptor every site with key K shares, defined once below; the
     // site's slot, level and owner list stay spelled for the reader.
     #define BC2CPP_SHARED(K, ...) (&bc2cpp_owner_sd_##K)
@@ -1106,7 +1132,8 @@ static inline bool bc2cpp_owner_icache_hit(mrb_state* M, const bc2cpp_owner_set&
     #endif
     BC2CPP_SHARD_ONE_BODY static mrb_value bc2cpp_owner_call_argv(mrb_state* M, mrb_value recv, const bc2cpp_owner_desc* d, mrb_value blk, mrb_int argc, const mrb_value* argv,
                                             mrb_value caller_self = mrb_nil_value()) {
-      bc2cpp_owner_set& s = *d->set;
+      bc2cpp_owner_set scratch;
+      bc2cpp_owner_set& s = bc2cpp_owner_set_of(d, scratch);
       int level = d->level;
       mrb_sym mid = bc2cpp_sym(M, d->mid);
       // As bc2cpp_funcall_argv: Proc#call and its aliases on a compiled block are a yield, not an OP_CALL in a C frame.
@@ -1133,15 +1160,18 @@ static inline bool bc2cpp_owner_icache_hit(mrb_state* M, const bc2cpp_owner_set&
         s.hit_klass = nullptr;
       }
       bool seen = false;
-      for (int k = 0; k < s.seen_count; ++k) seen = seen || s.seen[k] == owner;
+      for (int k = 0; k < s.seen_count; ++k) seen = seen || (k < 2 ? s.seen[k] : s.more[k - 2]) == owner;
       if (!seen) {
         if (!bc2cpp_owner_listed(M, owner, d->names)
     #ifdef BC2CPP_FIBER_RUNTIME
             && !bc2cpp_fiber_definer_p(m)
     #endif
         ) bc2cpp_owner_violation(M, recv, mid, "resolves to a definer the closed world does not list");
-        if (!s.seen) s.seen = (struct RClass**)malloc(32 * sizeof(struct RClass*));
-        if (s.seen && s.seen_count < 32) s.seen[s.seen_count++] = owner;
+        if (s.seen_count < 2) s.seen[s.seen_count++] = owner;
+        else if (s.seen_count < 32) {
+          if (!s.more) s.more = (struct RClass**)malloc(30 * sizeof(struct RClass*));
+          if (s.more) s.more[s.seen_count++ - 2] = owner;
+        }
       }
       if (level >= 2) {
         // vm.c OP_SEND: an explicit receiver may not call a private method, nor a protected one unless the caller's
