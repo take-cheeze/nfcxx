@@ -2614,3 +2614,16 @@ int mrbbc_protect(void (*body)(void *), void *data, MrbbcCallError *error) {
   unwind_value = saved_value;
   return !failed;
 }
+
+/* ---- accessors for the mruby compatibility header (mruby_compat/mruby.h) ---- */
+long mrbbc_sym_index(const MV *v) { return sym_index(v); }
+const char *mrbbc_sym_name(long index) { return sym_names[index]; }
+void mrbbc_sym_from_index(MV *dst, long index) { *dst = sym_value(index); }
+void mrbbc_ary_items(const MV *ary, const MV **items, long *len) {
+  const MAry *a = ary_of(ary);
+  *items = a->items;
+  *len = a->len;
+}
+long mrbbc_hash_size(const MV *hash) { return hash_of(hash)->len; }
+void mrbbc_hash_key(MV *dst, const MV *hash, long i) { *dst = hash_of(hash)->keys[i]; }
+void mrbbc_hash_val(MV *dst, const MV *hash, long i) { *dst = hash_of(hash)->vals[i]; }
