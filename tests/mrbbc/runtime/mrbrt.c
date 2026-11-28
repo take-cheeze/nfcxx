@@ -2614,3 +2614,351 @@ int mrbbc_protect(void (*body)(void *), void *data, MrbbcCallError *error) {
   unwind_value = saved_value;
   return !failed;
 }
+
+/* ---- Marshal (format 4.8, as CRuby and mruby-marshal write and read it) ----
+ * The values: nil, true, false, Integer (a boxed one too), Symbol, String, Array and Hash. A String is written as UTF-8 (the
+ * I wrapper with E true), since mrbrt strings carry no encoding. Repeated strings, arrays and hashes are written as links
+ * (@), repeated symbols as ;. Any other value raises TypeError on dump, and a bignum that does not fit 64 bits raises
+ * RangeError on load (the runtime's integers are 64-bit). */
+
+typedef struct { unsigned char *p; size_t n, cap; } MarBuf;
+
+static void mar_put(MarBuf *b, const void *src, size_t k) {
+  if (b->n + k > b->cap) {
+    size_t nc = b->cap ? b->cap : 64;
+    unsigned char *q;
+    while (nc < b->n + k) nc *= 2;
+    q = realloc(b->p, nc);
+    if (q == NULL) mrbbc_raise("NoMemoryError", "failed to allocate memory");
+    b->p = q;
+    b->cap = nc;
+  }
+  memcpy(b->p + b->n, src, k);
+  b->n += k;
+}
+
+static void mar_byte(MarBuf *b, int c) {
+  unsigned char x = (unsigned char)c;
+  mar_put(b, &x, 1);
+}
+
+/* w_long: a count, index or small integer */
+static void mar_wlong(MarBuf *b, long long x) {
+  unsigned char buf[9];
+  int i;
+  if (x == 0) { mar_byte(b, 0); return; }
+  if (x > 0 && x < 123) { mar_byte(b, (int)(x + 5)); return; }
+  if (x < 0 && x > -124) { mar_byte(b, (int)((x - 5) & 0xff)); return; }
+  for (i = 1; i <= 8; i++) {
+    buf[i] = (unsigned char)(x & 0xff);
+    x >>= 8;
+    if (x == 0) { buf[0] = (unsigned char)i; break; }
+    if (x == -1) { buf[0] = (unsigned char)((-i) & 0xff); break; }
+  }
+  mar_put(b, buf, (size_t)i + 1);
+}
+
+typedef struct { long n, cap; long *v; } MarList;
+
+static long mar_find(const MarList *l, long key) {
+  long k;
+  for (k = 0; k < l->n; k++) if (l->v[k] == key) return k;
+  return -1;
+}
+
+static void mar_add(MarList *l, long key) {
+  if (l->n == l->cap) {
+    long nc = l->cap ? l->cap * 2 : 16;
+    long *q = realloc(l->v, (size_t)nc * sizeof *q);
+    if (q == NULL) mrbbc_raise("NoMemoryError", "failed to allocate memory");
+    l->v = q;
+    l->cap = nc;
+  }
+  l->v[l->n++] = key;
+}
+
+typedef struct { MarBuf *out; MarList objs, syms; } MarDump;
+
+static void mar_symbol(MarDump *d, long sym) {
+  long at = mar_find(&d->syms, sym);
+  const char *name = sym_names[sym];
+  size_t len = strlen(name);
+  if (at >= 0) {
+    mar_byte(d->out, ';');
+    mar_wlong(d->out, at);
+    return;
+  }
+  mar_add(&d->syms, sym);
+  mar_byte(d->out, ':');
+  mar_wlong(d->out, (long long)len);
+  mar_put(d->out, name, len);
+}
+
+static void mar_value(MarDump *d, const MV *v) {
+  int tag = tag_of(v);
+  switch (tag) {
+    case MRBBC_NIL: mar_byte(d->out, '0'); return;
+    case MRBBC_TRUE: mar_byte(d->out, 'T'); return;
+    case MRBBC_FALSE: mar_byte(d->out, 'F'); return;
+    case MRBBC_SYM: mar_symbol(d, sym_index(v)); return;
+    case MRBBC_INT: {
+      int64_t x = 0;
+      uint64_t u;
+      int nb, k;
+      mrbbc_int_read(v, &x);
+      if (x >= -(1LL << 30) && x < (1LL << 30)) { mar_byte(d->out, 'i'); mar_wlong(d->out, x); return; }
+      /* a bignum: sign, the count of 16-bit shorts, then the magnitude little-endian in an even number of bytes */
+      mar_byte(d->out, 'l');
+      mar_byte(d->out, x < 0 ? '-' : '+');
+      u = x < 0 ? (uint64_t)0 - (uint64_t)x : (uint64_t)x;
+      nb = 0;
+      while (nb < 8 && (u >> (8 * nb))) nb++;
+      if (nb % 2) nb++;
+      mar_wlong(d->out, nb / 2);
+      u = x < 0 ? (uint64_t)0 - (uint64_t)x : (uint64_t)x;
+      for (k = 0; k < nb; k++) mar_byte(d->out, (int)((u >> (8 * k)) & 0xff));
+      return;
+    }
+    case MRBBC_STR: case MRBBC_ARY: case MRBBC_HASH: {
+      long id = (long)(intptr_t)ptr_of(v);
+      long at = mar_find(&d->objs, id);
+      if (at >= 0) { mar_byte(d->out, '@'); mar_wlong(d->out, at); return; }
+      mar_add(&d->objs, id);
+      if (tag == MRBBC_STR) {
+        MStr *s = str_of(v);
+        mar_byte(d->out, 'I');
+        mar_byte(d->out, '"');
+        mar_wlong(d->out, s->len);
+        mar_put(d->out, s->p, (size_t)s->len);
+        mar_wlong(d->out, 1);
+        mar_symbol(d, intern("E"));
+        mar_byte(d->out, 'T');
+      } else if (tag == MRBBC_ARY) {
+        MAry *a = ary_of(v);
+        long k;
+        mar_byte(d->out, '[');
+        mar_wlong(d->out, a->len);
+        for (k = 0; k < a->len; k++) mar_value(d, &a->items[k]);
+      } else {
+        MHash *h = hash_of(v);
+        long k;
+        mar_byte(d->out, '{');
+        mar_wlong(d->out, h->len);
+        for (k = 0; k < h->len; k++) { mar_value(d, &h->keys[k]); mar_value(d, &h->vals[k]); }
+      }
+      return;
+    }
+    default:
+      mrbbc_raise("TypeError", "can't dump this value (only nil, true, false, Integer, Symbol, String, Array and Hash)");
+  }
+}
+
+void mrbbc_marshal_dump(MV *dst, const MV *v) {
+  MarBuf out = {NULL, 0, 0};
+  MarDump d;
+  memset(&d, 0, sizeof d);
+  d.out = &out;
+  mar_byte(&out, 4);
+  mar_byte(&out, 8);
+  mar_value(&d, v);
+  free(d.objs.v);
+  free(d.syms.v);
+  mrbbc_str_new(dst, (const char *)out.p, (long)out.n);
+  free(out.p);
+}
+
+/* ---- load ---- */
+
+typedef struct { const unsigned char *p, *end; } MarIn;
+
+static int mar_byte_in(MarIn *in) {
+  if (in->p >= in->end) mrbbc_raise("ArgumentError", "marshal data too short");
+  return *in->p++;
+}
+
+static long long mar_read_long(MarIn *in) {
+  int c = (int8_t)mar_byte_in(in);
+  long long x;
+  int i;
+  if (c == 0) return 0;
+  if (c > 4) return c - 5;          /* 5..127: the value plus 5 */
+  if (c > 0) {                      /* 1..4: that many bytes, little-endian, positive */
+    x = 0;
+    for (i = 0; i < c; i++) x |= (long long)((uint64_t)mar_byte_in(in) << (8 * i));
+    return x;
+  }
+  if (c < -4) return c + 5;        /* -128..-5: the value minus 5 */
+  x = -1;                           /* -4..-1: that many bytes, negative */
+  for (i = 0; i < -c; i++) {
+    unsigned char b = (unsigned char)mar_byte_in(in);
+    x &= ~((long long)0xff << (8 * i));
+    x |= (long long)((uint64_t)b << (8 * i));
+  }
+  return x;
+}
+
+/* every value read is an entry of the objects array (a GC root while it loads); a reference is its index in that array */
+typedef struct { MV *objs; long ncount; char **names; long nsyms, syms_cap; } MarLoad;
+
+static long mar_push_entry(MarLoad *ld, const MV *v) {
+  long at = ld->ncount;
+  mrbbc_ary_push(ld->objs, v);
+  ld->ncount++;
+  return at;
+}
+
+static char *mar_read_name(MarIn *in, long long len) {
+  char *s = malloc((size_t)len + 1);
+  long long k;
+  if (s == NULL) mrbbc_raise("NoMemoryError", "failed to allocate memory");
+  for (k = 0; k < len; k++) s[k] = (char)mar_byte_in(in);
+  s[len] = 0;
+  return s;
+}
+
+static void mar_sym_add(MarLoad *ld, char *name) {
+  if (ld->nsyms == ld->syms_cap) {
+    long nc = ld->syms_cap ? ld->syms_cap * 2 : 16;
+    char **q = realloc(ld->names, (size_t)nc * sizeof *q);
+    if (q == NULL) mrbbc_raise("NoMemoryError", "failed to allocate memory");
+    ld->names = q;
+    ld->syms_cap = nc;
+  }
+  ld->names[ld->nsyms++] = name;
+}
+
+/* reads a Symbol body (after ':' or ';'); returns its index in the objects array */
+static long mar_read_value(MarIn *in, MarLoad *ld);
+
+static long mar_read_symbol_name(MarIn *in, MarLoad *ld, int link) {
+  MV sym;
+  if (link) {
+    long long at = mar_read_long(in);
+    if (at < 0 || at >= ld->nsyms) mrbbc_raise("ArgumentError", "bad symbol link");
+    mrbbc_sym(&sym, ld->names[at]);
+  } else {
+    long long len = mar_read_long(in);
+    char *name = mar_read_name(in, len);
+    mar_sym_add(ld, name);
+    mrbbc_sym(&sym, name);
+  }
+  return mar_push_entry(ld, &sym);
+}
+
+static long mar_read_value(MarIn *in, MarLoad *ld) {
+  int c = mar_byte_in(in);
+  MV v;
+  switch (c) {
+    case '0': mrbbc_set_nil(&v); return mar_push_entry(ld, &v);
+    case 'T': mrbbc_set_bool(&v, 1); return mar_push_entry(ld, &v);
+    case 'F': mrbbc_set_bool(&v, 0); return mar_push_entry(ld, &v);
+    case 'i': { long long x = mar_read_long(in); mrbbc_int_new(&v, x); return mar_push_entry(ld, &v); }
+    case ':': return mar_read_symbol_name(in, ld, 0);
+    case ';': return mar_read_symbol_name(in, ld, 1);
+    case '@': {
+      long long at = mar_read_long(in);
+      if (at < 0 || at >= ld->ncount) mrbbc_raise("ArgumentError", "bad object link");
+      return (long)at;
+    }
+    case 'l': {
+      int sign = mar_byte_in(in);
+      long long shorts = mar_read_long(in), k, nb = shorts * 2;
+      uint64_t u = 0;
+      long long a;
+      for (k = 0; k < nb; k++) {
+        unsigned char b = (unsigned char)mar_byte_in(in);
+        if (k < 8) u |= (uint64_t)b << (8 * k);
+        else if (b) mrbbc_raise("RangeError", "bignum too big to fit into a 64-bit integer");
+      }
+      if (u > (uint64_t)INT64_MAX + (sign == '-' ? 1u : 0u)) mrbbc_raise("RangeError", "bignum too big to fit into a 64-bit integer");
+      a = sign == '-' ? (long long)(0 - u) : (long long)u;
+      mrbbc_int_new(&v, a);
+      return mar_push_entry(ld, &v);
+    }
+    case 'I': {
+      long at;
+      int q = mar_byte_in(in);
+      long long len, n, j;
+      MV s;
+      if (q != '"') mrbbc_raise("ArgumentError", "unsupported string wrapper in marshal data");
+      len = mar_read_long(in);
+      if (len < 0) mrbbc_raise("ArgumentError", "marshal data format error");
+      {
+        char *buf = mar_read_name(in, len);
+        mrbbc_str_new(&s, buf, (long)len);
+        free(buf);
+      }
+      at = mar_push_entry(ld, &s);
+      n = mar_read_long(in);
+      for (j = 0; j < n; j++) { (void)mar_read_value(in, ld); (void)mar_read_value(in, ld); }
+      return at;
+    }
+    case '"': {
+      long long len = mar_read_long(in);
+      char *buf;
+      if (len < 0) mrbbc_raise("ArgumentError", "marshal data format error");
+      buf = mar_read_name(in, len);
+      mrbbc_str_new(&v, buf, (long)len);
+      free(buf);
+      return mar_push_entry(ld, &v);
+    }
+    case '[': {
+      long long n = mar_read_long(in), k;
+      long at;
+      mrbbc_ary_new(&v, n > 0 ? (long)n : 1);
+      at = mar_push_entry(ld, &v);
+      for (k = 0; k < n; k++) {
+        long child = mar_read_value(in, ld);
+        MV ary, item;
+        mrbbc_ary_elt(&ary, ld->objs, at);
+        mrbbc_ary_elt(&item, ld->objs, child);
+        mrbbc_ary_push(&ary, &item);
+        /* the array is in the objects array, so the push updates the entry its index names */
+      }
+      return at;
+    }
+    case '{': {
+      long long n = mar_read_long(in), k;
+      long at;
+      mrbbc_hash_new(&v, n > 0 ? (long)n : 1);
+      at = mar_push_entry(ld, &v);
+      for (k = 0; k < n; k++) {
+        long kidx = mar_read_value(in, ld);
+        long vidx = mar_read_value(in, ld);
+        MV hash, key, val;
+        mrbbc_ary_elt(&hash, ld->objs, at);
+        mrbbc_ary_elt(&key, ld->objs, kidx);
+        mrbbc_ary_elt(&val, ld->objs, vidx);
+        mrbbc_hash_set(&hash, &key, &val);
+      }
+      return at;
+    }
+    default:
+      mrbbc_raise("ArgumentError", "dump format error (unsupported type in marshal data)");
+  }
+  return 0;
+}
+
+void mrbbc_marshal_load(MV *dst, const MV *str) {
+  const char *data;
+  long size;
+  MarIn in;
+  MarLoad ld;
+  MV roots[1];
+  MrbbcGCFrame frame;
+  long top, k;
+  if (!mrbbc_str_view(str, &data, &size)) mrbbc_raise("TypeError", "no implicit conversion into String");
+  if (size < 2 || (unsigned char)data[0] != 4 || (unsigned char)data[1] != 8)
+    mrbbc_raise("TypeError", "incompatible marshal file format (can't be read)");
+  memset(&ld, 0, sizeof ld);
+  mrbbc_gc_enter(&frame, roots, 1);
+  mrbbc_ary_new(&roots[0], 16);
+  ld.objs = &roots[0];
+  in.p = (const unsigned char *)data + 2;
+  in.end = (const unsigned char *)data + size;
+  top = mar_read_value(&in, &ld);
+  mrbbc_ary_elt(dst, ld.objs, top);
+  mrbbc_gc_leave(&frame);
+  for (k = 0; k < ld.nsyms; k++) free(ld.names[k]);
+  free(ld.names);
+}

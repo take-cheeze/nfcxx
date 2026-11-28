@@ -25,6 +25,23 @@ for th in "" 1; do
   echo "gc_test (threshold $label): $got"
 done
 
+# Marshal (mrbbc_marshal_dump / mrbbc_marshal_load): the dumps of marshal_test.c's cases are CRuby's Marshal.dump bytes (the
+# cases are marshal_cases.rb), and each dump loads and dumps back to the same bytes. Built with conservative GC: the cases'
+# locals are roots the C stack scan finds.
+if command -v ruby >/dev/null 2>&1; then
+  cc -std=c99 -Wall -Wno-unused-parameter -Werror -DMRBBC_VALUE="${MRBBC_VALUE:-8}" -DMRBBC_GC_CONSERVATIVE=1 \
+     -o "$work/marshal_test" "$rt/marshal_test.c" "$rt/mrbrt.c" -lm || exit 1
+  ruby "$rt/marshal_cases.rb" > "$work/marshal_expected.txt" || exit 1
+  if "$work/marshal_test" > "$work/marshal_got.txt" 2>&1 && diff -q "$work/marshal_expected.txt" "$work/marshal_got.txt" >/dev/null; then
+    echo "marshal: $(wc -l < "$work/marshal_got.txt") cases match CRuby's Marshal.dump, and each reloads to the same bytes"
+  else
+    echo "FAIL marshal:"; diff "$work/marshal_expected.txt" "$work/marshal_got.txt" | head -20
+    fail=1
+  fi
+else
+  echo "marshal: skipped (ruby not found: the expected bytes come from CRuby's Marshal)"
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "mrbbc-runtime: FAILED"
   exit 1

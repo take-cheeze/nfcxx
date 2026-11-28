@@ -231,6 +231,10 @@ void mrbbc_binop(int op, MV *dst, const MV *a, const MV *b);
 void mrbbc_str_new(MV *dst, const char *p, long n);
 int mrbbc_str_view(const MV *value, const char **data, long *size);
 void mrbbc_set_nil(MV *dst);
+/* Marshal (format 4.8, as CRuby writes it; see mrbrt.c): dst = the Marshal.dump of v, as a String. Writes the dump into a new
+ * String; raises TypeError for a value it cannot dump. mrbbc_marshal_load reads a dump back (dst = the value). */
+void mrbbc_marshal_dump(MV *dst, const MV *v);
+void mrbbc_marshal_load(MV *dst, const MV *str);
 /* Ownership transfers only on successful return; domain prevents interpreting another embedder's payload. */
 void mrbbc_foreign_new(MV *dst, const void *domain, void *data, void (*release)(void *));
 void *mrbbc_foreign_data(const MV *value, const void *domain);
