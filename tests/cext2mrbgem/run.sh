@@ -997,9 +997,28 @@ check test ! -e "$work/api_dtype_parent_ok/NOT_BUILDABLE"
 check grep -qF 'static const mrb_data_type pc_base = { "PcBase", NULL, NULL };' "$work/api_dtype_parent_ok/src/api_dtype_parent_ok.c"
 check grep -qF 'static const mrb_data_type pc_child = { "PcChild", pc_free, pc_mark, &pc_base };' "$work/api_dtype_parent_ok/src/api_dtype_parent_ok.c"
 rc=0; env -u NFCX_MRUBY_DATA_H "$rb" "$conv" --scanner "$scanner" --name api_dtype_parent_nofield tools/cext2mrbgem/fixtures/api_dtype_parent_ok/ext/api_dtype_parent_ok "$work/api_dtype_parent_nofield" > "$work/api_dtype_parent_nofield.log" 2>&1 || rc=$?
+# 2zq1. without the parent field the parent is flattened (not refused): the parent field is dropped, the child keeps its own type
+check test "$rc" -eq 0
+check test ! -e "$work/api_dtype_parent_nofield/NOT_BUILDABLE"
+check grep -qF 'static const mrb_data_type pc_child = { "PcChild", pc_free, pc_mark };' "$work/api_dtype_parent_nofield/src/api_dtype_parent_ok.c"
+
+# 2zq2. a check against a flattened parent accepts its children (CRuby's kind-of), a check against a childless type stays exact
+rc=0; env -u NFCX_MRUBY_DATA_H -u NFCX_MRUBY_INCLUDE "$rb" "$conv" --scanner "$scanner" --name api_dtype_flat tools/cext2mrbgem/fixtures/api_dtype_flat/ext/api_dtype_flat "$work/api_dtype_flat" > "$work/api_dtype_flat.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_dtype_flat/NOT_BUILDABLE"
+check grep -qF '#include "nfcx_data_kind.h"' "$work/api_dtype_flat/src/api_dtype_flat.c"
+check grep -qF 'nfcx_data_get_ptr_kind(mrb, obj, (const char *const []){"FlBase", "FlChild"}, 2)' "$work/api_dtype_flat/src/api_dtype_flat.c"
+check grep -qF 'DATA_TYPE(obj) == &fl_child' "$work/api_dtype_flat/src/api_dtype_flat.c"
+check test -e "$work/api_dtype_flat/include/nfcx_data_kind.h"
+
+# 2zq3. a helper whose address goes to a library error setter (xmlSetGenericErrorFunc) uses the gem's global state (the
+# library calls it only inside a call the gem makes); a helper handed to an unknown library function stays refused
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_global_cb tools/cext2mrbgem/fixtures/api_global_cb/ext/api_global_cb "$work/api_global_cb" > "$work/api_global_cb.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
-check test -e "$work/api_dtype_parent_nofield/NOT_BUILDABLE"
-check grep -q "  rb_data_type_t  the parent is not 0/NULL: the mruby data type has no parent field" "$work/api_dtype_parent_nofield/REFUSALS.txt"
+check grep -qF 'static void gcb_error(void *ctx, const char *msg) {' "$work/api_global_cb/src/api_global_cb.c"
+check grep -qF 'mrb_raisef(api_global_cb_bc2_mrb, mrb_exc_get(api_global_cb_bc2_mrb, "RuntimeError"), "%s", msg);' "$work/api_global_cb/src/api_global_cb.c"
+check grep -qF 'xmlSetGenericErrorFunc(NULL, gcb_error);' "$work/api_global_cb/src/api_global_cb.c"
+check grep -q "^api_global_cb.c:27  gcb_kept  helper needs the mruby state threaded in" "$work/api_global_cb/REFUSALS.txt"
 
 # 2zq. TypedData_Make_Struct and TypedData_Wrap_Struct map to mrb_data_object_alloc; the struct is allocated with mrb_calloc
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_typed_alloc tools/cext2mrbgem/fixtures/api_typed_alloc/ext/api_typed_alloc "$work/api_typed_alloc" > "$work/api_typed_alloc.log" 2>&1 || rc=$?
