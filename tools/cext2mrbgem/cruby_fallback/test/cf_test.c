@@ -59,6 +59,25 @@ int main(int argc, char **argv) {
   /* a missing method */
   CHECK(nfcx_cruby_call("CF", "nope", 0, NULL, NULL, buf, sizeof buf, &n, err, sizeof err) != 0 &&
         strstr(err, "NoMethodError") != NULL, "CF.nope raises NoMethodError");
+  /* handles: CF::Counter.new(5) keeps its state in CRuby; "#<index>" dispatches to it */
+  long hid = -1;
+  const char *five = "\x04\x08i\x0a";
+  size_t fivel = 4;
+  CHECK(nfcx_cruby_handle_new("CF::Counter", "new", 1, &five, &fivel, &hid, err, sizeof err) == 0 && hid == 0,
+        "CF::Counter.new(5) makes handle 0");
+  char hpath[16];
+  snprintf(hpath, sizeof hpath, "#%ld", hid);
+  const char *three = "\x04\x08i\x08";
+  size_t threel = 4;
+  const char *want8 = "\x04\x08i\x0d";
+  CHECK(call_eq(hpath, "add", 1, &three, &threel, want8, 4, err, sizeof err), "handle 0 .add(3) == 8 (state kept in CRuby)");
+  const char *ten = "\x04\x08i\x0f";
+  size_t tenl = 4;
+  const char *want18 = "\x04\x08i\x17";
+  CHECK(call_eq(hpath, "add", 1, &ten, &tenl, want18, 4, err, sizeof err), "handle 0 .add(10) == 18");
+  CHECK(nfcx_cruby_handle_release(hid, err, sizeof err) == 0, "handle 0 released");
+  CHECK(nfcx_cruby_call(hpath, "add", 1, &three, &threel, buf, sizeof buf, &n, err, sizeof err) != 0 &&
+        strstr(err, "released") != NULL, "a call on the released handle fails");
   printf(failures ? "prototype test FAILED\n" : "prototype test OK\n");
   return failures ? 1 : 0;
 }

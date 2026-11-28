@@ -17,4 +17,14 @@ int nfcx_cruby_boot(const char *so_path, char *err, size_t errlen);
 int nfcx_cruby_call(const char *recv_path, const char *meth, int argc, const char *const *arg_data, const size_t *arg_len,
                     char *ret_buf, size_t ret_cap, size_t *ret_len, char *err, size_t errlen);
 
+/* Creates an instance: recv_path.ctor(*args) (a constant path, e.g. "CF::Counter" and "new"). The object stays in the CRuby
+ * VM's handles table, and *id is its handle index. Returns nonzero and fills err on failure. */
+int nfcx_cruby_handle_new(const char *recv_path, const char *ctor, int argc, const char *const *arg_data, const size_t *arg_len,
+                          long *id, char *err, size_t errlen);
+
+/* Releases a handle; calls on it fail afterwards. Returns nonzero and fills err on an unknown handle. */
+int nfcx_cruby_handle_release(long id, char *err, size_t errlen);
+
+/* A receiver path naming a handle is "#<index>", as nfcx_cruby_call takes it. */
+
 #endif
