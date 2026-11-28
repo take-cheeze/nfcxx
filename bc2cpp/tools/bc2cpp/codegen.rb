@@ -67,13 +67,6 @@ class CodeGen
   C_TYPE = { fixnum: 'mrb_int', symbol: 'mrb_sym', bool: 'mrb_bool',
              fixnum_nil: 'Bc2cppFixnumOrNil', value: 'mrb_value' }.freeze
 
-  # NATIVE_DATA_OWNERS: classes whose instances keep their native payload in DATA_PTR, set by a
-  # DataType<T> allocation in mruby-rgss/src/lib.cxx (alloc_obj asserts DATA_PTR is null first).
-  # A compiled #initialize must not embed an ivar struct in those objects: mrb_data_init would
-  # already occupy DATA_PTR before the first native load, so that assertion fails. Their ivars
-  # stay in iv_tbl.
-  NATIVE_DATA_OWNERS = %w[RGSS::Bitmap].freeze
-
   # box/check/unbox/err per specialized type proof. Ordinary embedded ivars use
   # mrb_value directly so arbitrary Ruby assignments retain their normal behavior.
   # `:bool` has no single check macro (MRB_TT_TRUE/MRB_TT_FALSE are separate
@@ -525,7 +518,7 @@ class CodeGen
   # so no subclass code runs before the root's #initialize has built the storage.
   def embed_family_foldable?(root, members)
     family = [root, *members]
-    return false if family.any? { |owner| NATIVE_DATA_OWNERS.include?(owner) }
+    return false if family.any? { |owner| native_data_owner?(owner) }
     # ENGINE_EMBED_FAMILIES: an engine world registers every owner, and switches each one's instance type, on its
     # own (bc2cpp_set_instance_tts walks subclasses), so a folded family needs no wiring of its own.
     # BC2CPP_ENGINE_EMBED_FAMILIES=0 keeps engine worlds at one layout per chain.
@@ -574,7 +567,7 @@ class CodeGen
         other != owner && (strict_subclass?(owner, other) || strict_subclass?(other, owner))
       end
       next if inherited_layout
-      next if NATIVE_DATA_OWNERS.include?(owner)
+      next if native_data_owner?(owner)
       next unless plain_object_ancestry?(owner)
 
 
@@ -757,6 +750,28 @@ class CodeGen
   # accessor (positional storage, nothing to synthesize).
   def synthesizable_accessor_only?(owner, name)
     (@registry[name] || []).select { |d| d.owner == owner }.all? { |d| d.kind == :ivar_accessor }
+  end
+
+  # NATIVE_DATA_OWNERS: an instance of a class native code makes MRB_TT_DATA (NativeOwnerMap.data_instance_classes),
+  # or of a subclass, has its DATA_PTR set by a native (RGSS::Window's _rgss1_initialize stores its node there after
+  # the compiled #initialize ran), so an embedded ivar struct there would be overwritten or trip alloc_obj's null
+  # check. Those owners keep their ivars in iv_tbl. A class the scan cannot name refuses every owner.
+  NATIVE_DATA_CLASSES_CACHE = {}
+
+  def native_data_owner?(owner)
+    classes = native_data_classes
+    classes.nil? || classes.include?(owner) || classes.any? { |klass| strict_subclass?(owner, klass) }
+  end
+
+  def native_data_classes
+    paths = self.class.native_source_paths
+    return Set.new unless paths
+
+    NATIVE_DATA_CLASSES_CACHE.fetch(paths) do
+      classes, unknown = NativeOwnerMap.data_instance_classes(paths)
+      warn "bc2cpp: #{unknown} MRB_SET_INSTANCE_TT(..., MRB_TT_DATA) call(s) name an unresolved class; no owner embeds" if unknown.positive?
+      NATIVE_DATA_CLASSES_CACHE[paths] = unknown.positive? ? nil : classes.freeze
+    end
   end
 
   # An embedding owner's instances must be plain objects: mrb_data_init on an Exception, Array, Struct or other
