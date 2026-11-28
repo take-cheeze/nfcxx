@@ -224,6 +224,18 @@ check test "$rc" -eq 2
 check test -e "$work/helper_global_refused/NOT_BUILDABLE"
 check grep -q '  hgr_cb  helper needs the mruby state threaded in, but is used outside a direct call (not supported): its address is in a file-scope initializer' "$work/helper_global_refused/REFUSALS.txt"
 
+# 2l2. init-time state: a registered method called directly from a function with no mruby state (a thread body refused for its
+# pointer escape). The gem's Init sets the file-scope state and leaves it set, so the direct call passes that global (mrb_tok) and
+# the method is not refused. Without an Init there is no state outside a method: the refusal stays, with its reason.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name method_direct_init tools/cext2mrbgem/fixtures/method_direct_init/ext/method_direct_init "$work/method_direct_init" > "$work/method_direct_init.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check sh -c "! grep -q 'mdi_name  registered method function is also called directly' '$work/method_direct_init/REFUSALS.txt'"
+check grep -qF 'static mrb_value mdi_name(mrb_state *mrb, mrb_value self) {' "$work/method_direct_init/src/method_direct_init.c"
+check grep -qF 'return mdi_name_impl(method_direct_init_bc2_mrb, mrb_nil_value());' "$work/method_direct_init/src/method_direct_init.c"
+rc=0; "$rb" "$conv" --scanner "$scanner" --name method_direct_noinit tools/cext2mrbgem/fixtures/method_direct_noinit/ext/method_direct_noinit "$work/method_direct_noinit" > "$work/method_direct_noinit.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check grep -q '  mdn_name  registered method function is also called directly (not supported) (its direct caller mdn_cb has no mruby state in scope (not a method, Init or threaded helper))' "$work/method_direct_noinit/REFUSALS.txt"
+
 # 2j. GC: rb_gc_register_mark_object -> mrb_gc_register (rooted in mruby's table, src/gc.c), rb_gc_start as a statement
 # -> mrb_full_gc, rb_gc_writebarrier on plain locals -> immediate-guarded barrier. Each GC form without an exact
 # equivalent (address registration, enable/disable, rb_gc_mark with no mark callback, a used rb_gc_start value, a
@@ -1214,12 +1226,15 @@ check grep -qF 'return reg_split_var_impl((int)nfcx_argc, argv, self);' "$work/r
 check grep -qF 'mrb_define_method(mrb, mRegSplit, "twice", reg_split_twice, MRB_ARGS_REQ(1));' "$work/reg_split/src/reg_split.c"
 check grep -qF 'mrb_define_method(mrb, mRegSplit, "var", reg_split_var, MRB_ARGS_ANY());' "$work/reg_split/src/reg_split.c"
 check sh -c "! grep -q 'reg_split_twice(self, self)\|reg_split_plain(self, a)' '$work/reg_split/src/reg_split.c'"
-# negative: the direct caller has no mruby state (its address is taken), so the impl cannot take mrb: stays refused, with the reason
+# the direct caller has no mruby state (its address is in a file-scope table). The gem's Init sets the file-scope state and leaves
+# it set, so the impl takes the global (mrb_tok) and the method is split: no refusal for rsr_make. The caller itself keeps its
+# own refusal (its table entry is refused), so the output is still not buildable.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name reg_split_refused tools/cext2mrbgem/fixtures/reg_split_refused/ext/reg_split_refused "$work/reg_split_refused" > "$work/reg_split_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check test -e "$work/reg_split_refused/NOT_BUILDABLE"
-check grep -qF '  rsr_make  registered method function is also called directly (not supported) (its direct caller rsr_plain_caller has no mruby state in scope' "$work/reg_split_refused/REFUSALS.txt"
-check sh -c "! grep -q 'rsr_make_impl' '$work/reg_split_refused/src/reg_split_refused.c'"
+check sh -c "! grep -q '  rsr_make  ' '$work/reg_split_refused/REFUSALS.txt'"
+check grep -qF '  rsr_plain_caller  helper needs the mruby state threaded in, but is used outside a direct call (not supported): its address is in a file-scope initializer' "$work/reg_split_refused/REFUSALS.txt"
+check grep -qF 'return rsr_make_impl(reg_split_refused_bc2_mrb, x, x);' "$work/reg_split_refused/src/reg_split_refused.c"
 
 # 2x2. direct calls of a registered method, two call sites: the method is split and both calls go to its impl. The method's
 # name is also a parameter of a prototype and a definition, and a local of a nested block (in scope there only) with an

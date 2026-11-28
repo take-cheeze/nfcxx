@@ -1,8 +1,9 @@
 #include <ruby.h>
 
 /* A registered method whose impl needs the mruby state (it makes a String) and whose direct caller gets no mruby
-   state: that caller's address is taken in a file-scope initializer, so it is not threaded. The method is split only
-   when every direct caller has the state in scope; here it stays refused, with the reason. */
+   state: that caller's address is taken in a file-scope initializer, so it is not threaded. With the gem's Init the
+   file-scope state is set for the life of the gem, so the caller passes it and the method is split. The caller's own
+   table entry is still refused. */
 static VALUE rsr_make(VALUE self, VALUE x) {
     return rb_str_new_cstr("make");
 }

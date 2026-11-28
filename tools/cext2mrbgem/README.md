@@ -196,6 +196,25 @@ headers), compiles the gem with `harness.c`, which requires that the global hold
 exception and after a normal return, and that a second state can be initialised and called. Without `MRUBY_BUILD`
 the run test prints SKIP.
 
+With the gem's Init, a use in a function that has no mruby state argument reads the same global (`mrb_tok`), so three
+refusals of missing state are not made. Each is a use whose state is the global, not an argument:
+
+- a split registered method whose direct caller has no state: the impl is split and the call passes the global (the
+  two refusals "its direct caller ... has no mruby state in scope" in corpus pg);
+- a macro expanded only in functions with no state argument: the macro is a global macro (corpus racc, PUSH);
+- a helper whose only refused use is such a macro expansion: the helper is a global-state helper (corpus bigdecimal,
+  check_allocation_count_nonzero).
+
+Limits of the init-time state:
+
+- One state per process: a second `mrb_state` that enters a wrapped method or Init while the global is set aborts (the
+  nested-state abort). Init leaves the global set, so a second state is not supported while the first is open.
+- The global is cleared only by `mrb_<fn>_gem_final`. A use after that (a pointer the C library keeps past `mrb_close`)
+  would read NULL.
+- Without an Init there is no state outside a method: these uses keep their refusals. The fixture
+  `method_direct_noinit` checks the split case (the direct caller has no state, and the method keeps its refusal), and a
+  helper use with no state and no Init is `CTX_REASON`.
+
 What remains:
 
 - Init is not under `mrb_ensure` (it is void). An exception that leaves Init keeps the global set to the gem's state
