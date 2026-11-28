@@ -127,7 +127,7 @@ static inline void mrb_hash_set(mrb_state *mrb, mrb_value h, mrb_value k, mrb_va
 #include <stdbool.h>
 
 /* the registry of RClass values, by name (one per name; a class's value is looked up when it is first needed) */
-static RClass *nfcx_classes = NULL;
+inline RClass *nfcx_classes = NULL;
 
 static inline RClass *nfcx_class_named(const char *name, int builtin) {
   RClass *c;
@@ -169,7 +169,8 @@ static inline void nfcx_state_init(mrb_state *M) {
 
 /* the value of a class: a program class is looked up once (a missing one raises NameError, as mrbbc_getconst does) */
 static inline mrb_value mrb_obj_value(RClass *c) {
-  if (mrbbc_tag(&c->v) == MRBBC_NIL && !c->builtin) mrbbc_getconst(&c->v, c->name);
+  /* a program class is looked up; a name the program does not define (a host module such as Marshal) has no program value */
+  if (mrbbc_tag(&c->v) == MRBBC_NIL && !c->builtin && mrbbc_const_defined(c->name)) mrbbc_getconst(&c->v, c->name);
   return c->v;
 }
 static inline mrb_value mrb_obj_value(RBasic *o) { return o->v; }
@@ -259,6 +260,11 @@ static inline bool nfcx_builtin(mrb_state *M, mrb_value recv, const char *name, 
   if (strcmp(name, "class") == 0) {
     if (t == MRB_TT_OBJECT) { mrbbc_obj_class(out, &recv); return true; }
     return false;
+  }
+  /* a core value has no instance variables in this layer (its class has none either): an empty list */
+  if (strcmp(name, "instance_variables") == 0 && t != MRB_TT_OBJECT) {
+    *out = mrb_ary_new_capa(M, 1);
+    return true;
   }
   if (strcmp(name, "respond_to?") == 0 && argc == 1 && mrb_symbol_p(argv[0])) {
     *out = mrbbc_responds_value(recv, mrbbc_sym_name((long)mrb_symbol(argv[0])));
@@ -369,19 +375,52 @@ static inline int mrb_obj_is_kind_of(mrb_state *M, mrb_value v, RClass *c) {
   RClass *k = mrb_class(M, v);
   return k == c || strcmp(k->name, c->name) == 0;
 }
-static inline void mrb_ary_set(mrb_state *M, mrb_value ary, mrb_int i, mrb_value v) { (void)M; mrbbc_ary_set(&ary, (long)i, &v); }
+/* mruby's mrb_ary_set: an index past the end extends the array with nil first */
+static inline void mrb_ary_set(mrb_state *M, mrb_value ary, mrb_int i, mrb_value v) {
+  mrb_int len = nfcx_ary_len(ary);
+  while (len < i) { mrb_ary_push(M, ary, mrb_nil_value()); len++; }
+  if (i == len) mrb_ary_push(M, ary, v);
+  else mrbbc_ary_set(&ary, (long)i, &v);
+}
 /* module and constant definitions belong to a gem's init, which this layer does not run: they name the class and do nothing */
 static inline RClass *mrb_define_module(mrb_state *M, const char *name) { (void)M; return nfcx_class_named(name, 0); }
 template <class F> static inline void mrb_define_module_function(mrb_state *M, RClass *c, const char *name, F func, int aspec) { (void)M; (void)c; (void)name; (void)func; (void)aspec; }
-static inline void mrb_define_const(mrb_state *M, RClass *c, const char *name, mrb_value v) { (void)M; (void)c; (void)name; (void)v; }
+/* host constants (a gem's own constants, such as Marshal::MAJOR_VERSION): kept by name in one table. The table has no module
+ * namespace yet: two constants of the same name in different modules collide. */
+struct nfcx_host_const { const char *name; MV v; };
+inline struct nfcx_host_const nfcx_host_table[64];
+inline int nfcx_host_count = 0;
+static inline int nfcx_host_const_find(const char *name, MV *out) {
+  int i;
+  for (i = 0; i < nfcx_host_count; i++) {
+    if (strcmp(nfcx_host_table[i].name, name) == 0) { *out = nfcx_host_table[i].v; return 1; }
+  }
+  return 0;
+}
+static inline void mrb_define_const(mrb_state *M, RClass *c, const char *name, mrb_value v) {
+  int i;
+  (void)M; (void)c;
+  for (i = 0; i < nfcx_host_count; i++) {
+    if (strcmp(nfcx_host_table[i].name, name) == 0) { nfcx_host_table[i].v = v; return; }
+  }
+  if (nfcx_host_count >= 64) mrbbc_raise("RuntimeError", "too many host constants in the compatibility layer");
+  nfcx_host_table[nfcx_host_count].name = name;
+  nfcx_host_table[nfcx_host_count].v = v;
+  nfcx_host_count++;
+}
 /* constants and class variables: program constants by name (a class variable of a module is a constant here) */
 static inline mrb_value mrb_cv_get(mrb_state *M, mrb_value mod, mrb_sym sym) {
   mrb_value v;
   (void)M; (void)mod;
+  if (nfcx_host_const_find(mrbbc_sym_name((long)sym), &v)) return v;
   mrbbc_getconst(&v, mrbbc_sym_name((long)sym));
   return v;
 }
-static inline int mrb_cv_defined(mrb_state *M, mrb_value mod, mrb_sym sym) { (void)M; (void)mod; return mrbbc_const_defined(mrbbc_sym_name((long)sym)); }
+static inline int mrb_cv_defined(mrb_state *M, mrb_value mod, mrb_sym sym) {
+  mrb_value v;
+  (void)M; (void)mod;
+  return nfcx_host_const_find(mrbbc_sym_name((long)sym), &v) || mrbbc_const_defined(mrbbc_sym_name((long)sym));
+}
 static inline int mrb_class_defined(mrb_state *M, const char *name) { (void)M; return mrbbc_const_defined(name); }
 /* hashes: new, keys, and the value of a key (equal keys by value: integers, strings, symbols, nil, booleans) */
 static inline mrb_value mrb_hash_new_capa(mrb_state *M, mrb_int capa) { mrb_value v; (void)M; mrbbc_hash_new(&v, (long)capa); return v; }
@@ -411,15 +450,16 @@ static inline mrb_value mrb_hash_get(mrb_state *M, mrb_value h, mrb_value key) {
   }
   return mrb_nil_value();
 }
-/* floats and bignums are not in mrbrt: these exist so the code compiles, and raise when they run */
+/* floats are not in mrbrt: these exist so the code compiles, and raise when they run */
 static inline mrb_value mrb_float_value(mrb_state *M, double d) { (void)M; (void)d; mrbbc_raise("NotImplementedError", "Float is not in the mrbbc runtime"); return mrb_nil_value(); }
 static inline double mrb_float(mrb_value v) { (void)v; mrbbc_raise("NotImplementedError", "Float is not in the mrbbc runtime"); return 0.0; }
-static inline mrb_value mrb_bint_new_int64(mrb_state *M, int64_t i) { (void)M; (void)i; mrbbc_raise("NotImplementedError", "Bignum is not in the mrbbc runtime"); return mrb_nil_value(); }
+/* a Bignum of the 64-bit range: mrbrt integers are exact to 64 bits, so the value is an Integer (the reader's bignum case) */
+static inline mrb_value mrb_bint_new_int64(mrb_state *M, int64_t i) { return mrb_fixnum_value((mrb_int)i); (void)M; }
 /* the argument parser and string builders are not here yet: they raise when called */
 /* the argument parser: the module functions that take arguments are not run through it yet, so this raises */
 static inline mrb_int mrb_get_args(mrb_state *M, const char *fmt, ...) { (void)M; (void)fmt; mrbbc_raise("NotImplementedError", "mrb_get_args is not in the compatibility layer yet"); return 0; }
-static inline void mrb_str_buf_cat(mrb_state *M, mrb_value s, const char *p, size_t n) { (void)M; (void)s; (void)p; (void)n; mrbbc_raise("NotImplementedError", "mrb_str_buf_cat is not in the compatibility layer yet"); }
-static inline void mrb_str_resize(mrb_state *M, mrb_value s, mrb_int n) { (void)M; (void)s; (void)n; mrbbc_raise("NotImplementedError", "mrb_str_resize is not in the compatibility layer yet"); }
+static inline void mrb_str_buf_cat(mrb_state *M, mrb_value s, const char *p, size_t n) { (void)M; mrbbc_str_append(&s, p, (long)n); }
+static inline void mrb_str_resize(mrb_state *M, mrb_value s, mrb_int n) { (void)M; mrbbc_str_resize(&s, (long)n); }
 
 /* calls: a program method of a program object is run through the runtime's dispatch (mrbbc_find_send gives its number,
  * mrbbc_user_call runs it). A method the program does not define is NoMethodError for now: builtin dispatch is milestone 2. */

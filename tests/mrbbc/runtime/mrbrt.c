@@ -2687,3 +2687,25 @@ int mrbbc_const_defined(const char *name) {
   if (find_class(name) != NULL) return 1;
   return host_constant(&probe, name);
 }
+
+/* a string's length set to n (the bytes past the old length are zero), and the bytes p..p+n appended to it: the storage grows
+ * in place (realloc; the collector frees the buffer it holds when the string is swept) */
+void mrbbc_str_resize(MV *s, long n) {
+  MStr *st = str_of(s);
+  if (n < 0 || (uint64_t)n > UINT32_MAX - sizeof(MStr) - 1) mrbbc_raise("ArgumentError", "argument too big");
+  if ((size_t)n + 1 > st->cap) {
+    char *q = realloc(st->p, (size_t)n + 1);
+    if (q == NULL) mrbbc_raise("NoMemoryError", "failed to allocate memory");
+    st->p = q;
+    st->cap = (size_t)n + 1;
+    gc_grow(st, st->cap);
+  }
+  if (n > st->len) memset(st->p + st->len, 0, (size_t)(n - st->len));
+  st->len = n;
+  st->p[n] = '\0';
+}
+void mrbbc_str_append(MV *s, const char *p, long n) {
+  long old = str_of(s)->len;
+  mrbbc_str_resize(s, old + n);
+  if (n > 0) memmove(str_of(s)->p + old, p, (size_t)n);
+}

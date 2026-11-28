@@ -315,6 +315,9 @@ void mrbbc_ivar_value(MV *dst, const MV *self, long i);
 int mrbbc_responds(const MV *recv, const char *name);
 void mrbbc_ary_set(MV *ary, long i, const MV *v);
 int mrbbc_const_defined(const char *name);
+/* a string's length set to n, and bytes appended to it (the storage grows in place) */
+void mrbbc_str_resize(MV *s, long n);
+void mrbbc_str_append(MV *s, const char *p, long n);
 
 #ifdef __cplusplus
 }
