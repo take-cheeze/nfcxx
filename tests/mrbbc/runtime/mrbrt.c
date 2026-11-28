@@ -2614,3 +2614,98 @@ int mrbbc_protect(void (*body)(void *), void *data, MrbbcCallError *error) {
   unwind_value = saved_value;
   return !failed;
 }
+
+/* ---- accessors for the mruby compatibility header (mruby_compat/mruby.h) ---- */
+long mrbbc_sym_index(const MV *v) { return sym_index(v); }
+const char *mrbbc_sym_name(long index) { return sym_names[index]; }
+void mrbbc_sym_from_index(MV *dst, long index) { *dst = sym_value(index); }
+void mrbbc_ary_items(const MV *ary, const MV **items, long *len) {
+  const MAry *a = ary_of(ary);
+  *items = a->items;
+  *len = a->len;
+}
+long mrbbc_hash_size(const MV *hash) { return hash_of(hash)->len; }
+void mrbbc_hash_key(MV *dst, const MV *hash, long i) { *dst = hash_of(hash)->keys[i]; }
+void mrbbc_hash_val(MV *dst, const MV *hash, long i) { *dst = hash_of(hash)->vals[i]; }
+
+/* the class of a program object (its MClass as a class value), a class value's own class is Class: nil for other values */
+void mrbbc_obj_class(MV *dst, const MV *v) {
+  MClass *c = NULL;
+  if (tag_of(v) == MRBBC_OBJ) c = obj_of(v)->cls;
+  if (c == NULL) { *dst = nil_value(); return; }
+  set_obj(dst, MRBBC_CLS, c);
+}
+const char *mrbbc_class_name(const MV *cls) { return cls_of(cls)->name; }
+
+/* a value's identity word: equal for the same object (and for the same immediate value) */
+uintptr_t mrbbc_obj_identity(const MV *v) {
+#if MRBBC_VALUE == 16
+  return (uintptr_t)v->i ^ ((uintptr_t)v->tag << 56);
+#else
+  return (uintptr_t)v->w;
+#endif
+}
+
+/* ---- accessors for the compatibility layer, milestone 2: instance variables and respond_to ---- */
+static MIvar *ivar_at(const MV *self, long i) {
+  MIvar **head = ivars_of(self), *v;
+  long k = 0;
+  if (head == NULL) return NULL;
+  for (v = *head; v != NULL; v = v->next, k++) if (k == i) return v;
+  return NULL;
+}
+long mrbbc_ivar_count(const MV *self) {
+  MIvar **head = ivars_of(self), *v;
+  long n = 0;
+  if (head == NULL) return 0;
+  for (v = *head; v != NULL; v = v->next) n++;
+  return n;
+}
+const char *mrbbc_ivar_name(const MV *self, long i) {
+  MIvar *v = ivar_at(self, i);
+  return v ? v->name : "";
+}
+void mrbbc_ivar_value(MV *dst, const MV *self, long i) {
+  MIvar *v = ivar_at(self, i);
+  *dst = v ? v->val : nil_value();
+}
+/* whether a program object's class (or an ancestor) defines name; no raise (the dispatch checks the arity when it calls) */
+int mrbbc_responds(const MV *recv, const char *name) {
+  MClass *where = NULL;
+  if (tag_of(recv) != MRBBC_OBJ) return 0;
+  return find_chain(obj_of(recv)->cls, name, &where) != NULL;
+}
+/* an array's element i, set in place (the sort! of the compatibility layer writes its result back) */
+void mrbbc_ary_set(MV *ary, long i, const MV *v) {
+  MAry *a = ary_of(ary);
+  if (i < 0 || i >= a->len) mrbbc_raise("IndexError", "array index out of range");
+  a->items[i] = *v;
+}
+/* whether a constant of this name is defined (a program class or a host constant), without raising */
+int mrbbc_const_defined(const char *name) {
+  MV probe;
+  if (find_class(name) != NULL) return 1;
+  return host_constant(&probe, name);
+}
+
+/* a string's length set to n (the bytes past the old length are zero), and the bytes p..p+n appended to it: the storage grows
+ * in place (realloc; the collector frees the buffer it holds when the string is swept) */
+void mrbbc_str_resize(MV *s, long n) {
+  MStr *st = str_of(s);
+  if (n < 0 || (uint64_t)n > UINT32_MAX - sizeof(MStr) - 1) mrbbc_raise("ArgumentError", "argument too big");
+  if ((size_t)n + 1 > st->cap) {
+    char *q = realloc(st->p, (size_t)n + 1);
+    if (q == NULL) mrbbc_raise("NoMemoryError", "failed to allocate memory");
+    st->p = q;
+    st->cap = (size_t)n + 1;
+    gc_grow(st, st->cap);
+  }
+  if (n > st->len) memset(st->p + st->len, 0, (size_t)(n - st->len));
+  st->len = n;
+  st->p[n] = '\0';
+}
+void mrbbc_str_append(MV *s, const char *p, long n) {
+  long old = str_of(s)->len;
+  mrbbc_str_resize(s, old + n);
+  if (n > 0) memmove(str_of(s)->p + old, p, (size_t)n);
+}

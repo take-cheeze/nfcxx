@@ -293,4 +293,34 @@ void mrbbc_gc_set_threshold(long bytes);
 #ifdef __cplusplus
 }
 #endif
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* accessors for the mruby compatibility layer (tests/mrbbc/runtime/mruby_compat): symbols by index and name, array items,
+ * hash entries, the class of a program object and a class's name, and a value's identity word */
+long mrbbc_sym_index(const MV *v);
+const char *mrbbc_sym_name(long index);
+void mrbbc_sym_from_index(MV *dst, long index);
+void mrbbc_ary_items(const MV *ary, const MV **items, long *len);
+long mrbbc_hash_size(const MV *hash);
+void mrbbc_hash_key(MV *dst, const MV *hash, long i);
+void mrbbc_hash_val(MV *dst, const MV *hash, long i);
+void mrbbc_obj_class(MV *dst, const MV *v);
+const char *mrbbc_class_name(const MV *cls);
+uintptr_t mrbbc_obj_identity(const MV *v);
+long mrbbc_ivar_count(const MV *self);
+const char *mrbbc_ivar_name(const MV *self, long i);
+void mrbbc_ivar_value(MV *dst, const MV *self, long i);
+/* whether a program object's class defines the method (no raise) */
+int mrbbc_responds(const MV *recv, const char *name);
+void mrbbc_ary_set(MV *ary, long i, const MV *v);
+int mrbbc_const_defined(const char *name);
+/* a string's length set to n, and bytes appended to it (the storage grows in place) */
+void mrbbc_str_resize(MV *s, long n);
+void mrbbc_str_append(MV *s, const char *p, long n);
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif /* MRBBC_MRBRT_H */
