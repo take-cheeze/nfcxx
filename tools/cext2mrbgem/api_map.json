@@ -2421,6 +2421,12 @@
       "needs_mrb": true,
       "caveat": "registers a method as rb_define_method does: the fork has no private visibility (no mrb_define_private_method), so the method is also callable with an explicit receiver; a visibility difference from CRuby, noted here"
     },
+    "rb_define_protected_method": {
+      "kind": "special",
+      "handler": "define_method",
+      "needs_mrb": true,
+      "caveat": "registers the method with the fork's protected visibility (mrb_define_protected_method): an explicit-receiver call is allowed only from a method whose self is_a? the owner, as CRuby. Mapped only when the mruby headers declare mrb_define_protected_method (NFCX_MRUBY_PROTECTED_H or NFCX_MRUBY_INCLUDE); otherwise refused"
+    },
     "rb_iv_get": {
       "kind": "call",
       "mruby": "mrb_iv_get",
@@ -3668,6 +3674,9 @@
       1
     ],
     "rb_define_private_method": [
+      0
+    ],
+    "rb_define_protected_method": [
       0
     ],
     "rb_class_new_instance": [

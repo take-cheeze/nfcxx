@@ -834,6 +834,27 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_private_reg/NOT_BUILDABLE"
 check grep -qF 'mrb_define_method(mrb, cApiPriv, "secret", api_secret, MRB_ARGS_REQ(1));' "$work/api_private_reg/src/api_private_reg.c"
 
+# 2zc2. a protected registration (CRuby's rb_define_protected_method, mapped to the fork's mrb_define_protected_method): it is mapped only
+# when the mruby headers declare that function (NFCX_MRUBY_PROTECTED_H names the mruby.h; else each NFCX_MRUBY_INCLUDE dir's). The
+# pinned fork has none, so the default refuses it; a stub header checks the mapping here, and NFCX_FORK_MRUBY_INCLUDE (the fork's
+# include dirs, with its build/host/include for presym) checks the emitted C compiles against the fork's headers.
+pdir=$root_work/protected_$scanner
+rm -rf "$pdir"; mkdir -p "$pdir"
+printf '%s\n' 'MRB_API void mrb_define_protected_method(mrb_state *mrb, struct RClass *c, const char *name, mrb_func_t func, mrb_aspec aspec);' > "$pdir/stub.h"
+rc=0; env -u NFCX_MRUBY_INCLUDE -u NFCX_MRUBY_PROTECTED_H "$rb" "$conv" --scanner "$scanner" --name api_protected_reg tools/cext2mrbgem/fixtures/api_protected_reg/ext/api_protected_reg "$pdir/refused" > "$pdir/refused.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test -e "$pdir/refused/NOT_BUILDABLE"
+check grep -q 'the mruby headers have no mrb_define_protected_method' "$pdir/refused/REFUSALS.txt"
+rc=0; env -u NFCX_MRUBY_INCLUDE NFCX_MRUBY_PROTECTED_H="$pdir/stub.h" "$rb" "$conv" --scanner "$scanner" --name api_protected_reg tools/cext2mrbgem/fixtures/api_protected_reg/ext/api_protected_reg "$pdir/mapped" > "$pdir/mapped.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$pdir/mapped/NOT_BUILDABLE"
+check grep -qF 'mrb_define_protected_method(mrb, cApiProt, "guarded", api_guarded, MRB_ARGS_REQ(1));' "$pdir/mapped/src/api_protected_reg.c"
+if [ -n "${NFCX_FORK_MRUBY_INCLUDE:-}" ]; then
+  rc=0; env NFCX_MRUBY_INCLUDE="$NFCX_FORK_MRUBY_INCLUDE" "$rb" "$conv" --scanner "$scanner" --name api_protected_reg tools/cext2mrbgem/fixtures/api_protected_reg/ext/api_protected_reg "$pdir/fork" > "$pdir/fork.log" 2>&1 || rc=$?
+  check test "$rc" -eq 0
+  check grep -q 'STATUS: no refusals' "$pdir/fork/REFUSALS.txt"
+fi
+
 # 2zd. instance variables named by a string literal (api_map.json batch D3): the name is interned with mrb_intern_cstr
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ivar_name tools/cext2mrbgem/fixtures/api_ivar_name/ext/api_ivar_name "$work/api_ivar_name" > "$work/api_ivar_name.log" 2>&1 || rc=$?
 check test "$rc" -eq 0

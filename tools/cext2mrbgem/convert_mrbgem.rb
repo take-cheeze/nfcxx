@@ -479,7 +479,7 @@ IDENT_RE = /(?<![#{WC}$])[A-Za-z_][#{WC}]*/
 C_STATEMENT_KEYWORDS = %w[if while for switch return sizeof else do].freeze
 DEF_RE = /^[ \t]*((?:(?:static|inline|extern)[ \t\n]+)*)((?:[A-Za-z_][#{WC}]*(?:[ \t\n]+|[ \t\n]*\*[ \t\n\*]*))+?)([A-Za-z_][#{WC}]*)[ \t\n]*\(((?:[^()]|\([^()]*\))*)\)#{SS}(\{|;)/
 INC_RE = /#[ \t]*include[ \t]*[<"](ruby(?:\/[#{WC}.\/-]*)?\.h)[>"]/
-REG_RE = /(?<![#{WC}$.>])(rb_define_method|rb_define_private_method|rb_define_singleton_method|rb_define_module_function|rb_define_global_function)#{SS}\(/
+REG_RE = /(?<![#{WC}$.>])(rb_define_method|rb_define_private_method|rb_define_protected_method|rb_define_singleton_method|rb_define_module_function|rb_define_global_function)#{SS}\(/
 ALLOC_REG_RE = /(?<![#{WC}$.>])(rb_define_alloc_func)#{SS}\(/
 # a right side that yields a class (a definition or a lookup of a class): not a non-class assignment to a class variable
 # a class expression of the fork (an RClass *): mrb->x_class, mrb_class_get / mrb_exc_get / mrb_module_get, or an E_*_ERROR class macro
@@ -2348,6 +2348,16 @@ end
 # the names of the rb_data_type_t declarations the input converts (no initializer error)
 def converted_dtype_names
   @converted_dtype_names ||= dtype_decls.reject { |_r, _m, i| i['error'] }.map { |_r, m, _i| dtype_name(m) }.to_set
+end
+
+# whether the mruby headers declare mrb_define_protected_method (the fork's protected visibility for a C method): NFCX_MRUBY_PROTECTED_H
+# names the header, else the mruby.h of each NFCX_MRUBY_INCLUDE directory. The pinned fork lacks it, so rb_define_protected_method is
+# refused until a fork with it is pinned.
+def mruby_protected_method_api?
+  return @mruby_protected_method_api if defined?(@mruby_protected_method_api)
+  h = ENV['NFCX_MRUBY_PROTECTED_H'].to_s
+  paths = h.empty? ? ENV['NFCX_MRUBY_INCLUDE'].to_s.split(':').reject(&:empty?).map { |d| File.join(d, 'mruby.h') } : [h]
+  @mruby_protected_method_api = paths.any? { |p| File.file?(p) && File.read(p).match?(/\bmrb_define_protected_method\s*\(/) }
 end
 
 # whether the fork's mrb_data_type has a parent field (mrb_data_type.parent, include/mruby/data.h): NFCX_MRUBY_DATA_H names
@@ -8656,7 +8666,11 @@ end
       return
     end
     case name
-    when 'rb_define_method', 'rb_define_private_method', 'rb_define_singleton_method', 'rb_define_module_function', 'rb_define_global_function'
+    when 'rb_define_method', 'rb_define_private_method', 'rb_define_protected_method', 'rb_define_singleton_method', 'rb_define_module_function', 'rb_define_global_function'
+      if name == 'rb_define_protected_method' && !mruby_protected_method_api?
+        refuse(rel, s, name, 'the mruby headers have no mrb_define_protected_method (the pinned fork has no protected visibility for a C method); pin a fork that has it, or set NFCX_MRUBY_PROTECTED_H')
+        return
+      end
       rec = @reg_by_call[[rel, s]]
       if rec.nil? || !called || nxt != rec['open']
         refuse(rel, s, name, 'used without a registration call')
@@ -8688,6 +8702,7 @@ end
         return
       end
       new = { 'rb_define_method' => 'mrb_define_method', 'rb_define_private_method' => 'mrb_define_method',
+              'rb_define_protected_method' => 'mrb_define_protected_method',
               'rb_define_singleton_method' => 'mrb_define_class_method',
               'rb_define_module_function' => 'mrb_define_module_function',
               'rb_define_global_function' => 'mrb_define_module_function' }[name]
