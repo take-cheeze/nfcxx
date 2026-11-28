@@ -40,6 +40,11 @@ module CalleeArena
     return same + plain unless on?
 
     text = <<~'CPP'
+      // KEPT_HINT_BITS: the by_obj hint has 2^BITS entries. It is only a hint (a miss records the root again), so a
+      // target short of RAM may shrink it; every unit of one link must agree, since they share one record.
+      #ifndef BC2CPP_KEPT_HINT_BITS
+      #define BC2CPP_KEPT_HINT_BITS 10
+      #endif
       // CALLEE_ARENA (callee_arena.rb): the arena slots of the roots stores took for values they unlinked, in order.
       struct Bc2cppKeptRoots {
         mrb_state* M;
@@ -49,9 +54,9 @@ module CalleeArena
         int at0[64];
         struct RBasic* obj0[64];
         // Record index + 1 by object address, a hint: a hit is used only when its record still holds that object.
-        uint16_t by_obj[1024];
+        uint16_t by_obj[1u << BC2CPP_KEPT_HINT_BITS];
       };
-      static inline unsigned bc2cpp_kept_hash(struct RBasic* p) { return ((uintptr_t)p >> 3) & 1023; }
+      static inline unsigned bc2cpp_kept_hash(struct RBasic* p) { return ((uintptr_t)p >> 3) & ((1u << BC2CPP_KEPT_HINT_BITS) - 1); }
       // One record for the link: the C-linkage storage names no type, since each gem's namespace has its own struct.
       extern "C" inline void* bc2cpp_kept_roots_storage() {
         alignas(void*) static unsigned char s[sizeof(Bc2cppKeptRoots)];
