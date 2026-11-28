@@ -293,4 +293,24 @@ void mrbbc_gc_set_threshold(long bytes);
 #ifdef __cplusplus
 }
 #endif
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* accessors for the mruby compatibility layer (tests/mrbbc/runtime/mruby_compat): symbols by index and name, array items,
+ * hash entries, the class of a program object and a class's name, and a value's identity word */
+long mrbbc_sym_index(const MV *v);
+const char *mrbbc_sym_name(long index);
+void mrbbc_sym_from_index(MV *dst, long index);
+void mrbbc_ary_items(const MV *ary, const MV **items, long *len);
+long mrbbc_hash_size(const MV *hash);
+void mrbbc_hash_key(MV *dst, const MV *hash, long i);
+void mrbbc_hash_val(MV *dst, const MV *hash, long i);
+void mrbbc_obj_class(MV *dst, const MV *v);
+const char *mrbbc_class_name(const MV *cls);
+uintptr_t mrbbc_obj_identity(const MV *v);
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif /* MRBBC_MRBRT_H */

@@ -2627,3 +2627,21 @@ void mrbbc_ary_items(const MV *ary, const MV **items, long *len) {
 long mrbbc_hash_size(const MV *hash) { return hash_of(hash)->len; }
 void mrbbc_hash_key(MV *dst, const MV *hash, long i) { *dst = hash_of(hash)->keys[i]; }
 void mrbbc_hash_val(MV *dst, const MV *hash, long i) { *dst = hash_of(hash)->vals[i]; }
+
+/* the class of a program object (its MClass as a class value), a class value's own class is Class: nil for other values */
+void mrbbc_obj_class(MV *dst, const MV *v) {
+  MClass *c = NULL;
+  if (tag_of(v) == MRBBC_OBJ) c = obj_of(v)->cls;
+  if (c == NULL) { *dst = nil_value(); return; }
+  set_obj(dst, MRBBC_CLS, c);
+}
+const char *mrbbc_class_name(const MV *cls) { return cls_of(cls)->name; }
+
+/* a value's identity word: equal for the same object (and for the same immediate value) */
+uintptr_t mrbbc_obj_identity(const MV *v) {
+#if MRBBC_VALUE == 16
+  return (uintptr_t)v->i ^ ((uintptr_t)v->tag << 56);
+#else
+  return (uintptr_t)v->w;
+#endif
+}
