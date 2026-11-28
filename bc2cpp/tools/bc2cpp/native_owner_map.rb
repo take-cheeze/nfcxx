@@ -596,6 +596,39 @@ module NativeOwnerMap
     end
     NilAnswers.new(names: names, modules: modules)
   end
+
+  SET_DATA_TT_RE = /\bMRB_SET_INSTANCE_TT\s*\(/
+
+  # NATIVE_DATA_OWNERS: the classes a native `MRB_SET_INSTANCE_TT(klass, MRB_TT_DATA)` makes data objects, whose
+  # natives own DATA_PTR; and how many such calls name a class this map cannot resolve (UNKNOWN).
+  def data_instance_classes(paths)
+    classes = Set.new
+    unknown = 0
+    Array(paths).each do |path|
+      found = ScanCache.fetch('native_owner_map.data_tt', [path], cache_absent: false) { scan_data_instance_classes(path) }
+      found.each { |owner| owner == UNKNOWN ? unknown += 1 : classes << owner }
+    end
+    [classes, unknown]
+  end
+
+  def scan_data_instance_classes(path)
+    raw = File.binread(path).force_encoding('UTF-8')
+    return [] unless raw.match?(SET_DATA_TT_RE)
+
+    typed = NativeDirect.strip_comments(raw).gsub(/struct\s+RClass\s*\*/, 'RClass *')
+    file_vars = NativeDirect.class_variables(typed, NativeDirect.sibling_param_owners(path))
+    scopes = static_param_scopes(typed, block_scopes(typed, file_vars))
+    found = []
+    typed.scan(SET_DATA_TT_RE) do
+      match = Regexp.last_match
+      args, = call_args(typed, match.end(0) - 1)
+      next unless args&.size == 2 && args[1] == 'MRB_TT_DATA'
+
+      vars = scopes.find { |from, to, _| match.begin(0).between?(from, to) }&.last || file_vars
+      found << owner_of(args[0], vars)
+    end
+    found
+  end
 end
 
 # Loaded last: NativeRomOwners reads NativeOwnerMap's constants when it loads.

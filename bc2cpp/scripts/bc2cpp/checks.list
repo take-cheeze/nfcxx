@@ -60,6 +60,7 @@ ruby scripts/bc2cpp/stack_block_check.rb
 ruby scripts/bc2cpp/block_abi_check.rb
 ruby scripts/bc2cpp/embed_family_check.rb
 ruby scripts/bc2cpp/embed_init_guard_check.rb
+ruby scripts/bc2cpp/native_data_embed_check.rb
 ruby scripts/bc2cpp/integer_bit_aref_check.rb
 ruby scripts/bc2cpp/array_hash_check.rb
 ruby scripts/bc2cpp/slot_assured_check.rb
