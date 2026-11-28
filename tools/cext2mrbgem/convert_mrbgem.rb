@@ -986,6 +986,9 @@ end
 
 # a use of a global-state helper in a function that has no mruby state (see global_use)
 CTX_REASON = 'helper needs mruby state, and a use is in a function with no mruby state in scope (not a method, Init or threaded helper)'.freeze
+# a direct call of a helper in a macro body that is expanded in no function with the state (or outside a function)
+MACRO_NO_STATE_REASON = 'helper needs the mruby state threaded in, but the call is not in a function definition the converter ' \
+                        'recognises (a macro-decorated definition, or file scope) (not supported)'.freeze
 
 # calls that may keep a pointer they are given (registration, storage, threads, data objects): a helper passed to one
 # of them is not a use that stays inside the method call
@@ -3934,8 +3937,7 @@ use_problem = lambda do |name, use|
         if (dm = define_at(rel, s)) && alloc_reach.include?(dm[0])
           next 'stuck point (per-class allocator): the macro that calls the helper is expanded in an allocator, which has no state argument in the fork'
         end
-        next ('helper needs the mruby state threaded in, but the call is not in a function definition the ' \
-              'converter recognises (a macro-decorated definition, or file scope) (not supported)')
+        next MACRO_NO_STATE_REASON
       end
       # a split registered method is tested at the call (a local hides the name from its declaration on, in its block)
       if (@split_names.include?(name) ? shadowed_at?(name, fn, s) : shadowed.call(name, fn))
@@ -3989,9 +3991,16 @@ use_problem = lambda do |name, use|
       compute_global_macros(@valid_reg_names | (init_first ? Set[init_first] : Set.new) | cands, false)
       changed = false
       cands.to_a.sort.each do |name|
-        why = uses[name].map { |u| use_problem.call(name, u) }.compact.first
+        reasons = uses[name].map { |u| [u, use_problem.call(name, u)] }.select { |_u, w| w }
+        why = reasons.first&.last
         next unless why
         changed = true
+        # with the gem's Init, a helper whose only problem is a macro expanded in a function with no state (the state is the
+        # global there) is not threaded: it uses the global, as a helper of a global-state path does (see global_use)
+        if init_first && !@split_names.include?(name) && reasons.all? { |u, w| w == MACRO_NO_STATE_REASON && u[3].nil? }
+          cands.delete(name)
+          next
+        end
         cands.delete(name)
         next unless @split_names.include?(name)
         # the impl cannot take mrb from every direct caller: the method is not split, and its calls keep the refusal
@@ -4006,8 +4015,9 @@ use_problem = lambda do |name, use|
     # not there, so the method is not split. Removing one method can leave another's caller without state: repeat.
     loop do
       mrb_fn = cands | @valid_reg_names | (init_first ? Set[init_first] : Set.new)
+      # with the gem's Init a caller with no state in scope reads the global (mrb_tok), so any caller is fine
       bad = @split_names.to_a.sort.filter_map do |name|
-        next unless cands.include?(name)
+        next if init_first || !cands.include?(name)
         _rel, _s, _d, fn = uses[name].find { |u| u[3] && !mrb_fn.include?(u[3]['name']) }
         [name, fn['name']] if fn
       end
@@ -4079,7 +4089,7 @@ use_problem = lambda do |name, use|
         # valid wherever the table's entries run: a table used from any function is accepted when there is an Init
         if !direct && (tbl = file_scope_table_at(rel, s)) && (init_first || table_used_in_methods?(tbl, rel, s))
           nil
-        elsif direct && macro && macro_expansions_ok(macro, with_state | members)
+        elsif direct && macro && (init_first || macro_expansions_ok(macro, with_state | members))
           nil
         elsif direct && macro && alloc_reach.include?(macro[0])
           'stuck point (per-class allocator): the macro that calls the helper is expanded in an allocator, which has no state argument in the fork'
@@ -4275,7 +4285,7 @@ use_problem = lambda do |name, use|
             if fn.nil?
               (accepted[orel] || []).any? { |a, z| a < os && os < z }
             else
-              ctx.include?(fn['name'])
+              ctx.include?(fn['name']) || (@init_defs || []).any?
             end
           end
           next unless ok
