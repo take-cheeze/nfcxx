@@ -2,6 +2,8 @@
   "_comment": "Per-gem converter options for run_corpus.sh (the corpus of CRuby C extensions). Each value is the list of options passed to convert_mrbgem.rb after --name and --scanner auto. The oj source is copied and its trace.c fill_indent is renamed to trace_fill_indent first (a name clash with dump.h's inline fill_indent); see run_corpus.sh. puma's mini_ssl.c is the OpenSSL-only source: the build without HAVE_OPENSSL_BIO_H does not compile it, so it is excluded.",
   "bigdecimal": [
     "--undefine",
+    "BIGDECIMAL_DEBUG",
+    "--undefine",
     "BIGDECIMAL_USE_VP_TEST_METHODS",
     "--undefine",
     "HAVE_RB_OPTS_EXCEPTION_P",
