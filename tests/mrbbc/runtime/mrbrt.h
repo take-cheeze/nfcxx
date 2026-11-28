@@ -308,6 +308,13 @@ void mrbbc_hash_val(MV *dst, const MV *hash, long i);
 void mrbbc_obj_class(MV *dst, const MV *v);
 const char *mrbbc_class_name(const MV *cls);
 uintptr_t mrbbc_obj_identity(const MV *v);
+long mrbbc_ivar_count(const MV *self);
+const char *mrbbc_ivar_name(const MV *self, long i);
+void mrbbc_ivar_value(MV *dst, const MV *self, long i);
+/* whether a program object's class defines the method (no raise) */
+int mrbbc_responds(const MV *recv, const char *name);
+void mrbbc_ary_set(MV *ary, long i, const MV *v);
+int mrbbc_const_defined(const char *name);
 
 #ifdef __cplusplus
 }

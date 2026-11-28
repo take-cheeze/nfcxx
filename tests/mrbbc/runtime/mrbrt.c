@@ -2645,3 +2645,45 @@ uintptr_t mrbbc_obj_identity(const MV *v) {
   return (uintptr_t)v->w;
 #endif
 }
+
+/* ---- accessors for the compatibility layer, milestone 2: instance variables and respond_to ---- */
+static MIvar *ivar_at(const MV *self, long i) {
+  MIvar **head = ivars_of(self), *v;
+  long k = 0;
+  if (head == NULL) return NULL;
+  for (v = *head; v != NULL; v = v->next, k++) if (k == i) return v;
+  return NULL;
+}
+long mrbbc_ivar_count(const MV *self) {
+  MIvar **head = ivars_of(self), *v;
+  long n = 0;
+  if (head == NULL) return 0;
+  for (v = *head; v != NULL; v = v->next) n++;
+  return n;
+}
+const char *mrbbc_ivar_name(const MV *self, long i) {
+  MIvar *v = ivar_at(self, i);
+  return v ? v->name : "";
+}
+void mrbbc_ivar_value(MV *dst, const MV *self, long i) {
+  MIvar *v = ivar_at(self, i);
+  *dst = v ? v->val : nil_value();
+}
+/* whether a program object's class (or an ancestor) defines name; no raise (the dispatch checks the arity when it calls) */
+int mrbbc_responds(const MV *recv, const char *name) {
+  MClass *where = NULL;
+  if (tag_of(recv) != MRBBC_OBJ) return 0;
+  return find_chain(obj_of(recv)->cls, name, &where) != NULL;
+}
+/* an array's element i, set in place (the sort! of the compatibility layer writes its result back) */
+void mrbbc_ary_set(MV *ary, long i, const MV *v) {
+  MAry *a = ary_of(ary);
+  if (i < 0 || i >= a->len) mrbbc_raise("IndexError", "array index out of range");
+  a->items[i] = *v;
+}
+/* whether a constant of this name is defined (a program class or a host constant), without raising */
+int mrbbc_const_defined(const char *name) {
+  MV probe;
+  if (find_class(name) != NULL) return 1;
+  return host_constant(&probe, name);
+}
