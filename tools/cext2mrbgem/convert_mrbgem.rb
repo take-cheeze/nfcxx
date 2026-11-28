@@ -2518,12 +2518,42 @@ end
     end
   end
 
+  # The pointer carried in a VALUE data argument of rb_ensure / rb_rescue: (VALUE)&x, (VALUE)(&x), or (VALUE)s.m / (VALUE)s->m
+  # (a pointer member of a local). Returns the operand as C text ("&x" or "s.m"), or nil. The fork's VALUE is a struct, so the
+  # operand is carried as mrb_cptr_value; each callback casts its parameter back (ptr_cast_uses), as for (VALUE)&x.
+  def value_pointer_operand(text)
+    t = text.to_s.strip
+    if (m = /\A\(VALUE\)\s*\(\s*(&\s*[A-Za-z_][#{WC}]*)\s*\)\z/.match(t)) || (m = /\A\(VALUE\)\s*(&\s*[A-Za-z_][#{WC}]*)\z/.match(t))
+      return m[1].delete(' ')
+    end
+    if (m = /\A\(VALUE\)\s*\(\s*([A-Za-z_][#{WC}]*(?:\s*(?:\.|->)\s*[A-Za-z_][#{WC}]*)+)\s*\)\z/.match(t)) ||
+       (m = /\A\(VALUE\)\s*([A-Za-z_][#{WC}]*(?:\s*(?:\.|->)\s*[A-Za-z_][#{WC}]*)+)\z/.match(t))
+      return m[1]
+    end
+    nil
+  end
+
+  # rb_rescue's rescue callback checks the exception's class itself: it reads the class of its exception parameter (the second
+  # one) with a class test or a class read. The rule for mapping rb_rescue with a pointer data argument (the rescue callback then
+  # also gets the wrapper that re-raises a non-StandardError exception): CRuby's rb_rescue catches only StandardError, and
+  # mrb_rescue catches every exception.
+  def rescue_checks_class?(rel, rdef)
+    text = @files[rel]['text']
+    masked = @files[rel]['masked']
+    pars = split_args(masked, rdef['po'], rdef['pc']).map { |a2, b2| psl(text, a2, b2).strip }
+    exname = pars[1].to_s[/([A-Za-z_]\w*)\z/, 1]
+    return false if exname.nil? || rdef['brace'].nil? || rdef['body_end'].nil?
+    body = masked[rdef['brace']...rdef['body_end']].to_s
+    body.match?(/\b(?:rb_obj_is_kind_of|rb_obj_is_instance_of|rb_obj_class|rb_class_of|CLASS_OF)\s*\(\s*#{Regexp.escape(exname)}(?![#{WC}])/)
+  end
+
   # rb_rescue(body, data1, rescue, data2) with static callbacks defined here and used only here. The body takes (VALUE) and
   # the rescue callback (VALUE data, VALUE exc): mruby's rescue takes (mrb, data) and reads the exception from mrb->exc, so
   # a wrapper after the rescue callback passes mrb->exc as its exc argument.
   def rescue_calls
     cands = []
     raw_refs = Hash.new(0)
+    @rescue_refusals ||= {}
     ident = /\A[A-Za-z_][#{WC}]*\z/
     @files.each do |rel, f|
       masked = f['masked']
@@ -2553,10 +2583,12 @@ end
         # (VALUE)name, or the converter's nfcx_ptr_value(name): a pointer carried in a VALUE
         # (VALUE)v where v is a VALUE of the converter's model is an identity (value_cast_identity?), not a pointer
         ptr_data = ->(d) { (d.match?(/\A\(VALUE\)\s*[A-Za-z_][#{WC}]*\z/) && !value_cast_identity?(rel, s0, d)) || d.match?(/\Anfcx_ptr_value\(\s*&?[A-Za-z_][#{WC}]*\s*\)\z/) }
-        next unless [d1, d2].all? { |d| data_ok.call(d) || ptr_data.call(d) || value_cast_identity?(rel, s0, d) }
+        next unless [d1, d2].all? { |d| data_ok.call(d) || ptr_data.call(d) || value_pointer_operand(d) || value_cast_identity?(rel, s0, d) }
         raw_refs[[rel, b_cb]] += 1
         raw_refs[[rel, r_cb]] += 1
-        cands << { rel: rel, s: s0, e: close + 1, b: b_cb, d1: d1, r: r_cb, d2: d2, cls: cls_text,
+        # a pointer operand ((VALUE)&x, (VALUE)s.m) is new data: a plain rb_rescue with it maps only when the rescue checks the class
+        ptr_new = fname == 'rb_rescue' && [d1, d2].any? { |d| value_pointer_operand(d) }
+        cands << { rel: rel, s: s0, e: close + 1, b: b_cb, d1: d1, r: r_cb, d2: d2, cls: cls_text, ptr_new: ptr_new,
                    bpos: spans[0][0], rpos: spans[2][0] }
       end
     end
@@ -2575,6 +2607,14 @@ end
       next unless ok
       rdef = (@defs[c[:r]] || []).find { |x| x['file'] == rel }
       bdef = (@defs[c[:b]] || []).find { |x| x['file'] == rel }
+      # the class check: a pointer-data rb_rescue maps only when its rescue callback checks the exception class (the wrapper then
+      # re-raises a non-StandardError exception, as CRuby does); a callback that does not check is refused, with the reason
+      if c[:ptr_new] && c[:cls].empty? && !rescue_checks_class?(rel, rdef)
+        @rescue_refusals[[rel, c[:s]]] = 'rb_rescue with a pointer data argument needs a rescue callback that checks the exception ' \
+                                         'class (CRuby catches only StandardError; mrb_rescue catches every exception, and this ' \
+                                         'callback does not test the class)'
+        next
+      end
       casts = []
       cast_ok = [[c[:d1], bdef], [c[:d2], rdef]].all? do |dd, dfn|
         next true unless dd.match?(/\A\(VALUE\)/) && !value_cast_identity?(rel, c[:s], dd)
@@ -2583,7 +2623,7 @@ end
         !pos.nil?
       end
       next unless cast_ok
-      out << c.merge(rend: rdef['body_end'] + 1, cast_pos: casts.uniq)
+      out << c.merge(rend: rdef['body_end'] + 1, cast_pos: casts.uniq, reraise: c[:ptr_new] && c[:cls].empty?)
     end
     out
   end
@@ -2611,7 +2651,7 @@ end
         data_ok = ->(d) { d.match?(/\A[A-Za-z_][#{WC}]*\z/) && (!@entries.key?(d) || d.match?(/\AQ(?:nil|undef|true|false)\z/)) }
         # (VALUE)p where p is a pointer declared in this file (oj's (VALUE)out): the pointer is carried in the VALUE
         ptr_name = ->(d) { (pm = /\A\(VALUE\)\s*([A-Za-z_]\w*)\z/.match(d)) && masked.match?(/\*\s*#{Regexp.escape(pm[1])}\b/) }
-        ptr_data = ->(d) { d.match?(/\A\(VALUE\)\s*&[A-Za-z_][#{WC}]*\z/) || ptr_name.call(d) }
+        ptr_data = ->(d) { value_pointer_operand(d) || ptr_name.call(d) }
         # (VALUE)v where v is a VALUE of the converter's model: the cast is an identity, and the data is v
         next unless [d1, d2].all? { |d| data_ok.call(d) || ptr_data.call(d) || value_cast_identity?(rel, s, d) }
         cands << { rel: rel, s: s, e: close + 1, b: b_cb, d1: d1, ecb: e_cb, d2: d2,
@@ -2630,12 +2670,14 @@ end
         d = (@defs[cb] || []).select { |x| x['file'] == rel }
         d.size == 1 && d[0]['storage'].split.include?('static') && d[0]['ret'].to_s.strip == 'VALUE' &&
           psl(text, d[0]['po'], d[0]['pc']).match?(/\A\(?\s*VALUE\s+[A-Za-z_][#{WC}]*\s*\)?\z/) &&
-          (@occ[cb] || []).count { |r, _, _| r == rel } == 1 + refs[[rel, cb]]
+          # the uses: the definition and one reference per call; a prototype (static VALUE f(VALUE);) is not a use (as rb_rescue's check)
+          ((@occ[cb] || []).count { |r, _, _| r == rel } -
+           @decls.count { |x| x['name'] == cb && x['file'] == rel && x['proto'] }) == 1 + refs[[rel, cb]]
       end
       next unless cb_ok
       cast_pos = []
       ptr_ok = [[c[:b], c[:d1]], [c[:ecb], c[:d2]]].all? do |cb, dd|
-        next true unless /\A\(VALUE\)\s*&/.match?(dd)
+        next true unless value_pointer_operand(dd)
         d = (@defs[cb] || []).find { |x| x['file'] == rel }
         pos = ptr_cast_uses(rel, d, text, masked)
         cast_pos.concat(pos) unless pos.nil?
@@ -7725,6 +7767,11 @@ end
                                '(the callbacks read a VALUE array of pointers); the fork\'s VALUE is a struct and cannot carry a pointer')
           return
         end
+        # a pointer data argument of a plain rb_rescue whose rescue callback does not check the exception class (see rescue_calls)
+        if (why = (@rescue_refusals || {})[[rel, s]])
+          refuse(rel, s, name, why)
+          return
+        end
         refuse(rel, s, name, 'rb_rescue needs static callbacks defined here and used only here (the body takes one VALUE, the rescue ' \
                              'callback takes the data and the exception), and VALUE-name or Q data arguments')
         return
@@ -7736,6 +7783,8 @@ end
       conv = lambda do |x|
         if value_cast_identity?(rel, s, x)
           x.strip.sub(/\A\(VALUE\)\s*/, '')
+        elsif (op = value_pointer_operand(x))
+          op.start_with?('&') ? "mrb_cptr_value(#{mrb_tok(rel, s)}, #{op})" : "mrb_cptr_value(#{mrb_tok(rel, s)}, (void *)(#{op}))"
         elsif (pm = /\A\(VALUE\)\s*([A-Za-z_][#{WC}]*)\z/.match(x))
           "mrb_cptr_value(#{mrb_tok(rel, s)}, #{pm[1]})"
         elsif x.match?(/\AQ(?:nil|undef|true|false)\z/)
@@ -7745,8 +7794,12 @@ end
         end
       end
       wname = "nfcx_rescue_#{c[:r]}_#{c[:s]}"
-      # the wrapper is file scope, after the rescue callback: it passes the exception (mrb->exc) as the callback's exc argument
-      ed.add(c[:rend], c[:rend], "\nstatic mrb_value #{wname}(mrb_state *mrb, mrb_value data) { return #{c[:r]}(mrb, data, mrb_obj_value(mrb->exc)); }\n")
+      # the wrapper is file scope, after the rescue callback: it passes the exception (mrb->exc) as the callback's exc argument.
+      # A plain rb_rescue with a checking callback (c[:reraise]) re-raises an exception that is not a StandardError, as CRuby's
+      # rb_rescue does (mrb_rescue would pass every exception to the callback)
+      guard = c[:reraise] ? 'if (!mrb_obj_is_kind_of(mrb, mrb_obj_value(mrb->exc), mrb_exc_get(mrb, "StandardError"))) ' \
+                            'mrb_exc_raise(mrb, mrb_obj_value(mrb->exc)); ' : ''
+      ed.add(c[:rend], c[:rend], "\nstatic mrb_value #{wname}(mrb_state *mrb, mrb_value data) { #{guard}return #{c[:r]}(mrb, data, mrb_obj_value(mrb->exc)); }\n")
       if c[:cls].empty?
         call = "mrb_rescue(#{mrb_tok(rel, s)}, #{c[:b]}, #{conv.call(c[:d1])}, #{wname}, #{conv.call(c[:d2])})"
       else
@@ -7762,11 +7815,19 @@ end
         ed.add(u0, u1, "mrb_cptr(#{@files[rel]['text'][u0...u1]})")
       end
       rewrite(rel, s, 'rb_rescue', "mrb_rescue(#{mrb_tok(rel, s)}, ...)",
+              c[:reraise] ? 'the rescue callback gets the exception from mrb->exc (a wrapper passes it as the exc argument); the wrapper ' \
+                            're-raises a non-StandardError exception, as CRuby (mrb_rescue catches every exception): the rescue callback ' \
+                            'checks the class itself' :
               'the rescue callback gets the exception from mrb->exc (a wrapper passes it as the exc argument)')
       return
     when 'ensure_call'
       c = (@ensure_calls || []).find { |x| x[:rel] == rel && x[:s] == s }
       unless c
+        # the body is rb_yield: it yields to the block of the method the call is in, which a file-scope callback does not have
+        if psl(@files[rel]['masked'], s, [s + 120, @files[rel]['masked'].length].min).match?(/\Arb_ensure\s*\(\s*rb_yield\s*,/)
+          refuse(rel, s, name, 'rb_yield as the body of rb_ensure: the body yields to the block of the method, and a file-scope callback has no block (not supported)')
+          return
+        end
         # a data argument that is a pointer cast to VALUE (the callbacks cast it back): a VALUE holds no address in the fork
         if psl(@files[rel]['masked'], s, [s + 300, @files[rel]['masked'].length].min).match?(/\A[^;]*?,[^;]*?,[^;]*?,\s*\(\s*VALUE\s*\)\s*&?[A-Za-z_]/)
           refuse(rel, s, name, 'stuck point (VALUE as pointer): rb_ensure gets a pointer cast to VALUE as its data, and the fork\'s VALUE is a struct (include/mruby/boxing_no.h), so the pointer cannot pass through it')
@@ -7782,8 +7843,9 @@ end
       conv = lambda do |x|
         if value_cast_identity?(rel, s, x)
           x.strip.sub(/\A\(VALUE\)\s*/, '')
-        elsif (pm = /\A\(VALUE\)\s*&([A-Za-z_][#{WC}]*)\z/.match(x))
-          "mrb_cptr_value(#{mrb_tok(rel, s)}, &#{pm[1]})"
+        elsif (op = value_pointer_operand(x))
+          # &x is carried as is; a pointer member (s.m) is cast to void * (the VALUE it came from is not known to be a pointer type)
+          op.start_with?('&') ? "mrb_cptr_value(#{mrb_tok(rel, s)}, #{op})" : "mrb_cptr_value(#{mrb_tok(rel, s)}, (void *)(#{op}))"
         elsif (pm = /\A\(VALUE\)\s*([A-Za-z_]\w*)\z/.match(x)) && !x.match?(/\AQ(?:nil|undef|true|false)\z/)
           "mrb_cptr_value(#{mrb_tok(rel, s)}, #{pm[1]})"
         elsif x.match?(/\AQ(?:nil|undef|true|false)\z/)
