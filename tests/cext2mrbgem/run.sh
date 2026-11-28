@@ -2010,6 +2010,33 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ensure_pdata tools/cext2mrbg
 check test "$rc" -eq 0
 check test "$(grep -c 'VALUE as pointer' "$work/api_ensure_pdata/REFUSALS.txt")" -eq 0
 check grep -qF 'mrb_ensure(mrb, ep_body, mrb_cptr_value(mrb, p), ep_done, mrb_cptr_value(mrb, p));' "$work/api_ensure_pdata/src/api_ensure_pdata.c"
+# 2zzz187. rb_ensure with a pointer member as its data ((VALUE)b.data, a struct local's pointer member): the member is carried as
+# mrb_cptr_value (cast to void *), the ensure callback casts its parameter back (mrb_cptr); no VALUE-as-pointer refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ensure_member tools/cext2mrbgem/fixtures/api_ensure_member/ext/api_ensure_member "$work/api_ensure_member" > "$work/api_ensure_member.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_ensure_member/NOT_BUILDABLE"
+check grep -qF 'return mrb_ensure(mrb, blob_body, mrb_cptr_value(mrb, &b), blob_free, mrb_cptr_value(mrb, (void *)(b.data)));' "$work/api_ensure_member/src/api_ensure_member.c"
+check grep -qF 'free((void *)mrb_cptr(mem));' "$work/api_ensure_member/src/api_ensure_member.c"
+# 2zzz188. the same rb_ensure, its ensure callback also stored in a file-scope pointer: the callback is used elsewhere, so the call
+# stays refused (not mapped)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ensure_member_refused tools/cext2mrbgem/fixtures/api_ensure_member_refused/ext/api_ensure_member_refused "$work/api_ensure_member_refused" > "$work/api_ensure_member_refused.log" 2>&1 || rc=$?
+check ok_rc "$rc"
+check test -e "$work/api_ensure_member_refused/NOT_BUILDABLE"
+check sh -c "! grep -q 'mrb_ensure(mrb, blob_body' '$work/api_ensure_member_refused/src/api_ensure_member_refused.c'"
+check grep -q 'api_ensure_member_refused.c:[0-9]*  rb_ensure' "$work/api_ensure_member_refused/REFUSALS.txt"
+# 2zzz189. rb_rescue with a pointer data argument ((VALUE)&arg) and a rescue callback that checks the exception class: mapped to
+# mrb_rescue; the wrapper re-raises a non-StandardError exception (CRuby's rb_rescue catches only StandardError).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rescue_class tools/cext2mrbgem/fixtures/api_rescue_class/ext/api_rescue_class "$work/api_rescue_class" > "$work/api_rescue_class.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_rescue_class/NOT_BUILDABLE"
+check grep -qF 'return mrb_rescue(mrb, rc_body, mrb_cptr_value(mrb, &arg), nfcx_rescue_rc_recover_' "$work/api_rescue_class/src/api_rescue_class.c"
+check grep -qF 'if (!mrb_obj_is_kind_of(mrb, mrb_obj_value(mrb->exc), mrb_exc_get(mrb, "StandardError"))) mrb_exc_raise(mrb, mrb_obj_value(mrb->exc));' "$work/api_rescue_class/src/api_rescue_class.c"
+# 2zzz190. a pointer-data rb_rescue whose rescue callback does not check the class: refused with the reason (not mapped)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rescue_nocheck tools/cext2mrbgem/fixtures/api_rescue_nocheck/ext/api_rescue_nocheck "$work/api_rescue_nocheck" > "$work/api_rescue_nocheck.log" 2>&1 || rc=$?
+check ok_rc "$rc"
+check test -e "$work/api_rescue_nocheck/NOT_BUILDABLE"
+check sh -c "! grep -q 'mrb_rescue(' '$work/api_rescue_nocheck/src/api_rescue_nocheck.c'"
+check grep -q 'needs a rescue callback that checks the exception class' "$work/api_rescue_nocheck/REFUSALS.txt"
 # 2zzz186. rb_protect with a VALUE array as its data ((VALUE)args): the array is mrb_cptr_value of its address, its element casts
 # are mrb_cptr of the element; no VALUE-array refusal.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_protect_array tools/cext2mrbgem/fixtures/api_protect_array/ext/api_protect_array "$work/api_protect_array" > "$work/api_protect_array.log" 2>&1 || rc=$?

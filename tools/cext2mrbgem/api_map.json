@@ -456,7 +456,7 @@
     "rb_rescue": {
       "kind": "rescue_call",
       "needs_mrb": true,
-      "caveat": "mrb_rescue (mruby-error): the body is called with (mrb, data); the rescue callback's exception argument is mrb->exc, passed by a wrapper"
+      "caveat": "mrb_rescue (mruby-error): the body is called with (mrb, data); the rescue callback's exception argument is mrb->exc, passed by a wrapper. A pointer data argument ((VALUE)&x) maps only when the rescue callback checks the exception class itself, and the wrapper then re-raises a non-StandardError exception: CRuby's rb_rescue catches only StandardError, mrb_rescue catches every exception (a plain rb_rescue whose callback does not check the class is refused for pointer data; see rescue_calls)"
     },
     "rb_rescue2": {
       "kind": "rescue_call",
