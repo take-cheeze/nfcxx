@@ -2,7 +2,8 @@
 // (scripts/bc2cpp/trace_host.bash).
 //
 // Mirrors the PSP entry point (app/psp/main.cxx) without the device: it opens
-// mruby, creates an LVGL display at RPG2k's native 320x240, sets the game
+// mruby, creates a display at RPG2k's native 320x240 (LVGL's, or with
+// RGSS_GFX_OWN the own compositor's: OWN_DISPLAY below), sets the game
 // constants, constructs RPG2k (which auto-selects New Game through
 // RPG2K_NEW_GAME), and runs a bounded number of RPG2k#main_loop frames. Exits
 // normally so the BC2CPP_TRACE_TYPES atexit dump runs.
@@ -30,7 +31,11 @@
 #include <ctime>
 #include <vector>
 
+#ifdef RGSS_GFX_OWN
+#include "rgss_gfx_own.hxx"
+#else
 #include <lvgl.h>
+#endif
 #include <mruby.h>
 #include <mruby/array.h>
 #include <mruby/class.h>
@@ -57,9 +62,11 @@ static void rom_graph_line(void* ud, const char* line) {
 }
 #endif
 
+#ifndef RGSS_GFX_OWN
 // mruby-rgss/src/lib.cxx: hands the display to the RGSS natives (Graphics.width
 // etc.).
 extern "C" void rgss_set_display(mrb_state* M, lv_display_t* display);
+#endif
 
 #ifdef MRB_USE_METHOD_LOOKUP_HOOK
 #include "method_lookup_survey.hxx"
@@ -145,17 +152,40 @@ void delay_ms(uint32_t ms) {
   nanosleep(&ts, nullptr);
 }
 
+#ifdef RGSS_GFX_OWN
+// OWN_DISPLAY: the compositor draws a rectangle at a time into its strip, and
+// the flush copies it into the screen the hash reads.
+uint16_t g_strip[kWidth * kHeight];
+uint16_t g_screen[kWidth * kHeight];
+RgssOwnDisplay* g_own = nullptr;
+
+void own_flush(int32_t x,
+               int32_t y,
+               int32_t w,
+               int32_t h,
+               const uint16_t* px) {
+  for (int32_t r = 0; r < h; ++r)
+    memcpy(&g_screen[(y + r) * kWidth + x], px + r * w,
+           w * sizeof(uint16_t));
+}
+#else
 // No window to draw into: the frame is discarded, but LVGL still needs the
 // flush acknowledged or it stops rendering.
 void flush_cb(lv_display_t* disp, const lv_area_t*, uint8_t*) {
   lv_display_flush_ready(disp);
 }
+#endif
 
-// FRAMEHASH: the full-screen buffer (LV_DISPLAY_RENDER_MODE_FULL) after a
-// forced refresh, so the hash does not depend on when LVGL's refresh timer
-// last ran. Two builds that draw the same frames print the same lines.
+// FRAMEHASH: the full-screen buffer (LV_DISPLAY_RENDER_MODE_FULL, or the own
+// compositor's screen) after a forced draw, so the hash does not depend on when
+// the refresh timer last ran. Two builds that draw the same frames print the
+// same lines.
 void print_frame_hash(long frame, const uint8_t* buf, size_t len) {
+#ifdef RGSS_GFX_OWN
+  rgss_own_draw_now(g_own);
+#else
   lv_refr_now(nullptr);
+#endif
   uint64_t h = 1469598103934665603ULL;
   for (size_t i = 0; i < len; ++i) {
     h ^= buf[i];
@@ -382,6 +412,25 @@ int main(int argc, char** argv) {
     return 64;
   }
 
+  const uint32_t buf_size = kWidth * kHeight * sizeof(uint16_t);
+#ifdef RGSS_GFX_OWN
+  RgssOwnConfig own{};
+  own.width = kWidth;
+  own.height = kHeight;
+  own.strip = g_strip;
+  own.strip_px = kWidth * kHeight;
+  own.flush = own_flush;
+  own.tick_ms = tick_ms;
+  own.delay_ms = delay_ms;
+  own.refresh_period_ms = 33;
+  g_own = rgss_own_display_create(&own);
+  if (!g_own) {
+    fprintf(stderr, "TRACE_HOST rgss_own_display_create failed\n");
+    return 2;
+  }
+  RgssOwnDisplay* const disp = g_own;
+  void* const buf = g_screen;
+#else
   lv_init();
   lv_tick_set_cb(tick_ms);
   lv_delay_set_cb(delay_ms);
@@ -391,7 +440,6 @@ int main(int argc, char** argv) {
     return 2;
   }
   lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
-  const uint32_t buf_size = kWidth * kHeight * sizeof(uint16_t);
   void* const buf = calloc(1, buf_size);
   if (!buf) {
     fprintf(stderr, "TRACE_HOST framebuffer alloc failed\n");
@@ -400,6 +448,7 @@ int main(int argc, char** argv) {
   lv_display_set_buffers(disp, buf, nullptr, buf_size,
                          LV_DISPLAY_RENDER_MODE_FULL);
   lv_display_set_flush_cb(disp, flush_cb);
+#endif
 
   const char* survey_path = getenv("BC2CPP_HOST_LOOKUP_SURVEY");
 #ifdef MRB_USE_METHOD_LOOKUP_HOOK

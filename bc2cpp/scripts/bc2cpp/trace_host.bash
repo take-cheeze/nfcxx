@@ -101,6 +101,8 @@ int_defs=()
 # MRB_ROM_CLASS_GRAPH (build_config.rb): class.h's method-table accessor then reads a ROM class's slot.
 grep -a -q mrb_rom_graph_claim "$mruby_lib" && int_defs+=(-DMRB_ROM_CLASS_GRAPH)
 [ "${BC2CPP_CLOSED_WIO_INT:-0}" = 1 ] && int_defs+=(-DMRB_INT32)
+# GFX_BACKEND: a libmruby.a built with RGSS_GFX_OWN (BC2CPP_CLOSED_GFX=own) draws through its own compositor.
+grep -a -q rgss_own_display_create "$mruby_lib" && int_defs+=(-DRGSS_GFX_OWN)
 "$cxx" -std=gnu++17 -O1 -g -Wall "${lookup_defs[@]}" \
   -DMRB_ENABLE_CXX_EXCEPTION -DMRB_DEBUG "${int_defs[@]}" \
   -DMRB_STR_LENGTH_MAX=0 -DMRB_HEAP_PAGE_SIZE=256 -DKHASH_INITIAL_SIZE=16 \
