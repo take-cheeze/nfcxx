@@ -1,6 +1,7 @@
 /* Prototype (opt-in, --cruby-fallback): the mruby side of the fallback. Arguments go to the embedded CRuby as Marshal.dump
  * bytes, and the result comes back the same way and is loaded with Marshal.load. A CRuby error raises RuntimeError. */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <mruby.h>
 #include <mruby/string.h>
@@ -45,6 +46,10 @@ mrb_value nfcx_cruby_fallback(mrb_state *mrb, const char *recv_path, const char 
   int rc = nfcx_cruby_call(recv_path, meth, (int)argc, data, len, ret_buf, sizeof ret_buf, &ret_len, err, sizeof err);
   mrb_gc_arena_restore(mrb, gc);
   if (rc) mrb_raise(mrb, E_RUNTIME_ERROR, err[0] ? err : "CRuby fallback: call failed");
+  if (ret_len > 0 && ret_buf[0] == 'H') {
+    /* a C-backed result: its handle (an Integer; the handle calls take it) */
+    return mrb_fixnum_value((mrb_int)strtol(ret_buf + 1, NULL, 10));
+  }
   return marshal_load(mrb, ret_buf, ret_len);
 }
 

@@ -116,7 +116,16 @@ int nfcx_cruby_call(const char *recv_path, const char *meth, int argc, const cha
   VALUE result = rb_protect(do_call, (VALUE)&c, &st);
   if (st) { put_pending(err, errlen, st); return 1; }
   VALUE dumped = rb_protect(dump_one, result, &st);
-  if (st) { put_pending(err, errlen, st); return 1; }
+  if (st) {
+    /* a result Marshal cannot carry (a C-backed object, e.g. the Packer that write returns): it stays in the handles table,
+     * and the result is "H<index>" (Marshal data starts with 04 08, so the H is unambiguous) */
+    rb_set_errinfo(Qnil);
+    rb_ary_push(handles, result);
+    int n = snprintf(ret_buf, ret_cap, "H%ld", (long)RARRAY_LEN(handles) - 1);
+    if (n < 0 || (size_t)n >= ret_cap) { put_msg(err, errlen, "result handle does not fit the return buffer"); return 1; }
+    *ret_len = (size_t)n;
+    return 0;
+  }
   if (RSTRING_LEN(dumped) < 0 || (size_t)RSTRING_LEN(dumped) > ret_cap) {
     put_msg(err, errlen, "result does not fit the return buffer");
     return 1;
