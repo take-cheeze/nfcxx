@@ -44,7 +44,7 @@ check.call('two sites with one key share it, the slot, level and owner list stil
            lines[0..1].all? { |l| l.include?("BC2CPP_SHARED(0x#{k}, 7, 2, \"Array\", \"String\"), mrb_nil_value()") })
 check.call('the shared key is defined once, after the macro: names, zeroed set, descriptor',
            defs == ["inline const char* const bc2cpp_owner_sn_0x#{k}[] = { \"Array\", \"String\", nullptr };\n",
-                    "inline bc2cpp_owner_set bc2cpp_owner_ss_0x#{k}{};\n",
+                    "inline bc2cpp_owner_set* bc2cpp_owner_ss_0x#{k}{};\n",
                     "inline const bc2cpp_owner_desc bc2cpp_owner_sd_0x#{k} = { bc2cpp_owner_sn_0x#{k}, nullptr, &bc2cpp_owner_ss_0x#{k}, 7, 2 };\n"])
 check.call('another level, method or owner list does not', lines[2..4].none? { |l| l.include?('BC2CPP_SHARED') })
 check.call('a single site keeps its own set', !lines[5].include?('BC2CPP_SHARED'))

@@ -67,7 +67,7 @@ module OwnerSetShare
   def definitions(key, mid, level, list)
     k = "0x#{key}"
     "inline const char* const bc2cpp_owner_sn_#{k}[] = { #{list}, nullptr };\n" \
-      "inline bc2cpp_owner_set bc2cpp_owner_ss_#{k}{};\n" \
+      "inline bc2cpp_owner_set* bc2cpp_owner_ss_#{k}{};\n" \
       "inline const bc2cpp_owner_desc bc2cpp_owner_sd_#{k} = { bc2cpp_owner_sn_#{k}, nullptr, &bc2cpp_owner_ss_#{k}, #{mid}, #{level} };\n"
   end
 

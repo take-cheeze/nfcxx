@@ -65,7 +65,7 @@ gen = <<~CPP
     r1 = bc2cpp_funcall_argv(M, r1, bc2cpp_sym(M, 5), 0, nullptr);
     r1 = mrb_funcall_id(M, r1, MRB_SYM(zip), 0);
     r1 = bc2cpp_nomethod(M, r1, bc2cpp_sym(M, 6));
-    r1 = bc2cpp_native_singleton(M, r1, 6, BC2CPP_NSC_SLOT, 0);
+    r1 = bc2cpp_native_singleton(M, r1, 6, BC2CPP_NSC_SLOT_OF(0, 6), 0);
   }
 CPP
 found = CoreRows.generated_lookups(gen)
